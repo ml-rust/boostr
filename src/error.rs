@@ -41,4 +41,13 @@ pub enum Error {
         /// Actual dtype
         got: DType,
     },
+
+    /// Invalid argument to an operation
+    #[error("invalid argument '{arg}': {reason}")]
+    InvalidArgument {
+        /// Argument name
+        arg: &'static str,
+        /// Why it's invalid
+        reason: String,
+    },
 }

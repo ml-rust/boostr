@@ -26,7 +26,12 @@
 //! - **Custom kernels**: Dequant, quantized matmul, fused attention (SIMD/PTX/WGSL)
 
 pub mod error;
+pub mod ops;
 pub mod quant;
+
+// Re-export primary boostr traits
+pub use ops::{AttentionOps, RoPEOps};
+pub use quant::{DequantOps, QuantFormat, QuantMatmulOps, QuantTensor};
 
 // Re-export numr types that users will commonly need
 pub use numr::dtype::DType;

@@ -1,0 +1,35 @@
+//! # boostr
+//!
+//! **ML framework built on numr — attention, quantization, model architectures.**
+//!
+//! boostr extends numr's foundational numerical computing with ML-specific operations,
+//! quantized tensor support, and model building blocks. It uses numr's runtime, tensors,
+//! and ops directly — no reimplementation, no wrappers.
+//!
+//! ## Relationship to numr
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────┐
+//! │                    boostr ◄── YOU ARE HERE               │
+//! │   (attention, RoPE, MoE, quantization, model loaders)   │
+//! └──────────────────────────┬──────────────────────────────┘
+//! │                      numr                                │
+//! │     (tensors, ops, runtime, autograd, linalg, FFT)       │
+//! └─────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Design
+//!
+//! - **Extension traits**: ML ops (AttentionOps, RoPEOps) implemented on numr's clients
+//! - **QuantTensor**: Separate type for block-quantized data (GGUF formats)
+//! - **impl_generic**: Composite ops composed from numr primitives, same on all backends
+//! - **Custom kernels**: Dequant, quantized matmul, fused attention (SIMD/PTX/WGSL)
+
+pub mod error;
+pub mod quant;
+
+// Re-export numr types that users will commonly need
+pub use numr::dtype::DType;
+pub use numr::error::{Error as NumrError, Result as NumrResult};
+pub use numr::runtime::{Runtime, RuntimeClient};
+pub use numr::tensor::Tensor;

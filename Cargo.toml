@@ -1,0 +1,38 @@
+[package]
+name = "boostr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "ML framework built on numr - attention, quantization, model architectures"
+license = "Apache-2.0"
+repository = "https://github.com/ml-rust/boostr"
+documentation = "https://docs.rs/boostr"
+keywords = [
+  "machine-learning",
+  "deep-learning",
+  "transformer",
+  "inference",
+  "quantization",
+]
+categories = ["science", "mathematics"]
+
+[dependencies]
+numr = "0.5.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+
+[features]
+default = ["cpu"]
+
+# Backend features (passed through to numr)
+cpu = []
+cuda = ["numr/cuda"]
+wgpu = ["numr/wgpu"]
+
+# Precision features
+f16 = ["numr/f16"]
+fp8 = ["numr/fp8"]
+
+[package.metadata.docs.rs]
+no-default-features = true

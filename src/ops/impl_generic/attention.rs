@@ -103,18 +103,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::CpuRuntime;
     use numr::tensor::Tensor;
-
-    fn setup() -> (numr::runtime::cpu::CpuClient, CpuDevice) {
-        let device = CpuDevice::new();
-        let client = CpuRuntime::default_client(&device);
-        (client, device)
-    }
 
     #[test]
     fn test_attention_output_shape() {
-        let (client, device) = setup();
+        let (client, device) = cpu_setup();
         let b = 2;
         let h = 4;
         let s = 8;
@@ -139,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_attention_with_mask() {
-        let (client, device) = setup();
+        let (client, device) = cpu_setup();
         let b = 1;
         let h = 1;
         let s = 4;
@@ -176,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_attention_kv_different_seqlen() {
-        let (client, device) = setup();
+        let (client, device) = cpu_setup();
         let b = 1;
         let h = 2;
         let s_q = 4;
@@ -214,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_attention_invalid_rank() {
-        let (client, device) = setup();
+        let (client, device) = cpu_setup();
         let q = Var::new(
             Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[2, 4], &device),
             false,

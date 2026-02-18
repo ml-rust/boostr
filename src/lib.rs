@@ -26,6 +26,7 @@
 //! - **Custom kernels**: Dequant, quantized matmul, fused attention (SIMD/PTX/WGSL)
 
 pub mod error;
+pub mod nn;
 pub mod ops;
 pub mod quant;
 
@@ -38,3 +39,15 @@ pub use numr::dtype::DType;
 pub use numr::error::{Error as NumrError, Result as NumrResult};
 pub use numr::runtime::{Runtime, RuntimeClient};
 pub use numr::tensor::Tensor;
+
+#[cfg(test)]
+pub(crate) mod test_utils {
+    use numr::runtime::cpu::{CpuClient, CpuDevice};
+
+    /// Create a CPU client and device for use in unit tests.
+    pub(crate) fn cpu_setup() -> (CpuClient, CpuDevice) {
+        let device = CpuDevice::new();
+        let client = CpuClient::new(device.clone());
+        (client, device)
+    }
+}

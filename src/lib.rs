@@ -26,6 +26,7 @@
 //! - **Custom kernels**: Dequant, quantized matmul, fused attention (SIMD/PTX/WGSL)
 
 pub mod error;
+pub mod model;
 pub mod nn;
 pub mod ops;
 pub mod quant;

@@ -27,6 +27,7 @@
 
 pub mod error;
 pub mod format;
+pub mod inference;
 pub mod model;
 pub mod nn;
 pub mod ops;

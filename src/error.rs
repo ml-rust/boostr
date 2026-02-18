@@ -50,4 +50,18 @@ pub enum Error {
         /// Why it's invalid
         reason: String,
     },
+
+    /// Inference infrastructure error
+    #[error("inference error: {reason}")]
+    InferenceError {
+        /// Description of what went wrong
+        reason: String,
+    },
+
+    /// Scheduler error
+    #[error("scheduler error: {reason}")]
+    SchedulerError {
+        /// Description of what went wrong
+        reason: String,
+    },
 }

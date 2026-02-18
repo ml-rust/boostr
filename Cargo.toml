@@ -24,6 +24,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 
+# Optional: CUDA backend
+cudarc = { version = "0.18", optional = true, features = [
+  "cuda-version-from-build-system",
+] }
+
+# Optional: WebGPU backend
+wgpu = { version = "28.0", optional = true }
+bytemuck = { version = "1.24", features = ["derive"], optional = true }
+
 [dev-dependencies]
 tempfile = "3"
 
@@ -32,8 +41,8 @@ default = ["cpu"]
 
 # Backend features (passed through to numr)
 cpu = []
-cuda = ["numr/cuda"]
-wgpu = ["numr/wgpu"]
+cuda = ["numr/cuda", "dep:cudarc"]
+wgpu = ["numr/wgpu", "dep:wgpu", "dep:bytemuck"]
 
 # Precision features
 f16 = ["numr/f16"]

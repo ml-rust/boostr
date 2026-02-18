@@ -28,17 +28,18 @@ impl DequantOps<CpuRuntime> for CpuClient {
 
         let numel = qt.numel();
 
-        // Read raw block bytes from storage
-        let block_bytes = qt.storage().to_vec::<u8>();
+        // Read raw block bytes from storage (zero-copy for CPU)
+        // SAFETY: CpuRuntime stores data as host pointers
+        let block_bytes = unsafe { qt.storage().as_host_slice::<u8>() };
 
         // Dequantize to f32 first
         let mut f32_output = vec![0.0f32; numel];
 
         match qt.format() {
-            QuantFormat::Q4_0 => dequant::dequant_q4_0(&block_bytes, &mut f32_output),
-            QuantFormat::Q8_0 => dequant::dequant_q8_0(&block_bytes, &mut f32_output),
-            QuantFormat::Q4K => dequant::dequant_q4k(&block_bytes, &mut f32_output),
-            QuantFormat::Q6K => dequant::dequant_q6k(&block_bytes, &mut f32_output),
+            QuantFormat::Q4_0 => dequant::dequant_q4_0(block_bytes, &mut f32_output),
+            QuantFormat::Q8_0 => dequant::dequant_q8_0(block_bytes, &mut f32_output),
+            QuantFormat::Q4K => dequant::dequant_q4k(block_bytes, &mut f32_output),
+            QuantFormat::Q6K => dequant::dequant_q6k(block_bytes, &mut f32_output),
             other => {
                 return Err(Error::UnsupportedQuantFormat {
                     format: format!("{} (CPU dequant not implemented)", other),

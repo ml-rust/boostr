@@ -6,3 +6,4 @@ pub mod traits;
 pub use format::QuantFormat;
 pub use tensor::QuantTensor;
 pub use traits::DequantOps;
+pub use traits::QuantMatmulOps;

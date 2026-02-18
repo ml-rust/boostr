@@ -18,6 +18,7 @@ categories = ["science", "mathematics"]
 
 [dependencies]
 numr = "0.5.0"
+half = "2"
 thiserror = "2.0"
 
 [dev-dependencies]

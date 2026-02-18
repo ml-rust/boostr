@@ -68,11 +68,24 @@ where
     let x1 = var_narrow(x, -1, 0, half_d).map_err(Error::Numr)?;
     let x2 = var_narrow(x, -1, half_d, half_d).map_err(Error::Numr)?;
 
-    // Broadcast cos/sin from [S, D/2] to [B, H, S, D/2]
-    // Reshape to [1, 1, S, D/2] then broadcasting happens automatically in mul
-    let cos_reshaped = numr::autograd::var_reshape(cos_cache, &[1, 1, cos_shape[0], half_d])
+    let seq_len = shape[2];
+
+    // Narrow cos/sin cache from [max_S, D/2] to [S, D/2] if needed
+    let cos_narrowed = if cos_shape[0] > seq_len {
+        var_narrow(cos_cache, 0, 0, seq_len).map_err(Error::Numr)?
+    } else {
+        cos_cache.clone()
+    };
+    let sin_narrowed = if sin_shape[0] > seq_len {
+        var_narrow(sin_cache, 0, 0, seq_len).map_err(Error::Numr)?
+    } else {
+        sin_cache.clone()
+    };
+
+    // Reshape to [1, 1, S, D/2] — broadcasting handles B and H
+    let cos_reshaped = numr::autograd::var_reshape(&cos_narrowed, &[1, 1, seq_len, half_d])
         .map_err(Error::Numr)?;
-    let sin_reshaped = numr::autograd::var_reshape(sin_cache, &[1, 1, sin_shape[0], half_d])
+    let sin_reshaped = numr::autograd::var_reshape(&sin_narrowed, &[1, 1, seq_len, half_d])
         .map_err(Error::Numr)?;
 
     // out1 = x1 * cos - x2 * sin
@@ -92,18 +105,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::CpuRuntime;
     use numr::tensor::Tensor;
-
-    fn setup() -> (numr::runtime::cpu::CpuClient, CpuDevice) {
-        let device = CpuDevice::new();
-        let client = CpuRuntime::default_client(&device);
-        (client, device)
-    }
 
     #[test]
     fn test_rope_output_shape() {
-        let (client, device) = setup();
+        let (client, device) = cpu_setup();
         let b = 1;
         let h = 2;
         let s = 4;
@@ -129,7 +137,7 @@ mod tests {
 
     #[test]
     fn test_rope_identity_with_zero_angle() {
-        let (client, device) = setup();
+        let (client, device) = cpu_setup();
         // cos=1, sin=0 → RoPE is identity
         let x_data: Vec<f32> = (0..16).map(|i| i as f32).collect();
         let x = Var::new(
@@ -163,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_rope_90_degree_rotation() {
-        let (client, device) = setup();
+        let (client, device) = cpu_setup();
         // cos=0, sin=1 → 90° rotation
         // out1 = x1*0 - x2*1 = -x2
         // out2 = x2*0 + x1*1 = x1
@@ -195,8 +203,55 @@ mod tests {
     }
 
     #[test]
+    fn test_rope_narrowing_matches_exact_cache() {
+        // Verifies that a pre-allocated cache larger than seq_len produces
+        // identical output to an exact-size cache (exercises the narrowing path).
+        let (client, device) = cpu_setup();
+
+        let x_data: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
+        let x = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 1, 2, 8], &device),
+            false,
+        );
+
+        // Exact-size caches: [S=2, D/2=4]
+        let cos_exact = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[2, 4], &device),
+            false,
+        );
+        let sin_exact = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 8], &[2, 4], &device),
+            false,
+        );
+
+        // Pre-allocated caches: [max_S=8, D/2=4] — will be narrowed to S=2
+        let cos_large = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 32], &[8, 4], &device),
+            false,
+        );
+        let sin_large = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 32], &[8, 4], &device),
+            false,
+        );
+
+        let out_exact = apply_rope_impl(&client, &x, &cos_exact, &sin_exact).unwrap();
+        let out_narrowed = apply_rope_impl(&client, &x, &cos_large, &sin_large).unwrap();
+
+        let exact_data: Vec<f32> = out_exact.tensor().contiguous().to_vec();
+        let narrowed_data: Vec<f32> = out_narrowed.tensor().contiguous().to_vec();
+
+        assert_eq!(exact_data.len(), narrowed_data.len());
+        for (i, (&a, &b)) in exact_data.iter().zip(narrowed_data.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "mismatch at {i}: exact={a}, narrowed={b}"
+            );
+        }
+    }
+
+    #[test]
     fn test_rope_invalid_odd_dim() {
-        let (client, device) = setup();
+        let (client, device) = cpu_setup();
         let x = Var::new(
             Tensor::<CpuRuntime>::from_slice(&[1.0f32; 3], &[1, 1, 1, 3], &device),
             false,

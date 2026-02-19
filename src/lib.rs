@@ -33,6 +33,7 @@ pub mod nn;
 pub mod ops;
 pub mod optimizer;
 pub mod quant;
+pub mod trainer;
 
 // Re-export primary boostr traits
 pub use ops::{AttentionOps, RoPEOps};

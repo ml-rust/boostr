@@ -4,19 +4,31 @@ use crate::error::Result;
 use crate::model::config::ModelConfig;
 use crate::nn::VarBuilder;
 use numr::autograd::Var;
-use numr::ops::{IndexingOps, ReduceOps, ScalarOps, ShapeOps, TensorOps};
+use numr::ops::{ActivationOps, IndexingOps, ReduceOps, ScalarOps, ShapeOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
 
 /// Trait alias for the full set of client bounds required by model forward passes.
 pub trait ModelClient<R: Runtime>:
-    RuntimeClient<R> + TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>
+    RuntimeClient<R>
+    + TensorOps<R>
+    + ScalarOps<R>
+    + ReduceOps<R>
+    + IndexingOps<R>
+    + ShapeOps<R>
+    + ActivationOps<R>
 {
 }
 
 impl<R, C> ModelClient<R> for C
 where
     R: Runtime,
-    C: RuntimeClient<R> + TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+    C: RuntimeClient<R>
+        + TensorOps<R>
+        + ScalarOps<R>
+        + ReduceOps<R>
+        + IndexingOps<R>
+        + ShapeOps<R>
+        + ActivationOps<R>,
 {
 }
 

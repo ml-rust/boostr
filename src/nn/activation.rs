@@ -50,13 +50,8 @@ impl std::fmt::Display for Activation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
-
-    fn cpu_setup() -> (CpuClient, CpuDevice) {
-        let device = CpuDevice::new();
-        let client = CpuClient::new(device.clone());
-        (client, device)
-    }
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::CpuRuntime;
 
     #[test]
     fn test_activation_forward() {

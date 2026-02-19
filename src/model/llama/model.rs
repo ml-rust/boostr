@@ -11,7 +11,7 @@ use crate::model::traits::{Model, ModelClient};
 use crate::nn::{Embedding, Linear, RmsNorm, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use crate::ops::impl_generic::rope::apply_rope_impl;
-use numr::autograd::{Var, var_add, var_mul, var_reshape, var_sigmoid};
+use numr::autograd::{Var, var_add, var_mul, var_reshape, var_silu};
 use numr::dtype::DType;
 use numr::ops::{IndexingOps, ReduceOps, ScalarOps, ShapeOps, TensorOps};
 use numr::runtime::Runtime;
@@ -396,11 +396,7 @@ impl<R: Runtime<DType = DType>> LlamaMlp<R> {
         let gate = self.gate_proj.forward(client, x)?;
         let up = self.up_proj.forward(client, x)?;
 
-        // silu(gate) = gate * sigmoid(gate)
-        let gate_sigmoid = var_sigmoid(&gate, client).map_err(Error::Numr)?;
-        let gate_silu = var_mul(&gate, &gate_sigmoid, client).map_err(Error::Numr)?;
-
-        // silu(gate) * up
+        let gate_silu = var_silu(&gate, client).map_err(Error::Numr)?;
         let hidden = var_mul(&gate_silu, &up, client).map_err(Error::Numr)?;
 
         self.down_proj.forward(client, &hidden)

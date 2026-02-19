@@ -73,6 +73,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
             config.max_seq_len,
             head_dim,
             attn_cfg.rope_theta,
+            attn_cfg.rope_scaling.as_ref(),
             vb.device(),
         );
 
@@ -168,8 +169,13 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         let embed_tokens = Embedding::new(embed_weight, true);
 
         // RoPE cache
-        let rope =
-            RoPE::<R>::precompute_freqs(config.max_seq_len, head_dim, attn_cfg.rope_theta, device);
+        let rope = RoPE::<R>::precompute_freqs(
+            config.max_seq_len,
+            head_dim,
+            attn_cfg.rope_theta,
+            attn_cfg.rope_scaling.as_ref(),
+            device,
+        );
 
         // Transformer layers
         let mut layers = Vec::with_capacity(config.num_layers);

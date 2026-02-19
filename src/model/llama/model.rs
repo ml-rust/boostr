@@ -56,6 +56,98 @@ struct LlamaMlp<R: Runtime> {
 // ── Model impl ──────────────────────────────────────────────────────
 
 impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
+    fn from_varbuilder(vb: &mut crate::nn::VarBuilder<R>, config: &ModelConfig) -> Result<Self> {
+        config.validate()?;
+
+        let attn_cfg = config.attention.as_ref().ok_or_else(|| Error::ModelError {
+            reason: "LLaMA requires attention config".into(),
+        })?;
+
+        let hidden = config.hidden_size;
+        let num_heads = attn_cfg.num_heads;
+        let num_kv_heads = attn_cfg.kv_heads();
+        let head_dim = attn_cfg.head_dim(hidden);
+
+        // RoPE cache (borrow device before mutable borrows)
+        let rope = RoPE::<R>::precompute_freqs(
+            config.max_seq_len,
+            head_dim,
+            attn_cfg.rope_theta,
+            vb.device(),
+        );
+
+        let mut model_vb = vb.pp("model");
+
+        // Embedding
+        let embed_weight = model_vb.take_tensor("embed_tokens.weight")?;
+        let embed_tokens = Embedding::new(embed_weight, false);
+
+        // Transformer layers
+        let mut layers = Vec::with_capacity(config.num_layers);
+        for i in 0..config.num_layers {
+            let mut layers_vb = model_vb.pp("layers");
+            let mut layer_vb = layers_vb.pp(&i.to_string());
+
+            let mut attn_vb = layer_vb.pp("self_attn");
+            let q_proj = Linear::new(attn_vb.take_tensor("q_proj.weight")?, None, false);
+            let k_proj = Linear::new(attn_vb.take_tensor("k_proj.weight")?, None, false);
+            let v_proj = Linear::new(attn_vb.take_tensor("v_proj.weight")?, None, false);
+            let o_proj = Linear::new(attn_vb.take_tensor("o_proj.weight")?, None, false);
+
+            let mut mlp_vb = layer_vb.pp("mlp");
+            let gate_proj = Linear::new(mlp_vb.take_tensor("gate_proj.weight")?, None, false);
+            let up_proj = Linear::new(mlp_vb.take_tensor("up_proj.weight")?, None, false);
+            let down_proj = Linear::new(mlp_vb.take_tensor("down_proj.weight")?, None, false);
+
+            let block = LlamaBlock {
+                input_layernorm: RmsNorm::new(
+                    layer_vb.take_tensor("input_layernorm.weight")?,
+                    config.rms_norm_eps,
+                    false,
+                ),
+                self_attn: LlamaAttention {
+                    q_proj,
+                    k_proj,
+                    v_proj,
+                    o_proj,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                },
+                post_attention_layernorm: RmsNorm::new(
+                    layer_vb.take_tensor("post_attention_layernorm.weight")?,
+                    config.rms_norm_eps,
+                    false,
+                ),
+                mlp: LlamaMlp {
+                    gate_proj,
+                    up_proj,
+                    down_proj,
+                },
+            };
+            layers.push(block);
+        }
+
+        // Final norm
+        let norm = RmsNorm::new(
+            model_vb.take_tensor("norm.weight")?,
+            config.rms_norm_eps,
+            false,
+        );
+
+        // LM head
+        let lm_head = Linear::new(vb.take_tensor("lm_head.weight")?, None, false);
+
+        Ok(Self {
+            config: config.clone(),
+            embed_tokens,
+            layers,
+            norm,
+            lm_head,
+            rope,
+        })
+    }
+
     fn from_config(config: &ModelConfig, device: &R::Device) -> Result<Self> {
         config.validate()?;
 

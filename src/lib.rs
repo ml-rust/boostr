@@ -37,6 +37,7 @@ pub mod quant;
 pub mod trainer;
 
 // Re-export primary boostr traits
+pub use nn::{Init, VarBuilder, VarMap, Weight};
 pub use ops::{AttentionOps, RoPEOps};
 pub use quant::{DequantOps, QuantFormat, QuantMatmulOps, QuantTensor};
 

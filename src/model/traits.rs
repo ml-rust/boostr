@@ -2,6 +2,7 @@
 
 use crate::error::Result;
 use crate::model::config::ModelConfig;
+use crate::nn::VarBuilder;
 use numr::autograd::Var;
 use numr::ops::{IndexingOps, ReduceOps, ScalarOps, ShapeOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
@@ -26,6 +27,16 @@ where
 pub trait Model<R: Runtime>: Sized {
     /// Create model from configuration with zero-initialized weights.
     fn from_config(config: &ModelConfig, device: &R::Device) -> Result<Self>;
+
+    /// Create model from a VarBuilder (loads real weights).
+    ///
+    /// Takes `&mut` because tensors are moved out of the VarMap (zero-copy).
+    fn from_varbuilder(vb: &mut VarBuilder<R>, config: &ModelConfig) -> Result<Self> {
+        let _ = (vb, config);
+        Err(crate::error::Error::ModelError {
+            reason: "from_varbuilder not implemented for this model".into(),
+        })
+    }
 
     /// Forward pass: token_ids [B, S] -> logits [B, S, vocab_size]
     fn forward<C>(&self, client: &C, input_ids: &Var<R>) -> Result<Var<R>>

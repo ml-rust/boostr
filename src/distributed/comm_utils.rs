@@ -23,7 +23,7 @@ pub fn all_reduce_tensor<R: Runtime<DType = DType>>(
         });
     }
 
-    let ptr = tensor.data_ptr();
+    let ptr = tensor.ptr();
     let count = tensor.numel();
     let dtype = tensor.dtype();
 
@@ -51,7 +51,7 @@ pub fn send_tensor<R: Runtime<DType = DType>>(
         });
     }
 
-    let ptr = tensor.data_ptr();
+    let ptr = tensor.ptr();
     let count = tensor.numel();
     let dtype = tensor.dtype();
 
@@ -79,7 +79,7 @@ pub fn recv_into_tensor<R: Runtime<DType = DType>>(
         });
     }
 
-    let ptr = buffer.data_ptr();
+    let ptr = buffer.ptr();
     let count = buffer.numel();
     let dtype = buffer.dtype();
 
@@ -106,7 +106,7 @@ pub fn broadcast_tensor<R: Runtime<DType = DType>>(
         });
     }
 
-    let ptr = tensor.data_ptr();
+    let ptr = tensor.ptr();
     let count = tensor.numel();
     let dtype = tensor.dtype();
 
@@ -167,7 +167,7 @@ pub fn send_tensor_with_metadata<R: Runtime<DType = DType>>(
     })?;
 
     // Send tensor data
-    let ptr = tensor.data_ptr();
+    let ptr = tensor.ptr();
     let count = tensor.numel();
 
     unsafe {
@@ -234,7 +234,7 @@ pub fn recv_tensor_with_metadata<R: Runtime<DType = DType>>(
     let buffer = Tensor::<R>::zeros(&shape, dtype, device);
 
     // Receive tensor data
-    let ptr = buffer.data_ptr();
+    let ptr = buffer.ptr();
     let count = buffer.numel();
 
     unsafe {

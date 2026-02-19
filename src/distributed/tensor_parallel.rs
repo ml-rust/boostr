@@ -321,7 +321,7 @@ pub fn gather_from_ranks<R: Runtime<DType = DType>>(
     let recv = Tensor::<R>::zeros(&[total_count], dtype, local_shard.device());
 
     unsafe {
-        comm.all_gather(local_shard.data_ptr(), recv.data_ptr(), count, dtype)
+        comm.all_gather(local_shard.ptr(), recv.ptr(), count, dtype)
             .map_err(|e| Error::DistributedError {
                 reason: format!("all_gather failed: {e}"),
             })?;

@@ -110,6 +110,12 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
         self.device
     }
 
+    /// Check if a name exists (relative to prefix).
+    pub fn contains(&self, name: &str) -> bool {
+        let full = self.full_name(name);
+        self.varmap.contains(&full)
+    }
+
     /// Current prefix.
     pub fn prefix(&self) -> &str {
         &self.prefix

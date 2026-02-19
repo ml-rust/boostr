@@ -1,15 +1,23 @@
+pub mod activation;
+pub mod conv1d;
 pub mod embedding;
 pub mod layernorm;
 pub mod linear;
+pub mod loss;
+pub mod module;
 pub mod rmsnorm;
 pub mod rope;
 pub mod var_builder;
 pub mod varmap;
 pub mod weight;
 
+pub use activation::Activation;
+pub use conv1d::Conv1d;
 pub use embedding::Embedding;
 pub use layernorm::LayerNorm;
 pub use linear::{Linear, QuantLinear};
+pub use loss::{cross_entropy_loss, mse_loss};
+pub use module::{Module, StateDict};
 pub use rmsnorm::RmsNorm;
 pub use rope::RoPE;
 pub use var_builder::VarBuilder;

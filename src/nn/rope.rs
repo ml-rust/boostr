@@ -194,7 +194,7 @@ mod tests {
         // At pos=2 scaled should match pos=1 unscaled (freq halved → angle halved)
         let half_dim = 4;
         for i in 0..half_dim {
-            let expected = cos_unscaled[1 * half_dim + i]; // pos=1 unscaled
+            let expected = cos_unscaled[half_dim + i]; // pos=1 unscaled
             let actual = cos_scaled[2 * half_dim + i]; // pos=2 scaled
             assert!(
                 (actual - expected).abs() < 1e-5,
@@ -220,7 +220,7 @@ mod tests {
         let cos: Vec<f32> = rope.cos_cache().tensor().to_vec();
         for &v in &cos {
             assert!(v.is_finite(), "non-finite cos value: {v}");
-            assert!(v >= -1.0 && v <= 1.0, "cos out of range: {v}");
+            assert!((-1.0..=1.0).contains(&v), "cos out of range: {v}");
         }
     }
 }

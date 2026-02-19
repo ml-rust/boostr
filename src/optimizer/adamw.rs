@@ -170,15 +170,10 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::cpu_setup;
     use numr::autograd::{Var, backward};
     use numr::autograd::{var_matmul, var_mean};
-    use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
-
-    fn cpu_setup() -> (CpuClient, CpuDevice) {
-        let device = CpuDevice::new();
-        let client = CpuClient::new(device.clone());
-        (client, device)
-    }
+    use numr::runtime::cpu::CpuRuntime;
 
     #[test]
     fn test_adamw_default_config() {

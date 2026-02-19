@@ -1,12 +1,11 @@
 //! Layer Normalization module
 //!
 //! LayerNorm: output = (x - mean) / sqrt(var + eps) * weight + bias
-//! Composed from numr autograd primitives for training support.
+//! Delegates to numr's fused `var_layer_norm` for single-kernel forward + autograd.
 
 use crate::error::{Error, Result};
-use numr::autograd::{Var, var_add, var_add_scalar, var_mean, var_mul, var_sqrt, var_sub};
-use numr::dtype::DType;
-use numr::ops::{ReduceOps, ScalarOps, TensorOps};
+use numr::autograd::{Var, var_layer_norm};
+use numr::ops::{NormalizationOps, ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -17,56 +16,38 @@ use numr::tensor::Tensor;
 pub struct LayerNorm<R: Runtime> {
     weight: Var<R>,
     bias: Var<R>,
-    eps: f64,
+    eps: f32,
 }
 
 impl<R: Runtime> LayerNorm<R> {
+    /// Create a new LayerNorm layer
     pub fn new(weight: Tensor<R>, bias: Tensor<R>, eps: f32, trainable: bool) -> Self {
         Self {
             weight: Var::new(weight, trainable),
             bias: Var::new(bias, trainable),
-            eps: eps as f64,
+            eps,
         }
     }
 
     /// Forward: (x - mean) / sqrt(var + eps) * weight + bias
     ///
+    /// Uses numr's fused NormalizationOps kernel (single kernel launch).
     /// input: `[..., hidden_size]`, output: same shape
     pub fn forward<C>(&self, client: &C, input: &Var<R>) -> Result<Var<R>>
     where
-        R: Runtime<DType = DType>,
-        C: RuntimeClient<R> + TensorOps<R> + ScalarOps<R> + ReduceOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R>,
+        R: Runtime,
+        C: RuntimeClient<R> + NormalizationOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R>,
     {
-        let ndim = input.shape().len();
-        let last_dim = ndim - 1;
-
-        // mean(x, last_dim, keepdim=true)
-        let mean = var_mean(input, &[last_dim], true, client).map_err(Error::Numr)?;
-
-        // x - mean
-        let centered = var_sub(input, &mean, client).map_err(Error::Numr)?;
-
-        // variance = mean((x - mean)^2)
-        let sq = var_mul(&centered, &centered, client).map_err(Error::Numr)?;
-        let variance = var_mean(&sq, &[last_dim], true, client).map_err(Error::Numr)?;
-
-        // sqrt(var + eps)
-        let var_eps = var_add_scalar(&variance, self.eps, client).map_err(Error::Numr)?;
-        let std = var_sqrt(&var_eps, client).map_err(Error::Numr)?;
-
-        // (x - mean) / std
-        let normed = numr::autograd::var_div(&centered, &std, client).map_err(Error::Numr)?;
-
-        // normed * weight + bias
-        let scaled = var_mul(&normed, &self.weight, client).map_err(Error::Numr)?;
-        var_add(&scaled, &self.bias, client).map_err(Error::Numr)
+        var_layer_norm(input, &self.weight, &self.bias, self.eps, client).map_err(Error::Numr)
     }
 
+    /// Get the weight (gamma) parameter
     pub fn weight(&self) -> &Var<R> {
         &self.weight
     }
 
+    /// Get the bias (beta) parameter
     pub fn bias(&self) -> &Var<R> {
         &self.bias
     }

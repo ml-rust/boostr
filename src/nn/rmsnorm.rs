@@ -2,12 +2,11 @@
 //!
 //! RMSNorm: output = x * rsqrt(mean(x^2, last_dim) + eps) * weight
 //! Used in LLaMA, Mistral, and other modern architectures.
-//! Composed from numr autograd primitives for training support.
+//! Delegates to numr's fused `var_rms_norm` for single-kernel forward + autograd.
 
 use crate::error::{Error, Result};
-use numr::autograd::{Var, var_add_scalar, var_mean, var_mul, var_sqrt};
-use numr::dtype::DType;
-use numr::ops::{ReduceOps, ScalarOps, TensorOps};
+use numr::autograd::{Var, var_rms_norm};
+use numr::ops::{NormalizationOps, ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -16,48 +15,32 @@ use numr::tensor::Tensor;
 /// weight: `[hidden_size]`
 pub struct RmsNorm<R: Runtime> {
     weight: Var<R>,
-    eps: f64,
+    eps: f32,
 }
 
 impl<R: Runtime> RmsNorm<R> {
+    /// Create a new RmsNorm layer
     pub fn new(weight: Tensor<R>, eps: f32, trainable: bool) -> Self {
         Self {
             weight: Var::new(weight, trainable),
-            eps: eps as f64,
+            eps,
         }
     }
 
     /// Forward: x * rsqrt(mean(x^2) + eps) * weight
     ///
+    /// Uses numr's fused NormalizationOps kernel (single kernel launch).
     /// input: `[..., hidden_size]`, output: same shape
     pub fn forward<C>(&self, client: &C, input: &Var<R>) -> Result<Var<R>>
     where
-        R: Runtime<DType = DType>,
-        C: RuntimeClient<R> + TensorOps<R> + ScalarOps<R> + ReduceOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R>,
+        R: Runtime,
+        C: RuntimeClient<R> + NormalizationOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R>,
     {
-        let ndim = input.shape().len();
-        let last_dim = ndim - 1;
-
-        // x^2
-        let x_sq = var_mul(input, input, client).map_err(Error::Numr)?;
-
-        // mean(x^2, last_dim, keepdim=true)
-        let mean_sq = var_mean(&x_sq, &[last_dim], true, client).map_err(Error::Numr)?;
-
-        // mean(x^2) + eps
-        let mean_sq_eps = var_add_scalar(&mean_sq, self.eps, client).map_err(Error::Numr)?;
-
-        // sqrt(mean(x^2) + eps)
-        let rms = var_sqrt(&mean_sq_eps, client).map_err(Error::Numr)?;
-
-        // x / rms
-        let normed = numr::autograd::var_div(input, &rms, client).map_err(Error::Numr)?;
-
-        // normed * weight
-        var_mul(&normed, &self.weight, client).map_err(Error::Numr)
+        var_rms_norm(input, &self.weight, self.eps, client).map_err(Error::Numr)
     }
 
+    /// Get the weight parameter
     pub fn weight(&self) -> &Var<R> {
         &self.weight
     }

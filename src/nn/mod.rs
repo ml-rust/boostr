@@ -4,6 +4,7 @@ pub mod embedding;
 pub mod layernorm;
 pub mod linear;
 pub mod loss;
+pub mod mla;
 pub mod module;
 pub mod moe;
 pub mod rmsnorm;
@@ -18,6 +19,7 @@ pub use embedding::Embedding;
 pub use layernorm::LayerNorm;
 pub use linear::{Linear, QuantLinear};
 pub use loss::{cross_entropy_loss, mse_loss};
+pub use mla::{Mla, MlaConfig};
 pub use module::{Module, StateDict};
 pub use moe::{
     Expert, MoeLayer, MoeLayerConfig, MoeOutput, MoeRouter, MoeRouterConfig, RouterOutput,

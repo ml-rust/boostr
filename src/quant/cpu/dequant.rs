@@ -37,9 +37,17 @@ impl DequantOps<CpuRuntime> for CpuClient {
 
         match qt.format() {
             QuantFormat::Q4_0 => dequant::dequant_q4_0(block_bytes, &mut f32_output),
+            QuantFormat::Q4_1 => dequant::dequant_q4_1(block_bytes, &mut f32_output),
+            QuantFormat::Q5_0 => dequant::dequant_q5_0(block_bytes, &mut f32_output),
+            QuantFormat::Q5_1 => dequant::dequant_q5_1(block_bytes, &mut f32_output),
             QuantFormat::Q8_0 => dequant::dequant_q8_0(block_bytes, &mut f32_output),
+            QuantFormat::Q8_1 => dequant::dequant_q8_1(block_bytes, &mut f32_output),
+            QuantFormat::Q2K => dequant::dequant_q2k(block_bytes, &mut f32_output),
+            QuantFormat::Q3K => dequant::dequant_q3k(block_bytes, &mut f32_output),
             QuantFormat::Q4K => dequant::dequant_q4k(block_bytes, &mut f32_output),
+            QuantFormat::Q5K => dequant::dequant_q5k(block_bytes, &mut f32_output),
             QuantFormat::Q6K => dequant::dequant_q6k(block_bytes, &mut f32_output),
+            QuantFormat::Q8K => dequant::dequant_q8k(block_bytes, &mut f32_output),
             other => {
                 return Err(Error::UnsupportedQuantFormat {
                     format: format!("{} (CPU dequant not implemented)", other),
@@ -161,9 +169,9 @@ mod tests {
     fn test_dequant_unsupported_format() {
         let (client, device) = setup();
 
-        // Q2K is not yet implemented
-        let block = vec![0u8; 84];
-        let qt = QuantTensor::<CpuRuntime>::from_bytes(&block, QuantFormat::Q2K, &[256], &device)
+        // IQ1S is not yet implemented
+        let block = vec![0u8; 50];
+        let qt = QuantTensor::<CpuRuntime>::from_bytes(&block, QuantFormat::IQ1S, &[256], &device)
             .unwrap();
 
         let result = client.dequantize(&qt, DType::F32);

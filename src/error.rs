@@ -71,4 +71,11 @@ pub enum Error {
         /// Description of what went wrong
         reason: String,
     },
+
+    /// Distributed communication error
+    #[error("distributed error: {reason}")]
+    DistributedError {
+        /// Description of what went wrong
+        reason: String,
+    },
 }

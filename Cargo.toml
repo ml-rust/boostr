@@ -42,6 +42,7 @@ default = ["cpu"]
 # Backend features (passed through to numr)
 cpu = []
 cuda = ["numr/cuda", "dep:cudarc"]
+nccl = ["numr/nccl"]
 wgpu = ["numr/wgpu", "dep:wgpu", "dep:bytemuck"]
 
 # Precision features

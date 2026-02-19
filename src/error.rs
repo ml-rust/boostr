@@ -64,4 +64,11 @@ pub enum Error {
         /// Description of what went wrong
         reason: String,
     },
+
+    /// Training/optimizer error
+    #[error("training error: {reason}")]
+    TrainingError {
+        /// Description of what went wrong
+        reason: String,
+    },
 }

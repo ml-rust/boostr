@@ -31,6 +31,7 @@ pub mod inference;
 pub mod model;
 pub mod nn;
 pub mod ops;
+pub mod optimizer;
 pub mod quant;
 
 // Re-export primary boostr traits

@@ -1,11 +1,12 @@
-//! Pipeline parallelism (GPipe-style)
+//! GPipe-style pipeline schedule (forward-only, for inference).
 //!
-//! Splits a model into stages across devices. Each rank owns one stage.
-//! Input is split into micro-batches that are pipelined through stages
-//! using point-to-point send/recv between ranks.
+//! All micro-batches flow forward through all stages before any backward pass.
+//! This is the simplest pipeline schedule, suitable for inference where no
+//! backward pass is needed.
 
 use std::sync::Arc;
 
+use super::stage::PipelineStage;
 use crate::distributed::comm_utils::{recv_tensor_with_metadata, send_tensor_with_metadata};
 use crate::error::{Error, Result};
 use numr::dtype::DType;
@@ -13,36 +14,23 @@ use numr::ops::ShapeOps;
 use numr::runtime::{Communicator, Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
-/// A single pipeline stage that processes a micro-batch.
-///
-/// Each rank implements this trait for its portion of the model.
-/// The pipeline scheduler handles the inter-stage communication.
-pub trait PipelineStage<R: Runtime>: Send {
-    /// Process one micro-batch through this stage.
-    ///
-    /// input: activation tensor from the previous stage (or original input for stage 0)
-    /// output: activation tensor to send to the next stage (or final output for last stage)
-    fn forward(&mut self, input: Tensor<R>) -> Result<Tensor<R>>;
-}
-
 /// GPipe-style pipeline schedule.
 ///
 /// Splits input into micro-batches, pipelines them through stages across ranks.
 /// Each rank owns exactly one stage. Inter-stage communication uses
 /// point-to-point send/recv via the `Communicator`.
 ///
-/// Schedule: all-forward pass (all micro-batches through all stages),
-/// then all-backward pass (not yet implemented — forward-only for inference
-/// and the forward half of training).
-pub struct PipelineSchedule<R: Runtime> {
+/// Schedule: all-forward pass (all micro-batches through all stages).
+/// No backward pass — use [`Schedule1F1B`](super::Schedule1F1B) for training.
+pub struct GpipeSchedule<R: Runtime> {
     stage: Box<dyn PipelineStage<R>>,
     num_micro_batches: usize,
     comm: Arc<dyn Communicator>,
     device: R::Device,
 }
 
-impl<R: Runtime<DType = DType>> PipelineSchedule<R> {
-    /// Create a new pipeline schedule.
+impl<R: Runtime<DType = DType>> GpipeSchedule<R> {
+    /// Create a new GPipe schedule.
     ///
     /// * `stage` — this rank's pipeline stage
     /// * `num_micro_batches` — number of micro-batches to split the input into
@@ -118,7 +106,6 @@ impl<R: Runtime<DType = DType>> PipelineSchedule<R> {
                     reason: "fewer micro-batches than expected from chunk".to_string(),
                 })?
             } else {
-                // Receive from previous rank (with shape metadata)
                 recv_tensor_with_metadata::<R>(self.comm.as_ref(), rank - 1, tag, &self.device)?
             };
 
@@ -128,7 +115,6 @@ impl<R: Runtime<DType = DType>> PipelineSchedule<R> {
             if is_last {
                 outputs.push(mb_output);
             } else {
-                // Send to next rank (with shape metadata)
                 send_tensor_with_metadata(self.comm.as_ref(), &mb_output, rank + 1, tag)?;
             }
         }
@@ -160,9 +146,6 @@ impl<R: Runtime<DType = DType>> PipelineSchedule<R> {
     }
 
     /// Receive into a pre-allocated tensor buffer.
-    ///
-    /// The caller must provide a tensor with the correct shape and dtype
-    /// that matches what the sender will send.
     pub fn recv_into(&self, buffer: &Tensor<R>, src: usize, tag: u32) -> Result<()> {
         crate::distributed::comm_utils::recv_into_tensor(self.comm.as_ref(), buffer, src, tag)
     }
@@ -176,6 +159,9 @@ impl<R: Runtime<DType = DType>> PipelineSchedule<R> {
     }
 }
 
+/// Type alias for backward compatibility with existing code.
+pub type PipelineSchedule<R> = GpipeSchedule<R>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,7 +169,6 @@ mod tests {
     use numr::runtime::NoOpCommunicator;
     use numr::runtime::cpu::CpuRuntime;
 
-    /// Simple test stage that doubles the input
     struct DoubleStage;
 
     impl PipelineStage<CpuRuntime> for DoubleStage {
@@ -194,7 +179,6 @@ mod tests {
         }
     }
 
-    /// Stage that adds 1 to each element
     struct AddOneStage;
 
     impl PipelineStage<CpuRuntime> for AddOneStage {
@@ -206,78 +190,66 @@ mod tests {
     }
 
     #[test]
-    fn test_pipeline_single_device() {
+    fn test_gpipe_single_device() {
         let (client, device) = cpu_setup();
         let comm = Arc::new(NoOpCommunicator);
 
         let stage = Box::new(DoubleStage);
-        let mut pipeline = PipelineSchedule::new(stage, 2, comm, device.clone()).unwrap();
+        let mut pipeline = GpipeSchedule::new(stage, 2, comm, device.clone()).unwrap();
 
         let input = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4, 1], &device);
         let outputs = pipeline.run(&client, Some(input)).unwrap();
 
         assert_eq!(outputs.len(), 2);
-        // First micro-batch: [1, 2] * 2 = [2, 4]
-        let out0 = outputs[0].to_vec::<f32>();
-        assert_eq!(out0, vec![2.0, 4.0]);
-        // Second micro-batch: [3, 4] * 2 = [6, 8]
-        let out1 = outputs[1].to_vec::<f32>();
-        assert_eq!(out1, vec![6.0, 8.0]);
+        assert_eq!(outputs[0].to_vec::<f32>(), vec![2.0, 4.0]);
+        assert_eq!(outputs[1].to_vec::<f32>(), vec![6.0, 8.0]);
     }
 
     #[test]
-    fn test_pipeline_single_micro_batch() {
+    fn test_gpipe_single_micro_batch() {
         let (client, device) = cpu_setup();
         let comm = Arc::new(NoOpCommunicator);
 
         let stage = Box::new(AddOneStage);
-        let mut pipeline = PipelineSchedule::new(stage, 1, comm, device.clone()).unwrap();
+        let mut pipeline = GpipeSchedule::new(stage, 1, comm, device.clone()).unwrap();
 
         let input = Tensor::<CpuRuntime>::from_slice(&[10.0f32, 20.0], &[2, 1], &device);
         let outputs = pipeline.run(&client, Some(input)).unwrap();
 
         assert_eq!(outputs.len(), 1);
-        let data = outputs[0].to_vec::<f32>();
-        assert_eq!(data, vec![11.0, 21.0]);
+        assert_eq!(outputs[0].to_vec::<f32>(), vec![11.0, 21.0]);
     }
 
     #[test]
-    fn test_pipeline_zero_micro_batches_error() {
+    fn test_gpipe_zero_micro_batches_error() {
         let (_client, device) = cpu_setup();
         let comm = Arc::new(NoOpCommunicator);
         let stage = Box::new(DoubleStage);
-        let result = PipelineSchedule::<CpuRuntime>::new(stage, 0, comm, device);
+        let result = GpipeSchedule::<CpuRuntime>::new(stage, 0, comm, device);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_pipeline_no_input_error() {
+    fn test_gpipe_no_input_error() {
         let (client, device) = cpu_setup();
         let comm = Arc::new(NoOpCommunicator);
 
         let stage = Box::new(DoubleStage);
-        let mut pipeline = PipelineSchedule::new(stage, 1, comm, device.clone()).unwrap();
+        let mut pipeline = GpipeSchedule::new(stage, 1, comm, device.clone()).unwrap();
 
         let result = pipeline.run(&client, None);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_pipeline_stage_trait_send() {
-        fn assert_send<T: Send>() {}
-        assert_send::<Box<dyn PipelineStage<CpuRuntime>>>();
-    }
-
-    #[test]
-    fn test_recv_into() {
+    fn test_gpipe_recv_into() {
         let (_client, device) = cpu_setup();
         let comm = Arc::new(NoOpCommunicator);
 
         let stage = Box::new(DoubleStage);
-        let pipeline = PipelineSchedule::new(stage, 1, comm, device.clone()).unwrap();
+        let pipeline = GpipeSchedule::new(stage, 1, comm, device.clone()).unwrap();
 
         let buffer = Tensor::<CpuRuntime>::zeros(&[3], DType::F32, &device);
-        // NoOpCommunicator recv is a no-op
         pipeline.recv_into(&buffer, 0, 0).unwrap();
     }
 }

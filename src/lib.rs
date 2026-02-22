@@ -38,7 +38,10 @@ pub mod trainer;
 
 // Re-export primary boostr traits
 pub use nn::{Init, VarBuilder, VarMap, Weight};
-pub use ops::{AttentionOps, MlaOps, RoPEOps};
+pub use ops::{
+    AttentionOps, FlashAttentionOps, KvCacheOps, MlaOps, PagedAttentionOps, RoPEOps,
+    var_flash_attention,
+};
 pub use quant::{DequantOps, QuantFormat, QuantMatmulOps, QuantTensor};
 
 // Re-export numr types that users will commonly need

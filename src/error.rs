@@ -78,4 +78,11 @@ pub enum Error {
         /// Description of what went wrong
         reason: String,
     },
+
+    /// CUDA kernel error
+    #[error("kernel error: {reason}")]
+    KernelError {
+        /// Description of what went wrong
+        reason: String,
+    },
 }

@@ -6,6 +6,8 @@ pub mod grad_sync;
 pub mod pipeline;
 pub mod tensor_parallel;
 pub mod trainer;
+pub mod zero;
+pub mod zero_trainer;
 
 pub use bucket_manager::{GradientBucketManager, param_order_from_graph};
 pub use bucketed_trainer::BucketedTrainer;
@@ -20,3 +22,5 @@ pub use tensor_parallel::{
     ColumnParallelLinear, RowParallelLinear, gather_from_ranks, scatter_to_rank,
 };
 pub use trainer::DistributedTrainer;
+pub use zero::ZeroStage1;
+pub use zero_trainer::ZeroTrainer;

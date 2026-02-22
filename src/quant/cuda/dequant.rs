@@ -3,6 +3,7 @@
 use crate::error::{Error, Result};
 use crate::quant::traits::DequantOps;
 use crate::quant::{QuantFormat, QuantTensor};
+use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
@@ -47,7 +48,7 @@ impl DequantOps<CudaRuntime> for CudaClient {
 
         // Allocate f32 output tensor
         let f32_out = Tensor::<CudaRuntime>::empty(qt.shape(), DType::F32, qt.device());
-        let output_ptr = f32_out.data_ptr();
+        let output_ptr = f32_out.ptr();
 
         // Load module and launch kernel
         let module = kernels::get_or_load_module(self.context(), device_index, DEQUANT_MODULE)?;

@@ -3,6 +3,7 @@
 use crate::error::{Error, Result};
 use crate::quant::traits::QuantMatmulOps;
 use crate::quant::{QuantFormat, QuantTensor};
+use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
 use numr::runtime::Device;
@@ -73,7 +74,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         // Ensure activation is contiguous
         let act_contig = activation.contiguous();
 
-        let act_ptr = act_contig.data_ptr();
+        let act_ptr = act_contig.ptr();
         let weight_ptr = weight.storage().ptr();
         let device_index = activation.device().id();
 
@@ -81,7 +82,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
         out_shape.push(n);
         let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, activation.device());
-        let output_ptr = output.data_ptr();
+        let output_ptr = output.ptr();
 
         // Load module and launch kernel
         let module =

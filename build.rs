@@ -15,9 +15,110 @@ fn compile_cuda_kernels() {
     use std::process::Command;
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let kernels_dir = PathBuf::from("src/quant/cuda/kernels");
 
-    let kernel_files = vec!["dequant.cu", "quant_matmul.cu"];
+    // Kernel sets: (directory, filename, arch)
+    // Most kernels target sm_75 (Turing+); flash_v3 needs sm_90 (Hopper)
+    let kernel_sets: Vec<(PathBuf, &str, &str)> = vec![
+        // Quantization kernels
+        (
+            PathBuf::from("src/quant/cuda/kernels"),
+            "dequant.cu",
+            "sm_75",
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels"),
+            "quant_matmul.cu",
+            "sm_75",
+        ),
+        // Attention kernels — sm_75
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "flash_v2.cu",
+            "sm_75",
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "flash_v2_bwd.cu",
+            "sm_75",
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "paged_attention.cu",
+            "sm_75",
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "paged_attention_bwd.cu",
+            "sm_75",
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "kv_cache_update.cu",
+            "sm_75",
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "varlen_attention.cu",
+            "sm_75",
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "varlen_attention_bwd.cu",
+            "sm_75",
+        ),
+        // KV cache quantization kernels
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "kv_cache_int4.cu",
+            "sm_75",
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "kv_cache_fp8.cu",
+            "sm_75",
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "kv_cache_fp8_bwd.cu",
+            "sm_75",
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "kv_cache_quant.cu",
+            "sm_75",
+        ),
+        // MQA/GQA dedicated kernels
+        (PathBuf::from("src/ops/cuda/kernels"), "mqa_gqa.cu", "sm_75"),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "mqa_gqa_bwd.cu",
+            "sm_75",
+        ),
+        // Reshape and cache (paged KV)
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "reshape_and_cache.cu",
+            "sm_75",
+        ),
+        // ALiBi attention
+        (PathBuf::from("src/ops/cuda/kernels"), "alibi.cu", "sm_75"),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "alibi_bwd.cu",
+            "sm_75",
+        ),
+        // Flash v3 — sm_90 (Hopper warp specialization)
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "flash_v3.cu",
+            "sm_90",
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "flash_v3_bwd.cu",
+            "sm_90",
+        ),
+    ];
 
     let nvcc = find_nvcc().unwrap_or_else(|| {
         eprintln!();
@@ -29,7 +130,7 @@ fn compile_cuda_kernels() {
         panic!("nvcc not found - CUDA Toolkit must be installed for the 'cuda' feature");
     });
 
-    for kernel_file in kernel_files {
+    for (kernels_dir, kernel_file, arch) in &kernel_sets {
         let cu_path = kernels_dir.join(kernel_file);
         let ptx_name = kernel_file.replace(".cu", ".ptx");
         let ptx_path = out_dir.join(&ptx_name);
@@ -39,17 +140,23 @@ fn compile_cuda_kernels() {
         if !cu_path.exists() {
             panic!(
                 "CUDA kernel source not found: {}\n\
-                 Ensure kernel files exist in src/quant/cuda/kernels/",
-                cu_path.display()
+                 Ensure kernel files exist in {}",
+                cu_path.display(),
+                kernels_dir.display()
             );
         }
+
+        // Include path for header files (dtype_traits.cuh)
+        let include_arg = format!("-I{}", kernels_dir.display());
+        let arch_arg = format!("-arch={}", arch);
 
         let output = Command::new(&nvcc)
             .args([
                 "-ptx",
                 "-O3",
                 "--use_fast_math",
-                "-arch=sm_75",
+                &arch_arg,
+                &include_arg,
                 "-o",
                 ptx_path.to_str().unwrap(),
                 cu_path.to_str().unwrap(),

@@ -4,7 +4,7 @@ pub mod prefix_cache;
 pub mod scheduler;
 pub mod speculative;
 
-pub use kv_cache::{KvCache, LayeredKvCache, LayeredKvCacheConfig};
+pub use kv_cache::{KvCache, LayeredKvCache, LayeredKvCacheConfig, PagedKvCache};
 pub use memory::{BlockAllocator, BlockAllocatorStats, BlockId, BlockTable, CpuBlockAllocator};
 pub use prefix_cache::{CacheResult, PrefixCache, PrefixCacheConfig, PrefixCacheStats};
 pub use scheduler::{

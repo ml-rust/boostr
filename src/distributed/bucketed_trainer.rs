@@ -31,11 +31,13 @@ use numr::tensor::{Tensor, TensorId};
 /// // Provide param info in reverse-backward order for max overlap
 /// let param_info: Vec<(TensorId, usize, DType)> = model.param_info_reversed();
 ///
+/// let stream_handle = client.compute_stream_handle();
 /// let mut trainer = BucketedTrainer::new(
 ///     config,
 ///     comm,
 ///     &param_info,
 ///     25 * 1024 * 1024, // 25 MiB buckets
+///     stream_handle,    // enables compute-comm overlap on CUDA
 /// )?;
 ///
 /// trainer.broadcast_params(&params)?;
@@ -62,15 +64,23 @@ impl<R: Runtime<DType = DType>> BucketedTrainer<R> {
     /// * `comm` - Communicator for allreduce operations
     /// * `param_info` - Parameter (id, numel, dtype) in reverse-backward order
     /// * `bucket_size_bytes` - Target bucket size in bytes (25 MiB is a good default)
+    /// * `compute_stream_handle` - Optional compute stream handle from
+    ///   `RuntimeClient::compute_stream_handle()`. Enables event-based
+    ///   compute-communication overlap when the communicator supports it.
     pub fn new(
         config: TrainingConfig,
         comm: Arc<dyn Communicator>,
         param_info: &[(TensorId, usize, DType)],
         bucket_size_bytes: usize,
+        compute_stream_handle: Option<u64>,
     ) -> Result<Self> {
         let inner = SimpleTrainer::new(config)?;
-        let bucket_manager =
-            GradientBucketManager::new(param_info, comm.clone(), bucket_size_bytes);
+        let bucket_manager = GradientBucketManager::new(
+            param_info,
+            comm.clone(),
+            bucket_size_bytes,
+            compute_stream_handle,
+        );
 
         Ok(Self {
             inner,
@@ -118,13 +128,23 @@ impl<R: Runtime<DType = DType>> BucketedTrainer<R> {
 
         // Run backward with hooks — allreduce fires during backward
         //
-        // Safety: We use a raw pointer to bucket_manager because backward_with_hooks()
-        // takes &mut hook while we also need &mut self.bucket_manager — a split borrow
-        // the compiler can't verify. This is safe because:
-        // 1. backward_with_hooks() borrows the hook (&mut H), does NOT store it
-        // 2. The backward pass is single-threaded
-        // 3. manager_ptr points to self.bucket_manager which outlives the hook
-        // 4. The hook is the sole accessor of bucket_manager during backward
+        // SAFETY: We use a raw pointer to bucket_manager to work around a split-borrow
+        // limitation: backward_with_hooks() takes `&mut hook` while the hook itself
+        // needs `&mut self.bucket_manager`. The compiler cannot verify that these are
+        // disjoint borrows of `self`. This is safe because:
+        //
+        // 1. backward_with_hooks() borrows the hook (`&mut H`) only for the duration
+        //    of the call and does NOT store it or spawn threads with it.
+        // 2. The backward pass is single-threaded — numr's backward_with_hooks() does
+        //    not invoke the hook concurrently. BucketedTrainer is !Sync (no concurrent
+        //    &self access) and the hook is scoped to this function.
+        // 3. `manager_ptr` points to `self.bucket_manager` which is a field of
+        //    `BucketedTrainer` and outlives the hook (both live on this stack frame).
+        // 4. The hook is the sole accessor of bucket_manager during backward — no
+        //    other code path touches `self.bucket_manager` until backward returns.
+        //
+        // If backward_with_hooks() ever becomes multi-threaded or stores the hook,
+        // this must be replaced with RefCell or an interior-mutability wrapper.
         let manager_ptr = &mut self.bucket_manager as *mut GradientBucketManager<R>;
         let mut hook = BucketHook::<R, C> {
             manager: manager_ptr,
@@ -161,20 +181,29 @@ struct BucketHook<'a, R: Runtime, C: RuntimeClient<R> + TensorOps<R>> {
     client: &'a C,
 }
 
-// Safety: BucketHook is only used within a single backward_with_hooks() call,
-// which is single-threaded. The raw pointer to GradientBucketManager points to
-// a field of BucketedTrainer and remains valid for the hook's entire lifetime.
-// R: Send is required because the pointer target contains R-parameterized data.
+// SAFETY: BucketHook is only used within a single backward_with_hooks() call,
+// which is single-threaded and synchronous. The raw pointer targets a field of
+// BucketedTrainer that outlives the hook. No concurrent access is possible:
+// - BucketedTrainer is !Sync (has Arc<dyn Communicator> but no shared &self path)
+// - backward_with_hooks() does not spawn threads or send the hook across threads
+// - R: Send is required because *mut GradientBucketManager<R> contains R-typed data
 unsafe impl<R: Runtime + Send, C: RuntimeClient<R> + TensorOps<R>> Send for BucketHook<'_, R, C> {}
 
 impl<R: Runtime<DType = DType>, C: RuntimeClient<R> + TensorOps<R>> BackwardHook<R>
     for BucketHook<'_, R, C>
 {
     fn on_leaf_grad_ready(&mut self, id: TensorId, grad: &Tensor<R>) {
-        // Safety: single-threaded backward pass, manager pointer is valid
+        // SAFETY: single-threaded backward pass, manager pointer is valid (see
+        // safety comment in backward_and_step).
         let manager = unsafe { &mut *self.manager };
-        // Best-effort: if mark_grad_ready fails, we'll catch it in wait_and_unflatten
-        let _ = manager.mark_grad_ready(id, grad, self.client);
+
+        // BackwardHook::on_leaf_grad_ready cannot return errors, so failures here
+        // will surface later in wait_and_unflatten (missing bucket data). In practice
+        // mark_grad_ready only fails on dtype mismatch or missing grads — both of
+        // which indicate a bug in bucket construction, not a transient error.
+        if let Err(_e) = manager.mark_grad_ready(id, grad, self.client) {
+            debug_assert!(false, "mark_grad_ready failed for {id:?}: {_e}");
+        }
     }
 }
 
@@ -200,7 +229,8 @@ mod tests {
         let id = TensorId::new();
         let params = vec![(id, 100, DType::F32)];
         let trainer =
-            BucketedTrainer::<CpuRuntime>::new(config, comm, &params, 25 * 1024 * 1024).unwrap();
+            BucketedTrainer::<CpuRuntime>::new(config, comm, &params, 25 * 1024 * 1024, None)
+                .unwrap();
         assert_eq!(trainer.global_step(), 0);
         assert_eq!(trainer.num_buckets(), 1);
     }
@@ -230,7 +260,8 @@ mod tests {
 
         let comm = Arc::new(NoOpCommunicator);
         let param_info = vec![(w_id, 3, DType::F32)];
-        let mut mgr = GradientBucketManager::<CpuRuntime>::new(&param_info, comm, 25 * 1024 * 1024);
+        let mut mgr =
+            GradientBucketManager::<CpuRuntime>::new(&param_info, comm, 25 * 1024 * 1024, None);
 
         let manager_ptr = &mut mgr as *mut GradientBucketManager<CpuRuntime>;
         let mut hook = BucketHook {

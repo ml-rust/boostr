@@ -36,8 +36,8 @@ where
             let flat = grad.reshape(&[grad.numel()])?;
             let sq = client.mul(&flat, &flat)?;
             let sum = client.sum(&sq, &[0], false)?;
-            let val = sum.to_vec::<f32>();
-            total_norm_sq += val[0] as f64;
+            let val: f32 = sum.item()?;
+            total_norm_sq += val as f64;
         }
     }
 
@@ -89,7 +89,7 @@ where
         let flat = grad.reshape(&[grad.numel()])?;
         let sq = client.mul(&flat, &flat)?;
         let sum = client.sum(&sq, &[0], false)?;
-        let norm_sq = sum.to_vec::<f32>()[0] as f64;
+        let norm_sq: f64 = sum.item::<f32>()? as f64;
         let norm = norm_sq.sqrt();
 
         if norm > max_norm {

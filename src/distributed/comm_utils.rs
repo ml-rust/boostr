@@ -121,6 +121,43 @@ pub fn broadcast_tensor<R: Runtime<DType = DType>>(
     Ok(())
 }
 
+/// Reduce-scatter a tensor: each rank gets a reduced shard.
+///
+/// `send`: `[N]` contiguous tensor (same on all ranks).
+/// `recv`: `[N / world_size]` pre-allocated contiguous buffer for this rank's shard.
+///
+/// The send buffer is split into `world_size` chunks, each chunk is reduced
+/// across ranks, and chunk `i` lands on rank `i`.
+pub fn reduce_scatter_tensor<R: Runtime<DType = DType>>(
+    comm: &dyn Communicator,
+    send: &Tensor<R>,
+    recv: &Tensor<R>,
+    op: ReduceOp,
+) -> Result<()> {
+    if !send.is_contiguous() {
+        return Err(Error::DistributedError {
+            reason: "reduce_scatter send tensor must be contiguous".to_string(),
+        });
+    }
+    if !recv.is_contiguous() {
+        return Err(Error::DistributedError {
+            reason: "reduce_scatter recv tensor must be contiguous".to_string(),
+        });
+    }
+
+    let recv_count = recv.numel();
+    let dtype = send.dtype();
+
+    unsafe {
+        comm.reduce_scatter(send.ptr(), recv.ptr(), recv_count, dtype, op)
+            .map_err(|e| Error::DistributedError {
+                reason: format!("reduce_scatter failed: {e}"),
+            })?;
+    }
+
+    Ok(())
+}
+
 /// Send a tensor with shape metadata, then receive one on the other end.
 ///
 /// Protocol:
@@ -360,6 +397,17 @@ mod tests {
         // NoOp send succeeds (no actual data transfer)
         let t = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device);
         send_tensor_with_metadata(&comm, &t, 0, 0).unwrap();
+    }
+
+    #[test]
+    fn test_reduce_scatter_tensor_noop() {
+        let (_client, device) = cpu_setup();
+        let comm = NoOpCommunicator;
+
+        // NoOp: world_size=1, recv = full send (no actual scatter)
+        let send = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device);
+        let recv = Tensor::<CpuRuntime>::zeros(&[3], DType::F32, &device);
+        reduce_scatter_tensor(&comm, &send, &recv, ReduceOp::Sum).unwrap();
     }
 
     #[test]

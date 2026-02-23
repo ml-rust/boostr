@@ -120,6 +120,54 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
     pub fn prefix(&self) -> &str {
         &self.prefix
     }
+
+    /// Take a tensor and narrow it along `dim` for the given TP rank.
+    ///
+    /// Takes the full tensor from the VarMap, narrows to the rank's shard
+    /// along `dim`, returns contiguous shard. The full tensor is removed
+    /// from the VarMap (zero-copy take, then narrow).
+    ///
+    /// Column-parallel uses dim=0, row-parallel uses dim=1.
+    pub fn take_tensor_shard(
+        &mut self,
+        name: &str,
+        dim: usize,
+        rank: usize,
+        world_size: usize,
+    ) -> Result<Tensor<R>> {
+        let full = self.take_tensor(name)?;
+        let shape = full.shape();
+
+        if dim >= shape.len() {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "take_tensor_shard: dim {} out of range for {}D tensor '{}'",
+                    dim,
+                    shape.len(),
+                    name
+                ),
+            });
+        }
+
+        let dim_size = shape[dim];
+        if dim_size % world_size != 0 {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "take_tensor_shard: dim {} size ({}) not divisible by world_size ({}) for '{}'",
+                    dim, dim_size, world_size, name
+                ),
+            });
+        }
+
+        let shard_size = dim_size / world_size;
+        let start = rank * shard_size;
+
+        full.narrow(dim as isize, start, shard_size)
+            .map(|t| t.contiguous())
+            .map_err(|e| Error::ModelError {
+                reason: format!("take_tensor_shard narrow failed for '{}': {e}", name),
+            })
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +227,47 @@ mod tests {
         assert_eq!(t.shape(), &[2]);
         // Second take should fail — already removed
         assert!(vb.take_tensor("weight").is_err());
+    }
+
+    #[test]
+    fn test_varbuilder_take_tensor_shard() {
+        let d = device();
+        let mut map = VarMap::<CpuRuntime>::new();
+        // [4, 6] weight
+        let data: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        map.insert("weight".into(), Tensor::from_slice(&data, &[4, 6], &d));
+
+        let vb = VarBuilder::new(&mut map, &d);
+
+        // Column-parallel shard (dim=0, rank=0, world_size=2) → [2, 6]
+        // Re-insert since take removes it
+        let data2: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        drop(vb);
+        map.insert("weight".into(), Tensor::from_slice(&data2, &[4, 6], &d));
+        let mut vb = VarBuilder::new(&mut map, &d);
+        let shard = vb.take_tensor_shard("weight", 0, 0, 2).unwrap();
+        assert_eq!(shard.shape(), &[2, 6]);
+
+        // Row-parallel shard (dim=1, rank=1, world_size=2) → [4, 3]
+        let data3: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        drop(vb);
+        map.insert("weight".into(), Tensor::from_slice(&data3, &[4, 6], &d));
+        let mut vb = VarBuilder::new(&mut map, &d);
+        let shard = vb.take_tensor_shard("weight", 1, 1, 2).unwrap();
+        assert_eq!(shard.shape(), &[4, 3]);
+    }
+
+    #[test]
+    fn test_varbuilder_take_tensor_shard_not_divisible() {
+        let d = device();
+        let mut map = VarMap::<CpuRuntime>::new();
+        map.insert(
+            "weight".into(),
+            Tensor::from_slice(&[1.0f32; 15], &[3, 5], &d),
+        );
+        let mut vb = VarBuilder::new(&mut map, &d);
+        // 3 not divisible by 2
+        assert!(vb.take_tensor_shard("weight", 0, 0, 2).is_err());
     }
 
     #[test]

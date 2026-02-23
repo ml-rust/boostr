@@ -3,7 +3,7 @@
 //! Wraps `SimpleTrainer` with automatic mixed precision: forward/backward in BF16/FP16
 //! with FP32 master weights for numerical stability. Achieves ~2x throughput on modern GPUs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::Result;
 use crate::optimizer::grad_scaler::{GradScaler, UnscaleResult};
@@ -45,6 +45,8 @@ pub struct AmpTrainer<R: Runtime<DType = DType>> {
     master_params: HashMap<TensorId, Tensor<R>>,
     compute_dtype: DType,
     grad_scaler: Option<GradScaler>,
+    /// Parameters that stay FP32 even during compute (e.g., final linear, loss layers).
+    fp32_overrides: HashSet<TensorId>,
 }
 
 impl<R: Runtime<DType = DType>> AmpTrainer<R> {
@@ -83,6 +85,7 @@ impl<R: Runtime<DType = DType>> AmpTrainer<R> {
             master_params,
             compute_dtype: amp_config.compute_dtype,
             grad_scaler,
+            fp32_overrides: HashSet::new(),
         })
     }
 
@@ -95,10 +98,15 @@ impl<R: Runtime<DType = DType>> AmpTrainer<R> {
     {
         let mut compute = HashMap::with_capacity(self.master_params.len());
         for (&id, master) in &self.master_params {
-            let param = if master.dtype() == self.compute_dtype {
+            let target_dtype = if self.fp32_overrides.contains(&id) {
+                DType::F32
+            } else {
+                self.compute_dtype
+            };
+            let param = if master.dtype() == target_dtype {
                 master.clone()
             } else {
-                client.cast(master, self.compute_dtype)?
+                client.cast(master, target_dtype)?
             };
             compute.insert(id, param);
         }
@@ -173,6 +181,30 @@ impl<R: Runtime<DType = DType>> AmpTrainer<R> {
         Ok(result)
     }
 
+    /// Mark parameters to keep in FP32 during compute (per-layer precision policy).
+    ///
+    /// Useful for layers where numerical precision is critical even when the rest
+    /// of the model runs in BF16/FP16 — e.g., final output projection, loss computation,
+    /// or normalization layers near the output.
+    pub fn set_fp32_overrides(&mut self, ids: HashSet<TensorId>) {
+        self.fp32_overrides = ids;
+    }
+
+    /// Add a single parameter to the FP32 override set.
+    pub fn add_fp32_override(&mut self, id: TensorId) {
+        self.fp32_overrides.insert(id);
+    }
+
+    /// Remove a parameter from the FP32 override set.
+    pub fn remove_fp32_override(&mut self, id: &TensorId) {
+        self.fp32_overrides.remove(id);
+    }
+
+    /// Get the current FP32 override set.
+    pub fn fp32_overrides(&self) -> &HashSet<TensorId> {
+        &self.fp32_overrides
+    }
+
     /// Get the current loss scale factor (for FP16).
     ///
     /// Returns 1.0 if no grad scaler is active (BF16 mode).
@@ -213,6 +245,7 @@ mod tests {
     use numr::autograd::{Var, backward, var_mean, var_mul, var_sub};
     use numr::ops::TypeConversionOps;
     use numr::runtime::cpu::CpuRuntime;
+    use std::collections::HashSet;
 
     #[test]
     fn test_amp_trainer_f64_compute_converges() {
@@ -300,6 +333,80 @@ mod tests {
         .unwrap();
         assert_eq!(trainer.loss_scale(), 65536.0);
         assert_eq!(trainer.scale_loss(1.0), 65536.0);
+    }
+
+    #[test]
+    fn test_per_layer_precision_policy() {
+        let (client, device) = cpu_setup();
+
+        let w1 = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
+        let w2 = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
+        let id1 = w1.id();
+        let id2 = w2.id();
+
+        let mut params = HashMap::new();
+        params.insert(id1, w1);
+        params.insert(id2, w2);
+
+        let amp_config = MixedPrecisionConfig {
+            compute_dtype: DType::F64,
+            master_dtype: DType::F32,
+            loss_scale: LossScaleStrategy::None,
+        };
+
+        let mut trainer =
+            AmpTrainer::<CpuRuntime>::new(TrainingConfig::default(), amp_config, params, &client)
+                .unwrap();
+
+        // Mark w1 as FP32 override — it should stay F32 while w2 gets cast to F64
+        trainer.add_fp32_override(id1);
+
+        let compute = trainer.compute_params(&client).unwrap();
+        assert_eq!(compute.get(&id1).unwrap().dtype(), DType::F32);
+        assert_eq!(compute.get(&id2).unwrap().dtype(), DType::F64);
+
+        // Remove override — now both should be F64
+        trainer.remove_fp32_override(&id1);
+        let compute = trainer.compute_params(&client).unwrap();
+        assert_eq!(compute.get(&id1).unwrap().dtype(), DType::F64);
+        assert_eq!(compute.get(&id2).unwrap().dtype(), DType::F64);
+    }
+
+    #[test]
+    fn test_fp32_override_set_bulk() {
+        let (client, device) = cpu_setup();
+
+        let w1 = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device);
+        let w2 = Tensor::<CpuRuntime>::from_slice(&[2.0f32], &[1], &device);
+        let w3 = Tensor::<CpuRuntime>::from_slice(&[3.0f32], &[1], &device);
+        let id1 = w1.id();
+        let id2 = w2.id();
+        let id3 = w3.id();
+
+        let mut params = HashMap::new();
+        params.insert(id1, w1);
+        params.insert(id2, w2);
+        params.insert(id3, w3);
+
+        let amp_config = MixedPrecisionConfig {
+            compute_dtype: DType::F64,
+            master_dtype: DType::F32,
+            loss_scale: LossScaleStrategy::None,
+        };
+
+        let mut trainer =
+            AmpTrainer::<CpuRuntime>::new(TrainingConfig::default(), amp_config, params, &client)
+                .unwrap();
+
+        // Bulk set: w1 and w3 stay FP32
+        let overrides: HashSet<TensorId> = [id1, id3].into_iter().collect();
+        trainer.set_fp32_overrides(overrides);
+
+        let compute = trainer.compute_params(&client).unwrap();
+        assert_eq!(compute.get(&id1).unwrap().dtype(), DType::F32);
+        assert_eq!(compute.get(&id2).unwrap().dtype(), DType::F64);
+        assert_eq!(compute.get(&id3).unwrap().dtype(), DType::F32);
+        assert_eq!(trainer.fp32_overrides().len(), 2);
     }
 
     #[test]

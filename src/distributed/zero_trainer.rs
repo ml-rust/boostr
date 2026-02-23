@@ -7,10 +7,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::distributed::grad_sync::{all_reduce_grads, broadcast_params};
+use crate::distributed::grad_sync::all_reduce_grads;
 use crate::distributed::zero::ZeroStage1;
+use crate::distributed::zero_trainer_base::{ZeroTrainerBase, adamw_config_from_training};
 use crate::error::Result;
-use crate::optimizer::{AdamWConfig, GradAccumulator, LrSchedule, clip_grad_norm};
 use crate::trainer::config::{TrainingConfig, TrainingMetrics};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
@@ -23,84 +23,34 @@ use numr::tensor::{Tensor, TensorId};
 /// Each rank stores optimizer state (m, v) for only ~1/N of parameters.
 /// Gradients are allreduced across ranks, then each rank updates only its
 /// owned params and broadcasts the results.
-///
-/// # Usage
-///
-/// ```ignore
-/// let comm = Arc::new(NcclCommunicator::new(...)?);
-/// let param_ids: Vec<TensorId> = params.keys().copied().collect();
-/// let mut trainer = ZeroTrainer::new(config, comm, &param_ids)?;
-///
-/// trainer.broadcast_params(&params)?;
-///
-/// for micro_batch in local_data {
-///     let loss = forward(micro_batch, &params);
-///     let grads = backward(&loss, &client)?;
-///     if let Some(metrics) = trainer.step(&client, &mut params, grads, loss_val)? {
-///         println!("step {} loss={:.4}", metrics.step, metrics.loss);
-///     }
-/// }
-/// ```
-pub struct ZeroTrainer<R: Runtime> {
-    zero_optimizer: ZeroStage1<R>,
-    accumulator: GradAccumulator<R>,
-    lr_schedule: Option<LrSchedule>,
-    max_grad_norm: Option<f64>,
-    global_step: u64,
-    accumulated_loss: f64,
-    loss_count: usize,
-    comm: Arc<dyn Communicator>,
+pub struct ZeroTrainer<R: Runtime<DType = DType>> {
+    base: ZeroTrainerBase<R, ZeroStage1<R>>,
 }
 
 impl<R: Runtime<DType = DType>> ZeroTrainer<R> {
     /// Create a new ZeRO Stage 1 trainer.
-    ///
-    /// # Arguments
-    /// * `config` - Training configuration
-    /// * `comm` - Communicator for collective operations
-    /// * `param_ids` - All parameter IDs (must be the same on all ranks)
     pub fn new(
         config: TrainingConfig,
         comm: Arc<dyn Communicator>,
         param_ids: &[TensorId],
     ) -> Result<Self> {
-        let adamw_config = AdamWConfig {
-            lr: config.learning_rate,
-            weight_decay: config.weight_decay,
-            ..AdamWConfig::default()
-        };
+        let adamw_config = adamw_config_from_training(&config);
         let zero_optimizer = ZeroStage1::new(adamw_config, comm.clone(), param_ids);
-        let accumulator = GradAccumulator::new(config.grad_accum_steps)?;
-
-        Ok(Self {
-            zero_optimizer,
-            accumulator,
-            lr_schedule: None,
-            max_grad_norm: config.max_grad_norm,
-            global_step: 0,
-            accumulated_loss: 0.0,
-            loss_count: 0,
-            comm,
-        })
+        let base = ZeroTrainerBase::new(&config, comm, zero_optimizer)?;
+        Ok(Self { base })
     }
 
-    /// Set a learning rate schedule.
-    pub fn with_lr_schedule(mut self, schedule: LrSchedule) -> Self {
-        self.lr_schedule = Some(schedule);
-        self
-    }
+    crate::distributed::zero_trainer_base::impl_zero_trainer_common!();
 
-    /// Broadcast parameters from rank 0 to all other ranks.
-    pub fn broadcast_params(&self, params: &HashMap<TensorId, Tensor<R>>) -> Result<()> {
-        broadcast_params(self.comm.as_ref(), params, 0)
-    }
-
-    /// Process one micro-batch of gradients.
+    /// Process one micro-batch of gradients (consumed).
     ///
     /// 1. Allreduce gradients across ranks
     /// 2. Accumulate (if gradient accumulation is enabled)
     /// 3. Clip gradients (if configured)
     /// 4. ZeRO optimizer step (updates owned params + broadcasts)
+    ///
+    /// `grads` is consumed because accumulation merges them into internal
+    /// state. Callers should not reuse `grads` after this call.
     ///
     /// Returns `None` if still accumulating, `Some(metrics)` after a full step.
     pub fn step<C>(
@@ -113,61 +63,21 @@ impl<R: Runtime<DType = DType>> ZeroTrainer<R> {
     where
         C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>,
     {
-        self.accumulated_loss += loss_value;
-        self.loss_count += 1;
-
-        // Allreduce gradients across ranks
+        // Stage 1: allreduce grads before accumulation
         let mut synced_grads = grads;
-        all_reduce_grads(self.comm.as_ref(), client, &mut synced_grads)?;
+        all_reduce_grads(self.base.comm.as_ref(), client, &mut synced_grads)?;
 
-        // Accumulate micro-batches
-        let averaged_grads = match self.accumulator.accumulate(client, synced_grads)? {
+        let mut averaged_grads = match self.base.prepare_step(client, synced_grads, loss_value)? {
             Some(g) => g,
             None => return Ok(None),
         };
 
-        // Apply LR schedule
-        if let Some(ref schedule) = self.lr_schedule {
-            let lr = schedule.get_lr(self.global_step);
-            self.zero_optimizer.set_lr(lr);
-        }
+        // ZeRO Stage 1 step (owned params + broadcast)
+        self.base
+            .zero_optimizer
+            .step(client, params, &mut averaged_grads)?;
 
-        // Gradient clipping then ZeRO optimizer step
-        if let Some(max_norm) = self.max_grad_norm {
-            let mut grads_mut = averaged_grads;
-            clip_grad_norm(client, &mut grads_mut, max_norm)?;
-            self.zero_optimizer.step(client, params, &grads_mut)?;
-        } else {
-            self.zero_optimizer.step(client, params, &averaged_grads)?;
-        }
-
-        let avg_loss = self.accumulated_loss / self.loss_count as f64;
-        self.accumulated_loss = 0.0;
-        self.loss_count = 0;
-
-        self.global_step += 1;
-
-        Ok(Some(TrainingMetrics {
-            step: self.global_step,
-            loss: avg_loss,
-            grad_norm: None,
-            lr: self.zero_optimizer.config().lr,
-        }))
-    }
-
-    /// Current global step count.
-    pub fn global_step(&self) -> u64 {
-        self.global_step
-    }
-
-    /// Reference to the underlying communicator.
-    pub fn communicator(&self) -> &dyn Communicator {
-        self.comm.as_ref()
-    }
-
-    /// The set of parameter IDs this rank owns optimizer state for.
-    pub fn owned_param_ids(&self) -> &std::collections::HashSet<TensorId> {
-        self.zero_optimizer.owned_param_ids()
+        Ok(Some(self.base.finish_step()))
     }
 }
 

@@ -41,7 +41,7 @@ use numr::tensor::{Tensor, TensorId};
 ///     }
 /// }
 /// ```
-pub struct DistributedTrainer<R: Runtime> {
+pub struct DistributedTrainer<R: Runtime<DType = DType>> {
     inner: SimpleTrainer<R>,
     comm: Arc<dyn Communicator>,
 }

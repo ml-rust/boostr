@@ -4,6 +4,7 @@
 //! Uses numr tensor ops directly — works on any backend without GPU↔CPU transfers.
 
 use crate::error::Result;
+use crate::optimizer::traits::Optimizer;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ScalarOps, UnaryOps};
@@ -164,6 +165,32 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
 
     pub fn set_lr(&mut self, lr: f64) {
         self.config.lr = lr;
+    }
+}
+
+impl<R: Runtime<DType = DType>> Optimizer<R> for AdamW<R> {
+    fn step<C>(
+        &mut self,
+        client: &C,
+        params: &mut HashMap<TensorId, Tensor<R>>,
+        grads: &GradStore<R>,
+    ) -> Result<()>
+    where
+        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R>,
+    {
+        AdamW::step(self, client, params, grads)
+    }
+
+    fn set_lr(&mut self, lr: f64) {
+        AdamW::set_lr(self, lr);
+    }
+
+    fn lr(&self) -> f64 {
+        self.config.lr
+    }
+
+    fn reset(&mut self) {
+        AdamW::reset(self);
     }
 }
 

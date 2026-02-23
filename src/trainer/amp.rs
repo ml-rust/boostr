@@ -40,7 +40,7 @@ use numr::tensor::{Tensor, TensorId};
 ///     }
 /// }
 /// ```
-pub struct AmpTrainer<R: Runtime> {
+pub struct AmpTrainer<R: Runtime<DType = DType>> {
     trainer: SimpleTrainer<R>,
     master_params: HashMap<TensorId, Tensor<R>>,
     compute_dtype: DType,

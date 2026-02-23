@@ -1,12 +1,12 @@
 //! Simple trainer for neural networks
 //!
-//! Integrates AdamW optimizer, gradient accumulation, gradient clipping,
+//! Integrates an optimizer, gradient accumulation, gradient clipping,
 //! and LR scheduling into a single training step abstraction.
 
 use std::collections::HashMap;
 
 use crate::error::Result;
-use crate::optimizer::{AdamW, AdamWConfig, GradAccumulator, LrSchedule, clip_grad_norm};
+use crate::optimizer::{AdamW, AdamWConfig, GradAccumulator, LrSchedule, Optimizer, clip_grad_norm};
 use crate::trainer::config::{TrainingConfig, TrainingMetrics};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
@@ -20,10 +20,10 @@ use numr::tensor::{Tensor, TensorId};
 /// - Gradient accumulation across micro-batches
 /// - Gradient clipping by global norm
 /// - Learning rate scheduling
-/// - AdamW optimizer step
+/// - Optimizer step (any optimizer implementing the `Optimizer` trait)
 ///
-/// The user provides the forward/backward pass; the trainer handles
-/// everything from gradients to parameter updates.
+/// Generic over the optimizer type `O`. Use `SimpleTrainer::new()` for the default
+/// AdamW optimizer, or `SimpleTrainer::with_optimizer()` for a custom one.
 ///
 /// # Usage
 ///
@@ -39,8 +39,8 @@ use numr::tensor::{Tensor, TensorId};
 ///     }
 /// }
 /// ```
-pub struct SimpleTrainer<R: Runtime> {
-    optimizer: AdamW<R>,
+pub struct SimpleTrainer<R: Runtime<DType = DType>, O: Optimizer<R> = AdamW<R>> {
+    optimizer: O,
     accumulator: GradAccumulator<R>,
     lr_schedule: Option<LrSchedule>,
     max_grad_norm: Option<f64>,
@@ -49,13 +49,21 @@ pub struct SimpleTrainer<R: Runtime> {
     loss_count: usize,
 }
 
-impl<R: Runtime<DType = DType>> SimpleTrainer<R> {
+impl<R: Runtime<DType = DType>> SimpleTrainer<R, AdamW<R>> {
+    /// Create a new trainer with the default AdamW optimizer.
     pub fn new(config: TrainingConfig) -> Result<Self> {
         let optimizer = AdamW::new(AdamWConfig {
             lr: config.learning_rate,
             weight_decay: config.weight_decay,
             ..AdamWConfig::default()
         });
+        Self::with_optimizer(config, optimizer)
+    }
+}
+
+impl<R: Runtime<DType = DType>, O: Optimizer<R>> SimpleTrainer<R, O> {
+    /// Create a new trainer with a custom optimizer.
+    pub fn with_optimizer(config: TrainingConfig, optimizer: O) -> Result<Self> {
         let accumulator = GradAccumulator::new(config.grad_accum_steps)?;
 
         Ok(Self {
@@ -125,7 +133,7 @@ impl<R: Runtime<DType = DType>> SimpleTrainer<R> {
             step: self.global_step,
             loss: avg_loss,
             grad_norm,
-            lr: self.optimizer.config().lr,
+            lr: self.optimizer.lr(),
         }))
     }
 
@@ -133,11 +141,11 @@ impl<R: Runtime<DType = DType>> SimpleTrainer<R> {
         self.global_step
     }
 
-    pub fn optimizer(&self) -> &AdamW<R> {
+    pub fn optimizer(&self) -> &O {
         &self.optimizer
     }
 
-    pub fn optimizer_mut(&mut self) -> &mut AdamW<R> {
+    pub fn optimizer_mut(&mut self) -> &mut O {
         &mut self.optimizer
     }
 }

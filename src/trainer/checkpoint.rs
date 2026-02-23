@@ -3,7 +3,7 @@
 //! A checkpoint consists of:
 //! - `model.safetensors` — model parameters
 //! - `optimizer.safetensors` — optimizer state (m/v tensors for AdamW)
-//! - `training_state.json` — step, epoch, lr, config
+//! - `training_state.json` — step, epoch, lr, config, version
 
 use crate::error::{Error, Result};
 use crate::format::safetensors::{SafeTensors, save_safetensors};
@@ -15,6 +15,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Current checkpoint format version.
+pub const CHECKPOINT_VERSION: u32 = 2;
+
+fn default_version() -> u32 {
+    1
+}
+
 /// Loaded checkpoint data: (model_state, optimizer_state, training_state).
 pub type CheckpointData<R> = (
     HashMap<String, Tensor<R>>,
@@ -25,6 +32,9 @@ pub type CheckpointData<R> = (
 /// Training metadata saved alongside model/optimizer state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingState {
+    /// Checkpoint format version. Defaults to 1 for old checkpoints without this field.
+    #[serde(default = "default_version")]
+    pub version: u32,
     pub step: u64,
     #[serde(default)]
     pub epoch: u64,
@@ -62,8 +72,10 @@ pub fn save_checkpoint<P: AsRef<Path>>(
         }
     }
 
-    // Training metadata
-    let json = serde_json::to_string_pretty(training_state).map_err(|e| Error::TrainingError {
+    // Training metadata — always write current version
+    let mut state = training_state.clone();
+    state.version = CHECKPOINT_VERSION;
+    let json = serde_json::to_string_pretty(&state).map_err(|e| Error::TrainingError {
         reason: format!("failed to serialize training state: {e}"),
     })?;
     std::fs::write(dir.join("training_state.json"), json).map_err(|e| Error::TrainingError {
@@ -115,70 +127,45 @@ pub fn load_checkpoint<R: Runtime<DType = DType>, P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trainer::test_helpers::*;
     use numr::runtime::cpu::CpuDevice;
     use tempfile::TempDir;
 
     #[test]
     fn test_save_and_load_checkpoint() {
         let dir = TempDir::new().unwrap();
-        let device = CpuDevice::new();
-
-        // Model state
-        let mut model_state = HashMap::new();
-        model_state.insert(
-            "layers.0.weight".to_string(),
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device),
-        );
-        model_state.insert(
-            "layers.0.bias".to_string(),
-            Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2], &[2], &device),
-        );
-
-        // Optimizer state
-        let mut opt_state = HashMap::new();
-        opt_state.insert(
-            "layers.0.weight.m".to_string(),
-            Tensor::<CpuRuntime>::from_slice(&[0.01f32, 0.02, 0.03, 0.04], &[2, 2], &device),
-        );
-        opt_state.insert(
-            "layers.0.weight.v".to_string(),
-            Tensor::<CpuRuntime>::from_slice(&[0.001f32, 0.002, 0.003, 0.004], &[2, 2], &device),
-        );
-
+        let device = make_device();
+        let model_state = make_model_state(&device);
+        let opt_state = make_opt_state(&device);
         let training_state = TrainingState {
+            version: CHECKPOINT_VERSION,
             step: 1000,
             epoch: 2,
             learning_rate: 3e-4,
             metadata: HashMap::new(),
         };
 
-        // Save
         save_checkpoint(dir.path(), &model_state, Some(&opt_state), &training_state).unwrap();
 
-        // Verify files exist
         assert!(dir.path().join("model.safetensors").exists());
         assert!(dir.path().join("optimizer.safetensors").exists());
         assert!(dir.path().join("training_state.json").exists());
 
-        // Load
         let (loaded_model, loaded_opt, loaded_state) =
             load_checkpoint::<CpuRuntime, _>(dir.path(), &device).unwrap();
 
-        // Verify model state
         assert_eq!(loaded_model.len(), 2);
         let w = &loaded_model["layers.0.weight"];
         assert_eq!(w.shape(), &[2, 2]);
         let data: Vec<f32> = w.to_vec();
         assert!((data[0] - 1.0).abs() < 1e-6);
 
-        // Verify optimizer state
         let opt = loaded_opt.unwrap();
         assert_eq!(opt.len(), 2);
         let m = &opt["layers.0.weight.m"];
         let m_data: Vec<f32> = m.to_vec();
         assert!((m_data[0] - 0.01).abs() < 1e-6);
 
-        // Verify training state
         assert_eq!(loaded_state.step, 1000);
         assert_eq!(loaded_state.epoch, 2);
         assert!((loaded_state.learning_rate - 3e-4).abs() < 1e-10);
@@ -187,7 +174,7 @@ mod tests {
     #[test]
     fn test_checkpoint_without_optimizer() {
         let dir = TempDir::new().unwrap();
-        let device = CpuDevice::new();
+        let device = make_device();
 
         let mut model_state = HashMap::new();
         model_state.insert(
@@ -195,20 +182,55 @@ mod tests {
             Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device),
         );
 
-        let training_state = TrainingState {
-            step: 42,
-            epoch: 0,
-            learning_rate: 1e-3,
-            metadata: HashMap::new(),
-        };
+        let training_state = make_training_state(42);
 
         save_checkpoint(dir.path(), &model_state, None, &training_state).unwrap();
-
         assert!(!dir.path().join("optimizer.safetensors").exists());
 
         let (_, loaded_opt, loaded_state) =
             load_checkpoint::<CpuRuntime, _>(dir.path(), &device).unwrap();
         assert!(loaded_opt.is_none());
         assert_eq!(loaded_state.step, 42);
+    }
+
+    #[test]
+    fn test_version_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let device = make_device();
+
+        let mut model_state = HashMap::new();
+        model_state.insert(
+            "w".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device),
+        );
+        let state = make_training_state(10);
+
+        save_checkpoint(dir.path(), &model_state, None, &state).unwrap();
+
+        let (_, _, loaded) = load_checkpoint::<CpuRuntime, _>(dir.path(), &device).unwrap();
+        assert_eq!(loaded.version, CHECKPOINT_VERSION);
+    }
+
+    #[test]
+    fn test_version_backward_compat() {
+        let dir = TempDir::new().unwrap();
+        let device = make_device();
+
+        // Create a v1-style checkpoint (no version field)
+        let mut model_state = HashMap::new();
+        model_state.insert(
+            "w".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device),
+        );
+        save_safetensors(dir.path().join("model.safetensors"), &model_state, None).unwrap();
+
+        // Write training state JSON without version field (simulating v1)
+        let json = r#"{"step": 100, "epoch": 5, "learning_rate": 0.001, "metadata": {}}"#;
+        std::fs::write(dir.path().join("training_state.json"), json).unwrap();
+
+        let (_, _, loaded) = load_checkpoint::<CpuRuntime, _>(dir.path(), &device).unwrap();
+        assert_eq!(loaded.version, 1); // defaults to 1
+        assert_eq!(loaded.step, 100);
+        assert_eq!(loaded.epoch, 5);
     }
 }

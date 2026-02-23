@@ -211,7 +211,7 @@ impl Drop for AsyncCheckpointer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trainer::checkpoint::{CHECKPOINT_VERSION, load_checkpoint};
+    use crate::trainer::checkpoint::load_checkpoint;
     use crate::trainer::test_helpers::*;
     use numr::runtime::cpu::CpuRuntime;
     use tempfile::TempDir;

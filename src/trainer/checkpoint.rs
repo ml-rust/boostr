@@ -128,7 +128,6 @@ pub fn load_checkpoint<R: Runtime<DType = DType>, P: AsRef<Path>>(
 mod tests {
     use super::*;
     use crate::trainer::test_helpers::*;
-    use numr::runtime::cpu::CpuDevice;
     use tempfile::TempDir;
 
     #[test]

@@ -1,8 +1,8 @@
-//! 1D convolution layer
+//! 1D convolution layer with autograd support
 
 use crate::error::Result;
-use numr::autograd::Var;
-use numr::ops::{ConvOps, PaddingMode};
+use numr::autograd::{Var, var_conv1d};
+use numr::ops::{BinaryOps, ConvOps, PaddingMode, ReduceOps, ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -11,6 +11,9 @@ use numr::tensor::Tensor;
 /// Weight: `[out_channels, in_channels/groups, kernel_size]`
 /// Input:  `[batch, in_channels, length]`
 /// Output: `[batch, out_channels, length_out]`
+///
+/// Supports autograd: when `trainable=true`, gradients flow through
+/// to input, weight, and bias during backward pass.
 pub struct Conv1d<R: Runtime> {
     weight: Var<R>,
     bias: Option<Var<R>>,
@@ -40,11 +43,36 @@ impl<R: Runtime> Conv1d<R> {
         }
     }
 
-    /// Forward pass.
+    /// Forward pass with autograd support.
     ///
     /// Input: `[batch, in_channels, length]`
     /// Output: `[batch, out_channels, length_out]`
-    pub fn forward<C>(&self, client: &C, input: &Tensor<R>) -> Result<Tensor<R>>
+    pub fn forward<C>(&self, client: &C, input: &Var<R>) -> Result<Var<R>>
+    where
+        R: Runtime<DType = numr::dtype::DType>,
+        C: RuntimeClient<R>
+            + ConvOps<R>
+            + TensorOps<R>
+            + ReduceOps<R>
+            + BinaryOps<R>
+            + ScalarOps<R>,
+        R::Client: ConvOps<R> + TensorOps<R> + ReduceOps<R> + BinaryOps<R> + ScalarOps<R>,
+    {
+        var_conv1d(
+            input,
+            &self.weight,
+            self.bias.as_ref(),
+            self.stride,
+            self.padding,
+            self.dilation,
+            self.groups,
+            client,
+        )
+        .map_err(crate::error::Error::Numr)
+    }
+
+    /// Forward pass without autograd (inference only, returns raw Tensor).
+    pub fn forward_inference<C>(&self, client: &C, input: &Tensor<R>) -> Result<Tensor<R>>
     where
         C: RuntimeClient<R> + ConvOps<R>,
     {
@@ -74,6 +102,7 @@ impl<R: Runtime> Conv1d<R> {
 mod tests {
     use super::*;
     use crate::test_utils::cpu_setup;
+    use numr::autograd::backward;
     use numr::runtime::cpu::CpuRuntime;
 
     #[test]
@@ -84,10 +113,13 @@ mod tests {
         let conv = Conv1d::new(weight, None, 1, PaddingMode::Valid, 1, 1, false);
 
         // input: [batch=2, channels=3, length=10]
-        let input = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 60], &[2, 3, 10], &device);
+        let input = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[0.1f32; 60], &[2, 3, 10], &device),
+            false,
+        );
         let out = conv.forward(&client, &input).unwrap();
         // Valid padding: L_out = 10 - 3 + 1 = 8
-        assert_eq!(out.shape(), &[2, 4, 8]);
+        assert_eq!(out.tensor().shape(), &[2, 4, 8]);
     }
 
     #[test]
@@ -96,9 +128,12 @@ mod tests {
         let weight = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 12], &[4, 1, 3], &device);
         let conv = Conv1d::new(weight, None, 1, PaddingMode::Same, 1, 1, false);
 
-        let input = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 10], &[1, 1, 10], &device);
+        let input = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 10], &[1, 1, 10], &device),
+            false,
+        );
         let out = conv.forward(&client, &input).unwrap();
-        assert_eq!(out.shape(), &[1, 4, 10]);
+        assert_eq!(out.tensor().shape(), &[1, 4, 10]);
     }
 
     #[test]
@@ -109,10 +144,40 @@ mod tests {
         let bias = Tensor::<CpuRuntime>::from_slice(&[10.0f32], &[1], &device);
         let conv = Conv1d::new(weight, Some(bias), 1, PaddingMode::Valid, 1, 1, false);
 
-        let input = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 5.0], &[1, 1, 2], &device);
+        let input = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[3.0f32, 5.0], &[1, 1, 2], &device),
+            false,
+        );
         let out = conv.forward(&client, &input).unwrap();
-        let data: Vec<f32> = out.to_vec();
+        let data: Vec<f32> = out.tensor().to_vec();
         // 3*2+10=16, 5*2+10=20
         assert_eq!(data, vec![16.0, 20.0]);
+    }
+
+    #[test]
+    fn test_conv1d_backward_gradients() {
+        let (client, device) = cpu_setup();
+
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0, 1.0], &[1, 1, 3], &device);
+        let conv = Conv1d::new(weight, None, 1, PaddingMode::Valid, 1, 1, true);
+
+        let input = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5], &device),
+            true,
+        );
+
+        let out = conv.forward(&client, &input).unwrap();
+        let loss = numr::autograd::var_sum(&out, &[], false, &client).unwrap();
+        let grads = backward(&loss, &client).unwrap();
+
+        // Verify input gradient exists and has correct shape
+        let d_input: Vec<f32> = grads.get(input.id()).unwrap().to_vec();
+        assert_eq!(d_input.len(), 5);
+        // [1, 2, 3, 2, 1] pattern for kernel [1,1,1]
+        assert_eq!(d_input, vec![1.0, 2.0, 3.0, 2.0, 1.0]);
+
+        // Verify weight gradient
+        let d_weight: Vec<f32> = grads.get(conv.weight().id()).unwrap().to_vec();
+        assert_eq!(d_weight.len(), 3);
     }
 }

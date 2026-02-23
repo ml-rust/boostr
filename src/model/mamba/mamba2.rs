@@ -13,8 +13,8 @@ use numr::autograd::{
 };
 use numr::dtype::DType;
 use numr::ops::{
-    ActivationOps, ConvOps, NormalizationOps, PaddingMode, ReduceOps, ScalarOps, ShapeOps,
-    TensorOps, UnaryOps,
+    ActivationOps, BinaryOps, ConvOps, NormalizationOps, PaddingMode, ReduceOps, ScalarOps,
+    ShapeOps, TensorOps, UnaryOps,
 };
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
@@ -279,7 +279,12 @@ impl<R: Runtime> Mamba2<R> {
             + NormalizationOps<R>
             + ReduceOps<R>
             + ShapeOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ActivationOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ActivationOps<R>
+            + ConvOps<R>
+            + ReduceOps<R>
+            + BinaryOps<R>,
     {
         let shape = x.shape();
         if shape.len() != 3 {
@@ -316,9 +321,8 @@ impl<R: Runtime> Mamba2<R> {
 
         // 3. Causal conv1d on xBC
         let xbc_ncl = var_contiguous(&var_transpose(&xbc).map_err(Error::Numr)?);
-        let xbc_conv = self.conv1d.forward(client, xbc_ncl.tensor())?;
-        let xbc_conv_var = Var::new(xbc_conv, false);
-        let xbc = var_contiguous(&var_transpose(&xbc_conv_var).map_err(Error::Numr)?);
+        let xbc_conv = self.conv1d.forward(client, &xbc_ncl)?;
+        let xbc = var_contiguous(&var_transpose(&xbc_conv).map_err(Error::Numr)?);
 
         // 4. SiLU activation
         let xbc = var_silu(&xbc, client).map_err(Error::Numr)?;

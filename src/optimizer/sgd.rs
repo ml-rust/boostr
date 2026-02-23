@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::optimizer::traits::Optimizer;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ScalarOps, UnaryOps};
+use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 use std::collections::HashMap;
@@ -71,7 +71,7 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Sgd<R> {
         grads: &GradStore<R>,
     ) -> Result<()>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R>,
+        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>,
     {
         let lr = self.config.lr;
         let momentum = self.config.momentum;
@@ -166,8 +166,7 @@ mod tests {
     fn test_sgd_vanilla_step() {
         let (client, device) = cpu_setup();
 
-        let w_tensor =
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device);
+        let w_tensor = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device);
         let w_id = w_tensor.id();
 
         // grad = [0.1, 0.2, 0.3, 0.4]
@@ -199,8 +198,7 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let target = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device);
-        let w_init =
-            Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device);
+        let w_init = Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device);
         let w_id = w_init.id();
 
         let mut params = HashMap::new();
@@ -246,8 +244,7 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let target = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device);
-        let w_init =
-            Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device);
+        let w_init = Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device);
         let w_id = w_init.id();
 
         let mut params = HashMap::new();

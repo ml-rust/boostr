@@ -5,7 +5,7 @@
 use crate::error::Result;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ScalarOps, UnaryOps};
+use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 use std::collections::HashMap;
@@ -26,7 +26,7 @@ pub trait Optimizer<R: Runtime<DType = DType>> {
         grads: &GradStore<R>,
     ) -> Result<()>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R>;
+        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>;
 
     /// Set the learning rate.
     fn set_lr(&mut self, lr: f64);

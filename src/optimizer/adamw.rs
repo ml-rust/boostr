@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::optimizer::traits::Optimizer;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ScalarOps, UnaryOps};
+use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 use std::collections::HashMap;
@@ -75,7 +75,7 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
         grads: &GradStore<R>,
     ) -> Result<()>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R>,
+        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>,
     {
         self.timestep += 1;
         let t = self.timestep;
@@ -176,7 +176,7 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for AdamW<R> {
         grads: &GradStore<R>,
     ) -> Result<()>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R>,
+        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>,
     {
         AdamW::step(self, client, params, grads)
     }

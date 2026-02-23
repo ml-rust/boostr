@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 
 use crate::error::Result;
-use crate::optimizer::{AdamW, AdamWConfig, GradAccumulator, LrSchedule, Optimizer, clip_grad_norm};
+use crate::optimizer::{
+    AdamW, AdamWConfig, GradAccumulator, LrSchedule, Optimizer, clip_grad_norm,
+};
 use crate::trainer::config::{TrainingConfig, TrainingMetrics};
 use numr::autograd::GradStore;
 use numr::dtype::DType;

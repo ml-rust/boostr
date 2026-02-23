@@ -5,7 +5,7 @@
 use crate::error::{Error, Result};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
+use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps, UtilityOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::TensorId;
 
@@ -54,6 +54,82 @@ where
     }
 
     Ok(total_norm)
+}
+
+/// Clip each gradient independently by its own L2 norm.
+///
+/// For each gradient tensor, if its L2 norm exceeds `max_norm`, it is scaled
+/// down so its norm equals `max_norm`. Other gradients are left unchanged.
+///
+/// Returns a map of tensor ID → original norm for every gradient that was clipped.
+pub fn clip_grad_norm_per_param<R, C>(
+    client: &C,
+    grads: &mut GradStore<R>,
+    max_norm: f64,
+) -> Result<Vec<(TensorId, f64)>>
+where
+    R: Runtime<DType = DType>,
+    C: RuntimeClient<R> + ReduceOps<R> + ScalarOps<R> + UnaryOps<R> + BinaryOps<R>,
+{
+    if max_norm <= 0.0 {
+        return Err(Error::TrainingError {
+            reason: format!("max_norm must be positive, got {max_norm}"),
+        });
+    }
+
+    let ids: Vec<TensorId> = grads.keys().copied().collect();
+    let mut clipped = Vec::new();
+
+    for id in ids {
+        let grad = match grads.get(id) {
+            Some(g) => g,
+            None => continue,
+        };
+
+        let flat = grad.reshape(&[grad.numel()])?;
+        let sq = client.mul(&flat, &flat)?;
+        let sum = client.sum(&sq, &[0], false)?;
+        let norm_sq = sum.to_vec::<f32>()[0] as f64;
+        let norm = norm_sq.sqrt();
+
+        if norm > max_norm {
+            let scale = max_norm / (norm + 1e-6);
+            let scaled = client.mul_scalar(grad, scale)?;
+            grads.insert(id, scaled);
+            clipped.push((id, norm));
+        }
+    }
+
+    Ok(clipped)
+}
+
+/// Clamp every gradient element to `[-clip_value, clip_value]`.
+///
+/// Unlike norm-based clipping, this operates element-wise and does not
+/// preserve gradient direction.
+pub fn clip_grad_value<R, C>(client: &C, grads: &mut GradStore<R>, clip_value: f64) -> Result<()>
+where
+    R: Runtime<DType = DType>,
+    C: RuntimeClient<R> + UtilityOps<R>,
+{
+    if clip_value <= 0.0 {
+        return Err(Error::TrainingError {
+            reason: format!("clip_value must be positive, got {clip_value}"),
+        });
+    }
+
+    let ids: Vec<TensorId> = grads.keys().copied().collect();
+
+    for id in ids {
+        let grad = match grads.get(id) {
+            Some(g) => g,
+            None => continue,
+        };
+        let clamped = client.clamp(grad, -clip_value, clip_value)?;
+        grads.insert(id, clamped);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -141,5 +217,62 @@ mod tests {
 
         assert!(clip_grad_norm(&client, &mut grads, 0.0).is_err());
         assert!(clip_grad_norm(&client, &mut grads, -1.0).is_err());
+    }
+
+    #[test]
+    fn test_clip_per_param_only_clips_large() {
+        let (client, device) = cpu_setup();
+
+        let id1 = TensorId::new();
+        let id2 = TensorId::new();
+        // grad1 = [3, 4] → norm = 5.0, should be clipped to norm 2.0
+        // grad2 = [1, 0] → norm = 1.0, should NOT be clipped
+        let t1 = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
+        let t2 = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0], &[2], &device);
+        let mut grads = GradStore::new();
+        grads.insert(id1, t1);
+        grads.insert(id2, t2);
+
+        let clipped = clip_grad_norm_per_param(&client, &mut grads, 2.0).unwrap();
+
+        // Only id1 should have been clipped
+        assert_eq!(clipped.len(), 1);
+        assert!((clipped[0].1 - 5.0).abs() < 1e-4);
+
+        // id1: norm should now be ~2.0
+        let d1 = grads.get(id1).unwrap().to_vec::<f32>();
+        let norm1 = (d1[0] * d1[0] + d1[1] * d1[1]).sqrt();
+        assert!((norm1 - 2.0).abs() < 1e-3);
+
+        // id2: unchanged
+        let d2 = grads.get(id2).unwrap().to_vec::<f32>();
+        assert!((d2[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_clip_value() {
+        let (client, device) = cpu_setup();
+
+        let id = TensorId::new();
+        let t = Tensor::<CpuRuntime>::from_slice(&[-5.0f32, 3.0, 0.5, -0.1], &[4], &device);
+        let mut grads = GradStore::new();
+        grads.insert(id, t);
+
+        clip_grad_value(&client, &mut grads, 1.0).unwrap();
+
+        let data = grads.get(id).unwrap().to_vec::<f32>();
+        assert!((data[0] - (-1.0)).abs() < 1e-6); // clamped from -5
+        assert!((data[1] - 1.0).abs() < 1e-6); // clamped from 3
+        assert!((data[2] - 0.5).abs() < 1e-6); // unchanged
+        assert!((data[3] - (-0.1)).abs() < 1e-6); // unchanged
+    }
+
+    #[test]
+    fn test_clip_value_rejects_non_positive() {
+        let (client, _device) = cpu_setup();
+        let mut grads = GradStore::<CpuRuntime>::new();
+
+        assert!(clip_grad_value(&client, &mut grads, 0.0).is_err());
+        assert!(clip_grad_value(&client, &mut grads, -1.0).is_err());
     }
 }

@@ -16,107 +16,138 @@ fn compile_cuda_kernels() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // Kernel sets: (directory, filename, arch)
+    // Kernel sets: (directory, filename, arch, required)
     // Most kernels target sm_75 (Turing+); flash_v3 needs sm_90 (Hopper)
-    let kernel_sets: Vec<(PathBuf, &str, &str)> = vec![
+    // Optional kernels (required=false) warn on failure instead of panicking —
+    // they require hardware-specific features (e.g. Hopper) that may not be
+    // available on all build machines.
+    let kernel_sets: Vec<(PathBuf, &str, &str, bool)> = vec![
         // Quantization kernels
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "dequant.cu",
             "sm_75",
+            true,
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "quant_matmul.cu",
             "sm_75",
+            true,
         ),
         // Attention kernels — sm_75
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "flash_v2.cu",
             "sm_75",
+            true,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "flash_v2_bwd.cu",
             "sm_75",
+            true,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "paged_attention.cu",
             "sm_75",
+            true,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "paged_attention_bwd.cu",
             "sm_75",
+            true,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "kv_cache_update.cu",
             "sm_75",
+            true,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "varlen_attention.cu",
             "sm_75",
+            true,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "varlen_attention_bwd.cu",
             "sm_75",
+            true,
         ),
         // KV cache quantization kernels
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "kv_cache_int4.cu",
             "sm_75",
+            true,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "kv_cache_fp8.cu",
-            "sm_75",
+            "sm_80",
+            true,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "kv_cache_fp8_bwd.cu",
-            "sm_75",
+            "sm_80",
+            true,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "kv_cache_quant.cu",
-            "sm_75",
+            "sm_80",
+            true,
         ),
         // MQA/GQA dedicated kernels
-        (PathBuf::from("src/ops/cuda/kernels"), "mqa_gqa.cu", "sm_75"),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "mqa_gqa.cu",
+            "sm_80",
+            true,
+        ),
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "mqa_gqa_bwd.cu",
             "sm_75",
+            true,
         ),
         // Reshape and cache (paged KV)
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "reshape_and_cache.cu",
             "sm_75",
+            true,
         ),
         // ALiBi attention
-        (PathBuf::from("src/ops/cuda/kernels"), "alibi.cu", "sm_75"),
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "alibi.cu",
+            "sm_80",
+            true,
+        ),
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "alibi_bwd.cu",
             "sm_75",
+            true,
         ),
-        // Flash v3 — sm_90 (Hopper warp specialization)
+        // Flash v3 — sm_90 (Hopper warp specialization, optional)
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "flash_v3.cu",
             "sm_90",
+            false,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels"),
             "flash_v3_bwd.cu",
             "sm_90",
+            false,
         ),
     ];
 
@@ -130,7 +161,7 @@ fn compile_cuda_kernels() {
         panic!("nvcc not found - CUDA Toolkit must be installed for the 'cuda' feature");
     });
 
-    for (kernels_dir, kernel_file, arch) in &kernel_sets {
+    for (kernels_dir, kernel_file, arch, required) in &kernel_sets {
         let cu_path = kernels_dir.join(kernel_file);
         let ptx_name = kernel_file.replace(".cu", ".ptx");
         let ptx_path = out_dir.join(&ptx_name);
@@ -168,20 +199,42 @@ fn compile_cuda_kernels() {
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     let stdout = String::from_utf8_lossy(&output.stdout);
-                    eprintln!();
-                    eprintln!("=== CUDA COMPILATION FAILED ===");
-                    eprintln!("Failed to compile: {}", kernel_file);
-                    if !stdout.is_empty() {
-                        eprintln!("stdout: {}", stdout);
+                    if *required {
+                        eprintln!();
+                        eprintln!("=== CUDA COMPILATION FAILED ===");
+                        eprintln!("Failed to compile: {}", kernel_file);
+                        if !stdout.is_empty() {
+                            eprintln!("stdout: {}", stdout);
+                        }
+                        if !stderr.is_empty() {
+                            eprintln!("stderr: {}", stderr);
+                        }
+                        panic!("nvcc compilation failed for {}", kernel_file);
+                    } else {
+                        eprintln!(
+                            "cargo:warning=Optional kernel {} ({}) failed to compile — \
+                             skipping (requires {} hardware). stderr: {}",
+                            kernel_file,
+                            arch,
+                            arch.to_uppercase(),
+                            stderr.lines().next().unwrap_or("unknown error")
+                        );
+                        // Write an empty PTX file so include_str! doesn't fail
+                        std::fs::write(&ptx_path, "// Optional kernel not compiled\n")
+                            .unwrap_or_else(|e| {
+                                panic!("Failed to write placeholder PTX for {}: {}", kernel_file, e)
+                            });
                     }
-                    if !stderr.is_empty() {
-                        eprintln!("stderr: {}", stderr);
-                    }
-                    panic!("nvcc compilation failed for {}", kernel_file);
                 }
             }
             Err(e) => {
-                panic!("Failed to execute nvcc: {}", e);
+                eprintln!();
+                eprintln!("=== CUDA COMPILATION ERROR ===");
+                eprintln!();
+                eprintln!("Failed to execute nvcc for kernel '{}': {}", kernel_file, e);
+                eprintln!("Install CUDA Toolkit: https://developer.nvidia.com/cuda-downloads");
+                eprintln!();
+                panic!("nvcc execution failed for {}: {}", kernel_file, e);
             }
         }
     }

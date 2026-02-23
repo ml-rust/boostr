@@ -25,7 +25,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 
 # Optional: CUDA backend
-cudarc = { version = "0.18", optional = true, features = [
+cudarc = { version = "0.19", optional = true, features = [
   "cuda-version-from-build-system",
 ] }
 

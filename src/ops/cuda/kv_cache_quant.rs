@@ -8,7 +8,7 @@ use crate::ops::traits::kv_cache_quant::{Int4GroupSize, KvCacheQuantOps};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
-use numr::runtime::Runtime;
+use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 

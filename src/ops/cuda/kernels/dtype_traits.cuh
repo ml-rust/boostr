@@ -68,7 +68,7 @@ __device__ __forceinline__ float fp8_e4m3_to_f32(uint8_t u, float scale = 1.0f) 
         "cvt.rn.f32.e4m3x2 {%0, dummy}, %1; \n\t"      // Unpack: lower 8 bits -> result, upper 8 bits -> dummy
         "}"
         : "=f"(result)
-        : "r"((uint16_t)u)                             // Input as 16-bit (lower byte valid, upper ignored)
+        : "h"((uint16_t)u)                              // cudarc 0.19: "h" constraint for 16-bit operands
     );
     return result / scale;
 #else
@@ -101,7 +101,7 @@ __device__ __forceinline__ uint8_t f32_to_fp8_e4m3_raw(float x, float scale = 1.
     // Saturate to E4M3 range and round to nearest
     asm ("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;"
          : "=r"(result)
-         : "f"(x), "f"(0.0f));  // Second operand is unused for scalar
+         : "f"(x), "f"(0.0f));  // Padding: e4m3x2 packs 2 scalars, second is zeroed
     return (uint8_t)result;
 #else
     // Ampere and older: Software emulation
@@ -138,7 +138,7 @@ __device__ __forceinline__ float fp8_e5m2_to_f32(uint8_t u, float scale = 1.0f) 
         "cvt.rn.f32.e5m2x2 {%0, dummy}, %1; \n\t"      // Unpack: lower 8 bits -> result, upper 8 bits -> dummy
         "}"
         : "=f"(result)
-        : "r"((uint16_t)u)                             // Input as 16-bit (lower byte valid, upper ignored)
+        : "h"((uint16_t)u)                              // cudarc 0.19: "h" constraint for 16-bit operands
     );
     return result / scale;
 #else
@@ -165,7 +165,7 @@ __device__ __forceinline__ uint8_t f32_to_fp8_e5m2_raw(float x, float scale = 1.
     uint32_t result;
     asm ("cvt.rn.satfinite.e5m2x2.f32 %0, %1, %2;"
          : "=r"(result)
-         : "f"(x), "f"(0.0f));  // Second operand is unused for scalar
+         : "f"(x), "f"(0.0f));  // Padding: e5m2x2 packs 2 scalars, second is zeroed
     return (uint8_t)result;
 #else
     // Ampere and older: Software emulation

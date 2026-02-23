@@ -25,6 +25,7 @@
 //! - **impl_generic**: Composite ops composed from numr primitives, same on all backends
 //! - **Custom kernels**: Dequant, quantized matmul, fused attention (SIMD/PTX/WGSL)
 
+pub mod data;
 pub mod distributed;
 pub mod error;
 pub mod format;

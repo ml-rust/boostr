@@ -85,4 +85,15 @@ pub enum Error {
         /// Description of what went wrong
         reason: String,
     },
+
+    /// Data loading / IO error
+    #[error("data error: {reason}")]
+    DataError {
+        /// Description of what went wrong
+        reason: String,
+    },
+
+    /// IO error
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }

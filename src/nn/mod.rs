@@ -11,6 +11,7 @@ pub mod module;
 pub mod moe;
 pub mod rmsnorm;
 pub mod rope;
+pub mod stochastic_depth;
 pub mod var_builder;
 pub mod varmap;
 pub mod weight;
@@ -33,6 +34,7 @@ pub use moe::{
 };
 pub use rmsnorm::RmsNorm;
 pub use rope::RoPE;
+pub use stochastic_depth::StochasticDepth;
 pub use var_builder::VarBuilder;
 pub use varmap::{Init, VarMap};
 pub use weight::Weight;

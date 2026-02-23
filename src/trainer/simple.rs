@@ -13,7 +13,7 @@ use crate::trainer::config::{TrainingConfig, TrainingMetrics};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
-use numr::runtime::{Runtime, RuntimeClient};
+use numr::runtime::{Graph, Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
 /// Simple single-device trainer
@@ -49,6 +49,8 @@ pub struct SimpleTrainer<R: Runtime<DType = DType>, O: Optimizer<R> = AdamW<R>> 
     global_step: u64,
     accumulated_loss: f64,
     loss_count: usize,
+    forward_graph: Option<R::Graph>,
+    backward_graph: Option<R::Graph>,
 }
 
 impl<R: Runtime<DType = DType>> SimpleTrainer<R, AdamW<R>> {
@@ -76,6 +78,8 @@ impl<R: Runtime<DType = DType>, O: Optimizer<R>> SimpleTrainer<R, O> {
             global_step: 0,
             accumulated_loss: 0.0,
             loss_count: 0,
+            forward_graph: None,
+            backward_graph: None,
         })
     }
 
@@ -149,5 +153,64 @@ impl<R: Runtime<DType = DType>, O: Optimizer<R>> SimpleTrainer<R, O> {
 
     pub fn optimizer_mut(&mut self) -> &mut O {
         &mut self.optimizer
+    }
+
+    /// Capture a forward pass into a CUDA graph for replay.
+    ///
+    /// On CPU/WebGPU the closure executes eagerly and `launch_forward_graph`
+    /// becomes a no-op. On CUDA the recorded kernel sequence is replayed
+    /// with a single `cuGraphLaunch`, eliminating per-kernel CPU overhead.
+    pub fn capture_forward_pass<F, T>(&mut self, client: &R::Client, f: F) -> Result<T>
+    where
+        F: FnOnce(&R::Client) -> numr::error::Result<T>,
+    {
+        let (graph, result) = R::capture_graph(client, f)?;
+        self.forward_graph = Some(graph);
+        Ok(result)
+    }
+
+    /// Capture a backward pass into a CUDA graph for replay.
+    pub fn capture_backward_pass<F, T>(&mut self, client: &R::Client, f: F) -> Result<T>
+    where
+        F: FnOnce(&R::Client) -> numr::error::Result<T>,
+    {
+        let (graph, result) = R::capture_graph(client, f)?;
+        self.backward_graph = Some(graph);
+        Ok(result)
+    }
+
+    /// Replay the captured forward graph.
+    ///
+    /// Returns an error if no forward graph has been captured.
+    pub fn launch_forward_graph(&self) -> Result<()> {
+        match &self.forward_graph {
+            Some(g) => Ok(g.launch()?),
+            None => Err(crate::error::Error::TrainingError {
+                reason: "no forward graph captured — call capture_forward_pass first".into(),
+            }),
+        }
+    }
+
+    /// Replay the captured backward graph.
+    ///
+    /// Returns an error if no backward graph has been captured.
+    pub fn launch_backward_graph(&self) -> Result<()> {
+        match &self.backward_graph {
+            Some(g) => Ok(g.launch()?),
+            None => Err(crate::error::Error::TrainingError {
+                reason: "no backward graph captured — call capture_backward_pass first".into(),
+            }),
+        }
+    }
+
+    /// Check whether forward and backward graphs have been captured.
+    pub fn graphs_captured(&self) -> (bool, bool) {
+        (self.forward_graph.is_some(), self.backward_graph.is_some())
+    }
+
+    /// Drop both captured graphs, reverting to eager execution.
+    pub fn clear_graphs(&mut self) {
+        self.forward_graph = None;
+        self.backward_graph = None;
     }
 }

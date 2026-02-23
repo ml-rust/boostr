@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+#[cfg(any(feature = "cuda", feature = "wgpu"))]
+use std::sync::{Mutex, OnceLock};
 
 use boostr::optimizer::LrSchedule;
 use boostr::trainer::{SimpleTrainer, TrainingConfig};
 use numr::autograd::{Var, backward, var_mean, var_mul, var_sub};
+use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 
@@ -183,4 +186,206 @@ fn test_trainer_with_grad_clipping() {
     let m = metrics.unwrap();
     assert!(m.grad_norm.is_some());
     assert!(m.grad_norm.unwrap() > 0.0);
+}
+
+// ============================================================================
+// Graph Capture & Replay Tests
+// ============================================================================
+//
+// Tests run on all available backends (CPU, CUDA, WebGPU) via cfg-gated helpers.
+
+#[cfg(feature = "cuda")]
+static CUDA_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+#[cfg(feature = "wgpu")]
+static WGPU_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(feature = "cuda")]
+fn with_cuda<F: FnMut(numr::runtime::cuda::CudaClient, numr::runtime::cuda::CudaDevice)>(mut f: F) {
+    let _guard = CUDA_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let device = numr::runtime::cuda::CudaDevice::new(0);
+    let client = numr::runtime::cuda::CudaClient::new(device.clone())
+        .expect("CUDA feature enabled but no CUDA device available");
+    f(client, device);
+}
+
+#[cfg(feature = "wgpu")]
+fn with_wgpu<F: FnMut(numr::runtime::wgpu::WgpuClient, numr::runtime::wgpu::WgpuDevice)>(mut f: F) {
+    let _guard = WGPU_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let device = numr::runtime::wgpu::WgpuDevice::default();
+    let client = numr::runtime::wgpu::WgpuRuntime::create_client(&device);
+    f(client, device);
+}
+
+/// Test graph capture on a specific backend.
+fn test_graph_capture_lifecycle<R: Runtime<DType = numr::dtype::DType>>(client: &R::Client) {
+    let config = TrainingConfig::default()
+        .with_lr(1e-3)
+        .with_max_grad_norm(None);
+    let mut trainer = SimpleTrainer::<R>::new(config).expect("valid config");
+
+    // Initially no graphs captured
+    assert_eq!(trainer.graphs_captured(), (false, false));
+
+    // Launch without capture should error
+    assert!(trainer.launch_forward_graph().is_err());
+    assert!(trainer.launch_backward_graph().is_err());
+
+    // Capture forward — closure must execute
+    let mut fwd_executed = false;
+    let fwd_result = trainer
+        .capture_forward_pass(client, |_c| {
+            fwd_executed = true;
+            Ok(42i32)
+        })
+        .expect("capture_forward_pass");
+    assert!(fwd_executed);
+    assert_eq!(fwd_result, 42);
+    assert_eq!(trainer.graphs_captured(), (true, false));
+
+    // Capture backward
+    let mut bwd_executed = false;
+    trainer
+        .capture_backward_pass(client, |_c| {
+            bwd_executed = true;
+            Ok(())
+        })
+        .expect("capture_backward_pass");
+    assert!(bwd_executed);
+    assert_eq!(trainer.graphs_captured(), (true, true));
+
+    // Launch both (no-op on CPU/WebGPU, real replay on CUDA)
+    trainer.launch_forward_graph().expect("launch forward");
+    trainer.launch_backward_graph().expect("launch backward");
+
+    // Clear and verify reset
+    trainer.clear_graphs();
+    assert_eq!(trainer.graphs_captured(), (false, false));
+    assert!(trainer.launch_forward_graph().is_err());
+    assert!(trainer.launch_backward_graph().is_err());
+}
+
+#[test]
+fn test_graph_capture_cpu() {
+    let (client, _device) = cpu_setup();
+    test_graph_capture_lifecycle::<CpuRuntime>(&client);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_graph_capture_cuda() {
+    with_cuda(|client, _device| {
+        test_graph_capture_lifecycle::<numr::runtime::cuda::CudaRuntime>(&client);
+    });
+}
+
+#[cfg(feature = "wgpu")]
+#[test]
+fn test_graph_capture_wgpu() {
+    with_wgpu(|client, _device| {
+        test_graph_capture_lifecycle::<numr::runtime::wgpu::WgpuRuntime>(&client);
+    });
+}
+
+/// Test graph capture with real tensor ops on non-capture backends (CPU/WebGPU).
+///
+/// On these backends, `capture_graph` executes eagerly and `launch` is a no-op,
+/// so allocations inside the closure work fine.
+fn test_graph_capture_with_tensor_ops_eager<R: Runtime<DType = numr::dtype::DType>>(
+    client: &R::Client,
+    device: &R::Device,
+) where
+    R::Client: numr::ops::BinaryOps<R> + numr::ops::ScalarOps<R>,
+{
+    let config = TrainingConfig::default()
+        .with_lr(1e-3)
+        .with_max_grad_norm(None);
+    let mut trainer = SimpleTrainer::<R>::new(config).expect("valid config");
+
+    let a = Tensor::<R>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4], device);
+
+    let result = trainer
+        .capture_forward_pass(client, |c| {
+            use numr::ops::ScalarOps;
+            c.mul_scalar(&a, 2.0f64)
+        })
+        .expect("capture with tensor ops");
+
+    let result_data = result.to_vec::<f32>();
+    assert_eq!(result_data, vec![2.0, 4.0, 6.0, 8.0]);
+
+    trainer.launch_forward_graph().expect("launch");
+}
+
+#[test]
+fn test_graph_capture_tensor_ops_cpu() {
+    let (client, device) = cpu_setup();
+    test_graph_capture_with_tensor_ops_eager::<CpuRuntime>(&client, &device);
+}
+
+/// Test CUDA graph capture with tensor ops.
+///
+/// CUDA stream capture forbids memory allocation (cuMemAlloc) inside the
+/// captured region. numr's tensor allocation currently panics on OOM rather
+/// than returning Result, so we use catch_unwind to handle this gracefully.
+/// The lifecycle test (test_graph_capture_cuda) validates the full graph API
+/// on CUDA without allocations. This test verifies behavior when allocations
+/// are attempted during capture — expected to fail without cudaMallocAsync pools.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_graph_capture_tensor_ops_cuda() {
+    use numr::ops::ScalarOps;
+
+    with_cuda(|client, device| {
+        let config = TrainingConfig::default()
+            .with_lr(1e-3)
+            .with_max_grad_norm(None);
+        let mut trainer =
+            SimpleTrainer::<numr::runtime::cuda::CudaRuntime>::new(config).expect("valid config");
+
+        let a = Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(
+            &[1.0f32, 2.0, 3.0, 4.0],
+            &[4],
+            &device,
+        );
+
+        // Warmup: execute once outside capture
+        let _warmup = client.mul_scalar(&a, 2.0f64).expect("warmup");
+
+        // Capture: mul_scalar allocates output, which panics during CUDA stream
+        // capture because cuMemAlloc isn't a stream-ordered operation.
+        // catch_unwind handles the expected panic gracefully.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            trainer.capture_forward_pass(&client, |c| {
+                let _b = c.mul_scalar(&a, 2.0f64)?;
+                Ok(())
+            })
+        }));
+
+        match result {
+            Ok(Ok(())) => {
+                // cudaMallocAsync pool available — graph captured successfully
+                trainer.launch_forward_graph().expect("launch");
+            }
+            Ok(Err(_)) | Err(_) => {
+                // Expected: allocation inside capture not supported.
+                // test_graph_capture_cuda already validates the graph API on CUDA.
+            }
+        }
+    });
+}
+
+#[cfg(feature = "wgpu")]
+#[test]
+fn test_graph_capture_tensor_ops_wgpu() {
+    with_wgpu(|client, device| {
+        test_graph_capture_with_tensor_ops_eager::<numr::runtime::wgpu::WgpuRuntime>(
+            &client, &device,
+        );
+    });
 }

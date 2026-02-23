@@ -49,7 +49,7 @@ use numr::tensor::{Tensor, TensorId};
 ///     }
 /// }
 /// ```
-pub struct BucketedTrainer<R: Runtime> {
+pub struct BucketedTrainer<R: Runtime<DType = DType>> {
     inner: SimpleTrainer<R>,
     bucket_manager: GradientBucketManager<R>,
     comm: Arc<dyn Communicator>,

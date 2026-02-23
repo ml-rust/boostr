@@ -26,6 +26,49 @@ pub trait Module<R: Runtime> {
     }
 }
 
+/// Training/eval mode switching for modules with mode-dependent behavior.
+///
+/// Modules like Dropout and BatchNorm behave differently during training
+/// vs inference. This trait provides a unified interface for toggling mode.
+///
+/// Modules without mode-dependent behavior (Linear, LayerNorm, RMSNorm, etc.)
+/// do NOT need to implement this trait.
+///
+/// # Recursive mode setting
+///
+/// Container modules (e.g., a full transformer) should propagate `set_training`
+/// to all child modules that implement `TrainMode`:
+///
+/// ```ignore
+/// impl TrainMode for MyModel {
+///     fn set_training(&mut self, training: bool) {
+///         self.dropout1.set_training(training);
+///         self.dropout2.set_training(training);
+///     }
+///     fn is_training(&self) -> bool {
+///         self.dropout1.is_training()
+///     }
+/// }
+/// ```
+pub trait TrainMode {
+    /// Set training mode. When `true`, stochastic layers (dropout, batch norm)
+    /// are active. When `false`, they behave deterministically.
+    fn set_training(&mut self, training: bool);
+
+    /// Returns `true` if the module is in training mode.
+    fn is_training(&self) -> bool;
+
+    /// Convenience: set to training mode.
+    fn train(&mut self) {
+        self.set_training(true);
+    }
+
+    /// Convenience: set to eval mode.
+    fn eval(&mut self) {
+        self.set_training(false);
+    }
+}
+
 /// State dict serialization for model checkpointing.
 ///
 /// Compatible with SafeTensors format via `boostr::format::safetensors`.

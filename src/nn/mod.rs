@@ -1,5 +1,6 @@
 pub mod activation;
 pub mod conv1d;
+pub mod dropout;
 pub mod embedding;
 pub mod layernorm;
 pub mod linear;
@@ -15,12 +16,16 @@ pub mod weight;
 
 pub use activation::Activation;
 pub use conv1d::Conv1d;
+pub use dropout::Dropout;
 pub use embedding::Embedding;
 pub use layernorm::LayerNorm;
 pub use linear::{Linear, QuantLinear};
-pub use loss::{cross_entropy_loss, mse_loss};
+pub use loss::{
+    contrastive_loss, cross_entropy_loss, cross_entropy_loss_smooth, focal_loss, kl_div_loss,
+    mse_loss,
+};
 pub use mla::{Mla, MlaConfig};
-pub use module::{Module, StateDict};
+pub use module::{Module, StateDict, TrainMode};
 pub use moe::{
     Expert, MoeLayer, MoeLayerConfig, MoeOutput, MoeRouter, MoeRouterConfig, RouterOutput,
 };

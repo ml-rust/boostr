@@ -2,6 +2,7 @@ pub mod activation;
 pub mod conv1d;
 pub mod dropout;
 pub mod embedding;
+pub mod groupnorm;
 pub mod layernorm;
 pub mod linear;
 pub mod loss;
@@ -18,6 +19,7 @@ pub use activation::Activation;
 pub use conv1d::Conv1d;
 pub use dropout::Dropout;
 pub use embedding::Embedding;
+pub use groupnorm::GroupNorm;
 pub use layernorm::LayerNorm;
 pub use linear::{Linear, QuantLinear};
 pub use loss::{

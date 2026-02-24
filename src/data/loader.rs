@@ -207,10 +207,7 @@ impl Iterator for PrefetchIter {
     type Item = Result<Batch<CpuRuntime>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.receiver.recv() {
-            Ok(result) => Some(result),
-            Err(_) => None, // Channel closed, epoch is done
-        }
+        self.receiver.recv().ok()
     }
 }
 

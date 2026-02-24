@@ -10,6 +10,12 @@ use numr::tensor::Tensor;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Type alias for reconstructed checkpoint state (model tensors, optional optimizer tensors).
+type ReconstructedState = (
+    HashMap<String, Tensor<CpuRuntime>>,
+    Option<HashMap<String, Tensor<CpuRuntime>>>,
+);
+
 /// Snapshot of tensor data for async writing.
 /// Stores raw bytes + shape + dtype so we can reconstruct CPU tensors in the background thread.
 struct TensorSnapshot {
@@ -89,12 +95,7 @@ impl StateSnapshots {
     }
 
     /// Reconstruct CPU tensors from snapshots and return them with the training state.
-    fn reconstruct(
-        &self,
-    ) -> Result<(
-        HashMap<String, Tensor<CpuRuntime>>,
-        Option<HashMap<String, Tensor<CpuRuntime>>>,
-    )> {
+    fn reconstruct(&self) -> Result<ReconstructedState> {
         let model_cpu = reconstruct_state(&self.model)?;
         let opt_cpu = match &self.optimizer {
             Some(snap) => Some(reconstruct_state(snap)?),

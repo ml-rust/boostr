@@ -1,7 +1,5 @@
 //! Shared test utilities for trainer tests.
 
-#![cfg(test)]
-
 use crate::trainer::checkpoint::{CHECKPOINT_VERSION, TrainingState};
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;

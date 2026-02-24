@@ -13,7 +13,7 @@ use crate::model::config::ModelConfig;
 use crate::model::traits::ModelClient;
 use crate::nn::{RmsNorm, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
-use crate::ops::impl_generic::rope::apply_rope_impl;
+use crate::ops::impl_generic::attention::rope::apply_rope_impl;
 use numr::autograd::{Var, var_add, var_mul, var_reshape, var_silu};
 use numr::dtype::DType;
 use numr::ops::{

@@ -12,8 +12,8 @@
 use crate::error::{Error, Result};
 use crate::nn::{Linear, RmsNorm, RoPE, VarBuilder};
 use crate::ops::RoPEOps;
-use crate::ops::impl_generic::mla::scaled_dot_product_attention_impl;
-use crate::ops::impl_generic::rope::apply_rope_impl;
+use crate::ops::impl_generic::attention::mla::scaled_dot_product_attention_impl;
+use crate::ops::impl_generic::attention::rope::apply_rope_impl;
 use numr::autograd::{Var, var_broadcast_to, var_cat, var_narrow, var_permute, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{NormalizationOps, ReduceOps, ScalarOps, ShapeOps, TensorOps};

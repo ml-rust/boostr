@@ -1,7 +1,7 @@
 //! Flash Attention v3 (Hopper/H100) CUDA launchers
 //!
 //! Warp-specialized forward and backward kernels for SM 90+ GPUs.
-//! Called from the main attention.rs when Hopper is detected.
+//! Called from the main flash.rs when Hopper is detected.
 //! Supports: F32, F16, BF16, FP8E4M3 with head dims 64 and 128.
 
 use crate::error::{Error, Result};
@@ -13,7 +13,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::attention::set_smem_attribute;
+use super::flash::set_smem_attribute;
 use super::kernels::{self, FLASH_V3_BWD_MODULE, FLASH_V3_MODULE};
 
 use std::sync::OnceLock;

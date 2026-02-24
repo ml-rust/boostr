@@ -1,7 +1,7 @@
 //! CPU implementation of MlaOps — delegates to impl_generic
 
 use crate::error::Result;
-use crate::ops::impl_generic::mla::scaled_dot_product_attention_impl;
+use crate::ops::impl_generic::attention::mla::scaled_dot_product_attention_impl;
 use crate::ops::traits::MlaOps;
 use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};

@@ -4,7 +4,7 @@
 //! Kernels: kv_cache_fp8.cu, kv_cache_int4.cu, kv_cache_quant.cu, kv_cache_fp8_bwd.cu
 
 use crate::error::{Error, Result};
-use crate::ops::traits::kv_cache_quant::{Int4GroupSize, KvCacheQuantOps};
+use crate::ops::traits::cache::kv_cache_quant::{Int4GroupSize, KvCacheQuantOps};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;

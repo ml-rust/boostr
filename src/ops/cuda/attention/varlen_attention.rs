@@ -12,7 +12,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::attention::set_smem_attribute;
+use super::flash::set_smem_attribute;
 use super::kernels::{self, VARLEN_ATTENTION_BWD_MODULE, VARLEN_ATTENTION_MODULE};
 
 impl VarLenAttentionOps<CudaRuntime> for CudaClient {

@@ -3,7 +3,7 @@
 //! Provides correct (but not optimized) implementations for testing.
 
 use crate::error::Result;
-use crate::ops::traits::kv_cache_quant::{Int4GroupSize, KvCacheQuantOps};
+use crate::ops::traits::cache::kv_cache_quant::{Int4GroupSize, KvCacheQuantOps};
 use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;

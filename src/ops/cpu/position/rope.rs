@@ -1,7 +1,7 @@
 //! CPU implementation of RoPEOps — delegates to impl_generic
 
 use crate::error::Result;
-use crate::ops::impl_generic::rope::apply_rope_impl;
+use crate::ops::impl_generic::attention::rope::apply_rope_impl;
 use crate::ops::traits::RoPEOps;
 use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};

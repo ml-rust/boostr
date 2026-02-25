@@ -136,6 +136,20 @@ fn compile_cuda_kernels() {
             "sm_75",
             true,
         ),
+        // RoPE position embedding
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "rope.cu",
+            "sm_75",
+            true,
+        ),
+        // SDPA (scaled dot-product attention for MLA)
+        (
+            PathBuf::from("src/ops/cuda/kernels"),
+            "sdpa.cu",
+            "sm_75",
+            true,
+        ),
         // Flash v3 — sm_90 (Hopper warp specialization, optional)
         (
             PathBuf::from("src/ops/cuda/kernels"),
@@ -148,6 +162,31 @@ fn compile_cuda_kernels() {
             "flash_v3_bwd.cu",
             "sm_90",
             false,
+        ),
+        // Fused optimizer kernels
+        (
+            PathBuf::from("src/ops/cuda/kernels/training"),
+            "fused_adamw.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/training"),
+            "fused_sgd.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/training"),
+            "fused_adagrad.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/training"),
+            "fused_lamb.cu",
+            "sm_75",
+            true,
         ),
     ];
 

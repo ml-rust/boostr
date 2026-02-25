@@ -35,6 +35,12 @@ pub const KV_CACHE_FP8_MODULE: &str = "kv_cache_fp8";
 pub const KV_CACHE_FP8_BWD_MODULE: &str = "kv_cache_fp8_bwd";
 pub const KV_CACHE_QUANT_MODULE: &str = "kv_cache_quant";
 pub const RESHAPE_AND_CACHE_MODULE: &str = "reshape_and_cache";
+pub const FUSED_ADAMW_MODULE: &str = "fused_adamw";
+pub const FUSED_SGD_MODULE: &str = "fused_sgd";
+pub const FUSED_ADAGRAD_MODULE: &str = "fused_adagrad";
+pub const FUSED_LAMB_MODULE: &str = "fused_lamb";
+pub const ROPE_MODULE: &str = "rope";
+pub const SDPA_MODULE: &str = "sdpa";
 
 /// Cache for loaded CUDA modules, keyed by (device_index, module_name)
 static MODULE_CACHE: OnceLock<Mutex<HashMap<(usize, &'static str), Arc<CudaModule>>>> =

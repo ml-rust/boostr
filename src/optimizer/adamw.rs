@@ -4,6 +4,7 @@
 //! Uses numr tensor ops directly — works on any backend without GPU↔CPU transfers.
 
 use crate::error::Result;
+use crate::ops::FusedOptimizerOps;
 use crate::optimizer::traits::Optimizer;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
@@ -75,7 +76,12 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
         grads: &GradStore<R>,
     ) -> Result<()>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>,
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + FusedOptimizerOps<R>,
     {
         self.timestep += 1;
         let t = self.timestep;
@@ -105,42 +111,17 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
 
             // Lazy init state
             self.state.entry(id).or_insert_with(|| {
-                let m = Tensor::<R>::zeros(param.shape(), DType::F32, param.device());
-                let v = Tensor::<R>::zeros(param.shape(), DType::F32, param.device());
+                let m = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
+                let v = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
                 ParamState { m, v }
             });
 
             let state = self.state.get(&id).expect("just initialized above");
 
-            // m = beta1 * m + (1 - beta1) * grad
-            let m_scaled = client.mul_scalar(&state.m, beta1)?;
-            let g_scaled = client.mul_scalar(grad, 1.0 - beta1)?;
-            let new_m = client.add(&m_scaled, &g_scaled)?;
+            let (new_param, new_m, new_v) = client.fused_adamw_step(
+                param, grad, &state.m, &state.v, lr, beta1, beta2, eps, wd, step_size,
+            )?;
 
-            // v = beta2 * v + (1 - beta2) * grad^2
-            let v_scaled = client.mul_scalar(&state.v, beta2)?;
-            let g_sq = client.mul(grad, grad)?;
-            let g_sq_scaled = client.mul_scalar(&g_sq, 1.0 - beta2)?;
-            let new_v = client.add(&v_scaled, &g_sq_scaled)?;
-
-            // update = step_size * m / (sqrt(v) + eps)
-            let v_sqrt = client.sqrt(&new_v)?;
-            let v_sqrt_eps = client.add_scalar(&v_sqrt, eps)?;
-            let update = client.div(&new_m, &v_sqrt_eps)?;
-            let update_scaled = client.mul_scalar(&update, step_size)?;
-
-            // Decoupled weight decay: param = param - lr * wd * param
-            let decayed = if wd > 0.0 {
-                let decay_term = client.mul_scalar(param, lr * wd)?;
-                client.sub(param, &decay_term)?
-            } else {
-                param.clone()
-            };
-
-            // param = decayed - update
-            let new_param = client.sub(&decayed, &update_scaled)?;
-
-            // Store updated state and param
             let state_mut = self.state.get_mut(&id).expect("just initialized above");
             state_mut.m = new_m;
             state_mut.v = new_v;
@@ -176,7 +157,12 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for AdamW<R> {
         grads: &GradStore<R>,
     ) -> Result<()>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>,
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + FusedOptimizerOps<R>,
     {
         AdamW::step(self, client, params, grads)
     }

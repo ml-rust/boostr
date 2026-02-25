@@ -12,6 +12,8 @@ use crate::optimizer::{AdamW, AdamWConfig};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ScalarOps, UnaryOps};
+
+use crate::ops::FusedOptimizerOps;
 use numr::runtime::{Communicator, Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
@@ -191,7 +193,7 @@ impl<R: Runtime<DType = DType>> ZeroOptimizerBase<R> {
         grads: &GradStore<R>,
     ) -> Result<()>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R>,
+        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + FusedOptimizerOps<R>,
     {
         let mut owned_map = self.extract_owned_params(params);
         self.optimizer.step(client, &mut owned_map, grads)?;

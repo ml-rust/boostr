@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::distributed::grad_sync::{all_reduce_grads, broadcast_params};
 use crate::error::Result;
+use crate::ops::FusedOptimizerOps;
 use crate::trainer::SimpleTrainer;
 use crate::trainer::config::{TrainingConfig, TrainingMetrics};
 use numr::autograd::GradStore;
@@ -76,7 +77,12 @@ impl<R: Runtime<DType = DType>> DistributedTrainer<R> {
         loss_value: f64,
     ) -> Result<Option<TrainingMetrics>>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>,
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + FusedOptimizerOps<R>,
     {
         // We need to intercept the gradient accumulation to insert all_reduce.
         // Since SimpleTrainer handles accumulation + clipping + optimizer internally,

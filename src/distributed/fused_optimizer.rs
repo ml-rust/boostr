@@ -13,6 +13,8 @@ use crate::optimizer::adamw::{AdamW, AdamWConfig};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ScalarOps, UnaryOps};
+
+use crate::ops::FusedOptimizerOps;
 use numr::runtime::{Communicator, ReduceOp, Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
@@ -76,7 +78,7 @@ impl<R: Runtime<DType = DType>> FusedDistributedOptimizer<R> {
         grads: &mut GradStore<R>,
     ) -> Result<()>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R>,
+        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + FusedOptimizerOps<R>,
     {
         let world_size = self.comm.world_size();
 

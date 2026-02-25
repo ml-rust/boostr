@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::distributed::bucket_manager::GradientBucketManager;
 use crate::distributed::grad_sync::broadcast_params;
 use crate::error::Result;
+use crate::ops::FusedOptimizerOps;
 use crate::trainer::SimpleTrainer;
 use crate::trainer::config::{TrainingConfig, TrainingMetrics};
 use numr::autograd::{BackwardHook, Var, backward_with_hooks};
@@ -113,7 +114,8 @@ impl<R: Runtime<DType = DType>> BucketedTrainer<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + ScalarOps<R>
-            + ReduceOps<R>,
+            + ReduceOps<R>
+            + FusedOptimizerOps<R>,
     {
         // Extract loss value before backward
         let loss_value =

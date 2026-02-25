@@ -8,6 +8,7 @@
 //! by setting `use_adam = false`, which uses SGD-style momentum instead of Adam moments.
 
 use crate::error::Result;
+use crate::ops::FusedOptimizerOps;
 use crate::optimizer::traits::Optimizer;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
@@ -114,7 +115,12 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
         grads: &GradStore<R>,
     ) -> Result<()>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>,
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + FusedOptimizerOps<R>,
     {
         self.timestep += 1;
         let t = self.timestep;
@@ -143,51 +149,19 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
 
             // Lazy init
             self.state.entry(id).or_insert_with(|| {
-                let m = Tensor::<R>::zeros(param.shape(), DType::F32, param.device());
-                let v = Tensor::<R>::zeros(param.shape(), DType::F32, param.device());
+                let m = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
+                let v = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
                 LambState { m, v }
             });
 
             let state = self.state.get(&id).unwrap();
 
-            // Update moments
-            // m = beta1 * m + (1 - beta1) * grad
-            let m_scaled = client.mul_scalar(&state.m, beta1)?;
-            let g_scaled = client.mul_scalar(grad, 1.0 - beta1)?;
-            let new_m = client.add(&m_scaled, &g_scaled)?;
+            // Fused kernel computes: update vector + updated m, v
+            let (update, new_m, new_v) = client.fused_lamb_step(
+                param, grad, &state.m, &state.v, beta1, beta2, eps, wd, bc1, bc2,
+            )?;
 
-            let new_v = if self.config.use_adam {
-                // v = beta2 * v + (1 - beta2) * grad^2
-                let v_scaled = client.mul_scalar(&state.v, beta2)?;
-                let g_sq = client.mul(grad, grad)?;
-                let g_sq_scaled = client.mul_scalar(&g_sq, 1.0 - beta2)?;
-                client.add(&v_scaled, &g_sq_scaled)?
-            } else {
-                state.v.clone()
-            };
-
-            // Bias-corrected estimates
-            let m_hat = client.mul_scalar(&new_m, 1.0 / bc1)?;
-
-            // Compute raw update
-            let update = if self.config.use_adam {
-                let v_hat = client.mul_scalar(&new_v, 1.0 / bc2)?;
-                let v_sqrt = client.sqrt(&v_hat)?;
-                let denom = client.add_scalar(&v_sqrt, eps)?;
-                client.div(&m_hat, &denom)?
-            } else {
-                m_hat
-            };
-
-            // Add weight decay to update: update = update + wd * param
-            let update = if wd > 0.0 {
-                let decay_term = client.mul_scalar(param, wd)?;
-                client.add(&update, &decay_term)?
-            } else {
-                update
-            };
-
-            // Compute trust ratio: phi(||param||) / ||update||
+            // Trust ratio requires global reductions (can't fuse into per-element kernel)
             let param_norm = tensor_l2_norm(client, param)?;
             let update_norm = tensor_l2_norm(client, &update)?;
 

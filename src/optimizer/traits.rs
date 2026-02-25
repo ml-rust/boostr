@@ -3,6 +3,7 @@
 //! Defines a common interface for all optimizers so trainers can be optimizer-agnostic.
 
 use crate::error::Result;
+use crate::ops::FusedOptimizerOps;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
@@ -26,7 +27,12 @@ pub trait Optimizer<R: Runtime<DType = DType>> {
         grads: &GradStore<R>,
     ) -> Result<()>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>;
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + FusedOptimizerOps<R>;
 
     /// Set the learning rate.
     fn set_lr(&mut self, lr: f64);

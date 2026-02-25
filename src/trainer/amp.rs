@@ -12,6 +12,8 @@ use crate::trainer::simple::SimpleTrainer;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps};
+
+use crate::ops::FusedOptimizerOps;
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
@@ -134,6 +136,7 @@ impl<R: Runtime<DType = DType>> AmpTrainer<R> {
             + UnaryOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
+            + FusedOptimizerOps<R>
             + TypeConversionOps<R>,
     {
         // Step 1: If FP16 with grad scaler, unscale and check for overflow

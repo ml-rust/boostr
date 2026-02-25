@@ -5,6 +5,7 @@
 //! for sparse gradients (e.g., embedding layers).
 
 use crate::error::Result;
+use crate::ops::FusedOptimizerOps;
 use crate::optimizer::traits::Optimizer;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
@@ -69,7 +70,12 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for AdaGrad<R> {
         grads: &GradStore<R>,
     ) -> Result<()>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>,
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + FusedOptimizerOps<R>,
     {
         let lr = self.config.lr;
         let eps = self.config.eps;
@@ -86,20 +92,12 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for AdaGrad<R> {
 
             let param = params.get(&id).expect("id collected from params.keys()");
 
-            // L2 weight decay
-            let grad = if wd > 0.0 {
-                let decay_term = client.mul_scalar(param, wd)?;
-                client.add(grad, &decay_term)?
-            } else {
-                grad.clone()
-            };
-
             // Lazy init accumulator
             if let std::collections::hash_map::Entry::Vacant(e) = self.accumulators.entry(id) {
                 let acc = if init_val == 0.0 {
-                    Tensor::<R>::zeros(param.shape(), DType::F32, param.device())
+                    Tensor::<R>::zeros(param.shape(), param.dtype(), param.device())
                 } else {
-                    let z = Tensor::<R>::zeros(param.shape(), DType::F32, param.device());
+                    let z = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
                     client.add_scalar(&z, init_val)?
                 };
                 e.insert(acc);
@@ -110,16 +108,7 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for AdaGrad<R> {
                 .get(&id)
                 .expect("accumulator just initialized");
 
-            // accum = accum + grad^2
-            let grad_sq = client.mul(&grad, &grad)?;
-            let new_acc = client.add(acc, &grad_sq)?;
-
-            // param = param - lr * grad / (sqrt(accum) + eps)
-            let acc_sqrt = client.sqrt(&new_acc)?;
-            let denom = client.add_scalar(&acc_sqrt, eps)?;
-            let update = client.div(&grad, &denom)?;
-            let scaled = client.mul_scalar(&update, lr)?;
-            let new_param = client.sub(param, &scaled)?;
+            let (new_param, new_acc) = client.fused_adagrad_step(param, grad, acc, lr, eps, wd)?;
 
             self.accumulators.insert(id, new_acc);
             params.insert(id, new_param);

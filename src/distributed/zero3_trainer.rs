@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::distributed::zero_trainer_base::{ZeroTrainerBase, adamw_config_from_training};
 use crate::distributed::zero3::ZeroStage3;
 use crate::error::Result;
+use crate::ops::FusedOptimizerOps;
 use crate::trainer::config::{TrainingConfig, TrainingMetrics};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
@@ -77,7 +78,12 @@ impl<R: Runtime<DType = DType>> Zero3Trainer<R> {
         loss_value: f64,
     ) -> Result<Option<TrainingMetrics>>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>,
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + FusedOptimizerOps<R>,
     {
         let mut averaged_grads = match self.base.prepare_step(client, grads, loss_value)? {
             Some(g) => g,

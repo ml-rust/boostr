@@ -15,7 +15,9 @@ use crate::error::Result;
 use crate::optimizer::AdamWConfig;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ScalarOps, UnaryOps};
+use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
+
+use crate::ops::FusedOptimizerOps;
 use numr::runtime::{Communicator, Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
@@ -54,7 +56,12 @@ impl<R: Runtime<DType = DType>> ZeroStage2<R> {
         grads: &mut GradStore<R>,
     ) -> Result<()>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R>,
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + FusedOptimizerOps<R>,
     {
         if self.base.world_size <= 1 {
             return self.base.optimizer.step(client, params, grads);

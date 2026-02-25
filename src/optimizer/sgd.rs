@@ -4,6 +4,7 @@
 //! Follows PyTorch's SGD semantics with Nesterov momentum support.
 
 use crate::error::Result;
+use crate::ops::FusedOptimizerOps;
 use crate::optimizer::traits::Optimizer;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
@@ -71,7 +72,12 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Sgd<R> {
         grads: &GradStore<R>,
     ) -> Result<()>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>,
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + FusedOptimizerOps<R>,
     {
         let lr = self.config.lr;
         let momentum = self.config.momentum;
@@ -89,43 +95,22 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Sgd<R> {
 
             let param = params.get(&id).expect("id collected from params.keys()");
 
-            // L2 weight decay: grad = grad + weight_decay * param
-            let grad = if wd > 0.0 {
-                let decay_term = client.mul_scalar(param, wd)?;
-                client.add(grad, &decay_term)?
-            } else {
-                grad.clone()
-            };
+            let momentum_buf = self.velocity.get(&id);
 
-            let update = if momentum > 0.0 {
-                let has_buf = self.velocity.contains_key(&id);
-                let buf = if has_buf {
-                    // buf = momentum * buf + (1 - dampening) * grad
-                    let prev = self.velocity.get(&id).unwrap();
-                    let scaled_buf = client.mul_scalar(prev, momentum)?;
-                    let scaled_grad = client.mul_scalar(&grad, 1.0 - dampening)?;
-                    client.add(&scaled_buf, &scaled_grad)?
-                } else {
-                    // First step: buf = grad (no dampening on first step, matching PyTorch)
-                    grad.clone()
-                };
+            let (new_param, new_buf) = client.fused_sgd_step(
+                param,
+                grad,
+                momentum_buf,
+                lr,
+                momentum,
+                dampening,
+                wd,
+                nesterov,
+            )?;
 
-                self.velocity.insert(id, buf.clone());
-
-                if nesterov {
-                    // update = grad + momentum * buf
-                    let m_buf = client.mul_scalar(&buf, momentum)?;
-                    client.add(&grad, &m_buf)?
-                } else {
-                    buf
-                }
-            } else {
-                grad
-            };
-
-            // param = param - lr * update
-            let scaled_update = client.mul_scalar(&update, lr)?;
-            let new_param = client.sub(param, &scaled_update)?;
+            if momentum > 0.0 {
+                self.velocity.insert(id, new_buf);
+            }
             params.insert(id, new_param);
         }
 

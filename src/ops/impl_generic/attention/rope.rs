@@ -93,10 +93,10 @@ where
     let x2_sin = var_mul(&x2, &sin_reshaped, client).map_err(Error::Numr)?;
     let out1 = var_sub(&x1_cos, &x2_sin, client).map_err(Error::Numr)?;
 
-    // out2 = x2 * cos + x1 * sin
-    let x2_cos = var_mul(&x2, &cos_reshaped, client).map_err(Error::Numr)?;
+    // out2 = x1 * sin + x2 * cos
     let x1_sin = var_mul(&x1, &sin_reshaped, client).map_err(Error::Numr)?;
-    let out2 = var_add(&x2_cos, &x1_sin, client).map_err(Error::Numr)?;
+    let x2_cos = var_mul(&x2, &cos_reshaped, client).map_err(Error::Numr)?;
+    let out2 = var_add(&x1_sin, &x2_cos, client).map_err(Error::Numr)?;
 
     // Concatenate back: [out1, out2] along last dim
     var_cat(&[&out1, &out2], -1, client).map_err(Error::Numr)

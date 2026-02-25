@@ -14,7 +14,7 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::flash::set_smem_attribute;
-use super::kernels::{self, MQA_GQA_BWD_MODULE, MQA_GQA_MODULE};
+use crate::ops::cuda::kernels::{self, MQA_GQA_BWD_MODULE, MQA_GQA_MODULE};
 
 /// Block configuration for MQA/GQA kernels (head dims 32/64/128 only).
 fn mqa_block_config(head_dim: usize) -> Result<(usize, usize)> {

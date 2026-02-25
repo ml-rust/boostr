@@ -14,7 +14,7 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::flash::set_smem_attribute;
-use super::kernels::{self, FLASH_V3_BWD_MODULE, FLASH_V3_MODULE};
+use crate::ops::cuda::kernels::{self, FLASH_V3_BWD_MODULE, FLASH_V3_MODULE};
 
 use std::sync::OnceLock;
 

@@ -9,7 +9,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::kernels::{self, ALIBI_MODULE};
+use crate::ops::cuda::kernels::{self, ALIBI_MODULE};
 
 impl AlibiOps<CudaRuntime> for CudaClient {
     fn alibi_add_bias(

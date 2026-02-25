@@ -9,7 +9,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::kernels::{self, KV_CACHE_UPDATE_MODULE, RESHAPE_AND_CACHE_MODULE};
+use crate::ops::cuda::kernels::{self, KV_CACHE_UPDATE_MODULE, RESHAPE_AND_CACHE_MODULE};
 
 impl KvCacheOps<CudaRuntime> for CudaClient {
     fn kv_cache_update(

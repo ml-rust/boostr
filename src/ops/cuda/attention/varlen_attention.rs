@@ -13,7 +13,7 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::flash::set_smem_attribute;
-use super::kernels::{self, VARLEN_ATTENTION_BWD_MODULE, VARLEN_ATTENTION_MODULE};
+use crate::ops::cuda::kernels::{self, VARLEN_ATTENTION_BWD_MODULE, VARLEN_ATTENTION_MODULE};
 
 impl VarLenAttentionOps<CudaRuntime> for CudaClient {
     fn varlen_attention_fwd(
@@ -64,7 +64,9 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
 
         const BLOCK_M: usize = 128;
         const BLOCK_N: usize = 64;
-        let num_q_blocks = (total_tokens_q + BLOCK_M - 1) / BLOCK_M;
+        // Grid must cover all batches × heads × Q blocks per batch
+        let num_q_blocks_per_batch = (max_seqlen_q + BLOCK_M - 1) / BLOCK_M;
+        let num_q_blocks = num_q_blocks_per_batch * batch_size;
 
         let dtype_size = dtype.size_in_bytes();
         let smem_size = (BLOCK_M * head_dim + BLOCK_N * head_dim + BLOCK_N * head_dim) * dtype_size;
@@ -109,6 +111,12 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
                 reason: format!("varlen attention fwd launch failed: {e:?}"),
             })?;
         }
+
+        self.stream()
+            .synchronize()
+            .map_err(|e| Error::KernelError {
+                reason: format!("varlen attention fwd sync failed: {e:?}"),
+            })?;
 
         Ok((output, lse))
     }
@@ -171,7 +179,8 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
 
         const BLOCK_M: usize = 128;
         const BLOCK_N: usize = 64;
-        let num_q_blocks = (total_tokens_q + BLOCK_M - 1) / BLOCK_M;
+        let num_q_blocks_per_batch = (max_seqlen_q + BLOCK_M - 1) / BLOCK_M;
+        let num_q_blocks = num_q_blocks_per_batch * batch_size;
 
         // Shared memory: Q + K + V + dO (BLOCK_M*HD + 2*BLOCK_N*HD + BLOCK_M*HD) + row_sum
         let dtype_size = dtype.size_in_bytes();
@@ -225,6 +234,13 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
                 reason: format!("varlen attention bwd launch failed: {e:?}"),
             })?;
         }
+
+        // Sync stream: BWD uses atomicAdd so must complete before results are read
+        self.stream()
+            .synchronize()
+            .map_err(|e| Error::KernelError {
+                reason: format!("varlen attention bwd sync failed: {e:?}"),
+            })?;
 
         Ok((dq, dk, dv))
     }

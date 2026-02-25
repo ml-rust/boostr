@@ -15,7 +15,7 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::flash_v3;
-use super::kernels::{self, FLASH_V2_BWD_MODULE, FLASH_V2_MODULE};
+use crate::ops::cuda::kernels::{self, FLASH_V2_BWD_MODULE, FLASH_V2_MODULE};
 
 /// Validated attention parameters extracted from tensor shapes.
 struct AttentionParams {
@@ -332,6 +332,12 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                 reason: format!("Flash Attention fwd kernel launch failed: {:?}", e),
             })?;
         }
+
+        self.stream()
+            .synchronize()
+            .map_err(|e| Error::KernelError {
+                reason: format!("Flash Attention fwd sync failed: {:?}", e),
+            })?;
 
         Ok((output, lse))
     }
@@ -666,6 +672,13 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                 })?;
             }
         }
+
+        // Sync stream: BWD uses atomicAdd so must complete before results are read
+        self.stream()
+            .synchronize()
+            .map_err(|e| Error::KernelError {
+                reason: format!("Flash Attention bwd sync failed: {:?}", e),
+            })?;
 
         Ok((dq, dk, dv))
     }

@@ -12,7 +12,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::kernels::{self, PAGED_ATTENTION_BWD_MODULE, PAGED_ATTENTION_MODULE};
+use crate::ops::cuda::kernels::{self, PAGED_ATTENTION_BWD_MODULE, PAGED_ATTENTION_MODULE};
 
 /// Get block sizes for paged attention forward.
 /// Uses smaller blocks that fit in 48KB shared memory.

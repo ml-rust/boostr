@@ -7,12 +7,15 @@ use crate::error::{Error, Result};
 use crate::ops::traits::cache::kv_cache_quant::{Int4GroupSize, KvCacheQuantOps};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
+use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::kernels::{self, KV_CACHE_FP8_MODULE, KV_CACHE_INT4_MODULE, KV_CACHE_QUANT_MODULE};
+use crate::ops::cuda::kernels::{
+    self, KV_CACHE_FP8_MODULE, KV_CACHE_INT4_MODULE, KV_CACHE_QUANT_MODULE,
+};
 
 impl KvCacheQuantOps<CudaRuntime> for CudaClient {
     fn quantize_kv_fp8_per_token(
@@ -21,7 +24,17 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         num_tokens: usize,
         head_dim: usize,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
-        let dtype = input.dtype();
+        let input_to_use = if input.dtype() == DType::F32 {
+            // Cast F32 to F16 if needed (CUDA FP8 kernel only supports F16/BF16 input)
+            let vars = Var::new(input.clone(), false);
+            let cast_var =
+                numr::autograd::var_cast(&vars, DType::F16, self).map_err(|e| Error::Numr(e))?;
+            cast_var.tensor().clone()
+        } else {
+            input.clone()
+        };
+
+        let dtype = input_to_use.dtype();
         let kernel_name = match dtype {
             DType::F16 => "quantize_kv_fp8_per_token_fp16",
             DType::BF16 => "quantize_kv_fp8_per_token_bf16",
@@ -49,7 +62,7 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         };
 
         let q_ptr = quantized.ptr();
-        let i_ptr = input.ptr();
+        let i_ptr = input_to_use.ptr();
         let s_ptr = scales.ptr();
         let batch_i32 = 1i32; // Flattened as [num_tokens, head_dim]
         let nkh_i32 = 1i32;
@@ -81,12 +94,18 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         head_dim: usize,
         output_dtype: DType,
     ) -> Result<Tensor<CudaRuntime>> {
-        let kernel_name = match output_dtype {
+        // CUDA kernels only support F16/BF16 output; cast F32 to F16 then back
+        let target_dtype = match output_dtype {
+            DType::F32 => DType::F16, // We'll cast back to F32 later
+            other => other,
+        };
+
+        let kernel_name = match target_dtype {
             DType::F16 => "dequantize_kv_fp8_per_token_fp16",
             DType::BF16 => "dequantize_kv_fp8_per_token_bf16",
             _ => {
                 return Err(Error::KernelError {
-                    reason: format!("FP8 dequant: unsupported output dtype {output_dtype:?}"),
+                    reason: format!("FP8 dequant: unsupported output dtype {target_dtype:?}"),
                 });
             }
         };
@@ -97,7 +116,7 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
             kernels::get_or_load_module(self.context(), device_index, KV_CACHE_FP8_MODULE)?;
         let func = kernels::get_kernel_function(&module, kernel_name)?;
 
-        let output = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], output_dtype, device);
+        let output = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], target_dtype, device);
 
         let cfg = LaunchConfig {
             grid_dim: (num_tokens as u32, 1, 1),
@@ -127,7 +146,15 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
             })?;
         }
 
-        Ok(output)
+        // Cast F16 back to F32 if needed
+        if output_dtype == DType::F32 && target_dtype == DType::F16 {
+            let output_var = Var::new(output, false);
+            let cast_var = numr::autograd::var_cast(&output_var, DType::F32, self)
+                .map_err(|e| Error::Numr(e))?;
+            Ok(cast_var.tensor().clone())
+        } else {
+            Ok(output)
+        }
     }
 
     fn quantize_kv_int4(
@@ -237,9 +264,9 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         unsafe {
             let mut builder = self.stream().launch_builder(&func);
             builder.arg(&p_ptr);
-            builder.arg(&o_ptr);
             builder.arg(&s_ptr);
             builder.arg(&z_ptr);
+            builder.arg(&o_ptr);
             builder.arg(&nt_i32);
             builder.arg(&hd_i32);
             builder.arg(&gs_i32);

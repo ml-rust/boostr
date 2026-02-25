@@ -96,10 +96,12 @@ __device__ void varlen_flash_attention_bwd_fp32_impl(
 
     const int tid = threadIdx.x;
     const int head_idx = blockIdx.x % num_heads;
-    const int global_q_block = blockIdx.x / num_heads;
+    const int remaining = blockIdx.x / num_heads;
+    const int num_q_blocks_per_batch = (max_seqlen_q + BLOCK_M - 1) / BLOCK_M;
+    const int batch_idx = remaining / num_q_blocks_per_batch;
+    const int q_block_in_batch = remaining % num_q_blocks_per_batch;
 
-    // Find which batch this Q block belongs to
-    const int batch_idx = binary_search_batch_bwd(cu_seqlens_q, global_q_block * BLOCK_M, batch_size);
+    if (batch_idx >= batch_size) return;
 
     // Get sequence boundaries
     const int seq_start_q = cu_seqlens_q[batch_idx];
@@ -111,8 +113,7 @@ __device__ void varlen_flash_attention_bwd_fp32_impl(
     const int seq_len_k = seq_end_k - seq_start_k;
 
     // Local Q block position
-    const int local_q_block = global_q_block * BLOCK_M - seq_start_q;
-    const int q_start = local_q_block;
+    const int q_start = q_block_in_batch * BLOCK_M;
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_tile_size = q_end - q_start;
 
@@ -321,9 +322,12 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
 
     const int tid = threadIdx.x;
     const int head_idx = blockIdx.x % num_heads;
-    const int global_q_block = blockIdx.x / num_heads;
+    const int remaining = blockIdx.x / num_heads;
+    const int num_q_blocks_per_batch = (max_seqlen_q + BLOCK_M - 1) / BLOCK_M;
+    const int batch_idx = remaining / num_q_blocks_per_batch;
+    const int q_block_in_batch = remaining % num_q_blocks_per_batch;
 
-    const int batch_idx = binary_search_batch_bwd(cu_seqlens_q, global_q_block * BLOCK_M, batch_size);
+    if (batch_idx >= batch_size) return;
 
     const int seq_start_q = cu_seqlens_q[batch_idx];
     const int seq_end_q = cu_seqlens_q[batch_idx + 1];
@@ -333,8 +337,7 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
     const int seq_end_k = cu_seqlens_k[batch_idx + 1];
     const int seq_len_k = seq_end_k - seq_start_k;
 
-    const int local_q_block = global_q_block * BLOCK_M - seq_start_q;
-    const int q_start = local_q_block;
+    const int q_start = q_block_in_batch * BLOCK_M;
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_tile_size = q_end - q_start;
 

@@ -2,6 +2,7 @@ pub mod helpers;
 
 pub mod alibi;
 pub mod attention;
+pub mod fused_fp8;
 pub mod fused_optimizer;
 pub mod fused_qkv;
 pub mod kv_cache;

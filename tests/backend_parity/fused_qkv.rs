@@ -115,6 +115,32 @@ fn test_fused_qkv_projection_gqa_parity() {
             "fused_qkv_proj GQA V: WGPU vs CPU",
         );
     });
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
+        use numr::tensor::Tensor;
+        let input_c = Tensor::from_slice(&input.to_vec::<f32>(), &[b, s, h], &cuda_device);
+        let weight_c = Tensor::from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &cuda_device);
+        let (cuda_q, cuda_k, cuda_v) = cuda_client
+            .fused_qkv_projection(&input_c, &weight_c, None, num_heads, num_kv_heads, head_dim)
+            .unwrap();
+        assert_parity_f32_relaxed(
+            &cuda_q.to_vec::<f32>(),
+            &cpu_q_vec,
+            "fused_qkv_proj GQA Q: CUDA vs CPU",
+        );
+        assert_parity_f32_relaxed(
+            &cuda_k.to_vec::<f32>(),
+            &cpu_k_vec,
+            "fused_qkv_proj GQA K: CUDA vs CPU",
+        );
+        assert_parity_f32_relaxed(
+            &cuda_v.to_vec::<f32>(),
+            &cpu_v_vec,
+            "fused_qkv_proj GQA V: CUDA vs CPU",
+        );
+    });
 }
 
 #[test]
@@ -175,6 +201,40 @@ fn test_fused_qkv_projection_with_bias_parity() {
             "fused_qkv_proj bias V: WGPU vs CPU",
         );
     });
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
+        use numr::tensor::Tensor;
+        let input_c = Tensor::from_slice(&input.to_vec::<f32>(), &[b, s, h], &cuda_device);
+        let weight_c = Tensor::from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &cuda_device);
+        let bias_c = Tensor::from_slice(&bias.to_vec::<f32>(), &[total_proj], &cuda_device);
+        let (cuda_q, cuda_k, cuda_v) = cuda_client
+            .fused_qkv_projection(
+                &input_c,
+                &weight_c,
+                Some(&bias_c),
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            )
+            .unwrap();
+        assert_parity_f32_relaxed(
+            &cuda_q.to_vec::<f32>(),
+            &cpu_q_vec,
+            "fused_qkv_proj bias Q: CUDA vs CPU",
+        );
+        assert_parity_f32_relaxed(
+            &cuda_k.to_vec::<f32>(),
+            &cpu_k_vec,
+            "fused_qkv_proj bias K: CUDA vs CPU",
+        );
+        assert_parity_f32_relaxed(
+            &cuda_v.to_vec::<f32>(),
+            &cpu_v_vec,
+            "fused_qkv_proj bias V: CUDA vs CPU",
+        );
+    });
 }
 
 #[test]
@@ -205,6 +265,23 @@ fn test_fused_output_projection_residual_parity() {
             &wgpu_out.to_vec::<f32>(),
             &cpu_out_vec,
             "fused_output_proj_residual: WGPU vs CPU",
+        );
+    });
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
+        use numr::tensor::Tensor;
+        let attn_c = Tensor::from_slice(&attn_out.to_vec::<f32>(), &[b, s, proj_dim], &cuda_device);
+        let weight_c = Tensor::from_slice(&weight.to_vec::<f32>(), &[h, proj_dim], &cuda_device);
+        let res_c = Tensor::from_slice(&residual.to_vec::<f32>(), &[b, s, h], &cuda_device);
+        let cuda_out = cuda_client
+            .fused_output_projection_residual(&attn_c, &weight_c, None, &res_c)
+            .unwrap();
+        assert_parity_f32_relaxed(
+            &cuda_out.to_vec::<f32>(),
+            &cpu_out_vec,
+            "fused_output_proj_residual: CUDA vs CPU",
         );
     });
 }
@@ -287,6 +364,57 @@ fn test_fused_qkv_projection_bwd_parity() {
             &wgpu_db.as_ref().unwrap().to_vec::<f32>(),
             &cpu_db_vec,
             "fused_qkv_bwd d_bias: WGPU vs CPU",
+        );
+    });
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
+        use numr::tensor::Tensor;
+        let dq_c = Tensor::from_slice(
+            &dq.to_vec::<f32>(),
+            &[b, num_heads, s, head_dim],
+            &cuda_device,
+        );
+        let dk_c = Tensor::from_slice(
+            &dk.to_vec::<f32>(),
+            &[b, num_kv_heads, s, head_dim],
+            &cuda_device,
+        );
+        let dv_c = Tensor::from_slice(
+            &dv.to_vec::<f32>(),
+            &[b, num_kv_heads, s, head_dim],
+            &cuda_device,
+        );
+        let input_c = Tensor::from_slice(&input.to_vec::<f32>(), &[b, s, h], &cuda_device);
+        let weight_c = Tensor::from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &cuda_device);
+        let (cuda_di, cuda_dw, cuda_db) = cuda_client
+            .fused_qkv_projection_bwd(
+                &dq_c,
+                &dk_c,
+                &dv_c,
+                &input_c,
+                &weight_c,
+                true,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            )
+            .unwrap();
+        assert_parity_f32_relaxed(
+            &cuda_di.to_vec::<f32>(),
+            &cpu_di_vec,
+            "fused_qkv_bwd d_input: CUDA vs CPU",
+        );
+        assert_parity_f32_relaxed(
+            &cuda_dw.to_vec::<f32>(),
+            &cpu_dw_vec,
+            "fused_qkv_bwd d_weight: CUDA vs CPU",
+        );
+        assert_parity_f32_relaxed(
+            &cuda_db.as_ref().unwrap().to_vec::<f32>(),
+            &cpu_db_vec,
+            "fused_qkv_bwd d_bias: CUDA vs CPU",
         );
     });
 }

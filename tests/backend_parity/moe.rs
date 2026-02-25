@@ -36,7 +36,7 @@ fn test_moe_top_k_routing_parity() {
             &[num_tokens, num_experts],
             &cuda_device,
         );
-        let (indices_c, weights_c) = cuda_client.moe_top_k_routing(&logits_c, k).unwrap();
+        let (_indices_c, weights_c) = cuda_client.moe_top_k_routing(&logits_c, k).unwrap();
         assert_parity_f32(
             &weights_c.to_vec::<f32>(),
             &cpu_weights_vec,

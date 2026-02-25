@@ -35,133 +35,135 @@ fn compile_cuda_kernels() {
             "sm_75",
             true,
         ),
-        // Attention kernels — sm_75
+        // Attention kernels
         (
-            PathBuf::from("src/ops/cuda/kernels"),
+            PathBuf::from("src/ops/cuda/kernels/attention"),
             "flash_v2.cu",
             "sm_75",
             true,
         ),
         (
-            PathBuf::from("src/ops/cuda/kernels"),
+            PathBuf::from("src/ops/cuda/kernels/attention"),
             "flash_v2_bwd.cu",
             "sm_75",
             true,
         ),
         (
-            PathBuf::from("src/ops/cuda/kernels"),
+            PathBuf::from("src/ops/cuda/kernels/attention"),
             "paged_attention.cu",
             "sm_75",
             true,
         ),
         (
-            PathBuf::from("src/ops/cuda/kernels"),
+            PathBuf::from("src/ops/cuda/kernels/attention"),
             "paged_attention_bwd.cu",
             "sm_75",
             true,
         ),
         (
-            PathBuf::from("src/ops/cuda/kernels"),
-            "kv_cache_update.cu",
-            "sm_75",
-            true,
-        ),
-        (
-            PathBuf::from("src/ops/cuda/kernels"),
+            PathBuf::from("src/ops/cuda/kernels/attention"),
             "varlen_attention.cu",
             "sm_75",
             true,
         ),
         (
-            PathBuf::from("src/ops/cuda/kernels"),
+            PathBuf::from("src/ops/cuda/kernels/attention"),
             "varlen_attention_bwd.cu",
             "sm_75",
             true,
         ),
-        // KV cache quantization kernels
         (
-            PathBuf::from("src/ops/cuda/kernels"),
-            "kv_cache_int4.cu",
-            "sm_75",
-            true,
-        ),
-        (
-            PathBuf::from("src/ops/cuda/kernels"),
-            "kv_cache_fp8.cu",
-            "sm_80",
-            true,
-        ),
-        (
-            PathBuf::from("src/ops/cuda/kernels"),
-            "kv_cache_fp8_bwd.cu",
-            "sm_80",
-            true,
-        ),
-        (
-            PathBuf::from("src/ops/cuda/kernels"),
-            "kv_cache_quant.cu",
-            "sm_80",
-            true,
-        ),
-        // MQA/GQA dedicated kernels
-        (
-            PathBuf::from("src/ops/cuda/kernels"),
+            PathBuf::from("src/ops/cuda/kernels/attention"),
             "mqa_gqa.cu",
             "sm_80",
             true,
         ),
         (
-            PathBuf::from("src/ops/cuda/kernels"),
+            PathBuf::from("src/ops/cuda/kernels/attention"),
             "mqa_gqa_bwd.cu",
             "sm_75",
             true,
         ),
-        // Reshape and cache (paged KV)
         (
-            PathBuf::from("src/ops/cuda/kernels"),
-            "reshape_and_cache.cu",
-            "sm_75",
-            true,
-        ),
-        // ALiBi attention
-        (
-            PathBuf::from("src/ops/cuda/kernels"),
-            "alibi.cu",
-            "sm_80",
-            true,
-        ),
-        (
-            PathBuf::from("src/ops/cuda/kernels"),
-            "alibi_bwd.cu",
-            "sm_75",
-            true,
-        ),
-        // RoPE position embedding
-        (
-            PathBuf::from("src/ops/cuda/kernels"),
-            "rope.cu",
-            "sm_75",
-            true,
-        ),
-        // SDPA (scaled dot-product attention for MLA)
-        (
-            PathBuf::from("src/ops/cuda/kernels"),
+            PathBuf::from("src/ops/cuda/kernels/attention"),
             "sdpa.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/attention"),
+            "fused_qkv.cu",
             "sm_75",
             true,
         ),
         // Flash v3 — sm_90 (Hopper warp specialization, optional)
         (
-            PathBuf::from("src/ops/cuda/kernels"),
+            PathBuf::from("src/ops/cuda/kernels/attention"),
             "flash_v3.cu",
             "sm_90",
             false,
         ),
         (
-            PathBuf::from("src/ops/cuda/kernels"),
+            PathBuf::from("src/ops/cuda/kernels/attention"),
             "flash_v3_bwd.cu",
             "sm_90",
             false,
+        ),
+        // Cache kernels
+        (
+            PathBuf::from("src/ops/cuda/kernels/cache"),
+            "kv_cache_update.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/cache"),
+            "kv_cache_int4.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/cache"),
+            "kv_cache_fp8.cu",
+            "sm_80",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/cache"),
+            "kv_cache_fp8_bwd.cu",
+            "sm_80",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/cache"),
+            "kv_cache_quant.cu",
+            "sm_80",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/cache"),
+            "reshape_and_cache.cu",
+            "sm_75",
+            true,
+        ),
+        // Position kernels
+        (
+            PathBuf::from("src/ops/cuda/kernels/position"),
+            "alibi.cu",
+            "sm_80",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/position"),
+            "alibi_bwd.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/position"),
+            "rope.cu",
+            "sm_75",
+            true,
         ),
         // Fused optimizer kernels
         (
@@ -222,8 +224,9 @@ fn compile_cuda_kernels() {
             );
         }
 
-        // Include path for header files (dtype_traits.cuh)
+        // Include paths: kernel's own dir + root kernels dir for shared headers (dtype_traits.cuh)
         let include_arg = format!("-I{}", kernels_dir.display());
+        let root_include_arg = "-Isrc/ops/cuda/kernels".to_string();
         let arch_arg = format!("-arch={}", arch);
 
         let output = Command::new(&nvcc)
@@ -233,6 +236,7 @@ fn compile_cuda_kernels() {
                 "--use_fast_math",
                 &arch_arg,
                 &include_arg,
+                &root_include_arg,
                 "-o",
                 ptx_path.to_str().unwrap(),
                 cu_path.to_str().unwrap(),

@@ -42,6 +42,7 @@ pub const FUSED_LAMB_MODULE: &str = "fused_lamb";
 pub const FUSED_MULTI_TENSOR_MODULE: &str = "fused_multi_tensor";
 pub const ROPE_MODULE: &str = "rope";
 pub const SDPA_MODULE: &str = "sdpa";
+pub const FUSED_QKV_MODULE: &str = "fused_qkv";
 
 /// Cache for loaded CUDA modules, keyed by (device_index, module_name)
 static MODULE_CACHE: OnceLock<Mutex<HashMap<(usize, &'static str), Arc<CudaModule>>>> =

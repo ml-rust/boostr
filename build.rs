@@ -205,12 +205,6 @@ fn compile_cuda_kernels() {
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/architecture"),
-            "moe_permute.cu",
-            "sm_75",
-            true,
-        ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/architecture"),
             "moe_grouped_gemm.cu",
             "sm_75",
             true,

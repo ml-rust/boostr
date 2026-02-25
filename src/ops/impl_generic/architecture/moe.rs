@@ -20,7 +20,7 @@ use numr::tensor::Tensor;
 /// - `k`: experts per token
 ///
 /// # Returns
-/// `(indices [num_tokens, k] (I64 on CPU/CUDA, I32 on WebGPU), weights [num_tokens, k] F32)`
+/// `(indices [num_tokens, k] I32, weights [num_tokens, k] F32)`
 pub fn moe_top_k_routing_impl<R, C>(
     client: &C,
     logits: &Tensor<R>,
@@ -28,7 +28,12 @@ pub fn moe_top_k_routing_impl<R, C>(
 ) -> Result<(Tensor<R>, Tensor<R>)>
 where
     R: Runtime<DType = DType>,
-    C: RuntimeClient<R> + ActivationOps<R> + SortingOps<R> + ReduceOps<R> + ScalarOps<R>,
+    C: RuntimeClient<R>
+        + ActivationOps<R>
+        + SortingOps<R>
+        + ReduceOps<R>
+        + ScalarOps<R>
+        + TypeConversionOps<R>,
 {
     let shape = logits.shape();
     if shape.len() != 2 {
@@ -51,9 +56,12 @@ where
     // softmax over experts dimension
     let probs = client.softmax(logits, -1).map_err(Error::Numr)?;
 
-    // top-k selection
-    let (top_values, top_indices) = client
+    // top-k selection (topk returns I64 indices, cast to I32 for uniform pipeline)
+    let (top_values, top_indices_i64) = client
         .topk(&probs, k, -1, true, true)
+        .map_err(Error::Numr)?;
+    let top_indices = client
+        .cast(&top_indices_i64, DType::I32)
         .map_err(Error::Numr)?;
 
     // normalize weights to sum to 1 per token
@@ -109,12 +117,8 @@ where
     let total = num_tokens * k;
     let device = tokens.device();
 
-    // Flatten indices to [N*k] and cast to I32 for backend compatibility
-    // (topk returns I64 but WebGPU argsort only supports I32/F32)
-    let flat_indices_i64 = indices.reshape(&[total]).map_err(Error::Numr)?.contiguous();
-    let flat_indices = client
-        .cast(&flat_indices_i64, DType::I32)
-        .map_err(Error::Numr)?;
+    // Flatten indices to [N*k] — already I32 from routing
+    let flat_indices = indices.reshape(&[total]).map_err(Error::Numr)?.contiguous();
 
     // Sort by expert index to group tokens by expert
     // argsort gives us the permutation that sorts flat_indices (stable sort)
@@ -148,18 +152,26 @@ where
         .bincount(&sorted_expert_ids, None, num_experts)
         .map_err(Error::Numr)?;
 
-    // Convert counts to CSR offsets: [0, count_0, count_0+count_1, ...]
-    let counts_vec = counts.to_vec::<i32>();
-    let mut offsets = Vec::with_capacity(num_experts + 1);
-    offsets.push(0i32);
-    let mut cumsum = 0i32;
-    for &c in &counts_vec {
-        cumsum += c;
-        offsets.push(cumsum);
-    }
-    let expert_offsets = Tensor::<R>::from_slice(&offsets, &[num_experts + 1], device);
+    // Convert counts to CSR offsets via GPU ops: [0, c0, c0+c1, ..., total]
+    // bincount dtype varies by backend (I64 on CPU, I32 on WebGPU) — cast on GPU first.
+    let counts_i32 = if counts.dtype() == DType::I32 {
+        counts
+    } else {
+        client.cast(&counts, DType::I32).map_err(Error::Numr)?
+    };
+    let cumsum = client.cumsum(&counts_i32, 0).map_err(Error::Numr)?;
+    // Prepend 0 to form CSR offsets [0, c0, c0+c1, ..., total]
+    let zero = Tensor::<R>::zeros(&[1], DType::I32, device);
+    let expert_offsets = client.cat(&[&zero, &cumsum], 0).map_err(Error::Numr)?;
 
-    Ok((permuted, expert_offsets, sort_perm))
+    // Cast sort_perm to I32 (argsort returns I64 on CPU, I32 on WebGPU)
+    let sort_perm_i32 = if sort_perm.dtype() != DType::I32 {
+        client.cast(&sort_perm, DType::I32).map_err(Error::Numr)?
+    } else {
+        sort_perm
+    };
+
+    Ok((permuted, expert_offsets, sort_perm_i32))
 }
 
 /// Unpermute expert outputs back to original token order with weighted combination.
@@ -209,26 +221,16 @@ where
         });
     }
 
-    // Compute inverse permutation: inv_perm[sort_indices[i]] = i
-    // This tells us where each original (token, expert) pair ended up
+    // Compute inverse permutation on GPU: inv_perm[sort_indices[i]] = i
+    // Use scatter: dst[index[i]] = src[i] with src = arange(total).
+    // arange is a static CPU-generated sequence of known size — not a GPU data download.
     let device = expert_output.device();
-
-    // Build inv_perm matching sort_indices dtype (I64 on CPU, I32 on WebGPU)
-    let inv_perm = if sort_indices.dtype() == DType::I64 {
-        let sort_vec = sort_indices.to_vec::<i64>();
-        let mut inv_perm_data = vec![0i64; total];
-        for (i, &si) in sort_vec.iter().enumerate() {
-            inv_perm_data[si as usize] = i as i64;
-        }
-        Tensor::<R>::from_slice(&inv_perm_data, &[total], device)
-    } else {
-        let sort_vec = sort_indices.to_vec::<i32>();
-        let mut inv_perm_data = vec![0i32; total];
-        for (i, &si) in sort_vec.iter().enumerate() {
-            inv_perm_data[si as usize] = i as i32;
-        }
-        Tensor::<R>::from_slice(&inv_perm_data, &[total], device)
-    };
+    let arange_data: Vec<i32> = (0..total as i32).collect();
+    let values = Tensor::<R>::from_slice(&arange_data, &[total], device);
+    let inv_perm_base = Tensor::<R>::zeros(&[total], DType::I32, device);
+    let inv_perm = client
+        .scatter(&inv_perm_base, 0, sort_indices, &values)
+        .map_err(Error::Numr)?;
 
     // Gather back to original order: unsorted[i] = expert_output[inv_perm[i]]
     let unsorted = client
@@ -272,6 +274,9 @@ where
     let out_dim = ew_shape[2];
     let total_tokens = permuted_tokens.shape()[0];
 
+    // `to_vec()` here is called only by the CPU backend — the CUDA and WebGPU backends
+    // use fused kernels and never reach this function for grouped GEMM. On CPU there is
+    // no device memory, so this is not a GPU↔CPU transfer.
     let offsets = expert_offsets.to_vec::<i32>();
 
     let mut expert_outputs: Vec<Tensor<R>> = Vec::with_capacity(num_experts);
@@ -342,6 +347,8 @@ where
     let out_dim = ew_shape[2];
     let total_tokens = permuted_tokens.shape()[0];
 
+    // `to_vec()` here is called only by the CPU backend — see comment in
+    // `moe_grouped_gemm_impl`. Not a GPU↔CPU transfer.
     let offsets = expert_offsets.to_vec::<i32>();
 
     let mut expert_outputs: Vec<Tensor<R>> = Vec::with_capacity(num_experts);

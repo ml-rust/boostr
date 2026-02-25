@@ -323,3 +323,178 @@ fn test_moe_grouped_gemm_fused_parity() {
         );
     });
 }
+
+#[test]
+fn test_moe_grouped_gemm_fused_gelu_parity() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let num_experts = 2;
+    let in_dim = 8;
+    let out_dim = 4;
+    let total_tokens = 6;
+
+    let tokens_data = det_tensor(&[total_tokens, in_dim], &cpu_device);
+    let weights_data = det_tensor(&[num_experts, in_dim, out_dim], &cpu_device);
+    let offsets_data: Vec<i32> = vec![0, 3, 6];
+    let offsets = Tensor::<CpuRuntime>::from_slice(&offsets_data, &[num_experts + 1], &cpu_device);
+
+    let cpu_result = cpu_client
+        .moe_grouped_gemm_fused(&tokens_data, &weights_data, &offsets, MoEActivation::GeLU)
+        .unwrap();
+    let cpu_result_vec = cpu_result.to_vec::<f32>();
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::architecture::moe::MoEOps as _;
+        let tokens_c = Tensor::from_slice(
+            &tokens_data.to_vec::<f32>(),
+            &[total_tokens, in_dim],
+            &cuda_device,
+        );
+        let weights_c = Tensor::from_slice(
+            &weights_data.to_vec::<f32>(),
+            &[num_experts, in_dim, out_dim],
+            &cuda_device,
+        );
+        let offsets_c = Tensor::from_slice(&offsets_data, &[num_experts + 1], &cuda_device);
+        let result_c = cuda_client
+            .moe_grouped_gemm_fused(&tokens_c, &weights_c, &offsets_c, MoEActivation::GeLU)
+            .unwrap();
+        assert_parity_f32_relaxed(
+            &result_c.to_vec::<f32>(),
+            &cpu_result_vec,
+            "moe_grouped_gemm_fused GeLU CUDA vs CPU",
+        );
+    });
+
+    #[cfg(feature = "wgpu")]
+    with_wgpu_backend(|wgpu_client, wgpu_device| {
+        use boostr::ops::traits::architecture::moe::MoEOps as _;
+        let tokens_w = Tensor::from_slice(
+            &tokens_data.to_vec::<f32>(),
+            &[total_tokens, in_dim],
+            &wgpu_device,
+        );
+        let weights_w = Tensor::from_slice(
+            &weights_data.to_vec::<f32>(),
+            &[num_experts, in_dim, out_dim],
+            &wgpu_device,
+        );
+        let offsets_w = Tensor::from_slice(&offsets_data, &[num_experts + 1], &wgpu_device);
+        let result_w = wgpu_client
+            .moe_grouped_gemm_fused(&tokens_w, &weights_w, &offsets_w, MoEActivation::GeLU)
+            .unwrap();
+        assert_parity_f32_relaxed(
+            &result_w.to_vec::<f32>(),
+            &cpu_result_vec,
+            "moe_grouped_gemm_fused GeLU WGPU vs CPU",
+        );
+    });
+}
+
+#[test]
+fn test_moe_end_to_end_parity() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let num_tokens = 6;
+    let hidden_dim = 16;
+    let num_experts = 4;
+    let k = 2;
+    let out_dim = 8;
+
+    // Step 1: routing
+    let logits_data = det_tensor(&[num_tokens, num_experts], &cpu_device);
+    let (cpu_indices, cpu_weights) = cpu_client.moe_top_k_routing(&logits_data, k).unwrap();
+
+    // Step 2: permute
+    let tokens_data = det_tensor(&[num_tokens, hidden_dim], &cpu_device);
+    let (cpu_permuted, cpu_offsets, cpu_sort) = cpu_client
+        .moe_permute_tokens(&tokens_data, &cpu_indices, num_experts)
+        .unwrap();
+
+    // Step 3: grouped gemm
+    let expert_weights_data = det_tensor(&[num_experts, hidden_dim, out_dim], &cpu_device);
+    let cpu_expert_out = cpu_client
+        .moe_grouped_gemm(&cpu_permuted, &expert_weights_data, &cpu_offsets)
+        .unwrap();
+
+    // Step 4: unpermute
+    let cpu_final = cpu_client
+        .moe_unpermute_tokens(&cpu_expert_out, &cpu_sort, &cpu_weights, num_tokens)
+        .unwrap();
+    let cpu_final_vec = cpu_final.to_vec::<f32>();
+
+    assert_eq!(cpu_final.shape(), &[num_tokens, out_dim]);
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::architecture::moe::MoEOps as _;
+        let logits_c = Tensor::from_slice(
+            &logits_data.to_vec::<f32>(),
+            &[num_tokens, num_experts],
+            &cuda_device,
+        );
+        let tokens_c = Tensor::from_slice(
+            &tokens_data.to_vec::<f32>(),
+            &[num_tokens, hidden_dim],
+            &cuda_device,
+        );
+        let ew_c = Tensor::from_slice(
+            &expert_weights_data.to_vec::<f32>(),
+            &[num_experts, hidden_dim, out_dim],
+            &cuda_device,
+        );
+
+        let (idx_c, wt_c) = cuda_client.moe_top_k_routing(&logits_c, k).unwrap();
+        let (perm_c, off_c, sort_c) = cuda_client
+            .moe_permute_tokens(&tokens_c, &idx_c, num_experts)
+            .unwrap();
+        let expert_out_c = cuda_client
+            .moe_grouped_gemm(&perm_c, &ew_c, &off_c)
+            .unwrap();
+        let final_c = cuda_client
+            .moe_unpermute_tokens(&expert_out_c, &sort_c, &wt_c, num_tokens)
+            .unwrap();
+
+        assert_parity_f32_relaxed(
+            &final_c.to_vec::<f32>(),
+            &cpu_final_vec,
+            "moe end-to-end CUDA vs CPU",
+        );
+    });
+
+    #[cfg(feature = "wgpu")]
+    with_wgpu_backend(|wgpu_client, wgpu_device| {
+        use boostr::ops::traits::architecture::moe::MoEOps as _;
+        let logits_w = Tensor::from_slice(
+            &logits_data.to_vec::<f32>(),
+            &[num_tokens, num_experts],
+            &wgpu_device,
+        );
+        let tokens_w = Tensor::from_slice(
+            &tokens_data.to_vec::<f32>(),
+            &[num_tokens, hidden_dim],
+            &wgpu_device,
+        );
+        let ew_w = Tensor::from_slice(
+            &expert_weights_data.to_vec::<f32>(),
+            &[num_experts, hidden_dim, out_dim],
+            &wgpu_device,
+        );
+
+        let (idx_w, wt_w) = wgpu_client.moe_top_k_routing(&logits_w, k).unwrap();
+        let (perm_w, off_w, sort_w) = wgpu_client
+            .moe_permute_tokens(&tokens_w, &idx_w, num_experts)
+            .unwrap();
+        let expert_out_w = wgpu_client
+            .moe_grouped_gemm(&perm_w, &ew_w, &off_w)
+            .unwrap();
+        let final_w = wgpu_client
+            .moe_unpermute_tokens(&expert_out_w, &sort_w, &wt_w, num_tokens)
+            .unwrap();
+
+        assert_parity_f32_relaxed(
+            &final_w.to_vec::<f32>(),
+            &cpu_final_vec,
+            "moe end-to-end WGPU vs CPU",
+        );
+    });
+}

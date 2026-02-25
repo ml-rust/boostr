@@ -28,6 +28,32 @@ pub fn det_i32_tensor(data: &[i32], shape: &[usize], device: &CpuDevice) -> Tens
     Tensor::<CpuRuntime>::from_slice(data, shape, device)
 }
 
+/// Relaxed parity check for backward passes (atomicAdd causes FP non-determinism).
+pub fn assert_parity_f32_relaxed(a: &[f32], b: &[f32], op: &str) {
+    assert_parity_f32_tol(a, b, op, 1e-4, 1e-5);
+}
+
+pub fn assert_parity_f32_tol(a: &[f32], b: &[f32], op: &str, rtol: f32, atol: f32) {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "parity_f32[{}]: length mismatch: {} vs {}",
+        op,
+        a.len(),
+        b.len()
+    );
+    for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+        let diff = (x - y).abs();
+        let tol = atol + rtol * y.abs();
+        if diff > tol {
+            panic!(
+                "parity_f32[{}] at index {}: {} vs {} (diff={}, tol={})",
+                op, i, x, y, diff, tol
+            );
+        }
+    }
+}
+
 pub fn assert_parity_f32(a: &[f32], b: &[f32], op: &str) {
     let rtol = 1e-5f32;
     let atol = 1e-7f32;
@@ -65,7 +91,13 @@ where
         return;
     }
     let device = numr::runtime::cuda::CudaDevice::new(0);
-    let client = numr::runtime::cuda::CudaClient::new(device.clone());
+    let client = match numr::runtime::cuda::CudaClient::new(device.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to create CudaClient: {:?}, skipping", e);
+            return;
+        }
+    };
     f(client, device);
 }
 
@@ -78,13 +110,11 @@ where
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (device, client) = match numr::runtime::wgpu::WgpuDevice::try_new() {
-        Ok(d) => {
-            let c = numr::runtime::wgpu::WgpuClient::new(d.clone());
-            (d, c)
-        }
-        Err(_) => {
-            eprintln!("WGPU feature enabled but runtime unavailable, skipping");
+    let device = numr::runtime::wgpu::WgpuDevice::new(0);
+    let client = match numr::runtime::wgpu::WgpuClient::new(device.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to create WgpuClient: {:?}, skipping", e);
             return;
         }
     };

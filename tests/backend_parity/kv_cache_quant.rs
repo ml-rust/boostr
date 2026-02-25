@@ -39,10 +39,14 @@ fn test_quantize_dequantize_fp8_roundtrip_parity() {
         let deq = cuda_client
             .dequantize_kv_fp8_per_token(&q, &s, num_tokens, head_dim, numr::dtype::DType::F32)
             .unwrap();
-        assert_parity_f32(
+        // FP8 quantization is inherently lossy; CUDA path goes F32→F16→FP8→F16→F32
+        // while CPU does F32→FP8→F32 directly, so wider tolerance needed
+        assert_parity_f32_tol(
             &deq.to_vec::<f32>(),
             &cpu_deq_vec,
             "fp8 roundtrip CUDA vs CPU",
+            0.1,  // 10% relative — FP8 has only 3 mantissa bits
+            0.01, // absolute tolerance for values near zero
         );
     });
 

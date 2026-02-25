@@ -125,7 +125,7 @@ fn test_reshape_and_cache_parity() {
         &cpu_device,
     );
     // Slot mapping: tokens go into slots 0,1,4,5 (block 0 slots 0-1, block 1 slots 0-1)
-    let slot_data: Vec<i64> = vec![0, 1, 4, 5];
+    let slot_data: Vec<i32> = vec![0, 1, 4, 5];
     let slot_mapping = numr::tensor::Tensor::from_slice(&slot_data, &[num_tokens], &cpu_device);
 
     cpu_client

@@ -8,7 +8,7 @@ use numr::runtime::cpu::CpuRuntime;
 #[test]
 fn test_apply_rope_parity() {
     let (cpu_client, cpu_device) = setup_cpu();
-    let (b, h, s, d) = (1, 2, 8, 16);
+    let (b, h, s, d) = (1, 2, 8, 32);
 
     let x_data = det_tensor(&[b, h, s, d], &cpu_device);
     let cos_data = det_tensor(&[s, d / 2], &cpu_device);

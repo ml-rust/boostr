@@ -6,7 +6,7 @@ use boostr::ops::traits::attention::paged_attention::PagedAttentionOps;
 #[test]
 fn test_paged_attention_fwd_parity() {
     let (cpu_client, cpu_device) = setup_cpu();
-    let (b, h, s, d) = (1, 2, 4, 16);
+    let (b, h, s, d) = (1, 2, 4, 64);
     let block_size = 4;
     let num_blocks = 1;
 

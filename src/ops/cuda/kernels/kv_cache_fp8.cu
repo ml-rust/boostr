@@ -68,7 +68,8 @@ extern "C" __global__ void quantize_kv_fp8_per_tensor_fp16(
     // First thread of each block writes to global atomicMax
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         // FP8 E4M3 max value is ~448 (before normalization)
-        *scale = smem_max[0] / 448.0f;
+        float max_val = smem_max[0];
+        *scale = (max_val > 0.0f) ? (448.0f / max_val) : 1.0f;
     }
     __syncthreads();
 
@@ -143,10 +144,12 @@ __device__ void quantize_kv_fp8_per_token_impl(
         __syncthreads();
     }
 
-    // Compute scale for this token
+    // Compute scale: 448 / max_abs maps values into FP8 representable range [-448, 448]
+    // f32_to_fp8_e4m3_raw does val * scale, fp8_e4m3_to_f32 does fp8_val / scale
     __shared__ float token_scale;
     if (tid == 0) {
-        token_scale = smem_max[0] / 448.0f;
+        float max_val = smem_max[0];
+        token_scale = (max_val > 0.0f) ? (448.0f / max_val) : 1.0f;
         scales[token_idx] = token_scale;
     }
     __syncthreads();
@@ -245,7 +248,8 @@ __device__ void quantize_kv_fp8_per_token_bf16_impl(
 
     __shared__ float token_scale;
     if (tid == 0) {
-        token_scale = smem_max[0] / 448.0f;
+        float max_val = smem_max[0];
+        token_scale = (max_val > 0.0f) ? (448.0f / max_val) : 1.0f;
         scales[token_idx] = token_scale;
     }
     __syncthreads();

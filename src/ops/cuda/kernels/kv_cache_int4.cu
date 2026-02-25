@@ -67,8 +67,8 @@ template<typename T>
 __device__ void quantize_kv_int4_per_group_impl(
     const T* __restrict__ input,
     uint8_t* __restrict__ output,
-    __half* __restrict__ scales,
-    __half* __restrict__ zeros,
+    float* __restrict__ scales,
+    float* __restrict__ zeros,
     int num_tokens,
     int head_dim,
     int group_size
@@ -131,8 +131,8 @@ __device__ void quantize_kv_int4_per_group_impl(
         }
 
         int global_group_idx = token_idx * groups_per_token + group_in_token;
-        scales[global_group_idx] = __float2half(scale);
-        zeros[global_group_idx] = __float2half(zero);
+        scales[global_group_idx] = scale;
+        zeros[global_group_idx] = zero;
     }
     __syncthreads();
 
@@ -160,8 +160,8 @@ __device__ void quantize_kv_int4_per_group_impl(
 extern "C" __global__ void quantize_kv_int4_per_group_fp32(
     const float* __restrict__ input,
     uint8_t* __restrict__ output,
-    __half* __restrict__ scales,
-    __half* __restrict__ zeros,
+    float* __restrict__ scales,
+    float* __restrict__ zeros,
     int num_tokens,
     int head_dim,
     int group_size
@@ -174,8 +174,8 @@ extern "C" __global__ void quantize_kv_int4_per_group_fp32(
 extern "C" __global__ void quantize_kv_int4_per_group_fp16(
     const __half* __restrict__ input,
     uint8_t* __restrict__ output,
-    __half* __restrict__ scales,
-    __half* __restrict__ zeros,
+    float* __restrict__ scales,
+    float* __restrict__ zeros,
     int num_tokens,
     int head_dim,
     int group_size
@@ -188,8 +188,8 @@ extern "C" __global__ void quantize_kv_int4_per_group_fp16(
 extern "C" __global__ void quantize_kv_int4_per_group_bf16(
     const __nv_bfloat16* __restrict__ input,
     uint8_t* __restrict__ output,
-    __half* __restrict__ scales,
-    __half* __restrict__ zeros,
+    float* __restrict__ scales,
+    float* __restrict__ zeros,
     int num_tokens,
     int head_dim,
     int group_size
@@ -206,8 +206,8 @@ extern "C" __global__ void quantize_kv_int4_per_group_bf16(
 template<typename T>
 __device__ void dequantize_kv_int4_per_group_impl(
     const uint8_t* __restrict__ input,     // [num_tokens, head_dim/2] packed INT4
-    const __half* __restrict__ scales,     // [num_groups]
-    const __half* __restrict__ zeros,      // [num_groups]
+    const float* __restrict__ scales,      // [num_groups]
+    const float* __restrict__ zeros,       // [num_groups]
     T* __restrict__ output,                // [num_tokens, head_dim]
     int num_tokens,
     int head_dim,
@@ -227,8 +227,8 @@ __device__ void dequantize_kv_int4_per_group_impl(
         int group_idx = i / group_size;
         int global_group_idx = token_idx * groups_per_token + group_idx;
 
-        float scale = __half2float(scales[global_group_idx]);
-        float zero = __half2float(zeros[global_group_idx]);
+        float scale = scales[global_group_idx];
+        float zero = zeros[global_group_idx];
 
         // Unpack INT4 values
         int q0, q1;
@@ -249,7 +249,7 @@ __device__ void dequantize_kv_int4_per_group_impl(
 }
 
 extern "C" __global__ void dequantize_kv_int4_per_group_fp32(
-    const uint8_t* input, const __half* scales, const __half* zeros,
+    const uint8_t* input, const float* scales, const float* zeros,
     float* output, int num_tokens, int head_dim, int group_size
 ) {
     dequantize_kv_int4_per_group_impl<float>(
@@ -258,7 +258,7 @@ extern "C" __global__ void dequantize_kv_int4_per_group_fp32(
 }
 
 extern "C" __global__ void dequantize_kv_int4_per_group_fp16(
-    const uint8_t* input, const __half* scales, const __half* zeros,
+    const uint8_t* input, const float* scales, const float* zeros,
     __half* output, int num_tokens, int head_dim, int group_size
 ) {
     dequantize_kv_int4_per_group_impl<__half>(
@@ -267,7 +267,7 @@ extern "C" __global__ void dequantize_kv_int4_per_group_fp16(
 }
 
 extern "C" __global__ void dequantize_kv_int4_per_group_bf16(
-    const uint8_t* input, const __half* scales, const __half* zeros,
+    const uint8_t* input, const float* scales, const float* zeros,
     __nv_bfloat16* output, int num_tokens, int head_dim, int group_size
 ) {
     dequantize_kv_int4_per_group_impl<__nv_bfloat16>(

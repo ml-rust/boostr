@@ -209,6 +209,13 @@ fn compile_cuda_kernels() {
             "sm_75",
             true,
         ),
+        // Architecture kernels (SSM / Mamba2)
+        (
+            PathBuf::from("src/ops/cuda/kernels/architecture"),
+            "ssd_state_passing.cu",
+            "sm_75",
+            true,
+        ),
     ];
 
     let nvcc = find_nvcc().unwrap_or_else(|| {

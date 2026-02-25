@@ -46,6 +46,7 @@ pub const FUSED_QKV_MODULE: &str = "fused_qkv";
 pub const MOE_ROUTING_MODULE: &str = "moe_routing";
 pub const MOE_PERMUTE_MODULE: &str = "moe_permute";
 pub const MOE_GROUPED_GEMM_MODULE: &str = "moe_grouped_gemm";
+pub const SSD_STATE_PASSING_MODULE: &str = "ssd_state_passing";
 
 /// Cache for loaded CUDA modules, keyed by (device_index, module_name)
 static MODULE_CACHE: OnceLock<Mutex<HashMap<(usize, &'static str), Arc<CudaModule>>>> =

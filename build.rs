@@ -188,6 +188,12 @@ fn compile_cuda_kernels() {
             "sm_75",
             true,
         ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/training"),
+            "fused_multi_tensor.cu",
+            "sm_75",
+            true,
+        ),
     ];
 
     let nvcc = find_nvcc().unwrap_or_else(|| {

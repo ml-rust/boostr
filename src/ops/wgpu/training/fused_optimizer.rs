@@ -338,4 +338,34 @@ impl FusedOptimizerOps<WgpuRuntime> for WgpuClient {
 
         Ok((update, new_m, new_v))
     }
+
+    fn fused_multi_tensor_adamw(
+        &self,
+        groups: &[(
+            &Tensor<WgpuRuntime>,
+            &Tensor<WgpuRuntime>,
+            &Tensor<WgpuRuntime>,
+            &Tensor<WgpuRuntime>,
+        )],
+        lr: f64,
+        beta1: f64,
+        beta2: f64,
+        eps: f64,
+        wd: f64,
+        step_size: f64,
+    ) -> Result<
+        Vec<(
+            Tensor<WgpuRuntime>,
+            Tensor<WgpuRuntime>,
+            Tensor<WgpuRuntime>,
+        )>,
+    > {
+        // WebGPU doesn't support raw pointer indirection — dispatch per group
+        groups
+            .iter()
+            .map(|(p, g, m, v)| {
+                self.fused_adamw_step(p, g, m, v, lr, beta1, beta2, eps, wd, step_size)
+            })
+            .collect()
+    }
 }

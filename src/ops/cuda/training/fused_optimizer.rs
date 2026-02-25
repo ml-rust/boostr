@@ -13,7 +13,8 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use crate::ops::cuda::kernels::{
-    self, FUSED_ADAGRAD_MODULE, FUSED_ADAMW_MODULE, FUSED_LAMB_MODULE, FUSED_SGD_MODULE,
+    self, FUSED_ADAGRAD_MODULE, FUSED_ADAMW_MODULE, FUSED_LAMB_MODULE, FUSED_MULTI_TENSOR_MODULE,
+    FUSED_SGD_MODULE,
 };
 
 fn launch_cfg(n: usize) -> LaunchConfig {
@@ -307,5 +308,135 @@ impl FusedOptimizerOps<CudaRuntime> for CudaClient {
         }
 
         Ok((update, new_m, new_v))
+    }
+
+    fn fused_multi_tensor_adamw(
+        &self,
+        groups: &[(
+            &Tensor<CudaRuntime>,
+            &Tensor<CudaRuntime>,
+            &Tensor<CudaRuntime>,
+            &Tensor<CudaRuntime>,
+        )],
+        lr: f64,
+        beta1: f64,
+        beta2: f64,
+        eps: f64,
+        wd: f64,
+        step_size: f64,
+    ) -> Result<
+        Vec<(
+            Tensor<CudaRuntime>,
+            Tensor<CudaRuntime>,
+            Tensor<CudaRuntime>,
+        )>,
+    > {
+        if groups.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // For non-F32 or single group, fall back to per-param launches
+        let dtype = groups[0].0.dtype();
+        if dtype != DType::F32 || groups.len() == 1 {
+            return groups
+                .iter()
+                .map(|(p, g, m, v)| {
+                    self.fused_adamw_step(p, g, m, v, lr, beta1, beta2, eps, wd, step_size)
+                })
+                .collect();
+        }
+
+        let num_groups = groups.len();
+
+        // Clone tensors for in-place update
+        let mut results: Vec<(
+            Tensor<CudaRuntime>,
+            Tensor<CudaRuntime>,
+            Tensor<CudaRuntime>,
+        )> = Vec::with_capacity(num_groups);
+        let mut ptrs_host: Vec<u64> = Vec::with_capacity(num_groups * 4);
+        let mut cum_sizes_host: Vec<i32> = Vec::with_capacity(num_groups + 1);
+        let mut total_n: usize = 0;
+
+        cum_sizes_host.push(0);
+
+        for (param, grad, m, v) in groups {
+            let new_param = (*param).clone();
+            let new_m = (*m).clone();
+            let new_v = (*v).clone();
+
+            ptrs_host.push(new_param.ptr());
+            ptrs_host.push(grad.ptr());
+            ptrs_host.push(new_m.ptr());
+            ptrs_host.push(new_v.ptr());
+
+            let n: usize = param.shape().iter().product();
+            total_n += n;
+            cum_sizes_host.push(total_n as i32);
+
+            results.push((new_param, new_m, new_v));
+        }
+
+        // Upload metadata to device
+        let stream = self.stream_arc();
+        let mut ptrs_dev = unsafe {
+            stream
+                .alloc::<u64>(ptrs_host.len())
+                .map_err(|e| Error::KernelError {
+                    reason: format!("alloc ptrs buffer: {:?}", e),
+                })?
+        };
+        stream
+            .memcpy_htod(&ptrs_host, &mut ptrs_dev)
+            .map_err(|e| Error::KernelError {
+                reason: format!("upload ptrs: {:?}", e),
+            })?;
+
+        let mut cum_dev = unsafe {
+            stream
+                .alloc::<i32>(cum_sizes_host.len())
+                .map_err(|e| Error::KernelError {
+                    reason: format!("alloc cum_sizes buffer: {:?}", e),
+                })?
+        };
+        stream
+            .memcpy_htod(&cum_sizes_host, &mut cum_dev)
+            .map_err(|e| Error::KernelError {
+                reason: format!("upload cum_sizes: {:?}", e),
+            })?;
+
+        let device_index = groups[0].0.device().id();
+        let module =
+            kernels::get_or_load_module(self.context(), device_index, FUSED_MULTI_TENSOR_MODULE)?;
+        let func = kernels::get_kernel_function(&module, "fused_multi_tensor_adamw_f32")?;
+
+        let cfg = launch_cfg(total_n);
+        let num_groups_i32 = num_groups as i32;
+        let lr_f = lr as f32;
+        let b1_f = beta1 as f32;
+        let b2_f = beta2 as f32;
+        let eps_f = eps as f32;
+        let wd_f = wd as f32;
+        let ss_f = step_size as f32;
+        let total_n_i32 = total_n as i32;
+
+        unsafe {
+            let mut builder = self.stream().launch_builder(&func);
+            builder.arg(&ptrs_dev);
+            builder.arg(&cum_dev);
+            builder.arg(&num_groups_i32);
+            builder.arg(&lr_f);
+            builder.arg(&b1_f);
+            builder.arg(&b2_f);
+            builder.arg(&eps_f);
+            builder.arg(&wd_f);
+            builder.arg(&ss_f);
+            builder.arg(&total_n_i32);
+            builder.launch(cfg).map_err(|e| Error::KernelError {
+                reason: format!("fused_multi_tensor_adamw launch failed: {:?}", e),
+            })?;
+        }
+
+        Ok(results)
     }
 }

@@ -99,33 +99,45 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
         // Corrected learning rate: lr * sqrt(1 - beta2^t) / (1 - beta1^t)
         let step_size = lr * bc2.sqrt() / bc1;
 
-        let param_ids: Vec<TensorId> = params.keys().copied().collect();
+        // Collect all param groups that have gradients
+        let mut ids_with_grads: Vec<TensorId> = Vec::new();
+        for &id in params.keys() {
+            if grads.get(id).is_some() {
+                // Lazy init state
+                let param = params.get(&id).expect("iterating params.keys()");
+                self.state.entry(id).or_insert_with(|| {
+                    let m = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
+                    let v = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
+                    ParamState { m, v }
+                });
+                ids_with_grads.push(id);
+            }
+        }
 
-        for id in param_ids {
-            let grad = match grads.get(id) {
-                Some(g) => g,
-                None => continue,
-            };
+        if ids_with_grads.is_empty() {
+            return Ok(());
+        }
 
-            let param = params.get(&id).expect("id collected from params.keys()");
+        // Build groups for multi-tensor launch
+        let groups: Vec<(&Tensor<R>, &Tensor<R>, &Tensor<R>, &Tensor<R>)> = ids_with_grads
+            .iter()
+            .map(|id| {
+                let param = params.get(id).unwrap();
+                let grad = grads.get(*id).unwrap();
+                let state = self.state.get(id).unwrap();
+                (param, grad, &state.m, &state.v)
+            })
+            .collect();
 
-            // Lazy init state
-            self.state.entry(id).or_insert_with(|| {
-                let m = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
-                let v = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
-                ParamState { m, v }
-            });
+        let results =
+            client.fused_multi_tensor_adamw(&groups, lr, beta1, beta2, eps, wd, step_size)?;
 
-            let state = self.state.get(&id).expect("just initialized above");
-
-            let (new_param, new_m, new_v) = client.fused_adamw_step(
-                param, grad, &state.m, &state.v, lr, beta1, beta2, eps, wd, step_size,
-            )?;
-
-            let state_mut = self.state.get_mut(&id).expect("just initialized above");
+        // Write back results
+        for (id, (new_param, new_m, new_v)) in ids_with_grads.iter().zip(results) {
+            let state_mut = self.state.get_mut(id).unwrap();
             state_mut.m = new_m;
             state_mut.v = new_v;
-            params.insert(id, new_param);
+            params.insert(*id, new_param);
         }
 
         Ok(())

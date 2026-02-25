@@ -117,4 +117,26 @@ pub trait FusedOptimizerOps<R: Runtime> {
         bias_corr1: f64,
         bias_corr2: f64,
     ) -> Result<(Tensor<R>, Tensor<R>, Tensor<R>)>;
+
+    /// Fused multi-tensor AdamW: update ALL parameter groups in a single kernel launch.
+    ///
+    /// Instead of launching one kernel per parameter, this batches all param groups
+    /// into a single dispatch. On GPU this eliminates per-parameter kernel launch
+    /// overhead (~5-10μs each), which adds up significantly for models with hundreds
+    /// of parameters.
+    ///
+    /// Each entry in `groups` is `(param, grad, m, v)` — all same shape per group.
+    /// Returns `Vec<(new_param, new_m, new_v)>` in the same order.
+    ///
+    /// Hyperparameters are shared across all groups (same lr, betas, eps, wd, step_size).
+    fn fused_multi_tensor_adamw(
+        &self,
+        groups: &[(&Tensor<R>, &Tensor<R>, &Tensor<R>, &Tensor<R>)],
+        lr: f64,
+        beta1: f64,
+        beta2: f64,
+        eps: f64,
+        wd: f64,
+        step_size: f64,
+    ) -> Result<Vec<(Tensor<R>, Tensor<R>, Tensor<R>)>>;
 }

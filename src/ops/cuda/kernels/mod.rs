@@ -39,6 +39,7 @@ pub const FUSED_ADAMW_MODULE: &str = "fused_adamw";
 pub const FUSED_SGD_MODULE: &str = "fused_sgd";
 pub const FUSED_ADAGRAD_MODULE: &str = "fused_adagrad";
 pub const FUSED_LAMB_MODULE: &str = "fused_lamb";
+pub const FUSED_MULTI_TENSOR_MODULE: &str = "fused_multi_tensor";
 pub const ROPE_MODULE: &str = "rope";
 pub const SDPA_MODULE: &str = "sdpa";
 

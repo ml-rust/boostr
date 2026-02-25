@@ -187,6 +187,128 @@ fn test_fused_adamw_wgpu_parity() {
     });
 }
 
+// ---- Multi-tensor AdamW parity ----
+
+#[test]
+fn test_fused_multi_tensor_adamw_cpu_reference() {
+    let (client, device) = setup_cpu();
+
+    let p1 = Tensor::from_slice(&[1.0f32, 2.0], &[2], &device);
+    let g1 = Tensor::from_slice(&[0.1f32, 0.2], &[2], &device);
+    let m1 = Tensor::zeros(&[2], DType::F32, &device);
+    let v1 = Tensor::zeros(&[2], DType::F32, &device);
+
+    let p2 = Tensor::from_slice(&[3.0f32, 4.0, 5.0], &[3], &device);
+    let g2 = Tensor::from_slice(&[0.3f32, 0.4, 0.5], &[3], &device);
+    let m2 = Tensor::zeros(&[3], DType::F32, &device);
+    let v2 = Tensor::zeros(&[3], DType::F32, &device);
+
+    let lr = 1e-3;
+    let beta1 = 0.9;
+    let beta2 = 0.999;
+    let eps = 1e-8;
+    let wd = 0.01;
+    let bc1 = 1.0 - beta1;
+    let bc2 = (1.0_f64 - beta2).sqrt();
+    let step_size = lr * bc2 / bc1;
+
+    let groups = vec![(&p1, &g1, &m1, &v1), (&p2, &g2, &m2, &v2)];
+
+    let results = client
+        .fused_multi_tensor_adamw(&groups, lr, beta1, beta2, eps, wd, step_size)
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+
+    // Verify group 0 matches individual call
+    let (ref_p1, ref_m1, ref_v1) = client
+        .fused_adamw_step(&p1, &g1, &m1, &v1, lr, beta1, beta2, eps, wd, step_size)
+        .unwrap();
+    assert_eq!(results[0].0.to_vec::<f32>(), ref_p1.to_vec::<f32>());
+    assert_eq!(results[0].1.to_vec::<f32>(), ref_m1.to_vec::<f32>());
+
+    // Verify group 1 matches individual call
+    let (ref_p2, _, _) = client
+        .fused_adamw_step(&p2, &g2, &m2, &v2, lr, beta1, beta2, eps, wd, step_size)
+        .unwrap();
+    assert_eq!(results[1].0.to_vec::<f32>(), ref_p2.to_vec::<f32>());
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_fused_multi_tensor_adamw_cuda_parity() {
+    use super::helpers::with_cuda_backend;
+
+    let (cpu_client, cpu_device) = setup_cpu();
+    let p1_data = [1.0f32, 2.0, 3.0, 4.0];
+    let g1_data = [0.1f32, 0.2, 0.3, 0.4];
+    let p2_data = [5.0f32, 6.0, 7.0, 8.0, 9.0];
+    let g2_data = [0.5f32, 0.6, 0.7, 0.8, 0.9];
+
+    let lr = 1e-3;
+    let beta1 = 0.9;
+    let beta2 = 0.999;
+    let eps = 1e-8;
+    let wd = 0.01;
+    let bc1 = 1.0 - beta1;
+    let bc2 = (1.0_f64 - beta2).sqrt();
+    let step_size = lr * bc2 / bc1;
+
+    let p1_cpu = Tensor::from_slice(&p1_data, &[4], &cpu_device);
+    let g1_cpu = Tensor::from_slice(&g1_data, &[4], &cpu_device);
+    let m1_cpu = Tensor::zeros(&[4], DType::F32, &cpu_device);
+    let v1_cpu = Tensor::zeros(&[4], DType::F32, &cpu_device);
+    let p2_cpu = Tensor::from_slice(&p2_data, &[5], &cpu_device);
+    let g2_cpu = Tensor::from_slice(&g2_data, &[5], &cpu_device);
+    let m2_cpu = Tensor::zeros(&[5], DType::F32, &cpu_device);
+    let v2_cpu = Tensor::zeros(&[5], DType::F32, &cpu_device);
+
+    let cpu_groups = vec![
+        (&p1_cpu, &g1_cpu, &m1_cpu, &v1_cpu),
+        (&p2_cpu, &g2_cpu, &m2_cpu, &v2_cpu),
+    ];
+    let cpu_results = cpu_client
+        .fused_multi_tensor_adamw(&cpu_groups, lr, beta1, beta2, eps, wd, step_size)
+        .unwrap();
+
+    with_cuda_backend(|cuda_client, cuda_device| {
+        let p1_cuda = Tensor::from_slice(&p1_data, &[4], &cuda_device);
+        let g1_cuda = Tensor::from_slice(&g1_data, &[4], &cuda_device);
+        let m1_cuda = Tensor::zeros(&[4], DType::F32, &cuda_device);
+        let v1_cuda = Tensor::zeros(&[4], DType::F32, &cuda_device);
+        let p2_cuda = Tensor::from_slice(&p2_data, &[5], &cuda_device);
+        let g2_cuda = Tensor::from_slice(&g2_data, &[5], &cuda_device);
+        let m2_cuda = Tensor::zeros(&[5], DType::F32, &cuda_device);
+        let v2_cuda = Tensor::zeros(&[5], DType::F32, &cuda_device);
+
+        let cuda_groups = vec![
+            (&p1_cuda, &g1_cuda, &m1_cuda, &v1_cuda),
+            (&p2_cuda, &g2_cuda, &m2_cuda, &v2_cuda),
+        ];
+        let cuda_results = cuda_client
+            .fused_multi_tensor_adamw(&cuda_groups, lr, beta1, beta2, eps, wd, step_size)
+            .unwrap();
+
+        for i in 0..2 {
+            assert_parity_f32(
+                &cpu_results[i].0.to_vec::<f32>(),
+                &cuda_results[i].0.to_vec::<f32>(),
+                &format!("multi_tensor_adamw param group {}", i),
+            );
+            assert_parity_f32(
+                &cpu_results[i].1.to_vec::<f32>(),
+                &cuda_results[i].1.to_vec::<f32>(),
+                &format!("multi_tensor_adamw m group {}", i),
+            );
+            assert_parity_f32(
+                &cpu_results[i].2.to_vec::<f32>(),
+                &cuda_results[i].2.to_vec::<f32>(),
+                &format!("multi_tensor_adamw v group {}", i),
+            );
+        }
+    });
+}
+
 // ---- SGD parity ----
 
 #[test]

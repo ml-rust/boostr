@@ -43,6 +43,9 @@ pub const FUSED_MULTI_TENSOR_MODULE: &str = "fused_multi_tensor";
 pub const ROPE_MODULE: &str = "rope";
 pub const SDPA_MODULE: &str = "sdpa";
 pub const FUSED_QKV_MODULE: &str = "fused_qkv";
+pub const MOE_ROUTING_MODULE: &str = "moe_routing";
+pub const MOE_PERMUTE_MODULE: &str = "moe_permute";
+pub const MOE_GROUPED_GEMM_MODULE: &str = "moe_grouped_gemm";
 
 /// Cache for loaded CUDA modules, keyed by (device_index, module_name)
 static MODULE_CACHE: OnceLock<Mutex<HashMap<(usize, &'static str), Arc<CudaModule>>>> =

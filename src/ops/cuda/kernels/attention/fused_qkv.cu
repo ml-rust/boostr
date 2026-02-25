@@ -19,7 +19,7 @@
 // Input:  qkv [B*S, total_proj] (output of matmul)
 // Output: q [B, num_heads, S, D], k [B, num_kv_heads, S, D], v [B, num_kv_heads, S, D]
 template<typename T>
-__global__ void fused_qkv_bias_split_kernel(
+__device__ void fused_qkv_bias_split_kernel(
     const T* __restrict__ qkv,      // [B*S, total_proj]
     const T* __restrict__ bias,      // [total_proj] or nullptr
     T* __restrict__ q_out,           // [B, num_heads, S, D]
@@ -78,7 +78,7 @@ __global__ void fused_qkv_bias_split_kernel(
 // Input: proj [B*S, H] (output of matmul), bias [H], residual [B, S, H]
 // Output: [B, S, H]
 template<typename T>
-__global__ void fused_output_bias_residual_kernel(
+__device__ void fused_output_bias_residual_kernel(
     const T* __restrict__ proj,       // [B*S, H]
     const T* __restrict__ bias,       // [H] or nullptr
     const T* __restrict__ residual,   // [B*S, H]
@@ -99,7 +99,7 @@ __global__ void fused_output_bias_residual_kernel(
 // Backward: fused concat dQ/dK/dV → d_qkv
 // Inverse of the split in forward: gather from [B, heads, S, D] → [B*S, total_proj]
 template<typename T>
-__global__ void fused_qkv_concat_kernel(
+__device__ void fused_qkv_concat_kernel(
     const T* __restrict__ dq,        // [B, num_heads, S, D]
     const T* __restrict__ dk,        // [B, num_kv_heads, S, D]
     const T* __restrict__ dv,        // [B, num_kv_heads, S, D]

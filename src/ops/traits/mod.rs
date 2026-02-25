@@ -10,4 +10,4 @@ pub use attention::{
 };
 pub use cache::{Int4GroupSize, KvCacheOps, KvCacheQuantOps, KvQuantMode};
 pub use position::{AlibiOps, RoPEOps};
-pub use training::FusedOptimizerOps;
+pub use training::{FusedFp8TrainingOps, FusedOptimizerOps};

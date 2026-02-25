@@ -196,6 +196,12 @@ fn compile_cuda_kernels() {
             "sm_75",
             true,
         ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/training"),
+            "fused_grad_unscale_clip.cu",
+            "sm_75",
+            true,
+        ),
         // Architecture kernels (MoE)
         (
             PathBuf::from("src/ops/cuda/kernels/architecture"),

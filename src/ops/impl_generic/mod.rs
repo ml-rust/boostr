@@ -1,5 +1,6 @@
 pub mod architecture;
 pub mod attention;
+pub mod training;
 
 pub use architecture::{
     moe_grouped_gemm_fused_impl, moe_grouped_gemm_impl, moe_permute_tokens_impl,

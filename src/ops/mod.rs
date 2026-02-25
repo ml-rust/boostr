@@ -11,6 +11,7 @@ pub use autograd_attention::var_flash_attention;
 pub use traits::AlibiOps;
 pub use traits::AttentionOps;
 pub use traits::FlashAttentionOps;
+pub use traits::FusedFp8TrainingOps;
 pub use traits::FusedOptimizerOps;
 pub use traits::FusedQkvOps;
 pub use traits::KvCacheOps;

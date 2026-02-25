@@ -148,9 +148,9 @@ fn test_varlen_attention_bwd_parity() {
             false,
         )
         .unwrap();
-    let _cpu_dq_vec = cpu_dq.to_vec::<f32>();
-    let _cpu_dk_vec = cpu_dk.to_vec::<f32>();
-    let _cpu_dv_vec = cpu_dv.to_vec::<f32>();
+    let cpu_dq_vec = cpu_dq.to_vec::<f32>();
+    let cpu_dk_vec = cpu_dk.to_vec::<f32>();
+    let cpu_dv_vec = cpu_dv.to_vec::<f32>();
 
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {

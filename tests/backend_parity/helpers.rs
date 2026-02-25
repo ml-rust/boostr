@@ -90,15 +90,16 @@ where
         eprintln!("CUDA feature enabled but runtime unavailable, skipping");
         return;
     }
+    // Use default_client to get the SAME client that Tensor::from_slice
+    // uses internally (via get_or_create_client). Creating a separate
+    // CudaClient::new() would use a different CUDA stream, causing race
+    // conditions with async copies.
+    use numr::runtime::Runtime;
     let device = numr::runtime::cuda::CudaDevice::new(0);
-    let client = match numr::runtime::cuda::CudaClient::new(device.clone()) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to create CudaClient: {:?}, skipping", e);
-            return;
-        }
-    };
-    f(client, device);
+    let client = numr::runtime::cuda::CudaRuntime::default_client(&device);
+    f(client.clone(), device);
+    use numr::runtime::RuntimeClient;
+    client.synchronize();
 }
 
 #[cfg(feature = "wgpu")]

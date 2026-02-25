@@ -7,6 +7,7 @@ pub mod fused_qkv;
 pub mod kv_cache;
 pub mod kv_cache_quant;
 pub mod mla;
+pub mod moe;
 pub mod paged_attention;
 pub mod rope;
 pub mod varlen_attention;

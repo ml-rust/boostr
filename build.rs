@@ -196,6 +196,25 @@ fn compile_cuda_kernels() {
             "sm_75",
             true,
         ),
+        // Architecture kernels (MoE)
+        (
+            PathBuf::from("src/ops/cuda/kernels/architecture"),
+            "moe_routing.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/architecture"),
+            "moe_permute.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/architecture"),
+            "moe_grouped_gemm.cu",
+            "sm_75",
+            true,
+        ),
     ];
 
     let nvcc = find_nvcc().unwrap_or_else(|| {

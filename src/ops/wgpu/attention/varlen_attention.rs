@@ -137,7 +137,7 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
             ],
         );
 
-        let workgroups = (total_tokens_q as u32 + 255) / 256;
+        let workgroups = (total_tokens_q as u32).div_ceil(256);
 
         let mut encoder =
             self.wgpu_device()

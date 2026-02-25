@@ -102,7 +102,7 @@ impl DequantOps<WgpuRuntime> for WgpuClient {
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, Some(&bind_group), &[]);
-            let workgroups = (num_blocks as u32 + 255) / 256;
+            let workgroups = (num_blocks as u32).div_ceil(256);
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
 

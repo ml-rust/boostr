@@ -221,7 +221,7 @@ fn test_fused_multi_tensor_adamw_cpu_reference() {
     assert_eq!(results.len(), 2);
 
     // Verify group 0 matches individual call
-    let (ref_p1, ref_m1, ref_v1) = client
+    let (ref_p1, ref_m1, _ref_v1) = client
         .fused_adamw_step(&p1, &g1, &m1, &v1, lr, beta1, beta2, eps, wd, step_size)
         .unwrap();
     assert_eq!(results[0].0.to_vec::<f32>(), ref_p1.to_vec::<f32>());

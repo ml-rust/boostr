@@ -12,6 +12,7 @@ pub use traits::AlibiOps;
 pub use traits::AttentionOps;
 pub use traits::FlashAttentionOps;
 pub use traits::FusedOptimizerOps;
+pub use traits::FusedQkvOps;
 pub use traits::KvCacheOps;
 pub use traits::MlaOps;
 pub use traits::PagedAttentionOps;

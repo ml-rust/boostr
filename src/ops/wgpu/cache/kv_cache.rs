@@ -123,7 +123,7 @@ impl KvCacheOps<WgpuRuntime> for WgpuClient {
         );
 
         let total_elems = (batch_size * num_heads * new_len * head_dim) as u32;
-        let workgroups = (total_elems + 255) / 256;
+        let workgroups = total_elems.div_ceil(256);
 
         let mut encoder =
             self.wgpu_device()
@@ -228,7 +228,7 @@ impl KvCacheOps<WgpuRuntime> for WgpuClient {
         );
 
         let total_elems = (num_tokens * num_heads * head_dim) as u32;
-        let workgroups = (total_elems + 255) / 256;
+        let workgroups = total_elems.div_ceil(256);
 
         let mut encoder =
             self.wgpu_device()

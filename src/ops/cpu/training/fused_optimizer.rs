@@ -10,6 +10,7 @@ use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 impl FusedOptimizerOps<CpuRuntime> for CpuClient {
     fn fused_adamw_step(
         &self,
@@ -169,6 +170,7 @@ fn validate_shapes(a: &Tensor<CpuRuntime>, b: &Tensor<CpuRuntime>, op: &str) -> 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fused_adamw_f32(
     param: &Tensor<CpuRuntime>,
     grad: &Tensor<CpuRuntime>,
@@ -217,6 +219,7 @@ fn fused_adamw_f32(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fused_adamw_f64(
     param: &Tensor<CpuRuntime>,
     grad: &Tensor<CpuRuntime>,
@@ -261,6 +264,7 @@ fn fused_adamw_f64(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fused_sgd_f32(
     param: &Tensor<CpuRuntime>,
     grad: &Tensor<CpuRuntime>,
@@ -319,6 +323,7 @@ fn fused_sgd_f32(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fused_sgd_f64(
     param: &Tensor<CpuRuntime>,
     grad: &Tensor<CpuRuntime>,
@@ -438,6 +443,7 @@ fn fused_adagrad_f64(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fused_lamb_f32(
     param: &Tensor<CpuRuntime>,
     grad: &Tensor<CpuRuntime>,
@@ -493,6 +499,7 @@ fn fused_lamb_f32(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fused_lamb_f64(
     param: &Tensor<CpuRuntime>,
     grad: &Tensor<CpuRuntime>,

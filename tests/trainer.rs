@@ -218,7 +218,13 @@ fn with_wgpu<F: FnMut(numr::runtime::wgpu::WgpuClient, numr::runtime::wgpu::Wgpu
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let device = numr::runtime::wgpu::WgpuDevice::default();
-    let client = numr::runtime::wgpu::WgpuRuntime::create_client(&device);
+    let client = match numr::runtime::wgpu::WgpuClient::new(device.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to create WgpuClient: {:?}, skipping", e);
+            return;
+        }
+    };
     f(client, device);
 }
 

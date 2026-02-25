@@ -137,7 +137,7 @@ impl PagedAttentionOps<WgpuRuntime> for WgpuClient {
         );
 
         let total_queries = (batch_size * num_heads * seq_len_q) as u32;
-        let workgroups = (total_queries + 255) / 256;
+        let workgroups = total_queries.div_ceil(256);
 
         let mut encoder =
             self.wgpu_device()

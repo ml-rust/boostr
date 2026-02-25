@@ -126,7 +126,7 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
             &[&input_buf, &quant_buf, &scales_buf, &params_buf],
             3, // num_storage
             1, // num_readonly (binding 0 = input)
-            (num_tokens as u32 + 255) / 256,
+            (num_tokens as u32).div_ceil(256),
         )?;
 
         Ok((quantized, scales))
@@ -173,7 +173,7 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
             &[&quant_buf, &scales_buf, &out_buf, &params_buf],
             3, // num_storage
             2, // num_readonly (bindings 0,1)
-            (num_tokens as u32 + 255) / 256,
+            (num_tokens as u32).div_ceil(256),
         )?;
 
         Ok(output)
@@ -236,7 +236,7 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
             ],
             4,
             1,
-            (num_groups as u32 + 255) / 256,
+            (num_groups as u32).div_ceil(256),
         )?;
 
         Ok((packed, scales, zeros))
@@ -289,7 +289,7 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
             &[&packed_buf, &scales_buf, &zeros_buf, &out_buf, &params_buf],
             4,
             3,
-            (num_groups as u32 + 255) / 256,
+            (num_groups as u32).div_ceil(256),
         )?;
 
         Ok(output)
@@ -334,7 +334,7 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
             &[&input_buf, &quant_buf, &scales_buf, &params_buf],
             3,
             1,
-            (num_tokens as u32 + 255) / 256,
+            (num_tokens as u32).div_ceil(256),
         )?;
 
         Ok((quantized, scales))
@@ -380,7 +380,7 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
             &[&quant_buf, &scales_buf, &out_buf, &params_buf],
             3,
             2,
-            (num_tokens as u32 + 255) / 256,
+            (num_tokens as u32).div_ceil(256),
         )?;
 
         Ok(output)

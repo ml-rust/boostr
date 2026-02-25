@@ -153,8 +153,8 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, Some(&bind_group), &[]);
-            let wg_x = (n as u32 + 15) / 16;
-            let wg_y = (m as u32 + 15) / 16;
+            let wg_x = (n as u32).div_ceil(16);
+            let wg_y = (m as u32).div_ceil(16);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
 

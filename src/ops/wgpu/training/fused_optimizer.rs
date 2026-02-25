@@ -72,7 +72,7 @@ fn dispatch_kernel(
     all_bufs.push(&params_buf);
     let bind_group = cache.create_bind_group(&layout, &all_bufs);
 
-    let workgroups = (params.n + 255) / 256;
+    let workgroups = params.n.div_ceil(256);
 
     let mut encoder =
         client

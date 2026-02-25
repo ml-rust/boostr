@@ -4,7 +4,7 @@ pub mod position;
 pub mod training;
 
 pub use attention::{
-    AttentionOps, FlashAttentionOps, MlaOps, PagedAttentionOps, VarLenAttentionOps,
+    AttentionOps, FlashAttentionOps, FusedQkvOps, MlaOps, PagedAttentionOps, VarLenAttentionOps,
 };
 pub use cache::{Int4GroupSize, KvCacheOps, KvCacheQuantOps, KvQuantMode};
 pub use position::{AlibiOps, RoPEOps};

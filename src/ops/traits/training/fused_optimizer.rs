@@ -15,6 +15,7 @@ use numr::tensor::Tensor;
 ///
 /// All tensors must be the same shape and on the same device. State tensors
 /// (m, v, accum, momentum_buf) are modified in-place.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub trait FusedOptimizerOps<R: Runtime> {
     /// Fused AdamW step: update param, m, v in a single pass.
     ///

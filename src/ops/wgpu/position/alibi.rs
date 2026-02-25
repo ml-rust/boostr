@@ -79,7 +79,7 @@ impl AlibiOps<WgpuRuntime> for WgpuClient {
         let bind_group = cache.create_bind_group(&layout, &[&scores_buf, &params_buf]);
 
         let total_elems = (batch_size * num_heads * seq_len_q * seq_len_k) as u32;
-        let workgroups = (total_elems + 255) / 256;
+        let workgroups = total_elems.div_ceil(256);
 
         let mut encoder =
             self.wgpu_device()

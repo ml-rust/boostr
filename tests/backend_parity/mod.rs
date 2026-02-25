@@ -3,6 +3,7 @@ pub mod helpers;
 pub mod alibi;
 pub mod attention;
 pub mod fused_optimizer;
+pub mod fused_qkv;
 pub mod kv_cache;
 pub mod kv_cache_quant;
 pub mod mla;

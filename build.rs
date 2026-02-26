@@ -35,6 +35,42 @@ fn compile_cuda_kernels() {
             "sm_75",
             true,
         ),
+        (
+            PathBuf::from("src/quant/cuda/kernels"),
+            "int4_gemm.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels"),
+            "int4_gemm_gptq.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels"),
+            "nf4_quant.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels"),
+            "marlin_gemm.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels"),
+            "fused_int4_swiglu.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels"),
+            "fused_int4_qkv.cu",
+            "sm_75",
+            true,
+        ),
         // Attention kernels
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),

@@ -10,4 +10,5 @@ pub mod wgpu;
 pub use format::QuantFormat;
 pub use tensor::QuantTensor;
 pub use traits::DequantOps;
+pub use traits::FusedQuantOps;
 pub use traits::QuantMatmulOps;

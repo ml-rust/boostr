@@ -43,7 +43,7 @@ pub use ops::{
     AttentionOps, FlashAttentionOps, FusedFp8TrainingOps, FusedOptimizerOps, FusedQkvOps,
     KvCacheOps, MlaOps, PagedAttentionOps, RoPEOps, var_flash_attention,
 };
-pub use quant::{DequantOps, QuantFormat, QuantMatmulOps, QuantTensor};
+pub use quant::{DequantOps, FusedQuantOps, QuantFormat, QuantMatmulOps, QuantTensor};
 
 // Re-export numr types that users will commonly need
 pub use numr::dtype::DType;

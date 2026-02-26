@@ -22,4 +22,5 @@ pub use traits::RoPEOps;
 pub use traits::SpeculativeOps;
 pub use traits::VarLenAttentionOps;
 pub use traits::architecture::moe::MoEActivation;
+pub use traits::CalibrationOps;
 pub use traits::{Int4GroupSize, KvCacheQuantOps, KvQuantMode};

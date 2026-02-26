@@ -265,6 +265,13 @@ fn compile_cuda_kernels() {
             "sm_75",
             true,
         ),
+        // Calibration kernels (quantization)
+        (
+            PathBuf::from("src/ops/cuda/kernels/quantization"),
+            "calibration.cu",
+            "sm_75",
+            true,
+        ),
     ];
 
     let nvcc = find_nvcc().unwrap_or_else(|| {

@@ -28,7 +28,7 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
             // Cast F32 to F16 if needed (CUDA FP8 kernel only supports F16/BF16 input)
             let vars = Var::new(input.clone(), false);
             let cast_var =
-                numr::autograd::var_cast(&vars, DType::F16, self).map_err(|e| Error::Numr(e))?;
+                numr::autograd::var_cast(&vars, DType::F16, self).map_err(Error::Numr)?;
             cast_var.tensor().clone()
         } else {
             input.clone()
@@ -149,8 +149,8 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         // Cast F16 back to F32 if needed
         if output_dtype == DType::F32 && target_dtype == DType::F16 {
             let output_var = Var::new(output, false);
-            let cast_var = numr::autograd::var_cast(&output_var, DType::F32, self)
-                .map_err(|e| Error::Numr(e))?;
+            let cast_var =
+                numr::autograd::var_cast(&output_var, DType::F32, self).map_err(Error::Numr)?;
             Ok(cast_var.tensor().clone())
         } else {
             Ok(output)
@@ -189,7 +189,7 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
 
         let gs = group_size as usize;
         let total = num_tokens * head_dim;
-        let num_groups = (total + gs - 1) / gs;
+        let num_groups = total.div_ceil(gs);
 
         let packed = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim / 2], DType::U8, device);
         let scales_t = Tensor::<CudaRuntime>::empty(&[num_groups], DType::F32, device);
@@ -243,7 +243,7 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
 
         let gs = group_size as usize;
         let total = num_tokens * head_dim;
-        let num_groups = (total + gs - 1) / gs;
+        let num_groups = total.div_ceil(gs);
 
         let output = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], DType::F32, device);
 

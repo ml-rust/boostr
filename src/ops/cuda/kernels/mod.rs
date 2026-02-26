@@ -54,6 +54,7 @@ pub const SPECULATIVE_VERIFY_MODULE: &str = "speculative_verify";
 pub const CALIBRATION_MODULE: &str = "calibration";
 
 /// Cache for loaded CUDA modules, keyed by (device_index, module_name)
+#[allow(clippy::type_complexity)]
 static MODULE_CACHE: OnceLock<Mutex<HashMap<(usize, &'static str), Arc<CudaModule>>>> =
     OnceLock::new();
 

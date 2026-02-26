@@ -28,6 +28,7 @@ struct GptqParams {
     _pad: u32,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_int4_gemm(
     client: &WgpuClient,
     input: &Tensor<WgpuRuntime>,
@@ -109,6 +110,7 @@ pub fn dispatch_int4_gemm(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_int4_gemm_gptq(
     client: &WgpuClient,
     input: &Tensor<WgpuRuntime>,
@@ -194,6 +196,7 @@ pub fn dispatch_int4_gemm_gptq(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_marlin_gemm(
     client: &WgpuClient,
     input: &Tensor<WgpuRuntime>,

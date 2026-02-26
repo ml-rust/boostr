@@ -86,6 +86,7 @@ fn validate_rope_shapes(
 }
 
 /// Launch a compute shader with 3 read-only storage buffers + 1 read-write output + 1 uniform.
+#[allow(clippy::too_many_arguments)]
 fn launch_rope_shader(
     client: &WgpuClient,
     shader_source: &'static str,

@@ -68,7 +68,7 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
 
             let total = (n * k) as u32;
             let block = 256u32;
-            let grid = (total + block - 1) / block;
+            let grid = total.div_ceil(block);
             let cfg = LaunchConfig {
                 grid_dim: (grid, 1, 1),
                 block_dim: (block, 1, 1),
@@ -100,7 +100,7 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
 
             let total = (m * k) as u32;
             let block = 256u32;
-            let grid = (total + block - 1) / block;
+            let grid = total.div_ceil(block);
             let cfg = LaunchConfig {
                 grid_dim: (grid, 1, 1),
                 block_dim: (block, 1, 1),
@@ -163,7 +163,7 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
 
         let total = (n * p) as u32;
         let block = 256u32;
-        let grid = (total + block - 1) / block;
+        let grid = total.div_ceil(block);
         let cfg = LaunchConfig {
             grid_dim: (grid, 1, 1),
             block_dim: (block, 1, 1),

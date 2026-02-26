@@ -60,7 +60,7 @@ impl KvCacheOps<CudaRuntime> for CudaClient {
 
         let total_elements = outer_size * new_len * head_dim;
         let threads = 256;
-        let blocks = (total_elements + threads - 1) / threads;
+        let blocks = total_elements.div_ceil(threads);
 
         let device = k_cache.device();
         let device_index = device.id();
@@ -158,7 +158,7 @@ impl KvCacheOps<CudaRuntime> for CudaClient {
             DType::F32 => 4usize,
             _ => 8usize,
         };
-        let threads_per_block = (head_dim + vec_size - 1) / vec_size;
+        let threads_per_block = head_dim.div_ceil(vec_size);
         let threads = threads_per_block.max(1);
 
         let device = key.device();

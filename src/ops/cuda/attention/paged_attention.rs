@@ -121,7 +121,7 @@ impl PagedAttentionOps<CudaRuntime> for CudaClient {
         let cfg = LaunchConfig {
             grid_dim: (
                 (batch_size * num_heads) as u32,
-                ((seq_len_q + block_m - 1) / block_m) as u32,
+                seq_len_q.div_ceil(block_m) as u32,
                 1,
             ),
             block_dim: (block_m as u32, 1, 1),
@@ -236,7 +236,7 @@ impl PagedAttentionOps<CudaRuntime> for CudaClient {
         let cfg = LaunchConfig {
             grid_dim: (
                 (batch_size * num_heads) as u32,
-                ((seq_len_q + block_m - 1) / block_m) as u32,
+                seq_len_q.div_ceil(block_m) as u32,
                 1,
             ),
             block_dim: (block_m as u32, 1, 1),
@@ -358,7 +358,7 @@ impl PagedAttentionOps<CudaRuntime> for CudaClient {
         let cfg = LaunchConfig {
             grid_dim: (
                 (batch_size * num_heads) as u32,
-                ((seq_len_q + block_m - 1) / block_m) as u32,
+                seq_len_q.div_ceil(block_m) as u32,
                 1,
             ),
             block_dim: (block_m as u32, 1, 1),

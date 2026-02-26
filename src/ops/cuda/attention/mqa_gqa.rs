@@ -33,6 +33,7 @@ fn mqa_block_config(head_dim: usize) -> Result<(usize, usize)> {
 }
 
 /// MQA/GQA forward pass — dedicated kernel for extreme GQA ratios.
+#[allow(clippy::too_many_arguments)]
 pub fn mqa_gqa_fwd(
     client: &CudaClient,
     q: &Tensor<CudaRuntime>,
@@ -92,7 +93,7 @@ pub fn mqa_gqa_fwd(
     let cfg = LaunchConfig {
         grid_dim: (
             (batch_size * num_heads) as u32,
-            ((seq_len_q + block_m - 1) / block_m) as u32,
+            seq_len_q.div_ceil(block_m) as u32,
             1,
         ),
         block_dim: (block_m as u32, 1, 1),
@@ -135,6 +136,7 @@ pub fn mqa_gqa_fwd(
 }
 
 /// MQA/GQA backward pass.
+#[allow(clippy::too_many_arguments)]
 pub fn mqa_gqa_bwd(
     client: &CudaClient,
     dout: &Tensor<CudaRuntime>,
@@ -213,7 +215,7 @@ pub fn mqa_gqa_bwd(
         let cfg = LaunchConfig {
             grid_dim: (
                 (batch_size * num_heads) as u32,
-                (seq_len_q as u32 + block_size - 1) / block_size,
+                (seq_len_q as u32).div_ceil(block_size),
                 1,
             ),
             block_dim: (block_size, 1, 1),
@@ -250,7 +252,7 @@ pub fn mqa_gqa_bwd(
         let smem_size = (2 * block_n * head_dim + 2 * block_m * head_dim) * 4;
         set_smem_attribute(&func, smem_size)?;
 
-        let num_k_blocks = (seq_len_k + block_n - 1) / block_n;
+        let num_k_blocks = seq_len_k.div_ceil(block_n);
         let cfg = LaunchConfig {
             grid_dim: ((batch_size * num_heads) as u32, num_k_blocks as u32, 1),
             block_dim: (block_m as u32, 1, 1),

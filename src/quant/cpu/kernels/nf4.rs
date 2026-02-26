@@ -6,8 +6,8 @@
 /// NF4 codebook: 16 values from normal distribution quantiles.
 /// Index 0 = 0.0, indices 1-7 = negative quantiles, indices 8-14 = positive, 15 = 1.0
 pub const NF4_CODEBOOK: [f32; 16] = [
-    0.0, -1.0, -0.6961928, -0.5250730, -0.3949739, -0.2844144, -0.1848489, -0.0911179, 0.0796013,
-    0.1609302, 0.2461123, 0.3379120, 0.4407173, 0.5626170, 0.7229568, 1.0,
+    0.0, -1.0, -0.6961928, -0.525073, -0.3949739, -0.2844144, -0.1848489, -0.0911179, 0.0796013,
+    0.1609302, 0.2461123, 0.337912, 0.4407173, 0.562617, 0.7229568, 1.0,
 ];
 
 /// Dequantize NF4 data to f32.
@@ -18,10 +18,9 @@ pub const NF4_CODEBOOK: [f32; 16] = [
 pub fn nf4_dequant_f32(nf4_data: &[u8], absmax: &[f32], blocksize: usize, output: &mut [f32]) {
     let n = nf4_data.len() * 2;
     debug_assert_eq!(output.len(), n);
-    debug_assert_eq!(absmax.len(), (n + blocksize - 1) / blocksize);
+    debug_assert_eq!(absmax.len(), n.div_ceil(blocksize));
 
-    for i in 0..nf4_data.len() {
-        let byte = nf4_data[i];
+    for (i, &byte) in nf4_data.iter().enumerate() {
         let idx_lo = (byte & 0x0F) as usize;
         let idx_hi = ((byte >> 4) & 0x0F) as usize;
 
@@ -40,6 +39,7 @@ pub fn nf4_dequant_f32(nf4_data: &[u8], absmax: &[f32], blocksize: usize, output
 ///
 /// Weight stored as nf4_data [N*K/2] u8, row-major [N, K] layout.
 /// Dequantizes on-the-fly during dot product computation.
+#[allow(clippy::too_many_arguments)]
 pub fn nf4_gemm_f32(
     input: &[f32],
     nf4_weight: &[u8],
@@ -75,6 +75,7 @@ pub fn nf4_gemm_f32(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn nf4_gemm_f32_scalar(
     input: &[f32],
     nf4_weight: &[u8],
@@ -90,14 +91,13 @@ fn nf4_gemm_f32_scalar(
         let inp_row = &input[row * k..][..k];
         let out_row = &mut output[row * n..][..n];
 
-        for col in 0..n {
+        for (col, out_elem) in out_row.iter_mut().enumerate() {
             let weight_row_start = col * k_packed;
             let weight_bytes = &nf4_weight[weight_row_start..][..k_packed];
             let absmax_row_start = col * (k / blocksize);
 
             let mut acc = 0.0f32;
-            for bi in 0..k_packed {
-                let byte = weight_bytes[bi];
+            for (bi, &byte) in weight_bytes.iter().enumerate() {
                 let idx_lo = (byte & 0x0F) as usize;
                 let idx_hi = ((byte >> 4) & 0x0F) as usize;
 
@@ -112,7 +112,7 @@ fn nf4_gemm_f32_scalar(
 
                 acc += inp_row[elem_lo] * w_lo + inp_row[elem_hi] * w_hi;
             }
-            out_row[col] = acc;
+            *out_elem = acc;
         }
     }
 }
@@ -121,6 +121,7 @@ fn nf4_gemm_f32_scalar(
 /// Processes 8 bytes (16 elements) per iteration.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
+#[allow(clippy::too_many_arguments)]
 unsafe fn nf4_gemm_f32_avx2(
     input: &[f32],
     nf4_weight: &[u8],
@@ -142,7 +143,7 @@ unsafe fn nf4_gemm_f32_avx2(
         let inp_row = &input[row * k..][..k];
         let out_row = &mut output[row * n..][..n];
 
-        for col in 0..n {
+        for (col, out_val) in out_row.iter_mut().enumerate() {
             let weight_row_start = col * k_packed;
             let weight_bytes = &nf4_weight[weight_row_start..][..k_packed];
             let absmax_row_start = col * (k / blocksize);
@@ -190,8 +191,8 @@ unsafe fn nf4_gemm_f32_avx2(
             let mut result = unsafe { hsum_f32_avx2(_mm256_add_ps(acc, acc2)) };
 
             // Scalar tail
-            for bi in (chunks * 8)..k_packed {
-                let byte = weight_bytes[bi];
+            for (bi, &byte) in weight_bytes[(chunks * 8)..].iter().enumerate() {
+                let bi = chunks * 8 + bi;
                 let elem_lo = bi * 2;
                 let elem_hi = bi * 2 + 1;
                 let block_lo = elem_lo / blocksize;
@@ -203,7 +204,7 @@ unsafe fn nf4_gemm_f32_avx2(
                 result += inp_row[elem_lo] * w_lo + inp_row[elem_hi] * w_hi;
             }
 
-            out_row[col] = result;
+            *out_val = result;
         }
     }
 }

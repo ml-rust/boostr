@@ -24,8 +24,8 @@ fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
     }
 
     let mut sum = 0.0f32;
-    for i in 0..len {
-        sum += a[i] * b[i];
+    for (&ai, &bi) in a.iter().zip(b.iter()) {
+        sum += ai * bi;
     }
     sum
 }

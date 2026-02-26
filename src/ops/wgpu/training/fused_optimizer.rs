@@ -96,6 +96,7 @@ fn dispatch_kernel(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 impl FusedOptimizerOps<WgpuRuntime> for WgpuClient {
     fn fused_adamw_step(
         &self,

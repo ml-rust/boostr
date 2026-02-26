@@ -6,16 +6,15 @@
 ///           7=qw_v(u32), 8=sc_v(f32), 9=zr_v(f32),
 ///           10=out_q(f32), 11=out_k(f32), 12=out_v(f32), 13=params(uniform)
 pub fn generate_fused_int4_qkv_shader() -> String {
-    format!(
-        r#"// Fused INT4 QKV: computes Q, K, V projections via separate dispatches
+    r#"// Fused INT4 QKV: computes Q, K, V projections via separate dispatches
 
 const QKV_AWQ_SHIFTS = array<u32, 8>(0u, 16u, 4u, 20u, 8u, 24u, 12u, 28u);
 
-fn unpack_awq_qkv(packed: u32, idx: u32) -> u32 {{
+fn unpack_awq_qkv(packed: u32, idx: u32) -> u32 {
     return (packed >> QKV_AWQ_SHIFTS[idx]) & 0xFu;
-}}
+}
 
-struct QkvParams {{
+struct QkvParams {
     m: u32,
     k: u32,
     nq: u32,
@@ -24,7 +23,7 @@ struct QkvParams {{
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
-}}
+}
 
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> qw_q: array<u32>;
@@ -43,72 +42,72 @@ struct QkvParams {{
 
 // Dispatch Q projection
 @compute @workgroup_size(16, 16, 1)
-fn fused_int4_qkv_q(@builtin(global_invocation_id) gid: vec3<u32>) {{
+fn fused_int4_qkv_q(@builtin(global_invocation_id) gid: vec3<u32>) {
     let col = gid.x;
     let row = gid.y;
-    if (row >= params.m || col >= params.nq) {{ return; }}
+    if (row >= params.m || col >= params.nq) { return; }
 
     let n_packed = params.nq / 8u;
     let pack_col = col / 8u;
     let sub = col % 8u;
 
     var acc: f32 = 0.0;
-    for (var ki: u32 = 0u; ki < params.k; ki = ki + 1u) {{
+    for (var ki: u32 = 0u; ki < params.k; ki = ki + 1u) {
         let a = input[row * params.k + ki];
         let packed = qw_q[ki * n_packed + pack_col];
         let q = unpack_awq_qkv(packed, sub);
         let group = ki / params.group_size;
         let w = (f32(q) - zr_q[group * params.nq + col]) * sc_q[group * params.nq + col];
         acc = acc + a * w;
-    }}
+    }
     out_q[row * params.nq + col] = acc;
-}}
+}
 
 // Dispatch K projection
 @compute @workgroup_size(16, 16, 1)
-fn fused_int4_qkv_k(@builtin(global_invocation_id) gid: vec3<u32>) {{
+fn fused_int4_qkv_k(@builtin(global_invocation_id) gid: vec3<u32>) {
     let col = gid.x;
     let row = gid.y;
-    if (row >= params.m || col >= params.nkv) {{ return; }}
+    if (row >= params.m || col >= params.nkv) { return; }
 
     let n_packed = params.nkv / 8u;
     let pack_col = col / 8u;
     let sub = col % 8u;
 
     var acc: f32 = 0.0;
-    for (var ki: u32 = 0u; ki < params.k; ki = ki + 1u) {{
+    for (var ki: u32 = 0u; ki < params.k; ki = ki + 1u) {
         let a = input[row * params.k + ki];
         let packed = qw_k[ki * n_packed + pack_col];
         let q = unpack_awq_qkv(packed, sub);
         let group = ki / params.group_size;
         let w = (f32(q) - zr_k[group * params.nkv + col]) * sc_k[group * params.nkv + col];
         acc = acc + a * w;
-    }}
+    }
     out_k[row * params.nkv + col] = acc;
-}}
+}
 
 // Dispatch V projection
 @compute @workgroup_size(16, 16, 1)
-fn fused_int4_qkv_v(@builtin(global_invocation_id) gid: vec3<u32>) {{
+fn fused_int4_qkv_v(@builtin(global_invocation_id) gid: vec3<u32>) {
     let col = gid.x;
     let row = gid.y;
-    if (row >= params.m || col >= params.nkv) {{ return; }}
+    if (row >= params.m || col >= params.nkv) { return; }
 
     let n_packed = params.nkv / 8u;
     let pack_col = col / 8u;
     let sub = col % 8u;
 
     var acc: f32 = 0.0;
-    for (var ki: u32 = 0u; ki < params.k; ki = ki + 1u) {{
+    for (var ki: u32 = 0u; ki < params.k; ki = ki + 1u) {
         let a = input[row * params.k + ki];
         let packed = qw_v[ki * n_packed + pack_col];
         let q = unpack_awq_qkv(packed, sub);
         let group = ki / params.group_size;
         let w = (f32(q) - zr_v[group * params.nkv + col]) * sc_v[group * params.nkv + col];
         acc = acc + a * w;
-    }}
+    }
     out_v[row * params.nkv + col] = acc;
-}}
+}
 "#
-    )
+    .to_string()
 }

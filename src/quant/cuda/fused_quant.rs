@@ -11,6 +11,7 @@ use numr::tensor::Tensor;
 
 use super::kernels::{self, FUSED_INT4_QKV_MODULE, FUSED_INT4_SWIGLU_MODULE};
 
+#[allow(clippy::too_many_arguments)]
 impl FusedQuantOps<CudaRuntime> for CudaClient {
     fn fused_int4_swiglu(
         &self,
@@ -50,7 +51,7 @@ impl FusedQuantOps<CudaRuntime> for CudaClient {
 
         let (m_u32, k_u32, n_u32, gs_u32) = (m as u32, k as u32, n as u32, group_size as u32);
         let cfg = LaunchConfig {
-            grid_dim: ((n_u32 + 15) / 16, (m_u32 + 15) / 16, 1),
+            grid_dim: (n_u32.div_ceil(16), m_u32.div_ceil(16), 1),
             block_dim: (16, 16, 1),
             shared_mem_bytes: 0,
         };
@@ -138,7 +139,7 @@ impl FusedQuantOps<CudaRuntime> for CudaClient {
             (m as u32, k as u32, nq as u32, nkv as u32, group_size as u32);
 
         let cfg = LaunchConfig {
-            grid_dim: ((max_n + 15) / 16, (m_u32 + 15) / 16, 3),
+            grid_dim: (max_n.div_ceil(16), m_u32.div_ceil(16), 3),
             block_dim: (16, 16, 1),
             shared_mem_bytes: 0,
         };

@@ -18,6 +18,7 @@ fn unpack_int4_awq(packed: u32, idx: usize) -> u32 {
 ///
 /// Weight stored as qweight [K, N/8] packed u32, with per-group scales/zeros.
 /// Dequant formula: `w = (q - zero) * scale`
+#[allow(clippy::too_many_arguments)]
 pub fn int4_gemm_f32(
     input: &[f32],
     qweight: &[u32],
@@ -55,6 +56,7 @@ pub fn int4_gemm_f32(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn int4_gemm_f32_scalar(
     input: &[f32],
     qweight: &[u32],
@@ -98,6 +100,7 @@ fn int4_gemm_f32_scalar(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
+#[allow(clippy::too_many_arguments)]
 unsafe fn int4_gemm_f32_avx2(
     input: &[f32],
     qweight: &[u32],

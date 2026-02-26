@@ -112,7 +112,7 @@ impl DequantOps<CudaRuntime> for CudaClient {
         let func = kernels::get_kernel_function(&module, kernel_name)?;
 
         let block_size = 256u32;
-        let grid_size = (num_blocks as u32 + block_size - 1) / block_size;
+        let grid_size = (num_blocks as u32).div_ceil(block_size);
         let num_blocks_u32 = num_blocks as u32;
 
         let cfg = LaunchConfig {

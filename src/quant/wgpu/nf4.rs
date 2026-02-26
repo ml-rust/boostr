@@ -94,6 +94,7 @@ pub fn dispatch_nf4_dequant(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_nf4_gemm(
     client: &WgpuClient,
     input: &Tensor<WgpuRuntime>,

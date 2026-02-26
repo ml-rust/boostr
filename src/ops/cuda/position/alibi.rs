@@ -39,7 +39,7 @@ impl AlibiOps<CudaRuntime> for CudaClient {
 
         let total = (batch_size * num_heads * seq_len_q * seq_len_k) as u32;
         let block_size = 256u32;
-        let grid_size = (total + block_size - 1) / block_size;
+        let grid_size = total.div_ceil(block_size);
 
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),

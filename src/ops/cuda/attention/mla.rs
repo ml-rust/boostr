@@ -122,7 +122,7 @@ impl MlaOps<CudaRuntime> for CudaClient {
         // Grid: (batch_size * num_heads, ceil(seq_len_q / BLOCK_M), 1)
         // Block: (BLOCK_M, 1, 1) where BLOCK_M = 128
         const BLOCK_M: usize = 128;
-        let grid_dim_y = ((seq_len_q + BLOCK_M - 1) / BLOCK_M) as u32;
+        let grid_dim_y = seq_len_q.div_ceil(BLOCK_M) as u32;
 
         let cfg = LaunchConfig {
             grid_dim: ((batch_size * num_heads) as u32, grid_dim_y, 1),

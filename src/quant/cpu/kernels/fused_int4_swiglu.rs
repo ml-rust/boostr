@@ -21,6 +21,7 @@ fn silu(x: f32) -> f32 {
 ///
 /// Both gate and up weights in AWQ INT4 format.
 /// input [M, K], gate/up qweight [K, N/8], output [M, N]
+#[allow(clippy::too_many_arguments)]
 pub fn fused_int4_swiglu_f32(
     input: &[f32],
     gate_qweight: &[u32],

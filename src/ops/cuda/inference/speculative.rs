@@ -60,7 +60,7 @@ impl SpeculativeOps<CudaRuntime> for CudaClient {
         let func = kernels::get_kernel_function(&module, "compute_acceptance_probs_kernel")?;
 
         let block_size = 256u32;
-        let grid_size = ((total_elements as u32) + block_size - 1) / block_size;
+        let grid_size = (total_elements as u32).div_ceil(block_size);
 
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
@@ -113,7 +113,7 @@ impl SpeculativeOps<CudaRuntime> for CudaClient {
         let func = kernels::get_kernel_function(&module, "compute_expected_tokens_kernel")?;
 
         let block_size = 256u32;
-        let grid_size = ((batch_size as u32) + block_size - 1) / block_size;
+        let grid_size = (batch_size as u32).div_ceil(block_size);
 
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),

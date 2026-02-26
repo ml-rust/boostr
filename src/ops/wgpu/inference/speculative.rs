@@ -134,7 +134,7 @@ impl SpeculativeOps<WgpuRuntime> for WgpuClient {
             &[&dp_buf, &tp_buf, &acc_buf, &res_buf, &params_buf],
         );
 
-        let workgroups = ((total as u32) + 255) / 256;
+        let workgroups = (total as u32).div_ceil(256);
 
         let mut encoder =
             self.wgpu_device()
@@ -215,7 +215,7 @@ impl SpeculativeOps<WgpuRuntime> for WgpuClient {
 
         let bind_group = cache.create_bind_group(&layout, &[&rates_buf, &out_buf, &params_buf]);
 
-        let workgroups = ((batch_size as u32) + 255) / 256;
+        let workgroups = (batch_size as u32).div_ceil(256);
 
         let mut encoder =
             self.wgpu_device()

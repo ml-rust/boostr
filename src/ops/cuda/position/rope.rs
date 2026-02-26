@@ -10,13 +10,7 @@ use numr::dtype::DType;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 
-/// Validate shapes and narrow caches. Returns (batch_size, num_heads, seq_len, head_dim, dtype,
-/// narrowed cos tensor, narrowed sin tensor, device).
-fn validate_rope_inputs(
-    x: &Var<CudaRuntime>,
-    cos_cache: &Var<CudaRuntime>,
-    sin_cache: &Var<CudaRuntime>,
-) -> Result<(
+type RopeInputs = (
     usize,
     usize,
     usize,
@@ -25,7 +19,15 @@ fn validate_rope_inputs(
     numr::tensor::Tensor<CudaRuntime>,
     numr::tensor::Tensor<CudaRuntime>,
     numr::runtime::cuda::CudaDevice,
-)> {
+);
+
+/// Validate shapes and narrow caches. Returns (batch_size, num_heads, seq_len, head_dim, dtype,
+/// narrowed cos tensor, narrowed sin tensor, device).
+fn validate_rope_inputs(
+    x: &Var<CudaRuntime>,
+    cos_cache: &Var<CudaRuntime>,
+    sin_cache: &Var<CudaRuntime>,
+) -> Result<RopeInputs> {
     let x_tensor = x.tensor();
     let cos_tensor = cos_cache.tensor();
     let sin_tensor = sin_cache.tensor();
@@ -144,7 +146,7 @@ impl RoPEOps<CudaRuntime> for CudaClient {
 
         let total_threads = (batch_size * num_heads * seq_len * head_dim) as u32;
         let block_size = 256u32;
-        let grid_size = (total_threads + block_size - 1) / block_size;
+        let grid_size = total_threads.div_ceil(block_size);
 
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
@@ -201,7 +203,7 @@ impl RoPEOps<CudaRuntime> for CudaClient {
         // One thread per pair (half the total elements)
         let total_pairs = (batch_size * num_heads * seq_len * head_dim / 2) as u32;
         let block_size = 256u32;
-        let grid_size = (total_pairs + block_size - 1) / block_size;
+        let grid_size = total_pairs.div_ceil(block_size);
 
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
@@ -257,7 +259,7 @@ impl RoPEOps<CudaRuntime> for CudaClient {
 
         let total_threads = (batch_size * num_heads * seq_len * head_dim) as u32;
         let block_size = 256u32;
-        let grid_size = (total_threads + block_size - 1) / block_size;
+        let grid_size = total_threads.div_ceil(block_size);
 
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),

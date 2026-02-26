@@ -15,6 +15,7 @@ fn unpack_int4_seq(packed: u32, idx: usize) -> u32 {
 ///
 /// Weight stored as [K/8, N] packed u32 (sequential 4-bit).
 /// Dequant formula: `w = (q - 8) * scale + zero`
+#[allow(clippy::too_many_arguments)]
 pub fn marlin_gemm_f32(
     input: &[f32],
     weight: &[u32],
@@ -52,6 +53,7 @@ pub fn marlin_gemm_f32(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn marlin_gemm_f32_scalar(
     input: &[f32],
     weight: &[u32],
@@ -90,6 +92,7 @@ fn marlin_gemm_f32_scalar(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
+#[allow(clippy::too_many_arguments)]
 unsafe fn marlin_gemm_f32_avx2(
     input: &[f32],
     weight: &[u32],

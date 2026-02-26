@@ -19,6 +19,7 @@ struct SwigluParams {
     group_size: u32,
 }
 
+#[allow(clippy::too_many_arguments)]
 impl FusedQuantOps<WgpuRuntime> for WgpuClient {
     fn fused_int4_swiglu(
         &self,

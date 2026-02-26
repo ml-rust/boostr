@@ -8,18 +8,20 @@ use numr::autograd::{Var, var_add, var_cat, var_mul, var_narrow, var_sub};
 use numr::ops::{ScalarOps, ShapeOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
 
+/// Output of `validate_and_prepare`: (shape, seq_len, half_d, cos_narrowed, sin_narrowed).
+type PrepareOutput<R> = (Vec<usize>, usize, usize, Var<R>, Var<R>);
+
 /// Validate inputs common to all RoPE variants.
-/// Returns `(seq_len, half_d, cos_narrowed, sin_narrowed)` with caches
+/// Returns `(shape, seq_len, half_d, cos_narrowed, sin_narrowed)` with caches
 /// reshaped to `[1, 1, S, D/2]` for broadcasting.
-fn validate_and_prepare<R, C>(
+fn validate_and_prepare<R>(
     x: &Var<R>,
     cos_cache: &Var<R>,
     sin_cache: &Var<R>,
-) -> Result<(Vec<usize>, usize, usize, Var<R>, Var<R>)>
+) -> Result<PrepareOutput<R>>
 where
     R: Runtime<DType = numr::dtype::DType>,
-    C: RuntimeClient<R> + ScalarOps<R> + ShapeOps<R>,
-    R::Client: TensorOps<R> + ShapeOps<R>,
+    R::Client: RuntimeClient<R> + ShapeOps<R> + TensorOps<R>,
 {
     let shape = x.tensor().shape().to_vec();
     if shape.len() != 4 {
@@ -100,7 +102,7 @@ where
     R::Client: TensorOps<R> + ShapeOps<R>,
 {
     let (_shape, _seq_len, half_d, cos_reshaped, sin_reshaped) =
-        validate_and_prepare::<R, C>(x, cos_cache, sin_cache)?;
+        validate_and_prepare::<R>(x, cos_cache, sin_cache)?;
 
     // Split x into two halves along last dim: x1 = x[..., :D/2], x2 = x[..., D/2:]
     let x1 = var_narrow(x, -1, 0, half_d).map_err(Error::Numr)?;
@@ -143,7 +145,7 @@ where
     R::Client: TensorOps<R> + ShapeOps<R>,
 {
     let (shape, seq_len, half_d, cos_reshaped, sin_reshaped) =
-        validate_and_prepare::<R, C>(x, cos_cache, sin_cache)?;
+        validate_and_prepare::<R>(x, cos_cache, sin_cache)?;
 
     let b = shape[0];
     let h = shape[1];

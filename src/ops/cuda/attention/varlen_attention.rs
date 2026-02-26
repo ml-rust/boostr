@@ -65,7 +65,7 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
         const BLOCK_M: usize = 128;
         const BLOCK_N: usize = 64;
         // Grid must cover all batches × heads × Q blocks per batch
-        let num_q_blocks_per_batch = (max_seqlen_q + BLOCK_M - 1) / BLOCK_M;
+        let num_q_blocks_per_batch = max_seqlen_q.div_ceil(BLOCK_M);
         let num_q_blocks = num_q_blocks_per_batch * batch_size;
 
         let dtype_size = dtype.size_in_bytes();
@@ -179,7 +179,7 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
 
         const BLOCK_M: usize = 128;
         const BLOCK_N: usize = 64;
-        let num_q_blocks_per_batch = (max_seqlen_q + BLOCK_M - 1) / BLOCK_M;
+        let num_q_blocks_per_batch = max_seqlen_q.div_ceil(BLOCK_M);
         let num_q_blocks = num_q_blocks_per_batch * batch_size;
 
         // Shared memory: Q + K + V + dO (BLOCK_M*HD + 2*BLOCK_N*HD + BLOCK_M*HD) + row_sum

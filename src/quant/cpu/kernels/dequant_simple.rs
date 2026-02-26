@@ -147,8 +147,8 @@ pub fn dequant_q8_0(blocks: &[u8], output: &mut [f32]) {
         let qs = &block[2..34];
         let out = &mut output[b * BLOCK_SIZE..][..BLOCK_SIZE];
 
-        for i in 0..32 {
-            out[i] = qs[i] as i8 as f32 * d;
+        for (out_val, &qs_val) in out.iter_mut().zip(qs.iter()) {
+            *out_val = qs_val as i8 as f32 * d;
         }
     }
 }
@@ -171,8 +171,8 @@ pub fn dequant_q8_1(blocks: &[u8], output: &mut [f32]) {
         let qs = &block[4..36];
         let out = &mut output[b * BLOCK_SIZE..][..BLOCK_SIZE];
 
-        for i in 0..32 {
-            out[i] = qs[i] as i8 as f32 * d;
+        for (out_val, &qs_val) in out.iter_mut().zip(qs.iter()) {
+            *out_val = qs_val as i8 as f32 * d;
         }
     }
 }

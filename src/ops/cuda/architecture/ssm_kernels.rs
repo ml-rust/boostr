@@ -95,7 +95,7 @@ impl SsmKernelOps<CudaRuntime> for CudaClient {
 
         let total_threads = (batch * nheads * headdim * dstate) as u32;
         let block_dim = 256u32;
-        let grid_dim = (total_threads + block_dim - 1) / block_dim;
+        let grid_dim = total_threads.div_ceil(block_dim);
 
         let cfg = LaunchConfig {
             grid_dim: (grid_dim, 1, 1),

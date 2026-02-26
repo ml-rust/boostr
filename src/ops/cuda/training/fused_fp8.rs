@@ -75,7 +75,7 @@ impl FusedFp8TrainingOps<CudaRuntime> for CudaClient {
             })?;
 
         let threads = 256u32;
-        let blocks = ((n + 255) / 256) as u32;
+        let blocks = n.div_ceil(256) as u32;
         let shared_bytes = threads * 4; // f32 per thread for reduction
         let cfg = LaunchConfig {
             grid_dim: (blocks, 1, 1),

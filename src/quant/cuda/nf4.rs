@@ -22,7 +22,7 @@ pub fn launch_nf4_dequant(
     let func = kernels::get_kernel_function(&module, "nf4_dequant_f32")?;
 
     let block_size = 256u32;
-    let grid_size = (num_bytes + block_size - 1) / block_size;
+    let grid_size = num_bytes.div_ceil(block_size);
 
     let cfg = LaunchConfig {
         grid_dim: (grid_size, 1, 1),
@@ -48,6 +48,7 @@ pub fn launch_nf4_dequant(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn launch_nf4_gemm(
     client: &CudaClient,
     input: &Tensor<CudaRuntime>,
@@ -64,7 +65,7 @@ pub fn launch_nf4_gemm(
     let func = kernels::get_kernel_function(&module, "nf4_gemm_f32")?;
 
     let cfg = LaunchConfig {
-        grid_dim: ((n + 15) / 16, (m + 15) / 16, 1),
+        grid_dim: (n.div_ceil(16), m.div_ceil(16), 1),
         block_dim: (16, 16, 1),
         shared_mem_bytes: 0,
     };

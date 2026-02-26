@@ -19,7 +19,7 @@ use crate::ops::cuda::kernels::{
 
 fn launch_cfg(n: usize) -> LaunchConfig {
     let threads = 256u32;
-    let blocks = ((n + 255) / 256) as u32;
+    let blocks = n.div_ceil(256) as u32;
     LaunchConfig {
         grid_dim: (blocks, 1, 1),
         block_dim: (threads, 1, 1),
@@ -40,6 +40,7 @@ fn kernel_suffix(dtype: DType) -> Result<&'static str> {
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 impl FusedOptimizerOps<CudaRuntime> for CudaClient {
     fn fused_adamw_step(
         &self,

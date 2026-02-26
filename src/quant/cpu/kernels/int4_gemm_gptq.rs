@@ -14,6 +14,7 @@ fn unpack_int4_seq(packed: u32, idx: usize) -> u32 {
 /// Weight stored as qweight [K/8, N] packed u32, with per-group scales/qzeros and g_idx.
 /// Dequant formula: `w = q * scale + zero`
 /// (where zero = -(qzero * scale), effectively `w = (q - qzero) * scale` but computed differently)
+#[allow(clippy::too_many_arguments)]
 pub fn int4_gemm_gptq_f32(
     input: &[f32],
     qweight: &[u32],

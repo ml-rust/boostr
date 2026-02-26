@@ -112,8 +112,8 @@ fn unpack_q3k_scales(sc: &[u8]) -> [i8; 16] {
     bytes[12..16].copy_from_slice(&aux[3].to_le_bytes());
 
     let mut scales = [0i8; 16];
-    for i in 0..16 {
-        scales[i] = bytes[i] as i8 - 32;
+    for (scale, &byte) in scales.iter_mut().zip(bytes.iter()) {
+        *scale = byte as i8 - 32;
     }
     scales
 }
@@ -310,8 +310,8 @@ pub fn dequant_q8k(blocks: &[u8], output: &mut [f32]) {
         // block[260..292] is bsums[16] (i16), ignored for dequant
         let out = &mut output[b * BLOCK_SIZE..][..BLOCK_SIZE];
 
-        for i in 0..256 {
-            out[i] = qs[i] as i8 as f32 * d;
+        for (out_val, &qs_val) in out.iter_mut().zip(qs.iter()) {
+            *out_val = qs_val as i8 as f32 * d;
         }
     }
 }

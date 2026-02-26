@@ -233,7 +233,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         let p = validate_qkv(q, k, v, num_heads, num_kv_heads, head_dim)?;
 
         // Try Flash v3 on Hopper (SM 90+) for supported configs
-        if num_kv_heads == num_heads && window_size == 0 && flash_v3::is_hopper(self, &q.device()) {
+        if num_kv_heads == num_heads && window_size == 0 && flash_v3::is_hopper(self, q.device()) {
             if let Some(result) = flash_v3::flash_v3_fwd(
                 self,
                 q,
@@ -292,7 +292,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         let cfg = LaunchConfig {
             grid_dim: (
                 (p.batch_size * p.num_heads) as u32,
-                ((p.seq_len_q + p.block_m - 1) / p.block_m) as u32,
+                p.seq_len_q.div_ceil(p.block_m) as u32,
                 1,
             ),
             block_dim: (p.block_m as u32, 1, 1),
@@ -386,7 +386,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
 
         // FP8 is 1 byte per element
         let head_stride = head_dim + 1;
-        let smem_size = (p.block_m * head_stride + 2 * p.block_n * head_stride) * 1;
+        let smem_size = p.block_m * head_stride + 2 * p.block_n * head_stride;
 
         let device_index = device.id();
         let module = kernels::get_or_load_module(self.context(), device_index, FLASH_V2_MODULE)?;
@@ -396,7 +396,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         let cfg = LaunchConfig {
             grid_dim: (
                 (p.batch_size * p.num_heads) as u32,
-                ((p.seq_len_q + p.block_m - 1) / p.block_m) as u32,
+                p.seq_len_q.div_ceil(p.block_m) as u32,
                 1,
             ),
             block_dim: (p.block_m as u32, 1, 1),
@@ -463,7 +463,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         let p = validate_qkv(q, k, v, num_heads, num_kv_heads, head_dim)?;
 
         // Try Flash v3 on Hopper (SM 90+) for supported configs
-        if num_kv_heads == num_heads && window_size == 0 && flash_v3::is_hopper(self, &q.device()) {
+        if num_kv_heads == num_heads && window_size == 0 && flash_v3::is_hopper(self, q.device()) {
             if let Some(result) = flash_v3::flash_v3_bwd(
                 self,
                 dout,
@@ -581,7 +581,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             // Grid: (batch * num_heads, ceil(seq_len_q / block_size))
             let block_size = 256u32;
             let grid_x = (p.batch_size * p.num_heads) as u32;
-            let grid_y = (p.seq_len_q as u32 + block_size - 1) / block_size;
+            let grid_y = (p.seq_len_q as u32).div_ceil(block_size);
 
             let cfg = LaunchConfig {
                 grid_dim: (grid_x, grid_y, 1),
@@ -624,7 +624,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
 
             // Grid: (batch * num_heads, ceil(seq_len_k / BLOCK_N))
             let grid_x = (p.batch_size * p.num_heads) as u32;
-            let grid_y = ((p.seq_len_k + p.block_n - 1) / p.block_n) as u32;
+            let grid_y = p.seq_len_k.div_ceil(p.block_n) as u32;
 
             let cfg = LaunchConfig {
                 grid_dim: (grid_x, grid_y, 1),
@@ -773,7 +773,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
 
             let block_size = 256u32;
             let grid_x = (p.batch_size * p.num_heads) as u32;
-            let grid_y = (p.seq_len_q as u32 + block_size - 1) / block_size;
+            let grid_y = (p.seq_len_q as u32).div_ceil(block_size);
 
             let cfg = LaunchConfig {
                 grid_dim: (grid_x, grid_y, 1),
@@ -814,7 +814,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             set_smem_attribute(&func, smem_size)?;
 
             let grid_x = (p.batch_size * p.num_heads) as u32;
-            let grid_y = ((p.seq_len_k + p.block_n - 1) / p.block_n) as u32;
+            let grid_y = p.seq_len_k.div_ceil(p.block_n) as u32;
 
             let cfg = LaunchConfig {
                 grid_dim: (grid_x, grid_y, 1),

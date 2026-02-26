@@ -8,6 +8,7 @@ use numr::tensor::Tensor;
 
 use super::kernels::{fused_int4_qkv, fused_int4_swiglu};
 
+#[allow(clippy::too_many_arguments)]
 impl FusedQuantOps<CpuRuntime> for CpuClient {
     fn fused_int4_swiglu(
         &self,

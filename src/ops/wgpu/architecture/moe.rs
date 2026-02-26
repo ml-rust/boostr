@@ -310,8 +310,8 @@ fn launch_grouped_gemm_wgpu(
     // grid_y uses total_tokens as a conservative upper bound — no CPU readback needed.
     // The shader reads offsets from device memory and guards: `if (row < count)`.
     const TILE: u32 = 16;
-    let grid_x = (out_dim as u32 + TILE - 1) / TILE;
-    let grid_y = (total_tokens as u32 + TILE - 1) / TILE;
+    let grid_x = (out_dim as u32).div_ceil(TILE);
+    let grid_y = (total_tokens as u32).div_ceil(TILE);
     let grid_z = num_experts as u32;
 
     let mut encoder =

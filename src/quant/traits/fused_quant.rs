@@ -8,6 +8,7 @@ use numr::tensor::Tensor;
 ///
 /// These avoid redundant activation reads by computing multiple projections
 /// in a single pass over the input tensor.
+#[allow(clippy::too_many_arguments)]
 pub trait FusedQuantOps<R: Runtime> {
     /// Fused INT4 dual-GEMM + SwiGLU: `silu(input @ gate_w) * (input @ up_w)`
     ///

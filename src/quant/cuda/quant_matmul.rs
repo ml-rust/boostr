@@ -201,8 +201,8 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         // 2D grid: each thread computes one (row, col) of output
         let block_x = 16u32;
         let block_y = 16u32;
-        let grid_x = (n as u32 + block_x - 1) / block_x;
-        let grid_y = (m as u32 + block_y - 1) / block_y;
+        let grid_x = (n as u32).div_ceil(block_x);
+        let grid_y = (m as u32).div_ceil(block_y);
 
         let m_u32 = m as u32;
         let k_u32 = k as u32;

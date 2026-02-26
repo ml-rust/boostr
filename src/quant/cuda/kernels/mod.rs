@@ -27,6 +27,7 @@ pub const FUSED_INT4_SWIGLU_MODULE: &str = "fused_int4_swiglu";
 pub const FUSED_INT4_QKV_MODULE: &str = "fused_int4_qkv";
 
 /// Cache for loaded CUDA modules, keyed by (device_index, module_name)
+#[allow(clippy::type_complexity)]
 static MODULE_CACHE: OnceLock<Mutex<HashMap<(usize, &'static str), Arc<CudaModule>>>> =
     OnceLock::new();
 

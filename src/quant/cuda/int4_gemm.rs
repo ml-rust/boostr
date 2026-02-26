@@ -9,6 +9,7 @@ use numr::tensor::Tensor;
 
 use super::kernels::{self, INT4_GEMM_GPTQ_MODULE, INT4_GEMM_MODULE, MARLIN_GEMM_MODULE};
 
+#[allow(clippy::too_many_arguments)]
 pub fn launch_int4_gemm(
     client: &CudaClient,
     input: &Tensor<CudaRuntime>,
@@ -26,7 +27,7 @@ pub fn launch_int4_gemm(
     let func = kernels::get_kernel_function(&module, "int4_gemm_f32")?;
 
     let cfg = LaunchConfig {
-        grid_dim: ((n + 15) / 16, (m + 15) / 16, 1),
+        grid_dim: (n.div_ceil(16), m.div_ceil(16), 1),
         block_dim: (16, 16, 1),
         shared_mem_bytes: 0,
     };
@@ -55,6 +56,7 @@ pub fn launch_int4_gemm(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn launch_int4_gemm_gptq(
     client: &CudaClient,
     input: &Tensor<CudaRuntime>,
@@ -73,7 +75,7 @@ pub fn launch_int4_gemm_gptq(
     let func = kernels::get_kernel_function(&module, "int4_gemm_gptq_f32")?;
 
     let cfg = LaunchConfig {
-        grid_dim: ((n + 15) / 16, (m + 15) / 16, 1),
+        grid_dim: (n.div_ceil(16), m.div_ceil(16), 1),
         block_dim: (16, 16, 1),
         shared_mem_bytes: 0,
     };
@@ -103,6 +105,7 @@ pub fn launch_int4_gemm_gptq(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn launch_marlin_gemm(
     client: &CudaClient,
     input: &Tensor<CudaRuntime>,
@@ -120,7 +123,7 @@ pub fn launch_marlin_gemm(
     let func = kernels::get_kernel_function(&module, "marlin_gemm_f32")?;
 
     let cfg = LaunchConfig {
-        grid_dim: ((n + 15) / 16, (m + 15) / 16, 1),
+        grid_dim: (n.div_ceil(16), m.div_ceil(16), 1),
         block_dim: (16, 16, 1),
         shared_mem_bytes: 0,
     };

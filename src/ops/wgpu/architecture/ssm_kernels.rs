@@ -147,7 +147,7 @@ impl SsmKernelOps<WgpuRuntime> for WgpuClient {
 
         let total_threads = (batch * nheads * headdim * dstate) as u32;
         let workgroup_size = 256u32;
-        let num_workgroups = (total_threads + workgroup_size - 1) / workgroup_size;
+        let num_workgroups = total_threads.div_ceil(workgroup_size);
 
         let mut encoder =
             self.wgpu_device()

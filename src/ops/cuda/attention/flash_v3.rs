@@ -56,6 +56,7 @@ pub fn is_hopper(
 
 /// Flash v3 forward — supports head_dim 64 and 128 only.
 /// Returns None if head_dim is not supported by v3 (caller falls back to v2).
+#[allow(clippy::too_many_arguments)]
 pub fn flash_v3_fwd(
     client: &CudaClient,
     q: &Tensor<CudaRuntime>,
@@ -116,7 +117,7 @@ pub fn flash_v3_fwd(
     let cfg = LaunchConfig {
         grid_dim: (
             (batch_size * num_heads) as u32,
-            ((seq_len_q + 127) / 128) as u32,
+            seq_len_q.div_ceil(128) as u32,
             1,
         ),
         block_dim: (256, 1, 1),
@@ -156,8 +157,16 @@ pub fn flash_v3_fwd(
     Ok(Some((output, lse)))
 }
 
+/// Return type of `flash_v3_bwd`: gradients for q, k, v.
+type BwdGrads = Option<(
+    Tensor<CudaRuntime>,
+    Tensor<CudaRuntime>,
+    Tensor<CudaRuntime>,
+)>;
+
 /// Flash v3 backward — supports head_dim 64 and 128 only.
 /// Returns None if head_dim is not supported.
+#[allow(clippy::too_many_arguments)]
 pub fn flash_v3_bwd(
     client: &CudaClient,
     dout: &Tensor<CudaRuntime>,
@@ -172,13 +181,7 @@ pub fn flash_v3_bwd(
     seq_len_k: usize,
     head_dim: usize,
     causal: bool,
-) -> Result<
-    Option<(
-        Tensor<CudaRuntime>,
-        Tensor<CudaRuntime>,
-        Tensor<CudaRuntime>,
-    )>,
-> {
+) -> Result<BwdGrads> {
     if head_dim != 64 && head_dim != 128 {
         return Ok(None);
     }
@@ -226,7 +229,7 @@ pub fn flash_v3_bwd(
         let cfg = LaunchConfig {
             grid_dim: (
                 (batch_size * num_heads) as u32,
-                (seq_len_q as u32 + block_size - 1) / block_size,
+                (seq_len_q as u32).div_ceil(block_size),
                 1,
             ),
             block_dim: (block_size, 1, 1),
@@ -271,7 +274,7 @@ pub fn flash_v3_bwd(
         let cfg = LaunchConfig {
             grid_dim: (
                 (batch_size * num_heads) as u32,
-                ((seq_len_k + block_n - 1) / block_n) as u32,
+                seq_len_k.div_ceil(block_n) as u32,
                 1,
             ),
             block_dim: (block_n as u32, 1, 1),

@@ -40,7 +40,11 @@ impl CalibrationOps<WgpuRuntime> for WgpuClient {
         num_bits: u32,
         group_size: u32,
         symmetric: bool,
-    ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
+    ) -> Result<(
+        Tensor<WgpuRuntime>,
+        Tensor<WgpuRuntime>,
+        Tensor<WgpuRuntime>,
+    )> {
         gptq_quantize_column_impl(self, weight, h_inv, num_bits, group_size, symmetric)
     }
 }

@@ -58,8 +58,7 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
 
         let device = activations.device();
         let device_index = device.id();
-        let module =
-            kernels::get_or_load_module(self.context(), device_index, CALIBRATION_MODULE)?;
+        let module = kernels::get_or_load_module(self.context(), device_index, CALIBRATION_MODULE)?;
 
         // Step 1: act_scale[j] = max_n(|act[n,j]|) → [K]
         let act_scale = Tensor::<CudaRuntime>::zeros(&[k], dtype, device);
@@ -130,10 +129,7 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
         Ok(scores)
     }
 
-    fn fisher_information(
-        &self,
-        gradients: &Tensor<CudaRuntime>,
-    ) -> Result<Tensor<CudaRuntime>> {
+    fn fisher_information(&self, gradients: &Tensor<CudaRuntime>) -> Result<Tensor<CudaRuntime>> {
         let shape = gradients.shape();
         if shape.len() != 2 {
             return Err(Error::InvalidArgument {
@@ -159,8 +155,7 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
 
         let device = gradients.device();
         let device_index = device.id();
-        let module =
-            kernels::get_or_load_module(self.context(), device_index, CALIBRATION_MODULE)?;
+        let module = kernels::get_or_load_module(self.context(), device_index, CALIBRATION_MODULE)?;
 
         let output = Tensor::<CudaRuntime>::zeros(&[p], dtype, device);
         let func_name = format!("fisher_accumulate_{}", kernel_prefix);
@@ -210,7 +205,11 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
         num_bits: u32,
         group_size: u32,
         symmetric: bool,
-    ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
+    ) -> Result<(
+        Tensor<CudaRuntime>,
+        Tensor<CudaRuntime>,
+        Tensor<CudaRuntime>,
+    )> {
         // Delegate to impl_generic — sequential column loop
         gptq_quantize_column_impl(self, weight, h_inv, num_bits, group_size, symmetric)
     }

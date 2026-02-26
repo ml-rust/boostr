@@ -63,10 +63,7 @@ where
 /// Diagonal Fisher Information: fisher[i] = mean_n(grad[n, i]^2)
 ///
 /// gradients: [N, P] → output: [P]
-pub fn fisher_information_impl<R, C>(
-    client: &C,
-    gradients: &Tensor<R>,
-) -> Result<Tensor<R>>
+pub fn fisher_information_impl<R, C>(client: &C, gradients: &Tensor<R>) -> Result<Tensor<R>>
 where
     R: Runtime<DType = DType>,
     C: RuntimeClient<R> + UnaryOps<R> + ReduceOps<R>,
@@ -113,7 +110,10 @@ where
     if x_shape[1] != h_shape[0] {
         return Err(Error::InvalidArgument {
             arg: "x_block",
-            reason: format!("K mismatch: x_block K={}, hessian K={}", x_shape[1], h_shape[0]),
+            reason: format!(
+                "K mismatch: x_block K={}, hessian K={}",
+                x_shape[1], h_shape[0]
+            ),
         });
     }
 
@@ -217,10 +217,12 @@ where
                 let group_vals = &w_work[start..end];
 
                 let (scale, zero) = if symmetric {
-                    let amax = group_vals
-                        .iter()
-                        .fold(0.0f32, |acc, &v| acc.max(v.abs()));
-                    let s = if amax == 0.0 { 1.0 } else { amax / (qmax_f as f32 / 2.0) };
+                    let amax = group_vals.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
+                    let s = if amax == 0.0 {
+                        1.0
+                    } else {
+                        amax / (qmax_f as f32 / 2.0)
+                    };
                     (s, 0.0f32)
                 } else {
                     let vmin = group_vals.iter().cloned().fold(f32::INFINITY, f32::min);
@@ -259,7 +261,12 @@ where
             q_out[idx] = q;
 
             // Error compensation: propagate error to remaining columns
-            let err = (w_val - q) / if h_inv_jj.abs() < 1e-10 { 1.0 } else { h_inv_jj };
+            let err = (w_val - q)
+                / if h_inv_jj.abs() < 1e-10 {
+                    1.0
+                } else {
+                    h_inv_jj
+                };
             for j2 in (col + 1)..k {
                 let h_val = h_data[col * k + j2];
                 w_work[row * k + j2] -= err * h_val;
@@ -283,16 +290,8 @@ mod tests {
     #[test]
     fn test_awq_channel_scores_shape() {
         let (client, device) = cpu_setup();
-        let act = Tensor::<CpuRuntime>::from_slice(
-            &[1.0f32; 4 * 8],
-            &[4, 8],
-            &device,
-        );
-        let w = Tensor::<CpuRuntime>::from_slice(
-            &[1.0f32; 6 * 8],
-            &[6, 8],
-            &device,
-        );
+        let act = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4 * 8], &[4, 8], &device);
+        let w = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6 * 8], &[6, 8], &device);
         let result = awq_channel_scores_impl(&client, &act, &w).unwrap();
         assert_eq!(result.shape(), &[8]);
     }
@@ -304,16 +303,8 @@ mod tests {
         // act_scale = max_abs over rows = [3, 2]
         // |W| * act_scale = [[2*3, 1*2], [1*3, 3*2]] = [[6, 2], [3, 6]]
         // score = mean over rows = [4.5, 4.0]
-        let act = Tensor::<CpuRuntime>::from_slice(
-            &[1.0f32, -2.0, 3.0, -1.0],
-            &[2, 2],
-            &device,
-        );
-        let w = Tensor::<CpuRuntime>::from_slice(
-            &[2.0f32, 1.0, 1.0, 3.0],
-            &[2, 2],
-            &device,
-        );
+        let act = Tensor::<CpuRuntime>::from_slice(&[1.0f32, -2.0, 3.0, -1.0], &[2, 2], &device);
+        let w = Tensor::<CpuRuntime>::from_slice(&[2.0f32, 1.0, 1.0, 3.0], &[2, 2], &device);
         let result = awq_channel_scores_impl(&client, &act, &w).unwrap();
         let data = result.to_vec::<f32>();
         assert!((data[0] - 4.5).abs() < 1e-5);
@@ -323,11 +314,7 @@ mod tests {
     #[test]
     fn test_fisher_information_shape() {
         let (client, device) = cpu_setup();
-        let grads = Tensor::<CpuRuntime>::from_slice(
-            &[1.0f32; 16 * 32],
-            &[16, 32],
-            &device,
-        );
+        let grads = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 16 * 32], &[16, 32], &device);
         let result = fisher_information_impl(&client, &grads).unwrap();
         assert_eq!(result.shape(), &[32]);
     }
@@ -338,11 +325,7 @@ mod tests {
         // grads = [[1, 2], [3, 4]]
         // squared = [[1, 4], [9, 16]]
         // mean over rows = [5.0, 10.0]
-        let grads = Tensor::<CpuRuntime>::from_slice(
-            &[1.0f32, 2.0, 3.0, 4.0],
-            &[2, 2],
-            &device,
-        );
+        let grads = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device);
         let result = fisher_information_impl(&client, &grads).unwrap();
         let data = result.to_vec::<f32>();
         assert!((data[0] - 5.0).abs() < 1e-5);
@@ -353,11 +336,7 @@ mod tests {
     fn test_gptq_hessian_update_shape() {
         let (client, device) = cpu_setup();
         let h = Tensor::<CpuRuntime>::zeros(&[8, 8], DType::F32, &device);
-        let x = Tensor::<CpuRuntime>::from_slice(
-            &[1.0f32; 4 * 8],
-            &[4, 8],
-            &device,
-        );
+        let x = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4 * 8], &[4, 8], &device);
         let result = gptq_hessian_update_impl(&client, &h, &x).unwrap();
         assert_eq!(result.shape(), &[8, 8]);
     }
@@ -374,7 +353,14 @@ mod tests {
         for i in 0..4 {
             for j in 0..4 {
                 let diff = (data[i * 4 + j] - data[j * 4 + i]).abs();
-                assert!(diff < 1e-5, "not symmetric at [{},{}]: {} vs {}", i, j, data[i * 4 + j], data[j * 4 + i]);
+                assert!(
+                    diff < 1e-5,
+                    "not symmetric at [{},{}]: {} vs {}",
+                    i,
+                    j,
+                    data[i * 4 + j],
+                    data[j * 4 + i]
+                );
             }
         }
     }
@@ -391,9 +377,8 @@ mod tests {
         }
         let h_inv = Tensor::<CpuRuntime>::from_slice(&h_inv_data, &[8, 8], &device);
 
-        let (q, scales, zeros) = gptq_quantize_column_impl(
-            &client, &w, &h_inv, 4, 4, false,
-        ).unwrap();
+        let (q, scales, zeros) =
+            gptq_quantize_column_impl(&client, &w, &h_inv, 4, 4, false).unwrap();
 
         assert_eq!(q.shape(), &[4, 8]);
         assert_eq!(scales.shape(), &[4, 2]);

@@ -25,11 +25,8 @@ pub trait CalibrationOps<R: Runtime> {
     /// - `activations`: `[N, K]` — calibration activations (N samples, K channels)
     /// - `weights`: `[M, K]` — weight matrix (M output features, K input channels)
     /// - Output: `[K]` — per-channel importance scores
-    fn awq_channel_scores(
-        &self,
-        activations: &Tensor<R>,
-        weights: &Tensor<R>,
-    ) -> Result<Tensor<R>>;
+    fn awq_channel_scores(&self, activations: &Tensor<R>, weights: &Tensor<R>)
+    -> Result<Tensor<R>>;
 
     /// Diagonal Fisher Information Matrix.
     ///
@@ -60,11 +57,7 @@ pub trait CalibrationOps<R: Runtime> {
     /// - `hessian`: `[K, K]` — current Hessian estimate
     /// - `x_block`: `[B, K]` — block of calibration inputs
     /// - Output: `[K, K]` — updated Hessian
-    fn gptq_hessian_update(
-        &self,
-        hessian: &Tensor<R>,
-        x_block: &Tensor<R>,
-    ) -> Result<Tensor<R>>;
+    fn gptq_hessian_update(&self, hessian: &Tensor<R>, x_block: &Tensor<R>) -> Result<Tensor<R>>;
 
     /// GPTQ column-wise quantization with error compensation.
     ///

@@ -36,12 +36,13 @@ fn dequant_q4_0(@builtin(global_invocation_id) gid: vec3<u32>) {{
     }}
 
     let base_byte = block_idx * BLOCK_BYTES;
-    let delta = read_f16(&input, base_byte);
+    let delta = f16_to_f32((input[base_byte / 4u] >> ((base_byte % 4u) * 8u)) & 0xFFFFu);
 
     let out_base = block_idx * BLOCK_SIZE;
 
     for (var i: u32 = 0u; i < 16u; i = i + 1u) {{
-        let byte_val = read_u8(&input, base_byte + 2u + i);
+        let u8_byte_idx = base_byte + 2u + i;
+        let byte_val = ((input[u8_byte_idx / 4u] >> ((u8_byte_idx % 4u) * 8u)) & 0xFFu);
         let lo = byte_val & 0xFu;
         let hi = (byte_val >> 4u) & 0xFu;
 
@@ -88,12 +89,14 @@ fn dequant_q8_0(@builtin(global_invocation_id) gid: vec3<u32>) {{
     }}
 
     let base_byte = block_idx * BLOCK_BYTES;
-    let delta = read_f16(&input, base_byte);
+    let delta = f16_to_f32((input[base_byte / 4u] >> ((base_byte % 4u) * 8u)) & 0xFFFFu);
 
     let out_base = block_idx * BLOCK_SIZE;
 
     for (var i: u32 = 0u; i < 32u; i = i + 1u) {{
-        let qs = read_i8(&input, base_byte + 2u + i);
+        let i8_byte_idx = base_byte + 2u + i;
+        let i8_u8 = ((input[i8_byte_idx / 4u] >> ((i8_byte_idx % 4u) * 8u)) & 0xFFu);
+        let qs = select(i32(i8_u8), i32(i8_u8) - 256, i8_u8 >= 128u);
         output[out_base + i] = f32(qs) * delta;
     }}
 }}
@@ -142,8 +145,9 @@ fn dequant_q4_k(@builtin(global_invocation_id) gid: vec3<u32>) {{
     let base = block_idx * BLOCK_BYTES;
 
     // Read super-block scale and min
-    let d = read_f16(&input, base);
-    let dmin = read_f16(&input, base + 2u);
+    let d = f16_to_f32((input[base / 4u] >> ((base % 4u) * 8u)) & 0xFFFFu);
+    let dmin_byte = base + 2u;
+    let dmin = f16_to_f32((input[dmin_byte / 4u] >> ((dmin_byte % 4u) * 8u)) & 0xFFFFu);
 
     let out_base = block_idx * BLOCK_SIZE;
 
@@ -176,15 +180,18 @@ fn dequant_q4_k(@builtin(global_invocation_id) gid: vec3<u32>) {{
         var mn: f32;
 
         if (sb < 4u) {{
-            let scale_byte = read_u8(&input, scales_base + sb);
+            let sb_byte_idx = scales_base + sb;
+            let scale_byte = ((input[sb_byte_idx / 4u] >> ((sb_byte_idx % 4u) * 8u)) & 0xFFu);
             sc = d * f32(scale_byte & 63u);
-            let min_byte = read_u8(&input, scales_base + sb + 4u);
+            let min_byte_idx = scales_base + sb + 4u;
+            let min_byte = ((input[min_byte_idx / 4u] >> ((min_byte_idx % 4u) * 8u)) & 0xFFu);
             mn = dmin * f32(min_byte & 63u);
         }} else {{
-            // Sub-blocks 4-7 use high bits from bytes 8-11
             let sb_off = sb - 4u;
-            let scale_byte_lo = read_u8(&input, scales_base + sb);
-            let scale_byte_hi = read_u8(&input, scales_base + sb + 4u);
+            let slo_byte_idx = scales_base + sb;
+            let scale_byte_lo = ((input[slo_byte_idx / 4u] >> ((slo_byte_idx % 4u) * 8u)) & 0xFFu);
+            let shi_byte_idx = scales_base + sb + 4u;
+            let scale_byte_hi = ((input[shi_byte_idx / 4u] >> ((shi_byte_idx % 4u) * 8u)) & 0xFFu);
             sc = d * f32((scale_byte_lo & 63u) | ((scale_byte_hi & 0x03u) << 6u));
             mn = dmin * f32(((scale_byte_lo >> 6u) & 3u) | ((scale_byte_hi >> 2u) << 2u));
         }}
@@ -193,7 +200,8 @@ fn dequant_q4_k(@builtin(global_invocation_id) gid: vec3<u32>) {{
         let sub_out_base = out_base + sb * 32u;
 
         for (var i: u32 = 0u; i < 16u; i = i + 1u) {{
-            let byte_val = read_u8(&input, sub_qs_base + i);
+            let qs_byte_idx = sub_qs_base + i;
+            let byte_val = ((input[qs_byte_idx / 4u] >> ((qs_byte_idx % 4u) * 8u)) & 0xFFu);
             let lo = byte_val & 0xFu;
             let hi = (byte_val >> 4u) & 0xFu;
 
@@ -251,19 +259,21 @@ fn dequant_q6_k(@builtin(global_invocation_id) gid: vec3<u32>) {{
     let sc_base = base + 192u;   // 16 bytes: int8 scales
     let d_offset = base + 208u;  // 2 bytes: f16 scale
 
-    let d = read_f16(&input, d_offset);
+    let d = f16_to_f32((input[d_offset / 4u] >> ((d_offset % 4u) * 8u)) & 0xFFFFu);
     let out_base = block_idx * BLOCK_SIZE;
 
     // 16 sub-blocks of 16 elements each
     for (var sb: u32 = 0u; sb < 16u; sb = sb + 1u) {{
-        let scale = read_i8(&input, sc_base + sb);
+        let sc_byte_idx = sc_base + sb;
+        let sc_u8 = ((input[sc_byte_idx / 4u] >> ((sc_byte_idx % 4u) * 8u)) & 0xFFu);
+        let scale = select(i32(sc_u8), i32(sc_u8) - 256, sc_u8 >= 128u);
 
         for (var i: u32 = 0u; i < 16u; i = i + 1u) {{
             let elem_idx = sb * 16u + i;
 
             // Read low 4 bits from ql
-            let ql_byte_idx = elem_idx / 2u;
-            let ql_byte = read_u8(&input, ql_base + ql_byte_idx);
+            let ql_byte_idx = ql_base + elem_idx / 2u;
+            let ql_byte = ((input[ql_byte_idx / 4u] >> ((ql_byte_idx % 4u) * 8u)) & 0xFFu);
             var ql_val: u32;
             if (elem_idx % 2u == 0u) {{
                 ql_val = ql_byte & 0xFu;
@@ -272,8 +282,8 @@ fn dequant_q6_k(@builtin(global_invocation_id) gid: vec3<u32>) {{
             }}
 
             // Read high 2 bits from qh
-            let qh_byte_idx = elem_idx / 4u;
-            let qh_byte = read_u8(&input, qh_base + qh_byte_idx);
+            let qh_byte_idx = qh_base + elem_idx / 4u;
+            let qh_byte = ((input[qh_byte_idx / 4u] >> ((qh_byte_idx % 4u) * 8u)) & 0xFFu);
             let qh_shift = (elem_idx % 4u) * 2u;
             let qh_val = (qh_byte >> qh_shift) & 0x3u;
 

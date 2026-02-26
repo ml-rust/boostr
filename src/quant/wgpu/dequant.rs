@@ -8,6 +8,7 @@ use numr::runtime::wgpu::{WgpuClient, WgpuRuntime, get_buffer};
 use numr::tensor::Tensor;
 use wgpu::BufferUsages;
 
+use super::nf4 as nf4_dispatch;
 use super::shaders::dequant as shader_gen;
 
 /// Params struct matching WGSL DequantParams
@@ -21,6 +22,61 @@ struct DequantParams {
 }
 
 impl DequantOps<WgpuRuntime> for WgpuClient {
+    fn nf4_dequant(
+        &self,
+        nf4_data: &Tensor<WgpuRuntime>,
+        absmax: &Tensor<WgpuRuntime>,
+        blocksize: usize,
+    ) -> Result<Tensor<WgpuRuntime>> {
+        let num_bytes = nf4_data.numel();
+        let n = num_bytes * 2;
+        let output = Tensor::<WgpuRuntime>::empty(&[n], DType::F32, nf4_data.device());
+        nf4_dispatch::dispatch_nf4_dequant(
+            self,
+            nf4_data,
+            absmax,
+            &output,
+            num_bytes as u32,
+            blocksize as u32,
+        )?;
+        Ok(output)
+    }
+
+    fn nf4_gemm(
+        &self,
+        input: &Tensor<WgpuRuntime>,
+        nf4_weight: &Tensor<WgpuRuntime>,
+        absmax: &Tensor<WgpuRuntime>,
+        n_out: usize,
+        k: usize,
+        blocksize: usize,
+    ) -> Result<Tensor<WgpuRuntime>> {
+        if input.dtype() != DType::F32 {
+            return Err(Error::QuantError {
+                reason: format!("nf4_gemm input must be F32, got {:?}", input.dtype()),
+            });
+        }
+        let in_shape = input.shape();
+        let m: usize = in_shape.iter().product::<usize>() / k;
+        let act_contig = input.contiguous();
+
+        let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
+        out_shape.push(n_out);
+        let output = Tensor::<WgpuRuntime>::empty(&out_shape, DType::F32, input.device());
+        nf4_dispatch::dispatch_nf4_gemm(
+            self,
+            &act_contig,
+            nf4_weight,
+            absmax,
+            &output,
+            m as u32,
+            k as u32,
+            n_out as u32,
+            blocksize as u32,
+        )?;
+        Ok(output)
+    }
+
     fn dequantize(
         &self,
         qt: &QuantTensor<WgpuRuntime>,

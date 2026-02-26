@@ -8,9 +8,62 @@ use numr::ops::TypeConversionOps;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
 
-use super::kernels::dequant;
+use super::kernels::{dequant, nf4};
 
 impl DequantOps<CpuRuntime> for CpuClient {
+    fn nf4_dequant(
+        &self,
+        nf4_data: &Tensor<CpuRuntime>,
+        absmax: &Tensor<CpuRuntime>,
+        blocksize: usize,
+    ) -> Result<Tensor<CpuRuntime>> {
+        if nf4_data.dtype() != DType::U8 {
+            return Err(Error::QuantError {
+                reason: format!("nf4_dequant data must be U8, got {:?}", nf4_data.dtype()),
+            });
+        }
+        let data = unsafe { nf4_data.storage().as_host_slice::<u8>() };
+        let abs = unsafe { absmax.storage().as_host_slice::<f32>() };
+        let n = data.len() * 2;
+        let mut output = vec![0.0f32; n];
+        nf4::nf4_dequant_f32(data, abs, blocksize, &mut output);
+        Ok(Tensor::<CpuRuntime>::from_slice(
+            &output,
+            &[n],
+            nf4_data.device(),
+        ))
+    }
+
+    fn nf4_gemm(
+        &self,
+        input: &Tensor<CpuRuntime>,
+        nf4_weight: &Tensor<CpuRuntime>,
+        absmax: &Tensor<CpuRuntime>,
+        n_out: usize,
+        k: usize,
+        blocksize: usize,
+    ) -> Result<Tensor<CpuRuntime>> {
+        if input.dtype() != DType::F32 {
+            return Err(Error::QuantError {
+                reason: format!("nf4_gemm input must be F32, got {:?}", input.dtype()),
+            });
+        }
+        let in_shape = input.shape();
+        let m: usize = in_shape.iter().product::<usize>() / k;
+        let inp = unsafe { input.storage().as_host_slice::<f32>() };
+        let wt = unsafe { nf4_weight.storage().as_host_slice::<u8>() };
+        let abs = unsafe { absmax.storage().as_host_slice::<f32>() };
+        let mut output = vec![0.0f32; m * n_out];
+        nf4::nf4_gemm_f32(inp, wt, abs, &mut output, m, k, n_out, blocksize);
+        let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
+        out_shape.push(n_out);
+        Ok(Tensor::<CpuRuntime>::from_slice(
+            &output,
+            &out_shape,
+            input.device(),
+        ))
+    }
+
     fn dequantize(
         &self,
         qt: &QuantTensor<CpuRuntime>,

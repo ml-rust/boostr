@@ -9,4 +9,4 @@ pub use fused_qkv::{
     fused_qkv_projection_bwd_impl, fused_qkv_projection_impl,
 };
 pub use mla::scaled_dot_product_attention_impl;
-pub use rope::apply_rope_impl;
+pub use rope::{apply_rope_impl, apply_rope_interleaved_impl, apply_rope_yarn_impl};

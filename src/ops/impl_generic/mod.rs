@@ -9,7 +9,8 @@ pub use architecture::{
     moe_top_k_routing_impl, moe_unpermute_tokens_impl,
 };
 pub use attention::{
-    apply_rope_impl, multi_head_attention_impl, scaled_dot_product_attention_impl,
+    apply_rope_impl, apply_rope_interleaved_impl, apply_rope_yarn_impl, multi_head_attention_impl,
+    scaled_dot_product_attention_impl,
 };
 pub use inference::{
     compute_acceptance_probs_impl, compute_expected_tokens_impl, verify_speculative_tokens_impl,

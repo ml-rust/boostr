@@ -201,6 +201,18 @@ fn compile_cuda_kernels() {
             "sm_75",
             true,
         ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/position"),
+            "rope_interleaved.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/position"),
+            "rope_yarn.cu",
+            "sm_75",
+            true,
+        ),
         // Fused optimizer kernels
         (
             PathBuf::from("src/ops/cuda/kernels/training"),

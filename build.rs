@@ -251,6 +251,13 @@ fn compile_cuda_kernels() {
             "sm_75",
             true,
         ),
+        // Inference kernels (speculative decoding)
+        (
+            PathBuf::from("src/ops/cuda/kernels/inference"),
+            "speculative_verify.cu",
+            "sm_75",
+            true,
+        ),
         // Architecture kernels (SSM / Mamba2)
         (
             PathBuf::from("src/ops/cuda/kernels/architecture"),

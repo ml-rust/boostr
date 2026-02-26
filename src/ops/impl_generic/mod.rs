@@ -1,5 +1,6 @@
 pub mod architecture;
 pub mod attention;
+pub mod inference;
 pub mod training;
 
 pub use architecture::{
@@ -8,4 +9,7 @@ pub use architecture::{
 };
 pub use attention::{
     apply_rope_impl, multi_head_attention_impl, scaled_dot_product_attention_impl,
+};
+pub use inference::{
+    compute_acceptance_probs_impl, compute_expected_tokens_impl, verify_speculative_tokens_impl,
 };

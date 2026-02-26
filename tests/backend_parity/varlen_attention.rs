@@ -148,9 +148,9 @@ fn test_varlen_attention_bwd_parity() {
             false,
         )
         .unwrap();
-    let cpu_dq_vec = cpu_dq.to_vec::<f32>();
-    let cpu_dk_vec = cpu_dk.to_vec::<f32>();
-    let cpu_dv_vec = cpu_dv.to_vec::<f32>();
+    let _cpu_dq_vec = cpu_dq.to_vec::<f32>();
+    let _cpu_dk_vec = cpu_dk.to_vec::<f32>();
+    let _cpu_dv_vec = cpu_dv.to_vec::<f32>();
 
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
@@ -192,17 +192,17 @@ fn test_varlen_attention_bwd_parity() {
             .unwrap();
         assert_parity_f32_relaxed(
             &dq.to_vec::<f32>(),
-            &cpu_dq_vec,
+            &_cpu_dq_vec,
             "varlen_bwd dQ CUDA vs CPU",
         );
         assert_parity_f32_relaxed(
             &dk.to_vec::<f32>(),
-            &cpu_dk_vec,
+            &_cpu_dk_vec,
             "varlen_bwd dK CUDA vs CPU",
         );
         assert_parity_f32_relaxed(
             &dv.to_vec::<f32>(),
-            &cpu_dv_vec,
+            &_cpu_dv_vec,
             "varlen_bwd dV CUDA vs CPU",
         );
     });

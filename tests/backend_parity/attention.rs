@@ -164,9 +164,9 @@ fn test_flash_attention_bwd_parity() {
     let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
         .flash_attention_bwd(&dout, &q, &k, &v, &out, &lse, h, h, d, false, 0)
         .unwrap();
-    let cpu_dq_vec = cpu_dq.to_vec::<f32>();
-    let cpu_dk_vec = cpu_dk.to_vec::<f32>();
-    let cpu_dv_vec = cpu_dv.to_vec::<f32>();
+    let _cpu_dq_vec = cpu_dq.to_vec::<f32>();
+    let _cpu_dk_vec = cpu_dk.to_vec::<f32>();
+    let _cpu_dv_vec = cpu_dv.to_vec::<f32>();
 
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
@@ -184,17 +184,17 @@ fn test_flash_attention_bwd_parity() {
             .unwrap();
         assert_parity_f32(
             &dq_c.to_vec::<f32>(),
-            &cpu_dq_vec,
+            &_cpu_dq_vec,
             "flash_bwd dQ CUDA vs CPU",
         );
         assert_parity_f32(
             &dk_c.to_vec::<f32>(),
-            &cpu_dk_vec,
+            &_cpu_dk_vec,
             "flash_bwd dK CUDA vs CPU",
         );
         assert_parity_f32(
             &dv_c.to_vec::<f32>(),
-            &cpu_dv_vec,
+            &_cpu_dv_vec,
             "flash_bwd dV CUDA vs CPU",
         );
     });
@@ -216,17 +216,17 @@ fn test_flash_attention_bwd_parity() {
         {
             assert_parity_f32(
                 &dq_w.to_vec::<f32>(),
-                &cpu_dq_vec,
+                &_cpu_dq_vec,
                 "flash_bwd dQ WGPU vs CPU",
             );
             assert_parity_f32(
                 &dk_w.to_vec::<f32>(),
-                &cpu_dk_vec,
+                &_cpu_dk_vec,
                 "flash_bwd dK WGPU vs CPU",
             );
             assert_parity_f32(
                 &dv_w.to_vec::<f32>(),
-                &cpu_dv_vec,
+                &_cpu_dv_vec,
                 "flash_bwd dV WGPU vs CPU",
             );
         } else {

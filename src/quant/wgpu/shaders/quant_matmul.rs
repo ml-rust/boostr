@@ -46,11 +46,12 @@ fn quant_matmul_q4_0(@builtin(global_invocation_id) gid: vec3<u32>) {{
 
     for (var b: u32 = 0u; b < num_blocks_per_row; b = b + 1u) {{
         let block_base = weight_row_base + b * BLOCK_BYTES;
-        let delta = read_f16(&weight, block_base);
+        let delta = f16_to_f32((weight[block_base / 4u] >> ((block_base % 4u) * 8u)) & 0xFFFFu);
         let k_base = b * BLOCK_SIZE;
 
         for (var i: u32 = 0u; i < 16u; i = i + 1u) {{
-            let byte_val = read_u8(&weight, block_base + 2u + i);
+            let u8_byte_idx = block_base + 2u + i;
+            let byte_val = ((weight[u8_byte_idx / 4u] >> ((u8_byte_idx % 4u) * 8u)) & 0xFFu);
             let lo = byte_val & 0xFu;
             let hi = (byte_val >> 4u) & 0xFu;
 
@@ -107,11 +108,13 @@ fn quant_matmul_q8_0(@builtin(global_invocation_id) gid: vec3<u32>) {{
 
     for (var b: u32 = 0u; b < num_blocks_per_row; b = b + 1u) {{
         let block_base = weight_row_base + b * BLOCK_BYTES;
-        let delta = read_f16(&weight, block_base);
+        let delta = f16_to_f32((weight[block_base / 4u] >> ((block_base % 4u) * 8u)) & 0xFFFFu);
         let k_base = b * BLOCK_SIZE;
 
         for (var i: u32 = 0u; i < 32u; i = i + 1u) {{
-            let qs = read_i8(&weight, block_base + 2u + i);
+            let i8_byte_idx = block_base + 2u + i;
+            let i8_u8 = ((weight[i8_byte_idx / 4u] >> ((i8_byte_idx % 4u) * 8u)) & 0xFFu);
+            let qs = select(i32(i8_u8), i32(i8_u8) - 256, i8_u8 >= 128u);
             let w = f32(qs) * delta;
             acc = acc + activation[act_row_base + k_base + i] * w;
         }}
@@ -162,8 +165,9 @@ fn quant_matmul_q4_k(@builtin(global_invocation_id) gid: vec3<u32>) {{
 
     for (var blk: u32 = 0u; blk < num_blocks_per_row; blk = blk + 1u) {{
         let base = weight_row_base + blk * BLOCK_BYTES;
-        let d = read_f16(&weight, base);
-        let dmin = read_f16(&weight, base + 2u);
+        let d = f16_to_f32((weight[base / 4u] >> ((base % 4u) * 8u)) & 0xFFFFu);
+        let dmin_byte = base + 2u;
+        let dmin = f16_to_f32((weight[dmin_byte / 4u] >> ((dmin_byte % 4u) * 8u)) & 0xFFFFu);
         let scales_base = base + 4u;
         let qs_base = base + 16u;
         let k_base = blk * BLOCK_SIZE;
@@ -173,14 +177,18 @@ fn quant_matmul_q4_k(@builtin(global_invocation_id) gid: vec3<u32>) {{
             var mn: f32;
 
             if (sb < 4u) {{
-                let scale_byte = read_u8(&weight, scales_base + sb);
+                let sb_byte_idx = scales_base + sb;
+                let scale_byte = ((weight[sb_byte_idx / 4u] >> ((sb_byte_idx % 4u) * 8u)) & 0xFFu);
                 sc = d * f32(scale_byte & 63u);
-                let min_byte = read_u8(&weight, scales_base + sb + 4u);
+                let min_byte_idx = scales_base + sb + 4u;
+                let min_byte = ((weight[min_byte_idx / 4u] >> ((min_byte_idx % 4u) * 8u)) & 0xFFu);
                 mn = dmin * f32(min_byte & 63u);
             }} else {{
                 let sb_off = sb - 4u;
-                let scale_byte_lo = read_u8(&weight, scales_base + sb);
-                let scale_byte_hi = read_u8(&weight, scales_base + sb + 4u);
+                let slo_byte_idx = scales_base + sb;
+                let scale_byte_lo = ((weight[slo_byte_idx / 4u] >> ((slo_byte_idx % 4u) * 8u)) & 0xFFu);
+                let shi_byte_idx = scales_base + sb + 4u;
+                let scale_byte_hi = ((weight[shi_byte_idx / 4u] >> ((shi_byte_idx % 4u) * 8u)) & 0xFFu);
                 sc = d * f32((scale_byte_lo & 63u) | ((scale_byte_hi & 0x03u) << 6u));
                 mn = dmin * f32(((scale_byte_lo >> 6u) & 3u) | ((scale_byte_hi >> 2u) << 2u));
             }}
@@ -189,7 +197,8 @@ fn quant_matmul_q4_k(@builtin(global_invocation_id) gid: vec3<u32>) {{
             let sub_k = k_base + sb * 32u;
 
             for (var i: u32 = 0u; i < 16u; i = i + 1u) {{
-                let byte_val = read_u8(&weight, sub_qs + i);
+                let qs_byte_idx = sub_qs + i;
+                let byte_val = ((weight[qs_byte_idx / 4u] >> ((qs_byte_idx % 4u) * 8u)) & 0xFFu);
                 let lo = byte_val & 0xFu;
                 let hi = (byte_val >> 4u) & 0xFu;
 
@@ -250,17 +259,20 @@ fn quant_matmul_q6_k(@builtin(global_invocation_id) gid: vec3<u32>) {{
         let ql_base = base;
         let qh_base = base + 128u;
         let sc_base = base + 192u;
-        let d = read_f16(&weight, base + 208u);
+        let d_offset = base + 208u;
+        let d = f16_to_f32((weight[d_offset / 4u] >> ((d_offset % 4u) * 8u)) & 0xFFFFu);
         let k_base = blk * BLOCK_SIZE;
 
         for (var sb: u32 = 0u; sb < 16u; sb = sb + 1u) {{
-            let scale = read_i8(&weight, sc_base + sb);
+            let sc_byte_idx = sc_base + sb;
+            let sc_u8 = ((weight[sc_byte_idx / 4u] >> ((sc_byte_idx % 4u) * 8u)) & 0xFFu);
+            let scale = select(i32(sc_u8), i32(sc_u8) - 256, sc_u8 >= 128u);
 
             for (var i: u32 = 0u; i < 16u; i = i + 1u) {{
                 let elem_idx = sb * 16u + i;
 
-                let ql_byte_idx = elem_idx / 2u;
-                let ql_byte = read_u8(&weight, ql_base + ql_byte_idx);
+                let ql_byte_idx = ql_base + elem_idx / 2u;
+                let ql_byte = ((weight[ql_byte_idx / 4u] >> ((ql_byte_idx % 4u) * 8u)) & 0xFFu);
                 var ql_val: u32;
                 if (elem_idx % 2u == 0u) {{
                     ql_val = ql_byte & 0xFu;
@@ -268,8 +280,8 @@ fn quant_matmul_q6_k(@builtin(global_invocation_id) gid: vec3<u32>) {{
                     ql_val = (ql_byte >> 4u) & 0xFu;
                 }}
 
-                let qh_byte_idx = elem_idx / 4u;
-                let qh_byte = read_u8(&weight, qh_base + qh_byte_idx);
+                let qh_byte_idx = qh_base + elem_idx / 4u;
+                let qh_byte = ((weight[qh_byte_idx / 4u] >> ((qh_byte_idx % 4u) * 8u)) & 0xFFu);
                 let qh_shift = (elem_idx % 4u) * 2u;
                 let qh_val = (qh_byte >> qh_shift) & 0x3u;
 

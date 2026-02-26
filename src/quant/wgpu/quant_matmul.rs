@@ -8,6 +8,7 @@ use numr::runtime::wgpu::{WgpuClient, WgpuRuntime, get_buffer};
 use numr::tensor::Tensor;
 use wgpu::BufferUsages;
 
+use super::int4_gemm as int4_dispatch;
 use super::shaders::quant_matmul as shader_gen;
 
 /// Params struct matching WGSL MatmulParams
@@ -21,6 +22,117 @@ struct MatmulParams {
 }
 
 impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
+    fn int4_gemm(
+        &self,
+        input: &Tensor<WgpuRuntime>,
+        qweight: &Tensor<WgpuRuntime>,
+        scales: &Tensor<WgpuRuntime>,
+        zeros: &Tensor<WgpuRuntime>,
+        group_size: usize,
+    ) -> Result<Tensor<WgpuRuntime>> {
+        if input.dtype() != DType::F32 {
+            return Err(Error::QuantError {
+                reason: format!("int4_gemm input must be F32, got {:?}", input.dtype()),
+            });
+        }
+        let in_shape = input.shape();
+        let k = in_shape[in_shape.len() - 1];
+        let m: usize = in_shape.iter().product::<usize>() / k;
+        let n = qweight.shape()[1] * 8;
+        let act_contig = input.contiguous();
+
+        let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
+        out_shape.push(n);
+        let output = Tensor::<WgpuRuntime>::empty(&out_shape, DType::F32, input.device());
+        int4_dispatch::dispatch_int4_gemm(
+            self,
+            &act_contig,
+            qweight,
+            scales,
+            zeros,
+            &output,
+            m as u32,
+            k as u32,
+            n as u32,
+            group_size as u32,
+        )?;
+        Ok(output)
+    }
+
+    fn int4_gemm_gptq(
+        &self,
+        input: &Tensor<WgpuRuntime>,
+        qweight: &Tensor<WgpuRuntime>,
+        qzeros: &Tensor<WgpuRuntime>,
+        scales: &Tensor<WgpuRuntime>,
+        g_idx: &Tensor<WgpuRuntime>,
+    ) -> Result<Tensor<WgpuRuntime>> {
+        if input.dtype() != DType::F32 {
+            return Err(Error::QuantError {
+                reason: format!("int4_gemm_gptq input must be F32, got {:?}", input.dtype()),
+            });
+        }
+        let in_shape = input.shape();
+        let k = in_shape[in_shape.len() - 1];
+        let m: usize = in_shape.iter().product::<usize>() / k;
+        let n = qweight.shape()[1];
+        let act_contig = input.contiguous();
+
+        let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
+        out_shape.push(n);
+        let output = Tensor::<WgpuRuntime>::empty(&out_shape, DType::F32, input.device());
+        int4_dispatch::dispatch_int4_gemm_gptq(
+            self,
+            &act_contig,
+            qweight,
+            qzeros,
+            scales,
+            g_idx,
+            &output,
+            m as u32,
+            k as u32,
+            n as u32,
+        )?;
+        Ok(output)
+    }
+
+    fn marlin_gemm(
+        &self,
+        input: &Tensor<WgpuRuntime>,
+        weight: &Tensor<WgpuRuntime>,
+        scales: &Tensor<WgpuRuntime>,
+        zeros: &Tensor<WgpuRuntime>,
+        group_size: usize,
+    ) -> Result<Tensor<WgpuRuntime>> {
+        if input.dtype() != DType::F32 {
+            return Err(Error::QuantError {
+                reason: format!("marlin_gemm input must be F32, got {:?}", input.dtype()),
+            });
+        }
+        let in_shape = input.shape();
+        let k = in_shape[in_shape.len() - 1];
+        let m: usize = in_shape.iter().product::<usize>() / k;
+        let n = weight.shape()[1];
+        let act_contig = input.contiguous();
+
+        let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
+        out_shape.push(n);
+        let output = Tensor::<WgpuRuntime>::empty(&out_shape, DType::F32, input.device());
+        int4_dispatch::dispatch_marlin_gemm(
+            self,
+            &act_contig,
+            weight,
+            scales,
+            zeros,
+            &output,
+            m as u32,
+            k as u32,
+            n as u32,
+            group_size as u32,
+        )?;
+        Ok(output)
+    }
+
     fn quant_matmul(
         &self,
         activation: &Tensor<WgpuRuntime>,

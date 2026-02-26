@@ -7,9 +7,139 @@ use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
 
-use super::kernels::quant_matmul;
+use super::kernels::{int4_gemm, int4_gemm_gptq, marlin_gemm, quant_matmul};
+
+/// Validate input is F32 and extract (M, K) from shape.
+fn validate_input(input: &Tensor<CpuRuntime>) -> Result<(usize, usize)> {
+    if input.dtype() != DType::F32 {
+        return Err(Error::QuantError {
+            reason: format!("input must be F32, got {:?}", input.dtype()),
+        });
+    }
+    let shape = input.shape();
+    if shape.len() < 2 {
+        return Err(Error::QuantError {
+            reason: format!("input must be at least 2D, got {:?}", shape),
+        });
+    }
+    let k = shape[shape.len() - 1];
+    let m: usize = shape.iter().product::<usize>() / k;
+    Ok((m, k))
+}
+
+/// Build output shape: replace last dim with n.
+fn output_shape(input_shape: &[usize], n: usize) -> Vec<usize> {
+    let mut s = input_shape[..input_shape.len() - 1].to_vec();
+    s.push(n);
+    s
+}
 
 impl QuantMatmulOps<CpuRuntime> for CpuClient {
+    fn int4_gemm(
+        &self,
+        input: &Tensor<CpuRuntime>,
+        qweight: &Tensor<CpuRuntime>,
+        scales: &Tensor<CpuRuntime>,
+        zeros: &Tensor<CpuRuntime>,
+        group_size: usize,
+    ) -> Result<Tensor<CpuRuntime>> {
+        let (m, k) = validate_input(input)?;
+        let qw_shape = qweight.shape();
+        if qw_shape.len() != 2 || qw_shape[0] != k {
+            return Err(Error::QuantError {
+                reason: format!("int4_gemm qweight shape mismatch: {:?}, K={}", qw_shape, k),
+            });
+        }
+        let n = qw_shape[1] * 8;
+
+        let inp = unsafe { input.storage().as_host_slice::<f32>() };
+        let qw = unsafe { qweight.storage().as_host_slice::<u32>() };
+        let sc = unsafe { scales.storage().as_host_slice::<f32>() };
+        let zr = unsafe { zeros.storage().as_host_slice::<f32>() };
+
+        let mut out = vec![0.0f32; m * n];
+        int4_gemm::int4_gemm_f32(inp, qw, sc, zr, &mut out, m, k, n, group_size);
+
+        Ok(Tensor::<CpuRuntime>::from_slice(
+            &out,
+            &output_shape(input.shape(), n),
+            input.device(),
+        ))
+    }
+
+    fn int4_gemm_gptq(
+        &self,
+        input: &Tensor<CpuRuntime>,
+        qweight: &Tensor<CpuRuntime>,
+        qzeros: &Tensor<CpuRuntime>,
+        scales: &Tensor<CpuRuntime>,
+        g_idx: &Tensor<CpuRuntime>,
+    ) -> Result<Tensor<CpuRuntime>> {
+        let (m, k) = validate_input(input)?;
+        let qw_shape = qweight.shape();
+        if qw_shape.len() != 2 || qw_shape[0] != k / 8 {
+            return Err(Error::QuantError {
+                reason: format!(
+                    "int4_gemm_gptq qweight shape mismatch: {:?}, K/8={}",
+                    qw_shape,
+                    k / 8
+                ),
+            });
+        }
+        let n = qw_shape[1];
+
+        let inp = unsafe { input.storage().as_host_slice::<f32>() };
+        let qw = unsafe { qweight.storage().as_host_slice::<u32>() };
+        let qz = unsafe { qzeros.storage().as_host_slice::<u32>() };
+        let sc = unsafe { scales.storage().as_host_slice::<f32>() };
+        let gi = unsafe { g_idx.storage().as_host_slice::<i32>() };
+
+        let mut out = vec![0.0f32; m * n];
+        int4_gemm_gptq::int4_gemm_gptq_f32(inp, qw, qz, sc, gi, &mut out, m, k, n);
+
+        Ok(Tensor::<CpuRuntime>::from_slice(
+            &out,
+            &output_shape(input.shape(), n),
+            input.device(),
+        ))
+    }
+
+    fn marlin_gemm(
+        &self,
+        input: &Tensor<CpuRuntime>,
+        weight: &Tensor<CpuRuntime>,
+        scales: &Tensor<CpuRuntime>,
+        zeros: &Tensor<CpuRuntime>,
+        group_size: usize,
+    ) -> Result<Tensor<CpuRuntime>> {
+        let (m, k) = validate_input(input)?;
+        let w_shape = weight.shape();
+        if w_shape.len() != 2 || w_shape[0] != k / 8 {
+            return Err(Error::QuantError {
+                reason: format!(
+                    "marlin_gemm weight shape mismatch: {:?}, K/8={}",
+                    w_shape,
+                    k / 8
+                ),
+            });
+        }
+        let n = w_shape[1];
+
+        let inp = unsafe { input.storage().as_host_slice::<f32>() };
+        let wt = unsafe { weight.storage().as_host_slice::<u32>() };
+        let sc = unsafe { scales.storage().as_host_slice::<f32>() };
+        let zr = unsafe { zeros.storage().as_host_slice::<f32>() };
+
+        let mut out = vec![0.0f32; m * n];
+        marlin_gemm::marlin_gemm_f32(inp, wt, sc, zr, &mut out, m, k, n, group_size);
+
+        Ok(Tensor::<CpuRuntime>::from_slice(
+            &out,
+            &output_shape(input.shape(), n),
+            input.device(),
+        ))
+    }
+
     fn quant_matmul(
         &self,
         activation: &Tensor<CpuRuntime>,

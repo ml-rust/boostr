@@ -10,9 +10,118 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
+use super::int4_gemm as int4_dispatch;
 use super::kernels::{self, QUANT_MATMUL_MODULE};
 
+/// Validate input is F32 and extract (M, K).
+fn validate_input_cuda(input: &Tensor<CudaRuntime>) -> Result<(usize, usize)> {
+    if input.dtype() != DType::F32 {
+        return Err(Error::QuantError {
+            reason: format!("input must be F32, got {:?}", input.dtype()),
+        });
+    }
+    let shape = input.shape();
+    if shape.len() < 2 {
+        return Err(Error::QuantError {
+            reason: format!("input must be at least 2D, got {:?}", shape),
+        });
+    }
+    let k = shape[shape.len() - 1];
+    let m: usize = shape.iter().product::<usize>() / k;
+    Ok((m, k))
+}
+
 impl QuantMatmulOps<CudaRuntime> for CudaClient {
+    fn int4_gemm(
+        &self,
+        input: &Tensor<CudaRuntime>,
+        qweight: &Tensor<CudaRuntime>,
+        scales: &Tensor<CudaRuntime>,
+        zeros: &Tensor<CudaRuntime>,
+        group_size: usize,
+    ) -> Result<Tensor<CudaRuntime>> {
+        let (m, k) = validate_input_cuda(input)?;
+        let n = qweight.shape()[1] * 8;
+        let act_contig = input.contiguous();
+
+        let mut out_shape = input.shape()[..input.shape().len() - 1].to_vec();
+        out_shape.push(n);
+        let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, input.device());
+        int4_dispatch::launch_int4_gemm(
+            self,
+            &act_contig,
+            qweight,
+            scales,
+            zeros,
+            &output,
+            m as u32,
+            k as u32,
+            n as u32,
+            group_size as u32,
+        )?;
+        Ok(output)
+    }
+
+    fn int4_gemm_gptq(
+        &self,
+        input: &Tensor<CudaRuntime>,
+        qweight: &Tensor<CudaRuntime>,
+        qzeros: &Tensor<CudaRuntime>,
+        scales: &Tensor<CudaRuntime>,
+        g_idx: &Tensor<CudaRuntime>,
+    ) -> Result<Tensor<CudaRuntime>> {
+        let (m, k) = validate_input_cuda(input)?;
+        let n = qweight.shape()[1];
+        let act_contig = input.contiguous();
+
+        let mut out_shape = input.shape()[..input.shape().len() - 1].to_vec();
+        out_shape.push(n);
+        let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, input.device());
+        int4_dispatch::launch_int4_gemm_gptq(
+            self,
+            &act_contig,
+            qweight,
+            qzeros,
+            scales,
+            g_idx,
+            &output,
+            m as u32,
+            k as u32,
+            n as u32,
+        )?;
+        Ok(output)
+    }
+
+    fn marlin_gemm(
+        &self,
+        input: &Tensor<CudaRuntime>,
+        weight: &Tensor<CudaRuntime>,
+        scales: &Tensor<CudaRuntime>,
+        zeros: &Tensor<CudaRuntime>,
+        group_size: usize,
+    ) -> Result<Tensor<CudaRuntime>> {
+        let (m, k) = validate_input_cuda(input)?;
+        let n = weight.shape()[1];
+        let act_contig = input.contiguous();
+
+        let mut out_shape = input.shape()[..input.shape().len() - 1].to_vec();
+        out_shape.push(n);
+        let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, input.device());
+        int4_dispatch::launch_marlin_gemm(
+            self,
+            &act_contig,
+            weight,
+            scales,
+            zeros,
+            &output,
+            m as u32,
+            k as u32,
+            n as u32,
+            group_size as u32,
+        )?;
+        Ok(output)
+    }
+
     fn quant_matmul(
         &self,
         activation: &Tensor<CudaRuntime>,

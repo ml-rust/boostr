@@ -219,15 +219,35 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
                 });
             }
 
+            // Ensure a physical block exists for the slot where the new token lands
+            // before committing any state change.  The new token occupies position
+            // `total_tokens` (0-indexed), which belongs to block
+            // `total_tokens / block_size`.
+            let new_token_block_idx = seq.total_tokens / seq.block_table.block_size;
+            if new_token_block_idx >= seq.block_table.blocks.len() {
+                if !self.allocator.can_allocate(1) {
+                    return Err(Error::SchedulerError {
+                        reason: format!(
+                            "Cannot append token to sequence {}: no free blocks available",
+                            seq_id
+                        ),
+                    });
+                }
+                let blk = self.allocator.allocate(1)?;
+                seq.block_table.append_blocks(blk);
+            }
+
             seq.generated_tokens.push(token);
             seq.total_tokens += 1;
             seq.block_table.num_tokens = seq.total_tokens;
             self.stats.total_tokens_generated += 1;
 
+            // Best-effort preallocation for the token after next (non-fatal if it fails).
             let blocks_needed = seq.blocks_needed_for_next_token();
             if blocks_needed > 0 && self.allocator.can_allocate(blocks_needed) {
-                let new_blocks = self.allocator.allocate(blocks_needed)?;
-                seq.block_table.append_blocks(new_blocks);
+                if let Ok(new_blocks) = self.allocator.allocate(blocks_needed) {
+                    seq.block_table.append_blocks(new_blocks);
+                }
             }
 
             if seq.is_finished() || seq.total_tokens >= self.config.max_seq_len {
@@ -266,8 +286,16 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
 
     pub fn abort_sequence(&mut self, seq_id: SequenceId) -> Result<()> {
         if let Some(seq) = self.sequences.get_mut(&seq_id) {
+            // Idempotent: already terminal, nothing to do.
+            if seq.state == SequenceState::Finished {
+                return Ok(());
+            }
+
+            // Free physical blocks first, then clear to prevent double-free on
+            // a second call before cleanup_finished() runs.
             if !seq.block_table.blocks.is_empty() {
                 self.allocator.free(&seq.block_table.blocks)?;
+                seq.block_table.blocks.clear();
             }
 
             match seq.state {
@@ -283,7 +311,7 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
                     self.preempted_set.retain(|&id| id != seq_id);
                     self.stats.preempted_count -= 1;
                 }
-                SequenceState::Finished => {}
+                SequenceState::Finished => unreachable!("guarded above"),
             }
 
             seq.state = SequenceState::Finished;

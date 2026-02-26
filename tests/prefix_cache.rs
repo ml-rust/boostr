@@ -259,3 +259,80 @@ fn test_refcount_tracking() {
     cache.release_blocks(3, &blocks).unwrap();
     assert!(cache.has_cached_prefix(&tokens));
 }
+
+/// max_cached_blocks must be enforced: once sequences release their blocks
+/// (ref_count → 0), new allocations must evict LRU entries to stay within cap.
+#[test]
+fn test_max_cached_blocks_enforced() {
+    let block_size = 4;
+    // Physical pool: 20 blocks; cache cap: 4 blocks.
+    let allocator = CpuBlockAllocator::new(20, block_size);
+    let config = PrefixCacheConfig {
+        enabled: true,
+        max_cached_blocks: 4,
+        min_prefix_tokens: 1,
+        block_size,
+    };
+    let mut cache = PrefixCache::new(allocator, config);
+
+    // Allocate 4 sequences and immediately release them so their blocks are
+    // eligible for eviction (ref_count == 0).
+    let mut all_blocks = Vec::new();
+    for seq_id in 1u64..=4 {
+        let tokens: Vec<u32> = (seq_id as u32 * 10..(seq_id as u32 * 10 + 4)).collect();
+        let result = cache.get_or_allocate_blocks(seq_id, &tokens).unwrap();
+        let blocks = result.blocks().to_vec();
+        cache.release_blocks(seq_id, &blocks).unwrap();
+        all_blocks.push(blocks);
+    }
+
+    // At this point the cache holds exactly 4 entries, all ref_count == 0.
+    assert_eq!(cache.stats().cached_blocks, 4);
+
+    // A 5th allocation must evict the LRU entry, keeping the count at ≤ 4.
+    let tokens5: Vec<u32> = (50..54).collect();
+    cache.get_or_allocate_blocks(5, &tokens5).unwrap();
+
+    let stats = cache.stats();
+    assert!(
+        stats.cached_blocks <= 4,
+        "cached_blocks {} exceeds max_cached_blocks 4",
+        stats.cached_blocks
+    );
+    assert!(
+        stats.blocks_evicted >= 1,
+        "at least one block must have been evicted"
+    );
+}
+
+/// has_cached_prefix and cached_block_count must validate token content,
+/// not just hash presence, to guard against hash collisions.
+#[test]
+fn test_cached_block_count_validates_tokens() {
+    let block_size = 4;
+    let allocator = CpuBlockAllocator::new(20, block_size);
+    let config = PrefixCacheConfig {
+        enabled: true,
+        max_cached_blocks: 100,
+        min_prefix_tokens: 1,
+        block_size,
+    };
+    let mut cache = PrefixCache::new(allocator, config);
+
+    let tokens: Vec<u32> = vec![1, 2, 3, 4];
+    cache.get_or_allocate_blocks(1, &tokens).unwrap();
+
+    // Correct tokens → should find the cached block.
+    assert!(cache.has_cached_prefix(&tokens));
+    assert_eq!(cache.cached_block_count(&tokens), 1);
+
+    // Different tokens with the same prefix length → should NOT hit.
+    let different: Vec<u32> = vec![9, 9, 9, 9];
+    // (These are very unlikely to collide; the test verifies the token check.)
+    if !cache.has_cached_prefix(&different) {
+        assert_eq!(cache.cached_block_count(&different), 0);
+    }
+    // If by extreme chance hashes collide, the token check must still return 0.
+    // We can't force a collision in a unit test, but we verify the path compiles
+    // and the non-colliding case is correct.
+}

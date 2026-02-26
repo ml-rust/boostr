@@ -149,12 +149,32 @@ impl<A: BlockAllocator> PrefixCache<A> {
     }
 
     fn allocate_with_eviction(&mut self, count: usize) -> Result<Vec<BlockId>> {
+        // Enforce max_cached_blocks: evict LRU entries to stay within the cap.
+        if self.config.max_cached_blocks > 0
+            && self.hash_to_block.len() + count > self.config.max_cached_blocks
+        {
+            let to_evict =
+                (self.hash_to_block.len() + count).saturating_sub(self.config.max_cached_blocks);
+            self.evict_lru(to_evict)?;
+        }
+
         if self.allocator.can_allocate(count) {
             return self.allocator.allocate(count);
         }
 
-        let mut evicted = 0;
-        while !self.allocator.can_allocate(count) && !self.lru_queue.is_empty() {
+        // Evict from cache to free physical blocks for the allocator.
+        // Track consecutive skips to detect a full rotation of in-use blocks
+        // and avoid spinning forever when all cached blocks have ref_count > 0.
+        let mut consecutive_skips = 0;
+        while !self.allocator.can_allocate(count) {
+            if self.lru_queue.is_empty() {
+                break;
+            }
+            // Full rotation without eviction: all remaining blocks are in-use.
+            if consecutive_skips >= self.lru_queue.len() {
+                break;
+            }
+
             if let Some(block_id) = self.lru_queue.pop_front() {
                 if let Some(&hash) = self.block_to_hash.get(&block_id) {
                     if let Some(info) = self.hash_to_block.get(&hash) {
@@ -162,6 +182,39 @@ impl<A: BlockAllocator> PrefixCache<A> {
                             self.allocator.free(&[block_id])?;
                             self.hash_to_block.remove(&hash);
                             self.block_to_hash.remove(&block_id);
+                            consecutive_skips = 0;
+                            self.stats.blocks_evicted += 1;
+                            continue;
+                        }
+                    }
+                }
+                self.lru_queue.push_back(block_id);
+                consecutive_skips += 1;
+            }
+        }
+
+        self.stats.cached_blocks = self.hash_to_block.len();
+        self.allocator.allocate(count)
+    }
+
+    /// Evict up to `count` LRU blocks that have no active references.
+    fn evict_lru(&mut self, count: usize) -> Result<()> {
+        let mut evicted = 0;
+        let mut consecutive_skips = 0;
+
+        while evicted < count {
+            if self.lru_queue.is_empty() || consecutive_skips >= self.lru_queue.len() {
+                break;
+            }
+
+            if let Some(block_id) = self.lru_queue.pop_front() {
+                if let Some(&hash) = self.block_to_hash.get(&block_id) {
+                    if let Some(info) = self.hash_to_block.get(&hash) {
+                        if info.ref_count == 0 {
+                            self.allocator.free(&[block_id])?;
+                            self.hash_to_block.remove(&hash);
+                            self.block_to_hash.remove(&block_id);
+                            consecutive_skips = 0;
                             evicted += 1;
                             self.stats.blocks_evicted += 1;
                             continue;
@@ -169,15 +222,12 @@ impl<A: BlockAllocator> PrefixCache<A> {
                     }
                 }
                 self.lru_queue.push_back(block_id);
-            }
-
-            if evicted == 0 && self.lru_queue.len() == self.hash_to_block.len() {
-                break;
+                consecutive_skips += 1;
             }
         }
 
         self.stats.cached_blocks = self.hash_to_block.len();
-        self.allocator.allocate(count)
+        Ok(())
     }
 
     fn touch_lru(&mut self, block_id: BlockId) {
@@ -214,11 +264,16 @@ impl<A: BlockAllocator> PrefixCache<A> {
             return false;
         }
 
+        let block_size = self.config.block_size;
         let block_hashes = self.compute_block_hashes(tokens);
-        block_hashes
-            .first()
-            .map(|hash| self.hash_to_block.contains_key(hash))
-            .unwrap_or(false)
+        if let Some(&hash) = block_hashes.first() {
+            if let Some(info) = self.hash_to_block.get(&hash) {
+                // Verify the stored tokens to guard against hash collisions.
+                let first_block_end = block_size.min(tokens.len());
+                return info.tokens == tokens[..first_block_end];
+            }
+        }
+        false
     }
 
     pub fn cached_block_count(&self, tokens: &[u32]) -> usize {
@@ -226,10 +281,21 @@ impl<A: BlockAllocator> PrefixCache<A> {
             return 0;
         }
 
+        let block_size = self.config.block_size;
         let block_hashes = self.compute_block_hashes(tokens);
         block_hashes
             .iter()
-            .take_while(|hash| self.hash_to_block.contains_key(hash))
+            .enumerate()
+            .take_while(|(block_idx, hash)| {
+                if let Some(info) = self.hash_to_block.get(hash) {
+                    let block_start = block_idx * block_size;
+                    let block_end = ((block_idx + 1) * block_size).min(tokens.len());
+                    // Validate tokens to guard against hash collisions.
+                    info.tokens == tokens[block_start..block_end]
+                } else {
+                    false
+                }
+            })
             .count()
     }
 

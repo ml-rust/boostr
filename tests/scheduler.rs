@@ -213,6 +213,73 @@ fn test_sequence_request_builder() {
     assert_eq!(request.priority, SchedulingPriority::High);
 }
 
+/// Verify that append_token returns an error rather than silently advancing
+/// the token count when no physical block can be allocated for the new token.
+#[test]
+fn test_append_token_returns_error_when_blocks_exhausted() {
+    // Tiny pool: 1 block of size 2 — can hold at most 2 tokens.
+    let allocator = CpuBlockAllocator::new(1, 2);
+    let config = SchedulerConfig {
+        max_batch_size: 4,
+        max_batch_tokens: 1024,
+        max_seq_len: 512,
+        block_size: 2,
+        enable_preemption: false,
+        max_preempt_per_step: 0,
+    };
+    let mut scheduler = SequenceScheduler::new(allocator, config);
+
+    // 1 token prompt, block size 2 → one block is enough for prefill (1 token)
+    // and still leaves slot 1 free within that block.
+    let req = SequenceRequest::new(1, vec![10]);
+    scheduler.add_request(req).unwrap();
+    scheduler.schedule().unwrap();
+
+    // Token 1 (pos 1) still fits in the first block.
+    let done = scheduler.append_token(1, 20).unwrap();
+    assert!(!done);
+
+    // Token 2 (pos 2) would need a second block, but the pool is exhausted.
+    let result = scheduler.append_token(1, 30);
+    assert!(result.is_err(), "must fail when no block available");
+
+    // The sequence total_tokens must NOT have been incremented past 2.
+    let bt = scheduler.get_block_table(1).unwrap();
+    assert!(
+        bt.num_tokens <= 2,
+        "num_tokens must not advance beyond available blocks: got {}",
+        bt.num_tokens
+    );
+}
+
+/// Double-abort of the same sequence must not panic, corrupt stats, or
+/// double-free blocks.
+#[test]
+fn test_abort_sequence_is_idempotent() {
+    let mut scheduler = create_scheduler();
+    let req = SequenceRequest::new(42, vec![1, 2, 3, 4]);
+    scheduler.add_request(req).unwrap();
+    scheduler.schedule().unwrap();
+
+    // First abort.
+    scheduler.abort_sequence(42).unwrap();
+    let stats_after_first = scheduler.stats();
+
+    // Second abort on the same (now-finished) sequence must succeed without
+    // corrupting counters or double-freeing blocks.
+    scheduler.abort_sequence(42).unwrap();
+    let stats_after_second = scheduler.stats();
+
+    assert_eq!(
+        stats_after_first.finished_count, stats_after_second.finished_count,
+        "finished_count must not change on second abort"
+    );
+    assert_eq!(
+        stats_after_first.running_count, stats_after_second.running_count,
+        "running_count must not underflow on second abort"
+    );
+}
+
 #[test]
 fn test_scheduled_batch_methods() {
     let batch = ScheduledBatch {

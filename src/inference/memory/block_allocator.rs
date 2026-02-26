@@ -49,6 +49,8 @@ struct BlockAllocatorState {
     total_blocks: usize,
     block_size: usize,
     free_list: VecDeque<BlockId>,
+    /// Per-block allocated flag; `true` means the block is currently allocated.
+    allocated_flags: Vec<bool>,
     total_allocations: usize,
     total_frees: usize,
     peak_usage: usize,
@@ -61,6 +63,7 @@ impl BlockAllocatorState {
             total_blocks,
             block_size,
             free_list,
+            allocated_flags: vec![false; total_blocks],
             total_allocations: 0,
             total_frees: 0,
             peak_usage: 0,
@@ -124,6 +127,10 @@ impl BlockAllocator for CpuBlockAllocator {
 
         let blocks: Vec<BlockId> = state.free_list.drain(0..count).collect();
 
+        for &block_id in &blocks {
+            state.allocated_flags[block_id as usize] = true;
+        }
+
         state.total_allocations += 1;
 
         let current_usage = state.allocated_count();
@@ -143,6 +150,7 @@ impl BlockAllocator for CpuBlockAllocator {
             reason: format!("block allocator mutex poisoned: {e}"),
         })?;
 
+        // Validate all IDs before mutating state.
         for &block_id in blocks {
             if block_id as usize >= state.total_blocks {
                 return Err(Error::SchedulerError {
@@ -153,9 +161,24 @@ impl BlockAllocator for CpuBlockAllocator {
                     ),
                 });
             }
+            if !state.allocated_flags[block_id as usize] {
+                return Err(Error::SchedulerError {
+                    reason: format!("Double-free of block {}", block_id),
+                });
+            }
+        }
+        // Check for duplicates within this call.
+        let mut seen = std::collections::HashSet::new();
+        for &block_id in blocks {
+            if !seen.insert(block_id) {
+                return Err(Error::SchedulerError {
+                    reason: format!("Duplicate block ID {} in free call", block_id),
+                });
+            }
         }
 
         for &block_id in blocks {
+            state.allocated_flags[block_id as usize] = false;
             state.free_list.push_back(block_id);
         }
 
@@ -206,6 +229,9 @@ impl BlockAllocator for CpuBlockAllocator {
         state.free_list.clear();
         for i in 0..state.total_blocks as BlockId {
             state.free_list.push_back(i);
+        }
+        for flag in &mut state.allocated_flags {
+            *flag = false;
         }
         state.total_allocations = 0;
         state.total_frees = 0;
@@ -400,6 +426,30 @@ mod tests {
 
         assert_eq!(alloc1.free_block_count(), 90);
         assert_eq!(alloc2.free_block_count(), 90);
+    }
+
+    #[test]
+    fn test_block_allocator_double_free_detected() {
+        let alloc = CpuBlockAllocator::new(10, 16);
+        let blocks = alloc.allocate(2).unwrap();
+        alloc.free(&blocks).unwrap();
+
+        // Freeing again must fail, not silently corrupt the free-list.
+        let result = alloc.free(&blocks);
+        assert!(result.is_err(), "double-free must be detected");
+    }
+
+    #[test]
+    fn test_block_allocator_duplicate_in_free_call_detected() {
+        let alloc = CpuBlockAllocator::new(10, 16);
+        let blocks = alloc.allocate(2).unwrap();
+
+        // Both entries in the slice are the same ID.
+        let result = alloc.free(&[blocks[0], blocks[0]]);
+        assert!(
+            result.is_err(),
+            "duplicate IDs in one free call must be detected"
+        );
     }
 
     #[test]

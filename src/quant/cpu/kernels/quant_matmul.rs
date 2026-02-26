@@ -11,6 +11,25 @@
 use super::dequant;
 use crate::quant::QuantFormat;
 
+/// f32 dot product with SIMD acceleration when available.
+fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let len = a.len();
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return unsafe { super::simd::dot_f32::dot_f32_avx2_fma(a.as_ptr(), b.as_ptr(), len) };
+        }
+    }
+
+    let mut sum = 0.0f32;
+    for i in 0..len {
+        sum += a[i] * b[i];
+    }
+    sum
+}
+
 /// Quantized matmul: activation \[M, K\] × weight\[N, K\]^T → output \[M, N\]
 ///
 /// `act`: \[M * K\] f32 values (row-major)
@@ -50,11 +69,7 @@ pub fn quant_matmul_f32(
         // Dot product with each activation row
         for i in 0..m {
             let act_row = &act[i * k..(i + 1) * k];
-            let mut sum = 0.0f32;
-            for l in 0..k {
-                sum += act_row[l] * dequant_row[l];
-            }
-            output[i * n + j] = sum;
+            output[i * n + j] = dot_f32(act_row, &dequant_row);
         }
     }
 }

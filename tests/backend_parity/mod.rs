@@ -2,6 +2,7 @@ pub mod helpers;
 
 pub mod alibi;
 pub mod attention;
+pub mod calibration;
 pub mod fused_fp8;
 pub mod fused_optimizer;
 pub mod fused_qkv;
@@ -16,5 +17,4 @@ pub mod quant_nf4;
 pub mod rope;
 pub mod speculative;
 pub mod ssm_kernels;
-pub mod calibration;
 pub mod varlen_attention;

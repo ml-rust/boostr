@@ -26,6 +26,7 @@ fn det_data(n: usize) -> Vec<f32> {
 ///
 /// Applies the specified RoPE variant to `x_data` and returns `sum(output)`,
 /// which is used as the loss in a two-point finite-difference approximation.
+#[allow(clippy::too_many_arguments)]
 fn compute_loss(
     client: &CpuClient,
     device: &CpuDevice,

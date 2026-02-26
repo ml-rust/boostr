@@ -30,10 +30,10 @@ fn create_awq_test_data(
     for ki in 0..k {
         for pj in 0..n_packed {
             let mut packed = 0u32;
-            for sub in 0..8 {
+            for (sub, &shift) in awq_shifts.iter().enumerate() {
                 // Use deterministic pattern: nibble values 0-15
                 let val = ((ki * n_packed + pj + sub) % 16) as u32;
-                packed |= val << awq_shifts[sub];
+                packed |= val << shift;
             }
             qweight_data[ki * n_packed + pj] = packed;
         }
@@ -59,6 +59,7 @@ fn create_awq_test_data(
 }
 
 /// Create GPTQ-packed test data
+#[allow(clippy::type_complexity)]
 fn create_gptq_test_data(
     m: usize,
     k: usize,

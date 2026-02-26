@@ -20,9 +20,9 @@ fn create_awq_weights(
     for ki in 0..k {
         for pj in 0..n_packed {
             let mut packed = 0u32;
-            for sub in 0..8 {
+            for (sub, &shift) in awq_shifts.iter().enumerate() {
                 let val = ((seed + ki * n_packed + pj + sub) % 16) as u32;
-                packed |= val << awq_shifts[sub];
+                packed |= val << shift;
             }
             qweight_data[ki * n_packed + pj] = packed;
         }

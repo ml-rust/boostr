@@ -14,6 +14,7 @@ const NGROUPS: usize = 2;
 const DSTATE: usize = 4;
 const CHUNK_SIZE: usize = 8;
 
+#[allow(clippy::type_complexity)]
 fn make_test_tensors(
     device: &numr::runtime::cpu::CpuDevice,
 ) -> (

@@ -16,7 +16,7 @@ use numr::runtime::Runtime;
 ///
 /// ```ignore
 /// let full_dataset = MmapDataset::open("data.bin", 1024)?;
-/// let shard = ShardedDataset::new(full_dataset, rank, world_size)?;
+/// let shard = new_sharded::<CpuRuntime, _>(full_dataset, rank, world_size)?;
 /// let loader = DataLoader::new(shard, batch_size, seed);
 /// ```
 pub struct ShardedDataset<D> {
@@ -27,38 +27,6 @@ pub struct ShardedDataset<D> {
 }
 
 impl<D> ShardedDataset<D> {
-    /// Create a sharded view of a dataset.
-    ///
-    /// # Arguments
-    /// * `inner` - The full dataset
-    /// * `rank` - This rank's index (0-based)
-    /// * `world_size` - Total number of ranks
-    pub fn new<R: Runtime>(inner: D, rank: usize, world_size: usize) -> Result<Self>
-    where
-        D: Dataset<R>,
-    {
-        if world_size == 0 {
-            return Err(Error::DataError {
-                reason: "world_size must be > 0".to_string(),
-            });
-        }
-        if rank >= world_size {
-            return Err(Error::DataError {
-                reason: format!("rank {rank} >= world_size {world_size}"),
-            });
-        }
-
-        let total = inner.len();
-        let shard_len = total.saturating_sub(rank).div_ceil(world_size);
-
-        Ok(Self {
-            inner,
-            rank,
-            world_size,
-            shard_len,
-        })
-    }
-
     /// The underlying dataset.
     pub fn inner(&self) -> &D {
         &self.inner
@@ -73,6 +41,43 @@ impl<D> ShardedDataset<D> {
     pub fn world_size(&self) -> usize {
         self.world_size
     }
+}
+
+impl<D> ShardedDataset<D> {
+    fn from_parts(inner: D, rank: usize, world_size: usize, total: usize) -> Result<Self> {
+        if world_size == 0 {
+            return Err(Error::DataError {
+                reason: "world_size must be > 0".to_string(),
+            });
+        }
+        if rank >= world_size {
+            return Err(Error::DataError {
+                reason: format!("rank {rank} >= world_size {world_size}"),
+            });
+        }
+        let shard_len = total.saturating_sub(rank).div_ceil(world_size);
+        Ok(Self {
+            inner,
+            rank,
+            world_size,
+            shard_len,
+        })
+    }
+}
+
+/// Create a sharded view of `inner`.
+///
+/// # Arguments
+/// * `inner` - The full dataset
+/// * `rank` - This rank's index (0-based)
+/// * `world_size` - Total number of ranks
+pub fn new_sharded<R: Runtime, D: Dataset<R>>(
+    inner: D,
+    rank: usize,
+    world_size: usize,
+) -> Result<ShardedDataset<D>> {
+    let total = inner.len();
+    ShardedDataset::from_parts(inner, rank, world_size, total)
 }
 
 impl<R: Runtime, D: Dataset<R>> Dataset<R> for ShardedDataset<D> {
@@ -127,11 +132,11 @@ mod tests {
     fn test_shard_disjoint() {
         let device = CpuDevice::new();
         let ds = DummyDataset { size: 10 };
-        let s0 = ShardedDataset::new::<CpuRuntime>(ds, 0, 3).unwrap();
+        let s0 = new_sharded::<CpuRuntime, _>(ds, 0, 3).unwrap();
         let ds = DummyDataset { size: 10 };
-        let s1 = ShardedDataset::new::<CpuRuntime>(ds, 1, 3).unwrap();
+        let s1 = new_sharded::<CpuRuntime, _>(ds, 1, 3).unwrap();
         let ds = DummyDataset { size: 10 };
-        let s2 = ShardedDataset::new::<CpuRuntime>(ds, 2, 3).unwrap();
+        let s2 = new_sharded::<CpuRuntime, _>(ds, 2, 3).unwrap();
 
         // Rank 0: indices 0,3,6,9 → 4 samples
         // Rank 1: indices 1,4,7 → 3 samples (10 not valid)
@@ -154,6 +159,6 @@ mod tests {
     #[test]
     fn test_shard_invalid_rank() {
         let ds = DummyDataset { size: 10 };
-        assert!(ShardedDataset::new::<CpuRuntime>(ds, 3, 3).is_err());
+        assert!(new_sharded::<CpuRuntime, _>(ds, 3, 3).is_err());
     }
 }

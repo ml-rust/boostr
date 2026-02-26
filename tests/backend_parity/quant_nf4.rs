@@ -2,7 +2,7 @@
 
 use super::helpers::*;
 use boostr::DequantOps;
-use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
 
 #[test]

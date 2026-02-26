@@ -14,5 +14,6 @@ pub mod quant_fused;
 pub mod quant_int4_gemm;
 pub mod quant_nf4;
 pub mod rope;
+pub mod speculative;
 pub mod ssm_kernels;
 pub mod varlen_attention;

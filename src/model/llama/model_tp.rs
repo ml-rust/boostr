@@ -129,7 +129,7 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
             let block = LlamaBlockTp {
                 input_layernorm: RmsNorm::new(
                     Tensor::<R>::ones(&[hidden], dt, device),
-                    config.rms_norm_eps,
+                    config.rms_norm_eps as f32,
                     true,
                 ),
                 self_attn: LlamaAttentionTp {
@@ -160,7 +160,7 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
                 },
                 post_attention_layernorm: RmsNorm::new(
                     Tensor::<R>::ones(&[hidden], dt, device),
-                    config.rms_norm_eps,
+                    config.rms_norm_eps as f32,
                     true,
                 ),
                 mlp: LlamaMlpTp {
@@ -188,7 +188,7 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
         // Final norm (replicated)
         let norm = RmsNorm::new(
             Tensor::<R>::ones(&[hidden], dt, device),
-            config.rms_norm_eps,
+            config.rms_norm_eps as f32,
             true,
         );
 
@@ -276,7 +276,7 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
             let block = LlamaBlockTp {
                 input_layernorm: RmsNorm::new(
                     layer_vb.take_tensor("input_layernorm.weight")?,
-                    config.rms_norm_eps,
+                    config.rms_norm_eps as f32,
                     false,
                 ),
                 self_attn: LlamaAttentionTp {
@@ -290,7 +290,7 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
                 },
                 post_attention_layernorm: RmsNorm::new(
                     layer_vb.take_tensor("post_attention_layernorm.weight")?,
-                    config.rms_norm_eps,
+                    config.rms_norm_eps as f32,
                     false,
                 ),
                 mlp: LlamaMlpTp {
@@ -304,7 +304,7 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
 
         let norm = RmsNorm::new(
             model_vb.take_tensor("norm.weight")?,
-            config.rms_norm_eps,
+            config.rms_norm_eps as f32,
             false,
         );
 

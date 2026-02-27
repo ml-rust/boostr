@@ -250,6 +250,29 @@ where
         Ok(Self { layers })
     }
 
+    /// Convenience constructor matching the positional-arg API used by blazr.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_positional(
+        num_layers: usize,
+        batch_size: usize,
+        num_kv_heads: usize,
+        initial_capacity: usize,
+        max_seq_len: usize,
+        head_dim: usize,
+        dtype: DType,
+        device: &R::Device,
+    ) -> Result<Self> {
+        let config = LayeredKvCacheConfig {
+            batch_size,
+            num_kv_heads,
+            initial_capacity,
+            max_seq_len,
+            head_dim,
+            dtype,
+        };
+        Self::new(num_layers, &config, device)
+    }
+
     pub fn layer_mut(&mut self, layer_idx: usize) -> Option<&mut KvCache<R>> {
         self.layers.get_mut(layer_idx)
     }

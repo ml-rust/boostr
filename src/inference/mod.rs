@@ -3,6 +3,7 @@ pub mod memory;
 pub mod prefix_cache;
 pub mod scheduler;
 pub mod speculative;
+pub mod ssm_state;
 
 pub use kv_cache::{KvCache, LayeredKvCache, LayeredKvCacheConfig, PagedKvCache};
 pub use memory::{BlockAllocator, BlockAllocatorStats, BlockId, BlockTable, CpuBlockAllocator};
@@ -14,3 +15,4 @@ pub use scheduler::{
 pub use speculative::{
     SpeculativeConfig, SpeculativeExecutor, SpeculativeModel, SpeculativeStats, VerificationResult,
 };
+pub use ssm_state::{LayeredSsmState, SsmState};

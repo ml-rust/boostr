@@ -10,6 +10,7 @@ use super::types::{GgmlType, GgufValueType};
 use super::value::GgufValue;
 use crate::error::{Error, Result};
 use crate::quant::QuantTensor;
+use memmap2::Mmap;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -21,9 +22,15 @@ use std::path::Path;
 const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" in little-endian
 const GGUF_DEFAULT_ALIGNMENT: usize = 32;
 
+/// Backing storage for GGUF tensor data: either a regular file or a memory-mapped file.
+enum GgufStorage {
+    File(File),
+    Mmap(Mmap),
+}
+
 /// GGUF file reader
 pub struct Gguf {
-    file: File,
+    storage: GgufStorage,
     version: u32,
     metadata: GgufMetadata,
     tensors: HashMap<String, GgufTensorInfo>,
@@ -31,8 +38,21 @@ pub struct Gguf {
 }
 
 impl Gguf {
-    /// Open and parse a GGUF file
+    /// Open and parse a GGUF file using regular file I/O.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::open_impl(path, false)
+    }
+
+    /// Open a GGUF file with optional memory-mapping.
+    ///
+    /// When `use_mmap` is `true`, the tensor data region is memory-mapped for
+    /// zero-copy reads. The header and metadata are still read via buffered I/O.
+    /// Falls back to regular file I/O if mmap fails (e.g. on unsupported platforms).
+    pub fn open_with_mmap<P: AsRef<Path>>(path: P, use_mmap: bool) -> Result<Self> {
+        Self::open_impl(path, use_mmap)
+    }
+
+    fn open_impl<P: AsRef<Path>>(path: P, use_mmap: bool) -> Result<Self> {
         let mut file = File::open(path.as_ref()).map_err(|e| Error::ModelError {
             reason: format!("IO error: {e}"),
         })?;
@@ -80,21 +100,27 @@ impl Gguf {
         })?;
         let data_offset = align_offset(current_pos, alignment);
 
+        // Drop the BufReader so we can take ownership of `file` again.
+        drop(reader);
+
+        let storage = if use_mmap {
+            // SAFETY: The file is read-only and we do not mutate the mapping.
+            // The caller must not truncate or replace the file while the Gguf is live.
+            match unsafe { Mmap::map(&file) } {
+                Ok(mmap) => GgufStorage::Mmap(mmap),
+                Err(_) => GgufStorage::File(file), // graceful fallback
+            }
+        } else {
+            GgufStorage::File(file)
+        };
+
         Ok(Gguf {
-            file,
+            storage,
             version,
             metadata,
             tensors,
             data_offset,
         })
-    }
-
-    /// Open a GGUF file with optional memory-mapping.
-    ///
-    /// The `_use_mmap` parameter is accepted for API compatibility but memory-mapping
-    /// is not yet implemented. Falls back to regular file I/O in all cases.
-    pub fn open_with_mmap<P: AsRef<Path>>(path: P, _use_mmap: bool) -> Result<Self> {
-        Self::open(path)
     }
 
     pub fn version(&self) -> u32 {
@@ -123,7 +149,10 @@ impl Gguf {
         })
     }
 
-    /// Read raw tensor data bytes
+    /// Read raw tensor data bytes.
+    ///
+    /// When the file was opened with `use_mmap = true` this is a zero-copy slice
+    /// of the mapping; otherwise it reads from the file.
     pub fn read_tensor_bytes(&mut self, name: &str) -> Result<Vec<u8>> {
         let info = self
             .tensors
@@ -135,20 +164,33 @@ impl Gguf {
 
         let abs_offset = self.data_offset + info.offset;
         let size = info.size_bytes();
-        let mut buf = vec![0u8; size];
 
-        self.file
-            .seek(SeekFrom::Start(abs_offset))
-            .map_err(|e| Error::ModelError {
-                reason: format!("IO seek error: {e}"),
-            })?;
-        self.file
-            .read_exact(&mut buf)
-            .map_err(|e| Error::ModelError {
-                reason: format!("IO read error: {e}"),
-            })?;
-
-        Ok(buf)
+        match &mut self.storage {
+            GgufStorage::Mmap(mmap) => {
+                let start = abs_offset as usize;
+                let end = start + size;
+                if end > mmap.len() {
+                    return Err(Error::ModelError {
+                        reason: format!(
+                            "tensor '{name}' data at [{start}..{end}) exceeds mmap length {}",
+                            mmap.len()
+                        ),
+                    });
+                }
+                Ok(mmap[start..end].to_vec())
+            }
+            GgufStorage::File(file) => {
+                let mut buf = vec![0u8; size];
+                file.seek(SeekFrom::Start(abs_offset))
+                    .map_err(|e| Error::ModelError {
+                        reason: format!("IO seek error: {e}"),
+                    })?;
+                file.read_exact(&mut buf).map_err(|e| Error::ModelError {
+                    reason: format!("IO read error: {e}"),
+                })?;
+                Ok(buf)
+            }
+        }
     }
 
     /// Load an F32 tensor (for unquantized F32/F16/BF16 tensors, converted to F32)
@@ -526,5 +568,33 @@ mod tests {
         let f = create_test_gguf();
         let gguf = Gguf::open(f.path()).unwrap();
         assert!(gguf.tensor_info("nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_open_with_mmap() {
+        let (_, device) = cpu_setup();
+        let f = create_test_gguf();
+        let mut gguf = Gguf::open_with_mmap(f.path(), true).unwrap();
+        assert_eq!(gguf.version(), 3);
+        let tensor = gguf
+            .load_tensor_f32::<CpuRuntime>("weight_f32", &device)
+            .unwrap();
+        assert_eq!(tensor.shape(), &[4]);
+        let data = tensor.to_vec::<f32>();
+        assert!((data[0] - 1.0).abs() < 1e-6);
+        assert!((data[3] - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_open_without_mmap() {
+        let (_, device) = cpu_setup();
+        let f = create_test_gguf();
+        // use_mmap=false should behave identically to open()
+        let mut gguf = Gguf::open_with_mmap(f.path(), false).unwrap();
+        let tensor = gguf
+            .load_tensor_f32::<CpuRuntime>("weight_f32", &device)
+            .unwrap();
+        let data = tensor.to_vec::<f32>();
+        assert!((data[0] - 1.0).abs() < 1e-6);
     }
 }

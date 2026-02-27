@@ -51,6 +51,27 @@ pub use numr::error::{Error as NumrError, Result as NumrResult};
 pub use numr::runtime::{Runtime, RuntimeClient};
 pub use numr::tensor::Tensor;
 
+// Re-export runtime types for convenience (blazr uses boostr::CpuRuntime, etc.)
+pub use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+#[cfg(feature = "cuda")]
+pub use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
+
+// Re-export numr modules for path-based access (e.g., boostr::runtime::Device)
+pub use numr::runtime;
+pub use numr::tensor;
+
+// Re-export TensorOps as a trait alias that blazr uses for client bounds
+pub use ops::TensorOps;
+
+// Re-export IndexingOps for KV cache bounds
+pub use numr::ops::traits::IndexingOps;
+
+// Re-export ScalarOps for blazr's temperature scaling
+pub use numr::ops::ScalarOps;
+
+// Re-export numr ops needed by blazr's Mamba2 inference path
+pub use numr::ops::{ActivationOps, BinaryOps, ConvOps, NormalizationOps, UnaryOps};
+
 #[cfg(test)]
 pub(crate) mod test_utils {
     use numr::runtime::cpu::{CpuClient, CpuDevice};

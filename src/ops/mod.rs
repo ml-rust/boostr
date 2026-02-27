@@ -24,3 +24,6 @@ pub use traits::SpeculativeOps;
 pub use traits::VarLenAttentionOps;
 pub use traits::architecture::moe::MoEActivation;
 pub use traits::{Int4GroupSize, KvCacheQuantOps, KvQuantMode};
+
+// Re-export numr's TensorOps which bundles all operation traits
+pub use numr::ops::traits::TensorOps;

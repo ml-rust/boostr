@@ -89,6 +89,14 @@ impl Gguf {
         })
     }
 
+    /// Open a GGUF file with optional memory-mapping.
+    ///
+    /// The `_use_mmap` parameter is accepted for API compatibility but memory-mapping
+    /// is not yet implemented. Falls back to regular file I/O in all cases.
+    pub fn open_with_mmap<P: AsRef<Path>>(path: P, _use_mmap: bool) -> Result<Self> {
+        Self::open(path)
+    }
+
     pub fn version(&self) -> u32 {
         self.version
     }

@@ -26,6 +26,16 @@ impl GgufMetadata {
         self.kv.get(key)
     }
 
+    /// Get an array value by key.
+    ///
+    /// Returns the array elements if the value at `key` is a `GgufValue::Array`.
+    pub fn get_array(&self, key: &str) -> Option<&[GgufValue]> {
+        self.kv.get(key).and_then(|v| match v {
+            GgufValue::Array(arr) => Some(arr.as_slice()),
+            _ => None,
+        })
+    }
+
     /// Model architecture (e.g., "llama")
     pub fn architecture(&self) -> Option<&str> {
         self.get_string("general.architecture")

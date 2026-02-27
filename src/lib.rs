@@ -70,7 +70,9 @@ pub use numr::ops::traits::IndexingOps;
 pub use numr::ops::ScalarOps;
 
 // Re-export numr ops needed by blazr's Mamba2 inference path
-pub use numr::ops::{ActivationOps, BinaryOps, ConvOps, NormalizationOps, UnaryOps};
+pub use numr::ops::{
+    ActivationOps, BinaryOps, ConvOps, NormalizationOps, TypeConversionOps, UnaryOps,
+};
 
 #[cfg(test)]
 pub(crate) mod test_utils {

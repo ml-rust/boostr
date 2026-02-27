@@ -224,9 +224,10 @@ impl SafeTensors {
         Ok(buf)
     }
 
-    /// Load a tensor as F32 on the given device
+    /// Load a tensor in its native dtype on the given device
     ///
-    /// Currently supports loading F32 data. F16/BF16 data is converted to F32.
+    /// Preserves the original dtype from the SafeTensors file (F32, F16, BF16, etc.)
+    /// without converting to F32. This halves memory for BF16/F16 models.
     pub fn load_tensor<R: Runtime<DType = DType>>(
         &mut self,
         name: &str,
@@ -242,39 +243,27 @@ impl SafeTensors {
 
         let bytes = self.read_tensor_bytes(name)?;
 
-        let data: Vec<f32> = match info.dtype {
-            DType::F32 => bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect(),
-            DType::F16 => bytes
-                .chunks_exact(2)
-                .map(|b| {
-                    let bits = u16::from_le_bytes([b[0], b[1]]);
-                    half::f16::from_bits(bits).to_f32()
-                })
-                .collect(),
-            DType::BF16 => bytes
-                .chunks_exact(2)
-                .map(|b| {
-                    let bits = u16::from_le_bytes([b[0], b[1]]);
-                    half::bf16::from_bits(bits).to_f32()
-                })
-                .collect(),
-            DType::F64 => bytes
-                .chunks_exact(8)
-                .map(|b| {
-                    f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
-                })
-                .collect(),
-            other => {
-                return Err(Error::ModelError {
-                    reason: format!("unsupported SafeTensors dtype: {other:?}"),
-                });
+        match info.dtype {
+            DType::F32 | DType::F16 | DType::BF16 => {
+                // Load raw bytes directly in native dtype
+                let storage = numr::tensor::Storage::<R>::from_bytes(&bytes, info.dtype, device)
+                    .map_err(Error::Numr)?;
+                Ok(Tensor::<R>::from_storage_contiguous(storage, &info.shape))
             }
-        };
-
-        Tensor::<R>::try_from_slice(&data, &info.shape, device).map_err(Error::Numr)
+            DType::F64 => {
+                // Downcast F64 to F32 (F64 weights are rare and wasteful)
+                let data: Vec<f32> = bytes
+                    .chunks_exact(8)
+                    .map(|b| {
+                        f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
+                    })
+                    .collect();
+                Tensor::<R>::try_from_slice(&data, &info.shape, device).map_err(Error::Numr)
+            }
+            other => Err(Error::ModelError {
+                reason: format!("unsupported SafeTensors dtype: {other:?}"),
+            }),
+        }
     }
 
     /// Load all tensors to the given device
@@ -464,6 +453,45 @@ mod tests {
         let data = tensor.to_vec::<f32>();
         assert!((data[0] - 1.0).abs() < 1e-6);
         assert!((data[5] - 6.0).abs() < 1e-6);
+    }
+
+    fn create_test_file_bf16() -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+
+        let header = serde_json::json!({
+            "__metadata__": { "format": "pt" },
+            "weight": {
+                "dtype": "BF16",
+                "shape": [2, 3],
+                "data_offsets": [0, 12]
+            }
+        });
+        let header_str = header.to_string();
+        let header_bytes = header_str.as_bytes();
+
+        file.write_all(&(header_bytes.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(header_bytes).unwrap();
+
+        for f in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0] {
+            file.write_all(&half::bf16::from_f32(f).to_le_bytes())
+                .unwrap();
+        }
+        file.flush().unwrap();
+        file
+    }
+
+    #[test]
+    fn test_load_tensor_bf16() {
+        let (_, device) = cpu_setup();
+        let f = create_test_file_bf16();
+        let mut st = SafeTensors::open(f.path()).unwrap();
+        let tensor = st.load_tensor::<CpuRuntime>("weight", &device).unwrap();
+        assert_eq!(tensor.shape(), &[2, 3]);
+        assert_eq!(tensor.dtype(), DType::BF16);
+        let data: Vec<half::bf16> = tensor.to_vec();
+        assert!((data[0].to_f32() - 1.0).abs() < 1e-2);
+        assert!((data[5].to_f32() - 6.0).abs() < 1e-2);
     }
 
     #[test]

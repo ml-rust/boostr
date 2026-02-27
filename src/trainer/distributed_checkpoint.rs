@@ -5,8 +5,9 @@ use crate::trainer::checkpoint::{
     CHECKPOINT_VERSION, CheckpointData, TrainingState, load_checkpoint, save_checkpoint,
 };
 use numr::dtype::DType;
+use numr::prelude::ShapeOps;
 use numr::runtime::Runtime;
-use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -23,6 +24,10 @@ pub struct ShardingConfig {
     pub owned_params: Vec<String>,
     /// Sharding strategy used.
     pub strategy: ShardingStrategy,
+    /// For TensorParallel: map from param name to the dimension it was split along.
+    /// e.g. {"attention.wq": 0, "attention.wk": 0, "mlp.w1": 1}
+    #[serde(default)]
+    pub split_dims: HashMap<String, usize>,
 }
 
 /// Sharding strategy for distributed checkpoints.
@@ -90,6 +95,7 @@ pub fn save_distributed_checkpoint<P: AsRef<Path>>(
                             rank: r,
                             owned_params: Vec::new(),
                             strategy: sharding.strategy.clone(),
+                            split_dims: HashMap::new(),
                         }
                     }
                 })
@@ -169,8 +175,7 @@ pub fn load_distributed_checkpoint<R: Runtime<DType = DType>, P: AsRef<Path>>(
 ///
 /// For `Replicated` strategy, uses rank 0's data.
 /// For `ZeroPartitioned`, merges each rank's owned params.
-/// For `TensorParallel`, concatenation along the split dimension would require
-/// knowing the split dim per tensor — currently returns an error (future work).
+/// For `TensorParallel`, concatenates tensors along their split dimensions using metadata.
 pub fn consolidate_checkpoint<P: AsRef<Path>>(sharded_dir: P, output_dir: P) -> Result<()> {
     let sharded_dir = sharded_dir.as_ref();
     let output_dir = output_dir.as_ref();
@@ -190,38 +195,51 @@ pub fn consolidate_checkpoint<P: AsRef<Path>>(sharded_dir: P, output_dir: P) -> 
     let mut merged_opt: HashMap<String, Tensor<CpuRuntime>> = HashMap::new();
     let mut training_state: Option<TrainingState> = None;
 
-    for rank in 0..meta.world_size {
-        let rank_dir = sharded_dir.join(format!("rank_{rank}"));
-        let (model, opt, state) = load_checkpoint::<CpuRuntime, _>(&rank_dir, &device)?;
+    // For TensorParallel, we need to collect all ranks before merging
+    let strategy = &meta.shards[0].strategy;
+    let is_tensor_parallel = matches!(strategy, ShardingStrategy::TensorParallel);
 
-        if training_state.is_none() {
-            training_state = Some(state);
-        }
+    if is_tensor_parallel {
+        consolidate_tensor_parallel(
+            &meta,
+            sharded_dir,
+            &device,
+            &mut merged_model,
+            &mut merged_opt,
+            &mut training_state,
+        )?;
+    } else {
+        // Replicated and ZeroPartitioned can be processed rank-by-rank
+        for rank in 0..meta.world_size {
+            let rank_dir = sharded_dir.join(format!("rank_{rank}"));
+            let (model, opt, state) = load_checkpoint::<CpuRuntime, _>(&rank_dir, &device)?;
 
-        let strategy = &meta.shards[rank].strategy;
-        match strategy {
-            ShardingStrategy::Replicated => {
-                // Use rank 0's data only
-                if rank == 0 {
-                    merged_model = model;
-                    if let Some(opt) = opt {
-                        merged_opt = opt;
+            if training_state.is_none() {
+                training_state = Some(state);
+            }
+
+            let strategy = &meta.shards[rank].strategy;
+            match strategy {
+                ShardingStrategy::Replicated => {
+                    // Use rank 0's data only
+                    if rank == 0 {
+                        merged_model = model;
+                        if let Some(opt) = opt {
+                            merged_opt = opt;
+                        }
                     }
                 }
-            }
-            ShardingStrategy::ZeroPartitioned { .. } => {
-                // Each rank owns a disjoint subset of params
-                merged_model.extend(model);
-                if let Some(opt) = opt {
-                    merged_opt.extend(opt);
+                ShardingStrategy::ZeroPartitioned { .. } => {
+                    // Each rank owns a disjoint subset of params
+                    merged_model.extend(model);
+                    if let Some(opt) = opt {
+                        merged_opt.extend(opt);
+                    }
                 }
-            }
-            ShardingStrategy::TensorParallel => {
-                return Err(Error::TrainingError {
-                    reason: "consolidation of TensorParallel checkpoints requires \
-                             per-tensor split dimension metadata (not yet implemented)"
-                        .to_string(),
-                });
+                ShardingStrategy::TensorParallel => {
+                    // Should not reach here (handled above)
+                    unreachable!()
+                }
             }
         }
     }
@@ -240,6 +258,98 @@ pub fn consolidate_checkpoint<P: AsRef<Path>>(sharded_dir: P, output_dir: P) -> 
         },
         &state,
     )
+}
+
+/// Helper function to consolidate TensorParallel checkpoints by concatenating along split dims.
+fn consolidate_tensor_parallel(
+    meta: &ShardingMeta,
+    sharded_dir: &Path,
+    device: &CpuDevice,
+    merged_model: &mut HashMap<String, Tensor<CpuRuntime>>,
+    merged_opt: &mut HashMap<String, Tensor<CpuRuntime>>,
+    training_state: &mut Option<TrainingState>,
+) -> Result<()> {
+    // Get split_dims from rank 0's config
+    let split_dims = &meta.shards[0].split_dims;
+    if split_dims.is_empty() {
+        return Err(Error::TrainingError {
+            reason: "TensorParallel consolidation requires split_dims metadata \
+                     in ShardingConfig (missing for rank 0)"
+                .to_string(),
+        });
+    }
+
+    // Load all rank data
+    let mut all_models = Vec::new();
+    let mut all_opts = Vec::new();
+
+    for rank in 0..meta.world_size {
+        let rank_dir = sharded_dir.join(format!("rank_{rank}"));
+        let (model, opt, state) = load_checkpoint::<CpuRuntime, _>(&rank_dir, device)?;
+
+        if training_state.is_none() {
+            *training_state = Some(state);
+        }
+
+        all_models.push(model);
+        all_opts.push(opt);
+    }
+
+    // Get client for concatenation
+    let client = CpuClient::new(device.clone());
+
+    // Merge model: concatenate along split dimension for each param
+    for (param_name, &split_dim) in split_dims {
+        let shards: Vec<&Tensor<CpuRuntime>> = (0..meta.world_size)
+            .filter_map(|r| all_models[r].get(param_name))
+            .collect();
+
+        if shards.len() == meta.world_size {
+            let merged =
+                client
+                    .cat(&shards, split_dim as isize)
+                    .map_err(|e| Error::TrainingError {
+                        reason: format!(
+                            "failed to concatenate param '{}' along dim {}: {}",
+                            param_name, split_dim, e
+                        ),
+                    })?;
+            merged_model.insert(param_name.clone(), merged);
+        }
+    }
+
+    // Copy non-split params from rank 0 (replicated params like norms, biases)
+    if let Some(rank0_model) = all_models.first() {
+        for (name, tensor) in rank0_model {
+            if !split_dims.contains_key(name) {
+                merged_model.insert(name.clone(), tensor.clone());
+            }
+        }
+    }
+
+    // Handle optimizer states similarly
+    if let Some(Some(opt0)) = all_opts.first() {
+        for (name, tensor) in opt0 {
+            if split_dims.contains_key(name) {
+                // Collect this optimizer state from all ranks
+                let shards: Vec<&Tensor<CpuRuntime>> = (0..meta.world_size)
+                    .filter_map(|r| all_opts[r].as_ref().and_then(|o| o.get(name)))
+                    .collect();
+
+                if shards.len() == meta.world_size {
+                    let split_dim = split_dims[name];
+                    if let Ok(merged) = client.cat(&shards, split_dim as isize) {
+                        merged_opt.insert(name.clone(), merged);
+                    }
+                }
+            } else {
+                // Non-split optimizer state from rank 0
+                merged_opt.insert(name.clone(), tensor.clone());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -283,6 +393,7 @@ mod tests {
                 rank: 0,
                 owned_params: vec!["embed.weight".to_string()],
                 strategy: ShardingStrategy::ZeroPartitioned { stage: 3 },
+                split_dims: HashMap::new(),
             },
         )
         .unwrap();
@@ -299,6 +410,7 @@ mod tests {
                 rank: 1,
                 owned_params: vec!["head.weight".to_string()],
                 strategy: ShardingStrategy::ZeroPartitioned { stage: 3 },
+                split_dims: HashMap::new(),
             },
         )
         .unwrap();
@@ -352,6 +464,7 @@ mod tests {
                 rank: 0,
                 owned_params: vec!["embed.weight".to_string()],
                 strategy: ShardingStrategy::ZeroPartitioned { stage: 3 },
+                split_dims: HashMap::new(),
             },
         )
         .unwrap();
@@ -368,6 +481,7 @@ mod tests {
                 rank: 1,
                 owned_params: vec!["head.weight".to_string()],
                 strategy: ShardingStrategy::ZeroPartitioned { stage: 3 },
+                split_dims: HashMap::new(),
             },
         )
         .unwrap();
@@ -376,6 +490,7 @@ mod tests {
         let meta_json = std::fs::read_to_string(dir.path().join("sharding_meta.json")).unwrap();
         let mut meta: ShardingMeta = serde_json::from_str(&meta_json).unwrap();
         meta.shards[1].owned_params = vec!["head.weight".to_string()];
+        meta.shards[1].split_dims = HashMap::new();
         std::fs::write(
             dir.path().join("sharding_meta.json"),
             serde_json::to_string_pretty(&meta).unwrap(),
@@ -423,6 +538,7 @@ mod tests {
                 rank: 0,
                 owned_params: vec!["w".to_string()],
                 strategy: ShardingStrategy::Replicated,
+                split_dims: HashMap::new(),
             },
         )
         .unwrap();
@@ -431,5 +547,118 @@ mod tests {
         let err = load_distributed_checkpoint::<CpuRuntime, _>(dir.path(), 3, &device).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("out of range"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn test_consolidate_tensor_parallel() {
+        let dir = TempDir::new().unwrap();
+        let output_dir = TempDir::new().unwrap();
+        let device = make_device();
+
+        // Rank 0: first half of wq weight [2, 4]
+        let mut model_r0 = HashMap::new();
+        model_r0.insert(
+            "attn.wq".to_string(),
+            Tensor::<CpuRuntime>::from_slice(
+                &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                &[2, 4],
+                &device,
+            ),
+        );
+        model_r0.insert(
+            "norm.weight".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[2], &device),
+        );
+
+        // Rank 1: second half of wq weight [2, 4]
+        let mut model_r1 = HashMap::new();
+        model_r1.insert(
+            "attn.wq".to_string(),
+            Tensor::<CpuRuntime>::from_slice(
+                &[9.0f32, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+                &[2, 4],
+                &device,
+            ),
+        );
+        model_r1.insert(
+            "norm.weight".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[2], &device),
+        );
+
+        let state = make_training_state(300);
+
+        let mut split_dims = HashMap::new();
+        split_dims.insert("attn.wq".to_string(), 0usize);
+
+        save_distributed_checkpoint(
+            dir.path(),
+            0,
+            2,
+            &model_r0,
+            None,
+            &state,
+            ShardingConfig {
+                world_size: 2,
+                rank: 0,
+                owned_params: vec!["attn.wq".to_string(), "norm.weight".to_string()],
+                strategy: ShardingStrategy::TensorParallel,
+                split_dims: split_dims.clone(),
+            },
+        )
+        .unwrap();
+
+        save_distributed_checkpoint(
+            dir.path(),
+            1,
+            2,
+            &model_r1,
+            None,
+            &state,
+            ShardingConfig {
+                world_size: 2,
+                rank: 1,
+                owned_params: vec!["attn.wq".to_string(), "norm.weight".to_string()],
+                strategy: ShardingStrategy::TensorParallel,
+                split_dims: split_dims.clone(),
+            },
+        )
+        .unwrap();
+
+        // Update sharding_meta.json with rank 1's info
+        let meta_json = std::fs::read_to_string(dir.path().join("sharding_meta.json")).unwrap();
+        let mut meta: ShardingMeta = serde_json::from_str(&meta_json).unwrap();
+        meta.shards[1].owned_params = vec!["attn.wq".to_string(), "norm.weight".to_string()];
+        meta.shards[1].split_dims = split_dims;
+        std::fs::write(
+            dir.path().join("sharding_meta.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+
+        // Consolidate
+        consolidate_checkpoint(dir.path(), output_dir.path()).unwrap();
+
+        let (merged, _, merged_state) =
+            load_checkpoint::<CpuRuntime, _>(output_dir.path(), &device).unwrap();
+
+        // attn.wq should be [4, 4] (concatenated along dim 0)
+        let wq = &merged["attn.wq"];
+        assert_eq!(wq.shape(), &[4, 4]);
+        let wq_data: Vec<f32> = wq.to_vec();
+        // First row from rank 0 should be [1, 2, 3, 4]
+        assert!((wq_data[0] - 1.0).abs() < 1e-6);
+        assert!((wq_data[1] - 2.0).abs() < 1e-6);
+        // First row from rank 1 (at index 8) should be [9, 10, 11, 12]
+        assert!((wq_data[8] - 9.0).abs() < 1e-6);
+        assert!((wq_data[9] - 10.0).abs() < 1e-6);
+
+        // norm.weight should be [2] (replicated, taken from rank 0)
+        let norm = &merged["norm.weight"];
+        assert_eq!(norm.shape(), &[2]);
+        let norm_data: Vec<f32> = norm.to_vec();
+        assert!((norm_data[0] - 1.0).abs() < 1e-6);
+
+        // Training state should be preserved
+        assert_eq!(merged_state.step, 300);
     }
 }

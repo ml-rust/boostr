@@ -333,11 +333,8 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             })?;
         }
 
-        self.stream()
-            .synchronize()
-            .map_err(|e| Error::KernelError {
-                reason: format!("Flash Attention fwd sync failed: {:?}", e),
-            })?;
+        // No sync needed: same-stream ordering guarantees the kernel
+        // completes before any subsequent kernel on this stream.
 
         Ok((output, lse))
     }
@@ -540,10 +537,11 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         let device = q.device();
         let device_index = device.id();
 
-        if window_size.is_some() {
+        if window_size != 0 {
             return Err(Error::InvalidArgument {
+                arg: "window_size",
                 reason: "flash_attention_bwd: sliding window attention (window_size) is not yet \
-                         supported in the backward pass; use window_size=None for training"
+                         supported in the backward pass; use window_size=0 for training"
                     .into(),
             });
         }

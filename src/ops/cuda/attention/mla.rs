@@ -165,12 +165,8 @@ impl MlaOps<CudaRuntime> for CudaClient {
             })?;
         }
 
-        // Sync: ensure kernel completes before output is consumed
-        self.stream()
-            .synchronize()
-            .map_err(|e| Error::KernelError {
-                reason: format!("SDPA sync failed: {:?}", e),
-            })?;
+        // No sync needed: same-stream ordering guarantees the kernel
+        // completes before any subsequent kernel on this stream.
 
         Ok(Var::new(output, false))
     }

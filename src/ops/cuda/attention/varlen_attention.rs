@@ -112,11 +112,7 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
             })?;
         }
 
-        self.stream()
-            .synchronize()
-            .map_err(|e| Error::KernelError {
-                reason: format!("varlen attention fwd sync failed: {e:?}"),
-            })?;
+        // No sync needed: same-stream ordering guarantees correctness.
 
         Ok((output, lse))
     }

@@ -540,7 +540,13 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         let device = q.device();
         let device_index = device.id();
 
-        let _ = window_size; // TODO: backward kernel doesn't yet support sliding window
+        if window_size.is_some() {
+            return Err(Error::InvalidArgument {
+                reason: "flash_attention_bwd: sliding window attention (window_size) is not yet \
+                         supported in the backward pass; use window_size=None for training"
+                    .into(),
+            });
+        }
 
         // Allocate gradient tensors (dQ must be zeroed — backward uses atomicAdd)
         let dq = Tensor::<CudaRuntime>::zeros(

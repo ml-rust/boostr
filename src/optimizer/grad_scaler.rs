@@ -226,7 +226,7 @@ mod tests {
         // 3 clean steps → scale should double
         scaler.update_scale(false);
         scaler.update_scale(false);
-        assert_eq!(scaler.scale(), 100.0); // not yet
+        assert_eq!(scaler.scale(), 100.0); // grow_interval=3, only 2 clean steps so far
         scaler.update_scale(false);
         assert_eq!(scaler.scale(), 200.0); // grew!
     }

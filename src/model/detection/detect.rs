@@ -198,8 +198,9 @@ pub(super) fn detect_layer_type(
     } else if has_standard_attn {
         LayerType::StandardTransformer
     } else if has_mla {
-        // MLA without MoE or MLP - assume MoE for now
-        LayerType::MlaWithMoe
+        // MLA without explicit MoE or MLP indicators; default to MlaWithMlp
+        // since most MLA models (e.g. DeepSeek) pair it with MLP, not MoE.
+        LayerType::MlaWithMlp
     } else {
         // Default to standard transformer
         LayerType::StandardTransformer
@@ -283,11 +284,11 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_mla_alone_defaults_to_moe() {
+    fn test_detect_mla_alone_defaults_to_mlp() {
         let names = layer_names(0, &["self_attn.w_dkv.weight"]);
         assert_eq!(
             detect_layer_type(&refs(&names), 0, ""),
-            LayerType::MlaWithMoe
+            LayerType::MlaWithMlp
         );
     }
 

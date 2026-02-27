@@ -372,7 +372,7 @@ impl<R: Runtime> Mamba2<R> {
 
         // 7. Compute A = -exp(A_log)
         let a = self.a_log.tensor().exp().map_err(Error::Numr)?;
-        let neg_one = Tensor::<R>::from_slice(&[-1.0f32], &[1], &x.device());
+        let neg_one = Tensor::<R>::from_slice(&[-1.0f32], &[1], x.device());
         let a = a.mul(&neg_one).map_err(Error::Numr)?;
 
         // 8. Process dt
@@ -456,7 +456,7 @@ impl<R: Runtime> Mamba2<R> {
         } else {
             let conv_channels = self.config.conv_channels();
             let mut new_conv =
-                Tensor::<R>::zeros(&[batch, conv_channels, conv_window], x.dtype(), &x.device());
+                Tensor::<R>::zeros(&[batch, conv_channels, conv_window], x.dtype(), x.device());
             let offset = conv_window - seq_len;
             if state.is_initialized() && offset > 0 {
                 let old_tail = state
@@ -499,11 +499,11 @@ impl<R: Runtime> Mamba2<R> {
                 .map_err(Error::Numr)?
                 .contiguous()
         } else {
-            Tensor::<R>::zeros(&[batch, conv_channels, 0], x.dtype(), &x.device())
+            Tensor::<R>::zeros(&[batch, conv_channels, 0], x.dtype(), x.device())
         };
 
         let mut new_state =
-            Tensor::<R>::zeros(&[batch, conv_channels, conv_window], x.dtype(), &x.device());
+            Tensor::<R>::zeros(&[batch, conv_channels, conv_window], x.dtype(), x.device());
         if conv_window > 1 {
             new_state = new_state
                 .slice_assign(&old_state, 2, 0)

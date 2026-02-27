@@ -2,6 +2,7 @@ pub mod cpu;
 #[cfg(feature = "cuda")]
 pub mod cuda;
 pub mod format;
+pub mod tables;
 pub mod tensor;
 pub mod traits;
 #[cfg(feature = "wgpu")]

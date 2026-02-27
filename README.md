@@ -107,7 +107,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-boostr = "0.1"
+boostr = "<latest-version>"
 
 # With CUDA support (requires CUDA 12.x)
 # boostr = { version = "0.1", features = ["cuda"] }

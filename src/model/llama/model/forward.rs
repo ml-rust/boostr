@@ -72,8 +72,13 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
             false,
         );
 
-        // LM head
-        let lm_head = Linear::new(vb.take_tensor("lm_head.weight")?, None, false);
+        // LM head (may be tied to embedding weights)
+        let lm_head = if config.tie_word_embeddings {
+            let embed_w = embed_tokens.weight().tensor().clone();
+            Linear::new(embed_w, None, false)
+        } else {
+            Linear::new(vb.take_tensor("lm_head.weight")?, None, false)
+        };
 
         Ok(Self {
             config: config.clone(),

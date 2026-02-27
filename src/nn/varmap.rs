@@ -331,18 +331,21 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
     /// Unquantized tensors (F32, F16, BF16) are loaded as `Weight::Standard`.
     /// Quantized tensors (Q4_0, Q4K, etc.) are loaded as `Weight::Quantized`.
     pub fn from_gguf<P: AsRef<Path>>(path: P, device: &R::Device) -> Result<Self> {
+        use crate::format::gguf::gguf_to_hf_name;
+
         let mut gguf = Gguf::open(path)?;
         let names: Vec<String> = gguf.tensor_names().map(|s| s.to_string()).collect();
         let mut map = Self::new();
 
         for name in &names {
+            let hf_name = gguf_to_hf_name(name);
             let info = gguf.tensor_info(name)?.clone();
             if info.ggml_type.is_quantized() {
                 let qt = gguf.load_tensor_quantized::<R>(name, device)?;
-                map.insert_quant(name.clone(), qt);
+                map.insert_quant(hf_name, qt);
             } else {
                 let t = gguf.load_tensor_f32::<R>(name, device)?;
-                map.insert(name.clone(), t);
+                map.insert(hf_name, t);
             }
         }
 

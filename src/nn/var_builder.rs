@@ -170,6 +170,22 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
     }
 }
 
+impl<R: Runtime> VarBuilder<'static, R> {
+    /// Create a VarBuilder from a boxed VarMap.
+    ///
+    /// Takes ownership of the VarMap by boxing and leaking it to obtain a
+    /// `'static` reference, which is required for `VarBuilder<'static, R>`.
+    /// This is appropriate when the VarMap must outlive any particular scope.
+    pub fn from_var_map(varmap: Box<VarMap<R>>, device: &'static R::Device) -> Self {
+        let varmap_ref: &'static mut VarMap<R> = Box::leak(varmap);
+        Self {
+            varmap: varmap_ref,
+            prefix: String::new(),
+            device,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

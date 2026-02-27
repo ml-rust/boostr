@@ -180,6 +180,9 @@ mod tests {
             original_max_position_embeddings: None,
             low_freq_factor: None,
             high_freq_factor: None,
+            attention_factor: None,
+            beta_fast: None,
+            beta_slow: None,
         };
 
         let unscaled = RoPE::<CpuRuntime>::precompute_freqs(4, 8, 10000.0, None, &device);
@@ -212,6 +215,9 @@ mod tests {
             original_max_position_embeddings: Some(8192),
             low_freq_factor: Some(1.0),
             high_freq_factor: Some(4.0),
+            attention_factor: None,
+            beta_fast: None,
+            beta_slow: None,
         };
 
         let rope = RoPE::<CpuRuntime>::precompute_freqs(128, 64, 500000.0, Some(&cfg), &device);

@@ -5,6 +5,16 @@
 
 use super::cpu::kernels::nf4::NF4_CODEBOOK;
 
+// ── IQ Codebook Tables ──────────────────────────────────────────────
+
+/// Non-linear 4-bit codebook for IQ4_NL format.
+/// Maps 4-bit indices (0..15) to quantized values.
+/// These values are used as scale multipliers in the dequantization process.
+/// Source: llama.cpp ggml-quants.c kvalues_iq4nl
+pub const KVALUES_IQ4NL: [i8; 16] = [
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+];
+
 /// Quantize a normalized f32 value to a 4-bit NF4 index.
 ///
 /// Input should be normalized to [-1, 1] range (divide by block absmax first).

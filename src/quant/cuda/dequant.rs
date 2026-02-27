@@ -90,6 +90,25 @@ impl DequantOps<CudaRuntime> for CudaClient {
             QuantFormat::Q8_0 => "dequant_q8_0_f32",
             QuantFormat::Q4K => "dequant_q4_k_f32",
             QuantFormat::Q6K => "dequant_q6_k_f32",
+            // IQ/TQ formats currently lack native CUDA kernels
+            QuantFormat::IQ4NL
+            | QuantFormat::IQ4XS
+            | QuantFormat::IQ2XXS
+            | QuantFormat::IQ2XS
+            | QuantFormat::IQ2S
+            | QuantFormat::IQ3XXS
+            | QuantFormat::IQ3S
+            | QuantFormat::IQ1S
+            | QuantFormat::IQ1M
+            | QuantFormat::TQ1_0
+            | QuantFormat::TQ2_0 => {
+                return Err(Error::UnsupportedQuantFormat {
+                    format: format!(
+                        "{}: no native CUDA kernel available. Use CPU runtime for IQ/TQ formats.",
+                        qt.format()
+                    ),
+                });
+            }
             other => {
                 return Err(Error::UnsupportedQuantFormat {
                     format: format!("{} (CUDA dequant not implemented)", other),

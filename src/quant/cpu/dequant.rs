@@ -101,11 +101,17 @@ impl DequantOps<CpuRuntime> for CpuClient {
             QuantFormat::Q5K => dequant::dequant_q5k(block_bytes, &mut f32_output),
             QuantFormat::Q6K => dequant::dequant_q6k(block_bytes, &mut f32_output),
             QuantFormat::Q8K => dequant::dequant_q8k(block_bytes, &mut f32_output),
-            other => {
-                return Err(Error::UnsupportedQuantFormat {
-                    format: format!("{} (CPU dequant not implemented)", other),
-                });
-            }
+            QuantFormat::IQ4NL => dequant::dequant_iq4_nl(block_bytes, &mut f32_output),
+            QuantFormat::IQ4XS => dequant::dequant_iq4_xs(block_bytes, &mut f32_output),
+            QuantFormat::IQ2XXS => dequant::dequant_iq2_xxs(block_bytes, &mut f32_output),
+            QuantFormat::IQ2XS => dequant::dequant_iq2_xs(block_bytes, &mut f32_output),
+            QuantFormat::IQ2S => dequant::dequant_iq2_s(block_bytes, &mut f32_output),
+            QuantFormat::IQ3XXS => dequant::dequant_iq3_xxs(block_bytes, &mut f32_output),
+            QuantFormat::IQ3S => dequant::dequant_iq3_s(block_bytes, &mut f32_output),
+            QuantFormat::IQ1S => dequant::dequant_iq1_s(block_bytes, &mut f32_output),
+            QuantFormat::IQ1M => dequant::dequant_iq1_m(block_bytes, &mut f32_output),
+            QuantFormat::TQ1_0 => dequant::dequant_tq1_0(block_bytes, &mut f32_output),
+            QuantFormat::TQ2_0 => dequant::dequant_tq2_0(block_bytes, &mut f32_output),
         }
 
         // Create f32 tensor
@@ -219,16 +225,21 @@ mod tests {
     }
 
     #[test]
-    fn test_dequant_unsupported_format() {
+    fn test_dequant_iq1s_basic() {
         let (client, device) = setup();
 
-        // IQ1S is not yet implemented
+        // IQ1S is now supported — test with all zeros
         let block = vec![0u8; 50];
         let qt = QuantTensor::<CpuRuntime>::from_bytes(&block, QuantFormat::IQ1S, &[256], &device)
             .unwrap();
 
         let result = client.dequantize(&qt, DType::F32);
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        let data = result.unwrap().to_vec::<f32>();
+        assert_eq!(data.len(), 256);
+        for &v in &data {
+            assert!(v.abs() < 1e-5, "expected 0, got {}", v);
+        }
     }
 
     #[test]

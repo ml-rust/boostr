@@ -27,6 +27,8 @@ struct AttentionParams {
     head_dim: usize,
     block_m: usize,
     block_n: usize,
+    /// Whether to use the small-memory kernel variant (_sm suffix)
+    use_sm_kernel: bool,
 }
 
 /// Validate Q/K/V shapes and extract parameters.
@@ -128,7 +130,8 @@ fn validate_qkv(
         });
     }
 
-    let (block_m, block_n) = block_config(head_dim)?;
+    let elem_bytes = q.dtype().size_in_bytes();
+    let (block_m, block_n, use_sm_kernel) = block_config(head_dim, elem_bytes)?;
 
     Ok(AttentionParams {
         batch_size: q_shape[0],
@@ -139,26 +142,83 @@ fn validate_qkv(
         head_dim,
         block_m,
         block_n,
+        use_sm_kernel,
     })
 }
 
-/// Get block configuration for a head dimension.
-fn block_config(head_dim: usize) -> Result<(usize, usize)> {
-    match head_dim {
-        32 => Ok((128, 128)),
-        64 => Ok((128, 128)),
-        96 => Ok((64, 128)),
-        128 => Ok((128, 64)),
-        192 => Ok((64, 64)),
-        256 => Ok((64, 64)),
-        _ => Err(Error::InvalidArgument {
-            arg: "head_dim",
-            reason: format!(
-                "unsupported head_dim={}. Supported: 32, 64, 96, 128, 192, 256",
-                head_dim
-            ),
-        }),
+/// Query the device's max dynamic shared memory per block (opt-in).
+fn device_max_smem() -> usize {
+    unsafe {
+        let mut cuda_dev: i32 = 0;
+        sys::cuCtxGetDevice(&mut cuda_dev);
+        let mut max_smem: i32 = 0;
+        sys::cuDeviceGetAttribute(
+            &mut max_smem,
+            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+            cuda_dev,
+        );
+        max_smem as usize
     }
+}
+
+/// Compute shared memory bytes for given block config, head_dim, and element size.
+fn compute_smem(block_m: usize, block_n: usize, head_dim: usize, elem_bytes: usize) -> usize {
+    let head_stride = head_dim + 1; // +1 padding for bank conflict avoidance
+    (block_m * head_stride + 2 * block_n * head_stride) * elem_bytes
+}
+
+/// Standard (large) block config — best performance on high-smem GPUs.
+fn block_config_large(head_dim: usize) -> Option<(usize, usize)> {
+    match head_dim {
+        32 => Some((128, 128)),
+        64 => Some((128, 128)),
+        96 => Some((64, 128)),
+        128 => Some((128, 64)),
+        192 => Some((64, 64)),
+        256 => Some((64, 64)),
+        _ => None,
+    }
+}
+
+/// Small-memory block config — works on GPUs with <=100KB shared memory.
+/// These have corresponding `_sm` kernel variants in flash_v2.cu.
+fn block_config_small(head_dim: usize) -> Option<(usize, usize)> {
+    match head_dim {
+        96 => Some((32, 32)),
+        128 => Some((64, 32)),
+        192 => Some((32, 16)),
+        256 => Some((16, 16)),
+        _ => None,
+    }
+}
+
+/// Get block configuration for a head dimension, accounting for device shared memory limits.
+/// Returns (block_m, block_n, use_sm_kernel).
+fn block_config(head_dim: usize, elem_bytes: usize) -> Result<(usize, usize, bool)> {
+    // Try large config first
+    if let Some((bm, bn)) = block_config_large(head_dim) {
+        let smem = compute_smem(bm, bn, head_dim, elem_bytes);
+        if smem <= device_max_smem() {
+            return Ok((bm, bn, false));
+        }
+    }
+
+    // Fall back to small-memory config
+    if let Some((bm, bn)) = block_config_small(head_dim) {
+        let smem = compute_smem(bm, bn, head_dim, elem_bytes);
+        if smem <= device_max_smem() {
+            return Ok((bm, bn, true));
+        }
+    }
+
+    Err(Error::InvalidArgument {
+        arg: "head_dim",
+        reason: format!(
+            "unsupported head_dim={} for this GPU (max shared memory: {}KB). Supported: 32, 64, 96, 128, 192, 256",
+            head_dim,
+            device_max_smem() / 1024
+        ),
+    })
 }
 
 /// Set dynamic shared memory attribute if >48KB.
@@ -266,7 +326,11 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                 });
             }
         };
-        let kernel_name = format!("flash_attention_fwd_{}_{}", head_dim, dtype_suffix);
+        let sm_suffix = if p.use_sm_kernel { "_sm" } else { "" };
+        let kernel_name = format!(
+            "flash_attention_fwd_{}{}_{}",
+            head_dim, sm_suffix, dtype_suffix
+        );
 
         let device = q.device();
         let output = Tensor::<CudaRuntime>::empty(
@@ -367,7 +431,8 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         }
 
         // FP8 kernels use E4M3 format (kernel handles both via same entry point)
-        let kernel_name = format!("flash_attention_fwd_{}_fp8", head_dim);
+        let sm_suffix = if p.use_sm_kernel { "_sm" } else { "" };
+        let kernel_name = format!("flash_attention_fwd_{}{}_fp8", head_dim, sm_suffix);
 
         let device = q.device();
         let output = Tensor::<CudaRuntime>::empty(
@@ -618,7 +683,11 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         // Kernel signature: (Q, K, V, O, dO, LSE, D, dQ, dK, dV,
         //                     batch_size, num_heads, seq_len_q, seq_len_k, scale, causal)
         {
-            let bwd_name = format!("flash_attention_bwd_{}_{}", head_dim, dtype_suffix);
+            let sm_suffix = if p.use_sm_kernel { "_sm" } else { "" };
+            let bwd_name = format!(
+                "flash_attention_bwd_{}{}_{}",
+                head_dim, sm_suffix, dtype_suffix
+            );
             let func = kernels::get_kernel_function(&module, &bwd_name)?;
 
             // Shared memory: K[BLOCK_N][HD] + V[BLOCK_N][HD] + Q[BLOCK_M][HD] + dO[BLOCK_M][HD]
@@ -810,7 +879,8 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
 
         // Step 2: FP8 Main backward — extra scale args
         {
-            let bwd_name = format!("flash_attention_bwd_{}_fp8", head_dim);
+            let sm_suffix = if p.use_sm_kernel { "_sm" } else { "" };
+            let bwd_name = format!("flash_attention_bwd_{}{}_fp8", head_dim, sm_suffix);
             let func = kernels::get_kernel_function(&module, &bwd_name)?;
 
             // FP8 is 1 byte per element

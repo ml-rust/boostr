@@ -297,6 +297,62 @@ extern "C" __global__ void flash_attention_fwd_128_fp32(
     );
 }
 
+// head_dim=128, BLOCK_M=64, BLOCK_N=32 (small shared memory variant for <=100KB GPUs)
+// smem: (64*129 + 2*32*129)*4 = 66048 bytes = 64.5KB
+extern "C" __global__ void flash_attention_fwd_128_sm_fp32(
+    const float* Q, const float* K, const float* V,
+    float* O, float* L,
+    const int batch_size, const int num_heads, const int num_kv_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_fwd_fp32_impl<128, 64, 32>(
+        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=96, BLOCK_M=32, BLOCK_N=32 (small shared memory variant for <=100KB GPUs)
+// smem: (32*97 + 2*32*97)*4 = 37248 bytes = 36.4KB
+extern "C" __global__ void flash_attention_fwd_96_sm_fp32(
+    const float* Q, const float* K, const float* V,
+    float* O, float* L,
+    const int batch_size, const int num_heads, const int num_kv_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_fwd_fp32_impl<96, 32, 32>(
+        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=192, BLOCK_M=32, BLOCK_N=16 (small shared memory variant for <=100KB GPUs)
+// smem: (32*193 + 2*16*193)*4 = 49408 bytes = 48.25KB
+extern "C" __global__ void flash_attention_fwd_192_sm_fp32(
+    const float* Q, const float* K, const float* V,
+    float* O, float* L,
+    const int batch_size, const int num_heads, const int num_kv_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_fwd_fp32_impl<192, 32, 16>(
+        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=256, BLOCK_M=16, BLOCK_N=16 (small shared memory variant for <=100KB GPUs)
+// smem: (16*257 + 2*16*257)*4 = 49344 bytes = 48.2KB
+extern "C" __global__ void flash_attention_fwd_256_sm_fp32(
+    const float* Q, const float* K, const float* V,
+    float* O, float* L,
+    const int batch_size, const int num_heads, const int num_kv_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_fwd_fp32_impl<256, 16, 16>(
+        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
 // head_dim=32, BLOCK_M=128, BLOCK_N=128
 extern "C" __global__ void flash_attention_fwd_32_fp32(
     const float* Q, const float* K, const float* V,

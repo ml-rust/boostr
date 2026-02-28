@@ -241,14 +241,17 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             };
 
             // For Q4_K: use dp4a path with Q8_1 quantized activation
+            // (Q6_K dp4a is slower due to unaligned loads — 210-byte blocks)
             if weight.format() == QuantFormat::Q4K && k % 32 == 0 {
                 let q8_buf = quantize_activation_q8_1(self, &act_contig, m, k)?;
                 let q8_ptr = q8_buf.ptr();
                 let weight_ptr = weight.storage().ptr();
 
+                let kernel_name = "quant_gemv_q4_k_q8_1";
+
                 let module =
                     kernels::get_or_load_module(self.context(), device_index, QUANT_GEMV_MODULE)?;
-                let func = kernels::get_kernel_function(&module, "quant_gemv_q4_k_q8_1")?;
+                let func = kernels::get_kernel_function(&module, kernel_name)?;
 
                 unsafe {
                     let mut builder = self.stream().launch_builder(&func);
@@ -259,7 +262,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                     builder.arg(&k_u32);
                     builder.arg(&n_u32);
                     builder.launch(cfg).map_err(|e| Error::QuantError {
-                        reason: format!("CUDA quant_gemv_q4_k_q8_1 launch failed: {:?}", e),
+                        reason: format!("CUDA {} launch failed: {:?}", kernel_name, e),
                     })?;
                 }
             } else {
@@ -374,9 +377,9 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         let m = total_elements / k;
         let act_contig = activation.contiguous();
 
-        // Check if all weights are Q4_K and we can use shared Q8_1 quantization
-        let all_q4k = weights.iter().all(|w| w.format() == QuantFormat::Q4K);
-        let use_dp4a = all_q4k && m <= 4 && k % 32 == 0;
+        // Check if all weights support dp4a (Q4_K only — Q6_K dp4a is slower due to unaligned loads)
+        let all_dp4a = weights.iter().all(|w| w.format() == QuantFormat::Q4K);
+        let use_dp4a = all_dp4a && m <= 4 && k % 32 == 0;
 
         if use_dp4a {
             // Quantize activation to Q8_1 ONCE
@@ -430,7 +433,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                     builder.arg(&k_u32);
                     builder.arg(&n_u32);
                     builder.launch(cfg).map_err(|e| Error::QuantError {
-                        reason: format!("CUDA quant_gemv_q4_k_q8_1 batch launch failed: {:?}", e),
+                        reason: format!("CUDA dp4a batch launch failed: {:?}", e),
                     })?;
                 }
 

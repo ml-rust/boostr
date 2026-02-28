@@ -3,8 +3,12 @@
 use crate::error::Result;
 use crate::model::config::ModelConfig;
 use crate::nn::VarBuilder;
+use crate::ops::traits::{FlashAttentionOps, RoPEOps};
 use numr::autograd::Var;
-use numr::ops::{ActivationOps, IndexingOps, ReduceOps, ScalarOps, ShapeOps, TensorOps};
+use numr::ops::{
+    ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
+    ShapeOps, TensorOps, UnaryOps,
+};
 use numr::runtime::{Runtime, RuntimeClient};
 
 /// Trait alias for the full set of client bounds required by model forward passes.
@@ -16,6 +20,12 @@ pub trait ModelClient<R: Runtime>:
     + IndexingOps<R>
     + ShapeOps<R>
     + ActivationOps<R>
+    + BinaryOps<R>
+    + UnaryOps<R>
+    + CompareOps<R>
+    + ConditionalOps<R>
+    + RoPEOps<R>
+    + FlashAttentionOps<R>
 {
 }
 
@@ -28,7 +38,13 @@ where
         + ReduceOps<R>
         + IndexingOps<R>
         + ShapeOps<R>
-        + ActivationOps<R>,
+        + ActivationOps<R>
+        + BinaryOps<R>
+        + UnaryOps<R>
+        + CompareOps<R>
+        + ConditionalOps<R>
+        + RoPEOps<R>
+        + FlashAttentionOps<R>,
 {
 }
 
@@ -54,7 +70,16 @@ pub trait Model<R: Runtime>: Sized {
     fn forward<C>(&self, client: &C, input_ids: &Var<R>) -> Result<Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>;
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>;
 
     /// Get the model configuration
     fn config(&self) -> &ModelConfig;

@@ -6,11 +6,13 @@ use crate::model::config::ModelConfig;
 use crate::model::traits::ModelClient;
 use crate::nn::{Linear, RmsNorm, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
-use crate::ops::impl_generic::attention::rope::apply_rope_impl;
-use numr::autograd::{Var, var_add, var_mul, var_narrow, var_reshape, var_silu};
+use numr::autograd::{Var, var_add, var_narrow, var_reshape, var_silu_mul};
 use numr::dtype::DType;
-use numr::ops::{IndexingOps, ReduceOps, ScalarOps, ShapeOps, TensorOps};
-use numr::runtime::Runtime;
+use numr::ops::{
+    ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
+    ShapeOps, TensorOps, UnaryOps,
+};
+use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
 /// Single transformer block
@@ -45,7 +47,16 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
     pub(super) fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
         // Pre-norm attention + residual
         let normed = self.input_layernorm.forward(client, x)?;
@@ -68,7 +79,16 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
     ) -> Result<Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
         // Pre-norm attention + residual
         let normed = self.input_layernorm.forward(client, x)?;
@@ -90,7 +110,16 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
     pub(super) fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
         let shape = x.shape().to_vec();
         let batch = shape[0];
@@ -110,17 +139,19 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             .map_err(Error::Numr)?;
 
         let q = numr::autograd::var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let q = var_contiguous(&q);
         let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let k = var_contiguous(&k);
         let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let v = var_contiguous(&v);
 
-        // Apply RoPE to Q and K
-        let q = apply_rope_impl(client, &q, rope.cos_cache(), rope.sin_cache())?;
-        let k = apply_rope_impl(client, &k, rope.cos_cache(), rope.sin_cache())?;
+        // Contiguous Q/K needed because fused RoPE kernel assumes contiguous layout.
+        // V skips contiguous — matmul handles strided inputs via copy_strided.
+        let q = var_contiguous(&q);
+        let k = var_contiguous(&k);
 
-        // GQA: repeat K/V heads to match Q heads if needed
+        // Apply fused RoPE to Q and K (single kernel per tensor on CUDA)
+        let q = client.apply_rope(&q, rope.cos_cache(), rope.sin_cache())?;
+        let k = client.apply_rope(&k, rope.cos_cache(), rope.sin_cache())?;
+
+        // GQA: repeat K/V heads to match Q heads
         let (k, v) = if self.num_kv_heads < self.num_heads {
             let repeat = self.num_heads / self.num_kv_heads;
             let k = repeat_kv(&k, repeat).map_err(Error::Numr)?;
@@ -154,16 +185,34 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
     ) -> Result<Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
+        let profile = std::env::var("BLAZR_PROFILE_DETAIL").is_ok();
+        let device = x.tensor().device();
+        let rc = R::default_client(device);
+
         let shape = x.shape().to_vec();
         let batch = shape[0];
         let seq_len = shape[1];
 
         // Q/K/V projections: [B, S, hidden] -> [B, S, heads*head_dim]
+        let t = std::time::Instant::now();
         let q = self.q_proj.forward(client, x)?;
         let k = self.k_proj.forward(client, x)?;
         let v = self.v_proj.forward(client, x)?;
+        if profile {
+            rc.synchronize();
+            eprintln!("  [detail] qkv_proj: {:?}", t.elapsed());
+        }
 
         // Reshape to [B, S, H, D] then permute to [B, H, S, D]
         let q = var_reshape(&q, &[batch, seq_len, self.num_heads, self.head_dim])
@@ -174,42 +223,77 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             .map_err(Error::Numr)?;
 
         let q = numr::autograd::var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let q = var_contiguous(&q);
         let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let k = var_contiguous(&k);
         let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let v = var_contiguous(&v);
 
-        // Apply RoPE with position offset
+        // Contiguous Q/K needed because fused RoPE kernel assumes contiguous layout.
+        // V skips contiguous — attention handles strided inputs.
+        let t = std::time::Instant::now();
+        let q = var_contiguous(&q);
+        let k = var_contiguous(&k);
+        if profile {
+            rc.synchronize();
+            eprintln!("  [detail] qk_contig: {:?}", t.elapsed());
+        }
+
+        // Apply fused RoPE with position offset (single kernel per tensor on CUDA)
+        let t = std::time::Instant::now();
         let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
         let sin_offset = var_narrow(rope.sin_cache(), 0, position, seq_len).map_err(Error::Numr)?;
 
-        let q = apply_rope_impl(client, &q, &cos_offset, &sin_offset)?;
-        let k = apply_rope_impl(client, &k, &cos_offset, &sin_offset)?;
+        let q = client.apply_rope(&q, &cos_offset, &sin_offset)?;
+        let k = client.apply_rope(&k, &cos_offset, &sin_offset)?;
+        if profile {
+            rc.synchronize();
+            eprintln!("  [detail] rope: {:?}", t.elapsed());
+        }
+
+        // V also needs to be contiguous for flash attention kernel
+        let t = std::time::Instant::now();
+        let v = var_contiguous(&v);
+        if profile {
+            rc.synchronize();
+            eprintln!("  [detail] v_contig: {:?}", t.elapsed());
+        }
 
         // Update KV cache with new K/V tensors [B, H_kv, S, D]
+        let t = std::time::Instant::now();
         kv_cache.update(k.tensor(), v.tensor())?;
+        if profile {
+            rc.synchronize();
+            eprintln!("  [detail] kv_update: {:?}", t.elapsed());
+        }
 
         // Get full cached K/V for attention
+        let t = std::time::Instant::now();
         let (cached_k, cached_v) = kv_cache.get_kv()?;
-        let cached_k = Var::new(cached_k.contiguous(), false);
-        let cached_v = Var::new(cached_v.contiguous(), false);
+        let cached_k = cached_k.contiguous();
+        let cached_v = cached_v.contiguous();
+        if profile {
+            rc.synchronize();
+            eprintln!("  [detail] kv_contig: {:?}", t.elapsed());
+        }
 
-        // GQA: repeat K/V heads to match Q heads
-        let (cached_k, cached_v) = if self.num_kv_heads < self.num_heads {
-            let repeat = self.num_heads / self.num_kv_heads;
-            let k_rep = repeat_kv(&cached_k, repeat).map_err(Error::Numr)?;
-            let v_rep = repeat_kv(&cached_v, repeat).map_err(Error::Numr)?;
-            (k_rep, v_rep)
-        } else {
-            (cached_k, cached_v)
-        };
-
-        // Multi-head attention (Q attends to full cached K/V)
-        let attn_out =
-            multi_head_attention_impl(client, &q, &cached_k, &cached_v, None, self.num_heads)?;
+        // Flash attention handles GQA natively (no repeat_kv needed).
+        // Single fused kernel: Q@K^T, scale, causal mask, softmax, @V
+        let t = std::time::Instant::now();
+        let (attn_out, _lse) = client.flash_attention_fwd(
+            q.tensor(),
+            &cached_k,
+            &cached_v,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            false, // not causal for decode (Q has 1 token, sees all of KV cache)
+            0,     // no sliding window
+        )?;
+        if profile {
+            rc.synchronize();
+            eprintln!("  [detail] flash_attn: {:?}", t.elapsed());
+        }
 
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
+        let attn_out = Var::new(attn_out, false);
         let attn_out =
             numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
         let attn_out = var_contiguous(&attn_out);
@@ -217,7 +301,13 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             .map_err(Error::Numr)?;
 
         // Output projection
-        self.o_proj.forward(client, &attn_out)
+        let t = std::time::Instant::now();
+        let out = self.o_proj.forward(client, &attn_out)?;
+        if profile {
+            rc.synchronize();
+            eprintln!("  [detail] o_proj: {:?}", t.elapsed());
+        }
+        Ok(out)
     }
 }
 
@@ -228,13 +318,22 @@ impl<R: Runtime<DType = DType>> LlamaMlp<R> {
     pub(super) fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
         let gate = self.gate_proj.forward(client, x)?;
         let up = self.up_proj.forward(client, x)?;
 
-        let gate_silu = var_silu(&gate, client).map_err(Error::Numr)?;
-        let hidden = var_mul(&gate_silu, &up, client).map_err(Error::Numr)?;
+        // Fused SiLU×mul: silu(gate) * up in a single kernel (avoids intermediate allocation)
+        let hidden = var_silu_mul(&gate, &up, client).map_err(Error::Numr)?;
 
         self.down_proj.forward(client, &hidden)
     }
@@ -255,10 +354,8 @@ pub(super) fn repeat_kv<R: Runtime>(x: &Var<R>, repeat: usize) -> numr::error::R
     let shape = x.shape();
     let [b, h_kv, s, d] = [shape[0], shape[1], shape[2], shape[3]];
 
-    // Reshape to [B, H_kv, 1, S, D] then broadcast to [B, H_kv, repeat, S, D]
     let expanded = x.tensor().reshape(&[b, h_kv, 1, s, d])?;
     let expanded = expanded.broadcast_to(&[b, h_kv, repeat, s, d])?;
-    // Reshape to [B, H_kv * repeat, S, D] — need contiguous for reshape after broadcast
     let result = expanded.contiguous().reshape(&[b, h_kv * repeat, s, d])?;
     Ok(Var::new(result, x.requires_grad()))
 }

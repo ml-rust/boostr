@@ -11,8 +11,8 @@ use crate::ops::impl_generic::attention::rope::apply_rope_impl;
 use numr::autograd::{Var, var_add, var_mul, var_narrow, var_reshape, var_silu};
 use numr::dtype::DType;
 use numr::ops::{
-    ActivationOps, BinaryOps, ConvOps, IndexingOps, NormalizationOps, ReduceOps, ScalarOps,
-    ShapeOps, TensorOps, UnaryOps,
+    ActivationOps, BinaryOps, CompareOps, ConditionalOps, ConvOps, IndexingOps, NormalizationOps,
+    ReduceOps, ScalarOps, ShapeOps, TensorOps, UnaryOps,
 };
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -202,6 +202,9 @@ where
             + ConvOps<R>
             + ReduceOps<R>
             + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
             + IndexingOps<R>
             + ShapeOps<R>,
     {
@@ -281,7 +284,16 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
     ) -> Result<Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
         // Pre-norm attention + residual
         let normed = self.input_layernorm.forward(client, x)?;
@@ -304,7 +316,16 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
     ) -> Result<Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
         let shape = x.shape().to_vec();
         let batch = shape[0];
@@ -371,7 +392,16 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
     fn mlp_forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
         let gate = self.gate_proj.forward(client, x)?;
         let up = self.up_proj.forward(client, x)?;

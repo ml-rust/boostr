@@ -17,8 +17,8 @@ use crate::ops::impl_generic::attention::rope::apply_rope_impl;
 use numr::autograd::{Var, var_add, var_mul, var_reshape, var_silu};
 use numr::dtype::DType;
 use numr::ops::{
-    CompareOps, IndexingOps, ReduceOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps,
-    UtilityOps,
+    ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
+    ShapeOps, TensorOps, TypeConversionOps, UnaryOps, UtilityOps,
 };
 use numr::runtime::{Communicator, Runtime};
 use numr::tensor::Tensor;
@@ -331,7 +331,16 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
     pub fn forward<C>(&self, client: &C, input_ids: &Var<R>) -> Result<Var<R>>
     where
         C: ModelClient<R> + CompareOps<R> + UtilityOps<R> + TypeConversionOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
         // Embed tokens: [B, S] -> [B, S, hidden]
         let mut hidden = self.embed_tokens.forward(client, input_ids.tensor())?;
@@ -367,7 +376,16 @@ impl<R: Runtime<DType = DType>> LlamaBlockTp<R> {
     fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
         let normed = self.input_layernorm.forward(client, x)?;
         let attn_out = self.self_attn.forward(client, &normed, rope)?;
@@ -385,7 +403,16 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
     fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
         let shape = x.shape().to_vec();
         let batch = shape[0];
@@ -462,7 +489,16 @@ impl<R: Runtime<DType = DType>> LlamaMlpTp<R> {
     fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
         let gate = self.gate_proj.forward(client, x)?;
         let up = self.up_proj.forward(client, x)?;

@@ -8,8 +8,11 @@ use crate::model::traits::{Model, ModelClient};
 use crate::nn::{Embedding, Linear, RmsNorm, RoPE};
 use numr::autograd::Var;
 use numr::dtype::DType;
-use numr::ops::{IndexingOps, ReduceOps, ScalarOps, ShapeOps, TensorOps};
-use numr::runtime::Runtime;
+use numr::ops::{
+    ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
+    ShapeOps, TensorOps, UnaryOps,
+};
+use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
 /// Full LLaMA model
@@ -155,7 +158,16 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
     fn forward<C>(&self, client: &C, input_ids: &Var<R>) -> Result<Var<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
         // Embed tokens: [B, S] -> [B, S, hidden]
         let mut hidden = self.embed_tokens.forward(client, input_ids.tensor())?;
@@ -204,24 +216,59 @@ impl<R: Runtime<DType = DType>> Llama<R> {
     ) -> Result<Tensor<R>>
     where
         C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ReduceOps<R> + IndexingOps<R> + ShapeOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
     {
+        let profile = std::env::var("BLAZR_PROFILE").is_ok();
+        let device = input_ids.device();
+        let rc = R::default_client(device);
+
+        macro_rules! sync_log {
+            ($t:expr, $msg:expr) => {
+                if profile {
+                    rc.synchronize();
+                    eprintln!("[profile] {}: {:?}", $msg, $t.elapsed());
+                }
+            };
+        }
+
+        let t = std::time::Instant::now();
+
         // Embed tokens: [B, S] -> [B, S, hidden]
         let mut hidden = self.embed_tokens.forward(client, input_ids)?;
+        sync_log!(t, "embed");
 
         // Transformer blocks with KV cache
         for (i, layer) in self.layers.iter().enumerate() {
+            let t_layer = std::time::Instant::now();
             let cache = kv_cache.layer_mut(i).ok_or_else(|| Error::ModelError {
                 reason: format!("KV cache missing for layer {i}"),
             })?;
             hidden = layer.forward_with_kv_cache(client, &hidden, &self.rope, cache, position)?;
+            sync_log!(t_layer, format!("layer {i}"));
         }
 
         // Final norm
+        let t_norm = std::time::Instant::now();
         hidden = self.norm.forward(client, &hidden)?;
+        sync_log!(t_norm, "norm");
 
         // LM head: [B, S, hidden] -> [B, S, vocab]
+        let t_lm = std::time::Instant::now();
         let logits = self.lm_head.forward(client, &hidden)?;
+        sync_log!(t_lm, "lm_head");
+
+        if profile {
+            eprintln!("[profile] total forward: {:?}", t.elapsed());
+        }
 
         Ok(logits.tensor().clone())
     }

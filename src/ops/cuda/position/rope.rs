@@ -7,8 +7,9 @@ use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::autograd::Var;
 use numr::dtype::DType;
-use numr::runtime::Device;
+use numr::ops::TypeConversionOps;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
+use numr::runtime::{Device, Runtime};
 
 type RopeInputs = (
     usize,
@@ -90,17 +91,21 @@ fn validate_rope_inputs(
     };
 
     let dtype = x_tensor.dtype();
-    if cos_to_use.dtype() != dtype || sin_to_use.dtype() != dtype {
-        return Err(Error::InvalidArgument {
-            arg: "dtype",
-            reason: format!(
-                "all inputs must have same dtype: x={:?}, cos={:?}, sin={:?}",
-                dtype,
-                cos_to_use.dtype(),
-                sin_to_use.dtype()
-            ),
-        });
-    }
+    // Cast cos/sin to match x dtype if needed (common: cos/sin are F32, x is BF16)
+    let cos_to_use = if cos_to_use.dtype() != dtype {
+        let device = x_tensor.device();
+        let client = numr::runtime::cuda::CudaRuntime::default_client(device);
+        client.cast(&cos_to_use, dtype)?
+    } else {
+        cos_to_use
+    };
+    let sin_to_use = if sin_to_use.dtype() != dtype {
+        let device = x_tensor.device();
+        let client = numr::runtime::cuda::CudaRuntime::default_client(device);
+        client.cast(&sin_to_use, dtype)?
+    } else {
+        sin_to_use
+    };
 
     let device = x_tensor.device().clone();
 

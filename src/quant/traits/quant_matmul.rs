@@ -22,6 +22,22 @@ use numr::tensor::Tensor;
 pub trait QuantMatmulOps<R: Runtime> {
     fn quant_matmul(&self, activation: &Tensor<R>, weight: &QuantTensor<R>) -> Result<Tensor<R>>;
 
+    /// Batched quant_matmul: same activation × multiple quantized weights.
+    ///
+    /// Enables implementations to amortize activation preprocessing (e.g. Q8_1
+    /// quantization on CUDA) across multiple projections that share the same input.
+    /// Default implementation just loops.
+    fn quant_matmul_batch(
+        &self,
+        activation: &Tensor<R>,
+        weights: &[&QuantTensor<R>],
+    ) -> Result<Vec<Tensor<R>>> {
+        weights
+            .iter()
+            .map(|w| self.quant_matmul(activation, w))
+            .collect()
+    }
+
     /// AWQ W4A16 GEMM: input × dequantized INT4 weight
     ///
     /// Weight is packed in AWQ format: 8 INT4 values per u32 with non-sequential

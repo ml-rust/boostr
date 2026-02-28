@@ -37,6 +37,12 @@ fn compile_cuda_kernels() {
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
+            "quant_gemv.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels"),
             "int4_gemm.cu",
             "sm_75",
             true,
@@ -68,6 +74,12 @@ fn compile_cuda_kernels() {
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "fused_int4_qkv.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels"),
+            "quant_act.cu",
             "sm_75",
             true,
         ),

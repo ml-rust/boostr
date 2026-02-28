@@ -125,17 +125,20 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         let batch = shape[0];
         let seq_len = shape[1];
 
-        // Q/K/V projections: [B, S, hidden] -> [B, S, heads*head_dim]
-        let q = self.q_proj.forward(client, x)?;
-        let k = self.k_proj.forward(client, x)?;
-        let v = self.v_proj.forward(client, x)?;
+        // Q/K/V projections (batched: quantize activation once for all 3)
+        let qkv = MaybeQuantLinear::forward_batch(
+            &[&self.q_proj, &self.k_proj, &self.v_proj],
+            client,
+            x,
+        )?;
+        let (q, k, v) = (&qkv[0], &qkv[1], &qkv[2]);
 
         // Reshape to [B, S, H, D] then permute to [B, H, S, D]
-        let q = var_reshape(&q, &[batch, seq_len, self.num_heads, self.head_dim])
+        let q = var_reshape(q, &[batch, seq_len, self.num_heads, self.head_dim])
             .map_err(Error::Numr)?;
-        let k = var_reshape(&k, &[batch, seq_len, self.num_kv_heads, self.head_dim])
+        let k = var_reshape(k, &[batch, seq_len, self.num_kv_heads, self.head_dim])
             .map_err(Error::Numr)?;
-        let v = var_reshape(&v, &[batch, seq_len, self.num_kv_heads, self.head_dim])
+        let v = var_reshape(v, &[batch, seq_len, self.num_kv_heads, self.head_dim])
             .map_err(Error::Numr)?;
 
         let q = numr::autograd::var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?;
@@ -196,30 +199,24 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             + CompareOps<R>
             + ConditionalOps<R>,
     {
-        let profile = std::env::var("BLAZR_PROFILE_DETAIL").is_ok();
-        let device = x.tensor().device();
-        let rc = R::default_client(device);
-
         let shape = x.shape().to_vec();
         let batch = shape[0];
         let seq_len = shape[1];
 
-        // Q/K/V projections: [B, S, hidden] -> [B, S, heads*head_dim]
-        let t = std::time::Instant::now();
-        let q = self.q_proj.forward(client, x)?;
-        let k = self.k_proj.forward(client, x)?;
-        let v = self.v_proj.forward(client, x)?;
-        if profile {
-            rc.synchronize();
-            eprintln!("  [detail] qkv_proj: {:?}", t.elapsed());
-        }
+        // Q/K/V projections (batched: quantize activation once for all 3)
+        let qkv = MaybeQuantLinear::forward_batch(
+            &[&self.q_proj, &self.k_proj, &self.v_proj],
+            client,
+            x,
+        )?;
+        let (q, k, v) = (&qkv[0], &qkv[1], &qkv[2]);
 
         // Reshape to [B, S, H, D] then permute to [B, H, S, D]
-        let q = var_reshape(&q, &[batch, seq_len, self.num_heads, self.head_dim])
+        let q = var_reshape(q, &[batch, seq_len, self.num_heads, self.head_dim])
             .map_err(Error::Numr)?;
-        let k = var_reshape(&k, &[batch, seq_len, self.num_kv_heads, self.head_dim])
+        let k = var_reshape(k, &[batch, seq_len, self.num_kv_heads, self.head_dim])
             .map_err(Error::Numr)?;
-        let v = var_reshape(&v, &[batch, seq_len, self.num_kv_heads, self.head_dim])
+        let v = var_reshape(v, &[batch, seq_len, self.num_kv_heads, self.head_dim])
             .map_err(Error::Numr)?;
 
         let q = numr::autograd::var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?;
@@ -227,56 +224,29 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
 
         // Contiguous Q/K needed because fused RoPE kernel assumes contiguous layout.
-        // V skips contiguous — attention handles strided inputs.
-        let t = std::time::Instant::now();
         let q = var_contiguous(&q);
         let k = var_contiguous(&k);
-        if profile {
-            rc.synchronize();
-            eprintln!("  [detail] qk_contig: {:?}", t.elapsed());
-        }
 
         // Apply fused RoPE with position offset (single kernel per tensor on CUDA)
-        let t = std::time::Instant::now();
         let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
         let sin_offset = var_narrow(rope.sin_cache(), 0, position, seq_len).map_err(Error::Numr)?;
 
         let q = client.apply_rope(&q, &cos_offset, &sin_offset)?;
         let k = client.apply_rope(&k, &cos_offset, &sin_offset)?;
-        if profile {
-            rc.synchronize();
-            eprintln!("  [detail] rope: {:?}", t.elapsed());
-        }
 
         // V also needs to be contiguous for flash attention kernel
-        let t = std::time::Instant::now();
         let v = var_contiguous(&v);
-        if profile {
-            rc.synchronize();
-            eprintln!("  [detail] v_contig: {:?}", t.elapsed());
-        }
 
         // Update KV cache with new K/V tensors [B, H_kv, S, D]
-        let t = std::time::Instant::now();
         kv_cache.update(k.tensor(), v.tensor())?;
-        if profile {
-            rc.synchronize();
-            eprintln!("  [detail] kv_update: {:?}", t.elapsed());
-        }
 
         // Get full cached K/V for attention
-        let t = std::time::Instant::now();
         let (cached_k, cached_v) = kv_cache.get_kv()?;
         let cached_k = cached_k.contiguous();
         let cached_v = cached_v.contiguous();
-        if profile {
-            rc.synchronize();
-            eprintln!("  [detail] kv_contig: {:?}", t.elapsed());
-        }
 
         // Flash attention handles GQA natively (no repeat_kv needed).
         // Single fused kernel: Q@K^T, scale, causal mask, softmax, @V
-        let t = std::time::Instant::now();
         let (attn_out, _lse) = client.flash_attention_fwd(
             q.tensor(),
             &cached_k,
@@ -287,10 +257,6 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             false, // not causal for decode (Q has 1 token, sees all of KV cache)
             0,     // no sliding window
         )?;
-        if profile {
-            rc.synchronize();
-            eprintln!("  [detail] flash_attn: {:?}", t.elapsed());
-        }
 
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
         let attn_out = Var::new(attn_out, false);
@@ -301,13 +267,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             .map_err(Error::Numr)?;
 
         // Output projection
-        let t = std::time::Instant::now();
-        let out = self.o_proj.forward(client, &attn_out)?;
-        if profile {
-            rc.synchronize();
-            eprintln!("  [detail] o_proj: {:?}", t.elapsed());
-        }
-        Ok(out)
+        self.o_proj.forward(client, &attn_out)
     }
 }
 
@@ -329,11 +289,13 @@ impl<R: Runtime<DType = DType>> LlamaMlp<R> {
             + CompareOps<R>
             + ConditionalOps<R>,
     {
-        let gate = self.gate_proj.forward(client, x)?;
-        let up = self.up_proj.forward(client, x)?;
+        // Batched gate+up: quantize activation once for both projections
+        let gate_up =
+            MaybeQuantLinear::forward_batch(&[&self.gate_proj, &self.up_proj], client, x)?;
+        let (gate, up) = (&gate_up[0], &gate_up[1]);
 
         // Fused SiLU×mul: silu(gate) * up in a single kernel (avoids intermediate allocation)
-        let hidden = var_silu_mul(&gate, &up, client).map_err(Error::Numr)?;
+        let hidden = var_silu_mul(gate, up, client).map_err(Error::Numr)?;
 
         self.down_proj.forward(client, &hidden)
     }

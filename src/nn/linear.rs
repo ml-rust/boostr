@@ -124,6 +124,41 @@ impl<R: Runtime> MaybeQuantLinear<R> {
             }
         }
     }
+
+    /// Batched forward: compute multiple projections sharing the same input.
+    ///
+    /// When all layers are quantized, uses `quant_matmul_batch` to amortize
+    /// activation preprocessing (e.g. Q8_1 quantization on CUDA).
+    pub fn forward_batch<C>(
+        layers: &[&MaybeQuantLinear<R>],
+        client: &C,
+        input: &Var<R>,
+    ) -> Result<Vec<Var<R>>>
+    where
+        C: RuntimeClient<R> + TensorOps<R> + QuantMatmulOps<R> + BinaryOps<R>,
+        R::Client: TensorOps<R>,
+    {
+        // Check if all are quantized (no bias) — enables batch path
+        let all_quantized_no_bias = layers
+            .iter()
+            .all(|l| matches!(l, MaybeQuantLinear::Quantized(ql) if ql.bias().is_none()));
+
+        if all_quantized_no_bias {
+            let weights: Vec<&QuantTensor<R>> = layers
+                .iter()
+                .map(|l| match l {
+                    MaybeQuantLinear::Quantized(ql) => ql.weight(),
+                    _ => unreachable!(),
+                })
+                .collect();
+
+            let outputs = client.quant_matmul_batch(input.tensor(), &weights)?;
+            Ok(outputs.into_iter().map(|t| Var::new(t, false)).collect())
+        } else {
+            // Fallback: individual forward passes
+            layers.iter().map(|l| l.forward(client, input)).collect()
+        }
+    }
 }
 
 #[cfg(test)]

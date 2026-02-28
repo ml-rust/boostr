@@ -7,6 +7,13 @@
 //! the packing axis contract: quantization blocks run along the last (K) axis.
 //! We iterate over weight rows (output columns), dequantize one row at a time,
 //! and accumulate the dot product contribution.
+//!
+//! Optimizations:
+//! - Rayon parallelism over N (weight rows / output columns)
+//! - Thread-local dequant buffers to avoid contention
+//! - AVX2+FMA SIMD dot product
+
+use rayon::prelude::*;
 
 use super::dequant;
 use crate::quant::QuantFormat;
@@ -55,23 +62,75 @@ pub fn quant_matmul_f32(
 
     debug_assert_eq!(weight_bytes.len(), n * row_bytes);
 
-    // Temp buffer for one dequantized weight row
-    let mut dequant_row = vec![0.0f32; k];
+    // Parallel over chunks of output columns (N dimension).
+    // Each chunk processes a range of weight rows independently with its own
+    // dequant buffer, avoiding false sharing by writing to disjoint output regions.
+    //
+    // For decode (M=1), the output is [1, N] so we split N across threads.
+    // Each thread dequantizes its weight rows and computes dot products.
 
-    // For each weight row (output column)
-    for j in 0..n {
-        let row_start = j * row_bytes;
-        let row_data = &weight_bytes[row_start..row_start + row_bytes];
+    // Choose chunk size: aim for ~64 rows per chunk to amortize thread overhead
+    // while keeping enough chunks for good load balancing
+    let num_threads = rayon::current_num_threads();
+    let chunk_size = (n + num_threads * 4 - 1) / (num_threads * 4);
+    let chunk_size = chunk_size.max(16); // minimum 16 rows per chunk
 
-        // Dequantize this row
-        dequant_row_f32(row_data, &mut dequant_row, format);
+    // We need to scatter results: output[i * n + j] for each (i, j).
+    // To avoid synchronization, we process column ranges in parallel.
+    // Each thread writes to output[i * n + j_start..j_end] for all i.
+    //
+    // We use a flat output slice and index into it.
 
-        // Dot product with each activation row
-        for i in 0..m {
-            let act_row = &act[i * k..(i + 1) * k];
-            output[i * n + j] = dot_f32(act_row, &dequant_row);
+    // Collect column ranges and process in parallel
+    let col_ranges: Vec<(usize, usize)> = (0..n)
+        .step_by(chunk_size)
+        .map(|start| (start, (start + chunk_size).min(n)))
+        .collect();
+
+    // Process column chunks in parallel using index-based approach.
+    // Each iteration of par_bridge processes one column range with its own dequant buffer.
+    // Output is written via unsafe pointer arithmetic to disjoint column ranges.
+    let output_ptr = output.as_mut_ptr() as usize; // usize is Send+Sync
+
+    // Q4_K has a dedicated AVX2 fused dequant+dot kernel
+    let use_fused_q4k = matches!(format, QuantFormat::Q4K);
+
+    col_ranges.par_iter().for_each(|&(j_start, j_end)| {
+        let out = output_ptr as *mut f32;
+
+        if use_fused_q4k {
+            // Fused AVX2 dequant+dot for Q4_K: no intermediate buffer needed
+            for j in j_start..j_end {
+                let row_start = j * row_bytes;
+                let row_data = &weight_bytes[row_start..row_start + row_bytes];
+
+                for i in 0..m {
+                    let act_row = &act[i * k..(i + 1) * k];
+                    let val = super::simd::fused_q4k_dot::fused_dot_q4k(act_row, row_data, k);
+                    unsafe {
+                        *out.add(i * n + j) = val;
+                    }
+                }
+            }
+        } else {
+            // Dequant to buffer then SIMD dot for other formats
+            let mut dequant_row = vec![0.0f32; k];
+            for j in j_start..j_end {
+                let row_start = j * row_bytes;
+                let row_data = &weight_bytes[row_start..row_start + row_bytes];
+
+                dequant_row_f32(row_data, &mut dequant_row, format);
+
+                for i in 0..m {
+                    let act_row = &act[i * k..(i + 1) * k];
+                    let val = dot_f32(act_row, &dequant_row);
+                    unsafe {
+                        *out.add(i * n + j) = val;
+                    }
+                }
+            }
         }
-    }
+    });
 }
 
 /// Dequantize a single row of quantized blocks into f32

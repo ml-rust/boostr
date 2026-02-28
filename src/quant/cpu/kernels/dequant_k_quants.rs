@@ -221,7 +221,7 @@ pub fn dequant_q5k(blocks: &[u8], output: &mut [f32]) {
 /// Unpack 6-bit scales and mins from 12-byte packed array for Q4_K and Q5_K.
 ///
 /// Shared between Q4_K and Q5_K (identical scale packing).
-fn unpack_q4k_q5k_scales(sc: &[u8]) -> ([u8; 8], [u8; 8]) {
+pub fn unpack_q4k_q5k_scales(sc: &[u8]) -> ([u8; 8], [u8; 8]) {
     let mut scales = [0u8; 8];
     let mut mins = [0u8; 8];
 

@@ -33,6 +33,7 @@ cudarc = { version = "0.19", optional = true, features = [
 wgpu = { version = "28.0", optional = true }
 bytemuck = { version = "1.24", features = ["derive"], optional = true }
 
+rayon = "1.11"
 memmap2 = "0.9"
 splintr = { version = "0.9" }
 

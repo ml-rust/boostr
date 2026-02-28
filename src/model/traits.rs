@@ -7,8 +7,8 @@ use crate::ops::traits::{FlashAttentionOps, RoPEOps};
 use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::Var;
 use numr::ops::{
-    ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
-    ShapeOps, TensorOps, UnaryOps,
+    ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, NormalizationOps, ReduceOps,
+    ScalarOps, ShapeOps, TensorOps, UnaryOps,
 };
 use numr::runtime::{Runtime, RuntimeClient};
 
@@ -28,6 +28,7 @@ pub trait ModelClient<R: Runtime>:
     + RoPEOps<R>
     + FlashAttentionOps<R>
     + QuantMatmulOps<R>
+    + NormalizationOps<R>
 {
 }
 
@@ -47,7 +48,8 @@ where
         + ConditionalOps<R>
         + RoPEOps<R>
         + FlashAttentionOps<R>
-        + QuantMatmulOps<R>,
+        + QuantMatmulOps<R>
+        + NormalizationOps<R>,
 {
 }
 

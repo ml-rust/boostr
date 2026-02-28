@@ -90,15 +90,18 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
             + CompareOps<R>
             + ConditionalOps<R>,
     {
-        // Pre-norm attention + residual
+        // Pre-norm attention + residual (fused: 1 kernel instead of 2)
         let normed = self.input_layernorm.forward(client, x)?;
         let attn_out = self
             .self_attn
             .forward_with_kv_cache(client, &normed, rope, kv_cache, position)?;
-        let h = var_add(x, &attn_out, client).map_err(Error::Numr)?;
 
-        // Pre-norm MLP + residual
-        let normed = self.post_attention_layernorm.forward(client, &h)?;
+        // Fused add + rms_norm: computes h = x + attn_out, then normed = rms_norm(h)
+        let (normed, h) = self
+            .post_attention_layernorm
+            .fused_add_forward(client, x, &attn_out)?;
+
+        // MLP + residual
         let mlp_out = self.mlp.forward(client, &normed)?;
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
     }

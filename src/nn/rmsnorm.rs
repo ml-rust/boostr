@@ -40,6 +40,32 @@ impl<R: Runtime> RmsNorm<R> {
         var_rms_norm(input, &self.weight, self.eps, client).map_err(Error::Numr)
     }
 
+    /// Fused residual add + RMS norm: rms_norm(x + residual, weight, eps)
+    ///
+    /// Returns `(normed, pre_norm)` where `pre_norm = x + residual`.
+    /// Single kernel launch instead of separate add + norm.
+    /// Uses the raw NormalizationOps directly (bypasses autograd — for inference).
+    pub fn fused_add_forward<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        residual: &Var<R>,
+    ) -> Result<(Var<R>, Var<R>)>
+    where
+        R: Runtime,
+        C: RuntimeClient<R> + NormalizationOps<R>,
+    {
+        let (normed, pre_norm) = client
+            .fused_add_rms_norm(
+                x.tensor(),
+                residual.tensor(),
+                self.weight.tensor(),
+                self.eps,
+            )
+            .map_err(Error::Numr)?;
+        Ok((Var::new(normed, false), Var::new(pre_norm, false)))
+    }
+
     /// Get the weight parameter
     pub fn weight(&self) -> &Var<R> {
         &self.weight

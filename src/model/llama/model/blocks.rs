@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::inference::KvCache;
 use crate::model::config::ModelConfig;
 use crate::model::traits::ModelClient;
-use crate::nn::{Linear, RmsNorm, RoPE};
+use crate::nn::{Linear, MaybeQuantLinear, RmsNorm, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use numr::autograd::{Var, var_add, var_narrow, var_reshape, var_silu_mul};
 use numr::dtype::DType;
@@ -25,10 +25,10 @@ pub(super) struct LlamaBlock<R: Runtime> {
 
 /// GQA attention with Q/K/V projections
 pub(super) struct LlamaAttention<R: Runtime> {
-    pub(super) q_proj: Linear<R>,
-    pub(super) k_proj: Linear<R>,
-    pub(super) v_proj: Linear<R>,
-    pub(super) o_proj: Linear<R>,
+    pub(super) q_proj: MaybeQuantLinear<R>,
+    pub(super) k_proj: MaybeQuantLinear<R>,
+    pub(super) v_proj: MaybeQuantLinear<R>,
+    pub(super) o_proj: MaybeQuantLinear<R>,
     pub(super) num_heads: usize,
     pub(super) num_kv_heads: usize,
     pub(super) head_dim: usize,
@@ -36,9 +36,9 @@ pub(super) struct LlamaAttention<R: Runtime> {
 
 /// SwiGLU MLP: down_proj(silu(gate_proj(x)) * up_proj(x))
 pub(super) struct LlamaMlp<R: Runtime> {
-    pub(super) gate_proj: Linear<R>,
-    pub(super) up_proj: Linear<R>,
-    pub(super) down_proj: Linear<R>,
+    pub(super) gate_proj: MaybeQuantLinear<R>,
+    pub(super) up_proj: MaybeQuantLinear<R>,
+    pub(super) down_proj: MaybeQuantLinear<R>,
 }
 
 // ── LlamaBlock ──────────────────────────────────────────────────────
@@ -354,7 +354,9 @@ pub(super) fn repeat_kv<R: Runtime>(x: &Var<R>, repeat: usize) -> numr::error::R
     let shape = x.shape();
     let [b, h_kv, s, d] = [shape[0], shape[1], shape[2], shape[3]];
 
-    let expanded = x.tensor().reshape(&[b, h_kv, 1, s, d])?;
+    // Contiguous required: reshape needs contiguous layout, and inputs
+    // (e.g. V after permute) may be strided.
+    let expanded = x.tensor().contiguous().reshape(&[b, h_kv, 1, s, d])?;
     let expanded = expanded.broadcast_to(&[b, h_kv, repeat, s, d])?;
     let result = expanded.contiguous().reshape(&[b, h_kv * repeat, s, d])?;
     Ok(Var::new(result, x.requires_grad()))
@@ -369,15 +371,15 @@ pub(super) fn build_block_from_varbuilder<R: Runtime<DType = DType>>(
     head_dim: usize,
 ) -> Result<LlamaBlock<R>> {
     let mut attn_vb = layer_vb.pp("self_attn");
-    let q_proj = Linear::new(attn_vb.take_tensor("q_proj.weight")?, None, false);
-    let k_proj = Linear::new(attn_vb.take_tensor("k_proj.weight")?, None, false);
-    let v_proj = Linear::new(attn_vb.take_tensor("v_proj.weight")?, None, false);
-    let o_proj = Linear::new(attn_vb.take_tensor("o_proj.weight")?, None, false);
+    let q_proj = attn_vb.take_maybe_quant_linear("q_proj.weight", None)?;
+    let k_proj = attn_vb.take_maybe_quant_linear("k_proj.weight", None)?;
+    let v_proj = attn_vb.take_maybe_quant_linear("v_proj.weight", None)?;
+    let o_proj = attn_vb.take_maybe_quant_linear("o_proj.weight", None)?;
 
     let mut mlp_vb = layer_vb.pp("mlp");
-    let gate_proj = Linear::new(mlp_vb.take_tensor("gate_proj.weight")?, None, false);
-    let up_proj = Linear::new(mlp_vb.take_tensor("up_proj.weight")?, None, false);
-    let down_proj = Linear::new(mlp_vb.take_tensor("down_proj.weight")?, None, false);
+    let gate_proj = mlp_vb.take_maybe_quant_linear("gate_proj.weight", None)?;
+    let up_proj = mlp_vb.take_maybe_quant_linear("up_proj.weight", None)?;
+    let down_proj = mlp_vb.take_maybe_quant_linear("down_proj.weight", None)?;
 
     Ok(LlamaBlock {
         input_layernorm: RmsNorm::new(
@@ -425,26 +427,26 @@ pub(super) fn build_block_from_config<R: Runtime<DType = DType>>(
             true,
         ),
         self_attn: LlamaAttention {
-            q_proj: Linear::new(
+            q_proj: MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<R>::zeros(&[num_heads * head_dim, hidden], dt, device),
                 None,
                 true,
-            ),
-            k_proj: Linear::new(
+            )),
+            k_proj: MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<R>::zeros(&[num_kv_heads * head_dim, hidden], dt, device),
                 None,
                 true,
-            ),
-            v_proj: Linear::new(
+            )),
+            v_proj: MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<R>::zeros(&[num_kv_heads * head_dim, hidden], dt, device),
                 None,
                 true,
-            ),
-            o_proj: Linear::new(
+            )),
+            o_proj: MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<R>::zeros(&[hidden, num_heads * head_dim], dt, device),
                 None,
                 true,
-            ),
+            )),
             num_heads,
             num_kv_heads,
             head_dim,
@@ -455,21 +457,21 @@ pub(super) fn build_block_from_config<R: Runtime<DType = DType>>(
             true,
         ),
         mlp: LlamaMlp {
-            gate_proj: Linear::new(
+            gate_proj: MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<R>::zeros(&[intermediate, hidden], dt, device),
                 None,
                 true,
-            ),
-            up_proj: Linear::new(
+            )),
+            up_proj: MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<R>::zeros(&[intermediate, hidden], dt, device),
                 None,
                 true,
-            ),
-            down_proj: Linear::new(
+            )),
+            down_proj: MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<R>::zeros(&[hidden, intermediate], dt, device),
                 None,
                 true,
-            ),
+            )),
         },
     }
 }

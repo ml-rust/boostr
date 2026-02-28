@@ -1,6 +1,7 @@
 //! Linear and quantized linear layers
 
 use crate::error::Result;
+use crate::nn::weight::Weight;
 use crate::quant::tensor::QuantTensor;
 use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{Var, var_add, var_matmul, var_transpose};
@@ -84,6 +85,44 @@ impl<R: Runtime> QuantLinear<R> {
 
     pub fn bias(&self) -> Option<&Tensor<R>> {
         self.bias.as_ref()
+    }
+}
+
+/// A linear layer that works with either standard or quantized weights.
+///
+/// During inference with GGUF models, some weights are quantized (Q4_K_M etc.)
+/// while others (norms, embeddings) remain in full precision. This enum lets
+/// model structs use a single field type for both cases.
+pub enum MaybeQuantLinear<R: Runtime> {
+    Standard(Linear<R>),
+    Quantized(QuantLinear<R>),
+}
+
+impl<R: Runtime> MaybeQuantLinear<R> {
+    /// Construct from a `Weight` (standard or quantized) plus optional bias tensor.
+    pub fn from_weight(weight: Weight<R>, bias: Option<Tensor<R>>) -> Self {
+        match weight {
+            Weight::Standard(t) => Self::Standard(Linear::new(t, bias, false)),
+            Weight::Quantized(qt) => Self::Quantized(QuantLinear::new(qt, bias)),
+        }
+    }
+
+    /// Forward pass: works for both standard and quantized weights.
+    ///
+    /// For standard weights: uses autograd-compatible matmul.
+    /// For quantized weights: extracts tensor, does quant_matmul, wraps result.
+    pub fn forward<C>(&self, client: &C, input: &Var<R>) -> Result<Var<R>>
+    where
+        C: RuntimeClient<R> + TensorOps<R> + QuantMatmulOps<R> + BinaryOps<R>,
+        R::Client: TensorOps<R>,
+    {
+        match self {
+            Self::Standard(linear) => linear.forward(client, input),
+            Self::Quantized(qlinear) => {
+                let out = qlinear.forward(client, input.tensor())?;
+                Ok(Var::new(out, false))
+            }
+        }
     }
 }
 

@@ -22,7 +22,7 @@ pub use dropout::Dropout;
 pub use embedding::Embedding;
 pub use groupnorm::GroupNorm;
 pub use layernorm::LayerNorm;
-pub use linear::{Linear, QuantLinear};
+pub use linear::{Linear, MaybeQuantLinear, QuantLinear};
 pub use loss::{
     contrastive_loss, cross_entropy_loss, cross_entropy_loss_smooth, focal_loss, kl_div_loss,
     mse_loss,

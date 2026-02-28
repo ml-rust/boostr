@@ -4,6 +4,7 @@ use crate::error::Result;
 use crate::model::config::ModelConfig;
 use crate::nn::VarBuilder;
 use crate::ops::traits::{FlashAttentionOps, RoPEOps};
+use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::Var;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
@@ -26,6 +27,7 @@ pub trait ModelClient<R: Runtime>:
     + ConditionalOps<R>
     + RoPEOps<R>
     + FlashAttentionOps<R>
+    + QuantMatmulOps<R>
 {
 }
 
@@ -44,7 +46,8 @@ where
         + CompareOps<R>
         + ConditionalOps<R>
         + RoPEOps<R>
-        + FlashAttentionOps<R>,
+        + FlashAttentionOps<R>
+        + QuantMatmulOps<R>,
 {
 }
 
@@ -59,7 +62,10 @@ pub trait Model<R: Runtime>: Sized {
     /// Create model from a VarBuilder (loads real weights).
     ///
     /// Takes `&mut` because tensors are moved out of the VarMap (zero-copy).
-    fn from_varbuilder(vb: &mut VarBuilder<R>, config: &ModelConfig) -> Result<Self> {
+    fn from_varbuilder(vb: &mut VarBuilder<R>, config: &ModelConfig) -> Result<Self>
+    where
+        R::Client: DequantOps<R>,
+    {
         let _ = (vb, config);
         Err(crate::error::Error::ModelError {
             reason: "from_varbuilder not implemented for this model".into(),

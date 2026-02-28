@@ -33,7 +33,7 @@ pub enum LoadedModel<R: Runtime> {
 
 impl<R: Runtime<DType = DType>> LoadedModel<R>
 where
-    R::Client: IndexingOps<R>,
+    R::Client: IndexingOps<R> + crate::quant::DequantOps<R>,
 {
     /// Load a model from universal config and weights
     pub fn load(config: &UniversalConfig, vb: &mut VarBuilder<R>) -> Result<Self> {
@@ -61,7 +61,12 @@ where
         // GGUF uses same load path - VarBuilder handles name mapping
         Self::load(config, vb)
     }
+}
 
+impl<R: Runtime<DType = DType>> LoadedModel<R>
+where
+    R::Client: IndexingOps<R>,
+{
     /// Forward pass with pre-allocated KV cache for transformer inference
     ///
     /// # Arguments

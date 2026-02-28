@@ -5,7 +5,7 @@ use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;
 use crate::model::config::ModelConfig;
 use crate::model::traits::{Model, ModelClient};
-use crate::nn::{Embedding, Linear, RmsNorm, RoPE};
+use crate::nn::{Embedding, Linear, MaybeQuantLinear, RmsNorm, RoPE};
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{
@@ -21,12 +21,15 @@ pub struct Llama<R: Runtime> {
     embed_tokens: Embedding<R>,
     layers: Vec<LlamaBlock<R>>,
     norm: RmsNorm<R>,
-    lm_head: Linear<R>,
+    lm_head: MaybeQuantLinear<R>,
     rope: RoPE<R>,
 }
 
 impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
-    fn from_varbuilder(vb: &mut crate::nn::VarBuilder<R>, config: &ModelConfig) -> Result<Self> {
+    fn from_varbuilder(vb: &mut crate::nn::VarBuilder<R>, config: &ModelConfig) -> Result<Self>
+    where
+        R::Client: crate::quant::DequantOps<R>,
+    {
         config.validate()?;
 
         let attn_cfg = config.attention.as_ref().ok_or_else(|| Error::ModelError {
@@ -49,8 +52,8 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
 
         let mut model_vb = vb.pp("model");
 
-        // Embedding
-        let embed_weight = model_vb.take_tensor("embed_tokens.weight")?;
+        // Embedding (dequantize if GGUF stored it as quantized)
+        let embed_weight = model_vb.take_tensor_dequant("embed_tokens.weight", DType::F32)?;
         let embed_tokens = Embedding::new(embed_weight, false);
 
         // Transformer layers
@@ -78,9 +81,9 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         // LM head (may be tied to embedding weights)
         let lm_head = if config.tie_word_embeddings {
             let embed_w = embed_tokens.weight().tensor().clone();
-            Linear::new(embed_w, None, false)
+            MaybeQuantLinear::Standard(Linear::new(embed_w, None, false))
         } else {
-            Linear::new(vb.take_tensor("lm_head.weight")?, None, false)
+            vb.take_maybe_quant_linear("lm_head.weight", None)?
         };
 
         Ok(Self {
@@ -143,7 +146,11 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         );
 
         // LM head
-        let lm_head = Linear::new(Tensor::<R>::zeros(&[vocab, hidden], dt, device), None, true);
+        let lm_head = MaybeQuantLinear::Standard(Linear::new(
+            Tensor::<R>::zeros(&[vocab, hidden], dt, device),
+            None,
+            true,
+        ));
 
         Ok(Self {
             config: config.clone(),
@@ -470,23 +477,24 @@ attention:
     #[test]
     fn test_swiglu_mlp() {
         use super::super::blocks::LlamaMlp;
+        use crate::nn::MaybeQuantLinear;
         let (client, device) = cpu_setup();
         let mlp = LlamaMlp {
-            gate_proj: Linear::new(
+            gate_proj: MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[2, 4], &device),
                 None,
                 false,
-            ),
-            up_proj: Linear::new(
+            )),
+            up_proj: MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[2, 4], &device),
                 None,
                 false,
-            ),
-            down_proj: Linear::new(
+            )),
+            down_proj: MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[4, 2], &device),
                 None,
                 false,
-            ),
+            )),
         };
 
         let x = Var::new(

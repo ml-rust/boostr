@@ -4,9 +4,12 @@
 //! (e.g., "model.layers.0.self_attn.q_proj.weight").
 
 use crate::error::{Error, Result};
+use crate::nn::linear::MaybeQuantLinear;
 use crate::nn::varmap::VarMap;
 use crate::nn::weight::Weight;
 use crate::quant::tensor::QuantTensor;
+use crate::quant::traits::DequantOps;
+use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -88,6 +91,34 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
         self.varmap.take_quant_tensor(&full)
     }
 
+    /// Take a weight (standard or quantized) by name, removing it from the map.
+    pub fn take_weight(&mut self, name: &str) -> Result<Weight<R>> {
+        let full = self.full_name(name);
+        self.varmap.take(&full)
+    }
+
+    /// Take a weight and construct a `MaybeQuantLinear` from it.
+    ///
+    /// If `bias_name` is provided, attempts to take a standard tensor for bias.
+    pub fn take_maybe_quant_linear(
+        &mut self,
+        name: &str,
+        bias_name: Option<&str>,
+    ) -> Result<MaybeQuantLinear<R>> {
+        let weight = self.take_weight(name)?;
+        let bias = match bias_name {
+            Some(bn) => {
+                if self.contains(bn) {
+                    Some(self.take_tensor(bn)?)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        Ok(MaybeQuantLinear::from_weight(weight, bias))
+    }
+
     /// Get a standard tensor and validate its shape.
     pub fn get_with_shape(&self, name: &str, expected_shape: &[usize]) -> Result<&Tensor<R>> {
         let full = self.full_name(name);
@@ -119,6 +150,24 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
     /// Current prefix.
     pub fn prefix(&self) -> &str {
         &self.prefix
+    }
+
+    /// Take a tensor by name, dequantizing if it's quantized.
+    ///
+    /// Useful for weights like embeddings that must be standard tensors
+    /// but may be stored quantized in GGUF files.
+    pub fn take_tensor_dequant(&mut self, name: &str, target_dtype: DType) -> Result<Tensor<R>>
+    where
+        R: Runtime<DType = DType>,
+        R::Client: DequantOps<R>,
+    {
+        match self.take_weight(name)? {
+            Weight::Standard(t) => Ok(t),
+            Weight::Quantized(qt) => {
+                let client = R::default_client(self.device);
+                client.dequantize(&qt, target_dtype)
+            }
+        }
     }
 
     /// Take a tensor and narrow it along `dim` for the given TP rank.

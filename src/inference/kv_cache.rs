@@ -3,6 +3,7 @@
 //! Provides a dynamic KV cache that grows as needed, avoiding massive upfront allocation.
 
 use crate::error::{Error, Result};
+use crate::inference::memory::{BlockAllocator, BlockTable};
 use crate::ops::traits::KvCacheOps;
 use numr::dtype::DType;
 use numr::ops::IndexingOps;
@@ -293,6 +294,143 @@ where
 
     pub fn seq_len(&self) -> usize {
         self.layers.first().map(|l| l.seq_len()).unwrap_or(0)
+    }
+}
+
+/// Multi-layer paged KV cache for a full transformer model.
+///
+/// Wraps `Vec<PagedKvCache<R>>` (one per layer) with per-sequence `BlockTable`s.
+/// All layers share the same block allocator and block size.
+pub struct LayeredPagedKvCache<R: Runtime> {
+    layers: Vec<PagedKvCache<R>>,
+    block_tables: Vec<BlockTable>,
+    block_size: usize,
+    seq_len: usize,
+}
+
+impl<R: Runtime<DType = DType>> LayeredPagedKvCache<R> {
+    /// Create a new layered paged KV cache.
+    ///
+    /// Allocates `num_blocks_per_layer` blocks for each of `num_layers` layers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        num_layers: usize,
+        num_blocks_per_layer: usize,
+        block_size: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        dtype: DType,
+        device: &R::Device,
+    ) -> Self {
+        let mut layers = Vec::with_capacity(num_layers);
+        let mut block_tables = Vec::with_capacity(num_layers);
+        for _ in 0..num_layers {
+            layers.push(PagedKvCache::new(
+                num_blocks_per_layer,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                dtype,
+                device,
+            ));
+            block_tables.push(BlockTable::new(block_size));
+        }
+        Self {
+            layers,
+            block_tables,
+            block_size,
+            seq_len: 0,
+        }
+    }
+
+    pub fn layer(&self, idx: usize) -> &PagedKvCache<R> {
+        &self.layers[idx]
+    }
+
+    pub fn block_table(&self, idx: usize) -> &BlockTable {
+        &self.block_tables[idx]
+    }
+
+    pub fn block_table_mut(&mut self, idx: usize) -> &mut BlockTable {
+        &mut self.block_tables[idx]
+    }
+
+    pub fn num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    pub fn seq_len(&self) -> usize {
+        self.seq_len
+    }
+
+    pub fn set_seq_len(&mut self, seq_len: usize) {
+        self.seq_len = seq_len;
+        for bt in &mut self.block_tables {
+            bt.set_num_tokens(seq_len);
+        }
+    }
+
+    /// Allocate blocks for `additional_tokens` new tokens across all layers.
+    ///
+    /// Uses the same allocator for all layers so each layer gets the same
+    /// logical→physical mapping (block tables are independent per layer but
+    /// the physical block pool is shared).
+    pub fn allocate_blocks<A: BlockAllocator>(
+        &mut self,
+        additional_tokens: usize,
+        allocator: &A,
+    ) -> Result<()> {
+        // All layers share the same logical→physical mapping.
+        // Allocate once, reuse same block IDs for every layer.
+        let needed = self.block_tables[0].additional_blocks_needed(additional_tokens);
+        if needed == 0 {
+            return Ok(());
+        }
+
+        let blocks = allocator.allocate(needed)?;
+        for bt in &mut self.block_tables {
+            bt.append_blocks(blocks.clone());
+        }
+        Ok(())
+    }
+
+    /// Compute slot mapping for token positions `start..start+count`.
+    ///
+    /// Returns a Vec<i32> suitable for uploading as a tensor.
+    /// Uses layer 0's block table (all layers have the same logical mapping).
+    pub fn compute_slot_mapping(&self, start: usize, count: usize) -> Result<Vec<i32>> {
+        let bt = &self.block_tables[0];
+        let mut slots = Vec::with_capacity(count);
+        for pos in start..start + count {
+            let (block_id, offset) = bt.get_slot(pos).ok_or_else(|| Error::InferenceError {
+                reason: format!(
+                    "no block allocated for token position {} (have {} blocks of size {})",
+                    pos,
+                    bt.num_blocks(),
+                    self.block_size
+                ),
+            })?;
+            slots.push((block_id as i32) * (self.block_size as i32) + (offset as i32));
+        }
+        Ok(slots)
+    }
+
+    /// Get block table in device format (i32 vec) for layer `idx`.
+    pub fn block_table_device_format(&self, idx: usize) -> Vec<i32> {
+        self.block_tables[idx].to_device_format()
+    }
+
+    /// Reset all block tables and sequence length (does NOT free blocks from allocator).
+    pub fn reset(&mut self) {
+        self.seq_len = 0;
+        for bt in &mut self.block_tables {
+            bt.blocks.clear();
+            bt.num_tokens = 0;
+        }
     }
 }
 

@@ -2,4 +2,5 @@
 
 pub mod dot_f32;
 pub mod fused_q4k_dot;
+pub mod fused_q6k_dot;
 pub mod int4_unpack;

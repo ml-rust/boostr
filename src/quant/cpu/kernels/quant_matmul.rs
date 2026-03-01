@@ -69,10 +69,12 @@ pub fn quant_matmul_f32(
     // For decode (M=1), the output is [1, N] so we split N across threads.
     // Each thread dequantizes its weight rows and computes dot products.
 
-    // Choose chunk size: aim for ~64 rows per chunk to amortize thread overhead
-    // while keeping enough chunks for good load balancing
+    // Choose chunk size based on M:
+    // - M=1 (decode GEMV): one chunk per thread to minimize Rayon scheduling overhead
+    // - M>1 (prefill): more chunks for better load balancing
     let num_threads = rayon::current_num_threads();
-    let chunk_size = (n + num_threads * 4 - 1) / (num_threads * 4);
+    let target_chunks = if m == 1 { num_threads } else { num_threads * 4 };
+    let chunk_size = (n + target_chunks - 1) / target_chunks;
     let chunk_size = chunk_size.max(16); // minimum 16 rows per chunk
 
     // We need to scatter results: output[i * n + j] for each (i, j).
@@ -92,21 +94,43 @@ pub fn quant_matmul_f32(
     // Output is written via unsafe pointer arithmetic to disjoint column ranges.
     let output_ptr = output.as_mut_ptr() as usize; // usize is Send+Sync
 
-    // Q4_K has a dedicated AVX2 fused dequant+dot kernel
-    let use_fused_q4k = matches!(format, QuantFormat::Q4K);
+    // Q4_K and Q6_K have dedicated AVX2 fused dequant+dot kernels
+    let use_fused = matches!(format, QuantFormat::Q4K | QuantFormat::Q6K);
 
     col_ranges.par_iter().for_each(|&(j_start, j_end)| {
         let out = output_ptr as *mut f32;
 
-        if use_fused_q4k {
-            // Fused AVX2 dequant+dot for Q4_K: no intermediate buffer needed
-            for j in j_start..j_end {
-                let row_start = j * row_bytes;
-                let row_data = &weight_bytes[row_start..row_start + row_bytes];
+        if use_fused {
+            // Multi-row GEMV: process 2 weight rows per iteration when M=1
+            // This reads the activation vector once and computes 2 dot products,
+            // keeping the activation in L1 cache (16KB for K=4096).
+            let cols = j_end - j_start;
+            let pairs = cols / 2;
+            let remainder = cols % 2;
 
-                for i in 0..m {
-                    let act_row = &act[i * k..(i + 1) * k];
-                    let val = super::simd::fused_q4k_dot::fused_dot_q4k(act_row, row_data, k);
+            for i in 0..m {
+                let act_row = &act[i * k..(i + 1) * k];
+
+                // Process pairs of weight rows
+                for p in 0..pairs {
+                    let j0 = j_start + p * 2;
+                    let j1 = j0 + 1;
+                    let row_data0 = &weight_bytes[j0 * row_bytes..(j0 + 1) * row_bytes];
+                    let row_data1 = &weight_bytes[j1 * row_bytes..(j1 + 1) * row_bytes];
+
+                    let val0 = fused_dot_dispatch(act_row, row_data0, k, format);
+                    let val1 = fused_dot_dispatch(act_row, row_data1, k, format);
+                    unsafe {
+                        *out.add(i * n + j0) = val0;
+                        *out.add(i * n + j1) = val1;
+                    }
+                }
+
+                // Handle odd remainder
+                if remainder > 0 {
+                    let j = j_end - 1;
+                    let row_data = &weight_bytes[j * row_bytes..(j + 1) * row_bytes];
+                    let val = fused_dot_dispatch(act_row, row_data, k, format);
                     unsafe {
                         *out.add(i * n + j) = val;
                     }
@@ -126,6 +150,113 @@ pub fn quant_matmul_f32(
                     let val = dot_f32(act_row, &dequant_row);
                     unsafe {
                         *out.add(i * n + j) = val;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Fused dot product dispatch for formats with SIMD fused kernels
+fn fused_dot_dispatch(act_row: &[f32], row_data: &[u8], k: usize, format: QuantFormat) -> f32 {
+    match format {
+        QuantFormat::Q4K => super::simd::fused_q4k_dot::fused_dot_q4k(act_row, row_data, k),
+        QuantFormat::Q6K => super::simd::fused_q6k_dot::fused_dot_q6k(act_row, row_data, k),
+        _ => unreachable!(),
+    }
+}
+
+/// Batched quantized matmul: activation \[M, K\] × multiple weight\[Ni, K\]^T → multiple output\[M, Ni\]
+///
+/// Processes all weight matrices together so the activation stays in L2 cache.
+/// For M=1 decode with QKV (3 projections) or gate+up (2 projections), this avoids
+/// re-reading the activation vector 3-5x from L3/memory.
+pub fn quant_matmul_batch_f32(
+    act: &[f32],
+    weight_list: &[(&[u8], usize)], // (weight_bytes, n) per matrix
+    outputs: &mut [&mut [f32]],
+    m: usize,
+    k: usize,
+    format: QuantFormat,
+) {
+    let block_size = format.block_size();
+    let block_bytes = format.block_bytes();
+    let blocks_per_row = k / block_size;
+    let row_bytes = blocks_per_row * block_bytes;
+
+    let use_fused = matches!(format, QuantFormat::Q4K | QuantFormat::Q6K);
+
+    // For each activation row, compute dot products against all weight matrices.
+    // This keeps the activation in L2 cache while streaming through weight data.
+    //
+    // We parallelize over the N dimension of each weight matrix (same as single matmul),
+    // but process all matrices for each column range before moving on.
+
+    // Find the max N across all weight matrices for chunking
+    let max_n: usize = weight_list.iter().map(|&(_, n)| n).max().unwrap_or(0);
+    if max_n == 0 {
+        return;
+    }
+
+    let num_threads = rayon::current_num_threads();
+    let target_chunks = if m == 1 { num_threads } else { num_threads * 4 };
+    let chunk_size = (max_n + target_chunks - 1) / target_chunks;
+    let chunk_size = chunk_size.max(16);
+
+    // Collect output pointers as usize for Send+Sync
+    let output_ptrs: Vec<(usize, usize)> = outputs
+        .iter()
+        .zip(weight_list.iter())
+        .map(|(out, &(_, n))| (out.as_ptr() as usize, n))
+        .collect();
+    let weight_ptrs: Vec<(usize, usize)> = weight_list
+        .iter()
+        .map(|&(w, n)| (w.as_ptr() as usize, n))
+        .collect();
+
+    let col_ranges: Vec<(usize, usize)> = (0..max_n)
+        .step_by(chunk_size)
+        .map(|start| (start, (start + chunk_size).min(max_n)))
+        .collect();
+
+    col_ranges.par_iter().for_each(|&(j_start, j_end)| {
+        // For each activation row
+        for i in 0..m {
+            let act_row = &act[i * k..(i + 1) * k];
+
+            // Process all weight matrices for this activation row and column range
+            for (w_idx, &(w_ptr, n)) in weight_ptrs.iter().enumerate() {
+                let (out_ptr, _) = output_ptrs[w_idx];
+                let out = out_ptr as *mut f32;
+                let w_base = w_ptr as *const u8;
+
+                let j_end_clamped = j_end.min(n);
+                if j_start >= n {
+                    continue;
+                }
+
+                if use_fused {
+                    for j in j_start..j_end_clamped {
+                        let row_data = unsafe {
+                            std::slice::from_raw_parts(w_base.add(j * row_bytes), row_bytes)
+                        };
+                        let val = fused_dot_dispatch(act_row, row_data, k, format);
+                        unsafe {
+                            *out.add(i * n + j) = val;
+                        }
+                    }
+                } else {
+                    // Scalar path with dequant buffer
+                    let mut dequant_row = vec![0.0f32; k];
+                    for j in j_start..j_end_clamped {
+                        let row_data = unsafe {
+                            std::slice::from_raw_parts(w_base.add(j * row_bytes), row_bytes)
+                        };
+                        dequant_row_f32(row_data, &mut dequant_row, format);
+                        let val = dot_f32(act_row, &dequant_row);
+                        unsafe {
+                            *out.add(i * n + j) = val;
+                        }
                     }
                 }
             }

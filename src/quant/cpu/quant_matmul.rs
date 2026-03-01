@@ -140,6 +140,116 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         ))
     }
 
+    fn quant_matmul_batch(
+        &self,
+        activation: &Tensor<CpuRuntime>,
+        weights: &[&QuantTensor<CpuRuntime>],
+    ) -> Result<Vec<Tensor<CpuRuntime>>> {
+        if weights.is_empty() {
+            return Ok(vec![]);
+        }
+        if weights.len() == 1 {
+            return Ok(vec![self.quant_matmul(activation, weights[0])?]);
+        }
+
+        // Validate activation
+        if activation.dtype() != DType::F32 {
+            return Err(Error::QuantError {
+                reason: format!(
+                    "quant_matmul_batch activation must be F32, got {:?}",
+                    activation.dtype()
+                ),
+            });
+        }
+
+        let a_shape = activation.shape();
+        if a_shape.is_empty() {
+            return Err(Error::QuantError {
+                reason: "quant_matmul_batch activation must be at least 1D".into(),
+            });
+        }
+        let k = a_shape[a_shape.len() - 1];
+        let total_elements: usize = a_shape.iter().product();
+        let m = total_elements / k;
+
+        // Validate all weights have same format and K
+        let format = weights[0].format();
+        for (i, w) in weights.iter().enumerate() {
+            let ws = w.shape();
+            if ws.len() != 2 {
+                return Err(Error::QuantError {
+                    reason: format!("weight[{}] must be 2D, got {:?}", i, ws),
+                });
+            }
+            if ws[1] != k {
+                return Err(Error::QuantError {
+                    reason: format!("weight[{}] K={} != activation K={}", i, ws[1], k),
+                });
+            }
+            if w.format() != format {
+                // Fall back to sequential if mixed formats
+                return weights
+                    .iter()
+                    .map(|w| self.quant_matmul(activation, w))
+                    .collect();
+            }
+        }
+
+        // Validate format is supported
+        match format {
+            QuantFormat::Q4_0 | QuantFormat::Q8_0 | QuantFormat::Q4K | QuantFormat::Q6K => {}
+            other => {
+                return Err(Error::UnsupportedQuantFormat {
+                    format: format!("{} (CPU quant_matmul_batch not implemented)", other),
+                });
+            }
+        }
+
+        let act_data = unsafe { activation.storage().as_host_slice::<f32>() };
+
+        // Build weight list and output buffers
+        let weight_list: Vec<(&[u8], usize)> = weights
+            .iter()
+            .map(|w| {
+                let bytes = unsafe { w.storage().as_host_slice::<u8>() };
+                let n = w.shape()[0];
+                (bytes, n)
+            })
+            .collect();
+
+        let mut output_bufs: Vec<Vec<f32>> = weights
+            .iter()
+            .map(|w| vec![0.0f32; m * w.shape()[0]])
+            .collect();
+
+        {
+            let mut output_slices: Vec<&mut [f32]> =
+                output_bufs.iter_mut().map(|v| v.as_mut_slice()).collect();
+            quant_matmul::quant_matmul_batch_f32(
+                act_data,
+                &weight_list,
+                &mut output_slices,
+                m,
+                k,
+                format,
+            );
+        }
+
+        // Build output tensors
+        let results: Vec<Tensor<CpuRuntime>> = weights
+            .iter()
+            .zip(output_bufs.into_iter())
+            .map(|(w, buf)| {
+                let n = w.shape()[0];
+                let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
+                out_shape.push(n);
+                Tensor::<CpuRuntime>::from_slice(&buf, &out_shape, activation.device())
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     fn quant_matmul(
         &self,
         activation: &Tensor<CpuRuntime>,

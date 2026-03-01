@@ -451,12 +451,21 @@ impl<R: Runtime<DType = DType>> LlamaMlp<R> {
             + CompareOps<R>
             + ConditionalOps<R>,
     {
-        // Batched gate+up: quantize activation once for both projections
+        // Try fused SwiGLU path: single kernel for silu(gate_proj(x)) * up_proj(x)
+        if let (MaybeQuantLinear::Quantized(gate_ql), MaybeQuantLinear::Quantized(up_ql)) =
+            (&self.gate_proj, &self.up_proj)
+        {
+            if gate_ql.bias().is_none() && up_ql.bias().is_none() {
+                let hidden_t = client.quant_swiglu(x.tensor(), gate_ql.weight(), up_ql.weight())?;
+                let hidden = Var::new(hidden_t, false);
+                return self.down_proj.forward(client, &hidden);
+            }
+        }
+
+        // Fallback: batched gate+up + separate silu_mul
         let gate_up =
             MaybeQuantLinear::forward_batch(&[&self.gate_proj, &self.up_proj], client, x)?;
         let (gate, up) = (&gate_up[0], &gate_up[1]);
-
-        // Fused SiLU×mul: silu(gate) * up in a single kernel (avoids intermediate allocation)
         let hidden = var_silu_mul(gate, up, client).map_err(Error::Numr)?;
 
         self.down_proj.forward(client, &hidden)

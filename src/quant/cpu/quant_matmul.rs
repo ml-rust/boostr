@@ -333,6 +333,19 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
             activation.device(),
         ))
     }
+
+    fn quant_swiglu(
+        &self,
+        activation: &Tensor<CpuRuntime>,
+        gate_weight: &QuantTensor<CpuRuntime>,
+        up_weight: &QuantTensor<CpuRuntime>,
+    ) -> Result<Tensor<CpuRuntime>> {
+        // CPU fallback: separate matmuls + fused silu_mul
+        let gate = self.quant_matmul(activation, gate_weight)?;
+        let up = self.quant_matmul(activation, up_weight)?;
+        use numr::ops::ActivationOps;
+        self.silu_mul(&gate, &up).map_err(Error::Numr)
+    }
 }
 
 #[cfg(test)]

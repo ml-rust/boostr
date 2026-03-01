@@ -468,4 +468,95 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 .collect()
         }
     }
+
+    fn quant_swiglu(
+        &self,
+        activation: &Tensor<CudaRuntime>,
+        gate_weight: &QuantTensor<CudaRuntime>,
+        up_weight: &QuantTensor<CudaRuntime>,
+    ) -> Result<Tensor<CudaRuntime>> {
+        let (m, k) = validate_input_cuda(activation)?;
+        let n = gate_weight.shape()[0];
+        let device_index = activation.device().id();
+
+        // Validate matching shapes and formats
+        if up_weight.shape()[0] != n || up_weight.shape()[1] != k {
+            return Err(Error::QuantError {
+                reason: format!(
+                    "gate_weight shape {:?} vs up_weight shape {:?}",
+                    gate_weight.shape(),
+                    up_weight.shape()
+                ),
+            });
+        }
+        if gate_weight.format() != up_weight.format() {
+            return Err(Error::QuantError {
+                reason: format!(
+                    "gate format {:?} != up format {:?}",
+                    gate_weight.format(),
+                    up_weight.format()
+                ),
+            });
+        }
+
+        let act_contig = activation.contiguous();
+        let a_shape = activation.shape();
+        let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
+        out_shape.push(n);
+        let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, activation.device());
+        let output_ptr = output.ptr();
+        let m_u32 = m as u32;
+        let k_u32 = k as u32;
+        let n_u32 = n as u32;
+
+        // Use fused kernel for GEMV path (decode + short prefill)
+        let use_fused = m <= 64
+            && matches!(gate_weight.format(), QuantFormat::Q4K | QuantFormat::Q6K)
+            && k % 32 == 0;
+
+        if use_fused {
+            let q8_buf = quantize_activation_q8_1(self, &act_contig, m, k)?;
+            let q8_ptr = q8_buf.ptr();
+            let gate_ptr = gate_weight.storage().ptr();
+            let up_ptr = up_weight.storage().ptr();
+
+            let kernel_name = match gate_weight.format() {
+                QuantFormat::Q4K => "fused_swiglu_q4k_q8_1_mwr",
+                QuantFormat::Q6K => "fused_swiglu_q6k_q8_1_mwr",
+                _ => unreachable!(),
+            };
+
+            let cfg = LaunchConfig {
+                grid_dim: (n_u32, m_u32, 1),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: 0,
+            };
+
+            let module =
+                kernels::get_or_load_module(self.context(), device_index, QUANT_GEMV_MODULE)?;
+            let func = kernels::get_kernel_function(&module, kernel_name)?;
+
+            unsafe {
+                let mut builder = self.stream().launch_builder(&func);
+                builder.arg(&q8_ptr);
+                builder.arg(&gate_ptr);
+                builder.arg(&up_ptr);
+                builder.arg(&output_ptr);
+                builder.arg(&m_u32);
+                builder.arg(&k_u32);
+                builder.arg(&n_u32);
+                builder.launch(cfg).map_err(|e| Error::QuantError {
+                    reason: format!("CUDA {} launch failed: {:?}", kernel_name, e),
+                })?;
+            }
+
+            Ok(output)
+        } else {
+            // Fallback: separate matmuls + fused silu_mul
+            let gate = self.quant_matmul(activation, gate_weight)?;
+            let up = self.quant_matmul(activation, up_weight)?;
+            use numr::ops::ActivationOps;
+            self.silu_mul(&gate, &up).map_err(Error::Numr)
+        }
+    }
 }

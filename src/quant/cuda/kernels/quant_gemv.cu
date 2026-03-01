@@ -777,3 +777,282 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q6_k_f32(
         acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
     if (lane_id == 0) output[m * N + col] = acc;
 }
+
+// ============================================================================
+// Fused SwiGLU GEMV: silu(x @ gate_w) * (x @ up_w) in one kernel
+//
+// Same MWR pattern as quant_gemv_q4_k_q8_1_mwr but computes TWO dot products
+// (gate and up) sharing Q8_1 activation reads, then applies silu*mul before
+// writing. Eliminates 2 kernel launches and 1 intermediate buffer vs separate.
+//
+// Grid: (N, M, 1), Block: (128, 1, 1) — 4 warps cooperating on K
+// ============================================================================
+
+static __device__ __forceinline__ float silu_f(float x) {
+    return x / (1.0f + expf(-x));
+}
+
+extern "C" __global__ __launch_bounds__(128, 1) void fused_swiglu_q4k_q8_1_mwr(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ gate_weight,
+    const unsigned char* __restrict__ up_weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    const int warp_id = threadIdx.x / WARP_SIZE;
+    const int lane_id = threadIdx.x % WARP_SIZE;
+    const int col = blockIdx.x;
+    const int m = blockIdx.y;
+    if (col >= N) return;
+
+    const int q4k_bpr = K / 256;
+    const int q8_bpr = K / 32;
+
+    const unsigned char* g_row = gate_weight + (unsigned long long)col * q4k_bpr * 144;
+    const unsigned char* u_row = up_weight   + (unsigned long long)col * q4k_bpr * 144;
+    const unsigned char* q8_row = q8_act + (unsigned long long)m * q8_bpr * 36;
+
+    const int chunk = lane_id / 8;
+    const int pos = (lane_id % 8) * 4;
+    const int j_lo = chunk * 2;
+    const int j_hi = chunk * 2 + 1;
+
+    float gate_acc = 0.0f;
+    float up_acc = 0.0f;
+
+    for (int b = warp_id; b < q4k_bpr; b += NWARPS_K) {
+        // Gate weight block
+        const unsigned char* gblk = g_row + b * 144;
+        float gd4 = __half2float(*(const __half*)gblk);
+        float gdmin4 = __half2float(*(const __half*)(gblk + 2));
+        const unsigned char* gsc = gblk + 4;
+        const unsigned char* gqs = gblk + 16;
+
+        // Up weight block
+        const unsigned char* ublk = u_row + b * 144;
+        float ud4 = __half2float(*(const __half*)ublk);
+        float udmin4 = __half2float(*(const __half*)(ublk + 2));
+        const unsigned char* usc = ublk + 4;
+        const unsigned char* uqs = ublk + 16;
+
+        // Shared Q8_1 activation (read ONCE for both projections)
+        int q8_idx_lo = b * 8 + j_lo;
+        int q8_idx_hi = b * 8 + j_hi;
+        float d8_lo = __half2float(*(const __half*)(q8_row + q8_idx_lo * 36));
+        float d8_hi = __half2float(*(const __half*)(q8_row + q8_idx_hi * 36));
+        int u_lo = *(const int*)(q8_row + q8_idx_lo * 36 + 4 + pos);
+        int u_hi = *(const int*)(q8_row + q8_idx_hi * 36 + 4 + pos);
+        int sumi_lo = dp4a(0x01010101, u_lo, 0);
+        int sumi_hi = dp4a(0x01010101, u_hi, 0);
+
+        // Gate projection dot product
+        {
+            const unsigned short* sc16 = (const unsigned short*)gsc;
+            unsigned char scale_lo, scale_hi, min_lo, min_hi;
+            const int j = j_lo / 2;
+            if (j < 2) {
+                unsigned short s0 = sc16[j] & 0x3F3F;
+                unsigned short s1 = sc16[j + 2] & 0x3F3F;
+                scale_lo = (unsigned char)(s0); scale_hi = (unsigned char)(s0 >> 8);
+                min_lo = (unsigned char)(s1); min_hi = (unsigned char)(s1 >> 8);
+            } else {
+                unsigned short s0 = ((sc16[j + 2]) & 0x0F0F) | ((sc16[j - 2] & 0xC0C0) >> 2);
+                unsigned short s1 = ((sc16[j + 2] >> 4) & 0x0F0F) | ((sc16[j] & 0xC0C0) >> 2);
+                scale_lo = (unsigned char)(s0); scale_hi = (unsigned char)(s0 >> 8);
+                min_lo = (unsigned char)(s1); min_hi = (unsigned char)(s1 >> 8);
+            }
+            int v = *(const int*)(gqs + lane_id * 4);
+            int dot_lo = dp4a(v & 0x0F0F0F0F, u_lo, 0);
+            int dot_hi = dp4a((v >> 4) & 0x0F0F0F0F, u_hi, 0);
+            gate_acc += gd4 * d8_lo * (float)(dot_lo * (int)scale_lo)
+                      + gd4 * d8_hi * (float)(dot_hi * (int)scale_hi)
+                      - gdmin4 * d8_lo * (float)(sumi_lo * (int)min_lo)
+                      - gdmin4 * d8_hi * (float)(sumi_hi * (int)min_hi);
+        }
+
+        // Up projection dot product
+        {
+            const unsigned short* sc16 = (const unsigned short*)usc;
+            unsigned char scale_lo, scale_hi, min_lo, min_hi;
+            const int j = j_lo / 2;
+            if (j < 2) {
+                unsigned short s0 = sc16[j] & 0x3F3F;
+                unsigned short s1 = sc16[j + 2] & 0x3F3F;
+                scale_lo = (unsigned char)(s0); scale_hi = (unsigned char)(s0 >> 8);
+                min_lo = (unsigned char)(s1); min_hi = (unsigned char)(s1 >> 8);
+            } else {
+                unsigned short s0 = ((sc16[j + 2]) & 0x0F0F) | ((sc16[j - 2] & 0xC0C0) >> 2);
+                unsigned short s1 = ((sc16[j + 2] >> 4) & 0x0F0F) | ((sc16[j] & 0xC0C0) >> 2);
+                scale_lo = (unsigned char)(s0); scale_hi = (unsigned char)(s0 >> 8);
+                min_lo = (unsigned char)(s1); min_hi = (unsigned char)(s1 >> 8);
+            }
+            int v = *(const int*)(uqs + lane_id * 4);
+            int dot_lo = dp4a(v & 0x0F0F0F0F, u_lo, 0);
+            int dot_hi = dp4a((v >> 4) & 0x0F0F0F0F, u_hi, 0);
+            up_acc += ud4 * d8_lo * (float)(dot_lo * (int)scale_lo)
+                    + ud4 * d8_hi * (float)(dot_hi * (int)scale_hi)
+                    - udmin4 * d8_lo * (float)(sumi_lo * (int)min_lo)
+                    - udmin4 * d8_hi * (float)(sumi_hi * (int)min_hi);
+        }
+    }
+
+    // Multi-warp reduction via shared memory (2 accumulators)
+    __shared__ float smem[2][NWARPS_K][WARP_SIZE];
+    smem[0][warp_id][lane_id] = gate_acc;
+    smem[1][warp_id][lane_id] = up_acc;
+    __syncthreads();
+
+    if (warp_id != 0) return;
+
+    float gate_sum = smem[0][0][lane_id];
+    float up_sum = smem[1][0][lane_id];
+    #pragma unroll
+    for (int w = 1; w < NWARPS_K; w++) {
+        gate_sum += smem[0][w][lane_id];
+        up_sum += smem[1][w][lane_id];
+    }
+
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+        gate_sum += __shfl_down_sync(0xFFFFFFFF, gate_sum, offset);
+        up_sum += __shfl_down_sync(0xFFFFFFFF, up_sum, offset);
+    }
+
+    if (lane_id == 0) output[m * N + col] = silu_f(gate_sum) * up_sum;
+}
+
+// ============================================================================
+// Fused SwiGLU GEMV for Q6_K weights
+// Same structure as Q4_K version but with Q6_K unpacking + __vsubss4
+// ============================================================================
+
+extern "C" __global__ __launch_bounds__(128, 1) void fused_swiglu_q6k_q8_1_mwr(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ gate_weight,
+    const unsigned char* __restrict__ up_weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    const int warp_id = threadIdx.x / WARP_SIZE;
+    const int lane_id = threadIdx.x % WARP_SIZE;
+    const int col = blockIdx.x;
+    const int m = blockIdx.y;
+    if (col >= N) return;
+
+    const int q6k_bpr = K / 256;
+    const int q8_bpr = K / 32;
+
+    const unsigned char* g_row = gate_weight + (unsigned long long)col * q6k_bpr * 210;
+    const unsigned char* u_row = up_weight   + (unsigned long long)col * q6k_bpr * 210;
+    const unsigned char* q8_row = q8_act + (unsigned long long)m * q8_bpr * 36;
+
+    const int block_in_pass = lane_id / 8;
+    const int pos = (lane_id % 8) * 4;
+    const int is = pos >= 16 ? 1 : 0;
+
+    float gate_acc = 0.0f;
+    float up_acc = 0.0f;
+
+    for (int b = warp_id; b < q6k_bpr; b += NWARPS_K) {
+        const unsigned char* gblk = g_row + b * 210;
+        const unsigned char* ublk = u_row + b * 210;
+
+        const unsigned char* g_ql = gblk;
+        const unsigned char* g_qh = gblk + 128;
+        const signed char* g_sc = (const signed char*)(gblk + 192);
+        __half g_d6_h; memcpy(&g_d6_h, gblk + 208, 2);
+        float g_d6 = __half2float(g_d6_h);
+
+        const unsigned char* u_ql = ublk;
+        const unsigned char* u_qh = ublk + 128;
+        const signed char* u_sc = (const signed char*)(ublk + 192);
+        __half u_d6_h; memcpy(&u_d6_h, ublk + 208, 2);
+        float u_d6 = __half2float(u_d6_h);
+
+        #pragma unroll
+        for (int half = 0; half < 2; half++) {
+            int ql_base = half * 64;
+            int qh_base = half * 32;
+            int sc_base = half * 8;
+            int q8_idx = b * 8 + half * 4 + block_in_pass;
+
+            // Shared Q8_1 activation
+            float d8 = __half2float(*(const __half*)(q8_row + q8_idx * 36));
+            int u = *(const int*)(q8_row + q8_idx * 36 + 4 + pos);
+
+            // Gate Q6_K unpack
+            {
+                int ql4_lo = load_int_ua(g_ql + ql_base + pos);
+                int ql4_hi = load_int_ua(g_ql + ql_base + 32 + pos);
+                int qh4    = load_int_ua(g_qh + qh_base + pos);
+                int q6_unsigned;
+                int scale;
+                switch (block_in_pass) {
+                    case 0:
+                        q6_unsigned = (ql4_lo & 0x0F0F0F0F) | ((qh4 & 0x03030303) << 4);
+                        scale = (int)g_sc[sc_base + is]; break;
+                    case 1:
+                        q6_unsigned = (ql4_hi & 0x0F0F0F0F) | ((qh4 & 0x0C0C0C0C) << 2);
+                        scale = (int)g_sc[sc_base + is + 2]; break;
+                    case 2:
+                        q6_unsigned = ((ql4_lo >> 4) & 0x0F0F0F0F) | (qh4 & 0x30303030);
+                        scale = (int)g_sc[sc_base + is + 4]; break;
+                    default:
+                        q6_unsigned = ((ql4_hi >> 4) & 0x0F0F0F0F) | ((qh4 & 0xC0C0C0C0) >> 2);
+                        scale = (int)g_sc[sc_base + is + 6]; break;
+                }
+                int q6_signed = __vsubss4(q6_unsigned, 0x20202020);
+                gate_acc += g_d6 * d8 * (float)(dp4a(q6_signed, u, 0) * scale);
+            }
+
+            // Up Q6_K unpack
+            {
+                int ql4_lo = load_int_ua(u_ql + ql_base + pos);
+                int ql4_hi = load_int_ua(u_ql + ql_base + 32 + pos);
+                int qh4    = load_int_ua(u_qh + qh_base + pos);
+                int q6_unsigned;
+                int scale;
+                switch (block_in_pass) {
+                    case 0:
+                        q6_unsigned = (ql4_lo & 0x0F0F0F0F) | ((qh4 & 0x03030303) << 4);
+                        scale = (int)u_sc[sc_base + is]; break;
+                    case 1:
+                        q6_unsigned = (ql4_hi & 0x0F0F0F0F) | ((qh4 & 0x0C0C0C0C) << 2);
+                        scale = (int)u_sc[sc_base + is + 2]; break;
+                    case 2:
+                        q6_unsigned = ((ql4_lo >> 4) & 0x0F0F0F0F) | (qh4 & 0x30303030);
+                        scale = (int)u_sc[sc_base + is + 4]; break;
+                    default:
+                        q6_unsigned = ((ql4_hi >> 4) & 0x0F0F0F0F) | ((qh4 & 0xC0C0C0C0) >> 2);
+                        scale = (int)u_sc[sc_base + is + 6]; break;
+                }
+                int q6_signed = __vsubss4(q6_unsigned, 0x20202020);
+                up_acc += u_d6 * d8 * (float)(dp4a(q6_signed, u, 0) * scale);
+            }
+        }
+    }
+
+    // Multi-warp reduction
+    __shared__ float smem[2][NWARPS_K][WARP_SIZE];
+    smem[0][warp_id][lane_id] = gate_acc;
+    smem[1][warp_id][lane_id] = up_acc;
+    __syncthreads();
+
+    if (warp_id != 0) return;
+
+    float gate_sum = smem[0][0][lane_id];
+    float up_sum = smem[1][0][lane_id];
+    #pragma unroll
+    for (int w = 1; w < NWARPS_K; w++) {
+        gate_sum += smem[0][w][lane_id];
+        up_sum += smem[1][w][lane_id];
+    }
+
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+        gate_sum += __shfl_down_sync(0xFFFFFFFF, gate_sum, offset);
+        up_sum += __shfl_down_sync(0xFFFFFFFF, up_sum, offset);
+    }
+
+    if (lane_id == 0) output[m * N + col] = silu_f(gate_sum) * up_sum;
+}

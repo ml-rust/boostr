@@ -107,4 +107,22 @@ pub trait QuantMatmulOps<R: Runtime> {
         zeros: &Tensor<R>,
         group_size: usize,
     ) -> Result<Tensor<R>>;
+
+    /// Fused SwiGLU: `silu(activation × gate_weight) * (activation × up_weight)`
+    ///
+    /// Computes both GEMV projections and applies SiLU gating in a single kernel,
+    /// reading the activation once instead of twice and avoiding the intermediate
+    /// global memory round-trip.
+    ///
+    /// # Contract
+    ///
+    /// - `activation` shape: `[..., M, K]`
+    /// - `gate_weight`, `up_weight` shape: `[N, K]` (same N and K, same format)
+    /// - Output shape: `[..., M, N]`
+    fn quant_swiglu(
+        &self,
+        activation: &Tensor<R>,
+        gate_weight: &QuantTensor<R>,
+        up_weight: &QuantTensor<R>,
+    ) -> Result<Tensor<R>>;
 }

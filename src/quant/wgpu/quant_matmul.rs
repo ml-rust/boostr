@@ -274,4 +274,17 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
 
         Ok(output)
     }
+
+    fn quant_swiglu(
+        &self,
+        activation: &Tensor<WgpuRuntime>,
+        gate_weight: &QuantTensor<WgpuRuntime>,
+        up_weight: &QuantTensor<WgpuRuntime>,
+    ) -> Result<Tensor<WgpuRuntime>> {
+        // WebGPU fallback: separate matmuls + fused silu_mul
+        let gate = self.quant_matmul(activation, gate_weight)?;
+        let up = self.quant_matmul(activation, up_weight)?;
+        use numr::ops::ActivationOps;
+        self.silu_mul(&gate, &up).map_err(Error::Numr)
+    }
 }

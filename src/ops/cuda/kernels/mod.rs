@@ -18,6 +18,7 @@ fn load_ptx(name: &str) -> Ptx {
 
 /// Module names
 pub const DECODE_ATTENTION_MODULE: &str = "decode_attention";
+pub const PAGED_DECODE_ATTENTION_MODULE: &str = "paged_decode_attention";
 pub const FLASH_V2_MODULE: &str = "flash_v2";
 pub const FLASH_V2_BWD_MODULE: &str = "flash_v2_bwd";
 pub const PAGED_ATTENTION_MODULE: &str = "paged_attention";
@@ -86,6 +87,18 @@ pub fn get_or_load_module(
 
     guard.insert(key, module.clone());
     Ok(module)
+}
+
+/// Pre-load a list of CUDA modules to avoid JIT compilation latency on first use.
+pub fn preload_modules(
+    context: &Arc<CudaContext>,
+    device_index: usize,
+    module_names: &[&'static str],
+) -> Result<()> {
+    for name in module_names {
+        get_or_load_module(context, device_index, name)?;
+    }
+    Ok(())
 }
 
 /// Get a kernel function from a loaded module.

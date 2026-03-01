@@ -54,6 +54,7 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
         v_blocks: &Tensor<CpuRuntime>,
         block_table: &Tensor<CpuRuntime>,
         num_heads: usize,
+        _num_kv_heads: usize,
         _seq_len_q: usize,
         seq_len_k: usize,
         head_dim: usize,
@@ -110,6 +111,7 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
         _v_blocks: &Tensor<CpuRuntime>,
         _block_table: &Tensor<CpuRuntime>,
         _num_heads: usize,
+        _num_kv_heads: usize,
         _seq_len_q: usize,
         _seq_len_k: usize,
         _head_dim: usize,
@@ -136,6 +138,7 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
         lse: &Tensor<CpuRuntime>,
         block_table: &Tensor<CpuRuntime>,
         num_heads: usize,
+        _num_kv_heads: usize,
         _seq_len_q: usize,
         seq_len_k: usize,
         head_dim: usize,
@@ -290,6 +293,7 @@ mod tests {
                 &v_blocks,
                 &block_table,
                 h,
+                1, // num_kv_heads
                 s,
                 s,
                 d,
@@ -316,7 +320,19 @@ mod tests {
         let block_table = Tensor::<CpuRuntime>::from_slice(&bt_data, &[b, num_blocks], &device);
 
         let (out_causal, _) = client
-            .paged_attention_fwd(&q, &k_blocks, &v_blocks, &block_table, h, s, s, d, bs, true)
+            .paged_attention_fwd(
+                &q,
+                &k_blocks,
+                &v_blocks,
+                &block_table,
+                h,
+                1,
+                s,
+                s,
+                d,
+                bs,
+                true,
+            )
             .unwrap();
         let (out_full, _) = client
             .paged_attention_fwd(
@@ -325,6 +341,7 @@ mod tests {
                 &v_blocks,
                 &block_table,
                 h,
+                1, // num_kv_heads
                 s,
                 s,
                 d,
@@ -364,6 +381,7 @@ mod tests {
                 &v_blocks,
                 &block_table,
                 h,
+                1, // num_kv_heads
                 s,
                 s,
                 d,
@@ -383,6 +401,7 @@ mod tests {
                 &lse,
                 &block_table,
                 h,
+                1, // num_kv_heads
                 s,
                 s,
                 d,

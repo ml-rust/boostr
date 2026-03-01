@@ -19,8 +19,8 @@ use numr::tensor::Tensor;
 /// # Layout contract
 ///
 /// - `q`: `[B, num_heads, S_q, head_dim]` — queries (contiguous)
-/// - `k_blocks`: `[num_blocks, block_size, head_dim]` — non-contiguous key blocks
-/// - `v_blocks`: `[num_blocks, block_size, head_dim]` — non-contiguous value blocks
+/// - `k_blocks`: `[num_blocks, block_size, num_kv_heads, head_dim]` — non-contiguous key blocks
+/// - `v_blocks`: `[num_blocks, block_size, num_kv_heads, head_dim]` — non-contiguous value blocks
 /// - `block_table`: `[B, max_num_blocks]` — i32, logical → physical block mapping
 /// - Output: `[B, num_heads, S_q, head_dim]`
 /// - Logsumexp: `[B, num_heads, S_q]` (F32, for backward pass)
@@ -40,6 +40,7 @@ pub trait PagedAttentionOps<R: Runtime> {
         v_blocks: &Tensor<R>,
         block_table: &Tensor<R>,
         num_heads: usize,
+        num_kv_heads: usize,
         seq_len_q: usize,
         seq_len_k: usize,
         head_dim: usize,
@@ -55,6 +56,7 @@ pub trait PagedAttentionOps<R: Runtime> {
         v_blocks: &Tensor<R>,
         block_table: &Tensor<R>,
         num_heads: usize,
+        num_kv_heads: usize,
         seq_len_q: usize,
         seq_len_k: usize,
         head_dim: usize,
@@ -83,6 +85,7 @@ pub trait PagedAttentionOps<R: Runtime> {
         lse: &Tensor<R>,
         block_table: &Tensor<R>,
         num_heads: usize,
+        num_kv_heads: usize,
         seq_len_q: usize,
         seq_len_k: usize,
         head_dim: usize,

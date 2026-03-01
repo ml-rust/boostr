@@ -62,6 +62,18 @@ pub fn get_or_load_module(
     Ok(module)
 }
 
+/// Pre-load a list of CUDA modules to avoid JIT compilation latency on first use.
+pub fn preload_modules(
+    context: &Arc<CudaContext>,
+    device_index: usize,
+    module_names: &[&'static str],
+) -> Result<()> {
+    for name in module_names {
+        get_or_load_module(context, device_index, name)?;
+    }
+    Ok(())
+}
+
 /// Get a kernel function from a loaded module.
 pub fn get_kernel_function(module: &Arc<CudaModule>, kernel_name: &str) -> Result<CudaFunction> {
     module

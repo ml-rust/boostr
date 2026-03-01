@@ -74,6 +74,64 @@ pub use numr::ops::{
     ActivationOps, BinaryOps, ConvOps, NormalizationOps, TypeConversionOps, UnaryOps,
 };
 
+/// Pre-load all CUDA PTX modules needed for LLaMA inference.
+///
+/// This front-loads all PTX→SASS JIT compilation during warmup,
+/// eliminating ~300ms latency on the first decode token.
+/// Call this once after creating the CudaClient, before any real inference.
+#[cfg(feature = "cuda")]
+pub fn preload_inference_modules(client: &CudaClient) -> Result<(), error::Error> {
+    use numr::runtime::Device;
+    use numr::runtime::cuda::kernels::kernel_names;
+
+    // numr core modules used by LLaMA inference
+    client
+        .preload_modules(&[
+            kernel_names::BINARY_MODULE,
+            kernel_names::UNARY_MODULE,
+            kernel_names::SCALAR_MODULE,
+            kernel_names::REDUCE_MODULE,
+            kernel_names::ACTIVATION_MODULE,
+            kernel_names::SOFTMAX_MODULE,
+            kernel_names::NORM_MODULE,
+            kernel_names::FUSED_ADD_NORM_MODULE,
+            kernel_names::CAST_MODULE,
+            kernel_names::UTILITY_MODULE,
+            kernel_names::MATMUL_MODULE,
+            kernel_names::GEMV_MODULE,
+        ])
+        .map_err(error::Error::Numr)?;
+
+    // boostr ops modules
+    ops::cuda::kernels::preload_modules(
+        client.context(),
+        client.device().id(),
+        &[
+            ops::cuda::kernels::ROPE_MODULE,
+            ops::cuda::kernels::DECODE_ATTENTION_MODULE,
+            ops::cuda::kernels::PAGED_DECODE_ATTENTION_MODULE,
+            ops::cuda::kernels::PAGED_ATTENTION_MODULE,
+            ops::cuda::kernels::FLASH_V2_MODULE,
+            ops::cuda::kernels::KV_CACHE_UPDATE_MODULE,
+            ops::cuda::kernels::RESHAPE_AND_CACHE_MODULE,
+        ],
+    )?;
+
+    // boostr quant modules (for GGUF inference)
+    quant::cuda::kernels::preload_modules(
+        client.context(),
+        client.device().id(),
+        &[
+            quant::cuda::kernels::DEQUANT_MODULE,
+            quant::cuda::kernels::QUANT_MATMUL_MODULE,
+            quant::cuda::kernels::QUANT_GEMV_MODULE,
+            quant::cuda::kernels::QUANT_ACT_MODULE,
+        ],
+    )?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod test_utils {
     use numr::runtime::cpu::{CpuClient, CpuDevice};

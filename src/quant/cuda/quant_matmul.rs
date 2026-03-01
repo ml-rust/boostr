@@ -240,14 +240,22 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 shared_mem_bytes: 0,
             };
 
-            // For Q4_K: use dp4a path with Q8_1 quantized activation
-            // (Q6_K dp4a is slower due to unaligned loads — 210-byte blocks)
+            // For Q4_K: use multi-row dp4a path with Q8_1 quantized activation
+            // Each warp computes 2 output neurons, sharing activation loads
             if weight.format() == QuantFormat::Q4K && k % 32 == 0 {
                 let q8_buf = quantize_activation_q8_1(self, &act_contig, m, k)?;
                 let q8_ptr = q8_buf.ptr();
                 let weight_ptr = weight.storage().ptr();
 
-                let kernel_name = "quant_gemv_q4_k_q8_1";
+                let rows_per_warp = 2u32;
+                let kernel_name = "quant_gemv_q4_k_q8_1_mr";
+                let grid_x_mr = (n as u32).div_ceil(warps_per_block * rows_per_warp);
+
+                let cfg_mr = LaunchConfig {
+                    grid_dim: (grid_x_mr, grid_y, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                };
 
                 let module =
                     kernels::get_or_load_module(self.context(), device_index, QUANT_GEMV_MODULE)?;
@@ -261,7 +269,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                     builder.arg(&m_u32);
                     builder.arg(&k_u32);
                     builder.arg(&n_u32);
-                    builder.launch(cfg).map_err(|e| Error::QuantError {
+                    builder.launch(cfg_mr).map_err(|e| Error::QuantError {
                         reason: format!("CUDA {} launch failed: {:?}", kernel_name, e),
                     })?;
                 }
@@ -382,7 +390,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         let use_dp4a = all_dp4a && m <= 4 && k % 32 == 0;
 
         if use_dp4a {
-            // Quantize activation to Q8_1 ONCE
+            // Batch path: quantize activation to Q8_1 ONCE, reuse for all weights
             let q8_buf = quantize_activation_q8_1(self, &act_contig, m, k)?;
             let q8_ptr = q8_buf.ptr();
             let device_index = activation.device().id();
@@ -392,9 +400,10 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             let m_u32 = m as u32;
             let k_u32 = k as u32;
 
+            let rows_per_warp = 2u32;
             let module =
                 kernels::get_or_load_module(self.context(), device_index, QUANT_GEMV_MODULE)?;
-            let func = kernels::get_kernel_function(&module, "quant_gemv_q4_k_q8_1")?;
+            let func = kernels::get_kernel_function(&module, "quant_gemv_q4_k_q8_1_mr")?;
 
             let mut results = Vec::with_capacity(weights.len());
             for w in weights {
@@ -417,7 +426,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 let output_ptr = output.ptr();
                 let weight_ptr = w.storage().ptr();
 
-                let grid_x = n_u32.div_ceil(warps_per_block);
+                let grid_x = n_u32.div_ceil(warps_per_block * rows_per_warp);
                 let cfg = LaunchConfig {
                     grid_dim: (grid_x, m_u32, 1),
                     block_dim: (block_size, 1, 1),
@@ -433,7 +442,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                     builder.arg(&k_u32);
                     builder.arg(&n_u32);
                     builder.launch(cfg).map_err(|e| Error::QuantError {
-                        reason: format!("CUDA dp4a batch launch failed: {:?}", e),
+                        reason: format!("CUDA dp4a mr batch launch failed: {:?}", e),
                     })?;
                 }
 

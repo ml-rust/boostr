@@ -269,6 +269,238 @@ extern "C" __global__ void quant_gemv_q4_k_q8_1(
 }
 
 // ============================================================================
+// Q4_K multi-row GEMV: each warp computes 2 output neurons, sharing activation
+// loads. Halves grid_x and doubles arithmetic intensity (compute/bandwidth).
+// ============================================================================
+
+#define ROWS_PER_WARP 2
+
+extern "C" __global__ void quant_gemv_q4_k_q8_1_mr(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    const unsigned int warp_id = threadIdx.x / WARP_SIZE;
+    const unsigned int lane_id = threadIdx.x % WARP_SIZE;
+    const unsigned int col_base = (blockIdx.x * WARPS_PER_BLOCK + warp_id) * ROWS_PER_WARP;
+    const unsigned int m = blockIdx.y;
+
+    const unsigned int q4k_blocks_per_row = K / 256;
+    const unsigned int q4k_row_bytes = q4k_blocks_per_row * 144;
+    const unsigned int q8_blocks_per_row = K / 32;
+
+    const unsigned char* q8_row = q8_act + m * q8_blocks_per_row * 36;
+
+    const int chunk = lane_id / 8;
+    const int pos = (lane_id % 8) * 4;
+    const int j_lo = chunk * 2;
+    const int j_hi = chunk * 2 + 1;
+
+    // Accumulators for each output row
+    float acc[ROWS_PER_WARP];
+    #pragma unroll
+    for (int r = 0; r < ROWS_PER_WARP; r++) acc[r] = 0.0f;
+
+    // Precompute weight row pointers (skip if out of bounds)
+    const unsigned char* w_rows[ROWS_PER_WARP];
+    #pragma unroll
+    for (int r = 0; r < ROWS_PER_WARP; r++) {
+        w_rows[r] = (col_base + r < N) ? weight + (col_base + r) * q4k_row_bytes : nullptr;
+    }
+
+    for (unsigned int b = 0; b < q4k_blocks_per_row; b++) {
+        // Load Q8_1 activation (SHARED across all rows)
+        int q8_idx_lo = b * 8 + j_lo;
+        int q8_idx_hi = b * 8 + j_hi;
+        float d8_lo = __half2float(*reinterpret_cast<const __half*>(q8_row + q8_idx_lo * 36));
+        float d8_hi = __half2float(*reinterpret_cast<const __half*>(q8_row + q8_idx_hi * 36));
+        int u_lo = *reinterpret_cast<const int*>(q8_row + q8_idx_lo * 36 + 4 + pos);
+        int u_hi = *reinterpret_cast<const int*>(q8_row + q8_idx_hi * 36 + 4 + pos);
+        int sumi_lo = dp4a(0x01010101, u_lo, 0);
+        int sumi_hi = dp4a(0x01010101, u_hi, 0);
+
+        // Process each output row with shared activation
+        #pragma unroll
+        for (int r = 0; r < ROWS_PER_WARP; r++) {
+            if (w_rows[r] == nullptr) continue;
+            const unsigned char* q4k_block = w_rows[r] + b * 144;
+            float d4 = __half2float(*reinterpret_cast<const __half*>(q4k_block));
+            float dmin4 = __half2float(*reinterpret_cast<const __half*>(q4k_block + 2));
+            const unsigned char* sc = q4k_block + 4;
+            const unsigned char* qs = q4k_block + 16;
+
+            unsigned char scales_lo, scales_hi, mvals_lo, mvals_hi;
+            if (j_lo < 4) {
+                scales_lo = sc[j_lo] & 0x3F;
+                mvals_lo = sc[j_lo + 4] & 0x3F;
+            } else {
+                scales_lo = (sc[j_lo + 4] & 0x0F) | ((sc[j_lo - 4] >> 6) << 4);
+                mvals_lo = (sc[j_lo + 4] >> 4) | ((sc[j_lo] >> 6) << 4);
+            }
+            if (j_hi < 4) {
+                scales_hi = sc[j_hi] & 0x3F;
+                mvals_hi = sc[j_hi + 4] & 0x3F;
+            } else {
+                scales_hi = (sc[j_hi + 4] & 0x0F) | ((sc[j_hi - 4] >> 6) << 4);
+                mvals_hi = (sc[j_hi + 4] >> 4) | ((sc[j_hi] >> 6) << 4);
+            }
+
+            int v = *reinterpret_cast<const int*>(qs + lane_id * 4);
+            int v_lo = v & 0x0F0F0F0F;
+            int v_hi = (v >> 4) & 0x0F0F0F0F;
+
+            int dot_lo = dp4a(v_lo, u_lo, 0);
+            int dot_hi = dp4a(v_hi, u_hi, 0);
+
+            acc[r] += d4 * d8_lo * (float)(dot_lo * (int)scales_lo)
+                    + d4 * d8_hi * (float)(dot_hi * (int)scales_hi)
+                    - dmin4 * d8_lo * (float)(sumi_lo * (int)mvals_lo)
+                    - dmin4 * d8_hi * (float)(sumi_hi * (int)mvals_hi);
+        }
+    }
+
+    // Warp-level reduction for each row
+    #pragma unroll
+    for (int r = 0; r < ROWS_PER_WARP; r++) {
+        #pragma unroll
+        for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+            acc[r] += __shfl_down_sync(0xFFFFFFFF, acc[r], offset);
+        if (lane_id == 0 && col_base + r < N)
+            output[m * N + col_base + r] = acc[r];
+    }
+}
+
+// ============================================================================
+// Q4_K GEMV with fused F32→Q8_1 quantization + dp4a
+//
+// Same algorithm as quant_gemv_q4_k_q8_1 but quantizes the f32 activation
+// in-register instead of reading from a pre-quantized Q8_1 buffer.
+// Eliminates the separate quantize_f32_q8_1 kernel launch.
+//
+// Each 8-lane sub-warp (one chunk) quantizes 32 f32 values into Q8_1 using
+// __shfl_xor_sync with offsets 1,2,4 (stays within the 8-lane boundary).
+// ============================================================================
+
+// Quantize 4 f32 values to packed int8x4, using sub-warp amax
+// amax_inv = 127/amax (pre-computed), returns packed int32 of 4 signed bytes
+static __device__ __forceinline__ int quantize_4f32(
+    float f0, float f1, float f2, float f3, float amax_inv
+) {
+    int q0 = (int)roundf(f0 * amax_inv);
+    int q1 = (int)roundf(f1 * amax_inv);
+    int q2 = (int)roundf(f2 * amax_inv);
+    int q3 = (int)roundf(f3 * amax_inv);
+    q0 = min(max(q0, -128), 127);
+    q1 = min(max(q1, -128), 127);
+    q2 = min(max(q2, -128), 127);
+    q3 = min(max(q3, -128), 127);
+    return (q0 & 0xFF) | ((q1 & 0xFF) << 8) | ((q2 & 0xFF) << 16) | ((q3 & 0xFF) << 24);
+}
+
+// Sub-warp (8 lanes) reduction for max absolute value of 4 floats per lane
+static __device__ __forceinline__ float subwarp_amax4(float f0, float f1, float f2, float f3) {
+    float a = fmaxf(fmaxf(fabsf(f0), fabsf(f1)), fmaxf(fabsf(f2), fabsf(f3)));
+    // Reduce across 8 lanes within the chunk (offsets 4,2,1 stay within 8-lane boundary)
+    a = fmaxf(a, __shfl_xor_sync(0xFFFFFFFF, a, 4));
+    a = fmaxf(a, __shfl_xor_sync(0xFFFFFFFF, a, 2));
+    a = fmaxf(a, __shfl_xor_sync(0xFFFFFFFF, a, 1));
+    return a;
+}
+
+extern "C" __global__ void quant_gemv_q4_k_fused(
+    const float* __restrict__ activation,  // [M, K] f32
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    const unsigned int warp_id = threadIdx.x / WARP_SIZE;
+    const unsigned int lane_id = threadIdx.x % WARP_SIZE;
+    const unsigned int col = blockIdx.x * WARPS_PER_BLOCK + warp_id;
+    const unsigned int m = blockIdx.y;
+    if (col >= N) return;
+
+    const unsigned int q4k_blocks_per_row = K / 256;
+    const unsigned int q4k_row_bytes = q4k_blocks_per_row * 144;
+
+    const unsigned char* w_row = weight + col * q4k_row_bytes;
+    const float* act_row = activation + m * K;
+
+    const int chunk = lane_id / 8;
+    const int pos = (lane_id % 8) * 4;
+
+    float acc = 0.0f;
+
+    for (unsigned int b = 0; b < q4k_blocks_per_row; b++) {
+        const unsigned char* q4k_block = w_row + b * 144;
+        float d4 = __half2float(*reinterpret_cast<const __half*>(q4k_block));
+        float dmin4 = __half2float(*reinterpret_cast<const __half*>(q4k_block + 2));
+        const unsigned char* sc = q4k_block + 4;
+        const unsigned char* qs = q4k_block + 16;
+
+        unsigned char scales[8], mvals[8];
+        for (int i = 0; i < 4; i++) {
+            scales[i] = sc[i] & 0x3F;
+            mvals[i] = sc[i + 4] & 0x3F;
+        }
+        for (int i = 4; i < 8; i++) {
+            scales[i] = (sc[i + 4] & 0x0F) | ((sc[i - 4] >> 6) << 4);
+            mvals[i] = (sc[i + 4] >> 4) | ((sc[i] >> 6) << 4);
+        }
+
+        int v = *reinterpret_cast<const int*>(qs + lane_id * 4);
+        int v_lo = v & 0x0F0F0F0F;
+        int v_hi = (v >> 4) & 0x0F0F0F0F;
+
+        int j_lo = chunk * 2;
+        int j_hi = chunk * 2 + 1;
+
+        // Fused quantize: load f32 activation, quantize in-register
+        unsigned int act_base = b * 256;
+
+        // Q8_1 block j_lo: 32 elements at act_base + j_lo*32
+        float f_lo0 = act_row[act_base + j_lo * 32 + pos];
+        float f_lo1 = act_row[act_base + j_lo * 32 + pos + 1];
+        float f_lo2 = act_row[act_base + j_lo * 32 + pos + 2];
+        float f_lo3 = act_row[act_base + j_lo * 32 + pos + 3];
+
+        float amax_lo = subwarp_amax4(f_lo0, f_lo1, f_lo2, f_lo3);
+        float d8_lo = amax_lo / 127.0f;
+        float id_lo = (amax_lo != 0.0f) ? 127.0f / amax_lo : 0.0f;
+        int u_lo = quantize_4f32(f_lo0, f_lo1, f_lo2, f_lo3, id_lo);
+
+        // Q8_1 block j_hi: 32 elements at act_base + j_hi*32
+        float f_hi0 = act_row[act_base + j_hi * 32 + pos];
+        float f_hi1 = act_row[act_base + j_hi * 32 + pos + 1];
+        float f_hi2 = act_row[act_base + j_hi * 32 + pos + 2];
+        float f_hi3 = act_row[act_base + j_hi * 32 + pos + 3];
+
+        float amax_hi = subwarp_amax4(f_hi0, f_hi1, f_hi2, f_hi3);
+        float d8_hi = amax_hi / 127.0f;
+        float id_hi = (amax_hi != 0.0f) ? 127.0f / amax_hi : 0.0f;
+        int u_hi = quantize_4f32(f_hi0, f_hi1, f_hi2, f_hi3, id_hi);
+
+        // dp4a + accumulate (same as non-fused kernel)
+        int dot_lo = dp4a(v_lo, u_lo, 0);
+        int dot_hi = dp4a(v_hi, u_hi, 0);
+
+        int sumi_lo = dp4a(0x01010101, u_lo, 0);
+        int sumi_hi = dp4a(0x01010101, u_hi, 0);
+
+        acc += d4 * d8_lo * (float)(dot_lo * (int)scales[j_lo])
+             + d4 * d8_hi * (float)(dot_hi * (int)scales[j_hi])
+             - dmin4 * d8_lo * (float)(sumi_lo * (int)mvals[j_lo])
+             - dmin4 * d8_hi * (float)(sumi_hi * (int)mvals[j_hi]);
+    }
+
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+
+    if (lane_id == 0) output[m * N + col] = acc;
+}
+
+// ============================================================================
 // Q6_K GEMV with dp4a (Q8_1 activation)
 //
 // Each warp handles 1 output column. 8 warps per block.

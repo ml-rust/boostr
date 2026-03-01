@@ -256,6 +256,20 @@ impl FlashAttentionOps<CpuRuntime> for CpuClient {
         causal: bool,
         window_size: usize,
     ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+        // Fast path: fused decode attention for S_q=1 (single token generation)
+        // Avoids all intermediate tensor allocations and GQA expansion
+        let seq_len_q = q.shape()[2];
+        if seq_len_q == 1 && !causal && window_size == 0 && q.dtype() == DType::F32 {
+            return super::decode_attention::fused_decode_attention(
+                q,
+                k,
+                v,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            );
+        }
+
         let _ = head_dim; // validated by shape
         standard_attention_fwd(self, q, k, v, causal, num_heads, num_kv_heads, window_size)
     }

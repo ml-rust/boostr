@@ -1,3 +1,4 @@
+pub mod decode_attention;
 pub mod flash;
 pub mod fused_qkv;
 pub mod mla;

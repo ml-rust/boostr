@@ -40,7 +40,7 @@ static __device__ __forceinline__ int dp4a(int a, int b, int c) {
 #define WARPS_PER_BLOCK 8
 #define BLOCK_SIZE (WARP_SIZE * WARPS_PER_BLOCK)
 
-extern "C" __global__ void quant_gemv_q4_0_f32(
+extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q4_0_f32(
     const float* __restrict__ activation,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
@@ -80,7 +80,7 @@ extern "C" __global__ void quant_gemv_q4_0_f32(
 // Q8_0 GEMV (F32 activation)
 // ============================================================================
 
-extern "C" __global__ void quant_gemv_q8_0_f32(
+extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q8_0_f32(
     const float* __restrict__ activation,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
@@ -115,7 +115,7 @@ extern "C" __global__ void quant_gemv_q8_0_f32(
 // Q4_K GEMV (F32 activation) — fallback for non-dp4a GPUs
 // ============================================================================
 
-extern "C" __global__ void quant_gemv_q4_k_f32(
+extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q4_k_f32(
     const float* __restrict__ activation,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
@@ -182,7 +182,7 @@ extern "C" __global__ void quant_gemv_q4_k_f32(
 // Q8_1 block layout: [d (half, 2B), s (half, 2B), qs[32] (32B)] = 36 bytes
 // ============================================================================
 
-extern "C" __global__ void quant_gemv_q4_k_q8_1(
+extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q4_k_q8_1(
     const unsigned char* __restrict__ q8_act,  // Q8_1 quantized activation
     const unsigned char* __restrict__ weight,   // Q4_K weights [N, ...]
     float* __restrict__ output,                 // [M, N]
@@ -275,7 +275,7 @@ extern "C" __global__ void quant_gemv_q4_k_q8_1(
 
 #define ROWS_PER_WARP 2
 
-extern "C" __global__ void quant_gemv_q4_k_q8_1_mr(
+extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q4_k_q8_1_mr(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
@@ -408,7 +408,7 @@ static __device__ __forceinline__ float subwarp_amax4(float f0, float f1, float 
     return a;
 }
 
-extern "C" __global__ void quant_gemv_q4_k_fused(
+extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q4_k_fused(
     const float* __restrict__ activation,  // [M, K] f32
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
@@ -516,7 +516,7 @@ extern "C" __global__ void quant_gemv_q4_k_fused(
 // We compute dot(q6, q8) - 32*sum(q8) to handle the -32 offset.
 // ============================================================================
 
-extern "C" __global__ void quant_gemv_q6_k_q8_1(
+extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q6_k_q8_1(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
@@ -607,10 +607,112 @@ extern "C" __global__ void quant_gemv_q6_k_q8_1(
 }
 
 // ============================================================================
+// Q6_K multi-row GEMV: each warp computes 2 output neurons, sharing activation
+// loads. Same pattern as quant_gemv_q4_k_q8_1_mr but for Q6_K weights.
+// ============================================================================
+
+extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q6_k_q8_1_mr(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    const unsigned int warp_id = threadIdx.x / WARP_SIZE;
+    const unsigned int lane_id = threadIdx.x % WARP_SIZE;
+    const unsigned int col_base = (blockIdx.x * WARPS_PER_BLOCK + warp_id) * ROWS_PER_WARP;
+    const unsigned int m = blockIdx.y;
+
+    const unsigned int q6k_blocks_per_row = K / 256;
+    const unsigned int q6k_row_bytes = q6k_blocks_per_row * 210;
+    const unsigned int q8_blocks_per_row = K / 32;
+
+    const unsigned char* q8_row = q8_act + m * q8_blocks_per_row * 36;
+
+    const int block_in_pass = lane_id / 8;
+    const int pos = (lane_id % 8) * 4;
+    const int is = pos >= 16 ? 1 : 0;
+
+    float acc[ROWS_PER_WARP];
+    #pragma unroll
+    for (int r = 0; r < ROWS_PER_WARP; r++) acc[r] = 0.0f;
+
+    const unsigned char* w_rows[ROWS_PER_WARP];
+    #pragma unroll
+    for (int r = 0; r < ROWS_PER_WARP; r++) {
+        w_rows[r] = (col_base + r < N) ? weight + (col_base + r) * q6k_row_bytes : nullptr;
+    }
+
+    for (unsigned int b = 0; b < q6k_blocks_per_row; b++) {
+        #pragma unroll
+        for (int half = 0; half < 2; half++) {
+            int q8_idx = b * 8 + half * 4 + block_in_pass;
+
+            // Load Q8_1 activation (SHARED across all rows)
+            float d8 = __half2float(*(const __half*)(q8_row + q8_idx * 36));
+            int u = *(const int*)(q8_row + q8_idx * 36 + 4 + pos);
+            int sumi = dp4a(0x01010101, u, 0);
+
+            int ql_base = half * 64;
+            int qh_base = half * 32;
+            int sc_base = half * 8;
+
+            #pragma unroll
+            for (int r = 0; r < ROWS_PER_WARP; r++) {
+                if (w_rows[r] == nullptr) continue;
+                const unsigned char* blk = w_rows[r] + b * 210;
+                const unsigned char* ql = blk;
+                const unsigned char* qh = blk + 128;
+                const signed char* sc = (const signed char*)(blk + 192);
+                __half d6_h;
+                memcpy(&d6_h, blk + 208, 2);
+                float d6 = __half2float(d6_h);
+
+                int ql4_lo = load_int_ua(ql + ql_base + pos);
+                int ql4_hi = load_int_ua(ql + ql_base + 32 + pos);
+                int qh4    = load_int_ua(qh + qh_base + pos);
+
+                int q6;
+                int scale;
+                switch (block_in_pass) {
+                    case 0:
+                        q6 = (ql4_lo & 0x0F0F0F0F) | ((qh4 & 0x03030303) << 4);
+                        scale = (int)sc[sc_base + is];
+                        break;
+                    case 1:
+                        q6 = (ql4_hi & 0x0F0F0F0F) | ((qh4 & 0x0C0C0C0C) << 2);
+                        scale = (int)sc[sc_base + is + 2];
+                        break;
+                    case 2:
+                        q6 = ((ql4_lo >> 4) & 0x0F0F0F0F) | (qh4 & 0x30303030);
+                        scale = (int)sc[sc_base + is + 4];
+                        break;
+                    default:
+                        q6 = ((ql4_hi >> 4) & 0x0F0F0F0F) | ((qh4 & 0xC0C0C0C0) >> 2);
+                        scale = (int)sc[sc_base + is + 6];
+                        break;
+                }
+
+                int dot = dp4a(q6, u, 0);
+                acc[r] += d6 * d8 * (float)scale * ((float)dot - 32.0f * (float)sumi);
+            }
+        }
+    }
+
+    #pragma unroll
+    for (int r = 0; r < ROWS_PER_WARP; r++) {
+        #pragma unroll
+        for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+            acc[r] += __shfl_down_sync(0xFFFFFFFF, acc[r], offset);
+        if (lane_id == 0 && col_base + r < N)
+            output[m * N + col_base + r] = acc[r];
+    }
+}
+
+// ============================================================================
 // Q6_K GEMV (F32 activation) — fallback for non-dp4a GPUs
 // ============================================================================
 
-extern "C" __global__ void quant_gemv_q6_k_f32(
+extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q6_k_f32(
     const float* __restrict__ activation,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,

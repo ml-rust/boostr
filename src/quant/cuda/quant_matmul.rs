@@ -240,15 +240,19 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 shared_mem_bytes: 0,
             };
 
-            // For Q4_K: use multi-row dp4a path with Q8_1 quantized activation
-            // Each warp computes 2 output neurons, sharing activation loads
-            if weight.format() == QuantFormat::Q4K && k % 32 == 0 {
+            // For Q4_K and Q6_K: use dp4a path with Q8_1 quantized activation
+            // Q4_K uses multi-row (2 output cols/warp); Q6_K uses single-row
+            // (Q6_K's 210-byte blocks cause unaligned loads that hurt multi-row perf)
+            if matches!(weight.format(), QuantFormat::Q4K | QuantFormat::Q6K) && k % 32 == 0 {
                 let q8_buf = quantize_activation_q8_1(self, &act_contig, m, k)?;
                 let q8_ptr = q8_buf.ptr();
                 let weight_ptr = weight.storage().ptr();
 
-                let rows_per_warp = 2u32;
-                let kernel_name = "quant_gemv_q4_k_q8_1_mr";
+                let (kernel_name, rows_per_warp) = match weight.format() {
+                    QuantFormat::Q4K => ("quant_gemv_q4_k_q8_1_mr", 2u32),
+                    QuantFormat::Q6K => ("quant_gemv_q6_k_q8_1", 1u32),
+                    _ => unreachable!(),
+                };
                 let grid_x_mr = (n as u32).div_ceil(warps_per_block * rows_per_warp);
 
                 let cfg_mr = LaunchConfig {
@@ -385,8 +389,10 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         let m = total_elements / k;
         let act_contig = activation.contiguous();
 
-        // Check if all weights support dp4a (Q4_K only — Q6_K dp4a is slower due to unaligned loads)
-        let all_dp4a = weights.iter().all(|w| w.format() == QuantFormat::Q4K);
+        // Check if all weights support dp4a (Q4_K and Q6_K)
+        let all_dp4a = weights
+            .iter()
+            .all(|w| matches!(w.format(), QuantFormat::Q4K | QuantFormat::Q6K));
         let use_dp4a = all_dp4a && m <= 4 && k % 32 == 0;
 
         if use_dp4a {
@@ -400,10 +406,10 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             let m_u32 = m as u32;
             let k_u32 = k as u32;
 
-            let rows_per_warp = 2u32;
             let module =
                 kernels::get_or_load_module(self.context(), device_index, QUANT_GEMV_MODULE)?;
-            let func = kernels::get_kernel_function(&module, "quant_gemv_q4_k_q8_1_mr")?;
+            let func_q4k = kernels::get_kernel_function(&module, "quant_gemv_q4_k_q8_1_mr")?;
+            let func_q6k = kernels::get_kernel_function(&module, "quant_gemv_q6_k_q8_1")?;
 
             let mut results = Vec::with_capacity(weights.len());
             for w in weights {
@@ -418,6 +424,12 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 }
                 let n = w_shape[0];
                 let n_u32 = n as u32;
+
+                let (func, rows_per_warp) = match w.format() {
+                    QuantFormat::Q4K => (&func_q4k, 2u32),
+                    QuantFormat::Q6K => (&func_q6k, 1u32),
+                    _ => unreachable!(),
+                };
 
                 let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
                 out_shape.push(n);
@@ -434,7 +446,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 };
 
                 unsafe {
-                    let mut builder = self.stream().launch_builder(&func);
+                    let mut builder = self.stream().launch_builder(func);
                     builder.arg(&q8_ptr);
                     builder.arg(&weight_ptr);
                     builder.arg(&output_ptr);

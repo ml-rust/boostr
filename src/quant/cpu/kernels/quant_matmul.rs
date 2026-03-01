@@ -97,13 +97,49 @@ pub fn quant_matmul_f32(
     // Q4_K and Q6_K have dedicated AVX2 fused dequant+dot kernels
     let use_fused = matches!(format, QuantFormat::Q4K | QuantFormat::Q6K);
 
+    // Check if we can use Q8_K integer maddubs path (4x throughput vs f32 FMA)
+    let use_q8k = use_fused && k % 256 == 0;
+
+    // Pre-quantize activation rows to Q8_K (one per M row) if using integer path
+    let q8k_block_bytes = super::simd::quantize_act_q8k::Q8K_BLOCK_BYTES;
+    let q8k_blocks_per_row = k / 256;
+    let q8k_row_size = q8k_blocks_per_row * q8k_block_bytes;
+    let act_q8k: Vec<u8> = if use_q8k {
+        let mut buf = vec![0u8; m * q8k_row_size];
+        for i in 0..m {
+            let act_row = &act[i * k..(i + 1) * k];
+            let q8k_row = &mut buf[i * q8k_row_size..(i + 1) * q8k_row_size];
+            super::simd::quantize_act_q8k::quantize_f32_to_q8k(act_row, q8k_row);
+        }
+        buf
+    } else {
+        Vec::new()
+    };
+    let act_q8k_ptr = act_q8k.as_ptr() as usize;
+
     col_ranges.par_iter().for_each(|&(j_start, j_end)| {
         let out = output_ptr as *mut f32;
 
-        if use_fused {
-            // Multi-row GEMV: process 2 weight rows per iteration when M=1
-            // This reads the activation vector once and computes 2 dot products,
-            // keeping the activation in L1 cache (16KB for K=4096).
+        if use_q8k {
+            // Integer maddubs path: Q8_K activation × Q4_K/Q6_K weight
+            for i in 0..m {
+                let q8k_row = unsafe {
+                    std::slice::from_raw_parts(
+                        (act_q8k_ptr as *const u8).add(i * q8k_row_size),
+                        q8k_row_size,
+                    )
+                };
+
+                for j in j_start..j_end {
+                    let row_data = &weight_bytes[j * row_bytes..(j + 1) * row_bytes];
+                    let val = fused_dot_q8k_dispatch(q8k_row, row_data, k, format);
+                    unsafe {
+                        *out.add(i * n + j) = val;
+                    }
+                }
+            }
+        } else if use_fused {
+            // f32 FMA fused path (fallback for non-256-aligned K)
             let cols = j_end - j_start;
             let pairs = cols / 2;
             let remainder = cols % 2;
@@ -166,6 +202,15 @@ fn fused_dot_dispatch(act_row: &[f32], row_data: &[u8], k: usize, format: QuantF
     }
 }
 
+/// Q8_K integer dot product dispatch (maddubs path)
+fn fused_dot_q8k_dispatch(act_q8k: &[u8], row_data: &[u8], k: usize, format: QuantFormat) -> f32 {
+    match format {
+        QuantFormat::Q4K => super::simd::fused_q4k_q8k_dot::fused_dot_q4k_q8k(act_q8k, row_data, k),
+        QuantFormat::Q6K => super::simd::fused_q6k_q8k_dot::fused_dot_q6k_q8k(act_q8k, row_data, k),
+        _ => unreachable!(),
+    }
+}
+
 /// Batched quantized matmul: activation \[M, K\] × multiple weight\[Ni, K\]^T → multiple output\[M, Ni\]
 ///
 /// Processes all weight matrices together so the activation stays in L2 cache.
@@ -185,6 +230,24 @@ pub fn quant_matmul_batch_f32(
     let row_bytes = blocks_per_row * block_bytes;
 
     let use_fused = matches!(format, QuantFormat::Q4K | QuantFormat::Q6K);
+    let use_q8k = use_fused && k % 256 == 0;
+
+    // Pre-quantize activation rows to Q8_K if using integer path
+    let q8k_block_bytes = super::simd::quantize_act_q8k::Q8K_BLOCK_BYTES;
+    let q8k_blocks_per_row = k / 256;
+    let q8k_row_size = q8k_blocks_per_row * q8k_block_bytes;
+    let act_q8k: Vec<u8> = if use_q8k {
+        let mut buf = vec![0u8; m * q8k_row_size];
+        for i in 0..m {
+            let act_row = &act[i * k..(i + 1) * k];
+            let q8k_row = &mut buf[i * q8k_row_size..(i + 1) * q8k_row_size];
+            super::simd::quantize_act_q8k::quantize_f32_to_q8k(act_row, q8k_row);
+        }
+        buf
+    } else {
+        Vec::new()
+    };
+    let act_q8k_ptr = act_q8k.as_ptr() as usize;
 
     // For each activation row, compute dot products against all weight matrices.
     // This keeps the activation in L2 cache while streaming through weight data.
@@ -222,8 +285,6 @@ pub fn quant_matmul_batch_f32(
     col_ranges.par_iter().for_each(|&(j_start, j_end)| {
         // For each activation row
         for i in 0..m {
-            let act_row = &act[i * k..(i + 1) * k];
-
             // Process all weight matrices for this activation row and column range
             for (w_idx, &(w_ptr, n)) in weight_ptrs.iter().enumerate() {
                 let (out_ptr, _) = output_ptrs[w_idx];
@@ -235,7 +296,24 @@ pub fn quant_matmul_batch_f32(
                     continue;
                 }
 
-                if use_fused {
+                if use_q8k {
+                    let q8k_row = unsafe {
+                        std::slice::from_raw_parts(
+                            (act_q8k_ptr as *const u8).add(i * q8k_row_size),
+                            q8k_row_size,
+                        )
+                    };
+                    for j in j_start..j_end_clamped {
+                        let row_data = unsafe {
+                            std::slice::from_raw_parts(w_base.add(j * row_bytes), row_bytes)
+                        };
+                        let val = fused_dot_q8k_dispatch(q8k_row, row_data, k, format);
+                        unsafe {
+                            *out.add(i * n + j) = val;
+                        }
+                    }
+                } else if use_fused {
+                    let act_row = &act[i * k..(i + 1) * k];
                     for j in j_start..j_end_clamped {
                         let row_data = unsafe {
                             std::slice::from_raw_parts(w_base.add(j * row_bytes), row_bytes)
@@ -246,6 +324,7 @@ pub fn quant_matmul_batch_f32(
                         }
                     }
                 } else {
+                    let act_row = &act[i * k..(i + 1) * k];
                     // Scalar path with dequant buffer
                     let mut dequant_row = vec![0.0f32; k];
                     for j in j_start..j_end_clamped {

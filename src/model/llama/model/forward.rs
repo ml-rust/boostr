@@ -3,9 +3,11 @@
 use super::blocks::{LlamaBlock, build_block_from_config, build_block_from_varbuilder};
 use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;
+use crate::inference::kv_cache::LayeredPagedKvCache;
 use crate::model::config::ModelConfig;
 use crate::model::traits::{Model, ModelClient};
 use crate::nn::{Embedding, Linear, MaybeQuantLinear, RmsNorm, RoPE};
+use crate::ops::traits::{KvCacheOps, PagedAttentionOps};
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{
@@ -276,6 +278,71 @@ impl<R: Runtime<DType = DType>> Llama<R> {
         if profile {
             eprintln!("[profile] total forward: {:?}", t.elapsed());
         }
+
+        Ok(logits.tensor().clone())
+    }
+
+    /// Forward pass for inference with paged KV cache.
+    ///
+    /// Uses PagedAttention with block table indirection instead of contiguous KV cache.
+    ///
+    /// # Arguments
+    /// * `client` - Runtime client
+    /// * `input_ids` - Token IDs `[B, S]`
+    /// * `paged_cache` - Layered paged KV cache
+    /// * `slot_mapping` - Slot mapping tensor `[B*S]` (I32)
+    /// * `block_table` - Block table tensor `[B, max_num_blocks]` (I32)
+    /// * `seq_len_k` - Total KV sequence length (including new tokens)
+    /// * `position` - RoPE position offset
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_with_paged_kv_cache<C>(
+        &self,
+        client: &C,
+        input_ids: &Tensor<R>,
+        paged_cache: &LayeredPagedKvCache<R>,
+        slot_mapping: &Tensor<R>,
+        block_table: &Tensor<R>,
+        seq_len_k: usize,
+        position: usize,
+    ) -> Result<Tensor<R>>
+    where
+        C: ModelClient<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + KvCacheOps<R>
+            + PagedAttentionOps<R>,
+    {
+        // Embed tokens: [B, S] -> [B, S, hidden]
+        let mut hidden = self.embed_tokens.forward(client, input_ids)?;
+
+        // Transformer blocks with paged KV cache
+        for (i, layer) in self.layers.iter().enumerate() {
+            hidden = layer.forward_with_paged_kv_cache(
+                client,
+                &hidden,
+                &self.rope,
+                paged_cache,
+                i,
+                slot_mapping,
+                block_table,
+                seq_len_k,
+                position,
+            )?;
+        }
+
+        // Final norm
+        hidden = self.norm.forward(client, &hidden)?;
+
+        // LM head: [B, S, hidden] -> [B, S, vocab]
+        let logits = self.lm_head.forward(client, &hidden)?;
 
         Ok(logits.tensor().clone())
     }

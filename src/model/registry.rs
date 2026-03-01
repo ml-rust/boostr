@@ -4,6 +4,7 @@
 //! with a unified inference API.
 
 use crate::error::{Error, Result};
+use crate::inference::kv_cache::LayeredPagedKvCache;
 use crate::inference::{LayeredKvCache, LayeredSsmState};
 use crate::model::config::UniversalConfig;
 use crate::model::mamba::mamba2::Mamba2Config;
@@ -98,6 +99,42 @@ where
             LoadedModel::Hybrid(_) => Err(Error::ModelError {
                 reason: "Hybrid model does not support forward_with_kv_cache — use forward_hybrid() instead"
                     .into(),
+            }),
+        }
+    }
+
+    /// Forward pass with paged KV cache for transformer inference
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_with_paged_kv_cache(
+        &self,
+        input_ids: &Tensor<R>,
+        paged_cache: &LayeredPagedKvCache<R>,
+        slot_mapping: &Tensor<R>,
+        block_table: &Tensor<R>,
+        seq_len_k: usize,
+        position: usize,
+    ) -> Result<Tensor<R>>
+    where
+        R::Client: ModelClient<R>,
+    {
+        let device = input_ids.device();
+        let client = R::default_client(device);
+        match self {
+            LoadedModel::Llama(m) => m.forward_with_paged_kv_cache(
+                &client,
+                input_ids,
+                paged_cache,
+                slot_mapping,
+                block_table,
+                seq_len_k,
+                position,
+            ),
+            LoadedModel::Mamba2(_) => Err(Error::ModelError {
+                reason: "Mamba2 does not use KV cache — use forward_with_ssm_state() instead"
+                    .into(),
+            }),
+            LoadedModel::Hybrid(_) => Err(Error::ModelError {
+                reason: "Hybrid model does not yet support paged KV cache".into(),
             }),
         }
     }

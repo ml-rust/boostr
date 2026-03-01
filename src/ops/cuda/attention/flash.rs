@@ -278,6 +278,73 @@ pub(crate) fn set_smem_attribute(
     Ok(())
 }
 
+/// Decode attention for S_q=1: lightweight vec kernel, no tiling.
+/// One block per (batch, head), head_dim threads. Online softmax in registers.
+fn decode_attention_fwd(
+    client: &CudaClient,
+    q: &Tensor<CudaRuntime>,
+    k: &Tensor<CudaRuntime>,
+    v: &Tensor<CudaRuntime>,
+    p: &AttentionParams,
+) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
+    let device = q.device();
+    let device_index = device.id();
+
+    let kernel_name = match p.head_dim {
+        64 => "decode_attention_64_fp32",
+        128 => "decode_attention_128_fp32",
+        _ => unreachable!("decode attention only supports head_dim 64/128"),
+    };
+
+    let module = kernels::get_or_load_module(
+        client.context(),
+        device_index,
+        kernels::DECODE_ATTENTION_MODULE,
+    )?;
+    let func = kernels::get_kernel_function(&module, kernel_name)?;
+
+    let output = Tensor::<CudaRuntime>::empty(
+        &[p.batch_size, p.num_heads, 1, p.head_dim],
+        q.dtype(),
+        device,
+    );
+    // LSE not computed by decode kernel — return dummy (only needed for backward)
+    let lse = Tensor::<CudaRuntime>::empty(&[p.batch_size, p.num_heads, 1], DType::F32, device);
+
+    let q_ptr = q.ptr();
+    let k_ptr = k.ptr();
+    let v_ptr = v.ptr();
+    let o_ptr = output.ptr();
+    let nh_i32 = p.num_heads as i32;
+    let nkv_i32 = p.num_kv_heads as i32;
+    let sk_i32 = p.seq_len_k as i32;
+    let scale = (p.head_dim as f32).sqrt().recip();
+
+    let num_blocks = p.batch_size * p.num_heads;
+    let cfg = LaunchConfig {
+        grid_dim: (num_blocks as u32, 1, 1),
+        block_dim: (p.head_dim as u32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    unsafe {
+        let mut builder = client.stream().launch_builder(&func);
+        builder.arg(&q_ptr);
+        builder.arg(&k_ptr);
+        builder.arg(&v_ptr);
+        builder.arg(&o_ptr);
+        builder.arg(&nh_i32);
+        builder.arg(&nkv_i32);
+        builder.arg(&sk_i32);
+        builder.arg(&scale);
+        builder.launch(cfg).map_err(|e| Error::KernelError {
+            reason: format!("decode_attention kernel launch failed: {:?}", e),
+        })?;
+    }
+
+    Ok((output, lse))
+}
+
 impl FlashAttentionOps<CudaRuntime> for CudaClient {
     fn flash_attention_fwd(
         &self,
@@ -291,6 +358,15 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         window_size: usize,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
         let p = validate_qkv(q, k, v, num_heads, num_kv_heads, head_dim)?;
+
+        // Decode path: S_q=1, use lightweight vec kernel (no tiling overhead)
+        if p.seq_len_q == 1
+            && q.dtype() == DType::F32
+            && (head_dim == 64 || head_dim == 128)
+            && window_size == 0
+        {
+            return decode_attention_fwd(self, q, k, v, &p);
+        }
 
         // Try Flash v3 on Hopper (SM 90+) for supported configs
         if num_kv_heads == num_heads && window_size == 0 && flash_v3::is_hopper(self, q.device()) {

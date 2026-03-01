@@ -144,6 +144,12 @@ fn compile_cuda_kernels() {
             "sm_75",
             true,
         ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/attention"),
+            "decode_attention.cu",
+            "sm_75",
+            true,
+        ),
         // Flash v3 — sm_90 (Hopper warp specialization, optional)
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),

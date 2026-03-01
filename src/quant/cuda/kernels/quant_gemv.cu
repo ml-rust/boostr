@@ -269,106 +269,113 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q4_k_q8_1(
 }
 
 // ============================================================================
-// Q4_K multi-row GEMV: each warp computes 2 output neurons, sharing activation
-// loads. Halves grid_x and doubles arithmetic intensity (compute/bandwidth).
+// Q4_K GEMV with multi-warp K-reduction (MWR)
+//
+// Architecture: 4 warps cooperate on the K-dimension for 1 output column.
+// Each warp handles every 4th Q4_K block, then partial sums are reduced
+// via shared memory. This 4x improvement in K-parallelism dramatically
+// improves memory bandwidth utilization per output element.
+//
+// Grid: (N, M, 1) — one block per output column
+// Block: (128, 1, 1) — 4 warps of 32 threads
 // ============================================================================
 
-#define ROWS_PER_WARP 2
+#define NWARPS_K 4
 
-extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q4_k_q8_1_mr(
+extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q4_k_q8_1_mwr(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
     unsigned int M, unsigned int K, unsigned int N
 ) {
-    const unsigned int warp_id = threadIdx.x / WARP_SIZE;
-    const unsigned int lane_id = threadIdx.x % WARP_SIZE;
-    const unsigned int col_base = (blockIdx.x * WARPS_PER_BLOCK + warp_id) * ROWS_PER_WARP;
-    const unsigned int m = blockIdx.y;
+    const int warp_id = threadIdx.x / WARP_SIZE;
+    const int lane_id = threadIdx.x % WARP_SIZE;
+    const int col = blockIdx.x;
+    const int m = blockIdx.y;
+    if (col >= N) return;
 
-    const unsigned int q4k_blocks_per_row = K / 256;
-    const unsigned int q4k_row_bytes = q4k_blocks_per_row * 144;
-    const unsigned int q8_blocks_per_row = K / 32;
+    const int q4k_bpr = K / 256;
+    const int q8_bpr = K / 32;
 
-    const unsigned char* q8_row = q8_act + m * q8_blocks_per_row * 36;
+    const unsigned char* w_row = weight + (unsigned long long)col * q4k_bpr * 144;
+    const unsigned char* q8_row = q8_act + (unsigned long long)m * q8_bpr * 36;
 
     const int chunk = lane_id / 8;
     const int pos = (lane_id % 8) * 4;
     const int j_lo = chunk * 2;
     const int j_hi = chunk * 2 + 1;
 
-    // Accumulators for each output row
-    float acc[ROWS_PER_WARP];
-    #pragma unroll
-    for (int r = 0; r < ROWS_PER_WARP; r++) acc[r] = 0.0f;
+    float acc = 0.0f;
 
-    // Precompute weight row pointers (skip if out of bounds)
-    const unsigned char* w_rows[ROWS_PER_WARP];
-    #pragma unroll
-    for (int r = 0; r < ROWS_PER_WARP; r++) {
-        w_rows[r] = (col_base + r < N) ? weight + (col_base + r) * q4k_row_bytes : nullptr;
-    }
+    // Each warp strides over K blocks with step NWARPS_K
+    for (int b = warp_id; b < q4k_bpr; b += NWARPS_K) {
+        const unsigned char* q4k = w_row + b * 144;
+        float d4 = __half2float(*(const __half*)q4k);
+        float dmin4 = __half2float(*(const __half*)(q4k + 2));
+        const unsigned char* sc = q4k + 4;
+        const unsigned char* qs = q4k + 16;
 
-    for (unsigned int b = 0; b < q4k_blocks_per_row; b++) {
-        // Load Q8_1 activation (SHARED across all rows)
+        // Selective scale unpacking via 16-bit loads
+        const unsigned short* sc16 = (const unsigned short*)sc;
+        unsigned char scale_lo, scale_hi, min_lo, min_hi;
+        const int j = j_lo / 2;
+        if (j < 2) {
+            unsigned short s0 = sc16[j] & 0x3F3F;
+            unsigned short s1 = sc16[j + 2] & 0x3F3F;
+            scale_lo = (unsigned char)(s0);
+            scale_hi = (unsigned char)(s0 >> 8);
+            min_lo = (unsigned char)(s1);
+            min_hi = (unsigned char)(s1 >> 8);
+        } else {
+            unsigned short s0 = ((sc16[j + 2]) & 0x0F0F) | ((sc16[j - 2] & 0xC0C0) >> 2);
+            unsigned short s1 = ((sc16[j + 2] >> 4) & 0x0F0F) | ((sc16[j] & 0xC0C0) >> 2);
+            scale_lo = (unsigned char)(s0);
+            scale_hi = (unsigned char)(s0 >> 8);
+            min_lo = (unsigned char)(s1);
+            min_hi = (unsigned char)(s1 >> 8);
+        }
+
+        int v = *(const int*)(qs + lane_id * 4);
+        int v_lo = v & 0x0F0F0F0F;
+        int v_hi = (v >> 4) & 0x0F0F0F0F;
+
         int q8_idx_lo = b * 8 + j_lo;
         int q8_idx_hi = b * 8 + j_hi;
-        float d8_lo = __half2float(*reinterpret_cast<const __half*>(q8_row + q8_idx_lo * 36));
-        float d8_hi = __half2float(*reinterpret_cast<const __half*>(q8_row + q8_idx_hi * 36));
-        int u_lo = *reinterpret_cast<const int*>(q8_row + q8_idx_lo * 36 + 4 + pos);
-        int u_hi = *reinterpret_cast<const int*>(q8_row + q8_idx_hi * 36 + 4 + pos);
+        float d8_lo = __half2float(*(const __half*)(q8_row + q8_idx_lo * 36));
+        float d8_hi = __half2float(*(const __half*)(q8_row + q8_idx_hi * 36));
+        int u_lo = *(const int*)(q8_row + q8_idx_lo * 36 + 4 + pos);
+        int u_hi = *(const int*)(q8_row + q8_idx_hi * 36 + 4 + pos);
+
+        int dot_lo = dp4a(v_lo, u_lo, 0);
+        int dot_hi = dp4a(v_hi, u_hi, 0);
         int sumi_lo = dp4a(0x01010101, u_lo, 0);
         int sumi_hi = dp4a(0x01010101, u_hi, 0);
 
-        // Process each output row with shared activation
-        #pragma unroll
-        for (int r = 0; r < ROWS_PER_WARP; r++) {
-            if (w_rows[r] == nullptr) continue;
-            const unsigned char* q4k_block = w_rows[r] + b * 144;
-            float d4 = __half2float(*reinterpret_cast<const __half*>(q4k_block));
-            float dmin4 = __half2float(*reinterpret_cast<const __half*>(q4k_block + 2));
-            const unsigned char* sc = q4k_block + 4;
-            const unsigned char* qs = q4k_block + 16;
-
-            unsigned char scales_lo, scales_hi, mvals_lo, mvals_hi;
-            if (j_lo < 4) {
-                scales_lo = sc[j_lo] & 0x3F;
-                mvals_lo = sc[j_lo + 4] & 0x3F;
-            } else {
-                scales_lo = (sc[j_lo + 4] & 0x0F) | ((sc[j_lo - 4] >> 6) << 4);
-                mvals_lo = (sc[j_lo + 4] >> 4) | ((sc[j_lo] >> 6) << 4);
-            }
-            if (j_hi < 4) {
-                scales_hi = sc[j_hi] & 0x3F;
-                mvals_hi = sc[j_hi + 4] & 0x3F;
-            } else {
-                scales_hi = (sc[j_hi + 4] & 0x0F) | ((sc[j_hi - 4] >> 6) << 4);
-                mvals_hi = (sc[j_hi + 4] >> 4) | ((sc[j_hi] >> 6) << 4);
-            }
-
-            int v = *reinterpret_cast<const int*>(qs + lane_id * 4);
-            int v_lo = v & 0x0F0F0F0F;
-            int v_hi = (v >> 4) & 0x0F0F0F0F;
-
-            int dot_lo = dp4a(v_lo, u_lo, 0);
-            int dot_hi = dp4a(v_hi, u_hi, 0);
-
-            acc[r] += d4 * d8_lo * (float)(dot_lo * (int)scales_lo)
-                    + d4 * d8_hi * (float)(dot_hi * (int)scales_hi)
-                    - dmin4 * d8_lo * (float)(sumi_lo * (int)mvals_lo)
-                    - dmin4 * d8_hi * (float)(sumi_hi * (int)mvals_hi);
-        }
+        acc += d4 * d8_lo * (float)(dot_lo * (int)scale_lo)
+             + d4 * d8_hi * (float)(dot_hi * (int)scale_hi)
+             - dmin4 * d8_lo * (float)(sumi_lo * (int)min_lo)
+             - dmin4 * d8_hi * (float)(sumi_hi * (int)min_hi);
     }
 
-    // Warp-level reduction for each row
+    // Multi-warp reduction via shared memory
+    __shared__ float smem[NWARPS_K][WARP_SIZE];
+    smem[warp_id][lane_id] = acc;
+    __syncthreads();
+
+    if (warp_id != 0) return;
+
+    // Warp 0 accumulates all partial sums
+    float sum = smem[0][lane_id];
     #pragma unroll
-    for (int r = 0; r < ROWS_PER_WARP; r++) {
-        #pragma unroll
-        for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-            acc[r] += __shfl_down_sync(0xFFFFFFFF, acc[r], offset);
-        if (lane_id == 0 && col_base + r < N)
-            output[m * N + col_base + r] = acc[r];
-    }
+    for (int w = 1; w < NWARPS_K; w++)
+        sum += smem[w][lane_id];
+
+    // Final warp-level reduction
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+        sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
+
+    if (lane_id == 0) output[m * N + col] = sum;
 }
 
 // ============================================================================
@@ -607,105 +614,108 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q6_k_q8_1(
 }
 
 // ============================================================================
-// Q6_K multi-row GEMV: each warp computes 2 output neurons, sharing activation
-// loads. Same pattern as quant_gemv_q4_k_q8_1_mr but for Q6_K weights.
+// Q6_K GEMV with multi-warp K-reduction (MWR)
+//
+// Same multi-warp pattern as Q4_K MWR. Key Q6_K-specific optimization:
+// __vsubss4 to handle the -32 zero-point offset in integer domain,
+// eliminating the separate sumi dp4a and float correction.
+//
+// Grid: (N, M, 1), Block: (128, 1, 1) — 4 warps cooperating on K
 // ============================================================================
 
-extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q6_k_q8_1_mr(
+extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q6_k_q8_1_mwr(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
     unsigned int M, unsigned int K, unsigned int N
 ) {
-    const unsigned int warp_id = threadIdx.x / WARP_SIZE;
-    const unsigned int lane_id = threadIdx.x % WARP_SIZE;
-    const unsigned int col_base = (blockIdx.x * WARPS_PER_BLOCK + warp_id) * ROWS_PER_WARP;
-    const unsigned int m = blockIdx.y;
+    const int warp_id = threadIdx.x / WARP_SIZE;
+    const int lane_id = threadIdx.x % WARP_SIZE;
+    const int col = blockIdx.x;
+    const int m = blockIdx.y;
+    if (col >= N) return;
 
-    const unsigned int q6k_blocks_per_row = K / 256;
-    const unsigned int q6k_row_bytes = q6k_blocks_per_row * 210;
-    const unsigned int q8_blocks_per_row = K / 32;
+    const int q6k_bpr = K / 256;
+    const int q8_bpr = K / 32;
 
-    const unsigned char* q8_row = q8_act + m * q8_blocks_per_row * 36;
+    const unsigned char* w_row = weight + (unsigned long long)col * q6k_bpr * 210;
+    const unsigned char* q8_row = q8_act + (unsigned long long)m * q8_bpr * 36;
 
     const int block_in_pass = lane_id / 8;
     const int pos = (lane_id % 8) * 4;
     const int is = pos >= 16 ? 1 : 0;
 
-    float acc[ROWS_PER_WARP];
-    #pragma unroll
-    for (int r = 0; r < ROWS_PER_WARP; r++) acc[r] = 0.0f;
+    float acc = 0.0f;
 
-    const unsigned char* w_rows[ROWS_PER_WARP];
-    #pragma unroll
-    for (int r = 0; r < ROWS_PER_WARP; r++) {
-        w_rows[r] = (col_base + r < N) ? weight + (col_base + r) * q6k_row_bytes : nullptr;
-    }
+    for (int b = warp_id; b < q6k_bpr; b += NWARPS_K) {
+        const unsigned char* blk = w_row + b * 210;
+        const unsigned char* ql = blk;
+        const unsigned char* qh = blk + 128;
+        const signed char* sc = (const signed char*)(blk + 192);
+        __half d6_h;
+        memcpy(&d6_h, blk + 208, 2);
+        float d6 = __half2float(d6_h);
 
-    for (unsigned int b = 0; b < q6k_blocks_per_row; b++) {
         #pragma unroll
         for (int half = 0; half < 2; half++) {
-            int q8_idx = b * 8 + half * 4 + block_in_pass;
-
-            // Load Q8_1 activation (SHARED across all rows)
-            float d8 = __half2float(*(const __half*)(q8_row + q8_idx * 36));
-            int u = *(const int*)(q8_row + q8_idx * 36 + 4 + pos);
-            int sumi = dp4a(0x01010101, u, 0);
-
             int ql_base = half * 64;
             int qh_base = half * 32;
             int sc_base = half * 8;
+            int q8_idx = b * 8 + half * 4 + block_in_pass;
 
-            #pragma unroll
-            for (int r = 0; r < ROWS_PER_WARP; r++) {
-                if (w_rows[r] == nullptr) continue;
-                const unsigned char* blk = w_rows[r] + b * 210;
-                const unsigned char* ql = blk;
-                const unsigned char* qh = blk + 128;
-                const signed char* sc = (const signed char*)(blk + 192);
-                __half d6_h;
-                memcpy(&d6_h, blk + 208, 2);
-                float d6 = __half2float(d6_h);
+            float d8 = __half2float(*(const __half*)(q8_row + q8_idx * 36));
+            int u = *(const int*)(q8_row + q8_idx * 36 + 4 + pos);
 
-                int ql4_lo = load_int_ua(ql + ql_base + pos);
-                int ql4_hi = load_int_ua(ql + ql_base + 32 + pos);
-                int qh4    = load_int_ua(qh + qh_base + pos);
+            int ql4_lo = load_int_ua(ql + ql_base + pos);
+            int ql4_hi = load_int_ua(ql + ql_base + 32 + pos);
+            int qh4    = load_int_ua(qh + qh_base + pos);
 
-                int q6;
-                int scale;
-                switch (block_in_pass) {
-                    case 0:
-                        q6 = (ql4_lo & 0x0F0F0F0F) | ((qh4 & 0x03030303) << 4);
-                        scale = (int)sc[sc_base + is];
-                        break;
-                    case 1:
-                        q6 = (ql4_hi & 0x0F0F0F0F) | ((qh4 & 0x0C0C0C0C) << 2);
-                        scale = (int)sc[sc_base + is + 2];
-                        break;
-                    case 2:
-                        q6 = ((ql4_lo >> 4) & 0x0F0F0F0F) | (qh4 & 0x30303030);
-                        scale = (int)sc[sc_base + is + 4];
-                        break;
-                    default:
-                        q6 = ((ql4_hi >> 4) & 0x0F0F0F0F) | ((qh4 & 0xC0C0C0C0) >> 2);
-                        scale = (int)sc[sc_base + is + 6];
-                        break;
-                }
-
-                int dot = dp4a(q6, u, 0);
-                acc[r] += d6 * d8 * (float)scale * ((float)dot - 32.0f * (float)sumi);
+            int q6_unsigned;
+            int scale;
+            switch (block_in_pass) {
+                case 0:
+                    q6_unsigned = (ql4_lo & 0x0F0F0F0F) | ((qh4 & 0x03030303) << 4);
+                    scale = (int)sc[sc_base + is];
+                    break;
+                case 1:
+                    q6_unsigned = (ql4_hi & 0x0F0F0F0F) | ((qh4 & 0x0C0C0C0C) << 2);
+                    scale = (int)sc[sc_base + is + 2];
+                    break;
+                case 2:
+                    q6_unsigned = ((ql4_lo >> 4) & 0x0F0F0F0F) | (qh4 & 0x30303030);
+                    scale = (int)sc[sc_base + is + 4];
+                    break;
+                default:
+                    q6_unsigned = ((ql4_hi >> 4) & 0x0F0F0F0F) | ((qh4 & 0xC0C0C0C0) >> 2);
+                    scale = (int)sc[sc_base + is + 6];
+                    break;
             }
+
+            // __vsubss4: 4x signed int8 saturated subtract
+            int q6_signed = __vsubss4(q6_unsigned, 0x20202020);
+            int dot = dp4a(q6_signed, u, 0);
+
+            acc += d6 * d8 * (float)(dot * scale);
         }
     }
 
+    // Multi-warp reduction via shared memory
+    __shared__ float smem[NWARPS_K][WARP_SIZE];
+    smem[warp_id][lane_id] = acc;
+    __syncthreads();
+
+    if (warp_id != 0) return;
+
+    float sum = smem[0][lane_id];
     #pragma unroll
-    for (int r = 0; r < ROWS_PER_WARP; r++) {
-        #pragma unroll
-        for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-            acc[r] += __shfl_down_sync(0xFFFFFFFF, acc[r], offset);
-        if (lane_id == 0 && col_base + r < N)
-            output[m * N + col_base + r] = acc[r];
-    }
+    for (int w = 1; w < NWARPS_K; w++)
+        sum += smem[w][lane_id];
+
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+        sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
+
+    if (lane_id == 0) output[m * N + col] = sum;
 }
 
 // ============================================================================

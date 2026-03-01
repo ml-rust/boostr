@@ -227,8 +227,10 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         let k_u32 = k as u32;
         let n_u32 = n as u32;
 
-        // Use GEMV for small M (decode), matmul for large M (prefill)
-        if m <= 4 {
+        // Use GEMV for small-to-moderate M (decode + short prefill)
+        // MWR kernels handle any M via grid_y; they outperform the naive
+        // 16x16 tiled matmul for M up to ~64
+        if m <= 64 {
             let warps_per_block = 8u32;
             let block_size = 256u32;
             let grid_x = (n as u32).div_ceil(warps_per_block);
@@ -240,24 +242,23 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 shared_mem_bytes: 0,
             };
 
-            // For Q4_K and Q6_K: use dp4a path with Q8_1 quantized activation
-            // Q4_K uses multi-row (2 output cols/warp); Q6_K uses single-row
-            // (Q6_K's 210-byte blocks cause unaligned loads that hurt multi-row perf)
+            // For Q4_K and Q6_K: use dp4a path with multi-warp K-reduction (MWR)
+            // 4 warps cooperate on K-dimension per output column, reduce via shared memory
             if matches!(weight.format(), QuantFormat::Q4K | QuantFormat::Q6K) && k % 32 == 0 {
                 let q8_buf = quantize_activation_q8_1(self, &act_contig, m, k)?;
                 let q8_ptr = q8_buf.ptr();
                 let weight_ptr = weight.storage().ptr();
 
-                let (kernel_name, rows_per_warp) = match weight.format() {
-                    QuantFormat::Q4K => ("quant_gemv_q4_k_q8_1_mr", 2u32),
-                    QuantFormat::Q6K => ("quant_gemv_q6_k_q8_1", 1u32),
+                let kernel_name = match weight.format() {
+                    QuantFormat::Q4K => "quant_gemv_q4_k_q8_1_mwr",
+                    QuantFormat::Q6K => "quant_gemv_q6_k_q8_1_mwr",
                     _ => unreachable!(),
                 };
-                let grid_x_mr = (n as u32).div_ceil(warps_per_block * rows_per_warp);
 
-                let cfg_mr = LaunchConfig {
-                    grid_dim: (grid_x_mr, grid_y, 1),
-                    block_dim: (block_size, 1, 1),
+                // MWR: one output column per block, 128 threads (4 warps)
+                let cfg_mwr = LaunchConfig {
+                    grid_dim: (n_u32, grid_y, 1),
+                    block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
                 };
 
@@ -273,7 +274,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                     builder.arg(&m_u32);
                     builder.arg(&k_u32);
                     builder.arg(&n_u32);
-                    builder.launch(cfg_mr).map_err(|e| Error::QuantError {
+                    builder.launch(cfg_mwr).map_err(|e| Error::QuantError {
                         reason: format!("CUDA {} launch failed: {:?}", kernel_name, e),
                     })?;
                 }
@@ -401,15 +402,13 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             let q8_ptr = q8_buf.ptr();
             let device_index = activation.device().id();
 
-            let warps_per_block = 8u32;
-            let block_size = 256u32;
             let m_u32 = m as u32;
             let k_u32 = k as u32;
 
             let module =
                 kernels::get_or_load_module(self.context(), device_index, QUANT_GEMV_MODULE)?;
-            let func_q4k = kernels::get_kernel_function(&module, "quant_gemv_q4_k_q8_1_mr")?;
-            let func_q6k = kernels::get_kernel_function(&module, "quant_gemv_q6_k_q8_1")?;
+            let func_q4k = kernels::get_kernel_function(&module, "quant_gemv_q4_k_q8_1_mwr")?;
+            let func_q6k = kernels::get_kernel_function(&module, "quant_gemv_q6_k_q8_1_mwr")?;
 
             let mut results = Vec::with_capacity(weights.len());
             for w in weights {
@@ -425,9 +424,9 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 let n = w_shape[0];
                 let n_u32 = n as u32;
 
-                let (func, rows_per_warp) = match w.format() {
-                    QuantFormat::Q4K => (&func_q4k, 2u32),
-                    QuantFormat::Q6K => (&func_q6k, 1u32),
+                let func = match w.format() {
+                    QuantFormat::Q4K => &func_q4k,
+                    QuantFormat::Q6K => &func_q6k,
                     _ => unreachable!(),
                 };
 
@@ -438,10 +437,10 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 let output_ptr = output.ptr();
                 let weight_ptr = w.storage().ptr();
 
-                let grid_x = n_u32.div_ceil(warps_per_block * rows_per_warp);
+                // MWR: one output column per block, 128 threads (4 warps)
                 let cfg = LaunchConfig {
-                    grid_dim: (grid_x, m_u32, 1),
-                    block_dim: (block_size, 1, 1),
+                    grid_dim: (n_u32, m_u32, 1),
+                    block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
                 };
 

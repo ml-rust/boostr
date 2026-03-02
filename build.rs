@@ -152,6 +152,12 @@ fn compile_cuda_kernels() {
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
+            "kv_insert.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/attention"),
             "paged_decode_attention.cu",
             "sm_75",
             true,

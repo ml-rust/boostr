@@ -8,89 +8,80 @@
 //
 // Layout: Q [B, num_heads, 1, D], K/V [B, num_kv_heads, seq_k, D]
 // Output: O [B, num_heads, 1, D]
+//
+// Two variants per head_dim:
+//   - Non-graph: seq_len_k passed as plain int kernel arg (zero overhead)
+//   - Graph-mode (_graph suffix): seq_len_k_ptr is a device pointer to i32,
+//     kv_seq_stride is the memory stride (capacity >= seq_len_k)
 
 // ============================================================================
-// head_dim = 128, 128 threads (4 warps), F32
+// Shared device function for the attention loop
 // ============================================================================
 
-extern "C" __global__ void decode_attention_128_fp32(
-    const float* __restrict__ Q,    // [B, num_heads, 1, 128]
-    const float* __restrict__ K,    // [B, num_kv_heads, seq_k, 128]
-    const float* __restrict__ V,    // [B, num_kv_heads, seq_k, 128]
-    float* __restrict__ O,          // [B, num_heads, 1, 128]
-    int num_heads, int num_kv_heads,
-    int seq_len_k, float scale
-) {
-    // One block per (batch, head) pair
-    const int bh = blockIdx.x;
-    const int b = bh / num_heads;
-    const int h = bh % num_heads;
-    const int kv_h = h / (num_heads / num_kv_heads);
-
-    const int tid = threadIdx.x;  // 0..127 = head_dim element
-    const int warp_id = tid / 32;
-    const int lane_id = tid % 32;
-
-    // Load Q[b, h, 0, :] into register (one element per thread), pre-scaled
-    const float* q_row = Q + (size_t)(b * num_heads + h) * 128;
-    const float q_val = q_row[tid] * scale;
-
-    // K/V base for this KV head
-    const float* k_base = K + (size_t)(b * num_kv_heads + kv_h) * seq_len_k * 128;
-    const float* v_base = V + (size_t)(b * num_kv_heads + kv_h) * seq_len_k * 128;
-
-    // Online softmax state (per-thread V accumulator, shared softmax scalars)
-    float acc = 0.0f;  // V accumulator for this thread's head_dim element
-    float m = -1e30f;   // running max of Q·K
-    float l = 0.0f;     // running sum of exp(Q·K - m)
-
-    // Shared memory for cross-warp Q·K reduction (4 warps)
-    __shared__ float smem_qk[4];
-
-    for (int pos = 0; pos < seq_len_k; pos++) {
-        // Q·K dot product: each thread has one element
-        float qk = q_val * k_base[pos * 128 + tid];
-
-        // Warp-level reduction (within 32 lanes)
-        #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1)
-            qk += __shfl_down_sync(0xFFFFFFFF, qk, offset);
-
-        // Cross-warp reduction via shared memory
-        if (lane_id == 0) smem_qk[warp_id] = qk;
-        __syncthreads();
-
-        // Sum the 4 warp partials (all threads read, avoid divergence)
-        float dot = smem_qk[0] + smem_qk[1] + smem_qk[2] + smem_qk[3];
-        __syncthreads();
-
-        // Online softmax update
-        float m_new = fmaxf(m, dot);
-        float exp_old = expf(m - m_new);
-        float exp_new = expf(dot - m_new);
-
-        // Rescale running accumulator and add new V contribution
-        acc = acc * exp_old + v_base[pos * 128 + tid] * exp_new;
-        l = l * exp_old + exp_new;
-        m = m_new;
-    }
-
-    // Write output: O[b, h, 0, tid] = acc / l
-    float* o_row = O + (size_t)(b * num_heads + h) * 128;
-    o_row[tid] = (l > 0.0f) ? acc / l : 0.0f;
-}
-
-// ============================================================================
-// head_dim = 64, 64 threads (2 warps), F32
-// ============================================================================
-
-extern "C" __global__ void decode_attention_64_fp32(
+__device__ __forceinline__ void decode_attention_128_impl(
     const float* __restrict__ Q,
     const float* __restrict__ K,
     const float* __restrict__ V,
     float* __restrict__ O,
     int num_heads, int num_kv_heads,
-    int seq_len_k, float scale
+    int seq_len_k, int kv_seq_stride,
+    float scale
+) {
+    const int bh = blockIdx.x;
+    const int b = bh / num_heads;
+    const int h = bh % num_heads;
+    const int kv_h = h / (num_heads / num_kv_heads);
+
+    const int tid = threadIdx.x;
+    const int warp_id = tid / 32;
+    const int lane_id = tid % 32;
+
+    const float* q_row = Q + (size_t)(b * num_heads + h) * 128;
+    const float q_val = q_row[tid] * scale;
+
+    const float* k_base = K + (size_t)(b * num_kv_heads + kv_h) * kv_seq_stride * 128;
+    const float* v_base = V + (size_t)(b * num_kv_heads + kv_h) * kv_seq_stride * 128;
+
+    float acc = 0.0f;
+    float m = -1e30f;
+    float l = 0.0f;
+
+    __shared__ float smem_qk[4];
+
+    for (int pos = 0; pos < seq_len_k; pos++) {
+        float qk = q_val * k_base[pos * 128 + tid];
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1)
+            qk += __shfl_down_sync(0xFFFFFFFF, qk, offset);
+
+        if (lane_id == 0) smem_qk[warp_id] = qk;
+        __syncthreads();
+
+        float dot = smem_qk[0] + smem_qk[1] + smem_qk[2] + smem_qk[3];
+        __syncthreads();
+
+        float m_new = fmaxf(m, dot);
+        float exp_old = expf(m - m_new);
+        float exp_new = expf(dot - m_new);
+
+        acc = acc * exp_old + v_base[pos * 128 + tid] * exp_new;
+        l = l * exp_old + exp_new;
+        m = m_new;
+    }
+
+    float* o_row = O + (size_t)(b * num_heads + h) * 128;
+    o_row[tid] = (l > 0.0f) ? acc / l : 0.0f;
+}
+
+__device__ __forceinline__ void decode_attention_64_impl(
+    const float* __restrict__ Q,
+    const float* __restrict__ K,
+    const float* __restrict__ V,
+    float* __restrict__ O,
+    int num_heads, int num_kv_heads,
+    int seq_len_k, int kv_seq_stride,
+    float scale
 ) {
     const int bh = blockIdx.x;
     const int b = bh / num_heads;
@@ -104,8 +95,8 @@ extern "C" __global__ void decode_attention_64_fp32(
     const float* q_row = Q + (size_t)(b * num_heads + h) * 64;
     const float q_val = q_row[tid] * scale;
 
-    const float* k_base = K + (size_t)(b * num_kv_heads + kv_h) * seq_len_k * 64;
-    const float* v_base = V + (size_t)(b * num_kv_heads + kv_h) * seq_len_k * 64;
+    const float* k_base = K + (size_t)(b * num_kv_heads + kv_h) * kv_seq_stride * 64;
+    const float* v_base = V + (size_t)(b * num_kv_heads + kv_h) * kv_seq_stride * 64;
 
     float acc = 0.0f;
     float m = -1e30f;
@@ -137,4 +128,60 @@ extern "C" __global__ void decode_attention_64_fp32(
 
     float* o_row = O + (size_t)(b * num_heads + h) * 64;
     o_row[tid] = (l > 0.0f) ? acc / l : 0.0f;
+}
+
+// ============================================================================
+// Non-graph entry points: seq_len_k as plain int (zero overhead)
+// ============================================================================
+
+extern "C" __global__ void decode_attention_128_fp32(
+    const float* __restrict__ Q,
+    const float* __restrict__ K,
+    const float* __restrict__ V,
+    float* __restrict__ O,
+    int num_heads, int num_kv_heads,
+    int seq_len_k, float scale
+) {
+    decode_attention_128_impl(Q, K, V, O, num_heads, num_kv_heads, seq_len_k, seq_len_k, scale);
+}
+
+extern "C" __global__ void decode_attention_64_fp32(
+    const float* __restrict__ Q,
+    const float* __restrict__ K,
+    const float* __restrict__ V,
+    float* __restrict__ O,
+    int num_heads, int num_kv_heads,
+    int seq_len_k, float scale
+) {
+    decode_attention_64_impl(Q, K, V, O, num_heads, num_kv_heads, seq_len_k, seq_len_k, scale);
+}
+
+// ============================================================================
+// Graph-mode entry points: seq_len_k from device pointer, separate stride
+// ============================================================================
+
+extern "C" __global__ void decode_attention_128_fp32_graph(
+    const float* __restrict__ Q,
+    const float* __restrict__ K,
+    const float* __restrict__ V,
+    float* __restrict__ O,
+    int num_heads, int num_kv_heads,
+    const int* seq_len_k_ptr,
+    int kv_seq_stride,
+    float scale
+) {
+    decode_attention_128_impl(Q, K, V, O, num_heads, num_kv_heads, *seq_len_k_ptr, kv_seq_stride, scale);
+}
+
+extern "C" __global__ void decode_attention_64_fp32_graph(
+    const float* __restrict__ Q,
+    const float* __restrict__ K,
+    const float* __restrict__ V,
+    float* __restrict__ O,
+    int num_heads, int num_kv_heads,
+    const int* seq_len_k_ptr,
+    int kv_seq_stride,
+    float scale
+) {
+    decode_attention_64_impl(Q, K, V, O, num_heads, num_kv_heads, *seq_len_k_ptr, kv_seq_stride, scale);
 }

@@ -321,6 +321,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         // Pass raw full-capacity KV cache buffers with explicit seq_len.
         // Avoids narrow() + contiguous() which copied the entire cache every token.
         let kv_seq_len = kv_cache.seq_len();
+        let is_prefill = seq_len > 1;
         let (attn_out, _lse) = client.flash_attention_fwd(
             q.tensor(),
             kv_cache.k_cache_raw(),
@@ -328,8 +329,8 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             self.num_heads,
             self.num_kv_heads,
             self.head_dim,
-            false, // not causal for decode (Q has 1 token, sees all of KV cache)
-            0,     // no sliding window
+            is_prefill, // causal during prefill (seq_len > 1), not needed for single-token decode
+            0,          // no sliding window
             Some(kv_seq_len),
         )?;
 

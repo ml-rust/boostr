@@ -641,9 +641,20 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q6_k_q8_1_mwr(
     const unsigned char* w_row = weight + (unsigned long long)col * q6k_bpr * 210;
     const unsigned char* q8_row = q8_act + (unsigned long long)m * q8_bpr * 36;
 
+    // Each lane processes one Q8_1 sub-block per Q6_K block per half.
+    // block_in_pass (0-3) selects which of the 4 sub-blocks within a half.
+    // BRANCHLESS: avoid 4-way warp divergence from switch(block_in_pass).
     const int block_in_pass = lane_id / 8;
     const int pos = (lane_id % 8) * 4;
     const int is = pos >= 16 ? 1 : 0;
+
+    // Pre-compute branchless selection parameters
+    const int use_hi = block_in_pass & 1;      // 0: use ql_lo, 1: use ql_hi
+    const int ql_shift = (block_in_pass & 2) ? 4 : 0;
+    const int qh_shift = block_in_pass * 2;     // qh bit pair position (0,2,4,6)
+    const unsigned int qh_mask = 0x03030303u << qh_shift;
+    const int qh_left = 4 - qh_shift;           // 4, 2, 0, -2
+    const int sc_offset = block_in_pass * 2 + is;
 
     float acc = 0.0f;
 
@@ -670,28 +681,17 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q6_k_q8_1_mwr(
             int ql4_hi = load_int_ua(ql + ql_base + 32 + pos);
             int qh4    = load_int_ua(qh + qh_base + pos);
 
-            int q6_unsigned;
-            int scale;
-            switch (block_in_pass) {
-                case 0:
-                    q6_unsigned = (ql4_lo & 0x0F0F0F0F) | ((qh4 & 0x03030303) << 4);
-                    scale = (int)sc[sc_base + is];
-                    break;
-                case 1:
-                    q6_unsigned = (ql4_hi & 0x0F0F0F0F) | ((qh4 & 0x0C0C0C0C) << 2);
-                    scale = (int)sc[sc_base + is + 2];
-                    break;
-                case 2:
-                    q6_unsigned = ((ql4_lo >> 4) & 0x0F0F0F0F) | (qh4 & 0x30303030);
-                    scale = (int)sc[sc_base + is + 4];
-                    break;
-                default:
-                    q6_unsigned = ((ql4_hi >> 4) & 0x0F0F0F0F) | ((qh4 & 0xC0C0C0C0) >> 2);
-                    scale = (int)sc[sc_base + is + 6];
-                    break;
-            }
+            // Branchless Q6_K dequantization
+            int ql4 = use_hi ? ql4_hi : ql4_lo;
+            int ql_nibble = (ql4 >> ql_shift) & 0x0F0F0F0F;
+            unsigned int qh_bits = (unsigned int)qh4 & qh_mask;
+            int qh_positioned = (int)((qh_left >= 0)
+                ? (qh_bits << qh_left)
+                : (qh_bits >> (-qh_left)));
+            int q6_unsigned = ql_nibble | qh_positioned;
 
-            // __vsubss4: 4x signed int8 saturated subtract
+            int scale = (int)sc[sc_base + sc_offset];
+
             int q6_signed = __vsubss4(q6_unsigned, 0x20202020);
             int dot = dp4a(q6_signed, u, 0);
 
@@ -950,6 +950,14 @@ extern "C" __global__ __launch_bounds__(128, 1) void fused_swiglu_q6k_q8_1_mwr(
     const int pos = (lane_id % 8) * 4;
     const int is = pos >= 16 ? 1 : 0;
 
+    // Branchless selection parameters (same as Q6_K MWR kernel)
+    const int use_hi = block_in_pass & 1;
+    const int ql_shift = (block_in_pass & 2) ? 4 : 0;
+    const int qh_shift = block_in_pass * 2;
+    const unsigned int qh_mask = 0x03030303u << qh_shift;
+    const int qh_left = 4 - qh_shift;
+    const int sc_offset = block_in_pass * 2 + is;
+
     float gate_acc = 0.0f;
     float up_acc = 0.0f;
 
@@ -976,58 +984,33 @@ extern "C" __global__ __launch_bounds__(128, 1) void fused_swiglu_q6k_q8_1_mwr(
             int sc_base = half * 8;
             int q8_idx = b * 8 + half * 4 + block_in_pass;
 
-            // Shared Q8_1 activation
             float d8 = __half2float(*(const __half*)(q8_row + q8_idx * 36));
             int u = *(const int*)(q8_row + q8_idx * 36 + 4 + pos);
 
-            // Gate Q6_K unpack
+            // Gate: branchless Q6_K unpack
             {
                 int ql4_lo = load_int_ua(g_ql + ql_base + pos);
                 int ql4_hi = load_int_ua(g_ql + ql_base + 32 + pos);
                 int qh4    = load_int_ua(g_qh + qh_base + pos);
-                int q6_unsigned;
-                int scale;
-                switch (block_in_pass) {
-                    case 0:
-                        q6_unsigned = (ql4_lo & 0x0F0F0F0F) | ((qh4 & 0x03030303) << 4);
-                        scale = (int)g_sc[sc_base + is]; break;
-                    case 1:
-                        q6_unsigned = (ql4_hi & 0x0F0F0F0F) | ((qh4 & 0x0C0C0C0C) << 2);
-                        scale = (int)g_sc[sc_base + is + 2]; break;
-                    case 2:
-                        q6_unsigned = ((ql4_lo >> 4) & 0x0F0F0F0F) | (qh4 & 0x30303030);
-                        scale = (int)g_sc[sc_base + is + 4]; break;
-                    default:
-                        q6_unsigned = ((ql4_hi >> 4) & 0x0F0F0F0F) | ((qh4 & 0xC0C0C0C0) >> 2);
-                        scale = (int)g_sc[sc_base + is + 6]; break;
-                }
-                int q6_signed = __vsubss4(q6_unsigned, 0x20202020);
-                gate_acc += g_d6 * d8 * (float)(dp4a(q6_signed, u, 0) * scale);
+                int ql4 = use_hi ? ql4_hi : ql4_lo;
+                int ql_nibble = (ql4 >> ql_shift) & 0x0F0F0F0F;
+                int qh_bits = qh4 & qh_mask;
+                int qh_positioned = (qh_left >= 0) ? (qh_bits << qh_left) : ((unsigned int)qh_bits >> (-qh_left));
+                int q6_signed = __vsubss4(ql_nibble | qh_positioned, 0x20202020);
+                gate_acc += g_d6 * d8 * (float)(dp4a(q6_signed, u, 0) * (int)g_sc[sc_base + sc_offset]);
             }
 
-            // Up Q6_K unpack
+            // Up: branchless Q6_K unpack
             {
                 int ql4_lo = load_int_ua(u_ql + ql_base + pos);
                 int ql4_hi = load_int_ua(u_ql + ql_base + 32 + pos);
                 int qh4    = load_int_ua(u_qh + qh_base + pos);
-                int q6_unsigned;
-                int scale;
-                switch (block_in_pass) {
-                    case 0:
-                        q6_unsigned = (ql4_lo & 0x0F0F0F0F) | ((qh4 & 0x03030303) << 4);
-                        scale = (int)u_sc[sc_base + is]; break;
-                    case 1:
-                        q6_unsigned = (ql4_hi & 0x0F0F0F0F) | ((qh4 & 0x0C0C0C0C) << 2);
-                        scale = (int)u_sc[sc_base + is + 2]; break;
-                    case 2:
-                        q6_unsigned = ((ql4_lo >> 4) & 0x0F0F0F0F) | (qh4 & 0x30303030);
-                        scale = (int)u_sc[sc_base + is + 4]; break;
-                    default:
-                        q6_unsigned = ((ql4_hi >> 4) & 0x0F0F0F0F) | ((qh4 & 0xC0C0C0C0) >> 2);
-                        scale = (int)u_sc[sc_base + is + 6]; break;
-                }
-                int q6_signed = __vsubss4(q6_unsigned, 0x20202020);
-                up_acc += u_d6 * d8 * (float)(dp4a(q6_signed, u, 0) * scale);
+                int ql4 = use_hi ? ql4_hi : ql4_lo;
+                int ql_nibble = (ql4 >> ql_shift) & 0x0F0F0F0F;
+                int qh_bits = qh4 & qh_mask;
+                int qh_positioned = (qh_left >= 0) ? (qh_bits << qh_left) : ((unsigned int)qh_bits >> (-qh_left));
+                int q6_signed = __vsubss4(ql_nibble | qh_positioned, 0x20202020);
+                up_acc += u_d6 * d8 * (float)(dp4a(q6_signed, u, 0) * (int)u_sc[sc_base + sc_offset]);
             }
         }
     }

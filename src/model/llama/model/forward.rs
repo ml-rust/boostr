@@ -8,7 +8,7 @@ use crate::model::config::ModelConfig;
 use crate::model::traits::{Model, ModelClient};
 use crate::nn::{Embedding, Linear, MaybeQuantLinear, RmsNorm, RoPE};
 use crate::ops::traits::{KvCacheOps, PagedAttentionOps};
-use numr::autograd::Var;
+use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
@@ -255,18 +255,31 @@ impl<R: Runtime<DType = DType>> Llama<R> {
         let mut hidden = self.embed_tokens.forward(client, input_ids)?;
         sync_log!(t, "embed");
 
-        // Transformer blocks with KV cache
+        // Transformer blocks with KV cache — deferred residual add fusion
+        let mut prev_mlp_out: Option<Var<R>> = None;
         for (i, layer) in self.layers.iter().enumerate() {
             let t_layer = std::time::Instant::now();
             let cache = kv_cache.layer_mut(i).ok_or_else(|| Error::ModelError {
                 reason: format!("KV cache missing for layer {i}"),
             })?;
-            hidden = layer.forward_with_kv_cache(client, &hidden, &self.rope, cache, position)?;
+            let (h, mlp_out) = layer.forward_with_kv_cache(
+                client,
+                &hidden,
+                prev_mlp_out.as_ref(),
+                &self.rope,
+                cache,
+                position,
+            )?;
+            hidden = h;
+            prev_mlp_out = Some(mlp_out);
             sync_log!(t_layer, format!("layer {i}"));
         }
 
-        // Final norm
+        // Final residual add (deferred from last layer) + norm
         let t_norm = std::time::Instant::now();
+        if let Some(last_mlp) = prev_mlp_out {
+            hidden = var_add(&hidden, &last_mlp, client).map_err(Error::Numr)?;
+        }
         hidden = self.norm.forward(client, &hidden)?;
         sync_log!(t_norm, "norm");
 
@@ -328,11 +341,13 @@ impl<R: Runtime<DType = DType>> Llama<R> {
         // Embed tokens: [B, S] -> [B, S, hidden]
         let mut hidden = self.embed_tokens.forward(client, input_ids)?;
 
-        // Transformer blocks with paged KV cache
+        // Transformer blocks with paged KV cache — deferred residual add fusion
+        let mut prev_mlp_out: Option<Var<R>> = None;
         for (i, layer) in self.layers.iter().enumerate() {
-            hidden = layer.forward_with_paged_kv_cache(
+            let (h, mlp_out) = layer.forward_with_paged_kv_cache(
                 client,
                 &hidden,
+                prev_mlp_out.as_ref(),
                 &self.rope,
                 paged_cache,
                 i,
@@ -341,9 +356,14 @@ impl<R: Runtime<DType = DType>> Llama<R> {
                 seq_len_k,
                 position,
             )?;
+            hidden = h;
+            prev_mlp_out = Some(mlp_out);
         }
 
-        // Final norm
+        // Final residual add (deferred from last layer) + norm
+        if let Some(last_mlp) = prev_mlp_out {
+            hidden = var_add(&hidden, &last_mlp, client).map_err(Error::Numr)?;
+        }
         hidden = self.norm.forward(client, &hidden)?;
 
         // LM head: [B, S, hidden] -> [B, S, vocab]
@@ -390,22 +410,29 @@ impl Llama<numr::runtime::cuda::CudaRuntime> {
         // Embed tokens
         let mut hidden = self.embed_tokens.forward(client, input_ids)?;
 
-        // Transformer layers — each uses kv_insert + raw cache for stable addresses
+        // Transformer layers — deferred residual add fusion
+        let mut prev_mlp_out: Option<numr::autograd::Var<numr::runtime::cuda::CudaRuntime>> = None;
         for (i, layer) in self.layers.iter().enumerate() {
             let cache = kv_cache.layer_mut(i).ok_or_else(|| Error::ModelError {
                 reason: format!("KV cache missing for layer {i}"),
             })?;
-            hidden = layer.forward_graph_mode(
+            let (h, mlp_out) = layer.forward_graph_mode(
                 client,
                 &hidden,
+                prev_mlp_out.as_ref(),
                 cos_slice,
                 sin_slice,
                 cache,
                 device_scalars,
             )?;
+            hidden = h;
+            prev_mlp_out = Some(mlp_out);
         }
 
-        // Final norm + LM head
+        // Final residual add (deferred from last layer) + norm
+        if let Some(last_mlp) = prev_mlp_out {
+            hidden = var_add(&hidden, &last_mlp, client).map_err(Error::Numr)?;
+        }
         hidden = self.norm.forward(client, &hidden)?;
         let logits = self.lm_head.forward(client, &hidden)?;
 

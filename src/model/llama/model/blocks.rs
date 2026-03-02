@@ -72,14 +72,20 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
     }
 
+    /// Forward with KV cache, accepting the previous layer's deferred MLP output.
+    ///
+    /// If `prev_mlp_out` is provided, fuses the residual add with this layer's
+    /// input layernorm (1 kernel instead of 2). Returns `(h, mlp_out)` so the
+    /// caller can defer the final add to the next layer.
     pub(super) fn forward_with_kv_cache<C>(
         &self,
         client: &C,
         x: &Var<R>,
+        prev_mlp_out: Option<&Var<R>>,
         rope: &RoPE<R>,
         kv_cache: &mut KvCache<R>,
         position: usize,
-    ) -> Result<Var<R>>
+    ) -> Result<(Var<R>, Var<R>)>
     where
         C: ModelClient<R>,
         R::Client: TensorOps<R>
@@ -93,8 +99,15 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
             + CompareOps<R>
             + ConditionalOps<R>,
     {
-        // Pre-norm attention + residual (fused: 1 kernel instead of 2)
-        let normed = self.input_layernorm.forward(client, x)?;
+        // Fuse previous layer's residual add with this layer's input norm
+        let (normed, x) = if let Some(prev_mlp) = prev_mlp_out {
+            self.input_layernorm
+                .fused_add_forward(client, x, prev_mlp)?
+        } else {
+            let normed = self.input_layernorm.forward(client, x)?;
+            (normed, x.clone())
+        };
+
         let attn_out = self
             .self_attn
             .forward_with_kv_cache(client, &normed, rope, kv_cache, position)?;
@@ -102,17 +115,19 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
         // Fused add + rms_norm: computes h = x + attn_out, then normed = rms_norm(h)
         let (normed, h) = self
             .post_attention_layernorm
-            .fused_add_forward(client, x, &attn_out)?;
+            .fused_add_forward(client, &x, &attn_out)?;
 
-        // MLP + residual
+        // MLP — defer the residual add to the next layer
         let mlp_out = self.mlp.forward(client, &normed)?;
-        var_add(&h, &mlp_out, client).map_err(Error::Numr)
+        Ok((h, mlp_out))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn forward_with_paged_kv_cache<C>(
         &self,
         client: &C,
         x: &Var<R>,
+        prev_mlp_out: Option<&Var<R>>,
         rope: &RoPE<R>,
         paged_cache: &LayeredPagedKvCache<R>,
         layer_idx: usize,
@@ -120,7 +135,7 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
         block_table: &Tensor<R>,
         seq_len_k: usize,
         position: usize,
-    ) -> Result<Var<R>>
+    ) -> Result<(Var<R>, Var<R>)>
     where
         C: ModelClient<R>,
         R::Client: TensorOps<R>
@@ -136,7 +151,14 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
             + KvCacheOps<R>
             + PagedAttentionOps<R>,
     {
-        let normed = self.input_layernorm.forward(client, x)?;
+        let (normed, x) = if let Some(prev_mlp) = prev_mlp_out {
+            self.input_layernorm
+                .fused_add_forward(client, x, prev_mlp)?
+        } else {
+            let normed = self.input_layernorm.forward(client, x)?;
+            (normed, x.clone())
+        };
+
         let attn_out = self.self_attn.forward_with_paged_kv_cache(
             client,
             &normed,
@@ -151,10 +173,10 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
 
         let (normed, h) = self
             .post_attention_layernorm
-            .fused_add_forward(client, x, &attn_out)?;
+            .fused_add_forward(client, &x, &attn_out)?;
 
         let mlp_out = self.mlp.forward(client, &normed)?;
-        var_add(&h, &mlp_out, client).map_err(Error::Numr)
+        Ok((h, mlp_out))
     }
 }
 
@@ -477,24 +499,21 @@ impl<R: Runtime<DType = DType>> LlamaMlp<R> {
 #[cfg(feature = "cuda")]
 impl LlamaBlock<numr::runtime::cuda::CudaRuntime> {
     /// Forward pass for CUDA graph capture / replay.
-    ///
-    /// Differences from `forward_with_kv_cache`:
-    /// - K/V update uses `kv_insert` kernel with device-side `write_pos` instead
-    ///   of `slice_assign` (which freezes the CPU offset at graph capture time).
-    /// - Attention uses the full-capacity raw cache buffers (stable addresses)
-    ///   with device-side `seq_len_k_ptr` instead of a narrow + contiguous view.
-    /// - RoPE uses pre-allocated `cos_slice`/`sin_slice` tensors (stable
-    ///   addresses) that are D2D-updated before each replay.
+    /// Returns `(h, mlp_out)` to defer the residual add to the next layer.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn forward_graph_mode(
         &self,
         client: &numr::runtime::cuda::CudaClient,
         x: &Var<numr::runtime::cuda::CudaRuntime>,
+        prev_mlp_out: Option<&Var<numr::runtime::cuda::CudaRuntime>>,
         cos_slice: &Var<numr::runtime::cuda::CudaRuntime>, // [1, head_dim]
         sin_slice: &Var<numr::runtime::cuda::CudaRuntime>,
         kv_cache: &KvCache<numr::runtime::cuda::CudaRuntime>,
         device_scalars: &crate::inference::decode_graph::DeviceScalars,
-    ) -> Result<Var<numr::runtime::cuda::CudaRuntime>>
+    ) -> Result<(
+        Var<numr::runtime::cuda::CudaRuntime>,
+        Var<numr::runtime::cuda::CudaRuntime>,
+    )>
     where
         numr::runtime::cuda::CudaClient: crate::model::traits::ModelClient<numr::runtime::cuda::CudaRuntime>
             + numr::ops::TensorOps<numr::runtime::cuda::CudaRuntime>
@@ -508,7 +527,14 @@ impl LlamaBlock<numr::runtime::cuda::CudaRuntime> {
             + numr::ops::CompareOps<numr::runtime::cuda::CudaRuntime>
             + numr::ops::ConditionalOps<numr::runtime::cuda::CudaRuntime>,
     {
-        let normed = self.input_layernorm.forward(client, x)?;
+        let (normed, x) = if let Some(prev_mlp) = prev_mlp_out {
+            self.input_layernorm
+                .fused_add_forward(client, x, prev_mlp)?
+        } else {
+            let normed = self.input_layernorm.forward(client, x)?;
+            (normed, x.clone())
+        };
+
         let attn_out = self.self_attn.forward_graph_mode(
             client,
             &normed,
@@ -520,9 +546,9 @@ impl LlamaBlock<numr::runtime::cuda::CudaRuntime> {
 
         let (normed, h) = self
             .post_attention_layernorm
-            .fused_add_forward(client, x, &attn_out)?;
+            .fused_add_forward(client, &x, &attn_out)?;
         let mlp_out = self.mlp.forward(client, &normed)?;
-        var_add(&h, &mlp_out, client).map_err(Error::Numr)
+        Ok((h, mlp_out))
     }
 }
 

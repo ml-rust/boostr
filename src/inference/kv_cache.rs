@@ -140,10 +140,12 @@ where
     ///
     /// Requires `R::Client: KvCacheOps<R>`. Falls back to `update` if the
     /// runtime client doesn't support fused KV cache operations.
-    pub fn update_fused(&mut self, k: &Tensor<R>, v: &Tensor<R>, client: &R::Client) -> Result<()>
-    where
-        R::Client: KvCacheOps<R>,
-    {
+    pub fn update_fused<C: KvCacheOps<R>>(
+        &mut self,
+        k: &Tensor<R>,
+        v: &Tensor<R>,
+        client: &C,
+    ) -> Result<()> {
         let (_, _, new_tokens, _) = k.dims4()?;
         let required = self.seq_len + new_tokens;
 

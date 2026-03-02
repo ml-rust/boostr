@@ -292,24 +292,23 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         let v = var_contiguous(&v);
 
         // Update KV cache with new K/V tensors [B, H_kv, S, D]
-        kv_cache.update(k.tensor(), v.tensor())?;
+        // Uses fused in-place write (single kernel) instead of slice_assign
+        // (which copies the entire cache buffer before writing the slice).
+        kv_cache.update_fused(k.tensor(), v.tensor(), client)?;
 
-        // Get full cached K/V for attention
-        let (cached_k, cached_v) = kv_cache.get_kv()?;
-        let cached_k = cached_k.contiguous();
-        let cached_v = cached_v.contiguous();
-
-        // Flash attention handles GQA natively (no repeat_kv needed).
-        // Single fused kernel: Q@K^T, scale, causal mask, softmax, @V
+        // Pass raw full-capacity KV cache buffers with explicit seq_len.
+        // Avoids narrow() + contiguous() which copied the entire cache every token.
+        let kv_seq_len = kv_cache.seq_len();
         let (attn_out, _lse) = client.flash_attention_fwd(
             q.tensor(),
-            &cached_k,
-            &cached_v,
+            kv_cache.k_cache_raw(),
+            kv_cache.v_cache_raw(),
             self.num_heads,
             self.num_kv_heads,
             self.head_dim,
             false, // not causal for decode (Q has 1 token, sees all of KV cache)
             0,     // no sliding window
+            Some(kv_seq_len),
         )?;
 
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]

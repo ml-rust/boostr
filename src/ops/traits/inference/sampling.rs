@@ -63,4 +63,32 @@ pub trait SamplingOps<R: Runtime> {
         top_p: f32,
         min_p: f32,
     ) -> Result<u32>;
+
+    /// Fused logits-to-token: narrow last position → cast F32 → apply penalties → argmax/sample.
+    ///
+    /// Returns `[1]` I64 tensor on device, enabling pipelined decode (the forward pass
+    /// can overlap with D2H copy of the previous token).
+    ///
+    /// When `temperature == 0.0`, performs greedy argmax. Otherwise runs the full
+    /// stochastic sampling chain (temperature → softmax → top-k → top-p → min-p → multinomial).
+    ///
+    /// # Layout
+    ///
+    /// - `logits`: `[1, seq_len, vocab_size]` any dtype
+    /// - `token_ids`: `[num_unique]` I64 — penalty token IDs
+    /// - `token_counts`: `[num_unique]` I32 — penalty counts
+    fn logits_to_token(
+        &self,
+        logits: &Tensor<R>,
+        token_ids: &Tensor<R>,
+        token_counts: &Tensor<R>,
+        num_unique: usize,
+        repeat_penalty: f32,
+        frequency_penalty: f32,
+        presence_penalty: f32,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        min_p: f32,
+    ) -> Result<Tensor<R>>;
 }

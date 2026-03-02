@@ -312,6 +312,12 @@ fn compile_cuda_kernels() {
             "sm_75",
             true,
         ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/inference"),
+            "logits_to_token.cu",
+            "sm_75",
+            true,
+        ),
         // Architecture kernels (SSM / Mamba2)
         (
             PathBuf::from("src/ops/cuda/kernels/architecture"),

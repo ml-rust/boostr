@@ -54,6 +54,8 @@ pub const MOE_GROUPED_GEMM_MODULE: &str = "moe_grouped_gemm";
 pub const SSD_STATE_PASSING_MODULE: &str = "ssd_state_passing";
 pub const FUSED_GRAD_UNSCALE_CLIP_MODULE: &str = "fused_grad_unscale_clip";
 pub const SPECULATIVE_VERIFY_MODULE: &str = "speculative_verify";
+pub const SAMPLING_PENALTIES_MODULE: &str = "sampling_penalties";
+pub const SAMPLING_MODULE: &str = "sampling";
 pub const CALIBRATION_MODULE: &str = "calibration";
 
 /// Cache for loaded CUDA modules, keyed by (device_index, module_name)

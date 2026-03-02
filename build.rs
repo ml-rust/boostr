@@ -293,10 +293,22 @@ fn compile_cuda_kernels() {
             "sm_75",
             true,
         ),
-        // Inference kernels (speculative decoding)
+        // Inference kernels (speculative decoding, sampling)
         (
             PathBuf::from("src/ops/cuda/kernels/inference"),
             "speculative_verify.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/inference"),
+            "sampling_penalties.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/ops/cuda/kernels/inference"),
+            "sampling.cu",
             "sm_75",
             true,
         ),

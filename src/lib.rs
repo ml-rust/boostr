@@ -41,7 +41,7 @@ pub mod trainer;
 pub use nn::{Init, VarBuilder, VarMap, Weight};
 pub use ops::{
     AttentionOps, FlashAttentionOps, FusedFp8TrainingOps, FusedOptimizerOps, FusedQkvOps,
-    KvCacheOps, MlaOps, PagedAttentionOps, RoPEOps, var_flash_attention,
+    KvCacheOps, MlaOps, PagedAttentionOps, RoPEOps, SamplingOps, var_flash_attention,
 };
 pub use quant::{DequantOps, FusedQuantOps, QuantFormat, QuantMatmulOps, QuantTensor};
 

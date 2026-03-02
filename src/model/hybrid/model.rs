@@ -269,6 +269,11 @@ where
     pub fn num_ssm_layers(&self) -> usize {
         self.hybrid_config.ssm_layers.len()
     }
+
+    /// RoPE module (for cos/sin cache access in CUDA graph setup).
+    pub fn rope(&self) -> &crate::nn::RoPE<R> {
+        &self.rope
+    }
 }
 
 // ── AttentionBlock forward ──────────────────────────────────────────

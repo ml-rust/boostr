@@ -282,6 +282,11 @@ impl<R: Runtime<DType = DType>> Llama<R> {
         Ok(logits.tensor().clone())
     }
 
+    /// Return a reference to the model's RoPE module (for cos/sin cache access).
+    pub fn rope(&self) -> &crate::nn::RoPE<R> {
+        &self.rope
+    }
+
     /// Forward pass for inference with paged KV cache.
     ///
     /// Uses PagedAttention with block table indirection instead of contiguous KV cache.
@@ -342,6 +347,66 @@ impl<R: Runtime<DType = DType>> Llama<R> {
         hidden = self.norm.forward(client, &hidden)?;
 
         // LM head: [B, S, hidden] -> [B, S, vocab]
+        let logits = self.lm_head.forward(client, &hidden)?;
+
+        Ok(logits.tensor().clone())
+    }
+}
+
+// ── CUDA graph-mode forward ──────────────────────────────────────────
+
+#[cfg(feature = "cuda")]
+impl Llama<numr::runtime::cuda::CudaRuntime> {
+    /// Graph-mode forward pass — all CUDA ops use stable device addresses.
+    ///
+    /// Designed for CUDA graph capture+replay. The caller must:
+    /// 1. Pre-allocate `kv_cache` at full capacity (`max_seq_len`) before capture.
+    /// 2. Provide `DeviceScalars` with correct seq_len values before each replay.
+    /// 3. Provide `cos_slice`/`sin_slice` updated to the current position via D2D copy.
+    ///
+    /// Returns the logits tensor whose device address is stable across graph replays.
+    pub fn forward_graph_mode(
+        &self,
+        client: &numr::runtime::cuda::CudaClient,
+        input_ids: &Tensor<numr::runtime::cuda::CudaRuntime>,
+        kv_cache: &mut LayeredKvCache<numr::runtime::cuda::CudaRuntime>,
+        device_scalars: &crate::inference::decode_graph::DeviceScalars,
+        cos_slice: &numr::autograd::Var<numr::runtime::cuda::CudaRuntime>,
+        sin_slice: &numr::autograd::Var<numr::runtime::cuda::CudaRuntime>,
+    ) -> Result<Tensor<numr::runtime::cuda::CudaRuntime>>
+    where
+        numr::runtime::cuda::CudaClient: crate::model::traits::ModelClient<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::TensorOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ScalarOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ReduceOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::IndexingOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ShapeOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ActivationOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::BinaryOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::UnaryOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::CompareOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ConditionalOps<numr::runtime::cuda::CudaRuntime>,
+    {
+        // Embed tokens
+        let mut hidden = self.embed_tokens.forward(client, input_ids)?;
+
+        // Transformer layers — each uses kv_insert + raw cache for stable addresses
+        for (i, layer) in self.layers.iter().enumerate() {
+            let cache = kv_cache.layer_mut(i).ok_or_else(|| Error::ModelError {
+                reason: format!("KV cache missing for layer {i}"),
+            })?;
+            hidden = layer.forward_graph_mode(
+                client,
+                &hidden,
+                cos_slice,
+                sin_slice,
+                cache,
+                device_scalars,
+            )?;
+        }
+
+        // Final norm + LM head
+        hidden = self.norm.forward(client, &hidden)?;
         let logits = self.lm_head.forward(client, &hidden)?;
 
         Ok(logits.tensor().clone())

@@ -298,12 +298,62 @@ where
         }
     }
 
+    /// Get the RoPE cos/sin caches for Llama models (for CUDA graph setup).
+    ///
+    /// Returns `None` for Mamba2 — SSM layers do not use RoPE.
+    pub fn rope_caches(&self) -> Option<(&numr::autograd::Var<R>, &numr::autograd::Var<R>)> {
+        match self {
+            LoadedModel::Llama(m) => Some((m.rope().cos_cache(), m.rope().sin_cache())),
+            LoadedModel::Mamba2(_) => None,
+            LoadedModel::Hybrid(m) => Some((m.rope().cos_cache(), m.rope().sin_cache())),
+        }
+    }
+
     /// Get the Mamba2 config (for SSM state allocation). Returns None for non-Mamba2/Hybrid models.
     pub fn mamba_config(&self) -> Option<&Mamba2Config> {
         match self {
             LoadedModel::Mamba2(m) => Some(m.mamba_config()),
             LoadedModel::Hybrid(m) => Some(m.mamba_config()),
             _ => None,
+        }
+    }
+}
+
+/// CUDA-specific graph-mode inference. Only available when `cuda` feature is enabled.
+#[cfg(feature = "cuda")]
+impl LoadedModel<numr::runtime::cuda::CudaRuntime> {
+    /// Forward pass using a pre-captured CUDA graph's stable-address tensors.
+    ///
+    /// All kernel arguments (device scalars, KV cache, cos/sin) must have stable
+    /// device addresses that were used during graph capture. The caller is responsible
+    /// for updating `device_scalars`, `cos_slice`, and `sin_slice` via D2D copy
+    /// before calling this.
+    pub fn forward_graph_mode(
+        &self,
+        input_ids: &numr::tensor::Tensor<numr::runtime::cuda::CudaRuntime>,
+        kv_cache: &mut crate::inference::LayeredKvCache<numr::runtime::cuda::CudaRuntime>,
+        device_scalars: &crate::inference::decode_graph::DeviceScalars,
+        cos_slice: &numr::autograd::Var<numr::runtime::cuda::CudaRuntime>,
+        sin_slice: &numr::autograd::Var<numr::runtime::cuda::CudaRuntime>,
+    ) -> Result<numr::tensor::Tensor<numr::runtime::cuda::CudaRuntime>> {
+        use numr::runtime::cuda::CudaRuntime;
+        let client = CudaRuntime::default_client(input_ids.device());
+        match self {
+            LoadedModel::Llama(m) => m.forward_graph_mode(
+                &client,
+                input_ids,
+                kv_cache,
+                device_scalars,
+                cos_slice,
+                sin_slice,
+            ),
+            LoadedModel::Mamba2(_) => Err(Error::ModelError {
+                reason: "Mamba2 does not support CUDA graph mode — use forward_with_ssm_state()"
+                    .into(),
+            }),
+            LoadedModel::Hybrid(_) => Err(Error::ModelError {
+                reason: "Hybrid model does not yet support CUDA graph mode".into(),
+            }),
         }
     }
 }

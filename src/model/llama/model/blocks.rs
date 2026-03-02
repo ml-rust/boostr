@@ -7,6 +7,7 @@ use crate::model::config::ModelConfig;
 use crate::model::traits::ModelClient;
 use crate::nn::{Linear, MaybeQuantLinear, RmsNorm, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
+use crate::ops::traits::position::rope::RoPEOps;
 use crate::ops::traits::{KvCacheOps, PagedAttentionOps};
 use numr::autograd::{Var, var_add, var_narrow, var_reshape, var_silu_mul};
 use numr::dtype::DType;
@@ -469,6 +470,157 @@ impl<R: Runtime<DType = DType>> LlamaMlp<R> {
         let hidden = var_silu_mul(gate, up, client).map_err(Error::Numr)?;
 
         self.down_proj.forward(client, &hidden)
+    }
+}
+
+// ── Graph-mode forward (CUDA only) ───────────────────────────────────
+
+#[cfg(feature = "cuda")]
+impl LlamaBlock<numr::runtime::cuda::CudaRuntime> {
+    /// Forward pass for CUDA graph capture / replay.
+    ///
+    /// Differences from `forward_with_kv_cache`:
+    /// - K/V update uses `kv_insert` kernel with device-side `write_pos` instead
+    ///   of `slice_assign` (which freezes the CPU offset at graph capture time).
+    /// - Attention uses the full-capacity raw cache buffers (stable addresses)
+    ///   with device-side `seq_len_k_ptr` instead of a narrow + contiguous view.
+    /// - RoPE uses pre-allocated `cos_slice`/`sin_slice` tensors (stable
+    ///   addresses) that are D2D-updated before each replay.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn forward_graph_mode(
+        &self,
+        client: &numr::runtime::cuda::CudaClient,
+        x: &Var<numr::runtime::cuda::CudaRuntime>,
+        cos_slice: &Var<numr::runtime::cuda::CudaRuntime>, // [1, head_dim]
+        sin_slice: &Var<numr::runtime::cuda::CudaRuntime>,
+        kv_cache: &KvCache<numr::runtime::cuda::CudaRuntime>,
+        device_scalars: &crate::inference::decode_graph::DeviceScalars,
+    ) -> Result<Var<numr::runtime::cuda::CudaRuntime>>
+    where
+        numr::runtime::cuda::CudaClient: crate::model::traits::ModelClient<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::TensorOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ScalarOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ReduceOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::IndexingOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ShapeOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ActivationOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::BinaryOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::UnaryOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::CompareOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ConditionalOps<numr::runtime::cuda::CudaRuntime>,
+    {
+        let normed = self.input_layernorm.forward(client, x)?;
+        let attn_out = self.self_attn.forward_graph_mode(
+            client,
+            &normed,
+            cos_slice,
+            sin_slice,
+            kv_cache,
+            device_scalars,
+        )?;
+
+        let (normed, h) = self
+            .post_attention_layernorm
+            .fused_add_forward(client, x, &attn_out)?;
+        let mlp_out = self.mlp.forward(client, &normed)?;
+        var_add(&h, &mlp_out, client).map_err(Error::Numr)
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
+    /// Graph-mode attention forward — all CUDA ops, stable addresses.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn forward_graph_mode(
+        &self,
+        client: &numr::runtime::cuda::CudaClient,
+        x: &Var<numr::runtime::cuda::CudaRuntime>,
+        cos_slice: &Var<numr::runtime::cuda::CudaRuntime>,
+        sin_slice: &Var<numr::runtime::cuda::CudaRuntime>,
+        kv_cache: &KvCache<numr::runtime::cuda::CudaRuntime>,
+        device_scalars: &crate::inference::decode_graph::DeviceScalars,
+    ) -> Result<Var<numr::runtime::cuda::CudaRuntime>>
+    where
+        numr::runtime::cuda::CudaClient: crate::model::traits::ModelClient<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::TensorOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ScalarOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ReduceOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::IndexingOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ShapeOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ActivationOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::BinaryOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::UnaryOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::CompareOps<numr::runtime::cuda::CudaRuntime>
+            + numr::ops::ConditionalOps<numr::runtime::cuda::CudaRuntime>,
+    {
+        use crate::ops::cuda::attention::flash::decode_attention_graph_fwd;
+        use crate::ops::cuda::attention::kv_insert::kv_insert;
+
+        let shape = x.shape().to_vec();
+        let batch = shape[0];
+        let seq_len = 1usize; // graph mode is always single-token decode
+
+        // Q/K/V projections
+        let qkv = MaybeQuantLinear::forward_batch(
+            &[&self.q_proj, &self.k_proj, &self.v_proj],
+            client,
+            x,
+        )?;
+        let (q, k, v) = (&qkv[0], &qkv[1], &qkv[2]);
+
+        // Reshape to [B, S, H, D] then permute to [B, H, S, D]
+        let q = var_reshape(q, &[batch, seq_len, self.num_heads, self.head_dim])
+            .map_err(Error::Numr)?;
+        let k = var_reshape(k, &[batch, seq_len, self.num_kv_heads, self.head_dim])
+            .map_err(Error::Numr)?;
+        let v = var_reshape(v, &[batch, seq_len, self.num_kv_heads, self.head_dim])
+            .map_err(Error::Numr)?;
+
+        let q = numr::autograd::var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?;
+        let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
+        let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
+
+        let q = var_contiguous(&q);
+        let k = var_contiguous(&k);
+        let v = var_contiguous(&v);
+
+        // Apply RoPE using the stable cos/sin slices (updated before each replay)
+        let q = client.apply_rope(&q, cos_slice, sin_slice)?;
+        let k = client.apply_rope(&k, cos_slice, sin_slice)?;
+
+        // Insert K/V into the full-capacity cache at the device-side write_pos
+        kv_insert(
+            client,
+            k.tensor(),
+            v.tensor(),
+            kv_cache.k_cache_raw(),
+            kv_cache.v_cache_raw(),
+            device_scalars.write_pos_ptr(),
+        )?;
+
+        // Decode attention against the full-capacity cache with device-side seq_len_k
+        let kv_capacity = kv_cache.capacity();
+        let (attn_out, _lse) = decode_attention_graph_fwd(
+            client,
+            q.tensor(),
+            kv_cache.k_cache_raw(),
+            kv_cache.v_cache_raw(),
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            device_scalars.seq_len_k_ptr(),
+            kv_capacity,
+        )?;
+
+        // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
+        let attn_out = Var::new(attn_out, false);
+        let attn_out =
+            numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
+        let attn_out = var_contiguous(&attn_out);
+        let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
+            .map_err(Error::Numr)?;
+
+        self.o_proj.forward(client, &attn_out)
     }
 }
 

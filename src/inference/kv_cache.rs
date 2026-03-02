@@ -178,6 +178,19 @@ where
         Ok((k, v))
     }
 
+    /// Full K cache tensor [B, H_kv, capacity, D] — stable device address.
+    ///
+    /// Unlike `get_kv()`, this returns the entire pre-allocated buffer without
+    /// narrowing or reallocation. Safe to use as a CUDA graph argument.
+    pub fn k_cache_raw(&self) -> &Tensor<R> {
+        &self.k_cache
+    }
+
+    /// Full V cache tensor [B, H_kv, capacity, D] — stable device address.
+    pub fn v_cache_raw(&self) -> &Tensor<R> {
+        &self.v_cache
+    }
+
     pub fn seq_len(&self) -> usize {
         self.seq_len
     }
@@ -192,6 +205,19 @@ where
 
     pub fn is_empty(&self) -> bool {
         self.seq_len == 0
+    }
+
+    /// Increment seq_len without modifying cache contents.
+    ///
+    /// Used in graph mode where the actual K/V write is done by the `kv_insert`
+    /// kernel (graph-captured). The CPU-side seq_len tracks how many tokens have
+    /// been inserted so DeviceScalars can be updated correctly before each replay.
+    pub fn increment_seq_len(&mut self) {
+        debug_assert!(
+            self.seq_len < self.max_seq_len,
+            "KvCache overflow on increment"
+        );
+        self.seq_len += 1;
     }
 
     pub fn reset(&mut self) {

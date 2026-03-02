@@ -1,3 +1,4 @@
+pub mod decode_graph;
 pub mod kv_cache;
 pub mod memory;
 pub mod prefix_cache;
@@ -5,6 +6,8 @@ pub mod scheduler;
 pub mod speculative;
 pub mod ssm_state;
 
+#[cfg(feature = "cuda")]
+pub use decode_graph::{DecodeGraph, DeviceScalars};
 pub use kv_cache::{
     KvCache, LayeredKvCache, LayeredKvCacheConfig, LayeredPagedKvCache, PagedKvCache,
 };

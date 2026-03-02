@@ -57,6 +57,7 @@ pub use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 pub use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
 
 // Re-export numr modules for path-based access (e.g., boostr::runtime::Device)
+pub use numr::autograd;
 pub use numr::runtime;
 pub use numr::tensor;
 

@@ -18,6 +18,7 @@ fn load_ptx(name: &str) -> Ptx {
 
 /// Module names
 pub const DECODE_ATTENTION_MODULE: &str = "decode_attention";
+pub const KV_INSERT_MODULE: &str = "kv_insert";
 pub const PAGED_DECODE_ATTENTION_MODULE: &str = "paged_decode_attention";
 pub const FLASH_V2_MODULE: &str = "flash_v2";
 pub const FLASH_V2_BWD_MODULE: &str = "flash_v2_bwd";

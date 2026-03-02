@@ -1,7 +1,7 @@
 //! Embedding layer — lookup table for token embeddings
 
 use crate::error::{Error, Result};
-use numr::autograd::{Var, var_gather};
+use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::IndexingOps;
 use numr::runtime::{Runtime, RuntimeClient};
@@ -24,34 +24,21 @@ impl<R: Runtime> Embedding<R> {
     /// Forward: lookup rows from embedding table.
     ///
     /// indices: `[...]` integer tensor, output: `[..., embed_dim]`
+    ///
+    /// Uses `embedding_lookup` which passes all parameters as kernel arguments
+    /// (no device-side shape/stride arrays). This is critical for CUDA graph
+    /// capture compatibility — the previous `gather`-based approach copied
+    /// shape/strides to device via H2D transfers that become stale on graph replay.
     pub fn forward<C>(&self, client: &C, indices: &Tensor<R>) -> Result<Var<R>>
     where
         R: Runtime<DType = DType>,
         C: RuntimeClient<R> + IndexingOps<R>,
         R::Client: IndexingOps<R>,
     {
-        // Flatten indices to 1D, gather from dim 0, then reshape
-        let idx_shape = indices.shape().to_vec();
-        let embed_dim = self.weight.shape()[1];
-
-        // gather along dim=0: each index selects a row
-        // We need indices to be [N, 1] for gather dim=0, then reshape output
-        let n: usize = idx_shape.iter().product();
-        let flat_idx = indices.reshape(&[n]).map_err(Error::Numr)?;
-
-        // Expand indices to [N, embed_dim] for gather
-        let expanded = flat_idx.unsqueeze(1).map_err(Error::Numr)?;
-        let expanded = expanded
-            .broadcast_to(&[n, embed_dim])
+        let out = client
+            .embedding_lookup(self.weight.tensor(), indices)
             .map_err(Error::Numr)?;
-
-        let gathered = var_gather(&self.weight, 0, &expanded, client).map_err(Error::Numr)?;
-
-        // Reshape to [..., embed_dim]
-        let mut out_shape = idx_shape;
-        out_shape.push(embed_dim);
-        let result = numr::autograd::var_reshape(&gathered, &out_shape).map_err(Error::Numr)?;
-        Ok(result)
+        Ok(Var::new(out, false))
     }
 
     pub fn weight(&self) -> &Var<R> {

@@ -288,6 +288,7 @@ fn decode_attention_fwd(
     k: &Tensor<CudaRuntime>,
     v: &Tensor<CudaRuntime>,
     p: &AttentionParams,
+    kv_seq_stride: usize,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let device = q.device();
     let device_index = device.id();
@@ -319,6 +320,7 @@ fn decode_attention_fwd(
     let nh_i32 = p.num_heads as i32;
     let nkv_i32 = p.num_kv_heads as i32;
     let sk_i32 = p.seq_len_k as i32;
+    let stride_i32 = kv_seq_stride as i32;
     let scale = (p.head_dim as f32).sqrt().recip();
 
     let num_blocks = p.batch_size * p.num_heads;
@@ -337,6 +339,7 @@ fn decode_attention_fwd(
         builder.arg(&nh_i32);
         builder.arg(&nkv_i32);
         builder.arg(&sk_i32);
+        builder.arg(&stride_i32);
         builder.arg(&scale);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("decode_attention kernel launch failed: {:?}", e),
@@ -427,16 +430,40 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         head_dim: usize,
         causal: bool,
         window_size: usize,
+        kv_seq_len: Option<usize>,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
-        let p = validate_qkv(q, k, v, num_heads, num_kv_heads, head_dim)?;
+        let mut p = validate_qkv(q, k, v, num_heads, num_kv_heads, head_dim)?;
 
-        // Decode path: S_q=1, use lightweight vec kernel (no tiling overhead)
+        // kv_seq_len override: use actual seq len as loop bound, tensor dim-2 as stride
+        let kv_seq_stride = p.seq_len_k; // memory stride = full capacity
+        if let Some(seq_len) = kv_seq_len {
+            p.seq_len_k = seq_len;
+        }
+
+        // Decode path: S_q=1, use lightweight vec kernel (supports separate stride)
         if p.seq_len_q == 1
             && q.dtype() == DType::F32
             && (head_dim == 64 || head_dim == 128)
             && window_size == 0
         {
-            return decode_attention_fwd(self, q, k, v, &p);
+            return decode_attention_fwd(self, q, k, v, &p, kv_seq_stride);
+        }
+
+        // Flash v2/v3 don't support separate kv_seq_stride — narrow if needed
+        if kv_seq_stride != p.seq_len_k {
+            let k_narrow = k.narrow(2, 0, p.seq_len_k)?.contiguous();
+            let v_narrow = v.narrow(2, 0, p.seq_len_k)?.contiguous();
+            return self.flash_attention_fwd(
+                q,
+                &k_narrow,
+                &v_narrow,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                causal,
+                window_size,
+                None,
+            );
         }
 
         // Try Flash v3 on Hopper (SM 90+) for supported configs

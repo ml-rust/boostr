@@ -12,7 +12,7 @@ fn test_flash_attention_fwd_non_causal_parity() {
     let v = det_tensor(&[b, h, s, d], &cpu_device);
 
     let (cpu_out, _cpu_lse) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0)
+        .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0, None)
         .unwrap();
     let cpu_out_vec = cpu_out.to_vec::<f32>();
 
@@ -24,7 +24,7 @@ fn test_flash_attention_fwd_non_causal_parity() {
         let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let (cuda_out, _) = cuda_client
-            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0)
+            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0, None)
             .unwrap();
         assert_parity_f32(
             &cuda_out.to_vec::<f32>(),
@@ -41,7 +41,7 @@ fn test_flash_attention_fwd_non_causal_parity() {
         let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let (wgpu_out, _) = wgpu_client
-            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0)
+            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0, None)
             .unwrap();
         assert_parity_f32(
             &wgpu_out.to_vec::<f32>(),
@@ -60,7 +60,7 @@ fn test_flash_attention_fwd_causal_parity() {
     let v = det_tensor(&[b, h, s, d], &cpu_device);
 
     let (cpu_out, _) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0)
+        .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None)
         .unwrap();
     let cpu_out_vec = cpu_out.to_vec::<f32>();
 
@@ -72,7 +72,7 @@ fn test_flash_attention_fwd_causal_parity() {
         let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let (cuda_out, _) = cuda_client
-            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0)
+            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0, None)
             .unwrap();
         assert_parity_f32(
             &cuda_out.to_vec::<f32>(),
@@ -89,7 +89,7 @@ fn test_flash_attention_fwd_causal_parity() {
         let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let (wgpu_out, _) = wgpu_client
-            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, true, 0)
+            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, true, 0, None)
             .unwrap();
         assert_parity_f32(
             &wgpu_out.to_vec::<f32>(),
@@ -110,7 +110,7 @@ fn test_flash_attention_fwd_gqa_parity() {
     let v = det_tensor(&[b, num_kv_heads, s, d], &cpu_device);
 
     let (cpu_out, _) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, num_heads, num_kv_heads, d, false, 0)
+        .flash_attention_fwd(&q, &k, &v, num_heads, num_kv_heads, d, false, 0, None)
         .unwrap();
     let cpu_out_vec = cpu_out.to_vec::<f32>();
 
@@ -122,7 +122,7 @@ fn test_flash_attention_fwd_gqa_parity() {
         let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device);
         let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device);
         let (cuda_out, _) = cuda_client
-            .flash_attention_fwd(&q_c, &k_c, &v_c, num_heads, num_kv_heads, d, false, 0)
+            .flash_attention_fwd(&q_c, &k_c, &v_c, num_heads, num_kv_heads, d, false, 0, None)
             .unwrap();
         assert_parity_f32(
             &cuda_out.to_vec::<f32>(),
@@ -139,7 +139,7 @@ fn test_flash_attention_fwd_gqa_parity() {
         let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, s, d], &wgpu_device);
         let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &wgpu_device);
         let (wgpu_out, _) = wgpu_client
-            .flash_attention_fwd(&q_w, &k_w, &v_w, num_heads, num_kv_heads, d, false, 0)
+            .flash_attention_fwd(&q_w, &k_w, &v_w, num_heads, num_kv_heads, d, false, 0, None)
             .unwrap();
         assert_parity_f32(
             &wgpu_out.to_vec::<f32>(),
@@ -158,7 +158,7 @@ fn test_flash_attention_bwd_parity() {
     let v = det_tensor(&[b, h, s, d], &cpu_device);
 
     let (out, lse) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0)
+        .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0, None)
         .unwrap();
     let dout = det_tensor(&[b, h, s, d], &cpu_device);
     let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
@@ -176,7 +176,7 @@ fn test_flash_attention_bwd_parity() {
         let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let (out_c, lse_c) = cuda_client
-            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0)
+            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0, None)
             .unwrap();
         let dout_c = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let (dq_c, dk_c, dv_c) = cuda_client
@@ -207,7 +207,7 @@ fn test_flash_attention_bwd_parity() {
         let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let (out_w, lse_w) = wgpu_client
-            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0)
+            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0, None)
             .unwrap();
         let dout_w = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         // BWD not yet implemented on WebGPU — skip gracefully
@@ -250,7 +250,7 @@ fn test_flash_v2_fwd_matches_reference() {
 
     // CPU flash vs naive reference
     let (cpu_flash_out, _) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0)
+        .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0, None)
         .unwrap();
     assert_parity_f32(
         &cpu_flash_out.to_vec::<f32>(),
@@ -266,7 +266,7 @@ fn test_flash_v2_fwd_matches_reference() {
         let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let (cuda_out, _) = cuda_client
-            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0)
+            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0, None)
             .unwrap();
         assert_parity_f32(
             &cuda_out.to_vec::<f32>(),
@@ -283,7 +283,7 @@ fn test_flash_v2_fwd_matches_reference() {
         let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let (wgpu_out, _) = wgpu_client
-            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0)
+            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0, None)
             .unwrap();
         assert_parity_f32(
             &wgpu_out.to_vec::<f32>(),
@@ -308,7 +308,7 @@ fn test_flash_v2_fwd_causal_matches_reference() {
 
     // CPU flash vs naive causal reference
     let (cpu_flash_out, _) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0)
+        .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None)
         .unwrap();
     assert_parity_f32(
         &cpu_flash_out.to_vec::<f32>(),
@@ -324,7 +324,7 @@ fn test_flash_v2_fwd_causal_matches_reference() {
         let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let (cuda_out, _) = cuda_client
-            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0)
+            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0, None)
             .unwrap();
         assert_parity_f32(
             &cuda_out.to_vec::<f32>(),
@@ -341,7 +341,7 @@ fn test_flash_v2_fwd_causal_matches_reference() {
         let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let (wgpu_out, _) = wgpu_client
-            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, true, 0)
+            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, true, 0, None)
             .unwrap();
         assert_parity_f32(
             &wgpu_out.to_vec::<f32>(),
@@ -364,7 +364,7 @@ fn test_flash_v2_bwd_gradients_nonzero() {
     // CPU: gradients must be nonzero
     use numr::ops::{ReduceOps, UnaryOps};
     let (out, lse) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0)
+        .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0, None)
         .unwrap();
     let (dq, dk, dv) = cpu_client
         .flash_attention_bwd(&dout, &q, &k, &v, &out, &lse, h, h, d, false, 0)
@@ -388,7 +388,7 @@ fn test_flash_v2_bwd_gradients_nonzero() {
         let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let dout_c = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let (out_c, lse_c) = cuda_client
-            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0)
+            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0, None)
             .unwrap();
         let (dq_c, dk_c, dv_c) = cuda_client
             .flash_attention_bwd(&dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, h, h, d, false, 0)
@@ -413,7 +413,7 @@ fn test_flash_v2_bwd_gradients_nonzero() {
         let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let dout_w = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let (out_w, lse_w) = wgpu_client
-            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0)
+            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0, None)
             .unwrap();
         // BWD not yet implemented on WebGPU — skip gracefully
         if let Ok((dq_w, dk_w, dv_w)) = wgpu_client
@@ -448,7 +448,7 @@ fn test_gqa_correctness_various_ratios() {
 
         // CPU correctness
         let (cpu_out, cpu_lse) = cpu_client
-            .flash_attention_fwd(&q, &k, &v, num_heads, num_kv_heads, d, false, 0)
+            .flash_attention_fwd(&q, &k, &v, num_heads, num_kv_heads, d, false, 0, None)
             .unwrap();
         assert_eq!(cpu_out.shape(), &[b, num_heads, s, d]);
         assert_eq!(cpu_lse.shape(), &[b, num_heads, s]);
@@ -489,7 +489,7 @@ fn test_gqa_correctness_various_ratios() {
             let v_c =
                 Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device);
             let (cuda_out, _) = cuda_client
-                .flash_attention_fwd(&q_c, &k_c, &v_c, num_heads, num_kv_heads, d, false, 0)
+                .flash_attention_fwd(&q_c, &k_c, &v_c, num_heads, num_kv_heads, d, false, 0, None)
                 .unwrap();
             assert_parity_f32(
                 &cuda_out.to_vec::<f32>(),
@@ -508,7 +508,7 @@ fn test_gqa_correctness_various_ratios() {
             let v_w =
                 Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &wgpu_device);
             let (wgpu_out, _) = wgpu_client
-                .flash_attention_fwd(&q_w, &k_w, &v_w, num_heads, num_kv_heads, d, false, 0)
+                .flash_attention_fwd(&q_w, &k_w, &v_w, num_heads, num_kv_heads, d, false, 0, None)
                 .unwrap();
             assert_parity_f32(
                 &wgpu_out.to_vec::<f32>(),
@@ -533,10 +533,10 @@ fn test_sliding_window_correctness() {
 
     // CPU: sliding window should differ from full attention and be finite
     let (cpu_win_out, _) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, false, window_size)
+        .flash_attention_fwd(&q, &k, &v, h, h, d, false1, window_size, None)
         .unwrap();
     let (cpu_full_out, _) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0)
+        .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0, None)
         .unwrap();
     let cpu_win_vec = cpu_win_out.to_vec::<f32>();
     let cpu_full_vec = cpu_full_out.to_vec::<f32>();
@@ -559,10 +559,10 @@ fn test_sliding_window_correctness() {
         let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
         let (cuda_win_out, _) = cuda_client
-            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, window_size)
+            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, window_size, None)
             .unwrap();
         let (cuda_full_out, _) = cuda_client
-            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0)
+            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0, None)
             .unwrap();
         // Sliding window vs full should differ on CUDA too
         let cuda_win_vec = cuda_win_out.to_vec::<f32>();
@@ -593,10 +593,10 @@ fn test_sliding_window_correctness() {
         let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
         let (wgpu_win_out, _) = wgpu_client
-            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, window_size)
+            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, window_size, None)
             .unwrap();
         let (wgpu_full_out, _) = wgpu_client
-            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0)
+            .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0, None)
             .unwrap();
         let wgpu_win_vec = wgpu_win_out.to_vec::<f32>();
         let wgpu_full_vec = wgpu_full_out.to_vec::<f32>();

@@ -66,7 +66,24 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
         head_dim: usize,
         causal: bool,
         window_size: usize,
+        kv_seq_len: Option<usize>,
     ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
+        // kv_seq_len override not optimized for WGPU — narrow if needed
+        if let Some(seq_len) = kv_seq_len {
+            let k_narrow = k.narrow(2, 0, seq_len)?.contiguous();
+            let v_narrow = v.narrow(2, 0, seq_len)?.contiguous();
+            return self.flash_attention_fwd(
+                q,
+                &k_narrow,
+                &v_narrow,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                causal,
+                window_size,
+                None,
+            );
+        }
         validate_f32(q, "flash_attention_fwd")?;
         validate_f32(k, "flash_attention_fwd")?;
         validate_f32(v, "flash_attention_fwd")?;

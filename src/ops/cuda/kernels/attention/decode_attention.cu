@@ -140,9 +140,10 @@ extern "C" __global__ void decode_attention_128_fp32(
     const float* __restrict__ V,
     float* __restrict__ O,
     int num_heads, int num_kv_heads,
-    int seq_len_k, float scale
+    int seq_len_k, int kv_seq_stride,
+    float scale
 ) {
-    decode_attention_128_impl(Q, K, V, O, num_heads, num_kv_heads, seq_len_k, seq_len_k, scale);
+    decode_attention_128_impl(Q, K, V, O, num_heads, num_kv_heads, seq_len_k, kv_seq_stride, scale);
 }
 
 extern "C" __global__ void decode_attention_64_fp32(
@@ -151,9 +152,10 @@ extern "C" __global__ void decode_attention_64_fp32(
     const float* __restrict__ V,
     float* __restrict__ O,
     int num_heads, int num_kv_heads,
-    int seq_len_k, float scale
+    int seq_len_k, int kv_seq_stride,
+    float scale
 ) {
-    decode_attention_64_impl(Q, K, V, O, num_heads, num_kv_heads, seq_len_k, seq_len_k, scale);
+    decode_attention_64_impl(Q, K, V, O, num_heads, num_kv_heads, seq_len_k, kv_seq_stride, scale);
 }
 
 // ============================================================================

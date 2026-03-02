@@ -59,6 +59,13 @@ pub trait FlashAttentionOps<R: Runtime> {
     ///
     /// Returns `(output, logsumexp)`. The logsumexp tensor is always F32
     /// and is required for the backward pass.
+    ///
+    /// # `kv_seq_len`
+    ///
+    /// When `Some(n)`, the kernel iterates over only the first `n` positions
+    /// of K/V while using the tensor's dim-2 as the memory stride. This allows
+    /// passing a full-capacity KV cache buffer without copying/narrowing.
+    /// When `None`, `k.shape()[2]` is used for both loop bound and stride.
     fn flash_attention_fwd(
         &self,
         q: &Tensor<R>,
@@ -69,6 +76,7 @@ pub trait FlashAttentionOps<R: Runtime> {
         head_dim: usize,
         causal: bool,
         window_size: usize,
+        kv_seq_len: Option<usize>,
     ) -> Result<(Tensor<R>, Tensor<R>)>;
 
     /// Flash Attention forward pass for FP8 tensors

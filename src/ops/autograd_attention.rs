@@ -122,6 +122,7 @@ where
         head_dim,
         causal,
         window_size,
+        None,
     )?;
 
     if q.requires_grad() || k.requires_grad() || v.requires_grad() {

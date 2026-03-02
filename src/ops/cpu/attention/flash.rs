@@ -255,7 +255,27 @@ impl FlashAttentionOps<CpuRuntime> for CpuClient {
         head_dim: usize,
         causal: bool,
         window_size: usize,
+        kv_seq_len: Option<usize>,
     ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+        // If kv_seq_len override provided, narrow K/V to actual seq len first
+        if let Some(seq_len) = kv_seq_len {
+            let k_narrow = k.narrow(2, 0, seq_len)?;
+            let v_narrow = v.narrow(2, 0, seq_len)?;
+            let k_c = k_narrow.contiguous();
+            let v_c = v_narrow.contiguous();
+            return self.flash_attention_fwd(
+                q,
+                &k_c,
+                &v_c,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                causal,
+                window_size,
+                None,
+            );
+        }
+
         // Fast path: fused decode attention for S_q=1 (single token generation)
         // Avoids all intermediate tensor allocations and GQA expansion
         let seq_len_q = q.shape()[2];
@@ -377,7 +397,7 @@ mod tests {
         let v = rand_tensor(&[b, h, s, d], &client, &device);
 
         let (out, lse) = client
-            .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0)
+            .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0, None)
             .unwrap();
         assert_eq!(out.shape(), &[b, h, s, d]);
         assert_eq!(lse.shape(), &[b, h, s]);
@@ -392,10 +412,10 @@ mod tests {
         let v = rand_tensor(&[b, h, s, d], &client, &device);
 
         let (out_causal, _) = client
-            .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0)
+            .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None)
             .unwrap();
         let (out_full, _) = client
-            .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0)
+            .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0, None)
             .unwrap();
 
         // Causal and full should differ (unless trivial inputs)
@@ -418,10 +438,10 @@ mod tests {
         let v = rand_tensor(&[b, h, s, d], &client, &device);
 
         let (out_window, _) = client
-            .flash_attention_fwd(&q, &k, &v, h, h, d, false, 4)
+            .flash_attention_fwd(&q, &k, &v, h, h, d, false, 4, None)
             .unwrap();
         let (out_full, _) = client
-            .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0)
+            .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0, None)
             .unwrap();
 
         let ow = out_window.to_vec::<f32>();
@@ -446,7 +466,7 @@ mod tests {
         let v = rand_tensor(&[b, nkv, s, d], &client, &device);
 
         let (out, lse) = client
-            .flash_attention_fwd(&q, &k, &v, h, nkv, d, false, 0)
+            .flash_attention_fwd(&q, &k, &v, h, nkv, d, false, 0, None)
             .unwrap();
         assert_eq!(out.shape(), &[b, h, s, d]);
         assert_eq!(lse.shape(), &[b, h, s]);
@@ -461,7 +481,7 @@ mod tests {
         let v = rand_tensor(&[b, h, s, d], &client, &device);
 
         let (out, lse) = client
-            .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0)
+            .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0, None)
             .unwrap();
         let dout = rand_tensor(&[b, h, s, d], &client, &device);
 
@@ -487,7 +507,7 @@ mod tests {
         let v = rand_tensor(&[b, h, s, d], &client, &device);
 
         let (out, lse) = client
-            .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0)
+            .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None)
             .unwrap();
         let dout = rand_tensor(&[b, h, s, d], &client, &device);
 
@@ -508,7 +528,7 @@ mod tests {
         let v = rand_tensor(&[b, nkv, s, d], &client, &device);
 
         let (out, lse) = client
-            .flash_attention_fwd(&q, &k, &v, h, nkv, d, false, 0)
+            .flash_attention_fwd(&q, &k, &v, h, nkv, d, false, 0, None)
             .unwrap();
         let dout = rand_tensor(&[b, h, s, d], &client, &device);
 

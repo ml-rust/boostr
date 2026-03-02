@@ -101,6 +101,7 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
             head_dim,
             causal,
             0,
+            None,
         )
     }
 

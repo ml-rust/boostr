@@ -242,9 +242,13 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 shared_mem_bytes: 0,
             };
 
-            // For Q4_K and Q6_K: use dp4a path with multi-warp K-reduction (MWR)
+            // For Q4_K, Q6_K, Q8_0: use dp4a path with multi-warp K-reduction (MWR)
             // 4 warps cooperate on K-dimension per output column, reduce via shared memory
-            if matches!(weight.format(), QuantFormat::Q4K | QuantFormat::Q6K) && k % 32 == 0 {
+            if matches!(
+                weight.format(),
+                QuantFormat::Q4K | QuantFormat::Q6K | QuantFormat::Q8_0
+            ) && k % 32 == 0
+            {
                 let q8_buf = quantize_activation_q8_1(self, &act_contig, m, k)?;
                 let q8_ptr = q8_buf.ptr();
                 let weight_ptr = weight.storage().ptr();
@@ -252,6 +256,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 let kernel_name = match weight.format() {
                     QuantFormat::Q4K => "quant_gemv_q4_k_q8_1_mwr",
                     QuantFormat::Q6K => "quant_gemv_q6_k_q8_1_mwr",
+                    QuantFormat::Q8_0 => "quant_gemv_q8_0_q8_1_mwr",
                     _ => unreachable!(),
                 };
 
@@ -390,10 +395,13 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         let m = total_elements / k;
         let act_contig = activation.contiguous();
 
-        // Check if all weights support dp4a (Q4_K and Q6_K)
-        let all_dp4a = weights
-            .iter()
-            .all(|w| matches!(w.format(), QuantFormat::Q4K | QuantFormat::Q6K));
+        // Check if all weights support dp4a (Q4_K, Q6_K, Q8_0)
+        let all_dp4a = weights.iter().all(|w| {
+            matches!(
+                w.format(),
+                QuantFormat::Q4K | QuantFormat::Q6K | QuantFormat::Q8_0
+            )
+        });
         let use_dp4a = all_dp4a && m <= 4 && k % 32 == 0;
 
         if use_dp4a {
@@ -409,6 +417,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 kernels::get_or_load_module(self.context(), device_index, QUANT_GEMV_MODULE)?;
             let func_q4k = kernels::get_kernel_function(&module, "quant_gemv_q4_k_q8_1_mwr")?;
             let func_q6k = kernels::get_kernel_function(&module, "quant_gemv_q6_k_q8_1_mwr")?;
+            let func_q8_0 = kernels::get_kernel_function(&module, "quant_gemv_q8_0_q8_1_mwr")?;
 
             let mut results = Vec::with_capacity(weights.len());
             for w in weights {
@@ -427,6 +436,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 let func = match w.format() {
                     QuantFormat::Q4K => &func_q4k,
                     QuantFormat::Q6K => &func_q6k,
+                    QuantFormat::Q8_0 => &func_q8_0,
                     _ => unreachable!(),
                 };
 
@@ -511,7 +521,10 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
 
         // Use fused kernel for GEMV path (decode + short prefill)
         let use_fused = m <= 64
-            && matches!(gate_weight.format(), QuantFormat::Q4K | QuantFormat::Q6K)
+            && matches!(
+                gate_weight.format(),
+                QuantFormat::Q4K | QuantFormat::Q6K | QuantFormat::Q8_0
+            )
             && k % 32 == 0;
 
         if use_fused {
@@ -523,6 +536,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             let kernel_name = match gate_weight.format() {
                 QuantFormat::Q4K => "fused_swiglu_q4k_q8_1_mwr",
                 QuantFormat::Q6K => "fused_swiglu_q6k_q8_1_mwr",
+                QuantFormat::Q8_0 => "fused_swiglu_q8_0_q8_1_mwr",
                 _ => unreachable!(),
             };
 

@@ -94,10 +94,17 @@ pub fn quant_matmul_f32(
     // Output is written via unsafe pointer arithmetic to disjoint column ranges.
     let output_ptr = output.as_mut_ptr() as usize; // usize is Send+Sync
 
-    // Q4_K and Q6_K have dedicated AVX2 fused dequant+dot kernels
+    // Q4_K, Q6_K have dedicated AVX2 fused dequant+dot kernels
     let use_fused = matches!(format, QuantFormat::Q4K | QuantFormat::Q6K);
 
-    // Check if we can use Q8_K integer maddubs path (4x throughput vs f32 FMA)
+    // Q8_0 also uses Q8_K activation quantization + integer dot product
+    // NOTE: Q8_0 intentionally NOT routed to Q8_K integer path.
+    // Q8_K uses one scale per 256 elements, but Q8_0 has per-32-element scales.
+    // The coarser Q8_K quantization of activations introduces too much error (~5-25% per dot),
+    // which compounds across 32 transformer layers and produces incoherent output.
+    // Q4_K/Q6_K work because their sub-block structure aligns with Q8_K's 256-element blocks.
+
+    // Check if we can use Q8_K integer path (4x throughput vs f32 FMA)
     let use_q8k = use_fused && k % 256 == 0;
 
     // Pre-quantize activation rows to Q8_K (one per M row) if using integer path

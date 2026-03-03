@@ -1039,3 +1039,177 @@ extern "C" __global__ __launch_bounds__(128, 1) void fused_swiglu_q6k_q8_1_mwr(
 
     if (lane_id == 0) output[m * N + col] = silu_f(gate_sum) * up_sum;
 }
+
+// ============================================================================
+// Q8_0 GEMV with dp4a (Q8_0 weight × Q8_1 activation)
+//
+// Q8_0 block = 34 bytes per 32 elements: [d: f16 (2B), qs: i8×32 (32B)]
+// Q8_1 block = 36 bytes per 32 elements: [d: f16 (2B), s: f16 (2B), qs: i8×32 (32B)]
+//
+// 1:1 block mapping (both 32 elements). Each 8-lane chunk covers one block pair
+// (8 lanes × 4 bytes dp4a = 32 elements). 4 chunks per warp = 4 blocks per warp
+// per iteration. Much simpler than Q4_K: no nibble unpacking, no scales/mins.
+//
+// MWR4: 128 threads = 4 warps cooperating on K, 1 block per output column.
+// ============================================================================
+
+extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    const int warp_id = threadIdx.x / WARP_SIZE;
+    const int lane_id = threadIdx.x % WARP_SIZE;
+    const int col = blockIdx.x;
+    const int m = blockIdx.y;
+    if (col >= N) return;
+
+    // Follow Q4_K structure exactly: virtual super-blocks of 8 Q8_0 blocks (256 elements)
+    const int sbpr = K / 256;  // super-blocks per row
+    const int q8_bpr = K / 32; // Q8_1 blocks per row
+
+    const unsigned char* w_row = weight + (unsigned long long)col * q8_bpr * 34;
+    const unsigned char* q8_row = q8_act + (unsigned long long)m * q8_bpr * 36;
+
+    const int chunk = lane_id / 8;
+    const int pos = (lane_id % 8) * 4;
+    const int j_lo = chunk * 2;      // same as Q4_K
+    const int j_hi = chunk * 2 + 1;
+
+    float acc = 0.0f;
+
+    // Each warp strides over super-blocks with step NWARPS_K (same as Q4_K)
+    for (int sb = warp_id; sb < sbpr; sb += NWARPS_K) {
+        // Two Q8_0 sub-blocks per chunk (j_lo, j_hi), same pattern as Q4_K
+        int q8_0_idx_lo = sb * 8 + j_lo;
+        int q8_0_idx_hi = sb * 8 + j_hi;
+
+        const unsigned char* wblk_lo = w_row + q8_0_idx_lo * 34;
+        const unsigned char* wblk_hi = w_row + q8_0_idx_hi * 34;
+
+        float dw_lo = __half2float(*(const __half*)wblk_lo);
+        float dw_hi = __half2float(*(const __half*)wblk_hi);
+        int w_lo = load_int_ua(wblk_lo + 2 + pos);
+        int w_hi = load_int_ua(wblk_hi + 2 + pos);
+
+        int q8_idx_lo = sb * 8 + j_lo;
+        int q8_idx_hi = sb * 8 + j_hi;
+        float da_lo = __half2float(*(const __half*)(q8_row + q8_idx_lo * 36));
+        float da_hi = __half2float(*(const __half*)(q8_row + q8_idx_hi * 36));
+        int a_lo = *(const int*)(q8_row + q8_idx_lo * 36 + 4 + pos);
+        int a_hi = *(const int*)(q8_row + q8_idx_hi * 36 + 4 + pos);
+
+        acc += dw_lo * da_lo * (float)dp4a(w_lo, a_lo, 0)
+             + dw_hi * da_hi * (float)dp4a(w_hi, a_hi, 0);
+    }
+
+    // Multi-warp reduction via shared memory (identical to Q4_K)
+    __shared__ float smem[NWARPS_K][WARP_SIZE];
+    smem[warp_id][lane_id] = acc;
+    __syncthreads();
+
+    if (warp_id != 0) return;
+
+    float sum = smem[0][lane_id];
+    #pragma unroll
+    for (int w = 1; w < NWARPS_K; w++)
+        sum += smem[w][lane_id];
+
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+        sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
+
+    if (lane_id == 0) output[m * N + col] = sum;
+}
+
+// ============================================================================
+// Fused SwiGLU GEMV for Q8_0 weights (Q8_0 × Q8_1 dp4a)
+// Same MWR pattern: reads Q8_1 activation once, computes gate+up dot products,
+// applies silu(gate) * up.
+// ============================================================================
+
+extern "C" __global__ __launch_bounds__(128, 1) void fused_swiglu_q8_0_q8_1_mwr(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ gate_weight,
+    const unsigned char* __restrict__ up_weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    const int warp_id = threadIdx.x / WARP_SIZE;
+    const int lane_id = threadIdx.x % WARP_SIZE;
+    const int col = blockIdx.x;
+    const int m = blockIdx.y;
+    if (col >= N) return;
+
+    // Follow Q4_K structure: virtual super-blocks of 8 Q8_0 blocks (256 elements)
+    const int sbpr = K / 256;
+    const int q8_bpr = K / 32;
+
+    const unsigned char* g_row = gate_weight + (unsigned long long)col * q8_bpr * 34;
+    const unsigned char* u_row = up_weight   + (unsigned long long)col * q8_bpr * 34;
+    const unsigned char* q8_row = q8_act + (unsigned long long)m * q8_bpr * 36;
+
+    const int chunk = lane_id / 8;
+    const int pos = (lane_id % 8) * 4;
+    const int j_lo = chunk * 2;
+    const int j_hi = chunk * 2 + 1;
+
+    float gate_acc = 0.0f;
+    float up_acc = 0.0f;
+
+    for (int sb = warp_id; sb < sbpr; sb += NWARPS_K) {
+        int idx_lo = sb * 8 + j_lo;
+        int idx_hi = sb * 8 + j_hi;
+
+        // Q8_1 activation (read ONCE for both projections)
+        float da_lo = __half2float(*(const __half*)(q8_row + idx_lo * 36));
+        float da_hi = __half2float(*(const __half*)(q8_row + idx_hi * 36));
+        int a_lo = *(const int*)(q8_row + idx_lo * 36 + 4 + pos);
+        int a_hi = *(const int*)(q8_row + idx_hi * 36 + 4 + pos);
+
+        // Gate weight
+        const unsigned char* gblk_lo = g_row + idx_lo * 34;
+        const unsigned char* gblk_hi = g_row + idx_hi * 34;
+        float gd_lo = __half2float(*(const __half*)gblk_lo);
+        float gd_hi = __half2float(*(const __half*)gblk_hi);
+        int gw_lo = load_int_ua(gblk_lo + 2 + pos);
+        int gw_hi = load_int_ua(gblk_hi + 2 + pos);
+        gate_acc += gd_lo * da_lo * (float)dp4a(gw_lo, a_lo, 0)
+                  + gd_hi * da_hi * (float)dp4a(gw_hi, a_hi, 0);
+
+        // Up weight
+        const unsigned char* ublk_lo = u_row + idx_lo * 34;
+        const unsigned char* ublk_hi = u_row + idx_hi * 34;
+        float ud_lo = __half2float(*(const __half*)ublk_lo);
+        float ud_hi = __half2float(*(const __half*)ublk_hi);
+        int uw_lo = load_int_ua(ublk_lo + 2 + pos);
+        int uw_hi = load_int_ua(ublk_hi + 2 + pos);
+        up_acc += ud_lo * da_lo * (float)dp4a(uw_lo, a_lo, 0)
+                + ud_hi * da_hi * (float)dp4a(uw_hi, a_hi, 0);
+    }
+
+    // Multi-warp reduction (2 accumulators)
+    __shared__ float smem[2][NWARPS_K][WARP_SIZE];
+    smem[0][warp_id][lane_id] = gate_acc;
+    smem[1][warp_id][lane_id] = up_acc;
+    __syncthreads();
+
+    if (warp_id != 0) return;
+
+    float gate_sum = smem[0][0][lane_id];
+    float up_sum = smem[1][0][lane_id];
+    #pragma unroll
+    for (int w = 1; w < NWARPS_K; w++) {
+        gate_sum += smem[0][w][lane_id];
+        up_sum += smem[1][w][lane_id];
+    }
+
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+        gate_sum += __shfl_down_sync(0xFFFFFFFF, gate_sum, offset);
+        up_sum += __shfl_down_sync(0xFFFFFFFF, up_sum, offset);
+    }
+
+    if (lane_id == 0) output[m * N + col] = silu_f(gate_sum) * up_sum;
+}

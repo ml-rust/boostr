@@ -119,6 +119,7 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
 
         // MLP — defer the residual add to the next layer
         let mlp_out = self.mlp.forward(client, &normed)?;
+
         Ok((h, mlp_out))
     }
 
@@ -227,8 +228,8 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         let k = var_contiguous(&k);
 
         // Apply fused RoPE to Q and K (single kernel per tensor on CUDA)
-        let q = client.apply_rope(&q, rope.cos_cache(), rope.sin_cache())?;
-        let k = client.apply_rope(&k, rope.cos_cache(), rope.sin_cache())?;
+        let q = client.apply_rope_interleaved(&q, rope.cos_cache(), rope.sin_cache())?;
+        let k = client.apply_rope_interleaved(&k, rope.cos_cache(), rope.sin_cache())?;
 
         // GQA: repeat K/V heads to match Q heads
         let (k, v) = if self.num_kv_heads < self.num_heads {
@@ -307,8 +308,8 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
         let sin_offset = var_narrow(rope.sin_cache(), 0, position, seq_len).map_err(Error::Numr)?;
 
-        let q = client.apply_rope(&q, &cos_offset, &sin_offset)?;
-        let k = client.apply_rope(&k, &cos_offset, &sin_offset)?;
+        let q = client.apply_rope_interleaved(&q, &cos_offset, &sin_offset)?;
+        let k = client.apply_rope_interleaved(&k, &cos_offset, &sin_offset)?;
 
         // V also needs to be contiguous for flash attention kernel
         let v = var_contiguous(&v);
@@ -406,8 +407,8 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
         let sin_offset = var_narrow(rope.sin_cache(), 0, position, seq_len).map_err(Error::Numr)?;
 
-        let q = client.apply_rope(&q, &cos_offset, &sin_offset)?;
-        let k = client.apply_rope(&k, &cos_offset, &sin_offset)?;
+        let q = client.apply_rope_interleaved(&q, &cos_offset, &sin_offset)?;
+        let k = client.apply_rope_interleaved(&k, &cos_offset, &sin_offset)?;
 
         // Reshape K/V from [B, H_kv, S, D] to [B*S, H_kv, D] for paged cache update
         let k_flat = k
@@ -489,9 +490,10 @@ impl<R: Runtime<DType = DType>> LlamaMlp<R> {
         let gate_up =
             MaybeQuantLinear::forward_batch(&[&self.gate_proj, &self.up_proj], client, x)?;
         let (gate, up) = (&gate_up[0], &gate_up[1]);
-        let hidden = var_silu_mul(gate, up, client).map_err(Error::Numr)?;
 
-        self.down_proj.forward(client, &hidden)
+        let hidden = var_silu_mul(gate, up, client).map_err(Error::Numr)?;
+        let result = self.down_proj.forward(client, &hidden)?;
+        Ok(result)
     }
 }
 
@@ -611,8 +613,8 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
         let v = var_contiguous(&v);
 
         // Apply RoPE using the stable cos/sin slices (updated before each replay)
-        let q = client.apply_rope(&q, cos_slice, sin_slice)?;
-        let k = client.apply_rope(&k, cos_slice, sin_slice)?;
+        let q = client.apply_rope_interleaved(&q, cos_slice, sin_slice)?;
+        let k = client.apply_rope_interleaved(&k, cos_slice, sin_slice)?;
 
         // Insert K/V into the full-capacity cache at the device-side write_pos
         kv_insert(

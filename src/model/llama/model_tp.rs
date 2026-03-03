@@ -13,7 +13,7 @@ use crate::model::config::ModelConfig;
 use crate::model::traits::ModelClient;
 use crate::nn::{RmsNorm, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
-use crate::ops::impl_generic::attention::rope::apply_rope_impl;
+use crate::ops::impl_generic::attention::rope::apply_rope_interleaved_impl;
 use numr::autograd::{Var, var_add, var_mul, var_reshape, var_silu};
 use numr::dtype::DType;
 use numr::ops::{
@@ -439,8 +439,8 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
         let v = var_contiguous(&v);
 
         // RoPE on Q and K
-        let q = apply_rope_impl(client, &q, rope.cos_cache(), rope.sin_cache())?;
-        let k = apply_rope_impl(client, &k, rope.cos_cache(), rope.sin_cache())?;
+        let q = apply_rope_interleaved_impl(client, &q, rope.cos_cache(), rope.sin_cache())?;
+        let k = apply_rope_interleaved_impl(client, &k, rope.cos_cache(), rope.sin_cache())?;
 
         // GQA repeat KV if needed (local heads)
         let (k, v) = if self.num_kv_heads < self.num_heads {

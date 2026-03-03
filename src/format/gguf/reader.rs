@@ -239,11 +239,25 @@ impl Gguf {
                 })
                 .collect(),
             other => {
-                return Err(Error::ModelError {
+                // Dequantize quantized types to f32
+                let format = other.to_quant_format().ok_or_else(|| Error::ModelError {
                     reason: format!(
-                        "tensor '{name}' has quantized type {other:?}, use load_tensor_quantized"
+                        "tensor '{name}' has type {other:?} which cannot be dequantized"
                     ),
-                });
+                })?;
+                let numel: usize = shape.iter().product();
+                let block_size = format.block_size();
+                let block_bytes = format.block_bytes();
+                let row_k = info.shape[0]; // innermost dim (before reversal) = K per row
+                let row_bytes = row_k / block_size * block_bytes;
+                let n_rows = numel / row_k;
+                let mut data = vec![0.0f32; numel];
+                for row in 0..n_rows {
+                    let src = &bytes[row * row_bytes..(row + 1) * row_bytes];
+                    let dst = &mut data[row * row_k..(row + 1) * row_k];
+                    crate::quant::cpu::kernels::quant_matmul::dequant_row_f32(src, dst, format);
+                }
+                data
             }
         };
 

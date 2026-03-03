@@ -199,6 +199,36 @@ impl QuantFormat {
         }
     }
 
+    /// Internal format ID for generic CUDA kernel dispatch.
+    /// Must match FMT_* constants in dequant_generic.cu.
+    pub const fn format_id(self) -> u32 {
+        match self {
+            Self::Q4_0 => 0,
+            Self::Q4_1 => 1,
+            Self::Q5_0 => 2,
+            Self::Q5_1 => 3,
+            Self::Q8_0 => 4,
+            Self::Q8_1 => 5,
+            Self::Q2K => 6,
+            Self::Q3K => 7,
+            Self::Q4K => 8,
+            Self::Q5K => 9,
+            Self::Q6K => 10,
+            Self::Q8K => 11,
+            Self::IQ1S => 12,
+            Self::IQ1M => 13,
+            Self::IQ2XXS => 14,
+            Self::IQ2XS => 15,
+            Self::IQ2S => 16,
+            Self::IQ3XXS => 17,
+            Self::IQ3S => 18,
+            Self::IQ4NL => 19,
+            Self::IQ4XS => 20,
+            Self::TQ1_0 => 21,
+            Self::TQ2_0 => 22,
+        }
+    }
+
     /// Construct from GGML type ID
     pub fn from_ggml_type_id(id: u32) -> Result<Self> {
         match id {

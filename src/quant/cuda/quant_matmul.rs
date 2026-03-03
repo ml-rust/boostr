@@ -11,7 +11,9 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::int4_gemm as int4_dispatch;
-use super::kernels::{self, QUANT_ACT_MODULE, QUANT_GEMV_MODULE, QUANT_MATMUL_MODULE};
+use super::kernels::{
+    self, QUANT_ACT_MODULE, QUANT_GEMV_MODULE, QUANT_MATMUL_GENERIC_MODULE, QUANT_MATMUL_MODULE,
+};
 
 /// Validate input is F32 and extract (M, K).
 fn validate_input_cuda(input: &Tensor<CudaRuntime>) -> Result<(usize, usize)> {
@@ -293,10 +295,9 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                     QuantFormat::Q8_0 => "quant_gemv_q8_0_f32",
                     QuantFormat::Q4K => "quant_gemv_q4_k_f32",
                     QuantFormat::Q6K => "quant_gemv_q6_k_f32",
-                    other => {
-                        return Err(Error::UnsupportedQuantFormat {
-                            format: format!("{} (CUDA quant_gemv not implemented)", other),
-                        });
+                    _ => {
+                        // Generic fallback: dequant weight to f32, then standard matmul
+                        return quant_matmul_via_dequant(self, activation, weight);
                     }
                 };
 
@@ -326,10 +327,9 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 QuantFormat::Q8_0 => "quant_matmul_q8_0_f32",
                 QuantFormat::Q4K => "quant_matmul_q4_k_f32",
                 QuantFormat::Q6K => "quant_matmul_q6_k_f32",
-                other => {
-                    return Err(Error::UnsupportedQuantFormat {
-                        format: format!("{} (CUDA quant_matmul not implemented)", other),
-                    });
+                _ => {
+                    // Generic fallback: dequant weight to f32, then standard matmul
+                    return quant_matmul_via_dequant(self, activation, weight);
                 }
             };
 
@@ -573,4 +573,61 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             self.silu_mul(&gate, &up).map_err(Error::Numr)
         }
     }
+}
+
+/// Generic fallback: fused dequant+dot CUDA kernel for all quant formats.
+/// Dequantizes weight blocks in registers during matmul — never materializes full f32 weight.
+/// Used for quant formats without dedicated CUDA GEMM/GEMV kernels.
+fn quant_matmul_via_dequant(
+    client: &CudaClient,
+    activation: &Tensor<CudaRuntime>,
+    weight: &QuantTensor<CudaRuntime>,
+) -> Result<Tensor<CudaRuntime>> {
+    let a_shape = activation.shape();
+    let w_shape = weight.shape();
+    let n = w_shape[0];
+    let k = w_shape[1];
+    let total: usize = a_shape.iter().product();
+    let m = total / k;
+
+    let act_contig = activation.contiguous();
+    let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
+    out_shape.push(n);
+    let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, activation.device());
+
+    let device_index = activation.device().id();
+    let module =
+        kernels::get_or_load_module(client.context(), device_index, QUANT_MATMUL_GENERIC_MODULE)?;
+    let func = kernels::get_kernel_function(&module, "quant_matmul_generic_f32")?;
+
+    let act_ptr = act_contig.ptr();
+    let weight_ptr = weight.storage().ptr();
+    let output_ptr = output.ptr();
+    let m_u32 = m as u32;
+    let k_u32 = k as u32;
+    let n_u32 = n as u32;
+    let format_id = weight.format().format_id();
+
+    // Grid: (N, M, 1), Block: (32, 1, 1) — one warp per output element
+    let cfg = LaunchConfig {
+        grid_dim: (n_u32, m_u32, 1),
+        block_dim: (32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    unsafe {
+        let mut builder = client.stream().launch_builder(&func);
+        builder.arg(&act_ptr);
+        builder.arg(&weight_ptr);
+        builder.arg(&output_ptr);
+        builder.arg(&m_u32);
+        builder.arg(&k_u32);
+        builder.arg(&n_u32);
+        builder.arg(&format_id);
+        builder.launch(cfg).map_err(|e| Error::QuantError {
+            reason: format!("CUDA quant_matmul_generic_f32 launch failed: {:?}", e),
+        })?;
+    }
+
+    Ok(output)
 }

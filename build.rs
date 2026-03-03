@@ -31,6 +31,18 @@ fn compile_cuda_kernels() {
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
+            "dequant_generic.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels"),
+            "quant_matmul_generic.cu",
+            "sm_75",
+            true,
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels"),
             "quant_matmul.cu",
             "sm_75",
             true,

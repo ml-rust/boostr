@@ -18,6 +18,8 @@ fn load_ptx(name: &str) -> Ptx {
 
 /// Module names
 pub const DEQUANT_MODULE: &str = "dequant";
+pub const DEQUANT_GENERIC_MODULE: &str = "dequant_generic";
+pub const QUANT_MATMUL_GENERIC_MODULE: &str = "quant_matmul_generic";
 pub const QUANT_MATMUL_MODULE: &str = "quant_matmul";
 pub const QUANT_GEMV_MODULE: &str = "quant_gemv";
 pub const INT4_GEMM_MODULE: &str = "int4_gemm";

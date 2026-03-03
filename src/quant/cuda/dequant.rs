@@ -11,7 +11,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::kernels::{self, DEQUANT_MODULE};
+use super::kernels::{self, DEQUANT_GENERIC_MODULE, DEQUANT_MODULE};
 use super::nf4 as nf4_dispatch;
 
 impl DequantOps<CudaRuntime> for CudaClient {
@@ -90,29 +90,9 @@ impl DequantOps<CudaRuntime> for CudaClient {
             QuantFormat::Q8_0 => "dequant_q8_0_f32",
             QuantFormat::Q4K => "dequant_q4_k_f32",
             QuantFormat::Q6K => "dequant_q6_k_f32",
-            // IQ/TQ formats currently lack native CUDA kernels
-            QuantFormat::IQ4NL
-            | QuantFormat::IQ4XS
-            | QuantFormat::IQ2XXS
-            | QuantFormat::IQ2XS
-            | QuantFormat::IQ2S
-            | QuantFormat::IQ3XXS
-            | QuantFormat::IQ3S
-            | QuantFormat::IQ1S
-            | QuantFormat::IQ1M
-            | QuantFormat::TQ1_0
-            | QuantFormat::TQ2_0 => {
-                return Err(Error::UnsupportedQuantFormat {
-                    format: format!(
-                        "{}: no native CUDA kernel available. Use CPU runtime for IQ/TQ formats.",
-                        qt.format()
-                    ),
-                });
-            }
-            other => {
-                return Err(Error::UnsupportedQuantFormat {
-                    format: format!("{} (CUDA dequant not implemented)", other),
-                });
+            // All other formats: use generic dequant kernel (format dispatch via switch)
+            _ => {
+                return dequant_via_generic_kernel(self, qt, target_dtype);
             }
         };
 
@@ -155,5 +135,56 @@ impl DequantOps<CudaRuntime> for CudaClient {
         } else {
             self.cast(&f32_out, target_dtype).map_err(Error::Numr)
         }
+    }
+}
+
+/// Dequantize using the generic CUDA kernel that handles all 23 formats
+/// via format_id dispatch. Slower than dedicated kernels but universally correct.
+fn dequant_via_generic_kernel(
+    client: &CudaClient,
+    qt: &QuantTensor<CudaRuntime>,
+    target_dtype: DType,
+) -> Result<Tensor<CudaRuntime>> {
+    let num_blocks = qt.num_blocks();
+    let device_index = qt.device().id();
+
+    let input_ptr = qt.storage().ptr();
+    let f32_out = Tensor::<CudaRuntime>::empty(qt.shape(), DType::F32, qt.device());
+    let output_ptr = f32_out.ptr();
+
+    let module =
+        kernels::get_or_load_module(client.context(), device_index, DEQUANT_GENERIC_MODULE)?;
+    let func = kernels::get_kernel_function(&module, "dequant_generic_f32")?;
+
+    let threads = 256u32;
+    let grid_size = (num_blocks as u32).div_ceil(threads);
+    let num_blocks_u32 = num_blocks as u32;
+    let format_id = qt.format().format_id();
+
+    let cfg = LaunchConfig {
+        grid_dim: (grid_size, 1, 1),
+        block_dim: (threads, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    unsafe {
+        let mut builder = client.stream().launch_builder(&func);
+        builder.arg(&input_ptr);
+        builder.arg(&output_ptr);
+        builder.arg(&num_blocks_u32);
+        builder.arg(&format_id);
+        builder.launch(cfg).map_err(|e| Error::QuantError {
+            reason: format!(
+                "CUDA dequant_generic kernel launch failed for {}: {:?}",
+                qt.format(),
+                e
+            ),
+        })?;
+    }
+
+    if target_dtype == DType::F32 {
+        Ok(f32_out)
+    } else {
+        client.cast(&f32_out, target_dtype).map_err(Error::Numr)
     }
 }

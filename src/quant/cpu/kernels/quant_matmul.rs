@@ -15,7 +15,7 @@
 
 use rayon::prelude::*;
 
-use super::dequant;
+use super::{dequant, dequant_iq, dequant_k_quants};
 use crate::quant::QuantFormat;
 
 /// f32 dot product with SIMD acceleration when available.
@@ -94,17 +94,15 @@ pub fn quant_matmul_f32(
     // Output is written via unsafe pointer arithmetic to disjoint column ranges.
     let output_ptr = output.as_mut_ptr() as usize; // usize is Send+Sync
 
-    // Q4_K, Q6_K have dedicated AVX2 fused dequant+dot kernels
-    let use_fused = matches!(format, QuantFormat::Q4K | QuantFormat::Q6K);
+    // K-quants with dedicated fused dequant+dot kernels
+    let use_fused = matches!(
+        format,
+        QuantFormat::Q2K | QuantFormat::Q3K | QuantFormat::Q4K | QuantFormat::Q6K
+    );
 
-    // Q8_0 also uses Q8_K activation quantization + integer dot product
-    // NOTE: Q8_0 intentionally NOT routed to Q8_K integer path.
-    // Q8_K uses one scale per 256 elements, but Q8_0 has per-32-element scales.
-    // The coarser Q8_K quantization of activations introduces too much error (~5-25% per dot),
-    // which compounds across 32 transformer layers and produces incoherent output.
-    // Q4_K/Q6_K work because their sub-block structure aligns with Q8_K's 256-element blocks.
-
-    // Check if we can use Q8_K integer path (4x throughput vs f32 FMA)
+    // Q8_K integer dot product path — quantize activations to Q8_K then integer arithmetic.
+    // Matches llama.cpp's approach for K-quant formats.
+    // NOTE: Q8_0 intentionally NOT routed here (per-32 scales vs Q8_K's per-256 scales).
     let use_q8k = use_fused && k % 256 == 0;
 
     // Pre-quantize activation rows to Q8_K (one per M row) if using integer path
@@ -203,6 +201,8 @@ pub fn quant_matmul_f32(
 /// Fused dot product dispatch for formats with SIMD fused kernels
 fn fused_dot_dispatch(act_row: &[f32], row_data: &[u8], k: usize, format: QuantFormat) -> f32 {
     match format {
+        QuantFormat::Q2K => super::simd::fused_q2k_dot::fused_dot_q2k(act_row, row_data, k),
+        QuantFormat::Q3K => super::simd::fused_q3k_dot::fused_dot_q3k(act_row, row_data, k),
         QuantFormat::Q4K => super::simd::fused_q4k_dot::fused_dot_q4k(act_row, row_data, k),
         QuantFormat::Q6K => super::simd::fused_q6k_dot::fused_dot_q6k(act_row, row_data, k),
         _ => unreachable!(),
@@ -212,6 +212,8 @@ fn fused_dot_dispatch(act_row: &[f32], row_data: &[u8], k: usize, format: QuantF
 /// Q8_K integer dot product dispatch (maddubs path)
 fn fused_dot_q8k_dispatch(act_q8k: &[u8], row_data: &[u8], k: usize, format: QuantFormat) -> f32 {
     match format {
+        QuantFormat::Q2K => super::simd::fused_q2k_q8k_dot::fused_dot_q2k_q8k(act_q8k, row_data, k),
+        QuantFormat::Q3K => super::simd::fused_q3k_q8k_dot::fused_dot_q3k_q8k(act_q8k, row_data, k),
         QuantFormat::Q4K => super::simd::fused_q4k_q8k_dot::fused_dot_q4k_q8k(act_q8k, row_data, k),
         QuantFormat::Q6K => super::simd::fused_q6k_q8k_dot::fused_dot_q6k_q8k(act_q8k, row_data, k),
         _ => unreachable!(),
@@ -236,7 +238,10 @@ pub fn quant_matmul_batch_f32(
     let blocks_per_row = k / block_size;
     let row_bytes = blocks_per_row * block_bytes;
 
-    let use_fused = matches!(format, QuantFormat::Q4K | QuantFormat::Q6K);
+    let use_fused = matches!(
+        format,
+        QuantFormat::Q2K | QuantFormat::Q3K | QuantFormat::Q4K | QuantFormat::Q6K
+    );
     let use_q8k = use_fused && k % 256 == 0;
 
     // Pre-quantize activation rows to Q8_K if using integer path
@@ -351,16 +356,34 @@ pub fn quant_matmul_batch_f32(
 }
 
 /// Dequantize a single row of quantized blocks into f32
-fn dequant_row_f32(row_bytes: &[u8], output: &mut [f32], format: QuantFormat) {
+pub fn dequant_row_f32(row_bytes: &[u8], output: &mut [f32], format: QuantFormat) {
     match format {
+        // Simple quants
         QuantFormat::Q4_0 => dequant::dequant_q4_0(row_bytes, output),
+        QuantFormat::Q4_1 => dequant::dequant_q4_1(row_bytes, output),
+        QuantFormat::Q5_0 => dequant::dequant_q5_0(row_bytes, output),
+        QuantFormat::Q5_1 => dequant::dequant_q5_1(row_bytes, output),
         QuantFormat::Q8_0 => dequant::dequant_q8_0(row_bytes, output),
+        QuantFormat::Q8_1 => dequant::dequant_q8_1(row_bytes, output),
+        // K-quants
+        QuantFormat::Q2K => dequant_k_quants::dequant_q2k(row_bytes, output),
+        QuantFormat::Q3K => dequant_k_quants::dequant_q3k(row_bytes, output),
         QuantFormat::Q4K => dequant::dequant_q4k(row_bytes, output),
+        QuantFormat::Q5K => dequant_k_quants::dequant_q5k(row_bytes, output),
         QuantFormat::Q6K => dequant::dequant_q6k(row_bytes, output),
-        _ => {
-            // Zero out for unsupported formats (caller should validate before)
-            output.iter_mut().for_each(|v| *v = 0.0);
-        }
+        QuantFormat::Q8K => dequant_k_quants::dequant_q8k(row_bytes, output),
+        // IQ/TQ formats
+        QuantFormat::IQ4NL => dequant_iq::dequant_iq4_nl(row_bytes, output),
+        QuantFormat::IQ4XS => dequant_iq::dequant_iq4_xs(row_bytes, output),
+        QuantFormat::IQ2XXS => dequant_iq::dequant_iq2_xxs(row_bytes, output),
+        QuantFormat::IQ2XS => dequant_iq::dequant_iq2_xs(row_bytes, output),
+        QuantFormat::IQ2S => dequant_iq::dequant_iq2_s(row_bytes, output),
+        QuantFormat::IQ3XXS => dequant_iq::dequant_iq3_xxs(row_bytes, output),
+        QuantFormat::IQ3S => dequant_iq::dequant_iq3_s(row_bytes, output),
+        QuantFormat::IQ1S => dequant_iq::dequant_iq1_s(row_bytes, output),
+        QuantFormat::IQ1M => dequant_iq::dequant_iq1_m(row_bytes, output),
+        QuantFormat::TQ1_0 => dequant_iq::dequant_tq1_0(row_bytes, output),
+        QuantFormat::TQ2_0 => dequant_iq::dequant_tq2_0(row_bytes, output),
     }
 }
 

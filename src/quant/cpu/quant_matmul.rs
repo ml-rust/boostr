@@ -1,8 +1,8 @@
 //! CPU implementation of QuantMatmulOps
 
 use crate::error::{Error, Result};
+use crate::quant::QuantTensor;
 use crate::quant::traits::QuantMatmulOps;
-use crate::quant::{QuantFormat, QuantTensor};
 use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
@@ -195,16 +195,6 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
             }
         }
 
-        // Validate format is supported
-        match format {
-            QuantFormat::Q4_0 | QuantFormat::Q8_0 | QuantFormat::Q4K | QuantFormat::Q6K => {}
-            other => {
-                return Err(Error::UnsupportedQuantFormat {
-                    format: format!("{} (CPU quant_matmul_batch not implemented)", other),
-                });
-            }
-        }
-
         let act_data = unsafe { activation.storage().as_host_slice::<f32>() };
 
         // Build weight list and output buffers
@@ -292,19 +282,17 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
             });
         }
 
-        // Validate format is supported
-        match weight.format() {
-            QuantFormat::Q4_0 | QuantFormat::Q8_0 | QuantFormat::Q4K | QuantFormat::Q6K => {}
-            other => {
-                return Err(Error::UnsupportedQuantFormat {
-                    format: format!("{} (CPU quant_matmul not implemented)", other),
-                });
-            }
-        }
-
         // Compute batch dimensions and M
         let total_elements: usize = a_shape.iter().product();
         let m = total_elements / k;
+
+        // Ensure activation is contiguous — non-contiguous tensors (from permute/reshape)
+        // would cause the raw storage to not match the logical layout.
+        let activation = if !activation.is_contiguous() {
+            activation.contiguous()
+        } else {
+            activation.clone()
+        };
 
         // Get raw data (zero-copy for CPU)
         // SAFETY: CpuRuntime stores data as host pointers
@@ -351,6 +339,7 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quant::format::QuantFormat;
     use crate::quant::traits::DequantOps;
     use half::f16;
     use numr::ops::MatmulOps;
@@ -456,17 +445,151 @@ mod tests {
     }
 
     #[test]
-    fn test_quant_matmul_unsupported_format() {
+    fn test_quant_matmul_q2k_basic() {
         let (client, device) = setup();
 
         let act = Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; 256], &[1, 256], &device);
 
-        let block = vec![0u8; 84]; // Q2K block
+        // Q2K: 256 elements, 84 bytes/block — all zeros dequantizes to zeros
+        let block = vec![0u8; 84];
         let qt =
             QuantTensor::<CpuRuntime>::from_bytes(&block, QuantFormat::Q2K, &[1, 256], &device)
                 .unwrap();
 
-        let result = client.quant_matmul(&act, &qt);
-        assert!(result.is_err());
+        let result = client.quant_matmul(&act, &qt).unwrap();
+        assert_eq!(result.shape(), &[1, 1]);
+        let data = result.to_vec::<f32>();
+        assert!(data[0].abs() < 1e-5, "expected ~0.0, got {}", data[0]);
+    }
+
+    #[test]
+    fn test_quant_matmul_q2k_matches_dequant_matmul() {
+        let (client, device) = setup();
+
+        // K=512 (2 Q2K blocks), N=2, M=2
+        let k = 512;
+        let n = 2;
+        let m = 2;
+
+        let act_data: Vec<f32> = (0..m * k).map(|i| ((i % 17) as f32 - 8.0) * 0.01).collect();
+        let act = Tensor::<CpuRuntime>::from_slice(&act_data, &[m, k], &device);
+
+        // Build Q2K blocks with non-trivial data
+        let mut weight_bytes = Vec::new();
+        for row in 0..n {
+            for blk in 0..2 {
+                let mut block = [0u8; 84];
+                // scales: non-zero low nibble (sub-scale) and high nibble (sub-min)
+                for i in 0..16 {
+                    let s = ((i + row + blk) % 15 + 1) as u8; // 1-15
+                    let m_val = ((i + row * 3 + blk) % 10) as u8; // 0-9
+                    block[i] = s | (m_val << 4);
+                }
+                // qs: non-trivial 2-bit values packed in bytes
+                for i in 0..64 {
+                    block[16 + i] = ((i + row * 7 + blk * 3) % 256) as u8;
+                }
+                // d = 0.5, dmin = 0.1
+                block[80..82].copy_from_slice(&f16::from_f32(0.5).to_le_bytes());
+                block[82..84].copy_from_slice(&f16::from_f32(0.1).to_le_bytes());
+                weight_bytes.extend_from_slice(&block);
+            }
+        }
+
+        let qt = QuantTensor::<CpuRuntime>::from_bytes(
+            &weight_bytes,
+            QuantFormat::Q2K,
+            &[n, k],
+            &device,
+        )
+        .unwrap();
+
+        // Method 1: quant_matmul (generic path)
+        let result_qm = client.quant_matmul(&act, &qt).unwrap();
+
+        // Method 2: dequant then matmul
+        let dequant_w = client.dequantize(&qt, DType::F32).unwrap();
+        let dequant_w_t = dequant_w.transpose(0isize, 1isize).unwrap();
+        let result_dm = MatmulOps::matmul(&client, &act, &dequant_w_t).unwrap();
+
+        assert_eq!(result_qm.shape(), result_dm.shape());
+
+        let qm_data = result_qm.to_vec::<f32>();
+        let dm_data = result_dm.to_vec::<f32>();
+        for (i, (&a, &b)) in qm_data.iter().zip(dm_data.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-2,
+                "Q2K mismatch at index {}: quant_matmul={}, dequant+matmul={}",
+                i,
+                a,
+                b
+            );
+        }
+    }
+
+    #[test]
+    fn test_quant_matmul_q3k_matches_dequant_matmul() {
+        let (client, device) = setup();
+
+        // K=512 (2 Q3K blocks), N=3, M=2
+        let k = 512;
+        let n = 3;
+        let m = 2;
+
+        let act_data: Vec<f32> = (0..m * k).map(|i| ((i % 13) as f32 - 6.0) * 0.01).collect();
+        let act = Tensor::<CpuRuntime>::from_slice(&act_data, &[m, k], &device);
+
+        // Build Q3K blocks with non-trivial data
+        let mut weight_bytes = Vec::new();
+        for row in 0..n {
+            for blk in 0..2 {
+                let mut block = [0u8; 110];
+                // hmask[32]: non-trivial high bits
+                for i in 0..32 {
+                    block[i] = ((i * 7 + row * 13 + blk * 5) % 256) as u8;
+                }
+                // qs[64]: non-trivial 2-bit values
+                for i in 0..64 {
+                    block[32 + i] = ((i * 11 + row * 3 + blk * 7) % 256) as u8;
+                }
+                // scales[12]: non-trivial packed 6-bit scales
+                for i in 0..12 {
+                    block[96 + i] = ((i * 5 + row * 9 + blk) % 256) as u8;
+                }
+                // d = 0.3
+                block[108..110].copy_from_slice(&f16::from_f32(0.3).to_le_bytes());
+                weight_bytes.extend_from_slice(&block);
+            }
+        }
+
+        let qt = QuantTensor::<CpuRuntime>::from_bytes(
+            &weight_bytes,
+            QuantFormat::Q3K,
+            &[n, k],
+            &device,
+        )
+        .unwrap();
+
+        // Method 1: quant_matmul (generic path)
+        let result_qm = client.quant_matmul(&act, &qt).unwrap();
+
+        // Method 2: dequant then matmul
+        let dequant_w = client.dequantize(&qt, DType::F32).unwrap();
+        let dequant_w_t = dequant_w.transpose(0isize, 1isize).unwrap();
+        let result_dm = MatmulOps::matmul(&client, &act, &dequant_w_t).unwrap();
+
+        assert_eq!(result_qm.shape(), result_dm.shape());
+
+        let qm_data = result_qm.to_vec::<f32>();
+        let dm_data = result_dm.to_vec::<f32>();
+        for (i, (&a, &b)) in qm_data.iter().zip(dm_data.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-2,
+                "Q3K mismatch at index {}: quant_matmul={}, dequant+matmul={}",
+                i,
+                a,
+                b
+            );
+        }
     }
 }

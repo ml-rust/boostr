@@ -30,7 +30,7 @@ pub struct Llama<R: Runtime> {
 impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
     fn from_varbuilder(vb: &mut crate::nn::VarBuilder<R>, config: &ModelConfig) -> Result<Self>
     where
-        R::Client: crate::quant::DequantOps<R>,
+        R::Client: crate::quant::DequantOps<R> + numr::ops::TypeConversionOps<R>,
     {
         config.validate()?;
 
@@ -87,6 +87,13 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         } else {
             vb.take_maybe_quant_linear("lm_head.weight", None)?
         };
+
+        // Pre-cast RoPE caches to match weight dtype (avoids per-token F32→BF16 casts)
+        let mut rope = rope;
+        if let Some(first_layer) = layers.first() {
+            let weight_dtype = first_layer.input_layernorm.weight().tensor().dtype();
+            rope.cast_caches(weight_dtype);
+        }
 
         Ok(Self {
             config: config.clone(),

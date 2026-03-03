@@ -70,7 +70,7 @@ pub trait Model<R: Runtime>: Sized {
     /// Takes `&mut` because tensors are moved out of the VarMap (zero-copy).
     fn from_varbuilder(vb: &mut VarBuilder<R>, config: &ModelConfig) -> Result<Self>
     where
-        R::Client: DequantOps<R>,
+        R::Client: DequantOps<R> + numr::ops::TypeConversionOps<R>,
     {
         let _ = (vb, config);
         Err(crate::error::Error::ModelError {

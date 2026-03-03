@@ -6,6 +6,7 @@ use crate::error::Result;
 use crate::model::config::RopeScalingConfig;
 use crate::ops::RoPEOps;
 use numr::autograd::Var;
+use numr::ops::TypeConversionOps;
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -118,6 +119,25 @@ impl<R: Runtime> RoPE<R> {
         C: RuntimeClient<R> + RoPEOps<R>,
     {
         client.apply_rope(x, &self.cos_cache, &self.sin_cache)
+    }
+
+    /// Cast cos/sin caches to the given dtype (e.g. BF16) so that
+    /// per-token casts are avoided during inference.
+    pub fn cast_caches(&mut self, dtype: numr::dtype::DType)
+    where
+        R: Runtime<DType = numr::dtype::DType>,
+        R::Client: numr::ops::TypeConversionOps<R>,
+    {
+        if self.cos_cache.tensor().dtype() != dtype {
+            let device = self.cos_cache.tensor().device().clone();
+            let client = R::default_client(&device);
+            if let Ok(cos) = client.cast(self.cos_cache.tensor(), dtype) {
+                self.cos_cache = Var::new(cos, false);
+            }
+            if let Ok(sin) = client.cast(self.sin_cache.tensor(), dtype) {
+                self.sin_cache = Var::new(sin, false);
+            }
+        }
     }
 
     pub fn cos_cache(&self) -> &Var<R> {

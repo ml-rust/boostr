@@ -34,7 +34,7 @@ pub enum LoadedModel<R: Runtime> {
 
 impl<R: Runtime<DType = DType>> LoadedModel<R>
 where
-    R::Client: IndexingOps<R> + crate::quant::DequantOps<R>,
+    R::Client: IndexingOps<R> + crate::quant::DequantOps<R> + numr::ops::TypeConversionOps<R>,
 {
     /// Load a model from universal config and weights
     pub fn load(config: &UniversalConfig, vb: &mut VarBuilder<R>) -> Result<Self> {

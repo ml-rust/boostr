@@ -521,13 +521,113 @@ __device__ void dequant_block(const unsigned char* b, float* out, unsigned int f
     }
 }
 
+// ── Fused dequant+dot functions (no buffer) ─────────────────────────
+// These compute dot(dequant(block), activation) without materializing
+// the full dequantized output, eliminating the 256-float register spill.
+
+__device__ float dq_dot_q2k(const unsigned char* b, const float* act) {
+    const unsigned char* sc = b;
+    const unsigned char* qs = b + 16;
+    float d    = load_f16_as_f32(b+80);
+    float dmin = load_f16_as_f32(b+82);
+    float sum = 0.0f;
+    int y = 0, is = 0;
+    for (int n = 0; n < 2; n++) {
+        const unsigned char* q = qs + n * 32;
+        for (int shift = 0; shift < 8; shift += 2) {
+            float dl = d * (float)(sc[is] & 0x0F);
+            float ml = dmin * (float)(sc[is] >> 4);
+            is++;
+            for (int l = 0; l < 16; l++)
+                sum += act[y++] * (dl * (float)((q[l] >> shift) & 3) - ml);
+            dl = d * (float)(sc[is] & 0x0F);
+            ml = dmin * (float)(sc[is] >> 4);
+            is++;
+            for (int l = 0; l < 16; l++)
+                sum += act[y++] * (dl * (float)((q[16+l] >> shift) & 3) - ml);
+        }
+    }
+    return sum;
+}
+
+__device__ float dq_dot_q3k(const unsigned char* b, const float* act) {
+    const unsigned char* hmask = b;
+    const unsigned char* qs = b + 32;
+    const unsigned char* sc_raw = b + 96;
+    float d = load_f16_as_f32(b+108);
+
+    unsigned int aux[4];
+    unsigned char aux_bytes[12];
+    memcpy(aux_bytes, sc_raw, 12);
+    memcpy(&aux[0], aux_bytes, 4);
+    memcpy(&aux[1], aux_bytes + 4, 4);
+    memcpy(&aux[2], aux_bytes + 8, 4);
+    unsigned int tmp = aux[2];
+    const unsigned int M1 = 0x03030303u, M2 = 0x0f0f0f0fu;
+    unsigned int a0 = aux[0], a1 = aux[1];
+    aux[0] = (a0 & M2) | ((tmp & M1) << 4);
+    aux[1] = (a1 & M2) | (((tmp>>2) & M1) << 4);
+    aux[2] = ((a0>>4) & M2) | (((tmp>>4) & M1) << 4);
+    aux[3] = ((a1>>4) & M2) | (((tmp>>6) & M1) << 4);
+    signed char scales[16];
+    memcpy(&scales[0],  &aux[0], 4);
+    memcpy(&scales[4],  &aux[1], 4);
+    memcpy(&scales[8],  &aux[2], 4);
+    memcpy(&scales[12], &aux[3], 4);
+    for (int i = 0; i < 16; i++) scales[i] = (signed char)((unsigned char)scales[i] - 32);
+
+    float sum = 0.0f;
+    int y = 0, is_idx = 0;
+    unsigned char m = 1;
+    for (int n = 0; n < 2; n++) {
+        const unsigned char* q = qs + n * 32;
+        for (int shift = 0; shift < 8; shift += 2) {
+            float dl = d * (float)scales[is_idx++];
+            for (int l = 0; l < 16; l++) {
+                int low2 = (q[l] >> shift) & 3;
+                int hsub = (hmask[l] & m) ? 0 : 4;
+                sum += act[y++] * (dl * (float)(low2 - hsub));
+            }
+            dl = d * (float)scales[is_idx++];
+            for (int l = 0; l < 16; l++) {
+                int low2 = (q[16+l] >> shift) & 3;
+                int hsub = (hmask[16+l] & m) ? 0 : 4;
+                sum += act[y++] * (dl * (float)(low2 - hsub));
+            }
+            m <<= 1;
+        }
+    }
+    return sum;
+}
+
+// Generic fallback: uses buffer for formats without fused dq_dot
+__device__ float dq_dot_generic(const unsigned char* block, const float* act,
+                                 int block_size, unsigned int fmt) {
+    float buf[256];
+    dequant_block(block, buf, fmt);
+    float sum = 0.0f;
+    for (int i = 0; i < block_size; i++)
+        sum += act[i] * buf[i];
+    return sum;
+}
+
+// Dispatch: use fused dq_dot for K-quants, generic for others
+__device__ float dq_dot_dispatch(const unsigned char* block, const float* act,
+                                  int block_size, unsigned int fmt) {
+    switch (fmt) {
+        case FMT_Q2K:  return dq_dot_q2k(block, act);
+        case FMT_Q3K:  return dq_dot_q3k(block, act);
+        default:       return dq_dot_generic(block, act, block_size, fmt);
+    }
+}
+
 // ── Fused dequant + GEMV kernel ──────────────────────────────────────
 //
 // Grid:  (N, M, 1)  — one thread block per output element
 // Block: (32, 1, 1) — one warp cooperates on K reduction
 //
-// Each thread iterates over quant blocks, dequantizes into registers,
-// dots with activation, and reduces via warp shuffle.
+// For K-quants with fused dq_dot: no intermediate buffer, dequant and
+// dot product happen in the same loop. Eliminates 256-float register spill.
 
 extern "C" __global__ void quant_matmul_generic_f32(
     const float* __restrict__ activation,  // [M, K]
@@ -554,15 +654,10 @@ extern "C" __global__ void quant_matmul_generic_f32(
 
     // Each thread processes a subset of blocks, then we reduce
     for (unsigned int b = lane; b < blocks_per_row; b += WARP_SIZE) {
-        float buf[256]; // max block_size
-        dequant_block(w_row + (unsigned long long)b * block_bytes, buf, format_id);
-
         const float* act_base = act_row + b * block_size;
-        float local_sum = 0.0f;
-        for (int i = 0; i < block_size; i++) {
-            local_sum += act_base[i] * buf[i];
-        }
-        acc += local_sum;
+        acc += dq_dot_dispatch(
+            w_row + (unsigned long long)b * block_bytes,
+            act_base, block_size, format_id);
     }
 
     // Warp reduction
@@ -572,5 +667,62 @@ extern "C" __global__ void quant_matmul_generic_f32(
 
     if (lane == 0) {
         output[(unsigned long long)row * N + col] = acc;
+    }
+}
+
+// ── Fused SwiGLU: gate_matmul + up_matmul + silu(gate)*up ──────────
+//
+// Grid:  (N, M, 1)  — one thread block per output element
+// Block: (32, 1, 1) — one warp cooperates on K reduction
+//
+// Computes: output[row, col] = silu(dot(act, gate_w[col])) * dot(act, up_w[col])
+// Eliminates 2 intermediate [M,N] tensors and 1 extra kernel launch.
+
+__device__ float silu(float x) {
+    return x / (1.0f + expf(-x));
+}
+
+extern "C" __global__ void quant_swiglu_generic_f32(
+    const float* __restrict__ activation,       // [M, K]
+    const unsigned char* __restrict__ gate_w,    // [N, K] packed
+    const unsigned char* __restrict__ up_w,      // [N, K] packed
+    float* __restrict__ output,                  // [M, N]
+    unsigned int M, unsigned int K, unsigned int N,
+    unsigned int format_id
+) {
+    const unsigned int col = blockIdx.x;
+    const unsigned int row = blockIdx.y;
+    const unsigned int lane = threadIdx.x;
+    if (col >= N || row >= M) return;
+
+    const int block_size = get_bs(format_id);
+    const int block_bytes = get_bb(format_id);
+    if (block_bytes == 0) return;
+
+    const unsigned int blocks_per_row = K / block_size;
+    const unsigned long long row_bytes = (unsigned long long)blocks_per_row * block_bytes;
+    const float* act_row = activation + (unsigned long long)row * K;
+    const unsigned char* g_row = gate_w + (unsigned long long)col * row_bytes;
+    const unsigned char* u_row = up_w   + (unsigned long long)col * row_bytes;
+
+    float gate_acc = 0.0f;
+    float up_acc = 0.0f;
+
+    for (unsigned int b = lane; b < blocks_per_row; b += WARP_SIZE) {
+        const float* act_base = act_row + b * block_size;
+        unsigned long long byte_off = (unsigned long long)b * block_bytes;
+        gate_acc += dq_dot_dispatch(g_row + byte_off, act_base, block_size, format_id);
+        up_acc   += dq_dot_dispatch(u_row + byte_off, act_base, block_size, format_id);
+    }
+
+    // Warp reduction for both accumulators
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+        gate_acc += __shfl_down_sync(0xFFFFFFFF, gate_acc, offset);
+        up_acc   += __shfl_down_sync(0xFFFFFFFF, up_acc, offset);
+    }
+
+    if (lane == 0) {
+        output[(unsigned long long)row * N + col] = silu(gate_acc) * up_acc;
     }
 }

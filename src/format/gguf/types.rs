@@ -80,13 +80,13 @@ impl GgmlType {
             Self::Q5_0 => 22,
             Self::Q5_1 => 24,
             Self::Q8_0 => 34,
-            Self::Q8_1 => 40,
+            Self::Q8_1 => 36,
             Self::Q2K => 84,
             Self::Q3K => 110,
             Self::Q4K => 144,
             Self::Q5K => 176,
             Self::Q6K => 210,
-            Self::Q8K => 276,
+            Self::Q8K => 292,
         }
     }
 

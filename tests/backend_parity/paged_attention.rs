@@ -23,6 +23,7 @@ fn test_paged_attention_fwd_parity() {
             &v_blocks,
             &block_table,
             h,
+            1, // num_kv_heads
             s,
             s,
             d,
@@ -49,7 +50,7 @@ fn test_paged_attention_fwd_parity() {
         );
         let bt = Tensor::from_slice(&bt_data, &[b, 1], &cuda_device);
         let (out, _) = cuda_client
-            .paged_attention_fwd(&q_c, &kb, &vb, &bt, h, s, s, d, block_size, false)
+            .paged_attention_fwd(&q_c, &kb, &vb, &bt, h, 1, s, s, d, block_size, false)
             .unwrap();
         assert_parity_f32(&out.to_vec::<f32>(), &cpu_out_vec, "paged_fwd CUDA vs CPU");
     });
@@ -71,7 +72,7 @@ fn test_paged_attention_fwd_parity() {
         );
         let bt = Tensor::from_slice(&bt_data, &[b, 1], &wgpu_device);
         let (out, _) = wgpu_client
-            .paged_attention_fwd(&q_w, &kb, &vb, &bt, h, s, s, d, block_size, false)
+            .paged_attention_fwd(&q_w, &kb, &vb, &bt, h, 1, s, s, d, block_size, false)
             .unwrap();
         assert_parity_f32(&out.to_vec::<f32>(), &cpu_out_vec, "paged_fwd WGPU vs CPU");
     });

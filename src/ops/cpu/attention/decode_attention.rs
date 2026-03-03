@@ -41,7 +41,7 @@ pub fn fused_decode_attention(
     debug_assert_eq!(k_shape[1], num_kv_heads);
     debug_assert_eq!(k_shape[3], head_dim);
 
-    let scale = (head_dim as f32).sqrt().recip();
+    let scale = (head_dim as f64).sqrt().recip();
     let kv_group_size = num_heads / num_kv_heads;
 
     // Get raw data
@@ -73,22 +73,23 @@ pub fn fused_decode_attention(
             let q_row = &q_data[q_offset..q_offset + head_dim];
 
             // Phase 1: Compute QK scores with SIMD dot products
+            // Use f64 scale to match standard attention path (mul_scalar with f64)
             let mut max_score = f32::NEG_INFINITY;
             for j in 0..seq_len_k {
                 let k_row = &k_data[k_base + j * head_dim..k_base + j * head_dim + head_dim];
-                let score = dot_f32_simd(q_row, k_row) * scale;
+                let score = (dot_f32_simd(q_row, k_row) as f64 * scale) as f32;
                 scores[j] = score;
                 if score > max_score {
                     max_score = score;
                 }
             }
 
-            // Phase 2: Softmax
-            let mut sum_exp = 0.0f32;
+            // Phase 2: Softmax with f64 accumulation for numerical stability
+            let mut sum_exp = 0.0f64;
             for j in 0..seq_len_k {
                 let w = (scores[j] - max_score).exp();
                 scores[j] = w;
-                sum_exp += w;
+                sum_exp += w as f64;
             }
 
             // Phase 3: Accumulate weighted V into output
@@ -96,14 +97,14 @@ pub fn fused_decode_attention(
             let out_row = &mut output[out_offset..out_offset + head_dim];
             out_row.fill(0.0);
 
-            let inv_sum = 1.0 / sum_exp;
+            let inv_sum = (1.0f64 / sum_exp) as f32;
             for j in 0..seq_len_k {
                 let w = scores[j] * inv_sum;
                 let v_row = &v_data[v_base + j * head_dim..v_base + j * head_dim + head_dim];
                 accumulate_weighted_simd(out_row, v_row, w);
             }
 
-            lse_data[b * num_heads + h] = max_score + sum_exp.ln();
+            lse_data[b * num_heads + h] = max_score + (sum_exp as f32).ln();
         }
     }
 
@@ -323,15 +324,93 @@ mod tests {
         let fused_data = fused_out.to_vec::<f32>();
         let ref_data = ref_out.to_vec::<f32>();
 
+        let mut max_diff = 0.0f32;
         for (i, (&f, &r)) in fused_data.iter().zip(ref_data.iter()).enumerate() {
+            let diff = (f - r).abs();
+            if diff > max_diff {
+                max_diff = diff;
+            }
             assert!(
-                (f - r).abs() < 1e-4,
+                diff < 1e-5,
                 "mismatch at {}: fused={}, ref={}, diff={}",
                 i,
                 f,
                 r,
-                (f - r).abs()
+                diff
             );
         }
+        eprintln!("max diff (small test): {max_diff:.2e}");
+    }
+
+    #[test]
+    fn test_decode_attention_matches_standard_realistic() {
+        use numr::ops::{ActivationOps, MatmulOps, ScalarOps, ShapeOps};
+        use numr::runtime::cpu::CpuClient;
+
+        let device = CpuDevice::new();
+        let client = CpuClient::new(device.clone());
+
+        // Realistic Mistral dimensions: B=1, H=32, H_kv=8, S_k=64, D=128
+        let num_heads = 32;
+        let num_kv_heads = 8;
+        let head_dim = 128;
+        let seq_len_k = 64;
+        let scale = (head_dim as f64).sqrt().recip();
+
+        let q_data: Vec<f32> = (0..num_heads * head_dim)
+            .map(|i| ((i as f32) * 0.037).sin())
+            .collect();
+        let k_data: Vec<f32> = (0..num_kv_heads * seq_len_k * head_dim)
+            .map(|i| ((i as f32) * 0.023).cos())
+            .collect();
+        let v_data: Vec<f32> = (0..num_kv_heads * seq_len_k * head_dim)
+            .map(|i| ((i as f32) * 0.011 + 0.5).sin())
+            .collect();
+
+        let q = Tensor::<CpuRuntime>::from_slice(&q_data, &[1, num_heads, 1, head_dim], &device);
+        let k = Tensor::<CpuRuntime>::from_slice(
+            &k_data,
+            &[1, num_kv_heads, seq_len_k, head_dim],
+            &device,
+        );
+        let v = Tensor::<CpuRuntime>::from_slice(
+            &v_data,
+            &[1, num_kv_heads, seq_len_k, head_dim],
+            &device,
+        );
+
+        // Fused kernel
+        let (fused_out, _) =
+            fused_decode_attention(&q, &k, &v, num_heads, num_kv_heads, head_dim).unwrap();
+
+        // Reference: standard matmul path with GQA expansion
+        let repeats = num_heads / num_kv_heads;
+        let k_exp = client.repeat_interleave(&k, repeats, Some(1)).unwrap();
+        let v_exp = client.repeat_interleave(&v, repeats, Some(1)).unwrap();
+        let k_t = k_exp.transpose(-2isize, -1isize).unwrap().contiguous();
+        let scores = client.matmul(&q, &k_t).unwrap();
+        let scores = client.mul_scalar(&scores, scale).unwrap();
+        let weights = client.softmax(&scores, -1).unwrap();
+        let ref_out = client.matmul(&weights, &v_exp).unwrap();
+
+        let fused_data = fused_out.to_vec::<f32>();
+        let ref_data = ref_out.to_vec::<f32>();
+
+        let mut max_diff = 0.0f32;
+        for (i, (&f, &r)) in fused_data.iter().zip(ref_data.iter()).enumerate() {
+            let diff = (f - r).abs();
+            if diff > max_diff {
+                max_diff = diff;
+            }
+            assert!(
+                diff < 1e-5,
+                "mismatch at {}: fused={}, ref={}, diff={}",
+                i,
+                f,
+                r,
+                diff
+            );
+        }
+        eprintln!("max diff (realistic test): {max_diff:.2e}");
     }
 }

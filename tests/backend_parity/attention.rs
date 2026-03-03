@@ -533,7 +533,7 @@ fn test_sliding_window_correctness() {
 
     // CPU: sliding window should differ from full attention and be finite
     let (cpu_win_out, _) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, false1, window_size, None)
+        .flash_attention_fwd(&q, &k, &v, h, h, d, false, window_size, None)
         .unwrap();
     let (cpu_full_out, _) = cpu_client
         .flash_attention_fwd(&q, &k, &v, h, h, d, false, 0, None)

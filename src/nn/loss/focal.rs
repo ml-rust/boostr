@@ -2,7 +2,7 @@
 //!
 //! Lin et al., "Focal Loss for Dense Object Detection", 2017.
 
-use super::{all_dims, batch_size, prepare_targets};
+use super::helpers::{all_dims, batch_size, prepare_targets};
 use crate::error::{Error, Result};
 use numr::autograd::{
     Var, var_add_scalar, var_gather, var_log_softmax, var_mean, var_mul, var_mul_scalar, var_neg,

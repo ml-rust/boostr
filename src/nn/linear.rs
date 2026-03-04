@@ -98,7 +98,7 @@ impl<R: Runtime> QuantLinear<R> {
 pub enum MaybeQuantLinear<R: Runtime> {
     Standard(Linear<R>),
     Quantized(QuantLinear<R>),
-    DecomposedQuant(DecomposedQuantLinear<R>),
+    DecomposedQuant(Box<DecomposedQuantLinear<R>>),
 }
 
 impl<R: Runtime> MaybeQuantLinear<R> {
@@ -108,7 +108,7 @@ impl<R: Runtime> MaybeQuantLinear<R> {
             Weight::Standard(t) => Self::Standard(Linear::new(t, bias, false)),
             Weight::Quantized(qt) => Self::Quantized(QuantLinear::new(qt, bias)),
             Weight::DecomposedQuant(dq) => {
-                Self::DecomposedQuant(DecomposedQuantLinear::new(dq, bias))
+                Self::DecomposedQuant(Box::new(DecomposedQuantLinear::new(*dq, bias)))
             }
         }
     }

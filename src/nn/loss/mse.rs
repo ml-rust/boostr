@@ -1,6 +1,6 @@
 //! Mean squared error loss.
 
-use super::all_dims;
+use super::helpers::all_dims;
 use crate::error::{Error, Result};
 use numr::autograd::{Var, var_mean, var_pow_scalar, var_sub};
 use numr::dtype::DType;

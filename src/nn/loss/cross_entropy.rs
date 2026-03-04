@@ -1,6 +1,6 @@
 //! Cross-entropy loss functions.
 
-use super::{all_dims, batch_size, prepare_targets};
+use super::helpers::{all_dims, batch_size, prepare_targets};
 use crate::error::{Error, Result};
 use numr::autograd::{
     Var, var_add, var_gather, var_log_softmax, var_mean, var_mul_scalar, var_neg, var_reshape,

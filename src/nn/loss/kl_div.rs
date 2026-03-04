@@ -1,6 +1,6 @@
 //! KL divergence loss.
 
-use super::{all_dims, batch_size};
+use super::helpers::{all_dims, batch_size};
 use crate::error::{Error, Result};
 use numr::autograd::{Var, var_log, var_mean, var_mul, var_mul_scalar, var_sub, var_sum};
 use numr::dtype::DType;

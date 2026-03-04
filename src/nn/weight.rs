@@ -17,7 +17,7 @@ pub enum Weight<R: Runtime> {
     /// Block-quantized tensor (GGUF formats)
     Quantized(QuantTensor<R>),
     /// Decomposed quantized tensor (AWQ/GPTQ formats)
-    DecomposedQuant(DecomposedQuantTensor<R>),
+    DecomposedQuant(Box<DecomposedQuantTensor<R>>),
 }
 
 impl<R: Runtime> Weight<R> {
@@ -79,7 +79,7 @@ impl<R: Runtime> Weight<R> {
     /// Consume and return the inner decomposed quantized tensor, or error.
     pub fn into_decomposed_quant_tensor(self) -> Result<DecomposedQuantTensor<R>> {
         match self {
-            Self::DecomposedQuant(dq) => Ok(dq),
+            Self::DecomposedQuant(dq) => Ok(*dq),
             _ => Err(Error::ModelError {
                 reason: "expected decomposed quantized tensor".into(),
             }),

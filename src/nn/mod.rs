@@ -13,6 +13,7 @@ pub mod rmsnorm;
 pub mod rope;
 pub mod stochastic_depth;
 pub mod var_builder;
+#[path = "varmap/mod.rs"]
 pub mod varmap;
 pub mod weight;
 

@@ -1,6 +1,6 @@
 //! InfoNCE / contrastive loss (CLIP, SimCLR, retrieval models).
 
-use super::all_dims;
+use super::helpers::all_dims;
 use crate::error::{Error, Result};
 use numr::autograd::{
     Var, var_gather, var_log_softmax, var_matmul, var_mean, var_mul_scalar, var_neg, var_transpose,

@@ -9,6 +9,9 @@ use numr::tensor::Tensor;
 
 use super::kernels::{self, INT4_GEMM_GPTQ_MODULE, INT4_GEMM_MODULE, MARLIN_GEMM_MODULE};
 
+/// M threshold: use GEMV for M <= this, tiled GEMM for M > this
+const GEMV_THRESHOLD: u32 = 4;
+
 #[allow(clippy::too_many_arguments)]
 pub fn launch_int4_gemm(
     client: &CudaClient,
@@ -24,34 +27,70 @@ pub fn launch_int4_gemm(
 ) -> Result<()> {
     let device_index = input.device().id();
     let module = kernels::get_or_load_module(client.context(), device_index, INT4_GEMM_MODULE)?;
-    let func = kernels::get_kernel_function(&module, "int4_gemm_f32")?;
 
-    let cfg = LaunchConfig {
-        grid_dim: (n.div_ceil(16), m.div_ceil(16), 1),
-        block_dim: (16, 16, 1),
-        shared_mem_bytes: 0,
-    };
+    if m <= GEMV_THRESHOLD {
+        // GEMV path: 4 warps/block (128 threads), each warp handles 8 cols (one packed u32)
+        // 32 output columns per block. Shared memory caches input row.
+        let func = kernels::get_kernel_function(&module, "int4_gemv_f32")?;
+        let n_packed = n / 8;
+        let cfg = LaunchConfig {
+            grid_dim: (n_packed.div_ceil(4), m, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
 
-    let input_ptr = input.ptr();
-    let qweight_ptr = qweight.ptr();
-    let scales_ptr = scales.ptr();
-    let zeros_ptr = zeros.ptr();
-    let output_ptr = output.ptr();
+        let input_ptr = input.ptr();
+        let qweight_ptr = qweight.ptr();
+        let scales_ptr = scales.ptr();
+        let zeros_ptr = zeros.ptr();
+        let output_ptr = output.ptr();
 
-    unsafe {
-        let mut builder = client.stream().launch_builder(&func);
-        builder.arg(&input_ptr);
-        builder.arg(&qweight_ptr);
-        builder.arg(&scales_ptr);
-        builder.arg(&zeros_ptr);
-        builder.arg(&output_ptr);
-        builder.arg(&m);
-        builder.arg(&k);
-        builder.arg(&n);
-        builder.arg(&group_size);
-        builder.launch(cfg).map_err(|e| Error::QuantError {
-            reason: format!("CUDA int4_gemm launch failed: {:?}", e),
-        })?;
+        unsafe {
+            let mut builder = client.stream().launch_builder(&func);
+            builder.arg(&input_ptr);
+            builder.arg(&qweight_ptr);
+            builder.arg(&scales_ptr);
+            builder.arg(&zeros_ptr);
+            builder.arg(&output_ptr);
+            builder.arg(&m);
+            builder.arg(&k);
+            builder.arg(&n);
+            builder.arg(&group_size);
+            builder.launch(cfg).map_err(|e| Error::QuantError {
+                reason: format!("CUDA int4_gemv launch failed: {:?}", e),
+            })?;
+        }
+    } else {
+        // Tiled GEMM path: BM=32, BN=32, BK=32
+        // Block: (32, 4) = 128 threads, each thread handles 8 rows
+        let func = kernels::get_kernel_function(&module, "int4_gemm_f32")?;
+        let cfg = LaunchConfig {
+            grid_dim: (n.div_ceil(32), m.div_ceil(32), 1),
+            block_dim: (32, 4, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let input_ptr = input.ptr();
+        let qweight_ptr = qweight.ptr();
+        let scales_ptr = scales.ptr();
+        let zeros_ptr = zeros.ptr();
+        let output_ptr = output.ptr();
+
+        unsafe {
+            let mut builder = client.stream().launch_builder(&func);
+            builder.arg(&input_ptr);
+            builder.arg(&qweight_ptr);
+            builder.arg(&scales_ptr);
+            builder.arg(&zeros_ptr);
+            builder.arg(&output_ptr);
+            builder.arg(&m);
+            builder.arg(&k);
+            builder.arg(&n);
+            builder.arg(&group_size);
+            builder.launch(cfg).map_err(|e| Error::QuantError {
+                reason: format!("CUDA int4_gemm launch failed: {:?}", e),
+            })?;
+        }
     }
     Ok(())
 }

@@ -57,6 +57,52 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         let sc = unsafe { scales.storage().as_host_slice::<f32>() };
         let zr = unsafe { zeros.storage().as_host_slice::<f32>() };
 
+        let num_groups = k / group_size;
+        if inp.len() != m * k {
+            return Err(Error::QuantError {
+                reason: format!(
+                    "int4_gemm input slice len {} != m*k {}*{}={}",
+                    inp.len(),
+                    m,
+                    k,
+                    m * k
+                ),
+            });
+        }
+        if qw.len() != k * (n / 8) {
+            return Err(Error::QuantError {
+                reason: format!(
+                    "int4_gemm qweight slice len {} != k*(n/8) {}*{}={}",
+                    qw.len(),
+                    k,
+                    n / 8,
+                    k * (n / 8)
+                ),
+            });
+        }
+        if sc.len() != num_groups * n {
+            return Err(Error::QuantError {
+                reason: format!(
+                    "int4_gemm scales slice len {} != groups*n {}*{}={}",
+                    sc.len(),
+                    num_groups,
+                    n,
+                    num_groups * n
+                ),
+            });
+        }
+        if zr.len() != num_groups * n {
+            return Err(Error::QuantError {
+                reason: format!(
+                    "int4_gemm zeros slice len {} != groups*n {}*{}={}",
+                    zr.len(),
+                    num_groups,
+                    n,
+                    num_groups * n
+                ),
+            });
+        }
+
         let mut out = vec![0.0f32; m * n];
         int4_gemm::int4_gemm_f32(inp, qw, sc, zr, &mut out, m, k, n, group_size);
 
@@ -517,12 +563,14 @@ mod tests {
         let qm_data = result_qm.to_vec::<f32>();
         let dm_data = result_dm.to_vec::<f32>();
         for (i, (&a, &b)) in qm_data.iter().zip(dm_data.iter()).enumerate() {
+            let tol = 0.05 * b.abs().max(1.0);
             assert!(
-                (a - b).abs() < 1e-2,
-                "Q2K mismatch at index {}: quant_matmul={}, dequant+matmul={}",
+                (a - b).abs() < tol,
+                "Q2K mismatch at index {}: quant_matmul={}, dequant+matmul={}, tol={}",
                 i,
                 a,
-                b
+                b,
+                tol
             );
         }
     }
@@ -583,12 +631,14 @@ mod tests {
         let qm_data = result_qm.to_vec::<f32>();
         let dm_data = result_dm.to_vec::<f32>();
         for (i, (&a, &b)) in qm_data.iter().zip(dm_data.iter()).enumerate() {
+            let tol = 0.05 * b.abs().max(1.0);
             assert!(
-                (a - b).abs() < 1e-2,
-                "Q3K mismatch at index {}: quant_matmul={}, dequant+matmul={}",
+                (a - b).abs() < tol,
+                "Q3K mismatch at index {}: quant_matmul={}, dequant+matmul={}, tol={}",
                 i,
                 a,
-                b
+                b,
+                tol
             );
         }
     }

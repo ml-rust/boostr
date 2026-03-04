@@ -1,4 +1,4 @@
-/// Module names for quantization CUDA kernel PTX files.
+//! Module names for quantization CUDA kernel PTX files.
 
 pub const DEQUANT_MODULE: &str = "dequant";
 pub const DEQUANT_GENERIC_MODULE: &str = "dequant_generic";

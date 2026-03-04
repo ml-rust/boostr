@@ -1,4 +1,4 @@
-/// Module names for CUDA kernel PTX files.
+//! Module names for CUDA kernel PTX files.
 
 pub const DECODE_ATTENTION_MODULE: &str = "decode_attention";
 pub const KV_INSERT_MODULE: &str = "kv_insert";

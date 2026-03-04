@@ -77,6 +77,7 @@ pub trait SamplingOps<R: Runtime> {
     /// - `logits`: `[1, seq_len, vocab_size]` any dtype
     /// - `token_ids`: `[num_unique]` I64 — penalty token IDs
     /// - `token_counts`: `[num_unique]` I32 — penalty counts
+    #[allow(clippy::too_many_arguments)]
     fn logits_to_token(
         &self,
         logits: &Tensor<R>,

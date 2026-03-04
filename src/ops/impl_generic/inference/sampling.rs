@@ -133,7 +133,7 @@ where
     // Generate random value on-device via RandomOps, read back scalar
     let rand_tensor = client
         .rand(&[1], numr::dtype::DType::F32)
-        .map_err(|e| crate::error::Error::Numr(e))?;
+        .map_err(crate::error::Error::Numr)?;
     let random_val: f32 = rand_tensor.to_vec::<f32>()[0];
 
     // Renormalize and sample
@@ -153,6 +153,7 @@ where
 ///
 /// Narrows to last seq position, casts to F32, applies penalties, then either
 /// argmax (temperature == 0) or full stochastic sampling. Returns `[1]` I64 tensor.
+#[allow(clippy::too_many_arguments)]
 pub fn logits_to_token_impl<R: Runtime<DType = numr::dtype::DType>>(
     client: &R::Client,
     logits: &Tensor<R>,
@@ -278,7 +279,7 @@ where
         // Random value
         let rand_tensor = client
             .rand(&[1], numr::dtype::DType::F32)
-            .map_err(|e| crate::error::Error::Numr(e))?;
+            .map_err(crate::error::Error::Numr)?;
         let random_val: f32 = rand_tensor.to_vec::<f32>()[0];
 
         // Renormalize and sample

@@ -1,3 +1,4 @@
+pub mod block_tp;
 pub mod model;
 pub mod model_tp;
 

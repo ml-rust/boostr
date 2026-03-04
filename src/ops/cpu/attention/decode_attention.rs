@@ -15,7 +15,7 @@
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
 
@@ -86,9 +86,9 @@ pub fn fused_decode_attention(
 
             // Phase 2: Softmax with f64 accumulation for numerical stability
             let mut sum_exp = 0.0f64;
-            for j in 0..seq_len_k {
-                let w = (scores[j] - max_score).exp();
-                scores[j] = w;
+            for s in scores[..seq_len_k].iter_mut() {
+                let w = (*s - max_score).exp();
+                *s = w;
                 sum_exp += w as f64;
             }
 
@@ -208,16 +208,14 @@ unsafe fn accumulate_weighted_avx2(out: *mut f32, v: *const f32, weight: f32, le
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn hsum_f32_avx2(v: __m256) -> f32 {
-    unsafe {
-        let hi128 = _mm256_extractf128_ps(v, 1);
-        let lo128 = _mm256_castps256_ps128(v);
-        let sum128 = _mm_add_ps(lo128, hi128);
-        let hi64 = _mm_movehl_ps(sum128, sum128);
-        let sum64 = _mm_add_ps(sum128, hi64);
-        let hi32 = _mm_shuffle_ps(sum64, sum64, 0b_00_00_00_01);
-        let sum32 = _mm_add_ss(sum64, hi32);
-        _mm_cvtss_f32(sum32)
-    }
+    let hi128 = _mm256_extractf128_ps(v, 1);
+    let lo128 = _mm256_castps256_ps128(v);
+    let sum128 = _mm_add_ps(lo128, hi128);
+    let hi64 = _mm_movehl_ps(sum128, sum128);
+    let sum64 = _mm_add_ps(sum128, hi64);
+    let hi32 = _mm_shuffle_ps(sum64, sum64, 0b_00_00_00_01);
+    let sum32 = _mm_add_ss(sum64, hi32);
+    _mm_cvtss_f32(sum32)
 }
 
 #[cfg(test)]
@@ -275,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_decode_attention_matches_standard() {
-        use numr::ops::{ActivationOps, MatmulOps, ReduceOps, ScalarOps, ShapeOps};
+        use numr::ops::{ActivationOps, MatmulOps, ScalarOps};
         use numr::runtime::cpu::CpuClient;
 
         let device = CpuDevice::new();

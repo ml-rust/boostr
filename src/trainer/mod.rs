@@ -2,6 +2,7 @@ pub mod amp;
 pub mod async_checkpoint;
 pub mod checkpoint;
 pub mod config;
+#[path = "distributed_checkpoint/mod.rs"]
 pub mod distributed_checkpoint;
 pub mod simple;
 #[cfg(test)]

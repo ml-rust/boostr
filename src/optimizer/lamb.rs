@@ -154,7 +154,10 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
                 LambState { m, v }
             });
 
-            let state = self.state.get(&id).unwrap();
+            let state = self
+                .state
+                .get(&id)
+                .expect("state was lazily initialized via or_insert_with above");
 
             // Fused kernel computes: update vector + updated m, v
             let (update, new_m, new_v) = client.fused_lamb_step(
@@ -180,7 +183,10 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
             let scaled_update = client.mul_scalar(&update, effective_lr)?;
             let new_param = client.sub(param, &scaled_update)?;
 
-            let state_mut = self.state.get_mut(&id).unwrap();
+            let state_mut = self
+                .state
+                .get_mut(&id)
+                .expect("state was initialized for this id earlier in the loop");
             state_mut.m = new_m;
             state_mut.v = new_v;
             params.insert(id, new_param);

@@ -123,9 +123,16 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
         let groups: Vec<(&Tensor<R>, &Tensor<R>, &Tensor<R>, &Tensor<R>)> = ids_with_grads
             .iter()
             .map(|id| {
-                let param = params.get(id).unwrap();
-                let grad = grads.get(*id).unwrap();
-                let state = self.state.get(id).unwrap();
+                let param = params
+                    .get(id)
+                    .expect("id came from ids_with_grads, which was built from params.keys()");
+                let grad = grads.get(*id).expect(
+                    "id came from ids_with_grads, which was filtered to only ids with grads",
+                );
+                let state = self
+                    .state
+                    .get(id)
+                    .expect("state was lazily initialized for all ids in ids_with_grads");
                 (param, grad, &state.m, &state.v)
             })
             .collect();
@@ -135,7 +142,10 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
 
         // Write back results
         for (id, (new_param, new_m, new_v)) in ids_with_grads.iter().zip(results) {
-            let state_mut = self.state.get_mut(id).unwrap();
+            let state_mut = self
+                .state
+                .get_mut(id)
+                .expect("state was initialized for all ids in ids_with_grads");
             state_mut.m = new_m;
             state_mut.v = new_v;
             params.insert(*id, new_param);

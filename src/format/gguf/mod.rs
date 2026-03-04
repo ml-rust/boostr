@@ -1,3 +1,4 @@
+pub mod io;
 pub mod metadata;
 pub mod name_map;
 pub mod reader;

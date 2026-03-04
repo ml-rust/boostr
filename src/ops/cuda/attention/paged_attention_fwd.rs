@@ -9,7 +9,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::paged_attention::{bwd_block_config, fwd_block_config};
+use super::paged_attention::fwd_block_config;
 use super::paged_decode::paged_decode_attention_fwd;
 
 /// Standard (non-FP8) paged attention forward.

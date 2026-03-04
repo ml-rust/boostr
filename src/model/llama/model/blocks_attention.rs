@@ -7,7 +7,7 @@ use crate::inference::kv_cache::LayeredPagedKvCache;
 use crate::model::traits::ModelClient;
 use crate::nn::{MaybeQuantLinear, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
-use crate::ops::traits::{KvCacheOps, PagedAttentionOps};
+use crate::ops::traits::{KvCacheOps, PagedAttentionOps, RoPEOps};
 use numr::autograd::{Var, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{

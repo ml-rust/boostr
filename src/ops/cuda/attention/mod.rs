@@ -1,8 +1,16 @@
 pub mod flash;
+pub mod flash_bwd;
+pub mod flash_bwd_fp8;
+pub mod flash_decode;
+pub mod flash_fwd;
+pub mod flash_utils;
 pub mod flash_v3;
 pub mod fused_qkv;
 pub mod kv_insert;
 pub mod mla;
 pub mod mqa_gqa;
 pub mod paged_attention;
+pub mod paged_attention_bwd;
+pub mod paged_attention_fwd;
+pub mod paged_decode;
 pub mod varlen_attention;

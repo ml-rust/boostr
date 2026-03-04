@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::quant::QuantFormat;
+use crate::quant::decomposed::DecomposedQuantTensor;
 use crate::quant::tensor::QuantTensor;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -15,30 +16,42 @@ pub enum Weight<R: Runtime> {
     Standard(Tensor<R>),
     /// Block-quantized tensor (GGUF formats)
     Quantized(QuantTensor<R>),
+    /// Decomposed quantized tensor (AWQ/GPTQ formats)
+    DecomposedQuant(DecomposedQuantTensor<R>),
 }
 
 impl<R: Runtime> Weight<R> {
-    /// Returns `true` if this weight is quantized.
+    /// Returns `true` if this weight is quantized (block or decomposed).
     pub fn is_quantized(&self) -> bool {
-        matches!(self, Self::Quantized(_))
+        matches!(self, Self::Quantized(_) | Self::DecomposedQuant(_))
     }
 
     /// Get as a standard tensor, or error if quantized.
     pub fn as_tensor(&self) -> Result<&Tensor<R>> {
         match self {
             Self::Standard(t) => Ok(t),
-            Self::Quantized(_) => Err(Error::ModelError {
+            _ => Err(Error::ModelError {
                 reason: "expected standard tensor, got quantized".into(),
             }),
         }
     }
 
-    /// Get as a quantized tensor, or error if standard.
+    /// Get as a quantized tensor, or error if not block-quantized.
     pub fn as_quant_tensor(&self) -> Result<&QuantTensor<R>> {
         match self {
             Self::Quantized(q) => Ok(q),
-            Self::Standard(_) => Err(Error::ModelError {
-                reason: "expected quantized tensor, got standard".into(),
+            _ => Err(Error::ModelError {
+                reason: "expected block-quantized tensor".into(),
+            }),
+        }
+    }
+
+    /// Get as a decomposed quantized tensor, or error.
+    pub fn as_decomposed_quant_tensor(&self) -> Result<&DecomposedQuantTensor<R>> {
+        match self {
+            Self::DecomposedQuant(dq) => Ok(dq),
+            _ => Err(Error::ModelError {
+                reason: "expected decomposed quantized tensor".into(),
             }),
         }
     }
@@ -47,18 +60,28 @@ impl<R: Runtime> Weight<R> {
     pub fn into_tensor(self) -> Result<Tensor<R>> {
         match self {
             Self::Standard(t) => Ok(t),
-            Self::Quantized(_) => Err(Error::ModelError {
+            _ => Err(Error::ModelError {
                 reason: "expected standard tensor, got quantized".into(),
             }),
         }
     }
 
-    /// Consume and return the inner quantized tensor, or error if standard.
+    /// Consume and return the inner quantized tensor, or error if not block-quantized.
     pub fn into_quant_tensor(self) -> Result<QuantTensor<R>> {
         match self {
             Self::Quantized(q) => Ok(q),
-            Self::Standard(_) => Err(Error::ModelError {
-                reason: "expected quantized tensor, got standard".into(),
+            _ => Err(Error::ModelError {
+                reason: "expected block-quantized tensor".into(),
+            }),
+        }
+    }
+
+    /// Consume and return the inner decomposed quantized tensor, or error.
+    pub fn into_decomposed_quant_tensor(self) -> Result<DecomposedQuantTensor<R>> {
+        match self {
+            Self::DecomposedQuant(dq) => Ok(dq),
+            _ => Err(Error::ModelError {
+                reason: "expected decomposed quantized tensor".into(),
             }),
         }
     }
@@ -70,14 +93,15 @@ impl<R: Runtime<DType = numr::dtype::DType>> Weight<R> {
         match self {
             Self::Standard(t) => t.shape(),
             Self::Quantized(q) => q.shape(),
+            Self::DecomposedQuant(dq) => dq.shape(),
         }
     }
 
-    /// Get the quantization format if quantized, `None` if standard.
+    /// Get the quantization format if block-quantized, `None` otherwise.
     pub fn quant_format(&self) -> Option<QuantFormat> {
         match self {
             Self::Quantized(q) => Some(q.format()),
-            Self::Standard(_) => None,
+            _ => None,
         }
     }
 }

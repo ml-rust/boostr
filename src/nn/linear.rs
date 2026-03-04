@@ -2,10 +2,12 @@
 
 use crate::error::Result;
 use crate::nn::weight::Weight;
+use crate::quant::decomposed::DecomposedQuantLinear;
 use crate::quant::tensor::QuantTensor;
 use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{Var, var_add, var_matmul, var_transpose};
-use numr::ops::{BinaryOps, TensorOps};
+use numr::dtype::DType;
+use numr::ops::{BinaryOps, TensorOps, TypeConversionOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -96,24 +98,30 @@ impl<R: Runtime> QuantLinear<R> {
 pub enum MaybeQuantLinear<R: Runtime> {
     Standard(Linear<R>),
     Quantized(QuantLinear<R>),
+    DecomposedQuant(DecomposedQuantLinear<R>),
 }
 
 impl<R: Runtime> MaybeQuantLinear<R> {
-    /// Construct from a `Weight` (standard or quantized) plus optional bias tensor.
+    /// Construct from a `Weight` (standard, quantized, or decomposed) plus optional bias tensor.
     pub fn from_weight(weight: Weight<R>, bias: Option<Tensor<R>>) -> Self {
         match weight {
             Weight::Standard(t) => Self::Standard(Linear::new(t, bias, false)),
             Weight::Quantized(qt) => Self::Quantized(QuantLinear::new(qt, bias)),
+            Weight::DecomposedQuant(dq) => {
+                Self::DecomposedQuant(DecomposedQuantLinear::new(dq, bias))
+            }
         }
     }
 
-    /// Forward pass: works for both standard and quantized weights.
-    ///
-    /// For standard weights: uses autograd-compatible matmul.
-    /// For quantized weights: extracts tensor, does quant_matmul, wraps result.
+    /// Forward pass: works for standard, quantized, and decomposed quantized weights.
     pub fn forward<C>(&self, client: &C, input: &Var<R>) -> Result<Var<R>>
     where
-        C: RuntimeClient<R> + TensorOps<R> + QuantMatmulOps<R> + BinaryOps<R>,
+        C: RuntimeClient<R>
+            + TensorOps<R>
+            + QuantMatmulOps<R>
+            + BinaryOps<R>
+            + TypeConversionOps<R>,
+        R: Runtime<DType = DType>,
         R::Client: TensorOps<R>,
     {
         match self {
@@ -122,23 +130,33 @@ impl<R: Runtime> MaybeQuantLinear<R> {
                 let out = qlinear.forward(client, input.tensor())?;
                 Ok(Var::new(out, false))
             }
+            Self::DecomposedQuant(dqlinear) => {
+                let out = dqlinear.forward(client, input.tensor())?;
+                Ok(Var::new(out, false))
+            }
         }
     }
 
     /// Batched forward: compute multiple projections sharing the same input.
     ///
-    /// When all layers are quantized, uses `quant_matmul_batch` to amortize
+    /// When all layers are block-quantized, uses `quant_matmul_batch` to amortize
     /// activation preprocessing (e.g. Q8_1 quantization on CUDA).
+    /// For decomposed quantized layers, falls back to individual forward passes.
     pub fn forward_batch<C>(
         layers: &[&MaybeQuantLinear<R>],
         client: &C,
         input: &Var<R>,
     ) -> Result<Vec<Var<R>>>
     where
-        C: RuntimeClient<R> + TensorOps<R> + QuantMatmulOps<R> + BinaryOps<R>,
+        C: RuntimeClient<R>
+            + TensorOps<R>
+            + QuantMatmulOps<R>
+            + BinaryOps<R>
+            + TypeConversionOps<R>,
+        R: Runtime<DType = DType>,
         R::Client: TensorOps<R>,
     {
-        // Check if all are quantized (no bias) — enables batch path
+        // Check if all are block-quantized (no bias) — enables batch path
         let all_quantized_no_bias = layers
             .iter()
             .all(|l| matches!(l, MaybeQuantLinear::Quantized(ql) if ql.bias().is_none()));

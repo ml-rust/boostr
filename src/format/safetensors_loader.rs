@@ -119,6 +119,19 @@ impl SafeTensorsLoader {
         })
     }
 
+    /// Read raw tensor bytes by name from whichever shard contains it
+    pub fn read_tensor_bytes(&mut self, name: &str) -> Result<Vec<u8>> {
+        let file_idx = self
+            .files
+            .iter()
+            .position(|st| st.tensor_info(name).is_ok())
+            .ok_or_else(|| Error::ModelError {
+                reason: format!("tensor not found in any shard: {name}"),
+            })?;
+
+        self.files[file_idx].read_tensor_bytes(name)
+    }
+
     /// Load a tensor by name from whichever shard contains it
     pub fn load_tensor<R: Runtime<DType = DType>>(
         &mut self,

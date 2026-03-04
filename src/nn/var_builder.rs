@@ -167,6 +167,9 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
                 let client = R::default_client(self.device);
                 client.dequantize(&qt, target_dtype)
             }
+            Weight::DecomposedQuant(_) => Err(Error::ModelError {
+                reason: "cannot dequantize decomposed quantized tensor to standard tensor".into(),
+            }),
         }
     }
 

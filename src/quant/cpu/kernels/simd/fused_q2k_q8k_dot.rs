@@ -32,7 +32,7 @@ fn fused_dot_q2k_q8k_scalar(act_q8k: &[u8], weight: &[u8], k: usize) -> f32 {
         let dmin = f16::from_le_bytes([q2k[82], q2k[83]]).to_f32();
 
         let q8k_block = &act_q8k[b * Q8K_BLOCK_BYTES..];
-        let d8 = f32::from_le_bytes(q8k_block[0..4].try_into().unwrap());
+        let d8 = f32::from_le_bytes(q8k_block[0..4].try_into().expect("exact-size slice"));
         let q8 = &q8k_block[4..260];
         let bsums_bytes = &q8k_block[260..292];
 

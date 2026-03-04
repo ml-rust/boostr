@@ -10,6 +10,7 @@ use half::f16;
 use super::super::dequant_k_quants::unpack_q3k_scales;
 
 /// Fused dequant+dot for Q3_K — per-block f32 accumulation.
+#[allow(clippy::needless_range_loop)]
 pub fn fused_dot_q3k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
     const BLOCK_SIZE: usize = 256;
     const BLOCK_BYTES: usize = 110;
@@ -76,8 +77,8 @@ mod tests {
         let mut block = [0u8; 110];
         block[0..32].fill(0xFF);
         block[32..96].fill(0xAA);
-        for i in 96..108 {
-            block[i] = ((i * 17 + 5) % 64) as u8;
+        for (i, b) in block[96..108].iter_mut().enumerate() {
+            *b = (((i + 96) * 17 + 5) % 64) as u8;
         }
         block[108..110].copy_from_slice(&f16::from_f32(0.5).to_le_bytes());
 

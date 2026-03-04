@@ -58,7 +58,8 @@ pub fn dispatch_int4_gemm(
             });
         }
     }
-    let [inp_buf, qw_buf, sc_buf, zr_buf, out_buf] = bufs.map(|b| b.unwrap());
+    let [inp_buf, qw_buf, sc_buf, zr_buf, out_buf] =
+        bufs.map(|b| b.expect("buffer existence checked above"));
 
     let params = Int4GemmParams {
         m,
@@ -141,7 +142,8 @@ pub fn dispatch_int4_gemm_gptq(
             });
         }
     }
-    let [inp_buf, qw_buf, qz_buf, sc_buf, gi_buf, out_buf] = bufs.map(|b| b.unwrap());
+    let [inp_buf, qw_buf, qz_buf, sc_buf, gi_buf, out_buf] =
+        bufs.map(|b| b.expect("buffer existence checked above"));
 
     let params = GptqParams { m, k, n, _pad: 0 };
     let params_buf = client.wgpu_device().create_buffer(&wgpu::BufferDescriptor {
@@ -226,7 +228,8 @@ pub fn dispatch_marlin_gemm(
             });
         }
     }
-    let [inp_buf, wt_buf, sc_buf, zr_buf, out_buf] = bufs.map(|b| b.unwrap());
+    let [inp_buf, wt_buf, sc_buf, zr_buf, out_buf] =
+        bufs.map(|b| b.expect("buffer existence checked above"));
 
     let params = Int4GemmParams {
         m,

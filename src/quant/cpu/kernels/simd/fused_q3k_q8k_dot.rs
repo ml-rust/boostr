@@ -35,7 +35,7 @@ fn fused_dot_q3k_q8k_scalar(act_q8k: &[u8], weight: &[u8], k: usize) -> f32 {
         let d_all = f16::from_le_bytes([q3k[108], q3k[109]]).to_f32();
 
         let q8k_block = &act_q8k[b * Q8K_BLOCK_BYTES..];
-        let d8 = f32::from_le_bytes(q8k_block[0..4].try_into().unwrap());
+        let d8 = f32::from_le_bytes(q8k_block[0..4].try_into().expect("exact-size slice"));
         let q8 = &q8k_block[4..260];
 
         let d = d_all * d8;
@@ -63,9 +63,9 @@ fn fused_dot_q3k_q8k_scalar(act_q8k: &[u8], weight: &[u8], k: usize) -> f32 {
         let mut aux32 = [0i32; 8];
         let mut q8_off = 0;
         let mut a_off = 0;
-        for j in 0..16 {
+        for &sc_val in &scales {
             // 16 sub-blocks of 16 elements each
-            let scale = scales[j] as i32;
+            let scale = sc_val as i32;
             for l in 0..8 {
                 aux32[l] += scale * (q8[q8_off + l] as i8 as i32 * aux8[a_off + l] as i32);
             }
@@ -87,6 +87,7 @@ fn fused_dot_q3k_q8k_scalar(act_q8k: &[u8], weight: &[u8], k: usize) -> f32 {
 }
 
 /// Dispatch wrapper
+#[allow(clippy::needless_range_loop)]
 pub fn fused_dot_q3k_q8k(act_q8k: &[u8], weight: &[u8], k: usize) -> f32 {
     // TODO: AVX2 version
     fused_dot_q3k_q8k_scalar(act_q8k, weight, k)

@@ -15,7 +15,7 @@
 
 use rayon::prelude::*;
 
-use super::{dequant, dequant_iq, dequant_k_quants};
+use super::{dequant, dequant_k_quants};
 use crate::quant::QuantFormat;
 
 /// f32 dot product with SIMD acceleration when available.
@@ -74,7 +74,7 @@ pub fn quant_matmul_f32(
     // - M>1 (prefill): more chunks for better load balancing
     let num_threads = rayon::current_num_threads();
     let target_chunks = if m == 1 { num_threads } else { num_threads * 4 };
-    let chunk_size = (n + target_chunks - 1) / target_chunks;
+    let chunk_size = n.div_ceil(target_chunks);
     let chunk_size = chunk_size.max(16); // minimum 16 rows per chunk
 
     // We need to scatter results: output[i * n + j] for each (i, j).
@@ -275,7 +275,7 @@ pub fn quant_matmul_batch_f32(
 
     let num_threads = rayon::current_num_threads();
     let target_chunks = if m == 1 { num_threads } else { num_threads * 4 };
-    let chunk_size = (max_n + target_chunks - 1) / target_chunks;
+    let chunk_size = max_n.div_ceil(target_chunks);
     let chunk_size = chunk_size.max(16);
 
     // Collect output pointers as usize for Send+Sync
@@ -373,17 +373,17 @@ pub fn dequant_row_f32(row_bytes: &[u8], output: &mut [f32], format: QuantFormat
         QuantFormat::Q6K => dequant::dequant_q6k(row_bytes, output),
         QuantFormat::Q8K => dequant_k_quants::dequant_q8k(row_bytes, output),
         // IQ/TQ formats
-        QuantFormat::IQ4NL => dequant_iq::dequant_iq4_nl(row_bytes, output),
-        QuantFormat::IQ4XS => dequant_iq::dequant_iq4_xs(row_bytes, output),
-        QuantFormat::IQ2XXS => dequant_iq::dequant_iq2_xxs(row_bytes, output),
-        QuantFormat::IQ2XS => dequant_iq::dequant_iq2_xs(row_bytes, output),
-        QuantFormat::IQ2S => dequant_iq::dequant_iq2_s(row_bytes, output),
-        QuantFormat::IQ3XXS => dequant_iq::dequant_iq3_xxs(row_bytes, output),
-        QuantFormat::IQ3S => dequant_iq::dequant_iq3_s(row_bytes, output),
-        QuantFormat::IQ1S => dequant_iq::dequant_iq1_s(row_bytes, output),
-        QuantFormat::IQ1M => dequant_iq::dequant_iq1_m(row_bytes, output),
-        QuantFormat::TQ1_0 => dequant_iq::dequant_tq1_0(row_bytes, output),
-        QuantFormat::TQ2_0 => dequant_iq::dequant_tq2_0(row_bytes, output),
+        QuantFormat::IQ4NL => dequant::dequant_iq4_nl(row_bytes, output),
+        QuantFormat::IQ4XS => dequant::dequant_iq4_xs(row_bytes, output),
+        QuantFormat::IQ2XXS => dequant::dequant_iq2_xxs(row_bytes, output),
+        QuantFormat::IQ2XS => dequant::dequant_iq2_xs(row_bytes, output),
+        QuantFormat::IQ2S => dequant::dequant_iq2_s(row_bytes, output),
+        QuantFormat::IQ3XXS => dequant::dequant_iq3_xxs(row_bytes, output),
+        QuantFormat::IQ3S => dequant::dequant_iq3_s(row_bytes, output),
+        QuantFormat::IQ1S => dequant::dequant_iq1_s(row_bytes, output),
+        QuantFormat::IQ1M => dequant::dequant_iq1_m(row_bytes, output),
+        QuantFormat::TQ1_0 => dequant::dequant_tq1_0(row_bytes, output),
+        QuantFormat::TQ2_0 => dequant::dequant_tq2_0(row_bytes, output),
     }
 }
 

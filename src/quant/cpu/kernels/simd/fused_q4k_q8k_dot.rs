@@ -125,7 +125,7 @@ fn fused_dot_q4k_q8k_scalar(act_q8k: &[u8], weight: &[u8], k: usize) -> f32 {
         let (scales, mins) = unpack_q4k_q5k_scales(sc);
 
         let q8k_block = &act_q8k[b * Q8K_BLOCK_BYTES..];
-        let d8 = f32::from_le_bytes(q8k_block[0..4].try_into().unwrap());
+        let d8 = f32::from_le_bytes(q8k_block[0..4].try_into().expect("exact-size slice"));
         let q8_qs = &q8k_block[4..260];
         let q8_bsums = &q8k_block[260..292];
 
@@ -152,8 +152,16 @@ fn fused_dot_q4k_q8k_scalar(act_q8k: &[u8], weight: &[u8], k: usize) -> f32 {
             sumi += dot * scales[j] as i32;
 
             // bsums: 2 sub-blocks of 16 elements for this 32-element group
-            let bsum = i16::from_le_bytes(q8_bsums[j * 4..j * 4 + 2].try_into().unwrap()) as i32
-                + i16::from_le_bytes(q8_bsums[j * 4 + 2..j * 4 + 4].try_into().unwrap()) as i32;
+            let bsum = i16::from_le_bytes(
+                q8_bsums[j * 4..j * 4 + 2]
+                    .try_into()
+                    .expect("exact-size slice"),
+            ) as i32
+                + i16::from_le_bytes(
+                    q8_bsums[j * 4 + 2..j * 4 + 4]
+                        .try_into()
+                        .expect("exact-size slice"),
+                ) as i32;
             sumi_mins += mins[j] as i32 * bsum;
         }
 

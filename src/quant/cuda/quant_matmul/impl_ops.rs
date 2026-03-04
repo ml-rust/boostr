@@ -1,4 +1,4 @@
-//! CUDA implementation of QuantMatmulOps
+//! impl QuantMatmulOps<CudaRuntime> for CudaClient
 
 use crate::error::{Error, Result};
 use crate::quant::traits::QuantMatmulOps;
@@ -10,72 +10,12 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::int4_gemm as int4_dispatch;
-use super::kernels::{
-    self, QUANT_ACT_MODULE, QUANT_GEMV_MODULE, QUANT_MATMUL_GENERIC_MODULE, QUANT_MATMUL_MODULE,
+use super::super::int4_gemm as int4_dispatch;
+use super::super::kernels::{self, QUANT_GEMV_MODULE};
+use super::fallback::{
+    dispatch_gemv, dispatch_matmul, quant_matmul_via_dequant, quant_swiglu_via_dequant,
 };
-
-/// Validate input is F32 and extract (M, K).
-fn validate_input_cuda(input: &Tensor<CudaRuntime>) -> Result<(usize, usize)> {
-    if input.dtype() != DType::F32 {
-        return Err(Error::QuantError {
-            reason: format!("input must be F32, got {:?}", input.dtype()),
-        });
-    }
-    let shape = input.shape();
-    if shape.len() < 2 {
-        return Err(Error::QuantError {
-            reason: format!("input must be at least 2D, got {:?}", shape),
-        });
-    }
-    let k = shape[shape.len() - 1];
-    let m: usize = shape.iter().product::<usize>() / k;
-    Ok((m, k))
-}
-
-/// Quantize F32 activation to Q8_1 format on GPU.
-/// Returns a raw byte tensor of shape [m * num_blocks * 36] containing Q8_1 blocks.
-fn quantize_activation_q8_1(
-    client: &CudaClient,
-    activation: &Tensor<CudaRuntime>,
-    m: usize,
-    k: usize,
-) -> Result<Tensor<CudaRuntime>> {
-    let device_index = activation.device().id();
-    let num_blocks = k / 32;
-    let q8_bytes = m * num_blocks * 36;
-
-    // Allocate Q8_1 buffer as U8 tensor
-    let q8_buf = Tensor::<CudaRuntime>::empty(&[q8_bytes], DType::U8, activation.device());
-
-    let module = kernels::get_or_load_module(client.context(), device_index, QUANT_ACT_MODULE)?;
-    let func = kernels::get_kernel_function(&module, "quantize_f32_q8_1")?;
-
-    let act_ptr = activation.ptr();
-    let q8_ptr = q8_buf.ptr();
-    let m_u32 = m as u32;
-    let k_u32 = k as u32;
-
-    // Grid: (num_blocks, M, 1), Block: (32, 1, 1) — one warp per Q8_1 block
-    let cfg = LaunchConfig {
-        grid_dim: (num_blocks as u32, m_u32, 1),
-        block_dim: (32, 1, 1),
-        shared_mem_bytes: 0,
-    };
-
-    unsafe {
-        let mut builder = client.stream().launch_builder(&func);
-        builder.arg(&act_ptr);
-        builder.arg(&q8_ptr);
-        builder.arg(&m_u32);
-        builder.arg(&k_u32);
-        builder.launch(cfg).map_err(|e| Error::QuantError {
-            reason: format!("CUDA quantize_f32_q8_1 kernel launch failed: {:?}", e),
-        })?;
-    }
-
-    Ok(q8_buf)
-}
+use super::helpers::{quantize_activation_q8_1, validate_input_cuda};
 
 impl QuantMatmulOps<CudaRuntime> for CudaClient {
     fn int4_gemm(
@@ -173,7 +113,6 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         activation: &Tensor<CudaRuntime>,
         weight: &QuantTensor<CudaRuntime>,
     ) -> Result<Tensor<CudaRuntime>> {
-        // Validate activation dtype
         if activation.dtype() != DType::F32 {
             return Err(Error::QuantError {
                 reason: format!(
@@ -183,7 +122,6 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             });
         }
 
-        // Validate weight is 2D: [N, K]
         let w_shape = weight.shape();
         if w_shape.len() != 2 {
             return Err(Error::QuantError {
@@ -193,7 +131,6 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         let n = w_shape[0];
         let k = w_shape[1];
 
-        // Validate activation shape: [..., K]
         let a_shape = activation.shape();
         if a_shape.is_empty() {
             return Err(Error::QuantError {
@@ -210,155 +147,23 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             });
         }
 
-        // Compute M from activation shape
-        let total_elements: usize = a_shape.iter().product();
-        let m = total_elements / k;
-
-        // Ensure activation is contiguous
+        let m = a_shape.iter().product::<usize>() / k;
         let act_contig = activation.contiguous();
 
-        let device_index = activation.device().id();
-
-        // Allocate output: [..., N]
         let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
         out_shape.push(n);
         let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, activation.device());
         let output_ptr = output.ptr();
 
-        let m_u32 = m as u32;
-        let k_u32 = k as u32;
-        let n_u32 = n as u32;
-
-        // Use GEMV for small-to-moderate M (decode + short prefill)
-        // MWR kernels handle any M via grid_y; they outperform the naive
-        // 16x16 tiled matmul for M up to ~64
         if m <= 64 {
-            let warps_per_block = 8u32;
-            let block_size = 256u32;
-            let grid_x = (n as u32).div_ceil(warps_per_block);
-            let grid_y = m as u32;
-
-            let cfg = LaunchConfig {
-                grid_dim: (grid_x, grid_y, 1),
-                block_dim: (block_size, 1, 1),
-                shared_mem_bytes: 0,
-            };
-
-            // For Q4_K, Q6_K, Q8_0: use dp4a path with multi-warp K-reduction (MWR)
-            // 4 warps cooperate on K-dimension per output column, reduce via shared memory
-            if matches!(
-                weight.format(),
-                QuantFormat::Q4K | QuantFormat::Q6K | QuantFormat::Q8_0
-            ) && k % 32 == 0
-            {
-                let q8_buf = quantize_activation_q8_1(self, &act_contig, m, k)?;
-                let q8_ptr = q8_buf.ptr();
-                let weight_ptr = weight.storage().ptr();
-
-                let kernel_name = match weight.format() {
-                    QuantFormat::Q4K => "quant_gemv_q4_k_q8_1_mwr",
-                    QuantFormat::Q6K => "quant_gemv_q6_k_q8_1_mwr",
-                    QuantFormat::Q8_0 => "quant_gemv_q8_0_q8_1_mwr",
-                    _ => unreachable!(),
-                };
-
-                // MWR: one output column per block, 128 threads (4 warps)
-                let cfg_mwr = LaunchConfig {
-                    grid_dim: (n_u32, grid_y, 1),
-                    block_dim: (128, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-
-                let module =
-                    kernels::get_or_load_module(self.context(), device_index, QUANT_GEMV_MODULE)?;
-                let func = kernels::get_kernel_function(&module, kernel_name)?;
-
-                unsafe {
-                    let mut builder = self.stream().launch_builder(&func);
-                    builder.arg(&q8_ptr);
-                    builder.arg(&weight_ptr);
-                    builder.arg(&output_ptr);
-                    builder.arg(&m_u32);
-                    builder.arg(&k_u32);
-                    builder.arg(&n_u32);
-                    builder.launch(cfg_mwr).map_err(|e| Error::QuantError {
-                        reason: format!("CUDA {} launch failed: {:?}", kernel_name, e),
-                    })?;
-                }
-            } else {
-                // F32 activation path for other formats
-                let act_ptr = act_contig.ptr();
-                let weight_ptr = weight.storage().ptr();
-
-                let kernel_name = match weight.format() {
-                    QuantFormat::Q4_0 => "quant_gemv_q4_0_f32",
-                    QuantFormat::Q8_0 => "quant_gemv_q8_0_f32",
-                    QuantFormat::Q4K => "quant_gemv_q4_k_f32",
-                    QuantFormat::Q6K => "quant_gemv_q6_k_f32",
-                    _ => {
-                        // Generic fallback: dequant weight to f32, then standard matmul
-                        return quant_matmul_via_dequant(self, activation, weight);
-                    }
-                };
-
-                let module =
-                    kernels::get_or_load_module(self.context(), device_index, QUANT_GEMV_MODULE)?;
-                let func = kernels::get_kernel_function(&module, kernel_name)?;
-
-                unsafe {
-                    let mut builder = self.stream().launch_builder(&func);
-                    builder.arg(&act_ptr);
-                    builder.arg(&weight_ptr);
-                    builder.arg(&output_ptr);
-                    builder.arg(&m_u32);
-                    builder.arg(&k_u32);
-                    builder.arg(&n_u32);
-                    builder.launch(cfg).map_err(|e| Error::QuantError {
-                        reason: format!("CUDA quant_gemv kernel launch failed: {:?}", e),
-                    })?;
-                }
+            match dispatch_gemv(self, &act_contig, weight, output_ptr, m, k, n)? {
+                Some(()) => {}
+                None => return quant_matmul_via_dequant(self, activation, weight),
             }
         } else {
-            let act_ptr = act_contig.ptr();
-            let weight_ptr = weight.storage().ptr();
-
-            let kernel_name = match weight.format() {
-                QuantFormat::Q4_0 => "quant_matmul_q4_0_f32",
-                QuantFormat::Q8_0 => "quant_matmul_q8_0_f32",
-                QuantFormat::Q4K => "quant_matmul_q4_k_f32",
-                QuantFormat::Q6K => "quant_matmul_q6_k_f32",
-                _ => {
-                    // Generic fallback: dequant weight to f32, then standard matmul
-                    return quant_matmul_via_dequant(self, activation, weight);
-                }
-            };
-
-            let module =
-                kernels::get_or_load_module(self.context(), device_index, QUANT_MATMUL_MODULE)?;
-            let func = kernels::get_kernel_function(&module, kernel_name)?;
-
-            let block_x = 16u32;
-            let block_y = 16u32;
-            let grid_x = (n as u32).div_ceil(block_x);
-            let grid_y = (m as u32).div_ceil(block_y);
-
-            let cfg = LaunchConfig {
-                grid_dim: (grid_x, grid_y, 1),
-                block_dim: (block_x, block_y, 1),
-                shared_mem_bytes: 0,
-            };
-
-            unsafe {
-                let mut builder = self.stream().launch_builder(&func);
-                builder.arg(&act_ptr);
-                builder.arg(&weight_ptr);
-                builder.arg(&output_ptr);
-                builder.arg(&m_u32);
-                builder.arg(&k_u32);
-                builder.arg(&n_u32);
-                builder.launch(cfg).map_err(|e| Error::QuantError {
-                    reason: format!("CUDA quant_matmul kernel launch failed: {:?}", e),
-                })?;
+            match dispatch_matmul(self, &act_contig, weight, output_ptr, m, k, n)? {
+                Some(()) => {}
+                None => return quant_matmul_via_dequant(self, activation, weight),
             }
         }
 
@@ -374,7 +179,6 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             return Ok(vec![]);
         }
 
-        // Validate activation
         if activation.dtype() != DType::F32 {
             return Err(Error::QuantError {
                 reason: format!(
@@ -391,8 +195,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             });
         }
         let k = a_shape[a_shape.len() - 1];
-        let total_elements: usize = a_shape.iter().product();
-        let m = total_elements / k;
+        let m = a_shape.iter().product::<usize>() / k;
         let act_contig = activation.contiguous();
 
         // Check if all weights support dp4a (Q4_K, Q6_K, Q8_0)
@@ -405,7 +208,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         let use_dp4a = all_dp4a && m <= 4 && k % 32 == 0;
 
         if use_dp4a {
-            // Batch path: quantize activation to Q8_1 ONCE, reuse for all weights
+            // Quantize activation to Q8_1 ONCE, reuse for all weights
             let q8_buf = quantize_activation_q8_1(self, &act_contig, m, k)?;
             let q8_ptr = q8_buf.ptr();
             let device_index = activation.device().id();
@@ -489,7 +292,6 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         let n = gate_weight.shape()[0];
         let device_index = activation.device().id();
 
-        // Validate matching shapes and formats
         if up_weight.shape()[0] != n || up_weight.shape()[1] != k {
             return Err(Error::QuantError {
                 reason: format!(
@@ -577,111 +379,4 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             self.silu_mul(&gate, &up).map_err(Error::Numr)
         }
     }
-}
-
-/// Generic fallback: fused dequant+dot CUDA kernel for all quant formats.
-/// Dequantizes weight blocks in registers during matmul — never materializes full f32 weight.
-/// Used for quant formats without dedicated CUDA GEMM/GEMV kernels.
-fn quant_matmul_via_dequant(
-    client: &CudaClient,
-    activation: &Tensor<CudaRuntime>,
-    weight: &QuantTensor<CudaRuntime>,
-) -> Result<Tensor<CudaRuntime>> {
-    let a_shape = activation.shape();
-    let w_shape = weight.shape();
-    let n = w_shape[0];
-    let k = w_shape[1];
-    let total: usize = a_shape.iter().product();
-    let m = total / k;
-
-    let act_contig = activation.contiguous();
-    let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
-    out_shape.push(n);
-    let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, activation.device());
-
-    let device_index = activation.device().id();
-    let module =
-        kernels::get_or_load_module(client.context(), device_index, QUANT_MATMUL_GENERIC_MODULE)?;
-    let func = kernels::get_kernel_function(&module, "quant_matmul_generic_f32")?;
-
-    let act_ptr = act_contig.ptr();
-    let weight_ptr = weight.storage().ptr();
-    let output_ptr = output.ptr();
-    let m_u32 = m as u32;
-    let k_u32 = k as u32;
-    let n_u32 = n as u32;
-    let format_id = weight.format().format_id();
-
-    // Grid: (N, M, 1), Block: (32, 1, 1) — one warp per output element
-    let cfg = LaunchConfig {
-        grid_dim: (n_u32, m_u32, 1),
-        block_dim: (32, 1, 1),
-        shared_mem_bytes: 0,
-    };
-
-    unsafe {
-        let mut builder = client.stream().launch_builder(&func);
-        builder.arg(&act_ptr);
-        builder.arg(&weight_ptr);
-        builder.arg(&output_ptr);
-        builder.arg(&m_u32);
-        builder.arg(&k_u32);
-        builder.arg(&n_u32);
-        builder.arg(&format_id);
-        builder.launch(cfg).map_err(|e| Error::QuantError {
-            reason: format!("CUDA quant_matmul_generic_f32 launch failed: {:?}", e),
-        })?;
-    }
-
-    Ok(output)
-}
-
-/// Generic fused SwiGLU: gate_matmul + up_matmul + silu(gate)*up in one kernel.
-/// Eliminates 2 intermediate tensors and reduces kernel launches from 3 to 1.
-fn quant_swiglu_via_dequant(
-    client: &CudaClient,
-    activation: &Tensor<CudaRuntime>,
-    gate_weight: &QuantTensor<CudaRuntime>,
-    up_weight: &QuantTensor<CudaRuntime>,
-    output: &Tensor<CudaRuntime>,
-    m: usize,
-    k: usize,
-    n: usize,
-) -> Result<()> {
-    let device_index = activation.device().id();
-    let module =
-        kernels::get_or_load_module(client.context(), device_index, QUANT_MATMUL_GENERIC_MODULE)?;
-    let func = kernels::get_kernel_function(&module, "quant_swiglu_generic_f32")?;
-
-    let act_ptr = activation.ptr();
-    let gate_ptr = gate_weight.storage().ptr();
-    let up_ptr = up_weight.storage().ptr();
-    let output_ptr = output.ptr();
-    let m_u32 = m as u32;
-    let k_u32 = k as u32;
-    let n_u32 = n as u32;
-    let format_id = gate_weight.format().format_id();
-
-    let cfg = LaunchConfig {
-        grid_dim: (n_u32, m_u32, 1),
-        block_dim: (32, 1, 1),
-        shared_mem_bytes: 0,
-    };
-
-    unsafe {
-        let mut builder = client.stream().launch_builder(&func);
-        builder.arg(&act_ptr);
-        builder.arg(&gate_ptr);
-        builder.arg(&up_ptr);
-        builder.arg(&output_ptr);
-        builder.arg(&m_u32);
-        builder.arg(&k_u32);
-        builder.arg(&n_u32);
-        builder.arg(&format_id);
-        builder.launch(cfg).map_err(|e| Error::QuantError {
-            reason: format!("CUDA quant_swiglu_generic_f32 launch failed: {:?}", e),
-        })?;
-    }
-
-    Ok(())
 }

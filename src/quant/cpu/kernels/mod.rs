@@ -1,9 +1,14 @@
 pub mod simd;
 
 pub mod dequant;
-pub mod dequant_iq;
+pub mod dequant_iq1;
+pub mod dequant_iq2;
+pub mod dequant_iq3;
+pub mod dequant_iq4;
+#[path = "dequant_k_quants/mod.rs"]
 pub mod dequant_k_quants;
 pub mod dequant_simple;
+pub mod dequant_tq;
 pub mod fused_dot;
 pub mod fused_int4_qkv;
 pub mod fused_int4_swiglu;

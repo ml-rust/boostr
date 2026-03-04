@@ -10,6 +10,7 @@
 use half::f16;
 
 /// Fused dequant+dot for Q2_K — per-block f32 accumulation.
+#[allow(clippy::needless_range_loop)]
 pub fn fused_dot_q2k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
     const BLOCK_SIZE: usize = 256;
     const BLOCK_BYTES: usize = 84;

@@ -72,7 +72,7 @@ impl FusedQuantOps<WgpuRuntime> for WgpuClient {
                 });
             }
         }
-        let bufs = bufs.map(|b| b.unwrap());
+        let bufs = bufs.map(|b| b.expect("buffer existence checked above"));
 
         let params = SwigluParams {
             m: m as u32,

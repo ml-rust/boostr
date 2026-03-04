@@ -22,6 +22,7 @@ pub const Q8K_BLOCK_BYTES: usize = 292;
 /// Requires AVX2. Caller ensures buffer sizes.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(clippy::needless_range_loop)]
 pub unsafe fn quantize_f32_to_q8k_avx2(input: &[f32], output: &mut [u8]) {
     unsafe {
         let num_blocks = input.len() / 256;

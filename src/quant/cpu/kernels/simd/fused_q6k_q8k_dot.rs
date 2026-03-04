@@ -154,6 +154,7 @@ pub unsafe fn fused_dot_q6k_q8k_avx2(act_q8k: &[u8], weight: &[u8], k: usize) ->
 }
 
 /// Dispatch wrapper
+#[allow(clippy::needless_range_loop)]
 pub fn fused_dot_q6k_q8k(act_q8k: &[u8], weight: &[u8], k: usize) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -181,7 +182,7 @@ fn fused_dot_q6k_q8k_scalar(act_q8k: &[u8], weight: &[u8], k: usize) -> f32 {
         let d6 = f16::from_le_bytes([blk[208], blk[209]]).to_f32();
 
         let q8k_block = &act_q8k[b * Q8K_BLOCK_BYTES..];
-        let d8 = f32::from_le_bytes(q8k_block[0..4].try_into().unwrap());
+        let d8 = f32::from_le_bytes(q8k_block[0..4].try_into().expect("exact-size slice"));
         let q8_qs = &q8k_block[4..260];
 
         let dall = d6 * d8;
@@ -236,11 +237,11 @@ mod tests {
         let mut weight = [0u8; 210];
         weight[208..210].copy_from_slice(&f16::from_f32(0.5).to_le_bytes());
         weight[192..208].fill(1);
-        for i in 0..128 {
-            weight[i] = ((i * 31) % 256) as u8;
+        for (i, w) in weight[..128].iter_mut().enumerate() {
+            *w = ((i * 31) % 256) as u8;
         }
-        for i in 0..64 {
-            weight[128 + i] = ((i * 37) % 256) as u8;
+        for (i, w) in weight[128..192].iter_mut().enumerate() {
+            *w = ((i * 37) % 256) as u8;
         }
 
         let mut act_q8k = vec![0u8; Q8K_BLOCK_BYTES];

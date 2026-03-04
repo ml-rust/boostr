@@ -76,6 +76,13 @@ fn standard_attention_fwd(
     // Attention mask (causal + sliding window)
     let scores = if causal || window_size > 0 {
         let mask = build_attention_mask(seq_len_q, seq_len_k, causal, window_size, q.device())?;
+        // Cast mask to match scores dtype (e.g. BF16 activations)
+        let mask = if mask.dtype() != scores.dtype() {
+            use numr::ops::TypeConversionOps;
+            client.cast(&mask, scores.dtype()).map_err(Error::Numr)?
+        } else {
+            mask
+        };
         client.add(&scores, &mask).map_err(Error::Numr)?
     } else {
         scores
@@ -147,6 +154,12 @@ fn standard_attention_bwd(
 
     let scores = if causal || window_size > 0 {
         let mask = build_attention_mask(seq_len_q, seq_len_k, causal, window_size, q.device())?;
+        let mask = if mask.dtype() != scores.dtype() {
+            use numr::ops::TypeConversionOps;
+            client.cast(&mask, scores.dtype()).map_err(Error::Numr)?
+        } else {
+            mask
+        };
         client.add(&scores, &mask).map_err(Error::Numr)?
     } else {
         scores
@@ -279,7 +292,13 @@ impl FlashAttentionOps<CpuRuntime> for CpuClient {
         // Fast path: fused decode attention for S_q=1 (single token generation)
         // Avoids all intermediate tensor allocations and GQA expansion
         let seq_len_q = q.shape()[2];
-        if seq_len_q == 1 && !causal && window_size == 0 && q.dtype() == DType::F32 {
+        if seq_len_q == 1
+            && !causal
+            && window_size == 0
+            && q.dtype() == DType::F32
+            && k.dtype() == DType::F32
+            && v.dtype() == DType::F32
+        {
             return super::decode_attention::fused_decode_attention(
                 q,
                 k,

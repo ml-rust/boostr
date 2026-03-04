@@ -4,6 +4,7 @@
 //! CUDA backend provides fused kernels that avoid D2H/H2D transfers.
 
 use crate::error::Result;
+use numr::dtype::DType;
 use numr::ops::RandomOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -167,9 +168,17 @@ pub fn logits_to_token_impl<R: Runtime<DType = numr::dtype::DType>>(
     min_p: f32,
 ) -> Result<Tensor<R>>
 where
-    R::Client: numr::ops::RandomOps<R>,
+    R::Client: numr::ops::RandomOps<R> + numr::ops::TypeConversionOps<R>,
 {
-    // 1. Read logits at last seq position
+    // 1. Read logits at last seq position (cast to F32 if needed)
+    let logits = if logits.dtype() != DType::F32 {
+        use numr::ops::TypeConversionOps;
+        client
+            .cast(logits, DType::F32)
+            .map_err(crate::error::Error::Numr)?
+    } else {
+        logits.clone()
+    };
     let shape = logits.shape();
     let seq_len = shape[1];
     let vocab_size = shape[2];

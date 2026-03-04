@@ -60,24 +60,34 @@ impl KvCacheOps<CpuRuntime> for CpuClient {
             });
         }
 
-        let nk = new_k.to_vec::<f32>();
-        let nv = new_v.to_vec::<f32>();
-
-        // Write directly into cache memory via raw pointers
-        let kc_ptr = k_cache.ptr() as *mut f32;
-        let vc_ptr = v_cache.ptr() as *mut f32;
+        // Copy using byte-level operations to support any dtype (F32, BF16, F16, etc.)
+        // Use raw pointers directly since both source and dest are CPU memory.
+        // Cannot use to_vec::<u8>() because Storage::to_vec uses inner.len (element count)
+        // as the number of T values, which gives wrong byte count for non-u8 dtypes.
+        let elem_size = k_cache.dtype().size_in_bytes();
+        let nk_ptr = new_k.ptr() as *const u8;
+        let nv_ptr = new_v.ptr() as *const u8;
+        let kc_ptr = k_cache.ptr() as *mut u8;
+        let vc_ptr = v_cache.ptr() as *mut u8;
 
         for b in 0..batch {
             for h in 0..num_heads {
                 for s in 0..new_len {
-                    for d in 0..head_dim {
-                        let src = ((b * num_heads + h) * new_len + s) * head_dim + d;
-                        let dst =
-                            ((b * num_heads + h) * max_seq_len + (position + s)) * head_dim + d;
-                        unsafe {
-                            *kc_ptr.add(dst) = nk[src];
-                            *vc_ptr.add(dst) = nv[src];
-                        }
+                    let src_offset = ((b * num_heads + h) * new_len + s) * head_dim * elem_size;
+                    let dst_offset =
+                        ((b * num_heads + h) * max_seq_len + (position + s)) * head_dim * elem_size;
+                    let row_bytes = head_dim * elem_size;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            nk_ptr.add(src_offset),
+                            kc_ptr.add(dst_offset),
+                            row_bytes,
+                        );
+                        std::ptr::copy_nonoverlapping(
+                            nv_ptr.add(src_offset),
+                            vc_ptr.add(dst_offset),
+                            row_bytes,
+                        );
                     }
                 }
             }

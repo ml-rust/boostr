@@ -24,6 +24,8 @@ pub struct DecomposedQuantTensor<R: Runtime> {
     pub scales: Tensor<R>,
     /// Per-group zero points (unpacked to full precision at load time)
     pub qzeros: Tensor<R>,
+    /// GPTQ column-to-group mapping (None for AWQ)
+    pub g_idx: Option<Tensor<R>>,
     /// Quantization method and parameters
     pub method: DecomposedQuantMethod,
     /// Logical shape of the full-precision weight [out_features, in_features]
@@ -36,6 +38,7 @@ impl<R: Runtime> DecomposedQuantTensor<R> {
         qweight: Tensor<R>,
         scales: Tensor<R>,
         qzeros: Tensor<R>,
+        g_idx: Option<Tensor<R>>,
         method: DecomposedQuantMethod,
         logical_shape: Vec<usize>,
     ) -> Self {
@@ -43,6 +46,7 @@ impl<R: Runtime> DecomposedQuantTensor<R> {
             qweight,
             scales,
             qzeros,
+            g_idx,
             method,
             logical_shape,
         }

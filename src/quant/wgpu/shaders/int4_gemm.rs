@@ -96,7 +96,7 @@ fn int4_gemm_gptq(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         let group = u32(g_idx[ki]);
         let zero_pack = qzeros[group * n_packed_zeros + col / 8u];
-        let qzero = unpack_int4_seq(zero_pack, col % 8u);
+        let qzero = unpack_int4_seq(zero_pack, col % 8u) + 1u;
 
         let scale = scales[group * params.n + col];
         let w = (f32(q) - f32(qzero)) * scale;

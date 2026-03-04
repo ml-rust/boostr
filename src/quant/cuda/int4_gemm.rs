@@ -111,13 +111,6 @@ pub fn launch_int4_gemm_gptq(
     let device_index = input.device().id();
     let module =
         kernels::get_or_load_module(client.context(), device_index, INT4_GEMM_GPTQ_MODULE)?;
-    let func = kernels::get_kernel_function(&module, "int4_gemm_gptq_f32")?;
-
-    let cfg = LaunchConfig {
-        grid_dim: (n.div_ceil(16), m.div_ceil(16), 1),
-        block_dim: (16, 16, 1),
-        shared_mem_bytes: 0,
-    };
 
     let input_ptr = input.ptr();
     let qweight_ptr = qweight.ptr();
@@ -126,20 +119,70 @@ pub fn launch_int4_gemm_gptq(
     let g_idx_ptr = g_idx.ptr();
     let output_ptr = output.ptr();
 
-    unsafe {
-        let mut builder = client.stream().launch_builder(&func);
-        builder.arg(&input_ptr);
-        builder.arg(&qweight_ptr);
-        builder.arg(&qzeros_ptr);
-        builder.arg(&scales_ptr);
-        builder.arg(&g_idx_ptr);
-        builder.arg(&output_ptr);
-        builder.arg(&m);
-        builder.arg(&k);
-        builder.arg(&n);
-        builder.launch(cfg).map_err(|e| Error::QuantError {
-            reason: format!("CUDA int4_gemm_gptq launch failed: {:?}", e),
-        })?;
+    if m <= GEMV_THRESHOLD {
+        // GEMV: 128 threads (one per output col), tiled over K in chunks of 128
+        // Grid: (ceil(K/128), ceil(N/128), M). Uses atomicAdd → output must be zeroed.
+        let func = kernels::get_kernel_function(&module, "int4_gemv_gptq_f32")?;
+        let k_blocks = k.div_ceil(128);
+        let cfg = LaunchConfig {
+            grid_dim: (k_blocks, n.div_ceil(128), m),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Zero output before atomicAdd accumulation
+        let output_bytes = (m * n) as usize * std::mem::size_of::<f32>();
+        unsafe {
+            cudarc::driver::result::memset_d8_async(
+                output.ptr(),
+                0,
+                output_bytes,
+                client.stream().cu_stream(),
+            )
+            .map_err(|e| Error::QuantError {
+                reason: format!("CUDA memset failed: {:?}", e),
+            })?;
+        }
+
+        unsafe {
+            let mut builder = client.stream().launch_builder(&func);
+            builder.arg(&input_ptr);
+            builder.arg(&qweight_ptr);
+            builder.arg(&qzeros_ptr);
+            builder.arg(&scales_ptr);
+            builder.arg(&g_idx_ptr);
+            builder.arg(&output_ptr);
+            builder.arg(&m);
+            builder.arg(&k);
+            builder.arg(&n);
+            builder.launch(cfg).map_err(|e| Error::QuantError {
+                reason: format!("CUDA int4_gemv_gptq launch failed: {:?}", e),
+            })?;
+        }
+    } else {
+        // Tiled GEMM: BM=32, BN=32, BK=32
+        let func = kernels::get_kernel_function(&module, "int4_gemm_gptq_f32")?;
+        let cfg = LaunchConfig {
+            grid_dim: (n.div_ceil(32), m.div_ceil(32), 1),
+            block_dim: (32, 4, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            let mut builder = client.stream().launch_builder(&func);
+            builder.arg(&input_ptr);
+            builder.arg(&qweight_ptr);
+            builder.arg(&qzeros_ptr);
+            builder.arg(&scales_ptr);
+            builder.arg(&g_idx_ptr);
+            builder.arg(&output_ptr);
+            builder.arg(&m);
+            builder.arg(&k);
+            builder.arg(&n);
+            builder.launch(cfg).map_err(|e| Error::QuantError {
+                reason: format!("CUDA int4_gemm_gptq launch failed: {:?}", e),
+            })?;
+        }
     }
     Ok(())
 }

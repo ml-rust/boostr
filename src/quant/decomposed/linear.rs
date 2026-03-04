@@ -46,20 +46,30 @@ impl<R: Runtime> DecomposedQuantLinear<R> {
             input.clone()
         };
 
-        let output = match self.weight.method {
-            DecomposedQuantMethod::Awq { group_size } => client.int4_gemm(
-                &input_f32,
-                &self.weight.qweight,
-                &self.weight.scales,
-                &self.weight.qzeros,
-                group_size,
-            )?,
-            DecomposedQuantMethod::Gptq { .. } => {
-                return Err(crate::error::Error::ModelError {
-                    reason: "GPTQ forward not yet implemented (needs g_idx tensor)".into(),
-                });
-            }
-        };
+        let output =
+            match self.weight.method {
+                DecomposedQuantMethod::Awq { group_size } => client.int4_gemm(
+                    &input_f32,
+                    &self.weight.qweight,
+                    &self.weight.scales,
+                    &self.weight.qzeros,
+                    group_size,
+                )?,
+                DecomposedQuantMethod::Gptq { .. } => {
+                    let g_idx = self.weight.g_idx.as_ref().ok_or_else(|| {
+                        crate::error::Error::ModelError {
+                            reason: "GPTQ requires g_idx tensor".into(),
+                        }
+                    })?;
+                    client.int4_gemm_gptq(
+                        &input_f32,
+                        &self.weight.qweight,
+                        &self.weight.qzeros,
+                        &self.weight.scales,
+                        g_idx,
+                    )?
+                }
+            };
 
         let output = match &self.bias {
             Some(bias) => client

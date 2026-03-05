@@ -24,7 +24,23 @@ use numr::tensor::Tensor;
 /// sacrificing type safety. The runtime type parameter `R` is preserved
 /// across all variants.
 pub enum LoadedModel<R: Runtime> {
-    /// Llama model (Llama 2, Llama 3, etc.)
+    /// Standard GQA transformer model
+    ///
+    /// Covers all architectures that share the LLaMA structure:
+    /// token embedding → transformer blocks (GQA + FFN) → RMSNorm → LM head.
+    ///
+    /// | HF `model_type`  | Example models                          |
+    /// |------------------|-----------------------------------------|
+    /// | `llama`          | Llama 2/3, CodeLlama, Yi, Solar         |
+    /// | `mistral`        | Mistral 7B, Mixtral (dense path)        |
+    /// | `qwen2`          | Qwen2-7B, Qwen2-72B                    |
+    /// | `qwen2_moe`      | Qwen2-57B-A14B (MoE variant)           |
+    /// | `phi3`           | Phi-3-mini, Phi-3-medium                |
+    /// | `phi`            | Phi-2                                   |
+    /// | `gemma`          | Gemma 7B                                |
+    /// | `gemma2`         | Gemma 2 9B/27B                          |
+    /// | `starcoder2`     | StarCoder2 3B/7B/15B                    |
+    /// | `internlm2`      | InternLM2 7B/20B                        |
     Llama(Box<super::llama::Llama<R>>),
     /// Mamba2 SSM model (full model with embedding + layers + lm_head)
     Mamba2(Box<super::mamba::Mamba2Model<R>>),
@@ -39,7 +55,11 @@ where
     /// Load a model from universal config and weights
     pub fn load(config: &UniversalConfig, vb: &mut VarBuilder<R>) -> Result<Self> {
         match config.model_type.as_str() {
-            "llama" | "mistral" => {
+            // All Llama-compatible architectures (standard GQA transformer).
+            // Yi, CodeLlama, and Solar use model_type "llama" in HF configs,
+            // so they are already covered by the "llama" arm.
+            "llama" | "mistral" | "qwen2" | "qwen2_moe" | "phi3" | "phi" | "gemma" | "gemma2"
+            | "starcoder2" | "internlm2" => {
                 let model = super::llama::Llama::from_varbuilder(vb, config)?;
                 Ok(LoadedModel::Llama(Box::new(model)))
             }

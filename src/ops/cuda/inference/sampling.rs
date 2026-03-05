@@ -146,6 +146,7 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         top_k: usize,
         top_p: f32,
         min_p: f32,
+        seed: Option<u64>,
     ) -> Result<Tensor<CudaRuntime>> {
         let shape = logits.shape();
         let seq_len = shape[1];
@@ -166,9 +167,13 @@ impl SamplingOps<CudaRuntime> for CudaClient {
 
         // Generate random value on-device (only used for non-greedy, but always generated
         // to avoid branching on host — the kernel ignores it when temperature == 0)
-        let rand_tensor = self
-            .rand(&[1], numr::dtype::DType::F32)
-            .map_err(|e| Error::Numr(e))?;
+        let rand_tensor = if let Some(s) = seed {
+            self.rand_seeded(&[1], numr::dtype::DType::F32, s)
+                .map_err(|e| Error::Numr(e))?
+        } else {
+            self.rand(&[1], numr::dtype::DType::F32)
+                .map_err(|e| Error::Numr(e))?
+        };
 
         // Determine dtype code: 0 = F32, 1 = F16, 2 = BF16
         let dtype_code: i32 = match logits.dtype() {

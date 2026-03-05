@@ -167,6 +167,7 @@ pub fn logits_to_token_impl<R: Runtime<DType = numr::dtype::DType>>(
     top_k: usize,
     top_p: f32,
     min_p: f32,
+    seed: Option<u64>,
 ) -> Result<Tensor<R>>
 where
     R::Client: numr::ops::RandomOps<R> + numr::ops::TypeConversionOps<R>,
@@ -276,10 +277,16 @@ where
             indexed.retain(|(_, p)| *p >= threshold);
         }
 
-        // Random value
-        let rand_tensor = client
-            .rand(&[1], numr::dtype::DType::F32)
-            .map_err(crate::error::Error::Numr)?;
+        // Random value (seeded for reproducibility if seed is provided)
+        let rand_tensor = if let Some(s) = seed {
+            client
+                .rand_seeded(&[1], numr::dtype::DType::F32, s)
+                .map_err(crate::error::Error::Numr)?
+        } else {
+            client
+                .rand(&[1], numr::dtype::DType::F32)
+                .map_err(crate::error::Error::Numr)?
+        };
         let random_val: f32 = rand_tensor.to_vec::<f32>()[0];
 
         // Renormalize and sample

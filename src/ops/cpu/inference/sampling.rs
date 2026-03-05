@@ -53,6 +53,7 @@ impl SamplingOps<CpuRuntime> for CpuClient {
         top_k: usize,
         top_p: f32,
         min_p: f32,
+        seed: Option<u64>,
     ) -> Result<Tensor<CpuRuntime>> {
         logits_to_token_impl::<CpuRuntime>(
             self,
@@ -67,6 +68,7 @@ impl SamplingOps<CpuRuntime> for CpuClient {
             top_k,
             top_p,
             min_p,
+            seed,
         )
     }
 }

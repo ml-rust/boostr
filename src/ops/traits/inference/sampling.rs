@@ -77,6 +77,7 @@ pub trait SamplingOps<R: Runtime> {
     /// - `logits`: `[1, seq_len, vocab_size]` any dtype
     /// - `token_ids`: `[num_unique]` I64 — penalty token IDs
     /// - `token_counts`: `[num_unique]` I32 — penalty counts
+    /// - `seed`: optional RNG seed for reproducible sampling (`None` = non-deterministic)
     #[allow(clippy::too_many_arguments)]
     fn logits_to_token(
         &self,
@@ -91,5 +92,6 @@ pub trait SamplingOps<R: Runtime> {
         top_k: usize,
         top_p: f32,
         min_p: f32,
+        seed: Option<u64>,
     ) -> Result<Tensor<R>>;
 }

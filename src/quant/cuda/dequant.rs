@@ -87,9 +87,17 @@ impl DequantOps<CudaRuntime> for CudaClient {
 
         let kernel_name = match qt.format() {
             QuantFormat::Q4_0 => "dequant_q4_0_f32",
+            QuantFormat::Q5_0 => "dequant_q5_0_f32",
             QuantFormat::Q8_0 => "dequant_q8_0_f32",
+            QuantFormat::Q2K => "dequant_q2_k_f32",
+            QuantFormat::Q3K => "dequant_q3_k_f32",
             QuantFormat::Q4K => "dequant_q4_k_f32",
+            QuantFormat::Q5K => "dequant_q5_k_f32",
             QuantFormat::Q6K => "dequant_q6_k_f32",
+            QuantFormat::IQ4NL => "dequant_iq4_nl_f32",
+            QuantFormat::IQ4XS => "dequant_iq4_xs_f32",
+            QuantFormat::IQ3S => "dequant_iq3_s_f32",
+            QuantFormat::IQ2XS => "dequant_iq2_xs_f32",
             // All other formats: use generic dequant kernel (format dispatch via switch)
             _ => {
                 return dequant_via_generic_kernel(self, qt, target_dtype);

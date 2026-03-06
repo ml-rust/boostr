@@ -114,6 +114,128 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
         &self.rope
     }
 
+    /// Embed token IDs into a hidden state tensor.
+    ///
+    /// # Arguments
+    /// * `client` - Runtime client
+    /// * `input_ids` - Token IDs `[B, S]`
+    ///
+    /// # Returns
+    /// Hidden state `[B, S, hidden_size]`
+    pub fn forward_embed<C>(
+        &self,
+        client: &C,
+        input_ids: &Tensor<R>,
+    ) -> Result<numr::autograd::Var<R>>
+    where
+        C: ModelClient<R>,
+        R::Client: IndexingOps<R>,
+    {
+        self.embed_tokens.forward(client, input_ids)
+    }
+
+    /// Run a range of transformer layers with KV cache.
+    ///
+    /// Used for pipeline parallelism: each worker owns a contiguous slice of layers
+    /// and processes activations forwarded from the previous stage.
+    ///
+    /// # Arguments
+    /// * `client` - Runtime client
+    /// * `hidden` - Input hidden state `[B, S, hidden_size]`
+    /// * `prev_mlp_out` - Deferred MLP residual from the previous layer (or `None` for first layer)
+    /// * `kv_cache` - Full layered KV cache (only slots `start_layer..end_layer` are accessed)
+    /// * `start_layer` - First layer index to run (inclusive)
+    /// * `end_layer` - Last layer index to run (exclusive)
+    /// * `position` - RoPE position offset
+    ///
+    /// # Returns
+    /// `(hidden, prev_mlp_out)` — the updated hidden state and deferred MLP output for the
+    /// next stage (or for `forward_head`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_layers_range<C>(
+        &self,
+        client: &C,
+        hidden: numr::autograd::Var<R>,
+        prev_mlp_out: Option<numr::autograd::Var<R>>,
+        kv_cache: &mut LayeredKvCache<R>,
+        start_layer: usize,
+        end_layer: usize,
+        position: usize,
+    ) -> Result<(numr::autograd::Var<R>, Option<numr::autograd::Var<R>>)>
+    where
+        C: ModelClient<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
+    {
+        let end_layer = end_layer.min(self.layers.len());
+        let mut hidden = hidden;
+        let mut prev_mlp_out = prev_mlp_out;
+        for i in start_layer..end_layer {
+            let layer = self.layers.get(i).ok_or_else(|| Error::ModelError {
+                reason: format!("Layer index {i} out of bounds"),
+            })?;
+            let cache = kv_cache.layer_mut(i).ok_or_else(|| Error::ModelError {
+                reason: format!("KV cache missing for layer {i}"),
+            })?;
+            let (h, mlp_out) = layer.forward_with_kv_cache(
+                client,
+                &hidden,
+                prev_mlp_out.as_ref(),
+                &self.rope,
+                cache,
+                position,
+            )?;
+            hidden = h;
+            prev_mlp_out = Some(mlp_out);
+        }
+        Ok((hidden, prev_mlp_out))
+    }
+
+    /// Apply the final norm and LM head to produce logits.
+    ///
+    /// # Arguments
+    /// * `client` - Runtime client
+    /// * `hidden` - Hidden state `[B, S, hidden_size]`
+    /// * `prev_mlp_out` - Deferred MLP residual from the last layer (if any)
+    ///
+    /// # Returns
+    /// Logits `[B, S, vocab_size]`
+    pub fn forward_head<C>(
+        &self,
+        client: &C,
+        hidden: numr::autograd::Var<R>,
+        prev_mlp_out: Option<numr::autograd::Var<R>>,
+    ) -> Result<Tensor<R>>
+    where
+        C: ModelClient<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
+    {
+        let mut hidden = hidden;
+        if let Some(last_mlp) = prev_mlp_out {
+            hidden = numr::autograd::var_add(&hidden, &last_mlp, client).map_err(Error::Numr)?;
+        }
+        hidden = self.norm.forward(client, &hidden)?;
+        let logits = self.lm_head.forward(client, &hidden)?;
+        Ok(logits.tensor().clone())
+    }
+
     /// Forward pass for inference with paged KV cache.
     ///
     /// Uses PagedAttention with block table indirection instead of contiguous KV cache.

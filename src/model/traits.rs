@@ -3,6 +3,7 @@
 use crate::error::Result;
 use crate::model::config::ModelConfig;
 use crate::nn::VarBuilder;
+use crate::ops::traits::architecture::moe::MoEOps;
 use crate::ops::traits::{FlashAttentionOps, KvCacheOps, PagedAttentionOps, RoPEOps};
 use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::Var;
@@ -31,6 +32,7 @@ pub trait ModelClient<R: Runtime>:
     + KvCacheOps<R>
     + QuantMatmulOps<R>
     + NormalizationOps<R>
+    + MoEOps<R>
 {
 }
 
@@ -53,7 +55,8 @@ where
         + PagedAttentionOps<R>
         + KvCacheOps<R>
         + QuantMatmulOps<R>
-        + NormalizationOps<R>,
+        + NormalizationOps<R>
+        + MoEOps<R>,
 {
 }
 

@@ -4,19 +4,13 @@
 //! with a unified inference API.
 
 use crate::error::{Error, Result};
-use crate::inference::kv_cache::LayeredPagedKvCache;
-use crate::inference::{LayeredKvCache, LayeredSsmState};
 use crate::model::config::UniversalConfig;
 use crate::model::mamba::mamba2::Mamba2Config;
-use crate::model::traits::{Model, ModelClient};
+use crate::model::traits::Model;
 use crate::nn::VarBuilder;
 use numr::dtype::DType;
-use numr::ops::{
-    ActivationOps, BinaryOps, ConvOps, IndexingOps, NormalizationOps, ScalarOps, ShapeOps,
-    TensorOps, UnaryOps,
-};
+use numr::ops::IndexingOps;
 use numr::runtime::Runtime;
-use numr::tensor::Tensor;
 
 /// Enum of all supported model architectures
 ///
@@ -42,6 +36,8 @@ pub enum LoadedModel<R: Runtime> {
     /// | `starcoder2`     | StarCoder2 3B/7B/15B                    |
     /// | `internlm2`      | InternLM2 7B/20B                        |
     Llama(Box<super::llama::Llama<R>>),
+    /// Tensor-parallel LLaMA model (sharded across multiple GPUs via NCCL)
+    LlamaTp(Box<super::llama::LlamaTp<R>>),
     /// Mamba2 SSM model (full model with embedding + layers + lm_head)
     Mamba2(Box<super::mamba::Mamba2Model<R>>),
     /// Hybrid model mixing attention and SSM layers
@@ -55,9 +51,6 @@ where
     /// Load a model from universal config and weights
     pub fn load(config: &UniversalConfig, vb: &mut VarBuilder<R>) -> Result<Self> {
         match config.model_type.as_str() {
-            // All Llama-compatible architectures (standard GQA transformer).
-            // Yi, CodeLlama, and Solar use model_type "llama" in HF configs,
-            // so they are already covered by the "llama" arm.
             "llama" | "mistral" | "qwen2" | "qwen2_moe" | "phi3" | "phi" | "gemma" | "gemma2"
             | "starcoder2" | "internlm2" => {
                 let model = super::llama::Llama::from_varbuilder(vb, config)?;
@@ -77,9 +70,28 @@ where
         }
     }
 
+    /// Load a tensor-parallel model. Requires a NCCL communicator.
+    pub fn load_tp(
+        config: &UniversalConfig,
+        vb: &mut VarBuilder<R>,
+        comm: std::sync::Arc<dyn numr::runtime::Communicator>,
+    ) -> Result<Self> {
+        match config.model_type.as_str() {
+            "llama" | "mistral" | "qwen2" | "qwen2_moe" | "phi3" | "phi" | "gemma" | "gemma2"
+            | "starcoder2" | "internlm2" => {
+                let model = super::llama::LlamaTp::from_varbuilder(vb, config, comm)?;
+                Ok(LoadedModel::LlamaTp(Box::new(model)))
+            }
+            other => Err(Error::ModelError {
+                reason: format!(
+                    "Tensor parallelism not supported for model type: {other} (only Llama-family architectures)"
+                ),
+            }),
+        }
+    }
+
     /// Load a model from GGUF format
     pub fn load_gguf(config: &UniversalConfig, vb: &mut VarBuilder<R>) -> Result<Self> {
-        // GGUF uses same load path - VarBuilder handles name mapping
         Self::load(config, vb)
     }
 }
@@ -88,157 +100,12 @@ impl<R: Runtime<DType = DType>> LoadedModel<R>
 where
     R::Client: IndexingOps<R>,
 {
-    /// Forward pass with pre-allocated KV cache for transformer inference
-    ///
-    /// # Arguments
-    /// * `input_ids` - Token IDs, shape `[batch_size, seq_len]`
-    /// * `kv_cache` - Mutable reference to pre-allocated KV cache
-    /// * `position` - Starting position for positional encoding
-    ///
-    /// # Returns
-    /// Logits tensor, shape `[batch_size, seq_len, vocab_size]`
-    pub fn forward_with_kv_cache(
-        &self,
-        input_ids: &Tensor<R>,
-        kv_cache: &mut LayeredKvCache<R>,
-        position: usize,
-    ) -> Result<Tensor<R>>
-    where
-        R::Client: ModelClient<R>,
-    {
-        let device = input_ids.device();
-        let client = R::default_client(device);
-        match self {
-            LoadedModel::Llama(m) => {
-                m.forward_with_kv_cache(&client, input_ids, kv_cache, position)
-            }
-            LoadedModel::Mamba2(_) => Err(Error::ModelError {
-                reason: "Mamba2 does not use KV cache — use forward_with_ssm_state() instead"
-                    .into(),
-            }),
-            LoadedModel::Hybrid(_) => Err(Error::ModelError {
-                reason: "Hybrid model does not support forward_with_kv_cache — use forward_hybrid() instead"
-                    .into(),
-            }),
-        }
-    }
-
-    /// Forward pass with paged KV cache for transformer inference
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward_with_paged_kv_cache(
-        &self,
-        input_ids: &Tensor<R>,
-        paged_cache: &LayeredPagedKvCache<R>,
-        slot_mapping: &Tensor<R>,
-        block_table: &Tensor<R>,
-        seq_len_k: usize,
-        position: usize,
-    ) -> Result<Tensor<R>>
-    where
-        R::Client: ModelClient<R>,
-    {
-        let device = input_ids.device();
-        let client = R::default_client(device);
-        match self {
-            LoadedModel::Llama(m) => m.forward_with_paged_kv_cache(
-                &client,
-                input_ids,
-                paged_cache,
-                slot_mapping,
-                block_table,
-                seq_len_k,
-                position,
-            ),
-            LoadedModel::Mamba2(_) => Err(Error::ModelError {
-                reason: "Mamba2 does not use KV cache — use forward_with_ssm_state() instead"
-                    .into(),
-            }),
-            LoadedModel::Hybrid(_) => Err(Error::ModelError {
-                reason: "Hybrid model does not yet support paged KV cache".into(),
-            }),
-        }
-    }
-
-    /// Forward pass with SSM state for Mamba2 inference
-    ///
-    /// # Arguments
-    /// * `input_ids` - Token IDs, shape `[batch_size, seq_len]`
-    /// * `ssm_state` - Mutable reference to pre-allocated SSM state
-    ///
-    /// # Returns
-    /// Logits tensor, shape `[batch_size, seq_len, vocab_size]`
-    pub fn forward_with_ssm_state(
-        &self,
-        input_ids: &Tensor<R>,
-        ssm_state: &mut LayeredSsmState<R>,
-    ) -> Result<Tensor<R>>
-    where
-        R::Client:
-            ModelClient<R> + ConvOps<R> + NormalizationOps<R> + UnaryOps<R> + ActivationOps<R>,
-    {
-        let device = input_ids.device();
-        let client = R::default_client(device);
-        match self {
-            LoadedModel::Mamba2(m) => m.forward_with_ssm_state(&client, input_ids, ssm_state),
-            LoadedModel::Llama(_) => Err(Error::ModelError {
-                reason: "Llama does not use SSM state — use forward_with_kv_cache() instead".into(),
-            }),
-            LoadedModel::Hybrid(_) => Err(Error::ModelError {
-                reason: "Hybrid model does not support forward_with_ssm_state — use forward_hybrid() instead"
-                    .into(),
-            }),
-        }
-    }
-
-    /// Forward pass for hybrid model with both KV cache and SSM state
-    ///
-    /// # Arguments
-    /// * `input_ids` - Token IDs, shape `[batch_size, seq_len]`
-    /// * `kv_cache` - Mutable reference to pre-allocated KV cache for attention layers
-    /// * `ssm_state` - Mutable reference to pre-allocated SSM state for Mamba2 layers
-    /// * `position` - Starting position for positional encoding
-    ///
-    /// # Returns
-    /// Logits tensor, shape `[batch_size, seq_len, vocab_size]`
-    pub fn forward_hybrid(
-        &self,
-        input_ids: &Tensor<R>,
-        kv_cache: &mut LayeredKvCache<R>,
-        ssm_state: &mut LayeredSsmState<R>,
-        position: usize,
-    ) -> Result<Tensor<R>>
-    where
-        R::Client: ModelClient<R>
-            + ConvOps<R>
-            + NormalizationOps<R>
-            + UnaryOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + ShapeOps<R>
-            + TensorOps<R>
-            + ScalarOps<R>,
-    {
-        let device = input_ids.device();
-        let client = R::default_client(device);
-        match self {
-            LoadedModel::Hybrid(m) => {
-                m.forward_hybrid(&client, input_ids, kv_cache, ssm_state, position)
-            }
-            LoadedModel::Llama(_) => Err(Error::ModelError {
-                reason: "Llama model does not support forward_hybrid — use forward_with_kv_cache()"
-                    .into(),
-            }),
-            LoadedModel::Mamba2(_) => Err(Error::ModelError {
-                reason:
-                    "Mamba2 model does not support forward_hybrid — use forward_with_ssm_state()"
-                        .into(),
-            }),
-        }
-    }
-
     /// Whether this model uses KV cache (transformer) or SSM state.
     pub fn needs_kv_cache(&self) -> bool {
-        matches!(self, LoadedModel::Llama(_) | LoadedModel::Hybrid(_))
+        matches!(
+            self,
+            LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) | LoadedModel::Hybrid(_)
+        )
     }
 
     /// Whether this model uses SSM state.
@@ -249,7 +116,7 @@ where
     /// Get model type name
     pub fn model_type(&self) -> &str {
         match self {
-            LoadedModel::Llama(_) => "llama",
+            LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) => "llama",
             LoadedModel::Mamba2(_) => "mamba2",
             LoadedModel::Hybrid(_) => "hybrid",
         }
@@ -259,6 +126,7 @@ where
     pub fn vocab_size(&self) -> usize {
         match self {
             LoadedModel::Llama(m) => m.config().vocab_size,
+            LoadedModel::LlamaTp(m) => m.config().vocab_size,
             LoadedModel::Mamba2(m) => m.config().vocab_size,
             LoadedModel::Hybrid(m) => m.config().vocab_size,
         }
@@ -268,18 +136,34 @@ where
     pub fn num_layers(&self) -> usize {
         match self {
             LoadedModel::Llama(m) => m.config().num_layers,
+            LoadedModel::LlamaTp(m) => m.config().num_layers,
             LoadedModel::Mamba2(m) => m.config().num_layers,
             LoadedModel::Hybrid(m) => m.config().num_layers,
+        }
+    }
+
+    /// Get hidden size (embedding dimension)
+    pub fn hidden_size(&self) -> usize {
+        match self {
+            LoadedModel::Llama(m) => m.config().hidden_size,
+            LoadedModel::LlamaTp(m) => m.config().hidden_size,
+            LoadedModel::Mamba2(m) => m.config().hidden_size,
+            LoadedModel::Hybrid(m) => m.config().hidden_size,
         }
     }
 
     /// Get number of KV heads (for KV cache allocation).
     ///
     /// Returns `None` for Mamba2 — SSM layers do not use a KV cache.
-    /// For Hybrid, returns KV heads from attention layers.
+    /// For LlamaTp, returns LOCAL kv heads (total / world_size).
     pub fn num_kv_heads(&self) -> Option<usize> {
         match self {
             LoadedModel::Llama(m) => m.config().attention.as_ref().map(|a| a.kv_heads()),
+            LoadedModel::LlamaTp(m) => m
+                .config()
+                .attention
+                .as_ref()
+                .map(|a| a.kv_heads() / m.world_size()),
             LoadedModel::Mamba2(_) => None,
             LoadedModel::Hybrid(m) => m.config().attention.as_ref().map(|a| a.kv_heads()),
         }
@@ -288,10 +172,16 @@ where
     /// Get head dimension (for KV cache allocation).
     ///
     /// Returns `None` for Mamba2 — SSM layers do not use a KV cache.
-    /// For Hybrid, returns head dimension from attention layers.
     pub fn head_dim(&self) -> Option<usize> {
         match self {
             LoadedModel::Llama(m) => {
+                let config = m.config();
+                config
+                    .attention
+                    .as_ref()
+                    .map(|a| a.head_dim(config.hidden_size))
+            }
+            LoadedModel::LlamaTp(m) => {
                 let config = m.config();
                 config
                     .attention
@@ -313,8 +203,29 @@ where
     pub fn max_seq_len(&self) -> usize {
         match self {
             LoadedModel::Llama(m) => m.config().max_seq_len,
+            LoadedModel::LlamaTp(m) => m.config().max_seq_len,
             LoadedModel::Mamba2(m) => m.config().max_seq_len,
             LoadedModel::Hybrid(m) => m.config().max_seq_len,
+        }
+    }
+
+    /// Whether this model uses Mixture of Experts.
+    pub fn is_moe(&self) -> bool {
+        match self {
+            LoadedModel::Llama(m) => m.config().moe.is_some(),
+            LoadedModel::LlamaTp(m) => m.config().moe.is_some(),
+            LoadedModel::Mamba2(m) => m.config().moe.is_some(),
+            LoadedModel::Hybrid(m) => m.config().moe.is_some(),
+        }
+    }
+
+    /// Get MoE configuration, if this is an MoE model.
+    pub fn moe_config(&self) -> Option<&crate::model::config::MoeConfig> {
+        match self {
+            LoadedModel::Llama(m) => m.config().moe.as_ref(),
+            LoadedModel::LlamaTp(m) => m.config().moe.as_ref(),
+            LoadedModel::Mamba2(m) => m.config().moe.as_ref(),
+            LoadedModel::Hybrid(m) => m.config().moe.as_ref(),
         }
     }
 
@@ -324,12 +235,13 @@ where
     pub fn rope_caches(&self) -> Option<(&numr::autograd::Var<R>, &numr::autograd::Var<R>)> {
         match self {
             LoadedModel::Llama(m) => Some((m.rope().cos_cache(), m.rope().sin_cache())),
+            LoadedModel::LlamaTp(_) => None, // TP model manages RoPE internally
             LoadedModel::Mamba2(_) => None,
             LoadedModel::Hybrid(m) => Some((m.rope().cos_cache(), m.rope().sin_cache())),
         }
     }
 
-    /// Get the Mamba2 config (for SSM state allocation). Returns None for non-Mamba2/Hybrid models.
+    /// Get the Mamba2 config (for SSM state allocation).
     pub fn mamba_config(&self) -> Option<&Mamba2Config> {
         match self {
             LoadedModel::Mamba2(m) => Some(m.mamba_config()),
@@ -339,49 +251,11 @@ where
     }
 }
 
-/// CUDA-specific graph-mode inference. Only available when `cuda` feature is enabled.
-#[cfg(feature = "cuda")]
-impl LoadedModel<numr::runtime::cuda::CudaRuntime> {
-    /// Forward pass using a pre-captured CUDA graph's stable-address tensors.
-    ///
-    /// All kernel arguments (device scalars, KV cache, cos/sin) must have stable
-    /// device addresses that were used during graph capture. The caller is responsible
-    /// for updating `device_scalars`, `cos_slice`, and `sin_slice` via D2D copy
-    /// before calling this.
-    pub fn forward_graph_mode(
-        &self,
-        input_ids: &numr::tensor::Tensor<numr::runtime::cuda::CudaRuntime>,
-        kv_cache: &mut crate::inference::LayeredKvCache<numr::runtime::cuda::CudaRuntime>,
-        device_scalars: &crate::inference::decode_graph::DeviceScalars,
-        cos_slice: &numr::autograd::Var<numr::runtime::cuda::CudaRuntime>,
-        sin_slice: &numr::autograd::Var<numr::runtime::cuda::CudaRuntime>,
-    ) -> Result<numr::tensor::Tensor<numr::runtime::cuda::CudaRuntime>> {
-        use numr::runtime::cuda::CudaRuntime;
-        let client = CudaRuntime::default_client(input_ids.device());
-        match self {
-            LoadedModel::Llama(m) => m.forward_graph_mode(
-                &client,
-                input_ids,
-                kv_cache,
-                device_scalars,
-                cos_slice,
-                sin_slice,
-            ),
-            LoadedModel::Mamba2(_) => Err(Error::ModelError {
-                reason: "Mamba2 does not support CUDA graph mode — use forward_with_ssm_state()"
-                    .into(),
-            }),
-            LoadedModel::Hybrid(_) => Err(Error::ModelError {
-                reason: "Hybrid model does not yet support CUDA graph mode".into(),
-            }),
-        }
-    }
-}
-
 impl<R: Runtime> std::fmt::Debug for LoadedModel<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LoadedModel::Llama(_) => f.debug_tuple("Llama").finish(),
+            LoadedModel::LlamaTp(_) => f.debug_tuple("LlamaTp").finish(),
             LoadedModel::Mamba2(_) => f.debug_tuple("Mamba2").finish(),
             LoadedModel::Hybrid(_) => f.debug_tuple("Hybrid").finish(),
         }

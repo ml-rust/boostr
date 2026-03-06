@@ -300,6 +300,52 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
         })
     }
 
+    /// Forward pass with KV cache for autoregressive inference.
+    ///
+    /// `kv_cache` is a layered cache: one `KvCache` per layer, each with
+    /// `local_kv_heads` (= total_kv_heads / world_size) heads.
+    ///
+    /// Note: output logits are the local shard (vocab/world_size).
+    pub fn forward_with_kv_cache<C>(
+        &self,
+        client: &C,
+        input_ids: &Tensor<R>,
+        kv_cache: &mut crate::inference::LayeredKvCache<R>,
+        position: usize,
+    ) -> Result<Tensor<R>>
+    where
+        C: ModelClient<R> + CompareOps<R> + UtilityOps<R> + TypeConversionOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
+    {
+        // Embed tokens: [B, S] -> [B, S, hidden]
+        let mut hidden = self.embed_tokens.forward(client, input_ids)?;
+
+        // Transformer blocks with KV cache
+        for (i, layer) in self.layers.iter().enumerate() {
+            let layer_kv = kv_cache.layer_mut(i).ok_or_else(|| Error::InferenceError {
+                reason: format!("KV cache missing for layer {}", i),
+            })?;
+            hidden =
+                layer.forward_with_kv_cache(client, &hidden, &self.rope, layer_kv, position)?;
+        }
+
+        // Final norm
+        hidden = self.norm.forward(client, &hidden)?;
+
+        // LM head (column-parallel): [B, S, hidden] -> [B, S, vocab/N]
+        let logits = self.lm_head.forward(client, &hidden)?;
+        Ok(logits.tensor().clone())
+    }
+
     /// Forward pass: token_ids [B, S] -> logits [B, S, vocab/world_size]
     ///
     /// Note: output is the local shard of logits (vocab dimension split).

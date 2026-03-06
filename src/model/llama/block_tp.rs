@@ -2,11 +2,12 @@
 
 use crate::distributed::tensor_parallel::{ColumnParallelLinear, RowParallelLinear};
 use crate::error::{Error, Result};
+use crate::inference::kv_cache::KvCache;
 use crate::model::traits::ModelClient;
 use crate::nn::{RmsNorm, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use crate::ops::impl_generic::attention::rope::apply_rope_interleaved_impl;
-use numr::autograd::{Var, var_add, var_mul, var_silu};
+use numr::autograd::{Var, var_add, var_mul, var_narrow, var_reshape, var_silu};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
@@ -56,6 +57,39 @@ impl<R: Runtime<DType = DType>> LlamaBlockTp<R> {
     {
         let normed = self.input_layernorm.forward(client, x)?;
         let attn_out = self.self_attn.forward(client, &normed, rope)?;
+        let h = var_add(x, &attn_out, client).map_err(Error::Numr)?;
+
+        let normed = self.post_attention_layernorm.forward(client, &h)?;
+        let mlp_out = self.mlp.forward(client, &normed)?;
+        var_add(&h, &mlp_out, client).map_err(Error::Numr)
+    }
+
+    /// Forward pass with KV cache for autoregressive inference.
+    pub(super) fn forward_with_kv_cache<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        rope: &RoPE<R>,
+        kv_cache: &mut KvCache<R>,
+        position: usize,
+    ) -> Result<Var<R>>
+    where
+        C: ModelClient<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
+    {
+        let normed = self.input_layernorm.forward(client, x)?;
+        let attn_out = self
+            .self_attn
+            .forward_with_kv_cache(client, &normed, rope, kv_cache, position)?;
         let h = var_add(x, &attn_out, client).map_err(Error::Numr)?;
 
         let normed = self.post_attention_layernorm.forward(client, &h)?;
@@ -133,6 +167,88 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
             &[batch, seq_len, self.num_heads * self.head_dim],
         )
         .map_err(Error::Numr)?;
+
+        // O projection (row-parallel → all-reduce)
+        self.o_proj.forward(client, &attn_out)
+    }
+
+    /// Forward with KV cache for autoregressive inference.
+    pub(super) fn forward_with_kv_cache<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        rope: &RoPE<R>,
+        kv_cache: &mut KvCache<R>,
+        position: usize,
+    ) -> Result<Var<R>>
+    where
+        C: ModelClient<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
+    {
+        let shape = x.shape().to_vec();
+        let batch = shape[0];
+        let seq_len = shape[1];
+
+        // Q/K/V: column-parallel, each rank gets local heads
+        let q = self.q_proj.forward(client, x)?;
+        let k = self.k_proj.forward(client, x)?;
+        let v = self.v_proj.forward(client, x)?;
+
+        // Reshape to [B, S, local_H, D] then permute to [B, local_H, S, D]
+        let q = var_reshape(&q, &[batch, seq_len, self.num_heads, self.head_dim])
+            .map_err(Error::Numr)?;
+        let k = var_reshape(&k, &[batch, seq_len, self.num_kv_heads, self.head_dim])
+            .map_err(Error::Numr)?;
+        let v = var_reshape(&v, &[batch, seq_len, self.num_kv_heads, self.head_dim])
+            .map_err(Error::Numr)?;
+
+        let q = numr::autograd::var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?;
+        let q = var_contiguous(&q);
+        let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
+        let k = var_contiguous(&k);
+        let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
+        let v = var_contiguous(&v);
+
+        // Apply RoPE with position offset
+        let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
+        let sin_offset = var_narrow(rope.sin_cache(), 0, position, seq_len).map_err(Error::Numr)?;
+        let q = apply_rope_interleaved_impl(client, &q, &cos_offset, &sin_offset)?;
+        let k = apply_rope_interleaved_impl(client, &k, &cos_offset, &sin_offset)?;
+
+        // Update KV cache
+        kv_cache.update_fused(k.tensor(), v.tensor(), client)?;
+
+        // Attention using full KV cache
+        let kv_seq_len = kv_cache.seq_len();
+        let is_prefill = seq_len > 1;
+        let (attn_out, _lse) = client.flash_attention_fwd(
+            q.tensor(),
+            kv_cache.k_cache_raw(),
+            kv_cache.v_cache_raw(),
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            is_prefill,
+            0,
+            Some(kv_seq_len),
+        )?;
+
+        // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
+        let attn_out = Var::new(attn_out, false);
+        let attn_out =
+            numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
+        let attn_out = var_contiguous(&attn_out);
+        let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
+            .map_err(Error::Numr)?;
 
         // O projection (row-parallel → all-reduce)
         self.o_proj.forward(client, &attn_out)

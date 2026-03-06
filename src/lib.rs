@@ -40,8 +40,9 @@ pub mod trainer;
 // Re-export primary boostr traits
 pub use nn::{Init, VarBuilder, VarMap, Weight};
 pub use ops::{
-    AttentionOps, FlashAttentionOps, FusedFp8TrainingOps, FusedOptimizerOps, FusedQkvOps,
-    KvCacheOps, MlaOps, PagedAttentionOps, RoPEOps, SamplingOps, var_flash_attention,
+    AttentionOps, DeviceGrammarDfa, FlashAttentionOps, FusedFp8TrainingOps, FusedOptimizerOps,
+    FusedQkvOps, GrammarDfaOps, KvCacheOps, MlaOps, PagedAttentionOps, RoPEOps, SamplingOps,
+    var_flash_attention,
 };
 pub use quant::{
     DecomposedQuantLinear, DecomposedQuantMethod, DecomposedQuantTensor, DequantOps, FusedQuantOps,
@@ -66,6 +67,9 @@ pub use numr::tensor;
 
 // Re-export TensorOps as a trait alias that blazr uses for client bounds
 pub use ops::TensorOps;
+
+// Re-export MoE expert weight types for blazr's expert offloading
+pub use model::ExpertWeights;
 
 // Re-export IndexingOps for KV cache bounds
 pub use numr::ops::traits::IndexingOps;

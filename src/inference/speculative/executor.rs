@@ -18,7 +18,7 @@ where
     target_model: T,
     config: SpeculativeConfig,
     pub(crate) current_depth: usize,
-    pub(crate) stats: SpeculativeStats,
+    pub stats: SpeculativeStats,
     rng_state: u64,
     _runtime: std::marker::PhantomData<R>,
 }

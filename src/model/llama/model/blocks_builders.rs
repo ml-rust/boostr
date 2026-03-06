@@ -3,6 +3,7 @@
 use super::attention::LlamaAttention;
 use super::block::LlamaBlock;
 use super::mlp::LlamaMlp;
+use super::moe::{LlamaFfn, LlamaMoeMlp};
 use crate::error::Result;
 use crate::model::config::ModelConfig;
 use crate::nn::{Linear, MaybeQuantLinear, RmsNorm};
@@ -24,10 +25,48 @@ pub fn build_block_from_varbuilder<R: Runtime<DType = DType>>(
     let v_proj = attn_vb.take_maybe_quant_linear("v_proj.weight", None)?;
     let o_proj = attn_vb.take_maybe_quant_linear("o_proj.weight", None)?;
 
-    let mut mlp_vb = layer_vb.pp("mlp");
-    let gate_proj = mlp_vb.take_maybe_quant_linear("gate_proj.weight", None)?;
-    let up_proj = mlp_vb.take_maybe_quant_linear("up_proj.weight", None)?;
-    let down_proj = mlp_vb.take_maybe_quant_linear("down_proj.weight", None)?;
+    let mlp = if let Some(moe_config) = &config.moe {
+        // MoE: load stacked expert weights and router
+        let mut mlp_vb = layer_vb.pp("block_sparse_moe");
+
+        // Router gate: hidden_size → num_experts
+        let router_gate = mlp_vb.take_maybe_quant_linear("gate.weight", None)?;
+
+        // Expert weights stacked as [num_experts, dim_in, dim_out]
+        let gate_weights = mlp_vb.take_tensor("experts.gate_proj.weight")?;
+        let up_weights = mlp_vb.take_tensor("experts.up_proj.weight")?;
+        let down_weights = mlp_vb.take_tensor("experts.down_proj.weight")?;
+
+        let mut moe_mlp = LlamaMoeMlp::new(
+            gate_weights,
+            up_weights,
+            down_weights,
+            router_gate,
+            moe_config.clone(),
+        );
+
+        // Optional shared expert
+        if moe_config.has_shared_expert() {
+            let mut shared_vb = mlp_vb.pp("shared_expert");
+            let sg = shared_vb.take_maybe_quant_linear("gate_proj.weight", None)?;
+            let su = shared_vb.take_maybe_quant_linear("up_proj.weight", None)?;
+            let sd = shared_vb.take_maybe_quant_linear("down_proj.weight", None)?;
+            moe_mlp = moe_mlp.with_shared_expert(sg, su, sd);
+        }
+
+        LlamaFfn::Moe(moe_mlp)
+    } else {
+        // Dense MLP
+        let mut mlp_vb = layer_vb.pp("mlp");
+        let gate_proj = mlp_vb.take_maybe_quant_linear("gate_proj.weight", None)?;
+        let up_proj = mlp_vb.take_maybe_quant_linear("up_proj.weight", None)?;
+        let down_proj = mlp_vb.take_maybe_quant_linear("down_proj.weight", None)?;
+        LlamaFfn::Dense(LlamaMlp {
+            gate_proj,
+            up_proj,
+            down_proj,
+        })
+    };
 
     Ok(LlamaBlock {
         input_layernorm: RmsNorm::new(
@@ -49,11 +88,7 @@ pub fn build_block_from_varbuilder<R: Runtime<DType = DType>>(
             config.rms_norm_eps as f32,
             false,
         ),
-        mlp: LlamaMlp {
-            gate_proj,
-            up_proj,
-            down_proj,
-        },
+        mlp,
     })
 }
 
@@ -104,7 +139,7 @@ pub fn build_block_from_config<R: Runtime<DType = DType>>(
             config.rms_norm_eps as f32,
             true,
         ),
-        mlp: LlamaMlp {
+        mlp: LlamaFfn::Dense(LlamaMlp {
             gate_proj: MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<R>::zeros(&[intermediate, hidden], dt, device),
                 None,
@@ -120,6 +155,6 @@ pub fn build_block_from_config<R: Runtime<DType = DType>>(
                 None,
                 true,
             )),
-        },
+        }),
     }
 }

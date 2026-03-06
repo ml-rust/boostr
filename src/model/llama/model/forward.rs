@@ -202,6 +202,58 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
     }
 }
 
+impl<R: Runtime<DType = DType>> Llama<R> {
+    /// Extract the weight tensors (gate, up, down projections) for a single MoE expert.
+    ///
+    /// Returns `None` if `layer_idx` is out of range, the layer is dense (non-MoE),
+    /// or `expert_id` is out of range.
+    pub fn get_expert_weights(
+        &self,
+        layer_idx: usize,
+        expert_id: usize,
+    ) -> Option<super::blocks::ExpertWeights<R>> {
+        use super::blocks::LlamaFfn;
+        let block = self.layers.get(layer_idx)?;
+        match &block.mlp {
+            LlamaFfn::Moe(moe) => moe.get_expert_weights(expert_id),
+            LlamaFfn::Dense(_) => None,
+        }
+    }
+
+    /// Replace the weight tensors for a single MoE expert in-place.
+    ///
+    /// Returns an error if `layer_idx` is out of range, the layer is dense,
+    /// `expert_id` is out of range, or an internal error occurs.
+    pub fn set_expert_weights(
+        &self,
+        layer_idx: usize,
+        expert_id: usize,
+        weights: super::blocks::ExpertWeights<R>,
+    ) -> crate::error::Result<()>
+    where
+        R::Client: ShapeOps<R>,
+    {
+        use super::blocks::LlamaFfn;
+        use crate::error::Error;
+        let block = self
+            .layers
+            .get(layer_idx)
+            .ok_or_else(|| Error::ModelError {
+                reason: format!(
+                    "layer_idx {} out of range (num_layers={})",
+                    layer_idx,
+                    self.layers.len()
+                ),
+            })?;
+        match &block.mlp {
+            LlamaFfn::Moe(moe) => moe.set_expert_weights(expert_id, weights),
+            LlamaFfn::Dense(_) => Err(Error::ModelError {
+                reason: format!("layer {} is a dense FFN layer, not MoE", layer_idx),
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

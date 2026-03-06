@@ -22,5 +22,9 @@ pub(super) mod block;
 #[path = "blocks_builders.rs"]
 pub(super) mod builders;
 
+#[path = "blocks_moe.rs"]
+pub(super) mod moe;
+
 pub(super) use block::LlamaBlock;
 pub(super) use builders::{build_block_from_config, build_block_from_varbuilder};
+pub use moe::{ExpertWeights, LlamaFfn, LlamaMoeMlp};

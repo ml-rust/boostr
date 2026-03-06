@@ -1,7 +1,7 @@
 //! LLaMA single transformer block.
 
 use super::attention::LlamaAttention;
-use super::mlp::LlamaMlp;
+use super::moe::LlamaFfn;
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
 use crate::inference::kv_cache::LayeredPagedKvCache;
@@ -22,7 +22,7 @@ pub struct LlamaBlock<R: Runtime> {
     pub(crate) input_layernorm: RmsNorm<R>,
     pub(crate) self_attn: LlamaAttention<R>,
     pub(crate) post_attention_layernorm: RmsNorm<R>,
-    pub(crate) mlp: LlamaMlp<R>,
+    pub(crate) mlp: LlamaFfn<R>,
 }
 
 impl<R: Runtime<DType = DType>> LlamaBlock<R> {

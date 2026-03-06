@@ -89,6 +89,9 @@ pub(crate) struct SequenceData {
     pub block_table: BlockTable,
     pub total_tokens: usize,
     pub prompt_len: usize,
+    /// Number of prompt tokens whose KV data is already in cache (prefix cache hit).
+    /// The prefill forward pass should start from this offset.
+    pub cached_token_count: usize,
 }
 
 impl SequenceData {
@@ -101,6 +104,7 @@ impl SequenceData {
             block_table: BlockTable::new(block_size),
             total_tokens: prompt_len,
             prompt_len,
+            cached_token_count: 0,
         }
     }
 
@@ -120,6 +124,9 @@ pub struct ScheduledBatch {
     pub decode_sequences: Vec<SequenceId>,
     pub block_tables: std::collections::HashMap<SequenceId, Vec<crate::inference::memory::BlockId>>,
     pub preempted_sequences: Vec<SequenceId>,
+    /// Number of cached tokens per prefill sequence (prefix cache hits).
+    /// If present, prefill should start from this offset instead of 0.
+    pub cached_token_counts: std::collections::HashMap<SequenceId, usize>,
 }
 
 impl ScheduledBatch {

@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::inference::memory::{BlockAllocator, BlockTable};
+use crate::inference::prefix_cache::PrefixCache;
 use std::collections::{HashMap, VecDeque};
 
 use super::types::{
@@ -18,6 +19,8 @@ pub struct SequenceScheduler<A: BlockAllocator> {
     running_set: Vec<SequenceId>,
     preempted_set: Vec<SequenceId>,
     stats: SchedulerStats,
+    /// Optional prefix cache for KV block reuse across sequences
+    prefix_cache: Option<PrefixCache<A>>,
 }
 
 impl<A: BlockAllocator> SequenceScheduler<A> {
@@ -30,7 +33,15 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
             running_set: Vec::new(),
             preempted_set: Vec::new(),
             stats: SchedulerStats::default(),
+            prefix_cache: None,
         }
+    }
+
+    /// Enable prefix caching with the given cache instance.
+    /// The prefix cache should use a clone of the same allocator.
+    pub fn with_prefix_cache(mut self, cache: PrefixCache<A>) -> Self {
+        self.prefix_cache = Some(cache);
+        self
     }
 
     pub fn add_request(&mut self, request: SequenceRequest) -> Result<()> {
@@ -67,6 +78,7 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
             decode_sequences: Vec::new(),
             block_tables: HashMap::new(),
             preempted_sequences: Vec::new(),
+            cached_token_counts: HashMap::new(),
         };
 
         let mut batch_tokens = 0;
@@ -118,22 +130,46 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
                     continue;
                 }
 
-                let blocks_needed =
-                    BlockTable::blocks_needed(prompt_tokens, self.config.block_size);
-                if !self.allocator.can_allocate(blocks_needed) {
-                    continue;
-                }
-
-                let blocks = self.allocator.allocate(blocks_needed)?;
+                // Try prefix cache first for block reuse
+                let (blocks, cached_count) = if let Some(ref mut cache) = self.prefix_cache {
+                    let tokens = &seq.request.prompt_tokens;
+                    match cache.get_or_allocate_blocks(seq_id, tokens) {
+                        Ok(result) => {
+                            let cached = result.cached_count();
+                            let cached_tokens = cached * self.config.block_size;
+                            (result.into_blocks(), cached_tokens.min(prompt_tokens))
+                        }
+                        Err(_) => {
+                            // Fallback to direct allocation
+                            let blocks_needed =
+                                BlockTable::blocks_needed(prompt_tokens, self.config.block_size);
+                            if !self.allocator.can_allocate(blocks_needed) {
+                                continue;
+                            }
+                            (self.allocator.allocate(blocks_needed)?, 0)
+                        }
+                    }
+                } else {
+                    let blocks_needed =
+                        BlockTable::blocks_needed(prompt_tokens, self.config.block_size);
+                    if !self.allocator.can_allocate(blocks_needed) {
+                        continue;
+                    }
+                    (self.allocator.allocate(blocks_needed)?, 0)
+                };
 
                 if let Some(seq_mut) = self.sequences.get_mut(&seq_id) {
                     seq_mut.block_table.blocks = blocks.clone();
                     seq_mut.block_table.num_tokens = prompt_tokens;
+                    seq_mut.cached_token_count = cached_count;
                     seq_mut.state = SequenceState::Running;
                 }
 
                 batch.prefill_sequences.push(seq_id);
                 batch.block_tables.insert(seq_id, blocks);
+                if cached_count > 0 {
+                    batch.cached_token_counts.insert(seq_id, cached_count);
+                }
                 batch_tokens += prompt_tokens;
                 scheduled_waiting.push(seq_id);
             }
@@ -266,7 +302,12 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
     pub fn finish_sequence(&mut self, seq_id: SequenceId) -> Result<()> {
         if let Some(seq) = self.sequences.get_mut(&seq_id) {
             if !seq.block_table.blocks.is_empty() {
-                self.allocator.free(&seq.block_table.blocks)?;
+                if let Some(ref mut cache) = self.prefix_cache {
+                    // Release ref-counts; blocks stay in cache for future reuse
+                    let _ = cache.release_blocks(seq_id, &seq.block_table.blocks);
+                } else {
+                    self.allocator.free(&seq.block_table.blocks)?;
+                }
             }
 
             seq.state = SequenceState::Finished;
@@ -352,8 +393,20 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
         self.stats
     }
 
+    pub fn block_stats(&self) -> crate::inference::memory::BlockAllocatorStats {
+        self.allocator.stats()
+    }
+
     pub fn get_sequence_state(&self, seq_id: SequenceId) -> Option<SequenceState> {
         self.sequences.get(&seq_id).map(|s| s.state)
+    }
+
+    /// Get the number of cached tokens for a sequence (prefix cache hit).
+    pub fn get_cached_token_count(&self, seq_id: SequenceId) -> usize {
+        self.sequences
+            .get(&seq_id)
+            .map(|s| s.cached_token_count)
+            .unwrap_or(0)
     }
 
     pub fn get_generated_tokens(&self, seq_id: SequenceId) -> Option<&[u32]> {

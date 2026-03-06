@@ -287,9 +287,67 @@ fn test_scheduled_batch_methods() {
         decode_sequences: vec![3, 4, 5],
         block_tables: HashMap::new(),
         preempted_sequences: vec![],
+        cached_token_counts: HashMap::new(),
     };
 
     assert!(!batch.is_empty());
     assert_eq!(batch.len(), 5);
     assert_eq!(batch.all_sequences(), vec![1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn test_scheduler_with_prefix_cache() {
+    use boostr::inference::memory::CpuBlockAllocator;
+    use boostr::inference::prefix_cache::{PrefixCache, PrefixCacheConfig};
+
+    let block_size = 16;
+    let allocator = CpuBlockAllocator::new(64, block_size);
+    let config = SchedulerConfig {
+        max_batch_size: 4,
+        max_batch_tokens: 1024,
+        max_seq_len: 512,
+        block_size,
+        ..Default::default()
+    };
+
+    let cache_config = PrefixCacheConfig {
+        enabled: true,
+        block_size,
+        max_cached_blocks: 32,
+        min_prefix_tokens: 16,
+    };
+    let cache = PrefixCache::new(allocator.clone(), cache_config);
+
+    let mut scheduler = SequenceScheduler::new(allocator, config).with_prefix_cache(cache);
+
+    // First request: no cache hit
+    let prompt: Vec<u32> = (0..64).collect();
+    let req1 = SequenceRequest::new(1, prompt.clone()).with_max_tokens(10);
+    scheduler.add_request(req1).unwrap();
+    let batch1 = scheduler.schedule().unwrap().unwrap();
+    assert!(batch1.prefill_sequences.contains(&1));
+    let cached1 = batch1.cached_token_counts.get(&1).copied().unwrap_or(0);
+    assert_eq!(cached1, 0, "First request should have no cache hits");
+
+    // Finish sequence 1 (blocks go to prefix cache, not freed)
+    scheduler.prefill_complete(1).unwrap();
+    for i in 0..10 {
+        let done = scheduler.append_token(1, 1000 + i).unwrap();
+        if done {
+            break; // append_token calls finish_sequence internally
+        }
+    }
+    scheduler.cleanup_finished();
+
+    // Second request with same prefix: should get cache hit
+    let req2 = SequenceRequest::new(2, prompt.clone()).with_max_tokens(10);
+    scheduler.add_request(req2).unwrap();
+    let batch2 = scheduler.schedule().unwrap().unwrap();
+    assert!(batch2.prefill_sequences.contains(&2));
+    let cached2 = batch2.cached_token_counts.get(&2).copied().unwrap_or(0);
+    assert!(
+        cached2 > 0,
+        "Second request with same prefix should have cache hits, got {}",
+        cached2
+    );
 }

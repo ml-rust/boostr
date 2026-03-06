@@ -1,7 +1,7 @@
 //! PagedKvCache and LayeredPagedKvCache - Block-based paged KV cache for PagedAttention
 
 use crate::error::{Error, Result};
-use crate::inference::memory::{BlockAllocator, BlockTable};
+use crate::inference::memory::{BlockAllocator, BlockId, BlockTable};
 use crate::ops::traits::KvCacheOps;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
@@ -226,6 +226,16 @@ impl<R: Runtime<DType = DType>> LayeredPagedKvCache<R> {
     /// Get block table in device format (i32 vec) for layer `idx`.
     pub fn block_table_device_format(&self, idx: usize) -> Vec<i32> {
         self.block_tables[idx].to_device_format()
+    }
+
+    /// Set pre-existing block IDs on all layers' block tables.
+    ///
+    /// Used when the prefix cache returns already-allocated blocks that should
+    /// be reused directly instead of allocating new ones.
+    pub fn set_blocks(&mut self, blocks: Vec<BlockId>) {
+        for bt in &mut self.block_tables {
+            bt.blocks = blocks.clone();
+        }
     }
 
     /// Reset all block tables and sequence length (does NOT free blocks from allocator).

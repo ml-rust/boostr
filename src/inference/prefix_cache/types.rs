@@ -68,6 +68,14 @@ impl CacheResult {
             CacheResult::Miss { .. } => 0,
         }
     }
+
+    /// Consume and return the block IDs
+    pub fn into_blocks(self) -> Vec<BlockId> {
+        match self {
+            CacheResult::Hit { blocks, .. } => blocks,
+            CacheResult::Miss { blocks } => blocks,
+        }
+    }
 }
 
 /// Statistics for prefix cache

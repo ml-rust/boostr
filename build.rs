@@ -16,84 +16,214 @@ fn compile_cuda_kernels() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // Kernel sets: (directory, filename, arch, required)
+    // Kernel sets: (directory, filename, arch, required, ptx_name_override)
     // Most kernels target sm_75 (Turing+); flash_v3 needs sm_90 (Hopper)
     // Optional kernels (required=false) warn on failure instead of panicking —
     // they require hardware-specific features (e.g. Hopper) that may not be
     // available on all build machines.
-    let kernel_sets: Vec<(PathBuf, &str, &str, bool)> = vec![
+    // ptx_name_override: Some("name.ptx") overrides the default (filename with .ptx ext).
+    // Needed when files in different subdirs share the same filename (e.g. gemv/q5_k.cu vs gemm/q5_k.cu).
+    let kernel_sets: Vec<(PathBuf, &str, &str, bool, Option<&str>)> = vec![
         // Quantization kernels
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "dequant.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "dequant_generic.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "quant_matmul_generic.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "quant_matmul.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "quant_gemv.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "int4_gemm.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "int4_gemm_gptq.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "nf4_quant.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "marlin_gemm.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "fused_int4_swiglu.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "fused_int4_qkv.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/quant/cuda/kernels"),
             "quant_act.cu",
             "sm_75",
             true,
+            None,
+        ),
+        // Per-format GEMV kernels (subdirectory)
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemv"),
+            "q5_k.cu",
+            "sm_75",
+            true,
+            Some("gemv_q5_k.ptx"),
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemv"),
+            "q3_k.cu",
+            "sm_75",
+            true,
+            Some("gemv_q3_k.ptx"),
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemv"),
+            "q2_k.cu",
+            "sm_75",
+            true,
+            Some("gemv_q2_k.ptx"),
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemv"),
+            "q5_0.cu",
+            "sm_75",
+            true,
+            Some("gemv_q5_0.ptx"),
+        ),
+        // Per-format IQ GEMV kernels (subdirectory)
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemv"),
+            "iq4_nl.cu",
+            "sm_75",
+            true,
+            Some("gemv_iq4_nl.ptx"),
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemv"),
+            "iq4_xs.cu",
+            "sm_75",
+            true,
+            Some("gemv_iq4_xs.ptx"),
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemv"),
+            "iq3_s.cu",
+            "sm_75",
+            true,
+            Some("gemv_iq3_s.ptx"),
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemv"),
+            "iq2_xs.cu",
+            "sm_75",
+            true,
+            Some("gemv_iq2_xs.ptx"),
+        ),
+        // Per-format GEMM kernels (subdirectory)
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemm"),
+            "q5_k.cu",
+            "sm_75",
+            true,
+            Some("gemm_q5_k.ptx"),
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemm"),
+            "q3_k.cu",
+            "sm_75",
+            true,
+            Some("gemm_q3_k.ptx"),
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemm"),
+            "q2_k.cu",
+            "sm_75",
+            true,
+            Some("gemm_q2_k.ptx"),
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemm"),
+            "q5_0.cu",
+            "sm_75",
+            true,
+            Some("gemm_q5_0.ptx"),
+        ),
+        // Per-format IQ GEMM kernels (subdirectory)
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemm"),
+            "iq4_nl.cu",
+            "sm_75",
+            true,
+            Some("gemm_iq4_nl.ptx"),
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemm"),
+            "iq4_xs.cu",
+            "sm_75",
+            true,
+            Some("gemm_iq4_xs.ptx"),
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemm"),
+            "iq3_s.cu",
+            "sm_75",
+            true,
+            Some("gemm_iq3_s.ptx"),
+        ),
+        (
+            PathBuf::from("src/quant/cuda/kernels/gemm"),
+            "iq2_xs.cu",
+            "sm_75",
+            true,
+            Some("gemm_iq2_xs.ptx"),
         ),
         // Attention kernels
         (
@@ -101,78 +231,91 @@ fn compile_cuda_kernels() {
             "flash_v2.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
             "flash_v2_bwd.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
             "paged_attention.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
             "paged_attention_bwd.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
             "varlen_attention.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
             "varlen_attention_bwd.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
             "mqa_gqa.cu",
             "sm_80",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
             "mqa_gqa_bwd.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
             "sdpa.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
             "fused_qkv.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
             "decode_attention.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
             "kv_insert.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
             "paged_decode_attention.cu",
             "sm_75",
             true,
+            None,
         ),
         // Flash v3 — sm_90 (Hopper warp specialization, optional)
         (
@@ -180,12 +323,14 @@ fn compile_cuda_kernels() {
             "flash_v3.cu",
             "sm_90",
             false,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/attention"),
             "flash_v3_bwd.cu",
             "sm_90",
             false,
+            None,
         ),
         // Cache kernels
         (
@@ -193,36 +338,42 @@ fn compile_cuda_kernels() {
             "kv_cache_update.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/cache"),
             "kv_cache_int4.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/cache"),
             "kv_cache_fp8.cu",
             "sm_80",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/cache"),
             "kv_cache_fp8_bwd.cu",
             "sm_80",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/cache"),
             "kv_cache_quant.cu",
             "sm_80",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/cache"),
             "reshape_and_cache.cu",
             "sm_75",
             true,
+            None,
         ),
         // Position kernels
         (
@@ -230,30 +381,35 @@ fn compile_cuda_kernels() {
             "alibi.cu",
             "sm_80",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/position"),
             "alibi_bwd.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/position"),
             "rope.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/position"),
             "rope_interleaved.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/position"),
             "rope_yarn.cu",
             "sm_75",
             true,
+            None,
         ),
         // Fused optimizer kernels
         (
@@ -261,36 +417,42 @@ fn compile_cuda_kernels() {
             "fused_adamw.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/training"),
             "fused_sgd.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/training"),
             "fused_adagrad.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/training"),
             "fused_lamb.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/training"),
             "fused_multi_tensor.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/training"),
             "fused_grad_unscale_clip.cu",
             "sm_75",
             true,
+            None,
         ),
         // Architecture kernels (MoE)
         (
@@ -298,12 +460,14 @@ fn compile_cuda_kernels() {
             "moe_routing.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/architecture"),
             "moe_grouped_gemm.cu",
             "sm_75",
             true,
+            None,
         ),
         // Inference kernels (speculative decoding, sampling, prefix cache)
         (
@@ -311,30 +475,35 @@ fn compile_cuda_kernels() {
             "prefix_cache_lookup.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/inference"),
             "speculative_verify.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/inference"),
             "sampling_penalties.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/inference"),
             "sampling.cu",
             "sm_75",
             true,
+            None,
         ),
         (
             PathBuf::from("src/ops/cuda/kernels/inference"),
             "logits_to_token.cu",
             "sm_75",
             true,
+            None,
         ),
         // Architecture kernels (SSM / Mamba2)
         (
@@ -342,6 +511,7 @@ fn compile_cuda_kernels() {
             "ssd_state_passing.cu",
             "sm_75",
             true,
+            None,
         ),
         // Calibration kernels (quantization)
         (
@@ -349,6 +519,7 @@ fn compile_cuda_kernels() {
             "calibration.cu",
             "sm_75",
             true,
+            None,
         ),
     ];
 
@@ -362,9 +533,11 @@ fn compile_cuda_kernels() {
         panic!("nvcc not found - CUDA Toolkit must be installed for the 'cuda' feature");
     });
 
-    for (kernels_dir, kernel_file, arch, required) in &kernel_sets {
+    for (kernels_dir, kernel_file, arch, required, ptx_override) in &kernel_sets {
         let cu_path = kernels_dir.join(kernel_file);
-        let ptx_name = kernel_file.replace(".cu", ".ptx");
+        let ptx_name = ptx_override
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| kernel_file.replace(".cu", ".ptx"));
         let ptx_path = out_dir.join(&ptx_name);
 
         println!("cargo:rerun-if-changed={}", cu_path.display());

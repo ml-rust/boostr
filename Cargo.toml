@@ -33,6 +33,11 @@ cudarc = { version = "0.19", optional = true, features = [
 wgpu = { version = "28.0", optional = true }
 bytemuck = { version = "1.24", features = ["derive"], optional = true }
 
+# Optional: Distributed inference (nexar transport)
+nexar = { version = "0.1.0", optional = true }
+anyhow = { version = "1", optional = true }
+tracing = { version = "0.1", optional = true }
+
 rayon = "1.11"
 memmap2 = "0.9"
 splintr = { version = "0.9" }
@@ -40,6 +45,8 @@ splintr = { version = "0.9" }
 [dev-dependencies]
 bytemuck = { version = "1.24", features = ["derive"] }
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+rustls = "0.23"
 
 [features]
 default = ["cpu"]
@@ -49,6 +56,9 @@ cpu = []
 cuda = ["numr/cuda", "dep:cudarc"]
 nccl = ["numr/nccl"]
 wgpu = ["numr/wgpu", "dep:wgpu", "dep:bytemuck"]
+
+# Distributed inference
+distributed = ["dep:nexar", "dep:anyhow", "dep:bytemuck", "dep:tracing"]
 
 # Precision features
 f16 = ["numr/f16"]

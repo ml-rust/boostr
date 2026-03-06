@@ -7,6 +7,8 @@ pub mod fused_q3k_dot;
 pub mod fused_q3k_q8k_dot;
 pub mod fused_q4k_dot;
 pub mod fused_q4k_q8k_dot;
+pub mod fused_q5k_dot;
+pub mod fused_q5k_q8k_dot;
 pub mod fused_q6k_dot;
 pub mod fused_q6k_q8k_dot;
 pub mod fused_q8_0_q8k_dot;

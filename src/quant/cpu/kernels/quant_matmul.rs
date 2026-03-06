@@ -97,7 +97,11 @@ pub fn quant_matmul_f32(
     // K-quants with dedicated fused dequant+dot kernels
     let use_fused = matches!(
         format,
-        QuantFormat::Q2K | QuantFormat::Q3K | QuantFormat::Q4K | QuantFormat::Q6K
+        QuantFormat::Q2K
+            | QuantFormat::Q3K
+            | QuantFormat::Q4K
+            | QuantFormat::Q5K
+            | QuantFormat::Q6K
     );
 
     // Q8_K integer dot product path — quantize activations to Q8_K then integer arithmetic.
@@ -204,6 +208,7 @@ fn fused_dot_dispatch(act_row: &[f32], row_data: &[u8], k: usize, format: QuantF
         QuantFormat::Q2K => super::simd::fused_q2k_dot::fused_dot_q2k(act_row, row_data, k),
         QuantFormat::Q3K => super::simd::fused_q3k_dot::fused_dot_q3k(act_row, row_data, k),
         QuantFormat::Q4K => super::simd::fused_q4k_dot::fused_dot_q4k(act_row, row_data, k),
+        QuantFormat::Q5K => super::simd::fused_q5k_dot::fused_dot_q5k(act_row, row_data, k),
         QuantFormat::Q6K => super::simd::fused_q6k_dot::fused_dot_q6k(act_row, row_data, k),
         _ => unreachable!(),
     }
@@ -215,6 +220,7 @@ fn fused_dot_q8k_dispatch(act_q8k: &[u8], row_data: &[u8], k: usize, format: Qua
         QuantFormat::Q2K => super::simd::fused_q2k_q8k_dot::fused_dot_q2k_q8k(act_q8k, row_data, k),
         QuantFormat::Q3K => super::simd::fused_q3k_q8k_dot::fused_dot_q3k_q8k(act_q8k, row_data, k),
         QuantFormat::Q4K => super::simd::fused_q4k_q8k_dot::fused_dot_q4k_q8k(act_q8k, row_data, k),
+        QuantFormat::Q5K => super::simd::fused_q5k_q8k_dot::fused_dot_q5k_q8k(act_q8k, row_data, k),
         QuantFormat::Q6K => super::simd::fused_q6k_q8k_dot::fused_dot_q6k_q8k(act_q8k, row_data, k),
         _ => unreachable!(),
     }
@@ -240,7 +246,11 @@ pub fn quant_matmul_batch_f32(
 
     let use_fused = matches!(
         format,
-        QuantFormat::Q2K | QuantFormat::Q3K | QuantFormat::Q4K | QuantFormat::Q6K
+        QuantFormat::Q2K
+            | QuantFormat::Q3K
+            | QuantFormat::Q4K
+            | QuantFormat::Q5K
+            | QuantFormat::Q6K
     );
     let use_q8k = use_fused && k % 256 == 0;
 

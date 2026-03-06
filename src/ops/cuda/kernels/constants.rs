@@ -41,3 +41,5 @@ pub const SAMPLING_PENALTIES_MODULE: &str = "sampling_penalties";
 pub const SAMPLING_MODULE: &str = "sampling";
 pub const LOGITS_TO_TOKEN_MODULE: &str = "logits_to_token";
 pub const CALIBRATION_MODULE: &str = "calibration";
+pub const GRAMMAR_DFA_MODULE: &str = "grammar_dfa";
+pub const PREFIX_CACHE_LOOKUP_MODULE: &str = "prefix_cache_lookup";

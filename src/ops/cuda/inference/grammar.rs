@@ -43,7 +43,8 @@ impl GrammarDfaOps<CudaRuntime> for CudaClient {
 
         // Offset the logits pointer to point at the last position's logits
         let logits_ptr = output.ptr();
-        let logits_ptr_offset = unsafe { logits_ptr.offset(logits_offset as isize * 4) };
+        // Byte-offset into device memory (4 bytes per f32 element)
+        let logits_ptr_offset = logits_ptr + (logits_offset as u64 * 4);
         let transition_ptr = grammar.transition_table.ptr();
         let accepting_ptr = grammar.accepting_mask.ptr();
         let vocab_bytes_ptr = grammar.vocab_bytes.ptr();

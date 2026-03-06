@@ -130,7 +130,7 @@ mod inner {
             }
 
             self.ram_tier.insert(token_hash, block_id);
-            self.ram_lru.push(token_hash);
+            self.ram_lru.push_back(token_hash);
         }
 
         /// Promote an entry from RAM tier back to GPU tier.
@@ -145,7 +145,7 @@ mod inner {
                 } else {
                     // GPU tier full, put back in RAM
                     self.ram_tier.insert(token_hash, block_id);
-                    self.ram_lru.push(token_hash);
+                    self.ram_lru.push_back(token_hash);
                     Some(block_id) // still usable from RAM
                 }
             } else {

@@ -5,6 +5,7 @@ pub mod embedding;
 pub mod groupnorm;
 pub mod layernorm;
 pub mod linear;
+pub mod lora;
 pub mod loss;
 pub mod mla;
 pub mod module;
@@ -24,6 +25,7 @@ pub use embedding::Embedding;
 pub use groupnorm::GroupNorm;
 pub use layernorm::LayerNorm;
 pub use linear::{Linear, MaybeQuantLinear, QuantLinear};
+pub use lora::LoraLinear;
 pub use loss::{
     contrastive_loss, cross_entropy_loss, cross_entropy_loss_smooth, focal_loss, kl_div_loss,
     mse_loss,

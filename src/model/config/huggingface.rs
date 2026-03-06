@@ -52,6 +52,36 @@ pub struct HuggingFaceConfig {
 
     #[serde(default)]
     pub tie_word_embeddings: bool,
+
+    // ── MoE fields ──────────────────────────────────────────────────
+    /// Number of experts (Mixtral, Qwen2-MoE, DBRX)
+    #[serde(default)]
+    pub num_local_experts: Option<usize>,
+
+    /// Number of active experts per token (top-k routing)
+    #[serde(default)]
+    pub num_experts_per_tok: Option<usize>,
+
+    // ── Architecture-specific flags ─────────────────────────────────
+    /// Whether attention layers use bias (GPT-NeoX, Falcon, some Qwen)
+    #[serde(default)]
+    pub attention_bias: Option<bool>,
+
+    /// Use ALiBi position embeddings instead of RoPE (Falcon v1)
+    #[serde(default)]
+    pub alibi: Option<bool>,
+
+    /// Multi-query attention flag (Falcon)
+    #[serde(default)]
+    pub multi_query: Option<bool>,
+
+    /// New decoder architecture flag (Falcon-40B+)
+    #[serde(default)]
+    pub new_decoder_architecture: Option<bool>,
+
+    /// Parallel attention + MLP (GPT-NeoX)
+    #[serde(default)]
+    pub parallel_attn: Option<bool>,
 }
 
 fn default_hf_rope_theta() -> f32 {
@@ -97,6 +127,13 @@ impl HuggingFaceConfig {
     pub fn to_universal(&self) -> UniversalConfig {
         let model_type = self.infer_model_type();
 
+        // Determine num_kv_heads: Falcon multi_query means 1 KV head
+        let effective_kv_heads = if self.multi_query == Some(true) && self.num_kv_heads.is_none() {
+            Some(1)
+        } else {
+            self.num_kv_heads
+        };
+
         let attention = self.num_attention_heads.map(|num_heads| {
             let rope_scaling = self.rope_scaling.as_ref().and_then(|rs| {
                 rs.scaling_type.as_ref().map(|t| RopeScalingConfig {
@@ -113,7 +150,7 @@ impl HuggingFaceConfig {
 
             AttentionConfig {
                 num_heads,
-                num_kv_heads: self.num_kv_heads,
+                num_kv_heads: effective_kv_heads,
                 head_dim: self.head_dim,
                 rope_theta: self.rope_theta,
                 rope_scaling,
@@ -123,6 +160,18 @@ impl HuggingFaceConfig {
                 sliding_window: self.sliding_window,
             }
         });
+
+        // Auto-detect MoE from num_local_experts
+        let moe = self
+            .num_local_experts
+            .map(|num_experts| super::moe::MoeConfig {
+                num_experts,
+                experts_per_tok: self.num_experts_per_tok.unwrap_or(2),
+                shared_expert: None,
+                intermediate_size: None,
+                load_balance_alpha: 0.01,
+                z_loss_alpha: 1e-3,
+            });
 
         UniversalConfig {
             model_type,
@@ -134,7 +183,7 @@ impl HuggingFaceConfig {
             rms_norm_eps: self.rms_norm_eps,
             attention,
             ssm: None,
-            moe: None,
+            moe,
             hybrid_layers: None,
             tie_word_embeddings: self.tie_word_embeddings,
         }
@@ -152,6 +201,8 @@ impl HuggingFaceConfig {
                 //  "gemma2" before "gemma").
                 if arch_lower.contains("llama") {
                     return "llama".to_string();
+                } else if arch_lower.contains("mixtral") {
+                    return "mixtral".to_string();
                 } else if arch_lower.contains("mistral") {
                     return "mistral".to_string();
                 } else if arch_lower.contains("mamba") {
@@ -172,6 +223,14 @@ impl HuggingFaceConfig {
                     return "starcoder2".to_string();
                 } else if arch_lower.contains("internlm") {
                     return "internlm2".to_string();
+                } else if arch_lower.contains("falcon") {
+                    return "falcon".to_string();
+                } else if arch_lower.contains("neox") || arch_lower.contains("pythia") {
+                    return "gpt_neox".to_string();
+                } else if arch_lower.contains("dbrx") {
+                    return "dbrx".to_string();
+                } else if arch_lower.contains("cohere") || arch_lower.contains("command") {
+                    return "command_r".to_string();
                 }
             }
         }
@@ -235,6 +294,13 @@ mod tests {
             rms_norm_eps: 1e-5,
             rope_scaling: None,
             tie_word_embeddings: false,
+            num_local_experts: None,
+            num_experts_per_tok: None,
+            attention_bias: None,
+            alibi: None,
+            multi_query: None,
+            new_decoder_architecture: None,
+            parallel_attn: None,
         }
     }
 
@@ -366,6 +432,75 @@ mod tests {
             config_with_arch("SomeNewModelForCausalLM").infer_model_type(),
             "llama"
         );
+    }
+
+    #[test]
+    fn arch_fallback_falcon() {
+        assert_eq!(
+            config_with_arch("FalconForCausalLM").infer_model_type(),
+            "falcon"
+        );
+    }
+
+    #[test]
+    fn arch_fallback_gpt_neox() {
+        assert_eq!(
+            config_with_arch("GPTNeoXForCausalLM").infer_model_type(),
+            "gpt_neox"
+        );
+    }
+
+    #[test]
+    fn arch_fallback_dbrx() {
+        assert_eq!(
+            config_with_arch("DbrxForCausalLM").infer_model_type(),
+            "dbrx"
+        );
+    }
+
+    #[test]
+    fn arch_fallback_mixtral() {
+        assert_eq!(
+            config_with_arch("MixtralForCausalLM").infer_model_type(),
+            "mixtral"
+        );
+    }
+
+    #[test]
+    fn arch_fallback_command_r() {
+        assert_eq!(
+            config_with_arch("CohereForCausalLM").infer_model_type(),
+            "command_r"
+        );
+    }
+
+    // -- MoE auto-detection from HF fields --
+
+    #[test]
+    fn moe_auto_detection_from_num_local_experts() {
+        let mut c = config_with_model_type("mixtral");
+        c.num_local_experts = Some(8);
+        c.num_experts_per_tok = Some(2);
+        let uc = c.to_universal();
+        let moe = uc.moe.as_ref().expect("MoE config should be populated");
+        assert_eq!(moe.num_experts, 8);
+        assert_eq!(moe.experts_per_tok, 2);
+    }
+
+    #[test]
+    fn no_moe_when_field_absent() {
+        let c = config_with_model_type("llama");
+        let uc = c.to_universal();
+        assert!(uc.moe.is_none());
+    }
+
+    #[test]
+    fn multi_query_sets_one_kv_head() {
+        let mut c = config_with_model_type("falcon");
+        c.multi_query = Some(true);
+        let uc = c.to_universal();
+        let attn = uc.attention.as_ref().unwrap();
+        assert_eq!(attn.num_kv_heads, Some(1));
     }
 }
 

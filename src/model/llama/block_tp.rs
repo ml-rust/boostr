@@ -30,6 +30,9 @@ pub(super) struct LlamaAttentionTp<R: Runtime> {
     pub(super) num_heads: usize,    // LOCAL heads (total / world_size)
     pub(super) num_kv_heads: usize, // LOCAL kv heads (total / world_size)
     pub(super) head_dim: usize,
+    /// Optional Q/K layer norms (Command-R, Cohere)
+    pub(super) q_norm: Option<RmsNorm<R>>,
+    pub(super) k_norm: Option<RmsNorm<R>>,
 }
 
 pub(super) struct LlamaMlpTp<R: Runtime> {
@@ -141,6 +144,16 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
         let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
         let v = var_contiguous(&v);
 
+        // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
+        let q = match &self.q_norm {
+            Some(norm) => norm.forward(client, &q)?,
+            None => q,
+        };
+        let k = match &self.k_norm {
+            Some(norm) => norm.forward(client, &k)?,
+            None => k,
+        };
+
         // RoPE on Q and K
         let q = apply_rope_interleaved_impl(client, &q, rope.cos_cache(), rope.sin_cache())?;
         let k = apply_rope_interleaved_impl(client, &k, rope.cos_cache(), rope.sin_cache())?;
@@ -217,6 +230,16 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
         let k = var_contiguous(&k);
         let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
         let v = var_contiguous(&v);
+
+        // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
+        let q = match &self.q_norm {
+            Some(norm) => norm.forward(client, &q)?,
+            None => q,
+        };
+        let k = match &self.k_norm {
+            Some(norm) => norm.forward(client, &k)?,
+            None => k,
+        };
 
         // Apply RoPE with position offset
         let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;

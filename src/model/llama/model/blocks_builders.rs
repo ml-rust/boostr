@@ -20,10 +20,40 @@ pub fn build_block_from_varbuilder<R: Runtime<DType = DType>>(
     head_dim: usize,
 ) -> Result<LlamaBlock<R>> {
     let mut attn_vb = layer_vb.pp("self_attn");
-    let q_proj = attn_vb.take_maybe_quant_linear("q_proj.weight", None)?;
-    let k_proj = attn_vb.take_maybe_quant_linear("k_proj.weight", None)?;
-    let v_proj = attn_vb.take_maybe_quant_linear("v_proj.weight", None)?;
-    let o_proj = attn_vb.take_maybe_quant_linear("o_proj.weight", None)?;
+
+    // Attention projections — bias is optional (present in GPT-NeoX, some Falcon/Qwen)
+    let q_bias = if attn_vb.contains("q_proj.bias") {
+        Some("q_proj.bias")
+    } else {
+        None
+    };
+    let k_bias = if attn_vb.contains("k_proj.bias") {
+        Some("k_proj.bias")
+    } else {
+        None
+    };
+    let v_bias = if attn_vb.contains("v_proj.bias") {
+        Some("v_proj.bias")
+    } else {
+        None
+    };
+    let o_bias = if attn_vb.contains("o_proj.bias") {
+        Some("o_proj.bias")
+    } else {
+        None
+    };
+    let q_proj = attn_vb.take_maybe_quant_linear("q_proj.weight", q_bias)?;
+    let k_proj = attn_vb.take_maybe_quant_linear("k_proj.weight", k_bias)?;
+    let v_proj = attn_vb.take_maybe_quant_linear("v_proj.weight", v_bias)?;
+    let o_proj = attn_vb.take_maybe_quant_linear("o_proj.weight", o_bias)?;
+
+    // Optional Q/K layer norms (Command-R, Cohere)
+    let q_norm = attn_vb
+        .take_tensor_optional("q_norm.weight")?
+        .map(|w| RmsNorm::new(w, config.rms_norm_eps as f32, false));
+    let k_norm = attn_vb
+        .take_tensor_optional("k_norm.weight")?
+        .map(|w| RmsNorm::new(w, config.rms_norm_eps as f32, false));
 
     let mlp = if let Some(moe_config) = &config.moe {
         // MoE: load stacked expert weights and router
@@ -82,6 +112,8 @@ pub fn build_block_from_varbuilder<R: Runtime<DType = DType>>(
             num_heads,
             num_kv_heads,
             head_dim,
+            q_norm,
+            k_norm,
         },
         post_attention_layernorm: RmsNorm::new(
             layer_vb.take_tensor("post_attention_layernorm.weight")?,
@@ -133,6 +165,8 @@ pub fn build_block_from_config<R: Runtime<DType = DType>>(
             num_heads,
             num_kv_heads,
             head_dim,
+            q_norm: None,
+            k_norm: None,
         },
         post_attention_layernorm: RmsNorm::new(
             Tensor::<R>::ones(&[hidden], dt, device),

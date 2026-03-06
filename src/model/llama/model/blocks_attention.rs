@@ -26,9 +26,30 @@ pub struct LlamaAttention<R: Runtime> {
     pub(crate) num_heads: usize,
     pub(crate) num_kv_heads: usize,
     pub(crate) head_dim: usize,
+    /// Optional Q/K layer norms (Command-R, Cohere)
+    pub(crate) q_norm: Option<crate::nn::RmsNorm<R>>,
+    pub(crate) k_norm: Option<crate::nn::RmsNorm<R>>,
 }
 
 impl<R: Runtime<DType = DType>> LlamaAttention<R> {
+    /// Apply optional Q/K layer norms (Command-R, Cohere).
+    /// Input shape: [B, H, S, D] — norm is applied over the last dimension (head_dim).
+    fn apply_qk_norms<C>(&self, client: &C, q: &Var<R>, k: &Var<R>) -> Result<(Var<R>, Var<R>)>
+    where
+        C: ModelClient<R>,
+        R::Client: TensorOps<R> + ScalarOps<R>,
+    {
+        let q = match &self.q_norm {
+            Some(norm) => norm.forward(client, q)?,
+            None => q.clone(),
+        };
+        let k = match &self.k_norm {
+            Some(norm) => norm.forward(client, k)?,
+            None => k.clone(),
+        };
+        Ok((q, k))
+    }
+
     pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
     where
         C: ModelClient<R>,
@@ -71,6 +92,9 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         // V skips contiguous — matmul handles strided inputs via copy_strided.
         let q = var_contiguous(&q);
         let k = var_contiguous(&k);
+
+        // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
+        let (q, k) = self.apply_qk_norms(client, &q, &k)?;
 
         // Apply fused RoPE to Q and K (single kernel per tensor on CUDA)
         let q = client.apply_rope_interleaved(&q, rope.cos_cache(), rope.sin_cache())?;
@@ -148,6 +172,9 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         // Contiguous Q/K needed because fused RoPE kernel assumes contiguous layout.
         let q = var_contiguous(&q);
         let k = var_contiguous(&k);
+
+        // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
+        let (q, k) = self.apply_qk_norms(client, &q, &k)?;
 
         // Apply fused RoPE with position offset (single kernel per tensor on CUDA)
         let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
@@ -247,6 +274,9 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         let q = var_contiguous(&q);
         let k = var_contiguous(&k);
         let v = var_contiguous(&v);
+
+        // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
+        let (q, k) = self.apply_qk_norms(client, &q, &k)?;
 
         // Apply RoPE with position offset
         let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
@@ -360,6 +390,9 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
         let q = var_contiguous(&q);
         let k = var_contiguous(&k);
         let v = var_contiguous(&v);
+
+        // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
+        let (q, k) = self.apply_qk_norms(client, &q, &k)?;
 
         // Apply RoPE using the stable cos/sin slices (updated before each replay)
         let q = client.apply_rope_interleaved(&q, cos_slice, sin_slice)?;

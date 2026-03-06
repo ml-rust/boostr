@@ -48,14 +48,14 @@ impl<R: Runtime<DType = DType>> LoadedModel<R>
 where
     R::Client: IndexingOps<R> + crate::quant::DequantOps<R> + numr::ops::TypeConversionOps<R>,
 {
-    /// Load a model from universal config and weights
+    /// Load a model from universal config and weights.
+    ///
+    /// Uses capability-based dispatch: any model with an attention config
+    /// is loaded as a Llama (universal transformer). This means new HF
+    /// model types work automatically without code changes as long as they
+    /// share the standard transformer structure.
     pub fn load(config: &UniversalConfig, vb: &mut VarBuilder<R>) -> Result<Self> {
         match config.model_type.as_str() {
-            "llama" | "mistral" | "qwen2" | "qwen2_moe" | "phi3" | "phi" | "gemma" | "gemma2"
-            | "starcoder2" | "internlm2" => {
-                let model = super::llama::Llama::from_varbuilder(vb, config)?;
-                Ok(LoadedModel::Llama(Box::new(model)))
-            }
             "mamba2" | "mamba3" => {
                 let model = super::mamba::Mamba2Model::from_varbuilder(vb, config)?;
                 Ok(LoadedModel::Mamba2(Box::new(model)))
@@ -64,29 +64,41 @@ where
                 let model = super::hybrid::HybridModel::from_varbuilder(vb, config)?;
                 Ok(LoadedModel::Hybrid(Box::new(model)))
             }
+            // Everything else with attention config → Llama (the universal transformer)
+            _ if config.attention.is_some() => {
+                let model = super::llama::Llama::from_varbuilder(vb, config)?;
+                Ok(LoadedModel::Llama(Box::new(model)))
+            }
             other => Err(Error::ModelError {
-                reason: format!("Unknown model type: {other}"),
+                reason: format!(
+                    "Unknown model type '{other}' without attention config. \
+                     Only pure SSM models (mamba2/mamba3) and hybrid models are \
+                     supported without attention configuration."
+                ),
             }),
         }
     }
 
     /// Load a tensor-parallel model. Requires a NCCL communicator.
+    ///
+    /// Tensor parallelism is supported for any model with an attention config
+    /// (i.e., transformer architectures loaded via the Llama struct).
     pub fn load_tp(
         config: &UniversalConfig,
         vb: &mut VarBuilder<R>,
         comm: std::sync::Arc<dyn numr::runtime::Communicator>,
     ) -> Result<Self> {
-        match config.model_type.as_str() {
-            "llama" | "mistral" | "qwen2" | "qwen2_moe" | "phi3" | "phi" | "gemma" | "gemma2"
-            | "starcoder2" | "internlm2" => {
-                let model = super::llama::LlamaTp::from_varbuilder(vb, config, comm)?;
-                Ok(LoadedModel::LlamaTp(Box::new(model)))
-            }
-            other => Err(Error::ModelError {
+        if config.attention.is_some() {
+            let model = super::llama::LlamaTp::from_varbuilder(vb, config, comm)?;
+            Ok(LoadedModel::LlamaTp(Box::new(model)))
+        } else {
+            Err(Error::ModelError {
                 reason: format!(
-                    "Tensor parallelism not supported for model type: {other} (only Llama-family architectures)"
+                    "Tensor parallelism not supported for model type '{}' \
+                     (requires attention config)",
+                    config.model_type
                 ),
-            }),
+            })
         }
     }
 

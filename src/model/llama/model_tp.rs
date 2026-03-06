@@ -133,6 +133,8 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
                     num_heads: local_heads,
                     num_kv_heads: local_kv_heads,
                     head_dim,
+                    q_norm: None,
+                    k_norm: None,
                 },
                 post_attention_layernorm: RmsNorm::new(
                     Tensor::<R>::ones(&[hidden], dt, device),
@@ -263,6 +265,16 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
                     num_heads: local_heads,
                     num_kv_heads: local_kv_heads,
                     head_dim,
+                    q_norm: {
+                        let mut avb = layer_vb.pp("self_attn");
+                        avb.take_tensor_optional("q_norm.weight")?
+                            .map(|w| RmsNorm::new(w, config.rms_norm_eps as f32, false))
+                    },
+                    k_norm: {
+                        let mut avb = layer_vb.pp("self_attn");
+                        avb.take_tensor_optional("k_norm.weight")?
+                            .map(|w| RmsNorm::new(w, config.rms_norm_eps as f32, false))
+                    },
                 },
                 post_attention_layernorm: RmsNorm::new(
                     layer_vb.take_tensor("post_attention_layernorm.weight")?,

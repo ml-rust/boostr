@@ -12,11 +12,26 @@ use std::path::Path;
 impl<R: Runtime<DType = DType>> VarMap<R> {
     /// Load all tensors from a SafeTensors file.
     pub fn from_safetensors<P: AsRef<Path>>(path: P, device: &R::Device) -> Result<Self> {
+        Self::from_safetensors_with_model_type(path, device, None)
+    }
+
+    /// Load all tensors from a SafeTensors file, normalizing tensor names for
+    /// the given model type (e.g., "falcon", "gpt_neox", "dbrx").
+    pub fn from_safetensors_with_model_type<P: AsRef<Path>>(
+        path: P,
+        device: &R::Device,
+        model_type: Option<&str>,
+    ) -> Result<Self> {
+        use crate::format::safetensors_name_map::normalize_hf_name;
         let mut st = SafeTensors::open(path)?;
         let all = st.load_all::<R>(device)?;
         let mut map = Self::new();
         for (name, tensor) in all {
-            map.insert(name, tensor);
+            let mapped = match model_type {
+                Some(mt) => normalize_hf_name(mt, &name),
+                None => name,
+            };
+            map.insert(mapped, tensor);
         }
         Ok(map)
     }
@@ -27,6 +42,15 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
     /// to shard filenames (e.g., `model-00001-of-00004.safetensors`).
     /// Loads each shard once and extracts all its tensors.
     pub fn from_safetensors_sharded<P: AsRef<Path>>(dir: P, device: &R::Device) -> Result<Self> {
+        Self::from_safetensors_sharded_with_model_type(dir, device, None)
+    }
+
+    /// Load tensors from sharded SafeTensors files with name normalization.
+    pub fn from_safetensors_sharded_with_model_type<P: AsRef<Path>>(
+        dir: P,
+        device: &R::Device,
+        model_type: Option<&str>,
+    ) -> Result<Self> {
         let dir = dir.as_ref();
         let index_path = dir.join("model.safetensors.index.json");
         let index_str = std::fs::read_to_string(&index_path).map_err(|e| Error::ModelError {
@@ -64,7 +88,11 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
             let mut st = SafeTensors::open(&shard_path)?;
             for name in names {
                 let tensor = st.load_tensor::<R>(name, device)?;
-                map.insert(name.clone(), tensor);
+                let mapped = match model_type {
+                    Some(mt) => crate::format::safetensors_name_map::normalize_hf_name(mt, name),
+                    None => name.clone(),
+                };
+                map.insert(mapped, tensor);
             }
         }
 

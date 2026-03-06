@@ -3,6 +3,7 @@ pub mod gguf;
 pub mod gguf_tokenizer;
 pub mod safetensors;
 pub mod safetensors_loader;
+pub mod safetensors_name_map;
 
 pub use device_map::{DevicePlacement, LayerDeviceMap};
 pub use gguf::{GgmlType, Gguf, GgufMetadata, GgufTensorInfo, GgufValue, GgufValueType};

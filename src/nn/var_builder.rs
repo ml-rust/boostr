@@ -85,6 +85,40 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
         self.varmap.take_tensor(&full)
     }
 
+    /// Take a standard tensor by name if it exists, returning `None` if absent.
+    ///
+    /// Useful for tensors that only exist in some architectures (e.g., attention
+    /// biases, Q/K layer norms for Command-R).
+    pub fn take_tensor_optional(&mut self, name: &str) -> Result<Option<Tensor<R>>> {
+        if self.contains(name) {
+            self.take_tensor(name).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Take a weight by name if it exists, returning `None` if absent.
+    pub fn take_weight_optional(&mut self, name: &str) -> Result<Option<Weight<R>>> {
+        if self.contains(name) {
+            self.take_weight(name).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Take a `MaybeQuantLinear` if the weight exists, returning `None` if absent.
+    pub fn take_maybe_quant_linear_optional(
+        &mut self,
+        name: &str,
+        bias_name: Option<&str>,
+    ) -> Result<Option<MaybeQuantLinear<R>>> {
+        if self.contains(name) {
+            self.take_maybe_quant_linear(name, bias_name).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Take a quantized tensor by name, removing it from the map (zero-copy).
     pub fn take_quant_tensor(&mut self, name: &str) -> Result<QuantTensor<R>> {
         let full = self.full_name(name);

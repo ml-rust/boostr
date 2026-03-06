@@ -95,6 +95,80 @@ extern "C" __global__ void paged_decode_attention_128_fp32(
 }
 
 // ============================================================================
+// head_dim = 128, graph variant — reads seq_len_k from device pointer
+// ============================================================================
+
+extern "C" __global__ void paged_decode_attention_128_fp32_graph(
+    const float* __restrict__ Q,
+    const float* __restrict__ K_blocks,
+    const float* __restrict__ V_blocks,
+    const int* __restrict__ block_table,
+    float* __restrict__ O,
+    int num_heads, int num_kv_heads,
+    const int* __restrict__ seq_len_k_ptr,  // device pointer
+    int max_num_blocks,
+    int block_size, float scale
+) {
+    const int seq_len_k = *seq_len_k_ptr;
+    const int bh = blockIdx.x;
+    const int b = bh / num_heads;
+    const int h = bh % num_heads;
+    const int kv_h = h / (num_heads / num_kv_heads);
+
+    const int tid = threadIdx.x;
+    const int warp_id = tid / 32;
+    const int lane_id = tid % 32;
+
+    const float* q_row = Q + (size_t)(b * num_heads + h) * 128;
+    const float q_val = q_row[tid] * scale;
+
+    const int* bt = block_table + b * max_num_blocks;
+
+    float acc = 0.0f;
+    float m = -1e30f;
+    float l = 0.0f;
+
+    __shared__ float smem_qk[4];
+
+    const int num_kv_blocks = (seq_len_k + block_size - 1) / block_size;
+    for (int blk = 0; blk < num_kv_blocks; blk++) {
+        const int physical_block = bt[blk];
+        const int tokens_in_block = min(block_size, seq_len_k - blk * block_size);
+
+        const size_t block_base = (size_t)physical_block * block_size * num_kv_heads * 128
+                                + (size_t)kv_h * 128;
+        const int kv_stride = num_kv_heads * 128;
+
+        for (int off = 0; off < tokens_in_block; off++) {
+            float k_val = K_blocks[block_base + (size_t)off * kv_stride + tid];
+            float qk = q_val * k_val;
+
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1)
+                qk += __shfl_down_sync(0xFFFFFFFF, qk, offset);
+
+            if (lane_id == 0) smem_qk[warp_id] = qk;
+            __syncthreads();
+
+            float dot = smem_qk[0] + smem_qk[1] + smem_qk[2] + smem_qk[3];
+            __syncthreads();
+
+            float m_new = fmaxf(m, dot);
+            float exp_old = expf(m - m_new);
+            float exp_new = expf(dot - m_new);
+
+            float v_val = V_blocks[block_base + (size_t)off * kv_stride + tid];
+            acc = acc * exp_old + v_val * exp_new;
+            l = l * exp_old + exp_new;
+            m = m_new;
+        }
+    }
+
+    float* o_row = O + (size_t)(b * num_heads + h) * 128;
+    o_row[tid] = (l > 0.0f) ? acc / l : 0.0f;
+}
+
+// ============================================================================
 // head_dim = 64, 64 threads (2 warps), F32
 // ============================================================================
 
@@ -108,6 +182,80 @@ extern "C" __global__ void paged_decode_attention_64_fp32(
     int seq_len_k, int max_num_blocks,
     int block_size, float scale
 ) {
+    const int bh = blockIdx.x;
+    const int b = bh / num_heads;
+    const int h = bh % num_heads;
+    const int kv_h = h / (num_heads / num_kv_heads);
+
+    const int tid = threadIdx.x;
+    const int warp_id = tid / 32;
+    const int lane_id = tid % 32;
+
+    const float* q_row = Q + (size_t)(b * num_heads + h) * 64;
+    const float q_val = q_row[tid] * scale;
+
+    const int* bt = block_table + b * max_num_blocks;
+
+    float acc = 0.0f;
+    float m = -1e30f;
+    float l = 0.0f;
+
+    __shared__ float smem_qk[2];
+
+    const int num_kv_blocks = (seq_len_k + block_size - 1) / block_size;
+    for (int blk = 0; blk < num_kv_blocks; blk++) {
+        const int physical_block = bt[blk];
+        const int tokens_in_block = min(block_size, seq_len_k - blk * block_size);
+
+        const size_t block_base = (size_t)physical_block * block_size * num_kv_heads * 64
+                                + (size_t)kv_h * 64;
+        const int kv_stride = num_kv_heads * 64;
+
+        for (int off = 0; off < tokens_in_block; off++) {
+            float k_val = K_blocks[block_base + (size_t)off * kv_stride + tid];
+            float qk = q_val * k_val;
+
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1)
+                qk += __shfl_down_sync(0xFFFFFFFF, qk, offset);
+
+            if (lane_id == 0) smem_qk[warp_id] = qk;
+            __syncthreads();
+
+            float dot = smem_qk[0] + smem_qk[1];
+            __syncthreads();
+
+            float m_new = fmaxf(m, dot);
+            float exp_old = expf(m - m_new);
+            float exp_new = expf(dot - m_new);
+
+            float v_val = V_blocks[block_base + (size_t)off * kv_stride + tid];
+            acc = acc * exp_old + v_val * exp_new;
+            l = l * exp_old + exp_new;
+            m = m_new;
+        }
+    }
+
+    float* o_row = O + (size_t)(b * num_heads + h) * 64;
+    o_row[tid] = (l > 0.0f) ? acc / l : 0.0f;
+}
+
+// ============================================================================
+// head_dim = 64, graph variant — reads seq_len_k from device pointer
+// ============================================================================
+
+extern "C" __global__ void paged_decode_attention_64_fp32_graph(
+    const float* __restrict__ Q,
+    const float* __restrict__ K_blocks,
+    const float* __restrict__ V_blocks,
+    const int* __restrict__ block_table,
+    float* __restrict__ O,
+    int num_heads, int num_kv_heads,
+    const int* __restrict__ seq_len_k_ptr,
+    int max_num_blocks,
+    int block_size, float scale
+) {
+    const int seq_len_k = *seq_len_k_ptr;
     const int bh = blockIdx.x;
     const int b = bh / num_heads;
     const int h = bh % num_heads;

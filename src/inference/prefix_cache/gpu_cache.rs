@@ -14,8 +14,6 @@
 mod inner {
     use std::collections::{HashMap, VecDeque};
 
-    use numr::dtype::DType;
-    use numr::runtime::Device;
     use numr::runtime::cuda::{CudaClient, CudaRuntime};
     use numr::tensor::Tensor;
 

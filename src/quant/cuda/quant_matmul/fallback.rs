@@ -4,7 +4,7 @@
 //! - `quant_swiglu_via_dequant` — fused SwiGLU fallback (all quant formats)
 
 use crate::error::{Error, Result};
-use crate::quant::{QuantFormat, QuantTensor};
+use crate::quant::QuantTensor;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;

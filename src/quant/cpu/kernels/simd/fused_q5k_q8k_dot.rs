@@ -132,7 +132,7 @@ unsafe fn load_high_bits_32(qh: &[u8], elem_off: usize) -> __m256i {
         let idx = elem_off + i;
         bits[i] = (qh[idx / 8] >> (idx % 8)) & 1;
     }
-    _mm256_loadu_si256(bits.as_ptr() as *const __m256i)
+    unsafe { _mm256_loadu_si256(bits.as_ptr() as *const __m256i) }
 }
 
 /// Dispatch wrapper

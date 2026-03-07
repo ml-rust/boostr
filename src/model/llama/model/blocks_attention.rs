@@ -436,7 +436,6 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
             + numr::ops::CompareOps<numr::runtime::cuda::CudaRuntime>
             + numr::ops::ConditionalOps<numr::runtime::cuda::CudaRuntime>,
     {
-        use crate::ops::RoPEOps;
         use crate::ops::cuda::attention::flash::decode_attention_graph_fwd;
         use crate::ops::cuda::attention::kv_insert::kv_insert;
 

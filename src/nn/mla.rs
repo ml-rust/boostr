@@ -10,13 +10,16 @@
 //! - Attention: Q=[q_nope, q_pe], K=[k_nope, k_pe], V=v
 
 use crate::error::{Error, Result};
-use crate::nn::{Linear, RmsNorm, RoPE, VarBuilder};
+use crate::nn::{Linear, MaybeQuantLinear, RmsNorm, RoPE, VarBuilder};
 use crate::ops::RoPEOps;
 use crate::ops::impl_generic::attention::mla::scaled_dot_product_attention_impl;
 use crate::ops::impl_generic::attention::rope::apply_rope_impl;
+use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{Var, var_broadcast_to, var_cat, var_narrow, var_permute, var_reshape};
 use numr::dtype::DType;
-use numr::ops::{NormalizationOps, ReduceOps, ScalarOps, ShapeOps, TensorOps};
+use numr::ops::{
+    BinaryOps, NormalizationOps, ReduceOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps,
+};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -115,17 +118,17 @@ impl MlaConfig {
 /// - **Output**: `softmax(Q·K^T / √d) · V` projected through `o_proj`
 pub struct Mla<R: Runtime> {
     // Q path
-    q_down: Option<Linear<R>>,
-    q_up: Linear<R>,
+    q_down: Option<MaybeQuantLinear<R>>,
+    q_up: MaybeQuantLinear<R>,
     q_norm: Option<RmsNorm<R>>,
 
     // KV path
-    kv_compress: Linear<R>,
+    kv_compress: MaybeQuantLinear<R>,
     kv_norm: Option<RmsNorm<R>>,
-    kv_decompress: Linear<R>,
+    kv_decompress: MaybeQuantLinear<R>,
 
     // Output
-    o_proj: Linear<R>,
+    o_proj: MaybeQuantLinear<R>,
 
     // RoPE
     rope: RoPE<R>,
@@ -150,16 +153,16 @@ impl<R: Runtime<DType = DType>> Mla<R> {
         let dt = DType::F32;
 
         let (q_down, q_up, q_norm) = if config.q_uses_lora() {
-            let q_down = Linear::new(
+            let q_down = MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<R>::zeros(&[config.q_lora_rank, h], dt, device),
                 None,
                 true,
-            );
-            let q_up = Linear::new(
+            ));
+            let q_up = MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<R>::zeros(&[nh * qk_dim, config.q_lora_rank], dt, device),
                 None,
                 true,
-            );
+            ));
             let q_norm = if config.use_norm {
                 Some(RmsNorm::new(
                     Tensor::<R>::ones(&[config.q_lora_rank], dt, device),
@@ -171,19 +174,19 @@ impl<R: Runtime<DType = DType>> Mla<R> {
             };
             (Some(q_down), q_up, q_norm)
         } else {
-            let q_up = Linear::new(
+            let q_up = MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<R>::zeros(&[nh * qk_dim, h], dt, device),
                 None,
                 true,
-            );
+            ));
             (None, q_up, None)
         };
 
-        let kv_compress = Linear::new(
+        let kv_compress = MaybeQuantLinear::Standard(Linear::new(
             Tensor::<R>::zeros(&[config.kv_lora_rank + config.rope_head_dim, h], dt, device),
             None,
             true,
-        );
+        ));
         let kv_norm = if config.use_norm {
             Some(RmsNorm::new(
                 Tensor::<R>::ones(&[config.kv_lora_rank], dt, device),
@@ -193,7 +196,7 @@ impl<R: Runtime<DType = DType>> Mla<R> {
         } else {
             None
         };
-        let kv_decompress = Linear::new(
+        let kv_decompress = MaybeQuantLinear::Standard(Linear::new(
             Tensor::<R>::zeros(
                 &[
                     nh * (config.head_dim + config.head_dim_v),
@@ -204,13 +207,13 @@ impl<R: Runtime<DType = DType>> Mla<R> {
             ),
             None,
             true,
-        );
+        ));
 
-        let o_proj = Linear::new(
+        let o_proj = MaybeQuantLinear::Standard(Linear::new(
             Tensor::<R>::zeros(&[h, nh * config.head_dim_v], dt, device),
             None,
             true,
-        );
+        ));
 
         let rope = RoPE::<R>::precompute_freqs(
             config.max_seq_len,
@@ -258,11 +261,8 @@ impl<R: Runtime<DType = DType>> Mla<R> {
 
         // Q path
         let (q_down, q_up, q_norm) = if config.q_uses_lora() {
-            let mut qa_vb = vb.pp("q_a_proj");
-            let q_down = Linear::new(qa_vb.take_tensor("weight")?, None, false);
-
-            let mut qb_vb = vb.pp("q_b_proj");
-            let q_up = Linear::new(qb_vb.take_tensor("weight")?, None, false);
+            let q_down = vb.pp("q_a_proj").take_maybe_quant_linear("weight", None)?;
+            let q_up = vb.pp("q_b_proj").take_maybe_quant_linear("weight", None)?;
 
             let q_norm = if config.use_norm {
                 let mut qn_vb = vb.pp("q_a_layernorm");
@@ -276,14 +276,14 @@ impl<R: Runtime<DType = DType>> Mla<R> {
             };
             (Some(q_down), q_up, q_norm)
         } else {
-            let mut q_vb = vb.pp("q_proj");
-            let q_up = Linear::new(q_vb.take_tensor("weight")?, None, false);
+            let q_up = vb.pp("q_proj").take_maybe_quant_linear("weight", None)?;
             (None, q_up, None)
         };
 
         // KV path
-        let mut kva_vb = vb.pp("kv_a_proj_with_mqa");
-        let kv_compress = Linear::new(kva_vb.take_tensor("weight")?, None, false);
+        let kv_compress = vb
+            .pp("kv_a_proj_with_mqa")
+            .take_maybe_quant_linear("weight", None)?;
 
         let kv_norm = if config.use_norm {
             let mut kvn_vb = vb.pp("kv_a_layernorm");
@@ -296,12 +296,10 @@ impl<R: Runtime<DType = DType>> Mla<R> {
             None
         };
 
-        let mut kvb_vb = vb.pp("kv_b_proj");
-        let kv_decompress = Linear::new(kvb_vb.take_tensor("weight")?, None, false);
+        let kv_decompress = vb.pp("kv_b_proj").take_maybe_quant_linear("weight", None)?;
 
         // Output
-        let mut o_vb = vb.pp("o_proj");
-        let o_proj = Linear::new(o_vb.take_tensor("weight")?, None, false);
+        let o_proj = vb.pp("o_proj").take_maybe_quant_linear("weight", None)?;
 
         // RoPE
         let rope = RoPE::<R>::precompute_freqs(
@@ -341,6 +339,9 @@ impl<R: Runtime<DType = DType>> Mla<R> {
             + ReduceOps<R>
             + NormalizationOps<R>
             + ShapeOps<R>
+            + BinaryOps<R>
+            + TypeConversionOps<R>
+            + QuantMatmulOps<R>
             + RoPEOps<R>,
         R::Client: TensorOps<R> + ScalarOps<R>,
     {

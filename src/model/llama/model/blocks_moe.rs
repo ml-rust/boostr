@@ -342,8 +342,8 @@ impl<R: Runtime<DType = DType>> LlamaMoeMlp<R> {
 
 /// Enum to represent either a dense MLP or an MoE MLP in a transformer block.
 pub enum LlamaFfn<R: Runtime> {
-    Dense(super::mlp::LlamaMlp<R>),
-    Moe(LlamaMoeMlp<R>),
+    Dense(Box<super::mlp::LlamaMlp<R>>),
+    Moe(Box<LlamaMoeMlp<R>>),
 }
 
 impl<R: Runtime<DType = DType>> LlamaFfn<R> {

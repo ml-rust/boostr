@@ -84,21 +84,21 @@ pub fn build_block_from_varbuilder<R: Runtime<DType = DType>>(
             moe_mlp = moe_mlp.with_shared_expert(sg, su, sd);
         }
 
-        LlamaFfn::Moe(moe_mlp)
+        LlamaFfn::Moe(Box::new(moe_mlp))
     } else {
         // Dense MLP
         let mut mlp_vb = layer_vb.pp("mlp");
         let gate_proj = mlp_vb.take_maybe_quant_linear("gate_proj.weight", None)?;
         let up_proj = mlp_vb.take_maybe_quant_linear("up_proj.weight", None)?;
         let down_proj = mlp_vb.take_maybe_quant_linear("down_proj.weight", None)?;
-        LlamaFfn::Dense(LlamaMlp {
+        LlamaFfn::Dense(Box::new(LlamaMlp {
             gate_proj,
             up_proj,
             down_proj,
-        })
+        }))
     };
 
-    let use_alibi = config.attention.as_ref().map_or(false, |a| a.use_alibi);
+    let use_alibi = config.attention.as_ref().is_some_and(|a| a.use_alibi);
 
     Ok(LlamaBlock {
         input_layernorm: RmsNorm::new(
@@ -138,7 +138,7 @@ pub fn build_block_from_config<R: Runtime<DType = DType>>(
     dt: numr::dtype::DType,
 ) -> LlamaBlock<R> {
     let hidden = config.hidden_size;
-    let use_alibi = config.attention.as_ref().map_or(false, |a| a.use_alibi);
+    let use_alibi = config.attention.as_ref().is_some_and(|a| a.use_alibi);
     LlamaBlock {
         input_layernorm: RmsNorm::new(
             Tensor::<R>::ones(&[hidden], dt, device),
@@ -178,7 +178,7 @@ pub fn build_block_from_config<R: Runtime<DType = DType>>(
             config.rms_norm_eps as f32,
             true,
         ),
-        mlp: LlamaFfn::Dense(LlamaMlp {
+        mlp: LlamaFfn::Dense(Box::new(LlamaMlp {
             gate_proj: MaybeQuantLinear::Standard(Linear::new(
                 Tensor::<R>::zeros(&[intermediate, hidden], dt, device),
                 None,
@@ -194,6 +194,6 @@ pub fn build_block_from_config<R: Runtime<DType = DType>>(
                 None,
                 true,
             )),
-        }),
+        })),
     }
 }

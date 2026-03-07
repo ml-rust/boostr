@@ -36,6 +36,11 @@ impl<R: Runtime> VarMap<R> {
             .insert(name, Weight::DecomposedQuant(Box::new(tensor)));
     }
 
+    /// Remove a weight by name.
+    pub fn remove(&mut self, name: &str) -> Option<Weight<R>> {
+        self.data.remove(name)
+    }
+
     /// Insert a weight directly.
     pub fn insert_weight(&mut self, name: String, weight: Weight<R>) {
         self.data.insert(name, weight);

@@ -69,13 +69,13 @@ fn map_layer_suffix(suffix: &str) -> Option<&'static str> {
         "ffn_down.weight" => "mlp.down_proj.weight",
 
         // MoE router
-        "ffn_gate_inp.weight" => "moe.gate.weight",
-        "ffn_gate_inp.bias" => "moe.gate.bias",
+        "ffn_gate_inp.weight" => "block_sparse_moe.gate.weight",
+        "ffn_gate_inp.bias" => "block_sparse_moe.gate.bias",
 
         // MoE shared expert
-        "ffn_gate_shexp.weight" => "moe.shared_expert.gate_proj.weight",
-        "ffn_up_shexp.weight" => "moe.shared_expert.up_proj.weight",
-        "ffn_down_shexp.weight" => "moe.shared_expert.down_proj.weight",
+        "ffn_gate_shexp.weight" => "block_sparse_moe.shared_expert.gate_proj.weight",
+        "ffn_up_shexp.weight" => "block_sparse_moe.shared_expert.up_proj.weight",
+        "ffn_down_shexp.weight" => "block_sparse_moe.shared_expert.down_proj.weight",
 
         // Layer norms
         "attn_norm.weight" => "input_layernorm.weight",
@@ -120,7 +120,9 @@ pub(crate) fn map_moe_expert(suffix: &str) -> Option<String> {
         _ => return None,
     };
 
-    Some(format!("moe.experts.{expert_id}.{proj}.{weight_suffix}"))
+    Some(format!(
+        "block_sparse_moe.experts.{expert_id}.{proj}.{weight_suffix}"
+    ))
 }
 
 #[cfg(test)]
@@ -201,7 +203,7 @@ mod tests {
     fn test_moe_router() {
         assert_eq!(
             gguf_to_hf_name("blk.0.ffn_gate_inp.weight"),
-            "model.layers.0.moe.gate.weight"
+            "model.layers.0.block_sparse_moe.gate.weight"
         );
     }
 
@@ -209,11 +211,11 @@ mod tests {
     fn test_moe_shared_expert() {
         assert_eq!(
             gguf_to_hf_name("blk.0.ffn_gate_shexp.weight"),
-            "model.layers.0.moe.shared_expert.gate_proj.weight"
+            "model.layers.0.block_sparse_moe.shared_expert.gate_proj.weight"
         );
         assert_eq!(
             gguf_to_hf_name("blk.0.ffn_up_shexp.weight"),
-            "model.layers.0.moe.shared_expert.up_proj.weight"
+            "model.layers.0.block_sparse_moe.shared_expert.up_proj.weight"
         );
     }
 
@@ -221,15 +223,15 @@ mod tests {
     fn test_moe_experts() {
         assert_eq!(
             map_moe_expert("ffn_gate.0.weight"),
-            Some("moe.experts.0.gate_proj.weight".to_string())
+            Some("block_sparse_moe.experts.0.gate_proj.weight".to_string())
         );
         assert_eq!(
             map_moe_expert("ffn_up.7.weight"),
-            Some("moe.experts.7.up_proj.weight".to_string())
+            Some("block_sparse_moe.experts.7.up_proj.weight".to_string())
         );
         assert_eq!(
             map_moe_expert("ffn_down.63.weight"),
-            Some("moe.experts.63.down_proj.weight".to_string())
+            Some("block_sparse_moe.experts.63.down_proj.weight".to_string())
         );
         assert_eq!(map_moe_expert("ffn_norm.weight"), None);
         assert_eq!(map_moe_expert("ffn_gate.abc.weight"), None);

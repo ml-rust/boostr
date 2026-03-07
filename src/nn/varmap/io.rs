@@ -6,6 +6,7 @@ use crate::format::gguf::Gguf;
 use crate::format::safetensors::SafeTensors;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
+use numr::tensor::Tensor;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -103,7 +104,10 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
     ///
     /// Unquantized tensors (F32, F16, BF16) are loaded as `Weight::Standard`.
     /// Quantized tensors (Q4_0, Q4K, etc.) are loaded as `Weight::Quantized`.
-    pub fn from_gguf<P: AsRef<Path>>(path: P, device: &R::Device) -> Result<Self> {
+    pub fn from_gguf<P: AsRef<Path>>(path: P, device: &R::Device) -> Result<Self>
+    where
+        R::Client: numr::ops::ShapeOps<R>,
+    {
         use crate::format::gguf::gguf_to_hf_name;
 
         let mut gguf = Gguf::open(path)?;
@@ -122,7 +126,93 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
             }
         }
 
+        // Stack per-expert MoE tensors into single stacked tensors.
+        // GGUF stores experts individually (experts.0.gate_proj.weight, experts.1.gate_proj.weight, ...)
+        // but the model expects stacked tensors (experts.gate_proj.weight with shape [num_experts, ...]).
+        Self::stack_moe_experts(&mut map, device)?;
+
         Ok(map)
+    }
+
+    /// Stack per-expert MoE tensors into [num_experts, ...] tensors.
+    ///
+    /// Finds patterns like `*.experts.{N}.{proj}.weight` and stacks them into
+    /// `*.experts.{proj}.weight`.
+    fn stack_moe_experts(map: &mut Self, _device: &R::Device) -> Result<()>
+    where
+        R::Client: numr::ops::ShapeOps<R>,
+    {
+        use std::collections::BTreeMap;
+
+        // Collect expert tensor groups: key = (prefix, proj_suffix), value = sorted (id, tensor)
+        let mut groups: HashMap<String, BTreeMap<usize, String>> = HashMap::new();
+
+        let all_names: Vec<String> = map.names().map(|s| s.to_string()).collect();
+        for name in &all_names {
+            // Match pattern: ...experts.{N}.{suffix}
+            if let Some(experts_pos) = name.find(".experts.") {
+                let after_experts = &name[experts_pos + ".experts.".len()..];
+                if let Some(dot_pos) = after_experts.find('.') {
+                    let id_str = &after_experts[..dot_pos];
+                    if let Ok(expert_id) = id_str.parse::<usize>() {
+                        let prefix = &name[..experts_pos];
+                        let suffix = &after_experts[dot_pos + 1..];
+                        let group_key = format!("{prefix}.experts.{suffix}");
+                        groups
+                            .entry(group_key)
+                            .or_default()
+                            .insert(expert_id, name.clone());
+                    }
+                }
+            }
+        }
+
+        // Stack each group
+        for (stacked_name, expert_entries) in &groups {
+            if expert_entries.len() < 2 {
+                continue;
+            }
+
+            // Only stack standard (non-quantized) tensors
+            let mut tensors: Vec<Tensor<R>> = Vec::with_capacity(expert_entries.len());
+            let mut all_standard = true;
+            for (_id, name) in expert_entries {
+                match map.get(name) {
+                    Ok(w) if !w.is_quantized() => {
+                        if let Ok(t) = w.as_tensor() {
+                            tensors.push(t.clone());
+                        } else {
+                            all_standard = false;
+                            break;
+                        }
+                    }
+                    _ => {
+                        all_standard = false;
+                        break;
+                    }
+                }
+            }
+
+            if !all_standard || tensors.is_empty() {
+                continue;
+            }
+
+            // Stack: each tensor is [dim_in, dim_out], result is [num_experts, dim_in, dim_out]
+            let tensor_refs: Vec<&Tensor<R>> = tensors.iter().collect();
+            let stacked = Tensor::<R>::stack(&tensor_refs, 0).map_err(|e| {
+                crate::error::Error::ModelError {
+                    reason: format!("Failed to stack expert tensors for {stacked_name}: {e}"),
+                }
+            })?;
+
+            // Remove per-expert entries and insert stacked
+            for (_id, name) in expert_entries {
+                map.remove(name);
+            }
+            map.insert(stacked_name.clone(), stacked);
+        }
+
+        Ok(())
     }
 }
 

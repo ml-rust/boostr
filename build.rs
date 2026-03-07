@@ -23,505 +23,316 @@ fn compile_cuda_kernels() {
     // available on all build machines.
     // ptx_name_override: Some("name.ptx") overrides the default (filename with .ptx ext).
     // Needed when files in different subdirs share the same filename (e.g. gemv/q5_k.cu vs gemm/q5_k.cu).
-    let kernel_sets: Vec<(PathBuf, &str, &str, bool, Option<&str>)> = vec![
+    // Helper to build kernel entries concisely: (dir, file, arch, required, ptx_override=None)
+    macro_rules! k {
+        ($dir:expr, $file:expr, $arch:expr, $req:expr) => {
+            (PathBuf::from($dir), $file.into(), $arch.into(), $req, None)
+        };
+    }
+
+    let mut kernel_sets: Vec<(PathBuf, String, String, bool, Option<String>)> = vec![
         // Quantization kernels
-        (
-            PathBuf::from("src/quant/cuda/kernels"),
-            "dequant.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels"),
+        k!("src/quant/cuda/kernels", "dequant.cu", "sm_75", true),
+        k!(
+            "src/quant/cuda/kernels",
             "dequant_generic.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/quant/cuda/kernels"),
+        k!(
+            "src/quant/cuda/kernels",
             "quant_matmul_generic.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/quant/cuda/kernels"),
-            "quant_matmul.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels"),
-            "quant_gemv.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels"),
-            "int4_gemm.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels"),
-            "int4_gemm_gptq.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels"),
-            "nf4_quant.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels"),
-            "marlin_gemm.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels"),
+        k!("src/quant/cuda/kernels", "quant_matmul.cu", "sm_75", true),
+        k!("src/quant/cuda/kernels", "quant_gemv.cu", "sm_75", true),
+        k!("src/quant/cuda/kernels", "int4_gemm.cu", "sm_75", true),
+        k!("src/quant/cuda/kernels", "int4_gemm_gptq.cu", "sm_75", true),
+        k!("src/quant/cuda/kernels", "nf4_quant.cu", "sm_75", true),
+        k!("src/quant/cuda/kernels", "marlin_gemm.cu", "sm_75", true),
+        k!(
+            "src/quant/cuda/kernels",
             "fused_int4_swiglu.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/quant/cuda/kernels"),
-            "fused_int4_qkv.cu",
-            "sm_75",
+        k!("src/quant/cuda/kernels", "fused_int4_qkv.cu", "sm_75", true),
+        k!("src/quant/cuda/kernels", "quant_act.cu", "sm_75", true),
+    ];
+
+    // Per-format GEMV + GEMM kernels: each format generates a gemv/ and gemm/ entry.
+    // All target sm_75, are required, and use the naming convention gemv_{fmt}.ptx / gemm_{fmt}.ptx.
+    let per_format_kernels: &[&str] = &[
+        // K-quants
+        "q5_k", "q3_k", "q2_k", // Simple quants
+        "q5_0", "q4_1", "q5_1", "q8_1", "q8_k", // IQ quants
+        "iq4_nl", "iq4_xs", "iq3_s", "iq2_xs", "iq1_s", "iq1_m", "iq2_xxs", "iq2_s", "iq3_xxs",
+        // Ternary quants
+        "tq1_0", "tq2_0",
+    ];
+
+    let gemv_dir = PathBuf::from("src/quant/cuda/kernels/gemv");
+    let gemm_dir = PathBuf::from("src/quant/cuda/kernels/gemm");
+    for fmt in per_format_kernels {
+        let cu_file = format!("{}.cu", fmt);
+        kernel_sets.push((
+            gemv_dir.clone(),
+            cu_file.clone(),
+            "sm_75".to_string(),
             true,
-            None,
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels"),
-            "quant_act.cu",
-            "sm_75",
+            Some(format!("gemv_{}.ptx", fmt)),
+        ));
+        kernel_sets.push((
+            gemm_dir.clone(),
+            cu_file,
+            "sm_75".to_string(),
             true,
-            None,
-        ),
-        // Per-format GEMV kernels (subdirectory)
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemv"),
-            "q5_k.cu",
-            "sm_75",
-            true,
-            Some("gemv_q5_k.ptx"),
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemv"),
-            "q3_k.cu",
-            "sm_75",
-            true,
-            Some("gemv_q3_k.ptx"),
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemv"),
-            "q2_k.cu",
-            "sm_75",
-            true,
-            Some("gemv_q2_k.ptx"),
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemv"),
-            "q5_0.cu",
-            "sm_75",
-            true,
-            Some("gemv_q5_0.ptx"),
-        ),
-        // Per-format IQ GEMV kernels (subdirectory)
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemv"),
-            "iq4_nl.cu",
-            "sm_75",
-            true,
-            Some("gemv_iq4_nl.ptx"),
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemv"),
-            "iq4_xs.cu",
-            "sm_75",
-            true,
-            Some("gemv_iq4_xs.ptx"),
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemv"),
-            "iq3_s.cu",
-            "sm_75",
-            true,
-            Some("gemv_iq3_s.ptx"),
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemv"),
-            "iq2_xs.cu",
-            "sm_75",
-            true,
-            Some("gemv_iq2_xs.ptx"),
-        ),
-        // Per-format GEMM kernels (subdirectory)
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemm"),
-            "q5_k.cu",
-            "sm_75",
-            true,
-            Some("gemm_q5_k.ptx"),
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemm"),
-            "q3_k.cu",
-            "sm_75",
-            true,
-            Some("gemm_q3_k.ptx"),
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemm"),
-            "q2_k.cu",
-            "sm_75",
-            true,
-            Some("gemm_q2_k.ptx"),
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemm"),
-            "q5_0.cu",
-            "sm_75",
-            true,
-            Some("gemm_q5_0.ptx"),
-        ),
-        // Per-format IQ GEMM kernels (subdirectory)
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemm"),
-            "iq4_nl.cu",
-            "sm_75",
-            true,
-            Some("gemm_iq4_nl.ptx"),
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemm"),
-            "iq4_xs.cu",
-            "sm_75",
-            true,
-            Some("gemm_iq4_xs.ptx"),
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemm"),
-            "iq3_s.cu",
-            "sm_75",
-            true,
-            Some("gemm_iq3_s.ptx"),
-        ),
-        (
-            PathBuf::from("src/quant/cuda/kernels/gemm"),
-            "iq2_xs.cu",
-            "sm_75",
-            true,
-            Some("gemm_iq2_xs.ptx"),
-        ),
+            Some(format!("gemm_{}.ptx", fmt)),
+        ));
+    }
+
+    kernel_sets.extend([
         // Attention kernels
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "flash_v2.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "flash_v2_bwd.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "paged_attention.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "paged_attention_bwd.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "varlen_attention.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "varlen_attention_bwd.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "mqa_gqa.cu",
             "sm_80",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "mqa_gqa_bwd.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
-            "sdpa.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!("src/ops/cuda/kernels/attention", "sdpa.cu", "sm_75", true),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "fused_qkv.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "decode_attention.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "kv_insert.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "paged_decode_attention.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
         // Flash v3 — sm_90 (Hopper warp specialization, optional)
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "flash_v3.cu",
             "sm_90",
-            false,
-            None,
+            false
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/attention"),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "flash_v3_bwd.cu",
             "sm_90",
-            false,
-            None,
+            false
         ),
         // Cache kernels
-        (
-            PathBuf::from("src/ops/cuda/kernels/cache"),
+        k!(
+            "src/ops/cuda/kernels/cache",
             "kv_cache_update.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/cache"),
+        k!(
+            "src/ops/cuda/kernels/cache",
             "kv_cache_int4.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/cache"),
+        k!(
+            "src/ops/cuda/kernels/cache",
             "kv_cache_fp8.cu",
             "sm_80",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/cache"),
+        k!(
+            "src/ops/cuda/kernels/cache",
             "kv_cache_fp8_bwd.cu",
             "sm_80",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/cache"),
+        k!(
+            "src/ops/cuda/kernels/cache",
             "kv_cache_quant.cu",
             "sm_80",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/cache"),
+        k!(
+            "src/ops/cuda/kernels/cache",
             "reshape_and_cache.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
         // Position kernels
-        (
-            PathBuf::from("src/ops/cuda/kernels/position"),
-            "alibi.cu",
-            "sm_80",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/position"),
+        k!("src/ops/cuda/kernels/position", "alibi.cu", "sm_80", true),
+        k!(
+            "src/ops/cuda/kernels/position",
             "alibi_bwd.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/position"),
-            "rope.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/position"),
+        k!("src/ops/cuda/kernels/position", "rope.cu", "sm_75", true),
+        k!(
+            "src/ops/cuda/kernels/position",
             "rope_interleaved.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/position"),
+        k!(
+            "src/ops/cuda/kernels/position",
             "rope_yarn.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
         // Fused optimizer kernels
-        (
-            PathBuf::from("src/ops/cuda/kernels/training"),
+        k!(
+            "src/ops/cuda/kernels/training",
             "fused_adamw.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/training"),
+        k!(
+            "src/ops/cuda/kernels/training",
             "fused_sgd.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/training"),
+        k!(
+            "src/ops/cuda/kernels/training",
             "fused_adagrad.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/training"),
+        k!(
+            "src/ops/cuda/kernels/training",
             "fused_lamb.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/training"),
+        k!(
+            "src/ops/cuda/kernels/training",
             "fused_multi_tensor.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/training"),
+        k!(
+            "src/ops/cuda/kernels/training",
             "fused_grad_unscale_clip.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        // Architecture kernels (MoE)
-        (
-            PathBuf::from("src/ops/cuda/kernels/architecture"),
+        // Architecture kernels (MoE, SSM)
+        k!(
+            "src/ops/cuda/kernels/architecture",
             "moe_routing.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/architecture"),
+        k!(
+            "src/ops/cuda/kernels/architecture",
             "moe_grouped_gemm.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-        // Inference kernels (speculative decoding, sampling, prefix cache)
-        (
-            PathBuf::from("src/ops/cuda/kernels/inference"),
-            "prefix_cache_lookup.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/inference"),
-            "speculative_verify.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/inference"),
-            "sampling_penalties.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/inference"),
-            "sampling.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        (
-            PathBuf::from("src/ops/cuda/kernels/inference"),
-            "logits_to_token.cu",
-            "sm_75",
-            true,
-            None,
-        ),
-        // Architecture kernels (SSM / Mamba2)
-        (
-            PathBuf::from("src/ops/cuda/kernels/architecture"),
+        k!(
+            "src/ops/cuda/kernels/architecture",
             "ssd_state_passing.cu",
             "sm_75",
-            true,
-            None,
+            true
+        ),
+        // Inference kernels (speculative decoding, sampling, prefix cache)
+        k!(
+            "src/ops/cuda/kernels/inference",
+            "prefix_cache_lookup.cu",
+            "sm_75",
+            true
+        ),
+        k!(
+            "src/ops/cuda/kernels/inference",
+            "speculative_verify.cu",
+            "sm_75",
+            true
+        ),
+        k!(
+            "src/ops/cuda/kernels/inference",
+            "sampling_penalties.cu",
+            "sm_75",
+            true
+        ),
+        k!(
+            "src/ops/cuda/kernels/inference",
+            "sampling.cu",
+            "sm_75",
+            true
+        ),
+        k!(
+            "src/ops/cuda/kernels/inference",
+            "logits_to_token.cu",
+            "sm_75",
+            true
         ),
         // Calibration kernels (quantization)
-        (
-            PathBuf::from("src/ops/cuda/kernels/quantization"),
+        k!(
+            "src/ops/cuda/kernels/quantization",
             "calibration.cu",
             "sm_75",
-            true,
-            None,
+            true
         ),
-    ];
+    ]);
 
     let nvcc = find_nvcc().unwrap_or_else(|| {
         eprintln!();
@@ -536,6 +347,7 @@ fn compile_cuda_kernels() {
     for (kernels_dir, kernel_file, arch, required, ptx_override) in &kernel_sets {
         let cu_path = kernels_dir.join(kernel_file);
         let ptx_name = ptx_override
+            .as_deref()
             .map(|s| s.to_string())
             .unwrap_or_else(|| kernel_file.replace(".cu", ".ptx"));
         let ptx_path = out_dir.join(&ptx_name);

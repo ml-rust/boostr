@@ -12,10 +12,15 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::super::kernels::{
-    self, GEMM_IQ2_XS_MODULE, GEMM_IQ3_S_MODULE, GEMM_IQ4_NL_MODULE, GEMM_IQ4_XS_MODULE,
-    GEMM_Q2_K_MODULE, GEMM_Q3_K_MODULE, GEMM_Q5_0_MODULE, GEMM_Q5_K_MODULE, GEMV_IQ2_XS_MODULE,
-    GEMV_IQ3_S_MODULE, GEMV_IQ4_NL_MODULE, GEMV_IQ4_XS_MODULE, GEMV_Q2_K_MODULE, GEMV_Q3_K_MODULE,
-    GEMV_Q5_0_MODULE, GEMV_Q5_K_MODULE, QUANT_GEMV_MODULE, QUANT_MATMUL_MODULE,
+    self, GEMM_IQ1_M_MODULE, GEMM_IQ1_S_MODULE, GEMM_IQ2_S_MODULE, GEMM_IQ2_XS_MODULE,
+    GEMM_IQ2_XXS_MODULE, GEMM_IQ3_S_MODULE, GEMM_IQ3_XXS_MODULE, GEMM_IQ4_NL_MODULE,
+    GEMM_IQ4_XS_MODULE, GEMM_Q2_K_MODULE, GEMM_Q3_K_MODULE, GEMM_Q4_1_MODULE, GEMM_Q5_0_MODULE,
+    GEMM_Q5_1_MODULE, GEMM_Q5_K_MODULE, GEMM_Q8_1_MODULE, GEMM_Q8_K_MODULE, GEMM_TQ1_0_MODULE,
+    GEMM_TQ2_0_MODULE, GEMV_IQ1_M_MODULE, GEMV_IQ1_S_MODULE, GEMV_IQ2_S_MODULE, GEMV_IQ2_XS_MODULE,
+    GEMV_IQ2_XXS_MODULE, GEMV_IQ3_S_MODULE, GEMV_IQ3_XXS_MODULE, GEMV_IQ4_NL_MODULE,
+    GEMV_IQ4_XS_MODULE, GEMV_Q2_K_MODULE, GEMV_Q3_K_MODULE, GEMV_Q4_1_MODULE, GEMV_Q5_0_MODULE,
+    GEMV_Q5_1_MODULE, GEMV_Q5_K_MODULE, GEMV_Q8_1_MODULE, GEMV_Q8_K_MODULE, GEMV_TQ1_0_MODULE,
+    GEMV_TQ2_0_MODULE, QUANT_GEMV_MODULE, QUANT_MATMUL_MODULE,
 };
 use super::helpers::quantize_activation_q8_1;
 
@@ -117,15 +122,17 @@ pub(super) fn dispatch_gemv(
         QuantFormat::IQ4XS => ("quant_gemv_iq4_xs_f32", GEMV_IQ4_XS_MODULE),
         QuantFormat::IQ3S => ("quant_gemv_iq3_s_f32", GEMV_IQ3_S_MODULE),
         QuantFormat::IQ2XS => ("quant_gemv_iq2_xs_f32", GEMV_IQ2_XS_MODULE),
-        other => {
-            tracing::warn!(
-                format = ?other,
-                m, k, n,
-                path = "generic_fallback",
-                "CUDA quant kernel: no dedicated GEMV kernel, falling back to dequant+matmul"
-            );
-            return Ok(None);
-        }
+        QuantFormat::Q4_1 => ("quant_gemv_q4_1_f32", GEMV_Q4_1_MODULE),
+        QuantFormat::Q5_1 => ("quant_gemv_q5_1_f32", GEMV_Q5_1_MODULE),
+        QuantFormat::Q8_1 => ("quant_gemv_q8_1_f32", GEMV_Q8_1_MODULE),
+        QuantFormat::Q8K => ("quant_gemv_q8_k_f32", GEMV_Q8_K_MODULE),
+        QuantFormat::IQ1S => ("quant_gemv_iq1_s_f32", GEMV_IQ1_S_MODULE),
+        QuantFormat::IQ1M => ("quant_gemv_iq1_m_f32", GEMV_IQ1_M_MODULE),
+        QuantFormat::IQ2XXS => ("quant_gemv_iq2_xxs_f32", GEMV_IQ2_XXS_MODULE),
+        QuantFormat::IQ2S => ("quant_gemv_iq2_s_f32", GEMV_IQ2_S_MODULE),
+        QuantFormat::IQ3XXS => ("quant_gemv_iq3_xxs_f32", GEMV_IQ3_XXS_MODULE),
+        QuantFormat::TQ1_0 => ("quant_gemv_tq1_0_f32", GEMV_TQ1_0_MODULE),
+        QuantFormat::TQ2_0 => ("quant_gemv_tq2_0_f32", GEMV_TQ2_0_MODULE),
     };
 
     let warps_per_block = 8u32;
@@ -182,15 +189,17 @@ pub(super) fn dispatch_matmul(
         QuantFormat::IQ4XS => ("quant_matmul_iq4_xs_f32", GEMM_IQ4_XS_MODULE),
         QuantFormat::IQ3S => ("quant_matmul_iq3_s_f32", GEMM_IQ3_S_MODULE),
         QuantFormat::IQ2XS => ("quant_matmul_iq2_xs_f32", GEMM_IQ2_XS_MODULE),
-        other => {
-            tracing::warn!(
-                format = ?other,
-                m, k, n,
-                path = "generic_fallback",
-                "CUDA quant kernel: no dedicated GEMM kernel, falling back to dequant+matmul"
-            );
-            return Ok(None);
-        }
+        QuantFormat::Q4_1 => ("quant_matmul_q4_1_f32", GEMM_Q4_1_MODULE),
+        QuantFormat::Q5_1 => ("quant_matmul_q5_1_f32", GEMM_Q5_1_MODULE),
+        QuantFormat::Q8_1 => ("quant_matmul_q8_1_f32", GEMM_Q8_1_MODULE),
+        QuantFormat::Q8K => ("quant_matmul_q8_k_f32", GEMM_Q8_K_MODULE),
+        QuantFormat::IQ1S => ("quant_matmul_iq1_s_f32", GEMM_IQ1_S_MODULE),
+        QuantFormat::IQ1M => ("quant_matmul_iq1_m_f32", GEMM_IQ1_M_MODULE),
+        QuantFormat::IQ2XXS => ("quant_matmul_iq2_xxs_f32", GEMM_IQ2_XXS_MODULE),
+        QuantFormat::IQ2S => ("quant_matmul_iq2_s_f32", GEMM_IQ2_S_MODULE),
+        QuantFormat::IQ3XXS => ("quant_matmul_iq3_xxs_f32", GEMM_IQ3_XXS_MODULE),
+        QuantFormat::TQ1_0 => ("quant_matmul_tq1_0_f32", GEMM_TQ1_0_MODULE),
+        QuantFormat::TQ2_0 => ("quant_matmul_tq2_0_f32", GEMM_TQ2_0_MODULE),
     };
 
     tracing::debug!(

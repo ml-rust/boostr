@@ -1,9 +1,11 @@
 //! Universal model configuration.
 
 use super::attention::AttentionConfig;
+use super::audio::AudioConfig;
 use super::hybrid::HybridConfig;
 use super::moe::MoeConfig;
 use super::ssm::SsmConfig;
+use super::vision::VisionConfig;
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -56,6 +58,14 @@ pub struct UniversalConfig {
     /// Whether to tie word embeddings (share embed_tokens and lm_head weights)
     #[serde(default)]
     pub tie_word_embeddings: bool,
+
+    /// Vision encoder configuration (for multimodal models)
+    #[serde(default)]
+    pub vision: Option<VisionConfig>,
+
+    /// Audio encoder configuration (for multimodal models)
+    #[serde(default)]
+    pub audio: Option<AudioConfig>,
 }
 
 pub(crate) fn default_rms_norm_eps() -> f64 {
@@ -218,6 +228,72 @@ ssm:
         assert_eq!(ssm.num_heads, 48);
         // 768 * 2 = 1536, 48 * 32 = 1536 ✓
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_multimodal_config_yaml() {
+        let yaml = r#"
+model_type: llava
+vocab_size: 32000
+hidden_size: 4096
+num_layers: 32
+max_seq_len: 4096
+attention:
+  num_heads: 32
+vision:
+  encoder_type: clip
+  hidden_size: 1024
+  num_layers: 24
+  num_heads: 16
+  patch_size: 14
+  image_size: 336
+  intermediate_size: 4096
+  projector_type: mlp
+  projector_depth: 2
+  select_layer: -2
+audio:
+  encoder_type: whisper
+  hidden_size: 1280
+  num_layers: 32
+  num_heads: 20
+"#;
+        let config: UniversalConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.model_type, "llava");
+        config.validate().unwrap();
+
+        let vision = config.vision.as_ref().unwrap();
+        assert_eq!(vision.encoder_type, "clip");
+        assert_eq!(vision.hidden_size, 1024);
+        assert_eq!(vision.num_layers, 24);
+        assert_eq!(vision.patch_size, 14);
+        assert_eq!(vision.image_size, 336);
+        assert_eq!(vision.projector_type, "mlp");
+        assert_eq!(vision.projector_depth, 2);
+        assert_eq!(vision.select_layer, Some(-2));
+
+        let audio = config.audio.as_ref().unwrap();
+        assert_eq!(audio.encoder_type, "whisper");
+        assert_eq!(audio.hidden_size, 1280);
+        assert_eq!(audio.num_mel_bins, 128); // default
+        assert_eq!(audio.max_audio_len, 3000); // default
+        assert_eq!(audio.projector_type, "linear"); // default
+    }
+
+    #[test]
+    fn test_config_without_vision_audio() {
+        let yaml = r#"
+model_type: llama
+vocab_size: 1000
+hidden_size: 256
+num_layers: 4
+max_seq_len: 512
+attention:
+  num_heads: 4
+"#;
+        let config: UniversalConfig = serde_yaml::from_str(yaml).unwrap();
+        config.validate().unwrap();
+        assert!(config.vision.is_none());
+        assert!(config.audio.is_none());
     }
 
     #[test]

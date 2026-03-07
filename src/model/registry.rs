@@ -42,6 +42,8 @@ pub enum LoadedModel<R: Runtime> {
     Mamba2(Box<super::mamba::Mamba2Model<R>>),
     /// Hybrid model mixing attention and SSM layers
     Hybrid(Box<super::hybrid::HybridModel<R>>),
+    /// Multimodal model with vision/audio encoders + LLM backbone
+    Multimodal(Box<super::multimodal::MultimodalModel<R>>),
 }
 
 impl<R: Runtime<DType = DType>> LoadedModel<R>
@@ -63,6 +65,11 @@ where
             "hybrid" => {
                 let model = super::hybrid::HybridModel::from_varbuilder(vb, config)?;
                 Ok(LoadedModel::Hybrid(Box::new(model)))
+            }
+            // Multimodal: vision/audio encoders + LLM backbone
+            _ if config.vision.is_some() || config.audio.is_some() => {
+                let model = super::multimodal::MultimodalModel::from_varbuilder(vb, config)?;
+                Ok(LoadedModel::Multimodal(Box::new(model)))
             }
             // Everything else with attention config → Llama (the universal transformer)
             _ if config.attention.is_some() => {
@@ -114,15 +121,20 @@ where
 {
     /// Whether this model uses KV cache (transformer) or SSM state.
     pub fn needs_kv_cache(&self) -> bool {
-        matches!(
-            self,
-            LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) | LoadedModel::Hybrid(_)
-        )
+        match self {
+            LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) | LoadedModel::Hybrid(_) => true,
+            LoadedModel::Multimodal(m) => m.llm().needs_kv_cache(),
+            LoadedModel::Mamba2(_) => false,
+        }
     }
 
     /// Whether this model uses SSM state.
     pub fn needs_ssm_state(&self) -> bool {
-        matches!(self, LoadedModel::Mamba2(_) | LoadedModel::Hybrid(_))
+        match self {
+            LoadedModel::Mamba2(_) | LoadedModel::Hybrid(_) => true,
+            LoadedModel::Multimodal(m) => m.llm().needs_ssm_state(),
+            _ => false,
+        }
     }
 
     /// Get model type name
@@ -131,6 +143,7 @@ where
             LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) => "llama",
             LoadedModel::Mamba2(_) => "mamba2",
             LoadedModel::Hybrid(_) => "hybrid",
+            LoadedModel::Multimodal(m) => m.config().model_type.as_str(),
         }
     }
 
@@ -141,6 +154,7 @@ where
             LoadedModel::LlamaTp(m) => m.config().vocab_size,
             LoadedModel::Mamba2(m) => m.config().vocab_size,
             LoadedModel::Hybrid(m) => m.config().vocab_size,
+            LoadedModel::Multimodal(m) => m.config().vocab_size,
         }
     }
 
@@ -151,6 +165,7 @@ where
             LoadedModel::LlamaTp(m) => m.config().num_layers,
             LoadedModel::Mamba2(m) => m.config().num_layers,
             LoadedModel::Hybrid(m) => m.config().num_layers,
+            LoadedModel::Multimodal(m) => m.config().num_layers,
         }
     }
 
@@ -161,6 +176,7 @@ where
             LoadedModel::LlamaTp(m) => m.config().hidden_size,
             LoadedModel::Mamba2(m) => m.config().hidden_size,
             LoadedModel::Hybrid(m) => m.config().hidden_size,
+            LoadedModel::Multimodal(m) => m.config().hidden_size,
         }
     }
 
@@ -178,6 +194,7 @@ where
                 .map(|a| a.kv_heads() / m.world_size()),
             LoadedModel::Mamba2(_) => None,
             LoadedModel::Hybrid(m) => m.config().attention.as_ref().map(|a| a.kv_heads()),
+            LoadedModel::Multimodal(m) => m.llm().num_kv_heads(),
         }
     }
 
@@ -208,6 +225,7 @@ where
                     .as_ref()
                     .map(|a| a.head_dim(config.hidden_size))
             }
+            LoadedModel::Multimodal(m) => m.llm().head_dim(),
         }
     }
 
@@ -218,6 +236,7 @@ where
             LoadedModel::LlamaTp(m) => m.config().max_seq_len,
             LoadedModel::Mamba2(m) => m.config().max_seq_len,
             LoadedModel::Hybrid(m) => m.config().max_seq_len,
+            LoadedModel::Multimodal(m) => m.config().max_seq_len,
         }
     }
 
@@ -228,6 +247,7 @@ where
             LoadedModel::LlamaTp(m) => m.config().moe.is_some(),
             LoadedModel::Mamba2(m) => m.config().moe.is_some(),
             LoadedModel::Hybrid(m) => m.config().moe.is_some(),
+            LoadedModel::Multimodal(m) => m.llm().is_moe(),
         }
     }
 
@@ -238,6 +258,7 @@ where
             LoadedModel::LlamaTp(m) => m.config().moe.as_ref(),
             LoadedModel::Mamba2(m) => m.config().moe.as_ref(),
             LoadedModel::Hybrid(m) => m.config().moe.as_ref(),
+            LoadedModel::Multimodal(m) => m.llm().moe_config(),
         }
     }
 
@@ -250,6 +271,7 @@ where
             LoadedModel::LlamaTp(_) => None, // TP model manages RoPE internally
             LoadedModel::Mamba2(_) => None,
             LoadedModel::Hybrid(m) => Some((m.rope().cos_cache(), m.rope().sin_cache())),
+            LoadedModel::Multimodal(m) => m.llm().rope_caches(),
         }
     }
 
@@ -258,6 +280,7 @@ where
         match self {
             LoadedModel::Mamba2(m) => Some(m.mamba_config()),
             LoadedModel::Hybrid(m) => Some(m.mamba_config()),
+            LoadedModel::Multimodal(m) => m.llm().mamba_config(),
             _ => None,
         }
     }
@@ -270,6 +293,7 @@ impl<R: Runtime> std::fmt::Debug for LoadedModel<R> {
             LoadedModel::LlamaTp(_) => f.debug_tuple("LlamaTp").finish(),
             LoadedModel::Mamba2(_) => f.debug_tuple("Mamba2").finish(),
             LoadedModel::Hybrid(_) => f.debug_tuple("Hybrid").finish(),
+            LoadedModel::Multimodal(_) => f.debug_tuple("Multimodal").finish(),
         }
     }
 }

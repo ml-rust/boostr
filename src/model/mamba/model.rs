@@ -210,6 +210,8 @@ mod tests {
             moe: None,
             hybrid_layers: None,
             tie_word_embeddings: false,
+            vision: None,
+            audio: None,
         };
         let mamba_config = Mamba2Config::from_universal(&config).unwrap();
         assert_eq!(mamba_config.d_model, 64);

@@ -2,6 +2,7 @@
 
 use super::attention::{AttentionConfig, RopeScalingConfig};
 use super::universal::{UniversalConfig, default_rms_norm_eps};
+use super::vision::VisionConfig;
 use crate::error::{Error, Result};
 use serde::Deserialize;
 use std::path::Path;
@@ -82,6 +83,11 @@ pub struct HuggingFaceConfig {
     /// Parallel attention + MLP (GPT-NeoX)
     #[serde(default)]
     pub parallel_attn: Option<bool>,
+
+    // ── Vision/multimodal fields ─────────────────────────────────────
+    /// Vision encoder configuration (LLaVA, Qwen-VL, etc.)
+    #[serde(default)]
+    pub vision_config: Option<serde_json::Value>,
 }
 
 fn default_hf_rope_theta() -> f32 {
@@ -174,6 +180,12 @@ impl HuggingFaceConfig {
                 z_loss_alpha: 1e-3,
             });
 
+        // Parse vision_config JSON into VisionConfig if present
+        let vision = self
+            .vision_config
+            .as_ref()
+            .and_then(|vc| serde_json::from_value::<VisionConfig>(vc.clone()).ok());
+
         UniversalConfig {
             model_type,
             vocab_size: self.vocab_size,
@@ -187,6 +199,8 @@ impl HuggingFaceConfig {
             moe,
             hybrid_layers: None,
             tie_word_embeddings: self.tie_word_embeddings,
+            vision,
+            audio: None,
         }
     }
 
@@ -200,7 +214,11 @@ impl HuggingFaceConfig {
                 // Order matters: check specific variants before generic ones
                 // (e.g. "qwen2moe" before "qwen", "phi3" before "phi",
                 //  "gemma2" before "gemma").
-                if arch_lower.contains("llama") {
+                if arch_lower.contains("llava") {
+                    return "llava".to_string();
+                } else if arch_lower.contains("qwen_vl") || arch_lower.contains("qwenvl") {
+                    return "qwen_vl".to_string();
+                } else if arch_lower.contains("llama") {
                     return "llama".to_string();
                 } else if arch_lower.contains("mixtral") {
                     return "mixtral".to_string();
@@ -272,6 +290,14 @@ pub fn load_config_auto<P: AsRef<Path>>(path: P) -> Result<UniversalConfig> {
     })
 }
 
+/// Load HuggingFace config.json and convert to UniversalConfig
+pub fn load_huggingface_config<P: AsRef<Path>>(path: P) -> Result<UniversalConfig> {
+    let hf_config = HuggingFaceConfig::load(path)?;
+    let config = hf_config.to_universal();
+    config.validate()?;
+    Ok(config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,6 +328,7 @@ mod tests {
             multi_query: None,
             new_decoder_architecture: None,
             parallel_attn: None,
+            vision_config: None,
         }
     }
 
@@ -514,18 +541,63 @@ mod tests {
     }
 
     #[test]
+    fn arch_fallback_llava() {
+        assert_eq!(
+            config_with_arch("LlavaForConditionalGeneration").infer_model_type(),
+            "llava"
+        );
+    }
+
+    #[test]
+    fn arch_fallback_qwen_vl() {
+        assert_eq!(
+            config_with_arch("QwenVLForConditionalGeneration").infer_model_type(),
+            "qwen_vl"
+        );
+    }
+
+    #[test]
+    fn vision_config_parsed_from_hf() {
+        let json = r#"{
+            "model_type": "llava",
+            "vocab_size": 32000,
+            "hidden_size": 4096,
+            "num_hidden_layers": 32,
+            "max_position_embeddings": 4096,
+            "num_attention_heads": 32,
+            "vision_config": {
+                "encoder_type": "clip",
+                "hidden_size": 1024,
+                "num_layers": 24,
+                "num_heads": 16,
+                "patch_size": 14,
+                "image_size": 336,
+                "intermediate_size": 4096
+            }
+        }"#;
+        let hf: HuggingFaceConfig = serde_json::from_str(json).unwrap();
+        let uc = hf.to_universal();
+        assert_eq!(uc.model_type, "llava");
+        let vision = uc.vision.as_ref().expect("vision config should be parsed");
+        assert_eq!(vision.encoder_type, "clip");
+        assert_eq!(vision.hidden_size, 1024);
+        assert_eq!(vision.patch_size, 14);
+        assert_eq!(vision.projector_type, "linear"); // default
+    }
+
+    #[test]
+    fn no_vision_when_absent() {
+        let c = config_with_model_type("llama");
+        let uc = c.to_universal();
+        assert!(uc.vision.is_none());
+        assert!(uc.audio.is_none());
+    }
+
+    #[test]
     fn alibi_defaults_to_false() {
         let c = config_with_model_type("llama");
         let uc = c.to_universal();
         let attn = uc.attention.as_ref().unwrap();
         assert!(!attn.use_alibi);
     }
-}
-
-/// Load HuggingFace config.json and convert to UniversalConfig
-pub fn load_huggingface_config<P: AsRef<Path>>(path: P) -> Result<UniversalConfig> {
-    let hf_config = HuggingFaceConfig::load(path)?;
-    let config = hf_config.to_universal();
-    config.validate()?;
-    Ok(config)
 }

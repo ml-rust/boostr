@@ -1,5 +1,6 @@
 pub mod activation;
 pub mod conv1d;
+pub mod conv2d;
 pub mod dropout;
 pub mod embedding;
 pub mod groupnorm;
@@ -20,6 +21,7 @@ pub mod weight;
 
 pub use activation::Activation;
 pub use conv1d::Conv1d;
+pub use conv2d::Conv2d;
 pub use dropout::Dropout;
 pub use embedding::Embedding;
 pub use groupnorm::GroupNorm;

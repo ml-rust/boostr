@@ -297,6 +297,8 @@ mod tests {
                 attention_layers: vec![2, 3],
             }),
             tie_word_embeddings: false,
+            vision: None,
+            audio: None,
         };
 
         config.validate().unwrap();

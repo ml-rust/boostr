@@ -176,7 +176,7 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
             // Only stack standard (non-quantized) tensors
             let mut tensors: Vec<Tensor<R>> = Vec::with_capacity(expert_entries.len());
             let mut all_standard = true;
-            for (_id, name) in expert_entries {
+            for name in expert_entries.values() {
                 match map.get(name) {
                     Ok(w) if !w.is_quantized() => {
                         if let Ok(t) = w.as_tensor() {
@@ -206,7 +206,7 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
             })?;
 
             // Remove per-expert entries and insert stacked
-            for (_id, name) in expert_entries {
+            for name in expert_entries.values() {
                 map.remove(name);
             }
             map.insert(stacked_name.clone(), stacked);

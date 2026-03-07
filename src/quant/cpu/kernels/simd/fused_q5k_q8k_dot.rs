@@ -128,9 +128,9 @@ unsafe fn load_high_bits_32(qh: &[u8], elem_off: usize) -> __m256i {
     // For 32 consecutive elements starting at elem_off, we need 4 bytes of qh
     // Build 32 bytes, each 0 or 1
     let mut bits = [0u8; 32];
-    for i in 0..32 {
+    for (i, bit) in bits.iter_mut().enumerate() {
         let idx = elem_off + i;
-        bits[i] = (qh[idx / 8] >> (idx % 8)) & 1;
+        *bit = (qh[idx / 8] >> (idx % 8)) & 1;
     }
     unsafe { _mm256_loadu_si256(bits.as_ptr() as *const __m256i) }
 }

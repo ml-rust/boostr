@@ -48,8 +48,8 @@ impl GrammarDfaOps<CpuRuntime> for CpuClient {
             let mut state = current_state;
             let mut valid = true;
 
-            for byte_idx in byte_start..byte_end {
-                let byte_val = vocab_bytes[byte_idx] as usize;
+            for &byte_val_raw in &vocab_bytes[byte_start..byte_end] {
+                let byte_val = byte_val_raw as usize;
                 let table_idx = (state as usize) * 256 + byte_val;
 
                 if table_idx >= num_states * 256 {
@@ -87,7 +87,6 @@ impl GrammarDfaOps<CpuRuntime> for CpuClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use numr::dtype::DType;
     use numr::runtime::cpu::CpuDevice;
 
     #[test]

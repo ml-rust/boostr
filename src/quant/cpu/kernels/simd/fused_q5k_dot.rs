@@ -65,7 +65,7 @@ pub unsafe fn fused_dot_q5k_avx2(act: &[f32], blocks: &[u8], k: usize) -> f32 {
 
                     // Build 8 values manually (SIMD gather would be slower for this pattern)
                     let mut vals = [0i32; 8];
-                    for i in 0..8 {
+                    for (i, val) in vals.iter_mut().enumerate() {
                         let l = l_base + i;
                         let idx = idx_base + i;
                         let qs_idx = j * 16 + l / 2;
@@ -75,7 +75,7 @@ pub unsafe fn fused_dot_q5k_avx2(act: &[f32], blocks: &[u8], k: usize) -> f32 {
                             ((qs[qs_idx] >> 4) & 0x0F) as i32
                         };
                         let high1 = ((qh[idx / 8] >> (idx % 8)) & 1) as i32;
-                        vals[i] = low4 | (high1 << 4);
+                        *val = low4 | (high1 << 4);
                     }
 
                     let q_i32 = _mm256_loadu_si256(vals.as_ptr() as *const __m256i);

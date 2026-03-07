@@ -29,6 +29,13 @@ pub fn launch_int4_gemm(
     let module = kernels::get_or_load_module(client.context(), device_index, INT4_GEMM_MODULE)?;
 
     if m <= GEMV_THRESHOLD {
+        tracing::debug!(
+            m,
+            k,
+            n,
+            path = "awq_int4_gemv",
+            "CUDA AWQ kernel: INT4 GEMV (optimized)"
+        );
         // GEMV path: 4 warps/block (128 threads), each warp handles 8 cols (one packed u32)
         // 32 output columns per block. Shared memory caches input row.
         let func = kernels::get_kernel_function(&module, "int4_gemv_f32")?;
@@ -61,6 +68,13 @@ pub fn launch_int4_gemm(
             })?;
         }
     } else {
+        tracing::debug!(
+            m,
+            k,
+            n,
+            path = "awq_int4_gemm",
+            "CUDA AWQ kernel: INT4 tiled GEMM (optimized)"
+        );
         // Tiled GEMM path: BM=32, BN=32, BK=32
         // Block: (32, 4) = 128 threads, each thread handles 8 rows
         let func = kernels::get_kernel_function(&module, "int4_gemm_f32")?;
@@ -120,6 +134,13 @@ pub fn launch_int4_gemm_gptq(
     let output_ptr = output.ptr();
 
     if m <= GEMV_THRESHOLD {
+        tracing::debug!(
+            m,
+            k,
+            n,
+            path = "gptq_int4_gemv",
+            "CUDA GPTQ kernel: INT4 GEMV (optimized)"
+        );
         // GEMV: 128 threads (one per output col), tiled over K in chunks of 128
         // Grid: (ceil(K/128), ceil(N/128), M). Uses atomicAdd → output must be zeroed.
         let func = kernels::get_kernel_function(&module, "int4_gemv_gptq_f32")?;
@@ -160,6 +181,13 @@ pub fn launch_int4_gemm_gptq(
             })?;
         }
     } else {
+        tracing::debug!(
+            m,
+            k,
+            n,
+            path = "gptq_int4_gemm",
+            "CUDA GPTQ kernel: INT4 tiled GEMM (optimized)"
+        );
         // Tiled GEMM: BM=32, BN=32, BK=32
         let func = kernels::get_kernel_function(&module, "int4_gemm_gptq_f32")?;
         let cfg = LaunchConfig {

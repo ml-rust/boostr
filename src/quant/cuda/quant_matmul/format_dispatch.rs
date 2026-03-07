@@ -49,6 +49,12 @@ pub(super) fn dispatch_gemv(
             | QuantFormat::Q2K
     ) && k % 32 == 0
     {
+        tracing::debug!(
+            format = ?weight.format(),
+            m, k, n,
+            path = "dp4a_gemv",
+            "CUDA quant kernel: dp4a GEMV (optimized)"
+        );
         let q8_buf = quantize_activation_q8_1(client, act_contig, m, k)?;
         let q8_ptr = q8_buf.ptr();
         let weight_ptr = weight.storage().ptr();
@@ -89,6 +95,12 @@ pub(super) fn dispatch_gemv(
     }
 
     // F32 activation path for formats with dedicated F32 GEMV kernels
+    tracing::debug!(
+        format = ?weight.format(),
+        m, k, n,
+        path = "f32_gemv",
+        "CUDA quant kernel: F32 GEMV (optimized)"
+    );
     let act_ptr = act_contig.ptr();
     let weight_ptr = weight.storage().ptr();
 
@@ -105,7 +117,15 @@ pub(super) fn dispatch_gemv(
         QuantFormat::IQ4XS => ("quant_gemv_iq4_xs_f32", GEMV_IQ4_XS_MODULE),
         QuantFormat::IQ3S => ("quant_gemv_iq3_s_f32", GEMV_IQ3_S_MODULE),
         QuantFormat::IQ2XS => ("quant_gemv_iq2_xs_f32", GEMV_IQ2_XS_MODULE),
-        _ => return Ok(None),
+        other => {
+            tracing::warn!(
+                format = ?other,
+                m, k, n,
+                path = "generic_fallback",
+                "CUDA quant kernel: no dedicated GEMV kernel, falling back to dequant+matmul"
+            );
+            return Ok(None);
+        }
     };
 
     let warps_per_block = 8u32;
@@ -162,8 +182,23 @@ pub(super) fn dispatch_matmul(
         QuantFormat::IQ4XS => ("quant_matmul_iq4_xs_f32", GEMM_IQ4_XS_MODULE),
         QuantFormat::IQ3S => ("quant_matmul_iq3_s_f32", GEMM_IQ3_S_MODULE),
         QuantFormat::IQ2XS => ("quant_matmul_iq2_xs_f32", GEMM_IQ2_XS_MODULE),
-        _ => return Ok(None),
+        other => {
+            tracing::warn!(
+                format = ?other,
+                m, k, n,
+                path = "generic_fallback",
+                "CUDA quant kernel: no dedicated GEMM kernel, falling back to dequant+matmul"
+            );
+            return Ok(None);
+        }
     };
+
+    tracing::debug!(
+        format = ?weight.format(),
+        m, k, n,
+        path = "dedicated_gemm",
+        "CUDA quant kernel: dedicated tiled GEMM (optimized)"
+    );
 
     let act_ptr = act_contig.ptr();
     let weight_ptr = weight.storage().ptr();

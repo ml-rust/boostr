@@ -134,6 +134,13 @@ impl<R: Runtime> VarMap<R> {
     pub fn contains(&self, name: &str) -> bool {
         self.data.contains_key(name)
     }
+
+    /// Merge all weights from another VarMap into this one.
+    ///
+    /// Existing keys are overwritten if present in `other`.
+    pub fn merge(&mut self, other: VarMap<R>) {
+        self.data.extend(other.data);
+    }
 }
 
 impl<R: Runtime> Default for VarMap<R> {

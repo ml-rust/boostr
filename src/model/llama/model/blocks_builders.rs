@@ -98,6 +98,8 @@ pub fn build_block_from_varbuilder<R: Runtime<DType = DType>>(
         })
     };
 
+    let use_alibi = config.attention.as_ref().map_or(false, |a| a.use_alibi);
+
     Ok(LlamaBlock {
         input_layernorm: RmsNorm::new(
             layer_vb.take_tensor("input_layernorm.weight")?,
@@ -114,6 +116,7 @@ pub fn build_block_from_varbuilder<R: Runtime<DType = DType>>(
             head_dim,
             q_norm,
             k_norm,
+            use_alibi,
         },
         post_attention_layernorm: RmsNorm::new(
             layer_vb.take_tensor("post_attention_layernorm.weight")?,
@@ -135,6 +138,7 @@ pub fn build_block_from_config<R: Runtime<DType = DType>>(
     dt: numr::dtype::DType,
 ) -> LlamaBlock<R> {
     let hidden = config.hidden_size;
+    let use_alibi = config.attention.as_ref().map_or(false, |a| a.use_alibi);
     LlamaBlock {
         input_layernorm: RmsNorm::new(
             Tensor::<R>::ones(&[hidden], dt, device),
@@ -167,6 +171,7 @@ pub fn build_block_from_config<R: Runtime<DType = DType>>(
             head_dim,
             q_norm: None,
             k_norm: None,
+            use_alibi,
         },
         post_attention_layernorm: RmsNorm::new(
             Tensor::<R>::ones(&[hidden], dt, device),

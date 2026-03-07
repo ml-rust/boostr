@@ -158,6 +158,7 @@ impl HuggingFaceConfig {
                 q_latent_dim: None,
                 d_rope: None,
                 sliding_window: self.sliding_window,
+                use_alibi: self.alibi.unwrap_or(false),
             }
         });
 
@@ -501,6 +502,23 @@ mod tests {
         let uc = c.to_universal();
         let attn = uc.attention.as_ref().unwrap();
         assert_eq!(attn.num_kv_heads, Some(1));
+    }
+
+    #[test]
+    fn alibi_propagated_to_universal() {
+        let mut c = config_with_model_type("falcon");
+        c.alibi = Some(true);
+        let uc = c.to_universal();
+        let attn = uc.attention.as_ref().unwrap();
+        assert!(attn.use_alibi);
+    }
+
+    #[test]
+    fn alibi_defaults_to_false() {
+        let c = config_with_model_type("llama");
+        let uc = c.to_universal();
+        let attn = uc.attention.as_ref().unwrap();
+        assert!(!attn.use_alibi);
     }
 }
 

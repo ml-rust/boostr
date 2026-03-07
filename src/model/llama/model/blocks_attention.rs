@@ -7,7 +7,6 @@ use crate::inference::kv_cache::LayeredPagedKvCache;
 use crate::model::traits::ModelClient;
 use crate::nn::{MaybeQuantLinear, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
-use crate::ops::traits::position::rope::RoPEOps;
 use crate::ops::traits::{KvCacheOps, PagedAttentionOps};
 use numr::autograd::{Var, var_narrow, var_reshape};
 use numr::dtype::DType;
@@ -30,6 +29,8 @@ pub struct LlamaAttention<R: Runtime> {
     /// Optional Q/K layer norms (Command-R, Cohere)
     pub(crate) q_norm: Option<crate::nn::RmsNorm<R>>,
     pub(crate) k_norm: Option<crate::nn::RmsNorm<R>>,
+    /// Use ALiBi instead of RoPE (Falcon v1, BLOOM, MPT)
+    pub(crate) use_alibi: bool,
 }
 
 impl<R: Runtime<DType = DType>> LlamaAttention<R> {
@@ -49,6 +50,27 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             None => k.clone(),
         };
         Ok((q, k))
+    }
+
+    /// Apply RoPE to Q/K or skip for ALiBi models.
+    fn apply_rotary_if_needed<C>(
+        &self,
+        client: &C,
+        q: Var<R>,
+        k: Var<R>,
+        cos: &Var<R>,
+        sin: &Var<R>,
+    ) -> Result<(Var<R>, Var<R>)>
+    where
+        C: ModelClient<R>,
+    {
+        if self.use_alibi {
+            Ok((q, k))
+        } else {
+            let q = client.apply_rope_interleaved(&q, cos, sin)?;
+            let k = client.apply_rope_interleaved(&k, cos, sin)?;
+            Ok((q, k))
+        }
     }
 
     pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
@@ -97,9 +119,9 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
         let (q, k) = self.apply_qk_norms(client, &q, &k)?;
 
-        // Apply fused RoPE to Q and K (single kernel per tensor on CUDA)
-        let q = client.apply_rope_interleaved(&q, rope.cos_cache(), rope.sin_cache())?;
-        let k = client.apply_rope_interleaved(&k, rope.cos_cache(), rope.sin_cache())?;
+        // Apply RoPE or skip for ALiBi models
+        let (q, k) =
+            self.apply_rotary_if_needed(client, q, k, rope.cos_cache(), rope.sin_cache())?;
 
         // GQA: repeat K/V heads to match Q heads
         let (k, v) = if self.num_kv_heads < self.num_heads {
@@ -111,8 +133,22 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             (k, v)
         };
 
-        // Multi-head attention
-        let attn_out = multi_head_attention_impl(client, &q, &k, &v, None, self.num_heads)?;
+        // Multi-head attention (with ALiBi bias as mask if enabled)
+        let alibi_mask = if self.use_alibi {
+            let sq = q.shape()[2];
+            let sk = k.shape()[2];
+            let mask = Tensor::<R>::zeros(
+                &[batch, self.num_heads, sq, sk],
+                DType::F32,
+                q.tensor().device(),
+            );
+            client.alibi_add_bias(&mask, batch, self.num_heads, sq, sk)?;
+            Some(Var::new(mask, false))
+        } else {
+            None
+        };
+        let attn_out =
+            multi_head_attention_impl(client, &q, &k, &v, alibi_mask.as_ref(), self.num_heads)?;
 
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
         let attn_out =
@@ -177,39 +213,80 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
         let (q, k) = self.apply_qk_norms(client, &q, &k)?;
 
-        // Apply fused RoPE with position offset (single kernel per tensor on CUDA)
+        // Apply RoPE or skip for ALiBi models
         let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
         let sin_offset = var_narrow(rope.sin_cache(), 0, position, seq_len).map_err(Error::Numr)?;
-
-        let q = client.apply_rope_interleaved(&q, &cos_offset, &sin_offset)?;
-        let k = client.apply_rope_interleaved(&k, &cos_offset, &sin_offset)?;
+        let (q, k) = self.apply_rotary_if_needed(client, q, k, &cos_offset, &sin_offset)?;
 
         // V also needs to be contiguous for flash attention kernel
         let v = var_contiguous(&v);
 
         // Update KV cache with new K/V tensors [B, H_kv, S, D]
-        // Uses fused in-place write (single kernel) instead of slice_assign
-        // (which copies the entire cache buffer before writing the slice).
         kv_cache.update_fused(k.tensor(), v.tensor(), client)?;
 
-        // Pass raw full-capacity KV cache buffers with explicit seq_len.
-        // Avoids narrow() + contiguous() which copied the entire cache every token.
         let kv_seq_len = kv_cache.seq_len();
-        let is_prefill = seq_len > 1;
-        let (attn_out, _lse) = client.flash_attention_fwd(
-            q.tensor(),
-            kv_cache.k_cache_raw(),
-            kv_cache.v_cache_raw(),
-            self.num_heads,
-            self.num_kv_heads,
-            self.head_dim,
-            is_prefill, // causal during prefill (seq_len > 1), not needed for single-token decode
-            0,          // no sliding window
-            Some(kv_seq_len),
-        )?;
+        let attn_out = if self.use_alibi {
+            // ALiBi: use generic attention with bias (no flash attention)
+            let k_full = Var::new(
+                kv_cache
+                    .k_cache_raw()
+                    .narrow(2, 0, kv_seq_len)
+                    .map_err(Error::Numr)?
+                    .contiguous(),
+                false,
+            );
+            let v_full = Var::new(
+                kv_cache
+                    .v_cache_raw()
+                    .narrow(2, 0, kv_seq_len)
+                    .map_err(Error::Numr)?
+                    .contiguous(),
+                false,
+            );
+            // Repeat KV heads for GQA
+            let (k_full, v_full) = if self.num_kv_heads < self.num_heads {
+                let repeat = self.num_heads / self.num_kv_heads;
+                let k_rep = repeat_kv(&k_full, repeat).map_err(Error::Numr)?;
+                let v_rep = repeat_kv(&v_full, repeat).map_err(Error::Numr)?;
+                (k_rep, v_rep)
+            } else {
+                (k_full, v_full)
+            };
+            // Build ALiBi + causal mask (single backend-specific kernel call)
+            let sq = seq_len;
+            let sk = kv_seq_len;
+            let mask = Tensor::<R>::zeros(
+                &[batch, self.num_heads, sq, sk],
+                DType::F32,
+                q.tensor().device(),
+            );
+            client.alibi_add_bias_causal(&mask, batch, self.num_heads, sq, sk, position)?;
+            let mask_var = Var::new(mask, false);
+            multi_head_attention_impl(
+                client,
+                &q,
+                &k_full,
+                &v_full,
+                Some(&mask_var),
+                self.num_heads,
+            )?
+        } else {
+            let is_prefill = seq_len > 1;
+            let (out, _lse) = client.flash_attention_fwd(
+                q.tensor(),
+                kv_cache.k_cache_raw(),
+                kv_cache.v_cache_raw(),
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                is_prefill,
+                0,
+                Some(kv_seq_len),
+            )?;
+            Var::new(out, false)
+        };
 
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
-        let attn_out = Var::new(attn_out, false);
         let attn_out =
             numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
         let attn_out = var_contiguous(&attn_out);
@@ -279,12 +356,10 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
         let (q, k) = self.apply_qk_norms(client, &q, &k)?;
 
-        // Apply RoPE with position offset
+        // Apply RoPE or skip for ALiBi models
         let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
         let sin_offset = var_narrow(rope.sin_cache(), 0, position, seq_len).map_err(Error::Numr)?;
-
-        let q = client.apply_rope_interleaved(&q, &cos_offset, &sin_offset)?;
-        let k = client.apply_rope_interleaved(&k, &cos_offset, &sin_offset)?;
+        let (q, k) = self.apply_rotary_if_needed(client, q, k, &cos_offset, &sin_offset)?;
 
         // Reshape K/V from [B, H_kv, S, D] to [B*S, H_kv, D] for paged cache update
         let k_flat = k
@@ -361,6 +436,7 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
             + numr::ops::CompareOps<numr::runtime::cuda::CudaRuntime>
             + numr::ops::ConditionalOps<numr::runtime::cuda::CudaRuntime>,
     {
+        use crate::ops::RoPEOps;
         use crate::ops::cuda::attention::flash::decode_attention_graph_fwd;
         use crate::ops::cuda::attention::kv_insert::kv_insert;
 
@@ -395,9 +471,8 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
         // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
         let (q, k) = self.apply_qk_norms(client, &q, &k)?;
 
-        // Apply RoPE using the stable cos/sin slices (updated before each replay)
-        let q = client.apply_rope_interleaved(&q, cos_slice, sin_slice)?;
-        let k = client.apply_rope_interleaved(&k, cos_slice, sin_slice)?;
+        // Apply RoPE or skip for ALiBi models
+        let (q, k) = self.apply_rotary_if_needed(client, q, k, cos_slice, sin_slice)?;
 
         // Insert K/V into the full-capacity cache at the device-side write_pos
         kv_insert(

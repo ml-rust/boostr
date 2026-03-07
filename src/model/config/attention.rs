@@ -35,6 +35,10 @@ pub struct AttentionConfig {
     /// Sliding window size (for Mistral-style attention)
     #[serde(default)]
     pub sliding_window: Option<usize>,
+
+    /// Use ALiBi position embeddings instead of RoPE (Falcon v1, BLOOM, MPT)
+    #[serde(default)]
+    pub use_alibi: bool,
 }
 
 fn default_rope_theta() -> f32 {

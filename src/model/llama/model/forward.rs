@@ -480,4 +480,77 @@ attention:
         let out = mlp.forward(&client, &x).unwrap();
         assert_eq!(out.shape(), &[1, 4]);
     }
+
+    fn tiny_alibi_config() -> ModelConfig {
+        let yaml = r#"
+model_type: falcon
+vocab_size: 32
+hidden_size: 16
+num_layers: 2
+max_seq_len: 32
+intermediate_size: 32
+rms_norm_eps: 1.0e-5
+attention:
+  num_heads: 2
+  use_alibi: true
+"#;
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn test_alibi_forward_shape() {
+        let (client, device) = cpu_setup();
+        let config = tiny_alibi_config();
+        let model = Llama::<CpuRuntime>::from_config(&config, &device).unwrap();
+        assert!(model.layers[0].self_attn.use_alibi);
+
+        let input_ids = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2, 3], &[1, 4], &device),
+            false,
+        );
+        let logits = model.forward(&client, &input_ids).unwrap();
+        assert_eq!(logits.shape(), &[1, 4, 32]);
+    }
+
+    #[test]
+    fn test_alibi_kv_cache_shape() {
+        let (client, device) = cpu_setup();
+        let config = tiny_alibi_config();
+        let model = Llama::<CpuRuntime>::from_config(&config, &device).unwrap();
+
+        let num_kv_heads = config.attention.as_ref().unwrap().kv_heads();
+        let head_dim = config
+            .attention
+            .as_ref()
+            .unwrap()
+            .head_dim(config.hidden_size);
+
+        let mut kv_cache = LayeredKvCache::<CpuRuntime>::new_positional(
+            config.num_layers,
+            1,
+            num_kv_heads,
+            16,
+            config.max_seq_len,
+            head_dim,
+            DType::F32,
+            &device,
+        )
+        .unwrap();
+
+        // Prefill: 4 tokens
+        let input_ids = Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2, 3], &[1, 4], &device);
+        let logits = model
+            .forward_with_kv_cache(&client, &input_ids, &mut kv_cache, 0)
+            .unwrap();
+        assert_eq!(logits.shape(), &[1, 4, 32]);
+        assert_eq!(kv_cache.seq_len(), 4);
+
+        // Decode: 1 token
+        let next = Tensor::<CpuRuntime>::from_slice(&[5i64], &[1, 1], &device);
+        let logits = model
+            .forward_with_kv_cache(&client, &next, &mut kv_cache, 4)
+            .unwrap();
+        assert_eq!(logits.shape(), &[1, 1, 32]);
+        assert_eq!(kv_cache.seq_len(), 5);
+    }
 }

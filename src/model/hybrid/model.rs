@@ -276,6 +276,7 @@ mod tests {
                 rope_theta: 10000.0,
                 rope_scaling: None,
                 sliding_window: None,
+                use_alibi: false,
             }),
             ssm: Some(crate::model::config::SsmConfig {
                 variant: "mamba2".into(),

@@ -182,6 +182,145 @@ extern "C" __global__ void alibi_add_bias_bf16(
 }
 
 // ============================================================================
+// ALiBi Bias + Causal Mask (combined, single pass)
+// ============================================================================
+
+// Combines ALiBi bias with causal masking:
+//   - If k_pos > q_pos + position: score = -inf (future token, masked)
+//   - Otherwise: score += -slope * (q_pos + position - k_pos)
+//
+// Args:
+//   position: absolute position of first query token (for KV cache decode)
+
+__device__ void alibi_add_bias_causal_fp32_impl(
+    float* __restrict__ scores,
+    const int batch_size,
+    const int num_heads,
+    const int seq_len_q,
+    const int seq_len_k,
+    const int position
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = batch_size * num_heads * seq_len_q * seq_len_k;
+
+    if (idx >= total) return;
+
+    const int k_pos = idx % seq_len_k;
+    const int q_pos = (idx / seq_len_k) % seq_len_q;
+    const int head_idx = (idx / (seq_len_k * seq_len_q)) % num_heads;
+
+    const int abs_q_pos = q_pos + position;
+
+    if (k_pos > abs_q_pos) {
+        scores[idx] = -INFINITY;
+        return;
+    }
+
+    const float slope = get_alibi_slope(head_idx, num_heads);
+    const int distance = abs_q_pos - k_pos;
+    scores[idx] += -slope * (float)distance;
+}
+
+extern "C" __global__ void alibi_add_bias_causal_fp32(
+    float* scores,
+    const int batch_size,
+    const int num_heads,
+    const int seq_len_q,
+    const int seq_len_k,
+    const int position
+) {
+    alibi_add_bias_causal_fp32_impl(scores, batch_size, num_heads, seq_len_q, seq_len_k, position);
+}
+
+__device__ void alibi_add_bias_causal_fp16_impl(
+    __half* __restrict__ scores,
+    const int batch_size,
+    const int num_heads,
+    const int seq_len_q,
+    const int seq_len_k,
+    const int position
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = batch_size * num_heads * seq_len_q * seq_len_k;
+
+    if (idx >= total) return;
+
+    const int k_pos = idx % seq_len_k;
+    const int q_pos = (idx / seq_len_k) % seq_len_q;
+    const int head_idx = (idx / (seq_len_k * seq_len_q)) % num_heads;
+
+    const int abs_q_pos = q_pos + position;
+
+    if (k_pos > abs_q_pos) {
+        scores[idx] = __float2half(-INFINITY);
+        return;
+    }
+
+    const float slope = get_alibi_slope(head_idx, num_heads);
+    const int distance = abs_q_pos - k_pos;
+    const float bias = -slope * (float)distance;
+
+    float score = __half2float(scores[idx]);
+    score += bias;
+    scores[idx] = __float2half(score);
+}
+
+extern "C" __global__ void alibi_add_bias_causal_fp16(
+    __half* scores,
+    const int batch_size,
+    const int num_heads,
+    const int seq_len_q,
+    const int seq_len_k,
+    const int position
+) {
+    alibi_add_bias_causal_fp16_impl(scores, batch_size, num_heads, seq_len_q, seq_len_k, position);
+}
+
+__device__ void alibi_add_bias_causal_bf16_impl(
+    __nv_bfloat16* __restrict__ scores,
+    const int batch_size,
+    const int num_heads,
+    const int seq_len_q,
+    const int seq_len_k,
+    const int position
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = batch_size * num_heads * seq_len_q * seq_len_k;
+
+    if (idx >= total) return;
+
+    const int k_pos = idx % seq_len_k;
+    const int q_pos = (idx / seq_len_k) % seq_len_q;
+    const int head_idx = (idx / (seq_len_k * seq_len_q)) % num_heads;
+
+    const int abs_q_pos = q_pos + position;
+
+    if (k_pos > abs_q_pos) {
+        scores[idx] = __float2bfloat16(-INFINITY);
+        return;
+    }
+
+    const float slope = get_alibi_slope(head_idx, num_heads);
+    const int distance = abs_q_pos - k_pos;
+    const float bias = -slope * (float)distance;
+
+    float score = __bfloat162float(scores[idx]);
+    score += bias;
+    scores[idx] = __float2bfloat16(score);
+}
+
+extern "C" __global__ void alibi_add_bias_causal_bf16(
+    __nv_bfloat16* scores,
+    const int batch_size,
+    const int num_heads,
+    const int seq_len_q,
+    const int seq_len_k,
+    const int position
+) {
+    alibi_add_bias_causal_bf16_impl(scores, batch_size, num_heads, seq_len_q, seq_len_k, position);
+}
+
+// ============================================================================
 // Fused ALiBi Flash Attention - FP32
 // ============================================================================
 

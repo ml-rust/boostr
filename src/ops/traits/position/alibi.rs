@@ -27,4 +27,22 @@ pub trait AlibiOps<R: Runtime> {
         seq_len_q: usize,
         seq_len_k: usize,
     ) -> Result<()>;
+
+    /// Add ALiBi bias + causal mask to attention scores in-place.
+    ///
+    /// Combines ALiBi bias with causal masking in a single pass:
+    /// - For positions where `ki > qi + position`: sets score to `-inf`
+    /// - Otherwise: adds ALiBi bias `-slope * |qi + position - ki|`
+    ///
+    /// `position` is the absolute position of the first query token
+    /// (e.g., during decode with KV cache, `position` = number of prior tokens).
+    fn alibi_add_bias_causal(
+        &self,
+        scores: &Tensor<R>,
+        batch_size: usize,
+        num_heads: usize,
+        seq_len_q: usize,
+        seq_len_k: usize,
+        position: usize,
+    ) -> Result<()>;
 }

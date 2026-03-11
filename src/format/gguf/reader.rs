@@ -22,10 +22,12 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// Backing storage for GGUF tensor data: either a regular file or a memory-mapped file.
+/// Backing storage for GGUF tensor data.
 enum GgufStorage {
     File(File),
     Mmap(Mmap),
+    /// In-memory buffer (for wasm or data loaded via HTTP).
+    InMemory(Vec<u8>),
 }
 
 /// GGUF file reader
@@ -52,33 +54,48 @@ impl Gguf {
         Self::open_impl(path, use_mmap)
     }
 
-    fn open_impl<P: AsRef<Path>>(path: P, use_mmap: bool) -> Result<Self> {
-        let mut file = File::open(path.as_ref()).map_err(|e| Error::ModelError {
-            reason: format!("IO error: {e}"),
-        })?;
-        let mut reader = BufReader::new(&mut file);
+    /// Parse a GGUF model from an in-memory byte buffer.
+    ///
+    /// This is the primary entry point for wasm/browser usage where models are
+    /// fetched via HTTP and provided as byte slices. The entire buffer is kept
+    /// in memory — tensor reads are zero-copy slices into this buffer.
+    pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
+        let mut cursor = std::io::Cursor::new(&data);
+        let (version, metadata, tensors, data_offset) = Self::parse_header(&mut cursor)?;
 
-        let magic = read_u32(&mut reader)?;
+        Ok(Gguf {
+            storage: GgufStorage::InMemory(data),
+            version,
+            metadata,
+            tensors,
+            data_offset,
+        })
+    }
+
+    /// Parse GGUF header (magic, version, metadata, tensor info) from any `Read + Seek`.
+    fn parse_header<R: Read + Seek>(
+        reader: &mut R,
+    ) -> Result<(u32, GgufMetadata, HashMap<String, GgufTensorInfo>, u64)> {
+        let magic = read_u32(reader)?;
         if magic != GGUF_MAGIC {
             return Err(Error::ModelError {
                 reason: format!("invalid GGUF magic: 0x{magic:08x}"),
             });
         }
 
-        let version = read_u32(&mut reader)?;
+        let version = read_u32(reader)?;
         if !(1..=3).contains(&version) {
             return Err(Error::ModelError {
                 reason: format!("unsupported GGUF version: {version}"),
             });
         }
 
-        let tensor_count = read_u64(&mut reader)?;
-        let kv_count = read_u64(&mut reader)?;
+        let tensor_count = read_u64(reader)?;
+        let kv_count = read_u64(reader)?;
 
-        // Parse metadata
         let mut metadata = GgufMetadata::default();
         for _ in 0..kv_count {
-            let (key, value) = read_kv_pair(&mut reader, version)?;
+            let (key, value) = read_kv_pair(reader, version)?;
             metadata.kv.insert(key, value);
         }
 
@@ -87,18 +104,27 @@ impl Gguf {
             .map(|v| v as usize)
             .unwrap_or(GGUF_DEFAULT_ALIGNMENT);
 
-        // Parse tensor info entries
         let mut tensors = HashMap::with_capacity(tensor_count as usize);
         for _ in 0..tensor_count {
-            let info = read_tensor_info(&mut reader, version)?;
+            let info = read_tensor_info(reader, version)?;
             tensors.insert(info.name.clone(), info);
         }
 
-        // Calculate aligned data offset
         let current_pos = reader.stream_position().map_err(|e| Error::ModelError {
             reason: format!("IO error: {e}"),
         })?;
         let data_offset = align_offset(current_pos, alignment);
+
+        Ok((version, metadata, tensors, data_offset))
+    }
+
+    fn open_impl<P: AsRef<Path>>(path: P, use_mmap: bool) -> Result<Self> {
+        let mut file = File::open(path.as_ref()).map_err(|e| Error::ModelError {
+            reason: format!("IO error: {e}"),
+        })?;
+        let mut reader = BufReader::new(&mut file);
+
+        let (version, metadata, tensors, data_offset) = Self::parse_header(&mut reader)?;
 
         // Drop the BufReader so we can take ownership of `file` again.
         drop(reader);
@@ -149,22 +175,8 @@ impl Gguf {
         })
     }
 
-    /// Read raw tensor data bytes.
-    ///
-    /// When the file was opened with `use_mmap = true` this is a zero-copy slice
-    /// of the mapping; otherwise it reads from the file.
-    pub fn read_tensor_bytes(&mut self, name: &str) -> Result<Vec<u8>> {
-        let info = self
-            .tensors
-            .get(name)
-            .ok_or_else(|| Error::ModelError {
-                reason: format!("GGUF tensor not found: {name}"),
-            })?
-            .clone();
-
-        let abs_offset = self.data_offset + info.offset;
-        let size = info.size_bytes();
-
+    /// Read a byte slice from storage at the given absolute offset.
+    fn read_slice(&mut self, abs_offset: u64, size: usize, name: &str) -> Result<Vec<u8>> {
         match &mut self.storage {
             GgufStorage::Mmap(mmap) => {
                 let start = abs_offset as usize;
@@ -179,6 +191,19 @@ impl Gguf {
                 }
                 Ok(mmap[start..end].to_vec())
             }
+            GgufStorage::InMemory(buf) => {
+                let start = abs_offset as usize;
+                let end = start + size;
+                if end > buf.len() {
+                    return Err(Error::ModelError {
+                        reason: format!(
+                            "tensor '{name}' data at [{start}..{end}) exceeds buffer length {}",
+                            buf.len()
+                        ),
+                    });
+                }
+                Ok(buf[start..end].to_vec())
+            }
             GgufStorage::File(file) => {
                 let mut buf = vec![0u8; size];
                 file.seek(SeekFrom::Start(abs_offset))
@@ -191,6 +216,25 @@ impl Gguf {
                 Ok(buf)
             }
         }
+    }
+
+    /// Read raw tensor data bytes.
+    ///
+    /// When backed by mmap or in-memory buffer, this copies from the backing store.
+    /// When backed by a file, this seeks and reads.
+    pub fn read_tensor_bytes(&mut self, name: &str) -> Result<Vec<u8>> {
+        let info = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| Error::ModelError {
+                reason: format!("GGUF tensor not found: {name}"),
+            })?
+            .clone();
+
+        let abs_offset = self.data_offset + info.offset;
+        let size = info.size_bytes();
+
+        self.read_slice(abs_offset, size, name)
     }
 
     /// Load an F32 tensor (for unquantized F32/F16/BF16 tensors, converted to F32)

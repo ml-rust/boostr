@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod config;
 pub mod detection;
+pub mod encoder;
 pub mod hybrid;
 pub mod llama;
 pub mod mamba;
@@ -15,6 +16,7 @@ pub use config::{
     RopeScalingConfig, SsmConfig, UniversalConfig, VisionConfig, load_config_auto,
     load_huggingface_config,
 };
+pub use encoder::{EmbeddingPipeline, Encoder, EncoderClient, EncoderConfig, Pooling};
 pub use hybrid::HybridModel;
 pub use llama::model::blocks::ExpertWeights;
 pub use llama::{Llama, LlamaTp};

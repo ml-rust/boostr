@@ -73,7 +73,7 @@ pub fn kv_insert(
 
     let total = b * h_kv * d;
     const BLOCK: u32 = 256;
-    let grid = ((total as u32 + BLOCK - 1) / BLOCK, 1, 1);
+    let grid = ((total as u32).div_ceil(BLOCK), 1, 1);
     let cfg = LaunchConfig {
         grid_dim: grid,
         block_dim: (BLOCK, 1, 1),

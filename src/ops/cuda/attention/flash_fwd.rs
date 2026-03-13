@@ -115,6 +115,7 @@ pub(super) fn flash_attention_fwd_impl(
 }
 
 /// Forward pass for FP8 (E4M3/E5M2) — separate scale args per tensor.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn flash_attention_fwd_fp8_impl(
     client: &CudaClient,
     q: &Tensor<CudaRuntime>,

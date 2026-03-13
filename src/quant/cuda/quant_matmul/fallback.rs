@@ -73,6 +73,7 @@ pub(super) fn quant_matmul_via_dequant(
 
 /// Generic fused SwiGLU: gate_matmul + up_matmul + silu(gate)*up in one kernel.
 /// Eliminates 2 intermediate tensors and reduces kernel launches from 3 to 1.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn quant_swiglu_via_dequant(
     client: &CudaClient,
     activation: &Tensor<CudaRuntime>,

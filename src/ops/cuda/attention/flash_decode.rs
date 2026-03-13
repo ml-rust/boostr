@@ -85,6 +85,7 @@ pub(super) fn decode_attention_fwd(
 /// Graph-mode decode attention: uses `_graph` kernel variants with device-pointer
 /// seq_len_k and separate kv_seq_stride for full-capacity raw KV buffers.
 #[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
 pub fn decode_attention_graph_fwd(
     client: &CudaClient,
     q: &Tensor<CudaRuntime>,

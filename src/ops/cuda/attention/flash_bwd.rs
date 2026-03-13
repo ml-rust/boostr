@@ -16,6 +16,7 @@ use super::flash_utils::{AttentionParams, set_smem_attribute};
 /// Two-step process:
 /// 1. Preprocessing: compute D = rowsum(dO ⊙ O) per query position.
 /// 2. Main backward kernel: compute dQ (atomicAdd), dK, dV.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn flash_attention_bwd_impl(
     client: &CudaClient,
     dout: &Tensor<CudaRuntime>,

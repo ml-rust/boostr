@@ -104,6 +104,7 @@ mod cuda_impl {
         /// Performs a stream-ordered D2D async copy of `half_dim` f32 elements from
         /// `rope_cos_cache[position * half_dim ..]` into `cos_slice` (and likewise for sin).
         /// Used to prepare RoPE values before each graph replay.
+        #[allow(clippy::too_many_arguments)]
         pub fn update_rope_slices(
             &self,
             client: &CudaClient,
@@ -138,8 +139,8 @@ mod cuda_impl {
         ///
         /// - `write_pos = seq_len`   — where to insert this step's K/V
         /// - `seq_len_k = seq_len + 1` — how many K/V entries to attend over AFTER insert
-        ///                               (positions 0..seq_len inclusive; matches non-graph behavior
-        ///                               where `update()` increments seq_len before `get_kv()`)
+        ///   (positions 0..seq_len inclusive; matches non-graph behavior
+        ///   where `update()` increments seq_len before `get_kv()`)
         ///
         /// Uses `cuMemsetD32Async` — the value is embedded in the API call itself
         /// (no host memory pointer involved), so there is NO stack-lifetime hazard.

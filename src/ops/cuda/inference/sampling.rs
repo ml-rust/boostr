@@ -91,7 +91,7 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         // Generate random value on GPU via RandomOps
         let rand_tensor = self
             .rand(&[1], numr::dtype::DType::F32)
-            .map_err(|e| Error::Numr(e))?;
+            .map_err(Error::Numr)?;
         // Allocate output tensor for sampled token ID
         let output = Tensor::<CudaRuntime>::zeros(&[1], numr::dtype::DType::I32, device);
 
@@ -169,10 +169,10 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         // to avoid branching on host — the kernel ignores it when temperature == 0)
         let rand_tensor = if let Some(s) = seed {
             self.rand_seeded(&[1], numr::dtype::DType::F32, s)
-                .map_err(|e| Error::Numr(e))?
+                .map_err(Error::Numr)?
         } else {
             self.rand(&[1], numr::dtype::DType::F32)
-                .map_err(|e| Error::Numr(e))?
+                .map_err(Error::Numr)?
         };
 
         // Determine dtype code: 0 = F32, 1 = F16, 2 = BF16

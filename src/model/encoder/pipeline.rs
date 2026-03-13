@@ -1,35 +1,40 @@
 //! High-level text → embedding pipeline.
 //!
-//! Combines splintr tokenization with encoder forward pass for one-call embedding.
+//! Combines tokenization with encoder forward pass for one-call embedding.
 //!
 //! ```ignore
-//! let pipeline = EmbeddingPipeline::new(encoder, tokenizer, &device);
+//! let pipeline = EmbeddingPipeline::new(encoder, tokenizer, device);
 //! let embeddings = pipeline.embed_text(&client, "Hello world")?; // Vec<f32>
 //! let batch = pipeline.embed_texts(&client, &["Hello", "World"])?; // Vec<Vec<f32>>
 //! ```
 
 use super::config::EncoderConfig;
-use super::model::{Encoder, EncoderClient};
+use super::model::{Encoder, EncoderClient, Pooling};
 use crate::error::Result;
+use crate::format::Gguf;
+use crate::format::gguf_tokenizer::GgufTokenizer;
 use numr::dtype::DType;
 use numr::ops::{IndexingOps, ScalarOps, TensorOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
-use splintr::Tokenizer;
+use splintr::{Tokenize, Tokenizer};
 
 /// End-to-end text → embedding pipeline.
 ///
-/// Owns an `Encoder` and a splintr `Tokenizer`, providing a simple
-/// `embed_text()` API that handles tokenization, forward pass, and
-/// pooling in one call.
-pub struct EmbeddingPipeline<R: Runtime> {
+/// Owns an `Encoder` and a tokenizer, providing a simple `embed_text()` API
+/// that handles tokenization, forward pass, and pooling in one call.
+///
+/// The default tokenizer type is `splintr::Tokenizer` (BPE) for backward
+/// compatibility. Use `EmbeddingPipeline<R, GgufTokenizer>` for GGUF models.
+pub struct EmbeddingPipeline<R: Runtime, T: Tokenize = Tokenizer> {
     encoder: Encoder<R>,
-    tokenizer: Tokenizer,
+    tokenizer: T,
     device: R::Device,
 }
 
-impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
-    pub fn new(encoder: Encoder<R>, tokenizer: Tokenizer, device: R::Device) -> Self {
+impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
+    /// Create a new embedding pipeline from an encoder, tokenizer, and device.
+    pub fn new(encoder: Encoder<R>, tokenizer: T, device: R::Device) -> Self {
         Self {
             encoder,
             tokenizer,
@@ -91,17 +96,87 @@ impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
         Ok(result)
     }
 
+    /// Returns a reference to the underlying encoder model.
     pub fn encoder(&self) -> &Encoder<R> {
         &self.encoder
     }
 
-    pub fn tokenizer(&self) -> &Tokenizer {
+    /// Returns a reference to the tokenizer.
+    pub fn tokenizer(&self) -> &T {
         &self.tokenizer
     }
 
+    /// Returns the encoder's configuration.
     pub fn config(&self) -> &EncoderConfig {
         self.encoder.config()
     }
+}
+
+impl<R: Runtime<DType = DType>> EmbeddingPipeline<R, GgufTokenizer> {
+    /// Load a complete sentence embedding model from a GGUF file.
+    ///
+    /// Extracts config, weights, and tokenizer from the single file.
+    /// Handles the standard GGUF tensor naming convention (`blk.N.*`,
+    /// `token_embd.*`, etc.) used by llama.cpp for all BERT conversions.
+    pub fn from_gguf(gguf: &mut Gguf, device: R::Device) -> Result<Self> {
+        let tokenizer = GgufTokenizer::from_gguf(gguf)?;
+        let config = EncoderConfig::from_gguf_metadata(gguf.metadata())?;
+        let d = &device;
+        let encoder = Encoder::from_weights(config, Pooling::Mean, |hf_name| {
+            let gguf_name = hf_name_to_gguf(hf_name);
+            gguf.load_tensor_f32::<R>(&gguf_name, d)
+        })?;
+        Ok(Self::new(encoder, tokenizer, device))
+    }
+}
+
+/// Map HuggingFace BERT weight names to GGUF standard names.
+///
+/// GGUF (llama.cpp) uses a flat naming scheme for all converted models:
+/// - `token_embd.weight` / `position_embd.weight`
+/// - `blk.{i}.attn_q.weight` / `.bias`, `attn_k`, `attn_v`, `attn_output`
+/// - `blk.{i}.attn_output_norm.weight` / `.bias`
+/// - `blk.{i}.ffn_up.weight` / `.bias` (intermediate.dense)
+/// - `blk.{i}.ffn_down.weight` / `.bias` (output.dense)
+/// - `blk.{i}.layer_output_norm.weight` / `.bias`
+fn hf_name_to_gguf(hf: &str) -> String {
+    // Embeddings
+    if hf == "embeddings.word_embeddings.weight" {
+        return "token_embd.weight".into();
+    }
+    if hf == "embeddings.position_embeddings.weight" {
+        return "position_embd.weight".into();
+    }
+
+    // Encoder layers: encoder.layer.{i}.{rest}
+    if let Some(rest) = hf.strip_prefix("encoder.layer.") {
+        if let Some(dot) = rest.find('.') {
+            let layer = &rest[..dot];
+            let suffix = &rest[dot + 1..];
+            let mapped = match suffix {
+                "attention.self.query.weight" => "attn_q.weight",
+                "attention.self.query.bias" => "attn_q.bias",
+                "attention.self.key.weight" => "attn_k.weight",
+                "attention.self.key.bias" => "attn_k.bias",
+                "attention.self.value.weight" => "attn_v.weight",
+                "attention.self.value.bias" => "attn_v.bias",
+                "attention.output.dense.weight" => "attn_output.weight",
+                "attention.output.dense.bias" => "attn_output.bias",
+                "attention.output.LayerNorm.weight" => "attn_output_norm.weight",
+                "attention.output.LayerNorm.bias" => "attn_output_norm.bias",
+                "intermediate.dense.weight" => "ffn_up.weight",
+                "intermediate.dense.bias" => "ffn_up.bias",
+                "output.dense.weight" => "ffn_down.weight",
+                "output.dense.bias" => "ffn_down.bias",
+                "output.LayerNorm.weight" => "layer_output_norm.weight",
+                "output.LayerNorm.bias" => "layer_output_norm.bias",
+                _ => return hf.to_string(),
+            };
+            return format!("blk.{layer}.{mapped}");
+        }
+    }
+
+    hf.to_string()
 }
 
 #[cfg(test)]

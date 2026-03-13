@@ -121,7 +121,8 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
         let hidden = self.num_heads * self.head_dim;
         let attn_out = var_reshape(&attn_out, &[batch, seq_len, hidden]).map_err(Error::Numr)?;
 
-        self.o_proj.forward(client, &attn_out)
+        let o = self.o_proj.forward(client, &attn_out)?;
+        Ok(o)
     }
 
     fn ffn<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
@@ -134,7 +135,8 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
             HiddenAct::Gelu => Var::new(client.gelu(h.tensor()).map_err(Error::Numr)?, false),
             HiddenAct::Relu => Var::new(client.relu(h.tensor()).map_err(Error::Numr)?, false),
         };
-        self.ffn_down.forward(client, &h)
+        let out = self.ffn_down.forward(client, &h)?;
+        Ok(out)
     }
 }
 
@@ -334,10 +336,12 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         }
     }
 
+    /// Returns the encoder's configuration.
     pub fn config(&self) -> &EncoderConfig {
         &self.config
     }
 
+    /// Returns the pooling strategy used by this encoder.
     pub fn pooling(&self) -> Pooling {
         self.pooling
     }

@@ -35,7 +35,71 @@ fn default_eps() -> f64 {
 }
 
 impl EncoderConfig {
+    /// Compute the dimension of each attention head (`hidden_size / num_attention_heads`).
     pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
+    }
+
+    /// Build an `EncoderConfig` from GGUF metadata keys.
+    ///
+    /// Reads standard BERT GGUF keys:
+    /// - `bert.embedding_length` → `hidden_size`
+    /// - `bert.feed_forward_length` → `intermediate_size`
+    /// - `bert.attention.head_count` → `num_attention_heads`
+    /// - `bert.block_count` → `num_hidden_layers`
+    /// - `bert.context_length` → `max_position_embeddings`
+    ///
+    /// Vocab size is inferred from the `tokenizer.ggml.tokens` array length.
+    pub fn from_gguf_metadata(
+        metadata: &crate::format::GgufMetadata,
+    ) -> crate::error::Result<Self> {
+        use crate::error::Error;
+
+        let hidden_size =
+            metadata
+                .get_u32("bert.embedding_length")
+                .ok_or_else(|| Error::ModelError {
+                    reason: "GGUF missing bert.embedding_length".into(),
+                })? as usize;
+
+        let intermediate_size = metadata
+            .get_u32("bert.feed_forward_length")
+            .ok_or_else(|| Error::ModelError {
+                reason: "GGUF missing bert.feed_forward_length".into(),
+            })? as usize;
+
+        let num_attention_heads =
+            metadata
+                .get_u32("bert.attention.head_count")
+                .ok_or_else(|| Error::ModelError {
+                    reason: "GGUF missing bert.attention.head_count".into(),
+                })? as usize;
+
+        let num_hidden_layers =
+            metadata
+                .get_u32("bert.block_count")
+                .ok_or_else(|| Error::ModelError {
+                    reason: "GGUF missing bert.block_count".into(),
+                })? as usize;
+
+        let max_position_embeddings =
+            metadata.get_u32("bert.context_length").unwrap_or(512) as usize;
+
+        let vocab_size = metadata
+            .get_array("tokenizer.ggml.tokens")
+            .map(|a| a.len())
+            .unwrap_or(30522); // BERT default
+
+        Ok(Self {
+            vocab_size,
+            hidden_size,
+            num_hidden_layers,
+            num_attention_heads,
+            intermediate_size,
+            max_position_embeddings,
+            layer_norm_eps: 1e-12,
+            hidden_act: HiddenAct::Gelu,
+            type_vocab_size: 0,
+        })
     }
 }

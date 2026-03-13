@@ -7,5 +7,6 @@ pub mod safetensors_name_map;
 
 pub use device_map::{DevicePlacement, LayerDeviceMap};
 pub use gguf::{GgmlType, Gguf, GgufMetadata, GgufTensorInfo, GgufValue, GgufValueType};
+pub use gguf_tokenizer::GgufTokenizer;
 pub use safetensors::{SafeTensors, TensorInfo};
 pub use safetensors_loader::SafeTensorsLoader;

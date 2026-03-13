@@ -71,6 +71,10 @@ pub use ops::TensorOps;
 // Re-export MoE expert weight types for blazr's expert offloading
 pub use model::ExpertWeights;
 
+// Re-export embedding pipeline and GGUF tokenizer for sentence embedding use cases
+pub use format::GgufTokenizer;
+pub use model::encoder::{EmbeddingPipeline, Encoder, EncoderClient, EncoderConfig, Pooling};
+
 // Re-export IndexingOps for KV cache bounds
 pub use numr::ops::traits::IndexingOps;
 

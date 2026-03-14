@@ -182,8 +182,20 @@ where
         logits.clone()
     };
     let shape = logits.shape();
+    if shape.len() < 3 {
+        return Err(crate::error::Error::InvalidArgument {
+            arg: "logits",
+            reason: format!("expected rank >= 3, got rank {}", shape.len()),
+        });
+    }
     let seq_len = shape[1];
     let vocab_size = shape[2];
+    if seq_len == 0 || vocab_size == 0 {
+        return Err(crate::error::Error::InvalidArgument {
+            arg: "logits",
+            reason: format!("seq_len and vocab_size must be > 0, got shape {:?}", shape),
+        });
+    }
     let all_logits: Vec<f32> = logits.to_vec();
     let offset = (seq_len - 1) * vocab_size;
     let mut last_logits: Vec<f32> = all_logits[offset..offset + vocab_size].to_vec();
@@ -192,8 +204,9 @@ where
     if num_unique > 0 {
         let ids_vec: Vec<i64> = token_ids.to_vec();
         let counts_vec: Vec<i32> = token_counts.to_vec();
+        let penalty_count = num_unique.min(ids_vec.len()).min(counts_vec.len());
 
-        for idx in 0..num_unique {
+        for idx in 0..penalty_count {
             let token_id = ids_vec[idx] as usize;
             if token_id >= vocab_size {
                 continue;

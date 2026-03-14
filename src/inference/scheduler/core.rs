@@ -1,7 +1,7 @@
 //! Continuous batching sequence scheduler
 
 use crate::error::{Error, Result};
-use crate::inference::memory::{BlockAllocator, BlockTable};
+use crate::inference::memory::{BlockAllocator, BlockId, BlockTable};
 use crate::inference::prefix_cache::PrefixCache;
 use std::collections::{HashMap, VecDeque};
 
@@ -302,12 +302,12 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
     pub fn finish_sequence(&mut self, seq_id: SequenceId) -> Result<()> {
         if let Some(seq) = self.sequences.get_mut(&seq_id) {
             if !seq.block_table.blocks.is_empty() {
-                if let Some(ref mut cache) = self.prefix_cache {
-                    // Release ref-counts; blocks stay in cache for future reuse
-                    let _ = cache.release_blocks(seq_id, &seq.block_table.blocks);
-                } else {
-                    self.allocator.free(&seq.block_table.blocks)?;
-                }
+                Self::release_blocks(
+                    &mut self.prefix_cache,
+                    &self.allocator,
+                    seq_id,
+                    &seq.block_table.blocks,
+                )?;
             }
 
             seq.state = SequenceState::Finished;
@@ -335,7 +335,12 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
             // Free physical blocks first, then clear to prevent double-free on
             // a second call before cleanup_finished() runs.
             if !seq.block_table.blocks.is_empty() {
-                self.allocator.free(&seq.block_table.blocks)?;
+                Self::release_blocks(
+                    &mut self.prefix_cache,
+                    &self.allocator,
+                    seq_id,
+                    &seq.block_table.blocks,
+                )?;
                 seq.block_table.blocks.clear();
             }
 
@@ -369,7 +374,12 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
     fn preempt_sequence(&mut self, seq_id: SequenceId) -> Result<()> {
         if let Some(seq) = self.sequences.get_mut(&seq_id) {
             if !seq.block_table.blocks.is_empty() {
-                self.allocator.free(&seq.block_table.blocks)?;
+                Self::release_blocks(
+                    &mut self.prefix_cache,
+                    &self.allocator,
+                    seq_id,
+                    &seq.block_table.blocks,
+                )?;
             }
 
             seq.state = SequenceState::Preempted;
@@ -441,5 +451,21 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
 
     pub fn has_sequence(&self, seq_id: SequenceId) -> bool {
         self.sequences.contains_key(&seq_id)
+    }
+
+    /// Release physical blocks for a sequence, delegating to the prefix cache
+    /// when present or falling back to the block allocator directly.
+    fn release_blocks(
+        prefix_cache: &mut Option<PrefixCache<A>>,
+        allocator: &A,
+        seq_id: SequenceId,
+        blocks: &[BlockId],
+    ) -> Result<()> {
+        if let Some(cache) = prefix_cache {
+            let _ = cache.release_blocks(seq_id, blocks);
+        } else {
+            allocator.free(blocks)?;
+        }
+        Ok(())
     }
 }

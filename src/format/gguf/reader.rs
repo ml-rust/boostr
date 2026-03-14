@@ -295,6 +295,15 @@ impl Gguf {
                 let row_k = info.shape[0]; // innermost dim (before reversal) = K per row
                 let row_bytes = row_k / block_size * block_bytes;
                 let n_rows = numel / row_k;
+                let expected_bytes = n_rows * row_bytes;
+                if bytes.len() < expected_bytes {
+                    return Err(Error::ModelError {
+                        reason: format!(
+                            "tensor '{name}': expected at least {expected_bytes} bytes for dequantization, got {}",
+                            bytes.len()
+                        ),
+                    });
+                }
                 let mut data = vec![0.0f32; numel];
                 for row in 0..n_rows {
                     let src = &bytes[row * row_bytes..(row + 1) * row_bytes];

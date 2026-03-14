@@ -22,6 +22,7 @@ pub fn fused_dot_row(
         QuantFormat::Q4_0 => fused_dot_q4_0(act_row, weight_row_bytes, k),
         QuantFormat::Q8_0 => fused_dot_q8_0(act_row, weight_row_bytes, k),
         QuantFormat::Q4K => fused_dot_q4k(act_row, weight_row_bytes, k),
+        QuantFormat::Q5K => fused_dot_q5k(act_row, weight_row_bytes, k),
         QuantFormat::Q6K => fused_dot_q6k(act_row, weight_row_bytes, k),
         _ => 0.0, // caller should validate
     }
@@ -125,6 +126,58 @@ fn fused_dot_q4k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
     sum
 }
 
+/// Fused dequant+dot for Q5_K (256-element blocks, 176 bytes each)
+///
+/// Layout: [d: f16, dmin: f16, scales: 12B, qh: 32B, qs: 128B]
+/// 5-bit quantization: 4 low bits from qs + 1 high bit from qh.
+fn fused_dot_q5k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
+    const BLOCK_SIZE: usize = 256;
+    const BLOCK_BYTES: usize = 176;
+    let num_blocks = k / BLOCK_SIZE;
+    let mut sum = 0.0f32;
+
+    for b in 0..num_blocks {
+        let block = &blocks[b * BLOCK_BYTES..];
+        let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
+        let dmin = f16::from_le_bytes([block[2], block[3]]).to_f32();
+        let sc = &block[4..16];
+        let qh = &block[16..48];
+        let qs = &block[48..176];
+        let act_block = &act[b * BLOCK_SIZE..][..BLOCK_SIZE];
+
+        let (scales, mins) = unpack_q4k_q5k_scales(sc);
+
+        for j in 0..8 {
+            let dl = d * scales[j] as f32;
+            let ml = dmin * mins[j] as f32;
+
+            let act_sub = &act_block[j * 32..][..32];
+            let mut dot_sum = 0.0f32;
+            let mut act_sum = 0.0f32;
+
+            #[allow(clippy::needless_range_loop)]
+            for l in 0..32 {
+                let idx = j * 32 + l;
+                let qs_idx = j * 16 + l / 2;
+                let low4 = if l % 2 == 0 {
+                    qs[qs_idx] & 0x0F
+                } else {
+                    (qs[qs_idx] >> 4) & 0x0F
+                };
+                let qh_byte = idx / 8;
+                let qh_bit = idx % 8;
+                let high1 = (qh[qh_byte] >> qh_bit) & 0x01;
+                let q = (low4 | (high1 << 4)) as f32;
+
+                dot_sum += act_sub[l] * q;
+                act_sum += act_sub[l];
+            }
+            sum += dl * dot_sum - ml * act_sum;
+        }
+    }
+    sum
+}
+
 /// Fused dequant+dot for Q6_K (256-element blocks, 210 bytes each)
 fn fused_dot_q6k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
     const BLOCK_SIZE: usize = 256;
@@ -185,6 +238,7 @@ mod tests {
             QuantFormat::Q4_0 => dequant::dequant_q4_0(weight_bytes, &mut dequant_buf),
             QuantFormat::Q8_0 => dequant::dequant_q8_0(weight_bytes, &mut dequant_buf),
             QuantFormat::Q4K => dequant::dequant_q4k(weight_bytes, &mut dequant_buf),
+            QuantFormat::Q5K => dequant::dequant_q5k(weight_bytes, &mut dequant_buf),
             QuantFormat::Q6K => dequant::dequant_q6k(weight_bytes, &mut dequant_buf),
             _ => panic!("unsupported"),
         }
@@ -240,6 +294,37 @@ mod tests {
         block[192..208].fill(1);
         // ql and qh all zeros → q = 0 - 32 = -32 for all
         verify_fused_vs_dequant(&act, &block, k, QuantFormat::Q6K);
+    }
+
+    #[test]
+    fn test_fused_q5k() {
+        let k = 256;
+        let act: Vec<f32> = (0..k).map(|i| (i as f32) * 0.01).collect();
+        let mut block = [0u8; 176];
+        block[0..2].copy_from_slice(&f16::from_f32(1.0).to_le_bytes());
+        block[2..4].copy_from_slice(&f16::from_f32(0.5).to_le_bytes());
+        block[4..8].fill(0x01); // scales
+        block[8..12].fill(0x01); // mins
+        block[16..48].fill(0xAA); // qh: alternating high bits
+        block[48..176].fill(0x55); // qs: nibble=5 for both halves
+        verify_fused_vs_dequant(&act, &block, k, QuantFormat::Q5K);
+    }
+
+    #[test]
+    fn test_fused_q5k_multi_block() {
+        let k = 512;
+        let act: Vec<f32> = (0..k).map(|i| ((i as f32) * 0.01).sin()).collect();
+        let mut weight = vec![0u8; 176 * 2];
+        for blk in 0..2 {
+            let base = blk * 176;
+            weight[base..base + 2].copy_from_slice(&f16::from_f32(1.5).to_le_bytes());
+            weight[base + 2..base + 4].copy_from_slice(&f16::from_f32(0.3).to_le_bytes());
+            weight[base + 4..base + 8].fill(0x02);
+            weight[base + 8..base + 12].fill(0x01);
+            weight[base + 16..base + 48].fill(0x55); // qh
+            weight[base + 48..base + 176].fill(0x37); // qs
+        }
+        verify_fused_vs_dequant(&act, &weight, k, QuantFormat::Q5K);
     }
 
     #[test]

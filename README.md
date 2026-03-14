@@ -40,7 +40,7 @@ boostr extends [numr](https://github.com/ml-rust/numr) with production-grade ML 
 ### Neural Network Modules
 
 - **Linear** — standard and quantized variants
-- **Embedding** and **QuantEmbedding** for low-rank token embedding
+- **Embedding** for token embeddings
 - **LayerNorm**, **RMSNorm** with fused implementations
 - **MoE layers** with expert routing and load balancing
 
@@ -49,8 +49,8 @@ boostr extends [numr](https://github.com/ml-rust/numr) with production-grade ML 
 - **Paged KV cache** with block allocator for memory efficiency
 - **Request scheduler** with continuous batching
 - **Prefix caching** for prompt reuse
-- **Speculative decoding** support
-- **Flash decoding** for long sequences
+- **Speculative decoding** with adaptive draft depth and verification kernels
+- **Flash decoding** for single-token decode (CUDA, auto-selected when S_q=1)
 
 ### Training
 
@@ -137,20 +137,18 @@ cargo test --features cuda
 
 ```rust
 use boostr::*;
-use numr::runtime::cpu::{CpuClient, CpuDevice};
+use numr::ops::RandomOps;
+use numr::runtime::cpu::CpuClient;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create CPU runtime
-    let device = CpuDevice::new();
-    let client = CpuClient::new(device);
+    let client = CpuClient::default();
 
-    // Create tensors via numr (boostr re-exports)
-    let queries = Tensor::randn::<_, f32>(
-        &client,
-        &[batch_size, seq_len, num_heads, head_dim],
-    )?;
+    // Create random tensors via numr's RandomOps (re-exported by boostr)
+    let queries = client.randn(&[1, 32, 8, 64], DType::F32)?;
+    let keys = client.randn(&[1, 32, 8, 64], DType::F32)?;
+    let values = client.randn(&[1, 32, 8, 64], DType::F32)?;
 
-    // Use boostr's extension traits
+    // Use boostr's extension traits for multi-head attention
     use boostr::AttentionOps;
     let output = client.multi_head_attention(
         &queries, &keys, &values,
@@ -165,12 +163,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Loading a Model
 
 ```rust
-use boostr::format::GgufLoader;
+use boostr::format::Gguf;
+use boostr::{CpuRuntime, DType};
+use numr::runtime::Runtime;
 
-// Load a GGUF model with quantized weights
-let loader = GgufLoader::from_path("model.gguf")?;
-let model_config = loader.metadata()?;
-let weights = loader.load_tensors(&client)?;
+// Open a GGUF model file (with optional memory mapping)
+let mut gguf = Gguf::open("model.gguf")?;
+let metadata = gguf.metadata();
+let device = <CpuRuntime as Runtime>::Device::default();
+
+// Load tensors — quantized as QuantTensor, others as f32
+for name in gguf.tensor_names().map(|s| s.to_string()).collect::<Vec<_>>() {
+    let info = gguf.tensor_info(&name)?;
+    if info.ggml_type.is_quantized() {
+        let qt = gguf.load_tensor_quantized::<CpuRuntime>(&name, &device)?;
+    } else {
+        let t = gguf.load_tensor_f32::<CpuRuntime>(&name, &device)?;
+    }
+}
 ```
 
 ### Inference with KV Cache
@@ -236,7 +246,7 @@ boostr is part of the [ml-rust](https://github.com/ml-rust) organization:
 - **[oxidizr](https://github.com/ml-rust/oxidizr)** — Training framework for Mamba2, MLA, MoE (uses boostr)
 - **[blazr](https://github.com/ml-rust/blazr)** — Inference server with OpenAI-compatible API (uses boostr)
 - **[compressr](https://github.com/ml-rust/compressr)** — Model quantization and compression (uses boostr)
-- **[splintr](https://github.com/ml-rust/splintr)** — High-performance BPE tokenizer (10-12x faster than tiktoken)
+- **[splintr](https://github.com/ml-rust/splintr)** — High-performance BPE tokenizer
 
 ## Building from Source
 
@@ -270,7 +280,6 @@ cargo clippy --all-targets
 
 - [API Documentation](https://docs.rs/boostr) — Full reference for public API
 - [numr Documentation](https://docs.rs/numr) — Tensor and runtime types
-- [CLAUDE.md](./CLAUDE.md) — Architecture and development guidelines
 
 ## Testing
 

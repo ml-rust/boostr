@@ -3,7 +3,7 @@
 //! Assigns requests to prefill workers (least-loaded) and routes completed
 //! prefills to decode workers (cache-aware affinity or round-robin fallback).
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use nexar::{NexarClient, Rank};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -165,40 +165,45 @@ impl DisaggRouter {
         );
 
         // Send token IDs to the prefill worker so it can start.
-        transport::send_bytes(
-            &self.client,
-            token_ids_bytes,
-            prefill_rank,
-            transport::tags::ACTIVATION,
-        )
-        .await?;
+        // If any prefill-phase I/O fails we must release the load counter.
+        let prefill_result: Result<PrefillDone> = async {
+            transport::send_bytes(
+                &self.client,
+                token_ids_bytes,
+                prefill_rank,
+                transport::tags::ACTIVATION,
+            )
+            .await?;
 
-        // Send the prefill request descriptor.
-        let prefill_req = PrefillRequest {
-            request_id,
-            seq_len,
-            decode_rank,
-        };
-        transport::send_bytes(
-            &self.client,
-            &prefill_req.to_bytes(),
-            prefill_rank,
-            tags::PREFILL_REQUEST,
-        )
-        .await?;
+            let prefill_req = PrefillRequest {
+                request_id,
+                seq_len,
+                decode_rank,
+            };
+            transport::send_bytes(
+                &self.client,
+                &prefill_req.to_bytes(),
+                prefill_rank,
+                tags::PREFILL_REQUEST,
+            )
+            .await?;
 
-        // Wait for the prefill worker to confirm it has finished and transferred
-        // the KV cache.
-        let mut done_buf = [0u8; 16];
-        transport::recv_bytes(
-            &self.client,
-            &mut done_buf,
-            prefill_rank,
-            tags::PREFILL_DONE,
-        )
-        .await?;
-        let prefill_done = PrefillDone::from_bytes(&done_buf);
+            let mut done_buf = [0u8; 16];
+            transport::recv_bytes(
+                &self.client,
+                &mut done_buf,
+                prefill_rank,
+                tags::PREFILL_DONE,
+            )
+            .await?;
+            Ok(PrefillDone::from_bytes(&done_buf))
+        }
+        .await;
+
+        // Always release the prefill load counter, even on failure.
         self.release_prefill_worker(prefill_rank);
+
+        let prefill_done = prefill_result?;
 
         tracing::debug!(
             request_id = prefill_done.request_id,
@@ -219,9 +224,17 @@ impl DisaggRouter {
         )
         .await?;
 
-        // Collect generated tokens until the decode worker signals completion.
+        // Collect generated tokens until the decode worker sends DECODE_DONE.
+        //
+        // Protocol: the decode worker sends N × DECODE_TOKEN messages followed by
+        // exactly one DECODE_DONE. We must NOT treat a transport error on
+        // DECODE_TOKEN as normal completion — that would silently return
+        // truncated output.
         let mut tokens = Vec::new();
         loop {
+            // Try to receive the next token OR the done signal.
+            // We first attempt DECODE_TOKEN; on success we accumulate.
+            // On failure we check for DECODE_DONE to confirm clean completion.
             let mut token_buf = [0u8; 16];
             match transport::recv_bytes(
                 &self.client,
@@ -233,18 +246,33 @@ impl DisaggRouter {
             {
                 Ok(()) => {
                     let decoded = DecodedToken::from_bytes(&token_buf);
+                    if decoded.is_done() {
+                        // Sentinel token signals end of generation.
+                        break;
+                    }
                     tokens.push(decoded.token_id);
                 }
-                Err(_) => {
+                Err(recv_err) => {
+                    // Check whether decode completion arrived instead.
                     let mut done_buf2 = [0u8; 16];
-                    let _ = transport::recv_bytes(
+                    match transport::recv_bytes(
                         &self.client,
                         &mut done_buf2,
                         decode_rank,
                         tags::DECODE_DONE,
                     )
-                    .await;
-                    break;
+                    .await
+                    {
+                        Ok(()) => break, // Clean completion.
+                        Err(_) => {
+                            // Neither token nor done — real transport failure.
+                            return Err(recv_err.context(format!(
+                                "decode transport error after {} tokens from worker {}",
+                                tokens.len(),
+                                decode_rank
+                            )));
+                        }
+                    }
                 }
             }
         }

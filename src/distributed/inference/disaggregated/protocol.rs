@@ -186,6 +186,20 @@ impl DecodedToken {
             token_id: i64::from_le_bytes(buf[8..16].try_into().unwrap()),
         }
     }
+
+    /// Sentinel value indicating the decode worker has finished generation.
+    /// A token_id of -1 is reserved as the end-of-generation marker.
+    pub fn is_done(&self) -> bool {
+        self.token_id == -1
+    }
+
+    /// Create a sentinel token that signals end of generation.
+    pub fn done(request_id: u64) -> Self {
+        Self {
+            request_id,
+            token_id: -1,
+        }
+    }
 }
 
 #[cfg(test)]

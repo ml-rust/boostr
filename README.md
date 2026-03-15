@@ -78,14 +78,14 @@ boostr extends [numr](https://github.com/ml-rust/numr) with production-grade ML 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
+┌───────────────────────────────────────────────────────┐
 │                    boostr                             │
 │   (attention, RoPE, MoE, quantization, model loaders) │
-└──────────────────────────┬──────────────────────────┘
+└──────────────────────────┬────────────────────────────┘
                            │
                         (uses)
                            │
-┌──────────────────────────▼──────────────────────────┐
+┌──────────────────────────▼───────────────────────────┐
 │                      numr                            │
 │   (tensors, ops, runtime, autograd, linalg, FFT)     │
 └──────────────────────────────────────────────────────┘
@@ -137,23 +137,27 @@ cargo test --features cuda
 
 ```rust
 use boostr::*;
+use boostr::ops::traits::attention::flash::FlashAttentionOps;
 use numr::ops::RandomOps;
-use numr::runtime::cpu::CpuClient;
+use numr::runtime::cpu::{CpuClient, CpuDevice};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = CpuClient::default();
+    let client = CpuClient::new(CpuDevice::new());
 
-    // Create random tensors via numr's RandomOps (re-exported by boostr)
-    let queries = client.randn(&[1, 32, 8, 64], DType::F32)?;
-    let keys = client.randn(&[1, 32, 8, 64], DType::F32)?;
-    let values = client.randn(&[1, 32, 8, 64], DType::F32)?;
+    // Create random tensors via numr's RandomOps
+    let q = client.randn(&[1, 8, 32, 64], DType::F32)?; // [batch, heads, seq, dim]
+    let k = client.randn(&[1, 8, 32, 64], DType::F32)?;
+    let v = client.randn(&[1, 8, 32, 64], DType::F32)?;
 
-    // Use boostr's extension traits for multi-head attention
-    use boostr::AttentionOps;
-    let output = client.multi_head_attention(
-        &queries, &keys, &values,
-        None, // no causal mask
-        1.0,  // scale
+    // Flash Attention forward pass
+    let (output, _lse) = client.flash_attention_fwd(
+        &q, &k, &v,
+        8,    // num_heads
+        8,    // num_kv_heads
+        64,   // head_dim
+        true, // causal
+        0,    // window_size (0 = no sliding window)
+        None, // kv_seq_len override
     )?;
 
     Ok(())

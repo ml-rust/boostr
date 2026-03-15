@@ -116,47 +116,37 @@ pub fn fused_decode_attention(
     Ok((out_tensor, lse_tensor))
 }
 
-/// SIMD dot product of two f32 slices
+/// SIMD dot product of two f32 slices, delegating to shared SIMD kernels.
 #[inline]
 fn dot_f32_simd(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
-    let len = a.len();
 
     #[cfg(target_arch = "x86_64")]
     {
+        let len = a.len();
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            return unsafe { dot_f32_avx2_fma(a.as_ptr(), b.as_ptr(), len) };
+            return unsafe {
+                crate::quant::cpu::kernels::simd::dot_f32::dot_f32_avx2_fma(
+                    a.as_ptr(),
+                    b.as_ptr(),
+                    len,
+                )
+            };
         }
+        a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
     }
 
-    // Scalar fallback
-    a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
-}
-
-/// AVX2+FMA dot product
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2", enable = "fma")]
-unsafe fn dot_f32_avx2_fma(a: *const f32, b: *const f32, len: usize) -> f32 {
+    #[cfg(target_arch = "aarch64")]
     unsafe {
-        const LANES: usize = 8;
-        let chunks = len / LANES;
-        let remainder = len % LANES;
-
-        let mut acc = _mm256_setzero_ps();
-        for i in 0..chunks {
-            let offset = i * LANES;
-            let va = _mm256_loadu_ps(a.add(offset));
-            let vb = _mm256_loadu_ps(b.add(offset));
-            acc = _mm256_fmadd_ps(va, vb, acc);
-        }
-
-        let mut result = hsum_f32_avx2(acc);
-        for i in 0..remainder {
-            let offset = chunks * LANES + i;
-            result += *a.add(offset) * *b.add(offset);
-        }
-        result
+        crate::quant::cpu::kernels::simd::aarch64::dot_f32::dot_f32_neon(
+            a.as_ptr(),
+            b.as_ptr(),
+            a.len(),
+        )
     }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
 }
 
 /// Accumulate: out[i] += weight * v[i] using SIMD
@@ -202,20 +192,6 @@ unsafe fn accumulate_weighted_avx2(out: *mut f32, v: *const f32, weight: f32, le
             *out.add(offset) += weight * *v.add(offset);
         }
     }
-}
-
-/// Horizontal sum of AVX2 register
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn hsum_f32_avx2(v: __m256) -> f32 {
-    let hi128 = _mm256_extractf128_ps(v, 1);
-    let lo128 = _mm256_castps256_ps128(v);
-    let sum128 = _mm_add_ps(lo128, hi128);
-    let hi64 = _mm_movehl_ps(sum128, sum128);
-    let sum64 = _mm_add_ps(sum128, hi64);
-    let hi32 = _mm_shuffle_ps(sum64, sum64, 0b_00_00_00_01);
-    let sum32 = _mm_add_ss(sum64, hi32);
-    _mm_cvtss_f32(sum32)
 }
 
 #[cfg(test)]

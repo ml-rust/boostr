@@ -1,5 +1,8 @@
 //! SIMD helpers for quantized matmul kernels
 
+#[cfg(target_arch = "aarch64")]
+pub mod aarch64;
+
 pub mod dot_f32;
 pub mod fused_q2k_dot;
 pub mod fused_q2k_q8k_dot;

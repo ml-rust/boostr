@@ -21,20 +21,29 @@ use crate::quant::QuantFormat;
 /// f32 dot product with SIMD acceleration when available.
 fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
-    let len = a.len();
 
     #[cfg(target_arch = "x86_64")]
     {
+        let len = a.len();
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return unsafe { super::simd::dot_f32::dot_f32_avx2_fma(a.as_ptr(), b.as_ptr(), len) };
         }
+        a.iter().zip(b.iter()).map(|(&ai, &bi)| ai * bi).sum()
     }
 
-    let mut sum = 0.0f32;
-    for (&ai, &bi) in a.iter().zip(b.iter()) {
-        sum += ai * bi;
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        super::simd::aarch64::dot_f32::dot_f32_neon(a.as_ptr(), b.as_ptr(), a.len())
     }
-    sum
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let mut sum = 0.0f32;
+        for (&ai, &bi) in a.iter().zip(b.iter()) {
+            sum += ai * bi;
+        }
+        sum
+    }
 }
 
 /// Quantized matmul: activation \[M, K\] × weight\[N, K\]^T → output \[M, N\]

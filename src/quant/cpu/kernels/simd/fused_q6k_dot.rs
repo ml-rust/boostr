@@ -131,16 +131,22 @@ pub unsafe fn fused_dot_q6k_avx2(act: &[f32], blocks: &[u8], k: usize) -> f32 {
     }
 }
 
-/// Dispatch wrapper: uses AVX2 if available, falls back to scalar
+/// Dispatch wrapper: uses AVX2 on x86_64, NEON on aarch64, scalar otherwise
 pub fn fused_dot_q6k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return unsafe { fused_dot_q6k_avx2(act, blocks, k) };
         }
+        super::super::fused_dot::fused_dot_row(act, blocks, k, crate::quant::QuantFormat::Q6K)
     }
 
-    // Scalar fallback
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        super::aarch64::fused_q6k::fused_dot_q6k_neon(act, blocks, k)
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     super::super::fused_dot::fused_dot_row(act, blocks, k, crate::quant::QuantFormat::Q6K)
 }
 

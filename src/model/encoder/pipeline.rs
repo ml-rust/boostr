@@ -53,7 +53,8 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
         let input: Vec<i64> = token_ids.into_iter().map(|t| t as i64).collect();
         let input_tensor = Tensor::<R>::from_slice(&input, &[1, seq_len], &self.device);
 
-        let embedding = self.encoder.embed(client, &input_tensor)?;
+        // Single input: no padding, no mask needed.
+        let embedding = self.encoder.embed(client, &input_tensor, None)?;
         Ok(embedding.tensor().to_vec())
     }
 
@@ -78,16 +79,27 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
             return Ok(vec![vec![]; texts.len()]);
         }
 
-        // Pad to max_len (pad token = 0)
+        // Pad to max_len (pad token = 0) and build attention mask.
+        //
+        // The attention mask is a [B, S] float32 tensor: 1.0 for real tokens,
+        // 0.0 for padding positions.  Passing it to `encode` prevents padded
+        // positions from contaminating the attention scores of real tokens.
         let batch_size = texts.len();
         let mut flat: Vec<i64> = Vec::with_capacity(batch_size * max_len);
+        let mut mask_flat: Vec<f32> = Vec::with_capacity(batch_size * max_len);
         for ids in &all_ids {
+            let real_len = ids.len();
             flat.extend(ids.iter().map(|&t| t as i64));
-            flat.extend(std::iter::repeat_n(0i64, max_len - ids.len()));
+            flat.extend(std::iter::repeat_n(0i64, max_len - real_len));
+            mask_flat.extend(std::iter::repeat_n(1.0f32, real_len));
+            mask_flat.extend(std::iter::repeat_n(0.0f32, max_len - real_len));
         }
 
         let input_tensor = Tensor::<R>::from_slice(&flat, &[batch_size, max_len], &self.device);
-        let embeddings = self.encoder.embed(client, &input_tensor)?;
+        let mask_tensor = Tensor::<R>::from_slice(&mask_flat, &[batch_size, max_len], &self.device);
+        let embeddings = self
+            .encoder
+            .embed(client, &input_tensor, Some(&mask_tensor))?;
 
         // Split [B, hidden] → Vec<Vec<f32>>
         let data: Vec<f32> = embeddings.tensor().to_vec();
@@ -147,6 +159,12 @@ fn hf_name_to_gguf(hf: &str) -> String {
     if hf == "embeddings.position_embeddings.weight" {
         return "position_embd.weight".into();
     }
+    if hf == "embeddings.layer_norm.weight" {
+        return "token_embd_norm.weight".into();
+    }
+    if hf == "embeddings.layer_norm.bias" {
+        return "token_embd_norm.bias".into();
+    }
 
     // Encoder layers: encoder.layer.{i}.{rest}
     if let Some(rest) = hf.strip_prefix("encoder.layer.") {
@@ -205,6 +223,8 @@ mod tests {
             layer_norm_eps: 1e-12,
             hidden_act: HiddenAct::Gelu,
             type_vocab_size: 0,
+            arch_family: crate::model::encoder::config::ArchFamily::Bert,
+            padding_token_id: 0,
         };
 
         let d = &device;
@@ -217,6 +237,8 @@ mod tests {
             "embeddings.position_embeddings.weight" => {
                 Ok(Tensor::from_slice(&vec![0.01f32; 64 * 8], &[64, 8], d))
             }
+            "embeddings.layer_norm.weight" => Ok(Tensor::from_slice(&[1.0f32; 8], &[8], d)),
+            "embeddings.layer_norm.bias" => Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d)),
             n if n.ends_with("query.weight")
                 || n.ends_with("key.weight")
                 || n.ends_with("value.weight")
@@ -274,5 +296,132 @@ mod tests {
         let (pipeline, client) = make_test_pipeline();
         let embs = pipeline.embed_texts(&client, &[]).unwrap();
         assert!(embs.is_empty());
+    }
+
+    /// Build a pipeline whose position embeddings are non-uniform so that
+    /// unmasked padding produces a detectably different mean-pool output.
+    fn make_pipeline_with_distinct_positions()
+    -> (EmbeddingPipeline<CpuRuntime>, numr::runtime::cpu::CpuClient) {
+        let (client, device) = cpu_setup();
+
+        let tokenizer = splintr::from_pretrained("cl100k_base").unwrap();
+        let vocab_size = tokenizer.vocab_size();
+
+        let config = EncoderConfig {
+            vocab_size,
+            hidden_size: 8,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 16,
+            max_position_embeddings: 64,
+            layer_norm_eps: 1e-12,
+            hidden_act: HiddenAct::Gelu,
+            type_vocab_size: 0,
+            arch_family: crate::model::encoder::config::ArchFamily::Bert,
+            padding_token_id: 0,
+        };
+
+        let d = &device;
+        // Position embeddings: position i has value (i+1) * 0.1 in all 8 dims,
+        // so different positions produce distinctly different hidden states.
+        let mut pos_emb_data = vec![0.0f32; 64 * 8];
+        for pos in 0..64usize {
+            let v = (pos + 1) as f32 * 0.1;
+            for dim in 0..8usize {
+                pos_emb_data[pos * 8 + dim] = v;
+            }
+        }
+
+        let encoder = Encoder::from_weights(config, Pooling::Mean, |name| match name {
+            "embeddings.word_embeddings.weight" => Ok(Tensor::from_slice(
+                &vec![0.1f32; vocab_size * 8],
+                &[vocab_size, 8],
+                d,
+            )),
+            "embeddings.position_embeddings.weight" => {
+                Ok(Tensor::from_slice(&pos_emb_data, &[64, 8], d))
+            }
+            "embeddings.layer_norm.weight" => Ok(Tensor::from_slice(&[1.0f32; 8], &[8], d)),
+            "embeddings.layer_norm.bias" => Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d)),
+            n if n.ends_with("query.weight")
+                || n.ends_with("key.weight")
+                || n.ends_with("value.weight")
+                || n.ends_with("attention.output.dense.weight") =>
+            {
+                Ok(Tensor::from_slice(&vec![0.02f32; 8 * 8], &[8, 8], d))
+            }
+            n if n.ends_with("query.bias")
+                || n.ends_with("key.bias")
+                || n.ends_with("value.bias")
+                || n.ends_with("attention.output.dense.bias")
+                || n.ends_with("output.dense.bias") =>
+            {
+                Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d))
+            }
+            n if n.ends_with("LayerNorm.weight") => Ok(Tensor::from_slice(&[1.0f32; 8], &[8], d)),
+            n if n.ends_with("LayerNorm.bias") => Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d)),
+            n if n.ends_with("intermediate.dense.weight") => {
+                Ok(Tensor::from_slice(&vec![0.02f32; 16 * 8], &[16, 8], d))
+            }
+            n if n.ends_with("intermediate.dense.bias") => {
+                Ok(Tensor::from_slice(&[0.0f32; 16], &[16], d))
+            }
+            n if n.ends_with("output.dense.weight") => {
+                Ok(Tensor::from_slice(&vec![0.02f32; 8 * 16], &[8, 16], d))
+            }
+            _ => Err(Error::ModelError {
+                reason: format!("unknown weight: {name}"),
+            }),
+        })
+        .unwrap();
+
+        let pipeline = EmbeddingPipeline::new(encoder, tokenizer, device);
+        (pipeline, client)
+    }
+
+    /// Core correctness test: embedding a short sequence alone (no padding)
+    /// must produce the same vector as embedding it in a batch alongside a
+    /// longer sequence (where it is padded on the right).
+    ///
+    /// Without an attention mask the pad tokens contribute to the mean-pool
+    /// output, causing V1 != V1'.  With the mask they are excluded and
+    /// V1 == V1' (within float epsilon).
+    #[test]
+    fn embed_texts_with_padding_excludes_pad_contamination() {
+        let (pipeline, client) = make_pipeline_with_distinct_positions();
+
+        // Embed "hello" alone — no padding, no mask needed.
+        let solo = pipeline.embed_texts(&client, &["hello"]).unwrap();
+        let v1 = &solo[0];
+
+        // Embed "hello" together with a longer text — "hello" gets padded.
+        let batch = pipeline
+            .embed_texts(&client, &["hello", "this is a longer input sequence"])
+            .unwrap();
+        let v1_prime = &batch[0];
+
+        assert_eq!(v1.len(), v1_prime.len());
+
+        // Both should agree to within a small epsilon; if masking is broken
+        // they will differ by the contribution of pad-token hidden states.
+        let max_diff = v1
+            .iter()
+            .zip(v1_prime.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+
+        assert!(
+            max_diff < 1e-5,
+            "pad contamination detected: max element-wise diff = {max_diff:.3e}"
+        );
+    }
+
+    /// Regression guard: a single-text call (no padding path) must not regress.
+    #[test]
+    fn embed_text_single_is_stable() {
+        let (pipeline, client) = make_pipeline_with_distinct_positions();
+        let e1 = pipeline.embed_text(&client, "hello world").unwrap();
+        let e2 = pipeline.embed_text(&client, "hello world").unwrap();
+        assert_eq!(e1, e2);
     }
 }

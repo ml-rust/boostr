@@ -327,7 +327,12 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             }
             Pooling::Cls => {
                 // Take first token (CLS): [B, S, H] → [B, 1, H] → [B, H]
+                //
+                // var_narrow produces a non-contiguous view into [B, S, H] storage
+                // (dim-0 stride remains S*H rather than H).  Make contiguous before
+                // reshape so that layout.reshape() can compute new strides correctly.
                 let cls = var_narrow(&hidden, 1, 0, 1).map_err(Error::Numr)?;
+                let cls = Var::new(cls.tensor().contiguous(), false);
                 let shape = cls.shape().to_vec();
                 let batch = shape[0];
                 let hidden_dim = shape[2];

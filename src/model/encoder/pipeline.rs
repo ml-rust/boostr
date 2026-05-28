@@ -11,8 +11,8 @@
 use super::config::EncoderConfig;
 use super::model::{Encoder, EncoderClient, Pooling};
 use crate::error::Result;
-use crate::format::gguf_tokenizer::GgufTokenizer;
 use crate::format::Gguf;
+use crate::format::gguf_tokenizer::GgufTokenizer;
 use numr::dtype::DType;
 use numr::ops::{IndexingOps, ScalarOps, TensorOps};
 use numr::runtime::Runtime;
@@ -58,8 +58,8 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
         let input_tensor = Tensor::<R>::from_slice(&input, &[1, seq_len], &self.device);
 
         // Single input: no padding, no mask needed.
-        let embedding = self.encoder.embed(client, &input_tensor, None)?;
-        Ok(embedding.tensor().to_vec())
+        let embedding = self.encoder.embed_inference(client, &input_tensor, None)?;
+        Ok(embedding.to_vec())
     }
 
     /// Embed multiple texts → one `[hidden_size]` f32 vector per text.
@@ -116,10 +116,10 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
         let mask_tensor = Tensor::<R>::from_slice(&mask_flat, &[batch_size, max_len], &self.device);
         let embeddings = self
             .encoder
-            .embed(client, &input_tensor, Some(&mask_tensor))?;
+            .embed_inference(client, &input_tensor, Some(&mask_tensor))?;
 
         // Split [B, hidden] → Vec<Vec<f32>>
-        let data: Vec<f32> = embeddings.tensor().to_vec();
+        let data: Vec<f32> = embeddings.to_vec();
         let hidden = self.encoder.config().hidden_size;
         let result = data.chunks_exact(hidden).map(|c| c.to_vec()).collect();
         Ok(result)
@@ -317,8 +317,8 @@ mod tests {
 
     /// Build a pipeline whose position embeddings are non-uniform so that
     /// unmasked padding produces a detectably different mean-pool output.
-    fn make_pipeline_with_distinct_positions(
-    ) -> (EmbeddingPipeline<CpuRuntime>, numr::runtime::cpu::CpuClient) {
+    fn make_pipeline_with_distinct_positions()
+    -> (EmbeddingPipeline<CpuRuntime>, numr::runtime::cpu::CpuClient) {
         let (client, device) = cpu_setup();
 
         let tokenizer = splintr::from_pretrained("cl100k_base").unwrap();

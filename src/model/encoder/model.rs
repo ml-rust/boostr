@@ -336,6 +336,144 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         })
     }
 
+    /// Inference-only forward pass: token IDs → per-token hidden states `[B, S, hidden_size]`.
+    ///
+    /// Identical to `encode` but breaks the autograd graph between each transformer
+    /// layer by calling `.detach()` on the layer output before passing it to the next
+    /// layer. This allows the runtime to reclaim intermediate activations (Q, K, V,
+    /// attention scores, FFN intermediates) as each layer completes rather than
+    /// pinning them all until the final output is dropped.
+    ///
+    /// Use this for all inference paths. `encode` is preserved for training.
+    pub fn encode_inference<C>(
+        &self,
+        client: &C,
+        input_ids: &Tensor<R>,
+        attention_mask: Option<&Tensor<R>>,
+    ) -> Result<Tensor<R>>
+    where
+        C: EncoderClient<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+    {
+        let shape = input_ids.shape().to_vec();
+        let seq_len = *shape.last().ok_or_else(|| Error::ModelError {
+            reason: "input_ids must have at least 1 dimension".into(),
+        })?;
+
+        let tok_emb = self.token_embed.forward(client, input_ids)?;
+
+        let device = input_ids.device();
+        let pos_tensor = match self.config.arch_family {
+            ArchFamily::Bert => {
+                let pos_ids: Vec<i64> = (0..seq_len as i64).collect();
+                Tensor::<R>::from_slice(&pos_ids, &[seq_len], device)
+            }
+            ArchFamily::XlmRoberta => {
+                let pad_id = self.config.padding_token_id;
+                let flat_ids: Vec<i64> = input_ids.to_vec();
+                let batch = if shape.len() == 2 { shape[0] } else { 1 };
+                let mut pos_flat: Vec<i64> = Vec::with_capacity(batch * seq_len);
+                for b in 0..batch {
+                    let mut count: i64 = 0;
+                    for s in 0..seq_len {
+                        let tok = flat_ids[b * seq_len + s];
+                        if tok == pad_id {
+                            pos_flat.push(pad_id);
+                        } else {
+                            count += 1;
+                            pos_flat.push(pad_id + count);
+                        }
+                    }
+                }
+                if shape.len() == 2 {
+                    Tensor::<R>::from_slice(&pos_flat, &[batch, seq_len], device)
+                } else {
+                    Tensor::<R>::from_slice(&pos_flat, &[seq_len], device)
+                }
+            }
+        };
+
+        let pos_emb = self.position_embed.forward(client, &pos_tensor)?;
+
+        let combined = var_add(&tok_emb, &pos_emb, client).map_err(Error::Numr)?;
+        let normed = self.embed_norm.forward(client, &combined)?;
+
+        // Break the graph: start with a detached leaf after embedding norm.
+        let mut hidden = normed.detach();
+
+        for layer in &self.layers {
+            let layer_input = Var::new(hidden.tensor().clone(), false);
+            let out = layer.forward(client, &layer_input, attention_mask)?;
+            // Detach after each layer so prior-layer intermediates can be freed.
+            hidden = out.detach();
+        }
+
+        Ok(hidden.tensor().clone())
+    }
+
+    /// Inference-only pooled embedding: token IDs → `[B, hidden_size]`.
+    ///
+    /// Routes through `encode_inference` so layer intermediates are freed
+    /// progressively. Use this for all inference paths.
+    pub fn embed_inference<C>(
+        &self,
+        client: &C,
+        input_ids: &Tensor<R>,
+        attention_mask: Option<&Tensor<R>>,
+    ) -> Result<Tensor<R>>
+    where
+        C: EncoderClient<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+    {
+        let hidden_var = {
+            let t = self.encode_inference(client, input_ids, attention_mask)?;
+            Var::new(t, false)
+        };
+
+        let pooled = match self.pooling {
+            Pooling::Mean => {
+                if let Some(mask) = attention_mask {
+                    let mask_shape = mask.shape().to_vec();
+                    let batch = mask_shape[0];
+                    let seq_len = mask_shape[1];
+                    let hidden_size = self.config.hidden_size;
+
+                    let mask_3d = mask.reshape(&[batch, seq_len, 1]).map_err(Error::Numr)?;
+                    let masked = client
+                        .mul(hidden_var.tensor(), &mask_3d)
+                        .map_err(Error::Numr)?;
+                    let summed = client.sum(&masked, &[1], false).map_err(Error::Numr)?;
+                    let token_counts = client.sum(mask, &[1], true).map_err(Error::Numr)?;
+                    let token_counts = client
+                        .maximum(
+                            &token_counts,
+                            &Tensor::from_slice(&[1.0f32], &[1], mask.device()),
+                        )
+                        .map_err(Error::Numr)?;
+                    let _ = hidden_size;
+                    client.div(&summed, &token_counts).map_err(Error::Numr)?
+                } else {
+                    client
+                        .mean(hidden_var.tensor(), &[1], false)
+                        .map_err(Error::Numr)?
+                }
+            }
+            Pooling::Cls => {
+                let cls = var_narrow(&hidden_var, 1, 0, 1).map_err(Error::Numr)?;
+                let cls = Var::new(cls.tensor().contiguous(), false);
+                let shape = cls.shape().to_vec();
+                let batch = shape[0];
+                let hidden_dim = shape[2];
+                var_reshape(&cls, &[batch, hidden_dim])
+                    .map_err(Error::Numr)?
+                    .tensor()
+                    .clone()
+            }
+        };
+
+        Ok(pooled)
+    }
+
     /// Forward pass: token IDs → per-token hidden states `[B, S, hidden_size]`.
     ///
     /// `attention_mask`: optional `[B, S]` float tensor where 1.0 = real token,

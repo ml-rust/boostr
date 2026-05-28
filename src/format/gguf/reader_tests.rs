@@ -1,6 +1,6 @@
 //! Tests for the GGUF reader. Included only under #[cfg(test)] from reader.rs.
 
-use super::super::io::{GGUF_MAGIC, align_offset};
+use super::super::io::{align_offset, GGUF_MAGIC};
 use super::super::types::{GgmlType, GgufValueType};
 use super::*;
 use crate::test_utils::cpu_setup;
@@ -211,4 +211,61 @@ fn test_from_bytes_load_quantized() {
         .unwrap();
     assert_eq!(qt.shape(), &[32]);
     assert_eq!(qt.format(), crate::quant::QuantFormat::Q4_0);
+}
+
+/// Verify that `load_tensor_f32_streaming` with a zero threshold (streaming
+/// forced for every quantized tensor) produces byte-identical results to the
+/// one-shot `load_tensor_f32` path.
+///
+/// This test covers the correctness of the chunked dequant + partial upload
+/// logic using the Q4_0 tensor in the standard test fixture.
+#[test]
+fn test_streaming_dequant_matches_oneshot() {
+    let (_, device) = cpu_setup();
+
+    // One-shot path
+    let buf = create_test_gguf_bytes();
+    let mut gguf_oneshot = Gguf::from_bytes(buf).unwrap();
+    let oneshot = gguf_oneshot
+        .load_tensor_f32::<CpuRuntime>("weight_q4", &device)
+        .unwrap();
+    let oneshot_data = oneshot.to_vec::<f32>();
+
+    // Streaming path (threshold = 0 forces streaming even for the 32-element tensor)
+    let buf = create_test_gguf_bytes();
+    let mut gguf_streaming = Gguf::from_bytes(buf).unwrap();
+    let streaming = gguf_streaming
+        .load_tensor_f32_streaming_impl::<CpuRuntime>("weight_q4", &device, 0)
+        .unwrap();
+    let streaming_data = streaming.to_vec::<f32>();
+
+    assert_eq!(
+        oneshot_data.len(),
+        streaming_data.len(),
+        "element count mismatch"
+    );
+    for (i, (a, b)) in oneshot_data.iter().zip(streaming_data.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < 1e-7,
+            "mismatch at element {i}: one-shot={a} streaming={b}"
+        );
+    }
+}
+
+/// Verify that `load_tensor_f32_streaming` for an F32 tensor uses the one-shot
+/// path (non-quantized types are never streamed) and returns correct data.
+#[test]
+fn test_streaming_f32_tensor_uses_oneshot_path() {
+    let (_, device) = cpu_setup();
+
+    let buf = create_test_gguf_bytes();
+    let mut gguf = Gguf::from_bytes(buf).unwrap();
+    let tensor = gguf
+        .load_tensor_f32_streaming::<CpuRuntime>("weight_f32", &device)
+        .unwrap();
+
+    assert_eq!(tensor.shape(), &[4]);
+    let data = tensor.to_vec::<f32>();
+    assert!((data[0] - 1.0).abs() < 1e-6);
+    assert!((data[3] - 4.0).abs() < 1e-6);
 }

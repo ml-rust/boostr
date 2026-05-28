@@ -11,8 +11,8 @@
 use super::config::EncoderConfig;
 use super::model::{Encoder, EncoderClient, Pooling};
 use crate::error::Result;
-use crate::format::Gguf;
 use crate::format::gguf_tokenizer::GgufTokenizer;
+use crate::format::Gguf;
 use numr::dtype::DType;
 use numr::ops::{IndexingOps, ScalarOps, TensorOps};
 use numr::runtime::Runtime;
@@ -48,7 +48,11 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
         C: EncoderClient<R>,
         R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
     {
-        let token_ids = self.tokenizer.encode(text);
+        let max_seq = self.encoder.config().max_position_embeddings;
+        let mut token_ids = self.tokenizer.encode(text);
+        if token_ids.len() > max_seq {
+            token_ids.truncate(max_seq);
+        }
         let seq_len = token_ids.len();
         let input: Vec<i64> = token_ids.into_iter().map(|t| t as i64).collect();
         let input_tensor = Tensor::<R>::from_slice(&input, &[1, seq_len], &self.device);
@@ -71,8 +75,21 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
             return Ok(vec![]);
         }
 
-        // Tokenize all texts
-        let all_ids: Vec<Vec<u32>> = texts.iter().map(|t| self.tokenizer.encode(t)).collect();
+        // Tokenize all texts, truncating each to the encoder's positional
+        // bound. Position embeddings are not defined past that length and
+        // the attention-scores tensor scales as seq², so unbounded inputs
+        // can produce GB-scale activations on a small model.
+        let max_seq = self.encoder.config().max_position_embeddings;
+        let all_ids: Vec<Vec<u32>> = texts
+            .iter()
+            .map(|t| {
+                let mut ids = self.tokenizer.encode(t);
+                if ids.len() > max_seq {
+                    ids.truncate(max_seq);
+                }
+                ids
+            })
+            .collect();
         let max_len = all_ids.iter().map(|ids| ids.len()).max().unwrap_or(0);
 
         if max_len == 0 {
@@ -300,8 +317,8 @@ mod tests {
 
     /// Build a pipeline whose position embeddings are non-uniform so that
     /// unmasked padding produces a detectably different mean-pool output.
-    fn make_pipeline_with_distinct_positions()
-    -> (EmbeddingPipeline<CpuRuntime>, numr::runtime::cpu::CpuClient) {
+    fn make_pipeline_with_distinct_positions(
+    ) -> (EmbeddingPipeline<CpuRuntime>, numr::runtime::cpu::CpuClient) {
         let (client, device) = cpu_setup();
 
         let tokenizer = splintr::from_pretrained("cl100k_base").unwrap();

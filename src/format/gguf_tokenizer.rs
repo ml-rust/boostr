@@ -16,6 +16,7 @@ use splintr::{SentencePieceTokenizer, Tokenize, TokenizeError, WordPieceTokenize
 /// - `"llama"` / `"gpt2"` → [`SentencePieceTokenizer`]
 pub struct GgufTokenizer {
     inner: Box<dyn Tokenize>,
+    eos_token_id: u32,
 }
 
 impl GgufTokenizer {
@@ -48,9 +49,11 @@ impl GgufTokenizer {
         // if vocab contains lowercase "the" but not "The", it's uncased
         let do_lower_case = tokens.iter().any(|t| t == "the") && !tokens.iter().any(|t| t == "The");
 
+        let eos_token_id = metadata.get_u32("tokenizer.ggml.eos_token_id").unwrap_or(0);
         let inner = WordPieceTokenizer::new(tokens, unk_token_id, 200, do_lower_case);
         Ok(Self {
             inner: Box::new(inner),
+            eos_token_id,
         })
     }
 
@@ -82,7 +85,18 @@ impl GgufTokenizer {
 
         Ok(Self {
             inner: Box::new(inner),
+            eos_token_id,
         })
+    }
+
+    /// EOS token ID from GGUF metadata.
+    pub fn eos_token_id(&self) -> u32 {
+        self.eos_token_id
+    }
+
+    /// Whether a token ID is the EOS token.
+    pub fn is_eos(&self, token_id: u32) -> bool {
+        token_id == self.eos_token_id
     }
 
     /// Encode text to token IDs.

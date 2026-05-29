@@ -1,6 +1,6 @@
 //! Tests for the GGUF reader. Included only under #[cfg(test)] from reader.rs.
 
-use super::super::io::{align_offset, GGUF_MAGIC};
+use super::super::io::{GGUF_MAGIC, align_offset};
 use super::super::types::{GgmlType, GgufValueType};
 use super::*;
 use crate::test_utils::cpu_setup;

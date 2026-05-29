@@ -4,13 +4,13 @@
 //! and tensor data. F32 tensors are loaded as `Tensor<R>`, quantized tensors
 //! as `QuantTensor<R>`.
 
+use super::GgufTensorInfo;
 use super::io::{
-    align_offset, read_kv_pair, read_tensor_info, read_u32, read_u64, GGUF_DEFAULT_ALIGNMENT,
-    GGUF_MAGIC,
+    GGUF_DEFAULT_ALIGNMENT, GGUF_MAGIC, align_offset, read_kv_pair, read_tensor_info, read_u32,
+    read_u64,
 };
 use super::metadata::GgufMetadata;
 use super::types::GgmlType;
-use super::GgufTensorInfo;
 use crate::error::{Error, Result};
 use crate::quant::QuantTensor;
 use memmap2::Mmap;

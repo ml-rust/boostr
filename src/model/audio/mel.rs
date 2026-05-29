@@ -5,6 +5,8 @@
 
 use std::f32::consts::PI;
 
+use super::fft::power_spectrum_rfft;
+
 /// Convert frequency in Hz to mel scale (HTK formula).
 #[inline]
 pub fn hz_to_mel(hz: f32) -> f32 {
@@ -42,7 +44,9 @@ pub fn compute_mel_spectrogram(
 ) -> Vec<f32> {
     let window_size = 400; // 25ms at 16kHz
     let hop_size = 160; // 10ms at 16kHz
-    let fft_size = window_size; // no zero-padding beyond window
+    // Pad to next power of 2 so the radix-2 FFT is usable. The frequency
+    // resolution shift (vs n_fft=400) is smoothed out by the mel filterbank.
+    let fft_size = 512;
 
     // Precompute Hann window
     let hann: Vec<f32> = (0..window_size)
@@ -83,49 +87,42 @@ pub fn compute_mel_spectrogram(
         }
     }
 
-    // Compute STFT power spectrum and apply filterbank
+    // Reusable per-frame buffer of `fft_size` real samples (windowed + zero-padded
+    // beyond `window_size`).
+    let mut windowed = vec![0.0f32; fft_size];
     let mut output = vec![0.0f32; num_mel_bins * num_frames];
 
     for frame_idx in 0..num_frames {
         let start = frame_idx * hop_size;
 
-        // Apply window and compute DFT (real input, brute-force DFT for correctness)
-        let mut real_parts = vec![0.0f32; num_fft_bins];
-        let mut imag_parts = vec![0.0f32; num_fft_bins];
-
-        for k in 0..num_fft_bins {
-            let mut re = 0.0f32;
-            let mut im = 0.0f32;
-            for n in 0..window_size {
-                let sample = if start + n < samples.len() {
-                    samples[start + n]
-                } else {
-                    0.0
-                };
-                let windowed = sample * hann[n];
-                let angle = -2.0 * PI * k as f32 * n as f32 / fft_size as f32;
-                re += windowed * angle.cos();
-                im += windowed * angle.sin();
-            }
-            real_parts[k] = re;
-            imag_parts[k] = im;
+        // Apply Hann window over the first `window_size` samples; the rest stays
+        // zero (implicit zero-padding up to `fft_size`).
+        for n in 0..window_size {
+            let sample = if start + n < samples.len() {
+                samples[start + n]
+            } else {
+                0.0
+            };
+            windowed[n] = sample * hann[n];
+        }
+        for v in windowed
+            .iter_mut()
+            .skip(window_size)
+            .take(fft_size - window_size)
+        {
+            *v = 0.0;
         }
 
-        // Power spectrum
-        let power: Vec<f32> = real_parts
-            .iter()
-            .zip(imag_parts.iter())
-            .map(|(re, im)| re * re + im * im)
-            .collect();
+        // Radix-2 FFT → power spectrum (`fft_size/2 + 1` bins).
+        let power = power_spectrum_rfft(&windowed, fft_size);
 
-        // Apply mel filterbank and log
+        // Apply mel filterbank and log.
         for m in 0..num_mel_bins {
             let mut energy = 0.0f32;
             for k in 0..num_fft_bins {
                 energy += filterbank[m * num_fft_bins + k] * power[k];
             }
-            // Log with floor to avoid log(0)
-            output[m * num_frames + frame_idx] = (energy.max(1e-10)).ln();
+            output[m * num_frames + frame_idx] = energy.max(1e-10).ln();
         }
     }
 

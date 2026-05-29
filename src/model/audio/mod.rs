@@ -1,4 +1,22 @@
+pub mod fft;
+pub mod g2p;
+pub mod kokoro;
 pub mod mel;
+pub mod reflection_pad;
+pub mod stft;
+pub mod tts_bundle;
+pub mod wav_encode;
 pub mod whisper;
+pub mod whisper_decoder;
+pub mod whisper_loader;
+pub mod whisper_model;
 
+pub use g2p::{G2pError, Lang, Phonemizer};
+pub use reflection_pad::reflection_pad_1d;
+pub use stft::{StftOptions, stft};
+pub use tts_bundle::{SynthesizeOptions, TtsBundle, TtsError, Voice, default_kokoro_voices};
+pub use wav_encode::{encode_pcm16_raw, encode_wav_f32, encode_wav_pcm16};
 pub use whisper::WhisperEncoder;
+pub use whisper_decoder::{DecoderCache, DecoderLayerCache, WhisperDecoder, WhisperDecoderLayer};
+pub use whisper_loader::WhisperBundle;
+pub use whisper_model::{GenerateOptions, WhisperModel};

@@ -215,12 +215,26 @@ pub(super) fn dispatch_matmul(
     let k_u32 = k as u32;
     let n_u32 = n as u32;
 
-    let block_x = 16u32;
-    let block_y = 16u32;
-    let cfg = LaunchConfig {
-        grid_dim: (n_u32.div_ceil(block_x), m_u32.div_ceil(block_y), 1),
-        block_dim: (block_x, block_y, 1),
-        shared_mem_bytes: 0,
+    // Q4K uses a 16×16 output-tiled kernel: each block computes a TM×TN=16×16
+    // output tile with 128 threads (2 outputs/thread). Shared memory holds the
+    // activation tile (TM × 256 × 4 = 16 KB). Grid = (ceil(N/16), ceil(M/16)).
+    // For M=2000, N=4096: grid = (256, 125) = 32,000 blocks vs 8M previously.
+    // All other formats use the classic 16×16 tiled GEMM.
+    let cfg = if weight.format() == QuantFormat::Q4K {
+        LaunchConfig {
+            grid_dim: (n_u32.div_ceil(16), m_u32.div_ceil(16), 1),
+            block_dim: (128, 1, 1),
+            // activation tile: TM(16) × 256 × 4 bytes = 16,384 bytes
+            shared_mem_bytes: 16384,
+        }
+    } else {
+        let block_x = 16u32;
+        let block_y = 16u32;
+        LaunchConfig {
+            grid_dim: (n_u32.div_ceil(block_x), m_u32.div_ceil(block_y), 1),
+            block_dim: (block_x, block_y, 1),
+            shared_mem_bytes: 0,
+        }
     };
 
     let module = kernels::get_or_load_module(client.context(), device_index, module_name)?;

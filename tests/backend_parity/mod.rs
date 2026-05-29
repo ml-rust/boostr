@@ -13,6 +13,7 @@ pub mod moe;
 pub mod paged_attention;
 pub mod quant_fused;
 pub mod quant_int4_gemm;
+pub mod quant_matmul_q4k;
 pub mod quant_nf4;
 pub mod rope;
 pub mod speculative;

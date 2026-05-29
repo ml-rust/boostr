@@ -90,7 +90,20 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
                 ids
             })
             .collect();
-        let max_len = all_ids.iter().map(|ids| ids.len()).max().unwrap_or(0);
+        // Round up to the next multiple of 16 so numr's WMMA tensor-core GEMM
+        // fires on the attention M/N dimensions (requires alignment to 16).
+        // Capped at max_seq (already used for truncation above) so we never
+        // exceed the model's positional embedding limit.  Padding positions are
+        // masked to 0.0 in the attention mask, so they cannot contaminate the
+        // mean-pooled embedding (normalised by real token count).
+        let max_len = {
+            let raw = all_ids.iter().map(|ids| ids.len()).max().unwrap_or(0);
+            if raw == 0 {
+                0
+            } else {
+                raw.next_multiple_of(16).min(max_seq)
+            }
+        };
 
         if max_len == 0 {
             return Ok(vec![vec![]; texts.len()]);
@@ -242,6 +255,7 @@ mod tests {
             type_vocab_size: 0,
             arch_family: crate::model::encoder::config::ArchFamily::Bert,
             padding_token_id: 0,
+            compute_dtype: numr::dtype::DType::F32,
         };
 
         let d = &device;
@@ -336,6 +350,7 @@ mod tests {
             type_vocab_size: 0,
             arch_family: crate::model::encoder::config::ArchFamily::Bert,
             padding_token_id: 0,
+            compute_dtype: numr::dtype::DType::F32,
         };
 
         let d = &device;

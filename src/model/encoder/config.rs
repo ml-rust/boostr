@@ -1,5 +1,6 @@
 //! Encoder model configuration (BERT-style transformer encoders).
 
+use numr::dtype::DType;
 use serde::{Deserialize, Serialize};
 
 /// Architecture family for position-id generation and embedding behaviour.
@@ -45,6 +46,18 @@ pub struct EncoderConfig {
     /// BERT default: 0.  XLM-RoBERTa default: 1.
     #[serde(default)]
     pub padding_token_id: i64,
+    /// Compute dtype for the encoder forward pass.
+    ///
+    /// `DType::F32` (the default) reproduces existing behaviour exactly.
+    /// `DType::F16` pre-dequantizes quantized projection weights to F16 at load
+    /// time and runs all activations in F16, routing through numr's WMMA tensor-
+    /// core GEMM and fused F16 kernels.  The pooled output is always cast back to
+    /// F32 before returning so callers (e.g. the classifier head and CUDA graph
+    /// buffers) remain unchanged.
+    ///
+    /// Only effective on CUDA; ignored on CPU (weights and activations stay F32).
+    #[serde(skip, default = "default_compute_dtype")]
+    pub compute_dtype: DType,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -57,6 +70,10 @@ pub enum HiddenAct {
 
 fn default_eps() -> f64 {
     1e-12
+}
+
+fn default_compute_dtype() -> DType {
+    DType::F32
 }
 
 impl EncoderConfig {
@@ -146,6 +163,7 @@ impl EncoderConfig {
             type_vocab_size: 0,
             arch_family,
             padding_token_id,
+            compute_dtype: DType::F32,
         })
     }
 }

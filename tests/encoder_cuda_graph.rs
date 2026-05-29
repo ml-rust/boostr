@@ -77,6 +77,7 @@ fn make_cuda_test_encoder() -> (Encoder<CudaRuntime>, CudaClient, CudaDevice) {
         type_vocab_size: 0,
         arch_family: ArchFamily::Bert,
         padding_token_id: 0,
+        compute_dtype: numr::dtype::DType::F32,
     };
 
     let d = &device;

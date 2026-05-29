@@ -22,6 +22,7 @@ fn make_test_encoder() -> (
         type_vocab_size: 0,
         arch_family: ArchFamily::Bert,
         padding_token_id: 0,
+        compute_dtype: numr::dtype::DType::F32,
     };
 
     let encoder = Encoder::from_weights(config, Pooling::Mean, |name| match name {
@@ -96,6 +97,7 @@ fn make_test_encoder_cls() -> (
         type_vocab_size: 0,
         arch_family: ArchFamily::Bert,
         padding_token_id: 0,
+        compute_dtype: numr::dtype::DType::F32,
     };
 
     let device_ref = &device;
@@ -227,6 +229,7 @@ fn test_xlm_roberta_position_ids() {
         type_vocab_size: 0,
         arch_family: ArchFamily::XlmRoberta,
         padding_token_id: 1,
+        compute_dtype: numr::dtype::DType::F32,
     };
 
     let device_ref = &device;
@@ -321,6 +324,7 @@ fn test_from_weights_quant_forward_shape() {
         type_vocab_size: 0,
         arch_family: ArchFamily::Bert,
         padding_token_id: 0,
+        compute_dtype: numr::dtype::DType::F32,
     };
 
     let make_q8_0 = |rows: usize, cols: usize| -> QuantTensor<CpuRuntime> {
@@ -330,7 +334,7 @@ fn test_from_weights_quant_forward_shape() {
     };
 
     let d = &device;
-    let encoder = Encoder::from_weights_quant(config, Pooling::Mean, |name| {
+    let encoder = Encoder::from_weights_quant(config, Pooling::Mean, &client, |name| {
         let is_proj = name.contains("attention.self.query.weight")
             || name.contains("attention.self.key.weight")
             || name.contains("attention.self.value.weight")

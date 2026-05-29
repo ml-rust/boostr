@@ -99,21 +99,20 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
         let k = var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
         let v = var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
 
-        let q = Var::new(q.tensor().contiguous(), false);
-        let k = Var::new(k.tensor().contiguous(), false);
-        let v = Var::new(v.tensor().contiguous(), false);
-
-        let k_t = var_transpose(&k).map_err(Error::Numr)?;
-        let scores = var_matmul(&q, &k_t, client).map_err(Error::Numr)?;
-        let scale = 1.0 / (self.head_dim as f32).sqrt();
-        let scores = Var::new(
-            client
-                .mul_scalar(scores.tensor(), scale as f64)
-                .map_err(Error::Numr)?,
+        // Fold the attention scale into Q (removes a [B,H,S,D] mul_scalar pass later).
+        let scale = 1.0 / (self.head_dim as f64).sqrt();
+        let q_scaled = Var::new(
+            client.mul_scalar(q.tensor(), scale).map_err(Error::Numr)?,
             false,
         );
+        let q_scaled = Var::new(q_scaled.tensor().contiguous()?, false);
+        let k = Var::new(k.tensor().contiguous()?, false);
+        let v = Var::new(v.tensor().contiguous()?, false);
 
-        let scores = if let Some(mask) = attention_mask {
+        let k_t = var_transpose(&k).map_err(Error::Numr)?;
+        let scores = var_matmul(&q_scaled, &k_t, client).map_err(Error::Numr)?;
+
+        let attn_weights = if let Some(mask) = attention_mask {
             let mask_shape = mask.shape().to_vec();
             if mask_shape.len() != 2 || mask_shape[0] != batch || mask_shape[1] != seq_len {
                 return Err(Error::ModelError {
@@ -123,27 +122,48 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
                     ),
                 });
             }
+            // Build the additive mask on the mask's dtype (always F32), then cast
+            // to match the scores dtype when running in F16.  Using -30000.0 instead
+            // of -1e9: the F16 range is ±65504 so -1e9 would overflow to -inf.
+            // -30000.0 fits in F16 and is small enough that softmax drives the
+            // masked positions to zero (exp(-30000 - max) ≈ 0).  If scores are F32
+            // we keep -1e9 so existing behaviour is preserved exactly.
             let inv = client.rsub_scalar(mask, 1.0).map_err(Error::Numr)?;
-            let additive = client.mul_scalar(&inv, -1e9).map_err(Error::Numr)?;
+            let scores_dtype = scores.tensor().dtype();
+            let additive_val = if scores_dtype == DType::F16 {
+                -30000.0f64
+            } else {
+                -1e9f64
+            };
+            let additive_f32 = client.mul_scalar(&inv, additive_val).map_err(Error::Numr)?;
+            // Cast additive to scores dtype so binary add is dtype-homogeneous.
+            let additive = if scores_dtype != DType::F32 {
+                client
+                    .cast(&additive_f32, scores_dtype)
+                    .map_err(Error::Numr)?
+            } else {
+                additive_f32
+            };
             let additive = additive
                 .reshape(&[batch, 1, 1, seq_len])
                 .map_err(Error::Numr)?;
-            let biased = client
-                .add(scores.tensor(), &additive)
-                .map_err(Error::Numr)?;
-            Var::new(biased, false)
+            // Fused: softmax(scores + additive, -1) in a single kernel pass.
+            Var::new(
+                client
+                    .softmax_with_bias(scores.tensor(), &additive, -1)
+                    .map_err(Error::Numr)?,
+                false,
+            )
         } else {
-            scores
+            Var::new(
+                client.softmax(scores.tensor(), -1).map_err(Error::Numr)?,
+                false,
+            )
         };
-
-        let attn_weights = Var::new(
-            client.softmax(scores.tensor(), -1).map_err(Error::Numr)?,
-            false,
-        );
         let attn_out = var_matmul(&attn_weights, &v, client).map_err(Error::Numr)?;
 
         let attn_out = var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = Var::new(attn_out.tensor().contiguous(), false);
+        let attn_out = Var::new(attn_out.tensor().contiguous()?, false);
         let hidden = self.num_heads * self.head_dim;
         let attn_out = var_reshape(&attn_out, &[batch, seq_len, hidden]).map_err(Error::Numr)?;
 

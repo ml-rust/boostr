@@ -17,25 +17,6 @@ use numr::runtime::Runtime;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-/// Size of the per-graph scratch arena for graph-internal intermediate tensors.
-///
-/// All allocations made inside the CUDA graph capture closure are redirected
-/// into this pre-allocated device buffer.  Because the buffer is allocated
-/// BEFORE `cuStreamBeginCapture`, its device address is stable across graph
-/// replays — this prevents `CUDA_ERROR_ILLEGAL_ADDRESS` on the second and
-/// subsequent calls to `cuGraphLaunch`.
-///
-/// 256 MiB is a conservative bound for a 24-layer encoder at the largest
-/// expected bench shape (B=64, S=512, H=1024).  Peak live intermediates at
-/// any one time are roughly one-layer's worth; the bump-pointer arena LIFO
-/// reclaims them between layers, so the peak working set is well under 64 MiB.
-/// The 256 MiB ceiling gives comfortable headroom for larger models and
-/// longer sequences.
-///
-/// If this triggers OOM for a truly large model, reduce the batch size or
-/// increase this constant.
-const ENCODER_ARENA_BYTES: usize = 256 * 1024 * 1024;
-
 use crate::error::{Error, Result};
 use crate::model::encoder::config::EncoderConfig;
 use crate::model::encoder::model::graph_cache::CapturedForward;
@@ -198,15 +179,15 @@ fn capture_and_run(
     // The closure writes into `stable_out` (outside the capture region) via an
     // in-graph D2D copy, so it is NOT subject to AUTO_FREE_ON_LAUNCH.
     //
-    // Arena: all intermediate tensors allocated INSIDE the closure (the ~22
-    // intermediates per encoder forward) are redirected into a pre-allocated
-    // device buffer.  Because the arena buffer was allocated BEFORE capture
-    // begins, its address is stable across replays — no CUDA_ERROR_ILLEGAL_ADDRESS.
-    let captured = CudaRuntime::capture_graph_into_with_arena(
+    // Intermediates: all tensors allocated INSIDE the closure (the ~22
+    // intermediates per encoder forward) become driver-managed MEM_ALLOC graph
+    // nodes via cuMemAllocAsync. AUTO_FREE_ON_LAUNCH reclaims them at the
+    // end of each replay, so they are correctly managed across launches
+    // without a pre-allocated arena.
+    let captured = CudaRuntime::capture_graph_into(
         client,
         &[&input_ids_buf, &pos_ids_buf, &mask_buf],
         &[&stable_out],
-        ENCODER_ARENA_BYTES,
         |cc| {
             let hidden = enc
                 .encode_inference_with_pos(cc, ids_ref, pos_ref, Some(mask_ref))
@@ -329,7 +310,7 @@ fn pool_hidden(
         }
         Pooling::Cls => {
             let cls = var_narrow(&hidden_var, 1, 0, 1).map_err(Error::Numr)?;
-            let cls = Var::new(cls.tensor().contiguous(), false);
+            let cls = Var::new(cls.tensor().contiguous()?, false);
             let sh = cls.shape().to_vec();
             let b = sh[0];
             let h = sh[2];

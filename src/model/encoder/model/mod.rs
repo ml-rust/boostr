@@ -186,6 +186,10 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
 
         let combined = var_add(&tok_emb, &pos_emb, client).map_err(Error::Numr)?;
         let normed = self.embed_norm.forward(client, &combined)?;
+
+        // When compute_dtype == F16, the embedding weights are already F16 so
+        // `normed` is F16.  We keep them as-is and the transformer layers run F16.
+        // When compute_dtype == F32 (default), everything stays F32 — no cast needed.
         let mut hidden = normed.detach();
 
         for layer in &self.layers {
@@ -194,7 +198,18 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             hidden = out.detach();
         }
 
-        Ok(hidden.tensor().clone())
+        // F16 path: cast final hidden states back to F32 so pooling, the CUDA graph
+        // output buffer, and the classifier head all receive F32 tensors unchanged.
+        let output =
+            if self.config.compute_dtype == DType::F16 && hidden.tensor().dtype() == DType::F16 {
+                client
+                    .cast(hidden.tensor(), DType::F32)
+                    .map_err(Error::Numr)?
+            } else {
+                hidden.tensor().clone()
+            };
+
+        Ok(output)
     }
 
     /// Inference-only forward pass: token IDs → per-token hidden states `[B, S, hidden_size]`.
@@ -300,7 +315,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             }
             Pooling::Cls => {
                 let cls = var_narrow(&hidden_var, 1, 0, 1).map_err(Error::Numr)?;
-                let cls = Var::new(cls.tensor().contiguous(), false);
+                let cls = Var::new(cls.tensor().contiguous()?, false);
                 let shape = cls.shape().to_vec();
                 let batch = shape[0];
                 let hidden_dim = shape[2];
@@ -399,7 +414,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             }
             Pooling::Cls => {
                 let cls = var_narrow(&hidden, 1, 0, 1).map_err(Error::Numr)?;
-                let cls = Var::new(cls.tensor().contiguous(), false);
+                let cls = Var::new(cls.tensor().contiguous()?, false);
                 let shape = cls.shape().to_vec();
                 let batch = shape[0];
                 let hidden_dim = shape[2];

@@ -1,4 +1,5 @@
 pub mod activation;
+pub mod adain;
 pub mod conv1d;
 pub mod conv2d;
 pub mod dropout;
@@ -8,6 +9,7 @@ pub mod layernorm;
 pub mod linear;
 pub mod lora;
 pub mod loss;
+pub mod lstm;
 pub mod mla;
 pub mod module;
 pub mod moe;
@@ -18,8 +20,10 @@ pub mod var_builder;
 #[path = "varmap/mod.rs"]
 pub mod varmap;
 pub mod weight;
+pub mod weight_norm;
 
 pub use activation::Activation;
+pub use adain::AdaIn1d;
 pub use conv1d::Conv1d;
 pub use conv2d::Conv2d;
 pub use dropout::Dropout;
@@ -32,6 +36,7 @@ pub use loss::{
     contrastive_loss, cross_entropy_loss, cross_entropy_loss_smooth, focal_loss, kl_div_loss,
     mse_loss,
 };
+pub use lstm::{BiLstm, Lstm};
 pub use mla::{Mla, MlaConfig};
 pub use module::{Module, StateDict, TrainMode};
 pub use moe::{
@@ -43,3 +48,4 @@ pub use stochastic_depth::StochasticDepth;
 pub use var_builder::VarBuilder;
 pub use varmap::{Init, VarMap};
 pub use weight::Weight;
+pub use weight_norm::fuse_weight_norm;

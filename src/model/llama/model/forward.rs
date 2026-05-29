@@ -182,18 +182,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
             + CompareOps<R>
             + ConditionalOps<R>,
     {
-        // Embed tokens: [B, S] -> [B, S, hidden]
-        let mut hidden = self.embed_tokens.forward(client, input_ids.tensor())?;
-
-        // Transformer blocks
-        for layer in &self.layers {
-            hidden = layer.forward(client, &hidden, &self.rope)?;
-        }
-
-        // Final norm
-        hidden = self.norm.forward(client, &hidden)?;
-
-        // LM head: [B, S, hidden] -> [B, S, vocab]
+        let hidden = self.forward_hidden(client, input_ids.tensor())?;
         self.lm_head.forward(client, &hidden)
     }
 

@@ -24,8 +24,8 @@ pub(super) fn detect_mamba2_params(
         if info.shape.len() == 3 {
             config.mamba2_conv_kernel = Some(info.shape[2]);
             let d_inner = info.shape[0];
-            if config.hidden_size > 0 {
-                config.mamba2_expand = Some(d_inner / config.hidden_size);
+            if let Some(expand) = d_inner.checked_div(config.hidden_size) {
+                config.mamba2_expand = Some(expand);
             }
         }
     }
@@ -84,8 +84,8 @@ pub(super) fn detect_mamba3_params(
                 // mimo_x_up: [head_dim * mimo_rank, head_dim]
                 let out_dim = info.shape[0];
                 let in_dim = info.shape[1];
-                if in_dim > 0 {
-                    config.mamba3_mimo_rank = Some(out_dim / in_dim);
+                if let Some(rank) = out_dim.checked_div(in_dim) {
+                    config.mamba3_mimo_rank = Some(rank);
                 }
             }
         }

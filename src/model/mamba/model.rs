@@ -136,6 +136,42 @@ where
         Ok(logits.tensor().clone())
     }
 
+    /// Contextualized hidden states for embedding extraction.
+    ///
+    /// Runs embed + all Mamba2 layers + final norm (no `lm_head`) with a fresh,
+    /// throwaway SSM state. Returns shape `[batch, seq_len, hidden]`.
+    pub fn forward_hidden<C>(
+        &self,
+        client: &C,
+        input_ids: &Tensor<R>,
+    ) -> Result<numr::autograd::Var<R>>
+    where
+        C: ModelClient<R> + ConvOps<R> + NormalizationOps<R> + UnaryOps<R> + ActivationOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ActivationOps<R>
+            + ConvOps<R>
+            + ReduceOps<R>
+            + BinaryOps<R>
+            + IndexingOps<R>,
+    {
+        let batch = input_ids.shape()[0];
+        let device = input_ids.device();
+        let dtype = self.embed_tokens.weight().tensor().dtype();
+        let mut ssm_state =
+            LayeredSsmState::<R>::new(self.layers.len(), batch, &self.mamba_config, dtype, device);
+
+        let mut hidden = self.embed_tokens.forward(client, input_ids)?;
+        for (i, layer) in self.layers.iter().enumerate() {
+            let state = ssm_state.layer_mut(i).ok_or_else(|| Error::ModelError {
+                reason: format!("SSM state missing for layer {i}"),
+            })?;
+            hidden = layer.forward_inference(client, &hidden, state)?;
+        }
+        hidden = self.norm.forward(client, &hidden)?;
+        Ok(hidden)
+    }
+
     /// Get the universal config.
     pub fn config(&self) -> &UniversalConfig {
         &self.config

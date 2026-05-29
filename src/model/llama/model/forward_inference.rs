@@ -15,6 +15,36 @@ use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
 impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
+    /// Contextualized hidden states: `[B, S] -> [B, S, hidden]` after all
+    /// transformer layers and the final norm, before `lm_head`.
+    ///
+    /// Used for embedding extraction (pool over `S`, then normalize).
+    pub fn forward_hidden<C>(
+        &self,
+        client: &C,
+        input_ids: &Tensor<R>,
+    ) -> Result<numr::autograd::Var<R>>
+    where
+        C: ModelClient<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
+    {
+        let mut hidden = self.embed_tokens.forward(client, input_ids)?;
+        for layer in &self.layers {
+            hidden = layer.forward(client, &hidden, &self.rope)?;
+        }
+        hidden = self.norm.forward(client, &hidden)?;
+        Ok(hidden)
+    }
+
     /// Forward pass for inference with KV cache.
     ///
     /// Unlike `Model::forward`, this:

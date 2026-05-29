@@ -197,6 +197,28 @@ where
         }
     }
 
+    /// Contextualized hidden states for embedding extraction.
+    ///
+    /// Runs embed + all transformer layers + final norm (no KV cache, no lm_head).
+    /// Output shape: `[B, S, hidden_size]`.
+    /// Only supported for Llama-family models.
+    pub fn forward_hidden(&self, input_ids: &Tensor<R>) -> Result<numr::autograd::Var<R>>
+    where
+        R::Client: ModelClient<R> + numr::ops::ConvOps<R>,
+    {
+        let device = input_ids.device();
+        let client = R::default_client(device);
+        match self {
+            LoadedModel::Llama(m) => m.forward_hidden(&client, input_ids),
+            LoadedModel::LlamaTp(_) => Err(Error::ModelError {
+                reason: "LlamaTp does not support forward_hidden (use a single-GPU model for embeddings)".into(),
+            }),
+            LoadedModel::Mamba2(m) => m.forward_hidden(&client, input_ids),
+            LoadedModel::Hybrid(m) => m.forward_hidden(&client, input_ids),
+            LoadedModel::Multimodal(m) => m.llm().forward_hidden(input_ids),
+        }
+    }
+
     /// Run a range of transformer layers with KV cache.
     ///
     /// Used for pipeline parallelism. Only supported for Llama-family models.

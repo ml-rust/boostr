@@ -10,6 +10,7 @@
 //! - Attention: Q=[q_nope, q_pe], K=[k_nope, k_pe], V=v
 
 use crate::error::{Error, Result};
+use crate::nn::var_ops::var_contiguous;
 use crate::nn::{Linear, MaybeQuantLinear, RmsNorm, RoPE, VarBuilder};
 use crate::ops::RoPEOps;
 use crate::ops::impl_generic::attention::mla::scaled_dot_product_attention_impl;
@@ -366,13 +367,13 @@ impl<R: Runtime<DType = DType>> Mla<R> {
         // [B, S, num_heads * qk_dim] → [B, S, H, qk_dim] → [B, H, S, qk_dim]
         let q = var_reshape(&q, &[batch, seq_len, self.num_heads, qk_dim]).map_err(Error::Numr)?;
         let q = var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let q = var_contiguous(&q);
+        let q = var_contiguous(&q)?;
 
         // Split Q into nope and pe
         let q_nope = var_narrow(&q, 3, 0, self.head_dim).map_err(Error::Numr)?;
-        let q_nope = var_contiguous(&q_nope);
+        let q_nope = var_contiguous(&q_nope)?;
         let q_pe = var_narrow(&q, 3, self.head_dim, self.rope_head_dim).map_err(Error::Numr)?;
-        let q_pe = var_contiguous(&q_pe);
+        let q_pe = var_contiguous(&q_pe)?;
 
         // === KV path ===
         // Compress: [B, S, hidden] → [B, S, kv_lora_rank + rope_head_dim]
@@ -380,10 +381,10 @@ impl<R: Runtime<DType = DType>> Mla<R> {
 
         // Split: c_kv [B, S, kv_lora_rank], k_pe_raw [B, S, rope_head_dim]
         let c_kv = var_narrow(&kv_compressed, 2, 0, self.kv_lora_rank).map_err(Error::Numr)?;
-        let c_kv = var_contiguous(&c_kv);
+        let c_kv = var_contiguous(&c_kv)?;
         let k_pe_raw = var_narrow(&kv_compressed, 2, self.kv_lora_rank, self.rope_head_dim)
             .map_err(Error::Numr)?;
-        let k_pe_raw = var_contiguous(&k_pe_raw);
+        let k_pe_raw = var_contiguous(&k_pe_raw)?;
 
         // Normalize c_kv
         let c_kv = if let Some(norm) = &self.kv_norm {
@@ -406,20 +407,20 @@ impl<R: Runtime<DType = DType>> Mla<R> {
         .map_err(Error::Numr)?;
         // → [B, H, S, head_dim + head_dim_v]
         let kv = var_permute(&kv, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let kv = var_contiguous(&kv);
+        let kv = var_contiguous(&kv)?;
 
         // Split K_nope and V
         let k_nope = var_narrow(&kv, 3, 0, self.head_dim).map_err(Error::Numr)?;
-        let k_nope = var_contiguous(&k_nope);
+        let k_nope = var_contiguous(&k_nope)?;
         let v = var_narrow(&kv, 3, self.head_dim, self.head_dim_v).map_err(Error::Numr)?;
-        let v = var_contiguous(&v);
+        let v = var_contiguous(&v)?;
 
         // K_pe: [B, S, rope_head_dim] → [B, 1, S, rope_head_dim] → [B, H, S, rope_head_dim]
         let k_pe = var_reshape(&k_pe_raw, &[batch, 1, seq_len, self.rope_head_dim])
             .map_err(Error::Numr)?;
         let k_pe = var_broadcast_to(&k_pe, &[batch, self.num_heads, seq_len, self.rope_head_dim])
             .map_err(Error::Numr)?;
-        let k_pe = var_contiguous(&k_pe);
+        let k_pe = var_contiguous(&k_pe)?;
 
         // Apply RoPE to q_pe and k_pe (decoupled)
         let q_pe = apply_rope_impl(client, &q_pe, self.rope.cos_cache(), self.rope.sin_cache())?;
@@ -434,7 +435,7 @@ impl<R: Runtime<DType = DType>> Mla<R> {
 
         // [B, H, S, head_dim_v] → [B, S, H, head_dim_v] → [B, S, H*head_dim_v]
         let attn_out = var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out);
+        let attn_out = var_contiguous(&attn_out)?;
         let attn_out = var_reshape(
             &attn_out,
             &[batch, seq_len, self.num_heads * self.head_dim_v],
@@ -444,9 +445,4 @@ impl<R: Runtime<DType = DType>> Mla<R> {
         // Output projection
         self.o_proj.forward(client, &attn_out)
     }
-}
-
-/// Make a Var contiguous (copies data if non-contiguous layout).
-fn var_contiguous<R: Runtime>(v: &Var<R>) -> Var<R> {
-    Var::new(v.tensor().contiguous(), v.requires_grad())
 }

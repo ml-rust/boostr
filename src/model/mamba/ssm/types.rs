@@ -27,12 +27,4 @@ pub struct SsmInferenceInput<'a, R: Runtime> {
     pub config: &'a Mamba2Config,
 }
 
-/// Make a Var contiguous (copies data if non-contiguous).
-/// Preserves the requires_grad flag but not the grad_fn (treated as a leaf).
-pub fn var_contiguous<R: Runtime>(v: &Var<R>) -> Var<R> {
-    if v.tensor().is_contiguous() {
-        v.clone()
-    } else {
-        Var::new(v.tensor().contiguous(), v.requires_grad())
-    }
-}
+pub use crate::nn::var_ops::var_contiguous;

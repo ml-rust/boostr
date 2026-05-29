@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use crate::inference::{KvCache, SsmState};
 use crate::model::mamba::mamba2::Mamba2;
 use crate::model::traits::ModelClient;
+use crate::nn::var_ops::{repeat_kv, var_contiguous};
 use crate::nn::{Linear, RmsNorm, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use crate::ops::impl_generic::attention::rope::apply_rope_impl;
@@ -109,11 +110,11 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
             .map_err(Error::Numr)?;
 
         let q = numr::autograd::var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let q = var_contiguous(&q);
+        let q = var_contiguous(&q)?;
         let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let k = var_contiguous(&k);
+        let k = var_contiguous(&k)?;
         let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let v = var_contiguous(&v);
+        let v = var_contiguous(&v)?;
 
         // Apply RoPE with position offset
         let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
@@ -127,8 +128,8 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
 
         // Get full cached K/V for attention
         let (cached_k, cached_v) = kv_cache.get_kv()?;
-        let cached_k = Var::new(cached_k.contiguous(), false);
-        let cached_v = Var::new(cached_v.contiguous(), false);
+        let cached_k = Var::new(cached_k.contiguous()?, false);
+        let cached_v = Var::new(cached_v.contiguous()?, false);
 
         // GQA: repeat K/V heads to match Q heads if needed
         let (cached_k, cached_v) = if self.num_kv_heads < self.num_heads {
@@ -147,7 +148,7 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
         let attn_out =
             numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out);
+        let attn_out = var_contiguous(&attn_out)?;
         let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 
@@ -203,25 +204,4 @@ impl<R: Runtime<DType = DType>> SsmBlock<R> {
         let out = Var::new(out_tensor, false);
         numr::autograd::var_add(x, &out, client).map_err(Error::Numr)
     }
-}
-
-// ── Helpers ─────────────────────────────────────────────────────────
-
-pub(super) fn var_contiguous<R: Runtime>(v: &Var<R>) -> Var<R> {
-    Var::new(v.tensor().contiguous(), v.requires_grad())
-}
-
-pub(super) fn repeat_kv<R: Runtime>(x: &Var<R>, repeat: usize) -> numr::error::Result<Var<R>> {
-    if repeat == 1 {
-        return Ok(x.clone());
-    }
-    let shape = x.shape();
-    let [b, h_kv, s, d] = [shape[0], shape[1], shape[2], shape[3]];
-
-    // Reshape to [B, H_kv, 1, S, D] then broadcast to [B, H_kv, repeat, S, D]
-    let expanded = x.tensor().reshape(&[b, h_kv, 1, s, d])?;
-    let expanded = expanded.broadcast_to(&[b, h_kv, repeat, s, d])?;
-    // Reshape to [B, H_kv * repeat, S, D] — need contiguous for reshape after broadcast
-    let result = expanded.contiguous().reshape(&[b, h_kv * repeat, s, d])?;
-    Ok(Var::new(result, x.requires_grad()))
 }

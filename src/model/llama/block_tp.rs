@@ -4,6 +4,7 @@ use crate::distributed::tensor_parallel::{ColumnParallelLinear, RowParallelLinea
 use crate::error::{Error, Result};
 use crate::inference::kv_cache::KvCache;
 use crate::model::traits::ModelClient;
+use crate::nn::var_ops::{repeat_kv, var_contiguous};
 use crate::nn::{RmsNorm, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use crate::ops::impl_generic::attention::rope::apply_rope_interleaved_impl;
@@ -138,11 +139,11 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
                 .map_err(Error::Numr)?;
 
         let q = numr::autograd::var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let q = var_contiguous(&q);
+        let q = var_contiguous(&q)?;
         let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let k = var_contiguous(&k);
+        let k = var_contiguous(&k)?;
         let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let v = var_contiguous(&v);
+        let v = var_contiguous(&v)?;
 
         // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
         let q = match &self.q_norm {
@@ -174,7 +175,7 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
         let attn_out =
             numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out);
+        let attn_out = var_contiguous(&attn_out)?;
         let attn_out = numr::autograd::var_reshape(
             &attn_out,
             &[batch, seq_len, self.num_heads * self.head_dim],
@@ -225,11 +226,11 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
             .map_err(Error::Numr)?;
 
         let q = numr::autograd::var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let q = var_contiguous(&q);
+        let q = var_contiguous(&q)?;
         let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let k = var_contiguous(&k);
+        let k = var_contiguous(&k)?;
         let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let v = var_contiguous(&v);
+        let v = var_contiguous(&v)?;
 
         // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
         let q = match &self.q_norm {
@@ -269,29 +270,13 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
         let attn_out = Var::new(attn_out, false);
         let attn_out =
             numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out);
+        let attn_out = var_contiguous(&attn_out)?;
         let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 
         // O projection (row-parallel → all-reduce)
         self.o_proj.forward(client, &attn_out)
     }
-}
-
-fn var_contiguous<R: Runtime>(v: &Var<R>) -> Var<R> {
-    Var::new(v.tensor().contiguous(), v.requires_grad())
-}
-
-fn repeat_kv<R: Runtime>(x: &Var<R>, repeat: usize) -> numr::error::Result<Var<R>> {
-    if repeat == 1 {
-        return Ok(x.clone());
-    }
-    let shape = x.shape();
-    let [b, h_kv, s, d] = [shape[0], shape[1], shape[2], shape[3]];
-    let expanded = x.tensor().reshape(&[b, h_kv, 1, s, d])?;
-    let expanded = expanded.broadcast_to(&[b, h_kv, repeat, s, d])?;
-    let result = expanded.contiguous().reshape(&[b, h_kv * repeat, s, d])?;
-    Ok(Var::new(result, x.requires_grad()))
 }
 
 // ── LlamaMlpTp ──────────────────────────────────────────────────────

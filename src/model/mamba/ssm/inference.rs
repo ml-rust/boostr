@@ -34,28 +34,28 @@ where
         .x
         .reshape(&[batch, nheads, headdim])
         .map_err(Error::Numr)?;
-    let x_t = x_t.contiguous();
+    let x_t = x_t.contiguous()?;
 
     // dt_t: [B, nheads, 1, 1]
     let dt_t = input
         .dt
         .reshape(&[batch, nheads, 1, 1])
         .map_err(Error::Numr)?;
-    let dt_t = dt_t.contiguous();
+    let dt_t = dt_t.contiguous()?;
 
     // B_t: [B, ngroups, 1, d_state]
     let b_t = input
         .b
         .reshape(&[batch, ngroups, 1, d_state])
         .map_err(Error::Numr)?;
-    let b_t = b_t.contiguous();
+    let b_t = b_t.contiguous()?;
 
     // C_t: [B, ngroups, d_state]
     let c_t = input
         .c
         .reshape(&[batch, ngroups, d_state])
         .map_err(Error::Numr)?;
-    let c_t = c_t.contiguous();
+    let c_t = c_t.contiguous()?;
 
     // A: [nheads] -> [1, nheads, 1, 1]
     let a_broad = input.a.reshape(&[1, nheads, 1, 1]).map_err(Error::Numr)?;
@@ -125,10 +125,14 @@ where
 
     for t in 0..seq_len {
         // Slice single timestep
-        let x_t = input.x.narrow(1, t, 1).map_err(Error::Numr)?.contiguous();
-        let b_t = input.b.narrow(1, t, 1).map_err(Error::Numr)?.contiguous();
-        let c_t = input.c.narrow(1, t, 1).map_err(Error::Numr)?.contiguous();
-        let dt_t = input.dt.narrow(1, t, 1).map_err(Error::Numr)?.contiguous();
+        let x_t = input.x.narrow(1, t, 1).map_err(Error::Numr)?.contiguous()?;
+        let b_t = input.b.narrow(1, t, 1).map_err(Error::Numr)?.contiguous()?;
+        let c_t = input.c.narrow(1, t, 1).map_err(Error::Numr)?.contiguous()?;
+        let dt_t = input
+            .dt
+            .narrow(1, t, 1)
+            .map_err(Error::Numr)?
+            .contiguous()?;
 
         let step_input = SsmInferenceInput {
             x: &x_t,

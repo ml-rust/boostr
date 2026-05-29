@@ -198,8 +198,8 @@ where
     // since the column loop is inherently sequential and touches individual columns.
     // This is the standard GPTQ approach — the loop is O(K) kernel launches.
 
-    let w_data: Vec<f32> = weight.contiguous().to_vec();
-    let h_data: Vec<f32> = h_inv.contiguous().to_vec();
+    let w_data: Vec<f32> = weight.contiguous()?.to_vec();
+    let h_data: Vec<f32> = h_inv.contiguous()?.to_vec();
 
     let mut w_work = w_data.clone();
     let mut q_out = vec![0.0f32; m * k];

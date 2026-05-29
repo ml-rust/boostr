@@ -138,7 +138,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoder<R> {
             .map_err(Error::Numr)?
             .broadcast_to(&[batch, seq_len, self.hidden_size])
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
 
         let mut hidden = client.add(tok.tensor(), &pos).map_err(Error::Numr)?;
 
@@ -153,7 +153,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoder<R> {
             .tied_out_weight
             .transpose(0, 1)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let logits = client.matmul(&hidden, &w_t).map_err(Error::Numr)?;
         Ok(logits)
     }
@@ -205,7 +205,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoder<R> {
         let pos_b = pos
             .broadcast_to(&[batch, seq_len, self.hidden_size])
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
 
         let mut hidden = client.add(tok.tensor(), &pos_b).map_err(Error::Numr)?;
 
@@ -224,7 +224,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoder<R> {
             .tied_out_weight
             .transpose(0, 1)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let logits = client.matmul(&hidden, &w_t).map_err(Error::Numr)?;
         Ok(logits)
     }

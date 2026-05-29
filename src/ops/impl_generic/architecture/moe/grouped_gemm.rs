@@ -50,12 +50,12 @@ where
         let expert_tokens = permuted_tokens
             .narrow(0, start, count)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
 
         let weight = expert_weights
             .narrow(0, e, 1)
             .map_err(Error::Numr)?
-            .contiguous()
+            .contiguous()?
             .reshape(&[ew_shape[1], out_dim])
             .map_err(Error::Numr)?;
 
@@ -122,12 +122,12 @@ where
         let expert_tokens = permuted_tokens
             .narrow(0, start, count)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
 
         let weight = expert_weights
             .narrow(0, e, 1)
             .map_err(Error::Numr)?
-            .contiguous()
+            .contiguous()?
             .reshape(&[ew_shape[1], out_dim])
             .map_err(Error::Numr)?;
 

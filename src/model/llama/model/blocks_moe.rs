@@ -92,9 +92,9 @@ impl<R: Runtime<DType = DType>> LlamaMoeMlp<R> {
 
         // narrow(dim=0, start=expert_id, length=1) → [1, in, out]
         // squeeze dim 0 → [in, out] (contiguous view)
-        let gate_slice = gate.narrow(0, expert_id, 1).ok()?.contiguous();
-        let up_slice = up.narrow(0, expert_id, 1).ok()?.contiguous();
-        let down_slice = down.narrow(0, expert_id, 1).ok()?.contiguous();
+        let gate_slice = gate.narrow(0, expert_id, 1).ok()?.contiguous().ok()?;
+        let up_slice = up.narrow(0, expert_id, 1).ok()?.contiguous().ok()?;
+        let down_slice = down.narrow(0, expert_id, 1).ok()?.contiguous().ok()?;
 
         // Determine 2-D shapes by dropping the leading expert dim.
         let gate_shape = {
@@ -180,11 +180,11 @@ impl<R: Runtime<DType = DType>> LlamaMoeMlp<R> {
                     .map_err(|e| Error::ModelError {
                         reason: e.to_string(),
                     })?
-                    .contiguous();
+                    .contiguous()?;
                 parts.push(before);
             }
 
-            parts.push(new_1d.contiguous());
+            parts.push(new_1d.contiguous()?);
 
             let after_start = expert_id + 1;
             if after_start < num_experts {
@@ -193,7 +193,7 @@ impl<R: Runtime<DType = DType>> LlamaMoeMlp<R> {
                     .map_err(|e| Error::ModelError {
                         reason: e.to_string(),
                     })?
-                    .contiguous();
+                    .contiguous()?;
                 parts.push(after);
             }
 

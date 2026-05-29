@@ -249,7 +249,7 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
         let start = rank * shard_size;
 
         full.narrow(dim as isize, start, shard_size)
-            .map(|t| t.contiguous())
+            .and_then(|t| t.contiguous())
             .map_err(|e| Error::ModelError {
                 reason: format!("take_tensor_shard narrow failed for '{}': {e}", name),
             })

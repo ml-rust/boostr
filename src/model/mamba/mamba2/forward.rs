@@ -63,30 +63,30 @@ impl<R: Runtime> Mamba2<R> {
 
         // 2. Split into z, xBC, dt
         let xbc_len = d_inner + 2 * n_groups_d_state;
-        let z = var_contiguous(&var_narrow(&projected, 2, 0, d_inner).map_err(Error::Numr)?);
+        let z = var_contiguous(&var_narrow(&projected, 2, 0, d_inner).map_err(Error::Numr)?)?;
         let xbc =
-            var_contiguous(&var_narrow(&projected, 2, d_inner, xbc_len).map_err(Error::Numr)?);
+            var_contiguous(&var_narrow(&projected, 2, d_inner, xbc_len).map_err(Error::Numr)?)?;
         let dt = var_contiguous(
             &var_narrow(&projected, 2, d_inner + xbc_len, self.config.nheads)
                 .map_err(Error::Numr)?,
-        );
+        )?;
 
         // 3. Causal conv1d on xBC
-        let xbc_ncl = var_contiguous(&var_transpose(&xbc).map_err(Error::Numr)?);
+        let xbc_ncl = var_contiguous(&var_transpose(&xbc).map_err(Error::Numr)?)?;
         let xbc_conv = self.conv1d.forward(client, &xbc_ncl)?;
-        let xbc = var_contiguous(&var_transpose(&xbc_conv).map_err(Error::Numr)?);
+        let xbc = var_contiguous(&var_transpose(&xbc_conv).map_err(Error::Numr)?)?;
 
         // 4. SiLU activation
         let xbc = var_silu(&xbc, client).map_err(Error::Numr)?;
 
         // 5. Split xBC into x_ssm, B, C
-        let x_ssm = var_contiguous(&var_narrow(&xbc, 2, 0, d_inner).map_err(Error::Numr)?);
+        let x_ssm = var_contiguous(&var_narrow(&xbc, 2, 0, d_inner).map_err(Error::Numr)?)?;
         let b_proj =
-            var_contiguous(&var_narrow(&xbc, 2, d_inner, n_groups_d_state).map_err(Error::Numr)?);
+            var_contiguous(&var_narrow(&xbc, 2, d_inner, n_groups_d_state).map_err(Error::Numr)?)?;
         let c_proj = var_contiguous(
             &var_narrow(&xbc, 2, d_inner + n_groups_d_state, n_groups_d_state)
                 .map_err(Error::Numr)?,
-        );
+        )?;
 
         // 6. Reshape for SSM
         let x_ssm = var_reshape(
@@ -196,25 +196,25 @@ impl<R: Runtime> Mamba2<R> {
         // 1. Input projection: [B, S, d_model] -> [B, S, proj_dim]
         let x_var = Var::new(x.clone(), false);
         let projected = self.in_proj.forward(client, &x_var)?;
-        let projected = projected.tensor().clone().contiguous();
+        let projected = projected.tensor().clone().contiguous()?;
 
         // 2. Split into z, xBC, dt
         let xbc_len = d_inner + 2 * n_groups_d_state;
         let z = projected
             .narrow(2, 0, d_inner)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let xbc = projected
             .narrow(2, d_inner, xbc_len)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let dt = projected
             .narrow(2, d_inner + xbc_len, self.config.nheads)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
 
         // 3. Causal conv1d on xBC — transpose NLC -> NCL
-        let xbc_ncl = xbc.transpose(-1, -2).map_err(Error::Numr)?.contiguous();
+        let xbc_ncl = xbc.transpose(-1, -2).map_err(Error::Numr)?.contiguous()?;
 
         let xbc_conv = if seq_len > 1 {
             self.prefill_conv(client, &xbc_ncl, seq_len, batch, x, state)?
@@ -226,21 +226,24 @@ impl<R: Runtime> Mamba2<R> {
         let xbc = xbc_conv
             .transpose(-1, -2)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
 
         // 4. SiLU activation
         let xbc = xbc.silu().map_err(Error::Numr)?;
 
         // 5. Split xBC into x_ssm, B, C
-        let x_ssm = xbc.narrow(2, 0, d_inner).map_err(Error::Numr)?.contiguous();
+        let x_ssm = xbc
+            .narrow(2, 0, d_inner)
+            .map_err(Error::Numr)?
+            .contiguous()?;
         let b_proj = xbc
             .narrow(2, d_inner, n_groups_d_state)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let c_proj = xbc
             .narrow(2, d_inner + n_groups_d_state, n_groups_d_state)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
 
         // 6. Reshape for SSM
         let x_ssm = x_ssm

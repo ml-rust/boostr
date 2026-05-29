@@ -121,9 +121,9 @@ where
         .philox_uniform(&[batch_size, num_draft + 1], seed, 0, DType::F32)
         .map_err(Error::Numr)?;
 
-    let dp_data = draft_probs.contiguous().to_vec::<f32>();
-    let tp_data = target_probs.contiguous().to_vec::<f32>();
-    let dt_data = draft_tokens.contiguous().to_vec::<i32>();
+    let dp_data = draft_probs.contiguous()?.to_vec::<f32>();
+    let tp_data = target_probs.contiguous()?.to_vec::<f32>();
+    let dt_data = draft_tokens.contiguous()?.to_vec::<i32>();
     let rand_data = randoms_tensor.to_vec::<f32>();
 
     let mut results = Vec::with_capacity(batch_size);
@@ -259,7 +259,7 @@ where
     let batch_size = shape[0];
     let k = shape[1];
 
-    let rates = acceptance_rates.contiguous().to_vec::<f32>();
+    let rates = acceptance_rates.contiguous()?.to_vec::<f32>();
     let mut expected = Vec::with_capacity(batch_size);
 
     for b in 0..batch_size {

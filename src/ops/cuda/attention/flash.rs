@@ -52,8 +52,8 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
 
         // Flash v2/v3 don't support separate kv_seq_stride — narrow if needed
         if kv_seq_stride != p.seq_len_k {
-            let k_narrow = k.narrow(2, 0, p.seq_len_k)?.contiguous();
-            let v_narrow = v.narrow(2, 0, p.seq_len_k)?.contiguous();
+            let k_narrow = k.narrow(2, 0, p.seq_len_k)?.contiguous()?;
+            let v_narrow = v.narrow(2, 0, p.seq_len_k)?.contiguous()?;
             return self.flash_attention_fwd(
                 q,
                 &k_narrow,

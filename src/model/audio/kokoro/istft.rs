@@ -103,9 +103,9 @@ pub fn istft(
     // DFT per frame instead. At `n_fft = 20` it's 11 × 20 = 220 complex
     // multiplies per frame — negligible vs the rest of the generator.
     let _ = client; // kept for future GPU path (irfft when n_fft is PoT).
-    let mag_flat: Vec<f32> = mag.contiguous().to_vec();
-    let phase_flat: Vec<f32> = phase.contiguous().to_vec();
-    let window_samples: Vec<f32> = window.contiguous().to_vec();
+    let mag_flat: Vec<f32> = mag.contiguous()?.to_vec();
+    let phase_flat: Vec<f32> = phase.contiguous()?.to_vec();
+    let window_samples: Vec<f32> = window.contiguous()?.to_vec();
 
     // Precompute twiddle tables e^{i·2π·k·n/N} (positive sign = inverse DFT).
     let n_fft_f = n_fft as f32;

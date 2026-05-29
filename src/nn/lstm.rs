@@ -166,6 +166,7 @@ impl<R: Runtime> Lstm<R> {
                 .narrow(1, idx, 1)
                 .map_err(Error::Numr)?
                 .contiguous()
+                .map_err(Error::Numr)?
                 .reshape(&[b, 4 * h_sz])
                 .map_err(Error::Numr)?;
 

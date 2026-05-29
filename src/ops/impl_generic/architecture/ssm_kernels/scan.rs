@@ -96,7 +96,7 @@ where
             .map_err(Error::Numr)?
             .broadcast_to(&[batch, nchunks, chunk_size, ngroups, heads_per_group, dstate])
             .map_err(Error::Numr)?
-            .contiguous()
+            .contiguous()?
             .reshape(&[batch, nchunks, chunk_size, nheads, dstate])
             .map_err(Error::Numr)?
     };
@@ -114,7 +114,7 @@ where
     let c_t = c_for_heads
         .permute(&[0, 1, 3, 2, 4])
         .map_err(Error::Numr)?
-        .contiguous()
+        .contiguous()?
         .reshape(&[batch * nchunks * nheads, chunk_size, dstate])
         .map_err(Error::Numr)?;
 
@@ -124,7 +124,7 @@ where
         .map_err(Error::Numr)?
         .permute(&[0, 2, 1])
         .map_err(Error::Numr)?
-        .contiguous();
+        .contiguous()?;
 
     // matmul: [B*K*H, chunk_size, dstate] @ [B*K*H, dstate, headdim]
     //       → [B*K*H, chunk_size, headdim]
@@ -140,7 +140,7 @@ where
     let decay_t = decay
         .permute(&[0, 2, 1, 3])
         .map_err(Error::Numr)?
-        .contiguous()
+        .contiguous()?
         .reshape(&[batch, nchunks, nheads, chunk_size, 1])
         .map_err(Error::Numr)?;
 
@@ -150,7 +150,7 @@ where
     let y_full = y_decayed
         .permute(&[0, 1, 3, 2, 4])
         .map_err(Error::Numr)?
-        .contiguous()
+        .contiguous()?
         .reshape(&[batch, padded_len, nheads, headdim])
         .map_err(Error::Numr)?;
 

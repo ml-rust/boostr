@@ -29,7 +29,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
     ) -> Result<Tensor<CudaRuntime>> {
         let (m, k) = validate_input_cuda(input)?;
         let n = qweight.shape()[1] * 8;
-        let act_contig = input.contiguous();
+        let act_contig = input.contiguous()?;
 
         let mut out_shape = input.shape()[..input.shape().len() - 1].to_vec();
         out_shape.push(n);
@@ -59,7 +59,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
     ) -> Result<Tensor<CudaRuntime>> {
         let (m, k) = validate_input_cuda(input)?;
         let n = qweight.shape()[1];
-        let act_contig = input.contiguous();
+        let act_contig = input.contiguous()?;
 
         let mut out_shape = input.shape()[..input.shape().len() - 1].to_vec();
         out_shape.push(n);
@@ -89,7 +89,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
     ) -> Result<Tensor<CudaRuntime>> {
         let (m, k) = validate_input_cuda(input)?;
         let n = weight.shape()[1];
-        let act_contig = input.contiguous();
+        let act_contig = input.contiguous()?;
 
         let mut out_shape = input.shape()[..input.shape().len() - 1].to_vec();
         out_shape.push(n);
@@ -149,7 +149,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         }
 
         let m = a_shape.iter().product::<usize>() / k;
-        let act_contig = activation.contiguous();
+        let act_contig = activation.contiguous()?;
 
         let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
         out_shape.push(n);
@@ -197,7 +197,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         }
         let k = a_shape[a_shape.len() - 1];
         let m = a_shape.iter().product::<usize>() / k;
-        let act_contig = activation.contiguous();
+        let act_contig = activation.contiguous()?;
 
         // Check if all weights support dp4a (Q4_K, Q6_K, Q8_0, Q5_K, Q3_K, Q2_K)
         let all_dp4a = weights.iter().all(|w| {
@@ -363,7 +363,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             });
         }
 
-        let act_contig = activation.contiguous();
+        let act_contig = activation.contiguous()?;
         let a_shape = activation.shape();
         let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
         out_shape.push(n);

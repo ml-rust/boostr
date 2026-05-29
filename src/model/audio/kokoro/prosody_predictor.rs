@@ -140,7 +140,7 @@ impl<R: Runtime> DurationEncoder<R> {
             .map_err(Error::Numr)?
             .broadcast_to(&[b, t, self.style_dim])
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
 
         // Running activation in [B, T, d_model + style_dim] — starts as `cat(x, style)`.
         let mut h = client.cat(&[x, &style_bc], 2).map_err(Error::Numr)?;
@@ -149,12 +149,12 @@ impl<R: Runtime> DurationEncoder<R> {
             // BiLSTM produces [B, T, d_model].
             h = self.lstms[i].forward(client, &h)?;
             // AdaLayerNorm expects [B, C, T]; transpose in and back.
-            let h_bct = h.transpose(1, 2).map_err(Error::Numr)?.contiguous();
+            let h_bct = h.transpose(1, 2).map_err(Error::Numr)?.contiguous()?;
             let normed_bct = self.adalns[i].forward(client, &h_bct, style)?;
             let normed = normed_bct
                 .transpose(1, 2)
                 .map_err(Error::Numr)?
-                .contiguous();
+                .contiguous()?;
             // Re-concat style for the next LSTM (or to form the module output).
             h = client.cat(&[&normed, &style_bc], 2).map_err(Error::Numr)?;
         }
@@ -318,7 +318,7 @@ impl<R: Runtime> ProsodyPredictor<R> {
             .map_err(Error::Numr)?
             .broadcast_to(&[b, t, self.style_dim])
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let cat = client
             .cat(&[frames_bt_d, &style_bc], 2)
             .map_err(Error::Numr)?;
@@ -328,7 +328,7 @@ impl<R: Runtime> ProsodyPredictor<R> {
         let shared_bct = shared_out
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let f0 = self.f0.forward(client, &shared_bct, style)?;
         let n = self.n.forward(client, &shared_bct, style)?;
         Ok((f0, n))

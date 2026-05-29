@@ -449,7 +449,7 @@ where
             modal_embeds
                 .broadcast_to(&[batch, num_modal_tokens, hidden_dim])
                 .map_err(Error::Numr)?
-                .contiguous()
+                .contiguous()?
         } else {
             modal_embeds.clone()
         };

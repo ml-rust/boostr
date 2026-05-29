@@ -101,7 +101,7 @@ mod tests {
         );
 
         let out = apply_rope_impl(&client, &x, &cos, &sin).unwrap();
-        let out_data: Vec<f32> = out.tensor().contiguous().to_vec();
+        let out_data: Vec<f32> = out.tensor().contiguous().unwrap().to_vec();
 
         // With sin=0, cos=1: out1 = x1*1 - x2*0 = x1, out2 = x2*1 + x1*0 = x2
         // So cat(x1, x2) = x (identity)
@@ -140,7 +140,7 @@ mod tests {
         );
 
         let out = apply_rope_impl(&client, &x, &cos, &sin).unwrap();
-        let out_data: Vec<f32> = out.tensor().contiguous().to_vec();
+        let out_data: Vec<f32> = out.tensor().contiguous().unwrap().to_vec();
 
         // out1 = -x2 = [-3, -4], out2 = x1 = [1, 2] → [-3, -4, 1, 2]
         assert!((out_data[0] - (-3.0)).abs() < 1e-5);
@@ -184,8 +184,8 @@ mod tests {
         let out_exact = apply_rope_impl(&client, &x, &cos_exact, &sin_exact).unwrap();
         let out_narrowed = apply_rope_impl(&client, &x, &cos_large, &sin_large).unwrap();
 
-        let exact_data: Vec<f32> = out_exact.tensor().contiguous().to_vec();
-        let narrowed_data: Vec<f32> = out_narrowed.tensor().contiguous().to_vec();
+        let exact_data: Vec<f32> = out_exact.tensor().contiguous().unwrap().to_vec();
+        let narrowed_data: Vec<f32> = out_narrowed.tensor().contiguous().unwrap().to_vec();
 
         assert_eq!(exact_data.len(), narrowed_data.len());
         for (i, (&a, &b)) in exact_data.iter().zip(narrowed_data.iter()).enumerate() {

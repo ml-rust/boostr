@@ -118,7 +118,7 @@ impl<R: Runtime> AlbertEmbeddings<R> {
             .map_err(Error::Numr)?
             .broadcast_to(&[b, t])
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let pos_emb = self.position_embeddings.forward(client, &positions)?;
         // Token types: all zeros.
         let type_ids = client.fill(&[b, t], 0.0, DType::I64).map_err(Error::Numr)?;
@@ -192,22 +192,22 @@ impl<R: Runtime> AlbertLayer<R> {
             .map_err(Error::Numr)?
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let k = k
             .reshape(&[b, t, n_heads, d_head])
             .map_err(Error::Numr)?
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let v = v
             .reshape(&[b, t, n_heads, d_head])
             .map_err(Error::Numr)?
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
 
         // Attention scores: q @ k.T / sqrt(d_head). k.T swaps the last two dims.
-        let k_t = k.transpose(2, 3).map_err(Error::Numr)?.contiguous();
+        let k_t = k.transpose(2, 3).map_err(Error::Numr)?.contiguous()?;
         let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
         let scale = 1.0 / (d_head as f64).sqrt();
         let scaled = client.mul_scalar(&scores, scale).map_err(Error::Numr)?;
@@ -219,7 +219,7 @@ impl<R: Runtime> AlbertLayer<R> {
         let ctx_merged = ctx
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous()
+            .contiguous()?
             .reshape(&[b, t, h])
             .map_err(Error::Numr)?;
 

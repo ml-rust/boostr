@@ -302,7 +302,7 @@ impl IStftNetGenerator<numr::runtime::cpu::CpuRuntime> {
             // [B, T, 1] -> [B, T, scale] (broadcast) -> [B, T*scale, 1].
             f0.broadcast_to(&[b, t, scale])
                 .map_err(Error::Numr)?
-                .contiguous()
+                .contiguous()?
                 .reshape(&[b, t * scale, 1])
                 .map_err(Error::Numr)?
         };
@@ -385,7 +385,7 @@ impl IStftNetGenerator<numr::runtime::cpu::CpuRuntime> {
                 x_source
                     .narrow(2, 0, trunk_t)
                     .map_err(Error::Numr)?
-                    .contiguous()
+                    .contiguous()?
             } else if source_t < trunk_t {
                 return Err(Error::InvalidArgument {
                     arg: "x_source",

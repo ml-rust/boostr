@@ -166,7 +166,7 @@ impl KokoroModel<CpuRuntime> {
 
         // 2. Predict durations: [1, T_phon]
         let log_dur = self.duration_predictor.forward(client, &hidden, style)?;
-        let log_dur_vec: Vec<f32> = log_dur.contiguous().to_vec();
+        let log_dur_vec: Vec<f32> = log_dur.contiguous()?.to_vec();
         let speed_ln = controls.speed.ln();
         let adjusted: Vec<f32> = log_dur_vec.iter().map(|&v| v - speed_ln).collect();
         let durations = decode_durations(&adjusted, self.min_frames_per_phoneme);
@@ -196,7 +196,7 @@ impl KokoroModel<CpuRuntime> {
         let frames_bct = frames_plus
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
 
         // 6. Initial decoder conv: [1, C_dec, T].
         let mut x = self

@@ -106,7 +106,7 @@ impl<R: Runtime> KokoroModelV2<R> {
                 reason: "synthesis is single-utterance; batch > 1 not supported".into(),
             });
         }
-        let logits_flat: Vec<f32> = dur_logits.contiguous().to_vec();
+        let logits_flat: Vec<f32> = dur_logits.contiguous()?.to_vec();
         let durations = decode_prosody_durations(
             &logits_flat,
             t_phon,
@@ -128,7 +128,10 @@ impl<R: Runtime> KokoroModelV2<R> {
         // 7. Alignment-expanded ASR features: each phoneme's t_en row
         // repeated `durations[i]` times, then transposed to [B, C, T_frames].
         let asr_bt_d = length_regulator(client, &t_en, &durations)?; // [1, T_frames, 512]
-        let asr = asr_bt_d.transpose(1, 2).map_err(Error::Numr)?.contiguous();
+        let asr = asr_bt_d
+            .transpose(1, 2)
+            .map_err(Error::Numr)?
+            .contiguous()?;
 
         // 8. Decoder → (mag, phase).
         let (mag, phase) = self
@@ -163,7 +166,7 @@ impl KokoroModelV2<CpuRuntime> {
                 reason: "synthesis is single-utterance; batch > 1 not supported".into(),
             });
         }
-        let logits_flat: Vec<f32> = dur_logits.contiguous().to_vec();
+        let logits_flat: Vec<f32> = dur_logits.contiguous()?.to_vec();
         let durations = decode_prosody_durations(
             &logits_flat,
             t_phon,
@@ -176,7 +179,10 @@ impl KokoroModelV2<CpuRuntime> {
             .predict_f0_n(client, &frames, &predictor_style)?;
         let t_en = self.text_encoder.forward(client, token_ids)?;
         let asr_bt_d = length_regulator(client, &t_en, &durations)?;
-        let asr = asr_bt_d.transpose(1, 2).map_err(Error::Numr)?.contiguous();
+        let asr = asr_bt_d
+            .transpose(1, 2)
+            .map_err(Error::Numr)?
+            .contiguous()?;
         let (mag, phase) =
             self.decoder
                 .forward_cpu_full(client, &asr, &f0, &n_energy, &decoder_style)?;

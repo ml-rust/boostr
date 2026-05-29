@@ -29,7 +29,7 @@ pub(super) fn quant_matmul_via_dequant(
     let total: usize = a_shape.iter().product();
     let m = total / k;
 
-    let act_contig = activation.contiguous();
+    let act_contig = activation.contiguous()?;
     let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
     out_shape.push(n);
     let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, activation.device());

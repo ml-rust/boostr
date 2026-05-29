@@ -172,17 +172,17 @@ impl<R: Runtime> SigLipEncoderLayer<R> {
         let k_t = k.transpose(-2, -1)?;
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let scores = client
-            .matmul(&q.contiguous(), &k_t.contiguous())
+            .matmul(&q.contiguous()?, &k_t.contiguous()?)
             .map_err(Error::Numr)?;
         let scores = client.mul_scalar(&scores, scale).map_err(Error::Numr)?;
 
         let attn_weights = client.softmax(&scores, -1).map_err(Error::Numr)?;
 
         let attn_out = client
-            .matmul(&attn_weights, &v.contiguous())
+            .matmul(&attn_weights, &v.contiguous()?)
             .map_err(Error::Numr)?;
 
-        let attn_out = attn_out.transpose(1, 2)?.contiguous().reshape(&[
+        let attn_out = attn_out.transpose(1, 2)?.contiguous()?.reshape(&[
             batch,
             seq_len,
             self.num_heads * self.head_dim,
@@ -385,7 +385,7 @@ impl<R: Runtime> SigLipEncoder<R> {
         let patches = patches
             .reshape(&[batch, hidden, num_patches])?
             .transpose(1, 2)?
-            .contiguous();
+            .contiguous()?;
 
         // Position embedding (interpolate if resolution differs)
         let pos =
@@ -394,7 +394,7 @@ impl<R: Runtime> SigLipEncoder<R> {
             .reshape(&[1, num_patches, self.hidden_size])?
             .broadcast_to(&[batch, num_patches, self.hidden_size])?;
         let embeddings = client
-            .add(&patches, &pos.contiguous())
+            .add(&patches, &pos.contiguous()?)
             .map_err(Error::Numr)?;
 
         // Run through transformer layers

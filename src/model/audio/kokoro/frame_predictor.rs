@@ -120,7 +120,7 @@ impl<R: Runtime> FramePredictor<R> {
             .map_err(Error::Numr)?
             .broadcast_to(&[b, t, self.style_dim])
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let cat = client.cat(&[frames, &style_bc], 2).map_err(Error::Numr)?;
 
         let lstm_out = self.lstm.forward(client, &cat)?;

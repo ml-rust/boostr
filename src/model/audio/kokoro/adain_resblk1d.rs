@@ -78,7 +78,7 @@ fn nearest_upsample_1d<R: Runtime<DType = DType>>(
     let broadcast = unsq
         .broadcast_to(&[shape[0], shape[1], t, scale])
         .map_err(Error::Numr)?
-        .contiguous();
+        .contiguous()?;
     broadcast
         .reshape(&[shape[0], shape[1], t * scale])
         .map_err(Error::Numr)

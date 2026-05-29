@@ -59,7 +59,10 @@ where
     let device = tokens.device();
 
     // Flatten indices to [N*k] — already I32 from routing
-    let flat_indices = indices.reshape(&[total]).map_err(Error::Numr)?.contiguous();
+    let flat_indices = indices
+        .reshape(&[total])
+        .map_err(Error::Numr)?
+        .contiguous()?;
 
     // Sort by expert index to group tokens by expert
     // argsort gives us the permutation that sorts flat_indices (stable sort)

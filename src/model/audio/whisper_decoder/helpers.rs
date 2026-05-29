@@ -57,7 +57,7 @@ pub(super) fn reshape_heads<R: Runtime>(
 ) -> Result<Tensor<R>> {
     x.reshape(&[batch, seq, num_heads, head_dim])
         .and_then(|t| t.transpose(1, 2))
-        .map(|t| t.contiguous())
+        .and_then(|t| t.contiguous())
         .map_err(Error::Numr)
 }
 
@@ -91,6 +91,6 @@ where
     let mask_b = mask_tensor
         .broadcast_to(&[batch, num_heads, seq_len, seq_len])
         .map_err(Error::Numr)?
-        .contiguous();
+        .contiguous()?;
     client.add(&scores, &mask_b).map_err(Error::Numr)
 }

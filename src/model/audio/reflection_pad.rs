@@ -48,10 +48,10 @@ pub fn reflection_pad_1d(
     if pad_left == 0 && pad_right == 0 {
         // No-op; return a contiguous clone so downstream ops that assume
         // contiguous memory aren't surprised by input strides.
-        return Ok(x.contiguous());
+        return x.contiguous().map_err(Error::Numr);
     }
 
-    let flat: Vec<f32> = x.contiguous().to_vec();
+    let flat: Vec<f32> = x.contiguous().map_err(Error::Numr)?.to_vec();
     let t_out = t + pad_left + pad_right;
     let mut out = vec![0.0f32; b * c * t_out];
 

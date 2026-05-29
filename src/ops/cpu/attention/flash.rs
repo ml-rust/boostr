@@ -43,8 +43,8 @@ impl FlashAttentionOps<CpuRuntime> for CpuClient {
         if let Some(seq_len) = kv_seq_len {
             let k_narrow = k.narrow(2, 0, seq_len)?;
             let v_narrow = v.narrow(2, 0, seq_len)?;
-            let k_c = k_narrow.contiguous();
-            let v_c = v_narrow.contiguous();
+            let k_c = k_narrow.contiguous()?;
+            let v_c = v_narrow.contiguous()?;
             return self.flash_attention_fwd(
                 q,
                 &k_c,

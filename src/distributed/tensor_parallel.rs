@@ -73,7 +73,8 @@ impl<R: Runtime<DType = DType>> ColumnParallelLinear<R> {
             .map_err(|e| Error::DistributedError {
                 reason: format!("weight narrow failed: {e}"),
             })?
-            .contiguous();
+            .contiguous()
+            .map_err(Error::Numr)?;
 
         let bias_shard = match full_bias {
             Some(b) => {
@@ -82,7 +83,8 @@ impl<R: Runtime<DType = DType>> ColumnParallelLinear<R> {
                     .map_err(|e| Error::DistributedError {
                         reason: format!("bias narrow failed: {e}"),
                     })?
-                    .contiguous();
+                    .contiguous()
+                    .map_err(Error::Numr)?;
                 Some(Var::new(shard, trainable))
             }
             None => None,
@@ -185,7 +187,8 @@ impl<R: Runtime<DType = DType>> RowParallelLinear<R> {
             .map_err(|e| Error::DistributedError {
                 reason: format!("weight narrow failed: {e}"),
             })?
-            .contiguous();
+            .contiguous()
+            .map_err(Error::Numr)?;
 
         // Bias is NOT split — it's added after all-reduce on rank 0 only,
         // or equivalently on all ranks (since all-reduce produces identical results).
@@ -286,7 +289,7 @@ pub fn scatter_to_rank<R: Runtime>(
 
     tensor
         .narrow(dim, start, shard_size)
-        .map(|t| t.contiguous())
+        .and_then(|t| t.contiguous())
         .map_err(|e| Error::DistributedError {
             reason: format!("scatter narrow failed: {e}"),
         })

@@ -139,24 +139,24 @@ impl<R: Runtime> WhisperEncoderLayer<R> {
             .map_err(Error::Numr)?
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let k = k
             .tensor()
             .reshape(&[batch, seq_len, self.num_heads, self.head_dim])
             .map_err(Error::Numr)?
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let v = v
             .tensor()
             .reshape(&[batch, seq_len, self.num_heads, self.head_dim])
             .map_err(Error::Numr)?
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
 
         // Attention: softmax(Q @ K^T / sqrt(d)) @ V
-        let k_t = k.transpose(2, 3).map_err(Error::Numr)?.contiguous();
+        let k_t = k.transpose(2, 3).map_err(Error::Numr)?.contiguous()?;
         let scale = (self.head_dim as f32).sqrt();
         let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
         let scores = client
@@ -170,7 +170,7 @@ impl<R: Runtime> WhisperEncoderLayer<R> {
         let attn_out = attn_out
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous()
+            .contiguous()?
             .reshape(&[batch, seq_len, hidden])
             .map_err(Error::Numr)?;
 
@@ -302,7 +302,7 @@ impl<R: Runtime> WhisperEncoder<R> {
         let x = client.gelu(&x).map_err(Error::Numr)?;
 
         // Transpose to [B, seq_len, hidden]
-        let x = x.transpose(1, 2).map_err(Error::Numr)?.contiguous();
+        let x = x.transpose(1, 2).map_err(Error::Numr)?.contiguous()?;
 
         let seq_len = x.shape()[1];
 

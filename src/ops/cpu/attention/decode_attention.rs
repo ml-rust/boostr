@@ -289,7 +289,7 @@ mod tests {
             fused_decode_attention(&q, &k, &v, num_heads, num_kv_heads, head_dim).unwrap();
 
         // Reference: standard matmul path
-        let k_t = k.transpose(-2isize, -1isize).unwrap().contiguous();
+        let k_t = k.transpose(-2isize, -1isize).unwrap().contiguous().unwrap();
         let scores = client.matmul(&q, &k_t).unwrap();
         let scores = client.mul_scalar(&scores, scale).unwrap();
         let weights = client.softmax(&scores, -1).unwrap();
@@ -361,7 +361,11 @@ mod tests {
         let repeats = num_heads / num_kv_heads;
         let k_exp = client.repeat_interleave(&k, repeats, Some(1)).unwrap();
         let v_exp = client.repeat_interleave(&v, repeats, Some(1)).unwrap();
-        let k_t = k_exp.transpose(-2isize, -1isize).unwrap().contiguous();
+        let k_t = k_exp
+            .transpose(-2isize, -1isize)
+            .unwrap()
+            .contiguous()
+            .unwrap();
         let scores = client.matmul(&q, &k_t).unwrap();
         let scores = client.mul_scalar(&scores, scale).unwrap();
         let weights = client.softmax(&scores, -1).unwrap();

@@ -156,7 +156,11 @@ fn test_nf4_gemm_matches_dequant_matmul() {
         .unwrap();
     // Reshape to [N, K] and transpose to [K, N] for matmul
     let dequant_2d = dequant_weight.reshape(&[n, k]).unwrap();
-    let dequant_t = dequant_2d.transpose(0isize, 1isize).unwrap().contiguous();
+    let dequant_t = dequant_2d
+        .transpose(0isize, 1isize)
+        .unwrap()
+        .contiguous()
+        .unwrap();
     let ref_result = MatmulOps::matmul(&cpu_client, &input, &dequant_t).unwrap();
 
     let cpu_fused_vec = fused_result.to_vec::<f32>();

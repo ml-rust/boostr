@@ -61,11 +61,11 @@ impl<R: Runtime> MagPhaseHead<R> {
         let mag_log = combined
             .narrow(1, 0, self.n_freq_bins)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let phase_raw = combined
             .narrow(1, self.n_freq_bins, self.n_freq_bins)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let mag = client.exp(&mag_log).map_err(Error::Numr)?;
         let phase = client.sin(&phase_raw).map_err(Error::Numr)?;
         Ok((mag, phase))

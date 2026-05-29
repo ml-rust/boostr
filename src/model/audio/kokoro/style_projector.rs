@@ -89,8 +89,14 @@ impl<R: Runtime> StyleProjector<R> {
             .map_err(Error::Numr)?;
 
         let c = self.channels;
-        let gamma = projected.narrow(1, 0, c).map_err(Error::Numr)?.contiguous();
-        let beta = projected.narrow(1, c, c).map_err(Error::Numr)?.contiguous();
+        let gamma = projected
+            .narrow(1, 0, c)
+            .map_err(Error::Numr)?
+            .contiguous()?;
+        let beta = projected
+            .narrow(1, c, c)
+            .map_err(Error::Numr)?
+            .contiguous()?;
         Ok((gamma, beta))
     }
 }

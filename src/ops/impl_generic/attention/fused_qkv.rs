@@ -78,22 +78,22 @@ where
 
     // Reshape and transpose to [B, heads, S, D]
     let q = q_flat
-        .contiguous()
+        .contiguous()?
         .reshape(&[batch_size, seq_len, num_heads, head_dim])?
         .transpose(1, 2)?
-        .contiguous();
+        .contiguous()?;
 
     let k = k_flat
-        .contiguous()
+        .contiguous()?
         .reshape(&[batch_size, seq_len, num_kv_heads, head_dim])?
         .transpose(1, 2)?
-        .contiguous();
+        .contiguous()?;
 
     let v = v_flat
-        .contiguous()
+        .contiguous()?
         .reshape(&[batch_size, seq_len, num_kv_heads, head_dim])?
         .transpose(1, 2)?
-        .contiguous();
+        .contiguous()?;
 
     Ok((q, k, v))
 }
@@ -184,17 +184,17 @@ where
     // Transpose dQ/dK/dV from [B, heads, S, D] to [B, S, heads, D] then flatten
     let dq_flat = dq
         .transpose(1, 2)?
-        .contiguous()
+        .contiguous()?
         .reshape(&[batch_size * seq_len, hq])?;
 
     let dk_flat = dk
         .transpose(1, 2)?
-        .contiguous()
+        .contiguous()?
         .reshape(&[batch_size * seq_len, hkv])?;
 
     let dv_flat = dv
         .transpose(1, 2)?
-        .contiguous()
+        .contiguous()?
         .reshape(&[batch_size * seq_len, hkv])?;
 
     // Concatenate dQ, dK, dV → d_qkv: [B*S, total_proj]
@@ -210,7 +210,7 @@ where
     let input_2d = input.reshape(&[batch_size * seq_len, hidden_dim])?;
     let d_qkv_t = d_qkv.transpose(-2, -1)?;
     let d_weight = client
-        .matmul(&d_qkv_t.contiguous(), &input_2d)
+        .matmul(&d_qkv_t.contiguous()?, &input_2d)
         .map_err(Error::Numr)?;
 
     // d_bias = sum(d_qkv, dim=0) → [total_proj]
@@ -261,7 +261,7 @@ where
     let attn_2d = attn_out.reshape(&[batch_size * seq_len, proj_dim])?;
     let d_output_2d_t = d_output_2d.transpose(-2, -1)?;
     let d_weight = client
-        .matmul(&d_output_2d_t.contiguous(), &attn_2d)
+        .matmul(&d_output_2d_t.contiguous()?, &attn_2d)
         .map_err(Error::Numr)?;
 
     // d_bias = sum(d_output_2d, dim=0) → [H]
@@ -283,8 +283,8 @@ mod tests {
     use numr::runtime::cpu::CpuRuntime;
 
     fn assert_close(actual: &Tensor<CpuRuntime>, expected: &Tensor<CpuRuntime>, label: &str) {
-        let a = actual.contiguous().to_vec::<f32>();
-        let b = expected.contiguous().to_vec::<f32>();
+        let a = actual.contiguous().unwrap().to_vec::<f32>();
+        let b = expected.contiguous().unwrap().to_vec::<f32>();
         for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
             assert!(
                 (x - y).abs() < 1e-5,
@@ -363,18 +363,21 @@ mod tests {
             .transpose(1, 2)
             .unwrap()
             .contiguous()
+            .unwrap()
             .reshape(&[bs, hq])
             .unwrap();
         let dk_flat = dk
             .transpose(1, 2)
             .unwrap()
             .contiguous()
+            .unwrap()
             .reshape(&[bs, hkv])
             .unwrap();
         let dv_flat = dv
             .transpose(1, 2)
             .unwrap()
             .contiguous()
+            .unwrap()
             .reshape(&[bs, hkv])
             .unwrap();
         let d_qkv_ref = client.cat(&[&dq_flat, &dk_flat, &dv_flat], -1).unwrap();
@@ -385,7 +388,7 @@ mod tests {
 
         // 3. ref_d_weight = d_qkv^T @ input_2d
         let input_2d = input.reshape(&[bs, hidden]).unwrap();
-        let d_qkv_t = d_qkv_ref.transpose(-2, -1).unwrap().contiguous();
+        let d_qkv_t = d_qkv_ref.transpose(-2, -1).unwrap().contiguous().unwrap();
         let ref_d_weight = client.matmul(&d_qkv_t, &input_2d).unwrap();
 
         // 4. ref_d_bias = sum(d_qkv, dim=0)
@@ -437,7 +440,7 @@ mod tests {
 
         // ref_d_weight = d_output_2d^T @ attn_2d
         let attn_2d = attn_out.reshape(&[bs, proj_dim]).unwrap();
-        let d_output_2d_t = d_output_2d.transpose(-2, -1).unwrap().contiguous();
+        let d_output_2d_t = d_output_2d.transpose(-2, -1).unwrap().contiguous().unwrap();
         let ref_d_weight = client.matmul(&d_output_2d_t, &attn_2d).unwrap();
 
         // ref_d_bias = sum(d_output_2d, dim=0)

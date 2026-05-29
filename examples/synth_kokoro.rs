@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let waveform = model.synthesize_cpu(&client, &token_ids, &voice_row, 1)?;
     let elapsed = start.elapsed();
 
-    let samples: Vec<f32> = waveform.contiguous().to_vec();
+    let samples: Vec<f32> = waveform.contiguous()?.to_vec();
     println!(
         "ok — {} samples @ {} Hz = {:.2}s audio, synth took {:.2}s ({:.2}x realtime)",
         samples.len(),

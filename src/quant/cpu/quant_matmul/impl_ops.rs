@@ -311,7 +311,7 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         // Ensure activation is contiguous — non-contiguous tensors (from permute/reshape)
         // would cause the raw storage to not match the logical layout.
         let activation = if !activation.is_contiguous() {
-            activation.contiguous()
+            activation.contiguous()?
         } else {
             activation.clone()
         };

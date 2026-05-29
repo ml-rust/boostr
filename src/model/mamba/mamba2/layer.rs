@@ -145,14 +145,14 @@ impl<R: Runtime> Mamba2<R> {
         let conv_out = conv_out
             .narrow(2, 0, seq_len)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
 
         let conv_window = self.config.d_conv - 1;
         if seq_len >= conv_window {
             let tail = xbc_ncl
                 .narrow(2, seq_len - conv_window, conv_window)
                 .map_err(Error::Numr)?
-                .contiguous();
+                .contiguous()?;
             state.update_conv_state(tail);
         } else {
             let conv_channels = self.config.conv_channels();
@@ -164,7 +164,7 @@ impl<R: Runtime> Mamba2<R> {
                     .conv_state()
                     .narrow(2, conv_window - offset, offset)
                     .map_err(Error::Numr)?
-                    .contiguous();
+                    .contiguous()?;
                 new_conv = new_conv
                     .slice_assign(&old_tail, 2, 0)
                     .map_err(Error::Numr)?;
@@ -198,7 +198,7 @@ impl<R: Runtime> Mamba2<R> {
                 .conv_state()
                 .narrow(2, 1, conv_window - 1)
                 .map_err(Error::Numr)?
-                .contiguous()
+                .contiguous()?
         } else {
             Tensor::<R>::zeros(&[batch, conv_channels, 0], x.dtype(), x.device())
         };

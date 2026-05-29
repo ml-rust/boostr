@@ -136,7 +136,7 @@ pub fn reference_attention(
     let seq_len_k = k.shape()[2];
     let scale = (head_dim as f64).sqrt().recip();
 
-    let k_t = k.transpose(-2, -1).unwrap().contiguous();
+    let k_t = k.transpose(-2, -1).unwrap().contiguous().unwrap();
     let scores = client.matmul(q, &k_t).unwrap();
     let scores = client.mul_scalar(&scores, scale).unwrap();
 

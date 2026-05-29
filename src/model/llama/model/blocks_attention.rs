@@ -113,8 +113,8 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
 
         // Contiguous Q/K needed because fused RoPE kernel assumes contiguous layout.
         // V skips contiguous — matmul handles strided inputs via copy_strided.
-        let q = var_contiguous(&q);
-        let k = var_contiguous(&k);
+        let q = var_contiguous(&q)?;
+        let k = var_contiguous(&k)?;
 
         // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
         let (q, k) = self.apply_qk_norms(client, &q, &k)?;
@@ -153,7 +153,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
         let attn_out =
             numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out);
+        let attn_out = var_contiguous(&attn_out)?;
         let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 
@@ -207,8 +207,8 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
 
         // Contiguous Q/K needed because fused RoPE kernel assumes contiguous layout.
-        let q = var_contiguous(&q);
-        let k = var_contiguous(&k);
+        let q = var_contiguous(&q)?;
+        let k = var_contiguous(&k)?;
 
         // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
         let (q, k) = self.apply_qk_norms(client, &q, &k)?;
@@ -219,7 +219,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         let (q, k) = self.apply_rotary_if_needed(client, q, k, &cos_offset, &sin_offset)?;
 
         // V also needs to be contiguous for flash attention kernel
-        let v = var_contiguous(&v);
+        let v = var_contiguous(&v)?;
 
         // Update KV cache with new K/V tensors [B, H_kv, S, D]
         kv_cache.update_fused(k.tensor(), v.tensor(), client)?;
@@ -232,7 +232,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
                     .k_cache_raw()
                     .narrow(2, 0, kv_seq_len)
                     .map_err(Error::Numr)?
-                    .contiguous(),
+                    .contiguous()?,
                 false,
             );
             let v_full = Var::new(
@@ -240,7 +240,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
                     .v_cache_raw()
                     .narrow(2, 0, kv_seq_len)
                     .map_err(Error::Numr)?
-                    .contiguous(),
+                    .contiguous()?,
                 false,
             );
             // Repeat KV heads for GQA
@@ -289,7 +289,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
         let attn_out =
             numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out);
+        let attn_out = var_contiguous(&attn_out)?;
         let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 
@@ -349,9 +349,9 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
         let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
 
-        let q = var_contiguous(&q);
-        let k = var_contiguous(&k);
-        let v = var_contiguous(&v);
+        let q = var_contiguous(&q)?;
+        let k = var_contiguous(&k)?;
+        let v = var_contiguous(&v)?;
 
         // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
         let (q, k) = self.apply_qk_norms(client, &q, &k)?;
@@ -365,12 +365,12 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         let k_flat = k
             .tensor()
             .permute(&[0, 2, 1, 3])? // [B, S, H_kv, D]
-            .contiguous()
+            .contiguous()?
             .reshape(&[batch * seq_len, self.num_kv_heads, self.head_dim])?;
         let v_flat = v
             .tensor()
             .permute(&[0, 2, 1, 3])? // [B, S, H_kv, D]
-            .contiguous()
+            .contiguous()?
             .reshape(&[batch * seq_len, self.num_kv_heads, self.head_dim])?;
 
         // Write K/V into paged cache using slot_mapping
@@ -399,7 +399,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         let attn_out = Var::new(attn_out, false);
         let attn_out =
             numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out);
+        let attn_out = var_contiguous(&attn_out)?;
         let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 
@@ -463,9 +463,9 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
         let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
         let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
 
-        let q = var_contiguous(&q);
-        let k = var_contiguous(&k);
-        let v = var_contiguous(&v);
+        let q = var_contiguous(&q)?;
+        let k = var_contiguous(&k)?;
+        let v = var_contiguous(&v)?;
 
         // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
         let (q, k) = self.apply_qk_norms(client, &q, &k)?;
@@ -501,7 +501,7 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
         let attn_out = Var::new(attn_out, false);
         let attn_out =
             numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out);
+        let attn_out = var_contiguous(&attn_out)?;
         let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 

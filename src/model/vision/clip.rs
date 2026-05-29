@@ -186,7 +186,7 @@ impl<R: Runtime> ClipEncoderLayer<R> {
         let k_t = k.transpose(-2, -1)?;
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let scores = client
-            .matmul(&q.contiguous(), &k_t.contiguous())
+            .matmul(&q.contiguous()?, &k_t.contiguous()?)
             .map_err(Error::Numr)?;
         let scores = client.mul_scalar(&scores, scale).map_err(Error::Numr)?;
 
@@ -195,11 +195,11 @@ impl<R: Runtime> ClipEncoderLayer<R> {
 
         // Weighted sum: attn @ V -> [B, num_heads, seq, head_dim]
         let attn_out = client
-            .matmul(&attn_weights, &v.contiguous())
+            .matmul(&attn_weights, &v.contiguous()?)
             .map_err(Error::Numr)?;
 
         // Transpose back and reshape: [B, seq, hidden]
-        let attn_out = attn_out.transpose(1, 2)?.contiguous().reshape(&[
+        let attn_out = attn_out.transpose(1, 2)?.contiguous()?.reshape(&[
             batch,
             seq_len,
             self.num_heads * self.head_dim,
@@ -351,14 +351,14 @@ impl<R: Runtime> ClipEncoder<R> {
         let patches = patches
             .reshape(&[batch, hidden, num_patches])?
             .transpose(1, 2)?
-            .contiguous();
+            .contiguous()?;
 
         // Prepend class token: expand class_embedding [hidden] -> [B, 1, hidden]
         let cls = self.class_embedding.tensor();
         let cls = cls
             .reshape(&[1, 1, hidden])?
             .broadcast_to(&[batch, 1, hidden])?
-            .contiguous();
+            .contiguous()?;
 
         // Concatenate [cls, patches] -> [B, num_patches+1, hidden]
         let embeddings = client.cat(&[&cls, &patches], 1).map_err(Error::Numr)?;

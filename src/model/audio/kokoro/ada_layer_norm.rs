@@ -94,7 +94,7 @@ impl<R: Runtime> AdaLayerNorm<R> {
         // LayerNorm needs the channel axis last: transpose [B,C,T] → [B,T,C],
         // apply with unit weight / zero bias (no learnable affine upstream),
         // then transpose back.
-        let x_btc = x.transpose(1, 2).map_err(Error::Numr)?.contiguous();
+        let x_btc = x.transpose(1, 2).map_err(Error::Numr)?.contiguous()?;
         let ones = client
             .fill(&[self.channels], 1.0, x.dtype())
             .map_err(Error::Numr)?;
@@ -104,7 +104,7 @@ impl<R: Runtime> AdaLayerNorm<R> {
         let ln = client
             .layer_norm(&x_btc, &ones, &zeros, self.eps)
             .map_err(Error::Numr)?;
-        let ln_bct = ln.transpose(1, 2).map_err(Error::Numr)?.contiguous();
+        let ln_bct = ln.transpose(1, 2).map_err(Error::Numr)?.contiguous()?;
 
         // Style projection → gamma, beta per-sample, broadcast over T.
         let fc_w_t = self.fc_weight.transpose(0, 1).map_err(Error::Numr)?;

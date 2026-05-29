@@ -39,7 +39,7 @@ impl FusedQuantOps<CudaRuntime> for CudaClient {
         let n = gate_qweight.shape()[1] * 8;
         let device_index = input.device().id();
 
-        let act_contig = input.contiguous();
+        let act_contig = input.contiguous()?;
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n);
@@ -118,7 +118,7 @@ impl FusedQuantOps<CudaRuntime> for CudaClient {
         let nkv = qweight_k.shape()[1] * 8;
         let device_index = input.device().id();
 
-        let act_contig = input.contiguous();
+        let act_contig = input.contiguous()?;
 
         let batch_dims = &in_shape[..in_shape.len() - 1];
         let mut q_shape = batch_dims.to_vec();

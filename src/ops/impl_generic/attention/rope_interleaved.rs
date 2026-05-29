@@ -145,7 +145,7 @@ mod tests {
         );
 
         let out = apply_rope_interleaved_impl(&client, &x, &cos, &sin).unwrap();
-        let out_data: Vec<f32> = out.tensor().contiguous().to_vec();
+        let out_data: Vec<f32> = out.tensor().contiguous().unwrap().to_vec();
 
         for (i, (&a, &b)) in out_data.iter().zip(x_data.iter()).enumerate() {
             assert!(
@@ -180,7 +180,7 @@ mod tests {
         );
 
         let out = apply_rope_interleaved_impl(&client, &x, &cos, &sin).unwrap();
-        let out_data: Vec<f32> = out.tensor().contiguous().to_vec();
+        let out_data: Vec<f32> = out.tensor().contiguous().unwrap().to_vec();
 
         assert!((out_data[0] - (-2.0)).abs() < 1e-5, "got {}", out_data[0]);
         assert!((out_data[1] - 1.0).abs() < 1e-5, "got {}", out_data[1]);

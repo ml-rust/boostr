@@ -64,11 +64,11 @@ impl<R: Runtime> ConvBlock<R> {
     {
         let y = self.conv.forward_inference(client, x)?;
         // Channel-wise LayerNorm: [B,C,T] -> [B,T,C] -> LN over last dim -> [B,C,T]
-        let y_bt_c = y.transpose(1, 2).map_err(Error::Numr)?.contiguous();
+        let y_bt_c = y.transpose(1, 2).map_err(Error::Numr)?.contiguous()?;
         let y_ln = client
             .layer_norm(&y_bt_c, &self.ln_weight, &self.ln_bias, self.eps)
             .map_err(Error::Numr)?;
-        let y_bct = y_ln.transpose(1, 2).map_err(Error::Numr)?.contiguous();
+        let y_bct = y_ln.transpose(1, 2).map_err(Error::Numr)?.contiguous()?;
         client
             .leaky_relu(&y_bct, self.leaky_slope)
             .map_err(Error::Numr)
@@ -172,14 +172,14 @@ impl<R: Runtime> TextEncoder<R> {
             .tensor()
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
 
         for block in &self.conv_blocks {
             h = block.forward(client, &h)?;
         }
 
         // [B, C, T] -> [B, T, C] for LSTM
-        let h_btc = h.transpose(1, 2).map_err(Error::Numr)?.contiguous();
+        let h_btc = h.transpose(1, 2).map_err(Error::Numr)?.contiguous()?;
         self.lstm.forward(client, &h_btc)
     }
 }

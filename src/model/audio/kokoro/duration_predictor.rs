@@ -128,7 +128,7 @@ impl<R: Runtime> DurationPredictor<R> {
         let style_bc = style_reshaped
             .broadcast_to(&[b, t, self.style_dim])
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         let x_cat = client.cat(&[hidden, &style_bc], 2).map_err(Error::Numr)?;
 
         // BiLSTM returns [B, T, d_model].

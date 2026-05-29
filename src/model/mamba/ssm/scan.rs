@@ -211,19 +211,19 @@ where
     R::Client: TensorOps<R> + ScalarOps<R>,
 {
     // Extract x_t: [B, 1, nheads, headdim] -> [B, nheads, headdim]
-    let x_t = var_contiguous(&var_narrow(x, 1, t, 1).map_err(Error::Numr)?);
+    let x_t = var_contiguous(&var_narrow(x, 1, t, 1).map_err(Error::Numr)?)?;
     let x_t = var_reshape(&x_t, &[batch, nheads, headdim]).map_err(Error::Numr)?;
 
     // Extract dt_t: [B, 1, nheads] -> [B, nheads, 1, 1] for broadcasting
-    let dt_t = var_contiguous(&var_narrow(dt, 1, t, 1).map_err(Error::Numr)?);
+    let dt_t = var_contiguous(&var_narrow(dt, 1, t, 1).map_err(Error::Numr)?)?;
     let dt_t = var_reshape(&dt_t, &[batch, nheads, 1, 1]).map_err(Error::Numr)?;
 
     // Extract B_t: [B, 1, ngroups, d_state] -> [B, ngroups, 1, d_state]
-    let b_t = var_contiguous(&var_narrow(b, 1, t, 1).map_err(Error::Numr)?);
+    let b_t = var_contiguous(&var_narrow(b, 1, t, 1).map_err(Error::Numr)?)?;
     let b_t = var_reshape(&b_t, &[batch, ngroups, 1, d_state]).map_err(Error::Numr)?;
 
     // Extract C_t: [B, 1, ngroups, d_state] -> [B, ngroups, d_state]
-    let c_t = var_contiguous(&var_narrow(c, 1, t, 1).map_err(Error::Numr)?);
+    let c_t = var_contiguous(&var_narrow(c, 1, t, 1).map_err(Error::Numr)?)?;
     let c_t = var_reshape(&c_t, &[batch, ngroups, d_state]).map_err(Error::Numr)?;
 
     // A: [nheads] -> [1, nheads, 1, 1] for broadcasting with h

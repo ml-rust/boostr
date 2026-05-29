@@ -82,8 +82,8 @@ impl SsmKernelOps<CudaRuntime> for CudaClient {
         let device = states.device();
 
         // Ensure contiguous
-        let states_c = states.contiguous();
-        let da_c = dA_cumsum.contiguous();
+        let states_c = states.contiguous()?;
+        let da_c = dA_cumsum.contiguous()?;
 
         // Allocate output
         let states_out = Tensor::<CudaRuntime>::empty(s_shape, dtype, device);

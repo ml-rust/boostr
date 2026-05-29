@@ -72,8 +72,8 @@ mod tests {
         let rope_out = apply_rope_impl(&client, &x, &cos, &sin).unwrap();
         let yarn_out = apply_rope_yarn_impl(&client, &x, &cos, &sin, 1.0).unwrap();
 
-        let rope_data: Vec<f32> = rope_out.tensor().contiguous().to_vec();
-        let yarn_data: Vec<f32> = yarn_out.tensor().contiguous().to_vec();
+        let rope_data: Vec<f32> = rope_out.tensor().contiguous().unwrap().to_vec();
+        let yarn_data: Vec<f32> = yarn_out.tensor().contiguous().unwrap().to_vec();
 
         for (i, (&a, &b)) in rope_data.iter().zip(yarn_data.iter()).enumerate() {
             assert!(
@@ -107,8 +107,8 @@ mod tests {
         let rope_out = apply_rope_impl(&client, &x, &cos, &sin).unwrap();
         let yarn_out = apply_rope_yarn_impl(&client, &x, &cos, &sin, 2.0).unwrap();
 
-        let rope_data: Vec<f32> = rope_out.tensor().contiguous().to_vec();
-        let yarn_data: Vec<f32> = yarn_out.tensor().contiguous().to_vec();
+        let rope_data: Vec<f32> = rope_out.tensor().contiguous().unwrap().to_vec();
+        let yarn_data: Vec<f32> = yarn_out.tensor().contiguous().unwrap().to_vec();
 
         for (i, (&a, &b)) in rope_data.iter().zip(yarn_data.iter()).enumerate() {
             assert!(

@@ -103,7 +103,7 @@ where
     let scale_t = scale
         .permute(&[0, 2, 3, 1])
         .map_err(Error::Numr)?
-        .contiguous()
+        .contiguous()?
         .reshape(&[batch, nchunks, chunk_size, nheads, 1])
         .map_err(Error::Numr)?;
 
@@ -121,23 +121,23 @@ where
     let sx_t = scaled_x
         .permute(&[0, 1, 3, 4, 2])
         .map_err(Error::Numr)?
-        .contiguous();
+        .contiguous()?;
 
     // Expand B for head groups: [batch, nchunks, nheads, chunk_size, dstate]
     let b_for_heads = if ngroups == nheads {
         b_chunks
             .permute(&[0, 1, 3, 4, 2])
             .map_err(Error::Numr)?
-            .contiguous()
+            .contiguous()?
             .permute(&[0, 1, 2, 4, 3])
             .map_err(Error::Numr)?
-            .contiguous()
+            .contiguous()?
     } else {
         // ngroups < nheads: repeat each group heads_per_group times
         let b_t = b_chunks
             .permute(&[0, 1, 3, 2, 4])
             .map_err(Error::Numr)?
-            .contiguous();
+            .contiguous()?;
         if heads_per_group == 1 {
             b_t
         } else {
@@ -145,7 +145,7 @@ where
                 .map_err(Error::Numr)?
                 .broadcast_to(&[batch, nchunks, ngroups, heads_per_group, chunk_size, dstate])
                 .map_err(Error::Numr)?
-                .contiguous()
+                .contiguous()?
                 .reshape(&[batch, nchunks, nheads, chunk_size, dstate])
                 .map_err(Error::Numr)?
         }
@@ -196,7 +196,7 @@ where
     let dA_last = dA_cumsum
         .narrow(3, chunk_size - 1, 1)
         .map_err(Error::Numr)?
-        .contiguous()
+        .contiguous()?
         .reshape(&[batch, nheads, nchunks])
         .map_err(Error::Numr)?;
 
@@ -219,7 +219,7 @@ where
         let scale_c = dA_scale
             .narrow(2, c, 1)
             .map_err(Error::Numr)?
-            .contiguous()
+            .contiguous()?
             .reshape(&[batch, 1, nheads, 1, 1])
             .map_err(Error::Numr)?;
 

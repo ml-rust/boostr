@@ -74,8 +74,8 @@ pub fn stft(
     }
 
     let (b, t_time) = (wave_shape[0], wave_shape[1]);
-    let window_vec: Vec<f32> = window.contiguous().to_vec();
-    let mut input_vec: Vec<f32> = waveform.contiguous().to_vec();
+    let window_vec: Vec<f32> = window.contiguous()?.to_vec();
+    let mut input_vec: Vec<f32> = waveform.contiguous()?.to_vec();
 
     // `center=True` pads `n_fft/2` zeros on each side. We use zero padding
     // rather than reflection — upstream Kokoro's TorchSTFT helper sets

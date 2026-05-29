@@ -68,7 +68,8 @@ impl<R: Runtime<DType = DType>> VocabParallelEmbedding<R> {
             .map_err(|e| Error::DistributedError {
                 reason: format!("embedding narrow failed: {e}"),
             })?
-            .contiguous();
+            .contiguous()
+            .map_err(Error::Numr)?;
 
         Ok(Self {
             weight: Var::new(shard, trainable),

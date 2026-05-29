@@ -101,9 +101,9 @@ impl Llama<numr::runtime::cuda::CudaRuntime> {
             let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
             let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
 
-            let q = var_contiguous(&q);
-            let k = var_contiguous(&k);
-            let v = var_contiguous(&v);
+            let q = var_contiguous(&q)?;
+            let k = var_contiguous(&k)?;
+            let v = var_contiguous(&v)?;
 
             // Apply RoPE using stable cos/sin slices
             let q = client.apply_rope_interleaved(&q, cos_slice, sin_slice)?;
@@ -113,9 +113,9 @@ impl Llama<numr::runtime::cuda::CudaRuntime> {
             let k_flat = k
                 .tensor()
                 .permute(&[0, 2, 1, 3])? // [B, S, H_kv, D]
-                .contiguous()
+                .contiguous()?
                 .reshape(&[batch * seq_len, attn.num_kv_heads, attn.head_dim])?;
-            let v_flat = v.tensor().permute(&[0, 2, 1, 3])?.contiguous().reshape(&[
+            let v_flat = v.tensor().permute(&[0, 2, 1, 3])?.contiguous()?.reshape(&[
                 batch * seq_len,
                 attn.num_kv_heads,
                 attn.head_dim,
@@ -152,7 +152,7 @@ impl Llama<numr::runtime::cuda::CudaRuntime> {
             let attn_out = Var::new(attn_output, false);
             let attn_out =
                 numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-            let attn_out = var_contiguous(&attn_out);
+            let attn_out = var_contiguous(&attn_out)?;
             let attn_out = numr::autograd::var_reshape(
                 &attn_out,
                 &[batch, seq_len, attn.num_heads * attn.head_dim],

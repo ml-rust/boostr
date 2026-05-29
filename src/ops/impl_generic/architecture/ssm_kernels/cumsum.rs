@@ -90,7 +90,7 @@ where
     let dt_out = dt_chunked
         .permute(&[0, 3, 1, 2])
         .map_err(Error::Numr)?
-        .contiguous();
+        .contiguous()?;
 
     // A: [nheads] → [1, nheads, 1, 1] for broadcast
     let a_broad = a.reshape(&[1, nheads, 1, 1]).map_err(Error::Numr)?;

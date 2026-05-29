@@ -252,7 +252,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
             None => v_new,
         };
 
-        let k_t = k_all.transpose(-2, -1).map_err(Error::Numr)?.contiguous();
+        let k_t = k_all.transpose(-2, -1).map_err(Error::Numr)?.contiguous()?;
         let scale = (self.head_dim as f32).sqrt();
         let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
         let mut scores = client
@@ -275,7 +275,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         let out = out
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous()
+            .contiguous()?
             .reshape(&[batch, cur_len, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 
@@ -333,7 +333,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         let q = self.cross_q_proj.forward(client, &q_in)?;
         let q = reshape_heads(q.tensor(), batch, tgt_len, self.num_heads, self.head_dim)?;
 
-        let k_t = k.transpose(-2, -1).map_err(Error::Numr)?.contiguous();
+        let k_t = k.transpose(-2, -1).map_err(Error::Numr)?.contiguous()?;
         let scale = (self.head_dim as f32).sqrt();
         let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
         let scores = client
@@ -345,7 +345,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         let out = out
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous()
+            .contiguous()?
             .reshape(&[batch, tgt_len, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 
@@ -379,7 +379,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         let k = reshape_heads(k.tensor(), batch, seq_len, self.num_heads, self.head_dim)?;
         let v = reshape_heads(v.tensor(), batch, seq_len, self.num_heads, self.head_dim)?;
 
-        let k_t = k.transpose(-2, -1).map_err(Error::Numr)?.contiguous();
+        let k_t = k.transpose(-2, -1).map_err(Error::Numr)?.contiguous()?;
         let scale = (self.head_dim as f32).sqrt();
         let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
         let mut scores = client
@@ -396,7 +396,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         let out = out
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous()
+            .contiguous()?
             .reshape(&[batch, seq_len, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 
@@ -437,7 +437,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         let k = reshape_heads(k.tensor(), batch, src_len, self.num_heads, self.head_dim)?;
         let v = reshape_heads(v.tensor(), batch, src_len, self.num_heads, self.head_dim)?;
 
-        let k_t = k.transpose(-2, -1).map_err(Error::Numr)?.contiguous();
+        let k_t = k.transpose(-2, -1).map_err(Error::Numr)?.contiguous()?;
         let scale = (self.head_dim as f32).sqrt();
         let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
         let scores = client
@@ -449,7 +449,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         let out = out
             .transpose(1, 2)
             .map_err(Error::Numr)?
-            .contiguous()
+            .contiguous()?
             .reshape(&[batch, tgt_len, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 

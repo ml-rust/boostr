@@ -60,8 +60,8 @@ impl SsmKernelOps<CpuRuntime> for CpuClient {
             return Ok(states.clone());
         }
 
-        let states_c = states.contiguous();
-        let da_c = dA_cumsum.contiguous();
+        let states_c = states.contiguous()?;
+        let da_c = dA_cumsum.contiguous()?;
 
         let states_data = states_c.to_vec::<f32>();
         let da_data = da_c.to_vec::<f32>();

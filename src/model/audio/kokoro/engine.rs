@@ -87,7 +87,7 @@ impl KokoroEngine {
         let waveform_tensor =
             self.model
                 .synthesize_cpu(&self.client, &token_ids, &voice_row, floor.max(1))?;
-        Ok(waveform_tensor.contiguous().to_vec())
+        Ok(waveform_tensor.contiguous()?.to_vec())
     }
 
     pub fn sample_rate(&self) -> u32 {

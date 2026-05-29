@@ -208,13 +208,13 @@ pub fn split_voice_style<R: Runtime<DType = DType>>(
         .map_err(|e| Error::ModelError {
             reason: format!("narrow decoder style: {e}"),
         })?
-        .contiguous();
+        .contiguous()?;
     let predictor = style_row
         .narrow(1, style_dim, style_dim)
         .map_err(|e| Error::ModelError {
             reason: format!("narrow predictor style: {e}"),
         })?
-        .contiguous();
+        .contiguous()?;
     Ok((decoder, predictor))
 }
 

@@ -47,7 +47,7 @@ pub(super) fn standard_attention_fwd(
 
     // Q @ K^T → [B, H, S_q, S_k]
     let k_t = k_expanded.transpose(-2, -1).map_err(Error::Numr)?;
-    let k_t = k_t.contiguous();
+    let k_t = k_t.contiguous()?;
     let scores = client.matmul(q, &k_t).map_err(Error::Numr)?;
 
     // Scale
@@ -128,7 +128,7 @@ pub(super) fn standard_attention_bwd(
 
     // Recompute scores and attention weights
     let k_t = k_expanded.transpose(-2, -1).map_err(Error::Numr)?;
-    let k_t = k_t.contiguous();
+    let k_t = k_t.contiguous()?;
     let scores = client.matmul(q, &k_t).map_err(Error::Numr)?;
     let scores = client.mul_scalar(&scores, scale).map_err(Error::Numr)?;
 
@@ -149,12 +149,12 @@ pub(super) fn standard_attention_bwd(
 
     // dV = P^T @ dO  → [B, H, S_k, D]
     let weights_t = weights.transpose(-2, -1).map_err(Error::Numr)?;
-    let weights_t = weights_t.contiguous();
+    let weights_t = weights_t.contiguous()?;
     let dv_expanded = client.matmul(&weights_t, dout).map_err(Error::Numr)?;
 
     // dP = dO @ V^T  → [B, H, S_q, S_k]
     let v_t = v_expanded.transpose(-2, -1).map_err(Error::Numr)?;
-    let v_t = v_t.contiguous();
+    let v_t = v_t.contiguous()?;
     let dp = client.matmul(dout, &v_t).map_err(Error::Numr)?;
 
     // D = rowsum(dO ⊙ O)  → [B, H, S_q]
@@ -176,7 +176,7 @@ pub(super) fn standard_attention_bwd(
 
     // dK = dS^T @ Q  → [B, H, S_k, D]
     let ds_t = ds.transpose(-2, -1).map_err(Error::Numr)?;
-    let ds_t = ds_t.contiguous();
+    let ds_t = ds_t.contiguous()?;
     let dk_expanded = client.matmul(&ds_t, q).map_err(Error::Numr)?;
 
     // If GQA, sum gradients across repeated heads back to num_kv_heads

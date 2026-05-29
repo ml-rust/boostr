@@ -244,20 +244,19 @@ fn test_graph_capture_lifecycle<R: Runtime<DType = numr::dtype::DType>>(client: 
 
     // Capture forward — closure must execute
     let mut fwd_executed = false;
-    let fwd_result = trainer
-        .capture_forward_pass(client, |_c| {
+    trainer
+        .capture_forward_pass(client, &[], &[], |_c| {
             fwd_executed = true;
-            Ok(42i32)
+            Ok(())
         })
         .expect("capture_forward_pass");
     assert!(fwd_executed);
-    assert_eq!(fwd_result, 42);
     assert_eq!(trainer.graphs_captured(), (true, false));
 
     // Capture backward
     let mut bwd_executed = false;
     trainer
-        .capture_backward_pass(client, |_c| {
+        .capture_backward_pass(client, &[], &[], |_c| {
             bwd_executed = true;
             Ok(())
         })
@@ -300,7 +299,7 @@ fn test_graph_capture_wgpu() {
 
 /// Test graph capture with real tensor ops on non-capture backends (CPU/WebGPU).
 ///
-/// On these backends, `capture_graph` executes eagerly and `launch` is a no-op,
+/// On these backends, `capture_graph_into` executes eagerly and `launch` is a no-op,
 /// so allocations inside the closure work fine.
 fn test_graph_capture_with_tensor_ops_eager<R: Runtime<DType = numr::dtype::DType>>(
     client: &R::Client,
@@ -314,15 +313,20 @@ fn test_graph_capture_with_tensor_ops_eager<R: Runtime<DType = numr::dtype::DTyp
     let mut trainer = SimpleTrainer::<R>::new(config).expect("valid config");
 
     let a = Tensor::<R>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4], device);
+    // Destination-passing: allocate output before capture.
+    let out = Tensor::<R>::zeros(&[4], numr::dtype::DType::F32, device);
 
-    let result = trainer
-        .capture_forward_pass(client, |c| {
+    trainer
+        .capture_forward_pass(client, &[&a], &[&out], |c| {
             use numr::ops::ScalarOps;
-            c.mul_scalar(&a, 2.0f64)
+            // mul_scalar produces a temporary; copy its bytes into `out` in-place.
+            let tmp = c.mul_scalar(&a, 2.0f64)?;
+            let size = tmp.numel() * tmp.dtype().size_in_bytes();
+            R::copy_within_device(tmp.ptr(), out.ptr(), size, tmp.device())
         })
         .expect("capture with tensor ops");
 
-    let result_data = result.to_vec::<f32>();
+    let result_data = out.to_vec::<f32>();
     assert_eq!(result_data, vec![2.0, 4.0, 6.0, 8.0]);
 
     trainer.launch_forward_graph().expect("launch");
@@ -367,7 +371,7 @@ fn test_graph_capture_tensor_ops_cuda() {
         // capture because cuMemAlloc isn't a stream-ordered operation.
         // catch_unwind handles the expected panic gracefully.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            trainer.capture_forward_pass(&client, |c| {
+            trainer.capture_forward_pass(&client, &[], &[], |c| {
                 let _b = c.mul_scalar(&a, 2.0f64)?;
                 Ok(())
             })

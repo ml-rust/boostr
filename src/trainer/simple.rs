@@ -15,7 +15,7 @@ use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
 
 use crate::ops::FusedOptimizerOps;
-use numr::runtime::{Graph, Runtime, RuntimeClient};
+use numr::runtime::{CapturedGraph, Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
 /// Simple single-device trainer
@@ -51,8 +51,8 @@ pub struct SimpleTrainer<R: Runtime<DType = DType>, O: Optimizer<R> = AdamW<R>> 
     global_step: u64,
     accumulated_loss: f64,
     loss_count: usize,
-    forward_graph: Option<R::Graph>,
-    backward_graph: Option<R::Graph>,
+    forward_graph: Option<CapturedGraph<R>>,
+    backward_graph: Option<CapturedGraph<R>>,
 }
 
 impl<R: Runtime<DType = DType>> SimpleTrainer<R, AdamW<R>> {
@@ -162,28 +162,58 @@ impl<R: Runtime<DType = DType>, O: Optimizer<R>> SimpleTrainer<R, O> {
         &mut self.optimizer
     }
 
-    /// Capture a forward pass into a CUDA graph for replay.
+    /// Capture a forward pass into a CUDA graph for replay (destination-passing).
     ///
-    /// On CPU/WebGPU the closure executes eagerly and `launch_forward_graph`
-    /// becomes a no-op. On CUDA the recorded kernel sequence is replayed
-    /// with a single `cuGraphLaunch`, eliminating per-kernel CPU overhead.
-    pub fn capture_forward_pass<F, T>(&mut self, client: &R::Client, f: F) -> Result<T>
+    /// `inputs` and `outputs` must be pre-allocated **before** calling this method
+    /// (outside the closure). The graph encodes their device addresses at capture
+    /// time; they must not move for the lifetime of the stored graph. The closure
+    /// `f` must write results into the output tensors in-place and return `Ok(())`.
+    ///
+    /// On CUDA the recorded kernel sequence is replayed with a single
+    /// `cuGraphLaunch`, eliminating per-kernel CPU overhead. On CPU/WebGPU the
+    /// closure executes eagerly, the resulting `CapturedGraph` wraps a `NoOpGraph`,
+    /// and `launch_forward_graph` executes a no-op replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if graph capture fails or the closure returns an error.
+    pub fn capture_forward_pass<F>(
+        &mut self,
+        client: &R::Client,
+        inputs: &[&Tensor<R>],
+        outputs: &[&Tensor<R>],
+        f: F,
+    ) -> Result<()>
     where
-        F: FnOnce(&R::Client) -> numr::error::Result<T>,
+        F: FnOnce(&R::Client) -> numr::error::Result<()>,
     {
-        let (graph, result) = R::capture_graph(client, f)?;
-        self.forward_graph = Some(graph);
-        Ok(result)
+        let captured = R::capture_graph_into(client, inputs, outputs, f)?;
+        self.forward_graph = Some(captured);
+        Ok(())
     }
 
-    /// Capture a backward pass into a CUDA graph for replay.
-    pub fn capture_backward_pass<F, T>(&mut self, client: &R::Client, f: F) -> Result<T>
+    /// Capture a backward pass into a CUDA graph for replay (destination-passing).
+    ///
+    /// Same contract as [`capture_forward_pass`][Self::capture_forward_pass]:
+    /// pre-allocate `inputs` and `outputs` outside the closure; the closure
+    /// writes into `outputs` in-place.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if graph capture fails or the closure returns an error.
+    pub fn capture_backward_pass<F>(
+        &mut self,
+        client: &R::Client,
+        inputs: &[&Tensor<R>],
+        outputs: &[&Tensor<R>],
+        f: F,
+    ) -> Result<()>
     where
-        F: FnOnce(&R::Client) -> numr::error::Result<T>,
+        F: FnOnce(&R::Client) -> numr::error::Result<()>,
     {
-        let (graph, result) = R::capture_graph(client, f)?;
-        self.backward_graph = Some(graph);
-        Ok(result)
+        let captured = R::capture_graph_into(client, inputs, outputs, f)?;
+        self.backward_graph = Some(captured);
+        Ok(())
     }
 
     /// Replay the captured forward graph.

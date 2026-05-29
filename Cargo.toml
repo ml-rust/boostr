@@ -45,6 +45,10 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 memmap2 = "0.9"
 splintr = { version = "0.9" }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Optional: TTS grapheme-to-phoneme via espeak-ng (system dep: espeak-ng-dev)
+espeakng = { version = "0.2", optional = true }
 
 [dev-dependencies]
 bytemuck = { version = "1.24", features = ["derive"] }
@@ -54,6 +58,9 @@ rustls = "0.23"
 
 [features]
 default = ["cpu"]
+
+# TTS grapheme-to-phoneme (requires libespeak-ng at runtime)
+tts-g2p = ["dep:espeakng"]
 
 # Backend features (passed through to numr)
 cpu = []

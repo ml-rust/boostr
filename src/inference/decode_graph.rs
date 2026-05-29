@@ -16,7 +16,7 @@
 //! ## Stable-address tensors
 //!
 //! All tensors that are read or written from outside the graph MUST be allocated
-//! BEFORE `Runtime::capture_graph()` is called (before `cuStreamBeginCapture`).
+//! BEFORE `Runtime::capture_graph_into()` is called (before `cuStreamBeginCapture`).
 //! Any tensor allocated INSIDE the capture region has a graph-managed address
 //! that is only valid within the graph's execution — accessing it from the CPU
 //! after the graph has run causes `CUDA_ERROR_ILLEGAL_ADDRESS`.
@@ -200,7 +200,7 @@ mod cuda_impl {
 
     /// Argmax on `logits` (graph-internal tensor) and write result into `out` (stable).
     ///
-    /// This function MUST be called inside a `Runtime::capture_graph()` closure.
+    /// This function MUST be called inside a `Runtime::capture_graph_into()` closure.
     /// The source (`logits`) has a graph-managed address — CUDA internally patches it
     /// on each replay.  The destination (`out`) is pre-allocated before capture and
     /// has a stable address that the caller can read after each graph launch.
@@ -246,7 +246,7 @@ mod cuda_impl {
     /// `[batch_size, 1, vocab_size]`, writing one i64 argmax per row into
     /// `out` (pre-allocated, shape `[batch_size]`).
     ///
-    /// This function MUST be called inside a `Runtime::capture_graph()` closure.
+    /// This function MUST be called inside a `Runtime::capture_graph_into()` closure.
     /// The `logits` tensor has a graph-managed address; `out` must be pre-allocated
     /// before capture so its address is stable across replays.
     pub fn batch_argmax_to_buf(

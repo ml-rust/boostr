@@ -4,6 +4,7 @@ pub mod huggingface;
 pub mod hybrid;
 pub mod moe;
 pub mod ssm;
+pub mod tts;
 pub mod universal;
 pub mod vision;
 
@@ -15,5 +16,6 @@ pub use huggingface::{
 pub use hybrid::HybridConfig;
 pub use moe::MoeConfig;
 pub use ssm::SsmConfig;
+pub use tts::KokoroConfig;
 pub use universal::{ModelConfig, UniversalConfig};
 pub use vision::VisionConfig;

@@ -222,6 +222,23 @@ impl HuggingFaceConfig {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(3000) as usize,
             projector_type: "linear".to_string(),
+            vocab_size: audio_cfg
+                .get("vocab_size")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(51865) as usize,
+            decoder_layers: audio_cfg
+                .get("decoder_layers")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize),
+            max_target_positions: audio_cfg
+                .get("max_target_positions")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(448) as usize,
+            intermediate_size: audio_cfg
+                .get("decoder_ffn_dim")
+                .or_else(|| audio_cfg.get("encoder_ffn_dim"))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize),
         });
 
         UniversalConfig {

@@ -18,11 +18,17 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
         cu_seqlens_k: &Tensor<CpuRuntime>,
         batch_size: usize,
         num_heads: usize,
+        num_kv_heads: usize,
         _max_seqlen_q: usize,
         _max_seqlen_k: usize,
         head_dim: usize,
         causal: bool,
     ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+        // GQA ratio: each kv head serves (num_heads / num_kv_heads) query heads.
+        // For MHA num_kv_heads == num_heads so the ratio is 1 and the mapping is
+        // the identity: kv_h = q_h / 1 = q_h.
+        let gqa_ratio = num_heads / num_kv_heads;
+
         let total_tokens_q = q.shape()[0];
         let device = q.device();
 
@@ -46,6 +52,9 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
             let seq_len_k = sk_end - sk_start;
 
             for h in 0..num_heads {
+                // GQA: map query head h to the corresponding kv head.
+                let kv_h = h / gqa_ratio;
+
                 for qi in 0..seq_len_q {
                     let q_offset = ((sq_start + qi) * num_heads + h) * head_dim;
 
@@ -57,7 +66,8 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
                             scores.push(f32::NEG_INFINITY);
                             continue;
                         }
-                        let k_offset = ((sk_start + ki) * num_heads + h) * head_dim;
+                        // K/V row stride uses num_kv_heads (GQA layout).
+                        let k_offset = ((sk_start + ki) * num_kv_heads + kv_h) * head_dim;
                         let mut dot = 0.0f32;
                         for d in 0..head_dim {
                             dot += q_data[q_offset + d] * k_data[k_offset + d];
@@ -78,7 +88,8 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
                     let o_offset = ((sq_start + qi) * num_heads + h) * head_dim;
                     for (ki, &exp_s) in exp_scores.iter().enumerate() {
                         let weight = exp_s / sum_exp;
-                        let v_offset = ((sk_start + ki) * num_heads + h) * head_dim;
+                        // V row stride also uses num_kv_heads.
+                        let v_offset = ((sk_start + ki) * num_kv_heads + kv_h) * head_dim;
                         for d in 0..head_dim {
                             out[o_offset + d] += weight * v_data[v_offset + d];
                         }
@@ -108,11 +119,17 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
         cu_seqlens_k: &Tensor<CpuRuntime>,
         batch_size: usize,
         num_heads: usize,
+        num_kv_heads: usize,
         _max_seqlen_q: usize,
         _max_seqlen_k: usize,
         head_dim: usize,
         causal: bool,
     ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+        // GQA backward: multiple Q heads share one KV head.
+        // dK and dV accumulate contributions from all Q heads mapping to the same
+        // KV head — the serial += across the h-loop is the scalar analog of atomicAdd.
+        let gqa_ratio = num_heads / num_kv_heads;
+
         let total_tokens_q = q.shape()[0];
         let total_tokens_k = k.shape()[0];
         let device = q.device();
@@ -127,8 +144,8 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
         let cu_k = cu_seqlens_k.to_vec::<i32>();
 
         let mut dq = vec![0.0f32; total_tokens_q * num_heads * head_dim];
-        let mut dk = vec![0.0f32; total_tokens_k * num_heads * head_dim];
-        let mut dv = vec![0.0f32; total_tokens_k * num_heads * head_dim];
+        let mut dk = vec![0.0f32; total_tokens_k * num_kv_heads * head_dim];
+        let mut dv = vec![0.0f32; total_tokens_k * num_kv_heads * head_dim];
 
         let scale = (head_dim as f32).sqrt().recip();
 
@@ -141,6 +158,9 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
             let seq_len_k = sk_end - sk_start;
 
             for h in 0..num_heads {
+                // GQA: map query head h to the corresponding kv head.
+                let kv_h = h / gqa_ratio;
+
                 for qi in 0..seq_len_q {
                     let q_off = ((sq_start + qi) * num_heads + h) * head_dim;
                     let l = lse_data[(sq_start + qi) * num_heads + h];
@@ -156,7 +176,8 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
                         if causal && qi < ki {
                             continue;
                         }
-                        let k_off = ((sk_start + ki) * num_heads + h) * head_dim;
+                        // K/V row stride uses num_kv_heads (GQA layout)
+                        let k_off = ((sk_start + ki) * num_kv_heads + kv_h) * head_dim;
 
                         // Recompute score and prob
                         let mut score = 0.0f32;
@@ -167,7 +188,7 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
                         let prob = (score - l).exp();
 
                         // grad_prob = V @ dO
-                        let v_off = ((sk_start + ki) * num_heads + h) * head_dim;
+                        let v_off = ((sk_start + ki) * num_kv_heads + kv_h) * head_dim;
                         let mut grad_prob = 0.0f32;
                         for d in 0..head_dim {
                             grad_prob += v_data[v_off + d] * do_data[o_off + d];
@@ -175,7 +196,7 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
 
                         let grad_score = prob * (grad_prob - d_val);
 
-                        // Accumulate gradients
+                        // Accumulate gradients — dk/dv indexed by kv_h (GQA scatter)
                         for d in 0..head_dim {
                             dq[q_off + d] += scale * grad_score * k_data[k_off + d];
                             dk[k_off + d] += scale * grad_score * q_data[q_off + d];
@@ -188,141 +209,20 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
 
         let dq_t =
             Tensor::<CpuRuntime>::from_slice(&dq, &[total_tokens_q, num_heads, head_dim], device);
-        let dk_t =
-            Tensor::<CpuRuntime>::from_slice(&dk, &[total_tokens_k, num_heads, head_dim], device);
-        let dv_t =
-            Tensor::<CpuRuntime>::from_slice(&dv, &[total_tokens_k, num_heads, head_dim], device);
+        let dk_t = Tensor::<CpuRuntime>::from_slice(
+            &dk,
+            &[total_tokens_k, num_kv_heads, head_dim],
+            device,
+        );
+        let dv_t = Tensor::<CpuRuntime>::from_slice(
+            &dv,
+            &[total_tokens_k, num_kv_heads, head_dim],
+            device,
+        );
         Ok((dq_t, dk_t, dv_t))
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_utils::cpu_setup;
-
-    #[test]
-    fn test_varlen_fwd_shape() {
-        let (client, dev) = cpu_setup();
-
-        // 2 sequences: [3, 2] tokens, 2 heads, head_dim=4
-        let total_q = 5;
-        let num_heads = 2;
-        let head_dim = 4;
-
-        let q_data = vec![0.1f32; total_q * num_heads * head_dim];
-        let k_data = vec![0.1f32; total_q * num_heads * head_dim];
-        let v_data = vec![0.2f32; total_q * num_heads * head_dim];
-
-        let q = Tensor::<CpuRuntime>::from_slice(&q_data, &[total_q, num_heads, head_dim], &dev);
-        let k = Tensor::<CpuRuntime>::from_slice(&k_data, &[total_q, num_heads, head_dim], &dev);
-        let v = Tensor::<CpuRuntime>::from_slice(&v_data, &[total_q, num_heads, head_dim], &dev);
-
-        let cu_seqlens = vec![0i32, 3, 5];
-        let cu = Tensor::<CpuRuntime>::from_slice(&cu_seqlens, &[3], &dev);
-
-        let (out, lse) = client
-            .varlen_attention_fwd(&q, &k, &v, &cu, &cu, 2, num_heads, 3, 3, head_dim, false)
-            .unwrap();
-
-        assert_eq!(out.shape(), &[total_q, num_heads, head_dim]);
-        assert_eq!(lse.shape(), &[total_q, num_heads]);
-    }
-
-    #[test]
-    fn test_varlen_fwd_causal() {
-        let (client, dev) = cpu_setup();
-
-        // Single sequence of 4 tokens, 1 head, head_dim=2
-        let total_q = 4;
-        let num_heads = 1;
-        let head_dim = 2;
-
-        let q_data: Vec<f32> = (0..total_q * num_heads * head_dim)
-            .map(|i| (i as f32) * 0.1 + 0.1)
-            .collect();
-        let k_data = q_data.clone();
-        let v_data: Vec<f32> = (0..total_q * num_heads * head_dim)
-            .map(|i| (i as f32) * 0.05)
-            .collect();
-
-        let q = Tensor::<CpuRuntime>::from_slice(&q_data, &[total_q, num_heads, head_dim], &dev);
-        let k = Tensor::<CpuRuntime>::from_slice(&k_data, &[total_q, num_heads, head_dim], &dev);
-        let v = Tensor::<CpuRuntime>::from_slice(&v_data, &[total_q, num_heads, head_dim], &dev);
-
-        let cu_seqlens = vec![0i32, 4];
-        let cu = Tensor::<CpuRuntime>::from_slice(&cu_seqlens, &[2], &dev);
-
-        let (out_causal, _) = client
-            .varlen_attention_fwd(&q, &k, &v, &cu, &cu, 1, num_heads, 4, 4, head_dim, true)
-            .unwrap();
-        let (out_full, _) = client
-            .varlen_attention_fwd(&q, &k, &v, &cu, &cu, 1, num_heads, 4, 4, head_dim, false)
-            .unwrap();
-
-        let causal_data = out_causal.to_vec::<f32>();
-        let full_data = out_full.to_vec::<f32>();
-
-        // Last token: causal sees all 4, non-causal sees all 4 → same
-        let last_off = (total_q - 1) * num_heads * head_dim;
-        for d in 0..head_dim {
-            assert!(
-                (causal_data[last_off + d] - full_data[last_off + d]).abs() < 1e-5,
-                "Last token should match between causal and non-causal"
-            );
-        }
-
-        // Second token (idx=1): causal sees [0,1], non-causal sees [0,1,2,3] → different
-        let second_off = num_heads * head_dim;
-        let differs = (0..head_dim)
-            .any(|d| (causal_data[second_off + d] - full_data[second_off + d]).abs() > 1e-6);
-        assert!(
-            differs,
-            "Middle tokens should differ between causal and non-causal"
-        );
-    }
-
-    #[test]
-    fn test_varlen_bwd_shapes() {
-        let (client, dev) = cpu_setup();
-
-        let total_q = 5;
-        let num_heads = 2;
-        let head_dim = 4;
-
-        let n = total_q * num_heads * head_dim;
-        let q_data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.3).sin()).collect();
-        let k_data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.7).cos()).collect();
-        let v_data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.5 + 1.0).sin()).collect();
-
-        let q = Tensor::<CpuRuntime>::from_slice(&q_data, &[total_q, num_heads, head_dim], &dev);
-        let k = Tensor::<CpuRuntime>::from_slice(&k_data, &[total_q, num_heads, head_dim], &dev);
-        let v = Tensor::<CpuRuntime>::from_slice(&v_data, &[total_q, num_heads, head_dim], &dev);
-
-        let cu_seqlens = vec![0i32, 3, 5];
-        let cu = Tensor::<CpuRuntime>::from_slice(&cu_seqlens, &[3], &dev);
-
-        let (out, lse) = client
-            .varlen_attention_fwd(&q, &k, &v, &cu, &cu, 2, num_heads, 3, 3, head_dim, false)
-            .unwrap();
-
-        let do_data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.2).cos() * 0.1).collect();
-        let dout =
-            Tensor::<CpuRuntime>::from_slice(&do_data, &[total_q, num_heads, head_dim], &dev);
-
-        let (dq, dk, dv) = client
-            .varlen_attention_bwd(
-                &dout, &q, &k, &v, &out, &lse, &cu, &cu, 2, num_heads, 3, 3, head_dim, false,
-            )
-            .unwrap();
-
-        assert_eq!(dq.shape(), &[total_q, num_heads, head_dim]);
-        assert_eq!(dk.shape(), &[total_q, num_heads, head_dim]);
-        assert_eq!(dv.shape(), &[total_q, num_heads, head_dim]);
-
-        // Gradients should be non-zero
-        let dq_data = dq.to_vec::<f32>();
-        let has_nonzero = dq_data.iter().any(|&x: &f32| x.abs() > 1e-10);
-        assert!(has_nonzero, "dQ should have non-zero gradients");
-    }
-}
+#[path = "varlen_attention_tests.rs"]
+mod tests;

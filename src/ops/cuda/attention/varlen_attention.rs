@@ -1,7 +1,8 @@
 //! Variable-length (ragged) attention CUDA launchers
 //!
 //! Packed sequences with cu_seqlens indexing. Supports F32 and F16,
-//! head dims 64 and 128.
+//! head dims 64, 128, and 256, with GQA (num_kv_heads <= num_heads).
+//! Both forward and backward are implemented for all supported head dims.
 
 use crate::error::{Error, Result};
 use crate::ops::traits::VarLenAttentionOps;
@@ -13,7 +14,30 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::flash::set_smem_attribute;
-use crate::ops::cuda::kernels::{self, VARLEN_ATTENTION_BWD_MODULE, VARLEN_ATTENTION_MODULE};
+use crate::ops::cuda::kernels::{
+    self, VARLEN_ATTENTION_BWD_FP16_MODULE, VARLEN_ATTENTION_BWD_MODULE, VARLEN_ATTENTION_MODULE,
+};
+
+/// Return `(BLOCK_M, BLOCK_N)` for the given head_dim and dtype.
+///
+/// Constraints: smem = (BLOCK_M + 2*BLOCK_N) * head_dim * dtype_size ≤ 48 KB,
+/// and block_dim = BLOCK_M (one thread per Q row).
+///
+/// | head_dim | dtype | BLOCK_M | BLOCK_N | smem    |
+/// |----------|-------|---------|---------|---------|
+/// | 64/128   | any   | 128     | 64      | ≤ 48 KB |
+/// | 256      | F32   | 16      | 16      | 48 KB   |
+/// | 256      | F16   | 32      | 32      | 48 KB   |
+#[inline]
+fn block_config(head_dim: usize, dtype: DType) -> (usize, usize) {
+    match head_dim {
+        256 => match dtype {
+            DType::F16 => (32, 32),
+            _ => (16, 16), // F32 and any future type default to 16/16
+        },
+        _ => (128, 64), // 64 and 128 use the proven large-tile config
+    }
+}
 
 impl VarLenAttentionOps<CudaRuntime> for CudaClient {
     fn varlen_attention_fwd(
@@ -25,14 +49,17 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
         cu_seqlens_k: &Tensor<CudaRuntime>,
         batch_size: usize,
         num_heads: usize,
+        num_kv_heads: usize,
         max_seqlen_q: usize,
         max_seqlen_k: usize,
         head_dim: usize,
         causal: bool,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
-        if head_dim != 64 && head_dim != 128 {
+        if head_dim != 64 && head_dim != 128 && head_dim != 256 {
             return Err(Error::KernelError {
-                reason: format!("varlen attention: unsupported head_dim {head_dim}, only 64/128"),
+                reason: format!(
+                    "varlen attention: unsupported head_dim {head_dim}, only 64/128/256"
+                ),
             });
         }
 
@@ -62,19 +89,31 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
             Tensor::<CudaRuntime>::empty(&[total_tokens_q, num_heads, head_dim], dtype, device);
         let lse = Tensor::<CudaRuntime>::empty(&[total_tokens_q, num_heads], DType::F32, device);
 
-        const BLOCK_M: usize = 128;
-        const BLOCK_N: usize = 64;
+        // Block sizes are chosen so that shared memory fits within 48 KB
+        // (after set_smem_attribute opts in to larger dynamic smem).
+        //   head_dim 64/128: BLOCK_M=128, BLOCK_N=64  (proven config)
+        //   head_dim 256 fp32: BLOCK_M=16, BLOCK_N=16
+        //     smem = (16 + 2*16) * 256 * 4 = 49 152 B = 48 KB
+        //   head_dim 256 fp16: BLOCK_M=32, BLOCK_N=32
+        //     smem = (32 + 2*32) * 256 * 2 = 49 152 B = 48 KB
+        // block_dim == BLOCK_M (one thread per Q row) — invariant kept.
+        let (block_m, block_n) = block_config(head_dim, dtype);
+
         // Grid must cover all batches × heads × Q blocks per batch
-        let num_q_blocks_per_batch = max_seqlen_q.div_ceil(BLOCK_M);
+        let num_q_blocks_per_batch = max_seqlen_q.div_ceil(block_m);
         let num_q_blocks = num_q_blocks_per_batch * batch_size;
 
         let dtype_size = dtype.size_in_bytes();
-        let smem_size = (BLOCK_M * head_dim + BLOCK_N * head_dim + BLOCK_N * head_dim) * dtype_size;
+        // smem layout: Q tile + K tile + V tile, each with +1 padding on the column
+        // stride to eliminate bank conflicts (HEAD_STRIDE = HEAD_DIM + 1).
+        let head_stride = head_dim + 1;
+        let smem_size =
+            (block_m * head_stride + block_n * head_stride + block_n * head_stride) * dtype_size;
         set_smem_attribute(&func, smem_size)?;
 
         let cfg = LaunchConfig {
             grid_dim: ((num_q_blocks * num_heads) as u32, 1, 1),
-            block_dim: (BLOCK_M as u32, 1, 1),
+            block_dim: (block_m as u32, 1, 1),
             shared_mem_bytes: smem_size as u32,
         };
 
@@ -88,6 +127,7 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
         let scale = (head_dim as f32).sqrt().recip();
         let batch_i32 = batch_size as i32;
         let nh_i32 = num_heads as i32;
+        let nkv_i32 = num_kv_heads as i32;
         let msq_i32 = max_seqlen_q as i32;
         let msk_i32 = max_seqlen_k as i32;
         let causal_i32 = if causal { 1i32 } else { 0i32 };
@@ -103,6 +143,7 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
             builder.arg(&l_ptr);
             builder.arg(&batch_i32);
             builder.arg(&nh_i32);
+            builder.arg(&nkv_i32);
             builder.arg(&msq_i32);
             builder.arg(&msk_i32);
             builder.arg(&scale);
@@ -129,6 +170,7 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
         cu_seqlens_k: &Tensor<CudaRuntime>,
         batch_size: usize,
         num_heads: usize,
+        num_kv_heads: usize,
         max_seqlen_q: usize,
         max_seqlen_k: usize,
         head_dim: usize,
@@ -138,9 +180,11 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
         Tensor<CudaRuntime>,
         Tensor<CudaRuntime>,
     )> {
-        if head_dim != 64 && head_dim != 128 {
+        if head_dim != 64 && head_dim != 128 && head_dim != 256 {
             return Err(Error::KernelError {
-                reason: format!("varlen attention bwd: unsupported head_dim {head_dim}"),
+                reason: format!(
+                    "varlen attention bwd: unsupported head_dim {head_dim}, only 64/128/256"
+                ),
             });
         }
 
@@ -159,33 +203,46 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
         let device = q.device();
         let device_index = device.id();
 
-        let module =
-            kernels::get_or_load_module(self.context(), device_index, VARLEN_ATTENTION_BWD_MODULE)?;
+        // FP16 backward kernels live in their own compiled module (split out to
+        // keep each .cu within the file-size budget); FP32 stays in the base module.
+        let bwd_module = match dtype {
+            DType::F16 => VARLEN_ATTENTION_BWD_FP16_MODULE,
+            _ => VARLEN_ATTENTION_BWD_MODULE,
+        };
+        let module = kernels::get_or_load_module(self.context(), device_index, bwd_module)?;
         let func = kernels::get_kernel_function(&module, &kernel_name)?;
 
         let total_tokens_q = q.shape()[0];
         let total_tokens_k = k.shape()[0];
 
+        // dq: same head layout as Q (num_heads)
+        // dk/dv: kv head layout (num_kv_heads) — GQA: fewer heads than Q
         let dq =
             Tensor::<CudaRuntime>::zeros(&[total_tokens_q, num_heads, head_dim], dtype, device);
         let dk =
-            Tensor::<CudaRuntime>::zeros(&[total_tokens_k, num_heads, head_dim], dtype, device);
+            Tensor::<CudaRuntime>::zeros(&[total_tokens_k, num_kv_heads, head_dim], dtype, device);
         let dv =
-            Tensor::<CudaRuntime>::zeros(&[total_tokens_k, num_heads, head_dim], dtype, device);
+            Tensor::<CudaRuntime>::zeros(&[total_tokens_k, num_kv_heads, head_dim], dtype, device);
 
-        const BLOCK_M: usize = 128;
-        const BLOCK_N: usize = 64;
-        let num_q_blocks_per_batch = max_seqlen_q.div_ceil(BLOCK_M);
+        // Use same block sizes as fwd (matches the kernel template instantiations)
+        let (block_m, block_n) = block_config(head_dim, dtype);
+        let num_q_blocks_per_batch = max_seqlen_q.div_ceil(block_m);
         let num_q_blocks = num_q_blocks_per_batch * batch_size;
 
-        // Shared memory: Q + K + V + dO (BLOCK_M*HD + 2*BLOCK_N*HD + BLOCK_M*HD) + row_sum
+        // Shared memory layout (with +1 HEAD_STRIDE padding, same as the bwd kernel):
+        //   Q tile   : BLOCK_M * (HEAD_DIM+1) elements
+        //   K tile   : BLOCK_N * (HEAD_DIM+1) elements
+        //   V tile   : BLOCK_N * (HEAD_DIM+1) elements
+        //   dO tile  : BLOCK_M * (HEAD_DIM+1) elements
+        // Total: (2*BLOCK_M + 2*BLOCK_N) * HEAD_STRIDE * dtype_size bytes
         let dtype_size = dtype.size_in_bytes();
-        let smem_size = (2 * BLOCK_M * head_dim + 2 * BLOCK_N * head_dim + BLOCK_M) * dtype_size;
+        let head_stride = head_dim + 1;
+        let smem_size = (2 * block_m + 2 * block_n) * head_stride * dtype_size;
         set_smem_attribute(&func, smem_size)?;
 
         let cfg = LaunchConfig {
             grid_dim: ((num_q_blocks * num_heads) as u32, 1, 1),
-            block_dim: (BLOCK_M as u32, 1, 1),
+            block_dim: (block_m as u32, 1, 1),
             shared_mem_bytes: smem_size as u32,
         };
 
@@ -203,6 +260,7 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
         let scale = (head_dim as f32).sqrt().recip();
         let batch_i32 = batch_size as i32;
         let nh_i32 = num_heads as i32;
+        let nkv_i32 = num_kv_heads as i32;
         let msq_i32 = max_seqlen_q as i32;
         let msk_i32 = max_seqlen_k as i32;
         let causal_i32 = if causal { 1i32 } else { 0i32 };
@@ -222,6 +280,7 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
             builder.arg(&dv_ptr);
             builder.arg(&batch_i32);
             builder.arg(&nh_i32);
+            builder.arg(&nkv_i32);
             builder.arg(&msq_i32);
             builder.arg(&msk_i32);
             builder.arg(&scale);

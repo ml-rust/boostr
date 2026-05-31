@@ -22,6 +22,7 @@ pub use traits::MlaOps;
 pub use traits::MoEOps;
 pub use traits::PagedAttentionOps;
 pub use traits::RoPEOps;
+pub use traits::RoPEPackedOps;
 pub use traits::SamplingOps;
 pub use traits::SpeculativeOps;
 pub use traits::VarLenAttentionOps;

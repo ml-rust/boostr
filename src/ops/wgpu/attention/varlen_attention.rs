@@ -45,11 +45,23 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
         cu_seqlens_k: &Tensor<WgpuRuntime>,
         batch_size: usize,
         num_heads: usize,
+        num_kv_heads: usize,
         _max_seqlen_q: usize,
         _max_seqlen_k: usize,
         head_dim: usize,
         causal: bool,
     ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
+        // WebGPU WGSL shader implements MHA only.  GQA requires non-trivial shader
+        // changes; guard until a shader update is provided.
+        if num_kv_heads != num_heads {
+            return Err(Error::InvalidArgument {
+                arg: "num_kv_heads",
+                reason: format!(
+                    "varlen_attention_fwd (WebGPU): GQA (num_kv_heads={num_kv_heads} != \
+                     num_heads={num_heads}) not yet supported on WebGPU backend"
+                ),
+            });
+        }
         validate_f32(q, "varlen_attention_fwd")?;
         validate_f32(k, "varlen_attention_fwd")?;
         validate_f32(v, "varlen_attention_fwd")?;
@@ -170,6 +182,7 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
         _cu_seqlens_k: &Tensor<WgpuRuntime>,
         _batch_size: usize,
         _num_heads: usize,
+        _num_kv_heads: usize,
         _max_seqlen_q: usize,
         _max_seqlen_k: usize,
         _head_dim: usize,

@@ -1,6 +1,7 @@
 pub mod architecture;
 pub mod attention;
 pub mod inference;
+pub mod position;
 pub mod quantization;
 pub mod training;
 

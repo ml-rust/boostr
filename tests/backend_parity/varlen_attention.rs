@@ -29,6 +29,7 @@ fn test_varlen_attention_fwd_parity() {
             &cu_seqlens_k,
             batch_size,
             num_heads,
+            num_heads, // MHA: num_kv_heads == num_heads
             max_seqlen,
             max_seqlen,
             head_dim,
@@ -60,8 +61,8 @@ fn test_varlen_attention_fwd_parity() {
         let csk = Tensor::from_slice(&cu_data, &[batch_size + 1], &cuda_device);
         let (out, _) = cuda_client
             .varlen_attention_fwd(
-                &q_c, &k_c, &v_c, &csq, &csk, batch_size, num_heads, max_seqlen, max_seqlen,
-                head_dim, false,
+                &q_c, &k_c, &v_c, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
+                max_seqlen, head_dim, false,
             )
             .unwrap();
         assert_parity_f32(&out.to_vec::<f32>(), &cpu_out_vec, "varlen_fwd CUDA vs CPU");
@@ -90,8 +91,8 @@ fn test_varlen_attention_fwd_parity() {
         let csk = Tensor::from_slice(&cu_data, &[batch_size + 1], &wgpu_device);
         let (out, _) = wgpu_client
             .varlen_attention_fwd(
-                &q_w, &k_w, &v_w, &csq, &csk, batch_size, num_heads, max_seqlen, max_seqlen,
-                head_dim, false,
+                &q_w, &k_w, &v_w, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
+                max_seqlen, head_dim, false,
             )
             .unwrap();
         assert_parity_f32(&out.to_vec::<f32>(), &cpu_out_vec, "varlen_fwd WGPU vs CPU");
@@ -123,6 +124,7 @@ fn test_varlen_attention_bwd_parity() {
             &cu_seqlens_k,
             batch_size,
             num_heads,
+            num_heads, // MHA: num_kv_heads == num_heads
             max_seqlen,
             max_seqlen,
             head_dim,
@@ -142,6 +144,7 @@ fn test_varlen_attention_bwd_parity() {
             &cu_seqlens_k,
             batch_size,
             num_heads,
+            num_heads, // MHA: num_kv_heads == num_heads
             max_seqlen,
             max_seqlen,
             head_dim,
@@ -175,8 +178,8 @@ fn test_varlen_attention_bwd_parity() {
         let csk = Tensor::from_slice(&cu_data, &[batch_size + 1], &cuda_device);
         let (out_c, lse_c) = cuda_client
             .varlen_attention_fwd(
-                &q_c, &k_c, &v_c, &csq, &csk, batch_size, num_heads, max_seqlen, max_seqlen,
-                head_dim, false,
+                &q_c, &k_c, &v_c, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
+                max_seqlen, head_dim, false,
             )
             .unwrap();
         let dout_c = Tensor::from_slice(
@@ -187,7 +190,7 @@ fn test_varlen_attention_bwd_parity() {
         let (dq, dk, dv) = cuda_client
             .varlen_attention_bwd(
                 &dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, &csq, &csk, batch_size, num_heads,
-                max_seqlen, max_seqlen, head_dim, false,
+                num_heads, max_seqlen, max_seqlen, head_dim, false,
             )
             .unwrap();
         assert_parity_f32_relaxed(
@@ -230,8 +233,8 @@ fn test_varlen_attention_bwd_parity() {
         let csk = Tensor::from_slice(&cu_data, &[batch_size + 1], &wgpu_device);
         let (_, _) = wgpu_client
             .varlen_attention_fwd(
-                &q_w, &k_w, &v_w, &csq, &csk, batch_size, num_heads, max_seqlen, max_seqlen,
-                head_dim, false,
+                &q_w, &k_w, &v_w, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
+                max_seqlen, head_dim, false,
             )
             .unwrap();
         // BWD not yet implemented on WebGPU — skip gracefully

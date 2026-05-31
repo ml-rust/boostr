@@ -13,82 +13,39 @@
 #include <stdint.h>
 
 // ============================================================================
-// Warp-level Primitives
-// ============================================================================
-
-__device__ __forceinline__ float warp_reduce_max(float val) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val = fmaxf(val, __shfl_down_sync(0xffffffff, val, offset));
-    }
-    return val;
-}
-
-__device__ __forceinline__ float warp_reduce_sum(float val) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    }
-    return val;
-}
-
-// ============================================================================
-// Binary Search for Batch Index from Cumulative Sequence Lengths
-// ============================================================================
-
-// Find which batch a global token belongs to using cumulative sequence lengths
-// cu_seqlens: [batch_size + 1] where cu_seqlens[i] = sum of seq lengths for batches 0..i-1
-// global_token_idx: Token index in the packed 1D buffer
-// Returns: batch index
-__device__ __forceinline__ int binary_search_batch(
-    const int* __restrict__ cu_seqlens,
-    int global_token_idx,
-    int batch_size
-) {
-    int left = 0;
-    int right = batch_size;
-
-    while (left < right) {
-        int mid = (left + right) / 2;
-        if (global_token_idx < cu_seqlens[mid + 1]) {
-            right = mid;
-        } else {
-            left = mid + 1;
-        }
-    }
-
-    return left;
-}
-
-// ============================================================================
 // FP32 VarLen Flash Attention Forward
 // ============================================================================
 
 template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
 __device__ void varlen_flash_attention_fwd_fp32_impl(
     const float* __restrict__ Q,           // [total_tokens_q, num_heads, head_dim]
-    const float* __restrict__ K,           // [total_tokens_k, num_heads, head_dim]
-    const float* __restrict__ V,           // [total_tokens_k, num_heads, head_dim]
+    const float* __restrict__ K,           // [total_tokens_k, num_kv_heads, head_dim]
+    const float* __restrict__ V,           // [total_tokens_k, num_kv_heads, head_dim]
     const int* __restrict__ cu_seqlens_q,  // [batch_size + 1]
     const int* __restrict__ cu_seqlens_k,  // [batch_size + 1]
     float* __restrict__ O,                 // [total_tokens_q, num_heads, head_dim]
     float* __restrict__ L,                 // [total_tokens_q, num_heads]
     const int batch_size,
     const int num_heads,
+    const int num_kv_heads,                // GQA: num_kv_heads <= num_heads; MHA: == num_heads
     const int max_seqlen_q,
     const int max_seqlen_k,
     const float scale,
     const int causal
 ) {
+    // +1 padding on the column stride eliminates 32-way bank conflicts for
+    // power-of-2 head dimensions (mirrors flash_v2.cu HEAD_STRIDE = HEAD_DIM+1).
+    constexpr int HEAD_STRIDE = HEAD_DIM + 1;
+
     extern __shared__ float smem[];
 
     float* Q_smem_flat = smem;
-    float* K_smem_flat = smem + BLOCK_M * HEAD_DIM;
-    float* V_smem_flat = smem + BLOCK_M * HEAD_DIM + BLOCK_N * HEAD_DIM;
+    float* K_smem_flat = smem + BLOCK_M * HEAD_STRIDE;
+    float* V_smem_flat = smem + BLOCK_M * HEAD_STRIDE + BLOCK_N * HEAD_STRIDE;
 
-    #define Q_smem(i, j) Q_smem_flat[(i) * HEAD_DIM + (j)]
-    #define K_smem(i, j) K_smem_flat[(i) * HEAD_DIM + (j)]
-    #define V_smem(i, j) V_smem_flat[(i) * HEAD_DIM + (j)]
+    #define Q_smem(i, j) Q_smem_flat[(i) * HEAD_STRIDE + (j)]
+    #define K_smem(i, j) K_smem_flat[(i) * HEAD_STRIDE + (j)]
+    #define V_smem(i, j) V_smem_flat[(i) * HEAD_STRIDE + (j)]
 
     const int tid = threadIdx.x;
     const int head_idx = blockIdx.x % num_heads;
@@ -118,10 +75,15 @@ __device__ void varlen_flash_attention_fwd_fp32_impl(
     // Check if this block is within valid range
     if (q_start >= seq_len_q) return;
 
-    // Base pointers for this head
+    // GQA head mapping: each kv head serves (num_heads / num_kv_heads) query heads.
+    // kv_head_idx = head_idx / (num_heads / num_kv_heads)
+    //             = head_idx * num_kv_heads / num_heads  (integer division)
+    const int kv_head_idx = head_idx * num_kv_heads / num_heads;
+
+    // Q and O use full num_heads stride; K and V use num_kv_heads stride.
     const float* Q_head = Q + head_idx * HEAD_DIM;
-    const float* K_head = K + head_idx * HEAD_DIM;
-    const float* V_head = V + head_idx * HEAD_DIM;
+    const float* K_head = K + kv_head_idx * HEAD_DIM;
+    const float* V_head = V + kv_head_idx * HEAD_DIM;
     float* O_head = O + head_idx * HEAD_DIM;
 
     // Load Q tile into shared memory
@@ -154,13 +116,13 @@ __device__ void varlen_flash_attention_fwd_fp32_impl(
         const int k_end = min(k_start + BLOCK_N, seq_len_k);
         const int k_tile_size = k_end - k_start;
 
-        // Load K and V tiles
+        // Load K and V tiles — K/V row stride uses num_kv_heads (GQA layout)
         for (int i = tid; i < k_tile_size * HEAD_DIM; i += blockDim.x) {
             const int row = i / HEAD_DIM;
             const int col = i % HEAD_DIM;
             const int global_k_pos = seq_start_k + k_start + row;
-            K_smem(row, col) = K_head[global_k_pos * num_heads * HEAD_DIM + col];
-            V_smem(row, col) = V_head[global_k_pos * num_heads * HEAD_DIM + col];
+            K_smem(row, col) = K_head[global_k_pos * num_kv_heads * HEAD_DIM + col];
+            V_smem(row, col) = V_head[global_k_pos * num_kv_heads * HEAD_DIM + col];
         }
         __syncthreads();
 
@@ -244,6 +206,7 @@ extern "C" __global__ void varlen_flash_attention_fwd_64_fp32(
     float* L,
     int batch_size,
     int num_heads,
+    int num_kv_heads,
     int max_seqlen_q,
     int max_seqlen_k,
     float scale,
@@ -251,7 +214,7 @@ extern "C" __global__ void varlen_flash_attention_fwd_64_fp32(
 ) {
     varlen_flash_attention_fwd_fp32_impl<64, 128, 64>(
         Q, K, V, cu_seqlens_q, cu_seqlens_k, O, L,
-        batch_size, num_heads, max_seqlen_q, max_seqlen_k, scale, causal
+        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal
     );
 }
 
@@ -265,6 +228,7 @@ extern "C" __global__ void varlen_flash_attention_fwd_128_fp32(
     float* L,
     int batch_size,
     int num_heads,
+    int num_kv_heads,
     int max_seqlen_q,
     int max_seqlen_k,
     float scale,
@@ -272,7 +236,7 @@ extern "C" __global__ void varlen_flash_attention_fwd_128_fp32(
 ) {
     varlen_flash_attention_fwd_fp32_impl<128, 128, 64>(
         Q, K, V, cu_seqlens_q, cu_seqlens_k, O, L,
-        batch_size, num_heads, max_seqlen_q, max_seqlen_k, scale, causal
+        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal
     );
 }
 
@@ -291,20 +255,25 @@ __device__ void varlen_flash_attention_fwd_fp16_impl(
     float* __restrict__ L,
     const int batch_size,
     const int num_heads,
+    const int num_kv_heads,                // GQA: num_kv_heads <= num_heads; MHA: == num_heads
     const int max_seqlen_q,
     const int max_seqlen_k,
     const float scale,
     const int causal
 ) {
+    // +1 padding on the column stride eliminates 32-way bank conflicts for
+    // power-of-2 head dimensions (mirrors flash_v2.cu HEAD_STRIDE = HEAD_DIM+1).
+    constexpr int HEAD_STRIDE = HEAD_DIM + 1;
+
     extern __shared__ __half smem_fp16[];
 
     __half* Q_smem_flat = smem_fp16;
-    __half* K_smem_flat = smem_fp16 + BLOCK_M * HEAD_DIM;
-    __half* V_smem_flat = smem_fp16 + BLOCK_M * HEAD_DIM + BLOCK_N * HEAD_DIM;
+    __half* K_smem_flat = smem_fp16 + BLOCK_M * HEAD_STRIDE;
+    __half* V_smem_flat = smem_fp16 + BLOCK_M * HEAD_STRIDE + BLOCK_N * HEAD_STRIDE;
 
-    #define Q_smem(i, j) Q_smem_flat[(i) * HEAD_DIM + (j)]
-    #define K_smem(i, j) K_smem_flat[(i) * HEAD_DIM + (j)]
-    #define V_smem(i, j) V_smem_flat[(i) * HEAD_DIM + (j)]
+    #define Q_smem(i, j) Q_smem_flat[(i) * HEAD_STRIDE + (j)]
+    #define K_smem(i, j) K_smem_flat[(i) * HEAD_STRIDE + (j)]
+    #define V_smem(i, j) V_smem_flat[(i) * HEAD_STRIDE + (j)]
 
     const int tid = threadIdx.x;
     const int head_idx = blockIdx.x % num_heads;
@@ -329,9 +298,12 @@ __device__ void varlen_flash_attention_fwd_fp16_impl(
 
     if (q_start >= seq_len_q) return;
 
+    // GQA head mapping: kv_head_idx = head_idx * num_kv_heads / num_heads
+    const int kv_head_idx_fp16 = head_idx * num_kv_heads / num_heads;
+
     const __half* Q_head = Q + head_idx * HEAD_DIM;
-    const __half* K_head = K + head_idx * HEAD_DIM;
-    const __half* V_head = V + head_idx * HEAD_DIM;
+    const __half* K_head = K + kv_head_idx_fp16 * HEAD_DIM;
+    const __half* V_head = V + kv_head_idx_fp16 * HEAD_DIM;
     __half* O_head = O + head_idx * HEAD_DIM;
 
     // Load Q tile
@@ -362,12 +334,13 @@ __device__ void varlen_flash_attention_fwd_fp16_impl(
         const int k_end = min(k_start + BLOCK_N, seq_len_k);
         const int k_tile_size = k_end - k_start;
 
+        // K/V row stride uses num_kv_heads (GQA layout)
         for (int i = tid; i < k_tile_size * HEAD_DIM; i += blockDim.x) {
             const int row = i / HEAD_DIM;
             const int col = i % HEAD_DIM;
             const int global_k_pos = seq_start_k + k_start + row;
-            K_smem(row, col) = K_head[global_k_pos * num_heads * HEAD_DIM + col];
-            V_smem(row, col) = V_head[global_k_pos * num_heads * HEAD_DIM + col];
+            K_smem(row, col) = K_head[global_k_pos * num_kv_heads * HEAD_DIM + col];
+            V_smem(row, col) = V_head[global_k_pos * num_kv_heads * HEAD_DIM + col];
         }
         __syncthreads();
 
@@ -437,12 +410,12 @@ extern "C" __global__ void varlen_flash_attention_fwd_64_fp16(
     const __half* Q, const __half* K, const __half* V,
     const int* cu_seqlens_q, const int* cu_seqlens_k,
     __half* O, float* L,
-    int batch_size, int num_heads, int max_seqlen_q, int max_seqlen_k,
+    int batch_size, int num_heads, int num_kv_heads, int max_seqlen_q, int max_seqlen_k,
     float scale, int causal
 ) {
     varlen_flash_attention_fwd_fp16_impl<64, 128, 64>(
         Q, K, V, cu_seqlens_q, cu_seqlens_k, O, L,
-        batch_size, num_heads, max_seqlen_q, max_seqlen_k, scale, causal
+        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal
     );
 }
 
@@ -450,11 +423,63 @@ extern "C" __global__ void varlen_flash_attention_fwd_128_fp16(
     const __half* Q, const __half* K, const __half* V,
     const int* cu_seqlens_q, const int* cu_seqlens_k,
     __half* O, float* L,
-    int batch_size, int num_heads, int max_seqlen_q, int max_seqlen_k,
+    int batch_size, int num_heads, int num_kv_heads, int max_seqlen_q, int max_seqlen_k,
     float scale, int causal
 ) {
     varlen_flash_attention_fwd_fp16_impl<128, 128, 64>(
         Q, K, V, cu_seqlens_q, cu_seqlens_k, O, L,
-        batch_size, num_heads, max_seqlen_q, max_seqlen_k, scale, causal
+        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal
+    );
+}
+
+// ============================================================================
+// Kernel Entry Points - HEAD_DIM=256
+//
+// head_dim=256 with BLOCK_M=128,BLOCK_N=64 would require ~256 KB smem which
+// exceeds all GPU limits.  Use smaller tiles instead:
+//   fp32: BLOCK_M=16, BLOCK_N=16 → smem=(16+2*16)*256*4 = 49152 B = 48 KB
+//   fp16: BLOCK_M=32, BLOCK_N=32 → smem=(32+2*32)*256*2 = 49152 B = 48 KB
+// Both fit within the 48 KB default smem limit (set_smem_attribute raises it
+// to the required size with cudaFuncAttributeMaxDynamicSharedMemorySize).
+//
+// O_local[256] at head_dim=256 will spill to local memory.  This is accepted
+// for this CORRECTNESS-FIRST implementation; optimisation is deferred.
+//
+// BWD for head_dim=256 is NOT instantiated here; the Rust launcher guards
+// against it.  Forward-only usage supports inference (EmbeddingGemma).
+// ============================================================================
+
+extern "C" __global__ void varlen_flash_attention_fwd_256_fp32(
+    const float* Q,
+    const float* K,
+    const float* V,
+    const int* cu_seqlens_q,
+    const int* cu_seqlens_k,
+    float* O,
+    float* L,
+    int batch_size,
+    int num_heads,
+    int num_kv_heads,
+    int max_seqlen_q,
+    int max_seqlen_k,
+    float scale,
+    int causal
+) {
+    varlen_flash_attention_fwd_fp32_impl<256, 16, 16>(
+        Q, K, V, cu_seqlens_q, cu_seqlens_k, O, L,
+        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal
+    );
+}
+
+extern "C" __global__ void varlen_flash_attention_fwd_256_fp16(
+    const __half* Q, const __half* K, const __half* V,
+    const int* cu_seqlens_q, const int* cu_seqlens_k,
+    __half* O, float* L,
+    int batch_size, int num_heads, int num_kv_heads, int max_seqlen_q, int max_seqlen_k,
+    float scale, int causal
+) {
+    varlen_flash_attention_fwd_fp16_impl<256, 32, 32>(
+        Q, K, V, cu_seqlens_q, cu_seqlens_k, O, L,
+        batch_size, num_heads, num_kv_heads, max_seqlen_q, max_seqlen_k, scale, causal
     );
 }

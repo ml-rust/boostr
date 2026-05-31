@@ -132,6 +132,12 @@ fn compile_cuda_kernels() {
         ),
         k!(
             "src/ops/cuda/kernels/attention",
+            "varlen_attention_bwd_fp16.cu",
+            "sm_75",
+            true
+        ),
+        k!(
+            "src/ops/cuda/kernels/attention",
             "mqa_gqa.cu",
             "sm_80",
             true

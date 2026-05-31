@@ -16,12 +16,14 @@ mod build;
 #[cfg(feature = "cuda")]
 pub(crate) mod graph_cache;
 mod layer;
+mod layer_varlen;
 
 use layer::EncoderLayer;
 
 use super::config::{ArchFamily, EncoderConfig};
 use crate::error::{Error, Result};
-use crate::nn::{Embedding, LayerNorm};
+use crate::nn::{Embedding, LayerNorm, RmsNorm};
+use crate::ops::{RoPEOps, RoPEPackedOps, VarLenAttentionOps};
 use crate::quant::QuantMatmulOps;
 use numr::autograd::{Var, var_add, var_narrow, var_reshape};
 use numr::dtype::DType;
@@ -49,12 +51,20 @@ pub enum Pooling {
 pub struct Encoder<R: Runtime> {
     pub(super) config: EncoderConfig,
     pub(super) token_embed: Embedding<R>,
+    /// Absolute position embedding table (BERT/XLM-R only).
+    /// NomicBert keeps this field as a sentinel zero embedding; it is never called.
     pub(super) position_embed: Embedding<R>,
     /// Post-embedding LayerNorm (applied after token + position embedding sum).
     /// Both BERT and XLM-RoBERTa apply this norm before the first transformer layer.
     pub(super) embed_norm: LayerNorm<R>,
     pub(super) layers: Vec<EncoderLayer<R>>,
     pub(super) pooling: Pooling,
+    /// Row 0 of `token_types.weight` as a `[1, hidden_size]` tensor (NomicBert only).
+    /// `None` for BERT/XLM-R, which do not load a token-type embedding.
+    pub(super) token_type_embed: Option<Tensor<R>>,
+    /// Final RMSNorm applied to all token hidden states before pooling (Gemma only).
+    /// `None` for BERT/XLM-R/NomicBert.
+    pub(super) output_norm: Option<RmsNorm<R>>,
     /// CUDA graph capture cache. Compiled only when the `cuda` feature is active.
     /// Non-CUDA runtimes never allocate or touch this field.
     #[cfg(feature = "cuda")]
@@ -75,6 +85,9 @@ pub trait EncoderClient<R: Runtime>:
     + NormalizationOps<R>
     + QuantMatmulOps<R>
     + TypeConversionOps<R>
+    + RoPEOps<R>
+    + RoPEPackedOps<R>
+    + VarLenAttentionOps<R>
 {
 }
 
@@ -92,7 +105,10 @@ where
         + UnaryOps<R>
         + NormalizationOps<R>
         + QuantMatmulOps<R>
-        + TypeConversionOps<R>,
+        + TypeConversionOps<R>
+        + RoPEOps<R>
+        + RoPEPackedOps<R>
+        + VarLenAttentionOps<R>,
 {
 }
 
@@ -109,7 +125,9 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         seq_len: usize,
     ) -> Vec<i64> {
         match self.config.arch_family {
-            ArchFamily::Bert => (0..seq_len as i64).cycle().take(batch * seq_len).collect(),
+            ArchFamily::Bert | ArchFamily::NomicBert | ArchFamily::GemmaEmbedding => {
+                (0..seq_len as i64).cycle().take(batch * seq_len).collect()
+            }
             ArchFamily::XlmRoberta => {
                 let pad_id = self.config.padding_token_id;
                 let mut pos_flat: Vec<i64> = Vec::with_capacity(batch * seq_len);
@@ -148,7 +166,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
     ) -> Tensor<R> {
         let device = input_ids.device();
         match self.config.arch_family {
-            ArchFamily::Bert => {
+            ArchFamily::Bert | ArchFamily::NomicBert | ArchFamily::GemmaEmbedding => {
                 let pos_ids: Vec<i64> = (0..seq_len as i64).collect();
                 Tensor::<R>::from_slice(&pos_ids, &[seq_len], device)
             }
@@ -182,10 +200,48 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
     {
         let tok_emb = self.token_embed.forward(client, input_ids)?;
-        let pos_emb = self.position_embed.forward(client, pos_ids)?;
 
-        let combined = var_add(&tok_emb, &pos_emb, client).map_err(Error::Numr)?;
-        let normed = self.embed_norm.forward(client, &combined)?;
+        // Gemma: multiply token embeddings by sqrt(hidden_size) immediately after lookup.
+        // This is the Gemma embedding normalizer — not a tensor, a scalar multiply.
+        let tok_emb = if self.config.embed_scale {
+            let scale = (self.config.hidden_size as f64).sqrt();
+            Var::new(
+                client
+                    .mul_scalar(tok_emb.tensor(), scale)
+                    .map_err(Error::Numr)?,
+                false,
+            )
+        } else {
+            tok_emb
+        };
+
+        // NomicBert and Gemma use RoPE for positions; skip the learned position embedding add.
+        // BERT/XLM-R add the position embedding as usual.
+        let tok_emb = if self.config.arch_family == ArchFamily::NomicBert
+            || self.config.arch_family == ArchFamily::GemmaEmbedding
+        {
+            tok_emb
+        } else {
+            let pos_emb = self.position_embed.forward(client, pos_ids)?;
+            var_add(&tok_emb, &pos_emb, client).map_err(Error::Numr)?
+        };
+
+        // NomicBert: broadcast-add token_type row 0 (single-segment inference).
+        // BERT/XLM-R: token_type_embed is None, this is a no-op.
+        // For NomicBert the padded path uses [1, 1, hidden] (input is [B, S, hidden]).
+        let tok_emb = if let Some(tte) = &self.token_type_embed {
+            let shape = tok_emb.shape().to_vec();
+            let hidden_size = *shape.last().ok_or_else(|| Error::ModelError {
+                reason: "tok_emb has no dimensions".into(),
+            })?;
+            let tte_3d = tte.reshape(&[1, 1, hidden_size]).map_err(Error::Numr)?;
+            let tte_var = Var::new(tte_3d, false);
+            var_add(&tok_emb, &tte_var, client).map_err(Error::Numr)?
+        } else {
+            tok_emb
+        };
+
+        let normed = self.embed_norm.forward(client, &tok_emb)?;
 
         // When compute_dtype == F16, the embedding weights are already F16 so
         // `normed` is F16.  We keep them as-is and the transformer layers run F16.
@@ -194,19 +250,29 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
 
         for layer in &self.layers {
             let layer_input = Var::new(hidden.tensor().clone(), false);
-            let out = layer.forward(client, &layer_input, attention_mask)?;
+            // Padded path: pass attention_mask, no varlen ctx.
+            let out = layer.forward(client, &layer_input, attention_mask, None)?;
             hidden = out.detach();
         }
+
+        // Gemma: apply final output_norm (RMSNorm) to all hidden states before pooling.
+        // BERT/NomicBert: output_norm is None, this is a no-op.
+        let hidden_tensor = if let Some(on) = &self.output_norm {
+            let hidden_var = Var::new(hidden.tensor().clone(), false);
+            on.forward(client, &hidden_var)?.tensor().clone()
+        } else {
+            hidden.tensor().clone()
+        };
 
         // F16 path: cast final hidden states back to F32 so pooling, the CUDA graph
         // output buffer, and the classifier head all receive F32 tensors unchanged.
         let output =
-            if self.config.compute_dtype == DType::F16 && hidden.tensor().dtype() == DType::F16 {
+            if self.config.compute_dtype == DType::F16 && hidden_tensor.dtype() == DType::F16 {
                 client
-                    .cast(hidden.tensor(), DType::F32)
+                    .cast(&hidden_tensor, DType::F32)
                     .map_err(Error::Numr)?
             } else {
-                hidden.tensor().clone()
+                hidden_tensor
             };
 
         Ok(output)
@@ -329,100 +395,6 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         Ok(pooled)
     }
 
-    /// Forward pass: token IDs → per-token hidden states `[B, S, hidden_size]`.
-    ///
-    /// `attention_mask`: optional `[B, S]` float tensor where 1.0 = real token,
-    /// 0.0 = padding.  When `None`, no masking is applied — all positions are
-    /// treated as valid, preserving the pre-existing behaviour for callers that
-    /// do not have variable-length input.
-    pub fn encode<C>(
-        &self,
-        client: &C,
-        input_ids: &Tensor<R>,
-        attention_mask: Option<&Tensor<R>>,
-    ) -> Result<Var<R>>
-    where
-        C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
-    {
-        let shape = input_ids.shape().to_vec();
-        let seq_len = *shape.last().ok_or_else(|| Error::ModelError {
-            reason: "input_ids must have at least 1 dimension".into(),
-        })?;
-
-        let tok_emb = self.token_embed.forward(client, input_ids)?;
-
-        let pos_tensor = self.position_ids_tensor(input_ids, &shape, seq_len);
-        let pos_emb = self.position_embed.forward(client, &pos_tensor)?;
-
-        let combined = var_add(&tok_emb, &pos_emb, client).map_err(Error::Numr)?;
-        let mut hidden = self.embed_norm.forward(client, &combined)?;
-
-        for layer in &self.layers {
-            hidden = layer.forward(client, &hidden, attention_mask)?;
-        }
-
-        Ok(hidden)
-    }
-
-    /// Forward pass: token IDs → pooled embedding `[B, hidden_size]`.
-    ///
-    /// `attention_mask`: optional `[B, S]` float tensor where 1.0 = real token,
-    /// 0.0 = padding.  Pass `None` for single-sequence inference with no padding.
-    pub fn embed<C>(
-        &self,
-        client: &C,
-        input_ids: &Tensor<R>,
-        attention_mask: Option<&Tensor<R>>,
-    ) -> Result<Var<R>>
-    where
-        C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
-    {
-        let hidden = self.encode(client, input_ids, attention_mask)?;
-
-        match self.pooling {
-            Pooling::Mean => {
-                let pooled = if let Some(mask) = attention_mask {
-                    let mask_shape = mask.shape().to_vec();
-                    let batch = mask_shape[0];
-                    let seq_len = mask_shape[1];
-                    let hidden_size = self.config.hidden_size;
-
-                    let mask_3d = mask.reshape(&[batch, seq_len, 1]).map_err(Error::Numr)?;
-                    let masked = client.mul(hidden.tensor(), &mask_3d).map_err(Error::Numr)?;
-                    let summed = client.sum(&masked, &[1], false).map_err(Error::Numr)?;
-                    let token_counts = client.sum(mask, &[1], true).map_err(Error::Numr)?;
-                    let token_counts = client
-                        .maximum(
-                            &token_counts,
-                            &Tensor::from_slice(&[1.0f32], &[1], mask.device()),
-                        )
-                        .map_err(Error::Numr)?;
-                    let _ = hidden_size;
-                    let pooled_t = client.div(&summed, &token_counts).map_err(Error::Numr)?;
-                    Var::new(pooled_t, false)
-                } else {
-                    Var::new(
-                        client
-                            .mean(hidden.tensor(), &[1], false)
-                            .map_err(Error::Numr)?,
-                        false,
-                    )
-                };
-                Ok(pooled)
-            }
-            Pooling::Cls => {
-                let cls = var_narrow(&hidden, 1, 0, 1).map_err(Error::Numr)?;
-                let cls = Var::new(cls.tensor().contiguous()?, false);
-                let shape = cls.shape().to_vec();
-                let batch = shape[0];
-                let hidden_dim = shape[2];
-                var_reshape(&cls, &[batch, hidden_dim]).map_err(Error::Numr)
-            }
-        }
-    }
-
     /// Returns the encoder's configuration.
     pub fn config(&self) -> &EncoderConfig {
         &self.config
@@ -443,6 +415,9 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         self.forward_cache.capture_count()
     }
 }
+
+mod inference_varlen;
+mod train_forward;
 
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda_graph;

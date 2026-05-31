@@ -118,6 +118,7 @@ fn embed_cached(
 // Capture path
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn capture_and_run(
     enc: &Encoder<CudaRuntime>,
     client: &CudaClient,
@@ -329,21 +330,11 @@ fn pool_hidden(
 #[inline]
 fn cast_i64(data: &[i64]) -> &[u8] {
     // SAFETY: i64 is Pod; no padding; pointer is valid for lifetime of slice.
-    unsafe {
-        std::slice::from_raw_parts(
-            data.as_ptr() as *const u8,
-            data.len() * std::mem::size_of::<i64>(),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)) }
 }
 
 #[inline]
 fn cast_f32(data: &[f32]) -> &[u8] {
     // SAFETY: f32 is Pod; no padding; pointer is valid for lifetime of slice.
-    unsafe {
-        std::slice::from_raw_parts(
-            data.as_ptr() as *const u8,
-            data.len() * std::mem::size_of::<f32>(),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)) }
 }

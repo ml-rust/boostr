@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 /// BERT uses simple 0-based position ids.  XLM-RoBERTa (used by e.g.
 /// bge-reranker-v2-m3) reserves position `pad_token_id` for padding and
 /// numbers real tokens starting from `pad_token_id + 1`.
+/// NomicBert replaces learned position embeddings with RoPE and uses a
+/// SwiGLU FFN.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ArchFamily {
@@ -17,7 +19,40 @@ pub enum ArchFamily {
     /// XLM-RoBERTa: position_ids computed as cumsum(input_ids != pad_id) + pad_id,
     /// with padding positions assigned position_id = pad_id.
     XlmRoberta,
+    /// NomicBert: RoPE positions (no learned position embedding), SwiGLU FFN,
+    /// fused QKV projection, token-type embedding row 0, mean pooling.
+    NomicBert,
+    /// Gemma3-embedding: RoPE positions, sandwich RMSNorm, GQA, QK-norm,
+    /// GeGLU FFN, token-embedding scale sqrt(hidden_size), mean pooling.
+    /// No learned position embedding. No biases anywhere.
+    GemmaEmbedding,
 }
+
+/// FFN variant: controls which feed-forward computation is used per layer.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FfnVariant {
+    /// Standard BERT FFN: ffn_down(act(ffn_up(x))).
+    #[default]
+    Standard,
+    /// NomicBert SwiGLU: ffn_down(silu(ffn_gate(x)) * ffn_up(x)).
+    GatedSilu,
+    /// Gemma GeGLU: ffn_down(gelu(ffn_gate(x)) * ffn_up(x)).
+    /// Gate activation is GELU (not SiLU/SwiGLU).
+    GatedGelu,
+}
+
+/// Maximum number of packed tokens per varlen forward pass.
+///
+/// Bounds peak memory for `embed_texts_varlen` by splitting large document
+/// batches into sub-batches whose total token count does not exceed this
+/// value.  A single document that is longer than this limit is still
+/// processed in one forward (documents cannot be split).
+///
+/// Tuned per hardware: 16 384 tokens fits comfortably on most 24 GB GPUs
+/// when hidden_size ≤ 768 and up to 12 layers.  Reduce to 8 192 on
+/// smaller GPUs or larger models.
+pub const DEFAULT_MAX_TOKENS_PER_FORWARD: usize = 16384;
 
 /// Configuration for BERT-style transformer encoder models.
 ///
@@ -58,6 +93,63 @@ pub struct EncoderConfig {
     /// Only effective on CUDA; ignored on CPU (weights and activations stay F32).
     #[serde(skip, default = "default_compute_dtype")]
     pub compute_dtype: DType,
+
+    // ── NomicBert-only fields (serde-defaulted; BERT/XLM-R deserialization unchanged) ──
+    /// RoPE frequency base. Read from `nomic-bert.rope.freq_base`. Default 10000.0.
+    #[serde(default = "default_rope_freq_base")]
+    pub rope_freq_base: f32,
+
+    /// Whether the model uses causal (autoregressive) attention.
+    /// NomicBert is bidirectional; always `false` in practice. Default false.
+    #[serde(default)]
+    pub causal: bool,
+
+    /// FFN variant: Standard (BERT) or GatedSilu (NomicBert SwiGLU).
+    #[serde(default)]
+    pub ffn_variant: FfnVariant,
+
+    /// Size of the token-type embedding table (`type_vocab_size` for NomicBert).
+    /// Zero for BERT models that do not load token_types.weight.
+    #[serde(default)]
+    pub token_type_embed_size: usize,
+
+    // ── Gemma-embedding-only fields (serde-defaulted; existing archs unchanged) ──
+    /// Number of KV heads (GQA). Equal to `num_attention_heads` for MHA (BERT/NomicBert).
+    /// Read from `gemma-embedding.attention.head_count_kv`. Default 0 → falls back to
+    /// `num_attention_heads` via `resolved_num_kv_heads()`.
+    #[serde(default)]
+    pub num_kv_heads: usize,
+
+    /// Explicit per-head dimension from `gemma-embedding.attention.key_length`.
+    /// When `None`, resolved as `hidden_size / num_attention_heads`.
+    #[serde(default)]
+    pub head_dim_explicit: Option<usize>,
+
+    /// RMSNorm epsilon from `gemma-embedding.attention.layer_norm_rms_epsilon`.
+    /// Also stored in `layer_norm_eps` for the norm forward; this field records
+    /// the GGUF value separately when the general `layer_norm_eps` field is already
+    /// used by the BERT path. Default 1e-6.
+    #[serde(default = "default_rms_eps")]
+    pub rms_eps: f64,
+
+    /// Sliding window size from `gemma-embedding.attention.sliding_window`.
+    /// Stored but not enforced for our embedding use (sessions ≤ 128 tokens are
+    /// well within the window). Full bidirectional attention is always applied.
+    #[serde(default)]
+    pub sliding_window: Option<usize>,
+
+    /// When true, token embeddings are multiplied by sqrt(hidden_size) after lookup.
+    /// Required for Gemma correctness; not a tensor — pure scalar multiply.
+    #[serde(default)]
+    pub embed_scale: bool,
+
+    /// Maximum number of packed tokens per varlen forward pass.
+    ///
+    /// `None` resolves to [`DEFAULT_MAX_TOKENS_PER_FORWARD`] (16 384).
+    /// Set explicitly to tune peak GPU memory vs. throughput trade-off.
+    /// Only affects the NomicBert varlen path (`embed_texts_varlen`).
+    #[serde(default)]
+    pub max_tokens_per_forward: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -76,94 +168,44 @@ fn default_compute_dtype() -> DType {
     DType::F32
 }
 
+fn default_rope_freq_base() -> f32 {
+    10000.0
+}
+
+fn default_rms_eps() -> f64 {
+    1e-6
+}
+
 impl EncoderConfig {
     /// Compute the dimension of each attention head (`hidden_size / num_attention_heads`).
+    ///
+    /// This is the BERT/NomicBert formula. For Gemma, use `resolved_head_dim()`.
     pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
     }
 
-    /// Build an `EncoderConfig` from GGUF metadata keys.
+    /// Resolve the per-head dimension.
     ///
-    /// Reads standard BERT GGUF keys:
-    /// - `bert.embedding_length` → `hidden_size`
-    /// - `bert.feed_forward_length` → `intermediate_size`
-    /// - `bert.attention.head_count` → `num_attention_heads`
-    /// - `bert.block_count` → `num_hidden_layers`
-    /// - `bert.context_length` → `max_position_embeddings`
+    /// Returns `head_dim_explicit` when set (Gemma stores it as
+    /// `gemma-embedding.attention.key_length`). Falls back to the BERT formula
+    /// `hidden_size / num_attention_heads` when `None`.
+    pub fn resolved_head_dim(&self) -> usize {
+        self.head_dim_explicit
+            .unwrap_or_else(|| self.hidden_size / self.num_attention_heads)
+    }
+
+    /// Resolve the number of KV heads.
     ///
-    /// Vocab size is inferred from the `tokenizer.ggml.tokens` array length.
-    ///
-    /// Architecture family is inferred from the tokenizer model:
-    /// `tokenizer.ggml.model == "t5"` (SentencePiece / unigram) indicates
-    /// an XLM-RoBERTa backbone and sets `arch_family = XlmRoberta` with
-    /// `padding_token_id = 1`.  BERT-family models use BPE/WordPiece and
-    /// get `arch_family = Bert` with `padding_token_id = 0`.
-    pub fn from_gguf_metadata(
-        metadata: &crate::format::GgufMetadata,
-    ) -> crate::error::Result<Self> {
-        use crate::error::Error;
-
-        let hidden_size =
-            metadata
-                .get_u32("bert.embedding_length")
-                .ok_or_else(|| Error::ModelError {
-                    reason: "GGUF missing bert.embedding_length".into(),
-                })? as usize;
-
-        let intermediate_size = metadata
-            .get_u32("bert.feed_forward_length")
-            .ok_or_else(|| Error::ModelError {
-                reason: "GGUF missing bert.feed_forward_length".into(),
-            })? as usize;
-
-        let num_attention_heads =
-            metadata
-                .get_u32("bert.attention.head_count")
-                .ok_or_else(|| Error::ModelError {
-                    reason: "GGUF missing bert.attention.head_count".into(),
-                })? as usize;
-
-        let num_hidden_layers =
-            metadata
-                .get_u32("bert.block_count")
-                .ok_or_else(|| Error::ModelError {
-                    reason: "GGUF missing bert.block_count".into(),
-                })? as usize;
-
-        let max_position_embeddings =
-            metadata.get_u32("bert.context_length").unwrap_or(512) as usize;
-
-        let vocab_size = metadata
-            .get_array("tokenizer.ggml.tokens")
-            .map(|a| a.len())
-            .unwrap_or(30522); // BERT default
-
-        // Detect XLM-RoBERTa: GGUF tokenizer model "t5" means SentencePiece/unigram,
-        // which is the tokenizer used by all XLM-RoBERTa variants.  BERT/RoBERTa-base
-        // models use "bert" or "bpe" here.
-        let tokenizer_model = metadata
-            .get_string("tokenizer.ggml.model")
-            .unwrap_or("bert");
-        let (arch_family, padding_token_id) = if tokenizer_model == "t5" {
-            // XLM-RoBERTa: <pad> is always at position 1 in the SentencePiece vocabulary.
-            (ArchFamily::XlmRoberta, 1i64)
+    /// Returns the stored `num_kv_heads` when non-zero (Gemma GQA).
+    /// Falls back to `num_attention_heads` (MHA for BERT/NomicBert).
+    pub fn resolved_num_kv_heads(&self) -> usize {
+        if self.num_kv_heads == 0 {
+            self.num_attention_heads
         } else {
-            (ArchFamily::Bert, 0i64)
-        };
-
-        Ok(Self {
-            vocab_size,
-            hidden_size,
-            num_hidden_layers,
-            num_attention_heads,
-            intermediate_size,
-            max_position_embeddings,
-            layer_norm_eps: 1e-12,
-            hidden_act: HiddenAct::Gelu,
-            type_vocab_size: 0,
-            arch_family,
-            padding_token_id,
-            compute_dtype: DType::F32,
-        })
+            self.num_kv_heads
+        }
     }
 }
+
+#[path = "config_gguf.rs"]
+mod gguf;

@@ -23,6 +23,16 @@ fn make_test_encoder() -> (
         arch_family: ArchFamily::Bert,
         padding_token_id: 0,
         compute_dtype: numr::dtype::DType::F32,
+        rope_freq_base: 10000.0,
+        causal: false,
+        ffn_variant: crate::model::encoder::config::FfnVariant::Standard,
+        token_type_embed_size: 0,
+        num_kv_heads: 0,
+        head_dim_explicit: None,
+        rms_eps: 1e-6,
+        sliding_window: None,
+        embed_scale: false,
+        max_tokens_per_forward: None,
     };
 
     let encoder = Encoder::from_weights(config, Pooling::Mean, |name| match name {
@@ -98,6 +108,16 @@ fn make_test_encoder_cls() -> (
         arch_family: ArchFamily::Bert,
         padding_token_id: 0,
         compute_dtype: numr::dtype::DType::F32,
+        rope_freq_base: 10000.0,
+        causal: false,
+        ffn_variant: crate::model::encoder::config::FfnVariant::Standard,
+        token_type_embed_size: 0,
+        num_kv_heads: 0,
+        head_dim_explicit: None,
+        rms_eps: 1e-6,
+        sliding_window: None,
+        embed_scale: false,
+        max_tokens_per_forward: None,
     };
 
     let device_ref = &device;
@@ -230,6 +250,16 @@ fn test_xlm_roberta_position_ids() {
         arch_family: ArchFamily::XlmRoberta,
         padding_token_id: 1,
         compute_dtype: numr::dtype::DType::F32,
+        rope_freq_base: 10000.0,
+        causal: false,
+        ffn_variant: crate::model::encoder::config::FfnVariant::Standard,
+        token_type_embed_size: 0,
+        num_kv_heads: 0,
+        head_dim_explicit: None,
+        rms_eps: 1e-6,
+        sliding_window: None,
+        embed_scale: false,
+        max_tokens_per_forward: None,
     };
 
     let device_ref = &device;
@@ -325,6 +355,16 @@ fn test_from_weights_quant_forward_shape() {
         arch_family: ArchFamily::Bert,
         padding_token_id: 0,
         compute_dtype: numr::dtype::DType::F32,
+        rope_freq_base: 10000.0,
+        causal: false,
+        ffn_variant: crate::model::encoder::config::FfnVariant::Standard,
+        token_type_embed_size: 0,
+        num_kv_heads: 0,
+        head_dim_explicit: None,
+        rms_eps: 1e-6,
+        sliding_window: None,
+        embed_scale: false,
+        max_tokens_per_forward: None,
     };
 
     let make_q8_0 = |rows: usize, cols: usize| -> QuantTensor<CpuRuntime> {

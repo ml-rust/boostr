@@ -83,11 +83,7 @@ mod inner {
             dtype_size: usize,
         ) -> Self {
             let block_memory = block_size * num_heads * head_dim * dtype_size * 2;
-            let total_blocks = if block_memory == 0 {
-                0
-            } else {
-                memory_budget_bytes / block_memory
-            };
+            let total_blocks = memory_budget_bytes.checked_div(block_memory).unwrap_or(0);
             Self::new(total_blocks, block_size)
         }
     }

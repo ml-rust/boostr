@@ -1,10 +1,69 @@
+<div align="center">
+
 # boostr
 
-**ML framework built on numr — attention, quantization, model architectures.**
+<h3>ML framework in Rust. Write once. Run on any backend.</h3>
 
-[![Crates.io](https://img.shields.io/crates/v/boostr)](https://crates.io/crates/boostr) [![Docs](https://docs.rs/boostr/badge.svg)](https://docs.rs/boostr) [![License](https://img.shields.io/crates/l/boostr)](LICENSE)
+<p>
+Production-grade LLM primitives — flash attention, quantization, MoE, state-space
+models, KV caching, and distributed training — built on
+<a href="https://github.com/ml-rust/numr">numr</a> so the same code runs on CPU, CUDA, and WebGPU.
+</p>
+
+<p>
+  <a href="https://docs.rs/boostr"><strong>Docs</strong></a>
+  · 
+  <a href="https://crates.io/crates/boostr"><strong>Crate</strong></a>
+  ·
+  <a href="#module-overview"><strong>Modules</strong></a>
+  ·
+  <a href="#basic-usage"><strong>Example</strong></a>
+  ·
+  <a href="CONTRIBUTING.md"><strong>Contributing</strong></a>
+</p>
+
+<p>
+  <a href="https://discord.gg/jBhFk9kHPg">
+    <img src="https://img.shields.io/discord/1453357769720594543?label=Discord&logo=discord&logoColor=white&color=5865F2" alt="Join the Discord">
+  </a>
+</p>
+
+<p>
+  <a href="https://github.com/ml-rust/boostr/actions/workflows/ci.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/ml-rust/boostr/ci.yml?branch=main&label=ci" alt="CI status">
+  </a>
+  <a href="https://crates.io/crates/boostr">
+    <img src="https://img.shields.io/crates/v/boostr" alt="crates.io">
+  </a>
+  <a href="https://docs.rs/boostr">
+    <img src="https://img.shields.io/docsrs/boostr" alt="docs.rs">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/crates/l/boostr" alt="License">
+  </a>
+  <a href="https://github.com/ml-rust/boostr/stargazers">
+    <img src="https://img.shields.io/github/stars/ml-rust/boostr?style=social" alt="GitHub stars">
+  </a>
+</p>
+
+</div>
 
 boostr extends [numr](https://github.com/ml-rust/numr) with production-grade ML primitives. It provides attention mechanisms, quantization support, model architectures, and inference infrastructure — all built on numr's foundational tensors, runtimes, and ops. No reimplementation. No wrappers. Pure extension traits.
+
+## Why boostr
+
+- **One codebase, every backend.** Write once against numr's `Runtime`; run on CPU (SIMD), CUDA (PTX), or WebGPU (WGSL) by switching a feature flag — no per-device dispatch, no rewrite.
+- **No vendor lock-in.** Every kernel is native — no cuBLAS, cuDNN, or MKL. Flash attention, quantized matmul, and fused optimizers are all hand-written per backend.
+- **Backends are a foundation concern.** Hardware support lives in numr, so new backends added there flow up to boostr automatically — the abstraction is built in, not bolted on per device.
+- **Train and serve from one stack.** The same primitives power [oxidizr](https://github.com/ml-rust/oxidizr) training and [blazr](https://github.com/ml-rust/blazr) inference — no Python runtime, single-binary deployment.
+
+## Who it's for
+
+- **LLM trainers** — distributed training with ZeRO (stages 1/2/3), tensor and pipeline parallelism (1F1B, GPipe, ZeroBubble), mixed precision, and fused optimizers.
+- **Inference engineers** — flash attention v2/v3, paged KV cache, continuous batching, speculative decoding, and prefix caching for high-throughput serving.
+- **Quantization & compression researchers** — 26 GGUF-compatible formats with a dedicated `QuantTensor` type and per-backend dequant / quantized-matmul kernels.
+- **Architecture researchers** — LLaMA, Mamba2 (SSD kernels), and hybrid transformer/SSM models, with an extensible system for custom architectures.
+- **WebAssembly & edge developers** — the WebGPU backend targets consumer GPUs (Vulkan/Metal/DX12) with no CUDA dependency.
 
 ## Key Capabilities
 
@@ -210,14 +269,18 @@ for token_idx in 0..seq_len {
 
 ## Feature Flags
 
-| Feature | Purpose                      | Dependencies      |
-| ------- | ---------------------------- | ----------------- |
-| `cpu`   | CPU backend (default)        | numr              |
-| `cuda`  | CUDA GPU acceleration        | numr/cuda, cudarc |
-| `nccl`  | Multi-GPU via NCCL           | numr/nccl         |
-| `wgpu`  | WebGPU cross-platform GPU    | numr/wgpu         |
-| `f16`   | Half-precision float support | numr/f16          |
-| `fp8`   | FP8 precision support        | numr/fp8          |
+| Feature       | Purpose                            | Dependencies            |
+| ------------- | ---------------------------------- | ----------------------- |
+| `cpu`         | CPU backend (default)              | numr                    |
+| `cuda`        | CUDA GPU acceleration (CUDA 12.x)  | numr/cuda, cudarc       |
+| `nccl`        | Multi-GPU via NCCL                 | numr/nccl               |
+| `wgpu`        | WebGPU cross-platform GPU          | numr/wgpu               |
+| `distributed` | Distributed inference over nexar   | nexar, anyhow, bytemuck |
+| `f16`         | Half-precision float support       | numr/f16                |
+| `fp8`         | FP8 precision support              | numr/fp8                |
+| `tts-g2p`     | Grapheme-to-phoneme via espeak-ng¹ | espeakng                |
+
+¹ Requires `libespeak-ng` available at runtime.
 
 ## Module Overview
 
@@ -300,7 +363,7 @@ cargo test --all-features -- --nocapture
 
 ## Contributing
 
-Contributions are welcome! Please see the main repository's contribution guidelines.
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture conventions, the `impl_generic` pattern, and pull request guidance.
 
 ## License
 

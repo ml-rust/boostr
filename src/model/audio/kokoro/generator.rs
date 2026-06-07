@@ -13,37 +13,35 @@
 //! conv_post : weight-normed Conv1d → (exp|sin) split      (mag/phase head)
 //! ```
 //!
-//! Forward (simplified to the main path — see `KNOWN LIMITATIONS` below):
+//! Two forward paths are provided:
+//!
+//! * [`IStftNetGenerator::forward`] — the generic, runtime-agnostic main path
+//!   (no source/noise conditioning). Used by generic-runtime callers and when
+//!   a checkpoint ships without noise weights.
+//! * [`IStftNetGenerator::forward_cpu_full`] — the complete CPU vocoder used in
+//!   production, including the harmonic-excitation → STFT → per-stage noise
+//!   residual path. The STFT analysis uses [`crate::model::audio::stft`].
+//!
+//! Full path (`forward_cpu_full`):
 //!
 //! ```text
+//! har = harmonic_excitation_spec(f0)            # [B, n_fft+2, T] via STFT
 //! for each upsample stage i:
 //!     x = leaky_relu(x)
-//!     x = ups[i](x)
-//!     if i == last_stage: reflection_pad(x)
-//!     x = x + x_source_i        # see limitation (1)
-//!     # average across parallel resblocks
+//!     x_source = noise_res[i](noise_convs[i](har), style)
+//!     x = ups[i](x) + x_source                  # cropped to trunk length
 //!     x = mean(resblocks[i*K .. (i+1)*K](x, style))
 //! x = leaky_relu(x)
-//! (mag, phase) = MagPhaseHead(x)
+//! (mag, phase) = conv_post(x)
 //! ```
 //!
-//! # Known limitations (documented, not hidden)
+//! # Known limitation
 //!
-//! 1. **Noise path not yet wired into `forward`.** Upstream passes
-//!    `har_source` through a forward STFT, concatenates magnitude + phase
-//!    into `[B, n_fft+2, T]`, and feeds that to `noise_convs[i]` followed
-//!    by `noise_res[i]`. The STFT primitive itself is now available — see
-//!    [`crate::model::audio::stft`] — but wiring it into the generator
-//!    requires adding `noise_convs`/`noise_res` fields to the struct,
-//!    extending `load_kokoro_v2` for those tensors, and threading the
-//!    residual through `Decoder`. That belongs in a focused follow-up
-//!    session. For CPU callers wanting the noise path today, call
-//!    [`IStftNetGenerator::harmonic_excitation_spec_cpu`] to compute the
-//!    excitation spectrogram and add the residual manually.
-//! 2. **Reflection padding skipped.** Before the final `+ x_source` add on
-//!    the last upsample stage, upstream applies `ReflectionPad1d(3)`.
-//!    Deferred until a reflection-pad primitive is ported; the current
-//!    build effectively uses zero padding for the last stage.
+//! **Reflection padding.** Upstream applies `ReflectionPad1d(3)` to the last
+//! upsample stage before the residual add; this build uses the STFT
+//! `center=True` framing plus right-cropping to align trunk and source lengths,
+//! which matches output length but differs from reflection padding at the
+//! boundary by a few samples. See [`IStftNetGenerator::forward_cpu_full`].
 
 use crate::error::{Error, Result};
 use crate::model::audio::kokoro::{AdaINResBlock1, MagPhaseHead, SourceModuleHnNSF, UpsampleBlock};
@@ -195,19 +193,19 @@ impl<R: Runtime> IStftNetGenerator<R> {
         self.ups.len()
     }
 
-    /// Forward: main trunk `x [B, C, T]` + style `s [B, style_dim]` + frame-
-    /// rate F0 `[B, T, 1]` → `(mag [B, F, T_out], phase [B, F, T_out])`.
+    /// Forward (generic main path): trunk `x [B, C, T]` + style `s [B, style_dim]`
+    /// → `(mag [B, F, T_out], phase [B, F, T_out])`.
     ///
-    /// Excitation is computed via `m_source(f0)` and returned in the debug
-    /// tuple for introspection, but NOT yet injected into the trunk — see the
-    /// "Known limitations" section at module level.
+    /// This is the runtime-agnostic path without source/noise conditioning. The
+    /// `f0` contour is unused here — it only drives the STFT-based noise path,
+    /// which is CPU-specialized in [`Self::forward_cpu_full`].
     #[allow(clippy::type_complexity)]
     pub fn forward<C>(
         &self,
         client: &C,
         x: &Tensor<R>,
         style: &Tensor<R>,
-        f0: &Tensor<R>,
+        _f0: &Tensor<R>,
     ) -> Result<(Tensor<R>, Tensor<R>)>
     where
         R: Runtime<DType = DType>,
@@ -226,9 +224,6 @@ impl<R: Runtime> IStftNetGenerator<R> {
             + TypeConversionOps<R>
             + UtilityOps<R>,
     {
-        // Compute excitation (currently unused — see limitation (1)).
-        let _excitation = self.m_source.forward(client, f0)?;
-
         let mut x = x.clone();
         for stage in 0..self.num_upsamples() {
             x = client
@@ -236,8 +231,11 @@ impl<R: Runtime> IStftNetGenerator<R> {
                 .map_err(Error::Numr)?;
             x = self.ups[stage].forward(client, &x)?;
 
-            // TODO: add `x_source_i` from noise_convs[stage](har_spec) +
-            // noise_res[stage](...) once a forward-STFT primitive lands.
+            // This generic path omits source/noise conditioning, which is
+            // STFT-based and therefore CPU-specialized. The full Kokoro vocoder
+            // (harmonic excitation → STFT → per-stage noise residual) runs via
+            // [`Self::forward_cpu_full`]; this `forward` is the no-noise variant
+            // used by generic-runtime callers and when no noise weights loaded.
 
             // Average K parallel resblocks for this stage.
             let mut xs: Option<Tensor<R>> = None;

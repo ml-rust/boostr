@@ -28,7 +28,7 @@ pub struct AdaLayerNorm<R: Runtime> {
 impl<R: Runtime> AdaLayerNorm<R> {
     pub fn new(fc_weight: Tensor<R>, fc_bias: Tensor<R>, eps: f32) -> Result<Self> {
         let w = fc_weight.shape();
-        if w.len() != 2 || w[0] % 2 != 0 {
+        if w.len() != 2 || !w[0].is_multiple_of(2) {
             return Err(Error::InvalidArgument {
                 arg: "fc_weight",
                 reason: format!("expected [2·C, style_dim], got {w:?}"),

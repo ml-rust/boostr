@@ -16,16 +16,16 @@
 //!    sum of per-sample angular increments, wrapped to `[0, 1)` to stay
 //!    numerically stable over long sequences.
 //! 2. Stack harmonics along a new last axis → `[B, T, harmonic_num+1]`.
-//! 3. Voiced/unvoiced mask `uv = (f0 > threshold)`; unvoiced regions get
-//!    small Gaussian noise instead of harmonic content.
+//! 3. Voiced/unvoiced mask `uv = (f0 > threshold)`; voiced frames carry the
+//!    harmonics plus a small amount of Gaussian noise, while unvoiced frames
+//!    are driven entirely by Gaussian noise (`sine_amp / 3`). Each harmonic
+//!    also receives a random initial phase.
 //! 4. `l_linear` + `tanh` collapse the `harmonic_num+1` channels to a single
 //!    time-domain excitation signal.
 //!
-//! This implementation is **deterministic**: the random initial phase and
-//! Gaussian noise in the upstream reference are skipped. That matches how
-//! production TTS systems typically run inference — reproducibility matters
-//! more than phase randomness for human listeners. If subjective quality
-//! differs vs upstream, the noise path can be added back with a provided RNG.
+//! The random initial phase and additive noise use the runtime's RNG, matching
+//! the upstream reference. Seed numr's global RNG before synthesis if you need
+//! bit-reproducible output.
 
 use crate::error::{Error, Result};
 use numr::dtype::DType;
@@ -42,6 +42,10 @@ pub struct SineGen {
     pub sample_rate: f32,
     pub harmonic_num: usize,
     pub sine_amp: f32,
+    /// Std-dev of the additive Gaussian noise (NSF default `0.003`). Voiced
+    /// frames get this much noise on top of the harmonics; unvoiced frames are
+    /// driven by `sine_amp / 3` noise instead of harmonics.
+    pub noise_std: f32,
     pub voiced_threshold: f32,
 }
 
@@ -51,14 +55,19 @@ impl SineGen {
             sample_rate,
             harmonic_num,
             sine_amp: 0.1,
+            noise_std: 0.003,
             voiced_threshold: 0.0,
         }
     }
 
-    /// Generate `[B, T, harmonic_num + 1]` sine harmonics from `f0 [B, T, 1]`.
+    /// Generate `[B, T, harmonic_num + 1]` harmonic-plus-noise excitation from
+    /// `f0 [B, T, 1]`, matching the upstream NSF `SineGen`.
     ///
-    /// `f0` is in Hz; entries `≤ voiced_threshold` are unvoiced and produce
-    /// zero output (pre-`tanh` mixing).
+    /// `f0` is in Hz. Voiced frames (`f0 > voiced_threshold`) emit the sine
+    /// harmonics scaled by `sine_amp` plus `noise_std` Gaussian noise; unvoiced
+    /// frames emit `sine_amp / 3` Gaussian noise only. Each harmonic also gets a
+    /// random initial phase, as in the reference. The Gaussian/uniform draws use
+    /// the runtime's RNG — seed it (numr global RNG) for reproducible synthesis.
     pub fn forward<R, C>(&self, client: &C, f0: &Tensor<R>) -> Result<Tensor<R>>
     where
         R: Runtime<DType = DType>,
@@ -70,6 +79,7 @@ impl SineGen {
             + ShapeOps<R>
             + CompareOps<R>
             + TypeConversionOps<R>
+            + numr::ops::RandomOps<R>
             + numr::ops::ReduceOps<R>
             + UtilityOps<R>,
     {
@@ -82,6 +92,7 @@ impl SineGen {
         }
         let (b, t) = (shape[0], shape[1]);
         let h = self.harmonic_num + 1;
+        let dtype = f0.dtype();
 
         // Build the [B, T, h] frequency buffer by multiplying f0 by each
         // harmonic index. Start with an empty output, fill harmonic by harmonic.
@@ -98,9 +109,21 @@ impl SineGen {
             .cat(&harmonics.iter().collect::<Vec<_>>(), 2)
             .map_err(Error::Numr)?; // [B, T, h]
 
-        // Cumulative sum along time axis → per-sample phase in cycles.
-        // Wrap to [0, 1) via `x - floor(x)` to avoid precision loss.
+        // Random initial phase per (batch, harmonic), fundamental fixed at 0.
+        // Upstream adds it to `rad_values[:, 0, :]` before the cumsum; since a
+        // constant added to the first step propagates to every later step, this
+        // is equivalent to adding the offset (broadcast over time) to the
+        // cumulative phase.
+        let rand_phase = client.rand(&[b, 1, h - 1], dtype).map_err(Error::Numr)?;
+        let zero_col = client.fill(&[b, 1, 1], 0.0, dtype).map_err(Error::Numr)?;
+        let rand_ini = client
+            .cat(&[&zero_col, &rand_phase], 2)
+            .map_err(Error::Numr)?; // [B, 1, h]
+
+        // Cumulative sum along time axis → per-sample phase in cycles, plus the
+        // random initial phase. Wrap to [0, 1) via `x - floor(x)` for precision.
         let phase = client.cumsum(&rad_values, 1).map_err(Error::Numr)?;
+        let phase = client.add(&phase, &rand_ini).map_err(Error::Numr)?;
         let phase_floor = client.floor(&phase).map_err(Error::Numr)?;
         let phase_frac = client.sub(&phase, &phase_floor).map_err(Error::Numr)?;
 
@@ -112,19 +135,39 @@ impl SineGen {
 
         // Voiced/unvoiced mask from the fundamental. (f0 > threshold) as f32.
         let threshold_tensor = client
-            .fill(&[b, t, 1], self.voiced_threshold as f64, f0.dtype())
+            .fill(&[b, t, 1], self.voiced_threshold as f64, dtype)
             .map_err(Error::Numr)?;
         let uv = client
             .gt(&f0_flat, &threshold_tensor)
             .map_err(Error::Numr)?;
-        let uv_f = client.cast(&uv, f0.dtype()).map_err(Error::Numr)?;
+        let uv_f = client.cast(&uv, dtype).map_err(Error::Numr)?;
 
-        // Amplitude: sine_amp where voiced, else 0.
+        // Voiced harmonics: sine · sine_amp · uv  (silenced on unvoiced frames).
         let amp = client
             .mul_scalar(&uv_f, self.sine_amp as f64)
             .map_err(Error::Numr)?;
-        // Broadcast amp [B, T, 1] × sine [B, T, h]
-        client.mul(&sine, &amp).map_err(Error::Numr)
+        let sine_waves = client.mul(&sine, &amp).map_err(Error::Numr)?;
+
+        // Additive noise: noise_amp = uv·noise_std + (1 − uv)·(sine_amp / 3).
+        // Voiced frames get a small amount of noise; unvoiced frames are noise-
+        // driven (no harmonics). noise = noise_amp · N(0, 1).
+        let one_minus_uv = {
+            let neg = client.mul_scalar(&uv_f, -1.0).map_err(Error::Numr)?;
+            client.add_scalar(&neg, 1.0).map_err(Error::Numr)?
+        };
+        let voiced_noise = client
+            .mul_scalar(&uv_f, self.noise_std as f64)
+            .map_err(Error::Numr)?;
+        let unvoiced_noise = client
+            .mul_scalar(&one_minus_uv, (self.sine_amp / 3.0) as f64)
+            .map_err(Error::Numr)?;
+        let noise_amp = client
+            .add(&voiced_noise, &unvoiced_noise)
+            .map_err(Error::Numr)?; // [B, T, 1]
+        let gauss = client.randn(&[b, t, h], dtype).map_err(Error::Numr)?;
+        let noise = client.mul(&gauss, &noise_amp).map_err(Error::Numr)?;
+
+        client.add(&sine_waves, &noise).map_err(Error::Numr)
     }
 }
 
@@ -169,7 +212,10 @@ impl<R: Runtime> SourceModuleHnNSF<R> {
             + ScalarOps<R>
             + MatmulOps<R>
             + TensorOps<R>
+            + ShapeOps<R>
             + CompareOps<R>
+            + TypeConversionOps<R>
+            + numr::ops::RandomOps<R>
             + numr::ops::ReduceOps<R>
             + UtilityOps<R>,
     {
@@ -212,15 +258,42 @@ mod tests {
     }
 
     #[test]
-    fn unvoiced_f0_yields_zero_sines() {
-        // f0 ≤ threshold (0.0 by default) → uv=0 → sines multiplied by 0.
+    fn unvoiced_f0_is_noise_driven() {
+        // f0 ≤ threshold (0.0) → uv=0 → no harmonics, output is noise with
+        // amplitude sine_amp/3 ≈ 0.0333 (matches upstream NSF). Verify the
+        // noise path is active (non-zero) and its RMS sits near sine_amp/3.
         let (client, device) = cpu_setup();
         let sg = SineGen::new(24_000.0, 2);
-        let f0 = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[1, 4, 1], &device);
-        let sines = sg.forward(&client, &f0).unwrap();
-        for v in sines.to_vec::<f32>() {
-            assert!(v.abs() < 1e-5, "expected zero, got {v}");
-        }
+        let t = 512;
+        let f0 = Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; t], &[1, t, 1], &device);
+        let out = sg.forward(&client, &f0).unwrap();
+        let data: Vec<f32> = out.to_vec();
+        assert!(data.iter().all(|v| v.is_finite()));
+        assert!(
+            data.iter().any(|&v| v != 0.0),
+            "noise path produced all zeros"
+        );
+        let rms = (data.iter().map(|v| v * v).sum::<f32>() / data.len() as f32).sqrt();
+        let expected = sg.sine_amp / 3.0; // ≈ 0.0333
+        assert!(
+            rms > expected * 0.4 && rms < expected * 2.0,
+            "unvoiced noise RMS {rms} far from expected {expected}"
+        );
+    }
+
+    #[test]
+    fn voiced_f0_carries_harmonics() {
+        // Voiced frames should have substantially more energy than the small
+        // unvoiced noise floor (sine harmonics at amplitude sine_amp = 0.1).
+        let (client, device) = cpu_setup();
+        let sg = SineGen::new(24_000.0, 4);
+        let t = 512;
+        let f0 = Tensor::<CpuRuntime>::from_slice(&vec![220.0f32; t], &[1, t, 1], &device);
+        let out = sg.forward(&client, &f0).unwrap();
+        let data: Vec<f32> = out.to_vec();
+        let rms = (data.iter().map(|v| v * v).sum::<f32>() / data.len() as f32).sqrt();
+        // Harmonic RMS (~sine_amp/√2 ≈ 0.07) dwarfs the voiced noise_std=0.003.
+        assert!(rms > 0.02, "voiced harmonic energy too low: rms={rms}");
     }
 
     #[test]

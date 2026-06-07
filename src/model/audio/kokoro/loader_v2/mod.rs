@@ -9,7 +9,7 @@
 //! [`full::load_kokoro_v2`] stitches everything under the confirmed checkpoint
 //! prefixes.
 //!
-//! Prefix map (from the upstream source audit — see `kokoro_tts_checklist.md`):
+//! Checkpoint prefix map:
 //!
 //! ```text
 //! bert.*                 bert_encoder.*

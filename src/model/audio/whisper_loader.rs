@@ -21,7 +21,10 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use splintr::{Tokenizer, WhisperVariant};
+use splintr::{
+    AnyTokenizer, PretrainedVocab, Tokenize, TokenizeError, Tokenizer, WhisperVariant,
+    from_json_path, from_vocab,
+};
 
 use crate::error::{Error, Result};
 use crate::model::audio::whisper_model::WhisperModel;
@@ -30,12 +33,65 @@ use crate::nn::{VarBuilder, VarMap};
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 
+/// Whisper tokenizer backend.
+///
+/// Multilingual v1/v2/v3 checkpoints load zero-config from splintr's bundled
+/// vocab as a typed [`Tokenizer`]. Any other checkpoint (English-only today, or
+/// future / custom variants) loads its `tokenizer.json` as an [`AnyTokenizer`].
+/// Both arms expose the [`Tokenize`] interface, so callers can stay generic.
+pub enum WhisperTokenizer {
+    /// Bundled multilingual vocab loaded via splintr's pretrained API.
+    Typed(Tokenizer),
+    /// Arbitrary HF `tokenizer.json` loaded from the checkpoint directory.
+    Any(AnyTokenizer),
+}
+
+impl WhisperTokenizer {
+    /// Encode text into token IDs.
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        match self {
+            Self::Typed(t) => t.encode(text),
+            Self::Any(t) => t.encode(text),
+        }
+    }
+
+    /// Decode token IDs back to text.
+    pub fn decode(&self, ids: &[u32]) -> std::result::Result<String, TokenizeError> {
+        match self {
+            Self::Typed(t) => t
+                .decode(ids)
+                .map_err(|e| TokenizeError::Other(e.to_string())),
+            Self::Any(t) => t.decode(ids),
+        }
+    }
+
+    /// Number of distinct tokens in the vocabulary.
+    pub fn vocab_size(&self) -> usize {
+        match self {
+            Self::Typed(t) => t.vocab_size(),
+            Self::Any(t) => t.vocab_size(),
+        }
+    }
+}
+
+impl Tokenize for WhisperTokenizer {
+    fn encode(&self, text: &str) -> Vec<u32> {
+        WhisperTokenizer::encode(self, text)
+    }
+    fn decode(&self, ids: &[u32]) -> std::result::Result<String, TokenizeError> {
+        WhisperTokenizer::decode(self, ids)
+    }
+    fn vocab_size(&self) -> usize {
+        WhisperTokenizer::vocab_size(self)
+    }
+}
+
 /// Everything a caller needs to run Whisper transcription: the model, the
 /// tokenizer, and the variant metadata that tells callers which language tokens
 /// / control tokens to emit as the SOT prompt.
 pub struct WhisperBundle<R: Runtime> {
     pub model: WhisperModel<R>,
-    pub tokenizer: Tokenizer,
+    pub tokenizer: WhisperTokenizer,
     pub variant: WhisperVariant,
     pub config: AudioConfig,
     /// Number of mel filterbank bins (80 for tiny/base/small/medium/large, 128 for v3).
@@ -60,12 +116,23 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
         let audio_config = hf.to_audio_config();
         let num_mel_bins = hf.num_mel_bins.unwrap_or(80);
 
-        let tok_path = dir.join("tokenizer.json");
-        let tokenizer = splintr::whisper_tokenizer_from_path(&tok_path, variant).map_err(|e| {
-            Error::ModelError {
-                reason: format!("loading {}: {e}", tok_path.display()),
+        // Multilingual v1/v2/v3 load zero-config from splintr's bundled vocab as
+        // a typed tokenizer; anything else loads its own `tokenizer.json`.
+        let tokenizer = match whisper_pretrained_vocab(variant) {
+            Some(vocab) => {
+                let t = from_vocab(vocab).map_err(|e| Error::ModelError {
+                    reason: format!("loading bundled {variant:?} whisper tokenizer: {e}"),
+                })?;
+                WhisperTokenizer::Typed(t)
             }
-        })?;
+            None => {
+                let tok_path = dir.join("tokenizer.json");
+                let t = from_json_path(&tok_path).map_err(|e| Error::ModelError {
+                    reason: format!("loading {}: {e}", tok_path.display()),
+                })?;
+                WhisperTokenizer::Any(t)
+            }
+        };
 
         let weights_path = find_safetensors(dir)?;
         let mut varmap = VarMap::<R>::from_safetensors(&weights_path, device)?;
@@ -85,25 +152,24 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
     ///
     /// Layout (multilingual): `[<|sot|>, <|lang|>, <|task|>, <|notimestamps|>]`.
     /// Layout (english-only):  `[<|sot|>, <|transcribe|>, <|notimestamps|>]` —
-    /// but english-only checkpoints don't have `<|transcribe|>` in their
-    /// special table, so we fall through to just `[<|sot|>, <|notimestamps|>]`.
+    /// english-only checkpoints carry `<|translate|>`/`<|transcribe|>` in their
+    /// special table too, so the task token is always emitted; only the language
+    /// token is skipped when `language` is `None`.
     ///
     /// `language` accepts BCP-47-ish codes (`"en"`, `"zh"`, `"yue"`, ...). Pass
     /// `None` to skip the language token (english-only) or to let the decoder
     /// auto-detect via a separate preliminary decode.
     pub fn sot_prompt(&self, language: Option<&str>, translate: bool) -> Vec<u32> {
         let mut out = vec![self.variant.sot_token_id()];
-        if let Some(code) = language {
-            if let Some(id) = self.variant.language_token_id(code) {
-                out.push(id);
-            }
+        if let Some(code) = language
+            && let Some(id) = self.variant.language_token_id(code)
+        {
+            out.push(id);
         }
         if translate {
-            if let Some(id) = self.variant.translate_token_id() {
-                out.push(id);
-            }
-        } else if let Some(id) = self.variant.transcribe_token_id() {
-            out.push(id);
+            out.push(self.variant.translate_token_id());
+        } else {
+            out.push(self.variant.transcribe_token_id());
         }
         out.push(self.variant.notimestamps_token_id());
         out
@@ -172,6 +238,19 @@ impl HfWhisperConfig {
             max_target_positions: self.max_target_positions,
             intermediate_size: self.decoder_ffn_dim.or(self.encoder_ffn_dim),
         }
+    }
+}
+
+/// Map a [`WhisperVariant`] to splintr's bundled pretrained vocab, if one
+/// exists. Multilingual v1/v2/v3 are bundled; English-only (and any future
+/// variant without bundled support) returns `None` and loads from
+/// `tokenizer.json` instead.
+fn whisper_pretrained_vocab(variant: WhisperVariant) -> Option<PretrainedVocab> {
+    match variant {
+        WhisperVariant::V1Multilingual => Some(PretrainedVocab::WhisperV1),
+        WhisperVariant::V2Multilingual => Some(PretrainedVocab::WhisperV2),
+        WhisperVariant::V3Multilingual => Some(PretrainedVocab::WhisperV3),
+        WhisperVariant::EnglishOnly => None,
     }
 }
 

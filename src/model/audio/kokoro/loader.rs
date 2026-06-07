@@ -1,24 +1,19 @@
-//! Kokoro checkpoint loader.
+//! Kokoro checkpoint tensor helpers.
 //!
-//! Composes `KokoroConfig` + safetensors weights into a ready-to-run
-//! `KokoroModel`. Layered in three tiers so that if upstream tensor naming
-//! diverges from our guesses, only the top tier needs updating:
+//! Tier-1 building blocks that read individual PyTorch-named tensors (plain and
+//! weight-normed Conv1d, bidirectional LSTM, Linear, voice packs) from a
+//! [`KokoroWeightSource`]. They work from an arbitrary name prefix and match
+//! PyTorch's default `torch.save` naming, so they are independently
+//! unit-testable and composable. The full checkpoint assembly that consumes
+//! them lives in [`super::loader_v2`] ([`super::loader_v2::load_kokoro_v2`]).
 //!
-//! * **Tier 1 — Tensor helpers** (`load_plain_conv1d`, `load_weight_normed_conv1d`,
-//!   `load_linear`, `load_bilstm`). Work from an arbitrary name prefix; match
-//!   PyTorch's default `torch.save` naming. Independently unit-testable.
-//! * **Tier 2 — Submodule loaders** (`load_text_encoder`, `load_duration_predictor`,
-//!   etc.). Each takes a prefix + config and returns its module. Adjusting one
-//!   doesn't affect the others.
-//! * **Tier 3 — `load_kokoro`**. Composes tier 2 under the prefixes that
-//!   hexgrad/Kokoro-82M's upstream checkpoint uses.
+//! Mis-named tensors surface as `Error::ModelError` with the exact missing
+//! name.
 //!
-//! When the real checkpoint is inspected, mis-named tensors surface as
-//! `Error::ModelError` with the exact missing name, so fixes are O(one sed).
+//! [`KokoroWeightSource`]: super::weight_source::KokoroWeightSource
 
 use crate::error::{Error, Result};
 use crate::format::safetensors_loader::SafeTensorsLoader;
-use crate::model::config::KokoroConfig;
 use crate::nn::{BiLstm, Conv1d, Lstm, fuse_weight_norm};
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, PaddingMode, ReduceOps, TensorOps, UnaryOps};
@@ -198,54 +193,4 @@ pub fn load_voice_style<R: Runtime<DType = DType>>(
     device: &R::Device,
 ) -> Result<Tensor<R>> {
     load_voice_pack::<R>(path, device)
-}
-
-/// Top-level Kokoro loader.
-///
-/// Opens `config.json` + safetensors from `model_dir`, validates the config,
-/// then fails cleanly via `Error::NotImplemented` for the actual weight
-/// assembly. The tier-1 helpers above are fully usable today; tier-2 / tier-3
-/// assembly requires inspecting the upstream checkpoint to lock down exact
-/// tensor prefixes (hexgrad/Kokoro-82M's naming isn't part of the public
-/// spec). Inspecting is a ~15-minute job once the .safetensors file is in
-/// hand — the tier-1 helpers will cover every read.
-pub fn load_kokoro<R: Runtime<DType = DType>>(
-    model_dir: impl AsRef<Path>,
-    _device: &R::Device,
-) -> Result<crate::model::audio::kokoro::model::KokoroModel<R>> {
-    let model_dir = model_dir.as_ref();
-    let config_path = model_dir.join("config.json");
-    let config = KokoroConfig::from_json_file(&config_path)?;
-    config.validate()?;
-
-    let _st = SafeTensorsLoader::open(model_dir)?;
-
-    Err(Error::ModelError {
-        reason: format!(
-            "Kokoro tier-3 assembly needs the upstream checkpoint to fix exact tensor \
-             prefixes. Tier-1/2 helpers in this module (load_plain_conv1d, \
-             load_weight_normed_conv1d, load_bilstm, load_linear_tensors, \
-             load_voice_style) are ready to use — compose them against your own \
-             checkpoint's names. Loaded config for {} (hidden_dim={}, style_dim={}).",
-            model_dir.display(),
-            config.hidden_dim,
-            config.style_dim,
-        ),
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn load_kokoro_reports_missing_config() {
-        use numr::runtime::cpu::{CpuDevice, CpuRuntime};
-        let device = CpuDevice::new();
-        let tmp = std::env::temp_dir().join("kokoro_missing_config_test");
-        std::fs::create_dir_all(&tmp).unwrap();
-        let res = load_kokoro::<CpuRuntime>(&tmp, &device);
-        assert!(res.is_err());
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
 }

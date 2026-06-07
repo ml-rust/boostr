@@ -38,7 +38,7 @@ impl<R: Runtime> StyleProjector<R> {
         }
         let twoc = w_shape[0];
         let style_dim = w_shape[1];
-        if twoc % 2 != 0 {
+        if !twoc.is_multiple_of(2) {
             return Err(Error::InvalidArgument {
                 arg: "weight",
                 reason: format!("first dim must be even (2 * channels), got {twoc}"),

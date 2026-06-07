@@ -17,7 +17,10 @@ use std::f32::consts::PI;
 ///
 /// Panics if `n` is not a power of 2.
 pub fn fft_inplace_radix2(data: &mut [f32]) {
-    debug_assert!(data.len() % 2 == 0, "fft data must be interleaved complex");
+    debug_assert!(
+        data.len().is_multiple_of(2),
+        "fft data must be interleaved complex"
+    );
     let n = data.len() / 2;
     assert!(
         n.is_power_of_two(),

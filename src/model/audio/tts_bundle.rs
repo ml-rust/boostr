@@ -1,14 +1,12 @@
-//! Text-to-speech bundle: G2P + (future) neural acoustic model + (future)
-//! vocoder + voice catalog.
+//! Text-to-speech bundle: G2P + neural acoustic model + vocoder + voice
+//! catalog.
 //!
-//! This is the scaffolding-only version. The neural synthesis path returns
-//! [`TtsError::NotImplemented`] until the Kokoro architecture ports land —
-//! see `kokoro_tts_checklist.md`.
-//!
-//! Callers (blazr's `/v1/audio/speech` handler) can still exercise the full
-//! pipeline today: tokenizer validation, voice lookup, G2P, and WAV encoding
-//! all work, making it easy to assert the network plumbing is correct while
-//! the model code is being written in parallel.
+//! A bundle can run in two modes. Without an attached [`KokoroEngine`] it
+//! validates the surrounding pipeline — tokenizer validation, voice lookup,
+//! G2P, and WAV encoding — and returns [`TtsError::NotImplemented`] from the
+//! synthesis step, which lets callers assert their plumbing is correct without
+//! loading model weights. With an engine attached via [`TtsBundle::with_engine`],
+//! `synthesize` runs the full `text → waveform` neural path.
 
 use std::sync::Arc;
 
@@ -24,7 +22,7 @@ pub enum TtsError {
     UnknownVoice(String),
     #[error("G2P error: {0}")]
     G2p(#[from] G2pError),
-    #[error("neural synthesis path not yet implemented — see kokoro_tts_checklist.md")]
+    #[error("neural synthesis requires an engine; this bundle was created without one")]
     NotImplemented,
     #[error("load error: {0}")]
     Load(String),
@@ -72,9 +70,9 @@ impl Default for SynthesizeOptions {
 
 /// End-to-end TTS bundle.
 ///
-/// The neural fields (`weights`, acoustic model, vocoder, ...) will land in
-/// future sessions — see milestones 4–7 of the Kokoro checklist. Today only
-/// the G2P + voice catalog portions are functional.
+/// Holds the voice catalog and, optionally, a neural synthesis engine. Without
+/// an engine, only the G2P + voice-catalog portions are functional and
+/// `synthesize` returns [`TtsError::NotImplemented`].
 pub struct TtsBundle {
     voices: Vec<Voice>,
     /// Sample rate of generated waveforms (Kokoro is 24 kHz).
@@ -86,9 +84,9 @@ pub struct TtsBundle {
 }
 
 impl TtsBundle {
-    /// Create a scaffolding bundle with a fixed voice catalog. Use this while
-    /// the neural path is being developed; `synthesize` will return
-    /// [`TtsError::NotImplemented`].
+    /// Create an engine-less bundle with a fixed voice catalog. Useful for
+    /// validating the surrounding pipeline (voice lookup, G2P) without loading
+    /// model weights; `synthesize` returns [`TtsError::NotImplemented`].
     pub fn scaffolding(voices: Vec<Voice>, sample_rate: u32) -> Self {
         Self {
             voices,
@@ -123,9 +121,8 @@ impl TtsBundle {
     /// Run G2P for a text string using the language of `voice`.
     ///
     /// This is useful in two places:
-    /// 1. Today: the `/v1/audio/speech` handler calls this to validate the
-    ///    input pipeline end-to-end even though synthesis itself is stubbed.
-    /// 2. Tomorrow: the neural path will call this as its first step.
+    /// 1. As the first step of the neural synthesis path.
+    /// 2. To validate the input pipeline end-to-end when no engine is attached.
     pub fn phonemize(&self, text: &str, voice_id: &str) -> Result<Vec<String>, TtsError> {
         let voice = self
             .voice(voice_id)
@@ -163,9 +160,9 @@ impl TtsBundle {
     }
 }
 
-/// Default Kokoro voice catalog (subset — full 54-voice catalog lands with the
-/// loader in checklist milestone 7). These match the canonical Kokoro ids so
-/// configuration files written today remain valid once weights are loaded.
+/// Default Kokoro voice catalog (a representative subset). These match the
+/// canonical Kokoro voice ids so configuration files referencing them remain
+/// valid once voice packs are loaded.
 pub fn default_kokoro_voices() -> Vec<Voice> {
     vec![
         Voice::new("af_alloy", Lang::EnUs, "Alloy"),

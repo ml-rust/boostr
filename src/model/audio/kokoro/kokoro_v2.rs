@@ -1,7 +1,7 @@
-//! `KokoroModelV2` — the real top-level assembly.
+//! `KokoroModelV2` — the top-level Kokoro assembly.
 //!
-//! Supersedes the speculative `KokoroModel` in `model.rs`. Every submodule is
-//! a faithful port of the upstream `hexgrad/kokoro` architecture:
+//! Every submodule is a faithful port of the upstream `hexgrad/kokoro`
+//! architecture:
 //!
 //! ```text
 //! KokoroModelV2
@@ -202,7 +202,7 @@ impl KokoroModelV2<CpuRuntime> {
     ) -> Result<Tensor<CpuRuntime>> {
         let (mag, phase, _durations) =
             self.forward_to_spectrogram_cpu(client, token_ids, voice_row, min_frames_per_phoneme)?;
-        let window = super::model::hann_window(self.config.n_fft, voice_row.device());
+        let window = super::window::hann_window(self.config.n_fft, voice_row.device());
         let opts = IStftOptions {
             hop_length: self.config.hop_length,
             center: true,

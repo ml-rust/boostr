@@ -98,6 +98,10 @@ pub struct KokoroConfig {
     /// the embedding into a low-dim table + linear projection).
     #[serde(default = "default_bert_embedding_size")]
     pub bert_embedding_size: usize,
+    /// ALBERT feed-forward intermediate size (default 2048 — Kokoro's plBERT
+    /// backbone uses `intermediate_size = 2048`, not the usual `4 × hidden`).
+    #[serde(default = "default_bert_intermediate_size")]
+    pub bert_intermediate_size: usize,
 }
 
 fn default_n_symbols() -> usize {
@@ -163,6 +167,9 @@ fn default_bert_num_heads() -> usize {
 fn default_bert_embedding_size() -> usize {
     128
 }
+fn default_bert_intermediate_size() -> usize {
+    2048
+}
 
 impl Default for KokoroConfig {
     fn default() -> Self {
@@ -188,6 +195,7 @@ impl Default for KokoroConfig {
             bert_num_layers: default_bert_num_layers(),
             bert_num_heads: default_bert_num_heads(),
             bert_embedding_size: default_bert_embedding_size(),
+            bert_intermediate_size: default_bert_intermediate_size(),
         }
     }
 }
@@ -219,7 +227,7 @@ impl KokoroConfig {
     /// `from_json_*` so that callers can decide whether to enforce (e.g.
     /// during `load_kokoro`) or skip (e.g. during CLI `blazr list`).
     pub fn validate(&self) -> Result<()> {
-        if self.hidden_dim == 0 || self.hidden_dim % 2 != 0 {
+        if self.hidden_dim == 0 || !self.hidden_dim.is_multiple_of(2) {
             return Err(Error::ModelError {
                 reason: format!(
                     "hidden_dim must be positive and even (BiLSTM splits it), got {}",

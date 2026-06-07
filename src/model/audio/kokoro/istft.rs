@@ -136,7 +136,7 @@ pub fn istft(
                     let theta =
                         ph_k + 2.0 * std::f32::consts::PI * (k as f32) * (n as f32) / n_fft_f;
                     let term = mag_k * theta.cos();
-                    let mirror = k != 0 && !(n_fft % 2 == 0 && k == n_fft / 2);
+                    let mirror = k != 0 && !(n_fft.is_multiple_of(2) && k == n_fft / 2);
                     acc += term * if mirror { 2.0 } else { 1.0 };
                 }
                 let dst = (b_idx * t_frames + t_idx) * n_fft + n;

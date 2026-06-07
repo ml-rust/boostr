@@ -50,7 +50,7 @@ impl<R: Runtime> AdaIn1d<R> {
         eps: f32,
     ) -> Result<Self> {
         let fc_shape = fc_weight.shape();
-        if fc_shape.len() != 2 || fc_shape[0] % 2 != 0 {
+        if fc_shape.len() != 2 || !fc_shape[0].is_multiple_of(2) {
             return Err(Error::InvalidArgument {
                 arg: "fc_weight",
                 reason: format!("expected [2·C, style_dim], got {fc_shape:?}"),

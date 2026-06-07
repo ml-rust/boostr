@@ -43,7 +43,7 @@ where
         embedding_size: config.bert_embedding_size,
         num_hidden_layers: config.bert_num_layers,
         num_attention_heads: config.bert_num_heads,
-        intermediate_size: config.bert_hidden_size * 4 / 3, // placeholder; real value 2048
+        intermediate_size: config.bert_intermediate_size,
         max_position_embeddings: 512,
         vocab_size: config.n_symbols,
         type_vocab_size: 2,
@@ -447,9 +447,8 @@ where
     })
 }
 
-/// Name alias — callers importing from `kokoro::load_kokoro_v2` get the
-/// public entry point; this mirror keeps the existing tier-3 stub path
-/// (`load_kokoro` in `loader.rs`) discoverable too.
+/// Convenience alias for [`load_kokoro_v2`] — the public top-level entry point
+/// that loads a full `hexgrad/Kokoro-82M` checkpoint into a [`KokoroModelV2`].
 pub fn load_kokoro_full<R, C>(
     client: &C,
     model_dir: impl AsRef<Path>,

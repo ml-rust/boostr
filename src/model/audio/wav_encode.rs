@@ -18,7 +18,7 @@ pub fn encode_wav_pcm16(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 pub fn encode_wav_pcm16_multichannel(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
     assert!(channels >= 1, "channels must be >= 1");
     assert!(
-        samples.len() % channels as usize == 0,
+        samples.len().is_multiple_of(channels as usize),
         "sample count not divisible by channel count"
     );
 

@@ -1,6 +1,6 @@
 [package]
 name = "boostr"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "ML framework built on numr - attention, quantization, model architectures"
@@ -31,14 +31,14 @@ cudarc = { version = "0.19", optional = true, features = [
 
 # Optional: WebGPU backend
 wgpu = { version = "29.0", optional = true }
-bytemuck = { version = "1.24", features = ["derive"], optional = true }
+bytemuck = { version = "1.25", features = ["derive"], optional = true }
 
 # Optional: Distributed inference (nexar transport)
 nexar = { version = "0.1", optional = true }
 anyhow = { version = "1", optional = true }
 tracing = "0.1"
 
-rayon = "1.11"
+rayon = "1.12"
 image = { version = "0.25", default-features = false, features = [
   "png",
   "jpeg",
@@ -51,7 +51,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 espeakng = { version = "0.2", optional = true }
 
 [dev-dependencies]
-bytemuck = { version = "1.24", features = ["derive"] }
+bytemuck = { version = "1.25", features = ["derive"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 rustls = "0.23"

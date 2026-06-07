@@ -32,6 +32,15 @@
 
 use nexar::Rank;
 
+/// Copy a fixed `N`-byte little-endian field out of a 16-byte wire buffer.
+///
+/// Infallible: the buffer is a fixed `[u8; 16]` and every call site uses a
+/// statically-valid `(offset, N)`, so no bounds error is possible.
+#[inline]
+fn le_field<const N: usize>(buf: &[u8; 16], offset: usize) -> [u8; N] {
+    core::array::from_fn(|i| buf[offset + i])
+}
+
 /// Prefill function signature: `(token_ids_bytes, seq_len) -> (activation_bytes, kv_cache_bytes)`
 pub type PrefillFn = Box<dyn Fn(&[u8], usize) -> (Vec<u8>, Vec<u8>) + Send + Sync>;
 
@@ -102,9 +111,9 @@ impl PrefillRequest {
 
     pub fn from_bytes(buf: &[u8; 16]) -> Self {
         Self {
-            request_id: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
-            seq_len: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
-            decode_rank: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
+            request_id: u64::from_le_bytes(le_field(buf, 0)),
+            seq_len: u32::from_le_bytes(le_field(buf, 8)),
+            decode_rank: u32::from_le_bytes(le_field(buf, 12)),
         }
     }
 }
@@ -130,8 +139,8 @@ impl PrefillDone {
 
     pub fn from_bytes(buf: &[u8; 16]) -> Self {
         Self {
-            request_id: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
-            kv_bytes: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
+            request_id: u64::from_le_bytes(le_field(buf, 0)),
+            kv_bytes: u64::from_le_bytes(le_field(buf, 8)),
         }
     }
 }
@@ -157,8 +166,8 @@ impl DecodeRequest {
 
     pub fn from_bytes(buf: &[u8; 16]) -> Self {
         Self {
-            request_id: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
-            max_new_tokens: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
+            request_id: u64::from_le_bytes(le_field(buf, 0)),
+            max_new_tokens: u32::from_le_bytes(le_field(buf, 8)),
         }
     }
 }
@@ -182,8 +191,8 @@ impl DecodedToken {
 
     pub fn from_bytes(buf: &[u8; 16]) -> Self {
         Self {
-            request_id: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
-            token_id: i64::from_le_bytes(buf[8..16].try_into().unwrap()),
+            request_id: u64::from_le_bytes(le_field(buf, 0)),
+            token_id: i64::from_le_bytes(le_field(buf, 8)),
         }
     }
 

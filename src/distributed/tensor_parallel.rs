@@ -56,7 +56,7 @@ impl<R: Runtime<DType = DType>> ColumnParallelLinear<R> {
         }
 
         let out_features = shape[0];
-        if out_features % world_size != 0 {
+        if !out_features.is_multiple_of(world_size) {
             return Err(Error::DistributedError {
                 reason: format!(
                     "out_features ({}) not divisible by world_size ({})",
@@ -170,7 +170,7 @@ impl<R: Runtime<DType = DType>> RowParallelLinear<R> {
         }
 
         let in_features = shape[1];
-        if in_features % world_size != 0 {
+        if !in_features.is_multiple_of(world_size) {
             return Err(Error::DistributedError {
                 reason: format!(
                     "in_features ({}) not divisible by world_size ({})",
@@ -275,7 +275,7 @@ pub fn scatter_to_rank<R: Runtime>(
     }
 
     let dim_size = tensor.shape()[dim_idx];
-    if dim_size % world_size != 0 {
+    if !dim_size.is_multiple_of(world_size) {
         return Err(Error::DistributedError {
             reason: format!(
                 "dim {} size ({}) not divisible by world_size ({})",

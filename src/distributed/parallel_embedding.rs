@@ -50,7 +50,7 @@ impl<R: Runtime<DType = DType>> VocabParallelEmbedding<R> {
         let rank = comm.rank();
         let world_size = comm.world_size();
 
-        if vocab_size % world_size != 0 {
+        if !vocab_size.is_multiple_of(world_size) {
             return Err(Error::DistributedError {
                 reason: format!(
                     "vocab_size ({}) not divisible by world_size ({})",

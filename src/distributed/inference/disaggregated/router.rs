@@ -3,7 +3,7 @@
 //! Assigns requests to prefill workers (least-loaded) and routes completed
 //! prefills to decode workers (cache-aware affinity or round-robin fallback).
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use nexar::{NexarClient, Rank};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -74,17 +74,17 @@ impl DisaggRouter {
     /// Assign a prefill request to the least-loaded prefill worker.
     ///
     /// Returns the rank chosen and the request ID that was allocated.
-    fn choose_prefill_worker(&self) -> (Rank, u64) {
+    fn choose_prefill_worker(&self) -> Result<(Rank, u64)> {
         let load = self
             .prefill_loads
             .iter()
             .min_by_key(|pl| pl.in_flight.load(Ordering::Relaxed))
-            .expect("at least one prefill worker must be configured");
+            .ok_or_else(|| anyhow!("no prefill workers configured"))?;
 
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         load.in_flight.fetch_add(1, Ordering::Relaxed);
 
-        (load.rank, request_id)
+        Ok((load.rank, request_id))
     }
 
     /// Decrement the in-flight counter for the given prefill worker rank.
@@ -100,7 +100,7 @@ impl DisaggRouter {
     /// decode worker is returned.  Otherwise the router picks via round-robin.
     fn choose_decode_worker(&self, session_key: Option<&str>) -> Rank {
         if let Some(key) = session_key {
-            let affinity = self.kv_affinity.lock().expect("kv_affinity mutex poisoned");
+            let affinity = self.kv_affinity.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(&rank) = affinity.get(key) {
                 return rank;
             }
@@ -154,7 +154,7 @@ impl DisaggRouter {
         }
 
         let decode_rank = self.choose_decode_worker(session_key);
-        let (prefill_rank, request_id) = self.choose_prefill_worker();
+        let (prefill_rank, request_id) = self.choose_prefill_worker()?;
 
         tracing::debug!(
             request_id,

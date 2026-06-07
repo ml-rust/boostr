@@ -195,16 +195,16 @@ impl<R: Runtime<DType = DType>> GradientBucketManager<R> {
 
         // Validate dtype consistency
         for &pid in &bucket.param_ids {
-            if let Some(g) = bucket.received_grads.get(&pid) {
-                if g.dtype() != bucket.dtype {
-                    return Err(Error::DistributedError {
-                        reason: format!(
-                            "dtype mismatch in bucket {bucket_idx}: expected {:?}, got {:?}",
-                            bucket.dtype,
-                            g.dtype()
-                        ),
-                    });
-                }
+            if let Some(g) = bucket.received_grads.get(&pid)
+                && g.dtype() != bucket.dtype
+            {
+                return Err(Error::DistributedError {
+                    reason: format!(
+                        "dtype mismatch in bucket {bucket_idx}: expected {:?}, got {:?}",
+                        bucket.dtype,
+                        g.dtype()
+                    ),
+                });
             }
         }
 
@@ -384,10 +384,10 @@ impl<R: Runtime<DType = DType>> GradientBucketManager<R> {
             bucket.flat_buffer = None;
             bucket.param_shapes.clear();
             // Clean up any leaked completion events
-            if let Some(event) = bucket.completion_event.take() {
-                if let Some(s) = sync {
-                    let _ = s.destroy_event(event);
-                }
+            if let Some(event) = bucket.completion_event.take()
+                && let Some(s) = sync
+            {
+                let _ = s.destroy_event(event);
             }
         }
     }

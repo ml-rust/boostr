@@ -68,12 +68,22 @@ where
         }
 
         match layer.get_kv() {
-            Ok((k, v)) => {
-                let k_data: Vec<f32> = k.contiguous().to_vec::<f32>();
-                let v_data: Vec<f32> = v.contiguous().to_vec::<f32>();
-                buf.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&k_data));
-                buf.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&v_data));
-            }
+            Ok((k, v)) => match (k.contiguous(), v.contiguous()) {
+                (Ok(k_c), Ok(v_c)) => {
+                    let k_data: Vec<f32> = k_c.to_vec::<f32>();
+                    let v_data: Vec<f32> = v_c.to_vec::<f32>();
+                    buf.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&k_data));
+                    buf.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&v_data));
+                }
+                _ => {
+                    let numel = batch_size as usize
+                        * num_kv_heads as usize
+                        * seq_len as usize
+                        * head_dim as usize;
+                    let zeros = vec![0u8; numel * 4 * 2];
+                    buf.extend_from_slice(&zeros);
+                }
+            },
             Err(_) => {
                 let numel = batch_size as usize
                     * num_kv_heads as usize
@@ -86,6 +96,15 @@ where
     }
 
     buf
+}
+
+/// Read a little-endian `u32` at `offset`, returning an error instead of
+/// panicking if the buffer is too short.
+fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32> {
+    let slice = bytes
+        .get(offset..offset + 4)
+        .ok_or_else(|| anyhow!("KV cache buffer truncated reading u32 at offset {offset}"))?;
+    Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
 /// Deserialize bytes (produced by [`serialize_kv_cache`]) into a fresh
@@ -102,8 +121,8 @@ where
         ));
     }
 
-    let num_layers = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let seq_len = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let num_layers = read_u32_le(bytes, 0)? as usize;
+    let seq_len = read_u32_le(bytes, 4)? as usize;
 
     let mut cursor = 8usize;
 
@@ -116,10 +135,9 @@ where
         return Err(anyhow!("KV cache buffer truncated in layer 0 header"));
     }
 
-    let batch_size = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
-    let num_kv_heads =
-        u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
-    let head_dim = u32::from_le_bytes(bytes[cursor + 8..cursor + 12].try_into().unwrap()) as usize;
+    let batch_size = read_u32_le(bytes, cursor)? as usize;
+    let num_kv_heads = read_u32_le(bytes, cursor + 4)? as usize;
+    let head_dim = read_u32_le(bytes, cursor + 8)? as usize;
 
     let initial_capacity = seq_len.max(1);
     let max_seq_len = (seq_len * 2).max(32768);
@@ -144,12 +162,9 @@ where
             ));
         }
 
-        let layer_batch =
-            u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
-        let layer_heads =
-            u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
-        let layer_dim =
-            u32::from_le_bytes(bytes[cursor + 8..cursor + 12].try_into().unwrap()) as usize;
+        let layer_batch = read_u32_le(bytes, cursor)? as usize;
+        let layer_heads = read_u32_le(bytes, cursor + 4)? as usize;
+        let layer_dim = read_u32_le(bytes, cursor + 8)? as usize;
         cursor += 12;
 
         if seq_len == 0 {
@@ -253,8 +268,8 @@ mod tests {
         assert_eq!(restored.seq_len(), 3);
 
         let (rk, rv) = restored.layer(0).unwrap().get_kv().unwrap();
-        let rk_data: Vec<f32> = rk.contiguous().to_vec::<f32>();
-        let rv_data: Vec<f32> = rv.contiguous().to_vec::<f32>();
+        let rk_data: Vec<f32> = rk.contiguous().unwrap().to_vec::<f32>();
+        let rv_data: Vec<f32> = rv.contiguous().unwrap().to_vec::<f32>();
 
         for (orig, got) in k_data.iter().zip(rk_data.iter()) {
             assert!((orig - got).abs() < 1e-6, "K mismatch: {} vs {}", orig, got);

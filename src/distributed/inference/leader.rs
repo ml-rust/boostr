@@ -129,12 +129,9 @@ impl SwarmLeader {
         max_tokens: u32,
     ) -> Result<Vec<f32>> {
         let stages = self.schedule.stages();
-        if stages.is_empty() {
+        let (Some(first_stage), Some(last_stage)) = (stages.first(), stages.last()) else {
             return Err(anyhow!("No pipeline stages configured"));
-        }
-
-        let first_stage = &stages[0];
-        let last_stage = stages.last().unwrap();
+        };
 
         let first_rank = self.rank_for_node(&first_stage.node_id);
         let last_rank = self.rank_for_node(&last_stage.node_id);
@@ -146,28 +143,26 @@ impl SwarmLeader {
         };
         let header_bytes = header.to_bytes();
 
-        if let Some(first) = first_rank {
-            if first != self.client.rank() {
-                transport::send_bytes(&self.client, &header_bytes, first, tags::GEN_REQUEST)
-                    .await?;
-                let input_bytes = bytemuck::cast_slice::<f32, u8>(input_data);
-                transport::send_bytes(&self.client, input_bytes, first, tags::ACTIVATION).await?;
-            }
+        if let Some(first) = first_rank
+            && first != self.client.rank()
+        {
+            transport::send_bytes(&self.client, &header_bytes, first, tags::GEN_REQUEST).await?;
+            let input_bytes = bytemuck::cast_slice::<f32, u8>(input_data);
+            transport::send_bytes(&self.client, input_bytes, first, tags::ACTIVATION).await?;
         }
 
         // Wait for logits from last stage
-        if let Some(last) = last_rank {
-            if last != self.client.rank() {
-                // Logits size = batch_size * vocab_size. The input_data length
-                // encodes batch_size * hidden_size, so we derive batch_size and
-                // compute the correct logits buffer size.
-                let batch_size = (seq_len as usize).max(1);
-                let logits_size = batch_size * self.vocab_size;
-                let mut logits_buf = vec![0f32; logits_size];
-                transport::recv_tensor_f32(&self.client, &mut logits_buf, last, tags::LOGITS)
-                    .await?;
-                return Ok(logits_buf);
-            }
+        if let Some(last) = last_rank
+            && last != self.client.rank()
+        {
+            // Logits size = batch_size * vocab_size. The input_data length
+            // encodes batch_size * hidden_size, so we derive batch_size and
+            // compute the correct logits buffer size.
+            let batch_size = (seq_len as usize).max(1);
+            let logits_size = batch_size * self.vocab_size;
+            let mut logits_buf = vec![0f32; logits_size];
+            transport::recv_tensor_f32(&self.client, &mut logits_buf, last, tags::LOGITS).await?;
+            return Ok(logits_buf);
         }
 
         // If leader is both first and last, execute locally

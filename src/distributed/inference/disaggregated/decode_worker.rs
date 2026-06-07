@@ -149,8 +149,8 @@ impl DecodeWorker {
 
             // Extract the starting position from the KV cache header (first 4
             // bytes, convention agreed between prefill_fn and decode_step_fn).
-            if kv_cache.len() >= 4 {
-                position = u32::from_le_bytes(kv_cache[0..4].try_into().unwrap());
+            if let Some(header) = kv_cache.get(0..4).and_then(|b| <[u8; 4]>::try_from(b).ok()) {
+                position = u32::from_le_bytes(header);
             }
 
             loop {

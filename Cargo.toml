@@ -2,7 +2,7 @@
 name = "boostr"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "ML framework built on numr - attention, quantization, model architectures"
 license = "Apache-2.0"
 repository = "https://github.com/ml-rust/boostr"
@@ -17,12 +17,12 @@ keywords = [
 categories = ["science", "mathematics"]
 
 [dependencies]
-numr = "0.5"
+numr = "0.6"
 half = { version = "2", features = ["bytemuck"] }
 thiserror = "2.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde-saphyr = "0.0"
 
 # Optional: CUDA backend
 cudarc = { version = "0.19", optional = true, features = [
@@ -30,7 +30,7 @@ cudarc = { version = "0.19", optional = true, features = [
 ] }
 
 # Optional: WebGPU backend
-wgpu = { version = "28.0", optional = true }
+wgpu = { version = "29.0", optional = true }
 bytemuck = { version = "1.24", features = ["derive"], optional = true }
 
 # Optional: Distributed inference (nexar transport)
@@ -44,8 +44,8 @@ image = { version = "0.25", default-features = false, features = [
   "jpeg",
 ] }
 memmap2 = "0.9"
-splintr = { version = "0.9" }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+splintr = { version = "0.10" }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # Optional: TTS grapheme-to-phoneme via espeak-ng (system dep: espeak-ng-dev)
 espeakng = { version = "0.2", optional = true }

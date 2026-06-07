@@ -171,7 +171,7 @@ where
             reason: format!("K mismatch: weight K={}, h_inv K={}", k, h_shape[0]),
         });
     }
-    if group_size == 0 || k % group_size as usize != 0 {
+    if group_size == 0 || !k.is_multiple_of(group_size as usize) {
         return Err(Error::InvalidArgument {
             arg: "group_size",
             reason: format!("K={} must be divisible by group_size={}", k, group_size),

@@ -175,11 +175,19 @@ impl SamplingOps<CudaRuntime> for CudaClient {
                 .map_err(Error::Numr)?
         };
 
-        // Determine dtype code: 0 = F32, 1 = F16, 2 = BF16
+        // Determine dtype code: 0 = F32, 1 = F16, 2 = BF16.
         let dtype_code: i32 = match logits.dtype() {
+            numr::dtype::DType::F32 => 0,
             numr::dtype::DType::F16 => 1,
             numr::dtype::DType::BF16 => 2,
-            _ => 0, // F32 or fallback
+            other => {
+                return Err(Error::InvalidArgument {
+                    arg: "logits",
+                    reason: format!(
+                        "logits_to_token: unsupported dtype {other:?}, expected F32/F16/BF16"
+                    ),
+                });
+            }
         };
 
         let block_size = 1024u32;

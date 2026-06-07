@@ -45,7 +45,7 @@ impl MmapDataset {
         let metadata = file.metadata()?;
         let file_len = metadata.len() as usize;
 
-        if file_len % 4 != 0 {
+        if !file_len.is_multiple_of(4) {
             return Err(Error::DataError {
                 reason: format!(
                     "file size {} is not a multiple of 4 (expected u32 tokens)",

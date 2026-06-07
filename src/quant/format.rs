@@ -141,7 +141,7 @@ impl QuantFormat {
     /// Uses `Result` (not panic) because `numel` may come from untrusted GGUF metadata.
     pub fn storage_bytes(self, numel: usize) -> Result<usize> {
         let bs = self.block_size();
-        if numel % bs != 0 {
+        if !numel.is_multiple_of(bs) {
             return Err(Error::QuantError {
                 reason: format!(
                     "{}: element count {} is not a multiple of block_size {}",
@@ -157,7 +157,7 @@ impl QuantFormat {
     /// Number of blocks for `numel` logical elements.
     pub fn num_blocks(self, numel: usize) -> Result<usize> {
         let bs = self.block_size();
-        if numel % bs != 0 {
+        if !numel.is_multiple_of(bs) {
             return Err(Error::QuantError {
                 reason: format!(
                     "{}: element count {} is not a multiple of block_size {}",

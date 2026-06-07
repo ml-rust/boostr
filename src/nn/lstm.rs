@@ -42,7 +42,7 @@ impl<R: Runtime> Lstm<R> {
         bias_hh: Tensor<R>,
     ) -> Result<Self> {
         let ih_shape = weight_ih.shape();
-        if ih_shape.len() != 2 || ih_shape[0] % 4 != 0 {
+        if ih_shape.len() != 2 || !ih_shape[0].is_multiple_of(4) {
             return Err(Error::InvalidArgument {
                 arg: "weight_ih",
                 reason: format!("expected [4*hidden, input], got {ih_shape:?}"),

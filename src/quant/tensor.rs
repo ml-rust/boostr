@@ -54,7 +54,7 @@ impl<R: Runtime<DType = numr::dtype::DType>> QuantTensor<R> {
         }
 
         let last_dim = shape[shape.len() - 1];
-        if last_dim % format.block_size() != 0 {
+        if !last_dim.is_multiple_of(format.block_size()) {
             return Err(Error::QuantError {
                 reason: format!(
                     "last dimension {} is not a multiple of {}'s block_size {}",

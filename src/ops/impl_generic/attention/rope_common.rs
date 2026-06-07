@@ -34,7 +34,7 @@ where
     }
 
     let d = shape[3];
-    if d % 2 != 0 {
+    if !d.is_multiple_of(2) {
         return Err(Error::InvalidArgument {
             arg: "x",
             reason: format!("head dim D={} must be even for RoPE", d),

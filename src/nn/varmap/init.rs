@@ -18,7 +18,7 @@ pub enum Init {
     Uniform(f32),
     /// Kaiming uniform (PyTorch Linear default): U(-1/sqrt(in), 1/sqrt(in))
     PyTorchLinear,
-    /// PyTorch Embedding default: N(0, 1) approximated as U(-1, 1)
+    /// PyTorch Embedding default: N(0, 1)
     PyTorchEmbedding,
     /// Kaiming (He) normal: N(0, sqrt(2 / fan_in))
     ///
@@ -90,10 +90,8 @@ impl Init {
                 client.add_scalar(&scaled, -bound).map_err(Error::Numr)
             }
             Init::PyTorchEmbedding => {
-                // N(0, 1) approximated as U(-1, 1)
-                let r = client.rand(shape, dtype).map_err(Error::Numr)?;
-                let scaled = client.mul_scalar(&r, 2.0).map_err(Error::Numr)?;
-                client.add_scalar(&scaled, -1.0).map_err(Error::Numr)
+                // PyTorch `nn.Embedding` default initializes weights with N(0, 1).
+                client.randn(shape, dtype).map_err(Error::Numr)
             }
             Init::Kaiming => {
                 // Kaiming/He normal: N(0, sqrt(2 / fan_in))

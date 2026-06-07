@@ -116,7 +116,7 @@ pub fn quant_matmul_f32(
     // Q8_K integer dot product path — quantize activations to Q8_K then integer arithmetic.
     // Matches llama.cpp's approach for K-quant formats.
     // NOTE: Q8_0 intentionally NOT routed here (per-32 scales vs Q8_K's per-256 scales).
-    let use_q8k = use_fused && k % 256 == 0;
+    let use_q8k = use_fused && k.is_multiple_of(256);
 
     // Pre-quantize activation rows to Q8_K (one per M row) if using integer path
     let q8k_block_bytes = super::simd::quantize_act_q8k::Q8K_BLOCK_BYTES;
@@ -261,7 +261,7 @@ pub fn quant_matmul_batch_f32(
             | QuantFormat::Q5K
             | QuantFormat::Q6K
     );
-    let use_q8k = use_fused && k % 256 == 0;
+    let use_q8k = use_fused && k.is_multiple_of(256);
 
     // Pre-quantize activation rows to Q8_K if using integer path
     let q8k_block_bytes = super::simd::quantize_act_q8k::Q8K_BLOCK_BYTES;

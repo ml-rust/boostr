@@ -50,7 +50,7 @@ where
     let num_heads = x_shape[1];
     let head_dim = x_shape[2];
 
-    if head_dim % 2 != 0 {
+    if !head_dim.is_multiple_of(2) {
         return Err(Error::InvalidArgument {
             arg: "x",
             reason: format!("head_dim D={} must be even for RoPE", head_dim),

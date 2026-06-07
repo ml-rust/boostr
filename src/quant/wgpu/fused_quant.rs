@@ -46,7 +46,7 @@ impl FusedQuantOps<WgpuRuntime> for WgpuClient {
         let m: usize = in_shape.iter().product::<usize>() / k;
         let n = gate_qweight.shape()[1] * 8;
 
-        let act_contig = input.contiguous();
+        let act_contig = input.contiguous()?;
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n);
@@ -161,7 +161,7 @@ impl FusedQuantOps<WgpuRuntime> for WgpuClient {
         let nq = qweight_q.shape()[1] * 8;
         let nkv = qweight_k.shape()[1] * 8;
 
-        let act_contig = input.contiguous();
+        let act_contig = input.contiguous()?;
 
         let batch_dims = &in_shape[..in_shape.len() - 1];
         let mut q_shape = batch_dims.to_vec();

@@ -39,7 +39,7 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
         let k = in_shape[in_shape.len() - 1];
         let m: usize = in_shape.iter().product::<usize>() / k;
         let n = qweight.shape()[1] * 8;
-        let act_contig = input.contiguous();
+        let act_contig = input.contiguous()?;
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n);
@@ -76,7 +76,7 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
         let k = in_shape[in_shape.len() - 1];
         let m: usize = in_shape.iter().product::<usize>() / k;
         let n = qweight.shape()[1];
-        let act_contig = input.contiguous();
+        let act_contig = input.contiguous()?;
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n);
@@ -113,7 +113,7 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
         let k = in_shape[in_shape.len() - 1];
         let m: usize = in_shape.iter().product::<usize>() / k;
         let n = weight.shape()[1];
-        let act_contig = input.contiguous();
+        let act_contig = input.contiguous()?;
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n);
@@ -204,7 +204,7 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
         let m = total_elements / k;
 
         // Ensure activation is contiguous
-        let act_contig = activation.contiguous();
+        let act_contig = activation.contiguous()?;
 
         // Get buffers
         let act_buf = get_buffer(act_contig.storage().ptr()).ok_or_else(|| Error::QuantError {

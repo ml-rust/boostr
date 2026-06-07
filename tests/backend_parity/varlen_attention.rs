@@ -231,13 +231,37 @@ fn test_varlen_attention_bwd_parity() {
         );
         let csq = Tensor::from_slice(&cu_data, &[batch_size + 1], &wgpu_device);
         let csk = Tensor::from_slice(&cu_data, &[batch_size + 1], &wgpu_device);
-        let (_, _) = wgpu_client
+        let (out_w, lse_w) = wgpu_client
             .varlen_attention_fwd(
                 &q_w, &k_w, &v_w, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
                 max_seqlen, head_dim, false,
             )
             .unwrap();
-        // BWD not yet implemented on WebGPU — skip gracefully
-        eprintln!("varlen_attention_bwd not implemented on WebGPU, skipping");
+        let dout_w = Tensor::from_slice(
+            &dout.to_vec::<f32>(),
+            &[total_tokens, num_heads, head_dim],
+            &wgpu_device,
+        );
+        let (dq, dk, dv) = wgpu_client
+            .varlen_attention_bwd(
+                &dout_w, &q_w, &k_w, &v_w, &out_w, &lse_w, &csq, &csk, batch_size, num_heads,
+                num_heads, max_seqlen, max_seqlen, head_dim, false,
+            )
+            .unwrap();
+        assert_parity_f32_relaxed(
+            &dq.to_vec::<f32>(),
+            &_cpu_dq_vec,
+            "varlen_bwd dQ WGPU vs CPU",
+        );
+        assert_parity_f32_relaxed(
+            &dk.to_vec::<f32>(),
+            &_cpu_dk_vec,
+            "varlen_bwd dK WGPU vs CPU",
+        );
+        assert_parity_f32_relaxed(
+            &dv.to_vec::<f32>(),
+            &_cpu_dv_vec,
+            "varlen_bwd dV WGPU vs CPU",
+        );
     });
 }

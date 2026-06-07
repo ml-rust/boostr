@@ -4,6 +4,7 @@
 //! F32 only (WebGPU limitation).
 
 use crate::error::{Error, Result};
+use crate::ops::impl_generic::attention::{PagedAttnConfig, PagedKv, paged_attention_bwd_impl};
 use crate::ops::traits::PagedAttentionOps;
 use numr::dtype::DType;
 use numr::runtime::wgpu::{WgpuClient, WgpuRuntime, get_buffer};
@@ -185,28 +186,52 @@ impl PagedAttentionOps<WgpuRuntime> for WgpuClient {
 
     fn paged_attention_bwd(
         &self,
-        _dout: &Tensor<WgpuRuntime>,
-        _q: &Tensor<WgpuRuntime>,
-        _k_blocks: &Tensor<WgpuRuntime>,
-        _v_blocks: &Tensor<WgpuRuntime>,
-        _output: &Tensor<WgpuRuntime>,
+        dout: &Tensor<WgpuRuntime>,
+        q: &Tensor<WgpuRuntime>,
+        k_blocks: &Tensor<WgpuRuntime>,
+        v_blocks: &Tensor<WgpuRuntime>,
+        output: &Tensor<WgpuRuntime>,
         _lse: &Tensor<WgpuRuntime>,
-        _block_table: &Tensor<WgpuRuntime>,
-        _num_heads: usize,
-        _num_kv_heads: usize,
+        block_table: &Tensor<WgpuRuntime>,
+        num_heads: usize,
+        num_kv_heads: usize,
         _seq_len_q: usize,
-        _seq_len_k: usize,
-        _head_dim: usize,
-        _block_size: usize,
-        _causal: bool,
+        seq_len_k: usize,
+        head_dim: usize,
+        block_size: usize,
+        causal: bool,
     ) -> Result<(
         Tensor<WgpuRuntime>,
         Tensor<WgpuRuntime>,
         Tensor<WgpuRuntime>,
     )> {
-        Err(Error::InvalidArgument {
-            arg: "op",
-            reason: "paged_attention_bwd not yet implemented on WebGPU".into(),
-        })
+        validate_f32(dout, "paged_attention_bwd")?;
+        validate_f32(q, "paged_attention_bwd")?;
+        validate_f32(k_blocks, "paged_attention_bwd")?;
+        validate_f32(v_blocks, "paged_attention_bwd")?;
+        // Gather paged KV → dense, run the shared standard-attention backward,
+        // scatter KV grads back into the block pool. Gather/scatter run on-device
+        // (numr index_select / scatter_reduce); only the block table is read host
+        // side. Identical algorithm to the CPU path.
+        let kv = PagedKv {
+            k_blocks,
+            v_blocks,
+            block_table,
+        };
+        paged_attention_bwd_impl(
+            self,
+            dout,
+            q,
+            &kv,
+            output,
+            PagedAttnConfig {
+                num_heads,
+                num_kv_heads,
+                seq_len_k,
+                head_dim,
+                block_size,
+                causal,
+            },
+        )
     }
 }

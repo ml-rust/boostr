@@ -4,9 +4,10 @@
 //! FlashAttentionOps uses standard O(N²) attention via numr Tensor ops
 //! (no fused kernel — CPU fallback).
 
-use super::flash_helpers::{standard_attention_bwd, standard_attention_fwd};
 use crate::error::{Error, Result};
-use crate::ops::impl_generic::attention::multi_head_attention_impl;
+use crate::ops::impl_generic::attention::{
+    StandardAttnConfig, multi_head_attention_impl, standard_attention_bwd, standard_attention_fwd,
+};
 use crate::ops::traits::{AttentionOps, FlashAttentionOps};
 use numr::autograd::Var;
 use numr::dtype::DType;
@@ -79,7 +80,13 @@ impl FlashAttentionOps<CpuRuntime> for CpuClient {
         }
 
         let _ = head_dim; // validated by shape
-        standard_attention_fwd(self, q, k, v, causal, num_heads, num_kv_heads, window_size)
+        let cfg = StandardAttnConfig {
+            num_heads,
+            num_kv_heads,
+            causal,
+            window_size,
+        };
+        standard_attention_fwd(self, q, k, v, cfg)
     }
 
     fn flash_attention_fwd_fp8(
@@ -109,26 +116,20 @@ impl FlashAttentionOps<CpuRuntime> for CpuClient {
         k: &Tensor<CpuRuntime>,
         v: &Tensor<CpuRuntime>,
         output: &Tensor<CpuRuntime>,
-        lse: &Tensor<CpuRuntime>,
+        _lse: &Tensor<CpuRuntime>,
         num_heads: usize,
         num_kv_heads: usize,
         _head_dim: usize,
         causal: bool,
         window_size: usize,
     ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
-        standard_attention_bwd(
-            self,
-            dout,
-            q,
-            k,
-            v,
-            output,
-            lse,
-            causal,
+        let cfg = StandardAttnConfig {
             num_heads,
             num_kv_heads,
+            causal,
             window_size,
-        )
+        };
+        standard_attention_bwd(self, dout, q, k, v, output, cfg)
     }
 
     fn flash_attention_bwd_fp8(

@@ -91,8 +91,8 @@ impl SsmKernelOps<WgpuRuntime> for WgpuClient {
         }
 
         // Ensure contiguous
-        let states_c = states.contiguous();
-        let da_c = dA_cumsum.contiguous();
+        let states_c = states.contiguous()?;
+        let da_c = dA_cumsum.contiguous()?;
 
         // Allocate output
         let states_out = Tensor::<WgpuRuntime>::empty(s_shape, DType::F32, states.device());

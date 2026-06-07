@@ -58,7 +58,7 @@ impl DequantOps<WgpuRuntime> for WgpuClient {
         }
         let in_shape = input.shape();
         let m: usize = in_shape.iter().product::<usize>() / k;
-        let act_contig = input.contiguous();
+        let act_contig = input.contiguous()?;
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n_out);

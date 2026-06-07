@@ -4,11 +4,54 @@
 //! F32 only (WebGPU limitation).
 
 use crate::error::{Error, Result};
+use crate::ops::impl_generic::attention::{StandardAttnConfig, standard_attention_bwd};
 use crate::ops::traits::VarLenAttentionOps;
 use numr::dtype::DType;
+use numr::ops::ShapeOps;
 use numr::runtime::wgpu::{WgpuClient, WgpuRuntime, get_buffer};
 use numr::tensor::Tensor;
 use wgpu::BufferUsages;
+
+/// Pack a packed-sequence slice `[s, H, D]` into the dense attention layout
+/// `[1, H, s, D]`.
+fn pack_seq(
+    slice: &Tensor<WgpuRuntime>,
+    heads: usize,
+    s: usize,
+    d: usize,
+) -> Result<Tensor<WgpuRuntime>> {
+    let hsd = slice.transpose(0, 1).map_err(Error::Numr)?.contiguous()?;
+    hsd.reshape(&[1, heads, s, d]).map_err(Error::Numr)
+}
+
+/// Unpack a dense gradient `[1, H, s, D]` back to packed layout `[s, H, D]`.
+fn unpack_seq(
+    dense: &Tensor<WgpuRuntime>,
+    heads: usize,
+    s: usize,
+    d: usize,
+) -> Result<Tensor<WgpuRuntime>> {
+    let hsd = dense.reshape(&[heads, s, d]).map_err(Error::Numr)?;
+    hsd.transpose(0, 1)
+        .map_err(Error::Numr)?
+        .contiguous()
+        .map_err(Error::Numr)
+}
+
+/// Concatenate per-sequence gradient pieces along the token axis, or return a
+/// zero tensor of `full_shape` when there are no pieces (all sequences empty).
+fn cat_token_parts(
+    client: &WgpuClient,
+    parts: &[Tensor<WgpuRuntime>],
+    full_shape: &[usize],
+    device: &<WgpuRuntime as numr::runtime::Runtime>::Device,
+) -> Result<Tensor<WgpuRuntime>> {
+    if parts.is_empty() {
+        return Ok(Tensor::<WgpuRuntime>::zeros(full_shape, DType::F32, device));
+    }
+    let refs: Vec<&Tensor<WgpuRuntime>> = parts.iter().collect();
+    client.cat(&refs, 0).map_err(Error::Numr)
+}
 
 const VARLEN_SHADER_SOURCE: &str = include_str!("../shaders/attention/varlen_attention.wgsl");
 
@@ -172,29 +215,77 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
 
     fn varlen_attention_bwd(
         &self,
-        _dout: &Tensor<WgpuRuntime>,
-        _q: &Tensor<WgpuRuntime>,
-        _k: &Tensor<WgpuRuntime>,
-        _v: &Tensor<WgpuRuntime>,
-        _output: &Tensor<WgpuRuntime>,
+        dout: &Tensor<WgpuRuntime>,
+        q: &Tensor<WgpuRuntime>,
+        k: &Tensor<WgpuRuntime>,
+        v: &Tensor<WgpuRuntime>,
+        output: &Tensor<WgpuRuntime>,
         _lse: &Tensor<WgpuRuntime>,
-        _cu_seqlens_q: &Tensor<WgpuRuntime>,
-        _cu_seqlens_k: &Tensor<WgpuRuntime>,
-        _batch_size: usize,
-        _num_heads: usize,
-        _num_kv_heads: usize,
+        cu_seqlens_q: &Tensor<WgpuRuntime>,
+        cu_seqlens_k: &Tensor<WgpuRuntime>,
+        batch_size: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
         _max_seqlen_q: usize,
         _max_seqlen_k: usize,
-        _head_dim: usize,
-        _causal: bool,
+        head_dim: usize,
+        causal: bool,
     ) -> Result<(
         Tensor<WgpuRuntime>,
         Tensor<WgpuRuntime>,
         Tensor<WgpuRuntime>,
     )> {
-        Err(Error::InvalidArgument {
-            arg: "op",
-            reason: "varlen_attention_bwd not yet implemented on WebGPU".into(),
-        })
+        validate_f32(dout, "varlen_attention_bwd")?;
+        validate_f32(q, "varlen_attention_bwd")?;
+        validate_f32(k, "varlen_attention_bwd")?;
+        validate_f32(v, "varlen_attention_bwd")?;
+
+        // Each packed sequence is sliced out, reshaped to the dense
+        // `[1, H, s, D]` layout, and run through the shared standard-attention
+        // backward (same algorithm as every other backend). The cu_seqlens are
+        // small i32 offset tables — reading them host-side is metadata access,
+        // not a GPU↔CPU transfer of the attention payload.
+        let cu_q = cu_seqlens_q.to_vec::<i32>();
+        let cu_k = cu_seqlens_k.to_vec::<i32>();
+        let d = head_dim;
+
+        let mut dq_parts = Vec::with_capacity(batch_size);
+        let mut dk_parts = Vec::with_capacity(batch_size);
+        let mut dv_parts = Vec::with_capacity(batch_size);
+
+        for b in 0..batch_size {
+            let sq_start = cu_q[b] as usize;
+            let s_q = cu_q[b + 1] as usize - sq_start;
+            let sk_start = cu_k[b] as usize;
+            let s_k = cu_k[b + 1] as usize - sk_start;
+            if s_q == 0 || s_k == 0 {
+                continue;
+            }
+
+            let q_seq = pack_seq(&q.narrow(0, sq_start, s_q)?, num_heads, s_q, d)?;
+            let k_seq = pack_seq(&k.narrow(0, sk_start, s_k)?, num_kv_heads, s_k, d)?;
+            let v_seq = pack_seq(&v.narrow(0, sk_start, s_k)?, num_kv_heads, s_k, d)?;
+            let o_seq = pack_seq(&output.narrow(0, sq_start, s_q)?, num_heads, s_q, d)?;
+            let do_seq = pack_seq(&dout.narrow(0, sq_start, s_q)?, num_heads, s_q, d)?;
+
+            let cfg = StandardAttnConfig {
+                num_heads,
+                num_kv_heads,
+                causal,
+                window_size: 0,
+            };
+            let (dq_s, dk_s, dv_s) =
+                standard_attention_bwd(self, &do_seq, &q_seq, &k_seq, &v_seq, &o_seq, cfg)?;
+
+            dq_parts.push(unpack_seq(&dq_s, num_heads, s_q, d)?);
+            dk_parts.push(unpack_seq(&dk_s, num_kv_heads, s_k, d)?);
+            dv_parts.push(unpack_seq(&dv_s, num_kv_heads, s_k, d)?);
+        }
+
+        let device = q.device();
+        let dq = cat_token_parts(self, &dq_parts, q.shape(), device)?;
+        let dk = cat_token_parts(self, &dk_parts, k.shape(), device)?;
+        let dv = cat_token_parts(self, &dv_parts, v.shape(), device)?;
+        Ok((dq, dk, dv))
     }
 }

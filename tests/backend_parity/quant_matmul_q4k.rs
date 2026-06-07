@@ -59,6 +59,7 @@ fn pack_q4k_block(seed: usize, buf: &mut [u8]) {
 ///   scales[j] = 1.0, mins[j] = 0.0 (for our packed blocks with d=1, dmin=0)
 ///   dequant(j, l) = scales[j] * nibble(qs, j, l) - mins[j]
 ///                 = nibble(qs, j, l)
+#[cfg(feature = "cuda")]
 fn serial_q4k_gemm(act: &[f32], weight_bytes: &[u8], m: usize, k: usize, n: usize) -> Vec<f32> {
     let blocks_per_row = k / 256;
     let mut out = vec![0.0f32; m * n];
@@ -112,6 +113,7 @@ fn serial_q4k_gemm(act: &[f32], weight_bytes: &[u8], m: usize, k: usize, n: usiz
 }
 
 /// Decode an f16 little-endian value to f32.
+#[cfg(feature = "cuda")]
 fn f16_le_to_f32(bytes: &[u8]) -> f32 {
     let bits = (bytes[0] as u16) | ((bytes[1] as u16) << 8);
     let sign = ((bits >> 15) & 1) as u32;
@@ -158,6 +160,7 @@ fn test_q4k_gemm_mwr_correctness() {
     }
 
     // Serial f32 reference (ground truth for CUDA comparison)
+    #[cfg(feature = "cuda")]
     let reference = serial_q4k_gemm(&act_data, &weight_bytes, m, k, n);
 
     // CPU backend sanity check (uses Q8K intermediate → larger tolerance)

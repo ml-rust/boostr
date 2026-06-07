@@ -6,7 +6,9 @@
 //! F32 only (WebGPU limitation).
 
 use crate::error::{Error, Result};
-use crate::ops::impl_generic::attention::multi_head_attention_impl;
+use crate::ops::impl_generic::attention::{
+    StandardAttnConfig, multi_head_attention_impl, standard_attention_bwd,
+};
 use crate::ops::traits::{AttentionOps, FlashAttentionOps};
 use numr::autograd::Var;
 use numr::dtype::DType;
@@ -70,8 +72,8 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
     ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
         // kv_seq_len override not optimized for WGPU — narrow if needed
         if let Some(seq_len) = kv_seq_len {
-            let k_narrow = k.narrow(2, 0, seq_len)?.contiguous();
-            let v_narrow = v.narrow(2, 0, seq_len)?.contiguous();
+            let k_narrow = k.narrow(2, 0, seq_len)?.contiguous()?;
+            let v_narrow = v.narrow(2, 0, seq_len)?.contiguous()?;
             return self.flash_attention_fwd(
                 q,
                 &k_narrow,
@@ -207,26 +209,36 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
 
     fn flash_attention_bwd(
         &self,
-        _dout: &Tensor<WgpuRuntime>,
-        _q: &Tensor<WgpuRuntime>,
-        _k: &Tensor<WgpuRuntime>,
-        _v: &Tensor<WgpuRuntime>,
-        _output: &Tensor<WgpuRuntime>,
+        dout: &Tensor<WgpuRuntime>,
+        q: &Tensor<WgpuRuntime>,
+        k: &Tensor<WgpuRuntime>,
+        v: &Tensor<WgpuRuntime>,
+        output: &Tensor<WgpuRuntime>,
         _lse: &Tensor<WgpuRuntime>,
-        _num_heads: usize,
-        _num_kv_heads: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
         _head_dim: usize,
-        _causal: bool,
-        _window_size: usize,
+        causal: bool,
+        window_size: usize,
     ) -> Result<(
         Tensor<WgpuRuntime>,
         Tensor<WgpuRuntime>,
         Tensor<WgpuRuntime>,
     )> {
-        Err(Error::InvalidArgument {
-            arg: "op",
-            reason: "flash_attention_bwd not yet implemented on WebGPU".into(),
-        })
+        // Backward composes numr ops (matmul/softmax/reduce); it recomputes the
+        // attention weights from q,k, so the saved LSE is not needed. Produces
+        // results identical to the fused forward.
+        validate_f32(dout, "flash_attention_bwd")?;
+        validate_f32(q, "flash_attention_bwd")?;
+        validate_f32(k, "flash_attention_bwd")?;
+        validate_f32(v, "flash_attention_bwd")?;
+        let cfg = StandardAttnConfig {
+            num_heads,
+            num_kv_heads,
+            causal,
+            window_size,
+        };
+        standard_attention_bwd(self, dout, q, k, v, output, cfg)
     }
 
     fn flash_attention_bwd_fp8(

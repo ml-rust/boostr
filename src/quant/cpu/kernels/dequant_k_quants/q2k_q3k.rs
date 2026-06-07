@@ -267,7 +267,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // temp debugging test
     fn test_dequant_q3k_real_block() {
         // Real block from blk.0.attn_v.weight block 10 of mistral Q2_K model
         let block: [u8; 110] = [

@@ -33,29 +33,15 @@ pub fn save_distributed_checkpoint<P: AsRef<Path>>(
     // Save this rank's shard using the standard save_checkpoint
     save_checkpoint(&rank_dir, model_state, optimizer_state, training_state)?;
 
-    // Rank 0 writes the sharding metadata
+    // Rank 0 writes the sharding metadata. The scheme is global (identical
+    // across ranks), so we record it once — there is no per-rank metadata to
+    // gather.
     if rank == 0 {
         let meta = ShardingMeta {
             version: CHECKPOINT_VERSION,
             world_size,
-            shards: (0..world_size)
-                .map(|r| {
-                    if r == rank {
-                        sharding.clone()
-                    } else {
-                        // Other ranks' configs will be filled in by those ranks
-                        // or by a coordinated gather. For now, rank 0 writes a
-                        // placeholder that can be updated.
-                        ShardingConfig {
-                            world_size,
-                            rank: r,
-                            owned_params: Vec::new(),
-                            strategy: sharding.strategy.clone(),
-                            split_dims: HashMap::new(),
-                        }
-                    }
-                })
-                .collect(),
+            strategy: sharding.strategy.clone(),
+            split_dims: sharding.split_dims.clone(),
         };
 
         let json = serde_json::to_string_pretty(&meta).map_err(|e| Error::TrainingError {

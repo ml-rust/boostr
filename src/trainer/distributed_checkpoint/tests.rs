@@ -36,9 +36,6 @@ fn test_distributed_save_and_load() {
         None,
         &state,
         ShardingConfig {
-            world_size: 2,
-            rank: 0,
-            owned_params: vec!["embed.weight".to_string()],
             strategy: ShardingStrategy::ZeroPartitioned { stage: 3 },
             split_dims: HashMap::new(),
         },
@@ -53,9 +50,6 @@ fn test_distributed_save_and_load() {
         None,
         &state,
         ShardingConfig {
-            world_size: 2,
-            rank: 1,
-            owned_params: vec!["head.weight".to_string()],
             strategy: ShardingStrategy::ZeroPartitioned { stage: 3 },
             split_dims: HashMap::new(),
         },
@@ -107,9 +101,6 @@ fn test_consolidate_zero_partitioned() {
         None,
         &state,
         ShardingConfig {
-            world_size: 2,
-            rank: 0,
-            owned_params: vec!["embed.weight".to_string()],
             strategy: ShardingStrategy::ZeroPartitioned { stage: 3 },
             split_dims: HashMap::new(),
         },
@@ -124,23 +115,9 @@ fn test_consolidate_zero_partitioned() {
         None,
         &state,
         ShardingConfig {
-            world_size: 2,
-            rank: 1,
-            owned_params: vec!["head.weight".to_string()],
             strategy: ShardingStrategy::ZeroPartitioned { stage: 3 },
             split_dims: HashMap::new(),
         },
-    )
-    .unwrap();
-
-    // Update sharding_meta.json with rank 1's info
-    let meta_json = std::fs::read_to_string(dir.path().join("sharding_meta.json")).unwrap();
-    let mut meta: ShardingMeta = serde_json::from_str(&meta_json).unwrap();
-    meta.shards[1].owned_params = vec!["head.weight".to_string()];
-    meta.shards[1].split_dims = HashMap::new();
-    std::fs::write(
-        dir.path().join("sharding_meta.json"),
-        serde_json::to_string_pretty(&meta).unwrap(),
     )
     .unwrap();
 
@@ -181,9 +158,6 @@ fn test_distributed_topology_mismatch() {
         None,
         &state,
         ShardingConfig {
-            world_size: 2,
-            rank: 0,
-            owned_params: vec!["w".to_string()],
             strategy: ShardingStrategy::Replicated,
             split_dims: HashMap::new(),
         },
@@ -245,9 +219,6 @@ fn test_consolidate_tensor_parallel() {
         None,
         &state,
         ShardingConfig {
-            world_size: 2,
-            rank: 0,
-            owned_params: vec!["attn.wq".to_string(), "norm.weight".to_string()],
             strategy: ShardingStrategy::TensorParallel,
             split_dims: split_dims.clone(),
         },
@@ -262,23 +233,9 @@ fn test_consolidate_tensor_parallel() {
         None,
         &state,
         ShardingConfig {
-            world_size: 2,
-            rank: 1,
-            owned_params: vec!["attn.wq".to_string(), "norm.weight".to_string()],
             strategy: ShardingStrategy::TensorParallel,
             split_dims: split_dims.clone(),
         },
-    )
-    .unwrap();
-
-    // Update sharding_meta.json with rank 1's info
-    let meta_json = std::fs::read_to_string(dir.path().join("sharding_meta.json")).unwrap();
-    let mut meta: ShardingMeta = serde_json::from_str(&meta_json).unwrap();
-    meta.shards[1].owned_params = vec!["attn.wq".to_string(), "norm.weight".to_string()];
-    meta.shards[1].split_dims = split_dims;
-    std::fs::write(
-        dir.path().join("sharding_meta.json"),
-        serde_json::to_string_pretty(&meta).unwrap(),
     )
     .unwrap();
 

@@ -66,10 +66,10 @@ pub fn save_checkpoint<P: AsRef<Path>>(
     save_safetensors(dir.join("model.safetensors"), model_state, None)?;
 
     // Optimizer state
-    if let Some(opt_state) = optimizer_state {
-        if !opt_state.is_empty() {
-            save_safetensors(dir.join("optimizer.safetensors"), opt_state, None)?;
-        }
+    if let Some(opt_state) = optimizer_state
+        && !opt_state.is_empty()
+    {
+        save_safetensors(dir.join("optimizer.safetensors"), opt_state, None)?;
     }
 
     // Training metadata — always write current version

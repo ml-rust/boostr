@@ -38,8 +38,7 @@ pub fn consolidate_checkpoint<P: AsRef<Path>>(sharded_dir: P, output_dir: P) -> 
     let mut training_state: Option<TrainingState> = None;
 
     // For TensorParallel, we need to collect all ranks before merging
-    let strategy = &meta.shards[0].strategy;
-    let is_tensor_parallel = matches!(strategy, ShardingStrategy::TensorParallel);
+    let is_tensor_parallel = matches!(meta.strategy, ShardingStrategy::TensorParallel);
 
     if is_tensor_parallel {
         consolidate_tensor_parallel(
@@ -60,8 +59,7 @@ pub fn consolidate_checkpoint<P: AsRef<Path>>(sharded_dir: P, output_dir: P) -> 
                 training_state = Some(state);
             }
 
-            let strategy = &meta.shards[rank].strategy;
-            match strategy {
+            match &meta.strategy {
                 ShardingStrategy::Replicated => {
                     // Use rank 0's data only
                     if rank == 0 {
@@ -111,13 +109,10 @@ fn consolidate_tensor_parallel(
     merged_opt: &mut HashMap<String, Tensor<CpuRuntime>>,
     training_state: &mut Option<TrainingState>,
 ) -> Result<()> {
-    // Get split_dims from rank 0's config
-    let split_dims = &meta.shards[0].split_dims;
+    let split_dims = &meta.split_dims;
     if split_dims.is_empty() {
         return Err(Error::TrainingError {
-            reason: "TensorParallel consolidation requires split_dims metadata \
-                     in ShardingConfig (missing for rank 0)"
-                .to_string(),
+            reason: "TensorParallel consolidation requires split_dims metadata".to_string(),
         });
     }
 

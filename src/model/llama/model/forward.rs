@@ -265,7 +265,7 @@ attention:
   num_heads: 2
   rope_theta: 10000.0
 "#;
-        serde_yaml::from_str(yaml).unwrap()
+        serde_saphyr::from_str(yaml).unwrap()
     }
 
     #[test]
@@ -306,7 +306,7 @@ attention:
   num_heads: 4
   num_kv_heads: 2
 "#;
-        let config: ModelConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: ModelConfig = serde_saphyr::from_str(yaml).unwrap();
         let model = Llama::<CpuRuntime>::from_config(&config, &device).unwrap();
         assert_eq!(model.layers[0].self_attn.num_heads, 4);
         assert_eq!(model.layers[0].self_attn.num_kv_heads, 2);
@@ -326,7 +326,7 @@ attention:
   num_heads: 4
   num_kv_heads: 2
 "#;
-        let config: ModelConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: ModelConfig = serde_saphyr::from_str(yaml).unwrap();
         let model = Llama::<CpuRuntime>::from_config(&config, &device).unwrap();
 
         let input_ids = Var::new(
@@ -401,7 +401,7 @@ attention:
   num_heads: 4
   num_kv_heads: 2
 "#;
-        let config: ModelConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: ModelConfig = serde_saphyr::from_str(yaml).unwrap();
         let model = Llama::<CpuRuntime>::from_config(&config, &device).unwrap();
 
         let num_kv_heads = config.attention.as_ref().unwrap().kv_heads();
@@ -483,7 +483,7 @@ attention:
   num_heads: 2
   use_alibi: true
 "#;
-        serde_yaml::from_str(yaml).unwrap()
+        serde_saphyr::from_str(yaml).unwrap()
     }
 
     #[test]

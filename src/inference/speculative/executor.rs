@@ -74,13 +74,13 @@ where
                 }
             }
 
-            if let Some(bonus) = verification.bonus_token {
-                if generated.len() < max_new_tokens {
-                    context.push(bonus);
-                    generated.push(bonus);
-                    self.stats.bonus_tokens += 1;
-                    self.stats.total_tokens += 1;
-                }
+            if let Some(bonus) = verification.bonus_token
+                && generated.len() < max_new_tokens
+            {
+                context.push(bonus);
+                generated.push(bonus);
+                self.stats.bonus_tokens += 1;
+                self.stats.total_tokens += 1;
             }
 
             let num_rejected = draft_output.tokens.len() - verification.num_accepted;

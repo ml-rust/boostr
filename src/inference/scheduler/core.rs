@@ -280,10 +280,11 @@ impl<A: BlockAllocator> SequenceScheduler<A> {
 
             // Best-effort preallocation for the token after next (non-fatal if it fails).
             let blocks_needed = seq.blocks_needed_for_next_token();
-            if blocks_needed > 0 && self.allocator.can_allocate(blocks_needed) {
-                if let Ok(new_blocks) = self.allocator.allocate(blocks_needed) {
-                    seq.block_table.append_blocks(new_blocks);
-                }
+            if blocks_needed > 0
+                && self.allocator.can_allocate(blocks_needed)
+                && let Ok(new_blocks) = self.allocator.allocate(blocks_needed)
+            {
+                seq.block_table.append_blocks(new_blocks);
             }
 
             if seq.is_finished() || seq.total_tokens >= self.config.max_seq_len {

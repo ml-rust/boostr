@@ -73,7 +73,7 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
                 ),
             });
         }
-        if intermediate % world_size != 0 {
+        if !intermediate.is_multiple_of(world_size) {
             return Err(Error::DistributedError {
                 reason: format!(
                     "intermediate_size ({}) not divisible by world_size ({})",
@@ -429,7 +429,7 @@ attention:
   num_heads: 2
   rope_theta: 10000.0
 "#;
-        serde_yaml::from_str(yaml).unwrap()
+        serde_saphyr::from_str(yaml).unwrap()
     }
 
     #[test]
@@ -473,7 +473,7 @@ attention:
   num_heads: 4
   num_kv_heads: 2
 "#;
-        let config: ModelConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: ModelConfig = serde_saphyr::from_str(yaml).unwrap();
         let comm = Arc::new(NoOpCommunicator);
         let model = LlamaTp::<CpuRuntime>::from_config(&config, &device, comm).unwrap();
         assert_eq!(model.layers[0].self_attn.num_heads, 4);

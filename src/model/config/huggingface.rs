@@ -268,49 +268,49 @@ impl HuggingFaceConfig {
                 _ => mt.clone(),
             };
         }
-        if let Some(archs) = &self.architectures {
-            if let Some(arch) = archs.first() {
-                let arch_lower = arch.to_lowercase();
-                // Order matters: check specific variants before generic ones
-                // (e.g. "qwen2moe" before "qwen", "phi3" before "phi",
-                //  "gemma2" before "gemma").
-                if arch_lower.contains("llava") {
-                    return "llava".to_string();
-                } else if arch_lower.contains("qwen_vl") || arch_lower.contains("qwenvl") {
-                    return "qwen_vl".to_string();
-                } else if arch_lower.contains("llama") {
-                    return "llama".to_string();
-                } else if arch_lower.contains("mixtral") {
-                    return "mixtral".to_string();
-                } else if arch_lower.contains("mistral") {
-                    return "mistral".to_string();
-                } else if arch_lower.contains("mamba") {
-                    return "mamba2".to_string();
-                } else if arch_lower.contains("qwen2moe") {
-                    return "qwen2_moe".to_string();
-                } else if arch_lower.contains("qwen") {
-                    return "qwen2".to_string();
-                } else if arch_lower.contains("phi3") {
-                    return "phi3".to_string();
-                } else if arch_lower.contains("phi") {
-                    return "phi".to_string();
-                } else if arch_lower.contains("gemma2") {
-                    return "gemma2".to_string();
-                } else if arch_lower.contains("gemma") {
-                    return "gemma".to_string();
-                } else if arch_lower.contains("starcoder") {
-                    return "starcoder2".to_string();
-                } else if arch_lower.contains("internlm") {
-                    return "internlm2".to_string();
-                } else if arch_lower.contains("falcon") {
-                    return "falcon".to_string();
-                } else if arch_lower.contains("neox") || arch_lower.contains("pythia") {
-                    return "gpt_neox".to_string();
-                } else if arch_lower.contains("dbrx") {
-                    return "dbrx".to_string();
-                } else if arch_lower.contains("cohere") || arch_lower.contains("command") {
-                    return "command_r".to_string();
-                }
+        if let Some(archs) = &self.architectures
+            && let Some(arch) = archs.first()
+        {
+            let arch_lower = arch.to_lowercase();
+            // Order matters: check specific variants before generic ones
+            // (e.g. "qwen2moe" before "qwen", "phi3" before "phi",
+            //  "gemma2" before "gemma").
+            if arch_lower.contains("llava") {
+                return "llava".to_string();
+            } else if arch_lower.contains("qwen_vl") || arch_lower.contains("qwenvl") {
+                return "qwen_vl".to_string();
+            } else if arch_lower.contains("llama") {
+                return "llama".to_string();
+            } else if arch_lower.contains("mixtral") {
+                return "mixtral".to_string();
+            } else if arch_lower.contains("mistral") {
+                return "mistral".to_string();
+            } else if arch_lower.contains("mamba") {
+                return "mamba2".to_string();
+            } else if arch_lower.contains("qwen2moe") {
+                return "qwen2_moe".to_string();
+            } else if arch_lower.contains("qwen") {
+                return "qwen2".to_string();
+            } else if arch_lower.contains("phi3") {
+                return "phi3".to_string();
+            } else if arch_lower.contains("phi") {
+                return "phi".to_string();
+            } else if arch_lower.contains("gemma2") {
+                return "gemma2".to_string();
+            } else if arch_lower.contains("gemma") {
+                return "gemma".to_string();
+            } else if arch_lower.contains("starcoder") {
+                return "starcoder2".to_string();
+            } else if arch_lower.contains("internlm") {
+                return "internlm2".to_string();
+            } else if arch_lower.contains("falcon") {
+                return "falcon".to_string();
+            } else if arch_lower.contains("neox") || arch_lower.contains("pythia") {
+                return "gpt_neox".to_string();
+            } else if arch_lower.contains("dbrx") {
+                return "dbrx".to_string();
+            } else if arch_lower.contains("cohere") || arch_lower.contains("command") {
+                return "command_r".to_string();
             }
         }
         "llama".to_string()
@@ -325,17 +325,17 @@ pub fn load_config_auto<P: AsRef<Path>>(path: P) -> Result<UniversalConfig> {
     })?;
 
     // Try UniversalConfig first (our native format)
-    if let Ok(config) = serde_json::from_str::<UniversalConfig>(&content) {
-        if config.validate().is_ok() {
-            return Ok(config);
-        }
+    if let Ok(config) = serde_json::from_str::<UniversalConfig>(&content)
+        && config.validate().is_ok()
+    {
+        return Ok(config);
     }
 
     // Try YAML format
-    if let Ok(config) = serde_yaml::from_str::<UniversalConfig>(&content) {
-        if config.validate().is_ok() {
-            return Ok(config);
-        }
+    if let Ok(config) = serde_saphyr::from_str::<UniversalConfig>(&content)
+        && config.validate().is_ok()
+    {
+        return Ok(config);
     }
 
     // Try HuggingFace format

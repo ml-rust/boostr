@@ -21,19 +21,19 @@ pub fn gguf_to_hf_name(name: &str) -> String {
     }
 
     // Layer tensors: blk.N.suffix -> model.layers.N.hf_suffix
-    if let Some(rest) = name.strip_prefix("blk.") {
-        if let Some(dot_pos) = rest.find('.') {
-            let layer_num = &rest[..dot_pos];
-            let suffix = &rest[dot_pos + 1..];
+    if let Some(rest) = name.strip_prefix("blk.")
+        && let Some(dot_pos) = rest.find('.')
+    {
+        let layer_num = &rest[..dot_pos];
+        let suffix = &rest[dot_pos + 1..];
 
-            if let Some(hf_suffix) = map_layer_suffix(suffix) {
-                return format!("model.layers.{layer_num}.{hf_suffix}");
-            }
+        if let Some(hf_suffix) = map_layer_suffix(suffix) {
+            return format!("model.layers.{layer_num}.{hf_suffix}");
+        }
 
-            // MoE expert tensors: ffn_{gate,up,down}.{expert_id}.weight
-            if let Some(hf_suffix) = map_moe_expert(suffix) {
-                return format!("model.layers.{layer_num}.{hf_suffix}");
-            }
+        // MoE expert tensors: ffn_{gate,up,down}.{expert_id}.weight
+        if let Some(hf_suffix) = map_moe_expert(suffix) {
+            return format!("model.layers.{layer_num}.{hf_suffix}");
         }
     }
 

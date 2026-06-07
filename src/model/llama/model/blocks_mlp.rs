@@ -37,12 +37,12 @@ impl<R: Runtime<DType = DType>> LlamaMlp<R> {
         // Try fused SwiGLU path: single kernel for silu(gate_proj(x)) * up_proj(x)
         if let (MaybeQuantLinear::Quantized(gate_ql), MaybeQuantLinear::Quantized(up_ql)) =
             (&self.gate_proj, &self.up_proj)
+            && gate_ql.bias().is_none()
+            && up_ql.bias().is_none()
         {
-            if gate_ql.bias().is_none() && up_ql.bias().is_none() {
-                let hidden_t = client.quant_swiglu(x.tensor(), gate_ql.weight(), up_ql.weight())?;
-                let hidden = Var::new(hidden_t, false);
-                return self.down_proj.forward(client, &hidden);
-            }
+            let hidden_t = client.quant_swiglu(x.tensor(), gate_ql.weight(), up_ql.weight())?;
+            let hidden = Var::new(hidden_t, false);
+            return self.down_proj.forward(client, &hidden);
         }
 
         // Fallback: batched gate+up + separate silu_mul

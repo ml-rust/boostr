@@ -109,7 +109,7 @@ impl UniversalConfig {
         let content = std::fs::read_to_string(path.as_ref()).map_err(|e| Error::ModelError {
             reason: format!("IO error: {e}"),
         })?;
-        let config: Self = serde_yaml::from_str(&content).map_err(|e| Error::ModelError {
+        let config: Self = serde_saphyr::from_str(&content).map_err(|e| Error::ModelError {
             reason: format!("YAML parse error: {e}"),
         })?;
         config.validate()?;
@@ -154,7 +154,7 @@ attention:
   num_kv_heads: 8
   rope_theta: 500000.0
 "#;
-        let config: UniversalConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.model_type, "llama");
         assert_eq!(config.vocab_size, 128256);
         config.validate().unwrap();
@@ -176,7 +176,7 @@ max_seq_len: 512
 attention:
   num_heads: 4
 "#;
-        let config: UniversalConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
         config.validate().unwrap();
         assert!((config.rms_norm_eps - 1e-5).abs() < 1e-10);
         assert_eq!(config.intermediate_size(), 1024);
@@ -198,7 +198,7 @@ max_seq_len: 512
 attention:
   num_heads: 3
 "#;
-        let config: UniversalConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
         assert!(config.validate().is_err()); // 256 % 3 != 0
     }
 
@@ -220,7 +220,7 @@ ssm:
   conv_kernel: 4
   expand: 2
 "#;
-        let config: UniversalConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.model_type, "mamba2");
         assert!(config.ssm.is_some());
         let ssm = config.ssm.as_ref().unwrap();
@@ -257,7 +257,7 @@ audio:
   num_layers: 32
   num_heads: 20
 "#;
-        let config: UniversalConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.model_type, "llava");
         config.validate().unwrap();
 
@@ -290,7 +290,7 @@ max_seq_len: 512
 attention:
   num_heads: 4
 "#;
-        let config: UniversalConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
         config.validate().unwrap();
         assert!(config.vision.is_none());
         assert!(config.audio.is_none());
@@ -319,7 +319,7 @@ hybrid_layers:
   ssm_layers: [0, 1, 2, 4, 5, 6]
   attention_layers: [3, 7]
 "#;
-        let config: UniversalConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.model_type, "hybrid");
         assert!(config.hybrid_layers.is_some());
         let hybrid = config.hybrid_layers.as_ref().unwrap();

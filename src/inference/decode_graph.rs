@@ -53,7 +53,6 @@ pub use cuda_impl::*;
 #[cfg(feature = "cuda")]
 mod cuda_impl {
     use cudarc::driver::sys;
-    use numr::runtime::Graph;
     use numr::runtime::cuda::{CudaClient, CudaRuntime};
     use numr::tensor::Tensor;
 
@@ -288,7 +287,11 @@ mod cuda_impl {
     /// addresses are stable across replays.
     pub struct DecodeGraph {
         /// The captured CUDA graph — replayed once per token.
-        pub graph: numr::runtime::cuda::CudaGraph,
+        ///
+        /// Stored as a [`CapturedGraph`] so the input/output tensors whose device
+        /// addresses are encoded in the graph are kept alive for as long as the
+        /// graph can be replayed.
+        pub graph: numr::runtime::CapturedGraph<CudaRuntime>,
 
         /// Device-side scalars (seq_len_k, write_pos).
         pub device_scalars: DeviceScalars,
@@ -424,7 +427,7 @@ mod cuda_impl {
     /// changes per step (set to `seq_len` — the slot for the new token).
     pub struct PagedDecodeGraph {
         /// The captured CUDA graph.
-        pub graph: numr::runtime::cuda::CudaGraph,
+        pub graph: numr::runtime::CapturedGraph<CudaRuntime>,
 
         /// Device-side scalars (seq_len_k for attention loop bound).
         pub device_scalars: DeviceScalars,

@@ -52,7 +52,7 @@ impl AttentionConfig {
                 reason: "num_heads must be > 0".into(),
             });
         }
-        if hidden_size % self.num_heads != 0 {
+        if !hidden_size.is_multiple_of(self.num_heads) {
             return Err(Error::ModelError {
                 reason: format!(
                     "hidden_size ({hidden_size}) must be divisible by num_heads ({})",
@@ -60,15 +60,15 @@ impl AttentionConfig {
                 ),
             });
         }
-        if let Some(kv) = self.num_kv_heads {
-            if self.num_heads % kv != 0 {
-                return Err(Error::ModelError {
-                    reason: format!(
-                        "num_heads ({}) must be divisible by num_kv_heads ({kv})",
-                        self.num_heads
-                    ),
-                });
-            }
+        if let Some(kv) = self.num_kv_heads
+            && !self.num_heads.is_multiple_of(kv)
+        {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "num_heads ({}) must be divisible by num_kv_heads ({kv})",
+                    self.num_heads
+                ),
+            });
         }
         Ok(())
     }

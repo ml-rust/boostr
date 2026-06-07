@@ -176,17 +176,16 @@ impl<A: BlockAllocator> PrefixCache<A> {
             }
 
             if let Some(block_id) = self.lru_queue.pop_front() {
-                if let Some(&hash) = self.block_to_hash.get(&block_id) {
-                    if let Some(info) = self.hash_to_block.get(&hash) {
-                        if info.ref_count == 0 {
-                            self.allocator.free(&[block_id])?;
-                            self.hash_to_block.remove(&hash);
-                            self.block_to_hash.remove(&block_id);
-                            consecutive_skips = 0;
-                            self.stats.blocks_evicted += 1;
-                            continue;
-                        }
-                    }
+                if let Some(&hash) = self.block_to_hash.get(&block_id)
+                    && let Some(info) = self.hash_to_block.get(&hash)
+                    && info.ref_count == 0
+                {
+                    self.allocator.free(&[block_id])?;
+                    self.hash_to_block.remove(&hash);
+                    self.block_to_hash.remove(&block_id);
+                    consecutive_skips = 0;
+                    self.stats.blocks_evicted += 1;
+                    continue;
                 }
                 self.lru_queue.push_back(block_id);
                 consecutive_skips += 1;
@@ -208,18 +207,17 @@ impl<A: BlockAllocator> PrefixCache<A> {
             }
 
             if let Some(block_id) = self.lru_queue.pop_front() {
-                if let Some(&hash) = self.block_to_hash.get(&block_id) {
-                    if let Some(info) = self.hash_to_block.get(&hash) {
-                        if info.ref_count == 0 {
-                            self.allocator.free(&[block_id])?;
-                            self.hash_to_block.remove(&hash);
-                            self.block_to_hash.remove(&block_id);
-                            consecutive_skips = 0;
-                            evicted += 1;
-                            self.stats.blocks_evicted += 1;
-                            continue;
-                        }
-                    }
+                if let Some(&hash) = self.block_to_hash.get(&block_id)
+                    && let Some(info) = self.hash_to_block.get(&hash)
+                    && info.ref_count == 0
+                {
+                    self.allocator.free(&[block_id])?;
+                    self.hash_to_block.remove(&hash);
+                    self.block_to_hash.remove(&block_id);
+                    consecutive_skips = 0;
+                    evicted += 1;
+                    self.stats.blocks_evicted += 1;
+                    continue;
                 }
                 self.lru_queue.push_back(block_id);
                 consecutive_skips += 1;
@@ -237,11 +235,11 @@ impl<A: BlockAllocator> PrefixCache<A> {
 
     pub fn release_blocks(&mut self, seq_id: SequenceId, blocks: &[BlockId]) -> Result<()> {
         for &block_id in blocks {
-            if let Some(&hash) = self.block_to_hash.get(&block_id) {
-                if let Some(info) = self.hash_to_block.get_mut(&hash) {
-                    info.ref_count = info.ref_count.saturating_sub(1);
-                    info.owners.retain(|&id| id != seq_id);
-                }
+            if let Some(&hash) = self.block_to_hash.get(&block_id)
+                && let Some(info) = self.hash_to_block.get_mut(&hash)
+            {
+                info.ref_count = info.ref_count.saturating_sub(1);
+                info.owners.retain(|&id| id != seq_id);
             }
         }
         Ok(())
@@ -266,12 +264,12 @@ impl<A: BlockAllocator> PrefixCache<A> {
 
         let block_size = self.config.block_size;
         let block_hashes = self.compute_block_hashes(tokens);
-        if let Some(&hash) = block_hashes.first() {
-            if let Some(info) = self.hash_to_block.get(&hash) {
-                // Verify the stored tokens to guard against hash collisions.
-                let first_block_end = block_size.min(tokens.len());
-                return info.tokens == tokens[..first_block_end];
-            }
+        if let Some(&hash) = block_hashes.first()
+            && let Some(info) = self.hash_to_block.get(&hash)
+        {
+            // Verify the stored tokens to guard against hash collisions.
+            let first_block_end = block_size.min(tokens.len());
+            return info.tokens == tokens[..first_block_end];
         }
         false
     }
@@ -317,12 +315,11 @@ impl<A: BlockAllocator> PrefixCache<A> {
     pub fn reset(&mut self) -> Result<()> {
         let blocks: Vec<BlockId> = self.block_to_hash.keys().copied().collect();
         for block_id in blocks {
-            if let Some(hash) = self.block_to_hash.remove(&block_id) {
-                if let Some(info) = self.hash_to_block.remove(&hash) {
-                    if info.ref_count == 0 {
-                        self.allocator.free(&[block_id])?;
-                    }
-                }
+            if let Some(hash) = self.block_to_hash.remove(&block_id)
+                && let Some(info) = self.hash_to_block.remove(&hash)
+                && info.ref_count == 0
+            {
+                self.allocator.free(&[block_id])?;
             }
         }
 

@@ -176,14 +176,14 @@ impl EncoderConfig {
             .unwrap_or(false);
 
         // pooling_type = 1 means mean pooling; validate if present.
-        if let Some(pt) = metadata.get_u32("nomic-bert.pooling_type") {
-            if pt != 1 {
-                return Err(Error::ModelError {
-                    reason: format!(
-                        "nomic-bert.pooling_type = {pt}; only mean pooling (1) is supported"
-                    ),
-                });
-            }
+        if let Some(pt) = metadata.get_u32("nomic-bert.pooling_type")
+            && pt != 1
+        {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "nomic-bert.pooling_type = {pt}; only mean pooling (1) is supported"
+                ),
+            });
         }
 
         let vocab_size = metadata
@@ -278,14 +278,14 @@ impl EncoderConfig {
             .get_f32("gemma-embedding.rope.freq_base")
             .unwrap_or(10000.0);
 
-        if let Some(pt) = metadata.get_u32("gemma-embedding.pooling_type") {
-            if pt != 1 {
-                return Err(Error::ModelError {
-                    reason: format!(
-                        "gemma-embedding.pooling_type = {pt}; only mean pooling (1) is supported"
-                    ),
-                });
-            }
+        if let Some(pt) = metadata.get_u32("gemma-embedding.pooling_type")
+            && pt != 1
+        {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "gemma-embedding.pooling_type = {pt}; only mean pooling (1) is supported"
+                ),
+            });
         }
 
         let vocab_size = metadata

@@ -144,14 +144,12 @@ pub(super) fn detect_layer_indices(tensor_names: &[&str], prefix: &str) -> Vec<u
     let layer_prefix = format!("{}layers.", prefix);
 
     for name in tensor_names {
-        if name.starts_with(&layer_prefix) {
-            if let Some(rest) = name.strip_prefix(&layer_prefix) {
-                if let Some(dot_pos) = rest.find('.') {
-                    if let Ok(idx) = rest[..dot_pos].parse::<usize>() {
-                        indices.insert(idx);
-                    }
-                }
-            }
+        if name.starts_with(&layer_prefix)
+            && let Some(rest) = name.strip_prefix(&layer_prefix)
+            && let Some(dot_pos) = rest.find('.')
+            && let Ok(idx) = rest[..dot_pos].parse::<usize>()
+        {
+            indices.insert(idx);
         }
     }
 

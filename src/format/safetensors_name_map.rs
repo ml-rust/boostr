@@ -57,41 +57,41 @@ fn normalize_falcon(name: &str) -> String {
         return name.to_string();
     }
     // Layer tensors: transformer.h.{N}.{rest}
-    if let Some(rest) = name.strip_prefix("transformer.h.") {
-        if let Some((layer_num, layer_rest)) = split_layer_num(rest) {
-            // Attention
-            if let Some(suffix) = layer_rest.strip_prefix("self_attention.") {
-                if suffix.starts_with("query_key_value.") {
-                    // Fused QKV — keep with canonical prefix for later splitting
-                    return format!(
-                        "model.layers.{layer_num}.self_attn.query_key_value.{rest_suffix}",
-                        rest_suffix = suffix.strip_prefix("query_key_value.").unwrap()
-                    );
-                }
-                if let Some(s) = suffix.strip_prefix("dense.") {
-                    return format!("model.layers.{layer_num}.self_attn.o_proj.{s}");
-                }
+    if let Some(rest) = name.strip_prefix("transformer.h.")
+        && let Some((layer_num, layer_rest)) = split_layer_num(rest)
+    {
+        // Attention
+        if let Some(suffix) = layer_rest.strip_prefix("self_attention.") {
+            if suffix.starts_with("query_key_value.") {
+                // Fused QKV — keep with canonical prefix for later splitting
+                return format!(
+                    "model.layers.{layer_num}.self_attn.query_key_value.{rest_suffix}",
+                    rest_suffix = suffix.strip_prefix("query_key_value.").unwrap()
+                );
             }
-            // MLP
-            if let Some(suffix) = layer_rest.strip_prefix("mlp.") {
-                if let Some(s) = suffix.strip_prefix("dense_h_to_4h.") {
-                    return format!("model.layers.{layer_num}.mlp.up_proj.{s}");
-                }
-                if let Some(s) = suffix.strip_prefix("dense_4h_to_h.") {
-                    return format!("model.layers.{layer_num}.mlp.down_proj.{s}");
-                }
+            if let Some(s) = suffix.strip_prefix("dense.") {
+                return format!("model.layers.{layer_num}.self_attn.o_proj.{s}");
             }
-            // Layer norms
-            if let Some(s) = layer_rest.strip_prefix("ln_attn.") {
-                return format!("model.layers.{layer_num}.input_layernorm.{s}");
+        }
+        // MLP
+        if let Some(suffix) = layer_rest.strip_prefix("mlp.") {
+            if let Some(s) = suffix.strip_prefix("dense_h_to_4h.") {
+                return format!("model.layers.{layer_num}.mlp.up_proj.{s}");
             }
-            if let Some(s) = layer_rest.strip_prefix("ln_mlp.") {
-                return format!("model.layers.{layer_num}.post_attention_layernorm.{s}");
+            if let Some(s) = suffix.strip_prefix("dense_4h_to_h.") {
+                return format!("model.layers.{layer_num}.mlp.down_proj.{s}");
             }
-            // Falcon v2 uses input_layernorm directly
-            if let Some(s) = layer_rest.strip_prefix("input_layernorm.") {
-                return format!("model.layers.{layer_num}.input_layernorm.{s}");
-            }
+        }
+        // Layer norms
+        if let Some(s) = layer_rest.strip_prefix("ln_attn.") {
+            return format!("model.layers.{layer_num}.input_layernorm.{s}");
+        }
+        if let Some(s) = layer_rest.strip_prefix("ln_mlp.") {
+            return format!("model.layers.{layer_num}.post_attention_layernorm.{s}");
+        }
+        // Falcon v2 uses input_layernorm directly
+        if let Some(s) = layer_rest.strip_prefix("input_layernorm.") {
+            return format!("model.layers.{layer_num}.input_layernorm.{s}");
         }
     }
     name.to_string()
@@ -126,35 +126,35 @@ fn normalize_gpt_neox(name: &str) -> String {
         return format!("model.norm.{suffix}");
     }
     // Layer tensors: gpt_neox.layers.{N}.{rest}
-    if let Some(rest) = name.strip_prefix("gpt_neox.layers.") {
-        if let Some((layer_num, layer_rest)) = split_layer_num(rest) {
-            // Attention
-            if let Some(suffix) = layer_rest.strip_prefix("attention.") {
-                if suffix.starts_with("query_key_value.") {
-                    return format!(
-                        "model.layers.{layer_num}.self_attn.query_key_value.{rest_suffix}",
-                        rest_suffix = suffix.strip_prefix("query_key_value.").unwrap()
-                    );
-                }
-                if let Some(s) = suffix.strip_prefix("dense.") {
-                    return format!("model.layers.{layer_num}.self_attn.o_proj.{s}");
-                }
+    if let Some(rest) = name.strip_prefix("gpt_neox.layers.")
+        && let Some((layer_num, layer_rest)) = split_layer_num(rest)
+    {
+        // Attention
+        if let Some(suffix) = layer_rest.strip_prefix("attention.") {
+            if suffix.starts_with("query_key_value.") {
+                return format!(
+                    "model.layers.{layer_num}.self_attn.query_key_value.{rest_suffix}",
+                    rest_suffix = suffix.strip_prefix("query_key_value.").unwrap()
+                );
             }
-            // MLP
-            if let Some(suffix) = layer_rest.strip_prefix("mlp.") {
-                if let Some(s) = suffix.strip_prefix("dense_h_to_4h.") {
-                    return format!("model.layers.{layer_num}.mlp.up_proj.{s}");
-                }
-                if let Some(s) = suffix.strip_prefix("dense_4h_to_h.") {
-                    return format!("model.layers.{layer_num}.mlp.down_proj.{s}");
-                }
+            if let Some(s) = suffix.strip_prefix("dense.") {
+                return format!("model.layers.{layer_num}.self_attn.o_proj.{s}");
             }
-            // Layer norms — already canonical names
-            if layer_rest.starts_with("input_layernorm.")
-                || layer_rest.starts_with("post_attention_layernorm.")
-            {
-                return format!("model.layers.{layer_num}.{layer_rest}");
+        }
+        // MLP
+        if let Some(suffix) = layer_rest.strip_prefix("mlp.") {
+            if let Some(s) = suffix.strip_prefix("dense_h_to_4h.") {
+                return format!("model.layers.{layer_num}.mlp.up_proj.{s}");
             }
+            if let Some(s) = suffix.strip_prefix("dense_4h_to_h.") {
+                return format!("model.layers.{layer_num}.mlp.down_proj.{s}");
+            }
+        }
+        // Layer norms — already canonical names
+        if layer_rest.starts_with("input_layernorm.")
+            || layer_rest.starts_with("post_attention_layernorm.")
+        {
+            return format!("model.layers.{layer_num}.{layer_rest}");
         }
     }
     name.to_string()
@@ -187,40 +187,40 @@ fn normalize_dbrx(name: &str) -> String {
         return name.to_string();
     }
     // Layer tensors: transformer.blocks.{N}.{rest}
-    if let Some(rest) = name.strip_prefix("transformer.blocks.") {
-        if let Some((layer_num, layer_rest)) = split_layer_num(rest) {
-            // Attention block
-            if let Some(suffix) = layer_rest.strip_prefix("norm_attn_norm.attn.") {
-                if suffix.starts_with("Wqkv.") {
-                    return format!(
-                        "model.layers.{layer_num}.self_attn.query_key_value.{rest_suffix}",
-                        rest_suffix = suffix.strip_prefix("Wqkv.").unwrap()
-                    );
-                }
-                if let Some(s) = suffix.strip_prefix("out_proj.") {
-                    return format!("model.layers.{layer_num}.self_attn.o_proj.{s}");
-                }
+    if let Some(rest) = name.strip_prefix("transformer.blocks.")
+        && let Some((layer_num, layer_rest)) = split_layer_num(rest)
+    {
+        // Attention block
+        if let Some(suffix) = layer_rest.strip_prefix("norm_attn_norm.attn.") {
+            if suffix.starts_with("Wqkv.") {
+                return format!(
+                    "model.layers.{layer_num}.self_attn.query_key_value.{rest_suffix}",
+                    rest_suffix = suffix.strip_prefix("Wqkv.").unwrap()
+                );
             }
-            // Norms
-            if let Some(s) = layer_rest.strip_prefix("norm_attn_norm.norm_1.") {
-                return format!("model.layers.{layer_num}.input_layernorm.{s}");
+            if let Some(s) = suffix.strip_prefix("out_proj.") {
+                return format!("model.layers.{layer_num}.self_attn.o_proj.{s}");
             }
-            if let Some(s) = layer_rest.strip_prefix("norm_attn_norm.norm_2.") {
-                return format!("model.layers.{layer_num}.post_attention_layernorm.{s}");
-            }
-            // MoE FFN
-            if let Some(s) = layer_rest.strip_prefix("ffn.router.layer.") {
-                return format!("model.layers.{layer_num}.block_sparse_moe.gate.{s}");
-            }
-            // Expert weights: ffn.experts.mlp.{E}.{v1,w1,w2}.weight
-            if let Some(suffix) = layer_rest.strip_prefix("ffn.experts.mlp.") {
-                // We keep expert-level naming for now; the MoE loader handles stacking
-                let mapped = suffix
-                    .replace(".v1.", ".gate_proj.")
-                    .replace(".w1.", ".up_proj.")
-                    .replace(".w2.", ".down_proj.");
-                return format!("model.layers.{layer_num}.block_sparse_moe.experts.{mapped}");
-            }
+        }
+        // Norms
+        if let Some(s) = layer_rest.strip_prefix("norm_attn_norm.norm_1.") {
+            return format!("model.layers.{layer_num}.input_layernorm.{s}");
+        }
+        if let Some(s) = layer_rest.strip_prefix("norm_attn_norm.norm_2.") {
+            return format!("model.layers.{layer_num}.post_attention_layernorm.{s}");
+        }
+        // MoE FFN
+        if let Some(s) = layer_rest.strip_prefix("ffn.router.layer.") {
+            return format!("model.layers.{layer_num}.block_sparse_moe.gate.{s}");
+        }
+        // Expert weights: ffn.experts.mlp.{E}.{v1,w1,w2}.weight
+        if let Some(suffix) = layer_rest.strip_prefix("ffn.experts.mlp.") {
+            // We keep expert-level naming for now; the MoE loader handles stacking
+            let mapped = suffix
+                .replace(".v1.", ".gate_proj.")
+                .replace(".w1.", ".up_proj.")
+                .replace(".w2.", ".down_proj.");
+            return format!("model.layers.{layer_num}.block_sparse_moe.experts.{mapped}");
         }
     }
     name.to_string()

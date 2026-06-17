@@ -23,7 +23,7 @@ models, KV caching, and distributed training — built on
 </p>
 
 <p>
-  <a href="https://discord.gg/jBhFk9kHPg">
+  <a href="https://discord.gg/n3tAYfKAx9">
     <img src="https://img.shields.io/discord/1453357769720594543?label=Discord&logo=discord&logoColor=white&color=5865F2" alt="Join the Discord">
   </a>
 </p>

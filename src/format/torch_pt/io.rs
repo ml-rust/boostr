@@ -25,10 +25,7 @@ pub(super) fn find_archive_layout(
         return Ok(("data.pkl".to_string(), "data".to_string()));
     }
     Err(Error::ModelError {
-        reason: format!(
-            "no data.pkl entry found in PyTorch archive; entries: {:?}",
-            &names
-        ),
+        reason: format!("no data.pkl entry found in PyTorch archive; entries: {names:?}"),
     })
 }
 

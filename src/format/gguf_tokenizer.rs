@@ -41,6 +41,12 @@ impl GgufTokenizer {
         metadata: &crate::format::GgufMetadata,
         tokens: Vec<String>,
     ) -> Result<Self> {
+        // Convert a SentencePiece-marked vocab to WordPiece convention first —
+        // see `normalize_wordpiece_vocab`. Everything below (the [UNK] lookup
+        // and the uncased heuristic) matches against plain strings like "the",
+        // so it MUST run on the normalized vocab or it silently misfires.
+        let tokens = normalize_wordpiece_vocab(tokens);
+
         // Find [UNK] token ID from vocab or token_type array
         let unk_token_id = find_special_token_id(&tokens, metadata, "[UNK]", 0);
 
@@ -129,6 +135,10 @@ impl Tokenize for GgufTokenizer {
     fn vocab_size(&self) -> usize {
         self.inner.vocab_size()
     }
+
+    fn cls_sep_ids(&self) -> Option<(u32, u32)> {
+        self.inner.cls_sep_ids()
+    }
 }
 
 /// Extract token strings from GGUF metadata.
@@ -152,6 +162,60 @@ fn extract_tokens(metadata: &crate::format::GgufMetadata) -> Result<Vec<String>>
         }
     }
     Ok(tokens)
+}
+
+/// The SentencePiece word-boundary marker (U+2581 LOWER ONE EIGHTH BLOCK).
+const SP_WORD_BOUNDARY: char = '\u{2581}';
+
+/// Rewrite a GGUF BERT vocab that uses SentencePiece word-boundary markers into
+/// the WordPiece convention [`WordPieceTokenizer`] expects.
+///
+/// Some GGUF converters store a WordPiece vocab with SentencePiece marking:
+/// word-INITIAL pieces get a leading `▁` and continuation pieces are bare,
+/// instead of BERT's bare-initial / `##`-continuation. `nomic-embed-text-v1.5`
+/// is one such file — 23695 of its 30522 tokens carry `▁` and **zero** carry
+/// `##`, so `vocab[1996]` is `"▁the"` where bert-base-uncased has `"the"`, and
+/// `vocab[2015]` is `"s"` where bert-base-uncased has `"##s"`.
+///
+/// Handing those strings to `WordPieceTokenizer` unchanged means no word ever
+/// matches its own vocab entry, so greedy longest-match shatters every word
+/// into stray fragments: `"hello the quick brown fox"` round-tripped as
+/// `"hell o the qui ck bro wn fo x"`. The resulting ids are near-random, and
+/// mean-pooled embeddings of ANY two texts collapse onto the corpus average —
+/// measured cosine distance between unrelated sentences was ~0.0005, which
+/// makes dense retrieval pure noise while still looking healthy end to end.
+///
+/// The mapping is total and lossless for this convention:
+/// - `▁X` → `X`      (word-initial)
+/// - `[SPECIAL]` → unchanged
+/// - `X` → `##X`     (continuation)
+///
+/// Punctuation and digits carry `▁` too (`"▁!"`, `"▁1"`), so they land on the
+/// word-initial branch exactly as BERT expects.
+///
+/// A vocab that already uses `##`, or that has no `▁` at all, is returned
+/// untouched — detection is on the vocab's own contents, never on the model
+/// name, so a correctly-marked file is never rewritten.
+fn normalize_wordpiece_vocab(tokens: Vec<String>) -> Vec<String> {
+    let has_sp_marker = tokens.iter().any(|t| t.starts_with(SP_WORD_BOUNDARY));
+    let has_wordpiece_marker = tokens.iter().any(|t| t.starts_with("##"));
+    if !has_sp_marker || has_wordpiece_marker {
+        return tokens;
+    }
+
+    tokens
+        .into_iter()
+        .map(|t| {
+            if let Some(stripped) = t.strip_prefix(SP_WORD_BOUNDARY) {
+                stripped.to_owned()
+            } else if t.starts_with('[') && t.ends_with(']') {
+                // [PAD], [CLS], [SEP], [UNK], [unusedN] — never continuations.
+                t
+            } else {
+                format!("##{t}")
+            }
+        })
+        .collect()
 }
 
 /// Find a special token ID, checking the token_type array first, then falling back
@@ -179,4 +243,52 @@ fn find_special_token_id(
     };
 
     metadata.get_u32(key).unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_wordpiece_vocab;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// The `nomic-embed-text-v1.5` shape: `▁`-marked word-initial pieces, bare
+    /// continuations, bracketed specials.
+    #[test]
+    fn sentencepiece_marked_bert_vocab_is_converted_to_wordpiece() {
+        let got = normalize_wordpiece_vocab(v(&[
+            "[PAD]", "[CLS]", "[SEP]", "[UNK]", "▁the", "▁hello", "s", "ing", "▁!", "▁1",
+        ]));
+        assert_eq!(
+            got,
+            v(&[
+                "[PAD]", "[CLS]", "[SEP]", "[UNK]", "the", "hello", "##s", "##ing", "!", "1",
+            ]),
+            "▁X must become X, bare X must become ##X, specials must be untouched"
+        );
+    }
+
+    /// A vocab already in WordPiece convention must be returned byte-identical —
+    /// otherwise fixing one model's tokenizer would break every other BERT GGUF.
+    #[test]
+    fn already_wordpiece_vocab_is_left_untouched() {
+        let original = v(&["[PAD]", "[CLS]", "the", "##s", "hello", "!"]);
+        assert_eq!(normalize_wordpiece_vocab(original.clone()), original);
+    }
+
+    /// Mixed marking (some `▁`, some `##`) means the file is already using the
+    /// WordPiece continuation marker, so rewriting would corrupt it.
+    #[test]
+    fn mixed_marking_is_left_untouched() {
+        let original = v(&["▁the", "##s", "hello"]);
+        assert_eq!(normalize_wordpiece_vocab(original.clone()), original);
+    }
+
+    /// No `▁` anywhere → nothing to convert.
+    #[test]
+    fn unmarked_vocab_is_left_untouched() {
+        let original = v(&["the", "hello", "world"]);
+        assert_eq!(normalize_wordpiece_vocab(original.clone()), original);
+    }
 }

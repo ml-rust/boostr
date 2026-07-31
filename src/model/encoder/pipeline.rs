@@ -80,6 +80,38 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
         }
     }
 
+    /// Wrap a freshly-encoded sequence in the model's `[CLS]` / `[SEP]` tokens
+    /// and truncate it to `max_seq`.
+    ///
+    /// BERT-family encoders are trained on `[CLS] tokens [SEP]` and never on a
+    /// bare token run, so feeding one is out-of-distribution input. It does not
+    /// fail loudly — it quietly degrades the representation. Measured on
+    /// `all-MiniLM-L6-v2`, mean-pooled embeddings of four unrelated sentences
+    /// sat at ~0.029 cosine distance without the wrapper and spread to ~0.20
+    /// with it: without this, dense retrieval ranks near-randomly while looking
+    /// perfectly healthy end to end.
+    ///
+    /// `Tokenize::encode` does not add them (a reranker builds its own
+    /// `[CLS] q [SEP] d [SEP]`), so the single-segment caller must — see
+    /// [`Tokenize::cls_sep_ids`]. Tokenizers with no such convention report
+    /// `None` and the sequence passes through unchanged.
+    ///
+    /// Truncation happens AFTER reserving the two slots, so the result is never
+    /// longer than `max_seq` and never loses its trailing `[SEP]`.
+    fn wrap_special_tokens(&self, ids: Vec<u32>, max_seq: usize) -> Vec<u32> {
+        let Some((cls, sep)) = self.tokenizer.cls_sep_ids() else {
+            let mut ids = ids;
+            ids.truncate(max_seq);
+            return ids;
+        };
+        let budget = max_seq.saturating_sub(2);
+        let mut out = Vec::with_capacity(ids.len().min(budget) + 2);
+        out.push(cls);
+        out.extend(ids.into_iter().take(budget));
+        out.push(sep);
+        out
+    }
+
     /// Embed a single text string → `[hidden_size]` f32 vector.
     pub fn embed_text<C>(&self, client: &C, text: &str) -> Result<Vec<f32>>
     where
@@ -87,10 +119,7 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
         R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
     {
         let max_seq = self.encoder.config().max_position_embeddings;
-        let mut token_ids = self.tokenizer.encode(text);
-        if token_ids.len() > max_seq {
-            token_ids.truncate(max_seq);
-        }
+        let token_ids = self.wrap_special_tokens(self.tokenizer.encode(text), max_seq);
         let seq_len = token_ids.len();
         let input: Vec<i64> = token_ids.into_iter().map(|t| t as i64).collect();
         let input_tensor = Tensor::<R>::from_slice(&input, &[1, seq_len], &self.device);
@@ -119,13 +148,7 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
         let max_seq = self.encoder.config().max_position_embeddings;
         let all_ids: Vec<Vec<u32>> = texts
             .iter()
-            .map(|t| {
-                let mut ids = self.tokenizer.encode(t);
-                if ids.len() > max_seq {
-                    ids.truncate(max_seq);
-                }
-                ids
-            })
+            .map(|t| self.wrap_special_tokens(self.tokenizer.encode(t), max_seq))
             .collect();
 
         use super::config::ArchFamily;

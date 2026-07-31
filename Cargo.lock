@@ -234,6 +234,7 @@ dependencies = [
  "nexar",
  "numr",
  "rayon",
+ "rustc-hash 2.1.2",
  "rustls",
  "serde",
  "serde-saphyr",

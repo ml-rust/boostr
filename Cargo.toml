@@ -18,6 +18,8 @@ categories = ["science", "mathematics"]
 
 [dependencies]
 numr = "0.6"
+# Matches splintr's hasher: `Tokenizer::with_merge_ranks` takes an FxHashMap.
+rustc-hash = "2.0"
 half = { version = "2", features = ["bytemuck"] }
 thiserror = "2.0"
 serde = { version = "1", features = ["derive"] }

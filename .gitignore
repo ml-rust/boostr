@@ -85,6 +85,7 @@ perf.data.old
 flamegraph.html
 
 # Misc
+/releases/
 .cache/
 .pytest_cache/
 .mypy_cache/

@@ -59,14 +59,11 @@ pub unsafe fn fused_dot_q5k_q8k_avx2(act_q8k: &[u8], weight: &[u8], k: usize) ->
                 let q4_hi_nib =
                     _mm256_and_si256(_mm256_srli_epi16(q4_raw, 4), _mm256_set1_epi8(0x0F));
 
-                // Load high bits from qh. For sub-block j*2, elements j*64..j*64+32
-                // qh[byte] bit layout: bit i of qh[byte] = high bit for element byte*8+i
-                // We need to create a mask of high bits for 32 elements at a time
-
-                // For even sub-block (elements j*64..j*64+32):
-                let qh_lo = load_high_bits_32(qh, j * 64);
-                // For odd sub-block (elements j*64+32..j*64+64):
-                let qh_hi = load_high_bits_32(qh, j * 64 + 32);
+                // Fifth bits, selected by SUB-BLOCK index (not element offset):
+                // this 32-byte `qs` run feeds sub-blocks 2j (low nibbles) and
+                // 2j+1 (high nibbles).
+                let qh_lo = load_high_bits_32(qh, j * 2);
+                let qh_hi = load_high_bits_32(qh, j * 2 + 1);
 
                 // Combine: q5_value = q4_nibble | (high_bit << 4)
                 let q5_lo = _mm256_or_si256(q4_lo_nib, _mm256_slli_epi16(qh_lo, 4));
@@ -119,18 +116,20 @@ pub unsafe fn fused_dot_q5k_q8k_avx2(act_q8k: &[u8], weight: &[u8], k: usize) ->
     }
 }
 
-/// Load 32 high bits from qh starting at element offset `elem_off`.
+/// Load the 32 fifth-bits belonging to sub-block `sub_block` (0..8).
 /// Returns __m256i with each byte being 0 or 1.
+///
+/// `qh` is indexed by ELEMENT within the sub-block, and the BIT position is the
+/// sub-block index — one `qh` byte per element carries that element's high bit
+/// for all 8 sub-blocks. It is NOT a flat bitstream over the block's 256 values;
+/// reading it that way silently scrambles which weight each fifth-bit belongs to
+/// (see `dequant_q5k`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn load_high_bits_32(qh: &[u8], elem_off: usize) -> __m256i {
-    // Each element's high bit is at qh[elem/8] bit (elem%8)
-    // For 32 consecutive elements starting at elem_off, we need 4 bytes of qh
-    // Build 32 bytes, each 0 or 1
+unsafe fn load_high_bits_32(qh: &[u8], sub_block: usize) -> __m256i {
     let mut bits = [0u8; 32];
-    for (i, bit) in bits.iter_mut().enumerate() {
-        let idx = elem_off + i;
-        *bit = (qh[idx / 8] >> (idx % 8)) & 1;
+    for (l, bit) in bits.iter_mut().enumerate() {
+        *bit = (qh[l] >> sub_block) & 1;
     }
     unsafe { _mm256_loadu_si256(bits.as_ptr() as *const __m256i) }
 }
@@ -177,18 +176,21 @@ fn fused_dot_q5k_q8k_scalar(act_q8k: &[u8], weight: &[u8], k: usize) -> f32 {
         let mut sumi_mins = 0i32;
 
         for j in 0..8 {
+            // Sub-block pairs share a 32-byte `qs` run; `qh` is indexed by
+            // element with the bit selected by sub-block. See `dequant_q5k`.
+            let qs_base = (j / 2) * 32;
+            let is_high_nibble = j % 2 == 1;
+
             let mut dot = 0i32;
             for l in 0..32 {
-                let idx = j * 32 + l;
-                let qs_idx = j * 16 + l / 2;
-                let low4 = if l % 2 == 0 {
-                    (qs[qs_idx] & 0x0F) as i32
+                let low4 = if is_high_nibble {
+                    ((qs[qs_base + l] >> 4) & 0x0F) as i32
                 } else {
-                    ((qs[qs_idx] >> 4) & 0x0F) as i32
+                    (qs[qs_base + l] & 0x0F) as i32
                 };
-                let high1 = ((qh[idx / 8] >> (idx % 8)) & 1) as i32;
+                let high1 = ((qh[l] >> j) & 1) as i32;
                 let val = low4 | (high1 << 4);
-                dot += val * q8_qs[idx] as i8 as i32;
+                dot += val * q8_qs[j * 32 + l] as i8 as i32;
             }
             sumi += dot * scales[j] as i32;
 

@@ -59,19 +59,21 @@ pub unsafe fn fused_dot_q5k_neon(act: &[f32], blocks: &[u8], k: usize) -> f32 {
             for g in 0..8 {
                 let l_base = g * 4;
 
-                // Build 5-bit values: low4 from qs + high1 from qh
+                // Build 5-bit values: low4 from qs + high1 from qh.
+                // Sub-block pairs share a 32-byte `qs` run; `qh` is indexed by
+                // element with the bit selected by sub-block. See `dequant_q5k`.
+                let qs_base = (j / 2) * 32;
+                let is_high_nibble = j % 2 == 1;
+
                 let mut q_vals = [0u32; 4];
                 for l in 0..4 {
-                    let idx = j * 32 + l_base + l;
-                    let qs_idx = j * 16 + (l_base + l) / 2;
-                    let low4 = if (l_base + l) % 2 == 0 {
-                        qs[qs_idx] & 0x0F
+                    let elem = l_base + l;
+                    let low4 = if is_high_nibble {
+                        (qs[qs_base + elem] >> 4) & 0x0F
                     } else {
-                        (qs[qs_idx] >> 4) & 0x0F
+                        qs[qs_base + elem] & 0x0F
                     };
-                    let qh_byte = idx / 8;
-                    let qh_bit = idx % 8;
-                    let high1 = (qh[qh_byte] >> qh_bit) & 0x01;
+                    let high1 = (qh[elem] >> j) & 0x01;
                     q_vals[l] = (low4 | (high1 << 4)) as u32;
                 }
 

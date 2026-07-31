@@ -21,12 +21,15 @@ pub fn dequant_iq4_nl(blocks: &[u8], output: &mut [f32]) {
         let qs = &block[2..18];
         let out = &mut output[b * BLOCK_SIZE..][..BLOCK_SIZE];
 
-        for i in 0..16 {
-            let byte = qs[i];
+        // Split-half nibble order, as in llama.cpp's `dequantize_row_iq4_nl`:
+        // `y[j]` takes the low nibble, `y[j + QK4_NL/2]` the high nibble of the
+        // SAME byte. See the `dequant_simple` module docs.
+        for j in 0..16 {
+            let byte = qs[j];
             let low = (byte & 0x0F) as usize;
             let high = ((byte >> 4) & 0x0F) as usize;
-            out[i * 2] = d * KVALUES_IQ4NL[low] as f32;
-            out[i * 2 + 1] = d * KVALUES_IQ4NL[high] as f32;
+            out[j] = d * KVALUES_IQ4NL[low] as f32;
+            out[j + 16] = d * KVALUES_IQ4NL[high] as f32;
         }
     }
 }

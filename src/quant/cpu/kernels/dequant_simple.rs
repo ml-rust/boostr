@@ -1,6 +1,24 @@
 //! CPU dequantization kernels for simple block formats
 //!
 //! Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1 — fixed-size blocks with straightforward layouts.
+//!
+//! # Nibble ordering
+//!
+//! The 4-bit formats pack element `j` and element `j + 16` into ONE byte — the
+//! low nibble is the first half of the block, the high nibble the second half.
+//! They are NOT consecutive output positions. llama.cpp's `dequantize_row_q4_0`
+//! is explicit about it:
+//!
+//! ```text
+//! y[i*qk + j + 0    ] = (qs[j] & 0x0F) * d;   // first half
+//! y[i*qk + j + qk/2 ] = (qs[j] >>   4) * d;   // second half
+//! ```
+//!
+//! Writing them to `out[2i]` / `out[2i+1]` instead permutes every weight within
+//! each 32-element block. Nothing errors: shapes, block counts and even the RMS
+//! of the tensor all stay correct, so the model loads and runs and merely
+//! produces wrong numbers. The same split applies to the 5th-bit field in
+//! Q5_0/Q5_1, whose bits are at `j` and `j + 16` of the 32-bit `qh` word.
 
 use half::f16;
 
@@ -21,12 +39,12 @@ pub fn dequant_q4_0(blocks: &[u8], output: &mut [f32]) {
         let qs = &block[2..18];
         let out = &mut output[b * BLOCK_SIZE..][..BLOCK_SIZE];
 
-        for i in 0..16 {
-            let byte = qs[i];
+        for j in 0..16 {
+            let byte = qs[j];
             let low = (byte & 0x0F) as i8 - 8;
             let high = ((byte >> 4) & 0x0F) as i8 - 8;
-            out[i * 2] = low as f32 * d;
-            out[i * 2 + 1] = high as f32 * d;
+            out[j] = low as f32 * d;
+            out[j + 16] = high as f32 * d;
         }
     }
 }
@@ -49,12 +67,12 @@ pub fn dequant_q4_1(blocks: &[u8], output: &mut [f32]) {
         let qs = &block[4..20];
         let out = &mut output[b * BLOCK_SIZE..][..BLOCK_SIZE];
 
-        for i in 0..16 {
-            let byte = qs[i];
+        for j in 0..16 {
+            let byte = qs[j];
             let low = (byte & 0x0F) as f32;
             let high = ((byte >> 4) & 0x0F) as f32;
-            out[i * 2] = d * low + m;
-            out[i * 2 + 1] = d * high + m;
+            out[j] = d * low + m;
+            out[j + 16] = d * high + m;
         }
     }
 }
@@ -77,19 +95,20 @@ pub fn dequant_q5_0(blocks: &[u8], output: &mut [f32]) {
         let qs = &block[6..22];
         let out = &mut output[b * BLOCK_SIZE..][..BLOCK_SIZE];
 
-        for i in 0..16 {
-            let byte = qs[i];
+        for j in 0..16 {
+            let byte = qs[j];
             let low_nibble = byte & 0x0F;
             let high_nibble = (byte >> 4) & 0x0F;
 
-            let hbit_low = ((qh_bits >> (i * 2)) & 1) as u8;
-            let hbit_high = ((qh_bits >> (i * 2 + 1)) & 1) as u8;
+            // 5th bit for the first half is bit `j`; for the second half, `j+16`.
+            let hbit_low = ((qh_bits >> j) & 1) as u8;
+            let hbit_high = ((qh_bits >> (j + 16)) & 1) as u8;
 
             let val_low = ((hbit_low << 4) | low_nibble) as i8 - 16;
             let val_high = ((hbit_high << 4) | high_nibble) as i8 - 16;
 
-            out[i * 2] = val_low as f32 * d;
-            out[i * 2 + 1] = val_high as f32 * d;
+            out[j] = val_low as f32 * d;
+            out[j + 16] = val_high as f32 * d;
         }
     }
 }
@@ -113,19 +132,20 @@ pub fn dequant_q5_1(blocks: &[u8], output: &mut [f32]) {
         let qs = &block[8..24];
         let out = &mut output[b * BLOCK_SIZE..][..BLOCK_SIZE];
 
-        for i in 0..16 {
-            let byte = qs[i];
+        for j in 0..16 {
+            let byte = qs[j];
             let low_nibble = byte & 0x0F;
             let high_nibble = (byte >> 4) & 0x0F;
 
-            let hbit_low = ((qh_bits >> (i * 2)) & 1) as u8;
-            let hbit_high = ((qh_bits >> (i * 2 + 1)) & 1) as u8;
+            // 5th bit for the first half is bit `j`; for the second half, `j+16`.
+            let hbit_low = ((qh_bits >> j) & 1) as u8;
+            let hbit_high = ((qh_bits >> (j + 16)) & 1) as u8;
 
             let val_low = (low_nibble | (hbit_low << 4)) as f32;
             let val_high = (high_nibble | (hbit_high << 4)) as f32;
 
-            out[i * 2] = d * val_low + m;
-            out[i * 2 + 1] = d * val_high + m;
+            out[j] = d * val_low + m;
+            out[j + 16] = d * val_high + m;
         }
     }
 }

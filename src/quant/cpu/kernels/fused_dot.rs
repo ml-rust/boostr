@@ -41,13 +41,16 @@ fn fused_dot_q4_0(act: &[f32], blocks: &[u8], k: usize) -> f32 {
         let qs = &block[2..18];
         let act_block = &act[b * BLOCK_SIZE..][..BLOCK_SIZE];
 
+        // Element `j` and element `j + 16` share one byte — the low nibble is
+        // the first half of the block, the high nibble the second half. See the
+        // module docs on `dequant_simple`.
         let mut block_sum = 0.0f32;
-        for i in 0..16 {
-            let byte = qs[i];
+        for j in 0..16 {
+            let byte = qs[j];
             let low = (byte & 0x0F) as i8 - 8;
             let high = ((byte >> 4) & 0x0F) as i8 - 8;
-            block_sum += act_block[i * 2] * low as f32;
-            block_sum += act_block[i * 2 + 1] * high as f32;
+            block_sum += act_block[j] * low as f32;
+            block_sum += act_block[j + 16] * high as f32;
         }
         sum += d * block_sum;
     }
@@ -155,18 +158,19 @@ fn fused_dot_q5k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
             let mut dot_sum = 0.0f32;
             let mut act_sum = 0.0f32;
 
+            // Sub-block pairs share a 32-byte `qs` run; `qh` is indexed by
+            // element with the bit selected by sub-block. See `dequant_q5k`.
+            let qs_base = (j / 2) * 32;
+            let is_high_nibble = j % 2 == 1;
+
             #[allow(clippy::needless_range_loop)]
             for l in 0..32 {
-                let idx = j * 32 + l;
-                let qs_idx = j * 16 + l / 2;
-                let low4 = if l % 2 == 0 {
-                    qs[qs_idx] & 0x0F
+                let low4 = if is_high_nibble {
+                    (qs[qs_base + l] >> 4) & 0x0F
                 } else {
-                    (qs[qs_idx] >> 4) & 0x0F
+                    qs[qs_base + l] & 0x0F
                 };
-                let qh_byte = idx / 8;
-                let qh_bit = idx % 8;
-                let high1 = (qh[qh_byte] >> qh_bit) & 0x01;
+                let high1 = (qh[l] >> j) & 0x01;
                 let q = (low4 | (high1 << 4)) as f32;
 
                 dot_sum += act_sub[l] * q;

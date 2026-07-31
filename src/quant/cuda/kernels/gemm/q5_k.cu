@@ -34,13 +34,18 @@ extern "C" __global__ void quant_matmul_q5_k_f32(
         for (int j = 0; j < 8; j++) {
             float dl = d * (float)scales[j];
             float ml = dmin * (float)mins[j];
+            // Sub-block PAIRS share one 32-byte run of qs (even sub-block takes
+            // the low nibbles, odd the high nibbles of the SAME bytes), and qh
+            // is indexed by ELEMENT with the BIT selected by sub-block index.
+            // Must match the CPU `dequant_q5k` / llama.cpp exactly.
+            int qs_base = (j / 2) * 32;
+            int is_high_nibble = j % 2;
             for (int l = 0; l < 32; l++) {
-                int idx = j * 32 + l;
-                int qs_idx = j * 16 + l / 2;
-                int low4 = (l % 2 == 0) ? (qs[qs_idx] & 0x0F) : ((qs[qs_idx] >> 4) & 0x0F);
-                int high1 = (qh[idx / 8] >> (idx % 8)) & 0x01;
+                int low4 = is_high_nibble ? ((qs[qs_base + l] >> 4) & 0x0F)
+                                          : (qs[qs_base + l] & 0x0F);
+                int high1 = (qh[l] >> j) & 0x01;
                 float q = (float)(low4 | (high1 << 4));
-                sum += act_row[base + idx] * (dl * q - ml);
+                sum += act_row[base + j * 32 + l] * (dl * q - ml);
             }
         }
     }

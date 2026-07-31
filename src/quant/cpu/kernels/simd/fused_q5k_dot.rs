@@ -50,31 +50,28 @@ pub unsafe fn fused_dot_q5k_avx2(act: &[f32], blocks: &[u8], k: usize) -> f32 {
             let dl_vec = _mm256_set1_ps(dl);
             let ml_vec = _mm256_set1_ps(ml);
 
+            // Sub-block PAIRS share one 32-byte run of `qs`; `qh` is indexed by
+            // element with the BIT selected by sub-block index. Must match
+            // `dequant_q5k` (and llama.cpp) exactly — see that function for what
+            // a mis-index costs.
+            let qs_base = (j / 2) * 32;
+            let is_high_nibble = j % 2 == 1;
+
             // Process 32 elements in 4 groups of 8
             for g in 0..4 {
                 let l_base = g * 8;
-                let idx_base = j * 32 + l_base; // global element index within block
 
                 unsafe {
-                    // Load 8 bytes of qs, compute qs_idx = j*16 + (l_base+i)/2
-                    // For each element l in sub-block j:
-                    //   qs_idx = j*16 + l/2
-                    //   low4 = (l%2==0) ? qs[qs_idx] & 0xF : qs[qs_idx] >> 4
-                    //   high1 = (qh[idx/8] >> (idx%8)) & 1
-                    //   value = low4 | (high1 << 4)
-
                     // Build 8 values manually (SIMD gather would be slower for this pattern)
                     let mut vals = [0i32; 8];
                     for (i, val) in vals.iter_mut().enumerate() {
                         let l = l_base + i;
-                        let idx = idx_base + i;
-                        let qs_idx = j * 16 + l / 2;
-                        let low4 = if l % 2 == 0 {
-                            (qs[qs_idx] & 0x0F) as i32
+                        let low4 = if is_high_nibble {
+                            ((qs[qs_base + l] >> 4) & 0x0F) as i32
                         } else {
-                            ((qs[qs_idx] >> 4) & 0x0F) as i32
+                            (qs[qs_base + l] & 0x0F) as i32
                         };
-                        let high1 = ((qh[idx / 8] >> (idx % 8)) & 1) as i32;
+                        let high1 = ((qh[l] >> j) & 1) as i32;
                         *val = low4 | (high1 << 4);
                     }
 

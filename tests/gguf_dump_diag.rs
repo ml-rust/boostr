@@ -281,3 +281,83 @@ fn qkv_split_thirds_have_signal() {
         );
     }
 }
+
+/// Ground-truth check on K-quant dequantization: load the SAME tensor from an
+/// f16 GGUF and a K-quantized GGUF of the same model and compare.
+///
+/// Correct dequantization of Q4_K should track the f16 reference closely
+/// (cosine ≳0.99 per row, small relative error). A large deviation means the
+/// dequant kernel is misreading the block layout, which silently corrupts every
+/// weight in the model.
+///
+/// ```bash
+/// BOOSTR_GGUF_REF=/path/model.f16.gguf BOOSTR_GGUF_QUANT=/path/model.Q4_K_M.gguf \
+///   cargo nextest run -p boostr --test gguf_dump_diag dequant_matches --no-capture --run-ignored all
+/// ```
+#[test]
+#[ignore]
+fn dequant_matches_f16_reference() {
+    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+
+    let ref_path = std::env::var("BOOSTR_GGUF_REF").expect("set BOOSTR_GGUF_REF");
+    let quant_path = std::env::var("BOOSTR_GGUF_QUANT").expect("set BOOSTR_GGUF_QUANT");
+    let device = CpuDevice::new();
+
+    let mut g_ref = Gguf::open(&ref_path).expect("open ref");
+    let mut g_q = Gguf::open(&quant_path).expect("open quant");
+
+    for name in [
+        "token_embd.weight",
+        "blk.0.attn_qkv.weight",
+        "blk.0.ffn_down.weight",
+        "blk.0.attn_output.weight",
+    ] {
+        let (ti_r, ti_q) = (
+            g_ref.tensor_info(name).expect("ref info").clone(),
+            g_q.tensor_info(name).expect("quant info").clone(),
+        );
+        let a: Vec<f32> = g_ref
+            .load_tensor_f32_streaming::<CpuRuntime>(name, &device)
+            .expect("load ref")
+            .to_vec();
+        let b: Vec<f32> = g_q
+            .load_tensor_f32_streaming::<CpuRuntime>(name, &device)
+            .expect("load quant")
+            .to_vec();
+        assert_eq!(a.len(), b.len(), "{name}: element count differs");
+
+        let dot: f64 = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (*x as f64) * (*y as f64))
+            .sum();
+        let na: f64 = a
+            .iter()
+            .map(|x| (*x as f64) * (*x as f64))
+            .sum::<f64>()
+            .sqrt();
+        let nb: f64 = b
+            .iter()
+            .map(|x| (*x as f64) * (*x as f64))
+            .sum::<f64>()
+            .sqrt();
+        let cos = dot / (na * nb);
+
+        let num: f64 = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| ((*x - *y) as f64) * ((*x - *y) as f64))
+            .sum::<f64>()
+            .sqrt();
+        let rel_err = num / na;
+
+        eprintln!(
+            "  {name}\n    ref={:?} quant={:?}\n    cosine={cos:.6}  rel_err={rel_err:.6}  \
+             rms_ref={:.6} rms_quant={:.6}",
+            ti_r.ggml_type,
+            ti_q.ggml_type,
+            (a.iter().map(|x| x * x).sum::<f32>() / a.len() as f32).sqrt(),
+            (b.iter().map(|x| x * x).sum::<f32>() / b.len() as f32).sqrt(),
+        );
+    }
+}

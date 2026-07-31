@@ -75,32 +75,35 @@ __device__ __forceinline__ unsigned long long load_u64(const unsigned char* p) {
 
 __device__ void dq_q4_0(const unsigned char* b, float* out) {
     float d = load_f16_as_f32(b);
-    for (int i = 0; i < 16; i++) {
-        unsigned char v = b[2 + i];
-        out[i*2]   = (float)((int)(v & 0x0F) - 8) * d;
-        out[i*2+1] = (float)((int)((v>>4) & 0x0F) - 8) * d;
+    // Split-half nibble order: element j takes the low nibble, element j+16 the
+    // high nibble of the SAME byte (llama.cpp dequantize_row_q4_0).
+    for (int j = 0; j < 16; j++) {
+        unsigned char v = b[2 + j];
+        out[j]      = (float)((int)(v & 0x0F) - 8) * d;
+        out[j + 16] = (float)((int)((v>>4) & 0x0F) - 8) * d;
     }
 }
 
 __device__ void dq_q4_1(const unsigned char* b, float* out) {
     float d = load_f16_as_f32(b);
     float m = load_f16_as_f32(b+2);
-    for (int i = 0; i < 16; i++) {
-        unsigned char v = b[4+i];
-        out[i*2]   = d * (float)(v & 0x0F) + m;
-        out[i*2+1] = d * (float)((v>>4) & 0x0F) + m;
+    for (int j = 0; j < 16; j++) {
+        unsigned char v = b[4+j];
+        out[j]      = d * (float)(v & 0x0F) + m;
+        out[j + 16] = d * (float)((v>>4) & 0x0F) + m;
     }
 }
 
 __device__ void dq_q5_0(const unsigned char* b, float* out) {
     float d = load_f16_as_f32(b);
     unsigned int qh = load_u32(b+2);
-    for (int i = 0; i < 16; i++) {
-        unsigned char v = b[6+i];
-        int lo  = (v & 0x0F) | (((qh >> (i*2))   & 1) << 4);
-        int hi  = ((v>>4) & 0x0F) | (((qh >> (i*2+1)) & 1) << 4);
-        out[i*2]   = (float)(lo - 16) * d;
-        out[i*2+1] = (float)(hi - 16) * d;
+    for (int j = 0; j < 16; j++) {
+        unsigned char v = b[6+j];
+        // 5th bit: bit j for the first half, bit j+16 for the second.
+        int lo  = (v & 0x0F) | (((qh >> j) & 1) << 4);
+        int hi  = ((v>>4) & 0x0F) | (((qh >> (j + 16)) & 1) << 4);
+        out[j]      = (float)(lo - 16) * d;
+        out[j + 16] = (float)(hi - 16) * d;
     }
 }
 
@@ -108,12 +111,13 @@ __device__ void dq_q5_1(const unsigned char* b, float* out) {
     float d = load_f16_as_f32(b);
     float m = load_f16_as_f32(b+2);
     unsigned int qh = load_u32(b+4);
-    for (int i = 0; i < 16; i++) {
-        unsigned char v = b[8+i];
-        int lo  = (v & 0x0F) | (((qh >> (i*2))   & 1) << 4);
-        int hi  = ((v>>4) & 0x0F) | (((qh >> (i*2+1)) & 1) << 4);
-        out[i*2]   = d * (float)lo + m;
-        out[i*2+1] = d * (float)hi + m;
+    for (int j = 0; j < 16; j++) {
+        unsigned char v = b[8+j];
+        // 5th bit: bit j for the first half, bit j+16 for the second.
+        int lo  = (v & 0x0F) | (((qh >> j) & 1) << 4);
+        int hi  = ((v>>4) & 0x0F) | (((qh >> (j + 16)) & 1) << 4);
+        out[j]      = d * (float)lo + m;
+        out[j + 16] = d * (float)hi + m;
     }
 }
 
@@ -237,12 +241,16 @@ __device__ void dq_q5k(const unsigned char* b, float* out) {
     }
     for (int j = 0; j < 8; j++) {
         float dl = d * (float)scales[j], ml = dmin * (float)mins[j];
+        // Sub-block PAIRS share one 32-byte run of qs; qh is indexed by ELEMENT
+        // with the BIT selected by sub-block index. Must match the CPU
+        // `dequant_q5k` / llama.cpp exactly.
+        int qs_base = (j / 2) * 32;
+        int is_high_nibble = j % 2;
         for (int l = 0; l < 32; l++) {
-            int idx = j*32+l;
-            int qs_idx = j*16 + l/2;
-            int low4 = (l%2==0) ? (qs[qs_idx] & 0x0F) : ((qs[qs_idx]>>4) & 0x0F);
-            int high1 = (qh[idx/8] >> (idx%8)) & 0x01;
-            out[idx] = dl * (float)(low4 | (high1<<4)) - ml;
+            int low4 = is_high_nibble ? ((qs[qs_base + l] >> 4) & 0x0F)
+                                      : (qs[qs_base + l] & 0x0F);
+            int high1 = (qh[l] >> j) & 0x01;
+            out[j*32 + l] = dl * (float)(low4 | (high1<<4)) - ml;
         }
     }
 }

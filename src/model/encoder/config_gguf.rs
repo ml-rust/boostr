@@ -36,6 +36,24 @@ impl EncoderConfig {
             return Self::from_gguf_metadata_nomic(metadata);
         }
 
+        // Anything else falls through to the BERT namespace below. Say so here
+        // rather than letting it fail on a missing `bert.*` key: a `qwen3` file
+        // reported "GGUF missing bert.embedding_length", which names the wrong
+        // architecture and reads like a corrupt file rather than an unsupported
+        // one.
+        let arch = metadata
+            .get_string("general.architecture")
+            .unwrap_or("<unset>");
+        if metadata.get_u32("bert.embedding_length").is_none() {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "unsupported encoder architecture '{arch}': no `bert.*` metadata found. \
+                     Supported: bert, nomic-bert, gemma-embedding (XLM-RoBERTa loads via the \
+                     bert namespace)."
+                ),
+            });
+        }
+
         let hidden_size =
             metadata
                 .get_u32("bert.embedding_length")

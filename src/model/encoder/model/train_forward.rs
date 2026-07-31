@@ -3,10 +3,11 @@
 //! These keep the full autograd graph across layers (used for training).
 //! For inference see `encode_inference` / `embed_inference` in `mod.rs`.
 
-use super::{Encoder, EncoderClient, Pooling};
+use super::layer::SpanMasks;
+use super::pooling::pool_padded;
+use super::{Encoder, EncoderClient};
 use crate::error::{Error, Result};
-use crate::model::encoder::config::ArchFamily;
-use numr::autograd::{Var, var_add, var_narrow, var_reshape};
+use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{IndexingOps, ScalarOps, TensorOps};
 use numr::runtime::Runtime;
@@ -52,10 +53,9 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             tok_emb
         };
 
-        // NomicBert and Gemma use RoPE; skip learned position embedding add.
-        let tok_emb = if self.config.arch_family == ArchFamily::NomicBert
-            || self.config.arch_family == ArchFamily::GemmaEmbedding
-        {
+        // RoPE families derive positions inside each layer; skip the learned
+        // absolute position embedding add.
+        let tok_emb = if self.config.arch_family.uses_rope() {
             tok_emb
         } else {
             let pos_tensor = self.position_ids_tensor(input_ids, &shape, seq_len);
@@ -76,11 +76,17 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             tok_emb
         };
 
-        let mut hidden = self.embed_norm.forward(client, &tok_emb)?;
+        let mut hidden = match &self.embed_norm {
+            Some(norm) => norm.forward(client, &tok_emb)?,
+            None => tok_emb,
+        };
+
+        let span_masks = SpanMasks::build(&self.config, seq_len, input_ids.device());
 
         for layer in &self.layers {
             // Training path is padded only; varlen is inference-only.
-            hidden = layer.forward(client, &hidden, attention_mask, None)?;
+            let span = span_masks.for_spec(layer.attn);
+            hidden = layer.forward(client, &hidden, attention_mask, span, None)?;
         }
 
         // Gemma: apply final output_norm (RMSNorm) to all hidden states before pooling.
@@ -108,46 +114,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
     {
         let hidden = self.encode(client, input_ids, attention_mask)?;
-
-        match self.pooling {
-            Pooling::Mean => {
-                let pooled = if let Some(mask) = attention_mask {
-                    let mask_shape = mask.shape().to_vec();
-                    let batch = mask_shape[0];
-                    let seq_len = mask_shape[1];
-                    let hidden_size = self.config.hidden_size;
-
-                    let mask_3d = mask.reshape(&[batch, seq_len, 1]).map_err(Error::Numr)?;
-                    let masked = client.mul(hidden.tensor(), &mask_3d).map_err(Error::Numr)?;
-                    let summed = client.sum(&masked, &[1], false).map_err(Error::Numr)?;
-                    let token_counts = client.sum(mask, &[1], true).map_err(Error::Numr)?;
-                    let token_counts = client
-                        .maximum(
-                            &token_counts,
-                            &Tensor::from_slice(&[1.0f32], &[1], mask.device()),
-                        )
-                        .map_err(Error::Numr)?;
-                    let _ = hidden_size;
-                    let pooled_t = client.div(&summed, &token_counts).map_err(Error::Numr)?;
-                    Var::new(pooled_t, false)
-                } else {
-                    Var::new(
-                        client
-                            .mean(hidden.tensor(), &[1], false)
-                            .map_err(Error::Numr)?,
-                        false,
-                    )
-                };
-                Ok(pooled)
-            }
-            Pooling::Cls => {
-                let cls = var_narrow(&hidden, 1, 0, 1).map_err(Error::Numr)?;
-                let cls = Var::new(cls.tensor().contiguous()?, false);
-                let shape = cls.shape().to_vec();
-                let batch = shape[0];
-                let hidden_dim = shape[2];
-                var_reshape(&cls, &[batch, hidden_dim]).map_err(Error::Numr)
-            }
-        }
+        let pooled = pool_padded(client, hidden.tensor(), attention_mask, self.pooling, None)?;
+        Ok(Var::new(pooled, false))
     }
 }

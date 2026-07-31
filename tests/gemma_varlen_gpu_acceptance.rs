@@ -16,7 +16,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use boostr::model::encoder::{
-    config::{ArchFamily, EncoderConfig, FfnVariant, HiddenAct},
+    config::{ArchFamily, EncoderConfig, FfnVariant, NormScheme},
     model::{Encoder, Pooling},
 };
 use boostr::nn::Weight;
@@ -54,21 +54,14 @@ fn make_cuda_gemma_encoder(device: &CudaDevice, client: &CudaClient) -> Encoder<
         intermediate_size: INTER,
         max_position_embeddings: MAX_POS,
         layer_norm_eps: 1e-6,
-        hidden_act: HiddenAct::Gelu,
-        type_vocab_size: 0,
         arch_family: ArchFamily::GemmaEmbedding,
-        padding_token_id: 0,
-        compute_dtype: DType::F32,
-        rope_freq_base: 10000.0,
-        causal: false,
         ffn_variant: FfnVariant::GatedGelu,
-        token_type_embed_size: 0,
+        norm_scheme: NormScheme::Sandwich,
         num_kv_heads: KV_HEADS,
         head_dim_explicit: Some(HEAD_DIM),
         rms_eps: 1e-6,
-        sliding_window: None,
         embed_scale: true,
-        max_tokens_per_forward: None,
+        ..Default::default()
     };
 
     let d = device;

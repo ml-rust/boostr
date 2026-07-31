@@ -157,20 +157,31 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
         //   - BERT or XLM-RoBERTa AND head_dim ∈ {64, 128}
         //     (varlen CUDA kernel supports only those two head dims; nonstandard
         //      head dims fall through to the padded path which always works).
-        let arch = self.encoder.config().arch_family;
+        let cfg = self.encoder.config();
+        let arch = cfg.arch_family;
+        // The varlen kernel cannot apply a bounded attention span, so a model
+        // whose sliding window would actually bind at this batch's longest
+        // sequence must take the padded path — which does mask — rather than
+        // silently returning unwindowed results.
+        let longest = all_ids.iter().map(|ids| ids.len()).max().unwrap_or(0);
+        let span_allows_varlen = cfg.varlen_span_is_unconstrained(longest);
+
         let use_varlen = match arch {
             ArchFamily::NomicBert => true,
             ArchFamily::Bert | ArchFamily::XlmRoberta => {
-                let hd = self.encoder.config().head_dim();
+                let hd = cfg.head_dim();
                 hd == 64 || hd == 128
             }
             // Route Gemma to varlen when head_dim ∈ {64, 128, 256}.
             // The CPU varlen path supports head_dim=256 + GQA.
             // Nonstandard head dims fall through to padded (always correct).
             ArchFamily::GemmaEmbedding => {
-                let hd = self.encoder.config().resolved_head_dim();
-                hd == 64 || hd == 128 || hd == 256
+                let hd = cfg.resolved_head_dim();
+                span_allows_varlen && (hd == 64 || hd == 128 || hd == 256)
             }
+            // Causal: the varlen kernel is invoked non-causally here, so the
+            // padded path is the only correct one.
+            ArchFamily::Qwen3 => false,
         };
         if use_varlen {
             return self.embed_texts_varlen(client, &all_ids);
@@ -396,12 +407,14 @@ where
         config.compute_dtype = preferred_compute_dtype::<R>();
         let d = &device;
 
+        let pooling = Pooling::for_arch(config.arch_family);
+
         let encoder = match config.arch_family {
             super::config::ArchFamily::NomicBert => {
                 // Obtain a default client to satisfy from_weights_nomic's C bound.
                 // compute_dtype remains F32 on this path so no casts are issued.
                 let client = R::default_client(d);
-                Encoder::from_weights_nomic(config, Pooling::Mean, &client, |gguf_name| {
+                Encoder::from_weights_nomic(config, pooling, &client, |gguf_name| {
                     gguf.load_tensor_f32::<R>(gguf_name, d)
                         .map(Weight::Standard)
                 })?
@@ -410,12 +423,19 @@ where
                 // Obtain a default client to satisfy from_weights_gemma's C bound.
                 // compute_dtype remains F32 on this path so no casts are issued.
                 let client = R::default_client(d);
-                Encoder::from_weights_gemma(config, Pooling::Mean, &client, |gguf_name| {
+                Encoder::from_weights_gemma(config, pooling, &client, |gguf_name| {
                     gguf.load_tensor_f32::<R>(gguf_name, d)
                         .map(Weight::Standard)
                 })?
             }
-            _ => Encoder::from_weights(config, Pooling::Mean, |hf_name| {
+            super::config::ArchFamily::Qwen3 => {
+                let client = R::default_client(d);
+                Encoder::from_weights_qwen3(config, pooling, &client, |gguf_name| {
+                    gguf.load_tensor_f32::<R>(gguf_name, d)
+                        .map(Weight::Standard)
+                })?
+            }
+            _ => Encoder::from_weights(config, pooling, |hf_name| {
                 let gguf_name = hf_name_to_gguf(hf_name);
                 gguf.load_tensor_f32::<R>(&gguf_name, d)
             })?,

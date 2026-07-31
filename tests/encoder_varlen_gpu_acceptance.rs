@@ -58,22 +58,12 @@ fn make_cuda_encoder(device: &CudaDevice, client: &CudaClient) -> Encoder<CudaRu
         num_attention_heads: HEADS,
         intermediate_size: INTER,
         max_position_embeddings: MAX_POS,
-        layer_norm_eps: 1e-12,
-        hidden_act: HiddenAct::Gelu,
         type_vocab_size: 2,
         arch_family: ArchFamily::NomicBert,
-        padding_token_id: 0,
-        compute_dtype: DType::F32,
-        rope_freq_base: 10000.0,
-        causal: false,
         ffn_variant: FfnVariant::GatedSilu,
         token_type_embed_size: 2,
         num_kv_heads: HEADS,
-        head_dim_explicit: None,
-        rms_eps: 1e-6,
-        sliding_window: None,
-        embed_scale: false,
-        max_tokens_per_forward: None,
+        ..Default::default()
     };
 
     let d = device;

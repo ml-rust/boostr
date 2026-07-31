@@ -10,19 +10,23 @@
 //! - Token embedding scale: multiply by sqrt(hidden_size) after lookup.
 //! - Final output_norm (RMSNorm) applied to all hidden states before mean pooling.
 //! - No learned absolute position embedding; no token-type embedding; no biases anywhere.
-//! - Bidirectional (full) attention. The sliding_window from GGUF is stored in config
-//!   but not enforced — our embedding sessions are well within the window size.
+//! - Interleaved attention: blocks alternate local/global on a fixed period.
+//!   Local blocks rotate at the local RoPE base and attend within a symmetric
+//!   window; global blocks rotate at the global base and attend fully. Both
+//!   properties come from `EncoderConfig::layer_attention`, so a block's RoPE
+//!   cache and its attention mask can never disagree.
 
 use crate::error::{Error, Result};
 use crate::model::encoder::config::{EncoderConfig, FfnVariant};
 use crate::model::encoder::model::layer::{EncoderLayer, NormLayer};
 use crate::model::encoder::model::{Encoder, Pooling};
-use crate::nn::{Embedding, LayerNorm, Linear, MaybeQuantLinear, RmsNorm, RoPE, Weight};
+use crate::nn::{Embedding, Linear, MaybeQuantLinear, RmsNorm, RoPE, Weight};
 use crate::quant::traits::DequantOps;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 impl<R: Runtime<DType = DType>> Encoder<R> {
@@ -110,32 +114,46 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             Tensor::<R>::from_slice(&vec![0.0f32; hidden_size], &[1, hidden_size], &device);
         let position_embed = Embedding::new(maybe_cast(sentinel_raw)?, false);
 
-        // Gemma has no token_embd_norm. Use an identity LayerNorm (weight=1, bias=0).
-        // This is the least-invasive approach: no Option wrapping, no change to the
-        // forward path that always calls embed_norm.
-        let identity_w =
-            Tensor::<R>::from_slice(&vec![1.0f32; hidden_size], &[hidden_size], &device);
-        let identity_b =
-            Tensor::<R>::from_slice(&vec![0.0f32; hidden_size], &[hidden_size], &device);
-        let embed_norm =
-            LayerNorm::new(maybe_cast(identity_w)?, maybe_cast(identity_b)?, eps, false);
+        // No token_embd_norm tensor in this architecture, and no norm is applied
+        // to the embeddings before the first block. A unit-weight LayerNorm is
+        // NOT a stand-in: it would still mean-centre and rescale the residual
+        // stream that every block downstream reads.
 
-        // Precompute RoPE frequency cache; share across all layers via Arc.
-        // On the F16 path, cast caches to F16 so rope.forward runs without per-token casts.
-        let mut rope = RoPE::<R>::precompute_freqs(
-            config.max_position_embeddings,
-            head_dim,
-            config.rope_freq_base,
-            None,
-            &device,
-        );
-        if cdtype == DType::F16 {
-            rope.cast_caches(DType::F16);
+        // Precompute one RoPE cache per distinct base — two for an interleaved
+        // model (global + local), one otherwise — and share them across blocks
+        // via Arc. Building one cache per block would be correct but would hold
+        // 24 copies of the same two tables.
+        //
+        // On the F16 path, cast caches to F16 so rope.forward runs without
+        // per-token casts.
+        let mut rope_caches: HashMap<u32, Arc<RoPE<R>>> = HashMap::new();
+        for base in config.distinct_rope_bases() {
+            let mut rope = RoPE::<R>::precompute_freqs(
+                config.max_position_embeddings,
+                head_dim,
+                base,
+                None,
+                &device,
+            );
+            if cdtype == DType::F16 {
+                rope.cast_caches(DType::F16);
+            }
+            rope_caches.insert(base.to_bits(), Arc::new(rope));
         }
-        let rope = Arc::new(rope);
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
+            // Single source of truth for this block: RoPE base AND window.
+            let attn = config.layer_attention(i);
+            let rope = rope_caches
+                .get(&attn.rope_freq_base.to_bits())
+                .ok_or_else(|| Error::ModelError {
+                    reason: format!(
+                        "no RoPE cache for base {} required by block {i}",
+                        attn.rope_freq_base
+                    ),
+                })?;
+
             // Pre-attention RMSNorm (sandwich: applied to input before attention sublayer).
             let attn_norm_w = extract_f32(
                 get(&format!("blk.{i}.attn_norm.weight"))?,
@@ -216,7 +234,9 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
                 head_dim,
                 hidden_act: config.hidden_act,
                 ffn_variant: FfnVariant::GatedGelu,
-                rope: Some(Arc::clone(&rope)),
+                norm_scheme: config.norm_scheme,
+                attn,
+                rope: Some(Arc::clone(rope)),
                 q_norm,
                 k_norm,
                 post_attn_norm,
@@ -232,7 +252,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             config,
             token_embed,
             position_embed,
-            embed_norm,
+            embed_norm: None,
             layers,
             pooling,
             token_type_embed: None,

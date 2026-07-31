@@ -24,10 +24,9 @@
 
 use boostr::error::Result;
 use boostr::model::encoder::{
-    config::{ArchFamily, EncoderConfig, FfnVariant, HiddenAct},
+    config::{ArchFamily, EncoderConfig},
     model::{Encoder, Pooling},
 };
-use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 
@@ -61,22 +60,9 @@ fn make_encoder(
         num_attention_heads: heads,
         intermediate_size: inter,
         max_position_embeddings: max_pos,
-        layer_norm_eps: 1e-12,
-        hidden_act: HiddenAct::Gelu,
-        type_vocab_size: 0,
         arch_family: arch,
         padding_token_id,
-        compute_dtype: DType::F32,
-        rope_freq_base: 10000.0,
-        causal: false,
-        ffn_variant: FfnVariant::Standard,
-        token_type_embed_size: 0,
-        num_kv_heads: 0,
-        head_dim_explicit: None,
-        rms_eps: 1e-6,
-        sliding_window: None,
-        embed_scale: false,
-        max_tokens_per_forward: None,
+        ..Default::default()
     };
 
     // Non-uniform position embeddings: position i → value (i+1)*0.1 in every dim.

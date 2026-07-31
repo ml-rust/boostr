@@ -9,10 +9,28 @@
 
 use boostr::format::gguf::Gguf;
 
+/// Path from an env var, or `None` after noting why the diagnostic is skipping.
+///
+/// These are `#[ignore]`d diagnostics that need real model files. Skipping —
+/// rather than panicking — means a `--run-ignored all` sweep that sets only some
+/// of the variables still exercises the diagnostics it has inputs for, instead
+/// of one unset variable failing the whole run.
+fn env_path(key: &str) -> Option<String> {
+    match std::env::var(key) {
+        Ok(v) => Some(v),
+        Err(_) => {
+            eprintln!("skipping: environment variable {key} is not set");
+            None
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn dump_gguf_metadata_and_tensors() {
-    let path = std::env::var("BOOSTR_GGUF_DUMP").expect("set BOOSTR_GGUF_DUMP");
+    let Some(path) = env_path("BOOSTR_GGUF_DUMP") else {
+        return;
+    };
     let gguf = Gguf::open(&path).expect("open gguf");
     let md = gguf.metadata();
 
@@ -65,7 +83,9 @@ fn dump_gguf_metadata_and_tensors() {
 fn dump_tokenizer_output() {
     use boostr::format::gguf_tokenizer::GgufTokenizer;
 
-    let path = std::env::var("BOOSTR_GGUF_DUMP").expect("set BOOSTR_GGUF_DUMP");
+    let Some(path) = env_path("BOOSTR_GGUF_DUMP") else {
+        return;
+    };
     let gguf = Gguf::open(&path).expect("open gguf");
     let tok = GgufTokenizer::from_gguf(&gguf).expect("tokenizer");
 
@@ -86,7 +106,9 @@ fn dump_tokenizer_output() {
 fn tokenizer_round_trip_and_vocab_probe() {
     use boostr::format::gguf_tokenizer::GgufTokenizer;
 
-    let path = std::env::var("BOOSTR_GGUF_DUMP").expect("set BOOSTR_GGUF_DUMP");
+    let Some(path) = env_path("BOOSTR_GGUF_DUMP") else {
+        return;
+    };
     let gguf = Gguf::open(&path).expect("open gguf");
     let md = gguf.metadata();
 
@@ -127,7 +149,9 @@ fn tokenizer_round_trip_and_vocab_probe() {
 #[test]
 #[ignore]
 fn vocab_marker_census() {
-    let path = std::env::var("BOOSTR_GGUF_DUMP").expect("set BOOSTR_GGUF_DUMP");
+    let Some(path) = env_path("BOOSTR_GGUF_DUMP") else {
+        return;
+    };
     let gguf = Gguf::open(&path).expect("open gguf");
     let toks = gguf
         .metadata()
@@ -165,7 +189,9 @@ fn vocab_marker_census() {
 #[test]
 #[ignore]
 fn vocab_punctuation_probe() {
-    let path = std::env::var("BOOSTR_GGUF_DUMP").expect("set BOOSTR_GGUF_DUMP");
+    let Some(path) = env_path("BOOSTR_GGUF_DUMP") else {
+        return;
+    };
     let gguf = Gguf::open(&path).expect("open gguf");
     let toks = gguf
         .metadata()
@@ -198,7 +224,9 @@ fn vocab_punctuation_probe() {
 fn token_embedding_rows_are_distinct() {
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
-    let path = std::env::var("BOOSTR_GGUF_DUMP").expect("set BOOSTR_GGUF_DUMP");
+    let Some(path) = env_path("BOOSTR_GGUF_DUMP") else {
+        return;
+    };
     let mut gguf = Gguf::open(&path).expect("open gguf");
     let info = gguf.tensor_info("token_embd.weight").expect("info").clone();
     eprintln!("  token_embd.weight gguf shape = {:?}", info.shape);
@@ -245,7 +273,9 @@ fn token_embedding_rows_are_distinct() {
 fn qkv_split_thirds_have_signal() {
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
-    let path = std::env::var("BOOSTR_GGUF_DUMP").expect("set BOOSTR_GGUF_DUMP");
+    let Some(path) = env_path("BOOSTR_GGUF_DUMP") else {
+        return;
+    };
     let mut gguf = Gguf::open(&path).expect("open gguf");
     let info = gguf
         .tensor_info("blk.0.attn_qkv.weight")
@@ -299,8 +329,12 @@ fn qkv_split_thirds_have_signal() {
 fn dequant_matches_f16_reference() {
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
-    let ref_path = std::env::var("BOOSTR_GGUF_REF").expect("set BOOSTR_GGUF_REF");
-    let quant_path = std::env::var("BOOSTR_GGUF_QUANT").expect("set BOOSTR_GGUF_QUANT");
+    let Some(ref_path) = env_path("BOOSTR_GGUF_REF") else {
+        return;
+    };
+    let Some(quant_path) = env_path("BOOSTR_GGUF_QUANT") else {
+        return;
+    };
     let device = CpuDevice::new();
 
     let mut g_ref = Gguf::open(&ref_path).expect("open ref");
@@ -366,7 +400,9 @@ fn dequant_matches_f16_reference() {
 #[test]
 #[ignore]
 fn gemma_attention_params() {
-    let path = std::env::var("BOOSTR_GGUF_DUMP").expect("set BOOSTR_GGUF_DUMP");
+    let Some(path) = env_path("BOOSTR_GGUF_DUMP") else {
+        return;
+    };
     let gguf = Gguf::open(&path).expect("open gguf");
     let md = gguf.metadata();
     for k in [

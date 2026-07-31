@@ -10,17 +10,15 @@
 //!   `CapturedGraph` (holds graph + I/O tensor Arc clones) in `CapturedForward`.
 //! - Hit: H2D-copy fresh inputs into captured buffers, replay graph via `cuGraphLaunch`.
 
-use numr::autograd::{Var, var_narrow, var_reshape};
-use numr::dtype::DType;
-use numr::ops::{BinaryOps, IndexingOps, ReduceOps, ScalarOps, TensorOps};
 use numr::runtime::Runtime;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use crate::error::{Error, Result};
-use crate::model::encoder::config::EncoderConfig;
 use crate::model::encoder::model::graph_cache::CapturedForward;
-use crate::model::encoder::model::{Encoder, EncoderClient, Pooling};
+use crate::model::encoder::model::layer::SpanMasks;
+use crate::model::encoder::model::pooling::pool_padded;
+use crate::model::encoder::model::{Encoder, EncoderClient};
 
 /// Called from `Encoder::embed_inference` for every runtime when `cuda` feature is on.
 ///
@@ -167,10 +165,25 @@ fn capture_and_run(
     // passing it into the closure gives the graph a stable device address.
     let ones_scalar = Tensor::<CudaRuntime>::from_slice(&[1.0f32], &[1], device);
 
+    // Sliding-window / causal span masks, built here for the same reason: the
+    // host-to-device copy must not happen inside the capture region.
+    let span_masks = SpanMasks::<CudaRuntime>::build(&enc.config, seq_len, device);
+
     let ids_ref = &input_ids_buf;
     let pos_ref = &pos_ids_buf;
     let mask_ref = &mask_buf;
     let ones_ref = &ones_scalar;
+    let span_ref = &span_masks;
+
+    // Every device buffer the graph reads must be handed to `capture_graph_into`
+    // as an input: it clones them into the `CapturedGraph`, which is what keeps
+    // the allocations alive for the graph's lifetime. A buffer left out here is
+    // freed when this function returns, and replay then reads freed device
+    // memory. `graph_cache` only ever indexes inputs[0..=2], so the retained
+    // extras can be appended.
+    let mut capture_inputs: Vec<&Tensor<CudaRuntime>> =
+        vec![&input_ids_buf, &pos_ids_buf, &mask_buf, &ones_scalar];
+    capture_inputs.extend(span_masks.tensors());
 
     // Capture: encode_inference_with_pos → pool → D2D copy into stable_out.
     //
@@ -185,31 +198,20 @@ fn capture_and_run(
     // nodes via cuMemAllocAsync. AUTO_FREE_ON_LAUNCH reclaims them at the
     // end of each replay, so they are correctly managed across launches
     // without a pre-allocated arena.
-    let captured = CudaRuntime::capture_graph_into(
-        client,
-        &[&input_ids_buf, &pos_ids_buf, &mask_buf],
-        &[&stable_out],
-        |cc| {
+    let captured =
+        CudaRuntime::capture_graph_into(client, &capture_inputs, &[&stable_out], |cc| {
             let hidden = enc
-                .encode_inference_with_pos(cc, ids_ref, pos_ref, Some(mask_ref))
+                .encode_inference_with_pos(cc, ids_ref, pos_ref, Some(mask_ref), span_ref)
                 .map_err(|e| numr::error::Error::Backend(format!("encoder forward: {e:#}")))?;
 
-            let pooled = pool_hidden(
-                cc,
-                &hidden,
-                Some(mask_ref),
-                &enc.pooling,
-                &enc.config,
-                ones_ref,
-            )
-            .map_err(|e| numr::error::Error::Backend(format!("pooling: {e:#}")))?;
+            let pooled = pool_padded(cc, &hidden, Some(mask_ref), enc.pooling, Some(ones_ref))
+                .map_err(|e| numr::error::Error::Backend(format!("pooling: {e:#}")))?;
 
             let n_bytes = batch * hidden_size * std::mem::size_of::<f32>();
             CudaRuntime::copy_within_device(pooled.ptr(), stable_out_ptr, n_bytes, device)?;
 
             Ok(())
-        },
-    )?;
+        })?;
 
     // Insert before reading — cache takes ownership of the CapturedGraph.
     enc.forward_cache
@@ -261,80 +263,4 @@ fn replay(
 
     // stable_out was written by the D2D copy node inside the graph.
     Ok(entry.output_buf().clone())
-}
-
-// ---------------------------------------------------------------------------
-// Pooling (runs inside graph capture for clean graph membership)
-// ---------------------------------------------------------------------------
-
-/// Pooling helper for use inside a CUDA graph capture closure.
-///
-/// `ones_scalar`: a pre-allocated `[1]` f32 tensor containing the value `1.0`
-/// that was allocated OUTSIDE the capture region.  This prevents
-/// `Tensor::from_slice(&[1.0f32], ...)` from being called inside the closure,
-/// which would record an H2D memcpy node with a stale stack address into the
-/// graph — causing `CUDA_ERROR_ILLEGAL_ADDRESS` on replay.
-fn pool_hidden(
-    client: &CudaClient,
-    hidden: &Tensor<CudaRuntime>,
-    mask: Option<&Tensor<CudaRuntime>>,
-    pooling: &Pooling,
-    config: &EncoderConfig,
-    ones_scalar: &Tensor<CudaRuntime>,
-) -> Result<Tensor<CudaRuntime>> {
-    let hidden_var = Var::new(hidden.clone(), false);
-
-    match pooling {
-        Pooling::Mean => {
-            if let Some(m) = mask {
-                let mask_shape = m.shape().to_vec();
-                let b = mask_shape[0];
-                let s = mask_shape[1];
-
-                let mask_3d = m.reshape(&[b, s, 1]).map_err(Error::Numr)?;
-                let masked =
-                    BinaryOps::mul(client, hidden_var.tensor(), &mask_3d).map_err(Error::Numr)?;
-                let summed = ReduceOps::sum(client, &masked, &[1], false).map_err(Error::Numr)?;
-                let counts = ReduceOps::sum(client, m, &[1], true).map_err(Error::Numr)?;
-                // Use the pre-allocated `ones_scalar` (allocated OUTSIDE capture)
-                // instead of `Tensor::from_slice(&[1.0f32], ...)` here.
-                // An inline from_slice would bake a host stack pointer into the
-                // graph's H2D memcpy node, causing CUDA_ERROR_ILLEGAL_ADDRESS on replay.
-                let counts =
-                    BinaryOps::maximum(client, &counts, ones_scalar).map_err(Error::Numr)?;
-                let _ = config.hidden_size;
-                Ok(BinaryOps::div(client, &summed, &counts).map_err(Error::Numr)?)
-            } else {
-                Ok(ReduceOps::mean(client, hidden_var.tensor(), &[1], false)
-                    .map_err(Error::Numr)?)
-            }
-        }
-        Pooling::Cls => {
-            let cls = var_narrow(&hidden_var, 1, 0, 1).map_err(Error::Numr)?;
-            let cls = Var::new(cls.tensor().contiguous()?, false);
-            let sh = cls.shape().to_vec();
-            let b = sh[0];
-            let h = sh[2];
-            Ok(var_reshape(&cls, &[b, h])
-                .map_err(Error::Numr)?
-                .tensor()
-                .clone())
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Byte-cast helpers
-// ---------------------------------------------------------------------------
-
-#[inline]
-fn cast_i64(data: &[i64]) -> &[u8] {
-    // SAFETY: i64 is Pod; no padding; pointer is valid for lifetime of slice.
-    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)) }
-}
-
-#[inline]
-fn cast_f32(data: &[f32]) -> &[u8] {
-    // SAFETY: f32 is Pod; no padding; pointer is valid for lifetime of slice.
-    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)) }
 }

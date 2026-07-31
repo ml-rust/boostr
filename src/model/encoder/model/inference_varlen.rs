@@ -5,10 +5,9 @@
 //! pre-builds `cu_seqlens`, `position_ids`, and `seg_ids` on the host. For the
 //! padded inference path see `encode_inference` / `embed_inference` in `mod.rs`.
 
-use super::layer::VarlenCtx;
+use super::layer::{VarlenCtx, ensure_varlen_span_is_unconstrained};
 use super::{Encoder, EncoderClient, Pooling};
 use crate::error::{Error, Result};
-use crate::model::encoder::config::ArchFamily;
 use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{IndexingOps, ScalarOps, ScatterReduceOp, TensorOps};
@@ -37,6 +36,10 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         C: EncoderClient<R>,
         R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
     {
+        // The varlen kernel has no bounded-span support, so refuse rather than
+        // silently returning unwindowed results for a windowed model.
+        ensure_varlen_span_is_unconstrained(&self.config, max_seqlen)?;
+
         // Token embedding lookup: [total_tokens] → [total_tokens, hidden]
         let tok_emb = self.token_embed.forward(client, input_ids)?;
 
@@ -65,12 +68,11 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         // `position_ids` is `[total_tokens]` I64 with values already offset
         // for XLM-RoBERTa (built by `embed_one_varlen_batch` in pipeline.rs).
         // `position_embed.forward` does an embedding lookup → `[total_tokens, hidden]`.
-        let tok_emb = match self.config.arch_family {
-            ArchFamily::Bert | ArchFamily::XlmRoberta => {
-                let pos_emb = self.position_embed.forward(client, position_ids)?;
-                var_add(&tok_emb, &pos_emb, client).map_err(Error::Numr)?
-            }
-            ArchFamily::NomicBert | ArchFamily::GemmaEmbedding => tok_emb,
+        let tok_emb = if self.config.arch_family.uses_rope() {
+            tok_emb
+        } else {
+            let pos_emb = self.position_embed.forward(client, position_ids)?;
+            var_add(&tok_emb, &pos_emb, client).map_err(Error::Numr)?
         };
 
         // NomicBert: broadcast-add token-type row 0.
@@ -85,7 +87,10 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             tok_emb
         };
 
-        let normed = self.embed_norm.forward(client, &tok_emb)?;
+        let normed = match &self.embed_norm {
+            Some(norm) => norm.forward(client, &tok_emb)?,
+            None => tok_emb,
+        };
         let mut hidden = normed.detach();
 
         let ctx = VarlenCtx {
@@ -97,7 +102,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
 
         for layer in &self.layers {
             let layer_input = Var::new(hidden.tensor().clone(), false);
-            let out = layer.forward(client, &layer_input, None, Some(&ctx))?;
+            let out = layer.forward(client, &layer_input, None, None, Some(&ctx))?;
             hidden = out.detach();
         }
 
@@ -179,19 +184,31 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
                     .map_err(Error::Numr)?;
                 Ok(pooled)
             }
-            Pooling::Cls => {
-                // CLS pooling in varlen: CLS token is the first token of each sequence
-                // (cu_seqlens[b] for sequence b).  We use gather via cu_seqlens.
-                // For simplicity fall back to first token of the flat buffer per batch.
-                // NomicBert with CLS pooling is uncommon; this is correct for well-formed
-                // packed inputs where CLS is always token 0 of each sequence.
+            // Both positional strategies gather one row per sequence; they
+            // differ only in which offset within the segment they pick.
+            // `cu_seqlens[b]` is the first token of sequence `b` and
+            // `cu_seqlens[b + 1] - 1` is its last.
+            Pooling::Cls | Pooling::Last => {
                 let cu_q: Vec<i32> = cu_seqlens.to_vec();
-                let cls_indices: Vec<i64> = (0..batch).map(|b| cu_q[b] as i64).collect();
-                let idx_t = Tensor::<R>::from_slice(&cls_indices, &[batch], &device);
-                let cls_out = client
+                let mut indices = Vec::with_capacity(batch);
+                for b in 0..batch {
+                    let (start, end) = (cu_q[b] as i64, cu_q[b + 1] as i64);
+                    if end <= start {
+                        return Err(Error::ModelError {
+                            reason: format!(
+                                "packed sequence {b} is empty, so there is no token to pool"
+                            ),
+                        });
+                    }
+                    indices.push(match self.pooling {
+                        Pooling::Last => end - 1,
+                        _ => start,
+                    });
+                }
+                let idx_t = Tensor::<R>::from_slice(&indices, &[batch], &device);
+                client
                     .embedding_lookup(&hidden_out, &idx_t)
-                    .map_err(Error::Numr)?;
-                Ok(cls_out)
+                    .map_err(Error::Numr)
             }
         }
     }

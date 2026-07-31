@@ -1,7 +1,9 @@
-use super::*;
-use crate::model::encoder::config::HiddenAct;
+use super::{Encoder, Pooling};
+use crate::error::Error;
+use crate::model::encoder::config::{ArchFamily, EncoderConfig, FfnVariant};
 use crate::test_utils::cpu_setup;
 use numr::runtime::cpu::CpuRuntime;
+use numr::tensor::Tensor;
 
 fn make_test_encoder() -> (
     Encoder<CpuRuntime>,
@@ -17,22 +19,8 @@ fn make_test_encoder() -> (
         num_attention_heads: 2,
         intermediate_size: 16,
         max_position_embeddings: 32,
-        layer_norm_eps: 1e-12,
-        hidden_act: HiddenAct::Gelu,
-        type_vocab_size: 0,
-        arch_family: ArchFamily::Bert,
-        padding_token_id: 0,
-        compute_dtype: numr::dtype::DType::F32,
-        rope_freq_base: 10000.0,
-        causal: false,
-        ffn_variant: crate::model::encoder::config::FfnVariant::Standard,
-        token_type_embed_size: 0,
-        num_kv_heads: 0,
-        head_dim_explicit: None,
-        rms_eps: 1e-6,
-        sliding_window: None,
-        embed_scale: false,
-        max_tokens_per_forward: None,
+        ffn_variant: FfnVariant::Standard,
+        ..Default::default()
     };
 
     let encoder = Encoder::from_weights(config, Pooling::Mean, |name| match name {
@@ -102,22 +90,8 @@ fn make_test_encoder_cls() -> (
         num_attention_heads: 2,
         intermediate_size: 16,
         max_position_embeddings: 32,
-        layer_norm_eps: 1e-12,
-        hidden_act: HiddenAct::Gelu,
-        type_vocab_size: 0,
-        arch_family: ArchFamily::Bert,
-        padding_token_id: 0,
-        compute_dtype: numr::dtype::DType::F32,
-        rope_freq_base: 10000.0,
-        causal: false,
-        ffn_variant: crate::model::encoder::config::FfnVariant::Standard,
-        token_type_embed_size: 0,
-        num_kv_heads: 0,
-        head_dim_explicit: None,
-        rms_eps: 1e-6,
-        sliding_window: None,
-        embed_scale: false,
-        max_tokens_per_forward: None,
+        ffn_variant: FfnVariant::Standard,
+        ..Default::default()
     };
 
     let device_ref = &device;
@@ -244,22 +218,10 @@ fn test_xlm_roberta_position_ids() {
         num_attention_heads: 2,
         intermediate_size: 16,
         max_position_embeddings: 32,
-        layer_norm_eps: 1e-12,
-        hidden_act: HiddenAct::Gelu,
-        type_vocab_size: 0,
+        ffn_variant: FfnVariant::Standard,
         arch_family: ArchFamily::XlmRoberta,
         padding_token_id: 1,
-        compute_dtype: numr::dtype::DType::F32,
-        rope_freq_base: 10000.0,
-        causal: false,
-        ffn_variant: crate::model::encoder::config::FfnVariant::Standard,
-        token_type_embed_size: 0,
-        num_kv_heads: 0,
-        head_dim_explicit: None,
-        rms_eps: 1e-6,
-        sliding_window: None,
-        embed_scale: false,
-        max_tokens_per_forward: None,
+        ..Default::default()
     };
 
     let device_ref = &device;
@@ -349,22 +311,8 @@ fn test_from_weights_quant_forward_shape() {
         num_attention_heads: 4,
         intermediate_size: inter,
         max_position_embeddings: max_pos,
-        layer_norm_eps: 1e-12,
-        hidden_act: HiddenAct::Gelu,
-        type_vocab_size: 0,
-        arch_family: ArchFamily::Bert,
-        padding_token_id: 0,
-        compute_dtype: numr::dtype::DType::F32,
-        rope_freq_base: 10000.0,
-        causal: false,
-        ffn_variant: crate::model::encoder::config::FfnVariant::Standard,
-        token_type_embed_size: 0,
-        num_kv_heads: 0,
-        head_dim_explicit: None,
-        rms_eps: 1e-6,
-        sliding_window: None,
-        embed_scale: false,
-        max_tokens_per_forward: None,
+        ffn_variant: FfnVariant::Standard,
+        ..Default::default()
     };
 
     let make_q8_0 = |rows: usize, cols: usize| -> QuantTensor<CpuRuntime> {

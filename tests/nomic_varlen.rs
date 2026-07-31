@@ -13,11 +13,10 @@
 
 use boostr::error::Result;
 use boostr::model::encoder::{
-    config::{ArchFamily, EncoderConfig, FfnVariant, HiddenAct},
+    config::{ArchFamily, EncoderConfig, FfnVariant},
     model::{Encoder, Pooling},
     pipeline::EmbeddingPipeline,
 };
-use numr::dtype::DType;
 use numr::ops::{IndexingOps, ScatterReduceOp};
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
@@ -44,22 +43,12 @@ fn make_nomic_encoder() -> (Encoder<CpuRuntime>, CpuClient, CpuDevice) {
         num_attention_heads: heads,
         intermediate_size: inter,
         max_position_embeddings: max_pos,
-        layer_norm_eps: 1e-12,
-        hidden_act: HiddenAct::Gelu,
         type_vocab_size: 2,
         arch_family: ArchFamily::NomicBert,
-        padding_token_id: 0,
-        compute_dtype: DType::F32,
-        rope_freq_base: 10000.0,
-        causal: false,
         ffn_variant: FfnVariant::GatedSilu,
         token_type_embed_size: 2,
         num_kv_heads: heads,
-        head_dim_explicit: None,
-        rms_eps: 1e-6,
-        sliding_window: None,
-        embed_scale: false,
-        max_tokens_per_forward: None,
+        ..Default::default()
     };
 
     use boostr::nn::Weight;
@@ -343,22 +332,13 @@ fn make_nomic_pipeline(budget: Option<usize>) -> (EmbeddingPipeline<CpuRuntime>,
         num_attention_heads: heads,
         intermediate_size: inter,
         max_position_embeddings: max_pos,
-        layer_norm_eps: 1e-12,
-        hidden_act: HiddenAct::Gelu,
         type_vocab_size: 2,
         arch_family: ArchFamily::NomicBert,
-        padding_token_id: 0,
-        compute_dtype: DType::F32,
-        rope_freq_base: 10000.0,
-        causal: false,
         ffn_variant: FfnVariant::GatedSilu,
         token_type_embed_size: 2,
         num_kv_heads: heads,
-        head_dim_explicit: None,
-        rms_eps: 1e-6,
-        sliding_window: None,
-        embed_scale: false,
         max_tokens_per_forward: budget,
+        ..Default::default()
     };
 
     use boostr::nn::Weight;

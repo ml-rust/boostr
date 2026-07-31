@@ -1,4 +1,3 @@
-use super::super::config::HiddenAct;
 use super::*;
 use crate::error::Error;
 use crate::model::Pooling;
@@ -36,22 +35,7 @@ fn make_test_pipeline() -> (EmbeddingPipeline<CpuRuntime>, numr::runtime::cpu::C
         num_attention_heads: 2,
         intermediate_size: 16,
         max_position_embeddings: 64,
-        layer_norm_eps: 1e-12,
-        hidden_act: HiddenAct::Gelu,
-        type_vocab_size: 0,
-        arch_family: crate::model::encoder::config::ArchFamily::Bert,
-        padding_token_id: 0,
-        compute_dtype: numr::dtype::DType::F32,
-        rope_freq_base: 10000.0,
-        causal: false,
-        ffn_variant: crate::model::encoder::config::FfnVariant::Standard,
-        token_type_embed_size: 0,
-        num_kv_heads: 0,
-        head_dim_explicit: None,
-        rms_eps: 1e-6,
-        sliding_window: None,
-        embed_scale: false,
-        max_tokens_per_forward: None,
+        ..Default::default()
     };
 
     let d = &device;
@@ -141,22 +125,7 @@ fn make_pipeline_with_distinct_positions()
         num_attention_heads: 2,
         intermediate_size: 16,
         max_position_embeddings: 64,
-        layer_norm_eps: 1e-12,
-        hidden_act: HiddenAct::Gelu,
-        type_vocab_size: 0,
-        arch_family: crate::model::encoder::config::ArchFamily::Bert,
-        padding_token_id: 0,
-        compute_dtype: numr::dtype::DType::F32,
-        rope_freq_base: 10000.0,
-        causal: false,
-        ffn_variant: crate::model::encoder::config::FfnVariant::Standard,
-        token_type_embed_size: 0,
-        num_kv_heads: 0,
-        head_dim_explicit: None,
-        rms_eps: 1e-6,
-        sliding_window: None,
-        embed_scale: false,
-        max_tokens_per_forward: None,
+        ..Default::default()
     };
 
     let d = &device;

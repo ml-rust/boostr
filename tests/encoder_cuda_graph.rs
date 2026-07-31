@@ -72,13 +72,7 @@ fn make_cuda_test_encoder() -> (Encoder<CudaRuntime>, CudaClient, CudaDevice) {
         num_attention_heads: 2,
         intermediate_size: 16,
         max_position_embeddings: 32,
-        layer_norm_eps: 1e-12,
-        hidden_act: HiddenAct::Gelu,
-        type_vocab_size: 0,
-        arch_family: ArchFamily::Bert,
-        padding_token_id: 0,
-        compute_dtype: numr::dtype::DType::F32,
-        max_tokens_per_forward: None,
+        ..Default::default()
     };
 
     let d = &device;

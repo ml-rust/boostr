@@ -361,3 +361,27 @@ fn dequant_matches_f16_reference() {
         );
     }
 }
+
+/// Print the exact numeric values needed to reason about Gemma's attention.
+#[test]
+#[ignore]
+fn gemma_attention_params() {
+    let path = std::env::var("BOOSTR_GGUF_DUMP").expect("set BOOSTR_GGUF_DUMP");
+    let gguf = Gguf::open(&path).expect("open gguf");
+    let md = gguf.metadata();
+    for k in [
+        "gemma-embedding.block_count",
+        "gemma-embedding.context_length",
+        "gemma-embedding.attention.sliding_window",
+        "gemma-embedding.attention.head_count",
+        "gemma-embedding.attention.head_count_kv",
+        "gemma-embedding.attention.key_length",
+        "gemma-embedding.attention.value_length",
+    ] {
+        eprintln!("  {k} = {:?}", md.get(k));
+    }
+    eprintln!(
+        "  rope.freq_base = {:?}",
+        md.get_f32("gemma-embedding.rope.freq_base")
+    );
+}

@@ -7,8 +7,8 @@ use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{Var, var_permute, var_reshape, var_transpose};
 use numr::dtype::DType;
 use numr::ops::{
-    ActivationOps, BinaryOps, ReduceOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps,
-    UnaryOps,
+    ActivationOps, BinaryOps, NormalizationOps, ReduceOps, ScalarOps, ShapeOps, TensorOps,
+    TypeConversionOps, UnaryOps,
 };
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
@@ -33,6 +33,7 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
             + UnaryOps<R>
             + QuantMatmulOps<R>
             + TypeConversionOps<R>
+            + NormalizationOps<R>
             + RoPEOps<R>,
         R::Client: TensorOps<R> + ScalarOps<R>,
     {
@@ -45,6 +46,13 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
         let q = self.q_proj.forward(client, x)?;
         let k = self.k_proj.forward(client, x)?;
         let v = self.v_proj.forward(client, x)?;
+
+        // Whole-hidden QK-norm (jina-bert-v2) runs on the [B, S, hidden]
+        // projection output, so every head shares one mean and variance. It
+        // MUST happen before the reshape below — after it, the same weights
+        // would normalise each head separately and produce different numbers
+        // at identical shapes.
+        let (q, k) = self.qk_norm_hidden(client, q, k)?;
 
         // Q: [B, S, num_heads * head_dim] → [B, num_heads, S, head_dim]
         let q = var_reshape(&q, &[batch, seq_len, self.num_heads, self.head_dim])
@@ -59,15 +67,9 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
             .map_err(Error::Numr)?;
         let v = var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
 
-        // QK-norm (Gemma/Qwen3): RmsNorm over head_dim after reshape, before RoPE.
-        let q = match &self.q_norm {
-            Some(qn) => qn.forward(client, &q)?,
-            None => q,
-        };
-        let k = match &self.k_norm {
-            Some(kn) => kn.forward(client, &k)?,
-            None => k,
-        };
+        // Per-head QK-norm (Gemma/Qwen3): RmsNorm over head_dim after reshape,
+        // before RoPE.
+        let (q, k) = self.qk_norm_per_head(client, q, k)?;
 
         // RoPE, using this block's own cache. For an interleaved architecture
         // local and global blocks hold caches built from different bases.

@@ -5,8 +5,12 @@
 //! - `build_nomic`: `from_weights_nomic` for nomic-bert GGUF models.
 //! - `build_gemma`: `from_weights_gemma` for gemma-embedding GGUF models.
 //! - `build_qwen3`: `from_weights_qwen3` for qwen3 GGUF models.
+//! - `build_jina_v2`: `from_weights_jina_v2` for jina-bert-v2 (ALiBi) models.
+//! - `build_jina_v3`: `from_weights_jina_v3` for jina-bert-v3 (RoPE) models.
 
 mod build_bert;
 mod build_gemma;
+mod build_jina_v2;
+mod build_jina_v3;
 mod build_nomic;
 mod build_qwen3;

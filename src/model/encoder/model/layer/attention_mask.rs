@@ -10,7 +10,7 @@
 //! the graph and faults with `CUDA_ERROR_ILLEGAL_ADDRESS` on replay.
 
 use crate::error::{Error, Result};
-use crate::model::encoder::config::{EncoderConfig, LayerAttention};
+use crate::model::encoder::config::{EncoderConfig, LayerAttention, alibi_slopes};
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -55,6 +55,44 @@ pub(in crate::model::encoder) fn additive_span_mask<R: Runtime<DType = DType>>(
     ))
 }
 
+/// Build the additive `[1, n_heads, seq_len, seq_len]` ALiBi bias.
+///
+/// Entry `(h, q, k)` is `slope[h] * -|q - k|` for a pair this block may attend,
+/// and the masked sentinel for a pair it may not. That is exactly what ggml
+/// computes: `ggml_soft_max_ext` receives a mask holding `-|p0 - p1|` (or
+/// `-inf`) and multiplies it by the head's slope while scanning.
+///
+/// Unlike a span mask, this is per-head and is never `None` — an ALiBi model
+/// has no other source of position information, so skipping the bias would
+/// silently turn it into a bag-of-words encoder.
+fn alibi_bias<R: Runtime<DType = DType>>(
+    spec: LayerAttention,
+    n_heads: usize,
+    max_bias: f32,
+    seq_len: usize,
+    dtype: DType,
+    device: &R::Device,
+) -> Tensor<R> {
+    let slopes = alibi_slopes(n_heads, max_bias);
+    let masked = masked_bias(dtype);
+
+    let mut data = vec![0.0f32; n_heads * seq_len * seq_len];
+    for (h, slope) in slopes.iter().enumerate() {
+        let head_base = h * seq_len * seq_len;
+        for q in 0..seq_len {
+            for k in 0..seq_len {
+                data[head_base + q * seq_len + k] = if spec.attends(q, k) {
+                    slope * -(q.abs_diff(k) as f32)
+                } else {
+                    masked
+                };
+            }
+        }
+    }
+
+    Tensor::<R>::from_slice(&data, &[1, n_heads, seq_len, seq_len], device)
+}
+
 /// Whether `spec` actually excludes any pair at this sequence length.
 fn spec_binds(spec: LayerAttention, seq_len: usize) -> bool {
     if seq_len <= 1 {
@@ -80,6 +118,14 @@ fn spec_binds(spec: LayerAttention, seq_len: usize) -> bool {
 pub struct SpanMasks<R: Runtime> {
     local: Option<Tensor<R>>,
     global: Option<Tensor<R>>,
+    /// Per-head ALiBi bias `[1, n_heads, S, S]`, for architectures that carry
+    /// no RoPE and no learned position table.
+    ///
+    /// It already folds in whatever the block's span spec excludes, so it
+    /// replaces the span mask rather than adding to it. ALiBi families here do
+    /// not interleave local and global blocks, so one tensor serves every
+    /// block — see [`SpanMasks::build`].
+    alibi: Option<Tensor<R>>,
 }
 
 impl<R: Runtime<DType = DType>> SpanMasks<R> {
@@ -88,6 +134,7 @@ impl<R: Runtime<DType = DType>> SpanMasks<R> {
         Self {
             local: None,
             global: None,
+            alibi: None,
         }
     }
 
@@ -97,6 +144,25 @@ impl<R: Runtime<DType = DType>> SpanMasks<R> {
     /// begins.
     pub fn build(config: &EncoderConfig, seq_len: usize, device: &R::Device) -> Self {
         let dtype = config.compute_dtype;
+
+        // ALiBi replaces the span mask outright: the per-head bias tensor
+        // already carries the block's exclusions. Interleaving would need one
+        // such tensor per attention spec; no ALiBi architecture here does that,
+        // and `layer_attention(0)` is every block's spec when it does not.
+        if let Some(max_bias) = config.alibi_max_bias {
+            return Self {
+                local: None,
+                global: None,
+                alibi: Some(alibi_bias::<R>(
+                    config.layer_attention(0),
+                    config.num_attention_heads,
+                    max_bias,
+                    seq_len,
+                    dtype,
+                    device,
+                )),
+            };
+        }
 
         // Layer 0 is local whenever the architecture interleaves at all, and
         // the first non-interleaved index is global; asking the config keeps
@@ -114,11 +180,18 @@ impl<R: Runtime<DType = DType>> SpanMasks<R> {
         let global =
             additive_span_mask::<R>(config.layer_attention(global_index), seq_len, dtype, device);
 
-        Self { local, global }
+        Self {
+            local,
+            global,
+            alibi: None,
+        }
     }
 
     /// The mask for a block with the given spec.
     pub(in crate::model::encoder) fn for_spec(&self, spec: LayerAttention) -> Option<&Tensor<R>> {
+        if self.alibi.is_some() {
+            return self.alibi.as_ref();
+        }
         if spec.window.is_some() {
             self.local.as_ref()
         } else {
@@ -131,10 +204,14 @@ impl<R: Runtime<DType = DType>> SpanMasks<R> {
     /// outlive the capture rather than being dropped with the calling frame.
     #[cfg(feature = "cuda")]
     pub(in crate::model::encoder) fn tensors(&self) -> Vec<&Tensor<R>> {
-        [self.local.as_ref(), self.global.as_ref()]
-            .into_iter()
-            .flatten()
-            .collect()
+        [
+            self.local.as_ref(),
+            self.global.as_ref(),
+            self.alibi.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 }
 
@@ -163,6 +240,13 @@ pub(in crate::model::encoder) fn ensure_varlen_span_is_unconstrained(
                 .into(),
         });
     }
+    if config.alibi_max_bias.is_some() {
+        return Err(Error::ModelError {
+            reason: "ALiBi position bias is not supported on the packed (varlen) \
+                     encoder path; use the padded path"
+                .into(),
+        });
+    }
     let spec = config.layer_attention(0);
     Err(Error::ModelError {
         reason: format!(
@@ -172,4 +256,77 @@ pub(in crate::model::encoder) fn ensure_varlen_span_is_unconstrained(
             spec.max_distance().unwrap_or(0)
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::encoder::config::ArchFamily;
+    use numr::runtime::cpu::CpuRuntime;
+
+    fn jina_v2_config(seq_heads: usize) -> EncoderConfig {
+        EncoderConfig {
+            hidden_size: 768,
+            num_hidden_layers: 12,
+            num_attention_heads: seq_heads,
+            intermediate_size: 3072,
+            max_position_embeddings: 8192,
+            arch_family: ArchFamily::JinaBertV2,
+            alibi_max_bias: Some(8.0),
+            ..Default::default()
+        }
+    }
+
+    /// The bias must be per-head and must carry the distance penalty ggml
+    /// applies: `slope[h] * -|q - k|`, zero on the diagonal.
+    ///
+    /// A `[1, 1, S, S]` bias — the shape every other mask here uses — would
+    /// broadcast without error and give every head head 0's slope.
+    #[test]
+    fn alibi_bias_is_per_head_and_linear_in_distance() {
+        let device = <CpuRuntime as Runtime>::Device::default();
+        let (heads, seq) = (12usize, 5usize);
+        let config = jina_v2_config(heads);
+
+        let masks = SpanMasks::<CpuRuntime>::build(&config, seq, &device);
+        let bias = masks
+            .for_spec(config.layer_attention(0))
+            .expect("an ALiBi model must always produce a bias");
+        assert_eq!(bias.shape(), &[1, heads, seq, seq]);
+
+        let data: Vec<f32> = bias.to_vec();
+        let slopes = alibi_slopes(heads, 8.0);
+        for (h, slope) in slopes.iter().enumerate() {
+            for q in 0..seq {
+                for k in 0..seq {
+                    let got = data[h * seq * seq + q * seq + k];
+                    let want = slope * -(q.abs_diff(k) as f32);
+                    assert!(
+                        (got - want).abs() < 1e-6,
+                        "head {h} ({q},{k}): {got} vs {want}"
+                    );
+                }
+            }
+        }
+
+        // Head 0 and head 11 must genuinely differ, which is the whole point of
+        // a per-head bias.
+        let head0 = data[4];
+        let head11 = data[11 * seq * seq + 4];
+        assert!((head0 - head11).abs() > 1e-3, "{head0} vs {head11}");
+    }
+
+    /// A non-ALiBi bidirectional encoder must still pay nothing: no mask at all.
+    #[test]
+    fn no_alibi_means_no_mask_for_a_plain_encoder() {
+        let device = <CpuRuntime as Runtime>::Device::default();
+        let config = EncoderConfig {
+            hidden_size: 384,
+            num_attention_heads: 12,
+            num_hidden_layers: 6,
+            ..Default::default()
+        };
+        let masks = SpanMasks::<CpuRuntime>::build(&config, 8, &device);
+        assert!(masks.for_spec(config.layer_attention(0)).is_none());
+    }
 }

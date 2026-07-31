@@ -24,17 +24,21 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
 
         // XLM-RoBERTa reserves position `pad_id` for padding and numbers real
         // tokens from `pad_id + 1` upward, so the ids depend on token values.
+        // `position_row` then re-bases them onto whatever the weight producer
+        // left in the table — a converted GGUF has the dead leading rows
+        // already chopped, a HuggingFace checkpoint does not.
         let pad_id = self.config.padding_token_id;
+        let pad_row = self.config.padding_position_row();
         let mut pos_flat: Vec<i64> = Vec::with_capacity(batch * seq_len);
         for b in 0..batch {
-            let mut count: i64 = 0;
+            let mut rank: i64 = 0;
             for s in 0..seq_len {
                 let tok = flat_input_ids[b * seq_len + s];
                 if tok == pad_id {
-                    pos_flat.push(pad_id);
+                    pos_flat.push(pad_row);
                 } else {
-                    count += 1;
-                    pos_flat.push(pad_id + count);
+                    pos_flat.push(self.config.position_row(rank));
+                    rank += 1;
                 }
             }
         }

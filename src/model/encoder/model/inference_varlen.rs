@@ -61,14 +61,15 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         // Learned absolute position embedding add for BERT / XLM-RoBERTa.
         //
         // NomicBert and GemmaEmbedding use RoPE applied inside each layer;
-        // they skip this block.  BERT/XLM-R have no RoPE: their position
+        // they skip this block, as does any ALiBi family (position enters via
+        // the attention bias).  BERT/XLM-R have neither: their position
         // information comes solely from the learned position embedding table
         // which must be added here, in the same place the padded path adds it.
         //
         // `position_ids` is `[total_tokens]` I64 with values already offset
         // for XLM-RoBERTa (built by `embed_one_varlen_batch` in pipeline.rs).
         // `position_embed.forward` does an embedding lookup → `[total_tokens, hidden]`.
-        let tok_emb = if self.config.arch_family.uses_rope() {
+        let tok_emb = if !self.config.arch_family.uses_learned_positions() {
             tok_emb
         } else {
             let pos_emb = self.position_embed.forward(client, position_ids)?;

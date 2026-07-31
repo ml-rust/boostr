@@ -1,7 +1,7 @@
 //! BERT / XLM-RoBERTa encoder constructors: f32 weights and quantized weights.
 
 use crate::error::{Error, Result};
-use crate::model::encoder::config::{EncoderConfig, FfnVariant};
+use crate::model::encoder::config::{EncoderConfig, FfnVariant, QkNormScope};
 use crate::model::encoder::model::layer::{EncoderLayer, NormLayer};
 use crate::model::encoder::model::{Encoder, Pooling};
 use crate::nn::{Embedding, LayerNorm, Linear, MaybeQuantLinear, Weight};
@@ -28,6 +28,20 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             config.layer_norm_eps as f32,
             false,
         );
+
+        // Token-type ("segment") embedding, row 0.
+        //
+        // BERT adds a segment vector to every token, and single-segment
+        // inference always uses row 0. Omitting it shifts every token by the
+        // same learned constant before the first block — which changes the
+        // pooled vector without changing a single shape. Measured against
+        // llama.cpp on all-MiniLM-L6-v2, dropping it moved the sentence
+        // embedding to cosine 0.85; restoring it gives 0.999+.
+        //
+        // Optional: a checkpoint that carries no such table (some distills, and
+        // the SafeTensors callers that share this constructor) simply has none.
+        let token_type_embed =
+            token_type_row0(get("embeddings.token_type_embeddings.weight").ok(), &config)?;
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
@@ -96,6 +110,8 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
                 rope: None,
                 q_norm: None,
                 k_norm: None,
+                qk_norm_scope: QkNormScope::PerHead,
+                attn_norm_2: None,
                 post_attn_norm: None,
                 post_ffn_norm: None,
             });
@@ -108,7 +124,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             embed_norm: Some(embed_norm),
             layers,
             pooling,
-            token_type_embed: None,
+            token_type_embed,
             output_norm: None,
             #[cfg(feature = "cuda")]
             forward_cache: std::sync::Arc::new(
@@ -236,6 +252,15 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             false,
         );
 
+        // Token-type ("segment") embedding, row 0 — see `from_weights` above.
+        let raw_token_type = get("embeddings.token_type_embeddings.weight")
+            .ok()
+            .map(|w| extract_f32(w, "embeddings.token_type_embeddings.weight"))
+            .transpose()?;
+        let token_type_embed = token_type_row0(raw_token_type, &config)?
+            .map(maybe_cast)
+            .transpose()?;
+
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
             let p = format!("encoder.layer.{i}");
@@ -344,6 +369,8 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
                 rope: None,
                 q_norm: None,
                 k_norm: None,
+                qk_norm_scope: QkNormScope::PerHead,
+                attn_norm_2: None,
                 post_attn_norm: None,
                 post_ffn_norm: None,
             });
@@ -356,7 +383,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             embed_norm: Some(embed_norm),
             layers,
             pooling,
-            token_type_embed: None,
+            token_type_embed,
             output_norm: None,
             #[cfg(feature = "cuda")]
             forward_cache: std::sync::Arc::new(
@@ -364,4 +391,33 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             ),
         })
     }
+}
+
+/// Extract row 0 of a token-type embedding table as a `[1, hidden_size]` tensor.
+///
+/// `None` in, `None` out: the table is genuinely absent for some checkpoints,
+/// and a zero stand-in would be indistinguishable from a real all-zero row
+/// while hiding a failed load.
+fn token_type_row0<R: Runtime<DType = DType>>(
+    table: Option<Tensor<R>>,
+    config: &EncoderConfig,
+) -> Result<Option<Tensor<R>>> {
+    let Some(table) = table else {
+        return Ok(None);
+    };
+    let hidden_size = config.hidden_size;
+    let data: Vec<f32> = table.to_vec();
+    if data.len() < hidden_size {
+        return Err(Error::ModelError {
+            reason: format!(
+                "token_type_embeddings has {} elements, need at least {hidden_size}",
+                data.len()
+            ),
+        });
+    }
+    Ok(Some(Tensor::<R>::from_slice(
+        &data[..hidden_size],
+        &[1, hidden_size],
+        table.device(),
+    )))
 }

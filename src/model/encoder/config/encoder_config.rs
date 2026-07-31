@@ -138,6 +138,46 @@ pub struct EncoderConfig {
     #[serde(default)]
     pub sliding_window_pattern: usize,
 
+    /// How many leading rows were already removed from the learned position
+    /// table by whoever produced the weights.
+    ///
+    /// XLM-RoBERTa numbers real tokens from `pad_token_id + 1`, so its
+    /// HuggingFace table carries `pad_token_id + 1` dead rows at the front.
+    /// llama.cpp's converter chops them (`XLMRobertaModel` in
+    /// `convert_hf_to_gguf.py`), which is why `bge-m3` ships an 8192-row table
+    /// for an 8194-position model — so a GGUF-sourced XLM-R must look up
+    /// *0-based* positions, while the same model loaded from SafeTensors must
+    /// still add the offset.
+    ///
+    /// Getting this wrong reads every token's position embedding two slots
+    /// late. Nothing about the shapes objects (the table is longer than any
+    /// real sequence) and the model keeps working — measured against llama.cpp
+    /// on bge-m3, the sentence embedding sat at cosine 0.989 instead of 0.999.
+    #[serde(default)]
+    pub position_embd_offset: i64,
+
+    /// Read-out strategy the model file itself declares, as the raw GGUF
+    /// `<arch>.pooling_type` code (1 = mean, 2 = CLS, 3 = last).
+    ///
+    /// `None` means the file said nothing and the architecture default applies.
+    /// This is not decorative: `bge-m3` ships a `bert`-namespace GGUF declaring
+    /// `pooling_type = 2`, and mean-pooling it instead returns a usable-looking
+    /// vector that is simply not the one the model was trained to produce
+    /// (measured against llama.cpp on the same file: cosine 0.74).
+    #[serde(default)]
+    pub declared_pooling_type: Option<u32>,
+
+    /// Maximum ALiBi bias, when this architecture encodes position as a
+    /// per-head linear penalty on key distance rather than with RoPE or a
+    /// learned table.
+    ///
+    /// `Some(8.0)` for jina-bert-v2, matching llama.cpp's
+    /// `hparams.f_max_alibi_bias`. `None` — the default — means no ALiBi.
+    /// See [`super::alibi::alibi_slopes`] for how the per-head slopes are
+    /// derived from this value.
+    #[serde(default)]
+    pub alibi_max_bias: Option<f32>,
+
     /// When true, token embeddings are multiplied by sqrt(hidden_size) after lookup.
     /// Required for Gemma correctness; not a tensor — pure scalar multiply.
     #[serde(default)]
@@ -196,6 +236,9 @@ impl Default for EncoderConfig {
             rms_eps: default_rms_eps(),
             sliding_window: None,
             sliding_window_pattern: 0,
+            position_embd_offset: 0,
+            declared_pooling_type: None,
+            alibi_max_bias: None,
             embed_scale: false,
             max_tokens_per_forward: None,
         }
@@ -229,6 +272,32 @@ impl EncoderConfig {
             self.num_attention_heads
         } else {
             self.num_kv_heads
+        }
+    }
+
+    /// The position-table row a real token at 0-based rank `rank` maps to.
+    ///
+    /// XLM-RoBERTa numbers from `padding_token_id + 1`; every other family
+    /// numbers from 0. [`Self::position_embd_offset`] then subtracts whatever
+    /// the weight producer already chopped off the front of the table, so the
+    /// same config drives both a HuggingFace table and a converted GGUF one.
+    pub fn position_row(&self, rank: i64) -> i64 {
+        let base = if self.arch_family == ArchFamily::XlmRoberta {
+            self.padding_token_id + 1 + rank
+        } else {
+            rank
+        };
+        (base - self.position_embd_offset).max(0)
+    }
+
+    /// The position-table row padding occupies.
+    ///
+    /// Masked out of attention either way, but it must stay inside the table.
+    pub fn padding_position_row(&self) -> i64 {
+        if self.arch_family == ArchFamily::XlmRoberta {
+            (self.padding_token_id - self.position_embd_offset).max(0)
+        } else {
+            0
         }
     }
 
@@ -276,6 +345,12 @@ impl EncoderConfig {
     /// within the half-width.
     pub fn varlen_span_is_unconstrained(&self, max_seqlen: usize) -> bool {
         if self.causal {
+            return false;
+        }
+        // ALiBi is not a span constraint, but it reaches attention through the
+        // same additive-bias slot the varlen kernel has no room for. Running
+        // packed would drop the model's ONLY source of position information.
+        if self.alibi_max_bias.is_some() {
             return false;
         }
         match self.layer_attention(0).max_distance() {

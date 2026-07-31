@@ -30,12 +30,45 @@ pub enum ArchFamily {
     /// GQA, QK-norm, SwiGLU FFN, causal attention, last-token pooling.
     /// Head dim is given explicitly and is NOT `hidden_size / head_count`.
     Qwen3,
+    /// jina-bert-v2: ALiBi positions (no RoPE, no learned position embedding),
+    /// separate biased Q/K/V, LayerNorm QK-norm over the whole hidden vector,
+    /// a second post-attention norm (`attn_norm_2`), GeGLU FFN with a bias only
+    /// on `ffn_down`, token-embedding norm, token-type row 0, mean pooling.
+    JinaBertV2,
+    /// jina-bert-v3: RoPE positions, fused *biased* QKV, post-norm LayerNorm,
+    /// standard (non-gated) GELU FFN with biases, token-embedding norm,
+    /// token-type row 0, mean pooling.
+    JinaBertV3,
 }
 
 impl ArchFamily {
     /// Whether this family derives positions from RoPE rather than a learned
     /// absolute position embedding table.
     pub fn uses_rope(self) -> bool {
-        matches!(self, Self::NomicBert | Self::GemmaEmbedding | Self::Qwen3)
+        matches!(
+            self,
+            Self::NomicBert | Self::GemmaEmbedding | Self::Qwen3 | Self::JinaBertV3
+        )
+    }
+
+    /// Whether this family derives positions from an ALiBi attention bias.
+    ///
+    /// Distinct from [`Self::uses_rope`] being false: BERT and XLM-RoBERTa also
+    /// answer `false` there, but they carry a learned absolute position table.
+    /// An ALiBi family carries neither, and gets its position information only
+    /// from the per-head distance bias added to the attention scores.
+    pub fn uses_alibi(self) -> bool {
+        matches!(self, Self::JinaBertV2)
+    }
+
+    /// Whether this family adds a learned absolute position embedding to the
+    /// token embeddings before the first block.
+    ///
+    /// Only BERT and XLM-RoBERTa do. Every other family here encodes position
+    /// inside the attention computation — RoPE rotates Q/K per block, ALiBi
+    /// biases the scores — and carries no `position_embd` tensor at all, so
+    /// looking one up would fail the load.
+    pub fn uses_learned_positions(self) -> bool {
+        !self.uses_rope() && !self.uses_alibi()
     }
 }

@@ -6,6 +6,7 @@ mod attention_varlen;
 mod encoder_layer;
 mod ffn;
 mod norm;
+mod qk_norm;
 
 pub use attention_mask::SpanMasks;
 pub(in crate::model::encoder) use attention_mask::ensure_varlen_span_is_unconstrained;

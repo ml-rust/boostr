@@ -41,7 +41,20 @@ impl EncoderConfig {
             hidden_act: HiddenAct::Gelu,
             arch_family,
             padding_token_id,
+            // llama.cpp's converter chops the dead leading rows off an
+            // XLM-RoBERTa position table, so a GGUF one is already re-based.
+            position_embd_offset: if arch_family == ArchFamily::XlmRoberta {
+                padding_token_id + 1
+            } else {
+                0
+            },
             norm_scheme: NormScheme::PostNorm,
+            // Unlike the dedicated namespaces, this one does NOT constrain the
+            // pooling type to a single value: the `bert` namespace serves both
+            // mean-pooled sentence encoders and CLS-pooled ones (bge-m3
+            // declares 2). Carry whatever the file says and let `Pooling`
+            // resolve it.
+            declared_pooling_type: metadata.get_u32("bert.pooling_type"),
             ..Default::default()
         })
     }

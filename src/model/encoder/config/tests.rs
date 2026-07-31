@@ -309,3 +309,167 @@ fn an_unsupported_architecture_is_named_in_the_error() {
     );
     assert!(err.contains("qwen3"), "and list what is supported: {err}");
 }
+
+/// The metadata actually present in `jina-embeddings-v3-Q4_0.gguf`.
+fn jina_v3_metadata() -> GgufMetadata {
+    meta(&[
+        (
+            "general.architecture",
+            GgufValue::String("jina-bert-v3".into()),
+        ),
+        ("jina-bert-v3.embedding_length", GgufValue::Uint32(1024)),
+        ("jina-bert-v3.feed_forward_length", GgufValue::Uint32(4096)),
+        ("jina-bert-v3.attention.head_count", GgufValue::Uint32(16)),
+        ("jina-bert-v3.block_count", GgufValue::Uint32(24)),
+        ("jina-bert-v3.context_length", GgufValue::Uint32(8192)),
+        (
+            "jina-bert-v3.attention.layer_norm_epsilon",
+            GgufValue::Float32(1e-5),
+        ),
+        ("jina-bert-v3.attention.causal", GgufValue::Bool(false)),
+        ("jina-bert-v3.pooling_type", GgufValue::Uint32(1)),
+        ("jina-bert-v3.rope.freq_base", GgufValue::Float32(20000.0)),
+    ])
+}
+
+/// The metadata actually present in `jina-embeddings-v2-base-code-Q8_0.gguf`.
+/// Note the absent `rope.freq_base`: this file has no rotary key at all.
+fn jina_v2_metadata() -> GgufMetadata {
+    meta(&[
+        (
+            "general.architecture",
+            GgufValue::String("jina-bert-v2".into()),
+        ),
+        ("jina-bert-v2.embedding_length", GgufValue::Uint32(768)),
+        ("jina-bert-v2.feed_forward_length", GgufValue::Uint32(3072)),
+        ("jina-bert-v2.attention.head_count", GgufValue::Uint32(12)),
+        ("jina-bert-v2.block_count", GgufValue::Uint32(12)),
+        ("jina-bert-v2.context_length", GgufValue::Uint32(8192)),
+        (
+            "jina-bert-v2.attention.layer_norm_epsilon",
+            GgufValue::Float32(1e-12),
+        ),
+        ("jina-bert-v2.attention.causal", GgufValue::Bool(false)),
+        ("jina-bert-v2.pooling_type", GgufValue::Uint32(1)),
+    ])
+}
+
+/// jina-bert-v3 must route to its own family, not to the BERT fallback: it
+/// reports `XLMRobertaModel` upstream but has no `position_embd` tensor, and
+/// its rotary base is 20 000 rather than the usual 10 000.
+#[test]
+fn jina_v3_config_uses_rope_at_its_own_base() {
+    let config = EncoderConfig::from_gguf_metadata(&jina_v3_metadata()).unwrap();
+
+    assert_eq!(config.arch_family, ArchFamily::JinaBertV3);
+    assert!(config.arch_family.uses_rope());
+    assert!(!config.arch_family.uses_learned_positions());
+    assert_eq!(config.rope_freq_base, 20000.0);
+    assert_eq!(config.hidden_size, 1024);
+    assert_eq!(config.num_attention_heads, 16);
+    assert_eq!(config.head_dim(), 64);
+    assert_eq!(config.num_hidden_layers, 24);
+    assert_eq!(config.ffn_variant, FfnVariant::Standard);
+    assert_eq!(config.norm_scheme, NormScheme::PostNorm);
+    assert!(!config.causal);
+    assert!(config.alibi_max_bias.is_none());
+    assert!((config.layer_norm_eps - 1e-5).abs() < 1e-12);
+}
+
+/// jina-bert-v2 carries neither a rotary key nor a position table, so ALiBi is
+/// its only source of position. A config that silently left `alibi_max_bias`
+/// unset would load and run as a bag-of-words encoder.
+#[test]
+fn jina_v2_config_enables_alibi_and_no_rope() {
+    let config = EncoderConfig::from_gguf_metadata(&jina_v2_metadata()).unwrap();
+
+    assert_eq!(config.arch_family, ArchFamily::JinaBertV2);
+    assert!(!config.arch_family.uses_rope());
+    assert!(config.arch_family.uses_alibi());
+    assert!(!config.arch_family.uses_learned_positions());
+    assert_eq!(config.alibi_max_bias, Some(8.0));
+    assert_eq!(config.hidden_size, 768);
+    assert_eq!(config.num_attention_heads, 12);
+    assert_eq!(config.ffn_variant, FfnVariant::GatedGelu);
+    assert_eq!(config.norm_scheme, NormScheme::PostNorm);
+    assert!(!config.causal);
+    assert_eq!(config.sliding_window, None);
+}
+
+/// The packed path cannot apply an additive per-head bias, so an ALiBi model
+/// must be refused there rather than silently returning position-free vectors.
+#[test]
+fn alibi_forces_the_padded_path() {
+    let config = EncoderConfig::from_gguf_metadata(&jina_v2_metadata()).unwrap();
+    assert!(!config.varlen_span_is_unconstrained(8));
+    assert!(!config.varlen_span_is_unconstrained(1));
+}
+
+/// `bge-m3` ships a `bert`-namespace GGUF that declares CLS pooling. The
+/// namespace serves both mean- and CLS-pooled encoders, so the architecture
+/// default is not the answer and the file has to be read.
+#[test]
+fn bert_namespace_carries_the_declared_pooling_type() {
+    let cls = meta(&[
+        ("general.architecture", GgufValue::String("bert".into())),
+        ("bert.embedding_length", GgufValue::Uint32(1024)),
+        ("bert.feed_forward_length", GgufValue::Uint32(4096)),
+        ("bert.attention.head_count", GgufValue::Uint32(16)),
+        ("bert.block_count", GgufValue::Uint32(24)),
+        ("bert.context_length", GgufValue::Uint32(8192)),
+        ("bert.pooling_type", GgufValue::Uint32(2)),
+        ("tokenizer.ggml.model", GgufValue::String("t5".into())),
+    ]);
+    let config = EncoderConfig::from_gguf_metadata(&cls).unwrap();
+    assert_eq!(config.declared_pooling_type, Some(2));
+
+    let mean = meta(&[
+        ("general.architecture", GgufValue::String("bert".into())),
+        ("bert.embedding_length", GgufValue::Uint32(384)),
+        ("bert.feed_forward_length", GgufValue::Uint32(1536)),
+        ("bert.attention.head_count", GgufValue::Uint32(12)),
+        ("bert.block_count", GgufValue::Uint32(6)),
+        ("bert.pooling_type", GgufValue::Uint32(1)),
+    ]);
+    let config = EncoderConfig::from_gguf_metadata(&mean).unwrap();
+    assert_eq!(config.declared_pooling_type, Some(1));
+}
+
+/// A converted XLM-RoBERTa GGUF has its dead leading position rows chopped off,
+/// so the first real token must read row 0 — not row `pad_id + 1`. A config
+/// built from HuggingFace weights keeps the offset, because that table is
+/// intact.
+#[test]
+fn xlm_roberta_position_rows_are_rebased_for_gguf_only() {
+    let gguf = meta(&[
+        ("general.architecture", GgufValue::String("bert".into())),
+        ("bert.embedding_length", GgufValue::Uint32(1024)),
+        ("bert.feed_forward_length", GgufValue::Uint32(4096)),
+        ("bert.attention.head_count", GgufValue::Uint32(16)),
+        ("bert.block_count", GgufValue::Uint32(24)),
+        ("tokenizer.ggml.model", GgufValue::String("t5".into())),
+    ]);
+    let config = EncoderConfig::from_gguf_metadata(&gguf).unwrap();
+    assert_eq!(config.arch_family, ArchFamily::XlmRoberta);
+    assert_eq!(config.padding_token_id, 1);
+    assert_eq!(config.position_embd_offset, 2);
+    assert_eq!(config.position_row(0), 0);
+    assert_eq!(config.position_row(5), 5);
+    assert_eq!(config.padding_position_row(), 0);
+
+    // Same family, weights straight from HuggingFace: nothing was chopped.
+    let hf = EncoderConfig {
+        arch_family: ArchFamily::XlmRoberta,
+        padding_token_id: 1,
+        position_embd_offset: 0,
+        ..Default::default()
+    };
+    assert_eq!(hf.position_row(0), 2);
+    assert_eq!(hf.position_row(5), 7);
+    assert_eq!(hf.padding_position_row(), 1);
+
+    // A plain BERT config is 0-based and unaffected by either knob.
+    let bert = EncoderConfig::default();
+    assert_eq!(bert.position_row(0), 0);
+    assert_eq!(bert.position_row(9), 9);
+}

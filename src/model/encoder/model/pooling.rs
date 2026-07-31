@@ -5,7 +5,7 @@
 //! cannot leave one of those paths behind.
 
 use crate::error::{Error, Result};
-use crate::model::encoder::config::ArchFamily;
+use crate::model::encoder::config::{ArchFamily, EncoderConfig};
 use numr::autograd::{Var, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, IndexingOps, ReduceOps, ScalarOps, ShapeOps, TensorOps};
@@ -40,6 +40,28 @@ impl Pooling {
         match arch {
             ArchFamily::Qwen3 => Self::Last,
             _ => Self::Mean,
+        }
+    }
+
+    /// The strategy to read this model out with: what the file declares, else
+    /// the architecture default.
+    ///
+    /// Prefer this over [`Self::for_arch`] whenever a config came from a model
+    /// file. The `bert` GGUF namespace covers both mean-pooled and CLS-pooled
+    /// encoders — `bge-m3` declares `pooling_type = 2` — so the architecture
+    /// alone does not determine the answer, and guessing wrong yields a
+    /// perfectly well-formed vector from the wrong read-out position.
+    ///
+    /// An unrecognised code falls back to the architecture default rather than
+    /// failing: the namespaces that support only one strategy already reject
+    /// anything else at parse time, so a stray value can only reach here from a
+    /// namespace that does not constrain it.
+    pub fn from_config(config: &EncoderConfig) -> Self {
+        match config.declared_pooling_type {
+            Some(1) => Self::Mean,
+            Some(2) => Self::Cls,
+            Some(3) => Self::Last,
+            _ => Self::for_arch(config.arch_family),
         }
     }
 }

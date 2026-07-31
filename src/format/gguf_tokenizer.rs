@@ -28,8 +28,8 @@ use crate::format::Gguf;
 use crate::format::gguf::value::GgufValue;
 use rustc_hash::FxHashMap;
 use splintr::{
-    QWEN2_PATTERN, SentencePieceTokenizer, SpmTokenizer, Tokenize, TokenizeError, Tokenizer,
-    WordPieceTokenizer,
+    GPT2_PATTERN, LLAMA3_PATTERN, QWEN2_PATTERN, SentencePieceTokenizer, SpmTokenizer, Tokenize,
+    TokenizeError, Tokenizer, WordPieceTokenizer,
 };
 
 /// Tokenizer that uses the vocabulary embedded in a GGUF file.
@@ -157,7 +157,7 @@ impl GgufTokenizer {
             .map_err(|e| Error::ModelError {
                 reason: format!("Unigram tokenizer: {e}"),
             })?
-            .with_prefix_space(add_space_prefix(metadata, true));
+            .with_prefix_space(unigram_prefix_space(metadata));
 
         Ok(Self::assemble(
             Box::new(inner),
@@ -211,10 +211,11 @@ impl GgufTokenizer {
 
         let merge_ranks = build_merge_ranks(merges, &tokens);
         let specials = special_token_map(metadata, &tokens);
+        let pattern = byte_level_pattern(metadata)?;
 
         let eos_token_id = metadata.get_u32("tokenizer.ggml.eos_token_id").unwrap_or(0);
 
-        let inner = Tokenizer::new_byte_level(encoder, specials, QWEN2_PATTERN)
+        let inner = Tokenizer::new_byte_level(encoder, specials, pattern)
             .map_err(|e| Error::ModelError {
                 reason: format!("byte-level BPE tokenizer: {e}"),
             })?
@@ -288,6 +289,44 @@ impl Tokenize for GgufTokenizer {
     }
 }
 
+/// The pre-tokenizer split regex a byte-level BPE vocabulary was built with.
+///
+/// `tokenizer.ggml.pre` names the pre-tokenizer, and the choice is not
+/// cosmetic: it decides where text is cut before any merge is applied, so two
+/// patterns over the same vocabulary and merge list produce different ids.
+/// llama.cpp keeps the same table (`llama_vocab::impl::load`, the
+/// `LLAMA_VOCAB_PRE_TYPE_*` mapping); this mirrors the subset that reaches an
+/// embedding model.
+///
+/// Concretely, `qwen2` splits digits one at a time and keeps letter runs
+/// whole, while the GPT-2 family splits ` ?\p{N}+` runs and has no `(?i:)`
+/// contraction handling — so tokenizing jina-v2-code's vocabulary with Qwen's
+/// pattern silently mis-segments every number and contraction in the corpus.
+///
+/// An unrecognised name is refused rather than defaulted: a wrong split is
+/// invisible downstream, and every id it produces is still in range.
+fn byte_level_pattern(metadata: &crate::format::GgufMetadata) -> Result<&'static str> {
+    // `default` is llama.cpp's fallback pre-tokenizer, which is the GPT-2 split.
+    match metadata
+        .get_string("tokenizer.ggml.pre")
+        .unwrap_or("default")
+    {
+        "qwen2" => Ok(QWEN2_PATTERN),
+        "default" | "gpt-2" | "phi-2" | "roberta-bpe" | "jina-v1-en" | "jina-v2-en"
+        | "jina-v2-es" | "jina-v2-de" | "jina-v2-code" | "jina-es" | "jina-de" => Ok(GPT2_PATTERN),
+        "llama-bpe" | "llama3" => Ok(LLAMA3_PATTERN),
+        other => Err(Error::ModelError {
+            reason: format!(
+                "unsupported tokenizer.ggml.pre '{other}' for a byte-level BPE \
+                 vocabulary. The pre-tokenizer decides where text is split before \
+                 merging, so guessing one would silently produce different token \
+                 ids. Supported: qwen2, llama-bpe, and the GPT-2 family \
+                 (default, gpt-2, phi-2, roberta-bpe, jina-v*)."
+            ),
+        }),
+    }
+}
+
 /// Extract token strings from GGUF metadata.
 fn extract_tokens(metadata: &crate::format::GgufMetadata) -> Result<Vec<String>> {
     let tokens_array =
@@ -336,6 +375,37 @@ fn add_special(metadata: &crate::format::GgufMetadata, key: &str, default: bool)
 /// SentencePiece `add_dummy_prefix` (`tokenizer.ggml.add_space_prefix`).
 fn add_space_prefix(metadata: &crate::format::GgufMetadata, default: bool) -> bool {
     add_special(metadata, "tokenizer.ggml.add_space_prefix", default)
+}
+
+/// Whether a Unigram (`t5`) vocabulary escapes a word-boundary marker before
+/// the FIRST word of the input.
+///
+/// Not simply `add_space_prefix`. llama.cpp's `llm_tokenizer_ugm::normalize`
+/// emits the marker at the start of every non-whitespace run when EITHER the
+/// dummy prefix is requested OR `remove_extra_whitespaces` is set:
+///
+/// ```text
+/// if ((shall_prepend_space && !is_space_prepended) || shall_merge_spaces) { … }
+/// ```
+///
+/// `jina-embeddings-v3` is the case that separates the two: it declares
+/// `add_space_prefix = false` with `remove_extra_whitespaces = true`, so the
+/// reference marks its first word after all. Honouring only the first flag
+/// leaves the leading word unmarked, and since a Unigram vocabulary stores
+/// `▁Rust` but not bare `Rust`, Viterbi shatters it into fragments. Measured
+/// against llama.cpp on the same file: 20 tokens instead of 19, and the pooled
+/// embedding drifts to cosine 0.940 — wrong, yet nowhere near broken enough to
+/// fail a retrieval check.
+///
+/// The rule is Unigram-only. The `llama` (SentencePiece BPE) path is a
+/// different tokenizer upstream and reads `add_space_prefix` alone.
+fn unigram_prefix_space(metadata: &crate::format::GgufMetadata) -> bool {
+    add_space_prefix(metadata, true) || remove_extra_whitespaces(metadata)
+}
+
+/// `tokenizer.ggml.remove_extra_whitespaces`, defaulting to false as upstream does.
+fn remove_extra_whitespaces(metadata: &crate::format::GgufMetadata) -> bool {
+    add_special(metadata, "tokenizer.ggml.remove_extra_whitespaces", false)
 }
 
 /// Build a bytes → merge-rank map from the GGUF `merges` list.

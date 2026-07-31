@@ -17,7 +17,7 @@
 //! reshape and before RoPE, a final `output_norm` before pooling, no biases.
 
 use crate::error::{Error, Result};
-use crate::model::encoder::config::{EncoderConfig, FfnVariant};
+use crate::model::encoder::config::{EncoderConfig, FfnVariant, QkNormScope};
 use crate::model::encoder::model::layer::{EncoderLayer, NormLayer};
 use crate::model::encoder::model::{Encoder, Pooling};
 use crate::nn::{Embedding, Linear, MaybeQuantLinear, RmsNorm, RoPE, Weight};
@@ -138,13 +138,21 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
                 get(&format!("blk.{i}.attn_q_norm.weight"))?,
                 &format!("blk.{i}.attn_q_norm.weight"),
             )?;
-            let q_norm = Some(RmsNorm::new(maybe_cast(q_norm_w)?, eps, false));
+            let q_norm = Some(NormLayer::RmsNorm(RmsNorm::new(
+                maybe_cast(q_norm_w)?,
+                eps,
+                false,
+            )));
 
             let k_norm_w = extract_f32(
                 get(&format!("blk.{i}.attn_k_norm.weight"))?,
                 &format!("blk.{i}.attn_k_norm.weight"),
             )?;
-            let k_norm = Some(RmsNorm::new(maybe_cast(k_norm_w)?, eps, false));
+            let k_norm = Some(NormLayer::RmsNorm(RmsNorm::new(
+                maybe_cast(k_norm_w)?,
+                eps,
+                false,
+            )));
 
             let ffn_norm_w = extract_f32(
                 get(&format!("blk.{i}.ffn_norm.weight"))?,
@@ -180,6 +188,8 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
                 q_norm,
                 k_norm,
                 // Pre-norm: no sandwich post-norms exist in the file.
+                qk_norm_scope: QkNormScope::PerHead,
+                attn_norm_2: None,
                 post_attn_norm: None,
                 post_ffn_norm: None,
             });

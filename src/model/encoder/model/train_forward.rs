@@ -53,9 +53,9 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             tok_emb
         };
 
-        // RoPE families derive positions inside each layer; skip the learned
-        // absolute position embedding add.
-        let tok_emb = if self.config.arch_family.uses_rope() {
+        // RoPE and ALiBi families encode position inside the attention
+        // computation; skip the learned absolute position embedding add.
+        let tok_emb = if !self.config.arch_family.uses_learned_positions() {
             tok_emb
         } else {
             let pos_tensor = self.position_ids_tensor(input_ids, &shape, seq_len);

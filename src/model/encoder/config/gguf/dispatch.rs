@@ -5,8 +5,8 @@ use crate::format::GgufMetadata;
 use crate::model::encoder::config::EncoderConfig;
 
 /// Architectures this encoder can load, for the unsupported-architecture error.
-const SUPPORTED: &str =
-    "bert, nomic-bert, gemma-embedding, qwen3 (XLM-RoBERTa loads via the bert namespace)";
+const SUPPORTED: &str = "bert, nomic-bert, gemma-embedding, qwen3, jina-bert-v2, jina-bert-v3 \
+     (XLM-RoBERTa loads via the bert namespace)";
 
 impl EncoderConfig {
     /// Build an `EncoderConfig` from GGUF metadata keys.
@@ -19,6 +19,8 @@ impl EncoderConfig {
             Some("gemma-embedding") => Self::from_gguf_metadata_gemma(metadata),
             Some("nomic-bert") => Self::from_gguf_metadata_nomic(metadata),
             Some("qwen3") => Self::from_gguf_metadata_qwen3(metadata),
+            Some("jina-bert-v2") => Self::from_gguf_metadata_jina_v2(metadata),
+            Some("jina-bert-v3") => Self::from_gguf_metadata_jina_v3(metadata),
             _ => {
                 // Report the architecture by name rather than letting this fail
                 // on a missing `bert.*` key — that names the wrong architecture

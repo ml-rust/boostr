@@ -15,7 +15,7 @@ use crate::ops::{RoPEPackedOps, VarLenAttentionOps};
 use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{Var, var_reshape};
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps};
+use numr::ops::{BinaryOps, NormalizationOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps};
 use numr::runtime::{Runtime, RuntimeClient};
 
 impl<R: Runtime<DType = DType>> EncoderLayer<R> {
@@ -38,6 +38,7 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
             + ShapeOps<R>
             + QuantMatmulOps<R>
             + TypeConversionOps<R>
+            + NormalizationOps<R>
             + RoPEPackedOps<R>
             + VarLenAttentionOps<R>,
         R::Client: TensorOps<R> + ScalarOps<R>,
@@ -50,6 +51,12 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
         let q = self.q_proj.forward(client, x)?;
         let k = self.k_proj.forward(client, x)?;
         let v = self.v_proj.forward(client, x)?;
+
+        // 1b. Whole-hidden QK-norm, before the reshape into heads. No packed
+        //     architecture uses it today (jina-bert-v2 takes the padded path,
+        //     since ALiBi has no varlen kernel), but the hook is called here so
+        //     the two attention paths stay in step.
+        let (q, k) = self.qk_norm_hidden(client, q, k)?;
 
         // 2. Reshape to [total_tokens, num_heads, head_dim] (no permute).
         let q =
@@ -64,16 +71,7 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
         //    For NomicBert/BERT these are None and are a no-op.
         //    RmsNorm normalises the last axis, so it works on both
         //    [B, H, S, D] (padded) and [total, H, D] (packed) layouts.
-        let q = if let Some(qn) = &self.q_norm {
-            qn.forward(client, &q)?
-        } else {
-            q
-        };
-        let k = if let Some(kn) = &self.k_norm {
-            kn.forward(client, &k)?
-        } else {
-            k
-        };
+        let (q, k) = self.qk_norm_per_head(client, q, k)?;
 
         // 4. Packed RoPE on Q and K.  V is left unchanged.
         //    RoPE is applied when present (NomicBert/Gemma); BERT/XLM-R have

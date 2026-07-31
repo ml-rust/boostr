@@ -2,7 +2,9 @@
 
 use super::NormLayer;
 use crate::error::{Error, Result};
-use crate::model::encoder::config::{FfnVariant, HiddenAct, LayerAttention, NormScheme};
+use crate::model::encoder::config::{
+    FfnVariant, HiddenAct, LayerAttention, NormScheme, QkNormScope,
+};
 use crate::nn::{MaybeQuantLinear, RmsNorm, RoPE};
 use crate::ops::{RoPEOps, RoPEPackedOps, VarLenAttentionOps};
 use crate::quant::traits::QuantMatmulOps;
@@ -68,10 +70,24 @@ pub(in crate::model::encoder) struct EncoderLayer<R: Runtime> {
     pub(in crate::model::encoder) attn: LayerAttention,
     /// RoPE cache for this block's base. `None` for BERT/XLM-R.
     pub(in crate::model::encoder) rope: Option<Arc<RoPE<R>>>,
-    /// QK-norm on Q after reshape, before RoPE. `None` for BERT/NomicBert.
-    pub(in crate::model::encoder) q_norm: Option<RmsNorm<R>>,
-    /// QK-norm on K after reshape, before RoPE. `None` for BERT/NomicBert.
-    pub(in crate::model::encoder) k_norm: Option<RmsNorm<R>>,
+    /// QK-norm on Q, applied before RoPE. `None` for BERT/NomicBert.
+    ///
+    /// Both the norm type and the axis vary by architecture — RmsNorm over
+    /// `head_dim` for Gemma/Qwen3, LayerNorm over the whole hidden vector for
+    /// jina-bert-v2 — so `qk_norm_scope` says which axis this applies over.
+    pub(in crate::model::encoder) q_norm: Option<NormLayer<R>>,
+    /// QK-norm on K, applied before RoPE. `None` for BERT/NomicBert.
+    pub(in crate::model::encoder) k_norm: Option<NormLayer<R>>,
+    /// Which axis `q_norm`/`k_norm` normalise over. Ignored when both are
+    /// `None`.
+    pub(in crate::model::encoder) qk_norm_scope: QkNormScope,
+    /// Second post-attention norm (jina-bert-v2's `attn_norm_2`).
+    ///
+    /// Applied only under [`NormScheme::PostNorm`], and it re-adds the layer
+    /// input a *second* time before normalising:
+    /// `x = attn_norm_2(attn_norm(x + ATTN(x)) + x)`. That extra residual is
+    /// part of the architecture, not a duplicate of the first add.
+    pub(in crate::model::encoder) attn_norm_2: Option<NormLayer<R>>,
     /// Post-attention sandwich norm (Gemma only).
     pub(in crate::model::encoder) post_attn_norm: Option<RmsNorm<R>>,
     /// Post-FFN sandwich norm (Gemma only).
@@ -158,11 +174,24 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
             }
 
             // x = attn_norm(x + ATTN(x))
+            // x = attn_norm_2(x + input)      — jina-bert-v2 only
             // x = ffn_norm(x + FFN(x))
             NormScheme::PostNorm => {
                 let attn_out = attend(x)?;
-                let x = var_add(x, &attn_out, client).map_err(Error::Numr)?;
-                let x = self.attn_norm.forward(client, &x)?;
+                let residual = var_add(x, &attn_out, client).map_err(Error::Numr)?;
+                let normed = self.attn_norm.forward(client, &residual)?;
+
+                // jina-bert-v2 re-adds the *layer input* (not the value just
+                // normalised) and normalises again. Mirrors llama.cpp's
+                // `llm_build_bert`, which does `cur = ggml_add(cur, inpL)`
+                // a second time before `attn_norm_2`.
+                let x = match &self.attn_norm_2 {
+                    Some(norm) => {
+                        let re_added = var_add(&normed, x, client).map_err(Error::Numr)?;
+                        norm.forward(client, &re_added)?
+                    }
+                    None => normed,
+                };
 
                 let ffn_out = self.ffn(client, &x)?;
                 let x = var_add(&x, &ffn_out, client).map_err(Error::Numr)?;

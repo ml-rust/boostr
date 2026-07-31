@@ -43,9 +43,9 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             tok_emb
         };
 
-        // RoPE families derive positions inside each layer and skip the learned
-        // absolute position embedding entirely.
-        let tok_emb = if self.config.arch_family.uses_rope() {
+        // RoPE and ALiBi families encode position inside the attention
+        // computation and carry no learned absolute position table.
+        let tok_emb = if !self.config.arch_family.uses_learned_positions() {
             tok_emb
         } else {
             let pos_emb = self.position_embed.forward(client, pos_ids)?;

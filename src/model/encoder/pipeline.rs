@@ -182,6 +182,10 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
             // Causal: the varlen kernel is invoked non-causally here, so the
             // padded path is the only correct one.
             ArchFamily::Qwen3 => false,
+            // jina-bert-v2 encodes position as an ALiBi score bias the varlen
+            // kernel has no slot for; jina-bert-v3's biased fused QKV is built
+            // for the padded path. Both are correct there.
+            ArchFamily::JinaBertV2 | ArchFamily::JinaBertV3 => false,
         };
         if use_varlen {
             return self.embed_texts_varlen(client, &all_ids);
@@ -321,10 +325,10 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
         let mut seg_ids: Vec<i32> = Vec::new();
         let mut max_seqlen: usize = 0;
 
-        // XLM-RoBERTa position-id offset: real token at within-sequence index `p`
-        // maps to `pad_id + 1 + p`.  For BERT and NomicBert the offset is 0.
-        let arch = self.encoder.config().arch_family;
-        let xlmr_pad_id: i64 = self.encoder.config().padding_token_id;
+        // Position numbering is a config property: XLM-RoBERTa offsets real
+        // tokens past its reserved padding slot, then `position_row` re-bases
+        // onto the table the weights actually carry. Everything else is 0-based.
+        let cfg = self.encoder.config();
 
         cu.push(0i32);
         for (b, ids) in ids_chunk.iter().enumerate() {
@@ -334,11 +338,7 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
             }
             flat_ids.extend(ids.iter().map(|&t| t as i64));
             for p in 0..n as i64 {
-                let pid = match arch {
-                    super::config::ArchFamily::XlmRoberta => xlmr_pad_id + 1 + p,
-                    _ => p,
-                };
-                pos_ids.push(pid);
+                pos_ids.push(cfg.position_row(p));
             }
             seg_ids.extend(std::iter::repeat_n(b as i32, n));
             let last = *cu.last().unwrap_or(&0);
@@ -407,7 +407,7 @@ where
         config.compute_dtype = preferred_compute_dtype::<R>();
         let d = &device;
 
-        let pooling = Pooling::for_arch(config.arch_family);
+        let pooling = Pooling::from_config(&config);
 
         let encoder = match config.arch_family {
             super::config::ArchFamily::NomicBert => {
@@ -431,6 +431,20 @@ where
             super::config::ArchFamily::Qwen3 => {
                 let client = R::default_client(d);
                 Encoder::from_weights_qwen3(config, pooling, &client, |gguf_name| {
+                    gguf.load_tensor_f32::<R>(gguf_name, d)
+                        .map(Weight::Standard)
+                })?
+            }
+            super::config::ArchFamily::JinaBertV2 => {
+                let client = R::default_client(d);
+                Encoder::from_weights_jina_v2(config, pooling, &client, |gguf_name| {
+                    gguf.load_tensor_f32::<R>(gguf_name, d)
+                        .map(Weight::Standard)
+                })?
+            }
+            super::config::ArchFamily::JinaBertV3 => {
+                let client = R::default_client(d);
+                Encoder::from_weights_jina_v3(config, pooling, &client, |gguf_name| {
                     gguf.load_tensor_f32::<R>(gguf_name, d)
                         .map(Weight::Standard)
                 })?
@@ -461,6 +475,9 @@ fn hf_name_to_gguf(hf: &str) -> String {
     }
     if hf == "embeddings.position_embeddings.weight" {
         return "position_embd.weight".into();
+    }
+    if hf == "embeddings.token_type_embeddings.weight" {
+        return "token_types.weight".into();
     }
     if hf == "embeddings.layer_norm.weight" {
         return "token_embd_norm.weight".into();

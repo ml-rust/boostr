@@ -17,7 +17,7 @@
 //!   cache and its attention mask can never disagree.
 
 use crate::error::{Error, Result};
-use crate::model::encoder::config::{EncoderConfig, FfnVariant};
+use crate::model::encoder::config::{EncoderConfig, FfnVariant, QkNormScope};
 use crate::model::encoder::model::layer::{EncoderLayer, NormLayer};
 use crate::model::encoder::model::{Encoder, Pooling};
 use crate::nn::{Embedding, Linear, MaybeQuantLinear, RmsNorm, RoPE, Weight};
@@ -180,13 +180,21 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
                 get(&format!("blk.{i}.attn_q_norm.weight"))?,
                 &format!("blk.{i}.attn_q_norm.weight"),
             )?;
-            let q_norm = Some(RmsNorm::new(maybe_cast(q_norm_w)?, eps, false));
+            let q_norm = Some(NormLayer::RmsNorm(RmsNorm::new(
+                maybe_cast(q_norm_w)?,
+                eps,
+                false,
+            )));
 
             let k_norm_w = extract_f32(
                 get(&format!("blk.{i}.attn_k_norm.weight"))?,
                 &format!("blk.{i}.attn_k_norm.weight"),
             )?;
-            let k_norm = Some(RmsNorm::new(maybe_cast(k_norm_w)?, eps, false));
+            let k_norm = Some(NormLayer::RmsNorm(RmsNorm::new(
+                maybe_cast(k_norm_w)?,
+                eps,
+                false,
+            )));
 
             // Post-attention sandwich RMSNorm (applied to attn output before residual add).
             let post_attn_norm_w = extract_f32(
@@ -239,6 +247,8 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
                 rope: Some(Arc::clone(rope)),
                 q_norm,
                 k_norm,
+                qk_norm_scope: QkNormScope::PerHead,
+                attn_norm_2: None,
                 post_attn_norm,
                 post_ffn_norm,
             });

@@ -11,7 +11,7 @@
 //! - No learned absolute position embedding (RoPE handles positions).
 
 use crate::error::{Error, Result};
-use crate::model::encoder::config::{EncoderConfig, FfnVariant};
+use crate::model::encoder::config::{EncoderConfig, FfnVariant, QkNormScope};
 use crate::model::encoder::model::layer::{EncoderLayer, NormLayer};
 use crate::model::encoder::model::{Encoder, Pooling};
 use crate::nn::{Embedding, LayerNorm, Linear, MaybeQuantLinear, RoPE, Weight};
@@ -285,6 +285,8 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
                 rope: Some(Arc::clone(&rope)),
                 q_norm: None,
                 k_norm: None,
+                qk_norm_scope: QkNormScope::PerHead,
+                attn_norm_2: None,
                 post_attn_norm: None,
                 post_ffn_norm: None,
             });

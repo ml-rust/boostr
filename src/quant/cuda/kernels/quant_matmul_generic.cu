@@ -59,6 +59,12 @@ __device__ __forceinline__ float load_f32(const unsigned char* p) {
     return tmp;
 }
 
+__device__ __forceinline__ unsigned short load_u16(const unsigned char* p) {
+    unsigned short tmp;
+    memcpy(&tmp, p, sizeof(unsigned short));
+    return tmp;
+}
+
 __device__ __forceinline__ unsigned int load_u32(const unsigned char* p) {
     unsigned int tmp;
     memcpy(&tmp, p, sizeof(unsigned int));
@@ -284,26 +290,30 @@ __device__ void dq_q8k(const unsigned char* b, float* out) {
 
 __device__ void dq_iq4_nl(const unsigned char* b, float* out) {
     float d = load_f16_as_f32(b);
-    for (int i = 0; i < 16; i++) {
-        unsigned char v = b[2+i];
-        out[i*2]   = d * (float)KVALUES_IQ4NL_GM[v & 0x0F];
-        out[i*2+1] = d * (float)KVALUES_IQ4NL_GM[(v>>4) & 0x0F];
+    // Split-half nibble order (llama.cpp dequantize_row_iq4_nl).
+    for (int j = 0; j < 16; j++) {
+        unsigned char v = b[2+j];
+        out[j]      = d * (float)KVALUES_IQ4NL_GM[v & 0x0F];
+        out[j + 16] = d * (float)KVALUES_IQ4NL_GM[(v>>4) & 0x0F];
     }
 }
 
 __device__ void dq_iq4_xs(const unsigned char* b, float* out) {
+    // block_iq4_xs = { half d; uint16_t scales_h; uint8_t scales_l[4]; uint8_t qs[128]; }
+    // scales_h is TWO bytes at offset 2, so scales_l starts at 4 (no pad byte),
+    // and scales_h supplies high scale bits for all EIGHT sub-blocks.
     float d = load_f16_as_f32(b);
-    unsigned char scales_h = b[2];
-    const unsigned char* scales_l = b + 3;
+    unsigned int scales_h = (unsigned int)load_u16(b + 2);
+    const unsigned char* scales_l = b + 4;
     const unsigned char* qs = b + 8;
     for (int sb = 0; sb < 8; sb++) {
-        int sl = (sb%2==0) ? (scales_l[sb/2] & 0x0F) : ((scales_l[sb/2]>>4) & 0x0F);
-        int sh = (sb < 4) ? ((scales_h >> (2*sb)) & 0x03) : 0;
+        int sl = (scales_l[sb/2] >> (4*(sb%2))) & 0x0F;
+        int sh = (scales_h >> (2*sb)) & 0x03;
         float sub_scale = d * (float)((sl | (sh<<4)) - 32);
-        for (int i = 0; i < 16; i++) {
-            unsigned char v = qs[sb*16+i];
-            out[sb*32+i*2]   = sub_scale * (float)KVALUES_IQ4NL_GM[v & 0x0F];
-            out[sb*32+i*2+1] = sub_scale * (float)KVALUES_IQ4NL_GM[(v>>4) & 0x0F];
+        for (int j = 0; j < 16; j++) {
+            unsigned char v = qs[sb*16+j];
+            out[sb*32 + j]      = sub_scale * (float)KVALUES_IQ4NL_GM[v & 0x0F];
+            out[sb*32 + j + 16] = sub_scale * (float)KVALUES_IQ4NL_GM[(v>>4) & 0x0F];
         }
     }
 }

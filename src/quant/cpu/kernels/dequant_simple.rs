@@ -322,4 +322,119 @@ mod tests {
             assert!((v - 3.0).abs() < 0.01, "expected 3.0, got {}", v);
         }
     }
+
+    // ── Layout pins: split-half nibble order ──────────────────────────────
+    //
+    // Each block below is hand-built so EVERY element decodes to a distinct
+    // value. Any permutation — in particular the `out[2i]`/`out[2i+1]`
+    // sequential order these kernels used to emit — changes the output
+    // sequence and fails. Uniform-fill fixtures cannot catch that, which is how
+    // the original ordering bug survived: shapes, block counts and tensor RMS
+    // are all identical under a within-block permutation.
+    //
+    // Reference: llama.cpp `dequantize_row_q4_0` / `_q4_1` / `_q5_0` / `_q5_1`,
+    //   y[i*qk + j + 0    ] <- low  nibble of qs[j]
+    //   y[i*qk + j + qk/2 ] <- high nibble of qs[j]
+
+    /// qs[j] = low nibble j, high nibble 15-j — asymmetric, so swapping the
+    /// halves or interleaving them is detectable.
+    fn distinct_nibbles() -> [u8; 16] {
+        let mut qs = [0u8; 16];
+        for (j, b) in qs.iter_mut().enumerate() {
+            *b = (j as u8) | ((15 - j as u8) << 4);
+        }
+        qs
+    }
+
+    #[test]
+    fn q4_0_uses_split_half_nibble_order() {
+        let mut block = [0u8; 18];
+        block[0..2].copy_from_slice(&f16::from_f32(1.0).to_le_bytes());
+        block[2..18].copy_from_slice(&distinct_nibbles());
+
+        let mut out = [0.0f32; 32];
+        dequant_q4_0(&block, &mut out);
+
+        for j in 0..16 {
+            assert_eq!(
+                out[j],
+                j as f32 - 8.0,
+                "first half: out[{j}] is the LOW nibble of qs[{j}]"
+            );
+            assert_eq!(
+                out[j + 16],
+                (15 - j) as f32 - 8.0,
+                "second half: out[{}] is the HIGH nibble of qs[{j}]",
+                j + 16
+            );
+        }
+    }
+
+    #[test]
+    fn q4_1_uses_split_half_nibble_order() {
+        let mut block = [0u8; 20];
+        block[0..2].copy_from_slice(&f16::from_f32(1.0).to_le_bytes()); // d
+        block[2..4].copy_from_slice(&f16::from_f32(0.0).to_le_bytes()); // m
+        block[4..20].copy_from_slice(&distinct_nibbles());
+
+        let mut out = [0.0f32; 32];
+        dequant_q4_1(&block, &mut out);
+
+        for j in 0..16 {
+            assert_eq!(out[j], j as f32);
+            assert_eq!(out[j + 16], (15 - j) as f32);
+        }
+    }
+
+    /// Q5_0 additionally pins the fifth bit: bit `j` of the 32-bit `qh` word
+    /// belongs to element `j`, bit `j+16` to element `j+16`.
+    #[test]
+    fn q5_0_uses_split_half_nibbles_and_fifth_bits() {
+        let mut block = [0u8; 22];
+        block[0..2].copy_from_slice(&f16::from_f32(1.0).to_le_bytes());
+        // Fifth bit set for the FIRST half only: bits 0..16 set, 16..32 clear.
+        let qh: u32 = 0x0000_FFFF;
+        block[2..6].copy_from_slice(&qh.to_le_bytes());
+        block[6..22].copy_from_slice(&distinct_nibbles());
+
+        let mut out = [0.0f32; 32];
+        dequant_q5_0(&block, &mut out);
+
+        for j in 0..16 {
+            // first half: nibble j, fifth bit SET -> (j + 16) - 16
+            assert_eq!(
+                out[j], j as f32,
+                "first-half fifth bit must come from qh bit {j}"
+            );
+            // second half: nibble 15-j, fifth bit CLEAR -> (15-j) - 16
+            assert_eq!(
+                out[j + 16],
+                (15 - j) as f32 - 16.0,
+                "second-half fifth bit must come from qh bit {}",
+                j + 16
+            );
+        }
+    }
+
+    #[test]
+    fn q5_1_uses_split_half_nibbles_and_fifth_bits() {
+        let mut block = [0u8; 24];
+        block[0..2].copy_from_slice(&f16::from_f32(1.0).to_le_bytes()); // d
+        block[2..4].copy_from_slice(&f16::from_f32(0.0).to_le_bytes()); // m
+        let qh: u32 = 0xFFFF_0000; // fifth bit set for the SECOND half only
+        block[4..8].copy_from_slice(&qh.to_le_bytes());
+        block[8..24].copy_from_slice(&distinct_nibbles());
+
+        let mut out = [0.0f32; 32];
+        dequant_q5_1(&block, &mut out);
+
+        for j in 0..16 {
+            assert_eq!(out[j], j as f32, "first half: fifth bit clear");
+            assert_eq!(
+                out[j + 16],
+                (15 - j) as f32 + 16.0,
+                "second half: fifth bit set"
+            );
+        }
+    }
 }

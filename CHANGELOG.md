@@ -7,6 +7,48 @@ boostr uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.0] - 2026-08-02
+
+### ⚠️ Breaking changes
+
+- **Tokenizer ownership moved to splintr.** `GgufTokenizer` is removed. boostr no longer
+  decides how to interpret `tokenizer.ggml.*` metadata — it lifts the metadata into a
+  plain `splintr::GgufVocab` via the new `format::extract_gguf_vocab`, and
+  `splintr::from_gguf_vocab` owns every dialect decision (algorithm dispatch, defaults
+  for absent flags). Both crates previously guessed at defaults like `add_space_prefix`,
+  and their answers had drifted apart silently.
+- **`WhisperTokenizer` is removed**; `WhisperBundle.tokenizer` is now a
+  `splintr::AnyTokenizer`. The enum existed only to paper over `from_vocab` returning a
+  concrete `Tokenizer` while `from_json_path` returned an `AnyTokenizer`; both now
+  return the latter.
+- **`EmbeddingPipeline<R, T: Tokenize>` is now `EmbeddingPipeline<R>`**, holding a
+  concrete `splintr::AnyTokenizer`. After the removals above the trait had no
+  implementors in boostr and every instantiation was already an `AnyTokenizer`.
+- **Requires splintr 0.11.** Special-token wrapping now goes through splintr's
+  `SpecialPolicy` rather than a hand-rolled `cls_sep_ids` lookup, and Unigram scores are
+  `f64` end to end.
+
+### Added
+
+- **Format** — `extract_gguf_vocab(&GgufMetadata) -> Result<splintr::GgufVocab>`, the
+  public seam a downstream crate uses to build a tokenizer from an already-parsed GGUF
+  header. `GgufValue::as_u8` and `GgufMetadata::get_u8_array` support it.
+- **GGUF** — `tokenizer.ggml.precompiled_charsmap` is now extracted. It never was
+  before, so SentencePiece normalization was skipped and vocabularies that depend on it
+  emitted `<unk>` for inputs the table folds (tabs, NBSP, fullwidth punctuation).
+- **Encoder** — a regression test pinning that a BERT-family sequence keeps `[CLS]` and
+  `[SEP]` through truncation; there was no coverage of that invariant.
+
+### Fixed
+
+- **Encoder (CUDA)** — the graph-replay H2D path called `cast_i64`/`cast_f32`, which
+  existed nowhere; `--features cuda` had not compiled. They are host-side byte views for
+  `copy_to_device`, which takes raw bytes.
+- **Encoder** — special-token wrapping truncates content *before* applying the boundary
+  template, so the trailing `[SEP]` is no longer severed on an over-length input.
+
+---
+
 ## [0.2.0] - 2026-06-07
 
 ### ⚠️ Breaking changes

@@ -10,6 +10,8 @@
 //!   `CapturedGraph` (holds graph + I/O tensor Arc clones) in `CapturedForward`.
 //! - Hit: H2D-copy fresh inputs into captured buffers, replay graph via `cuGraphLaunch`.
 
+use numr::dtype::DType;
+use numr::ops::{IndexingOps, ScalarOps, TensorOps};
 use numr::runtime::Runtime;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
@@ -227,6 +229,30 @@ fn capture_and_run(
         .ok_or_else(|| Error::ModelError {
             reason: "CUDA graph cache entry missing immediately after insert".into(),
         })?
+}
+
+// ---------------------------------------------------------------------------
+// Host byte views for H2D copies
+// ---------------------------------------------------------------------------
+//
+// `Runtime::copy_to_device` takes the source as `&[u8]` and copies it verbatim;
+// it performs no element conversion. The captured buffers were built with
+// `Tensor::from_slice` over `&[i64]` (ids/positions) and `&[f32]` (mask), so
+// replay must hand it the raw little-endian bytes of those same element types.
+// `bytemuck` is not a dependency under the `cuda` feature, so the byte views are
+// taken directly; both types are plain-old-data with no padding, and `u8` has
+// alignment 1, so the reinterpretation is sound.
+
+fn cast_i64(data: &[i64]) -> &[u8] {
+    // SAFETY: `i64` is POD with no padding; the view covers exactly the same
+    // bytes as `data` and borrows it for the same lifetime.
+    unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data)) }
+}
+
+fn cast_f32(data: &[f32]) -> &[u8] {
+    // SAFETY: `f32` is POD with no padding; the view covers exactly the same
+    // bytes as `data` and borrows it for the same lifetime.
+    unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data)) }
 }
 
 // ---------------------------------------------------------------------------

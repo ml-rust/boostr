@@ -46,7 +46,7 @@ image = { version = "0.25", default-features = false, features = [
   "jpeg",
 ] }
 memmap2 = "0.9"
-splintr = { version = "0.10" }
+splintr = { version = "0.11" }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # Optional: TTS grapheme-to-phoneme via espeak-ng (system dep: espeak-ng-dev)

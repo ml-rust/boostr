@@ -36,6 +36,20 @@ impl GgufMetadata {
         })
     }
 
+    /// Get a `UINT8` array by key as a contiguous byte buffer.
+    ///
+    /// Returns `None` when the key is absent, is not an array, or holds any
+    /// element wider than a byte. The all-or-nothing rule is deliberate: the
+    /// consumers of these blobs (SentencePiece's `precompiled_charsmap`, a
+    /// darts-clone trie) are parsed as whole byte sequences, so a partially
+    /// decoded buffer would be worse than no buffer at all.
+    pub fn get_u8_array(&self, key: &str) -> Option<Vec<u8>> {
+        self.get_array(key)?
+            .iter()
+            .map(GgufValue::as_u8)
+            .collect::<Option<Vec<u8>>>()
+    }
+
     /// Model architecture (e.g., "llama")
     pub fn architecture(&self) -> Option<&str> {
         self.get_string("general.architecture")

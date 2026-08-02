@@ -21,10 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use splintr::{
-    AnyTokenizer, PretrainedVocab, Tokenize, TokenizeError, Tokenizer, WhisperVariant,
-    from_json_path, from_vocab,
-};
+use splintr::{AnyTokenizer, PretrainedVocab, WhisperVariant, from_json_path, from_vocab};
 
 use crate::error::{Error, Result};
 use crate::model::audio::whisper_model::WhisperModel;
@@ -33,65 +30,12 @@ use crate::nn::{VarBuilder, VarMap};
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 
-/// Whisper tokenizer backend.
-///
-/// Multilingual v1/v2/v3 checkpoints load zero-config from splintr's bundled
-/// vocab as a typed [`Tokenizer`]. Any other checkpoint (English-only today, or
-/// future / custom variants) loads its `tokenizer.json` as an [`AnyTokenizer`].
-/// Both arms expose the [`Tokenize`] interface, so callers can stay generic.
-pub enum WhisperTokenizer {
-    /// Bundled multilingual vocab loaded via splintr's pretrained API.
-    Typed(Tokenizer),
-    /// Arbitrary HF `tokenizer.json` loaded from the checkpoint directory.
-    Any(AnyTokenizer),
-}
-
-impl WhisperTokenizer {
-    /// Encode text into token IDs.
-    pub fn encode(&self, text: &str) -> Vec<u32> {
-        match self {
-            Self::Typed(t) => t.encode(text),
-            Self::Any(t) => t.encode(text),
-        }
-    }
-
-    /// Decode token IDs back to text.
-    pub fn decode(&self, ids: &[u32]) -> std::result::Result<String, TokenizeError> {
-        match self {
-            Self::Typed(t) => t
-                .decode(ids)
-                .map_err(|e| TokenizeError::Other(e.to_string())),
-            Self::Any(t) => t.decode(ids),
-        }
-    }
-
-    /// Number of distinct tokens in the vocabulary.
-    pub fn vocab_size(&self) -> usize {
-        match self {
-            Self::Typed(t) => t.vocab_size(),
-            Self::Any(t) => t.vocab_size(),
-        }
-    }
-}
-
-impl Tokenize for WhisperTokenizer {
-    fn encode(&self, text: &str) -> Vec<u32> {
-        WhisperTokenizer::encode(self, text)
-    }
-    fn decode(&self, ids: &[u32]) -> std::result::Result<String, TokenizeError> {
-        WhisperTokenizer::decode(self, ids)
-    }
-    fn vocab_size(&self) -> usize {
-        WhisperTokenizer::vocab_size(self)
-    }
-}
-
 /// Everything a caller needs to run Whisper transcription: the model, the
 /// tokenizer, and the variant metadata that tells callers which language tokens
 /// / control tokens to emit as the SOT prompt.
 pub struct WhisperBundle<R: Runtime> {
     pub model: WhisperModel<R>,
-    pub tokenizer: WhisperTokenizer,
+    pub tokenizer: AnyTokenizer,
     pub variant: WhisperVariant,
     pub config: AudioConfig,
     /// Number of mel filterbank bins (80 for tiny/base/small/medium/large, 128 for v3).
@@ -116,21 +60,18 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
         let audio_config = hf.to_audio_config();
         let num_mel_bins = hf.num_mel_bins.unwrap_or(80);
 
-        // Multilingual v1/v2/v3 load zero-config from splintr's bundled vocab as
-        // a typed tokenizer; anything else loads its own `tokenizer.json`.
+        // Multilingual v1/v2/v3 load zero-config from splintr's bundled vocab;
+        // anything else loads its own `tokenizer.json`. Both paths yield an
+        // `AnyTokenizer`, so no wrapper is needed to unify them.
         let tokenizer = match whisper_pretrained_vocab(variant) {
-            Some(vocab) => {
-                let t = from_vocab(vocab).map_err(|e| Error::ModelError {
-                    reason: format!("loading bundled {variant:?} whisper tokenizer: {e}"),
-                })?;
-                WhisperTokenizer::Typed(t)
-            }
+            Some(vocab) => from_vocab(vocab).map_err(|e| Error::ModelError {
+                reason: format!("loading bundled {variant:?} whisper tokenizer: {e}"),
+            })?,
             None => {
                 let tok_path = dir.join("tokenizer.json");
-                let t = from_json_path(&tok_path).map_err(|e| Error::ModelError {
+                from_json_path(&tok_path).map_err(|e| Error::ModelError {
                     reason: format!("loading {}: {e}", tok_path.display()),
-                })?;
-                WhisperTokenizer::Any(t)
+                })?
             }
         };
 

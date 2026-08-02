@@ -36,6 +36,22 @@ impl GgufValue {
         }
     }
 
+    /// Narrow accessor for `UINT8` payloads.
+    ///
+    /// Separate from [`as_u32`](Self::as_u32) because the callers differ: `u32`
+    /// is read for counts and ids, where a widening cast is harmless, while
+    /// `u8` is read for opaque byte blobs (`tokenizer.ggml.precompiled_charsmap`)
+    /// that must survive verbatim. Anything wider than a byte is refused rather
+    /// than truncated, so a mistyped array surfaces as `None` instead of silently
+    /// corrupting the blob.
+    pub fn as_u8(&self) -> Option<u8> {
+        match self {
+            GgufValue::Uint8(v) => Some(*v),
+            GgufValue::Int8(v) => Some(*v as u8),
+            _ => None,
+        }
+    }
+
     pub fn as_u64(&self) -> Option<u64> {
         match self {
             GgufValue::Uint32(v) => Some(*v as u64),

@@ -11,15 +11,14 @@
 use super::config::EncoderConfig;
 use super::model::{Encoder, EncoderClient, Pooling};
 use crate::error::Result;
-use crate::format::Gguf;
-use crate::format::gguf_tokenizer::GgufTokenizer;
+use crate::format::{Gguf, extract_gguf_vocab};
 use crate::nn::Weight;
 use crate::quant::traits::DequantOps;
 use numr::dtype::DType;
 use numr::ops::{IndexingOps, ScalarOps, TensorOps, TypeConversionOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
-use splintr::{Tokenize, Tokenizer};
+use splintr::AnyTokenizer;
 
 /// Preferred forward compute dtype for the embedding model.
 ///
@@ -62,17 +61,19 @@ fn seq_len_bucket(raw: usize, max_seq: usize) -> usize {
 /// Owns an `Encoder` and a tokenizer, providing a simple `embed_text()` API
 /// that handles tokenization, forward pass, and pooling in one call.
 ///
-/// The default tokenizer type is `splintr::Tokenizer` (BPE) for backward
-/// compatibility. Use `EmbeddingPipeline<R, GgufTokenizer>` for GGUF models.
-pub struct EmbeddingPipeline<R: Runtime, T: Tokenize = Tokenizer> {
+/// The tokenizer is a [`splintr::AnyTokenizer`] whatever its source — a
+/// `tokenizer.json`, a packaged vocabulary, or the vocabulary embedded in the
+/// GGUF the weights came from ([`Self::from_gguf`]) — so every model takes the
+/// same path through this file.
+pub struct EmbeddingPipeline<R: Runtime> {
     encoder: Encoder<R>,
-    tokenizer: T,
+    tokenizer: AnyTokenizer,
     device: R::Device,
 }
 
-impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
+impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
     /// Create a new embedding pipeline from an encoder, tokenizer, and device.
-    pub fn new(encoder: Encoder<R>, tokenizer: T, device: R::Device) -> Self {
+    pub fn new(encoder: Encoder<R>, tokenizer: AnyTokenizer, device: R::Device) -> Self {
         Self {
             encoder,
             tokenizer,
@@ -91,25 +92,21 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
     /// with it: without this, dense retrieval ranks near-randomly while looking
     /// perfectly healthy end to end.
     ///
-    /// `Tokenize::encode` does not add them (a reranker builds its own
-    /// `[CLS] q [SEP] d [SEP]`), so the single-segment caller must — see
-    /// [`Tokenize::cls_sep_ids`]. Tokenizers with no such convention report
-    /// `None` and the sequence passes through unchanged.
+    /// The tokenizer's own [`splintr::SpecialPolicy`] owns which tokens those
+    /// are and where they go — a reranker builds its own `[CLS] q [SEP] d [SEP]`
+    /// through the pair template, and the single-segment caller here applies the
+    /// single template via [`splintr::SpecialPolicy::apply_single`]. A tokenizer
+    /// with no such convention has an identity template, zero
+    /// [`splintr::SpecialPolicy::single_overhead`], and the sequence passes
+    /// through unchanged.
     ///
-    /// Truncation happens AFTER reserving the two slots, so the result is never
-    /// longer than `max_seq` and never loses its trailing `[SEP]`.
+    /// Truncation happens AFTER reserving the template's slots, so the result is
+    /// never longer than `max_seq` and never loses its trailing `[SEP]`.
     fn wrap_special_tokens(&self, ids: Vec<u32>, max_seq: usize) -> Vec<u32> {
-        let Some((cls, sep)) = self.tokenizer.cls_sep_ids() else {
-            let mut ids = ids;
-            ids.truncate(max_seq);
-            return ids;
-        };
-        let budget = max_seq.saturating_sub(2);
-        let mut out = Vec::with_capacity(ids.len().min(budget) + 2);
-        out.push(cls);
-        out.extend(ids.into_iter().take(budget));
-        out.push(sep);
-        out
+        let policy = self.tokenizer.policy();
+        let mut ids = ids;
+        ids.truncate(max_seq.saturating_sub(policy.single_overhead()));
+        policy.apply_single(ids)
     }
 
     /// Embed a single text string → `[hidden_size]` f32 vector.
@@ -119,7 +116,7 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
         R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
     {
         let max_seq = self.encoder.config().max_position_embeddings;
-        let token_ids = self.wrap_special_tokens(self.tokenizer.encode(text), max_seq);
+        let token_ids = self.wrap_special_tokens(self.tokenizer.encode_raw(text), max_seq);
         let seq_len = token_ids.len();
         let input: Vec<i64> = token_ids.into_iter().map(|t| t as i64).collect();
         let input_tensor = Tensor::<R>::from_slice(&input, &[1, seq_len], &self.device);
@@ -148,7 +145,7 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
         let max_seq = self.encoder.config().max_position_embeddings;
         let all_ids: Vec<Vec<u32>> = texts
             .iter()
-            .map(|t| self.wrap_special_tokens(self.tokenizer.encode(t), max_seq))
+            .map(|t| self.wrap_special_tokens(self.tokenizer.encode_raw(t), max_seq))
             .collect();
 
         use super::config::ArchFamily;
@@ -375,7 +372,7 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
     }
 
     /// Returns a reference to the tokenizer.
-    pub fn tokenizer(&self) -> &T {
+    pub fn tokenizer(&self) -> &AnyTokenizer {
         &self.tokenizer
     }
 
@@ -383,12 +380,7 @@ impl<R: Runtime<DType = DType>, T: Tokenize> EmbeddingPipeline<R, T> {
     pub fn config(&self) -> &EncoderConfig {
         self.encoder.config()
     }
-}
 
-impl<R: Runtime<DType = DType>> EmbeddingPipeline<R, GgufTokenizer>
-where
-    R::Client: Clone + TypeConversionOps<R> + DequantOps<R>,
-{
     /// Load a complete sentence embedding model from a GGUF file.
     ///
     /// Extracts config, weights, and tokenizer from the single file.
@@ -401,8 +393,19 @@ where
     /// tensor cores and runs ~50–100× slower for these shapes (profiled: 0.5 vs
     /// ~29 docs/s for nomic-768 on a 3060). CPU/WGPU keep F32. GGUF weights are
     /// loaded dequantized to F32 then cast to the compute dtype by the builders.
-    pub fn from_gguf(gguf: &mut Gguf, device: R::Device) -> Result<Self> {
-        let tokenizer = GgufTokenizer::from_gguf(gguf)?;
+    pub fn from_gguf(gguf: &mut Gguf, device: R::Device) -> Result<Self>
+    where
+        R::Client: Clone + TypeConversionOps<R> + DequantOps<R>,
+    {
+        // The container is boostr's to read; what the vocabulary *means* is
+        // splintr's, so the metadata is lifted into a plain struct and handed
+        // straight over rather than interpreted here.
+        let tokenizer =
+            splintr::from_gguf_vocab(extract_gguf_vocab(gguf.metadata())?).map_err(|e| {
+                crate::error::Error::ModelError {
+                    reason: format!("GGUF tokenizer: {e}"),
+                }
+            })?;
         let mut config = EncoderConfig::from_gguf_metadata(gguf.metadata())?;
         config.compute_dtype = preferred_compute_dtype::<R>();
         let d = &device;

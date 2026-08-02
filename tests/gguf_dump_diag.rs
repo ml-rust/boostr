@@ -25,6 +25,14 @@ fn env_path(key: &str) -> Option<String> {
     }
 }
 
+/// Build the tokenizer a GGUF file declares, the same way
+/// `EmbeddingPipeline::from_gguf` does: boostr lifts the `tokenizer.ggml.*`
+/// block out of the container, splintr decides what it means.
+fn open_tokenizer(gguf: &Gguf) -> splintr::AnyTokenizer {
+    let vocab = boostr::format::extract_gguf_vocab(gguf.metadata()).expect("vocab metadata");
+    splintr::from_gguf_vocab(vocab).expect("tokenizer")
+}
+
 #[test]
 #[ignore]
 fn dump_gguf_metadata_and_tensors() {
@@ -81,13 +89,11 @@ fn dump_gguf_metadata_and_tensors() {
 #[test]
 #[ignore]
 fn dump_tokenizer_output() {
-    use boostr::format::gguf_tokenizer::GgufTokenizer;
-
     let Some(path) = env_path("BOOSTR_GGUF_DUMP") else {
         return;
     };
     let gguf = Gguf::open(&path).expect("open gguf");
-    let tok = GgufTokenizer::from_gguf(&gguf).expect("tokenizer");
+    let tok = open_tokenizer(&gguf);
 
     for text in [
         "storage flush persists the in-memory index state to disk",
@@ -104,8 +110,6 @@ fn dump_tokenizer_output() {
 #[test]
 #[ignore]
 fn tokenizer_round_trip_and_vocab_probe() {
-    use boostr::format::gguf_tokenizer::GgufTokenizer;
-
     let Some(path) = env_path("BOOSTR_GGUF_DUMP") else {
         return;
     };
@@ -136,7 +140,7 @@ fn tokenizer_round_trip_and_vocab_probe() {
             .collect::<Vec<_>>()
     );
 
-    let tok = GgufTokenizer::from_gguf(&gguf).expect("tokenizer");
+    let tok = open_tokenizer(&gguf);
     let text = "hello the quick brown fox";
     let ids = tok.encode(text);
     eprintln!("  encode({text:?}) = {ids:?}");

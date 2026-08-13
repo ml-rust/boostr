@@ -98,3 +98,4 @@ dmypy.json
 
 .cargo/
 .claude
+.agents/prep/

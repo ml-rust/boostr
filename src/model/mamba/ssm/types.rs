@@ -14,6 +14,8 @@ pub struct SsmInput<'a, R: Runtime> {
     pub d_param: Option<&'a Var<R>>,
     pub dt: &'a Var<R>,
     pub config: &'a Mamba2Config,
+    /// Optional clamp applied to the recurrent hidden state after each sequential update.
+    pub hidden_state_clamp: Option<f64>,
 }
 
 /// Bundled SSM inputs for inference (raw tensors, no Var).

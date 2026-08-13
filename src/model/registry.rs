@@ -5,7 +5,9 @@
 
 use crate::error::{Error, Result};
 use crate::model::config::UniversalConfig;
+use crate::model::mamba::mamba1::Mamba1Config;
 use crate::model::mamba::mamba2::Mamba2Config;
+use crate::model::mamba::mamba3::Mamba3Config;
 use crate::model::traits::Model;
 use crate::nn::VarBuilder;
 use numr::dtype::DType;
@@ -38,8 +40,12 @@ pub enum LoadedModel<R: Runtime> {
     Llama(Box<super::llama::Llama<R>>),
     /// Tensor-parallel LLaMA model (sharded across multiple GPUs via NCCL)
     LlamaTp(Box<super::llama::LlamaTp<R>>),
+    /// Mamba1 SSM model (original selective SSM + depthwise convolution)
+    Mamba1(Box<super::mamba::Mamba1Model<R>>),
     /// Mamba2 SSM model (full model with embedding + layers + lm_head)
     Mamba2(Box<super::mamba::Mamba2Model<R>>),
+    /// Mamba3 SSM model (trapezoidal discretization + optional complex RoPE/MIMO)
+    Mamba3(Box<super::mamba::Mamba3Model<R>>),
     /// Hybrid model mixing attention and SSM layers
     Hybrid(Box<super::hybrid::HybridModel<R>>),
     /// Multimodal model with vision/audio encoders + LLM backbone
@@ -58,9 +64,17 @@ where
     /// share the standard transformer structure.
     pub fn load(config: &UniversalConfig, vb: &mut VarBuilder<R>) -> Result<Self> {
         match config.model_type.as_str() {
-            "mamba2" | "mamba3" => {
+            "mamba1" => {
+                let model = super::mamba::Mamba1Model::from_varbuilder(vb, config)?;
+                Ok(LoadedModel::Mamba1(Box::new(model)))
+            }
+            "mamba2" => {
                 let model = super::mamba::Mamba2Model::from_varbuilder(vb, config)?;
                 Ok(LoadedModel::Mamba2(Box::new(model)))
+            }
+            "mamba3" => {
+                let model = super::mamba::Mamba3Model::from_varbuilder(vb, config)?;
+                Ok(LoadedModel::Mamba3(Box::new(model)))
             }
             "hybrid" => {
                 let model = super::hybrid::HybridModel::from_varbuilder(vb, config)?;
@@ -79,7 +93,7 @@ where
             other => Err(Error::ModelError {
                 reason: format!(
                     "Unknown model type '{other}' without attention config. \
-                     Only pure SSM models (mamba2/mamba3) and hybrid models are \
+                     Only pure SSM models (mamba1/mamba2/mamba3) and hybrid models are \
                      supported without attention configuration."
                 ),
             }),
@@ -124,14 +138,17 @@ where
         match self {
             LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) | LoadedModel::Hybrid(_) => true,
             LoadedModel::Multimodal(m) => m.llm().needs_kv_cache(),
-            LoadedModel::Mamba2(_) => false,
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => false,
         }
     }
 
     /// Whether this model uses SSM state.
     pub fn needs_ssm_state(&self) -> bool {
         match self {
-            LoadedModel::Mamba2(_) | LoadedModel::Hybrid(_) => true,
+            LoadedModel::Mamba1(_)
+            | LoadedModel::Mamba2(_)
+            | LoadedModel::Mamba3(_)
+            | LoadedModel::Hybrid(_) => true,
             LoadedModel::Multimodal(m) => m.llm().needs_ssm_state(),
             _ => false,
         }
@@ -141,7 +158,9 @@ where
     pub fn model_type(&self) -> &str {
         match self {
             LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) => "llama",
+            LoadedModel::Mamba1(_) => "mamba1",
             LoadedModel::Mamba2(_) => "mamba2",
+            LoadedModel::Mamba3(_) => "mamba3",
             LoadedModel::Hybrid(_) => "hybrid",
             LoadedModel::Multimodal(m) => m.config().model_type.as_str(),
         }
@@ -152,7 +171,9 @@ where
         match self {
             LoadedModel::Llama(m) => m.config().vocab_size,
             LoadedModel::LlamaTp(m) => m.config().vocab_size,
+            LoadedModel::Mamba1(m) => m.config().vocab_size,
             LoadedModel::Mamba2(m) => m.config().vocab_size,
+            LoadedModel::Mamba3(m) => m.config().vocab_size,
             LoadedModel::Hybrid(m) => m.config().vocab_size,
             LoadedModel::Multimodal(m) => m.config().vocab_size,
         }
@@ -163,7 +184,9 @@ where
         match self {
             LoadedModel::Llama(m) => m.config().num_layers,
             LoadedModel::LlamaTp(m) => m.config().num_layers,
+            LoadedModel::Mamba1(m) => m.config().num_layers,
             LoadedModel::Mamba2(m) => m.config().num_layers,
+            LoadedModel::Mamba3(m) => m.config().num_layers,
             LoadedModel::Hybrid(m) => m.config().num_layers,
             LoadedModel::Multimodal(m) => m.config().num_layers,
         }
@@ -174,7 +197,9 @@ where
         match self {
             LoadedModel::Llama(m) => m.config().hidden_size,
             LoadedModel::LlamaTp(m) => m.config().hidden_size,
+            LoadedModel::Mamba1(m) => m.config().hidden_size,
             LoadedModel::Mamba2(m) => m.config().hidden_size,
+            LoadedModel::Mamba3(m) => m.config().hidden_size,
             LoadedModel::Hybrid(m) => m.config().hidden_size,
             LoadedModel::Multimodal(m) => m.config().hidden_size,
         }
@@ -192,7 +217,7 @@ where
                 .attention
                 .as_ref()
                 .map(|a| a.kv_heads() / m.world_size()),
-            LoadedModel::Mamba2(_) => None,
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => None,
             LoadedModel::Hybrid(m) => m.config().attention.as_ref().map(|a| a.kv_heads()),
             LoadedModel::Multimodal(m) => m.llm().num_kv_heads(),
         }
@@ -217,7 +242,7 @@ where
                     .as_ref()
                     .map(|a| a.head_dim(config.hidden_size))
             }
-            LoadedModel::Mamba2(_) => None,
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => None,
             LoadedModel::Hybrid(m) => {
                 let config = m.config();
                 config
@@ -234,7 +259,9 @@ where
         match self {
             LoadedModel::Llama(m) => m.config().max_seq_len,
             LoadedModel::LlamaTp(m) => m.config().max_seq_len,
+            LoadedModel::Mamba1(m) => m.config().max_seq_len,
             LoadedModel::Mamba2(m) => m.config().max_seq_len,
+            LoadedModel::Mamba3(m) => m.config().max_seq_len,
             LoadedModel::Hybrid(m) => m.config().max_seq_len,
             LoadedModel::Multimodal(m) => m.config().max_seq_len,
         }
@@ -245,7 +272,9 @@ where
         match self {
             LoadedModel::Llama(m) => m.config().moe.is_some(),
             LoadedModel::LlamaTp(m) => m.config().moe.is_some(),
+            LoadedModel::Mamba1(m) => m.config().moe.is_some(),
             LoadedModel::Mamba2(m) => m.config().moe.is_some(),
+            LoadedModel::Mamba3(m) => m.config().moe.is_some(),
             LoadedModel::Hybrid(m) => m.config().moe.is_some(),
             LoadedModel::Multimodal(m) => m.llm().is_moe(),
         }
@@ -256,7 +285,9 @@ where
         match self {
             LoadedModel::Llama(m) => m.config().moe.as_ref(),
             LoadedModel::LlamaTp(m) => m.config().moe.as_ref(),
+            LoadedModel::Mamba1(m) => m.config().moe.as_ref(),
             LoadedModel::Mamba2(m) => m.config().moe.as_ref(),
+            LoadedModel::Mamba3(m) => m.config().moe.as_ref(),
             LoadedModel::Hybrid(m) => m.config().moe.as_ref(),
             LoadedModel::Multimodal(m) => m.llm().moe_config(),
         }
@@ -269,18 +300,36 @@ where
         match self {
             LoadedModel::Llama(m) => Some((m.rope().cos_cache(), m.rope().sin_cache())),
             LoadedModel::LlamaTp(_) => None, // TP model manages RoPE internally
-            LoadedModel::Mamba2(_) => None,
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => None,
             LoadedModel::Hybrid(m) => Some((m.rope().cos_cache(), m.rope().sin_cache())),
             LoadedModel::Multimodal(m) => m.llm().rope_caches(),
         }
     }
 
-    /// Get the Mamba2 config (for SSM state allocation).
+    /// Get the Mamba1 config, if this is a Mamba1 model.
+    pub fn mamba1_config(&self) -> Option<&Mamba1Config> {
+        match self {
+            LoadedModel::Mamba1(m) => Some(m.mamba_config()),
+            _ => None,
+        }
+    }
+
+    /// Get the Mamba2 config (for existing SSM state allocation).
     pub fn mamba_config(&self) -> Option<&Mamba2Config> {
         match self {
             LoadedModel::Mamba2(m) => Some(m.mamba_config()),
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba3(_) => None,
             LoadedModel::Hybrid(m) => Some(m.mamba_config()),
             LoadedModel::Multimodal(m) => m.llm().mamba_config(),
+            _ => None,
+        }
+    }
+
+    /// Get the Mamba3 config, if this is a Mamba3 model.
+    pub fn mamba3_config(&self) -> Option<&Mamba3Config> {
+        match self {
+            LoadedModel::Mamba3(m) => Some(m.mamba_config()),
+            LoadedModel::Multimodal(m) => m.llm().mamba3_config(),
             _ => None,
         }
     }
@@ -291,7 +340,9 @@ impl<R: Runtime> std::fmt::Debug for LoadedModel<R> {
         match self {
             LoadedModel::Llama(_) => f.debug_tuple("Llama").finish(),
             LoadedModel::LlamaTp(_) => f.debug_tuple("LlamaTp").finish(),
+            LoadedModel::Mamba1(_) => f.debug_tuple("Mamba1").finish(),
             LoadedModel::Mamba2(_) => f.debug_tuple("Mamba2").finish(),
+            LoadedModel::Mamba3(_) => f.debug_tuple("Mamba3").finish(),
             LoadedModel::Hybrid(_) => f.debug_tuple("Hybrid").finish(),
             LoadedModel::Multimodal(_) => f.debug_tuple("Multimodal").finish(),
         }

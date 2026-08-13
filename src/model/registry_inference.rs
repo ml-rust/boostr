@@ -46,10 +46,12 @@ where
             LoadedModel::LlamaTp(m) => {
                 m.forward_with_kv_cache(&client, input_ids, kv_cache, position)
             }
-            LoadedModel::Mamba2(_) => Err(Error::ModelError {
-                reason: "Mamba2 does not use KV cache — use forward_with_ssm_state() instead"
-                    .into(),
-            }),
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => {
+                Err(Error::ModelError {
+                    reason: "SSM models do not use KV cache — use the SSM/full-sequence API instead"
+                        .into(),
+                })
+            }
             LoadedModel::Hybrid(_) => Err(Error::ModelError {
                 reason: "Hybrid model does not support forward_with_kv_cache — use forward_hybrid() instead"
                     .into(),
@@ -89,10 +91,13 @@ where
             LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "LlamaTp does not yet support paged KV cache".into(),
             }),
-            LoadedModel::Mamba2(_) => Err(Error::ModelError {
-                reason: "Mamba2 does not use KV cache — use forward_with_ssm_state() instead"
-                    .into(),
-            }),
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => {
+                Err(Error::ModelError {
+                    reason:
+                        "SSM models do not use KV cache — use the SSM/full-sequence API instead"
+                            .into(),
+                })
+            }
             LoadedModel::Hybrid(_) => Err(Error::ModelError {
                 reason: "Hybrid model does not yet support paged KV cache".into(),
             }),
@@ -120,7 +125,13 @@ where
         let device = input_ids.device();
         let client = R::default_client(device);
         match self {
+            LoadedModel::Mamba1(_) => Err(Error::ModelError {
+                reason: "Mamba1 needs a Mamba1-specific recurrent cache (per-channel/per-state A and depthwise-conv state); LayeredSsmState is Mamba2-shaped".into(),
+            }),
             LoadedModel::Mamba2(m) => m.forward_with_ssm_state(&client, input_ids, ssm_state),
+            LoadedModel::Mamba3(_) => Err(Error::ModelError {
+                reason: "Mamba3 needs a Mamba3-specific recurrent cache (trapezoidal prev x/B plus optional MIMO state); LayeredSsmState is Mamba2-shaped".into(),
+            }),
             LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "Llama does not use SSM state — use forward_with_kv_cache() instead".into(),
             }),
@@ -161,11 +172,11 @@ where
                 reason: "Llama model does not support forward_hybrid — use forward_with_kv_cache()"
                     .into(),
             }),
-            LoadedModel::Mamba2(_) => Err(Error::ModelError {
-                reason:
-                    "Mamba2 model does not support forward_hybrid — use forward_with_ssm_state()"
-                        .into(),
-            }),
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => {
+                Err(Error::ModelError {
+                    reason: "SSM-only model does not support forward_hybrid".into(),
+                })
+            }
             LoadedModel::Multimodal(m) => m
                 .llm()
                 .forward_hybrid(input_ids, kv_cache, ssm_state, position),
@@ -186,10 +197,11 @@ where
             LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "LlamaTp does not support pipeline-parallel forward_embed".into(),
             }),
-            LoadedModel::Mamba2(_) => Err(Error::ModelError {
-                reason: "Mamba2 does not support forward_embed — use forward_with_ssm_state()"
-                    .into(),
-            }),
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => {
+                Err(Error::ModelError {
+                    reason: "SSM models do not support forward_embed in pipeline mode".into(),
+                })
+            }
             LoadedModel::Hybrid(_) => Err(Error::ModelError {
                 reason: "Hybrid does not support forward_embed in pipeline mode".into(),
             }),
@@ -213,7 +225,9 @@ where
             LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "LlamaTp does not support forward_hidden (use a single-GPU model for embeddings)".into(),
             }),
+            LoadedModel::Mamba1(m) => m.forward_hidden(&client, input_ids),
             LoadedModel::Mamba2(m) => m.forward_hidden(&client, input_ids),
+            LoadedModel::Mamba3(m) => m.forward_hidden(&client, input_ids),
             LoadedModel::Hybrid(m) => m.forward_hidden(&client, input_ids),
             LoadedModel::Multimodal(m) => m.llm().forward_hidden(input_ids),
         }
@@ -250,9 +264,11 @@ where
             LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "LlamaTp does not support pipeline-parallel forward_layers_range".into(),
             }),
-            LoadedModel::Mamba2(_) => Err(Error::ModelError {
-                reason: "Mamba2 does not support forward_layers_range".into(),
-            }),
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => {
+                Err(Error::ModelError {
+                    reason: "SSM models do not support forward_layers_range".into(),
+                })
+            }
             LoadedModel::Hybrid(_) => Err(Error::ModelError {
                 reason: "Hybrid does not support forward_layers_range in pipeline mode".into(),
             }),
@@ -285,9 +301,11 @@ where
             LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "LlamaTp does not support pipeline-parallel forward_head".into(),
             }),
-            LoadedModel::Mamba2(_) => Err(Error::ModelError {
-                reason: "Mamba2 does not support forward_head".into(),
-            }),
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => {
+                Err(Error::ModelError {
+                    reason: "SSM models do not support forward_head".into(),
+                })
+            }
             LoadedModel::Hybrid(_) => Err(Error::ModelError {
                 reason: "Hybrid does not support forward_head in pipeline mode".into(),
             }),
@@ -492,10 +510,11 @@ impl LoadedModel<numr::runtime::cuda::CudaRuntime> {
             LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "LlamaTp does not yet support CUDA graph mode".into(),
             }),
-            LoadedModel::Mamba2(_) => Err(Error::ModelError {
-                reason: "Mamba2 does not support CUDA graph mode — use forward_with_ssm_state()"
-                    .into(),
-            }),
+            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => {
+                Err(Error::ModelError {
+                    reason: "SSM models do not support CUDA graph mode".into(),
+                })
+            }
             LoadedModel::Hybrid(_) => Err(Error::ModelError {
                 reason: "Hybrid model does not yet support CUDA graph mode".into(),
             }),

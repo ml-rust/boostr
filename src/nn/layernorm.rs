@@ -4,10 +4,11 @@
 //! Delegates to numr's fused `var_layer_norm` for single-kernel forward + autograd.
 
 use crate::error::{Error, Result};
+use crate::nn::module::Module;
 use numr::autograd::{Var, var_layer_norm};
 use numr::ops::{NormalizationOps, ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
-use numr::tensor::Tensor;
+use numr::tensor::{Tensor, TensorId};
 
 /// Layer Normalization
 ///
@@ -25,6 +26,22 @@ impl<R: Runtime> LayerNorm<R> {
         Self {
             weight: Var::new(weight, trainable),
             bias: Var::new(bias, trainable),
+            eps,
+        }
+    }
+
+    /// Create from tensors while preserving stable autograd IDs.
+    pub fn with_ids(
+        weight: Tensor<R>,
+        weight_id: TensorId,
+        bias: Tensor<R>,
+        bias_id: TensorId,
+        eps: f32,
+        trainable: bool,
+    ) -> Self {
+        Self {
+            weight: Var::with_id(weight, weight_id, trainable),
+            bias: Var::with_id(bias, bias_id, trainable),
             eps,
         }
     }
@@ -50,6 +67,35 @@ impl<R: Runtime> LayerNorm<R> {
     /// Get the bias (beta) parameter
     pub fn bias(&self) -> &Var<R> {
         &self.bias
+    }
+
+    /// All parameters with their stable autograd IDs.
+    pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        vec![
+            (self.weight.id(), &self.weight),
+            (self.bias.id(), &self.bias),
+        ]
+    }
+
+    /// Trainable parameters with their stable autograd IDs.
+    pub fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        self.parameters()
+            .into_iter()
+            .filter(|param| param.1.requires_grad())
+            .collect()
+    }
+}
+
+impl<R: Runtime> Module<R> for LayerNorm<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        vec![self.weight(), self.bias()]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        vec![
+            ("weight".to_string(), self.weight()),
+            ("bias".to_string(), self.bias()),
+        ]
     }
 }
 

@@ -1,10 +1,11 @@
 //! 1D convolution layer with autograd support
 
 use crate::error::Result;
+use crate::nn::module::Module;
 use numr::autograd::{Var, var_conv1d};
 use numr::ops::{BinaryOps, ConvOps, PaddingMode, ReduceOps, ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
-use numr::tensor::Tensor;
+use numr::tensor::{Tensor, TensorId};
 
 /// 1D convolution layer: output = conv1d(input, weight) + bias
 ///
@@ -36,6 +37,28 @@ impl<R: Runtime> Conv1d<R> {
         Self {
             weight: Var::new(weight, trainable),
             bias: bias.map(|b| Var::new(b, trainable)),
+            stride,
+            padding,
+            dilation,
+            groups,
+        }
+    }
+
+    /// Create from tensors while preserving stable autograd IDs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_ids(
+        weight: Tensor<R>,
+        weight_id: TensorId,
+        bias: Option<(Tensor<R>, TensorId)>,
+        stride: usize,
+        padding: PaddingMode,
+        dilation: usize,
+        groups: usize,
+        trainable: bool,
+    ) -> Self {
+        Self {
+            weight: Var::with_id(weight, weight_id, trainable),
+            bias: bias.map(|(b, id)| Var::with_id(b, id, trainable)),
             stride,
             padding,
             dilation,
@@ -95,6 +118,41 @@ impl<R: Runtime> Conv1d<R> {
 
     pub fn bias(&self) -> Option<&Var<R>> {
         self.bias.as_ref()
+    }
+
+    /// All parameters with their stable autograd IDs.
+    pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        let mut params = vec![(self.weight.id(), &self.weight)];
+        if let Some(bias) = &self.bias {
+            params.push((bias.id(), bias));
+        }
+        params
+    }
+
+    /// Trainable parameters with their stable autograd IDs.
+    pub fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        self.parameters()
+            .into_iter()
+            .filter(|param| param.1.requires_grad())
+            .collect()
+    }
+}
+
+impl<R: Runtime> Module<R> for Conv1d<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        let mut params = vec![self.weight()];
+        if let Some(bias) = self.bias() {
+            params.push(bias);
+        }
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = vec![("weight".to_string(), self.weight())];
+        if let Some(bias) = self.bias() {
+            params.push(("bias".to_string(), bias));
+        }
+        params
     }
 }
 

@@ -5,10 +5,11 @@
 //! Delegates to numr's fused `var_rms_norm` for single-kernel forward + autograd.
 
 use crate::error::{Error, Result};
+use crate::nn::module::Module;
 use numr::autograd::{Var, var_rms_norm};
 use numr::ops::{NormalizationOps, ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
-use numr::tensor::Tensor;
+use numr::tensor::{Tensor, TensorId};
 
 /// RMS Normalization layer
 ///
@@ -25,6 +26,19 @@ impl<R: Runtime> RmsNorm<R> {
             weight: Var::new(weight, trainable),
             eps,
         }
+    }
+
+    /// Create from a tensor while preserving its stable autograd ID.
+    pub fn with_id(weight: Tensor<R>, weight_id: TensorId, eps: f32, trainable: bool) -> Self {
+        Self {
+            weight: Var::with_id(weight, weight_id, trainable),
+            eps,
+        }
+    }
+
+    /// Alias for [`with_id`](Self::with_id), matching multi-parameter modules.
+    pub fn with_ids(weight: Tensor<R>, weight_id: TensorId, eps: f32, trainable: bool) -> Self {
+        Self::with_id(weight, weight_id, eps, trainable)
     }
 
     /// Forward: x * rsqrt(mean(x^2) + eps) * weight
@@ -69,6 +83,29 @@ impl<R: Runtime> RmsNorm<R> {
     /// Get the weight parameter
     pub fn weight(&self) -> &Var<R> {
         &self.weight
+    }
+
+    /// All parameters with their stable autograd IDs.
+    pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        vec![(self.weight.id(), &self.weight)]
+    }
+
+    /// Trainable parameters with their stable autograd IDs.
+    pub fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        self.parameters()
+            .into_iter()
+            .filter(|param| param.1.requires_grad())
+            .collect()
+    }
+}
+
+impl<R: Runtime> Module<R> for RmsNorm<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        vec![self.weight()]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        vec![("weight".to_string(), self.weight())]
     }
 }
 

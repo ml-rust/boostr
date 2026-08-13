@@ -9,8 +9,8 @@ use numr::autograd::{
 };
 use numr::dtype::DType;
 use numr::ops::{
-    ActivationOps, BinaryOps, ConvOps, NormalizationOps, ReduceOps, ScalarOps, ShapeOps, TensorOps,
-    UnaryOps,
+    ActivationOps, BinaryOps, CompareOps, ConvOps, NormalizationOps, ReduceOps, ScalarOps,
+    ShapeOps, TensorOps, UnaryOps,
 };
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
@@ -30,13 +30,15 @@ impl<R: Runtime> Mamba2<R> {
             + ConvOps<R>
             + NormalizationOps<R>
             + ReduceOps<R>
-            + ShapeOps<R>,
+            + ShapeOps<R>
+            + BinaryOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ActivationOps<R>
             + ConvOps<R>
             + ReduceOps<R>
-            + BinaryOps<R>,
+            + BinaryOps<R>
+            + CompareOps<R>,
     {
         let shape = x.shape();
         if shape.len() != 3 {
@@ -127,6 +129,7 @@ impl<R: Runtime> Mamba2<R> {
             d_param: self.d_param.as_ref(),
             dt: &dt,
             config: &self.config,
+            hidden_state_clamp: None,
         };
         let out = crate::model::mamba::ssm::ssm_forward_sequential(client, &ssm_input)?;
 

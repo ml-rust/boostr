@@ -38,7 +38,7 @@ pub mod quant;
 pub mod trainer;
 
 // Re-export primary boostr traits
-pub use nn::{Init, VarBuilder, VarMap, Weight};
+pub use nn::{Init, VarBuilder, VarMap, Weight, router_z_loss};
 pub use ops::{
     AttentionOps, DeviceGrammarDfa, FlashAttentionOps, FusedFp8TrainingOps, FusedOptimizerOps,
     FusedQkvOps, GrammarDfaOps, KvCacheOps, MlaOps, PagedAttentionOps, RoPEOps, RoPEPackedOps,

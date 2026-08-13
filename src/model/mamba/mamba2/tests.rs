@@ -88,3 +88,39 @@ fn test_mamba2_forward_invalid_input() {
     );
     assert!(mamba.forward(&client, &x_wrong).is_err());
 }
+
+#[test]
+fn test_mamba2_model_config() {
+    let config = crate::model::config::UniversalConfig {
+        model_type: "mamba2".into(),
+        vocab_size: 1000,
+        hidden_size: 64,
+        num_layers: 2,
+        max_seq_len: 512,
+        intermediate_size: None,
+        rms_norm_eps: 1e-5,
+        attention: None,
+        ssm: Some(crate::model::config::SsmConfig {
+            variant: "mamba2".into(),
+            state_size: 16,
+            num_heads: 2,
+            head_dim: 64,
+            expand: 2,
+            conv_kernel: 4,
+            chunk_size: 64,
+            n_groups: 1,
+            complex_rope: None,
+            mimo_rank: None,
+            use_conv: None,
+        }),
+        moe: None,
+        hybrid_layers: None,
+        tie_word_embeddings: false,
+        vision: None,
+        audio: None,
+    };
+    let mamba_config = Mamba2Config::from_universal(&config).unwrap();
+    assert_eq!(mamba_config.d_model, 64);
+    assert_eq!(mamba_config.nheads, 2);
+    assert_eq!(mamba_config.d_state, 16);
+}

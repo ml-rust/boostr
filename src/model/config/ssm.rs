@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// SSM (State Space Model) configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SsmConfig {
-    /// SSM variant: "mamba2", "mamba3"
+    /// SSM variant: "mamba1", "mamba2", "mamba3"
     pub variant: String,
 
     /// Number of SSM heads
@@ -86,11 +86,15 @@ impl SsmConfig {
         if actual != expected {
             return Err(Error::ModelError {
                 reason: format!(
-                    "Mamba2 constraint violated: hidden_size * expand ({actual}) != num_heads * head_dim ({expected})"
+                    "SSM constraint violated: hidden_size * expand ({actual}) != num_heads * head_dim ({expected})"
                 ),
             });
         }
         Ok(())
+    }
+
+    pub fn is_mamba1(&self) -> bool {
+        self.variant == "mamba1"
     }
 
     pub fn is_mamba3(&self) -> bool {

@@ -1,11 +1,12 @@
 //! Embedding layer — lookup table for token embeddings
 
 use crate::error::{Error, Result};
+use crate::nn::module::Module;
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::IndexingOps;
 use numr::runtime::{Runtime, RuntimeClient};
-use numr::tensor::Tensor;
+use numr::tensor::{Tensor, TensorId};
 
 /// Token embedding: maps integer indices to dense vectors.
 ///
@@ -19,6 +20,18 @@ impl<R: Runtime> Embedding<R> {
         Self {
             weight: Var::new(weight, trainable),
         }
+    }
+
+    /// Create from a tensor while preserving its stable autograd ID.
+    pub fn with_id(weight: Tensor<R>, weight_id: TensorId, trainable: bool) -> Self {
+        Self {
+            weight: Var::with_id(weight, weight_id, trainable),
+        }
+    }
+
+    /// Alias for [`with_id`](Self::with_id), matching multi-parameter modules.
+    pub fn with_ids(weight: Tensor<R>, weight_id: TensorId, trainable: bool) -> Self {
+        Self::with_id(weight, weight_id, trainable)
     }
 
     /// Forward: lookup rows from embedding table.
@@ -43,6 +56,29 @@ impl<R: Runtime> Embedding<R> {
 
     pub fn weight(&self) -> &Var<R> {
         &self.weight
+    }
+
+    /// All parameters with their stable autograd IDs.
+    pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        vec![(self.weight.id(), &self.weight)]
+    }
+
+    /// Trainable parameters with their stable autograd IDs.
+    pub fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        self.parameters()
+            .into_iter()
+            .filter(|param| param.1.requires_grad())
+            .collect()
+    }
+}
+
+impl<R: Runtime> Module<R> for Embedding<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        vec![self.weight()]
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        vec![("weight".to_string(), self.weight())]
     }
 }
 

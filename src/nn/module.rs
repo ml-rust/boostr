@@ -2,7 +2,7 @@
 
 use numr::autograd::Var;
 use numr::runtime::Runtime;
-use numr::tensor::Tensor;
+use numr::tensor::{Tensor, TensorId};
 use std::collections::HashMap;
 
 /// Core trait for neural network modules.
@@ -13,12 +13,40 @@ use std::collections::HashMap;
 /// Forward passes stay as inherent methods on each layer because
 /// signatures differ (different client bounds, input types).
 pub trait Module<R: Runtime> {
-    /// All trainable parameters (for optimizer).
+    /// All parameters owned by the module.
     fn parameters(&self) -> Vec<&Var<R>>;
 
     /// Named parameters (for checkpointing). Names use dot notation
     /// for nested modules: `"layers.0.attn.weight"`.
     fn named_parameters(&self) -> Vec<(String, &Var<R>)>;
+
+    /// All parameters with their stable autograd IDs.
+    fn parameters_with_ids(&self) -> Vec<(TensorId, &Var<R>)> {
+        self.parameters()
+            .into_iter()
+            .map(|var| (var.id(), var))
+            .collect()
+    }
+
+    /// Trainable parameters with their stable autograd IDs.
+    fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        self.parameters_with_ids()
+            .into_iter()
+            .filter(|param| param.1.requires_grad())
+            .collect()
+    }
+
+    /// Clone trainable parameter tensors keyed by their stable autograd IDs.
+    ///
+    /// `Tensor::clone()` creates a fresh tensor storage ID, so optimizers must use
+    /// the returned map key — not the cloned tensor's own ID — as the canonical
+    /// parameter identity.
+    fn trainable_parameter_tensors(&self) -> HashMap<TensorId, Tensor<R>> {
+        self.trainable_parameters()
+            .into_iter()
+            .map(|(id, var)| (id, var.tensor().clone()))
+            .collect()
+    }
 
     /// Total number of scalar parameters.
     fn num_parameters(&self) -> usize {
@@ -92,25 +120,6 @@ mod tests {
     use super::*;
     use crate::nn::Linear;
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
-
-    // Demonstrate implementing Module for Linear
-    impl Module<CpuRuntime> for Linear<CpuRuntime> {
-        fn parameters(&self) -> Vec<&Var<CpuRuntime>> {
-            let mut params = vec![self.weight()];
-            if let Some(b) = self.bias() {
-                params.push(b);
-            }
-            params
-        }
-
-        fn named_parameters(&self) -> Vec<(String, &Var<CpuRuntime>)> {
-            let mut params = vec![("weight".to_string(), self.weight())];
-            if let Some(b) = self.bias() {
-                params.push(("bias".to_string(), b));
-            }
-            params
-        }
-    }
 
     #[test]
     fn test_module_parameters() {

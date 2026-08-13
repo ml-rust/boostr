@@ -35,7 +35,7 @@ pub use linear::{Linear, MaybeQuantLinear, QuantLinear};
 pub use lora::LoraLinear;
 pub use loss::{
     contrastive_loss, cross_entropy_loss, cross_entropy_loss_smooth, focal_loss, kl_div_loss,
-    mse_loss,
+    mse_loss, router_z_loss,
 };
 pub use lstm::{BiLstm, Lstm};
 pub use mla::{Mla, MlaConfig};

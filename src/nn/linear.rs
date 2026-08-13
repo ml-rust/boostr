@@ -1,6 +1,7 @@
 //! Linear and quantized linear layers
 
 use crate::error::Result;
+use crate::nn::module::Module;
 use crate::nn::weight::Weight;
 use crate::quant::decomposed::DecomposedQuantLinear;
 use crate::quant::tensor::QuantTensor;
@@ -9,7 +10,7 @@ use numr::autograd::{Var, var_add, var_matmul, var_transpose};
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, TensorOps, TypeConversionOps};
 use numr::runtime::{Runtime, RuntimeClient};
-use numr::tensor::Tensor;
+use numr::tensor::{Tensor, TensorId};
 
 /// Dense linear layer: output = input @ weight^T + bias
 ///
@@ -26,6 +27,23 @@ impl<R: Runtime> Linear<R> {
         Self {
             weight: Var::new(weight, trainable),
             bias: bias.map(|b| Var::new(b, trainable)),
+        }
+    }
+
+    /// Create from tensors while preserving stable autograd IDs.
+    ///
+    /// Use this when rebuilding a layer from optimizer-updated tensors so the
+    /// optimizer state keyed by `TensorId` remains attached to the same logical
+    /// parameters across steps.
+    pub fn with_ids(
+        weight: Tensor<R>,
+        weight_id: TensorId,
+        bias: Option<(Tensor<R>, TensorId)>,
+        trainable: bool,
+    ) -> Self {
+        Self {
+            weight: Var::with_id(weight, weight_id, trainable),
+            bias: bias.map(|(b, id)| Var::with_id(b, id, trainable)),
         }
     }
 
@@ -51,6 +69,41 @@ impl<R: Runtime> Linear<R> {
 
     pub fn bias(&self) -> Option<&Var<R>> {
         self.bias.as_ref()
+    }
+
+    /// All parameters with their stable autograd IDs.
+    pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        let mut params = vec![(self.weight.id(), &self.weight)];
+        if let Some(bias) = &self.bias {
+            params.push((bias.id(), bias));
+        }
+        params
+    }
+
+    /// Trainable parameters with their stable autograd IDs.
+    pub fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        self.parameters()
+            .into_iter()
+            .filter(|param| param.1.requires_grad())
+            .collect()
+    }
+}
+
+impl<R: Runtime> Module<R> for Linear<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        let mut params = vec![self.weight()];
+        if let Some(bias) = self.bias() {
+            params.push(bias);
+        }
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = vec![("weight".to_string(), self.weight())];
+        if let Some(bias) = self.bias() {
+            params.push(("bias".to_string(), bias));
+        }
+        params
     }
 }
 

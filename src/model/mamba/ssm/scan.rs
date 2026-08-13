@@ -3,10 +3,10 @@
 use super::types::{SsmInput, var_contiguous};
 use crate::error::{Error, Result};
 use numr::autograd::{
-    Var, var_add, var_cat, var_exp, var_matmul, var_mul, var_narrow, var_reshape,
+    Var, var_add, var_cat, var_clamp, var_exp, var_matmul, var_mul, var_narrow, var_reshape,
 };
 use numr::dtype::DType;
-use numr::ops::{ActivationOps, ReduceOps, ScalarOps, TensorOps, UnaryOps};
+use numr::ops::{ActivationOps, CompareOps, ReduceOps, ScalarOps, TensorOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -14,13 +14,14 @@ use numr::tensor::Tensor;
 ///   h[t] = exp(dt[t] * A) * h[t-1] + dt[t] * B[t] * x[t]
 ///   y[t] = (C[t] @ h[t]) + D * x[t]
 ///
-/// x: [B, S, nheads, headdim], A: [nheads], B: [B, S, ngroups, d_state],
-/// C: [B, S, ngroups, d_state], dt: [B, S, nheads], D: [nheads] (optional)
+/// x: [B, S, nheads, headdim], A: [nheads] or [nheads, d_state],
+/// B: [B, S, ngroups, d_state], C: [B, S, ngroups, d_state],
+/// dt: [B, S, nheads], D: [nheads] (optional)
 pub fn ssm_forward_sequential<R, C>(client: &C, input: &SsmInput<'_, R>) -> Result<Var<R>>
 where
     R: Runtime<DType = DType>,
     C: RuntimeClient<R> + TensorOps<R> + ScalarOps<R> + UnaryOps<R> + ActivationOps<R>,
-    R::Client: TensorOps<R> + ScalarOps<R>,
+    R::Client: TensorOps<R> + ScalarOps<R> + CompareOps<R>,
 {
     let shape = input.x.shape();
     let batch = shape[0];
@@ -58,6 +59,7 @@ where
             headdim,
             d_state,
             ngroups,
+            input.hidden_state_clamp,
         )?;
         h = h_new;
         outputs.push(y_t);
@@ -80,7 +82,7 @@ where
         + UnaryOps<R>
         + ActivationOps<R>
         + ReduceOps<R>,
-    R::Client: TensorOps<R> + ScalarOps<R>,
+    R::Client: TensorOps<R> + ScalarOps<R> + CompareOps<R>,
 {
     let shape = input.x.shape();
     let batch = shape[0];
@@ -124,6 +126,7 @@ where
             d_param: input.d_param,
             dt: &dt_chunk,
             config: input.config,
+            hidden_state_clamp: input.hidden_state_clamp,
         };
 
         let (chunk_out, h_new) = ssm_chunk_with_state(client, &chunk_input, &h)?;
@@ -146,7 +149,7 @@ fn ssm_chunk_with_state<R, C>(
 where
     R: Runtime<DType = DType>,
     C: RuntimeClient<R> + TensorOps<R> + ScalarOps<R> + UnaryOps<R> + ActivationOps<R>,
-    R::Client: TensorOps<R> + ScalarOps<R>,
+    R::Client: TensorOps<R> + ScalarOps<R> + CompareOps<R>,
 {
     let shape = input.x.shape();
     let batch = shape[0];
@@ -175,6 +178,7 @@ where
             headdim,
             d_state,
             ngroups,
+            input.hidden_state_clamp,
         )?;
         h = h_new;
         outputs.push(y_t);
@@ -204,11 +208,12 @@ fn ssm_step<R, C>(
     headdim: usize,
     d_state: usize,
     ngroups: usize,
+    hidden_state_clamp: Option<f64>,
 ) -> Result<(Var<R>, Var<R>)>
 where
     R: Runtime<DType = DType>,
     C: RuntimeClient<R> + TensorOps<R> + ScalarOps<R> + UnaryOps<R> + ActivationOps<R>,
-    R::Client: TensorOps<R> + ScalarOps<R>,
+    R::Client: TensorOps<R> + ScalarOps<R> + CompareOps<R>,
 {
     // Extract x_t: [B, 1, nheads, headdim] -> [B, nheads, headdim]
     let x_t = var_contiguous(&var_narrow(x, 1, t, 1).map_err(Error::Numr)?)?;
@@ -226,10 +231,9 @@ where
     let c_t = var_contiguous(&var_narrow(c, 1, t, 1).map_err(Error::Numr)?)?;
     let c_t = var_reshape(&c_t, &[batch, ngroups, d_state]).map_err(Error::Numr)?;
 
-    // A: [nheads] -> [1, nheads, 1, 1] for broadcasting with h
-    let a_broad = var_reshape(a, &[1, nheads, 1, 1]).map_err(Error::Numr)?;
+    let a_broad = broadcast_a(a, nheads, d_state)?;
 
-    // decay = exp(dt_t * A): [B, nheads, 1, 1]
+    // decay = exp(dt_t * A): [B, nheads, 1, 1] or [B, nheads, 1, d_state]
     let dt_a = var_mul(&dt_t, &a_broad, client).map_err(Error::Numr)?;
     let decay = var_exp(&dt_a, client).map_err(Error::Numr)?;
 
@@ -252,6 +256,9 @@ where
 
     // h = h + input_term
     h = var_add(&h, &input_term, client).map_err(Error::Numr)?;
+    if let Some(clamp) = hidden_state_clamp {
+        h = var_clamp(&h, -clamp, clamp, client).map_err(Error::Numr)?;
+    }
 
     // y_t = h @ C_t: [B, nheads, headdim, d_state] @ [B, ngroups, d_state, 1]
     let c_t_col = var_reshape(&c_t, &[batch, ngroups, d_state, 1]).map_err(Error::Numr)?;
@@ -268,6 +275,19 @@ where
     // y_t: [B, nheads, headdim] -> [B, 1, nheads, headdim]
     let y_t = var_reshape(&y_t, &[batch, 1, nheads, headdim]).map_err(Error::Numr)?;
     Ok((y_t, h))
+}
+
+fn broadcast_a<R: Runtime>(a: &Var<R>, nheads: usize, d_state: usize) -> Result<Var<R>> {
+    let shape = a.shape();
+    if shape == [nheads] {
+        return var_reshape(a, &[1, nheads, 1, 1]).map_err(Error::Numr);
+    }
+    if shape == [nheads, d_state] {
+        return var_reshape(a, &[1, nheads, 1, d_state]).map_err(Error::Numr);
+    }
+    Err(Error::ModelError {
+        reason: format!("SSM A must have shape [{nheads}] or [{nheads}, {d_state}], got {shape:?}"),
+    })
 }
 
 #[cfg(test)]
@@ -322,6 +342,7 @@ mod tests {
             d_param: None,
             dt: &dt,
             config: &config,
+            hidden_state_clamp: None,
         };
         let out = ssm_forward_sequential(&client, &input).unwrap();
         assert_eq!(out.shape(), &[1, 2, 1, 4]);
@@ -380,6 +401,7 @@ mod tests {
             d_param: Some(&d_param),
             dt: &dt,
             config: &config,
+            hidden_state_clamp: None,
         };
 
         let out_seq = ssm_forward_sequential(&client, &input).unwrap();

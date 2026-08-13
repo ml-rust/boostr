@@ -20,7 +20,10 @@ pub use encoder::{EmbeddingPipeline, Encoder, EncoderClient, EncoderConfig, Pool
 pub use hybrid::HybridModel;
 pub use llama::model::blocks::ExpertWeights;
 pub use llama::{Llama, LlamaTp};
-pub use mamba::{Mamba2, Mamba2Config, Mamba2Model, Mamba2Weights};
+pub use mamba::{
+    Mamba1, Mamba1Config, Mamba1Model, Mamba1Weights, Mamba2, Mamba2Config, Mamba2Model,
+    Mamba2Weights, Mamba3, Mamba3Config, Mamba3Model, Mamba3Weights,
+};
 pub use multimodal::{ModelInput, MultimodalModel};
 pub use registry::LoadedModel;
 pub use traits::{Model, ModelClient};

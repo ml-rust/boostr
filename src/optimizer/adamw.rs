@@ -162,6 +162,21 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
         &self.config
     }
 
+    /// Number of parameter state entries currently held by the optimizer.
+    pub fn state_len(&self) -> usize {
+        self.state.len()
+    }
+
+    /// Returns true if optimizer state exists for `id`.
+    pub fn has_state(&self, id: TensorId) -> bool {
+        self.state.contains_key(&id)
+    }
+
+    /// Stable parameter IDs with initialized optimizer state.
+    pub fn state_ids(&self) -> impl Iterator<Item = TensorId> + '_ {
+        self.state.keys().copied()
+    }
+
     pub fn reset(&mut self) {
         self.state.clear();
         self.timestep = 0;

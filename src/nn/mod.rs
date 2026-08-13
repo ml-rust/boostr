@@ -41,7 +41,8 @@ pub use lstm::{BiLstm, Lstm};
 pub use mla::{Mla, MlaConfig, MlaWeights};
 pub use module::{Module, StateDict, TrainMode};
 pub use moe::{
-    Expert, MoeLayer, MoeLayerConfig, MoeOutput, MoeRouter, MoeRouterConfig, RouterOutput,
+    Expert, MoeLayer, MoeLayerConfig, MoeLoadBalanceLossMode, MoeOutput, MoeRouter,
+    MoeRouterConfig, RouterOutput,
 };
 pub use rmsnorm::RmsNorm;
 pub use rope::RoPE;

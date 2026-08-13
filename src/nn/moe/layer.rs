@@ -1,12 +1,14 @@
 //! MoE Layer — combines router with expert MLPs
 
 use crate::error::{Error, Result};
+use crate::nn::loss::router_z_loss;
 use crate::nn::moe::expert::Expert;
 use crate::nn::moe::router::{MoeRouter, RouterOutput};
-use numr::autograd::{Var, var_add, var_narrow};
+use numr::autograd::{Var, var_add, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
-    ActivationOps, CompareOps, IndexingOps, ReduceOps, ScalarOps, ShapeOps, SortingOps, TensorOps,
+    ActivationOps, BinaryOps, CompareOps, IndexingOps, ReduceOps, ScalarOps, ShapeOps, SortingOps,
+    TensorOps, UnaryOps,
 };
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
@@ -29,6 +31,8 @@ pub struct MoeOutput<R: Runtime> {
     pub output: Var<R>,
     /// Router auxiliary loss for load balancing
     pub aux_loss: Var<R>,
+    /// ST-MoE router z-loss computed from tracked pre-softmax router logits.
+    pub z_loss: Var<R>,
 }
 
 /// Mixture of Experts layer.
@@ -72,7 +76,7 @@ impl<R: Runtime> MoeLayer<R> {
     /// Forward pass with auxiliary loss.
     ///
     /// Input: `[num_tokens, hidden_size]`
-    /// Returns: MoeOutput with output tensor and aux_loss
+    /// Returns: MoeOutput with output tensor, aux_loss, and z_loss
     ///
     /// Strategy: iterate over experts (not tokens). For each expert,
     /// compute output for all tokens, then mask-and-weight by routing decisions.
@@ -88,13 +92,17 @@ impl<R: Runtime> MoeLayer<R> {
             + ActivationOps<R>
             + SortingOps<R>
             + IndexingOps<R>
-            + CompareOps<R>,
+            + CompareOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>,
         R::Client: RuntimeClient<R>
             + TensorOps<R>
             + ScalarOps<R>
             + ActivationOps<R>
             + ReduceOps<R>
-            + ShapeOps<R>,
+            + ShapeOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>,
     {
         let num_tokens = x.shape()[0];
         let hidden_size = x.shape()[1];
@@ -104,8 +112,21 @@ impl<R: Runtime> MoeLayer<R> {
         let RouterOutput {
             weights,
             indices,
+            logits,
             aux_loss,
         } = self.router.route(client, x)?;
+        let z_logits = if logits.shape().len() == 2 {
+            logits.clone()
+        } else {
+            let logits_shape = logits.shape().to_vec();
+            let num_experts = *logits_shape.last().ok_or_else(|| Error::InvalidArgument {
+                arg: "router_logits",
+                reason: "expected at least one dimension".into(),
+            })?;
+            let num_tokens = logits_shape[..logits_shape.len() - 1].iter().product();
+            var_reshape(&logits, &[num_tokens, num_experts]).map_err(Error::Numr)?
+        };
+        let z_loss = router_z_loss(client, &z_logits)?;
 
         // Initialize output accumulator as zeros
         let mut output = Var::new(
@@ -167,7 +188,11 @@ impl<R: Runtime> MoeLayer<R> {
             output = var_add(&output, &shared_out, client).map_err(Error::Numr)?;
         }
 
-        Ok(MoeOutput { output, aux_loss })
+        Ok(MoeOutput {
+            output,
+            aux_loss,
+            z_loss,
+        })
     }
 }
 
@@ -177,6 +202,35 @@ mod tests {
     use crate::nn::moe::router::MoeRouterConfig;
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;
+
+    fn experts(
+        num_experts: usize,
+        hidden: usize,
+        inter: usize,
+        device: &<CpuRuntime as Runtime>::Device,
+    ) -> Vec<Expert<CpuRuntime>> {
+        (0..num_experts)
+            .map(|expert_idx| {
+                let scale = 0.05f32 + expert_idx as f32 * 0.02;
+                let gw = Tensor::<CpuRuntime>::from_slice(
+                    &vec![scale; inter * hidden],
+                    &[inter, hidden],
+                    device,
+                );
+                let uw = Tensor::<CpuRuntime>::from_slice(
+                    &vec![scale + 0.01; inter * hidden],
+                    &[inter, hidden],
+                    device,
+                );
+                let dw = Tensor::<CpuRuntime>::from_slice(
+                    &vec![scale - 0.01; hidden * inter],
+                    &[hidden, inter],
+                    device,
+                );
+                Expert::from_tensors(gw, uw, dw, false)
+            })
+            .collect()
+    }
 
     #[test]
     fn test_moe_layer_forward_shape() {
@@ -188,19 +242,10 @@ mod tests {
 
         let gate_w =
             Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[num_experts, hidden], &device);
-        let config = MoeRouterConfig { num_experts, top_k };
+        let config = MoeRouterConfig::new(num_experts, top_k);
         let router = MoeRouter::from_tensor(gate_w, config, false);
 
-        let experts: Vec<Expert<CpuRuntime>> = (0..num_experts)
-            .map(|_| {
-                let gw = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 32], &[inter, hidden], &device);
-                let uw = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 32], &[inter, hidden], &device);
-                let dw = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 32], &[hidden, inter], &device);
-                Expert::from_tensors(gw, uw, dw, false)
-            })
-            .collect();
-
-        let layer = MoeLayer::new(router, experts, None);
+        let layer = MoeLayer::new(router, experts(num_experts, hidden, inter, &device), None);
 
         let input = Var::new(
             Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[3, hidden], &device),
@@ -209,5 +254,49 @@ mod tests {
         let result = layer.forward(&client, &input).unwrap();
 
         assert_eq!(result.output.shape(), &[3, hidden]);
+        assert_eq!(result.z_loss.tensor().numel(), 1);
+    }
+
+    #[test]
+    fn z_loss_produces_gate_gradient() {
+        let (client, device) = cpu_setup();
+        let hidden = 4;
+        let inter = 8;
+        let num_experts = 3;
+        let top_k = 2;
+
+        // Asymmetric weights and inputs keep this from passing by accidental
+        // symmetry if z_loss ever stops being connected to the gate.
+        let gate_w = Tensor::<CpuRuntime>::from_slice(
+            &[
+                0.7f32, -0.2, 0.15, 0.4, -0.35, 0.6, 0.25, -0.1, 0.05, -0.45, 0.8, 0.3,
+            ],
+            &[num_experts, hidden],
+            &device,
+        );
+        let router = MoeRouter::from_tensor(gate_w, MoeRouterConfig::new(num_experts, top_k), true);
+        let layer = MoeLayer::new(router, experts(num_experts, hidden, inter, &device), None);
+        let input = Var::new(
+            Tensor::<CpuRuntime>::from_slice(
+                &[0.3f32, -0.7, 1.1, 0.2, 0.8, 0.4, -0.3, 0.9, -0.6, 0.5, 0.7, -0.2],
+                &[3, hidden],
+                &device,
+            ),
+            false,
+        );
+
+        let result = layer.forward(&client, &input).unwrap();
+        let grads = numr::autograd::backward(&result.z_loss, &client).unwrap();
+        let gate_id = layer.router().gate().parameters()[0].0;
+        let gate_grad = grads
+            .get(gate_id)
+            .expect("z_loss must produce a gradient for the gate weight")
+            .contiguous()
+            .unwrap();
+        let magnitude: f32 = gate_grad.to_vec::<f32>().iter().map(|v| v.abs()).sum();
+        assert!(
+            magnitude > 1e-8,
+            "gate gradient from z_loss is all zeros ({magnitude}) — graph is severed"
+        );
     }
 }

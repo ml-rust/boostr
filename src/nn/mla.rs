@@ -24,6 +24,9 @@ use numr::ops::{
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
+mod parameter_identity;
+pub use parameter_identity::MlaWeights;
+
 /// MLA configuration
 #[derive(Debug, Clone)]
 pub struct MlaConfig {

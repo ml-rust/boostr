@@ -2,12 +2,12 @@
 
 use super::config::Mamba2Config;
 use crate::error::{Error, Result};
-use crate::nn::{Conv1d, Linear, RmsNorm, VarBuilder};
+use crate::nn::{Conv1d, Linear, Module, RmsNorm, VarBuilder};
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{ConvOps, PaddingMode, ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
-use numr::tensor::Tensor;
+use numr::tensor::{Tensor, TensorId};
 
 /// Mamba2 layer implementing the SSD algorithm.
 ///
@@ -35,6 +35,17 @@ pub struct Mamba2Weights<R: Runtime> {
     pub norm: Option<RmsNorm<R>>,
 }
 
+/// Bundled Mamba2 weights with explicit stable IDs for raw `Var` fields.
+pub struct Mamba2WeightsWithIds<R: Runtime> {
+    pub in_proj: Linear<R>,
+    pub conv1d: Conv1d<R>,
+    pub out_proj: Linear<R>,
+    pub a_log: (Tensor<R>, TensorId),
+    pub dt_bias: Option<(Tensor<R>, TensorId)>,
+    pub d_param: Option<(Tensor<R>, TensorId)>,
+    pub norm: Option<RmsNorm<R>>,
+}
+
 impl<R: Runtime> Mamba2<R> {
     /// Create a new Mamba2 layer from config and weights.
     pub fn new(config: Mamba2Config, weights: Mamba2Weights<R>, trainable: bool) -> Self {
@@ -46,6 +57,28 @@ impl<R: Runtime> Mamba2<R> {
             a_log: Var::new(weights.a_log, trainable),
             dt_bias: weights.dt_bias.map(|t| Var::new(t, trainable)),
             d_param: weights.d_param.map(|t| Var::new(t, trainable)),
+            norm: weights.norm,
+        }
+    }
+
+    /// Create a Mamba2 layer while preserving explicit IDs for raw parameters.
+    pub fn with_ids(
+        config: Mamba2Config,
+        weights: Mamba2WeightsWithIds<R>,
+        trainable: bool,
+    ) -> Self {
+        Self {
+            config,
+            in_proj: weights.in_proj,
+            conv1d: weights.conv1d,
+            out_proj: weights.out_proj,
+            a_log: Var::with_id(weights.a_log.0, weights.a_log.1, trainable),
+            dt_bias: weights
+                .dt_bias
+                .map(|(tensor, id)| Var::with_id(tensor, id, trainable)),
+            d_param: weights
+                .d_param
+                .map(|(tensor, id)| Var::with_id(tensor, id, trainable)),
             norm: weights.norm,
         }
     }
@@ -124,6 +157,33 @@ impl<R: Runtime> Mamba2<R> {
 
     pub fn config(&self) -> &Mamba2Config {
         &self.config
+    }
+
+    /// All parameters with their stable autograd IDs.
+    pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        let mut params = Vec::new();
+        params.extend(self.in_proj.parameters());
+        params.extend(self.conv1d.parameters());
+        params.extend(self.out_proj.parameters());
+        params.push((self.a_log.id(), &self.a_log));
+        if let Some(dt_bias) = &self.dt_bias {
+            params.push((dt_bias.id(), dt_bias));
+        }
+        if let Some(d_param) = &self.d_param {
+            params.push((d_param.id(), d_param));
+        }
+        if let Some(norm) = &self.norm {
+            params.extend(norm.parameters());
+        }
+        params
+    }
+
+    /// Trainable parameters with their stable autograd IDs.
+    pub fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        self.parameters()
+            .into_iter()
+            .filter(|param| param.1.requires_grad())
+            .collect()
     }
 
     /// Prefill: full conv1d with causal padding, saves conv state.
@@ -232,4 +292,51 @@ impl<R: Runtime> Mamba2<R> {
             )
             .map_err(Error::Numr)
     }
+}
+
+impl<R: Runtime> Module<R> for Mamba2<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        Mamba2::parameters(self)
+            .into_iter()
+            .map(|param| param.1)
+            .collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = Vec::new();
+        extend_named(&mut params, "in_proj", self.in_proj.named_parameters());
+        extend_named(&mut params, "conv1d", self.conv1d.named_parameters());
+        extend_named(&mut params, "out_proj", self.out_proj.named_parameters());
+        params.push(("a_log".to_string(), &self.a_log));
+        if let Some(dt_bias) = &self.dt_bias {
+            params.push(("dt_bias".to_string(), dt_bias));
+        }
+        if let Some(d_param) = &self.d_param {
+            params.push(("d_param".to_string(), d_param));
+        }
+        if let Some(norm) = &self.norm {
+            extend_named(&mut params, "norm", norm.named_parameters());
+        }
+        params
+    }
+
+    fn parameters_with_ids(&self) -> Vec<(TensorId, &Var<R>)> {
+        Mamba2::parameters(self)
+    }
+
+    fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        Mamba2::trainable_parameters(self)
+    }
+}
+
+fn extend_named<'a, R: Runtime>(
+    params: &mut Vec<(String, &'a Var<R>)>,
+    prefix: &str,
+    child: Vec<(String, &'a Var<R>)>,
+) {
+    params.extend(
+        child
+            .into_iter()
+            .map(|(name, var)| (format!("{prefix}.{name}"), var)),
+    );
 }

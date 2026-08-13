@@ -6,7 +6,7 @@ use crate::nn::weight::Weight;
 use crate::quant::decomposed::DecomposedQuantLinear;
 use crate::quant::tensor::QuantTensor;
 use crate::quant::traits::QuantMatmulOps;
-use numr::autograd::{Var, var_add, var_matmul, var_transpose};
+use numr::autograd::{Var, var_add, var_matmul, var_reshape, var_transpose};
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, TensorOps, TypeConversionOps};
 use numr::runtime::{Runtime, RuntimeClient};
@@ -56,11 +56,37 @@ impl<R: Runtime> Linear<R> {
         R::Client: TensorOps<R>,
     {
         let w_t = var_transpose(&self.weight).map_err(crate::error::Error::Numr)?;
-        let output = var_matmul(input, &w_t, client).map_err(crate::error::Error::Numr)?;
-        match &self.bias {
-            Some(bias) => var_add(&output, bias, client).map_err(crate::error::Error::Numr),
-            None => Ok(output),
+        let input_shape = input.shape().to_vec();
+
+        if input_shape.len() <= 2 {
+            let output = var_matmul(input, &w_t, client).map_err(crate::error::Error::Numr)?;
+            return match &self.bias {
+                Some(bias) => var_add(&output, bias, client).map_err(crate::error::Error::Numr),
+                None => Ok(output),
+            };
         }
+
+        let last_axis = input_shape.len() - 1;
+        let in_features = input_shape[last_axis];
+        let leading: usize = input_shape[..last_axis].iter().product();
+        let flat_input =
+            var_reshape(input, &[leading, in_features]).map_err(crate::error::Error::Numr)?;
+        let flat_output =
+            var_matmul(&flat_input, &w_t, client).map_err(crate::error::Error::Numr)?;
+        let flat_output = match &self.bias {
+            Some(bias) => var_add(&flat_output, bias, client).map_err(crate::error::Error::Numr)?,
+            None => flat_output,
+        };
+
+        let weight_shape = self.weight.tensor().shape();
+        if weight_shape.is_empty() {
+            return Err(crate::error::Error::ModelError {
+                reason: "linear weight must have at least one dimension".into(),
+            });
+        }
+        let mut output_shape = input_shape;
+        output_shape[last_axis] = weight_shape[0];
+        var_reshape(&flat_output, &output_shape).map_err(crate::error::Error::Numr)
     }
 
     pub fn weight(&self) -> &Var<R> {
@@ -229,6 +255,54 @@ impl<R: Runtime> MaybeQuantLinear<R> {
             // Fallback: individual forward passes
             layers.iter().map(|l| l.forward(client, input)).collect()
         }
+    }
+
+    /// All trainable-capable parameters with their stable autograd IDs.
+    ///
+    /// Quantized variants are inference-only and therefore expose no `Var`
+    /// parameters.
+    pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        match self {
+            Self::Standard(linear) => linear.parameters(),
+            Self::Quantized(_) | Self::DecomposedQuant(_) => Vec::new(),
+        }
+    }
+
+    /// Trainable parameters with their stable autograd IDs.
+    pub fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        self.parameters()
+            .into_iter()
+            .filter(|param| param.1.requires_grad())
+            .collect()
+    }
+
+    /// Named standard parameters for checkpoint traversal.
+    pub fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        match self {
+            Self::Standard(linear) => linear.named_parameters(),
+            Self::Quantized(_) | Self::DecomposedQuant(_) => Vec::new(),
+        }
+    }
+}
+
+impl<R: Runtime> Module<R> for MaybeQuantLinear<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        MaybeQuantLinear::parameters(self)
+            .into_iter()
+            .map(|param| param.1)
+            .collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        MaybeQuantLinear::named_parameters(self)
+    }
+
+    fn parameters_with_ids(&self) -> Vec<(TensorId, &Var<R>)> {
+        MaybeQuantLinear::parameters(self)
+    }
+
+    fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        MaybeQuantLinear::trainable_parameters(self)
     }
 }
 

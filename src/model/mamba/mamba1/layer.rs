@@ -2,11 +2,11 @@
 
 use super::config::Mamba1Config;
 use crate::error::Result;
-use crate::nn::{Conv1d, Linear, VarBuilder};
+use crate::nn::{Conv1d, Linear, Module, VarBuilder};
 use numr::autograd::Var;
 use numr::ops::PaddingMode;
 use numr::runtime::Runtime;
-use numr::tensor::Tensor;
+use numr::tensor::{Tensor, TensorId};
 
 /// Mamba1 layer implementing the original selective SSM block.
 pub struct Mamba1<R: Runtime> {
@@ -31,6 +31,17 @@ pub struct Mamba1Weights<R: Runtime> {
     pub d_param: Option<Tensor<R>>,
 }
 
+/// Bundled Mamba1 weights with explicit stable IDs for raw `Var` fields.
+pub struct Mamba1WeightsWithIds<R: Runtime> {
+    pub in_proj: Linear<R>,
+    pub conv1d: Conv1d<R>,
+    pub x_proj: Linear<R>,
+    pub dt_proj: Linear<R>,
+    pub out_proj: Linear<R>,
+    pub a_log: (Tensor<R>, TensorId),
+    pub d_param: Option<(Tensor<R>, TensorId)>,
+}
+
 impl<R: Runtime> Mamba1<R> {
     /// Create a new Mamba1 layer from config and weights.
     pub fn new(config: Mamba1Config, weights: Mamba1Weights<R>, trainable: bool) -> Self {
@@ -43,6 +54,26 @@ impl<R: Runtime> Mamba1<R> {
             out_proj: weights.out_proj,
             a_log: Var::new(weights.a_log, trainable),
             d_param: weights.d_param.map(|t| Var::new(t, trainable)),
+        }
+    }
+
+    /// Create a Mamba1 layer while preserving explicit IDs for raw parameters.
+    pub fn with_ids(
+        config: Mamba1Config,
+        weights: Mamba1WeightsWithIds<R>,
+        trainable: bool,
+    ) -> Self {
+        Self {
+            config,
+            in_proj: weights.in_proj,
+            conv1d: weights.conv1d,
+            x_proj: weights.x_proj,
+            dt_proj: weights.dt_proj,
+            out_proj: weights.out_proj,
+            a_log: Var::with_id(weights.a_log.0, weights.a_log.1, trainable),
+            d_param: weights
+                .d_param
+                .map(|(tensor, id)| Var::with_id(tensor, id, trainable)),
         }
     }
 
@@ -90,6 +121,72 @@ impl<R: Runtime> Mamba1<R> {
     pub fn config(&self) -> &Mamba1Config {
         &self.config
     }
+
+    /// All parameters with their stable autograd IDs.
+    pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        let mut params = Vec::new();
+        params.extend(self.in_proj.parameters());
+        params.extend(self.conv1d.parameters());
+        params.extend(self.x_proj.parameters());
+        params.extend(self.dt_proj.parameters());
+        params.extend(self.out_proj.parameters());
+        params.push((self.a_log.id(), &self.a_log));
+        if let Some(d_param) = &self.d_param {
+            params.push((d_param.id(), d_param));
+        }
+        params
+    }
+
+    /// Trainable parameters with their stable autograd IDs.
+    pub fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        self.parameters()
+            .into_iter()
+            .filter(|param| param.1.requires_grad())
+            .collect()
+    }
+}
+
+impl<R: Runtime> Module<R> for Mamba1<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        Mamba1::parameters(self)
+            .into_iter()
+            .map(|param| param.1)
+            .collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = Vec::new();
+        extend_named(&mut params, "in_proj", self.in_proj.named_parameters());
+        extend_named(&mut params, "conv1d", self.conv1d.named_parameters());
+        extend_named(&mut params, "x_proj", self.x_proj.named_parameters());
+        extend_named(&mut params, "dt_proj", self.dt_proj.named_parameters());
+        extend_named(&mut params, "out_proj", self.out_proj.named_parameters());
+        params.push(("a_log".to_string(), &self.a_log));
+        if let Some(d_param) = &self.d_param {
+            params.push(("d_param".to_string(), d_param));
+        }
+        params
+    }
+
+    fn parameters_with_ids(&self) -> Vec<(TensorId, &Var<R>)> {
+        Mamba1::parameters(self)
+    }
+
+    fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        Mamba1::trainable_parameters(self)
+    }
+}
+
+fn extend_named<'a, R: Runtime>(
+    params: &mut Vec<(String, &'a Var<R>)>,
+    prefix: &str,
+    child: Vec<(String, &'a Var<R>)>,
+) {
+    params.extend(
+        child
+            .into_iter()
+            .map(|(name, var)| (format!("{prefix}.{name}"), var)),
+    );
 }
 
 fn take_linear<R: Runtime>(

@@ -1,19 +1,66 @@
 //! Shared `Var` layout helpers used across attention and SSM blocks.
 
-use numr::autograd::Var;
+use numr::autograd::{GradFn, Var};
 use numr::runtime::Runtime;
+use numr::tensor::{Tensor, TensorId};
+use std::sync::Arc;
 
 /// Make a `Var` contiguous (copies data only if the layout is non-contiguous).
 ///
-/// Preserves the `requires_grad` flag but not the `grad_fn` (treated as a leaf).
+/// Preserves autograd identity and gradient flow through the layout copy.
 pub fn var_contiguous<R: Runtime>(v: &Var<R>) -> crate::error::Result<Var<R>> {
     if v.tensor().is_contiguous() {
-        Ok(v.clone())
-    } else {
-        Ok(Var::new(
-            v.tensor().contiguous().map_err(crate::error::Error::Numr)?,
-            v.requires_grad(),
+        return Ok(var_identity(v));
+    }
+
+    let tensor = v.tensor().contiguous().map_err(crate::error::Error::Numr)?;
+    if v.requires_grad() {
+        Ok(Var::from_op(
+            tensor,
+            Arc::new(ContiguousBackward {
+                inputs: [v.id()],
+                input_grad_fn: v.grad_fn().cloned(),
+            }),
         ))
+    } else {
+        Ok(Var::new(tensor, false))
+    }
+}
+
+fn var_identity<R: Runtime>(v: &Var<R>) -> Var<R> {
+    match (v.requires_grad(), v.grad_fn().cloned()) {
+        (true, Some(grad_fn)) => {
+            Var::with_id_and_grad_fn(v.tensor().clone(), v.id(), Some(grad_fn))
+        }
+        (true, None) => Var::with_id(v.tensor().clone(), v.id(), true),
+        (false, _) => Var::with_id(v.tensor().clone(), v.id(), false),
+    }
+}
+
+struct ContiguousBackward<R: Runtime> {
+    inputs: [TensorId; 1],
+    input_grad_fn: Option<Arc<dyn GradFn<R>>>,
+}
+
+impl<R: Runtime> GradFn<R> for ContiguousBackward<R> {
+    fn backward(&self, grad_output: &Tensor<R>) -> numr::error::Result<Vec<Option<Tensor<R>>>> {
+        Ok(vec![Some(grad_output.clone())])
+    }
+
+    fn backward_var(&self, grad_output: &Var<R>) -> numr::error::Result<Vec<Option<Var<R>>>> {
+        Ok(vec![Some(grad_output.clone())])
+    }
+
+    fn inputs(&self) -> &[TensorId] {
+        &self.inputs
+    }
+
+    fn input_grad_fns(&self) -> Vec<Option<Arc<dyn GradFn<R>>>> {
+        vec![self.input_grad_fn.clone()]
+    }
+
+    fn name(&self) -> &'static str {
+        "contiguous"
     }
 }
 

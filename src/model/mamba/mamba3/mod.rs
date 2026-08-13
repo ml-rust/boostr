@@ -5,4 +5,4 @@ pub mod layer;
 mod tests;
 
 pub use config::Mamba3Config;
-pub use layer::{Mamba3, Mamba3Weights};
+pub use layer::{Mamba3, Mamba3Weights, Mamba3WeightsWithIds};

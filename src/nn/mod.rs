@@ -38,7 +38,7 @@ pub use loss::{
     mse_loss, router_z_loss,
 };
 pub use lstm::{BiLstm, Lstm};
-pub use mla::{Mla, MlaConfig};
+pub use mla::{Mla, MlaConfig, MlaWeights};
 pub use module::{Module, StateDict, TrainMode};
 pub use moe::{
     Expert, MoeLayer, MoeLayerConfig, MoeOutput, MoeRouter, MoeRouterConfig, RouterOutput,

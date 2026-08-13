@@ -2,11 +2,11 @@
 
 use super::config::Mamba3Config;
 use crate::error::{Error, Result};
-use crate::nn::{Conv1d, Linear, RmsNorm, VarBuilder};
+use crate::nn::{Conv1d, Linear, Module, RmsNorm, VarBuilder};
 use numr::autograd::Var;
 use numr::ops::PaddingMode;
 use numr::runtime::Runtime;
-use numr::tensor::Tensor;
+use numr::tensor::{Tensor, TensorId};
 
 /// Mamba3 layer implementing trapezoidal discretization, optional complex RoPE,
 /// and optional MIMO projections.
@@ -46,6 +46,24 @@ pub struct Mamba3Weights<R: Runtime> {
     pub mimo_x_down: Option<Linear<R>>,
 }
 
+/// Bundled Mamba3 weights with explicit stable IDs for raw `Var` fields.
+pub struct Mamba3WeightsWithIds<R: Runtime> {
+    pub in_proj: Linear<R>,
+    pub out_proj: Linear<R>,
+    pub lambda_proj: Linear<R>,
+    pub theta_proj: Option<Linear<R>>,
+    pub b_bias: (Tensor<R>, TensorId),
+    pub c_bias: (Tensor<R>, TensorId),
+    pub dt_bias: Option<(Tensor<R>, TensorId)>,
+    pub a_log: (Tensor<R>, TensorId),
+    pub d_param: Option<(Tensor<R>, TensorId)>,
+    pub bc_norm: RmsNorm<R>,
+    pub norm: RmsNorm<R>,
+    pub conv1d: Option<Conv1d<R>>,
+    pub mimo_x_up: Option<Linear<R>>,
+    pub mimo_x_down: Option<Linear<R>>,
+}
+
 impl<R: Runtime> Mamba3<R> {
     /// Create a new Mamba3 layer from config and weights.
     pub fn new(config: Mamba3Config, weights: Mamba3Weights<R>, trainable: bool) -> Self {
@@ -60,6 +78,35 @@ impl<R: Runtime> Mamba3<R> {
             dt_bias: weights.dt_bias.map(|t| Var::new(t, trainable)),
             a_log: Var::new(weights.a_log, trainable),
             d_param: weights.d_param.map(|t| Var::new(t, trainable)),
+            bc_norm: weights.bc_norm,
+            norm: weights.norm,
+            conv1d: weights.conv1d,
+            mimo_x_up: weights.mimo_x_up,
+            mimo_x_down: weights.mimo_x_down,
+        }
+    }
+
+    /// Create a Mamba3 layer while preserving explicit IDs for raw parameters.
+    pub fn with_ids(
+        config: Mamba3Config,
+        weights: Mamba3WeightsWithIds<R>,
+        trainable: bool,
+    ) -> Self {
+        Self {
+            config,
+            in_proj: weights.in_proj,
+            out_proj: weights.out_proj,
+            lambda_proj: weights.lambda_proj,
+            theta_proj: weights.theta_proj,
+            b_bias: Var::with_id(weights.b_bias.0, weights.b_bias.1, trainable),
+            c_bias: Var::with_id(weights.c_bias.0, weights.c_bias.1, trainable),
+            dt_bias: weights
+                .dt_bias
+                .map(|(tensor, id)| Var::with_id(tensor, id, trainable)),
+            a_log: Var::with_id(weights.a_log.0, weights.a_log.1, trainable),
+            d_param: weights
+                .d_param
+                .map(|(tensor, id)| Var::with_id(tensor, id, trainable)),
             bc_norm: weights.bc_norm,
             norm: weights.norm,
             conv1d: weights.conv1d,
@@ -170,6 +217,110 @@ impl<R: Runtime> Mamba3<R> {
     pub fn config(&self) -> &Mamba3Config {
         &self.config
     }
+
+    /// All parameters with their stable autograd IDs.
+    pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        let mut params = Vec::new();
+        params.extend(self.in_proj.parameters());
+        params.extend(self.out_proj.parameters());
+        params.extend(self.lambda_proj.parameters());
+        if let Some(theta_proj) = &self.theta_proj {
+            params.extend(theta_proj.parameters());
+        }
+        params.push((self.b_bias.id(), &self.b_bias));
+        params.push((self.c_bias.id(), &self.c_bias));
+        if let Some(dt_bias) = &self.dt_bias {
+            params.push((dt_bias.id(), dt_bias));
+        }
+        params.push((self.a_log.id(), &self.a_log));
+        if let Some(d_param) = &self.d_param {
+            params.push((d_param.id(), d_param));
+        }
+        params.extend(self.bc_norm.parameters());
+        params.extend(self.norm.parameters());
+        if let Some(conv1d) = &self.conv1d {
+            params.extend(conv1d.parameters());
+        }
+        if let Some(mimo_x_up) = &self.mimo_x_up {
+            params.extend(mimo_x_up.parameters());
+        }
+        if let Some(mimo_x_down) = &self.mimo_x_down {
+            params.extend(mimo_x_down.parameters());
+        }
+        params
+    }
+
+    /// Trainable parameters with their stable autograd IDs.
+    pub fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        self.parameters()
+            .into_iter()
+            .filter(|param| param.1.requires_grad())
+            .collect()
+    }
+}
+
+impl<R: Runtime> Module<R> for Mamba3<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        Mamba3::parameters(self)
+            .into_iter()
+            .map(|param| param.1)
+            .collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = Vec::new();
+        extend_named(&mut params, "in_proj", self.in_proj.named_parameters());
+        extend_named(&mut params, "out_proj", self.out_proj.named_parameters());
+        extend_named(
+            &mut params,
+            "lambda_proj",
+            self.lambda_proj.named_parameters(),
+        );
+        if let Some(theta_proj) = &self.theta_proj {
+            extend_named(&mut params, "theta_proj", theta_proj.named_parameters());
+        }
+        params.push(("b_bias".to_string(), &self.b_bias));
+        params.push(("c_bias".to_string(), &self.c_bias));
+        if let Some(dt_bias) = &self.dt_bias {
+            params.push(("dt_bias".to_string(), dt_bias));
+        }
+        params.push(("a_log".to_string(), &self.a_log));
+        if let Some(d_param) = &self.d_param {
+            params.push(("d_param".to_string(), d_param));
+        }
+        extend_named(&mut params, "bc_norm", self.bc_norm.named_parameters());
+        extend_named(&mut params, "norm", self.norm.named_parameters());
+        if let Some(conv1d) = &self.conv1d {
+            extend_named(&mut params, "conv1d", conv1d.named_parameters());
+        }
+        if let Some(mimo_x_up) = &self.mimo_x_up {
+            extend_named(&mut params, "mimo_x_up", mimo_x_up.named_parameters());
+        }
+        if let Some(mimo_x_down) = &self.mimo_x_down {
+            extend_named(&mut params, "mimo_x_down", mimo_x_down.named_parameters());
+        }
+        params
+    }
+
+    fn parameters_with_ids(&self) -> Vec<(TensorId, &Var<R>)> {
+        Mamba3::parameters(self)
+    }
+
+    fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        Mamba3::trainable_parameters(self)
+    }
+}
+
+fn extend_named<'a, R: Runtime>(
+    params: &mut Vec<(String, &'a Var<R>)>,
+    prefix: &str,
+    child: Vec<(String, &'a Var<R>)>,
+) {
+    params.extend(
+        child
+            .into_iter()
+            .map(|(name, var)| (format!("{prefix}.{name}"), var)),
+    );
 }
 
 fn take_linear<R: Runtime>(

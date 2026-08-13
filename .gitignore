@@ -99,3 +99,5 @@ dmypy.json
 .cargo/
 .claude
 .agents/prep/
+# pi agent scratch
+.pi-subagents/

@@ -32,8 +32,10 @@ where
     let mut total_norm_sq = 0.0f64;
     for &id in &ids {
         if let Some(grad) = grads.get(id) {
-            // Flatten then sum all elements: sum(grad^2)
-            let flat = grad.reshape(&[grad.numel()])?;
+            // Flatten then sum all elements: sum(grad^2).
+            // Gradients can arrive strided (e.g. through a transpose or a
+            // broadcast reduction), and `reshape` requires a contiguous layout.
+            let flat = grad.contiguous()?.reshape(&[grad.numel()])?;
             let sq = client.mul(&flat, &flat)?;
             let sum = client.sum(&sq, &[0], false)?;
             let val: f32 = sum.item()?;
@@ -86,7 +88,8 @@ where
             None => continue,
         };
 
-        let flat = grad.reshape(&[grad.numel()])?;
+        // Gradients can arrive strided; `reshape` requires a contiguous layout.
+        let flat = grad.contiguous()?.reshape(&[grad.numel()])?;
         let sq = client.mul(&flat, &flat)?;
         let sum = client.sum(&sq, &[0], false)?;
         let norm_sq: f64 = sum.item::<f32>()? as f64;

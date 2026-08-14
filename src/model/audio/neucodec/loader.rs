@@ -33,6 +33,7 @@ use crate::model::audio::neucodec::decoder::{NeuCodecDecoder, NeuCodecDecoderWei
 use crate::model::audio::neucodec::istft_head::{IstftHead, IstftHeadWeights};
 use crate::model::audio::neucodec::resnet_block::{ResnetBlock, ResnetBlockWeights};
 use crate::model::audio::neucodec::transformer_block::{TransformerBlock, TransformerBlockWeights};
+use crate::nn::fsq::{Fsq, FsqConfig};
 use crate::nn::{Conv1d, GroupNorm, LayerNorm, Linear, RmsNorm};
 use numr::dtype::DType;
 use numr::ops::PaddingMode;
@@ -42,6 +43,63 @@ use std::path::Path;
 
 /// Default top-level prefix for the decoder's tensors in the checkpoint.
 pub const DEFAULT_DECODER_PREFIX: &str = "acoustic_decoder";
+
+/// Top-level prefix for the FSQ quantizer's projections.
+pub const DEFAULT_QUANTIZER_PREFIX: &str = "quantizer";
+
+/// Per-dimension FSQ levels for the released NeuCodec checkpoint:
+/// `4^8 = 65_536` codes at 50 Hz.
+pub const NEUCODEC_FSQ_LEVELS: [u32; 8] = [4; 8];
+
+/// Load the FSQ quantizer (`quantizer.project_in`/`project_out`) from a
+/// checkpoint.
+///
+/// Upstream builds it as `ResidualFSQ(dim=2048, levels=[4]*8,
+/// num_quantizers=1)`, which stores exactly these two projections under
+/// `quantizer.*` — the same names this reads.
+///
+/// Only `project_out` is needed to decode, but `project_in` is loaded too so
+/// the returned quantizer can also encode (and so a missing/mis-shaped tensor
+/// is caught at load time rather than at first use).
+pub fn load_fsq_quantizer<R: Runtime<DType = DType>, P: AsRef<Path>>(
+    path: P,
+    device: &R::Device,
+) -> Result<Fsq<R>> {
+    let config = FsqConfig::new(NEUCODEC_FSQ_LEVELS.to_vec(), FSQ_INPUT_DIM)?;
+    let codebook_dim = config.codebook_dim();
+
+    let mut loader = SafeTensorsLoader::open(path)?;
+    let mut take = |name: &str, expected: &[usize]| -> Result<Tensor<R>> {
+        let full = format!("{DEFAULT_QUANTIZER_PREFIX}.{name}");
+        let t = loader.load_tensor::<R>(&full, device)?;
+        if t.shape() != expected {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "{full}: expected shape {expected:?}, checkpoint has {:?}",
+                    t.shape()
+                ),
+            });
+        }
+        Ok(t)
+    };
+
+    let project_in = Linear::new(
+        take("project_in.weight", &[codebook_dim, FSQ_INPUT_DIM])?,
+        Some(take("project_in.bias", &[codebook_dim])?),
+        false,
+    );
+    let project_out = Linear::new(
+        take("project_out.weight", &[FSQ_INPUT_DIM, codebook_dim])?,
+        Some(take("project_out.bias", &[FSQ_INPUT_DIM])?),
+        false,
+    );
+
+    Fsq::new(config, device, Some(project_in), Some(project_out))
+}
+
+/// Width of the FSQ latent that `project_out` produces and the decoder's `fc`
+/// consumes (checkpoint: 2048).
+const FSQ_INPUT_DIM: usize = 2048;
 
 /// Reads `acoustic_decoder.*` tensors and assembles a [`NeuCodecDecoder`].
 struct DecoderLoader<'a, R: Runtime<DType = DType>> {

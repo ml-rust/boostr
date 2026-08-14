@@ -1,14 +1,15 @@
-//! Numerical parity for the NeuCodec acoustic decoder against the upstream
-//! `neucodec` Python package.
+//! Numerical parity for the NeuCodec FSQ quantizer and acoustic decoder
+//! against the upstream `neucodec` Python package.
 //!
-//! The fixtures are produced by running upstream's own `VocosBackbone` +
-//! `ISTFTHead` on the released weights and dumping raw little-endian f32
-//! blobs. They are NOT checked in (the decoder weights alone are ~560 MB and
-//! the checkpoint lives outside the repo), so this test is skipped unless both
-//! of these are present:
+//! The fixtures are produced by running upstream's own `ResidualFSQ`,
+//! `VocosBackbone` and `ISTFTHead` on the released weights and dumping raw
+//! little-endian f32 blobs. They are NOT checked in (the decoder weights alone
+//! are ~560 MB and the checkpoint lives outside the repo), so these tests are
+//! skipped unless both of these are present:
 //!
-//! * `NEUCODEC_REF_DIR` — directory holding `ref_input.f32`,
-//!   `ref_x_pred.f32`, `ref_waveform.f32`
+//! * `NEUCODEC_REF_DIR` — directory holding `ref_input.f32`, `ref_x_pred.f32`,
+//!   `ref_waveform.f32`, `ref_fsq_indices.f32`, `ref_fsq_out.f32`,
+//!   `ref_e2e_waveform.f32`
 //! * the checkpoint at `NEUCODEC_CHECKPOINT` (defaults to the local path)
 //!
 //! Regenerate with `dump_reference.py` (see that script's docstring).
@@ -19,7 +20,7 @@
 //! the Vocos `padding="same"` ISTFT trim. Every one of those is invisible in
 //! the checkpoint's shapes.
 
-use boostr::model::audio::neucodec::NeuCodecDecoder;
+use boostr::model::audio::neucodec::{NeuCodec, NeuCodecDecoder};
 use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
@@ -75,7 +76,14 @@ fn fixtures() -> Option<Fixtures> {
     let checkpoint = PathBuf::from(
         std::env::var("NEUCODEC_CHECKPOINT").unwrap_or_else(|_| DEFAULT_CHECKPOINT.to_string()),
     );
-    let needed = ["ref_input.f32", "ref_x_pred.f32", "ref_waveform.f32"];
+    let needed = [
+        "ref_input.f32",
+        "ref_x_pred.f32",
+        "ref_waveform.f32",
+        "ref_fsq_indices.f32",
+        "ref_fsq_out.f32",
+        "ref_e2e_waveform.f32",
+    ];
     if !checkpoint.exists() || needed.iter().any(|f| !dir.join(f).exists()) {
         return None;
     }
@@ -166,5 +174,64 @@ fn decoder_matches_upstream_neucodec_reference() {
     assert!(
         w_d < 1e-3 * scale.max(1.0) + 1e-3,
         "waveform diverges from upstream: max|d|={w_d} at sample {w_i} (rms {scale})"
+    );
+}
+
+/// The full pure-Rust listening path: FSQ code indices -> 24 kHz waveform,
+/// against upstream `ResidualFSQ.get_output_from_indices` + the same decoder.
+///
+/// Covers what the decoder-only test cannot: the mixed-radix unpack of a
+/// 65_536-entry codebook and the `project_out` that follows it. The reference
+/// indices deliberately include 0 and 65_535 so the unpack is exercised at both
+/// ends of its range.
+#[test]
+fn codec_matches_upstream_from_indices() {
+    let Some(fx) = fixtures() else {
+        eprintln!("skipping: set NEUCODEC_REF_DIR (and have the checkpoint) to run parity");
+        return;
+    };
+    let (client, device) = setup();
+
+    let codec =
+        NeuCodec::<CpuRuntime>::from_safetensors(&fx.checkpoint, &device).expect("load codec");
+    let cfg = *codec.config();
+
+    // Indices were dumped as f32 for a uniform fixture format; they are exact
+    // small integers, so the round-trip through f32 is lossless.
+    let idx_f32 = read_f32(&fx.dir.join("ref_fsq_indices.f32"));
+    let frames = idx_f32.len();
+    let idx: Vec<i32> = idx_f32.iter().map(|v| *v as i32).collect();
+    let indices = Tensor::<CpuRuntime>::from_slice(&idx, &[1, frames], &device);
+
+    // --- Dequantization ---------------------------------------------------
+    let features = codec
+        .indices_to_features(&client, &indices)
+        .expect("dequantize");
+    assert_eq!(features.shape(), &[1, frames, cfg.fc_in_dim]);
+
+    let got: Vec<f32> = features.tensor().contiguous().unwrap().to_vec();
+    let want = read_f32(&fx.dir.join("ref_fsq_out.f32"));
+    let (d, i) = max_abs_diff(&got, &want);
+    eprintln!(
+        "fsq features: max|d|={d:.3e} at {i} (rms {:.3e})",
+        rms(&want)
+    );
+    assert!(
+        d < 1e-4,
+        "FSQ dequantization diverges from upstream: max|d|={d} at index {i}"
+    );
+
+    // --- End to end -------------------------------------------------------
+    let waveform = codec.decode(&client, &indices).expect("decode");
+    assert_eq!(waveform.shape(), &[1, frames * cfg.hop_length]);
+
+    let got: Vec<f32> = waveform.contiguous().unwrap().to_vec();
+    let want = read_f32(&fx.dir.join("ref_e2e_waveform.f32"));
+    let (d, i) = max_abs_diff(&got, &want);
+    let scale = rms(&want);
+    eprintln!("e2e waveform: max|d|={d:.3e} at {i}, reference rms={scale:.3e}");
+    assert!(
+        d < 1e-3 * scale.max(1.0) + 1e-3,
+        "indices->waveform diverges from upstream: max|d|={d} at sample {i} (rms {scale})"
     );
 }

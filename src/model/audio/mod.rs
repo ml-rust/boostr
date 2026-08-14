@@ -2,6 +2,7 @@ pub mod fft;
 pub mod g2p;
 pub mod kokoro;
 pub mod mel;
+pub mod neucodec;
 pub mod reflection_pad;
 pub mod stft;
 pub mod tts_bundle;

@@ -207,7 +207,8 @@ impl<R: Runtime> MoeRouter<R> {
                 // differentiable for every expert because it is computed from
                 // the tracked dense softmax probabilities.
                 let p_squared = var_mul(&p_e_var, &p_e_var, client).map_err(Error::Numr)?;
-                let p_squared_sum = var_sum(&p_squared, &[0], false, client).map_err(Error::Numr)?;
+                let p_squared_sum =
+                    var_sum(&p_squared, &[0], false, client).map_err(Error::Numr)?;
                 var_add(&p_squared_sum, &switch_sum, client).map_err(Error::Numr)?
             }
         };
@@ -307,7 +308,9 @@ mod tests {
 
         let input = Var::new(
             Tensor::<CpuRuntime>::from_slice(
-                &[0.3f32, -0.7, 1.1, 0.2, 0.8, 0.4, -0.3, 0.9, -0.6, 0.5, 0.7, -0.2],
+                &[
+                    0.3f32, -0.7, 1.1, 0.2, 0.8, 0.4, -0.3, 0.9, -0.6, 0.5, 0.7, -0.2,
+                ],
                 &[3, hidden],
                 &device,
             ),
@@ -399,11 +402,8 @@ mod tests {
             router_temperature: 0.5,
             ..MoeRouterConfig::new(4, 2)
         };
-        let hot_router = MoeRouter::from_tensor(
-            router.gate().weight().tensor().clone(),
-            hot_config,
-            true,
-        );
+        let hot_router =
+            MoeRouter::from_tensor(router.gate().weight().tensor().clone(), hot_config, true);
         let hot_out = hot_router.route(&client, &input).unwrap();
         let probs_one = var_softmax(&out.logits, -1, &client).unwrap();
         let probs_hot = var_softmax(&hot_out.logits, -1, &client).unwrap();

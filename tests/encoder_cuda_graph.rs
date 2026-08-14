@@ -14,7 +14,6 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use boostr::model::encoder::config::{ArchFamily, HiddenAct};
 use boostr::model::encoder::model::Pooling;
 use boostr::{Encoder, EncoderConfig};
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
@@ -212,7 +211,7 @@ fn embed_inference_matches_standard_cuda() {
 
     client.synchronize();
     let first_vals: Vec<f32> = first_out.to_vec();
-    println!("call-1 (capture) output: {:?}", &first_vals);
+    println!("call-1 (capture) output: {:?}", first_vals);
 
     // Second call → graph replay (cuGraphLaunch executes the captured ops;
     // stable_out is now populated with real results).
@@ -229,8 +228,8 @@ fn embed_inference_matches_standard_cuda() {
 
     let graph_vals: Vec<f32> = graph_out.to_vec();
     let std_vals: Vec<f32> = std_out.to_vec();
-    println!("call-2 (replay) output:  {:?}", &graph_vals);
-    println!("standard path output:    {:?}", &std_vals);
+    println!("call-2 (replay) output:  {:?}", graph_vals);
+    println!("standard path output:    {:?}", std_vals);
 
     // Diagnose capture-path output from call 1: was it zero (pre-launch)?
     let capture_is_zero = first_vals.iter().all(|&v| v == 0.0);
@@ -293,7 +292,7 @@ fn graph_capture_100_replays_no_drift() {
         .expect("embed_inference replay (iter 1) must succeed");
     client.synchronize();
     let reference_vals: Vec<f32> = reference.to_vec();
-    println!("reference values (first replay): {:?}", &reference_vals);
+    println!("reference values (first replay): {:?}", reference_vals);
 
     // Calls 2..=99: further replays must be bit-exact with the reference.
     for iter in 2usize..100 {

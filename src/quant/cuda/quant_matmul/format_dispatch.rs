@@ -52,7 +52,7 @@ pub(super) fn dispatch_gemv(
             | QuantFormat::Q5K
             | QuantFormat::Q3K
             | QuantFormat::Q2K
-    ) && k % 32 == 0
+    ) && k.is_multiple_of(32)
     {
         tracing::debug!(
             format = ?weight.format(),

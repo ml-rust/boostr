@@ -23,11 +23,10 @@
 use std::sync::{Mutex, OnceLock};
 
 use boostr::model::encoder::{
-    config::{ArchFamily, EncoderConfig, FfnVariant, HiddenAct},
+    config::{ArchFamily, EncoderConfig, FfnVariant},
     model::{Encoder, Pooling},
 };
 use boostr::nn::Weight;
-use numr::dtype::DType;
 use numr::runtime::cuda::{CudaDevice, CudaRuntime};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;

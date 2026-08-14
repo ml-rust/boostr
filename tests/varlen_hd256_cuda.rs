@@ -77,13 +77,11 @@ fn assert_close(a: &[f32], b: &[f32], label: &str, tol: f32) {
 // Shared input builder
 // ---------------------------------------------------------------------------
 
+/// Packed varlen batch: (q, k, v, cu_seqlens, total_tokens, max_seqlen, batch_size).
+type Hd256Inputs = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<i32>, usize, usize, usize);
+
 /// Build a packed 2-sequence batch with head_dim=256.
-/// Returns (q_data, k_data, v_data, cu_seqlens, total_tokens, max_seqlen).
-fn build_hd256_inputs(
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<i32>, usize, usize, usize) {
+fn build_hd256_inputs(num_heads: usize, num_kv_heads: usize, head_dim: usize) -> Hd256Inputs {
     // Sequence lengths: [4, 6] → total=10, max=6
     let seq_lens: Vec<usize> = vec![4, 6];
     let total_tokens: usize = seq_lens.iter().sum();

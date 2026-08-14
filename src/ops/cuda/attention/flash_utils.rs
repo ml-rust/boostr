@@ -91,7 +91,7 @@ pub(super) fn validate_qkv(
             reason: format!("k seq_len={} != v seq_len={}", k_shape[2], v_shape[2]),
         });
     }
-    if num_heads % num_kv_heads != 0 {
+    if !num_heads.is_multiple_of(num_kv_heads) {
         return Err(Error::InvalidArgument {
             arg: "num_kv_heads",
             reason: format!(

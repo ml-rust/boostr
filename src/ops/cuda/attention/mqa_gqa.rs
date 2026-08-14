@@ -48,7 +48,7 @@ pub fn mqa_gqa_fwd(
     let k_shape = k.shape();
     let dtype = q.dtype();
 
-    if num_heads % num_kv_heads != 0 {
+    if !num_heads.is_multiple_of(num_kv_heads) {
         return Err(Error::InvalidArgument {
             arg: "num_kv_heads",
             reason: format!(
@@ -157,7 +157,7 @@ pub fn mqa_gqa_bwd(
     let q_shape = q.shape();
     let dtype = q.dtype();
 
-    if num_heads % num_kv_heads != 0 {
+    if !num_heads.is_multiple_of(num_kv_heads) {
         return Err(Error::InvalidArgument {
             arg: "num_kv_heads",
             reason: format!(

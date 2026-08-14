@@ -211,7 +211,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                     | QuantFormat::Q2K
             )
         });
-        let use_dp4a = all_dp4a && m <= 4 && k % 32 == 0;
+        let use_dp4a = all_dp4a && m <= 4 && k.is_multiple_of(32);
 
         if use_dp4a {
             // Quantize activation to Q8_1 ONCE, reuse for all weights

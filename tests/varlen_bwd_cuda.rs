@@ -15,7 +15,6 @@
 use std::sync::{Mutex, OnceLock};
 
 use boostr::ops::traits::attention::varlen_attention::VarLenAttentionOps;
-use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};

@@ -257,10 +257,10 @@ mod inner {
 
             // Check RAM tier for misses
             for (i, result) in results.iter_mut().enumerate() {
-                if result.is_none() {
-                    if let Some(&block_id) = self.ram_tier.get(&token_block_hashes[i]) {
-                        *result = Some(block_id);
-                    }
+                if result.is_none()
+                    && let Some(&block_id) = self.ram_tier.get(&token_block_hashes[i])
+                {
+                    *result = Some(block_id);
                 }
             }
 
@@ -349,9 +349,9 @@ mod inner {
             // Third entry should evict the oldest (100)
             cache.demote_to_ram(300, 3);
             assert_eq!(cache.ram_tier_count(), 2);
-            assert!(cache.ram_tier.get(&100).is_none());
-            assert!(cache.ram_tier.get(&200).is_some());
-            assert!(cache.ram_tier.get(&300).is_some());
+            assert!(!cache.ram_tier.contains_key(&100));
+            assert!(cache.ram_tier.contains_key(&200));
+            assert!(cache.ram_tier.contains_key(&300));
         }
 
         #[test]

@@ -20,7 +20,6 @@ use boostr::model::encoder::{
     model::{Encoder, Pooling},
 };
 use boostr::nn::Weight;
-use numr::dtype::DType;
 use numr::runtime::cuda::{CudaDevice, CudaRuntime};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;

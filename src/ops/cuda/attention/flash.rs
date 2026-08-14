@@ -68,8 +68,10 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         }
 
         // Try Flash v3 on Hopper (SM 90+) for supported configs
-        if num_kv_heads == num_heads && window_size == 0 && flash_v3::is_hopper(self, q.device()) {
-            if let Some(result) = flash_v3::flash_v3_fwd(
+        if num_kv_heads == num_heads
+            && window_size == 0
+            && flash_v3::is_hopper(self, q.device())
+            && let Some(result) = flash_v3::flash_v3_fwd(
                 self,
                 q,
                 k,
@@ -80,9 +82,9 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                 p.seq_len_k,
                 p.head_dim,
                 causal,
-            )? {
-                return Ok(result);
-            }
+            )?
+        {
+            return Ok(result);
         }
 
         flash_fwd::flash_attention_fwd_impl(self, q, k, v, &p, causal, window_size)
@@ -141,8 +143,10 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         let p = validate_qkv(q, k, v, num_heads, num_kv_heads, head_dim)?;
 
         // Try Flash v3 on Hopper (SM 90+) for supported configs
-        if num_kv_heads == num_heads && window_size == 0 && flash_v3::is_hopper(self, q.device()) {
-            if let Some(result) = flash_v3::flash_v3_bwd(
+        if num_kv_heads == num_heads
+            && window_size == 0
+            && flash_v3::is_hopper(self, q.device())
+            && let Some(result) = flash_v3::flash_v3_bwd(
                 self,
                 dout,
                 q,
@@ -156,9 +160,9 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                 p.seq_len_k,
                 p.head_dim,
                 causal,
-            )? {
-                return Ok(result);
-            }
+            )?
+        {
+            return Ok(result);
         }
 
         flash_bwd::flash_attention_bwd_impl(

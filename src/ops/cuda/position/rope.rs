@@ -46,7 +46,7 @@ fn validate_rope_inputs(
     let seq_len = x_shape[2];
     let head_dim = x_shape[3];
 
-    if head_dim % 2 != 0 {
+    if !head_dim.is_multiple_of(2) {
         return Err(Error::InvalidArgument {
             arg: "head_dim",
             reason: format!("head_dim must be even, got {}", head_dim),

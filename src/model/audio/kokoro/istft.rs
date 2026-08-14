@@ -16,15 +16,32 @@ use crate::error::{Error, Result};
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
 
+/// How much of the overlap-added signal to trim from each end.
+///
+/// The overlap-add itself is identical in every case; only the crop differs,
+/// and it changes both the output length and the alignment, so it must match
+/// whatever forward transform produced the spectrogram.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IStftPadding {
+    /// Trim `n_fft/2` from each end — mirrors `torch.istft(center=True)`,
+    /// undoing a forward STFT that zero-padded both ends by `n_fft/2`.
+    /// Output length is `(T-1)*hop`.
+    Center,
+    /// Trim `(n_fft - hop)/2` from each end — the convention used by Vocos-style
+    /// ISTFT heads (`padding="same"`), including NeuCodec's acoustic decoder.
+    /// Output length is `T*hop`, i.e. exactly `hop` samples per input frame.
+    Same,
+    /// No trim: return the full `(T-1)*hop + n_fft` overlap-added signal.
+    None,
+}
+
 /// Options for `istft`.
 #[derive(Debug, Clone, Copy)]
 pub struct IStftOptions {
     /// Frame hop in samples.
     pub hop_length: usize,
-    /// If true, trim the first and last `n_fft/2` samples (mirrors
-    /// `torch.istft(center=True)` — forward STFT padded both ends with
-    /// `n_fft/2` zeros, iSTFT undoes that crop).
-    pub center: bool,
+    /// Which end-trim convention to apply.
+    pub padding: IStftPadding,
     /// Minimum window-square sum below which a sample is masked to zero
     /// (avoids divide-by-near-zero at the waveform boundaries).
     pub eps: f32,
@@ -34,7 +51,7 @@ impl Default for IStftOptions {
     fn default() -> Self {
         Self {
             hop_length: 256,
-            center: true,
+            padding: IStftPadding::Center,
             eps: 1e-8,
         }
     }
@@ -185,24 +202,32 @@ pub fn istft(
         }
     }
 
-    // 6. Optionally crop the `center=True` padding.
-    let (out_len, output) = if opts.center {
-        let half = n_fft / 2;
-        if raw_len < 2 * half {
+    // 6. Crop according to the requested padding convention.
+    let trim = match opts.padding {
+        IStftPadding::Center => n_fft / 2,
+        IStftPadding::Same => n_fft.saturating_sub(opts.hop_length) / 2,
+        IStftPadding::None => 0,
+    };
+    let (out_len, output) = if trim == 0 {
+        (raw_len, waveform)
+    } else {
+        if raw_len < 2 * trim {
             return Err(Error::InvalidArgument {
                 arg: "mag",
-                reason: "signal too short to remove center padding".into(),
+                reason: format!(
+                    "signal of {raw_len} samples is too short to trim {trim} from each end \
+                     ({:?} padding)",
+                    opts.padding
+                ),
             });
         }
-        let out_len = raw_len - 2 * half;
+        let out_len = raw_len - 2 * trim;
         let mut cropped = vec![0.0f32; b * out_len];
         for b_idx in 0..b {
-            let src = &waveform[b_idx * raw_len + half..b_idx * raw_len + half + out_len];
+            let src = &waveform[b_idx * raw_len + trim..b_idx * raw_len + trim + out_len];
             cropped[b_idx * out_len..(b_idx + 1) * out_len].copy_from_slice(src);
         }
         (out_len, cropped)
-    } else {
-        (raw_len, waveform)
     };
 
     let device = mag.device();
@@ -241,7 +266,7 @@ mod tests {
 
         let opts = IStftOptions {
             hop_length: hop,
-            center: false,
+            padding: IStftPadding::None,
             eps: 1e-8,
         };
         let out = istft(&client, &mag, &phase, &window, opts).unwrap();
@@ -286,7 +311,7 @@ mod tests {
 
         let opts = IStftOptions {
             hop_length: hop,
-            center: false,
+            padding: IStftPadding::None,
             eps: 1e-8,
         };
         let out = istft(&client, &mag, &phase, &window, opts).unwrap();
@@ -324,7 +349,7 @@ mod tests {
             &window,
             IStftOptions {
                 hop_length: hop,
-                center: true,
+                padding: IStftPadding::Center,
                 eps: 1e-8,
             },
         )
@@ -336,7 +361,7 @@ mod tests {
             &window,
             IStftOptions {
                 hop_length: hop,
-                center: false,
+                padding: IStftPadding::None,
                 eps: 1e-8,
             },
         )

@@ -36,7 +36,7 @@
 
 use crate::error::{Error, Result};
 use crate::model::audio::kokoro::{
-    BertEncoder, Decoder, IStftOptions, KokoroConfig, ProsodyPredictor, TextEncoder,
+    BertEncoder, Decoder, IStftOptions, IStftPadding, KokoroConfig, ProsodyPredictor, TextEncoder,
     decode_prosody_durations, istft, length_regulator, split_voice_style,
 };
 use numr::dtype::DType;
@@ -205,7 +205,7 @@ impl KokoroModelV2<CpuRuntime> {
         let window = super::window::hann_window(self.config.n_fft, voice_row.device());
         let opts = IStftOptions {
             hop_length: self.config.hop_length,
-            center: true,
+            padding: IStftPadding::Center,
             eps: 1e-8,
         };
         istft(client, &mag, &phase, &window, opts)

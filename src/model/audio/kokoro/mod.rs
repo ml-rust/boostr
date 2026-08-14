@@ -45,7 +45,7 @@ pub use duration_predictor::{DurationPredictor, decode_durations, length_regulat
 pub use engine::KokoroEngine;
 pub use frame_predictor::{EnergyPredictor, FramePredictor, PitchPredictor};
 pub use generator::{GeneratorStftParams, IStftNetGenerator, IStftNetGeneratorOpts};
-pub use istft::{IStftOptions, istft};
+pub use istft::{IStftOptions, IStftPadding, istft};
 pub use kokoro_v2::{KokoroModelV2, alignment_matrix_from_durations};
 #[allow(deprecated)]
 pub use loader::load_voice_style;

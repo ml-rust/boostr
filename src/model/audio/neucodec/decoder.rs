@@ -11,30 +11,31 @@
 //!   -> prior_net     2x ResnetBlock                    -> [B, 1024, T]
 //!   -> (permute)                                       -> [B, T, 1024]  (channels-last)
 //!   -> 12x TransformerBlock (RMSNorm/attn/RMSNorm/MLP) -> [B, T, 1024]
-//!   -> norm          LayerNorm(eps=1e-6, weight+bias)  -> [B, T, 1024]
 //!   -> (permute)                                       -> [B, 1024, T]
 //!   -> post_net      2x ResnetBlock                    -> [B, 1024, T]
 //!   -> (permute)                                       -> [B, T, 1024]
+//!   -> norm          LayerNorm(eps=1e-6, weight+bias)  -> [B, T, 1024]
 //!   -> head.linear   Linear[1922, 1024]+bias           -> [B, T, 1922]
 //!   -> split/activate -> (mag [B, 961, T], phase [B, 961, T])
 //!   -> istft (n_fft=1920, hop=480)                     -> waveform [B, samples]
 //! ```
 //!
-//! `samples == (T - 1) * hop_length` under `istft`'s `center=true` framing
-//! (see [`NeuCodecDecoder::forward`] tests for the exact derivation).
+//! `samples == T * hop_length` under Vocos `padding="same"` framing — one hop
+//! per latent frame (see [`NeuCodecDecoder::forward`] tests for the exact
+//! derivation).
 //!
 //! This module is architecture-only: no weight loading. Construct with
 //! synthetic weights via [`NeuCodecDecoderWeights`]; a loader is a separate
 //! unit.
 
 use crate::error::{Error, Result};
-use crate::model::audio::kokoro::{IStftOptions, hann_window, istft};
+use crate::model::audio::kokoro::{IStftOptions, IStftPadding, hann_window, istft};
 use crate::model::audio::neucodec::client::NeuCodecClient;
 use crate::model::audio::neucodec::config::NeuCodecDecoderConfig;
 use crate::model::audio::neucodec::istft_head::IstftHead;
 use crate::model::audio::neucodec::resnet_block::ResnetBlock;
 use crate::model::audio::neucodec::transformer_block::TransformerBlock;
-use crate::nn::{Conv1d, LayerNorm, Linear, RoPE, TrainMode, var_contiguous};
+use crate::nn::{Conv1d, LayerNorm, Linear, TrainMode, var_contiguous};
 use numr::autograd::{Var, var_permute};
 use numr::dtype::DType;
 use numr::runtime::Runtime;
@@ -60,16 +61,11 @@ pub struct NeuCodecDecoder<R: Runtime> {
     norm: LayerNorm<R>,
     post_net: Vec<ResnetBlock<R>>,
     head: IstftHead<R>,
-    rope: RoPE<R>,
 }
 
 impl<R: Runtime<DType = DType>> NeuCodecDecoder<R> {
     /// Build the decoder from a validated config and already-built weights.
-    pub fn new(
-        config: NeuCodecDecoderConfig,
-        weights: NeuCodecDecoderWeights<R>,
-        device: &R::Device,
-    ) -> Result<Self> {
+    pub fn new(config: NeuCodecDecoderConfig, weights: NeuCodecDecoderWeights<R>) -> Result<Self> {
         config.validate()?;
 
         if weights.prior_net.len() != config.num_prior_resnet_blocks {
@@ -103,14 +99,6 @@ impl<R: Runtime<DType = DType>> NeuCodecDecoder<R> {
             });
         }
 
-        let rope = RoPE::<R>::precompute_freqs(
-            config.max_seq_len,
-            config.head_dim,
-            config.rope_theta,
-            None,
-            device,
-        );
-
         Ok(Self {
             config,
             fc: weights.fc,
@@ -120,7 +108,6 @@ impl<R: Runtime<DType = DType>> NeuCodecDecoder<R> {
             norm: weights.norm,
             post_net: weights.post_net,
             head: weights.head,
-            rope,
         })
     }
 
@@ -186,9 +173,8 @@ impl<R: Runtime<DType = DType>> NeuCodecDecoder<R> {
         let h = var_permute(&h, &[0, 2, 1]).map_err(Error::Numr)?;
         let mut h = var_contiguous(&h)?;
         for layer in &self.layers {
-            h = layer.forward(client, &h, &self.rope)?;
+            h = layer.forward(client, &h)?;
         }
-        let h = self.norm.forward(client, &h)?;
 
         // channels-last -> channels-first for post_net
         let h = var_permute(&h, &[0, 2, 1]).map_err(Error::Numr)?;
@@ -197,9 +183,16 @@ impl<R: Runtime<DType = DType>> NeuCodecDecoder<R> {
             h = block.forward(client, &h)?;
         }
 
-        // channels-first -> channels-last for head.linear
+        // channels-first -> channels-last, then the FINAL norm.
+        //
+        // `norm` runs AFTER `post_net`, not between the transformer stack and
+        // `post_net` — upstream `VocosBackbone.forward` is
+        // `embed -> prior_net -> transformers -> post_net -> final_layer_norm`.
+        // The checkpoint cannot reveal this (it only records that `norm` has a
+        // bias); only the source ordering does.
         let h = var_permute(&h, &[0, 2, 1]).map_err(Error::Numr)?;
         let h = var_contiguous(&h)?;
+        let h = self.norm.forward(client, &h)?;
 
         self.head.forward(client, &h)
     }
@@ -231,7 +224,11 @@ impl NeuCodecDecoder<numr::runtime::cpu::CpuRuntime> {
             &window,
             IStftOptions {
                 hop_length: self.config.hop_length,
-                center: true,
+                // Vocos `padding="same"`, NOT torch's `center=True`: upstream
+                // trims `(n_fft - hop)/2 = 720` per end, not `n_fft/2 = 960`.
+                // This sets both the output length (`T*hop`, one hop per input
+                // frame) and the alignment, so the two are not interchangeable.
+                padding: IStftPadding::Same,
                 eps: 1e-8,
             },
         )
@@ -360,7 +357,10 @@ mod tests {
         let mlp = 16;
         let fc_in = 6;
         let n_fft = 8;
-        let hop = 3;
+        // `n_fft - hop` must be EVEN for the `samples == frames * hop` identity
+        // to hold exactly (the Vocos trim is `(n_fft - hop) / 2`, floored).
+        // The real config satisfies this: 1920 - 480 = 1440.
+        let hop = 4;
         let config = NeuCodecDecoderConfig {
             hidden_size: hidden,
             fc_in_dim: fc_in,
@@ -372,8 +372,6 @@ mod tests {
             num_heads: heads,
             head_dim,
             mlp_intermediate_size: mlp,
-            rope_theta: 10000.0,
-            max_seq_len: 64,
             rms_norm_eps: 1e-6,
             resnet_norm_groups: 2,
             resnet_norm_eps: 1e-6,
@@ -406,7 +404,7 @@ mod tests {
             .unwrap(),
         };
 
-        let decoder = NeuCodecDecoder::new(config, weights, &device).unwrap();
+        let decoder = NeuCodecDecoder::new(config, weights).unwrap();
         (decoder, client, device, config)
     }
 
@@ -432,19 +430,18 @@ mod tests {
     /// Full decoder: input `[batch, frames, fc_in_dim]` -> waveform
     /// `[batch, samples]`.
     ///
-    /// Derivation (see `crate::model::audio::kokoro::istft`): with
-    /// `center=true`, `istft` first builds `raw_len = (frames-1)*hop + n_fft`
-    /// via overlap-add, then crops `n_fft/2` samples off each end (undoing
-    /// the forward STFT's `center=true` padding), leaving
-    /// `raw_len - 2*(n_fft/2) = raw_len - n_fft = (frames-1)*hop` samples —
-    /// i.e. `samples == (frames - 1) * hop_length`, not `frames * hop_length`.
-    /// (The task brief's "`samples == frames * hop`" describes the
-    /// *asymptotic* frame-rate/sample-rate relationship for a long sequence,
-    /// where the `-1` is negligible; the exact `torch.istft`-compatible
-    /// formula this decoder implements is the `(frames-1)` one asserted
-    /// below.)
+    /// Derivation (see `crate::model::audio::kokoro::istft`): overlap-add
+    /// builds `raw_len = (frames-1)*hop + n_fft`, then Vocos `padding="same"`
+    /// trims `(n_fft - hop)/2` from each end, leaving
+    /// `raw_len - (n_fft - hop) = frames * hop` samples.
+    ///
+    /// So one input frame yields exactly `hop_length` output samples, which is
+    /// what makes the 50 Hz latent rate line up with 24 kHz audio
+    /// (`50 * 480 = 24000`). An earlier version of this port used
+    /// `torch.istft`-style `center=true` trimming of `n_fft/2` per end and got
+    /// `(frames-1)*hop` — one hop short, and misaligned by 240 samples.
     #[test]
-    fn forward_waveform_sample_count_matches_center_istft_formula() {
+    fn forward_waveform_sample_count_matches_vocos_same_padding() {
         let (decoder, client, device, config) = make_decoder(0.01);
         let batch = 2;
         let frames = 7;
@@ -457,7 +454,7 @@ mod tests {
             false,
         );
         let waveform = decoder.forward(&client, &x).unwrap();
-        let expected_samples = (frames - 1) * config.hop_length;
+        let expected_samples = frames * config.hop_length;
         assert_eq!(waveform.shape(), &[batch, expected_samples]);
     }
 
@@ -517,7 +514,7 @@ mod tests {
             )
             .unwrap(),
         };
-        assert!(NeuCodecDecoder::new(config, weights, &device).is_err());
+        assert!(NeuCodecDecoder::new(config, weights).is_err());
     }
 
     #[test]

@@ -173,11 +173,7 @@ mod tests {
         let n_fft = 8;
         let h = head(hidden, n_fft, &device);
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
-                &vec![1.0f32; 3 * hidden],
-                &[1, 3, hidden],
-                &device,
-            ),
+            Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; 3 * hidden], &[1, 3, hidden], &device),
             false,
         );
         let (mag, phase) = h.forward(&client, &x).unwrap();
@@ -226,11 +222,7 @@ mod tests {
         )
         .unwrap();
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
-                &vec![0.0f32; 2 * hidden],
-                &[1, 2, hidden],
-                &device,
-            ),
+            Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; 2 * hidden], &[1, 2, hidden], &device),
             false,
         );
         let (mag, _phase) = head.forward(&client, &x).unwrap();

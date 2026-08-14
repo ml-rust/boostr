@@ -1,17 +1,42 @@
 //! `TransformerBlock` — one of the 12 pre-norm transformer layers in
 //! NeuCodec's acoustic decoder.
 //!
-//! Checkpoint shapes (hidden 1024, 16 heads x head_dim 64, RoPE theta 10000):
+//! Checkpoint shapes (hidden 1024, 16 heads x head_dim 64):
 //! `input_layernorm` (RMSNorm, weight-only) -> self-attention (`q/k/v/o_proj`,
 //! weight-only, no biases, no GQA) -> `post_attention_layernorm` (RMSNorm,
 //! weight-only) -> plain 2-layer MLP (`mlp.fc1` `[4096,1024]` ->
 //! `mlp.fc2` `[1024,4096]`, **not** SwiGLU — there is no gate projection).
 //! Pre-norm residual structure throughout. Full (non-causal) attention: this
 //! decoder sees the whole latent sequence at once, so no mask is applied.
+//!
+//! ## No positional encoding — deliberately, to match the released weights
+//!
+//! `config.json` advertises `rope_parameters`, and upstream's `Attention` does
+//! call a `RotaryPositionalEmbeddings` on `q` and `k`. It has no effect:
+//!
+//! * `RotaryPositionalEmbeddings.forward` documents its input as
+//!   `[b, s, n_h, h_d]` and reads the sequence length as `x.size(1)`, but
+//!   `Attention.forward` hands it `q`/`k` shaped `(b, h, t, d)`. Axis 1 is the
+//!   HEAD axis, so the rotation angle is selected by head index and is
+//!   CONSTANT across time.
+//! * A per-head rotation `R_h` that does not vary with `t` is orthogonal and
+//!   applied to both `q` and `k`, so every score is
+//!   `(R_h q_t)·(R_h k_s) = q_t·k_s` — it cancels exactly.
+//!
+//! Both were verified against the installed `neucodec` package: RoPE input
+//! shapes come through as `(2, 16, 7, 64)` for `t = 7`, upstream attention is
+//! exactly permutation-equivariant over time (max deviation 2.9e-7), and
+//! swapping the rotation for the identity changes the output by 1.5e-7 at an
+//! output scale of 0.47 — i.e. float32 noise.
+//!
+//! So the released decoder has NO effective positional information, and this
+//! port applies none. Adding a genuine time-indexed RoPE here would be a
+//! silent parity break: it is not a no-op, and the weights were never trained
+//! with one.
 
 use crate::error::{Error, Result};
 use crate::model::audio::neucodec::client::NeuCodecClient;
-use crate::nn::{Linear, RmsNorm, RoPE, var_contiguous};
+use crate::nn::{Linear, RmsNorm, var_contiguous};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use numr::autograd::{Var, var_add, var_permute, var_reshape, var_silu};
 use numr::dtype::DType;
@@ -73,13 +98,13 @@ impl<R: Runtime> TransformerBlock<R> {
 impl<R: Runtime<DType = DType>> TransformerBlock<R> {
     /// Forward: `x [B, T, hidden] -> [B, T, hidden]`. Full (non-causal)
     /// self-attention over the whole sequence.
-    pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
+    pub fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
     where
         C: NeuCodecClient<R>,
         R::Client: NeuCodecClient<R>,
     {
         let normed = self.input_layernorm.forward(client, x)?;
-        let attn_out = self.self_attn(client, &normed, rope)?;
+        let attn_out = self.self_attn(client, &normed)?;
         let h = var_add(x, &attn_out, client).map_err(Error::Numr)?;
 
         let normed = self.post_attention_layernorm.forward(client, &h)?;
@@ -89,7 +114,7 @@ impl<R: Runtime<DType = DType>> TransformerBlock<R> {
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
     }
 
-    fn self_attn<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
+    fn self_attn<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
     where
         C: NeuCodecClient<R>,
         R::Client: NeuCodecClient<R>,
@@ -131,8 +156,8 @@ impl<R: Runtime<DType = DType>> TransformerBlock<R> {
         let k = var_contiguous(&k)?;
         let v = var_contiguous(&v)?;
 
-        let q = rope.forward(client, &q)?;
-        let k = rope.forward(client, &k)?;
+        // No RoPE — see the module doc: upstream's rotation is a verified
+        // no-op, so applying one here would break parity with the weights.
 
         // No mask: NeuCodec's acoustic decoder attends over the full latent
         // sequence (non-causal), unlike an autoregressive LLaMA-style block.
@@ -198,7 +223,6 @@ mod tests {
         let (client, device) = cpu_setup();
         let (hidden, heads, head_dim, mlp) = (16, 4, 4, 32);
         let b = block(hidden, heads, head_dim, mlp, &device);
-        let rope = RoPE::<CpuRuntime>::precompute_freqs(32, head_dim, 10000.0, None, &device);
 
         let x_data: Vec<f32> = (0..(2 * 5 * hidden))
             .map(|i| (i as f32 * 0.05).sin())
@@ -207,7 +231,7 @@ mod tests {
             Tensor::<CpuRuntime>::from_slice(&x_data, &[2, 5, hidden], &device),
             false,
         );
-        let out = b.forward(&client, &x, &rope).unwrap();
+        let out = b.forward(&client, &x).unwrap();
         assert_eq!(out.shape(), &[2, 5, hidden]);
     }
 
@@ -216,16 +240,13 @@ mod tests {
         let (client, device) = cpu_setup();
         let (hidden, heads, head_dim, mlp) = (16, 4, 4, 32);
         let b = block(hidden, heads, head_dim, mlp, &device);
-        let rope = RoPE::<CpuRuntime>::precompute_freqs(32, head_dim, 10000.0, None, &device);
 
-        let x_data: Vec<f32> = (0..(7 * hidden))
-            .map(|i| (i as f32 * 0.11).cos())
-            .collect();
+        let x_data: Vec<f32> = (0..(7 * hidden)).map(|i| (i as f32 * 0.11).cos()).collect();
         let x = Var::new(
             Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 7, hidden], &device),
             false,
         );
-        let out = b.forward(&client, &x, &rope).unwrap();
+        let out = b.forward(&client, &x).unwrap();
         for v in out.tensor().contiguous().unwrap().to_vec::<f32>() {
             assert!(v.is_finite());
         }
@@ -236,13 +257,12 @@ mod tests {
         let (client, device) = cpu_setup();
         let (hidden, heads, head_dim, mlp) = (16, 4, 4, 32);
         let b = block(hidden, heads, head_dim, mlp, &device);
-        let rope = RoPE::<CpuRuntime>::precompute_freqs(32, head_dim, 10000.0, None, &device);
 
         let x = Var::new(
             Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; 2 * 5 * 8], &[2, 5, 8], &device),
             false,
         );
-        assert!(b.forward(&client, &x, &rope).is_err());
+        assert!(b.forward(&client, &x).is_err());
     }
 
     #[test]

@@ -8,6 +8,11 @@
 use crate::error::{Error, Result};
 
 /// Dimensions and hyperparameters for [`super::decoder::NeuCodecDecoder`].
+///
+/// There are deliberately no RoPE fields, despite `config.json` advertising
+/// `rope_parameters`: the released decoder's rotary embedding is a verified
+/// no-op (see `transformer_block`'s module doc), so this port applies no
+/// positional encoding and has nothing to parameterize.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NeuCodecDecoderConfig {
     /// Residual-stream width used by `embed`, the resnet blocks, and every
@@ -32,12 +37,6 @@ pub struct NeuCodecDecoderConfig {
     pub head_dim: usize,
     /// Hidden width of the plain 2-layer transformer MLP (checkpoint: 4096).
     pub mlp_intermediate_size: usize,
-    /// RoPE base frequency (checkpoint: 10000.0).
-    pub rope_theta: f32,
-    /// Maximum sequence length to precompute RoPE cos/sin caches for.
-    /// Matches `config.json`'s `max_position_embeddings` (not part of the
-    /// verified weight shapes, but a safe/generous cache size).
-    pub max_seq_len: usize,
     /// Epsilon for the RMSNorm layers inside each `TransformerBlock`.
     pub rms_norm_eps: f32,
     /// Number of groups in each `ResnetBlock`'s GroupNorm layers. Upstream
@@ -80,8 +79,6 @@ impl Default for NeuCodecDecoderConfig {
             num_heads: 16,
             head_dim: 64,
             mlp_intermediate_size: 4096,
-            rope_theta: 10000.0,
-            max_seq_len: 4096,
             rms_norm_eps: 1e-6,
             resnet_norm_groups: 32,
             resnet_norm_eps: 1e-6,
@@ -175,12 +172,6 @@ impl NeuCodecDecoderConfig {
                 reason: "must be > 0".into(),
             });
         }
-        if self.max_seq_len == 0 {
-            return Err(Error::InvalidArgument {
-                arg: "max_seq_len",
-                reason: "must be > 0".into(),
-            });
-        }
         if self.n_fft == 0 || !self.n_fft.is_multiple_of(2) {
             return Err(Error::InvalidArgument {
                 arg: "n_fft",
@@ -191,6 +182,31 @@ impl NeuCodecDecoderConfig {
             return Err(Error::InvalidArgument {
                 arg: "hop_length",
                 reason: "must be > 0".into(),
+            });
+        }
+        if self.hop_length > self.n_fft {
+            return Err(Error::InvalidArgument {
+                arg: "hop_length",
+                reason: format!(
+                    "must not exceed n_fft ({}), got {}",
+                    self.n_fft, self.hop_length
+                ),
+            });
+        }
+        // The Vocos `padding="same"` ISTFT trims `(n_fft - hop)/2` per end. If
+        // that difference is odd the floor makes the trim asymmetric, and the
+        // decoder emits `frames*hop + 1` samples instead of exactly one hop per
+        // frame. The released config satisfies this (1920 - 480 = 1440).
+        if !(self.n_fft - self.hop_length).is_multiple_of(2) {
+            return Err(Error::InvalidArgument {
+                arg: "hop_length",
+                reason: format!(
+                    "n_fft - hop_length must be even for one hop of audio per frame, \
+                     got {} - {} = {}",
+                    self.n_fft,
+                    self.hop_length,
+                    self.n_fft - self.hop_length
+                ),
             });
         }
         Ok(())
@@ -227,6 +243,26 @@ mod tests {
         assert_eq!(cfg.hop_length, 480);
         // 24 kHz output / 480 = the documented 50 Hz NeuCodec frame rate.
         assert_eq!(24_000 / cfg.hop_length, 50);
+    }
+
+    /// An odd `n_fft - hop_length` makes the Vocos trim asymmetric, so the
+    /// decoder would emit `frames*hop + 1` samples instead of one hop per frame.
+    #[test]
+    fn rejects_odd_gap_between_n_fft_and_hop() {
+        let cfg = NeuCodecDecoderConfig {
+            hop_length: 481,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_hop_longer_than_n_fft() {
+        let cfg = NeuCodecDecoderConfig {
+            hop_length: 4096,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

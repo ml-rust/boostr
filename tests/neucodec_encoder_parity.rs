@@ -14,7 +14,7 @@
 
 use boostr::model::audio::neucodec::{
     Activation1d, SnakeBeta, encoder_hop_length, kaiser_sinc_filter1d, load_acoustic_encoder,
-    load_semantic_adapter, seamless_fbank,
+    load_semantic_adapter, load_semantic_encoder, seamless_fbank,
 };
 use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -170,6 +170,84 @@ fn checkpoint() -> Option<PathBuf> {
             .unwrap_or_else(|_| "/home/farhan/Projects/models/neucodec/model.safetensors".into()),
     );
     p.exists().then_some(p)
+}
+
+/// The 16-layer Wav2Vec2-BERT semantic encoder, checked at THREE depths so a
+/// mismatch localizes instead of just failing:
+///   1. feature projection  (LayerNorm-then-Linear, norm over the 160 input dim)
+///   2. encoder layer 0 (conformer: ffn1/2 half-residual, relative_key attention,
+///      causal depthwise conv module)
+///   3. all 16 layers (= upstream `hidden_states[16]`, what NeuCodec reads)
+///
+/// If (1) passes and (2) fails, the bug is inside the conformer layer; if (2)
+/// passes and (3) fails, it is in the stacking/loader.
+#[test]
+fn semantic_encoder_matches_upstream() {
+    let Some(dir) = fixtures() else {
+        eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_encoder_primitives.py)");
+        return;
+    };
+    let needed = [
+        "enc_sem_input.f32",
+        "enc_sem_proj.f32",
+        "enc_sem_layer0.f32",
+        "enc_sem_hidden16.f32",
+    ];
+    let Some(ckpt) = checkpoint() else {
+        eprintln!("skipping: checkpoint absent");
+        return;
+    };
+    if needed.iter().any(|f| !dir.join(f).exists()) {
+        eprintln!("skipping: semantic fixtures absent (run encode_real_audio.py)");
+        return;
+    }
+    let (client, device) = setup();
+
+    let encoder =
+        load_semantic_encoder::<CpuRuntime, _>(&ckpt, &device).expect("load semantic encoder");
+
+    const IN_DIM: usize = 160;
+    const HIDDEN: usize = 1024;
+    let input = read_f32(&dir.join("enc_sem_input.f32"));
+    let frames = input.len() / IN_DIM;
+    let x = Var::new(
+        Tensor::<CpuRuntime>::from_slice(&input, &[1, frames, IN_DIM], &device),
+        false,
+    );
+
+    let check = |label: &str, got: &[f32], want_file: &str, tol: f32| {
+        let want = read_f32(&dir.join(want_file));
+        assert_eq!(got.len(), want.len(), "{label}: length mismatch");
+        let (d, i) = max_abs_diff(got, &want);
+        let scale = (want.iter().map(|v| v * v).sum::<f32>() / want.len() as f32).sqrt();
+        eprintln!("{label}: max|d|={d:.3e} at {i}, reference rms={scale:.3e}");
+        assert!(
+            d < tol * scale.max(1.0),
+            "{label} diverges from upstream: max|d|={d} at {i} (rms {scale})"
+        );
+    };
+
+    // 1. feature projection
+    let proj = encoder
+        .feature_projection()
+        .forward(&client, &x)
+        .expect("feature projection");
+    assert_eq!(proj.shape(), &[1, frames, HIDDEN]);
+    let got: Vec<f32> = proj.tensor().contiguous().unwrap().to_vec();
+    check("feature projection", &got, "enc_sem_proj.f32", 2e-3);
+
+    // 2. encoder layer 0, fed the projected features
+    let l0 = encoder.layers()[0]
+        .forward(&client, &proj)
+        .expect("encoder layer 0");
+    let got: Vec<f32> = l0.tensor().contiguous().unwrap().to_vec();
+    check("encoder layer 0", &got, "enc_sem_layer0.f32", 2e-3);
+
+    // 3. the full stack — what NeuCodec actually consumes
+    let hs = encoder.forward(&client, &x).expect("semantic encoder");
+    assert_eq!(hs.shape(), &[1, frames, HIDDEN]);
+    let got: Vec<f32> = hs.tensor().contiguous().unwrap().to_vec();
+    check("hidden_states[16]", &got, "enc_sem_hidden16.f32", 3e-3);
 }
 
 /// The Kaldi-compatible mel frontend, against upstream's own

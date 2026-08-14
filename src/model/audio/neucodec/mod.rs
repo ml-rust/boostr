@@ -1,8 +1,9 @@
 //! NeuCodec acoustic decoder — architecture only, no weight loading.
 //!
 //! See [`decoder`] for the verified pipeline, [`resnet_block`] for the
-//! GroupNorm-vs-LayerNorm decision, and [`fbank`] for the semantic branch's
-//! Kaldi-compatible feature frontend.
+//! GroupNorm-vs-LayerNorm decision, [`fbank`] for the semantic branch's
+//! Kaldi-compatible feature frontend, and [`semantic_encoder`] for the
+//! 16-layer Wav2Vec2-BERT conformer that consumes those features.
 
 pub mod acoustic_encoder;
 pub mod alias_free;
@@ -15,6 +16,7 @@ pub mod istft_head;
 pub mod loader;
 pub mod resnet_block;
 pub mod semantic_adapter;
+pub mod semantic_encoder;
 pub mod transformer_block;
 
 pub use acoustic_encoder::{AcousticEncoder, EncoderBlock, ResidualUnit, encoder_hop_length};
@@ -33,9 +35,16 @@ pub use fbank::{
 pub use istft_head::{IstftHead, IstftHeadWeights};
 pub use loader::{
     DEFAULT_ACOUSTIC_ENCODER_PREFIX, DEFAULT_DECODER_PREFIX, DEFAULT_QUANTIZER_PREFIX,
-    DEFAULT_SEMANTIC_ADAPTER_PREFIX, NEUCODEC_FSQ_LEVELS, load_acoustic_encoder,
-    load_fsq_quantizer, load_semantic_adapter,
+    DEFAULT_SEMANTIC_ADAPTER_PREFIX, DEFAULT_SEMANTIC_ENCODER_PREFIX, NEUCODEC_FSQ_LEVELS,
+    load_acoustic_encoder, load_fsq_quantizer, load_semantic_adapter, load_semantic_encoder,
+    load_semantic_encoder_with,
 };
 pub use resnet_block::{ResnetBlock, ResnetBlockWeights};
 pub use semantic_adapter::{SemanticAdapter, SemanticAdapterWeights};
+pub use semantic_encoder::{
+    ConvolutionModule, ConvolutionModuleWeights, FFN_RESIDUAL_SCALE, FeatureProjection,
+    FeatureProjectionWeights, SemanticEncoder, SemanticEncoderConfig, SemanticEncoderLayer,
+    SemanticEncoderLayerWeights, SemanticEncoderWeights, SemanticFeedForward,
+    SemanticSelfAttention, SemanticSelfAttentionWeights, causal_padding, relative_distance_indices,
+};
 pub use transformer_block::{TransformerBlock, TransformerBlockWeights};

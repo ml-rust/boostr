@@ -13,8 +13,9 @@
 //! Fixtures come from `dump_encoder_primitives.py`; skipped when absent.
 
 use boostr::model::audio::neucodec::{
-    Activation1d, SnakeBeta, encoder_hop_length, kaiser_sinc_filter1d, load_acoustic_encoder,
-    load_residual_fsq, load_semantic_adapter, load_semantic_encoder, seamless_fbank,
+    Activation1d, NeuCodecEncoder, SnakeBeta, encoder_hop_length, kaiser_sinc_filter1d,
+    load_acoustic_encoder, load_residual_fsq, load_semantic_adapter, load_semantic_encoder,
+    seamless_fbank,
 };
 use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -515,4 +516,172 @@ fn residual_fsq_matches_upstream() {
         d < 2e-3 * scale.max(1.0),
         "residual fsq quantized_out diverges from upstream: max|d|={d} at {i} (rms {scale})"
     );
+}
+
+/// The FULL encode path — 16 kHz waveform in, FSQ code indices out — against
+/// upstream `NeuCodec.encode_code`.
+///
+/// Two clips, because the interesting failures are at the boundaries:
+///
+/// * `a` is an EXACT multiple of 320. Upstream's `_prepare_audio` pads
+///   `320 - (T % 320)`, which at a multiple appends a full extra 320 samples
+///   rather than none. A port that "optimizes" that case away produces one
+///   fewer acoustic frame and silently shifts every index.
+/// * `b` is not a multiple — the ordinary case.
+///
+/// Both are checked stage by stage (padding, per-branch frame counts, the
+/// post-`fc_prior` prior, then the indices) so a failure says WHERE. The
+/// branches deliberately disagree on length — acoustic 26 vs semantic 25 for
+/// 8320 samples — and upstream reconciles by truncating both to the minimum,
+/// so the frame-count assertions are part of the contract, not incidental.
+///
+/// The bar is EXACT integer index match. These are discrete codes: a
+/// near-miss float at a quantization boundary flips one, so any tolerance
+/// would be meaningless. Mismatches are reported as a fraction plus examples.
+#[test]
+fn full_encode_matches_upstream() {
+    let Some(dir) = fixtures() else {
+        eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_encoder_primitives.py)");
+        return;
+    };
+    let Some(ckpt) = checkpoint() else {
+        eprintln!("skipping: checkpoint absent");
+        return;
+    };
+    let clips = ["a", "b"];
+    let needed: Vec<PathBuf> = clips
+        .iter()
+        .flat_map(|c| {
+            [
+                dir.join(format!("enc_full_{c}_wave.f32")),
+                dir.join(format!("enc_full_{c}_padded.f32")),
+                dir.join(format!("enc_full_{c}_sem.f32")),
+                dir.join(format!("enc_full_{c}_ac.f32")),
+                dir.join(format!("enc_full_{c}_prior.f32")),
+                dir.join(format!("enc_full_{c}_indices.i32")),
+            ]
+        })
+        .collect();
+    if needed.iter().any(|p| !p.exists()) {
+        eprintln!("skipping: full-encode fixtures absent (run dump_full_encode.py)");
+        return;
+    }
+    let (client, device) = setup();
+
+    let encoder =
+        NeuCodecEncoder::<CpuRuntime>::from_safetensors(&ckpt, &device).expect("load encoder");
+
+    const CHANNELS: usize = 1024;
+    const PRIOR: usize = 2048;
+
+    for clip in clips {
+        let wave = read_f32(&dir.join(format!("enc_full_{clip}_wave.f32")));
+        let stages = encoder
+            .encode_stages(&client, &wave, &device)
+            .unwrap_or_else(|e| panic!("clip {clip}: encode failed: {e}"));
+
+        // 1. Padding — the always-pad rule, checked against upstream's own
+        //    padded waveform rather than recomputed here.
+        let want_padded = read_f32(&dir.join(format!("enc_full_{clip}_padded.f32")));
+        let got_padded: Vec<f32> = stages
+            .padded
+            .contiguous()
+            .expect("contiguous padded")
+            .to_vec();
+        assert_eq!(
+            got_padded.len(),
+            want_padded.len(),
+            "clip {clip}: padded length {} != upstream {} \
+             (input was {} samples; the pad ALWAYS fires, even at a multiple of 320)",
+            got_padded.len(),
+            want_padded.len(),
+            wave.len(),
+        );
+        let (d, i) = max_abs_diff(&got_padded, &want_padded);
+        assert!(
+            d == 0.0,
+            "clip {clip}: padded waveform differs at {i} ({d})"
+        );
+
+        // 2. Per-branch frame counts, BEFORE truncation. A padding bug shows
+        //    up here first, as an off-by-one acoustic frame.
+        let want_sem = read_f32(&dir.join(format!("enc_full_{clip}_sem.f32")));
+        let want_ac = read_f32(&dir.join(format!("enc_full_{clip}_ac.f32")));
+        let ts = stages.semantic.shape()[2];
+        let ta = stages.acoustic.shape()[2];
+        let min_len = ts.min(ta);
+        eprintln!(
+            "clip {clip}: padded={} semantic frames={ts} acoustic frames={ta} -> {min_len}",
+            got_padded.len(),
+        );
+        // Upstream's dumps are already truncated to min_len.
+        assert_eq!(
+            want_sem.len() / CHANNELS,
+            min_len,
+            "clip {clip}: upstream semantic frames disagree with min(Ts={ts}, Ta={ta})"
+        );
+        assert_eq!(
+            want_ac.len() / CHANNELS,
+            min_len,
+            "clip {clip}: upstream acoustic frames disagree with min(Ts={ts}, Ta={ta})"
+        );
+
+        // 3. The prior — everything after concat + fc_prior, in one number.
+        let want_prior = read_f32(&dir.join(format!("enc_full_{clip}_prior.f32")));
+        let got_prior: Vec<f32> = stages
+            .prior
+            .contiguous()
+            .expect("contiguous prior")
+            .to_vec();
+        assert_eq!(
+            got_prior.len(),
+            want_prior.len(),
+            "clip {clip}: prior length mismatch (shape {:?}, expected [1, {PRIOR}, {min_len}])",
+            stages.prior.shape(),
+        );
+        let (d, i) = max_abs_diff(&got_prior, &want_prior);
+        let scale =
+            (want_prior.iter().map(|v| v * v).sum::<f32>() / want_prior.len() as f32).sqrt();
+        eprintln!("clip {clip}: prior max|d|={d:.3e} at {i}, reference rms={scale:.3e}");
+        assert!(
+            d < 3e-3 * scale.max(1.0),
+            "clip {clip}: prior diverges from upstream: max|d|={d} at {i} (rms {scale}). \
+             A large, structured error here usually means the concat order was \
+             reversed (upstream puts SEMANTIC first)."
+        );
+
+        // 4. The indices — exact, no tolerance.
+        let want_idx = read_i32(&dir.join(format!("enc_full_{clip}_indices.i32")));
+        let got_idx: Vec<i32> = stages
+            .indices
+            .contiguous()
+            .expect("contiguous indices")
+            .to_vec();
+        assert_eq!(
+            got_idx.len(),
+            want_idx.len(),
+            "clip {clip}: index count mismatch (shape {:?})",
+            stages.indices.shape()
+        );
+        let mismatches: Vec<(usize, i32, i32)> = got_idx
+            .iter()
+            .zip(want_idx.iter())
+            .enumerate()
+            .filter_map(|(i, (&g, &w))| (g != w).then_some((i, g, w)))
+            .collect();
+        let fraction = mismatches.len() as f64 / got_idx.len() as f64 * 100.0;
+        eprintln!(
+            "clip {clip}: indices {}/{} mismatched ({fraction:.2}%)",
+            mismatches.len(),
+            got_idx.len()
+        );
+        assert!(
+            mismatches.is_empty(),
+            "clip {clip}: FSQ indices diverge from upstream: {}/{} mismatched ({fraction:.2}%); \
+             first few (position, got, want): {:?}",
+            mismatches.len(),
+            got_idx.len(),
+            mismatches.iter().take(5).collect::<Vec<_>>(),
+        );
+    }
 }

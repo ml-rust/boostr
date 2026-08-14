@@ -3,8 +3,8 @@
 //!
 //! This is the pure-Rust listening path: given the 50 Hz FSQ code indices that
 //! a model predicts, it reconstructs 24 kHz audio with no Python in the loop.
-//! The encoder (BigCodec acoustic + Wav2Vec2-BERT semantic branches) is a
-//! separate, later port; tokenizing a corpus still goes through upstream.
+//! The encoder (BigCodec acoustic + Wav2Vec2-BERT semantic branches) lives in
+//! [`super::encoder`] — both directions of NeuCodec are pure Rust.
 //!
 //! Pipeline, matching upstream `NeuCodec.decode_code`:
 //!

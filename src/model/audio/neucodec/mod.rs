@@ -1,6 +1,8 @@
-//! NeuCodec acoustic decoder — architecture only, no weight loading.
+//! NeuCodec: the full waveform <-> FSQ-code path.
 //!
-//! See [`decoder`] for the verified pipeline, [`resnet_block`] for the
+//! See [`encoder`] for the 16 kHz-waveform-to-indices direction (both branches,
+//! the prior projection and the quantizer), [`decoder`] for the reverse
+//! direction, [`resnet_block`] for the
 //! GroupNorm-vs-LayerNorm decision, [`fbank`] for the semantic branch's
 //! Kaldi-compatible feature frontend, and [`semantic_encoder`] for the
 //! 16-layer Wav2Vec2-BERT conformer that consumes those features.
@@ -11,6 +13,7 @@ pub mod client;
 pub mod codec;
 pub mod config;
 pub mod decoder;
+pub mod encoder;
 pub mod fbank;
 pub mod istft_head;
 pub mod loader;
@@ -27,6 +30,10 @@ pub use client::NeuCodecClient;
 pub use codec::NeuCodec;
 pub use config::NeuCodecDecoderConfig;
 pub use decoder::{NeuCodecDecoder, NeuCodecDecoderWeights};
+pub use encoder::{
+    EncodeStages, NeuCodecEncoder, NeuCodecEncoderWeights, PRIOR_DIM, encode_alignment,
+    encode_padding,
+};
 pub use fbank::{
     FFT_LENGTH, FRAME_LENGTH, FRAME_SHIFT, HIGH_FREQ, LOW_FREQ, MEL_FLOOR, NUM_FFT_BINS,
     NUM_MEL_BINS, SAMPLE_RATE, STACKED_DIM, hz_to_mel, mel_filterbank, mel_to_hz, num_frames,
@@ -34,10 +41,10 @@ pub use fbank::{
 };
 pub use istft_head::{IstftHead, IstftHeadWeights};
 pub use loader::{
-    DEFAULT_ACOUSTIC_ENCODER_PREFIX, DEFAULT_DECODER_PREFIX, DEFAULT_QUANTIZER_PREFIX,
-    DEFAULT_SEMANTIC_ADAPTER_PREFIX, DEFAULT_SEMANTIC_ENCODER_PREFIX, NEUCODEC_FSQ_LEVELS,
-    load_acoustic_encoder, load_fsq_quantizer, load_residual_fsq, load_semantic_adapter,
-    load_semantic_encoder, load_semantic_encoder_with,
+    DEFAULT_ACOUSTIC_ENCODER_PREFIX, DEFAULT_DECODER_PREFIX, DEFAULT_FC_PRIOR_PREFIX,
+    DEFAULT_QUANTIZER_PREFIX, DEFAULT_SEMANTIC_ADAPTER_PREFIX, DEFAULT_SEMANTIC_ENCODER_PREFIX,
+    NEUCODEC_FSQ_LEVELS, load_acoustic_encoder, load_fc_prior, load_fsq_quantizer,
+    load_residual_fsq, load_semantic_adapter, load_semantic_encoder, load_semantic_encoder_with,
 };
 pub use resnet_block::{ResnetBlock, ResnetBlockWeights};
 pub use semantic_adapter::{SemanticAdapter, SemanticAdapterWeights};

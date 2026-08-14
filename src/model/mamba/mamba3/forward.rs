@@ -205,7 +205,8 @@ impl<R: Runtime> Mamba3<R> {
         R::Client: TensorOps<R> + ReduceOps<R>,
     {
         if self.config.ngroups == self.config.nheads {
-            return Ok(input.clone());
+            // `alias`, not `clone` — `Var::clone` mints a fresh TensorId.
+            return Ok(input.alias());
         }
         if self.config.ngroups == 1 {
             let repeated = var_broadcast_to(
@@ -307,7 +308,8 @@ impl<R: Runtime> Mamba3<R> {
         R::Client: TensorOps<R>,
     {
         if self.config.mimo_rank == 0 {
-            return Ok(input.clone());
+            // `alias`, not `clone` — `Var::clone` mints a fresh TensorId.
+            return Ok(input.alias());
         }
         let up_proj = self.mimo_x_up.as_ref().ok_or_else(|| Error::ModelError {
             reason: "Mamba3 mimo_rank > 0 requires mimo_x_up".into(),
@@ -343,7 +345,8 @@ impl<R: Runtime> Mamba3<R> {
         R::Client: TensorOps<R>,
     {
         if self.config.mimo_rank == 0 {
-            return Ok(input.clone());
+            // `alias`, not `clone` — `Var::clone` mints a fresh TensorId.
+            return Ok(input.alias());
         }
         let down_proj = self.mimo_x_down.as_ref().ok_or_else(|| Error::ModelError {
             reason: "Mamba3 mimo_rank > 0 requires mimo_x_down".into(),

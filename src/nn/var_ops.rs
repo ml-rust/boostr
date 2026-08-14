@@ -82,7 +82,9 @@ where
     R::Client: numr::ops::TensorOps<R>,
 {
     if repeat == 1 {
-        return Ok(x.clone());
+        // `alias`, not `clone`: `Var::clone` mints a fresh TensorId, which would
+        // orphan the input's gradient/optimizer state on the no-op path.
+        return Ok(x.alias());
     }
     let shape = x.shape();
     let [b, h_kv, s, d] = [shape[0], shape[1], shape[2], shape[3]];

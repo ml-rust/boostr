@@ -75,7 +75,10 @@ impl Dropout {
         R::Client: TensorOps<R> + ScalarOps<R> + BinaryOps<R>,
     {
         if !self.training || self.p == 0.0 {
-            return Ok(input.clone());
+            // `alias`, not `clone`: `Var::clone` mints a fresh TensorId, so an
+            // eval-mode passthrough would hide the input's id from `GradStore`
+            // and from TensorId-keyed optimizer state.
+            return Ok(input.alias());
         }
         let (output, _mask) =
             var_dropout(input, self.p, client).map_err(crate::error::Error::Numr)?;

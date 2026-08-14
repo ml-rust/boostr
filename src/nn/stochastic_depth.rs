@@ -72,7 +72,10 @@ impl StochasticDepth {
         R::Client: TensorOps<R> + ScalarOps<R> + BinaryOps<R>,
     {
         if !self.training || self.drop_prob == 0.0 {
-            return Ok(input.clone());
+            // `alias`, not `clone`: `Var::clone` mints a fresh TensorId, so an
+            // eval-mode passthrough would hide the input's id from `GradStore`
+            // and from TensorId-keyed optimizer state.
+            return Ok(input.alias());
         }
 
         // For drop_prob >= 1.0, everything is dropped

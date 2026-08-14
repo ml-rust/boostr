@@ -111,13 +111,17 @@ impl<R: Runtime> Mamba2<R> {
         let a = var_neg(&var_exp(&self.a_log, client).map_err(Error::Numr)?, client)
             .map_err(Error::Numr)?;
 
-        // 8. Process dt
+        // 8. dt = softplus(dt + dt_bias).
+        // The bias goes INSIDE softplus (matching reference Mamba2 and this
+        // crate's Mamba3): softplus(dt) + bias can be negative, which flips the
+        // sign of the decay exponent exp(dt * A) and makes the recurrence
+        // diverge instead of decay.
         let mut dt = dt;
-        if self.config.dt_softplus {
-            dt = var_softplus(&dt, client).map_err(Error::Numr)?;
-        }
         if let Some(ref bias) = self.dt_bias {
             dt = var_add(&dt, bias, client).map_err(Error::Numr)?;
+        }
+        if self.config.dt_softplus {
+            dt = var_softplus(&dt, client).map_err(Error::Numr)?;
         }
 
         // 9. SSM forward
@@ -264,13 +268,14 @@ impl<R: Runtime> Mamba2<R> {
         let neg_one = Tensor::<R>::from_slice(&[-1.0f32], &[1], x.device());
         let a = a.mul(&neg_one).map_err(Error::Numr)?;
 
-        // 8. Process dt
+        // 8. dt = softplus(dt + dt_bias) — bias inside softplus, mirroring the
+        // training path above. Inference and training must agree exactly.
         let mut dt = dt;
-        if self.config.dt_softplus {
-            dt = client.softplus(&dt).map_err(Error::Numr)?;
-        }
         if let Some(ref bias) = self.dt_bias {
             dt = dt.add(bias.tensor()).map_err(Error::Numr)?;
+        }
+        if self.config.dt_softplus {
+            dt = client.softplus(&dt).map_err(Error::Numr)?;
         }
 
         // 9. SSM forward

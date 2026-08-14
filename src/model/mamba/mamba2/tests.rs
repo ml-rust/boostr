@@ -8,6 +8,57 @@ use numr::ops::PaddingMode;
 use numr::runtime::{Runtime, cpu::CpuRuntime};
 use numr::tensor::Tensor;
 
+/// Same tiny layer as [`tiny_mamba2`] but with softplus enabled and an explicit
+/// `dt_bias` filled with `bias_value`, for exercising the dt ordering.
+fn mamba2_with_dt_bias(bias_value: f32) -> (Mamba2<CpuRuntime>, Mamba2Config) {
+    let (_, device) = cpu_setup();
+    let config = Mamba2Config::new(8)
+        .with_nheads(1)
+        .with_d_state(4)
+        .with_expand(2)
+        .with_dt_softplus(true)
+        .with_use_dt_bias(true)
+        .with_use_d(false);
+
+    let d_inner = config.d_inner();
+    let conv_channels = config.conv_channels();
+    let proj_dim = config.proj_dim();
+
+    let in_proj = Linear::new(
+        Tensor::<CpuRuntime>::from_slice(&[0.01f32; 328], &[proj_dim, 8], &device),
+        None,
+        false,
+    );
+    let conv1d = Conv1d::new(
+        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 96], &[conv_channels, 1, 4], &device),
+        None,
+        1,
+        PaddingMode::Custom(3, 0, 0, 0),
+        1,
+        conv_channels,
+        false,
+    );
+    let out_proj = Linear::new(
+        Tensor::<CpuRuntime>::from_slice(&[0.01f32; 128], &[8, d_inner], &device),
+        None,
+        false,
+    );
+    let a_log = Tensor::<CpuRuntime>::from_slice(&[-0.5f32], &[config.nheads], &device);
+    let dt_bias = Tensor::<CpuRuntime>::from_slice(&[bias_value], &[config.nheads], &device);
+
+    let weights = Mamba2Weights {
+        in_proj,
+        conv1d,
+        out_proj,
+        a_log,
+        dt_bias: Some(dt_bias),
+        d_param: None,
+        norm: None,
+    };
+    let mamba = Mamba2::new(config.clone(), weights, false);
+    (mamba, config)
+}
+
 fn tiny_mamba2() -> (Mamba2<CpuRuntime>, Mamba2Config) {
     let (_, device) = cpu_setup();
     let config = Mamba2Config::new(8)
@@ -197,4 +248,87 @@ fn test_mamba2_model_config() {
     assert_eq!(mamba_config.d_model, 64);
     assert_eq!(mamba_config.nheads, 2);
     assert_eq!(mamba_config.d_state, 16);
+}
+
+/// `dt_bias` must be added INSIDE softplus: `softplus(dt + bias)`.
+///
+/// Regression: this computed `softplus(dt) + bias`. With the default zero-init
+/// bias the two are identical, so the bug is invisible until the bias trains
+/// away from zero — at which point a sufficiently negative bias makes dt
+/// negative, flipping the sign of the decay exponent `exp(dt * A)` so the
+/// recurrence diverges instead of decaying.
+///
+/// A strongly negative bias separates the two orderings:
+///   softplus(dt + bias) > 0 always
+///   softplus(dt) + bias < 0 for bias below -softplus(dt)
+#[test]
+fn test_mamba2_dt_bias_is_applied_inside_softplus() {
+    use numr::autograd::{var_add, var_softplus};
+
+    let (client, device) = cpu_setup();
+
+    // dt values around zero => softplus(dt) ~ 0.69; a -5.0 bias flips the sign
+    // under the WRONG ordering but never under the correct one.
+    let dt = Var::new(
+        Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.25, -0.25, 0.5], &[4], &device),
+        false,
+    );
+    let bias = Var::new(
+        Tensor::<CpuRuntime>::from_slice(&[-5.0f32; 4], &[4], &device),
+        false,
+    );
+
+    // Correct: bias inside.
+    let inside = var_softplus(&var_add(&dt, &bias, &client).unwrap(), &client).unwrap();
+    let inside_vals: Vec<f32> = inside.tensor().contiguous().unwrap().to_vec();
+
+    // Wrong: bias outside.
+    let outside = var_add(&var_softplus(&dt, &client).unwrap(), &bias, &client).unwrap();
+    let outside_vals: Vec<f32> = outside.tensor().contiguous().unwrap().to_vec();
+
+    assert!(
+        inside_vals.iter().all(|v| *v > 0.0),
+        "softplus(dt + bias) must stay positive, got {inside_vals:?}"
+    );
+    assert!(
+        outside_vals.iter().all(|v| *v < 0.0),
+        "test setup is degenerate: the wrong ordering should go negative here, got {outside_vals:?}"
+    );
+
+    // The arithmetic above only pins the semantics; now prove the LAYER uses it.
+    //
+    // Compare a strongly negative bias against a zero bias. dt scales the SSM
+    // input term, so the two orderings move the output in OPPOSITE directions:
+    //   correct  softplus(dt_raw - 5) ~= 0.007  -> much SMALLER than softplus(dt_raw) ~= 0.69
+    //   wrong    softplus(dt_raw) - 5 ~= -4.31  -> |dt| much LARGER, and the decay
+    //                                              exponent dt*A flips sign
+    // Asserting the direction is robust; asserting a magnitude threshold is not,
+    // because these tiny fixture weights never actually overflow.
+    let magnitude = |bias: f32| -> f32 {
+        let (mamba, _) = mamba2_with_dt_bias(bias);
+        let x = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[0.05f32; 8 * 6], &[1, 6, 8], &device),
+            false,
+        );
+        let out = mamba.forward(&client, &x).expect("forward must succeed");
+        let vals: Vec<f32> = out.tensor().contiguous().unwrap().to_vec();
+        assert!(
+            vals.iter().all(|v| v.is_finite()),
+            "dt_bias={bias} produced non-finite output"
+        );
+        vals.iter().map(|v| v.abs()).fold(0.0f32, f32::max)
+    };
+
+    let neutral = magnitude(0.0);
+    let suppressed = magnitude(-5.0);
+    assert!(
+        neutral > 0.0,
+        "test setup is degenerate: zero-bias output is exactly zero"
+    );
+    assert!(
+        suppressed < neutral * 0.5,
+        "a strongly negative dt_bias must SHRINK the output (dt -> 0); \
+         got {suppressed} vs {neutral} at zero bias — dt_bias is being added \
+         outside softplus"
+    );
 }

@@ -2,10 +2,11 @@
 
 use super::config::Mamba3Config;
 use crate::error::{Error, Result};
-use crate::nn::{Conv1d, Linear, Module, RmsNorm, VarBuilder};
+use crate::nn::{Conv1d, Init, Linear, Module, RmsNorm, VarBuilder};
 use numr::autograd::Var;
-use numr::ops::PaddingMode;
-use numr::runtime::Runtime;
+use numr::dtype::DType;
+use numr::ops::{BinaryOps, CompareOps, PaddingMode, RandomOps, ScalarOps, TensorOps};
+use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
 /// Mamba3 layer implementing trapezoidal discretization, optional complex RoPE,
@@ -214,6 +215,163 @@ impl<R: Runtime> Mamba3<R> {
         Ok(Self::new(config.clone(), weights, trainable))
     }
 
+    /// Build from a VarBuilder, initializing missing tensors for fresh training.
+    pub fn init<C>(
+        config: &Mamba3Config,
+        vb: &mut VarBuilder<R>,
+        dtype: DType,
+        client: &C,
+        trainable: bool,
+    ) -> Result<Self>
+    where
+        R: Runtime<DType = DType>,
+        C: RuntimeClient<R>
+            + RandomOps<R>
+            + ScalarOps<R>
+            + BinaryOps<R>
+            + CompareOps<R>
+            + TensorOps<R>,
+    {
+        macro_rules! init_tensor {
+            ($name:literal, $shape:expr, $init:expr) => {
+                vb.take_or_init_tensor($name, $shape, dtype, $init, client)?
+            };
+        }
+        macro_rules! init_linear_layer {
+            ($weight:literal, $weight_shape:expr, $bias:literal, $bias_shape:expr) => {
+                init_linear(
+                    vb,
+                    $weight,
+                    $weight_shape,
+                    $bias,
+                    $bias_shape,
+                    dtype,
+                    client,
+                    trainable,
+                )?
+            };
+        }
+
+        config.validate()?;
+        let d_inner = config.d_inner();
+        let conv_channels = config.conv_channels();
+        let theta_dim = config.nheads * (config.d_state / 2);
+
+        let in_proj = init_linear_layer!(
+            "in_proj.weight",
+            &[config.proj_dim(), config.d_model],
+            "in_proj.bias",
+            &[config.proj_dim()]
+        );
+        let out_proj = init_linear_layer!(
+            "out_proj.weight",
+            &[config.d_model, d_inner],
+            "out_proj.bias",
+            &[config.d_model]
+        );
+        let lambda_proj = init_linear_layer!(
+            "lambda_proj.weight",
+            &[config.nheads, config.d_model],
+            "lambda_proj.bias",
+            &[config.nheads]
+        );
+        let theta_proj = if config.use_complex_rope || vb.contains("theta_proj.weight") {
+            Some(init_linear_layer!(
+                "theta_proj.weight",
+                &[theta_dim, config.d_model],
+                "theta_proj.bias",
+                &[theta_dim]
+            ))
+        } else {
+            None
+        };
+
+        let b_bias = init_tensor!("b_bias", &[config.nheads, config.d_state], Init::Zeros);
+        let c_bias = init_tensor!("c_bias", &[config.nheads, config.d_state], Init::Zeros);
+        let dt_bias = if config.use_dt_bias {
+            Some(init_tensor!("dt_bias", &[config.nheads], Init::Zeros))
+        } else {
+            None
+        };
+        let a_log = init_tensor!("A_log", &[config.nheads], Init::Zeros);
+        let d_param = if config.use_d {
+            Some(init_tensor!("D", &[config.nheads], Init::Ones))
+        } else {
+            None
+        };
+
+        let bc_norm = RmsNorm::new(
+            init_tensor!("bc_norm.weight", &[config.d_state], Init::Ones),
+            1e-6,
+            trainable,
+        );
+        let norm = RmsNorm::new(
+            init_tensor!("norm.weight", &[d_inner], Init::Ones),
+            1e-6,
+            trainable,
+        );
+
+        let conv1d = if config.use_conv {
+            let conv_weight = init_tensor!(
+                "conv1d.weight",
+                &[conv_channels, 1, config.d_conv],
+                Init::PyTorchLinear
+            );
+            let conv_bias = if vb.contains("conv1d.bias") {
+                Some(init_tensor!("conv1d.bias", &[conv_channels], Init::Zeros))
+            } else {
+                None
+            };
+            Some(Conv1d::new(
+                conv_weight,
+                conv_bias,
+                1,
+                PaddingMode::Custom(config.d_conv - 1, 0, 0, 0),
+                1,
+                conv_channels,
+                trainable,
+            ))
+        } else {
+            None
+        };
+
+        let (mimo_x_up, mimo_x_down) = if config.mimo_rank > 0 {
+            let up = init_linear_layer!(
+                "mimo_x_up.weight",
+                &[config.headdim * config.mimo_rank, config.headdim],
+                "mimo_x_up.bias",
+                &[config.headdim * config.mimo_rank]
+            );
+            let down = init_linear_layer!(
+                "mimo_x_down.weight",
+                &[config.headdim, config.headdim * config.mimo_rank],
+                "mimo_x_down.bias",
+                &[config.headdim]
+            );
+            (Some(up), Some(down))
+        } else {
+            (None, None)
+        };
+
+        let weights = Mamba3Weights {
+            in_proj,
+            out_proj,
+            lambda_proj,
+            theta_proj,
+            b_bias,
+            c_bias,
+            dt_bias,
+            a_log,
+            d_param,
+            bc_norm,
+            norm,
+            conv1d,
+            mimo_x_up,
+            mimo_x_down,
+        };
+        Ok(Self::new(config.clone(), weights, trainable))
+    }
+
     pub fn config(&self) -> &Mamba3Config {
         &self.config
     }
@@ -332,6 +490,36 @@ fn take_linear<R: Runtime>(
     let weight = vb.take_tensor(weight_name)?;
     let bias = if vb.contains(bias_name) {
         Some(vb.take_tensor(bias_name)?)
+    } else {
+        None
+    };
+    Ok(Linear::new(weight, bias, trainable))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn init_linear<R, C>(
+    vb: &mut VarBuilder<R>,
+    weight_name: &str,
+    weight_shape: &[usize],
+    bias_name: &str,
+    bias_shape: &[usize],
+    dtype: DType,
+    client: &C,
+    trainable: bool,
+) -> Result<Linear<R>>
+where
+    R: Runtime<DType = DType>,
+    C: RuntimeClient<R> + RandomOps<R> + ScalarOps<R> + BinaryOps<R> + CompareOps<R> + TensorOps<R>,
+{
+    let weight = vb.take_or_init_tensor(
+        weight_name,
+        weight_shape,
+        dtype,
+        Init::PyTorchLinear,
+        client,
+    )?;
+    let bias = if vb.contains(bias_name) {
+        Some(vb.take_or_init_tensor(bias_name, bias_shape, dtype, Init::Zeros, client)?)
     } else {
         None
     };

@@ -85,6 +85,51 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
         self.varmap.take_tensor(&full)
     }
 
+    /// Take a tensor by name, initializing it if the VarMap has no entry.
+    ///
+    /// This is the constructor path a trainer needs: the same model code both
+    /// builds a fresh model (empty VarMap → initialize) and restores one from a
+    /// checkpoint (populated VarMap → take). Without it, a model written with
+    /// `take_tensor` can only ever load, and training from scratch fails with
+    /// "weight not found".
+    ///
+    /// A present tensor is validated against `shape`, so a checkpoint that
+    /// disagrees with the config fails loudly instead of silently mis-shaping
+    /// the model.
+    pub fn take_or_init_tensor<C>(
+        &mut self,
+        name: &str,
+        shape: &[usize],
+        dtype: DType,
+        init: crate::nn::Init,
+        client: &C,
+    ) -> Result<Tensor<R>>
+    where
+        R: Runtime<DType = DType>,
+        C: numr::runtime::RuntimeClient<R>
+            + numr::ops::RandomOps<R>
+            + numr::ops::ScalarOps<R>
+            + numr::ops::BinaryOps<R>
+            + numr::ops::CompareOps<R>
+            + numr::ops::TensorOps<R>,
+    {
+        let full = self.full_name(name);
+        if self.varmap.contains(&full) {
+            let tensor = self.varmap.take_tensor(&full)?;
+            if tensor.shape() != shape {
+                return Err(Error::ModelError {
+                    reason: format!(
+                        "shape mismatch for '{full}': config expects {shape:?}, \
+                         loaded weight is {:?}",
+                        tensor.shape()
+                    ),
+                });
+            }
+            return Ok(tensor);
+        }
+        init.init_tensor::<R, C>(shape, dtype, self.device, client)
+    }
+
     /// Take a standard tensor by name if it exists, returning `None` if absent.
     ///
     /// Useful for tensors that only exist in some architectures (e.g., attention

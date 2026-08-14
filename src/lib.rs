@@ -85,6 +85,17 @@ pub use numr::ops::{
     ActivationOps, BinaryOps, ConvOps, NormalizationOps, TypeConversionOps, UnaryOps,
 };
 
+// Re-export the remaining numr op traits that appear in boostr's own public
+// signatures (MoE routing, attention, SSM). Anyone building a trainer or
+// inference server on boostr has to name these to satisfy the `C:` bounds on
+// `forward`, so they belong on boostr's surface rather than forcing a direct
+// numr dependency just to spell a bound.
+pub use numr::ops::{CompareOps, RandomOps, ReduceOps, ShapeOps, SortingOps};
+
+// PaddingMode is part of Conv1d's public signature, so downstream crates need
+// it to construct a conv layer without depending on numr directly.
+pub use numr::ops::PaddingMode;
+
 /// Pre-load all CUDA PTX modules needed for LLaMA inference.
 ///
 /// This front-loads all PTX→SASS JIT compilation during warmup,

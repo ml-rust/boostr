@@ -12,6 +12,7 @@ pub mod decoder;
 pub mod istft_head;
 pub mod loader;
 pub mod resnet_block;
+pub mod semantic_adapter;
 pub mod transformer_block;
 
 pub use acoustic_encoder::{AcousticEncoder, EncoderBlock, ResidualUnit, encoder_hop_length};
@@ -25,7 +26,9 @@ pub use decoder::{NeuCodecDecoder, NeuCodecDecoderWeights};
 pub use istft_head::{IstftHead, IstftHeadWeights};
 pub use loader::{
     DEFAULT_ACOUSTIC_ENCODER_PREFIX, DEFAULT_DECODER_PREFIX, DEFAULT_QUANTIZER_PREFIX,
-    NEUCODEC_FSQ_LEVELS, load_acoustic_encoder, load_fsq_quantizer,
+    DEFAULT_SEMANTIC_ADAPTER_PREFIX, NEUCODEC_FSQ_LEVELS, load_acoustic_encoder,
+    load_fsq_quantizer, load_semantic_adapter,
 };
 pub use resnet_block::{ResnetBlock, ResnetBlockWeights};
+pub use semantic_adapter::{SemanticAdapter, SemanticAdapterWeights};
 pub use transformer_block::{TransformerBlock, TransformerBlockWeights};

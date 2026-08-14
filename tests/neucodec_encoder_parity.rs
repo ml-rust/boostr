@@ -14,6 +14,7 @@
 
 use boostr::model::audio::neucodec::{
     Activation1d, SnakeBeta, encoder_hop_length, kaiser_sinc_filter1d, load_acoustic_encoder,
+    load_semantic_adapter,
 };
 use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -159,6 +160,71 @@ fn snake_beta_and_activation1d_match_upstream() {
     assert!(
         d < 1e-5,
         "Activation1d diverges from upstream: max|d|={d} at {i}"
+    );
+}
+
+/// Path to the real checkpoint, or `None` when it isn't downloaded.
+fn checkpoint() -> Option<PathBuf> {
+    let p = PathBuf::from(
+        std::env::var("NEUCODEC_CHECKPOINT")
+            .unwrap_or_else(|_| "/home/farhan/Projects/models/neucodec/model.safetensors".into()),
+    );
+    p.exists().then_some(p)
+}
+
+/// The semantic adapter (upstream `SemanticEncoder_module`).
+///
+/// Pins the residual wiring, which is genuinely counter-intuitive: the skip
+/// adds `relu(conv1(x))`, not `conv1(x)` and not the raw input, because
+/// upstream's first residual-block layer is `nn.ReLU(inplace=True)` and so
+/// rewrites the tensor that `residual_blocks(x) + x` goes on to add.
+///
+/// Every wrong variant still produces correctly-shaped output, which is why
+/// this needs a numeric check: the natural `+ conv1(x)` reading is off by
+/// `max|d| = 2.10` against an output of rms 1.36.
+#[test]
+fn semantic_adapter_matches_upstream() {
+    let Some(dir) = fixtures() else {
+        eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_encoder_primitives.py)");
+        return;
+    };
+    let (in_path, ref_path) = (dir.join("enc_sa_input.f32"), dir.join("enc_sa_output.f32"));
+    let Some(ckpt) = checkpoint() else {
+        eprintln!("skipping: checkpoint absent");
+        return;
+    };
+    if !in_path.exists() || !ref_path.exists() {
+        eprintln!("skipping: semantic-adapter fixtures absent (run encode_real_audio.py)");
+        return;
+    }
+    let (client, device) = setup();
+
+    let adapter =
+        load_semantic_adapter::<CpuRuntime, _>(&ckpt, &device).expect("load semantic adapter");
+
+    let input = read_f32(&in_path);
+    const CHANNELS: usize = 1024;
+    let frames = input.len() / CHANNELS;
+    let x = Var::new(
+        Tensor::<CpuRuntime>::from_slice(&input, &[1, CHANNELS, frames], &device),
+        false,
+    );
+
+    let out = adapter.forward(&client, &x).expect("semantic adapter");
+    assert_eq!(
+        out.shape(),
+        &[1, CHANNELS, frames],
+        "length must be preserved"
+    );
+
+    let got: Vec<f32> = out.tensor().contiguous().unwrap().to_vec();
+    let want = read_f32(&ref_path);
+    let (d, i) = max_abs_diff(&got, &want);
+    let scale = (want.iter().map(|v| v * v).sum::<f32>() / want.len() as f32).sqrt();
+    eprintln!("semantic adapter: max|d|={d:.3e} at {i}, reference rms={scale:.3e}");
+    assert!(
+        d < 2e-3 * scale.max(1.0),
+        "semantic adapter diverges from upstream: max|d|={d} at {i} (rms {scale})"
     );
 }
 

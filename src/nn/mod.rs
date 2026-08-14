@@ -4,6 +4,8 @@ pub mod conv1d;
 pub mod conv2d;
 pub mod dropout;
 pub mod embedding;
+#[path = "fsq/mod.rs"]
+pub mod fsq;
 pub mod groupnorm;
 pub mod layernorm;
 pub mod linear;
@@ -29,6 +31,7 @@ pub use conv1d::Conv1d;
 pub use conv2d::Conv2d;
 pub use dropout::Dropout;
 pub use embedding::Embedding;
+pub use fsq::{Fsq, FsqConfig};
 pub use groupnorm::GroupNorm;
 pub use layernorm::LayerNorm;
 pub use linear::{Linear, MaybeQuantLinear, QuantLinear};

@@ -6,7 +6,7 @@
 //! where A: [rank, in_features], B: [out_features, rank], scaling = alpha / rank.
 
 use crate::error::Result;
-use numr::autograd::{Var, var_matmul, var_transpose};
+use numr::autograd::{Var, var_add, var_matmul, var_mul_scalar, var_transpose};
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
@@ -96,22 +96,15 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
         let b_t = var_transpose(&self.lora_b).map_err(crate::error::Error::Numr)?;
         let lora_out = var_matmul(&lora_mid, &b_t, client).map_err(crate::error::Error::Numr)?;
 
-        // Scale and add
-        let scaled = Var::new(
-            lora_out
-                .tensor()
-                .mul_scalar(self.scaling as f64)
-                .map_err(crate::error::Error::Numr)?,
-            lora_out.requires_grad(),
-        );
-
-        let result = Var::new(
-            base_out
-                .tensor()
-                .add(scaled.tensor())
-                .map_err(crate::error::Error::Numr)?,
-            base_out.requires_grad() || scaled.requires_grad(),
-        );
+        // Scale and add — TRACKED.
+        //
+        // These must be `var_*` ops. Computing them on `.tensor()` and re-wrapping
+        // with `Var::new` produces a LEAF with grad_fn = None, which severs the
+        // graph: backward would reach neither `lora_a`/`lora_b` nor the base, so
+        // every LoRA adapter would silently never train.
+        let scaled = var_mul_scalar(&lora_out, self.scaling as f64, client)
+            .map_err(crate::error::Error::Numr)?;
+        let result = var_add(&base_out, &scaled, client).map_err(crate::error::Error::Numr)?;
 
         Ok(result)
     }
@@ -145,5 +138,62 @@ mod tests {
         let lora = LoraLinear::new(base, 8, 16.0, &device);
         assert_eq!(lora.rank(), 8);
         assert!((lora.scaling() - 2.0).abs() < 1e-6); // alpha/rank = 16/8 = 2
+    }
+
+    /// Gradients must reach the LoRA factors.
+    ///
+    /// Regression: the scale-and-add tail was built with `Var::new(...)` on raw
+    /// tensors, producing a LEAF with no grad_fn. Backward then reached neither
+    /// `lora_a`/`lora_b` nor the base, so EVERY LoRA adapter silently never
+    /// trained — no error, no NaN, and the loss still falls because the rest of
+    /// the network learns.
+    #[test]
+    fn test_lora_forward_propagates_gradient_to_factors() {
+        use crate::test_utils::cpu_setup;
+        use numr::autograd::{backward, var_sum};
+
+        let (client, device) = cpu_setup();
+        let (in_features, out_features, rank) = (4usize, 3usize, 2usize);
+
+        // Asymmetric weights so a genuine zero gradient cannot pass by accident.
+        let base_w: Vec<f32> = (0..out_features * in_features)
+            .map(|i| (i as f32) * 0.1 - 0.5)
+            .collect();
+        let base = Linear::new(
+            Tensor::<CpuRuntime>::from_slice(&base_w, &[out_features, in_features], &device),
+            None,
+            false,
+        );
+        let lora = LoraLinear::new(base, rank, 16.0, &device);
+
+        let x_vals: Vec<f32> = (0..2 * in_features)
+            .map(|i| (i as f32) * 0.25 - 0.75)
+            .collect();
+        let x = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&x_vals, &[2, in_features], &device),
+            false,
+        );
+
+        let out = lora.forward(&client, &x).expect("lora forward");
+        let loss = var_sum(&out, &[0, 1], false, &client).expect("reduce");
+        let grads = backward(&loss, &client).expect("backward");
+
+        // lora_b is zero-initialised, so d(loss)/d(lora_a) is zero at step 0 by
+        // construction; lora_b is the factor that must receive signal immediately.
+        let b_grad = grads
+            .get(lora.lora_b.id())
+            .expect("lora_b must receive a gradient");
+        let b_vals: Vec<f32> = b_grad.contiguous().expect("contig").to_vec();
+        let magnitude: f32 = b_vals.iter().map(|v| v.abs()).sum();
+        assert!(
+            magnitude > 1e-8,
+            "lora_b gradient is all zeros ({magnitude}) — the LoRA graph is severed"
+        );
+
+        // And lora_a must at least be reachable in the graph.
+        assert!(
+            grads.get(lora.lora_a.id()).is_some(),
+            "lora_a must be reachable from the loss"
+        );
     }
 }

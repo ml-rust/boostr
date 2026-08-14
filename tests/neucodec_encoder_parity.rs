@@ -14,7 +14,7 @@
 
 use boostr::model::audio::neucodec::{
     Activation1d, SnakeBeta, encoder_hop_length, kaiser_sinc_filter1d, load_acoustic_encoder,
-    load_semantic_adapter,
+    load_semantic_adapter, seamless_fbank,
 };
 use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -170,6 +170,54 @@ fn checkpoint() -> Option<PathBuf> {
             .unwrap_or_else(|_| "/home/farhan/Projects/models/neucodec/model.safetensors".into()),
     );
     p.exists().then_some(p)
+}
+
+/// The Kaldi-compatible mel frontend, against upstream's own
+/// `SeamlessM4TFeatureExtractor` on a real 1 s waveform.
+///
+/// This is the single highest-risk piece of the semantic branch: at least nine
+/// conventions here have a plausible alternative that yields correctly-shaped
+/// but numerically wrong features — Kaldi vs HTK mel scale, triangulating in
+/// mel space vs Hz, DC-removal before vs after pre-emphasis, the exact mel
+/// floor, `ddof=1` vs population variance, `center=false`, the 2^15 scale, and
+/// the Povey window's symmetric-vs-periodic form. Only a numeric comparison
+/// against upstream can tell them apart.
+#[test]
+fn mel_frontend_matches_upstream() {
+    let Some(dir) = fixtures() else {
+        eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_encoder_primitives.py)");
+        return;
+    };
+    let (wave_path, ref_path) = (
+        dir.join("enc_fbank_wave.f32"),
+        dir.join("enc_fbank_features.f32"),
+    );
+    if !wave_path.exists() || !ref_path.exists() {
+        eprintln!("skipping: fbank fixtures absent (run encode_real_audio.py)");
+        return;
+    }
+    let (_client, device) = setup();
+
+    let wave = read_f32(&wave_path);
+    let feats = seamless_fbank::<CpuRuntime>(&wave, &device).expect("fbank");
+
+    const STACKED: usize = 160;
+    let want = read_f32(&ref_path);
+    let frames = want.len() / STACKED;
+    assert_eq!(
+        feats.shape(),
+        &[frames, STACKED],
+        "frame count / stacked width must match upstream"
+    );
+
+    let got: Vec<f32> = feats.contiguous().unwrap().to_vec();
+    let (d, i) = max_abs_diff(&got, &want);
+    let scale = (want.iter().map(|v| v * v).sum::<f32>() / want.len() as f32).sqrt();
+    eprintln!("mel frontend: max|d|={d:.3e} at {i}, reference rms={scale:.3e}");
+    assert!(
+        d < 5e-3,
+        "mel frontend diverges from upstream: max|d|={d} at {i} (rms {scale})"
+    );
 }
 
 /// The semantic adapter (upstream `SemanticEncoder_module`).

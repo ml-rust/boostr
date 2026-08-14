@@ -131,6 +131,24 @@ fn test_paged_attention_bwd_parity() {
     let cpu_dk_vec = cpu_dk.to_vec::<f32>();
     let cpu_dv_vec = cpu_dv.to_vec::<f32>();
 
+    // The CPU backward is the reference for the comparison below, but only the
+    // wgpu block consumes it — paged_attention_bwd has no CUDA parity coverage
+    // yet. Assert the reference is sane unconditionally so this is a real test
+    // under every feature set rather than a bare smoke call.
+    assert_eq!(cpu_dq.shape(), &[b, h, s, d], "paged_bwd dQ shape");
+    assert_eq!(cpu_dk.shape(), k_blocks.shape(), "paged_bwd dK shape");
+    assert_eq!(cpu_dv.shape(), v_blocks.shape(), "paged_bwd dV shape");
+    for (name, v) in [
+        ("dQ", &cpu_dq_vec),
+        ("dK", &cpu_dk_vec),
+        ("dV", &cpu_dv_vec),
+    ] {
+        assert!(
+            v.iter().all(|x| x.is_finite()),
+            "paged_bwd {name} CPU reference has non-finite values"
+        );
+    }
+
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::paged_attention::PagedAttentionOps as _;

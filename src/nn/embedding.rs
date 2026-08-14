@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::nn::module::Module;
-use numr::autograd::Var;
+use numr::autograd::{Var, var_embedding_lookup};
 use numr::dtype::DType;
 use numr::ops::IndexingOps;
 use numr::runtime::{Runtime, RuntimeClient};
@@ -38,20 +38,19 @@ impl<R: Runtime> Embedding<R> {
     ///
     /// indices: `[...]` integer tensor, output: `[..., embed_dim]`
     ///
-    /// Uses `embedding_lookup` which passes all parameters as kernel arguments
-    /// (no device-side shape/stride arrays). This is critical for CUDA graph
-    /// capture compatibility — the previous `gather`-based approach copied
-    /// shape/strides to device via H2D transfers that become stale on graph replay.
+    /// Uses `var_embedding_lookup`, which preserves the autograd edge to the
+    /// embedding table while delegating to `embedding_lookup`. That op passes all
+    /// parameters as kernel arguments (no device-side shape/stride arrays), which
+    /// is critical for CUDA graph capture compatibility — the previous
+    /// `gather`-based approach copied shape/strides to device via H2D transfers
+    /// that become stale on graph replay.
     pub fn forward<C>(&self, client: &C, indices: &Tensor<R>) -> Result<Var<R>>
     where
         R: Runtime<DType = DType>,
         C: RuntimeClient<R> + IndexingOps<R>,
         R::Client: IndexingOps<R>,
     {
-        let out = client
-            .embedding_lookup(self.weight.tensor(), indices)
-            .map_err(Error::Numr)?;
-        Ok(Var::new(out, false))
+        var_embedding_lookup(&self.weight, indices, client).map_err(Error::Numr)
     }
 
     pub fn weight(&self) -> &Var<R> {
@@ -86,6 +85,7 @@ impl<R: Runtime> Module<R> for Embedding<R> {
 mod tests {
     use super::*;
     use crate::test_utils::cpu_setup;
+    use numr::autograd::{backward, var_sum};
     use numr::runtime::cpu::CpuRuntime;
 
     #[test]
@@ -107,6 +107,7 @@ mod tests {
         let indices = Tensor::<CpuRuntime>::from_slice(&[0i64, 2, 1], &[3], &device);
         let out = emb.forward(&client, &indices).unwrap();
         assert_eq!(out.shape(), &[3, 4]);
+        assert!(!out.requires_grad());
 
         let data: Vec<f32> = out.tensor().to_vec();
         assert_eq!(
@@ -130,5 +131,35 @@ mod tests {
         let indices = Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 0, 1, 0, 1], &[2, 3], &device);
         let out = emb.forward(&client, &indices).unwrap();
         assert_eq!(out.shape(), &[2, 3, 2]);
+    }
+
+    #[test]
+    fn test_embedding_backward_updates_weight_gradient() {
+        let (client, device) = cpu_setup();
+        #[rustfmt::skip]
+        let weight = Tensor::<CpuRuntime>::from_slice(
+            &[
+                0.25f32, -1.5, 3.0,
+                2.75, 4.5, -0.5,
+                -3.25, 1.25, 5.5,
+                6.75, -2.25, 0.75,
+            ],
+            &[4, 3],
+            &device,
+        );
+        let emb = Embedding::new(weight, true);
+
+        let indices = Tensor::<CpuRuntime>::from_slice(&[2i64, 0, 2], &[3], &device);
+        let out = emb.forward(&client, &indices).unwrap();
+        let loss = var_sum(&out, &[0, 1], false, &client).unwrap();
+        let grads = backward(&loss, &client).unwrap();
+
+        let grad_data = grads
+            .get(emb.weight().id())
+            .expect("embedding weight gradient missing")
+            .contiguous()
+            .unwrap()
+            .to_vec::<f32>();
+        assert!(grad_data.iter().any(|&g| g != 0.0));
     }
 }

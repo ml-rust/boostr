@@ -1887,6 +1887,8 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "regexr"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4517eabcacff4d42a9242a75b867b37d54593beec2a427b514bfb646bb32c2c7"
 dependencies = [
  "aho-corasick",
  "dynasm",
@@ -3511,3 +3513,7 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "regexr"
+version = "0.5.0"

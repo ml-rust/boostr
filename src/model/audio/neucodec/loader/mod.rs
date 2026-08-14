@@ -16,7 +16,9 @@ mod support;
 
 pub use acoustic_encoder::{DEFAULT_ACOUSTIC_ENCODER_PREFIX, load_acoustic_encoder};
 pub use decoder::DEFAULT_DECODER_PREFIX;
-pub use fsq::{DEFAULT_QUANTIZER_PREFIX, NEUCODEC_FSQ_LEVELS, load_fsq_quantizer};
+pub use fsq::{
+    DEFAULT_QUANTIZER_PREFIX, NEUCODEC_FSQ_LEVELS, load_fsq_quantizer, load_residual_fsq,
+};
 pub use semantic_adapter::{DEFAULT_SEMANTIC_ADAPTER_PREFIX, load_semantic_adapter};
 pub use semantic_encoder::{
     DEFAULT_SEMANTIC_ENCODER_PREFIX, load_semantic_encoder, load_semantic_encoder_with,

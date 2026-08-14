@@ -36,8 +36,8 @@ pub use istft_head::{IstftHead, IstftHeadWeights};
 pub use loader::{
     DEFAULT_ACOUSTIC_ENCODER_PREFIX, DEFAULT_DECODER_PREFIX, DEFAULT_QUANTIZER_PREFIX,
     DEFAULT_SEMANTIC_ADAPTER_PREFIX, DEFAULT_SEMANTIC_ENCODER_PREFIX, NEUCODEC_FSQ_LEVELS,
-    load_acoustic_encoder, load_fsq_quantizer, load_semantic_adapter, load_semantic_encoder,
-    load_semantic_encoder_with,
+    load_acoustic_encoder, load_fsq_quantizer, load_residual_fsq, load_semantic_adapter,
+    load_semantic_encoder, load_semantic_encoder_with,
 };
 pub use resnet_block::{ResnetBlock, ResnetBlockWeights};
 pub use semantic_adapter::{SemanticAdapter, SemanticAdapterWeights};

@@ -1,4 +1,8 @@
-//! Configuration for a Finite Scalar Quantizer.
+//! Configuration for the Finite Scalar Quantizers.
+//!
+//! [`FsqConfig`] configures upstream's `FSQ`; [`ResidualFsqConfig`] configures
+//! upstream's `ResidualFSQ`. They are different classes with different forward
+//! math — see [`super::residual`] for the trap that conflating them creates.
 
 use crate::error::{Error, Result};
 
@@ -74,6 +78,75 @@ impl FsqConfig {
                 reason: format!(
                     "codebook_size {size} exceeds i32::MAX; indices are stored as DType::I32"
                 ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Configuration for [`ResidualFsq`](super::residual::ResidualFsq).
+///
+/// Mirrors `ResidualFSQ.__init__` from lucidrains/vector-quantize-pytorch
+/// (`residual_fsq.py`): `levels` describes every inner `FSQ` layer (they all
+/// share the same grid), `dim` is the model-facing feature width the wrapper's
+/// own `project_in`/`project_out` map to and from, and `num_quantizers` is how
+/// many residual refinement stages are stacked.
+#[derive(Debug, Clone)]
+pub struct ResidualFsqConfig {
+    /// Per-dimension quantization levels shared by every inner layer.
+    pub levels: Vec<u32>,
+    /// Model-facing feature width fed to `ResidualFsq::encode`.
+    pub dim: usize,
+    /// Number of residual quantizer stages.
+    pub num_quantizers: usize,
+}
+
+impl ResidualFsqConfig {
+    /// Construct and validate a configuration.
+    pub fn new(levels: Vec<u32>, dim: usize, num_quantizers: usize) -> Result<Self> {
+        let config = Self {
+            levels,
+            dim,
+            num_quantizers,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Number of scalar dimensions actually quantized (`levels.len()`).
+    pub fn codebook_dim(&self) -> usize {
+        self.levels.len()
+    }
+
+    /// Whether `project_in`/`project_out` are required (`dim != codebook_dim`).
+    pub fn needs_projection(&self) -> bool {
+        self.dim != self.codebook_dim()
+    }
+
+    /// The configuration each inner `Fsq` layer must have: the shared grid,
+    /// operating directly on `codebook_dim`.
+    ///
+    /// Upstream's inner `FSQ` layers always have `nn.Identity` projections —
+    /// the residual wrapper owns the projections — so `input_dim` is
+    /// `codebook_dim`, never `dim`.
+    pub fn layer_config(&self) -> Result<FsqConfig> {
+        FsqConfig::new(self.levels.clone(), self.codebook_dim())
+    }
+
+    /// Validate levels (delegated to [`FsqConfig`]), `dim`, and
+    /// `num_quantizers`.
+    pub fn validate(&self) -> Result<()> {
+        self.layer_config()?;
+        if self.dim == 0 {
+            return Err(Error::InvalidArgument {
+                arg: "dim",
+                reason: "must not be zero".to_string(),
+            });
+        }
+        if self.num_quantizers == 0 {
+            return Err(Error::InvalidArgument {
+                arg: "num_quantizers",
+                reason: "must be at least 1".to_string(),
             });
         }
         Ok(())

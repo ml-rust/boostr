@@ -31,7 +31,7 @@ pub use conv1d::Conv1d;
 pub use conv2d::Conv2d;
 pub use dropout::Dropout;
 pub use embedding::Embedding;
-pub use fsq::{Fsq, FsqConfig};
+pub use fsq::{Fsq, FsqConfig, ResidualFsq, ResidualFsqConfig, ResidualFsqWeights};
 pub use groupnorm::GroupNorm;
 pub use layernorm::LayerNorm;
 pub use linear::{Linear, MaybeQuantLinear, QuantLinear};

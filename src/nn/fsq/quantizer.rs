@@ -3,8 +3,18 @@
 //! Ports `FSQ` from lucidrains/vector-quantize-pytorch
 //! (`vector_quantize_pytorch/finite_scalar_quantization.py`, revision as of
 //! 2026-08, single-codebook case — `num_codebooks = 1`, `preserve_symmetry =
-//! false`, `bound_hard_clamp = false`, the defaults `ResidualFSQ(num_quantizers
-//! = 1)` degenerates to, which is how NeuCodec/WideCodec use it).
+//! false`, `bound_hard_clamp = false`, which is how NeuCodec/WideCodec use it).
+//!
+//! This type is upstream's `FSQ` and *only* `FSQ`. The residual wrapper —
+//! upstream's `ResidualFSQ`, which owns the projections, the per-quantizer
+//! `scales`, and the extra pre-`bound` on the encode path — lives in
+//! [`super::residual::ResidualFsq`]. Conflating the two is a real numerical
+//! trap; see that module's docs.
+//!
+//! `Fsq` keeps optional `project_in`/`project_out` of its own because callers
+//! configure them through [`FsqConfig`] (`input_dim != levels.len()`); upstream
+//! `FSQ`'s equivalents are `nn.Identity` in that case, which is exactly what
+//! `None` means here.
 //!
 //! # Math (mirrors the reference exactly)
 //!
@@ -14,10 +24,15 @@
 //! half_l     = (level - 1) * (1 + eps) / 2
 //! offset     = 0.5 if level is even else 0.0
 //! shift      = atanh(offset / half_l)          // 0 for odd levels
-//! bounded(z) = tanh(z + shift) * half_l - offset
+//! bound(z)   = tanh(z + shift) * half_l - offset          // FSQ.bound
 //! half_width = level // 2
-//! code       = round_ste(bounded(z)) / half_width
+//! quantize(z) = round_ste(bound(z)) / half_width          // FSQ.quantize
 //! ```
+//!
+//! Note the two are SEPARATE upstream functions (`Fsq::bound` and
+//! `Fsq::quantize_codes`) and `bound` is NOT idempotent — its output range is
+//! asymmetric, `(-half_l - offset, half_l - offset)`. `ResidualFsq` applies it
+//! twice on purpose. Do not fuse them back together.
 //!
 //! `round_ste(x) = x + (round(x) - x).detach()`: forward value is `round(x)`,
 //! backward gradient is the identity (straight-through estimator).
@@ -31,6 +46,7 @@
 //! indices_to_codes(index)  = (level_indices - half_width) / half_width
 //! ```
 
+use super::codes::var_passthrough;
 use super::config::FsqConfig;
 use crate::error::{Error, Result};
 use crate::nn::linear::Linear;
@@ -40,27 +56,6 @@ use numr::dtype::DType;
 use numr::ops::{ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
-
-/// Identity view of `v` that preserves its autograd id and grad_fn.
-///
-/// `Var::clone()` mints a *fresh* `TensorId` for the clone (see
-/// `numr::autograd::Var::clone`), which is correct when the clone becomes an
-/// independent graph node but WRONG when a Var is meant to pass straight
-/// through unchanged: if `v` is itself a leaf (`grad_fn = None`), the clone
-/// becomes a second, disconnected leaf, and any gradient computed for it never
-/// reaches `v.id()` — silently orphaning whichever caller is holding onto the
-/// original id (exactly the "severs autograd" landmine, via `Clone` instead of
-/// `Var::new`). This reproduces `numr`'s own `var_identity` helper (used in
-/// `var_contiguous`) since that one is private to `numr`.
-fn var_passthrough<R: Runtime>(v: &Var<R>) -> Var<R> {
-    match (v.requires_grad(), v.grad_fn().cloned()) {
-        (true, Some(grad_fn)) => {
-            Var::with_id_and_grad_fn(v.tensor().clone(), v.id(), Some(grad_fn))
-        }
-        (true, None) => Var::with_id(v.tensor().clone(), v.id(), true),
-        (false, _) => Var::with_id(v.tensor().clone(), v.id(), false),
-    }
-}
 
 /// Finite Scalar Quantizer.
 ///
@@ -82,11 +77,20 @@ pub struct Fsq<R: Runtime> {
     /// `0.5` for even levels, `0.0` for odd levels, shape `[codebook_dim]`.
     offset: Tensor<R>,
     /// `level // 2`, shape `[codebook_dim]`.
-    half_width: Tensor<R>,
+    ///
+    /// `pub(super)`: read by [`super::codes`]'s `codes_to_indices` /
+    /// `decode_indices`, which live in a sibling module.
+    pub(super) half_width: Tensor<R>,
     /// Mixed-radix basis (cumulative product of levels), shape `[codebook_dim]`.
-    basis: Tensor<R>,
+    ///
+    /// `pub(super)`: read by [`super::codes`]'s `codes_to_indices` /
+    /// `decode_indices`, which live in a sibling module.
+    pub(super) basis: Tensor<R>,
     /// `levels` as f32, shape `[codebook_dim]`.
-    levels_f32: Tensor<R>,
+    ///
+    /// `pub(super)`: read by [`super::codes`]'s `decode_indices`, which lives
+    /// in a sibling module.
+    pub(super) levels_f32: Tensor<R>,
     project_in: Option<Linear<R>>,
     project_out: Option<Linear<R>>,
 }
@@ -174,12 +178,20 @@ impl<R: Runtime<DType = DType>> Fsq<R> {
         &self.config
     }
 
-    /// Bound `z` onto the FSQ grid, normalized to `[-1, 1]`-ish per dimension.
+    /// Upstream `FSQ.bound`: `tanh(z + shift) * half_l - offset`.
     ///
-    /// Straight-through: forward value is the rounded grid point, backward
-    /// gradient is `d(tanh(z + shift) * half_l - offset) / dz / half_width` —
-    /// every step here is a tracked `var_*` op, so gradients reach `z`.
-    fn bound<C>(&self, z: &Var<R>, client: &C) -> Result<Var<R>>
+    /// Squashes `z` into the (asymmetric) interval
+    /// `(-half_l - offset, half_l - offset)` per dimension. NO rounding, NO
+    /// division by `half_width` — that is `quantize_codes`, a strictly
+    /// different function.
+    ///
+    /// The asymmetry is why this is not idempotent: `bound(bound(z)) !=
+    /// bound(z)`. [`ResidualFsq`](super::residual::ResidualFsq) relies on
+    /// applying it twice (once to seed the residual, once inside
+    /// `quantize_codes`) exactly as upstream `ResidualFSQ.forward` does.
+    ///
+    /// Every step is a tracked `var_*` op, so gradients reach `z`.
+    pub(crate) fn bound<C>(&self, z: &Var<R>, client: &C) -> Result<Var<R>>
     where
         R: Runtime<DType = DType>,
         C: RuntimeClient<R> + TensorOps<R>,
@@ -190,87 +202,33 @@ impl<R: Runtime<DType = DType>> Fsq<R> {
         let shift = Var::new(self.shift.clone(), false);
         let half_l = Var::new(self.half_l.clone(), false);
         let offset = Var::new(self.offset.clone(), false);
-        let half_width = Var::new(self.half_width.clone(), false);
 
         let shifted = var_add(z, &shift, client).map_err(Error::Numr)?;
         let tanh_val = var_tanh(&shifted, client).map_err(Error::Numr)?;
         let scaled = var_mul(&tanh_val, &half_l, client).map_err(Error::Numr)?;
-        let bounded = var_sub(&scaled, &offset, client).map_err(Error::Numr)?;
+        var_sub(&scaled, &offset, client).map_err(Error::Numr)
+    }
+
+    /// Upstream `FSQ.quantize`: `round_ste(bound(z)) / half_width`.
+    ///
+    /// Snaps `z` onto the FSQ grid, normalized to `[-1, 1]`-ish per dimension.
+    /// Straight-through: forward value is the rounded grid point, backward
+    /// gradient is `d(bound(z)) / dz / half_width` — every step here is a
+    /// tracked `var_*` op, so gradients reach `z`.
+    ///
+    /// Named `quantize_codes` rather than `quantize` because
+    /// [`Fsq::quantize`](Self::quantize) is the public encode entry point
+    /// (projections + index packing) that wraps it.
+    fn quantize_codes<C>(&self, z: &Var<R>, client: &C) -> Result<Var<R>>
+    where
+        R: Runtime<DType = DType>,
+        C: RuntimeClient<R> + TensorOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R>,
+    {
+        let half_width = Var::new(self.half_width.clone(), false);
+        let bounded = self.bound(z, client)?;
         let rounded = self.round_ste(&bounded, client)?;
         var_div(&rounded, &half_width, client).map_err(Error::Numr)
-    }
-
-    /// `z + (round(z) - z).detach()`: forward = `round(z)`, backward = identity.
-    ///
-    /// The `(round(z) - z)` residual is computed on the raw `Tensor` (not
-    /// through `var_*`) and wrapped in `Var::new(_, false)` — this is the
-    /// legitimate "detach" use of `Var::new`: it is a genuine constant offset
-    /// with no gradient path of its own, exactly mirroring PyTorch's
-    /// `(zhat - z).detach()`. `z` itself stays on the tracked graph the whole
-    /// time, so `var_add` passes the incoming gradient straight through to it.
-    fn round_ste<C>(&self, z: &Var<R>, client: &C) -> Result<Var<R>>
-    where
-        C: RuntimeClient<R> + TensorOps<R>,
-        R::Client: TensorOps<R>,
-    {
-        let z_tensor = z.tensor();
-        let rounded = client.round(z_tensor).map_err(Error::Numr)?;
-        let residual = client.sub(&rounded, z_tensor).map_err(Error::Numr)?;
-        let residual = Var::new(residual, false);
-        var_add(z, &residual, client).map_err(Error::Numr)
-    }
-
-    /// Mixed-radix pack: `round(sum((code * half_width + half_width) * basis))`
-    /// cast to `DType::I32`.
-    ///
-    /// Not on the gradient path (indices are discrete) — operates on the raw
-    /// `Tensor`, not `Var`.
-    fn codes_to_indices<C>(&self, client: &C, zhat: &Tensor<R>) -> Result<Tensor<R>>
-    where
-        C: RuntimeClient<R> + TensorOps<R>,
-    {
-        let scaled = client.mul(zhat, &self.half_width).map_err(Error::Numr)?;
-        let scaled = client.add(&scaled, &self.half_width).map_err(Error::Numr)?;
-        let weighted = client.mul(&scaled, &self.basis).map_err(Error::Numr)?;
-
-        let last_dim = weighted.shape().len().saturating_sub(1);
-        let summed = client
-            .sum(&weighted, &[last_dim], false)
-            .map_err(Error::Numr)?;
-        let rounded = client.round(&summed).map_err(Error::Numr)?;
-        client.cast(&rounded, DType::I32).map_err(Error::Numr)
-    }
-
-    /// Inverse of [`codes_to_indices`](Self::codes_to_indices): mixed-radix
-    /// unpack into normalized grid codes, shape `[..., codebook_dim]`.
-    ///
-    /// `level_indices = (indices // basis) % levels`, then
-    /// `codes = (level_indices - half_width) / half_width`. Implemented with
-    /// `floor`/`div`/`mul`/`sub` (no integer floor-div/mod op exists in numr;
-    /// this is exactly how the PyTorch reference does it too — float tensor
-    /// ops, not a host-side loop — so it stays backend-generic).
-    fn decode_indices<C>(&self, client: &C, indices: &Tensor<R>) -> Result<Tensor<R>>
-    where
-        C: RuntimeClient<R> + TensorOps<R>,
-    {
-        let indices_f32 = client.cast(indices, DType::F32).map_err(Error::Numr)?;
-        let expanded = indices_f32.unsqueeze(-1).map_err(Error::Numr)?;
-
-        let div_basis = client.div(&expanded, &self.basis).map_err(Error::Numr)?;
-        let floor_div = client.floor(&div_basis).map_err(Error::Numr)?;
-        let div_levels = client
-            .div(&floor_div, &self.levels_f32)
-            .map_err(Error::Numr)?;
-        let floor_levels = client.floor(&div_levels).map_err(Error::Numr)?;
-        let mod_part = client
-            .mul(&floor_levels, &self.levels_f32)
-            .map_err(Error::Numr)?;
-        let level_indices = client.sub(&floor_div, &mod_part).map_err(Error::Numr)?;
-
-        let shifted = client
-            .sub(&level_indices, &self.half_width)
-            .map_err(Error::Numr)?;
-        client.div(&shifted, &self.half_width).map_err(Error::Numr)
     }
 
     /// Encode: quantize `z` and return `(codes, indices)`.
@@ -311,7 +269,7 @@ impl<R: Runtime<DType = DType>> Fsq<R> {
             None => var_passthrough(z),
         };
 
-        let bounded = self.bound(&projected, client)?;
+        let bounded = self.quantize_codes(&projected, client)?;
         let indices = self.codes_to_indices(client, bounded.tensor())?;
 
         let codes = match &self.project_out {

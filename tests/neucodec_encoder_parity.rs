@@ -14,7 +14,7 @@
 
 use boostr::model::audio::neucodec::{
     Activation1d, SnakeBeta, encoder_hop_length, kaiser_sinc_filter1d, load_acoustic_encoder,
-    load_semantic_adapter, load_semantic_encoder, seamless_fbank,
+    load_residual_fsq, load_semantic_adapter, load_semantic_encoder, seamless_fbank,
 };
 use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -23,9 +23,27 @@ use std::path::PathBuf;
 
 fn read_f32(path: &PathBuf) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    assert!(
+        bytes.len().is_multiple_of(4),
+        "{} is not a whole number of f32s",
+        path.display()
+    );
     bytes
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+fn read_i32(path: &PathBuf) -> Vec<i32> {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    assert!(
+        bytes.len().is_multiple_of(4),
+        "{} is not a whole number of i32s",
+        path.display()
+    );
+    bytes
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
 
@@ -408,5 +426,93 @@ fn acoustic_encoder_matches_upstream() {
     assert!(
         d < 2e-3 * scale.max(1.0),
         "acoustic encoder diverges from upstream: max|d|={d} at {i} (rms {scale})"
+    );
+}
+
+/// The `ResidualFSQ` quantizer (`ResidualFsq`) against upstream, on the encode
+/// path — the one with the load-bearing double `bound` (see
+/// `boostr::nn::fsq::residual` for why collapsing it is wrong).
+///
+/// Indices are integers: any mismatch is a real divergence, so this reports
+/// the mismatch FRACTION and the first few (position, got, want) triples
+/// rather than a bare assert — a large fraction (e.g. ~43.75%) means the
+/// double bound was lost, while a handful means a float knife-edge in the
+/// upstream reference itself.
+#[test]
+fn residual_fsq_matches_upstream() {
+    let Some(dir) = fixtures() else {
+        eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_encoder_primitives.py)");
+        return;
+    };
+    let (in_path, idx_path, out_path) = (
+        dir.join("enc_fsq_input.f32"),
+        dir.join("enc_fsq_indices.i32"),
+        dir.join("enc_fsq_out.f32"),
+    );
+    let Some(ckpt) = checkpoint() else {
+        eprintln!("skipping: checkpoint absent");
+        return;
+    };
+    if !in_path.exists() || !idx_path.exists() || !out_path.exists() {
+        eprintln!("skipping: residual FSQ fixtures absent (run encode_real_audio.py)");
+        return;
+    }
+    let (client, device) = setup();
+
+    let quantizer = load_residual_fsq::<CpuRuntime, _>(&ckpt, &device).expect("load residual fsq");
+
+    const DIM: usize = 2048;
+    let input = read_f32(&in_path);
+    let frames = input.len() / DIM;
+    let x = Var::new(
+        Tensor::<CpuRuntime>::from_slice(&input, &[1, frames, DIM], &device),
+        false,
+    );
+
+    let (codes, indices) = quantizer.encode(&client, &x).expect("residual fsq encode");
+
+    // `indices` is `[1, frames, num_quantizers]` (num_quantizers = 1 here); the
+    // fixture is flat `[1, frames]`. Compare the flattened values, but assert
+    // the element count first rather than silently reshaping past a real
+    // shape bug.
+    let want_indices = read_i32(&idx_path);
+    let got_indices: Vec<i32> = indices.contiguous().expect("contiguous indices").to_vec();
+    assert_eq!(
+        got_indices.len(),
+        want_indices.len(),
+        "indices element count mismatch (got shape {:?})",
+        indices.shape()
+    );
+
+    let mismatches: Vec<(usize, i32, i32)> = got_indices
+        .iter()
+        .zip(want_indices.iter())
+        .enumerate()
+        .filter_map(|(i, (&g, &w))| (g != w).then_some((i, g, w)))
+        .collect();
+    if !mismatches.is_empty() {
+        let fraction = mismatches.len() as f64 / got_indices.len() as f64 * 100.0;
+        let sample: Vec<_> = mismatches.iter().take(5).collect();
+        panic!(
+            "residual fsq indices diverge from upstream: {}/{} mismatched ({fraction:.2}%); \
+             first few (position, got, want): {sample:?}",
+            mismatches.len(),
+            got_indices.len(),
+        );
+    }
+
+    let got: Vec<f32> = codes
+        .tensor()
+        .contiguous()
+        .expect("contiguous codes")
+        .to_vec();
+    let want = read_f32(&out_path);
+    assert_eq!(got.len(), want.len(), "quantized_out: length mismatch");
+    let (d, i) = max_abs_diff(&got, &want);
+    let scale = (want.iter().map(|v| v * v).sum::<f32>() / want.len() as f32).sqrt();
+    eprintln!("residual fsq quantized_out: max|d|={d:.3e} at {i}, reference rms={scale:.3e}");
+    assert!(
+        d < 2e-3 * scale.max(1.0),
+        "residual fsq quantized_out diverges from upstream: max|d|={d} at {i} (rms {scale})"
     );
 }

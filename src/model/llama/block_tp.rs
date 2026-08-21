@@ -7,7 +7,7 @@ use crate::model::traits::ModelClient;
 use crate::nn::var_ops::{repeat_kv, var_contiguous};
 use crate::nn::{RmsNorm, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
-use crate::ops::impl_generic::attention::rope::apply_rope_interleaved_impl;
+use crate::ops::impl_generic::attention::rope::apply_rope_impl;
 use numr::autograd::{Var, var_add, var_mul, var_narrow, var_reshape, var_silu};
 use numr::dtype::DType;
 use numr::ops::{
@@ -156,8 +156,8 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
         };
 
         // RoPE on Q and K
-        let q = apply_rope_interleaved_impl(client, &q, rope.cos_cache(), rope.sin_cache())?;
-        let k = apply_rope_interleaved_impl(client, &k, rope.cos_cache(), rope.sin_cache())?;
+        let q = apply_rope_impl(client, &q, rope.cos_cache(), rope.sin_cache())?;
+        let k = apply_rope_impl(client, &k, rope.cos_cache(), rope.sin_cache())?;
 
         // GQA repeat KV if needed (local heads)
         let (k, v) = if self.num_kv_heads < self.num_heads {
@@ -245,8 +245,8 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
         // Apply RoPE with position offset
         let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
         let sin_offset = var_narrow(rope.sin_cache(), 0, position, seq_len).map_err(Error::Numr)?;
-        let q = apply_rope_interleaved_impl(client, &q, &cos_offset, &sin_offset)?;
-        let k = apply_rope_interleaved_impl(client, &k, &cos_offset, &sin_offset)?;
+        let q = apply_rope_impl(client, &q, &cos_offset, &sin_offset)?;
+        let k = apply_rope_impl(client, &k, &cos_offset, &sin_offset)?;
 
         // Update KV cache
         kv_cache.update_fused(k.tensor(), v.tensor(), client)?;

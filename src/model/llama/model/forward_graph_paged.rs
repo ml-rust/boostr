@@ -106,8 +106,8 @@ impl Llama<numr::runtime::cuda::CudaRuntime> {
             let v = var_contiguous(&v)?;
 
             // Apply RoPE using stable cos/sin slices
-            let q = client.apply_rope_interleaved(&q, cos_slice, sin_slice)?;
-            let k = client.apply_rope_interleaved(&k, cos_slice, sin_slice)?;
+            let q = client.apply_rope(&q, cos_slice, sin_slice)?;
+            let k = client.apply_rope(&k, cos_slice, sin_slice)?;
 
             // Insert K/V into paged cache using slot_mapping
             let k_flat = k

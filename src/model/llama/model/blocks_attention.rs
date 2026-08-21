@@ -34,6 +34,28 @@ pub struct LlamaAttention<R: Runtime> {
 }
 
 impl<R: Runtime<DType = DType>> LlamaAttention<R> {
+    /// Additive causal mask, shape `[1, 1, sq, sk]`: `0` where a query may
+    /// attend, a large negative where it may not.
+    ///
+    /// Built as `triu(full(NEG), 1)` — `triu` with `diagonal = 1` keeps the
+    /// STRICTLY upper triangle (the future) and zeroes the diagonal and below
+    /// (the past and self), which is exactly the additive form.
+    ///
+    /// The fill is `f32::MIN`, not `-inf`: `-inf` survives softmax fine, but a
+    /// `0 * -inf` anywhere in a fused path is NaN, and HuggingFace uses
+    /// `torch.finfo(dtype).min` for the same reason. Leading shape is `[1, 1]`
+    /// so it broadcasts across batch and heads instead of materializing
+    /// `[B, H, S, S]` per layer.
+    fn causal_mask<C>(client: &C, sq: usize, sk: usize, device: &R::Device) -> Result<Tensor<R>>
+    where
+        C: ModelClient<R>,
+    {
+        let zeros = Tensor::<R>::zeros(&[sq, sk], DType::F32, device);
+        let filled = client.add_scalar(&zeros, f32::MIN as f64)?;
+        let masked = client.triu(&filled, 1)?;
+        masked.reshape(&[1, 1, sq, sk]).map_err(Error::Numr)
+    }
+
     /// Apply optional Q/K layer norms (Command-R, Cohere).
     /// Input shape: [B, H, S, D] — norm is applied over the last dimension (head_dim).
     fn apply_qk_norms<C>(&self, client: &C, q: &Var<R>, k: &Var<R>) -> Result<(Var<R>, Var<R>)>
@@ -67,8 +89,8 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         if self.use_alibi {
             Ok((q, k))
         } else {
-            let q = client.apply_rope_interleaved(&q, cos, sin)?;
-            let k = client.apply_rope_interleaved(&k, cos, sin)?;
+            let q = client.apply_rope(&q, cos, sin)?;
+            let k = client.apply_rope(&k, cos, sin)?;
             Ok((q, k))
         }
     }
@@ -133,22 +155,39 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             (k, v)
         };
 
-        // Multi-head attention (with ALiBi bias as mask if enabled)
-        let alibi_mask = if self.use_alibi {
-            let sq = q.shape()[2];
-            let sk = k.shape()[2];
+        // Additive attention mask.
+        //
+        // ⚠ This branch MUST supply a causal mask. It is the prefill/training
+        // path: `Model::forward` and every training step run through it with
+        // the whole sequence at once, so without a mask each position attends
+        // to FUTURE tokens. That is not a subtle numerical issue — it makes the
+        // next-token objective trivially cheatable during training and corrupts
+        // every prompt position during inference. It also stays invisible to
+        // shape checks and still emits fluent text, which is how it survived
+        // until `tests/qwen3_parity.rs` measured against HuggingFace.
+        //
+        // The decode paths do not need this: `forward_with_kv_cache` either
+        // builds the causal mask via `alibi_add_bias_causal` or delegates to
+        // `flash_attention_fwd`, whose kernel applies causality from
+        // `is_prefill`.
+        let sq = q.shape()[2];
+        let sk = k.shape()[2];
+        let mask = if self.use_alibi {
+            // ALiBi's own kernel writes the causal structure along with the bias.
             let mask = Tensor::<R>::zeros(
                 &[batch, self.num_heads, sq, sk],
                 DType::F32,
                 q.tensor().device(),
             );
             client.alibi_add_bias(&mask, batch, self.num_heads, sq, sk)?;
-            Some(Var::new(mask, false))
+            Var::new(mask, false)
         } else {
-            None
+            Var::new(
+                Self::causal_mask(client, sq, sk, q.tensor().device())?,
+                false,
+            )
         };
-        let attn_out =
-            multi_head_attention_impl(client, &q, &k, &v, alibi_mask.as_ref(), self.num_heads)?;
+        let attn_out = multi_head_attention_impl(client, &q, &k, &v, Some(&mask), self.num_heads)?;
 
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
         let attn_out =

@@ -21,8 +21,18 @@ pub trait RoPEOps<R: Runtime> {
     fn apply_rope(&self, x: &Var<R>, cos_cache: &Var<R>, sin_cache: &Var<R>) -> Result<Var<R>>;
 
     /// Interleaved RoPE: pairs are `(x[..., 2d], x[..., 2d+1])`.
-    /// Used by GPT-NeoX, Qwen, RoFormer — the "mathematically pure" form
-    /// treating adjacent elements as complex number (real + imaginary).
+    /// The "mathematically pure" form, treating adjacent elements as a complex
+    /// number (real + imaginary). Used by GPT-J/GPT-NeoX and RoFormer.
+    ///
+    /// ⚠ **Not what HuggingFace checkpoints want.** `transformers` implements
+    /// RoPE as `rotate_half` — split-half — for Llama, Mistral, Qwen2 AND Qwen3
+    /// alike, and the HF conversion scripts permute `q_proj`/`k_proj` so that
+    /// split-half reproduces the original model. Any model loaded from HF
+    /// safetensors must use [`RoPEOps::apply_rope`], not this. Reaching for
+    /// this because a model is "Qwen" or "NeoX lineage" is exactly the mistake
+    /// that produced silently wrong logits in the decoder (see
+    /// `tests/qwen3_parity.rs`): every shape stays valid and the output still
+    /// looks like text.
     ///
     /// Same layout contract as `apply_rope` for x, cos_cache, sin_cache.
     fn apply_rope_interleaved(

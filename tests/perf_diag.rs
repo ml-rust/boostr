@@ -13,7 +13,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use boostr::model::encoder::{
-    config::{ArchFamily, EncoderConfig, FfnVariant, HiddenAct},
+    config::{ArchFamily, EncoderConfig, FfnVariant},
     model::{Encoder, Pooling},
 };
 use boostr::nn::Weight;

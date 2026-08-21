@@ -11,6 +11,7 @@ pub mod registry_inference;
 pub mod speech_lm;
 pub mod traits;
 pub mod vision;
+pub mod vocab_growth;
 
 pub use config::{
     AttentionConfig, AudioConfig, HuggingFaceConfig, HybridConfig, ModelConfig, MoeConfig,
@@ -31,3 +32,4 @@ pub use speech_lm::{
     ALL_SPECIAL_TOKENS, CodecVocab, DEFAULT_CONTROL_REGION, SpecialToken, SpeechVocab,
 };
 pub use traits::{Model, ModelClient};
+pub use vocab_growth::fit_vocab_rows;

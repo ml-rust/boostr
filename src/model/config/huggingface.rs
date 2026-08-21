@@ -254,6 +254,7 @@ impl HuggingFaceConfig {
             moe,
             hybrid_layers: None,
             tie_word_embeddings: self.tie_word_embeddings,
+            grow_vocab: false,
             vision,
             audio,
         }

@@ -59,6 +59,13 @@ pub struct UniversalConfig {
     #[serde(default)]
     pub tie_word_embeddings: bool,
 
+    /// Grow a smaller checkpoint's token embedding to `vocab_size` at load time,
+    /// mean-initializing the added rows. Off by default: without it, a row-count
+    /// mismatch between checkpoint and config is a hard error rather than a silent
+    /// reinterpretation.
+    #[serde(default)]
+    pub grow_vocab: bool,
+
     /// Vision encoder configuration (for multimodal models)
     #[serde(default)]
     pub vision: Option<VisionConfig>,

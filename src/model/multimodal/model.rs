@@ -65,7 +65,11 @@ pub struct MultimodalModel<R: Runtime> {
 
 impl<R: Runtime<DType = DType>> MultimodalModel<R>
 where
-    R::Client: IndexingOps<R> + crate::quant::DequantOps<R> + numr::ops::TypeConversionOps<R>,
+    R::Client: IndexingOps<R>
+        + crate::quant::DequantOps<R>
+        + numr::ops::TypeConversionOps<R>
+        + ReduceOps<R>
+        + ShapeOps<R>,
 {
     /// Load a multimodal model from a VarBuilder and config.
     ///

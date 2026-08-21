@@ -241,6 +241,7 @@ fn test_mamba2_model_config() {
         moe: None,
         hybrid_layers: None,
         tie_word_embeddings: false,
+        grow_vocab: false,
         vision: None,
         audio: None,
     };

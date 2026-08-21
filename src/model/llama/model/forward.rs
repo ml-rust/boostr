@@ -1,9 +1,11 @@
 //! LLaMA model: struct definition, construction, and training forward pass.
 
 use super::blocks::{LlamaBlock, build_block_from_config, build_block_from_varbuilder};
+use super::lm_head::build_lm_head;
 use crate::error::{Error, Result};
 use crate::model::config::ModelConfig;
 use crate::model::traits::{Model, ModelClient};
+use crate::model::vocab_growth::fit_vocab_rows;
 use crate::nn::{Embedding, Linear, MaybeQuantLinear, RmsNorm, RoPE};
 use numr::autograd::Var;
 use numr::dtype::DType;
@@ -27,7 +29,10 @@ pub struct Llama<R: Runtime> {
 impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
     fn from_varbuilder(vb: &mut crate::nn::VarBuilder<R>, config: &ModelConfig) -> Result<Self>
     where
-        R::Client: crate::quant::DequantOps<R> + numr::ops::TypeConversionOps<R>,
+        R::Client: crate::quant::DequantOps<R>
+            + numr::ops::TypeConversionOps<R>
+            + ReduceOps<R>
+            + ShapeOps<R>,
     {
         config.validate()?;
 
@@ -53,6 +58,14 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
 
         // Embedding (dequantize if GGUF stored it as quantized)
         let embed_weight = model_vb.take_tensor_dequant("embed_tokens.weight", DType::F32)?;
+        // `model_vb.device()` here, not `vb.device()`: `vb` is mutably borrowed by
+        // `model_vb` for the rest of this scope.
+        let embed_weight = fit_vocab_rows(
+            embed_weight,
+            config,
+            model_vb.device(),
+            "embed_tokens.weight",
+        )?;
         let embed_tokens = Embedding::new(embed_weight, false);
 
         // Transformer layers
@@ -78,12 +91,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         );
 
         // LM head (may be tied to embedding weights)
-        let lm_head = if config.tie_word_embeddings {
-            let embed_w = embed_tokens.weight().tensor().clone();
-            MaybeQuantLinear::Standard(Linear::new(embed_w, None, false))
-        } else {
-            vb.take_maybe_quant_linear("lm_head.weight", None)?
-        };
+        let lm_head = build_lm_head(vb, config, &embed_tokens)?;
 
         // Pre-cast RoPE caches to match weight dtype (avoids per-token F32→BF16 casts)
         let mut rope = rope;

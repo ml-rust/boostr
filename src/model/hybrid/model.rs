@@ -384,6 +384,7 @@ mod tests {
                 attention_layers: vec![2, 3],
             }),
             tie_word_embeddings: false,
+            grow_vocab: false,
             vision: None,
             audio: None,
         };

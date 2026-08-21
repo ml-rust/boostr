@@ -22,6 +22,7 @@ pub mod var_builder;
 pub mod var_ops;
 #[path = "varmap/mod.rs"]
 pub mod varmap;
+pub mod vocab_resize;
 pub mod weight;
 pub mod weight_norm;
 
@@ -53,5 +54,6 @@ pub use stochastic_depth::StochasticDepth;
 pub use var_builder::VarBuilder;
 pub use var_ops::{repeat_kv, var_contiguous};
 pub use varmap::{Init, VarMap};
+pub use vocab_resize::resize_rows_mean_init;
 pub use weight::Weight;
 pub use weight_norm::fuse_weight_norm;

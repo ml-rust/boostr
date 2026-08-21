@@ -11,7 +11,7 @@ use crate::model::mamba::mamba3::Mamba3Config;
 use crate::model::traits::Model;
 use crate::nn::VarBuilder;
 use numr::dtype::DType;
-use numr::ops::IndexingOps;
+use numr::ops::{IndexingOps, ReduceOps, ShapeOps};
 use numr::runtime::Runtime;
 
 /// Enum of all supported model architectures
@@ -54,7 +54,11 @@ pub enum LoadedModel<R: Runtime> {
 
 impl<R: Runtime<DType = DType>> LoadedModel<R>
 where
-    R::Client: IndexingOps<R> + crate::quant::DequantOps<R> + numr::ops::TypeConversionOps<R>,
+    R::Client: IndexingOps<R>
+        + crate::quant::DequantOps<R>
+        + numr::ops::TypeConversionOps<R>
+        + ReduceOps<R>
+        + ShapeOps<R>,
 {
     /// Load a model from universal config and weights.
     ///

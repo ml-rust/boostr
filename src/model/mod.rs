@@ -27,5 +27,7 @@ pub use mamba::{
 };
 pub use multimodal::{ModelInput, MultimodalModel};
 pub use registry::LoadedModel;
-pub use speech_lm::{CodecVocab, SpecialToken, SpeechVocab};
+pub use speech_lm::{
+    ALL_SPECIAL_TOKENS, CodecVocab, DEFAULT_CONTROL_REGION, SpecialToken, SpeechVocab,
+};
 pub use traits::{Model, ModelClient};

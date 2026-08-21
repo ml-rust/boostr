@@ -16,6 +16,33 @@
 //! and a residual/interleaved codec (SNAC: 3-4 codebooks x 4096 entries, several
 //! codes per frame) are both expressible without touching this file.
 //!
+//! Control tokens themselves, and the evidence for the set that exists, live in
+//! [`super::special`].
+//!
+//! # Extension path: how each future addition lands
+//!
+//! The region order below is chosen so growth does not move existing ids. State
+//! plainly what each kind of extension costs.
+//!
+//! - **A new control token.** Takes the next FREE reserved slot inside the control
+//!   region. `audio_base` is unchanged, every audio id keeps its embedding row,
+//!   and checkpoints trained before the addition stay valid. This is free.
+//! - **A richer codec** (more codebooks, or a bigger codebook). NOT free. It is a
+//!   new [`SpeechVocab`] over a different [`CodecVocab`]: every id at or after
+//!   `audio_base` changes meaning, so it is a new layout and a NEW CHECKPOINT.
+//!   There is no in-place upgrade — do not pretend otherwise.
+//! - **A second modality** (say a video codec block). Appends AFTER the audio
+//!   block. Text, control and audio ids are all untouched, so an audio-only
+//!   checkpoint's rows stay valid and the new rows are appended to the embedding
+//!   matrix.
+//!
+//! That last case is why control ids are reserved BEFORE audio rather than
+//! appended after it. Appending a MODALITY after audio is fine — it is one more
+//! contiguous block. Appending CONTROL tokens after audio, which Scicom's
+//! checkpoint does, permanently fragments the layout: control ids end up split
+//! across two disjoint ranges, and every mask, resize and range check has to carry
+//! both forever.
+//!
 //! Pure logic: no tensors, no `Runtime`, no device code. Testable without weights.
 
 use std::collections::BTreeMap;
@@ -25,30 +52,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 use super::codec::CodecVocab;
-
-/// Control tokens a TTS LM needs.
-///
-/// Deliberately minimal. A causal text-to-audio decoder needs exactly two things
-/// from its control tokens: a delimiter around the text conditioning, and a
-/// delimiter around the audio it generates. `EndOfAudio` is the stop condition
-/// sampling checks; `StartOfAudio` is the prompt suffix that switches the model
-/// from reading to speaking. No speaker, language, or style tokens are defined
-/// here — those are task-specific and belong to whoever builds that task, added
-/// through the same special-token map rather than baked into this enum.
-///
-/// `Ord` is derived so the map keyed by this type has a deterministic iteration
-/// order, which keeps a serialized layout byte-stable across runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum SpecialToken {
-    /// Marks the beginning of the text conditioning segment.
-    StartOfText,
-    /// Marks the end of the text conditioning segment.
-    EndOfText,
-    /// Switches the model from consuming text to emitting audio codes.
-    StartOfAudio,
-    /// Terminates generation; sampling stops here.
-    EndOfAudio,
-}
+use super::special::{ALL_SPECIAL_TOKENS, DEFAULT_CONTROL_REGION, SpecialToken};
 
 /// The flat id layout holding text, control, and audio tokens.
 ///
@@ -72,8 +76,8 @@ pub struct SpeechVocab {
     ///
     /// This is what stops a future control token from invalidating a trained
     /// checkpoint. `audio_base` is derived from this reservation, so reserving
-    /// more slots than are defined lets a fifth (or twentieth) control token take
-    /// an unused reserved id WITHOUT moving a single audio id. Deriving the
+    /// more slots than are defined lets a fourteenth (or fiftieth) control token
+    /// take an unused reserved id WITHOUT moving a single audio id. Deriving the
     /// boundary from the number of defined specials instead would shift the whole
     /// audio region every time a control token is added.
     control_region_size: usize,
@@ -188,6 +192,21 @@ impl SpeechVocab {
         Self::new(text_vocab_size, control_region_size, map, codec)
     }
 
+    /// The default layout: all 13 control tokens in canonical order, in a region
+    /// of [`DEFAULT_CONTROL_REGION`] ids.
+    ///
+    /// Use this to build a fresh model. The remaining 627 reserved ids are the
+    /// headroom that keeps a future control token from moving `audio_base`; see
+    /// [`DEFAULT_CONTROL_REGION`] for why the region is that size.
+    pub fn with_default_specials(text_vocab_size: usize, codec: CodecVocab) -> Result<Self> {
+        Self::with_sequential_specials(
+            text_vocab_size,
+            DEFAULT_CONTROL_REGION,
+            &ALL_SPECIAL_TOKENS,
+            codec,
+        )
+    }
+
     /// The codec this layout was built for.
     pub fn codec(&self) -> &CodecVocab {
         &self.codec
@@ -240,6 +259,50 @@ impl SpeechVocab {
     /// Id of a control token, or `None` if it is not defined in this layout.
     pub fn special_id(&self, tok: SpecialToken) -> Option<u32> {
         self.specials.get(&tok).copied()
+    }
+
+    /// True if `id` sits in the reserved control region but no token claims it.
+    ///
+    /// These rows exist in the embedding matrix and are trained on nothing.
+    pub fn is_reserved_unused(&self, id: u32) -> bool {
+        self.is_special(id) && !self.specials.values().any(|claimed| *claimed == id)
+    }
+
+    /// Ids that MUST be suppressed in the logits before sampling.
+    ///
+    /// This is a correctness requirement, not hygiene. Under
+    /// `tie_word_embeddings: true` the embedding matrix IS the output projection,
+    /// so every reserved-but-undefined row is also an output logit — and those
+    /// rows are never a training target, so nothing ever pushes their logit down.
+    /// Untrained rows of a tied matrix are exactly the "glitch token" class
+    /// described in *Fishing for Magikarp* (Land & Bartolo, EMNLP 2024): they are
+    /// occasionally sampled with high probability, and the id they emit decodes to
+    /// nothing at all. Suppressing them is the only reliable fix at inference time.
+    ///
+    /// Returned ids, ascending:
+    /// - every id in the control region with no defined [`SpecialToken`], and
+    /// - [`SpecialToken::SpeechPad`], which is padding for packed batches and is
+    ///   defined but must never be generated.
+    ///
+    /// Text ids and audio ids are NOT here: both are trained targets, and
+    /// restricting sampling to one of those regions is the caller's decision.
+    pub fn sampling_forbidden_ids(&self) -> Vec<u32> {
+        let mut out = Vec::new();
+        for id in self.text_vocab_size..self.audio_base() {
+            let Ok(id) = u32::try_from(id) else {
+                break;
+            };
+            if self.is_reserved_unused(id) {
+                out.push(id);
+            }
+        }
+        if let Some(pad) = self.special_id(SpecialToken::SpeechPad) {
+            match out.binary_search(&pad) {
+                Ok(_) => {}
+                Err(at) => out.insert(at, pad),
+            }
+        }
+        out
     }
 
     /// Flat id for `code` in `codebook`, codebook-major.
@@ -304,67 +367,12 @@ impl SpeechVocab {
         let id = id as usize;
         id >= self.audio_base() && id < self.total_size()
     }
-
-    /// One frame's codes to ids, in frame position order.
-    ///
-    /// `codes.len()` must equal [`CodecVocab::codes_per_frame`]; position `i`
-    /// belongs to the codebook named by [`CodecVocab::frame_codebooks`].
-    pub fn encode_frame(&self, codes: &[usize]) -> Result<Vec<u32>> {
-        let layout = self.codec.frame_codebooks();
-        if codes.len() != layout.len() {
-            return Err(Error::InvalidArgument {
-                arg: "codes",
-                reason: format!(
-                    "expected {} codes per frame, got {}",
-                    layout.len(),
-                    codes.len()
-                ),
-            });
-        }
-        let mut ids = Vec::with_capacity(codes.len());
-        for (codebook, code) in layout.iter().zip(codes.iter()) {
-            ids.push(self.audio_token(*codebook, *code)?);
-        }
-        Ok(ids)
-    }
-
-    /// One frame's ids back to codes, validating codebook index against position.
-    ///
-    /// The positional check is the point of this method. A model that emits a
-    /// codebook-2 token where codebook 0 belongs produces audio that decodes to
-    /// noise with no other symptom, so the mismatch is raised as an error here
-    /// rather than passed on to the codec.
-    pub fn decode_frame(&self, ids: &[u32]) -> Result<Vec<usize>> {
-        let layout = self.codec.frame_codebooks();
-        if ids.len() != layout.len() {
-            return Err(Error::InvalidArgument {
-                arg: "ids",
-                reason: format!("expected {} ids per frame, got {}", layout.len(), ids.len()),
-            });
-        }
-        let mut codes = Vec::with_capacity(ids.len());
-        for (pos, (expected, id)) in layout.iter().zip(ids.iter()).enumerate() {
-            let (codebook, code) =
-                self.decode_audio_token(*id)
-                    .ok_or_else(|| Error::InvalidArgument {
-                        arg: "ids",
-                        reason: format!("id {id} at frame position {pos} is not an audio token"),
-                    })?;
-            if codebook != *expected {
-                return Err(Error::InvalidArgument {
-                    arg: "ids",
-                    reason: format!(
-                        "id {id} at frame position {pos} belongs to codebook {codebook}, \
-                         expected codebook {expected}"
-                    ),
-                });
-            }
-            codes.push(code);
-        }
-        Ok(codes)
-    }
 }
 
 #[cfg(test)]
 #[path = "vocab_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "vocab_audio_tests.rs"]
+mod audio_tests;

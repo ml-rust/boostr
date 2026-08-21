@@ -117,3 +117,7 @@ impl CodecVocab {
         out
     }
 }
+
+#[cfg(test)]
+#[path = "codec_tests.rs"]
+mod tests;

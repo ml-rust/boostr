@@ -5,6 +5,12 @@
 //! space with a layout every downstream stage agrees on — embedding resize, loss
 //! masking, sampling constraints, and audio decode all index into it.
 //!
+//! The layout is EXPLICIT and SERIALIZABLE. Control ids are stored as absolute
+//! numbers, never derived from a position in a list, and the control region has a
+//! size the caller reserves up front. Both properties exist so a layout can be
+//! written next to a checkpoint and checked back against it: a vocabulary whose
+//! layout is not recorded cannot be reloaded correctly.
+//!
 //! Nothing here is codec-specific. Every size is derived from [`CodecVocab`], so
 //! a single-codebook codec (NeuCodec: 1 codebook x 65_536 entries, 50 frames/sec)
 //! and a residual/interleaved codec (SNAC: 3-4 codebooks x 4096 entries, several
@@ -12,116 +18,13 @@
 //!
 //! Pure logic: no tensors, no `Runtime`, no device code. Testable without weights.
 
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result};
 
-/// Description of a neural audio codec's token space.
-///
-/// A codec is fully described, for layout purposes, by three things:
-/// - how many codebooks it has,
-/// - how many entries each codebook holds,
-/// - how many codes each codebook contributes to one frame.
-///
-/// The third field is what makes interleaved codecs work. NeuCodec emits one code
-/// per frame from its one codebook. SNAC emits a hierarchy where deeper codebooks
-/// fire more often per frame, so a frame is a flat run of codes whose codebook
-/// index varies by position. `codes_per_codebook` records that shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodecVocab {
-    num_codebooks: usize,
-    codebook_size: usize,
-    codes_per_codebook: Vec<usize>,
-}
-
-impl CodecVocab {
-    /// Codec where every codebook contributes exactly one code per frame.
-    ///
-    /// Covers NeuCodec (`new(1, 65_536)`) and flat residual codecs (`new(3, 4096)`).
-    pub fn new(num_codebooks: usize, codebook_size: usize) -> Result<Self> {
-        Self::with_frame_layout(codebook_size, vec![1; num_codebooks])
-    }
-
-    /// Codec with a per-codebook code count per frame, for interleaved layouts.
-    ///
-    /// `codes_per_codebook[c]` is how many codes codebook `c` emits in one frame.
-    /// A SNAC-style hierarchy is `with_frame_layout(4096, vec![1, 2, 4])`.
-    pub fn with_frame_layout(codebook_size: usize, codes_per_codebook: Vec<usize>) -> Result<Self> {
-        let num_codebooks = codes_per_codebook.len();
-        if num_codebooks == 0 {
-            return Err(Error::InvalidArgument {
-                arg: "num_codebooks",
-                reason: "codec must have at least one codebook".to_string(),
-            });
-        }
-        if codebook_size == 0 {
-            return Err(Error::InvalidArgument {
-                arg: "codebook_size",
-                reason: "codebook must have at least one entry".to_string(),
-            });
-        }
-        for (c, n) in codes_per_codebook.iter().enumerate() {
-            if *n == 0 {
-                return Err(Error::InvalidArgument {
-                    arg: "codes_per_codebook",
-                    reason: format!("codebook {c} contributes 0 codes per frame"),
-                });
-            }
-        }
-        // Ids are u32 on the wire (token ids into an embedding table), so the audio
-        // span alone must fit even before text and control tokens are added.
-        let span = num_codebooks
-            .checked_mul(codebook_size)
-            .filter(|s| *s <= u32::MAX as usize)
-            .ok_or_else(|| Error::InvalidArgument {
-                arg: "codebook_size",
-                reason: format!(
-                    "{num_codebooks} codebooks x {codebook_size} entries overflows the u32 id space"
-                ),
-            })?;
-        debug_assert!(span > 0);
-        Ok(Self {
-            num_codebooks,
-            codebook_size,
-            codes_per_codebook,
-        })
-    }
-
-    /// Number of codebooks.
-    pub fn num_codebooks(&self) -> usize {
-        self.num_codebooks
-    }
-
-    /// Entries in each codebook.
-    pub fn codebook_size(&self) -> usize {
-        self.codebook_size
-    }
-
-    /// Total audio ids this codec occupies: `num_codebooks * codebook_size`.
-    pub fn total_audio_tokens(&self) -> usize {
-        self.num_codebooks * self.codebook_size
-    }
-
-    /// Codes in one frame, summed over codebooks.
-    pub fn codes_per_frame(&self) -> usize {
-        self.codes_per_codebook.iter().sum()
-    }
-
-    /// How many codes codebook `c` contributes per frame, or `None` if out of range.
-    pub fn codes_of_codebook(&self, codebook: usize) -> Option<usize> {
-        self.codes_per_codebook.get(codebook).copied()
-    }
-
-    /// Codebook index expected at each position within a frame.
-    ///
-    /// Length is [`codes_per_frame`](Self::codes_per_frame). This is the ground
-    /// truth [`SpeechVocab::decode_frame`] validates a model's emissions against.
-    pub fn frame_codebooks(&self) -> Vec<usize> {
-        let mut out = Vec::with_capacity(self.codes_per_frame());
-        for (c, n) in self.codes_per_codebook.iter().enumerate() {
-            out.extend(std::iter::repeat_n(c, *n));
-        }
-        out
-    }
-}
+use super::codec::CodecVocab;
 
 /// Control tokens a TTS LM needs.
 ///
@@ -131,8 +34,11 @@ impl CodecVocab {
 /// sampling checks; `StartOfAudio` is the prompt suffix that switches the model
 /// from reading to speaking. No speaker, language, or style tokens are defined
 /// here — those are task-specific and belong to whoever builds that task, added
-/// through the same special-token list rather than baked into this enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// through the same special-token map rather than baked into this enum.
+///
+/// `Ord` is derived so the map keyed by this type has a deterministic iteration
+/// order, which keeps a serialized layout byte-stable across runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum SpecialToken {
     /// Marks the beginning of the text conditioning segment.
     StartOfText,
@@ -154,26 +60,41 @@ pub enum SpecialToken {
 ///
 /// ```text
 /// [0, text_vocab)                                        text tokens
-/// [text_vocab, text_vocab + num_specials)                control tokens
+/// [text_vocab, text_vocab + control_region_size)         control tokens
 /// [audio_base, audio_base + num_codebooks*codebook_size) audio tokens
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpeechVocab {
     text_vocab_size: usize,
-    specials: Vec<SpecialToken>,
+    /// Ids RESERVED for control tokens, chosen by the caller — NOT the count of
+    /// tokens currently defined.
+    ///
+    /// This is what stops a future control token from invalidating a trained
+    /// checkpoint. `audio_base` is derived from this reservation, so reserving
+    /// more slots than are defined lets a fifth (or twentieth) control token take
+    /// an unused reserved id WITHOUT moving a single audio id. Deriving the
+    /// boundary from the number of defined specials instead would shift the whole
+    /// audio region every time a control token is added.
+    control_region_size: usize,
+    /// Absolute id of each defined control token.
+    ///
+    /// Explicit and persisted: an id is never recomputed from a position, so the
+    /// map read back from a layout file is the same map the checkpoint trained on.
+    specials: BTreeMap<SpecialToken, u32>,
     codec: CodecVocab,
 }
 
 impl SpeechVocab {
-    /// Build the layout from the base model's text vocab, a codec, and controls.
+    /// Build the layout from explicit control ids.
     ///
-    /// `specials` order fixes the control ids, so persist it alongside a
-    /// checkpoint. Duplicates are rejected — a token with two ids would make
-    /// [`special_id`](Self::special_id) ambiguous and split its gradient.
+    /// This is the form to persist and reload. Every id is stated, so the layout
+    /// is self-describing and checkable against a checkpoint.
     pub fn new(
         text_vocab_size: usize,
+        control_region_size: usize,
+        specials: BTreeMap<SpecialToken, u32>,
         codec: CodecVocab,
-        specials: Vec<SpecialToken>,
     ) -> Result<Self> {
         if text_vocab_size == 0 {
             return Err(Error::InvalidArgument {
@@ -181,32 +102,90 @@ impl SpeechVocab {
                 reason: "text vocabulary must be non-empty".to_string(),
             });
         }
-        for (i, tok) in specials.iter().enumerate() {
-            if specials.iter().take(i).any(|prev| prev == tok) {
+        if control_region_size < specials.len() {
+            return Err(Error::InvalidArgument {
+                arg: "control_region_size",
+                reason: format!(
+                    "reserved region of {control_region_size} ids cannot hold {} control tokens",
+                    specials.len()
+                ),
+            });
+        }
+        let audio_base = text_vocab_size
+            .checked_add(control_region_size)
+            .ok_or_else(|| Error::ModelError {
+                reason: format!(
+                    "{text_vocab_size} text + {control_region_size} control ids \
+                     overflows the id space"
+                ),
+            })?;
+        for (tok, id) in specials.iter() {
+            let id = *id as usize;
+            if id < text_vocab_size || id >= audio_base {
                 return Err(Error::InvalidArgument {
                     arg: "specials",
-                    reason: format!("duplicate special token {tok:?} at index {i}"),
+                    reason: format!(
+                        "control token {tok:?} has id {id} outside the reserved control region \
+                         [{text_vocab_size}, {audio_base})"
+                    ),
                 });
             }
         }
-        let total = text_vocab_size
-            .checked_add(specials.len())
-            .and_then(|n| n.checked_add(codec.total_audio_tokens()))
+        // Two tokens on one id would share an embedding row and split its gradient.
+        for (tok, id) in specials.iter() {
+            if specials.iter().any(|(o, oid)| o != tok && oid == id) {
+                return Err(Error::InvalidArgument {
+                    arg: "specials",
+                    reason: format!("control token {tok:?} shares id {id} with another token"),
+                });
+            }
+        }
+        let total = audio_base
+            .checked_add(codec.total_audio_tokens())
             .filter(|n| *n <= u32::MAX as usize)
             .ok_or_else(|| Error::ModelError {
                 reason: format!(
-                    "vocabulary of {text_vocab_size} text + {} control + {} audio tokens \
-                     overflows the u32 id space",
-                    specials.len(),
+                    "vocabulary of {text_vocab_size} text + {control_region_size} control + {} \
+                     audio tokens overflows the u32 id space",
                     codec.total_audio_tokens()
                 ),
             })?;
         debug_assert!(total > 0);
         Ok(Self {
             text_vocab_size,
+            control_region_size,
             specials,
             codec,
         })
+    }
+
+    /// Build the layout by assigning control ids sequentially from `text_vocab_size`.
+    ///
+    /// Ergonomic path for a fresh layout. The assignment happens ONCE, here; the
+    /// resulting ids are STORED and become the source of truth. Reordering the
+    /// slice afterwards cannot change a persisted layout's ids.
+    pub fn with_sequential_specials(
+        text_vocab_size: usize,
+        control_region_size: usize,
+        specials: &[SpecialToken],
+        codec: CodecVocab,
+    ) -> Result<Self> {
+        let mut map = BTreeMap::new();
+        for (i, tok) in specials.iter().enumerate() {
+            let id = text_vocab_size
+                .checked_add(i)
+                .and_then(|id| u32::try_from(id).ok())
+                .ok_or_else(|| Error::ModelError {
+                    reason: format!("control id for {tok:?} exceeds the u32 id space"),
+                })?;
+            if map.insert(*tok, id).is_some() {
+                return Err(Error::InvalidArgument {
+                    arg: "specials",
+                    reason: format!("duplicate special token {tok:?} at index {i}"),
+                });
+            }
+        }
+        Self::new(text_vocab_size, control_region_size, map, codec)
     }
 
     /// The codec this layout was built for.
@@ -224,14 +203,23 @@ impl SpeechVocab {
         self.text_vocab_size
     }
 
-    /// Number of control tokens.
+    /// Ids reserved for control tokens, defined or not. See the field docs.
+    pub fn control_region_size(&self) -> usize {
+        self.control_region_size
+    }
+
+    /// Number of control tokens actually defined, at most
+    /// [`control_region_size`](Self::control_region_size).
     pub fn num_specials(&self) -> usize {
         self.specials.len()
     }
 
     /// First audio id. Audio occupies `[audio_base, total_size)`.
+    ///
+    /// Derived from the RESERVED region, not from the defined tokens, so adding a
+    /// control token leaves every audio id where it is.
     pub fn audio_base(&self) -> usize {
-        self.text_vocab_size + self.specials.len()
+        self.text_vocab_size + self.control_region_size
     }
 
     /// Total ids, i.e. the embedding/output-projection row count.
@@ -239,10 +227,19 @@ impl SpeechVocab {
         self.audio_base() + self.codec.total_audio_tokens()
     }
 
-    /// Id of a control token, or `None` if it was not included in the layout.
+    /// True if a checkpoint with `rows` embedding rows matches this layout.
+    ///
+    /// A loader MUST check this before using a layout. A mismatch means the
+    /// checkpoint and the layout disagree about the id space, so every id past the
+    /// first divergence points at the wrong embedding row; loading must abort
+    /// rather than proceed with silently wrong tokens.
+    pub fn matches_embedding_rows(&self, rows: usize) -> bool {
+        rows == self.total_size()
+    }
+
+    /// Id of a control token, or `None` if it is not defined in this layout.
     pub fn special_id(&self, tok: SpecialToken) -> Option<u32> {
-        let idx = self.specials.iter().position(|t| *t == tok)?;
-        u32::try_from(self.text_vocab_size + idx).ok()
+        self.specials.get(&tok).copied()
     }
 
     /// Flat id for `code` in `codebook`, codebook-major.
@@ -251,25 +248,25 @@ impl SpeechVocab {
     /// codebook's ids contiguous, so a residual codec can mask logits to the one
     /// codebook legal at the current frame position with a single range.
     pub fn audio_token(&self, codebook: usize, code: usize) -> Result<u32> {
-        if codebook >= self.codec.num_codebooks {
+        if codebook >= self.codec.num_codebooks() {
             return Err(Error::InvalidArgument {
                 arg: "codebook",
                 reason: format!(
                     "codebook {codebook} out of range for {} codebooks",
-                    self.codec.num_codebooks
+                    self.codec.num_codebooks()
                 ),
             });
         }
-        if code >= self.codec.codebook_size {
+        if code >= self.codec.codebook_size() {
             return Err(Error::InvalidArgument {
                 arg: "code",
                 reason: format!(
                     "code {code} out of range for codebook size {}",
-                    self.codec.codebook_size
+                    self.codec.codebook_size()
                 ),
             });
         }
-        let id = self.audio_base() + codebook * self.codec.codebook_size + code;
+        let id = self.audio_base() + codebook * self.codec.codebook_size() + code;
         u32::try_from(id).map_err(|_| Error::ModelError {
             reason: format!("audio id {id} exceeds the u32 id space"),
         })
@@ -283,8 +280,8 @@ impl SpeechVocab {
             return None;
         }
         Some((
-            offset / self.codec.codebook_size,
-            offset % self.codec.codebook_size,
+            offset / self.codec.codebook_size(),
+            offset % self.codec.codebook_size(),
         ))
     }
 
@@ -293,7 +290,10 @@ impl SpeechVocab {
         (id as usize) < self.text_vocab_size
     }
 
-    /// True if `id` is a control token.
+    /// True if `id` falls in the reserved control region.
+    ///
+    /// The whole reserved region answers true, including ids no token claims yet.
+    /// Those rows exist in the embedding matrix and are neither text nor audio.
     pub fn is_special(&self, id: u32) -> bool {
         let id = id as usize;
         id >= self.text_vocab_size && id < self.audio_base()

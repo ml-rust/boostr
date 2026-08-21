@@ -21,7 +21,9 @@
 use crate::error::{Error, Result};
 use crate::model::audio::neucodec::client::NeuCodecClient;
 use crate::nn::var_contiguous;
-use numr::autograd::{Var, var_add, var_cat, var_mul, var_mul_scalar, var_narrow, var_reshape};
+use numr::autograd::{
+    Var, var_add, var_broadcast_to, var_cat, var_mul, var_mul_scalar, var_narrow, var_reshape,
+};
 use numr::dtype::DType;
 use numr::ops::PaddingMode;
 use numr::runtime::Runtime;
@@ -114,9 +116,18 @@ pub fn kaiser_sinc_filter1d(cutoff: f64, half_width: f64, kernel_size: usize) ->
 
 /// Replicate ("edge") padding along the last axis of a `[B, C, T]` tensor.
 ///
-/// numr has no replicate `PaddingMode`, and this is a composition rather than a
-/// kernel, so it is built from `narrow` + `cat` — which keeps it tracked and
-/// backend-generic instead of forcing a CPU round-trip.
+/// numr has no replicate `PaddingMode` (its `pad` fills a constant), and this
+/// is a composition rather than a kernel, so it is built from `narrow` +
+/// `broadcast_to` + `cat` — which keeps it tracked and backend-generic instead
+/// of forcing a CPU round-trip.
+///
+/// The edge blocks are BROADCAST to their full width and concatenated as one
+/// tensor each, rather than pushing `left` (then `right`) copies of a
+/// single-frame slice into the `cat` list. Both produce identical values, but
+/// CUDA's `cat` launches one kernel PER INPUT, so the naive form costs
+/// `left + right + 1` launches. The alias-free activations call this twice per
+/// `Activation1d` and the acoustic encoder holds ~36 of them, which turned edge
+/// replication alone into ~800 launches per forward. This form is always 3.
 pub fn replicate_pad_1d<R, C>(client: &C, x: &Var<R>, left: usize, right: usize) -> Result<Var<R>>
 where
     R: Runtime<DType = DType>,
@@ -141,19 +152,21 @@ where
         });
     }
 
-    let mut parts: Vec<Var<R>> = Vec::with_capacity(left + right + 1);
+    // At most three: [left edge block] ++ [x] ++ [right edge block].
+    let mut parts: Vec<Var<R>> = Vec::with_capacity(3);
+    let edge_block = |offset: usize, width: usize| -> Result<Var<R>> {
+        let edge = var_narrow(x, 2, offset, 1).map_err(Error::Numr)?;
+        let block = var_broadcast_to(&edge, &[shape[0], shape[1], width]).map_err(Error::Numr)?;
+        // `cat` reads its inputs; materialize the broadcast view so the stride-0
+        // time axis never reaches a kernel that assumes contiguity.
+        var_contiguous(&block)
+    };
     if left > 0 {
-        let first = var_narrow(x, 2, 0, 1).map_err(Error::Numr)?;
-        for _ in 0..left {
-            parts.push(first.alias());
-        }
+        parts.push(edge_block(0, left)?);
     }
     parts.push(x.alias());
     if right > 0 {
-        let last = var_narrow(x, 2, t - 1, 1).map_err(Error::Numr)?;
-        for _ in 0..right {
-            parts.push(last.alias());
-        }
+        parts.push(edge_block(t - 1, right)?);
     }
 
     let refs: Vec<&Var<R>> = parts.iter().collect();
@@ -439,6 +452,44 @@ mod tests {
         assert_eq!(out.shape(), &[1, 1, 6]);
         let got: Vec<f32> = out.tensor().contiguous().unwrap().to_vec();
         assert_eq!(got, vec![1.0, 1.0, 1.0, 2.0, 3.0, 3.0]);
+    }
+
+    /// The edge blocks are built by broadcasting a `[B, C, 1]` slice across
+    /// TIME. With B = C = 1 that is indistinguishable from broadcasting across
+    /// the wrong axis, so this checks a genuinely 3-D case: every padded column
+    /// must equal its own row's edge, never another channel's or batch's.
+    #[test]
+    fn replicate_pad_replicates_per_batch_and_channel() {
+        let (client, device) = cpu_setup();
+        // [2, 3, 4], each (batch, channel) row a distinct decade.
+        let data: Vec<f32> = (0..2 * 3 * 4).map(|i| i as f32).collect();
+        let x = var(&data, &[2, 3, 4], &device);
+
+        let (left, right) = (3, 2);
+        let out = replicate_pad_1d(&client, &x, left, right).unwrap();
+        assert_eq!(out.shape(), &[2, 3, 4 + left + right]);
+        let got: Vec<f32> = out.tensor().contiguous().unwrap().to_vec();
+
+        let width = 4 + left + right;
+        for b in 0..2 {
+            for c in 0..3 {
+                let row = &data[(b * 3 + c) * 4..(b * 3 + c) * 4 + 4];
+                let out_row = &got[(b * 3 + c) * width..(b * 3 + c) * width + width];
+                for (i, v) in out_row.iter().enumerate() {
+                    let want = if i < left {
+                        row[0]
+                    } else if i < left + 4 {
+                        row[i - left]
+                    } else {
+                        row[3]
+                    };
+                    assert_eq!(
+                        *v, want,
+                        "batch {b} channel {c} position {i}: got {v}, want {want}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

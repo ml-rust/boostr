@@ -1,4 +1,3 @@
-pub mod fft;
 pub mod g2p;
 pub mod kokoro;
 pub mod mel;

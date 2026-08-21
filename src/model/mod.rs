@@ -8,6 +8,7 @@ pub mod mamba;
 pub mod multimodal;
 pub mod registry;
 pub mod registry_inference;
+pub mod speech_lm;
 pub mod traits;
 pub mod vision;
 
@@ -26,4 +27,5 @@ pub use mamba::{
 };
 pub use multimodal::{ModelInput, MultimodalModel};
 pub use registry::LoadedModel;
+pub use speech_lm::{CodecVocab, SpecialToken, SpeechVocab};
 pub use traits::{Model, ModelClient};

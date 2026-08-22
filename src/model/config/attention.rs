@@ -81,6 +81,13 @@ impl AttentionConfig {
         self.num_kv_heads.unwrap_or(self.num_heads)
     }
 
+    /// Sliding-window span, or `0` (unlimited) if unset. `Some(0)` is treated
+    /// as disabled too: a zero-width window is undefined, and `0` is the
+    /// flash-attention kernel's "unlimited" sentinel.
+    pub fn sliding_window(&self) -> usize {
+        self.sliding_window.unwrap_or(0)
+    }
+
     /// Check if this is MLA (Multi-Head Latent Attention)
     pub fn is_mla(&self) -> bool {
         self.kv_latent_dim.is_some()

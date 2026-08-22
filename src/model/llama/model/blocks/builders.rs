@@ -99,6 +99,7 @@ pub fn build_block_from_varbuilder<R: Runtime<DType = DType>>(
     };
 
     let use_alibi = config.attention.as_ref().is_some_and(|a| a.use_alibi);
+    let sliding_window = config.attention.as_ref().map_or(0, |a| a.sliding_window());
 
     Ok(LlamaBlock {
         input_layernorm: RmsNorm::new(
@@ -117,6 +118,7 @@ pub fn build_block_from_varbuilder<R: Runtime<DType = DType>>(
             q_norm,
             k_norm,
             use_alibi,
+            sliding_window,
         },
         post_attention_layernorm: RmsNorm::new(
             layer_vb.take_tensor("post_attention_layernorm.weight")?,
@@ -139,6 +141,7 @@ pub fn build_block_from_config<R: Runtime<DType = DType>>(
 ) -> LlamaBlock<R> {
     let hidden = config.hidden_size;
     let use_alibi = config.attention.as_ref().is_some_and(|a| a.use_alibi);
+    let sliding_window = config.attention.as_ref().map_or(0, |a| a.sliding_window());
     LlamaBlock {
         input_layernorm: RmsNorm::new(
             Tensor::<R>::ones(&[hidden], dt, device),
@@ -172,6 +175,7 @@ pub fn build_block_from_config<R: Runtime<DType = DType>>(
             q_norm: None,
             k_norm: None,
             use_alibi,
+            sliding_window,
         },
         post_attention_layernorm: RmsNorm::new(
             Tensor::<R>::ones(&[hidden], dt, device),

@@ -5,7 +5,6 @@ pub mod dequant_iq1;
 pub mod dequant_iq2;
 pub mod dequant_iq3;
 pub mod dequant_iq4;
-#[path = "dequant_k_quants/mod.rs"]
 pub mod dequant_k_quants;
 pub mod dequant_simple;
 pub mod dequant_tq;

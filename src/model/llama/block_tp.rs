@@ -34,6 +34,11 @@ pub(super) struct LlamaAttentionTp<R: Runtime> {
     /// Optional Q/K layer norms (Command-R, Cohere)
     pub(super) q_norm: Option<RmsNorm<R>>,
     pub(super) k_norm: Option<RmsNorm<R>>,
+    /// Sliding-window attention span. `0` disables windowing (unlimited context).
+    ///
+    /// Inclusive of the current token: query `i` attends keys `j` with
+    /// `i - sliding_window < j <= i`, per the flash-attention kernel contract.
+    pub(super) sliding_window: usize,
 }
 
 pub(super) struct LlamaMlpTp<R: Runtime> {
@@ -262,7 +267,7 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
             self.num_kv_heads,
             self.head_dim,
             is_prefill,
-            0,
+            self.sliding_window,
             Some(kv_seq_len),
         )?;
 

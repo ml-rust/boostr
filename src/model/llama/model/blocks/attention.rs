@@ -3,11 +3,9 @@
 use super::helpers::{repeat_kv, var_contiguous};
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
-use crate::inference::kv_cache::LayeredPagedKvCache;
 use crate::model::traits::ModelClient;
 use crate::nn::{MaybeQuantLinear, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
-use crate::ops::traits::{KvCacheOps, PagedAttentionOps};
 use numr::autograd::{Var, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
@@ -31,6 +29,17 @@ pub struct LlamaAttention<R: Runtime> {
     pub(crate) k_norm: Option<crate::nn::RmsNorm<R>>,
     /// Use ALiBi instead of RoPE (Falcon v1, BLOOM, MPT)
     pub(crate) use_alibi: bool,
+    /// Sliding-window attention span. `0` disables windowing (unlimited context).
+    ///
+    /// The window is INCLUSIVE of the current token: query `i` may attend keys
+    /// `j` with `i - sliding_window < j <= i`, i.e. exactly `sliding_window`
+    /// keys. This matches the flash-attention kernel contract in
+    /// `ops/impl_generic/attention/flash_standard.rs`.
+    ///
+    /// IGNORED when `use_alibi` is set. ALiBi's bias kernel writes the causal
+    /// structure together with the distance bias; the two mechanisms do not
+    /// compose here, so ALiBi models always attend the full context.
+    pub(crate) sliding_window: usize,
 }
 
 impl<R: Runtime<DType = DType>> LlamaAttention<R> {
@@ -46,13 +55,41 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
     /// `torch.finfo(dtype).min` for the same reason. Leading shape is `[1, 1]`
     /// so it broadcasts across batch and heads instead of materializing
     /// `[B, H, S, S]` per layer.
-    fn causal_mask<C>(client: &C, sq: usize, sk: usize, device: &R::Device) -> Result<Tensor<R>>
+    ///
+    /// `window_size > 0` additionally masks keys that fall out of the sliding
+    /// window: `j + window_size <= i`. That is `tril(diagonal = -window_size)`,
+    /// which keeps exactly `j <= i - window_size`. The window is inclusive of
+    /// the current token, so row `i` keeps `j ∈ (i - window_size, i]`.
+    ///
+    /// The two masked regions are DISJOINT for every `window_size >= 1`:
+    /// `triu(1)` keeps `j >= i + 1` and `tril(-window_size)` keeps
+    /// `j <= i - window_size <= i - 1`. No element is covered twice, so summing
+    /// the two `f32::MIN`-filled tensors never evaluates `MIN + MIN` (which
+    /// would overflow to `-inf` and reintroduce the `0 * -inf = NaN` hazard the
+    /// `f32::MIN` fill exists to avoid).
+    ///
+    /// Only called with `sq == sk` (the prefill/training path builds Q and K
+    /// from the same activation), so row `i` is absolute position `i` and no
+    /// `sk - sq` offset is applied — consistent with the existing `triu(1)`.
+    fn causal_mask<C>(
+        client: &C,
+        sq: usize,
+        sk: usize,
+        window_size: usize,
+        device: &R::Device,
+    ) -> Result<Tensor<R>>
     where
         C: ModelClient<R>,
     {
         let zeros = Tensor::<R>::zeros(&[sq, sk], DType::F32, device);
         let filled = client.add_scalar(&zeros, f32::MIN as f64)?;
-        let masked = client.triu(&filled, 1)?;
+        let future = client.triu(&filled, 1)?;
+        let masked = if window_size == 0 {
+            future
+        } else {
+            let too_old = client.tril(&filled, -(window_size as i64))?;
+            client.add(&future, &too_old)?
+        };
         masked.reshape(&[1, 1, sq, sk]).map_err(Error::Numr)
     }
 
@@ -183,7 +220,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             Var::new(mask, false)
         } else {
             Var::new(
-                Self::causal_mask(client, sq, sk, q.tensor().device())?,
+                Self::causal_mask(client, sq, sk, self.sliding_window, q.tensor().device())?,
                 false,
             )
         };
@@ -319,7 +356,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
                 self.num_kv_heads,
                 self.head_dim,
                 is_prefill,
-                0,
+                self.sliding_window,
                 Some(kv_seq_len),
             )?;
             Var::new(out, false)
@@ -335,215 +372,13 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         // Output projection
         self.o_proj.forward(client, &attn_out)
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward_with_paged_kv_cache<C>(
-        &self,
-        client: &C,
-        x: &Var<R>,
-        rope: &RoPE<R>,
-        paged_cache: &LayeredPagedKvCache<R>,
-        layer_idx: usize,
-        slot_mapping: &Tensor<R>,
-        block_table: &Tensor<R>,
-        seq_len_k: usize,
-        position: usize,
-    ) -> Result<Var<R>>
-    where
-        C: ModelClient<R>,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ReduceOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + KvCacheOps<R>
-            + PagedAttentionOps<R>,
-    {
-        let shape = x.shape().to_vec();
-        let batch = shape[0];
-        let seq_len = shape[1];
-
-        // Q/K/V projections
-        let qkv = MaybeQuantLinear::forward_batch(
-            &[&self.q_proj, &self.k_proj, &self.v_proj],
-            client,
-            x,
-        )?;
-        let (q, k, v) = (&qkv[0], &qkv[1], &qkv[2]);
-
-        // Reshape to [B, S, H, D] then permute to [B, H, S, D]
-        let q = var_reshape(q, &[batch, seq_len, self.num_heads, self.head_dim])
-            .map_err(Error::Numr)?;
-        let k = var_reshape(k, &[batch, seq_len, self.num_kv_heads, self.head_dim])
-            .map_err(Error::Numr)?;
-        let v = var_reshape(v, &[batch, seq_len, self.num_kv_heads, self.head_dim])
-            .map_err(Error::Numr)?;
-
-        let q = numr::autograd::var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-
-        let q = var_contiguous(&q)?;
-        let k = var_contiguous(&k)?;
-        let v = var_contiguous(&v)?;
-
-        // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
-        let (q, k) = self.apply_qk_norms(client, &q, &k)?;
-
-        // Apply RoPE or skip for ALiBi models
-        let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
-        let sin_offset = var_narrow(rope.sin_cache(), 0, position, seq_len).map_err(Error::Numr)?;
-        let (q, k) = self.apply_rotary_if_needed(client, q, k, &cos_offset, &sin_offset)?;
-
-        // Reshape K/V from [B, H_kv, S, D] to [B*S, H_kv, D] for paged cache update
-        let k_flat = k
-            .tensor()
-            .permute(&[0, 2, 1, 3])? // [B, S, H_kv, D]
-            .contiguous()?
-            .reshape(&[batch * seq_len, self.num_kv_heads, self.head_dim])?;
-        let v_flat = v
-            .tensor()
-            .permute(&[0, 2, 1, 3])? // [B, S, H_kv, D]
-            .contiguous()?
-            .reshape(&[batch * seq_len, self.num_kv_heads, self.head_dim])?;
-
-        // Write K/V into paged cache using slot_mapping
-        let layer_cache = paged_cache.layer(layer_idx);
-        let rc = R::default_client(x.tensor().device());
-        layer_cache.update(&k_flat, &v_flat, slot_mapping, &rc)?;
-
-        // Paged attention: Q against full cached K/V
-        let block_size = paged_cache.block_size();
-        let _max_num_blocks = block_table.shape()[block_table.shape().len() - 1];
-        let (attn_out, _lse) = rc.paged_attention_fwd(
-            q.tensor(),
-            layer_cache.k_cache(),
-            layer_cache.v_cache(),
-            block_table,
-            self.num_heads,
-            self.num_kv_heads,
-            seq_len,
-            seq_len_k,
-            self.head_dim,
-            block_size,
-            false, // not causal for decode (Q sees all of KV cache)
-        )?;
-
-        // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
-        let attn_out = Var::new(attn_out, false);
-        let attn_out =
-            numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out)?;
-        let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
-            .map_err(Error::Numr)?;
-
-        // Output projection
-        self.o_proj.forward(client, &attn_out)
-    }
 }
 
-// ── Graph-mode forward (CUDA only) ───────────────────────────────────
+// ── Paged-attention forward, graph-mode forward (CUDA only) ──────────
+//
+// Split out to sibling files under `attention/` to keep this file readable.
+mod graph_mode;
+mod paged;
 
-#[cfg(feature = "cuda")]
-impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
-    /// Graph-mode attention forward — all CUDA ops, stable addresses.
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward_graph_mode(
-        &self,
-        client: &numr::runtime::cuda::CudaClient,
-        x: &Var<numr::runtime::cuda::CudaRuntime>,
-        cos_slice: &Var<numr::runtime::cuda::CudaRuntime>,
-        sin_slice: &Var<numr::runtime::cuda::CudaRuntime>,
-        kv_cache: &KvCache<numr::runtime::cuda::CudaRuntime>,
-        device_scalars: &crate::inference::decode_graph::DeviceScalars,
-    ) -> Result<Var<numr::runtime::cuda::CudaRuntime>>
-    where
-        numr::runtime::cuda::CudaClient: crate::model::traits::ModelClient<numr::runtime::cuda::CudaRuntime>
-            + numr::ops::TensorOps<numr::runtime::cuda::CudaRuntime>
-            + numr::ops::ScalarOps<numr::runtime::cuda::CudaRuntime>
-            + numr::ops::ReduceOps<numr::runtime::cuda::CudaRuntime>
-            + numr::ops::IndexingOps<numr::runtime::cuda::CudaRuntime>
-            + numr::ops::ShapeOps<numr::runtime::cuda::CudaRuntime>
-            + numr::ops::ActivationOps<numr::runtime::cuda::CudaRuntime>
-            + numr::ops::BinaryOps<numr::runtime::cuda::CudaRuntime>
-            + numr::ops::UnaryOps<numr::runtime::cuda::CudaRuntime>
-            + numr::ops::CompareOps<numr::runtime::cuda::CudaRuntime>
-            + numr::ops::ConditionalOps<numr::runtime::cuda::CudaRuntime>,
-    {
-        use crate::ops::cuda::attention::flash::decode_attention_graph_fwd;
-        use crate::ops::cuda::attention::kv_insert::kv_insert;
-
-        let shape = x.shape().to_vec();
-        let batch = shape[0];
-        let seq_len = 1usize; // graph mode is always single-token decode
-
-        // Q/K/V projections
-        let qkv = MaybeQuantLinear::forward_batch(
-            &[&self.q_proj, &self.k_proj, &self.v_proj],
-            client,
-            x,
-        )?;
-        let (q, k, v) = (&qkv[0], &qkv[1], &qkv[2]);
-
-        // Reshape to [B, S, H, D] then permute to [B, H, S, D]
-        let q = var_reshape(q, &[batch, seq_len, self.num_heads, self.head_dim])
-            .map_err(Error::Numr)?;
-        let k = var_reshape(k, &[batch, seq_len, self.num_kv_heads, self.head_dim])
-            .map_err(Error::Numr)?;
-        let v = var_reshape(v, &[batch, seq_len, self.num_kv_heads, self.head_dim])
-            .map_err(Error::Numr)?;
-
-        let q = numr::autograd::var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-
-        let q = var_contiguous(&q)?;
-        let k = var_contiguous(&k)?;
-        let v = var_contiguous(&v)?;
-
-        // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
-        let (q, k) = self.apply_qk_norms(client, &q, &k)?;
-
-        // Apply RoPE or skip for ALiBi models
-        let (q, k) = self.apply_rotary_if_needed(client, q, k, cos_slice, sin_slice)?;
-
-        // Insert K/V into the full-capacity cache at the device-side write_pos
-        kv_insert(
-            client,
-            k.tensor(),
-            v.tensor(),
-            kv_cache.k_cache_raw(),
-            kv_cache.v_cache_raw(),
-            device_scalars.write_pos_ptr(),
-        )?;
-
-        // Decode attention against the full-capacity cache with device-side seq_len_k
-        let kv_capacity = kv_cache.capacity();
-        let (attn_out, _lse) = decode_attention_graph_fwd(
-            client,
-            q.tensor(),
-            kv_cache.k_cache_raw(),
-            kv_cache.v_cache_raw(),
-            self.num_heads,
-            self.num_kv_heads,
-            self.head_dim,
-            device_scalars.seq_len_k_ptr(),
-            kv_capacity,
-        )?;
-
-        // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
-        let attn_out = Var::new(attn_out, false);
-        let attn_out =
-            numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out)?;
-        let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
-            .map_err(Error::Numr)?;
-
-        self.o_proj.forward(client, &attn_out)
-    }
-}
+#[cfg(test)]
+mod tests;

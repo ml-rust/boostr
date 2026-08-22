@@ -4,7 +4,6 @@ pub mod conv1d;
 pub mod conv2d;
 pub mod dropout;
 pub mod embedding;
-#[path = "fsq/mod.rs"]
 pub mod fsq;
 pub mod groupnorm;
 pub mod layernorm;
@@ -20,7 +19,6 @@ pub mod rope;
 pub mod stochastic_depth;
 pub mod var_builder;
 pub mod var_ops;
-#[path = "varmap/mod.rs"]
 pub mod varmap;
 pub mod vocab_resize;
 pub mod weight;

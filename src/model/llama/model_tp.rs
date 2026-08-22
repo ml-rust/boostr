@@ -54,6 +54,7 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
         let num_heads = attn_cfg.num_heads;
         let num_kv_heads = attn_cfg.kv_heads();
         let head_dim = attn_cfg.head_dim(hidden);
+        let sliding_window = attn_cfg.sliding_window();
         let dt = DType::F32;
 
         // Validate divisibility
@@ -135,6 +136,7 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
                     head_dim,
                     q_norm: None,
                     k_norm: None,
+                    sliding_window,
                 },
                 post_attention_layernorm: RmsNorm::new(
                     Tensor::<R>::ones(&[hidden], dt, device),
@@ -207,6 +209,7 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
         let num_heads = attn_cfg.num_heads;
         let num_kv_heads = attn_cfg.kv_heads();
         let head_dim = attn_cfg.head_dim(hidden);
+        let sliding_window = attn_cfg.sliding_window();
 
         if num_heads % world_size != 0 || num_kv_heads % world_size != 0 {
             return Err(Error::DistributedError {
@@ -275,6 +278,7 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
                         avb.take_tensor_optional("k_norm.weight")?
                             .map(|w| RmsNorm::new(w, config.rms_norm_eps as f32, false))
                     },
+                    sliding_window,
                 },
                 post_attention_layernorm: RmsNorm::new(
                     layer_vb.take_tensor("post_attention_layernorm.weight")?,

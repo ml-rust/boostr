@@ -69,7 +69,7 @@ where
             attn_config.rope_theta,
             attn_config.rope_scaling.as_ref(),
             vb.device(),
-        );
+        )?;
 
         let mut model_vb = vb.pp("model");
 

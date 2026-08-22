@@ -2,7 +2,7 @@
 //!
 //! Wraps the RoPEOps trait as a reusable module with precomputed frequency caches.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::config::RopeScalingConfig;
 use crate::ops::RoPEOps;
 use numr::autograd::Var;
@@ -37,6 +37,11 @@ impl<R: Runtime> RoPE<R> {
     /// - No scaling (standard RoPE)
     /// - Linear scaling: `freq /= factor`
     /// - Llama3 (NTK-aware): frequency-dependent scaling with low/high freq factors
+    /// - YaRN: ramped interpolation/extrapolation blend plus `attention_factor` (mscale)
+    ///   folded into the cos/sin caches
+    ///
+    /// Any other `scaling_type` is an error. `"dynamic"` is rejected: it recomputes
+    /// frequencies per forward as the sequence grows, which a precomputed cache cannot do.
     ///
     /// Returns `RoPE` with cos/sin caches `[max_seq_len, dim/2]`.
     pub fn precompute_freqs(
@@ -45,7 +50,7 @@ impl<R: Runtime> RoPE<R> {
         base: f32,
         scaling: Option<&RopeScalingConfig>,
         device: &<R as Runtime>::Device,
-    ) -> Self
+    ) -> Result<Self>
     where
         R: Runtime<DType = numr::dtype::DType>,
     {
@@ -57,6 +62,7 @@ impl<R: Runtime> RoPE<R> {
             .collect();
 
         // Apply scaling
+        let mut attention_scaling = 1.0f32;
         if let Some(cfg) = scaling {
             match cfg.scaling_type.as_str() {
                 "linear" => {
@@ -87,8 +93,28 @@ impl<R: Runtime> RoPE<R> {
                         }
                     }
                 }
-                _ => {
-                    // Unknown scaling type — fall through with unscaled frequencies
+                "yarn" => {
+                    attention_scaling = apply_yarn_scaling(&mut freqs, head_dim, base, cfg)?;
+                }
+                "dynamic" => {
+                    return Err(Error::InvalidArgument {
+                        arg: "rope_scaling.type",
+                        reason: "'dynamic' RoPE scaling recomputes frequencies per forward as the \
+                                 sequence length grows; this precomputed cos/sin cache cannot do \
+                                 that, and precomputing at max_seq_len would silently apply \
+                                 max-length scaling to short sequences. Convert the checkpoint to \
+                                 'linear', 'llama3', or 'yarn' scaling"
+                            .to_string(),
+                    });
+                }
+                other => {
+                    return Err(Error::InvalidArgument {
+                        arg: "rope_scaling.type",
+                        reason: format!(
+                            "unsupported RoPE scaling type '{other}'; supported: \
+                             'linear', 'llama3', 'yarn'"
+                        ),
+                    });
                 }
             }
         }
@@ -100,15 +126,15 @@ impl<R: Runtime> RoPE<R> {
         for pos in 0..max_seq_len {
             for (i, &freq) in freqs.iter().enumerate() {
                 let angle = pos as f32 * freq;
-                cos_data[pos * half_dim + i] = angle.cos();
-                sin_data[pos * half_dim + i] = angle.sin();
+                cos_data[pos * half_dim + i] = angle.cos() * attention_scaling;
+                sin_data[pos * half_dim + i] = angle.sin() * attention_scaling;
             }
         }
 
         let cos_cache = Tensor::<R>::from_slice(&cos_data, &[max_seq_len, half_dim], device);
         let sin_cache = Tensor::<R>::from_slice(&sin_data, &[max_seq_len, half_dim], device);
 
-        Self::new(cos_cache, sin_cache)
+        Ok(Self::new(cos_cache, sin_cache))
     }
 
     /// Apply RoPE to input tensor `x: [B, H, S, D]`
@@ -149,104 +175,61 @@ impl<R: Runtime> RoPE<R> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+/// YaRN frequency scaling: ramped interpolation/extrapolation blend.
+///
+/// Mirrors HuggingFace `_compute_yarn_parameters`. Mutates `freqs` in place and
+/// returns the `attention_factor` (mscale), which the caller folds into the
+/// cos/sin caches since it scales both alike.
+fn apply_yarn_scaling(
+    freqs: &mut [f32],
+    head_dim: usize,
+    base: f32,
+    cfg: &RopeScalingConfig,
+) -> Result<f32> {
+    let original = cfg
+        .original_max_position_embeddings
+        .ok_or_else(|| Error::InvalidArgument {
+            arg: "rope_scaling.original_max_position_embeddings",
+            reason: "yarn RoPE scaling requires original_max_position_embeddings; \
+                     set it in the checkpoint's rope_scaling config"
+                .to_string(),
+        })? as f64;
+    let factor = cfg.factor as f64;
+    let beta_fast = cfg.beta_fast.unwrap_or(32.0) as f64;
+    let beta_slow = cfg.beta_slow.unwrap_or(1.0) as f64;
+    let base_f64 = base as f64;
+    let dim = head_dim as f64;
 
-    #[test]
-    fn test_rope_precompute_shape() {
-        let device = CpuDevice::new();
-        let rope = RoPE::<CpuRuntime>::precompute_freqs(128, 64, 10000.0, None, &device);
-        assert_eq!(rope.cos_cache().shape(), &[128, 32]);
-        assert_eq!(rope.sin_cache().shape(), &[128, 32]);
+    // find_correction_dim, evaluated over the full dim (not dim/2).
+    let correction_dim = |num_rotations: f64| {
+        (dim * (original / (num_rotations * 2.0 * std::f64::consts::PI)).ln())
+            / (2.0 * base_f64.ln())
+    };
+    let low = correction_dim(beta_fast).floor().max(0.0);
+    let mut high = correction_dim(beta_slow).ceil().min(dim - 1.0);
+    if low == high {
+        high += 0.001;
     }
 
-    #[test]
-    fn test_rope_precompute_values() {
-        let device = CpuDevice::new();
-        let rope = RoPE::<CpuRuntime>::precompute_freqs(4, 8, 10000.0, None, &device);
+    for (i, f) in freqs.iter_mut().enumerate() {
+        // linear_ramp_factor over dim/2 entries.
+        let ramp = ((i as f64 - low) / (high - low)).clamp(0.0, 1.0);
+        let extrapolation_factor = 1.0 - ramp;
+        let inv_freq_extrapolation = 1.0 / base_f64.powf(2.0 * i as f64 / dim);
+        let inv_freq_interpolation = inv_freq_extrapolation / factor;
+        *f = (inv_freq_interpolation * (1.0 - extrapolation_factor)
+            + inv_freq_extrapolation * extrapolation_factor) as f32;
+    }
 
-        let cos: Vec<f32> = rope.cos_cache().tensor().to_vec();
-        let sin: Vec<f32> = rope.sin_cache().tensor().to_vec();
-
-        // pos=0: all cos=1, sin=0
-        for i in 0..4 {
-            assert!((cos[i] - 1.0).abs() < 1e-6, "cos[0,{i}]={}", cos[i]);
-            assert!(sin[i].abs() < 1e-6, "sin[0,{i}]={}", sin[i]);
+    // mscale: folds into the caches because it scales cos and sin alike.
+    Ok(cfg.attention_factor.unwrap_or_else(|| {
+        if factor <= 1.0 {
+            1.0
+        } else {
+            (0.1 * factor.ln() + 1.0) as f32
         }
-    }
-
-    #[test]
-    fn test_rope_forward() {
-        let device = CpuDevice::new();
-        let client = CpuRuntime::default_client(&device);
-        let rope = RoPE::<CpuRuntime>::precompute_freqs(8, 16, 10000.0, None, &device);
-
-        let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[0.1f32; 2 * 4 * 16], &[1, 2, 4, 16], &device),
-            false,
-        );
-        let out = rope.forward(&client, &x).unwrap();
-        assert_eq!(out.shape(), &[1, 2, 4, 16]);
-    }
-
-    #[test]
-    fn test_rope_linear_scaling() {
-        let device = CpuDevice::new();
-        let cfg = RopeScalingConfig {
-            scaling_type: "linear".to_string(),
-            factor: 2.0,
-            original_max_position_embeddings: None,
-            low_freq_factor: None,
-            high_freq_factor: None,
-            attention_factor: None,
-            beta_fast: None,
-            beta_slow: None,
-        };
-
-        let unscaled = RoPE::<CpuRuntime>::precompute_freqs(4, 8, 10000.0, None, &device);
-        let scaled = RoPE::<CpuRuntime>::precompute_freqs(4, 8, 10000.0, Some(&cfg), &device);
-
-        let cos_unscaled: Vec<f32> = unscaled.cos_cache().tensor().to_vec();
-        let cos_scaled: Vec<f32> = scaled.cos_cache().tensor().to_vec();
-
-        // At pos=0, both should be all 1s (cos(0)=1)
-        assert!((cos_scaled[0] - 1.0).abs() < 1e-6);
-
-        // At pos=2 scaled should match pos=1 unscaled (freq halved → angle halved)
-        let half_dim = 4;
-        for i in 0..half_dim {
-            let expected = cos_unscaled[half_dim + i]; // pos=1 unscaled
-            let actual = cos_scaled[2 * half_dim + i]; // pos=2 scaled
-            assert!(
-                (actual - expected).abs() < 1e-5,
-                "dim {i}: expected {expected}, got {actual}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_rope_llama3_scaling() {
-        let device = CpuDevice::new();
-        let cfg = RopeScalingConfig {
-            scaling_type: "llama3".to_string(),
-            factor: 8.0,
-            original_max_position_embeddings: Some(8192),
-            low_freq_factor: Some(1.0),
-            high_freq_factor: Some(4.0),
-            attention_factor: None,
-            beta_fast: None,
-            beta_slow: None,
-        };
-
-        let rope = RoPE::<CpuRuntime>::precompute_freqs(128, 64, 500000.0, Some(&cfg), &device);
-        assert_eq!(rope.cos_cache().shape(), &[128, 32]);
-        // Verify it doesn't panic and produces valid values
-        let cos: Vec<f32> = rope.cos_cache().tensor().to_vec();
-        for &v in &cos {
-            assert!(v.is_finite(), "non-finite cos value: {v}");
-            assert!((-1.0..=1.0).contains(&v), "cos out of range: {v}");
-        }
-    }
+    }))
 }
+
+#[cfg(test)]
+mod tests;

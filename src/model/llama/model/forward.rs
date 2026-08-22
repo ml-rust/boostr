@@ -52,7 +52,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
             attn_cfg.rope_theta,
             attn_cfg.rope_scaling.as_ref(),
             vb.device(),
-        );
+        )?;
 
         let mut model_vb = vb.pp("model");
 
@@ -136,7 +136,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
             attn_cfg.rope_theta,
             attn_cfg.rope_scaling.as_ref(),
             device,
-        );
+        )?;
 
         // Transformer layers
         let mut layers = Vec::with_capacity(config.num_layers);

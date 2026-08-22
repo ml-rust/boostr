@@ -114,7 +114,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             config.rope_freq_base,
             None,
             &device,
-        );
+        )?;
         if cdtype == DType::F16 {
             rope.cast_caches(DType::F16);
         }

@@ -84,7 +84,8 @@ fn rope_cache_matches_huggingface() {
     let seq = hf_cos.len() / HEAD_DIM;
     let half = HEAD_DIM / 2;
 
-    let rope = RoPE::<CpuRuntime>::precompute_freqs(seq, HEAD_DIM, ROPE_THETA, None, &device);
+    let rope = RoPE::<CpuRuntime>::precompute_freqs(seq, HEAD_DIM, ROPE_THETA, None, &device)
+        .expect("precompute_freqs");
     let got: Vec<f32> = rope
         .cos_cache()
         .tensor()
@@ -135,7 +136,8 @@ fn rope_convention_matches_huggingface() {
     let seq = q_pre.len() / (HEADS * HEAD_DIM);
     eprintln!("q is [1, {HEADS}, {seq}, {HEAD_DIM}]");
 
-    let rope = RoPE::<CpuRuntime>::precompute_freqs(seq, HEAD_DIM, ROPE_THETA, None, &device);
+    let rope = RoPE::<CpuRuntime>::precompute_freqs(seq, HEAD_DIM, ROPE_THETA, None, &device)
+        .expect("precompute_freqs");
     let (cos, sin) = (rope.cos_cache(), rope.sin_cache());
 
     let q = Var::new(

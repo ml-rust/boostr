@@ -225,7 +225,7 @@ impl<R: Runtime<DType = DType>> Mla<R> {
             config.rope_theta,
             None,
             device,
-        );
+        )?;
 
         let scale = 1.0 / (qk_dim as f64).sqrt();
 
@@ -312,7 +312,7 @@ impl<R: Runtime<DType = DType>> Mla<R> {
             config.rope_theta,
             None,
             vb.device(),
-        );
+        )?;
 
         let scale = 1.0 / (qk_dim as f64).sqrt();
 

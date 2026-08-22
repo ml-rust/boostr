@@ -189,8 +189,14 @@ fn perf_varlen_throughput() {
         "throughput {docs_per_sec:.1} docs/s below floor {MIN_DOCS_PER_SEC} — F16/WMMA \
          regression (F32 matmul fallback?)",
     );
+    // Only GROWTH indicates retention. `drift = free0 - free1`, so a positive
+    // value means free memory shrank across the run. A negative value means the
+    // device reported MORE free memory at the end than at the start — memory was
+    // released, which is the healthy direction. `memory_info` is device-global,
+    // so another process freeing during the run shows up here too; asserting on
+    // `.abs()` turned that into a spurious "unbounded retention" failure.
     assert!(
-        drift_mib.abs() <= MAX_DRIFT_MIB,
+        drift_mib <= MAX_DRIFT_MIB,
         "memory drift {drift_mib:.0} MiB exceeds {MAX_DRIFT_MIB} — unbounded retention",
     );
 }

@@ -107,6 +107,11 @@ pub fn mqa_gqa_bwd(
         let batch_i32 = batch_size as i32;
         let nh_i32 = num_heads as i32;
         let sq_i32 = seq_len_q as i32;
+        // The F32/BF16 preprocess kernels declare trailing dequant scales and
+        // ignore them; the F16 kernel declares neither. Push them either way so
+        // no kernel reads a parameter slot that was never written.
+        let scale_do = 1.0f32;
+        let scale_o = 1.0f32;
 
         unsafe {
             let mut builder = client.stream().launch_builder(&func);
@@ -116,6 +121,8 @@ pub fn mqa_gqa_bwd(
             builder.arg(&batch_i32);
             builder.arg(&nh_i32);
             builder.arg(&sq_i32);
+            builder.arg(&scale_do);
+            builder.arg(&scale_o);
             builder.launch(cfg).map_err(|e| Error::KernelError {
                 reason: format!("MQA/GQA bwd preprocess failed: {:?}", e),
             })?;
@@ -156,6 +163,10 @@ pub fn mqa_gqa_bwd(
         let sq_i32 = seq_len_q as i32;
         let sk_i32 = seq_len_k as i32;
         let causal_i32 = if causal { 1i32 } else { 0i32 };
+        // The F32/BF16 kernels declare eight trailing quantization scales and
+        // ignore them; the F16 kernel declares none. Push them either way so no
+        // kernel reads a parameter slot that was never written.
+        let one = 1.0f32;
 
         unsafe {
             let mut builder = client.stream().launch_builder(&func);
@@ -176,6 +187,10 @@ pub fn mqa_gqa_bwd(
             builder.arg(&sk_i32);
             builder.arg(&scale);
             builder.arg(&causal_i32);
+            // scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
+            for _ in 0..8 {
+                builder.arg(&one);
+            }
             builder.launch(cfg).map_err(|e| Error::KernelError {
                 reason: format!("MQA/GQA bwd kernel launch failed: {:?}", e),
             })?;

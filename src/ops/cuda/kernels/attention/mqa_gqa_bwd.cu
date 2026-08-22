@@ -228,7 +228,7 @@ __device__ void mqa_gqa_bwd_fp32_impl(
     int q_block_end = (seq_len_q + BLOCK_M - 1) / BLOCK_M;
 
     if (causal) {
-        q_block_start = k_block;  // Skip Q blocks before this K block
+        q_block_start = max(0, k_start - max(0, seq_len_k - seq_len_q)) / BLOCK_M;
     }
 
     // Iterate over Q blocks
@@ -267,7 +267,7 @@ __device__ void mqa_gqa_bwd_fp32_impl(
             for (int k_col = 0; k_col < k_tile_size; ++k_col) {
                 const int k_pos = k_start + k_col;
 
-                if (causal && q_pos < k_pos) continue;
+                if (causal && q_pos + max(0, seq_len_k - seq_len_q) < k_pos) continue;
 
                 // Recompute QK score
                 float qk_score = 0.0f;
@@ -469,7 +469,7 @@ __device__ void mqa_gqa_bwd_fp16_impl(
     int q_block_end = (seq_len_q + BLOCK_M - 1) / BLOCK_M;
 
     if (causal) {
-        q_block_start = k_block;  // Skip Q blocks before this K block
+        q_block_start = max(0, k_start - max(0, seq_len_k - seq_len_q)) / BLOCK_M;
     }
 
     // Iterate over Q blocks
@@ -507,7 +507,7 @@ __device__ void mqa_gqa_bwd_fp16_impl(
             for (int k_col = 0; k_col < k_tile_size; ++k_col) {
                 const int k_pos = k_start + k_col;
 
-                if (causal && q_pos < k_pos) continue;
+                if (causal && q_pos + max(0, seq_len_k - seq_len_q) < k_pos) continue;
 
                 // Recompute QK score
                 float qk_score = 0.0f;
@@ -855,7 +855,7 @@ __device__ void mqa_gqa_bwd_dtype_impl(
     int q_block_end = (seq_len_q + BLOCK_M - 1) / BLOCK_M;
 
     if (causal) {
-        q_block_start = k_block;  // Skip Q blocks before this K block
+        q_block_start = max(0, k_start - max(0, seq_len_k - seq_len_q)) / BLOCK_M;
     }
 
     // Iterate over Q blocks
@@ -894,7 +894,7 @@ __device__ void mqa_gqa_bwd_dtype_impl(
             for (int k_col = 0; k_col < k_tile_size; ++k_col) {
                 const int k_pos = k_start + k_col;
 
-                if (causal && q_pos < k_pos) continue;
+                if (causal && q_pos + max(0, seq_len_k - seq_len_q) < k_pos) continue;
 
                 // Recompute QK score
                 float qk_score = 0.0f;

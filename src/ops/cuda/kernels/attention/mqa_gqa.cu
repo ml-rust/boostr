@@ -142,7 +142,7 @@ __device__ void mqa_gqa_fwd_fp32_impl(
             // First pass: compute max
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -163,7 +163,7 @@ __device__ void mqa_gqa_fwd_fp32_impl(
             // Second pass: accumulate
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -296,7 +296,7 @@ __device__ void mqa_gqa_fwd_fp16_impl(
         if (is_valid_thread) {
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -316,7 +316,7 @@ __device__ void mqa_gqa_fwd_fp16_impl(
 
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -446,7 +446,7 @@ __device__ void mqa_gqa_fwd_bf16_impl(
         if (is_valid_thread) {
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -466,7 +466,7 @@ __device__ void mqa_gqa_fwd_bf16_impl(
 
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -710,7 +710,7 @@ __device__ void mqa_gqa_fwd_fp8_impl(
         if (is_valid_thread) {
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -732,7 +732,7 @@ __device__ void mqa_gqa_fwd_fp8_impl(
             }
 
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll

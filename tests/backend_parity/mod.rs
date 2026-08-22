@@ -10,6 +10,7 @@ pub mod kv_cache;
 pub mod kv_cache_quant;
 pub mod mla;
 pub mod moe;
+pub mod mqa_gqa_attention;
 pub mod paged_attention;
 pub mod quant_fused;
 pub mod quant_int4_gemm;

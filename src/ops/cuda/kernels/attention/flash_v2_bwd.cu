@@ -1097,6 +1097,300 @@ extern "C" __global__ void flash_attention_bwd_256_bf16(
 }
 
 // ============================================================================
+// Small-shared-memory Backward Instantiations - FP32
+// Same `flash_attention_bwd_fp32_impl` template, smaller BLOCK_M/BLOCK_N so the
+// backward layout [K|V: BLOCK_N x HEAD_DIM][Q|dO: BLOCK_M x HEAD_DIM] fits GPUs
+// with limited opt-in shared memory. Selected by `bwd_block_config` in
+// src/ops/cuda/attention/flash_utils.rs — keep the block sizes in sync.
+// ============================================================================
+
+// head_dim=32, BLOCK_M=64, BLOCK_N=64
+extern "C" __global__ void flash_attention_bwd_32_sm_fp32(
+    const float* Q, const float* K, const float* V,
+    const float* O, const float* dO, const float* LSE, const float* D,
+    float* dQ, float* dK, float* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_fp32_impl<32, 64, 64>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=64, BLOCK_M=64, BLOCK_N=64
+extern "C" __global__ void flash_attention_bwd_64_sm_fp32(
+    const float* Q, const float* K, const float* V,
+    const float* O, const float* dO, const float* LSE, const float* D,
+    float* dQ, float* dK, float* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_fp32_impl<64, 64, 64>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=96, BLOCK_M=32, BLOCK_N=32
+extern "C" __global__ void flash_attention_bwd_96_sm_fp32(
+    const float* Q, const float* K, const float* V,
+    const float* O, const float* dO, const float* LSE, const float* D,
+    float* dQ, float* dK, float* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_fp32_impl<96, 32, 32>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=128, BLOCK_M=32, BLOCK_N=32
+extern "C" __global__ void flash_attention_bwd_128_sm_fp32(
+    const float* Q, const float* K, const float* V,
+    const float* O, const float* dO, const float* LSE, const float* D,
+    float* dQ, float* dK, float* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_fp32_impl<128, 32, 32>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=192, BLOCK_M=16, BLOCK_N=16
+extern "C" __global__ void flash_attention_bwd_192_sm_fp32(
+    const float* Q, const float* K, const float* V,
+    const float* O, const float* dO, const float* LSE, const float* D,
+    float* dQ, float* dK, float* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_fp32_impl<192, 16, 16>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=256, BLOCK_M=16, BLOCK_N=16
+extern "C" __global__ void flash_attention_bwd_256_sm_fp32(
+    const float* Q, const float* K, const float* V,
+    const float* O, const float* dO, const float* LSE, const float* D,
+    float* dQ, float* dK, float* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_fp32_impl<256, 16, 16>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// ============================================================================
+// Small-shared-memory Backward Instantiations - FP16
+// Same `flash_attention_bwd_fp16_impl` template, smaller BLOCK_M/BLOCK_N so the
+// backward layout [K|V: BLOCK_N x HEAD_DIM][Q|dO: BLOCK_M x HEAD_DIM] fits GPUs
+// with limited opt-in shared memory. Selected by `bwd_block_config` in
+// src/ops/cuda/attention/flash_utils.rs — keep the block sizes in sync.
+// ============================================================================
+
+// head_dim=32, BLOCK_M=64, BLOCK_N=64
+extern "C" __global__ void flash_attention_bwd_32_sm_fp16(
+    const __half* Q, const __half* K, const __half* V,
+    const __half* O, const __half* dO, const float* LSE, const float* D,
+    __half* dQ, __half* dK, __half* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_fp16_impl<32, 64, 64>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=64, BLOCK_M=64, BLOCK_N=64
+extern "C" __global__ void flash_attention_bwd_64_sm_fp16(
+    const __half* Q, const __half* K, const __half* V,
+    const __half* O, const __half* dO, const float* LSE, const float* D,
+    __half* dQ, __half* dK, __half* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_fp16_impl<64, 64, 64>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=96, BLOCK_M=32, BLOCK_N=32
+extern "C" __global__ void flash_attention_bwd_96_sm_fp16(
+    const __half* Q, const __half* K, const __half* V,
+    const __half* O, const __half* dO, const float* LSE, const float* D,
+    __half* dQ, __half* dK, __half* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_fp16_impl<96, 32, 32>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=128, BLOCK_M=32, BLOCK_N=32
+extern "C" __global__ void flash_attention_bwd_128_sm_fp16(
+    const __half* Q, const __half* K, const __half* V,
+    const __half* O, const __half* dO, const float* LSE, const float* D,
+    __half* dQ, __half* dK, __half* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_fp16_impl<128, 32, 32>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=192, BLOCK_M=16, BLOCK_N=16
+extern "C" __global__ void flash_attention_bwd_192_sm_fp16(
+    const __half* Q, const __half* K, const __half* V,
+    const __half* O, const __half* dO, const float* LSE, const float* D,
+    __half* dQ, __half* dK, __half* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_fp16_impl<192, 16, 16>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=256, BLOCK_M=16, BLOCK_N=16
+extern "C" __global__ void flash_attention_bwd_256_sm_fp16(
+    const __half* Q, const __half* K, const __half* V,
+    const __half* O, const __half* dO, const float* LSE, const float* D,
+    __half* dQ, __half* dK, __half* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_fp16_impl<256, 16, 16>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// ============================================================================
+// Small-shared-memory Backward Instantiations - BF16
+// Same `flash_attention_bwd_bf16_impl` template, smaller BLOCK_M/BLOCK_N so the
+// backward layout [K|V: BLOCK_N x HEAD_DIM][Q|dO: BLOCK_M x HEAD_DIM] fits GPUs
+// with limited opt-in shared memory. Selected by `bwd_block_config` in
+// src/ops/cuda/attention/flash_utils.rs — keep the block sizes in sync.
+// ============================================================================
+
+// head_dim=32, BLOCK_M=64, BLOCK_N=64
+extern "C" __global__ void flash_attention_bwd_32_sm_bf16(
+    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
+    const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
+    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_bf16_impl<32, 64, 64>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=64, BLOCK_M=64, BLOCK_N=64
+extern "C" __global__ void flash_attention_bwd_64_sm_bf16(
+    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
+    const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
+    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_bf16_impl<64, 64, 64>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=96, BLOCK_M=32, BLOCK_N=32
+extern "C" __global__ void flash_attention_bwd_96_sm_bf16(
+    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
+    const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
+    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_bf16_impl<96, 32, 32>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=128, BLOCK_M=32, BLOCK_N=32
+extern "C" __global__ void flash_attention_bwd_128_sm_bf16(
+    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
+    const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
+    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_bf16_impl<128, 32, 32>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=192, BLOCK_M=16, BLOCK_N=16
+extern "C" __global__ void flash_attention_bwd_192_sm_bf16(
+    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
+    const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
+    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_bf16_impl<192, 16, 16>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// head_dim=256, BLOCK_M=16, BLOCK_N=16
+extern "C" __global__ void flash_attention_bwd_256_sm_bf16(
+    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
+    const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
+    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal, const int window_size
+) {
+    flash_attention_bwd_bf16_impl<256, 16, 16>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
+    );
+}
+
+// ============================================================================
 // FP8 Backward Kernels - For Ampere/Hopper GPUs (FP8 I/O, FP32 accumulation)
 // ============================================================================
 
@@ -1465,6 +1759,121 @@ extern "C" __global__ void flash_attention_bwd_256_fp8(
     const float dQ_scale, const float dK_scale, const float dV_scale
 ) {
     flash_attention_bwd_fp8_impl<256, 64, 64>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal,
+        Q_scale, K_scale, V_scale, dO_scale, dQ_scale, dK_scale, dV_scale
+    );
+}
+
+// ============================================================================
+// Small-shared-memory Backward Instantiations - FP8
+// Same `flash_attention_bwd_fp8_impl` template with smaller BLOCK_M/BLOCK_N.
+// Selected by `bwd_block_config` in src/ops/cuda/attention/flash_utils.rs —
+// keep the block sizes in sync.
+// ============================================================================
+
+// head_dim=32, BLOCK_M=64, BLOCK_N=64
+extern "C" __global__ void flash_attention_bwd_32_sm_fp8(
+    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
+    const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
+    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal,
+    const float Q_scale, const float K_scale, const float V_scale, const float dO_scale,
+    const float dQ_scale, const float dK_scale, const float dV_scale
+) {
+    flash_attention_bwd_fp8_impl<32, 64, 64>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal,
+        Q_scale, K_scale, V_scale, dO_scale, dQ_scale, dK_scale, dV_scale
+    );
+}
+
+// head_dim=64, BLOCK_M=64, BLOCK_N=64
+extern "C" __global__ void flash_attention_bwd_64_sm_fp8(
+    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
+    const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
+    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal,
+    const float Q_scale, const float K_scale, const float V_scale, const float dO_scale,
+    const float dQ_scale, const float dK_scale, const float dV_scale
+) {
+    flash_attention_bwd_fp8_impl<64, 64, 64>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal,
+        Q_scale, K_scale, V_scale, dO_scale, dQ_scale, dK_scale, dV_scale
+    );
+}
+
+// head_dim=96, BLOCK_M=32, BLOCK_N=32
+extern "C" __global__ void flash_attention_bwd_96_sm_fp8(
+    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
+    const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
+    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal,
+    const float Q_scale, const float K_scale, const float V_scale, const float dO_scale,
+    const float dQ_scale, const float dK_scale, const float dV_scale
+) {
+    flash_attention_bwd_fp8_impl<96, 32, 32>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal,
+        Q_scale, K_scale, V_scale, dO_scale, dQ_scale, dK_scale, dV_scale
+    );
+}
+
+// head_dim=128, BLOCK_M=32, BLOCK_N=32
+extern "C" __global__ void flash_attention_bwd_128_sm_fp8(
+    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
+    const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
+    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal,
+    const float Q_scale, const float K_scale, const float V_scale, const float dO_scale,
+    const float dQ_scale, const float dK_scale, const float dV_scale
+) {
+    flash_attention_bwd_fp8_impl<128, 32, 32>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal,
+        Q_scale, K_scale, V_scale, dO_scale, dQ_scale, dK_scale, dV_scale
+    );
+}
+
+// head_dim=192, BLOCK_M=16, BLOCK_N=16
+extern "C" __global__ void flash_attention_bwd_192_sm_fp8(
+    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
+    const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
+    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal,
+    const float Q_scale, const float K_scale, const float V_scale, const float dO_scale,
+    const float dQ_scale, const float dK_scale, const float dV_scale
+) {
+    flash_attention_bwd_fp8_impl<192, 16, 16>(
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal,
+        Q_scale, K_scale, V_scale, dO_scale, dQ_scale, dK_scale, dV_scale
+    );
+}
+
+// head_dim=256, BLOCK_M=16, BLOCK_N=16
+extern "C" __global__ void flash_attention_bwd_256_sm_fp8(
+    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
+    const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
+    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    const int batch_size, const int num_heads,
+    const int seq_len_q, const int seq_len_k,
+    const float scale, const int causal,
+    const float Q_scale, const float K_scale, const float V_scale, const float dO_scale,
+    const float dQ_scale, const float dK_scale, const float dV_scale
+) {
+    flash_attention_bwd_fp8_impl<256, 16, 16>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
         batch_size, num_heads, seq_len_q, seq_len_k, scale, causal,
         Q_scale, K_scale, V_scale, dO_scale, dQ_scale, dK_scale, dV_scale

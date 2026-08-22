@@ -11,7 +11,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::flash_utils::{AttentionParams, set_smem_attribute};
+use super::flash_utils::{AttentionParams, bwd_block_config, compute_bwd_smem, set_smem_attribute};
 
 /// Backward pass for F32/F16/BF16. Returns (dQ, dK, dV).
 ///
@@ -192,33 +192,29 @@ pub(super) fn flash_attention_bwd_impl(
 
     // Step 2: Main backward kernel — compute dQ, dK, dV
     {
-        // flash_v2_bwd.cu has no `_sm` (small shared memory) backward kernels; only
-        // the forward pass provides them. Fail with a clear message instead of an
-        // opaque kernel-lookup error.
-        if p.use_sm_kernel {
-            return Err(Error::InvalidArgument {
-                arg: "head_dim",
-                reason: format!(
-                    "flash_attention_bwd_{}_sm_{} does not exist: this GPU lacks the shared memory for head_dim={} backward (needs the large block config)",
-                    p.head_dim, dtype_suffix, p.head_dim
-                ),
-            });
-        }
-        let bwd_name = format!("flash_attention_bwd_{}_{}", p.head_dim, dtype_suffix);
+        // The backward layout needs more shared memory than the forward one that
+        // `AttentionParams` was sized for, so pick a backward-specific block config
+        // that fits this device; `_sm` selects the small-block instantiations.
+        let dtype_size = dtype.size_in_bytes();
+        let (block_m, block_n, use_sm_kernel) = bwd_block_config(p.head_dim, dtype_size)?;
+        let sm_infix = if use_sm_kernel { "_sm" } else { "" };
+        let bwd_name = format!(
+            "flash_attention_bwd_{}{}_{}",
+            p.head_dim, sm_infix, dtype_suffix
+        );
         let func = kernels::get_kernel_function(&module, &bwd_name)?;
 
         // Shared memory: K[BLOCK_N][HD] + V[BLOCK_N][HD] + Q[BLOCK_M][HD] + dO[BLOCK_M][HD]
-        let dtype_size = dtype.size_in_bytes();
-        let smem_size = (2 * p.block_n * p.head_dim + 2 * p.block_m * p.head_dim) * dtype_size;
+        let smem_size = compute_bwd_smem(block_m, block_n, p.head_dim, dtype_size);
         set_smem_attribute(&func, smem_size)?;
 
         // Grid: (batch * num_heads, ceil(seq_len_k / BLOCK_N))
         let grid_x = (p.batch_size * p.num_heads) as u32;
-        let grid_y = p.seq_len_k.div_ceil(p.block_n) as u32;
+        let grid_y = p.seq_len_k.div_ceil(block_n) as u32;
 
         let cfg = LaunchConfig {
             grid_dim: (grid_x, grid_y, 1),
-            block_dim: (p.block_n as u32, 1, 1),
+            block_dim: (block_n as u32, 1, 1),
             shared_mem_bytes: smem_size as u32,
         };
 

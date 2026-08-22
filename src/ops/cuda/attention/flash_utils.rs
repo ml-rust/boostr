@@ -162,6 +162,95 @@ pub(super) fn compute_smem(
     (block_m * head_stride + 2 * block_n * head_stride) * elem_bytes
 }
 
+/// Shared memory bytes the flash-attention BACKWARD kernel needs.
+///
+/// Layout in `flash_v2_bwd.cu` (`flash_attention_bwd_*_impl`):
+/// `[K: BLOCK_N x HEAD_DIM][V: BLOCK_N x HEAD_DIM][Q: BLOCK_M x HEAD_DIM][dO: BLOCK_M x HEAD_DIM]`,
+/// stored in the kernel's element type with NO `+1` bank-conflict padding — unlike
+/// the forward layout in `compute_smem`.
+pub(super) fn compute_bwd_smem(
+    block_m: usize,
+    block_n: usize,
+    head_dim: usize,
+    elem_bytes: usize,
+) -> usize {
+    (2 * block_n + 2 * block_m) * head_dim * elem_bytes
+}
+
+/// Block config of the unsuffixed `flash_attention_bwd_{head_dim}_{dtype}` kernels.
+/// Must stay in sync with the `extern "C"` instantiations in `flash_v2_bwd.cu`.
+fn bwd_block_config_large(head_dim: usize) -> Option<(usize, usize)> {
+    match head_dim {
+        32 => Some((128, 128)),
+        64 => Some((128, 128)),
+        96 => Some((64, 128)),
+        128 => Some((128, 64)),
+        192 => Some((64, 64)),
+        256 => Some((64, 64)),
+        _ => None,
+    }
+}
+
+/// Block config of the `flash_attention_bwd_{head_dim}_sm_{dtype}` kernels.
+/// Must stay in sync with the `extern "C"` instantiations in `flash_v2_bwd.cu`.
+///
+/// Sized so the F32 backward fits in 64KB, the smallest opt-in limit on GPUs that
+/// support this code path; F16/BF16 need half that and FP8 a quarter.
+fn bwd_block_config_small(head_dim: usize) -> Option<(usize, usize)> {
+    match head_dim {
+        32 => Some((64, 64)),
+        64 => Some((64, 64)),
+        96 => Some((32, 32)),
+        128 => Some((32, 32)),
+        192 => Some((16, 16)),
+        256 => Some((16, 16)),
+        _ => None,
+    }
+}
+
+/// Pick the backward block config that fits this device's opt-in shared memory.
+/// Returns `(block_m, block_n, use_sm_kernel)`.
+///
+/// The forward `block_config` is NOT usable here: it sizes for the forward layout
+/// `(BLOCK_M + 2*BLOCK_N) * (head_dim + 1)`, which is smaller than the backward's
+/// `2 * (BLOCK_M + BLOCK_N) * head_dim` at every head_dim this kernel supports.
+pub(super) fn bwd_block_config(head_dim: usize, elem_bytes: usize) -> Result<(usize, usize, bool)> {
+    let max_smem = device_max_smem();
+
+    if let Some((bm, bn)) = bwd_block_config_large(head_dim)
+        && compute_bwd_smem(bm, bn, head_dim, elem_bytes) <= max_smem
+    {
+        return Ok((bm, bn, false));
+    }
+    if let Some((bm, bn)) = bwd_block_config_small(head_dim)
+        && compute_bwd_smem(bm, bn, head_dim, elem_bytes) <= max_smem
+    {
+        return Ok((bm, bn, true));
+    }
+
+    let reason = match bwd_block_config_small(head_dim) {
+        Some((bm, bn)) => format!(
+            "flash attention backward for head_dim={} needs {} bytes of shared memory \
+             (smallest block config BLOCK_M={}, BLOCK_N={}, {}-byte elements) but this GPU \
+             allows at most {} bytes per block",
+            head_dim,
+            compute_bwd_smem(bm, bn, head_dim, elem_bytes),
+            bm,
+            bn,
+            elem_bytes,
+            max_smem
+        ),
+        None => format!(
+            "unsupported head_dim={} for flash attention backward. Supported: 32, 64, 96, 128, 192, 256",
+            head_dim
+        ),
+    };
+    Err(Error::InvalidArgument {
+        arg: "head_dim",
+        reason,
+    })
+}
+
 /// Standard (large) block config — best performance on high-smem GPUs.
 fn block_config_large(head_dim: usize) -> Option<(usize, usize)> {
     match head_dim {
@@ -216,9 +305,12 @@ pub(super) fn block_config(head_dim: usize, elem_bytes: usize) -> Result<(usize,
     })
 }
 
-/// Set dynamic shared memory attribute if >48KB.
+/// Set dynamic shared memory attribute if it reaches the 48KB default cap.
+///
+/// Requests of exactly 48KB go through the opt-in path too: some backward block
+/// configs land on that boundary, and raising the cap explicitly is always valid.
 pub(crate) fn set_smem_attribute(func: &CudaFunction, smem_size: usize) -> Result<()> {
-    if smem_size <= 48 * 1024 {
+    if smem_size < 48 * 1024 {
         return Ok(());
     }
 

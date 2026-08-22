@@ -931,40 +931,34 @@ fn test_flash_attention_bwd_causal_head_dim_128_parity() {
         let (out_c, lse_c) = cuda_client
             .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0, None)
             .unwrap();
-        // head_dim=128 backward needs the large block config (BLOCK_M=128,
-        // BLOCK_N=64); there is no `_sm` backward kernel, so a GPU without the
-        // shared memory for it reports an error instead of running.
-        match cuda_client
+        // head_dim=128 backward runs on every GPU: `bwd_block_config` falls back to
+        // the `_sm` instantiation (BLOCK_M=32, BLOCK_N=32) when the large config
+        // does not fit. No skip — a failure here is a real failure.
+        let (dq_c, dk_c, dv_c) = cuda_client
             .flash_attention_bwd(&dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, h, h, d, true, 0)
-        {
-            Ok((dq_c, dk_c, dv_c)) => {
-                assert_parity_f32_relaxed(
-                    &dq_c.to_vec::<f32>(),
-                    &_cpu_dq_vec,
-                    "flash_bwd causal hd128 dQ",
-                );
-                assert_parity_f32_relaxed(
-                    &dk_c.to_vec::<f32>(),
-                    &_cpu_dk_vec,
-                    "flash_bwd causal hd128 dK",
-                );
-                assert_parity_f32_relaxed(
-                    &dv_c.to_vec::<f32>(),
-                    &_cpu_dv_vec,
-                    "flash_bwd causal hd128 dV",
-                );
-            }
-            Err(e) => eprintln!(
-                "head_dim=128 backward unavailable on this GPU, skipping parity check: {:?}",
-                e
-            ),
-        }
+            .unwrap();
+        assert_parity_f32_relaxed(
+            &dq_c.to_vec::<f32>(),
+            &_cpu_dq_vec,
+            "flash_bwd causal hd128 dQ",
+        );
+        assert_parity_f32_relaxed(
+            &dk_c.to_vec::<f32>(),
+            &_cpu_dk_vec,
+            "flash_bwd causal hd128 dK",
+        );
+        assert_parity_f32_relaxed(
+            &dv_c.to_vec::<f32>(),
+            &_cpu_dv_vec,
+            "flash_bwd causal hd128 dV",
+        );
     });
 }
 
 /// Guard that the configs which were already correct stay correct: head_dim 32
-/// and 64 both use `BLOCK_M == BLOCK_N == 128`, so the generalized pruning must
-/// reproduce the old block-index behaviour exactly.
+/// keeps `BLOCK_M == BLOCK_N == 128`, so the generalized pruning must reproduce the
+/// old block-index behaviour exactly. head_dim 64 exercises the same pruning under
+/// the `_sm` block config on cards that cannot fit the large one.
 #[test]
 fn test_flash_attention_bwd_causal_small_head_dim_parity() {
     for d in [32usize, 64usize] {
@@ -996,40 +990,17 @@ fn test_flash_attention_bwd_causal_small_head_dim_parity() {
             let (out_c, lse_c) = cuda_client
                 .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0, None)
                 .unwrap();
-            // The backward's block config is chosen from the FORWARD shared-memory
-            // layout, but backward needs (2*BLOCK_M + 2*BLOCK_N)*head_dim*elem —
-            // 128KB at head_dim 64 — and no `_sm` backward kernel exists for
-            // head_dim 32/64. On a card with less opt-in shared memory than that,
-            // backward cannot run at all. Report it rather than failing the run,
-            // and rather than pretending the parity check happened.
-            match cuda_client
+            // Backward uses its own block config, sized from
+            // (2*BLOCK_M + 2*BLOCK_N)*head_dim*elem, and falls back to the `_sm`
+            // instantiations when the large config does not fit. head_dim 32 keeps
+            // the large (128, 128) config; head_dim 64 drops to `_sm` (64, 64) on a
+            // card with under 128KB of opt-in shared memory. Both must RUN.
+            let (dq_c, dk_c, dv_c) = cuda_client
                 .flash_attention_bwd(&dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, h, h, d, true, 0)
-            {
-                Ok((dq_c, dk_c, dv_c)) => {
-                    assert_parity_f32_relaxed(
-                        &dq_c.to_vec::<f32>(),
-                        &_cpu_dq_vec,
-                        "flash_bwd causal dQ",
-                    );
-                    assert_parity_f32_relaxed(
-                        &dk_c.to_vec::<f32>(),
-                        &_cpu_dk_vec,
-                        "flash_bwd causal dK",
-                    );
-                    assert_parity_f32_relaxed(
-                        &dv_c.to_vec::<f32>(),
-                        &_cpu_dv_vec,
-                        "flash_bwd causal dV",
-                    );
-                }
-                Err(e) => {
-                    println!(
-                        "SKIPPED head_dim {d} backward parity: this GPU cannot run \
-                         the backward kernel ({e}). CUDA flash backward is \
-                         UNAVAILABLE at this head_dim on this device."
-                    );
-                }
-            }
+                .unwrap();
+            assert_parity_f32_relaxed(&dq_c.to_vec::<f32>(), &_cpu_dq_vec, "flash_bwd causal dQ");
+            assert_parity_f32_relaxed(&dk_c.to_vec::<f32>(), &_cpu_dk_vec, "flash_bwd causal dK");
+            assert_parity_f32_relaxed(&dv_c.to_vec::<f32>(), &_cpu_dv_vec, "flash_bwd causal dV");
         });
     }
 }
@@ -1093,18 +1064,20 @@ fn test_flash_attention_bwd_causal_key_offset_parity() {
     });
 }
 
-/// CPU/CUDA parity for a flash backward with `num_kv_heads` KV heads.
-///
-/// `head_dim` is 32 on purpose: the v2 backward kernel has no small-shared-memory
-/// variant, so a card with ~99KB of shared memory cannot run it above head_dim 32.
-/// A larger head_dim makes the launcher reject the call and the test proves nothing.
+/// CPU/CUDA parity for a flash backward with `num_kv_heads` KV heads at `d` head_dim.
 ///
 /// The CUDA v2 backward kernel takes no `num_kv_heads` — it indexes K, V, dK and dV
 /// with `num_heads`. The launcher repeats the KV heads up to `num_heads` and sums
 /// each group's dK/dV back down to `num_kv_heads`. The CPU path is the reference.
-fn assert_flash_bwd_kv_parity(num_heads: usize, num_kv_heads: usize, causal: bool, label: &str) {
+fn assert_flash_bwd_kv_parity(
+    num_heads: usize,
+    num_kv_heads: usize,
+    d: usize,
+    causal: bool,
+    label: &str,
+) {
     let (cpu_client, cpu_device) = setup_cpu();
-    let (b, s, d) = (1usize, 8usize, 32usize);
+    let (b, s) = (1usize, 8usize);
     let q = det_tensor(&[b, num_heads, s, d], &cpu_device);
     let k = det_tensor(&[b, num_kv_heads, s, d], &cpu_device);
     let v = det_tensor(&[b, num_kv_heads, s, d], &cpu_device);
@@ -1212,20 +1185,20 @@ fn assert_flash_bwd_kv_parity(num_heads: usize, num_kv_heads: usize, causal: boo
 /// of both buffers.
 #[test]
 fn test_flash_attention_bwd_gqa_parity() {
-    assert_flash_bwd_kv_parity(4, 2, false, "flash_bwd gqa 4h/2kv");
-    assert_flash_bwd_kv_parity(4, 2, true, "flash_bwd gqa 4h/2kv causal");
+    assert_flash_bwd_kv_parity(4, 2, 32, false, "flash_bwd gqa 4h/2kv");
+    assert_flash_bwd_kv_parity(4, 2, 32, true, "flash_bwd gqa 4h/2kv causal");
 }
 
 /// MQA backward: 4 query heads share a single KV head.
 #[test]
 fn test_flash_attention_bwd_mqa_parity() {
-    assert_flash_bwd_kv_parity(4, 1, false, "flash_bwd mqa 4h/1kv");
+    assert_flash_bwd_kv_parity(4, 1, 32, false, "flash_bwd mqa 4h/1kv");
 }
 
 /// Non-GQA backward stays unchanged: no KV repeat, no group sum.
 #[test]
 fn test_flash_attention_bwd_no_gqa_parity() {
-    assert_flash_bwd_kv_parity(4, 4, false, "flash_bwd 4h/4kv");
+    assert_flash_bwd_kv_parity(4, 4, 32, false, "flash_bwd 4h/4kv");
 }
 
 /// Assert key row `key` of a `[1, h, seq_len_k, head_dim]` gradient is not all zero.
@@ -1250,8 +1223,8 @@ fn assert_key_row_nonzero(grad: &[f32], h: usize, sk: usize, d: usize, key: usiz
 /// with `num_kv_heads == num_heads` over explicitly repeated K/V: the GQA result
 /// must equal the group sum of those per-head gradients, within one FP8 rounding.
 ///
-/// `head_dim` is 32: the v2 backward has no small-shared-memory variant, so a card
-/// with ~99KB of shared memory cannot run it above head_dim 32.
+/// `head_dim` is 32 to keep the FP8 reference cheap; the FP8 backward itself has
+/// `_sm` instantiations for every supported head_dim.
 #[cfg(feature = "cuda")]
 fn assert_flash_bwd_fp8_kv_parity(num_heads: usize, num_kv_heads: usize, label: &str) {
     use numr::dtype::DType;
@@ -1407,4 +1380,79 @@ fn test_flash_attention_bwd_fp8_mqa_parity() {
 #[test]
 fn test_flash_attention_bwd_fp8_no_gqa_parity() {
     assert_flash_bwd_fp8_kv_parity(4, 4, "flash_bwd_fp8 4h/4kv");
+}
+
+/// GQA backward at head dims the backward kernel previously could NOT run on a card
+/// with under ~128KB of opt-in shared memory: the forward-derived block config asked
+/// for more shared memory than the backward layout could get, and no `_sm` backward
+/// instantiation existed. These must RUN, not skip.
+#[test]
+fn test_flash_attention_bwd_gqa_large_head_dim_parity() {
+    for d in [64usize, 128usize] {
+        assert_flash_bwd_kv_parity(4, 2, d, false, &format!("flash_bwd gqa 4h/2kv hd{d}"));
+        assert_flash_bwd_kv_parity(4, 2, d, true, &format!("flash_bwd gqa 4h/2kv hd{d} causal"));
+    }
+}
+
+/// CPU/CUDA backward parity across every head_dim the v2 backward supports, causal
+/// and non-causal. Every one of these must RUN on a card with ~99KB of opt-in shared
+/// memory: `bwd_block_config` falls back to the `_sm` instantiations
+/// (`flash_attention_bwd_{head_dim}_sm_{dtype}`) when the large block config does not
+/// fit. A skip here would mean the fallback is missing, so there is no skip branch.
+#[test]
+fn test_flash_attention_bwd_head_dim_sweep_parity() {
+    for d in [32usize, 64, 96, 128, 192, 256] {
+        for causal in [false, true] {
+            let (cpu_client, cpu_device) = setup_cpu();
+            let (b, h, s) = (1usize, 1usize, 96usize);
+            let q = det_tensor(&[b, h, s, d], &cpu_device);
+            let k = det_tensor(&[b, h, s, d], &cpu_device);
+            let v = det_tensor(&[b, h, s, d], &cpu_device);
+            let dout = det_tensor(&[b, h, s, d], &cpu_device);
+
+            let (out, lse) = cpu_client
+                .flash_attention_fwd(&q, &k, &v, h, h, d, causal, 0, None)
+                .unwrap();
+            let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
+                .flash_attention_bwd(&dout, &q, &k, &v, &out, &lse, h, h, d, causal, 0)
+                .unwrap();
+            let _cpu_dq_vec = cpu_dq.to_vec::<f32>();
+            let _cpu_dk_vec = cpu_dk.to_vec::<f32>();
+            let _cpu_dv_vec = cpu_dv.to_vec::<f32>();
+
+            #[cfg(feature = "cuda")]
+            with_cuda_backend(|cuda_client, cuda_device| {
+                use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
+                use numr::tensor::Tensor;
+                let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+                let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+                let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+                let dout_c = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+                let (out_c, lse_c) = cuda_client
+                    .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, causal, 0, None)
+                    .unwrap();
+                let (dq_c, dk_c, dv_c) = cuda_client
+                    .flash_attention_bwd(
+                        &dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, h, h, d, causal, 0,
+                    )
+                    .unwrap();
+                let tag = format!("flash_bwd hd{d} causal={causal}");
+                assert_parity_f32_relaxed(
+                    &dq_c.to_vec::<f32>(),
+                    &_cpu_dq_vec,
+                    &format!("{tag} dQ"),
+                );
+                assert_parity_f32_relaxed(
+                    &dk_c.to_vec::<f32>(),
+                    &_cpu_dk_vec,
+                    &format!("{tag} dK"),
+                );
+                assert_parity_f32_relaxed(
+                    &dv_c.to_vec::<f32>(),
+                    &_cpu_dv_vec,
+                    &format!("{tag} dV"),
+                );
+            });
+        }
+    }
 }

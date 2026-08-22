@@ -239,12 +239,8 @@ fn test_rope_linear_llama3_unscaled_by_attention_factor() {
         let rope =
             RoPE::<CpuRuntime>::precompute_freqs(4, 8, 10000.0, Some(&cfg), &device).unwrap();
         let cos: Vec<f32> = rope.cos_cache().tensor().to_vec();
-        for i in 0..4 {
-            assert!(
-                (cos[i] - 1.0).abs() < 1e-6,
-                "{scaling_type} cos[0,{i}]={}",
-                cos[i]
-            );
+        for (i, c) in cos.iter().take(4).enumerate() {
+            assert!((c - 1.0).abs() < 1e-6, "{scaling_type} cos[0,{i}]={c}");
         }
     }
 }

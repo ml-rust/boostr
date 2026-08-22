@@ -215,9 +215,7 @@ mod inner {
             for i in 0..state.total_blocks as BlockId {
                 state.free_list.push_back(i);
             }
-            for flag in &mut state.allocated_flags {
-                *flag = false;
-            }
+            state.allocated_flags.fill(false);
             state.total_allocations = 0;
             state.total_frees = 0;
             state.peak_usage = 0;

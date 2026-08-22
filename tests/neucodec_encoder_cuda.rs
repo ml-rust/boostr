@@ -41,8 +41,10 @@ fn read_f32(path: &PathBuf) -> Vec<f32> {
         path.display()
     );
     bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect()
 }
 
@@ -54,8 +56,10 @@ fn read_i32(path: &PathBuf) -> Vec<i32> {
         path.display()
     );
     bytes
-        .chunks_exact(4)
-        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| i32::from_le_bytes(*c))
         .collect()
 }
 

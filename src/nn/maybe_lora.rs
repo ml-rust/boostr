@@ -16,9 +16,15 @@ use numr::tensor::TensorId;
 /// single field type, and the variant decides how `forward` and parameter
 /// enumeration behave. This is what lets a module (e.g. an MoE `Expert`) be
 /// LoRA-adapted per projection without duplicating the module for each case.
+// `Lora` is boxed because `LoraLinear` carries the base `Linear` plus both
+// adapter factors; unboxed it made every `Plain` projection pay that footprint.
+// `Plain` stays inline deliberately: it is the common variant (only targeted
+// projections are adapted), and boxing it would add a heap allocation per
+// projection per layer to buy back a size difference that no longer matters.
+#[allow(clippy::large_enum_variant)]
 pub enum MaybeLoraLinear<R: Runtime> {
     Plain(Linear<R>),
-    Lora(LoraLinear<R>),
+    Lora(Box<LoraLinear<R>>),
 }
 
 // `LoraLinear`'s inherent methods are bounded on `DType = DType`, so this
@@ -73,7 +79,7 @@ impl<R: Runtime<DType = DType>> MaybeLoraLinear<R> {
             Self::Plain(linear) => linear.parameters(),
             // `Linear` also has an INHERENT `parameters()` returning `(TensorId, &Var)`
             // pairs, which shadows the trait method — go through `Module` explicitly.
-            Self::Lora(lora) => Module::parameters(lora)
+            Self::Lora(lora) => Module::parameters(lora.as_ref())
                 .into_iter()
                 .map(|var| (var.id(), var))
                 .collect(),
@@ -130,7 +136,7 @@ impl<R: Runtime> From<Linear<R>> for MaybeLoraLinear<R> {
 
 impl<R: Runtime> From<LoraLinear<R>> for MaybeLoraLinear<R> {
     fn from(lora: LoraLinear<R>) -> Self {
-        Self::Lora(lora)
+        Self::Lora(Box::new(lora))
     }
 }
 

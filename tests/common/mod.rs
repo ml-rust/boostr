@@ -1,3 +1,8 @@
+// Each file in `tests/` compiles as its own crate and pulls in this module
+// wholesale, so any helper a given test crate does not call reads as dead code
+// there. The helpers ARE used — just not all of them by every crate.
+#![allow(dead_code)]
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 

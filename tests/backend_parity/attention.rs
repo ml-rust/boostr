@@ -1093,6 +1093,141 @@ fn test_flash_attention_bwd_causal_key_offset_parity() {
     });
 }
 
+/// CPU/CUDA parity for a flash backward with `num_kv_heads` KV heads.
+///
+/// `head_dim` is 32 on purpose: the v2 backward kernel has no small-shared-memory
+/// variant, so a card with ~99KB of shared memory cannot run it above head_dim 32.
+/// A larger head_dim makes the launcher reject the call and the test proves nothing.
+///
+/// The CUDA v2 backward kernel takes no `num_kv_heads` — it indexes K, V, dK and dV
+/// with `num_heads`. The launcher repeats the KV heads up to `num_heads` and sums
+/// each group's dK/dV back down to `num_kv_heads`. The CPU path is the reference.
+fn assert_flash_bwd_kv_parity(num_heads: usize, num_kv_heads: usize, causal: bool, label: &str) {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, s, d) = (1usize, 8usize, 32usize);
+    let q = det_tensor(&[b, num_heads, s, d], &cpu_device);
+    let k = det_tensor(&[b, num_kv_heads, s, d], &cpu_device);
+    let v = det_tensor(&[b, num_kv_heads, s, d], &cpu_device);
+    let dout = det_tensor(&[b, num_heads, s, d], &cpu_device);
+
+    let (out, lse) = cpu_client
+        .flash_attention_fwd(&q, &k, &v, num_heads, num_kv_heads, d, causal, 0, None)
+        .unwrap();
+    let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
+        .flash_attention_bwd(
+            &dout,
+            &q,
+            &k,
+            &v,
+            &out,
+            &lse,
+            num_heads,
+            num_kv_heads,
+            d,
+            causal,
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        cpu_dk.shape(),
+        [b, num_kv_heads, s, d],
+        "{}: CPU dK must have num_kv_heads heads",
+        label
+    );
+    let _cpu_dq_vec = cpu_dq.to_vec::<f32>();
+    let _cpu_dk_vec = cpu_dk.to_vec::<f32>();
+    let _cpu_dv_vec = cpu_dv.to_vec::<f32>();
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
+        use numr::tensor::Tensor;
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device);
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device);
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device);
+        let dout_c = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device);
+        let (out_c, lse_c) = cuda_client
+            .flash_attention_fwd(
+                &q_c,
+                &k_c,
+                &v_c,
+                num_heads,
+                num_kv_heads,
+                d,
+                causal,
+                0,
+                None,
+            )
+            .unwrap();
+        let (dq_c, dk_c, dv_c) = cuda_client
+            .flash_attention_bwd(
+                &dout_c,
+                &q_c,
+                &k_c,
+                &v_c,
+                &out_c,
+                &lse_c,
+                num_heads,
+                num_kv_heads,
+                d,
+                causal,
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(
+            dk_c.shape(),
+            [b, num_kv_heads, s, d],
+            "{}: CUDA dK must have num_kv_heads heads",
+            label
+        );
+        assert_eq!(
+            dv_c.shape(),
+            [b, num_kv_heads, s, d],
+            "{}: CUDA dV must have num_kv_heads heads",
+            label
+        );
+        assert_parity_f32_relaxed(
+            &dq_c.to_vec::<f32>(),
+            &_cpu_dq_vec,
+            &format!("{} dQ CUDA vs CPU", label),
+        );
+        assert_parity_f32_relaxed(
+            &dk_c.to_vec::<f32>(),
+            &_cpu_dk_vec,
+            &format!("{} dK CUDA vs CPU", label),
+        );
+        assert_parity_f32_relaxed(
+            &dv_c.to_vec::<f32>(),
+            &_cpu_dv_vec,
+            &format!("{} dV CUDA vs CPU", label),
+        );
+    });
+}
+
+/// GQA backward: 4 query heads over 2 KV heads.
+///
+/// Regression: the CUDA v2 backward kernel indexes dK/dV with `num_heads` while the
+/// launcher allocated them with `num_kv_heads`, so every GQA model wrote past the end
+/// of both buffers.
+#[test]
+fn test_flash_attention_bwd_gqa_parity() {
+    assert_flash_bwd_kv_parity(4, 2, false, "flash_bwd gqa 4h/2kv");
+    assert_flash_bwd_kv_parity(4, 2, true, "flash_bwd gqa 4h/2kv causal");
+}
+
+/// MQA backward: 4 query heads share a single KV head.
+#[test]
+fn test_flash_attention_bwd_mqa_parity() {
+    assert_flash_bwd_kv_parity(4, 1, false, "flash_bwd mqa 4h/1kv");
+}
+
+/// Non-GQA backward stays unchanged: no KV repeat, no group sum.
+#[test]
+fn test_flash_attention_bwd_no_gqa_parity() {
+    assert_flash_bwd_kv_parity(4, 4, false, "flash_bwd 4h/4kv");
+}
+
 /// Assert key row `key` of a `[1, h, seq_len_k, head_dim]` gradient is not all zero.
 fn assert_key_row_nonzero(grad: &[f32], h: usize, sk: usize, d: usize, key: usize, what: &str) {
     for head in 0..h {

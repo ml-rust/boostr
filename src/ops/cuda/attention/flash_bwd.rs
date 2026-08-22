@@ -2,9 +2,11 @@
 
 use crate::error::{Error, Result};
 use crate::ops::cuda::kernels::{self, FLASH_V2_BWD_MODULE};
+use crate::ops::impl_generic::attention::sum_gqa_grads;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
+use numr::ops::ShapeOps;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
@@ -13,7 +15,9 @@ use super::flash_utils::{AttentionParams, set_smem_attribute};
 
 /// Backward pass for F32/F16/BF16. Returns (dQ, dK, dV).
 ///
-/// Two-step process:
+/// Steps:
+/// 0. GQA/MQA: repeat KV heads up to `num_heads` (the kernel has no
+///    `num_kv_heads`), and sum the per-head dK/dV back down afterwards.
 /// 1. Preprocessing: compute D = rowsum(dO ⊙ O) per query position.
 /// 2. Main backward kernel: compute dQ (atomicAdd), dK, dV.
 #[allow(clippy::too_many_arguments)]
@@ -89,19 +93,51 @@ pub(super) fn flash_attention_bwd_impl(
     let device = q.device();
     let device_index = device.id();
 
-    // Allocate gradient tensors (dQ must be zeroed — backward uses atomicAdd)
+    if p.num_kv_heads == 0 {
+        return Err(Error::InvalidArgument {
+            arg: "num_kv_heads",
+            reason: "num_kv_heads must be non-zero".into(),
+        });
+    }
+
+    // GQA/MQA: the v2 backward kernel takes no `num_kv_heads` — it indexes K, V,
+    // dK and dV with `num_heads`. Repeat the KV heads up to `num_heads` (same
+    // mapping the forward kernel applies internally:
+    // `kv_head_idx = head_idx / (num_heads / num_kv_heads)`), run the kernel over
+    // the expanded layout, then SUM each KV head's group of per-head dK/dV back
+    // down to `num_kv_heads`. Sum is the gradient of a repeated tensor.
+    let repeats = p.num_heads / p.num_kv_heads;
+    let kv_repeated = if repeats > 1 {
+        let k_rep = client
+            .repeat_interleave(k, repeats, Some(1))?
+            .contiguous()?;
+        let v_rep = client
+            .repeat_interleave(v, repeats, Some(1))?
+            .contiguous()?;
+        Some((k_rep, v_rep))
+    } else {
+        None
+    };
+    let (k, v) = match &kv_repeated {
+        Some((k_rep, v_rep)) => (k_rep, v_rep),
+        None => (k, v),
+    };
+
+    // Allocate gradient tensors (dQ must be zeroed — backward uses atomicAdd).
+    // dK/dV are allocated with `num_heads` heads to match the kernel's indexing;
+    // GQA groups are summed back to `num_kv_heads` after the launch.
     let dq = Tensor::<CudaRuntime>::zeros(
         &[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim],
         dtype,
         device,
     );
     let dk = Tensor::<CudaRuntime>::empty(
-        &[p.batch_size, p.num_kv_heads, p.seq_len_k, p.head_dim],
+        &[p.batch_size, p.num_heads, p.seq_len_k, p.head_dim],
         dtype,
         device,
     );
     let dv = Tensor::<CudaRuntime>::empty(
-        &[p.batch_size, p.num_kv_heads, p.seq_len_k, p.head_dim],
+        &[p.batch_size, p.num_heads, p.seq_len_k, p.head_dim],
         dtype,
         device,
     );
@@ -239,6 +275,12 @@ pub(super) fn flash_attention_bwd_impl(
         .map_err(|e| Error::KernelError {
             reason: format!("Flash Attention bwd sync failed: {:?}", e),
         })?;
+
+    if repeats > 1 {
+        let dk = sum_gqa_grads(client, &dk, p.num_kv_heads, repeats)?;
+        let dv = sum_gqa_grads(client, &dv, p.num_kv_heads, repeats)?;
+        return Ok((dq, dk, dv));
+    }
 
     Ok((dq, dk, dv))
 }

@@ -6,6 +6,7 @@
 //! where A: [rank, in_features], B: [out_features, rank], scaling = alpha / rank.
 
 use crate::error::Result;
+use crate::nn::module::Module;
 use numr::autograd::{Var, var_add, var_matmul, var_mul_scalar, var_transpose};
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ScalarOps, TensorOps};
@@ -72,12 +73,24 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
     }
 
     /// Create from pre-loaded LoRA weights.
-    pub fn from_weights(base: Linear<R>, lora_a: Tensor<R>, lora_b: Tensor<R>, alpha: f32) -> Self {
+    ///
+    /// `trainable` controls gradient tracking on `lora_a`/`lora_b`: `false` for
+    /// inference or merge-only use (the adapter is fixed), `true` to resume
+    /// training this adapter further (e.g. continued fine-tuning after a
+    /// checkpoint load). The base layer's own trainability is unaffected —
+    /// pass it separately when constructing `base`.
+    pub fn from_weights(
+        base: Linear<R>,
+        lora_a: Tensor<R>,
+        lora_b: Tensor<R>,
+        alpha: f32,
+        trainable: bool,
+    ) -> Self {
         let rank = lora_a.shape()[0];
         Self {
             base,
-            lora_a: Var::new(lora_a, false),
-            lora_b: Var::new(lora_b, false),
+            lora_a: Var::new(lora_a, trainable),
+            lora_b: Var::new(lora_b, trainable),
             scaling: alpha / rank as f32,
         }
     }
@@ -122,6 +135,55 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
     /// Get scaling factor.
     pub fn scaling(&self) -> f32 {
         self.scaling
+    }
+
+    /// Merge the adapter into the base weight, producing a plain `Linear`.
+    ///
+    /// Computes `W + scaling * (B @ A)`, matching the base weight layout
+    /// `[out_features, in_features]` (`lora_b` is `[out, rank]`, `lora_a` is
+    /// `[rank, in]`, so `B @ A` is `[out, in]`). The result carries no adapter
+    /// and is not part of any gradient path — for export and inference after
+    /// training. The base's bias, if any, is carried over unchanged.
+    pub fn merge_into_base<C>(&self, client: &C) -> Result<Linear<R>>
+    where
+        C: RuntimeClient<R> + TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
+    {
+        let ba = client
+            .matmul(self.lora_b.tensor(), self.lora_a.tensor())
+            .map_err(crate::error::Error::Numr)?;
+        let scaled = client
+            .mul_scalar(&ba, self.scaling as f64)
+            .map_err(crate::error::Error::Numr)?;
+        let merged_weight = client
+            .add(self.base.weight().tensor(), &scaled)
+            .map_err(crate::error::Error::Numr)?;
+
+        let bias = self.base.bias().map(|b| b.tensor().clone());
+        Ok(Linear::new(merged_weight, bias, false))
+    }
+}
+
+impl<R: Runtime> Module<R> for LoraLinear<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        // `Linear` also has an INHERENT `parameters()` returning `(TensorId, &Var)`
+        // pairs, which shadows the trait method — disambiguate explicitly.
+        let mut params = Module::parameters(&self.base);
+        params.push(&self.lora_a);
+        params.push(&self.lora_b);
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params: Vec<(String, &Var<R>)> = self
+            .base
+            .named_parameters()
+            .into_iter()
+            .map(|(name, var)| (format!("base.{name}"), var))
+            .collect();
+        params.push(("lora_a".to_string(), &self.lora_a));
+        params.push(("lora_b".to_string(), &self.lora_b));
+        params
     }
 }
 
@@ -195,5 +257,117 @@ mod tests {
             grads.get(lora.lora_a.id()).is_some(),
             "lora_a must be reachable from the loss"
         );
+    }
+
+    #[test]
+    fn test_module_parameters_enumerates_base_and_adapters() {
+        let device = <CpuRuntime as Runtime>::default_device();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device);
+        let bias = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4], &device);
+        let base = Linear::new(weight, Some(bias), true);
+        let lora = LoraLinear::new(base, 2, 4.0, &device);
+
+        // base.weight + base.bias + lora_a + lora_b
+        assert_eq!(lora.parameters().len(), 4);
+
+        let named = lora.named_parameters();
+        assert_eq!(named.len(), 4);
+        assert!(named.iter().any(|(n, _)| n == "lora_a"));
+        assert!(named.iter().any(|(n, _)| n == "lora_b"));
+        assert!(named.iter().any(|(n, _)| n == "base.weight"));
+        assert!(named.iter().any(|(n, _)| n == "base.bias"));
+    }
+
+    /// With a frozen base, only the adapter factors are trainable — this is
+    /// what lets LoRA train an adapter alone.
+    #[test]
+    fn test_trainable_parameters_excludes_frozen_base() {
+        let device = <CpuRuntime as Runtime>::default_device();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device);
+        let base = Linear::new(weight, None, false); // frozen
+        let lora = LoraLinear::new(base, 2, 4.0, &device);
+
+        let trainable = lora.trainable_parameters();
+        assert_eq!(trainable.len(), 2);
+        assert_eq!(trainable[0].0, lora.lora_a.id());
+        assert_eq!(trainable[1].0, lora.lora_b.id());
+    }
+
+    #[test]
+    fn test_from_weights_trainable_flag() {
+        let device = <CpuRuntime as Runtime>::default_device();
+        let make_base = || {
+            let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device);
+            Linear::new(weight, None, false)
+        };
+        let a = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 6], &[2, 3], &device);
+        let b = Tensor::<CpuRuntime>::from_slice(&[0.2f32; 4], &[2, 2], &device);
+
+        let frozen = LoraLinear::from_weights(make_base(), a.clone(), b.clone(), 4.0, false);
+        assert!(!frozen.lora_a.requires_grad());
+        assert!(!frozen.lora_b.requires_grad());
+
+        let trainable = LoraLinear::from_weights(make_base(), a, b, 4.0, true);
+        assert!(trainable.lora_a.requires_grad());
+        assert!(trainable.lora_b.requires_grad());
+    }
+
+    /// Merging into a plain `Linear` must reproduce the adapted forward pass
+    /// exactly, and must carry the base bias over unchanged. Uses a non-zero
+    /// `lora_b` (via `from_weights`) — with the default zero-init the
+    /// equivalence would hold trivially and prove nothing.
+    #[test]
+    fn test_merge_matches_forward_and_preserves_bias() {
+        use crate::test_utils::cpu_setup;
+
+        let (client, device) = cpu_setup();
+        let (in_features, out_features, rank) = (3usize, 2usize, 2usize);
+
+        let base_w: Vec<f32> = (0..out_features * in_features)
+            .map(|i| (i as f32) * 0.1 - 0.3)
+            .collect();
+        let bias_v: Vec<f32> = vec![0.05, -0.05];
+        let base = Linear::new(
+            Tensor::<CpuRuntime>::from_slice(&base_w, &[out_features, in_features], &device),
+            Some(Tensor::<CpuRuntime>::from_slice(
+                &bias_v,
+                &[out_features],
+                &device,
+            )),
+            false,
+        );
+
+        let a_vals: Vec<f32> = (0..rank * in_features)
+            .map(|i| (i as f32) * 0.05 - 0.1)
+            .collect();
+        // Deliberately non-zero, unlike LoraLinear::new's zero-init.
+        let b_vals: Vec<f32> = (0..out_features * rank)
+            .map(|i| (i as f32) * 0.07 + 0.02)
+            .collect();
+        let lora_a = Tensor::<CpuRuntime>::from_slice(&a_vals, &[rank, in_features], &device);
+        let lora_b = Tensor::<CpuRuntime>::from_slice(&b_vals, &[out_features, rank], &device);
+        let lora = LoraLinear::from_weights(base, lora_a, lora_b, 8.0, false);
+
+        let x_vals: Vec<f32> = (0..2 * in_features)
+            .map(|i| (i as f32) * 0.2 - 0.4)
+            .collect();
+        let x = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&x_vals, &[2, in_features], &device),
+            false,
+        );
+
+        let lora_out = lora.forward(&client, &x).expect("lora forward");
+        let merged = lora.merge_into_base(&client).expect("merge");
+        let merged_out = merged.forward(&client, &x).expect("merged forward");
+
+        let lora_vals: Vec<f32> = lora_out.tensor().contiguous().expect("contig").to_vec();
+        let merged_vals: Vec<f32> = merged_out.tensor().contiguous().expect("contig").to_vec();
+        assert_eq!(lora_vals.len(), merged_vals.len());
+        for (l, m) in lora_vals.iter().zip(merged_vals.iter()) {
+            assert!((l - m).abs() < 1e-5, "lora={l} merged={m}");
+        }
+
+        let merged_bias: Vec<f32> = merged.bias().expect("bias preserved").tensor().to_vec();
+        assert_eq!(merged_bias, bias_v);
     }
 }

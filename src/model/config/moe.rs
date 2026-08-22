@@ -29,11 +29,18 @@ pub struct MoeConfig {
     pub z_loss_alpha: f64,
 }
 
-fn default_load_balance_alpha() -> f64 {
+/// Auxiliary load-balancing loss coefficient used when a config omits it.
+///
+/// Public so consumers that build a `MoeConfig` in code (rather than through
+/// serde) can use the same value instead of copying the literal and silently
+/// drifting from it.
+pub fn default_load_balance_alpha() -> f64 {
     0.01
 }
 
-fn default_z_loss_alpha() -> f64 {
+/// Router z-loss coefficient used when a config omits it. Public for the same
+/// reason as [`default_load_balance_alpha`].
+pub fn default_z_loss_alpha() -> f64 {
     1e-3
 }
 

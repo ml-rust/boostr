@@ -46,15 +46,27 @@ pub struct SsmConfig {
     pub use_conv: Option<bool>,
 }
 
-fn default_n_groups() -> usize {
+/// Group count used when a config omits it.
+///
+/// Public so consumers building an `SsmConfig` in code can use the same
+/// value instead of copying the literal and silently drifting from it.
+pub fn default_n_groups() -> usize {
     1
 }
 
-fn default_conv_kernel() -> usize {
+/// Depthwise conv kernel width used when a config omits it.
+///
+/// Public so consumers building an `SsmConfig` in code can use the same
+/// value instead of copying the literal and silently drifting from it.
+pub fn default_conv_kernel() -> usize {
     4
 }
 
-fn default_expand() -> usize {
+/// Inner-dimension expansion factor used when a config omits it.
+///
+/// Public so consumers building an `SsmConfig` in code can use the same
+/// value instead of copying the literal and silently drifting from it.
+pub fn default_expand() -> usize {
     2
 }
 

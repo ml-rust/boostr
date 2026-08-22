@@ -75,7 +75,11 @@ pub struct UniversalConfig {
     pub audio: Option<AudioConfig>,
 }
 
-pub(crate) fn default_rms_norm_eps() -> f64 {
+/// RMSNorm epsilon used when a config omits it.
+///
+/// Public so consumers that build a `ModelConfig` in code can use the same
+/// value instead of copying the literal and silently drifting from it.
+pub fn default_rms_norm_eps() -> f64 {
     1e-5
 }
 

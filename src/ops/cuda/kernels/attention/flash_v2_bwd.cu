@@ -124,7 +124,8 @@ __device__ void flash_attention_bwd_fp32_impl(
     const int seq_len_q,
     const int seq_len_k,
     const float scale,
-    const int causal
+    const int causal,
+    const int window_size
 ) {
     // Dynamic shared memory layout:
     // [K: BLOCK_N x HEAD_DIM][V: BLOCK_N x HEAD_DIM]
@@ -239,6 +240,11 @@ __device__ void flash_attention_bwd_fp32_impl(
                 // Apply causal mask (position-level)
                 if (causal && q_pos < k_pos) continue;
 
+                // Sliding window (inclusive of the current token): query row q_pos sits at
+                // absolute position q_pos + key_offset, key_offset = max(0, seq_len_k - seq_len_q).
+                // Same rule as the forward kernel in flash_v2.cu.
+                if (window_size > 0 && k_pos < (q_pos + max(0, seq_len_k - seq_len_q)) - window_size + 1) continue;
+
                 // Recompute attention score: Q @ K^T
                 float qk_score = 0.0f;
                 #pragma unroll
@@ -323,11 +329,11 @@ extern "C" __global__ void flash_attention_bwd_64_fp32(
     float* dQ, float* dK, float* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_fp32_impl<64, 128, 128>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -338,11 +344,11 @@ extern "C" __global__ void flash_attention_bwd_128_fp32(
     float* dQ, float* dK, float* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_fp32_impl<128, 128, 64>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -353,11 +359,11 @@ extern "C" __global__ void flash_attention_bwd_32_fp32(
     float* dQ, float* dK, float* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_fp32_impl<32, 128, 128>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -372,11 +378,11 @@ extern "C" __global__ void flash_attention_bwd_96_fp32(
     float* dQ, float* dK, float* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_fp32_impl<96, 64, 128>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -391,11 +397,11 @@ extern "C" __global__ void flash_attention_bwd_192_fp32(
     float* dQ, float* dK, float* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_fp32_impl<192, 64, 64>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -410,11 +416,11 @@ extern "C" __global__ void flash_attention_bwd_256_fp32(
     float* dQ, float* dK, float* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_fp32_impl<256, 64, 64>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -472,7 +478,8 @@ __device__ void flash_attention_bwd_fp16_impl(
     const int seq_len_q,
     const int seq_len_k,
     const float scale,
-    const int causal
+    const int causal,
+    const int window_size
 ) {
     extern __shared__ __half smem_fp16[];
 
@@ -573,6 +580,9 @@ __device__ void flash_attention_bwd_fp16_impl(
 
                 if (causal && q_pos < k_pos) continue;
 
+                // Sliding window (inclusive of the current token), absolute q position
+                if (window_size > 0 && k_pos < (q_pos + max(0, seq_len_k - seq_len_q)) - window_size + 1) continue;
+
                 // Compute in FP32
                 float qk_score = 0.0f;
                 #pragma unroll
@@ -648,11 +658,11 @@ extern "C" __global__ void flash_attention_bwd_64_fp16(
     __half* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_fp16_impl<64, 128, 128>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -669,11 +679,11 @@ extern "C" __global__ void flash_attention_bwd_128_fp16(
     __half* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_fp16_impl<128, 128, 64>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -688,11 +698,11 @@ extern "C" __global__ void flash_attention_bwd_32_fp16(
     __half* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_fp16_impl<32, 128, 128>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -707,11 +717,11 @@ extern "C" __global__ void flash_attention_bwd_96_fp16(
     __half* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_fp16_impl<96, 64, 128>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -726,11 +736,11 @@ extern "C" __global__ void flash_attention_bwd_192_fp16(
     __half* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_fp16_impl<192, 64, 64>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -745,11 +755,11 @@ extern "C" __global__ void flash_attention_bwd_256_fp16(
     __half* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_fp16_impl<256, 64, 64>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -806,7 +816,8 @@ __device__ void flash_attention_bwd_bf16_impl(
     const int seq_len_q,
     const int seq_len_k,
     const float scale,
-    const int causal
+    const int causal,
+    const int window_size
 ) {
     extern __shared__ __nv_bfloat16 smem_bf16[];
 
@@ -905,6 +916,9 @@ __device__ void flash_attention_bwd_bf16_impl(
 
                 if (causal && q_pos < k_pos) continue;
 
+                // Sliding window (inclusive of the current token), absolute q position
+                if (window_size > 0 && k_pos < (q_pos + max(0, seq_len_k - seq_len_q)) - window_size + 1) continue;
+
                 float qk_score = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
@@ -977,11 +991,11 @@ extern "C" __global__ void flash_attention_bwd_64_bf16(
     __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_bf16_impl<64, 128, 128>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -998,11 +1012,11 @@ extern "C" __global__ void flash_attention_bwd_128_bf16(
     __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_bf16_impl<128, 128, 64>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -1017,11 +1031,11 @@ extern "C" __global__ void flash_attention_bwd_32_bf16(
     __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_bf16_impl<32, 128, 128>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -1036,11 +1050,11 @@ extern "C" __global__ void flash_attention_bwd_96_bf16(
     __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_bf16_impl<96, 64, 128>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -1055,11 +1069,11 @@ extern "C" __global__ void flash_attention_bwd_192_bf16(
     __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_bf16_impl<192, 64, 64>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 
@@ -1074,11 +1088,11 @@ extern "C" __global__ void flash_attention_bwd_256_bf16(
     __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
+    const float scale, const int causal, const int window_size
 ) {
     flash_attention_bwd_bf16_impl<256, 64, 64>(
         Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal
+        batch_size, num_heads, seq_len_q, seq_len_k, scale, causal, window_size
     );
 }
 

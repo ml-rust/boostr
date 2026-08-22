@@ -89,15 +89,6 @@ pub(super) fn flash_attention_bwd_impl(
     let device = q.device();
     let device_index = device.id();
 
-    if window_size != 0 {
-        return Err(Error::InvalidArgument {
-            arg: "window_size",
-            reason: "flash_attention_bwd: sliding window attention (window_size) is not yet \
-                     supported in the backward pass; use window_size=0 for training"
-                .into(),
-        });
-    }
-
     // Allocate gradient tensors (dQ must be zeroed — backward uses atomicAdd)
     let dq = Tensor::<CudaRuntime>::zeros(
         &[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim],
@@ -203,6 +194,10 @@ pub(super) fn flash_attention_bwd_impl(
         let sq_i32 = p.seq_len_q as i32;
         let sk_i32 = p.seq_len_k as i32;
         let causal_i32 = if causal { 1i32 } else { 0i32 };
+        let window_i32 = i32::try_from(window_size).map_err(|_| Error::InvalidArgument {
+            arg: "window_size",
+            reason: format!("window_size {} exceeds i32 range", window_size),
+        })?;
 
         unsafe {
             let mut builder = client.stream().launch_builder(&func);
@@ -222,6 +217,7 @@ pub(super) fn flash_attention_bwd_impl(
             builder.arg(&sk_i32);
             builder.arg(&scale);
             builder.arg(&causal_i32);
+            builder.arg(&window_i32);
             builder.launch(cfg).map_err(|e| Error::KernelError {
                 reason: format!("Flash Attention bwd kernel launch failed: {:?}", e),
             })?;

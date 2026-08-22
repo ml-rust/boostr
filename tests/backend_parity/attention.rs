@@ -691,3 +691,205 @@ fn test_sliding_window_correctness() {
         assert_parity_f32(&wgpu_full_vec, &cpu_full_vec, "sliding_full WGPU vs CPU");
     });
 }
+
+/// Windowed backward parity: CPU is the reference (its mask goes through
+/// `build_attention_mask`), CUDA must match for dQ, dK and dV.
+///
+/// Also asserts the windowed gradients differ from the unwindowed ones, so the
+/// test cannot pass with the window ignored on both sides.
+#[test]
+fn test_flash_attention_bwd_windowed_parity() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, h, s, d) = (1, 2, 16, 32);
+    let window = 4usize;
+    let q = det_tensor(&[b, h, s, d], &cpu_device);
+    let k = det_tensor(&[b, h, s, d], &cpu_device);
+    let v = det_tensor(&[b, h, s, d], &cpu_device);
+    let dout = det_tensor(&[b, h, s, d], &cpu_device);
+
+    let (out_win, lse_win) = cpu_client
+        .flash_attention_fwd(&q, &k, &v, h, h, d, true, window, None)
+        .unwrap();
+    let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
+        .flash_attention_bwd(&dout, &q, &k, &v, &out_win, &lse_win, h, h, d, true, window)
+        .unwrap();
+    let cpu_dq_vec = cpu_dq.to_vec::<f32>();
+    let cpu_dk_vec = cpu_dk.to_vec::<f32>();
+    let cpu_dv_vec = cpu_dv.to_vec::<f32>();
+
+    // The window must actually change the CPU gradients.
+    let (out_full, lse_full) = cpu_client
+        .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None)
+        .unwrap();
+    let (_, cpu_dk_full, _) = cpu_client
+        .flash_attention_bwd(&dout, &q, &k, &v, &out_full, &lse_full, h, h, d, true, 0)
+        .unwrap();
+    assert_differs(
+        &cpu_dk_vec,
+        &cpu_dk_full.to_vec::<f32>(),
+        "CPU windowed vs unwindowed dK",
+    );
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
+        use numr::tensor::Tensor;
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+        let dout_c = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+
+        let (out_c, lse_c) = cuda_client
+            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, window, None)
+            .unwrap();
+        let (dq_c, dk_c, dv_c) = cuda_client
+            .flash_attention_bwd(
+                &dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, h, h, d, true, window,
+            )
+            .unwrap();
+        let cuda_dk_vec = dk_c.to_vec::<f32>();
+        assert_parity_f32_relaxed(&dq_c.to_vec::<f32>(), &cpu_dq_vec, "flash_bwd windowed dQ");
+        assert_parity_f32_relaxed(&cuda_dk_vec, &cpu_dk_vec, "flash_bwd windowed dK");
+        assert_parity_f32_relaxed(&dv_c.to_vec::<f32>(), &cpu_dv_vec, "flash_bwd windowed dV");
+
+        // Windowed CUDA gradients must differ from unwindowed CUDA gradients.
+        let (out_cf, lse_cf) = cuda_client
+            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0, None)
+            .unwrap();
+        let (_, dk_cf, _) = cuda_client
+            .flash_attention_bwd(
+                &dout_c, &q_c, &k_c, &v_c, &out_cf, &lse_cf, h, h, d, true, 0,
+            )
+            .unwrap();
+        assert_differs(
+            &cuda_dk_vec,
+            &dk_cf.to_vec::<f32>(),
+            "CUDA windowed vs unwindowed dK",
+        );
+    });
+}
+
+/// Regression guard: `window_size == 0` backward is untouched by the windowing
+/// change — CUDA still matches CPU for both causal and non-causal.
+#[test]
+fn test_flash_attention_bwd_window_zero_unchanged() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, h, s, d) = (1, 2, 16, 32);
+    let q = det_tensor(&[b, h, s, d], &cpu_device);
+    let k = det_tensor(&[b, h, s, d], &cpu_device);
+    let v = det_tensor(&[b, h, s, d], &cpu_device);
+    let dout = det_tensor(&[b, h, s, d], &cpu_device);
+
+    for causal in [false, true] {
+        let (out, lse) = cpu_client
+            .flash_attention_fwd(&q, &k, &v, h, h, d, causal, 0, None)
+            .unwrap();
+        let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
+            .flash_attention_bwd(&dout, &q, &k, &v, &out, &lse, h, h, d, causal, 0)
+            .unwrap();
+        let cpu_dq_vec = cpu_dq.to_vec::<f32>();
+        let cpu_dk_vec = cpu_dk.to_vec::<f32>();
+        let cpu_dv_vec = cpu_dv.to_vec::<f32>();
+
+        #[cfg(feature = "cuda")]
+        with_cuda_backend(|cuda_client, cuda_device| {
+            use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
+            use numr::tensor::Tensor;
+            let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+            let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+            let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+            let dout_c = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+            let (out_c, lse_c) = cuda_client
+                .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, causal, 0, None)
+                .unwrap();
+            let (dq_c, dk_c, dv_c) = cuda_client
+                .flash_attention_bwd(
+                    &dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, h, h, d, causal, 0,
+                )
+                .unwrap();
+            assert_parity_f32_relaxed(&dq_c.to_vec::<f32>(), &cpu_dq_vec, "flash_bwd w0 dQ");
+            assert_parity_f32_relaxed(&dk_c.to_vec::<f32>(), &cpu_dk_vec, "flash_bwd w0 dK");
+            assert_parity_f32_relaxed(&dv_c.to_vec::<f32>(), &cpu_dv_vec, "flash_bwd w0 dV");
+        });
+    }
+}
+
+/// A key position the window excludes for EVERY query must receive exactly zero
+/// gradient. With seq_len_q < seq_len_k the query rows sit at absolute positions
+/// `key_offset..key_offset + seq_len_q`, so keys `j` with `j + window <= key_offset`
+/// are masked for every query row.
+#[test]
+fn test_flash_attention_bwd_excluded_key_has_zero_grad() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, h, d) = (1, 2, 32);
+    let (sq, sk) = (4usize, 16usize);
+    let window = 2usize;
+    let key_offset = sk - sq;
+    let last_excluded = key_offset - window; // keys 0..=last_excluded are fully masked
+
+    let q = det_tensor(&[b, h, sq, d], &cpu_device);
+    let k = det_tensor(&[b, h, sk, d], &cpu_device);
+    let v = det_tensor(&[b, h, sk, d], &cpu_device);
+    let dout = det_tensor(&[b, h, sq, d], &cpu_device);
+
+    let (out, lse) = cpu_client
+        .flash_attention_fwd(&q, &k, &v, h, h, d, false, window, None)
+        .unwrap();
+    let (_, cpu_dk, cpu_dv) = cpu_client
+        .flash_attention_bwd(&dout, &q, &k, &v, &out, &lse, h, h, d, false, window)
+        .unwrap();
+    assert_zero_key_rows(&cpu_dk.to_vec::<f32>(), h, sk, d, last_excluded, "CPU dK");
+    assert_zero_key_rows(&cpu_dv.to_vec::<f32>(), h, sk, d, last_excluded, "CPU dV");
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
+        use numr::tensor::Tensor;
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, sq, d], &cuda_device);
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, sk, d], &cuda_device);
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, sk, d], &cuda_device);
+        let dout_c = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, sq, d], &cuda_device);
+        let (out_c, lse_c) = cuda_client
+            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, window, None)
+            .unwrap();
+        let (_, dk_c, dv_c) = cuda_client
+            .flash_attention_bwd(
+                &dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, h, h, d, false, window,
+            )
+            .unwrap();
+        assert_zero_key_rows(&dk_c.to_vec::<f32>(), h, sk, d, last_excluded, "CUDA dK");
+        assert_zero_key_rows(&dv_c.to_vec::<f32>(), h, sk, d, last_excluded, "CUDA dV");
+    });
+}
+
+/// Assert two gradient buffers are not the same tensor within backward tolerance.
+fn assert_differs(a: &[f32], b: &[f32], what: &str) {
+    assert_eq!(a.len(), b.len(), "{}: length mismatch", what);
+    let max_diff = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_diff > 1e-3,
+        "{}: expected a difference, max abs diff was {}",
+        what,
+        max_diff
+    );
+}
+
+/// Assert key rows `0..=last` of a `[1, h, seq_len_k, head_dim]` gradient are exactly zero.
+fn assert_zero_key_rows(grad: &[f32], h: usize, sk: usize, d: usize, last: usize, what: &str) {
+    for head in 0..h {
+        for key in 0..=last {
+            for dim in 0..d {
+                let idx = (head * sk + key) * d + dim;
+                assert_eq!(
+                    grad[idx], 0.0,
+                    "{}: key {} (head {}, dim {}) is excluded by the window but got {}",
+                    what, key, head, dim, grad[idx]
+                );
+            }
+        }
+    }
+}

@@ -196,8 +196,8 @@ __device__ void flash_attention_bwd_fp32_impl(
     int q_block_end = (seq_len_q + BLOCK_M - 1) / BLOCK_M;
 
     if (causal) {
-        // For causal: only process Q blocks where q_pos >= k_pos
-        q_block_start = k_block;  // Skip Q blocks before this K block
+        // Causal: skip Q blocks fully masked. Token positions, not block indices.
+        q_block_start = max(0, k_start - max(0, seq_len_k - seq_len_q)) / BLOCK_M;
     }
 
     // Iterate over Q blocks
@@ -238,7 +238,7 @@ __device__ void flash_attention_bwd_fp32_impl(
                 const int k_pos = k_start + k_col;
 
                 // Apply causal mask (position-level)
-                if (causal && q_pos < k_pos) continue;
+                if (causal && q_pos + max(0, seq_len_k - seq_len_q) < k_pos) continue;
 
                 // Sliding window (inclusive of the current token): query row q_pos sits at
                 // absolute position q_pos + key_offset, key_offset = max(0, seq_len_k - seq_len_q).
@@ -267,7 +267,7 @@ __device__ void flash_attention_bwd_fp32_impl(
                 const float ds_val = p_val * (dp_val - d_val) * scale;
 
                 // Accumulate dQ += dS * K (only for tid's Q row)
-                if (tid == q_row && tid < q_tile_size) {
+                if ((q_row % (int)blockDim.x) == tid) {
                     #pragma unroll
                     for (int d = 0; d < HEAD_DIM; ++d) {
                         dQ_local[d] += ds_val * K_smem(k_col, d);
@@ -292,7 +292,7 @@ __device__ void flash_attention_bwd_fp32_impl(
             }
 
             // Write dQ with atomic adds (only for tid's assigned Q row)
-            if (tid == q_row && tid < q_tile_size) {
+            if ((q_row % (int)blockDim.x) == tid) {
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     atomicAdd(&dQ_base[q_pos * HEAD_DIM + d], dQ_local[d]);
@@ -544,7 +544,7 @@ __device__ void flash_attention_bwd_fp16_impl(
     int q_block_end = (seq_len_q + BLOCK_M - 1) / BLOCK_M;
 
     if (causal) {
-        q_block_start = k_block;
+        q_block_start = max(0, k_start - max(0, seq_len_k - seq_len_q)) / BLOCK_M;
     }
 
     for (int q_block = q_block_start; q_block < q_block_end; ++q_block) {
@@ -578,7 +578,7 @@ __device__ void flash_attention_bwd_fp16_impl(
             for (int k_col = 0; k_col < k_tile_size; ++k_col) {
                 const int k_pos = k_start + k_col;
 
-                if (causal && q_pos < k_pos) continue;
+                if (causal && q_pos + max(0, seq_len_k - seq_len_q) < k_pos) continue;
 
                 // Sliding window (inclusive of the current token), absolute q position
                 if (window_size > 0 && k_pos < (q_pos + max(0, seq_len_k - seq_len_q)) - window_size + 1) continue;
@@ -601,7 +601,7 @@ __device__ void flash_attention_bwd_fp16_impl(
 
                 const float ds_val = p_val * (dp_val - d_val) * scale;
 
-                if (tid == q_row && tid < q_tile_size) {
+                if ((q_row % (int)blockDim.x) == tid) {
                     #pragma unroll
                     for (int d = 0; d < HEAD_DIM; ++d) {
                         dQ_local[d] += ds_val * __half2float(K_smem(k_col, d));
@@ -618,7 +618,7 @@ __device__ void flash_attention_bwd_fp16_impl(
             }
 
             // Write dQ with atomics (convert FP32 → FP16)
-            if (tid == q_row && tid < q_tile_size) {
+            if ((q_row % (int)blockDim.x) == tid) {
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     atomicAdd((float*)&dQ_base[q_pos * HEAD_DIM + d], dQ_local[d]);
@@ -880,7 +880,7 @@ __device__ void flash_attention_bwd_bf16_impl(
     int q_block_end = (seq_len_q + BLOCK_M - 1) / BLOCK_M;
 
     if (causal) {
-        q_block_start = k_block;
+        q_block_start = max(0, k_start - max(0, seq_len_k - seq_len_q)) / BLOCK_M;
     }
 
     for (int q_block = q_block_start; q_block < q_block_end; ++q_block) {
@@ -914,7 +914,7 @@ __device__ void flash_attention_bwd_bf16_impl(
             for (int k_col = 0; k_col < k_tile_size; ++k_col) {
                 const int k_pos = k_start + k_col;
 
-                if (causal && q_pos < k_pos) continue;
+                if (causal && q_pos + max(0, seq_len_k - seq_len_q) < k_pos) continue;
 
                 // Sliding window (inclusive of the current token), absolute q position
                 if (window_size > 0 && k_pos < (q_pos + max(0, seq_len_k - seq_len_q)) - window_size + 1) continue;
@@ -936,7 +936,7 @@ __device__ void flash_attention_bwd_bf16_impl(
 
                 const float ds_val = p_val * (dp_val - d_val) * scale;
 
-                if (tid == q_row && tid < q_tile_size) {
+                if ((q_row % (int)blockDim.x) == tid) {
                     #pragma unroll
                     for (int d = 0; d < HEAD_DIM; ++d) {
                         dQ_local[d] += ds_val * __bfloat162float(K_smem(k_col, d));
@@ -952,7 +952,7 @@ __device__ void flash_attention_bwd_bf16_impl(
                 }
             }
 
-            if (tid == q_row && tid < q_tile_size) {
+            if ((q_row % (int)blockDim.x) == tid) {
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     atomicAdd((float*)&dQ_base[q_pos * HEAD_DIM + d], dQ_local[d]);
@@ -1225,7 +1225,7 @@ __device__ void flash_attention_bwd_fp8_impl(
     int q_block_end = (seq_len_q + BLOCK_M - 1) / BLOCK_M;
 
     if (causal) {
-        q_block_start = k_block;
+        q_block_start = max(0, k_start - max(0, seq_len_k - seq_len_q)) / BLOCK_M;
     }
 
     for (int q_block = q_block_start; q_block < q_block_end; ++q_block) {
@@ -1259,7 +1259,7 @@ __device__ void flash_attention_bwd_fp8_impl(
             for (int k_col = 0; k_col < k_tile_size; ++k_col) {
                 const int k_pos = k_start + k_col;
 
-                if (causal && q_pos < k_pos) continue;
+                if (causal && q_pos + max(0, seq_len_k - seq_len_q) < k_pos) continue;
 
                 // Dequantize FP8 → FP32 for computation
                 float qk_score = 0.0f;
@@ -1283,7 +1283,7 @@ __device__ void flash_attention_bwd_fp8_impl(
 
                 const float ds_val = p_val * (dp_val - d_val) * scale;
 
-                if (tid == q_row && tid < q_tile_size) {
+                if ((q_row % (int)blockDim.x) == tid) {
                     #pragma unroll
                     for (int d = 0; d < HEAD_DIM; ++d) {
                         float k_val = fp8_e4m3_to_f32(K_smem(k_col, d), K_scale);
@@ -1302,7 +1302,7 @@ __device__ void flash_attention_bwd_fp8_impl(
                 }
             }
 
-            if (tid == q_row && tid < q_tile_size) {
+            if ((q_row % (int)blockDim.x) == tid) {
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     atomicAdd((float*)&dQ_base[q_pos * HEAD_DIM + d], dQ_local[d]);

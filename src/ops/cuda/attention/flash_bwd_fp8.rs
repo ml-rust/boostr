@@ -125,8 +125,18 @@ pub(super) fn flash_attention_bwd_fp8_impl(
 
     // Step 2: FP8 Main backward — extra scale args
     {
-        let sm_suffix = if p.use_sm_kernel { "_sm" } else { "" };
-        let bwd_name = format!("flash_attention_bwd_{}{}_fp8", p.head_dim, sm_suffix);
+        // flash_v2_bwd.cu has no `_sm` (small shared memory) backward kernels; only
+        // the forward pass provides them.
+        if p.use_sm_kernel {
+            return Err(Error::InvalidArgument {
+                arg: "head_dim",
+                reason: format!(
+                    "flash_attention_bwd_{}_sm_fp8 does not exist: this GPU lacks the shared memory for head_dim={} backward (needs the large block config)",
+                    p.head_dim, p.head_dim
+                ),
+            });
+        }
+        let bwd_name = format!("flash_attention_bwd_{}_fp8", p.head_dim);
         let func = kernels::get_kernel_function(&module, &bwd_name)?;
 
         // FP8 is 1 byte per element

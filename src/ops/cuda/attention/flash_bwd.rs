@@ -156,11 +156,19 @@ pub(super) fn flash_attention_bwd_impl(
 
     // Step 2: Main backward kernel — compute dQ, dK, dV
     {
-        let sm_suffix = if p.use_sm_kernel { "_sm" } else { "" };
-        let bwd_name = format!(
-            "flash_attention_bwd_{}{}_{}",
-            p.head_dim, sm_suffix, dtype_suffix
-        );
+        // flash_v2_bwd.cu has no `_sm` (small shared memory) backward kernels; only
+        // the forward pass provides them. Fail with a clear message instead of an
+        // opaque kernel-lookup error.
+        if p.use_sm_kernel {
+            return Err(Error::InvalidArgument {
+                arg: "head_dim",
+                reason: format!(
+                    "flash_attention_bwd_{}_sm_{} does not exist: this GPU lacks the shared memory for head_dim={} backward (needs the large block config)",
+                    p.head_dim, dtype_suffix, p.head_dim
+                ),
+            });
+        }
+        let bwd_name = format!("flash_attention_bwd_{}_{}", p.head_dim, dtype_suffix);
         let func = kernels::get_kernel_function(&module, &bwd_name)?;
 
         // Shared memory: K[BLOCK_N][HD] + V[BLOCK_N][HD] + Q[BLOCK_M][HD] + dO[BLOCK_M][HD]

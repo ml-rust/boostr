@@ -893,3 +893,215 @@ fn assert_zero_key_rows(grad: &[f32], h: usize, sk: usize, d: usize, last: usize
         }
     }
 }
+
+/// Bug 2 regression: causal backward for `head_dim = 128`, whose block config is
+/// `BLOCK_M = 128`, `BLOCK_N = 64`. The Q-block pruning must compare token
+/// positions, not block indices — with `BLOCK_M > BLOCK_N` a block-index
+/// comparison skips Q blocks that still hold causally valid rows, zeroing
+/// dK/dV for the later key blocks.
+///
+/// `s = 192` spans two Q blocks and three K blocks, so the pruning engages.
+#[test]
+fn test_flash_attention_bwd_causal_head_dim_128_parity() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, h, s, d) = (1, 1, 192, 128);
+    let q = det_tensor(&[b, h, s, d], &cpu_device);
+    let k = det_tensor(&[b, h, s, d], &cpu_device);
+    let v = det_tensor(&[b, h, s, d], &cpu_device);
+    let dout = det_tensor(&[b, h, s, d], &cpu_device);
+
+    let (out, lse) = cpu_client
+        .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None)
+        .unwrap();
+    let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
+        .flash_attention_bwd(&dout, &q, &k, &v, &out, &lse, h, h, d, true, 0)
+        .unwrap();
+    let _cpu_dq_vec = cpu_dq.to_vec::<f32>();
+    let _cpu_dk_vec = cpu_dk.to_vec::<f32>();
+    let _cpu_dv_vec = cpu_dv.to_vec::<f32>();
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
+        use numr::tensor::Tensor;
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+        let dout_c = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+        let (out_c, lse_c) = cuda_client
+            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0, None)
+            .unwrap();
+        // head_dim=128 backward needs the large block config (BLOCK_M=128,
+        // BLOCK_N=64); there is no `_sm` backward kernel, so a GPU without the
+        // shared memory for it reports an error instead of running.
+        match cuda_client
+            .flash_attention_bwd(&dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, h, h, d, true, 0)
+        {
+            Ok((dq_c, dk_c, dv_c)) => {
+                assert_parity_f32_relaxed(
+                    &dq_c.to_vec::<f32>(),
+                    &_cpu_dq_vec,
+                    "flash_bwd causal hd128 dQ",
+                );
+                assert_parity_f32_relaxed(
+                    &dk_c.to_vec::<f32>(),
+                    &_cpu_dk_vec,
+                    "flash_bwd causal hd128 dK",
+                );
+                assert_parity_f32_relaxed(
+                    &dv_c.to_vec::<f32>(),
+                    &_cpu_dv_vec,
+                    "flash_bwd causal hd128 dV",
+                );
+            }
+            Err(e) => eprintln!(
+                "head_dim=128 backward unavailable on this GPU, skipping parity check: {:?}",
+                e
+            ),
+        }
+    });
+}
+
+/// Guard that the configs which were already correct stay correct: head_dim 32
+/// and 64 both use `BLOCK_M == BLOCK_N == 128`, so the generalized pruning must
+/// reproduce the old block-index behaviour exactly.
+#[test]
+fn test_flash_attention_bwd_causal_small_head_dim_parity() {
+    for d in [32usize, 64usize] {
+        let (cpu_client, cpu_device) = setup_cpu();
+        let (b, h, s) = (1, 2, 160);
+        let q = det_tensor(&[b, h, s, d], &cpu_device);
+        let k = det_tensor(&[b, h, s, d], &cpu_device);
+        let v = det_tensor(&[b, h, s, d], &cpu_device);
+        let dout = det_tensor(&[b, h, s, d], &cpu_device);
+
+        let (out, lse) = cpu_client
+            .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None)
+            .unwrap();
+        let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
+            .flash_attention_bwd(&dout, &q, &k, &v, &out, &lse, h, h, d, true, 0)
+            .unwrap();
+        let _cpu_dq_vec = cpu_dq.to_vec::<f32>();
+        let _cpu_dk_vec = cpu_dk.to_vec::<f32>();
+        let _cpu_dv_vec = cpu_dv.to_vec::<f32>();
+
+        #[cfg(feature = "cuda")]
+        with_cuda_backend(|cuda_client, cuda_device| {
+            use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
+            use numr::tensor::Tensor;
+            let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+            let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+            let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+            let dout_c = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+            let (out_c, lse_c) = cuda_client
+                .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0, None)
+                .unwrap();
+            // The backward's block config is chosen from the FORWARD shared-memory
+            // layout, but backward needs (2*BLOCK_M + 2*BLOCK_N)*head_dim*elem —
+            // 128KB at head_dim 64 — and no `_sm` backward kernel exists for
+            // head_dim 32/64. On a card with less opt-in shared memory than that,
+            // backward cannot run at all. Report it rather than failing the run,
+            // and rather than pretending the parity check happened.
+            match cuda_client
+                .flash_attention_bwd(&dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, h, h, d, true, 0)
+            {
+                Ok((dq_c, dk_c, dv_c)) => {
+                    assert_parity_f32_relaxed(
+                        &dq_c.to_vec::<f32>(),
+                        &_cpu_dq_vec,
+                        "flash_bwd causal dQ",
+                    );
+                    assert_parity_f32_relaxed(
+                        &dk_c.to_vec::<f32>(),
+                        &_cpu_dk_vec,
+                        "flash_bwd causal dK",
+                    );
+                    assert_parity_f32_relaxed(
+                        &dv_c.to_vec::<f32>(),
+                        &_cpu_dv_vec,
+                        "flash_bwd causal dV",
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "SKIPPED head_dim {d} backward parity: this GPU cannot run \
+                         the backward kernel ({e}). CUDA flash backward is \
+                         UNAVAILABLE at this head_dim on this device."
+                    );
+                }
+            }
+        });
+    }
+}
+
+/// Bug 1 regression: causal backward with `seq_len_q != seq_len_k`. Query row
+/// `i` sits at absolute position `key_offset + i` with
+/// `key_offset = seq_len_k - seq_len_q`, so the backward mask must be
+/// `k_pos > key_offset + q_pos`, matching the forward and
+/// `build_attention_mask`. CPU is the reference.
+///
+/// Also asserts key `seq_len_k - 1` — visible only to the LAST query row — has
+/// a nonzero gradient, which a raw-index mask (`q_pos < k_pos`) would zero.
+#[test]
+fn test_flash_attention_bwd_causal_key_offset_parity() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, h, d) = (1, 2, 32);
+    let (sq, sk) = (6usize, 16usize);
+    let q = det_tensor(&[b, h, sq, d], &cpu_device);
+    let k = det_tensor(&[b, h, sk, d], &cpu_device);
+    let v = det_tensor(&[b, h, sk, d], &cpu_device);
+    let dout = det_tensor(&[b, h, sq, d], &cpu_device);
+
+    let (out, lse) = cpu_client
+        .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None)
+        .unwrap();
+    let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
+        .flash_attention_bwd(&dout, &q, &k, &v, &out, &lse, h, h, d, true, 0)
+        .unwrap();
+    let _cpu_dq_vec = cpu_dq.to_vec::<f32>();
+    let _cpu_dk_vec = cpu_dk.to_vec::<f32>();
+    let _cpu_dv_vec = cpu_dv.to_vec::<f32>();
+    assert_key_row_nonzero(&_cpu_dk_vec, h, sk, d, sk - 1, "CPU dK last key");
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
+        use numr::tensor::Tensor;
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, sq, d], &cuda_device);
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, sk, d], &cuda_device);
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, sk, d], &cuda_device);
+        let dout_c = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, sq, d], &cuda_device);
+        let (out_c, lse_c) = cuda_client
+            .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0, None)
+            .unwrap();
+        let (dq_c, dk_c, dv_c) = cuda_client
+            .flash_attention_bwd(&dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, h, h, d, true, 0)
+            .unwrap();
+        let cuda_dk_vec = dk_c.to_vec::<f32>();
+        assert_key_row_nonzero(&cuda_dk_vec, h, sk, d, sk - 1, "CUDA dK last key");
+        assert_parity_f32_relaxed(
+            &dq_c.to_vec::<f32>(),
+            &_cpu_dq_vec,
+            "flash_bwd key_offset dQ",
+        );
+        assert_parity_f32_relaxed(&cuda_dk_vec, &_cpu_dk_vec, "flash_bwd key_offset dK");
+        assert_parity_f32_relaxed(
+            &dv_c.to_vec::<f32>(),
+            &_cpu_dv_vec,
+            "flash_bwd key_offset dV",
+        );
+    });
+}
+
+/// Assert key row `key` of a `[1, h, seq_len_k, head_dim]` gradient is not all zero.
+fn assert_key_row_nonzero(grad: &[f32], h: usize, sk: usize, d: usize, key: usize, what: &str) {
+    for head in 0..h {
+        let start = (head * sk + key) * d;
+        let nonzero = grad[start..start + d].iter().any(|x| x.abs() > 1e-6);
+        assert!(
+            nonzero,
+            "{}: key {} (head {}) must receive gradient but is all zero",
+            what, key, head
+        );
+    }
+}

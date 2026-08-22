@@ -42,7 +42,9 @@ fn samples(n: usize) -> Vec<f32> {
     if let Ok(path) = std::env::var("NEUCODEC_BENCH_WAV") {
         let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
         let mut wave: Vec<f32> = bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         if wave.is_empty() {

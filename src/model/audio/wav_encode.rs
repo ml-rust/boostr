@@ -133,8 +133,8 @@ mod tests {
         let input = vec![0.0, 0.5, -0.5, 1.0, -1.0];
         let wav = encode_wav_pcm16(&input, 16_000);
         let mut decoded = Vec::with_capacity(input.len());
-        for chunk in wav[44..].chunks_exact(2) {
-            let s = i16::from_le_bytes(chunk.try_into().unwrap());
+        for chunk in wav[44..].as_chunks::<2>().0 {
+            let s = i16::from_le_bytes(*chunk);
             decoded.push(s as f32 / i16::MAX as f32);
         }
         for (a, b) in input.iter().zip(decoded.iter()) {

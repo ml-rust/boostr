@@ -253,7 +253,9 @@ impl SafeTensors {
             DType::F64 => {
                 // Downcast F64 to F32 (F64 weights are rare and wasteful)
                 let data: Vec<f32> = bytes
-                    .chunks_exact(8)
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
                     .map(|b| {
                         f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
                     })

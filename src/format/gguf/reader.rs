@@ -269,25 +269,33 @@ impl Gguf {
 
         let data: Vec<f32> = match info.ggml_type {
             GgmlType::F32 => bytes
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                 .collect(),
             GgmlType::F16 => bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|b| {
                     let bits = u16::from_le_bytes([b[0], b[1]]);
                     half::f16::from_bits(bits).to_f32()
                 })
                 .collect(),
             GgmlType::BF16 => bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|b| {
                     let bits = u16::from_le_bytes([b[0], b[1]]);
                     half::bf16::from_bits(bits).to_f32()
                 })
                 .collect(),
             GgmlType::F64 => bytes
-                .chunks_exact(8)
+                .as_chunks::<8>()
+                .0
+                .iter()
                 .map(|b| {
                     f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
                 })

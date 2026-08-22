@@ -49,7 +49,9 @@ fn read_f32(path: &PathBuf) -> Vec<f32> {
         path.display()
     );
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
@@ -57,7 +59,9 @@ fn read_f32(path: &PathBuf) -> Vec<f32> {
 fn read_i32(path: &PathBuf) -> Vec<i32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }

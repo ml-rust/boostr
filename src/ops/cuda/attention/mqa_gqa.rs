@@ -14,10 +14,22 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::flash::set_smem_attribute;
+use super::flash_utils::{compute_bwd_smem, device_max_smem};
 use crate::ops::cuda::kernels::{self, MQA_GQA_BWD_MODULE, MQA_GQA_MODULE};
 
-/// Block configuration for MQA/GQA kernels (head dims 32/64/128 only).
-fn mqa_block_config(head_dim: usize) -> Result<(usize, usize)> {
+/// Shared memory element size of the MQA/GQA backward kernels.
+///
+/// `mqa_gqa_bwd.cu` declares `extern __shared__ float smem[]` in every backward
+/// impl (`mqa_gqa_bwd_fp32_impl`, `mqa_gqa_bwd_fp16_impl`, `mqa_gqa_bwd_dtype_impl`)
+/// and stages K/V/Q/dO as f32 there, converting on load. The requirement is
+/// therefore independent of the tensor dtype.
+const BWD_SMEM_ELEM_BYTES: usize = 4;
+
+/// Block configuration for the MQA/GQA FORWARD kernels (head dims 32/64/128 only).
+///
+/// Forward-only: the backward kernels have a different shared-memory layout and
+/// pick their blocks at runtime via [`mqa_bwd_block_config`].
+fn mqa_fwd_block_config(head_dim: usize) -> Result<(usize, usize)> {
     match head_dim {
         32 => Ok((128, 128)),
         64 => Ok((128, 128)),
@@ -30,6 +42,71 @@ fn mqa_block_config(head_dim: usize) -> Result<(usize, usize)> {
             ),
         }),
     }
+}
+
+/// Block config of the unsuffixed `mqa_gqa_bwd_{head_dim}_{dtype}` kernels.
+/// Must stay in sync with the "Large blocks" instantiations in `mqa_gqa_bwd.cu`.
+fn mqa_bwd_block_config_large(head_dim: usize) -> Option<(usize, usize)> {
+    match head_dim {
+        32 => Some((128, 128)),
+        64 => Some((128, 128)),
+        128 => Some((128, 64)),
+        _ => None,
+    }
+}
+
+/// Block config of the `mqa_gqa_bwd_{head_dim}_{dtype}_sm` kernels.
+/// Must stay in sync with the "Small blocks" instantiations in `mqa_gqa_bwd.cu`.
+fn mqa_bwd_block_config_small(head_dim: usize) -> Option<(usize, usize)> {
+    match head_dim {
+        32 => Some((64, 64)),
+        64 => Some((64, 32)),
+        128 => Some((64, 32)),
+        _ => None,
+    }
+}
+
+/// Pick the MQA/GQA backward block config that fits this device's opt-in shared
+/// memory. Returns `(block_m, block_n, use_sm_kernel)`; `use_sm_kernel` selects
+/// the `_sm`-suffixed kernel symbol.
+///
+/// [`mqa_fwd_block_config`] is NOT usable here: the forward stages in the tensor
+/// dtype with `head_dim + 1` padding, while the backward always stages 4 tiles of
+/// f32 with no padding, which is larger at every supported head_dim.
+fn mqa_bwd_block_config(head_dim: usize) -> Result<(usize, usize, bool)> {
+    let max_smem = device_max_smem();
+
+    if let Some((bm, bn)) = mqa_bwd_block_config_large(head_dim)
+        && compute_bwd_smem(bm, bn, head_dim, BWD_SMEM_ELEM_BYTES) <= max_smem
+    {
+        return Ok((bm, bn, false));
+    }
+    if let Some((bm, bn)) = mqa_bwd_block_config_small(head_dim)
+        && compute_bwd_smem(bm, bn, head_dim, BWD_SMEM_ELEM_BYTES) <= max_smem
+    {
+        return Ok((bm, bn, true));
+    }
+
+    let reason = match mqa_bwd_block_config_small(head_dim) {
+        Some((bm, bn)) => format!(
+            "MQA/GQA backward for head_dim={} needs {} bytes of shared memory \
+             (smallest block config BLOCK_M={}, BLOCK_N={}, f32 staging) but this GPU \
+             allows at most {} bytes per block",
+            head_dim,
+            compute_bwd_smem(bm, bn, head_dim, BWD_SMEM_ELEM_BYTES),
+            bm,
+            bn,
+            max_smem
+        ),
+        None => format!(
+            "MQA/GQA backward supports head_dim 32/64/128, got {}",
+            head_dim
+        ),
+    };
+    Err(Error::InvalidArgument {
+        arg: "head_dim",
+        reason,
+    })
 }
 
 /// MQA/GQA forward pass — dedicated kernel for extreme GQA ratios.
@@ -61,7 +138,7 @@ pub fn mqa_gqa_fwd(
     let batch_size = q_shape[0];
     let seq_len_q = q_shape[2];
     let seq_len_k = k_shape[2];
-    let (block_m, block_n) = mqa_block_config(head_dim)?;
+    let (block_m, block_n) = mqa_fwd_block_config(head_dim)?;
 
     let dtype_suffix = match dtype {
         DType::F32 => "fp32",
@@ -170,7 +247,7 @@ pub fn mqa_gqa_bwd(
     let batch_size = q_shape[0];
     let seq_len_q = q_shape[2];
     let seq_len_k = k.shape()[2];
-    let (block_m, block_n) = mqa_block_config(head_dim)?;
+    let (block_m, block_n, use_sm_kernel) = mqa_bwd_block_config(head_dim)?;
 
     let dtype_suffix = match dtype {
         DType::F32 => "fp32",
@@ -245,11 +322,12 @@ pub fn mqa_gqa_bwd(
 
     // Step 2: Main backward — dQ, dK, dV
     {
-        let bwd_name = format!("mqa_gqa_bwd_{}_{}", head_dim, dtype_suffix);
+        let variant = if use_sm_kernel { "_sm" } else { "" };
+        let bwd_name = format!("mqa_gqa_bwd_{}_{}{}", head_dim, dtype_suffix, variant);
         let func = kernels::get_kernel_function(&module, &bwd_name)?;
 
-        // Shared memory always F32 in shared memory (kernels convert internally)
-        let smem_size = (2 * block_n * head_dim + 2 * block_m * head_dim) * 4;
+        // Shared memory is always F32 (kernels convert on load), never the tensor dtype.
+        let smem_size = compute_bwd_smem(block_m, block_n, head_dim, BWD_SMEM_ELEM_BYTES);
         set_smem_attribute(&func, smem_size)?;
 
         let num_k_blocks = seq_len_k.div_ceil(block_n);

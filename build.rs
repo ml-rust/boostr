@@ -142,10 +142,15 @@ fn compile_cuda_kernels() {
             "sm_80",
             true
         ),
+        // sm_80, not sm_75: the bf16 backward kernels are guarded by
+        // `#if __CUDA_ARCH__ >= 800`, so compiling this at sm_75 silently drops
+        // every bf16 symbol while the launcher still accepts `DType::BF16` —
+        // a runtime kernel-lookup failure on the primary training dtype.
+        // The forward (mqa_gqa.cu) is already sm_80, so nothing is lost.
         k!(
             "src/ops/cuda/kernels/attention",
             "mqa_gqa_bwd.cu",
-            "sm_75",
+            "sm_80",
             true
         ),
         k!("src/ops/cuda/kernels/attention", "sdpa.cu", "sm_75", true),

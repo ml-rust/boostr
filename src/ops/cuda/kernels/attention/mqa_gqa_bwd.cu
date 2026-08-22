@@ -583,247 +583,87 @@ __device__ void mqa_gqa_bwd_fp16_impl(
 }
 
 // ============================================================================
+// Kernel Exports - runtime block-size selection
+// ============================================================================
+// BOTH block-size variants are emitted unconditionally, as separate symbols:
+//   mqa_gqa_bwd_{head_dim}_{dtype}       large blocks (128x128, 128x64)
+//   mqa_gqa_bwd_{head_dim}_{dtype}_sm    small blocks (64x64, 64x32)
+// The launcher in src/ops/cuda/attention/mqa_gqa.rs picks the symbol at runtime
+// from the device's opt-in shared-memory limit; nothing here is compile-time
+// gated on the GPU architecture.
+//
+// Every variant stages K/V/Q/dO in F32 shared memory regardless of the input
+// dtype, so the requirement is always:
+//   (2*BLOCK_M + 2*BLOCK_N) * head_dim * 4 bytes
+// ============================================================================
+
+// ============================================================================
 // Kernel Exports - FP32
 // ============================================================================
 
-// ============================================================================
-// Kernel Exports - Compile-time selection based on target GPU
-// ============================================================================
-// build.rs sets -DUSE_SMALL_BLOCKS for sm_86 and older GPUs
-// Shared memory limits:
-// - sm_86 (RTX 30xx): 99KB → use small blocks (64x64, 64x32)
-// - sm_89+ (Hopper/Ada): 128KB+ → use large blocks (128x128, 128x64)
-// ============================================================================
-
-#ifdef USE_SMALL_BLOCKS
-
-// Small block variants for GPUs with limited shared memory (sm_86 and older)
-extern "C" __global__ void mqa_gqa_bwd_32_fp32(
-    const float* Q, const float* K, const float* V,
-    const float* O, const float* dO,
-    const float* LSE, const float* D,
-    float* dQ, float* dK, float* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    // head_dim=32: 64x64 blocks = 2*64*32 + 2*64*32 = 16KB
-    // F32 kernels ignore scale parameters (no quantization)
-    mqa_gqa_bwd_fp32_impl<32, 64, 64>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
+#define EXPORT_MQA_GQA_BWD_FP32(HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX) \
+extern "C" __global__ void mqa_gqa_bwd_##HEAD_DIM##_##SUFFIX( \
+    const float* Q, const float* K, const float* V, \
+    const float* O, const float* dO, \
+    const float* LSE, const float* D, \
+    float* dQ, float* dK, float* dV, \
+    const int batch_size, const int num_q_heads, const int num_kv_heads, \
+    const int seq_len_q, const int seq_len_k, \
+    const float scale, const int causal, \
+    const float scale_q, const float scale_k, const float scale_v, \
+    const float scale_o, const float scale_do, \
+    const float scale_dq, const float scale_dk, const float scale_dv \
+) { \
+    /* F32 kernels ignore the scale parameters (no quantization) */ \
+    mqa_gqa_bwd_fp32_impl<HEAD_DIM, BLOCK_M, BLOCK_N>( \
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV, \
+        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal \
+    ); \
 }
 
-extern "C" __global__ void mqa_gqa_bwd_64_fp32(
-    const float* Q, const float* K, const float* V,
-    const float* O, const float* dO,
-    const float* LSE, const float* D,
-    float* dQ, float* dK, float* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    // head_dim=64: 64x32 blocks = 2*32*64 + 2*64*64 = 20KB
-    // F32 kernels ignore scale parameters (no quantization)
-    mqa_gqa_bwd_fp32_impl<64, 64, 32>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
+// Large blocks
+EXPORT_MQA_GQA_BWD_FP32(32, 128, 128, fp32)
+EXPORT_MQA_GQA_BWD_FP32(64, 128, 128, fp32)
+EXPORT_MQA_GQA_BWD_FP32(128, 128, 64, fp32)
 
-extern "C" __global__ void mqa_gqa_bwd_128_fp32(
-    const float* Q, const float* K, const float* V,
-    const float* O, const float* dO,
-    const float* LSE, const float* D,
-    float* dQ, float* dK, float* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    // head_dim=128: 64x32 blocks = 2*32*128 + 2*64*128 = 40KB
-    // F32 kernels ignore scale parameters (no quantization)
-    mqa_gqa_bwd_fp32_impl<128, 64, 32>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
+// Small blocks
+EXPORT_MQA_GQA_BWD_FP32(32, 64, 64, fp32_sm)
+EXPORT_MQA_GQA_BWD_FP32(64, 64, 32, fp32_sm)
+EXPORT_MQA_GQA_BWD_FP32(128, 64, 32, fp32_sm)
 
-#else
-
-// Large block variants for high-end GPUs (sm_89+)
-extern "C" __global__ void mqa_gqa_bwd_32_fp32(
-    const float* Q, const float* K, const float* V,
-    const float* O, const float* dO,
-    const float* LSE, const float* D,
-    float* dQ, float* dK, float* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    // head_dim=32: 128x128 blocks
-    // F32 kernels ignore scale parameters (no quantization)
-    mqa_gqa_bwd_fp32_impl<32, 128, 128>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_64_fp32(
-    const float* Q, const float* K, const float* V,
-    const float* O, const float* dO,
-    const float* LSE, const float* D,
-    float* dQ, float* dK, float* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    // head_dim=64: 128x128 blocks
-    // F32 kernels ignore scale parameters (no quantization)
-    mqa_gqa_bwd_fp32_impl<64, 128, 128>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_128_fp32(
-    const float* Q, const float* K, const float* V,
-    const float* O, const float* dO,
-    const float* LSE, const float* D,
-    float* dQ, float* dK, float* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    // head_dim=128: 128x64 blocks
-    // F32 kernels ignore scale parameters (no quantization)
-    mqa_gqa_bwd_fp32_impl<128, 128, 64>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
-
-#endif
+#undef EXPORT_MQA_GQA_BWD_FP32
 
 // ============================================================================
 // Kernel Exports - FP16
 // ============================================================================
 
-#ifdef USE_SMALL_BLOCKS
-
-// Small block variants for GPUs with limited shared memory (sm_86 and older)
-extern "C" __global__ void mqa_gqa_bwd_32_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    const __half* O, const __half* dO,
-    const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_bwd_fp16_impl<32, 64, 64>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
+#define EXPORT_MQA_GQA_BWD_FP16(HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX) \
+extern "C" __global__ void mqa_gqa_bwd_##HEAD_DIM##_##SUFFIX( \
+    const __half* Q, const __half* K, const __half* V, \
+    const __half* O, const __half* dO, \
+    const float* LSE, const float* D, \
+    __half* dQ, __half* dK, __half* dV, \
+    const int batch_size, const int num_q_heads, const int num_kv_heads, \
+    const int seq_len_q, const int seq_len_k, \
+    const float scale, const int causal \
+) { \
+    mqa_gqa_bwd_fp16_impl<HEAD_DIM, BLOCK_M, BLOCK_N>( \
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV, \
+        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal \
+    ); \
 }
 
-extern "C" __global__ void mqa_gqa_bwd_64_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    const __half* O, const __half* dO,
-    const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_bwd_fp16_impl<64, 64, 64>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
+// Large blocks
+EXPORT_MQA_GQA_BWD_FP16(32, 128, 128, fp16)
+EXPORT_MQA_GQA_BWD_FP16(64, 128, 128, fp16)
+EXPORT_MQA_GQA_BWD_FP16(128, 128, 64, fp16)
 
-extern "C" __global__ void mqa_gqa_bwd_128_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    const __half* O, const __half* dO,
-    const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_bwd_fp16_impl<128, 64, 32>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
+// Small blocks
+EXPORT_MQA_GQA_BWD_FP16(32, 64, 64, fp16_sm)
+EXPORT_MQA_GQA_BWD_FP16(64, 64, 32, fp16_sm)
+EXPORT_MQA_GQA_BWD_FP16(128, 64, 32, fp16_sm)
 
-#else
-
-// Large block variants for high-end GPUs (sm_89+)
-extern "C" __global__ void mqa_gqa_bwd_32_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    const __half* O, const __half* dO,
-    const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_bwd_fp16_impl<32, 128, 128>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_64_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    const __half* O, const __half* dO,
-    const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_bwd_fp16_impl<64, 128, 128>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_128_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    const __half* O, const __half* dO,
-    const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_bwd_fp16_impl<128, 128, 64>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
-
-#endif
+#undef EXPORT_MQA_GQA_BWD_FP16
 
 // ============================================================================
 // Dtype-Generic Preprocessing Implementation
@@ -1130,382 +970,73 @@ __device__ void mqa_gqa_bwd_dtype_impl(
 }
 
 // ============================================================================
-// Kernel Exports - BF16 with compile-time block selection
+// Kernel Exports - dtype-generic (BF16, FP8)
+// ============================================================================
+
+#define EXPORT_MQA_GQA_BWD_DTYPE(T, HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX) \
+extern "C" __global__ void mqa_gqa_bwd_##HEAD_DIM##_##SUFFIX( \
+    const T* Q, const T* K, const T* V, \
+    const T* O, const T* dO, \
+    const float* LSE, const float* D, \
+    T* dQ, T* dK, T* dV, \
+    const int batch_size, const int num_q_heads, const int num_kv_heads, \
+    const int seq_len_q, const int seq_len_k, \
+    const float scale, const int causal, \
+    const float scale_q, const float scale_k, const float scale_v, \
+    const float scale_o, const float scale_do, \
+    const float scale_dq, const float scale_dk, const float scale_dv \
+) { \
+    mqa_gqa_bwd_dtype_impl<T, HEAD_DIM, BLOCK_M, BLOCK_N>( \
+        Q, K, V, O, dO, LSE, D, dQ, dK, dV, \
+        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, \
+        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv \
+    ); \
+}
+
+// ============================================================================
+// Kernel Exports - BF16
 // ============================================================================
 
 #if __CUDA_ARCH__ >= 800
 
-#ifdef USE_SMALL_BLOCKS
+// Large blocks
+EXPORT_MQA_GQA_BWD_DTYPE(__nv_bfloat16, 32, 128, 128, bf16)
+EXPORT_MQA_GQA_BWD_DTYPE(__nv_bfloat16, 64, 128, 128, bf16)
+EXPORT_MQA_GQA_BWD_DTYPE(__nv_bfloat16, 128, 128, 64, bf16)
 
-// Small block BF16 kernels
-extern "C" __global__ void mqa_gqa_bwd_32_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    const __nv_bfloat16* O, const __nv_bfloat16* dO,
-    const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<__nv_bfloat16, 32, 64, 64>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
+// Small blocks
+EXPORT_MQA_GQA_BWD_DTYPE(__nv_bfloat16, 32, 64, 64, bf16_sm)
+EXPORT_MQA_GQA_BWD_DTYPE(__nv_bfloat16, 64, 64, 32, bf16_sm)
+EXPORT_MQA_GQA_BWD_DTYPE(__nv_bfloat16, 128, 64, 32, bf16_sm)
 
-extern "C" __global__ void mqa_gqa_bwd_64_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    const __nv_bfloat16* O, const __nv_bfloat16* dO,
-    const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<__nv_bfloat16, 64, 64, 32>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_128_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    const __nv_bfloat16* O, const __nv_bfloat16* dO,
-    const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<__nv_bfloat16, 128, 64, 32>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-#else
-
-// Large block BF16 kernels
-extern "C" __global__ void mqa_gqa_bwd_32_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    const __nv_bfloat16* O, const __nv_bfloat16* dO,
-    const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<__nv_bfloat16, 32, 128, 128>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_64_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    const __nv_bfloat16* O, const __nv_bfloat16* dO,
-    const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<__nv_bfloat16, 64, 128, 128>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_128_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    const __nv_bfloat16* O, const __nv_bfloat16* dO,
-    const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<__nv_bfloat16, 128, 128, 64>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-#endif
 #endif  // __CUDA_ARCH__ >= 800
 
 // ============================================================================
-// Kernel Exports - FP8 E4M3 with compile-time block selection
+// Kernel Exports - FP8 E4M3
 // ============================================================================
 
-#ifdef USE_SMALL_BLOCKS
+// Large blocks
+EXPORT_MQA_GQA_BWD_DTYPE(boostr_fp8_e4m3, 32, 128, 128, fp8_e4m3)
+EXPORT_MQA_GQA_BWD_DTYPE(boostr_fp8_e4m3, 64, 128, 128, fp8_e4m3)
+EXPORT_MQA_GQA_BWD_DTYPE(boostr_fp8_e4m3, 128, 128, 64, fp8_e4m3)
 
-// Small block FP8 E4M3 kernels
-extern "C" __global__ void mqa_gqa_bwd_32_fp8_e4m3(
-    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
-    const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO,
-    const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<boostr_fp8_e4m3, 32, 64, 64>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_64_fp8_e4m3(
-    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
-    const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO,
-    const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<boostr_fp8_e4m3, 64, 64, 32>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_128_fp8_e4m3(
-    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
-    const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO,
-    const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<boostr_fp8_e4m3, 128, 64, 32>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-#else
-
-// Large block FP8 E4M3 kernels
-extern "C" __global__ void mqa_gqa_bwd_32_fp8_e4m3(
-    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
-    const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO,
-    const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<boostr_fp8_e4m3, 32, 128, 128>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_64_fp8_e4m3(
-    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
-    const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO,
-    const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<boostr_fp8_e4m3, 64, 128, 128>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_128_fp8_e4m3(
-    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
-    const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO,
-    const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<boostr_fp8_e4m3, 128, 128, 64>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-#endif
+// Small blocks
+EXPORT_MQA_GQA_BWD_DTYPE(boostr_fp8_e4m3, 32, 64, 64, fp8_e4m3_sm)
+EXPORT_MQA_GQA_BWD_DTYPE(boostr_fp8_e4m3, 64, 64, 32, fp8_e4m3_sm)
+EXPORT_MQA_GQA_BWD_DTYPE(boostr_fp8_e4m3, 128, 64, 32, fp8_e4m3_sm)
 
 // ============================================================================
-// Kernel Exports - FP8 E5M2 with compile-time block selection
+// Kernel Exports - FP8 E5M2
 // ============================================================================
 
-#ifdef USE_SMALL_BLOCKS
+// Large blocks
+EXPORT_MQA_GQA_BWD_DTYPE(boostr_fp8_e5m2, 32, 128, 128, fp8_e5m2)
+EXPORT_MQA_GQA_BWD_DTYPE(boostr_fp8_e5m2, 64, 128, 128, fp8_e5m2)
+EXPORT_MQA_GQA_BWD_DTYPE(boostr_fp8_e5m2, 128, 128, 64, fp8_e5m2)
 
-// Small block FP8 E5M2 kernels
-extern "C" __global__ void mqa_gqa_bwd_32_fp8_e5m2(
-    const boostr_fp8_e5m2* Q, const boostr_fp8_e5m2* K, const boostr_fp8_e5m2* V,
-    const boostr_fp8_e5m2* O, const boostr_fp8_e5m2* dO,
-    const float* LSE, const float* D,
-    boostr_fp8_e5m2* dQ, boostr_fp8_e5m2* dK, boostr_fp8_e5m2* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<boostr_fp8_e5m2, 32, 64, 64>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
+// Small blocks
+EXPORT_MQA_GQA_BWD_DTYPE(boostr_fp8_e5m2, 32, 64, 64, fp8_e5m2_sm)
+EXPORT_MQA_GQA_BWD_DTYPE(boostr_fp8_e5m2, 64, 64, 32, fp8_e5m2_sm)
+EXPORT_MQA_GQA_BWD_DTYPE(boostr_fp8_e5m2, 128, 64, 32, fp8_e5m2_sm)
 
-extern "C" __global__ void mqa_gqa_bwd_64_fp8_e5m2(
-    const boostr_fp8_e5m2* Q, const boostr_fp8_e5m2* K, const boostr_fp8_e5m2* V,
-    const boostr_fp8_e5m2* O, const boostr_fp8_e5m2* dO,
-    const float* LSE, const float* D,
-    boostr_fp8_e5m2* dQ, boostr_fp8_e5m2* dK, boostr_fp8_e5m2* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<boostr_fp8_e5m2, 64, 64, 32>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_128_fp8_e5m2(
-    const boostr_fp8_e5m2* Q, const boostr_fp8_e5m2* K, const boostr_fp8_e5m2* V,
-    const boostr_fp8_e5m2* O, const boostr_fp8_e5m2* dO,
-    const float* LSE, const float* D,
-    boostr_fp8_e5m2* dQ, boostr_fp8_e5m2* dK, boostr_fp8_e5m2* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<boostr_fp8_e5m2, 128, 64, 32>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-#else
-
-// Large block FP8 E5M2 kernels
-extern "C" __global__ void mqa_gqa_bwd_32_fp8_e5m2(
-    const boostr_fp8_e5m2* Q, const boostr_fp8_e5m2* K, const boostr_fp8_e5m2* V,
-    const boostr_fp8_e5m2* O, const boostr_fp8_e5m2* dO,
-    const float* LSE, const float* D,
-    boostr_fp8_e5m2* dQ, boostr_fp8_e5m2* dK, boostr_fp8_e5m2* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<boostr_fp8_e5m2, 32, 128, 128>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_64_fp8_e5m2(
-    const boostr_fp8_e5m2* Q, const boostr_fp8_e5m2* K, const boostr_fp8_e5m2* V,
-    const boostr_fp8_e5m2* O, const boostr_fp8_e5m2* dO,
-    const float* LSE, const float* D,
-    boostr_fp8_e5m2* dQ, boostr_fp8_e5m2* dK, boostr_fp8_e5m2* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<boostr_fp8_e5m2, 64, 128, 128>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-extern "C" __global__ void mqa_gqa_bwd_128_fp8_e5m2(
-    const boostr_fp8_e5m2* Q, const boostr_fp8_e5m2* K, const boostr_fp8_e5m2* V,
-    const boostr_fp8_e5m2* O, const boostr_fp8_e5m2* dO,
-    const float* LSE, const float* D,
-    boostr_fp8_e5m2* dQ, boostr_fp8_e5m2* dK, boostr_fp8_e5m2* dV,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float scale_q, const float scale_k, const float scale_v,
-    const float scale_o, const float scale_do,
-    const float scale_dq, const float scale_dk, const float scale_dv
-) {
-    mqa_gqa_bwd_dtype_impl<boostr_fp8_e5m2, 128, 128, 64>(
-        Q, K, V, O, dO, LSE, D, dQ, dK, dV,
-        batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        scale_q, scale_k, scale_v, scale_o, scale_do, scale_dq, scale_dk, scale_dv
-    );
-}
-
-#endif
+#undef EXPORT_MQA_GQA_BWD_DTYPE

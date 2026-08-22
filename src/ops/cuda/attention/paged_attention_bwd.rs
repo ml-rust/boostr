@@ -41,6 +41,18 @@ pub(super) fn paged_attention_bwd_impl(
             reason: format!("expected 4D [B, H, S, D], got {}D", q_shape.len()),
         });
     }
+    // The kernel maps query heads to KV heads with `head_idx / (num_heads /
+    // num_kv_heads)`; a zero or non-dividing `num_kv_heads` makes that mapping
+    // undefined on the device.
+    if num_kv_heads == 0 || !num_heads.is_multiple_of(num_kv_heads) {
+        return Err(Error::InvalidArgument {
+            arg: "num_kv_heads",
+            reason: format!(
+                "num_heads ({}) must be divisible by a non-zero num_kv_heads ({})",
+                num_heads, num_kv_heads
+            ),
+        });
+    }
     let batch_size = q_shape[0];
     let dtype = q.dtype();
 

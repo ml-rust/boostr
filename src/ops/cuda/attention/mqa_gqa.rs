@@ -311,6 +311,9 @@ pub fn mqa_gqa_bwd(
 /// - num_heads / num_kv_heads >= 4 (extreme GQA ratio)
 /// - head_dim is 32, 64, or 128 (supported by MQA/GQA kernels)
 pub fn should_use_mqa_gqa(num_heads: usize, num_kv_heads: usize, head_dim: usize) -> bool {
+    if num_kv_heads == 0 {
+        return false;
+    }
     let ratio = num_heads / num_kv_heads;
     ratio >= 4 && matches!(head_dim, 32 | 64 | 128)
 }

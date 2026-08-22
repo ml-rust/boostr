@@ -164,3 +164,57 @@ fn explicit_zero_sliding_window_is_disabled() {
     assert_eq!(block_from_config(Some(0)), 0);
     assert_eq!(block_from_varbuilder(Some(0)), 0);
 }
+
+/// ALiBi's prefill mask MUST mask the future.
+///
+/// Regression guard for a real bug: this path built its bias with
+/// `alibi_add_bias`, which writes a SYMMETRIC `-slope * |qi - ki|` over the
+/// whole rectangle and masks nothing — so every prefill position attended to
+/// future tokens. The comment above it even claimed the opposite. Only
+/// `alibi_add_bias_causal` sets `ki > qi` to -inf.
+#[test]
+fn alibi_prefill_mask_is_causal() {
+    let (client, device) = cpu_setup();
+    let yaml = r#"
+model_type: llama
+vocab_size: 32
+hidden_size: 8
+num_layers: 1
+max_seq_len: 32
+intermediate_size: 16
+rms_norm_eps: 1.0e-5
+attention:
+  num_heads: 2
+  rope_theta: 10000.0
+  use_alibi: true
+"#;
+    let config: ModelConfig = serde_saphyr::from_str(yaml).unwrap();
+    let block = build_block_from_config::<CpuRuntime>(&config, &device, 2, 2, 4, 16, DType::F32);
+    assert!(block.self_attn.use_alibi, "fixture must exercise ALiBi");
+
+    let sq = 4;
+    let mask = block
+        .self_attn
+        .prefill_mask(&client, 1, sq, sq, &device)
+        .expect("mask builds");
+    let values: Vec<f32> = mask.tensor().contiguous().unwrap().to_vec();
+
+    // Head 0 occupies the first sq*sq entries.
+    for i in 0..sq {
+        for j in 0..sq {
+            let got = values[i * sq + j];
+            if j > i {
+                assert_eq!(
+                    got,
+                    f32::NEG_INFINITY,
+                    "future key ({i},{j}) must be masked, got {got}"
+                );
+            } else {
+                assert!(
+                    got.is_finite() && got <= 0.0,
+                    "past/self key ({i},{j}) must carry a finite ALiBi bias, got {got}"
+                );
+            }
+        }
+    }
+}

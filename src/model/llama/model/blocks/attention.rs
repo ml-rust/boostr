@@ -179,21 +179,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         // `is_prefill`.
         let sq = q.shape()[2];
         let sk = k.shape()[2];
-        let mask = if self.use_alibi {
-            // ALiBi's own kernel writes the causal structure along with the bias.
-            let mask = Tensor::<R>::zeros(
-                &[batch, self.num_heads, sq, sk],
-                DType::F32,
-                q.tensor().device(),
-            );
-            client.alibi_add_bias(&mask, batch, self.num_heads, sq, sk)?;
-            Var::new(mask, false)
-        } else {
-            Var::new(
-                Self::causal_mask(client, sq, sk, self.sliding_window, q.tensor().device())?,
-                false,
-            )
-        };
+        let mask = self.prefill_mask(client, batch, sq, sk, q.tensor().device())?;
         let attn_out = multi_head_attention_impl(client, &q, &k, &v, Some(&mask), self.num_heads)?;
 
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
@@ -205,6 +191,42 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
 
         // Output projection
         self.o_proj.forward(client, &attn_out)
+    }
+
+    /// The prefill/training additive mask: ALiBi bias or causal(+window).
+    ///
+    /// Split out so the masking rule is directly testable — a non-causal mask
+    /// here is invisible to shape checks and still produces fluent text.
+    pub(crate) fn prefill_mask<C>(
+        &self,
+        client: &C,
+        batch: usize,
+        sq: usize,
+        sk: usize,
+        device: &R::Device,
+    ) -> Result<Var<R>>
+    where
+        C: ModelClient<R>,
+    {
+        Ok(if self.use_alibi {
+            // MUST be the `_causal` kernel. `alibi_add_bias` writes a SYMMETRIC
+            // `-slope * |qi - ki|` over the whole rectangle and masks nothing,
+            // so using it here let every prefill position attend to FUTURE
+            // tokens — the same defect the non-ALiBi path had until parity
+            // testing caught it. `alibi_add_bias_causal` adds the same distance
+            // bias and sets `ki > qi + position` to -inf.
+            //
+            // `position = 0`: this is the prefill/training path, so query `qi`
+            // is at absolute position `qi`.
+            let mask = Tensor::<R>::zeros(&[batch, self.num_heads, sq, sk], DType::F32, device);
+            client.alibi_add_bias_causal(&mask, batch, self.num_heads, sq, sk, 0)?;
+            Var::new(mask, false)
+        } else {
+            Var::new(
+                Self::causal_mask(client, sq, sk, self.sliding_window, device)?,
+                false,
+            )
+        })
     }
 
     pub fn forward_with_kv_cache<C>(

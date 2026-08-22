@@ -1,23 +1,43 @@
 //! MoE Expert — individual SwiGLU MLP
 
 use crate::error::{Error, Result};
-use crate::nn::Linear;
+use crate::nn::linear::Linear;
+use crate::nn::maybe_lora::MaybeLoraLinear;
+use crate::nn::module::Module;
 use numr::autograd::{Var, var_mul, var_silu};
-use numr::ops::{ActivationOps, ReduceOps, ScalarOps, ShapeOps, TensorOps};
+use numr::dtype::DType;
+use numr::ops::{ActivationOps, BinaryOps, ReduceOps, ScalarOps, ShapeOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
-use numr::tensor::Tensor;
+use numr::tensor::{Tensor, TensorId};
 
 /// Single expert MLP (SwiGLU architecture).
 ///
 /// Architecture: `down_proj(silu(gate_proj(x)) * up_proj(x))`
+///
+/// Each projection is a [`MaybeLoraLinear`], so an expert can be LoRA-adapted
+/// per projection without a separate expert type.
 pub struct Expert<R: Runtime> {
-    gate_proj: Linear<R>,
-    up_proj: Linear<R>,
-    down_proj: Linear<R>,
+    gate_proj: MaybeLoraLinear<R>,
+    up_proj: MaybeLoraLinear<R>,
+    down_proj: MaybeLoraLinear<R>,
 }
 
-impl<R: Runtime> Expert<R> {
+impl<R: Runtime<DType = DType>> Expert<R> {
+    /// Create from plain linear projections.
     pub fn new(gate_proj: Linear<R>, up_proj: Linear<R>, down_proj: Linear<R>) -> Self {
+        Self {
+            gate_proj: gate_proj.into(),
+            up_proj: up_proj.into(),
+            down_proj: down_proj.into(),
+        }
+    }
+
+    /// Create from projections that may each carry a LoRA adapter.
+    pub fn new_adapted(
+        gate_proj: MaybeLoraLinear<R>,
+        up_proj: MaybeLoraLinear<R>,
+        down_proj: MaybeLoraLinear<R>,
+    ) -> Self {
         Self {
             gate_proj,
             up_proj,
@@ -35,11 +55,11 @@ impl<R: Runtime> Expert<R> {
         down_proj: Tensor<R>,
         trainable: bool,
     ) -> Self {
-        Self {
-            gate_proj: Linear::new(gate_proj, None, trainable),
-            up_proj: Linear::new(up_proj, None, trainable),
-            down_proj: Linear::new(down_proj, None, trainable),
-        }
+        Self::new(
+            Linear::new(gate_proj, None, trainable),
+            Linear::new(up_proj, None, trainable),
+            Linear::new(down_proj, None, trainable),
+        )
     }
 
     /// SwiGLU forward: `down_proj(silu(gate_proj(x)) * up_proj(x))`
@@ -51,8 +71,9 @@ impl<R: Runtime> Expert<R> {
             + ScalarOps<R>
             + ReduceOps<R>
             + ShapeOps<R>
-            + ActivationOps<R>,
-        R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R>,
+            + ActivationOps<R>
+            + BinaryOps<R>,
+        R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R> + BinaryOps<R>,
     {
         let gate = self.gate_proj.forward(client, x)?;
         let up = self.up_proj.forward(client, x)?;
@@ -62,42 +83,71 @@ impl<R: Runtime> Expert<R> {
         self.down_proj.forward(client, &hidden)
     }
 
-    pub fn gate_proj(&self) -> &Linear<R> {
+    /// Fold every adapter into its base weight, producing a plain expert.
+    ///
+    /// Mirrors [`LoraLinear::merge_into_base`](crate::nn::LoraLinear::merge_into_base)
+    /// at expert granularity — for export and inference after training.
+    pub fn merge_adapters<C>(&self, client: &C) -> Result<Self>
+    where
+        C: RuntimeClient<R> + TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
+    {
+        Ok(Self::new(
+            self.gate_proj.merge_into_base(client)?,
+            self.up_proj.merge_into_base(client)?,
+            self.down_proj.merge_into_base(client)?,
+        ))
+    }
+
+    pub fn gate_proj(&self) -> &MaybeLoraLinear<R> {
         &self.gate_proj
     }
 
-    pub fn up_proj(&self) -> &Linear<R> {
+    pub fn up_proj(&self) -> &MaybeLoraLinear<R> {
         &self.up_proj
     }
 
-    pub fn down_proj(&self) -> &Linear<R> {
+    pub fn down_proj(&self) -> &MaybeLoraLinear<R> {
         &self.down_proj
+    }
+
+    /// All parameters with their stable autograd IDs, adapters included.
+    pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
+        let mut params = self.gate_proj.parameters();
+        params.extend(self.up_proj.parameters());
+        params.extend(self.down_proj.parameters());
+        params
+    }
+}
+
+impl<R: Runtime<DType = DType>> Module<R> for Expert<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        Expert::parameters(self)
+            .into_iter()
+            .map(|param| param.1)
+            .collect()
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = Vec::new();
+        for (prefix, proj) in [
+            ("gate_proj", &self.gate_proj),
+            ("up_proj", &self.up_proj),
+            ("down_proj", &self.down_proj),
+        ] {
+            params.extend(
+                proj.named_parameters()
+                    .into_iter()
+                    .map(|(name, var)| (format!("{prefix}.{name}"), var)),
+            );
+        }
+        params
+    }
+
+    fn parameters_with_ids(&self) -> Vec<(TensorId, &Var<R>)> {
+        Expert::parameters(self)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_utils::cpu_setup;
-    use numr::runtime::cpu::CpuRuntime;
-
-    #[test]
-    fn test_expert_forward_shape() {
-        let (client, device) = cpu_setup();
-        let hidden = 4;
-        let inter = 8;
-
-        let gate_w = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 32], &[inter, hidden], &device);
-        let up_w = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 32], &[inter, hidden], &device);
-        let down_w = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 32], &[hidden, inter], &device);
-
-        let expert = Expert::from_tensors(gate_w, up_w, down_w, false);
-
-        let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[2, hidden], &device),
-            false,
-        );
-        let out = expert.forward(&client, &input).unwrap();
-        assert_eq!(out.shape(), &[2, hidden]);
-    }
-}
+mod tests;

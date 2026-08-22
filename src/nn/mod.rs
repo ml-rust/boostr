@@ -11,6 +11,7 @@ pub mod linear;
 pub mod lora;
 pub mod loss;
 pub mod lstm;
+pub mod maybe_lora;
 pub mod mla;
 pub mod module;
 pub mod moe;
@@ -40,6 +41,7 @@ pub use loss::{
     focal_loss, kl_div_loss, mse_loss, router_z_loss,
 };
 pub use lstm::{BiLstm, Lstm};
+pub use maybe_lora::MaybeLoraLinear;
 pub use mla::{Mla, MlaConfig, MlaWeights};
 pub use module::{Module, StateDict, TrainMode};
 pub use moe::{

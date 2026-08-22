@@ -39,7 +39,8 @@ use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 use std::path::PathBuf;
 
-const DEFAULT_MODEL: &str = "/home/farhan/Projects/models/qwen3-1.7b";
+mod common;
+use common::model_fixture;
 
 fn read_f32(path: &PathBuf) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -96,7 +97,7 @@ fn fixtures() -> Option<PathBuf> {
 }
 
 fn model_dir() -> Option<PathBuf> {
-    let p = PathBuf::from(std::env::var("QWEN3_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()));
+    let p = model_fixture("QWEN3_MODEL", "qwen3-1.7b")?;
     p.join("config.json").exists().then_some(p)
 }
 
@@ -142,7 +143,7 @@ fn load(dir: &PathBuf, device: &CpuDevice) -> (Llama<CpuRuntime>, usize) {
 #[test]
 fn qwen3_config_parses_correctly() {
     let Some(model_path) = model_dir() else {
-        eprintln!("skipping: Qwen3 weights absent (set QWEN3_MODEL)");
+        common::skip_notice("Qwen3 weights", "QWEN3_MODEL");
         return;
     };
     let cfg_text = std::fs::read_to_string(model_path.join("config.json")).expect("config.json");
@@ -199,7 +200,7 @@ fn qwen3_embedding_matches_huggingface() {
         return;
     };
     let Some(model_path) = model_dir() else {
-        eprintln!("skipping: Qwen3 weights absent (set QWEN3_MODEL)");
+        common::skip_notice("Qwen3 weights", "QWEN3_MODEL");
         return;
     };
     let device = CpuDevice::new();
@@ -250,7 +251,7 @@ fn qwen3_hidden_state_matches_huggingface() {
         return;
     };
     let Some(model_path) = model_dir() else {
-        eprintln!("skipping: Qwen3 weights absent (set QWEN3_MODEL)");
+        common::skip_notice("Qwen3 weights", "QWEN3_MODEL");
         return;
     };
 
@@ -297,7 +298,7 @@ fn qwen3_logits_match_huggingface() {
         return;
     };
     let Some(model_path) = model_dir() else {
-        eprintln!("skipping: Qwen3 weights absent (set QWEN3_MODEL)");
+        common::skip_notice("Qwen3 weights", "QWEN3_MODEL");
         return;
     };
 

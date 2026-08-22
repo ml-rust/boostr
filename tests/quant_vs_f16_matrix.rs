@@ -28,7 +28,10 @@
 //! The 0.90 floor sits in the wide empty gap between those, so it holds for
 //! every format down to 2-bit without being loose enough to pass a layout bug.
 
+mod common;
+
 use boostr::format::gguf::Gguf;
+use common::model_fixture;
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
 /// Tensors compared per model. Chosen to span the formats a mixed-precision
@@ -81,11 +84,13 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 #[test]
 #[ignore]
 fn every_quantization_matches_the_f16_reference() {
-    let dir = std::env::var("BOOSTR_QUANT_MATRIX_DIR")
-        .unwrap_or_else(|_| "/home/farhan/Projects/models".to_owned());
+    let Some(dir) = model_fixture("BOOSTR_QUANT_MATRIX_DIR", "") else {
+        common::skip_notice("quant matrix models dir", "BOOSTR_QUANT_MATRIX_DIR");
+        return;
+    };
     let stem = std::env::var("BOOSTR_QUANT_MATRIX_STEM")
         .unwrap_or_else(|_| "nomic-embed-text-v1.5".to_owned());
-    let dir = std::path::Path::new(&dir);
+    let dir = dir.as_path();
 
     let mut builds: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))

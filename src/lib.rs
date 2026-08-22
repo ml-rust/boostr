@@ -157,11 +157,24 @@ pub fn preload_inference_modules(client: &CudaClient) -> Result<(), error::Error
 #[cfg(test)]
 pub(crate) mod test_utils {
     use numr::runtime::cpu::{CpuClient, CpuDevice};
+    use std::path::PathBuf;
 
     /// Create a CPU client and device for use in unit tests.
     pub(crate) fn cpu_setup() -> (CpuClient, CpuDevice) {
         let device = CpuDevice::new();
         let client = CpuClient::new(device.clone());
         (client, device)
+    }
+
+    /// Resolve the NeuCodec checkpoint fixture: `$NEUCODEC_CHECKPOINT`, else
+    /// `$BOOSTR_MODELS_DIR/neucodec/model.safetensors`. `None` when neither is
+    /// set or the resolved path is absent, so callers skip.
+    pub(crate) fn neucodec_checkpoint() -> Option<PathBuf> {
+        let path = match std::env::var("NEUCODEC_CHECKPOINT") {
+            Ok(p) => PathBuf::from(p),
+            Err(_) => PathBuf::from(std::env::var("BOOSTR_MODELS_DIR").ok()?)
+                .join("neucodec/model.safetensors"),
+        };
+        path.exists().then_some(path)
     }
 }

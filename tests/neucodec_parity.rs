@@ -26,7 +26,8 @@ use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 use std::path::PathBuf;
 
-const DEFAULT_CHECKPOINT: &str = "/home/farhan/Projects/models/neucodec/model.safetensors";
+mod common;
+use common::model_fixture;
 
 fn read_f32(path: &PathBuf) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -90,9 +91,7 @@ struct Fixtures {
 
 fn fixtures() -> Option<Fixtures> {
     let dir = PathBuf::from(std::env::var("NEUCODEC_REF_DIR").ok()?);
-    let checkpoint = PathBuf::from(
-        std::env::var("NEUCODEC_CHECKPOINT").unwrap_or_else(|_| DEFAULT_CHECKPOINT.to_string()),
-    );
+    let checkpoint = model_fixture("NEUCODEC_CHECKPOINT", "neucodec/model.safetensors")?;
     let needed = [
         "ref_input.f32",
         "ref_x_pred.f32",
@@ -101,7 +100,7 @@ fn fixtures() -> Option<Fixtures> {
         "ref_fsq_out.f32",
         "ref_e2e_waveform.f32",
     ];
-    if !checkpoint.exists() || needed.iter().any(|f| !dir.join(f).exists()) {
+    if needed.iter().any(|f| !dir.join(f).exists()) {
         return None;
     }
     Some(Fixtures { dir, checkpoint })
@@ -116,7 +115,9 @@ fn setup() -> (CpuClient, CpuDevice) {
 #[test]
 fn decoder_matches_upstream_neucodec_reference() {
     let Some(fx) = fixtures() else {
-        eprintln!("skipping: set NEUCODEC_REF_DIR (and have the checkpoint) to run parity");
+        eprintln!(
+            "skipping: set NEUCODEC_REF_DIR and (NEUCODEC_CHECKPOINT or BOOSTR_MODELS_DIR) to run parity"
+        );
         return;
     };
     let (client, device) = setup();
@@ -204,7 +205,9 @@ fn decoder_matches_upstream_neucodec_reference() {
 #[test]
 fn codec_matches_upstream_from_indices() {
     let Some(fx) = fixtures() else {
-        eprintln!("skipping: set NEUCODEC_REF_DIR (and have the checkpoint) to run parity");
+        eprintln!(
+            "skipping: set NEUCODEC_REF_DIR and (NEUCODEC_CHECKPOINT or BOOSTR_MODELS_DIR) to run parity"
+        );
         return;
     };
     let (client, device) = setup();
@@ -266,7 +269,9 @@ fn codec_matches_upstream_from_indices() {
 #[test]
 fn decodes_real_speech_matching_upstream() {
     let Some(fx) = fixtures() else {
-        eprintln!("skipping: set NEUCODEC_REF_DIR (and have the checkpoint) to run parity");
+        eprintln!(
+            "skipping: set NEUCODEC_REF_DIR and (NEUCODEC_CHECKPOINT or BOOSTR_MODELS_DIR) to run parity"
+        );
         return;
     };
     let idx_path = fx.dir.join("real_indices.i32");

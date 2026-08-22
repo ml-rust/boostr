@@ -66,11 +66,17 @@ fn samples(n: usize) -> Vec<f32> {
         .collect()
 }
 
+/// Resolve the checkpoint: `$NEUCODEC_CHECKPOINT`, else
+/// `$BOOSTR_MODELS_DIR/neucodec/model.safetensors`. Returns a best-effort path
+/// even when unresolved so `main` can report a precise error.
 fn checkpoint() -> PathBuf {
-    PathBuf::from(
-        std::env::var("NEUCODEC_CHECKPOINT")
-            .unwrap_or_else(|_| "/home/farhan/Projects/models/neucodec/model.safetensors".into()),
-    )
+    if let Ok(p) = std::env::var("NEUCODEC_CHECKPOINT") {
+        return PathBuf::from(p);
+    }
+    match std::env::var("BOOSTR_MODELS_DIR") {
+        Ok(root) => PathBuf::from(root).join("neucodec/model.safetensors"),
+        Err(_) => PathBuf::new(),
+    }
 }
 
 /// Run `iters` timed encodes (after one warmup) and report the realtime factor.
@@ -95,10 +101,10 @@ fn main() {
     let ckpt = checkpoint();
     if !ckpt.exists() {
         eprintln!(
-            "checkpoint not found at {}; set NEUCODEC_CHECKPOINT",
+            "checkpoint not found at {}; set NEUCODEC_CHECKPOINT or BOOSTR_MODELS_DIR",
             ckpt.display()
         );
-        return;
+        std::process::exit(1);
     }
     let secs = env_usize("NEUCODEC_BENCH_SECS", 10);
     let iters = env_usize("NEUCODEC_BENCH_ITERS", 5);

@@ -223,16 +223,13 @@ impl<R: Runtime<DType = DType>> NeuCodecDecoder<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{cpu_setup, neucodec_checkpoint};
     use numr::runtime::cpu::CpuRuntime;
 
     /// The real checkpoint, if present. Loader tests are skipped when the
     /// weights are not downloaded (they live outside the repo).
-    const CHECKPOINT: &str = "/home/farhan/Projects/models/neucodec/model.safetensors";
-
-    fn checkpoint() -> Option<&'static Path> {
-        let p = Path::new(CHECKPOINT);
-        p.exists().then_some(p)
+    fn checkpoint() -> Option<std::path::PathBuf> {
+        neucodec_checkpoint()
     }
 
     #[test]

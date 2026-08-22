@@ -93,14 +93,11 @@ impl NeuCodec<numr::runtime::cpu::CpuRuntime> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::cpu_setup;
+    use crate::test_utils::{cpu_setup, neucodec_checkpoint};
     use numr::runtime::cpu::CpuRuntime;
 
-    const CHECKPOINT: &str = "/home/farhan/Projects/models/neucodec/model.safetensors";
-
-    fn checkpoint() -> Option<&'static Path> {
-        let p = Path::new(CHECKPOINT);
-        p.exists().then_some(p)
+    fn checkpoint() -> Option<std::path::PathBuf> {
+        neucodec_checkpoint()
     }
 
     #[test]

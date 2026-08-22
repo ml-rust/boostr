@@ -12,11 +12,14 @@
 //!
 //! Fixtures come from `dump_encoder_primitives.py`; skipped when absent.
 
+mod common;
+
 use boostr::model::audio::neucodec::{
     Activation1d, NeuCodecEncoder, SnakeBeta, encoder_hop_length, kaiser_sinc_filter1d,
     load_acoustic_encoder, load_residual_fsq, load_semantic_adapter, load_semantic_encoder,
     seamless_fbank,
 };
+use common::model_fixture;
 use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
@@ -188,11 +191,7 @@ fn snake_beta_and_activation1d_match_upstream() {
 
 /// Path to the real checkpoint, or `None` when it isn't downloaded.
 fn checkpoint() -> Option<PathBuf> {
-    let p = PathBuf::from(
-        std::env::var("NEUCODEC_CHECKPOINT")
-            .unwrap_or_else(|_| "/home/farhan/Projects/models/neucodec/model.safetensors".into()),
-    );
-    p.exists().then_some(p)
+    model_fixture("NEUCODEC_CHECKPOINT", "neucodec/model.safetensors")
 }
 
 /// The 16-layer Wav2Vec2-BERT semantic encoder, checked at THREE depths so a
@@ -217,7 +216,7 @@ fn semantic_encoder_matches_upstream() {
         "enc_sem_hidden16.f32",
     ];
     let Some(ckpt) = checkpoint() else {
-        eprintln!("skipping: checkpoint absent");
+        common::skip_notice("NeuCodec checkpoint", "NEUCODEC_CHECKPOINT");
         return;
     };
     if needed.iter().any(|f| !dir.join(f).exists()) {
@@ -339,7 +338,7 @@ fn semantic_adapter_matches_upstream() {
     };
     let (in_path, ref_path) = (dir.join("enc_sa_input.f32"), dir.join("enc_sa_output.f32"));
     let Some(ckpt) = checkpoint() else {
-        eprintln!("skipping: checkpoint absent");
+        common::skip_notice("NeuCodec checkpoint", "NEUCODEC_CHECKPOINT");
         return;
     };
     if !in_path.exists() || !ref_path.exists() {
@@ -394,12 +393,12 @@ fn acoustic_encoder_matches_upstream() {
     };
     let wave_path = dir.join("enc_wave16k_short.f32");
     let ref_path = dir.join("enc_acoustic_short.f32");
-    let ckpt = PathBuf::from(
-        std::env::var("NEUCODEC_CHECKPOINT")
-            .unwrap_or_else(|_| "/home/farhan/Projects/models/neucodec/model.safetensors".into()),
-    );
-    if !wave_path.exists() || !ref_path.exists() || !ckpt.exists() {
-        eprintln!("skipping: acoustic fixtures/checkpoint absent (run encode_real_audio.py)");
+    let Some(ckpt) = checkpoint() else {
+        common::skip_notice("NeuCodec checkpoint", "NEUCODEC_CHECKPOINT");
+        return;
+    };
+    if !wave_path.exists() || !ref_path.exists() {
+        eprintln!("skipping: acoustic fixtures absent (run encode_real_audio.py)");
         return;
     }
     let (client, device) = setup();
@@ -455,7 +454,7 @@ fn residual_fsq_matches_upstream() {
         dir.join("enc_fsq_out.f32"),
     );
     let Some(ckpt) = checkpoint() else {
-        eprintln!("skipping: checkpoint absent");
+        common::skip_notice("NeuCodec checkpoint", "NEUCODEC_CHECKPOINT");
         return;
     };
     if !in_path.exists() || !idx_path.exists() || !out_path.exists() {
@@ -549,7 +548,7 @@ fn full_encode_matches_upstream() {
         return;
     };
     let Some(ckpt) = checkpoint() else {
-        eprintln!("skipping: checkpoint absent");
+        common::skip_notice("NeuCodec checkpoint", "NEUCODEC_CHECKPOINT");
         return;
     };
     let clips = ["a", "b"];

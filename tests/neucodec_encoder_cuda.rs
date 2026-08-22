@@ -24,7 +24,10 @@
 
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use boostr::model::audio::neucodec::NeuCodecEncoder;
+use common::model_fixture;
 use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::runtime::cuda::{CudaDevice, CudaRuntime};
@@ -82,11 +85,7 @@ fn fixtures() -> Option<PathBuf> {
 }
 
 fn checkpoint() -> Option<PathBuf> {
-    let p = PathBuf::from(
-        std::env::var("NEUCODEC_CHECKPOINT")
-            .unwrap_or_else(|_| "/home/farhan/Projects/models/neucodec/model.safetensors".into()),
-    );
-    p.exists().then_some(p)
+    model_fixture("NEUCODEC_CHECKPOINT", "neucodec/model.safetensors")
 }
 
 /// Compare, for both fixture clips: CUDA vs upstream (exact indices) and CUDA
@@ -100,7 +99,7 @@ fn cuda_encode_matches_upstream_and_cpu() {
         return;
     };
     let Some(ckpt) = checkpoint() else {
-        eprintln!("skipping: checkpoint absent");
+        common::skip_notice("NeuCodec checkpoint", "NEUCODEC_CHECKPOINT");
         return;
     };
 

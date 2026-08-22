@@ -159,12 +159,30 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
             true,
         );
 
-        // LM head
-        let lm_head = MaybeQuantLinear::Standard(Linear::new(
-            Tensor::<R>::zeros(&[vocab, hidden], dt, device),
-            None,
-            true,
-        ));
+        // LM head. When tied, it must share the embedding's autograd identity,
+        // not just its values: autograd accumulates by `TensorId`, so a shared
+        // id sums the gradient arriving through the embedding lookup and
+        // through the output projection, and an optimizer keyed by `TensorId`
+        // updates the one weight exactly once.
+        //
+        // `Tensor::clone` mints a FRESH `TensorId`, so passing the embedding's
+        // tensor to `Linear::new` would produce a second independent leaf that
+        // duplicates the values but not the identity — the head would train
+        // separately from the embedding while appearing tied.
+        let lm_head = if config.tie_word_embeddings {
+            MaybeQuantLinear::Standard(Linear::with_ids(
+                embed_tokens.weight().tensor().clone(),
+                embed_tokens.weight().id(),
+                None,
+                true,
+            ))
+        } else {
+            MaybeQuantLinear::Standard(Linear::new(
+                Tensor::<R>::zeros(&[vocab, hidden], dt, device),
+                None,
+                true,
+            ))
+        };
 
         Ok(Self {
             config: config.clone(),
@@ -282,6 +300,37 @@ attention:
         let config = tiny_config();
         let model = Llama::<CpuRuntime>::from_config(&config, &device).unwrap();
         assert_eq!(model.layers.len(), 2);
+    }
+
+    fn lm_head_id(model: &Llama<CpuRuntime>) -> numr::tensor::TensorId {
+        match &model.lm_head {
+            MaybeQuantLinear::Standard(linear) => linear.weight().id(),
+            _ => panic!("from_config always builds a standard lm_head"),
+        }
+    }
+
+    /// A tied head must share the embedding's autograd IDENTITY, not just its
+    /// values. Autograd accumulates by `TensorId`, so only a shared id sums the
+    /// gradient from both the embedding lookup and the output projection, and
+    /// only then does a `TensorId`-keyed optimizer update the weight once.
+    #[test]
+    fn tied_lm_head_shares_the_embedding_tensor_id() {
+        let (_, device) = cpu_setup();
+        let mut config = tiny_config();
+        config.tie_word_embeddings = true;
+        let model = Llama::<CpuRuntime>::from_config(&config, &device).unwrap();
+        assert_eq!(model.embed_tokens.weight().id(), lm_head_id(&model));
+    }
+
+    /// The discriminating half: without this, the test above would also pass on
+    /// an implementation that gave every weight the same id.
+    #[test]
+    fn untied_lm_head_has_its_own_tensor_id() {
+        let (_, device) = cpu_setup();
+        let mut config = tiny_config();
+        config.tie_word_embeddings = false;
+        let model = Llama::<CpuRuntime>::from_config(&config, &device).unwrap();
+        assert_ne!(model.embed_tokens.weight().id(), lm_head_id(&model));
     }
 
     #[test]

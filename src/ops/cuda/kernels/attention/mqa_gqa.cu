@@ -505,124 +505,110 @@ __device__ void mqa_gqa_fwd_bf16_impl(
 }
 
 // ============================================================================
-// Kernel Instantiations - FP32
+// Kernel Exports - runtime block-size selection
+// ============================================================================
+// BOTH block-size variants are emitted unconditionally, as separate symbols:
+//   mqa_gqa_fwd_{head_dim}_{dtype}       large blocks (128x128, 128x64)
+//   mqa_gqa_fwd_{head_dim}_{dtype}_sm    small blocks (64x64, 64x32)
+// The launcher in src/ops/cuda/attention/mqa_gqa/ picks the symbol at runtime
+// from the device's opt-in shared-memory limit; nothing here is compile-time
+// gated on the GPU architecture.
+//
+// The forward layout is [Q: BLOCK_M x HEAD_STRIDE][K: BLOCK_N x HEAD_STRIDE]
+// [V: BLOCK_N x HEAD_STRIDE] with HEAD_STRIDE = head_dim + 1, so the
+// requirement is:
+//   (BLOCK_M + 2*BLOCK_N) * (head_dim + 1) * sizeof(smem element)
+// The smem element is the tensor dtype for FP32/FP16/BF16, but `float` for the
+// FP8 impls, which dequantize on load. Unlike the backward layout, the forward
+// pads by +1 to avoid bank conflicts.
 // ============================================================================
 
-extern "C" __global__ void mqa_gqa_fwd_64_fp32(
-    const float* Q, const float* K, const float* V,
-    float* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_fwd_fp32_impl<64, 128, 128>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
-
-extern "C" __global__ void mqa_gqa_fwd_128_fp32(
-    const float* Q, const float* K, const float* V,
-    float* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_fwd_fp32_impl<128, 128, 64>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
-
-extern "C" __global__ void mqa_gqa_fwd_32_fp32(
-    const float* Q, const float* K, const float* V,
-    float* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_fwd_fp32_impl<32, 128, 128>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
-
 // ============================================================================
-// Kernel Instantiations - FP16
+// Kernel Exports - FP32
 // ============================================================================
 
-extern "C" __global__ void mqa_gqa_fwd_64_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    __half* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_fwd_fp16_impl<64, 128, 128>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
+#define EXPORT_MQA_GQA_FWD_FP32(HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX) \
+extern "C" __global__ void mqa_gqa_fwd_##HEAD_DIM##_##SUFFIX( \
+    const float* Q, const float* K, const float* V, \
+    float* O, float* L, \
+    const int batch_size, const int num_q_heads, const int num_kv_heads, \
+    const int seq_len_q, const int seq_len_k, \
+    const float scale, const int causal \
+) { \
+    mqa_gqa_fwd_fp32_impl<HEAD_DIM, BLOCK_M, BLOCK_N>( \
+        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal \
+    ); \
 }
 
-extern "C" __global__ void mqa_gqa_fwd_128_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    __half* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_fwd_fp16_impl<128, 128, 64>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
+// Large blocks
+EXPORT_MQA_GQA_FWD_FP32(32, 128, 128, fp32)
+EXPORT_MQA_GQA_FWD_FP32(64, 128, 128, fp32)
+EXPORT_MQA_GQA_FWD_FP32(128, 128, 64, fp32)
 
-extern "C" __global__ void mqa_gqa_fwd_32_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    __half* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_fwd_fp16_impl<32, 128, 128>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
+// Small blocks
+EXPORT_MQA_GQA_FWD_FP32(32, 64, 64, fp32_sm)
+EXPORT_MQA_GQA_FWD_FP32(64, 64, 32, fp32_sm)
+EXPORT_MQA_GQA_FWD_FP32(128, 64, 32, fp32_sm)
+
+#undef EXPORT_MQA_GQA_FWD_FP32
 
 // ============================================================================
-// Kernel Instantiations - BF16
+// Kernel Exports - FP16
 // ============================================================================
 
-extern "C" __global__ void mqa_gqa_fwd_64_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    __nv_bfloat16* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_fwd_bf16_impl<64, 128, 128>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
+#define EXPORT_MQA_GQA_FWD_FP16(HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX) \
+extern "C" __global__ void mqa_gqa_fwd_##HEAD_DIM##_##SUFFIX( \
+    const __half* Q, const __half* K, const __half* V, \
+    __half* O, float* L, \
+    const int batch_size, const int num_q_heads, const int num_kv_heads, \
+    const int seq_len_q, const int seq_len_k, \
+    const float scale, const int causal \
+) { \
+    mqa_gqa_fwd_fp16_impl<HEAD_DIM, BLOCK_M, BLOCK_N>( \
+        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal \
+    ); \
 }
 
-extern "C" __global__ void mqa_gqa_fwd_128_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    __nv_bfloat16* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_fwd_bf16_impl<128, 128, 64>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
+// Large blocks
+EXPORT_MQA_GQA_FWD_FP16(32, 128, 128, fp16)
+EXPORT_MQA_GQA_FWD_FP16(64, 128, 128, fp16)
+EXPORT_MQA_GQA_FWD_FP16(128, 128, 64, fp16)
+
+// Small blocks
+EXPORT_MQA_GQA_FWD_FP16(32, 64, 64, fp16_sm)
+EXPORT_MQA_GQA_FWD_FP16(64, 64, 32, fp16_sm)
+EXPORT_MQA_GQA_FWD_FP16(128, 64, 32, fp16_sm)
+
+#undef EXPORT_MQA_GQA_FWD_FP16
+
+// ============================================================================
+// Kernel Exports - BF16
+// ============================================================================
+
+#define EXPORT_MQA_GQA_FWD_BF16(HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX) \
+extern "C" __global__ void mqa_gqa_fwd_##HEAD_DIM##_##SUFFIX( \
+    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V, \
+    __nv_bfloat16* O, float* L, \
+    const int batch_size, const int num_q_heads, const int num_kv_heads, \
+    const int seq_len_q, const int seq_len_k, \
+    const float scale, const int causal \
+) { \
+    mqa_gqa_fwd_bf16_impl<HEAD_DIM, BLOCK_M, BLOCK_N>( \
+        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal \
+    ); \
 }
 
-extern "C" __global__ void mqa_gqa_fwd_32_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    __nv_bfloat16* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal
-) {
-    mqa_gqa_fwd_bf16_impl<32, 128, 128>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal
-    );
-}
+// Large blocks
+EXPORT_MQA_GQA_FWD_BF16(32, 128, 128, bf16)
+EXPORT_MQA_GQA_FWD_BF16(64, 128, 128, bf16)
+EXPORT_MQA_GQA_FWD_BF16(128, 128, 64, bf16)
+
+// Small blocks
+EXPORT_MQA_GQA_FWD_BF16(32, 64, 64, bf16_sm)
+EXPORT_MQA_GQA_FWD_BF16(64, 64, 32, bf16_sm)
+EXPORT_MQA_GQA_FWD_BF16(128, 64, 32, bf16_sm)
+
+#undef EXPORT_MQA_GQA_FWD_BF16
 
 // ============================================================================
 // FP8 MQA/GQA Implementation
@@ -782,90 +768,47 @@ __device__ void mqa_gqa_fwd_fp8_impl(
     #undef V_smem
 }
 
-// FP8 E4M3 kernel instantiations
-extern "C" __global__ void mqa_gqa_fwd_64_fp8_e4m3(
-    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
-    boostr_fp8_e4m3* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float q_scale, const float k_scale, const float v_scale, const float o_scale
-) {
-    mqa_gqa_fwd_fp8_impl<64, 128, 128>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        q_scale, k_scale, v_scale, o_scale
-    );
+// ============================================================================
+// Kernel Exports - FP8 (E4M3 and E5M2 share one impl, distinct symbol names)
+// ============================================================================
+// The FP8 impl dequantizes into `float` shared memory, so its requirement is
+// 4x the naive dtype-size estimate — same bytes as the FP32 variants.
+
+#define EXPORT_MQA_GQA_FWD_FP8(HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX) \
+extern "C" __global__ void mqa_gqa_fwd_##HEAD_DIM##_##SUFFIX( \
+    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V, \
+    boostr_fp8_e4m3* O, float* L, \
+    const int batch_size, const int num_q_heads, const int num_kv_heads, \
+    const int seq_len_q, const int seq_len_k, \
+    const float scale, const int causal, \
+    const float q_scale, const float k_scale, const float v_scale, const float o_scale \
+) { \
+    mqa_gqa_fwd_fp8_impl<HEAD_DIM, BLOCK_M, BLOCK_N>( \
+        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, \
+        q_scale, k_scale, v_scale, o_scale \
+    ); \
 }
 
-extern "C" __global__ void mqa_gqa_fwd_128_fp8_e4m3(
-    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
-    boostr_fp8_e4m3* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float q_scale, const float k_scale, const float v_scale, const float o_scale
-) {
-    mqa_gqa_fwd_fp8_impl<128, 128, 64>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        q_scale, k_scale, v_scale, o_scale
-    );
-}
+// FP8 E4M3 — large blocks
+EXPORT_MQA_GQA_FWD_FP8(32, 128, 128, fp8_e4m3)
+EXPORT_MQA_GQA_FWD_FP8(64, 128, 128, fp8_e4m3)
+EXPORT_MQA_GQA_FWD_FP8(128, 128, 64, fp8_e4m3)
 
-extern "C" __global__ void mqa_gqa_fwd_32_fp8_e4m3(
-    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
-    boostr_fp8_e4m3* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float q_scale, const float k_scale, const float v_scale, const float o_scale
-) {
-    mqa_gqa_fwd_fp8_impl<32, 128, 128>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        q_scale, k_scale, v_scale, o_scale
-    );
-}
+// FP8 E4M3 — small blocks
+EXPORT_MQA_GQA_FWD_FP8(32, 64, 64, fp8_e4m3_sm)
+EXPORT_MQA_GQA_FWD_FP8(64, 64, 32, fp8_e4m3_sm)
+EXPORT_MQA_GQA_FWD_FP8(128, 64, 32, fp8_e4m3_sm)
 
-// FP8 E5M2 kernels (same impl, just different kernel names for routing)
-extern "C" __global__ void mqa_gqa_fwd_64_fp8_e5m2(
-    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
-    boostr_fp8_e4m3* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float q_scale, const float k_scale, const float v_scale, const float o_scale
-) {
-    mqa_gqa_fwd_fp8_impl<64, 128, 128>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        q_scale, k_scale, v_scale, o_scale
-    );
-}
+// FP8 E5M2 — large blocks
+EXPORT_MQA_GQA_FWD_FP8(32, 128, 128, fp8_e5m2)
+EXPORT_MQA_GQA_FWD_FP8(64, 128, 128, fp8_e5m2)
+EXPORT_MQA_GQA_FWD_FP8(128, 128, 64, fp8_e5m2)
 
-extern "C" __global__ void mqa_gqa_fwd_128_fp8_e5m2(
-    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
-    boostr_fp8_e4m3* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float q_scale, const float k_scale, const float v_scale, const float o_scale
-) {
-    mqa_gqa_fwd_fp8_impl<128, 128, 64>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        q_scale, k_scale, v_scale, o_scale
-    );
-}
+// FP8 E5M2 — small blocks
+EXPORT_MQA_GQA_FWD_FP8(32, 64, 64, fp8_e5m2_sm)
+EXPORT_MQA_GQA_FWD_FP8(64, 64, 32, fp8_e5m2_sm)
+EXPORT_MQA_GQA_FWD_FP8(128, 64, 32, fp8_e5m2_sm)
 
-extern "C" __global__ void mqa_gqa_fwd_32_fp8_e5m2(
-    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
-    boostr_fp8_e4m3* O, float* L,
-    const int batch_size, const int num_q_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal,
-    const float q_scale, const float k_scale, const float v_scale, const float o_scale
-) {
-    mqa_gqa_fwd_fp8_impl<32, 128, 128>(
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal,
-        q_scale, k_scale, v_scale, o_scale
-    );
-}
+#undef EXPORT_MQA_GQA_FWD_FP8
 
 

@@ -394,5 +394,4 @@ fn parse_dtype(s: &str) -> Result<DType> {
 }
 
 #[cfg(test)]
-#[path = "safetensors_tests.rs"]
 mod tests;

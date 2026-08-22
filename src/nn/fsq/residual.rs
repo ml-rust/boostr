@@ -389,5 +389,4 @@ impl<R: Runtime<DType = DType>> Module<R> for ResidualFsq<R> {
 }
 
 #[cfg(test)]
-#[path = "residual_tests.rs"]
 mod tests;

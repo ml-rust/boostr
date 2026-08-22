@@ -3,7 +3,6 @@ pub mod flash_standard;
 pub mod fused_qkv;
 pub mod mla;
 pub mod paged;
-#[path = "rope.rs"]
 pub mod rope;
 
 pub use flash::multi_head_attention_impl;

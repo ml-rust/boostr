@@ -1,6 +1,6 @@
 //! Interleaved RoPE implementation (GPT-NeoX/Qwen style).
 
-use super::rope_common::validate_and_prepare;
+use super::common::validate_and_prepare;
 use crate::error::{Error, Result};
 use numr::autograd::{Var, var_add, var_cat, var_mul, var_narrow, var_sub};
 use numr::ops::{ScalarOps, ShapeOps, TensorOps, TypeConversionOps};

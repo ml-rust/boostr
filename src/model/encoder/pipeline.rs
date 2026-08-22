@@ -521,5 +521,4 @@ fn hf_name_to_gguf(hf: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "pipeline_tests.rs"]
 mod tests;

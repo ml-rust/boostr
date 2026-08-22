@@ -1,9 +1,7 @@
 //! Unit tests for [`super::Fsq`].
 //!
-//! Split into its own file (still `#[cfg(test)]`-only, included via
-//! `#[path]` from `quantizer.rs`) purely to keep `quantizer.rs` under the
-//! nn/*.rs file-size limit — this is still "in-file" `mod tests` in spirit,
-//! just split like every other oversized module in this codebase.
+//! Split into a sibling file to keep `quantizer.rs` readable; still
+//! `#[cfg(test)]`-only and still the `tests` submodule of `quantizer`.
 
 use super::*;
 use crate::test_utils::cpu_setup;

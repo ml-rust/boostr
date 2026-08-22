@@ -72,5 +72,4 @@ impl SpeechVocab {
 }
 
 #[cfg(test)]
-#[path = "frame_tests.rs"]
 mod tests;

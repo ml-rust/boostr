@@ -176,5 +176,4 @@ impl SpecialToken {
 }
 
 #[cfg(test)]
-#[path = "special_tests.rs"]
 mod tests;

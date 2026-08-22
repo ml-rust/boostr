@@ -1,6 +1,6 @@
 //! YaRN RoPE implementation (extended context via temperature scaling).
 
-use super::rope_standard::apply_rope_impl;
+use super::standard::apply_rope_impl;
 use crate::error::{Error, Result};
 use numr::autograd::Var;
 use numr::ops::{ScalarOps, ShapeOps, TensorOps, TypeConversionOps};
@@ -44,7 +44,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::rope_standard::apply_rope_impl;
+    use super::super::standard::apply_rope_impl;
     use super::*;
     use crate::test_utils::cpu_setup;
     use numr::autograd::Var;

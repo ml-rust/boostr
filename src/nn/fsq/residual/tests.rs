@@ -1,8 +1,7 @@
 //! Unit tests for [`super::ResidualFsq`].
 //!
-//! Split into its own file (still `#[cfg(test)]`-only, included via `#[path]`
-//! from `residual.rs`) to keep `residual.rs` under the nn/*.rs file-size limit,
-//! exactly as `quantizer_tests.rs` does for `quantizer.rs`.
+//! Split into a sibling file to keep `residual.rs` readable; still
+//! `#[cfg(test)]`-only and still the `tests` submodule of `residual`.
 
 use super::*;
 use crate::nn::fsq::config::FsqConfig;

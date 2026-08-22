@@ -1,9 +1,9 @@
 //! Mixed-radix index packing/unpacking and straight-through/identity helpers
 //! for [`Fsq`](super::quantizer::Fsq).
 //!
-//! Split out of `quantizer.rs` purely to keep that file under the nn/*.rs
-//! file-size limit — these are the mechanically separable pieces (index
-//! codec + STE/passthrough), not part of the `bound`/`quantize_codes` core
+//! Split out of `quantizer.rs` to keep that file readable — these are the
+//! mechanically separable pieces (index codec + STE/passthrough), not part
+//! of the `bound`/`quantize_codes` core
 //! that stays in `quantizer.rs`. See that module's docs for the math.
 
 use super::quantizer::Fsq;
@@ -111,5 +111,4 @@ impl<R: Runtime<DType = DType>> Fsq<R> {
 }
 
 #[cfg(test)]
-#[path = "codes_tests.rs"]
 mod tests;

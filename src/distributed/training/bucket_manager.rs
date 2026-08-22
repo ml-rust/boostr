@@ -449,5 +449,4 @@ pub fn param_order_from_graph<R: Runtime>(loss: &Var<R>) -> Vec<TensorId> {
 }
 
 #[cfg(test)]
-#[path = "bucket_manager_tests.rs"]
 mod tests;

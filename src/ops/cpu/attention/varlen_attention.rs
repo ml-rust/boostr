@@ -224,5 +224,4 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
 }
 
 #[cfg(test)]
-#[path = "varlen_attention_tests.rs"]
 mod tests;

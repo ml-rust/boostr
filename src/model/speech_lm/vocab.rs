@@ -370,9 +370,7 @@ impl SpeechVocab {
 }
 
 #[cfg(test)]
-#[path = "vocab_tests.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "vocab_audio_tests.rs"]
 mod audio_tests;

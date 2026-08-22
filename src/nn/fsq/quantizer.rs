@@ -345,5 +345,4 @@ impl<R: Runtime<DType = DType>> Module<R> for Fsq<R> {
 }
 
 #[cfg(test)]
-#[path = "quantizer_tests.rs"]
 mod tests;

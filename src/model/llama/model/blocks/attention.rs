@@ -43,34 +43,13 @@ pub struct LlamaAttention<R: Runtime> {
 }
 
 impl<R: Runtime<DType = DType>> LlamaAttention<R> {
-    /// Additive causal mask, shape `[1, 1, sq, sk]`: `0` where a query may
-    /// attend, a large negative where it may not.
+    /// Additive causal mask, shape `[1, 1, sq, sk]`.
     ///
-    /// Built as `triu(full(NEG), 1)` — `triu` with `diagonal = 1` keeps the
-    /// STRICTLY upper triangle (the future) and zeroes the diagonal and below
-    /// (the past and self), which is exactly the additive form.
-    ///
-    /// The fill is `f32::MIN`, not `-inf`: `-inf` survives softmax fine, but a
-    /// `0 * -inf` anywhere in a fused path is NaN, and HuggingFace uses
-    /// `torch.finfo(dtype).min` for the same reason. Leading shape is `[1, 1]`
-    /// so it broadcasts across batch and heads instead of materializing
-    /// `[B, H, S, S]` per layer.
-    ///
-    /// `window_size > 0` additionally masks keys that fall out of the sliding
-    /// window: `j + window_size <= i`. That is `tril(diagonal = -window_size)`,
-    /// which keeps exactly `j <= i - window_size`. The window is inclusive of
-    /// the current token, so row `i` keeps `j ∈ (i - window_size, i]`.
-    ///
-    /// The two masked regions are DISJOINT for every `window_size >= 1`:
-    /// `triu(1)` keeps `j >= i + 1` and `tril(-window_size)` keeps
-    /// `j <= i - window_size <= i - 1`. No element is covered twice, so summing
-    /// the two `f32::MIN`-filled tensors never evaluates `MIN + MIN` (which
-    /// would overflow to `-inf` and reintroduce the `0 * -inf = NaN` hazard the
-    /// `f32::MIN` fill exists to avoid).
-    ///
-    /// Only called with `sq == sk` (the prefill/training path builds Q and K
-    /// from the same activation), so row `i` is absolute position `i` and no
-    /// `sk - sq` offset is applied — consistent with the existing `triu(1)`.
+    /// Thin wrapper over [`crate::model::attention_mask::causal_window_mask`],
+    /// which owns the masking rule (causality, the inclusive sliding window,
+    /// and the `f32::MIN` fill) for every architecture. Only called with
+    /// `sq == sk` here — the prefill/training path builds Q and K from the same
+    /// activation — so the shared builder's key offset is `0`.
     fn causal_mask<C>(
         client: &C,
         sq: usize,
@@ -81,16 +60,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
     where
         C: ModelClient<R>,
     {
-        let zeros = Tensor::<R>::zeros(&[sq, sk], DType::F32, device);
-        let filled = client.add_scalar(&zeros, f32::MIN as f64)?;
-        let future = client.triu(&filled, 1)?;
-        let masked = if window_size == 0 {
-            future
-        } else {
-            let too_old = client.tril(&filled, -(window_size as i64))?;
-            client.add(&future, &too_old)?
-        };
-        masked.reshape(&[1, 1, sq, sk]).map_err(Error::Numr)
+        crate::model::attention_mask::causal_window_mask(client, sq, sk, window_size, device)
     }
 
     /// Apply optional Q/K layer norms (Command-R, Cohere).

@@ -1,3 +1,4 @@
+pub mod attention_mask;
 pub mod audio;
 pub mod config;
 pub mod detection;

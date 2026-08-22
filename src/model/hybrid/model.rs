@@ -22,14 +22,14 @@ pub struct HybridModel<R: Runtime> {
     hybrid_config: HybridConfig,
     mamba_config: Mamba2Config,
     embed_tokens: Embedding<R>,
-    blocks: Vec<HybridBlock<R>>,
+    pub(super) blocks: Vec<HybridBlock<R>>,
     norm: RmsNorm<R>,
     lm_head: Linear<R>,
     rope: RoPE<R>,
 }
 
 /// A hybrid block is either an attention block or an SSM block.
-enum HybridBlock<R: Runtime> {
+pub(super) enum HybridBlock<R: Runtime> {
     Attention(Box<AttentionBlock<R>>),
     Ssm(Box<SsmBlock<R>>),
 }
@@ -61,6 +61,9 @@ where
         let num_heads = attn_config.num_heads;
         let num_kv_heads = attn_config.kv_heads();
         let head_dim = attn_config.head_dim(hidden);
+        let use_alibi = attn_config.use_alibi;
+        // `0` is the disabled sentinel; `Some(0)` is not a zero-width window.
+        let sliding_window = attn_config.sliding_window();
 
         // RoPE cache
         let rope = RoPE::<R>::precompute_freqs(
@@ -131,6 +134,8 @@ where
                     num_heads,
                     num_kv_heads,
                     head_dim,
+                    use_alibi,
+                    sliding_window,
                 })));
             }
         }

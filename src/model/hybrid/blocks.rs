@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::inference::{KvCache, SsmState};
+use crate::model::attention_mask::causal_window_mask;
 use crate::model::mamba::mamba2::Mamba2;
 use crate::model::traits::ModelClient;
 use crate::nn::var_ops::{repeat_kv, var_contiguous};
@@ -15,6 +16,7 @@ use numr::ops::{
     ReduceOps, ScalarOps, ShapeOps, TensorOps, UnaryOps,
 };
 use numr::runtime::Runtime;
+use numr::tensor::Tensor;
 
 /// Attention block: pre-norm → multi-head attention → residual + pre-norm → MLP → residual
 pub(super) struct AttentionBlock<R: Runtime> {
@@ -30,6 +32,17 @@ pub(super) struct AttentionBlock<R: Runtime> {
     pub(super) num_heads: usize,
     pub(super) num_kv_heads: usize,
     pub(super) head_dim: usize,
+    /// Use ALiBi instead of RoPE (Falcon v1, BLOOM, MPT).
+    pub(super) use_alibi: bool,
+    /// Sliding-window attention span. `0` disables windowing (unlimited context).
+    ///
+    /// The window is INCLUSIVE of the current token: query at absolute position
+    /// `p` may attend keys `j` with `p - sliding_window < j <= p`.
+    ///
+    /// IGNORED when `use_alibi` is set. ALiBi's bias kernel writes the causal
+    /// structure together with the distance bias; the two mechanisms do not
+    /// compose here, so ALiBi models always attend the full context.
+    pub(super) sliding_window: usize,
 }
 
 /// SSM block: pre-norm → Mamba2 → residual
@@ -116,12 +129,19 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
         let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
         let v = var_contiguous(&v)?;
 
-        // Apply RoPE with position offset
-        let cos_offset = var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
-        let sin_offset = var_narrow(rope.sin_cache(), 0, position, seq_len).map_err(Error::Numr)?;
-
-        let q = apply_rope_impl(client, &q, &cos_offset, &sin_offset)?;
-        let k = apply_rope_impl(client, &k, &cos_offset, &sin_offset)?;
+        // Apply RoPE with position offset, or skip it for ALiBi models: ALiBi
+        // carries positional information in the attention bias instead.
+        let (q, k) = if self.use_alibi {
+            (q, k)
+        } else {
+            let cos_offset =
+                var_narrow(rope.cos_cache(), 0, position, seq_len).map_err(Error::Numr)?;
+            let sin_offset =
+                var_narrow(rope.sin_cache(), 0, position, seq_len).map_err(Error::Numr)?;
+            let q = apply_rope_impl(client, &q, &cos_offset, &sin_offset)?;
+            let k = apply_rope_impl(client, &k, &cos_offset, &sin_offset)?;
+            (q, k)
+        };
 
         // Update KV cache with new K/V tensors [B, H_kv, S, D]
         kv_cache.update(k.tensor(), v.tensor())?;
@@ -141,9 +161,19 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
             (cached_k, cached_v)
         };
 
+        let sq = q.shape()[2];
+        let sk = cached_k.shape()[2];
+        let mask = self.attention_mask(client, batch, sq, sk, position, q.tensor().device())?;
+
         // Multi-head attention (Q attends to full cached K/V)
-        let attn_out =
-            multi_head_attention_impl(client, &q, &cached_k, &cached_v, None, self.num_heads)?;
+        let attn_out = multi_head_attention_impl(
+            client,
+            &q,
+            &cached_k,
+            &cached_v,
+            mask.as_ref(),
+            self.num_heads,
+        )?;
 
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
         let attn_out =
@@ -154,6 +184,54 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
 
         // Output projection
         self.o_proj.forward(client, &attn_out)
+    }
+
+    /// Additive attention mask for one attention step, or `None`.
+    ///
+    /// `None` — no ALiBi, no sliding window — is the historical behaviour and
+    /// is preserved bit-for-bit: the mask is materialized only when one of the
+    /// two features asks for it.
+    ///
+    /// Row `i` is absolute position `position + i` and the cache holds
+    /// `sk = position + sq` keys, so [`causal_window_mask`] derives the key
+    /// offset from `sk - sq` and needs no extra argument.
+    pub(super) fn attention_mask<C>(
+        &self,
+        client: &C,
+        batch: usize,
+        sq: usize,
+        sk: usize,
+        position: usize,
+        device: &R::Device,
+    ) -> Result<Option<Var<R>>>
+    where
+        C: ModelClient<R>,
+    {
+        if self.use_alibi {
+            // ALiBi's own kernel writes the causal structure along with the
+            // distance bias, so the sliding window does not apply here.
+            let bias = Tensor::<R>::zeros(&[batch, self.num_heads, sq, sk], DType::F32, device);
+            client.alibi_add_bias_causal(&bias, batch, self.num_heads, sq, sk, position)?;
+            Ok(Some(Var::new(bias, false)))
+        } else {
+            // ALWAYS masked, even with no sliding window. This branch is the
+            // prefill/training path: without a causal mask every position
+            // attends to FUTURE tokens, which makes the next-token objective
+            // trivially cheatable and corrupts every prompt position at
+            // inference. It stays invisible to shape checks and still emits
+            // fluent text — the same failure that survived in the LLaMA
+            // decoder until parity testing caught it.
+            //
+            // `window_size == 0` yields a pure causal mask, so this covers both
+            // the windowed and unwindowed cases. On the decode path
+            // (`sq == 1`, `sk == position + 1`) the shared builder's key offset
+            // makes every cached key visible, as it must be.
+            //
+            // The window predicate alone does not mask the future — the shared
+            // builder always applies causality alongside it.
+            let mask = causal_window_mask(client, sq, sk, self.sliding_window, device)?;
+            Ok(Some(Var::new(mask, false)))
+        }
     }
 
     fn mlp_forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>

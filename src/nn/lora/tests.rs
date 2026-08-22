@@ -102,6 +102,197 @@ fn test_trainable_parameters_excludes_frozen_base() {
     assert_eq!(trainable[1].0, lora.lora_b.id());
 }
 
+/// `with_ids` must preserve BOTH supplied `TensorId`s exactly — this is its
+/// entire reason to exist over `from_weights`. A resumed run rebuilds
+/// `LoraLinear` from a `TensorId`-keyed optimizer-state map each step; if the
+/// ids drifted, the rebuilt adapter would detach from its optimizer state.
+#[test]
+fn test_with_ids_preserves_supplied_ids() {
+    let device = <CpuRuntime as Runtime>::default_device();
+    let make_base = || {
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device);
+        Linear::new(weight, None, false)
+    };
+    let a = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 6], &[2, 3], &device);
+    let b = Tensor::<CpuRuntime>::from_slice(&[0.2f32; 4], &[2, 2], &device);
+    let a_id = TensorId::new();
+    let b_id = TensorId::new();
+
+    let lora = LoraLinear::with_ids(make_base(), a, a_id, b, b_id, 4.0, true);
+
+    assert_eq!(lora.lora_a().id(), a_id);
+    assert_eq!(lora.lora_b().id(), b_id);
+}
+
+/// Contrast case: a resumed run reads adapter tensors OUT of a
+/// `TensorId`-keyed optimizer-state map by reference, so it must `.clone()`
+/// before handing them to `from_weights` — and `Tensor::clone` mints a FRESH
+/// `TensorId` (`numr::tensor::core::Tensor::clone`, confirmed by reading its
+/// impl: `Self { id: TensorId::new(), .. }`). This is precisely the
+/// detachment `with_ids` exists to avoid: rebuilding via `from_weights` from
+/// a stored map hands the adapter a new id every step. Proves the two
+/// constructors are NOT interchangeable for that caller.
+#[test]
+fn test_from_weights_mints_fresh_ids_unlike_with_ids() {
+    let device = <CpuRuntime as Runtime>::default_device();
+    let make_base = || {
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device);
+        Linear::new(weight, None, false)
+    };
+    // Simulates tensors held in a `TensorId`-keyed map, accessed by reference.
+    let stored_a = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 6], &[2, 3], &device);
+    let stored_b = Tensor::<CpuRuntime>::from_slice(&[0.2f32; 4], &[2, 2], &device);
+    let stored_a_id = stored_a.id();
+    let stored_b_id = stored_b.id();
+
+    let lora = LoraLinear::from_weights(make_base(), stored_a.clone(), stored_b.clone(), 4.0, true);
+
+    assert_ne!(
+        lora.lora_a().id(),
+        stored_a_id,
+        "from_weights unexpectedly preserved the cloned lora_a id — the contrast \
+         case no longer holds and with_ids may be redundant"
+    );
+    assert_ne!(
+        lora.lora_b().id(),
+        stored_b_id,
+        "from_weights unexpectedly preserved the cloned lora_b id — the contrast \
+         case no longer holds and with_ids may be redundant"
+    );
+}
+
+/// `trainable` must apply to both factors, in both directions, via `with_ids`.
+#[test]
+fn test_with_ids_trainable_flag() {
+    let device = <CpuRuntime as Runtime>::default_device();
+    let make_base = || {
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device);
+        Linear::new(weight, None, false)
+    };
+    let a = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 6], &[2, 3], &device);
+    let b = Tensor::<CpuRuntime>::from_slice(&[0.2f32; 4], &[2, 2], &device);
+
+    let frozen = LoraLinear::with_ids(
+        make_base(),
+        a.clone(),
+        TensorId::new(),
+        b.clone(),
+        TensorId::new(),
+        4.0,
+        false,
+    );
+    assert!(!frozen.lora_a().requires_grad());
+    assert!(!frozen.lora_b().requires_grad());
+
+    let trainable = LoraLinear::with_ids(
+        make_base(),
+        a,
+        TensorId::new(),
+        b,
+        TensorId::new(),
+        4.0,
+        true,
+    );
+    assert!(trainable.lora_a().requires_grad());
+    assert!(trainable.lora_b().requires_grad());
+}
+
+/// `rank()` and `scaling()` must derive from the supplied tensors/`alpha`,
+/// not from any assumption baked into `LoraLinear::new`'s init path.
+#[test]
+fn test_with_ids_derives_rank_and_scaling() {
+    let device = <CpuRuntime as Runtime>::default_device();
+    let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 20], &[4, 5], &device);
+    let base = Linear::new(weight, None, false);
+    let (rank, in_features, out_features) = (5usize, 5usize, 4usize);
+    let a = Tensor::<CpuRuntime>::from_slice(
+        &vec![0.1f32; rank * in_features],
+        &[rank, in_features],
+        &device,
+    );
+    let b = Tensor::<CpuRuntime>::from_slice(
+        &vec![0.2f32; out_features * rank],
+        &[out_features, rank],
+        &device,
+    );
+
+    let lora = LoraLinear::with_ids(base, a, TensorId::new(), b, TensorId::new(), 15.0, true);
+
+    assert_eq!(lora.rank(), rank);
+    assert!((lora.scaling() - 3.0).abs() < 1e-6); // alpha/rank = 15/5 = 3
+}
+
+/// Ids must not affect numerics: a `with_ids`-built layer and an equivalent
+/// `from_weights`-built layer must produce identical forward output.
+#[test]
+fn test_with_ids_forward_matches_from_weights() {
+    use crate::test_utils::cpu_setup;
+
+    let (client, device) = cpu_setup();
+    let (in_features, out_features, rank) = (3usize, 2usize, 2usize);
+
+    let base_w: Vec<f32> = (0..out_features * in_features)
+        .map(|i| (i as f32) * 0.1 - 0.3)
+        .collect();
+    let make_base = || {
+        Linear::new(
+            Tensor::<CpuRuntime>::from_slice(&base_w, &[out_features, in_features], &device),
+            None,
+            false,
+        )
+    };
+
+    let a_vals: Vec<f32> = (0..rank * in_features)
+        .map(|i| (i as f32) * 0.05 - 0.1)
+        .collect();
+    let b_vals: Vec<f32> = (0..out_features * rank)
+        .map(|i| (i as f32) * 0.07 + 0.02)
+        .collect();
+
+    let with_ids_lora = LoraLinear::with_ids(
+        make_base(),
+        Tensor::<CpuRuntime>::from_slice(&a_vals, &[rank, in_features], &device),
+        TensorId::new(),
+        Tensor::<CpuRuntime>::from_slice(&b_vals, &[out_features, rank], &device),
+        TensorId::new(),
+        8.0,
+        false,
+    );
+    let from_weights_lora = LoraLinear::from_weights(
+        make_base(),
+        Tensor::<CpuRuntime>::from_slice(&a_vals, &[rank, in_features], &device),
+        Tensor::<CpuRuntime>::from_slice(&b_vals, &[out_features, rank], &device),
+        8.0,
+        false,
+    );
+
+    let x_vals: Vec<f32> = (0..2 * in_features)
+        .map(|i| (i as f32) * 0.2 - 0.4)
+        .collect();
+    let x = Var::new(
+        Tensor::<CpuRuntime>::from_slice(&x_vals, &[2, in_features], &device),
+        false,
+    );
+
+    let with_ids_out = with_ids_lora
+        .forward(&client, &x)
+        .expect("with_ids forward");
+    let from_weights_out = from_weights_lora
+        .forward(&client, &x)
+        .expect("from_weights forward");
+
+    let with_ids_vals: Vec<f32> = with_ids_out.tensor().contiguous().expect("contig").to_vec();
+    let from_weights_vals: Vec<f32> = from_weights_out
+        .tensor()
+        .contiguous()
+        .expect("contig")
+        .to_vec();
+    assert_eq!(with_ids_vals.len(), from_weights_vals.len());
+    for (w, f) in with_ids_vals.iter().zip(from_weights_vals.iter()) {
+        assert!((w - f).abs() < 1e-5, "with_ids={w} from_weights={f}");
+    }
+}
+
 #[test]
 fn test_from_weights_trainable_flag() {
     let device = <CpuRuntime as Runtime>::default_device();

@@ -179,3 +179,318 @@ fn test_paged_attention_bwd_parity() {
         assert_parity_f32_relaxed(&dv.to_vec::<f32>(), &cpu_dv_vec, "paged_bwd dV WGPU vs CPU");
     });
 }
+
+/// Naive paged-attention reference.
+///
+/// The block table indexes keys by their ABSOLUTE position in the sequence, so
+/// with `absolute = true` query row `i` sits at `key_offset + i` where
+/// `key_offset = seq_len_k - seq_len_q` (the `seq_len_q` queries are the LAST
+/// positions of the `seq_len_k` context). `absolute = false` reproduces the
+/// legacy top-left rule, where `i` was taken as the position itself.
+///
+/// Assumes `num_kv_heads == 1`, matching the CPU paged path.
+#[allow(clippy::too_many_arguments)]
+fn paged_reference_fwd(
+    q: &[f32],
+    k_blocks: &[f32],
+    v_blocks: &[f32],
+    block_table: &[i32],
+    batch_size: usize,
+    num_heads: usize,
+    seq_len_q: usize,
+    seq_len_k: usize,
+    head_dim: usize,
+    block_size: usize,
+    max_num_blocks: usize,
+    causal: bool,
+    absolute: bool,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; batch_size * num_heads * seq_len_q * head_dim];
+    let scale = (head_dim as f32).sqrt().recip();
+    let key_offset = if absolute {
+        seq_len_k.saturating_sub(seq_len_q)
+    } else {
+        0
+    };
+
+    for b in 0..batch_size {
+        for h in 0..num_heads {
+            for i in 0..seq_len_q {
+                let q_off = ((b * num_heads + h) * seq_len_q + i) * head_dim;
+
+                let mut scores = vec![f32::NEG_INFINITY; seq_len_k];
+                let mut max_score = f32::NEG_INFINITY;
+                for (j, score) in scores.iter_mut().enumerate() {
+                    if causal && key_offset + i < j {
+                        continue;
+                    }
+                    let physical = block_table[b * max_num_blocks + j / block_size] as usize;
+                    let kv_off = (physical * block_size + j % block_size) * head_dim;
+                    let mut dot = 0.0f32;
+                    for d in 0..head_dim {
+                        dot += q[q_off + d] * k_blocks[kv_off + d];
+                    }
+                    *score = dot * scale;
+                    max_score = max_score.max(*score);
+                }
+
+                let mut sum_exp = 0.0f32;
+                let exps: Vec<f32> = scores
+                    .iter()
+                    .map(|s| {
+                        let e = (s - max_score).exp();
+                        sum_exp += e;
+                        e
+                    })
+                    .collect();
+
+                for (j, e) in exps.iter().enumerate() {
+                    let weight = e / sum_exp;
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let physical = block_table[b * max_num_blocks + j / block_size] as usize;
+                    let kv_off = (physical * block_size + j % block_size) * head_dim;
+                    for d in 0..head_dim {
+                        out[q_off + d] += weight * v_blocks[kv_off + d];
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Causal paged attention with `seq_len_q < seq_len_k` must mask by ABSOLUTE
+/// position: the block table addresses keys by absolute position, and the
+/// `seq_len_q` query rows are the LAST positions of the `seq_len_k` context, so
+/// query row `i` is at `key_offset + i` with `key_offset = seq_len_k - seq_len_q`.
+#[test]
+fn test_paged_causal_unequal_seqlens_uses_absolute_positions() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, h, d) = (1usize, 2usize, 64usize);
+    let block_size = 4;
+    let num_blocks = 2;
+    let max_num_blocks = 2;
+    let seq_len_k = 8;
+    let seq_len_q = 3; // key_offset = 5
+    let bt_data: Vec<i32> = vec![0, 1];
+
+    let q = det_tensor(&[b, h, seq_len_q, d], &cpu_device);
+    let k_blocks = det_tensor(&[num_blocks, block_size, 1, d], &cpu_device);
+    let v_blocks = det_tensor(&[num_blocks, block_size, 1, d], &cpu_device);
+    let block_table = det_i32_tensor(&bt_data, &[b, max_num_blocks], &cpu_device);
+
+    let q_vec = q.to_vec::<f32>();
+    let kb_vec = k_blocks.to_vec::<f32>();
+    let vb_vec = v_blocks.to_vec::<f32>();
+
+    let absolute_ref = paged_reference_fwd(
+        &q_vec,
+        &kb_vec,
+        &vb_vec,
+        &bt_data,
+        b,
+        h,
+        seq_len_q,
+        seq_len_k,
+        d,
+        block_size,
+        max_num_blocks,
+        true,
+        true,
+    );
+    let legacy_ref = paged_reference_fwd(
+        &q_vec,
+        &kb_vec,
+        &vb_vec,
+        &bt_data,
+        b,
+        h,
+        seq_len_q,
+        seq_len_k,
+        d,
+        block_size,
+        max_num_blocks,
+        true,
+        false,
+    );
+    assert!(
+        absolute_ref
+            .iter()
+            .zip(legacy_ref.iter())
+            .any(|(x, y)| (x - y).abs() > 1e-4),
+        "test setup is degenerate: absolute and top-left masking agree"
+    );
+
+    let (cpu_out, _) = cpu_client
+        .paged_attention_fwd(
+            &q,
+            &k_blocks,
+            &v_blocks,
+            &block_table,
+            h,
+            1,
+            seq_len_q,
+            seq_len_k,
+            d,
+            block_size,
+            true,
+        )
+        .unwrap();
+    let cpu_out_vec = cpu_out.to_vec::<f32>();
+    assert_parity_f32(
+        &cpu_out_vec,
+        &absolute_ref,
+        "paged causal unequal CPU vs absolute reference",
+    );
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::attention::paged_attention::PagedAttentionOps as _;
+        use numr::tensor::Tensor;
+        let q_c = Tensor::from_slice(&q_vec, &[b, h, seq_len_q, d], &cuda_device);
+        let kb = Tensor::from_slice(&kb_vec, &[num_blocks, block_size, 1, d], &cuda_device);
+        let vb = Tensor::from_slice(&vb_vec, &[num_blocks, block_size, 1, d], &cuda_device);
+        let bt = Tensor::from_slice(&bt_data, &[b, max_num_blocks], &cuda_device);
+        let (out, _) = cuda_client
+            .paged_attention_fwd(
+                &q_c, &kb, &vb, &bt, h, 1, seq_len_q, seq_len_k, d, block_size, true,
+            )
+            .unwrap();
+        assert_parity_f32(
+            &out.to_vec::<f32>(),
+            &cpu_out_vec,
+            "paged causal unequal CUDA vs CPU",
+        );
+    });
+
+    #[cfg(feature = "wgpu")]
+    with_wgpu_backend(|wgpu_client, wgpu_device| {
+        use boostr::ops::traits::attention::paged_attention::PagedAttentionOps as _;
+        use numr::tensor::Tensor;
+        let q_w = Tensor::from_slice(&q_vec, &[b, h, seq_len_q, d], &wgpu_device);
+        let kb = Tensor::from_slice(&kb_vec, &[num_blocks, block_size, 1, d], &wgpu_device);
+        let vb = Tensor::from_slice(&vb_vec, &[num_blocks, block_size, 1, d], &wgpu_device);
+        let bt = Tensor::from_slice(&bt_data, &[b, max_num_blocks], &wgpu_device);
+        let (out, _) = wgpu_client
+            .paged_attention_fwd(
+                &q_w, &kb, &vb, &bt, h, 1, seq_len_q, seq_len_k, d, block_size, true,
+            )
+            .unwrap();
+        assert_parity_f32(
+            &out.to_vec::<f32>(),
+            &cpu_out_vec,
+            "paged causal unequal WGPU vs CPU",
+        );
+    });
+}
+
+/// Regression guard: `seq_len_q == seq_len_k` gives `key_offset == 0`, so the
+/// absolute rule reduces to the legacy top-left rule. The reference here uses
+/// the LEGACY rule, so any drift in the equal-length path is caught.
+#[test]
+fn test_paged_causal_equal_seqlens_matches_legacy_rule() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, h, d) = (1usize, 2usize, 64usize);
+    let block_size = 4;
+    let num_blocks = 2;
+    let max_num_blocks = 2;
+    let s = 8;
+    let bt_data: Vec<i32> = vec![0, 1];
+
+    let q = det_tensor(&[b, h, s, d], &cpu_device);
+    let k_blocks = det_tensor(&[num_blocks, block_size, 1, d], &cpu_device);
+    let v_blocks = det_tensor(&[num_blocks, block_size, 1, d], &cpu_device);
+    let block_table = det_i32_tensor(&bt_data, &[b, max_num_blocks], &cpu_device);
+
+    let legacy_ref = paged_reference_fwd(
+        &q.to_vec::<f32>(),
+        &k_blocks.to_vec::<f32>(),
+        &v_blocks.to_vec::<f32>(),
+        &bt_data,
+        b,
+        h,
+        s,
+        s,
+        d,
+        block_size,
+        max_num_blocks,
+        true,
+        false,
+    );
+
+    let (cpu_out, _) = cpu_client
+        .paged_attention_fwd(
+            &q,
+            &k_blocks,
+            &v_blocks,
+            &block_table,
+            h,
+            1,
+            s,
+            s,
+            d,
+            block_size,
+            true,
+        )
+        .unwrap();
+    let cpu_out_vec = cpu_out.to_vec::<f32>();
+    assert_parity_f32(
+        &cpu_out_vec,
+        &legacy_ref,
+        "equal-length causal paged changed: must stay top-left equivalent",
+    );
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::attention::paged_attention::PagedAttentionOps as _;
+        use numr::tensor::Tensor;
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
+        let kb = Tensor::from_slice(
+            &k_blocks.to_vec::<f32>(),
+            &[num_blocks, block_size, 1, d],
+            &cuda_device,
+        );
+        let vb = Tensor::from_slice(
+            &v_blocks.to_vec::<f32>(),
+            &[num_blocks, block_size, 1, d],
+            &cuda_device,
+        );
+        let bt = Tensor::from_slice(&bt_data, &[b, max_num_blocks], &cuda_device);
+        let (out, _) = cuda_client
+            .paged_attention_fwd(&q_c, &kb, &vb, &bt, h, 1, s, s, d, block_size, true)
+            .unwrap();
+        assert_parity_f32(
+            &out.to_vec::<f32>(),
+            &cpu_out_vec,
+            "paged causal equal CUDA vs CPU",
+        );
+    });
+
+    #[cfg(feature = "wgpu")]
+    with_wgpu_backend(|wgpu_client, wgpu_device| {
+        use boostr::ops::traits::attention::paged_attention::PagedAttentionOps as _;
+        use numr::tensor::Tensor;
+        let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
+        let kb = Tensor::from_slice(
+            &k_blocks.to_vec::<f32>(),
+            &[num_blocks, block_size, 1, d],
+            &wgpu_device,
+        );
+        let vb = Tensor::from_slice(
+            &v_blocks.to_vec::<f32>(),
+            &[num_blocks, block_size, 1, d],
+            &wgpu_device,
+        );
+        let bt = Tensor::from_slice(&bt_data, &[b, max_num_blocks], &wgpu_device);
+        let (out, _) = wgpu_client
+            .paged_attention_fwd(&q_w, &kb, &vb, &bt, h, 1, s, s, d, block_size, true)
+            .unwrap();
+        assert_parity_f32(
+            &out.to_vec::<f32>(),
+            &cpu_out_vec,
+            "paged causal equal WGPU vs CPU",
+        );
+    });
+}

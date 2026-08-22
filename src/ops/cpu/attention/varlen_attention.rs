@@ -50,6 +50,13 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
             let sk_end = cu_k[b + 1] as usize;
             let seq_len_q = sq_end - sq_start;
             let seq_len_k = sk_end - sk_start;
+            // Bottom-right (ABSOLUTE) causal alignment, per sequence: this
+            // sequence's `seq_len_q` query rows are the LAST positions of its
+            // `seq_len_k` keys, so row `qi` sits at absolute position
+            // `key_offset + qi`. A full prefill (`seq_len_q == seq_len_k`) gives
+            // `key_offset == 0`, leaving the rule unchanged. Same convention as
+            // `ops/impl_generic/attention/flash_standard.rs::build_attention_mask`.
+            let key_offset = seq_len_k.saturating_sub(seq_len_q);
 
             for h in 0..num_heads {
                 // GQA: map query head h to the corresponding kv head.
@@ -62,7 +69,7 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
                     let mut scores = Vec::with_capacity(seq_len_k);
 
                     for ki in 0..seq_len_k {
-                        if causal && qi < ki {
+                        if causal && key_offset + qi < ki {
                             scores.push(f32::NEG_INFINITY);
                             continue;
                         }
@@ -156,6 +163,13 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
             let sk_end = cu_k[b + 1] as usize;
             let seq_len_q = sq_end - sq_start;
             let seq_len_k = sk_end - sk_start;
+            // Bottom-right (ABSOLUTE) causal alignment, per sequence: this
+            // sequence's `seq_len_q` query rows are the LAST positions of its
+            // `seq_len_k` keys, so row `qi` sits at absolute position
+            // `key_offset + qi`. A full prefill (`seq_len_q == seq_len_k`) gives
+            // `key_offset == 0`, leaving the rule unchanged. Same convention as
+            // `ops/impl_generic/attention/flash_standard.rs::build_attention_mask`.
+            let key_offset = seq_len_k.saturating_sub(seq_len_q);
 
             for h in 0..num_heads {
                 // GQA: map query head h to the corresponding kv head.
@@ -173,7 +187,7 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
                     }
 
                     for ki in 0..seq_len_k {
-                        if causal && qi < ki {
+                        if causal && key_offset + qi < ki {
                             continue;
                         }
                         // K/V row stride uses num_kv_heads (GQA layout)

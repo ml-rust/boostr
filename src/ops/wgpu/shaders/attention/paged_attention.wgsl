@@ -53,10 +53,19 @@ fn paged_attention_fwd_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
     var max_score = -1e30f;
     var sum_exp = 0.0f;
 
+    // Bottom-right (ABSOLUTE) causal alignment: the block table indexes keys by
+    // their absolute position in the sequence, and the seq_len_q query rows are
+    // the LAST positions of that seq_len_k context, so query row i sits at
+    // absolute position key_offset + i. A full prefill (seq_len_q == seq_len_k)
+    // gives key_offset == 0, leaving the rule unchanged. Same convention as
+    // `ops/impl_generic/attention/flash_standard.rs::build_attention_mask`.
+    let key_offset = select(0u, params.seq_len_k - params.seq_len_q, params.seq_len_k >= params.seq_len_q);
+    let q_pos = key_offset + i;
+
     // Compute valid key range
     var end_j = params.seq_len_k;
     if params.causal != 0u {
-        end_j = i + 1u;
+        end_j = min(q_pos + 1u, params.seq_len_k);
     }
 
     // First pass: find max score

@@ -4,6 +4,17 @@
 // each kernel translation unit within the file-size budget. Compiled as its own
 // module (VARLEN_ATTENTION_BWD_FP16_MODULE); the FP16 kernel symbols are
 // unchanged so the Rust dispatcher loads them by the same names.
+//
+// Causal convention: ABSOLUTE (bottom-right) alignment, per sequence.
+// Within sequence s, seq_len_q = cu_seqlens_q[s+1] - cu_seqlens_q[s] and
+// seq_len_k = cu_seqlens_k[s+1] - cu_seqlens_k[s], so the query rows of that
+// sequence are the LAST seq_len_q positions of its seq_len_k keys and local
+// query row r sits at absolute position key_offset + r, with a PER-SEQUENCE
+// key_offset = seq_len_k - seq_len_q. Key ki is masked when ki > key_offset + r.
+// A full prefill (seq_len_q == seq_len_k) gives key_offset == 0, leaving the
+// rule identical to the previous top-left form. Same convention as
+// `ops/impl_generic/attention/flash_standard.rs::build_attention_mask` and
+// `kernels/attention/flash_v2.cu`.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -74,6 +85,8 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
     const int seq_start_k = cu_seqlens_k[batch_idx];
     const int seq_end_k   = cu_seqlens_k[batch_idx + 1];
     const int seq_len_k   = seq_end_k - seq_start_k;
+    // Absolute (bottom-right) causal alignment, per sequence — see file header.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
 
     const int q_start = q_block_in_batch * BLOCK_M;
     const int q_end   = min(q_start + BLOCK_M, seq_len_q);
@@ -142,7 +155,7 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
 
         if (is_valid_thread) {
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll

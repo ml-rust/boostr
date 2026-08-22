@@ -35,6 +35,7 @@ fn varlen_attention_fwd_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Find which batch this token belongs to
     var batch_idx = 0u;
     var batch_start_q = 0u;
+    var batch_end_q = 0u;
     var batch_start_k = 0u;
 
     for (var b = 0u; b < params.batch_size; b = b + 1u) {
@@ -43,6 +44,7 @@ fn varlen_attention_fwd_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
         if token_idx >= start_q && token_idx < end_q {
             batch_idx = b;
             batch_start_q = start_q;
+            batch_end_q = end_q;
             batch_start_k = u32(cu_seqlens_k[b]);
             break;
         }
@@ -50,9 +52,19 @@ fn varlen_attention_fwd_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let batch_end_k = u32(cu_seqlens_k[batch_idx + 1u]);
     let batch_len_k = batch_end_k - batch_start_k;
+    let batch_len_q = batch_end_q - batch_start_q;
 
     // Position within batch
     let pos_q = token_idx - batch_start_q;
+
+    // Bottom-right (ABSOLUTE) causal alignment, per sequence: this sequence's
+    // batch_len_q query rows are the LAST positions of its batch_len_k keys, so
+    // row pos_q sits at absolute position key_offset + pos_q. A full prefill
+    // (batch_len_q == batch_len_k) gives key_offset == 0, leaving the rule
+    // unchanged. Same convention as
+    // `ops/impl_generic/attention/flash_standard.rs::build_attention_mask`.
+    let key_offset = select(0u, batch_len_k - batch_len_q, batch_len_k >= batch_len_q);
+    let q_pos = key_offset + pos_q;
 
     // Compute attention across heads (simplified: single thread per token, iterate heads)
     var accum: array<f32, 512>;  // Max head_dim
@@ -69,7 +81,7 @@ fn varlen_attention_fwd_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
         let k_end = batch_end_k;
         var k_limit = batch_end_k;
         if params.causal != 0u {
-            k_limit = batch_start_k + pos_q + 1u;
+            k_limit = batch_start_k + q_pos + 1u;
         }
 
         for (var k_idx = k_start; k_idx < min(k_end, k_limit); k_idx = k_idx + 1u) {

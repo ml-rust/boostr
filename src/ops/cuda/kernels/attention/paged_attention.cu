@@ -7,6 +7,16 @@
 // 2. Eliminates memory fragmentation and copying
 // 3. 2-3x memory efficiency vs contiguous cache
 // 4. Supports variable sequence lengths without padding
+//
+// Causal convention: ABSOLUTE (bottom-right) alignment. The block table indexes
+// keys by their absolute position in the sequence, and the seq_len_q query rows
+// are the LAST positions of that seq_len_k context, so query row r sits at
+// absolute position key_offset + r with key_offset = seq_len_k - seq_len_q.
+// Key j is masked when j > key_offset + r. A full prefill
+// (seq_len_q == seq_len_k) gives key_offset == 0, leaving the rule identical to
+// the previous top-left form. Same convention as
+// `ops/impl_generic/attention/flash_standard.rs::build_attention_mask` and
+// `kernels/attention/flash_v2.cu`.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -120,6 +130,8 @@ __device__ void paged_flash_attention_fwd_fp32_impl(
     const int q_start = q_block_idx * BLOCK_M;
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_tile_size = q_end - q_start;
+    // Absolute (bottom-right) causal alignment — see file header.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
 
     // Load Q tile into shared memory
     for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
@@ -172,7 +184,7 @@ __device__ void paged_flash_attention_fwd_fp32_impl(
             // First pass: compute max
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -193,7 +205,7 @@ __device__ void paged_flash_attention_fwd_fp32_impl(
             // Second pass: accumulate weighted values
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -318,6 +330,8 @@ __device__ void paged_flash_attention_fwd_fp16_impl(
     const int q_start = q_block_idx * BLOCK_M;
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_tile_size = q_end - q_start;
+    // Absolute (bottom-right) causal alignment — see file header.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
 
     // Load Q tile
     for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
@@ -365,7 +379,7 @@ __device__ void paged_flash_attention_fwd_fp16_impl(
         if (is_valid_thread) {
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -384,7 +398,7 @@ __device__ void paged_flash_attention_fwd_fp16_impl(
 
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -503,6 +517,8 @@ __device__ void paged_flash_attention_fwd_bf16_impl(
     const int q_start = q_block_idx * BLOCK_M;
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_tile_size = q_end - q_start;
+    // Absolute (bottom-right) causal alignment — see file header.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
 
     // Load Q tile
     for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
@@ -550,7 +566,7 @@ __device__ void paged_flash_attention_fwd_bf16_impl(
         if (is_valid_thread) {
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -569,7 +585,7 @@ __device__ void paged_flash_attention_fwd_bf16_impl(
 
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -790,6 +806,8 @@ __device__ void paged_flash_attention_fwd_fp8_e4m3_impl(
     const int q_start = q_block_idx * BLOCK_M;
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_tile_size = q_end - q_start;
+    // Absolute (bottom-right) causal alignment — see file header.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
 
     // Load Q tile and dequantize to FP32
     for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
@@ -841,7 +859,7 @@ __device__ void paged_flash_attention_fwd_fp8_e4m3_impl(
             // First pass: compute max
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -862,7 +880,7 @@ __device__ void paged_flash_attention_fwd_fp8_e4m3_impl(
             // Second pass: accumulate weighted values
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -999,6 +1017,8 @@ __device__ void paged_flash_attention_fwd_fp8_e5m2_impl(
     const int q_start = q_block_idx * BLOCK_M;
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_tile_size = q_end - q_start;
+    // Absolute (bottom-right) causal alignment — see file header.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
 
     // Load Q tile and dequantize
     for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
@@ -1048,7 +1068,7 @@ __device__ void paged_flash_attention_fwd_fp8_e5m2_impl(
         if (is_valid_thread) {
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -1067,7 +1087,7 @@ __device__ void paged_flash_attention_fwd_fp8_e5m2_impl(
 
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll

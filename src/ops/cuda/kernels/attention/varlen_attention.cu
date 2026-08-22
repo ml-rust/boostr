@@ -6,6 +6,16 @@
 // 2. 30-50% memory savings by eliminating padding
 // 3. Cumulative sequence length indexing (cu_seqlens)
 // 4. Efficient for training and inference with variable lengths
+//
+// Causal convention: ABSOLUTE (bottom-right) alignment, per sequence.
+// Within sequence s, seq_len_q = cu_seqlens_q[s+1] - cu_seqlens_q[s] and
+// seq_len_k = cu_seqlens_k[s+1] - cu_seqlens_k[s], so that sequence's query rows
+// are the LAST seq_len_q of its seq_len_k keys: local query row r sits at
+// absolute position key_offset + r, with a PER-SEQUENCE key_offset =
+// seq_len_k - seq_len_q, and key ki is masked when ki > key_offset + r. A full
+// prefill (seq_len_q == seq_len_k) gives key_offset == 0, leaving the rule
+// identical to the previous top-left form. Same convention as
+// `ops/impl_generic/attention/flash_standard.rs::build_attention_mask`.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -66,6 +76,8 @@ __device__ void varlen_flash_attention_fwd_fp32_impl(
     const int seq_start_k = cu_seqlens_k[batch_idx];
     const int seq_end_k = cu_seqlens_k[batch_idx + 1];
     const int seq_len_k = seq_end_k - seq_start_k;
+    // Absolute (bottom-right) causal alignment, per sequence — see file header.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
 
     // Local Q block position within this sequence
     const int q_start = q_block_in_batch * BLOCK_M;
@@ -130,7 +142,7 @@ __device__ void varlen_flash_attention_fwd_fp32_impl(
             // First pass: compute max
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -151,7 +163,7 @@ __device__ void varlen_flash_attention_fwd_fp32_impl(
             // Second pass: accumulate
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -291,6 +303,8 @@ __device__ void varlen_flash_attention_fwd_fp16_impl(
     const int seq_start_k = cu_seqlens_k[batch_idx];
     const int seq_end_k = cu_seqlens_k[batch_idx + 1];
     const int seq_len_k = seq_end_k - seq_start_k;
+    // Absolute (bottom-right) causal alignment, per sequence — see file header.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
 
     const int q_start = q_block_in_batch * BLOCK_M;
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
@@ -347,7 +361,7 @@ __device__ void varlen_flash_attention_fwd_fp16_impl(
         if (is_valid_thread) {
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -366,7 +380,7 @@ __device__ void varlen_flash_attention_fwd_fp16_impl(
 
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll

@@ -12,12 +12,13 @@
 //! `flash_attention_fwd` decode over that narrowed suffix with `window_size = 0`,
 //! which is mathematically the windowed result.
 //!
-//! It does NOT pass the window to `flash_attention_fwd` directly: the masks in
-//! `ops/impl_generic/attention/flash_standard.rs::build_attention_mask` and in
-//! `kernels/attention/flash_v2.cu` treat the query index `i` as relative to the
-//! query tensor, not as an absolute position, so with `seq_len_q == 1` the term
-//! `j + window <= i` is never true and the window is a no-op there. Using that
-//! as a reference would assert the new kernel is unwindowed.
+//! It does NOT pass the window to `flash_attention_fwd` directly: a narrowed
+//! key range needs no masking at all, so the reference stays independent of the
+//! mask builders it is checking. Those builders
+//! (`ops/impl_generic/attention/flash_standard.rs::build_attention_mask` and
+//! `kernels/attention/flash_v2.cu`) now read the query index as the absolute
+//! position `seq_len_k - seq_len_q + i`; `tests/window_mask_decode.rs` checks
+//! them against the same suffix reference on CPU.
 
 #![cfg(feature = "cuda")]
 

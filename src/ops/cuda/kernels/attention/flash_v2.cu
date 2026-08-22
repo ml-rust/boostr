@@ -11,6 +11,14 @@
 // 4. Warp-shuffle reductions (minimize shared memory traffic)
 // 5. All head dimensions (32, 64, 96, 128, 192, 256)
 //
+// Query positions are ABSOLUTE: query row `i` sits at sequence position
+// `key_offset + i`, where `key_offset = seq_len_k - seq_len_q`. A KV-cached
+// decode or chunked prefill passes seq_len_q < seq_len_k, and those queries are
+// the LAST seq_len_q positions of the key sequence, so causal and sliding-window
+// masking must both use that absolute position. Prefill (seq_len_q == seq_len_k)
+// gives key_offset == 0 and leaves the masks unchanged. Same convention as
+// `ops/impl_generic/attention/flash_standard.rs::build_attention_mask`.
+//
 // Shared memory padding strategy:
 // - Custom padding per dimension (default: +8 for general case, +1 for head dims)
 // - Avoids 32-way bank conflicts on NVIDIA GPUs (32 banks, 4-byte words)
@@ -125,6 +133,9 @@ __device__ void flash_attention_fwd_fp32_impl(
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_tile_size = q_end - q_start;
 
+    // Absolute position of query row 0 (see the header note); 0 on prefill.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     // Load Q tile into shared memory (all threads cooperate)
     for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
         const int row = i / HEAD_DIM;
@@ -166,7 +177,7 @@ __device__ void flash_attention_fwd_fp32_impl(
             // For the last Q position in this tile (q_start + BLOCK_M - 1 or q_end - 1),
             // the earliest K we might need is (q_end - 1) - window_size + 1
             // If k_end - 1 < this value, skip entire block
-            int last_q_pos = min(q_start + BLOCK_M - 1, seq_len_q - 1);
+            int last_q_pos = key_offset + min(q_start + BLOCK_M - 1, seq_len_q - 1);
             int min_k_for_last_q = max(0, last_q_pos - window_size + 1);
             if (k_end - 1 < min_k_for_last_q) {
                 continue;  // Skip this K block entirely - outside window for all Q
@@ -187,7 +198,7 @@ __device__ void flash_attention_fwd_fp32_impl(
             // First pass: compute max over this K tile
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                const int q_pos = q_start + q_row;
+                const int q_pos = key_offset + q_start + q_row;
                 const int k_pos = k_start + j;
 
                 // Causal masking: skip if q_pos < k_pos
@@ -218,7 +229,7 @@ __device__ void flash_attention_fwd_fp32_impl(
             // Second pass: accumulate weighted values and update l_local
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                const int q_pos = q_start + q_row;
+                const int q_pos = key_offset + q_start + q_row;
                 const int k_pos = k_start + j;
 
                 // Causal masking: skip if q_pos < k_pos
@@ -470,6 +481,9 @@ __device__ void flash_attention_fwd_fp16_impl(
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_tile_size = q_end - q_start;
 
+    // Absolute position of query row 0 (see the header note); 0 on prefill.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     // Load Q tile into shared memory (all threads cooperate)
     for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
         const int row = i / HEAD_DIM;
@@ -500,7 +514,7 @@ __device__ void flash_attention_fwd_fp16_impl(
 
         // Sliding window optimization: skip entire K blocks outside window
         if (window_size > 0) {
-            int last_q_pos = min(q_start + BLOCK_M - 1, seq_len_q - 1);
+            int last_q_pos = key_offset + min(q_start + BLOCK_M - 1, seq_len_q - 1);
             int min_k_for_last_q = max(0, last_q_pos - window_size + 1);
             if (k_end - 1 < min_k_for_last_q) {
                 continue;  // Skip this K block entirely - outside window for all Q
@@ -521,7 +535,7 @@ __device__ void flash_attention_fwd_fp16_impl(
             // First pass: compute max (FP32 accumulation)
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                const int q_pos = q_start + q_row;
+                const int q_pos = key_offset + q_start + q_row;
                 const int k_pos = k_start + j;
 
                 // Causal masking: skip if q_pos < k_pos
@@ -549,7 +563,7 @@ __device__ void flash_attention_fwd_fp16_impl(
             // Second pass: accumulate weighted values (FP32 accumulation)
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                const int q_pos = q_start + q_row;
+                const int q_pos = key_offset + q_start + q_row;
                 const int k_pos = k_start + j;
 
                 // Causal masking: skip if q_pos < k_pos
@@ -730,6 +744,9 @@ __device__ void flash_attention_fwd_bf16_impl(
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_tile_size = q_end - q_start;
 
+    // Absolute position of query row 0 (see the header note); 0 on prefill.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     // Load Q tile into shared memory (all threads cooperate)
     for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
         const int row = i / HEAD_DIM;
@@ -760,7 +777,7 @@ __device__ void flash_attention_fwd_bf16_impl(
 
         // Sliding window optimization: skip entire K blocks outside window
         if (window_size > 0) {
-            int last_q_pos = min(q_start + BLOCK_M - 1, seq_len_q - 1);
+            int last_q_pos = key_offset + min(q_start + BLOCK_M - 1, seq_len_q - 1);
             int min_k_for_last_q = max(0, last_q_pos - window_size + 1);
             if (k_end - 1 < min_k_for_last_q) {
                 continue;  // Skip this K block entirely - outside window for all Q
@@ -780,7 +797,7 @@ __device__ void flash_attention_fwd_bf16_impl(
         if (is_valid_thread) {
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                const int q_pos = q_start + q_row;
+                const int q_pos = key_offset + q_start + q_row;
                 const int k_pos = k_start + j;
 
                 // Causal masking: skip if q_pos < k_pos
@@ -807,7 +824,7 @@ __device__ void flash_attention_fwd_bf16_impl(
 
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                const int q_pos = q_start + q_row;
+                const int q_pos = key_offset + q_start + q_row;
                 const int k_pos = k_start + j;
 
                 // Causal masking: skip if q_pos < k_pos
@@ -1004,6 +1021,9 @@ __device__ void flash_attention_fwd_fp8_impl(
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_tile_size = q_end - q_start;
 
+    // Absolute position of query row 0 (see the header note); 0 on prefill.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
         const int row = i / HEAD_DIM;
         const int col = i % HEAD_DIM;
@@ -1050,7 +1070,7 @@ __device__ void flash_attention_fwd_fp8_impl(
 
         float m_new = m_local;
         for (int j = 0; j < k_tile_size; ++j) {
-            if (causal && (q_start + q_row) < (k_start + j)) continue;
+            if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
             float score = 0.0f;
             #pragma unroll
@@ -1073,7 +1093,7 @@ __device__ void flash_attention_fwd_fp8_impl(
 
         float l_new = alpha * l_local;
         for (int j = 0; j < k_tile_size; ++j) {
-            if (causal && (q_start + q_row) < (k_start + j)) continue;
+            if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
             float score = 0.0f;
             #pragma unroll

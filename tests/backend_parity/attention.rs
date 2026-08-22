@@ -149,6 +149,80 @@ fn test_flash_attention_fwd_gqa_parity() {
     });
 }
 
+/// Sliding-window single-token decode (`seq_len_q == 1`, `seq_len_k == 20`).
+/// The query is at absolute position `seq_len_k - 1`, so every backend must
+/// keep the same `window` key suffix. Decode passes `causal = false`, matching
+/// the model path where `causal` comes from `is_prefill`.
+#[test]
+fn test_flash_attention_fwd_windowed_decode_parity() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, d, sk, window) = (1, 32, 20, 6);
+    let num_heads = 4;
+    let num_kv_heads = 2;
+    let q = det_tensor(&[b, num_heads, 1, d], &cpu_device);
+    let k = det_tensor(&[b, num_kv_heads, sk, d], &cpu_device);
+    let v = det_tensor(&[b, num_kv_heads, sk, d], &cpu_device);
+
+    let (cpu_out, _) = cpu_client
+        .flash_attention_fwd(&q, &k, &v, num_heads, num_kv_heads, d, false, window, None)
+        .unwrap();
+    let cpu_out_vec = cpu_out.to_vec::<f32>();
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
+        use numr::tensor::Tensor;
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, num_heads, 1, d], &cuda_device);
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, sk, d], &cuda_device);
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, sk, d], &cuda_device);
+        let (cuda_out, _) = cuda_client
+            .flash_attention_fwd(
+                &q_c,
+                &k_c,
+                &v_c,
+                num_heads,
+                num_kv_heads,
+                d,
+                false,
+                window,
+                None,
+            )
+            .unwrap();
+        assert_parity_f32(
+            &cuda_out.to_vec::<f32>(),
+            &cpu_out_vec,
+            "flash_fwd windowed decode CUDA vs CPU",
+        );
+    });
+
+    #[cfg(feature = "wgpu")]
+    with_wgpu_backend(|wgpu_client, wgpu_device| {
+        use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
+        use numr::tensor::Tensor;
+        let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &[b, num_heads, 1, d], &wgpu_device);
+        let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, sk, d], &wgpu_device);
+        let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, sk, d], &wgpu_device);
+        let (wgpu_out, _) = wgpu_client
+            .flash_attention_fwd(
+                &q_w,
+                &k_w,
+                &v_w,
+                num_heads,
+                num_kv_heads,
+                d,
+                false,
+                window,
+                None,
+            )
+            .unwrap();
+        assert_parity_f32(
+            &wgpu_out.to_vec::<f32>(),
+            &cpu_out_vec,
+            "flash_fwd windowed decode WGPU vs CPU",
+        );
+    });
+}
+
 #[test]
 fn test_flash_attention_bwd_parity() {
     let (cpu_client, cpu_device) = setup_cpu();

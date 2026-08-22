@@ -268,8 +268,19 @@ where
 }
 
 /// Build the additive attention mask: `0` where allowed, `-inf` where masked.
-/// - causal: position `j > i` is masked
-/// - window_size > 0: position `j + window_size <= i` is masked
+///
+/// Query row `i` is at ABSOLUTE sequence position `key_offset + i`, where
+/// `key_offset = seq_len_k - seq_len_q`. A KV-cached decode or chunked prefill
+/// passes `seq_len_q` new queries against `seq_len_k` cached keys, so the
+/// queries are the LAST `seq_len_q` positions of the key sequence. Prefill and
+/// training pass `seq_len_q == seq_len_k`, giving `key_offset == 0` and leaving
+/// both rules exactly as they were. Same convention as
+/// `model/attention_mask.rs::causal_window_mask` and `kernels/attention/flash_v2.cu`.
+///
+/// - causal: position `j > key_offset + i` is masked
+/// - window_size > 0: position `j + window_size <= key_offset + i` is masked
+///   (`0` disables the window; the window is INCLUSIVE of the current token, so
+///   row `i` keeps exactly `window_size` keys)
 pub fn build_attention_mask<R: Runtime<DType = DType>>(
     seq_len_q: usize,
     seq_len_k: usize,
@@ -277,10 +288,12 @@ pub fn build_attention_mask<R: Runtime<DType = DType>>(
     window_size: usize,
     device: &R::Device,
 ) -> Result<Tensor<R>> {
+    let key_offset = seq_len_k.saturating_sub(seq_len_q);
     let mut mask_data = vec![0.0f32; seq_len_q * seq_len_k];
     for i in 0..seq_len_q {
+        let q_pos = key_offset + i;
         for j in 0..seq_len_k {
-            let masked = (causal && j > i) || (window_size > 0 && (j + window_size) <= i);
+            let masked = (causal && j > q_pos) || (window_size > 0 && (j + window_size) <= q_pos);
             if masked {
                 mask_data[i * seq_len_k + j] = f32::NEG_INFINITY;
             }
@@ -291,4 +304,92 @@ pub fn build_attention_mask<R: Runtime<DType = DType>>(
         &[1, 1, seq_len_q, seq_len_k],
         device,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::CpuRuntime;
+
+    /// The mask rule as it was written before absolute positions: query index
+    /// `i` taken as a position within the query tensor.
+    fn legacy_masked(i: usize, j: usize, causal: bool, window_size: usize) -> bool {
+        (causal && j > i) || (window_size > 0 && (j + window_size) <= i)
+    }
+
+    fn mask(sq: usize, sk: usize, causal: bool, window_size: usize) -> Vec<f32> {
+        let (_client, device) = cpu_setup();
+        build_attention_mask::<CpuRuntime>(sq, sk, causal, window_size, &device)
+            .unwrap()
+            .to_vec::<f32>()
+    }
+
+    /// Prefill (`sq == sk`) has `key_offset == 0`, so every entry must be
+    /// bit-identical to the legacy relative-index rule — windowed and not.
+    #[test]
+    fn prefill_mask_is_bit_identical_to_legacy() {
+        let s = 7;
+        for (causal, window_size) in [(false, 3), (true, 0), (true, 3), (false, 1)] {
+            let got = mask(s, s, causal, window_size);
+            for i in 0..s {
+                for j in 0..s {
+                    let want = if legacy_masked(i, j, causal, window_size) {
+                        f32::NEG_INFINITY
+                    } else {
+                        0.0
+                    };
+                    assert_eq!(
+                        got[i * s + j],
+                        want,
+                        "prefill mask changed at ({i},{j}) causal={causal} window={window_size}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Single-token decode: the one query row sits at absolute position
+    /// `sk - 1`, so a window keeps exactly the last `window_size` keys.
+    #[test]
+    fn decode_mask_keeps_only_the_window_suffix() {
+        let (sk, window_size) = (8usize, 3usize);
+        let got = mask(1, sk, false, window_size);
+        for (j, &m) in got.iter().enumerate() {
+            let allowed = j >= sk - window_size;
+            assert_eq!(
+                m == 0.0,
+                allowed,
+                "decode window: key {j} allowed={allowed} but mask={m}"
+            );
+        }
+    }
+
+    /// The causal clause is inert on decode: the query is the newest position,
+    /// so no key is in its future and the row is never fully masked.
+    #[test]
+    fn decode_mask_causal_masks_nothing() {
+        let got = mask(1, 8, true, 0);
+        assert!(got.iter().all(|&m| m == 0.0), "causal decode masked keys");
+    }
+
+    /// Chunked prefill (`1 < sq < sk`): row `i` is at absolute position
+    /// `sk - sq + i` and keeps `window_size` keys ending there.
+    #[test]
+    fn chunked_mask_uses_absolute_positions() {
+        let (sq, sk, window_size) = (3usize, 8usize, 3usize);
+        let got = mask(sq, sk, true, window_size);
+        let key_offset = sk - sq;
+        for i in 0..sq {
+            let q_pos = key_offset + i;
+            for j in 0..sk {
+                let allowed = j <= q_pos && j + window_size > q_pos;
+                assert_eq!(
+                    got[i * sk + j] == 0.0,
+                    allowed,
+                    "chunked mask at ({i},{j}): expected allowed={allowed}"
+                );
+            }
+        }
+    }
 }

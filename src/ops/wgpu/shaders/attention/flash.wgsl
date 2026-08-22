@@ -53,16 +53,24 @@ fn flash_attention_fwd_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
     var max_score = -1e30f;
     var sum_exp = 0.0f;
 
+    // Query row `i` is at ABSOLUTE sequence position `key_offset + i`: a
+    // KV-cached decode or chunked prefill passes seq_len_q < seq_len_k and its
+    // queries are the LAST seq_len_q positions. Prefill (seq_len_q ==
+    // seq_len_k) gives 0, leaving both rules unchanged. Same convention as
+    // `ops/impl_generic/attention/flash_standard.rs::build_attention_mask`.
+    let key_offset = select(0u, params.seq_len_k - params.seq_len_q, params.seq_len_k >= params.seq_len_q);
+    let q_pos = key_offset + i;
+
     // Compute valid key range [start_k, end_k) based on window and causal
     var start_k = 0u;
     var end_k = params.seq_len_k;
 
     if params.causal != 0u {
-        end_k = min(i + 1u, params.seq_len_k);
+        end_k = min(q_pos + 1u, params.seq_len_k);
     }
     if params.window_size > 0u {
-        if i >= params.window_size {
-            start_k = max(start_k, i - params.window_size + 1u);
+        if q_pos >= params.window_size {
+            start_k = max(start_k, q_pos - params.window_size + 1u);
         }
     }
 

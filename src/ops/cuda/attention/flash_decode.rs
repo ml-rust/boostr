@@ -84,6 +84,13 @@ pub(super) fn decode_attention_fwd(
 
 /// Graph-mode decode attention: uses `_graph` kernel variants with device-pointer
 /// seq_len_k and separate kv_seq_stride for full-capacity raw KV buffers.
+///
+/// `window_size` is the sliding-window span; `0` disables it, matching every
+/// other call path. Decode is single-token, so the query sits at absolute
+/// position `seq_len_k - 1` and the kernel keeps keys `j >= seq_len_k -
+/// window_size`. It is a static config value, not a per-step one, so passing it
+/// as a plain scalar is safe under CUDA graph capture — unlike `seq_len_k`,
+/// which changes every replay and therefore stays a device pointer.
 #[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
 pub fn decode_attention_graph_fwd(
@@ -96,15 +103,23 @@ pub fn decode_attention_graph_fwd(
     head_dim: usize,
     seq_len_k_ptr: u64,
     kv_capacity: usize,
+    window_size: usize,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let device = q.device();
     let device_index = device.id();
     let batch_size = q.shape()[0];
 
+    // Unlike the non-graph path, nothing upstream of graph mode filters head_dim,
+    // so an unsupported one is an error, not an unreachable case.
     let kernel_name = match head_dim {
         64 => "decode_attention_64_fp32_graph",
         128 => "decode_attention_128_fp32_graph",
-        _ => unreachable!("decode attention only supports head_dim 64/128"),
+        other => {
+            return Err(Error::InvalidArgument {
+                arg: "head_dim",
+                reason: format!("graph decode attention supports head_dim 64/128, got {other}"),
+            });
+        }
     };
 
     let module = kernels::get_or_load_module(
@@ -125,6 +140,7 @@ pub fn decode_attention_graph_fwd(
     let nh_i32 = num_heads as i32;
     let nkv_i32 = num_kv_heads as i32;
     let stride_i32 = kv_capacity as i32;
+    let window_i32 = window_size as i32;
     let scale = (head_dim as f32).sqrt().recip();
 
     let num_blocks = batch_size * num_heads;
@@ -145,6 +161,7 @@ pub fn decode_attention_graph_fwd(
         builder.arg(&seq_len_k_ptr);
         builder.arg(&stride_i32);
         builder.arg(&scale);
+        builder.arg(&window_i32);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("decode_attention_graph kernel launch failed: {:?}", e),
         })?;

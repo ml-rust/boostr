@@ -13,6 +13,13 @@
 //   - Non-graph: seq_len_k passed as plain int kernel arg (zero overhead)
 //   - Graph-mode (_graph suffix): seq_len_k_ptr is a device pointer to i32,
 //     kv_seq_stride is the memory stride (capacity >= seq_len_k)
+//
+// Sliding window: `window_size == 0` disables it. Otherwise a key `j` is masked
+// when `j + window_size <= i`, where `i` is the query's absolute position. Decode
+// is single-token, so `i == seq_len_k - 1` and the surviving keys are exactly
+// `j >= seq_len_k - window_size` — a contiguous suffix, so the loop just starts
+// later. Matches the kernel contract in
+// ops/impl_generic/attention/flash_standard.rs.
 
 // ============================================================================
 // Shared device function for the attention loop
@@ -25,7 +32,7 @@ __device__ __forceinline__ void decode_attention_128_impl(
     float* __restrict__ O,
     int num_heads, int num_kv_heads,
     int seq_len_k, int kv_seq_stride,
-    float scale
+    float scale, int window_size
 ) {
     const int bh = blockIdx.x;
     const int b = bh / num_heads;
@@ -48,7 +55,10 @@ __device__ __forceinline__ void decode_attention_128_impl(
 
     __shared__ float smem_qk[4];
 
-    for (int pos = 0; pos < seq_len_k; pos++) {
+    // Sliding window keeps the last `window_size` keys; `0` disables it.
+    const int pos_start = (window_size > 0) ? max(0, seq_len_k - window_size) : 0;
+
+    for (int pos = pos_start; pos < seq_len_k; pos++) {
         float qk = q_val * k_base[pos * 128 + tid];
 
         #pragma unroll
@@ -81,7 +91,7 @@ __device__ __forceinline__ void decode_attention_64_impl(
     float* __restrict__ O,
     int num_heads, int num_kv_heads,
     int seq_len_k, int kv_seq_stride,
-    float scale
+    float scale, int window_size
 ) {
     const int bh = blockIdx.x;
     const int b = bh / num_heads;
@@ -104,7 +114,10 @@ __device__ __forceinline__ void decode_attention_64_impl(
 
     __shared__ float smem_qk[2];
 
-    for (int pos = 0; pos < seq_len_k; pos++) {
+    // Sliding window keeps the last `window_size` keys; `0` disables it.
+    const int pos_start = (window_size > 0) ? max(0, seq_len_k - window_size) : 0;
+
+    for (int pos = pos_start; pos < seq_len_k; pos++) {
         float qk = q_val * k_base[pos * 64 + tid];
 
         #pragma unroll
@@ -143,7 +156,9 @@ extern "C" __global__ void decode_attention_128_fp32(
     int seq_len_k, int kv_seq_stride,
     float scale
 ) {
-    decode_attention_128_impl(Q, K, V, O, num_heads, num_kv_heads, seq_len_k, kv_seq_stride, scale);
+    // Non-graph decode is only dispatched for window_size == 0 (see
+    // ops/cuda/attention/flash.rs); windowed non-graph decode goes to flash_v2.
+    decode_attention_128_impl(Q, K, V, O, num_heads, num_kv_heads, seq_len_k, kv_seq_stride, scale, 0);
 }
 
 extern "C" __global__ void decode_attention_64_fp32(
@@ -155,7 +170,9 @@ extern "C" __global__ void decode_attention_64_fp32(
     int seq_len_k, int kv_seq_stride,
     float scale
 ) {
-    decode_attention_64_impl(Q, K, V, O, num_heads, num_kv_heads, seq_len_k, kv_seq_stride, scale);
+    // Non-graph decode is only dispatched for window_size == 0 (see
+    // ops/cuda/attention/flash.rs); windowed non-graph decode goes to flash_v2.
+    decode_attention_64_impl(Q, K, V, O, num_heads, num_kv_heads, seq_len_k, kv_seq_stride, scale, 0);
 }
 
 // ============================================================================
@@ -170,9 +187,10 @@ extern "C" __global__ void decode_attention_128_fp32_graph(
     int num_heads, int num_kv_heads,
     const int* seq_len_k_ptr,
     int kv_seq_stride,
-    float scale
+    float scale,
+    int window_size
 ) {
-    decode_attention_128_impl(Q, K, V, O, num_heads, num_kv_heads, *seq_len_k_ptr, kv_seq_stride, scale);
+    decode_attention_128_impl(Q, K, V, O, num_heads, num_kv_heads, *seq_len_k_ptr, kv_seq_stride, scale, window_size);
 }
 
 extern "C" __global__ void decode_attention_64_fp32_graph(
@@ -183,7 +201,8 @@ extern "C" __global__ void decode_attention_64_fp32_graph(
     int num_heads, int num_kv_heads,
     const int* seq_len_k_ptr,
     int kv_seq_stride,
-    float scale
+    float scale,
+    int window_size
 ) {
-    decode_attention_64_impl(Q, K, V, O, num_heads, num_kv_heads, *seq_len_k_ptr, kv_seq_stride, scale);
+    decode_attention_64_impl(Q, K, V, O, num_heads, num_kv_heads, *seq_len_k_ptr, kv_seq_stride, scale, window_size);
 }

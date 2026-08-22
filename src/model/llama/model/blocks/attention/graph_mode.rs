@@ -42,25 +42,6 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
         use crate::ops::cuda::attention::flash::decode_attention_graph_fwd;
         use crate::ops::cuda::attention::kv_insert::kv_insert;
 
-        // TEMPORARY CAPABILITY GAP, not a design choice: the graph decode kernel
-        // `decode_attention_graph_fwd` takes no window parameter and always
-        // attends the whole cache. Running a windowed model through it would
-        // silently return unwindowed attention. Graph capture also bakes the
-        // host-side `seq_len` into the replayed graph, so the non-graph
-        // `flash_attention_fwd` (which needs a host `seq_len_k`) cannot be
-        // substituted here either — it would go stale on every replay. Until the
-        // graph kernel accepts a window, refuse graph mode and let the caller run
-        // the non-graph decode path, which honours `sliding_window` correctly.
-        if self.sliding_window > 0 {
-            return Err(Error::ModelError {
-                reason: format!(
-                    "CUDA graph decode does not support sliding-window attention \
-                     (sliding_window = {}); use the non-graph decode path",
-                    self.sliding_window
-                ),
-            });
-        }
-
         let shape = x.shape().to_vec();
         let batch = shape[0];
         let seq_len = 1usize; // graph mode is always single-token decode
@@ -105,7 +86,9 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
             device_scalars.write_pos_ptr(),
         )?;
 
-        // Decode attention against the full-capacity cache with device-side seq_len_k
+        // Decode attention against the full-capacity cache with device-side seq_len_k.
+        // `sliding_window` is a static config value, safe to bake into the captured
+        // graph; `seq_len_k` changes per replay and stays a device pointer.
         let kv_capacity = kv_cache.capacity();
         let (attn_out, _lse) = decode_attention_graph_fwd(
             client,
@@ -117,6 +100,7 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
             self.head_dim,
             device_scalars.seq_len_k_ptr(),
             kv_capacity,
+            self.sliding_window,
         )?;
 
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]

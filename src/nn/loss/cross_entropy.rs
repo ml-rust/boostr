@@ -3,10 +3,13 @@
 use super::helpers::{all_dims, batch_size, prepare_targets};
 use crate::error::{Error, Result};
 use numr::autograd::{
-    Var, var_add, var_gather, var_log_softmax, var_mean, var_mul_scalar, var_neg, var_reshape,
+    Var, var_add, var_div_scalar, var_gather, var_log_softmax, var_mean, var_mul, var_mul_scalar,
+    var_neg, var_reshape, var_sum,
 };
 use numr::dtype::DType;
-use numr::ops::{ActivationOps, BinaryOps, IndexingOps, ReduceOps, ScalarOps, UnaryOps};
+use numr::ops::{
+    ActivationOps, BinaryOps, IndexingOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps,
+};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -147,108 +150,122 @@ where
     Ok(loss)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_utils::cpu_setup;
-    use numr::runtime::cpu::CpuRuntime;
-
-    #[test]
-    fn test_cross_entropy_basic() {
-        let (client, device) = cpu_setup();
-
-        #[rustfmt::skip]
-        let logits = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
-                &[2.0f32, 1.0, 0.1,   // sample 0: class 0 is highest
-                  0.1, 2.0, 1.0],     // sample 1: class 1 is highest
-                &[2, 3],
-                &device,
+/// Cross-entropy loss over masked-in positions only.
+///
+/// `sum(nll * mask) / sum(mask)`. The denominator is the number of masked-in
+/// positions, NOT `N`: dividing by `N` would dilute the loss by every ignored
+/// position (for a speech LM, by all the text that precedes the audio in a
+/// packed row).
+///
+/// - `logits`: `[N, V]` raw model output (pre-softmax)
+/// - `targets`: `[N]` integer class indices in `[0, V)`
+/// - `mask`: `[N]` `1.0` = count this position, `0.0` = ignore it
+///
+/// Differentiable w.r.t. `logits`. `mask` is data and carries no gradient, so
+/// masked-out rows receive exactly zero gradient.
+///
+/// Errors when the mask selects no positions, because `0 / 0` would return
+/// `NaN` and silently poison the gradient.
+pub fn cross_entropy_loss_masked<R, C>(
+    client: &C,
+    logits: &Var<R>,
+    targets: &Tensor<R>,
+    mask: &Tensor<R>,
+) -> Result<Var<R>>
+where
+    R: Runtime<DType = DType>,
+    C: RuntimeClient<R>
+        + ActivationOps<R>
+        + BinaryOps<R>
+        + UnaryOps<R>
+        + ReduceOps<R>
+        + ScalarOps<R>
+        + IndexingOps<R>
+        + TypeConversionOps<R>,
+    R::Client: ActivationOps<R>
+        + BinaryOps<R>
+        + UnaryOps<R>
+        + ReduceOps<R>
+        + ScalarOps<R>
+        + IndexingOps<R>
+        + TypeConversionOps<R>,
+{
+    let logits_shape = logits.shape();
+    if logits_shape.len() != 2 {
+        return Err(Error::InvalidArgument {
+            arg: "logits",
+            reason: format!(
+                "expected rank-2 [N, V], got shape {logits_shape:?}; flatten the batch and time dims before calling"
             ),
-            true,
-        );
-        let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1], &[2], &device);
-
-        let loss = cross_entropy_loss(&client, &logits, &targets).unwrap();
-        assert_eq!(loss.shape(), &[] as &[usize]);
-        let val: Vec<f32> = loss.tensor().to_vec();
-        assert!(
-            val[0] < 1.0,
-            "loss={} should be < 1.0 for correct predictions",
-            val[0]
-        );
+        });
     }
+    let n = logits_shape[0];
 
-    #[test]
-    fn test_cross_entropy_wrong_predictions() {
-        let (client, device) = cpu_setup();
-
-        let logits = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
-                &[
-                    0.1f32, 0.1, 2.0, // sample 0: class 2 is highest
-                    2.0, 0.1, 0.1, // sample 1: class 0 is highest
-                ],
-                &[2, 3],
-                &device,
+    let targets_shape = targets.shape();
+    if targets_shape.len() != 1 || targets_shape[0] != n {
+        return Err(Error::InvalidArgument {
+            arg: "targets",
+            reason: format!(
+                "expected shape [{n}] to match logits {logits_shape:?}, got {targets_shape:?}; reshape targets to [N]"
             ),
-            false,
-        );
-        let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1], &[2], &device);
-
-        let loss = cross_entropy_loss(&client, &logits, &targets).unwrap();
-        let val: Vec<f32> = loss.tensor().to_vec();
-        assert!(
-            val[0] > 1.0,
-            "loss={} should be > 1.0 for wrong predictions",
-            val[0]
-        );
+        });
     }
 
-    #[test]
-    fn test_label_smoothing_reduces_confidence() {
-        let (client, device) = cpu_setup();
-
-        let logits = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[2.0f32, 1.0, 0.1, 0.1, 2.0, 1.0], &[2, 3], &device),
-            false,
-        );
-        let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1], &[2], &device);
-
-        let loss_no_smooth = cross_entropy_loss(&client, &logits, &targets).unwrap();
-        let loss_smooth = cross_entropy_loss_smooth(&client, &logits, &targets, 0.1).unwrap();
-
-        let v0: Vec<f32> = loss_no_smooth.tensor().to_vec();
-        let vs: Vec<f32> = loss_smooth.tensor().to_vec();
-
-        assert!(
-            vs[0] > v0[0],
-            "smoothed loss {} should be > unsmoothed {}",
-            vs[0],
-            v0[0]
-        );
+    let mask_shape = mask.shape();
+    if mask_shape.len() != 1 || mask_shape[0] != n {
+        return Err(Error::InvalidArgument {
+            arg: "mask",
+            reason: format!(
+                "expected shape [{n}] to match logits {logits_shape:?}, got {mask_shape:?}; reshape mask to [N]"
+            ),
+        });
     }
 
-    #[test]
-    fn test_label_smoothing_zero_is_ce() {
-        let (client, device) = cpu_setup();
+    // Per-position NLL, identical to cross_entropy_loss: [N, 1]
+    let log_probs = var_log_softmax(logits, -1, client).map_err(Error::Numr)?;
+    let targets_expanded = prepare_targets(targets, n)?;
+    let selected = var_gather(&log_probs, 1, &targets_expanded, client).map_err(Error::Numr)?;
+    let nll = var_neg(&selected, client).map_err(Error::Numr)?;
 
-        let logits = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[2.0f32, 1.0, 0.1, 0.1, 2.0, 1.0], &[2, 3], &device),
-            false,
-        );
-        let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1], &[2], &device);
+    // Mask is data, not a parameter: requires_grad = false, so no gradient
+    // flows into it and masked-out rows get exactly zero gradient.
+    let mask_2d = mask.reshape(&[n, 1]).map_err(Error::Numr)?;
+    let logits_dtype = logits.tensor().dtype();
+    let mask_2d = if mask.dtype() == logits_dtype {
+        mask_2d
+    } else {
+        client.cast(&mask_2d, logits_dtype).map_err(Error::Numr)?
+    };
 
-        let loss_ce = cross_entropy_loss(&client, &logits, &targets).unwrap();
-        let loss_smooth = cross_entropy_loss_smooth(&client, &logits, &targets, 0.0).unwrap();
-
-        let v0: Vec<f32> = loss_ce.tensor().to_vec();
-        let vs: Vec<f32> = loss_smooth.tensor().to_vec();
-        assert!(
-            (v0[0] - vs[0]).abs() < 1e-6,
-            "smoothing=0 should match CE: {} vs {}",
-            v0[0],
-            vs[0]
-        );
+    // Denominator: number of masked-IN positions, never N.
+    //
+    // Reading it back to the host is a device sync point, once per loss call.
+    // It is what makes the empty-mask guard below possible: without it,
+    // sum(mask) == 0 yields 0/0 = NaN and poisons every gradient silently.
+    // Do NOT remove this readback without replacing the guard.
+    let mask_sum = client.sum(&mask_2d, &[0, 1], false).map_err(Error::Numr)?;
+    let kept: f32 = client
+        .cast(&mask_sum, DType::F32)
+        .map_err(Error::Numr)?
+        .item()
+        .map_err(Error::Numr)?;
+    if kept <= 0.0 || !kept.is_finite() {
+        return Err(Error::InvalidArgument {
+            arg: "mask",
+            reason: format!(
+                "mask selected no positions: sum(mask) = {kept} over {n} positions; this usually means the mask was derived from the wrong tensor - pass a mask with at least one 1.0 entry"
+            ),
+        });
     }
+
+    let mask_var = Var::new(mask_2d, false);
+    let masked = var_mul(&nll, &mask_var, client).map_err(Error::Numr)?;
+    let total =
+        var_sum(&masked, &all_dims(masked.shape().len()), false, client).map_err(Error::Numr)?;
+    let loss = var_div_scalar(&total, kept as f64, client).map_err(Error::Numr)?;
+
+    Ok(loss)
 }
+
+#[cfg(test)]
+mod tests;

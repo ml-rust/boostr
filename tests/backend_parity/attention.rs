@@ -1240,3 +1240,171 @@ fn assert_key_row_nonzero(grad: &[f32], h: usize, sk: usize, d: usize, key: usiz
         );
     }
 }
+
+/// FP8 GQA backward: the CUDA FP8 backward kernel takes no `num_kv_heads` — it
+/// indexes K, V, dK and dV with `num_heads`. The launcher repeats the KV heads up
+/// to `num_heads`, runs the kernel over the expanded layout, and reduces each
+/// group's dK/dV back to `num_kv_heads` in F32 before requantizing once.
+///
+/// There is no CPU FP8 attention, so the reference is the same CUDA kernel run
+/// with `num_kv_heads == num_heads` over explicitly repeated K/V: the GQA result
+/// must equal the group sum of those per-head gradients, within one FP8 rounding.
+///
+/// `head_dim` is 32: the v2 backward has no small-shared-memory variant, so a card
+/// with ~99KB of shared memory cannot run it above head_dim 32.
+#[cfg(feature = "cuda")]
+fn assert_flash_bwd_fp8_kv_parity(num_heads: usize, num_kv_heads: usize, label: &str) {
+    use numr::dtype::DType;
+    use numr::ops::TypeConversionOps;
+    use numr::tensor::Tensor;
+
+    let (_cpu_client, cpu_device) = setup_cpu();
+    let (b, s, d) = (1usize, 8usize, 32usize);
+    let repeats = num_heads / num_kv_heads;
+
+    let q = det_tensor(&[b, num_heads, s, d], &cpu_device).to_vec::<f32>();
+    let k = det_tensor(&[b, num_kv_heads, s, d], &cpu_device).to_vec::<f32>();
+    let v = det_tensor(&[b, num_kv_heads, s, d], &cpu_device).to_vec::<f32>();
+    let dout = det_tensor(&[b, num_heads, s, d], &cpu_device).to_vec::<f32>();
+
+    // K/V with each KV head repeated `repeats` times — the layout the kernel sees.
+    let expand = |src: &[f32]| -> Vec<f32> {
+        let mut out = Vec::with_capacity(num_heads * s * d);
+        for h in 0..num_heads {
+            let kv = h / repeats;
+            out.extend_from_slice(&src[kv * s * d..(kv + 1) * s * d]);
+        }
+        out
+    };
+    let k_expanded = expand(&k);
+    let v_expanded = expand(&v);
+
+    with_cuda_backend(|cuda_client, cuda_device| {
+        let to_fp8 = |data: &[f32], shape: &[usize]| {
+            let t = Tensor::from_slice(data, shape, &cuda_device);
+            cuda_client.cast(&t, DType::FP8E4M3).unwrap()
+        };
+
+        // Runs one FP8 forward+backward; returns (dK, dV) as F32 vectors, or None
+        // when this GPU has no FP8 backward kernel.
+        let run = |heads: usize, kv_heads: usize, k_data: &[f32], v_data: &[f32]| {
+            let q_c = to_fp8(&q, &[b, heads, s, d]);
+            let k_c = to_fp8(k_data, &[b, kv_heads, s, d]);
+            let v_c = to_fp8(v_data, &[b, kv_heads, s, d]);
+            let dout_c = to_fp8(&dout, &[b, heads, s, d]);
+
+            let (out_c, lse_c) = cuda_client
+                .flash_attention_fwd_fp8(
+                    &q_c, &k_c, &v_c, heads, kv_heads, d, false, 1.0, 1.0, 1.0, 1.0,
+                )
+                .ok()?;
+            let (dq_c, dk_c, dv_c) = cuda_client
+                .flash_attention_bwd_fp8(
+                    &dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, heads, kv_heads, d, false, 1.0, 1.0,
+                    1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                )
+                .ok()?;
+
+            assert_eq!(
+                dk_c.shape(),
+                [b, kv_heads, s, d],
+                "{}: FP8 dK must have num_kv_heads heads",
+                label
+            );
+            assert_eq!(
+                dv_c.shape(),
+                [b, kv_heads, s, d],
+                "{}: FP8 dV must have num_kv_heads heads",
+                label
+            );
+
+            let dq_f32 = cuda_client.cast(&dq_c, DType::F32).unwrap().to_vec::<f32>();
+            let dk_f32 = cuda_client.cast(&dk_c, DType::F32).unwrap().to_vec::<f32>();
+            let dv_f32 = cuda_client.cast(&dv_c, DType::F32).unwrap().to_vec::<f32>();
+            for (name, vals) in [("dQ", &dq_f32), ("dK", &dk_f32), ("dV", &dv_f32)] {
+                assert!(
+                    vals.iter().all(|x| x.is_finite()),
+                    "{}: FP8 {} has non-finite values",
+                    label,
+                    name
+                );
+            }
+            Some((dk_f32, dv_f32))
+        };
+
+        let Some((dk_gqa, dv_gqa)) = run(num_heads, num_kv_heads, &k, &v) else {
+            eprintln!(
+                "{}: FP8 flash backward unavailable on this GPU, skipping",
+                label
+            );
+            return;
+        };
+        assert!(
+            dk_gqa.iter().any(|x| x.abs() > 0.0),
+            "{}: FP8 dK is all zero",
+            label
+        );
+
+        if repeats == 1 {
+            // Non-GQA: no KV repeat, no group sum — nothing further to compare.
+            return;
+        }
+
+        let Some((dk_full, dv_full)) = run(num_heads, num_heads, &k_expanded, &v_expanded) else {
+            eprintln!("{}: FP8 reference run unavailable, skipping", label);
+            return;
+        };
+
+        // Sum each group of `repeats` per-head gradients — the reduction the GQA
+        // launcher performs internally.
+        let group_sum = |full: &[f32]| -> Vec<f32> {
+            let mut out = vec![0.0f32; num_kv_heads * s * d];
+            for h in 0..num_heads {
+                let kv = h / repeats;
+                for i in 0..s * d {
+                    out[kv * s * d + i] += full[h * s * d + i];
+                }
+            }
+            out
+        };
+        // One E4M3 rounding step is ~6.25% relative; atol covers the subnormal floor.
+        assert_parity_f32_tol(
+            &dk_gqa,
+            &group_sum(&dk_full),
+            &format!("{} dK FP8 group sum", label),
+            0.1,
+            5e-3,
+        );
+        assert_parity_f32_tol(
+            &dv_gqa,
+            &group_sum(&dv_full),
+            &format!("{} dV FP8 group sum", label),
+            0.1,
+            5e-3,
+        );
+    });
+}
+
+/// FP8 GQA backward: 4 query heads over 2 KV heads.
+///
+/// Regression: the FP8 launcher allocated dK/dV with `num_kv_heads` while the
+/// kernel indexes them with `num_heads`, writing past the end of both buffers.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_flash_attention_bwd_fp8_gqa_parity() {
+    assert_flash_bwd_fp8_kv_parity(4, 2, "flash_bwd_fp8 gqa 4h/2kv");
+}
+
+/// FP8 MQA backward: 4 query heads share a single KV head.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_flash_attention_bwd_fp8_mqa_parity() {
+    assert_flash_bwd_fp8_kv_parity(4, 1, "flash_bwd_fp8 mqa 4h/1kv");
+}
+
+/// FP8 non-GQA backward stays unchanged: no KV repeat, no group sum.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_flash_attention_bwd_fp8_no_gqa_parity() {
+    assert_flash_bwd_fp8_kv_parity(4, 4, "flash_bwd_fp8 4h/4kv");
+}

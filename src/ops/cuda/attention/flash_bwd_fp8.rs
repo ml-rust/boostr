@@ -2,9 +2,11 @@
 
 use crate::error::{Error, Result};
 use crate::ops::cuda::kernels::{self, FLASH_V2_BWD_MODULE};
+use crate::ops::impl_generic::attention::sum_gqa_grads;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
+use numr::ops::{ShapeOps, TypeConversionOps};
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
@@ -60,19 +62,51 @@ pub(super) fn flash_attention_bwd_fp8_impl(
     let device = q.device();
     let device_index = device.id();
 
-    // Allocate gradient tensors (dQ zeroed for atomicAdd)
+    if p.num_kv_heads == 0 {
+        return Err(Error::InvalidArgument {
+            arg: "num_kv_heads",
+            reason: "num_kv_heads must be non-zero".into(),
+        });
+    }
+
+    // GQA/MQA: the FP8 backward kernel takes no `num_kv_heads` — it indexes K, V,
+    // dK and dV with `num_heads`. Repeat the KV heads up to `num_heads` (same
+    // mapping the forward kernel applies internally:
+    // `kv_head_idx = head_idx / (num_heads / num_kv_heads)`), run the kernel over
+    // the expanded layout, then SUM each KV head's group of per-head dK/dV back
+    // down to `num_kv_heads`. Sum is the gradient of a repeated tensor.
+    let repeats = p.num_heads / p.num_kv_heads;
+    let kv_repeated = if repeats > 1 {
+        let k_rep = client
+            .repeat_interleave(k, repeats, Some(1))?
+            .contiguous()?;
+        let v_rep = client
+            .repeat_interleave(v, repeats, Some(1))?
+            .contiguous()?;
+        Some((k_rep, v_rep))
+    } else {
+        None
+    };
+    let (k, v) = match &kv_repeated {
+        Some((k_rep, v_rep)) => (k_rep, v_rep),
+        None => (k, v),
+    };
+
+    // Allocate gradient tensors (dQ zeroed for atomicAdd).
+    // dK/dV are allocated with `num_heads` heads to match the kernel's indexing;
+    // GQA groups are summed back to `num_kv_heads` after the launch.
     let dq = Tensor::<CudaRuntime>::zeros(
         &[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim],
         dtype,
         device,
     );
     let dk = Tensor::<CudaRuntime>::empty(
-        &[p.batch_size, p.num_kv_heads, p.seq_len_k, p.head_dim],
+        &[p.batch_size, p.num_heads, p.seq_len_k, p.head_dim],
         dtype,
         device,
     );
     let dv = Tensor::<CudaRuntime>::empty(
-        &[p.batch_size, p.num_kv_heads, p.seq_len_k, p.head_dim],
+        &[p.batch_size, p.num_heads, p.seq_len_k, p.head_dim],
         dtype,
         device,
     );
@@ -200,5 +234,31 @@ pub(super) fn flash_attention_bwd_fp8_impl(
         }
     }
 
+    if repeats > 1 {
+        let dk = sum_gqa_grads_fp8(client, &dk, p.num_kv_heads, repeats, dtype)?;
+        let dv = sum_gqa_grads_fp8(client, &dv, p.num_kv_heads, repeats, dtype)?;
+        return Ok((dq, dk, dv));
+    }
+
     Ok((dq, dk, dv))
+}
+
+/// Reduce a GQA group of per-head FP8 gradients back to one KV head.
+///
+/// The kernel stores `raw = quantize(value * scale)`, so an element already
+/// carries its `dk_scale`/`dv_scale` factor. Summing raw FP8 would round once per
+/// group member and can leave E4M3's ~±448 range, so the group is dequantized to
+/// F32, summed there, and requantized ONCE. The cast back to FP8 reapplies the
+/// kernel's convention exactly: the F32 sum equals `scale * sum(real values)`,
+/// which is the value the kernel would have written for the merged head.
+fn sum_gqa_grads_fp8(
+    client: &CudaClient,
+    grad: &Tensor<CudaRuntime>,
+    num_kv_heads: usize,
+    repeats: usize,
+    dtype: DType,
+) -> Result<Tensor<CudaRuntime>> {
+    let grad_f32 = client.cast(grad, DType::F32)?;
+    let summed = sum_gqa_grads(client, &grad_f32, num_kv_heads, repeats)?;
+    Ok(client.cast(&summed, dtype)?)
 }

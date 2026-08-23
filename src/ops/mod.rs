@@ -1,5 +1,6 @@
 pub mod autograd_attention;
 pub mod autograd_biased_attention;
+pub mod autograd_rope;
 pub mod cpu;
 #[cfg(feature = "cuda")]
 pub mod cuda;
@@ -10,6 +11,7 @@ pub mod wgpu;
 
 pub use autograd_attention::var_flash_attention;
 pub use autograd_biased_attention::{AttentionCausality, var_attention_with_bias};
+pub use autograd_rope::{RopeVariant, attach_rope_backward};
 pub use traits::AlibiOps;
 pub use traits::AttentionOps;
 pub use traits::CalibrationOps;

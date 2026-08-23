@@ -1,6 +1,7 @@
 //! CUDA implementation of RoPEOps — fused kernel dispatch
 
 use crate::error::{Error, Result};
+use crate::ops::autograd_rope::{RopeVariant, attach_rope_backward};
 use crate::ops::cuda::kernels::{self, ROPE_INTERLEAVED_MODULE, ROPE_MODULE, ROPE_YARN_MODULE};
 use crate::ops::traits::RoPEOps;
 use cudarc::driver::PushKernelArg;
@@ -184,7 +185,7 @@ impl RoPEOps<CudaRuntime> for CudaClient {
             })?;
         }
 
-        Ok(Var::new(output, false))
+        attach_rope_backward(x, output, &cos_to_use, &sin_to_use, RopeVariant::Standard)
     }
 
     fn apply_rope_interleaved(
@@ -241,7 +242,13 @@ impl RoPEOps<CudaRuntime> for CudaClient {
             })?;
         }
 
-        Ok(Var::new(output, false))
+        attach_rope_backward(
+            x,
+            output,
+            &cos_to_use,
+            &sin_to_use,
+            RopeVariant::Interleaved,
+        )
     }
 
     fn apply_rope_yarn(
@@ -298,6 +305,12 @@ impl RoPEOps<CudaRuntime> for CudaClient {
             })?;
         }
 
-        Ok(Var::new(output, false))
+        attach_rope_backward(
+            x,
+            output,
+            &cos_to_use,
+            &sin_to_use,
+            RopeVariant::Yarn { attn_scale },
+        )
     }
 }

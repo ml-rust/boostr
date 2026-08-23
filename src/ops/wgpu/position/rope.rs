@@ -1,6 +1,7 @@
 //! WebGPU implementation of RoPEOps — fused WGSL shader dispatch
 
 use crate::error::{Error, Result};
+use crate::ops::autograd_rope::{RopeVariant, attach_rope_backward};
 use crate::ops::traits::RoPEOps;
 use numr::autograd::Var;
 use numr::dtype::DType;
@@ -208,7 +209,13 @@ impl RoPEOps<WgpuRuntime> for WgpuClient {
             workgroups,
         );
 
-        Ok(Var::new(output, false))
+        attach_rope_backward(
+            x,
+            output,
+            &cos_narrowed,
+            &sin_narrowed,
+            RopeVariant::Standard,
+        )
     }
 
     fn apply_rope_interleaved(
@@ -277,7 +284,13 @@ impl RoPEOps<WgpuRuntime> for WgpuClient {
             workgroups,
         );
 
-        Ok(Var::new(output, false))
+        attach_rope_backward(
+            x,
+            output,
+            &cos_narrowed,
+            &sin_narrowed,
+            RopeVariant::Interleaved,
+        )
     }
 
     fn apply_rope_yarn(
@@ -351,6 +364,12 @@ impl RoPEOps<WgpuRuntime> for WgpuClient {
             workgroups,
         );
 
-        Ok(Var::new(output, false))
+        attach_rope_backward(
+            x,
+            output,
+            &cos_narrowed,
+            &sin_narrowed,
+            RopeVariant::Yarn { attn_scale },
+        )
     }
 }

@@ -5,8 +5,8 @@
 //! and cannot drift between architectures.
 
 use crate::error::{Error, Result};
-use crate::model::traits::ModelClient;
 use numr::dtype::DType;
+use numr::ops::{BinaryOps, LinalgOps, ScalarOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -50,7 +50,10 @@ pub fn causal_window_mask<R, C>(
 ) -> Result<Tensor<R>>
 where
     R: Runtime<DType = DType>,
-    C: ModelClient<R>,
+    // Exactly the ops this builder calls — NOT the `ModelClient` umbrella.
+    // A caller with a small bound list (a trainer's model) must be able to
+    // build the same mask without inheriting 17 supertraits.
+    C: ScalarOps<R> + LinalgOps<R> + BinaryOps<R>,
 {
     let key_offset = sk.saturating_sub(sq) as i64;
     let zeros = Tensor::<R>::zeros(&[sq, sk], DType::F32, device);

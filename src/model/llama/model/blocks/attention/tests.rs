@@ -1,7 +1,6 @@
 //! Tests for the sliding-window causal mask and the sliding-window config wiring.
 
 use super::super::builders::{build_block_from_config, build_block_from_varbuilder};
-use super::LlamaAttention;
 use crate::model::config::ModelConfig;
 use crate::nn::{VarBuilder, VarMap};
 use crate::test_utils::cpu_setup;
@@ -29,8 +28,14 @@ fn expected_mask(sq: usize, sk: usize, window_size: usize) -> Vec<f32> {
 
 fn mask_values(sq: usize, sk: usize, window_size: usize) -> Vec<f32> {
     let (client, device) = cpu_setup();
-    let mask =
-        LlamaAttention::<CpuRuntime>::causal_mask(&client, sq, sk, window_size, &device).unwrap();
+    let mask = crate::model::attention_mask::causal_window_mask::<CpuRuntime, _>(
+        &client,
+        sq,
+        sk,
+        window_size,
+        &device,
+    )
+    .unwrap();
     assert_eq!(mask.shape(), &[1, 1, sq, sk]);
     mask.to_vec::<f32>()
 }
@@ -193,10 +198,19 @@ attention:
     assert!(block.self_attn.use_alibi, "fixture must exercise ALiBi");
 
     let sq = 4;
-    let mask = block
-        .self_attn
-        .prefill_mask(&client, 1, sq, sq, &device)
-        .expect("mask builds");
+    // Go through the shared rule directly. `attention_core` is what the forward
+    // path actually calls, so testing anything else would leave the real mask
+    // unguarded — and a non-causal mask is invisible to shape checks while still
+    // producing fluent text.
+    let mask = crate::model::prefill_attention_mask(
+        &client,
+        1,
+        sq,
+        sq,
+        &block.self_attn.core_spec(),
+        &device,
+    )
+    .expect("mask builds");
     let values: Vec<f32> = mask.tensor().contiguous().unwrap().to_vec();
 
     // Head 0 occupies the first sq*sq entries.

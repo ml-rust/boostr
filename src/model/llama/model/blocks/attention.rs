@@ -3,6 +3,7 @@
 use super::helpers::{repeat_kv, var_contiguous};
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
+use crate::model::attention_core::{AttentionCoreSpec, attention_core};
 use crate::model::traits::ModelClient;
 use crate::nn::{MaybeQuantLinear, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
@@ -43,24 +44,18 @@ pub struct LlamaAttention<R: Runtime> {
 }
 
 impl<R: Runtime<DType = DType>> LlamaAttention<R> {
-    /// Additive causal mask, shape `[1, 1, sq, sk]`.
-    ///
-    /// Thin wrapper over [`crate::model::attention_mask::causal_window_mask`],
-    /// which owns the masking rule (causality, the inclusive sliding window,
-    /// and the `f32::MIN` fill) for every architecture. Only called with
-    /// `sq == sk` here — the prefill/training path builds Q and K from the same
-    /// activation — so the shared builder's key offset is `0`.
-    fn causal_mask<C>(
-        client: &C,
-        sq: usize,
-        sk: usize,
-        window_size: usize,
-        device: &R::Device,
-    ) -> Result<Tensor<R>>
-    where
-        C: ModelClient<R>,
-    {
-        crate::model::attention_mask::causal_window_mask(client, sq, sk, window_size, device)
+    /// Borrowed view of this block's attention parameters, for
+    /// [`attention_core`].
+    fn core_spec(&self) -> AttentionCoreSpec<'_, R> {
+        AttentionCoreSpec {
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            q_norm: self.q_norm.as_ref(),
+            k_norm: self.k_norm.as_ref(),
+            use_alibi: self.use_alibi,
+            sliding_window: self.sliding_window,
+        }
     }
 
     /// Apply optional Q/K layer norms (Command-R, Cohere).
@@ -116,10 +111,6 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             + CompareOps<R>
             + ConditionalOps<R>,
     {
-        let shape = x.shape().to_vec();
-        let batch = shape[0];
-        let seq_len = shape[1];
-
         // Q/K/V projections (batched: quantize activation once for all 3)
         let qkv = MaybeQuantLinear::forward_batch(
             &[&self.q_proj, &self.k_proj, &self.v_proj],
@@ -128,105 +119,22 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         )?;
         let (q, k, v) = (&qkv[0], &qkv[1], &qkv[2]);
 
-        // Reshape to [B, S, H, D] then permute to [B, H, S, D]
-        let q = var_reshape(q, &[batch, seq_len, self.num_heads, self.head_dim])
-            .map_err(Error::Numr)?;
-        let k = var_reshape(k, &[batch, seq_len, self.num_kv_heads, self.head_dim])
-            .map_err(Error::Numr)?;
-        let v = var_reshape(v, &[batch, seq_len, self.num_kv_heads, self.head_dim])
-            .map_err(Error::Numr)?;
-
-        let q = numr::autograd::var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-
-        // Contiguous Q/K needed because fused RoPE kernel assumes contiguous layout.
-        // V skips contiguous — matmul handles strided inputs via copy_strided.
-        let q = var_contiguous(&q)?;
-        let k = var_contiguous(&k)?;
-
-        // Optional Q/K layer norms (Command-R, Cohere) — applied before RoPE
-        let (q, k) = self.apply_qk_norms(client, &q, &k)?;
-
-        // Apply RoPE or skip for ALiBi models
-        let (q, k) =
-            self.apply_rotary_if_needed(client, q, k, rope.cos_cache(), rope.sin_cache())?;
-
-        // GQA: repeat K/V heads to match Q heads
-        let (k, v) = if self.num_kv_heads < self.num_heads {
-            let repeat = self.num_heads / self.num_kv_heads;
-            let k = repeat_kv(&k, repeat).map_err(Error::Numr)?;
-            let v = repeat_kv(&v, repeat).map_err(Error::Numr)?;
-            (k, v)
-        } else {
-            (k, v)
-        };
-
-        // Additive attention mask.
-        //
-        // ⚠ This branch MUST supply a causal mask. It is the prefill/training
-        // path: `Model::forward` and every training step run through it with
-        // the whole sequence at once, so without a mask each position attends
-        // to FUTURE tokens. That is not a subtle numerical issue — it makes the
-        // next-token objective trivially cheatable during training and corrupts
-        // every prompt position during inference. It also stays invisible to
-        // shape checks and still emits fluent text, which is how it survived
-        // until `tests/qwen3_parity.rs` measured against HuggingFace.
-        //
-        // The decode paths do not need this: `forward_with_kv_cache` either
-        // builds the causal mask via `alibi_add_bias_causal` or delegates to
-        // `flash_attention_fwd`, whose kernel applies causality from
-        // `is_prefill`.
-        let sq = q.shape()[2];
-        let sk = k.shape()[2];
-        let mask = self.prefill_mask(client, batch, sq, sk, q.tensor().device())?;
-        let attn_out = multi_head_attention_impl(client, &q, &k, &v, Some(&mask), self.num_heads)?;
-
-        // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
-        let attn_out =
-            numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out)?;
-        let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
-            .map_err(Error::Numr)?;
+        // Everything between the projections and `o_proj` — reshape/permute,
+        // Q/K norm, RoPE, GQA, causal(+window)/ALiBi mask, attention — lives in
+        // `attention_core` so this block and a trainer's block cannot drift on
+        // the step order (notably: norm BEFORE rope).
+        let attn_out = attention_core(
+            client,
+            q,
+            k,
+            v,
+            rope.cos_cache(),
+            rope.sin_cache(),
+            &self.core_spec(),
+        )?;
 
         // Output projection
         self.o_proj.forward(client, &attn_out)
-    }
-
-    /// The prefill/training additive mask: ALiBi bias or causal(+window).
-    ///
-    /// Split out so the masking rule is directly testable — a non-causal mask
-    /// here is invisible to shape checks and still produces fluent text.
-    pub(crate) fn prefill_mask<C>(
-        &self,
-        client: &C,
-        batch: usize,
-        sq: usize,
-        sk: usize,
-        device: &R::Device,
-    ) -> Result<Var<R>>
-    where
-        C: ModelClient<R>,
-    {
-        Ok(if self.use_alibi {
-            // MUST be the `_causal` kernel. `alibi_add_bias` writes a SYMMETRIC
-            // `-slope * |qi - ki|` over the whole rectangle and masks nothing,
-            // so using it here let every prefill position attend to FUTURE
-            // tokens — the same defect the non-ALiBi path had until parity
-            // testing caught it. `alibi_add_bias_causal` adds the same distance
-            // bias and sets `ki > qi + position` to -inf.
-            //
-            // `position = 0`: this is the prefill/training path, so query `qi`
-            // is at absolute position `qi`.
-            let mask = Tensor::<R>::zeros(&[batch, self.num_heads, sq, sk], DType::F32, device);
-            client.alibi_add_bias_causal(&mask, batch, self.num_heads, sq, sk, 0)?;
-            Var::new(mask, false)
-        } else {
-            Var::new(
-                Self::causal_mask(client, sq, sk, self.sliding_window, device)?,
-                false,
-            )
-        })
     }
 
     pub fn forward_with_kv_cache<C>(

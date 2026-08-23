@@ -3,7 +3,7 @@
 use super::helpers::{repeat_kv, var_contiguous};
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
-use crate::model::attention_core::{AttentionCoreSpec, attention_core};
+use crate::model::attention_core::{AttentionCoreSpec, AttentionKernel, attention_core_masked};
 use crate::model::traits::ModelClient;
 use crate::nn::{MaybeQuantLinear, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
@@ -45,7 +45,7 @@ pub struct LlamaAttention<R: Runtime> {
 
 impl<R: Runtime<DType = DType>> LlamaAttention<R> {
     /// Borrowed view of this block's attention parameters, for
-    /// [`attention_core`].
+    /// [`attention_core_masked`].
     fn core_spec(&self) -> AttentionCoreSpec<'_, R> {
         AttentionCoreSpec {
             num_heads: self.num_heads,
@@ -55,6 +55,9 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             k_norm: self.k_norm.as_ref(),
             use_alibi: self.use_alibi,
             sliding_window: self.sliding_window,
+            // This block runs the materialized-mask kernel. Its ALiBi variants
+            // require it, and `tests/qwen3_parity.rs` pins its numbers.
+            kernel: AttentionKernel::Masked,
         }
     }
 
@@ -121,9 +124,12 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
 
         // Everything between the projections and `o_proj` — reshape/permute,
         // Q/K norm, RoPE, GQA, causal(+window)/ALiBi mask, attention — lives in
-        // `attention_core` so this block and a trainer's block cannot drift on
-        // the step order (notably: norm BEFORE rope).
-        let attn_out = attention_core(
+        // `attention_core_masked` so this block and a trainer's block cannot
+        // drift on the step order (notably: norm BEFORE rope). It is the same
+        // sequence and the same math `attention_core`'s `Masked` arm runs; the
+        // separate entry point only drops the flash kernel's `R::Client` bound,
+        // which the `Model` trait's fixed bound list cannot carry.
+        let attn_out = attention_core_masked(
             client,
             q,
             k,

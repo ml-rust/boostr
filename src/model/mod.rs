@@ -15,7 +15,10 @@ pub mod traits;
 pub mod vision;
 pub mod vocab_growth;
 
-pub use attention_core::{AttentionCoreSpec, attention_core, prefill_attention_mask};
+pub use attention_core::{
+    AttentionCoreSpec, AttentionKernel, attention_core, attention_core_masked,
+    prefill_attention_mask,
+};
 pub use config::{
     AttentionConfig, AudioConfig, HuggingFaceConfig, HybridConfig, ModelConfig, MoeConfig,
     RopeScalingConfig, SsmConfig, UniversalConfig, VisionConfig, load_config_auto,

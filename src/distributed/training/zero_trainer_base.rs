@@ -14,7 +14,7 @@ use crate::optimizer::{AdamWConfig, GradAccumulator, LrSchedule, clip_grad_norm}
 use crate::trainer::config::{TrainingConfig, TrainingMetrics};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
+use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps};
 use numr::runtime::{Communicator, Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
@@ -70,7 +70,12 @@ impl<R: Runtime<DType = DType>, Z: ZeroOptimizer<R>> ZeroTrainerBase<R, Z> {
         loss_value: f64,
     ) -> Result<Option<GradStore<R>>>
     where
-        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R> + ReduceOps<R>,
+        C: RuntimeClient<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + TypeConversionOps<R>,
     {
         self.accumulated_loss += loss_value;
         self.loss_count += 1;

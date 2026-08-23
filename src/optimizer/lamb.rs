@@ -10,9 +10,10 @@
 use crate::error::Result;
 use crate::ops::FusedOptimizerOps;
 use crate::optimizer::traits::Optimizer;
+use crate::readback::scalar_f32;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
+use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 use std::collections::HashMap;
@@ -96,15 +97,18 @@ impl<R: Runtime<DType = DType>> Lamb<R> {
 }
 
 /// Compute L2 norm of a tensor as f64, device-native via reduction ops.
+///
+/// The sum of squares carries the tensor's own dtype, so it is read back
+/// through [`scalar_f32`]. Under BF16 or F16 a direct `item::<f32>` over-runs
+/// the buffer, and both trust-ratio operands would be garbage.
 fn tensor_l2_norm<R, C>(client: &C, t: &Tensor<R>) -> Result<f64>
 where
     R: Runtime<DType = DType>,
-    C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ReduceOps<R>,
+    C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ReduceOps<R> + TypeConversionOps<R>,
 {
     let sq = client.mul(t, t)?;
     let sum_sq = client.sum(&sq, &[], false)?;
-    let val: f32 = sum_sq.item()?;
-    Ok((val as f64).sqrt())
+    Ok((scalar_f32(client, &sum_sq)? as f64).sqrt())
 }
 
 impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
@@ -120,6 +124,7 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
             + UnaryOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
+            + TypeConversionOps<R>
             + FusedOptimizerOps<R>,
     {
         self.timestep += 1;
@@ -374,6 +379,50 @@ mod tests {
 
         let updated = params.get(&w_id).unwrap().to_vec::<f32>();
         assert_eq!(updated, vec![1.0, 2.0]);
+    }
+
+    /// The trust ratio is `||param|| / ||update||`. Both operands come from
+    /// `tensor_l2_norm`, so a reinterpreted readback corrupts the ratio and the
+    /// effective learning rate with it. [3, 4] has L2 norm 5.0 exactly in F32,
+    /// F64, BF16 and F16, so the expected value is exact at every dtype and a
+    /// byte-reinterpretation result cannot pass.
+    #[test]
+    fn test_tensor_l2_norm_f32_value_is_unchanged() {
+        let (client, device) = cpu_setup();
+        let t = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
+        let norm = tensor_l2_norm(&client, &t).unwrap();
+        assert!((norm - 5.0).abs() < 1e-6, "expected 5.0, got {norm}");
+    }
+
+    /// F64 needs no feature flag, so this is the case that guards the fix under
+    /// a plain `cargo test`. `item::<f32>` takes the low four bytes of the F64
+    /// sum of squares, which for 25.0 are all zero, so the unfixed code reports
+    /// a norm of 0.0 and LAMB falls back to a trust ratio of 1.0.
+    #[test]
+    fn test_tensor_l2_norm_reads_an_f64_tensor_at_its_own_dtype() {
+        let (client, device) = cpu_setup();
+        let t = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
+        let wide = client.cast(&t, DType::F64).unwrap();
+        let norm = tensor_l2_norm(&client, &wide).unwrap();
+        assert!((norm - 5.0).abs() < 1e-6, "expected 5.0, got {norm}");
+    }
+
+    /// The mixed-precision case: needs `--features f16`.
+    #[cfg(feature = "f16")]
+    #[test]
+    fn test_tensor_l2_norm_reads_narrow_tensors_at_their_own_dtype() {
+        let (client, device) = cpu_setup();
+        let t = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
+
+        for dtype in [DType::BF16, DType::F16] {
+            let narrow = client.cast(&t, dtype).unwrap();
+            assert_eq!(narrow.dtype(), dtype);
+            let norm = tensor_l2_norm(&client, &narrow).unwrap();
+            assert!(
+                (norm - 5.0).abs() < 1e-2,
+                "{dtype:?}: expected 5.0, got {norm}"
+            );
+        }
     }
 
     #[test]

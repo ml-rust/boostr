@@ -6,7 +6,7 @@ use crate::error::Result;
 use crate::ops::FusedOptimizerOps;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
+use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 use std::collections::HashMap;
@@ -20,6 +20,10 @@ pub trait Optimizer<R: Runtime<DType = DType>> {
     ///
     /// Updates all parameters in `params` using gradients from `grads`.
     /// Parameters without gradients are skipped.
+    ///
+    /// `TypeConversionOps` is required because an optimizer that reads a scalar
+    /// back to the host (LAMB's trust ratio) must cast it to F32 first: reading
+    /// a BF16/F16 scalar at a fixed f32 width over-runs the device buffer.
     fn step<C>(
         &mut self,
         client: &C,
@@ -32,6 +36,7 @@ pub trait Optimizer<R: Runtime<DType = DType>> {
             + UnaryOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
+            + TypeConversionOps<R>
             + FusedOptimizerOps<R>;
 
     /// Set the learning rate.

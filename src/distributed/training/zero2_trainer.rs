@@ -15,7 +15,7 @@ use crate::ops::FusedOptimizerOps;
 use crate::trainer::config::{TrainingConfig, TrainingMetrics};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
+use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps};
 use numr::runtime::{Communicator, Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
@@ -66,6 +66,7 @@ impl<R: Runtime<DType = DType>> Zero2Trainer<R> {
             + UnaryOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
+            + TypeConversionOps<R>
             + FusedOptimizerOps<R>,
     {
         let mut averaged_grads = match self.base.prepare_step(client, grads, loss_value)? {

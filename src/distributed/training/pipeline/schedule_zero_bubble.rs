@@ -15,7 +15,7 @@ use super::stage::{TrainablePipelineStage, ZeroBubbleStage};
 use crate::error::{Error, Result};
 use numr::autograd::Var;
 use numr::dtype::DType;
-use numr::ops::ShapeOps;
+use numr::ops::{ShapeOps, TypeConversionOps};
 use numr::runtime::{Communicator, Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -56,12 +56,12 @@ impl<R: Runtime<DType = DType>> ScheduleZeroBubble<R> {
     /// * `loss_fn` — loss function (only on the last stage).
     pub fn run<C>(
         &mut self,
-        _client: &C,
+        client: &C,
         micro_batches: Option<Vec<Tensor<R>>>,
         loss_fn: Option<&super::schedule_1f1b::LossFn<'_, R>>,
     ) -> Result<PipelineOutput<R>>
     where
-        C: RuntimeClient<R> + ShapeOps<R>,
+        C: RuntimeClient<R> + ShapeOps<R> + TypeConversionOps<R>,
     {
         let rank = self.pp_comm.rank();
         let world_size = self.pp_comm.world_size().max(1);
@@ -130,6 +130,7 @@ impl<R: Runtime<DType = DType>> ScheduleZeroBubble<R> {
                 PipelineAction::BackwardInput(mb_id) => {
                     let output_grad = if is_last {
                         compute_loss_grad(
+                            client,
                             &mut forward_outputs[mb_id],
                             mb_id,
                             loss_fn,
@@ -167,6 +168,7 @@ impl<R: Runtime<DType = DType>> ScheduleZeroBubble<R> {
                 PipelineAction::Backward(mb_id) => {
                     let output_grad = if is_last {
                         compute_loss_grad(
+                            client,
                             &mut forward_outputs[mb_id],
                             mb_id,
                             loss_fn,

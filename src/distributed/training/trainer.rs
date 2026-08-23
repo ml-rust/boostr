@@ -13,7 +13,7 @@ use crate::trainer::SimpleTrainer;
 use crate::trainer::config::{TrainingConfig, TrainingMetrics};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
+use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps};
 use numr::runtime::Communicator;
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
@@ -82,6 +82,7 @@ impl<R: Runtime<DType = DType>> DistributedTrainer<R> {
             + UnaryOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
+            + TypeConversionOps<R>
             + FusedOptimizerOps<R>,
     {
         // We need to intercept the gradient accumulation to insert all_reduce.

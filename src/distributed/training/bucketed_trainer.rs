@@ -117,13 +117,16 @@ impl<R: Runtime<DType = DType>> BucketedTrainer<R> {
             + ReduceOps<R>
             + FusedOptimizerOps<R>,
     {
-        // Extract loss value before backward
-        let loss_value =
-            loss.tensor()
-                .item::<f32>()
-                .map_err(|e| crate::error::Error::DistributedError {
-                    reason: format!("failed to extract scalar loss: {e}"),
-                })? as f64;
+        // Extract loss value before backward.
+        //
+        // The loss carries the model's compute dtype, so it is cast to F32
+        // before readback: `item::<f32>` on a BF16/F16 loss over-runs the
+        // device buffer and yields a plausible-looking wrong number.
+        let loss_value = crate::readback::scalar_f32(client, loss.tensor()).map_err(|e| {
+            crate::error::Error::DistributedError {
+                reason: format!("failed to extract scalar loss: {e}"),
+            }
+        })? as f64;
 
         // Reset bucket state for this backward pass
         self.bucket_manager.reset();

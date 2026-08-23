@@ -8,6 +8,7 @@
 use crate::distributed::comm_utils::{recv_tensor_with_metadata, send_tensor_with_metadata};
 use crate::error::{Error, Result};
 use numr::dtype::DType;
+use numr::ops::TypeConversionOps;
 use numr::runtime::{Communicator, Runtime};
 use numr::tensor::Tensor;
 
@@ -94,13 +95,22 @@ pub fn recv_activation_tagged<R: Runtime<DType = DType>>(
 ///
 /// Extracts the saved forward output for `mb_id`, applies `loss_fn`, records the
 /// scalar loss value, and returns a ones tensor as the initial gradient.
-pub(super) fn compute_loss_grad<R: Runtime<DType = DType>>(
+///
+/// The loss carries the stage's compute dtype. It is cast to F32 before the
+/// host readback, and the seed gradient is built at the loss's own dtype: a
+/// fixed F32 seed would mismatch a BF16/F16 loss on the first backward op.
+pub(super) fn compute_loss_grad<R, C>(
+    client: &C,
     forward_output: &mut Option<numr::autograd::Var<R>>,
     mb_id: usize,
     loss_fn: Option<&super::schedule_1f1b::LossFn<'_, R>>,
     losses: &mut Vec<f64>,
     device: &R::Device,
-) -> Result<Tensor<R>> {
+) -> Result<Tensor<R>>
+where
+    R: Runtime<DType = DType>,
+    C: TypeConversionOps<R>,
+{
     let output = forward_output
         .take()
         .ok_or_else(|| Error::DistributedError {
@@ -112,13 +122,13 @@ pub(super) fn compute_loss_grad<R: Runtime<DType = DType>>(
     })?;
 
     let loss_var = loss_fn(&output)?;
-    if let Ok(v) = loss_var.tensor().item::<f32>() {
+    if let Ok(v) = crate::readback::scalar_f32(client, loss_var.tensor()) {
         losses.push(v as f64);
     }
 
     Ok(Tensor::<R>::ones(
         loss_var.tensor().shape(),
-        DType::F32,
+        loss_var.tensor().dtype(),
         device,
     ))
 }

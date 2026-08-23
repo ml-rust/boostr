@@ -12,7 +12,7 @@ use crate::optimizer::{
 use crate::trainer::config::{TrainingConfig, TrainingMetrics};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
+use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps};
 
 use crate::ops::FusedOptimizerOps;
 use numr::runtime::{CapturedGraph, Runtime, RuntimeClient};
@@ -109,6 +109,7 @@ impl<R: Runtime<DType = DType>, O: Optimizer<R>> SimpleTrainer<R, O> {
             + UnaryOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
+            + TypeConversionOps<R>
             + FusedOptimizerOps<R>,
     {
         self.accumulated_loss += loss_value;

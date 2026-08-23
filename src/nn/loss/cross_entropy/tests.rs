@@ -313,3 +313,61 @@ fn test_gradient_flows_only_to_kept_positions() {
         &g[6..9]
     );
 }
+
+/// Cross-entropy at BF16 must match an F32 reference over the same logits.
+///
+/// 512 tokens over a 1024-way vocabulary with all-zero logits: every per-token
+/// loss is exactly `ln(1024) = 6.9315`, so the loss is that number however the
+/// mean is computed — unless the mean saturates.
+///
+/// It did. `cross_entropy_loss` ends in a mean over the flattened `[N, 1]`
+/// per-token losses, and numr summed those 512 BF16 values in BF16. The
+/// running sum stalled at `2048`, so the loss came back as exactly `4.0`
+/// regardless of the logits. The same defect at a 512-token, 128256-way
+/// vocabulary stalled at `4096` and reported `loss 8.0000` on every batch.
+///
+/// This test is dark under a plain `cargo test`: `f16` is not a default
+/// boostr feature, and BF16 tensors need it.
+#[cfg(feature = "f16")]
+#[test]
+fn test_cross_entropy_bf16_matches_f32_reference() {
+    use half::bf16;
+
+    let (client, device) = cpu_setup();
+
+    const N: usize = 512;
+    const V: usize = 1024;
+
+    let target_data: Vec<i64> = (0..N as i64).map(|i| i % V as i64).collect();
+    let targets = Tensor::<CpuRuntime>::from_slice(&target_data, &[N], &device);
+
+    let f32_logits = Var::new(
+        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; N * V], &[N, V], &device),
+        false,
+    );
+    let f32_loss: f32 = cross_entropy_loss(&client, &f32_logits, &targets)
+        .unwrap()
+        .tensor()
+        .item()
+        .unwrap();
+    assert!(
+        (f32_loss - 6.931_472).abs() < 1e-4,
+        "F32 reference moved: {f32_loss}"
+    );
+
+    let bf16_logits = Var::new(
+        Tensor::<CpuRuntime>::from_slice(&vec![bf16::from_f32(0.0); N * V], &[N, V], &device),
+        false,
+    );
+    let bf16_loss: bf16 = cross_entropy_loss(&client, &bf16_logits, &targets)
+        .unwrap()
+        .tensor()
+        .item()
+        .unwrap();
+    let bf16_loss = bf16_loss.to_f32();
+
+    assert!(
+        (bf16_loss - f32_loss).abs() < 0.06,
+        "BF16 loss {bf16_loss} does not match F32 reference {f32_loss}"
+    );
+}

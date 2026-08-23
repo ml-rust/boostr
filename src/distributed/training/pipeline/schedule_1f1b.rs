@@ -11,7 +11,7 @@ use super::stage::TrainablePipelineStage;
 use crate::error::{Error, Result};
 use numr::autograd::Var;
 use numr::dtype::DType;
-use numr::ops::ShapeOps;
+use numr::ops::{ShapeOps, TypeConversionOps};
 use numr::runtime::{Communicator, Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -66,12 +66,12 @@ impl<R: Runtime<DType = DType>> Schedule1F1B<R> {
     /// Returns [`PipelineOutput`] with losses (last stage) and input grads (first stage).
     pub fn run<C>(
         &mut self,
-        _client: &C,
+        client: &C,
         micro_batches: Option<Vec<Tensor<R>>>,
         loss_fn: Option<&LossFn<'_, R>>,
     ) -> Result<PipelineOutput<R>>
     where
-        C: RuntimeClient<R> + ShapeOps<R>,
+        C: RuntimeClient<R> + ShapeOps<R> + TypeConversionOps<R>,
     {
         let rank = self.pp_comm.rank();
         let world_size = self.pp_comm.world_size();
@@ -149,6 +149,7 @@ impl<R: Runtime<DType = DType>> Schedule1F1B<R> {
                     // Get output gradient
                     let output_grad = if is_last {
                         compute_loss_grad(
+                            client,
                             &mut forward_outputs[mb_id],
                             mb_id,
                             loss_fn,

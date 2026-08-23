@@ -680,3 +680,116 @@ fn test_fused_lamb_wgpu_parity() {
         );
     });
 }
+
+// ---- Master weights: a narrow-dtype parameter must actually move ----
+
+/// Run `steps` AdamW steps on a one-element parameter with a constant gradient.
+///
+/// Returns the parameter's final value as f32, read back through its own dtype.
+#[cfg(feature = "f16")]
+fn adamw_bf16_scalar_run<R, C>(
+    client: &C,
+    device: &R::Device,
+    w0: f32,
+    g: f32,
+    lr: f64,
+    steps: usize,
+) -> f32
+where
+    R: numr::runtime::Runtime<DType = DType>,
+    C: numr::runtime::RuntimeClient<R>
+        + numr::ops::BinaryOps<R>
+        + numr::ops::UnaryOps<R>
+        + numr::ops::ScalarOps<R>
+        + numr::ops::ReduceOps<R>
+        + boostr::FusedOptimizerOps<R>,
+{
+    use boostr::optimizer::{AdamW, AdamWConfig};
+    use numr::autograd::GradStore;
+    use std::collections::HashMap;
+
+    let param = Tensor::<R>::from_slice(&[half::bf16::from_f32(w0)], &[1], device);
+    let id = param.id();
+    let mut params = HashMap::new();
+    params.insert(id, param);
+
+    let grad = Tensor::<R>::from_slice(&[half::bf16::from_f32(g)], &[1], device);
+
+    let mut opt = AdamW::<R>::new(AdamWConfig {
+        lr,
+        weight_decay: 0.0,
+        ..Default::default()
+    });
+
+    for _ in 0..steps {
+        let mut grads = GradStore::new();
+        grads.insert(id, grad.clone());
+        opt.step(client, &mut params, &grads).unwrap();
+    }
+
+    let out = params.get(&id).expect("param stays in the map");
+    assert_eq!(
+        out.dtype(),
+        DType::BF16,
+        "the model's parameter must stay BF16 — only the update runs in F32"
+    );
+    out.to_vec::<half::bf16>()[0].to_f32()
+}
+
+/// Shared assertions for the decisive BF16 case, so CPU and CUDA pin the same
+/// numbers.
+#[cfg(feature = "f16")]
+fn assert_bf16_param_moved(backend: &str, w0: f32, got: f32, lr: f64, steps: usize) {
+    // AdamW's update is normalized, so each step moves the weight by ~lr.
+    let expected_move = lr as f32 * steps as f32;
+    let moved = w0 - got;
+
+    assert!(
+        moved > expected_move * 0.5,
+        "{backend}: BF16 parameter did not move — started {w0}, ended {got} \
+         after {steps} steps (expected ~{expected_move} of movement)"
+    );
+    assert!(
+        (moved - expected_move).abs() < 1e-4,
+        "{backend}: BF16 movement {moved} does not match the expected {expected_move}"
+    );
+}
+
+#[cfg(feature = "f16")]
+#[test]
+fn test_adamw_bf16_master_weights_cpu() {
+    let (client, device) = setup_cpu();
+
+    let w0 = 0.02f32;
+    let lr = 2e-5;
+    let steps = 32;
+
+    // Premise: one lr-sized step is below BF16's resolution at this weight.
+    assert_eq!(
+        half::bf16::from_f32(w0 - lr as f32).to_bits(),
+        half::bf16::from_f32(w0).to_bits(),
+        "test premise broken: a single step is representable in BF16"
+    );
+
+    let got = adamw_bf16_scalar_run::<numr::runtime::cpu::CpuRuntime, _>(
+        &client, &device, w0, 0.001, lr, steps,
+    );
+    assert_bf16_param_moved("cpu", w0, got, lr, steps);
+}
+
+#[cfg(all(feature = "cuda", feature = "f16"))]
+#[test]
+fn test_adamw_bf16_master_weights_cuda() {
+    use super::helpers::with_cuda_backend;
+
+    let w0 = 0.02f32;
+    let lr = 2e-5;
+    let steps = 32;
+
+    with_cuda_backend(|client, device| {
+        let got = adamw_bf16_scalar_run::<numr::runtime::cuda::CudaRuntime, _>(
+            &client, &device, w0, 0.001, lr, steps,
+        );
+        assert_bf16_param_moved("cuda", w0, got, lr, steps);
+    });
+}

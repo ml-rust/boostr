@@ -8,7 +8,7 @@ use crate::ops::FusedOptimizerOps;
 use crate::optimizer::traits::Optimizer;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
+use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 use std::collections::HashMap;
@@ -77,6 +77,7 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Sgd<R> {
             + UnaryOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
+            + TypeConversionOps<R>
             + FusedOptimizerOps<R>,
     {
         let lr = self.config.lr;

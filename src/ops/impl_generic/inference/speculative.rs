@@ -108,6 +108,16 @@ where
             reason: format!("expected F32, got {:?}", draft_probs.dtype()),
         });
     }
+    // `target_probs` is read below with `to_vec::<f32>()`, which sizes its copy
+    // from `f32` rather than from the tensor's dtype. Without this guard a BF16
+    // or F16 target distribution silently over-reads the buffer instead of
+    // erroring, and the sampler accepts or rejects on reinterpreted bytes.
+    if target_probs.dtype() != DType::F32 {
+        return Err(Error::InvalidArgument {
+            arg: "target_probs",
+            reason: format!("expected F32, got {:?}", target_probs.dtype()),
+        });
+    }
     if draft_tokens.dtype() != DType::I32 {
         return Err(Error::InvalidArgument {
             arg: "draft_tokens",
@@ -253,6 +263,16 @@ where
         return Err(Error::InvalidArgument {
             arg: "acceptance_rates",
             reason: format!("expected 2D [batch, K], got {}D", shape.len()),
+        });
+    }
+
+    // Read at a fixed f32 width below, so the dtype must be F32: `to_vec::<f32>()`
+    // sizes its copy from `f32`, not from the tensor, and would over-read a
+    // narrower dtype rather than report a mismatch.
+    if acceptance_rates.dtype() != DType::F32 {
+        return Err(Error::InvalidArgument {
+            arg: "acceptance_rates",
+            reason: format!("expected F32, got {:?}", acceptance_rates.dtype()),
         });
     }
 

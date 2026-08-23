@@ -5,10 +5,11 @@
 
 use crate::error::Result;
 use crate::ops::FusedOptimizerOps;
+use crate::optimizer::precision::optimizer_state_dtype;
 use crate::optimizer::traits::Optimizer;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ReduceOps, ScalarOps, UnaryOps};
+use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 use std::collections::HashMap;
@@ -39,12 +40,30 @@ impl Default for AdamWConfig {
 struct ParamState<R: Runtime> {
     m: Tensor<R>,
     v: Tensor<R>,
+    /// F32 master copy of the parameter, held ONLY when the parameter's own
+    /// dtype is narrower than F32 (BF16/F16/FP8).
+    ///
+    /// The update runs against the master and a cast of the master is written
+    /// back into the caller's `params` map, so the model keeps computing in its
+    /// own dtype while the update arithmetic stays F32. For an F32 or F64
+    /// parameter this is `None`: no copy, no extra allocation, and the numbers
+    /// are bit-identical to a build without master weights.
+    master: Option<Tensor<R>>,
 }
 
 /// AdamW optimizer with decoupled weight decay
 ///
 /// Maintains first moment (m) and second moment (v) estimates per parameter.
 /// State is lazily initialized on first `step()` call for each parameter.
+///
+/// For a parameter narrower than F32 (BF16/F16/FP8) the optimizer also holds an
+/// F32 master copy and keeps `m`/`v` at F32: AdamW's normalized update is
+/// smaller than BF16's resolution at fine-tuning learning rates, so updating
+/// the narrow parameter directly rounds every step away and the model never
+/// trains. See [`crate::optimizer::precision`].
+///
+/// Optimizer state is not persisted by this type — a resumed run rebuilds the
+/// master copies from the checkpointed parameters on its first step.
 pub struct AdamW<R: Runtime> {
     config: AdamWConfig,
     state: HashMap<TensorId, ParamState<R>>,
@@ -64,6 +83,11 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
     ///
     /// Updates all parameters in `params` using gradients from `grads`.
     /// Parameters without gradients are skipped.
+    ///
+    /// Parameters narrower than F32 (BF16/F16/FP8) are updated through an F32
+    /// master copy held in optimizer state; the caller's map receives a cast of
+    /// the updated master. F32/F64 parameters take the direct path with no
+    /// extra allocation.
     ///
     /// # Arguments
     /// * `client` - Runtime client for tensor ops
@@ -100,55 +124,137 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
         // Corrected learning rate: lr * sqrt(1 - beta2^t) / (1 - beta1^t)
         let step_size = lr * bc2.sqrt() / bc1;
 
-        // Collect all param groups that have gradients
-        let mut ids_with_grads: Vec<TensorId> = Vec::new();
-        for &id in params.keys() {
-            if grads.get(id).is_some() {
-                // Lazy init state
-                let param = params.get(&id).expect("iterating params.keys()");
-                self.state.entry(id).or_insert_with(|| {
-                    let m = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
-                    let v = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
-                    ParamState { m, v }
-                });
-                ids_with_grads.push(id);
+        // Collect params that have gradients, lazily initializing state (and
+        // the F32 master copy for narrow-dtype params), and split them:
+        //
+        // - `direct`: the parameter, its gradient, and its state already share
+        //   one dtype. These take the multi-tensor launch exactly as before.
+        // - `widened`: the update needs an F32 master, an F32 gradient, or
+        //   both. These run one parameter at a time so each temporary F32
+        //   gradient is freed before the next one is allocated — batching them
+        //   would hold an F32 copy of EVERY gradient at once.
+        let mut direct: Vec<TensorId> = Vec::new();
+        let mut widened: Vec<TensorId> = Vec::new();
+
+        for (&id, param) in params.iter() {
+            let Some(grad) = grads.get(id) else {
+                continue;
+            };
+            // Entry rather than contains_key + insert: the master copy needs a
+            // fallible `cast`, so `or_insert_with` cannot build it.
+            let state = match self.state.entry(id) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let state_dtype = optimizer_state_dtype(param.dtype());
+                    let m = Tensor::<R>::zeros(param.shape(), state_dtype, param.device());
+                    let v = Tensor::<R>::zeros(param.shape(), state_dtype, param.device());
+                    let master = if state_dtype == param.dtype() {
+                        None
+                    } else {
+                        Some(client.cast(param, state_dtype)?)
+                    };
+                    entry.insert(ParamState { m, v, master })
+                }
+            };
+            if state.master.is_some() || grad.dtype() != state.m.dtype() {
+                widened.push(id);
+            } else {
+                direct.push(id);
             }
         }
 
-        if ids_with_grads.is_empty() {
-            return Ok(());
+        if !direct.is_empty() {
+            // Build groups for multi-tensor launch
+            let groups: Vec<(&Tensor<R>, &Tensor<R>, &Tensor<R>, &Tensor<R>)> = direct
+                .iter()
+                .map(|id| {
+                    let param = params
+                        .get(id)
+                        .expect("id came from params.keys() while building `direct`");
+                    let grad = grads
+                        .get(*id)
+                        .expect("`direct` only holds ids that have a gradient");
+                    let state = self
+                        .state
+                        .get(id)
+                        .expect("state was lazily initialized for every id in `direct`");
+                    (param, grad, &state.m, &state.v)
+                })
+                .collect();
+
+            let results =
+                client.fused_multi_tensor_adamw(&groups, lr, beta1, beta2, eps, wd, step_size)?;
+
+            // Write back results
+            for (id, (new_param, new_m, new_v)) in direct.iter().zip(results) {
+                let state_mut = self
+                    .state
+                    .get_mut(id)
+                    .expect("state was lazily initialized for every id in `direct`");
+                state_mut.m = new_m;
+                state_mut.v = new_v;
+                params.insert(*id, new_param);
+            }
         }
 
-        // Build groups for multi-tensor launch
-        let groups: Vec<(&Tensor<R>, &Tensor<R>, &Tensor<R>, &Tensor<R>)> = ids_with_grads
-            .iter()
-            .map(|id| {
-                let param = params
-                    .get(id)
-                    .expect("id came from ids_with_grads, which was built from params.keys()");
-                let grad = grads.get(*id).expect(
-                    "id came from ids_with_grads, which was filtered to only ids with grads",
-                );
-                let state = self
-                    .state
-                    .get(id)
-                    .expect("state was lazily initialized for all ids in ids_with_grads");
-                (param, grad, &state.m, &state.v)
-            })
-            .collect();
+        for id in widened {
+            let param_dtype = params
+                .get(&id)
+                .expect("id came from params.keys() while building `widened`")
+                .dtype();
+            let grad = grads
+                .get(id)
+                .expect("`widened` only holds ids that have a gradient");
 
-        let results =
-            client.fused_multi_tensor_adamw(&groups, lr, beta1, beta2, eps, wd, step_size)?;
+            let state = self
+                .state
+                .get(&id)
+                .expect("state was lazily initialized for every id in `widened`");
+            let state_dtype = state.m.dtype();
+            let arith_param = match state.master.as_ref() {
+                Some(master) => master,
+                None => params
+                    .get(&id)
+                    .expect("id came from params.keys() while building `widened`"),
+            };
 
-        // Write back results
-        for (id, (new_param, new_m, new_v)) in ids_with_grads.iter().zip(results) {
+            // Freed at the end of this iteration, so only one F32 gradient copy
+            // is resident at a time.
+            let widened_grad = if grad.dtype() == state_dtype {
+                None
+            } else {
+                Some(client.cast(grad, state_dtype)?)
+            };
+            let arith_grad = widened_grad.as_ref().unwrap_or(grad);
+
+            let (new_param, new_m, new_v) = client.fused_adamw_step(
+                arith_param,
+                arith_grad,
+                &state.m,
+                &state.v,
+                lr,
+                beta1,
+                beta2,
+                eps,
+                wd,
+                step_size,
+            )?;
+
             let state_mut = self
                 .state
-                .get_mut(id)
-                .expect("state was initialized for all ids in ids_with_grads");
+                .get_mut(&id)
+                .expect("state was lazily initialized for every id in `widened`");
             state_mut.m = new_m;
             state_mut.v = new_v;
-            params.insert(*id, new_param);
+
+            let updated = match state_mut.master.as_mut() {
+                Some(master) => {
+                    *master = new_param;
+                    client.cast(master, param_dtype)?
+                }
+                None => new_param,
+            };
+            params.insert(id, updated);
         }
 
         Ok(())
@@ -200,6 +306,7 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for AdamW<R> {
             + UnaryOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
+            + TypeConversionOps<R>
             + FusedOptimizerOps<R>,
     {
         AdamW::step(self, client, params, grads)
@@ -385,6 +492,252 @@ mod tests {
         let mut opt: AdamW<CpuRuntime> = AdamW::new(AdamWConfig::default());
         opt.set_lr(0.01);
         assert_eq!(opt.config().lr, 0.01);
+    }
+
+    /// Replay `fused_adamw_f32`'s exact arithmetic for a single scalar.
+    ///
+    /// Used to pin the F32 path bit-for-bit: if the optimizer ever widens or
+    /// rounds an F32 parameter, these bits change.
+    fn f32_reference(w0: f32, g: f32, config: &AdamWConfig, steps: i32) -> f32 {
+        let b1 = config.beta1 as f32;
+        let b2 = config.beta2 as f32;
+        let e = config.eps as f32;
+        let decay = (config.lr * config.weight_decay) as f32;
+
+        let mut w = w0;
+        let mut m = 0.0f32;
+        let mut v = 0.0f32;
+
+        for t in 1..=steps {
+            let bc1 = 1.0 - config.beta1.powi(t);
+            let bc2 = 1.0 - config.beta2.powi(t);
+            let step_size = (config.lr * bc2.sqrt() / bc1) as f32;
+
+            m = b1 * m + (1.0 - b1) * g;
+            v = b2 * v + (1.0 - b2) * g * g;
+            let update = step_size * m / (v.sqrt() + e);
+            w = w * (1.0 - decay) - update;
+        }
+        w
+    }
+
+    /// Run `steps` AdamW steps on a single-element parameter with a constant
+    /// gradient, returning the final parameter as f32.
+    fn run_scalar_steps(
+        client: &numr::runtime::cpu::CpuClient,
+        param: Tensor<CpuRuntime>,
+        grad: Tensor<CpuRuntime>,
+        config: AdamWConfig,
+        steps: usize,
+    ) -> Tensor<CpuRuntime> {
+        let id = param.id();
+        let mut params = HashMap::new();
+        params.insert(id, param);
+
+        let mut opt = AdamW::<CpuRuntime>::new(config);
+        for _ in 0..steps {
+            let mut grads = GradStore::new();
+            grads.insert(id, grad.clone());
+            opt.step(client, &mut params, &grads).unwrap();
+        }
+        params
+            .remove(&id)
+            .expect("param was inserted under this id")
+    }
+
+    #[test]
+    fn test_adamw_f32_path_is_bit_exact() {
+        let (client, device) = cpu_setup();
+
+        let w0 = 0.02f32;
+        let g = 0.001f32;
+        let steps = 4;
+        let config = AdamWConfig {
+            lr: 2e-5,
+            weight_decay: 0.01,
+            ..Default::default()
+        };
+
+        let param = Tensor::<CpuRuntime>::from_slice(&[w0], &[1], &device);
+        let grad = Tensor::<CpuRuntime>::from_slice(&[g], &[1], &device);
+        let out = run_scalar_steps(&client, param, grad, config.clone(), steps);
+
+        let expected = f32_reference(w0, g, &config, steps as i32);
+        assert_eq!(
+            out.dtype(),
+            DType::F32,
+            "an F32 parameter must stay F32 in the caller's map"
+        );
+        assert_eq!(
+            out.to_vec::<f32>()[0].to_bits(),
+            expected.to_bits(),
+            "F32 AdamW must be bit-identical to the plain f32 kernel arithmetic: \
+             got {} expected {}",
+            out.to_vec::<f32>()[0],
+            expected
+        );
+    }
+
+    #[test]
+    fn test_adamw_f32_allocates_no_master_copy() {
+        let (client, device) = cpu_setup();
+
+        let param = Tensor::<CpuRuntime>::from_slice(&[0.02f32], &[1], &device);
+        let id = param.id();
+        let mut params = HashMap::new();
+        params.insert(id, param);
+
+        let mut grads = GradStore::new();
+        grads.insert(
+            id,
+            Tensor::<CpuRuntime>::from_slice(&[0.001f32], &[1], &device),
+        );
+
+        let mut opt = AdamW::<CpuRuntime>::new(AdamWConfig::default());
+        opt.step(&client, &mut params, &grads).unwrap();
+
+        let state = opt.state.get(&id).expect("state initialized on first step");
+        assert!(
+            state.master.is_none(),
+            "an F32 parameter must not get a master copy"
+        );
+        assert_eq!(state.m.dtype(), DType::F32);
+        assert_eq!(state.v.dtype(), DType::F32);
+    }
+
+    /// The decisive test: a BF16 parameter under a realistic fine-tuning
+    /// learning rate must actually move, and must track an F32 reference run.
+    ///
+    /// Without F32 master weights the parameter is returned unchanged, bit for
+    /// bit, because `w + delta_w` rounds straight back to `w` in BF16.
+    #[cfg(feature = "f16")]
+    #[test]
+    fn test_adamw_bf16_parameter_actually_moves() {
+        let (client, device) = cpu_setup();
+
+        let w0 = 0.02f32;
+        let g = 0.001f32;
+        let steps = 32;
+        let config = AdamWConfig {
+            lr: 2e-5,
+            weight_decay: 0.0,
+            ..Default::default()
+        };
+
+        // Premise: one lr-sized step is below BF16's resolution at this weight.
+        assert_eq!(
+            half::bf16::from_f32(w0 - config.lr as f32).to_bits(),
+            half::bf16::from_f32(w0).to_bits(),
+            "test premise broken: a single step is representable in BF16"
+        );
+
+        let param = Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(w0)], &[1], &device);
+        let grad = Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(g)], &[1], &device);
+        let out = run_scalar_steps(&client, param, grad, config.clone(), steps);
+
+        assert_eq!(
+            out.dtype(),
+            DType::BF16,
+            "the model's parameter must stay BF16 — only the update is F32"
+        );
+
+        let got = out.to_vec::<half::bf16>()[0].to_f32();
+        assert!(
+            w0 - got > 1e-4,
+            "BF16 parameter did not move: started {w0}, ended {got} after {steps} steps"
+        );
+
+        let expected = f32_reference(w0, g, &config, steps as i32);
+        assert!(
+            (got - expected).abs() < 1e-4,
+            "BF16 run must track the F32 reference: got {got} expected {expected}"
+        );
+    }
+
+    #[cfg(feature = "f16")]
+    #[test]
+    fn test_adamw_f16_parameter_actually_moves() {
+        let (client, device) = cpu_setup();
+
+        let w0 = 0.02f32;
+        let g = 0.001f32;
+        let steps = 32;
+        let config = AdamWConfig {
+            lr: 2e-5,
+            weight_decay: 0.0,
+            ..Default::default()
+        };
+
+        let param = Tensor::<CpuRuntime>::from_slice(&[half::f16::from_f32(w0)], &[1], &device);
+        let grad = Tensor::<CpuRuntime>::from_slice(&[half::f16::from_f32(g)], &[1], &device);
+        let out = run_scalar_steps(&client, param, grad, config.clone(), steps);
+
+        assert_eq!(out.dtype(), DType::F16);
+
+        let got = out.to_vec::<half::f16>()[0].to_f32();
+        let expected = f32_reference(w0, g, &config, steps as i32);
+        assert!(
+            w0 - got > 1e-5,
+            "F16 parameter did not move: started {w0}, ended {got}"
+        );
+        assert!(
+            (got - expected).abs() < 2e-5,
+            "F16 run must track the F32 reference: got {got} expected {expected}"
+        );
+    }
+
+    #[cfg(feature = "f16")]
+    #[test]
+    fn test_adamw_bf16_state_and_master_are_f32() {
+        let (client, device) = cpu_setup();
+
+        let param = Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(0.02)], &[1], &device);
+        let id = param.id();
+        let mut params = HashMap::new();
+        params.insert(id, param);
+
+        let mut grads = GradStore::new();
+        grads.insert(
+            id,
+            Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(0.001)], &[1], &device),
+        );
+
+        let mut opt = AdamW::<CpuRuntime>::new(AdamWConfig {
+            lr: 2e-5,
+            weight_decay: 0.0,
+            ..Default::default()
+        });
+        opt.step(&client, &mut params, &grads).unwrap();
+
+        let state = opt.state.get(&id).expect("state initialized on first step");
+        assert_eq!(
+            state.m.dtype(),
+            DType::F32,
+            "m must be F32 for a BF16 param"
+        );
+        assert_eq!(
+            state.v.dtype(),
+            DType::F32,
+            "v must be F32 for a BF16 param"
+        );
+        let master = state
+            .master
+            .as_ref()
+            .expect("a BF16 param must get an F32 master copy");
+        assert_eq!(master.dtype(), DType::F32);
+
+        // The master already carries the step the BF16 parameter cannot show.
+        //
+        // Measure from the BF16-ROUNDED start, not from the `0.02` literal:
+        // `bf16(0.02)` is 0.0200195, so the literal sits 1.95e-5 away from
+        // where the master actually began — the same order as the 2e-5 step
+        // being measured, which would swamp it.
+        let started = half::bf16::from_f32(0.02).to_f32();
+        let moved = started - master.to_vec::<f32>()[0];
+        assert!(
+            moved > 1e-5,
+            "master weight did not take the step: moved by {moved}"
+        );
     }
 
     #[test]

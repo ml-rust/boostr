@@ -86,7 +86,7 @@ impl<R: Runtime<DType = DType>> Zero3Trainer<R> {
             + TypeConversionOps<R>
             + FusedOptimizerOps<R>,
     {
-        let mut averaged_grads = match self.base.prepare_step(client, grads, loss_value)? {
+        let mut averaged_grads = match self.base.prepare_step(client, params, grads, loss_value)? {
             Some(g) => g,
             None => return Ok(None),
         };

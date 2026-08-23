@@ -74,10 +74,14 @@ impl<R: Runtime<DType = DType>> ZeroTrainer<R> {
         let mut synced_grads = grads;
         all_reduce_grads(self.base.comm.as_ref(), client, &mut synced_grads)?;
 
-        let mut averaged_grads = match self.base.prepare_step(client, synced_grads, loss_value)? {
-            Some(g) => g,
-            None => return Ok(None),
-        };
+        let mut averaged_grads =
+            match self
+                .base
+                .prepare_step(client, params, synced_grads, loss_value)?
+            {
+                Some(g) => g,
+                None => return Ok(None),
+            };
 
         // ZeRO Stage 1 step (owned params + broadcast)
         self.base

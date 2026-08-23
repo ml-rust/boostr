@@ -126,10 +126,13 @@ impl<R: Runtime<DType = DType>, O: Optimizer<R>> SimpleTrainer<R, O> {
             self.optimizer.set_lr(lr);
         }
 
-        // Gradient clipping
+        // Gradient clipping.
+        // The norm is over the parameters this trainer steps, NOT over every
+        // node the grad store happens to hold — see `clip_grad_norm`.
         let grad_norm = if let Some(max_norm) = self.max_grad_norm {
             let mut grads_mut = averaged_grads;
-            let norm = clip_grad_norm(client, &mut grads_mut, max_norm)?;
+            let param_ids: Vec<TensorId> = params.keys().copied().collect();
+            let norm = clip_grad_norm(client, &mut grads_mut, &param_ids, max_norm)?;
             self.optimizer.step(client, params, &grads_mut)?;
             Some(norm)
         } else {

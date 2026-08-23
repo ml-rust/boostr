@@ -62,10 +62,15 @@ impl<R: Runtime<DType = DType>, Z: ZeroOptimizer<R>> ZeroTrainerBase<R, Z> {
 
     /// Accumulate loss + grads, apply LR schedule + clipping.
     ///
+    /// `params` is the set this trainer optimizes. Clipping norms over its
+    /// keys only, never over every node in the grad store — see
+    /// [`clip_grad_norm`].
+    ///
     /// Returns `None` if still accumulating, `Some(grads)` ready for optimizer.
     pub(crate) fn prepare_step<C>(
         &mut self,
         client: &C,
+        params: &HashMap<TensorId, Tensor<R>>,
         grads: GradStore<R>,
         loss_value: f64,
     ) -> Result<Option<GradStore<R>>>
@@ -93,7 +98,8 @@ impl<R: Runtime<DType = DType>, Z: ZeroOptimizer<R>> ZeroTrainerBase<R, Z> {
 
         // Gradient clipping
         if let Some(max_norm) = self.max_grad_norm {
-            clip_grad_norm(client, &mut averaged_grads, max_norm)?;
+            let param_ids: Vec<TensorId> = params.keys().copied().collect();
+            clip_grad_norm(client, &mut averaged_grads, &param_ids, max_norm)?;
         }
 
         Ok(Some(averaged_grads))

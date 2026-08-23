@@ -90,7 +90,7 @@ pub use numr::ops::{
 // inference server on boostr has to name these to satisfy the `C:` bounds on
 // `forward`, so they belong on boostr's surface rather than forcing a direct
 // numr dependency just to spell a bound.
-pub use numr::ops::{CompareOps, RandomOps, ReduceOps, ShapeOps, SortingOps};
+pub use numr::ops::{CompareOps, LinalgOps, RandomOps, ReduceOps, ShapeOps, SortingOps};
 
 // PaddingMode is part of Conv1d's public signature, so downstream crates need
 // it to construct a conv layer without depending on numr directly.

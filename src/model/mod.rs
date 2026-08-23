@@ -16,8 +16,8 @@ pub mod vision;
 pub mod vocab_growth;
 
 pub use attention_core::{
-    AttentionCoreSpec, AttentionKernel, attention_core, attention_core_masked,
-    prefill_attention_mask,
+    AttentionCoreSpec, AttentionKernel, attention_core, attention_core_flash,
+    attention_core_masked, prefill_attention_mask,
 };
 pub use config::{
     AttentionConfig, AudioConfig, HuggingFaceConfig, HybridConfig, ModelConfig, MoeConfig,

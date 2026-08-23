@@ -182,12 +182,17 @@ where
 ///
 /// # Client bounds
 ///
-/// This entry point needs `R::Client: FlashAttentionOps<R>` because the flash
-/// backward node resolves its client from the runtime. Callers that only ever
-/// run [`AttentionKernel::Masked`] — notably `LlamaAttention`, which sits under
-/// the [`crate::model::Model`] trait's fixed `R::Client` bound list — call
-/// [`attention_core_masked`] instead. Both share the same prologue, so the step
-/// order cannot drift between them.
+/// This entry point carries the UNION of both kernels' bounds, including
+/// `LinalgOps<R>` and `AlibiOps<R>` (needed only by `Masked`) and
+/// `R::Client: FlashAttentionOps<R>` (needed only by `Flash`, whose backward
+/// node resolves its client from the runtime). A caller that only ever runs
+/// one kernel should call the narrower entry point instead:
+/// [`attention_core_masked`] for callers that avoid `FlashAttentionOps<R>` —
+/// notably `LlamaAttention`, which sits under the [`crate::model::Model`]
+/// trait's fixed `R::Client` bound list — or [`attention_core_flash`] for
+/// callers that avoid `LinalgOps<R>`/`AlibiOps<R>`/`BinaryOps<R>`. All three
+/// share the same prologue/epilogue, so the step order cannot drift between
+/// them.
 pub fn attention_core<R, C>(
     client: &C,
     q: &Var<R>,
@@ -210,43 +215,68 @@ where
 {
     match spec.kernel {
         AttentionKernel::Masked => attention_core_masked(client, q, k, v, cos, sin, spec),
-        AttentionKernel::Flash => {
-            if spec.use_alibi {
-                // Hard error, never a downgrade to `Masked` and never a
-                // silently dropped bias: either choice yields a model that
-                // trains, runs, and emits fluent text while computing a
-                // different function than the one that was asked for.
-                return Err(Error::InvalidArgument {
-                    arg: "spec.kernel",
-                    reason: "AttentionKernel::Flash cannot serve use_alibi: the flash kernel \
-                             takes no additive bias tensor and writes causality itself. Use \
-                             AttentionKernel::Masked for ALiBi models."
-                        .into(),
-                });
-            }
-            let (q, k, v) = attention_prologue(client, q, k, v, cos, sin, spec)?;
-            let batch = q.shape()[0];
-            // Flash reads V directly; the permuted view is not contiguous.
-            let v = var_contiguous(&v)?;
-            let attn_out = var_flash_attention(
-                &q,
-                &k,
-                &v,
-                spec.num_heads,
-                // GQA broadcast happens INSIDE the kernel. Calling `repeat_kv`
-                // here would materialize the very tensor this path exists to
-                // avoid.
-                spec.num_kv_heads,
-                spec.head_dim,
-                // Causal always: prefill/training sees the whole sequence.
-                true,
-                // Same sentinel as `Masked`: `0` disables, and the window is
-                // inclusive of the current token.
-                spec.sliding_window,
-            )?;
-            attention_epilogue(&attn_out, batch, spec)
-        }
+        AttentionKernel::Flash => attention_core_flash(client, q, k, v, cos, sin, spec),
     }
+}
+
+/// [`attention_core`] restricted to [`AttentionKernel::Flash`].
+///
+/// Identical math and identical step order — [`attention_core`]'s `Flash` arm
+/// calls straight into here. It exists as its own entry point only because it
+/// does NOT need `LinalgOps`/`AlibiOps`/`BinaryOps`, so callers that only ever
+/// run the flash kernel (no ALiBi arm, no additive mask) avoid threading those
+/// bounds through code that never executes `Masked`.
+///
+/// `spec.kernel` is IGNORED here: asking for `Masked` and getting the flash
+/// path would be exactly the silent divergence [`attention_core`] refuses, so
+/// pick the entry point deliberately.
+pub fn attention_core_flash<R, C>(
+    client: &C,
+    q: &Var<R>,
+    k: &Var<R>,
+    v: &Var<R>,
+    cos: &Var<R>,
+    sin: &Var<R>,
+    spec: &AttentionCoreSpec<'_, R>,
+) -> Result<Var<R>>
+where
+    R: Runtime<DType = DType>,
+    C: RuntimeClient<R> + NormalizationOps<R> + RoPEOps<R>,
+    R::Client: TensorOps<R> + ScalarOps<R> + FlashAttentionOps<R>,
+{
+    if spec.use_alibi {
+        // Hard error, never a downgrade to `Masked` and never a silently
+        // dropped bias: either choice yields a model that trains, runs, and
+        // emits fluent text while computing a different function than the
+        // one that was asked for.
+        return Err(Error::InvalidArgument {
+            arg: "spec.kernel",
+            reason: "AttentionKernel::Flash cannot serve use_alibi: the flash kernel \
+                     takes no additive bias tensor and writes causality itself. Use \
+                     AttentionKernel::Masked for ALiBi models."
+                .into(),
+        });
+    }
+    let (q, k, v) = attention_prologue(client, q, k, v, cos, sin, spec)?;
+    let batch = q.shape()[0];
+    // Flash reads V directly; the permuted view is not contiguous.
+    let v = var_contiguous(&v)?;
+    let attn_out = var_flash_attention(
+        &q,
+        &k,
+        &v,
+        spec.num_heads,
+        // GQA broadcast happens INSIDE the kernel. Calling `repeat_kv` here
+        // would materialize the very tensor this path exists to avoid.
+        spec.num_kv_heads,
+        spec.head_dim,
+        // Causal always: prefill/training sees the whole sequence.
+        true,
+        // Same sentinel as `Masked`: `0` disables, and the window is
+        // inclusive of the current token.
+        spec.sliding_window,
+    )?;
+    attention_epilogue(&attn_out, batch, spec)
 }
 
 /// [`attention_core`] restricted to [`AttentionKernel::Masked`].

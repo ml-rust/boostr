@@ -30,7 +30,7 @@
 //! different code paths and would need their own tolerances; nothing here says
 //! anything about them.
 
-use boostr::model::{AttentionCoreSpec, AttentionKernel, attention_core};
+use boostr::model::{AttentionCoreSpec, AttentionKernel, attention_core, attention_core_flash};
 use boostr::nn::{RmsNorm, RoPE};
 use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -129,6 +129,67 @@ fn run(case: &Case, kernel: AttentionKernel, sliding_window: usize) -> Vec<f32> 
         &spec,
     )
     .unwrap_or_else(|e| panic!("{} / {:?}: attention_core failed: {e}", case.name, kernel));
+
+    let expected = [BATCH, case.seq_len_q, case.num_heads * HEAD_DIM];
+    assert_eq!(out.shape(), &expected[..], "{}: output shape", case.name);
+    out.tensor()
+        .contiguous()
+        .expect("output contiguous")
+        .to_vec::<f32>()
+}
+
+/// Same as [`run`] but calls [`attention_core_flash`] directly instead of
+/// going through [`attention_core`]'s kernel selector — `spec.kernel` is set
+/// to `Masked` deliberately, since `attention_core_flash` must ignore it.
+fn run_flash_entry(case: &Case, sliding_window: usize) -> Vec<f32> {
+    let (client, device) = cpu_setup();
+
+    let q = var(
+        &[BATCH, case.seq_len_q, case.num_heads * HEAD_DIM],
+        0.3,
+        &device,
+    );
+    let kv_shape = [BATCH, case.seq_len_k, case.num_kv_heads * HEAD_DIM];
+    let k = var(&kv_shape, 1.1, &device);
+    let v = var(&kv_shape, 2.7, &device);
+
+    let rope = RoPE::<CpuRuntime>::precompute_freqs(MAX_SEQ, HEAD_DIM, 10000.0, None, &device)
+        .expect("rope cache builds");
+
+    let norm_weight = || {
+        RmsNorm::<CpuRuntime>::new(
+            Tensor::<CpuRuntime>::from_slice(&values(HEAD_DIM, 5.5), &[HEAD_DIM], &device),
+            1e-6,
+            false,
+        )
+    };
+    let q_norm = case.qk_norm.then(norm_weight);
+    let k_norm = case.qk_norm.then(norm_weight);
+
+    let spec = AttentionCoreSpec {
+        num_heads: case.num_heads,
+        num_kv_heads: case.num_kv_heads,
+        head_dim: HEAD_DIM,
+        q_norm: q_norm.as_ref(),
+        k_norm: k_norm.as_ref(),
+        use_alibi: false,
+        sliding_window,
+        // Deliberately mismatched: `attention_core_flash` must ignore this
+        // and always run the flash kernel, exactly like `attention_core_masked`
+        // ignores a `Flash` request.
+        kernel: AttentionKernel::Masked,
+    };
+
+    let out = attention_core_flash(
+        &client,
+        &q,
+        &k,
+        &v,
+        rope.cos_cache(),
+        rope.sin_cache(),
+        &spec,
+    )
+    .unwrap_or_else(|e| panic!("{}: attention_core_flash failed: {e}", case.name));
 
     let expected = [BATCH, case.seq_len_q, case.num_heads * HEAD_DIM];
     assert_eq!(out.shape(), &expected[..], "{}: output shape", case.name);
@@ -260,6 +321,22 @@ fn masked_and_flash_agree() {
         assert!(
             magnitude > 1e-3,
             "{}: output is ~zero ({magnitude:e}); the comparison proves nothing",
+            case.name
+        );
+    }
+}
+
+/// `attention_core_flash` must produce EXACTLY the same output as
+/// `attention_core` with `kernel: Flash` — it is the same code, reached by a
+/// narrower entry point, not a second implementation that could drift.
+#[test]
+fn flash_entry_point_matches_selector() {
+    for case in cases() {
+        let via_selector = run(&case, AttentionKernel::Flash, case.sliding_window);
+        let via_entry = run_flash_entry(&case, case.sliding_window);
+        assert_eq!(
+            via_selector, via_entry,
+            "{}: attention_core_flash diverged from attention_core(kernel: Flash)",
             case.name
         );
     }

@@ -5,6 +5,29 @@ use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
+/// PyTorch's `fan_in` for a weight tensor, matching
+/// `torch.nn.init._calculate_fan_in_and_fan_out`.
+///
+/// PyTorch computes `fan_in = tensor.size(1) * prod(tensor.shape[2:])`, i.e.
+/// the product of every dimension EXCEPT the leading output dimension.
+///
+/// - `Linear` weight `[out_features, in_features]` → `in_features`. This layout
+///   is fixed by [`crate::nn::Linear::forward`], which computes
+///   `input @ weight^T` and reads `out_features` from `shape[0]`.
+/// - `Conv1d` weight `[out_channels, in_channels / groups, kernel]` →
+///   `in_channels / groups * kernel`. The division by `groups` is already
+///   baked into the stored `shape[1]`, so a depthwise conv `[C, 1, K]`
+///   correctly yields `K`, not `C` and not `1`.
+///
+/// PyTorch rejects tensors with fewer than 2 dimensions. A 1-D tensor has no
+/// separate input dimension, so its own length is the only defensible fan_in.
+fn pytorch_fan_in(shape: &[usize]) -> usize {
+    if shape.len() < 2 {
+        return shape.first().copied().unwrap_or(1);
+    }
+    shape[1..].iter().product()
+}
+
 /// Initialization strategy for new tensors.
 #[derive(Debug, Clone, Copy)]
 pub enum Init {
@@ -16,7 +39,12 @@ pub enum Init {
     Const(f32),
     /// Uniform random in `[-bound, bound]`
     Uniform(f32),
-    /// Kaiming uniform (PyTorch Linear default): U(-1/sqrt(in), 1/sqrt(in))
+    /// Kaiming uniform (PyTorch `Linear`/`Conv` default):
+    /// U(-1/sqrt(fan_in), 1/sqrt(fan_in)).
+    ///
+    /// `fan_in` follows PyTorch exactly — see [`pytorch_fan_in`]. For a
+    /// `[out_features, in_features]` weight that is `in_features`, NOT
+    /// `out_features`: the leading dimension is the output side.
     PyTorchLinear,
     /// PyTorch Embedding default: N(0, 1)
     PyTorchEmbedding,
@@ -24,11 +52,21 @@ pub enum Init {
     ///
     /// Standard initialization for ReLU networks. fan_in is the product of
     /// all dimensions except the last (output) dimension.
+    ///
+    /// NOTE: this assumes an `[..., in, out]` layout — the OPPOSITE of the
+    /// `[out_features, in_features]` layout `Linear` stores and
+    /// [`Init::PyTorchLinear`] assumes. No model in this workspace uses
+    /// `Kaiming`; the first one that does must transpose or switch variant.
     Kaiming,
     /// Xavier (Glorot) normal: N(0, sqrt(2 / (fan_in + fan_out)))
     ///
     /// Standard initialization for Sigmoid/Tanh networks. Used in some
     /// attention weight initializations.
+    ///
+    /// NOTE: carries the same `[..., in, out]` layout assumption as
+    /// [`Init::Kaiming`], opposite to [`Init::PyTorchLinear`]. Xavier is
+    /// symmetric in `fan_in + fan_out`, so a 2-D weight is unaffected by the
+    /// mix-up; a 3-D or higher weight is not.
     Xavier,
     /// Normal distribution with given mean and standard deviation.
     Randn { mean: f64, stdev: f64 },
@@ -83,7 +121,7 @@ impl Init {
             }
             Init::PyTorchLinear => {
                 // Kaiming uniform: U(-1/sqrt(fan_in), 1/sqrt(fan_in))
-                let fan_in = shape[0];
+                let fan_in = pytorch_fan_in(shape);
                 let bound = 1.0 / (fan_in as f64).sqrt();
                 let r = client.rand(shape, dtype).map_err(Error::Numr)?;
                 let scaled = client.mul_scalar(&r, 2.0 * bound).map_err(Error::Numr)?;
@@ -194,7 +232,7 @@ impl Init {
             }
             Init::PyTorchLinear => {
                 // Kaiming uniform: U(-1/sqrt(fan_in), 1/sqrt(fan_in))
-                let fan_in = shape[0];
+                let fan_in = pytorch_fan_in(shape);
                 let bound = 1.0 / (fan_in as f64).sqrt();
                 let r = client
                     .rand_seeded(shape, dtype, seed)

@@ -1,0 +1,22 @@
+# Tests that measure DEVICE-GLOBAL GPU free memory must run alone.
+#
+# `gpu_varlen_memory_is_bounded`, `gpu_gemma_varlen_memory_is_bounded` and
+# `perf_varlen_throughput` assert that free VRAM does not fall far below a
+# baseline they capture at their own start. That is only a valid measure of
+# THIS process's allocator retention if nothing else is using the GPU.
+#
+# nextest runs each test in its own process, so the `CUDA_LOCK` mutex those
+# files declare is process-local and cannot exclude tests in other binaries.
+# Concurrent CUDA tests therefore show up as this test's "unbounded retention",
+# and the failure is a scheduling artifact rather than a real leak — it passes
+# in isolation and fails under the full suite.
+#
+# `threads-required = "num-cpus"` makes each of these occupy every runner slot,
+# so it executes with no other test in flight.
+#
+# The real fix is for numr to expose per-allocator accounting so these tests can
+# measure their own retention instead of the whole device; until then this keeps
+# the signal honest rather than muting the assertion.
+[[profile.default.overrides]]
+filter = 'test(/memory_is_bounded$/) + test(=perf_varlen_throughput)'
+threads-required = "num-cpus"

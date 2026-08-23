@@ -461,6 +461,9 @@ __device__ void flash_attention_preprocess_bwd_fp16_impl(
 }
 
 // Main backward kernel for FP16 - FP32 accumulation
+// `dQ` is an FP32 accumulator, NOT an FP16 buffer: K/V blocks atomicAdd into
+// the same element and CUDA has no 2-byte float atomic. The launcher casts it
+// down to FP16 afterwards.
 template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
 __device__ void flash_attention_bwd_fp16_impl(
     const __half* __restrict__ Q,
@@ -470,7 +473,7 @@ __device__ void flash_attention_bwd_fp16_impl(
     const __half* __restrict__ dO,
     const float* __restrict__ LSE,
     const float* __restrict__ D,
-    __half* __restrict__ dQ,
+    float* __restrict__ dQ,
     __half* __restrict__ dK,
     __half* __restrict__ dV,
     const int batch_size,
@@ -516,7 +519,7 @@ __device__ void flash_attention_bwd_fp16_impl(
     const __half* dO_base = dO + head_offset;
     const float* LSE_base = LSE + lse_offset;
     const float* D_base = D + lse_offset;
-    __half* dQ_base = dQ + head_offset;
+    float* dQ_base = dQ + head_offset;
     __half* dK_base = dK + kv_head_offset;
     __half* dV_base = dV + kv_head_offset;
 
@@ -621,7 +624,7 @@ __device__ void flash_attention_bwd_fp16_impl(
             if ((q_row % (int)blockDim.x) == tid) {
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    atomicAdd((float*)&dQ_base[q_pos * HEAD_DIM + d], dQ_local[d]);
+                    atomicAdd(&dQ_base[q_pos * HEAD_DIM + d], dQ_local[d]);
                 }
             }
         }
@@ -655,7 +658,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_64_fp16(
 extern "C" __global__ void flash_attention_bwd_64_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const __half* dO, const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
+    float* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -676,7 +679,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_128_fp16(
 extern "C" __global__ void flash_attention_bwd_128_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const __half* dO, const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
+    float* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -695,7 +698,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_32_fp16(
 extern "C" __global__ void flash_attention_bwd_32_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const __half* dO, const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
+    float* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -714,7 +717,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_96_fp16(
 extern "C" __global__ void flash_attention_bwd_96_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const __half* dO, const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
+    float* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -733,7 +736,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_192_fp16(
 extern "C" __global__ void flash_attention_bwd_192_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const __half* dO, const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
+    float* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -752,7 +755,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_256_fp16(
 extern "C" __global__ void flash_attention_bwd_256_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const __half* dO, const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
+    float* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -799,6 +802,9 @@ __device__ void flash_attention_preprocess_bwd_bf16_impl(
 }
 
 // Main backward kernel for BF16
+// `dQ` is an FP32 accumulator, NOT a BF16 buffer: K/V blocks atomicAdd into
+// the same element and CUDA has no 2-byte float atomic. The launcher casts it
+// down to BF16 afterwards.
 template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
 __device__ void flash_attention_bwd_bf16_impl(
     const __nv_bfloat16* __restrict__ Q,
@@ -808,7 +814,7 @@ __device__ void flash_attention_bwd_bf16_impl(
     const __nv_bfloat16* __restrict__ dO,
     const float* __restrict__ LSE,
     const float* __restrict__ D,
-    __nv_bfloat16* __restrict__ dQ,
+    float* __restrict__ dQ,
     __nv_bfloat16* __restrict__ dK,
     __nv_bfloat16* __restrict__ dV,
     const int batch_size,
@@ -854,7 +860,7 @@ __device__ void flash_attention_bwd_bf16_impl(
     const __nv_bfloat16* dO_base = dO + head_offset;
     const float* LSE_base = LSE + lse_offset;
     const float* D_base = D + lse_offset;
-    __nv_bfloat16* dQ_base = dQ + head_offset;
+    float* dQ_base = dQ + head_offset;
     __nv_bfloat16* dK_base = dK + kv_head_offset;
     __nv_bfloat16* dV_base = dV + kv_head_offset;
 
@@ -955,7 +961,7 @@ __device__ void flash_attention_bwd_bf16_impl(
             if ((q_row % (int)blockDim.x) == tid) {
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    atomicAdd((float*)&dQ_base[q_pos * HEAD_DIM + d], dQ_local[d]);
+                    atomicAdd(&dQ_base[q_pos * HEAD_DIM + d], dQ_local[d]);
                 }
             }
         }
@@ -988,7 +994,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_64_bf16(
 extern "C" __global__ void flash_attention_bwd_64_bf16(
     const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
     const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    float* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1009,7 +1015,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_128_bf16(
 extern "C" __global__ void flash_attention_bwd_128_bf16(
     const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
     const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    float* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1028,7 +1034,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_32_bf16(
 extern "C" __global__ void flash_attention_bwd_32_bf16(
     const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
     const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    float* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1047,7 +1053,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_96_bf16(
 extern "C" __global__ void flash_attention_bwd_96_bf16(
     const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
     const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    float* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1066,7 +1072,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_192_bf16(
 extern "C" __global__ void flash_attention_bwd_192_bf16(
     const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
     const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    float* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1085,7 +1091,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_256_bf16(
 extern "C" __global__ void flash_attention_bwd_256_bf16(
     const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
     const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    float* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1206,7 +1212,7 @@ extern "C" __global__ void flash_attention_bwd_256_sm_fp32(
 extern "C" __global__ void flash_attention_bwd_32_sm_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const __half* dO, const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
+    float* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1221,7 +1227,7 @@ extern "C" __global__ void flash_attention_bwd_32_sm_fp16(
 extern "C" __global__ void flash_attention_bwd_64_sm_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const __half* dO, const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
+    float* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1236,7 +1242,7 @@ extern "C" __global__ void flash_attention_bwd_64_sm_fp16(
 extern "C" __global__ void flash_attention_bwd_96_sm_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const __half* dO, const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
+    float* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1251,7 +1257,7 @@ extern "C" __global__ void flash_attention_bwd_96_sm_fp16(
 extern "C" __global__ void flash_attention_bwd_128_sm_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const __half* dO, const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
+    float* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1266,7 +1272,7 @@ extern "C" __global__ void flash_attention_bwd_128_sm_fp16(
 extern "C" __global__ void flash_attention_bwd_192_sm_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const __half* dO, const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
+    float* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1281,7 +1287,7 @@ extern "C" __global__ void flash_attention_bwd_192_sm_fp16(
 extern "C" __global__ void flash_attention_bwd_256_sm_fp16(
     const __half* Q, const __half* K, const __half* V,
     const __half* O, const __half* dO, const float* LSE, const float* D,
-    __half* dQ, __half* dK, __half* dV,
+    float* dQ, __half* dK, __half* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1304,7 +1310,7 @@ extern "C" __global__ void flash_attention_bwd_256_sm_fp16(
 extern "C" __global__ void flash_attention_bwd_32_sm_bf16(
     const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
     const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    float* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1319,7 +1325,7 @@ extern "C" __global__ void flash_attention_bwd_32_sm_bf16(
 extern "C" __global__ void flash_attention_bwd_64_sm_bf16(
     const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
     const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    float* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1334,7 +1340,7 @@ extern "C" __global__ void flash_attention_bwd_64_sm_bf16(
 extern "C" __global__ void flash_attention_bwd_96_sm_bf16(
     const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
     const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    float* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1349,7 +1355,7 @@ extern "C" __global__ void flash_attention_bwd_96_sm_bf16(
 extern "C" __global__ void flash_attention_bwd_128_sm_bf16(
     const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
     const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    float* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1364,7 +1370,7 @@ extern "C" __global__ void flash_attention_bwd_128_sm_bf16(
 extern "C" __global__ void flash_attention_bwd_192_sm_bf16(
     const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
     const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    float* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1379,7 +1385,7 @@ extern "C" __global__ void flash_attention_bwd_192_sm_bf16(
 extern "C" __global__ void flash_attention_bwd_256_sm_bf16(
     const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
     const __nv_bfloat16* O, const __nv_bfloat16* dO, const float* LSE, const float* D,
-    __nv_bfloat16* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
+    float* dQ, __nv_bfloat16* dK, __nv_bfloat16* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal, const int window_size
@@ -1432,6 +1438,10 @@ __device__ void flash_attention_preprocess_bwd_fp8_impl(
 }
 
 // Main backward kernel for FP8
+// `dQ` is an FP32 accumulator holding the DEQUANTIZED gradient, NOT an FP8
+// buffer: K/V blocks atomicAdd into the same element and CUDA has no 1-byte
+// float atomic. The launcher applies `dQ_scale` and quantizes afterwards, so
+// `dQ_scale` is unused here.
 template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
 __device__ void flash_attention_bwd_fp8_impl(
     const boostr_fp8_e4m3* __restrict__ Q,
@@ -1441,7 +1451,7 @@ __device__ void flash_attention_bwd_fp8_impl(
     const boostr_fp8_e4m3* __restrict__ dO,
     const float* __restrict__ LSE,
     const float* __restrict__ D,
-    boostr_fp8_e4m3* __restrict__ dQ,
+    float* __restrict__ dQ,
     boostr_fp8_e4m3* __restrict__ dK,
     boostr_fp8_e4m3* __restrict__ dV,
     const int batch_size,
@@ -1493,7 +1503,7 @@ __device__ void flash_attention_bwd_fp8_impl(
     const boostr_fp8_e4m3* dO_base = dO + head_offset;
     const float* LSE_base = LSE + lse_offset;
     const float* D_base = D + lse_offset;
-    boostr_fp8_e4m3* dQ_base = dQ + head_offset;
+    float* dQ_base = dQ + head_offset;
     boostr_fp8_e4m3* dK_base = dK + kv_head_offset;
     boostr_fp8_e4m3* dV_base = dV + kv_head_offset;
 
@@ -1599,7 +1609,7 @@ __device__ void flash_attention_bwd_fp8_impl(
             if ((q_row % (int)blockDim.x) == tid) {
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    atomicAdd((float*)&dQ_base[q_pos * HEAD_DIM + d], dQ_local[d]);
+                    atomicAdd(&dQ_base[q_pos * HEAD_DIM + d], dQ_local[d]);
                 }
             }
         }
@@ -1634,7 +1644,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_64_fp8(
 extern "C" __global__ void flash_attention_bwd_64_fp8(
     const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
     const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    float* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal,
@@ -1659,7 +1669,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_128_fp8(
 extern "C" __global__ void flash_attention_bwd_128_fp8(
     const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
     const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    float* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal,
@@ -1682,7 +1692,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_32_fp8(
 extern "C" __global__ void flash_attention_bwd_32_fp8(
     const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
     const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    float* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal,
@@ -1705,7 +1715,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_96_fp8(
 extern "C" __global__ void flash_attention_bwd_96_fp8(
     const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
     const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    float* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal,
@@ -1728,7 +1738,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_192_fp8(
 extern "C" __global__ void flash_attention_bwd_192_fp8(
     const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
     const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    float* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal,
@@ -1751,7 +1761,7 @@ extern "C" __global__ void flash_attention_preprocess_bwd_256_fp8(
 extern "C" __global__ void flash_attention_bwd_256_fp8(
     const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
     const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    float* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal,
@@ -1776,7 +1786,7 @@ extern "C" __global__ void flash_attention_bwd_256_fp8(
 extern "C" __global__ void flash_attention_bwd_32_sm_fp8(
     const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
     const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    float* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal,
@@ -1794,7 +1804,7 @@ extern "C" __global__ void flash_attention_bwd_32_sm_fp8(
 extern "C" __global__ void flash_attention_bwd_64_sm_fp8(
     const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
     const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    float* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal,
@@ -1812,7 +1822,7 @@ extern "C" __global__ void flash_attention_bwd_64_sm_fp8(
 extern "C" __global__ void flash_attention_bwd_96_sm_fp8(
     const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
     const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    float* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal,
@@ -1830,7 +1840,7 @@ extern "C" __global__ void flash_attention_bwd_96_sm_fp8(
 extern "C" __global__ void flash_attention_bwd_128_sm_fp8(
     const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
     const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    float* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal,
@@ -1848,7 +1858,7 @@ extern "C" __global__ void flash_attention_bwd_128_sm_fp8(
 extern "C" __global__ void flash_attention_bwd_192_sm_fp8(
     const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
     const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    float* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal,
@@ -1866,7 +1876,7 @@ extern "C" __global__ void flash_attention_bwd_192_sm_fp8(
 extern "C" __global__ void flash_attention_bwd_256_sm_fp8(
     const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V,
     const boostr_fp8_e4m3* O, const boostr_fp8_e4m3* dO, const float* LSE, const float* D,
-    boostr_fp8_e4m3* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
+    float* dQ, boostr_fp8_e4m3* dK, boostr_fp8_e4m3* dV,
     const int batch_size, const int num_heads,
     const int seq_len_q, const int seq_len_k,
     const float scale, const int causal,

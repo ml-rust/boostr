@@ -6,7 +6,7 @@ use crate::ops::impl_generic::attention::sum_gqa_grads;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
-use numr::ops::{ShapeOps, TypeConversionOps};
+use numr::ops::{ScalarOps, ShapeOps, TypeConversionOps};
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
@@ -95,9 +95,18 @@ pub(super) fn flash_attention_bwd_fp8_impl(
     // Allocate gradient tensors (dQ zeroed for atomicAdd).
     // dK/dV are allocated with `num_heads` heads to match the kernel's indexing;
     // GQA groups are summed back to `num_kv_heads` after the launch.
-    let dq = Tensor::<CudaRuntime>::zeros(
+    //
+    // dQ is an F32 accumulator, not an FP8 buffer: each K/V block adds into the
+    // same dQ element with `atomicAdd`, and CUDA has no 1-byte float atomic. A
+    // 4-byte atomic aimed at an FP8 element is misaligned unless the element
+    // index is a multiple of 4 (`CUDA_ERROR_MISALIGNED_ADDRESS`) and clobbers
+    // three neighbours when it is. The kernel therefore accumulates the
+    // DEQUANTIZED gradient here; `dq_scale` and the quantization are applied
+    // below, matching the `raw = quantize(value * scale)` convention the kernel
+    // uses for dK/dV.
+    let dq_acc = Tensor::<CudaRuntime>::zeros(
         &[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim],
-        dtype,
+        DType::F32,
         device,
     );
     let dk = Tensor::<CudaRuntime>::empty(
@@ -187,7 +196,7 @@ pub(super) fn flash_attention_bwd_fp8_impl(
         let dout_ptr = dout.ptr();
         let lse_ptr = lse.ptr();
         let d_ptr = d_buf.ptr();
-        let dq_ptr = dq.ptr();
+        let dq_ptr = dq_acc.ptr();
         let dk_ptr = dk.ptr();
         let dv_ptr = dv.ptr();
         let scale = (p.head_dim as f32).sqrt().recip();
@@ -227,6 +236,20 @@ pub(super) fn flash_attention_bwd_fp8_impl(
             })?;
         }
     }
+
+    // Sync before the requantization below: the backward uses atomicAdd, and
+    // `dq_acc` is a temporary that must outlive the kernel writing into it.
+    client
+        .stream()
+        .synchronize()
+        .map_err(|e| Error::KernelError {
+            reason: format!("Flash Attention FP8 bwd sync failed: {:?}", e),
+        })?;
+
+    // Requantize dQ once: the kernel stores `raw = quantize(value * scale)`, so
+    // apply `dq_scale` to the F32 accumulator before the single cast to FP8.
+    let dq_scaled = client.mul_scalar(&dq_acc, f64::from(dq_scale))?;
+    let dq = client.cast(&dq_scaled, dtype)?;
 
     if repeats > 1 {
         let dk = sum_gqa_grads_fp8(client, &dk, p.num_kv_heads, repeats, dtype)?;

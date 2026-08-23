@@ -36,21 +36,36 @@ where
 {
     fn backward(&self, grad_output: &Tensor<R>) -> numr::error::Result<Vec<Option<Tensor<R>>>> {
         let client = R::default_client(grad_output.device());
-        let q = &self.saved_tensors[0];
-        let k = &self.saved_tensors[1];
-        let v = &self.saved_tensors[2];
-        let output = &self.saved_tensors[3];
-        let lse = &self.saved_tensors[4];
+        // The fused backward kernels index dO, Q, K, V, O and LSE through raw
+        // device pointers with implied row-major strides, so every input must
+        // be contiguous. The autograd engine hands down whatever layout the
+        // consumer's backward produced: the standard attention epilogue is
+        // `permute([0,2,1,3]) -> contiguous -> reshape`, whose backward chain
+        // ends in `PermuteBackward`, which returns a permuted VIEW. That view
+        // reaches here as `grad_output` and is NOT contiguous.
+        //
+        // Normalizing is this node's job, not the caller's: the node is the
+        // boundary between the layout-agnostic autograd engine and the
+        // kernel's pointer contract, and it serves every caller of
+        // `var_flash_attention`. `Tensor::contiguous` is a refcount clone when
+        // the tensor is already contiguous, so the copy happens only for the
+        // layouts that would otherwise be rejected.
+        let grad_output = grad_output.contiguous()?;
+        let q = self.saved_tensors[0].contiguous()?;
+        let k = self.saved_tensors[1].contiguous()?;
+        let v = self.saved_tensors[2].contiguous()?;
+        let output = self.saved_tensors[3].contiguous()?;
+        let lse = self.saved_tensors[4].contiguous()?;
         let cfg = &self.config;
 
         let (dq, dk, dv) = client
             .flash_attention_bwd(
-                grad_output,
-                q,
-                k,
-                v,
-                output,
-                lse,
+                &grad_output,
+                &q,
+                &k,
+                &v,
+                &output,
+                &lse,
                 cfg.num_heads,
                 cfg.num_kv_heads,
                 cfg.head_dim,

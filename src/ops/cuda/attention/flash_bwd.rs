@@ -6,7 +6,7 @@ use crate::ops::impl_generic::attention::sum_gqa_grads;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
-use numr::ops::ShapeOps;
+use numr::ops::{ShapeOps, TypeConversionOps};
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
@@ -126,9 +126,16 @@ pub(super) fn flash_attention_bwd_impl(
     // Allocate gradient tensors (dQ must be zeroed — backward uses atomicAdd).
     // dK/dV are allocated with `num_heads` heads to match the kernel's indexing;
     // GQA groups are summed back to `num_kv_heads` after the launch.
-    let dq = Tensor::<CudaRuntime>::zeros(
+    //
+    // dQ is ALWAYS F32, whatever `dtype` is: each K/V block adds into the same
+    // dQ element with `atomicAdd`, and CUDA has no 2-byte float atomic. A
+    // 4-byte atomic aimed at an F16/BF16 element is misaligned whenever the
+    // element index is odd (`CUDA_ERROR_MISALIGNED_ADDRESS`) and clobbers the
+    // neighbouring element when it is even. The F32 accumulator is cast down to
+    // `dtype` after the kernel completes.
+    let dq_acc = Tensor::<CudaRuntime>::zeros(
         &[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim],
-        dtype,
+        DType::F32,
         device,
     );
     let dk = Tensor::<CudaRuntime>::empty(
@@ -225,7 +232,7 @@ pub(super) fn flash_attention_bwd_impl(
         let dout_ptr = dout.ptr();
         let lse_ptr = lse.ptr();
         let d_ptr = d_buf.ptr();
-        let dq_ptr = dq.ptr();
+        let dq_ptr = dq_acc.ptr();
         let dk_ptr = dk.ptr();
         let dv_ptr = dv.ptr();
         let scale = (p.head_dim as f32).sqrt().recip();
@@ -271,6 +278,13 @@ pub(super) fn flash_attention_bwd_impl(
         .map_err(|e| Error::KernelError {
             reason: format!("Flash Attention bwd sync failed: {:?}", e),
         })?;
+
+    // Narrow the F32 dQ accumulator back to the caller's dtype.
+    let dq = if dtype == DType::F32 {
+        dq_acc
+    } else {
+        client.cast(&dq_acc, dtype)?
+    };
 
     if repeats > 1 {
         let dk = sum_gqa_grads(client, &dk, p.num_kv_heads, repeats)?;

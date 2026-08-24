@@ -84,13 +84,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pcm_path = out_dir.join("synth_output.wav");
     std::fs::write(
         &pcm_path,
-        encode_wav_pcm16(&samples, model.config.sample_rate),
+        encode_wav_pcm16(&samples, model.config.sample_rate)?,
     )?;
     println!("wrote {}", pcm_path.display());
     let f32_path = out_dir.join("synth_output_f32.wav");
     std::fs::write(
         &f32_path,
-        encode_wav_f32(&samples, model.config.sample_rate),
+        encode_wav_f32(&samples, model.config.sample_rate)?,
     )?;
     println!("wrote {}", f32_path.display());
     Ok(())

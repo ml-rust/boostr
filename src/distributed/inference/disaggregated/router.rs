@@ -114,9 +114,13 @@ impl DisaggRouter {
     /// Record KV cache affinity so future requests in the same session are
     /// routed to the decode worker that already has warm state.
     pub fn record_kv_affinity(&self, session_key: String, decode_rank: Rank) {
+        // Recover from poisoning rather than propagating it, matching the read path in
+        // `select_decode_worker`. This map is a routing hint: a panic elsewhere cannot
+        // leave it in a state where an insert is unsafe, and refusing to record affinity
+        // would degrade every later request in the session.
         self.kv_affinity
             .lock()
-            .expect("kv_affinity mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .insert(session_key, decode_rank);
     }
 
@@ -125,7 +129,7 @@ impl DisaggRouter {
     pub fn evict_kv_affinity(&self, session_key: &str) {
         self.kv_affinity
             .lock()
-            .expect("kv_affinity mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .remove(session_key);
     }
 

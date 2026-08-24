@@ -20,6 +20,41 @@ use crate::inference::{BlockTable, LayeredPagedKvCache};
 use crate::{DType, Runtime};
 use anyhow::{Result, anyhow};
 
+/// Read a little-endian `u32` at `offset`, erroring rather than panicking when the
+/// buffer is too short.
+///
+/// The callers bounds-check before each read, so this is defence in depth: it keeps a
+/// truncated or hostile payload from turning into a slice-index panic inside a server.
+fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32> {
+    let end = offset.checked_add(4).ok_or_else(|| {
+        anyhow!(
+            "Paged KV cache read offset {} overflows the address space",
+            offset
+        )
+    })?;
+    let slice = bytes.get(offset..end).ok_or_else(|| {
+        anyhow!(
+            "Paged KV cache buffer too short: need {} bytes, got {}",
+            end,
+            bytes.len()
+        )
+    })?;
+    Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+/// Decode a little-endian `f32` run without requiring 4-byte alignment.
+///
+/// `len` is a multiple of 4 and already bounds-checked by the caller, so the trailing
+/// partial chunk `chunks_exact` would leave is always empty.
+fn read_f32_le_vec(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&c| f32::from_le_bytes(c))
+        .collect()
+}
+
 /// Per-layer deserialized K/V data that could not be directly loaded into the
 /// paged cache (the public API does not expose mutable raw-block writes).
 ///
@@ -65,8 +100,14 @@ where
 
         let k_data: Vec<f32> = layer.k_cache().try_to_vec::<f32>()?;
         let v_data: Vec<f32> = layer.v_cache().try_to_vec::<f32>()?;
-        buf.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&k_data));
-        buf.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&v_data));
+        // Explicit little-endian, matching the documented wire format and the reader.
+        // `cast_slice` would emit native-endian bytes, which disagree on a big-endian host.
+        for &x in &k_data {
+            buf.extend_from_slice(&x.to_le_bytes());
+        }
+        for &x in &v_data {
+            buf.extend_from_slice(&x.to_le_bytes());
+        }
 
         let block_ids = &bt.blocks;
         let bt_len = block_ids.len() as u32;
@@ -100,9 +141,9 @@ where
         ));
     }
 
-    let num_layers = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let block_size = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
-    let seq_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let num_layers = read_u32_le(bytes, 0)? as usize;
+    let block_size = read_u32_le(bytes, 4)? as usize;
+    let seq_len = read_u32_le(bytes, 8)? as usize;
 
     let mut cursor = 12usize;
 
@@ -115,7 +156,8 @@ where
         block_ids: Vec<u32>,
     }
 
-    let mut raw_layers: Vec<RawLayerParams> = Vec::with_capacity(num_layers);
+    // `num_layers` is attacker-controlled: reserve lazily rather than trusting it.
+    let mut raw_layers: Vec<RawLayerParams> = Vec::new();
 
     for layer_idx in 0..num_layers {
         if cursor + 12 > bytes.len() {
@@ -124,28 +166,54 @@ where
                 layer_idx
             ));
         }
-        let num_blocks = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
-        let num_heads =
-            u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
-        let head_dim =
-            u32::from_le_bytes(bytes[cursor + 8..cursor + 12].try_into().unwrap()) as usize;
+        let num_blocks = read_u32_le(bytes, cursor)? as usize;
+        let num_heads = read_u32_le(bytes, cursor + 4)? as usize;
+        let head_dim = read_u32_le(bytes, cursor + 8)? as usize;
         cursor += 12;
 
-        let numel = num_blocks * block_size * num_heads * head_dim;
-        let data_bytes = numel * 4;
+        // Every factor here comes off the wire. In release builds `*` wraps, so an
+        // unchecked product can land back inside the buffer and slip past the
+        // truncation check below while the header still claims enormous dimensions.
+        let data_bytes = num_blocks
+            .checked_mul(block_size)
+            .and_then(|n| n.checked_mul(num_heads))
+            .and_then(|n| n.checked_mul(head_dim))
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| {
+                anyhow!(
+                    "Paged KV cache layer {} dimensions overflow: \
+                     num_blocks={} block_size={} num_heads={} head_dim={}",
+                    layer_idx,
+                    num_blocks,
+                    block_size,
+                    num_heads,
+                    head_dim
+                )
+            })?;
 
-        if cursor + data_bytes * 2 > bytes.len() {
+        let both = data_bytes
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(cursor))
+            .ok_or_else(|| {
+                anyhow!(
+                    "Paged KV cache layer {} data size overflows the address space",
+                    layer_idx
+                )
+            })?;
+        if both > bytes.len() {
             return Err(anyhow!(
                 "Paged KV cache buffer truncated at layer {} data",
                 layer_idx
             ));
         }
 
-        let k_data: Vec<f32> =
-            bytemuck::cast_slice::<u8, f32>(&bytes[cursor..cursor + data_bytes]).to_vec();
+        // Read element-wise rather than `bytemuck::cast_slice`: a received buffer
+        // carries no alignment guarantee, and `cast_slice` panics when `&bytes[cursor..]`
+        // is not 4-aligned. This also makes the f32s explicitly little-endian, matching
+        // the documented wire format.
+        let k_data = read_f32_le_vec(&bytes[cursor..cursor + data_bytes]);
         cursor += data_bytes;
-        let v_data: Vec<f32> =
-            bytemuck::cast_slice::<u8, f32>(&bytes[cursor..cursor + data_bytes]).to_vec();
+        let v_data = read_f32_le_vec(&bytes[cursor..cursor + data_bytes]);
         cursor += data_bytes;
 
         if cursor + 4 > bytes.len() {
@@ -154,22 +222,32 @@ where
                 layer_idx
             ));
         }
-        let bt_len = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+        let bt_len = read_u32_le(bytes, cursor)? as usize;
         cursor += 4;
 
-        if cursor + bt_len * 4 > bytes.len() {
+        let bt_end = bt_len
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(cursor))
+            .ok_or_else(|| {
+                anyhow!(
+                    "Paged KV cache layer {} block table length {} overflows",
+                    layer_idx,
+                    bt_len
+                )
+            })?;
+        if bt_end > bytes.len() {
             return Err(anyhow!(
                 "Paged KV cache buffer truncated at layer {} block table data",
                 layer_idx
             ));
         }
+        // `bt_len` is bounded by the buffer now, so reserving it cannot be used to
+        // force a large allocation from a 4-byte field.
         let mut block_ids = Vec::with_capacity(bt_len);
         for i in 0..bt_len {
-            let offset = cursor + i * 4;
-            let id = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-            block_ids.push(id);
+            block_ids.push(read_u32_le(bytes, cursor + i * 4)?);
         }
-        cursor += bt_len * 4;
+        cursor = bt_end;
 
         raw_layers.push(RawLayerParams {
             num_blocks,
@@ -220,6 +298,71 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hostile header whose dimensions multiply past `usize::MAX` must be rejected.
+    ///
+    /// Without checked arithmetic the product wraps in release builds to a small
+    /// `data_bytes`, the truncation check then passes, and the enormous `num_blocks` /
+    /// `num_heads` / `head_dim` reach the cache constructor anyway. The assertion pins
+    /// the error, not merely "did not panic".
+    #[test]
+    fn test_deserialize_rejects_dimension_overflow() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // num_layers
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // block_size
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // seq_len
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // num_blocks
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // num_heads
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // head_dim
+
+        // `expect_err` would require `Debug` on the success type, which the cache
+        // does not implement.
+        let Err(err) =
+            deserialize_paged_kv_cache::<crate::CpuRuntime>(&bytes, &crate::CpuDevice::new())
+        else {
+            panic!("overflowing dimensions must be rejected");
+        };
+        assert!(
+            err.to_string().contains("overflow"),
+            "expected an overflow error, got: {err}"
+        );
+    }
+
+    /// The reader must not require the input buffer to be 4-byte aligned.
+    ///
+    /// A buffer arriving off the wire carries no alignment guarantee, and
+    /// `bytemuck::cast_slice::<u8, f32>` panics outright on a misaligned slice. Reading
+    /// a deliberately offset copy reproduces that panic if the element-wise decode is
+    /// reverted.
+    #[test]
+    fn test_deserialize_accepts_misaligned_buffer() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u32.to_le_bytes()); // num_layers
+        payload.extend_from_slice(&1u32.to_le_bytes()); // block_size
+        payload.extend_from_slice(&1u32.to_le_bytes()); // seq_len
+        payload.extend_from_slice(&1u32.to_le_bytes()); // num_blocks
+        payload.extend_from_slice(&1u32.to_le_bytes()); // num_heads
+        payload.extend_from_slice(&2u32.to_le_bytes()); // head_dim
+        for x in [1.0f32, 2.0] {
+            payload.extend_from_slice(&x.to_le_bytes()); // k_data
+        }
+        for x in [3.0f32, 4.0] {
+            payload.extend_from_slice(&x.to_le_bytes()); // v_data
+        }
+        payload.extend_from_slice(&0u32.to_le_bytes()); // block_table_len
+
+        // Shift by one byte so the f32 runs start at an odd address.
+        let mut shifted = vec![0u8];
+        shifted.extend_from_slice(&payload);
+
+        let (_cache, layer_data, _tables) = deserialize_paged_kv_cache::<crate::CpuRuntime>(
+            &shifted[1..],
+            &crate::CpuDevice::new(),
+        )
+        .expect("a misaligned buffer must deserialize");
+        assert_eq!(layer_data[0].k_data, vec![1.0, 2.0]);
+        assert_eq!(layer_data[0].v_data, vec![3.0, 4.0]);
+    }
 
     #[test]
     fn test_deserialize_too_short_buffer() {

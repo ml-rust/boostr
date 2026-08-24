@@ -31,8 +31,8 @@ pub use codec::NeuCodec;
 pub use config::NeuCodecDecoderConfig;
 pub use decoder::{NeuCodecDecoder, NeuCodecDecoderWeights};
 pub use encoder::{
-    EncodeStages, NeuCodecEncoder, NeuCodecEncoderWeights, PRIOR_DIM, encode_alignment,
-    encode_padding,
+    EncodeStages, MAX_ENCODE_SAMPLES, NeuCodecEncoder, NeuCodecEncoderWeights, PRIOR_DIM,
+    check_encode_len, encode_alignment, encode_padding,
 };
 pub use fbank::{
     FFT_LENGTH, FRAME_LENGTH, FRAME_SHIFT, HIGH_FREQ, LOW_FREQ, MEL_FLOOR, NUM_FFT_BINS,

@@ -148,3 +148,39 @@ fn to_time_last_swaps_the_trailing_axes() {
         vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
     );
 }
+
+/// The refusal is the entire reason [`MAX_ENCODE_SAMPLES`] exists, so it is
+/// tested directly rather than through a model that needs a checkpoint.
+/// Without the guard, an over-long clip dies as an allocation failure inside a
+/// matmul, naming nothing the caller can act on.
+#[test]
+fn encode_len_guard_refuses_an_over_long_clip() {
+    let over = MAX_ENCODE_SAMPLES + 1;
+    let Err(err) = check_encode_len(over, MAX_ENCODE_SAMPLES) else {
+        panic!("a clip one sample over the limit must be refused");
+    };
+    let msg = err.to_string();
+    assert!(msg.contains(&over.to_string()), "{msg}");
+    assert!(msg.contains("utterance"), "{msg}");
+    // The corpus case: 26.8 minutes is ~80k frames of quadratic attention.
+    assert!(check_encode_len(26 * 60 * SAMPLE_RATE, MAX_ENCODE_SAMPLES).is_err());
+}
+
+/// Exactly at the limit must pass — an off-by-one here would silently reject
+/// the longest legitimate utterance.
+#[test]
+fn encode_len_guard_accepts_exactly_the_limit() {
+    assert!(check_encode_len(MAX_ENCODE_SAMPLES, MAX_ENCODE_SAMPLES).is_ok());
+    assert!(check_encode_len(1, 1).is_ok());
+    assert!(check_encode_len(2, 1).is_err());
+}
+
+/// Empty input is refused separately from the length limit, so a caller that
+/// hands over a zero-length decode result gets a distinct message.
+#[test]
+fn encode_len_guard_refuses_empty_input() {
+    let Err(err) = check_encode_len(0, MAX_ENCODE_SAMPLES) else {
+        panic!("an empty waveform must be refused");
+    };
+    assert!(err.to_string().contains("non-empty"), "{err}");
+}

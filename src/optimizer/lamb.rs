@@ -9,6 +9,7 @@
 
 use crate::error::Result;
 use crate::ops::FusedOptimizerOps;
+use crate::optimizer::precision::optimizer_state_dtype;
 use crate::optimizer::traits::Optimizer;
 use crate::readback::scalar_f32;
 use numr::autograd::GradStore;
@@ -17,6 +18,7 @@ use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 /// LAMB / LARS configuration
 #[derive(Debug, Clone)]
@@ -62,8 +64,20 @@ impl LambConfig {
 }
 
 struct LambState<R: Runtime> {
+    /// First moment. Always held at the optimizer state dtype.
     m: Tensor<R>,
+    /// Second moment. Always held at the optimizer state dtype: it sums SQUARED
+    /// gradients, which a narrow dtype flushes toward zero.
     v: Tensor<R>,
+    /// F32 master copy of the parameter, held ONLY when the parameter's own
+    /// dtype is narrower than F32 (BF16/F16/FP8).
+    ///
+    /// The update runs against the master and a cast of the master is written
+    /// back into the caller's `params` map, so the model keeps computing in its
+    /// own dtype while the update arithmetic stays F32. For an F32 or F64
+    /// parameter this is `None`: no copy, no extra allocation, and the numbers
+    /// are bit-identical to a build without master weights.
+    master: Option<Tensor<R>>,
 }
 
 /// LAMB optimizer with layer-wise adaptive trust ratios
@@ -72,6 +86,17 @@ struct LambState<R: Runtime> {
 /// layer's update by `||param|| / ||update||` (the "trust ratio"). This
 /// normalization keeps gradient magnitudes consistent across layers,
 /// enabling stable training at batch sizes of 32K+.
+///
+/// For a parameter narrower than F32 (BF16/F16/FP8) the optimizer also holds an
+/// F32 master copy and keeps `m` and `v` at F32: LAMB's update is normalized, so
+/// the step is `lr * trust_ratio` in magnitude, which at fine-tuning learning
+/// rates is below BF16's resolution and rounds straight back to the original
+/// weight. The trust ratio itself is computed over the master, so its two norms
+/// are exact rather than rounded to the parameter's width. See
+/// [`crate::optimizer::precision`].
+///
+/// Optimizer state is not persisted by this type — a resumed run rebuilds the
+/// master copies from the checkpointed parameters on its first step.
 pub struct Lamb<R: Runtime> {
     config: LambConfig,
     state: HashMap<TensorId, LambState<R>>,
@@ -150,27 +175,67 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
                 None => continue,
             };
 
-            let param = params.get(&id).expect("id collected from params.keys()");
+            let param = match params.get(&id) {
+                Some(p) => p,
+                None => continue,
+            };
 
-            // Lazy init
-            if let std::collections::hash_map::Entry::Vacant(e) = self.state.entry(id) {
-                let m = Tensor::<R>::try_zeros(param.shape(), param.dtype(), param.device())?;
-                let v = Tensor::<R>::try_zeros(param.shape(), param.dtype(), param.device())?;
-                e.insert(LambState { m, v });
-            }
+            let param_dtype = param.dtype();
+            let state_dtype = optimizer_state_dtype(param_dtype);
 
-            let state = self
-                .state
-                .get(&id)
-                .expect("state was lazily initialized above");
+            // Entry rather than contains_key + insert: the moments and the
+            // master copy all need fallible calls, so `or_insert_with` cannot
+            // build them.
+            let state = match self.state.entry(id) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let m = Tensor::<R>::try_zeros(param.shape(), state_dtype, param.device())?;
+                    let v = Tensor::<R>::try_zeros(param.shape(), state_dtype, param.device())?;
+                    let master = if state_dtype == param_dtype {
+                        None
+                    } else {
+                        Some(client.cast(param, state_dtype)?)
+                    };
+                    entry.insert(LambState { m, v, master })
+                }
+            };
+
+            // The LAMB kernel does not write the parameter, but it allocates the
+            // update vector at the parameter's dtype and mutates `m`/`v` through
+            // storage-sharing clones — so a narrow parameter would narrow the
+            // whole update. The master — never the narrow parameter — goes in.
+            let arith_param = state.master.as_ref().unwrap_or(param);
+
+            // CPU dispatch keys on the parameter dtype alone and reads the
+            // gradient at that width, so a narrow gradient against an F32
+            // master must be widened first. Dropped at the end of the
+            // iteration: only one widened gradient is resident at a time.
+            let widened_grad = if grad.dtype() == state_dtype {
+                None
+            } else {
+                Some(client.cast(grad, state_dtype)?)
+            };
+            let arith_grad = widened_grad.as_ref().unwrap_or(grad);
 
             // Fused kernel computes: update vector + updated m, v
             let (update, new_m, new_v) = client.fused_lamb_step(
-                param, grad, &state.m, &state.v, beta1, beta2, eps, wd, bc1, bc2,
+                arith_param,
+                arith_grad,
+                &state.m,
+                &state.v,
+                beta1,
+                beta2,
+                eps,
+                wd,
+                bc1,
+                bc2,
             )?;
 
-            // Trust ratio requires global reductions (can't fuse into per-element kernel)
-            let param_norm = tensor_l2_norm(client, param)?;
+            // Trust ratio requires global reductions (can't fuse into per-element kernel).
+            // Taken over the master: `tensor_l2_norm` sums squares in the tensor's
+            // own dtype, so a BF16 parameter would round the sum of squares and
+            // perturb the ratio. Over the F32 master it is exact.
+            let param_norm = tensor_l2_norm(client, arith_param)?;
             let update_norm = tensor_l2_norm(client, &update)?;
 
             let trust_ratio = if param_norm > 0.0 && update_norm > 0.0 {
@@ -186,15 +251,21 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
             // param = param - lr * trust_ratio * update
             let effective_lr = lr * trust_ratio;
             let scaled_update = client.mul_scalar(&update, effective_lr)?;
-            let new_param = client.sub(param, &scaled_update)?;
+            let new_param = client.sub(arith_param, &scaled_update)?;
 
-            let state_mut = self
-                .state
-                .get_mut(&id)
-                .expect("state was initialized for this id earlier in the loop");
-            state_mut.m = new_m;
-            state_mut.v = new_v;
-            params.insert(id, new_param);
+            state.m = new_m;
+            state.v = new_v;
+
+            // A fresh cast, never the returned handle: on CUDA and WGPU that
+            // handle aliases the master's storage.
+            let updated = match state.master.as_mut() {
+                Some(master) => {
+                    *master = new_param;
+                    client.cast(master, param_dtype)?
+                }
+                None => new_param,
+            };
+            params.insert(id, updated);
         }
 
         Ok(())
@@ -440,5 +511,239 @@ mod tests {
         opt.reset();
         assert_eq!(opt.timestep(), 0);
         assert!(opt.state.is_empty());
+    }
+
+    #[test]
+    fn test_lamb_set_lr() {
+        let mut opt = Lamb::<CpuRuntime>::new(LambConfig::default());
+        opt.set_lr(0.05);
+        assert_eq!(opt.lr(), 0.05);
+    }
+
+    /// Plain f32 LAMB on a single element, mirroring the kernel arithmetic and
+    /// the trust-ratio scaling this module applies around it.
+    #[cfg(feature = "f16")]
+    fn f32_reference(w0: f32, g: f32, config: &LambConfig, steps: usize) -> f32 {
+        let b1 = config.beta1 as f32;
+        let b2 = config.beta2 as f32;
+        let e = config.eps as f32;
+        let w = config.weight_decay as f32;
+
+        let mut p = w0;
+        let mut m = 0.0f32;
+        let mut v = 0.0f32;
+
+        for t in 1..=steps {
+            let bc1 = 1.0 - config.beta1.powi(t as i32);
+            let bc2 = if config.use_adam {
+                1.0 - config.beta2.powi(t as i32)
+            } else {
+                1.0
+            };
+
+            m = b1 * m + (1.0 - b1) * g;
+            v = b2 * v + (1.0 - b2) * g * g;
+
+            let m_hat = m / bc1 as f32;
+            let v_hat = v / bc2 as f32;
+            let adam_update = m_hat / (v_hat.sqrt() + e);
+            let update = if w > 0.0 {
+                adam_update + w * p
+            } else {
+                adam_update
+            };
+
+            let param_norm = ((p * p) as f64).sqrt();
+            let update_norm = ((update * update) as f64).sqrt();
+            let trust = if param_norm > 0.0 && update_norm > 0.0 {
+                let ratio = param_norm / update_norm;
+                match config.max_trust_ratio {
+                    Some(max) => ratio.min(max),
+                    None => ratio,
+                }
+            } else {
+                1.0
+            };
+
+            p -= (config.lr * trust) as f32 * update;
+        }
+        p
+    }
+
+    /// Run `steps` LAMB steps on a single-element parameter with a constant
+    /// gradient, returning the optimizer and the final parameter map.
+    #[cfg(feature = "f16")]
+    fn run_scalar_steps(
+        client: &numr::runtime::cpu::CpuClient,
+        param: Tensor<CpuRuntime>,
+        grad: Tensor<CpuRuntime>,
+        config: LambConfig,
+        steps: usize,
+    ) -> (Lamb<CpuRuntime>, HashMap<TensorId, Tensor<CpuRuntime>>) {
+        let id = param.id();
+        let mut params = HashMap::new();
+        params.insert(id, param);
+
+        let mut opt = Lamb::<CpuRuntime>::new(config);
+        for _ in 0..steps {
+            let mut grads = GradStore::new();
+            grads.insert(id, grad.clone());
+            opt.step(client, &mut params, &grads).unwrap();
+        }
+        (opt, params)
+    }
+
+    /// The decisive test: a BF16 parameter under a realistic fine-tuning
+    /// learning rate must actually move, and must land on the BF16 grid point
+    /// nearest the F32 reference run.
+    ///
+    /// Reasoning for the premise: with a constant gradient the Adam update is
+    /// bias-corrected to ~1.0, so `||update|| = 1` and the trust ratio is
+    /// `||param||` itself — 0.02 here. One step is therefore `lr * 0.02` =
+    /// 4e-7, while BF16's ulp at 0.02 is 2^-14 = 6.1e-5, over a hundred times
+    /// larger. Without an F32 master every step rounds back to the starting
+    /// weight, forever. Over 512 steps the master decays by ~2e-4, which is
+    /// ~3.3 ulps and cannot round back.
+    #[cfg(feature = "f16")]
+    #[test]
+    fn test_lamb_bf16_parameter_actually_moves() {
+        let (client, device) = cpu_setup();
+
+        let w0 = 0.02f32;
+        let g = 1.0f32;
+        let steps = 512;
+        let config = LambConfig {
+            lr: 2e-5,
+            weight_decay: 0.0,
+            ..Default::default()
+        };
+
+        let started = half::bf16::from_f32(w0).to_f32();
+
+        // Premise: a single step is below BF16's resolution at this weight.
+        let one_step = config.lr as f32 * started;
+        assert_eq!(
+            half::bf16::from_f32(started - one_step).to_bits(),
+            half::bf16::from_f32(started).to_bits(),
+            "test premise broken: a single step is representable in BF16"
+        );
+
+        let param =
+            Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(w0)], &[1], &device)
+                .unwrap();
+        let grad = Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(g)], &[1], &device)
+            .unwrap();
+        let param_id = param.id();
+        let (_opt, params) = run_scalar_steps(&client, param, grad, config.clone(), steps);
+
+        let out = params.get(&param_id).unwrap();
+        assert_eq!(
+            out.dtype(),
+            DType::BF16,
+            "the model's parameter must stay BF16 — only the update is F32"
+        );
+
+        let got = out.to_vec::<half::bf16>()[0].to_f32();
+        assert!(
+            started - got > 1e-4,
+            "BF16 parameter did not move: started {started}, ended {got} after {steps} steps"
+        );
+
+        // The master is exact F32, so the written-back parameter is precisely the
+        // reference rounded to BF16. Assert that equality directly rather than
+        // against a hand-derived ulp tolerance — the grid spacing changes with the
+        // binade, and an off-by-one-binade tolerance is how this assertion first
+        // failed while the value itself was correct.
+        let expected = f32_reference(started, half::bf16::from_f32(g).to_f32(), &config, steps);
+        let expected_bf16 = half::bf16::from_f32(expected).to_f32();
+        assert_eq!(
+            got, expected_bf16,
+            "BF16 run must equal the F32 reference rounded to BF16: got {got}, \
+             reference {expected} rounds to {expected_bf16}"
+        );
+    }
+
+    #[cfg(feature = "f16")]
+    #[test]
+    fn test_lamb_bf16_state_and_master_are_f32() {
+        let (client, device) = cpu_setup();
+
+        let param =
+            Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(0.02)], &[1], &device)
+                .unwrap();
+        let grad =
+            Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(1.0)], &[1], &device)
+                .unwrap();
+        let param_id = param.id();
+
+        let config = LambConfig {
+            lr: 2e-5,
+            weight_decay: 0.0,
+            ..Default::default()
+        };
+        let (opt, params) = run_scalar_steps(&client, param, grad, config, 1);
+
+        let state = opt
+            .state
+            .get(&param_id)
+            .expect("state initialized on first step");
+        let master = state
+            .master
+            .as_ref()
+            .expect("a BF16 param must get an F32 master copy");
+        assert_eq!(master.dtype(), DType::F32);
+        assert_eq!(
+            state.m.dtype(),
+            DType::F32,
+            "the first moment must be F32 for a BF16 param"
+        );
+        assert_eq!(
+            state.v.dtype(),
+            DType::F32,
+            "the second moment must be F32 for a BF16 param — it sums squares"
+        );
+
+        // The master already carries the step the BF16 parameter cannot show.
+        let started = half::bf16::from_f32(0.02).to_f32();
+        let moved = started - master.to_vec::<f32>()[0];
+        assert!(
+            moved > 1e-7,
+            "master weight did not take the step: moved by {moved}"
+        );
+        assert_eq!(
+            params.get(&param_id).unwrap().dtype(),
+            DType::BF16,
+            "the caller's parameter must stay BF16"
+        );
+    }
+
+    #[test]
+    fn test_lamb_f32_allocates_no_master_copy() {
+        let (client, device) = cpu_setup();
+
+        let param = Tensor::<CpuRuntime>::try_from_slice(&[0.02f32], &[1], &device).unwrap();
+        let id = param.id();
+        let mut params = HashMap::new();
+        params.insert(id, param);
+
+        let mut grads = GradStore::new();
+        grads.insert(
+            id,
+            Tensor::<CpuRuntime>::try_from_slice(&[0.001f32], &[1], &device).unwrap(),
+        );
+
+        let mut opt = Lamb::<CpuRuntime>::new(LambConfig {
+            lr: 0.1,
+            ..Default::default()
+        });
+        opt.step(&client, &mut params, &grads).unwrap();
+
+        let state = opt.state.get(&id).expect("state initialized on first step");
+        assert!(
+            state.master.is_none(),
+            "an F32 parameter must not get a master copy"
+        );
+        assert_eq!(state.m.dtype(), DType::F32);
+        assert_eq!(state.v.dtype(), DType::F32);
     }
 }

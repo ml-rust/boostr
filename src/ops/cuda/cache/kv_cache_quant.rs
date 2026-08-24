@@ -52,9 +52,8 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         let func = kernels::get_kernel_function(&module, kernel_name)?;
 
         // Output: FP8 (u8) same shape, scales: [num_tokens] F32
-        let quantized =
-            Tensor::<CudaRuntime>::try_empty(&[num_tokens, head_dim], DType::U8, device)?;
-        let scales = Tensor::<CudaRuntime>::try_empty(&[num_tokens], DType::F32, device)?;
+        let quantized = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], DType::U8, device)?;
+        let scales = Tensor::<CudaRuntime>::empty(&[num_tokens], DType::F32, device)?;
 
         let cfg = LaunchConfig {
             grid_dim: (num_tokens as u32, 1, 1),
@@ -117,8 +116,7 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
             kernels::get_or_load_module(self.context(), device_index, KV_CACHE_FP8_MODULE)?;
         let func = kernels::get_kernel_function(&module, kernel_name)?;
 
-        let output =
-            Tensor::<CudaRuntime>::try_empty(&[num_tokens, head_dim], target_dtype, device)?;
+        let output = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], target_dtype, device)?;
 
         let cfg = LaunchConfig {
             grid_dim: (num_tokens as u32, 1, 1),
@@ -193,10 +191,9 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         let total = num_tokens * head_dim;
         let num_groups = total.div_ceil(gs);
 
-        let packed =
-            Tensor::<CudaRuntime>::try_empty(&[num_tokens, head_dim / 2], DType::U8, device)?;
-        let scales_t = Tensor::<CudaRuntime>::try_empty(&[num_groups], DType::F32, device)?;
-        let zeros_t = Tensor::<CudaRuntime>::try_empty(&[num_groups], DType::F32, device)?;
+        let packed = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim / 2], DType::U8, device)?;
+        let scales_t = Tensor::<CudaRuntime>::empty(&[num_groups], DType::F32, device)?;
+        let zeros_t = Tensor::<CudaRuntime>::empty(&[num_groups], DType::F32, device)?;
 
         let cfg = LaunchConfig {
             grid_dim: (num_groups as u32, 1, 1),
@@ -248,7 +245,7 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         let total = num_tokens * head_dim;
         let num_groups = total.div_ceil(gs);
 
-        let output = Tensor::<CudaRuntime>::try_empty(&[num_tokens, head_dim], DType::F32, device)?;
+        let output = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], DType::F32, device)?;
 
         let cfg = LaunchConfig {
             grid_dim: (num_groups as u32, 1, 1),
@@ -306,9 +303,8 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
             kernels::get_or_load_module(self.context(), device_index, KV_CACHE_QUANT_MODULE)?;
         let func = kernels::get_kernel_function(&module, &kernel_name)?;
 
-        let quantized =
-            Tensor::<CudaRuntime>::try_empty(&[num_tokens, head_dim], DType::I8, device)?;
-        let scales = Tensor::<CudaRuntime>::try_empty(&[num_tokens], DType::F32, device)?;
+        let quantized = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], DType::I8, device)?;
+        let scales = Tensor::<CudaRuntime>::empty(&[num_tokens], DType::F32, device)?;
 
         let cfg = LaunchConfig {
             grid_dim: (num_tokens as u32, 1, 1),
@@ -350,7 +346,7 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
             kernels::get_or_load_module(self.context(), device_index, KV_CACHE_QUANT_MODULE)?;
         let func = kernels::get_kernel_function(&module, "dequantize_kv_int8_per_token_fp32")?;
 
-        let output = Tensor::<CudaRuntime>::try_empty(&[num_tokens, head_dim], DType::F32, device)?;
+        let output = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], DType::F32, device)?;
 
         let cfg = LaunchConfig {
             grid_dim: (num_tokens as u32, 1, 1),

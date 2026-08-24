@@ -41,7 +41,7 @@ pub(super) fn quantize_activation_q8_1(
     let q8_bytes = m * num_blocks * 36;
 
     // Allocate Q8_1 buffer as U8 tensor
-    let q8_buf = Tensor::<CudaRuntime>::try_empty(&[q8_bytes], DType::U8, activation.device())?;
+    let q8_buf = Tensor::<CudaRuntime>::empty(&[q8_bytes], DType::U8, activation.device())?;
 
     let module = kernels::get_or_load_module(client.context(), device_index, QUANT_ACT_MODULE)?;
     let func = kernels::get_kernel_function(&module, "quantize_f32_q8_1")?;

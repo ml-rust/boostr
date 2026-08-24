@@ -83,8 +83,8 @@ mod cuda_impl {
             device: &numr::runtime::cuda::CudaDevice,
         ) -> Result<Self> {
             let val = initial_seq_len as i32;
-            let seq_len_k = Tensor::<CudaRuntime>::try_from_slice(&[val], &[1], device)?;
-            let write_pos = Tensor::<CudaRuntime>::try_from_slice(&[val], &[1], device)?;
+            let seq_len_k = Tensor::<CudaRuntime>::from_slice(&[val], &[1], device)?;
+            let write_pos = Tensor::<CudaRuntime>::from_slice(&[val], &[1], device)?;
             Ok(Self {
                 seq_len_k,
                 write_pos,

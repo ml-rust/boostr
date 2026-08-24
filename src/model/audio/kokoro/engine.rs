@@ -71,7 +71,7 @@ impl KokoroEngine {
                 reason: "no phonemes mapped to vocab — check that G2P and vocab agree".into(),
             });
         }
-        let token_ids = Tensor::<CpuRuntime>::try_from_slice(&ids, &[1, ids.len()], &self.device)?;
+        let token_ids = Tensor::<CpuRuntime>::from_slice(&ids, &[1, ids.len()], &self.device)?;
 
         // 3. Resolve + load the voice pack, pick the row for this phoneme count.
         let voice_pack = self.resolver.load::<CpuRuntime>(voice_spec, &self.device)?;

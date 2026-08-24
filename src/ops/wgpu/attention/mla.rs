@@ -64,7 +64,7 @@ impl MlaOps<WgpuRuntime> for WgpuClient {
         }
 
         // Create output tensor: [B, H, S_q, D_v]
-        let output = Tensor::<WgpuRuntime>::try_zeros(
+        let output = Tensor::<WgpuRuntime>::zeros(
             &[batch_size, num_heads, seq_len_q, head_dim_v],
             DType::F32,
             q_tensor.device(),

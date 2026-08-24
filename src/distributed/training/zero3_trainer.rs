@@ -119,8 +119,8 @@ mod tests {
         let (_, device) = cpu_setup();
         let id1 = TensorId::new();
         let id2 = TensorId::new();
-        let t1 = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &device).unwrap();
-        let t2 = Tensor::<CpuRuntime>::try_from_slice(&[2.0f32], &[1], &device).unwrap();
+        let t1 = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device).unwrap();
+        let t2 = Tensor::<CpuRuntime>::from_slice(&[2.0f32], &[1], &device).unwrap();
         let mut params = HashMap::new();
         params.insert(id1, t1);
         params.insert(id2, t2);
@@ -141,7 +141,7 @@ mod tests {
         };
 
         let param_id = TensorId::new();
-        let param = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let param = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let mut params = HashMap::new();
         params.insert(param_id, param);
 
@@ -149,7 +149,7 @@ mod tests {
 
         trainer.gather_full_params(&mut params, &device).unwrap();
 
-        let grad = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
+        let grad = Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(param_id, grad);
 
@@ -173,21 +173,21 @@ mod tests {
         };
 
         let param_id = TensorId::new();
-        let param = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let param = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let mut params = HashMap::new();
         params.insert(param_id, param);
 
         let mut trainer = Zero3Trainer::<CpuRuntime>::new(config, comm, &params).unwrap();
 
         // First micro-batch: still accumulating
-        let g1 = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
+        let g1 = Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
         let mut grads1 = GradStore::new();
         grads1.insert(param_id, g1);
         let result = trainer.step(&client, &mut params, grads1, 0.5).unwrap();
         assert!(result.is_none());
 
         // Second micro-batch: step fires
-        let g2 = Tensor::<CpuRuntime>::try_from_slice(&[0.3f32, 0.4], &[2], &device).unwrap();
+        let g2 = Tensor::<CpuRuntime>::from_slice(&[0.3f32, 0.4], &[2], &device).unwrap();
         let mut grads2 = GradStore::new();
         grads2.insert(param_id, g2);
         let result = trainer.step(&client, &mut params, grads2, 0.6).unwrap();
@@ -207,14 +207,14 @@ mod tests {
         };
 
         let param_id = TensorId::new();
-        let param = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let param = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let mut params = HashMap::new();
         params.insert(param_id, param);
 
         let mut trainer = Zero3Trainer::<CpuRuntime>::new(config, comm, &params).unwrap();
 
         // Large gradient that should be clipped
-        let g = Tensor::<CpuRuntime>::try_from_slice(&[100.0f32, 100.0], &[2], &device).unwrap();
+        let g = Tensor::<CpuRuntime>::from_slice(&[100.0f32, 100.0], &[2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(param_id, g);
 

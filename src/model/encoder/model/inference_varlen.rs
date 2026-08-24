@@ -174,7 +174,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
                     .map_err(Error::Numr)?;
 
                 // dst: zero-initialised [batch, hidden_size].
-                let dst = Tensor::<R>::try_from_slice(
+                let dst = Tensor::<R>::from_slice(
                     &vec![0.0f32; batch * hidden_size],
                     &[batch, hidden_size],
                     &device,
@@ -206,7 +206,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
                         _ => start,
                     });
                 }
-                let idx_t = Tensor::<R>::try_from_slice(&indices, &[batch], &device)?;
+                let idx_t = Tensor::<R>::from_slice(&indices, &[batch], &device)?;
                 client
                     .embedding_lookup(&hidden_out, &idx_t)
                     .map_err(Error::Numr)

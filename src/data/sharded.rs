@@ -122,8 +122,8 @@ mod tests {
         ) -> Result<Batch<CpuRuntime>> {
             let val = idx as f32;
             Ok(Batch {
-                inputs: Tensor::try_from_slice(&[val], &[1], device).unwrap(),
-                targets: Tensor::try_from_slice(&[val + 0.5], &[1], device).unwrap(),
+                inputs: Tensor::from_slice(&[val], &[1], device).unwrap(),
+                targets: Tensor::from_slice(&[val + 0.5], &[1], device).unwrap(),
             })
         }
     }

@@ -67,17 +67,14 @@ pub fn mqa_gqa_bwd(
     let device_index = device.id();
 
     // Allocate gradients (dQ zeroed for atomicAdd)
-    let dq = Tensor::<CudaRuntime>::try_zeros(
-        &[batch_size, num_heads, seq_len_q, head_dim],
-        dtype,
-        device,
-    )?;
-    let dk = Tensor::<CudaRuntime>::try_zeros(
+    let dq =
+        Tensor::<CudaRuntime>::zeros(&[batch_size, num_heads, seq_len_q, head_dim], dtype, device)?;
+    let dk = Tensor::<CudaRuntime>::zeros(
         &[batch_size, num_kv_heads, seq_len_k, head_dim],
         dtype,
         device,
     )?;
-    let dv = Tensor::<CudaRuntime>::try_zeros(
+    let dv = Tensor::<CudaRuntime>::zeros(
         &[batch_size, num_kv_heads, seq_len_k, head_dim],
         dtype,
         device,
@@ -85,7 +82,7 @@ pub fn mqa_gqa_bwd(
 
     // Step 1: Preprocessing — D = rowsum(dO ⊙ O)
     let d_buf =
-        Tensor::<CudaRuntime>::try_empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
+        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
 
     let module = kernels::get_or_load_module(client.context(), device_index, MQA_GQA_BWD_MODULE)?;
 

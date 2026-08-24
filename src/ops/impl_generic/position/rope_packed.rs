@@ -151,7 +151,7 @@ mod tests {
     // Helper: build position_ids [0, 1, 2, ..., n-1]
     fn seq_pids(n: usize, device: &numr::runtime::cpu::CpuDevice) -> Tensor<CpuRuntime> {
         let ids: Vec<i32> = (0..n as i32).collect();
-        Tensor::<CpuRuntime>::try_from_slice(&ids, &[n], device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(&ids, &[n], device).unwrap()
     }
 
     #[test]
@@ -168,7 +168,7 @@ mod tests {
             .map(|i| i as f32)
             .collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &x_data,
                 &[total_tokens, num_heads, head_dim],
                 &device,
@@ -177,7 +177,7 @@ mod tests {
             false,
         );
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &vec![1.0f32; max_seq * half_d],
                 &[max_seq, half_d],
                 &device,
@@ -186,7 +186,7 @@ mod tests {
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &vec![0.0f32; max_seq * half_d],
                 &[max_seq, half_d],
                 &device,
@@ -229,11 +229,11 @@ mod tests {
             .collect();
 
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&cos_data, &[max_seq, half_d], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&cos_data, &[max_seq, half_d], &device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&sin_data, &[max_seq, half_d], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&sin_data, &[max_seq, half_d], &device).unwrap(),
             false,
         );
 
@@ -244,13 +244,12 @@ mod tests {
             1.0, 2.0, 3.0, 4.0,
         ];
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&x_data, &[3, num_heads, head_dim], &device)
-                .unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&x_data, &[3, num_heads, head_dim], &device).unwrap(),
             false,
         );
 
         // position_ids: token0=pos0, token1=pos1, token2=pos0 (reset!)
-        let pids = Tensor::<CpuRuntime>::try_from_slice(&[0i32, 1, 0], &[3], &device).unwrap();
+        let pids = Tensor::<CpuRuntime>::from_slice(&[0i32, 1, 0], &[3], &device).unwrap();
 
         let out = apply_rope_packed_impl(&client, &x, &cos, &sin, &pids)
             .expect("apply_rope_packed_impl failed");
@@ -291,11 +290,11 @@ mod tests {
         let sin_data: Vec<f32> = (0..s * half_d).map(|i| (i as f32 * 0.3).sin()).collect();
 
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&cos_data, &[s, half_d], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&cos_data, &[s, half_d], &device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&sin_data, &[s, half_d], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&sin_data, &[s, half_d], &device).unwrap(),
             false,
         );
 
@@ -315,7 +314,7 @@ mod tests {
         //
         // Build x_packed as [S, H, D]:
         let x_packed = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&x_data, &[s, h, d], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&x_data, &[s, h, d], &device).unwrap(),
             false,
         );
         let pids = seq_pids(s, &device);
@@ -342,7 +341,7 @@ mod tests {
             }
         }
         let x_standard = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&x_4d_data, &[1, h, s, d], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&x_4d_data, &[1, h, s, d], &device).unwrap(),
             false,
         );
 
@@ -376,19 +375,19 @@ mod tests {
         let (client, device) = cpu_setup();
         // head_dim=3 is odd — should be rejected
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 3], &[1, 1, 3], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 3], &[1, 1, 3], &device).unwrap(),
             false,
         );
         // cos/sin with half_d=1 (closest valid), but head_dim is odd so validation fails before cache check
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[4, 1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[4, 1], &device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[4, 1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4, 1], &device).unwrap(),
             false,
         );
-        let pids = Tensor::<CpuRuntime>::try_from_slice(&[0i32], &[1], &device).unwrap();
+        let pids = Tensor::<CpuRuntime>::from_slice(&[0i32], &[1], &device).unwrap();
 
         let result = apply_rope_packed_impl(&client, &x, &cos, &sin, &pids);
         assert!(result.is_err());
@@ -399,18 +398,18 @@ mod tests {
         let (client, device) = cpu_setup();
         // 4D input should be rejected (requires 3D)
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 8], &[1, 1, 2, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[1, 1, 2, 4], &device).unwrap(),
             false,
         );
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 8], &[4, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[4, 2], &device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 8], &[4, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 8], &[4, 2], &device).unwrap(),
             false,
         );
-        let pids = Tensor::<CpuRuntime>::try_from_slice(&[0i32; 2], &[2], &device).unwrap();
+        let pids = Tensor::<CpuRuntime>::from_slice(&[0i32; 2], &[2], &device).unwrap();
 
         let result = apply_rope_packed_impl(&client, &x, &cos, &sin, &pids);
         assert!(result.is_err());
@@ -425,7 +424,7 @@ mod tests {
         let d = 4usize;
 
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
                 &[total, h, d],
                 &device,
@@ -435,14 +434,14 @@ mod tests {
         );
         // cos/sin: [max_seq, half_d=2] — need max_seq * 2 elements
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 16], &[8, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 16], &[8, 2], &device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 16], &[8, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 16], &[8, 2], &device).unwrap(),
             false,
         );
-        let pids = Tensor::<CpuRuntime>::try_from_slice(&[0i32, 1], &[2], &device).unwrap();
+        let pids = Tensor::<CpuRuntime>::from_slice(&[0i32, 1], &[2], &device).unwrap();
 
         let out = apply_rope_packed_impl(&client, &x, &cos, &sin, &pids).unwrap();
         assert_eq!(out.tensor().shape(), &[total, h, d]);

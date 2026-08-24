@@ -120,9 +120,9 @@ pub(super) fn fused_lamb_f32(
     let shape = param.shape();
     let device = param.device();
     Ok((
-        Tensor::<CpuRuntime>::try_from_slice(&update, shape, device)?,
-        Tensor::<CpuRuntime>::try_from_slice(&new_m, shape, device)?,
-        Tensor::<CpuRuntime>::try_from_slice(&new_v, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&update, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&new_m, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&new_v, shape, device)?,
     ))
 }
 
@@ -169,8 +169,8 @@ pub(super) fn fused_lamb_f64(
     let shape = param.shape();
     let device = param.device();
     Ok((
-        Tensor::<CpuRuntime>::try_from_slice(&update, shape, device)?,
-        Tensor::<CpuRuntime>::try_from_slice(&new_m, shape, device)?,
-        Tensor::<CpuRuntime>::try_from_slice(&new_v, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&update, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&new_m, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&new_v, shape, device)?,
     ))
 }

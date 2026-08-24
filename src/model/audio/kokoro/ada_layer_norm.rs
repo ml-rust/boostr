@@ -136,7 +136,7 @@ mod tests {
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device).unwrap()
     }
 
     #[test]
@@ -146,7 +146,7 @@ mod tests {
         let (client, device) = cpu_setup();
         let ada = AdaLayerNorm::new(zeros(&[8, 3], &device), zeros(&[8], &device), 1e-5).unwrap();
         // B=1, C=4, T=2. Channel values per-time: time 0 = [1,2,3,4] → mean 2.5; time 1 = [5,6,7,8].
-        let x = Tensor::<CpuRuntime>::try_from_slice(
+        let x = Tensor::<CpuRuntime>::from_slice(
             &[1.0f32, 5.0, 2.0, 6.0, 3.0, 7.0, 4.0, 8.0],
             &[1, 4, 2],
             &device,

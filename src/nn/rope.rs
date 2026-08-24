@@ -131,8 +131,8 @@ impl<R: Runtime> RoPE<R> {
             }
         }
 
-        let cos_cache = Tensor::<R>::try_from_slice(&cos_data, &[max_seq_len, half_dim], device)?;
-        let sin_cache = Tensor::<R>::try_from_slice(&sin_data, &[max_seq_len, half_dim], device)?;
+        let cos_cache = Tensor::<R>::from_slice(&cos_data, &[max_seq_len, half_dim], device)?;
+        let sin_cache = Tensor::<R>::from_slice(&sin_data, &[max_seq_len, half_dim], device)?;
 
         Ok(Self::new(cos_cache, sin_cache))
     }

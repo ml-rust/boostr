@@ -57,15 +57,15 @@ mod tests {
         // With attn_scale=1.0, YaRN = standard RoPE
         let x_data: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, 1, 2, 8], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 1, 2, 8], &device).unwrap(),
             false,
         );
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 8], &[2, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[2, 4], &device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 8], &[2, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 8], &[2, 4], &device).unwrap(),
             false,
         );
 
@@ -92,15 +92,15 @@ mod tests {
         // With attn_scale=2.0, output should be 2x standard RoPE
         let x_data: Vec<f32> = (0..8).map(|i| i as f32 * 0.1).collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, 1, 1, 8], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 1, 1, 8], &device).unwrap(),
             false,
         );
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[1, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[1, 4], &device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[1, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[1, 4], &device).unwrap(),
             false,
         );
 

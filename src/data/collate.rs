@@ -60,8 +60,8 @@ pub(crate) fn collate_batch<D: Dataset<CpuRuntime>>(
     batch_shape.push(indices.len());
     batch_shape.extend_from_slice(&sample_shape);
 
-    let inputs = Tensor::<CpuRuntime>::try_from_slice(&all_input_data, &batch_shape, device)?;
-    let targets = Tensor::<CpuRuntime>::try_from_slice(&all_target_data, &batch_shape, device)?;
+    let inputs = Tensor::<CpuRuntime>::from_slice(&all_input_data, &batch_shape, device)?;
+    let targets = Tensor::<CpuRuntime>::from_slice(&all_target_data, &batch_shape, device)?;
 
     Ok(Batch { inputs, targets })
 }

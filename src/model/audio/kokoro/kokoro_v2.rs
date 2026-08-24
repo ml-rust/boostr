@@ -238,7 +238,7 @@ pub fn alignment_matrix_from_durations<R: Runtime<DType = DType>>(
         }
         cursor += d as usize;
     }
-    Ok(Tensor::<R>::try_from_slice(
+    Ok(Tensor::<R>::from_slice(
         &data,
         &[t_phon, t_frames],
         reference.device(),
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn alignment_matrix_shape_and_placement() {
         let device = CpuDevice::new();
-        let reference = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32], &[1], &device).unwrap();
+        let reference = Tensor::<CpuRuntime>::from_slice(&[0.0f32], &[1], &device).unwrap();
         let aln = alignment_matrix_from_durations(&[2, 1, 3], &reference).unwrap();
         assert_eq!(aln.shape(), &[3, 6]);
         let v: Vec<f32> = aln.to_vec();
@@ -269,14 +269,14 @@ mod tests {
     #[test]
     fn alignment_matrix_rejects_zero_total() {
         let device = CpuDevice::new();
-        let reference = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32], &[1], &device).unwrap();
+        let reference = Tensor::<CpuRuntime>::from_slice(&[0.0f32], &[1], &device).unwrap();
         assert!(alignment_matrix_from_durations(&[0, 0], &reference).is_err());
     }
 
     #[test]
     fn alignment_matrix_single_phoneme() {
         let device = CpuDevice::new();
-        let reference = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32], &[1], &device).unwrap();
+        let reference = Tensor::<CpuRuntime>::from_slice(&[0.0f32], &[1], &device).unwrap();
         let aln = alignment_matrix_from_durations(&[4], &reference).unwrap();
         assert_eq!(aln.shape(), &[1, 4]);
         let v: Vec<f32> = aln.to_vec();

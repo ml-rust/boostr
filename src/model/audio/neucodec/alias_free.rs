@@ -258,7 +258,7 @@ impl<R: Runtime<DType = DType>> UpSample1d<R> {
         let taps = kaiser_sinc_filter1d(0.5 / ratio as f64, 0.6 / ratio as f64, kernel_size);
         let pad = kernel_size / ratio - 1;
         Ok(Self {
-            filter: Tensor::try_from_slice(&taps, &[1, 1, kernel_size], device)?,
+            filter: Tensor::from_slice(&taps, &[1, 1, kernel_size], device)?,
             ratio,
             pad,
             pad_left: pad * ratio + (kernel_size - ratio) / 2,
@@ -333,7 +333,7 @@ impl<R: Runtime<DType = DType>> DownSample1d<R> {
         let taps = kaiser_sinc_filter1d(0.5 / ratio as f64, 0.6 / ratio as f64, kernel_size);
         let even = kernel_size.is_multiple_of(2);
         Ok(Self {
-            filter: Tensor::try_from_slice(&taps, &[1, 1, kernel_size], device)?,
+            filter: Tensor::from_slice(&taps, &[1, 1, kernel_size], device)?,
             ratio,
             pad_left: kernel_size / 2 - usize::from(even),
             pad_right: kernel_size / 2,
@@ -428,7 +428,7 @@ mod tests {
         device: &<CpuRuntime as Runtime>::Device,
     ) -> Var<CpuRuntime> {
         Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(data, shape, device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(data, shape, device).unwrap(),
             false,
         )
     }
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn snake_beta_uses_log_scale_parameters() {
         let (client, device) = cpu_setup();
-        let zeros = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0], &[2], &device).unwrap();
+        let zeros = Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0], &[2], &device).unwrap();
         let snake = SnakeBeta::new(zeros.clone(), zeros, false).unwrap();
         let xs = [0.5f32, -1.25, 2.0, 0.0];
         let x = var(&xs, &[1, 2, 2], &device);
@@ -529,8 +529,8 @@ mod tests {
     fn snake_beta_alpha_scales_frequency() {
         let (client, device) = cpu_setup();
         let ln2 = std::f32::consts::LN_2; // exp(ln2) = 2
-        let alpha = Tensor::<CpuRuntime>::try_from_slice(&[ln2], &[1], &device).unwrap();
-        let beta = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32], &[1], &device).unwrap();
+        let alpha = Tensor::<CpuRuntime>::from_slice(&[ln2], &[1], &device).unwrap();
+        let beta = Tensor::<CpuRuntime>::from_slice(&[0.0f32], &[1], &device).unwrap();
         let snake = SnakeBeta::new(alpha, beta, false).unwrap();
         let x = var(&[0.7f32], &[1, 1, 1], &device);
         let got: Vec<f32> = snake
@@ -553,8 +553,8 @@ mod tests {
         let (client, device) = cpu_setup();
         let c = 3;
         let t = 16;
-        let alpha = Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; c], &[c], &device).unwrap();
-        let beta = Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; c], &[c], &device).unwrap();
+        let alpha = Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; c], &[c], &device).unwrap();
+        let beta = Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; c], &[c], &device).unwrap();
         let act = Activation1d::new(SnakeBeta::new(alpha, beta, false).unwrap(), &device).unwrap();
         let data: Vec<f32> = (0..(c * t)).map(|i| (i as f32 * 0.3).sin()).collect();
         let x = var(&data, &[1, c, t], &device);

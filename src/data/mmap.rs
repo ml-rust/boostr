@@ -121,8 +121,8 @@ impl<R: Runtime<DType = DType>> Dataset<R> for MmapDataset {
         let input_f32: Vec<f32> = tokens[..self.seq_len].iter().map(|&t| t as f32).collect();
         let target_f32: Vec<f32> = tokens[1..=self.seq_len].iter().map(|&t| t as f32).collect();
 
-        let inputs = Tensor::<R>::try_from_slice(&input_f32, &[self.seq_len], device)?;
-        let targets = Tensor::<R>::try_from_slice(&target_f32, &[self.seq_len], device)?;
+        let inputs = Tensor::<R>::from_slice(&input_f32, &[self.seq_len], device)?;
+        let targets = Tensor::<R>::from_slice(&target_f32, &[self.seq_len], device)?;
 
         Ok(Batch { inputs, targets })
     }

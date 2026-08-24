@@ -87,13 +87,13 @@ impl SamplingOps<CudaRuntime> for CudaClient {
 
         // Allocate scratch buffer for probabilities (global mem, not shared)
         let probs_buf =
-            Tensor::<CudaRuntime>::try_zeros(&[vocab_size], numr::dtype::DType::F32, device)?;
+            Tensor::<CudaRuntime>::zeros(&[vocab_size], numr::dtype::DType::F32, device)?;
         // Generate random value on GPU via RandomOps
         let rand_tensor = self
             .rand(&[1], numr::dtype::DType::F32)
             .map_err(Error::Numr)?;
         // Allocate output tensor for sampled token ID
-        let output = Tensor::<CudaRuntime>::try_zeros(&[1], numr::dtype::DType::I32, device)?;
+        let output = Tensor::<CudaRuntime>::zeros(&[1], numr::dtype::DType::I32, device)?;
 
         let block_size = 1024u32;
         // shared mem: only block_size floats for reductions
@@ -161,9 +161,9 @@ impl SamplingOps<CudaRuntime> for CudaClient {
 
         // Scratch buffer for probabilities
         let probs_buf =
-            Tensor::<CudaRuntime>::try_zeros(&[vocab_size], numr::dtype::DType::F32, device)?;
+            Tensor::<CudaRuntime>::zeros(&[vocab_size], numr::dtype::DType::F32, device)?;
         // Output tensor [1] I64
-        let output = Tensor::<CudaRuntime>::try_zeros(&[1], numr::dtype::DType::I64, device)?;
+        let output = Tensor::<CudaRuntime>::zeros(&[1], numr::dtype::DType::I64, device)?;
 
         // Generate random value on-device (only used for non-greedy, but always generated
         // to avoid branching on host — the kernel ignores it when temperature == 0)

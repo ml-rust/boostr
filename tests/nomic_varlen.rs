@@ -57,30 +57,30 @@ fn make_nomic_encoder() -> (Encoder<CpuRuntime>, CpuClient, CpuDevice) {
         // Token embedding: [vocab, hidden]
         if name == "token_embd.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.1f32; vocab * hidden], &[vocab, hidden], d).unwrap(),
+                Tensor::from_slice(&vec![0.1f32; vocab * hidden], &[vocab, hidden], d).unwrap(),
             ));
         }
         // Embedding norm
         if name == "token_embd_norm.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![1.0f32; hidden], &[hidden], d).unwrap(),
+                Tensor::from_slice(&vec![1.0f32; hidden], &[hidden], d).unwrap(),
             ));
         }
         if name == "token_embd_norm.bias" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.0f32; hidden], &[hidden], d).unwrap(),
+                Tensor::from_slice(&vec![0.0f32; hidden], &[hidden], d).unwrap(),
             ));
         }
         // Token type embedding: [2, hidden]
         if name == "token_types.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.05f32; 2 * hidden], &[2, hidden], d).unwrap(),
+                Tensor::from_slice(&vec![0.05f32; 2 * hidden], &[2, hidden], d).unwrap(),
             ));
         }
         // Layer 0 QKV (fused [3H, H])
         if name == "blk.0.attn_qkv.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(
+                Tensor::from_slice(
                     &vec![0.02f32; 3 * hidden * hidden],
                     &[3 * hidden, hidden],
                     d,
@@ -90,46 +90,42 @@ fn make_nomic_encoder() -> (Encoder<CpuRuntime>, CpuClient, CpuDevice) {
         }
         if name == "blk.0.attn_output.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.02f32; hidden * hidden], &[hidden, hidden], d)
-                    .unwrap(),
+                Tensor::from_slice(&vec![0.02f32; hidden * hidden], &[hidden, hidden], d).unwrap(),
             ));
         }
         if name == "blk.0.attn_output_norm.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![1.0f32; hidden], &[hidden], d).unwrap(),
+                Tensor::from_slice(&vec![1.0f32; hidden], &[hidden], d).unwrap(),
             ));
         }
         if name == "blk.0.attn_output_norm.bias" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.0f32; hidden], &[hidden], d).unwrap(),
+                Tensor::from_slice(&vec![0.0f32; hidden], &[hidden], d).unwrap(),
             ));
         }
         if name == "blk.0.ffn_gate.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.02f32; inter * hidden], &[inter, hidden], d)
-                    .unwrap(),
+                Tensor::from_slice(&vec![0.02f32; inter * hidden], &[inter, hidden], d).unwrap(),
             ));
         }
         if name == "blk.0.ffn_up.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.02f32; inter * hidden], &[inter, hidden], d)
-                    .unwrap(),
+                Tensor::from_slice(&vec![0.02f32; inter * hidden], &[inter, hidden], d).unwrap(),
             ));
         }
         if name == "blk.0.ffn_down.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.02f32; hidden * inter], &[hidden, inter], d)
-                    .unwrap(),
+                Tensor::from_slice(&vec![0.02f32; hidden * inter], &[hidden, inter], d).unwrap(),
             ));
         }
         if name == "blk.0.layer_output_norm.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![1.0f32; hidden], &[hidden], d).unwrap(),
+                Tensor::from_slice(&vec![1.0f32; hidden], &[hidden], d).unwrap(),
             ));
         }
         if name == "blk.0.layer_output_norm.bias" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.0f32; hidden], &[hidden], d).unwrap(),
+                Tensor::from_slice(&vec![0.0f32; hidden], &[hidden], d).unwrap(),
             ));
         }
         Err(boostr::error::Error::ModelError {
@@ -170,11 +166,11 @@ fn test_varlen_pooling_scatter_mean() {
     let total_tokens = 5usize;
 
     let hidden_t =
-        Tensor::<CpuRuntime>::try_from_slice(&hidden_data, &[total_tokens, hidden], d).unwrap();
+        Tensor::<CpuRuntime>::from_slice(&hidden_data, &[total_tokens, hidden], d).unwrap();
 
     // seg_ids: [0,0,0, 1,1] — each token's batch-sequence index
     let seg_ids_data: Vec<i32> = vec![0, 0, 0, 1, 1];
-    let seg_ids = Tensor::<CpuRuntime>::try_from_slice(&seg_ids_data, &[total_tokens], d).unwrap();
+    let seg_ids = Tensor::<CpuRuntime>::from_slice(&seg_ids_data, &[total_tokens], d).unwrap();
 
     // Build index for scatter_reduce: reshape seg_ids to [total,1] then broadcast to [total,hidden]
     let seg_2d = seg_ids.reshape(&[total_tokens, 1]).unwrap();
@@ -184,9 +180,8 @@ fn test_varlen_pooling_scatter_mean() {
         .contiguous()
         .unwrap();
 
-    let dst =
-        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; batch * hidden], &[batch, hidden], d)
-            .unwrap();
+    let dst = Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; batch * hidden], &[batch, hidden], d)
+        .unwrap();
 
     let pooled = client
         .scatter_reduce(&dst, 0, &idx, &hidden_t, ScatterReduceOp::Mean, false)
@@ -244,10 +239,10 @@ fn test_varlen_attention_no_cross_sequence_leakage() -> Result<()> {
         .collect();
     let max_ab = len_a.max(len_b);
 
-    let input_ab = Tensor::<CpuRuntime>::try_from_slice(&flat_ab, &[total_ab], d).unwrap();
-    let cu_ab_t = Tensor::<CpuRuntime>::try_from_slice(&cu_ab, &[3], d).unwrap();
-    let pos_ab_t = Tensor::<CpuRuntime>::try_from_slice(&pos_ab, &[total_ab], d).unwrap();
-    let seg_ab_t = Tensor::<CpuRuntime>::try_from_slice(&seg_ab, &[total_ab], d).unwrap();
+    let input_ab = Tensor::<CpuRuntime>::from_slice(&flat_ab, &[total_ab], d).unwrap();
+    let cu_ab_t = Tensor::<CpuRuntime>::from_slice(&cu_ab, &[3], d).unwrap();
+    let pos_ab_t = Tensor::<CpuRuntime>::from_slice(&pos_ab, &[total_ab], d).unwrap();
+    let seg_ab_t = Tensor::<CpuRuntime>::from_slice(&seg_ab, &[total_ab], d).unwrap();
 
     let out_ab = encoder.encode_inference_varlen(
         &client, &input_ab, &cu_ab_t, &pos_ab_t, &seg_ab_t, 2, max_ab,
@@ -260,10 +255,10 @@ fn test_varlen_attention_no_cross_sequence_leakage() -> Result<()> {
     let pos_a: Vec<i64> = (0..len_a as i64).collect();
     let seg_a: Vec<i32> = vec![0i32; len_a];
 
-    let input_a = Tensor::<CpuRuntime>::try_from_slice(&ids_a, &[len_a], d).unwrap();
-    let cu_a_t = Tensor::<CpuRuntime>::try_from_slice(&cu_a, &[2], d).unwrap();
-    let pos_a_t = Tensor::<CpuRuntime>::try_from_slice(&pos_a, &[len_a], d).unwrap();
-    let seg_a_t = Tensor::<CpuRuntime>::try_from_slice(&seg_a, &[len_a], d).unwrap();
+    let input_a = Tensor::<CpuRuntime>::from_slice(&ids_a, &[len_a], d).unwrap();
+    let cu_a_t = Tensor::<CpuRuntime>::from_slice(&cu_a, &[2], d).unwrap();
+    let pos_a_t = Tensor::<CpuRuntime>::from_slice(&pos_a, &[len_a], d).unwrap();
+    let seg_a_t = Tensor::<CpuRuntime>::from_slice(&seg_a, &[len_a], d).unwrap();
 
     let out_a = encoder
         .encode_inference_varlen(&client, &input_a, &cu_a_t, &pos_a_t, &seg_a_t, 1, len_a)?;
@@ -332,27 +327,27 @@ fn make_nomic_pipeline(budget: Option<usize>) -> (EmbeddingPipeline<CpuRuntime>,
     let encoder = Encoder::from_weights_nomic(config, Pooling::Mean, &client, |name| {
         if name == "token_embd.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.1f32; vocab * hidden], &[vocab, hidden], d).unwrap(),
+                Tensor::from_slice(&vec![0.1f32; vocab * hidden], &[vocab, hidden], d).unwrap(),
             ));
         }
         if name == "token_embd_norm.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![1.0f32; hidden], &[hidden], d).unwrap(),
+                Tensor::from_slice(&vec![1.0f32; hidden], &[hidden], d).unwrap(),
             ));
         }
         if name == "token_embd_norm.bias" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.0f32; hidden], &[hidden], d).unwrap(),
+                Tensor::from_slice(&vec![0.0f32; hidden], &[hidden], d).unwrap(),
             ));
         }
         if name == "token_types.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.05f32; 2 * hidden], &[2, hidden], d).unwrap(),
+                Tensor::from_slice(&vec![0.05f32; 2 * hidden], &[2, hidden], d).unwrap(),
             ));
         }
         if name == "blk.0.attn_qkv.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(
+                Tensor::from_slice(
                     &vec![0.02f32; 3 * hidden * hidden],
                     &[3 * hidden, hidden],
                     d,
@@ -362,46 +357,42 @@ fn make_nomic_pipeline(budget: Option<usize>) -> (EmbeddingPipeline<CpuRuntime>,
         }
         if name == "blk.0.attn_output.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.02f32; hidden * hidden], &[hidden, hidden], d)
-                    .unwrap(),
+                Tensor::from_slice(&vec![0.02f32; hidden * hidden], &[hidden, hidden], d).unwrap(),
             ));
         }
         if name == "blk.0.attn_output_norm.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![1.0f32; hidden], &[hidden], d).unwrap(),
+                Tensor::from_slice(&vec![1.0f32; hidden], &[hidden], d).unwrap(),
             ));
         }
         if name == "blk.0.attn_output_norm.bias" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.0f32; hidden], &[hidden], d).unwrap(),
+                Tensor::from_slice(&vec![0.0f32; hidden], &[hidden], d).unwrap(),
             ));
         }
         if name == "blk.0.ffn_gate.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.02f32; inter * hidden], &[inter, hidden], d)
-                    .unwrap(),
+                Tensor::from_slice(&vec![0.02f32; inter * hidden], &[inter, hidden], d).unwrap(),
             ));
         }
         if name == "blk.0.ffn_up.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.02f32; inter * hidden], &[inter, hidden], d)
-                    .unwrap(),
+                Tensor::from_slice(&vec![0.02f32; inter * hidden], &[inter, hidden], d).unwrap(),
             ));
         }
         if name == "blk.0.ffn_down.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.02f32; hidden * inter], &[hidden, inter], d)
-                    .unwrap(),
+                Tensor::from_slice(&vec![0.02f32; hidden * inter], &[hidden, inter], d).unwrap(),
             ));
         }
         if name == "blk.0.layer_output_norm.weight" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![1.0f32; hidden], &[hidden], d).unwrap(),
+                Tensor::from_slice(&vec![1.0f32; hidden], &[hidden], d).unwrap(),
             ));
         }
         if name == "blk.0.layer_output_norm.bias" {
             return Ok(Weight::Standard(
-                Tensor::try_from_slice(&vec![0.0f32; hidden], &[hidden], d).unwrap(),
+                Tensor::from_slice(&vec![0.0f32; hidden], &[hidden], d).unwrap(),
             ));
         }
         Err(boostr::error::Error::ModelError {

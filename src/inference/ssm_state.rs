@@ -28,12 +28,12 @@ impl<R: Runtime<DType = DType>> SsmState<R> {
         dtype: DType,
         device: &R::Device,
     ) -> Result<Self> {
-        let h = Tensor::<R>::try_zeros(
+        let h = Tensor::<R>::zeros(
             &[batch_size, config.nheads, config.headdim, config.d_state],
             dtype,
             device,
         )?;
-        let conv_state = Tensor::<R>::try_zeros(
+        let conv_state = Tensor::<R>::zeros(
             &[batch_size, config.conv_channels(), config.d_conv - 1],
             dtype,
             device,
@@ -77,8 +77,8 @@ impl<R: Runtime<DType = DType>> SsmState<R> {
         let dtype = self.h.dtype();
         let conv_shape = self.conv_state.shape().to_vec();
         let device = self.h.device().clone();
-        self.h = Tensor::<R>::try_zeros(&shape, dtype, &device)?;
-        self.conv_state = Tensor::<R>::try_zeros(&conv_shape, dtype, &device)?;
+        self.h = Tensor::<R>::zeros(&shape, dtype, &device)?;
+        self.conv_state = Tensor::<R>::zeros(&conv_shape, dtype, &device)?;
         self.initialized = false;
         Ok(())
     }
@@ -173,7 +173,7 @@ mod tests {
 
         let mut state = SsmState::<CpuRuntime>::new(1, &config, DType::F32, &device)
             .expect("ssm state new must succeed on CPU");
-        let dummy_h = Tensor::<CpuRuntime>::try_ones(&[1, 2, 64, 16], DType::F32, &device).unwrap();
+        let dummy_h = Tensor::<CpuRuntime>::ones(&[1, 2, 64, 16], DType::F32, &device).unwrap();
         state.update_h(dummy_h);
         assert!(state.is_initialized());
 

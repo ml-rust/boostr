@@ -180,8 +180,8 @@ mod tests {
 
     fn layer_norm(dim: usize, device: &CpuDevice) -> LayerNorm<CpuRuntime> {
         LayerNorm::new(
-            Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; dim], &[dim], device).unwrap(),
-            Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; dim], &[dim], device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; dim], &[dim], device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; dim], &[dim], device).unwrap(),
             1e-5,
             false,
         )
@@ -195,7 +195,7 @@ mod tests {
         padding: PaddingMode,
         device: &CpuDevice,
     ) -> Conv1d<CpuRuntime> {
-        let weight = Tensor::<CpuRuntime>::try_from_slice(
+        let weight = Tensor::<CpuRuntime>::from_slice(
             &vec![0.05f32; out_ch * in_ch * kernel],
             &[out_ch, in_ch, kernel],
             device,
@@ -255,7 +255,7 @@ mod tests {
             .map(|i| (i as f32 * 0.09).sin())
             .collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&data, &[1, t, channels], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&data, &[1, t, channels], &device).unwrap(),
             false,
         );
         let y = m.forward(&client, &x).expect("forward");
@@ -270,7 +270,7 @@ mod tests {
         let (client, device) = cpu_setup();
         let m = module(8, 5, &device);
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4 * 3], &[1, 4, 3], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4 * 3], &[1, 4, 3], &device).unwrap(),
             false,
         );
         assert!(m.forward(&client, &x).is_err());

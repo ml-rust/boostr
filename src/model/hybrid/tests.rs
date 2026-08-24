@@ -36,8 +36,8 @@ fn expected_mask(sq: usize, sk: usize, window_size: usize) -> Vec<f32> {
 /// are never touched by `attention_mask`, so they are left minimal.
 fn flag_block(use_alibi: bool, sliding_window: usize) -> AttentionBlock<CpuRuntime> {
     let (_, device) = cpu_setup();
-    let w = || Tensor::<CpuRuntime>::try_zeros(&[4, 4], DType::F32, &device).unwrap();
-    let n = || Tensor::<CpuRuntime>::try_zeros(&[4], DType::F32, &device).unwrap();
+    let w = || Tensor::<CpuRuntime>::zeros(&[4, 4], DType::F32, &device).unwrap();
+    let n = || Tensor::<CpuRuntime>::zeros(&[4], DType::F32, &device).unwrap();
     AttentionBlock {
         input_layernorm: RmsNorm::new(n(), 1e-5, false),
         q_proj: Linear::new(w(), None, false),
@@ -190,8 +190,8 @@ fn ramp(n: usize) -> Vec<f32> {
 /// frequencies actually moves the output.
 fn rope_probe_block(use_alibi: bool) -> AttentionBlock<CpuRuntime> {
     let (_, device) = cpu_setup();
-    let w = || Tensor::<CpuRuntime>::try_from_slice(&ramp(64), &[8, 8], &device).unwrap();
-    let n = || Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 8], &[8], &device).unwrap();
+    let w = || Tensor::<CpuRuntime>::from_slice(&ramp(64), &[8, 8], &device).unwrap();
+    let n = || Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[8], &device).unwrap();
     AttentionBlock {
         input_layernorm: RmsNorm::new(n(), 1e-5, false),
         q_proj: Linear::new(w(), None, false),
@@ -218,7 +218,7 @@ fn forward_with_rope_base(use_alibi: bool, base: f32) -> Vec<f32> {
     let mut cache =
         crate::inference::KvCache::<CpuRuntime>::new(1, 2, 8, 8, 4, DType::F32, &device).unwrap();
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&ramp(24), &[1, 3, 8], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&ramp(24), &[1, 3, 8], &device).unwrap(),
         false,
     );
     let out = block
@@ -327,7 +327,7 @@ fn attention_flags(sliding_window: Option<usize>, use_alibi: bool) -> (usize, bo
     for (name, shape) in weight_shapes() {
         varmap.insert(
             name.into(),
-            Tensor::<CpuRuntime>::try_zeros(&shape, DType::F32, &device).unwrap(),
+            Tensor::<CpuRuntime>::zeros(&shape, DType::F32, &device).unwrap(),
         );
     }
     let mut vb = VarBuilder::new(&mut varmap, &device);

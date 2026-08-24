@@ -81,7 +81,7 @@ mod tests {
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device).unwrap()
     }
 
     fn conv_post(

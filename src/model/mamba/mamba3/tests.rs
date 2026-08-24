@@ -10,7 +10,7 @@ use numr::tensor::Tensor;
 fn linear_with_value(rows: usize, cols: usize, value: f32) -> Linear<CpuRuntime> {
     let (_, device) = cpu_setup();
     Linear::new(
-        Tensor::<CpuRuntime>::try_from_slice(&vec![value; rows * cols], &[rows, cols], &device)
+        Tensor::<CpuRuntime>::from_slice(&vec![value; rows * cols], &[rows, cols], &device)
             .unwrap(),
         None,
         false,
@@ -55,13 +55,13 @@ fn tiny_mamba3(config: Mamba3Config) -> Mamba3<CpuRuntime> {
         out_proj,
         lambda_proj,
         theta_proj,
-        b_bias: Tensor::<CpuRuntime>::try_from_slice(
+        b_bias: Tensor::<CpuRuntime>::from_slice(
             &vec![0.0f32; config.nheads * config.d_state],
             &[config.nheads, config.d_state],
             &device,
         )
         .unwrap(),
-        c_bias: Tensor::<CpuRuntime>::try_from_slice(
+        c_bias: Tensor::<CpuRuntime>::from_slice(
             &vec![0.0f32; config.nheads * config.d_state],
             &[config.nheads, config.d_state],
             &device,
@@ -69,7 +69,7 @@ fn tiny_mamba3(config: Mamba3Config) -> Mamba3<CpuRuntime> {
         .unwrap(),
         dt_bias: if config.use_dt_bias {
             Some(
-                Tensor::<CpuRuntime>::try_from_slice(
+                Tensor::<CpuRuntime>::from_slice(
                     &vec![0.0f32; config.nheads],
                     &[config.nheads],
                     &device,
@@ -79,7 +79,7 @@ fn tiny_mamba3(config: Mamba3Config) -> Mamba3<CpuRuntime> {
         } else {
             None
         },
-        a_log: Tensor::<CpuRuntime>::try_from_slice(
+        a_log: Tensor::<CpuRuntime>::from_slice(
             &vec![0.0f32; config.nheads],
             &[config.nheads],
             &device,
@@ -87,7 +87,7 @@ fn tiny_mamba3(config: Mamba3Config) -> Mamba3<CpuRuntime> {
         .unwrap(),
         d_param: if config.use_d {
             Some(
-                Tensor::<CpuRuntime>::try_from_slice(
+                Tensor::<CpuRuntime>::from_slice(
                     &vec![0.0f32; config.nheads],
                     &[config.nheads],
                     &device,
@@ -98,7 +98,7 @@ fn tiny_mamba3(config: Mamba3Config) -> Mamba3<CpuRuntime> {
             None
         },
         bc_norm: RmsNorm::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &vec![1.0f32; config.d_state],
                 &[config.d_state],
                 &device,
@@ -108,7 +108,7 @@ fn tiny_mamba3(config: Mamba3Config) -> Mamba3<CpuRuntime> {
             false,
         ),
         norm: RmsNorm::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &vec![1.0f32; config.d_inner()],
                 &[config.d_inner()],
                 &device,
@@ -244,7 +244,7 @@ fn test_mamba3_forward_shape() {
         .with_use_d(false);
     let mamba = tiny_mamba3(config);
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 12], &[1, 3, 4], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 12], &[1, 3, 4], &device).unwrap(),
         false,
     );
 
@@ -265,13 +265,13 @@ fn test_mamba3_forward_invalid_input() {
     let mamba = tiny_mamba3(config);
 
     let x_2d = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 4], &[1, 4], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 4], &[1, 4], &device).unwrap(),
         false,
     );
     assert!(mamba.forward(&client, &x_2d).is_err());
 
     let x_wrong = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 6], &[1, 3, 2], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 6], &[1, 3, 2], &device).unwrap(),
         false,
     );
     assert!(mamba.forward(&client, &x_wrong).is_err());
@@ -289,11 +289,11 @@ fn test_trapezoidal_discretization_matches_f64_reference() {
         .with_use_d(true);
     let mut mamba = tiny_mamba3(config);
     mamba.a_log = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.5f32.ln()], &[1], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.5f32.ln()], &[1], &device).unwrap(),
         false,
     );
     mamba.d_param = Some(Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32], &[1], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.1f32], &[1], &device).unwrap(),
         false,
     ));
 
@@ -304,23 +304,23 @@ fn test_trapezoidal_discretization_matches_f64_reference() {
     let lambda_data = [0.7f32, 0.2, 0.9];
 
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, 3, 1, 2], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 3, 1, 2], &device).unwrap(),
         false,
     );
     let b = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&b_data, &[1, 3, 1, 2], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&b_data, &[1, 3, 1, 2], &device).unwrap(),
         false,
     );
     let c = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&c_data, &[1, 3, 1, 2], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&c_data, &[1, 3, 1, 2], &device).unwrap(),
         false,
     );
     let dt = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&dt_data, &[1, 3, 1], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&dt_data, &[1, 3, 1], &device).unwrap(),
         false,
     );
     let lambda = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&lambda_data, &[1, 3, 1], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&lambda_data, &[1, 3, 1], &device).unwrap(),
         false,
     );
 
@@ -360,11 +360,11 @@ fn test_complex_rope_matches_f64_reference() {
         -std::f32::consts::FRAC_PI_2,
     ];
     let tensor = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&tensor_data, &[1, 2, 1, 4], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&tensor_data, &[1, 2, 1, 4], &device).unwrap(),
         false,
     );
     let angles = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&angles_data, &[1, 2, 1, 2], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&angles_data, &[1, 2, 1, 2], &device).unwrap(),
         false,
     );
 
@@ -393,7 +393,7 @@ fn test_mimo_up_down_matches_f64_reference() {
         .with_use_d(false);
     let mut mamba = tiny_mamba3(config);
     mamba.mimo_x_up = Some(Linear::new(
-        Tensor::<CpuRuntime>::try_from_slice(
+        Tensor::<CpuRuntime>::from_slice(
             &[1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0, -1.0, 0.5],
             &[4, 2],
             &device,
@@ -403,7 +403,7 @@ fn test_mimo_up_down_matches_f64_reference() {
         false,
     ));
     mamba.mimo_x_down = Some(Linear::new(
-        Tensor::<CpuRuntime>::try_from_slice(
+        Tensor::<CpuRuntime>::from_slice(
             &[1.0f32, 0.0, 0.0, 1.0, 0.0, 1.0, -1.0, 0.0],
             &[2, 4],
             &device,
@@ -414,7 +414,7 @@ fn test_mimo_up_down_matches_f64_reference() {
     ));
 
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[1, 1, 1, 2], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[1, 1, 1, 2], &device).unwrap(),
         false,
     );
     let up = mamba.apply_mimo_up(&client, &x, 1, 1).unwrap();

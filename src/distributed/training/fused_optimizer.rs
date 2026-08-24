@@ -242,13 +242,11 @@ mod tests {
         let mut opt = FusedDistributedOptimizer::<CpuRuntime>::new(config, comm);
 
         let id = TensorId::new();
-        let param =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap();
+        let param = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap();
         let mut params = HashMap::new();
         params.insert(id, param);
 
-        let grad =
-            Tensor::<CpuRuntime>::try_from_slice(&[0.1f32, 0.2, 0.3], &[3], &device).unwrap();
+        let grad = Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2, 0.3], &[3], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(id, grad);
 
@@ -287,8 +285,8 @@ mod tests {
 
         let id1 = TensorId::new();
         let id2 = TensorId::new();
-        let g1 = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[4], &device).unwrap();
-        let g2 = Tensor::<CpuRuntime>::try_from_slice(&[2.0f32; 4], &[4], &device).unwrap();
+        let g1 = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[4], &device).unwrap();
+        let g2 = Tensor::<CpuRuntime>::from_slice(&[2.0f32; 4], &[4], &device).unwrap();
 
         let mut grads = GradStore::new();
         grads.insert(id1, g1);

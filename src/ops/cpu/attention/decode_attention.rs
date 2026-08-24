@@ -108,13 +108,10 @@ pub fn fused_decode_attention(
         }
     }
 
-    let out_tensor = Tensor::<CpuRuntime>::try_from_slice(
-        &output,
-        &[batch, num_heads, 1, head_dim],
-        q.device(),
-    )?;
+    let out_tensor =
+        Tensor::<CpuRuntime>::from_slice(&output, &[batch, num_heads, 1, head_dim], q.device())?;
     let lse_tensor =
-        Tensor::<CpuRuntime>::try_from_slice(&lse_data, &[batch, num_heads, 1], q.device())?;
+        Tensor::<CpuRuntime>::from_slice(&lse_data, &[batch, num_heads, 1], q.device())?;
 
     Ok((out_tensor, lse_tensor))
 }
@@ -204,7 +201,7 @@ mod tests {
 
     fn make_tensor(data: &[f32], shape: &[usize]) -> Tensor<CpuRuntime> {
         let device = CpuDevice::new();
-        Tensor::<CpuRuntime>::try_from_slice(data, shape, &device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(data, shape, &device).unwrap()
     }
 
     #[test]
@@ -275,16 +272,15 @@ mod tests {
             .map(|i| ((i as f32) * 0.1 + 0.5).sin())
             .collect();
 
-        let q =
-            Tensor::<CpuRuntime>::try_from_slice(&q_data, &[1, num_heads, 1, head_dim], &device)
-                .unwrap();
-        let k = Tensor::<CpuRuntime>::try_from_slice(
+        let q = Tensor::<CpuRuntime>::from_slice(&q_data, &[1, num_heads, 1, head_dim], &device)
+            .unwrap();
+        let k = Tensor::<CpuRuntime>::from_slice(
             &k_data,
             &[1, num_kv_heads, seq_len_k, head_dim],
             &device,
         )
         .unwrap();
-        let v = Tensor::<CpuRuntime>::try_from_slice(
+        let v = Tensor::<CpuRuntime>::from_slice(
             &v_data,
             &[1, num_kv_heads, seq_len_k, head_dim],
             &device,
@@ -348,16 +344,15 @@ mod tests {
             .map(|i| ((i as f32) * 0.011 + 0.5).sin())
             .collect();
 
-        let q =
-            Tensor::<CpuRuntime>::try_from_slice(&q_data, &[1, num_heads, 1, head_dim], &device)
-                .unwrap();
-        let k = Tensor::<CpuRuntime>::try_from_slice(
+        let q = Tensor::<CpuRuntime>::from_slice(&q_data, &[1, num_heads, 1, head_dim], &device)
+            .unwrap();
+        let k = Tensor::<CpuRuntime>::from_slice(
             &k_data,
             &[1, num_kv_heads, seq_len_k, head_dim],
             &device,
         )
         .unwrap();
-        let v = Tensor::<CpuRuntime>::try_from_slice(
+        let v = Tensor::<CpuRuntime>::from_slice(
             &v_data,
             &[1, num_kv_heads, seq_len_k, head_dim],
             &device,

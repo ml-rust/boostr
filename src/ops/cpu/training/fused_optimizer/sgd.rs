@@ -130,8 +130,8 @@ pub(super) fn fused_sgd_f32(
     let shape = param.shape();
     let device = param.device();
     Ok((
-        Tensor::<CpuRuntime>::try_from_slice(&new_p, shape, device)?,
-        Tensor::<CpuRuntime>::try_from_slice(&new_buf, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&new_p, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&new_buf, shape, device)?,
     ))
 }
 
@@ -184,7 +184,7 @@ pub(super) fn fused_sgd_f64(
     let shape = param.shape();
     let device = param.device();
     Ok((
-        Tensor::<CpuRuntime>::try_from_slice(&new_p, shape, device)?,
-        Tensor::<CpuRuntime>::try_from_slice(&new_buf, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&new_p, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&new_buf, shape, device)?,
     ))
 }

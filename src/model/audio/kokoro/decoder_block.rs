@@ -175,7 +175,7 @@ mod tests {
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device).unwrap()
     }
 
     fn build_block(device: &<CpuRuntime as Runtime>::Device) -> DecoderBlock<CpuRuntime> {
@@ -243,13 +243,13 @@ mod tests {
         )
         .unwrap();
 
-        let x = Tensor::<CpuRuntime>::try_from_slice(
+        let x = Tensor::<CpuRuntime>::from_slice(
             &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
             &[1, 2, 3],
             &device,
         )
         .unwrap();
-        let gamma = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[1, 2], &device).unwrap();
+        let gamma = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[1, 2], &device).unwrap();
         let beta = zeros(&[1, 2], &device);
         let y = block
             .forward(&client, &x, &gamma, &beta, &gamma, &beta)
@@ -285,7 +285,7 @@ mod tests {
         let (client, device) = cpu_setup();
         // C_in = 1, C_out = 1, kernel = 2, stride = 2 → output ~ T * 2.
         let block = UpsampleBlock::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[1, 1, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[1, 1, 2], &device).unwrap(),
             None,
             2,
             PaddingMode::Valid,
@@ -294,8 +294,7 @@ mod tests {
             1,
             0.0,
         );
-        let x =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[1, 1, 3], &device).unwrap();
+        let x = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[1, 1, 3], &device).unwrap();
         let y = block.forward(&client, &x).unwrap();
         // L_out = (3-1)*2 + 2 = 6.
         assert_eq!(y.shape(), &[1, 1, 6]);

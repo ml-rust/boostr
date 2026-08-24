@@ -30,7 +30,7 @@ impl DequantOps<WgpuRuntime> for WgpuClient {
     ) -> Result<Tensor<WgpuRuntime>> {
         let num_bytes = nf4_data.numel();
         let n = num_bytes * 2;
-        let output = Tensor::<WgpuRuntime>::try_empty(&[n], DType::F32, nf4_data.device())?;
+        let output = Tensor::<WgpuRuntime>::empty(&[n], DType::F32, nf4_data.device())?;
         nf4_dispatch::dispatch_nf4_dequant(
             self,
             nf4_data,
@@ -62,7 +62,7 @@ impl DequantOps<WgpuRuntime> for WgpuClient {
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n_out);
-        let output = Tensor::<WgpuRuntime>::try_empty(&out_shape, DType::F32, input.device())?;
+        let output = Tensor::<WgpuRuntime>::empty(&out_shape, DType::F32, input.device())?;
         nf4_dispatch::dispatch_nf4_gemm(
             self,
             &act_contig,
@@ -130,7 +130,7 @@ impl DequantOps<WgpuRuntime> for WgpuClient {
         })?;
 
         // Allocate f32 output tensor
-        let f32_out = Tensor::<WgpuRuntime>::try_empty(qt.shape(), DType::F32, qt.device())?;
+        let f32_out = Tensor::<WgpuRuntime>::empty(qt.shape(), DType::F32, qt.device())?;
         let output_buf = get_buffer(f32_out.storage().ptr()).ok_or_else(|| Error::QuantError {
             reason: "output buffer not found in WebGPU registry".into(),
         })?;

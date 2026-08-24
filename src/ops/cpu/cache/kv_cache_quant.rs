@@ -38,8 +38,8 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
         }
 
         let q_tensor =
-            Tensor::<CpuRuntime>::try_from_slice(&quantized, &[num_tokens, head_dim], device)?;
-        let s_tensor = Tensor::<CpuRuntime>::try_from_slice(&scales, &[num_tokens], device)?;
+            Tensor::<CpuRuntime>::from_slice(&quantized, &[num_tokens, head_dim], device)?;
+        let s_tensor = Tensor::<CpuRuntime>::from_slice(&scales, &[num_tokens], device)?;
         Ok((q_tensor, s_tensor))
     }
 
@@ -64,7 +64,7 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
             }
         }
 
-        Ok(Tensor::<CpuRuntime>::try_from_slice(
+        Ok(Tensor::<CpuRuntime>::from_slice(
             &output,
             &[num_tokens, head_dim],
             device,
@@ -114,9 +114,9 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
             }
         }
 
-        let p = Tensor::<CpuRuntime>::try_from_slice(&packed, &[num_tokens, head_dim / 2], device)?;
-        let s = Tensor::<CpuRuntime>::try_from_slice(&scales_vec, &[num_groups], device)?;
-        let z = Tensor::<CpuRuntime>::try_from_slice(&zeros_vec, &[num_groups], device)?;
+        let p = Tensor::<CpuRuntime>::from_slice(&packed, &[num_tokens, head_dim / 2], device)?;
+        let s = Tensor::<CpuRuntime>::from_slice(&scales_vec, &[num_groups], device)?;
+        let z = Tensor::<CpuRuntime>::from_slice(&zeros_vec, &[num_groups], device)?;
         Ok((p, s, z))
     }
 
@@ -149,7 +149,7 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
             output[i] = nibble as f32 * s_data[g] + z_data[g];
         }
 
-        Ok(Tensor::<CpuRuntime>::try_from_slice(
+        Ok(Tensor::<CpuRuntime>::from_slice(
             &output,
             &[num_tokens, head_dim],
             device,
@@ -185,8 +185,8 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
             }
         }
 
-        let q = Tensor::<CpuRuntime>::try_from_slice(&quantized, &[num_tokens, head_dim], device)?;
-        let s = Tensor::<CpuRuntime>::try_from_slice(&scales, &[num_tokens], device)?;
+        let q = Tensor::<CpuRuntime>::from_slice(&quantized, &[num_tokens, head_dim], device)?;
+        let s = Tensor::<CpuRuntime>::from_slice(&scales, &[num_tokens], device)?;
         Ok((q, s))
     }
 
@@ -209,7 +209,7 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
             }
         }
 
-        Ok(Tensor::<CpuRuntime>::try_from_slice(
+        Ok(Tensor::<CpuRuntime>::from_slice(
             &output,
             &[num_tokens, head_dim],
             device,
@@ -230,8 +230,7 @@ mod tests {
         let data: Vec<f32> = (0..num_tokens * head_dim)
             .map(|i| (i as f32 * 0.3).sin())
             .collect();
-        let input =
-            Tensor::<CpuRuntime>::try_from_slice(&data, &[num_tokens, head_dim], &dev).unwrap();
+        let input = Tensor::<CpuRuntime>::from_slice(&data, &[num_tokens, head_dim], &dev).unwrap();
 
         let (q, s) = client
             .quantize_kv_fp8_per_token(&input, num_tokens, head_dim)
@@ -255,8 +254,7 @@ mod tests {
         let num_tokens = 2;
         let head_dim = 8;
         let data: Vec<f32> = (0..num_tokens * head_dim).map(|i| i as f32 * 0.1).collect();
-        let input =
-            Tensor::<CpuRuntime>::try_from_slice(&data, &[num_tokens, head_dim], &dev).unwrap();
+        let input = Tensor::<CpuRuntime>::from_slice(&data, &[num_tokens, head_dim], &dev).unwrap();
 
         let (p, s, z) = client
             .quantize_kv_int4(&input, num_tokens, head_dim, Int4GroupSize::Group32)
@@ -283,8 +281,7 @@ mod tests {
         let data: Vec<f32> = (0..num_tokens * head_dim)
             .map(|i| (i as f32 * 0.5).sin())
             .collect();
-        let input =
-            Tensor::<CpuRuntime>::try_from_slice(&data, &[num_tokens, head_dim], &dev).unwrap();
+        let input = Tensor::<CpuRuntime>::from_slice(&data, &[num_tokens, head_dim], &dev).unwrap();
 
         let (q, s) = client
             .quantize_kv_int8(&input, num_tokens, head_dim)

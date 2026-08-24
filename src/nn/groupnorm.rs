@@ -83,12 +83,12 @@ mod tests {
     #[test]
     fn test_groupnorm_output_shape() {
         let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[4], &device).unwrap();
-        let bias = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[4], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[4], &device).unwrap();
+        let bias = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4], &device).unwrap();
         let norm = GroupNorm::new(weight, bias, 2, 1e-5, false);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 24], &[2, 4, 3], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 24], &[2, 4, 3], &device).unwrap(),
             false,
         );
         let out = norm.forward(&client, &input).unwrap();
@@ -98,12 +98,12 @@ mod tests {
     #[test]
     fn test_groupnorm_zero_mean_per_group() {
         let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[4], &device).unwrap();
-        let bias = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[4], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[4], &device).unwrap();
+        let bias = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4], &device).unwrap();
         let norm = GroupNorm::new(weight, bias, 2, 1e-5, false);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &[
                     1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
                 ],
@@ -124,12 +124,12 @@ mod tests {
     #[test]
     fn test_groupnorm_backward() {
         let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[4], &device).unwrap();
-        let bias = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[4], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[4], &device).unwrap();
+        let bias = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4], &device).unwrap();
         let norm = GroupNorm::new(weight, bias, 2, 1e-5, true);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
                 &[1, 4, 2],
                 &device,

@@ -17,7 +17,7 @@ fn vals(count: usize, offset: f32) -> Vec<f32> {
 }
 
 fn tensor(data: &[f32], shape: &[usize], device: &CpuDevice) -> Tensor<CpuRuntime> {
-    Tensor::<CpuRuntime>::try_from_slice(data, shape, device).unwrap()
+    Tensor::<CpuRuntime>::from_slice(data, shape, device).unwrap()
 }
 
 /// The three plain SwiGLU projections, built from fixed data.

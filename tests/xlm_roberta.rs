@@ -90,7 +90,7 @@ fn xlm_roberta_gguf_forward_pass_produces_finite_cls_embedding() {
     .expect("encoder weights loaded");
 
     // Three-token input: [CLS=0, tok=4, SEP=2] (using xlm-roberta special token IDs)
-    let input_ids = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 4, 2], &[1, 3], &device).unwrap();
+    let input_ids = Tensor::<CpuRuntime>::from_slice(&[0i64, 4, 2], &[1, 3], &device).unwrap();
 
     let output = encoder
         .embed(&client, &input_ids, None)

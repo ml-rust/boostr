@@ -237,7 +237,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             // Build ALiBi + causal mask (single backend-specific kernel call)
             let sq = seq_len;
             let sk = kv_seq_len;
-            let mask = Tensor::<R>::try_zeros(
+            let mask = Tensor::<R>::zeros(
                 &[batch, self.num_heads, sq, sk],
                 DType::F32,
                 q.tensor().device(),

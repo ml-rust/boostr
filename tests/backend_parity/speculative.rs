@@ -30,7 +30,7 @@ fn make_test_probs(
         }
     }
 
-    Tensor::<CpuRuntime>::try_from_slice(&data, &[batch, positions, vocab], device).unwrap()
+    Tensor::<CpuRuntime>::from_slice(&data, &[batch, positions, vocab], device).unwrap()
 }
 
 #[test]
@@ -59,8 +59,7 @@ fn test_verify_speculative_tokens_parity() {
             tokens.push(best as i32);
         }
     }
-    let draft_tokens =
-        Tensor::<CpuRuntime>::try_from_slice(&tokens, &[batch, k], &cpu_device).unwrap();
+    let draft_tokens = Tensor::<CpuRuntime>::from_slice(&tokens, &[batch, k], &cpu_device).unwrap();
 
     let cpu_results = cpu_client
         .verify_speculative_tokens(&draft_probs, &target_probs, &draft_tokens, seed)
@@ -89,19 +88,19 @@ fn test_verify_speculative_tokens_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::inference::speculative::SpeculativeOps as _;
 
-        let dp_c = Tensor::try_from_slice(
+        let dp_c = Tensor::from_slice(
             &draft_probs.to_vec::<f32>(),
             &[batch, k, vocab],
             &cuda_device,
         )
         .unwrap();
-        let tp_c = Tensor::try_from_slice(
+        let tp_c = Tensor::from_slice(
             &target_probs.to_vec::<f32>(),
             &[batch, k + 1, vocab],
             &cuda_device,
         )
         .unwrap();
-        let dt_c = Tensor::try_from_slice(&tokens, &[batch, k], &cuda_device).unwrap();
+        let dt_c = Tensor::from_slice(&tokens, &[batch, k], &cuda_device).unwrap();
 
         let cuda_results = cuda_client
             .verify_speculative_tokens(&dp_c, &tp_c, &dt_c, seed)
@@ -132,19 +131,19 @@ fn test_verify_speculative_tokens_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::inference::speculative::SpeculativeOps as _;
 
-        let dp_w = Tensor::try_from_slice(
+        let dp_w = Tensor::from_slice(
             &draft_probs.to_vec::<f32>(),
             &[batch, k, vocab],
             &wgpu_device,
         )
         .unwrap();
-        let tp_w = Tensor::try_from_slice(
+        let tp_w = Tensor::from_slice(
             &target_probs.to_vec::<f32>(),
             &[batch, k + 1, vocab],
             &wgpu_device,
         )
         .unwrap();
-        let dt_w = Tensor::try_from_slice(&tokens, &[batch, k], &wgpu_device).unwrap();
+        let dt_w = Tensor::from_slice(&tokens, &[batch, k], &wgpu_device).unwrap();
 
         let wgpu_results = wgpu_client
             .verify_speculative_tokens(&dp_w, &tp_w, &dt_w, seed)
@@ -204,11 +203,10 @@ fn test_compute_acceptance_probs_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::inference::speculative::SpeculativeOps as _;
 
-        let dp_c = Tensor::try_from_slice(&draft.to_vec::<f32>(), &[batch, k, vocab], &cuda_device)
-            .unwrap();
+        let dp_c =
+            Tensor::from_slice(&draft.to_vec::<f32>(), &[batch, k, vocab], &cuda_device).unwrap();
         let tp_c =
-            Tensor::try_from_slice(&target.to_vec::<f32>(), &[batch, k, vocab], &cuda_device)
-                .unwrap();
+            Tensor::from_slice(&target.to_vec::<f32>(), &[batch, k, vocab], &cuda_device).unwrap();
 
         let (cuda_acc, cuda_res) = cuda_client.compute_acceptance_probs(&dp_c, &tp_c).unwrap();
 
@@ -228,11 +226,10 @@ fn test_compute_acceptance_probs_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::inference::speculative::SpeculativeOps as _;
 
-        let dp_w = Tensor::try_from_slice(&draft.to_vec::<f32>(), &[batch, k, vocab], &wgpu_device)
-            .unwrap();
+        let dp_w =
+            Tensor::from_slice(&draft.to_vec::<f32>(), &[batch, k, vocab], &wgpu_device).unwrap();
         let tp_w =
-            Tensor::try_from_slice(&target.to_vec::<f32>(), &[batch, k, vocab], &wgpu_device)
-                .unwrap();
+            Tensor::from_slice(&target.to_vec::<f32>(), &[batch, k, vocab], &wgpu_device).unwrap();
 
         let (wgpu_acc, wgpu_res) = wgpu_client.compute_acceptance_probs(&dp_w, &tp_w).unwrap();
 
@@ -258,8 +255,7 @@ fn test_compute_expected_tokens_parity() {
     let rates: Vec<f32> = (0..batch * k)
         .map(|i| 0.5 + 0.4 * (i as f32 * 0.3).sin())
         .collect();
-    let rates_tensor =
-        Tensor::<CpuRuntime>::try_from_slice(&rates, &[batch, k], &cpu_device).unwrap();
+    let rates_tensor = Tensor::<CpuRuntime>::from_slice(&rates, &[batch, k], &cpu_device).unwrap();
 
     let cpu_expected = cpu_client.compute_expected_tokens(&rates_tensor).unwrap();
     let cpu_vec = cpu_expected.to_vec::<f32>();
@@ -269,7 +265,7 @@ fn test_compute_expected_tokens_parity() {
     // Analytical check for uniform rate=0.8 case
     let uniform_rates: Vec<f32> = vec![0.8; batch * k];
     let uniform_tensor =
-        Tensor::<CpuRuntime>::try_from_slice(&uniform_rates, &[batch, k], &cpu_device).unwrap();
+        Tensor::<CpuRuntime>::from_slice(&uniform_rates, &[batch, k], &cpu_device).unwrap();
     let uniform_expected = cpu_client.compute_expected_tokens(&uniform_tensor).unwrap();
     let uniform_vec = uniform_expected.to_vec::<f32>();
     let analytical = (1..=k).fold(0.0f32, |acc, i| acc + 0.8f32.powi(i as i32)) + 1.0;
@@ -287,7 +283,7 @@ fn test_compute_expected_tokens_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::inference::speculative::SpeculativeOps as _;
 
-        let rates_c = Tensor::try_from_slice(&rates, &[batch, k], &cuda_device).unwrap();
+        let rates_c = Tensor::from_slice(&rates, &[batch, k], &cuda_device).unwrap();
         let cuda_expected = cuda_client.compute_expected_tokens(&rates_c).unwrap();
 
         assert_parity_f32(
@@ -301,7 +297,7 @@ fn test_compute_expected_tokens_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::inference::speculative::SpeculativeOps as _;
 
-        let rates_w = Tensor::try_from_slice(&rates, &[batch, k], &wgpu_device).unwrap();
+        let rates_w = Tensor::from_slice(&rates, &[batch, k], &wgpu_device).unwrap();
         let wgpu_expected = wgpu_client.compute_expected_tokens(&rates_w).unwrap();
 
         assert_parity_f32(
@@ -323,8 +319,7 @@ fn test_verify_deterministic() {
     let draft_probs = make_test_probs(batch, k, vocab, &cpu_device, 0.0);
     let target_probs = make_test_probs(batch, k + 1, vocab, &cpu_device, 0.3);
     let tokens: Vec<i32> = (0..batch * k).map(|i| (i % vocab) as i32).collect();
-    let draft_tokens =
-        Tensor::<CpuRuntime>::try_from_slice(&tokens, &[batch, k], &cpu_device).unwrap();
+    let draft_tokens = Tensor::<CpuRuntime>::from_slice(&tokens, &[batch, k], &cpu_device).unwrap();
 
     let r1 = cpu_client
         .verify_speculative_tokens(&draft_probs, &target_probs, &draft_tokens, seed)

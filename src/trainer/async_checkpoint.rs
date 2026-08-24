@@ -39,7 +39,7 @@ impl TensorSnapshot {
     /// Reconstruct as a CPU tensor.
     fn to_cpu_tensor(&self) -> Result<Tensor<CpuRuntime>> {
         let device = CpuDevice::new();
-        Tensor::<CpuRuntime>::try_from_bytes(&self.bytes, &self.shape, self.dtype, &device).map_err(
+        Tensor::<CpuRuntime>::from_bytes(&self.bytes, &self.shape, self.dtype, &device).map_err(
             |e| Error::TrainingError {
                 reason: format!("failed to reconstruct tensor from snapshot: {e}"),
             },

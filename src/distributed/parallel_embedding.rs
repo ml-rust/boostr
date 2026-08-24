@@ -123,13 +123,13 @@ impl<R: Runtime<DType = DType>> VocabParallelEmbedding<R> {
 
         // Build mask on-device: (indices >= vocab_start) AND (indices < vocab_end)
         // CompareOps returns 1.0/0.0 in same dtype
-        let start_tensor = Tensor::<R>::try_full_scalar(
+        let start_tensor = Tensor::<R>::full_scalar(
             &[1],
             flat_idx.dtype(),
             self.vocab_start as f64,
             indices.device(),
         )?;
-        let end_tensor = Tensor::<R>::try_full_scalar(
+        let end_tensor = Tensor::<R>::full_scalar(
             &[1],
             flat_idx.dtype(),
             self.vocab_end as f64,
@@ -218,7 +218,7 @@ mod tests {
         let comm = Arc::new(NoOpCommunicator);
 
         #[rustfmt::skip]
-        let weight = Tensor::<CpuRuntime>::try_from_slice(
+        let weight = Tensor::<CpuRuntime>::from_slice(
             &[
                 1.0f32, 2.0, 3.0, 4.0,   // token 0
                 5.0, 6.0, 7.0, 8.0,       // token 1
@@ -231,7 +231,7 @@ mod tests {
         let plain_emb = Embedding::new(weight.clone(), false);
         let par_emb = VocabParallelEmbedding::new(&weight, comm, false).unwrap();
 
-        let indices = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 2, 1], &[3], &device).unwrap();
+        let indices = Tensor::<CpuRuntime>::from_slice(&[0i64, 2, 1], &[3], &device).unwrap();
 
         let plain_out = plain_emb.forward(&client, &indices).unwrap();
         let par_out = par_emb.forward(&client, &indices).unwrap();
@@ -247,12 +247,12 @@ mod tests {
         let (client, device) = cpu_setup();
         let comm = Arc::new(NoOpCommunicator);
 
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 20], &[4, 5], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 20], &[4, 5], &device).unwrap();
         let par_emb = VocabParallelEmbedding::new(&weight, comm, false).unwrap();
 
         // [2, 3] batch of indices
         let indices =
-            Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2, 3, 0, 1], &[2, 3], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2, 3, 0, 1], &[2, 3], &device).unwrap();
         let out = par_emb.forward(&client, &indices).unwrap();
         assert_eq!(out.shape(), &[2, 3, 5]);
     }
@@ -264,7 +264,7 @@ mod tests {
         // vocab=3, world_size=1 → 3 % 1 == 0, OK
         // But we can't test world_size>1 with NoOp easily.
         // Just test the error path with a direct check.
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[3, 4], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[3, 4], &device).unwrap();
         let comm = Arc::new(NoOpCommunicator);
         // world_size=1 always divides, so this should succeed
         assert!(VocabParallelEmbedding::new(&weight, comm, false).is_ok());

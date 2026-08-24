@@ -28,7 +28,7 @@ fn test_round_trip_toy_levels() {
     let (fsq, client, device) = toy_fsq();
 
     for index in [0i32, 1, 5, 8, 15] {
-        let indices = Tensor::<CpuRuntime>::try_from_slice(&[index], &[1], &device).unwrap();
+        let indices = Tensor::<CpuRuntime>::from_slice(&[index], &[1], &device).unwrap();
         let codes = fsq.decode_indices(&client, &indices).unwrap();
         let recovered = fsq.codes_to_indices(&client, &codes).unwrap();
         let recovered_val: Vec<i32> = recovered.contiguous().unwrap().to_vec();
@@ -43,7 +43,7 @@ fn test_round_trip_neucodec_levels() {
     assert_eq!(max_index, 65_535);
 
     for index in [0i32, 1, 100, max_index / 2, max_index - 1, max_index] {
-        let indices = Tensor::<CpuRuntime>::try_from_slice(&[index], &[1], &device).unwrap();
+        let indices = Tensor::<CpuRuntime>::from_slice(&[index], &[1], &device).unwrap();
         let codes = fsq.decode_indices(&client, &indices).unwrap();
         let recovered = fsq.codes_to_indices(&client, &codes).unwrap();
         let recovered_val: Vec<i32> = recovered.contiguous().unwrap().to_vec();
@@ -56,7 +56,7 @@ fn test_round_trip_batched() {
     let (fsq, client, device) = toy_fsq();
 
     let all_indices: Vec<i32> = (0..16).collect();
-    let indices = Tensor::<CpuRuntime>::try_from_slice(&all_indices, &[16], &device).unwrap();
+    let indices = Tensor::<CpuRuntime>::from_slice(&all_indices, &[16], &device).unwrap();
     let codes = fsq.decode_indices(&client, &indices).unwrap();
     let recovered = fsq.codes_to_indices(&client, &codes).unwrap();
     let recovered_val: Vec<i32> = recovered.contiguous().unwrap().to_vec();

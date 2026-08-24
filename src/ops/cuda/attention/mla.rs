@@ -111,7 +111,7 @@ impl MlaOps<CudaRuntime> for CudaClient {
         // Create output tensor: [B, H, S_q, D_v]
         let device = q_tensor.device();
         let output_shape = vec![batch_size, num_heads, seq_len_q, head_dim_v];
-        let output = numr::tensor::Tensor::<CudaRuntime>::try_empty(&output_shape, dtype, device)?;
+        let output = numr::tensor::Tensor::<CudaRuntime>::empty(&output_shape, dtype, device)?;
 
         // Get kernel function
         let device_index = device.id();

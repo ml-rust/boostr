@@ -4,7 +4,7 @@ use numr::runtime::cpu::CpuRuntime;
 #[test]
 fn test_lora_linear_creation() {
     let device = <CpuRuntime as Runtime>::default_device();
-    let weight: Tensor<CpuRuntime> = Tensor::try_zeros(&[64, 32], DType::F32, &device).unwrap();
+    let weight: Tensor<CpuRuntime> = Tensor::zeros(&[64, 32], DType::F32, &device).unwrap();
     let base = Linear::new(weight, None, false);
     let lora = LoraLinear::new(base, 8, 16.0, &device).expect("lora new must succeed on CPU");
     assert_eq!(lora.rank(), 8);
@@ -31,8 +31,7 @@ fn test_lora_forward_propagates_gradient_to_factors() {
         .map(|i| (i as f32) * 0.1 - 0.5)
         .collect();
     let base = Linear::new(
-        Tensor::<CpuRuntime>::try_from_slice(&base_w, &[out_features, in_features], &device)
-            .unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&base_w, &[out_features, in_features], &device).unwrap(),
         None,
         false,
     );
@@ -42,7 +41,7 @@ fn test_lora_forward_propagates_gradient_to_factors() {
         .map(|i| (i as f32) * 0.25 - 0.75)
         .collect();
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&x_vals, &[2, in_features], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&x_vals, &[2, in_features], &device).unwrap(),
         false,
     );
 
@@ -72,8 +71,8 @@ fn test_lora_forward_propagates_gradient_to_factors() {
 #[test]
 fn test_module_parameters_enumerates_base_and_adapters() {
     let device = <CpuRuntime as Runtime>::default_device();
-    let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
-    let bias = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[4], &device).unwrap();
+    let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
+    let bias = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4], &device).unwrap();
     let base = Linear::new(weight, Some(bias), true);
     let lora = LoraLinear::new(base, 2, 4.0, &device).expect("lora new must succeed on CPU");
 
@@ -93,7 +92,7 @@ fn test_module_parameters_enumerates_base_and_adapters() {
 #[test]
 fn test_trainable_parameters_excludes_frozen_base() {
     let device = <CpuRuntime as Runtime>::default_device();
-    let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
+    let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
     let base = Linear::new(weight, None, false); // frozen
     let lora = LoraLinear::new(base, 2, 4.0, &device).expect("lora new must succeed on CPU");
 
@@ -111,11 +110,11 @@ fn test_trainable_parameters_excludes_frozen_base() {
 fn test_with_ids_preserves_supplied_ids() {
     let device = <CpuRuntime as Runtime>::default_device();
     let make_base = || {
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
         Linear::new(weight, None, false)
     };
-    let a = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 6], &[2, 3], &device).unwrap();
-    let b = Tensor::<CpuRuntime>::try_from_slice(&[0.2f32; 4], &[2, 2], &device).unwrap();
+    let a = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 6], &[2, 3], &device).unwrap();
+    let b = Tensor::<CpuRuntime>::from_slice(&[0.2f32; 4], &[2, 2], &device).unwrap();
     let a_id = TensorId::new();
     let b_id = TensorId::new();
 
@@ -137,12 +136,12 @@ fn test_with_ids_preserves_supplied_ids() {
 fn test_from_weights_mints_fresh_ids_unlike_with_ids() {
     let device = <CpuRuntime as Runtime>::default_device();
     let make_base = || {
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
         Linear::new(weight, None, false)
     };
     // Simulates tensors held in a `TensorId`-keyed map, accessed by reference.
-    let stored_a = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 6], &[2, 3], &device).unwrap();
-    let stored_b = Tensor::<CpuRuntime>::try_from_slice(&[0.2f32; 4], &[2, 2], &device).unwrap();
+    let stored_a = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 6], &[2, 3], &device).unwrap();
+    let stored_b = Tensor::<CpuRuntime>::from_slice(&[0.2f32; 4], &[2, 2], &device).unwrap();
     let stored_a_id = stored_a.id();
     let stored_b_id = stored_b.id();
 
@@ -167,11 +166,11 @@ fn test_from_weights_mints_fresh_ids_unlike_with_ids() {
 fn test_with_ids_trainable_flag() {
     let device = <CpuRuntime as Runtime>::default_device();
     let make_base = || {
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
         Linear::new(weight, None, false)
     };
-    let a = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 6], &[2, 3], &device).unwrap();
-    let b = Tensor::<CpuRuntime>::try_from_slice(&[0.2f32; 4], &[2, 2], &device).unwrap();
+    let a = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 6], &[2, 3], &device).unwrap();
+    let b = Tensor::<CpuRuntime>::from_slice(&[0.2f32; 4], &[2, 2], &device).unwrap();
 
     let frozen = LoraLinear::with_ids(
         make_base(),
@@ -203,16 +202,16 @@ fn test_with_ids_trainable_flag() {
 #[test]
 fn test_with_ids_derives_rank_and_scaling() {
     let device = <CpuRuntime as Runtime>::default_device();
-    let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 20], &[4, 5], &device).unwrap();
+    let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 20], &[4, 5], &device).unwrap();
     let base = Linear::new(weight, None, false);
     let (rank, in_features, out_features) = (5usize, 5usize, 4usize);
-    let a = Tensor::<CpuRuntime>::try_from_slice(
+    let a = Tensor::<CpuRuntime>::from_slice(
         &vec![0.1f32; rank * in_features],
         &[rank, in_features],
         &device,
     )
     .unwrap();
-    let b = Tensor::<CpuRuntime>::try_from_slice(
+    let b = Tensor::<CpuRuntime>::from_slice(
         &vec![0.2f32; out_features * rank],
         &[out_features, rank],
         &device,
@@ -239,7 +238,7 @@ fn test_with_ids_forward_matches_from_weights() {
         .collect();
     let make_base = || {
         Linear::new(
-            Tensor::<CpuRuntime>::try_from_slice(&base_w, &[out_features, in_features], &device)
+            Tensor::<CpuRuntime>::from_slice(&base_w, &[out_features, in_features], &device)
                 .unwrap(),
             None,
             false,
@@ -255,17 +254,17 @@ fn test_with_ids_forward_matches_from_weights() {
 
     let with_ids_lora = LoraLinear::with_ids(
         make_base(),
-        Tensor::<CpuRuntime>::try_from_slice(&a_vals, &[rank, in_features], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&a_vals, &[rank, in_features], &device).unwrap(),
         TensorId::new(),
-        Tensor::<CpuRuntime>::try_from_slice(&b_vals, &[out_features, rank], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&b_vals, &[out_features, rank], &device).unwrap(),
         TensorId::new(),
         8.0,
         false,
     );
     let from_weights_lora = LoraLinear::from_weights(
         make_base(),
-        Tensor::<CpuRuntime>::try_from_slice(&a_vals, &[rank, in_features], &device).unwrap(),
-        Tensor::<CpuRuntime>::try_from_slice(&b_vals, &[out_features, rank], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&a_vals, &[rank, in_features], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&b_vals, &[out_features, rank], &device).unwrap(),
         8.0,
         false,
     );
@@ -274,7 +273,7 @@ fn test_with_ids_forward_matches_from_weights() {
         .map(|i| (i as f32) * 0.2 - 0.4)
         .collect();
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&x_vals, &[2, in_features], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&x_vals, &[2, in_features], &device).unwrap(),
         false,
     );
 
@@ -301,11 +300,11 @@ fn test_with_ids_forward_matches_from_weights() {
 fn test_from_weights_trainable_flag() {
     let device = <CpuRuntime as Runtime>::default_device();
     let make_base = || {
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
         Linear::new(weight, None, false)
     };
-    let a = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 6], &[2, 3], &device).unwrap();
-    let b = Tensor::<CpuRuntime>::try_from_slice(&[0.2f32; 4], &[2, 2], &device).unwrap();
+    let a = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 6], &[2, 3], &device).unwrap();
+    let b = Tensor::<CpuRuntime>::from_slice(&[0.2f32; 4], &[2, 2], &device).unwrap();
 
     let frozen = LoraLinear::from_weights(make_base(), a.clone(), b.clone(), 4.0, false);
     assert!(!frozen.lora_a.requires_grad());
@@ -332,9 +331,8 @@ fn test_merge_matches_forward_and_preserves_bias() {
         .collect();
     let bias_v: Vec<f32> = vec![0.05, -0.05];
     let base = Linear::new(
-        Tensor::<CpuRuntime>::try_from_slice(&base_w, &[out_features, in_features], &device)
-            .unwrap(),
-        Some(Tensor::<CpuRuntime>::try_from_slice(&bias_v, &[out_features], &device).unwrap()),
+        Tensor::<CpuRuntime>::from_slice(&base_w, &[out_features, in_features], &device).unwrap(),
+        Some(Tensor::<CpuRuntime>::from_slice(&bias_v, &[out_features], &device).unwrap()),
         false,
     );
 
@@ -345,17 +343,15 @@ fn test_merge_matches_forward_and_preserves_bias() {
     let b_vals: Vec<f32> = (0..out_features * rank)
         .map(|i| (i as f32) * 0.07 + 0.02)
         .collect();
-    let lora_a =
-        Tensor::<CpuRuntime>::try_from_slice(&a_vals, &[rank, in_features], &device).unwrap();
-    let lora_b =
-        Tensor::<CpuRuntime>::try_from_slice(&b_vals, &[out_features, rank], &device).unwrap();
+    let lora_a = Tensor::<CpuRuntime>::from_slice(&a_vals, &[rank, in_features], &device).unwrap();
+    let lora_b = Tensor::<CpuRuntime>::from_slice(&b_vals, &[out_features, rank], &device).unwrap();
     let lora = LoraLinear::from_weights(base, lora_a, lora_b, 8.0, false);
 
     let x_vals: Vec<f32> = (0..2 * in_features)
         .map(|i| (i as f32) * 0.2 - 0.4)
         .collect();
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&x_vals, &[2, in_features], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&x_vals, &[2, in_features], &device).unwrap(),
         false,
     );
 

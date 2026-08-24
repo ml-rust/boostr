@@ -178,7 +178,7 @@ impl FusedOptimizerOps<WgpuRuntime> for WgpuClient {
         let has_buf = momentum_buf.is_some();
         let new_buf = match momentum_buf {
             Some(b) => b.clone(),
-            None => Tensor::<WgpuRuntime>::try_zeros(param.shape(), DType::F32, param.device())?,
+            None => Tensor::<WgpuRuntime>::zeros(param.shape(), DType::F32, param.device())?,
         };
 
         let p_buf = get_buffer(new_param.storage().ptr()).ok_or_else(|| Error::KernelError {
@@ -207,7 +207,7 @@ impl FusedOptimizerOps<WgpuRuntime> for WgpuClient {
         };
 
         // Pass dummy state1 buffer to match 4-binding shader layout
-        let dummy = Tensor::<WgpuRuntime>::try_zeros(&[1], DType::F32, param.device())?;
+        let dummy = Tensor::<WgpuRuntime>::zeros(&[1], DType::F32, param.device())?;
         let dummy_buf = get_buffer(dummy.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "dummy buffer not found".into(),
         })?;
@@ -262,7 +262,7 @@ impl FusedOptimizerOps<WgpuRuntime> for WgpuClient {
         };
 
         // Pass dummy state1 buffer to match 4-binding shader layout
-        let dummy = Tensor::<WgpuRuntime>::try_zeros(&[1], DType::F32, param.device())?;
+        let dummy = Tensor::<WgpuRuntime>::zeros(&[1], DType::F32, param.device())?;
         let dummy_buf = get_buffer(dummy.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "dummy buffer not found".into(),
         })?;

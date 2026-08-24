@@ -63,7 +63,7 @@ where
 
     // Pad C to padded_len
     let c_padded = if padded_len > seqlen {
-        let pad = Tensor::<R>::try_zeros(
+        let pad = Tensor::<R>::zeros(
             &[batch, padded_len - seqlen, ngroups, dstate],
             dtype,
             device,

@@ -223,7 +223,7 @@ where
     }
 
     let device = hidden.device();
-    let index_tensor = Tensor::<R>::try_from_slice(&indices, &[indices.len()], device)?;
+    let index_tensor = Tensor::<R>::from_slice(&indices, &[indices.len()], device)?;
 
     // Squeeze to [T, D] for index_select, then re-add batch dim.
     let hidden_2d = hidden.reshape(&[t, shape[2]]).map_err(Error::Numr)?;
@@ -244,7 +244,7 @@ mod tests {
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device).unwrap()
     }
 
     fn build_predictor(device: &<CpuRuntime as Runtime>::Device) -> DurationPredictor<CpuRuntime> {
@@ -318,7 +318,7 @@ mod tests {
     fn length_regulator_repeats_rows() {
         let (client, device) = cpu_setup();
         // 3 phonemes, 2-d hidden, durations [2, 1, 3] → 6 frames total.
-        let hidden = Tensor::<CpuRuntime>::try_from_slice(
+        let hidden = Tensor::<CpuRuntime>::from_slice(
             &[
                 1.0f32, 1.0, // phoneme 0
                 2.0, 2.0, // phoneme 1

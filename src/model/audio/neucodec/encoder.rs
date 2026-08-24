@@ -255,8 +255,8 @@ impl<R: Runtime<DType = DType>> NeuCodecEncoder<R> {
         padded.extend_from_slice(samples);
         padded.resize(samples.len() + encode_padding(samples.len()), 0.0);
 
-        let waveform = Tensor::<R>::try_from_slice(&padded, &[1, 1, padded.len()], device)
-            .map_err(Error::Numr)?;
+        let waveform =
+            Tensor::<R>::from_slice(&padded, &[1, 1, padded.len()], device).map_err(Error::Numr)?;
 
         let semantic = self.semantic_branch(client, &padded, device)?;
         let acoustic = self

@@ -114,7 +114,7 @@ fn test_save_and_load_roundtrip() {
     let mut tensors = HashMap::new();
     tensors.insert(
         "w1".to_string(),
-        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device).unwrap(),
     );
 
     save_safetensors(tmp.path(), &tensors, None).unwrap();
@@ -360,11 +360,11 @@ fn test_save_f32_bytes_unchanged() {
     let mut tensors = HashMap::new();
     tensors.insert(
         "b.weight".to_string(),
-        Tensor::<CpuRuntime>::try_from_slice(&[7.5f32, -1.25, 0.0], &[3], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[7.5f32, -1.25, 0.0], &[3], &device).unwrap(),
     );
     tensors.insert(
         "a.weight".to_string(),
-        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device).unwrap(),
     );
     let mut metadata = HashMap::new();
     metadata.insert("format".to_string(), "pt".to_string());

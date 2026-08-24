@@ -296,7 +296,7 @@ mod tests {
             .map(|i| ((i as f32) * 0.001).sin() * 0.5)
             .collect();
         let x = numr::autograd::Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, frames, cfg.fc_in_dim], &device)
+            Tensor::<CpuRuntime>::from_slice(&x_data, &[1, frames, cfg.fc_in_dim], &device)
                 .unwrap(),
             false,
         );

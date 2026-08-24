@@ -82,7 +82,7 @@ fn disjoint_regions_never_sum_to_negative_infinity() {
 fn zero_window_is_bit_identical_to_pure_causal() {
     let (client, device) = cpu_setup();
     // The pre-window formulation: `triu(full(f32::MIN), 1)`.
-    let zeros = Tensor::<CpuRuntime>::try_zeros(&[5, 5], DType::F32, &device).unwrap();
+    let zeros = Tensor::<CpuRuntime>::zeros(&[5, 5], DType::F32, &device).unwrap();
     let filled = client.add_scalar(&zeros, f32::MIN as f64).unwrap();
     let pure_causal = client.triu(&filled, 1).unwrap().to_vec::<f32>();
 
@@ -144,7 +144,7 @@ fn block_from_varbuilder(sliding_window: Option<usize>) -> usize {
     ] {
         varmap.insert(
             name.into(),
-            Tensor::<CpuRuntime>::try_zeros(&shape, DType::F32, &device).unwrap(),
+            Tensor::<CpuRuntime>::zeros(&shape, DType::F32, &device).unwrap(),
         );
     }
     let mut vb = VarBuilder::new(&mut varmap, &device);

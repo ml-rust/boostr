@@ -209,13 +209,12 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let w_tensor =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device).unwrap();
         let w_id = w_tensor.id();
 
         // grad = [0.1, 0.2, 0.3, 0.4]
-        let grad = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32, 0.2, 0.3, 0.4], &[2, 2], &device)
-            .unwrap();
+        let grad =
+            Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2, 0.3, 0.4], &[2, 2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(w_id, grad);
 
@@ -243,11 +242,9 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let target =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
         let w_init =
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device).unwrap();
         let w_id = w_init.id();
 
         let mut params = HashMap::new();
@@ -293,11 +290,9 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let target =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
         let w_init =
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device).unwrap();
         let w_id = w_init.id();
 
         let mut params = HashMap::new();
@@ -343,10 +338,10 @@ mod tests {
     fn test_sgd_weight_decay() {
         let (client, device) = cpu_setup();
 
-        let w_tensor = Tensor::<CpuRuntime>::try_from_slice(&[5.0f32, 5.0], &[2], &device).unwrap();
+        let w_tensor = Tensor::<CpuRuntime>::from_slice(&[5.0f32, 5.0], &[2], &device).unwrap();
         let w_id = w_tensor.id();
 
-        let zero_grad = Tensor::<CpuRuntime>::try_zeros(&[2], DType::F32, &device).unwrap();
+        let zero_grad = Tensor::<CpuRuntime>::zeros(&[2], DType::F32, &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(w_id, zero_grad);
 
@@ -375,7 +370,7 @@ mod tests {
     fn test_sgd_skips_missing_grads() {
         let (client, device) = cpu_setup();
 
-        let w_tensor = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let w_tensor = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let w_id = w_tensor.id();
 
         let mut params = HashMap::new();
@@ -493,10 +488,9 @@ mod tests {
         );
 
         let param =
-            Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(w0)], &[1], &device)
-                .unwrap();
-        let grad = Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(g)], &[1], &device)
-            .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(w0)], &[1], &device).unwrap();
+        let grad =
+            Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(g)], &[1], &device).unwrap();
         let out = run_scalar_steps(&client, param, grad, config.clone(), steps);
 
         assert_eq!(
@@ -527,8 +521,7 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let param =
-            Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(0.02)], &[1], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(0.02)], &[1], &device).unwrap();
         let id = param.id();
         let mut params = HashMap::new();
         params.insert(id, param);
@@ -536,8 +529,7 @@ mod tests {
         let mut grads = GradStore::new();
         grads.insert(
             id,
-            Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(1.0)], &[1], &device)
-                .unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(1.0)], &[1], &device).unwrap(),
         );
 
         let mut opt = Sgd::<CpuRuntime>::new(SgdConfig {
@@ -581,7 +573,7 @@ mod tests {
     fn test_sgd_f32_allocates_no_master_copy() {
         let (client, device) = cpu_setup();
 
-        let param = Tensor::<CpuRuntime>::try_from_slice(&[0.02f32], &[1], &device).unwrap();
+        let param = Tensor::<CpuRuntime>::from_slice(&[0.02f32], &[1], &device).unwrap();
         let id = param.id();
         let mut params = HashMap::new();
         params.insert(id, param);
@@ -589,7 +581,7 @@ mod tests {
         let mut grads = GradStore::new();
         grads.insert(
             id,
-            Tensor::<CpuRuntime>::try_from_slice(&[0.001f32], &[1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.001f32], &[1], &device).unwrap(),
         );
 
         let mut opt = Sgd::<CpuRuntime>::new(SgdConfig {

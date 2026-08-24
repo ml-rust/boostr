@@ -167,13 +167,12 @@ mod tests {
     fn test_conv1d_output_shape() {
         let (client, device) = cpu_setup();
         // weight: [out=4, in=3, kernel=3]
-        let weight =
-            Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 36], &[4, 3, 3], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 36], &[4, 3, 3], &device).unwrap();
         let conv = Conv1d::new(weight, None, 1, PaddingMode::Valid, 1, 1, false);
 
         // input: [batch=2, channels=3, length=10]
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 60], &[2, 3, 10], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.1f32; 60], &[2, 3, 10], &device).unwrap(),
             false,
         );
         let out = conv.forward(&client, &input).unwrap();
@@ -184,12 +183,11 @@ mod tests {
     #[test]
     fn test_conv1d_same_padding() {
         let (client, device) = cpu_setup();
-        let weight =
-            Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 12], &[4, 1, 3], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 12], &[4, 1, 3], &device).unwrap();
         let conv = Conv1d::new(weight, None, 1, PaddingMode::Same, 1, 1, false);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 10], &[1, 1, 10], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 10], &[1, 1, 10], &device).unwrap(),
             false,
         );
         let out = conv.forward(&client, &input).unwrap();
@@ -200,12 +198,12 @@ mod tests {
     fn test_conv1d_with_bias() {
         let (client, device) = cpu_setup();
         // Single in/out channel, kernel=1 → effectively a multiply+bias
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[2.0f32], &[1, 1, 1], &device).unwrap();
-        let bias = Tensor::<CpuRuntime>::try_from_slice(&[10.0f32], &[1], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[2.0f32], &[1, 1, 1], &device).unwrap();
+        let bias = Tensor::<CpuRuntime>::from_slice(&[10.0f32], &[1], &device).unwrap();
         let conv = Conv1d::new(weight, Some(bias), 1, PaddingMode::Valid, 1, 1, false);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 5.0], &[1, 1, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[3.0f32, 5.0], &[1, 1, 2], &device).unwrap(),
             false,
         );
         let out = conv.forward(&client, &input).unwrap();
@@ -219,16 +217,12 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let weight =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0, 1.0], &[1, 1, 3], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0, 1.0], &[1, 1, 3], &device).unwrap();
         let conv = Conv1d::new(weight, None, 1, PaddingMode::Valid, 1, 1, true);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
-                &[1.0f32, 2.0, 3.0, 4.0, 5.0],
-                &[1, 1, 5],
-                &device,
-            )
-            .unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5], &device)
+                .unwrap(),
             true,
         );
 

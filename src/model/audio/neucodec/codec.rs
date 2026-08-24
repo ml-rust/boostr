@@ -109,7 +109,7 @@ mod tests {
 
         let frames = 6;
         let idx: Vec<i32> = vec![0, 1, 4095, 32768, 65535, 7];
-        let indices = Tensor::<CpuRuntime>::try_from_slice(&idx, &[1, frames], &device).unwrap();
+        let indices = Tensor::<CpuRuntime>::from_slice(&idx, &[1, frames], &device).unwrap();
 
         let features = codec
             .indices_to_features(&client, &indices)

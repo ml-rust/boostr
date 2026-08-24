@@ -390,10 +390,10 @@ impl<R: Runtime> Mamba3<R> {
         let a = var_neg(&a_pos, client).map_err(Error::Numr)?;
         let a_broad = var_reshape(&a, &[1, nheads, 1, 1]).map_err(Error::Numr)?;
 
-        let h_tensor = Tensor::<R>::try_zeros(&[batch, nheads, headdim, d_state], dtype, device)?;
+        let h_tensor = Tensor::<R>::zeros(&[batch, nheads, headdim, d_state], dtype, device)?;
         let mut h = Var::new(h_tensor, false);
-        let prev_x_tensor = Tensor::<R>::try_zeros(&[batch, nheads, headdim], dtype, device)?;
-        let prev_b_tensor = Tensor::<R>::try_zeros(&[batch, nheads, d_state], dtype, device)?;
+        let prev_x_tensor = Tensor::<R>::zeros(&[batch, nheads, headdim], dtype, device)?;
+        let prev_b_tensor = Tensor::<R>::zeros(&[batch, nheads, d_state], dtype, device)?;
         let mut prev_x = Var::new(prev_x_tensor, false);
         let mut prev_b = Var::new(prev_b_tensor, false);
         let mut outputs: Vec<Var<R>> = Vec::with_capacity(seq_len);

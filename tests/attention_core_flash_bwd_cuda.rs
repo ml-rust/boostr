@@ -84,7 +84,7 @@ fn leaf(
     device: &CudaDevice,
 ) -> Var<CudaRuntime> {
     let n: usize = shape.iter().product();
-    let t = Tensor::<CudaRuntime>::try_from_slice(&values(n, seed), shape, device).unwrap();
+    let t = Tensor::<CudaRuntime>::from_slice(&values(n, seed), shape, device).unwrap();
     let t = if dtype == DType::F32 {
         t
     } else {

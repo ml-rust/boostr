@@ -86,9 +86,9 @@ impl MoEOps<WgpuRuntime> for WgpuClient {
 
         // Allocate outputs — I32 indices on WebGPU (no I64)
         let out_indices =
-            Tensor::<WgpuRuntime>::try_empty(&[num_tokens, k], DType::I32, logits.device())?;
+            Tensor::<WgpuRuntime>::empty(&[num_tokens, k], DType::I32, logits.device())?;
         let out_weights =
-            Tensor::<WgpuRuntime>::try_empty(&[num_tokens, k], DType::F32, logits.device())?;
+            Tensor::<WgpuRuntime>::empty(&[num_tokens, k], DType::F32, logits.device())?;
 
         let logits_buf = get_buffer(logits.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "logits buffer not found".into(),
@@ -248,7 +248,7 @@ fn launch_grouped_gemm_wgpu(
     let out_dim = ew_shape[2];
     let device = permuted_tokens.device();
 
-    let output = Tensor::<WgpuRuntime>::try_empty(&[total_tokens, out_dim], DType::F32, device)?;
+    let output = Tensor::<WgpuRuntime>::empty(&[total_tokens, out_dim], DType::F32, device)?;
 
     if total_tokens == 0 {
         return Ok(output);

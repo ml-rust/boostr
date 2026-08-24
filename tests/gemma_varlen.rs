@@ -69,16 +69,16 @@ fn make_gemma_encoder() -> (Encoder<CpuRuntime>, CpuClient, CpuDevice) {
                 let data: Vec<f32> = (0..VOCAB * HIDDEN)
                     .map(|i| (i as f32 + 1.0) * 0.001)
                     .collect();
-                Tensor::try_from_slice(&data, &[VOCAB, HIDDEN], d).unwrap()
+                Tensor::from_slice(&data, &[VOCAB, HIDDEN], d).unwrap()
             }
             // Sentinel position embedding (unused by Gemma)
             "position_embd.weight" => {
-                Tensor::try_from_slice(&vec![0.0f32; HIDDEN], &[1, HIDDEN], d).unwrap()
+                Tensor::from_slice(&vec![0.0f32; HIDDEN], &[1, HIDDEN], d).unwrap()
             }
 
             // Layer 0: pre-attention RMSNorm
             "blk.0.attn_norm.weight" => {
-                Tensor::try_from_slice(&vec![1.0f32; HIDDEN], &[HIDDEN], d).unwrap()
+                Tensor::from_slice(&vec![1.0f32; HIDDEN], &[HIDDEN], d).unwrap()
             }
 
             // q_proj: [num_heads*head_dim, hidden] = [256, 128]
@@ -87,7 +87,7 @@ fn make_gemma_encoder() -> (Encoder<CpuRuntime>, CpuClient, CpuDevice) {
                 let data: Vec<f32> = (0..rows * HIDDEN)
                     .map(|i| (i as f32).sin() * 0.01)
                     .collect();
-                Tensor::try_from_slice(&data, &[rows, HIDDEN], d).unwrap()
+                Tensor::from_slice(&data, &[rows, HIDDEN], d).unwrap()
             }
             // k_proj: [kv_heads*head_dim, hidden] = [128, 128]
             "blk.0.attn_k.weight" => {
@@ -95,7 +95,7 @@ fn make_gemma_encoder() -> (Encoder<CpuRuntime>, CpuClient, CpuDevice) {
                 let data: Vec<f32> = (0..rows * HIDDEN)
                     .map(|i| (i as f32).cos() * 0.01)
                     .collect();
-                Tensor::try_from_slice(&data, &[rows, HIDDEN], d).unwrap()
+                Tensor::from_slice(&data, &[rows, HIDDEN], d).unwrap()
             }
             // v_proj: [kv_heads*head_dim, hidden] = [128, 128]
             "blk.0.attn_v.weight" => {
@@ -103,7 +103,7 @@ fn make_gemma_encoder() -> (Encoder<CpuRuntime>, CpuClient, CpuDevice) {
                 let data: Vec<f32> = (0..rows * HIDDEN)
                     .map(|i| ((i as f32) * 0.7).sin() * 0.01)
                     .collect();
-                Tensor::try_from_slice(&data, &[rows, HIDDEN], d).unwrap()
+                Tensor::from_slice(&data, &[rows, HIDDEN], d).unwrap()
             }
             // o_proj: [hidden, num_heads*head_dim] = [128, 256]
             "blk.0.attn_output.weight" => {
@@ -111,51 +111,51 @@ fn make_gemma_encoder() -> (Encoder<CpuRuntime>, CpuClient, CpuDevice) {
                 let data: Vec<f32> = (0..HIDDEN * cols)
                     .map(|i| ((i as f32) * 1.3).sin() * 0.01)
                     .collect();
-                Tensor::try_from_slice(&data, &[HIDDEN, cols], d).unwrap()
+                Tensor::from_slice(&data, &[HIDDEN, cols], d).unwrap()
             }
             // QK-norm weights: shape [head_dim]
             "blk.0.attn_q_norm.weight" => {
-                Tensor::try_from_slice(&vec![1.0f32; HEAD_DIM], &[HEAD_DIM], d).unwrap()
+                Tensor::from_slice(&vec![1.0f32; HEAD_DIM], &[HEAD_DIM], d).unwrap()
             }
             "blk.0.attn_k_norm.weight" => {
-                Tensor::try_from_slice(&vec![1.0f32; HEAD_DIM], &[HEAD_DIM], d).unwrap()
+                Tensor::from_slice(&vec![1.0f32; HEAD_DIM], &[HEAD_DIM], d).unwrap()
             }
             // Post-attention sandwich RMSNorm
             "blk.0.post_attention_norm.weight" => {
-                Tensor::try_from_slice(&vec![1.0f32; HIDDEN], &[HIDDEN], d).unwrap()
+                Tensor::from_slice(&vec![1.0f32; HIDDEN], &[HIDDEN], d).unwrap()
             }
             // Pre-FFN RMSNorm
             "blk.0.ffn_norm.weight" => {
-                Tensor::try_from_slice(&vec![1.0f32; HIDDEN], &[HIDDEN], d).unwrap()
+                Tensor::from_slice(&vec![1.0f32; HIDDEN], &[HIDDEN], d).unwrap()
             }
             // GeGLU gate: [intermediate, hidden]
             "blk.0.ffn_gate.weight" => {
                 let data: Vec<f32> = (0..INTER * HIDDEN)
                     .map(|i| ((i as f32) * 0.5).sin() * 0.01)
                     .collect();
-                Tensor::try_from_slice(&data, &[INTER, HIDDEN], d).unwrap()
+                Tensor::from_slice(&data, &[INTER, HIDDEN], d).unwrap()
             }
             // FFN up: [intermediate, hidden]
             "blk.0.ffn_up.weight" => {
                 let data: Vec<f32> = (0..INTER * HIDDEN)
                     .map(|i| ((i as f32) * 0.3).cos() * 0.01)
                     .collect();
-                Tensor::try_from_slice(&data, &[INTER, HIDDEN], d).unwrap()
+                Tensor::from_slice(&data, &[INTER, HIDDEN], d).unwrap()
             }
             // FFN down: [hidden, intermediate]
             "blk.0.ffn_down.weight" => {
                 let data: Vec<f32> = (0..HIDDEN * INTER)
                     .map(|i| ((i as f32) * 0.2).sin() * 0.01)
                     .collect();
-                Tensor::try_from_slice(&data, &[HIDDEN, INTER], d).unwrap()
+                Tensor::from_slice(&data, &[HIDDEN, INTER], d).unwrap()
             }
             // Post-FFN sandwich RMSNorm
             "blk.0.post_ffw_norm.weight" => {
-                Tensor::try_from_slice(&vec![1.0f32; HIDDEN], &[HIDDEN], d).unwrap()
+                Tensor::from_slice(&vec![1.0f32; HIDDEN], &[HIDDEN], d).unwrap()
             }
             // Final output_norm (applied before pooling)
             "output_norm.weight" => {
-                Tensor::try_from_slice(&vec![1.0f32; HIDDEN], &[HIDDEN], d).unwrap()
+                Tensor::from_slice(&vec![1.0f32; HIDDEN], &[HIDDEN], d).unwrap()
             }
             other => {
                 return Err(boostr::error::Error::ModelError {
@@ -180,7 +180,7 @@ fn embed_padded(
     ids: &[i64],
 ) -> Vec<f32> {
     let seq_len = ids.len();
-    let input = Tensor::<CpuRuntime>::try_from_slice(ids, &[1, seq_len], device).unwrap();
+    let input = Tensor::<CpuRuntime>::from_slice(ids, &[1, seq_len], device).unwrap();
     // No mask — single doc, no padding.
     let out = encoder
         .embed_inference_standard(client, &input, None)
@@ -223,10 +223,10 @@ fn embed_varlen(
         cu.push(last + n as i32);
     }
 
-    let input_t = Tensor::<CpuRuntime>::try_from_slice(&flat, &[total], device).unwrap();
-    let cu_t = Tensor::<CpuRuntime>::try_from_slice(&cu, &[sub_batch + 1], device).unwrap();
-    let pos_t = Tensor::<CpuRuntime>::try_from_slice(&pos_ids, &[total], device).unwrap();
-    let seg_t = Tensor::<CpuRuntime>::try_from_slice(&seg_ids, &[total], device).unwrap();
+    let input_t = Tensor::<CpuRuntime>::from_slice(&flat, &[total], device).unwrap();
+    let cu_t = Tensor::<CpuRuntime>::from_slice(&cu, &[sub_batch + 1], device).unwrap();
+    let pos_t = Tensor::<CpuRuntime>::from_slice(&pos_ids, &[total], device).unwrap();
+    let seg_t = Tensor::<CpuRuntime>::from_slice(&seg_ids, &[total], device).unwrap();
 
     let out = encoder
         .embed_inference_varlen(

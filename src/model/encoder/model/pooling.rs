@@ -109,7 +109,7 @@ where
                 let ones = match ones_scalar {
                     Some(o) => o,
                     None => {
-                        owned_ones = Tensor::<R>::try_from_slice(&[1.0f32], &[1], m.device())?;
+                        owned_ones = Tensor::<R>::from_slice(&[1.0f32], &[1], m.device())?;
                         &owned_ones
                     }
                 };
@@ -151,7 +151,7 @@ where
                         .contiguous()?
                         .reshape(&[batch * seq_len, shape[2]])
                         .map_err(Error::Numr)?;
-                    let idx = Tensor::<R>::try_from_slice(&indices, &[batch], m.device())?;
+                    let idx = Tensor::<R>::from_slice(&indices, &[batch], m.device())?;
                     client.embedding_lookup(&flat, &idx).map_err(Error::Numr)
                 }
                 None => select_position(&hidden_var, seq_len - 1),

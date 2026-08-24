@@ -178,7 +178,7 @@ mod tests {
         let mut model_state = HashMap::new();
         model_state.insert(
             "w".to_string(),
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device).unwrap(),
         );
 
         let training_state = make_training_state(42);
@@ -200,7 +200,7 @@ mod tests {
         let mut model_state = HashMap::new();
         model_state.insert(
             "w".to_string(),
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device).unwrap(),
         );
         let state = make_training_state(10);
 
@@ -219,7 +219,7 @@ mod tests {
         let mut model_state = HashMap::new();
         model_state.insert(
             "w".to_string(),
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device).unwrap(),
         );
         save_safetensors(dir.path().join("model.safetensors"), &model_state, None).unwrap();
 

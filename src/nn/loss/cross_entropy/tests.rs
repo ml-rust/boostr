@@ -11,7 +11,7 @@ fn test_cross_entropy_basic() {
 
     #[rustfmt::skip]
     let logits = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(
+        Tensor::<CpuRuntime>::from_slice(
             &[2.0f32, 1.0, 0.1,   // sample 0: class 0 is highest
               0.1, 2.0, 1.0],     // sample 1: class 1 is highest
             &[2, 3],
@@ -19,7 +19,7 @@ fn test_cross_entropy_basic() {
         ).unwrap(),
         true,
     );
-    let targets = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1], &[2], &device).unwrap();
+    let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1], &[2], &device).unwrap();
 
     let loss = cross_entropy_loss(&client, &logits, &targets).unwrap();
     assert_eq!(loss.shape(), &[] as &[usize]);
@@ -36,7 +36,7 @@ fn test_cross_entropy_wrong_predictions() {
     let (client, device) = cpu_setup();
 
     let logits = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(
+        Tensor::<CpuRuntime>::from_slice(
             &[
                 0.1f32, 0.1, 2.0, // sample 0: class 2 is highest
                 2.0, 0.1, 0.1, // sample 1: class 0 is highest
@@ -47,7 +47,7 @@ fn test_cross_entropy_wrong_predictions() {
         .unwrap(),
         false,
     );
-    let targets = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1], &[2], &device).unwrap();
+    let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1], &[2], &device).unwrap();
 
     let loss = cross_entropy_loss(&client, &logits, &targets).unwrap();
     let val: Vec<f32> = loss.tensor().to_vec();
@@ -63,11 +63,11 @@ fn test_label_smoothing_reduces_confidence() {
     let (client, device) = cpu_setup();
 
     let logits = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[2.0f32, 1.0, 0.1, 0.1, 2.0, 1.0], &[2, 3], &device)
+        Tensor::<CpuRuntime>::from_slice(&[2.0f32, 1.0, 0.1, 0.1, 2.0, 1.0], &[2, 3], &device)
             .unwrap(),
         false,
     );
-    let targets = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1], &[2], &device).unwrap();
+    let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1], &[2], &device).unwrap();
 
     let loss_no_smooth = cross_entropy_loss(&client, &logits, &targets).unwrap();
     let loss_smooth = cross_entropy_loss_smooth(&client, &logits, &targets, 0.1).unwrap();
@@ -88,11 +88,11 @@ fn test_label_smoothing_zero_is_ce() {
     let (client, device) = cpu_setup();
 
     let logits = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[2.0f32, 1.0, 0.1, 0.1, 2.0, 1.0], &[2, 3], &device)
+        Tensor::<CpuRuntime>::from_slice(&[2.0f32, 1.0, 0.1, 0.1, 2.0, 1.0], &[2, 3], &device)
             .unwrap(),
         false,
     );
-    let targets = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1], &[2], &device).unwrap();
+    let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1], &[2], &device).unwrap();
 
     let loss_ce = cross_entropy_loss(&client, &logits, &targets).unwrap();
     let loss_smooth = cross_entropy_loss_smooth(&client, &logits, &targets, 0.0).unwrap();
@@ -125,12 +125,11 @@ fn test_masked_all_ones_matches_unmasked() {
         0.7, -0.2, 0.3, // row 3
     ];
     let logits = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&values, &[4, 3], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&values, &[4, 3], &device).unwrap(),
         false,
     );
-    let targets = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2, 1], &[4], &device).unwrap();
-    let mask =
-        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0, 1.0, 1.0], &[4], &device).unwrap();
+    let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2, 1], &[4], &device).unwrap();
+    let mask = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0, 1.0, 1.0], &[4], &device).unwrap();
 
     let plain = cross_entropy_loss(&client, &logits, &targets).unwrap();
     let masked = cross_entropy_loss_masked(&client, &logits, &targets, &mask).unwrap();
@@ -157,12 +156,11 @@ fn test_masked_out_positions_are_excluded() {
         5.0, 5.0, -20.0, // row 3: masked out, target 2 is hopeless
     ];
     let logits = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&values, &[4, 3], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&values, &[4, 3], &device).unwrap(),
         false,
     );
-    let targets = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 0, 2, 2], &[4], &device).unwrap();
-    let mask =
-        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 1.0, 0.0], &[4], &device).unwrap();
+    let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 0, 2, 2], &[4], &device).unwrap();
+    let mask = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 1.0, 0.0], &[4], &device).unwrap();
 
     let masked = cross_entropy_loss_masked(&client, &logits, &targets, &mask).unwrap();
     let plain = cross_entropy_loss(&client, &logits, &targets).unwrap();
@@ -208,11 +206,11 @@ fn test_denominator_counts_only_kept_positions() {
         let n = 2 + pad;
 
         let logits = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&values, &[n, 3], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&values, &[n, 3], &device).unwrap(),
             false,
         );
-        let targets = Tensor::<CpuRuntime>::try_from_slice(&targets_data, &[n], &device).unwrap();
-        let mask = Tensor::<CpuRuntime>::try_from_slice(&mask_data, &[n], &device).unwrap();
+        let targets = Tensor::<CpuRuntime>::from_slice(&targets_data, &[n], &device).unwrap();
+        let mask = Tensor::<CpuRuntime>::from_slice(&mask_data, &[n], &device).unwrap();
 
         let loss = cross_entropy_loss_masked(&client, &logits, &targets, &mask).unwrap();
         let v: Vec<f32> = loss.tensor().to_vec();
@@ -229,12 +227,12 @@ fn test_all_zero_mask_errors() {
     let (client, device) = cpu_setup();
 
     let logits = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[2.0f32, 1.0, 0.1, 0.1, 2.0, 1.0], &[2, 3], &device)
+        Tensor::<CpuRuntime>::from_slice(&[2.0f32, 1.0, 0.1, 0.1, 2.0, 1.0], &[2, 3], &device)
             .unwrap(),
         false,
     );
-    let targets = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1], &[2], &device).unwrap();
-    let mask = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0], &[2], &device).unwrap();
+    let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1], &[2], &device).unwrap();
+    let mask = Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0], &[2], &device).unwrap();
 
     let err = cross_entropy_loss_masked(&client, &logits, &targets, &mask).unwrap_err();
     let msg = err.to_string();
@@ -249,12 +247,12 @@ fn test_shape_mismatch_errors() {
     let (client, device) = cpu_setup();
 
     let values = [2.0f32, 1.0, 0.1, 0.1, 2.0, 1.0];
-    let targets = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1], &[2], &device).unwrap();
-    let mask = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[2], &device).unwrap();
+    let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1], &[2], &device).unwrap();
+    let mask = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[2], &device).unwrap();
 
     // logits must be rank 2
     let logits_3d = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&values, &[1, 2, 3], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&values, &[1, 2, 3], &device).unwrap(),
         false,
     );
     let err = cross_entropy_loss_masked(&client, &logits_3d, &targets, &mask).unwrap_err();
@@ -264,12 +262,12 @@ fn test_shape_mismatch_errors() {
     );
 
     let logits = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&values, &[2, 3], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&values, &[2, 3], &device).unwrap(),
         false,
     );
 
     // targets length must be N
-    let bad_targets = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 0], &[3], &device).unwrap();
+    let bad_targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 0], &[3], &device).unwrap();
     let err = cross_entropy_loss_masked(&client, &logits, &bad_targets, &mask).unwrap_err();
     assert!(
         matches!(err, Error::InvalidArgument { arg: "targets", .. }),
@@ -277,8 +275,7 @@ fn test_shape_mismatch_errors() {
     );
 
     // mask length must be N
-    let bad_mask =
-        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0, 1.0], &[3], &device).unwrap();
+    let bad_mask = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0, 1.0], &[3], &device).unwrap();
     let err = cross_entropy_loss_masked(&client, &logits, &targets, &bad_mask).unwrap_err();
     assert!(
         matches!(err, Error::InvalidArgument { arg: "mask", .. }),
@@ -296,11 +293,11 @@ fn test_gradient_flows_only_to_kept_positions() {
         -1.0, 0.5, 3.0, // row 2: kept
     ];
     let logits = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&values, &[3, 3], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&values, &[3, 3], &device).unwrap(),
         true,
     );
-    let targets = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2], &[3], &device).unwrap();
-    let mask = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 1.0], &[3], &device).unwrap();
+    let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2], &[3], &device).unwrap();
+    let mask = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 1.0], &[3], &device).unwrap();
 
     let loss = cross_entropy_loss_masked(&client, &logits, &targets, &mask).unwrap();
     let grads = backward(&loss, &client).unwrap();
@@ -346,10 +343,10 @@ fn test_cross_entropy_bf16_matches_f32_reference() {
     const V: usize = 1024;
 
     let target_data: Vec<i64> = (0..N as i64).map(|i| i % V as i64).collect();
-    let targets = Tensor::<CpuRuntime>::try_from_slice(&target_data, &[N], &device).unwrap();
+    let targets = Tensor::<CpuRuntime>::from_slice(&target_data, &[N], &device).unwrap();
 
     let f32_logits = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; N * V], &[N, V], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; N * V], &[N, V], &device).unwrap(),
         false,
     );
     let f32_loss: f32 = cross_entropy_loss(&client, &f32_logits, &targets)
@@ -363,7 +360,7 @@ fn test_cross_entropy_bf16_matches_f32_reference() {
     );
 
     let bf16_logits = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&vec![bf16::from_f32(0.0); N * V], &[N, V], &device)
+        Tensor::<CpuRuntime>::from_slice(&vec![bf16::from_f32(0.0); N * V], &[N, V], &device)
             .unwrap(),
         false,
     );

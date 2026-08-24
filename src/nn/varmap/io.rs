@@ -236,11 +236,11 @@ mod tests {
         let mut tensors = HashMap::new();
         tensors.insert(
             "a".to_string(),
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &d).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &d).unwrap(),
         );
         tensors.insert(
             "b".to_string(),
-            Tensor::<CpuRuntime>::try_from_slice(&[4.0f32, 5.0], &[2], &d).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[4.0f32, 5.0], &[2], &d).unwrap(),
         );
         save_safetensors(tmp.path(), &tensors, None).unwrap();
 
@@ -285,7 +285,7 @@ mod tests {
         let mut shard1 = HashMap::new();
         shard1.insert(
             "layers.0.weight".to_string(),
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &d).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &d).unwrap(),
         );
         save_safetensors(
             dir.path().join("model-00001-of-00002.safetensors"),
@@ -297,7 +297,7 @@ mod tests {
         let mut shard2 = HashMap::new();
         shard2.insert(
             "layers.1.weight".to_string(),
-            Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0, 5.0], &[3], &d).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0, 5.0], &[3], &d).unwrap(),
         );
         save_safetensors(
             dir.path().join("model-00002-of-00002.safetensors"),

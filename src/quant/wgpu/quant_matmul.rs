@@ -43,7 +43,7 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n);
-        let output = Tensor::<WgpuRuntime>::try_empty(&out_shape, DType::F32, input.device())?;
+        let output = Tensor::<WgpuRuntime>::empty(&out_shape, DType::F32, input.device())?;
         int4_dispatch::dispatch_int4_gemm(
             self,
             &act_contig,
@@ -80,7 +80,7 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n);
-        let output = Tensor::<WgpuRuntime>::try_empty(&out_shape, DType::F32, input.device())?;
+        let output = Tensor::<WgpuRuntime>::empty(&out_shape, DType::F32, input.device())?;
         int4_dispatch::dispatch_int4_gemm_gptq(
             self,
             &act_contig,
@@ -117,7 +117,7 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n);
-        let output = Tensor::<WgpuRuntime>::try_empty(&out_shape, DType::F32, input.device())?;
+        let output = Tensor::<WgpuRuntime>::empty(&out_shape, DType::F32, input.device())?;
         int4_dispatch::dispatch_marlin_gemm(
             self,
             &act_contig,
@@ -217,7 +217,7 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
         // Allocate output: [..., N]
         let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
         out_shape.push(n);
-        let output = Tensor::<WgpuRuntime>::try_empty(&out_shape, DType::F32, activation.device())?;
+        let output = Tensor::<WgpuRuntime>::empty(&out_shape, DType::F32, activation.device())?;
         let output_buf = get_buffer(output.storage().ptr()).ok_or_else(|| Error::QuantError {
             reason: "output buffer not found in WebGPU registry".into(),
         })?;

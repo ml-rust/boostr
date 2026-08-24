@@ -23,7 +23,7 @@ fn test_router_z_loss_cpu_is_finite() {
     let (num_tokens, num_experts) = (384, 4);
     let data = logits_data(num_tokens, num_experts);
     let logits = Var::new(
-        Tensor::try_from_slice(&data, &[num_tokens, num_experts], &device).unwrap(),
+        Tensor::from_slice(&data, &[num_tokens, num_experts], &device).unwrap(),
         true,
     );
 
@@ -45,7 +45,7 @@ fn test_router_z_loss_parity_large_logits() {
         .collect();
 
     let cpu_logits = Var::new(
-        Tensor::try_from_slice(&data, &[num_tokens, num_experts], &cpu_device).unwrap(),
+        Tensor::from_slice(&data, &[num_tokens, num_experts], &cpu_device).unwrap(),
         true,
     );
     let cpu_loss = router_z_loss(&cpu_client, &cpu_logits).expect("cpu router_z_loss");
@@ -54,7 +54,7 @@ fn test_router_z_loss_parity_large_logits() {
 
     with_cuda_backend(|cuda_client, cuda_device| {
         let cuda_logits = Var::new(
-            Tensor::try_from_slice(&data, &[num_tokens, num_experts], &cuda_device).unwrap(),
+            Tensor::from_slice(&data, &[num_tokens, num_experts], &cuda_device).unwrap(),
             true,
         );
         let cuda_loss = router_z_loss(&cuda_client, &cuda_logits).expect("cuda router_z_loss");
@@ -75,7 +75,7 @@ fn test_router_z_loss_parity() {
     let data = logits_data(num_tokens, num_experts);
 
     let cpu_logits = Var::new(
-        Tensor::try_from_slice(&data, &[num_tokens, num_experts], &cpu_device).unwrap(),
+        Tensor::from_slice(&data, &[num_tokens, num_experts], &cpu_device).unwrap(),
         true,
     );
     let cpu_loss = router_z_loss(&cpu_client, &cpu_logits).expect("cpu router_z_loss");
@@ -84,7 +84,7 @@ fn test_router_z_loss_parity() {
 
     with_cuda_backend(|cuda_client, cuda_device| {
         let cuda_logits = Var::new(
-            Tensor::try_from_slice(&data, &[num_tokens, num_experts], &cuda_device).unwrap(),
+            Tensor::from_slice(&data, &[num_tokens, num_experts], &cuda_device).unwrap(),
             true,
         );
         let cuda_loss = router_z_loss(&cuda_client, &cuda_logits).expect("cuda router_z_loss");

@@ -77,13 +77,10 @@ pub(super) fn paged_attention_fwd_impl(
     );
 
     let device = q.device();
-    let output = Tensor::<CudaRuntime>::try_empty(
-        &[batch_size, num_heads, seq_len_q, head_dim],
-        dtype,
-        device,
-    )?;
+    let output =
+        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q, head_dim], dtype, device)?;
     let lse =
-        Tensor::<CudaRuntime>::try_empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
+        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
 
     let dtype_size = dtype.size_in_bytes();
     let smem_size = (block_m * head_dim + block_n * head_dim + block_n * head_dim) * dtype_size;
@@ -196,13 +193,10 @@ pub(super) fn paged_attention_fwd_fp8_impl(
     );
 
     let device = q.device();
-    let output = Tensor::<CudaRuntime>::try_empty(
-        &[batch_size, num_heads, seq_len_q, head_dim],
-        dtype,
-        device,
-    )?;
+    let output =
+        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q, head_dim], dtype, device)?;
     let lse =
-        Tensor::<CudaRuntime>::try_empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
+        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
 
     // FP8 uses FP32 smem: (BLOCK_M + 2*BLOCK_N) * HEAD_DIM * 4
     let (bm, bn) = fwd_block_config(head_dim, dtype)?;

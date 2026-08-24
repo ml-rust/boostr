@@ -190,8 +190,8 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
             let state = match self.state.entry(id) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    let m = Tensor::<R>::try_zeros(param.shape(), state_dtype, param.device())?;
-                    let v = Tensor::<R>::try_zeros(param.shape(), state_dtype, param.device())?;
+                    let m = Tensor::<R>::zeros(param.shape(), state_dtype, param.device())?;
+                    let v = Tensor::<R>::zeros(param.shape(), state_dtype, param.device())?;
                     let master = init_master(client, param, state_dtype)?;
                     entry.insert(LambState { m, v, master })
                 }
@@ -289,11 +289,9 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let target =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
         let w_init =
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device).unwrap();
         let w_id = w_init.id();
 
         let mut params = HashMap::new();
@@ -338,11 +336,9 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let target =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
         let w_init =
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device).unwrap();
         let w_id = w_init.id();
 
         let mut params = HashMap::new();
@@ -386,11 +382,10 @@ mod tests {
         let (client, device) = cpu_setup();
 
         // Large param, tiny gradient → trust ratio would be huge without clamping
-        let w_tensor =
-            Tensor::<CpuRuntime>::try_from_slice(&[100.0f32, 100.0], &[2], &device).unwrap();
+        let w_tensor = Tensor::<CpuRuntime>::from_slice(&[100.0f32, 100.0], &[2], &device).unwrap();
         let w_id = w_tensor.id();
 
-        let grad = Tensor::<CpuRuntime>::try_from_slice(&[0.001f32, 0.001], &[2], &device).unwrap();
+        let grad = Tensor::<CpuRuntime>::from_slice(&[0.001f32, 0.001], &[2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(w_id, grad);
 
@@ -424,7 +419,7 @@ mod tests {
     fn test_lamb_skips_missing_grads() {
         let (client, device) = cpu_setup();
 
-        let w_tensor = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let w_tensor = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let w_id = w_tensor.id();
 
         let mut params = HashMap::new();
@@ -446,7 +441,7 @@ mod tests {
     #[test]
     fn test_tensor_l2_norm_f32_value_is_unchanged() {
         let (client, device) = cpu_setup();
-        let t = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
+        let t = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
         let norm = tensor_l2_norm(&client, &t).unwrap();
         assert!((norm - 5.0).abs() < 1e-6, "expected 5.0, got {norm}");
     }
@@ -458,7 +453,7 @@ mod tests {
     #[test]
     fn test_tensor_l2_norm_reads_an_f64_tensor_at_its_own_dtype() {
         let (client, device) = cpu_setup();
-        let t = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
+        let t = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
         let wide = client.cast(&t, DType::F64).unwrap();
         let norm = tensor_l2_norm(&client, &wide).unwrap();
         assert!((norm - 5.0).abs() < 1e-6, "expected 5.0, got {norm}");
@@ -469,7 +464,7 @@ mod tests {
     #[test]
     fn test_tensor_l2_norm_reads_narrow_tensors_at_their_own_dtype() {
         let (client, device) = cpu_setup();
-        let t = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
+        let t = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
 
         for dtype in [DType::BF16, DType::F16] {
             let narrow = client.cast(&t, dtype).unwrap();
@@ -606,10 +601,9 @@ mod tests {
         );
 
         let param =
-            Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(w0)], &[1], &device)
-                .unwrap();
-        let grad = Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(g)], &[1], &device)
-            .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(w0)], &[1], &device).unwrap();
+        let grad =
+            Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(g)], &[1], &device).unwrap();
         let param_id = param.id();
         let (_opt, params) = run_scalar_steps(&client, param, grad, config.clone(), steps);
 
@@ -646,11 +640,9 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let param =
-            Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(0.02)], &[1], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(0.02)], &[1], &device).unwrap();
         let grad =
-            Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(1.0)], &[1], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(1.0)], &[1], &device).unwrap();
         let param_id = param.id();
 
         let config = LambConfig {
@@ -698,7 +690,7 @@ mod tests {
     fn test_lamb_f32_allocates_no_master_copy() {
         let (client, device) = cpu_setup();
 
-        let param = Tensor::<CpuRuntime>::try_from_slice(&[0.02f32], &[1], &device).unwrap();
+        let param = Tensor::<CpuRuntime>::from_slice(&[0.02f32], &[1], &device).unwrap();
         let id = param.id();
         let mut params = HashMap::new();
         params.insert(id, param);
@@ -706,7 +698,7 @@ mod tests {
         let mut grads = GradStore::new();
         grads.insert(
             id,
-            Tensor::<CpuRuntime>::try_from_slice(&[0.001f32], &[1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.001f32], &[1], &device).unwrap(),
         );
 
         let mut opt = Lamb::<CpuRuntime>::new(LambConfig {

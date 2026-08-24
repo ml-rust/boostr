@@ -65,14 +65,14 @@ fn make_cuda_gemma_encoder(device: &CudaDevice, client: &CudaClient) -> Encoder<
 
     let d = device;
     let small = |n: usize, shape: &[usize]| {
-        Tensor::<CudaRuntime>::try_from_slice(
+        Tensor::<CudaRuntime>::from_slice(
             &(0..n).map(|i| (i as f32).sin() * 0.01).collect::<Vec<_>>(),
             shape,
             d,
         )
         .unwrap()
     };
-    let ones = |n: usize| Tensor::<CudaRuntime>::try_from_slice(&vec![1.0f32; n], &[n], d).unwrap();
+    let ones = |n: usize| Tensor::<CudaRuntime>::from_slice(&vec![1.0f32; n], &[n], d).unwrap();
 
     Encoder::from_weights_gemma(config, Pooling::Mean, client, |name| {
         let qd = HEADS * HEAD_DIM;
@@ -80,8 +80,7 @@ fn make_cuda_gemma_encoder(device: &CudaDevice, client: &CudaClient) -> Encoder<
         let t = match name {
             "token_embd.weight" => small(VOCAB * HIDDEN, &[VOCAB, HIDDEN]),
             "position_embd.weight" => {
-                Tensor::<CudaRuntime>::try_from_slice(&vec![0.0f32; HIDDEN], &[1, HIDDEN], d)
-                    .unwrap()
+                Tensor::<CudaRuntime>::from_slice(&vec![0.0f32; HIDDEN], &[1, HIDDEN], d).unwrap()
             }
             "blk.0.attn_norm.weight" => ones(HIDDEN),
             "blk.0.attn_q.weight" => small(qd * HIDDEN, &[qd, HIDDEN]),
@@ -119,10 +118,10 @@ fn run_one_shape(
     let pos: Vec<i64> = (0..seq_len as i64).collect();
     let seg: Vec<i32> = vec![0i32; seq_len];
 
-    let input = Tensor::<CudaRuntime>::try_from_slice(&ids, &[seq_len], device).unwrap();
-    let cu_t = Tensor::<CudaRuntime>::try_from_slice(&cu, &[2], device).unwrap();
-    let pos_t = Tensor::<CudaRuntime>::try_from_slice(&pos, &[seq_len], device).unwrap();
-    let seg_t = Tensor::<CudaRuntime>::try_from_slice(&seg, &[seq_len], device).unwrap();
+    let input = Tensor::<CudaRuntime>::from_slice(&ids, &[seq_len], device).unwrap();
+    let cu_t = Tensor::<CudaRuntime>::from_slice(&cu, &[2], device).unwrap();
+    let pos_t = Tensor::<CudaRuntime>::from_slice(&pos, &[seq_len], device).unwrap();
+    let seg_t = Tensor::<CudaRuntime>::from_slice(&seg, &[seq_len], device).unwrap();
 
     let out = encoder
         .encode_inference_varlen(client, &input, &cu_t, &pos_t, &seg_t, 1, seq_len)

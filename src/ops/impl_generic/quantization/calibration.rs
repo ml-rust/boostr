@@ -274,9 +274,9 @@ where
         }
     }
 
-    let q_tensor = Tensor::<R>::try_from_slice(&q_out, &[m, k], &device)?;
-    let s_tensor = Tensor::<R>::try_from_slice(&scales_out, &[m, num_groups], &device)?;
-    let z_tensor = Tensor::<R>::try_from_slice(&zeros_out, &[m, num_groups], &device)?;
+    let q_tensor = Tensor::<R>::from_slice(&q_out, &[m, k], &device)?;
+    let s_tensor = Tensor::<R>::from_slice(&scales_out, &[m, num_groups], &device)?;
+    let z_tensor = Tensor::<R>::from_slice(&zeros_out, &[m, num_groups], &device)?;
 
     Ok((q_tensor, s_tensor, z_tensor))
 }
@@ -290,8 +290,8 @@ mod tests {
     #[test]
     fn test_awq_channel_scores_shape() {
         let (client, device) = cpu_setup();
-        let act = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4 * 8], &[4, 8], &device).unwrap();
-        let w = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6 * 8], &[6, 8], &device).unwrap();
+        let act = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4 * 8], &[4, 8], &device).unwrap();
+        let w = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6 * 8], &[6, 8], &device).unwrap();
         let result = awq_channel_scores_impl(&client, &act, &w).unwrap();
         assert_eq!(result.shape(), &[8]);
     }
@@ -304,10 +304,9 @@ mod tests {
         // |W| * act_scale = [[2*3, 1*2], [1*3, 3*2]] = [[6, 2], [3, 6]]
         // score = mean over rows = [4.5, 4.0]
         let act =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, -2.0, 3.0, -1.0], &[2, 2], &device)
-                .unwrap();
-        let w = Tensor::<CpuRuntime>::try_from_slice(&[2.0f32, 1.0, 1.0, 3.0], &[2, 2], &device)
-            .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, -2.0, 3.0, -1.0], &[2, 2], &device).unwrap();
+        let w =
+            Tensor::<CpuRuntime>::from_slice(&[2.0f32, 1.0, 1.0, 3.0], &[2, 2], &device).unwrap();
         let result = awq_channel_scores_impl(&client, &act, &w).unwrap();
         let data = result.to_vec::<f32>();
         assert!((data[0] - 4.5).abs() < 1e-5);
@@ -318,7 +317,7 @@ mod tests {
     fn test_fisher_information_shape() {
         let (client, device) = cpu_setup();
         let grads =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 16 * 32], &[16, 32], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 16 * 32], &[16, 32], &device).unwrap();
         let result = fisher_information_impl(&client, &grads).unwrap();
         assert_eq!(result.shape(), &[32]);
     }
@@ -330,8 +329,7 @@ mod tests {
         // squared = [[1, 4], [9, 16]]
         // mean over rows = [5.0, 10.0]
         let grads =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device).unwrap();
         let result = fisher_information_impl(&client, &grads).unwrap();
         let data = result.to_vec::<f32>();
         assert!((data[0] - 5.0).abs() < 1e-5);
@@ -341,8 +339,8 @@ mod tests {
     #[test]
     fn test_gptq_hessian_update_shape() {
         let (client, device) = cpu_setup();
-        let h = Tensor::<CpuRuntime>::try_zeros(&[8, 8], DType::F32, &device).unwrap();
-        let x = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4 * 8], &[4, 8], &device).unwrap();
+        let h = Tensor::<CpuRuntime>::zeros(&[8, 8], DType::F32, &device).unwrap();
+        let x = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4 * 8], &[4, 8], &device).unwrap();
         let result = gptq_hessian_update_impl(&client, &h, &x).unwrap();
         assert_eq!(result.shape(), &[8, 8]);
     }
@@ -350,9 +348,9 @@ mod tests {
     #[test]
     fn test_gptq_hessian_update_symmetry() {
         let (client, device) = cpu_setup();
-        let h = Tensor::<CpuRuntime>::try_zeros(&[4, 4], DType::F32, &device).unwrap();
+        let h = Tensor::<CpuRuntime>::zeros(&[4, 4], DType::F32, &device).unwrap();
         let x_data: Vec<f32> = (0..8).map(|i| (i as f32 + 1.0) * 0.1).collect();
-        let x = Tensor::<CpuRuntime>::try_from_slice(&x_data, &[2, 4], &device).unwrap();
+        let x = Tensor::<CpuRuntime>::from_slice(&x_data, &[2, 4], &device).unwrap();
         let result = gptq_hessian_update_impl(&client, &h, &x).unwrap();
         let data = result.to_vec::<f32>();
         // H = (2/B) * X^T X should be symmetric
@@ -375,13 +373,13 @@ mod tests {
     fn test_gptq_quantize_column_basic() {
         let (client, device) = cpu_setup();
         let w_data: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.1).collect();
-        let w = Tensor::<CpuRuntime>::try_from_slice(&w_data, &[4, 8], &device).unwrap();
+        let w = Tensor::<CpuRuntime>::from_slice(&w_data, &[4, 8], &device).unwrap();
         // Identity-like h_inv
         let mut h_inv_data = vec![0.0f32; 64];
         for i in 0..8 {
             h_inv_data[i * 8 + i] = 1.0;
         }
-        let h_inv = Tensor::<CpuRuntime>::try_from_slice(&h_inv_data, &[8, 8], &device).unwrap();
+        let h_inv = Tensor::<CpuRuntime>::from_slice(&h_inv_data, &[8, 8], &device).unwrap();
 
         let (q, scales, zeros) =
             gptq_quantize_column_impl(&client, &w, &h_inv, 4, 4, false).unwrap();

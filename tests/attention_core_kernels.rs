@@ -63,7 +63,7 @@ fn values(len: usize, seed: f32) -> Vec<f32> {
 fn var(shape: &[usize], seed: f32, device: &CpuDevice) -> Var<CpuRuntime> {
     let n: usize = shape.iter().product();
     Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&values(n, seed), shape, device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&values(n, seed), shape, device).unwrap(),
         false,
     )
 }
@@ -100,8 +100,7 @@ fn run(case: &Case, kernel: AttentionKernel, sliding_window: usize) -> Vec<f32> 
     // Non-unit norm weights: an ignored QK-norm would otherwise be invisible.
     let norm_weight = || {
         RmsNorm::<CpuRuntime>::new(
-            Tensor::<CpuRuntime>::try_from_slice(&values(HEAD_DIM, 5.5), &[HEAD_DIM], &device)
-                .unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&values(HEAD_DIM, 5.5), &[HEAD_DIM], &device).unwrap(),
             1e-6,
             false,
         )
@@ -159,8 +158,7 @@ fn run_flash_entry(case: &Case, sliding_window: usize) -> Vec<f32> {
 
     let norm_weight = || {
         RmsNorm::<CpuRuntime>::new(
-            Tensor::<CpuRuntime>::try_from_slice(&values(HEAD_DIM, 5.5), &[HEAD_DIM], &device)
-                .unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&values(HEAD_DIM, 5.5), &[HEAD_DIM], &device).unwrap(),
             1e-6,
             false,
         )

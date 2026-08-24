@@ -135,7 +135,7 @@ impl FusedOptimizerOps<CudaRuntime> for CudaClient {
         let new_param = param.clone();
         let new_buf = match momentum_buf {
             Some(buf) => buf.clone(),
-            None => Tensor::<CudaRuntime>::try_zeros(param.shape(), dtype, param.device())?,
+            None => Tensor::<CudaRuntime>::zeros(param.shape(), dtype, param.device())?,
         };
         let has_buf = momentum_buf.is_some();
 
@@ -260,7 +260,7 @@ impl FusedOptimizerOps<CudaRuntime> for CudaClient {
 
         let new_m = m.clone();
         let new_v = v.clone();
-        let update = Tensor::<CudaRuntime>::try_zeros(param.shape(), dtype, param.device())?;
+        let update = Tensor::<CudaRuntime>::zeros(param.shape(), dtype, param.device())?;
 
         let device_index = param.device().id();
         let module = kernels::get_or_load_module(self.context(), device_index, FUSED_LAMB_MODULE)?;

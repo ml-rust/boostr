@@ -247,10 +247,10 @@ fn run_shape(client: &CudaClient, device: &CudaDevice, shape: &Shape) {
     let v_data = det_data(&kv_shape, 3.1);
     let dout_data = det_data(&q_shape, 5.3);
 
-    let q = Tensor::<CudaRuntime>::try_from_slice(&q_data, &q_shape, device).unwrap();
-    let k = Tensor::<CudaRuntime>::try_from_slice(&k_data, &kv_shape, device).unwrap();
-    let v = Tensor::<CudaRuntime>::try_from_slice(&v_data, &kv_shape, device).unwrap();
-    let dout = Tensor::<CudaRuntime>::try_from_slice(&dout_data, &q_shape, device).unwrap();
+    let q = Tensor::<CudaRuntime>::from_slice(&q_data, &q_shape, device).unwrap();
+    let k = Tensor::<CudaRuntime>::from_slice(&k_data, &kv_shape, device).unwrap();
+    let v = Tensor::<CudaRuntime>::from_slice(&v_data, &kv_shape, device).unwrap();
+    let dout = Tensor::<CudaRuntime>::from_slice(&dout_data, &q_shape, device).unwrap();
 
     // ---- Forward ----
     let mqa_fwd = time_calls_ms(client, || {

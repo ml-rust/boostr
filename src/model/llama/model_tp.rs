@@ -88,7 +88,7 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
         let local_intermediate = intermediate / world_size;
 
         // Embedding (vocab-parallel)
-        let embed_weight = Tensor::<R>::try_zeros(&[vocab, hidden], dt, device)?;
+        let embed_weight = Tensor::<R>::zeros(&[vocab, hidden], dt, device)?;
         let embed_tokens = VocabParallelEmbedding::new(&embed_weight, comm.clone(), true)?;
 
         // RoPE
@@ -105,28 +105,28 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
         for _ in 0..config.num_layers {
             let block = LlamaBlockTp {
                 input_layernorm: RmsNorm::new(
-                    Tensor::<R>::try_ones(&[hidden], dt, device)?,
+                    Tensor::<R>::ones(&[hidden], dt, device)?,
                     config.rms_norm_eps as f32,
                     true,
                 ),
                 self_attn: LlamaAttentionTp {
                     q_proj: ColumnParallelLinear::from_shard(
-                        Tensor::<R>::try_zeros(&[local_heads * head_dim, hidden], dt, device)?,
+                        Tensor::<R>::zeros(&[local_heads * head_dim, hidden], dt, device)?,
                         None,
                         true,
                     ),
                     k_proj: ColumnParallelLinear::from_shard(
-                        Tensor::<R>::try_zeros(&[local_kv_heads * head_dim, hidden], dt, device)?,
+                        Tensor::<R>::zeros(&[local_kv_heads * head_dim, hidden], dt, device)?,
                         None,
                         true,
                     ),
                     v_proj: ColumnParallelLinear::from_shard(
-                        Tensor::<R>::try_zeros(&[local_kv_heads * head_dim, hidden], dt, device)?,
+                        Tensor::<R>::zeros(&[local_kv_heads * head_dim, hidden], dt, device)?,
                         None,
                         true,
                     ),
                     o_proj: RowParallelLinear::from_shard(
-                        Tensor::<R>::try_zeros(&[hidden, local_heads * head_dim], dt, device)?,
+                        Tensor::<R>::zeros(&[hidden, local_heads * head_dim], dt, device)?,
                         None,
                         comm.clone(),
                         true,
@@ -139,23 +139,23 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
                     sliding_window,
                 },
                 post_attention_layernorm: RmsNorm::new(
-                    Tensor::<R>::try_ones(&[hidden], dt, device)?,
+                    Tensor::<R>::ones(&[hidden], dt, device)?,
                     config.rms_norm_eps as f32,
                     true,
                 ),
                 mlp: LlamaMlpTp {
                     gate_proj: ColumnParallelLinear::from_shard(
-                        Tensor::<R>::try_zeros(&[local_intermediate, hidden], dt, device)?,
+                        Tensor::<R>::zeros(&[local_intermediate, hidden], dt, device)?,
                         None,
                         true,
                     ),
                     up_proj: ColumnParallelLinear::from_shard(
-                        Tensor::<R>::try_zeros(&[local_intermediate, hidden], dt, device)?,
+                        Tensor::<R>::zeros(&[local_intermediate, hidden], dt, device)?,
                         None,
                         true,
                     ),
                     down_proj: RowParallelLinear::from_shard(
-                        Tensor::<R>::try_zeros(&[hidden, local_intermediate], dt, device)?,
+                        Tensor::<R>::zeros(&[hidden, local_intermediate], dt, device)?,
                         None,
                         comm.clone(),
                         true,
@@ -167,14 +167,14 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
 
         // Final norm (replicated)
         let norm = RmsNorm::new(
-            Tensor::<R>::try_ones(&[hidden], dt, device)?,
+            Tensor::<R>::ones(&[hidden], dt, device)?,
             config.rms_norm_eps as f32,
             true,
         );
 
         // LM head (column-parallel over vocab)
         let lm_head = ColumnParallelLinear::from_shard(
-            Tensor::<R>::try_zeros(&[vocab / world_size, hidden], dt, device)?,
+            Tensor::<R>::zeros(&[vocab / world_size, hidden], dt, device)?,
             None,
             true,
         );
@@ -454,7 +454,7 @@ attention:
         let model = LlamaTp::<CpuRuntime>::from_config(&config, &device, comm).unwrap();
 
         let input_ids = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2, 3], &[1, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2, 3], &[1, 4], &device).unwrap(),
             false,
         );
 

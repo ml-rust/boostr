@@ -17,7 +17,7 @@ fn test_varbuilder_prefix() {
     let mut map = VarMap::<CpuRuntime>::new();
     map.insert(
         "model.layers.0.self_attn.q_proj.weight".into(),
-        Tensor::try_from_slice(&[1.0f32], &[1], &d).unwrap(),
+        Tensor::from_slice(&[1.0f32], &[1], &d).unwrap(),
     );
 
     let mut vb = VarBuilder::new(&mut map, &d);
@@ -35,7 +35,7 @@ fn test_varbuilder_get_with_shape() {
     let mut map = VarMap::<CpuRuntime>::new();
     map.insert(
         "w".into(),
-        Tensor::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &d).unwrap(),
+        Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &d).unwrap(),
     );
 
     let vb = VarBuilder::new(&mut map, &d);
@@ -49,7 +49,7 @@ fn test_varbuilder_take_tensor() {
     let mut map = VarMap::<CpuRuntime>::new();
     map.insert(
         "layer.weight".into(),
-        Tensor::try_from_slice(&[1.0f32, 2.0], &[2], &d).unwrap(),
+        Tensor::from_slice(&[1.0f32, 2.0], &[2], &d).unwrap(),
     );
 
     let mut vb = VarBuilder::new(&mut map, &d);
@@ -68,7 +68,7 @@ fn test_varbuilder_take_tensor_shard() {
     let data: Vec<f32> = (0..24).map(|i| i as f32).collect();
     map.insert(
         "weight".into(),
-        Tensor::try_from_slice(&data, &[4, 6], &d).unwrap(),
+        Tensor::from_slice(&data, &[4, 6], &d).unwrap(),
     );
 
     let vb = VarBuilder::new(&mut map, &d);
@@ -79,7 +79,7 @@ fn test_varbuilder_take_tensor_shard() {
     drop(vb);
     map.insert(
         "weight".into(),
-        Tensor::try_from_slice(&data2, &[4, 6], &d).unwrap(),
+        Tensor::from_slice(&data2, &[4, 6], &d).unwrap(),
     );
     let mut vb = VarBuilder::new(&mut map, &d);
     let shard = vb.take_tensor_shard("weight", 0, 0, 2).unwrap();
@@ -90,7 +90,7 @@ fn test_varbuilder_take_tensor_shard() {
     drop(vb);
     map.insert(
         "weight".into(),
-        Tensor::try_from_slice(&data3, &[4, 6], &d).unwrap(),
+        Tensor::from_slice(&data3, &[4, 6], &d).unwrap(),
     );
     let mut vb = VarBuilder::new(&mut map, &d);
     let shard = vb.take_tensor_shard("weight", 1, 1, 2).unwrap();
@@ -103,7 +103,7 @@ fn test_varbuilder_take_tensor_shard_not_divisible() {
     let mut map = VarMap::<CpuRuntime>::new();
     map.insert(
         "weight".into(),
-        Tensor::try_from_slice(&[1.0f32; 15], &[3, 5], &d).unwrap(),
+        Tensor::from_slice(&[1.0f32; 15], &[3, 5], &d).unwrap(),
     );
     let mut vb = VarBuilder::new(&mut map, &d);
     // 3 not divisible by 2

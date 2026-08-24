@@ -20,9 +20,9 @@ fn test_flash_attention_fwd_non_causal_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
         let (cuda_out, _) = cuda_client
             .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0, None)
             .unwrap();
@@ -37,9 +37,9 @@ fn test_flash_attention_fwd_non_causal_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let k_w = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let v_w = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
         let (wgpu_out, _) = wgpu_client
             .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0, None)
             .unwrap();
@@ -68,9 +68,9 @@ fn test_flash_attention_fwd_causal_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
         let (cuda_out, _) = cuda_client
             .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0, None)
             .unwrap();
@@ -85,9 +85,9 @@ fn test_flash_attention_fwd_causal_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let k_w = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let v_w = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
         let (wgpu_out, _) = wgpu_client
             .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, true, 0, None)
             .unwrap();
@@ -118,14 +118,12 @@ fn test_flash_attention_fwd_gqa_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device)
-            .unwrap();
+        let q_c =
+            Tensor::from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device).unwrap();
         let k_c =
-            Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device)
-                .unwrap();
+            Tensor::from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device).unwrap();
         let v_c =
-            Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device)
-                .unwrap();
+            Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device).unwrap();
         let (cuda_out, _) = cuda_client
             .flash_attention_fwd(&q_c, &k_c, &v_c, num_heads, num_kv_heads, d, false, 0, None)
             .unwrap();
@@ -140,14 +138,12 @@ fn test_flash_attention_fwd_gqa_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &wgpu_device)
-            .unwrap();
+        let q_w =
+            Tensor::from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &wgpu_device).unwrap();
         let k_w =
-            Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, s, d], &wgpu_device)
-                .unwrap();
+            Tensor::from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, s, d], &wgpu_device).unwrap();
         let v_w =
-            Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &wgpu_device)
-                .unwrap();
+            Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &wgpu_device).unwrap();
         let (wgpu_out, _) = wgpu_client
             .flash_attention_fwd(&q_w, &k_w, &v_w, num_heads, num_kv_heads, d, false, 0, None)
             .unwrap();
@@ -182,14 +178,12 @@ fn test_flash_attention_fwd_windowed_decode_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, num_heads, 1, d], &cuda_device)
+        let q_c =
+            Tensor::from_slice(&q.to_vec::<f32>(), &[b, num_heads, 1, d], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, sk, d], &cuda_device)
             .unwrap();
-        let k_c =
-            Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, sk, d], &cuda_device)
-                .unwrap();
-        let v_c =
-            Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, sk, d], &cuda_device)
-                .unwrap();
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, sk, d], &cuda_device)
+            .unwrap();
         let (cuda_out, _) = cuda_client
             .flash_attention_fwd(
                 &q_c,
@@ -214,14 +208,12 @@ fn test_flash_attention_fwd_windowed_decode_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, num_heads, 1, d], &wgpu_device)
+        let q_w =
+            Tensor::from_slice(&q.to_vec::<f32>(), &[b, num_heads, 1, d], &wgpu_device).unwrap();
+        let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, sk, d], &wgpu_device)
             .unwrap();
-        let k_w =
-            Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, sk, d], &wgpu_device)
-                .unwrap();
-        let v_w =
-            Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, sk, d], &wgpu_device)
-                .unwrap();
+        let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, sk, d], &wgpu_device)
+            .unwrap();
         let (wgpu_out, _) = wgpu_client
             .flash_attention_fwd(
                 &q_w,
@@ -266,14 +258,14 @@ fn test_flash_attention_bwd_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
         let (out_c, lse_c) = cuda_client
             .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0, None)
             .unwrap();
         let dout_c =
-            Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+            Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
         let (dq_c, dk_c, dv_c) = cuda_client
             .flash_attention_bwd(&dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, h, h, d, false, 0)
             .unwrap();
@@ -298,14 +290,14 @@ fn test_flash_attention_bwd_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let k_w = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let v_w = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
         let (out_w, lse_w) = wgpu_client
             .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0, None)
             .unwrap();
         let dout_w =
-            Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+            Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
         // BWD not yet implemented on WebGPU — skip gracefully
         if let Ok((dq_w, dk_w, dv_w)) = wgpu_client
             .flash_attention_bwd(&dout_w, &q_w, &k_w, &v_w, &out_w, &lse_w, h, h, d, false, 0)
@@ -358,9 +350,9 @@ fn test_flash_v2_fwd_matches_reference() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
         let (cuda_out, _) = cuda_client
             .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0, None)
             .unwrap();
@@ -375,9 +367,9 @@ fn test_flash_v2_fwd_matches_reference() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let k_w = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let v_w = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
         let (wgpu_out, _) = wgpu_client
             .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0, None)
             .unwrap();
@@ -416,9 +408,9 @@ fn test_flash_v2_fwd_causal_matches_reference() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
         let (cuda_out, _) = cuda_client
             .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0, None)
             .unwrap();
@@ -433,9 +425,9 @@ fn test_flash_v2_fwd_causal_matches_reference() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let k_w = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let v_w = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
         let (wgpu_out, _) = wgpu_client
             .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, true, 0, None)
             .unwrap();
@@ -479,11 +471,11 @@ fn test_flash_v2_bwd_gradients_nonzero() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
         let dout_c =
-            Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+            Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
         let (out_c, lse_c) = cuda_client
             .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, 0, None)
             .unwrap();
@@ -505,11 +497,11 @@ fn test_flash_v2_bwd_gradients_nonzero() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let k_w = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let v_w = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
         let dout_w =
-            Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+            Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
         let (out_w, lse_w) = wgpu_client
             .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, 0, None)
             .unwrap();
@@ -581,14 +573,13 @@ fn test_gqa_correctness_various_ratios() {
         with_cuda_backend(|cuda_client, cuda_device| {
             use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
             use numr::tensor::Tensor;
-            let q_c =
-                Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device)
-                    .unwrap();
+            let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device)
+                .unwrap();
             let k_c =
-                Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device)
+                Tensor::from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device)
                     .unwrap();
             let v_c =
-                Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device)
+                Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device)
                     .unwrap();
             let (cuda_out, _) = cuda_client
                 .flash_attention_fwd(&q_c, &k_c, &v_c, num_heads, num_kv_heads, d, false, 0, None)
@@ -604,14 +595,13 @@ fn test_gqa_correctness_various_ratios() {
         with_wgpu_backend(|wgpu_client, wgpu_device| {
             use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
             use numr::tensor::Tensor;
-            let q_w =
-                Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &wgpu_device)
-                    .unwrap();
+            let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &wgpu_device)
+                .unwrap();
             let k_w =
-                Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, s, d], &wgpu_device)
+                Tensor::from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, s, d], &wgpu_device)
                     .unwrap();
             let v_w =
-                Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &wgpu_device)
+                Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &wgpu_device)
                     .unwrap();
             let (wgpu_out, _) = wgpu_client
                 .flash_attention_fwd(&q_w, &k_w, &v_w, num_heads, num_kv_heads, d, false, 0, None)
@@ -661,9 +651,9 @@ fn test_sliding_window_correctness() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
         let (cuda_win_out, _) = cuda_client
             .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, window_size, None)
             .unwrap();
@@ -695,9 +685,9 @@ fn test_sliding_window_correctness() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let k_w = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
-        let v_w = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
         let (wgpu_win_out, _) = wgpu_client
             .flash_attention_fwd(&q_w, &k_w, &v_w, h, h, d, false, window_size, None)
             .unwrap();
@@ -770,11 +760,11 @@ fn test_flash_attention_bwd_windowed_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
         let dout_c =
-            Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+            Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
 
         let (out_c, lse_c) = cuda_client
             .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, window, None)
@@ -836,14 +826,11 @@ fn test_flash_attention_bwd_window_zero_unchanged() {
         with_cuda_backend(|cuda_client, cuda_device| {
             use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
             use numr::tensor::Tensor;
-            let q_c =
-                Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-            let k_c =
-                Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-            let v_c =
-                Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+            let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+            let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+            let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
             let dout_c =
-                Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+                Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
             let (out_c, lse_c) = cuda_client
                 .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, causal, 0, None)
                 .unwrap();
@@ -890,11 +877,11 @@ fn test_flash_attention_bwd_excluded_key_has_zero_grad() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, sq, d], &cuda_device).unwrap();
-        let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, sk, d], &cuda_device).unwrap();
-        let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, sk, d], &cuda_device).unwrap();
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, sq, d], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, sk, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, sk, d], &cuda_device).unwrap();
         let dout_c =
-            Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, h, sq, d], &cuda_device).unwrap();
+            Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, sq, d], &cuda_device).unwrap();
         let (out_c, lse_c) = cuda_client
             .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, false, window, None)
             .unwrap();
@@ -970,11 +957,11 @@ fn test_flash_attention_bwd_causal_head_dim_128_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-        let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
         let dout_c =
-            Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+            Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
         let (out_c, lse_c) = cuda_client
             .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0, None)
             .unwrap();
@@ -1030,14 +1017,11 @@ fn test_flash_attention_bwd_causal_small_head_dim_parity() {
         with_cuda_backend(|cuda_client, cuda_device| {
             use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
             use numr::tensor::Tensor;
-            let q_c =
-                Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-            let k_c =
-                Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
-            let v_c =
-                Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+            let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+            let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+            let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
             let dout_c =
-                Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+                Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
             let (out_c, lse_c) = cuda_client
                 .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0, None)
                 .unwrap();
@@ -1089,11 +1073,11 @@ fn test_flash_attention_bwd_causal_key_offset_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, sq, d], &cuda_device).unwrap();
-        let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, sk, d], &cuda_device).unwrap();
-        let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, sk, d], &cuda_device).unwrap();
+        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, sq, d], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, sk, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, sk, d], &cuda_device).unwrap();
         let dout_c =
-            Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, h, sq, d], &cuda_device).unwrap();
+            Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, sq, d], &cuda_device).unwrap();
         let (out_c, lse_c) = cuda_client
             .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, true, 0, None)
             .unwrap();
@@ -1167,17 +1151,14 @@ fn assert_flash_bwd_kv_parity(
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device)
-            .unwrap();
+        let q_c =
+            Tensor::from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device).unwrap();
         let k_c =
-            Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device)
-                .unwrap();
+            Tensor::from_slice(&k.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device).unwrap();
         let v_c =
-            Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device)
-                .unwrap();
+            Tensor::from_slice(&v.to_vec::<f32>(), &[b, num_kv_heads, s, d], &cuda_device).unwrap();
         let dout_c =
-            Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device)
-                .unwrap();
+            Tensor::from_slice(&dout.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device).unwrap();
         let (out_c, lse_c) = cuda_client
             .flash_attention_fwd(
                 &q_c,
@@ -1313,7 +1294,7 @@ fn assert_flash_bwd_fp8_kv_parity(num_heads: usize, num_kv_heads: usize, label: 
 
     with_cuda_backend(|cuda_client, cuda_device| {
         let to_fp8 = |data: &[f32], shape: &[usize]| {
-            let t = Tensor::try_from_slice(data, shape, &cuda_device).unwrap();
+            let t = Tensor::from_slice(data, shape, &cuda_device).unwrap();
             cuda_client.cast(&t, DType::FP8E4M3).unwrap()
         };
 
@@ -1483,15 +1464,14 @@ fn test_flash_attention_bwd_head_dim_sweep_parity() {
             with_cuda_backend(|cuda_client, cuda_device| {
                 use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
                 use numr::tensor::Tensor;
-                let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device)
-                    .unwrap();
-                let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device)
-                    .unwrap();
-                let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device)
-                    .unwrap();
+                let q_c =
+                    Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+                let k_c =
+                    Tensor::from_slice(&k.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+                let v_c =
+                    Tensor::from_slice(&v.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
                 let dout_c =
-                    Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device)
-                        .unwrap();
+                    Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
                 let (out_c, lse_c) = cuda_client
                     .flash_attention_fwd(&q_c, &k_c, &v_c, h, h, d, causal, 0, None)
                     .unwrap();

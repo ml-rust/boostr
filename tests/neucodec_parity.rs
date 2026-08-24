@@ -135,7 +135,7 @@ fn decoder_matches_upstream_neucodec_reference() {
     );
 
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&input, &[1, frames, cfg.fc_in_dim], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&input, &[1, frames, cfg.fc_in_dim], &device).unwrap(),
         false,
     );
 
@@ -221,7 +221,7 @@ fn codec_matches_upstream_from_indices() {
     let idx_f32 = read_f32(&fx.dir.join("ref_fsq_indices.f32"));
     let frames = idx_f32.len();
     let idx: Vec<i32> = idx_f32.iter().map(|v| *v as i32).collect();
-    let indices = Tensor::<CpuRuntime>::try_from_slice(&idx, &[1, frames], &device).unwrap();
+    let indices = Tensor::<CpuRuntime>::from_slice(&idx, &[1, frames], &device).unwrap();
 
     // --- Dequantization ---------------------------------------------------
     let features = codec
@@ -288,7 +288,7 @@ fn decodes_real_speech_matching_upstream() {
 
     let idx = read_i32(&idx_path);
     let frames = idx.len();
-    let indices = Tensor::<CpuRuntime>::try_from_slice(&idx, &[1, frames], &device).unwrap();
+    let indices = Tensor::<CpuRuntime>::from_slice(&idx, &[1, frames], &device).unwrap();
 
     let waveform = codec.decode(&client, &indices).expect("decode");
     assert_eq!(waveform.shape(), &[1, frames * cfg.hop_length]);

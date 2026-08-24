@@ -96,8 +96,8 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         validate_f32(input, "quantize_kv_fp8_per_token")?;
 
         let quantized =
-            Tensor::<WgpuRuntime>::try_zeros(&[num_tokens, head_dim], DType::F32, input.device())?;
-        let scales = Tensor::<WgpuRuntime>::try_zeros(&[num_tokens], DType::F32, input.device())?;
+            Tensor::<WgpuRuntime>::zeros(&[num_tokens, head_dim], DType::F32, input.device())?;
+        let scales = Tensor::<WgpuRuntime>::zeros(&[num_tokens], DType::F32, input.device())?;
 
         let input_buf = get_buffer(input.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "input buffer not found".into(),
@@ -143,11 +143,8 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         validate_f32(quantized, "dequantize_kv_fp8_per_token")?;
         validate_f32(scales, "dequantize_kv_fp8_per_token")?;
 
-        let output = Tensor::<WgpuRuntime>::try_zeros(
-            &[num_tokens, head_dim],
-            DType::F32,
-            quantized.device(),
-        )?;
+        let output =
+            Tensor::<WgpuRuntime>::zeros(&[num_tokens, head_dim], DType::F32, quantized.device())?;
 
         let quant_buf =
             get_buffer(quantized.storage().ptr()).ok_or_else(|| Error::KernelError {
@@ -199,13 +196,10 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         let num_groups = (num_tokens * head_dim) / group_sz;
 
         // Packed uses u32 via DType::I32 (same size), but we use F32 for WebGPU compatibility
-        let packed = Tensor::<WgpuRuntime>::try_zeros(
-            &[num_tokens, head_dim / 2],
-            DType::F32,
-            input.device(),
-        )?;
-        let scales = Tensor::<WgpuRuntime>::try_zeros(&[num_groups], DType::F32, input.device())?;
-        let zeros = Tensor::<WgpuRuntime>::try_zeros(&[num_groups], DType::F32, input.device())?;
+        let packed =
+            Tensor::<WgpuRuntime>::zeros(&[num_tokens, head_dim / 2], DType::F32, input.device())?;
+        let scales = Tensor::<WgpuRuntime>::zeros(&[num_groups], DType::F32, input.device())?;
+        let zeros = Tensor::<WgpuRuntime>::zeros(&[num_groups], DType::F32, input.device())?;
 
         let input_buf = get_buffer(input.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "input buffer not found".into(),
@@ -262,7 +256,7 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         validate_f32(zeros, "dequantize_kv_int4")?;
 
         let output =
-            Tensor::<WgpuRuntime>::try_zeros(&[num_tokens, head_dim], DType::F32, packed.device())?;
+            Tensor::<WgpuRuntime>::zeros(&[num_tokens, head_dim], DType::F32, packed.device())?;
 
         let packed_buf = get_buffer(packed.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "packed buffer not found".into(),
@@ -310,8 +304,8 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         validate_f32(input, "quantize_kv_int8")?;
 
         let quantized =
-            Tensor::<WgpuRuntime>::try_zeros(&[num_tokens, head_dim], DType::F32, input.device())?;
-        let scales = Tensor::<WgpuRuntime>::try_zeros(&[num_tokens], DType::F32, input.device())?;
+            Tensor::<WgpuRuntime>::zeros(&[num_tokens, head_dim], DType::F32, input.device())?;
+        let scales = Tensor::<WgpuRuntime>::zeros(&[num_tokens], DType::F32, input.device())?;
 
         let input_buf = get_buffer(input.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "input buffer not found".into(),
@@ -356,11 +350,8 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         validate_f32(quantized, "dequantize_kv_int8")?;
         validate_f32(scales, "dequantize_kv_int8")?;
 
-        let output = Tensor::<WgpuRuntime>::try_zeros(
-            &[num_tokens, head_dim],
-            DType::F32,
-            quantized.device(),
-        )?;
+        let output =
+            Tensor::<WgpuRuntime>::zeros(&[num_tokens, head_dim], DType::F32, quantized.device())?;
 
         let quant_buf =
             get_buffer(quantized.storage().ptr()).ok_or_else(|| Error::KernelError {

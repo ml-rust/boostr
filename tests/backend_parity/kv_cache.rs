@@ -13,11 +13,9 @@ fn test_kv_cache_update_parity() {
     // Zero-init caches
     let zeros = vec![0.0f32; b * kv_heads * max_seq * d];
     let k_cache =
-        numr::tensor::Tensor::try_from_slice(&zeros, &[b, kv_heads, max_seq, d], &cpu_device)
-            .unwrap();
+        numr::tensor::Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cpu_device).unwrap();
     let v_cache =
-        numr::tensor::Tensor::try_from_slice(&zeros, &[b, kv_heads, max_seq, d], &cpu_device)
-            .unwrap();
+        numr::tensor::Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cpu_device).unwrap();
     let new_k = det_tensor(&[b, kv_heads, new_len, d], &cpu_device);
     let new_v = det_tensor(&[b, kv_heads, new_len, d], &cpu_device);
 
@@ -31,25 +29,25 @@ fn test_kv_cache_update_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
         use numr::tensor::Tensor;
-        let k_c = Tensor::try_from_slice(
+        let k_c = Tensor::from_slice(
             &vec![0.0f32; b * kv_heads * max_seq * d],
             &[b, kv_heads, max_seq, d],
             &cuda_device,
         )
         .unwrap();
-        let v_c = Tensor::try_from_slice(
+        let v_c = Tensor::from_slice(
             &vec![0.0f32; b * kv_heads * max_seq * d],
             &[b, kv_heads, max_seq, d],
             &cuda_device,
         )
         .unwrap();
-        let nk = Tensor::try_from_slice(
+        let nk = Tensor::from_slice(
             &new_k.to_vec::<f32>(),
             &[b, kv_heads, new_len, d],
             &cuda_device,
         )
         .unwrap();
-        let nv = Tensor::try_from_slice(
+        let nv = Tensor::from_slice(
             &new_v.to_vec::<f32>(),
             &[b, kv_heads, new_len, d],
             &cuda_device,
@@ -74,25 +72,25 @@ fn test_kv_cache_update_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
         use numr::tensor::Tensor;
-        let k_w = Tensor::try_from_slice(
+        let k_w = Tensor::from_slice(
             &vec![0.0f32; b * kv_heads * max_seq * d],
             &[b, kv_heads, max_seq, d],
             &wgpu_device,
         )
         .unwrap();
-        let v_w = Tensor::try_from_slice(
+        let v_w = Tensor::from_slice(
             &vec![0.0f32; b * kv_heads * max_seq * d],
             &[b, kv_heads, max_seq, d],
             &wgpu_device,
         )
         .unwrap();
-        let nk = Tensor::try_from_slice(
+        let nk = Tensor::from_slice(
             &new_k.to_vec::<f32>(),
             &[b, kv_heads, new_len, d],
             &wgpu_device,
         )
         .unwrap();
-        let nv = Tensor::try_from_slice(
+        let nv = Tensor::from_slice(
             &new_v.to_vec::<f32>(),
             &[b, kv_heads, new_len, d],
             &wgpu_device,
@@ -126,13 +124,13 @@ fn test_reshape_and_cache_parity() {
     let key = det_tensor(&[num_tokens, num_heads, d], &cpu_device);
     let value = det_tensor(&[num_tokens, num_heads, d], &cpu_device);
     let zeros = vec![0.0f32; num_blocks * block_size * num_heads * d];
-    let key_cache = numr::tensor::Tensor::try_from_slice(
+    let key_cache = numr::tensor::Tensor::from_slice(
         &zeros,
         &[num_blocks, block_size, num_heads, d],
         &cpu_device,
     )
     .unwrap();
-    let value_cache = numr::tensor::Tensor::try_from_slice(
+    let value_cache = numr::tensor::Tensor::from_slice(
         &zeros,
         &[num_blocks, block_size, num_heads, d],
         &cpu_device,
@@ -141,7 +139,7 @@ fn test_reshape_and_cache_parity() {
     // Slot mapping: tokens go into slots 0,1,4,5 (block 0 slots 0-1, block 1 slots 0-1)
     let slot_data: Vec<i32> = vec![0, 1, 4, 5];
     let slot_mapping =
-        numr::tensor::Tensor::try_from_slice(&slot_data, &[num_tokens], &cpu_device).unwrap();
+        numr::tensor::Tensor::from_slice(&slot_data, &[num_tokens], &cpu_device).unwrap();
 
     cpu_client
         .reshape_and_cache(
@@ -160,31 +158,31 @@ fn test_reshape_and_cache_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
         use numr::tensor::Tensor;
-        let k = Tensor::try_from_slice(
+        let k = Tensor::from_slice(
             &key.to_vec::<f32>(),
             &[num_tokens, num_heads, d],
             &cuda_device,
         )
         .unwrap();
-        let v = Tensor::try_from_slice(
+        let v = Tensor::from_slice(
             &value.to_vec::<f32>(),
             &[num_tokens, num_heads, d],
             &cuda_device,
         )
         .unwrap();
-        let kc = Tensor::try_from_slice(
+        let kc = Tensor::from_slice(
             &vec![0.0f32; num_blocks * block_size * num_heads * d],
             &[num_blocks, block_size, num_heads, d],
             &cuda_device,
         )
         .unwrap();
-        let vc = Tensor::try_from_slice(
+        let vc = Tensor::from_slice(
             &vec![0.0f32; num_blocks * block_size * num_heads * d],
             &[num_blocks, block_size, num_heads, d],
             &cuda_device,
         )
         .unwrap();
-        let sm = Tensor::try_from_slice(&slot_data, &[num_tokens], &cuda_device).unwrap();
+        let sm = Tensor::from_slice(&slot_data, &[num_tokens], &cuda_device).unwrap();
         cuda_client
             .reshape_and_cache(&k, &v, &kc, &vc, &sm, block_size)
             .unwrap();
@@ -204,31 +202,31 @@ fn test_reshape_and_cache_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
         use numr::tensor::Tensor;
-        let k = Tensor::try_from_slice(
+        let k = Tensor::from_slice(
             &key.to_vec::<f32>(),
             &[num_tokens, num_heads, d],
             &wgpu_device,
         )
         .unwrap();
-        let v = Tensor::try_from_slice(
+        let v = Tensor::from_slice(
             &value.to_vec::<f32>(),
             &[num_tokens, num_heads, d],
             &wgpu_device,
         )
         .unwrap();
-        let kc = Tensor::try_from_slice(
+        let kc = Tensor::from_slice(
             &vec![0.0f32; num_blocks * block_size * num_heads * d],
             &[num_blocks, block_size, num_heads, d],
             &wgpu_device,
         )
         .unwrap();
-        let vc = Tensor::try_from_slice(
+        let vc = Tensor::from_slice(
             &vec![0.0f32; num_blocks * block_size * num_heads * d],
             &[num_blocks, block_size, num_heads, d],
             &wgpu_device,
         )
         .unwrap();
-        let sm = Tensor::try_from_slice(&slot_data, &[num_tokens], &wgpu_device).unwrap();
+        let sm = Tensor::from_slice(&slot_data, &[num_tokens], &wgpu_device).unwrap();
         wgpu_client
             .reshape_and_cache(&k, &v, &kc, &vc, &sm, block_size)
             .unwrap();

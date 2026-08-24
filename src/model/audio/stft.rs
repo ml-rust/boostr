@@ -152,8 +152,8 @@ pub fn stft(
     }
 
     let device = waveform.device();
-    let mag = Tensor::<CpuRuntime>::try_from_slice(&mag_out, &[b, f_bins, t_spec], device)?;
-    let phase = Tensor::<CpuRuntime>::try_from_slice(&phase_out, &[b, f_bins, t_spec], device)?;
+    let mag = Tensor::<CpuRuntime>::from_slice(&mag_out, &[b, f_bins, t_spec], device)?;
+    let phase = Tensor::<CpuRuntime>::from_slice(&phase_out, &[b, f_bins, t_spec], device)?;
     Ok((mag, phase))
 }
 
@@ -168,7 +168,7 @@ mod tests {
         shape: &[usize],
         device: &<CpuRuntime as numr::runtime::Runtime>::Device,
     ) -> Tensor<CpuRuntime> {
-        Tensor::<CpuRuntime>::try_from_slice(data, shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(data, shape, device).unwrap()
     }
 
     #[test]

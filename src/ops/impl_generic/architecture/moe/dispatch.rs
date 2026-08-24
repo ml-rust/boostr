@@ -76,7 +76,7 @@ where
     let token_source_data: Vec<i32> = (0..num_tokens)
         .flat_map(|t| std::iter::repeat_n(t as i32, k))
         .collect();
-    let token_source = Tensor::<R>::try_from_slice(&token_source_data, &[total], device)?;
+    let token_source = Tensor::<R>::from_slice(&token_source_data, &[total], device)?;
 
     // Reorder token_source by sort_perm to get the token index for each position in sorted order
     let sorted_token_indices = client
@@ -105,7 +105,7 @@ where
     };
     let cumsum = client.cumsum(&counts_i32, 0).map_err(Error::Numr)?;
     // Prepend 0 to form CSR offsets [0, c0, c0+c1, ..., total]
-    let zero = Tensor::<R>::try_zeros(&[1], DType::I32, device)?;
+    let zero = Tensor::<R>::zeros(&[1], DType::I32, device)?;
     let expert_offsets = client.cat(&[&zero, &cumsum], 0).map_err(Error::Numr)?;
 
     // Cast sort_perm to I32 (argsort returns I64 on CPU, I32 on WebGPU)
@@ -170,8 +170,8 @@ where
     // arange is a static CPU-generated sequence of known size — not a GPU data download.
     let device = expert_output.device();
     let arange_data: Vec<i32> = (0..total as i32).collect();
-    let values = Tensor::<R>::try_from_slice(&arange_data, &[total], device)?;
-    let inv_perm_base = Tensor::<R>::try_zeros(&[total], DType::I32, device)?;
+    let values = Tensor::<R>::from_slice(&arange_data, &[total], device)?;
+    let inv_perm_base = Tensor::<R>::zeros(&[total], DType::I32, device)?;
     let inv_perm = client
         .scatter(&inv_perm_base, 0, sort_indices, &values)
         .map_err(Error::Numr)?;
@@ -215,18 +215,18 @@ mod tests {
             .map(|i| i as f32 * 0.1)
             .collect();
         let tokens =
-            Tensor::<CpuRuntime>::try_from_slice(&tokens_data, &[num_tokens, hidden_dim], &device)
+            Tensor::<CpuRuntime>::from_slice(&tokens_data, &[num_tokens, hidden_dim], &device)
                 .unwrap();
 
         // Create expert indices [num_tokens, k]
         let indices_data: Vec<i32> = vec![0, 1, 2, 0, 1, 2, 0, 1];
         let indices =
-            Tensor::<CpuRuntime>::try_from_slice(&indices_data, &[num_tokens, k], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&indices_data, &[num_tokens, k], &device).unwrap();
 
         // Equal weights
         let weights_data: Vec<f32> = vec![0.5; num_tokens * k];
         let weights =
-            Tensor::<CpuRuntime>::try_from_slice(&weights_data, &[num_tokens, k], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&weights_data, &[num_tokens, k], &device).unwrap();
 
         let (permuted, offsets, sort_indices) =
             moe_permute_tokens_impl(&client, &tokens, &indices, num_experts).unwrap();

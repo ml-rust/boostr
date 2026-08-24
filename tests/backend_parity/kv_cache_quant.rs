@@ -28,7 +28,7 @@ fn test_quantize_dequantize_fp8_roundtrip_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
         use numr::tensor::Tensor;
-        let inp = Tensor::try_from_slice(
+        let inp = Tensor::from_slice(
             &input.to_vec::<f32>(),
             &[num_tokens, head_dim],
             &cuda_device,
@@ -55,7 +55,7 @@ fn test_quantize_dequantize_fp8_roundtrip_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
         use numr::tensor::Tensor;
-        let inp = Tensor::try_from_slice(
+        let inp = Tensor::from_slice(
             &input.to_vec::<f32>(),
             &[num_tokens, head_dim],
             &wgpu_device,
@@ -95,7 +95,7 @@ fn test_quantize_dequantize_int4_roundtrip_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
         use numr::tensor::Tensor;
-        let inp = Tensor::try_from_slice(
+        let inp = Tensor::from_slice(
             &input.to_vec::<f32>(),
             &[num_tokens, head_dim],
             &cuda_device,
@@ -118,7 +118,7 @@ fn test_quantize_dequantize_int4_roundtrip_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
         use numr::tensor::Tensor;
-        let inp = Tensor::try_from_slice(
+        let inp = Tensor::from_slice(
             &input.to_vec::<f32>(),
             &[num_tokens, head_dim],
             &wgpu_device,
@@ -157,7 +157,7 @@ fn test_quantize_dequantize_int8_roundtrip_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
         use numr::tensor::Tensor;
-        let inp = Tensor::try_from_slice(
+        let inp = Tensor::from_slice(
             &input.to_vec::<f32>(),
             &[num_tokens, head_dim],
             &cuda_device,
@@ -180,7 +180,7 @@ fn test_quantize_dequantize_int8_roundtrip_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
         use numr::tensor::Tensor;
-        let inp = Tensor::try_from_slice(
+        let inp = Tensor::from_slice(
             &input.to_vec::<f32>(),
             &[num_tokens, head_dim],
             &wgpu_device,

@@ -129,33 +129,32 @@ impl BwdTestCase {
     /// Run fwd + bwd on CPU (f32 reference).
     fn run_cpu(&self) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let (client, dev) = cpu_setup();
-        let q = Tensor::<CpuRuntime>::try_from_slice(
+        let q = Tensor::<CpuRuntime>::from_slice(
             &self.q_data,
             &[self.total_tokens, self.num_heads, self.head_dim],
             &dev,
         )
         .unwrap();
-        let k = Tensor::<CpuRuntime>::try_from_slice(
+        let k = Tensor::<CpuRuntime>::from_slice(
             &self.k_data,
             &[self.total_tokens, self.num_kv_heads, self.head_dim],
             &dev,
         )
         .unwrap();
-        let v = Tensor::<CpuRuntime>::try_from_slice(
+        let v = Tensor::<CpuRuntime>::from_slice(
             &self.v_data,
             &[self.total_tokens, self.num_kv_heads, self.head_dim],
             &dev,
         )
         .unwrap();
-        let dout = Tensor::<CpuRuntime>::try_from_slice(
+        let dout = Tensor::<CpuRuntime>::from_slice(
             &self.do_data,
             &[self.total_tokens, self.num_heads, self.head_dim],
             &dev,
         )
         .unwrap();
-        let cu =
-            Tensor::<CpuRuntime>::try_from_slice(&self.cu_seqlens, &[self.batch_size + 1], &dev)
-                .unwrap();
+        let cu = Tensor::<CpuRuntime>::from_slice(&self.cu_seqlens, &[self.batch_size + 1], &dev)
+            .unwrap();
 
         let (out, lse) = client
             .varlen_attention_fwd(
@@ -202,36 +201,33 @@ impl BwdTestCase {
         let (client, cuda_dev) = cuda_setup();
         let (_, cpu_dev) = cpu_setup();
 
-        let q = Tensor::<CudaRuntime>::try_from_slice(
+        let q = Tensor::<CudaRuntime>::from_slice(
             &self.q_data,
             &[self.total_tokens, self.num_heads, self.head_dim],
             &cuda_dev,
         )
         .unwrap();
-        let k = Tensor::<CudaRuntime>::try_from_slice(
+        let k = Tensor::<CudaRuntime>::from_slice(
             &self.k_data,
             &[self.total_tokens, self.num_kv_heads, self.head_dim],
             &cuda_dev,
         )
         .unwrap();
-        let v = Tensor::<CudaRuntime>::try_from_slice(
+        let v = Tensor::<CudaRuntime>::from_slice(
             &self.v_data,
             &[self.total_tokens, self.num_kv_heads, self.head_dim],
             &cuda_dev,
         )
         .unwrap();
-        let dout = Tensor::<CudaRuntime>::try_from_slice(
+        let dout = Tensor::<CudaRuntime>::from_slice(
             &self.do_data,
             &[self.total_tokens, self.num_heads, self.head_dim],
             &cuda_dev,
         )
         .unwrap();
-        let cu = Tensor::<CudaRuntime>::try_from_slice(
-            &self.cu_seqlens,
-            &[self.batch_size + 1],
-            &cuda_dev,
-        )
-        .unwrap();
+        let cu =
+            Tensor::<CudaRuntime>::from_slice(&self.cu_seqlens, &[self.batch_size + 1], &cuda_dev)
+                .unwrap();
 
         let (out, lse) = client
             .varlen_attention_fwd(
@@ -376,32 +372,25 @@ fn test_cuda_varlen_bwd_fp16_gqa_no_corruption() {
 
     let (client, cuda_dev) = cuda_setup();
 
-    let q = Tensor::<CudaRuntime>::try_from_slice(
-        &q_f16,
-        &[total_tokens, num_heads, head_dim],
-        &cuda_dev,
-    )
-    .unwrap();
-    let k = Tensor::<CudaRuntime>::try_from_slice(
+    let q =
+        Tensor::<CudaRuntime>::from_slice(&q_f16, &[total_tokens, num_heads, head_dim], &cuda_dev)
+            .unwrap();
+    let k = Tensor::<CudaRuntime>::from_slice(
         &k_f16,
         &[total_tokens, num_kv_heads, head_dim],
         &cuda_dev,
     )
     .unwrap();
-    let v = Tensor::<CudaRuntime>::try_from_slice(
+    let v = Tensor::<CudaRuntime>::from_slice(
         &v_f16,
         &[total_tokens, num_kv_heads, head_dim],
         &cuda_dev,
     )
     .unwrap();
-    let dout = Tensor::<CudaRuntime>::try_from_slice(
-        &do_f16,
-        &[total_tokens, num_heads, head_dim],
-        &cuda_dev,
-    )
-    .unwrap();
-    let cu =
-        Tensor::<CudaRuntime>::try_from_slice(&cu_seqlens, &[batch_size + 1], &cuda_dev).unwrap();
+    let dout =
+        Tensor::<CudaRuntime>::from_slice(&do_f16, &[total_tokens, num_heads, head_dim], &cuda_dev)
+            .unwrap();
+    let cu = Tensor::<CudaRuntime>::from_slice(&cu_seqlens, &[batch_size + 1], &cuda_dev).unwrap();
 
     let (out, lse) = client
         .varlen_attention_fwd(

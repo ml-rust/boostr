@@ -321,7 +321,7 @@ pub fn gather_from_ranks<R: Runtime<DType = DType>>(
     let total_count = count * world_size;
 
     // Allocate receive buffer
-    let recv = Tensor::<R>::try_zeros(&[total_count], dtype, local_shard.device())?;
+    let recv = Tensor::<R>::zeros(&[total_count], dtype, local_shard.device())?;
 
     unsafe {
         comm.all_gather(local_shard.ptr(), recv.ptr(), count, dtype)
@@ -367,7 +367,7 @@ mod tests {
         let comm = NoOpCommunicator;
 
         // weight: [4, 3] — 4 out_features, 3 in_features
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
         let col = ColumnParallelLinear::new(&weight, None, &comm, false).unwrap();
 
         // world_size=1, rank=0 → shard is full weight
@@ -379,16 +379,13 @@ mod tests {
         let (client, device) = cpu_setup();
         let comm = NoOpCommunicator;
 
-        let weight = Tensor::<CpuRuntime>::try_from_slice(
-            &[1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0],
-            &[2, 3],
-            &device,
-        )
-        .unwrap();
+        let weight =
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0], &[2, 3], &device)
+                .unwrap();
         let col = ColumnParallelLinear::new(&weight, None, &comm, false).unwrap();
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[1, 3], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[1, 3], &device).unwrap(),
             false,
         );
         let out = col.forward(&client, &input).unwrap();
@@ -400,7 +397,7 @@ mod tests {
         let (_client, device) = cpu_setup();
         let comm = Arc::new(NoOpCommunicator);
 
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
         let row = RowParallelLinear::new(&weight, None, comm, false).unwrap();
 
         assert_eq!(row.weight().shape(), &[2, 3]);
@@ -411,16 +408,13 @@ mod tests {
         let (client, device) = cpu_setup();
         let comm = Arc::new(NoOpCommunicator);
 
-        let weight = Tensor::<CpuRuntime>::try_from_slice(
-            &[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0],
-            &[2, 3],
-            &device,
-        )
-        .unwrap();
+        let weight =
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0], &[2, 3], &device)
+                .unwrap();
         let row = RowParallelLinear::new(&weight, None, comm, false).unwrap();
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[1, 3], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[1, 3], &device).unwrap(),
             false,
         );
         let out = row.forward(&client, &input).unwrap();
@@ -430,7 +424,7 @@ mod tests {
     #[test]
     fn test_scatter_to_rank() {
         let (_client, device) = cpu_setup();
-        let tensor = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
+        let tensor = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
 
         // world_size=1
         let shard = scatter_to_rank(&tensor, 0, 0, 1).unwrap();
@@ -447,8 +441,7 @@ mod tests {
     fn test_gather_from_ranks_noop() {
         let (_client, device) = cpu_setup();
         let comm = NoOpCommunicator;
-        let shard =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap();
+        let shard = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap();
 
         let gathered = gather_from_ranks(&shard, 0, &comm).unwrap();
         assert_eq!(gathered.shape(), &[3]);
@@ -462,7 +455,7 @@ mod tests {
         // Create a fake communicator with world_size=3 to test error
         // NoOpCommunicator has world_size=1, so this always passes.
         // The divisibility check is still exercised via scatter_to_rank.
-        let tensor = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
+        let tensor = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
         let result = scatter_to_rank(&tensor, 0, 0, 3);
         assert!(result.is_err());
     }
@@ -473,13 +466,12 @@ mod tests {
         let comm = NoOpCommunicator;
 
         let weight =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device)
-                .unwrap();
-        let bias = Tensor::<CpuRuntime>::try_from_slice(&[10.0f32, 20.0], &[2], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
+        let bias = Tensor::<CpuRuntime>::from_slice(&[10.0f32, 20.0], &[2], &device).unwrap();
         let col = ColumnParallelLinear::new(&weight, Some(&bias), &comm, false).unwrap();
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[1, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[1, 2], &device).unwrap(),
             false,
         );
         let out = col.forward(&client, &input).unwrap();

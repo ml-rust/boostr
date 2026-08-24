@@ -254,7 +254,7 @@ mod tests {
         // Create a parameter
         let w_id = TensorId::new();
         let w_tensor =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap();
 
         // Regular backward: loss = sum(w * w), grad = 2w
         let w_var = Var::with_id(w_tensor.clone(), w_id, true);

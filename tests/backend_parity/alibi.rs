@@ -10,8 +10,7 @@ fn test_alibi_add_bias_parity() {
 
     // Initialize scores to zero so we can see the bias values
     let zeros = vec![0.0f32; b * h * sq * sk];
-    let scores =
-        numr::tensor::Tensor::try_from_slice(&zeros, &[b, h, sq, sk], &cpu_device).unwrap();
+    let scores = numr::tensor::Tensor::from_slice(&zeros, &[b, h, sq, sk], &cpu_device).unwrap();
 
     cpu_client.alibi_add_bias(&scores, b, h, sq, sk).unwrap();
     let cpu_scores_vec = scores.to_vec::<f32>();
@@ -20,7 +19,7 @@ fn test_alibi_add_bias_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::position::alibi::AlibiOps as _;
         use numr::tensor::Tensor;
-        let s = Tensor::try_from_slice(
+        let s = Tensor::from_slice(
             &vec![0.0f32; b * h * sq * sk],
             &[b, h, sq, sk],
             &cuda_device,
@@ -38,7 +37,7 @@ fn test_alibi_add_bias_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::position::alibi::AlibiOps as _;
         use numr::tensor::Tensor;
-        let s = Tensor::try_from_slice(
+        let s = Tensor::from_slice(
             &vec![0.0f32; b * h * sq * sk],
             &[b, h, sq, sk],
             &wgpu_device,

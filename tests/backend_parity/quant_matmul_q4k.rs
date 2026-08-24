@@ -165,7 +165,7 @@ fn test_q4k_gemm_mwr_correctness() {
 
     // CPU backend sanity check (uses Q8K intermediate → larger tolerance)
     let cpu_device = CpuDevice::new();
-    let act_cpu = Tensor::<CpuRuntime>::try_from_slice(&act_data, &[m, k], &cpu_device).unwrap();
+    let act_cpu = Tensor::<CpuRuntime>::from_slice(&act_data, &[m, k], &cpu_device).unwrap();
     let wt_cpu = QuantTensor::<CpuRuntime>::from_bytes(
         &weight_bytes,
         QuantFormat::Q4K,
@@ -191,7 +191,7 @@ fn test_q4k_gemm_mwr_correctness() {
         use boostr::quant::QuantTensor;
         use numr::tensor::Tensor;
 
-        let act_c = Tensor::try_from_slice(&act_data, &[m, k], &cuda_device).unwrap();
+        let act_c = Tensor::from_slice(&act_data, &[m, k], &cuda_device).unwrap();
         let wt_c = QuantTensor::from_bytes(&weight_bytes, QuantFormat::Q4K, &[n, k], &cuda_device)
             .expect("CUDA Q4K QuantTensor");
 

@@ -104,13 +104,10 @@ pub fn flash_v3_fwd(
         Err(_) => return Ok(None),
     };
 
-    let output = Tensor::<CudaRuntime>::try_empty(
-        &[batch_size, num_heads, seq_len_q, head_dim],
-        dtype,
-        device,
-    )?;
+    let output =
+        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q, head_dim], dtype, device)?;
     let lse =
-        Tensor::<CudaRuntime>::try_empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
+        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
 
     // v3 uses BLOCK_M=128, BLOCK_N=128, 8 warps (256 threads)
     // Double-buffered shared memory: 2 × (Q + K + V) tiles
@@ -208,25 +205,16 @@ pub fn flash_v3_bwd(
         };
 
     // Allocate gradient tensors (dQ zeroed for atomicAdd)
-    let dq = Tensor::<CudaRuntime>::try_zeros(
-        &[batch_size, num_heads, seq_len_q, head_dim],
-        dtype,
-        device,
-    )?;
-    let dk = Tensor::<CudaRuntime>::try_empty(
-        &[batch_size, num_heads, seq_len_k, head_dim],
-        dtype,
-        device,
-    )?;
-    let dv = Tensor::<CudaRuntime>::try_empty(
-        &[batch_size, num_heads, seq_len_k, head_dim],
-        dtype,
-        device,
-    )?;
+    let dq =
+        Tensor::<CudaRuntime>::zeros(&[batch_size, num_heads, seq_len_q, head_dim], dtype, device)?;
+    let dk =
+        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_k, head_dim], dtype, device)?;
+    let dv =
+        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_k, head_dim], dtype, device)?;
 
     // Step 1: Preprocessing — D = rowsum(dO ⊙ O)
     let d_buf =
-        Tensor::<CudaRuntime>::try_empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
+        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
 
     {
         let preprocess_name = format!(

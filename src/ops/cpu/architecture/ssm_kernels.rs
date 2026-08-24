@@ -99,7 +99,7 @@ impl SsmKernelOps<CpuRuntime> for CpuClient {
         }
 
         let device = states.device();
-        Ok(Tensor::<CpuRuntime>::try_from_slice(
+        Ok(Tensor::<CpuRuntime>::from_slice(
             &out_data, s_shape, device,
         )?)
     }

@@ -56,11 +56,11 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
         };
 
         let lora_a = Var::new(
-            Tensor::try_from_slice(&a_data, &[rank, in_features], device)?,
+            Tensor::from_slice(&a_data, &[rank, in_features], device)?,
             true,
         );
         let lora_b = Var::new(
-            Tensor::try_zeros(&[out_features, rank], DType::F32, device)?,
+            Tensor::zeros(&[out_features, rank], DType::F32, device)?,
             true,
         );
 

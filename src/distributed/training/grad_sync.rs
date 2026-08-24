@@ -104,7 +104,7 @@ mod tests {
         let comm = NoOpCommunicator;
 
         let id = TensorId::new();
-        let t = Tensor::<CpuRuntime>::try_from_slice(&[2.0f32, 4.0, 6.0], &[3], &device).unwrap();
+        let t = Tensor::<CpuRuntime>::from_slice(&[2.0f32, 4.0, 6.0], &[3], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(id, t);
 
@@ -133,7 +133,7 @@ mod tests {
         let comm = NoOpCommunicator;
 
         let id = TensorId::new();
-        let t = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let t = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let mut params = HashMap::new();
         params.insert(id, t);
 

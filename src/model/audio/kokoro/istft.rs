@@ -231,7 +231,7 @@ pub fn istft(
     };
 
     let device = mag.device();
-    Ok(Tensor::<CpuRuntime>::try_from_slice(
+    Ok(Tensor::<CpuRuntime>::from_slice(
         &output,
         &[b, out_len],
         device,
@@ -250,7 +250,7 @@ mod tests {
         shape: &[usize],
         device: &<CpuRuntime as Runtime>::Device,
     ) -> Tensor<CpuRuntime> {
-        Tensor::<CpuRuntime>::try_from_slice(data, shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(data, shape, device).unwrap()
     }
 
     #[test]

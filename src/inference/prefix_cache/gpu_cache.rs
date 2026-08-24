@@ -169,13 +169,13 @@ mod inner {
             let keys_as_i64: &[i64] =
                 unsafe { std::slice::from_raw_parts(keys.as_ptr() as *const i64, keys.len()) };
 
-            self.device_keys = Some(Tensor::<CudaRuntime>::try_from_slice(
+            self.device_keys = Some(Tensor::<CudaRuntime>::from_slice(
                 keys_as_i64,
                 &[keys.len()],
                 &self.device,
             )?);
 
-            self.device_values = Some(Tensor::<CudaRuntime>::try_from_slice(
+            self.device_values = Some(Tensor::<CudaRuntime>::from_slice(
                 values,
                 &[values.len()],
                 &self.device,
@@ -225,11 +225,8 @@ mod inner {
 
             // Create query tensor on device
             let hashes_i64: Vec<i64> = token_block_hashes.iter().map(|&h| h as i64).collect();
-            let query_tensor = Tensor::<CudaRuntime>::try_from_slice(
-                &hashes_i64,
-                &[hashes_i64.len()],
-                &self.device,
-            )?;
+            let query_tensor =
+                Tensor::<CudaRuntime>::from_slice(&hashes_i64, &[hashes_i64.len()], &self.device)?;
 
             // GPU lookup
             let gpu_result = self.lookup_gpu(client, &query_tensor)?;

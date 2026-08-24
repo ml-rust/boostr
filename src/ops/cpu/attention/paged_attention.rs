@@ -39,7 +39,7 @@ fn gather_paged_kv(
         }
     }
 
-    Ok(Tensor::<CpuRuntime>::try_from_slice(
+    Ok(Tensor::<CpuRuntime>::from_slice(
         &out,
         &[batch_size, 1, seq_len_k, head_dim],
         kv_blocks.device(),
@@ -251,7 +251,7 @@ fn scatter_to_paged(
         }
     }
 
-    Ok(Tensor::<CpuRuntime>::try_from_slice(
+    Ok(Tensor::<CpuRuntime>::from_slice(
         &out,
         block_shape,
         kv_blocks_ref.device(),
@@ -269,7 +269,7 @@ mod tests {
     ) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
         let data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.1).sin() * 0.5).collect();
-        Tensor::<CpuRuntime>::try_from_slice(&data, shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(&data, shape, device).unwrap()
     }
 
     #[test]
@@ -286,7 +286,7 @@ mod tests {
         // Identity block table
         let bt_data: Vec<i32> = (0..b * num_blocks).map(|i| i as i32).collect();
         let block_table =
-            Tensor::<CpuRuntime>::try_from_slice(&bt_data, &[b, num_blocks], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&bt_data, &[b, num_blocks], &device).unwrap();
 
         let (out, lse) = client
             .paged_attention_fwd(
@@ -320,7 +320,7 @@ mod tests {
 
         let bt_data: Vec<i32> = (0..b * num_blocks).map(|i| i as i32).collect();
         let block_table =
-            Tensor::<CpuRuntime>::try_from_slice(&bt_data, &[b, num_blocks], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&bt_data, &[b, num_blocks], &device).unwrap();
 
         let (out_causal, _) = client
             .paged_attention_fwd(
@@ -376,7 +376,7 @@ mod tests {
 
         let bt_data: Vec<i32> = (0..b * num_blocks).map(|i| i as i32).collect();
         let block_table =
-            Tensor::<CpuRuntime>::try_from_slice(&bt_data, &[b, num_blocks], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&bt_data, &[b, num_blocks], &device).unwrap();
 
         let (out, lse) = client
             .paged_attention_fwd(

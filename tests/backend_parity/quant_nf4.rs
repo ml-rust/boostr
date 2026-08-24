@@ -11,8 +11,8 @@ fn test_nf4_dequant_codebook_values() {
 
     // Create data with known codebook indices: all zeros (idx 0 = 0.0)
     let nf4_bytes = vec![0u8; 16]; // 16 bytes = 32 elements, all index 0
-    let nf4_data = Tensor::<CpuRuntime>::try_from_slice(&nf4_bytes, &[16], &cpu_device).unwrap();
-    let absmax = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &cpu_device).unwrap();
+    let nf4_data = Tensor::<CpuRuntime>::from_slice(&nf4_bytes, &[16], &cpu_device).unwrap();
+    let absmax = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &cpu_device).unwrap();
 
     let result = cpu_client.nf4_dequant(&nf4_data, &absmax, 32).unwrap();
     assert_eq!(result.shape(), &[32]);
@@ -29,8 +29,8 @@ fn test_nf4_dequant_scaling() {
 
     // Index 15 = codebook value 1.0, absmax = 2.0 → output = 2.0
     let nf4_bytes = vec![0xFFu8; 16]; // all index 15
-    let nf4_data = Tensor::<CpuRuntime>::try_from_slice(&nf4_bytes, &[16], &cpu_device).unwrap();
-    let absmax = Tensor::<CpuRuntime>::try_from_slice(&[2.0f32], &[1], &cpu_device).unwrap();
+    let nf4_data = Tensor::<CpuRuntime>::from_slice(&nf4_bytes, &[16], &cpu_device).unwrap();
+    let absmax = Tensor::<CpuRuntime>::from_slice(&[2.0f32], &[1], &cpu_device).unwrap();
 
     let result = cpu_client.nf4_dequant(&nf4_data, &absmax, 32).unwrap();
     let data = result.to_vec::<f32>();
@@ -60,13 +60,13 @@ fn test_nf4_gemm_parity() {
         })
         .collect();
     let nf4_weight =
-        Tensor::<CpuRuntime>::try_from_slice(&nf4_bytes, &[num_bytes], &cpu_device).unwrap();
+        Tensor::<CpuRuntime>::from_slice(&nf4_bytes, &[num_bytes], &cpu_device).unwrap();
 
     // Absmax: [N * K/blocksize]
     let num_absmax = n * k / blocksize;
     let absmax_data: Vec<f32> = (0..num_absmax).map(|i| 0.5 + i as f32 * 0.1).collect();
     let absmax =
-        Tensor::<CpuRuntime>::try_from_slice(&absmax_data, &[num_absmax], &cpu_device).unwrap();
+        Tensor::<CpuRuntime>::from_slice(&absmax_data, &[num_absmax], &cpu_device).unwrap();
 
     let cpu_result = cpu_client
         .nf4_gemm(&input, &nf4_weight, &absmax, n, k, blocksize)
@@ -84,12 +84,12 @@ fn test_nf4_gemm_parity() {
         use numr::tensor::Tensor;
 
         let input_c =
-            Tensor::try_from_slice(&input.to_vec::<f32>(), input.shape(), &cuda_device).unwrap();
+            Tensor::from_slice(&input.to_vec::<f32>(), input.shape(), &cuda_device).unwrap();
         let nf4_c =
-            Tensor::try_from_slice(&nf4_weight.to_vec::<u8>(), nf4_weight.shape(), &cuda_device)
+            Tensor::from_slice(&nf4_weight.to_vec::<u8>(), nf4_weight.shape(), &cuda_device)
                 .unwrap();
         let absmax_c =
-            Tensor::try_from_slice(&absmax.to_vec::<f32>(), absmax.shape(), &cuda_device).unwrap();
+            Tensor::from_slice(&absmax.to_vec::<f32>(), absmax.shape(), &cuda_device).unwrap();
 
         let cuda_result = cuda_client
             .nf4_gemm(&input_c, &nf4_c, &absmax_c, n, k, blocksize)
@@ -107,12 +107,12 @@ fn test_nf4_gemm_parity() {
         use numr::tensor::Tensor;
 
         let input_w =
-            Tensor::try_from_slice(&input.to_vec::<f32>(), input.shape(), &wgpu_device).unwrap();
+            Tensor::from_slice(&input.to_vec::<f32>(), input.shape(), &wgpu_device).unwrap();
         let nf4_w =
-            Tensor::try_from_slice(&nf4_weight.to_vec::<u8>(), nf4_weight.shape(), &wgpu_device)
+            Tensor::from_slice(&nf4_weight.to_vec::<u8>(), nf4_weight.shape(), &wgpu_device)
                 .unwrap();
         let absmax_w =
-            Tensor::try_from_slice(&absmax.to_vec::<f32>(), absmax.shape(), &wgpu_device).unwrap();
+            Tensor::from_slice(&absmax.to_vec::<f32>(), absmax.shape(), &wgpu_device).unwrap();
 
         let wgpu_result = wgpu_client
             .nf4_gemm(&input_w, &nf4_w, &absmax_w, n, k, blocksize)
@@ -148,12 +148,12 @@ fn test_nf4_gemm_matches_dequant_matmul() {
         })
         .collect();
     let nf4_weight =
-        Tensor::<CpuRuntime>::try_from_slice(&nf4_bytes, &[num_bytes], &cpu_device).unwrap();
+        Tensor::<CpuRuntime>::from_slice(&nf4_bytes, &[num_bytes], &cpu_device).unwrap();
 
     let num_absmax = n * k / blocksize;
     let absmax_data: Vec<f32> = (0..num_absmax).map(|i| 1.0 + i as f32 * 0.05).collect();
     let absmax =
-        Tensor::<CpuRuntime>::try_from_slice(&absmax_data, &[num_absmax], &cpu_device).unwrap();
+        Tensor::<CpuRuntime>::from_slice(&absmax_data, &[num_absmax], &cpu_device).unwrap();
 
     // Method 1: Fused NF4 GEMM
     let fused_result = cpu_client
@@ -186,12 +186,12 @@ fn test_nf4_gemm_matches_dequant_matmul() {
         use numr::tensor::Tensor;
 
         let input_c =
-            Tensor::try_from_slice(&input.to_vec::<f32>(), input.shape(), &cuda_device).unwrap();
+            Tensor::from_slice(&input.to_vec::<f32>(), input.shape(), &cuda_device).unwrap();
         let nf4_c =
-            Tensor::try_from_slice(&nf4_weight.to_vec::<u8>(), nf4_weight.shape(), &cuda_device)
+            Tensor::from_slice(&nf4_weight.to_vec::<u8>(), nf4_weight.shape(), &cuda_device)
                 .unwrap();
         let absmax_c =
-            Tensor::try_from_slice(&absmax.to_vec::<f32>(), absmax.shape(), &cuda_device).unwrap();
+            Tensor::from_slice(&absmax.to_vec::<f32>(), absmax.shape(), &cuda_device).unwrap();
 
         let cuda_fused = cuda_client
             .nf4_gemm(&input_c, &nf4_c, &absmax_c, n, k, blocksize)
@@ -209,12 +209,12 @@ fn test_nf4_gemm_matches_dequant_matmul() {
         use numr::tensor::Tensor;
 
         let input_w =
-            Tensor::try_from_slice(&input.to_vec::<f32>(), input.shape(), &wgpu_device).unwrap();
+            Tensor::from_slice(&input.to_vec::<f32>(), input.shape(), &wgpu_device).unwrap();
         let nf4_w =
-            Tensor::try_from_slice(&nf4_weight.to_vec::<u8>(), nf4_weight.shape(), &wgpu_device)
+            Tensor::from_slice(&nf4_weight.to_vec::<u8>(), nf4_weight.shape(), &wgpu_device)
                 .unwrap();
         let absmax_w =
-            Tensor::try_from_slice(&absmax.to_vec::<f32>(), absmax.shape(), &wgpu_device).unwrap();
+            Tensor::from_slice(&absmax.to_vec::<f32>(), absmax.shape(), &wgpu_device).unwrap();
 
         let wgpu_fused = wgpu_client
             .nf4_gemm(&input_w, &nf4_w, &absmax_w, n, k, blocksize)

@@ -126,7 +126,7 @@ where
         losses.push(v as f64);
     }
 
-    Ok(Tensor::<R>::try_ones(
+    Ok(Tensor::<R>::ones(
         loss_var.tensor().shape(),
         loss_var.tensor().dtype(),
         device,

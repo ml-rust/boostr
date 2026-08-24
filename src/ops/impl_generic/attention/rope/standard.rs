@@ -65,22 +65,18 @@ mod tests {
         let d = 8;
 
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
-                &vec![1.0f32; b * h * s * d],
-                &[b, h, s, d],
-                &device,
-            )
-            .unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; b * h * s * d], &[b, h, s, d], &device)
+                .unwrap(),
             false,
         );
         // cos/sin cache: [S, D/2]
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; s * d / 2], &[s, d / 2], &device)
+            Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; s * d / 2], &[s, d / 2], &device)
                 .unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; s * d / 2], &[s, d / 2], &device)
+            Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; s * d / 2], &[s, d / 2], &device)
                 .unwrap(),
             false,
         );
@@ -95,15 +91,15 @@ mod tests {
         // cos=1, sin=0 → RoPE is identity
         let x_data: Vec<f32> = (0..16).map(|i| i as f32).collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, 1, 2, 8], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 1, 2, 8], &device).unwrap(),
             false,
         );
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 8], &[2, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[2, 4], &device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 8], &[2, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 8], &[2, 4], &device).unwrap(),
             false,
         );
 
@@ -130,7 +126,7 @@ mod tests {
         // out1 = x1*0 - x2*1 = -x2
         // out2 = x2*0 + x1*1 = x1
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &[1.0f32, 2.0, 3.0, 4.0], // x1=[1,2], x2=[3,4]
                 &[1, 1, 1, 4],
                 &device,
@@ -139,11 +135,11 @@ mod tests {
             false,
         );
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0], &[1, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0], &[1, 2], &device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[1, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[1, 2], &device).unwrap(),
             false,
         );
 
@@ -165,27 +161,27 @@ mod tests {
 
         let x_data: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, 1, 2, 8], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 1, 2, 8], &device).unwrap(),
             false,
         );
 
         // Exact-size caches: [S=2, D/2=4]
         let cos_exact = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 8], &[2, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[2, 4], &device).unwrap(),
             false,
         );
         let sin_exact = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 8], &[2, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 8], &[2, 4], &device).unwrap(),
             false,
         );
 
         // Pre-allocated caches: [max_S=8, D/2=4] — will be narrowed to S=2
         let cos_large = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 32], &[8, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 32], &[8, 4], &device).unwrap(),
             false,
         );
         let sin_large = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 32], &[8, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 32], &[8, 4], &device).unwrap(),
             false,
         );
 
@@ -208,15 +204,15 @@ mod tests {
     fn test_rope_invalid_odd_dim() {
         let (client, device) = cpu_setup();
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 3], &[1, 1, 1, 3], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 3], &[1, 1, 1, 3], &device).unwrap(),
             false,
         );
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1, 1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1, 1], &device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32], &[1, 1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32], &[1, 1], &device).unwrap(),
             false,
         );
 

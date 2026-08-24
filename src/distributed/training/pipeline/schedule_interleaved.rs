@@ -305,8 +305,8 @@ mod tests {
 
         let mut schedule = ScheduleInterleaved1F1B::new(stages, 2, comm, device.clone()).unwrap();
 
-        let mb0 = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &device).unwrap();
-        let mb1 = Tensor::<CpuRuntime>::try_from_slice(&[2.0f32], &[1], &device).unwrap();
+        let mb0 = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device).unwrap();
+        let mb1 = Tensor::<CpuRuntime>::from_slice(&[2.0f32], &[1], &device).unwrap();
 
         let loss_fn = |output: &Var<CpuRuntime>| -> Result<Var<CpuRuntime>> {
             Ok(Var::new(output.tensor().clone(), false))

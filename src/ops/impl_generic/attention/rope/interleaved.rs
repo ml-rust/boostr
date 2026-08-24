@@ -65,7 +65,7 @@ where
     // Create a zero tensor for the add trick to force contiguous
     let zero_shape = &[total_bhsd, half_d, 1];
     let zero = Var::new(
-        numr::tensor::Tensor::<R>::try_zeros(zero_shape, x.tensor().dtype(), x.tensor().device())?,
+        numr::tensor::Tensor::<R>::zeros(zero_shape, x.tensor().dtype(), x.tensor().device())?,
         false,
     );
     let x_even_contig = var_add(&x_even_3d, &zero, client).map_err(Error::Numr)?;
@@ -110,21 +110,17 @@ mod tests {
         let (b, h, s, d) = (1, 2, 4, 8);
 
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
-                &vec![1.0f32; b * h * s * d],
-                &[b, h, s, d],
-                &device,
-            )
-            .unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; b * h * s * d], &[b, h, s, d], &device)
+                .unwrap(),
             false,
         );
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; s * d / 2], &[s, d / 2], &device)
+            Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; s * d / 2], &[s, d / 2], &device)
                 .unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; s * d / 2], &[s, d / 2], &device)
+            Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; s * d / 2], &[s, d / 2], &device)
                 .unwrap(),
             false,
         );
@@ -139,15 +135,15 @@ mod tests {
         // cos=1, sin=0 → identity
         let x_data: Vec<f32> = (0..8).map(|i| i as f32).collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, 1, 1, 8], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 1, 1, 8], &device).unwrap(),
             false,
         );
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[1, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[1, 4], &device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[1, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[1, 4], &device).unwrap(),
             false,
         );
 
@@ -174,16 +170,16 @@ mod tests {
         // out_odd  = x_even*1 + x_odd*0 = x_even → [1, 3]
         // interleaved: [-2, 1, -4, 3]
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 1, 1, 4], &device)
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 1, 1, 4], &device)
                 .unwrap(),
             false,
         );
         let cos = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0], &[1, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0], &[1, 2], &device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[1, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[1, 2], &device).unwrap(),
             false,
         );
 

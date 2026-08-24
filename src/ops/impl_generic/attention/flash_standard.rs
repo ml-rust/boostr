@@ -299,7 +299,7 @@ pub fn build_attention_mask<R: Runtime<DType = DType>>(
             }
         }
     }
-    Ok(Tensor::<R>::try_from_slice(
+    Ok(Tensor::<R>::from_slice(
         &mask_data,
         &[1, 1, seq_len_q, seq_len_k],
         device,

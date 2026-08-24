@@ -20,12 +20,12 @@ pub fn setup_cpu() -> (CpuClient, CpuDevice) {
 pub fn det_tensor(shape: &[usize], device: &CpuDevice) -> Tensor<CpuRuntime> {
     let n: usize = shape.iter().product();
     let data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.1).sin() * 0.5).collect();
-    Tensor::<CpuRuntime>::try_from_slice(&data, shape, device).unwrap()
+    Tensor::<CpuRuntime>::from_slice(&data, shape, device).unwrap()
 }
 
 /// Deterministic I32 tensor (for block tables, cu_seqlens, etc.).
 pub fn det_i32_tensor(data: &[i32], shape: &[usize], device: &CpuDevice) -> Tensor<CpuRuntime> {
-    Tensor::<CpuRuntime>::try_from_slice(data, shape, device).unwrap()
+    Tensor::<CpuRuntime>::from_slice(data, shape, device).unwrap()
 }
 
 /// Relaxed parity check for backward passes (atomicAdd causes FP non-determinism).
@@ -148,12 +148,9 @@ pub fn reference_attention(
                 if j <= i { 0.0 } else { -1e9 }
             })
             .collect();
-        let mask = Tensor::<CpuRuntime>::try_from_slice(
-            &mask_data,
-            &[1, 1, seq_len_q, seq_len_k],
-            q.device(),
-        )
-        .unwrap();
+        let mask =
+            Tensor::<CpuRuntime>::from_slice(&mask_data, &[1, 1, seq_len_q, seq_len_k], q.device())
+                .unwrap();
         client.add(&scores, &mask).unwrap()
     } else {
         scores

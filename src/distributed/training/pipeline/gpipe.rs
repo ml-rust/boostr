@@ -175,11 +175,7 @@ mod tests {
         fn forward(&mut self, input: Tensor<CpuRuntime>) -> Result<Tensor<CpuRuntime>> {
             let data = input.to_vec::<f32>();
             let doubled: Vec<f32> = data.iter().map(|x| x * 2.0).collect();
-            Ok(Tensor::try_from_slice(
-                &doubled,
-                input.shape(),
-                input.device(),
-            )?)
+            Ok(Tensor::from_slice(&doubled, input.shape(), input.device())?)
         }
     }
 
@@ -189,11 +185,7 @@ mod tests {
         fn forward(&mut self, input: Tensor<CpuRuntime>) -> Result<Tensor<CpuRuntime>> {
             let data = input.to_vec::<f32>();
             let result: Vec<f32> = data.iter().map(|x| x + 1.0).collect();
-            Ok(Tensor::try_from_slice(
-                &result,
-                input.shape(),
-                input.device(),
-            )?)
+            Ok(Tensor::from_slice(&result, input.shape(), input.device())?)
         }
     }
 
@@ -206,8 +198,7 @@ mod tests {
         let mut pipeline = GpipeSchedule::new(stage, 2, comm, device.clone()).unwrap();
 
         let input =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4, 1], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4, 1], &device).unwrap();
         let outputs = pipeline.run(&client, Some(input)).unwrap();
 
         assert_eq!(outputs.len(), 2);
@@ -223,8 +214,7 @@ mod tests {
         let stage = Box::new(AddOneStage);
         let mut pipeline = GpipeSchedule::new(stage, 1, comm, device.clone()).unwrap();
 
-        let input =
-            Tensor::<CpuRuntime>::try_from_slice(&[10.0f32, 20.0], &[2, 1], &device).unwrap();
+        let input = Tensor::<CpuRuntime>::from_slice(&[10.0f32, 20.0], &[2, 1], &device).unwrap();
         let outputs = pipeline.run(&client, Some(input)).unwrap();
 
         assert_eq!(outputs.len(), 1);
@@ -260,7 +250,7 @@ mod tests {
         let stage = Box::new(DoubleStage);
         let pipeline = GpipeSchedule::new(stage, 1, comm, device.clone()).unwrap();
 
-        let buffer = Tensor::<CpuRuntime>::try_zeros(&[3], DType::F32, &device).unwrap();
+        let buffer = Tensor::<CpuRuntime>::zeros(&[3], DType::F32, &device).unwrap();
         pipeline.recv_into(&buffer, 0, 0).unwrap();
     }
 }

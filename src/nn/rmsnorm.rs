@@ -118,11 +118,11 @@ mod tests {
     #[test]
     fn test_rmsnorm_output_shape() {
         let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[4], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[4], &device).unwrap();
         let norm = RmsNorm::new(weight, 1e-5, false);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[3, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[3, 4], &device).unwrap(),
             false,
         );
         let out = norm.forward(&client, &input).unwrap();
@@ -132,12 +132,11 @@ mod tests {
     #[test]
     fn test_rmsnorm_values() {
         let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[4], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[4], &device).unwrap();
         let norm = RmsNorm::new(weight, 1e-6, false);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 4], &device)
-                .unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 4], &device).unwrap(),
             false,
         );
         let out = norm.forward(&client, &input).unwrap();
@@ -158,12 +157,11 @@ mod tests {
     #[test]
     fn test_rmsnorm_with_scale() {
         let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::try_from_slice(&[2.0f32; 4], &[4], &device).unwrap();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[2.0f32; 4], &[4], &device).unwrap();
         let norm = RmsNorm::new(weight, 1e-6, false);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 4], &device)
-                .unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 4], &device).unwrap(),
             false,
         );
         let out = norm.forward(&client, &input).unwrap();

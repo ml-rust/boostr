@@ -260,7 +260,7 @@ impl SafeTensors {
                         f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
                     })
                     .collect();
-                Tensor::<R>::try_from_slice(&data, &info.shape, device).map_err(Error::Numr)
+                Tensor::<R>::from_slice(&data, &info.shape, device).map_err(Error::Numr)
             }
             other => Err(Error::ModelError {
                 reason: format!("unsupported SafeTensors dtype: {other:?}"),

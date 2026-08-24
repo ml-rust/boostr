@@ -21,7 +21,7 @@ pub fn hann_window(
             0.5 - 0.5 * (2.0 * PI * ratio).cos()
         })
         .collect();
-    Ok(Tensor::<CpuRuntime>::try_from_slice(&data, &[n], device)?)
+    Ok(Tensor::<CpuRuntime>::from_slice(&data, &[n], device)?)
 }
 
 #[cfg(test)]

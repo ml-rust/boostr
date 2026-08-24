@@ -50,11 +50,7 @@ fn ones_1d<R: Runtime<DType = DType>>(
     device: &R::Device,
 ) -> Result<numr::tensor::Tensor<R>> {
     let data: Vec<f32> = vec![1.0; n];
-    Ok(numr::tensor::Tensor::<R>::try_from_slice(
-        &data,
-        &[n],
-        device,
-    )?)
+    Ok(numr::tensor::Tensor::<R>::from_slice(&data, &[n], device)?)
 }
 
 fn zeros_1d<R: Runtime<DType = DType>>(
@@ -62,11 +58,7 @@ fn zeros_1d<R: Runtime<DType = DType>>(
     device: &R::Device,
 ) -> Result<numr::tensor::Tensor<R>> {
     let data: Vec<f32> = vec![0.0; n];
-    Ok(numr::tensor::Tensor::<R>::try_from_slice(
-        &data,
-        &[n],
-        device,
-    )?)
+    Ok(numr::tensor::Tensor::<R>::from_slice(&data, &[n], device)?)
 }
 
 /// Load an `AdaLayerNorm` from `{prefix}.fc.*` (no learnable `norm` in

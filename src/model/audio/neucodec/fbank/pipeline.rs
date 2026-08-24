@@ -85,7 +85,7 @@ pub fn seamless_fbank<R: Runtime<DType = DType>>(
         .map(|&v| v as f32)
         .collect();
 
-    Ok(Tensor::<R>::try_from_slice(
+    Ok(Tensor::<R>::from_slice(
         &out,
         &[out_rows, STACKED_DIM],
         device,
@@ -155,7 +155,7 @@ fn window_frames(samples: &[f32], frames: usize) -> Vec<f64> {
 fn power_spectra(windowed: &[f64], frames: usize) -> Result<Vec<f64>> {
     let cpu_device = CpuDevice::new();
     let client = CpuClient::new(cpu_device.clone());
-    let input = Tensor::<CpuRuntime>::try_from_slice(windowed, &[frames, FFT_LENGTH], &cpu_device)?;
+    let input = Tensor::<CpuRuntime>::from_slice(windowed, &[frames, FFT_LENGTH], &cpu_device)?;
     let spectrum = client.rfft(&input, FftNormalization::None)?.contiguous()?;
     let bins: Vec<Complex128> = spectrum.to_vec();
 

@@ -33,7 +33,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
 
         let mut out_shape = input.shape()[..input.shape().len() - 1].to_vec();
         out_shape.push(n);
-        let output = Tensor::<CudaRuntime>::try_empty(&out_shape, DType::F32, input.device())?;
+        let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, input.device())?;
         int4_dispatch::launch_int4_gemm(
             self,
             &act_contig,
@@ -63,7 +63,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
 
         let mut out_shape = input.shape()[..input.shape().len() - 1].to_vec();
         out_shape.push(n);
-        let output = Tensor::<CudaRuntime>::try_empty(&out_shape, DType::F32, input.device())?;
+        let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, input.device())?;
         int4_dispatch::launch_int4_gemm_gptq(
             self,
             &act_contig,
@@ -93,7 +93,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
 
         let mut out_shape = input.shape()[..input.shape().len() - 1].to_vec();
         out_shape.push(n);
-        let output = Tensor::<CudaRuntime>::try_empty(&out_shape, DType::F32, input.device())?;
+        let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, input.device())?;
         int4_dispatch::launch_marlin_gemm(
             self,
             &act_contig,
@@ -153,7 +153,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
 
         let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
         out_shape.push(n);
-        let output = Tensor::<CudaRuntime>::try_empty(&out_shape, DType::F32, activation.device())?;
+        let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, activation.device())?;
         let output_ptr = output.ptr();
 
         if m <= 64 {
@@ -298,7 +298,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
                 out_shape.push(n);
                 let output =
-                    Tensor::<CudaRuntime>::try_empty(&out_shape, DType::F32, activation.device())?;
+                    Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, activation.device())?;
                 let output_ptr = output.ptr();
                 let weight_ptr = w.storage().ptr();
 
@@ -367,7 +367,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         let a_shape = activation.shape();
         let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
         out_shape.push(n);
-        let output = Tensor::<CudaRuntime>::try_empty(&out_shape, DType::F32, activation.device())?;
+        let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, activation.device())?;
         let output_ptr = output.ptr();
         let m_u32 = m as u32;
         let k_u32 = k as u32;

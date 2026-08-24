@@ -350,11 +350,7 @@ impl<R: Runtime> SigLipEncoder<R> {
         }
 
         let device = pos_embed.device();
-        Ok(Tensor::<R>::try_from_slice(
-            &out,
-            &[tgt * tgt, hidden],
-            device,
-        )?)
+        Ok(Tensor::<R>::from_slice(&out, &[tgt * tgt, hidden], device)?)
     }
 
     /// Forward pass for inference.

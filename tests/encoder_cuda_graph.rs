@@ -86,47 +86,47 @@ fn make_cuda_test_encoder() -> (Encoder<CudaRuntime>, CudaClient, CudaDevice) {
 
     let encoder = Encoder::from_weights(config, Pooling::Mean, |name| match name {
         "embeddings.word_embeddings.weight" => {
-            Ok(Tensor::try_from_slice(&make_w(10, 8, 0.1), &[10, 8], d).unwrap())
+            Ok(Tensor::from_slice(&make_w(10, 8, 0.1), &[10, 8], d).unwrap())
         }
         "embeddings.position_embeddings.weight" => {
-            Ok(Tensor::try_from_slice(&make_w(32, 8, 0.01), &[32, 8], d).unwrap())
+            Ok(Tensor::from_slice(&make_w(32, 8, 0.01), &[32, 8], d).unwrap())
         }
         "embeddings.layer_norm.weight" => {
-            Ok(Tensor::try_from_slice(&make_w(8, 1, 1.0), &[8], d).unwrap())
+            Ok(Tensor::from_slice(&make_w(8, 1, 1.0), &[8], d).unwrap())
         }
-        "embeddings.layer_norm.bias" => Ok(Tensor::try_from_slice(&[0.0f32; 8], &[8], d).unwrap()),
+        "embeddings.layer_norm.bias" => Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d).unwrap()),
         n if n.ends_with("query.weight")
             || n.ends_with("key.weight")
             || n.ends_with("value.weight") =>
         {
-            Ok(Tensor::try_from_slice(&make_w(8, 8, 0.02), &[8, 8], d).unwrap())
+            Ok(Tensor::from_slice(&make_w(8, 8, 0.02), &[8, 8], d).unwrap())
         }
         n if n.ends_with("query.bias") || n.ends_with("key.bias") || n.ends_with("value.bias") => {
-            Ok(Tensor::try_from_slice(&[0.0f32; 8], &[8], d).unwrap())
+            Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d).unwrap())
         }
         n if n.ends_with("attention.output.dense.weight") => {
-            Ok(Tensor::try_from_slice(&make_w(8, 8, 0.02), &[8, 8], d).unwrap())
+            Ok(Tensor::from_slice(&make_w(8, 8, 0.02), &[8, 8], d).unwrap())
         }
         n if n.ends_with("attention.output.dense.bias") => {
-            Ok(Tensor::try_from_slice(&[0.0f32; 8], &[8], d).unwrap())
+            Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d).unwrap())
         }
         n if n.ends_with("output.dense.weight") => {
-            Ok(Tensor::try_from_slice(&make_w(8, 16, 0.02), &[8, 16], d).unwrap())
+            Ok(Tensor::from_slice(&make_w(8, 16, 0.02), &[8, 16], d).unwrap())
         }
         n if n.ends_with("output.dense.bias") => {
-            Ok(Tensor::try_from_slice(&[0.0f32; 8], &[8], d).unwrap())
+            Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d).unwrap())
         }
         n if n.ends_with("LayerNorm.weight") => {
-            Ok(Tensor::try_from_slice(&make_w(8, 1, 1.0), &[8], d).unwrap())
+            Ok(Tensor::from_slice(&make_w(8, 1, 1.0), &[8], d).unwrap())
         }
         n if n.ends_with("LayerNorm.bias") => {
-            Ok(Tensor::try_from_slice(&[0.0f32; 8], &[8], d).unwrap())
+            Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d).unwrap())
         }
         n if n.ends_with("intermediate.dense.weight") => {
-            Ok(Tensor::try_from_slice(&make_w(16, 8, 0.02), &[16, 8], d).unwrap())
+            Ok(Tensor::from_slice(&make_w(16, 8, 0.02), &[16, 8], d).unwrap())
         }
         n if n.ends_with("intermediate.dense.bias") => {
-            Ok(Tensor::try_from_slice(&[0.0f32; 16], &[16], d).unwrap())
+            Ok(Tensor::from_slice(&[0.0f32; 16], &[16], d).unwrap())
         }
         _ => Err(boostr::error::Error::ModelError {
             reason: format!("unknown weight: {name}"),
@@ -209,8 +209,7 @@ fn embed_inference_matches_standard_cuda() {
 
     let (encoder, client, device) = make_cuda_test_encoder();
 
-    let input_ids =
-        Tensor::<CudaRuntime>::try_from_slice(&[1i64, 2, 3, 4], &[1, 4], &device).unwrap();
+    let input_ids = Tensor::<CudaRuntime>::from_slice(&[1i64, 2, 3, 4], &[1, 4], &device).unwrap();
 
     // First call → graph capture (CUDA records ops; no compute yet; output buffer
     // still holds its zero-initialization until the first launch).
@@ -287,8 +286,7 @@ fn graph_capture_100_replays_no_drift() {
 
     let (encoder, client, device) = make_cuda_test_encoder();
 
-    let input_ids =
-        Tensor::<CudaRuntime>::try_from_slice(&[1i64, 2, 3, 4], &[1, 4], &device).unwrap();
+    let input_ids = Tensor::<CudaRuntime>::from_slice(&[1i64, 2, 3, 4], &[1, 4], &device).unwrap();
 
     // Call 0: triggers graph capture.
     let _capture_out = encoder
@@ -365,7 +363,7 @@ fn graph_capture_multiple_shapes_no_thrash() {
     for &(batch, seq_len) in shapes {
         let ids_data: Vec<i64> = (1..=(batch * seq_len) as i64).collect();
         let input_ids =
-            Tensor::<CudaRuntime>::try_from_slice(&ids_data, &[batch, seq_len], &device).unwrap();
+            Tensor::<CudaRuntime>::from_slice(&ids_data, &[batch, seq_len], &device).unwrap();
 
         // Call A: capture (zeros expected out of graph path).
         let _cap = encoder
@@ -408,7 +406,7 @@ fn graph_capture_multiple_shapes_no_thrash() {
     for (idx, &(batch, seq_len)) in shapes.iter().enumerate() {
         let ids_data: Vec<i64> = (1..=(batch * seq_len) as i64).collect();
         let input_ids =
-            Tensor::<CudaRuntime>::try_from_slice(&ids_data, &[batch, seq_len], &device).unwrap();
+            Tensor::<CudaRuntime>::from_slice(&ids_data, &[batch, seq_len], &device).unwrap();
 
         let replay_out = encoder
             .embed_inference(&client, &input_ids, None)
@@ -473,7 +471,7 @@ fn graph_capture_cache_eviction_safe() {
             .map(|v| v % 10) // keep within vocab_size=10
             .collect();
         let input_ids =
-            Tensor::<CudaRuntime>::try_from_slice(&ids_data, &[batch, seq_len], &device).unwrap();
+            Tensor::<CudaRuntime>::from_slice(&ids_data, &[batch, seq_len], &device).unwrap();
 
         // Capture call (output is zeros from pre-launch stable_out).
         let _cap = encoder

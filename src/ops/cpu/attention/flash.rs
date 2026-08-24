@@ -174,7 +174,7 @@ mod tests {
         // Simple deterministic pseudo-random data
         let n: usize = shape.iter().product();
         let data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.1).sin() * 0.5).collect();
-        Tensor::<CpuRuntime>::try_from_slice(&data, shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(&data, shape, device).unwrap()
     }
 
     #[test]

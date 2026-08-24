@@ -26,7 +26,7 @@ fn make_test_tensors(
 ) {
     let dt = det_tensor(&[BATCH, SEQLEN, NHEADS], device);
     let a_data: Vec<f32> = (0..NHEADS).map(|i| -0.5 - 0.1 * i as f32).collect();
-    let a = Tensor::<CpuRuntime>::try_from_slice(&a_data, &[NHEADS], device).unwrap();
+    let a = Tensor::<CpuRuntime>::from_slice(&a_data, &[NHEADS], device).unwrap();
     let x = det_tensor(&[BATCH, SEQLEN, NHEADS, HEADDIM], device);
     let b = det_tensor(&[BATCH, SEQLEN, NGROUPS, DSTATE], device);
     let c = det_tensor(&[BATCH, SEQLEN, NGROUPS, DSTATE], device);
@@ -53,8 +53,8 @@ fn test_ssd_chunk_cumsum_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_c = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
-        let a_c = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
+        let dt_c = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
+        let a_c = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
         let (dt_out_c, da_c) = cuda_client
             .ssd_chunk_cumsum(&dt_c, &a_c, None, CHUNK_SIZE, true)
             .unwrap();
@@ -69,8 +69,8 @@ fn test_ssd_chunk_cumsum_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_w = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
-        let a_w = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
+        let dt_w = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
+        let a_w = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
         let (dt_out_w, da_w) = wgpu_client
             .ssd_chunk_cumsum(&dt_w, &a_w, None, CHUNK_SIZE, true)
             .unwrap();
@@ -88,7 +88,7 @@ fn test_ssd_chunk_cumsum_with_bias_parity() {
     let (cpu_client, cpu_device) = setup_cpu();
     let (dt, a, _x, _b, _c) = make_test_tensors(&cpu_device);
     let bias_data: Vec<f32> = (0..NHEADS).map(|i| 0.1 * i as f32).collect();
-    let dt_bias = Tensor::<CpuRuntime>::try_from_slice(&bias_data, &[NHEADS], &cpu_device).unwrap();
+    let dt_bias = Tensor::<CpuRuntime>::from_slice(&bias_data, &[NHEADS], &cpu_device).unwrap();
 
     let (cpu_dt_out, cpu_da_cumsum) = cpu_client
         .ssd_chunk_cumsum(&dt, &a, Some(&dt_bias), CHUNK_SIZE, true)
@@ -100,11 +100,10 @@ fn test_ssd_chunk_cumsum_with_bias_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_c = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
-        let a_c = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
+        let dt_c = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
+        let a_c = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
         let bias_c =
-            Tensor::try_from_slice(&dt_bias.to_vec::<f32>(), dt_bias.shape(), &cuda_device)
-                .unwrap();
+            Tensor::from_slice(&dt_bias.to_vec::<f32>(), dt_bias.shape(), &cuda_device).unwrap();
         let (dt_out_c, da_c) = cuda_client
             .ssd_chunk_cumsum(&dt_c, &a_c, Some(&bias_c), CHUNK_SIZE, true)
             .unwrap();
@@ -119,11 +118,10 @@ fn test_ssd_chunk_cumsum_with_bias_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_w = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
-        let a_w = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
+        let dt_w = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
+        let a_w = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
         let bias_w =
-            Tensor::try_from_slice(&dt_bias.to_vec::<f32>(), dt_bias.shape(), &wgpu_device)
-                .unwrap();
+            Tensor::from_slice(&dt_bias.to_vec::<f32>(), dt_bias.shape(), &wgpu_device).unwrap();
         let (dt_out_w, da_w) = wgpu_client
             .ssd_chunk_cumsum(&dt_w, &a_w, Some(&bias_w), CHUNK_SIZE, true)
             .unwrap();
@@ -159,10 +157,10 @@ fn test_ssd_chunk_state_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_c = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
-        let a_c = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
-        let x_c = Tensor::try_from_slice(&x.to_vec::<f32>(), x.shape(), &cuda_device).unwrap();
-        let b_c = Tensor::try_from_slice(&b.to_vec::<f32>(), b.shape(), &cuda_device).unwrap();
+        let dt_c = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
+        let a_c = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
+        let x_c = Tensor::from_slice(&x.to_vec::<f32>(), x.shape(), &cuda_device).unwrap();
+        let b_c = Tensor::from_slice(&b.to_vec::<f32>(), b.shape(), &cuda_device).unwrap();
         let (dt_out_c, da_c) = cuda_client
             .ssd_chunk_cumsum(&dt_c, &a_c, None, CHUNK_SIZE, true)
             .unwrap();
@@ -179,10 +177,10 @@ fn test_ssd_chunk_state_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_w = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
-        let a_w = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
-        let x_w = Tensor::try_from_slice(&x.to_vec::<f32>(), x.shape(), &wgpu_device).unwrap();
-        let b_w = Tensor::try_from_slice(&b.to_vec::<f32>(), b.shape(), &wgpu_device).unwrap();
+        let dt_w = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
+        let a_w = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
+        let x_w = Tensor::from_slice(&x.to_vec::<f32>(), x.shape(), &wgpu_device).unwrap();
+        let b_w = Tensor::from_slice(&b.to_vec::<f32>(), b.shape(), &wgpu_device).unwrap();
         let (dt_out_w, da_w) = wgpu_client
             .ssd_chunk_cumsum(&dt_w, &a_w, None, CHUNK_SIZE, true)
             .unwrap();
@@ -216,10 +214,10 @@ fn test_ssd_state_passing_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_c = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
-        let a_c = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
-        let x_c = Tensor::try_from_slice(&x.to_vec::<f32>(), x.shape(), &cuda_device).unwrap();
-        let b_c = Tensor::try_from_slice(&b.to_vec::<f32>(), b.shape(), &cuda_device).unwrap();
+        let dt_c = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
+        let a_c = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
+        let x_c = Tensor::from_slice(&x.to_vec::<f32>(), x.shape(), &cuda_device).unwrap();
+        let b_c = Tensor::from_slice(&b.to_vec::<f32>(), b.shape(), &cuda_device).unwrap();
         let (dt_out_c, da_c) = cuda_client
             .ssd_chunk_cumsum(&dt_c, &a_c, None, CHUNK_SIZE, true)
             .unwrap();
@@ -237,10 +235,10 @@ fn test_ssd_state_passing_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_w = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
-        let a_w = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
-        let x_w = Tensor::try_from_slice(&x.to_vec::<f32>(), x.shape(), &wgpu_device).unwrap();
-        let b_w = Tensor::try_from_slice(&b.to_vec::<f32>(), b.shape(), &wgpu_device).unwrap();
+        let dt_w = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
+        let a_w = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
+        let x_w = Tensor::from_slice(&x.to_vec::<f32>(), x.shape(), &wgpu_device).unwrap();
+        let b_w = Tensor::from_slice(&b.to_vec::<f32>(), b.shape(), &wgpu_device).unwrap();
         let (dt_out_w, da_w) = wgpu_client
             .ssd_chunk_cumsum(&dt_w, &a_w, None, CHUNK_SIZE, true)
             .unwrap();
@@ -280,11 +278,11 @@ fn test_ssd_chunk_scan_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_c = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
-        let a_c = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
-        let x_c = Tensor::try_from_slice(&x.to_vec::<f32>(), x.shape(), &cuda_device).unwrap();
-        let b_c = Tensor::try_from_slice(&b.to_vec::<f32>(), b.shape(), &cuda_device).unwrap();
-        let c_c = Tensor::try_from_slice(&c.to_vec::<f32>(), c.shape(), &cuda_device).unwrap();
+        let dt_c = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
+        let a_c = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
+        let x_c = Tensor::from_slice(&x.to_vec::<f32>(), x.shape(), &cuda_device).unwrap();
+        let b_c = Tensor::from_slice(&b.to_vec::<f32>(), b.shape(), &cuda_device).unwrap();
+        let c_c = Tensor::from_slice(&c.to_vec::<f32>(), c.shape(), &cuda_device).unwrap();
         let (dt_out_c, da_c) = cuda_client
             .ssd_chunk_cumsum(&dt_c, &a_c, None, CHUNK_SIZE, true)
             .unwrap();
@@ -305,11 +303,11 @@ fn test_ssd_chunk_scan_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_w = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
-        let a_w = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
-        let x_w = Tensor::try_from_slice(&x.to_vec::<f32>(), x.shape(), &wgpu_device).unwrap();
-        let b_w = Tensor::try_from_slice(&b.to_vec::<f32>(), b.shape(), &wgpu_device).unwrap();
-        let c_w = Tensor::try_from_slice(&c.to_vec::<f32>(), c.shape(), &wgpu_device).unwrap();
+        let dt_w = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
+        let a_w = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
+        let x_w = Tensor::from_slice(&x.to_vec::<f32>(), x.shape(), &wgpu_device).unwrap();
+        let b_w = Tensor::from_slice(&b.to_vec::<f32>(), b.shape(), &wgpu_device).unwrap();
+        let c_w = Tensor::from_slice(&c.to_vec::<f32>(), c.shape(), &wgpu_device).unwrap();
         let (dt_out_w, da_w) = wgpu_client
             .ssd_chunk_cumsum(&dt_w, &a_w, None, CHUNK_SIZE, true)
             .unwrap();
@@ -333,7 +331,7 @@ fn test_ssd_chunk_scan_with_d_skip_parity() {
     let (cpu_client, cpu_device) = setup_cpu();
     let (dt, a, x, b, c) = make_test_tensors(&cpu_device);
     let d_data: Vec<f32> = (0..NHEADS).map(|i| 0.5 + 0.1 * i as f32).collect();
-    let d = Tensor::<CpuRuntime>::try_from_slice(&d_data, &[NHEADS], &cpu_device).unwrap();
+    let d = Tensor::<CpuRuntime>::from_slice(&d_data, &[NHEADS], &cpu_device).unwrap();
 
     let (cpu_dt_out, cpu_da_cumsum) = cpu_client
         .ssd_chunk_cumsum(&dt, &a, None, CHUNK_SIZE, true)
@@ -352,12 +350,12 @@ fn test_ssd_chunk_scan_with_d_skip_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_c = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
-        let a_c = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
-        let x_c = Tensor::try_from_slice(&x.to_vec::<f32>(), x.shape(), &cuda_device).unwrap();
-        let b_c = Tensor::try_from_slice(&b.to_vec::<f32>(), b.shape(), &cuda_device).unwrap();
-        let c_c = Tensor::try_from_slice(&c.to_vec::<f32>(), c.shape(), &cuda_device).unwrap();
-        let d_c = Tensor::try_from_slice(&d.to_vec::<f32>(), d.shape(), &cuda_device).unwrap();
+        let dt_c = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
+        let a_c = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
+        let x_c = Tensor::from_slice(&x.to_vec::<f32>(), x.shape(), &cuda_device).unwrap();
+        let b_c = Tensor::from_slice(&b.to_vec::<f32>(), b.shape(), &cuda_device).unwrap();
+        let c_c = Tensor::from_slice(&c.to_vec::<f32>(), c.shape(), &cuda_device).unwrap();
+        let d_c = Tensor::from_slice(&d.to_vec::<f32>(), d.shape(), &cuda_device).unwrap();
         let (dt_out_c, da_c) = cuda_client
             .ssd_chunk_cumsum(&dt_c, &a_c, None, CHUNK_SIZE, true)
             .unwrap();
@@ -378,12 +376,12 @@ fn test_ssd_chunk_scan_with_d_skip_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_w = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
-        let a_w = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
-        let x_w = Tensor::try_from_slice(&x.to_vec::<f32>(), x.shape(), &wgpu_device).unwrap();
-        let b_w = Tensor::try_from_slice(&b.to_vec::<f32>(), b.shape(), &wgpu_device).unwrap();
-        let c_w = Tensor::try_from_slice(&c.to_vec::<f32>(), c.shape(), &wgpu_device).unwrap();
-        let d_w = Tensor::try_from_slice(&d.to_vec::<f32>(), d.shape(), &wgpu_device).unwrap();
+        let dt_w = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
+        let a_w = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
+        let x_w = Tensor::from_slice(&x.to_vec::<f32>(), x.shape(), &wgpu_device).unwrap();
+        let b_w = Tensor::from_slice(&b.to_vec::<f32>(), b.shape(), &wgpu_device).unwrap();
+        let c_w = Tensor::from_slice(&c.to_vec::<f32>(), c.shape(), &wgpu_device).unwrap();
+        let d_w = Tensor::from_slice(&d.to_vec::<f32>(), d.shape(), &wgpu_device).unwrap();
         let (dt_out_w, da_w) = wgpu_client
             .ssd_chunk_cumsum(&dt_w, &a_w, None, CHUNK_SIZE, true)
             .unwrap();
@@ -407,9 +405,9 @@ fn test_ssd_end_to_end_parity() {
     let (cpu_client, cpu_device) = setup_cpu();
     let (dt, a, x, b, c) = make_test_tensors(&cpu_device);
     let d_data: Vec<f32> = (0..NHEADS).map(|i| 0.3 + 0.05 * i as f32).collect();
-    let d = Tensor::<CpuRuntime>::try_from_slice(&d_data, &[NHEADS], &cpu_device).unwrap();
+    let d = Tensor::<CpuRuntime>::from_slice(&d_data, &[NHEADS], &cpu_device).unwrap();
     let bias_data: Vec<f32> = (0..NHEADS).map(|i| 0.1 * i as f32).collect();
-    let dt_bias = Tensor::<CpuRuntime>::try_from_slice(&bias_data, &[NHEADS], &cpu_device).unwrap();
+    let dt_bias = Tensor::<CpuRuntime>::from_slice(&bias_data, &[NHEADS], &cpu_device).unwrap();
 
     // Full pipeline: cumsum → chunk_state → state_passing → chunk_scan
     let (cpu_dt_out, cpu_da) = cpu_client
@@ -431,15 +429,14 @@ fn test_ssd_end_to_end_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_c = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
-        let a_c = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
-        let x_c = Tensor::try_from_slice(&x.to_vec::<f32>(), x.shape(), &cuda_device).unwrap();
-        let b_c = Tensor::try_from_slice(&b.to_vec::<f32>(), b.shape(), &cuda_device).unwrap();
-        let c_c = Tensor::try_from_slice(&c.to_vec::<f32>(), c.shape(), &cuda_device).unwrap();
-        let d_c = Tensor::try_from_slice(&d.to_vec::<f32>(), d.shape(), &cuda_device).unwrap();
+        let dt_c = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &cuda_device).unwrap();
+        let a_c = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &cuda_device).unwrap();
+        let x_c = Tensor::from_slice(&x.to_vec::<f32>(), x.shape(), &cuda_device).unwrap();
+        let b_c = Tensor::from_slice(&b.to_vec::<f32>(), b.shape(), &cuda_device).unwrap();
+        let c_c = Tensor::from_slice(&c.to_vec::<f32>(), c.shape(), &cuda_device).unwrap();
+        let d_c = Tensor::from_slice(&d.to_vec::<f32>(), d.shape(), &cuda_device).unwrap();
         let bias_c =
-            Tensor::try_from_slice(&dt_bias.to_vec::<f32>(), dt_bias.shape(), &cuda_device)
-                .unwrap();
+            Tensor::from_slice(&dt_bias.to_vec::<f32>(), dt_bias.shape(), &cuda_device).unwrap();
         let (dt_out_c, da_c) = cuda_client
             .ssd_chunk_cumsum(&dt_c, &a_c, Some(&bias_c), CHUNK_SIZE, true)
             .unwrap();
@@ -460,15 +457,14 @@ fn test_ssd_end_to_end_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::ssm_kernels::SsmKernelOps as _;
-        let dt_w = Tensor::try_from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
-        let a_w = Tensor::try_from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
-        let x_w = Tensor::try_from_slice(&x.to_vec::<f32>(), x.shape(), &wgpu_device).unwrap();
-        let b_w = Tensor::try_from_slice(&b.to_vec::<f32>(), b.shape(), &wgpu_device).unwrap();
-        let c_w = Tensor::try_from_slice(&c.to_vec::<f32>(), c.shape(), &wgpu_device).unwrap();
-        let d_w = Tensor::try_from_slice(&d.to_vec::<f32>(), d.shape(), &wgpu_device).unwrap();
+        let dt_w = Tensor::from_slice(&dt.to_vec::<f32>(), dt.shape(), &wgpu_device).unwrap();
+        let a_w = Tensor::from_slice(&a.to_vec::<f32>(), a.shape(), &wgpu_device).unwrap();
+        let x_w = Tensor::from_slice(&x.to_vec::<f32>(), x.shape(), &wgpu_device).unwrap();
+        let b_w = Tensor::from_slice(&b.to_vec::<f32>(), b.shape(), &wgpu_device).unwrap();
+        let c_w = Tensor::from_slice(&c.to_vec::<f32>(), c.shape(), &wgpu_device).unwrap();
+        let d_w = Tensor::from_slice(&d.to_vec::<f32>(), d.shape(), &wgpu_device).unwrap();
         let bias_w =
-            Tensor::try_from_slice(&dt_bias.to_vec::<f32>(), dt_bias.shape(), &wgpu_device)
-                .unwrap();
+            Tensor::from_slice(&dt_bias.to_vec::<f32>(), dt_bias.shape(), &wgpu_device).unwrap();
         let (dt_out_w, da_w) = wgpu_client
             .ssd_chunk_cumsum(&dt_w, &a_w, Some(&bias_w), CHUNK_SIZE, true)
             .unwrap();

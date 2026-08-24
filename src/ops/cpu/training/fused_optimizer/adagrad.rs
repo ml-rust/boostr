@@ -79,8 +79,8 @@ pub(super) fn fused_adagrad_f32(
     let shape = param.shape();
     let device = param.device();
     Ok((
-        Tensor::<CpuRuntime>::try_from_slice(&new_p, shape, device)?,
-        Tensor::<CpuRuntime>::try_from_slice(&new_a, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&new_p, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&new_a, shape, device)?,
     ))
 }
 
@@ -110,7 +110,7 @@ pub(super) fn fused_adagrad_f64(
     let shape = param.shape();
     let device = param.device();
     Ok((
-        Tensor::<CpuRuntime>::try_from_slice(&new_p, shape, device)?,
-        Tensor::<CpuRuntime>::try_from_slice(&new_a, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&new_p, shape, device)?,
+        Tensor::<CpuRuntime>::from_slice(&new_a, shape, device)?,
     ))
 }

@@ -191,12 +191,12 @@ where
             bytemuck::cast_slice::<u8, f32>(&bytes[cursor..cursor + data_bytes]).to_vec();
         cursor += data_bytes;
 
-        let k_tensor = Tensor::<R>::try_from_slice(
+        let k_tensor = Tensor::<R>::from_slice(
             &k_f32,
             &[layer_batch, layer_heads, seq_len, layer_dim],
             device,
         )?;
-        let v_tensor = Tensor::<R>::try_from_slice(
+        let v_tensor = Tensor::<R>::from_slice(
             &v_f32,
             &[layer_batch, layer_heads, seq_len, layer_dim],
             device,
@@ -255,8 +255,8 @@ mod tests {
 
         let k_data: Vec<f32> = (0..24).map(|i| i as f32 * 0.1).collect();
         let v_data: Vec<f32> = (0..24).map(|i| i as f32 * 0.2).collect();
-        let k = Tensor::<CpuRuntime>::try_from_slice(&k_data, &[1, 2, 3, 4], &device).unwrap();
-        let v = Tensor::<CpuRuntime>::try_from_slice(&v_data, &[1, 2, 3, 4], &device).unwrap();
+        let k = Tensor::<CpuRuntime>::from_slice(&k_data, &[1, 2, 3, 4], &device).unwrap();
+        let v = Tensor::<CpuRuntime>::from_slice(&v_data, &[1, 2, 3, 4], &device).unwrap();
 
         cache.layer_mut(0).unwrap().update(&k, &v).unwrap();
         assert_eq!(cache.seq_len(), 3);

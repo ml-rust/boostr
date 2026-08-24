@@ -311,30 +311,25 @@ mod tests {
         let n_input = batch * seq * hidden;
         let input_data: Vec<f32> = (0..n_input).map(|i| (i as f32) * 0.01).collect();
         let input =
-            Tensor::<CpuRuntime>::try_from_slice(&input_data, &[batch, seq, hidden], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&input_data, &[batch, seq, hidden], &device).unwrap();
 
         let n_weight = total_proj * hidden;
         let weight_data: Vec<f32> = (0..n_weight).map(|i| (i as f32) * 0.005).collect();
         let weight =
-            Tensor::<CpuRuntime>::try_from_slice(&weight_data, &[total_proj, hidden], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&weight_data, &[total_proj, hidden], &device).unwrap();
 
         // Upstream gradients
         let dq_data: Vec<f32> = (0..batch * num_heads * seq * head_dim)
             .map(|i| ((i % 7) as f32 - 3.0) * 0.01)
             .collect();
-        let dq = Tensor::<CpuRuntime>::try_from_slice(
-            &dq_data,
-            &[batch, num_heads, seq, head_dim],
-            &device,
-        )
-        .unwrap();
+        let dq =
+            Tensor::<CpuRuntime>::from_slice(&dq_data, &[batch, num_heads, seq, head_dim], &device)
+                .unwrap();
 
         let dk_data: Vec<f32> = (0..batch * num_kv_heads * seq * head_dim)
             .map(|i| ((i % 5) as f32 - 2.0) * 0.01)
             .collect();
-        let dk = Tensor::<CpuRuntime>::try_from_slice(
+        let dk = Tensor::<CpuRuntime>::from_slice(
             &dk_data,
             &[batch, num_kv_heads, seq, head_dim],
             &device,
@@ -344,7 +339,7 @@ mod tests {
         let dv_data: Vec<f32> = (0..batch * num_kv_heads * seq * head_dim)
             .map(|i| ((i % 3) as f32 - 1.0) * 0.01)
             .collect();
-        let dv = Tensor::<CpuRuntime>::try_from_slice(
+        let dv = Tensor::<CpuRuntime>::from_slice(
             &dv_data,
             &[batch, num_kv_heads, seq, head_dim],
             &device,
@@ -424,19 +419,17 @@ mod tests {
         let n_attn = batch * seq * proj_dim;
         let attn_data: Vec<f32> = (0..n_attn).map(|i| (i as f32) * 0.02).collect();
         let attn_out =
-            Tensor::<CpuRuntime>::try_from_slice(&attn_data, &[batch, seq, proj_dim], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&attn_data, &[batch, seq, proj_dim], &device).unwrap();
 
         let n_weight = hidden * proj_dim;
         let weight_data: Vec<f32> = (0..n_weight).map(|i| (i as f32) * 0.01).collect();
         let weight =
-            Tensor::<CpuRuntime>::try_from_slice(&weight_data, &[hidden, proj_dim], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&weight_data, &[hidden, proj_dim], &device).unwrap();
 
         let n_dout = batch * seq * hidden;
         let d_output_data: Vec<f32> = (0..n_dout).map(|i| ((i % 5) as f32 - 2.0) * 0.01).collect();
         let d_output =
-            Tensor::<CpuRuntime>::try_from_slice(&d_output_data, &[batch, seq, hidden], &device)
+            Tensor::<CpuRuntime>::from_slice(&d_output_data, &[batch, seq, hidden], &device)
                 .unwrap();
 
         // Compute backward via our implementation
@@ -475,24 +468,17 @@ mod tests {
         let total_proj = num_heads * head_dim + 2 * num_kv_heads * head_dim;
 
         let dq =
-            Tensor::<CpuRuntime>::try_ones(&[batch, num_heads, seq, head_dim], DType::F32, &device)
+            Tensor::<CpuRuntime>::ones(&[batch, num_heads, seq, head_dim], DType::F32, &device)
                 .unwrap();
-        let dk = Tensor::<CpuRuntime>::try_ones(
-            &[batch, num_kv_heads, seq, head_dim],
-            DType::F32,
-            &device,
-        )
-        .unwrap();
-        let dv = Tensor::<CpuRuntime>::try_ones(
-            &[batch, num_kv_heads, seq, head_dim],
-            DType::F32,
-            &device,
-        )
-        .unwrap();
-        let input =
-            Tensor::<CpuRuntime>::try_ones(&[batch, seq, hidden], DType::F32, &device).unwrap();
+        let dk =
+            Tensor::<CpuRuntime>::ones(&[batch, num_kv_heads, seq, head_dim], DType::F32, &device)
+                .unwrap();
+        let dv =
+            Tensor::<CpuRuntime>::ones(&[batch, num_kv_heads, seq, head_dim], DType::F32, &device)
+                .unwrap();
+        let input = Tensor::<CpuRuntime>::ones(&[batch, seq, hidden], DType::F32, &device).unwrap();
         let weight =
-            Tensor::<CpuRuntime>::try_ones(&[total_proj, hidden], DType::F32, &device).unwrap();
+            Tensor::<CpuRuntime>::ones(&[total_proj, hidden], DType::F32, &device).unwrap();
 
         let (_, _, d_bias) = fused_qkv_projection_bwd_impl(
             &client,

@@ -27,7 +27,7 @@ impl DequantOps<CpuRuntime> for CpuClient {
         let n = data.len() * 2;
         let mut output = vec![0.0f32; n];
         nf4::nf4_dequant_f32(data, abs, blocksize, &mut output);
-        Ok(Tensor::<CpuRuntime>::try_from_slice(
+        Ok(Tensor::<CpuRuntime>::from_slice(
             &output,
             &[n],
             nf4_data.device(),
@@ -57,7 +57,7 @@ impl DequantOps<CpuRuntime> for CpuClient {
         nf4::nf4_gemm_f32(inp, wt, abs, &mut output, m, k, n_out, blocksize);
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n_out);
-        Ok(Tensor::<CpuRuntime>::try_from_slice(
+        Ok(Tensor::<CpuRuntime>::from_slice(
             &output,
             &out_shape,
             input.device(),
@@ -115,8 +115,7 @@ impl DequantOps<CpuRuntime> for CpuClient {
         }
 
         // Create f32 tensor
-        let f32_tensor =
-            Tensor::<CpuRuntime>::try_from_slice(&f32_output, qt.shape(), qt.device())?;
+        let f32_tensor = Tensor::<CpuRuntime>::from_slice(&f32_output, qt.shape(), qt.device())?;
 
         // Cast to target dtype if needed
         if target_dtype == DType::F32 {

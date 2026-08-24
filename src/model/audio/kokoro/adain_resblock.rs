@@ -267,12 +267,12 @@ mod tests {
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device).unwrap()
     }
 
     fn ones(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; n], shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; n], shape, device).unwrap()
     }
 
     fn build_adain(
@@ -297,7 +297,7 @@ mod tests {
         let (client, device) = cpu_setup();
         let adain = build_adain(2, 3, &device);
         let data: Vec<f32> = (0..10).map(|i| i as f32).collect();
-        let x = Tensor::<CpuRuntime>::try_from_slice(&data, &[1, 2, 5], &device).unwrap();
+        let x = Tensor::<CpuRuntime>::from_slice(&data, &[1, 2, 5], &device).unwrap();
         let style = zeros(&[1, 3], &device);
         let out = adain.forward(&client, &x, &style).unwrap();
         let flat: Vec<f32> = out.to_vec();

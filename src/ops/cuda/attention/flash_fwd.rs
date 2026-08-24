@@ -44,12 +44,12 @@ pub(super) fn flash_attention_fwd_impl(
     );
 
     let device = q.device();
-    let output = Tensor::<CudaRuntime>::try_empty(
+    let output = Tensor::<CudaRuntime>::empty(
         &[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim],
         dtype,
         device,
     )?;
-    let lse = Tensor::<CudaRuntime>::try_empty(
+    let lse = Tensor::<CudaRuntime>::empty(
         &[p.batch_size, p.num_heads, p.seq_len_q],
         DType::F32,
         device,
@@ -135,12 +135,12 @@ pub(super) fn flash_attention_fwd_fp8_impl(
     let kernel_name = format!("flash_attention_fwd_{}{}_fp8", p.head_dim, sm_suffix);
 
     let device = q.device();
-    let output = Tensor::<CudaRuntime>::try_empty(
+    let output = Tensor::<CudaRuntime>::empty(
         &[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim],
         dtype,
         device,
     )?;
-    let lse = Tensor::<CudaRuntime>::try_empty(
+    let lse = Tensor::<CudaRuntime>::empty(
         &[p.batch_size, p.num_heads, p.seq_len_q],
         DType::F32,
         device,

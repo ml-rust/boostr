@@ -129,11 +129,11 @@ fn snake_beta_and_activation1d_match_upstream() {
     let length = input.len() / channels;
 
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&input, &[1, channels, length], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&input, &[1, channels, length], &device).unwrap(),
         false,
     );
-    let alpha_t = Tensor::<CpuRuntime>::try_from_slice(&alpha, &[channels], &device).unwrap();
-    let beta_t = Tensor::<CpuRuntime>::try_from_slice(&beta, &[channels], &device).unwrap();
+    let alpha_t = Tensor::<CpuRuntime>::from_slice(&alpha, &[channels], &device).unwrap();
+    let beta_t = Tensor::<CpuRuntime>::from_slice(&beta, &[channels], &device).unwrap();
 
     // --- bare SnakeBeta ---------------------------------------------------
     let snake = SnakeBeta::new(alpha_t.clone(), beta_t.clone(), false).unwrap();
@@ -233,7 +233,7 @@ fn semantic_encoder_matches_upstream() {
     let input = read_f32(&dir.join("enc_sem_input.f32"));
     let frames = input.len() / IN_DIM;
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&input, &[1, frames, IN_DIM], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&input, &[1, frames, IN_DIM], &device).unwrap(),
         false,
     );
 
@@ -354,7 +354,7 @@ fn semantic_adapter_matches_upstream() {
     const CHANNELS: usize = 1024;
     let frames = input.len() / CHANNELS;
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&input, &[1, CHANNELS, frames], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&input, &[1, CHANNELS, frames], &device).unwrap(),
         false,
     );
 
@@ -409,7 +409,7 @@ fn acoustic_encoder_matches_upstream() {
     let wave = read_f32(&wave_path);
     let samples = wave.len();
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&wave, &[1, 1, samples], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&wave, &[1, 1, samples], &device).unwrap(),
         false,
     );
 
@@ -469,7 +469,7 @@ fn residual_fsq_matches_upstream() {
     let input = read_f32(&in_path);
     let frames = input.len() / DIM;
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&input, &[1, frames, DIM], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&input, &[1, frames, DIM], &device).unwrap(),
         false,
     );
 

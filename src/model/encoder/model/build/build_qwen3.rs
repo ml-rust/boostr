@@ -99,7 +99,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         // Qwen3 uses RoPE; no learned position embedding. Sentinel zero table,
         // never called (the forward skips it for RoPE families).
         let sentinel_raw =
-            Tensor::<R>::try_from_slice(&vec![0.0f32; hidden_size], &[1, hidden_size], &device)?;
+            Tensor::<R>::from_slice(&vec![0.0f32; hidden_size], &[1, hidden_size], &device)?;
         let position_embed = Embedding::new(maybe_cast(sentinel_raw)?, false);
 
         // No token_embd_norm tensor in this architecture, and no norm is applied

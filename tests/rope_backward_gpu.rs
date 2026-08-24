@@ -92,19 +92,19 @@ fn cpu_reference_grad(variant: Variant) -> Vec<f32> {
     let (cos_data, sin_data) = caches();
 
     let x = Var::<CpuRuntime>::new(
-        Tensor::try_from_slice(&values(NUMEL, 0.3), &SHAPE, &device).unwrap(),
+        Tensor::from_slice(&values(NUMEL, 0.3), &SHAPE, &device).unwrap(),
         true,
     );
     let cos = Var::<CpuRuntime>::new(
-        Tensor::try_from_slice(&cos_data, &CACHE_SHAPE, &device).unwrap(),
+        Tensor::from_slice(&cos_data, &CACHE_SHAPE, &device).unwrap(),
         false,
     );
     let sin = Var::<CpuRuntime>::new(
-        Tensor::try_from_slice(&sin_data, &CACHE_SHAPE, &device).unwrap(),
+        Tensor::from_slice(&sin_data, &CACHE_SHAPE, &device).unwrap(),
         false,
     );
     let w = Var::<CpuRuntime>::new(
-        Tensor::try_from_slice(&values(NUMEL, 1.9), &SHAPE, &device).unwrap(),
+        Tensor::from_slice(&values(NUMEL, 1.9), &SHAPE, &device).unwrap(),
         false,
     );
 
@@ -186,8 +186,7 @@ mod cuda {
         let (cos_data, sin_data) = caches();
         let label = variant.label();
 
-        let x_t =
-            Tensor::<CudaRuntime>::try_from_slice(&values(NUMEL, 0.3), &SHAPE, device).unwrap();
+        let x_t = Tensor::<CudaRuntime>::from_slice(&values(NUMEL, 0.3), &SHAPE, device).unwrap();
         let x_t = if dtype == DType::F32 {
             x_t
         } else {
@@ -196,11 +195,11 @@ mod cuda {
         let x = Var::new(x_t, true);
 
         let cos = Var::new(
-            Tensor::<CudaRuntime>::try_from_slice(&cos_data, &CACHE_SHAPE, device).unwrap(),
+            Tensor::<CudaRuntime>::from_slice(&cos_data, &CACHE_SHAPE, device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<CudaRuntime>::try_from_slice(&sin_data, &CACHE_SHAPE, device).unwrap(),
+            Tensor::<CudaRuntime>::from_slice(&sin_data, &CACHE_SHAPE, device).unwrap(),
             false,
         );
 
@@ -216,7 +215,7 @@ mod cuda {
         // is exactly the dtype its saved caches carry.
         let out = var_cast(&out, DType::F32, client).expect("cast rope output to f32");
         let w = Var::new(
-            Tensor::<CudaRuntime>::try_from_slice(&values(NUMEL, 1.9), &SHAPE, device).unwrap(),
+            Tensor::<CudaRuntime>::from_slice(&values(NUMEL, 1.9), &SHAPE, device).unwrap(),
             false,
         );
         let weighted = var_mul(&out, &w, client).expect("weighting");
@@ -325,15 +324,15 @@ mod webgpu {
         let label = variant.label();
 
         let x = Var::new(
-            Tensor::<WgpuRuntime>::try_from_slice(&values(NUMEL, 0.3), &SHAPE, device).unwrap(),
+            Tensor::<WgpuRuntime>::from_slice(&values(NUMEL, 0.3), &SHAPE, device).unwrap(),
             true,
         );
         let cos = Var::new(
-            Tensor::<WgpuRuntime>::try_from_slice(&cos_data, &CACHE_SHAPE, device).unwrap(),
+            Tensor::<WgpuRuntime>::from_slice(&cos_data, &CACHE_SHAPE, device).unwrap(),
             false,
         );
         let sin = Var::new(
-            Tensor::<WgpuRuntime>::try_from_slice(&sin_data, &CACHE_SHAPE, device).unwrap(),
+            Tensor::<WgpuRuntime>::from_slice(&sin_data, &CACHE_SHAPE, device).unwrap(),
             false,
         );
 
@@ -345,7 +344,7 @@ mod webgpu {
         .unwrap_or_else(|e| panic!("wgpu {label}: forward failed: {e}"));
 
         let w = Var::new(
-            Tensor::<WgpuRuntime>::try_from_slice(&values(NUMEL, 1.9), &SHAPE, device).unwrap(),
+            Tensor::<WgpuRuntime>::from_slice(&values(NUMEL, 1.9), &SHAPE, device).unwrap(),
             false,
         );
         let weighted = var_mul(&out, &w, client).expect("weighting");

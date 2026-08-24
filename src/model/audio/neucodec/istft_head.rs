@@ -125,14 +125,14 @@ mod tests {
         IstftHead::new(
             IstftHeadWeights {
                 linear: Linear::new(
-                    Tensor::<CpuRuntime>::try_from_slice(
+                    Tensor::<CpuRuntime>::from_slice(
                         &vec![0.0f32; out * hidden],
                         &[out, hidden],
                         device,
                     )
                     .unwrap(),
                     Some(
-                        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; out], &[out], device)
+                        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; out], &[out], device)
                             .unwrap(),
                     ),
                     false,
@@ -151,7 +151,7 @@ mod tests {
         let n_fft = 20;
         let h = head(hidden, n_fft, &device);
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &vec![0.0f32; 2 * 6 * hidden],
                 &[2, 6, hidden],
                 &device,
@@ -174,12 +174,8 @@ mod tests {
         let n_fft = 8;
         let h = head(hidden, n_fft, &device);
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
-                &vec![1.0f32; 3 * hidden],
-                &[1, 3, hidden],
-                &device,
-            )
-            .unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; 3 * hidden], &[1, 3, hidden], &device)
+                .unwrap(),
             false,
         );
         let (mag, phase) = h.forward(&client, &x).unwrap();
@@ -205,7 +201,7 @@ mod tests {
         let head = IstftHead::new(
             IstftHeadWeights {
                 linear: Linear::new(
-                    Tensor::<CpuRuntime>::try_from_slice(
+                    Tensor::<CpuRuntime>::from_slice(
                         &vec![0.0f32; out * hidden],
                         &[out, hidden],
                         &device,
@@ -214,7 +210,7 @@ mod tests {
                     // Bias alone drives the pre-activation magnitude channels
                     // to 1e6, far past the clamp ceiling.
                     Some(
-                        Tensor::<CpuRuntime>::try_from_slice(
+                        Tensor::<CpuRuntime>::from_slice(
                             &vec![1.0e6f32; f]
                                 .into_iter()
                                 .chain(vec![0.0f32; f])
@@ -232,12 +228,8 @@ mod tests {
         )
         .unwrap();
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
-                &vec![0.0f32; 2 * hidden],
-                &[1, 2, hidden],
-                &device,
-            )
-            .unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; 2 * hidden], &[1, 2, hidden], &device)
+                .unwrap(),
             false,
         );
         let (mag, _phase) = head.forward(&client, &x).unwrap();
@@ -259,8 +251,7 @@ mod tests {
         let head = IstftHead::new(
             IstftHeadWeights {
                 linear: Linear::new(
-                    Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 5 * 4], &[5, 4], &device)
-                        .unwrap(),
+                    Tensor::<CpuRuntime>::from_slice(&[0.0f32; 5 * 4], &[5, 4], &device).unwrap(),
                     None,
                     false,
                 ),
@@ -270,7 +261,7 @@ mod tests {
         )
         .unwrap();
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[1, 1, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[1, 1, 4], &device).unwrap(),
             false,
         );
         assert!(head.forward(&client, &x).is_err());
@@ -283,8 +274,7 @@ mod tests {
             IstftHead::new(
                 IstftHeadWeights {
                     linear: Linear::new(
-                        Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[2, 2], &device)
-                            .unwrap(),
+                        Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[2, 2], &device).unwrap(),
                         None,
                         false,
                     ),

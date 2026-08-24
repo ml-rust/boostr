@@ -241,14 +241,14 @@ mod tests {
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device).unwrap()
     }
 
     #[test]
     fn sine_gen_output_shape_has_harmonic_plus_one_channels() {
         let (client, device) = cpu_setup();
         let sg = SineGen::new(24_000.0, 8);
-        let f0 = Tensor::<CpuRuntime>::try_from_slice(
+        let f0 = Tensor::<CpuRuntime>::from_slice(
             &[100.0f32, 100.0, 100.0, 100.0, 100.0],
             &[1, 5, 1],
             &device,
@@ -266,8 +266,7 @@ mod tests {
         let (client, device) = cpu_setup();
         let sg = SineGen::new(24_000.0, 2);
         let t = 512;
-        let f0 =
-            Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; t], &[1, t, 1], &device).unwrap();
+        let f0 = Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; t], &[1, t, 1], &device).unwrap();
         let out = sg.forward(&client, &f0).unwrap();
         let data: Vec<f32> = out.to_vec();
         assert!(data.iter().all(|v| v.is_finite()));
@@ -290,8 +289,7 @@ mod tests {
         let (client, device) = cpu_setup();
         let sg = SineGen::new(24_000.0, 4);
         let t = 512;
-        let f0 =
-            Tensor::<CpuRuntime>::try_from_slice(&vec![220.0f32; t], &[1, t, 1], &device).unwrap();
+        let f0 = Tensor::<CpuRuntime>::from_slice(&vec![220.0f32; t], &[1, t, 1], &device).unwrap();
         let out = sg.forward(&client, &f0).unwrap();
         let data: Vec<f32> = out.to_vec();
         let rms = (data.iter().map(|v| v * v).sum::<f32>() / data.len() as f32).sqrt();
@@ -313,9 +311,8 @@ mod tests {
         let sg = SineGen::new(24_000.0, 4);
         let module =
             SourceModuleHnNSF::new(sg, zeros(&[1, 5], &device), zeros(&[1], &device)).unwrap();
-        let f0 =
-            Tensor::<CpuRuntime>::try_from_slice(&[200.0f32, 200.0, 200.0], &[1, 3, 1], &device)
-                .unwrap();
+        let f0 = Tensor::<CpuRuntime>::from_slice(&[200.0f32, 200.0, 200.0], &[1, 3, 1], &device)
+            .unwrap();
         let out = module.forward(&client, &f0).unwrap();
         assert_eq!(out.shape(), &[1, 3, 1]);
     }
@@ -327,7 +324,7 @@ mod tests {
         let sg = SineGen::new(24_000.0, 2);
         let module =
             SourceModuleHnNSF::new(sg, zeros(&[1, 3], &device), zeros(&[1], &device)).unwrap();
-        let f0 = Tensor::<CpuRuntime>::try_from_slice(&[200.0f32; 4], &[1, 4, 1], &device).unwrap();
+        let f0 = Tensor::<CpuRuntime>::from_slice(&[200.0f32; 4], &[1, 4, 1], &device).unwrap();
         let out = module.forward(&client, &f0).unwrap();
         for v in out.to_vec::<f32>() {
             assert!(v.abs() < 1e-5, "got {v}");

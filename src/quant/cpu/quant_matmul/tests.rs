@@ -20,7 +20,7 @@ fn test_quant_matmul_q4_0_basic() {
     let (client, device) = setup();
 
     // activation [1, 32], weight [1, 32] → output [1, 1]
-    let act = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 32], &[1, 32], &device).unwrap();
+    let act = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 32], &[1, 32], &device).unwrap();
 
     let mut block = [0u8; 18];
     block[0..2].copy_from_slice(&f16::from_f32(2.0).to_le_bytes());
@@ -46,7 +46,7 @@ fn test_quant_matmul_matches_dequant_matmul() {
 
     // activation [2, 32]
     let act_data: Vec<f32> = (0..64).map(|i| (i as f32) * 0.1).collect();
-    let act = Tensor::<CpuRuntime>::try_from_slice(&act_data, &[2, 32], &device).unwrap();
+    let act = Tensor::<CpuRuntime>::from_slice(&act_data, &[2, 32], &device).unwrap();
 
     // weight [3, 32] as Q8_0 (3 rows, each 34 bytes)
     let mut weight_bytes = Vec::new();
@@ -91,7 +91,7 @@ fn test_quant_matmul_matches_dequant_matmul() {
 fn test_quant_matmul_dim_mismatch() {
     let (client, device) = setup();
 
-    let act = Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; 64], &[2, 32], &device).unwrap();
+    let act = Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; 64], &[2, 32], &device).unwrap();
 
     // Weight K=64 ≠ activation K=32
     let block = vec![0u8; 2 * 34]; // 2 blocks of Q8_0 = 64 elements
@@ -106,7 +106,7 @@ fn test_quant_matmul_dim_mismatch() {
 fn test_quant_matmul_q2k_basic() {
     let (client, device) = setup();
 
-    let act = Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; 256], &[1, 256], &device).unwrap();
+    let act = Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; 256], &[1, 256], &device).unwrap();
 
     // Q2K: 256 elements, 84 bytes/block — all zeros dequantizes to zeros
     let block = vec![0u8; 84];
@@ -130,7 +130,7 @@ fn test_quant_matmul_q2k_matches_dequant_matmul() {
     let m = 2;
 
     let act_data: Vec<f32> = (0..m * k).map(|i| ((i % 17) as f32 - 8.0) * 0.01).collect();
-    let act = Tensor::<CpuRuntime>::try_from_slice(&act_data, &[m, k], &device).unwrap();
+    let act = Tensor::<CpuRuntime>::from_slice(&act_data, &[m, k], &device).unwrap();
 
     // Build Q2K blocks with non-trivial data
     let mut weight_bytes = Vec::new();
@@ -194,7 +194,7 @@ fn test_quant_matmul_q3k_matches_dequant_matmul() {
     let m = 2;
 
     let act_data: Vec<f32> = (0..m * k).map(|i| ((i % 13) as f32 - 6.0) * 0.01).collect();
-    let act = Tensor::<CpuRuntime>::try_from_slice(&act_data, &[m, k], &device).unwrap();
+    let act = Tensor::<CpuRuntime>::from_slice(&act_data, &[m, k], &device).unwrap();
 
     // Build Q3K blocks with non-trivial data
     let mut weight_bytes = Vec::new();

@@ -89,13 +89,13 @@ mod tests {
         let (client, device) = cpu_setup();
         // v: two output channels, each a unit vector of length 3 (norm = 1).
         // g = [1, 1] → fused weight == v.
-        let v = Tensor::<CpuRuntime>::try_from_slice(
+        let v = Tensor::<CpuRuntime>::from_slice(
             &[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0],
             &[2, 1, 3],
             &device,
         )
         .unwrap();
-        let g = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[2, 1, 1], &device).unwrap();
+        let g = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[2, 1, 1], &device).unwrap();
         let w = fuse_weight_norm(&client, &v, &g, 0).unwrap();
         assert_eq!(w.shape(), &[2, 1, 3]);
         let flat: Vec<f32> = w.to_vec();
@@ -110,13 +110,13 @@ mod tests {
         let (client, device) = cpu_setup();
         // v channel 0 has norm 2, channel 1 has norm 5. g = [4, 10].
         // Expected per-channel norm of fused weight: [4, 10].
-        let v = Tensor::<CpuRuntime>::try_from_slice(
+        let v = Tensor::<CpuRuntime>::from_slice(
             &[2.0f32, 0.0, 0.0, 3.0, 4.0, 0.0],
             &[2, 1, 3],
             &device,
         )
         .unwrap();
-        let g = Tensor::<CpuRuntime>::try_from_slice(&[4.0f32, 10.0], &[2], &device).unwrap();
+        let g = Tensor::<CpuRuntime>::from_slice(&[4.0f32, 10.0], &[2], &device).unwrap();
         let w = fuse_weight_norm(&client, &v, &g, 0).unwrap();
         let flat: Vec<f32> = w.to_vec();
         let c0_norm = (flat[0].powi(2) + flat[1].powi(2) + flat[2].powi(2)).sqrt();
@@ -128,25 +128,25 @@ mod tests {
     #[test]
     fn accepts_flat_g() {
         let (client, device) = cpu_setup();
-        let v = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device)
-            .unwrap();
-        let g = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[2], &device).unwrap();
+        let v =
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
+        let g = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[2], &device).unwrap();
         assert!(fuse_weight_norm(&client, &v, &g, 0).is_ok());
     }
 
     #[test]
     fn rejects_wrong_g_size() {
         let (client, device) = cpu_setup();
-        let v = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6], &[2, 1, 3], &device).unwrap();
-        let g = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 3], &[3], &device).unwrap();
+        let v = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 1, 3], &device).unwrap();
+        let g = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 3], &[3], &device).unwrap();
         assert!(fuse_weight_norm(&client, &v, &g, 0).is_err());
     }
 
     #[test]
     fn rejects_dim_out_of_range() {
         let (client, device) = cpu_setup();
-        let v = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[2, 2], &device).unwrap();
-        let g = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[2], &device).unwrap();
+        let v = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[2, 2], &device).unwrap();
+        let g = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[2], &device).unwrap();
         assert!(fuse_weight_norm(&client, &v, &g, 5).is_err());
     }
 
@@ -154,7 +154,7 @@ mod tests {
     fn axis_1_works_for_transposed_conv_layout() {
         // Transposed-conv weight shape: [C_in, C_out, K]. Output channel axis = 1.
         let (client, device) = cpu_setup();
-        let v = Tensor::<CpuRuntime>::try_from_slice(
+        let v = Tensor::<CpuRuntime>::from_slice(
             &[
                 1.0f32, 0.0, 0.0, // c_in=0, c_out=0
                 0.0, 2.0, 0.0, // c_in=0, c_out=1
@@ -165,7 +165,7 @@ mod tests {
             &device,
         )
         .unwrap();
-        let g = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 6.0], &[2], &device).unwrap();
+        let g = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 6.0], &[2], &device).unwrap();
         let w = fuse_weight_norm(&client, &v, &g, 1).unwrap();
         assert_eq!(w.shape(), &[2, 2, 3]);
         // ||v[:, 0, :]|| = 1, ||v[:, 1, :]|| = 2 → scales = 3, 3 respectively.

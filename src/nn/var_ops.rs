@@ -123,7 +123,7 @@ mod tests {
 
         // [B=1, H_kv=2, S=2, D=2]
         let kv = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &[0.5f32, -1.0, 2.0, 0.25, -0.75, 1.5, 0.1, -0.3],
                 &[1, 2, 2, 2],
                 &device,
@@ -153,7 +153,7 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let w = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 1, 2, 2], &device)
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 1, 2, 2], &device)
                 .unwrap(),
             true,
         );

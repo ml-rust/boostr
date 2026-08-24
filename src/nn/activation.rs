@@ -56,7 +56,7 @@ mod tests {
     #[test]
     fn test_activation_forward() {
         let (client, device) = cpu_setup();
-        let x = Tensor::<CpuRuntime>::try_from_slice(&[-1.0f32, 0.0, 1.0], &[3], &device).unwrap();
+        let x = Tensor::<CpuRuntime>::from_slice(&[-1.0f32, 0.0, 1.0], &[3], &device).unwrap();
 
         for act in [
             Activation::Relu,
@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn test_relu_values() {
         let (client, device) = cpu_setup();
-        let x = Tensor::<CpuRuntime>::try_from_slice(&[-2.0f32, 0.0, 3.0], &[3], &device).unwrap();
+        let x = Tensor::<CpuRuntime>::from_slice(&[-2.0f32, 0.0, 3.0], &[3], &device).unwrap();
         let out = Activation::Relu.forward(&client, &x).unwrap();
         let data: Vec<f32> = out.to_vec();
         assert_eq!(data, vec![0.0, 0.0, 3.0]);

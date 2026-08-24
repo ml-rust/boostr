@@ -48,7 +48,7 @@ pub(in crate::model::encoder) fn additive_span_mask<R: Runtime<DType = DType>>(
             }
         }
     }
-    Ok(Some(Tensor::<R>::try_from_slice(
+    Ok(Some(Tensor::<R>::from_slice(
         &data,
         &[1, 1, seq_len, seq_len],
         device,
@@ -90,7 +90,7 @@ fn alibi_bias<R: Runtime<DType = DType>>(
         }
     }
 
-    Ok(Tensor::<R>::try_from_slice(
+    Ok(Tensor::<R>::from_slice(
         &data,
         &[1, n_heads, seq_len, seq_len],
         device,

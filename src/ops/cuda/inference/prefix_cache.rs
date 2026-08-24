@@ -88,7 +88,7 @@ pub fn gpu_prefix_cache_lookup(
     let device = query_hashes.device();
     let device_index = device.id();
 
-    let out_block_ids = Tensor::<CudaRuntime>::try_empty(&[num_queries], DType::I32, device)?;
+    let out_block_ids = Tensor::<CudaRuntime>::empty(&[num_queries], DType::I32, device)?;
 
     let module =
         kernels::get_or_load_module(client.context(), device_index, PREFIX_CACHE_LOOKUP_MODULE)?;

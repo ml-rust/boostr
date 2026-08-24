@@ -332,7 +332,7 @@ impl Gguf {
             }
         };
 
-        Tensor::<R>::try_from_slice(&data, &shape, device).map_err(Error::Numr)
+        Tensor::<R>::from_slice(&data, &shape, device).map_err(Error::Numr)
     }
 
     /// Load an F32 tensor using a streaming dequant path for large tensors.
@@ -341,7 +341,7 @@ impl Gguf {
     /// is identical to [`load_tensor_f32`].  For larger tensors the method:
     ///
     /// 1. Allocates the destination `Tensor<R>` of the correct shape once on the
-    ///    device via `Tensor::try_empty`.
+    ///    device via `Tensor::empty`.
     /// 2. Dequantizes `STREAMING_CHUNK_ELEMS` f32 elements at a time on the CPU.
     /// 3. Uploads each chunk directly into the pre-allocated device buffer at the
     ///    correct byte offset, then drops the chunk `Vec<f32>` before the next
@@ -352,7 +352,7 @@ impl Gguf {
     /// weights such as the token-embedding table in bge-reranker-v2-m3.
     ///
     /// The GPU-side allocation is a single contiguous buffer of `numel × 4`
-    /// bytes; if the device cannot satisfy that allocation `Tensor::try_empty`
+    /// bytes; if the device cannot satisfy that allocation `Tensor::empty`
     /// returns `OutOfMemory` immediately (no change from the non-streaming path).
     ///
     /// Non-quantized types (F32 / F16 / BF16 / F64) always use the one-shot
@@ -439,7 +439,7 @@ impl Gguf {
         let raw = self.read_slice(abs_offset, expected_bytes, name)?;
 
         // Allocate the destination tensor on the device.
-        let dst = Tensor::<R>::try_empty(&shape, DType::F32, device).map_err(Error::Numr)?;
+        let dst = Tensor::<R>::empty(&shape, DType::F32, device).map_err(Error::Numr)?;
         let base_ptr = dst.ptr();
 
         // How many rows fit in one chunk?  Use the chunk size that corresponds

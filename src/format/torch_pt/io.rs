@@ -57,7 +57,7 @@ pub(super) fn build_tensor_from_bytes<R: Runtime<DType = DType>>(
                 .iter()
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
-            Ok(Tensor::<R>::try_from_slice(&data, shape, device)?)
+            Ok(Tensor::<R>::from_slice(&data, shape, device)?)
         }
         DType::F64 => {
             let data: Vec<f64> = bytes
@@ -66,7 +66,7 @@ pub(super) fn build_tensor_from_bytes<R: Runtime<DType = DType>>(
                 .iter()
                 .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
                 .collect();
-            Ok(Tensor::<R>::try_from_slice(&data, shape, device)?)
+            Ok(Tensor::<R>::from_slice(&data, shape, device)?)
         }
         other => Err(Error::ModelError {
             reason: format!(

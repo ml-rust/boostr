@@ -29,7 +29,7 @@ fn test_decode_grid_values_toy() {
     let expected_grid = [-1.0f32, -0.5, 0.0, 0.5];
 
     for index in 0..16i32 {
-        let indices = Tensor::<CpuRuntime>::try_from_slice(&[index], &[1], &device).unwrap();
+        let indices = Tensor::<CpuRuntime>::from_slice(&[index], &[1], &device).unwrap();
         let codes = fsq.indices_to_codes(&client, &indices).unwrap();
         let data: Vec<f32> = codes.tensor().contiguous().unwrap().to_vec();
 
@@ -65,7 +65,7 @@ fn test_encode_grid_values_toy() {
 
     for &z_val in &[-5.0f32, 0.0, 5.0] {
         let z = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[z_val, z_val], &[1, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[z_val, z_val], &[1, 2], &device).unwrap(),
             false,
         );
         let (codes, _) = fsq.quantize(&client, &z).unwrap();
@@ -80,7 +80,7 @@ fn test_encode_grid_values_toy() {
 
     // Saturating extremes hit the exact boundary grid points.
     let z_neg = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[-5.0f32, -5.0], &[1, 2], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[-5.0f32, -5.0], &[1, 2], &device).unwrap(),
         false,
     );
     let (codes_neg, _) = fsq.quantize(&client, &z_neg).unwrap();
@@ -89,7 +89,7 @@ fn test_encode_grid_values_toy() {
     assert!((data_neg[1] - (-1.0)).abs() < 1e-4);
 
     let z_pos = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[5.0f32, 5.0], &[1, 2], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[5.0f32, 5.0], &[1, 2], &device).unwrap(),
         false,
     );
     let (codes_pos, _) = fsq.quantize(&client, &z_pos).unwrap();
@@ -108,7 +108,7 @@ fn test_encode_grid_values_toy() {
 fn test_straight_through_gradient_nonzero() {
     let (fsq, client, device) = toy_fsq();
     let z = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.31f32, -0.72], &[1, 2], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.31f32, -0.72], &[1, 2], &device).unwrap(),
         true,
     );
 
@@ -148,7 +148,7 @@ fn test_projection_required_when_dims_differ() {
 fn test_projection_rejected_when_dims_match() {
     let (_, device) = cpu_setup();
     let config = FsqConfig::new(vec![4, 4], 2).unwrap();
-    let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[2, 2], &device).unwrap();
+    let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[2, 2], &device).unwrap();
     let project_in = Some(Linear::new(weight, None, false));
     let err = Fsq::<CpuRuntime>::new(config, &device, project_in, None)
         .err()
@@ -168,13 +168,13 @@ fn test_projection_roundtrips_shape() {
     // input_dim=5, codebook_dim=2 (mirrors NeuCodec's dim != levels.len()).
     let config = FsqConfig::new(vec![4, 4], 5).unwrap();
 
-    let w_in = Tensor::<CpuRuntime>::try_from_slice(
+    let w_in = Tensor::<CpuRuntime>::from_slice(
         &[0.1f32; 10], // [codebook_dim=2, input_dim=5]
         &[2, 5],
         &device,
     )
     .unwrap();
-    let w_out = Tensor::<CpuRuntime>::try_from_slice(
+    let w_out = Tensor::<CpuRuntime>::from_slice(
         &[0.2f32; 10], // [input_dim=5, codebook_dim=2]
         &[5, 2],
         &device,
@@ -186,7 +186,7 @@ fn test_projection_roundtrips_shape() {
     let fsq = Fsq::new(config, &device, project_in, project_out).unwrap();
 
     let z = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.5f32; 5], &[1, 5], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.5f32; 5], &[1, 5], &device).unwrap(),
         false,
     );
     let (codes, indices) = fsq.quantize(&client, &z).unwrap();

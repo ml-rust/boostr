@@ -40,8 +40,8 @@ fn test_flatten_unflatten_roundtrip() {
     let params = vec![(id1, 3, DType::F32), (id2, 2, DType::F32)];
     let mut mgr = GradientBucketManager::<CpuRuntime>::new(&params, comm, 25 * 1024 * 1024, None);
 
-    let g1 = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap();
-    let g2 = Tensor::<CpuRuntime>::try_from_slice(&[4.0f32, 5.0], &[2], &device).unwrap();
+    let g1 = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap();
+    let g2 = Tensor::<CpuRuntime>::from_slice(&[4.0f32, 5.0], &[2], &device).unwrap();
 
     // Mark both ready — should flatten and launch allreduce
     mgr.mark_grad_ready(id1, &g1, &client).unwrap();
@@ -68,7 +68,7 @@ fn test_untracked_param_ignored() {
     let params = vec![(id1, 2, DType::F32)];
     let mut mgr = GradientBucketManager::<CpuRuntime>::new(&params, comm, 25 * 1024 * 1024, None);
 
-    let g = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+    let g = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
 
     // Marking an untracked param should be a no-op
     mgr.mark_grad_ready(untracked, &g, &client).unwrap();
@@ -84,9 +84,8 @@ fn test_multidim_gradient_shape_preserved() {
     let mut mgr = GradientBucketManager::<CpuRuntime>::new(&params, comm, 25 * 1024 * 1024, None);
 
     // 2x3 gradient
-    let g1 =
-        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], &device)
-            .unwrap();
+    let g1 = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], &device)
+        .unwrap();
 
     mgr.mark_grad_ready(id1, &g1, &client).unwrap();
 

@@ -133,17 +133,17 @@ pub(super) fn flash_attention_bwd_impl(
     // element index is odd (`CUDA_ERROR_MISALIGNED_ADDRESS`) and clobbers the
     // neighbouring element when it is even. The F32 accumulator is cast down to
     // `dtype` after the kernel completes.
-    let dq_acc = Tensor::<CudaRuntime>::try_zeros(
+    let dq_acc = Tensor::<CudaRuntime>::zeros(
         &[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim],
         DType::F32,
         device,
     )?;
-    let dk = Tensor::<CudaRuntime>::try_empty(
+    let dk = Tensor::<CudaRuntime>::empty(
         &[p.batch_size, p.num_heads, p.seq_len_k, p.head_dim],
         dtype,
         device,
     )?;
-    let dv = Tensor::<CudaRuntime>::try_empty(
+    let dv = Tensor::<CudaRuntime>::empty(
         &[p.batch_size, p.num_heads, p.seq_len_k, p.head_dim],
         dtype,
         device,
@@ -151,7 +151,7 @@ pub(super) fn flash_attention_bwd_impl(
 
     // Step 1: Preprocessing — compute D = rowsum(dO ⊙ O) per query position
     // D shape: [B, num_heads, S_q]
-    let d_buf = Tensor::<CudaRuntime>::try_empty(
+    let d_buf = Tensor::<CudaRuntime>::empty(
         &[p.batch_size, p.num_heads, p.seq_len_q],
         DType::F32,
         device,

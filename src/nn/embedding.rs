@@ -93,7 +93,7 @@ mod tests {
         let (client, device) = cpu_setup();
         // vocab=3, dim=4
         #[rustfmt::skip]
-        let weight = Tensor::<CpuRuntime>::try_from_slice(
+        let weight = Tensor::<CpuRuntime>::from_slice(
             &[
                 1.0f32, 2.0, 3.0, 4.0,   // token 0
                 5.0, 6.0, 7.0, 8.0,       // token 1
@@ -104,7 +104,7 @@ mod tests {
         ).unwrap();
         let emb = Embedding::new(weight, false);
 
-        let indices = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 2, 1], &[3], &device).unwrap();
+        let indices = Tensor::<CpuRuntime>::from_slice(&[0i64, 2, 1], &[3], &device).unwrap();
         let out = emb.forward(&client, &indices).unwrap();
         assert_eq!(out.shape(), &[3, 4]);
         assert!(!out.requires_grad());
@@ -124,13 +124,13 @@ mod tests {
     fn test_embedding_batched() {
         let (client, device) = cpu_setup();
         let weight =
-            Tensor::<CpuRuntime>::try_from_slice(&[10.0f32, 20.0, 30.0, 40.0], &[2, 2], &device)
+            Tensor::<CpuRuntime>::from_slice(&[10.0f32, 20.0, 30.0, 40.0], &[2, 2], &device)
                 .unwrap();
         let emb = Embedding::new(weight, false);
 
         // [2, 3] indices
         let indices =
-            Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 0, 1, 0, 1], &[2, 3], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 0, 1, 0, 1], &[2, 3], &device).unwrap();
         let out = emb.forward(&client, &indices).unwrap();
         assert_eq!(out.shape(), &[2, 3, 2]);
     }
@@ -139,7 +139,7 @@ mod tests {
     fn test_embedding_backward_updates_weight_gradient() {
         let (client, device) = cpu_setup();
         #[rustfmt::skip]
-        let weight = Tensor::<CpuRuntime>::try_from_slice(
+        let weight = Tensor::<CpuRuntime>::from_slice(
             &[
                 0.25f32, -1.5, 3.0,
                 2.75, 4.5, -0.5,
@@ -151,7 +151,7 @@ mod tests {
         ).unwrap();
         let emb = Embedding::new(weight, true);
 
-        let indices = Tensor::<CpuRuntime>::try_from_slice(&[2i64, 0, 2], &[3], &device).unwrap();
+        let indices = Tensor::<CpuRuntime>::from_slice(&[2i64, 0, 2], &[3], &device).unwrap();
         let out = emb.forward(&client, &indices).unwrap();
         let loss = var_sum(&out, &[0, 1], false, &client).unwrap();
         let grads = backward(&loss, &client).unwrap();

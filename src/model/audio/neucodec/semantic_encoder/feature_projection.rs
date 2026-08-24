@@ -98,21 +98,20 @@ mod tests {
         device: &CpuDevice,
     ) -> FeatureProjection<CpuRuntime> {
         let layer_norm = LayerNorm::new(
-            Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; in_dim], &[in_dim], device).unwrap(),
-            Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; in_dim], &[in_dim], device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; in_dim], &[in_dim], device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; in_dim], &[in_dim], device).unwrap(),
             1e-5,
             false,
         );
         let linear = Linear::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &vec![0.01f32; hidden * in_dim],
                 &[hidden, in_dim],
                 device,
             )
             .unwrap(),
             Some(
-                Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; hidden], &[hidden], device)
-                    .unwrap(),
+                Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; hidden], &[hidden], device).unwrap(),
             ),
             false,
         );
@@ -134,7 +133,7 @@ mod tests {
 
         let data: Vec<f32> = (0..(t * in_dim)).map(|i| (i as f32 * 0.13).sin()).collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&data, &[1, t, in_dim], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&data, &[1, t, in_dim], &device).unwrap(),
             false,
         );
         let y = p.forward(&client, &x).expect("forward");
@@ -146,7 +145,7 @@ mod tests {
         let (client, device) = cpu_setup();
         let p = projection(10, 16, &device);
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 5 * 7], &[1, 5, 7], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 5 * 7], &[1, 5, 7], &device).unwrap(),
             false,
         );
         assert!(p.forward(&client, &x).is_err());

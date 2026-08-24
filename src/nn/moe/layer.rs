@@ -158,7 +158,7 @@ impl<R: Runtime> MoeLayer<R> {
 
         // Initialize output accumulator as zeros
         let mut output = Var::new(
-            Tensor::<R>::try_zeros(&[num_tokens, hidden_size], DType::F32, x.tensor().device())?,
+            Tensor::<R>::zeros(&[num_tokens, hidden_size], DType::F32, x.tensor().device())?,
             x.requires_grad(),
         );
 
@@ -174,7 +174,7 @@ impl<R: Runtime> MoeLayer<R> {
                 // Create mask: slot_indices == expert_idx (on-device)
                 // Build constant tensor via ones * scalar
                 let expert_id_tensor = {
-                    let ones = Tensor::<R>::try_ones(
+                    let ones = Tensor::<R>::ones(
                         slot_indices.shape(),
                         slot_indices.tensor().dtype(),
                         x.tensor().device(),
@@ -246,19 +246,19 @@ mod tests {
         (0..num_experts)
             .map(|expert_idx| {
                 let scale = 0.05f32 + expert_idx as f32 * 0.02;
-                let gw = Tensor::<CpuRuntime>::try_from_slice(
+                let gw = Tensor::<CpuRuntime>::from_slice(
                     &vec![scale; inter * hidden],
                     &[inter, hidden],
                     device,
                 )
                 .unwrap();
-                let uw = Tensor::<CpuRuntime>::try_from_slice(
+                let uw = Tensor::<CpuRuntime>::from_slice(
                     &vec![scale + 0.01; inter * hidden],
                     &[inter, hidden],
                     device,
                 )
                 .unwrap();
-                let dw = Tensor::<CpuRuntime>::try_from_slice(
+                let dw = Tensor::<CpuRuntime>::from_slice(
                     &vec![scale - 0.01; hidden * inter],
                     &[hidden, inter],
                     device,
@@ -278,7 +278,7 @@ mod tests {
         let top_k = 1;
 
         let gate_w =
-            Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 8], &[num_experts, hidden], &device)
+            Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[num_experts, hidden], &device)
                 .unwrap();
         let config = MoeRouterConfig::new(num_experts, top_k);
         let router = MoeRouter::from_tensor(gate_w, config, false);
@@ -286,7 +286,7 @@ mod tests {
         let layer = MoeLayer::new(router, experts(num_experts, hidden, inter, &device), None);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[3, hidden], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[3, hidden], &device).unwrap(),
             false,
         );
         let result = layer.forward(&client, &input).unwrap();
@@ -305,7 +305,7 @@ mod tests {
             let (hidden, inter, num_experts, top_k) = (4, 8, 2, 1);
 
             let gate_w =
-                Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 8], &[num_experts, hidden], &device)
+                Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[num_experts, hidden], &device)
                     .unwrap();
             let router =
                 MoeRouter::from_tensor(gate_w, MoeRouterConfig::new(num_experts, top_k), false);
@@ -318,7 +318,7 @@ mod tests {
             }
 
             let input = Var::new(
-                Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[3, hidden], &device).unwrap(),
+                Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[3, hidden], &device).unwrap(),
                 false,
             );
             let out = layer.forward(&client, &input).unwrap();
@@ -330,13 +330,13 @@ mod tests {
             let (client, device) = cpu_setup();
             let (hidden, inter, num_experts, top_k) = (4, 8, 2, 1);
             let gate_w =
-                Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 8], &[num_experts, hidden], &device)
+                Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[num_experts, hidden], &device)
                     .unwrap();
             let router =
                 MoeRouter::from_tensor(gate_w, MoeRouterConfig::new(num_experts, top_k), false);
             let layer = MoeLayer::new(router, experts(num_experts, hidden, inter, &device), None);
             let input = Var::new(
-                Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[3, hidden], &device).unwrap(),
+                Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[3, hidden], &device).unwrap(),
                 false,
             );
             let out = layer.forward(&client, &input).unwrap();
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn shared_expert_scale_rejects_non_finite() {
         let (_client, device) = cpu_setup();
-        let gate_w = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 8], &[2, 4], &device).unwrap();
+        let gate_w = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[2, 4], &device).unwrap();
         let router = MoeRouter::from_tensor(gate_w, MoeRouterConfig::new(2, 1), false);
         let layer = MoeLayer::new(router, experts(2, 4, 8, &device), None);
         assert!(layer.with_shared_expert_scale(f32::NAN).is_err());
@@ -382,7 +382,7 @@ mod tests {
 
         // Asymmetric weights and inputs keep this from passing by accidental
         // symmetry if z_loss ever stops being connected to the gate.
-        let gate_w = Tensor::<CpuRuntime>::try_from_slice(
+        let gate_w = Tensor::<CpuRuntime>::from_slice(
             &[
                 0.7f32, -0.2, 0.15, 0.4, -0.35, 0.6, 0.25, -0.1, 0.05, -0.45, 0.8, 0.3,
             ],
@@ -393,7 +393,7 @@ mod tests {
         let router = MoeRouter::from_tensor(gate_w, MoeRouterConfig::new(num_experts, top_k), true);
         let layer = MoeLayer::new(router, experts(num_experts, hidden, inter, &device), None);
         let input = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &[
                     0.3f32, -0.7, 1.1, 0.2, 0.8, 0.4, -0.3, 0.9, -0.6, 0.5, 0.7, -0.2,
                 ],

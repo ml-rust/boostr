@@ -153,7 +153,7 @@ pub fn compute_mel_spectrogram(
 fn power_spectra(windowed: &[f32], num_frames: usize, fft_size: usize) -> Result<Vec<f32>> {
     let device = CpuDevice::new();
     let client = CpuClient::new(device.clone());
-    let input = Tensor::<CpuRuntime>::try_from_slice(windowed, &[num_frames, fft_size], &device)
+    let input = Tensor::<CpuRuntime>::from_slice(windowed, &[num_frames, fft_size], &device)
         .map_err(Error::Numr)?;
     let spectrum = client
         .rfft(&input, FftNormalization::None)

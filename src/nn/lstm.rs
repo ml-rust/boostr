@@ -258,7 +258,7 @@ mod tests {
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device).unwrap()
     }
 
     #[test]
@@ -292,16 +292,16 @@ mod tests {
         let t = 5;
         let b = 2;
         let lstm = Lstm::new(
-            Tensor::<CpuRuntime>::try_from_slice(&vec![0.01f32; 4 * h * i], &[4 * h, i], &device)
+            Tensor::<CpuRuntime>::from_slice(&vec![0.01f32; 4 * h * i], &[4 * h, i], &device)
                 .unwrap(),
-            Tensor::<CpuRuntime>::try_from_slice(&vec![0.01f32; 4 * h * h], &[4 * h, h], &device)
+            Tensor::<CpuRuntime>::from_slice(&vec![0.01f32; 4 * h * h], &[4 * h, h], &device)
                 .unwrap(),
             zeros(&[4 * h], &device),
             zeros(&[4 * h], &device),
         )
         .unwrap();
 
-        let x = Tensor::<CpuRuntime>::try_from_slice(&vec![0.5f32; b * t * i], &[b, t, i], &device)
+        let x = Tensor::<CpuRuntime>::from_slice(&vec![0.5f32; b * t * i], &[b, t, i], &device)
             .unwrap();
         let (out, hn, cn) = lstm.forward(&client, &x, false).unwrap();
         assert_eq!(out.shape(), &[b, t, h]);
@@ -319,7 +319,7 @@ mod tests {
         let i = 2;
         // Non-zero weights so direction actually matters.
         let lstm = Lstm::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &(0..(4 * h * i))
                     .map(|k| 0.05 * k as f32)
                     .collect::<Vec<_>>(),
@@ -327,7 +327,7 @@ mod tests {
                 &device,
             )
             .unwrap(),
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &(0..(4 * h * h))
                     .map(|k| 0.05 * k as f32)
                     .collect::<Vec<_>>(),
@@ -340,7 +340,7 @@ mod tests {
         )
         .unwrap();
 
-        let x = Tensor::<CpuRuntime>::try_from_slice(
+        let x = Tensor::<CpuRuntime>::from_slice(
             &[1.0f32, 0.0, 0.0, 1.0, -1.0, 0.0],
             &[1, 3, 2],
             &device,

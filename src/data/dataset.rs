@@ -32,8 +32,8 @@ pub struct Batch<R: Runtime> {
 ///     }
 ///     fn get(&self, idx: usize, device: &CpuDevice) -> Result<Batch<CpuRuntime>> {
 ///         let start = idx * self.seq_len;
-///         let inputs = Tensor::try_from_slice(&self.tokens[start..start + self.seq_len], &[self.seq_len], device)?;
-///         let targets = Tensor::try_from_slice(&self.tokens[start + 1..start + self.seq_len + 1], &[self.seq_len], device)?;
+///         let inputs = Tensor::from_slice(&self.tokens[start..start + self.seq_len], &[self.seq_len], device)?;
+///         let targets = Tensor::from_slice(&self.tokens[start + 1..start + self.seq_len + 1], &[self.seq_len], device)?;
 ///         Ok(Batch { inputs, targets })
 ///     }
 /// }

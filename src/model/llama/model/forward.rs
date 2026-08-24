@@ -126,7 +126,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         let dt = DType::F32;
 
         // Embedding
-        let embed_weight = Tensor::<R>::try_zeros(&[vocab, hidden], dt, device)?;
+        let embed_weight = Tensor::<R>::zeros(&[vocab, hidden], dt, device)?;
         let embed_tokens = Embedding::new(embed_weight, true);
 
         // RoPE cache
@@ -154,7 +154,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
 
         // Final norm
         let norm = RmsNorm::new(
-            Tensor::<R>::try_ones(&[hidden], dt, device)?,
+            Tensor::<R>::ones(&[hidden], dt, device)?,
             config.rms_norm_eps as f32,
             true,
         );
@@ -178,7 +178,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
             ))
         } else {
             MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<R>::try_zeros(&[vocab, hidden], dt, device)?,
+                Tensor::<R>::zeros(&[vocab, hidden], dt, device)?,
                 None,
                 true,
             ))
@@ -340,7 +340,7 @@ attention:
         let model = Llama::<CpuRuntime>::from_config(&config, &device).unwrap();
 
         let input_ids = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2, 3], &[1, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2, 3], &[1, 4], &device).unwrap(),
             false,
         );
 
@@ -387,7 +387,7 @@ attention:
         let model = Llama::<CpuRuntime>::from_config(&config, &device).unwrap();
 
         let input_ids = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2], &[1, 3], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2], &[1, 3], &device).unwrap(),
             false,
         );
         let logits = model.forward(&client, &input_ids).unwrap();
@@ -421,7 +421,7 @@ attention:
 
         // Prefill: 4 tokens at position 0
         let input_ids =
-            Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2, 3], &[1, 4], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2, 3], &[1, 4], &device).unwrap();
         let logits = model
             .forward_with_kv_cache(&client, &input_ids, &mut kv_cache, 0)
             .unwrap();
@@ -429,7 +429,7 @@ attention:
         assert_eq!(kv_cache.seq_len(), 4);
 
         // Decode: 1 token at position 4
-        let next_token = Tensor::<CpuRuntime>::try_from_slice(&[5i64], &[1, 1], &device).unwrap();
+        let next_token = Tensor::<CpuRuntime>::from_slice(&[5i64], &[1, 1], &device).unwrap();
         let logits = model
             .forward_with_kv_cache(&client, &next_token, &mut kv_cache, 4)
             .unwrap();
@@ -437,7 +437,7 @@ attention:
         assert_eq!(kv_cache.seq_len(), 5);
 
         // Decode another token at position 5
-        let next_token = Tensor::<CpuRuntime>::try_from_slice(&[6i64], &[1, 1], &device).unwrap();
+        let next_token = Tensor::<CpuRuntime>::from_slice(&[6i64], &[1, 1], &device).unwrap();
         let logits = model
             .forward_with_kv_cache(&client, &next_token, &mut kv_cache, 5)
             .unwrap();
@@ -482,15 +482,14 @@ attention:
         .unwrap();
 
         // Prefill
-        let input_ids =
-            Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2], &[1, 3], &device).unwrap();
+        let input_ids = Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2], &[1, 3], &device).unwrap();
         let logits = model
             .forward_with_kv_cache(&client, &input_ids, &mut kv_cache, 0)
             .unwrap();
         assert_eq!(logits.shape(), &[1, 3, 32]);
 
         // Decode
-        let next = Tensor::<CpuRuntime>::try_from_slice(&[3i64], &[1, 1], &device).unwrap();
+        let next = Tensor::<CpuRuntime>::from_slice(&[3i64], &[1, 1], &device).unwrap();
         let logits = model
             .forward_with_kv_cache(&client, &next, &mut kv_cache, 3)
             .unwrap();
@@ -505,24 +504,24 @@ attention:
         let (client, device) = cpu_setup();
         let mlp = LlamaMlp {
             gate_proj: MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 8], &[2, 4], &device).unwrap(),
+                Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[2, 4], &device).unwrap(),
                 None,
                 false,
             )),
             up_proj: MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 8], &[2, 4], &device).unwrap(),
+                Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[2, 4], &device).unwrap(),
                 None,
                 false,
             )),
             down_proj: MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 8], &[4, 2], &device).unwrap(),
+                Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[4, 2], &device).unwrap(),
                 None,
                 false,
             )),
         };
 
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[1, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[1, 4], &device).unwrap(),
             false,
         );
         let out = mlp.forward(&client, &x).unwrap();
@@ -553,7 +552,7 @@ attention:
         assert!(model.layers[0].self_attn.use_alibi);
 
         let input_ids = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2, 3], &[1, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2, 3], &[1, 4], &device).unwrap(),
             false,
         );
         let logits = model.forward(&client, &input_ids).unwrap();
@@ -587,7 +586,7 @@ attention:
 
         // Prefill: 4 tokens
         let input_ids =
-            Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2, 3], &[1, 4], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2, 3], &[1, 4], &device).unwrap();
         let logits = model
             .forward_with_kv_cache(&client, &input_ids, &mut kv_cache, 0)
             .unwrap();
@@ -595,7 +594,7 @@ attention:
         assert_eq!(kv_cache.seq_len(), 4);
 
         // Decode: 1 token
-        let next = Tensor::<CpuRuntime>::try_from_slice(&[5i64], &[1, 1], &device).unwrap();
+        let next = Tensor::<CpuRuntime>::from_slice(&[5i64], &[1, 1], &device).unwrap();
         let logits = model
             .forward_with_kv_cache(&client, &next, &mut kv_cache, 4)
             .unwrap();

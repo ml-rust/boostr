@@ -12,7 +12,7 @@ use numr::tensor::Tensor;
 #[test]
 fn test_fused_grad_unscale_clip_cpu_reference() {
     let (client, device) = setup_cpu();
-    let grad = Tensor::try_from_slice(&[2.0f32, 4.0, 6.0, 8.0], &[4], &device).unwrap();
+    let grad = Tensor::from_slice(&[2.0f32, 4.0, 6.0, 8.0], &[4], &device).unwrap();
 
     let (clipped, norm, found_inf) = client.fused_grad_unscale_clip(&grad, 10.0, 2.0).unwrap();
 
@@ -29,7 +29,7 @@ fn test_fused_grad_unscale_clip_cpu_reference() {
 #[test]
 fn test_fused_grad_unscale_clip_no_clip_cpu() {
     let (client, device) = setup_cpu();
-    let grad = Tensor::try_from_slice(&[0.1f32, 0.2, 0.3], &[3], &device).unwrap();
+    let grad = Tensor::from_slice(&[0.1f32, 0.2, 0.3], &[3], &device).unwrap();
 
     let (clipped, norm, found_inf) = client.fused_grad_unscale_clip(&grad, 100.0, 1.0).unwrap();
 
@@ -45,7 +45,7 @@ fn test_fused_grad_unscale_clip_no_clip_cpu() {
 #[test]
 fn test_fused_grad_unscale_clip_with_clipping_cpu() {
     let (client, device) = setup_cpu();
-    let grad = Tensor::try_from_slice(&[20.0f32, 40.0, 60.0, 80.0], &[4], &device).unwrap();
+    let grad = Tensor::from_slice(&[20.0f32, 40.0, 60.0, 80.0], &[4], &device).unwrap();
 
     let (clipped, norm, found_inf) = client.fused_grad_unscale_clip(&grad, 1.0, 2.0).unwrap();
 
@@ -65,7 +65,7 @@ fn test_fused_grad_unscale_clip_with_clipping_cpu() {
 #[test]
 fn test_fused_grad_unscale_clip_inf_detection_cpu() {
     let (client, device) = setup_cpu();
-    let grad = Tensor::try_from_slice(&[1.0f32, f32::INFINITY, 3.0, 4.0], &[4], &device).unwrap();
+    let grad = Tensor::from_slice(&[1.0f32, f32::INFINITY, 3.0, 4.0], &[4], &device).unwrap();
 
     let (_clipped, _norm, found_inf) = client.fused_grad_unscale_clip(&grad, 1.0, 1.0).unwrap();
 
@@ -75,7 +75,7 @@ fn test_fused_grad_unscale_clip_inf_detection_cpu() {
 #[test]
 fn test_fused_grad_unscale_clip_nan_detection_cpu() {
     let (client, device) = setup_cpu();
-    let grad = Tensor::try_from_slice(&[1.0f32, f32::NAN, 3.0, 4.0], &[4], &device).unwrap();
+    let grad = Tensor::from_slice(&[1.0f32, f32::NAN, 3.0, 4.0], &[4], &device).unwrap();
 
     let (_clipped, _norm, found_inf) = client.fused_grad_unscale_clip(&grad, 1.0, 1.0).unwrap();
 
@@ -127,13 +127,13 @@ fn test_fused_grad_unscale_clip_cuda_parity() {
     let max_norm = 10.0;
     let loss_scale = 2.0;
 
-    let cpu_grad = Tensor::try_from_slice(&grad_data, &shape, &cpu_device).unwrap();
+    let cpu_grad = Tensor::from_slice(&grad_data, &shape, &cpu_device).unwrap();
     let (cpu_out, cpu_norm, cpu_inf) = cpu_client
         .fused_grad_unscale_clip(&cpu_grad, max_norm, loss_scale)
         .unwrap();
 
     with_cuda_backend(|cuda_client, cuda_device| {
-        let cuda_grad = Tensor::try_from_slice(&grad_data, &shape, &cuda_device).unwrap();
+        let cuda_grad = Tensor::from_slice(&grad_data, &shape, &cuda_device).unwrap();
         let (cuda_out, cuda_norm, cuda_inf) = cuda_client
             .fused_grad_unscale_clip(&cuda_grad, max_norm, loss_scale)
             .unwrap();
@@ -160,7 +160,7 @@ fn test_fused_grad_unscale_clip_inf_cuda() {
 
     with_cuda_backend(|cuda_client, cuda_device| {
         let grad_data = [1.0f32, f32::INFINITY, 3.0, 4.0];
-        let cuda_grad = Tensor::try_from_slice(&grad_data, &[4], &cuda_device).unwrap();
+        let cuda_grad = Tensor::from_slice(&grad_data, &[4], &cuda_device).unwrap();
         let (_out, _norm, found_inf) = cuda_client
             .fused_grad_unscale_clip(&cuda_grad, 1.0, 1.0)
             .unwrap();
@@ -214,13 +214,13 @@ fn test_fused_grad_unscale_clip_large_cuda_parity() {
     let max_norm = 5.0;
     let loss_scale = 4.0;
 
-    let cpu_grad = Tensor::try_from_slice(&grad_data, &shape, &cpu_device).unwrap();
+    let cpu_grad = Tensor::from_slice(&grad_data, &shape, &cpu_device).unwrap();
     let (cpu_out, cpu_norm, cpu_inf) = cpu_client
         .fused_grad_unscale_clip(&cpu_grad, max_norm, loss_scale)
         .unwrap();
 
     with_cuda_backend(|cuda_client, cuda_device| {
-        let cuda_grad = Tensor::try_from_slice(&grad_data, &shape, &cuda_device).unwrap();
+        let cuda_grad = Tensor::from_slice(&grad_data, &shape, &cuda_device).unwrap();
         let (cuda_out, cuda_norm, cuda_inf) = cuda_client
             .fused_grad_unscale_clip(&cuda_grad, max_norm, loss_scale)
             .unwrap();
@@ -253,13 +253,13 @@ fn test_fused_grad_unscale_clip_wgpu_parity() {
     let max_norm = 10.0;
     let loss_scale = 2.0;
 
-    let cpu_grad = Tensor::try_from_slice(&grad_data, &shape, &cpu_device).unwrap();
+    let cpu_grad = Tensor::from_slice(&grad_data, &shape, &cpu_device).unwrap();
     let (cpu_out, cpu_norm, cpu_inf) = cpu_client
         .fused_grad_unscale_clip(&cpu_grad, max_norm, loss_scale)
         .unwrap();
 
     with_wgpu_backend(|wgpu_client, wgpu_device| {
-        let wgpu_grad = Tensor::try_from_slice(&grad_data, &shape, &wgpu_device).unwrap();
+        let wgpu_grad = Tensor::from_slice(&grad_data, &shape, &wgpu_device).unwrap();
         let (wgpu_out, wgpu_norm, wgpu_inf) = wgpu_client
             .fused_grad_unscale_clip(&wgpu_grad, max_norm, loss_scale)
             .unwrap();
@@ -325,13 +325,13 @@ fn test_fused_grad_unscale_clip_large_wgpu_parity() {
     let max_norm = 5.0;
     let loss_scale = 4.0;
 
-    let cpu_grad = Tensor::try_from_slice(&grad_data, &shape, &cpu_device).unwrap();
+    let cpu_grad = Tensor::from_slice(&grad_data, &shape, &cpu_device).unwrap();
     let (cpu_out, cpu_norm, cpu_inf) = cpu_client
         .fused_grad_unscale_clip(&cpu_grad, max_norm, loss_scale)
         .unwrap();
 
     with_wgpu_backend(|wgpu_client, wgpu_device| {
-        let wgpu_grad = Tensor::try_from_slice(&grad_data, &shape, &wgpu_device).unwrap();
+        let wgpu_grad = Tensor::from_slice(&grad_data, &shape, &wgpu_device).unwrap();
         let (wgpu_out, wgpu_norm, wgpu_inf) = wgpu_client
             .fused_grad_unscale_clip(&wgpu_grad, max_norm, loss_scale)
             .unwrap();

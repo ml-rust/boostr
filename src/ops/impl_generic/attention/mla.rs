@@ -81,7 +81,7 @@ where
                 mask_data[i * s_kv + j] = f32::NEG_INFINITY;
             }
         }
-        let mask_tensor = numr::tensor::Tensor::<R>::try_from_slice(
+        let mask_tensor = numr::tensor::Tensor::<R>::from_slice(
             &mask_data,
             &[1, 1, s_q, s_kv],
             q.tensor().device(),
@@ -116,7 +116,7 @@ mod tests {
         let d_v = 6; // V dim (different!)
 
         let q = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &vec![0.1f32; b * h * s * d_k],
                 &[b, h, s, d_k],
                 &device,
@@ -125,7 +125,7 @@ mod tests {
             false,
         );
         let k = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &vec![0.1f32; b * h * s * d_k],
                 &[b, h, s, d_k],
                 &device,
@@ -134,7 +134,7 @@ mod tests {
             false,
         );
         let v = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &vec![0.1f32; b * h * s * d_v],
                 &[b, h, s, d_v],
                 &device,
@@ -157,12 +157,8 @@ mod tests {
         let d = 4;
 
         let q = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
-                &vec![0.1f32; b * h * s * d],
-                &[b, h, s, d],
-                &device,
-            )
-            .unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&vec![0.1f32; b * h * s * d], &[b, h, s, d], &device)
+                .unwrap(),
             false,
         );
         let k = q.clone();

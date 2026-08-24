@@ -43,7 +43,7 @@ impl FusedQuantOps<CudaRuntime> for CudaClient {
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n);
-        let output = Tensor::<CudaRuntime>::try_empty(&out_shape, DType::F32, input.device())?;
+        let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, input.device())?;
 
         let module =
             kernels::get_or_load_module(self.context(), device_index, FUSED_INT4_SWIGLU_MODULE)?;
@@ -126,9 +126,9 @@ impl FusedQuantOps<CudaRuntime> for CudaClient {
         let mut kv_shape = batch_dims.to_vec();
         kv_shape.push(nkv);
 
-        let out_q = Tensor::<CudaRuntime>::try_empty(&q_shape, DType::F32, input.device())?;
-        let out_k = Tensor::<CudaRuntime>::try_empty(&kv_shape, DType::F32, input.device())?;
-        let out_v = Tensor::<CudaRuntime>::try_empty(&kv_shape, DType::F32, input.device())?;
+        let out_q = Tensor::<CudaRuntime>::empty(&q_shape, DType::F32, input.device())?;
+        let out_k = Tensor::<CudaRuntime>::empty(&kv_shape, DType::F32, input.device())?;
+        let out_v = Tensor::<CudaRuntime>::empty(&kv_shape, DType::F32, input.device())?;
 
         let module =
             kernels::get_or_load_module(self.context(), device_index, FUSED_INT4_QKV_MODULE)?;

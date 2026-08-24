@@ -119,7 +119,7 @@ impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
         let token_ids = self.wrap_special_tokens(self.tokenizer.encode_raw(text), max_seq);
         let seq_len = token_ids.len();
         let input: Vec<i64> = token_ids.into_iter().map(|t| t as i64).collect();
-        let input_tensor = Tensor::<R>::try_from_slice(&input, &[1, seq_len], &self.device)?;
+        let input_tensor = Tensor::<R>::from_slice(&input, &[1, seq_len], &self.device)?;
 
         // Single input: no padding, no mask needed.
         let embedding = self.encoder.embed_inference(client, &input_tensor, None)?;
@@ -229,10 +229,9 @@ impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
             mask_flat.extend(std::iter::repeat_n(0.0f32, max_len - real_len));
         }
 
-        let input_tensor =
-            Tensor::<R>::try_from_slice(&flat, &[batch_size, max_len], &self.device)?;
+        let input_tensor = Tensor::<R>::from_slice(&flat, &[batch_size, max_len], &self.device)?;
         let mask_tensor =
-            Tensor::<R>::try_from_slice(&mask_flat, &[batch_size, max_len], &self.device)?;
+            Tensor::<R>::from_slice(&mask_flat, &[batch_size, max_len], &self.device)?;
         let embeddings = self
             .encoder
             .embed_inference(client, &input_tensor, Some(&mask_tensor))?;
@@ -351,10 +350,10 @@ impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
         let total_tokens = flat_ids.len();
         let d = &self.device;
 
-        let input_t = Tensor::<R>::try_from_slice(&flat_ids, &[total_tokens], d)?;
-        let cu_t = Tensor::<R>::try_from_slice(&cu, &[sub_batch + 1], d)?;
-        let pos_t = Tensor::<R>::try_from_slice(&pos_ids, &[total_tokens], d)?;
-        let seg_t = Tensor::<R>::try_from_slice(&seg_ids, &[total_tokens], d)?;
+        let input_t = Tensor::<R>::from_slice(&flat_ids, &[total_tokens], d)?;
+        let cu_t = Tensor::<R>::from_slice(&cu, &[sub_batch + 1], d)?;
+        let pos_t = Tensor::<R>::from_slice(&pos_ids, &[total_tokens], d)?;
+        let seg_t = Tensor::<R>::from_slice(&seg_ids, &[total_tokens], d)?;
 
         // Bypass CUDA graph capture for varlen (graph capture requires fixed shapes).
         let embeddings = self.encoder.embed_inference_varlen(

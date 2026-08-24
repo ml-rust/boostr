@@ -78,14 +78,11 @@ pub(super) fn paged_attention_bwd_impl(
     let max_num_blocks = block_table.shape()[1];
 
     // dQ: contiguous [B, H, S_q, D]
-    let dq = Tensor::<CudaRuntime>::try_empty(
-        &[batch_size, num_heads, seq_len_q, head_dim],
-        dtype,
-        device,
-    )?;
+    let dq =
+        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q, head_dim], dtype, device)?;
     // dK, dV: same shape as k_blocks/v_blocks — zeroed for atomicAdd
-    let dk_blocks = Tensor::<CudaRuntime>::try_zeros(k_blocks.shape(), dtype, device)?;
-    let dv_blocks = Tensor::<CudaRuntime>::try_zeros(v_blocks.shape(), dtype, device)?;
+    let dk_blocks = Tensor::<CudaRuntime>::zeros(k_blocks.shape(), dtype, device)?;
+    let dv_blocks = Tensor::<CudaRuntime>::zeros(v_blocks.shape(), dtype, device)?;
 
     let dtype_size = dtype.size_in_bytes();
     let smem_size = (3 * block_m * head_dim + 2 * block_n * head_dim) * dtype_size;

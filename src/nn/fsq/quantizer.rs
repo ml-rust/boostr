@@ -161,12 +161,12 @@ impl<R: Runtime<DType = DType>> Fsq<R> {
         }
 
         Ok(Self {
-            half_l: Tensor::try_from_slice(&half_l, &[dim], device)?,
-            shift: Tensor::try_from_slice(&shift, &[dim], device)?,
-            offset: Tensor::try_from_slice(&offset, &[dim], device)?,
-            half_width: Tensor::try_from_slice(&half_width, &[dim], device)?,
-            basis: Tensor::try_from_slice(&basis, &[dim], device)?,
-            levels_f32: Tensor::try_from_slice(&levels_f32, &[dim], device)?,
+            half_l: Tensor::from_slice(&half_l, &[dim], device)?,
+            shift: Tensor::from_slice(&shift, &[dim], device)?,
+            offset: Tensor::from_slice(&offset, &[dim], device)?,
+            half_width: Tensor::from_slice(&half_width, &[dim], device)?,
+            basis: Tensor::from_slice(&basis, &[dim], device)?,
+            levels_f32: Tensor::from_slice(&levels_f32, &[dim], device)?,
             config,
             project_in,
             project_out,

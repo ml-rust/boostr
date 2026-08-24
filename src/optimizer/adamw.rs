@@ -147,8 +147,8 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     let state_dtype = optimizer_state_dtype(param.dtype());
-                    let m = Tensor::<R>::try_zeros(param.shape(), state_dtype, param.device())?;
-                    let v = Tensor::<R>::try_zeros(param.shape(), state_dtype, param.device())?;
+                    let m = Tensor::<R>::zeros(param.shape(), state_dtype, param.device())?;
+                    let v = Tensor::<R>::zeros(param.shape(), state_dtype, param.device())?;
                     let master = init_master(client, param, state_dtype)?;
                     entry.insert(ParamState { m, v, master })
                 }
@@ -334,13 +334,12 @@ mod tests {
 
         // Create parameter tensor and Var — use Var's id as the canonical key
         let w_tensor =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device).unwrap();
         let w = Var::new(w_tensor, true);
         let w_id = w.id();
 
-        let x = Tensor::<CpuRuntime>::try_from_slice(&[0.5f32, 0.5, 0.5, 0.5], &[2, 2], &device)
-            .unwrap();
+        let x =
+            Tensor::<CpuRuntime>::from_slice(&[0.5f32, 0.5, 0.5, 0.5], &[2, 2], &device).unwrap();
         let x_var = Var::new(x, false);
 
         // Forward: loss = mean(w @ x)
@@ -377,12 +376,10 @@ mod tests {
 
         // Simple optimization: minimize ||w - target||^2
         let target =
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
 
         let w_init =
-            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device).unwrap();
         // Use a stable ID for the parameter across all iterations
         let w_id = w_init.id();
 
@@ -442,12 +439,12 @@ mod tests {
     fn test_adamw_weight_decay() {
         let (client, device) = cpu_setup();
 
-        let w_tensor = Tensor::<CpuRuntime>::try_from_slice(&[5.0f32, 5.0], &[2], &device).unwrap();
+        let w_tensor = Tensor::<CpuRuntime>::from_slice(&[5.0f32, 5.0], &[2], &device).unwrap();
         let w_id = w_tensor.id();
 
         // Create a zero gradient — weight decay should still shrink params
         let mut grads = GradStore::new();
-        let zero_grad = Tensor::<CpuRuntime>::try_zeros(&[2], DType::F32, &device).unwrap();
+        let zero_grad = Tensor::<CpuRuntime>::zeros(&[2], DType::F32, &device).unwrap();
         grads.insert(w_id, zero_grad);
 
         let mut params = HashMap::new();
@@ -550,8 +547,8 @@ mod tests {
             ..Default::default()
         };
 
-        let param = Tensor::<CpuRuntime>::try_from_slice(&[w0], &[1], &device).unwrap();
-        let grad = Tensor::<CpuRuntime>::try_from_slice(&[g], &[1], &device).unwrap();
+        let param = Tensor::<CpuRuntime>::from_slice(&[w0], &[1], &device).unwrap();
+        let grad = Tensor::<CpuRuntime>::from_slice(&[g], &[1], &device).unwrap();
         let out = run_scalar_steps(&client, param, grad, config.clone(), steps);
 
         let expected = f32_reference(w0, g, &config, steps as i32);
@@ -574,7 +571,7 @@ mod tests {
     fn test_adamw_f32_allocates_no_master_copy() {
         let (client, device) = cpu_setup();
 
-        let param = Tensor::<CpuRuntime>::try_from_slice(&[0.02f32], &[1], &device).unwrap();
+        let param = Tensor::<CpuRuntime>::from_slice(&[0.02f32], &[1], &device).unwrap();
         let id = param.id();
         let mut params = HashMap::new();
         params.insert(id, param);
@@ -582,7 +579,7 @@ mod tests {
         let mut grads = GradStore::new();
         grads.insert(
             id,
-            Tensor::<CpuRuntime>::try_from_slice(&[0.001f32], &[1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.001f32], &[1], &device).unwrap(),
         );
 
         let mut opt = AdamW::<CpuRuntime>::new(AdamWConfig::default());
@@ -624,10 +621,9 @@ mod tests {
         );
 
         let param =
-            Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(w0)], &[1], &device)
-                .unwrap();
-        let grad = Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(g)], &[1], &device)
-            .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(w0)], &[1], &device).unwrap();
+        let grad =
+            Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(g)], &[1], &device).unwrap();
         let out = run_scalar_steps(&client, param, grad, config.clone(), steps);
 
         assert_eq!(
@@ -663,10 +659,10 @@ mod tests {
             ..Default::default()
         };
 
-        let param = Tensor::<CpuRuntime>::try_from_slice(&[half::f16::from_f32(w0)], &[1], &device)
-            .unwrap();
+        let param =
+            Tensor::<CpuRuntime>::from_slice(&[half::f16::from_f32(w0)], &[1], &device).unwrap();
         let grad =
-            Tensor::<CpuRuntime>::try_from_slice(&[half::f16::from_f32(g)], &[1], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[half::f16::from_f32(g)], &[1], &device).unwrap();
         let out = run_scalar_steps(&client, param, grad, config.clone(), steps);
 
         assert_eq!(out.dtype(), DType::F16);
@@ -689,8 +685,7 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let param =
-            Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(0.02)], &[1], &device)
-                .unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(0.02)], &[1], &device).unwrap();
         let id = param.id();
         let mut params = HashMap::new();
         params.insert(id, param);
@@ -698,7 +693,7 @@ mod tests {
         let mut grads = GradStore::new();
         grads.insert(
             id,
-            Tensor::<CpuRuntime>::try_from_slice(&[half::bf16::from_f32(0.001)], &[1], &device)
+            Tensor::<CpuRuntime>::from_slice(&[half::bf16::from_f32(0.001)], &[1], &device)
                 .unwrap(),
         );
 
@@ -744,7 +739,7 @@ mod tests {
     fn test_adamw_skips_missing_grads() {
         let (client, device) = cpu_setup();
 
-        let w_tensor = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let w_tensor = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let w_id = w_tensor.id();
 
         let mut params = HashMap::new();

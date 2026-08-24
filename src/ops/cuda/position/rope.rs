@@ -144,7 +144,7 @@ impl RoPEOps<CudaRuntime> for CudaClient {
 
         let kernel_name = select_kernel_name("rope_apply", dtype)?;
         let x_shape = x.tensor().shape().to_vec();
-        let output = numr::tensor::Tensor::<CudaRuntime>::try_empty(&x_shape, dtype, &device)?;
+        let output = numr::tensor::Tensor::<CudaRuntime>::empty(&x_shape, dtype, &device)?;
 
         let device_index = device.id();
         let module = kernels::get_or_load_module(self.context(), device_index, ROPE_MODULE)?;
@@ -199,7 +199,7 @@ impl RoPEOps<CudaRuntime> for CudaClient {
 
         let kernel_name = select_kernel_name("rope_interleaved", dtype)?;
         let x_shape = x.tensor().shape().to_vec();
-        let output = numr::tensor::Tensor::<CudaRuntime>::try_empty(&x_shape, dtype, &device)?;
+        let output = numr::tensor::Tensor::<CudaRuntime>::empty(&x_shape, dtype, &device)?;
 
         let device_index = device.id();
         let module =
@@ -263,7 +263,7 @@ impl RoPEOps<CudaRuntime> for CudaClient {
 
         let kernel_name = select_kernel_name("rope_yarn", dtype)?;
         let x_shape = x.tensor().shape().to_vec();
-        let output = numr::tensor::Tensor::<CudaRuntime>::try_empty(&x_shape, dtype, &device)?;
+        let output = numr::tensor::Tensor::<CudaRuntime>::empty(&x_shape, dtype, &device)?;
 
         let device_index = device.id();
         let module = kernels::get_or_load_module(self.context(), device_index, ROPE_YARN_MODULE)?;

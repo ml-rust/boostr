@@ -34,7 +34,7 @@ where
     let device = input.x.tensor().device();
 
     // Initialize h to zeros: [B, nheads, headdim, d_state]
-    let h_tensor = Tensor::<R>::try_zeros(
+    let h_tensor = Tensor::<R>::zeros(
         &[batch, nheads, headdim, d_state],
         input.x.tensor().dtype(),
         device,
@@ -103,7 +103,7 @@ where
     let dtype = input.x.tensor().dtype();
 
     // Initialize hidden state
-    let h_tensor = Tensor::<R>::try_zeros(&[batch, nheads, headdim, d_state], dtype, device)?;
+    let h_tensor = Tensor::<R>::zeros(&[batch, nheads, headdim, d_state], dtype, device)?;
     let mut h = Var::new(h_tensor, false);
 
     let mut chunk_outputs: Vec<Var<R>> = Vec::with_capacity(nchunks);
@@ -310,7 +310,7 @@ mod tests {
             .with_use_dt_bias(false);
 
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(
+            Tensor::<CpuRuntime>::from_slice(
                 &[1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
                 &[1, 2, 1, 4],
                 &device,
@@ -319,21 +319,21 @@ mod tests {
             false,
         );
         let a = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[-1.0f32], &[1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[-1.0f32], &[1], &device).unwrap(),
             false,
         );
         let b = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[1, 2, 1, 2], &device)
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[1, 2, 1, 2], &device)
                 .unwrap(),
             false,
         );
         let c = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0, 1.0, 1.0], &[1, 2, 1, 2], &device)
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0, 1.0, 1.0], &[1, 2, 1, 2], &device)
                 .unwrap(),
             false,
         );
         let dt = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.5f32, 0.5], &[1, 2, 1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.5f32, 0.5], &[1, 2, 1], &device).unwrap(),
             false,
         );
 
@@ -369,30 +369,30 @@ mod tests {
         let seq_len = 6;
         let x_data: Vec<f32> = (0..24).map(|i| (i as f32) * 0.1).collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, seq_len, 1, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&x_data, &[1, seq_len, 1, 4], &device).unwrap(),
             false,
         );
         let a = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[-0.5f32], &[1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[-0.5f32], &[1], &device).unwrap(),
             false,
         );
         let b_data: Vec<f32> = (0..12).map(|i| (i as f32) * 0.05 + 0.1).collect();
         let b = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&b_data, &[1, seq_len, 1, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&b_data, &[1, seq_len, 1, 2], &device).unwrap(),
             false,
         );
         let c_data: Vec<f32> = (0..12).map(|i| (i as f32) * 0.03 + 0.2).collect();
         let c = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&c_data, &[1, seq_len, 1, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&c_data, &[1, seq_len, 1, 2], &device).unwrap(),
             false,
         );
         let d_param = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.5f32], &[1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.5f32], &[1], &device).unwrap(),
             false,
         );
         let dt_data: Vec<f32> = vec![0.1, 0.2, 0.3, 0.1, 0.2, 0.3];
         let dt = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&dt_data, &[1, seq_len, 1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&dt_data, &[1, seq_len, 1], &device).unwrap(),
             false,
         );
 

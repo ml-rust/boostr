@@ -178,15 +178,13 @@ mod tests {
             .with_use_dt_bias(false);
 
         let x_data = [1.0f32, 0.5, 0.0, -0.5];
-        let x_t = Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, 1, 1, 4], &device).unwrap();
-        let a_t = Tensor::<CpuRuntime>::try_from_slice(&[-1.0f32], &[1], &device).unwrap();
-        let b_t =
-            Tensor::<CpuRuntime>::try_from_slice(&[0.5f32, 0.3], &[1, 1, 1, 2], &device).unwrap();
-        let c_t =
-            Tensor::<CpuRuntime>::try_from_slice(&[0.2f32, 0.8], &[1, 1, 1, 2], &device).unwrap();
-        let d_p = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32], &[1], &device).unwrap();
-        let dt_t = Tensor::<CpuRuntime>::try_from_slice(&[0.5f32], &[1, 1, 1], &device).unwrap();
-        let h = Tensor::<CpuRuntime>::try_zeros(&[1, 1, 4, 2], DType::F32, &device).unwrap();
+        let x_t = Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 1, 1, 4], &device).unwrap();
+        let a_t = Tensor::<CpuRuntime>::from_slice(&[-1.0f32], &[1], &device).unwrap();
+        let b_t = Tensor::<CpuRuntime>::from_slice(&[0.5f32, 0.3], &[1, 1, 1, 2], &device).unwrap();
+        let c_t = Tensor::<CpuRuntime>::from_slice(&[0.2f32, 0.8], &[1, 1, 1, 2], &device).unwrap();
+        let d_p = Tensor::<CpuRuntime>::from_slice(&[0.1f32], &[1], &device).unwrap();
+        let dt_t = Tensor::<CpuRuntime>::from_slice(&[0.5f32], &[1, 1, 1], &device).unwrap();
+        let h = Tensor::<CpuRuntime>::zeros(&[1, 1, 4, 2], DType::F32, &device).unwrap();
 
         let input = SsmInferenceInput {
             x: &x_t,
@@ -225,23 +223,23 @@ mod tests {
 
         // Var-based (existing)
         let x_var = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, 2, 1, 4], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 2, 1, 4], &device).unwrap(),
             false,
         );
         let a_var = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&a_data, &[1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&a_data, &[1], &device).unwrap(),
             false,
         );
         let b_var = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&b_data, &[1, 2, 1, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&b_data, &[1, 2, 1, 2], &device).unwrap(),
             false,
         );
         let c_var = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&c_data, &[1, 2, 1, 2], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&c_data, &[1, 2, 1, 2], &device).unwrap(),
             false,
         );
         let dt_var = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&dt_data, &[1, 2, 1], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&dt_data, &[1, 2, 1], &device).unwrap(),
             false,
         );
 
@@ -258,12 +256,12 @@ mod tests {
         let out_var = ssm_forward_sequential(&client, &var_input).unwrap();
 
         // Tensor-based (inference)
-        let x_t = Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, 2, 1, 4], &device).unwrap();
-        let a_t = Tensor::<CpuRuntime>::try_from_slice(&a_data, &[1], &device).unwrap();
-        let b_t = Tensor::<CpuRuntime>::try_from_slice(&b_data, &[1, 2, 1, 2], &device).unwrap();
-        let c_t = Tensor::<CpuRuntime>::try_from_slice(&c_data, &[1, 2, 1, 2], &device).unwrap();
-        let dt_t = Tensor::<CpuRuntime>::try_from_slice(&dt_data, &[1, 2, 1], &device).unwrap();
-        let h_init = Tensor::<CpuRuntime>::try_zeros(&[1, 1, 4, 2], DType::F32, &device).unwrap();
+        let x_t = Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 2, 1, 4], &device).unwrap();
+        let a_t = Tensor::<CpuRuntime>::from_slice(&a_data, &[1], &device).unwrap();
+        let b_t = Tensor::<CpuRuntime>::from_slice(&b_data, &[1, 2, 1, 2], &device).unwrap();
+        let c_t = Tensor::<CpuRuntime>::from_slice(&c_data, &[1, 2, 1, 2], &device).unwrap();
+        let dt_t = Tensor::<CpuRuntime>::from_slice(&dt_data, &[1, 2, 1], &device).unwrap();
+        let h_init = Tensor::<CpuRuntime>::zeros(&[1, 1, 4, 2], DType::F32, &device).unwrap();
 
         let inf_input = SsmInferenceInput {
             x: &x_t,

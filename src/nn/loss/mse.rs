@@ -37,11 +37,11 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let pred = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap(),
             true,
         );
         let target = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap(),
             false,
         );
 
@@ -58,11 +58,11 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let pred = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap(),
             false,
         );
         let target = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[2.0f32, 2.0, 2.0], &[3], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[2.0f32, 2.0, 2.0], &[3], &device).unwrap(),
             false,
         );
 

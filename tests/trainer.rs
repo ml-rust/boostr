@@ -25,9 +25,9 @@ fn test_trainer_basic_step() {
     let mut trainer = SimpleTrainer::<CpuRuntime>::new(config).expect("valid config");
 
     let target =
-        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
+        Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
     let w_init =
-        Tensor::<CpuRuntime>::try_from_slice(&[0.5f32, 0.5, 0.5, 0.5], &[2, 2], &device).unwrap();
+        Tensor::<CpuRuntime>::from_slice(&[0.5f32, 0.5, 0.5, 0.5], &[2, 2], &device).unwrap();
     let w_id = w_init.id();
 
     let mut params = HashMap::new();
@@ -61,8 +61,8 @@ fn test_trainer_with_grad_accum() {
         .with_max_grad_norm(None);
     let mut trainer = SimpleTrainer::<CpuRuntime>::new(config).expect("valid config");
 
-    let target = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[2], &device).unwrap();
-    let w_init = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0], &[2], &device).unwrap();
+    let target = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[2], &device).unwrap();
+    let w_init = Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0], &[2], &device).unwrap();
     let w_id = w_init.id();
 
     let mut params = HashMap::new();
@@ -107,9 +107,9 @@ fn test_trainer_convergence() {
     let mut trainer = SimpleTrainer::<CpuRuntime>::new(config).expect("valid config");
 
     let target =
-        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
+        Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
     let w_init =
-        Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device).unwrap();
+        Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device).unwrap();
     let w_id = w_init.id();
 
     let mut params = HashMap::new();
@@ -168,9 +168,9 @@ fn test_trainer_with_grad_clipping() {
     let mut trainer = SimpleTrainer::<CpuRuntime>::new(config).expect("valid config");
 
     let target =
-        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
+        Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
     let w_init =
-        Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device).unwrap();
+        Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device).unwrap();
     let w_id = w_init.id();
 
     let mut params = HashMap::new();
@@ -318,9 +318,9 @@ fn test_graph_capture_with_tensor_ops_eager<R: Runtime<DType = numr::dtype::DTyp
         .with_max_grad_norm(None);
     let mut trainer = SimpleTrainer::<R>::new(config).expect("valid config");
 
-    let a = Tensor::<R>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4], device).unwrap();
+    let a = Tensor::<R>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4], device).unwrap();
     // Destination-passing: allocate output before capture.
-    let out = Tensor::<R>::try_zeros(&[4], numr::dtype::DType::F32, device).unwrap();
+    let out = Tensor::<R>::zeros(&[4], numr::dtype::DType::F32, device).unwrap();
 
     trainer
         .capture_forward_pass(client, &[&a], &[&out], |c| {
@@ -364,7 +364,7 @@ fn test_graph_capture_tensor_ops_cuda() {
         let mut trainer =
             SimpleTrainer::<numr::runtime::cuda::CudaRuntime>::new(config).expect("valid config");
 
-        let a = Tensor::<numr::runtime::cuda::CudaRuntime>::try_from_slice(
+        let a = Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(
             &[1.0f32, 2.0, 3.0, 4.0],
             &[4],
             &device,

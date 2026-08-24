@@ -193,12 +193,12 @@ mod tests {
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device).unwrap()
     }
 
     fn ones(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; n], shape, device).unwrap()
+        Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; n], shape, device).unwrap()
     }
 
     fn build_tiny_encoder(device: &<CpuRuntime as Runtime>::Device) -> TextEncoder<CpuRuntime> {
@@ -254,7 +254,7 @@ mod tests {
         let enc = build_tiny_encoder(&device);
 
         let ids =
-            Tensor::<CpuRuntime>::try_from_slice(&[1i64, 2, 3, 4, 5, 6], &[2, 3], &device).unwrap();
+            Tensor::<CpuRuntime>::from_slice(&[1i64, 2, 3, 4, 5, 6], &[2, 3], &device).unwrap();
         let out = enc.forward(&client, &ids).unwrap();
         assert_eq!(out.shape(), &[2, 3, 4]);
     }
@@ -264,7 +264,7 @@ mod tests {
         let (client, device) = cpu_setup();
         let enc = build_tiny_encoder(&device);
 
-        let ids = Tensor::<CpuRuntime>::try_from_slice(&[0i64; 5], &[1, 5], &device).unwrap();
+        let ids = Tensor::<CpuRuntime>::from_slice(&[0i64; 5], &[1, 5], &device).unwrap();
         let out = enc.forward(&client, &ids).unwrap();
         for v in out.to_vec::<f32>() {
             assert!(v.is_finite(), "got non-finite value {v}");
@@ -275,7 +275,7 @@ mod tests {
     fn rejects_rank_other_than_2() {
         let (client, device) = cpu_setup();
         let enc = build_tiny_encoder(&device);
-        let ids = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2], &[3], &device).unwrap();
+        let ids = Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2], &[3], &device).unwrap();
         assert!(enc.forward(&client, &ids).is_err());
     }
 

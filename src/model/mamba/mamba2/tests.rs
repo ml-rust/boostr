@@ -25,13 +25,12 @@ fn mamba2_with_dt_bias(bias_value: f32) -> (Mamba2<CpuRuntime>, Mamba2Config) {
     let proj_dim = config.proj_dim();
 
     let in_proj = Linear::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.01f32; 328], &[proj_dim, 8], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.01f32; 328], &[proj_dim, 8], &device).unwrap(),
         None,
         false,
     );
     let conv1d = Conv1d::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 96], &[conv_channels, 1, 4], &device)
-            .unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 96], &[conv_channels, 1, 4], &device).unwrap(),
         None,
         1,
         PaddingMode::Custom(3, 0, 0, 0),
@@ -40,14 +39,13 @@ fn mamba2_with_dt_bias(bias_value: f32) -> (Mamba2<CpuRuntime>, Mamba2Config) {
         false,
     );
     let out_proj = Linear::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.01f32; 128], &[8, d_inner], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.01f32; 128], &[8, d_inner], &device).unwrap(),
         None,
         false,
     );
-    let a_log =
-        Tensor::<CpuRuntime>::try_from_slice(&[-0.5f32], &[config.nheads], &device).unwrap();
+    let a_log = Tensor::<CpuRuntime>::from_slice(&[-0.5f32], &[config.nheads], &device).unwrap();
     let dt_bias =
-        Tensor::<CpuRuntime>::try_from_slice(&[bias_value], &[config.nheads], &device).unwrap();
+        Tensor::<CpuRuntime>::from_slice(&[bias_value], &[config.nheads], &device).unwrap();
 
     let weights = Mamba2Weights {
         in_proj,
@@ -77,13 +75,12 @@ fn tiny_mamba2() -> (Mamba2<CpuRuntime>, Mamba2Config) {
     let proj_dim = config.proj_dim();
 
     let in_proj = Linear::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.01f32; 328], &[proj_dim, 8], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.01f32; 328], &[proj_dim, 8], &device).unwrap(),
         None,
         false,
     );
     let conv1d = Conv1d::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 96], &[conv_channels, 1, 4], &device)
-            .unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 96], &[conv_channels, 1, 4], &device).unwrap(),
         None,
         1,
         PaddingMode::Custom(3, 0, 0, 0),
@@ -92,12 +89,11 @@ fn tiny_mamba2() -> (Mamba2<CpuRuntime>, Mamba2Config) {
         false,
     );
     let out_proj = Linear::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.01f32; 128], &[8, d_inner], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.01f32; 128], &[8, d_inner], &device).unwrap(),
         None,
         false,
     );
-    let a_log =
-        Tensor::<CpuRuntime>::try_from_slice(&[-0.5f32], &[config.nheads], &device).unwrap();
+    let a_log = Tensor::<CpuRuntime>::from_slice(&[-0.5f32], &[config.nheads], &device).unwrap();
 
     let weights = Mamba2Weights {
         in_proj,
@@ -191,7 +187,7 @@ fn test_mamba2_forward_shape() {
     let (mamba, _) = tiny_mamba2();
 
     let x = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 32], &[1, 4, 8], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 32], &[1, 4, 8], &device).unwrap(),
         false,
     );
 
@@ -206,14 +202,14 @@ fn test_mamba2_forward_invalid_input() {
 
     // 2D input should fail
     let x_2d = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 8], &[1, 8], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 8], &[1, 8], &device).unwrap(),
         false,
     );
     assert!(mamba.forward(&client, &x_2d).is_err());
 
     // Wrong d_model should fail
     let x_wrong = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 12], &[1, 4, 3], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 12], &[1, 4, 3], &device).unwrap(),
         false,
     );
     assert!(mamba.forward(&client, &x_wrong).is_err());
@@ -276,11 +272,11 @@ fn test_mamba2_dt_bias_is_applied_inside_softplus() {
     // dt values around zero => softplus(dt) ~ 0.69; a -5.0 bias flips the sign
     // under the WRONG ordering but never under the correct one.
     let dt = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.25, -0.25, 0.5], &[4], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.25, -0.25, 0.5], &[4], &device).unwrap(),
         false,
     );
     let bias = Var::new(
-        Tensor::<CpuRuntime>::try_from_slice(&[-5.0f32; 4], &[4], &device).unwrap(),
+        Tensor::<CpuRuntime>::from_slice(&[-5.0f32; 4], &[4], &device).unwrap(),
         false,
     );
 
@@ -313,7 +309,7 @@ fn test_mamba2_dt_bias_is_applied_inside_softplus() {
     let magnitude = |bias: f32| -> f32 {
         let (mamba, _) = mamba2_with_dt_bias(bias);
         let x = Var::new(
-            Tensor::<CpuRuntime>::try_from_slice(&[0.05f32; 8 * 6], &[1, 6, 8], &device).unwrap(),
+            Tensor::<CpuRuntime>::from_slice(&[0.05f32; 8 * 6], &[1, 6, 8], &device).unwrap(),
             false,
         );
         let out = mamba.forward(&client, &x).expect("forward must succeed");

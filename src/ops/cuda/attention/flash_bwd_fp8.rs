@@ -104,23 +104,23 @@ pub(super) fn flash_attention_bwd_fp8_impl(
     // DEQUANTIZED gradient here; `dq_scale` and the quantization are applied
     // below, matching the `raw = quantize(value * scale)` convention the kernel
     // uses for dK/dV.
-    let dq_acc = Tensor::<CudaRuntime>::try_zeros(
+    let dq_acc = Tensor::<CudaRuntime>::zeros(
         &[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim],
         DType::F32,
         device,
     )?;
-    let dk = Tensor::<CudaRuntime>::try_empty(
+    let dk = Tensor::<CudaRuntime>::empty(
         &[p.batch_size, p.num_heads, p.seq_len_k, p.head_dim],
         dtype,
         device,
     )?;
-    let dv = Tensor::<CudaRuntime>::try_empty(
+    let dv = Tensor::<CudaRuntime>::empty(
         &[p.batch_size, p.num_heads, p.seq_len_k, p.head_dim],
         dtype,
         device,
     )?;
 
-    let d_buf = Tensor::<CudaRuntime>::try_empty(
+    let d_buf = Tensor::<CudaRuntime>::empty(
         &[p.batch_size, p.num_heads, p.seq_len_q],
         DType::F32,
         device,

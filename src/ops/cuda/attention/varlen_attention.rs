@@ -85,13 +85,9 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
         // Total tokens from Q shape: [total_tokens_q, num_heads, head_dim]
         let total_tokens_q = q.shape()[0];
 
-        let output = Tensor::<CudaRuntime>::try_empty(
-            &[total_tokens_q, num_heads, head_dim],
-            dtype,
-            device,
-        )?;
-        let lse =
-            Tensor::<CudaRuntime>::try_empty(&[total_tokens_q, num_heads], DType::F32, device)?;
+        let output =
+            Tensor::<CudaRuntime>::empty(&[total_tokens_q, num_heads, head_dim], dtype, device)?;
+        let lse = Tensor::<CudaRuntime>::empty(&[total_tokens_q, num_heads], DType::F32, device)?;
 
         // Block sizes are chosen so that shared memory fits within 48 KB
         // (after set_smem_attribute opts in to larger dynamic smem).
@@ -221,21 +217,12 @@ impl VarLenAttentionOps<CudaRuntime> for CudaClient {
 
         // dq: same head layout as Q (num_heads)
         // dk/dv: kv head layout (num_kv_heads) — GQA: fewer heads than Q
-        let dq = Tensor::<CudaRuntime>::try_zeros(
-            &[total_tokens_q, num_heads, head_dim],
-            dtype,
-            device,
-        )?;
-        let dk = Tensor::<CudaRuntime>::try_zeros(
-            &[total_tokens_k, num_kv_heads, head_dim],
-            dtype,
-            device,
-        )?;
-        let dv = Tensor::<CudaRuntime>::try_zeros(
-            &[total_tokens_k, num_kv_heads, head_dim],
-            dtype,
-            device,
-        )?;
+        let dq =
+            Tensor::<CudaRuntime>::zeros(&[total_tokens_q, num_heads, head_dim], dtype, device)?;
+        let dk =
+            Tensor::<CudaRuntime>::zeros(&[total_tokens_k, num_kv_heads, head_dim], dtype, device)?;
+        let dv =
+            Tensor::<CudaRuntime>::zeros(&[total_tokens_k, num_kv_heads, head_dim], dtype, device)?;
 
         // Use same block sizes as fwd (matches the kernel template instantiations)
         let (block_m, block_n) = block_config(head_dim, dtype);

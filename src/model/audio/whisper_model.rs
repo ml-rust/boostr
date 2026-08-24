@@ -139,8 +139,7 @@ impl<R: Runtime<DType = DType>> WhisperModel<R> {
         // Prefill: feed the prefix through the decoder once so the cache
         // contains all prefix K/V and we have logits for the last prefix token.
         let prefix_i64: Vec<i64> = start_tokens.iter().map(|&t| t as i64).collect();
-        let prefix_tensor =
-            Tensor::<R>::try_from_slice(&prefix_i64, &[1, prefix_i64.len()], device)?;
+        let prefix_tensor = Tensor::<R>::from_slice(&prefix_i64, &[1, prefix_i64.len()], device)?;
         let logits = self.decoder.forward_with_cache(
             client,
             &prefix_tensor,
@@ -165,7 +164,7 @@ impl<R: Runtime<DType = DType>> WhisperModel<R> {
             }
             generated.push(next_token);
 
-            let step_ids = Tensor::<R>::try_from_slice(&[next_token as i64], &[1, 1], device)?;
+            let step_ids = Tensor::<R>::from_slice(&[next_token as i64], &[1, 1], device)?;
             let logits = self.decoder.forward_with_cache(
                 client,
                 &step_ids,
@@ -228,7 +227,7 @@ where
         }
     }
     let device = logits.device();
-    let mask_t = Tensor::<R>::try_from_slice(&mask, &[1, 1, vocab_size], device)?;
+    let mask_t = Tensor::<R>::from_slice(&mask, &[1, 1, vocab_size], device)?;
     let masked = client.add(&last, &mask_t).map_err(Error::Numr)?;
     let data: Vec<f32> = masked.to_vec();
     Ok(argmax_f32(&data) as u32)

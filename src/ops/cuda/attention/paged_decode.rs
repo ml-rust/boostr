@@ -35,13 +35,10 @@ pub(super) fn paged_decode_attention_fwd(
     )?;
     let func = kernels::get_kernel_function(&module, &kernel_name)?;
 
-    let output = Tensor::<CudaRuntime>::try_empty(
-        &[batch_size, num_heads, 1, head_dim],
-        DType::F32,
-        device,
-    )?;
+    let output =
+        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, 1, head_dim], DType::F32, device)?;
     // LSE not computed by decode kernel (not needed for inference)
-    let lse = Tensor::<CudaRuntime>::try_empty(&[batch_size, num_heads, 1], DType::F32, device)?;
+    let lse = Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, 1], DType::F32, device)?;
 
     let max_num_blocks = block_table.shape()[1];
     let scale = (head_dim as f32).sqrt().recip();

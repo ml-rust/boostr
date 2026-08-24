@@ -96,9 +96,9 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
         let seq_len_k = k.shape()[2];
 
         // Create output tensors
-        let output = Tensor::<WgpuRuntime>::try_zeros(q_shape, DType::F32, q.device())?;
+        let output = Tensor::<WgpuRuntime>::zeros(q_shape, DType::F32, q.device())?;
         let lse_shape = vec![batch_size, num_heads, seq_len_q];
-        let lse = Tensor::<WgpuRuntime>::try_zeros(&lse_shape, DType::F32, q.device())?;
+        let lse = Tensor::<WgpuRuntime>::zeros(&lse_shape, DType::F32, q.device())?;
 
         // Get buffers
         let q_buf = get_buffer(q.storage().ptr()).ok_or_else(|| Error::KernelError {

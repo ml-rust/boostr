@@ -3,6 +3,7 @@ pub mod kokoro;
 pub mod mel;
 pub mod neucodec;
 pub mod reflection_pad;
+pub mod resample;
 pub mod stft;
 pub mod tts_bundle;
 pub mod wav_decode;
@@ -15,6 +16,9 @@ pub mod whisper_model;
 
 pub use g2p::{G2pError, Lang, Phonemizer};
 pub use reflection_pad::reflection_pad_1d;
+pub use resample::{
+    DEFAULT_TAPS_PER_PHASE, MAX_FILTER_TAPS, resample, resample_with_taps, to_mono_at_rate,
+};
 pub use stft::{StftOptions, stft};
 pub use tts_bundle::{SynthesizeOptions, TtsBundle, TtsError, Voice, default_kokoro_voices};
 pub use wav_decode::{WavData, decode_wav, to_mono};

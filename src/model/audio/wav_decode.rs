@@ -299,7 +299,10 @@ fn decode_one(chunk: &[u8], format: &Format) -> f32 {
 
 /// Normalise an integer sample against positive full scale, clamped to `[-1, 1]`
 /// because the negative extreme is one step past `-1`.
-fn scale(value: f64, full_scale: f64) -> f32 {
+///
+/// Shared with [`super::decode`] so the symphonia-backed path and this one
+/// return identical values for identical bytes.
+pub(super) fn scale(value: f64, full_scale: f64) -> f32 {
     (value / full_scale).clamp(-1.0, 1.0) as f32
 }
 

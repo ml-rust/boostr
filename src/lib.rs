@@ -179,4 +179,23 @@ pub(crate) mod test_utils {
         };
         path.exists().then_some(path)
     }
+
+    /// Resolve a real-audio fixture: `$AUDIO_CORPUS_FLAC`, else the first
+    /// `.flac` in `$AUDIO_CORPUS_DIR` by sorted name. `None` when neither is
+    /// set or the resolved path is absent, so callers skip.
+    pub(crate) fn corpus_flac() -> Option<PathBuf> {
+        if let Ok(p) = std::env::var("AUDIO_CORPUS_FLAC") {
+            let path = PathBuf::from(p);
+            return path.exists().then_some(path);
+        }
+        let dir = PathBuf::from(std::env::var("AUDIO_CORPUS_DIR").ok()?);
+        let mut flacs: Vec<PathBuf> = std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "flac"))
+            .collect();
+        flacs.sort();
+        flacs.into_iter().next()
+    }
 }

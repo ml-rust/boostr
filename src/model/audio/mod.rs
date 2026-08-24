@@ -1,3 +1,4 @@
+pub mod decode;
 pub mod g2p;
 pub mod kokoro;
 pub mod mel;
@@ -14,6 +15,7 @@ pub mod whisper_decoder;
 pub mod whisper_loader;
 pub mod whisper_model;
 
+pub use decode::{decode_audio, decode_audio_file_mono_at, decode_audio_mono_at, extension_hint};
 pub use g2p::{G2pError, Lang, Phonemizer};
 pub use reflection_pad::reflection_pad_1d;
 pub use resample::{

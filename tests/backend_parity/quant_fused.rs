@@ -27,11 +27,12 @@ fn create_awq_weights(
             qweight_data[ki * n_packed + pj] = packed;
         }
     }
-    let qweight = Tensor::<CpuRuntime>::from_slice(
+    let qweight = Tensor::<CpuRuntime>::try_from_slice(
         bytemuck::cast_slice::<u32, f32>(&qweight_data),
         &[k, n_packed],
         device,
-    );
+    )
+    .unwrap();
 
     let scales_data: Vec<f32> = (0..num_groups * n)
         .map(|i| 0.01 + ((seed + i) as f32 * 0.001).sin().abs() * 0.1)
@@ -39,8 +40,10 @@ fn create_awq_weights(
     let zeros_data: Vec<f32> = (0..num_groups * n)
         .map(|i| 7.0 + ((seed + i) as f32 * 0.003).cos() * 0.5)
         .collect();
-    let scales = Tensor::<CpuRuntime>::from_slice(&scales_data, &[num_groups, n], device);
-    let zeros = Tensor::<CpuRuntime>::from_slice(&zeros_data, &[num_groups, n], device);
+    let scales =
+        Tensor::<CpuRuntime>::try_from_slice(&scales_data, &[num_groups, n], device).unwrap();
+    let zeros =
+        Tensor::<CpuRuntime>::try_from_slice(&zeros_data, &[num_groups, n], device).unwrap();
 
     (qweight, scales, zeros)
 }
@@ -95,7 +98,7 @@ fn test_fused_int4_swiglu_parity() {
         use numr::tensor::Tensor;
 
         let to_cuda = |t: &Tensor<CpuRuntime>| -> Tensor<numr::runtime::cuda::CudaRuntime> {
-            Tensor::from_slice(&t.to_vec::<f32>(), t.shape(), &cuda_device)
+            Tensor::try_from_slice(&t.to_vec::<f32>(), t.shape(), &cuda_device).unwrap()
         };
         let input_c = to_cuda(&input);
         let gqw_c = to_cuda(&gate_qw);
@@ -123,7 +126,7 @@ fn test_fused_int4_swiglu_parity() {
         use numr::tensor::Tensor;
 
         let to_wgpu = |t: &Tensor<CpuRuntime>| -> Tensor<numr::runtime::wgpu::WgpuRuntime> {
-            Tensor::from_slice(&t.to_vec::<f32>(), t.shape(), &wgpu_device)
+            Tensor::try_from_slice(&t.to_vec::<f32>(), t.shape(), &wgpu_device).unwrap()
         };
         let input_w = to_wgpu(&input);
         let gqw_w = to_wgpu(&gate_qw);
@@ -208,7 +211,7 @@ fn test_fused_int4_qkv_parity() {
         use numr::tensor::Tensor;
 
         let to_cuda = |t: &Tensor<CpuRuntime>| -> Tensor<numr::runtime::cuda::CudaRuntime> {
-            Tensor::from_slice(&t.to_vec::<f32>(), t.shape(), &cuda_device)
+            Tensor::try_from_slice(&t.to_vec::<f32>(), t.shape(), &cuda_device).unwrap()
         };
 
         let (cuda_q, cuda_k, cuda_v) = cuda_client
@@ -238,7 +241,7 @@ fn test_fused_int4_qkv_parity() {
         use numr::tensor::Tensor;
 
         let to_wgpu = |t: &Tensor<CpuRuntime>| -> Tensor<numr::runtime::wgpu::WgpuRuntime> {
-            Tensor::from_slice(&t.to_vec::<f32>(), t.shape(), &wgpu_device)
+            Tensor::try_from_slice(&t.to_vec::<f32>(), t.shape(), &wgpu_device).unwrap()
         };
 
         let (wgpu_q, wgpu_k, wgpu_v) = wgpu_client

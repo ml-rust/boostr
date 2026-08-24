@@ -92,11 +92,11 @@ mod tests {
 
     fn weight(device: &numr::runtime::cpu::CpuDevice) -> Tensor<CpuRuntime> {
         #[rustfmt::skip]
-        let w = Tensor::<CpuRuntime>::from_slice(
+        let w = Tensor::<CpuRuntime>::try_from_slice(
             &[1.0f32, 2.0, 3.0, 3.0, 4.0, 5.0],
             &[2, 3],
             device,
-        );
+        ).unwrap();
         w
     }
 

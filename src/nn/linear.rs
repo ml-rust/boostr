@@ -316,12 +316,12 @@ mod tests {
     fn test_linear_output_shape() {
         let (client, device) = cpu_setup();
         // weight: [out=4, in=3]
-        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device);
+        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
         let linear = Linear::new(weight, None, false);
 
         // input: [2, 3]
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap(),
             false,
         );
         let out = linear.forward(&client, &input).unwrap();
@@ -331,12 +331,14 @@ mod tests {
     #[test]
     fn test_linear_with_bias() {
         let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device);
-        let bias = Tensor::<CpuRuntime>::from_slice(&[10.0f32, 20.0], &[2], &device);
+        let weight =
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device)
+                .unwrap();
+        let bias = Tensor::<CpuRuntime>::try_from_slice(&[10.0f32, 20.0], &[2], &device).unwrap();
         let linear = Linear::new(weight, Some(bias), false);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[1, 2], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[1, 2], &device).unwrap(),
             false,
         );
         let out = linear.forward(&client, &input).unwrap();
@@ -348,12 +350,12 @@ mod tests {
     #[test]
     fn test_linear_batched() {
         let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device);
+        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
         let linear = Linear::new(weight, None, false);
 
         // input: [4, 5, 3] — batched
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[0.1f32; 60], &[4, 5, 3], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 60], &[4, 5, 3], &device).unwrap(),
             false,
         );
         let out = linear.forward(&client, &input).unwrap();

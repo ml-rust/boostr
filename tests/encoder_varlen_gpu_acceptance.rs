@@ -67,25 +67,19 @@ fn make_cuda_encoder(device: &CudaDevice, client: &CudaClient) -> Encoder<CudaRu
 
     let d = device;
     let small = |n: usize, shape: &[usize]| {
-        Ok(Weight::Standard(Tensor::from_slice(
-            &vec![0.02f32; n],
-            shape,
-            d,
-        )))
+        Ok(Weight::Standard(
+            Tensor::try_from_slice(&vec![0.02f32; n], shape, d).unwrap(),
+        ))
     };
     let ones = |n: usize| {
-        Ok(Weight::Standard(Tensor::from_slice(
-            &vec![1.0f32; n],
-            &[n],
-            d,
-        )))
+        Ok(Weight::Standard(
+            Tensor::try_from_slice(&vec![1.0f32; n], &[n], d).unwrap(),
+        ))
     };
     let zeros = |n: usize| {
-        Ok(Weight::Standard(Tensor::from_slice(
-            &vec![0.0f32; n],
-            &[n],
-            d,
-        )))
+        Ok(Weight::Standard(
+            Tensor::try_from_slice(&vec![0.0f32; n], &[n], d).unwrap(),
+        ))
     };
 
     Encoder::from_weights_nomic(config, Pooling::Mean, client, |name| match name {
@@ -129,10 +123,10 @@ fn run_one_shape(
     let pos: Vec<i64> = (0..seq_len as i64).collect();
     let seg: Vec<i32> = vec![0i32; seq_len];
 
-    let input = Tensor::<CudaRuntime>::from_slice(&ids, &[seq_len], device);
-    let cu_t = Tensor::<CudaRuntime>::from_slice(&cu, &[2], device);
-    let pos_t = Tensor::<CudaRuntime>::from_slice(&pos, &[seq_len], device);
-    let seg_t = Tensor::<CudaRuntime>::from_slice(&seg, &[seg.len()], device);
+    let input = Tensor::<CudaRuntime>::try_from_slice(&ids, &[seq_len], device).unwrap();
+    let cu_t = Tensor::<CudaRuntime>::try_from_slice(&cu, &[2], device).unwrap();
+    let pos_t = Tensor::<CudaRuntime>::try_from_slice(&pos, &[seq_len], device).unwrap();
+    let seg_t = Tensor::<CudaRuntime>::try_from_slice(&seg, &[seg.len()], device).unwrap();
 
     let out = encoder
         .encode_inference_varlen(client, &input, &cu_t, &pos_t, &seg_t, 1, seq_len)

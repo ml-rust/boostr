@@ -37,18 +37,20 @@ fn test_paged_attention_fwd_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::paged_attention::PagedAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
-        let kb = Tensor::from_slice(
+        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let kb = Tensor::try_from_slice(
             &k_blocks.to_vec::<f32>(),
             &[num_blocks, block_size, 1, d],
             &cuda_device,
-        );
-        let vb = Tensor::from_slice(
+        )
+        .unwrap();
+        let vb = Tensor::try_from_slice(
             &v_blocks.to_vec::<f32>(),
             &[num_blocks, block_size, 1, d],
             &cuda_device,
-        );
-        let bt = Tensor::from_slice(&bt_data, &[b, 1], &cuda_device);
+        )
+        .unwrap();
+        let bt = Tensor::try_from_slice(&bt_data, &[b, 1], &cuda_device).unwrap();
         let (out, _) = cuda_client
             .paged_attention_fwd(&q_c, &kb, &vb, &bt, h, 1, s, s, d, block_size, false)
             .unwrap();
@@ -59,18 +61,20 @@ fn test_paged_attention_fwd_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::paged_attention::PagedAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
-        let kb = Tensor::from_slice(
+        let q_w = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let kb = Tensor::try_from_slice(
             &k_blocks.to_vec::<f32>(),
             &[num_blocks, block_size, 1, d],
             &wgpu_device,
-        );
-        let vb = Tensor::from_slice(
+        )
+        .unwrap();
+        let vb = Tensor::try_from_slice(
             &v_blocks.to_vec::<f32>(),
             &[num_blocks, block_size, 1, d],
             &wgpu_device,
-        );
-        let bt = Tensor::from_slice(&bt_data, &[b, 1], &wgpu_device);
+        )
+        .unwrap();
+        let bt = Tensor::try_from_slice(&bt_data, &[b, 1], &wgpu_device).unwrap();
         let (out, _) = wgpu_client
             .paged_attention_fwd(&q_w, &kb, &vb, &bt, h, 1, s, s, d, block_size, false)
             .unwrap();
@@ -153,22 +157,25 @@ fn test_paged_attention_bwd_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::paged_attention::PagedAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
-        let kb = Tensor::from_slice(
+        let q_w = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let kb = Tensor::try_from_slice(
             &k_blocks.to_vec::<f32>(),
             &[num_blocks, block_size, 1, d],
             &wgpu_device,
-        );
-        let vb = Tensor::from_slice(
+        )
+        .unwrap();
+        let vb = Tensor::try_from_slice(
             &v_blocks.to_vec::<f32>(),
             &[num_blocks, block_size, 1, d],
             &wgpu_device,
-        );
-        let bt = Tensor::from_slice(&bt_data, &[b, num_blocks], &wgpu_device);
+        )
+        .unwrap();
+        let bt = Tensor::try_from_slice(&bt_data, &[b, num_blocks], &wgpu_device).unwrap();
         let (out_w, lse_w) = wgpu_client
             .paged_attention_fwd(&q_w, &kb, &vb, &bt, h, 1, s, s, d, block_size, true)
             .unwrap();
-        let dout_w = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
+        let dout_w =
+            Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
         let (dq, dk, dv) = wgpu_client
             .paged_attention_bwd(
                 &dout_w, &q_w, &kb, &vb, &out_w, &lse_w, &bt, h, 1, s, s, d, block_size, true,
@@ -349,10 +356,12 @@ fn test_paged_causal_unequal_seqlens_uses_absolute_positions() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::paged_attention::PagedAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::from_slice(&q_vec, &[b, h, seq_len_q, d], &cuda_device);
-        let kb = Tensor::from_slice(&kb_vec, &[num_blocks, block_size, 1, d], &cuda_device);
-        let vb = Tensor::from_slice(&vb_vec, &[num_blocks, block_size, 1, d], &cuda_device);
-        let bt = Tensor::from_slice(&bt_data, &[b, max_num_blocks], &cuda_device);
+        let q_c = Tensor::try_from_slice(&q_vec, &[b, h, seq_len_q, d], &cuda_device).unwrap();
+        let kb =
+            Tensor::try_from_slice(&kb_vec, &[num_blocks, block_size, 1, d], &cuda_device).unwrap();
+        let vb =
+            Tensor::try_from_slice(&vb_vec, &[num_blocks, block_size, 1, d], &cuda_device).unwrap();
+        let bt = Tensor::try_from_slice(&bt_data, &[b, max_num_blocks], &cuda_device).unwrap();
         let (out, _) = cuda_client
             .paged_attention_fwd(
                 &q_c, &kb, &vb, &bt, h, 1, seq_len_q, seq_len_k, d, block_size, true,
@@ -369,10 +378,12 @@ fn test_paged_causal_unequal_seqlens_uses_absolute_positions() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::paged_attention::PagedAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::from_slice(&q_vec, &[b, h, seq_len_q, d], &wgpu_device);
-        let kb = Tensor::from_slice(&kb_vec, &[num_blocks, block_size, 1, d], &wgpu_device);
-        let vb = Tensor::from_slice(&vb_vec, &[num_blocks, block_size, 1, d], &wgpu_device);
-        let bt = Tensor::from_slice(&bt_data, &[b, max_num_blocks], &wgpu_device);
+        let q_w = Tensor::try_from_slice(&q_vec, &[b, h, seq_len_q, d], &wgpu_device).unwrap();
+        let kb =
+            Tensor::try_from_slice(&kb_vec, &[num_blocks, block_size, 1, d], &wgpu_device).unwrap();
+        let vb =
+            Tensor::try_from_slice(&vb_vec, &[num_blocks, block_size, 1, d], &wgpu_device).unwrap();
+        let bt = Tensor::try_from_slice(&bt_data, &[b, max_num_blocks], &wgpu_device).unwrap();
         let (out, _) = wgpu_client
             .paged_attention_fwd(
                 &q_w, &kb, &vb, &bt, h, 1, seq_len_q, seq_len_k, d, block_size, true,
@@ -446,18 +457,20 @@ fn test_paged_causal_equal_seqlens_matches_legacy_rule() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::paged_attention::PagedAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
-        let kb = Tensor::from_slice(
+        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let kb = Tensor::try_from_slice(
             &k_blocks.to_vec::<f32>(),
             &[num_blocks, block_size, 1, d],
             &cuda_device,
-        );
-        let vb = Tensor::from_slice(
+        )
+        .unwrap();
+        let vb = Tensor::try_from_slice(
             &v_blocks.to_vec::<f32>(),
             &[num_blocks, block_size, 1, d],
             &cuda_device,
-        );
-        let bt = Tensor::from_slice(&bt_data, &[b, max_num_blocks], &cuda_device);
+        )
+        .unwrap();
+        let bt = Tensor::try_from_slice(&bt_data, &[b, max_num_blocks], &cuda_device).unwrap();
         let (out, _) = cuda_client
             .paged_attention_fwd(&q_c, &kb, &vb, &bt, h, 1, s, s, d, block_size, true)
             .unwrap();
@@ -472,18 +485,20 @@ fn test_paged_causal_equal_seqlens_matches_legacy_rule() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::paged_attention::PagedAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device);
-        let kb = Tensor::from_slice(
+        let q_w = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
+        let kb = Tensor::try_from_slice(
             &k_blocks.to_vec::<f32>(),
             &[num_blocks, block_size, 1, d],
             &wgpu_device,
-        );
-        let vb = Tensor::from_slice(
+        )
+        .unwrap();
+        let vb = Tensor::try_from_slice(
             &v_blocks.to_vec::<f32>(),
             &[num_blocks, block_size, 1, d],
             &wgpu_device,
-        );
-        let bt = Tensor::from_slice(&bt_data, &[b, max_num_blocks], &wgpu_device);
+        )
+        .unwrap();
+        let bt = Tensor::try_from_slice(&bt_data, &[b, max_num_blocks], &wgpu_device).unwrap();
         let (out, _) = wgpu_client
             .paged_attention_fwd(&q_w, &kb, &vb, &bt, h, 1, s, s, d, block_size, true)
             .unwrap();
@@ -583,19 +598,24 @@ fn assert_paged_bwd_kv_parity(num_heads: usize, num_kv_heads: usize, label: &str
     let v_paged = to_paged_layout(&v.to_vec::<f32>(), num_kv_heads, s, d);
 
     with_cuda_backend(|cuda_client, cuda_device| {
-        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device);
-        let dout_c = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device);
-        let kb = Tensor::from_slice(
+        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device)
+            .unwrap();
+        let dout_c =
+            Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device)
+                .unwrap();
+        let kb = Tensor::try_from_slice(
             &k_paged,
             &[num_blocks, block_size, num_kv_heads, d],
             &cuda_device,
-        );
-        let vb = Tensor::from_slice(
+        )
+        .unwrap();
+        let vb = Tensor::try_from_slice(
             &v_paged,
             &[num_blocks, block_size, num_kv_heads, d],
             &cuda_device,
-        );
-        let bt = Tensor::from_slice(&bt_data, &[b, num_blocks], &cuda_device);
+        )
+        .unwrap();
+        let bt = Tensor::try_from_slice(&bt_data, &[b, num_blocks], &cuda_device).unwrap();
 
         let (out_c, lse_c) = cuda_client
             .paged_attention_fwd(
@@ -725,21 +745,25 @@ fn test_paged_attention_bwd_zero_kv_heads_rejected() {
         .unwrap();
 
     with_cuda_backend(|cuda_client, cuda_device| {
-        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
-        let dout_c = Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
-        let out_c = Tensor::from_slice(&out.to_vec::<f32>(), &[b, h, s, d], &cuda_device);
-        let lse_c = Tensor::from_slice(&lse.to_vec::<f32>(), &[b, h, s], &cuda_device);
-        let kb = Tensor::from_slice(
+        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let dout_c =
+            Tensor::try_from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let out_c =
+            Tensor::try_from_slice(&out.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let lse_c = Tensor::try_from_slice(&lse.to_vec::<f32>(), &[b, h, s], &cuda_device).unwrap();
+        let kb = Tensor::try_from_slice(
             &to_paged_layout(&k.to_vec::<f32>(), 1, s, d),
             &[num_blocks, block_size, 1, d],
             &cuda_device,
-        );
-        let vb = Tensor::from_slice(
+        )
+        .unwrap();
+        let vb = Tensor::try_from_slice(
             &to_paged_layout(&v.to_vec::<f32>(), 1, s, d),
             &[num_blocks, block_size, 1, d],
             &cuda_device,
-        );
-        let bt = Tensor::from_slice(&bt_data, &[b, num_blocks], &cuda_device);
+        )
+        .unwrap();
+        let bt = Tensor::try_from_slice(&bt_data, &[b, num_blocks], &cuda_device).unwrap();
 
         let err = match cuda_client.paged_attention_bwd(
             &dout_c, &q_c, &kb, &vb, &out_c, &lse_c, &bt, h, 0, s, s, d, block_size, true,

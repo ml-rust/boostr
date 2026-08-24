@@ -233,8 +233,8 @@ mod tests {
         let id1 = TensorId::new();
         let id2 = TensorId::new();
 
-        let t1 = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
-        let t2 = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
+        let t1 = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let t2 = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
 
         let mut zero3_params = HashMap::new();
         zero3_params.insert(id1, t1.clone());
@@ -244,8 +244,8 @@ mod tests {
         adam_params.insert(id1, t1);
         adam_params.insert(id2, t2);
 
-        let g1 = Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2], &[2], &device);
-        let g2 = Tensor::<CpuRuntime>::from_slice(&[0.3f32, 0.4], &[2], &device);
+        let g1 = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
+        let g2 = Tensor::<CpuRuntime>::try_from_slice(&[0.3f32, 0.4], &[2], &device).unwrap();
 
         let mut grads = GradStore::new();
         grads.insert(id1, g1.clone());
@@ -278,8 +278,8 @@ mod tests {
         let id1 = TensorId::new();
         let id2 = TensorId::new();
 
-        let t1 = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
-        let t2 = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
+        let t1 = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let t2 = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
 
         let mut params = HashMap::new();
         params.insert(id1, t1);
@@ -300,13 +300,13 @@ mod tests {
         let comm = Arc::new(NoOpCommunicator);
 
         let id = TensorId::new();
-        let t = Tensor::<CpuRuntime>::from_slice(&[5.0f32, 5.0], &[2], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[5.0f32, 5.0], &[2], &device).unwrap();
         let original: Vec<f32> = t.to_vec();
 
         let mut params = HashMap::new();
         params.insert(id, t);
 
-        let g = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[2], &device);
+        let g = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(id, g);
 

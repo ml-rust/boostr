@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn test_standard_weight() {
         let d = device();
-        let t = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &d);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &d).unwrap();
         let w = Weight::Standard(t);
 
         assert!(!w.is_quantized());
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn test_into_tensor() {
         let d = device();
-        let t = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &d);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &d).unwrap();
         let w = Weight::Standard(t);
         assert!(w.into_tensor().is_ok());
     }

@@ -138,7 +138,8 @@ mod tests {
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Var<CpuRuntime> {
         let n: usize = shape.iter().product();
         Var::new(
-            numr::tensor::Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device),
+            numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device)
+                .unwrap(),
             false,
         )
     }
@@ -151,8 +152,10 @@ mod tests {
         device: &<CpuRuntime as Runtime>::Device,
     ) -> GroupNorm<CpuRuntime> {
         GroupNorm::new(
-            numr::tensor::Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; c], &[c], device),
-            numr::tensor::Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; c], &[c], device),
+            numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; c], &[c], device)
+                .unwrap(),
+            numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; c], &[c], device)
+                .unwrap(),
             groups,
             RESNET_NORM_EPS,
             false,
@@ -167,12 +170,12 @@ mod tests {
     ) -> Conv1d<CpuRuntime> {
         let n = c * c * k;
         Conv1d::new(
-            numr::tensor::Tensor::<CpuRuntime>::from_slice(&vec![w; n], &[c, c, k], device),
-            Some(numr::tensor::Tensor::<CpuRuntime>::from_slice(
-                &vec![0.0f32; c],
-                &[c],
-                device,
-            )),
+            numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&vec![w; n], &[c, c, k], device)
+                .unwrap(),
+            Some(
+                numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; c], &[c], device)
+                    .unwrap(),
+            ),
             1,
             PaddingMode::Same,
             1,
@@ -235,7 +238,8 @@ mod tests {
             1.0f32, -2.0, 3.0, 0.5, 2.0, -1.0, 0.0, 4.0, 1.5, -0.5, 2.5, 3.5,
         ];
         let x = Var::new(
-            numr::tensor::Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 4, 3], &device),
+            numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, 4, 3], &device)
+                .unwrap(),
             false,
         );
         let out = b.forward(&client, &x).unwrap();
@@ -260,7 +264,8 @@ mod tests {
         // -10; both have identical shape around their mean.
         let x_data = vec![9.0f32, 11.0, 9.0, 11.0, -11.0, -9.0, -11.0, -9.0];
         let x = Var::new(
-            numr::tensor::Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 2, 4], &device),
+            numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, 2, 4], &device)
+                .unwrap(),
             false,
         );
         // groups == channels: normalize each channel over time independently.
@@ -287,23 +292,29 @@ mod tests {
         let n = c * c * k;
         let block = ResnetBlock::new(ResnetBlockWeights {
             norm1: GroupNorm::new(
-                numr::tensor::Tensor::<CpuRuntime>::from_slice(&vec![1.2f32; c], &[c], &device),
-                numr::tensor::Tensor::<CpuRuntime>::from_slice(&vec![0.1f32; c], &[c], &device),
+                numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&vec![1.2f32; c], &[c], &device)
+                    .unwrap(),
+                numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&vec![0.1f32; c], &[c], &device)
+                    .unwrap(),
                 3,
                 RESNET_NORM_EPS,
                 false,
             ),
             conv1: Conv1d::new(
-                numr::tensor::Tensor::<CpuRuntime>::from_slice(
+                numr::tensor::Tensor::<CpuRuntime>::try_from_slice(
                     &vec![0.05f32; n],
                     &[c, c, k],
                     &device,
+                )
+                .unwrap(),
+                Some(
+                    numr::tensor::Tensor::<CpuRuntime>::try_from_slice(
+                        &vec![0.02f32; c],
+                        &[c],
+                        &device,
+                    )
+                    .unwrap(),
                 ),
-                Some(numr::tensor::Tensor::<CpuRuntime>::from_slice(
-                    &vec![0.02f32; c],
-                    &[c],
-                    &device,
-                )),
                 1,
                 PaddingMode::Same,
                 1,
@@ -311,23 +322,33 @@ mod tests {
                 false,
             ),
             norm2: GroupNorm::new(
-                numr::tensor::Tensor::<CpuRuntime>::from_slice(&vec![0.9f32; c], &[c], &device),
-                numr::tensor::Tensor::<CpuRuntime>::from_slice(&vec![-0.1f32; c], &[c], &device),
+                numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&vec![0.9f32; c], &[c], &device)
+                    .unwrap(),
+                numr::tensor::Tensor::<CpuRuntime>::try_from_slice(
+                    &vec![-0.1f32; c],
+                    &[c],
+                    &device,
+                )
+                .unwrap(),
                 3,
                 RESNET_NORM_EPS,
                 false,
             ),
             conv2: Conv1d::new(
-                numr::tensor::Tensor::<CpuRuntime>::from_slice(
+                numr::tensor::Tensor::<CpuRuntime>::try_from_slice(
                     &vec![-0.03f32; n],
                     &[c, c, k],
                     &device,
+                )
+                .unwrap(),
+                Some(
+                    numr::tensor::Tensor::<CpuRuntime>::try_from_slice(
+                        &vec![0.0f32; c],
+                        &[c],
+                        &device,
+                    )
+                    .unwrap(),
                 ),
-                Some(numr::tensor::Tensor::<CpuRuntime>::from_slice(
-                    &vec![0.0f32; c],
-                    &[c],
-                    &device,
-                )),
                 1,
                 PaddingMode::Same,
                 1,
@@ -337,7 +358,8 @@ mod tests {
         });
         let x_data: Vec<f32> = (0..(2 * c * 5)).map(|i| (i as f32 * 0.13).sin()).collect();
         let x = Var::new(
-            numr::tensor::Tensor::<CpuRuntime>::from_slice(&x_data, &[2, c, 5], &device),
+            numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&x_data, &[2, c, 5], &device)
+                .unwrap(),
             false,
         );
         let out = block.forward(&client, &x).unwrap();
@@ -363,7 +385,8 @@ mod tests {
 
         let x_data: Vec<f32> = (0..(4 * 8)).map(|i| (i as f32 * 0.37).sin()).collect();
         let x = Var::new(
-            numr::tensor::Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 4, 8], &device),
+            numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, 4, 8], &device)
+                .unwrap(),
             false,
         );
 

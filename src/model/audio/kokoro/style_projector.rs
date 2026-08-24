@@ -109,7 +109,7 @@ mod tests {
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device)
+        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device).unwrap()
     }
 
     #[test]
@@ -120,8 +120,12 @@ mod tests {
         let bias = zeros(&[8], &device);
         let proj = StyleProjector::new(weight, bias).unwrap();
 
-        let style =
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], &device);
+        let style = Tensor::<CpuRuntime>::try_from_slice(
+            &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            &[2, 3],
+            &device,
+        )
+        .unwrap();
         let (gamma, beta) = proj.forward(&client, &style).unwrap();
         assert_eq!(gamma.shape(), &[2, 4]);
         assert_eq!(beta.shape(), &[2, 4]);
@@ -132,10 +136,12 @@ mod tests {
         // With weights=0, output = bias; first C values land in gamma, next C in beta.
         let (client, device) = cpu_setup();
         let weight = zeros(&[4, 3], &device);
-        let bias = Tensor::<CpuRuntime>::from_slice(&[10.0f32, 20.0, 30.0, 40.0], &[4], &device);
+        let bias =
+            Tensor::<CpuRuntime>::try_from_slice(&[10.0f32, 20.0, 30.0, 40.0], &[4], &device)
+                .unwrap();
         let proj = StyleProjector::new(weight, bias).unwrap();
 
-        let style = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 3], &[1, 3], &device);
+        let style = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 3], &[1, 3], &device).unwrap();
         let (gamma, beta) = proj.forward(&client, &style).unwrap();
         let g: Vec<f32> = gamma.to_vec();
         let b: Vec<f32> = beta.to_vec();

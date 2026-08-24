@@ -151,10 +151,10 @@ mod tests {
     fn test_adagrad_single_step() {
         let (client, device) = cpu_setup();
 
-        let w_tensor = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
+        let w_tensor = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let w_id = w_tensor.id();
 
-        let grad = Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2], &[2], &device);
+        let grad = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(w_id, grad);
 
@@ -179,8 +179,12 @@ mod tests {
     fn test_adagrad_converges() {
         let (client, device) = cpu_setup();
 
-        let target = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device);
-        let w_init = Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device);
+        let target =
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device)
+                .unwrap();
+        let w_init =
+            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device)
+                .unwrap();
         let w_id = w_init.id();
 
         let mut params = HashMap::new();
@@ -223,7 +227,7 @@ mod tests {
     fn test_adagrad_lr_decreases_over_time() {
         let (client, device) = cpu_setup();
 
-        let w_tensor = Tensor::<CpuRuntime>::from_slice(&[5.0f32], &[1], &device);
+        let w_tensor = Tensor::<CpuRuntime>::try_from_slice(&[5.0f32], &[1], &device).unwrap();
         let w_id = w_tensor.id();
 
         let mut params = HashMap::new();
@@ -239,7 +243,7 @@ mod tests {
         for _ in 0..5 {
             let before = params.get(&w_id).unwrap().to_vec::<f32>()[0] as f64;
 
-            let grad = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device);
+            let grad = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &device).unwrap();
             let mut grads = GradStore::new();
             grads.insert(w_id, grad);
 
@@ -259,10 +263,10 @@ mod tests {
     fn test_adagrad_weight_decay() {
         let (client, device) = cpu_setup();
 
-        let w_tensor = Tensor::<CpuRuntime>::from_slice(&[5.0f32, 5.0], &[2], &device);
+        let w_tensor = Tensor::<CpuRuntime>::try_from_slice(&[5.0f32, 5.0], &[2], &device).unwrap();
         let w_id = w_tensor.id();
 
-        let zero_grad = Tensor::<CpuRuntime>::zeros(&[2], DType::F32, &device);
+        let zero_grad = Tensor::<CpuRuntime>::try_zeros(&[2], DType::F32, &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(w_id, zero_grad);
 
@@ -289,7 +293,7 @@ mod tests {
     fn test_adagrad_skips_missing_grads() {
         let (client, device) = cpu_setup();
 
-        let w_tensor = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
+        let w_tensor = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let w_id = w_tensor.id();
 
         let mut params = HashMap::new();

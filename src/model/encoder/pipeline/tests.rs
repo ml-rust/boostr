@@ -51,22 +51,22 @@ fn build_pipeline(
 
     let d = &device;
     let encoder = Encoder::from_weights(config, Pooling::Mean, |name| match name {
-        "embeddings.word_embeddings.weight" => Ok(Tensor::from_slice(
-            &vec![0.1f32; vocab_size * 8],
-            &[vocab_size, 8],
-            d,
-        )),
-        "embeddings.position_embeddings.weight" => {
-            Ok(Tensor::from_slice(&pos_emb, &[max_pos, 8], d))
+        "embeddings.word_embeddings.weight" => {
+            Ok(Tensor::try_from_slice(&vec![0.1f32; vocab_size * 8], &[vocab_size, 8], d).unwrap())
         }
-        "embeddings.layer_norm.weight" => Ok(Tensor::from_slice(&[1.0f32; 8], &[8], d)),
-        "embeddings.layer_norm.bias" => Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d)),
+        "embeddings.position_embeddings.weight" => {
+            Ok(Tensor::try_from_slice(&pos_emb, &[max_pos, 8], d).unwrap())
+        }
+        "embeddings.layer_norm.weight" => {
+            Ok(Tensor::try_from_slice(&[1.0f32; 8], &[8], d).unwrap())
+        }
+        "embeddings.layer_norm.bias" => Ok(Tensor::try_from_slice(&[0.0f32; 8], &[8], d).unwrap()),
         n if n.ends_with("query.weight")
             || n.ends_with("key.weight")
             || n.ends_with("value.weight")
             || n.ends_with("attention.output.dense.weight") =>
         {
-            Ok(Tensor::from_slice(&vec![0.02f32; 8 * 8], &[8, 8], d))
+            Ok(Tensor::try_from_slice(&vec![0.02f32; 8 * 8], &[8, 8], d).unwrap())
         }
         n if n.ends_with("query.bias")
             || n.ends_with("key.bias")
@@ -74,18 +74,22 @@ fn build_pipeline(
             || n.ends_with("attention.output.dense.bias")
             || n.ends_with("output.dense.bias") =>
         {
-            Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d))
+            Ok(Tensor::try_from_slice(&[0.0f32; 8], &[8], d).unwrap())
         }
-        n if n.ends_with("LayerNorm.weight") => Ok(Tensor::from_slice(&[1.0f32; 8], &[8], d)),
-        n if n.ends_with("LayerNorm.bias") => Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d)),
+        n if n.ends_with("LayerNorm.weight") => {
+            Ok(Tensor::try_from_slice(&[1.0f32; 8], &[8], d).unwrap())
+        }
+        n if n.ends_with("LayerNorm.bias") => {
+            Ok(Tensor::try_from_slice(&[0.0f32; 8], &[8], d).unwrap())
+        }
         n if n.ends_with("intermediate.dense.weight") => {
-            Ok(Tensor::from_slice(&vec![0.02f32; 16 * 8], &[16, 8], d))
+            Ok(Tensor::try_from_slice(&vec![0.02f32; 16 * 8], &[16, 8], d).unwrap())
         }
         n if n.ends_with("intermediate.dense.bias") => {
-            Ok(Tensor::from_slice(&[0.0f32; 16], &[16], d))
+            Ok(Tensor::try_from_slice(&[0.0f32; 16], &[16], d).unwrap())
         }
         n if n.ends_with("output.dense.weight") => {
-            Ok(Tensor::from_slice(&vec![0.02f32; 8 * 16], &[8, 16], d))
+            Ok(Tensor::try_from_slice(&vec![0.02f32; 8 * 16], &[8, 16], d).unwrap())
         }
         _ => Err(Error::ModelError {
             reason: format!("unknown weight: {name}"),

@@ -42,7 +42,7 @@ mod tests {
     #[test]
     fn scalar_f32_is_exact_for_f32() {
         let (client, device) = cpu_setup();
-        let t = Tensor::<CpuRuntime>::from_slice(&[15.5f32], &[1], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[15.5f32], &[1], &device).unwrap();
         assert_eq!(scalar_f32(&client, &t).expect("readback runs"), 15.5);
     }
 
@@ -55,7 +55,7 @@ mod tests {
     #[test]
     fn scalar_f32_reads_narrow_dtypes_at_their_own_width() {
         let (client, device) = cpu_setup();
-        let f32_t = Tensor::<CpuRuntime>::from_slice(&[15.5f32], &[1], &device);
+        let f32_t = Tensor::<CpuRuntime>::try_from_slice(&[15.5f32], &[1], &device).unwrap();
 
         for dtype in [DType::BF16, DType::F16] {
             let narrow = client.cast(&f32_t, dtype).expect("cast runs");
@@ -69,7 +69,7 @@ mod tests {
     #[test]
     fn scalar_f32_reads_f64_at_its_own_width() {
         let (client, device) = cpu_setup();
-        let f32_t = Tensor::<CpuRuntime>::from_slice(&[15.5f32], &[1], &device);
+        let f32_t = Tensor::<CpuRuntime>::try_from_slice(&[15.5f32], &[1], &device).unwrap();
         let wide = client.cast(&f32_t, DType::F64).expect("cast runs");
         assert_eq!(scalar_f32(&client, &wide).expect("readback runs"), 15.5);
     }

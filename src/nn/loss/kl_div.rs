@@ -50,11 +50,16 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let p = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[0.2f32, 0.3, 0.5, 0.1, 0.4, 0.5], &[2, 3], &device),
+            Tensor::<CpuRuntime>::try_from_slice(
+                &[0.2f32, 0.3, 0.5, 0.1, 0.4, 0.5],
+                &[2, 3],
+                &device,
+            )
+            .unwrap(),
             false,
         );
         let log_q = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &[
                     0.2f32.ln(),
                     0.3f32.ln(),
@@ -65,7 +70,8 @@ mod tests {
                 ],
                 &[2, 3],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
 
@@ -79,11 +85,11 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let p = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[0.9f32, 0.05, 0.05], &[1, 3], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[0.9f32, 0.05, 0.05], &[1, 3], &device).unwrap(),
             false,
         );
         let log_q = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &[
                     (1.0f32 / 3.0).ln(),
                     (1.0f32 / 3.0).ln(),
@@ -91,7 +97,8 @@ mod tests {
                 ],
                 &[1, 3],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
 

@@ -269,7 +269,7 @@ mod tests {
     ) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
         let data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.1).sin() * 0.5).collect();
-        Tensor::<CpuRuntime>::from_slice(&data, shape, device)
+        Tensor::<CpuRuntime>::try_from_slice(&data, shape, device).unwrap()
     }
 
     #[test]
@@ -285,7 +285,8 @@ mod tests {
 
         // Identity block table
         let bt_data: Vec<i32> = (0..b * num_blocks).map(|i| i as i32).collect();
-        let block_table = Tensor::<CpuRuntime>::from_slice(&bt_data, &[b, num_blocks], &device);
+        let block_table =
+            Tensor::<CpuRuntime>::try_from_slice(&bt_data, &[b, num_blocks], &device).unwrap();
 
         let (out, lse) = client
             .paged_attention_fwd(
@@ -318,7 +319,8 @@ mod tests {
         let v_blocks = rand_tensor(&[total_blocks, bs, d], &device);
 
         let bt_data: Vec<i32> = (0..b * num_blocks).map(|i| i as i32).collect();
-        let block_table = Tensor::<CpuRuntime>::from_slice(&bt_data, &[b, num_blocks], &device);
+        let block_table =
+            Tensor::<CpuRuntime>::try_from_slice(&bt_data, &[b, num_blocks], &device).unwrap();
 
         let (out_causal, _) = client
             .paged_attention_fwd(
@@ -373,7 +375,8 @@ mod tests {
         let v_blocks = rand_tensor(&[total_blocks, bs, d], &device);
 
         let bt_data: Vec<i32> = (0..b * num_blocks).map(|i| i as i32).collect();
-        let block_table = Tensor::<CpuRuntime>::from_slice(&bt_data, &[b, num_blocks], &device);
+        let block_table =
+            Tensor::<CpuRuntime>::try_from_slice(&bt_data, &[b, num_blocks], &device).unwrap();
 
         let (out, lse) = client
             .paged_attention_fwd(

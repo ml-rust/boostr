@@ -33,7 +33,8 @@ fn test_rope_forward() {
     let rope = RoPE::<CpuRuntime>::precompute_freqs(8, 16, 10000.0, None, &device).unwrap();
 
     let x = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 2 * 4 * 16], &[1, 2, 4, 16], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 2 * 4 * 16], &[1, 2, 4, 16], &device)
+            .unwrap(),
         false,
     );
     let out = rope.forward(&client, &x).unwrap();

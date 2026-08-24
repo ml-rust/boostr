@@ -14,12 +14,15 @@ fn test_varlen_fwd_shape() {
     let k_data = vec![0.1f32; total_q * num_heads * head_dim];
     let v_data = vec![0.2f32; total_q * num_heads * head_dim];
 
-    let q = Tensor::<CpuRuntime>::from_slice(&q_data, &[total_q, num_heads, head_dim], &dev);
-    let k = Tensor::<CpuRuntime>::from_slice(&k_data, &[total_q, num_heads, head_dim], &dev);
-    let v = Tensor::<CpuRuntime>::from_slice(&v_data, &[total_q, num_heads, head_dim], &dev);
+    let q = Tensor::<CpuRuntime>::try_from_slice(&q_data, &[total_q, num_heads, head_dim], &dev)
+        .unwrap();
+    let k = Tensor::<CpuRuntime>::try_from_slice(&k_data, &[total_q, num_heads, head_dim], &dev)
+        .unwrap();
+    let v = Tensor::<CpuRuntime>::try_from_slice(&v_data, &[total_q, num_heads, head_dim], &dev)
+        .unwrap();
 
     let cu_seqlens = vec![0i32, 3, 5];
-    let cu = Tensor::<CpuRuntime>::from_slice(&cu_seqlens, &[3], &dev);
+    let cu = Tensor::<CpuRuntime>::try_from_slice(&cu_seqlens, &[3], &dev).unwrap();
 
     let (out, lse) = client
         .varlen_attention_fwd(
@@ -48,12 +51,15 @@ fn test_varlen_fwd_causal() {
         .map(|i| (i as f32) * 0.05)
         .collect();
 
-    let q = Tensor::<CpuRuntime>::from_slice(&q_data, &[total_q, num_heads, head_dim], &dev);
-    let k = Tensor::<CpuRuntime>::from_slice(&k_data, &[total_q, num_heads, head_dim], &dev);
-    let v = Tensor::<CpuRuntime>::from_slice(&v_data, &[total_q, num_heads, head_dim], &dev);
+    let q = Tensor::<CpuRuntime>::try_from_slice(&q_data, &[total_q, num_heads, head_dim], &dev)
+        .unwrap();
+    let k = Tensor::<CpuRuntime>::try_from_slice(&k_data, &[total_q, num_heads, head_dim], &dev)
+        .unwrap();
+    let v = Tensor::<CpuRuntime>::try_from_slice(&v_data, &[total_q, num_heads, head_dim], &dev)
+        .unwrap();
 
     let cu_seqlens = vec![0i32, 4];
-    let cu = Tensor::<CpuRuntime>::from_slice(&cu_seqlens, &[2], &dev);
+    let cu = Tensor::<CpuRuntime>::try_from_slice(&cu_seqlens, &[2], &dev).unwrap();
 
     let (out_causal, _) = client
         .varlen_attention_fwd(
@@ -101,12 +107,15 @@ fn test_varlen_bwd_shapes() {
     let k_data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.7).cos()).collect();
     let v_data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.5 + 1.0).sin()).collect();
 
-    let q = Tensor::<CpuRuntime>::from_slice(&q_data, &[total_q, num_heads, head_dim], &dev);
-    let k = Tensor::<CpuRuntime>::from_slice(&k_data, &[total_q, num_heads, head_dim], &dev);
-    let v = Tensor::<CpuRuntime>::from_slice(&v_data, &[total_q, num_heads, head_dim], &dev);
+    let q = Tensor::<CpuRuntime>::try_from_slice(&q_data, &[total_q, num_heads, head_dim], &dev)
+        .unwrap();
+    let k = Tensor::<CpuRuntime>::try_from_slice(&k_data, &[total_q, num_heads, head_dim], &dev)
+        .unwrap();
+    let v = Tensor::<CpuRuntime>::try_from_slice(&v_data, &[total_q, num_heads, head_dim], &dev)
+        .unwrap();
 
     let cu_seqlens = vec![0i32, 3, 5];
-    let cu = Tensor::<CpuRuntime>::from_slice(&cu_seqlens, &[3], &dev);
+    let cu = Tensor::<CpuRuntime>::try_from_slice(&cu_seqlens, &[3], &dev).unwrap();
 
     let (out, lse) = client
         .varlen_attention_fwd(
@@ -115,7 +124,9 @@ fn test_varlen_bwd_shapes() {
         .unwrap();
 
     let do_data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.2).cos() * 0.1).collect();
-    let dout = Tensor::<CpuRuntime>::from_slice(&do_data, &[total_q, num_heads, head_dim], &dev);
+    let dout =
+        Tensor::<CpuRuntime>::try_from_slice(&do_data, &[total_q, num_heads, head_dim], &dev)
+            .unwrap();
 
     let (dq, dk, dv) = client
         .varlen_attention_bwd(
@@ -185,18 +196,37 @@ fn test_varlen_bwd_gqa_equals_expanded_mha() {
 
     let do_data: Vec<f32> = (0..n_q).map(|i| ((i as f32) * 0.11).cos() * 0.1).collect();
 
-    let q = Tensor::<CpuRuntime>::from_slice(&q_data, &[total_tokens, num_heads, head_dim], &dev);
-    let k_gqa =
-        Tensor::<CpuRuntime>::from_slice(&k_data, &[total_tokens, num_kv_heads, head_dim], &dev);
-    let v_gqa =
-        Tensor::<CpuRuntime>::from_slice(&v_data, &[total_tokens, num_kv_heads, head_dim], &dev);
-    let k_exp =
-        Tensor::<CpuRuntime>::from_slice(&k_expanded, &[total_tokens, num_heads, head_dim], &dev);
-    let v_exp =
-        Tensor::<CpuRuntime>::from_slice(&v_expanded, &[total_tokens, num_heads, head_dim], &dev);
+    let q =
+        Tensor::<CpuRuntime>::try_from_slice(&q_data, &[total_tokens, num_heads, head_dim], &dev)
+            .unwrap();
+    let k_gqa = Tensor::<CpuRuntime>::try_from_slice(
+        &k_data,
+        &[total_tokens, num_kv_heads, head_dim],
+        &dev,
+    )
+    .unwrap();
+    let v_gqa = Tensor::<CpuRuntime>::try_from_slice(
+        &v_data,
+        &[total_tokens, num_kv_heads, head_dim],
+        &dev,
+    )
+    .unwrap();
+    let k_exp = Tensor::<CpuRuntime>::try_from_slice(
+        &k_expanded,
+        &[total_tokens, num_heads, head_dim],
+        &dev,
+    )
+    .unwrap();
+    let v_exp = Tensor::<CpuRuntime>::try_from_slice(
+        &v_expanded,
+        &[total_tokens, num_heads, head_dim],
+        &dev,
+    )
+    .unwrap();
     let dout =
-        Tensor::<CpuRuntime>::from_slice(&do_data, &[total_tokens, num_heads, head_dim], &dev);
-    let cu = Tensor::<CpuRuntime>::from_slice(&cu_seqlens, &[batch_size + 1], &dev);
+        Tensor::<CpuRuntime>::try_from_slice(&do_data, &[total_tokens, num_heads, head_dim], &dev)
+            .unwrap();
+    let cu = Tensor::<CpuRuntime>::try_from_slice(&cu_seqlens, &[batch_size + 1], &dev).unwrap();
 
     // --- GQA fwd + bwd ---
     let (out_gqa, lse_gqa) = client
@@ -352,16 +382,34 @@ fn test_varlen_gqa_equals_expanded_mha() {
     let cu_seqlens = vec![0i32, 3, 8];
     let max_seqlen = 5usize;
 
-    let q = Tensor::<CpuRuntime>::from_slice(&q_data, &[total_tokens, num_heads, head_dim], &dev);
-    let k_gqa =
-        Tensor::<CpuRuntime>::from_slice(&k_data, &[total_tokens, num_kv_heads, head_dim], &dev);
-    let v_gqa =
-        Tensor::<CpuRuntime>::from_slice(&v_data, &[total_tokens, num_kv_heads, head_dim], &dev);
-    let k_exp =
-        Tensor::<CpuRuntime>::from_slice(&k_expanded, &[total_tokens, num_heads, head_dim], &dev);
-    let v_exp =
-        Tensor::<CpuRuntime>::from_slice(&v_expanded, &[total_tokens, num_heads, head_dim], &dev);
-    let cu = Tensor::<CpuRuntime>::from_slice(&cu_seqlens, &[batch_size + 1], &dev);
+    let q =
+        Tensor::<CpuRuntime>::try_from_slice(&q_data, &[total_tokens, num_heads, head_dim], &dev)
+            .unwrap();
+    let k_gqa = Tensor::<CpuRuntime>::try_from_slice(
+        &k_data,
+        &[total_tokens, num_kv_heads, head_dim],
+        &dev,
+    )
+    .unwrap();
+    let v_gqa = Tensor::<CpuRuntime>::try_from_slice(
+        &v_data,
+        &[total_tokens, num_kv_heads, head_dim],
+        &dev,
+    )
+    .unwrap();
+    let k_exp = Tensor::<CpuRuntime>::try_from_slice(
+        &k_expanded,
+        &[total_tokens, num_heads, head_dim],
+        &dev,
+    )
+    .unwrap();
+    let v_exp = Tensor::<CpuRuntime>::try_from_slice(
+        &v_expanded,
+        &[total_tokens, num_heads, head_dim],
+        &dev,
+    )
+    .unwrap();
+    let cu = Tensor::<CpuRuntime>::try_from_slice(&cu_seqlens, &[batch_size + 1], &dev).unwrap();
 
     // Reference: MHA with expanded K/V (num_kv_heads == num_heads)
     let (out_ref, _) = client

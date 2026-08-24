@@ -80,7 +80,7 @@ mod tests {
         let (b, h, sq, sk) = (1, 2, 3, 3);
 
         let data = vec![0.0f32; b * h * sq * sk];
-        let scores = Tensor::<CpuRuntime>::from_slice(&data, &[b, h, sq, sk], &dev);
+        let scores = Tensor::<CpuRuntime>::try_from_slice(&data, &[b, h, sq, sk], &dev).unwrap();
 
         client.alibi_add_bias(&scores, b, h, sq, sk).unwrap();
 
@@ -99,7 +99,7 @@ mod tests {
         let position = 2;
 
         let data = vec![0.0f32; b * h * sq * sk];
-        let scores = Tensor::<CpuRuntime>::from_slice(&data, &[b, h, sq, sk], &dev);
+        let scores = Tensor::<CpuRuntime>::try_from_slice(&data, &[b, h, sq, sk], &dev).unwrap();
 
         client
             .alibi_add_bias_causal(&scores, b, h, sq, sk, position)

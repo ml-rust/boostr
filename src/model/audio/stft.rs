@@ -168,7 +168,7 @@ mod tests {
         shape: &[usize],
         device: &<CpuRuntime as numr::runtime::Runtime>::Device,
     ) -> Tensor<CpuRuntime> {
-        Tensor::<CpuRuntime>::from_slice(data, shape, device)
+        Tensor::<CpuRuntime>::try_from_slice(data, shape, device).unwrap()
     }
 
     #[test]

@@ -105,10 +105,15 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let logits = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[2.0f32, 1.0, 0.1, 0.1, 2.0, 1.0], &[2, 3], &device),
+            Tensor::<CpuRuntime>::try_from_slice(
+                &[2.0f32, 1.0, 0.1, 0.1, 2.0, 1.0],
+                &[2, 3],
+                &device,
+            )
+            .unwrap(),
             false,
         );
-        let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1], &[2], &device);
+        let targets = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1], &[2], &device).unwrap();
 
         let loss_ce = cross_entropy_loss(&client, &logits, &targets).unwrap();
         let loss_focal = focal_loss(&client, &logits, &targets, 0.0, None).unwrap();
@@ -128,10 +133,15 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let logits = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[5.0f32, 0.0, 0.0, 0.0, 5.0, 0.0], &[2, 3], &device),
+            Tensor::<CpuRuntime>::try_from_slice(
+                &[5.0f32, 0.0, 0.0, 0.0, 5.0, 0.0],
+                &[2, 3],
+                &device,
+            )
+            .unwrap(),
             false,
         );
-        let targets = Tensor::<CpuRuntime>::from_slice(&[0i64, 1], &[2], &device);
+        let targets = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1], &[2], &device).unwrap();
 
         let loss_ce = cross_entropy_loss(&client, &logits, &targets).unwrap();
         let loss_focal = focal_loss(&client, &logits, &targets, 2.0, None).unwrap();

@@ -255,8 +255,8 @@ mod tests {
 
         let k_data: Vec<f32> = (0..24).map(|i| i as f32 * 0.1).collect();
         let v_data: Vec<f32> = (0..24).map(|i| i as f32 * 0.2).collect();
-        let k = Tensor::<CpuRuntime>::from_slice(&k_data, &[1, 2, 3, 4], &device);
-        let v = Tensor::<CpuRuntime>::from_slice(&v_data, &[1, 2, 3, 4], &device);
+        let k = Tensor::<CpuRuntime>::try_from_slice(&k_data, &[1, 2, 3, 4], &device).unwrap();
+        let v = Tensor::<CpuRuntime>::try_from_slice(&v_data, &[1, 2, 3, 4], &device).unwrap();
 
         cache.layer_mut(0).unwrap().update(&k, &v).unwrap();
         assert_eq!(cache.seq_len(), 3);

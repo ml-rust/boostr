@@ -68,14 +68,14 @@ mod tests {
     fn grown_rows_equal_column_mean_and_originals_are_untouched() {
         let (client, device) = cpu_setup();
         #[rustfmt::skip]
-        let weight = Tensor::<CpuRuntime>::from_slice(
+        let weight = Tensor::<CpuRuntime>::try_from_slice(
             &[
                 1.0f32, 2.0, 3.0,
                 3.0, 4.0, 5.0,
             ],
             &[2, 3],
             &device,
-        );
+        ).unwrap();
 
         let grown = resize_rows_mean_init(&client, &weight, 4).unwrap();
         assert_eq!(grown.shape(), &[4, 3]);
@@ -93,21 +93,26 @@ mod tests {
     fn rejects_non_rank_2_input() {
         let (client, device) = cpu_setup();
         let weight =
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2, 1], &device);
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2, 1], &device)
+                .unwrap();
         assert!(resize_rows_mean_init(&client, &weight, 4).is_err());
     }
 
     #[test]
     fn rejects_shrinking() {
         let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device);
+        let weight =
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device)
+                .unwrap();
         assert!(resize_rows_mean_init(&client, &weight, 1).is_err());
     }
 
     #[test]
     fn equal_target_is_a_no_op() {
         let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device);
+        let weight =
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[2, 2], &device)
+                .unwrap();
         let out = resize_rows_mean_init(&client, &weight, 2).unwrap();
         assert_eq!(out.shape(), &[2, 2]);
         let data: Vec<f32> = out.contiguous().unwrap().to_vec();

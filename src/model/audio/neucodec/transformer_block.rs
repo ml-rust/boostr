@@ -180,7 +180,8 @@ mod tests {
 
     fn linear(out_f: usize, in_f: usize, val: f32, device: &CpuDevice) -> Linear<CpuRuntime> {
         Linear::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![val; out_f * in_f], &[out_f, in_f], device),
+            Tensor::<CpuRuntime>::try_from_slice(&vec![val; out_f * in_f], &[out_f, in_f], device)
+                .unwrap(),
             None,
             false,
         )
@@ -188,7 +189,7 @@ mod tests {
 
     fn rms_norm(dim: usize, device: &CpuDevice) -> RmsNorm<CpuRuntime> {
         RmsNorm::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; dim], &[dim], device),
+            Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; dim], &[dim], device).unwrap(),
             1e-6,
             false,
         )
@@ -228,7 +229,7 @@ mod tests {
             .map(|i| (i as f32 * 0.05).sin())
             .collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&x_data, &[2, 5, hidden], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&x_data, &[2, 5, hidden], &device).unwrap(),
             false,
         );
         let out = b.forward(&client, &x).unwrap();
@@ -243,7 +244,7 @@ mod tests {
 
         let x_data: Vec<f32> = (0..(7 * hidden)).map(|i| (i as f32 * 0.11).cos()).collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&x_data, &[1, 7, hidden], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&x_data, &[1, 7, hidden], &device).unwrap(),
             false,
         );
         let out = b.forward(&client, &x).unwrap();
@@ -259,7 +260,8 @@ mod tests {
         let b = block(hidden, heads, head_dim, mlp, &device);
 
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; 2 * 5 * 8], &[2, 5, 8], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; 2 * 5 * 8], &[2, 5, 8], &device)
+                .unwrap(),
             false,
         );
         assert!(b.forward(&client, &x).is_err());

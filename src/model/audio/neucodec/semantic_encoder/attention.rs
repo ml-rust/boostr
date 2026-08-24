@@ -319,12 +319,16 @@ mod tests {
 
     fn linear(out_f: usize, in_f: usize, device: &CpuDevice) -> Linear<CpuRuntime> {
         Linear::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![0.02f32; out_f * in_f], &[out_f, in_f], device),
-            Some(Tensor::<CpuRuntime>::from_slice(
-                &vec![0.0f32; out_f],
-                &[out_f],
+            Tensor::<CpuRuntime>::try_from_slice(
+                &vec![0.02f32; out_f * in_f],
+                &[out_f, in_f],
                 device,
-            )),
+            )
+            .unwrap(),
+            Some(
+                Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; out_f], &[out_f], device)
+                    .unwrap(),
+            ),
             false,
         )
     }
@@ -344,7 +348,8 @@ mod tests {
                 linear_v: linear(cfg.hidden_size, cfg.hidden_size, device),
                 linear_out: linear(cfg.hidden_size, cfg.hidden_size, device),
                 distance_embedding: Embedding::new(
-                    Tensor::<CpuRuntime>::from_slice(&table, &[rows, cfg.head_dim], device),
+                    Tensor::<CpuRuntime>::try_from_slice(&table, &[rows, cfg.head_dim], device)
+                        .unwrap(),
                     false,
                 ),
             },
@@ -387,7 +392,7 @@ mod tests {
             .map(|i| (i as f32 * 0.07).cos())
             .collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&data, &[b, t, cfg.hidden_size], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&data, &[b, t, cfg.hidden_size], &device).unwrap(),
             false,
         );
         let y = attn.forward(&client, &x).expect("forward");
@@ -408,7 +413,7 @@ mod tests {
             .map(|i| (i as f32 * 0.07).cos())
             .collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&data, &[b, t, cfg.hidden_size], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&data, &[b, t, cfg.hidden_size], &device).unwrap(),
             false,
         );
 
@@ -450,7 +455,7 @@ mod tests {
         let (b, t) = (1, 6);
         let data = vec![0.0f32; b * t * cfg.hidden_size];
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&data, &[b, t, cfg.hidden_size], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&data, &[b, t, cfg.hidden_size], &device).unwrap(),
             false,
         );
 
@@ -475,7 +480,7 @@ mod tests {
         let cfg = small_config();
         let attn = attention(cfg, &device);
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4 * 3], &[1, 4, 3], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4 * 3], &[1, 4, 3], &device).unwrap(),
             false,
         );
         assert!(attn.forward(&client, &x).is_err());

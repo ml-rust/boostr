@@ -38,8 +38,11 @@ fn test_awq_channel_scores_cuda_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use numr::runtime::cuda::CudaRuntime;
         let act_c =
-            Tensor::<CudaRuntime>::from_slice(&act_data.to_vec::<f32>(), &[4, 8], &cuda_device);
-        let w_c = Tensor::<CudaRuntime>::from_slice(&w_data.to_vec::<f32>(), &[6, 8], &cuda_device);
+            Tensor::<CudaRuntime>::try_from_slice(&act_data.to_vec::<f32>(), &[4, 8], &cuda_device)
+                .unwrap();
+        let w_c =
+            Tensor::<CudaRuntime>::try_from_slice(&w_data.to_vec::<f32>(), &[6, 8], &cuda_device)
+                .unwrap();
 
         let result = cuda_client.awq_channel_scores(&act_c, &w_c).unwrap();
         assert_parity_f32(
@@ -63,8 +66,11 @@ fn test_awq_channel_scores_wgpu_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use numr::runtime::wgpu::WgpuRuntime;
         let act_w =
-            Tensor::<WgpuRuntime>::from_slice(&act_data.to_vec::<f32>(), &[4, 8], &wgpu_device);
-        let w_w = Tensor::<WgpuRuntime>::from_slice(&w_data.to_vec::<f32>(), &[6, 8], &wgpu_device);
+            Tensor::<WgpuRuntime>::try_from_slice(&act_data.to_vec::<f32>(), &[4, 8], &wgpu_device)
+                .unwrap();
+        let w_w =
+            Tensor::<WgpuRuntime>::try_from_slice(&w_data.to_vec::<f32>(), &[6, 8], &wgpu_device)
+                .unwrap();
 
         let result = wgpu_client.awq_channel_scores(&act_w, &w_w).unwrap();
         assert_parity_f32(
@@ -104,8 +110,12 @@ fn test_fisher_information_cuda_parity() {
 
     with_cuda_backend(|cuda_client, cuda_device| {
         use numr::runtime::cuda::CudaRuntime;
-        let grad_c =
-            Tensor::<CudaRuntime>::from_slice(&grad_data.to_vec::<f32>(), &[16, 32], &cuda_device);
+        let grad_c = Tensor::<CudaRuntime>::try_from_slice(
+            &grad_data.to_vec::<f32>(),
+            &[16, 32],
+            &cuda_device,
+        )
+        .unwrap();
 
         let result = cuda_client.fisher_information(&grad_c).unwrap();
         assert_parity_f32(
@@ -127,8 +137,12 @@ fn test_fisher_information_wgpu_parity() {
 
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use numr::runtime::wgpu::WgpuRuntime;
-        let grad_w =
-            Tensor::<WgpuRuntime>::from_slice(&grad_data.to_vec::<f32>(), &[16, 32], &wgpu_device);
+        let grad_w = Tensor::<WgpuRuntime>::try_from_slice(
+            &grad_data.to_vec::<f32>(),
+            &[16, 32],
+            &wgpu_device,
+        )
+        .unwrap();
 
         let result = wgpu_client.fisher_information(&grad_w).unwrap();
         assert_parity_f32(
@@ -146,7 +160,7 @@ fn test_fisher_information_wgpu_parity() {
 #[test]
 fn test_gptq_hessian_update_cpu() {
     let (client, device) = setup_cpu();
-    let h = Tensor::<CpuRuntime>::zeros(&[8, 8], DType::F32, &device);
+    let h = Tensor::<CpuRuntime>::try_zeros(&[8, 8], DType::F32, &device).unwrap();
     let x = det_tensor(&[4, 8], &device);
 
     let result = client.gptq_hessian_update(&h, &x).unwrap();
@@ -173,7 +187,7 @@ fn test_gptq_hessian_update_cpu() {
 #[test]
 fn test_gptq_hessian_update_cuda_parity() {
     let (cpu_client, cpu_device) = setup_cpu();
-    let h_data = Tensor::<CpuRuntime>::zeros(&[8, 8], DType::F32, &cpu_device);
+    let h_data = Tensor::<CpuRuntime>::try_zeros(&[8, 8], DType::F32, &cpu_device).unwrap();
     let x_data = det_tensor(&[4, 8], &cpu_device);
 
     let cpu_result = cpu_client.gptq_hessian_update(&h_data, &x_data).unwrap();
@@ -181,8 +195,12 @@ fn test_gptq_hessian_update_cuda_parity() {
 
     with_cuda_backend(|cuda_client, cuda_device| {
         use numr::runtime::cuda::CudaRuntime;
-        let h_c = Tensor::<CudaRuntime>::from_slice(&h_data.to_vec::<f32>(), &[8, 8], &cuda_device);
-        let x_c = Tensor::<CudaRuntime>::from_slice(&x_data.to_vec::<f32>(), &[4, 8], &cuda_device);
+        let h_c =
+            Tensor::<CudaRuntime>::try_from_slice(&h_data.to_vec::<f32>(), &[8, 8], &cuda_device)
+                .unwrap();
+        let x_c =
+            Tensor::<CudaRuntime>::try_from_slice(&x_data.to_vec::<f32>(), &[4, 8], &cuda_device)
+                .unwrap();
 
         let result = cuda_client.gptq_hessian_update(&h_c, &x_c).unwrap();
         assert_parity_f32(
@@ -197,7 +215,7 @@ fn test_gptq_hessian_update_cuda_parity() {
 #[test]
 fn test_gptq_hessian_update_wgpu_parity() {
     let (cpu_client, cpu_device) = setup_cpu();
-    let h_data = Tensor::<CpuRuntime>::zeros(&[8, 8], DType::F32, &cpu_device);
+    let h_data = Tensor::<CpuRuntime>::try_zeros(&[8, 8], DType::F32, &cpu_device).unwrap();
     let x_data = det_tensor(&[4, 8], &cpu_device);
 
     let cpu_result = cpu_client.gptq_hessian_update(&h_data, &x_data).unwrap();
@@ -205,8 +223,12 @@ fn test_gptq_hessian_update_wgpu_parity() {
 
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use numr::runtime::wgpu::WgpuRuntime;
-        let h_w = Tensor::<WgpuRuntime>::from_slice(&h_data.to_vec::<f32>(), &[8, 8], &wgpu_device);
-        let x_w = Tensor::<WgpuRuntime>::from_slice(&x_data.to_vec::<f32>(), &[4, 8], &wgpu_device);
+        let h_w =
+            Tensor::<WgpuRuntime>::try_from_slice(&h_data.to_vec::<f32>(), &[8, 8], &wgpu_device)
+                .unwrap();
+        let x_w =
+            Tensor::<WgpuRuntime>::try_from_slice(&x_data.to_vec::<f32>(), &[4, 8], &wgpu_device)
+                .unwrap();
 
         let result = wgpu_client.gptq_hessian_update(&h_w, &x_w).unwrap();
         assert_parity_f32(
@@ -226,14 +248,14 @@ fn test_gptq_quantize_column_cpu() {
     let (client, device) = setup_cpu();
 
     let w_data: Vec<f32> = (0..128).map(|i| (i as f32 - 64.0) * 0.01).collect();
-    let w = Tensor::<CpuRuntime>::from_slice(&w_data, &[8, 16], &device);
+    let w = Tensor::<CpuRuntime>::try_from_slice(&w_data, &[8, 16], &device).unwrap();
 
     // Identity H_inv
     let mut h_inv_data = vec![0.0f32; 16 * 16];
     for i in 0..16 {
         h_inv_data[i * 16 + i] = 1.0;
     }
-    let h_inv = Tensor::<CpuRuntime>::from_slice(&h_inv_data, &[16, 16], &device);
+    let h_inv = Tensor::<CpuRuntime>::try_from_slice(&h_inv_data, &[16, 16], &device).unwrap();
 
     let (q, scales, zeros) = client
         .gptq_quantize_column(&w, &h_inv, 4, 4, false)
@@ -262,13 +284,13 @@ fn test_gptq_quantize_column_cuda_parity() {
     let (cpu_client, cpu_device) = setup_cpu();
 
     let w_data: Vec<f32> = (0..128).map(|i| (i as f32 - 64.0) * 0.01).collect();
-    let w = Tensor::<CpuRuntime>::from_slice(&w_data, &[8, 16], &cpu_device);
+    let w = Tensor::<CpuRuntime>::try_from_slice(&w_data, &[8, 16], &cpu_device).unwrap();
 
     let mut h_inv_data = vec![0.0f32; 16 * 16];
     for i in 0..16 {
         h_inv_data[i * 16 + i] = 1.0;
     }
-    let h_inv = Tensor::<CpuRuntime>::from_slice(&h_inv_data, &[16, 16], &cpu_device);
+    let h_inv = Tensor::<CpuRuntime>::try_from_slice(&h_inv_data, &[16, 16], &cpu_device).unwrap();
 
     let (cpu_q, cpu_s, cpu_z) = cpu_client
         .gptq_quantize_column(&w, &h_inv, 4, 4, false)
@@ -279,8 +301,9 @@ fn test_gptq_quantize_column_cuda_parity() {
 
     with_cuda_backend(|cuda_client, cuda_device| {
         use numr::runtime::cuda::CudaRuntime;
-        let w_c = Tensor::<CudaRuntime>::from_slice(&w_data, &[8, 16], &cuda_device);
-        let h_c = Tensor::<CudaRuntime>::from_slice(&h_inv_data, &[16, 16], &cuda_device);
+        let w_c = Tensor::<CudaRuntime>::try_from_slice(&w_data, &[8, 16], &cuda_device).unwrap();
+        let h_c =
+            Tensor::<CudaRuntime>::try_from_slice(&h_inv_data, &[16, 16], &cuda_device).unwrap();
 
         let (q, s, z) = cuda_client
             .gptq_quantize_column(&w_c, &h_c, 4, 4, false)
@@ -310,13 +333,13 @@ fn test_gptq_quantize_column_wgpu_parity() {
     let (cpu_client, cpu_device) = setup_cpu();
 
     let w_data: Vec<f32> = (0..128).map(|i| (i as f32 - 64.0) * 0.01).collect();
-    let w = Tensor::<CpuRuntime>::from_slice(&w_data, &[8, 16], &cpu_device);
+    let w = Tensor::<CpuRuntime>::try_from_slice(&w_data, &[8, 16], &cpu_device).unwrap();
 
     let mut h_inv_data = vec![0.0f32; 16 * 16];
     for i in 0..16 {
         h_inv_data[i * 16 + i] = 1.0;
     }
-    let h_inv = Tensor::<CpuRuntime>::from_slice(&h_inv_data, &[16, 16], &cpu_device);
+    let h_inv = Tensor::<CpuRuntime>::try_from_slice(&h_inv_data, &[16, 16], &cpu_device).unwrap();
 
     let (cpu_q, cpu_s, cpu_z) = cpu_client
         .gptq_quantize_column(&w, &h_inv, 4, 4, false)
@@ -327,8 +350,9 @@ fn test_gptq_quantize_column_wgpu_parity() {
 
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use numr::runtime::wgpu::WgpuRuntime;
-        let w_w = Tensor::<WgpuRuntime>::from_slice(&w_data, &[8, 16], &wgpu_device);
-        let h_w = Tensor::<WgpuRuntime>::from_slice(&h_inv_data, &[16, 16], &wgpu_device);
+        let w_w = Tensor::<WgpuRuntime>::try_from_slice(&w_data, &[8, 16], &wgpu_device).unwrap();
+        let h_w =
+            Tensor::<WgpuRuntime>::try_from_slice(&h_inv_data, &[16, 16], &wgpu_device).unwrap();
 
         let (q, s, z) = wgpu_client
             .gptq_quantize_column(&w_w, &h_w, 4, 4, false)

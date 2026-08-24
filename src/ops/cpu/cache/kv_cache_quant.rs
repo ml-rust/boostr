@@ -230,7 +230,8 @@ mod tests {
         let data: Vec<f32> = (0..num_tokens * head_dim)
             .map(|i| (i as f32 * 0.3).sin())
             .collect();
-        let input = Tensor::<CpuRuntime>::from_slice(&data, &[num_tokens, head_dim], &dev);
+        let input =
+            Tensor::<CpuRuntime>::try_from_slice(&data, &[num_tokens, head_dim], &dev).unwrap();
 
         let (q, s) = client
             .quantize_kv_fp8_per_token(&input, num_tokens, head_dim)
@@ -254,7 +255,8 @@ mod tests {
         let num_tokens = 2;
         let head_dim = 8;
         let data: Vec<f32> = (0..num_tokens * head_dim).map(|i| i as f32 * 0.1).collect();
-        let input = Tensor::<CpuRuntime>::from_slice(&data, &[num_tokens, head_dim], &dev);
+        let input =
+            Tensor::<CpuRuntime>::try_from_slice(&data, &[num_tokens, head_dim], &dev).unwrap();
 
         let (p, s, z) = client
             .quantize_kv_int4(&input, num_tokens, head_dim, Int4GroupSize::Group32)
@@ -281,7 +283,8 @@ mod tests {
         let data: Vec<f32> = (0..num_tokens * head_dim)
             .map(|i| (i as f32 * 0.5).sin())
             .collect();
-        let input = Tensor::<CpuRuntime>::from_slice(&data, &[num_tokens, head_dim], &dev);
+        let input =
+            Tensor::<CpuRuntime>::try_from_slice(&data, &[num_tokens, head_dim], &dev).unwrap();
 
         let (q, s) = client
             .quantize_kv_int8(&input, num_tokens, head_dim)

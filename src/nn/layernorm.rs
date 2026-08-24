@@ -108,12 +108,12 @@ mod tests {
     #[test]
     fn test_layernorm_output_shape() {
         let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[4], &device);
-        let bias = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4], &device);
+        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[4], &device).unwrap();
+        let bias = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[4], &device).unwrap();
         let norm = LayerNorm::new(weight, bias, 1e-5, false);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[3, 4], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[3, 4], &device).unwrap(),
             false,
         );
         let out = norm.forward(&client, &input).unwrap();
@@ -123,12 +123,13 @@ mod tests {
     #[test]
     fn test_layernorm_zero_mean_unit_var() {
         let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[4], &device);
-        let bias = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4], &device);
+        let weight = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[4], &device).unwrap();
+        let bias = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[4], &device).unwrap();
         let norm = LayerNorm::new(weight, bias, 1e-6, false);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 4], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 4], &device)
+                .unwrap(),
             false,
         );
         let out = norm.forward(&client, &input).unwrap();
@@ -146,12 +147,13 @@ mod tests {
     #[test]
     fn test_layernorm_affine() {
         let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::from_slice(&[2.0f32; 4], &[4], &device);
-        let bias = Tensor::<CpuRuntime>::from_slice(&[5.0f32; 4], &[4], &device);
+        let weight = Tensor::<CpuRuntime>::try_from_slice(&[2.0f32; 4], &[4], &device).unwrap();
+        let bias = Tensor::<CpuRuntime>::try_from_slice(&[5.0f32; 4], &[4], &device).unwrap();
         let norm = LayerNorm::new(weight, bias, 1e-6, false);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 4], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 4], &device)
+                .unwrap(),
             false,
         );
         let out = norm.forward(&client, &input).unwrap();

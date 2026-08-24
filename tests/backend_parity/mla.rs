@@ -32,15 +32,15 @@ fn test_mla_scaled_dot_product_attention_parity() {
         use numr::runtime::cuda::CudaRuntime;
         use numr::tensor::Tensor;
         let q_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&q_data.to_vec::<f32>(), &[b, h, s, d_k], &cuda_device),
+            Tensor::try_from_slice(&q_data.to_vec::<f32>(), &[b, h, s, d_k], &cuda_device).unwrap(),
             false,
         );
         let k_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&k_data.to_vec::<f32>(), &[b, h, s, d_k], &cuda_device),
+            Tensor::try_from_slice(&k_data.to_vec::<f32>(), &[b, h, s, d_k], &cuda_device).unwrap(),
             false,
         );
         let v_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&v_data.to_vec::<f32>(), &[b, h, s, d_v], &cuda_device),
+            Tensor::try_from_slice(&v_data.to_vec::<f32>(), &[b, h, s, d_v], &cuda_device).unwrap(),
             false,
         );
         let result = cuda_client
@@ -60,15 +60,15 @@ fn test_mla_scaled_dot_product_attention_parity() {
         use numr::runtime::wgpu::WgpuRuntime;
         use numr::tensor::Tensor;
         let q_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&q_data.to_vec::<f32>(), &[b, h, s, d_k], &wgpu_device),
+            Tensor::try_from_slice(&q_data.to_vec::<f32>(), &[b, h, s, d_k], &wgpu_device).unwrap(),
             false,
         );
         let k_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&k_data.to_vec::<f32>(), &[b, h, s, d_k], &wgpu_device),
+            Tensor::try_from_slice(&k_data.to_vec::<f32>(), &[b, h, s, d_k], &wgpu_device).unwrap(),
             false,
         );
         let v_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&v_data.to_vec::<f32>(), &[b, h, s, d_v], &wgpu_device),
+            Tensor::try_from_slice(&v_data.to_vec::<f32>(), &[b, h, s, d_v], &wgpu_device).unwrap(),
             false,
         );
         let result = wgpu_client
@@ -108,15 +108,15 @@ fn test_mla_causal_parity() {
         use numr::runtime::cuda::CudaRuntime;
         use numr::tensor::Tensor;
         let q_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&q_data.to_vec::<f32>(), &[b, h, s, d_k], &cuda_device),
+            Tensor::try_from_slice(&q_data.to_vec::<f32>(), &[b, h, s, d_k], &cuda_device).unwrap(),
             false,
         );
         let k_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&k_data.to_vec::<f32>(), &[b, h, s, d_k], &cuda_device),
+            Tensor::try_from_slice(&k_data.to_vec::<f32>(), &[b, h, s, d_k], &cuda_device).unwrap(),
             false,
         );
         let v_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&v_data.to_vec::<f32>(), &[b, h, s, d_v], &cuda_device),
+            Tensor::try_from_slice(&v_data.to_vec::<f32>(), &[b, h, s, d_v], &cuda_device).unwrap(),
             false,
         );
         let result = cuda_client
@@ -136,15 +136,15 @@ fn test_mla_causal_parity() {
         use numr::runtime::wgpu::WgpuRuntime;
         use numr::tensor::Tensor;
         let q_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&q_data.to_vec::<f32>(), &[b, h, s, d_k], &wgpu_device),
+            Tensor::try_from_slice(&q_data.to_vec::<f32>(), &[b, h, s, d_k], &wgpu_device).unwrap(),
             false,
         );
         let k_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&k_data.to_vec::<f32>(), &[b, h, s, d_k], &wgpu_device),
+            Tensor::try_from_slice(&k_data.to_vec::<f32>(), &[b, h, s, d_k], &wgpu_device).unwrap(),
             false,
         );
         let v_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&v_data.to_vec::<f32>(), &[b, h, s, d_v], &wgpu_device),
+            Tensor::try_from_slice(&v_data.to_vec::<f32>(), &[b, h, s, d_v], &wgpu_device).unwrap(),
             false,
         );
         let result = wgpu_client
@@ -216,7 +216,7 @@ fn test_mla_forward_no_q_lora() {
     };
     let mla = Mla::<CpuRuntime>::from_config(&cfg, &cpu_device).unwrap();
     let x = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 4 * 16], &[1, 4, 16], &cpu_device),
+        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 4 * 16], &[1, 4, 16], &cpu_device).unwrap(),
         false,
     );
     let out = mla.forward(&cpu_client, &x).unwrap();
@@ -242,7 +242,7 @@ fn test_mla_forward_with_q_lora() {
     };
     let mla = Mla::<CpuRuntime>::from_config(&cfg, &cpu_device).unwrap();
     let x = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 4 * 16], &[1, 4, 16], &cpu_device),
+        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 4 * 16], &[1, 4, 16], &cpu_device).unwrap(),
         false,
     );
     let out = mla.forward(&cpu_client, &x).unwrap();
@@ -268,7 +268,7 @@ fn test_mla_forward_different_head_dim_v() {
     };
     let mla = Mla::<CpuRuntime>::from_config(&cfg, &cpu_device).unwrap();
     let x = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 3 * 16], &[1, 3, 16], &cpu_device),
+        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 3 * 16], &[1, 3, 16], &cpu_device).unwrap(),
         false,
     );
     let out = mla.forward(&cpu_client, &x).unwrap();
@@ -294,7 +294,7 @@ fn test_mla_output_finite() {
     };
     let mla = Mla::<CpuRuntime>::from_config(&cfg, &cpu_device).unwrap();
     let x = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 2 * 8], &[1, 2, 8], &cpu_device),
+        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 2 * 8], &[1, 2, 8], &cpu_device).unwrap(),
         false,
     );
     let out = mla.forward(&cpu_client, &x).unwrap();

@@ -115,25 +115,19 @@ fn build_encoder(
                 let data: Vec<f32> = (0..VOCAB * HIDDEN)
                     .map(|i| ((i as f32) * 0.11).sin() * 0.05)
                     .collect();
-                return Ok(Weight::Standard(Tensor::from_slice(
-                    &data,
-                    &[VOCAB, HIDDEN],
-                    d,
-                )));
+                return Ok(Weight::Standard(
+                    Tensor::try_from_slice(&data, &[VOCAB, HIDDEN], d).unwrap(),
+                ));
             }
             "position_embd.weight" => {
-                return Ok(Weight::Standard(Tensor::from_slice(
-                    &vec![0.0f32; HIDDEN],
-                    &[1, HIDDEN],
-                    d,
-                )));
+                return Ok(Weight::Standard(
+                    Tensor::try_from_slice(&vec![0.0f32; HIDDEN], &[1, HIDDEN], d).unwrap(),
+                ));
             }
             "output_norm.weight" => {
-                return Ok(Weight::Standard(Tensor::from_slice(
-                    &vec![1.0f32; HIDDEN],
-                    &[HIDDEN],
-                    d,
-                )));
+                return Ok(Weight::Standard(
+                    Tensor::try_from_slice(&vec![1.0f32; HIDDEN], &[HIDDEN], d).unwrap(),
+                ));
             }
             other => other,
         };
@@ -160,30 +154,39 @@ fn build_encoder(
             "attn_norm.weight"
             | "post_attention_norm.weight"
             | "ffn_norm.weight"
-            | "post_ffw_norm.weight" => Tensor::from_slice(&vec![1.0f32; HIDDEN], &[HIDDEN], d),
+            | "post_ffw_norm.weight" => {
+                Tensor::try_from_slice(&vec![1.0f32; HIDDEN], &[HIDDEN], d).unwrap()
+            }
             "attn_q_norm.weight" | "attn_k_norm.weight" => {
-                Tensor::from_slice(&vec![1.0f32; HEAD_DIM], &[HEAD_DIM], d)
+                Tensor::try_from_slice(&vec![1.0f32; HEAD_DIM], &[HEAD_DIM], d).unwrap()
             }
             "attn_q.weight" => {
-                Tensor::from_slice(&seeded(q_rows * HIDDEN, layer, 1.0), &[q_rows, HIDDEN], d)
+                Tensor::try_from_slice(&seeded(q_rows * HIDDEN, layer, 1.0), &[q_rows, HIDDEN], d)
+                    .unwrap()
             }
             "attn_k.weight" => {
-                Tensor::from_slice(&seeded(kv_rows * HIDDEN, layer, 0.7), &[kv_rows, HIDDEN], d)
+                Tensor::try_from_slice(&seeded(kv_rows * HIDDEN, layer, 0.7), &[kv_rows, HIDDEN], d)
+                    .unwrap()
             }
             "attn_v.weight" => {
-                Tensor::from_slice(&seeded(kv_rows * HIDDEN, layer, 0.3), &[kv_rows, HIDDEN], d)
+                Tensor::try_from_slice(&seeded(kv_rows * HIDDEN, layer, 0.3), &[kv_rows, HIDDEN], d)
+                    .unwrap()
             }
             "attn_output.weight" => {
-                Tensor::from_slice(&seeded(HIDDEN * q_rows, layer, 1.3), &[HIDDEN, q_rows], d)
+                Tensor::try_from_slice(&seeded(HIDDEN * q_rows, layer, 1.3), &[HIDDEN, q_rows], d)
+                    .unwrap()
             }
             "ffn_gate.weight" => {
-                Tensor::from_slice(&seeded(INTER * HIDDEN, layer, 0.5), &[INTER, HIDDEN], d)
+                Tensor::try_from_slice(&seeded(INTER * HIDDEN, layer, 0.5), &[INTER, HIDDEN], d)
+                    .unwrap()
             }
             "ffn_up.weight" => {
-                Tensor::from_slice(&seeded(INTER * HIDDEN, layer, 0.9), &[INTER, HIDDEN], d)
+                Tensor::try_from_slice(&seeded(INTER * HIDDEN, layer, 0.9), &[INTER, HIDDEN], d)
+                    .unwrap()
             }
             "ffn_down.weight" => {
-                Tensor::from_slice(&seeded(HIDDEN * INTER, layer, 0.2), &[HIDDEN, INTER], d)
+                Tensor::try_from_slice(&seeded(HIDDEN * INTER, layer, 0.2), &[HIDDEN, INTER], d)
+                    .unwrap()
             }
             other => {
                 return Err(boostr::error::Error::ModelError {
@@ -213,7 +216,7 @@ fn embed(
     device: &CpuDevice,
     tokens: &[i64],
 ) -> Vec<f32> {
-    let input = Tensor::<CpuRuntime>::from_slice(tokens, &[1, tokens.len()], device);
+    let input = Tensor::<CpuRuntime>::try_from_slice(tokens, &[1, tokens.len()], device).unwrap();
     encoder
         .embed_inference_standard(client, &input, None)
         .expect("embed")
@@ -227,7 +230,7 @@ fn hidden_states(
     device: &CpuDevice,
     tokens: &[i64],
 ) -> Vec<f32> {
-    let input = Tensor::<CpuRuntime>::from_slice(tokens, &[1, tokens.len()], device);
+    let input = Tensor::<CpuRuntime>::try_from_slice(tokens, &[1, tokens.len()], device).unwrap();
     encoder
         .encode_inference(client, &input, None)
         .expect("encode")

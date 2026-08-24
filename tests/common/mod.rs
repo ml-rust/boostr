@@ -63,7 +63,7 @@ pub fn patterned_tensor(
     let data: Vec<f32> = (0..len)
         .map(|i| base + scale * ((i % 11) as f32 - 5.0))
         .collect();
-    Tensor::<CpuRuntime>::from_slice(&data, shape, device)
+    Tensor::<CpuRuntime>::try_from_slice(&data, shape, device).unwrap()
 }
 
 pub fn linear(
@@ -303,11 +303,13 @@ pub fn build_mamba2(
     let (in_proj, in_proj_ids) = linear(config.proj_dim(), config.d_model, true, 0.08, device);
     let (conv1d, conv1d_ids) = conv(config.conv_channels(), config.d_conv, true, 0.09, device);
     let (out_proj, out_proj_ids) = linear(config.d_model, config.d_inner(), true, 0.10, device);
-    let a_log = Tensor::<CpuRuntime>::from_slice(&[-0.3f32], &[config.nheads], device);
+    let a_log = Tensor::<CpuRuntime>::try_from_slice(&[-0.3f32], &[config.nheads], device).unwrap();
     let a_log_id = a_log.id();
-    let dt_bias = Tensor::<CpuRuntime>::from_slice(&[0.1f32], &[config.nheads], device);
+    let dt_bias =
+        Tensor::<CpuRuntime>::try_from_slice(&[0.1f32], &[config.nheads], device).unwrap();
     let dt_bias_id = dt_bias.id();
-    let d_param = Tensor::<CpuRuntime>::from_slice(&[0.4f32], &[config.nheads], device);
+    let d_param =
+        Tensor::<CpuRuntime>::try_from_slice(&[0.4f32], &[config.nheads], device).unwrap();
     let d_param_id = d_param.id();
     let (norm, norm_id) = rms(config.d_inner(), 1e-5, 0.11, device);
     let weights = Mamba2WeightsWithIds {

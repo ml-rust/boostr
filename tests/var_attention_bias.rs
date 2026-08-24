@@ -29,15 +29,15 @@ fn qkv(
 ) -> (Var<CpuRuntime>, Var<CpuRuntime>, Var<CpuRuntime>) {
     let n: usize = shape.iter().product();
     let q = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&det_data(n, 0.0), shape, device),
+        Tensor::<CpuRuntime>::try_from_slice(&det_data(n, 0.0), shape, device).unwrap(),
         requires_grad,
     );
     let k = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&det_data(n, 1.1), shape, device),
+        Tensor::<CpuRuntime>::try_from_slice(&det_data(n, 1.1), shape, device).unwrap(),
         requires_grad,
     );
     let v = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&det_data(n, 2.3), shape, device),
+        Tensor::<CpuRuntime>::try_from_slice(&det_data(n, 2.3), shape, device).unwrap(),
         requires_grad,
     );
     (q, k, v)
@@ -62,7 +62,7 @@ fn gradients_flow_to_qkv_through_bias() -> TestResult {
     let (b, h, s, d) = (2, 2, 4, 8);
     let (q, k, v) = qkv(&device, &[b, h, s, d], true);
 
-    let bias = Tensor::<CpuRuntime>::zeros(&[b, h, s, s], DType::F32, &device);
+    let bias = Tensor::<CpuRuntime>::try_zeros(&[b, h, s, s], DType::F32, &device).unwrap();
     client.alibi_add_bias(&bias, b, h, s, s)?;
 
     let out = var_attention_with_bias(
@@ -91,7 +91,7 @@ fn zero_bias_matches_unbiased() -> TestResult {
     let (b, h, s, d) = (1, 2, 5, 4);
     let (q, k, v) = qkv(&device, &[b, h, s, d], false);
 
-    let zero = Tensor::<CpuRuntime>::zeros(&[b, h, s, s], DType::F32, &device);
+    let zero = Tensor::<CpuRuntime>::try_zeros(&[b, h, s, s], DType::F32, &device).unwrap();
     let biased = var_attention_with_bias(
         &client,
         &q,
@@ -119,8 +119,8 @@ fn nonzero_bias_changes_result() -> TestResult {
     let (b, h, s, d) = (1, 2, 5, 4);
     let (q, k, v) = qkv(&device, &[b, h, s, d], false);
 
-    let zero = Tensor::<CpuRuntime>::zeros(&[b, h, s, s], DType::F32, &device);
-    let alibi = Tensor::<CpuRuntime>::zeros(&[b, h, s, s], DType::F32, &device);
+    let zero = Tensor::<CpuRuntime>::try_zeros(&[b, h, s, s], DType::F32, &device).unwrap();
+    let alibi = Tensor::<CpuRuntime>::try_zeros(&[b, h, s, s], DType::F32, &device).unwrap();
     client.alibi_add_bias(&alibi, b, h, s, s)?;
 
     let base = var_attention_with_bias(
@@ -165,19 +165,19 @@ fn alibi_bias_matches_hand_computed() -> TestResult {
     let (b, h, s, d) = (1, 1, 2, 1);
     let ones = vec![1.0f32; b * h * s * d];
     let q = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&ones, &[b, h, s, d], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&ones, &[b, h, s, d], &device).unwrap(),
         false,
     );
     let k = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&ones, &[b, h, s, d], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&ones, &[b, h, s, d], &device).unwrap(),
         false,
     );
     let v = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&[3.0f32, 5.0], &[b, h, s, d], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 5.0], &[b, h, s, d], &device).unwrap(),
         false,
     );
 
-    let bias = Tensor::<CpuRuntime>::zeros(&[b, h, s, s], DType::F32, &device);
+    let bias = Tensor::<CpuRuntime>::try_zeros(&[b, h, s, s], DType::F32, &device).unwrap();
     client.alibi_add_bias(&bias, b, h, s, s)?;
 
     let out = var_attention_with_bias(
@@ -208,7 +208,7 @@ fn alibi_matches_llama_composition() -> TestResult {
     let (b, h, s, d) = (2, 4, 6, 8);
     let (q, k, v) = qkv(&device, &[b, h, s, d], false);
 
-    let bias = Tensor::<CpuRuntime>::zeros(&[b, h, s, s], DType::F32, &device);
+    let bias = Tensor::<CpuRuntime>::try_zeros(&[b, h, s, s], DType::F32, &device).unwrap();
     client.alibi_add_bias(&bias, b, h, s, s)?;
 
     let got = var_attention_with_bias(
@@ -222,7 +222,7 @@ fn alibi_matches_llama_composition() -> TestResult {
     )?;
 
     // The LLaMA ALiBi path: zeros -> alibi_add_bias -> detached Var -> impl.
-    let ref_bias = Tensor::<CpuRuntime>::zeros(&[b, h, s, s], DType::F32, &device);
+    let ref_bias = Tensor::<CpuRuntime>::try_zeros(&[b, h, s, s], DType::F32, &device).unwrap();
     client.alibi_add_bias(&ref_bias, b, h, s, s)?;
     let ref_var = Var::new(ref_bias, false);
     let want = multi_head_attention_impl(&client, &q, &k, &v, Some(&ref_var), h)?;
@@ -244,11 +244,11 @@ fn masked_positions_get_zero_weight() -> TestResult {
     let (q, k, _) = qkv(&device, &[b, h, s, d], false);
     let v_data: Vec<f32> = (0..s * d).map(|i| (i as f32) + 1.0).collect();
     let v = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&v_data, &[b, h, s, d], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&v_data, &[b, h, s, d], &device).unwrap(),
         false,
     );
 
-    let zero = Tensor::<CpuRuntime>::zeros(&[b, h, s, s], DType::F32, &device);
+    let zero = Tensor::<CpuRuntime>::try_zeros(&[b, h, s, s], DType::F32, &device).unwrap();
     let out = var_attention_with_bias(
         &client,
         &q,

@@ -38,11 +38,12 @@ fn create_awq_test_data(
             qweight_data[ki * n_packed + pj] = packed;
         }
     }
-    let qweight = Tensor::<CpuRuntime>::from_slice(
+    let qweight = Tensor::<CpuRuntime>::try_from_slice(
         bytemuck::cast_slice::<u32, f32>(&qweight_data),
         &[k, n_packed],
         device,
-    );
+    )
+    .unwrap();
 
     // Scales and zeros: [num_groups, N]
     let num_groups = k / group_size;
@@ -52,8 +53,10 @@ fn create_awq_test_data(
     let zeros_data: Vec<f32> = (0..num_groups * n)
         .map(|i| 7.0 + (i as f32 * 0.003).cos() * 0.5)
         .collect();
-    let scales = Tensor::<CpuRuntime>::from_slice(&scales_data, &[num_groups, n], device);
-    let zeros = Tensor::<CpuRuntime>::from_slice(&zeros_data, &[num_groups, n], device);
+    let scales =
+        Tensor::<CpuRuntime>::try_from_slice(&scales_data, &[num_groups, n], device).unwrap();
+    let zeros =
+        Tensor::<CpuRuntime>::try_from_slice(&zeros_data, &[num_groups, n], device).unwrap();
 
     (input, qweight, scales, zeros)
 }
@@ -88,11 +91,12 @@ fn create_gptq_test_data(
             qweight_data[pk * n + col] = packed;
         }
     }
-    let qweight = Tensor::<CpuRuntime>::from_slice(
+    let qweight = Tensor::<CpuRuntime>::try_from_slice(
         bytemuck::cast_slice::<u32, f32>(&qweight_data),
         &[k_packed, n],
         device,
-    );
+    )
+    .unwrap();
 
     // GPTQ qzeros: [num_groups, N/8] packed u32
     let num_groups = k / group_size;
@@ -107,25 +111,28 @@ fn create_gptq_test_data(
             qzeros_data[g * n_packed_zeros + pn] = packed;
         }
     }
-    let qzeros = Tensor::<CpuRuntime>::from_slice(
+    let qzeros = Tensor::<CpuRuntime>::try_from_slice(
         bytemuck::cast_slice::<u32, f32>(&qzeros_data),
         &[num_groups, n_packed_zeros],
         device,
-    );
+    )
+    .unwrap();
 
     // Scales: [num_groups, N]
     let scales_data: Vec<f32> = (0..num_groups * n)
         .map(|i| 0.01 + (i as f32 * 0.002).sin().abs() * 0.1)
         .collect();
-    let scales = Tensor::<CpuRuntime>::from_slice(&scales_data, &[num_groups, n], device);
+    let scales =
+        Tensor::<CpuRuntime>::try_from_slice(&scales_data, &[num_groups, n], device).unwrap();
 
     // g_idx: [K] — simple sequential grouping
     let g_idx_data: Vec<i32> = (0..k).map(|i| (i / group_size) as i32).collect();
-    let g_idx = Tensor::<CpuRuntime>::from_slice(
+    let g_idx = Tensor::<CpuRuntime>::try_from_slice(
         bytemuck::cast_slice::<i32, f32>(&g_idx_data),
         &[k],
         device,
-    );
+    )
+    .unwrap();
 
     (input, qweight, qzeros, scales, g_idx)
 }
@@ -158,11 +165,12 @@ fn create_marlin_test_data(
             weight_data[pk * n + col] = packed;
         }
     }
-    let weight = Tensor::<CpuRuntime>::from_slice(
+    let weight = Tensor::<CpuRuntime>::try_from_slice(
         bytemuck::cast_slice::<u32, f32>(&weight_data),
         &[k_packed, n],
         device,
-    );
+    )
+    .unwrap();
 
     let num_groups = k / group_size;
     let scales_data: Vec<f32> = (0..num_groups * n)
@@ -171,8 +179,10 @@ fn create_marlin_test_data(
     let zeros_data: Vec<f32> = (0..num_groups * n)
         .map(|i| (i as f32 * 0.002).cos() * 0.01)
         .collect();
-    let scales = Tensor::<CpuRuntime>::from_slice(&scales_data, &[num_groups, n], device);
-    let zeros = Tensor::<CpuRuntime>::from_slice(&zeros_data, &[num_groups, n], device);
+    let scales =
+        Tensor::<CpuRuntime>::try_from_slice(&scales_data, &[num_groups, n], device).unwrap();
+    let zeros =
+        Tensor::<CpuRuntime>::try_from_slice(&zeros_data, &[num_groups, n], device).unwrap();
 
     (input, weight, scales, zeros)
 }
@@ -198,10 +208,14 @@ fn test_int4_gemm_awq_parity() {
         use boostr::QuantMatmulOps as _;
         use numr::tensor::Tensor;
 
-        let input_c = Tensor::from_slice(&input.to_vec::<f32>(), input.shape(), &cuda_device);
-        let qw_c = Tensor::from_slice(&qweight.to_vec::<f32>(), qweight.shape(), &cuda_device);
-        let sc_c = Tensor::from_slice(&scales.to_vec::<f32>(), scales.shape(), &cuda_device);
-        let zr_c = Tensor::from_slice(&zeros.to_vec::<f32>(), zeros.shape(), &cuda_device);
+        let input_c =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), input.shape(), &cuda_device).unwrap();
+        let qw_c = Tensor::try_from_slice(&qweight.to_vec::<f32>(), qweight.shape(), &cuda_device)
+            .unwrap();
+        let sc_c =
+            Tensor::try_from_slice(&scales.to_vec::<f32>(), scales.shape(), &cuda_device).unwrap();
+        let zr_c =
+            Tensor::try_from_slice(&zeros.to_vec::<f32>(), zeros.shape(), &cuda_device).unwrap();
 
         let cuda_result = cuda_client
             .int4_gemm(&input_c, &qw_c, &sc_c, &zr_c, 32)
@@ -218,10 +232,14 @@ fn test_int4_gemm_awq_parity() {
         use boostr::QuantMatmulOps as _;
         use numr::tensor::Tensor;
 
-        let input_w = Tensor::from_slice(&input.to_vec::<f32>(), input.shape(), &wgpu_device);
-        let qw_w = Tensor::from_slice(&qweight.to_vec::<f32>(), qweight.shape(), &wgpu_device);
-        let sc_w = Tensor::from_slice(&scales.to_vec::<f32>(), scales.shape(), &wgpu_device);
-        let zr_w = Tensor::from_slice(&zeros.to_vec::<f32>(), zeros.shape(), &wgpu_device);
+        let input_w =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), input.shape(), &wgpu_device).unwrap();
+        let qw_w = Tensor::try_from_slice(&qweight.to_vec::<f32>(), qweight.shape(), &wgpu_device)
+            .unwrap();
+        let sc_w =
+            Tensor::try_from_slice(&scales.to_vec::<f32>(), scales.shape(), &wgpu_device).unwrap();
+        let zr_w =
+            Tensor::try_from_slice(&zeros.to_vec::<f32>(), zeros.shape(), &wgpu_device).unwrap();
 
         let wgpu_result = wgpu_client
             .int4_gemm(&input_w, &qw_w, &sc_w, &zr_w, 32)
@@ -254,11 +272,16 @@ fn test_int4_gemm_gptq_parity() {
         use boostr::QuantMatmulOps as _;
         use numr::tensor::Tensor;
 
-        let input_c = Tensor::from_slice(&input.to_vec::<f32>(), input.shape(), &cuda_device);
-        let qw_c = Tensor::from_slice(&qweight.to_vec::<f32>(), qweight.shape(), &cuda_device);
-        let qz_c = Tensor::from_slice(&qzeros.to_vec::<f32>(), qzeros.shape(), &cuda_device);
-        let sc_c = Tensor::from_slice(&scales.to_vec::<f32>(), scales.shape(), &cuda_device);
-        let gi_c = Tensor::from_slice(&g_idx.to_vec::<f32>(), g_idx.shape(), &cuda_device);
+        let input_c =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), input.shape(), &cuda_device).unwrap();
+        let qw_c = Tensor::try_from_slice(&qweight.to_vec::<f32>(), qweight.shape(), &cuda_device)
+            .unwrap();
+        let qz_c =
+            Tensor::try_from_slice(&qzeros.to_vec::<f32>(), qzeros.shape(), &cuda_device).unwrap();
+        let sc_c =
+            Tensor::try_from_slice(&scales.to_vec::<f32>(), scales.shape(), &cuda_device).unwrap();
+        let gi_c =
+            Tensor::try_from_slice(&g_idx.to_vec::<f32>(), g_idx.shape(), &cuda_device).unwrap();
 
         let cuda_result = cuda_client
             .int4_gemm_gptq(&input_c, &qw_c, &qz_c, &sc_c, &gi_c)
@@ -275,11 +298,16 @@ fn test_int4_gemm_gptq_parity() {
         use boostr::QuantMatmulOps as _;
         use numr::tensor::Tensor;
 
-        let input_w = Tensor::from_slice(&input.to_vec::<f32>(), input.shape(), &wgpu_device);
-        let qw_w = Tensor::from_slice(&qweight.to_vec::<f32>(), qweight.shape(), &wgpu_device);
-        let qz_w = Tensor::from_slice(&qzeros.to_vec::<f32>(), qzeros.shape(), &wgpu_device);
-        let sc_w = Tensor::from_slice(&scales.to_vec::<f32>(), scales.shape(), &wgpu_device);
-        let gi_w = Tensor::from_slice(&g_idx.to_vec::<f32>(), g_idx.shape(), &wgpu_device);
+        let input_w =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), input.shape(), &wgpu_device).unwrap();
+        let qw_w = Tensor::try_from_slice(&qweight.to_vec::<f32>(), qweight.shape(), &wgpu_device)
+            .unwrap();
+        let qz_w =
+            Tensor::try_from_slice(&qzeros.to_vec::<f32>(), qzeros.shape(), &wgpu_device).unwrap();
+        let sc_w =
+            Tensor::try_from_slice(&scales.to_vec::<f32>(), scales.shape(), &wgpu_device).unwrap();
+        let gi_w =
+            Tensor::try_from_slice(&g_idx.to_vec::<f32>(), g_idx.shape(), &wgpu_device).unwrap();
 
         let wgpu_result = wgpu_client
             .int4_gemm_gptq(&input_w, &qw_w, &qz_w, &sc_w, &gi_w)
@@ -312,10 +340,14 @@ fn test_marlin_gemm_parity() {
         use boostr::QuantMatmulOps as _;
         use numr::tensor::Tensor;
 
-        let input_c = Tensor::from_slice(&input.to_vec::<f32>(), input.shape(), &cuda_device);
-        let wt_c = Tensor::from_slice(&weight.to_vec::<f32>(), weight.shape(), &cuda_device);
-        let sc_c = Tensor::from_slice(&scales.to_vec::<f32>(), scales.shape(), &cuda_device);
-        let zr_c = Tensor::from_slice(&zeros.to_vec::<f32>(), zeros.shape(), &cuda_device);
+        let input_c =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), input.shape(), &cuda_device).unwrap();
+        let wt_c =
+            Tensor::try_from_slice(&weight.to_vec::<f32>(), weight.shape(), &cuda_device).unwrap();
+        let sc_c =
+            Tensor::try_from_slice(&scales.to_vec::<f32>(), scales.shape(), &cuda_device).unwrap();
+        let zr_c =
+            Tensor::try_from_slice(&zeros.to_vec::<f32>(), zeros.shape(), &cuda_device).unwrap();
 
         let cuda_result = cuda_client
             .marlin_gemm(&input_c, &wt_c, &sc_c, &zr_c, 32)
@@ -332,10 +364,14 @@ fn test_marlin_gemm_parity() {
         use boostr::QuantMatmulOps as _;
         use numr::tensor::Tensor;
 
-        let input_w = Tensor::from_slice(&input.to_vec::<f32>(), input.shape(), &wgpu_device);
-        let wt_w = Tensor::from_slice(&weight.to_vec::<f32>(), weight.shape(), &wgpu_device);
-        let sc_w = Tensor::from_slice(&scales.to_vec::<f32>(), scales.shape(), &wgpu_device);
-        let zr_w = Tensor::from_slice(&zeros.to_vec::<f32>(), zeros.shape(), &wgpu_device);
+        let input_w =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), input.shape(), &wgpu_device).unwrap();
+        let wt_w =
+            Tensor::try_from_slice(&weight.to_vec::<f32>(), weight.shape(), &wgpu_device).unwrap();
+        let sc_w =
+            Tensor::try_from_slice(&scales.to_vec::<f32>(), scales.shape(), &wgpu_device).unwrap();
+        let zr_w =
+            Tensor::try_from_slice(&zeros.to_vec::<f32>(), zeros.shape(), &wgpu_device).unwrap();
 
         let wgpu_result = wgpu_client
             .marlin_gemm(&input_w, &wt_w, &sc_w, &zr_w, 32)

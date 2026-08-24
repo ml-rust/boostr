@@ -454,7 +454,7 @@ attention:
         let model = LlamaTp::<CpuRuntime>::from_config(&config, &device, comm).unwrap();
 
         let input_ids = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2, 3], &[1, 4], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2, 3], &[1, 4], &device).unwrap(),
             false,
         );
 

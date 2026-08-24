@@ -87,23 +87,24 @@ fn make_encoder(
 
     let encoder = Encoder::from_weights(config, Pooling::Mean, |name| match name {
         "embeddings.word_embeddings.weight" => {
-            Ok(Tensor::from_slice(&tok_emb, &[vocab, hidden], d))
+            Ok(Tensor::try_from_slice(&tok_emb, &[vocab, hidden], d).unwrap())
         }
         "embeddings.position_embeddings.weight" => {
-            Ok(Tensor::from_slice(&pos_emb, &[max_pos, hidden], d))
+            Ok(Tensor::try_from_slice(&pos_emb, &[max_pos, hidden], d).unwrap())
         }
-        "embeddings.layer_norm.weight" => Ok(Tensor::from_slice(&[1.0f32; 8], &[8], d)),
-        "embeddings.layer_norm.bias" => Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d)),
+        "embeddings.layer_norm.weight" => {
+            Ok(Tensor::try_from_slice(&[1.0f32; 8], &[8], d).unwrap())
+        }
+        "embeddings.layer_norm.bias" => Ok(Tensor::try_from_slice(&[0.0f32; 8], &[8], d).unwrap()),
         n if n.ends_with("query.weight")
             || n.ends_with("key.weight")
             || n.ends_with("value.weight")
             || n.ends_with("attention.output.dense.weight") =>
         {
-            Ok(Tensor::from_slice(
-                &vec![0.02f32; hidden * hidden],
-                &[hidden, hidden],
-                d,
-            ))
+            Ok(
+                Tensor::try_from_slice(&vec![0.02f32; hidden * hidden], &[hidden, hidden], d)
+                    .unwrap(),
+            )
         }
         n if n.ends_with("query.bias")
             || n.ends_with("key.bias")
@@ -111,23 +112,29 @@ fn make_encoder(
             || n.ends_with("attention.output.dense.bias")
             || n.ends_with("output.dense.bias") =>
         {
-            Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d))
+            Ok(Tensor::try_from_slice(&[0.0f32; 8], &[8], d).unwrap())
         }
-        n if n.ends_with("LayerNorm.weight") => Ok(Tensor::from_slice(&[1.0f32; 8], &[8], d)),
-        n if n.ends_with("LayerNorm.bias") => Ok(Tensor::from_slice(&[0.0f32; 8], &[8], d)),
-        n if n.ends_with("intermediate.dense.weight") => Ok(Tensor::from_slice(
-            &vec![0.02f32; inter * hidden],
-            &[inter, hidden],
-            d,
-        )),
+        n if n.ends_with("LayerNorm.weight") => {
+            Ok(Tensor::try_from_slice(&[1.0f32; 8], &[8], d).unwrap())
+        }
+        n if n.ends_with("LayerNorm.bias") => {
+            Ok(Tensor::try_from_slice(&[0.0f32; 8], &[8], d).unwrap())
+        }
+        n if n.ends_with("intermediate.dense.weight") => {
+            Ok(
+                Tensor::try_from_slice(&vec![0.02f32; inter * hidden], &[inter, hidden], d)
+                    .unwrap(),
+            )
+        }
         n if n.ends_with("intermediate.dense.bias") => {
-            Ok(Tensor::from_slice(&[0.0f32; 16], &[16], d))
+            Ok(Tensor::try_from_slice(&[0.0f32; 16], &[16], d).unwrap())
         }
-        n if n.ends_with("output.dense.weight") => Ok(Tensor::from_slice(
-            &vec![0.02f32; hidden * inter],
-            &[hidden, inter],
-            d,
-        )),
+        n if n.ends_with("output.dense.weight") => {
+            Ok(
+                Tensor::try_from_slice(&vec![0.02f32; hidden * inter], &[hidden, inter], d)
+                    .unwrap(),
+            )
+        }
         _ => Err(boostr::error::Error::ModelError {
             reason: format!("unknown weight: {name}"),
         }),
@@ -163,8 +170,8 @@ fn embed_padded(
         mask_flat.extend(std::iter::repeat_n(0.0f32, max_len - real));
     }
 
-    let input = Tensor::<CpuRuntime>::from_slice(&flat, &[batch, max_len], device);
-    let mask = Tensor::<CpuRuntime>::from_slice(&mask_flat, &[batch, max_len], device);
+    let input = Tensor::<CpuRuntime>::try_from_slice(&flat, &[batch, max_len], device).unwrap();
+    let mask = Tensor::<CpuRuntime>::try_from_slice(&mask_flat, &[batch, max_len], device).unwrap();
     let pooled = encoder
         .embed_inference_standard(client, &input, Some(&mask))
         .unwrap();
@@ -216,10 +223,10 @@ fn embed_varlen(
 
     let total = flat_ids.len();
     let d = device;
-    let input_t = Tensor::<CpuRuntime>::from_slice(&flat_ids, &[total], d);
-    let cu_t = Tensor::<CpuRuntime>::from_slice(&cu, &[batch + 1], d);
-    let pos_t = Tensor::<CpuRuntime>::from_slice(&pos_ids, &[total], d);
-    let seg_t = Tensor::<CpuRuntime>::from_slice(&seg_ids, &[total], d);
+    let input_t = Tensor::<CpuRuntime>::try_from_slice(&flat_ids, &[total], d).unwrap();
+    let cu_t = Tensor::<CpuRuntime>::try_from_slice(&cu, &[batch + 1], d).unwrap();
+    let pos_t = Tensor::<CpuRuntime>::try_from_slice(&pos_ids, &[total], d).unwrap();
+    let seg_t = Tensor::<CpuRuntime>::try_from_slice(&seg_ids, &[total], d).unwrap();
 
     let pooled = encoder
         .embed_inference_varlen(client, &input_t, &cu_t, &pos_t, &seg_t, batch, max_seqlen)

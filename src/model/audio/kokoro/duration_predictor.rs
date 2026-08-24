@@ -244,7 +244,7 @@ mod tests {
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device)
+        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device).unwrap()
     }
 
     fn build_predictor(device: &<CpuRuntime as Runtime>::Device) -> DurationPredictor<CpuRuntime> {
@@ -318,7 +318,7 @@ mod tests {
     fn length_regulator_repeats_rows() {
         let (client, device) = cpu_setup();
         // 3 phonemes, 2-d hidden, durations [2, 1, 3] → 6 frames total.
-        let hidden = Tensor::<CpuRuntime>::from_slice(
+        let hidden = Tensor::<CpuRuntime>::try_from_slice(
             &[
                 1.0f32, 1.0, // phoneme 0
                 2.0, 2.0, // phoneme 1
@@ -326,7 +326,8 @@ mod tests {
             ],
             &[1, 3, 2],
             &device,
-        );
+        )
+        .unwrap();
         let out = length_regulator(&client, &hidden, &[2, 1, 3]).unwrap();
         assert_eq!(out.shape(), &[1, 6, 2]);
         let flat: Vec<f32> = out.to_vec();

@@ -204,7 +204,7 @@ mod tests {
 
     fn make_tensor(data: &[f32], shape: &[usize]) -> Tensor<CpuRuntime> {
         let device = CpuDevice::new();
-        Tensor::<CpuRuntime>::from_slice(data, shape, &device)
+        Tensor::<CpuRuntime>::try_from_slice(data, shape, &device).unwrap()
     }
 
     #[test]
@@ -275,17 +275,21 @@ mod tests {
             .map(|i| ((i as f32) * 0.1 + 0.5).sin())
             .collect();
 
-        let q = Tensor::<CpuRuntime>::from_slice(&q_data, &[1, num_heads, 1, head_dim], &device);
-        let k = Tensor::<CpuRuntime>::from_slice(
+        let q =
+            Tensor::<CpuRuntime>::try_from_slice(&q_data, &[1, num_heads, 1, head_dim], &device)
+                .unwrap();
+        let k = Tensor::<CpuRuntime>::try_from_slice(
             &k_data,
             &[1, num_kv_heads, seq_len_k, head_dim],
             &device,
-        );
-        let v = Tensor::<CpuRuntime>::from_slice(
+        )
+        .unwrap();
+        let v = Tensor::<CpuRuntime>::try_from_slice(
             &v_data,
             &[1, num_kv_heads, seq_len_k, head_dim],
             &device,
-        );
+        )
+        .unwrap();
 
         // Fused kernel
         let (fused_out, _) =
@@ -344,17 +348,21 @@ mod tests {
             .map(|i| ((i as f32) * 0.011 + 0.5).sin())
             .collect();
 
-        let q = Tensor::<CpuRuntime>::from_slice(&q_data, &[1, num_heads, 1, head_dim], &device);
-        let k = Tensor::<CpuRuntime>::from_slice(
+        let q =
+            Tensor::<CpuRuntime>::try_from_slice(&q_data, &[1, num_heads, 1, head_dim], &device)
+                .unwrap();
+        let k = Tensor::<CpuRuntime>::try_from_slice(
             &k_data,
             &[1, num_kv_heads, seq_len_k, head_dim],
             &device,
-        );
-        let v = Tensor::<CpuRuntime>::from_slice(
+        )
+        .unwrap();
+        let v = Tensor::<CpuRuntime>::try_from_slice(
             &v_data,
             &[1, num_kv_heads, seq_len_k, head_dim],
             &device,
-        );
+        )
+        .unwrap();
 
         // Fused kernel
         let (fused_out, _) =

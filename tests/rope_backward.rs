@@ -37,10 +37,19 @@ fn compute_loss(
     variant: &str,
     attn_scale: f32,
 ) -> TestResult<f32> {
-    let x = Var::<CpuRuntime>::new(Tensor::from_slice(x_data, shape, device), false);
+    let x = Var::<CpuRuntime>::new(
+        Tensor::try_from_slice(x_data, shape, device).unwrap(),
+        false,
+    );
     let (s, d) = (shape[2], shape[3]);
-    let cos = Var::<CpuRuntime>::new(Tensor::from_slice(cos_data, &[s, d / 2], device), false);
-    let sin = Var::<CpuRuntime>::new(Tensor::from_slice(sin_data, &[s, d / 2], device), false);
+    let cos = Var::<CpuRuntime>::new(
+        Tensor::try_from_slice(cos_data, &[s, d / 2], device).unwrap(),
+        false,
+    );
+    let sin = Var::<CpuRuntime>::new(
+        Tensor::try_from_slice(sin_data, &[s, d / 2], device).unwrap(),
+        false,
+    );
 
     let out = match variant {
         "standard" => client.apply_rope(&x, &cos, &sin)?,
@@ -66,11 +75,17 @@ fn verify_rope_backward(variant: &str, attn_scale: f32) -> TestResult {
 
     // Forward + backward
     let x = Var::<CpuRuntime>::new(
-        Tensor::from_slice(&x_data, &shape, &device),
+        Tensor::try_from_slice(&x_data, &shape, &device).unwrap(),
         true, // requires_grad
     );
-    let cos = Var::<CpuRuntime>::new(Tensor::from_slice(&cos_data, &[s, d / 2], &device), false);
-    let sin = Var::<CpuRuntime>::new(Tensor::from_slice(&sin_data, &[s, d / 2], &device), false);
+    let cos = Var::<CpuRuntime>::new(
+        Tensor::try_from_slice(&cos_data, &[s, d / 2], &device).unwrap(),
+        false,
+    );
+    let sin = Var::<CpuRuntime>::new(
+        Tensor::try_from_slice(&sin_data, &[s, d / 2], &device).unwrap(),
+        false,
+    );
 
     let out = match variant {
         "standard" => client.apply_rope(&x, &cos, &sin)?,

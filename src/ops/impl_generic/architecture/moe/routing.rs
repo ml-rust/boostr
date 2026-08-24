@@ -84,7 +84,8 @@ mod tests {
             .map(|i| (i as f32 * 0.3).sin())
             .collect();
         let logits =
-            Tensor::<CpuRuntime>::from_slice(&logits_data, &[num_tokens, num_experts], &device);
+            Tensor::<CpuRuntime>::try_from_slice(&logits_data, &[num_tokens, num_experts], &device)
+                .unwrap();
 
         let (indices, weights) = moe_top_k_routing_impl(&client, &logits, k).unwrap();
 
@@ -107,7 +108,7 @@ mod tests {
     #[test]
     fn test_routing_invalid_k() {
         let (client, device) = cpu_setup();
-        let logits = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[2, 4], &device);
+        let logits = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 8], &[2, 4], &device).unwrap();
 
         assert!(moe_top_k_routing_impl(&client, &logits, 0).is_err());
         assert!(moe_top_k_routing_impl(&client, &logits, 5).is_err());

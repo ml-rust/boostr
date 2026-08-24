@@ -133,7 +133,7 @@ mod tests {
 
         let data = vec![1.0f32; 12];
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&data, &[3, 4], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&data, &[3, 4], &device).unwrap(),
             false,
         );
 
@@ -152,7 +152,7 @@ mod tests {
 
         let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&data, &[2, 3], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&data, &[2, 3], &device).unwrap(),
             false,
         );
 
@@ -170,7 +170,7 @@ mod tests {
         // 100 samples, 4 features each
         let data = vec![1.0f32; 400];
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&data, &[100, 4], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&data, &[100, 4], &device).unwrap(),
             false,
         );
 

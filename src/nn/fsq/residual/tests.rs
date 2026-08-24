@@ -55,7 +55,8 @@ fn test_encode_applies_double_bound() {
     let (residual, client, device) = neucodec_residual();
 
     let x = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&[DOUBLE_BOUND_DISCRIMINATOR; 8], &[1, 8], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&[DOUBLE_BOUND_DISCRIMINATOR; 8], &[1, 8], &device)
+            .unwrap(),
         false,
     );
 
@@ -92,7 +93,7 @@ fn test_decode_round_trips_encode() {
 
     let values: Vec<f32> = (0..16).map(|i| (i as f32) * 0.37 - 3.0).collect();
     let x = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&values, &[2, 8], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&values, &[2, 8], &device).unwrap(),
         false,
     );
 
@@ -149,8 +150,8 @@ fn test_mismatched_projection_dims_rejected() {
         Fsq::<CpuRuntime>::new(config.layer_config().unwrap(), &device, None, None).unwrap();
 
     // Wrong out-features on project_in: [3, 5] instead of [2, 5].
-    let bad_in = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 15], &[3, 5], &device);
-    let good_out = Tensor::<CpuRuntime>::from_slice(&[0.2f32; 10], &[5, 2], &device);
+    let bad_in = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 15], &[3, 5], &device).unwrap();
+    let good_out = Tensor::<CpuRuntime>::try_from_slice(&[0.2f32; 10], &[5, 2], &device).unwrap();
 
     let err = ResidualFsq::new(
         config,
@@ -201,8 +202,8 @@ fn test_projecting_inner_layer_rejected() {
     let (_, device) = cpu_setup();
     // Inner layers must be plain FSQ (upstream's are nn.Identity-projected).
     let config = ResidualFsqConfig::new(vec![4, 4], 2, 1).unwrap();
-    let w_in = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 10], &[2, 5], &device);
-    let w_out = Tensor::<CpuRuntime>::from_slice(&[0.2f32; 10], &[5, 2], &device);
+    let w_in = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 10], &[2, 5], &device).unwrap();
+    let w_out = Tensor::<CpuRuntime>::try_from_slice(&[0.2f32; 10], &[5, 2], &device).unwrap();
     let projecting_layer = Fsq::<CpuRuntime>::new(
         FsqConfig::new(vec![4, 4], 5).unwrap(),
         &device,

@@ -188,7 +188,7 @@ mod tests {
         let scaler = GradScaler::new(100.0, 2.0, 0.5, 10).unwrap();
 
         let id = TensorId::new();
-        let grad = Tensor::<CpuRuntime>::from_slice(&[200.0f32, 400.0], &[2], &device);
+        let grad = Tensor::<CpuRuntime>::try_from_slice(&[200.0f32, 400.0], &[2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(id, grad);
 
@@ -208,7 +208,7 @@ mod tests {
         let scaler = GradScaler::new(100.0, 2.0, 0.5, 10).unwrap();
 
         let id = TensorId::new();
-        let grad = Tensor::<CpuRuntime>::from_slice(&[f32::NAN, 1.0], &[2], &device);
+        let grad = Tensor::<CpuRuntime>::try_from_slice(&[f32::NAN, 1.0], &[2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(id, grad);
 

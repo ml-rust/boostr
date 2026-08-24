@@ -163,7 +163,10 @@ mod tests {
     fn test_varmap_insert_and_get() {
         let d = device();
         let mut map = VarMap::<CpuRuntime>::new();
-        map.insert("w1".into(), Tensor::from_slice(&[1.0f32, 2.0], &[2], &d));
+        map.insert(
+            "w1".into(),
+            Tensor::try_from_slice(&[1.0f32, 2.0], &[2], &d).unwrap(),
+        );
         assert_eq!(map.len(), 1);
         assert!(map.contains("w1"));
         assert!(!map.contains("w2"));
@@ -178,7 +181,7 @@ mod tests {
         let mut map = VarMap::<CpuRuntime>::new();
         map.insert(
             "norm.weight".into(),
-            Tensor::from_slice(&[1.0f32], &[1], &d),
+            Tensor::try_from_slice(&[1.0f32], &[1], &d).unwrap(),
         );
         let data = vec![0u8; 18];
         let qt = QuantTensor::from_bytes(&data, QuantFormat::Q4_0, &[32], &d).unwrap();
@@ -193,7 +196,10 @@ mod tests {
     fn test_varmap_take_tensor() {
         let d = device();
         let mut map = VarMap::<CpuRuntime>::new();
-        map.insert("w".into(), Tensor::from_slice(&[1.0f32, 2.0], &[2], &d));
+        map.insert(
+            "w".into(),
+            Tensor::try_from_slice(&[1.0f32, 2.0], &[2], &d).unwrap(),
+        );
         assert_eq!(map.len(), 1);
 
         let t = map.take_tensor("w").unwrap();
@@ -206,8 +212,14 @@ mod tests {
     fn test_varmap_names_and_iter() {
         let d = device();
         let mut map = VarMap::<CpuRuntime>::new();
-        map.insert("x".into(), Tensor::from_slice(&[1.0f32], &[1], &d));
-        map.insert("y".into(), Tensor::from_slice(&[2.0f32], &[1], &d));
+        map.insert(
+            "x".into(),
+            Tensor::try_from_slice(&[1.0f32], &[1], &d).unwrap(),
+        );
+        map.insert(
+            "y".into(),
+            Tensor::try_from_slice(&[2.0f32], &[1], &d).unwrap(),
+        );
 
         let mut names: Vec<&str> = map.names().collect();
         names.sort();

@@ -237,20 +237,24 @@ pub(crate) mod tests {
 
     pub(crate) fn linear(out_f: usize, in_f: usize, device: &CpuDevice) -> Linear<CpuRuntime> {
         Linear::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![0.02f32; out_f * in_f], &[out_f, in_f], device),
-            Some(Tensor::<CpuRuntime>::from_slice(
-                &vec![0.0f32; out_f],
-                &[out_f],
+            Tensor::<CpuRuntime>::try_from_slice(
+                &vec![0.02f32; out_f * in_f],
+                &[out_f, in_f],
                 device,
-            )),
+            )
+            .unwrap(),
+            Some(
+                Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; out_f], &[out_f], device)
+                    .unwrap(),
+            ),
             false,
         )
     }
 
     pub(crate) fn layer_norm(dim: usize, device: &CpuDevice) -> LayerNorm<CpuRuntime> {
         LayerNorm::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; dim], &[dim], device),
-            Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; dim], &[dim], device),
+            Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; dim], &[dim], device).unwrap(),
+            Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; dim], &[dim], device).unwrap(),
             1e-5,
             false,
         )
@@ -265,11 +269,12 @@ pub(crate) mod tests {
         device: &CpuDevice,
     ) -> Conv1d<CpuRuntime> {
         Conv1d::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &vec![0.05f32; out_ch * in_ch * kernel],
                 &[out_ch, in_ch, kernel],
                 device,
-            ),
+            )
+            .unwrap(),
             None,
             1,
             padding,
@@ -305,7 +310,8 @@ pub(crate) mod tests {
                     linear_v: linear(hidden, hidden, device),
                     linear_out: linear(hidden, hidden, device),
                     distance_embedding: Embedding::new(
-                        Tensor::<CpuRuntime>::from_slice(&table, &[rows, cfg.head_dim], device),
+                        Tensor::<CpuRuntime>::try_from_slice(&table, &[rows, cfg.head_dim], device)
+                            .unwrap(),
                         false,
                     ),
                 },
@@ -350,7 +356,7 @@ pub(crate) mod tests {
             .map(|i| (i as f32 * 0.05).sin())
             .collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&data, &[1, t, cfg.hidden_size], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&data, &[1, t, cfg.hidden_size], &device).unwrap(),
             false,
         );
         let y = layer.forward(&client, &x).expect("forward");
@@ -365,7 +371,7 @@ pub(crate) mod tests {
         let (client, device) = cpu_setup();
         let layer = test_layer(test_config(), &device);
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4 * 3], &[1, 4, 3], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4 * 3], &[1, 4, 3], &device).unwrap(),
             false,
         );
         assert!(layer.forward(&client, &x).is_err());

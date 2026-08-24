@@ -260,8 +260,8 @@ mod tests {
         let mut cache = KvCache::<CpuRuntime>::new(1, 2, 64, 2048, 4, DType::F32, &device).unwrap();
 
         // Create K and V tensors [1, 2, 3, 4] (3 new tokens)
-        let k = Tensor::<CpuRuntime>::zeros(&[1, 2, 3, 4], DType::F32, &device);
-        let v = Tensor::<CpuRuntime>::zeros(&[1, 2, 3, 4], DType::F32, &device);
+        let k = Tensor::<CpuRuntime>::try_zeros(&[1, 2, 3, 4], DType::F32, &device).unwrap();
+        let v = Tensor::<CpuRuntime>::try_zeros(&[1, 2, 3, 4], DType::F32, &device).unwrap();
 
         cache.update(&k, &v).unwrap();
         assert_eq!(cache.seq_len(), 3);
@@ -279,8 +279,8 @@ mod tests {
         assert_eq!(cache.capacity(), 4);
 
         // Fill beyond capacity - should trigger growth
-        let k = Tensor::<CpuRuntime>::zeros(&[1, 2, 5, 4], DType::F32, &device);
-        let v = Tensor::<CpuRuntime>::zeros(&[1, 2, 5, 4], DType::F32, &device);
+        let k = Tensor::<CpuRuntime>::try_zeros(&[1, 2, 5, 4], DType::F32, &device).unwrap();
+        let v = Tensor::<CpuRuntime>::try_zeros(&[1, 2, 5, 4], DType::F32, &device).unwrap();
         cache.update(&k, &v).unwrap();
 
         assert_eq!(cache.seq_len(), 5);
@@ -292,8 +292,8 @@ mod tests {
         let device = numr::runtime::cpu::CpuDevice::new();
         let mut cache = KvCache::<CpuRuntime>::new(1, 2, 4, 8, 4, DType::F32, &device).unwrap();
 
-        let k = Tensor::<CpuRuntime>::zeros(&[1, 2, 10, 4], DType::F32, &device);
-        let v = Tensor::<CpuRuntime>::zeros(&[1, 2, 10, 4], DType::F32, &device);
+        let k = Tensor::<CpuRuntime>::try_zeros(&[1, 2, 10, 4], DType::F32, &device).unwrap();
+        let v = Tensor::<CpuRuntime>::try_zeros(&[1, 2, 10, 4], DType::F32, &device).unwrap();
         let result = cache.update(&k, &v);
         assert!(result.is_err());
     }
@@ -303,8 +303,8 @@ mod tests {
         let device = numr::runtime::cpu::CpuDevice::new();
         let mut cache = KvCache::<CpuRuntime>::new(1, 2, 64, 2048, 4, DType::F32, &device).unwrap();
 
-        let k = Tensor::<CpuRuntime>::zeros(&[1, 2, 3, 4], DType::F32, &device);
-        let v = Tensor::<CpuRuntime>::zeros(&[1, 2, 3, 4], DType::F32, &device);
+        let k = Tensor::<CpuRuntime>::try_zeros(&[1, 2, 3, 4], DType::F32, &device).unwrap();
+        let v = Tensor::<CpuRuntime>::try_zeros(&[1, 2, 3, 4], DType::F32, &device).unwrap();
         cache.update(&k, &v).unwrap();
         assert_eq!(cache.seq_len(), 3);
 
@@ -327,8 +327,8 @@ mod tests {
 
         let k_data: Vec<f32> = (0..24).map(|i| i as f32 * 0.1).collect();
         let v_data: Vec<f32> = (0..24).map(|i| i as f32 * 0.2).collect();
-        let k = Tensor::<CpuRuntime>::from_slice(&k_data, &[1, 2, 3, 4], &device);
-        let v = Tensor::<CpuRuntime>::from_slice(&v_data, &[1, 2, 3, 4], &device);
+        let k = Tensor::<CpuRuntime>::try_from_slice(&k_data, &[1, 2, 3, 4], &device).unwrap();
+        let v = Tensor::<CpuRuntime>::try_from_slice(&v_data, &[1, 2, 3, 4], &device).unwrap();
 
         cache.update_fused(&k, &v, &client).unwrap();
         assert_eq!(cache.seq_len(), 3);

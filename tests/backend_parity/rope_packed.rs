@@ -10,7 +10,7 @@ use numr::tensor::Tensor;
 /// Build sequential position_ids [0, 1, ..., n-1] as I32.
 fn seq_pids_cpu(n: usize, device: &numr::runtime::cpu::CpuDevice) -> Tensor<CpuRuntime> {
     let ids: Vec<i32> = (0..n as i32).collect();
-    Tensor::<CpuRuntime>::from_slice(&ids, &[n], device)
+    Tensor::<CpuRuntime>::try_from_slice(&ids, &[n], device).unwrap()
 }
 
 #[test]
@@ -40,23 +40,30 @@ fn test_apply_rope_packed_parity() {
         use numr::tensor::Tensor;
 
         let x_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(
+            Tensor::try_from_slice(
                 &x_data.to_vec::<f32>(),
                 &[total_tokens, num_heads, head_dim],
                 &cuda_device,
-            ),
+            )
+            .unwrap(),
             false,
         );
         let cos_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&cos_data.to_vec::<f32>(), &[max_seq, half_d], &cuda_device),
+            Tensor::try_from_slice(&cos_data.to_vec::<f32>(), &[max_seq, half_d], &cuda_device)
+                .unwrap(),
             false,
         );
         let sin_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&sin_data.to_vec::<f32>(), &[max_seq, half_d], &cuda_device),
+            Tensor::try_from_slice(&sin_data.to_vec::<f32>(), &[max_seq, half_d], &cuda_device)
+                .unwrap(),
             false,
         );
-        let pids_c =
-            Tensor::<CudaRuntime>::from_slice(&pids.to_vec::<i32>(), &[total_tokens], &cuda_device);
+        let pids_c = Tensor::<CudaRuntime>::try_from_slice(
+            &pids.to_vec::<i32>(),
+            &[total_tokens],
+            &cuda_device,
+        )
+        .unwrap();
 
         let result = cuda_client
             .apply_rope_packed(&x_c, &cos_c, &sin_c, &pids_c)
@@ -76,23 +83,30 @@ fn test_apply_rope_packed_parity() {
         use numr::tensor::Tensor;
 
         let x_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(
+            Tensor::try_from_slice(
                 &x_data.to_vec::<f32>(),
                 &[total_tokens, num_heads, head_dim],
                 &wgpu_device,
-            ),
+            )
+            .unwrap(),
             false,
         );
         let cos_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&cos_data.to_vec::<f32>(), &[max_seq, half_d], &wgpu_device),
+            Tensor::try_from_slice(&cos_data.to_vec::<f32>(), &[max_seq, half_d], &wgpu_device)
+                .unwrap(),
             false,
         );
         let sin_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&sin_data.to_vec::<f32>(), &[max_seq, half_d], &wgpu_device),
+            Tensor::try_from_slice(&sin_data.to_vec::<f32>(), &[max_seq, half_d], &wgpu_device)
+                .unwrap(),
             false,
         );
-        let pids_w =
-            Tensor::<WgpuRuntime>::from_slice(&pids.to_vec::<i32>(), &[total_tokens], &wgpu_device);
+        let pids_w = Tensor::<WgpuRuntime>::try_from_slice(
+            &pids.to_vec::<i32>(),
+            &[total_tokens],
+            &wgpu_device,
+        )
+        .unwrap();
 
         let result = wgpu_client
             .apply_rope_packed(&x_w, &cos_w, &sin_w, &pids_w)
@@ -146,7 +160,7 @@ fn test_packed_matches_standard_single_sequence() {
         }
     }
     let x_standard = Var::<CpuRuntime>::new(
-        Tensor::<CpuRuntime>::from_slice(&x_4d_data, &[1, h, s, d], &cpu_device),
+        Tensor::<CpuRuntime>::try_from_slice(&x_4d_data, &[1, h, s, d], &cpu_device).unwrap(),
         false,
     );
     let out_standard = cpu_client.apply_rope(&x_standard, &cos, &sin).unwrap();
@@ -189,11 +203,11 @@ fn test_packed_position_reset_parity() {
         .map(|i| (i as f32 * 0.4).sin())
         .collect();
     let cos = Var::<CpuRuntime>::new(
-        Tensor::<CpuRuntime>::from_slice(&cos_data, &[max_seq, half_d], &cpu_device),
+        Tensor::<CpuRuntime>::try_from_slice(&cos_data, &[max_seq, half_d], &cpu_device).unwrap(),
         false,
     );
     let sin = Var::<CpuRuntime>::new(
-        Tensor::<CpuRuntime>::from_slice(&sin_data, &[max_seq, half_d], &cpu_device),
+        Tensor::<CpuRuntime>::try_from_slice(&sin_data, &[max_seq, half_d], &cpu_device).unwrap(),
         false,
     );
 
@@ -209,10 +223,10 @@ fn test_packed_position_reset_parity() {
         .collect();
 
     let x = Var::<CpuRuntime>::new(
-        Tensor::<CpuRuntime>::from_slice(&x_data, &[4, h, d], &cpu_device),
+        Tensor::<CpuRuntime>::try_from_slice(&x_data, &[4, h, d], &cpu_device).unwrap(),
         false,
     );
-    let pids = Tensor::<CpuRuntime>::from_slice(&[0i32, 1, 0, 1], &[4], &cpu_device);
+    let pids = Tensor::<CpuRuntime>::try_from_slice(&[0i32, 1, 0, 1], &[4], &cpu_device).unwrap();
 
     let out = cpu_client.apply_rope_packed(&x, &cos, &sin, &pids).unwrap();
     let out_vec = out.tensor().to_vec::<f32>();

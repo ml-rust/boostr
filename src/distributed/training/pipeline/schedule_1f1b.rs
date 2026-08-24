@@ -231,7 +231,8 @@ mod tests {
         fn forward(&mut self, input: Var<CpuRuntime>) -> Result<Var<CpuRuntime>> {
             let data = input.tensor().to_vec::<f32>();
             let doubled: Vec<f32> = data.iter().map(|x| x * 2.0).collect();
-            let out = Tensor::from_slice(&doubled, input.tensor().shape(), input.tensor().device());
+            let out =
+                Tensor::try_from_slice(&doubled, input.tensor().shape(), input.tensor().device())?;
             self.saved_count += 1;
             Ok(Var::new(out, false))
         }
@@ -245,11 +246,11 @@ mod tests {
             // Gradient of doubling is 2 * output_grad
             let data = output_grad.to_vec::<f32>();
             let grad: Vec<f32> = data.iter().map(|x| x * 2.0).collect();
-            Ok(Tensor::from_slice(
+            Ok(Tensor::try_from_slice(
                 &grad,
                 output_grad.shape(),
                 output_grad.device(),
-            ))
+            )?)
         }
 
         fn param_grads(&self) -> Result<Vec<(TensorId, Tensor<CpuRuntime>)>> {
@@ -268,15 +269,15 @@ mod tests {
         let stage = Box::new(DoubleTrainStage::new());
         let mut schedule = Schedule1F1B::<CpuRuntime>::new(stage, 2, comm, device.clone()).unwrap();
 
-        let mb0 = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
-        let mb1 = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
+        let mb0 = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let mb1 = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
 
         // Single device: rank 0 is both first and last
         let loss_fn = |output: &Var<CpuRuntime>| -> Result<Var<CpuRuntime>> {
             // Sum as scalar loss
             let data = output.tensor().to_vec::<f32>();
             let sum: f32 = data.iter().sum();
-            let loss_t = Tensor::from_slice(&[sum], &[1], output.tensor().device());
+            let loss_t = Tensor::try_from_slice(&[sum], &[1], output.tensor().device())?;
             Ok(Var::new(loss_t, false))
         };
 

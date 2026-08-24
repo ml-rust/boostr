@@ -332,7 +332,7 @@ mod tests {
         let (_client, device) = cpu_setup();
         let comm = NoOpCommunicator;
 
-        let t = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap();
         all_reduce_tensor(&comm, &t, ReduceOp::Sum).unwrap();
 
         let data = t.to_vec::<f32>();
@@ -344,10 +344,10 @@ mod tests {
         let (_client, device) = cpu_setup();
         let comm = NoOpCommunicator;
 
-        let t = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         send_tensor(&comm, &t, 0, 0).unwrap();
 
-        let buf = Tensor::<CpuRuntime>::zeros(&[2], DType::F32, &device);
+        let buf = Tensor::<CpuRuntime>::try_zeros(&[2], DType::F32, &device).unwrap();
         recv_into_tensor(&comm, &buf, 0, 0).unwrap();
     }
 
@@ -356,7 +356,7 @@ mod tests {
         let (_client, device) = cpu_setup();
         let comm = NoOpCommunicator;
 
-        let t = Tensor::<CpuRuntime>::from_slice(&[5.0f32, 10.0], &[2], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[5.0f32, 10.0], &[2], &device).unwrap();
         broadcast_tensor(&comm, &t, 0).unwrap();
 
         let data = t.to_vec::<f32>();
@@ -395,7 +395,7 @@ mod tests {
         let comm = NoOpCommunicator;
 
         // NoOp send succeeds (no actual data transfer)
-        let t = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap();
         send_tensor_with_metadata(&comm, &t, 0, 0).unwrap();
     }
 
@@ -405,8 +405,9 @@ mod tests {
         let comm = NoOpCommunicator;
 
         // NoOp: world_size=1, recv = full send (no actual scatter)
-        let send = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device);
-        let recv = Tensor::<CpuRuntime>::zeros(&[3], DType::F32, &device);
+        let send =
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap();
+        let recv = Tensor::<CpuRuntime>::try_zeros(&[3], DType::F32, &device).unwrap();
         reduce_scatter_tensor(&comm, &send, &recv, ReduceOp::Sum).unwrap();
     }
 

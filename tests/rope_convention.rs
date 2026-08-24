@@ -141,7 +141,7 @@ fn rope_convention_matches_huggingface() {
     let (cos, sin) = (rope.cos_cache(), rope.sin_cache());
 
     let q = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&q_pre, &[1, HEADS, seq, HEAD_DIM], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&q_pre, &[1, HEADS, seq, HEAD_DIM], &device).unwrap(),
         false,
     );
 
@@ -186,7 +186,8 @@ fn rope_convention_matches_huggingface() {
     let k_pre = read_f32(&dir.join("qwen3_l0_k_pre_rope.f32"));
     let k_post = read_f32(&dir.join("qwen3_l0_k_after_rope.f32"));
     let k = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&k_pre, &[1, KV_HEADS, seq, HEAD_DIM], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&k_pre, &[1, KV_HEADS, seq, HEAD_DIM], &device)
+            .unwrap(),
         false,
     );
     let k_split: Vec<f32> = client

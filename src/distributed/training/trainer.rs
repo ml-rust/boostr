@@ -159,7 +159,7 @@ mod tests {
 
         let (_client, device) = cpu_setup();
         let id = TensorId::new();
-        let t = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let mut params = HashMap::new();
         params.insert(id, t);
 
@@ -180,11 +180,11 @@ mod tests {
 
         // Create a param and matching grad
         let param_id = TensorId::new();
-        let param = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
+        let param = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let mut params = HashMap::new();
         params.insert(param_id, param);
 
-        let grad = Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2], &[2], &device);
+        let grad = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(param_id, grad);
 
@@ -207,19 +207,19 @@ mod tests {
         let mut trainer = DistributedTrainer::<CpuRuntime>::new(config, comm).unwrap();
 
         let param_id = TensorId::new();
-        let param = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
+        let param = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let mut params = HashMap::new();
         params.insert(param_id, param);
 
         // First micro-batch: should return None (still accumulating)
-        let grad1 = Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2], &[2], &device);
+        let grad1 = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
         let mut grads1 = GradStore::new();
         grads1.insert(param_id, grad1);
         let result = trainer.step(&client, &mut params, grads1, 0.5).unwrap();
         assert!(result.is_none());
 
         // Second micro-batch: should return Some (accumulation complete)
-        let grad2 = Tensor::<CpuRuntime>::from_slice(&[0.3f32, 0.4], &[2], &device);
+        let grad2 = Tensor::<CpuRuntime>::try_from_slice(&[0.3f32, 0.4], &[2], &device).unwrap();
         let mut grads2 = GradStore::new();
         grads2.insert(param_id, grad2);
         let result = trainer.step(&client, &mut params, grads2, 0.6).unwrap();

@@ -13,10 +13,10 @@ use numr::tensor::Tensor;
 #[test]
 fn test_fused_adamw_cpu_reference() {
     let (client, device) = setup_cpu();
-    let param = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4], &device);
-    let grad = Tensor::from_slice(&[0.1f32, 0.2, 0.3, 0.4], &[4], &device);
-    let m = Tensor::zeros(&[4], DType::F32, &device);
-    let v = Tensor::zeros(&[4], DType::F32, &device);
+    let param = Tensor::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4], &device).unwrap();
+    let grad = Tensor::try_from_slice(&[0.1f32, 0.2, 0.3, 0.4], &[4], &device).unwrap();
+    let m = Tensor::try_zeros(&[4], DType::F32, &device).unwrap();
+    let v = Tensor::try_zeros(&[4], DType::F32, &device).unwrap();
 
     let lr = 1e-3;
     let beta1 = 0.9;
@@ -59,10 +59,10 @@ fn test_fused_adamw_cuda_parity() {
     let grad_data = [0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
     let shape = [8];
 
-    let param_cpu = Tensor::from_slice(&param_data, &shape, &cpu_device);
-    let grad_cpu = Tensor::from_slice(&grad_data, &shape, &cpu_device);
-    let m_cpu = Tensor::zeros(&shape, DType::F32, &cpu_device);
-    let v_cpu = Tensor::zeros(&shape, DType::F32, &cpu_device);
+    let param_cpu = Tensor::try_from_slice(&param_data, &shape, &cpu_device).unwrap();
+    let grad_cpu = Tensor::try_from_slice(&grad_data, &shape, &cpu_device).unwrap();
+    let m_cpu = Tensor::try_zeros(&shape, DType::F32, &cpu_device).unwrap();
+    let v_cpu = Tensor::try_zeros(&shape, DType::F32, &cpu_device).unwrap();
 
     let lr = 1e-3;
     let beta1 = 0.9;
@@ -80,10 +80,10 @@ fn test_fused_adamw_cuda_parity() {
         .unwrap();
 
     with_cuda_backend(|cuda_client, cuda_device| {
-        let param_cuda = Tensor::from_slice(&param_data, &shape, &cuda_device);
-        let grad_cuda = Tensor::from_slice(&grad_data, &shape, &cuda_device);
-        let m_cuda = Tensor::zeros(&shape, DType::F32, &cuda_device);
-        let v_cuda = Tensor::zeros(&shape, DType::F32, &cuda_device);
+        let param_cuda = Tensor::try_from_slice(&param_data, &shape, &cuda_device).unwrap();
+        let grad_cuda = Tensor::try_from_slice(&grad_data, &shape, &cuda_device).unwrap();
+        let m_cuda = Tensor::try_zeros(&shape, DType::F32, &cuda_device).unwrap();
+        let v_cuda = Tensor::try_zeros(&shape, DType::F32, &cuda_device).unwrap();
 
         let (cuda_p, cuda_m, cuda_v) = cuda_client
             .fused_adamw_step(
@@ -128,10 +128,10 @@ fn test_fused_adamw_wgpu_parity() {
     let grad_data = [0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
     let shape = [8];
 
-    let param_cpu = Tensor::from_slice(&param_data, &shape, &cpu_device);
-    let grad_cpu = Tensor::from_slice(&grad_data, &shape, &cpu_device);
-    let m_cpu = Tensor::zeros(&shape, DType::F32, &cpu_device);
-    let v_cpu = Tensor::zeros(&shape, DType::F32, &cpu_device);
+    let param_cpu = Tensor::try_from_slice(&param_data, &shape, &cpu_device).unwrap();
+    let grad_cpu = Tensor::try_from_slice(&grad_data, &shape, &cpu_device).unwrap();
+    let m_cpu = Tensor::try_zeros(&shape, DType::F32, &cpu_device).unwrap();
+    let v_cpu = Tensor::try_zeros(&shape, DType::F32, &cpu_device).unwrap();
 
     let lr = 1e-3;
     let beta1 = 0.9;
@@ -149,10 +149,10 @@ fn test_fused_adamw_wgpu_parity() {
         .unwrap();
 
     with_wgpu_backend(|wgpu_client, wgpu_device| {
-        let param_wgpu = Tensor::from_slice(&param_data, &shape, &wgpu_device);
-        let grad_wgpu = Tensor::from_slice(&grad_data, &shape, &wgpu_device);
-        let m_wgpu = Tensor::zeros(&shape, DType::F32, &wgpu_device);
-        let v_wgpu = Tensor::zeros(&shape, DType::F32, &wgpu_device);
+        let param_wgpu = Tensor::try_from_slice(&param_data, &shape, &wgpu_device).unwrap();
+        let grad_wgpu = Tensor::try_from_slice(&grad_data, &shape, &wgpu_device).unwrap();
+        let m_wgpu = Tensor::try_zeros(&shape, DType::F32, &wgpu_device).unwrap();
+        let v_wgpu = Tensor::try_zeros(&shape, DType::F32, &wgpu_device).unwrap();
 
         let (wgpu_p, wgpu_m, wgpu_v) = wgpu_client
             .fused_adamw_step(
@@ -193,15 +193,15 @@ fn test_fused_adamw_wgpu_parity() {
 fn test_fused_multi_tensor_adamw_cpu_reference() {
     let (client, device) = setup_cpu();
 
-    let p1 = Tensor::from_slice(&[1.0f32, 2.0], &[2], &device);
-    let g1 = Tensor::from_slice(&[0.1f32, 0.2], &[2], &device);
-    let m1 = Tensor::zeros(&[2], DType::F32, &device);
-    let v1 = Tensor::zeros(&[2], DType::F32, &device);
+    let p1 = Tensor::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+    let g1 = Tensor::try_from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
+    let m1 = Tensor::try_zeros(&[2], DType::F32, &device).unwrap();
+    let v1 = Tensor::try_zeros(&[2], DType::F32, &device).unwrap();
 
-    let p2 = Tensor::from_slice(&[3.0f32, 4.0, 5.0], &[3], &device);
-    let g2 = Tensor::from_slice(&[0.3f32, 0.4, 0.5], &[3], &device);
-    let m2 = Tensor::zeros(&[3], DType::F32, &device);
-    let v2 = Tensor::zeros(&[3], DType::F32, &device);
+    let p2 = Tensor::try_from_slice(&[3.0f32, 4.0, 5.0], &[3], &device).unwrap();
+    let g2 = Tensor::try_from_slice(&[0.3f32, 0.4, 0.5], &[3], &device).unwrap();
+    let m2 = Tensor::try_zeros(&[3], DType::F32, &device).unwrap();
+    let v2 = Tensor::try_zeros(&[3], DType::F32, &device).unwrap();
 
     let lr = 1e-3;
     let beta1 = 0.9;
@@ -254,14 +254,14 @@ fn test_fused_multi_tensor_adamw_cuda_parity() {
     let bc2 = (1.0_f64 - beta2).sqrt();
     let step_size = lr * bc2 / bc1;
 
-    let p1_cpu = Tensor::from_slice(&p1_data, &[4], &cpu_device);
-    let g1_cpu = Tensor::from_slice(&g1_data, &[4], &cpu_device);
-    let m1_cpu = Tensor::zeros(&[4], DType::F32, &cpu_device);
-    let v1_cpu = Tensor::zeros(&[4], DType::F32, &cpu_device);
-    let p2_cpu = Tensor::from_slice(&p2_data, &[5], &cpu_device);
-    let g2_cpu = Tensor::from_slice(&g2_data, &[5], &cpu_device);
-    let m2_cpu = Tensor::zeros(&[5], DType::F32, &cpu_device);
-    let v2_cpu = Tensor::zeros(&[5], DType::F32, &cpu_device);
+    let p1_cpu = Tensor::try_from_slice(&p1_data, &[4], &cpu_device).unwrap();
+    let g1_cpu = Tensor::try_from_slice(&g1_data, &[4], &cpu_device).unwrap();
+    let m1_cpu = Tensor::try_zeros(&[4], DType::F32, &cpu_device).unwrap();
+    let v1_cpu = Tensor::try_zeros(&[4], DType::F32, &cpu_device).unwrap();
+    let p2_cpu = Tensor::try_from_slice(&p2_data, &[5], &cpu_device).unwrap();
+    let g2_cpu = Tensor::try_from_slice(&g2_data, &[5], &cpu_device).unwrap();
+    let m2_cpu = Tensor::try_zeros(&[5], DType::F32, &cpu_device).unwrap();
+    let v2_cpu = Tensor::try_zeros(&[5], DType::F32, &cpu_device).unwrap();
 
     let cpu_groups = vec![
         (&p1_cpu, &g1_cpu, &m1_cpu, &v1_cpu),
@@ -272,14 +272,14 @@ fn test_fused_multi_tensor_adamw_cuda_parity() {
         .unwrap();
 
     with_cuda_backend(|cuda_client, cuda_device| {
-        let p1_cuda = Tensor::from_slice(&p1_data, &[4], &cuda_device);
-        let g1_cuda = Tensor::from_slice(&g1_data, &[4], &cuda_device);
-        let m1_cuda = Tensor::zeros(&[4], DType::F32, &cuda_device);
-        let v1_cuda = Tensor::zeros(&[4], DType::F32, &cuda_device);
-        let p2_cuda = Tensor::from_slice(&p2_data, &[5], &cuda_device);
-        let g2_cuda = Tensor::from_slice(&g2_data, &[5], &cuda_device);
-        let m2_cuda = Tensor::zeros(&[5], DType::F32, &cuda_device);
-        let v2_cuda = Tensor::zeros(&[5], DType::F32, &cuda_device);
+        let p1_cuda = Tensor::try_from_slice(&p1_data, &[4], &cuda_device).unwrap();
+        let g1_cuda = Tensor::try_from_slice(&g1_data, &[4], &cuda_device).unwrap();
+        let m1_cuda = Tensor::try_zeros(&[4], DType::F32, &cuda_device).unwrap();
+        let v1_cuda = Tensor::try_zeros(&[4], DType::F32, &cuda_device).unwrap();
+        let p2_cuda = Tensor::try_from_slice(&p2_data, &[5], &cuda_device).unwrap();
+        let g2_cuda = Tensor::try_from_slice(&g2_data, &[5], &cuda_device).unwrap();
+        let m2_cuda = Tensor::try_zeros(&[5], DType::F32, &cuda_device).unwrap();
+        let v2_cuda = Tensor::try_zeros(&[5], DType::F32, &cuda_device).unwrap();
 
         let cuda_groups = vec![
             (&p1_cuda, &g1_cuda, &m1_cuda, &v1_cuda),
@@ -314,8 +314,8 @@ fn test_fused_multi_tensor_adamw_cuda_parity() {
 #[test]
 fn test_fused_sgd_cpu_reference() {
     let (client, device) = setup_cpu();
-    let param = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4], &device);
-    let grad = Tensor::from_slice(&[0.1f32, 0.2, 0.3, 0.4], &[4], &device);
+    let param = Tensor::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4], &device).unwrap();
+    let grad = Tensor::try_from_slice(&[0.1f32, 0.2, 0.3, 0.4], &[4], &device).unwrap();
 
     // Vanilla SGD (no momentum)
     let (new_p, _buf) = client
@@ -330,8 +330,8 @@ fn test_fused_sgd_cpu_reference() {
 #[test]
 fn test_fused_sgd_momentum_cpu() {
     let (client, device) = setup_cpu();
-    let param = Tensor::from_slice(&[1.0f32, 2.0], &[2], &device);
-    let grad = Tensor::from_slice(&[0.1f32, 0.2], &[2], &device);
+    let param = Tensor::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+    let grad = Tensor::try_from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
 
     // First step (no buf)
     let (new_p, buf) = client
@@ -343,7 +343,7 @@ fn test_fused_sgd_momentum_cpu() {
     assert!((buf_data[0] - 0.1).abs() < 1e-6);
 
     // Second step (has buf)
-    let grad2 = Tensor::from_slice(&[0.2f32, 0.3], &[2], &device);
+    let grad2 = Tensor::try_from_slice(&[0.2f32, 0.3], &[2], &device).unwrap();
     let (new_p2, buf2) = client
         .fused_sgd_step(&new_p, &grad2, Some(&buf), 0.1, 0.9, 0.0, 0.0, false)
         .unwrap();
@@ -366,16 +366,16 @@ fn test_fused_sgd_cuda_parity() {
     let param_data = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     let grad_data = [0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
 
-    let param_cpu = Tensor::from_slice(&param_data, &shape, &cpu_device);
-    let grad_cpu = Tensor::from_slice(&grad_data, &shape, &cpu_device);
+    let param_cpu = Tensor::try_from_slice(&param_data, &shape, &cpu_device).unwrap();
+    let grad_cpu = Tensor::try_from_slice(&grad_data, &shape, &cpu_device).unwrap();
 
     let (cpu_p, cpu_buf) = cpu_client
         .fused_sgd_step(&param_cpu, &grad_cpu, None, 0.1, 0.9, 0.0, 0.01, false)
         .unwrap();
 
     with_cuda_backend(|cuda_client, cuda_device| {
-        let param_cuda = Tensor::from_slice(&param_data, &shape, &cuda_device);
-        let grad_cuda = Tensor::from_slice(&grad_data, &shape, &cuda_device);
+        let param_cuda = Tensor::try_from_slice(&param_data, &shape, &cuda_device).unwrap();
+        let grad_cuda = Tensor::try_from_slice(&grad_data, &shape, &cuda_device).unwrap();
 
         let (cuda_p, cuda_buf) = cuda_client
             .fused_sgd_step(&param_cuda, &grad_cuda, None, 0.1, 0.9, 0.0, 0.01, false)
@@ -404,16 +404,16 @@ fn test_fused_sgd_wgpu_parity() {
     let param_data = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     let grad_data = [0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
 
-    let param_cpu = Tensor::from_slice(&param_data, &shape, &cpu_device);
-    let grad_cpu = Tensor::from_slice(&grad_data, &shape, &cpu_device);
+    let param_cpu = Tensor::try_from_slice(&param_data, &shape, &cpu_device).unwrap();
+    let grad_cpu = Tensor::try_from_slice(&grad_data, &shape, &cpu_device).unwrap();
 
     let (cpu_p, cpu_buf) = cpu_client
         .fused_sgd_step(&param_cpu, &grad_cpu, None, 0.1, 0.9, 0.0, 0.01, false)
         .unwrap();
 
     with_wgpu_backend(|wgpu_client, wgpu_device| {
-        let param_wgpu = Tensor::from_slice(&param_data, &shape, &wgpu_device);
-        let grad_wgpu = Tensor::from_slice(&grad_data, &shape, &wgpu_device);
+        let param_wgpu = Tensor::try_from_slice(&param_data, &shape, &wgpu_device).unwrap();
+        let grad_wgpu = Tensor::try_from_slice(&grad_data, &shape, &wgpu_device).unwrap();
 
         let (wgpu_p, wgpu_buf) = wgpu_client
             .fused_sgd_step(&param_wgpu, &grad_wgpu, None, 0.1, 0.9, 0.0, 0.01, false)
@@ -437,9 +437,9 @@ fn test_fused_sgd_wgpu_parity() {
 #[test]
 fn test_fused_adagrad_cpu_reference() {
     let (client, device) = setup_cpu();
-    let param = Tensor::from_slice(&[1.0f32, 2.0], &[2], &device);
-    let grad = Tensor::from_slice(&[0.1f32, 0.2], &[2], &device);
-    let accum = Tensor::zeros(&[2], DType::F32, &device);
+    let param = Tensor::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+    let grad = Tensor::try_from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
+    let accum = Tensor::try_zeros(&[2], DType::F32, &device).unwrap();
 
     let (new_p, new_acc) = client
         .fused_adagrad_step(&param, &grad, &accum, 0.1, 1e-10, 0.0)
@@ -464,18 +464,18 @@ fn test_fused_adagrad_cuda_parity() {
     let param_data: Vec<f32> = (0..8).map(|i| (i + 1) as f32).collect();
     let grad_data: Vec<f32> = (0..8).map(|i| (i + 1) as f32 * 0.1).collect();
 
-    let param_cpu = Tensor::from_slice(&param_data, &shape, &cpu_device);
-    let grad_cpu = Tensor::from_slice(&grad_data, &shape, &cpu_device);
-    let accum_cpu = Tensor::zeros(&shape, DType::F32, &cpu_device);
+    let param_cpu = Tensor::try_from_slice(&param_data, &shape, &cpu_device).unwrap();
+    let grad_cpu = Tensor::try_from_slice(&grad_data, &shape, &cpu_device).unwrap();
+    let accum_cpu = Tensor::try_zeros(&shape, DType::F32, &cpu_device).unwrap();
 
     let (cpu_p, cpu_a) = cpu_client
         .fused_adagrad_step(&param_cpu, &grad_cpu, &accum_cpu, 0.1, 1e-10, 0.01)
         .unwrap();
 
     with_cuda_backend(|cuda_client, cuda_device| {
-        let param_cuda = Tensor::from_slice(&param_data, &shape, &cuda_device);
-        let grad_cuda = Tensor::from_slice(&grad_data, &shape, &cuda_device);
-        let accum_cuda = Tensor::zeros(&shape, DType::F32, &cuda_device);
+        let param_cuda = Tensor::try_from_slice(&param_data, &shape, &cuda_device).unwrap();
+        let grad_cuda = Tensor::try_from_slice(&grad_data, &shape, &cuda_device).unwrap();
+        let accum_cuda = Tensor::try_zeros(&shape, DType::F32, &cuda_device).unwrap();
 
         let (cuda_p, cuda_a) = cuda_client
             .fused_adagrad_step(&param_cuda, &grad_cuda, &accum_cuda, 0.1, 1e-10, 0.01)
@@ -504,18 +504,18 @@ fn test_fused_adagrad_wgpu_parity() {
     let param_data: Vec<f32> = (0..8).map(|i| (i + 1) as f32).collect();
     let grad_data: Vec<f32> = (0..8).map(|i| (i + 1) as f32 * 0.1).collect();
 
-    let param_cpu = Tensor::from_slice(&param_data, &shape, &cpu_device);
-    let grad_cpu = Tensor::from_slice(&grad_data, &shape, &cpu_device);
-    let accum_cpu = Tensor::zeros(&shape, DType::F32, &cpu_device);
+    let param_cpu = Tensor::try_from_slice(&param_data, &shape, &cpu_device).unwrap();
+    let grad_cpu = Tensor::try_from_slice(&grad_data, &shape, &cpu_device).unwrap();
+    let accum_cpu = Tensor::try_zeros(&shape, DType::F32, &cpu_device).unwrap();
 
     let (cpu_p, cpu_a) = cpu_client
         .fused_adagrad_step(&param_cpu, &grad_cpu, &accum_cpu, 0.1, 1e-10, 0.01)
         .unwrap();
 
     with_wgpu_backend(|wgpu_client, wgpu_device| {
-        let param_wgpu = Tensor::from_slice(&param_data, &shape, &wgpu_device);
-        let grad_wgpu = Tensor::from_slice(&grad_data, &shape, &wgpu_device);
-        let accum_wgpu = Tensor::zeros(&shape, DType::F32, &wgpu_device);
+        let param_wgpu = Tensor::try_from_slice(&param_data, &shape, &wgpu_device).unwrap();
+        let grad_wgpu = Tensor::try_from_slice(&grad_data, &shape, &wgpu_device).unwrap();
+        let accum_wgpu = Tensor::try_zeros(&shape, DType::F32, &wgpu_device).unwrap();
 
         let (wgpu_p, wgpu_a) = wgpu_client
             .fused_adagrad_step(&param_wgpu, &grad_wgpu, &accum_wgpu, 0.1, 1e-10, 0.01)
@@ -539,10 +539,10 @@ fn test_fused_adagrad_wgpu_parity() {
 #[test]
 fn test_fused_lamb_cpu_reference() {
     let (client, device) = setup_cpu();
-    let param = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4], &device);
-    let grad = Tensor::from_slice(&[0.1f32, 0.2, 0.3, 0.4], &[4], &device);
-    let m = Tensor::zeros(&[4], DType::F32, &device);
-    let v = Tensor::zeros(&[4], DType::F32, &device);
+    let param = Tensor::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4], &device).unwrap();
+    let grad = Tensor::try_from_slice(&[0.1f32, 0.2, 0.3, 0.4], &[4], &device).unwrap();
+    let m = Tensor::try_zeros(&[4], DType::F32, &device).unwrap();
+    let v = Tensor::try_zeros(&[4], DType::F32, &device).unwrap();
 
     let beta1 = 0.9;
     let beta2 = 0.999;
@@ -571,10 +571,10 @@ fn test_fused_lamb_cuda_parity() {
     let param_data: Vec<f32> = (0..8).map(|i| (i + 1) as f32).collect();
     let grad_data: Vec<f32> = (0..8).map(|i| (i + 1) as f32 * 0.1).collect();
 
-    let param_cpu = Tensor::from_slice(&param_data, &shape, &cpu_device);
-    let grad_cpu = Tensor::from_slice(&grad_data, &shape, &cpu_device);
-    let m_cpu = Tensor::zeros(&shape, DType::F32, &cpu_device);
-    let v_cpu = Tensor::zeros(&shape, DType::F32, &cpu_device);
+    let param_cpu = Tensor::try_from_slice(&param_data, &shape, &cpu_device).unwrap();
+    let grad_cpu = Tensor::try_from_slice(&grad_data, &shape, &cpu_device).unwrap();
+    let m_cpu = Tensor::try_zeros(&shape, DType::F32, &cpu_device).unwrap();
+    let v_cpu = Tensor::try_zeros(&shape, DType::F32, &cpu_device).unwrap();
 
     let (cpu_u, cpu_m, cpu_v) = cpu_client
         .fused_lamb_step(
@@ -583,10 +583,10 @@ fn test_fused_lamb_cuda_parity() {
         .unwrap();
 
     with_cuda_backend(|cuda_client, cuda_device| {
-        let param_cuda = Tensor::from_slice(&param_data, &shape, &cuda_device);
-        let grad_cuda = Tensor::from_slice(&grad_data, &shape, &cuda_device);
-        let m_cuda = Tensor::zeros(&shape, DType::F32, &cuda_device);
-        let v_cuda = Tensor::zeros(&shape, DType::F32, &cuda_device);
+        let param_cuda = Tensor::try_from_slice(&param_data, &shape, &cuda_device).unwrap();
+        let grad_cuda = Tensor::try_from_slice(&grad_data, &shape, &cuda_device).unwrap();
+        let m_cuda = Tensor::try_zeros(&shape, DType::F32, &cuda_device).unwrap();
+        let v_cuda = Tensor::try_zeros(&shape, DType::F32, &cuda_device).unwrap();
 
         let (cuda_u, cuda_m, cuda_v) = cuda_client
             .fused_lamb_step(
@@ -631,10 +631,10 @@ fn test_fused_lamb_wgpu_parity() {
     let param_data: Vec<f32> = (0..8).map(|i| (i + 1) as f32).collect();
     let grad_data: Vec<f32> = (0..8).map(|i| (i + 1) as f32 * 0.1).collect();
 
-    let param_cpu = Tensor::from_slice(&param_data, &shape, &cpu_device);
-    let grad_cpu = Tensor::from_slice(&grad_data, &shape, &cpu_device);
-    let m_cpu = Tensor::zeros(&shape, DType::F32, &cpu_device);
-    let v_cpu = Tensor::zeros(&shape, DType::F32, &cpu_device);
+    let param_cpu = Tensor::try_from_slice(&param_data, &shape, &cpu_device).unwrap();
+    let grad_cpu = Tensor::try_from_slice(&grad_data, &shape, &cpu_device).unwrap();
+    let m_cpu = Tensor::try_zeros(&shape, DType::F32, &cpu_device).unwrap();
+    let v_cpu = Tensor::try_zeros(&shape, DType::F32, &cpu_device).unwrap();
 
     let (cpu_u, cpu_m, cpu_v) = cpu_client
         .fused_lamb_step(
@@ -643,10 +643,10 @@ fn test_fused_lamb_wgpu_parity() {
         .unwrap();
 
     with_wgpu_backend(|wgpu_client, wgpu_device| {
-        let param_wgpu = Tensor::from_slice(&param_data, &shape, &wgpu_device);
-        let grad_wgpu = Tensor::from_slice(&grad_data, &shape, &wgpu_device);
-        let m_wgpu = Tensor::zeros(&shape, DType::F32, &wgpu_device);
-        let v_wgpu = Tensor::zeros(&shape, DType::F32, &wgpu_device);
+        let param_wgpu = Tensor::try_from_slice(&param_data, &shape, &wgpu_device).unwrap();
+        let grad_wgpu = Tensor::try_from_slice(&grad_data, &shape, &wgpu_device).unwrap();
+        let m_wgpu = Tensor::try_zeros(&shape, DType::F32, &wgpu_device).unwrap();
+        let v_wgpu = Tensor::try_zeros(&shape, DType::F32, &wgpu_device).unwrap();
 
         let (wgpu_u, wgpu_m, wgpu_v) = wgpu_client
             .fused_lamb_step(
@@ -708,12 +708,12 @@ where
     use numr::autograd::GradStore;
     use std::collections::HashMap;
 
-    let param = Tensor::<R>::from_slice(&[half::bf16::from_f32(w0)], &[1], device);
+    let param = Tensor::<R>::try_from_slice(&[half::bf16::from_f32(w0)], &[1], device).unwrap();
     let id = param.id();
     let mut params = HashMap::new();
     params.insert(id, param);
 
-    let grad = Tensor::<R>::from_slice(&[half::bf16::from_f32(g)], &[1], device);
+    let grad = Tensor::<R>::try_from_slice(&[half::bf16::from_f32(g)], &[1], device).unwrap();
 
     let mut opt = AdamW::<R>::new(AdamWConfig {
         lr,

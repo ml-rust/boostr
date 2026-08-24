@@ -103,7 +103,7 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let embeddings = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &[
                     1.0f32, 0.0, 0.0, 0.0, // embed 0
                     0.0, 1.0, 0.0, 0.0, // embed 1
@@ -111,7 +111,8 @@ mod tests {
                 ],
                 &[3, 4],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
 
@@ -126,11 +127,11 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let q = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap(),
             false,
         );
         let k = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap(),
             false,
         );
         assert!(contrastive_loss(&client, &q, &k, 0.07).is_err());

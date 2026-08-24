@@ -24,8 +24,11 @@ fn test_fused_qkv_projection_mha_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
         use numr::tensor::Tensor;
-        let input_w = Tensor::from_slice(&input.to_vec::<f32>(), &[b, s, h], &wgpu_device);
-        let weight_w = Tensor::from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &wgpu_device);
+        let input_w =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), &[b, s, h], &wgpu_device).unwrap();
+        let weight_w =
+            Tensor::try_from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &wgpu_device)
+                .unwrap();
         let (wgpu_q, wgpu_k, wgpu_v) = wgpu_client
             .fused_qkv_projection(&input_w, &weight_w, None, num_heads, num_kv_heads, head_dim)
             .unwrap();
@@ -50,8 +53,11 @@ fn test_fused_qkv_projection_mha_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
         use numr::tensor::Tensor;
-        let input_c = Tensor::from_slice(&input.to_vec::<f32>(), &[b, s, h], &cuda_device);
-        let weight_c = Tensor::from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &cuda_device);
+        let input_c =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), &[b, s, h], &cuda_device).unwrap();
+        let weight_c =
+            Tensor::try_from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &cuda_device)
+                .unwrap();
         let (cuda_q, cuda_k, cuda_v) = cuda_client
             .fused_qkv_projection(&input_c, &weight_c, None, num_heads, num_kv_heads, head_dim)
             .unwrap();
@@ -94,8 +100,11 @@ fn test_fused_qkv_projection_gqa_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
         use numr::tensor::Tensor;
-        let input_w = Tensor::from_slice(&input.to_vec::<f32>(), &[b, s, h], &wgpu_device);
-        let weight_w = Tensor::from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &wgpu_device);
+        let input_w =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), &[b, s, h], &wgpu_device).unwrap();
+        let weight_w =
+            Tensor::try_from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &wgpu_device)
+                .unwrap();
         let (wgpu_q, wgpu_k, wgpu_v) = wgpu_client
             .fused_qkv_projection(&input_w, &weight_w, None, num_heads, num_kv_heads, head_dim)
             .unwrap();
@@ -120,8 +129,11 @@ fn test_fused_qkv_projection_gqa_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
         use numr::tensor::Tensor;
-        let input_c = Tensor::from_slice(&input.to_vec::<f32>(), &[b, s, h], &cuda_device);
-        let weight_c = Tensor::from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &cuda_device);
+        let input_c =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), &[b, s, h], &cuda_device).unwrap();
+        let weight_c =
+            Tensor::try_from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &cuda_device)
+                .unwrap();
         let (cuda_q, cuda_k, cuda_v) = cuda_client
             .fused_qkv_projection(&input_c, &weight_c, None, num_heads, num_kv_heads, head_dim)
             .unwrap();
@@ -172,9 +184,13 @@ fn test_fused_qkv_projection_with_bias_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
         use numr::tensor::Tensor;
-        let input_w = Tensor::from_slice(&input.to_vec::<f32>(), &[b, s, h], &wgpu_device);
-        let weight_w = Tensor::from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &wgpu_device);
-        let bias_w = Tensor::from_slice(&bias.to_vec::<f32>(), &[total_proj], &wgpu_device);
+        let input_w =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), &[b, s, h], &wgpu_device).unwrap();
+        let weight_w =
+            Tensor::try_from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &wgpu_device)
+                .unwrap();
+        let bias_w =
+            Tensor::try_from_slice(&bias.to_vec::<f32>(), &[total_proj], &wgpu_device).unwrap();
         let (wgpu_q, wgpu_k, wgpu_v) = wgpu_client
             .fused_qkv_projection(
                 &input_w,
@@ -206,9 +222,13 @@ fn test_fused_qkv_projection_with_bias_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
         use numr::tensor::Tensor;
-        let input_c = Tensor::from_slice(&input.to_vec::<f32>(), &[b, s, h], &cuda_device);
-        let weight_c = Tensor::from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &cuda_device);
-        let bias_c = Tensor::from_slice(&bias.to_vec::<f32>(), &[total_proj], &cuda_device);
+        let input_c =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), &[b, s, h], &cuda_device).unwrap();
+        let weight_c =
+            Tensor::try_from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &cuda_device)
+                .unwrap();
+        let bias_c =
+            Tensor::try_from_slice(&bias.to_vec::<f32>(), &[total_proj], &cuda_device).unwrap();
         let (cuda_q, cuda_k, cuda_v) = cuda_client
             .fused_qkv_projection(
                 &input_c,
@@ -255,9 +275,13 @@ fn test_fused_output_projection_residual_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
         use numr::tensor::Tensor;
-        let attn_w = Tensor::from_slice(&attn_out.to_vec::<f32>(), &[b, s, proj_dim], &wgpu_device);
-        let weight_w = Tensor::from_slice(&weight.to_vec::<f32>(), &[h, proj_dim], &wgpu_device);
-        let res_w = Tensor::from_slice(&residual.to_vec::<f32>(), &[b, s, h], &wgpu_device);
+        let attn_w =
+            Tensor::try_from_slice(&attn_out.to_vec::<f32>(), &[b, s, proj_dim], &wgpu_device)
+                .unwrap();
+        let weight_w =
+            Tensor::try_from_slice(&weight.to_vec::<f32>(), &[h, proj_dim], &wgpu_device).unwrap();
+        let res_w =
+            Tensor::try_from_slice(&residual.to_vec::<f32>(), &[b, s, h], &wgpu_device).unwrap();
         let wgpu_out = wgpu_client
             .fused_output_projection_residual(&attn_w, &weight_w, None, &res_w)
             .unwrap();
@@ -272,9 +296,13 @@ fn test_fused_output_projection_residual_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
         use numr::tensor::Tensor;
-        let attn_c = Tensor::from_slice(&attn_out.to_vec::<f32>(), &[b, s, proj_dim], &cuda_device);
-        let weight_c = Tensor::from_slice(&weight.to_vec::<f32>(), &[h, proj_dim], &cuda_device);
-        let res_c = Tensor::from_slice(&residual.to_vec::<f32>(), &[b, s, h], &cuda_device);
+        let attn_c =
+            Tensor::try_from_slice(&attn_out.to_vec::<f32>(), &[b, s, proj_dim], &cuda_device)
+                .unwrap();
+        let weight_c =
+            Tensor::try_from_slice(&weight.to_vec::<f32>(), &[h, proj_dim], &cuda_device).unwrap();
+        let res_c =
+            Tensor::try_from_slice(&residual.to_vec::<f32>(), &[b, s, h], &cuda_device).unwrap();
         let cuda_out = cuda_client
             .fused_output_projection_residual(&attn_c, &weight_c, None, &res_c)
             .unwrap();
@@ -320,23 +348,29 @@ fn test_fused_qkv_projection_bwd_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
         use numr::tensor::Tensor;
-        let dq_w = Tensor::from_slice(
+        let dq_w = Tensor::try_from_slice(
             &dq.to_vec::<f32>(),
             &[b, num_heads, s, head_dim],
             &wgpu_device,
-        );
-        let dk_w = Tensor::from_slice(
+        )
+        .unwrap();
+        let dk_w = Tensor::try_from_slice(
             &dk.to_vec::<f32>(),
             &[b, num_kv_heads, s, head_dim],
             &wgpu_device,
-        );
-        let dv_w = Tensor::from_slice(
+        )
+        .unwrap();
+        let dv_w = Tensor::try_from_slice(
             &dv.to_vec::<f32>(),
             &[b, num_kv_heads, s, head_dim],
             &wgpu_device,
-        );
-        let input_w = Tensor::from_slice(&input.to_vec::<f32>(), &[b, s, h], &wgpu_device);
-        let weight_w = Tensor::from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &wgpu_device);
+        )
+        .unwrap();
+        let input_w =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), &[b, s, h], &wgpu_device).unwrap();
+        let weight_w =
+            Tensor::try_from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &wgpu_device)
+                .unwrap();
         let (wgpu_di, wgpu_dw, wgpu_db) = wgpu_client
             .fused_qkv_projection_bwd(
                 &dq_w,
@@ -371,23 +405,29 @@ fn test_fused_qkv_projection_bwd_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::fused_qkv::FusedQkvOps as _;
         use numr::tensor::Tensor;
-        let dq_c = Tensor::from_slice(
+        let dq_c = Tensor::try_from_slice(
             &dq.to_vec::<f32>(),
             &[b, num_heads, s, head_dim],
             &cuda_device,
-        );
-        let dk_c = Tensor::from_slice(
+        )
+        .unwrap();
+        let dk_c = Tensor::try_from_slice(
             &dk.to_vec::<f32>(),
             &[b, num_kv_heads, s, head_dim],
             &cuda_device,
-        );
-        let dv_c = Tensor::from_slice(
+        )
+        .unwrap();
+        let dv_c = Tensor::try_from_slice(
             &dv.to_vec::<f32>(),
             &[b, num_kv_heads, s, head_dim],
             &cuda_device,
-        );
-        let input_c = Tensor::from_slice(&input.to_vec::<f32>(), &[b, s, h], &cuda_device);
-        let weight_c = Tensor::from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &cuda_device);
+        )
+        .unwrap();
+        let input_c =
+            Tensor::try_from_slice(&input.to_vec::<f32>(), &[b, s, h], &cuda_device).unwrap();
+        let weight_c =
+            Tensor::try_from_slice(&weight.to_vec::<f32>(), &[total_proj, h], &cuda_device)
+                .unwrap();
         let (cuda_di, cuda_dw, cuda_db) = cuda_client
             .fused_qkv_projection_bwd(
                 &dq_c,

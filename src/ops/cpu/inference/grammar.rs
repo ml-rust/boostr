@@ -110,12 +110,14 @@ mod tests {
         let vocab_offsets_data: Vec<f32> = vec![0.0, 1.0, 2.0, 4.0]; // 3 tokens + 1
 
         let transition_table_tensor =
-            Tensor::from_slice(&transition_table, &[num_states * 256], &device);
-        let accepting_mask_tensor = Tensor::from_slice(&accepting_mask, &[num_states], &device);
+            Tensor::try_from_slice(&transition_table, &[num_states * 256], &device).unwrap();
+        let accepting_mask_tensor =
+            Tensor::try_from_slice(&accepting_mask, &[num_states], &device).unwrap();
         let vocab_bytes_tensor =
-            Tensor::from_slice(&vocab_bytes_data, &[vocab_bytes_data.len()], &device);
+            Tensor::try_from_slice(&vocab_bytes_data, &[vocab_bytes_data.len()], &device).unwrap();
         let vocab_offsets_tensor =
-            Tensor::from_slice(&vocab_offsets_data, &[vocab_offsets_data.len()], &device);
+            Tensor::try_from_slice(&vocab_offsets_data, &[vocab_offsets_data.len()], &device)
+                .unwrap();
 
         let grammar = DeviceGrammarDfa {
             transition_table: transition_table_tensor,
@@ -127,7 +129,7 @@ mod tests {
             vocab_size: 3,
         };
 
-        let logits = Tensor::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device);
+        let logits = Tensor::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap();
 
         let client = numr::runtime::cpu::CpuClient::new(device);
         let result = client.grammar_dfa_mask_logits(&logits, &grammar).unwrap();

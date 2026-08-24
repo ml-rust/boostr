@@ -42,23 +42,26 @@ fn test_varlen_attention_fwd_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::varlen_attention::VarLenAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::from_slice(
+        let q_c = Tensor::try_from_slice(
             &q.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &cuda_device,
-        );
-        let k_c = Tensor::from_slice(
+        )
+        .unwrap();
+        let k_c = Tensor::try_from_slice(
             &k.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &cuda_device,
-        );
-        let v_c = Tensor::from_slice(
+        )
+        .unwrap();
+        let v_c = Tensor::try_from_slice(
             &v.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &cuda_device,
-        );
-        let csq = Tensor::from_slice(&cu_data, &[batch_size + 1], &cuda_device);
-        let csk = Tensor::from_slice(&cu_data, &[batch_size + 1], &cuda_device);
+        )
+        .unwrap();
+        let csq = Tensor::try_from_slice(&cu_data, &[batch_size + 1], &cuda_device).unwrap();
+        let csk = Tensor::try_from_slice(&cu_data, &[batch_size + 1], &cuda_device).unwrap();
         let (out, _) = cuda_client
             .varlen_attention_fwd(
                 &q_c, &k_c, &v_c, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
@@ -72,23 +75,26 @@ fn test_varlen_attention_fwd_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::varlen_attention::VarLenAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::from_slice(
+        let q_w = Tensor::try_from_slice(
             &q.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &wgpu_device,
-        );
-        let k_w = Tensor::from_slice(
+        )
+        .unwrap();
+        let k_w = Tensor::try_from_slice(
             &k.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &wgpu_device,
-        );
-        let v_w = Tensor::from_slice(
+        )
+        .unwrap();
+        let v_w = Tensor::try_from_slice(
             &v.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &wgpu_device,
-        );
-        let csq = Tensor::from_slice(&cu_data, &[batch_size + 1], &wgpu_device);
-        let csk = Tensor::from_slice(&cu_data, &[batch_size + 1], &wgpu_device);
+        )
+        .unwrap();
+        let csq = Tensor::try_from_slice(&cu_data, &[batch_size + 1], &wgpu_device).unwrap();
+        let csk = Tensor::try_from_slice(&cu_data, &[batch_size + 1], &wgpu_device).unwrap();
         let (out, _) = wgpu_client
             .varlen_attention_fwd(
                 &q_w, &k_w, &v_w, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
@@ -159,34 +165,38 @@ fn test_varlen_attention_bwd_parity() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::varlen_attention::VarLenAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::from_slice(
+        let q_c = Tensor::try_from_slice(
             &q.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &cuda_device,
-        );
-        let k_c = Tensor::from_slice(
+        )
+        .unwrap();
+        let k_c = Tensor::try_from_slice(
             &k.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &cuda_device,
-        );
-        let v_c = Tensor::from_slice(
+        )
+        .unwrap();
+        let v_c = Tensor::try_from_slice(
             &v.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &cuda_device,
-        );
-        let csq = Tensor::from_slice(&cu_data, &[batch_size + 1], &cuda_device);
-        let csk = Tensor::from_slice(&cu_data, &[batch_size + 1], &cuda_device);
+        )
+        .unwrap();
+        let csq = Tensor::try_from_slice(&cu_data, &[batch_size + 1], &cuda_device).unwrap();
+        let csk = Tensor::try_from_slice(&cu_data, &[batch_size + 1], &cuda_device).unwrap();
         let (out_c, lse_c) = cuda_client
             .varlen_attention_fwd(
                 &q_c, &k_c, &v_c, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
                 max_seqlen, head_dim, false,
             )
             .unwrap();
-        let dout_c = Tensor::from_slice(
+        let dout_c = Tensor::try_from_slice(
             &dout.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &cuda_device,
-        );
+        )
+        .unwrap();
         let (dq, dk, dv) = cuda_client
             .varlen_attention_bwd(
                 &dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, &csq, &csk, batch_size, num_heads,
@@ -214,34 +224,38 @@ fn test_varlen_attention_bwd_parity() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::varlen_attention::VarLenAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::from_slice(
+        let q_w = Tensor::try_from_slice(
             &q.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &wgpu_device,
-        );
-        let k_w = Tensor::from_slice(
+        )
+        .unwrap();
+        let k_w = Tensor::try_from_slice(
             &k.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &wgpu_device,
-        );
-        let v_w = Tensor::from_slice(
+        )
+        .unwrap();
+        let v_w = Tensor::try_from_slice(
             &v.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &wgpu_device,
-        );
-        let csq = Tensor::from_slice(&cu_data, &[batch_size + 1], &wgpu_device);
-        let csk = Tensor::from_slice(&cu_data, &[batch_size + 1], &wgpu_device);
+        )
+        .unwrap();
+        let csq = Tensor::try_from_slice(&cu_data, &[batch_size + 1], &wgpu_device).unwrap();
+        let csk = Tensor::try_from_slice(&cu_data, &[batch_size + 1], &wgpu_device).unwrap();
         let (out_w, lse_w) = wgpu_client
             .varlen_attention_fwd(
                 &q_w, &k_w, &v_w, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
                 max_seqlen, head_dim, false,
             )
             .unwrap();
-        let dout_w = Tensor::from_slice(
+        let dout_w = Tensor::try_from_slice(
             &dout.to_vec::<f32>(),
             &[total_tokens, num_heads, head_dim],
             &wgpu_device,
-        );
+        )
+        .unwrap();
         let (dq, dk, dv) = wgpu_client
             .varlen_attention_bwd(
                 &dout_w, &q_w, &k_w, &v_w, &out_w, &lse_w, &csq, &csk, batch_size, num_heads,
@@ -439,11 +453,17 @@ fn test_varlen_causal_unequal_seqlens_uses_absolute_positions() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::attention::varlen_attention::VarLenAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_c = Tensor::from_slice(&q_vec, &[total_tokens_q, num_heads, head_dim], &cuda_device);
-        let k_c = Tensor::from_slice(&k_vec, &[total_tokens_k, num_heads, head_dim], &cuda_device);
-        let v_c = Tensor::from_slice(&v_vec, &[total_tokens_k, num_heads, head_dim], &cuda_device);
-        let csq = Tensor::from_slice(&cu_q_data, &[batch_size + 1], &cuda_device);
-        let csk = Tensor::from_slice(&cu_k_data, &[batch_size + 1], &cuda_device);
+        let q_c =
+            Tensor::try_from_slice(&q_vec, &[total_tokens_q, num_heads, head_dim], &cuda_device)
+                .unwrap();
+        let k_c =
+            Tensor::try_from_slice(&k_vec, &[total_tokens_k, num_heads, head_dim], &cuda_device)
+                .unwrap();
+        let v_c =
+            Tensor::try_from_slice(&v_vec, &[total_tokens_k, num_heads, head_dim], &cuda_device)
+                .unwrap();
+        let csq = Tensor::try_from_slice(&cu_q_data, &[batch_size + 1], &cuda_device).unwrap();
+        let csk = Tensor::try_from_slice(&cu_k_data, &[batch_size + 1], &cuda_device).unwrap();
         let (out, _) = cuda_client
             .varlen_attention_fwd(
                 &q_c,
@@ -471,11 +491,17 @@ fn test_varlen_causal_unequal_seqlens_uses_absolute_positions() {
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::attention::varlen_attention::VarLenAttentionOps as _;
         use numr::tensor::Tensor;
-        let q_w = Tensor::from_slice(&q_vec, &[total_tokens_q, num_heads, head_dim], &wgpu_device);
-        let k_w = Tensor::from_slice(&k_vec, &[total_tokens_k, num_heads, head_dim], &wgpu_device);
-        let v_w = Tensor::from_slice(&v_vec, &[total_tokens_k, num_heads, head_dim], &wgpu_device);
-        let csq = Tensor::from_slice(&cu_q_data, &[batch_size + 1], &wgpu_device);
-        let csk = Tensor::from_slice(&cu_k_data, &[batch_size + 1], &wgpu_device);
+        let q_w =
+            Tensor::try_from_slice(&q_vec, &[total_tokens_q, num_heads, head_dim], &wgpu_device)
+                .unwrap();
+        let k_w =
+            Tensor::try_from_slice(&k_vec, &[total_tokens_k, num_heads, head_dim], &wgpu_device)
+                .unwrap();
+        let v_w =
+            Tensor::try_from_slice(&v_vec, &[total_tokens_k, num_heads, head_dim], &wgpu_device)
+                .unwrap();
+        let csq = Tensor::try_from_slice(&cu_q_data, &[batch_size + 1], &wgpu_device).unwrap();
+        let csk = Tensor::try_from_slice(&cu_k_data, &[batch_size + 1], &wgpu_device).unwrap();
         let (out, _) = wgpu_client
             .varlen_attention_fwd(
                 &q_w,
@@ -561,11 +587,11 @@ fn test_varlen_causal_equal_seqlens_bit_identical_to_legacy() {
         use boostr::ops::traits::attention::varlen_attention::VarLenAttentionOps as _;
         use numr::tensor::Tensor;
         let shape = [total_tokens, num_heads, head_dim];
-        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &shape, &cuda_device);
-        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &shape, &cuda_device);
-        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &shape, &cuda_device);
-        let csq = Tensor::from_slice(&cu_data, &[batch_size + 1], &cuda_device);
-        let csk = Tensor::from_slice(&cu_data, &[batch_size + 1], &cuda_device);
+        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &shape, &cuda_device).unwrap();
+        let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &shape, &cuda_device).unwrap();
+        let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &shape, &cuda_device).unwrap();
+        let csq = Tensor::try_from_slice(&cu_data, &[batch_size + 1], &cuda_device).unwrap();
+        let csk = Tensor::try_from_slice(&cu_data, &[batch_size + 1], &cuda_device).unwrap();
         let (out, _) = cuda_client
             .varlen_attention_fwd(
                 &q_c, &k_c, &v_c, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
@@ -584,11 +610,11 @@ fn test_varlen_causal_equal_seqlens_bit_identical_to_legacy() {
         use boostr::ops::traits::attention::varlen_attention::VarLenAttentionOps as _;
         use numr::tensor::Tensor;
         let shape = [total_tokens, num_heads, head_dim];
-        let q_w = Tensor::from_slice(&q.to_vec::<f32>(), &shape, &wgpu_device);
-        let k_w = Tensor::from_slice(&k.to_vec::<f32>(), &shape, &wgpu_device);
-        let v_w = Tensor::from_slice(&v.to_vec::<f32>(), &shape, &wgpu_device);
-        let csq = Tensor::from_slice(&cu_data, &[batch_size + 1], &wgpu_device);
-        let csk = Tensor::from_slice(&cu_data, &[batch_size + 1], &wgpu_device);
+        let q_w = Tensor::try_from_slice(&q.to_vec::<f32>(), &shape, &wgpu_device).unwrap();
+        let k_w = Tensor::try_from_slice(&k.to_vec::<f32>(), &shape, &wgpu_device).unwrap();
+        let v_w = Tensor::try_from_slice(&v.to_vec::<f32>(), &shape, &wgpu_device).unwrap();
+        let csq = Tensor::try_from_slice(&cu_data, &[batch_size + 1], &wgpu_device).unwrap();
+        let csk = Tensor::try_from_slice(&cu_data, &[batch_size + 1], &wgpu_device).unwrap();
         let (out, _) = wgpu_client
             .varlen_attention_fwd(
                 &q_w, &k_w, &v_w, &csq, &csk, batch_size, num_heads, num_heads, max_seqlen,
@@ -690,12 +716,12 @@ fn test_varlen_causal_unequal_seqlens_bwd_reaches_all_keys() {
         use numr::tensor::Tensor;
         let q_shape = [total_tokens_q, num_heads, head_dim];
         let k_shape = [total_tokens_k, num_heads, head_dim];
-        let q_c = Tensor::from_slice(&q.to_vec::<f32>(), &q_shape, &cuda_device);
-        let k_c = Tensor::from_slice(&k.to_vec::<f32>(), &k_shape, &cuda_device);
-        let v_c = Tensor::from_slice(&v.to_vec::<f32>(), &k_shape, &cuda_device);
-        let dout_c = Tensor::from_slice(&dout.to_vec::<f32>(), &q_shape, &cuda_device);
-        let csq = Tensor::from_slice(&cu_q_data, &[batch_size + 1], &cuda_device);
-        let csk = Tensor::from_slice(&cu_k_data, &[batch_size + 1], &cuda_device);
+        let q_c = Tensor::try_from_slice(&q.to_vec::<f32>(), &q_shape, &cuda_device).unwrap();
+        let k_c = Tensor::try_from_slice(&k.to_vec::<f32>(), &k_shape, &cuda_device).unwrap();
+        let v_c = Tensor::try_from_slice(&v.to_vec::<f32>(), &k_shape, &cuda_device).unwrap();
+        let dout_c = Tensor::try_from_slice(&dout.to_vec::<f32>(), &q_shape, &cuda_device).unwrap();
+        let csq = Tensor::try_from_slice(&cu_q_data, &[batch_size + 1], &cuda_device).unwrap();
+        let csk = Tensor::try_from_slice(&cu_k_data, &[batch_size + 1], &cuda_device).unwrap();
         let (out_c, lse_c) = cuda_client
             .varlen_attention_fwd(
                 &q_c,

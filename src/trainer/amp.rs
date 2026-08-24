@@ -255,8 +255,12 @@ mod tests {
         let (client, device) = cpu_setup();
 
         // Use F64 as compute dtype to test on CPU (BF16 needs f16 feature)
-        let target = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device);
-        let w_init = Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device);
+        let target =
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device)
+                .unwrap();
+        let w_init =
+            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0, 0.0, 0.0], &[2, 2], &device)
+                .unwrap();
         let w_id = w_init.id();
 
         let mut initial_params = HashMap::new();
@@ -311,7 +315,7 @@ mod tests {
     fn test_amp_trainer_loss_scale() {
         let (client, device) = cpu_setup();
 
-        let w = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device);
+        let w = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &device).unwrap();
         let mut params = HashMap::new();
         params.insert(w.id(), w);
 
@@ -342,8 +346,8 @@ mod tests {
     fn test_per_layer_precision_policy() {
         let (client, device) = cpu_setup();
 
-        let w1 = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
-        let w2 = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
+        let w1 = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let w2 = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
         let id1 = w1.id();
         let id2 = w2.id();
 
@@ -379,9 +383,9 @@ mod tests {
     fn test_fp32_override_set_bulk() {
         let (client, device) = cpu_setup();
 
-        let w1 = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device);
-        let w2 = Tensor::<CpuRuntime>::from_slice(&[2.0f32], &[1], &device);
-        let w3 = Tensor::<CpuRuntime>::from_slice(&[3.0f32], &[1], &device);
+        let w1 = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &device).unwrap();
+        let w2 = Tensor::<CpuRuntime>::try_from_slice(&[2.0f32], &[1], &device).unwrap();
+        let w3 = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32], &[1], &device).unwrap();
         let id1 = w1.id();
         let id2 = w2.id();
         let id3 = w3.id();
@@ -416,7 +420,7 @@ mod tests {
     fn test_amp_trainer_master_params_are_f32() {
         let (client, device) = cpu_setup();
 
-        let w = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
+        let w = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let mut params = HashMap::new();
         let id = w.id();
         params.insert(id, w);

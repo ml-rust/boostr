@@ -26,9 +26,9 @@ fn parameter_tensor_map(
 fn listed_nn_modules_preserve_explicit_parameter_ids() {
     let (_client, device) = cpu_setup();
 
-    let linear_w = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device);
+    let linear_w = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
     let linear_w_id = linear_w.id();
-    let linear_b = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 2], &[2], &device);
+    let linear_b = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 2], &[2], &device).unwrap();
     let linear_b_id = linear_b.id();
     let linear = Linear::with_ids(
         linear_w.clone(),
@@ -45,14 +45,15 @@ fn listed_nn_modules_preserve_explicit_parameter_ids() {
         vec![linear_w_id, linear_b_id]
     );
 
-    let embedding_w = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[3, 4], &device);
+    let embedding_w =
+        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[3, 4], &device).unwrap();
     let embedding_w_id = embedding_w.id();
     let embedding = Embedding::with_id(embedding_w.clone(), embedding_w_id, true);
     assert_eq!(embedding.parameters()[0].0, embedding_w_id);
 
-    let layernorm_w = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[4], &device);
+    let layernorm_w = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[4], &device).unwrap();
     let layernorm_w_id = layernorm_w.id();
-    let layernorm_b = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4], &device);
+    let layernorm_b = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[4], &device).unwrap();
     let layernorm_b_id = layernorm_b.id();
     let layernorm = LayerNorm::with_ids(
         layernorm_w.clone(),
@@ -71,14 +72,14 @@ fn listed_nn_modules_preserve_explicit_parameter_ids() {
         vec![layernorm_w_id, layernorm_b_id]
     );
 
-    let rms_w = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[4], &device);
+    let rms_w = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[4], &device).unwrap();
     let rms_w_id = rms_w.id();
     let rms = RmsNorm::with_id(rms_w.clone(), rms_w_id, 1e-5, true);
     assert_eq!(rms.parameters()[0].0, rms_w_id);
 
-    let conv_w = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 3], &[1, 1, 3], &device);
+    let conv_w = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 3], &[1, 1, 3], &device).unwrap();
     let conv_w_id = conv_w.id();
-    let conv_b = Tensor::<CpuRuntime>::from_slice(&[0.0f32], &[1], &device);
+    let conv_b = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32], &[1], &device).unwrap();
     let conv_b_id = conv_b.id();
     let conv = Conv1d::with_ids(
         conv_w.clone(),
@@ -109,12 +110,12 @@ fn nn_module_adamw_loop_preserves_state_and_converges() {
         .with_max_grad_norm(None);
     let mut trainer = SimpleTrainer::<CpuRuntime>::new(config).expect("valid config");
 
-    let input = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1, 1], &device);
-    let target = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1, 1], &device);
+    let input = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1, 1], &device).unwrap();
+    let target = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1, 1], &device).unwrap();
 
-    let weight_init = Tensor::<CpuRuntime>::from_slice(&[0.0f32], &[1, 1], &device);
+    let weight_init = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32], &[1, 1], &device).unwrap();
     let weight_id = weight_init.id();
-    let bias_init = Tensor::<CpuRuntime>::from_slice(&[0.0f32], &[1], &device);
+    let bias_init = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32], &[1], &device).unwrap();
     let bias_id = bias_init.id();
 
     let initial_model = Linear::with_ids(weight_init, weight_id, Some((bias_init, bias_id)), true);

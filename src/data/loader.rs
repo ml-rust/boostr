@@ -243,8 +243,8 @@ mod tests {
         fn get(&self, idx: usize, device: &CpuDevice) -> Result<Batch<CpuRuntime>> {
             let val = idx as f32;
             Ok(Batch {
-                inputs: Tensor::from_slice(&[val, val + 0.1], &[2], device),
-                targets: Tensor::from_slice(&[val + 1.0, val + 1.1], &[2], device),
+                inputs: Tensor::try_from_slice(&[val, val + 0.1], &[2], device).unwrap(),
+                targets: Tensor::try_from_slice(&[val + 1.0, val + 1.1], &[2], device).unwrap(),
             })
         }
     }

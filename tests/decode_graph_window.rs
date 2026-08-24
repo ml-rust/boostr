@@ -80,11 +80,12 @@ fn inputs(
     Tensor<CudaRuntime>,
     Tensor<CudaRuntime>,
 ) {
-    let q = Tensor::<CudaRuntime>::from_slice(
+    let q = Tensor::<CudaRuntime>::try_from_slice(
         &values(BATCH * NUM_HEADS * HEAD_DIM, 0.3),
         &[BATCH, NUM_HEADS, 1, HEAD_DIM],
         device,
-    );
+    )
+    .unwrap();
 
     let cache_len = BATCH * NUM_KV_HEADS * CAPACITY * HEAD_DIM;
     let mut k_data = values(cache_len, 1.1);
@@ -100,8 +101,8 @@ fn inputs(
     }
 
     let shape = [BATCH, NUM_KV_HEADS, CAPACITY, HEAD_DIM];
-    let k = Tensor::<CudaRuntime>::from_slice(&k_data, &shape, device);
-    let v = Tensor::<CudaRuntime>::from_slice(&v_data, &shape, device);
+    let k = Tensor::<CudaRuntime>::try_from_slice(&k_data, &shape, device).unwrap();
+    let v = Tensor::<CudaRuntime>::try_from_slice(&v_data, &shape, device).unwrap();
     (q, k, v)
 }
 
@@ -114,7 +115,8 @@ fn graph_decode(
     v: &Tensor<CudaRuntime>,
     window_size: usize,
 ) -> Vec<f32> {
-    let seq_len_k = Tensor::<CudaRuntime>::from_slice(&[SEQ_LEN_K as i32], &[1], device);
+    let seq_len_k =
+        Tensor::<CudaRuntime>::try_from_slice(&[SEQ_LEN_K as i32], &[1], device).unwrap();
     let (out, _lse) = decode_attention_graph_fwd(
         client,
         q,

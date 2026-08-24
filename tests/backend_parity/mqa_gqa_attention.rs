@@ -666,7 +666,8 @@ fn to_cuda(
 ) -> numr::tensor::Tensor<numr::runtime::cuda::CudaRuntime> {
     use numr::dtype::DType;
     use numr::tensor::Tensor;
-    let t = Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(data, shape, device);
+    let t =
+        Tensor::<numr::runtime::cuda::CudaRuntime>::try_from_slice(data, shape, device).unwrap();
     match dtype {
         TestDType::F32 => t,
         TestDType::F16 => t.to_dtype(DType::F16).expect("cast fixture to F16"),
@@ -705,9 +706,9 @@ fn run_fwd_case(case: Case, dtype: TestDType) {
 
     // Independent reference: CPU flash path (impl_generic standard attention).
     let (cpu_client, cpu_device) = setup_cpu();
-    let q = Tensor::<CpuRuntime>::from_slice(&q_data, &q_shape, &cpu_device);
-    let k = Tensor::<CpuRuntime>::from_slice(&k_data, &kv_shape, &cpu_device);
-    let v = Tensor::<CpuRuntime>::from_slice(&v_data, &kv_shape, &cpu_device);
+    let q = Tensor::<CpuRuntime>::try_from_slice(&q_data, &q_shape, &cpu_device).unwrap();
+    let k = Tensor::<CpuRuntime>::try_from_slice(&k_data, &kv_shape, &cpu_device).unwrap();
+    let v = Tensor::<CpuRuntime>::try_from_slice(&v_data, &kv_shape, &cpu_device).unwrap();
     let (cpu_out, _cpu_lse) = cpu_client
         .flash_attention_fwd(
             &q,
@@ -803,10 +804,10 @@ fn run_bwd_case(case: Case, dtype: TestDType) {
     let dout_data = det_data(&q_shape, 5.3);
 
     let (cpu_client, cpu_device) = setup_cpu();
-    let q = Tensor::<CpuRuntime>::from_slice(&q_data, &q_shape, &cpu_device);
-    let k = Tensor::<CpuRuntime>::from_slice(&k_data, &kv_shape, &cpu_device);
-    let v = Tensor::<CpuRuntime>::from_slice(&v_data, &kv_shape, &cpu_device);
-    let dout = Tensor::<CpuRuntime>::from_slice(&dout_data, &q_shape, &cpu_device);
+    let q = Tensor::<CpuRuntime>::try_from_slice(&q_data, &q_shape, &cpu_device).unwrap();
+    let k = Tensor::<CpuRuntime>::try_from_slice(&k_data, &kv_shape, &cpu_device).unwrap();
+    let v = Tensor::<CpuRuntime>::try_from_slice(&v_data, &kv_shape, &cpu_device).unwrap();
+    let dout = Tensor::<CpuRuntime>::try_from_slice(&dout_data, &q_shape, &cpu_device).unwrap();
 
     let (cpu_out, cpu_lse) = cpu_client
         .flash_attention_fwd(

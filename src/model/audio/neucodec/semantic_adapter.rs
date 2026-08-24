@@ -120,13 +120,10 @@ mod tests {
         let c = SEMANTIC_ADAPTER_CHANNELS;
         let k = SEMANTIC_ADAPTER_KERNEL_SIZE;
         let weight_data = vec![0.01f32; c * c * k];
-        let weight = Tensor::<CpuRuntime>::from_slice(&weight_data, &[c, c, k], device);
+        let weight =
+            Tensor::<CpuRuntime>::try_from_slice(&weight_data, &[c, c, k], device).unwrap();
         let bias = if bias {
-            Some(Tensor::<CpuRuntime>::from_slice(
-                &vec![0.0f32; c],
-                &[c],
-                device,
-            ))
+            Some(Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; c], &[c], device).unwrap())
         } else {
             None
         };
@@ -160,7 +157,12 @@ mod tests {
             .map(|i| (i as f32) * 0.001)
             .collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&x_data, &[1, SEMANTIC_ADAPTER_CHANNELS, t], &device),
+            Tensor::<CpuRuntime>::try_from_slice(
+                &x_data,
+                &[1, SEMANTIC_ADAPTER_CHANNELS, t],
+                &device,
+            )
+            .unwrap(),
             false,
         );
 
@@ -177,11 +179,12 @@ mod tests {
         let adapter = adapter(&device);
 
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &vec![0.0f32; SEMANTIC_ADAPTER_CHANNELS * 8],
                 &[SEMANTIC_ADAPTER_CHANNELS, 8],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
         assert!(adapter.forward(&client, &x).is_err());
@@ -193,7 +196,8 @@ mod tests {
         let adapter = adapter(&device);
 
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; 8 * 8], &[1, 8, 8], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; 8 * 8], &[1, 8, 8], &device)
+                .unwrap(),
             false,
         );
         assert!(adapter.forward(&client, &x).is_err());

@@ -197,7 +197,7 @@ mod tests {
         shape: &[usize],
     ) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device)
+        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device).unwrap()
     }
 
     fn ones(
@@ -205,7 +205,7 @@ mod tests {
         shape: &[usize],
     ) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; n], shape, device)
+        Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; n], shape, device).unwrap()
     }
 
     #[test]
@@ -246,7 +246,7 @@ mod tests {
         let value = ones(&device, &[2, 1, 4]);
         let key_cache = zeros(&device, &[4, 2, 1, 4]);
         let value_cache = zeros(&device, &[4, 2, 1, 4]);
-        let slot_mapping = Tensor::<CpuRuntime>::from_slice(&[1i32, 5], &[2], &device);
+        let slot_mapping = Tensor::<CpuRuntime>::try_from_slice(&[1i32, 5], &[2], &device).unwrap();
 
         client
             .reshape_and_cache(&key, &value, &key_cache, &value_cache, &slot_mapping, 2)
@@ -267,7 +267,7 @@ mod tests {
         let value = ones(&device, &[1, 1, 4]);
         let key_cache = zeros(&device, &[4, 2, 1, 4]);
         let value_cache = zeros(&device, &[4, 2, 1, 4]);
-        let slot_mapping = Tensor::<CpuRuntime>::from_slice(&[-1i32], &[1], &device);
+        let slot_mapping = Tensor::<CpuRuntime>::try_from_slice(&[-1i32], &[1], &device).unwrap();
 
         let result =
             client.reshape_and_cache(&key, &value, &key_cache, &value_cache, &slot_mapping, 2);
@@ -282,7 +282,7 @@ mod tests {
         let value = ones(&device, &[1, 1, 4]);
         let key_cache = zeros(&device, &[2, 2, 1, 4]);
         let value_cache = zeros(&device, &[2, 2, 1, 4]);
-        let slot_mapping = Tensor::<CpuRuntime>::from_slice(&[4i32], &[1], &device);
+        let slot_mapping = Tensor::<CpuRuntime>::try_from_slice(&[4i32], &[1], &device).unwrap();
 
         let result =
             client.reshape_and_cache(&key, &value, &key_cache, &value_cache, &slot_mapping, 2);

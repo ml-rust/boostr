@@ -117,7 +117,7 @@ mod tests {
         let (client, device) = cpu_setup();
         let mut accum = GradAccumulator::<CpuRuntime>::new(3).unwrap();
 
-        let t = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
         let id = t.id();
         let mut grads = GradStore::new();
         grads.insert(id, t);
@@ -135,14 +135,14 @@ mod tests {
         let id = numr::tensor::TensorId::new();
 
         // Micro-batch 1: grads = [2.0, 4.0]
-        let t1 = Tensor::<CpuRuntime>::from_slice(&[2.0f32, 4.0], &[2], &device);
+        let t1 = Tensor::<CpuRuntime>::try_from_slice(&[2.0f32, 4.0], &[2], &device).unwrap();
         let mut g1 = GradStore::new();
         g1.insert(id, t1);
 
         assert!(accum.accumulate(&client, g1).unwrap().is_none());
 
         // Micro-batch 2: grads = [6.0, 8.0]
-        let t2 = Tensor::<CpuRuntime>::from_slice(&[6.0f32, 8.0], &[2], &device);
+        let t2 = Tensor::<CpuRuntime>::try_from_slice(&[6.0f32, 8.0], &[2], &device).unwrap();
         let mut g2 = GradStore::new();
         g2.insert(id, t2);
 
@@ -165,7 +165,7 @@ mod tests {
         let id = numr::tensor::TensorId::new();
 
         for _ in 0..2 {
-            let t = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device);
+            let t = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &device).unwrap();
             let mut g = GradStore::new();
             g.insert(id, t);
             accum.accumulate(&client, g).unwrap();
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(accum.current_step(), 0);
 
         // Next accumulation starts fresh
-        let t = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &device).unwrap();
         let mut g = GradStore::new();
         g.insert(id, t);
         assert!(accum.accumulate(&client, g).unwrap().is_none());
@@ -188,7 +188,7 @@ mod tests {
         let mut accum = GradAccumulator::<CpuRuntime>::new(1).unwrap();
 
         let id = numr::tensor::TensorId::new();
-        let t = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 5.0], &[2], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 5.0], &[2], &device).unwrap();
         let mut g = GradStore::new();
         g.insert(id, t);
 
@@ -206,7 +206,7 @@ mod tests {
         let mut accum = GradAccumulator::<CpuRuntime>::new(3).unwrap();
 
         let id = numr::tensor::TensorId::new();
-        let t = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &device).unwrap();
         let mut g = GradStore::new();
         g.insert(id, t);
         accum.accumulate(&client, g).unwrap();

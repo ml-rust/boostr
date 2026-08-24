@@ -145,22 +145,26 @@ fn test_cuda_varlen_hd256_matches_cpu() {
     // --- CPU reference ---
     let (cpu_client, cpu_device) = cpu_setup();
 
-    let q_cpu = Tensor::<CpuRuntime>::from_slice(
+    let q_cpu = Tensor::<CpuRuntime>::try_from_slice(
         &q_data,
         &[total_tokens, num_heads, head_dim],
         &cpu_device,
-    );
-    let k_cpu = Tensor::<CpuRuntime>::from_slice(
+    )
+    .unwrap();
+    let k_cpu = Tensor::<CpuRuntime>::try_from_slice(
         &k_data,
         &[total_tokens, num_kv_heads, head_dim],
         &cpu_device,
-    );
-    let v_cpu = Tensor::<CpuRuntime>::from_slice(
+    )
+    .unwrap();
+    let v_cpu = Tensor::<CpuRuntime>::try_from_slice(
         &v_data,
         &[total_tokens, num_kv_heads, head_dim],
         &cpu_device,
-    );
-    let cu_cpu = Tensor::<CpuRuntime>::from_slice(&cu_data, &[batch_size + 1], &cpu_device);
+    )
+    .unwrap();
+    let cu_cpu =
+        Tensor::<CpuRuntime>::try_from_slice(&cu_data, &[batch_size + 1], &cpu_device).unwrap();
 
     let (out_cpu, _) = cpu_client
         .varlen_attention_fwd(
@@ -184,23 +188,28 @@ fn test_cuda_varlen_hd256_matches_cpu() {
     // --- CUDA hd256 GQA ---
     let (cuda_client, cuda_device) = cuda_setup();
 
-    let q_c = Tensor::<CudaRuntime>::from_slice(
+    let q_c = Tensor::<CudaRuntime>::try_from_slice(
         &q_data,
         &[total_tokens, num_heads, head_dim],
         &cuda_device,
-    );
-    let k_c = Tensor::<CudaRuntime>::from_slice(
+    )
+    .unwrap();
+    let k_c = Tensor::<CudaRuntime>::try_from_slice(
         &k_data,
         &[total_tokens, num_kv_heads, head_dim],
         &cuda_device,
-    );
-    let v_c = Tensor::<CudaRuntime>::from_slice(
+    )
+    .unwrap();
+    let v_c = Tensor::<CudaRuntime>::try_from_slice(
         &v_data,
         &[total_tokens, num_kv_heads, head_dim],
         &cuda_device,
-    );
-    let cu_q = Tensor::<CudaRuntime>::from_slice(&cu_data, &[batch_size + 1], &cuda_device);
-    let cu_k = Tensor::<CudaRuntime>::from_slice(&cu_data, &[batch_size + 1], &cuda_device);
+    )
+    .unwrap();
+    let cu_q =
+        Tensor::<CudaRuntime>::try_from_slice(&cu_data, &[batch_size + 1], &cuda_device).unwrap();
+    let cu_k =
+        Tensor::<CudaRuntime>::try_from_slice(&cu_data, &[batch_size + 1], &cuda_device).unwrap();
 
     let (out_cuda, _) = cuda_client
         .varlen_attention_fwd(
@@ -254,22 +263,26 @@ fn test_cuda_varlen_hd256_mha() {
     // --- CPU reference ---
     let (cpu_client, cpu_device) = cpu_setup();
 
-    let q_cpu = Tensor::<CpuRuntime>::from_slice(
+    let q_cpu = Tensor::<CpuRuntime>::try_from_slice(
         &q_data,
         &[total_tokens, num_heads, head_dim],
         &cpu_device,
-    );
-    let k_cpu = Tensor::<CpuRuntime>::from_slice(
+    )
+    .unwrap();
+    let k_cpu = Tensor::<CpuRuntime>::try_from_slice(
         &k_data,
         &[total_tokens, num_kv_heads, head_dim],
         &cpu_device,
-    );
-    let v_cpu = Tensor::<CpuRuntime>::from_slice(
+    )
+    .unwrap();
+    let v_cpu = Tensor::<CpuRuntime>::try_from_slice(
         &v_data,
         &[total_tokens, num_kv_heads, head_dim],
         &cpu_device,
-    );
-    let cu_cpu = Tensor::<CpuRuntime>::from_slice(&cu_data, &[batch_size + 1], &cpu_device);
+    )
+    .unwrap();
+    let cu_cpu =
+        Tensor::<CpuRuntime>::try_from_slice(&cu_data, &[batch_size + 1], &cpu_device).unwrap();
 
     let (out_cpu, _) = cpu_client
         .varlen_attention_fwd(
@@ -293,23 +306,28 @@ fn test_cuda_varlen_hd256_mha() {
     // --- CUDA hd256 MHA ---
     let (cuda_client, cuda_device) = cuda_setup();
 
-    let q_c = Tensor::<CudaRuntime>::from_slice(
+    let q_c = Tensor::<CudaRuntime>::try_from_slice(
         &q_data,
         &[total_tokens, num_heads, head_dim],
         &cuda_device,
-    );
-    let k_c = Tensor::<CudaRuntime>::from_slice(
+    )
+    .unwrap();
+    let k_c = Tensor::<CudaRuntime>::try_from_slice(
         &k_data,
         &[total_tokens, num_kv_heads, head_dim],
         &cuda_device,
-    );
-    let v_c = Tensor::<CudaRuntime>::from_slice(
+    )
+    .unwrap();
+    let v_c = Tensor::<CudaRuntime>::try_from_slice(
         &v_data,
         &[total_tokens, num_kv_heads, head_dim],
         &cuda_device,
-    );
-    let cu_q = Tensor::<CudaRuntime>::from_slice(&cu_data, &[batch_size + 1], &cuda_device);
-    let cu_k = Tensor::<CudaRuntime>::from_slice(&cu_data, &[batch_size + 1], &cuda_device);
+    )
+    .unwrap();
+    let cu_q =
+        Tensor::<CudaRuntime>::try_from_slice(&cu_data, &[batch_size + 1], &cuda_device).unwrap();
+    let cu_k =
+        Tensor::<CudaRuntime>::try_from_slice(&cu_data, &[batch_size + 1], &cuda_device).unwrap();
 
     let (out_cuda, _) = cuda_client
         .varlen_attention_fwd(

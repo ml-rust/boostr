@@ -389,11 +389,11 @@ mod tests {
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device)
+        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device).unwrap()
     }
     fn ones(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; n], shape, device)
+        Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; n], shape, device).unwrap()
     }
 
     fn tiny_config() -> AlbertConfig {
@@ -478,7 +478,7 @@ mod tests {
             shared_layer: build_layer(&cfg, &device),
             config: cfg,
         };
-        let ids = Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2, 3], &[1, 4], &device);
+        let ids = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2, 3], &[1, 4], &device).unwrap();
         let out = model.forward(&client, &ids).unwrap();
         assert_eq!(out.shape(), &[1, 4, cfg.hidden_size]);
     }
@@ -501,7 +501,7 @@ mod tests {
             projection_bias: zeros(&[out_dim], &device),
             out_dim,
         };
-        let ids = Tensor::<CpuRuntime>::from_slice(&[0i64, 1, 2], &[1, 3], &device);
+        let ids = Tensor::<CpuRuntime>::try_from_slice(&[0i64, 1, 2], &[1, 3], &device).unwrap();
         let out = encoder.forward(&client, &ids).unwrap();
         assert_eq!(out.shape(), &[1, 3, out_dim]);
     }
@@ -513,7 +513,7 @@ mod tests {
         let emb = build_embeddings(&cfg, &device);
         // max_positions is 16 in tiny_config; give 20.
         let ids_data = [0i64; 20];
-        let ids = Tensor::<CpuRuntime>::from_slice(&ids_data, &[1, 20], &device);
+        let ids = Tensor::<CpuRuntime>::try_from_slice(&ids_data, &[1, 20], &device).unwrap();
         assert!(emb.forward(&client, &ids).is_err());
     }
 }

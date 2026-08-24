@@ -71,8 +71,9 @@ mod tests {
     #[test]
     fn zero_input_stays_zero() {
         let (client, device) = cpu_setup();
-        let x = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 6], &[1, 2, 3], &device);
-        let alpha = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[1, 2, 1], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 6], &[1, 2, 3], &device).unwrap();
+        let alpha =
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[1, 2, 1], &device).unwrap();
         let y = snake(&client, &x, &alpha, 1e-9).unwrap();
         for v in y.to_vec::<f32>() {
             assert!(v.abs() < 1e-6, "got {v}");
@@ -84,8 +85,8 @@ mod tests {
         // snake(x) = x + sin²(x). Check pointwise.
         let (client, device) = cpu_setup();
         let input: Vec<f32> = vec![-1.5, -0.5, 0.0, 0.5, 1.5];
-        let x = Tensor::<CpuRuntime>::from_slice(&input, &[1, 1, 5], &device);
-        let alpha = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1, 1, 1], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(&input, &[1, 1, 5], &device).unwrap();
+        let alpha = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1, 1, 1], &device).unwrap();
         let y: Vec<f32> = snake(&client, &x, &alpha, 0.0).unwrap().to_vec();
         for (got, x_in) in y.iter().zip(&input) {
             let expected = x_in + x_in.sin().powi(2);
@@ -101,8 +102,8 @@ mod tests {
         // For α=2, period halves: snake(x) = x + sin²(2x).
         let (client, device) = cpu_setup();
         let input: Vec<f32> = vec![0.5, 1.0];
-        let x = Tensor::<CpuRuntime>::from_slice(&input, &[1, 1, 2], &device);
-        let alpha = Tensor::<CpuRuntime>::from_slice(&[2.0f32], &[1, 1, 1], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(&input, &[1, 1, 2], &device).unwrap();
+        let alpha = Tensor::<CpuRuntime>::try_from_slice(&[2.0f32], &[1, 1, 1], &device).unwrap();
         let y: Vec<f32> = snake(&client, &x, &alpha, 0.0).unwrap().to_vec();
         for (got, x_in) in y.iter().zip(&input) {
             let expected = x_in + 0.5 * (2.0 * x_in).sin().powi(2);
@@ -116,17 +117,18 @@ mod tests {
     #[test]
     fn rejects_bad_alpha_shape() {
         let (client, device) = cpu_setup();
-        let x = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 6], &[1, 2, 3], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 6], &[1, 2, 3], &device).unwrap();
         // Should be [1, 2, 1]; give [2] instead.
-        let alpha = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[2], &device);
+        let alpha = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[2], &device).unwrap();
         assert!(snake(&client, &x, &alpha, 1e-9).is_err());
     }
 
     #[test]
     fn rejects_bad_input_rank() {
         let (client, device) = cpu_setup();
-        let x = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[2, 2], &device);
-        let alpha = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[1, 2, 1], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[2, 2], &device).unwrap();
+        let alpha =
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[1, 2, 1], &device).unwrap();
         assert!(snake(&client, &x, &alpha, 1e-9).is_err());
     }
 }

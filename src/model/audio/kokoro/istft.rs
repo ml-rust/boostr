@@ -250,7 +250,7 @@ mod tests {
         shape: &[usize],
         device: &<CpuRuntime as Runtime>::Device,
     ) -> Tensor<CpuRuntime> {
-        Tensor::<CpuRuntime>::from_slice(data, shape, device)
+        Tensor::<CpuRuntime>::try_from_slice(data, shape, device).unwrap()
     }
 
     #[test]

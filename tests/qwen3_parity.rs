@@ -261,7 +261,7 @@ fn qwen3_hidden_state_matches_huggingface() {
 
     let ids = read_i32(&dir.join("qwen3_input_ids.i32"));
     let seq = ids.len();
-    let input = Tensor::<CpuRuntime>::from_slice(&ids, &[1, seq], &device);
+    let input = Tensor::<CpuRuntime>::try_from_slice(&ids, &[1, seq], &device).unwrap();
 
     let hidden = model
         .forward_hidden(&client, &input)
@@ -311,7 +311,7 @@ fn qwen3_logits_match_huggingface() {
     let seq = ids.len();
     eprintln!("prompt is {seq} tokens, vocab {vocab}");
     let input = Var::new(
-        Tensor::<CpuRuntime>::from_slice(&ids, &[1, seq], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&ids, &[1, seq], &device).unwrap(),
         false,
     );
 

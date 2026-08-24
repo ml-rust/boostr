@@ -73,11 +73,12 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let logits = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &[0.0f32, 3.0f32.ln(), 3.0f32.ln(), 0.0],
                 &[2, 2],
                 &device,
-            ),
+            )
+            .unwrap(),
             true,
         );
 
@@ -101,7 +102,7 @@ mod tests {
 
         let values = [0.25f32, -0.75, 1.25, -1.0, 0.5, 0.0];
         let logits = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&values, &[2, 3], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&values, &[2, 3], &device).unwrap(),
             true,
         );
 

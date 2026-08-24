@@ -7,7 +7,10 @@ use crate::test_utils::cpu_setup;
 use numr::runtime::cpu::CpuRuntime;
 
 fn var(data: &[f32], shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Var<CpuRuntime> {
-    Var::new(Tensor::<CpuRuntime>::from_slice(data, shape, device), false)
+    Var::new(
+        Tensor::<CpuRuntime>::try_from_slice(data, shape, device).unwrap(),
+        false,
+    )
 }
 
 #[test]
@@ -40,34 +43,32 @@ fn fc_prior_must_be_2048_square_with_bias() {
     let (_client, device) = cpu_setup();
 
     let good = Linear::<CpuRuntime>::new(
-        Tensor::from_slice(
+        Tensor::try_from_slice(
             &vec![0.0f32; PRIOR_DIM * PRIOR_DIM],
             &[PRIOR_DIM, PRIOR_DIM],
             &device,
-        ),
-        Some(Tensor::from_slice(
-            &vec![0.0f32; PRIOR_DIM],
-            &[PRIOR_DIM],
-            &device,
-        )),
+        )
+        .unwrap(),
+        Some(Tensor::try_from_slice(&vec![0.0f32; PRIOR_DIM], &[PRIOR_DIM], &device).unwrap()),
         false,
     );
     assert!(check_fc_prior(&good).is_ok());
 
     let no_bias = Linear::<CpuRuntime>::new(
-        Tensor::from_slice(
+        Tensor::try_from_slice(
             &vec![0.0f32; PRIOR_DIM * PRIOR_DIM],
             &[PRIOR_DIM, PRIOR_DIM],
             &device,
-        ),
+        )
+        .unwrap(),
         None,
         false,
     );
     assert!(check_fc_prior(&no_bias).is_err());
 
     let wrong_shape = Linear::<CpuRuntime>::new(
-        Tensor::from_slice(&[0.0f32; 4 * 8], &[4, 8], &device),
-        Some(Tensor::from_slice(&[0.0f32; 4], &[4], &device)),
+        Tensor::try_from_slice(&[0.0f32; 4 * 8], &[4, 8], &device).unwrap(),
+        Some(Tensor::try_from_slice(&[0.0f32; 4], &[4], &device).unwrap()),
         false,
     );
     assert!(check_fc_prior(&wrong_shape).is_err());

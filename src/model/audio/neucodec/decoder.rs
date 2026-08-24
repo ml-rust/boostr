@@ -249,20 +249,20 @@ mod tests {
 
     fn linear(out_f: usize, in_f: usize, val: f32, device: &CpuDevice) -> Linear<CpuRuntime> {
         Linear::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![val; out_f * in_f], &[out_f, in_f], device),
-            Some(Tensor::<CpuRuntime>::from_slice(
-                &vec![0.0f32; out_f],
-                &[out_f],
-                device,
-            )),
+            Tensor::<CpuRuntime>::try_from_slice(&vec![val; out_f * in_f], &[out_f, in_f], device)
+                .unwrap(),
+            Some(
+                Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; out_f], &[out_f], device)
+                    .unwrap(),
+            ),
             false,
         )
     }
 
     fn layer_norm(c: usize, device: &CpuDevice) -> LayerNorm<CpuRuntime> {
         LayerNorm::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; c], &[c], device),
-            Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; c], &[c], device),
+            Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; c], &[c], device).unwrap(),
+            Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; c], &[c], device).unwrap(),
             1e-5,
             false,
         )
@@ -270,7 +270,7 @@ mod tests {
 
     fn rms_norm(c: usize, device: &CpuDevice) -> RmsNorm<CpuRuntime> {
         RmsNorm::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; c], &[c], device),
+            Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; c], &[c], device).unwrap(),
             1e-6,
             false,
         )
@@ -279,12 +279,8 @@ mod tests {
     fn conv(c: usize, k: usize, val: f32, device: &CpuDevice) -> Conv1d<CpuRuntime> {
         let n = c * c * k;
         Conv1d::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![val; n], &[c, c, k], device),
-            Some(Tensor::<CpuRuntime>::from_slice(
-                &vec![0.0f32; c],
-                &[c],
-                device,
-            )),
+            Tensor::<CpuRuntime>::try_from_slice(&vec![val; n], &[c, c, k], device).unwrap(),
+            Some(Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; c], &[c], device).unwrap()),
             1,
             PaddingMode::Same,
             1,
@@ -297,8 +293,8 @@ mod tests {
     /// synthetic decoder here is only 8 channels wide).
     fn group_norm(c: usize, groups: usize, device: &CpuDevice) -> GroupNorm<CpuRuntime> {
         GroupNorm::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; c], &[c], device),
-            Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; c], &[c], device),
+            Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; c], &[c], device).unwrap(),
+            Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; c], &[c], device).unwrap(),
             groups,
             1e-6,
             false,
@@ -414,11 +410,12 @@ mod tests {
         let batch = 2;
         let frames = 5;
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &vec![0.1f32; batch * frames * config.fc_in_dim],
                 &[batch, frames, config.fc_in_dim],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
         let (mag, phase) = decoder.forward_features(&client, &x).unwrap();
@@ -446,11 +443,12 @@ mod tests {
         let batch = 2;
         let frames = 7;
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &vec![0.05f32; batch * frames * config.fc_in_dim],
                 &[batch, frames, config.fc_in_dim],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
         let waveform = decoder.forward(&client, &x).unwrap();
@@ -467,7 +465,12 @@ mod tests {
             .map(|i| (i as f32 * 0.017).sin())
             .collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&x_data, &[batch, frames, config.fc_in_dim], &device),
+            Tensor::<CpuRuntime>::try_from_slice(
+                &x_data,
+                &[batch, frames, config.fc_in_dim],
+                &device,
+            )
+            .unwrap(),
             false,
         );
         let waveform = decoder.forward(&client, &x).unwrap();
@@ -521,11 +524,12 @@ mod tests {
     fn forward_features_rejects_wrong_input_width() {
         let (decoder, client, device, config) = make_decoder(0.01);
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &vec![0.0f32; 4 * (config.fc_in_dim + 1)],
                 &[1, 4, config.fc_in_dim + 1],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
         assert!(decoder.forward_features(&client, &x).is_err());

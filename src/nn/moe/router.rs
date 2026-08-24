@@ -264,13 +264,14 @@ mod tests {
         let top_k = 2;
 
         let gate_w =
-            Tensor::<CpuRuntime>::from_slice(&[0.1f32; 16], &[num_experts, hidden], &device);
+            Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 16], &[num_experts, hidden], &device)
+                .unwrap();
 
         let config = MoeRouterConfig::new(num_experts, top_k);
         let router = MoeRouter::from_tensor(gate_w, config, false);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[3, hidden], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 12], &[3, hidden], &device).unwrap(),
             false,
         );
         let output = router.route(&client, &input).unwrap();
@@ -296,24 +297,26 @@ mod tests {
 
         // Asymmetric gate + inputs: a symmetric setup can produce a genuinely
         // zero gradient and would pass even with the graph severed.
-        let gate_w = Tensor::<CpuRuntime>::from_slice(
+        let gate_w = Tensor::<CpuRuntime>::try_from_slice(
             &[
                 0.9f32, -0.2, 0.4, 0.1, -0.5, 0.7, 0.05, 0.3, 0.2, 0.15, -0.8, 0.6, -0.1, 0.35,
                 0.25, -0.45,
             ],
             &[config.num_experts, hidden],
             &device,
-        );
+        )
+        .unwrap();
         let router = MoeRouter::from_tensor(gate_w, config, true);
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &[
                     0.3f32, -0.7, 1.1, 0.2, 0.8, 0.4, -0.3, 0.9, -0.6, 0.5, 0.7, -0.2,
                 ],
                 &[3, hidden],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
         (client, router, input)
@@ -425,13 +428,14 @@ mod tests {
         let (client, device) = cpu_setup();
         let hidden = 2;
         let num_experts = 2;
-        let gate_w = Tensor::<CpuRuntime>::from_slice(
+        let gate_w = Tensor::<CpuRuntime>::try_from_slice(
             &[0.2f32, -0.1, -0.3, 0.4],
             &[num_experts, hidden],
             &device,
-        );
+        )
+        .unwrap();
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[0.5f32, -0.25], &[1, hidden], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[0.5f32, -0.25], &[1, hidden], &device).unwrap(),
             false,
         );
 
@@ -467,14 +471,16 @@ mod tests {
     fn squared_prob_mode_gives_dead_expert_extra_gradient() {
         fn run_mode(mode: MoeLoadBalanceLossMode) -> (RouterOutput<CpuRuntime>, Vec<f32>) {
             let (client, device) = cpu_setup();
-            let gate_w = Tensor::<CpuRuntime>::from_slice(&[2.0f32, -1.0, 0.0], &[3, 1], &device);
+            let gate_w =
+                Tensor::<CpuRuntime>::try_from_slice(&[2.0f32, -1.0, 0.0], &[3, 1], &device)
+                    .unwrap();
             let config = MoeRouterConfig {
                 load_balance_loss_mode: mode,
                 ..MoeRouterConfig::new(3, 1)
             };
             let router = MoeRouter::from_tensor(gate_w, config, true);
             let input = Var::new(
-                Tensor::<CpuRuntime>::from_slice(&[1.0f32, -0.5], &[2, 1], &device),
+                Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, -0.5], &[2, 1], &device).unwrap(),
                 false,
             );
             let out = router.route(&client, &input).unwrap();

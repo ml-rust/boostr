@@ -124,8 +124,11 @@ mod tests {
     #[test]
     fn test_module_parameters() {
         let device = CpuDevice::new();
-        let weight = numr::tensor::Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device);
-        let bias = numr::tensor::Tensor::<CpuRuntime>::from_slice(&[0.0f32; 2], &[2], &device);
+        let weight =
+            numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6], &[2, 3], &device)
+                .unwrap();
+        let bias = numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 2], &[2], &device)
+            .unwrap();
         let linear = Linear::new(weight, Some(bias), true);
 
         assert_eq!(linear.parameters().len(), 2);
@@ -135,7 +138,9 @@ mod tests {
     #[test]
     fn test_named_parameters() {
         let device = CpuDevice::new();
-        let weight = numr::tensor::Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device);
+        let weight =
+            numr::tensor::Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6], &[2, 3], &device)
+                .unwrap();
         let linear = Linear::new(weight, None, false);
 
         let named = linear.named_parameters();

@@ -215,15 +215,18 @@ mod tests {
             .map(|i| i as f32 * 0.1)
             .collect();
         let tokens =
-            Tensor::<CpuRuntime>::from_slice(&tokens_data, &[num_tokens, hidden_dim], &device);
+            Tensor::<CpuRuntime>::try_from_slice(&tokens_data, &[num_tokens, hidden_dim], &device)
+                .unwrap();
 
         // Create expert indices [num_tokens, k]
         let indices_data: Vec<i32> = vec![0, 1, 2, 0, 1, 2, 0, 1];
-        let indices = Tensor::<CpuRuntime>::from_slice(&indices_data, &[num_tokens, k], &device);
+        let indices =
+            Tensor::<CpuRuntime>::try_from_slice(&indices_data, &[num_tokens, k], &device).unwrap();
 
         // Equal weights
         let weights_data: Vec<f32> = vec![0.5; num_tokens * k];
-        let weights = Tensor::<CpuRuntime>::from_slice(&weights_data, &[num_tokens, k], &device);
+        let weights =
+            Tensor::<CpuRuntime>::try_from_slice(&weights_data, &[num_tokens, k], &device).unwrap();
 
         let (permuted, offsets, sort_indices) =
             moe_permute_tokens_impl(&client, &tokens, &indices, num_experts).unwrap();

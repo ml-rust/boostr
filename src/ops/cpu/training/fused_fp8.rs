@@ -142,7 +142,8 @@ mod tests {
     #[test]
     fn test_fused_grad_unscale_clip_basic() {
         let (client, device) = cpu_setup();
-        let grad = Tensor::<CpuRuntime>::from_slice(&[2.0f32, 4.0, 6.0, 8.0], &[4], &device);
+        let grad =
+            Tensor::<CpuRuntime>::try_from_slice(&[2.0f32, 4.0, 6.0, 8.0], &[4], &device).unwrap();
         let loss_scale = 2.0;
         let max_norm = 10.0;
 
@@ -161,7 +162,9 @@ mod tests {
     #[test]
     fn test_fused_grad_unscale_clip_clips() {
         let (client, device) = cpu_setup();
-        let grad = Tensor::<CpuRuntime>::from_slice(&[20.0f32, 40.0, 60.0, 80.0], &[4], &device);
+        let grad =
+            Tensor::<CpuRuntime>::try_from_slice(&[20.0f32, 40.0, 60.0, 80.0], &[4], &device)
+                .unwrap();
         let loss_scale = 2.0;
         let max_norm = 1.0;
 
@@ -180,7 +183,8 @@ mod tests {
     fn test_fused_grad_unscale_clip_inf() {
         let (client, device) = cpu_setup();
         let grad =
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, f32::INFINITY, 3.0, 4.0], &[4], &device);
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, f32::INFINITY, 3.0, 4.0], &[4], &device)
+                .unwrap();
 
         let (_clipped, _norm, found_inf) = client.fused_grad_unscale_clip(&grad, 1.0, 1.0).unwrap();
 
@@ -190,7 +194,9 @@ mod tests {
     #[test]
     fn test_fused_grad_unscale_clip_nan() {
         let (client, device) = cpu_setup();
-        let grad = Tensor::<CpuRuntime>::from_slice(&[1.0f32, f32::NAN, 3.0, 4.0], &[4], &device);
+        let grad =
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, f32::NAN, 3.0, 4.0], &[4], &device)
+                .unwrap();
 
         let (_clipped, _norm, found_inf) = client.fused_grad_unscale_clip(&grad, 1.0, 1.0).unwrap();
 

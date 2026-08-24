@@ -296,7 +296,7 @@ mod tests {
         let device = CpuDevice::new();
         // pack [3, 1, 4]: row 0 = 1s, row 1 = 2s, row 2 = 3s
         let data: Vec<f32> = (0..3).flat_map(|r| vec![(r + 1) as f32; 4]).collect();
-        let pack = Tensor::<CpuRuntime>::from_slice(&data, &[3, 1, 4], &device);
+        let pack = Tensor::<CpuRuntime>::try_from_slice(&data, &[3, 1, 4], &device).unwrap();
         let picked = select_voice_style(&pack, 2).unwrap();
         assert_eq!(picked.shape(), &[1, 4]);
         let v: Vec<f32> = picked.to_vec();
@@ -311,11 +311,12 @@ mod tests {
     fn split_voice_style_halves_match() {
         use numr::runtime::cpu::{CpuDevice, CpuRuntime};
         let device = CpuDevice::new();
-        let row = Tensor::<CpuRuntime>::from_slice(
+        let row = Tensor::<CpuRuntime>::try_from_slice(
             &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             &[1, 8],
             &device,
-        );
+        )
+        .unwrap();
         let (dec, pred) = split_voice_style(&row, 4).unwrap();
         assert_eq!(dec.shape(), &[1, 4]);
         assert_eq!(pred.shape(), &[1, 4]);
@@ -329,7 +330,7 @@ mod tests {
     fn select_voice_style_rejects_bad_rank() {
         use numr::runtime::cpu::{CpuDevice, CpuRuntime};
         let device = CpuDevice::new();
-        let bad = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[4], &device);
+        let bad = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 4], &[4], &device).unwrap();
         assert!(select_voice_style(&bad, 0).is_err());
     }
 
@@ -337,7 +338,7 @@ mod tests {
     fn split_voice_style_rejects_wrong_width() {
         use numr::runtime::cpu::{CpuDevice, CpuRuntime};
         let device = CpuDevice::new();
-        let row = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[1, 6], &device);
+        let row = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6], &[1, 6], &device).unwrap();
         // style_dim = 4 → expected [1, 8] but we have [1, 6]
         assert!(split_voice_style(&row, 4).is_err());
     }

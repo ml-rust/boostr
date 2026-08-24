@@ -280,14 +280,23 @@ mod tests {
         let v_data: Vec<f32> = (0..num_tokens * num_heads * head_dim)
             .map(|i| i as f32 * 0.2)
             .collect();
-        let key =
-            Tensor::<CpuRuntime>::from_slice(&k_data, &[num_tokens, num_heads, head_dim], &device);
-        let value =
-            Tensor::<CpuRuntime>::from_slice(&v_data, &[num_tokens, num_heads, head_dim], &device);
+        let key = Tensor::<CpuRuntime>::try_from_slice(
+            &k_data,
+            &[num_tokens, num_heads, head_dim],
+            &device,
+        )
+        .unwrap();
+        let value = Tensor::<CpuRuntime>::try_from_slice(
+            &v_data,
+            &[num_tokens, num_heads, head_dim],
+            &device,
+        )
+        .unwrap();
 
         // slot_mapping: token 0 → slot 0, token 1 → slot 1, token 2 → slot 9
         let slots: Vec<i32> = vec![0, 1, 9];
-        let slot_mapping = Tensor::<CpuRuntime>::from_slice(&slots, &[num_tokens], &device);
+        let slot_mapping =
+            Tensor::<CpuRuntime>::try_from_slice(&slots, &[num_tokens], &device).unwrap();
 
         cache.update(&key, &value, &slot_mapping, &client).unwrap();
 

@@ -31,11 +31,12 @@ fn test_moe_top_k_routing_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let logits_c = Tensor::from_slice(
+        let logits_c = Tensor::try_from_slice(
             &logits_data.to_vec::<f32>(),
             &[num_tokens, num_experts],
             &cuda_device,
-        );
+        )
+        .unwrap();
         let (_indices_c, weights_c) = cuda_client.moe_top_k_routing(&logits_c, k).unwrap();
         assert_parity_f32(
             &weights_c.to_vec::<f32>(),
@@ -47,11 +48,12 @@ fn test_moe_top_k_routing_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let logits_w = Tensor::from_slice(
+        let logits_w = Tensor::try_from_slice(
             &logits_data.to_vec::<f32>(),
             &[num_tokens, num_experts],
             &wgpu_device,
-        );
+        )
+        .unwrap();
         let (_indices_w, weights_w) = wgpu_client.moe_top_k_routing(&logits_w, k).unwrap();
         assert_parity_f32(
             &weights_w.to_vec::<f32>(),
@@ -72,7 +74,8 @@ fn test_moe_permute_tokens_parity() {
     let tokens_data = det_tensor(&[num_tokens, hidden_dim], &cpu_device);
     // Use I32 indices for WebGPU compatibility
     let indices_data: Vec<i32> = vec![0, 1, 2, 3, 0, 2, 1, 3, 0, 1, 2, 3];
-    let indices = Tensor::<CpuRuntime>::from_slice(&indices_data, &[num_tokens, k], &cpu_device);
+    let indices =
+        Tensor::<CpuRuntime>::try_from_slice(&indices_data, &[num_tokens, k], &cpu_device).unwrap();
 
     let (cpu_permuted, _cpu_offsets, _cpu_sort) = cpu_client
         .moe_permute_tokens(&tokens_data, &indices, num_experts)
@@ -83,12 +86,14 @@ fn test_moe_permute_tokens_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let tokens_c = Tensor::from_slice(
+        let tokens_c = Tensor::try_from_slice(
             &tokens_data.to_vec::<f32>(),
             &[num_tokens, hidden_dim],
             &cuda_device,
-        );
-        let indices_c = Tensor::from_slice(&indices_data, &[num_tokens, k], &cuda_device);
+        )
+        .unwrap();
+        let indices_c =
+            Tensor::try_from_slice(&indices_data, &[num_tokens, k], &cuda_device).unwrap();
         let (permuted_c, _, _) = cuda_client
             .moe_permute_tokens(&tokens_c, &indices_c, num_experts)
             .unwrap();
@@ -102,12 +107,14 @@ fn test_moe_permute_tokens_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let tokens_w = Tensor::from_slice(
+        let tokens_w = Tensor::try_from_slice(
             &tokens_data.to_vec::<f32>(),
             &[num_tokens, hidden_dim],
             &wgpu_device,
-        );
-        let indices_w = Tensor::from_slice(&indices_data, &[num_tokens, k], &wgpu_device);
+        )
+        .unwrap();
+        let indices_w =
+            Tensor::try_from_slice(&indices_data, &[num_tokens, k], &wgpu_device).unwrap();
         let (permuted_w, _, _) = wgpu_client
             .moe_permute_tokens(&tokens_w, &indices_w, num_experts)
             .unwrap();
@@ -129,9 +136,11 @@ fn test_moe_unpermute_tokens_parity() {
 
     let tokens_data = det_tensor(&[num_tokens, hidden_dim], &cpu_device);
     let indices_data: Vec<i32> = vec![0, 1, 2, 0, 1, 2, 0, 1];
-    let indices = Tensor::<CpuRuntime>::from_slice(&indices_data, &[num_tokens, k], &cpu_device);
+    let indices =
+        Tensor::<CpuRuntime>::try_from_slice(&indices_data, &[num_tokens, k], &cpu_device).unwrap();
     let weights_data: Vec<f32> = vec![0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.4, 0.6];
-    let weights = Tensor::<CpuRuntime>::from_slice(&weights_data, &[num_tokens, k], &cpu_device);
+    let weights =
+        Tensor::<CpuRuntime>::try_from_slice(&weights_data, &[num_tokens, k], &cpu_device).unwrap();
 
     let (permuted, _, sort_indices) = cpu_client
         .moe_permute_tokens(&tokens_data, &indices, num_experts)
@@ -146,13 +155,16 @@ fn test_moe_unpermute_tokens_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let tokens_c = Tensor::from_slice(
+        let tokens_c = Tensor::try_from_slice(
             &tokens_data.to_vec::<f32>(),
             &[num_tokens, hidden_dim],
             &cuda_device,
-        );
-        let indices_c = Tensor::from_slice(&indices_data, &[num_tokens, k], &cuda_device);
-        let weights_c = Tensor::from_slice(&weights_data, &[num_tokens, k], &cuda_device);
+        )
+        .unwrap();
+        let indices_c =
+            Tensor::try_from_slice(&indices_data, &[num_tokens, k], &cuda_device).unwrap();
+        let weights_c =
+            Tensor::try_from_slice(&weights_data, &[num_tokens, k], &cuda_device).unwrap();
         let (permuted_c, _, sort_c) = cuda_client
             .moe_permute_tokens(&tokens_c, &indices_c, num_experts)
             .unwrap();
@@ -169,13 +181,16 @@ fn test_moe_unpermute_tokens_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let tokens_w = Tensor::from_slice(
+        let tokens_w = Tensor::try_from_slice(
             &tokens_data.to_vec::<f32>(),
             &[num_tokens, hidden_dim],
             &wgpu_device,
-        );
-        let indices_w = Tensor::from_slice(&indices_data, &[num_tokens, k], &wgpu_device);
-        let weights_w = Tensor::from_slice(&weights_data, &[num_tokens, k], &wgpu_device);
+        )
+        .unwrap();
+        let indices_w =
+            Tensor::try_from_slice(&indices_data, &[num_tokens, k], &wgpu_device).unwrap();
+        let weights_w =
+            Tensor::try_from_slice(&weights_data, &[num_tokens, k], &wgpu_device).unwrap();
         let (permuted_w, _, sort_w) = wgpu_client
             .moe_permute_tokens(&tokens_w, &indices_w, num_experts)
             .unwrap();
@@ -201,7 +216,9 @@ fn test_moe_grouped_gemm_parity() {
     let tokens_data = det_tensor(&[total_tokens, in_dim], &cpu_device);
     let weights_data = det_tensor(&[num_experts, in_dim, out_dim], &cpu_device);
     let offsets_data: Vec<i32> = vec![0, 3, 6, 9];
-    let offsets = Tensor::<CpuRuntime>::from_slice(&offsets_data, &[num_experts + 1], &cpu_device);
+    let offsets =
+        Tensor::<CpuRuntime>::try_from_slice(&offsets_data, &[num_experts + 1], &cpu_device)
+            .unwrap();
 
     let cpu_result = cpu_client
         .moe_grouped_gemm(&tokens_data, &weights_data, &offsets)
@@ -211,17 +228,20 @@ fn test_moe_grouped_gemm_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let tokens_c = Tensor::from_slice(
+        let tokens_c = Tensor::try_from_slice(
             &tokens_data.to_vec::<f32>(),
             &[total_tokens, in_dim],
             &cuda_device,
-        );
-        let weights_c = Tensor::from_slice(
+        )
+        .unwrap();
+        let weights_c = Tensor::try_from_slice(
             &weights_data.to_vec::<f32>(),
             &[num_experts, in_dim, out_dim],
             &cuda_device,
-        );
-        let offsets_c = Tensor::from_slice(&offsets_data, &[num_experts + 1], &cuda_device);
+        )
+        .unwrap();
+        let offsets_c =
+            Tensor::try_from_slice(&offsets_data, &[num_experts + 1], &cuda_device).unwrap();
         let result_c = cuda_client
             .moe_grouped_gemm(&tokens_c, &weights_c, &offsets_c)
             .unwrap();
@@ -235,17 +255,20 @@ fn test_moe_grouped_gemm_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let tokens_w = Tensor::from_slice(
+        let tokens_w = Tensor::try_from_slice(
             &tokens_data.to_vec::<f32>(),
             &[total_tokens, in_dim],
             &wgpu_device,
-        );
-        let weights_w = Tensor::from_slice(
+        )
+        .unwrap();
+        let weights_w = Tensor::try_from_slice(
             &weights_data.to_vec::<f32>(),
             &[num_experts, in_dim, out_dim],
             &wgpu_device,
-        );
-        let offsets_w = Tensor::from_slice(&offsets_data, &[num_experts + 1], &wgpu_device);
+        )
+        .unwrap();
+        let offsets_w =
+            Tensor::try_from_slice(&offsets_data, &[num_experts + 1], &wgpu_device).unwrap();
         let result_w = wgpu_client
             .moe_grouped_gemm(&tokens_w, &weights_w, &offsets_w)
             .unwrap();
@@ -268,7 +291,9 @@ fn test_moe_grouped_gemm_fused_parity() {
     let tokens_data = det_tensor(&[total_tokens, in_dim], &cpu_device);
     let weights_data = det_tensor(&[num_experts, in_dim, out_dim], &cpu_device);
     let offsets_data: Vec<i32> = vec![0, 3, 6];
-    let offsets = Tensor::<CpuRuntime>::from_slice(&offsets_data, &[num_experts + 1], &cpu_device);
+    let offsets =
+        Tensor::<CpuRuntime>::try_from_slice(&offsets_data, &[num_experts + 1], &cpu_device)
+            .unwrap();
 
     let cpu_result = cpu_client
         .moe_grouped_gemm_fused(&tokens_data, &weights_data, &offsets, MoEActivation::SiLU)
@@ -278,17 +303,20 @@ fn test_moe_grouped_gemm_fused_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let tokens_c = Tensor::from_slice(
+        let tokens_c = Tensor::try_from_slice(
             &tokens_data.to_vec::<f32>(),
             &[total_tokens, in_dim],
             &cuda_device,
-        );
-        let weights_c = Tensor::from_slice(
+        )
+        .unwrap();
+        let weights_c = Tensor::try_from_slice(
             &weights_data.to_vec::<f32>(),
             &[num_experts, in_dim, out_dim],
             &cuda_device,
-        );
-        let offsets_c = Tensor::from_slice(&offsets_data, &[num_experts + 1], &cuda_device);
+        )
+        .unwrap();
+        let offsets_c =
+            Tensor::try_from_slice(&offsets_data, &[num_experts + 1], &cuda_device).unwrap();
         let result_c = cuda_client
             .moe_grouped_gemm_fused(&tokens_c, &weights_c, &offsets_c, MoEActivation::SiLU)
             .unwrap();
@@ -302,17 +330,20 @@ fn test_moe_grouped_gemm_fused_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let tokens_w = Tensor::from_slice(
+        let tokens_w = Tensor::try_from_slice(
             &tokens_data.to_vec::<f32>(),
             &[total_tokens, in_dim],
             &wgpu_device,
-        );
-        let weights_w = Tensor::from_slice(
+        )
+        .unwrap();
+        let weights_w = Tensor::try_from_slice(
             &weights_data.to_vec::<f32>(),
             &[num_experts, in_dim, out_dim],
             &wgpu_device,
-        );
-        let offsets_w = Tensor::from_slice(&offsets_data, &[num_experts + 1], &wgpu_device);
+        )
+        .unwrap();
+        let offsets_w =
+            Tensor::try_from_slice(&offsets_data, &[num_experts + 1], &wgpu_device).unwrap();
         let result_w = wgpu_client
             .moe_grouped_gemm_fused(&tokens_w, &weights_w, &offsets_w, MoEActivation::SiLU)
             .unwrap();
@@ -335,7 +366,9 @@ fn test_moe_grouped_gemm_fused_gelu_parity() {
     let tokens_data = det_tensor(&[total_tokens, in_dim], &cpu_device);
     let weights_data = det_tensor(&[num_experts, in_dim, out_dim], &cpu_device);
     let offsets_data: Vec<i32> = vec![0, 3, 6];
-    let offsets = Tensor::<CpuRuntime>::from_slice(&offsets_data, &[num_experts + 1], &cpu_device);
+    let offsets =
+        Tensor::<CpuRuntime>::try_from_slice(&offsets_data, &[num_experts + 1], &cpu_device)
+            .unwrap();
 
     let cpu_result = cpu_client
         .moe_grouped_gemm_fused(&tokens_data, &weights_data, &offsets, MoEActivation::GeLU)
@@ -345,17 +378,20 @@ fn test_moe_grouped_gemm_fused_gelu_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let tokens_c = Tensor::from_slice(
+        let tokens_c = Tensor::try_from_slice(
             &tokens_data.to_vec::<f32>(),
             &[total_tokens, in_dim],
             &cuda_device,
-        );
-        let weights_c = Tensor::from_slice(
+        )
+        .unwrap();
+        let weights_c = Tensor::try_from_slice(
             &weights_data.to_vec::<f32>(),
             &[num_experts, in_dim, out_dim],
             &cuda_device,
-        );
-        let offsets_c = Tensor::from_slice(&offsets_data, &[num_experts + 1], &cuda_device);
+        )
+        .unwrap();
+        let offsets_c =
+            Tensor::try_from_slice(&offsets_data, &[num_experts + 1], &cuda_device).unwrap();
         let result_c = cuda_client
             .moe_grouped_gemm_fused(&tokens_c, &weights_c, &offsets_c, MoEActivation::GeLU)
             .unwrap();
@@ -369,17 +405,20 @@ fn test_moe_grouped_gemm_fused_gelu_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let tokens_w = Tensor::from_slice(
+        let tokens_w = Tensor::try_from_slice(
             &tokens_data.to_vec::<f32>(),
             &[total_tokens, in_dim],
             &wgpu_device,
-        );
-        let weights_w = Tensor::from_slice(
+        )
+        .unwrap();
+        let weights_w = Tensor::try_from_slice(
             &weights_data.to_vec::<f32>(),
             &[num_experts, in_dim, out_dim],
             &wgpu_device,
-        );
-        let offsets_w = Tensor::from_slice(&offsets_data, &[num_experts + 1], &wgpu_device);
+        )
+        .unwrap();
+        let offsets_w =
+            Tensor::try_from_slice(&offsets_data, &[num_experts + 1], &wgpu_device).unwrap();
         let result_w = wgpu_client
             .moe_grouped_gemm_fused(&tokens_w, &weights_w, &offsets_w, MoEActivation::GeLU)
             .unwrap();
@@ -427,21 +466,24 @@ fn test_moe_end_to_end_parity() {
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let logits_c = Tensor::from_slice(
+        let logits_c = Tensor::try_from_slice(
             &logits_data.to_vec::<f32>(),
             &[num_tokens, num_experts],
             &cuda_device,
-        );
-        let tokens_c = Tensor::from_slice(
+        )
+        .unwrap();
+        let tokens_c = Tensor::try_from_slice(
             &tokens_data.to_vec::<f32>(),
             &[num_tokens, hidden_dim],
             &cuda_device,
-        );
-        let ew_c = Tensor::from_slice(
+        )
+        .unwrap();
+        let ew_c = Tensor::try_from_slice(
             &expert_weights_data.to_vec::<f32>(),
             &[num_experts, hidden_dim, out_dim],
             &cuda_device,
-        );
+        )
+        .unwrap();
 
         let (idx_c, wt_c) = cuda_client.moe_top_k_routing(&logits_c, k).unwrap();
         let (perm_c, off_c, sort_c) = cuda_client
@@ -464,21 +506,24 @@ fn test_moe_end_to_end_parity() {
     #[cfg(feature = "wgpu")]
     with_wgpu_backend(|wgpu_client, wgpu_device| {
         use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let logits_w = Tensor::from_slice(
+        let logits_w = Tensor::try_from_slice(
             &logits_data.to_vec::<f32>(),
             &[num_tokens, num_experts],
             &wgpu_device,
-        );
-        let tokens_w = Tensor::from_slice(
+        )
+        .unwrap();
+        let tokens_w = Tensor::try_from_slice(
             &tokens_data.to_vec::<f32>(),
             &[num_tokens, hidden_dim],
             &wgpu_device,
-        );
-        let ew_w = Tensor::from_slice(
+        )
+        .unwrap();
+        let ew_w = Tensor::try_from_slice(
             &expert_weights_data.to_vec::<f32>(),
             &[num_experts, hidden_dim, out_dim],
             &wgpu_device,
-        );
+        )
+        .unwrap();
 
         let (idx_w, wt_w) = wgpu_client.moe_top_k_routing(&logits_w, k).unwrap();
         let (perm_w, off_w, sort_w) = wgpu_client

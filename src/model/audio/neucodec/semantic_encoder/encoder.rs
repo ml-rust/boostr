@@ -173,7 +173,7 @@ mod tests {
             .map(|i| (i as f32 * 0.031).cos())
             .collect();
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&data, &[1, t, in_dim], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&data, &[1, t, in_dim], &device).unwrap(),
             false,
         );
 
@@ -211,7 +211,7 @@ mod tests {
         let cfg = test_config();
         let enc = encoder(cfg, &device);
         let x = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[0.0f32; 5 * 3], &[1, 5, 3], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 5 * 3], &[1, 5, 3], &device).unwrap(),
             false,
         );
         assert!(enc.forward(&client, &x).is_err());

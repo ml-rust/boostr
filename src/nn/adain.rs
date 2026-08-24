@@ -125,9 +125,12 @@ mod tests {
     fn forward_shape_is_preserved() {
         let (client, device) = cpu_setup();
         let adain = AdaIn1d::new(4, 1e-5);
-        let x = Tensor::<CpuRuntime>::from_slice(&[0.5f32; 2 * 4 * 6], &[2, 4, 6], &device);
-        let gamma = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 2 * 4], &[2, 4], &device);
-        let beta = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 2 * 4], &[2, 4], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(&[0.5f32; 2 * 4 * 6], &[2, 4, 6], &device)
+            .unwrap();
+        let gamma =
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 2 * 4], &[2, 4], &device).unwrap();
+        let beta =
+            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 2 * 4], &[2, 4], &device).unwrap();
         let out = adain.forward(&client, &x, &gamma, &beta).unwrap();
         assert_eq!(out.shape(), &[2, 4, 6]);
     }
@@ -139,9 +142,9 @@ mod tests {
         let (client, device) = cpu_setup();
         let adain = AdaIn1d::new(2, 1e-5);
         let data: Vec<f32> = (0..(2 * 5)).map(|i| i as f32).collect();
-        let x = Tensor::<CpuRuntime>::from_slice(&data, &[1, 2, 5], &device);
-        let gamma = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 2], &[1, 2], &device);
-        let beta = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 2], &[1, 2], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(&data, &[1, 2, 5], &device).unwrap();
+        let gamma = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 2], &[1, 2], &device).unwrap();
+        let beta = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 2], &[1, 2], &device).unwrap();
 
         let out = adain.forward(&client, &x, &gamma, &beta).unwrap();
         let flat: Vec<f32> = out.to_vec();
@@ -163,9 +166,11 @@ mod tests {
         // gamma = 2, beta = 3 → normalized stats shifted accordingly.
         let (client, device) = cpu_setup();
         let adain = AdaIn1d::new(1, 1e-5);
-        let x = Tensor::<CpuRuntime>::from_slice(&[-1.0f32, 0.0, 1.0, 2.0], &[1, 1, 4], &device);
-        let gamma = Tensor::<CpuRuntime>::from_slice(&[2.0f32], &[1, 1], &device);
-        let beta = Tensor::<CpuRuntime>::from_slice(&[3.0f32], &[1, 1], &device);
+        let x =
+            Tensor::<CpuRuntime>::try_from_slice(&[-1.0f32, 0.0, 1.0, 2.0], &[1, 1, 4], &device)
+                .unwrap();
+        let gamma = Tensor::<CpuRuntime>::try_from_slice(&[2.0f32], &[1, 1], &device).unwrap();
+        let beta = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32], &[1, 1], &device).unwrap();
 
         let out = adain.forward(&client, &x, &gamma, &beta).unwrap();
         let flat: Vec<f32> = out.to_vec();
@@ -178,9 +183,9 @@ mod tests {
     fn rejects_wrong_input_rank() {
         let (client, device) = cpu_setup();
         let adain = AdaIn1d::new(4, 1e-5);
-        let x = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 8], &[2, 4], &device);
-        let gamma = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[2, 4], &device);
-        let beta = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 8], &[2, 4], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 8], &[2, 4], &device).unwrap();
+        let gamma = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 8], &[2, 4], &device).unwrap();
+        let beta = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 8], &[2, 4], &device).unwrap();
         assert!(adain.forward(&client, &x, &gamma, &beta).is_err());
     }
 
@@ -188,9 +193,9 @@ mod tests {
     fn rejects_mismatched_channel_count() {
         let (client, device) = cpu_setup();
         let adain = AdaIn1d::new(4, 1e-5);
-        let x = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 24], &[2, 3, 4], &device);
-        let gamma = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device);
-        let beta = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 6], &[2, 3], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 24], &[2, 3, 4], &device).unwrap();
+        let gamma = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
+        let beta = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 6], &[2, 3], &device).unwrap();
         assert!(adain.forward(&client, &x, &gamma, &beta).is_err());
     }
 }

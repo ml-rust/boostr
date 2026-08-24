@@ -217,20 +217,28 @@ mod tests {
         let nrows = num_blocks * block_size * nkv;
         let pool: Vec<f32> = (0..nrows * d).map(|i| (i as f32 * 0.017).sin()).collect();
         let k_blocks =
-            Tensor::<CpuRuntime>::from_slice(&pool, &[num_blocks, block_size, nkv, d], &device);
+            Tensor::<CpuRuntime>::try_from_slice(&pool, &[num_blocks, block_size, nkv, d], &device)
+                .unwrap();
         let vpool: Vec<f32> = (0..nrows * d).map(|i| (i as f32 * 0.023).cos()).collect();
-        let v_blocks =
-            Tensor::<CpuRuntime>::from_slice(&vpool, &[num_blocks, block_size, nkv, d], &device);
-        let bt = Tensor::<CpuRuntime>::from_slice(&[0i32, 1, 2, 3], &[b, max_num_blocks], &device);
+        let v_blocks = Tensor::<CpuRuntime>::try_from_slice(
+            &vpool,
+            &[num_blocks, block_size, nkv, d],
+            &device,
+        )
+        .unwrap();
+        let bt =
+            Tensor::<CpuRuntime>::try_from_slice(&[0i32, 1, 2, 3], &[b, max_num_blocks], &device)
+                .unwrap();
 
         let qd: Vec<f32> = (0..b * h * seq_len_q * d)
             .map(|i| (i as f32 * 0.01).cos())
             .collect();
-        let q = Tensor::<CpuRuntime>::from_slice(&qd, &[b, h, seq_len_q, d], &device);
+        let q = Tensor::<CpuRuntime>::try_from_slice(&qd, &[b, h, seq_len_q, d], &device).unwrap();
         let dod: Vec<f32> = (0..b * h * seq_len_q * d)
             .map(|i| (i as f32 * 0.03).sin())
             .collect();
-        let dout = Tensor::<CpuRuntime>::from_slice(&dod, &[b, h, seq_len_q, d], &device);
+        let dout =
+            Tensor::<CpuRuntime>::try_from_slice(&dod, &[b, h, seq_len_q, d], &device).unwrap();
 
         let cfg = PagedAttnConfig {
             num_heads: h,
@@ -245,7 +253,7 @@ mod tests {
         let rows =
             paged_kv_row_indices(&[0, 1, 2, 3], b, nkv, seq_len_k, block_size, max_num_blocks);
         let n = rows.len();
-        let idx = Tensor::<CpuRuntime>::from_slice(&rows, &[n], &device);
+        let idx = Tensor::<CpuRuntime>::try_from_slice(&rows, &[n], &device).unwrap();
         let k_pool = k_blocks.reshape(&[nrows, d]).unwrap();
         let v_pool = v_blocks.reshape(&[nrows, d]).unwrap();
         let k_dense = client

@@ -116,27 +116,30 @@ mod tests {
         let d_v = 6; // V dim (different!)
 
         let q = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &vec![0.1f32; b * h * s * d_k],
                 &[b, h, s, d_k],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
         let k = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &vec![0.1f32; b * h * s * d_k],
                 &[b, h, s, d_k],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
         let v = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &vec![0.1f32; b * h * s * d_v],
                 &[b, h, s, d_v],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
 
@@ -154,7 +157,12 @@ mod tests {
         let d = 4;
 
         let q = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![0.1f32; b * h * s * d], &[b, h, s, d], &device),
+            Tensor::<CpuRuntime>::try_from_slice(
+                &vec![0.1f32; b * h * s * d],
+                &[b, h, s, d],
+                &device,
+            )
+            .unwrap(),
             false,
         );
         let k = q.clone();

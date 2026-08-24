@@ -173,7 +173,7 @@ mod tests {
 
         let mut state = SsmState::<CpuRuntime>::new(1, &config, DType::F32, &device)
             .expect("ssm state new must succeed on CPU");
-        let dummy_h = Tensor::<CpuRuntime>::ones(&[1, 2, 64, 16], DType::F32, &device);
+        let dummy_h = Tensor::<CpuRuntime>::try_ones(&[1, 2, 64, 16], DType::F32, &device).unwrap();
         state.update_h(dummy_h);
         assert!(state.is_initialized());
 

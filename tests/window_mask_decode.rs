@@ -46,7 +46,7 @@ fn values(len: usize, seed: f32) -> Vec<f32> {
 
 fn tensor(shape: &[usize], seed: f32, device: &CpuDevice) -> Tensor<CpuRuntime> {
     let n: usize = shape.iter().product();
-    Tensor::<CpuRuntime>::from_slice(&values(n, seed), shape, device)
+    Tensor::<CpuRuntime>::try_from_slice(&values(n, seed), shape, device).unwrap()
 }
 
 /// Q `[B, H, seq_len_q, D]` plus K/V `[B, KVH, SEQ_LEN_K, D]`.

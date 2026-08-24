@@ -57,25 +57,24 @@ fn make_encoder(device: &CudaDevice, client: &CudaClient) -> Encoder<CudaRuntime
     };
     let d = device;
     let small = |n: usize, shape: &[usize]| {
-        Ok(Weight::Standard(Tensor::<CudaRuntime>::from_slice(
-            &(0..n).map(|i| (i as f32).sin() * 0.02).collect::<Vec<_>>(),
-            shape,
-            d,
-        )))
+        Ok(Weight::Standard(
+            Tensor::<CudaRuntime>::try_from_slice(
+                &(0..n).map(|i| (i as f32).sin() * 0.02).collect::<Vec<_>>(),
+                shape,
+                d,
+            )
+            .unwrap(),
+        ))
     };
     let ones = |n: usize| {
-        Ok(Weight::Standard(Tensor::<CudaRuntime>::from_slice(
-            &vec![1.0f32; n],
-            &[n],
-            d,
-        )))
+        Ok(Weight::Standard(
+            Tensor::<CudaRuntime>::try_from_slice(&vec![1.0f32; n], &[n], d).unwrap(),
+        ))
     };
     let zeros = |n: usize| {
-        Ok(Weight::Standard(Tensor::<CudaRuntime>::from_slice(
-            &vec![0.0f32; n],
-            &[n],
-            d,
-        )))
+        Ok(Weight::Standard(
+            Tensor::<CudaRuntime>::try_from_slice(&vec![0.0f32; n], &[n], d).unwrap(),
+        ))
     };
     Encoder::from_weights_nomic(config, Pooling::Mean, client, |name| match name {
         "token_embd.weight" => small(VOCAB * HIDDEN, &[VOCAB, HIDDEN]),
@@ -127,10 +126,10 @@ fn run_batch(
         cu.push(((b + 1) * seq) as i32);
     }
     let total = ids.len();
-    let input = Tensor::<CudaRuntime>::from_slice(&ids, &[total], device);
-    let cu_t = Tensor::<CudaRuntime>::from_slice(&cu, &[n_docs + 1], device);
-    let pos_t = Tensor::<CudaRuntime>::from_slice(&pos, &[total], device);
-    let seg_t = Tensor::<CudaRuntime>::from_slice(&seg, &[total], device);
+    let input = Tensor::<CudaRuntime>::try_from_slice(&ids, &[total], device).unwrap();
+    let cu_t = Tensor::<CudaRuntime>::try_from_slice(&cu, &[n_docs + 1], device).unwrap();
+    let pos_t = Tensor::<CudaRuntime>::try_from_slice(&pos, &[total], device).unwrap();
+    let seg_t = Tensor::<CudaRuntime>::try_from_slice(&seg, &[total], device).unwrap();
     // Full pooled path (scatter_reduce mean) — matches the real embed entrypoint.
     let out = encoder
         .embed_inference_varlen(client, &input, &cu_t, &pos_t, &seg_t, n_docs, seq)
@@ -215,7 +214,7 @@ fn single_short_query_padded_path() {
     // Sizes around the GEMV(16) / WMMA-align(16) boundaries, all batch=1.
     for seq in [1usize, 7, 16, 17, 31, 33, 64, 65] {
         let ids: Vec<i64> = (0..seq as i64).map(|i| i % VOCAB as i64).collect();
-        let input = Tensor::<CudaRuntime>::from_slice(&ids, &[1, seq], &device);
+        let input = Tensor::<CudaRuntime>::try_from_slice(&ids, &[1, seq], &device).unwrap();
         let out = encoder
             .embed_inference(&client, &input, None)
             .unwrap_or_else(|e| panic!("padded embed failed at seq={seq}: {e}"));

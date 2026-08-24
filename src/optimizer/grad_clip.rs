@@ -215,7 +215,7 @@ mod tests {
 
         let id = TensorId::new();
         // grad = [1, 0] → norm = 1.0
-        let t = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0], &[2], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0], &[2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(id, t);
 
@@ -234,7 +234,7 @@ mod tests {
 
         let id = TensorId::new();
         // grad = [3, 4] → norm = 5.0, clip to max_norm=1.0
-        let t = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(id, t);
 
@@ -254,8 +254,8 @@ mod tests {
         let id1 = TensorId::new();
         let id2 = TensorId::new();
         // grad1 = [3, 0], grad2 = [0, 4] → global norm = sqrt(9+16) = 5.0
-        let t1 = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 0.0], &[2], &device);
-        let t2 = Tensor::<CpuRuntime>::from_slice(&[0.0f32, 4.0], &[2], &device);
+        let t1 = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 0.0], &[2], &device).unwrap();
+        let t2 = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 4.0], &[2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(id1, t1);
         grads.insert(id2, t2);
@@ -296,8 +296,8 @@ mod tests {
         let id2 = TensorId::new();
         // grad1 = [3, 4] → norm = 5.0, should be clipped to norm 2.0
         // grad2 = [1, 0] → norm = 1.0, should NOT be clipped
-        let t1 = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
-        let t2 = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0], &[2], &device);
+        let t1 = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
+        let t2 = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 0.0], &[2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(id1, t1);
         grads.insert(id2, t2);
@@ -323,7 +323,8 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let id = TensorId::new();
-        let t = Tensor::<CpuRuntime>::from_slice(&[-5.0f32, 3.0, 0.5, -0.1], &[4], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&[-5.0f32, 3.0, 0.5, -0.1], &[4], &device)
+            .unwrap();
         let mut grads = GradStore::new();
         grads.insert(id, t);
 
@@ -353,7 +354,7 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let id = TensorId::new();
-        let t = Tensor::<CpuRuntime>::from_slice(&NORM_FIXTURE, &[4], &device);
+        let t = Tensor::<CpuRuntime>::try_from_slice(&NORM_FIXTURE, &[4], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(id, t);
 
@@ -371,7 +372,7 @@ mod tests {
     #[test]
     fn test_clip_grad_norm_reads_narrow_gradients_at_their_own_dtype() {
         let (client, device) = cpu_setup();
-        let f32_grad = Tensor::<CpuRuntime>::from_slice(&NORM_FIXTURE, &[4], &device);
+        let f32_grad = Tensor::<CpuRuntime>::try_from_slice(&NORM_FIXTURE, &[4], &device).unwrap();
 
         for dtype in [DType::BF16, DType::F16] {
             let id = TensorId::new();
@@ -393,7 +394,7 @@ mod tests {
     fn test_clip_grad_norm_scales_a_narrow_gradient_correctly() {
         let (client, device) = cpu_setup();
         // grad = [3, 4] → norm = 5.0, exact in BF16 and F16.
-        let f32_grad = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
+        let f32_grad = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
 
         for dtype in [DType::BF16, DType::F16] {
             let id = TensorId::new();
@@ -424,7 +425,7 @@ mod tests {
         let (client, device) = cpu_setup();
 
         let id = TensorId::new();
-        let f32_grad = Tensor::<CpuRuntime>::from_slice(&NORM_FIXTURE, &[4], &device);
+        let f32_grad = Tensor::<CpuRuntime>::try_from_slice(&NORM_FIXTURE, &[4], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(id, client.cast(&f32_grad, DType::F64).unwrap());
 
@@ -442,7 +443,7 @@ mod tests {
     fn test_clip_per_param_reads_narrow_gradients_at_their_own_dtype() {
         let (client, device) = cpu_setup();
         // grad = [3, 4] → norm = 5.0, clipped to 2.0.
-        let f32_grad = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
+        let f32_grad = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
 
         for dtype in [DType::BF16, DType::F16] {
             let id = TensorId::new();
@@ -473,7 +474,7 @@ mod tests {
 
         let id = TensorId::new();
         // grad = [3, 4] → norm = 5.0, clipped to 2.0.
-        let f32_grad = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device);
+        let f32_grad = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap();
         let mut grads = GradStore::new();
         grads.insert(id, client.cast(&f32_grad, DType::F64).unwrap());
 
@@ -529,19 +530,19 @@ mod tests {
         let mut grads = GradStore::new();
         grads.insert(
             p1,
-            Tensor::<CpuRuntime>::from_slice(&[3.0f32, 0.0], &[2], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 0.0], &[2], &device).unwrap(),
         );
         grads.insert(
             p2,
-            Tensor::<CpuRuntime>::from_slice(&[0.0f32, 4.0], &[2], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 4.0], &[2], &device).unwrap(),
         );
         grads.insert(
             loss_node,
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &device).unwrap(),
         );
         grads.insert(
             activation,
-            Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 5.0, 5.0], &[4], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[0.0f32, 0.0, 5.0, 5.0], &[4], &device).unwrap(),
         );
 
         GraphStore {
@@ -666,11 +667,11 @@ mod tests {
         let mut grads = GradStore::new();
         grads.insert(
             trainable,
-            Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap(),
         );
         grads.insert(
             frozen,
-            Tensor::<CpuRuntime>::from_slice(&[128.0f32, 0.0], &[2], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[128.0f32, 0.0], &[2], &device).unwrap(),
         );
 
         // Only `trainable` is optimized, so only it is in the parameter set.
@@ -700,7 +701,7 @@ mod tests {
         let mut grads = GradStore::new();
         grads.insert(
             present,
-            Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap(),
         );
 
         let norm = clip_grad_norm(&client, &mut grads, &[present, missing], f64::MAX).unwrap();
@@ -717,7 +718,7 @@ mod tests {
         let mut grads = GradStore::new();
         grads.insert(
             id,
-            Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap(),
         );
 
         let norm = clip_grad_norm(&client, &mut grads, &[id, id], f64::MAX).unwrap();

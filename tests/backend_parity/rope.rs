@@ -28,15 +28,15 @@ fn test_apply_rope_parity() {
         use numr::runtime::cuda::CudaRuntime;
         use numr::tensor::Tensor;
         let x_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&x_data.to_vec::<f32>(), &[b, h, s, d], &cuda_device),
+            Tensor::try_from_slice(&x_data.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap(),
             false,
         );
         let cos_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&cos_data.to_vec::<f32>(), &[s, d / 2], &cuda_device),
+            Tensor::try_from_slice(&cos_data.to_vec::<f32>(), &[s, d / 2], &cuda_device).unwrap(),
             false,
         );
         let sin_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&sin_data.to_vec::<f32>(), &[s, d / 2], &cuda_device),
+            Tensor::try_from_slice(&sin_data.to_vec::<f32>(), &[s, d / 2], &cuda_device).unwrap(),
             false,
         );
         let result = cuda_client.apply_rope(&x_c, &cos_c, &sin_c).unwrap();
@@ -54,15 +54,15 @@ fn test_apply_rope_parity() {
         use numr::runtime::wgpu::WgpuRuntime;
         use numr::tensor::Tensor;
         let x_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&x_data.to_vec::<f32>(), &[b, h, s, d], &wgpu_device),
+            Tensor::try_from_slice(&x_data.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap(),
             false,
         );
         let cos_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&cos_data.to_vec::<f32>(), &[s, d / 2], &wgpu_device),
+            Tensor::try_from_slice(&cos_data.to_vec::<f32>(), &[s, d / 2], &wgpu_device).unwrap(),
             false,
         );
         let sin_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&sin_data.to_vec::<f32>(), &[s, d / 2], &wgpu_device),
+            Tensor::try_from_slice(&sin_data.to_vec::<f32>(), &[s, d / 2], &wgpu_device).unwrap(),
             false,
         );
         let result = wgpu_client.apply_rope(&x_w, &cos_w, &sin_w).unwrap();
@@ -97,15 +97,15 @@ fn test_apply_rope_interleaved_parity() {
         use numr::runtime::cuda::CudaRuntime;
         use numr::tensor::Tensor;
         let x_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&x_data.to_vec::<f32>(), &[b, h, s, d], &cuda_device),
+            Tensor::try_from_slice(&x_data.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap(),
             false,
         );
         let cos_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&cos_data.to_vec::<f32>(), &[s, d / 2], &cuda_device),
+            Tensor::try_from_slice(&cos_data.to_vec::<f32>(), &[s, d / 2], &cuda_device).unwrap(),
             false,
         );
         let sin_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&sin_data.to_vec::<f32>(), &[s, d / 2], &cuda_device),
+            Tensor::try_from_slice(&sin_data.to_vec::<f32>(), &[s, d / 2], &cuda_device).unwrap(),
             false,
         );
         let result = cuda_client
@@ -125,15 +125,15 @@ fn test_apply_rope_interleaved_parity() {
         use numr::runtime::wgpu::WgpuRuntime;
         use numr::tensor::Tensor;
         let x_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&x_data.to_vec::<f32>(), &[b, h, s, d], &wgpu_device),
+            Tensor::try_from_slice(&x_data.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap(),
             false,
         );
         let cos_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&cos_data.to_vec::<f32>(), &[s, d / 2], &wgpu_device),
+            Tensor::try_from_slice(&cos_data.to_vec::<f32>(), &[s, d / 2], &wgpu_device).unwrap(),
             false,
         );
         let sin_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&sin_data.to_vec::<f32>(), &[s, d / 2], &wgpu_device),
+            Tensor::try_from_slice(&sin_data.to_vec::<f32>(), &[s, d / 2], &wgpu_device).unwrap(),
             false,
         );
         let result = wgpu_client
@@ -173,15 +173,15 @@ fn test_apply_rope_yarn_parity() {
         use numr::runtime::cuda::CudaRuntime;
         use numr::tensor::Tensor;
         let x_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&x_data.to_vec::<f32>(), &[b, h, s, d], &cuda_device),
+            Tensor::try_from_slice(&x_data.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap(),
             false,
         );
         let cos_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&cos_data.to_vec::<f32>(), &[s, d / 2], &cuda_device),
+            Tensor::try_from_slice(&cos_data.to_vec::<f32>(), &[s, d / 2], &cuda_device).unwrap(),
             false,
         );
         let sin_c = Var::<CudaRuntime>::new(
-            Tensor::from_slice(&sin_data.to_vec::<f32>(), &[s, d / 2], &cuda_device),
+            Tensor::try_from_slice(&sin_data.to_vec::<f32>(), &[s, d / 2], &cuda_device).unwrap(),
             false,
         );
         let result = cuda_client
@@ -201,15 +201,15 @@ fn test_apply_rope_yarn_parity() {
         use numr::runtime::wgpu::WgpuRuntime;
         use numr::tensor::Tensor;
         let x_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&x_data.to_vec::<f32>(), &[b, h, s, d], &wgpu_device),
+            Tensor::try_from_slice(&x_data.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap(),
             false,
         );
         let cos_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&cos_data.to_vec::<f32>(), &[s, d / 2], &wgpu_device),
+            Tensor::try_from_slice(&cos_data.to_vec::<f32>(), &[s, d / 2], &wgpu_device).unwrap(),
             false,
         );
         let sin_w = Var::<WgpuRuntime>::new(
-            Tensor::from_slice(&sin_data.to_vec::<f32>(), &[s, d / 2], &wgpu_device),
+            Tensor::try_from_slice(&sin_data.to_vec::<f32>(), &[s, d / 2], &wgpu_device).unwrap(),
             false,
         );
         let result = wgpu_client
@@ -260,11 +260,11 @@ fn test_interleaved_vs_standard_different_outputs() {
     let sin_data: Vec<f32> = (0..s * d / 2).map(|i| (i as f32 * 0.3).sin()).collect();
 
     let cos = Var::<CpuRuntime>::new(
-        numr::tensor::Tensor::from_slice(&cos_data, &[s, d / 2], &cpu_device),
+        numr::tensor::Tensor::try_from_slice(&cos_data, &[s, d / 2], &cpu_device).unwrap(),
         false,
     );
     let sin = Var::<CpuRuntime>::new(
-        numr::tensor::Tensor::from_slice(&sin_data, &[s, d / 2], &cpu_device),
+        numr::tensor::Tensor::try_from_slice(&sin_data, &[s, d / 2], &cpu_device).unwrap(),
         false,
     );
     let x = Var::<CpuRuntime>::new(x_data, false);

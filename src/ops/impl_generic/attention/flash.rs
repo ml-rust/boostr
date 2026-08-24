@@ -116,15 +116,30 @@ mod tests {
         let d = 16;
 
         let q = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![0.1f32; b * h * s * d], &[b, h, s, d], &device),
+            Tensor::<CpuRuntime>::try_from_slice(
+                &vec![0.1f32; b * h * s * d],
+                &[b, h, s, d],
+                &device,
+            )
+            .unwrap(),
             false,
         );
         let k = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![0.1f32; b * h * s * d], &[b, h, s, d], &device),
+            Tensor::<CpuRuntime>::try_from_slice(
+                &vec![0.1f32; b * h * s * d],
+                &[b, h, s, d],
+                &device,
+            )
+            .unwrap(),
             false,
         );
         let v = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![0.1f32; b * h * s * d], &[b, h, s, d], &device),
+            Tensor::<CpuRuntime>::try_from_slice(
+                &vec![0.1f32; b * h * s * d],
+                &[b, h, s, d],
+                &device,
+            )
+            .unwrap(),
             false,
         );
 
@@ -141,15 +156,30 @@ mod tests {
         let d = 8;
 
         let q = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![0.1f32; b * h * s * d], &[b, h, s, d], &device),
+            Tensor::<CpuRuntime>::try_from_slice(
+                &vec![0.1f32; b * h * s * d],
+                &[b, h, s, d],
+                &device,
+            )
+            .unwrap(),
             false,
         );
         let k = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![0.1f32; b * h * s * d], &[b, h, s, d], &device),
+            Tensor::<CpuRuntime>::try_from_slice(
+                &vec![0.1f32; b * h * s * d],
+                &[b, h, s, d],
+                &device,
+            )
+            .unwrap(),
             false,
         );
         let v = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&vec![0.1f32; b * h * s * d], &[b, h, s, d], &device),
+            Tensor::<CpuRuntime>::try_from_slice(
+                &vec![0.1f32; b * h * s * d],
+                &[b, h, s, d],
+                &device,
+            )
+            .unwrap(),
             false,
         );
 
@@ -161,7 +191,7 @@ mod tests {
             }
         }
         let mask = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&mask_data, &[1, 1, s, s], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&mask_data, &[1, 1, s, s], &device).unwrap(),
             false,
         );
 
@@ -179,27 +209,30 @@ mod tests {
         let d = 16;
 
         let q = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &vec![0.1f32; b * h * s_q * d],
                 &[b, h, s_q, d],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
         let k = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &vec![0.1f32; b * h * s_kv * d],
                 &[b, h, s_kv, d],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
         let v = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &vec![0.1f32; b * h * s_kv * d],
                 &[b, h, s_kv, d],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
 
@@ -211,15 +244,15 @@ mod tests {
     fn test_attention_invalid_rank() {
         let (client, device) = cpu_setup();
         let q = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[2, 4], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 8], &[2, 4], &device).unwrap(),
             false,
         );
         let k = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[2, 4], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 8], &[2, 4], &device).unwrap(),
             false,
         );
         let v = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[2, 4], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32; 8], &[2, 4], &device).unwrap(),
             false,
         );
 

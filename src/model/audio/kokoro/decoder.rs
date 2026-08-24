@@ -225,11 +225,11 @@ mod tests {
 
     fn zeros(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; n], shape, device)
+        Tensor::<CpuRuntime>::try_from_slice(&vec![0.0f32; n], shape, device).unwrap()
     }
     fn ones(shape: &[usize], device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
-        Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; n], shape, device)
+        Tensor::<CpuRuntime>::try_from_slice(&vec![1.0f32; n], shape, device).unwrap()
     }
     fn conv(
         c_out: usize,

@@ -222,10 +222,12 @@ mod tests {
     #[test]
     fn test_fused_adamw_basic() {
         let (client, device) = cpu_setup();
-        let param = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4], &device);
-        let grad = Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2, 0.3, 0.4], &[4], &device);
-        let m = Tensor::<CpuRuntime>::zeros(&[4], DType::F32, &device);
-        let v = Tensor::<CpuRuntime>::zeros(&[4], DType::F32, &device);
+        let param =
+            Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[4], &device).unwrap();
+        let grad =
+            Tensor::<CpuRuntime>::try_from_slice(&[0.1f32, 0.2, 0.3, 0.4], &[4], &device).unwrap();
+        let m = Tensor::<CpuRuntime>::try_zeros(&[4], DType::F32, &device).unwrap();
+        let v = Tensor::<CpuRuntime>::try_zeros(&[4], DType::F32, &device).unwrap();
 
         let lr = 1e-3;
         let beta1 = 0.9;
@@ -249,8 +251,8 @@ mod tests {
     #[test]
     fn test_fused_sgd_basic() {
         let (client, device) = cpu_setup();
-        let param = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
-        let grad = Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2], &[2], &device);
+        let param = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let grad = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
 
         let (new_p, _buf) = client
             .fused_sgd_step(&param, &grad, None, 0.1, 0.0, 0.0, 0.0, false)
@@ -265,15 +267,15 @@ mod tests {
     fn test_fused_multi_tensor_adamw() {
         let (client, device) = cpu_setup();
 
-        let p1 = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
-        let g1 = Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2], &[2], &device);
-        let m1 = Tensor::<CpuRuntime>::zeros(&[2], DType::F32, &device);
-        let v1 = Tensor::<CpuRuntime>::zeros(&[2], DType::F32, &device);
+        let p1 = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let g1 = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
+        let m1 = Tensor::<CpuRuntime>::try_zeros(&[2], DType::F32, &device).unwrap();
+        let v1 = Tensor::<CpuRuntime>::try_zeros(&[2], DType::F32, &device).unwrap();
 
-        let p2 = Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0, 5.0], &[3], &device);
-        let g2 = Tensor::<CpuRuntime>::from_slice(&[0.3f32, 0.4, 0.5], &[3], &device);
-        let m2 = Tensor::<CpuRuntime>::zeros(&[3], DType::F32, &device);
-        let v2 = Tensor::<CpuRuntime>::zeros(&[3], DType::F32, &device);
+        let p2 = Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0, 5.0], &[3], &device).unwrap();
+        let g2 = Tensor::<CpuRuntime>::try_from_slice(&[0.3f32, 0.4, 0.5], &[3], &device).unwrap();
+        let m2 = Tensor::<CpuRuntime>::try_zeros(&[3], DType::F32, &device).unwrap();
+        let v2 = Tensor::<CpuRuntime>::try_zeros(&[3], DType::F32, &device).unwrap();
 
         let lr = 1e-3;
         let beta1 = 0.9;
@@ -319,11 +321,11 @@ mod tests {
         match dt {
             DType::BF16 => {
                 let d: Vec<half::bf16> = vals.iter().map(|&v| half::bf16::from_f32(v)).collect();
-                Tensor::<CpuRuntime>::from_slice(&d, &shape, device)
+                Tensor::<CpuRuntime>::try_from_slice(&d, &shape, device).unwrap()
             }
             DType::F16 => {
                 let d: Vec<half::f16> = vals.iter().map(|&v| half::f16::from_f32(v)).collect();
-                Tensor::<CpuRuntime>::from_slice(&d, &shape, device)
+                Tensor::<CpuRuntime>::try_from_slice(&d, &shape, device).unwrap()
             }
             other => panic!("narrow_from_f32: {:?} is not a narrow float", other),
         }
@@ -358,8 +360,8 @@ mod tests {
         for dt in NARROW_DTYPES {
             let param = narrow_from_f32(&[1.0, 2.0], dt, &device);
             let grad = narrow_from_f32(&[0.1, 0.2], dt, &device);
-            let m = Tensor::<CpuRuntime>::zeros(&[2], dt, &device);
-            let v = Tensor::<CpuRuntime>::zeros(&[2], dt, &device);
+            let m = Tensor::<CpuRuntime>::try_zeros(&[2], dt, &device).unwrap();
+            let v = Tensor::<CpuRuntime>::try_zeros(&[2], dt, &device).unwrap();
 
             // lr large enough that the step clears the narrow dtype's resolution.
             let lr = 0.1;
@@ -407,10 +409,10 @@ mod tests {
         let wd = 0.0;
         let step_size = lr * (1.0_f64 - beta2).sqrt() / (1.0 - beta1);
 
-        let p32 = Tensor::<CpuRuntime>::from_slice(&vals, &[2], &device);
-        let g32 = Tensor::<CpuRuntime>::from_slice(&grads, &[2], &device);
-        let m32 = Tensor::<CpuRuntime>::zeros(&[2], DType::F32, &device);
-        let v32 = Tensor::<CpuRuntime>::zeros(&[2], DType::F32, &device);
+        let p32 = Tensor::<CpuRuntime>::try_from_slice(&vals, &[2], &device).unwrap();
+        let g32 = Tensor::<CpuRuntime>::try_from_slice(&grads, &[2], &device).unwrap();
+        let m32 = Tensor::<CpuRuntime>::try_zeros(&[2], DType::F32, &device).unwrap();
+        let v32 = Tensor::<CpuRuntime>::try_zeros(&[2], DType::F32, &device).unwrap();
         let (ref_p, _, _) = client
             .fused_adamw_step(&p32, &g32, &m32, &v32, lr, beta1, beta2, eps, wd, step_size)
             .unwrap();
@@ -418,8 +420,8 @@ mod tests {
 
         let p16 = narrow_from_f32(&vals, DType::BF16, &device);
         let g16 = narrow_from_f32(&grads, DType::BF16, &device);
-        let m16 = Tensor::<CpuRuntime>::zeros(&[2], DType::BF16, &device);
-        let v16 = Tensor::<CpuRuntime>::zeros(&[2], DType::BF16, &device);
+        let m16 = Tensor::<CpuRuntime>::try_zeros(&[2], DType::BF16, &device).unwrap();
+        let v16 = Tensor::<CpuRuntime>::try_zeros(&[2], DType::BF16, &device).unwrap();
         let (bf_p, _, _) = client
             .fused_adamw_step(&p16, &g16, &m16, &v16, lr, beta1, beta2, eps, wd, step_size)
             .unwrap();
@@ -467,7 +469,7 @@ mod tests {
         for dt in NARROW_DTYPES {
             let param = narrow_from_f32(&[1.0, 2.0], dt, &device);
             let grad = narrow_from_f32(&[0.1, 0.2], dt, &device);
-            let accum = Tensor::<CpuRuntime>::zeros(&[2], dt, &device);
+            let accum = Tensor::<CpuRuntime>::try_zeros(&[2], dt, &device).unwrap();
 
             let (new_p, new_acc) = client
                 .fused_adagrad_step(&param, &grad, &accum, 0.1, 1e-10, 0.0)
@@ -490,8 +492,8 @@ mod tests {
         for dt in NARROW_DTYPES {
             let param = narrow_from_f32(&[1.0, 2.0], dt, &device);
             let grad = narrow_from_f32(&[0.1, 0.2], dt, &device);
-            let m = Tensor::<CpuRuntime>::zeros(&[2], dt, &device);
-            let v = Tensor::<CpuRuntime>::zeros(&[2], dt, &device);
+            let m = Tensor::<CpuRuntime>::try_zeros(&[2], dt, &device).unwrap();
+            let v = Tensor::<CpuRuntime>::try_zeros(&[2], dt, &device).unwrap();
 
             let (update, new_m, new_v) = client
                 .fused_lamb_step(&param, &grad, &m, &v, 0.9, 0.999, 1e-6, 0.0, 0.1, 0.001)
@@ -514,8 +516,8 @@ mod tests {
 
         let p1 = narrow_from_f32(&[1.0, 2.0], DType::BF16, &device);
         let g1 = narrow_from_f32(&[0.1, 0.2], DType::BF16, &device);
-        let m1 = Tensor::<CpuRuntime>::zeros(&[2], DType::BF16, &device);
-        let v1 = Tensor::<CpuRuntime>::zeros(&[2], DType::BF16, &device);
+        let m1 = Tensor::<CpuRuntime>::try_zeros(&[2], DType::BF16, &device).unwrap();
+        let v1 = Tensor::<CpuRuntime>::try_zeros(&[2], DType::BF16, &device).unwrap();
 
         let lr = 0.1;
         let step_size = lr * (1.0_f64 - 0.999).sqrt() / (1.0 - 0.9);
@@ -533,9 +535,9 @@ mod tests {
     #[test]
     fn test_fused_adagrad_basic() {
         let (client, device) = cpu_setup();
-        let param = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device);
-        let grad = Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.2], &[2], &device);
-        let accum = Tensor::<CpuRuntime>::zeros(&[2], DType::F32, &device);
+        let param = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+        let grad = Tensor::<CpuRuntime>::try_from_slice(&[0.1f32, 0.2], &[2], &device).unwrap();
+        let accum = Tensor::<CpuRuntime>::try_zeros(&[2], DType::F32, &device).unwrap();
 
         let (new_p, new_acc) = client
             .fused_adagrad_step(&param, &grad, &accum, 0.1, 1e-10, 0.0)

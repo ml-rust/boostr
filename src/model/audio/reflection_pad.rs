@@ -91,8 +91,12 @@ mod tests {
     #[test]
     fn reflects_both_sides() {
         let (_client, device) = cpu_setup();
-        let x =
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0], &[1, 1, 5], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(
+            &[1.0f32, 2.0, 3.0, 4.0, 5.0],
+            &[1, 1, 5],
+            &device,
+        )
+        .unwrap();
         let y = reflection_pad_1d(&x, 2, 2).unwrap();
         let v: Vec<f32> = y.to_vec();
         // Input [1,2,3,4,5], pad=2 each side → [3,2,1,2,3,4,5,4,3].
@@ -103,7 +107,7 @@ mod tests {
     fn zero_padding_is_identity() {
         let (_client, device) = cpu_setup();
         let data = vec![1.0f32, 2.0, 3.0];
-        let x = Tensor::<CpuRuntime>::from_slice(&data, &[1, 1, 3], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(&data, &[1, 1, 3], &device).unwrap();
         let y = reflection_pad_1d(&x, 0, 0).unwrap();
         let v: Vec<f32> = y.to_vec();
         assert_eq!(v, data);
@@ -113,7 +117,7 @@ mod tests {
     fn handles_multichannel_batched_input() {
         let (_client, device) = cpu_setup();
         // B=2, C=2, T=3. Each (b, c) row should pad independently.
-        let x = Tensor::<CpuRuntime>::from_slice(
+        let x = Tensor::<CpuRuntime>::try_from_slice(
             &[
                 1.0f32, 2.0, 3.0, // (0, 0)
                 4.0, 5.0, 6.0, // (0, 1)
@@ -122,7 +126,8 @@ mod tests {
             ],
             &[2, 2, 3],
             &device,
-        );
+        )
+        .unwrap();
         let y = reflection_pad_1d(&x, 1, 1).unwrap();
         assert_eq!(y.shape(), &[2, 2, 5]);
         let v: Vec<f32> = y.to_vec();
@@ -135,7 +140,8 @@ mod tests {
     #[test]
     fn asymmetric_padding() {
         let (_client, device) = cpu_setup();
-        let x = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 1, 4], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0, 4.0], &[1, 1, 4], &device)
+            .unwrap();
         let y = reflection_pad_1d(&x, 1, 3).unwrap();
         let v: Vec<f32> = y.to_vec();
         // Input [1,2,3,4], left=1 → [2], right=3 → [3, 2, 1].
@@ -146,7 +152,7 @@ mod tests {
     #[test]
     fn rejects_too_large_padding() {
         let (_client, device) = cpu_setup();
-        let x = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[1, 1, 2], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[1, 1, 2], &device).unwrap();
         assert!(reflection_pad_1d(&x, 2, 0).is_err());
         assert!(reflection_pad_1d(&x, 0, 2).is_err());
     }
@@ -154,7 +160,7 @@ mod tests {
     #[test]
     fn rejects_wrong_rank() {
         let (_client, device) = cpu_setup();
-        let x = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[2, 2], &device);
+        let x = Tensor::<CpuRuntime>::try_from_slice(&[0.0f32; 4], &[2, 2], &device).unwrap();
         assert!(reflection_pad_1d(&x, 1, 1).is_err());
     }
 }

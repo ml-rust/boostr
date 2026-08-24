@@ -68,9 +68,13 @@ fn composite_modules_enumerate_all_trainable_parameters() {
         &device,
     );
     let (m1_out, m1_out_ids) = linear(4, mamba1_config.d_inner(), true, 0.16, &device);
-    let m1_a = Tensor::<CpuRuntime>::from_slice(&[-0.2f32; 4], &[mamba1_config.d_inner()], &device);
+    let m1_a =
+        Tensor::<CpuRuntime>::try_from_slice(&[-0.2f32; 4], &[mamba1_config.d_inner()], &device)
+            .unwrap();
     let m1_a_id = m1_a.id();
-    let m1_d = Tensor::<CpuRuntime>::from_slice(&[0.3f32; 4], &[mamba1_config.d_inner()], &device);
+    let m1_d =
+        Tensor::<CpuRuntime>::try_from_slice(&[0.3f32; 4], &[mamba1_config.d_inner()], &device)
+            .unwrap();
     let m1_d_id = m1_d.id();
     let mamba1 = Mamba1::with_ids(
         mamba1_config,
@@ -125,23 +129,28 @@ fn composite_modules_enumerate_all_trainable_parameters() {
         0.20,
         &device,
     );
-    let m3_b = Tensor::<CpuRuntime>::from_slice(
+    let m3_b = Tensor::<CpuRuntime>::try_from_slice(
         &[0.1f32; 2],
         &[mamba3_config.nheads, mamba3_config.d_state],
         &device,
-    );
+    )
+    .unwrap();
     let m3_b_id = m3_b.id();
-    let m3_c = Tensor::<CpuRuntime>::from_slice(
+    let m3_c = Tensor::<CpuRuntime>::try_from_slice(
         &[0.2f32; 2],
         &[mamba3_config.nheads, mamba3_config.d_state],
         &device,
-    );
+    )
+    .unwrap();
     let m3_c_id = m3_c.id();
-    let m3_dt = Tensor::<CpuRuntime>::from_slice(&[0.05f32], &[mamba3_config.nheads], &device);
+    let m3_dt =
+        Tensor::<CpuRuntime>::try_from_slice(&[0.05f32], &[mamba3_config.nheads], &device).unwrap();
     let m3_dt_id = m3_dt.id();
-    let m3_a = Tensor::<CpuRuntime>::from_slice(&[-0.4f32], &[mamba3_config.nheads], &device);
+    let m3_a =
+        Tensor::<CpuRuntime>::try_from_slice(&[-0.4f32], &[mamba3_config.nheads], &device).unwrap();
     let m3_a_id = m3_a.id();
-    let m3_d = Tensor::<CpuRuntime>::from_slice(&[0.3f32], &[mamba3_config.nheads], &device);
+    let m3_d =
+        Tensor::<CpuRuntime>::try_from_slice(&[0.3f32], &[mamba3_config.nheads], &device).unwrap();
     let m3_d_id = m3_d.id();
     let (m3_bc_norm, m3_bc_norm_id) = rms(mamba3_config.d_state, 1e-6, 0.21, &device);
     let (m3_norm, m3_norm_id) = rms(mamba3_config.d_inner(), 1e-6, 0.22, &device);
@@ -220,24 +229,26 @@ fn composite_modules_enumerate_all_trainable_parameters() {
 #[test]
 fn composite_adamw_training_preserves_ids_and_state() {
     let (client, device) = cpu_setup();
-    let mla_input = Tensor::<CpuRuntime>::from_slice(
+    let mla_input = Tensor::<CpuRuntime>::try_from_slice(
         &[0.2f32, -0.1, 0.4, 0.3, -0.3, 0.5, -0.2, 0.1],
         &[1, 2, 4],
         &device,
-    );
-    let mla_target = Tensor::<CpuRuntime>::zeros(&[1, 2, 4], DType::F32, &device);
+    )
+    .unwrap();
+    let mla_target = Tensor::<CpuRuntime>::try_zeros(&[1, 2, 4], DType::F32, &device).unwrap();
     let (mla, mla_config, mla_ids, mla_expected_ids) = build_mla(&device);
     let mut mla_params = trainable_map(mla.trainable_parameters());
     assert_eq!(mla_params.len(), mla_expected_ids.len());
 
-    let mamba_input = Tensor::<CpuRuntime>::from_slice(
+    let mamba_input = Tensor::<CpuRuntime>::try_from_slice(
         &[
             0.1f32, -0.2, 0.3, -0.4, 0.2, 0.1, -0.3, 0.4, -0.1, 0.3, 0.2, -0.2,
         ],
         &[1, 3, 4],
         &device,
-    );
-    let mamba_target = Tensor::<CpuRuntime>::zeros(&[1, 3, 4], DType::F32, &device);
+    )
+    .unwrap();
+    let mamba_target = Tensor::<CpuRuntime>::try_zeros(&[1, 3, 4], DType::F32, &device).unwrap();
     let (mamba, mamba_config, mamba_ids, mamba_expected_ids) = build_mamba2(&device);
     let mut mamba_params = trainable_map(mamba.trainable_parameters());
     assert_eq!(mamba_params.len(), mamba_expected_ids.len());

@@ -15,14 +15,14 @@ fn test_distributed_save_and_load() {
     let mut model_r0 = HashMap::new();
     model_r0.insert(
         "embed.weight".to_string(),
-        Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap(),
     );
 
     // Rank 1 state
     let mut model_r1 = HashMap::new();
     model_r1.insert(
         "head.weight".to_string(),
-        Tensor::<CpuRuntime>::from_slice(&[4.0f32, 5.0], &[2], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&[4.0f32, 5.0], &[2], &device).unwrap(),
     );
 
     let state = make_training_state(100);
@@ -81,14 +81,14 @@ fn test_consolidate_zero_partitioned() {
     let mut model_r0 = HashMap::new();
     model_r0.insert(
         "embed.weight".to_string(),
-        Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 2.0], &[2], &device).unwrap(),
     );
 
     // Rank 1 owns head.weight
     let mut model_r1 = HashMap::new();
     model_r1.insert(
         "head.weight".to_string(),
-        Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 4.0], &[2], &device).unwrap(),
     );
 
     let state = make_training_state(200);
@@ -146,7 +146,7 @@ fn test_distributed_topology_mismatch() {
     let mut model = HashMap::new();
     model.insert(
         "w".to_string(),
-        Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32], &[1], &device).unwrap(),
     );
     let state = make_training_state(1);
 
@@ -180,30 +180,32 @@ fn test_consolidate_tensor_parallel() {
     let mut model_r0 = HashMap::new();
     model_r0.insert(
         "attn.wq".to_string(),
-        Tensor::<CpuRuntime>::from_slice(
+        Tensor::<CpuRuntime>::try_from_slice(
             &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             &[2, 4],
             &device,
-        ),
+        )
+        .unwrap(),
     );
     model_r0.insert(
         "norm.weight".to_string(),
-        Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[2], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[2], &device).unwrap(),
     );
 
     // Rank 1: second half of wq weight [2, 4]
     let mut model_r1 = HashMap::new();
     model_r1.insert(
         "attn.wq".to_string(),
-        Tensor::<CpuRuntime>::from_slice(
+        Tensor::<CpuRuntime>::try_from_slice(
             &[9.0f32, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
             &[2, 4],
             &device,
-        ),
+        )
+        .unwrap(),
     );
     model_r1.insert(
         "norm.weight".to_string(),
-        Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[2], &device),
+        Tensor::<CpuRuntime>::try_from_slice(&[1.0f32, 1.0], &[2], &device).unwrap(),
     );
 
     let state = make_training_state(300);

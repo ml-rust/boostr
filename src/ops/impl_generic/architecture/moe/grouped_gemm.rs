@@ -230,18 +230,21 @@ mod tests {
             .map(|i| (i as f32 * 0.1).sin())
             .collect();
         let tokens =
-            Tensor::<CpuRuntime>::from_slice(&tokens_data, &[total_tokens, in_dim], &device);
+            Tensor::<CpuRuntime>::try_from_slice(&tokens_data, &[total_tokens, in_dim], &device)
+                .unwrap();
 
         let weights_data: Vec<f32> = (0..num_experts * in_dim * out_dim)
             .map(|i| (i as f32 * 0.05).cos() * 0.1)
             .collect();
-        let weights = Tensor::<CpuRuntime>::from_slice(
+        let weights = Tensor::<CpuRuntime>::try_from_slice(
             &weights_data,
             &[num_experts, in_dim, out_dim],
             &device,
-        );
+        )
+        .unwrap();
 
-        let offsets = Tensor::<CpuRuntime>::from_slice(&[0i32, 3, 5, 8], &[4], &device);
+        let offsets =
+            Tensor::<CpuRuntime>::try_from_slice(&[0i32, 3, 5, 8], &[4], &device).unwrap();
 
         let output = moe_grouped_gemm_impl(&client, &tokens, &weights, &offsets).unwrap();
         assert_eq!(output.shape(), &[total_tokens, out_dim]);
@@ -255,14 +258,19 @@ mod tests {
         const OUT_DIM: usize = 4;
         const TOTAL: usize = 4;
 
-        let tokens =
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32; TOTAL * IN_DIM], &[TOTAL, IN_DIM], &device);
-        let weights = Tensor::<CpuRuntime>::from_slice(
+        let tokens = Tensor::<CpuRuntime>::try_from_slice(
+            &[1.0f32; TOTAL * IN_DIM],
+            &[TOTAL, IN_DIM],
+            &device,
+        )
+        .unwrap();
+        let weights = Tensor::<CpuRuntime>::try_from_slice(
             &[0.1f32; NUM_EXPERTS * IN_DIM * OUT_DIM],
             &[NUM_EXPERTS, IN_DIM, OUT_DIM],
             &device,
-        );
-        let offsets = Tensor::<CpuRuntime>::from_slice(&[0i32, 2, 4], &[3], &device);
+        )
+        .unwrap();
+        let offsets = Tensor::<CpuRuntime>::try_from_slice(&[0i32, 2, 4], &[3], &device).unwrap();
 
         let plain = moe_grouped_gemm_impl(&client, &tokens, &weights, &offsets).unwrap();
         let fused =

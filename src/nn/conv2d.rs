@@ -115,12 +115,13 @@ mod tests {
     fn test_conv2d_output_shape() {
         let (client, device) = cpu_setup();
         // weight: [out=4, in=3, kH=3, kW=3]
-        let weight = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 108], &[4, 3, 3, 3], &device);
+        let weight =
+            Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 108], &[4, 3, 3, 3], &device).unwrap();
         let conv = Conv2d::new(weight, None, (1, 1), PaddingMode::Valid, (1, 1), 1, false);
 
         // input: [batch=2, channels=3, height=8, width=10]
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[0.1f32; 480], &[2, 3, 8, 10], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[0.1f32; 480], &[2, 3, 8, 10], &device).unwrap(),
             false,
         );
         let out = conv.forward(&client, &input).unwrap();
@@ -132,8 +133,9 @@ mod tests {
     fn test_conv2d_with_bias() {
         let (client, device) = cpu_setup();
         // Single in/out channel, kernel=1x1 -> effectively a multiply+bias
-        let weight = Tensor::<CpuRuntime>::from_slice(&[2.0f32], &[1, 1, 1, 1], &device);
-        let bias = Tensor::<CpuRuntime>::from_slice(&[10.0f32], &[1], &device);
+        let weight =
+            Tensor::<CpuRuntime>::try_from_slice(&[2.0f32], &[1, 1, 1, 1], &device).unwrap();
+        let bias = Tensor::<CpuRuntime>::try_from_slice(&[10.0f32], &[1], &device).unwrap();
         let conv = Conv2d::new(
             weight,
             Some(bias),
@@ -146,7 +148,7 @@ mod tests {
 
         // input: [batch=1, channels=1, height=1, width=2]
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[3.0f32, 5.0], &[1, 1, 1, 2], &device),
+            Tensor::<CpuRuntime>::try_from_slice(&[3.0f32, 5.0], &[1, 1, 1, 2], &device).unwrap(),
             false,
         );
         let out = conv.forward(&client, &input).unwrap();
@@ -166,8 +168,12 @@ mod tests {
 
         let (client, device) = crate::test_utils::cpu_setup();
         // Asymmetric weight so a genuine zero cannot produce a false pass.
-        let weight =
-            Tensor::<CpuRuntime>::from_slice(&[1.5f32, -0.5, 0.25, 2.0], &[1, 1, 2, 2], &device);
+        let weight = Tensor::<CpuRuntime>::try_from_slice(
+            &[1.5f32, -0.5, 0.25, 2.0],
+            &[1, 1, 2, 2],
+            &device,
+        )
+        .unwrap();
         let conv = Conv2d::new(
             weight,
             None,
@@ -179,11 +185,12 @@ mod tests {
         );
 
         let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(
+            Tensor::<CpuRuntime>::try_from_slice(
                 &[0.5f32, -1.0, 2.0, 0.75, 1.25, -0.25, 0.1, 1.75, -0.6],
                 &[1, 1, 3, 3],
                 &device,
-            ),
+            )
+            .unwrap(),
             false,
         );
 

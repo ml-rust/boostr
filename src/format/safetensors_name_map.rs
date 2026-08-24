@@ -62,12 +62,9 @@ fn normalize_falcon(name: &str) -> String {
     {
         // Attention
         if let Some(suffix) = layer_rest.strip_prefix("self_attention.") {
-            if suffix.starts_with("query_key_value.") {
+            if let Some(rest_suffix) = suffix.strip_prefix("query_key_value.") {
                 // Fused QKV — keep with canonical prefix for later splitting
-                return format!(
-                    "model.layers.{layer_num}.self_attn.query_key_value.{rest_suffix}",
-                    rest_suffix = suffix.strip_prefix("query_key_value.").unwrap()
-                );
+                return format!("model.layers.{layer_num}.self_attn.query_key_value.{rest_suffix}");
             }
             if let Some(s) = suffix.strip_prefix("dense.") {
                 return format!("model.layers.{layer_num}.self_attn.o_proj.{s}");
@@ -131,11 +128,8 @@ fn normalize_gpt_neox(name: &str) -> String {
     {
         // Attention
         if let Some(suffix) = layer_rest.strip_prefix("attention.") {
-            if suffix.starts_with("query_key_value.") {
-                return format!(
-                    "model.layers.{layer_num}.self_attn.query_key_value.{rest_suffix}",
-                    rest_suffix = suffix.strip_prefix("query_key_value.").unwrap()
-                );
+            if let Some(rest_suffix) = suffix.strip_prefix("query_key_value.") {
+                return format!("model.layers.{layer_num}.self_attn.query_key_value.{rest_suffix}");
             }
             if let Some(s) = suffix.strip_prefix("dense.") {
                 return format!("model.layers.{layer_num}.self_attn.o_proj.{s}");
@@ -192,11 +186,8 @@ fn normalize_dbrx(name: &str) -> String {
     {
         // Attention block
         if let Some(suffix) = layer_rest.strip_prefix("norm_attn_norm.attn.") {
-            if suffix.starts_with("Wqkv.") {
-                return format!(
-                    "model.layers.{layer_num}.self_attn.query_key_value.{rest_suffix}",
-                    rest_suffix = suffix.strip_prefix("Wqkv.").unwrap()
-                );
+            if let Some(rest_suffix) = suffix.strip_prefix("Wqkv.") {
+                return format!("model.layers.{layer_num}.self_attn.query_key_value.{rest_suffix}");
             }
             if let Some(s) = suffix.strip_prefix("out_proj.") {
                 return format!("model.layers.{layer_num}.self_attn.o_proj.{s}");

@@ -172,9 +172,8 @@ pub fn load_voice_pack<R: Runtime<DType = DType>>(
     };
 
     let shape = tensor.shape();
-    let is_valid = matches!(shape.len(), 2 | 3)
-        && *shape.last().unwrap() >= 2
-        && shape.last().unwrap() % 2 == 0;
+    let is_valid =
+        matches!(shape.len(), 2 | 3) && shape.last().is_some_and(|&d| d >= 2 && d % 2 == 0);
     if !is_valid {
         return Err(Error::ModelError {
             reason: format!(

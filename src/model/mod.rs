@@ -35,7 +35,9 @@ pub use mamba::{
 pub use multimodal::{ModelInput, MultimodalModel};
 pub use registry::LoadedModel;
 pub use speech_lm::{
-    ALL_SPECIAL_TOKENS, CodecVocab, DEFAULT_CONTROL_REGION, SpecialToken, SpeechVocab,
+    ALL_SPECIAL_TOKENS, CodecVocab, DEFAULT_CONTROL_REGION, OwnedSpeechRecord, SpecialToken,
+    SpeechRecord, SpeechVocab, pack_record, pack_records, pack_records_padded, unpack_record,
+    unpack_records,
 };
 pub use traits::{Model, ModelClient};
 pub use vocab_growth::fit_vocab_rows;

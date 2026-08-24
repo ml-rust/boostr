@@ -6,7 +6,7 @@ fn test_lora_linear_creation() {
     let device = <CpuRuntime as Runtime>::default_device();
     let weight: Tensor<CpuRuntime> = Tensor::zeros(&[64, 32], DType::F32, &device);
     let base = Linear::new(weight, None, false);
-    let lora = LoraLinear::new(base, 8, 16.0, &device);
+    let lora = LoraLinear::new(base, 8, 16.0, &device).expect("lora new must succeed on CPU");
     assert_eq!(lora.rank(), 8);
     assert!((lora.scaling() - 2.0).abs() < 1e-6); // alpha/rank = 16/8 = 2
 }
@@ -35,7 +35,7 @@ fn test_lora_forward_propagates_gradient_to_factors() {
         None,
         false,
     );
-    let lora = LoraLinear::new(base, rank, 16.0, &device);
+    let lora = LoraLinear::new(base, rank, 16.0, &device).expect("lora new must succeed on CPU");
 
     let x_vals: Vec<f32> = (0..2 * in_features)
         .map(|i| (i as f32) * 0.25 - 0.75)
@@ -74,7 +74,7 @@ fn test_module_parameters_enumerates_base_and_adapters() {
     let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device);
     let bias = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4], &device);
     let base = Linear::new(weight, Some(bias), true);
-    let lora = LoraLinear::new(base, 2, 4.0, &device);
+    let lora = LoraLinear::new(base, 2, 4.0, &device).expect("lora new must succeed on CPU");
 
     // base.weight + base.bias + lora_a + lora_b
     assert_eq!(lora.parameters().len(), 4);
@@ -94,7 +94,7 @@ fn test_trainable_parameters_excludes_frozen_base() {
     let device = <CpuRuntime as Runtime>::default_device();
     let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device);
     let base = Linear::new(weight, None, false); // frozen
-    let lora = LoraLinear::new(base, 2, 4.0, &device);
+    let lora = LoraLinear::new(base, 2, 4.0, &device).expect("lora new must succeed on CPU");
 
     let trainable = lora.trainable_parameters();
     assert_eq!(trainable.len(), 2);

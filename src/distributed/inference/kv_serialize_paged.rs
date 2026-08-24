@@ -37,7 +37,7 @@ pub struct PagedLayerData {
 pub fn serialize_paged_kv_cache<R>(
     cache: &LayeredPagedKvCache<R>,
     _block_table: &BlockTable,
-) -> Vec<u8>
+) -> Result<Vec<u8>>
 where
     R: Runtime<DType = DType>,
 {
@@ -63,8 +63,8 @@ where
         buf.extend_from_slice(&num_heads.to_le_bytes());
         buf.extend_from_slice(&head_dim.to_le_bytes());
 
-        let k_data: Vec<f32> = layer.k_cache().to_vec::<f32>();
-        let v_data: Vec<f32> = layer.v_cache().to_vec::<f32>();
+        let k_data: Vec<f32> = layer.k_cache().try_to_vec::<f32>()?;
+        let v_data: Vec<f32> = layer.v_cache().try_to_vec::<f32>()?;
         buf.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&k_data));
         buf.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&v_data));
 
@@ -76,7 +76,7 @@ where
         }
     }
 
-    buf
+    Ok(buf)
 }
 
 /// Deserialize bytes into a `LayeredPagedKvCache`, per-layer K/V data, and
@@ -182,7 +182,7 @@ where
     }
 
     if raw_layers.is_empty() {
-        let cache = LayeredPagedKvCache::<R>::new(0, 0, block_size, 1, 64, DType::F32, device);
+        let cache = LayeredPagedKvCache::<R>::new(0, 0, block_size, 1, 64, DType::F32, device)?;
         return Ok((cache, Vec::new(), Vec::new()));
     }
 
@@ -195,7 +195,7 @@ where
         first.head_dim,
         DType::F32,
         device,
-    );
+    )?;
     paged_cache.set_seq_len(seq_len);
 
     let mut block_tables: Vec<BlockTable> = Vec::with_capacity(num_layers);

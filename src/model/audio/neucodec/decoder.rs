@@ -216,7 +216,7 @@ impl NeuCodecDecoder<numr::runtime::cpu::CpuRuntime> {
         x: &Var<numr::runtime::cpu::CpuRuntime>,
     ) -> Result<numr::tensor::Tensor<numr::runtime::cpu::CpuRuntime>> {
         let (mag, phase) = self.forward_features(client, x)?;
-        let window = hann_window(self.config.n_fft, x.tensor().device());
+        let window = hann_window(self.config.n_fft, x.tensor().device())?;
         istft(
             client,
             mag.tensor(),

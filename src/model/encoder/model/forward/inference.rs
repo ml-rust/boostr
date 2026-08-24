@@ -111,8 +111,8 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             reason: "input_ids must have at least 1 dimension".into(),
         })?;
 
-        let pos_tensor = self.position_ids_tensor(input_ids, &shape, seq_len);
-        let span_masks = SpanMasks::build(&self.config, seq_len, input_ids.device());
+        let pos_tensor = self.position_ids_tensor(input_ids, &shape, seq_len)?;
+        let span_masks = SpanMasks::build(&self.config, seq_len, input_ids.device())?;
 
         self.encode_inference_with_pos(client, input_ids, &pos_tensor, attention_mask, &span_masks)
     }

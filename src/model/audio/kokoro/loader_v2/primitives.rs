@@ -35,24 +35,38 @@ pub fn load_kokoro_adain<R: Runtime<DType = DType>>(
     let norm_w = if st.has_tensor(&format!("{prefix}.norm.weight")) {
         st.load_tensor::<R>(&format!("{prefix}.norm.weight"), device)?
     } else {
-        ones_1d::<R>(channels, device)
+        ones_1d::<R>(channels, device)?
     };
     let norm_b = if st.has_tensor(&format!("{prefix}.norm.bias")) {
         st.load_tensor::<R>(&format!("{prefix}.norm.bias"), device)?
     } else {
-        zeros_1d::<R>(channels, device)
+        zeros_1d::<R>(channels, device)?
     };
     KokoroAdaIn1d::new(fc_w, fc_b, norm_w, norm_b, eps)
 }
 
-fn ones_1d<R: Runtime<DType = DType>>(n: usize, device: &R::Device) -> numr::tensor::Tensor<R> {
+fn ones_1d<R: Runtime<DType = DType>>(
+    n: usize,
+    device: &R::Device,
+) -> Result<numr::tensor::Tensor<R>> {
     let data: Vec<f32> = vec![1.0; n];
-    numr::tensor::Tensor::<R>::from_slice(&data, &[n], device)
+    Ok(numr::tensor::Tensor::<R>::try_from_slice(
+        &data,
+        &[n],
+        device,
+    )?)
 }
 
-fn zeros_1d<R: Runtime<DType = DType>>(n: usize, device: &R::Device) -> numr::tensor::Tensor<R> {
+fn zeros_1d<R: Runtime<DType = DType>>(
+    n: usize,
+    device: &R::Device,
+) -> Result<numr::tensor::Tensor<R>> {
     let data: Vec<f32> = vec![0.0; n];
-    numr::tensor::Tensor::<R>::from_slice(&data, &[n], device)
+    Ok(numr::tensor::Tensor::<R>::try_from_slice(
+        &data,
+        &[n],
+        device,
+    )?)
 }
 
 /// Load an `AdaLayerNorm` from `{prefix}.fc.*` (no learnable `norm` in

@@ -34,9 +34,9 @@ pub(in crate::model::encoder) fn additive_span_mask<R: Runtime<DType = DType>>(
     seq_len: usize,
     dtype: DType,
     device: &R::Device,
-) -> Option<Tensor<R>> {
+) -> Result<Option<Tensor<R>>> {
     if !spec_binds(spec, seq_len) {
-        return None;
+        return Ok(None);
     }
 
     let bias = masked_bias(dtype);
@@ -48,11 +48,11 @@ pub(in crate::model::encoder) fn additive_span_mask<R: Runtime<DType = DType>>(
             }
         }
     }
-    Some(Tensor::<R>::from_slice(
+    Ok(Some(Tensor::<R>::try_from_slice(
         &data,
         &[1, 1, seq_len, seq_len],
         device,
-    ))
+    )?))
 }
 
 /// Build the additive `[1, n_heads, seq_len, seq_len]` ALiBi bias.
@@ -72,7 +72,7 @@ fn alibi_bias<R: Runtime<DType = DType>>(
     seq_len: usize,
     dtype: DType,
     device: &R::Device,
-) -> Tensor<R> {
+) -> Result<Tensor<R>> {
     let slopes = alibi_slopes(n_heads, max_bias);
     let masked = masked_bias(dtype);
 
@@ -90,7 +90,11 @@ fn alibi_bias<R: Runtime<DType = DType>>(
         }
     }
 
-    Tensor::<R>::from_slice(&data, &[1, n_heads, seq_len, seq_len], device)
+    Ok(Tensor::<R>::try_from_slice(
+        &data,
+        &[1, n_heads, seq_len, seq_len],
+        device,
+    )?)
 }
 
 /// Whether `spec` actually excludes any pair at this sequence length.
@@ -142,7 +146,7 @@ impl<R: Runtime<DType = DType>> SpanMasks<R> {
     ///
     /// Call before the layer loop, and — on the CUDA graph path — before capture
     /// begins.
-    pub fn build(config: &EncoderConfig, seq_len: usize, device: &R::Device) -> Self {
+    pub fn build(config: &EncoderConfig, seq_len: usize, device: &R::Device) -> Result<Self> {
         let dtype = config.compute_dtype;
 
         // ALiBi replaces the span mask outright: the per-head bias tensor
@@ -150,7 +154,7 @@ impl<R: Runtime<DType = DType>> SpanMasks<R> {
         // such tensor per attention spec; no ALiBi architecture here does that,
         // and `layer_attention(0)` is every block's spec when it does not.
         if let Some(max_bias) = config.alibi_max_bias {
-            return Self {
+            return Ok(Self {
                 local: None,
                 global: None,
                 alibi: Some(alibi_bias::<R>(
@@ -160,17 +164,18 @@ impl<R: Runtime<DType = DType>> SpanMasks<R> {
                     seq_len,
                     dtype,
                     device,
-                )),
-            };
+                )?),
+            });
         }
 
         // Layer 0 is local whenever the architecture interleaves at all, and
         // the first non-interleaved index is global; asking the config keeps
         // this in lockstep with the RoPE base assignment.
-        let local = config
-            .interleaves_attention()
-            .then(|| additive_span_mask::<R>(config.layer_attention(0), seq_len, dtype, device))
-            .flatten();
+        let local = if config.interleaves_attention() {
+            additive_span_mask::<R>(config.layer_attention(0), seq_len, dtype, device)?
+        } else {
+            None
+        };
 
         let global_index = if config.interleaves_attention() {
             config.sliding_window_pattern - 1
@@ -178,13 +183,13 @@ impl<R: Runtime<DType = DType>> SpanMasks<R> {
             0
         };
         let global =
-            additive_span_mask::<R>(config.layer_attention(global_index), seq_len, dtype, device);
+            additive_span_mask::<R>(config.layer_attention(global_index), seq_len, dtype, device)?;
 
-        Self {
+        Ok(Self {
             local,
             global,
             alibi: None,
-        }
+        })
     }
 
     /// The mask for a block with the given spec.
@@ -288,7 +293,8 @@ mod tests {
         let (heads, seq) = (12usize, 5usize);
         let config = jina_v2_config(heads);
 
-        let masks = SpanMasks::<CpuRuntime>::build(&config, seq, &device);
+        let masks = SpanMasks::<CpuRuntime>::build(&config, seq, &device)
+            .expect("mask build must succeed on CPU");
         let bias = masks
             .for_spec(config.layer_attention(0))
             .expect("an ALiBi model must always produce a bias");
@@ -326,7 +332,8 @@ mod tests {
             num_hidden_layers: 6,
             ..Default::default()
         };
-        let masks = SpanMasks::<CpuRuntime>::build(&config, 8, &device);
+        let masks = SpanMasks::<CpuRuntime>::build(&config, 8, &device)
+            .expect("mask build must succeed on CPU");
         assert!(masks.for_spec(config.layer_attention(0)).is_none());
     }
 }

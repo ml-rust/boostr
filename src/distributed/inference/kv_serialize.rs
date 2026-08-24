@@ -30,7 +30,7 @@ use anyhow::{Result, anyhow};
 /// data from the device to CPU memory. For GPU tensors this is an intentional
 /// transfer — disaggregated inference requires moving the KV cache over the
 /// network, so a CPU copy is unavoidable.
-pub fn serialize_kv_cache<R>(cache: &LayeredKvCache<R>) -> Vec<u8>
+pub fn serialize_kv_cache<R>(cache: &LayeredKvCache<R>) -> Result<Vec<u8>>
 where
     R: Runtime<DType = DType>,
     R::Client: IndexingOps<R>,
@@ -70,8 +70,8 @@ where
         match layer.get_kv() {
             Ok((k, v)) => match (k.contiguous(), v.contiguous()) {
                 (Ok(k_c), Ok(v_c)) => {
-                    let k_data: Vec<f32> = k_c.to_vec::<f32>();
-                    let v_data: Vec<f32> = v_c.to_vec::<f32>();
+                    let k_data: Vec<f32> = k_c.try_to_vec::<f32>()?;
+                    let v_data: Vec<f32> = v_c.try_to_vec::<f32>()?;
                     buf.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&k_data));
                     buf.extend_from_slice(bytemuck::cast_slice::<f32, u8>(&v_data));
                 }
@@ -95,7 +95,7 @@ where
         }
     }
 
-    buf
+    Ok(buf)
 }
 
 /// Read a little-endian `u32` at `offset`, returning an error instead of
@@ -228,7 +228,7 @@ mod tests {
             LayeredKvCache::<CpuRuntime>::new_positional(2, 1, 2, 4, 64, 32, DType::F32, &device)
                 .unwrap();
 
-        let bytes = serialize_kv_cache(&cache);
+        let bytes = serialize_kv_cache(&cache).unwrap();
         assert!(bytes.len() >= 8 + 2 * 12);
     }
 
@@ -239,7 +239,7 @@ mod tests {
             LayeredKvCache::<CpuRuntime>::new_positional(2, 1, 2, 4, 64, 32, DType::F32, &device)
                 .unwrap();
 
-        let bytes = serialize_kv_cache(&cache);
+        let bytes = serialize_kv_cache(&cache).unwrap();
         let restored = deserialize_kv_cache::<CpuRuntime>(&bytes, &device).unwrap();
 
         assert_eq!(restored.num_layers(), 2);
@@ -261,7 +261,7 @@ mod tests {
         cache.layer_mut(0).unwrap().update(&k, &v).unwrap();
         assert_eq!(cache.seq_len(), 3);
 
-        let bytes = serialize_kv_cache(&cache);
+        let bytes = serialize_kv_cache(&cache).unwrap();
         let restored = deserialize_kv_cache::<CpuRuntime>(&bytes, &device).unwrap();
 
         assert_eq!(restored.num_layers(), 1);

@@ -58,7 +58,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         let tok_emb = if !self.config.arch_family.uses_learned_positions() {
             tok_emb
         } else {
-            let pos_tensor = self.position_ids_tensor(input_ids, &shape, seq_len);
+            let pos_tensor = self.position_ids_tensor(input_ids, &shape, seq_len)?;
             let pos_emb = self.position_embed.forward(client, &pos_tensor)?;
             var_add(&tok_emb, &pos_emb, client).map_err(Error::Numr)?
         };
@@ -81,7 +81,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             None => tok_emb,
         };
 
-        let span_masks = SpanMasks::build(&self.config, seq_len, input_ids.device());
+        let span_masks = SpanMasks::build(&self.config, seq_len, input_ids.device())?;
 
         for layer in &self.layers {
             // Training path is padded only; varlen is inference-only.

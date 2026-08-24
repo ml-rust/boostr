@@ -202,7 +202,7 @@ impl KokoroModelV2<CpuRuntime> {
     ) -> Result<Tensor<CpuRuntime>> {
         let (mag, phase, _durations) =
             self.forward_to_spectrogram_cpu(client, token_ids, voice_row, min_frames_per_phoneme)?;
-        let window = super::window::hann_window(self.config.n_fft, voice_row.device());
+        let window = super::window::hann_window(self.config.n_fft, voice_row.device())?;
         let opts = IStftOptions {
             hop_length: self.config.hop_length,
             padding: IStftPadding::Center,

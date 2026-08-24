@@ -169,7 +169,7 @@ fn capture_and_run(
 
     // Sliding-window / causal span masks, built here for the same reason: the
     // host-to-device copy must not happen inside the capture region.
-    let span_masks = SpanMasks::<CudaRuntime>::build(&enc.config, seq_len, device);
+    let span_masks = SpanMasks::<CudaRuntime>::build(&enc.config, seq_len, device)?;
 
     let ids_ref = &input_ids_buf;
     let pos_ref = &pos_ids_buf;

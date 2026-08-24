@@ -149,7 +149,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
                 head_dim,
                 intermediate,
                 dt,
-            ));
+            )?);
         }
 
         // Final norm

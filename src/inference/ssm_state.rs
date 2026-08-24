@@ -4,6 +4,7 @@
 //! - SSM hidden state `h`: `[batch, nheads, headdim, d_state]`
 //! - Conv buffer: `[batch, conv_channels, d_conv - 1]` (sliding window for causal conv1d)
 
+use crate::error::Result;
 use crate::model::mamba::mamba2::Mamba2Config;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
@@ -21,22 +22,27 @@ pub struct SsmState<R: Runtime> {
 
 impl<R: Runtime<DType = DType>> SsmState<R> {
     /// Create a new zeroed SSM state for a single layer.
-    pub fn new(batch_size: usize, config: &Mamba2Config, dtype: DType, device: &R::Device) -> Self {
-        let h = Tensor::<R>::zeros(
+    pub fn new(
+        batch_size: usize,
+        config: &Mamba2Config,
+        dtype: DType,
+        device: &R::Device,
+    ) -> Result<Self> {
+        let h = Tensor::<R>::try_zeros(
             &[batch_size, config.nheads, config.headdim, config.d_state],
             dtype,
             device,
-        );
-        let conv_state = Tensor::<R>::zeros(
+        )?;
+        let conv_state = Tensor::<R>::try_zeros(
             &[batch_size, config.conv_channels(), config.d_conv - 1],
             dtype,
             device,
-        );
-        Self {
+        )?;
+        Ok(Self {
             h,
             conv_state,
             initialized: false,
-        }
+        })
     }
 
     /// Get the SSM hidden state.
@@ -66,14 +72,15 @@ impl<R: Runtime<DType = DType>> SsmState<R> {
     }
 
     /// Reset state to zeros.
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self) -> Result<()> {
         let shape = self.h.shape().to_vec();
         let dtype = self.h.dtype();
         let conv_shape = self.conv_state.shape().to_vec();
         let device = self.h.device().clone();
-        self.h = Tensor::<R>::zeros(&shape, dtype, &device);
-        self.conv_state = Tensor::<R>::zeros(&conv_shape, dtype, &device);
+        self.h = Tensor::<R>::try_zeros(&shape, dtype, &device)?;
+        self.conv_state = Tensor::<R>::try_zeros(&conv_shape, dtype, &device)?;
         self.initialized = false;
+        Ok(())
     }
 }
 
@@ -90,11 +97,11 @@ impl<R: Runtime<DType = DType>> LayeredSsmState<R> {
         config: &Mamba2Config,
         dtype: DType,
         device: &R::Device,
-    ) -> Self {
+    ) -> Result<Self> {
         let layers = (0..num_layers)
             .map(|_| SsmState::new(batch_size, config, dtype, device))
-            .collect();
-        Self { layers }
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { layers })
     }
 
     /// Get mutable reference to a layer's state.
@@ -113,10 +120,11 @@ impl<R: Runtime<DType = DType>> LayeredSsmState<R> {
     }
 
     /// Reset all layers.
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self) -> Result<()> {
         for layer in &mut self.layers {
-            layer.reset();
+            layer.reset()?;
         }
+        Ok(())
     }
 }
 
@@ -133,7 +141,8 @@ mod tests {
             .with_d_state(16)
             .with_expand(2);
 
-        let state = SsmState::<CpuRuntime>::new(1, &config, DType::F32, &device);
+        let state = SsmState::<CpuRuntime>::new(1, &config, DType::F32, &device)
+            .expect("ssm state new must succeed on CPU");
         assert_eq!(state.h().shape(), &[1, 2, 64, 16]);
         assert_eq!(state.conv_state().shape(), &[1, config.conv_channels(), 3]);
         assert!(!state.is_initialized());
@@ -147,7 +156,8 @@ mod tests {
             .with_d_state(16)
             .with_expand(2);
 
-        let state = LayeredSsmState::<CpuRuntime>::new(4, 1, &config, DType::F32, &device);
+        let state = LayeredSsmState::<CpuRuntime>::new(4, 1, &config, DType::F32, &device)
+            .expect("layered ssm state new must succeed on CPU");
         assert_eq!(state.num_layers(), 4);
         assert!(state.layer(0).is_some());
         assert!(state.layer(4).is_none());
@@ -161,12 +171,13 @@ mod tests {
             .with_d_state(16)
             .with_expand(2);
 
-        let mut state = SsmState::<CpuRuntime>::new(1, &config, DType::F32, &device);
+        let mut state = SsmState::<CpuRuntime>::new(1, &config, DType::F32, &device)
+            .expect("ssm state new must succeed on CPU");
         let dummy_h = Tensor::<CpuRuntime>::ones(&[1, 2, 64, 16], DType::F32, &device);
         state.update_h(dummy_h);
         assert!(state.is_initialized());
 
-        state.reset();
+        state.reset().expect("ssm state reset must succeed on CPU");
         assert!(!state.is_initialized());
     }
 }

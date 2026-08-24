@@ -138,34 +138,34 @@ pub fn build_block_from_config<R: Runtime<DType = DType>>(
     head_dim: usize,
     intermediate: usize,
     dt: numr::dtype::DType,
-) -> LlamaBlock<R> {
+) -> Result<LlamaBlock<R>> {
     let hidden = config.hidden_size;
     let use_alibi = config.attention.as_ref().is_some_and(|a| a.use_alibi);
     let sliding_window = config.attention.as_ref().map_or(0, |a| a.sliding_window());
-    LlamaBlock {
+    Ok(LlamaBlock {
         input_layernorm: RmsNorm::new(
-            Tensor::<R>::ones(&[hidden], dt, device),
+            Tensor::<R>::try_ones(&[hidden], dt, device)?,
             config.rms_norm_eps as f32,
             true,
         ),
         self_attn: LlamaAttention {
             q_proj: MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<R>::zeros(&[num_heads * head_dim, hidden], dt, device),
+                Tensor::<R>::try_zeros(&[num_heads * head_dim, hidden], dt, device)?,
                 None,
                 true,
             )),
             k_proj: MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<R>::zeros(&[num_kv_heads * head_dim, hidden], dt, device),
+                Tensor::<R>::try_zeros(&[num_kv_heads * head_dim, hidden], dt, device)?,
                 None,
                 true,
             )),
             v_proj: MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<R>::zeros(&[num_kv_heads * head_dim, hidden], dt, device),
+                Tensor::<R>::try_zeros(&[num_kv_heads * head_dim, hidden], dt, device)?,
                 None,
                 true,
             )),
             o_proj: MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<R>::zeros(&[hidden, num_heads * head_dim], dt, device),
+                Tensor::<R>::try_zeros(&[hidden, num_heads * head_dim], dt, device)?,
                 None,
                 true,
             )),
@@ -178,26 +178,26 @@ pub fn build_block_from_config<R: Runtime<DType = DType>>(
             sliding_window,
         },
         post_attention_layernorm: RmsNorm::new(
-            Tensor::<R>::ones(&[hidden], dt, device),
+            Tensor::<R>::try_ones(&[hidden], dt, device)?,
             config.rms_norm_eps as f32,
             true,
         ),
         mlp: LlamaFfn::Dense(Box::new(LlamaMlp {
             gate_proj: MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<R>::zeros(&[intermediate, hidden], dt, device),
+                Tensor::<R>::try_zeros(&[intermediate, hidden], dt, device)?,
                 None,
                 true,
             )),
             up_proj: MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<R>::zeros(&[intermediate, hidden], dt, device),
+                Tensor::<R>::try_zeros(&[intermediate, hidden], dt, device)?,
                 None,
                 true,
             )),
             down_proj: MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<R>::zeros(&[hidden, intermediate], dt, device),
+                Tensor::<R>::try_zeros(&[hidden, intermediate], dt, device)?,
                 None,
                 true,
             )),
         })),
-    }
+    })
 }

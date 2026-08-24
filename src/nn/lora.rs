@@ -34,7 +34,7 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
     /// - `rank`: Low-rank dimension (typical: 4, 8, 16, 32)
     /// - `alpha`: Scaling factor (typical: rank or 2*rank)
     /// - `device`: Device to allocate LoRA weights on
-    pub fn new(base: Linear<R>, rank: usize, alpha: f32, device: &R::Device) -> Self {
+    pub fn new(base: Linear<R>, rank: usize, alpha: f32, device: &R::Device) -> Result<Self> {
         let in_features = base.weight().tensor().shape()[1];
         let out_features = base.weight().tensor().shape()[0];
 
@@ -56,20 +56,20 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
         };
 
         let lora_a = Var::new(
-            Tensor::from_slice(&a_data, &[rank, in_features], device),
+            Tensor::try_from_slice(&a_data, &[rank, in_features], device)?,
             true,
         );
         let lora_b = Var::new(
-            Tensor::zeros(&[out_features, rank], DType::F32, device),
+            Tensor::try_zeros(&[out_features, rank], DType::F32, device)?,
             true,
         );
 
-        Self {
+        Ok(Self {
             base,
             lora_a,
             lora_b,
             scaling: alpha / rank as f32,
-        }
+        })
     }
 
     /// Create from pre-loaded LoRA weights.

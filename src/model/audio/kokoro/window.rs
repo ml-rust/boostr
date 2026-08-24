@@ -1,5 +1,6 @@
 //! Analysis/synthesis windows for Kokoro's STFT/iSTFT vocoder paths.
 
+use crate::error::Result;
 use numr::runtime::Runtime;
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
@@ -9,7 +10,10 @@ use numr::tensor::Tensor;
 /// Uses the periodic (DFT-even) definition `0.5 - 0.5·cos(2π·i/n)`, matching
 /// PyTorch's `torch.hann_window(n, periodic=True)` — the convention Kokoro's
 /// `TorchSTFT` uses for both analysis and synthesis.
-pub fn hann_window(n: usize, device: &<CpuRuntime as Runtime>::Device) -> Tensor<CpuRuntime> {
+pub fn hann_window(
+    n: usize,
+    device: &<CpuRuntime as Runtime>::Device,
+) -> Result<Tensor<CpuRuntime>> {
     use std::f32::consts::PI;
     let data: Vec<f32> = (0..n)
         .map(|i| {
@@ -17,7 +21,7 @@ pub fn hann_window(n: usize, device: &<CpuRuntime as Runtime>::Device) -> Tensor
             0.5 - 0.5 * (2.0 * PI * ratio).cos()
         })
         .collect();
-    Tensor::<CpuRuntime>::from_slice(&data, &[n], device)
+    Ok(Tensor::<CpuRuntime>::try_from_slice(&data, &[n], device)?)
 }
 
 #[cfg(test)]
@@ -28,7 +32,7 @@ mod tests {
     #[test]
     fn hann_window_endpoints_are_zero() {
         let (_client, device) = cpu_setup();
-        let w = hann_window(8, &device);
+        let w = hann_window(8, &device).expect("hann_window must succeed on CPU");
         let v: Vec<f32> = w.to_vec();
         assert!(v[0].abs() < 1e-6);
         // Hann is symmetric around the midpoint; the mid value peaks near 1.

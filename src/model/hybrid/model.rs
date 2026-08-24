@@ -284,7 +284,7 @@ where
         };
         let mut kv_cache = LayeredKvCache::<R>::new(num_attn_layers, &kv_config, device)?;
         let mut ssm_state =
-            LayeredSsmState::<R>::new(num_ssm_layers, batch, &self.mamba_config, dtype, device);
+            LayeredSsmState::<R>::new(num_ssm_layers, batch, &self.mamba_config, dtype, device)?;
 
         let mut hidden = self.embed_tokens.forward(client, input_ids)?;
         let mut attn_idx = 0usize;

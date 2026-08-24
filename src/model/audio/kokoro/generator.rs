@@ -309,7 +309,7 @@ impl IStftNetGenerator<numr::runtime::cpu::CpuRuntime> {
         let exc_shape = excitation.shape();
         let (bb, t_audio) = (exc_shape[0], exc_shape[1]);
         let waveform = excitation.reshape(&[bb, t_audio]).map_err(Error::Numr)?;
-        let hann = crate::model::audio::kokoro::hann_window(n_fft, f0.device());
+        let hann = crate::model::audio::kokoro::hann_window(n_fft, f0.device())?;
         let (mag, phase) = crate::model::audio::stft::stft(
             &waveform,
             &hann,

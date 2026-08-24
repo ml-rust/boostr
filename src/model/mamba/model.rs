@@ -285,7 +285,7 @@ where
         let device = input_ids.device();
         let dtype = self.embed_tokens.weight().tensor().dtype();
         let mut ssm_state =
-            LayeredSsmState::<R>::new(self.layers.len(), batch, &self.mamba_config, dtype, device);
+            LayeredSsmState::<R>::new(self.layers.len(), batch, &self.mamba_config, dtype, device)?;
 
         let mut hidden = self.embed_tokens.forward(client, input_ids)?;
         for (i, layer) in self.layers.iter().enumerate() {

@@ -30,12 +30,12 @@ impl<R: Runtime<DType = DType>> PagedKvCache<R> {
         head_dim: usize,
         dtype: DType,
         device: &R::Device,
-    ) -> Self {
+    ) -> Result<Self> {
         let shape = [num_blocks, block_size, num_heads, head_dim];
-        let k_cache = Tensor::<R>::zeros(&shape, dtype, device);
-        let v_cache = Tensor::<R>::zeros(&shape, dtype, device);
+        let k_cache = Tensor::<R>::try_zeros(&shape, dtype, device)?;
+        let v_cache = Tensor::<R>::try_zeros(&shape, dtype, device)?;
 
-        Self {
+        Ok(Self {
             k_cache,
             v_cache,
             num_blocks,
@@ -43,7 +43,7 @@ impl<R: Runtime<DType = DType>> PagedKvCache<R> {
             num_heads,
             head_dim,
             dtype,
-        }
+        })
     }
 
     /// Write new K/V tokens into cache blocks using slot_mapping.
@@ -125,7 +125,7 @@ impl<R: Runtime<DType = DType>> LayeredPagedKvCache<R> {
         head_dim: usize,
         dtype: DType,
         device: &R::Device,
-    ) -> Self {
+    ) -> Result<Self> {
         let mut layers = Vec::with_capacity(num_layers);
         let mut block_tables = Vec::with_capacity(num_layers);
         for _ in 0..num_layers {
@@ -136,15 +136,15 @@ impl<R: Runtime<DType = DType>> LayeredPagedKvCache<R> {
                 head_dim,
                 dtype,
                 device,
-            ));
+            )?);
             block_tables.push(BlockTable::new(block_size));
         }
-        Self {
+        Ok(Self {
             layers,
             block_tables,
             block_size,
             seq_len: 0,
-        }
+        })
     }
 
     pub fn layer(&self, idx: usize) -> &PagedKvCache<R> {
@@ -269,7 +269,8 @@ mod tests {
             head_dim,
             DType::F32,
             &device,
-        );
+        )
+        .expect("paged kv cache new must succeed on CPU");
 
         // 3 tokens to write
         let num_tokens = 3;

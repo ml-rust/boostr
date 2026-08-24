@@ -122,7 +122,8 @@ attention:
 fn block_from_config(sliding_window: Option<usize>) -> usize {
     let (_, device) = cpu_setup();
     let config = window_config(sliding_window);
-    let block = build_block_from_config::<CpuRuntime>(&config, &device, 2, 2, 4, 16, DType::F32);
+    let block = build_block_from_config::<CpuRuntime>(&config, &device, 2, 2, 4, 16, DType::F32)
+        .expect("block build must succeed on CPU");
     block.self_attn.sliding_window
 }
 
@@ -194,7 +195,8 @@ attention:
   use_alibi: true
 "#;
     let config: ModelConfig = serde_saphyr::from_str(yaml).unwrap();
-    let block = build_block_from_config::<CpuRuntime>(&config, &device, 2, 2, 4, 16, DType::F32);
+    let block = build_block_from_config::<CpuRuntime>(&config, &device, 2, 2, 4, 16, DType::F32)
+        .expect("block build must succeed on CPU");
     assert!(block.self_attn.use_alibi, "fixture must exercise ALiBi");
 
     let sq = 4;

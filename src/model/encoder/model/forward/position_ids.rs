@@ -54,20 +54,24 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         input_ids: &Tensor<R>,
         shape: &[usize],
         seq_len: usize,
-    ) -> Tensor<R> {
+    ) -> crate::error::Result<Tensor<R>> {
         let device = input_ids.device();
         if self.config.arch_family != ArchFamily::XlmRoberta {
             let pos_ids: Vec<i64> = (0..seq_len as i64).collect();
-            return Tensor::<R>::from_slice(&pos_ids, &[seq_len], device);
+            return Ok(Tensor::<R>::try_from_slice(&pos_ids, &[seq_len], device)?);
         }
 
         let batch = if shape.len() == 2 { shape[0] } else { 1 };
         let flat_ids: Vec<i64> = input_ids.to_vec();
         let pos_flat = self.compute_position_ids_host(&flat_ids, batch, seq_len);
         if shape.len() == 2 {
-            Tensor::<R>::from_slice(&pos_flat, &[batch, seq_len], device)
+            Ok(Tensor::<R>::try_from_slice(
+                &pos_flat,
+                &[batch, seq_len],
+                device,
+            )?)
         } else {
-            Tensor::<R>::from_slice(&pos_flat, &[seq_len], device)
+            Ok(Tensor::<R>::try_from_slice(&pos_flat, &[seq_len], device)?)
         }
     }
 }

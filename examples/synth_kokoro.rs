@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let token_ids_f: Vec<i64> = ids.iter().map(|&x| x as i64).collect();
     let token_ids =
-        Tensor::<CpuRuntime>::from_slice(&token_ids_f, &[1, token_ids_f.len()], &device);
+        Tensor::<CpuRuntime>::try_from_slice(&token_ids_f, &[1, token_ids_f.len()], &device)?;
 
     println!("loading voice pack from {voice_path} ...");
     let voice_pack = load_voice_pt::<CpuRuntime>(&voice_path, &device)?;

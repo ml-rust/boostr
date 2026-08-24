@@ -103,7 +103,7 @@ impl<R: Runtime<DType = DType>> ZeroStage3<R> {
                              original params passed to ZeroStage3::new?"
                         ),
                     })?;
-                let buf = Tensor::<R>::zeros(&meta.shape, meta.dtype, device);
+                let buf = Tensor::<R>::try_zeros(&meta.shape, meta.dtype, device)?;
                 e.insert(buf);
             }
 

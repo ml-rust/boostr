@@ -108,10 +108,13 @@ pub fn fused_decode_attention(
         }
     }
 
-    let out_tensor =
-        Tensor::<CpuRuntime>::from_slice(&output, &[batch, num_heads, 1, head_dim], q.device());
+    let out_tensor = Tensor::<CpuRuntime>::try_from_slice(
+        &output,
+        &[batch, num_heads, 1, head_dim],
+        q.device(),
+    )?;
     let lse_tensor =
-        Tensor::<CpuRuntime>::from_slice(&lse_data, &[batch, num_heads, 1], q.device());
+        Tensor::<CpuRuntime>::try_from_slice(&lse_data, &[batch, num_heads, 1], q.device())?;
 
     Ok((out_tensor, lse_tensor))
 }

@@ -39,12 +39,13 @@ pub(super) fn decode_attention_fwd(
     )?;
     let func = kernels::get_kernel_function(&module, kernel_name)?;
 
-    let output = Tensor::<CudaRuntime>::empty(
+    let output = Tensor::<CudaRuntime>::try_empty(
         &[p.batch_size, p.num_heads, 1, p.head_dim],
         q.dtype(),
         device,
-    );
-    let lse = Tensor::<CudaRuntime>::empty(&[p.batch_size, p.num_heads, 1], DType::F32, device);
+    )?;
+    let lse =
+        Tensor::<CudaRuntime>::try_empty(&[p.batch_size, p.num_heads, 1], DType::F32, device)?;
 
     let q_ptr = q.ptr();
     let k_ptr = k.ptr();
@@ -130,8 +131,8 @@ pub fn decode_attention_graph_fwd(
     let func = kernels::get_kernel_function(&module, kernel_name)?;
 
     let output =
-        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, 1, head_dim], q.dtype(), device);
-    let lse = Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, 1], DType::F32, device);
+        Tensor::<CudaRuntime>::try_empty(&[batch_size, num_heads, 1, head_dim], q.dtype(), device)?;
+    let lse = Tensor::<CudaRuntime>::try_empty(&[batch_size, num_heads, 1], DType::F32, device)?;
 
     let q_ptr = q.ptr();
     let k_ptr = k_cache.ptr();

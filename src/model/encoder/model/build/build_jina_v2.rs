@@ -106,7 +106,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         // ALiBi supplies positions; `position_embed` holds a sentinel that the
         // forward pass never looks up (see `uses_learned_positions`).
         let sentinel_raw =
-            Tensor::<R>::from_slice(&vec![0.0f32; hidden_size], &[1, hidden_size], &device);
+            Tensor::<R>::try_from_slice(&vec![0.0f32; hidden_size], &[1, hidden_size], &device)?;
         let position_embed = Embedding::new(maybe_cast(sentinel_raw)?, false);
 
         let raw_en_w = extract_f32(get("token_embd_norm.weight")?, "token_embd_norm.weight")?;
@@ -124,8 +124,11 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
                 ),
             });
         }
-        let row0_tensor =
-            Tensor::<R>::from_slice(&token_types_data[..hidden_size], &[1, hidden_size], &device);
+        let row0_tensor = Tensor::<R>::try_from_slice(
+            &token_types_data[..hidden_size],
+            &[1, hidden_size],
+            &device,
+        )?;
         let token_type_embed = Some(maybe_cast(row0_tensor)?);
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);

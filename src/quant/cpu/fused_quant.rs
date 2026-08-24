@@ -63,11 +63,11 @@ impl FusedQuantOps<CpuRuntime> for CpuClient {
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n);
-        Ok(Tensor::<CpuRuntime>::from_slice(
+        Ok(Tensor::<CpuRuntime>::try_from_slice(
             &output,
             &out_shape,
             input.device(),
-        ))
+        )?)
     }
 
     fn fused_int4_qkv(
@@ -125,9 +125,9 @@ impl FusedQuantOps<CpuRuntime> for CpuClient {
 
         let dev = input.device();
         Ok((
-            Tensor::<CpuRuntime>::from_slice(&out_q, &q_shape, dev),
-            Tensor::<CpuRuntime>::from_slice(&out_k, &kv_shape, dev),
-            Tensor::<CpuRuntime>::from_slice(&out_v, &kv_shape, dev),
+            Tensor::<CpuRuntime>::try_from_slice(&out_q, &q_shape, dev)?,
+            Tensor::<CpuRuntime>::try_from_slice(&out_k, &kv_shape, dev)?,
+            Tensor::<CpuRuntime>::try_from_slice(&out_v, &kv_shape, dev)?,
         ))
     }
 }

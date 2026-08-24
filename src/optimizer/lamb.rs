@@ -153,16 +153,16 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
             let param = params.get(&id).expect("id collected from params.keys()");
 
             // Lazy init
-            self.state.entry(id).or_insert_with(|| {
-                let m = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
-                let v = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
-                LambState { m, v }
-            });
+            if let std::collections::hash_map::Entry::Vacant(e) = self.state.entry(id) {
+                let m = Tensor::<R>::try_zeros(param.shape(), param.dtype(), param.device())?;
+                let v = Tensor::<R>::try_zeros(param.shape(), param.dtype(), param.device())?;
+                e.insert(LambState { m, v });
+            }
 
             let state = self
                 .state
                 .get(&id)
-                .expect("state was lazily initialized via or_insert_with above");
+                .expect("state was lazily initialized above");
 
             // Fused kernel computes: update vector + updated m, v
             let (update, new_m, new_v) = client.fused_lamb_step(

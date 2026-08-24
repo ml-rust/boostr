@@ -57,21 +57,21 @@ where
     // Pad x and b to nchunks * chunk_size if needed
     let padded_len = nchunks * chunk_size;
     let x_padded = if padded_len > seqlen {
-        let pad = Tensor::<R>::zeros(
+        let pad = Tensor::<R>::try_zeros(
             &[batch, padded_len - seqlen, nheads, headdim],
             dtype,
             device,
-        );
+        )?;
         client.cat(&[x, &pad], 1).map_err(Error::Numr)?
     } else {
         x.clone()
     };
     let b_padded = if padded_len > seqlen {
-        let pad = Tensor::<R>::zeros(
+        let pad = Tensor::<R>::try_zeros(
             &[batch, padded_len - seqlen, ngroups, dstate],
             dtype,
             device,
-        );
+        )?;
         client.cat(&[b, &pad], 1).map_err(Error::Numr)?
     } else {
         b.clone()

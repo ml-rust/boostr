@@ -122,7 +122,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         // NomicBert positions are handled by per-layer RoPE; the position_embed field
         // is populated with a sentinel zero tensor that is never called.
         let sentinel_raw =
-            Tensor::<R>::from_slice(&vec![0.0f32; hidden_size], &[1, hidden_size], &device);
+            Tensor::<R>::try_from_slice(&vec![0.0f32; hidden_size], &[1, hidden_size], &device)?;
         let sentinel_pos = maybe_cast(sentinel_raw)?;
         let position_embed = Embedding::new(sentinel_pos, false);
 
@@ -143,7 +143,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             });
         }
         let row0: Vec<f32> = token_types_data[..hidden_size].to_vec();
-        let row0_tensor = Tensor::<R>::from_slice(&row0, &[1, hidden_size], &device);
+        let row0_tensor = Tensor::<R>::try_from_slice(&row0, &[1, hidden_size], &device)?;
         let token_type_embed = Some(maybe_cast(row0_tensor)?);
 
         // Precompute RoPE frequency cache once; share across all layers via Arc.
@@ -202,21 +202,21 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
                 });
             }
 
-            let q_tensor = Tensor::<R>::from_slice(
+            let q_tensor = Tensor::<R>::try_from_slice(
                 &qkv_data[0..proj_elems],
                 &[hidden_size, hidden_size],
                 &device,
-            );
-            let k_tensor = Tensor::<R>::from_slice(
+            )?;
+            let k_tensor = Tensor::<R>::try_from_slice(
                 &qkv_data[proj_elems..2 * proj_elems],
                 &[hidden_size, hidden_size],
                 &device,
-            );
-            let v_tensor = Tensor::<R>::from_slice(
+            )?;
+            let v_tensor = Tensor::<R>::try_from_slice(
                 &qkv_data[2 * proj_elems..3 * proj_elems],
                 &[hidden_size, hidden_size],
                 &device,
-            );
+            )?;
 
             // Wrap split slices as Standard weights then apply proj_to_maybe_quant,
             // which casts to F16 (when cdtype F16) and builds MaybeQuantLinear::Standard.

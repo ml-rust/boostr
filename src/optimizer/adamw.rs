@@ -146,8 +146,8 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     let state_dtype = optimizer_state_dtype(param.dtype());
-                    let m = Tensor::<R>::zeros(param.shape(), state_dtype, param.device());
-                    let v = Tensor::<R>::zeros(param.shape(), state_dtype, param.device());
+                    let m = Tensor::<R>::try_zeros(param.shape(), state_dtype, param.device())?;
+                    let v = Tensor::<R>::try_zeros(param.shape(), state_dtype, param.device())?;
                     let master = if state_dtype == param.dtype() {
                         None
                     } else {

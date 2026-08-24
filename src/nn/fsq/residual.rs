@@ -129,7 +129,7 @@ impl<R: Runtime<DType = DType>> ResidualFsq<R> {
                 .iter()
                 .map(|&level| ((level as f32) - 1.0).powi(-(index as i32)))
                 .collect();
-            scales.push(Tensor::from_slice(&values, &[codebook_dim], device));
+            scales.push(Tensor::try_from_slice(&values, &[codebook_dim], device)?);
         }
 
         Ok(Self {

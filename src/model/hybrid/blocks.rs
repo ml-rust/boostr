@@ -210,7 +210,8 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
         if self.use_alibi {
             // ALiBi's own kernel writes the causal structure along with the
             // distance bias, so the sliding window does not apply here.
-            let bias = Tensor::<R>::zeros(&[batch, self.num_heads, sq, sk], DType::F32, device);
+            let bias =
+                Tensor::<R>::try_zeros(&[batch, self.num_heads, sq, sk], DType::F32, device)?;
             client.alibi_add_bias_causal(&bias, batch, self.num_heads, sq, sk, position)?;
             Ok(Some(Var::new(bias, false)))
         } else {

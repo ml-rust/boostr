@@ -48,13 +48,17 @@ pub(super) fn write_narrow(
     match dtype {
         DType::F16 => {
             let narrow: Vec<half::f16> = data.iter().map(|&v| half::f16::from_f32(v)).collect();
-            Ok(Tensor::<CpuRuntime>::from_slice(&narrow, shape, device))
+            Ok(Tensor::<CpuRuntime>::try_from_slice(
+                &narrow, shape, device,
+            )?)
         }
         DType::BF16 => {
             let narrow: Vec<half::bf16> = data.iter().map(|&v| half::bf16::from_f32(v)).collect();
-            Ok(Tensor::<CpuRuntime>::from_slice(&narrow, shape, device))
+            Ok(Tensor::<CpuRuntime>::try_from_slice(
+                &narrow, shape, device,
+            )?)
         }
-        DType::F32 => Ok(Tensor::<CpuRuntime>::from_slice(data, shape, device)),
+        DType::F32 => Ok(Tensor::<CpuRuntime>::try_from_slice(data, shape, device)?),
         dt => Err(Error::InvalidArgument {
             arg: "dtype",
             reason: format!("{}: unsupported dtype {:?}", op, dt),

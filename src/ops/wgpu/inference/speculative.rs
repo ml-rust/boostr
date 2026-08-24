@@ -82,8 +82,8 @@ impl SpeculativeOps<WgpuRuntime> for WgpuClient {
         let total: usize = dp_shape.iter().product();
         let device = draft_probs.device();
 
-        let acceptance = Tensor::<WgpuRuntime>::empty(dp_shape, DType::F32, device);
-        let residual = Tensor::<WgpuRuntime>::empty(dp_shape, DType::F32, device);
+        let acceptance = Tensor::<WgpuRuntime>::try_empty(dp_shape, DType::F32, device)?;
+        let residual = Tensor::<WgpuRuntime>::try_empty(dp_shape, DType::F32, device)?;
 
         let dp_buf = get_buffer(draft_probs.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "draft buffer not found".into(),
@@ -173,7 +173,7 @@ impl SpeculativeOps<WgpuRuntime> for WgpuClient {
         let k = shape[1];
         let device = acceptance_rates.device();
 
-        let output = Tensor::<WgpuRuntime>::empty(&[batch_size], DType::F32, device);
+        let output = Tensor::<WgpuRuntime>::try_empty(&[batch_size], DType::F32, device)?;
 
         let rates_buf =
             get_buffer(acceptance_rates.storage().ptr()).ok_or_else(|| Error::KernelError {

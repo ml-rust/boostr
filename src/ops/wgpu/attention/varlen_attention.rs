@@ -47,7 +47,11 @@ fn cat_token_parts(
     device: &<WgpuRuntime as numr::runtime::Runtime>::Device,
 ) -> Result<Tensor<WgpuRuntime>> {
     if parts.is_empty() {
-        return Ok(Tensor::<WgpuRuntime>::zeros(full_shape, DType::F32, device));
+        return Ok(Tensor::<WgpuRuntime>::try_zeros(
+            full_shape,
+            DType::F32,
+            device,
+        )?);
     }
     let refs: Vec<&Tensor<WgpuRuntime>> = parts.iter().collect();
     client.cat(&refs, 0).map_err(Error::Numr)
@@ -114,9 +118,9 @@ impl VarLenAttentionOps<WgpuRuntime> for WgpuClient {
         let total_tokens_k = k.shape()[0];
 
         // Create output tensors
-        let output = Tensor::<WgpuRuntime>::zeros(q.shape(), DType::F32, q.device());
+        let output = Tensor::<WgpuRuntime>::try_zeros(q.shape(), DType::F32, q.device())?;
         let lse_shape = vec![total_tokens_q, num_heads];
-        let lse = Tensor::<WgpuRuntime>::zeros(&lse_shape, DType::F32, q.device());
+        let lse = Tensor::<WgpuRuntime>::try_zeros(&lse_shape, DType::F32, q.device())?;
 
         // Get buffers
         let q_buf = get_buffer(q.storage().ptr()).ok_or_else(|| Error::KernelError {

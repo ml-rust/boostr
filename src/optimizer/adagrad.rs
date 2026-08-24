@@ -96,9 +96,9 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for AdaGrad<R> {
             // Lazy init accumulator
             if let std::collections::hash_map::Entry::Vacant(e) = self.accumulators.entry(id) {
                 let acc = if init_val == 0.0 {
-                    Tensor::<R>::zeros(param.shape(), param.dtype(), param.device())
+                    Tensor::<R>::try_zeros(param.shape(), param.dtype(), param.device())?
                 } else {
-                    let z = Tensor::<R>::zeros(param.shape(), param.dtype(), param.device());
+                    let z = Tensor::<R>::try_zeros(param.shape(), param.dtype(), param.device())?;
                     client.add_scalar(&z, init_val)?
                 };
                 e.insert(acc);

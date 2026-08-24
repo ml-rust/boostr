@@ -71,11 +71,11 @@ where
     let log_probs = var_log_softmax(&sim_scaled, -1, client).map_err(Error::Numr)?;
 
     // Targets: diagonal (positive pair for query i is key i)
-    let targets = Tensor::<R>::from_slice(
+    let targets = Tensor::<R>::try_from_slice(
         &(0..n as i64).collect::<Vec<_>>(),
         &[n],
         queries.tensor().device(),
-    );
+    )?;
     let targets_expanded = targets
         .unsqueeze(1)
         .map_err(Error::Numr)?

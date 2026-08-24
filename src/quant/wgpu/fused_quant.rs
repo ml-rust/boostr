@@ -50,7 +50,7 @@ impl FusedQuantOps<WgpuRuntime> for WgpuClient {
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n);
-        let output = Tensor::<WgpuRuntime>::empty(&out_shape, DType::F32, input.device());
+        let output = Tensor::<WgpuRuntime>::try_empty(&out_shape, DType::F32, input.device())?;
 
         let shader_source = swiglu_shader::generate_fused_int4_swiglu_shader();
         let entry_point = "fused_int4_swiglu";
@@ -169,9 +169,9 @@ impl FusedQuantOps<WgpuRuntime> for WgpuClient {
         let mut kv_shape = batch_dims.to_vec();
         kv_shape.push(nkv);
 
-        let out_q = Tensor::<WgpuRuntime>::empty(&q_shape, DType::F32, input.device());
-        let out_k = Tensor::<WgpuRuntime>::empty(&kv_shape, DType::F32, input.device());
-        let out_v = Tensor::<WgpuRuntime>::empty(&kv_shape, DType::F32, input.device());
+        let out_q = Tensor::<WgpuRuntime>::try_empty(&q_shape, DType::F32, input.device())?;
+        let out_k = Tensor::<WgpuRuntime>::try_empty(&kv_shape, DType::F32, input.device())?;
+        let out_v = Tensor::<WgpuRuntime>::try_empty(&kv_shape, DType::F32, input.device())?;
 
         // WebGPU has a limit of 8 storage buffers per shader stage, so we can't bind
         // all 13 buffers in a single dispatch. Instead, dispatch 3 separate int4_gemm calls.

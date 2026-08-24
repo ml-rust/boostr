@@ -231,11 +231,11 @@ pub fn istft(
     };
 
     let device = mag.device();
-    Ok(Tensor::<CpuRuntime>::from_slice(
+    Ok(Tensor::<CpuRuntime>::try_from_slice(
         &output,
         &[b, out_len],
         device,
-    ))
+    )?)
 }
 
 #[cfg(test)]

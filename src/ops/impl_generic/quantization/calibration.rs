@@ -274,9 +274,9 @@ where
         }
     }
 
-    let q_tensor = Tensor::<R>::from_slice(&q_out, &[m, k], &device);
-    let s_tensor = Tensor::<R>::from_slice(&scales_out, &[m, num_groups], &device);
-    let z_tensor = Tensor::<R>::from_slice(&zeros_out, &[m, num_groups], &device);
+    let q_tensor = Tensor::<R>::try_from_slice(&q_out, &[m, k], &device)?;
+    let s_tensor = Tensor::<R>::try_from_slice(&scales_out, &[m, num_groups], &device)?;
+    let z_tensor = Tensor::<R>::try_from_slice(&zeros_out, &[m, num_groups], &device)?;
 
     Ok((q_tensor, s_tensor, z_tensor))
 }

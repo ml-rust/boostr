@@ -126,7 +126,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         let dt = DType::F32;
 
         // Embedding
-        let embed_weight = Tensor::<R>::zeros(&[vocab, hidden], dt, device);
+        let embed_weight = Tensor::<R>::try_zeros(&[vocab, hidden], dt, device)?;
         let embed_tokens = Embedding::new(embed_weight, true);
 
         // RoPE cache
@@ -154,7 +154,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
 
         // Final norm
         let norm = RmsNorm::new(
-            Tensor::<R>::ones(&[hidden], dt, device),
+            Tensor::<R>::try_ones(&[hidden], dt, device)?,
             config.rms_norm_eps as f32,
             true,
         );
@@ -178,7 +178,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
             ))
         } else {
             MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<R>::zeros(&[vocab, hidden], dt, device),
+                Tensor::<R>::try_zeros(&[vocab, hidden], dt, device)?,
                 None,
                 true,
             ))

@@ -64,11 +64,11 @@ impl MlaOps<WgpuRuntime> for WgpuClient {
         }
 
         // Create output tensor: [B, H, S_q, D_v]
-        let output = Tensor::<WgpuRuntime>::zeros(
+        let output = Tensor::<WgpuRuntime>::try_zeros(
             &[batch_size, num_heads, seq_len_q, head_dim_v],
             DType::F32,
             q_tensor.device(),
-        );
+        )?;
 
         let q_buf = get_buffer(q_tensor.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "q buffer not found".into(),

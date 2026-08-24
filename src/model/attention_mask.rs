@@ -56,7 +56,7 @@ where
     C: ScalarOps<R> + LinalgOps<R> + BinaryOps<R>,
 {
     let key_offset = sk.saturating_sub(sq) as i64;
-    let zeros = Tensor::<R>::zeros(&[sq, sk], DType::F32, device);
+    let zeros = Tensor::<R>::try_zeros(&[sq, sk], DType::F32, device)?;
     let filled = client.add_scalar(&zeros, f32::MIN as f64)?;
     let future = client.triu(&filled, key_offset + 1)?;
     let masked = if window_size == 0 {

@@ -103,10 +103,10 @@ impl Init {
         // Trait bounds on the function provide the methods
 
         match *self {
-            Init::Zeros => Ok(Tensor::zeros(shape, dtype, device)),
-            Init::Ones => Ok(Tensor::ones(shape, dtype, device)),
+            Init::Zeros => Ok(Tensor::try_zeros(shape, dtype, device)?),
+            Init::Ones => Ok(Tensor::try_ones(shape, dtype, device)?),
             Init::Const(val) => {
-                let t = Tensor::zeros(shape, dtype, device);
+                let t = Tensor::try_zeros(shape, dtype, device)?;
                 client.add_scalar(&t, val as f64).map_err(Error::Numr)
             }
             Init::Uniform(bound) => {
@@ -212,10 +212,10 @@ impl Init {
             + numr::ops::TensorOps<R>,
     {
         match *self {
-            Init::Zeros => Ok(Tensor::zeros(shape, dtype, device)),
-            Init::Ones => Ok(Tensor::ones(shape, dtype, device)),
+            Init::Zeros => Ok(Tensor::try_zeros(shape, dtype, device)?),
+            Init::Ones => Ok(Tensor::try_ones(shape, dtype, device)?),
             Init::Const(val) => {
-                let t = Tensor::zeros(shape, dtype, device);
+                let t = Tensor::try_zeros(shape, dtype, device)?;
                 client.add_scalar(&t, val as f64).map_err(Error::Numr)
             }
             Init::Uniform(bound) => {

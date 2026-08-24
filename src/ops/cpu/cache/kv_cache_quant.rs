@@ -38,8 +38,8 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
         }
 
         let q_tensor =
-            Tensor::<CpuRuntime>::from_slice(&quantized, &[num_tokens, head_dim], device);
-        let s_tensor = Tensor::<CpuRuntime>::from_slice(&scales, &[num_tokens], device);
+            Tensor::<CpuRuntime>::try_from_slice(&quantized, &[num_tokens, head_dim], device)?;
+        let s_tensor = Tensor::<CpuRuntime>::try_from_slice(&scales, &[num_tokens], device)?;
         Ok((q_tensor, s_tensor))
     }
 
@@ -64,11 +64,11 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
             }
         }
 
-        Ok(Tensor::<CpuRuntime>::from_slice(
+        Ok(Tensor::<CpuRuntime>::try_from_slice(
             &output,
             &[num_tokens, head_dim],
             device,
-        ))
+        )?)
     }
 
     fn quantize_kv_int4(
@@ -114,9 +114,9 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
             }
         }
 
-        let p = Tensor::<CpuRuntime>::from_slice(&packed, &[num_tokens, head_dim / 2], device);
-        let s = Tensor::<CpuRuntime>::from_slice(&scales_vec, &[num_groups], device);
-        let z = Tensor::<CpuRuntime>::from_slice(&zeros_vec, &[num_groups], device);
+        let p = Tensor::<CpuRuntime>::try_from_slice(&packed, &[num_tokens, head_dim / 2], device)?;
+        let s = Tensor::<CpuRuntime>::try_from_slice(&scales_vec, &[num_groups], device)?;
+        let z = Tensor::<CpuRuntime>::try_from_slice(&zeros_vec, &[num_groups], device)?;
         Ok((p, s, z))
     }
 
@@ -149,11 +149,11 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
             output[i] = nibble as f32 * s_data[g] + z_data[g];
         }
 
-        Ok(Tensor::<CpuRuntime>::from_slice(
+        Ok(Tensor::<CpuRuntime>::try_from_slice(
             &output,
             &[num_tokens, head_dim],
             device,
-        ))
+        )?)
     }
 
     fn quantize_kv_int8(
@@ -185,8 +185,8 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
             }
         }
 
-        let q = Tensor::<CpuRuntime>::from_slice(&quantized, &[num_tokens, head_dim], device);
-        let s = Tensor::<CpuRuntime>::from_slice(&scales, &[num_tokens], device);
+        let q = Tensor::<CpuRuntime>::try_from_slice(&quantized, &[num_tokens, head_dim], device)?;
+        let s = Tensor::<CpuRuntime>::try_from_slice(&scales, &[num_tokens], device)?;
         Ok((q, s))
     }
 
@@ -209,11 +209,11 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
             }
         }
 
-        Ok(Tensor::<CpuRuntime>::from_slice(
+        Ok(Tensor::<CpuRuntime>::try_from_slice(
             &output,
             &[num_tokens, head_dim],
             device,
-        ))
+        )?)
     }
 }
 

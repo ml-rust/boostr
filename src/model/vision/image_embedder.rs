@@ -126,8 +126,11 @@ impl<R: Runtime<DType = DType>> ImageEmbedder<R> {
         };
 
         // [3, H, W] -> [1, 3, H, W]
-        let pixel_tensor =
-            Tensor::<R>::from_slice(&pixels, &[1, 3, self.image_size, self.image_size], device);
+        let pixel_tensor = Tensor::<R>::try_from_slice(
+            &pixels,
+            &[1, 3, self.image_size, self.image_size],
+            device,
+        )?;
 
         // Encoder forward: [1, 3, H, W] -> [1, num_patches, hidden]
         let patches = match &self.encoder {

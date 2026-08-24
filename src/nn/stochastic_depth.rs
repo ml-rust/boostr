@@ -80,11 +80,11 @@ impl StochasticDepth {
 
         // For drop_prob >= 1.0, everything is dropped
         if self.drop_prob >= 1.0 {
-            let zeros = numr::tensor::Tensor::<R>::zeros(
+            let zeros = numr::tensor::Tensor::<R>::try_zeros(
                 input.tensor().shape(),
                 input.tensor().dtype(),
                 input.tensor().device(),
-            );
+            )?;
             return Ok(Var::new(zeros, false));
         }
 

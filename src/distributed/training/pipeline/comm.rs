@@ -126,11 +126,11 @@ where
         losses.push(v as f64);
     }
 
-    Ok(Tensor::<R>::ones(
+    Ok(Tensor::<R>::try_ones(
         loss_var.tensor().shape(),
         loss_var.tensor().dtype(),
         device,
-    ))
+    )?)
 }
 
 #[cfg(test)]

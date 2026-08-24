@@ -107,10 +107,13 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
             }
         }
 
-        let output =
-            Tensor::<CpuRuntime>::from_slice(&out, &[total_tokens_q, num_heads, head_dim], device);
+        let output = Tensor::<CpuRuntime>::try_from_slice(
+            &out,
+            &[total_tokens_q, num_heads, head_dim],
+            device,
+        )?;
         let lse_tensor =
-            Tensor::<CpuRuntime>::from_slice(&lse, &[total_tokens_q, num_heads], device);
+            Tensor::<CpuRuntime>::try_from_slice(&lse, &[total_tokens_q, num_heads], device)?;
         Ok((output, lse_tensor))
     }
 
@@ -221,18 +224,21 @@ impl VarLenAttentionOps<CpuRuntime> for CpuClient {
             }
         }
 
-        let dq_t =
-            Tensor::<CpuRuntime>::from_slice(&dq, &[total_tokens_q, num_heads, head_dim], device);
-        let dk_t = Tensor::<CpuRuntime>::from_slice(
+        let dq_t = Tensor::<CpuRuntime>::try_from_slice(
+            &dq,
+            &[total_tokens_q, num_heads, head_dim],
+            device,
+        )?;
+        let dk_t = Tensor::<CpuRuntime>::try_from_slice(
             &dk,
             &[total_tokens_k, num_kv_heads, head_dim],
             device,
-        );
-        let dv_t = Tensor::<CpuRuntime>::from_slice(
+        )?;
+        let dv_t = Tensor::<CpuRuntime>::try_from_slice(
             &dv,
             &[total_tokens_k, num_kv_heads, head_dim],
             device,
-        );
+        )?;
         Ok((dq_t, dk_t, dv_t))
     }
 }

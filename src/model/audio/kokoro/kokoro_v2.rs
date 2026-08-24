@@ -238,11 +238,11 @@ pub fn alignment_matrix_from_durations<R: Runtime<DType = DType>>(
         }
         cursor += d as usize;
     }
-    Ok(Tensor::<R>::from_slice(
+    Ok(Tensor::<R>::try_from_slice(
         &data,
         &[t_phon, t_frames],
         reference.device(),
-    ))
+    )?)
 }
 
 #[cfg(test)]

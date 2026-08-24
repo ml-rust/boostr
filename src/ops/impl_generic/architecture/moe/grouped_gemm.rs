@@ -69,11 +69,11 @@ where
     if expert_outputs.is_empty() {
         // All experts have zero tokens — return empty
         let device = permuted_tokens.device();
-        return Ok(Tensor::<R>::empty(
+        return Ok(Tensor::<R>::try_empty(
             &[total_tokens, out_dim],
             permuted_tokens.dtype(),
             device,
-        ));
+        )?);
     }
 
     // Concatenate all expert outputs along dim 0
@@ -147,11 +147,11 @@ where
 
     if expert_outputs.is_empty() {
         let device = permuted_tokens.device();
-        return Ok(Tensor::<R>::empty(
+        return Ok(Tensor::<R>::try_empty(
             &[total_tokens, out_dim],
             permuted_tokens.dtype(),
             device,
-        ));
+        )?);
     }
 
     let refs: Vec<&Tensor<R>> = expert_outputs.iter().collect();

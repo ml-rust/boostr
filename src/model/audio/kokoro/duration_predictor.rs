@@ -223,7 +223,7 @@ where
     }
 
     let device = hidden.device();
-    let index_tensor = Tensor::<R>::from_slice(&indices, &[indices.len()], device);
+    let index_tensor = Tensor::<R>::try_from_slice(&indices, &[indices.len()], device)?;
 
     // Squeeze to [T, D] for index_select, then re-add batch dim.
     let hidden_2d = hidden.reshape(&[t, shape[2]]).map_err(Error::Numr)?;

@@ -123,18 +123,18 @@ impl<R: Runtime<DType = DType>> VocabParallelEmbedding<R> {
 
         // Build mask on-device: (indices >= vocab_start) AND (indices < vocab_end)
         // CompareOps returns 1.0/0.0 in same dtype
-        let start_tensor = Tensor::<R>::full_scalar(
+        let start_tensor = Tensor::<R>::try_full_scalar(
             &[1],
             flat_idx.dtype(),
             self.vocab_start as f64,
             indices.device(),
-        );
-        let end_tensor = Tensor::<R>::full_scalar(
+        )?;
+        let end_tensor = Tensor::<R>::try_full_scalar(
             &[1],
             flat_idx.dtype(),
             self.vocab_end as f64,
             indices.device(),
-        );
+        )?;
 
         let ge_start = client.ge(&flat_idx, &start_tensor).map_err(Error::Numr)?;
         let lt_end = client.lt(&flat_idx, &end_tensor).map_err(Error::Numr)?;

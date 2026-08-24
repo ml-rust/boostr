@@ -265,7 +265,7 @@ impl<R: Runtime> Mamba2<R> {
 
         // 7. Compute A = -exp(A_log)
         let a = self.a_log.tensor().exp().map_err(Error::Numr)?;
-        let neg_one = Tensor::<R>::from_slice(&[-1.0f32], &[1], x.device());
+        let neg_one = Tensor::<R>::try_from_slice(&[-1.0f32], &[1], x.device())?;
         let a = a.mul(&neg_one).map_err(Error::Numr)?;
 
         // 8. dt = softplus(dt + dt_bias) — bias inside softplus, mirroring the

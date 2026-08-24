@@ -44,7 +44,7 @@ impl FusedFp8TrainingOps<WgpuRuntime> for WgpuClient {
         let n: usize = grad.shape().iter().product();
 
         // Allocate a fresh output tensor — can't alias grad (read vs read_write conflict)
-        let out = Tensor::<WgpuRuntime>::zeros(grad.shape(), DType::F32, grad.device());
+        let out = Tensor::<WgpuRuntime>::try_zeros(grad.shape(), DType::F32, grad.device())?;
 
         let out_buf = get_buffer(out.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "out buffer not found".into(),
@@ -170,7 +170,7 @@ impl FusedFp8TrainingOps<WgpuRuntime> for WgpuClient {
             let clip_pipeline =
                 cache.get_or_create_pipeline("clip_scale_f32", "clip_scale_f32", &module, &layout);
             // Binding 0 is read-only, can't alias with binding 1 (read_write out_buf)
-            let dummy = Tensor::<WgpuRuntime>::zeros(&[1], DType::F32, grad.device());
+            let dummy = Tensor::<WgpuRuntime>::try_zeros(&[1], DType::F32, grad.device())?;
             let dummy_buf =
                 get_buffer(dummy.storage().ptr()).ok_or_else(|| Error::KernelError {
                     reason: "dummy buffer not found".into(),

@@ -61,7 +61,7 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
         let module = kernels::get_or_load_module(self.context(), device_index, CALIBRATION_MODULE)?;
 
         // Step 1: act_scale[j] = max_n(|act[n,j]|) → [K]
-        let act_scale = Tensor::<CudaRuntime>::zeros(&[k], dtype, device);
+        let act_scale = Tensor::<CudaRuntime>::try_zeros(&[k], dtype, device)?;
         {
             let func_name = format!("awq_act_scale_{}", kernel_prefix);
             let func = kernels::get_kernel_function(&module, &func_name)?;
@@ -93,7 +93,7 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
         }
 
         // Step 2: score[j] = mean_i(act_scale[j] * |W[i,j]|) → [K]
-        let scores = Tensor::<CudaRuntime>::zeros(&[k], dtype, device);
+        let scores = Tensor::<CudaRuntime>::try_zeros(&[k], dtype, device)?;
         {
             let func_name = format!("awq_score_reduce_{}", kernel_prefix);
             let func = kernels::get_kernel_function(&module, &func_name)?;
@@ -157,7 +157,7 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
         let device_index = device.id();
         let module = kernels::get_or_load_module(self.context(), device_index, CALIBRATION_MODULE)?;
 
-        let output = Tensor::<CudaRuntime>::zeros(&[p], dtype, device);
+        let output = Tensor::<CudaRuntime>::try_zeros(&[p], dtype, device)?;
         let func_name = format!("fisher_accumulate_{}", kernel_prefix);
         let func = kernels::get_kernel_function(&module, &func_name)?;
 

@@ -322,8 +322,11 @@ impl<R: Runtime> Mamba2<R> {
             state.update_conv_state(tail);
         } else {
             let conv_channels = self.config.conv_channels();
-            let mut new_conv =
-                Tensor::<R>::zeros(&[batch, conv_channels, conv_window], x.dtype(), x.device());
+            let mut new_conv = Tensor::<R>::try_zeros(
+                &[batch, conv_channels, conv_window],
+                x.dtype(),
+                x.device(),
+            )?;
             let offset = conv_window - seq_len;
             if state.is_initialized() && offset > 0 {
                 let old_tail = state
@@ -366,11 +369,11 @@ impl<R: Runtime> Mamba2<R> {
                 .map_err(Error::Numr)?
                 .contiguous()?
         } else {
-            Tensor::<R>::zeros(&[batch, conv_channels, 0], x.dtype(), x.device())
+            Tensor::<R>::try_zeros(&[batch, conv_channels, 0], x.dtype(), x.device())?
         };
 
         let mut new_state =
-            Tensor::<R>::zeros(&[batch, conv_channels, conv_window], x.dtype(), x.device());
+            Tensor::<R>::try_zeros(&[batch, conv_channels, conv_window], x.dtype(), x.device())?;
         if conv_window > 1 {
             new_state = new_state
                 .slice_assign(&old_state, 2, 0)

@@ -140,21 +140,21 @@ fn capture_and_run(
 
     // Allocate stable-address I/O buffers BEFORE capture begins.
     // The graph encodes these device pointers; they must not move.
-    let input_ids_buf = Tensor::<CudaRuntime>::from_slice(flat_ids, &[batch, seq_len], device);
-    let pos_ids_buf = Tensor::<CudaRuntime>::from_slice(pos_flat, &pos_shape, device);
+    let input_ids_buf = Tensor::<CudaRuntime>::try_from_slice(flat_ids, &[batch, seq_len], device)?;
+    let pos_ids_buf = Tensor::<CudaRuntime>::try_from_slice(pos_flat, &pos_shape, device)?;
 
     let flat_mask: Vec<f32> = attention_mask
         .map(|m| m.to_vec())
         .unwrap_or_else(|| vec![1.0f32; batch * seq_len]);
-    let mask_buf = Tensor::<CudaRuntime>::from_slice(&flat_mask, &[batch, seq_len], device);
+    let mask_buf = Tensor::<CudaRuntime>::try_from_slice(&flat_mask, &[batch, seq_len], device)?;
 
     // Stable output buffer [B, hidden] — allocated OUTSIDE capture so it is
     // NOT subject to AUTO_FREE_ON_LAUNCH. The graph writes into it via D2D copy.
-    let stable_out = Tensor::<CudaRuntime>::from_slice(
+    let stable_out = Tensor::<CudaRuntime>::try_from_slice(
         &vec![0.0f32; batch * hidden_size],
         &[batch, hidden_size],
         device,
-    );
+    )?;
     let stable_out_ptr = stable_out.ptr();
 
     // Pre-allocate a `[1]` f32 tensor holding 1.0 OUTSIDE capture.
@@ -165,7 +165,7 @@ fn capture_and_run(
     // address as the source.  On replay that stack frame is gone →
     // CUDA_ERROR_ILLEGAL_ADDRESS.  Allocating the scalar BEFORE capture and
     // passing it into the closure gives the graph a stable device address.
-    let ones_scalar = Tensor::<CudaRuntime>::from_slice(&[1.0f32], &[1], device);
+    let ones_scalar = Tensor::<CudaRuntime>::try_from_slice(&[1.0f32], &[1], device)?;
 
     // Sliding-window / causal span masks, built here for the same reason: the
     // host-to-device copy must not happen inside the capture region.

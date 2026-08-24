@@ -258,7 +258,7 @@ impl<R: Runtime<DType = DType>> UpSample1d<R> {
         let taps = kaiser_sinc_filter1d(0.5 / ratio as f64, 0.6 / ratio as f64, kernel_size);
         let pad = kernel_size / ratio - 1;
         Ok(Self {
-            filter: Tensor::from_slice(&taps, &[1, 1, kernel_size], device),
+            filter: Tensor::try_from_slice(&taps, &[1, 1, kernel_size], device)?,
             ratio,
             pad,
             pad_left: pad * ratio + (kernel_size - ratio) / 2,
@@ -333,7 +333,7 @@ impl<R: Runtime<DType = DType>> DownSample1d<R> {
         let taps = kaiser_sinc_filter1d(0.5 / ratio as f64, 0.6 / ratio as f64, kernel_size);
         let even = kernel_size.is_multiple_of(2);
         Ok(Self {
-            filter: Tensor::from_slice(&taps, &[1, 1, kernel_size], device),
+            filter: Tensor::try_from_slice(&taps, &[1, 1, kernel_size], device)?,
             ratio,
             pad_left: kernel_size / 2 - usize::from(even),
             pad_right: kernel_size / 2,

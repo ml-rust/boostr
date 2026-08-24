@@ -268,7 +268,7 @@ pub fn recv_tensor_with_metadata<R: Runtime<DType = DType>>(
     let dtype = u64_to_dtype(header_buf[ndim + 1])?;
 
     // Allocate receive buffer
-    let buffer = Tensor::<R>::zeros(&shape, dtype, device);
+    let buffer = Tensor::<R>::try_zeros(&shape, dtype, device)?;
 
     // Receive tensor data
     let ptr = buffer.ptr();

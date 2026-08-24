@@ -87,7 +87,7 @@ where
         }
     }
     // Upload as f32; cast to scores' dtype is handled by runtime on add-broadcast.
-    let mask_tensor = Tensor::<R>::from_slice(&mask, &[1, 1, seq_len, seq_len], device);
+    let mask_tensor = Tensor::<R>::try_from_slice(&mask, &[1, 1, seq_len, seq_len], device)?;
     let mask_b = mask_tensor
         .broadcast_to(&[batch, num_heads, seq_len, seq_len])
         .map_err(Error::Numr)?

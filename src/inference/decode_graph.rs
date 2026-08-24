@@ -78,14 +78,17 @@ mod cuda_impl {
 
     impl DeviceScalars {
         /// Allocate device scalars initialised to `initial_seq_len`.
-        pub fn new(initial_seq_len: usize, device: &numr::runtime::cuda::CudaDevice) -> Self {
+        pub fn new(
+            initial_seq_len: usize,
+            device: &numr::runtime::cuda::CudaDevice,
+        ) -> Result<Self> {
             let val = initial_seq_len as i32;
-            let seq_len_k = Tensor::<CudaRuntime>::from_slice(&[val], &[1], device);
-            let write_pos = Tensor::<CudaRuntime>::from_slice(&[val], &[1], device);
-            Self {
+            let seq_len_k = Tensor::<CudaRuntime>::try_from_slice(&[val], &[1], device)?;
+            let write_pos = Tensor::<CudaRuntime>::try_from_slice(&[val], &[1], device)?;
+            Ok(Self {
                 seq_len_k,
                 write_pos,
-            }
+            })
         }
 
         /// Raw device pointer to the i32 seq_len_k value. Pass to decode_attention.

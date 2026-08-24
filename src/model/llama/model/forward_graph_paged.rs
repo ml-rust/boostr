@@ -125,11 +125,11 @@ impl Llama<numr::runtime::cuda::CudaRuntime> {
             layer_cache.update(&k_flat, &v_flat, slot_mapping, client)?;
 
             // Pre-allocate output for graph stability
-            let attn_output = numr::tensor::Tensor::<numr::runtime::cuda::CudaRuntime>::empty(
+            let attn_output = numr::tensor::Tensor::<numr::runtime::cuda::CudaRuntime>::try_empty(
                 &[batch, attn.num_heads, 1, attn.head_dim],
                 numr::dtype::DType::F32,
                 input_ids.device(),
-            );
+            )?;
 
             // Paged decode attention with device-side seq_len_k
             paged_decode_attention_fwd_graph(

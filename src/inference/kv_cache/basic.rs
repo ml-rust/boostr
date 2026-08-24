@@ -43,8 +43,8 @@ where
         let capacity = initial_capacity.min(max_seq_len);
         let shape = [batch_size, num_kv_heads, capacity, head_dim];
 
-        let k_cache = Tensor::<R>::zeros(&shape, dtype, device);
-        let v_cache = Tensor::<R>::zeros(&shape, dtype, device);
+        let k_cache = Tensor::<R>::try_zeros(&shape, dtype, device)?;
+        let v_cache = Tensor::<R>::try_zeros(&shape, dtype, device)?;
 
         Ok(Self {
             k_cache,
@@ -83,8 +83,8 @@ where
             new_capacity,
             self.head_dim,
         ];
-        let mut new_k_cache = Tensor::<R>::zeros(&new_shape, self.dtype, &self.device);
-        let mut new_v_cache = Tensor::<R>::zeros(&new_shape, self.dtype, &self.device);
+        let mut new_k_cache = Tensor::<R>::try_zeros(&new_shape, self.dtype, &self.device)?;
+        let mut new_v_cache = Tensor::<R>::try_zeros(&new_shape, self.dtype, &self.device)?;
 
         if self.seq_len > 0 {
             let old_k = self.k_cache.narrow(2, 0, self.seq_len)?;

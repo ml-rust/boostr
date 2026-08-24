@@ -316,5 +316,5 @@ where
         sampled as i64
     };
 
-    Ok(Tensor::from_slice(&[token_id], &[1], logits.device()))
+    Ok(Tensor::try_from_slice(&[token_id], &[1], logits.device())?)
 }

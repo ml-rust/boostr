@@ -415,9 +415,9 @@ fn token_type_row0<R: Runtime<DType = DType>>(
             ),
         });
     }
-    Ok(Some(Tensor::<R>::from_slice(
+    Ok(Some(Tensor::<R>::try_from_slice(
         &data[..hidden_size],
         &[1, hidden_size],
         table.device(),
-    )))
+    )?))
 }

@@ -52,8 +52,8 @@ impl SpeculativeOps<CudaRuntime> for CudaClient {
         let device = draft_probs.device();
         let device_index = device.id();
 
-        let acceptance = Tensor::<CudaRuntime>::empty(dp_shape, DType::F32, device);
-        let residual = Tensor::<CudaRuntime>::empty(dp_shape, DType::F32, device);
+        let acceptance = Tensor::<CudaRuntime>::try_empty(dp_shape, DType::F32, device)?;
+        let residual = Tensor::<CudaRuntime>::try_empty(dp_shape, DType::F32, device)?;
 
         let module =
             kernels::get_or_load_module(self.context(), device_index, SPECULATIVE_VERIFY_MODULE)?;
@@ -106,7 +106,7 @@ impl SpeculativeOps<CudaRuntime> for CudaClient {
         let device = acceptance_rates.device();
         let device_index = device.id();
 
-        let output = Tensor::<CudaRuntime>::empty(&[batch_size], DType::F32, device);
+        let output = Tensor::<CudaRuntime>::try_empty(&[batch_size], DType::F32, device)?;
 
         let module =
             kernels::get_or_load_module(self.context(), device_index, SPECULATIVE_VERIFY_MODULE)?;

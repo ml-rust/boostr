@@ -75,11 +75,11 @@ pub fn reflection_pad_1d(
         }
     }
 
-    Ok(Tensor::<CpuRuntime>::from_slice(
+    Ok(Tensor::<CpuRuntime>::try_from_slice(
         &out,
         &[b, c, t_out],
         x.device(),
-    ))
+    )?)
 }
 
 #[cfg(test)]

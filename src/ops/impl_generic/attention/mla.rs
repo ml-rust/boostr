@@ -81,11 +81,11 @@ where
                 mask_data[i * s_kv + j] = f32::NEG_INFINITY;
             }
         }
-        let mask_tensor = numr::tensor::Tensor::<R>::from_slice(
+        let mask_tensor = numr::tensor::Tensor::<R>::try_from_slice(
             &mask_data,
             &[1, 1, s_q, s_kv],
             q.tensor().device(),
-        );
+        )?;
         let mask = Var::new(mask_tensor, false);
         var_add(&scores, &mask, client).map_err(Error::Numr)?
     } else {

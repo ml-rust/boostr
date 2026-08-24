@@ -82,11 +82,11 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         let mut out = vec![0.0f32; m * n];
         int4_gemm::int4_gemm_f32(inp, qw, sc, zr, &mut out, m, k, n, group_size);
 
-        Ok(Tensor::<CpuRuntime>::from_slice(
+        Ok(Tensor::<CpuRuntime>::try_from_slice(
             &out,
             &output_shape(input.shape(), n),
             input.device(),
-        ))
+        )?)
     }
 
     fn int4_gemm_gptq(
@@ -119,11 +119,11 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         let mut out = vec![0.0f32; m * n];
         int4_gemm_gptq::int4_gemm_gptq_f32(inp, qw, qz, sc, gi, &mut out, m, k, n);
 
-        Ok(Tensor::<CpuRuntime>::from_slice(
+        Ok(Tensor::<CpuRuntime>::try_from_slice(
             &out,
             &output_shape(input.shape(), n),
             input.device(),
-        ))
+        )?)
     }
 
     fn marlin_gemm(
@@ -155,11 +155,11 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         let mut out = vec![0.0f32; m * n];
         marlin_gemm::marlin_gemm_f32(inp, wt, sc, zr, &mut out, m, k, n, group_size);
 
-        Ok(Tensor::<CpuRuntime>::from_slice(
+        Ok(Tensor::<CpuRuntime>::try_from_slice(
             &out,
             &output_shape(input.shape(), n),
             input.device(),
-        ))
+        )?)
     }
 
     fn quant_matmul_batch(
@@ -248,16 +248,17 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         }
 
         // Build output tensors
-        let results: Vec<Tensor<CpuRuntime>> = weights
-            .iter()
-            .zip(output_bufs)
-            .map(|(w, buf)| {
-                let n = w.shape()[0];
-                let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
-                out_shape.push(n);
-                Tensor::<CpuRuntime>::from_slice(&buf, &out_shape, activation.device())
-            })
-            .collect();
+        let mut results = Vec::new();
+        for (w, buf) in weights.iter().zip(output_bufs) {
+            let n = w.shape()[0];
+            let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
+            out_shape.push(n);
+            results.push(Tensor::<CpuRuntime>::try_from_slice(
+                &buf,
+                &out_shape,
+                activation.device(),
+            )?);
+        }
 
         Ok(results)
     }
@@ -337,11 +338,11 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
         out_shape.push(n);
 
-        Ok(Tensor::<CpuRuntime>::from_slice(
+        Ok(Tensor::<CpuRuntime>::try_from_slice(
             &output,
             &out_shape,
             activation.device(),
-        ))
+        )?)
     }
 
     fn quant_swiglu(

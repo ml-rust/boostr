@@ -127,7 +127,7 @@ where
         // `position` is the absolute position of query row `0`, i.e. the
         // number of keys that precede the query block. Prefill/training has
         // `sq == sk` and `position == 0`.
-        let mask = Tensor::<R>::zeros(&[batch, spec.num_heads, sq, sk], DType::F32, device);
+        let mask = Tensor::<R>::try_zeros(&[batch, spec.num_heads, sq, sk], DType::F32, device)?;
         client.alibi_add_bias_causal(
             &mask,
             batch,

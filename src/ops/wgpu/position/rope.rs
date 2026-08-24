@@ -170,7 +170,7 @@ impl RoPEOps<WgpuRuntime> for WgpuClient {
             sin_t.clone()
         };
 
-        let output = Tensor::<WgpuRuntime>::empty(&[b, h, s, d], DType::F32, x_t.device());
+        let output = Tensor::<WgpuRuntime>::try_empty(&[b, h, s, d], DType::F32, x_t.device())?;
 
         let x_buf = get_buffer(x_t.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "x buffer not found".into(),
@@ -245,7 +245,7 @@ impl RoPEOps<WgpuRuntime> for WgpuClient {
             sin_t.clone()
         };
 
-        let output = Tensor::<WgpuRuntime>::empty(&[b, h, s, d], DType::F32, x_t.device());
+        let output = Tensor::<WgpuRuntime>::try_empty(&[b, h, s, d], DType::F32, x_t.device())?;
 
         let x_buf = get_buffer(x_t.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "x buffer not found".into(),
@@ -321,7 +321,7 @@ impl RoPEOps<WgpuRuntime> for WgpuClient {
             sin_t.clone()
         };
 
-        let output = Tensor::<WgpuRuntime>::empty(&[b, h, s, d], DType::F32, x_t.device());
+        let output = Tensor::<WgpuRuntime>::try_empty(&[b, h, s, d], DType::F32, x_t.device())?;
 
         let x_buf = get_buffer(x_t.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "x buffer not found".into(),

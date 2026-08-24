@@ -65,7 +65,7 @@ where
     // Create a zero tensor for the add trick to force contiguous
     let zero_shape = &[total_bhsd, half_d, 1];
     let zero = Var::new(
-        numr::tensor::Tensor::<R>::zeros(zero_shape, x.tensor().dtype(), x.tensor().device()),
+        numr::tensor::Tensor::<R>::try_zeros(zero_shape, x.tensor().dtype(), x.tensor().device())?,
         false,
     );
     let x_even_contig = var_add(&x_even_3d, &zero, client).map_err(Error::Numr)?;

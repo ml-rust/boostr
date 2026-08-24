@@ -158,18 +158,18 @@ impl<R: Runtime<DType = DType>> Mla<R> {
 
         let (q_down, q_up, q_norm) = if config.q_uses_lora() {
             let q_down = MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<R>::zeros(&[config.q_lora_rank, h], dt, device),
+                Tensor::<R>::try_zeros(&[config.q_lora_rank, h], dt, device)?,
                 None,
                 true,
             ));
             let q_up = MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<R>::zeros(&[nh * qk_dim, config.q_lora_rank], dt, device),
+                Tensor::<R>::try_zeros(&[nh * qk_dim, config.q_lora_rank], dt, device)?,
                 None,
                 true,
             ));
             let q_norm = if config.use_norm {
                 Some(RmsNorm::new(
-                    Tensor::<R>::ones(&[config.q_lora_rank], dt, device),
+                    Tensor::<R>::try_ones(&[config.q_lora_rank], dt, device)?,
                     config.norm_eps,
                     true,
                 ))
@@ -179,7 +179,7 @@ impl<R: Runtime<DType = DType>> Mla<R> {
             (Some(q_down), q_up, q_norm)
         } else {
             let q_up = MaybeQuantLinear::Standard(Linear::new(
-                Tensor::<R>::zeros(&[nh * qk_dim, h], dt, device),
+                Tensor::<R>::try_zeros(&[nh * qk_dim, h], dt, device)?,
                 None,
                 true,
             ));
@@ -187,13 +187,13 @@ impl<R: Runtime<DType = DType>> Mla<R> {
         };
 
         let kv_compress = MaybeQuantLinear::Standard(Linear::new(
-            Tensor::<R>::zeros(&[config.kv_lora_rank + config.rope_head_dim, h], dt, device),
+            Tensor::<R>::try_zeros(&[config.kv_lora_rank + config.rope_head_dim, h], dt, device)?,
             None,
             true,
         ));
         let kv_norm = if config.use_norm {
             Some(RmsNorm::new(
-                Tensor::<R>::ones(&[config.kv_lora_rank], dt, device),
+                Tensor::<R>::try_ones(&[config.kv_lora_rank], dt, device)?,
                 config.norm_eps,
                 true,
             ))
@@ -201,20 +201,20 @@ impl<R: Runtime<DType = DType>> Mla<R> {
             None
         };
         let kv_decompress = MaybeQuantLinear::Standard(Linear::new(
-            Tensor::<R>::zeros(
+            Tensor::<R>::try_zeros(
                 &[
                     nh * (config.head_dim + config.head_dim_v),
                     config.kv_lora_rank,
                 ],
                 dt,
                 device,
-            ),
+            )?,
             None,
             true,
         ));
 
         let o_proj = MaybeQuantLinear::Standard(Linear::new(
-            Tensor::<R>::zeros(&[h, nh * config.head_dim_v], dt, device),
+            Tensor::<R>::try_zeros(&[h, nh * config.head_dim_v], dt, device)?,
             None,
             true,
         ));

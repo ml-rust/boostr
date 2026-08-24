@@ -158,7 +158,7 @@ impl<R: Runtime> MoeLayer<R> {
 
         // Initialize output accumulator as zeros
         let mut output = Var::new(
-            Tensor::<R>::zeros(&[num_tokens, hidden_size], DType::F32, x.tensor().device()),
+            Tensor::<R>::try_zeros(&[num_tokens, hidden_size], DType::F32, x.tensor().device())?,
             x.requires_grad(),
         );
 
@@ -174,11 +174,11 @@ impl<R: Runtime> MoeLayer<R> {
                 // Create mask: slot_indices == expert_idx (on-device)
                 // Build constant tensor via ones * scalar
                 let expert_id_tensor = {
-                    let ones = Tensor::<R>::ones(
+                    let ones = Tensor::<R>::try_ones(
                         slot_indices.shape(),
                         slot_indices.tensor().dtype(),
                         x.tensor().device(),
-                    );
+                    )?;
                     client
                         .mul_scalar(&ones, expert_idx as f64)
                         .map_err(Error::Numr)?

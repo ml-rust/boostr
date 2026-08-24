@@ -232,9 +232,9 @@ where
 
     // acceptance = min(1, target / draft)
     // safe_draft = max(draft, eps) to avoid division by zero
-    let eps = Tensor::<R>::full_scalar(dp_shape, DType::F32, 1e-10, draft_probs.device());
-    let ones = Tensor::<R>::full_scalar(dp_shape, DType::F32, 1.0, draft_probs.device());
-    let zeros = Tensor::<R>::full_scalar(dp_shape, DType::F32, 0.0, draft_probs.device());
+    let eps = Tensor::<R>::try_full_scalar(dp_shape, DType::F32, 1e-10, draft_probs.device())?;
+    let ones = Tensor::<R>::try_full_scalar(dp_shape, DType::F32, 1.0, draft_probs.device())?;
+    let zeros = Tensor::<R>::try_full_scalar(dp_shape, DType::F32, 0.0, draft_probs.device())?;
 
     let safe_draft = client.maximum(draft_probs, &eps).map_err(Error::Numr)?;
     let ratio = client.div(target_probs, &safe_draft).map_err(Error::Numr)?;
@@ -295,9 +295,9 @@ where
         expected.push(exp_tokens + 1.0);
     }
 
-    Ok(Tensor::<R>::from_slice(
+    Ok(Tensor::<R>::try_from_slice(
         &expected,
         &[batch_size],
         acceptance_rates.device(),
-    ))
+    )?)
 }

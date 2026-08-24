@@ -96,7 +96,7 @@ where
     // Build the gather/scatter row-index map from the (small) block table.
     let bt = kv.block_table.to_vec::<i32>();
     let rows = paged_kv_row_indices(&bt, batch_size, nkv, sk, cfg.block_size, max_num_blocks);
-    let idx = Tensor::<R>::from_slice(&rows, &[n], device);
+    let idx = Tensor::<R>::try_from_slice(&rows, &[n], device)?;
 
     // Gather KV blocks → dense [B, num_kv_heads, S_k, D].
     let k_pool = kv.k_blocks.reshape(&[pool_rows, d]).map_err(Error::Numr)?;
@@ -175,7 +175,7 @@ where
         .broadcast_to(&[n, d])
         .map_err(Error::Numr)?
         .contiguous()?;
-    let dst = Tensor::<R>::zeros(&[pool_rows, d], DType::F32, grad_dense.device());
+    let dst = Tensor::<R>::try_zeros(&[pool_rows, d], DType::F32, grad_dense.device())?;
     let scattered = client
         .scatter_reduce(&dst, 0, &index2d, &grad_rows, ScatterReduceOp::Sum, true)
         .map_err(Error::Numr)?;

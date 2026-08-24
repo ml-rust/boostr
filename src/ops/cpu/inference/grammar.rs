@@ -80,7 +80,11 @@ impl GrammarDfaOps<CpuRuntime> for CpuClient {
             }
         }
 
-        Ok(Tensor::from_slice(&logits_data, &shape, logits.device()))
+        Ok(Tensor::try_from_slice(
+            &logits_data,
+            &shape,
+            logits.device(),
+        )?)
     }
 }
 

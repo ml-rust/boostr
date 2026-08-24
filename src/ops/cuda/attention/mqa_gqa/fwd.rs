@@ -69,9 +69,13 @@ pub fn mqa_gqa_fwd(
     let kernel_name = format!("mqa_gqa_fwd_{}_{}{}", head_dim, dtype_suffix, variant);
 
     let device = q.device();
-    let output =
-        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q, head_dim], dtype, device);
-    let lse = Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q], DType::F32, device);
+    let output = Tensor::<CudaRuntime>::try_empty(
+        &[batch_size, num_heads, seq_len_q, head_dim],
+        dtype,
+        device,
+    )?;
+    let lse =
+        Tensor::<CudaRuntime>::try_empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
 
     let smem_size = compute_smem(block_m, block_n, head_dim, elem_bytes);
 

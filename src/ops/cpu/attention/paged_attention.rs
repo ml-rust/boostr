@@ -39,11 +39,11 @@ fn gather_paged_kv(
         }
     }
 
-    Ok(Tensor::<CpuRuntime>::from_slice(
+    Ok(Tensor::<CpuRuntime>::try_from_slice(
         &out,
         &[batch_size, 1, seq_len_k, head_dim],
         kv_blocks.device(),
-    ))
+    )?)
 }
 
 impl PagedAttentionOps<CpuRuntime> for CpuClient {
@@ -251,11 +251,11 @@ fn scatter_to_paged(
         }
     }
 
-    Ok(Tensor::<CpuRuntime>::from_slice(
+    Ok(Tensor::<CpuRuntime>::try_from_slice(
         &out,
         block_shape,
         kv_blocks_ref.device(),
-    ))
+    )?)
 }
 
 #[cfg(test)]

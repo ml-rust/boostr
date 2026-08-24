@@ -86,7 +86,7 @@ impl SsmKernelOps<CudaRuntime> for CudaClient {
         let da_c = dA_cumsum.contiguous()?;
 
         // Allocate output
-        let states_out = Tensor::<CudaRuntime>::empty(s_shape, dtype, device);
+        let states_out = Tensor::<CudaRuntime>::try_empty(s_shape, dtype, device)?;
 
         let device_index = device.id();
         let module =

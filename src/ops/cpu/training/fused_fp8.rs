@@ -72,7 +72,7 @@ fn fused_grad_unscale_clip_f32(
 
     if found_inf {
         // Return zeros — caller should skip this step
-        let zeros = Tensor::<CpuRuntime>::zeros(grad.shape(), DType::F32, grad.device());
+        let zeros = Tensor::<CpuRuntime>::try_zeros(grad.shape(), DType::F32, grad.device())?;
         return Ok((zeros, 0.0, true));
     }
 
@@ -86,7 +86,7 @@ fn fused_grad_unscale_clip_f32(
         }
     }
 
-    let result = Tensor::<CpuRuntime>::from_slice(&unscaled, grad.shape(), grad.device());
+    let result = Tensor::<CpuRuntime>::try_from_slice(&unscaled, grad.shape(), grad.device())?;
     Ok((result, norm as f64, false))
 }
 
@@ -116,7 +116,7 @@ fn fused_grad_unscale_clip_f64(
     }
 
     if found_inf {
-        let zeros = Tensor::<CpuRuntime>::zeros(grad.shape(), DType::F64, grad.device());
+        let zeros = Tensor::<CpuRuntime>::try_zeros(grad.shape(), DType::F64, grad.device())?;
         return Ok((zeros, 0.0, true));
     }
 
@@ -130,7 +130,7 @@ fn fused_grad_unscale_clip_f64(
         }
     }
 
-    let result = Tensor::<CpuRuntime>::from_slice(&unscaled, grad.shape(), grad.device());
+    let result = Tensor::<CpuRuntime>::try_from_slice(&unscaled, grad.shape(), grad.device())?;
     Ok((result, norm, false))
 }
 

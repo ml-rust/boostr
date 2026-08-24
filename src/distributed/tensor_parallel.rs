@@ -321,7 +321,7 @@ pub fn gather_from_ranks<R: Runtime<DType = DType>>(
     let total_count = count * world_size;
 
     // Allocate receive buffer
-    let recv = Tensor::<R>::zeros(&[total_count], dtype, local_shard.device());
+    let recv = Tensor::<R>::try_zeros(&[total_count], dtype, local_shard.device())?;
 
     unsafe {
         comm.all_gather(local_shard.ptr(), recv.ptr(), count, dtype)

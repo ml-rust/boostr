@@ -34,11 +34,11 @@ where
     let device = input.x.tensor().device();
 
     // Initialize h to zeros: [B, nheads, headdim, d_state]
-    let h_tensor = Tensor::<R>::zeros(
+    let h_tensor = Tensor::<R>::try_zeros(
         &[batch, nheads, headdim, d_state],
         input.x.tensor().dtype(),
         device,
-    );
+    )?;
     let mut h = Var::new(h_tensor, false);
 
     let mut outputs: Vec<Var<R>> = Vec::with_capacity(seq_len);
@@ -103,7 +103,7 @@ where
     let dtype = input.x.tensor().dtype();
 
     // Initialize hidden state
-    let h_tensor = Tensor::<R>::zeros(&[batch, nheads, headdim, d_state], dtype, device);
+    let h_tensor = Tensor::<R>::try_zeros(&[batch, nheads, headdim, d_state], dtype, device)?;
     let mut h = Var::new(h_tensor, false);
 
     let mut chunk_outputs: Vec<Var<R>> = Vec::with_capacity(nchunks);

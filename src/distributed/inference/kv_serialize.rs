@@ -191,16 +191,16 @@ where
             bytemuck::cast_slice::<u8, f32>(&bytes[cursor..cursor + data_bytes]).to_vec();
         cursor += data_bytes;
 
-        let k_tensor = Tensor::<R>::from_slice(
+        let k_tensor = Tensor::<R>::try_from_slice(
             &k_f32,
             &[layer_batch, layer_heads, seq_len, layer_dim],
             device,
-        );
-        let v_tensor = Tensor::<R>::from_slice(
+        )?;
+        let v_tensor = Tensor::<R>::try_from_slice(
             &v_f32,
             &[layer_batch, layer_heads, seq_len, layer_dim],
             device,
-        );
+        )?;
 
         if let Some(layer) = cache.layer_mut(layer_idx) {
             layer

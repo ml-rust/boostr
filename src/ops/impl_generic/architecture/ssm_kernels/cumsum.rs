@@ -57,7 +57,7 @@ where
     let dt_padded = if padded_len > seqlen {
         let pad_size = padded_len - seqlen;
         let device = dt.device();
-        let pad = Tensor::<R>::zeros(&[batch, pad_size, nheads], dt.dtype(), device);
+        let pad = Tensor::<R>::try_zeros(&[batch, pad_size, nheads], dt.dtype(), device)?;
         client.cat(&[dt, &pad], 1).map_err(Error::Numr)?
     } else {
         dt.clone()

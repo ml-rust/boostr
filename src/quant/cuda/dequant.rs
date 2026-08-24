@@ -24,7 +24,7 @@ impl DequantOps<CudaRuntime> for CudaClient {
         let num_bytes = nf4_data.numel();
         let n = num_bytes * 2;
 
-        let output = Tensor::<CudaRuntime>::empty(&[n], DType::F32, nf4_data.device());
+        let output = Tensor::<CudaRuntime>::try_empty(&[n], DType::F32, nf4_data.device())?;
         nf4_dispatch::launch_nf4_dequant(
             self,
             nf4_data,
@@ -56,7 +56,7 @@ impl DequantOps<CudaRuntime> for CudaClient {
 
         let mut out_shape = in_shape[..in_shape.len() - 1].to_vec();
         out_shape.push(n_out);
-        let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, input.device());
+        let output = Tensor::<CudaRuntime>::try_empty(&out_shape, DType::F32, input.device())?;
         nf4_dispatch::launch_nf4_gemm(
             self,
             &act_contig,
@@ -111,7 +111,7 @@ impl DequantOps<CudaRuntime> for CudaClient {
         let input_ptr = qt.storage().ptr();
 
         // Allocate f32 output tensor
-        let f32_out = Tensor::<CudaRuntime>::empty(qt.shape(), DType::F32, qt.device());
+        let f32_out = Tensor::<CudaRuntime>::try_empty(qt.shape(), DType::F32, qt.device())?;
         let output_ptr = f32_out.ptr();
 
         // Load module and launch kernel
@@ -157,7 +157,7 @@ fn dequant_via_generic_kernel(
     let device_index = qt.device().id();
 
     let input_ptr = qt.storage().ptr();
-    let f32_out = Tensor::<CudaRuntime>::empty(qt.shape(), DType::F32, qt.device());
+    let f32_out = Tensor::<CudaRuntime>::try_empty(qt.shape(), DType::F32, qt.device())?;
     let output_ptr = f32_out.ptr();
 
     let module =

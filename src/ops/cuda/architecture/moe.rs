@@ -85,8 +85,8 @@ impl MoEOps<CudaRuntime> for CudaClient {
         let device = logits.device();
 
         // Output: indices always I32, weights always F32
-        let indices = Tensor::<CudaRuntime>::empty(&[num_tokens, k], DType::I32, device);
-        let weights = Tensor::<CudaRuntime>::empty(&[num_tokens, k], DType::F32, device);
+        let indices = Tensor::<CudaRuntime>::try_empty(&[num_tokens, k], DType::I32, device)?;
+        let weights = Tensor::<CudaRuntime>::try_empty(&[num_tokens, k], DType::F32, device)?;
 
         let device_index = device.id();
         let module = kernels::get_or_load_module(self.context(), device_index, MOE_ROUTING_MODULE)?;
@@ -247,7 +247,7 @@ fn launch_grouped_gemm(
     let kernel_name = grouped_gemm_kernel_name(dtype, activation)?;
 
     // Allocate output
-    let output = Tensor::<CudaRuntime>::empty(&[total_tokens, out_dim], dtype, device);
+    let output = Tensor::<CudaRuntime>::try_empty(&[total_tokens, out_dim], dtype, device)?;
 
     if total_tokens == 0 {
         return Ok(output);

@@ -11,6 +11,7 @@ use crate::error::Result;
 use crate::ops::FusedOptimizerOps;
 use crate::optimizer::precision::optimizer_state_dtype;
 use crate::optimizer::traits::Optimizer;
+use crate::optimizer::{init_master, widen_grad, write_back};
 use crate::readback::scalar_f32;
 use numr::autograd::GradStore;
 use numr::dtype::DType;
@@ -191,30 +192,14 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
                 Entry::Vacant(entry) => {
                     let m = Tensor::<R>::try_zeros(param.shape(), state_dtype, param.device())?;
                     let v = Tensor::<R>::try_zeros(param.shape(), state_dtype, param.device())?;
-                    let master = if state_dtype == param_dtype {
-                        None
-                    } else {
-                        Some(client.cast(param, state_dtype)?)
-                    };
+                    let master = init_master(client, param, state_dtype)?;
                     entry.insert(LambState { m, v, master })
                 }
             };
 
-            // The LAMB kernel does not write the parameter, but it allocates the
-            // update vector at the parameter's dtype and mutates `m`/`v` through
-            // storage-sharing clones — so a narrow parameter would narrow the
-            // whole update. The master — never the narrow parameter — goes in.
             let arith_param = state.master.as_ref().unwrap_or(param);
 
-            // CPU dispatch keys on the parameter dtype alone and reads the
-            // gradient at that width, so a narrow gradient against an F32
-            // master must be widened first. Dropped at the end of the
-            // iteration: only one widened gradient is resident at a time.
-            let widened_grad = if grad.dtype() == state_dtype {
-                None
-            } else {
-                Some(client.cast(grad, state_dtype)?)
-            };
+            let widened_grad = widen_grad(client, grad, state_dtype)?;
             let arith_grad = widened_grad.as_ref().unwrap_or(grad);
 
             // Fused kernel computes: update vector + updated m, v
@@ -256,15 +241,7 @@ impl<R: Runtime<DType = DType>> Optimizer<R> for Lamb<R> {
             state.m = new_m;
             state.v = new_v;
 
-            // A fresh cast, never the returned handle: on CUDA and WGPU that
-            // handle aliases the master's storage.
-            let updated = match state.master.as_mut() {
-                Some(master) => {
-                    *master = new_param;
-                    client.cast(master, param_dtype)?
-                }
-                None => new_param,
-            };
+            let updated = write_back(client, state.master.as_mut(), new_param, param_dtype)?;
             params.insert(id, updated);
         }
 

@@ -7,6 +7,7 @@ use crate::error::Result;
 use crate::ops::FusedOptimizerOps;
 use crate::optimizer::precision::optimizer_state_dtype;
 use crate::optimizer::traits::Optimizer;
+use crate::optimizer::{init_master, widen_grad, write_back};
 use numr::autograd::GradStore;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TypeConversionOps, UnaryOps};
@@ -148,11 +149,7 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
                     let state_dtype = optimizer_state_dtype(param.dtype());
                     let m = Tensor::<R>::try_zeros(param.shape(), state_dtype, param.device())?;
                     let v = Tensor::<R>::try_zeros(param.shape(), state_dtype, param.device())?;
-                    let master = if state_dtype == param.dtype() {
-                        None
-                    } else {
-                        Some(client.cast(param, state_dtype)?)
-                    };
+                    let master = init_master(client, param, state_dtype)?;
                     entry.insert(ParamState { m, v, master })
                 }
             };
@@ -218,13 +215,7 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
                     .expect("id came from params.keys() while building `widened`"),
             };
 
-            // Freed at the end of this iteration, so only one F32 gradient copy
-            // is resident at a time.
-            let widened_grad = if grad.dtype() == state_dtype {
-                None
-            } else {
-                Some(client.cast(grad, state_dtype)?)
-            };
+            let widened_grad = widen_grad(client, grad, state_dtype)?;
             let arith_grad = widened_grad.as_ref().unwrap_or(grad);
 
             let (new_param, new_m, new_v) = client.fused_adamw_step(
@@ -247,13 +238,7 @@ impl<R: Runtime<DType = DType>> AdamW<R> {
             state_mut.m = new_m;
             state_mut.v = new_v;
 
-            let updated = match state_mut.master.as_mut() {
-                Some(master) => {
-                    *master = new_param;
-                    client.cast(master, param_dtype)?
-                }
-                None => new_param,
-            };
+            let updated = write_back(client, state_mut.master.as_mut(), new_param, param_dtype)?;
             params.insert(id, updated);
         }
 

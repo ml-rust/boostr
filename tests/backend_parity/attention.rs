@@ -710,12 +710,16 @@ fn test_flash_attention_bwd_windowed_parity() {
     let (out_win, lse_win) = cpu_client
         .flash_attention_fwd(&q, &k, &v, h, h, d, true, window, None)
         .unwrap();
-    let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
+    // Bound as a tuple, not destructured: dQ and dV are read only by the CUDA parity
+    // block below, so destructured names would be unused in a cuda-less build.
+    let cpu_grads = cpu_client
         .flash_attention_bwd(&dout, &q, &k, &v, &out_win, &lse_win, h, h, d, true, window)
         .unwrap();
-    let cpu_dq_vec = cpu_dq.to_vec::<f32>();
-    let cpu_dk_vec = cpu_dk.to_vec::<f32>();
-    let cpu_dv_vec = cpu_dv.to_vec::<f32>();
+    let cpu_dk_vec = cpu_grads.1.to_vec::<f32>();
+    #[cfg(feature = "cuda")]
+    let cpu_dq_vec = cpu_grads.0.to_vec::<f32>();
+    #[cfg(feature = "cuda")]
+    let cpu_dv_vec = cpu_grads.2.to_vec::<f32>();
 
     // The window must actually change the CPU gradients.
     let (out_full, lse_full) = cpu_client
@@ -771,6 +775,10 @@ fn test_flash_attention_bwd_windowed_parity() {
 
 /// Regression guard: `window_size == 0` backward is untouched by the windowing
 /// change — CUDA still matches CPU for both causal and non-causal.
+///
+/// Every assertion in this test is CUDA-vs-CPU, so without the `cuda` feature the
+/// body computes CPU gradients and checks nothing. Gated rather than left to run empty.
+#[cfg(feature = "cuda")]
 #[test]
 fn test_flash_attention_bwd_window_zero_unchanged() {
     let (cpu_client, cpu_device) = setup_cpu();

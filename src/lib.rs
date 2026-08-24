@@ -40,7 +40,6 @@ pub mod trainer;
 
 // Re-export primary boostr traits
 pub use nn::{Init, VarBuilder, VarMap, Weight, router_z_loss};
-pub use readback::scalar_f32;
 pub use ops::{
     AttentionOps, DeviceGrammarDfa, FlashAttentionOps, FusedFp8TrainingOps, FusedOptimizerOps,
     FusedQkvOps, GrammarDfaOps, KvCacheOps, MlaOps, PagedAttentionOps, RoPEOps, RoPEPackedOps,
@@ -50,6 +49,7 @@ pub use quant::{
     DecomposedQuantLinear, DecomposedQuantMethod, DecomposedQuantTensor, DequantOps, FusedQuantOps,
     QuantFormat, QuantMatmulOps, QuantTensor,
 };
+pub use readback::scalar_f32;
 
 // Re-export numr types that users will commonly need
 pub use numr::dtype::DType;

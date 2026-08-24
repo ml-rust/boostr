@@ -87,7 +87,12 @@ impl<R: Runtime> GradFn<R> for RopeBackward<R>
 where
     R::Client: RoPEOps<R>,
 {
-    fn backward(&self, grad_output: &Tensor<R>) -> numr::error::Result<Vec<Option<Tensor<R>>>> {
+    fn backward(
+        &self,
+        grad_output: &Tensor<R>,
+        _needed: &[bool],
+    ) -> numr::error::Result<Vec<Option<Tensor<R>>>> {
+        // Single input — nothing to skip.
         let client = R::default_client(grad_output.device());
 
         // The fused kernels index x, cos, sin and out through raw device
@@ -118,7 +123,8 @@ where
 
     fn backward_var(&self, grad_output: &Var<R>) -> numr::error::Result<Vec<Option<Var<R>>>> {
         // First-order only — wrap Tensor results as detached Vars.
-        let grads = self.backward(grad_output.tensor())?;
+        // Second-order traversal keeps every node, so ask for every gradient.
+        let grads = self.backward_all(grad_output.tensor())?;
         Ok(grads
             .into_iter()
             .map(|g| g.map(|t| Var::new(t, false)))

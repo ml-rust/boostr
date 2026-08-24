@@ -51,7 +51,12 @@ struct ContiguousBackward<R: Runtime> {
 }
 
 impl<R: Runtime> GradFn<R> for ContiguousBackward<R> {
-    fn backward(&self, grad_output: &Tensor<R>) -> numr::error::Result<Vec<Option<Tensor<R>>>> {
+    fn backward(
+        &self,
+        grad_output: &Tensor<R>,
+        _needed: &[bool],
+    ) -> numr::error::Result<Vec<Option<Tensor<R>>>> {
+        // Single input, and the gradient is a refcount clone — nothing to skip.
         Ok(vec![Some(grad_output.clone())])
     }
 

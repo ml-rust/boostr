@@ -1,7 +1,8 @@
 //! Bucketed distributed trainer with backward/allreduce overlap
 //!
-//! Uses `backward_with_hooks` to fire allreduce on gradient buckets
+//! Uses `backward_wrt_with_hooks` to fire allreduce on gradient buckets
 //! during the backward pass, overlapping communication with computation.
+//! Backward is pruned to the bucketed parameter ids — no other gradient is read.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use crate::error::Result;
 use crate::ops::FusedOptimizerOps;
 use crate::trainer::SimpleTrainer;
 use crate::trainer::config::{TrainingConfig, TrainingMetrics};
-use numr::autograd::{BackwardHook, Var, backward_with_hooks};
+use numr::autograd::{BackwardHook, Var, backward_wrt_with_hooks};
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, ScalarOps, TensorOps, UnaryOps};
 use numr::runtime::{Communicator, Runtime, RuntimeClient};
@@ -54,6 +55,9 @@ pub struct BucketedTrainer<R: Runtime<DType = DType>> {
     inner: SimpleTrainer<R>,
     bucket_manager: GradientBucketManager<R>,
     comm: Arc<dyn Communicator>,
+    /// Ids of the bucketed parameters, in the order given to `new`. These are
+    /// the only gradients this trainer reads back, so backward is pruned to them.
+    param_ids: Vec<TensorId>,
 }
 
 impl<R: Runtime<DType = DType>> BucketedTrainer<R> {
@@ -87,6 +91,7 @@ impl<R: Runtime<DType = DType>> BucketedTrainer<R> {
             inner,
             bucket_manager,
             comm,
+            param_ids: param_info.iter().map(|&(id, _, _)| id).collect(),
         })
     }
 
@@ -155,7 +160,9 @@ impl<R: Runtime<DType = DType>> BucketedTrainer<R> {
             manager: manager_ptr,
             client,
         };
-        let mut grads = backward_with_hooks(loss, client, &mut hook)?;
+        // Pruned to the bucketed parameters: the bucket manager and the optimizer
+        // only ever read those ids, so a gradient for any other node is dead weight.
+        let mut grads = backward_wrt_with_hooks(loss, &self.param_ids, client, &mut hook)?;
 
         // Wait for all allreduce ops and unflatten into the grad store
         self.bucket_manager.wait_and_unflatten(client, &mut grads)?;
@@ -218,7 +225,7 @@ mod tests {
     use crate::distributed::bucket_manager::GradientBucketManager;
     use crate::test_utils::cpu_setup;
     use crate::trainer::config::TrainingConfig;
-    use numr::autograd::{backward, var_mul, var_sum};
+    use numr::autograd::{backward, backward_with_hooks, var_mul, var_sum};
     use numr::runtime::NoOpCommunicator;
     use numr::runtime::cpu::CpuRuntime;
 

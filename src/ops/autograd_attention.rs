@@ -34,7 +34,14 @@ impl<R: Runtime> GradFn<R> for FlashAttentionBackward<R>
 where
     R::Client: FlashAttentionOps<R>,
 {
-    fn backward(&self, grad_output: &Tensor<R>) -> numr::error::Result<Vec<Option<Tensor<R>>>> {
+    fn backward(
+        &self,
+        grad_output: &Tensor<R>,
+        _needed: &[bool],
+    ) -> numr::error::Result<Vec<Option<Tensor<R>>>> {
+        // One fused kernel returns dQ, dK and dV together, so no slot has a
+        // cost of its own to skip. Guarding would need
+        // `flash_attention_bwd` itself to take the mask.
         let client = R::default_client(grad_output.device());
         // The fused backward kernels index dO, Q, K, V, O and LSE through raw
         // device pointers with implied row-major strides, so every input must
@@ -80,8 +87,9 @@ where
     }
 
     fn backward_var(&self, grad_output: &Var<R>) -> numr::error::Result<Vec<Option<Var<R>>>> {
-        // First-order only — wrap Tensor results as detached Vars
-        let grads = self.backward(grad_output.tensor())?;
+        // First-order only — wrap Tensor results as detached Vars.
+        // Second-order traversal keeps every node, so ask for every gradient.
+        let grads = self.backward_all(grad_output.tensor())?;
         Ok(grads
             .into_iter()
             .map(|g| g.map(|t| Var::new(t, false)))

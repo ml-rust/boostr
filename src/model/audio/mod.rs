@@ -3,6 +3,7 @@ pub mod g2p;
 pub mod kokoro;
 pub mod mel;
 pub mod neucodec;
+pub mod quality;
 pub mod reflection_pad;
 pub mod resample;
 pub mod stft;
@@ -17,6 +18,7 @@ pub mod whisper_model;
 
 pub use decode::{decode_audio, decode_audio_file_mono_at, decode_audio_mono_at, extension_hint};
 pub use g2p::{G2pError, Lang, Phonemizer};
+pub use quality::{TakeQuality, measure_quality};
 pub use reflection_pad::reflection_pad_1d;
 pub use resample::{
     DEFAULT_TAPS_PER_PHASE, MAX_FILTER_TAPS, resample, resample_with_taps, to_mono_at_rate,

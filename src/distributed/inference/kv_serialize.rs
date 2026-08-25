@@ -6,49 +6,55 @@
 //! # Wire format — `LayeredKvCache`
 //!
 //! ```text
+//! [magic:       u32 LE = 0xB0057B01]   — flat (non-paged) KV cache
+//! [version:     u32 LE = 1]
+//! [dtype_tag:   u32 LE]                — numr DType discriminant: 1 = f32, 2 = f16, 3 = bf16
 //! [num_layers:  u32 LE]
 //! [seq_len:     u32 LE]       — used token count (same for all layers)
 //! For each layer:
 //!   [batch_size:    u32 LE]
 //!   [num_kv_heads:  u32 LE]
 //!   [head_dim:      u32 LE]
-//!   [k_data:        seq_len * batch_size * num_kv_heads * head_dim * 4 bytes (f32 LE)]
-//!   [v_data:        seq_len * batch_size * num_kv_heads * head_dim * 4 bytes (f32 LE)]
+//!   [k_data:        seq_len * batch_size * num_kv_heads * head_dim * E bytes (LE)]
+//!   [v_data:        seq_len * batch_size * num_kv_heads * head_dim * E bytes (LE)]
 //! ```
 //!
-//! The format carries **no dtype tag**: element data is f32 little-endian and nothing
-//! else. A cache of any other dtype (bf16 in particular, the usual training dtype) is
-//! refused by [`serialize_kv_cache`] rather than reinterpreted or converted, since
-//! either would hand the peer numbers it cannot know are wrong.
+//! `E` is the element width the dtype tag names: 4 bytes for f32, 2 for f16 and bf16.
+//! Elements are little-endian on every host and are decoded element-wise, so a received
+//! buffer needs no alignment.
+//!
+//! The dtype tag round-trips: a bf16 cache is written as bf16 elements and comes back as
+//! a bf16 cache. Only dtypes carried end to end are accepted — f32, f16 and bf16. Any
+//! other dtype is refused by [`serialize_kv_cache`], naming itself, rather than
+//! reinterpreted or converted, since either hands the peer numbers it cannot know are
+//! wrong.
+//!
+//! The magic differs from the paged cache's `0xB0057B02`, so a paged buffer handed to
+//! [`deserialize_kv_cache`] errors on the first four bytes.
+//!
+//! Both magics sit above `0xB0057B00` = 2_952_003_840. The pre-header format started
+//! straight at `num_layers`, and no cache has billions of layers — every layer allocates
+//! its own K and V tensors — so an old buffer can never present a matching magic. It is
+//! rejected up front instead of being misparsed.
 
-use super::kv_serialize_paged::read_f32_le_vec;
+use super::kv_serialize_paged::{
+    FLAT_MAGIC, HEADER_LEN, append_le_elements, read_header, tensor_from_le_wire,
+    unsupported_dtype_err, write_header,
+};
 use crate::inference::LayeredKvCache;
-use crate::{DType, IndexingOps, Runtime, Tensor};
+use crate::{DType, IndexingOps, Runtime};
 use anyhow::{Result, anyhow};
 
-/// The only element type this wire format can carry.
+/// Reject a cache tensor whose dtype disagrees with the one the header declares.
 ///
-/// The header records dimensions but no dtype tag, so both sides are hard-wired to
-/// f32. Every read and write below goes through this constant so the assumption is
-/// stated once instead of being implied by a bare `to_vec::<f32>()`.
-const WIRE_DTYPE: DType = DType::F32;
-
-/// Reject a cache tensor whose dtype the wire format cannot represent.
-///
-/// `try_to_vec::<f32>()` does not check dtype: on a bf16 cache it copies
-/// `numel * 4` bytes out of a `numel * 2` byte allocation and reinterprets the
-/// result as f32. That is a silent wrong answer at the peer, so refuse instead.
-///
-/// Converting to f32 here is not an option either — the peer has no dtype tag to
-/// tell it the numbers were changed on the way.
-fn check_wire_dtype(layer_idx: usize, which: &str, dtype: DType) -> Result<()> {
-    if dtype != WIRE_DTYPE {
+/// The header carries a single dtype for the whole cache. A layer that disagrees would
+/// be written at the declared width and read back as the wrong numbers, so refuse.
+fn check_wire_dtype(layer_idx: usize, which: &str, dtype: DType, wire_dtype: DType) -> Result<()> {
+    if dtype != wire_dtype {
         return Err(anyhow!(
-            "KV cache layer {layer_idx} {which} tensor has dtype {dtype}, but the KV cache \
-             wire format carries {WIRE_DTYPE} only (the header has no dtype tag). Refusing \
-             to transfer: reinterpreting {dtype} bytes as {WIRE_DTYPE} corrupts the cache, \
-             and converting would change the values the peer receives without telling it. \
-             Allocate the cache with DType::{WIRE_DTYPE:?} for disaggregated transfer."
+            "KV cache layer {layer_idx} {which} tensor has dtype {dtype}, but the header \
+             declares {wire_dtype} from layer 0. The wire format carries one dtype for the \
+             whole cache; refusing to transfer a mixed-dtype cache."
         ));
     }
     Ok(())
@@ -66,9 +72,9 @@ fn check_wire_dtype(layer_idx: usize, which: &str, dtype: DType) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error naming the offending dtype if any layer's K or V tensor is
-/// not [`WIRE_DTYPE`]. The wire format carries no dtype tag, so a non-f32 cache
-/// cannot be represented and is refused rather than silently mangled.
+/// Returns an error naming the offending dtype if the cache's element type is not one
+/// the wire format carries (f32, f16, bf16), or if the layers do not all share one
+/// dtype — the header declares a single dtype for the whole cache.
 pub fn serialize_kv_cache<R>(cache: &LayeredKvCache<R>) -> Result<Vec<u8>>
 where
     R: Runtime<DType = DType>,
@@ -77,9 +83,23 @@ where
     let num_layers = cache.num_layers() as u32;
     let seq_len = cache.seq_len() as u32;
 
-    let mut buf: Vec<u8> =
-        Vec::with_capacity(8 + num_layers as usize * (12 + seq_len as usize * 4 * 2 * 64 * 32));
+    // The header declares one dtype for the whole cache, taken from layer 0 and checked
+    // against every other layer below. A cache with no layers carries no elements, so its
+    // tag is the format's default rather than a property of absent data.
+    let wire_dtype = match cache.layer(0) {
+        Some(layer) => layer.k_cache_raw().dtype(),
+        None => DType::F32,
+    };
+    let elem_size = match wire_dtype {
+        DType::F32 | DType::F16 | DType::BF16 => wire_dtype.size_in_bytes(),
+        other => return Err(unsupported_dtype_err(other)),
+    };
 
+    let mut buf: Vec<u8> = Vec::with_capacity(
+        HEADER_LEN + 8 + num_layers as usize * (12 + seq_len as usize * elem_size * 2 * 64 * 32),
+    );
+
+    write_header(&mut buf, FLAT_MAGIC, wire_dtype)?;
     buf.extend_from_slice(&num_layers.to_le_bytes());
     buf.extend_from_slice(&seq_len.to_le_bytes());
 
@@ -104,8 +124,8 @@ where
 
         // Checked before the `seq_len == 0` shortcut: a cache the format cannot carry
         // is refused whether or not it currently holds tokens.
-        check_wire_dtype(layer_idx, "K", layer.k_cache_raw().dtype())?;
-        check_wire_dtype(layer_idx, "V", layer.v_cache_raw().dtype())?;
+        check_wire_dtype(layer_idx, "K", layer.k_cache_raw().dtype(), wire_dtype)?;
+        check_wire_dtype(layer_idx, "V", layer.v_cache_raw().dtype(), wire_dtype)?;
 
         if seq_len == 0 {
             continue;
@@ -123,16 +143,11 @@ where
             .contiguous()
             .map_err(|e| anyhow!("Failed to make layer {layer_idx} V contiguous: {e}"))?;
 
-        let k_data: Vec<f32> = k_c.try_to_vec::<f32>()?;
-        let v_data: Vec<f32> = v_c.try_to_vec::<f32>()?;
-        // Explicit little-endian, matching the documented wire format and the reader.
-        // `cast_slice` would emit native-endian bytes, which disagree on a big-endian host.
-        for &x in &k_data {
-            buf.extend_from_slice(&x.to_le_bytes());
-        }
-        for &x in &v_data {
-            buf.extend_from_slice(&x.to_le_bytes());
-        }
+        // Element-wise little-endian at the tensor's own width, matching the documented
+        // wire format and the reader. `cast_slice` would emit native-endian bytes, which
+        // disagree on a big-endian host.
+        append_le_elements(&mut buf, &k_c)?;
+        append_le_elements(&mut buf, &v_c)?;
     }
 
     Ok(buf)
@@ -157,20 +172,26 @@ where
     R: Runtime<DType = DType>,
     R::Client: IndexingOps<R>,
 {
-    if bytes.len() < 8 {
+    // Magic, version and dtype tag are checked before any dimension is read, so a foreign
+    // or stale buffer errors on its first four bytes rather than on an absurd dimension.
+    let wire_dtype = read_header(bytes, FLAT_MAGIC, "KV cache")?;
+    let elem_size = wire_dtype.size_in_bytes();
+
+    if bytes.len() < HEADER_LEN + 8 {
         return Err(anyhow!(
-            "KV cache buffer too short: need at least 8 bytes, got {}",
+            "KV cache buffer too short: need at least {} bytes, got {}",
+            HEADER_LEN + 8,
             bytes.len()
         ));
     }
 
-    let num_layers = read_u32_le(bytes, 0)? as usize;
-    let seq_len = read_u32_le(bytes, 4)? as usize;
+    let num_layers = read_u32_le(bytes, HEADER_LEN)? as usize;
+    let seq_len = read_u32_le(bytes, HEADER_LEN + 4)? as usize;
 
-    let mut cursor = 8usize;
+    let mut cursor = HEADER_LEN + 8;
 
     if num_layers == 0 {
-        let cache = LayeredKvCache::<R>::new_positional(0, 1, 1, 1, 64, 1, WIRE_DTYPE, device)?;
+        let cache = LayeredKvCache::<R>::new_positional(0, 1, 1, 1, 64, 1, wire_dtype, device)?;
         return Ok(cache);
     }
 
@@ -206,7 +227,7 @@ where
         .checked_mul(num_kv_heads)
         .and_then(|n| n.checked_mul(seq_len))
         .and_then(|n| n.checked_mul(head_dim))
-        .and_then(|n| n.checked_mul(8))
+        .and_then(|n| n.checked_mul(elem_size * 2))
         .and_then(|n| n.checked_add(cursor + 12))
         .ok_or_else(|| anyhow!("KV cache layer 0 data size overflows the address space"))?;
     if layer0_bytes > bytes.len() {
@@ -224,20 +245,20 @@ where
         initial_capacity,
         max_seq_len,
         head_dim,
-        WIRE_DTYPE,
+        wire_dtype,
         device,
     )?;
 
-    // The bytes carry no dtype tag, so the reader decodes them as `WIRE_DTYPE` and
-    // requested a `WIRE_DTYPE` cache above. State that symmetry as a check rather than
-    // leaving it implied: if the constructor ever stops honouring the requested dtype,
-    // this errors instead of writing f32 bytes into a differently-typed cache.
+    // The header's dtype tag was passed to the constructor above. State the symmetry as a
+    // check rather than leaving it implied: if the constructor ever stops honouring the
+    // requested dtype, this errors instead of writing elements of one width into a cache
+    // of another.
     if let Some(layer) = cache.layer(0) {
         let got = layer.k_cache_raw().dtype();
-        if got != WIRE_DTYPE {
+        if got != wire_dtype {
             return Err(anyhow!(
-                "KV cache wire format decodes {WIRE_DTYPE} only, but the reconstructed \
-                 cache has dtype {got}"
+                "KV cache header declares dtype {wire_dtype}, but the reconstructed cache \
+                 has dtype {got}"
             ));
         }
     }
@@ -267,7 +288,7 @@ where
             .checked_mul(layer_heads)
             .and_then(|n| n.checked_mul(seq_len))
             .and_then(|n| n.checked_mul(layer_dim))
-            .and_then(|n| n.checked_mul(4))
+            .and_then(|n| n.checked_mul(elem_size))
             .ok_or_else(|| {
                 anyhow!(
                     "KV cache layer {layer_idx} dimensions overflow: \
@@ -290,26 +311,27 @@ where
             ));
         }
 
-        // Read element-wise rather than `bytemuck::cast_slice`: a buffer arriving off
-        // the wire carries no alignment guarantee, and `cast_slice::<u8, f32>` panics on
-        // a misaligned slice. This also makes the decode explicitly little-endian,
-        // matching the documented wire format.
-        let k_f32: Vec<f32> = read_f32_le_vec(&bytes[cursor..cursor + data_bytes]);
-        cursor += data_bytes;
-
-        let v_f32: Vec<f32> = read_f32_le_vec(&bytes[cursor..cursor + data_bytes]);
-        cursor += data_bytes;
-
-        let k_tensor = Tensor::<R>::from_slice(
-            &k_f32,
-            &[layer_batch, layer_heads, seq_len, layer_dim],
+        // Decode element-wise rather than with `bytemuck::cast_slice`: a buffer arriving
+        // off the wire carries no alignment guarantee, and `cast_slice` panics on a
+        // misaligned slice. This also makes the decode explicitly little-endian, matching
+        // the documented wire format, and keeps the elements at the header's dtype instead
+        // of widening them.
+        let shape = [layer_batch, layer_heads, seq_len, layer_dim];
+        let k_tensor = tensor_from_le_wire::<R>(
+            &bytes[cursor..cursor + data_bytes],
+            wire_dtype,
+            &shape,
             device,
         )?;
-        let v_tensor = Tensor::<R>::from_slice(
-            &v_f32,
-            &[layer_batch, layer_heads, seq_len, layer_dim],
+        cursor += data_bytes;
+
+        let v_tensor = tensor_from_le_wire::<R>(
+            &bytes[cursor..cursor + data_bytes],
+            wire_dtype,
+            &shape,
             device,
         )?;
+        cursor += data_bytes;
 
         if let Some(layer) = cache.layer_mut(layer_idx) {
             layer
@@ -323,11 +345,21 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::super::kv_serialize_paged::{PAGED_MAGIC, WIRE_VERSION};
     use super::*;
-    use crate::{CpuDevice, CpuRuntime};
+    use crate::{CpuDevice, CpuRuntime, Tensor};
 
     fn cpu_device() -> CpuDevice {
         CpuDevice::new()
+    }
+
+    /// Build the 12-byte `[magic][version][dtype_tag]` prefix a flat buffer starts with.
+    fn flat_header(dtype: DType) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&FLAT_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&WIRE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&(dtype as u32).to_le_bytes());
+        bytes
     }
 
     #[test]
@@ -338,7 +370,11 @@ mod tests {
                 .unwrap();
 
         let bytes = serialize_kv_cache(&cache).unwrap();
-        assert!(bytes.len() >= 8 + 2 * 12);
+        // Header, then num_layers + seq_len, then a 12-byte dimension block per layer.
+        assert_eq!(bytes.len(), HEADER_LEN + 8 + 2 * 12);
+        assert_eq!(read_u32_le(&bytes, 0).unwrap(), FLAT_MAGIC);
+        assert_eq!(read_u32_le(&bytes, 4).unwrap(), WIRE_VERSION);
+        assert_eq!(read_u32_le(&bytes, 8).unwrap(), DType::F32 as u32);
     }
 
     #[test]
@@ -371,10 +407,13 @@ mod tests {
         assert_eq!(cache.seq_len(), 3);
 
         let bytes = serialize_kv_cache(&cache).unwrap();
+        assert_eq!(read_u32_le(&bytes, 8).unwrap(), DType::F32 as u32);
         let restored = deserialize_kv_cache::<CpuRuntime>(&bytes, &device).unwrap();
 
         assert_eq!(restored.num_layers(), 1);
         assert_eq!(restored.seq_len(), 3);
+        let restored_dtype = restored.layer(0).unwrap().k_cache_raw().dtype();
+        assert_eq!(restored_dtype, DType::F32);
 
         let (rk, rv) = restored.layer(0).unwrap().get_kv().unwrap();
         let rk_data: Vec<f32> = rk.contiguous().unwrap().to_vec::<f32>();
@@ -388,50 +427,184 @@ mod tests {
         }
     }
 
-    /// A cache whose dtype the wire format cannot carry must be refused by name.
+    /// A bf16 cache round-trips as bf16: bf16 elements on the wire, a bf16 cache back,
+    /// and the same values.
     ///
-    /// `try_to_vec::<f32>()` performs no dtype check: for a BF16 cache it copies
-    /// `numel * 4` bytes out of a `numel * 2` byte allocation and reinterprets them as
-    /// f32, so without the guard this returns a buffer of garbage rather than an error.
-    /// The assertion pins the dtype name and the f32-only statement, not merely
-    /// "is_err".
+    /// This replaces the old `test_serialize_rejects_non_f32_cache`, which asserted the
+    /// serializer refused BF16. The header now carries a dtype tag, so BF16 is supported
+    /// end to end and the refusal moved to `test_serialize_rejects_unsupported_dtype`.
     #[test]
-    fn test_serialize_rejects_non_f32_cache() {
+    fn test_roundtrip_bf16_cache() {
         let device = cpu_device();
-        let cache =
-            LayeredKvCache::<CpuRuntime>::new_positional(1, 1, 2, 4, 64, 32, DType::BF16, &device)
+        let mut cache =
+            LayeredKvCache::<CpuRuntime>::new_positional(1, 1, 1, 16, 64, 2, DType::BF16, &device)
                 .unwrap();
 
-        let Err(err) = serialize_kv_cache(&cache) else {
-            panic!("a BF16 KV cache must be refused, not serialized as f32");
-        };
-        let msg = err.to_string();
-        // `DType` displays lowercase (`bf16`, `f32`), so compare case-insensitively
-        // rather than against a spelling the type does not produce.
-        let lower = msg.to_lowercase();
-        assert!(lower.contains("bf16"), "error must name the dtype: {msg}");
-        assert!(
-            lower.contains("f32") && lower.contains("only"),
-            "error must state the wire format is f32-only: {msg}"
-        );
+        // Every value is exactly representable in bf16, so equality is the right check.
+        let k_vals: Vec<half::bf16> = [0.5f32, -1.5, 2.0, 3.0]
+            .iter()
+            .map(|&x| half::bf16::from_f32(x))
+            .collect();
+        let v_vals: Vec<half::bf16> = [-0.25f32, 4.0, 6.0, -8.0]
+            .iter()
+            .map(|&x| half::bf16::from_f32(x))
+            .collect();
+        let k = Tensor::<CpuRuntime>::from_slice(&k_vals, &[1, 1, 2, 2], &device).unwrap();
+        let v = Tensor::<CpuRuntime>::from_slice(&v_vals, &[1, 1, 2, 2], &device).unwrap();
+        cache.layer_mut(0).unwrap().update(&k, &v).unwrap();
+
+        let bytes = serialize_kv_cache(&cache).unwrap();
+        assert_eq!(read_u32_le(&bytes, 8).unwrap(), DType::BF16 as u32);
+        // 2 bytes per element, not 4: 4 elements each for K and V.
+        assert_eq!(bytes.len(), HEADER_LEN + 8 + 12 + 4 * 2 * 2);
+
+        let restored = deserialize_kv_cache::<CpuRuntime>(&bytes, &device).unwrap();
+        let layer = restored.layer(0).unwrap();
+        assert_eq!(layer.k_cache_raw().dtype(), DType::BF16);
+        assert_eq!(layer.v_cache_raw().dtype(), DType::BF16);
+
+        let (rk, rv) = layer.get_kv().unwrap();
+        assert_eq!(rk.contiguous().unwrap().to_vec::<half::bf16>(), k_vals);
+        assert_eq!(rv.contiguous().unwrap().to_vec::<half::bf16>(), v_vals);
     }
 
-    /// The dtype guard fires even when the cache holds no tokens, so a mismatched
-    /// peer is rejected at the start of a transfer rather than after prefill.
+    /// A dtype the format cannot carry is refused by name, even with no tokens held, so
+    /// a mismatched peer is rejected at the start of a transfer rather than after prefill.
+    ///
+    /// This replaces the old `test_serialize_rejects_non_f32_empty_cache`, which pinned
+    /// the refusal on BF16. BF16 is now carried, so the refusal is pinned on F64.
     #[test]
-    fn test_serialize_rejects_non_f32_empty_cache() {
+    fn test_serialize_rejects_unsupported_dtype() {
         let device = cpu_device();
         let cache =
-            LayeredKvCache::<CpuRuntime>::new_positional(2, 1, 2, 4, 64, 32, DType::BF16, &device)
+            LayeredKvCache::<CpuRuntime>::new_positional(2, 1, 2, 4, 64, 32, DType::F64, &device)
                 .unwrap();
 
         assert_eq!(cache.seq_len(), 0);
         let Err(err) = serialize_kv_cache(&cache) else {
-            panic!("an empty BF16 KV cache must still be refused");
+            panic!("an F64 KV cache must be refused, not written at another width");
         };
+        let msg = err.to_string();
+        // `DType` displays lowercase (`f64`, `bf16`), so compare case-insensitively
+        // rather than against a spelling the type does not produce.
+        let lower = msg.to_lowercase();
+        assert!(lower.contains("f64"), "error must name the dtype: {msg}");
         assert!(
-            err.to_string().to_lowercase().contains("bf16"),
-            "error must name the dtype: {err}"
+            lower.contains("f32") && lower.contains("f16") && lower.contains("bf16"),
+            "error must list what the format does carry: {msg}"
+        );
+    }
+
+    /// A buffer shorter than the 12-byte prefix errors in the header, naming the length.
+    #[test]
+    fn test_deserialize_rejects_truncated_header() {
+        let device = cpu_device();
+        let bytes = [0u8; 7];
+
+        let Err(err) = deserialize_kv_cache::<CpuRuntime>(&bytes, &device) else {
+            panic!("a 7-byte buffer must be refused");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("truncated in the header"),
+            "expected a header truncation error, got: {msg}"
+        );
+        assert!(
+            msg.contains("need 12 bytes, got 7"),
+            "error must name both lengths: {msg}"
+        );
+    }
+
+    /// A paged buffer must be refused by the flat reader on its magic, not thirty lines
+    /// later on a dimension field.
+    #[test]
+    fn test_deserialize_rejects_paged_magic() {
+        let device = cpu_device();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&PAGED_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&WIRE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&(DType::F32 as u32).to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // num_layers
+        bytes.extend_from_slice(&16u32.to_le_bytes()); // block_size
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // seq_len
+
+        let Err(err) = deserialize_kv_cache::<CpuRuntime>(&bytes, &device) else {
+            panic!("a paged KV cache buffer must be refused by the flat reader");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("magic 0xB0057B02") && msg.contains("expected 0xB0057B01"),
+            "error must name both magics: {msg}"
+        );
+        assert!(
+            msg.contains("that is the paged KV cache magic"),
+            "error must name the sibling format: {msg}"
+        );
+    }
+
+    /// A buffer in the pre-header format starts at `num_layers`, which can never match a
+    /// magic, so it lands as a magic error rather than as garbage dimensions.
+    #[test]
+    fn test_deserialize_rejects_pre_header_buffer() {
+        let device = cpu_device();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&2u32.to_le_bytes()); // old num_layers
+        bytes.extend_from_slice(&3u32.to_le_bytes()); // old seq_len
+        for _ in 0..2 {
+            bytes.extend_from_slice(&1u32.to_le_bytes()); // batch_size
+            bytes.extend_from_slice(&2u32.to_le_bytes()); // num_kv_heads
+            bytes.extend_from_slice(&4u32.to_le_bytes()); // head_dim
+        }
+
+        let Err(err) = deserialize_kv_cache::<CpuRuntime>(&bytes, &device) else {
+            panic!("a pre-header buffer must be refused");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("magic 0x00000002") && msg.contains("expected 0xB0057B01"),
+            "error must name the magic it read: {msg}"
+        );
+    }
+
+    /// An unknown wire version errors, naming the version it got.
+    #[test]
+    fn test_deserialize_rejects_unknown_version() {
+        let device = cpu_device();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&FLAT_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&(DType::F32 as u32).to_le_bytes());
+
+        let Err(err) = deserialize_kv_cache::<CpuRuntime>(&bytes, &device) else {
+            panic!("an unknown wire version must be refused");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wire version 2") && msg.contains("version 1 only"),
+            "error must name the version it got and the one it reads: {msg}"
+        );
+    }
+
+    /// An unknown dtype tag errors, naming the tag.
+    #[test]
+    fn test_deserialize_rejects_unknown_dtype_tag() {
+        let device = cpu_device();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&FLAT_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&WIRE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&23u32.to_le_bytes()); // DType::U8, not carried
+
+        let Err(err) = deserialize_kv_cache::<CpuRuntime>(&bytes, &device) else {
+            panic!("an unknown dtype tag must be refused");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown dtype tag 23"),
+            "error must name the tag: {msg}"
+        );
+        assert!(
+            msg.contains("bf16 (tag 3)"),
+            "error must name the tags it does carry: {msg}"
         );
     }
 
@@ -472,7 +645,7 @@ mod tests {
     #[test]
     fn test_deserialize_rejects_dimension_overflow() {
         let device = cpu_device();
-        let mut bytes = Vec::new();
+        let mut bytes = flat_header(DType::F32);
         bytes.extend_from_slice(&1u32.to_le_bytes()); // num_layers
         bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // seq_len
         bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // batch_size

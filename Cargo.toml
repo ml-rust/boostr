@@ -84,7 +84,11 @@ nccl = ["numr/nccl"]
 wgpu = ["numr/wgpu", "dep:wgpu", "dep:bytemuck"]
 
 # Distributed inference
-distributed = ["dep:nexar", "dep:anyhow", "dep:bytemuck"]
+#
+# Pulls in `f16` because the disaggregated KV cache wire format carries bf16 — the
+# training dtype — and reconstructing a bf16 cache goes through numr's f16-gated
+# kernels. Without it a bf16 transfer would fail at run time inside a server.
+distributed = ["dep:nexar", "dep:anyhow", "dep:bytemuck", "f16"]
 
 # Precision features
 f16 = ["numr/f16"]

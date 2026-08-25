@@ -178,25 +178,9 @@ impl<R: Runtime> Lstm<R> {
             // Sum the two gate contributions.
             let gates = client.add(&xh_t, &hh).map_err(Error::Numr)?;
 
-            // Split into 4 gate pre-activations along the last dim.
-            let i_pre = gates.narrow(1, 0, h_sz).map_err(Error::Numr)?;
-            let f_pre = gates.narrow(1, h_sz, h_sz).map_err(Error::Numr)?;
-            let g_pre = gates.narrow(1, 2 * h_sz, h_sz).map_err(Error::Numr)?;
-            let o_pre = gates.narrow(1, 3 * h_sz, h_sz).map_err(Error::Numr)?;
-
-            let i_gate = client.sigmoid(&i_pre).map_err(Error::Numr)?;
-            let f_gate = client.sigmoid(&f_pre).map_err(Error::Numr)?;
-            let g_gate = client.tanh(&g_pre).map_err(Error::Numr)?;
-            let o_gate = client.sigmoid(&o_pre).map_err(Error::Numr)?;
-
-            // c' = f*c + i*g
-            let fc = client.mul(&f_gate, &c).map_err(Error::Numr)?;
-            let ig = client.mul(&i_gate, &g_gate).map_err(Error::Numr)?;
-            c = client.add(&fc, &ig).map_err(Error::Numr)?;
-
-            // h' = o * tanh(c')
-            let c_tanh = client.tanh(&c).map_err(Error::Numr)?;
-            h = client.mul(&o_gate, &c_tanh).map_err(Error::Numr)?;
+            let (h_next, c_next) = self.cell(client, &gates, &c)?;
+            h = h_next;
+            c = c_next;
 
             outputs[idx] = h.clone();
         }
@@ -206,6 +190,98 @@ impl<R: Runtime> Lstm<R> {
         let output_refs: Vec<&Tensor<R>> = outputs.iter().collect();
         let stacked = client.stack(&output_refs, 1).map_err(Error::Numr)?;
         Ok((stacked, h, c))
+    }
+
+    /// Gate activations and the cell update, shared by [`Lstm::forward`] and
+    /// [`Lstm::step`].
+    ///
+    /// * `gates` — `[B, 4*hidden]` pre-activations in PyTorch order
+    ///   `[i, f, g, o]`, already summing the input and recurrent contributions.
+    /// * `c` — `[B, hidden]` cell state entering this timestep.
+    ///
+    /// Returns `(h_next, c_next)`, both `[B, hidden]`.
+    fn cell<C>(
+        &self,
+        client: &C,
+        gates: &Tensor<R>,
+        c: &Tensor<R>,
+    ) -> Result<(Tensor<R>, Tensor<R>)>
+    where
+        C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ActivationOps<R>,
+    {
+        let h_sz = self.hidden_size;
+
+        // Split into 4 gate pre-activations along the last dim.
+        let i_pre = gates.narrow(1, 0, h_sz).map_err(Error::Numr)?;
+        let f_pre = gates.narrow(1, h_sz, h_sz).map_err(Error::Numr)?;
+        let g_pre = gates.narrow(1, 2 * h_sz, h_sz).map_err(Error::Numr)?;
+        let o_pre = gates.narrow(1, 3 * h_sz, h_sz).map_err(Error::Numr)?;
+
+        let i_gate = client.sigmoid(&i_pre).map_err(Error::Numr)?;
+        let f_gate = client.sigmoid(&f_pre).map_err(Error::Numr)?;
+        let g_gate = client.tanh(&g_pre).map_err(Error::Numr)?;
+        let o_gate = client.sigmoid(&o_pre).map_err(Error::Numr)?;
+
+        // c' = f*c + i*g
+        let fc = client.mul(&f_gate, c).map_err(Error::Numr)?;
+        let ig = client.mul(&i_gate, &g_gate).map_err(Error::Numr)?;
+        let c_next = client.add(&fc, &ig).map_err(Error::Numr)?;
+
+        // h' = o * tanh(c')
+        let c_tanh = client.tanh(&c_next).map_err(Error::Numr)?;
+        let h_next = client.mul(&o_gate, &c_tanh).map_err(Error::Numr)?;
+
+        Ok((h_next, c_next))
+    }
+
+    /// One timestep from an explicit `(h, c)`, for streaming callers that carry
+    /// the state across calls instead of running a whole sequence at once.
+    ///
+    /// * `x` — `[B, input_size]`.
+    /// * `h`, `c` — `[B, hidden_size]` each.
+    ///
+    /// Returns `(h_next, c_next)`, both `[B, hidden_size]`.
+    pub fn step<C>(
+        &self,
+        client: &C,
+        x: &Tensor<R>,
+        h: &Tensor<R>,
+        c: &Tensor<R>,
+    ) -> Result<(Tensor<R>, Tensor<R>)>
+    where
+        C: RuntimeClient<R> + MatmulOps<R> + BinaryOps<R> + UnaryOps<R> + ActivationOps<R>,
+    {
+        let h_sz = self.hidden_size;
+        if x.shape().len() != 2 || x.shape()[1] != self.input_size {
+            return Err(Error::InvalidArgument {
+                arg: "x",
+                reason: format!("expected [B, {}], got {:?}", self.input_size, x.shape()),
+            });
+        }
+        let batch = x.shape()[0];
+        if h.shape() != [batch, h_sz] {
+            return Err(Error::InvalidArgument {
+                arg: "h",
+                reason: format!("expected [{batch}, {h_sz}], got {:?}", h.shape()),
+            });
+        }
+        if c.shape() != [batch, h_sz] {
+            return Err(Error::InvalidArgument {
+                arg: "c",
+                reason: format!("expected [{batch}, {h_sz}], got {:?}", c.shape()),
+            });
+        }
+
+        let w_ih_t = self.weight_ih.transpose(0, 1).map_err(Error::Numr)?;
+        let w_hh_t = self.weight_hh.transpose(0, 1).map_err(Error::Numr)?;
+        let xh = client
+            .matmul_bias(x, &w_ih_t, &self.bias_ih)
+            .map_err(Error::Numr)?;
+        let hh = client
+            .matmul_bias(h, &w_hh_t, &self.bias_hh)
+            .map_err(Error::Numr)?;
+        let gates = client.add(&xh, &hh).map_err(Error::Numr)?;
+        self.cell(client, &gates, c)
     }
 }
 

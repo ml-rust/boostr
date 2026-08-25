@@ -9,6 +9,7 @@ pub mod reflection_pad;
 pub mod resample;
 pub mod stft;
 pub mod tts_bundle;
+pub mod vad;
 pub mod wav_decode;
 pub mod wav_encode;
 pub(crate) mod wav_format;
@@ -30,6 +31,7 @@ pub use resample::{
 };
 pub use stft::{StftOptions, stft};
 pub use tts_bundle::{SynthesizeOptions, TtsBundle, TtsError, Voice, default_kokoro_voices};
+pub use vad::{SileroVad, SileroVadWeights, VadConfig, VadState};
 pub use wav_decode::{WavData, decode_wav, to_mono};
 pub use wav_encode::{encode_pcm16_raw, encode_wav_f32, encode_wav_pcm16};
 pub use whisper::WhisperEncoder;

@@ -1,7 +1,8 @@
-//! The iSTFT vocoder tail on CUDA, checked against CPU at the sizes that matter.
+//! The iSTFT vocoder tail on GPU, checked against CPU at the sizes that matter.
 //!
 //! Run with:
-//!   `cd boostr && cargo test --release --features cuda --test istft_cuda_parity`
+//!   `cd boostr && cargo test --release --features cuda --test istft_backend_parity`
+//!   `cd boostr && cargo test --release --features wgpu --test istft_backend_parity`
 //!
 //! Why this test exists: `istft` was `CpuRuntime`-only, on the grounds that numr
 //! exposed no `scatter_add` for the overlap-add and no non-power-of-two `irfft`.
@@ -16,12 +17,11 @@
 //! and it is not a power of two, so it exercises the Bluestein path rather than
 //! the Stockham one.
 
-#![cfg(feature = "cuda")]
+#![cfg(any(feature = "cuda", feature = "wgpu"))]
 
 use boostr::model::audio::kokoro::{IStftOptions, IStftPadding, hann_window, istft};
 use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
-use numr::runtime::cuda::{CudaDevice, CudaRuntime};
 use numr::tensor::Tensor;
 
 /// Deterministic pseudo-random spectrogram: a fixed LCG rather than a constant,
@@ -61,28 +61,85 @@ fn run_case(n_fft: usize, hop: usize, t_frames: usize, batch: usize, padding: IS
     let cpu_shape = cpu_out.shape().to_vec();
     let cpu_samples: Vec<f32> = cpu_out.to_vec();
 
-    let cuda_device = CudaDevice::new(0);
-    let cuda_client = CudaRuntime::default_client(&cuda_device);
-    let cuda_mag = Tensor::<CudaRuntime>::from_slice(&mag_data, &shape, &cuda_device).unwrap();
-    let cuda_phase = Tensor::<CudaRuntime>::from_slice(&phase_data, &shape, &cuda_device).unwrap();
-    let cuda_window = hann_window::<CudaRuntime>(n_fft, &cuda_device).unwrap();
-    let cuda_out = istft(&cuda_client, &cuda_mag, &cuda_phase, &cuda_window, opts)
-        .expect("cuda istft must succeed");
-
-    assert_eq!(
-        cuda_out.shape(),
-        cpu_shape.as_slice(),
-        "n_fft={n_fft} shape mismatch"
+    // A tolerance check passes trivially if both sides are silent. The signal
+    // must actually be there before any comparison means anything.
+    let peak = cpu_samples.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+    assert!(
+        peak > 1e-3,
+        "n_fft={n_fft}: CPU output is silent, test is inert"
     );
-    let cuda_samples: Vec<f32> = cuda_out.to_vec();
 
     // Scale the tolerance to the signal: the waveform amplitude here is O(1),
     // but the un-normalized overlap-add sums n_fft/hop frames of an inverse
     // transform of n_fft terms, so absolute error grows with n_fft.
     let tol = 1e-5 * (n_fft as f32).sqrt();
+
+    #[cfg(feature = "cuda")]
+    {
+        use numr::runtime::cuda::{CudaDevice, CudaRuntime};
+        let device = CudaDevice::new(0);
+        let client = CudaRuntime::default_client(&device);
+        let mag = Tensor::<CudaRuntime>::from_slice(&mag_data, &shape, &device).unwrap();
+        let phase = Tensor::<CudaRuntime>::from_slice(&phase_data, &shape, &device).unwrap();
+        let window = hann_window::<CudaRuntime>(n_fft, &device).unwrap();
+        let out = istft(&client, &mag, &phase, &window, opts).expect("cuda istft must succeed");
+        assert_eq!(
+            out.shape(),
+            cpu_shape.as_slice(),
+            "cuda n_fft={n_fft} shape"
+        );
+        compare(
+            "cuda",
+            n_fft,
+            hop,
+            padding,
+            &cpu_samples,
+            &out.to_vec(),
+            tol,
+        );
+    }
+
+    #[cfg(feature = "wgpu")]
+    {
+        use numr::runtime::wgpu::{WgpuDevice, WgpuRuntime};
+        let device = WgpuDevice::new(0);
+        let client = WgpuRuntime::default_client(&device);
+        let mag = Tensor::<WgpuRuntime>::from_slice(&mag_data, &shape, &device).unwrap();
+        let phase = Tensor::<WgpuRuntime>::from_slice(&phase_data, &shape, &device).unwrap();
+        let window = hann_window::<WgpuRuntime>(n_fft, &device).unwrap();
+        let out = istft(&client, &mag, &phase, &window, opts).expect("wgpu istft must succeed");
+        assert_eq!(
+            out.shape(),
+            cpu_shape.as_slice(),
+            "wgpu n_fft={n_fft} shape"
+        );
+        compare(
+            "wgpu",
+            n_fft,
+            hop,
+            padding,
+            &cpu_samples,
+            &out.to_vec(),
+            tol,
+        );
+    }
+}
+
+/// Compare one backend's waveform against the CPU reference, reporting the
+/// worst sample rather than the first — the first divergence is usually a
+/// boundary artefact and says less than the largest one.
+fn compare(
+    backend: &str,
+    n_fft: usize,
+    hop: usize,
+    padding: IStftPadding,
+    cpu: &[f32],
+    gpu: &[f32],
+    tol: f32,
+) {
     let mut worst = 0.0f32;
     let mut worst_at = 0usize;
-    for (i, (c, g)) in cpu_samples.iter().zip(cuda_samples.iter()).enumerate() {
+    for (i, (c, g)) in cpu.iter().zip(gpu.iter()).enumerate() {
         let d = (c - g).abs();
         if d > worst {
             worst = d;
@@ -91,18 +148,10 @@ fn run_case(n_fft: usize, hop: usize, t_frames: usize, batch: usize, padding: IS
     }
     assert!(
         worst < tol,
-        "n_fft={n_fft} hop={hop} pad={padding:?}: worst |cpu-cuda| = {worst} at sample \
-         {worst_at} (cpu {}, cuda {}), tol {tol}",
-        cpu_samples[worst_at],
-        cuda_samples[worst_at]
-    );
-
-    // A tolerance check passes trivially if both sides are silent. The signal
-    // must actually be there.
-    let peak = cpu_samples.iter().fold(0.0f32, |a, b| a.max(b.abs()));
-    assert!(
-        peak > 1e-3,
-        "n_fft={n_fft}: CPU output is silent, test is inert"
+        "{backend} n_fft={n_fft} hop={hop} pad={padding:?}: worst |cpu-{backend}| = {worst} \
+         at sample {worst_at} (cpu {}, {backend} {}), tol {tol}",
+        cpu[worst_at],
+        gpu[worst_at]
     );
 }
 

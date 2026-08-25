@@ -192,3 +192,41 @@ fn pack_of_no_utterances_is_empty() {
     let packed = pack_utterances(&vocab, &[], &CorpusOptions::default()).expect("pack");
     assert!(packed.is_empty());
 }
+
+/// Knowing a name and being able to LOAD it are different things: splintr gates
+/// each vocabulary's data behind a cargo feature. `llama3` is documented and
+/// resolves to a `PretrainedVocab`, then fails unless its vocabulary is
+/// bundled — which is exactly what boostr's `vocab-llama3` feature does, so
+/// this only holds in a build without it.
+#[cfg(not(feature = "vocab-llama3"))]
+#[test]
+fn a_documented_but_unbundled_name_fails_with_a_feature_error() {
+    let Err(err) = TextTokenizer::Pretrained("llama3").resolve() else {
+        panic!("llama3 is not bundled by this build and must not resolve");
+    };
+    let msg = err.to_string();
+    // splintr's own error names the cargo feature that would fix it.
+    assert!(
+        msg.contains("vocab-llama3") || msg.contains("llama3"),
+        "the error must name the vocabulary or its feature: {msg}"
+    );
+}
+
+/// The unknown-name error must not imply every documented name is loadable —
+/// a documented name still needs its vocabulary bundled. It must say so and
+/// steer at the path that always works.
+#[test]
+fn the_unknown_name_error_explains_the_feature_gate() {
+    let Err(err) = TextTokenizer::Pretrained("nope").resolve() else {
+        panic!("an unknown name must not resolve");
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("vocab-"),
+        "must point at the feature that bundles a vocabulary: {msg}"
+    );
+    assert!(
+        msg.contains("tokenizer.json"),
+        "must steer at the path that always works: {msg}"
+    );
+}

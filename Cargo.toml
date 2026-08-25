@@ -55,7 +55,7 @@ symphonia = { version = "0.5", default-features = false, features = [
   "wav",
 ] }
 memmap2 = "0.9"
-splintr = { version = "0.19", features = ["vocab-cl100k", "vocab-whisper"] }
+splintr = { version = "0.19", features = ["vocab-whisper"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # Optional: TTS grapheme-to-phoneme via espeak-ng (system dep: espeak-ng-dev)
@@ -63,6 +63,10 @@ espeakng = { version = "0.2", optional = true }
 
 [dev-dependencies]
 bytemuck = { version = "1.25", features = ["derive"] }
+# Tests tokenize with cl100k_base. Declaring it here rather than on the main
+# dependency keeps the ~3 MB payload out of every downstream build: dev-dependency
+# features unify only when building boostr's own tests.
+splintr = { version = "0.19", features = ["vocab-cl100k"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 rustls = "0.23"
@@ -85,6 +89,37 @@ distributed = ["dep:nexar", "dep:anyhow", "dep:bytemuck"]
 # Precision features
 f16 = ["numr/f16"]
 fp8 = ["numr/fp8"]
+
+# Bundled tokenizer vocabularies, one feature per splintr family, forwarded
+# verbatim so a consumer never needs a direct splintr dependency just to reach
+# a feature flag.
+#
+# None are on by default: splintr gates the vocabulary DATA behind these, and a
+# family costs 2.6-6.4 MB (all of them, ~42 MB). A consumer loading a
+# checkpoint's own `tokenizer.json` should pay for none of it.
+#
+# `vocab-whisper` is NOT here — it is a hard dependency of
+# `WhisperBundle::from_dir`, which loads the bundled multilingual Whisper
+# vocabulary rather than the checkpoint's `tokenizer.json`, so it stays enabled
+# unconditionally on the splintr dependency itself.
+vocab-cl100k = ["splintr/vocab-cl100k"]
+vocab-o200k = ["splintr/vocab-o200k"]
+vocab-gpt-oss = ["splintr/vocab-gpt-oss"]
+vocab-phi4 = ["splintr/vocab-phi4"]
+vocab-olmo2 = ["splintr/vocab-olmo2"]
+vocab-llama3 = ["splintr/vocab-llama3"]
+vocab-llama2 = ["splintr/vocab-llama2"]
+vocab-deepseek = ["splintr/vocab-deepseek"]
+vocab-qwen = ["splintr/vocab-qwen"]
+vocab-glm = ["splintr/vocab-glm"]
+vocab-gemma2 = ["splintr/vocab-gemma2"]
+vocab-gemma3 = ["splintr/vocab-gemma3"]
+vocab-gemma4 = ["splintr/vocab-gemma4"]
+vocab-kimi = ["splintr/vocab-kimi"]
+vocab-mistral = ["splintr/vocab-mistral"]
+vocab-modernbert = ["splintr/vocab-modernbert"]
+# Every bundled vocabulary at once.
+vocabs = ["splintr/vocabs"]
 
 [package.metadata.docs.rs]
 no-default-features = true

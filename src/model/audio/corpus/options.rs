@@ -15,10 +15,21 @@ use crate::model::audio::vad::VadSegmentOptions;
 /// that actually applies.
 pub const MAX_UTTERANCE_SECS: f32 = 30.0;
 
-/// The pretrained vocabulary names an error lists back when a name does not
-/// resolve. Splintr accepts more names than these (see
-/// [`PretrainedVocab::from_name`]); these are the four this crate documents,
-/// and the ones a speech-LM base model is normally trained against.
+/// Pretrained vocabulary names this crate documents. Splintr knows more (see
+/// [`PretrainedVocab::from_name`]).
+///
+/// **Knowing a name is not the same as being able to load it.** Splintr gates
+/// each vocabulary's data behind a cargo feature and bundles none by default,
+/// because a family costs 2.6-6.4 MB. boostr forwards one feature per family,
+/// so `boostr = { features = ["vocab-llama3"] }` makes `"llama3"` loadable
+/// without a direct splintr dependency. Without it, the name still resolves to
+/// a [`PretrainedVocab`] and then fails with splintr's `VocabNotBundled`,
+/// which names the feature.
+///
+/// Whisper's own vocabulary is always bundled: [`WhisperBundle::from_dir`]
+/// loads it for multilingual checkpoints instead of their `tokenizer.json`.
+///
+/// [`WhisperBundle::from_dir`]: crate::model::audio::WhisperBundle::from_dir
 pub const PRETRAINED_TOKENIZER_NAMES: [&str; 4] =
     ["cl100k_base", "o200k_base", "llama3", "deepseek_v3"];
 
@@ -31,12 +42,9 @@ pub const PRETRAINED_TOKENIZER_NAMES: [&str; 4] =
 /// learned row.
 #[derive(Debug, Clone, Copy)]
 pub enum TextTokenizer<'a> {
-    /// A splintr built-in, by name — `"cl100k_base"`, `"o200k_base"`,
-    /// `"llama3"`, `"deepseek_v3"`.
-    ///
-    /// A name splintr knows but whose vocabulary this build did not bundle
-    /// fails with splintr's own `VocabNotBundled`, which names the cargo
-    /// feature to enable.
+    /// A splintr built-in, by name. The name must ALSO have its vocabulary
+    /// bundled — enable boostr's matching `vocab-*` feature — or loading fails
+    /// with splintr's `VocabNotBundled`, which names that feature.
     Pretrained(&'a str),
     /// A `tokenizer.json` on disk, in the HuggingFace `tokenizers` layout.
     JsonFile(&'a Path),
@@ -51,7 +59,10 @@ impl TextTokenizer<'_> {
                     PretrainedVocab::from_name(name).ok_or_else(|| Error::InvalidArgument {
                         arg: "tokenizer",
                         reason: format!(
-                            "unknown pretrained tokenizer name {name:?}; accepted names are {}",
+                            "unknown pretrained tokenizer name {name:?}; this crate documents \
+                             {}. A documented name also needs its vocabulary bundled — enable \
+                             boostr's matching `vocab-*` feature — or pass a `tokenizer.json` \
+                             path, which always works and carries a checkpoint's added tokens.",
                             PRETRAINED_TOKENIZER_NAMES.join(", ")
                         ),
                     })?;

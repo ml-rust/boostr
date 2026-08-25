@@ -1,7 +1,7 @@
 //! Flash Attention v2 FP8 backward pass: dQ, dK, dV with per-tensor scales.
 
 use crate::error::{Error, Result};
-use crate::ops::cuda::kernels::{self, FLASH_V2_BWD_MODULE};
+use crate::ops::cuda::kernels::{self, FLASH_V2_BWD_FP8_MODULE};
 use crate::ops::impl_generic::attention::sum_gqa_grads;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
@@ -126,7 +126,8 @@ pub(super) fn flash_attention_bwd_fp8_impl(
         device,
     )?;
 
-    let module = kernels::get_or_load_module(client.context(), device_index, FLASH_V2_BWD_MODULE)?;
+    let module =
+        kernels::get_or_load_module(client.context(), device_index, FLASH_V2_BWD_FP8_MODULE)?;
 
     // Step 1: FP8 Preprocessing — extra scale args
     {

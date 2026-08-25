@@ -1254,6 +1254,26 @@ fn assert_key_row_nonzero(grad: &[f32], h: usize, sk: usize, d: usize, key: usiz
     }
 }
 
+/// Classify an FP8 flash-attention error: an ABSENT kernel is a legitimate skip
+/// on hardware below sm_80, anything else is a real failure.
+///
+/// This used to be a bare `.ok()?`, which turned every error into a silent skip.
+/// That masked a build defect for the entire life of these kernels: the FP8
+/// blocks were guarded by `#if __CUDA_ARCH__ >= 800` while `build.rs` compiled
+/// them at `sm_75`, so the symbols existed in no binary and these tests reported
+/// "unavailable on this GPU" on every GPU. Never widen this back to `.ok()`.
+#[cfg(feature = "cuda")]
+fn skip_or_fail<T>(label: &str, phase: &str, err: &boostr::error::Error) -> Option<T> {
+    let msg = err.to_string();
+    let absent = msg.contains("CUDA_ERROR_NOT_FOUND") || msg.contains("named symbol not found");
+    assert!(
+        absent,
+        "{label}: FP8 {phase} failed for a reason other than the kernel being absent: {err}"
+    );
+    eprintln!("{label}: FP8 {phase} kernel absent ({err}); skipping");
+    None
+}
+
 /// FP8 GQA backward: the CUDA FP8 backward kernel takes no `num_kv_heads` — it
 /// indexes K, V, dK and dV with `num_heads`. The launcher repeats the KV heads up
 /// to `num_heads`, runs the kernel over the expanded layout, and reduces each
@@ -1306,17 +1326,19 @@ fn assert_flash_bwd_fp8_kv_parity(num_heads: usize, num_kv_heads: usize, label: 
             let v_c = to_fp8(v_data, &[b, kv_heads, s, d]);
             let dout_c = to_fp8(&dout, &[b, heads, s, d]);
 
-            let (out_c, lse_c) = cuda_client
-                .flash_attention_fwd_fp8(
-                    &q_c, &k_c, &v_c, heads, kv_heads, d, false, 1.0, 1.0, 1.0, 1.0,
-                )
-                .ok()?;
-            let (dq_c, dk_c, dv_c) = cuda_client
-                .flash_attention_bwd_fp8(
-                    &dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, heads, kv_heads, d, false, 1.0, 1.0,
-                    1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-                )
-                .ok()?;
+            let (out_c, lse_c) = match cuda_client.flash_attention_fwd_fp8(
+                &q_c, &k_c, &v_c, heads, kv_heads, d, false, 1.0, 1.0, 1.0, 1.0,
+            ) {
+                Ok(v) => v,
+                Err(e) => return skip_or_fail(label, "forward", &e),
+            };
+            let (dq_c, dk_c, dv_c) = match cuda_client.flash_attention_bwd_fp8(
+                &dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, heads, kv_heads, d, false, 1.0, 1.0,
+                1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            ) {
+                Ok(v) => v,
+                Err(e) => return skip_or_fail(label, "backward", &e),
+            };
 
             assert_eq!(
                 dk_c.shape(),
@@ -1380,20 +1402,31 @@ fn assert_flash_bwd_fp8_kv_parity(num_heads: usize, num_kv_heads: usize, label: 
             }
             out
         };
-        // One E4M3 rounding step is ~6.25% relative; atol covers the subnormal floor.
+        // rtol 0.1: one E4M3 rounding step is ~6.25% relative.
+        //
+        // atol 2^-6 (0.015625) is E4M3's smallest NORMAL magnitude, and is
+        // derived, not tuned. Below it the format has only subnormals spaced
+        // 2^-9 apart, so a gradient whose true value sits near zero can land on
+        // either side: the in-kernel group sum rounds to 0 while the host-side
+        // reference sum rounds to 2^-7, a disagreement of 4 subnormal steps on
+        // a value that is numerically zero. The previous 5e-3 did not reach the
+        // floor it claimed to cover, so this fired on exactly one index per
+        // GQA/MQA run. `no_gqa`, which performs no group sum, passes untouched
+        // at any tolerance — which is what shows the reduction itself is right.
+        // rtol still governs every value of consequence.
         assert_parity_f32_tol(
             &dk_gqa,
             &group_sum(&dk_full),
             &format!("{} dK FP8 group sum", label),
             0.1,
-            5e-3,
+            0.015625,
         );
         assert_parity_f32_tol(
             &dv_gqa,
             &group_sum(&dv_full),
             &format!("{} dV FP8 group sum", label),
             0.1,
-            5e-3,
+            0.015625,
         );
     });
 }

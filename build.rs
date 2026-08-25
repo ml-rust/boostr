@@ -106,6 +106,24 @@ fn compile_cuda_kernels() {
             "sm_75",
             true
         ),
+        // sm_80, not sm_75: the FP8 kernels are guarded by
+        // `#if __CUDA_ARCH__ >= 800`, so compiling them at sm_75 silently drops
+        // every FP8 symbol while the launchers still accept `DType::F8E4M3` —
+        // a runtime kernel-lookup failure. They live in their own translation
+        // units because flash_v2.cu / flash_v2_bwd.cu also hold the general
+        // flash kernels, which legitimately target Turing (sm_75).
+        k!(
+            "src/ops/cuda/kernels/attention",
+            "flash_v2_fp8.cu",
+            "sm_80",
+            true
+        ),
+        k!(
+            "src/ops/cuda/kernels/attention",
+            "flash_v2_bwd_fp8.cu",
+            "sm_80",
+            true
+        ),
         k!(
             "src/ops/cuda/kernels/attention",
             "paged_attention.cu",

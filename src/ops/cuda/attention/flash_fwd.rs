@@ -1,7 +1,7 @@
 //! Flash Attention v2 forward pass implementations (F32/F16/BF16 and FP8).
 
 use crate::error::{Error, Result};
-use crate::ops::cuda::kernels::{self, FLASH_V2_MODULE};
+use crate::ops::cuda::kernels::{self, FLASH_V2_FP8_MODULE, FLASH_V2_MODULE};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
@@ -151,7 +151,7 @@ pub(super) fn flash_attention_fwd_fp8_impl(
     let smem_size = p.block_m * head_stride + 2 * p.block_n * head_stride;
 
     let device_index = device.id();
-    let module = kernels::get_or_load_module(client.context(), device_index, FLASH_V2_MODULE)?;
+    let module = kernels::get_or_load_module(client.context(), device_index, FLASH_V2_FP8_MODULE)?;
     let func = kernels::get_kernel_function(&module, &kernel_name)?;
     set_smem_attribute(&func, smem_size)?;
 

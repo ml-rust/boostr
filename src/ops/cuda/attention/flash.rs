@@ -16,6 +16,7 @@ use super::flash_decode;
 use super::flash_fwd;
 use super::flash_utils::validate_qkv;
 use super::flash_v3;
+use super::mqa_gqa;
 
 pub use super::flash_decode::decode_attention_graph_fwd;
 pub(crate) use super::flash_utils::set_smem_attribute;
@@ -85,6 +86,20 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             )?
         {
             return Ok(result);
+        }
+
+        // Dedicated MQA/GQA kernels, for the shapes their heuristic targets.
+        //
+        // Gated on three things the kernels actually support, not just the
+        // heuristic: `window_size == 0` because they have no sliding-window
+        // path, and F32/F16/BF16 because those are the only dtype variants
+        // instantiated. Anything else falls through to the general kernel
+        // below, which is what ran for every shape before this was wired up.
+        if window_size == 0
+            && matches!(q.dtype(), DType::F32 | DType::F16 | DType::BF16)
+            && mqa_gqa::should_use_mqa_gqa(num_heads, num_kv_heads, head_dim)
+        {
+            return mqa_gqa::mqa_gqa_fwd(self, q, k, v, num_heads, num_kv_heads, head_dim, causal);
         }
 
         flash_fwd::flash_attention_fwd_impl(self, q, k, v, &p, causal, window_size)
@@ -163,6 +178,28 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             )?
         {
             return Ok(result);
+        }
+
+        // Same gate as the forward. Both halves must agree: routing the forward
+        // to the MQA/GQA kernel and the backward to the general one would pair
+        // kernels that were never parity-tested together.
+        if window_size == 0
+            && matches!(q.dtype(), DType::F32 | DType::F16 | DType::BF16)
+            && mqa_gqa::should_use_mqa_gqa(num_heads, num_kv_heads, head_dim)
+        {
+            return mqa_gqa::mqa_gqa_bwd(
+                self,
+                dout,
+                q,
+                k,
+                v,
+                output,
+                lse,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                causal,
+            );
         }
 
         flash_bwd::flash_attention_bwd_impl(

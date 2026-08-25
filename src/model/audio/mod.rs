@@ -1,5 +1,6 @@
 pub mod corpus;
 pub mod decode;
+pub mod eval;
 pub mod g2p;
 pub mod kokoro;
 pub mod mel;
@@ -26,6 +27,7 @@ pub use corpus::{
     pack_utterances_with_layout,
 };
 pub use decode::{decode_audio, decode_audio_file_mono_at, decode_audio_mono_at, extension_hint};
+pub use eval::{ErrorRate, align, character_error_rate, normalize, total, word_error_rate};
 pub use g2p::{G2pError, Lang, Phonemizer};
 pub use mel::{
     LogSpec, MelNorm, MelOptions, MelScale, compute_mel_spectrogram, compute_mel_spectrogram_with,

@@ -6,6 +6,8 @@
 //!   config.json                    # architecture + vocab_size + hidden sizes
 //!   tokenizer.json                 # byte-level BPE vocab + merges
 //!   model.safetensors              # weights (all prefixes under `model.*`)
+//!                                  # — or, for a sharded checkpoint,
+//!                                  # model.safetensors.index.json plus its shards
 //!   generation_config.json         # optional — decoding constraints, parsed
 //!                                  # into [`WhisperGenerationConfig`]
 //!   preprocessor_config.json       # optional — mel params (num_mel_bins, etc.)
@@ -159,8 +161,17 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
 
         let generation = load_generation_config(dir, variant)?;
 
-        let weights_path = find_safetensors(dir)?;
-        let mut varmap = VarMap::<R>::from_safetensors(&weights_path, device)?;
+        // Both arms feed the same `varmap`, so the dtype cast below applies to a
+        // sharded checkpoint exactly as it does to a single-file one.
+        let mut varmap = match find_safetensors(dir)? {
+            SafetensorsLayout::Single(path) => VarMap::<R>::from_safetensors(&path, device)?,
+            // `from_safetensors_sharded` reads `model.safetensors.index.json` from the
+            // directory itself and loads every shard it names.
+            SafetensorsLayout::Sharded(index) => VarMap::<R>::from_safetensors_sharded(dir, device)
+                .map_err(|e| Error::ModelError {
+                    reason: format!("loading sharded checkpoint via {}: {e}", index.display()),
+                })?,
+        };
         if let Some((cast, target)) = cast_to {
             let names: Vec<String> = varmap.names().map(str::to_string).collect();
             for name in names {
@@ -414,25 +425,45 @@ fn detect_variant(cfg: &HfWhisperConfig) -> WhisperVariant {
     }
 }
 
-fn find_safetensors(dir: &Path) -> Result<PathBuf> {
+/// Which safetensors layout a checkpoint directory ships.
+#[derive(Debug, PartialEq, Eq)]
+enum SafetensorsLayout {
+    /// One `model.safetensors` holding every weight.
+    Single(PathBuf),
+    /// A `model.safetensors.index.json` naming the shard each weight lives in.
+    ///
+    /// Holds the index path; the loader passes the *directory* to
+    /// `VarMap::from_safetensors_sharded`, which reads the index itself.
+    Sharded(PathBuf),
+}
+
+/// Decide how to load a checkpoint directory's weights.
+///
+/// Selection only — no file is opened — so the choice is testable without real
+/// weights.
+///
+/// `model.safetensors` wins when present: `whisper-large-v3` ships a single-file
+/// copy, and that path is verified working.
+///
+/// This never falls back to an arbitrary `*.safetensors` entry. The old code took
+/// the first one `read_dir` returned, which for a sharded checkpoint is one shard
+/// out of many, in whatever order the filesystem happened to yield — the model then
+/// loaded with most of its weights missing.
+fn find_safetensors(dir: &Path) -> Result<SafetensorsLayout> {
     let single = dir.join("model.safetensors");
-    if single.exists() {
-        return Ok(single);
+    if single.is_file() {
+        return Ok(SafetensorsLayout::Single(single));
     }
-    let entries = std::fs::read_dir(dir).map_err(|e| Error::ModelError {
-        reason: format!("reading {}: {e}", dir.display()),
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|e| Error::ModelError {
-            reason: format!("reading dir entry: {e}"),
-        })?;
-        if entry.path().extension().and_then(|s| s.to_str()) == Some("safetensors") {
-            return Ok(entry.path());
-        }
+
+    let index = dir.join("model.safetensors.index.json");
+    if index.is_file() {
+        return Ok(SafetensorsLayout::Sharded(index));
     }
+
     Err(Error::ModelError {
         reason: format!(
-            "no safetensors file found in {} (expected model.safetensors)",
+            "no safetensors weights found in {}: expected either model.safetensors \
+             (single-file checkpoint) or model.safetensors.index.json (sharded checkpoint)",
             dir.display()
         ),
     })
@@ -535,5 +566,75 @@ mod tests {
             vocab_size: 51865,
         };
         assert_eq!(detect_variant(&cfg), WhisperVariant::V2Multilingual);
+    }
+
+    /// The single-file fast path must be unchanged: `whisper-large-v3` ships one
+    /// `model.safetensors` and is verified working against it.
+    #[test]
+    fn find_safetensors_picks_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let single = dir.path().join("model.safetensors");
+        std::fs::write(&single, b"").unwrap();
+
+        assert_eq!(
+            find_safetensors(dir.path()).unwrap(),
+            SafetensorsLayout::Single(single)
+        );
+    }
+
+    /// A sharded checkpoint must resolve to the index, never to one shard.
+    ///
+    /// The old code returned the first `*.safetensors` entry `read_dir` yielded,
+    /// which here is an arbitrary one of the two shards — a model loaded from it is
+    /// missing most of its weights.
+    #[test]
+    fn find_safetensors_picks_index_for_sharded_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("model.safetensors.index.json");
+        std::fs::write(&index, b"{\"weight_map\":{}}").unwrap();
+        std::fs::write(dir.path().join("model-00001-of-00002.safetensors"), b"").unwrap();
+        std::fs::write(dir.path().join("model-00002-of-00002.safetensors"), b"").unwrap();
+
+        assert_eq!(
+            find_safetensors(dir.path()).unwrap(),
+            SafetensorsLayout::Sharded(index)
+        );
+    }
+
+    /// `model.safetensors` wins over an index when a checkpoint ships both.
+    #[test]
+    fn find_safetensors_prefers_single_file_over_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let single = dir.path().join("model.safetensors");
+        std::fs::write(&single, b"").unwrap();
+        std::fs::write(
+            dir.path().join("model.safetensors.index.json"),
+            b"{\"weight_map\":{}}",
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_safetensors(dir.path()).unwrap(),
+            SafetensorsLayout::Single(single)
+        );
+    }
+
+    /// A stray shard with neither a single file nor an index is not a checkpoint,
+    /// and the error must name both files it looked for.
+    #[test]
+    fn find_safetensors_errors_naming_both_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("model-00001-of-00002.safetensors"), b"").unwrap();
+
+        let err = find_safetensors(dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("model.safetensors"),
+            "error must name model.safetensors: {msg}"
+        );
+        assert!(
+            msg.contains("model.safetensors.index.json"),
+            "error must name model.safetensors.index.json: {msg}"
+        );
     }
 }

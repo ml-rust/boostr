@@ -52,13 +52,30 @@ impl AttentionConfig {
                 reason: "num_heads must be > 0".into(),
             });
         }
-        if !hidden_size.is_multiple_of(self.num_heads) {
-            return Err(Error::ModelError {
-                reason: format!(
-                    "hidden_size ({hidden_size}) must be divisible by num_heads ({})",
-                    self.num_heads
-                ),
-            });
+        // Divisibility only matters when `head_dim` is inferred. `head_dim()`
+        // falls back to `hidden_size / num_heads`, so a non-divisible pair
+        // would silently truncate — but an EXPLICIT `head_dim` never performs
+        // that division, and rejecting it locks out legitimate configs whose
+        // head_dim is not hidden_size/num_heads (Qwen3 and Llama-3.2 both ship
+        // such shapes).
+        match self.head_dim {
+            Some(0) => {
+                return Err(Error::ModelError {
+                    reason: "head_dim must be > 0 when set explicitly".into(),
+                });
+            }
+            Some(_) => {}
+            None => {
+                if !hidden_size.is_multiple_of(self.num_heads) {
+                    return Err(Error::ModelError {
+                        reason: format!(
+                            "hidden_size ({hidden_size}) must be divisible by num_heads ({}), \
+                             or head_dim must be set explicitly",
+                            self.num_heads
+                        ),
+                    });
+                }
+            }
         }
         if let Some(kv) = self.num_kv_heads
             && !self.num_heads.is_multiple_of(kv)
@@ -117,4 +134,74 @@ pub struct RopeScalingConfig {
     pub beta_fast: Option<f32>,
     #[serde(default)]
     pub beta_slow: Option<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(num_heads: usize, head_dim: Option<usize>) -> AttentionConfig {
+        AttentionConfig {
+            num_heads,
+            num_kv_heads: None,
+            head_dim,
+            rope_theta: default_rope_theta(),
+            rope_scaling: None,
+            kv_latent_dim: None,
+            q_latent_dim: None,
+            d_rope: None,
+            sliding_window: None,
+            use_alibi: false,
+        }
+    }
+
+    /// An explicit `head_dim` means `head_dim()` never divides, so a
+    /// non-divisible `hidden_size` is legitimate. Rejecting it locked out real
+    /// checkpoints whose head_dim is not `hidden_size / num_heads`.
+    #[test]
+    fn explicit_head_dim_allows_non_divisible_hidden_size() {
+        let c = cfg(3, Some(4));
+        assert!(c.validate(10).is_ok(), "explicit head_dim must be accepted");
+        // And the accessor returns the explicit value, never the division.
+        assert_eq!(c.head_dim(10), 4);
+    }
+
+    /// Without an explicit `head_dim` the division IS used, so a non-divisible
+    /// pair would silently truncate (10 / 3 == 3, losing a dimension). That
+    /// must still be refused, and the message must point at the way out.
+    #[test]
+    fn inferred_head_dim_still_requires_divisibility() {
+        let c = cfg(3, None);
+        let Err(err) = c.validate(10) else {
+            panic!("a non-divisible hidden_size with inferred head_dim must be refused");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("10"), "{msg}");
+        assert!(msg.contains("head_dim must be set explicitly"), "{msg}");
+
+        // The divisible case is unaffected.
+        assert!(cfg(4, None).validate(12).is_ok());
+        assert_eq!(cfg(4, None).head_dim(12), 3);
+    }
+
+    /// `head_dim: Some(0)` would make every head zero-width. The old code let
+    /// it through whenever `hidden_size` happened to divide evenly.
+    #[test]
+    fn explicit_zero_head_dim_is_refused() {
+        let Err(err) = cfg(4, Some(0)).validate(12) else {
+            panic!("head_dim of 0 must be refused");
+        };
+        assert!(err.to_string().contains("head_dim must be > 0"), "{err}");
+    }
+
+    /// The num_heads/num_kv_heads rule is independent of head_dim and must
+    /// still fire on either path.
+    #[test]
+    fn kv_head_divisibility_is_unchanged() {
+        let mut c = cfg(4, Some(8));
+        c.num_kv_heads = Some(3);
+        assert!(c.validate(10).is_err(), "4 heads is not divisible by 3 kv");
+        c.num_kv_heads = Some(2);
+        assert!(c.validate(10).is_ok());
+    }
 }

@@ -38,8 +38,11 @@ fn test_init_kaiming() {
     // Std should be close to sqrt(2/128) ≈ 0.125
     let var: f32 = data.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / data.len() as f32;
     let std = var.sqrt();
-    // fan_in = product of all dims except last = 64
-    let expected_std = (2.0f32 / 64.0).sqrt();
+    // fan_in is in_features = 128, matching `pytorch_fan_in` and the
+    // [out, in] layout every Linear here stores. This assertion previously read
+    // 64 — the leading dim — which is fan_OUT, and contradicted the comment
+    // three lines above it.
+    let expected_std = (2.0f32 / 128.0).sqrt();
     assert!(
         (std - expected_std).abs() < 0.05,
         "Kaiming std {std} vs expected {expected_std}"
@@ -482,4 +485,62 @@ fn test_deterministic_variants_seeded_matches_unseeded() {
             "{init:?} must be identical whether seeded or not"
         );
     }
+}
+
+/// Non-square shape whose two fan directions differ by 4x, so a convention
+/// mix-up moves the standard deviation by a factor of 2.
+const OUT_FEATURES: usize = 8;
+const IN_FEATURES: usize = 32;
+
+#[test]
+fn kaiming_reads_fan_in_from_the_trailing_dimensions() {
+    // `[out_features, in_features]` is what every Linear in this workspace
+    // stores, so fan_in must be in_features. Reading it off the leading
+    // dimension instead gives sqrt(2/8) rather than sqrt(2/32) — twice the
+    // spread, and silently so on any square weight.
+    let d = device();
+    let c = client();
+    let shape = [OUT_FEATURES, IN_FEATURES];
+    let t = Init::Kaiming
+        .init_tensor(&shape, DType::F32, &d, &c)
+        .expect("kaiming init");
+
+    let v: Vec<f32> = t.to_vec();
+    let n = v.len() as f64;
+    let mean = v.iter().map(|&x| x as f64).sum::<f64>() / n;
+    let sd = (v.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n).sqrt();
+
+    let expected = (2.0 / IN_FEATURES as f64).sqrt();
+    let wrong = (2.0 / OUT_FEATURES as f64).sqrt();
+    // Sample sd of 256 draws sits well inside 25% of the true sd, and the two
+    // candidates differ by 2x, so this cannot confuse them.
+    assert!(
+        (sd - expected).abs() < 0.25 * expected,
+        "sd {sd:.4} should be near {expected:.4} (fan_in = in_features), not {wrong:.4}"
+    );
+}
+
+#[test]
+fn xavier_agrees_with_kaiming_about_which_dimension_is_fan_in() {
+    // Xavier is symmetric in fan_in + fan_out, so a 2-D weight cannot detect a
+    // swap. A 3-D weight can: fan_in collapses the trailing dims while fan_out
+    // stays the leading one, so the sum differs.
+    let d = device();
+    let c = client();
+    let shape = [4usize, 8, 16]; // fan_in = 8*16 = 128, fan_out = 4
+    let t = Init::Xavier
+        .init_tensor(&shape, DType::F32, &d, &c)
+        .expect("xavier init");
+
+    let v: Vec<f32> = t.to_vec();
+    let n = v.len() as f64;
+    let mean = v.iter().map(|&x| x as f64).sum::<f64>() / n;
+    let sd = (v.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n).sqrt();
+
+    let expected = (2.0f64 / (128.0 + 4.0)).sqrt();
+    let swapped = (2.0f64 / (32.0 + 16.0)).sqrt(); // the old split: 4*8 and 16
+    assert!(
+        (sd - expected).abs() < 0.25 * expected,
+        "sd {sd:.4} should be near {expected:.4}, not the swapped {swapped:.4}"
+    );
 }

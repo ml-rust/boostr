@@ -50,23 +50,25 @@ pub enum Init {
     PyTorchEmbedding,
     /// Kaiming (He) normal: N(0, sqrt(2 / fan_in))
     ///
-    /// Standard initialization for ReLU networks. fan_in is the product of
-    /// all dimensions except the last (output) dimension.
+    /// Standard initialization for ReLU networks. `fan_in` follows
+    /// [`pytorch_fan_in`], the same convention as [`Init::PyTorchLinear`]: for
+    /// a `[out_features, in_features]` weight it is `in_features`.
     ///
-    /// NOTE: this assumes an `[..., in, out]` layout — the OPPOSITE of the
-    /// `[out_features, in_features]` layout `Linear` stores and
-    /// [`Init::PyTorchLinear`] assumes. No model in this workspace uses
-    /// `Kaiming`; the first one that does must transpose or switch variant.
+    /// This previously read `fan_in` off the OPPOSITE end of the shape, so for
+    /// the `[out, in]` layout every `Linear` in this workspace stores it
+    /// scaled by `fan_out` instead. That inflates or deflates the initial
+    /// variance by `out/in` — invisible on a square weight, and wrong on every
+    /// other one.
     Kaiming,
     /// Xavier (Glorot) normal: N(0, sqrt(2 / (fan_in + fan_out)))
     ///
-    /// Standard initialization for Sigmoid/Tanh networks. Used in some
-    /// attention weight initializations.
+    /// Standard initialization for Sigmoid/Tanh networks. Uses the same
+    /// `[out_features, in_features]` convention as [`Init::PyTorchLinear`].
     ///
-    /// NOTE: carries the same `[..., in, out]` layout assumption as
-    /// [`Init::Kaiming`], opposite to [`Init::PyTorchLinear`]. Xavier is
-    /// symmetric in `fan_in + fan_out`, so a 2-D weight is unaffected by the
-    /// mix-up; a 3-D or higher weight is not.
+    /// Xavier is symmetric in `fan_in + fan_out`, so a 2-D weight was already
+    /// unaffected by the layout mix-up this shares with [`Init::Kaiming`]. A
+    /// 3-D or higher weight was not: `fan_in` and `fan_out` split the
+    /// dimensions differently, so their sum changed.
     Xavier,
     /// Normal distribution with given mean and standard deviation.
     Randn { mean: f64, stdev: f64 },
@@ -133,23 +135,19 @@ impl Init {
             }
             Init::Kaiming => {
                 // Kaiming/He normal: N(0, sqrt(2 / fan_in))
-                let fan_in = if shape.len() >= 2 {
-                    shape[..shape.len() - 1].iter().product::<usize>()
-                } else {
-                    shape[0]
-                };
+                let fan_in = pytorch_fan_in(shape);
                 let std = (2.0 / fan_in as f64).sqrt();
                 let r = client.randn(shape, dtype).map_err(Error::Numr)?;
                 client.mul_scalar(&r, std).map_err(Error::Numr)
             }
             Init::Xavier => {
-                // Xavier/Glorot normal: N(0, sqrt(2 / (fan_in + fan_out)))
+                // Xavier/Glorot normal: N(0, sqrt(2 / (fan_in + fan_out))).
+                // Leading dim is the output side, matching `pytorch_fan_in`.
                 let (fan_in, fan_out) = if shape.len() >= 2 {
-                    let fi = shape[..shape.len() - 1].iter().product::<usize>();
-                    let fo = shape[shape.len() - 1];
-                    (fi, fo)
+                    (pytorch_fan_in(shape), shape[0])
                 } else {
-                    (shape[0], shape[0])
+                    let n = shape.first().copied().unwrap_or(1);
+                    (n, n)
                 };
                 let std = (2.0 / (fan_in + fan_out) as f64).sqrt();
                 let r = client.randn(shape, dtype).map_err(Error::Numr)?;

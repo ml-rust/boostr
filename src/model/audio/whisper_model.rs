@@ -28,9 +28,16 @@ pub struct GenerateOptions {
     /// `<|endoftext|>`). Also used for Whisper's `<|nospeech|>` in callers that want to stop there.
     pub eos_token_ids: Vec<u32>,
     /// Token IDs that are never allowed to be emitted (logit suppression).
-    /// Whisper's `<|notimestamps|>` / language tokens are usually part of the
-    /// prefix, not the output, but some decoders use suppression to skip them.
+    /// Applied at **every** generated position. Whisper's `<|notimestamps|>` /
+    /// language tokens are usually part of the prefix, not the output, but some
+    /// decoders use suppression to skip them.
     pub suppress_tokens: Vec<u32>,
+    /// Token IDs suppressed at the **first** generated position only — the step
+    /// right after the prefix. Whisper uses this to forbid a leading space
+    /// (`220`) and an immediate `<|endoftext|>`. At step 0 the effective mask is
+    /// the union of this list and [`Self::suppress_tokens`]; afterwards only
+    /// [`Self::suppress_tokens`] applies.
+    pub begin_suppress_tokens: Vec<u32>,
 }
 
 impl Default for GenerateOptions {
@@ -39,6 +46,7 @@ impl Default for GenerateOptions {
             max_new_tokens: 448,
             eos_token_ids: Vec::new(),
             suppress_tokens: Vec::new(),
+            begin_suppress_tokens: Vec::new(),
         }
     }
 }
@@ -120,11 +128,12 @@ impl<R: Runtime<DType = DType>> WhisperModel<R> {
             + IndexingOps<R>,
         R::Client: TensorOps<R> + ScalarOps<R>,
     {
-        assert_eq!(
-            encoder_out.shape()[0],
-            1,
-            "WhisperModel::generate currently supports batch=1"
-        );
+        let batch = encoder_out.shape()[0];
+        if batch != 1 {
+            return Err(Error::ModelError {
+                reason: format!("generate currently supports batch=1, got batch={batch}"),
+            });
+        }
         if start_tokens.is_empty() {
             return Err(Error::ModelError {
                 reason: "generate requires at least one start token".into(),
@@ -135,6 +144,22 @@ impl<R: Runtime<DType = DType>> WhisperModel<R> {
         let mut cache = self.decoder.new_cache();
         let mut generated: Vec<u32> = Vec::with_capacity(options.max_new_tokens);
         let mut position: usize = 0;
+
+        // Suppression masks are built once per call and reused across steps —
+        // rebuilding a [1, 1, vocab] host buffer and uploading it every token is
+        // a pure waste of bandwidth. `step_mask` applies at every position;
+        // `first_mask` (the union with `begin_suppress_tokens`) applies only at
+        // the first generated position, matching HuggingFace's two processors.
+        let vocab_size = self.decoder.vocab_size();
+        let step_mask = suppression_mask::<R>(&options.suppress_tokens, vocab_size, device)?;
+        let begin_mask = if options.begin_suppress_tokens.is_empty() {
+            None
+        } else {
+            let mut union = options.suppress_tokens.clone();
+            union.extend_from_slice(&options.begin_suppress_tokens);
+            suppression_mask::<R>(&union, vocab_size, device)?
+        };
+        let first_mask = begin_mask.as_ref().or(step_mask.as_ref());
 
         // Prefill: feed the prefix through the decoder once so the cache
         // contains all prefix K/V and we have logits for the last prefix token.
@@ -150,12 +175,7 @@ impl<R: Runtime<DType = DType>> WhisperModel<R> {
         position += start_tokens.len();
 
         // Predict the first token from the final position of the prefix.
-        let mut next_token = greedy_pick_last(
-            client,
-            &logits,
-            self.decoder.vocab_size(),
-            &options.suppress_tokens,
-        )?;
+        let mut next_token = greedy_pick_last(client, &logits, first_mask)?;
 
         // Decode loop.
         for _ in 0..options.max_new_tokens {
@@ -174,12 +194,7 @@ impl<R: Runtime<DType = DType>> WhisperModel<R> {
             )?;
             position += 1;
 
-            next_token = greedy_pick_last(
-                client,
-                &logits,
-                self.decoder.vocab_size(),
-                &options.suppress_tokens,
-            )?;
+            next_token = greedy_pick_last(client, &logits, step_mask.as_ref())?;
         }
 
         // Emit the final predicted token unless it's EOS or we exceeded the budget.
@@ -192,55 +207,71 @@ impl<R: Runtime<DType = DType>> WhisperModel<R> {
     }
 }
 
-/// Greedy-pick the argmax over the vocab dimension at the **last** time step of
-/// a logits tensor `[B, T, vocab]` (`B==1` here).
-///
-/// Suppressed tokens are masked to -inf before the argmax.
-fn greedy_pick_last<R, C>(
-    client: &C,
-    logits: &Tensor<R>,
+/// Build an additive `[1, 1, vocab]` suppression mask holding `-inf` at every
+/// id in `ids` and `0` elsewhere. Returns `None` when `ids` is empty, so the
+/// caller can skip the add entirely.
+fn suppression_mask<R>(
+    ids: &[u32],
     vocab_size: usize,
-    suppress: &[u32],
-) -> Result<u32>
+    device: &R::Device,
+) -> Result<Option<Tensor<R>>>
 where
     R: Runtime<DType = DType>,
-    C: TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
-    R::Client: TensorOps<R>,
 {
-    let shape = logits.shape();
-    let t = shape[1];
-    // Slice last time-step: [1, 1, vocab]
-    let last = logits.narrow(1, t - 1, 1).map_err(Error::Numr)?;
-
-    if suppress.is_empty() {
-        // Pull [vocab] floats and argmax on CPU — cheap since vocab ~51k and we
-        // do this once per step.
-        let data: Vec<f32> = last.to_vec();
-        return Ok(argmax_f32(&data) as u32);
+    if ids.is_empty() {
+        return Ok(None);
     }
-
-    // Apply suppression by adding a -inf mask. Build a [vocab] mask on CPU.
     let mut mask = vec![0.0f32; vocab_size];
-    for &id in suppress {
+    for &id in ids {
         if (id as usize) < vocab_size {
             mask[id as usize] = f32::NEG_INFINITY;
         }
     }
-    let device = logits.device();
-    let mask_t = Tensor::<R>::from_slice(&mask, &[1, 1, vocab_size], device)?;
-    let masked = client.add(&last, &mask_t).map_err(Error::Numr)?;
-    let data: Vec<f32> = masked.to_vec();
-    Ok(argmax_f32(&data) as u32)
+    let tensor = Tensor::<R>::from_slice(&mask, &[1, 1, vocab_size], device)?;
+    Ok(Some(tensor))
 }
 
-fn argmax_f32(xs: &[f32]) -> usize {
-    let mut best = 0usize;
-    let mut best_val = f32::NEG_INFINITY;
-    for (i, &v) in xs.iter().enumerate() {
-        if v > best_val {
-            best_val = v;
-            best = i;
-        }
+/// Greedy-pick the argmax over the vocab dimension at the **last** time step of
+/// a logits tensor `[B, T, vocab]` (`B==1` here).
+///
+/// `mask` is an additive `-inf` suppression mask from [`suppression_mask`], or
+/// `None` when nothing is suppressed. The argmax runs on-device; only the
+/// resulting index crosses back to the host.
+fn greedy_pick_last<R, C>(client: &C, logits: &Tensor<R>, mask: Option<&Tensor<R>>) -> Result<u32>
+where
+    R: Runtime<DType = DType>,
+    C: TensorOps<R> + BinaryOps<R> + IndexingOps<R>,
+{
+    let shape = logits.shape();
+    if shape.len() != 3 {
+        return Err(Error::ModelError {
+            reason: format!("greedy_pick_last expects [B, T, vocab] logits, got {shape:?}"),
+        });
     }
-    best
+    let t = shape[1];
+    // Unreachable on today's call paths — `generate` rejects an empty prefix and
+    // every later step feeds a `[1, 1]` id tensor — but `t - 1` on a `usize` is
+    // an underflow, not a caught mistake, so it is refused rather than assumed.
+    if t == 0 {
+        return Err(Error::ModelError {
+            reason: "greedy_pick_last got zero time steps".to_string(),
+        });
+    }
+    // Slice last time-step: [1, 1, vocab]
+    let last = logits.narrow(1, t - 1, 1).map_err(Error::Numr)?;
+
+    let scored = match mask {
+        Some(mask) => client.add(&last, mask).map_err(Error::Numr)?,
+        None => last,
+    };
+
+    // Device-side argmax over the vocab dimension → [1, 1] of I64.
+    let index = client.argmax(&scored, 2, false).map_err(Error::Numr)?;
+    let host: Vec<i64> = index.try_to_vec().map_err(Error::Numr)?;
+    let picked = host.first().copied().ok_or_else(|| Error::ModelError {
+        reason: "argmax over the vocab dimension returned an empty index tensor".into(),
+    })?;
+    u32::try_from(picked).map_err(|_| Error::ModelError {
+        reason: format!("argmax returned an out-of-range token index {picked}"),
+    })
 }

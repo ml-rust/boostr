@@ -34,5 +34,5 @@ pub use wav_decode::{WavData, decode_wav, to_mono};
 pub use wav_encode::{encode_pcm16_raw, encode_wav_f32, encode_wav_pcm16};
 pub use whisper::WhisperEncoder;
 pub use whisper_decoder::{DecoderCache, DecoderLayerCache, WhisperDecoder, WhisperDecoderLayer};
-pub use whisper_loader::WhisperBundle;
+pub use whisper_loader::{WhisperBundle, WhisperGenerationConfig};
 pub use whisper_model::{GenerateOptions, WhisperModel};

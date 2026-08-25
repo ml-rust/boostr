@@ -23,6 +23,7 @@ pub mod whisper_transcribe;
 pub use corpus::{
     CorpusOptions, MAX_UTTERANCE_SECS, PRETRAINED_TOKENIZER_NAMES, SpeechCorpusBuilder,
     TextTokenizer, Utterance, check_max_speech_duration, pack_utterances,
+    pack_utterances_with_layout,
 };
 pub use decode::{decode_audio, decode_audio_file_mono_at, decode_audio_mono_at, extension_hint};
 pub use g2p::{G2pError, Lang, Phonemizer};

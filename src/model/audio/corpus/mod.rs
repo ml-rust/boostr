@@ -26,7 +26,7 @@ pub use options::{
     CorpusOptions, MAX_UTTERANCE_SECS, PRETRAINED_TOKENIZER_NAMES, TextTokenizer,
     check_max_speech_duration,
 };
-pub use utterance::{Utterance, pack_utterances};
+pub use utterance::{Utterance, pack_utterances, pack_utterances_with_layout};
 
 #[cfg(test)]
 mod tests;

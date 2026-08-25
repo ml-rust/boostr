@@ -16,9 +16,10 @@ use super::options::{
     CorpusOptions, MAX_UTTERANCE_SECS, PRETRAINED_TOKENIZER_NAMES, TextTokenizer,
     check_max_speech_duration,
 };
-use super::utterance::{Utterance, pack_utterances};
+use super::utterance::{Utterance, pack_utterances, pack_utterances_with_layout};
 use crate::model::audio::vad::{SpeechSegment, VadSegmentOptions};
 use crate::model::speech_lm::codec::CodecVocab;
+use crate::model::speech_lm::layout::SpeechLayout;
 use crate::model::speech_lm::pack::{SpeechRecord, pack_records, pack_records_padded};
 use crate::model::speech_lm::vocab::SpeechVocab;
 
@@ -228,5 +229,45 @@ fn the_unknown_name_error_explains_the_feature_gate() {
     assert!(
         msg.contains("tokenizer.json"),
         "must steer at the path that always works: {msg}"
+    );
+}
+
+#[test]
+fn the_native_layout_packs_utterances_exactly_as_before() {
+    let vocab = test_vocab();
+    let utterances = vec![utterance(0, 320, &[7, 8, 9], &[1, 2])];
+    let opts = CorpusOptions::default();
+
+    let by_vocab = pack_utterances(&vocab, &utterances, &opts).expect("pack by vocab");
+    let by_layout = pack_utterances_with_layout(&SpeechLayout::Native(vocab), &utterances, &opts)
+        .expect("pack by layout");
+
+    // <|speech_text|> 7 8 9 <|/speech_text|> <|speech|> audio(1) audio(2) <|/speech|>
+    assert_eq!(by_vocab, vec![256, 7, 8, 9, 257, 258, 897, 898, 259]);
+    assert_eq!(by_layout, by_vocab);
+}
+
+#[test]
+fn the_expressive_tts_layout_packs_utterances_into_the_base_sequence() {
+    let utterances = vec![utterance(0, 320, &[7, 8, 9], &[1, 2])];
+    let packed = pack_utterances_with_layout(
+        &SpeechLayout::expressive_tts(),
+        &utterances,
+        &CorpusOptions::default(),
+    )
+    .expect("pack by layout");
+
+    // <|im_start|> 7 8 9 <|speech_start|> 151670+1 151670+2 <|im_end|>
+    assert_eq!(
+        packed,
+        vec![151_644, 7, 8, 9, 151_669, 151_671, 151_672, 151_645]
+    );
+}
+
+#[test]
+fn the_default_options_render_no_speaker_prefix() {
+    assert!(
+        CorpusOptions::default().speaker.is_none(),
+        "adding the speaker option must not change what an existing run tokenizes"
     );
 }

@@ -7,42 +7,65 @@ use crate::error::{Error, Result};
 use crate::model::audio::corpus::options::{
     CorpusOptions, TextTokenizer, check_max_speech_duration,
 };
-use crate::model::audio::corpus::utterance::{Utterance, pack_utterances};
+use crate::model::audio::corpus::utterance::{Utterance, pack_utterances_with_layout};
 use crate::model::audio::neucodec::NeuCodecEncoder;
 use crate::model::audio::neucodec::client::NeuCodecClient;
 use crate::model::audio::vad::SileroVad;
 use crate::model::audio::whisper_loader::WhisperBundle;
 use crate::model::audio::whisper_transcribe::TranscribeOptions;
 use crate::model::speech_lm::codec::CodecVocab;
+use crate::model::speech_lm::layout::SpeechLayout;
+use crate::model::speech_lm::layout::expressive_tts::{CODEBOOK_SIZE, ExpressiveTtsLayout};
 use crate::model::speech_lm::vocab::SpeechVocab;
 use numr::dtype::DType;
 use numr::ops::MatmulOps;
 use numr::runtime::Runtime;
 
 /// The three models and the tokenizer a corpus run needs, plus the
-/// [`SpeechVocab`] derived from them.
+/// [`SpeechLayout`] its packed stream is written in.
 ///
 /// Built once and reused across every recording: each of the three checkpoints
-/// costs a full safetensors load, and the vocabulary they imply is fixed the
-/// moment they are chosen.
+/// costs a full safetensors load, and the layout is fixed the moment the
+/// constructor is chosen — [`new`](Self::new) for boostr's native layout,
+/// [`new_expressive_tts`](Self::new_expressive_tts) for the
+/// `Multilingual-Expressive-TTS-1.7B` base.
 pub struct SpeechCorpusBuilder<R: Runtime> {
     vad: SileroVad<R>,
     whisper: WhisperBundle<R>,
     codec: NeuCodecEncoder<R>,
     tokenizer: AnyTokenizer,
-    vocab: SpeechVocab,
+    layout: SpeechLayout,
+}
+
+/// The codec's token space, read off the encoder's own quantizer config.
+///
+/// `num_quantizers` codebooks of `levels.product()` codes each — `1 x 65_536`
+/// for the published NeuCodec checkpoint. Reading it off the encoder rather
+/// than hardcoding it means a checkpoint with a different FSQ grid produces a
+/// matching vocabulary instead of a silently wrong one.
+fn codec_vocab<R: Runtime<DType = DType>>(codec: &NeuCodecEncoder<R>) -> Result<CodecVocab> {
+    let quantizer = codec.quantizer().config();
+    let codebook_size =
+        usize::try_from(quantizer.layer_config()?.codebook_size()).map_err(|_| {
+            Error::ModelError {
+                reason: "NeuCodec codebook size does not fit in usize".to_string(),
+            }
+        })?;
+    CodecVocab::new(quantizer.num_quantizers, codebook_size)
 }
 
 impl<R: Runtime<DType = DType>> SpeechCorpusBuilder<R> {
-    /// Take ownership of the loaded models and resolve the text tokenizer.
+    /// Take ownership of the loaded models and resolve the text tokenizer,
+    /// packing into boostr's NATIVE layout.
     ///
     /// The [`SpeechVocab`] is derived here, never passed in: its text region is
-    /// the resolved tokenizer's vocabulary size, and its audio region comes
-    /// from the encoder's own quantizer configuration — `num_quantizers`
-    /// codebooks of `levels.product()` codes each (`1 x 65_536` for the
-    /// published NeuCodec checkpoint). Reading it off the encoder rather than
-    /// hardcoding it means a checkpoint with a different FSQ grid produces a
-    /// matching vocabulary instead of a silently wrong one.
+    /// the resolved tokenizer's vocabulary size and its audio region comes from
+    /// the encoder's quantizer configuration.
+    ///
+    /// Use [`new_expressive_tts`](Self::new_expressive_tts) instead when
+    /// fine-tuning `Multilingual-Expressive-TTS-1.7B`: that base has its own
+    /// trained layout, and this one would point every id at a different
+    /// embedding row.
     pub fn new(
         vad: SileroVad<R>,
         whisper: WhisperBundle<R>,
@@ -51,15 +74,7 @@ impl<R: Runtime<DType = DType>> SpeechCorpusBuilder<R> {
     ) -> Result<Self> {
         let tokenizer = tokenizer.resolve()?;
         let text_vocab_size = Tokenize::vocab_size(&tokenizer);
-
-        let quantizer = codec.quantizer().config();
-        let codebook_size =
-            usize::try_from(quantizer.layer_config()?.codebook_size()).map_err(|_| {
-                Error::ModelError {
-                    reason: "NeuCodec codebook size does not fit in usize".to_string(),
-                }
-            })?;
-        let codec_vocab = CodecVocab::new(quantizer.num_quantizers, codebook_size)?;
+        let codec_vocab = codec_vocab(&codec)?;
         let vocab = SpeechVocab::with_default_specials(text_vocab_size, codec_vocab)?;
 
         Ok(Self {
@@ -67,17 +82,68 @@ impl<R: Runtime<DType = DType>> SpeechCorpusBuilder<R> {
             whisper,
             codec,
             tokenizer,
-            vocab,
+            layout: SpeechLayout::Native(vocab),
         })
     }
 
-    /// The vocabulary the packed stream is written against.
+    /// Same, but packing into the `Multilingual-Expressive-TTS-1.7B` layout.
+    ///
+    /// No [`SpeechVocab`] is derived: under this layout the vocabulary is the
+    /// BASE's 217_208 ids and the audio ids are fixed at `151_670 + code`, so
+    /// deriving one from the tokenizer would be a vocabulary nothing reads.
+    ///
+    /// `tokenizer` MUST be that checkpoint's own `tokenizer.json` — pass it as
+    /// [`TextTokenizer::JsonFile`]. Nothing here can check that, because a
+    /// tokenizer knows its size but not which checkpoint trained it; a
+    /// different one silently retokenizes the corpus against the wrong
+    /// embedding rows.
+    ///
+    /// The encoder is checked: this layout has ONE codebook of
+    /// [`CODEBOOK_SIZE`] codes, so a NeuCodec checkpoint with any other
+    /// quantizer shape is rejected here rather than at the first frame.
+    pub fn new_expressive_tts(
+        vad: SileroVad<R>,
+        whisper: WhisperBundle<R>,
+        codec: NeuCodecEncoder<R>,
+        tokenizer: TextTokenizer<'_>,
+    ) -> Result<Self> {
+        let codec_vocab = codec_vocab(&codec)?;
+        if codec_vocab.num_codebooks() != 1 || codec_vocab.codebook_size() != CODEBOOK_SIZE {
+            return Err(Error::InvalidArgument {
+                arg: "codec",
+                reason: format!(
+                    "this encoder has {} codebooks of {} codes, but the ExpressiveTTS layout \
+                     holds exactly 1 codebook of {CODEBOOK_SIZE} codes (<|s_0|> .. <|s_65535|>); \
+                     a differently-shaped codec cannot be expressed in it",
+                    codec_vocab.num_codebooks(),
+                    codec_vocab.codebook_size()
+                ),
+            });
+        }
+        let tokenizer = tokenizer.resolve()?;
+
+        Ok(Self {
+            vad,
+            whisper,
+            codec,
+            tokenizer,
+            layout: SpeechLayout::ExpressiveTts(ExpressiveTtsLayout::new()),
+        })
+    }
+
+    /// The layout the packed stream is written against.
     ///
     /// Callers need it to write the corpus layout sidecar: a stream is only
     /// readable by a model whose embedding rows match
-    /// [`SpeechVocab::total_size`].
-    pub fn vocab(&self) -> &SpeechVocab {
-        &self.vocab
+    /// [`SpeechLayout::total_size`].
+    pub fn layout(&self) -> &SpeechLayout {
+        &self.layout
+    }
+
+    /// The [`SpeechVocab`] behind a native layout, or `None` under
+    /// [`SpeechLayout::ExpressiveTts`], which no `SpeechVocab` describes.
+    pub fn vocab(&self) -> Option<&SpeechVocab> {
+        self.layout.vocab()
     }
 
     /// The resolved base text tokenizer, for callers that must tokenize
@@ -93,6 +159,10 @@ impl<R: Runtime<DType = DType>> SpeechCorpusBuilder<R> {
     ///
     /// - shorter than `opts.min_utterance_secs`, dropped BEFORE transcription,
     /// - transcribing to empty or whitespace-only text, dropped after it.
+    ///
+    /// When `opts.speaker` is set, each kept transcript is prefixed with
+    /// `"{speaker}: "` BEFORE tokenizing, so the prefix and the words share one
+    /// tokenization — which is what the ExpressiveTTS base is trained on.
     ///
     /// The second count is reported through `tracing` at `debug` level, since a
     /// recording that is mostly music or noise drops nearly everything and the
@@ -156,7 +226,10 @@ impl<R: Runtime<DType = DType>> SpeechCorpusBuilder<R> {
                 empty_transcripts += 1;
                 continue;
             }
-            let text = text.to_string();
+            let text = match opts.speaker {
+                Some(speaker) => format!("{speaker}: {text}"),
+                None => text.to_string(),
+            };
             let text_tokens = self.tokenizer.encode(&text);
 
             let frames = self.codec.encode_frames(client, slice, client.device())?;
@@ -184,6 +257,6 @@ impl<R: Runtime<DType = DType>> SpeechCorpusBuilder<R> {
     /// Pack prepared utterances into the token stream, padding when
     /// `opts.pad_to_multiple` says to.
     pub fn pack(&self, utterances: &[Utterance], opts: &CorpusOptions<'_>) -> Result<Vec<u32>> {
-        pack_utterances(&self.vocab, utterances, opts)
+        pack_utterances_with_layout(&self.layout, utterances, opts)
     }
 }

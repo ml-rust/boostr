@@ -93,6 +93,19 @@ pub struct CorpusOptions<'a> {
     pub vad: VadSegmentOptions,
     /// Whisper language token, e.g. `Some("ms")`. `None` skips it.
     pub language: Option<&'a str>,
+    /// Speaker name to PRE-RENDER into the transcript before tokenizing, as the
+    /// literal prefix `"{speaker}: "`.
+    ///
+    /// This exists because
+    /// [`SpeechLayout::ExpressiveTts`](crate::model::speech_lm::SpeechLayout)
+    /// has no speaker delimiter: its base is trained on
+    /// `"{speaker}: {text}"` as ONE tokenized string, so the prefix must be
+    /// tokenized together with the transcript or the seam between them lands on
+    /// a token boundary the base never saw.
+    ///
+    /// `None` — the default — leaves the transcript exactly as Whisper produced
+    /// it, which is what the native layout has always done.
+    pub speaker: Option<&'a str>,
     /// Bound on Whisper's decode length, overriding the checkpoint's own.
     pub max_new_tokens: Option<usize>,
     /// Utterances shorter than this are dropped BEFORE transcription —
@@ -111,6 +124,7 @@ impl Default for CorpusOptions<'_> {
                 ..VadSegmentOptions::default()
             },
             language: None,
+            speaker: None,
             max_new_tokens: None,
             min_utterance_secs: 0.5,
             pad_to_multiple: None,

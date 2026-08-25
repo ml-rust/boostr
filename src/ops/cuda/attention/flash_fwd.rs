@@ -9,7 +9,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::flash_utils::{AttentionParams, set_smem_attribute};
+use super::flash_utils::{AttentionParams, device_max_smem, set_smem_attribute};
 
 /// Forward pass for F32/F16/BF16 — main tiled Flash Attention v2 kernel.
 pub(super) fn flash_attention_fwd_impl(
@@ -130,9 +130,29 @@ pub(super) fn flash_attention_fwd_fp8_impl(
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let dtype = q.dtype();
 
-    // FP8 kernels use E4M3 format (kernel handles both via same entry point)
-    let sm_suffix = if p.use_sm_kernel { "_sm" } else { "" };
-    let kernel_name = format!("flash_attention_fwd_{}{}_fp8", p.head_dim, sm_suffix);
+    // `flash_v2_fp8.cu` instantiates only the LARGE block config for the
+    // forward pass — there is no `flash_attention_fwd_{head_dim}_sm_fp8`, unlike
+    // the backward, which defines all six `_sm` variants. Building that name
+    // anyway would fail as an opaque "kernel not found" at launch time.
+    //
+    // In practice `use_sm_kernel` is false here: it is only set when the large
+    // config exceeds the device's shared memory, and FP8 is 1 byte per element,
+    // so its tile is a quarter of the F32 one. That is a property of the
+    // hardware this has run on, not a guarantee, so the case is refused
+    // explicitly rather than assumed away.
+    if p.use_sm_kernel {
+        return Err(Error::InvalidArgument {
+            arg: "head_dim",
+            reason: format!(
+                "FP8 flash attention has no small-block forward kernel: head_dim={} needs the \
+                 reduced block config on this GPU ({}KB shared memory), but flash_v2_fp8.cu \
+                 instantiates only the large config for the forward pass",
+                p.head_dim,
+                device_max_smem() / 1024
+            ),
+        });
+    }
+    let kernel_name = format!("flash_attention_fwd_{}_fp8", p.head_dim);
 
     let device = q.device();
     let output = Tensor::<CudaRuntime>::empty(

@@ -19,9 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use boostr::model::audio::{
-    GenerateOptions, MelOptions, WhisperBundle, compute_mel_spectrogram_with,
-};
+use boostr::model::audio::{GenerateOptions, SpeechSegment, TranscribeOptions, WhisperBundle};
 use boostr::nn::VarMap;
 #[cfg(feature = "f16")]
 use numr::dtype::DType;
@@ -47,6 +45,17 @@ struct Reference {
     num_samples: usize,
     /// The generated ids ONLY — the SOT prompt prefix is not included, and
     /// neither is the trailing `<|endoftext|>`.
+    token_ids: Vec<u32>,
+    text: String,
+    /// Fixed sub-ranges transcribed independently, for `transcribe_segments`.
+    /// Their bounds must match the segments the test builds.
+    segments: Vec<ReferenceSegment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReferenceSegment {
+    start: usize,
+    end: usize,
     token_ids: Vec<u32>,
     text: String,
 }
@@ -245,44 +254,140 @@ fn whisper_tiny_end_to_end_from_samples() {
     let bundle =
         WhisperBundle::<CpuRuntime>::from_dir(&fx.dir, &fx.device).expect("load whisper-tiny");
 
-    // Waveform → our own mel front end → encoder → greedy → text. This is the
-    // only test that puts `compute_mel_spectrogram_with` and the model on the
-    // same path, so it is what proves the two agree.
+    // Waveform → mel front end → encoder → greedy → text, all inside
+    // `transcribe`. This is the only test that puts the mel front end and the
+    // model on the same path, so it is what proves the two agree — and it now
+    // also proves `transcribe` assembles that path exactly as a caller would.
     let samples = fixture_tensor(&map, "input");
-    let opts = MelOptions::whisper(bundle.num_mel_bins, SAMPLE_RATE);
-    let mel = compute_mel_spectrogram_with(&samples, SAMPLE_RATE, &opts).expect("mel");
-    assert_eq!(
-        mel.len(),
-        bundle.num_mel_bins * FRAMES,
-        "our mel is not [{}, {FRAMES}]",
-        bundle.num_mel_bins
-    );
-
-    let mel_t =
-        Tensor::<CpuRuntime>::from_slice(&mel, &[1, bundle.num_mel_bins, FRAMES], &fx.device)
-            .expect("mel tensor");
-    let encoded = bundle
-        .model
-        .encode(&fx.client, &mel_t)
-        .expect("whisper encode");
-
-    let prompt = bundle.sot_prompt(Some(&reference.language), false);
-    let ids = bundle
-        .model
-        .generate(
+    let out = bundle
+        .transcribe(
             &fx.client,
-            &encoded,
-            &prompt,
-            &greedy_options(&bundle, reference.token_ids.len() + 16),
+            &samples,
+            SAMPLE_RATE,
+            &TranscribeOptions {
+                language: Some(&reference.language),
+                translate: false,
+                max_new_tokens: Some(reference.token_ids.len() + 16),
+            },
         )
-        .expect("whisper generate");
+        .expect("whisper transcribe");
 
-    let text = bundle.tokenizer.decode(&ids).expect("decode");
-    eprintln!("end-to-end produced : {text:?}");
+    eprintln!("end-to-end produced : {:?}", out.text);
     eprintln!("end-to-end reference: {:?}", reference.text);
     assert_eq!(
-        text, reference.text,
+        out.text, reference.text,
         "end-to-end transcription differs from the HuggingFace reference"
+    );
+}
+
+/// Over-long audio must be REFUSED, never silently trimmed to the first 30 s.
+/// The fixture `input` is exactly 30 s, so two copies are exactly 60 s.
+#[test]
+fn whisper_transcribe_rejects_audio_over_thirty_seconds() {
+    let Some(fx) = tiny_fixtures() else {
+        skip_notice("whisper-tiny checkpoint", "WHISPER_TINY_DIR");
+        return;
+    };
+    let Some(map) = mel_fixture(&fx.device) else {
+        skip_notice("whisper mel fixture", "WHISPER_MEL_FIXTURE");
+        return;
+    };
+    let bundle =
+        WhisperBundle::<CpuRuntime>::from_dir(&fx.dir, &fx.device).expect("load whisper-tiny");
+
+    let samples = fixture_tensor(&map, "input");
+    assert_eq!(samples.len(), 30 * SAMPLE_RATE, "fixture input is not 30 s");
+    let doubled: Vec<f32> = samples.iter().chain(samples.iter()).copied().collect();
+
+    let err = bundle
+        .transcribe(
+            &fx.client,
+            &doubled,
+            SAMPLE_RATE,
+            &TranscribeOptions::default(),
+        )
+        .expect_err("60 s of audio must be refused, not truncated");
+    let msg = err.to_string();
+    eprintln!("over-long rejection: {msg}");
+    assert!(
+        msg.contains("60.000"),
+        "the error must name the actual duration, got: {msg}"
+    );
+    assert!(
+        msg.contains("30 s window"),
+        "the error must name the 30 s limit, got: {msg}"
+    );
+}
+
+/// `transcribe_segments` drives one decode per segment, and refuses a segment
+/// that runs past the end of the buffer instead of panicking on the slice.
+#[test]
+fn whisper_transcribe_segments_covers_each_range() {
+    let Some(fx) = tiny_fixtures() else {
+        skip_notice("whisper-tiny checkpoint", "WHISPER_TINY_DIR");
+        return;
+    };
+    let Some(map) = mel_fixture(&fx.device) else {
+        skip_notice("whisper mel fixture", "WHISPER_MEL_FIXTURE");
+        return;
+    };
+    let bundle =
+        WhisperBundle::<CpuRuntime>::from_dir(&fx.dir, &fx.device).expect("load whisper-tiny");
+
+    let samples = fixture_tensor(&map, "input");
+    let reference = load_reference(&fx.reference);
+    let segments: Vec<SpeechSegment> = reference
+        .segments
+        .iter()
+        .map(|s| SpeechSegment {
+            start: s.start,
+            end: s.end,
+        })
+        .collect();
+    assert!(!segments.is_empty(), "reference carries no segments");
+
+    let opts = TranscribeOptions {
+        language: Some(reference.language.as_str()),
+        translate: false,
+        // 48 is what the reference was captured with, and it must match
+        // exactly: segment 1 HITS this cap — whisper-tiny falls into a
+        // repetition loop on that range — so any other budget diverges. See
+        // `audio/pipeline/make_whisper_asr_reference.py`.
+        max_new_tokens: Some(48),
+    };
+
+    let out = bundle
+        .transcribe_segments(&fx.client, &samples, SAMPLE_RATE, &segments, &opts)
+        .expect("transcribe segments");
+    assert_eq!(
+        out.len(),
+        reference.segments.len(),
+        "one transcription per segment"
+    );
+    // Exact equality, not a non-empty check: HuggingFace produces these
+    // byte-for-byte on the same ranges. Segment 0 comes back in ENGLISH even
+    // though the audio is Malay and the prompt carries `<|ms|>` + transcribe —
+    // whisper-tiny translates instead of transcribing, and upstream does the
+    // same, so matching it is correct behaviour, not a bug to chase.
+    for (i, (got, want)) in out.iter().zip(reference.segments.iter()).enumerate() {
+        eprintln!("segment {i} ours: {:?}", got.text);
+        eprintln!("segment {i} ref : {:?}", want.text);
+        assert_eq!(got.tokens, want.token_ids, "segment {i}: token ids differ");
+        assert_eq!(got.text, want.text, "segment {i}: text differs");
+    }
+
+    let past_end = [SpeechSegment {
+        start: 0,
+        end: samples.len() + 1,
+    }];
+    let err = bundle
+        .transcribe_segments(&fx.client, &samples, SAMPLE_RATE, &past_end, &opts)
+        .expect_err("a segment past the end of the buffer must be an error");
+    let msg = err.to_string();
+    eprintln!("out-of-bounds rejection: {msg}");
+    assert!(
+        msg.contains("segment 0"),
+        "the error must name the offending index, got: {msg}"
     );
 }
 

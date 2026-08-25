@@ -17,6 +17,7 @@ pub mod whisper;
 pub mod whisper_decoder;
 pub mod whisper_loader;
 pub mod whisper_model;
+pub mod whisper_transcribe;
 
 pub use decode::{decode_audio, decode_audio_file_mono_at, decode_audio_mono_at, extension_hint};
 pub use g2p::{G2pError, Lang, Phonemizer};
@@ -41,3 +42,4 @@ pub use whisper::WhisperEncoder;
 pub use whisper_decoder::{DecoderCache, DecoderLayerCache, WhisperDecoder, WhisperDecoderLayer};
 pub use whisper_loader::{WhisperBundle, WhisperGenerationConfig};
 pub use whisper_model::{GenerateOptions, WhisperModel};
+pub use whisper_transcribe::{TranscribeOptions, Transcription};

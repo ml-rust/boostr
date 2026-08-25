@@ -283,7 +283,10 @@ fn aperiodicity_is_reported_exactly_where_f0_is() {
             "frame {i}: f0 and aperiodicity must agree on voicing"
         );
         if let Some(a) = a {
-            assert!((0.0..=1.0).contains(a), "frame {i}: aperiodicity {a} out of range");
+            assert!(
+                (0.0..=1.0).contains(a),
+                "frame {i}: aperiodicity {a} out of range"
+            );
         }
     }
 }
@@ -307,5 +310,9 @@ fn hnr_is_monotonic_in_aperiodicity_and_finite_at_the_ends() {
     assert!(hnr_db(0.1) > hnr_db(0.5));
     assert!(hnr_db(0.5) > hnr_db(0.9));
     // a = 0.5 is equal harmonic and noise power, so 0 dB by definition.
-    assert!(hnr_db(0.5).abs() < 1e-9, "a=0.5 must be 0 dB, got {}", hnr_db(0.5));
+    assert!(
+        hnr_db(0.5).abs() < 1e-9,
+        "a=0.5 must be 0 dB, got {}",
+        hnr_db(0.5)
+    );
 }

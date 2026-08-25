@@ -139,8 +139,14 @@ where
         );
 
         if take.complete {
-            by_arm.entry(take.arm.clone()).or_default().push(q.floor_dbfs);
-            snr_by_arm.entry(take.arm.clone()).or_default().push(q.snr_db);
+            by_arm
+                .entry(take.arm.clone())
+                .or_default()
+                .push(q.floor_dbfs);
+            snr_by_arm
+                .entry(take.arm.clone())
+                .or_default()
+                .push(q.snr_db);
             if let Some(h) = hnr {
                 hnr_by_arm.entry(take.arm.clone()).or_default().push(h);
             }
@@ -230,7 +236,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         #[cfg(not(feature = "cuda"))]
         {
-            return Err("PROBE_DEVICE=cuda but this binary was built without --features cuda".into());
+            return Err(
+                "PROBE_DEVICE=cuda but this binary was built without --features cuda".into(),
+            );
         }
     } else {
         let device = CpuDevice::new();

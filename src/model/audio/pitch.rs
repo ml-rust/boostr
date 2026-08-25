@@ -33,6 +33,34 @@ pub struct PitchTrack {
     pub std_hz: Option<f64>,
     /// Fraction of frames judged voiced, in `[0, 1]`.
     pub voiced_fraction: f64,
+    /// YIN aperiodicity `d'(tau)` at the chosen lag, per frame; `None` where
+    /// the frame is unvoiced.
+    ///
+    /// 0 is perfectly periodic, 1 is no periodicity found. YIN computes this to
+    /// make the voicing decision and it is the continuous quantity behind that
+    /// binary — a breathy or noisy voiced frame sits near the threshold, which
+    /// `voiced_fraction` alone cannot show.
+    pub aperiodicity: Vec<Option<f64>>,
+    /// Mean harmonic-to-noise ratio over VOICED frames, dB. `None` when nothing
+    /// is voiced.
+    ///
+    /// `10 * log10((1 - a) / a)` from the aperiodicity `a`. This measures noise
+    /// DURING speech, which a noise-floor measurement over an entire signal
+    /// cannot: the floor is dominated by the pauses, and a recording whose
+    /// pauses are digitally silent can still be hissy under the voice.
+    pub mean_hnr_db: Option<f64>,
+}
+
+/// Harmonic-to-noise ratio in dB from a YIN aperiodicity.
+///
+/// Clamped away from 0 and 1 because both ends are singular: a perfectly
+/// periodic frame would give `+inf` and a fully aperiodic one `-inf`, and
+/// neither survives averaging. The bounds put the reportable range at
+/// +/- 40 dB, well outside anything real speech produces.
+fn hnr_db(aperiodicity: f64) -> f64 {
+    const MIN_A: f64 = 1e-4;
+    let a = aperiodicity.clamp(MIN_A, 1.0 - MIN_A);
+    10.0 * ((1.0 - a) / a).log10()
 }
 
 /// Search range and framing for [`estimate_pitch`].
@@ -81,7 +109,11 @@ fn parabolic_offset(a: f64, b: f64, c: f64) -> f64 {
     ((a - c) / denom).clamp(-1.0, 1.0)
 }
 
-/// YIN over one frame. Returns the frame's F0 in Hz, or `None` when unvoiced.
+/// YIN over one frame.
+///
+/// Returns `(f0_hz, aperiodicity)`, or `None` when the frame is unvoiced. The
+/// aperiodicity is `d'(tau)` at the chosen lag — the same value the voicing
+/// decision is made from, returned rather than discarded.
 ///
 /// `scratch` is `tau_max + 1` long and is overwritten; it is owned by the
 /// caller so no allocation happens per frame.
@@ -93,7 +125,7 @@ fn frame_f0(
     tau_min: usize,
     tau_max: usize,
     threshold: f64,
-) -> Option<f64> {
+) -> Option<(f64, f64)> {
     // Step 1 + 2: squared difference d(tau), normalised in place into the
     // cumulative mean normalised difference d'(tau). `running` accumulates
     // d(1..=tau) before the slot is overwritten, so one buffer serves both.
@@ -155,7 +187,10 @@ fn frame_f0(
         tau as f64
     };
     if refined > 0.0 {
-        Some(sample_rate / refined)
+        // Report d' at the integer lag actually chosen: the parabolic step
+        // refines the LAG, and interpolating the depth as well would report a
+        // periodicity the frame did not measure.
+        Some((sample_rate / refined, at(tau)))
     } else {
         None
     }
@@ -243,9 +278,10 @@ pub fn estimate_pitch(samples: &[f32], sample_rate: u32, opts: PitchOptions) -> 
 
     let mut scratch = vec![0.0f64; tau_max + 1];
     let mut f0 = Vec::new();
+    let mut aperiodicity = Vec::new();
     let mut start = 0usize;
     while let Some(frame) = samples.get(start..start + window) {
-        f0.push(frame_f0(
+        let measured = frame_f0(
             frame,
             &mut scratch,
             rate,
@@ -253,11 +289,22 @@ pub fn estimate_pitch(samples: &[f32], sample_rate: u32, opts: PitchOptions) -> 
             tau_min,
             tau_max,
             opts.threshold,
-        ));
+        );
+        f0.push(measured.map(|(hz, _)| hz));
+        aperiodicity.push(measured.map(|(_, a)| a));
         start += hop;
     }
 
     let voiced: Vec<f64> = f0.iter().filter_map(|&v| v).collect();
+    let voiced_aperiodicity: Vec<f64> = aperiodicity.iter().filter_map(|&v| v).collect();
+    let mean_hnr_db = if voiced_aperiodicity.is_empty() {
+        None
+    } else {
+        Some(
+            voiced_aperiodicity.iter().copied().map(hnr_db).sum::<f64>()
+                / voiced_aperiodicity.len() as f64,
+        )
+    };
     let voiced_fraction = if f0.is_empty() {
         0.0
     } else {
@@ -289,6 +336,8 @@ pub fn estimate_pitch(samples: &[f32], sample_rate: u32, opts: PitchOptions) -> 
         mean_hz,
         std_hz,
         voiced_fraction,
+        aperiodicity,
+        mean_hnr_db,
     })
 }
 

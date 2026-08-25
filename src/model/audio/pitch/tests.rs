@@ -219,3 +219,93 @@ fn input_shorter_than_one_window_yields_an_empty_track() {
     assert_eq!(t.std_hz, None);
     assert_eq!(t.voiced_fraction, 0.0);
 }
+
+// --- aperiodicity / HNR -----------------------------------------------------
+//
+// These pin the continuous periodicity measure YIN already computes. Before it
+// was exposed, `voiced_fraction` was the only signal available and it collapses
+// a clean tone and a barely-voiced hiss into the same "voiced" bucket.
+
+#[test]
+fn a_pure_tone_is_far_more_harmonic_than_the_same_tone_with_noise() {
+    let rate = 16_000usize;
+    let f0 = 150.0f64;
+    let n = rate; // one second
+
+    let clean: Vec<f32> = (0..n)
+        .map(|i| (2.0 * std::f64::consts::PI * f0 * i as f64 / rate as f64).sin() as f32)
+        .collect();
+
+    // Deterministic additive noise at ~30% amplitude. An LCG, not a constant,
+    // so it is broadband rather than a second tone.
+    let mut state = 0x1234_5678u32;
+    let noisy: Vec<f32> = clean
+        .iter()
+        .map(|&s| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let r = (state >> 8) as f32 / (1 << 24) as f32 - 0.5;
+            s + r * 0.6
+        })
+        .collect();
+
+    let clean_track = estimate_pitch(&clean, rate as u32, PitchOptions::default()).unwrap();
+    let noisy_track = estimate_pitch(&noisy, rate as u32, PitchOptions::default()).unwrap();
+
+    let clean_hnr = clean_track.mean_hnr_db.expect("clean tone must be voiced");
+    let noisy_hnr = noisy_track.mean_hnr_db.expect("noisy tone must be voiced");
+
+    assert!(
+        clean_hnr > noisy_hnr + 5.0,
+        "clean HNR {clean_hnr:.1} dB should exceed noisy {noisy_hnr:.1} dB by >5 dB"
+    );
+
+    // Both are still detected as voiced at the same F0, which is the whole
+    // point: voicing alone cannot separate them, HNR can.
+    let clean_f0 = clean_track.mean_hz.unwrap();
+    let noisy_f0 = noisy_track.mean_hz.unwrap();
+    assert!((clean_f0 - f0).abs() < 5.0, "clean f0 {clean_f0}");
+    assert!((noisy_f0 - f0).abs() < 5.0, "noisy f0 {noisy_f0}");
+}
+
+#[test]
+fn aperiodicity_is_reported_exactly_where_f0_is() {
+    let rate = 16_000u32;
+    let samples: Vec<f32> = (0..rate as usize)
+        .map(|i| (2.0 * std::f64::consts::PI * 200.0 * i as f64 / rate as f64).sin() as f32)
+        .collect();
+    let track = estimate_pitch(&samples, rate, PitchOptions::default()).unwrap();
+
+    assert_eq!(track.aperiodicity.len(), track.f0.len());
+    for (i, (f, a)) in track.f0.iter().zip(track.aperiodicity.iter()).enumerate() {
+        assert_eq!(
+            f.is_some(),
+            a.is_some(),
+            "frame {i}: f0 and aperiodicity must agree on voicing"
+        );
+        if let Some(a) = a {
+            assert!((0.0..=1.0).contains(a), "frame {i}: aperiodicity {a} out of range");
+        }
+    }
+}
+
+#[test]
+fn silence_reports_no_hnr_at_all() {
+    let rate = 16_000u32;
+    let track = estimate_pitch(&vec![0.0f32; rate as usize], rate, PitchOptions::default())
+        .expect("silence must not error");
+    assert_eq!(track.voiced_fraction, 0.0);
+    assert!(track.mean_hnr_db.is_none(), "silence has no HNR to report");
+    assert!(track.aperiodicity.iter().all(|a| a.is_none()));
+}
+
+#[test]
+fn hnr_is_monotonic_in_aperiodicity_and_finite_at_the_ends() {
+    // The clamp exists so averaging cannot be poisoned by a single +/-inf.
+    assert!(hnr_db(0.0).is_finite());
+    assert!(hnr_db(1.0).is_finite());
+    assert!(hnr_db(0.0) > hnr_db(0.1));
+    assert!(hnr_db(0.1) > hnr_db(0.5));
+    assert!(hnr_db(0.5) > hnr_db(0.9));
+    // a = 0.5 is equal harmonic and noise power, so 0 dB by definition.
+    assert!(hnr_db(0.5).abs() < 1e-9, "a=0.5 must be 0 dB, got {}", hnr_db(0.5));
+}

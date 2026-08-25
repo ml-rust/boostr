@@ -1,20 +1,45 @@
 //! Inverse short-time Fourier transform for ISTFTNet vocoder output.
 //!
-//! Kokoro's decoder emits magnitude + phase spectrograms `[B, F, T_frames]`
-//! where `F = n_fft/2 + 1`. This module turns that pair back into a time-domain
-//! waveform via Hermitian irfft + windowed overlap-add with window-square
-//! normalization (matching `torch.istft` / `librosa.istft` defaults).
+//! Kokoro's decoder and NeuCodec's vocoder both emit magnitude + phase
+//! spectrograms `[B, F, T_frames]` where `F = n_fft/2 + 1`. This module turns
+//! that pair back into a time-domain waveform via Hermitian irfft + windowed
+//! overlap-add with window-square normalization (matching `torch.istft` /
+//! `librosa.istft` defaults).
 //!
-//! **CPU-only.** Overlap-add is an accumulating scatter along strided output
-//! positions. numr does not yet expose `scatter_add`; rather than add it
-//! speculatively, we do the accumulation on `CpuRuntime` where tensor data is
-//! directly addressable. Promoting to GPU backends requires a `scatter_add`
-//! primitive — a single-session addition — plus an index-tensor build. Until
-//! then, callers on CUDA/WebGPU must transfer the spectrograms to CPU.
+//! **Runs on every backend.** Overlap-add is an accumulating scatter along
+//! strided output positions, expressed here as
+//! [`IndexingOps::scatter_reduce`] with [`ScatterReduceOp::Sum`], which numr
+//! implements on CPU, CUDA and WebGPU. An earlier version of this file was
+//! `CpuRuntime`-only on the grounds that "numr does not yet expose
+//! `scatter_add`" and that "numr's `irfft` rejects non-power-of-2" sizes;
+//! neither is true any more — `scatter_reduce` covers the first and numr's
+//! Bluestein path covers the second, including NeuCodec's `n_fft = 1920` and
+//! Kokoro's 20.
+//!
+//! The vocoder tail is the last stage of every generation, so keeping it on
+//! CPU forced a device round-trip per utterance on anything built with boostr.
 
 use crate::error::{Error, Result};
-use numr::runtime::cpu::{CpuClient, CpuRuntime};
+use crate::model::traits::ModelClient;
+use numr::algorithm::fft::{FftAlgorithms, FftNormalization};
+use numr::dtype::DType;
+use numr::ops::traits::{ComplexOps, ScatterReduceOp};
+use numr::runtime::Runtime;
 use numr::tensor::Tensor;
+
+/// Client capabilities [`istft`] needs beyond [`ModelClient`].
+///
+/// `ModelClient` already carries the elementwise, compare, conditional,
+/// indexing and shape ops; only the complex construction and the transform
+/// itself are extra.
+pub trait IStftClient<R: Runtime>: ModelClient<R> + ComplexOps<R> + FftAlgorithms<R> {}
+
+impl<R, C> IStftClient<R> for C
+where
+    R: Runtime,
+    C: ModelClient<R> + ComplexOps<R> + FftAlgorithms<R>,
+{
+}
 
 /// How much of the overlap-added signal to trim from each end.
 ///
@@ -62,13 +87,17 @@ impl Default for IStftOptions {
 /// * `mag` — `[B, F, T_frames]`
 /// * `phase` — `[B, F, T_frames]`
 /// * `window` — `[n_fft]` analysis / synthesis window (must match forward STFT)
-pub fn istft(
-    client: &CpuClient,
-    mag: &Tensor<CpuRuntime>,
-    phase: &Tensor<CpuRuntime>,
-    window: &Tensor<CpuRuntime>,
+pub fn istft<R, C>(
+    client: &C,
+    mag: &Tensor<R>,
+    phase: &Tensor<R>,
+    window: &Tensor<R>,
     opts: IStftOptions,
-) -> Result<Tensor<CpuRuntime>> {
+) -> Result<Tensor<R>>
+where
+    R: Runtime<DType = DType>,
+    C: IStftClient<R>,
+{
     if mag.shape() != phase.shape() {
         return Err(Error::InvalidArgument {
             arg: "phase",
@@ -115,127 +144,101 @@ pub fn istft(
         });
     }
 
-    // 1. Extract magnitude/phase to host buffers. Kokoro's `n_fft = 20` is
-    // NOT power-of-2 so numr's `irfft` rejects it; we run a direct inverse
-    // DFT per frame instead. At `n_fft = 20` it's 11 × 20 = 220 complex
-    // multiplies per frame — negligible vs the rest of the generator.
-    let _ = client; // kept for future GPU path (irfft when n_fft is PoT).
-    let mag_flat: Vec<f32> = mag.contiguous()?.to_vec();
-    let phase_flat: Vec<f32> = phase.contiguous()?.to_vec();
-    let window_samples: Vec<f32> = window.contiguous()?.to_vec();
-
-    // Precompute twiddle tables e^{i·2π·k·n/N} (positive sign = inverse DFT).
-    let n_fft_f = n_fft as f32;
-    let f_bins = n_fft / 2 + 1;
-    let mut cos_table = vec![0.0f32; f_bins * n_fft];
-    let mut sin_table = vec![0.0f32; f_bins * n_fft];
-    for k in 0..f_bins {
-        for n in 0..n_fft {
-            let theta = 2.0 * std::f32::consts::PI * (k as f32) * (n as f32) / n_fft_f;
-            cos_table[k * n_fft + n] = theta.cos();
-            sin_table[k * n_fft + n] = theta.sin();
-        }
-    }
-
-    // 2. Inverse DFT + windowing per frame.
-    let mut windowed_flat = vec![0.0f32; b * t_frames * n_fft];
-    let inv_n = 1.0f32 / n_fft_f;
-    for b_idx in 0..b {
-        for t_idx in 0..t_frames {
-            for (n, &w) in window_samples.iter().take(n_fft).enumerate() {
-                let mut acc = 0.0f32;
-                // Full Hermitian sum: bin 0 and bin n_fft/2 (if n_fft even)
-                // contribute once; bins in between contribute twice (conjugate).
-                for k in 0..f_bins {
-                    let src = (b_idx * f_bins + k) * t_frames + t_idx;
-                    let mag_k = mag_flat[src];
-                    let ph_k = phase_flat[src];
-                    let theta =
-                        ph_k + 2.0 * std::f32::consts::PI * (k as f32) * (n as f32) / n_fft_f;
-                    let term = mag_k * theta.cos();
-                    let mirror = k != 0 && !(n_fft.is_multiple_of(2) && k == n_fft / 2);
-                    acc += term * if mirror { 2.0 } else { 1.0 };
-                }
-                let dst = (b_idx * t_frames + t_idx) * n_fft + n;
-                windowed_flat[dst] = acc * inv_n * w;
-            }
-        }
-    }
-    // The cos/sin tables are only kept for potential future use (caching
-    // across frames inside one call); drop to keep memory predictable.
-    drop(cos_table);
-    drop(sin_table);
-
+    let device = mag.device();
+    let dtype = mag.dtype();
     let raw_len = (t_frames - 1) * opts.hop_length + n_fft;
-    let mut waveform = vec![0.0f32; b * raw_len];
-    let mut norm = vec![0.0f32; raw_len];
 
-    // Precompute window^2 once.
-    let window_sq: Vec<f32> = window_samples.iter().map(|w| w * w).collect();
+    // 1. Polar -> rectangular, then a real inverse transform per frame.
+    //    `irfft` works along the LAST axis, so the spectrogram is permuted from
+    //    [B, F, T] to [B, T, F] first — which is also the frame-major layout the
+    //    overlap-add below wants, so the permute is not wasted work.
+    let real = client.mul(mag, &client.cos(phase)?)?;
+    let imag = client.mul(mag, &client.sin(phase)?)?;
+    let spectrum = client.make_complex(&real, &imag)?;
+    let spectrum = spectrum.permute(&[0, 2, 1])?.contiguous()?;
 
-    for b_idx in 0..b {
-        for t_idx in 0..t_frames {
-            let frame_base = (b_idx * t_frames + t_idx) * n_fft;
-            let wave_base = b_idx * raw_len + t_idx * opts.hop_length;
-            for n in 0..n_fft {
-                waveform[wave_base + n] += windowed_flat[frame_base + n];
-            }
-        }
-    }
-    // Normalization vector is batch-independent.
+    // `Backward` is the numpy/torch default: the inverse divides by n_fft.
+    // `None` would return n_fft times the intended amplitude.
+    let frames = client.irfft(&spectrum, Some(n_fft), FftNormalization::Backward)?;
+
+    // 2. Synthesis window, broadcast over batch and frame.
+    let windowed = client.mul(&frames, &window.reshape(&[1, 1, n_fft])?)?;
+    let windowed = windowed.contiguous()?.reshape(&[b, t_frames * n_fft])?;
+
+    // 3. Overlap-add. Frame `t` sample `n` lands at output position
+    //    `t * hop + n`; several frames hit the same position, which is exactly
+    //    the accumulating scatter `ScatterReduceOp::Sum` performs.
+    let mut positions = Vec::with_capacity(t_frames * n_fft);
     for t_idx in 0..t_frames {
         let base = t_idx * opts.hop_length;
         for n in 0..n_fft {
-            norm[base + n] += window_sq[n];
+            positions.push((base + n) as i32);
         }
     }
+    let index_row = Tensor::<R>::from_slice(&positions, &[1, t_frames * n_fft], device)?;
+    let index = index_row
+        .broadcast_to(&[b, t_frames * n_fft])?
+        .contiguous()?;
 
-    // Apply normalization.
-    for b_idx in 0..b {
-        for n in 0..raw_len {
-            let nrm = norm[n];
-            if nrm > opts.eps {
-                waveform[b_idx * raw_len + n] /= nrm;
-            } else {
-                waveform[b_idx * raw_len + n] = 0.0;
-            }
-        }
-    }
+    let wave_dst = Tensor::<R>::zeros(&[b, raw_len], dtype, device)?;
+    // `include_self = true` keeps the zeros in `wave_dst`, which under Sum
+    // contribute nothing — that is what makes the destination a clean accumulator.
+    let waveform =
+        client.scatter_reduce(&wave_dst, 1, &index, &windowed, ScatterReduceOp::Sum, true)?;
 
-    // 6. Crop according to the requested padding convention.
+    // 4. Window-square normalization. Batch-independent: every row of the batch
+    //    overlaps identically, so this scatters ONE row and broadcasts it.
+    let window_sq = client.mul(window, window)?;
+    let norm_src = window_sq
+        .reshape(&[1, 1, n_fft])?
+        .broadcast_to(&[1, t_frames, n_fft])?
+        .contiguous()?
+        .reshape(&[1, t_frames * n_fft])?;
+    let norm_dst = Tensor::<R>::zeros(&[1, raw_len], dtype, device)?;
+    let norm = client.scatter_reduce(
+        &norm_dst,
+        1,
+        &index_row,
+        &norm_src,
+        ScatterReduceOp::Sum,
+        true,
+    )?;
+
+    // Divide only where the window-square sum is meaningful. At the very edges
+    // of the signal few or no frames overlap, so the sum approaches zero and the
+    // quotient would blow up; those samples are defined as silence.
+    let eps_t = Tensor::<R>::full_scalar(&[1, raw_len], dtype, opts.eps as f64, device)?;
+    let valid = client.gt(&norm, &eps_t)?;
+    let ones = Tensor::<R>::ones(&[1, raw_len], dtype, device)?;
+    let safe_norm = client.where_cond(&valid, &norm, &ones)?;
+
+    let normalized = client.div(&waveform, &safe_norm)?;
+    let zeros_full = Tensor::<R>::zeros(&[b, raw_len], dtype, device)?;
+    let valid_full = valid.broadcast_to(&[b, raw_len])?.contiguous()?;
+    let normalized = client.where_cond(&valid_full, &normalized, &zeros_full)?;
+
+    // 5. Crop to the requested padding convention.
     let trim = match opts.padding {
         IStftPadding::Center => n_fft / 2,
         IStftPadding::Same => n_fft.saturating_sub(opts.hop_length) / 2,
         IStftPadding::None => 0,
     };
-    let (out_len, output) = if trim == 0 {
-        (raw_len, waveform)
-    } else {
-        if raw_len < 2 * trim {
-            return Err(Error::InvalidArgument {
-                arg: "mag",
-                reason: format!(
-                    "signal of {raw_len} samples is too short to trim {trim} from each end \
-                     ({:?} padding)",
-                    opts.padding
-                ),
-            });
-        }
-        let out_len = raw_len - 2 * trim;
-        let mut cropped = vec![0.0f32; b * out_len];
-        for b_idx in 0..b {
-            let src = &waveform[b_idx * raw_len + trim..b_idx * raw_len + trim + out_len];
-            cropped[b_idx * out_len..(b_idx + 1) * out_len].copy_from_slice(src);
-        }
-        (out_len, cropped)
-    };
-
-    let device = mag.device();
-    Ok(Tensor::<CpuRuntime>::from_slice(
-        &output,
-        &[b, out_len],
-        device,
-    )?)
+    if trim == 0 {
+        return Ok(normalized);
+    }
+    if raw_len < 2 * trim {
+        return Err(Error::InvalidArgument {
+            arg: "mag",
+            reason: format!(
+                "signal of {raw_len} samples is too short to trim {trim} from each end \
+                 ({:?} padding)",
+                opts.padding
+            ),
+        });
+    }
+    Ok(normalized
+        .narrow(1, trim, raw_len - 2 * trim)?
+        .contiguous()?)
 }
 
 #[cfg(test)]
@@ -244,6 +247,7 @@ mod tests {
     use super::*;
     use crate::test_utils::cpu_setup;
     use numr::runtime::Runtime;
+    use numr::runtime::cpu::CpuRuntime;
 
     fn make_tensor(
         data: &[f32],

@@ -2,7 +2,6 @@
 
 use crate::error::Result;
 use numr::runtime::Runtime;
-use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
 
 /// Periodic Hann window of length `n` on the given device.
@@ -10,10 +9,12 @@ use numr::tensor::Tensor;
 /// Uses the periodic (DFT-even) definition `0.5 - 0.5·cos(2π·i/n)`, matching
 /// PyTorch's `torch.hann_window(n, periodic=True)` — the convention Kokoro's
 /// `TorchSTFT` uses for both analysis and synthesis.
-pub fn hann_window(
+/// Built on the host and uploaded once: it is a length-`n` constant, not a
+/// function of any tensor, so there is no device work to keep on device.
+pub fn hann_window<R: Runtime<DType = numr::dtype::DType>>(
     n: usize,
-    device: &<CpuRuntime as Runtime>::Device,
-) -> Result<Tensor<CpuRuntime>> {
+    device: &R::Device,
+) -> Result<Tensor<R>> {
     use std::f32::consts::PI;
     let data: Vec<f32> = (0..n)
         .map(|i| {
@@ -21,7 +22,7 @@ pub fn hann_window(
             0.5 - 0.5 * (2.0 * PI * ratio).cos()
         })
         .collect();
-    Ok(Tensor::<CpuRuntime>::from_slice(&data, &[n], device)?)
+    Ok(Tensor::<R>::from_slice(&data, &[n], device)?)
 }
 
 #[cfg(test)]
@@ -32,7 +33,8 @@ mod tests {
     #[test]
     fn hann_window_endpoints_are_zero() {
         let (_client, device) = cpu_setup();
-        let w = hann_window(8, &device).expect("hann_window must succeed on CPU");
+        let w = hann_window::<numr::runtime::cpu::CpuRuntime>(8, &device)
+            .expect("hann_window must succeed on CPU");
         let v: Vec<f32> = w.to_vec();
         assert!(v[0].abs() < 1e-6);
         // Hann is symmetric around the midpoint; the mid value peaks near 1.

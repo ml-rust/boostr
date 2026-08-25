@@ -29,7 +29,7 @@
 //! unit.
 
 use crate::error::{Error, Result};
-use crate::model::audio::kokoro::{IStftOptions, IStftPadding, hann_window, istft};
+use crate::model::audio::kokoro::{IStftClient, IStftOptions, IStftPadding, hann_window, istft};
 use crate::model::audio::neucodec::client::NeuCodecClient;
 use crate::model::audio::neucodec::config::NeuCodecDecoderConfig;
 use crate::model::audio::neucodec::istft_head::IstftHead;
@@ -208,13 +208,16 @@ impl<R: Runtime<DType = DType>> TrainMode for NeuCodecDecoder<R> {
     }
 }
 
-impl NeuCodecDecoder<numr::runtime::cpu::CpuRuntime> {
+impl<R: Runtime<DType = DType>> NeuCodecDecoder<R> {
     /// Full forward: `x [B, T, fc_in_dim] -> waveform [B, T * hop_length]`.
-    pub fn forward(
-        &self,
-        client: &numr::runtime::cpu::CpuClient,
-        x: &Var<numr::runtime::cpu::CpuRuntime>,
-    ) -> Result<numr::tensor::Tensor<numr::runtime::cpu::CpuRuntime>> {
+    ///
+    /// Runs on any backend: the iSTFT tail is generic and numr's Bluestein path
+    /// covers this vocoder's non-power-of-two `n_fft = 1920`.
+    pub fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<numr::tensor::Tensor<R>>
+    where
+        C: NeuCodecClient<R> + IStftClient<R>,
+        R::Client: NeuCodecClient<R>,
+    {
         let (mag, phase) = self.forward_features(client, x)?;
         let window = hann_window(self.config.n_fft, x.tensor().device())?;
         istft(

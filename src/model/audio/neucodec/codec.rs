@@ -20,6 +20,7 @@
 //! duplicated here.
 
 use crate::error::Result;
+use crate::model::audio::kokoro::IStftClient;
 use crate::model::audio::neucodec::client::NeuCodecClient;
 use crate::model::audio::neucodec::config::NeuCodecDecoderConfig;
 use crate::model::audio::neucodec::decoder::NeuCodecDecoder;
@@ -75,16 +76,17 @@ impl<R: Runtime<DType = DType>> NeuCodec<R> {
     }
 }
 
-impl NeuCodec<numr::runtime::cpu::CpuRuntime> {
+impl<R: Runtime<DType = DType>> NeuCodec<R> {
     /// Full decode: code indices `[B, T]` -> waveform `[B, T * hop_length]`.
     ///
-    /// CPU-only because the ISTFT tail is (see
-    /// [`crate::model::audio::kokoro::istft`]).
-    pub fn decode(
-        &self,
-        client: &numr::runtime::cpu::CpuClient,
-        indices: &Tensor<numr::runtime::cpu::CpuRuntime>,
-    ) -> Result<Tensor<numr::runtime::cpu::CpuRuntime>> {
+    /// Runs on any backend. This was CPU-only until numr gained arbitrary-size
+    /// FFT on GPU; the vocoder tail is the last stage of every generation, so
+    /// pinning it to CPU cost a device round-trip per utterance.
+    pub fn decode<C>(&self, client: &C, indices: &Tensor<R>) -> Result<Tensor<R>>
+    where
+        C: NeuCodecClient<R> + IStftClient<R>,
+        R::Client: NeuCodecClient<R>,
+    {
         let features = self.indices_to_features(client, indices)?;
         self.decoder.forward(client, &features)
     }

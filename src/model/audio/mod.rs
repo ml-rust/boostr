@@ -31,7 +31,10 @@ pub use resample::{
 };
 pub use stft::{StftOptions, stft};
 pub use tts_bundle::{SynthesizeOptions, TtsBundle, TtsError, Voice, default_kokoro_voices};
-pub use vad::{SileroVad, SileroVadWeights, VadConfig, VadState};
+pub use vad::{
+    SileroVad, SileroVadWeights, SpeechSegment, VadConfig, VadSegmentOptions, VadState,
+    segments_from_probabilities,
+};
 pub use wav_decode::{WavData, decode_wav, to_mono};
 pub use wav_encode::{encode_pcm16_raw, encode_wav_f32, encode_wav_pcm16};
 pub use whisper::WhisperEncoder;

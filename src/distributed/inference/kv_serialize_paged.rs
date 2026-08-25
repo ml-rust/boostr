@@ -15,10 +15,20 @@
 //!   [block_table_len: u32 LE]
 //!   [block_ids:     block_table_len * 4 bytes (u32 LE)]   — BlockId = u32
 //! ```
+//!
+//! The format carries **no dtype tag**: element data is f32 little-endian and nothing
+//! else. A cache of any other dtype is refused by [`serialize_paged_kv_cache`] rather
+//! than reinterpreted or converted.
 
 use crate::inference::{BlockTable, LayeredPagedKvCache};
 use crate::{DType, Runtime};
 use anyhow::{Result, anyhow};
+
+/// The only element type this wire format can carry.
+///
+/// The header records dimensions and block ids but no dtype tag, so both sides are
+/// hard-wired to f32.
+const WIRE_DTYPE: DType = DType::F32;
 
 /// Read a little-endian `u32` at `offset`, erroring rather than panicking when the
 /// buffer is too short.
@@ -46,7 +56,7 @@ fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32> {
 ///
 /// `len` is a multiple of 4 and already bounds-checked by the caller, so the trailing
 /// partial chunk `chunks_exact` would leave is always empty.
-fn read_f32_le_vec(bytes: &[u8]) -> Vec<f32> {
+pub(super) fn read_f32_le_vec(bytes: &[u8]) -> Vec<f32> {
     bytes
         .as_chunks::<4>()
         .0
@@ -97,6 +107,22 @@ where
         buf.extend_from_slice(&num_blocks.to_le_bytes());
         buf.extend_from_slice(&num_heads.to_le_bytes());
         buf.extend_from_slice(&head_dim.to_le_bytes());
+
+        // `try_to_vec::<f32>()` does not check dtype: on a bf16 layer it copies
+        // `numel * 4` bytes out of a `numel * 2` byte allocation and reinterprets the
+        // result as f32 — a silent wrong answer at the peer. Converting to f32 is no
+        // better, since the peer has no dtype tag telling it the values changed.
+        let layer_dtype = layer.dtype();
+        if layer_dtype != WIRE_DTYPE {
+            return Err(anyhow!(
+                "Paged KV cache layer {layer_idx} has dtype {layer_dtype}, but the paged KV \
+                 cache wire format carries {WIRE_DTYPE} only (the header has no dtype tag). \
+                 Refusing to transfer: reinterpreting {layer_dtype} bytes as {WIRE_DTYPE} \
+                 corrupts the cache, and converting would change the values the peer \
+                 receives without telling it. Allocate the cache with \
+                 DType::{WIRE_DTYPE:?} for disaggregated transfer."
+            ));
+        }
 
         let k_data: Vec<f32> = layer.k_cache().try_to_vec::<f32>()?;
         let v_data: Vec<f32> = layer.v_cache().try_to_vec::<f32>()?;
@@ -260,7 +286,7 @@ where
     }
 
     if raw_layers.is_empty() {
-        let cache = LayeredPagedKvCache::<R>::new(0, 0, block_size, 1, 64, DType::F32, device)?;
+        let cache = LayeredPagedKvCache::<R>::new(0, 0, block_size, 1, 64, WIRE_DTYPE, device)?;
         return Ok((cache, Vec::new(), Vec::new()));
     }
 
@@ -271,10 +297,21 @@ where
         block_size,
         first.num_heads,
         first.head_dim,
-        DType::F32,
+        WIRE_DTYPE,
         device,
     )?;
     paged_cache.set_seq_len(seq_len);
+
+    // The bytes carry no dtype tag, so the reader decodes them as `WIRE_DTYPE` and
+    // requested a `WIRE_DTYPE` cache above. State that symmetry as a check rather than
+    // leaving it implied.
+    let built_dtype = paged_cache.layer(0).dtype();
+    if built_dtype != WIRE_DTYPE {
+        return Err(anyhow!(
+            "Paged KV cache wire format decodes {WIRE_DTYPE} only, but the reconstructed \
+             cache has dtype {built_dtype}"
+        ));
+    }
 
     let mut block_tables: Vec<BlockTable> = Vec::with_capacity(num_layers);
     let mut layer_data: Vec<PagedLayerData> = Vec::with_capacity(num_layers);
@@ -362,6 +399,30 @@ mod tests {
         .expect("a misaligned buffer must deserialize");
         assert_eq!(layer_data[0].k_data, vec![1.0, 2.0]);
         assert_eq!(layer_data[0].v_data, vec![3.0, 4.0]);
+    }
+
+    /// The paged serializer carries the same f32-only wire format and the same
+    /// unchecked `try_to_vec::<f32>()`, so it must refuse a non-f32 cache by name.
+    #[test]
+    fn test_serialize_rejects_non_f32_cache() {
+        let device = crate::CpuDevice::new();
+        let cache =
+            LayeredPagedKvCache::<crate::CpuRuntime>::new(1, 2, 16, 2, 4, DType::BF16, &device)
+                .unwrap();
+        let block_table = BlockTable::new(16);
+
+        let Err(err) = serialize_paged_kv_cache(&cache, &block_table) else {
+            panic!("a BF16 paged KV cache must be refused, not serialized as f32");
+        };
+        let msg = err.to_string();
+        // `DType` displays lowercase (`bf16`, `f32`), so compare case-insensitively
+        // rather than against a spelling the type does not produce.
+        let lower = msg.to_lowercase();
+        assert!(lower.contains("bf16"), "error must name the dtype: {msg}");
+        assert!(
+            lower.contains("f32") && lower.contains("only"),
+            "error must state the wire format is f32-only: {msg}"
+        );
     }
 
     #[test]

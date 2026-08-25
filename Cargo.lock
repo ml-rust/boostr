@@ -1309,8 +1309,6 @@ dependencies = [
 [[package]]
 name = "nexar"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dac038912d8e0f36309f3368c0980377730edd4ad5d082627227277cdd870c3a"
 dependencies = [
  "bytes",
  "crossbeam-queue",
@@ -1896,8 +1894,6 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "regexr"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a10e63d4a65161fc4e8a0bf34c9b65aaee6a325fd6cf44a624204d18276c6551"
 dependencies = [
  "aho-corasick",
  "dynasm",

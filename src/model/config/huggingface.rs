@@ -118,6 +118,10 @@ pub struct HuggingFaceRopeScaling {
     pub low_freq_factor: Option<f32>,
     #[serde(default)]
     pub high_freq_factor: Option<f32>,
+    #[serde(default)]
+    pub short_factor: Option<Vec<f32>>,
+    #[serde(default)]
+    pub long_factor: Option<Vec<f32>>,
 }
 
 impl HuggingFaceConfig {
@@ -156,6 +160,8 @@ impl HuggingFaceConfig {
                     attention_factor: rs.attention_factor,
                     beta_fast: rs.beta_fast,
                     beta_slow: rs.beta_slow,
+                    short_factor: rs.short_factor.clone(),
+                    long_factor: rs.long_factor.clone(),
                 })
             });
 

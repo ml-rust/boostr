@@ -39,6 +39,9 @@ impl<R: Runtime> RoPE<R> {
     /// - Llama3 (NTK-aware): frequency-dependent scaling with low/high freq factors
     /// - YaRN: ramped interpolation/extrapolation blend plus `attention_factor` (mscale)
     ///   folded into the cos/sin caches
+    /// - LongRoPE: per-dimension divisor list (`short_factor` below/at
+    ///   `original_max_position_embeddings`, else `long_factor`) plus an
+    ///   `attention_scaling` (mscale) folded into the cos/sin caches
     ///
     /// Any other `scaling_type` is an error. `"dynamic"` is rejected: it recomputes
     /// frequencies per forward as the sequence grows, which a precomputed cache cannot do.
@@ -96,6 +99,10 @@ impl<R: Runtime> RoPE<R> {
                 "yarn" => {
                     attention_scaling = apply_yarn_scaling(&mut freqs, head_dim, base, cfg)?;
                 }
+                "longrope" => {
+                    attention_scaling =
+                        apply_longrope_scaling(&mut freqs, head_dim, base, max_seq_len, cfg)?;
+                }
                 "dynamic" => {
                     return Err(Error::InvalidArgument {
                         arg: "rope_scaling.type",
@@ -112,7 +119,7 @@ impl<R: Runtime> RoPE<R> {
                         arg: "rope_scaling.type",
                         reason: format!(
                             "unsupported RoPE scaling type '{other}'; supported: \
-                             'linear', 'llama3', 'yarn'"
+                             'linear', 'llama3', 'yarn', 'longrope'"
                         ),
                     });
                 }
@@ -173,6 +180,34 @@ impl<R: Runtime> RoPE<R> {
     pub fn sin_cache(&self) -> &Var<R> {
         &self.sin_cache
     }
+
+    /// Keep only the first `num_positions` rows of the cos/sin caches.
+    ///
+    /// The caches are built at the model's configured `max_position_embeddings`
+    /// because that length selects the scaling regime, but a model that only
+    /// ever rotates a few positions does not need the rest resident.
+    pub fn narrow_positions(&self, num_positions: usize) -> Result<Self> {
+        let len = self.cos_cache.tensor().shape()[0];
+        if num_positions == 0 || num_positions > len {
+            return Err(Error::InvalidArgument {
+                arg: "num_positions",
+                reason: format!(
+                    "num_positions must be nonzero and at most the cache length {len}, got {num_positions}"
+                ),
+            });
+        }
+        let cos = self
+            .cos_cache
+            .tensor()
+            .narrow(0, 0, num_positions)?
+            .contiguous()?;
+        let sin = self
+            .sin_cache
+            .tensor()
+            .narrow(0, 0, num_positions)?
+            .contiguous()?;
+        Ok(Self::new(cos, sin))
+    }
 }
 
 /// YaRN frequency scaling: ramped interpolation/extrapolation blend.
@@ -229,6 +264,84 @@ fn apply_yarn_scaling(
             (0.1 * factor.ln() + 1.0) as f32
         }
     }))
+}
+
+/// LongRoPE frequency scaling: per-dimension divisor list (Phi-3,
+/// MiniCPM4-style), unlike YaRN/llama3's single shared factor.
+///
+/// `max_seq_len` plays the role HF's `rope_scaling` config calls
+/// `max_position_embeddings`: the length the cache is precomputed for.
+/// Picks `short_factor` when `max_seq_len <= original_max_position_embeddings`,
+/// else `long_factor`, ONCE for the whole cache. Mutates `freqs` in place and
+/// returns the `attention_scaling` (mscale), which the caller folds into the
+/// cos/sin caches since it scales both alike.
+fn apply_longrope_scaling(
+    freqs: &mut [f32],
+    head_dim: usize,
+    base: f32,
+    max_seq_len: usize,
+    cfg: &RopeScalingConfig,
+) -> Result<f32> {
+    let half_dim = head_dim / 2;
+    let original = cfg
+        .original_max_position_embeddings
+        .filter(|&o| o > 0)
+        .ok_or_else(|| Error::InvalidArgument {
+            arg: "rope_scaling.original_max_position_embeddings",
+            reason: "longrope RoPE scaling requires a nonzero \
+                     original_max_position_embeddings; set it in the checkpoint's \
+                     rope_scaling config"
+                .to_string(),
+        })?;
+
+    let use_short = max_seq_len <= original;
+    let factor_list = if use_short {
+        cfg.short_factor
+            .as_ref()
+            .ok_or_else(|| Error::InvalidArgument {
+                arg: "rope_scaling.short_factor",
+                reason: "longrope RoPE scaling requires rope_scaling.short_factor when \
+                     max_seq_len <= original_max_position_embeddings; set it in the \
+                     checkpoint's rope_scaling config"
+                    .to_string(),
+            })?
+    } else {
+        cfg.long_factor
+            .as_ref()
+            .ok_or_else(|| Error::InvalidArgument {
+                arg: "rope_scaling.long_factor",
+                reason: "longrope RoPE scaling requires rope_scaling.long_factor when \
+                     max_seq_len > original_max_position_embeddings; set it in the \
+                     checkpoint's rope_scaling config"
+                    .to_string(),
+            })?
+    };
+    if factor_list.len() != half_dim {
+        return Err(Error::InvalidArgument {
+            arg: if use_short {
+                "rope_scaling.short_factor"
+            } else {
+                "rope_scaling.long_factor"
+            },
+            reason: format!(
+                "expected {half_dim} entries (head_dim/2={half_dim}), got {}",
+                factor_list.len()
+            ),
+        });
+    }
+
+    for (i, f) in freqs.iter_mut().enumerate() {
+        let inv_freq = 1.0 / base.powf(2.0 * i as f32 / head_dim as f32);
+        *f = inv_freq / factor_list[i];
+    }
+
+    let attention_scaling = if max_seq_len == original {
+        1.0
+    } else {
+        let ratio = max_seq_len as f64 / original as f64;
+        (1.0 + ratio.ln() / (original as f64).ln()).sqrt() as f32
+    };
+    Ok(attention_scaling)
 }
 
 #[cfg(test)]

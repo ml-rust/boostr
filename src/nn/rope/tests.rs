@@ -52,6 +52,8 @@ fn test_rope_linear_scaling() {
         attention_factor: None,
         beta_fast: None,
         beta_slow: None,
+        short_factor: None,
+        long_factor: None,
     };
 
     let unscaled = RoPE::<CpuRuntime>::precompute_freqs(4, 8, 10000.0, None, &device).unwrap();
@@ -87,6 +89,8 @@ fn test_rope_llama3_scaling() {
         attention_factor: None,
         beta_fast: None,
         beta_slow: None,
+        short_factor: None,
+        long_factor: None,
     };
 
     let rope =
@@ -120,6 +124,8 @@ fn yarn_cfg() -> RopeScalingConfig {
         attention_factor: None,
         beta_fast: Some(32.0),
         beta_slow: Some(1.0),
+        short_factor: None,
+        long_factor: None,
     }
 }
 
@@ -235,6 +241,8 @@ fn test_rope_linear_llama3_unscaled_by_attention_factor() {
             attention_factor: Some(0.25),
             beta_fast: Some(32.0),
             beta_slow: Some(1.0),
+            short_factor: None,
+            long_factor: None,
         };
         let rope =
             RoPE::<CpuRuntime>::precompute_freqs(4, 8, 10000.0, Some(&cfg), &device).unwrap();
@@ -243,4 +251,157 @@ fn test_rope_linear_llama3_unscaled_by_attention_factor() {
             assert!((c - 1.0).abs() < 1e-6, "{scaling_type} cos[0,{i}]={c}");
         }
     }
+}
+
+fn longrope_cfg(
+    short_factor: Vec<f32>,
+    long_factor: Vec<f32>,
+    original_max_position_embeddings: Option<usize>,
+) -> RopeScalingConfig {
+    RopeScalingConfig {
+        scaling_type: "longrope".to_string(),
+        factor: 1.0,
+        original_max_position_embeddings,
+        low_freq_factor: None,
+        high_freq_factor: None,
+        attention_factor: None,
+        beta_fast: None,
+        beta_slow: None,
+        short_factor: Some(short_factor),
+        long_factor: Some(long_factor),
+    }
+}
+
+#[test]
+fn test_rope_longrope_short_factor_frequencies() {
+    // head_dim=8, half_dim=4, base=10000, original=8, max_seq_len=8 (<=
+    // original -> short_factor path, and max_seq_len == original ->
+    // attention_scaling == 1).
+    //   inv_freq = 10000^(-2i/8) = [1, 0.1, 0.01, 0.001]
+    //   short_factor = [2, 4, 5, 8] -> divided = [0.5, 0.025, 0.002, 0.000125]
+    let device = CpuDevice::new();
+    let cfg = longrope_cfg(vec![2.0, 4.0, 5.0, 8.0], vec![1.0; 4], Some(8));
+    let rope = RoPE::<CpuRuntime>::precompute_freqs(8, 8, 10000.0, Some(&cfg), &device).unwrap();
+
+    let expected = [0.5f32, 0.025, 0.002, 0.000125];
+    let got = freqs_at_pos1(&rope, 4);
+    for (i, (&e, &g)) in expected.iter().zip(got.iter()).enumerate() {
+        assert!(
+            (g - e).abs() < 1e-6,
+            "longrope short_factor freq[{i}]: expected {e}, got {g}"
+        );
+    }
+}
+
+#[test]
+fn test_rope_longrope_long_factor_and_attention_scaling() {
+    // max_seq_len=16 > original=8 selects long_factor (short_factor=999 would
+    // give wildly different frequencies if wrongly selected, so this also
+    // pins the selection, not just the scaling).
+    //   inv_freq = 10000^(-2i/8) = [1, 0.1, 0.01, 0.001]
+    //   long_factor = [2, 2, 2, 2] -> divided = [0.5, 0.05, 0.005, 0.0005]
+    //   attention_scaling = sqrt(1 + ln(16/8) / ln(8)) ~= 1.1547005
+    let device = CpuDevice::new();
+    let cfg = longrope_cfg(vec![999.0; 4], vec![2.0; 4], Some(8));
+    let rope = RoPE::<CpuRuntime>::precompute_freqs(16, 8, 10000.0, Some(&cfg), &device).unwrap();
+
+    let expected = [0.5f32, 0.05, 0.005, 0.0005];
+    let got = freqs_at_pos1(&rope, 4);
+    for (i, (&e, &g)) in expected.iter().zip(got.iter()).enumerate() {
+        assert!(
+            (g - e).abs() < 1e-6,
+            "longrope long_factor freq[{i}]: expected {e}, got {g}"
+        );
+    }
+
+    let cos: Vec<f32> = rope.cos_cache().tensor().to_vec();
+    let expected_scaling = 1.154_700_5f32;
+    for (i, &c) in cos.iter().take(4).enumerate() {
+        assert!(
+            (c - expected_scaling).abs() < 1e-5,
+            "attention_scaling cos[0,{i}]: expected {expected_scaling}, got {c}"
+        );
+    }
+}
+
+#[test]
+fn test_rope_longrope_wrong_length_factor_errors() {
+    let device = CpuDevice::new();
+    let cfg = longrope_cfg(vec![1.0; 3], vec![1.0; 4], Some(8));
+    let err = RoPE::<CpuRuntime>::precompute_freqs(8, 8, 10000.0, Some(&cfg), &device)
+        .err()
+        .expect("wrong-length short_factor must error");
+    let msg = err.to_string();
+    assert!(msg.contains("expected 4"), "unexpected error: {msg}");
+    assert!(msg.contains("got 3"), "unexpected error: {msg}");
+}
+
+#[test]
+fn test_rope_longrope_requires_original_max_position_embeddings() {
+    let device = CpuDevice::new();
+    let cfg = longrope_cfg(vec![1.0; 4], vec![1.0; 4], None);
+    let err = RoPE::<CpuRuntime>::precompute_freqs(8, 8, 10000.0, Some(&cfg), &device)
+        .err()
+        .expect("longrope without original_max_position_embeddings must error");
+    assert!(
+        err.to_string().contains("original_max_position_embeddings"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_rope_narrow_positions_keeps_matching_rows() {
+    let device = CpuDevice::new();
+    let rope = RoPE::<CpuRuntime>::precompute_freqs(128, 64, 10000.0, None, &device).unwrap();
+    let narrowed = rope.narrow_positions(5).unwrap();
+    assert_eq!(narrowed.cos_cache().shape(), &[5, 32]);
+    assert_eq!(narrowed.sin_cache().shape(), &[5, 32]);
+
+    let cos_full: Vec<f32> = rope.cos_cache().tensor().to_vec();
+    let sin_full: Vec<f32> = rope.sin_cache().tensor().to_vec();
+    let cos_narrow: Vec<f32> = narrowed.cos_cache().tensor().to_vec();
+    let sin_narrow: Vec<f32> = narrowed.sin_cache().tensor().to_vec();
+    assert_eq!(cos_narrow, cos_full[..5 * 32]);
+    assert_eq!(sin_narrow, sin_full[..5 * 32]);
+}
+
+#[test]
+fn test_rope_narrow_positions_rejects_zero() {
+    let device = CpuDevice::new();
+    let rope = RoPE::<CpuRuntime>::precompute_freqs(128, 64, 10000.0, None, &device).unwrap();
+    let err = rope
+        .narrow_positions(0)
+        .err()
+        .expect("num_positions=0 must error");
+    assert!(
+        err.to_string().contains("num_positions"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_rope_narrow_positions_rejects_over_length() {
+    let device = CpuDevice::new();
+    let rope = RoPE::<CpuRuntime>::precompute_freqs(128, 64, 10000.0, None, &device).unwrap();
+    let err = rope
+        .narrow_positions(129)
+        .err()
+        .expect("num_positions > cache length must error");
+    let msg = err.to_string();
+    assert!(msg.contains("128"), "unexpected error: {msg}");
+    assert!(msg.contains("129"), "unexpected error: {msg}");
+}
+
+#[test]
+fn test_rope_longrope_requires_short_factor() {
+    let device = CpuDevice::new();
+    let mut cfg = longrope_cfg(vec![1.0; 4], vec![1.0; 4], Some(8));
+    cfg.short_factor = None;
+    let err = RoPE::<CpuRuntime>::precompute_freqs(8, 8, 10000.0, Some(&cfg), &device)
+        .err()
+        .expect("longrope without short_factor must error");
+    assert!(
+        err.to_string().contains("short_factor"),
+        "unexpected error: {err}"
+    );
 }

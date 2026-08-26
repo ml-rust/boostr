@@ -134,6 +134,10 @@ pub struct RopeScalingConfig {
     pub beta_fast: Option<f32>,
     #[serde(default)]
     pub beta_slow: Option<f32>,
+    #[serde(default)]
+    pub short_factor: Option<Vec<f32>>,
+    #[serde(default)]
+    pub long_factor: Option<Vec<f32>>,
 }
 
 #[cfg(test)]

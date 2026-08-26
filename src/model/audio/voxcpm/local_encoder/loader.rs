@@ -30,8 +30,8 @@ use crate::model::audio::voxcpm::local_encoder::config::LocalEncoderConfig;
 use crate::model::audio::voxcpm::local_encoder::encoder::LocalEncoder;
 use crate::model::audio::voxcpm::local_encoder::layer::LocalEncoderLayer;
 use crate::model::audio::voxcpm::local_encoder::mlp::LocalEncoderMlp;
-use crate::model::audio::voxcpm::long_rope::build_long_rope_cache;
-use crate::nn::{Linear, RmsNorm};
+use crate::model::config::RopeScalingConfig;
+use crate::nn::{Linear, RmsNorm, RoPE};
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
@@ -102,15 +102,39 @@ where
             false,
         );
 
-        let rope = build_long_rope_cache::<R>(
-            cfg.num_positions,
+        // Cache is built at `max_position_embeddings` (not `num_positions`), matching
+        // every other model in this codebase (e.g. `model/llama/model/forward.rs`):
+        // `RoPE::forward`/`apply_rope` narrow `[max_seq_len, D/2]` caches down to the
+        // actual sequence length at call time (`ops/impl_generic/attention/rope/common.rs`).
+        // Building at `num_positions` (5) instead would feed 5 as the "max_position_embeddings"
+        // role in the longrope `attention_scaling` formula, which is wrong for
+        // this checkpoint (max_position_embeddings == original_max_position_embeddings
+        // == 32768) and would silently produce a different scale than the
+        // checkpoint's real config implies.
+        let rope_scaling = RopeScalingConfig {
+            scaling_type: "longrope".to_string(),
+            factor: 1.0,
+            original_max_position_embeddings: Some(cfg.original_max_position_embeddings),
+            low_freq_factor: None,
+            high_freq_factor: None,
+            attention_factor: None,
+            beta_fast: None,
+            beta_slow: None,
+            short_factor: Some(cfg.rope_short_factor.clone()),
+            long_factor: Some(cfg.rope_long_factor.clone()),
+        };
+        let rope = RoPE::<R>::precompute_freqs(
+            cfg.max_position_embeddings,
             cfg.head_dim,
             cfg.rope_theta,
-            &cfg.rope_short_factor,
-            cfg.max_position_embeddings,
-            cfg.original_max_position_embeddings,
+            Some(&rope_scaling),
             device,
         )?;
+        // The cache above is built long (32768 rows) only so `max_seq_len` picks
+        // the right longrope scaling regime; `feat_encoder` only ever rotates
+        // `cfg.num_positions` (5) positions per (batch, frame), so the rest is
+        // dead memory once the scaling has been baked in.
+        let rope = rope.narrow_positions(cfg.num_positions)?;
 
         Ok(Self {
             in_proj,

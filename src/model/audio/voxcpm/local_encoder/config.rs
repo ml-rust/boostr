@@ -31,8 +31,10 @@ pub struct LocalEncoderConfig {
     /// Per-dimension LongRoPE short-context rescale, length `head_dim / 2`.
     pub rope_short_factor: Vec<f32>,
     /// Per-dimension LongRoPE long-context rescale, length `head_dim / 2`.
-    /// Read/stored for config completeness; never applied at this module's
-    /// fixed 5-position sequence length.
+    /// `RoPE::precompute_freqs` selects this over `rope_short_factor` only
+    /// when `max_position_embeddings > original_max_position_embeddings`;
+    /// on this checkpoint the two are equal (32768 == 32768), so
+    /// `rope_short_factor` is always selected in practice.
     pub rope_long_factor: Vec<f32>,
 }
 

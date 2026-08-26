@@ -16,18 +16,19 @@
 //!
 //! `encoder.fc_logvar` (same shape as `fc_mu`) is NOT loaded: `AudioVAE.encode()`
 //! returns `mu` only, deterministically, with no reparameterisation sampling
-//! (see [`crate::model::audio::voxcpm::encoder`] module docs).
+//! (see [`crate::model::audio::voxcpm::vae::encoder`] module docs).
 
-use super::support::TensorLoader;
 use crate::error::{Error, Result};
 use crate::format::safetensors_loader::SafeTensorsLoader;
-use crate::model::audio::voxcpm::causal_conv1d::CausalConv1d;
-use crate::model::audio::voxcpm::encoder::{
+use crate::model::audio::voxcpm::loader::support::TensorLoader;
+use crate::model::audio::voxcpm::vae::causal_conv1d::CausalConv1d;
+use crate::model::audio::voxcpm::vae::encoder::{
     AudioVaeEncoder, AudioVaeEncoderWeights, FINAL_HIDDEN, FRONT_HIDDEN, HEAD_KERNEL,
     INPUT_CHANNELS, OUTPUT_CHANNELS, RES_KERNEL, RES_UNIT_DILATIONS, STRIDES,
 };
-use crate::model::audio::voxcpm::encoder_block::{EncoderBlock, EncoderBlockWeights};
+use crate::model::audio::voxcpm::vae::encoder_block::{EncoderBlock, EncoderBlockWeights};
 use numr::dtype::DType;
+use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
 use std::path::Path;
 
@@ -47,7 +48,10 @@ fn block_dims() -> [(usize, usize); 4] {
 /// encoder-specific.
 type EncoderLoader<'a, R> = TensorLoader<'a, R>;
 
-impl<R: Runtime<DType = DType>> EncoderLoader<'_, R> {
+impl<R: Runtime<DType = DType>> EncoderLoader<'_, R>
+where
+    R::Client: TypeConversionOps<R>,
+{
     fn encoder_block(
         &mut self,
         model_idx: usize,
@@ -132,7 +136,10 @@ impl<R: Runtime<DType = DType>> EncoderLoader<'_, R> {
     }
 }
 
-impl<R: Runtime<DType = DType>> AudioVaeEncoder<R> {
+impl<R: Runtime<DType = DType>> AudioVaeEncoder<R>
+where
+    R::Client: TypeConversionOps<R>,
+{
     /// Load the `AudioVAE` encoder from a VoxCPM2 checkpoint.
     ///
     /// `path` may be either the `model.safetensors` file or the directory
@@ -152,6 +159,7 @@ impl<R: Runtime<DType = DType>> AudioVaeEncoder<R> {
             loader: &mut loader,
             device,
             prefix: prefix.to_string(),
+            dtype: None,
         }
         .build_encoder()?;
         Ok(Self::new(weights))

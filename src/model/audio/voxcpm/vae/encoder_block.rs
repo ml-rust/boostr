@@ -9,10 +9,10 @@
 //! `x = Snake(input_dim) -> CausalConv1d::new_strided(input_dim->output_dim, stride)`
 
 use crate::error::{Error, Result};
-use crate::model::audio::voxcpm::causal_conv1d::CausalConv1d;
 use crate::model::audio::voxcpm::client::VoxCpmClient;
-use crate::model::audio::voxcpm::res_unit::ResUnit;
-use crate::model::audio::voxcpm::snake::Snake;
+use crate::model::audio::voxcpm::vae::causal_conv1d::CausalConv1d;
+use crate::model::audio::voxcpm::vae::res_unit::ResUnit;
+use crate::model::audio::voxcpm::vae::snake::Snake;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;

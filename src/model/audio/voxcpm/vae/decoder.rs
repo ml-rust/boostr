@@ -18,10 +18,10 @@
 //! Inference-only: built from plain [`Tensor<R>`] weights, no autograd.
 
 use crate::error::{Error, Result};
-use crate::model::audio::voxcpm::causal_conv1d::CausalConv1d;
 use crate::model::audio::voxcpm::client::VoxCpmClient;
-use crate::model::audio::voxcpm::decoder_block::DecoderBlock;
-use crate::model::audio::voxcpm::snake::Snake;
+use crate::model::audio::voxcpm::vae::causal_conv1d::CausalConv1d;
+use crate::model::audio::voxcpm::vae::decoder_block::DecoderBlock;
+use crate::model::audio::voxcpm::vae::snake::Snake;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -131,9 +131,9 @@ impl<R: Runtime<DType = DType>> AudioVaeDecoder<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::audio::voxcpm::causal_transpose_conv1d::CausalTransposeConv1d;
-    use crate::model::audio::voxcpm::decoder_block::DecoderBlockWeights;
-    use crate::model::audio::voxcpm::res_unit::ResUnit;
+    use crate::model::audio::voxcpm::vae::causal_transpose_conv1d::CausalTransposeConv1d;
+    use crate::model::audio::voxcpm::vae::decoder_block::DecoderBlockWeights;
+    use crate::model::audio::voxcpm::vae::res_unit::ResUnit;
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;
 

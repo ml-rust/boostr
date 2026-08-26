@@ -19,21 +19,22 @@
 //! ```
 //!
 //! `decoder.sr_bin_boundaries` (`[3]`, I32) is NOT loaded: this port always
-//! decodes at the fixed [`crate::model::audio::voxcpm::decoder::DEFAULT_SR_BUCKET`]
+//! decodes at the fixed [`crate::model::audio::voxcpm::vae::decoder::DEFAULT_SR_BUCKET`]
 //! (see that constant's doc comment), so the boundaries used to derive a
 //! bucket from an arbitrary target rate are never consulted.
 
-use super::support::TensorLoader;
 use crate::error::{Error, Result};
 use crate::format::safetensors_loader::SafeTensorsLoader;
-use crate::model::audio::voxcpm::causal_conv1d::CausalConv1d;
-use crate::model::audio::voxcpm::causal_transpose_conv1d::CausalTransposeConv1d;
-use crate::model::audio::voxcpm::decoder::{
+use crate::model::audio::voxcpm::loader::support::TensorLoader;
+use crate::model::audio::voxcpm::vae::causal_conv1d::CausalConv1d;
+use crate::model::audio::voxcpm::vae::causal_transpose_conv1d::CausalTransposeConv1d;
+use crate::model::audio::voxcpm::vae::decoder::{
     AudioVaeDecoder, AudioVaeDecoderWeights, CAUSAL_KERNEL, FINAL_CHANNELS, FRONT_HIDDEN,
     INPUT_CHANNELS, NUM_SR_BUCKETS, OUTPUT_CHANNELS, RES_UNIT_DILATIONS, STRIDES,
 };
-use crate::model::audio::voxcpm::decoder_block::{DecoderBlock, DecoderBlockWeights};
+use crate::model::audio::voxcpm::vae::decoder_block::{DecoderBlock, DecoderBlockWeights};
 use numr::dtype::DType;
+use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
 use std::path::Path;
 
@@ -53,7 +54,10 @@ fn block_dims() -> [(usize, usize); 6] {
 /// decoder-specific.
 type DecoderLoader<'a, R> = TensorLoader<'a, R>;
 
-impl<R: Runtime<DType = DType>> DecoderLoader<'_, R> {
+impl<R: Runtime<DType = DType>> DecoderLoader<'_, R>
+where
+    R::Client: TypeConversionOps<R>,
+{
     fn decoder_block(
         &mut self,
         model_idx: usize,
@@ -146,7 +150,10 @@ impl<R: Runtime<DType = DType>> DecoderLoader<'_, R> {
     }
 }
 
-impl<R: Runtime<DType = DType>> AudioVaeDecoder<R> {
+impl<R: Runtime<DType = DType>> AudioVaeDecoder<R>
+where
+    R::Client: TypeConversionOps<R>,
+{
     /// Load the `AudioVAE` decoder from a VoxCPM2 checkpoint.
     ///
     /// `path` may be either the `model.safetensors` file or the directory
@@ -166,6 +173,7 @@ impl<R: Runtime<DType = DType>> AudioVaeDecoder<R> {
             loader: &mut loader,
             device,
             prefix: prefix.to_string(),
+            dtype: None,
         }
         .build_decoder()?;
         Ok(Self::new(weights))

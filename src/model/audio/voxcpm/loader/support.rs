@@ -6,22 +6,31 @@
 
 use crate::error::{Error, Result};
 use crate::format::safetensors_loader::SafeTensorsLoader;
-use crate::model::audio::voxcpm::causal_conv1d::CausalConv1d;
-use crate::model::audio::voxcpm::res_unit::ResUnit;
-use crate::model::audio::voxcpm::snake::Snake;
+use crate::model::audio::voxcpm::vae::causal_conv1d::CausalConv1d;
+use crate::model::audio::voxcpm::vae::res_unit::ResUnit;
+use crate::model::audio::voxcpm::vae::snake::Snake;
 use numr::dtype::DType;
+use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
 /// Load `{prefix}.{name}` and verify its shape matches `expected`.
-pub(super) fn checked_tensor<R: Runtime<DType = DType>>(
+///
+/// A trailing `.` on `prefix` is absorbed, and an empty `prefix` reads
+/// `name` at the checkpoint root, so callers can pass either spelling.
+pub(crate) fn checked_tensor<R: Runtime<DType = DType>>(
     loader: &mut SafeTensorsLoader,
     device: &R::Device,
     prefix: &str,
     name: &str,
     expected: &[usize],
 ) -> Result<Tensor<R>> {
-    let full = format!("{prefix}.{name}");
+    let prefix = prefix.trim_end_matches('.');
+    let full = if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}.{name}")
+    };
     let t = loader.load_tensor::<R>(&full, device)?;
     if t.shape() != expected {
         return Err(Error::ModelError {
@@ -40,24 +49,41 @@ pub(super) fn checked_tensor<R: Runtime<DType = DType>>(
 /// kernel-size constants, so that walk lives here once. `encoder.rs` and
 /// `decoder.rs` each add their own inherent `impl` (block/front/head
 /// assembly) on this same type for their block-specific layout.
-pub(super) struct TensorLoader<'a, R: Runtime<DType = DType>> {
-    pub(super) loader: &'a mut SafeTensorsLoader,
-    pub(super) device: &'a R::Device,
-    pub(super) prefix: String,
+pub(crate) struct TensorLoader<'a, R: Runtime<DType = DType>> {
+    pub(crate) loader: &'a mut SafeTensorsLoader,
+    pub(crate) device: &'a R::Device,
+    pub(crate) prefix: String,
+    /// Cast every tensor this loader reads to this dtype. `None` keeps the
+    /// checkpoint's own (the AudioVAE encoder/decoder construction sites
+    /// pass `None`: that model is F32-native, verified to 5e-07 / 2.4e-05
+    /// against PyTorch fixtures, and must not be cast).
+    pub(crate) dtype: Option<DType>,
 }
 
-impl<R: Runtime<DType = DType>> TensorLoader<'_, R> {
-    pub(super) fn tensor(&mut self, name: &str, expected: &[usize]) -> Result<Tensor<R>> {
-        checked_tensor::<R>(self.loader, self.device, &self.prefix, name, expected)
+impl<R: Runtime<DType = DType>> TensorLoader<'_, R>
+where
+    R::Client: TypeConversionOps<R>,
+{
+    pub(crate) fn tensor(&mut self, name: &str, expected: &[usize]) -> Result<Tensor<R>> {
+        let t = checked_tensor::<R>(self.loader, self.device, &self.prefix, name, expected)?;
+        // VoxCPM2 ships BF16 weights; the AudioVAE ships F32. A forward pass
+        // mixing the two errors rather than promoting, so the caller states
+        // which dtype it wants and the cast happens once, here.
+        match self.dtype {
+            // `contiguous` first: a cast reads the source elementwise and the
+            // safetensors view may be strided, which `cast` refuses.
+            Some(want) if t.dtype() != want => Ok(t.contiguous()?.to_dtype(want)?.contiguous()?),
+            _ => Ok(t),
+        }
     }
 
-    pub(super) fn snake(&mut self, name: &str, channels: usize) -> Result<Snake<R>> {
+    pub(crate) fn snake(&mut self, name: &str, channels: usize) -> Result<Snake<R>> {
         let alpha = self.tensor(&format!("{name}.alpha"), &[1, channels, 1])?;
         Snake::new(alpha)
     }
 
     /// Depthwise causal conv: `[channels, 1, kernel]`.
-    pub(super) fn depthwise_conv(
+    pub(crate) fn depthwise_conv(
         &mut self,
         name: &str,
         channels: usize,
@@ -70,7 +96,7 @@ impl<R: Runtime<DType = DType>> TensorLoader<'_, R> {
     }
 
     /// Pointwise (`k=1`, `groups=1`) causal conv: `[out, in, 1]`.
-    pub(super) fn pointwise_conv(
+    pub(crate) fn pointwise_conv(
         &mut self,
         name: &str,
         in_c: usize,
@@ -81,7 +107,7 @@ impl<R: Runtime<DType = DType>> TensorLoader<'_, R> {
         CausalConv1d::new(weight, Some(bias), 1, 1, 1)
     }
 
-    pub(super) fn res_unit(
+    pub(crate) fn res_unit(
         &mut self,
         name: &str,
         dim: usize,

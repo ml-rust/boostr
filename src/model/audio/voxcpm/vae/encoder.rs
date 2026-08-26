@@ -15,14 +15,14 @@
 //! stack — `fc_mu` is the last layer. `fc_logvar` exists in the checkpoint
 //! with the same shape as `fc_mu` but is never used: `AudioVAE.encode()`
 //! returns `mu` deterministically with no reparameterisation sampling, so
-//! this port does not load it at all (see `loader/encoder.rs`).
+//! this port does not load it at all (see `vae/loader/encoder.rs`).
 //!
 //! Inference-only: built from plain [`Tensor<R>`] weights, no autograd.
 
 use crate::error::{Error, Result};
-use crate::model::audio::voxcpm::causal_conv1d::CausalConv1d;
 use crate::model::audio::voxcpm::client::VoxCpmClient;
-use crate::model::audio::voxcpm::encoder_block::EncoderBlock;
+use crate::model::audio::voxcpm::vae::causal_conv1d::CausalConv1d;
+use crate::model::audio::voxcpm::vae::encoder_block::EncoderBlock;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -115,9 +115,9 @@ impl<R: Runtime<DType = DType>> AudioVaeEncoder<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::audio::voxcpm::encoder_block::EncoderBlockWeights;
-    use crate::model::audio::voxcpm::res_unit::ResUnit;
-    use crate::model::audio::voxcpm::snake::Snake;
+    use crate::model::audio::voxcpm::vae::encoder_block::EncoderBlockWeights;
+    use crate::model::audio::voxcpm::vae::res_unit::ResUnit;
+    use crate::model::audio::voxcpm::vae::snake::Snake;
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;
 

@@ -1,9 +1,4 @@
-//! Weight loading for the VoxCPM2 `AudioVAE` decoder/encoder from their
-//! `decoder.*`/`encoder.*` SafeTensors checkpoint prefixes.
+//! Shared tensor-loading helpers reused by the VoxCPM2 `AudioVAE` and
+//! local-encoder loaders.
 
-mod decoder;
-mod encoder;
-mod support;
-
-pub use decoder::DEFAULT_DECODER_PREFIX;
-pub use encoder::DEFAULT_ENCODER_PREFIX;
+pub mod support;

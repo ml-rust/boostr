@@ -17,7 +17,7 @@
 //! ~3e-5 on an 8.7 span - both ~3e-6 relative, which is f32 accumulation
 //! through the conv stacks, not a difference in behaviour.
 use boostr::format::safetensors_loader::SafeTensorsLoader;
-use boostr::model::audio::voxcpm::{AudioVaeDecoder, AudioVaeEncoder};
+use boostr::model::audio::voxcpm::vae::{AudioVaeDecoder, AudioVaeEncoder};
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use std::path::PathBuf;
 

@@ -46,7 +46,8 @@ image = { version = "0.25", default-features = false, features = [
   "jpeg",
 ] }
 # Compressed-audio decode (FLAC/MP3/OGG-Vorbis/WAV) for the audio corpus loaders.
-symphonia = { version = "0.5", default-features = false, features = [
+# Gated behind `audio`: a text-only build has no use for four codec decoders.
+symphonia = { version = "0.5", optional = true, default-features = false, features = [
   "flac",
   "mp3",
   "ogg",
@@ -74,8 +75,20 @@ rustls = "0.23"
 [features]
 default = ["cpu"]
 
-# TTS grapheme-to-phoneme (requires libespeak-ng at runtime)
-tts-g2p = ["dep:espeakng"]
+# Speech and audio: `model::audio` in full — corpus preparation (VAD, Whisper,
+# NeuCodec), the enhancement chain, TTS models, and the compressed-audio
+# decoders. Off by default; a text-only training or serving build pays nothing
+# for it.
+#
+# `model::speech_lm` is NOT gated. It is token packing and layout — no audio
+# processing, no extra dependency — and the dependency runs one way:
+# `model::audio` uses `speech_lm`, never the reverse.
+audio = ["dep:symphonia"]
+
+# TTS grapheme-to-phoneme (requires libespeak-ng at runtime). Implies `audio`:
+# phonemes exist to be spoken, and every consumer of this feature is in the
+# audio path already.
+tts-g2p = ["audio", "dep:espeakng"]
 
 # Backend features (passed through to numr)
 cpu = []
@@ -127,3 +140,67 @@ vocabs = ["splintr/vocabs"]
 
 [package.metadata.docs.rs]
 no-default-features = true
+
+# Targets that need `model::audio`. Without these entries a default
+# `cargo check --all-targets` tries to build them against a boostr that has
+# no audio module and fails on the import rather than skipping the target.
+[[example]]
+name = "audio_stats"
+required-features = ["audio"]
+
+[[example]]
+name = "codec_hnr_ceiling"
+required-features = ["audio"]
+
+[[example]]
+name = "enhance_reference"
+required-features = ["audio"]
+
+[[example]]
+name = "load_kokoro"
+required-features = ["audio"]
+
+[[example]]
+name = "neucodec_tokenize_bench"
+required-features = ["audio"]
+
+[[example]]
+name = "noise_probe_decode"
+required-features = ["audio"]
+
+[[example]]
+name = "synth_kokoro"
+required-features = ["audio"]
+
+[[test]]
+name = "istft_backend_parity"
+required-features = ["audio"]
+
+[[test]]
+name = "neucodec_encoder_cuda"
+required-features = ["audio"]
+
+[[test]]
+name = "neucodec_encoder_parity"
+required-features = ["audio"]
+
+[[test]]
+name = "neucodec_parity"
+required-features = ["audio"]
+
+[[test]]
+name = "silero_vad_parity"
+required-features = ["audio"]
+
+[[test]]
+name = "silero_vad_segment_parity"
+required-features = ["audio"]
+
+[[test]]
+name = "whisper_integration"
+required-features = ["audio"]
+
+[[test]]
+name = "whisper_mel_parity"
+required-features = ["audio"]
+

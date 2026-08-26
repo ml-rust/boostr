@@ -1,5 +1,6 @@
 pub mod attention_core;
 pub mod attention_mask;
+#[cfg(feature = "audio")]
 pub mod audio;
 pub mod config;
 pub mod detection;

@@ -1,15 +1,20 @@
 //! Multimodal model wrapper combining vision/audio encoders with an LLM backbone.
 
 use crate::error::{Error, Result};
+#[cfg(feature = "audio")]
 use crate::model::audio::WhisperEncoder;
-use crate::model::config::{AudioConfig, UniversalConfig, VisionConfig};
+#[cfg(feature = "audio")]
+use crate::model::config::AudioConfig;
+use crate::model::config::{UniversalConfig, VisionConfig};
 use crate::model::registry::LoadedModel;
 use crate::model::vision::{ClipEncoder, MultimodalProjector, SigLipEncoder};
 use crate::nn::VarBuilder;
 use numr::dtype::DType;
+#[cfg(feature = "audio")]
+use numr::ops::MatmulOps;
 use numr::ops::{
-    ActivationOps, BinaryOps, ConvOps, IndexingOps, MatmulOps, NormalizationOps, ReduceOps,
-    ScalarOps, ShapeOps, TensorOps, UnaryOps,
+    ActivationOps, BinaryOps, ConvOps, IndexingOps, NormalizationOps, ReduceOps, ScalarOps,
+    ShapeOps, TensorOps, UnaryOps,
 };
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
@@ -57,7 +62,12 @@ impl<R: Runtime> VisionEncoderVariant<R> {
 pub struct MultimodalModel<R: Runtime> {
     vision_encoder: Option<VisionEncoderVariant<R>>,
     vision_projector: Option<MultimodalProjector<R>>,
+    /// Whisper audio encoder, behind the `audio` feature. Without it a
+    /// checkpoint that declares an audio encoder is refused at load time
+    /// rather than silently loaded as text-only.
+    #[cfg(feature = "audio")]
     audio_encoder: Option<WhisperEncoder<R>>,
+    #[cfg(feature = "audio")]
     audio_projector: Option<MultimodalProjector<R>>,
     llm: LoadedModel<R>,
     config: UniversalConfig,
@@ -86,12 +96,24 @@ where
         };
 
         // Load audio encoder + projector if configured
+        #[cfg(feature = "audio")]
         let (audio_encoder, audio_projector) = if let Some(ref audio_config) = config.audio {
             let (enc, proj) = Self::load_audio(vb, audio_config, config.hidden_size)?;
             (Some(enc), Some(proj))
         } else {
             (None, None)
         };
+        // Refuse rather than degrade: a checkpoint declaring an audio encoder
+        // loaded by a build without `audio` would run, ignore every audio
+        // token, and produce plausible text from half a model.
+        #[cfg(not(feature = "audio"))]
+        if config.audio.is_some() {
+            return Err(Error::ModelError {
+                reason: "checkpoint has an audio encoder but this build lacks the \
+                         `audio` feature; rebuild boostr with --features audio"
+                    .into(),
+            });
+        }
 
         // Load LLM backbone with vision/audio stripped from config
         let mut llm_config = config.clone();
@@ -102,7 +124,9 @@ where
         Ok(Self {
             vision_encoder,
             vision_projector,
+            #[cfg(feature = "audio")]
             audio_encoder,
+            #[cfg(feature = "audio")]
             audio_projector,
             llm,
             config: config.clone(),
@@ -147,6 +171,7 @@ where
     }
 
     /// Load audio encoder and projector from the VarBuilder.
+    #[cfg(feature = "audio")]
     fn load_audio(
         vb: &mut VarBuilder<R>,
         audio_config: &AudioConfig,
@@ -221,6 +246,7 @@ impl<R: Runtime<DType = DType>> MultimodalModel<R> {
     ///
     /// `mel`: `[B, num_mel_bins, audio_len]` log-mel spectrogram.
     /// Returns: `[B, num_audio_tokens, llm_hidden]`
+    #[cfg(feature = "audio")]
     pub fn encode_audio<C>(&self, client: &C, mel: &Tensor<R>) -> Result<Tensor<R>>
     where
         C: RuntimeClient<R>

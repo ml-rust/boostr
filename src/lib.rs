@@ -161,6 +161,7 @@ pub fn preload_inference_modules(client: &CudaClient) -> Result<(), error::Error
 #[cfg(test)]
 pub(crate) mod test_utils {
     use numr::runtime::cpu::{CpuClient, CpuDevice};
+    #[cfg(feature = "audio")]
     use std::path::PathBuf;
 
     /// Create a CPU client and device for use in unit tests.
@@ -173,6 +174,7 @@ pub(crate) mod test_utils {
     /// Resolve the NeuCodec checkpoint fixture: `$NEUCODEC_CHECKPOINT`, else
     /// `$BOOSTR_MODELS_DIR/neucodec/model.safetensors`. `None` when neither is
     /// set or the resolved path is absent, so callers skip.
+    #[cfg(feature = "audio")]
     pub(crate) fn neucodec_checkpoint() -> Option<PathBuf> {
         let path = match std::env::var("NEUCODEC_CHECKPOINT") {
             Ok(p) => PathBuf::from(p),
@@ -185,6 +187,7 @@ pub(crate) mod test_utils {
     /// Resolve a real-audio fixture: `$AUDIO_CORPUS_FLAC`, else the first
     /// `.flac` in `$AUDIO_CORPUS_DIR` by sorted name. `None` when neither is
     /// set or the resolved path is absent, so callers skip.
+    #[cfg(feature = "audio")]
     pub(crate) fn corpus_flac() -> Option<PathBuf> {
         if let Ok(p) = std::env::var("AUDIO_CORPUS_FLAC") {
             let path = PathBuf::from(p);

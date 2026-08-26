@@ -2,10 +2,12 @@
 //! token ids), [`loader`] ([`VoxCpm2Model`], every sub-model plus its
 //! checkpoint loader), [`sequence`] (host-side prefix layout and mask
 //! complementarity), [`patches`] (wav padding and the VAE patch fold),
-//! [`prefill`] (reference encode and the two-LM prefill).
-//! The per-patch sampling loop is a separate unit and does not live here.
+//! [`prefill`] (reference encode and the two-LM prefill), [`generate`] (the
+//! per-patch sampling loop and its stop logic).
+//! The VAE decode and wav wrapper are a separate unit and do not live here.
 
 pub mod config;
+pub mod generate;
 pub mod loader;
 pub mod patches;
 pub mod prefill;
@@ -13,6 +15,9 @@ pub mod sequence;
 
 pub use config::{
     AUDIO_START_ID, REF_AUDIO_END_ID, REF_AUDIO_FILLER_ID, REF_AUDIO_START_ID, VoxCpm2Config,
+};
+pub use generate::{
+    GenerateOptions, GenerateOutcome, GenerateState, PatchGenerator, StepIntermediates, StepOutcome,
 };
 pub use loader::{DEFAULT_CONFIG_FILE, DEFAULT_WEIGHTS_FILE, VoxCpm2Model};
 pub use patches::{fold_patches, pad_to_multiple};

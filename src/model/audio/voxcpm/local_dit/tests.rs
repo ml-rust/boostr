@@ -3,9 +3,9 @@
 //! Weights are tiny and synthetic; these pin SHAPE and the output SLICE
 //! WINDOW, which are the two things the reference makes easy to get wrong.
 //!
-//! [`model`], [`t`] and the dimension constants are `pub(super)` so the
-//! sampler's tests integrate this same tiny estimator instead of rebuilding
-//! one.
+//! [`model`], [`t`] and the dimension constants are `pub(crate)` so the
+//! sampler's tests — and the orchestrator's generation-loop tests — integrate
+//! this same tiny estimator instead of rebuilding one.
 
 use crate::model::audio::voxcpm::bidirectional::attention::BidirectionalAttention;
 use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
@@ -17,21 +17,21 @@ use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 
-pub(super) const FEAT_DIM: usize = 3;
-pub(super) const PATCH_SIZE: usize = 2;
-pub(super) const HIDDEN_DIM: usize = 8;
+pub(crate) const FEAT_DIM: usize = 3;
+pub(crate) const PATCH_SIZE: usize = 2;
+pub(crate) const HIDDEN_DIM: usize = 8;
 const FFN_DIM: usize = 8;
 const NUM_HEADS: usize = 2;
 const NUM_KV_HEADS: usize = 1;
-const HEAD_DIM: usize = 4;
+pub(crate) const HEAD_DIM: usize = 4;
 /// `mu(2) + t(1) + cond(2) + x(2)` — the same derivation as
 /// `LocalDitConfig::sequence_len`, at `PATCH_SIZE = 2`.
 const SEQUENCE_LEN: usize = 2 + 1 + PATCH_SIZE + PATCH_SIZE;
-pub(super) const MU_TOKENS: usize = 2;
+pub(crate) const MU_TOKENS: usize = 2;
 
 /// Deterministic non-degenerate values: a constant fill would make every
 /// position identical and hide a wrong slice window.
-pub(super) fn t(shape: &[usize], seed: f32, device: &CpuDevice) -> Tensor<CpuRuntime> {
+pub(crate) fn t(shape: &[usize], seed: f32, device: &CpuDevice) -> Tensor<CpuRuntime> {
     let n: usize = shape.iter().product();
     let data: Vec<f32> = (0..n)
         .map(|i| 0.4 * ((i as f32) * 0.37 + seed).sin())
@@ -39,18 +39,24 @@ pub(super) fn t(shape: &[usize], seed: f32, device: &CpuDevice) -> Tensor<CpuRun
     Tensor::<CpuRuntime>::from_slice(&data, shape, device).unwrap()
 }
 
-fn linear(out: usize, inp: usize, seed: f32, bias: bool, device: &CpuDevice) -> Linear<CpuRuntime> {
+pub(crate) fn linear(
+    out: usize,
+    inp: usize,
+    seed: f32,
+    bias: bool,
+    device: &CpuDevice,
+) -> Linear<CpuRuntime> {
     let b = bias.then(|| t(&[out], seed + 5.0, device));
     Linear::new(t(&[out, inp], seed, device), b, false)
 }
 
-fn norm(device: &CpuDevice) -> RmsNorm<CpuRuntime> {
+pub(crate) fn norm(device: &CpuDevice) -> RmsNorm<CpuRuntime> {
     let ones =
         Tensor::<CpuRuntime>::from_slice(&[1.0f32; HIDDEN_DIM], &[HIDDEN_DIM], device).unwrap();
     RmsNorm::new(ones, 1e-5, false)
 }
 
-fn layer(seed: f32, device: &CpuDevice) -> BidirectionalLayer<CpuRuntime> {
+pub(crate) fn layer(seed: f32, device: &CpuDevice) -> BidirectionalLayer<CpuRuntime> {
     BidirectionalLayer {
         input_layernorm: norm(device),
         self_attn: BidirectionalAttention {
@@ -86,7 +92,7 @@ fn layer(seed: f32, device: &CpuDevice) -> BidirectionalLayer<CpuRuntime> {
 /// `num_layers = 0` builds the same model minus the transformer stack — the
 /// only way to observe the slice window in isolation (see
 /// `slice_window_keeps_only_the_trailing_x_positions`).
-pub(super) fn model(num_layers: usize, device: &CpuDevice) -> LocalDit<CpuRuntime> {
+pub(crate) fn model(num_layers: usize, device: &CpuDevice) -> LocalDit<CpuRuntime> {
     let rope = RoPE::<CpuRuntime>::precompute_freqs(32, HEAD_DIM, 10000.0, None, device)
         .unwrap()
         .narrow_positions(SEQUENCE_LEN)

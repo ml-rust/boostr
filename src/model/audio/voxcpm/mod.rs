@@ -3,8 +3,8 @@
 //! `feat_encoder`/`feat_decoder`), [`local_encoder`] (`feat_encoder`),
 //! [`minicpm4`] (the `base_lm` decoder), [`fsq`] (the `fsq_layer` bottleneck
 //! and its six sibling projections), [`local_dit`] (`feat_decoder`),
-//! [`model`] (the end-to-end orchestrator: reference encode + two-LM
-//! prefill). Both transformers get LongRoPE via
+//! [`model`] (the end-to-end orchestrator: reference encode, two-LM prefill,
+//! per-patch generation loop). Both transformers get LongRoPE via
 //! `crate::nn::RoPE::precompute_freqs`.
 
 pub mod bidirectional;

@@ -10,7 +10,7 @@ pub mod loader;
 pub mod sampler;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use config::LocalDitConfig;
 pub use loader::{DEFAULT_LOCAL_DIT_PREFIX, LocalDit};

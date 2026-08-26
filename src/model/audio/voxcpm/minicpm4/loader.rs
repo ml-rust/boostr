@@ -20,9 +20,19 @@
 //! ```
 //!
 //! Everything is bias-free — every attention projection, every MLP
-//! projection, and both norms. `embed_tokens` is skipped entirely when
-//! `cfg.vocab_size == 0`, which is how VoxCPM2's `residual_lm` (same
-//! architecture, 8 layers, no embedding table) loads through this same code.
+//! projection, and both norms.
+//!
+//! VoxCPM2's `residual_lm` loads through this same code under the
+//! `residual_lm` prefix and a
+//! [`residual_lm_from_config_json`](MiniCpm4Config::residual_lm_from_config_json)
+//! config — 73 tensors (`8*9 + 1`), two of its overrides visible here:
+//!
+//! - `vocab_size == 0` skips `embed_tokens` entirely; the checkpoint has no
+//!   such tensor, so requesting it would fail the load rather than yield
+//!   `None`.
+//! - `no_rope` skips `RoPE::precompute_freqs` entirely; a NoPE stack reads no
+//!   cos/sin table, and building the 32768-row cache anyway would allocate
+//!   memory nothing ever touches.
 
 use crate::error::Result;
 use crate::format::safetensors_loader::SafeTensorsLoader;
@@ -42,6 +52,14 @@ use std::path::Path;
 /// Default top-level prefix for the MiniCPM4 decoder's tensors in the VoxCPM2
 /// checkpoint.
 pub const DEFAULT_MINICPM4_PREFIX: &str = "base_lm";
+
+/// Top-level prefix for the second MiniCPM4 instantiation, `residual_lm`.
+///
+/// Pair it with
+/// [`MiniCpm4Config::residual_lm_from_config_json`]: the prefix selects the
+/// tensors, the config selects the 8 layers, the absent embedding table, and
+/// NoPE.
+pub const DEFAULT_RESIDUAL_LM_PREFIX: &str = "residual_lm";
 
 impl<R: Runtime<DType = DType>> MiniCpm4Model<R>
 where
@@ -120,25 +138,32 @@ where
         // length at call time. Building it shorter would feed that shorter
         // length into the LongRoPE regime choice and silently change the
         // scale.
-        let rope_scaling = RopeScalingConfig {
-            scaling_type: "longrope".to_string(),
-            factor: 1.0,
-            original_max_position_embeddings: Some(cfg.original_max_position_embeddings),
-            low_freq_factor: None,
-            high_freq_factor: None,
-            attention_factor: None,
-            beta_fast: None,
-            beta_slow: None,
-            short_factor: Some(cfg.rope_short_factor.clone()),
-            long_factor: Some(cfg.rope_long_factor.clone()),
+        let rope = if cfg.no_rope {
+            // NoPE: no block reads a cos/sin table, so none is built. The
+            // 32768 x head_dim/2 pair would otherwise sit resident and unused
+            // for the whole run.
+            None
+        } else {
+            let rope_scaling = RopeScalingConfig {
+                scaling_type: "longrope".to_string(),
+                factor: 1.0,
+                original_max_position_embeddings: Some(cfg.original_max_position_embeddings),
+                low_freq_factor: None,
+                high_freq_factor: None,
+                attention_factor: None,
+                beta_fast: None,
+                beta_slow: None,
+                short_factor: Some(cfg.rope_short_factor.clone()),
+                long_factor: Some(cfg.rope_long_factor.clone()),
+            };
+            Some(RoPE::<R>::precompute_freqs(
+                cfg.max_position_embeddings,
+                cfg.head_dim,
+                cfg.rope_theta,
+                Some(&rope_scaling),
+                device,
+            )?)
         };
-        let rope = RoPE::<R>::precompute_freqs(
-            cfg.max_position_embeddings,
-            cfg.head_dim,
-            cfg.rope_theta,
-            Some(&rope_scaling),
-            device,
-        )?;
 
         Ok(Self {
             embed_tokens,
@@ -214,6 +239,7 @@ where
             num_heads: cfg.num_heads,
             num_kv_heads: cfg.num_kv_heads,
             head_dim: cfg.head_dim,
+            no_rope: cfg.no_rope,
         }
     };
 

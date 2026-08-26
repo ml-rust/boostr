@@ -115,6 +115,7 @@ fn run(case: &Case, kernel: AttentionKernel, sliding_window: usize) -> Vec<f32> 
         q_norm: q_norm.as_ref(),
         k_norm: k_norm.as_ref(),
         use_alibi: false,
+        skip_rope: false,
         sliding_window,
         kernel,
     };
@@ -124,8 +125,8 @@ fn run(case: &Case, kernel: AttentionKernel, sliding_window: usize) -> Vec<f32> 
         &q,
         &k,
         &v,
-        rope.cos_cache(),
-        rope.sin_cache(),
+        Some(rope.cos_cache()),
+        Some(rope.sin_cache()),
         &spec,
     )
     .unwrap_or_else(|e| panic!("{} / {:?}: attention_core failed: {e}", case.name, kernel));
@@ -173,6 +174,7 @@ fn run_flash_entry(case: &Case, sliding_window: usize) -> Vec<f32> {
         q_norm: q_norm.as_ref(),
         k_norm: k_norm.as_ref(),
         use_alibi: false,
+        skip_rope: false,
         sliding_window,
         // Deliberately mismatched: `attention_core_flash` must ignore this
         // and always run the flash kernel, exactly like `attention_core_masked`
@@ -185,8 +187,8 @@ fn run_flash_entry(case: &Case, sliding_window: usize) -> Vec<f32> {
         &q,
         &k,
         &v,
-        rope.cos_cache(),
-        rope.sin_cache(),
+        Some(rope.cos_cache()),
+        Some(rope.sin_cache()),
         &spec,
     )
     .unwrap_or_else(|e| panic!("{}: attention_core_flash failed: {e}", case.name));
@@ -385,6 +387,7 @@ fn alibi_with_flash_is_an_error() {
         q_norm: None,
         k_norm: None,
         use_alibi: true,
+        skip_rope: false,
         sliding_window: 0,
         kernel,
     };
@@ -394,8 +397,8 @@ fn alibi_with_flash_is_an_error() {
         &q,
         &k,
         &v,
-        rope.cos_cache(),
-        rope.sin_cache(),
+        Some(rope.cos_cache()),
+        Some(rope.sin_cache()),
         &spec(AttentionKernel::Flash),
     );
     let text = match result {
@@ -413,8 +416,8 @@ fn alibi_with_flash_is_an_error() {
         &q,
         &k,
         &v,
-        rope.cos_cache(),
-        rope.sin_cache(),
+        Some(rope.cos_cache()),
+        Some(rope.sin_cache()),
         &spec(AttentionKernel::Masked),
     )
     .expect("ALiBi + Masked is the supported combination");

@@ -17,6 +17,10 @@
 //!   sibling [`decode`](crate::model::audio::voxcpm::minicpm4::decode) module
 //!   and leaves this one untouched.
 //!
+//! - **RoPE is OPTIONAL.** `residual_lm` runs NoPE (`no_rope`), so `rope` is
+//!   `None` there and every attention block skips the rotation on both the
+//!   full-sequence and the KV-cached path. Nothing takes its place.
+//!
 //! [`forward`](MiniCpm4Model::forward) takes pre-computed `inputs_embeds`
 //! rather than token ids, matching the real pipeline (which feeds a combined
 //! text+audio embedding). The `embed_tokens` table is exposed separately as
@@ -47,7 +51,10 @@ pub struct MiniCpm4Model<R: Runtime> {
     pub(crate) embed_tokens: Option<Embedding<R>>,
     pub(crate) layers: Vec<MiniCpm4Layer<R>>,
     pub(crate) norm: RmsNorm<R>,
-    pub(crate) rope: RoPE<R>,
+    /// Precomputed cos/sin tables. `None` when the config carries
+    /// `no_rope` (`residual_lm`): that stack runs NoPE, so the loader builds no
+    /// table rather than a `max_position_embeddings`-row cache nothing reads.
+    pub(crate) rope: Option<RoPE<R>>,
     pub(crate) hidden_size: usize,
 }
 
@@ -65,6 +72,15 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// Whether this instantiation owns an `embed_tokens` table.
     pub fn has_embedding(&self) -> bool {
         self.embed_tokens.is_some()
+    }
+
+    /// Whether this instantiation rotates Q/K.
+    ///
+    /// `false` for a NoPE (`no_rope`) stack, which owns no RoPE table. Every
+    /// attention block in such a stack carries the matching `no_rope` flag, so
+    /// no path here can reach a rotation with nothing to rotate by.
+    pub fn uses_rope(&self) -> bool {
+        self.rope.is_some()
     }
 
     /// `embed_tokens` lookup: integer `ids` `[...]` -> `[..., hidden_size]`.
@@ -96,7 +112,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     ///
     /// `inputs_embeds: [batch, seq, hidden_size]` -> `[batch, seq,
     /// hidden_size]` after the final `norm`. `seq` may not exceed the RoPE
-    /// cache length the loader built (`max_position_embeddings`).
+    /// cache length the loader built (`max_position_embeddings`); a NoPE
+    /// (`no_rope`) stack has no such cache and no such bound.
     pub fn forward<C>(&self, client: &C, inputs_embeds: &Var<R>) -> Result<Var<R>>
     where
         C: ModelClient<R>,
@@ -133,7 +150,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
 
         let mut h = inputs_embeds.clone();
         for layer in &self.layers {
-            h = layer.forward(client, &h, &self.rope)?;
+            h = layer.forward(client, &h, self.rope.as_ref())?;
         }
         self.norm.forward(client, &h)
     }
@@ -169,7 +186,20 @@ pub(crate) mod tests {
         Linear::new(filled(&[out, in_dim], salt, device), None, false)
     }
 
+    /// `base_lm`-shaped tiny model: rotary, exactly as before `no_rope`
+    /// existed.
     pub(crate) fn tiny_model(device: &CpuDevice) -> MiniCpm4Model<CpuRuntime> {
+        tiny_model_with(device, false)
+    }
+
+    /// `residual_lm`-shaped tiny model: NoPE, no RoPE table at all.
+    pub(crate) fn tiny_nope_model(device: &CpuDevice) -> MiniCpm4Model<CpuRuntime> {
+        tiny_model_with(device, true)
+    }
+
+    /// Same weights either way, so any output difference between the two is
+    /// the rotation and nothing else.
+    fn tiny_model_with(device: &CpuDevice, no_rope: bool) -> MiniCpm4Model<CpuRuntime> {
         let q_dim = NUM_HEADS * HEAD_DIM;
         let kv_dim = NUM_KV_HEADS * HEAD_DIM;
         let layers = (0..NUM_LAYERS)
@@ -187,6 +217,7 @@ pub(crate) mod tests {
                     num_heads: NUM_HEADS,
                     num_kv_heads: NUM_KV_HEADS,
                     head_dim: HEAD_DIM,
+                    no_rope,
                 },
                 post_attention_layernorm: RmsNorm::new(
                     Tensor::<CpuRuntime>::ones(&[HIDDEN], DType::F32, device).expect("norm"),
@@ -208,8 +239,10 @@ pub(crate) mod tests {
                 1e-5,
                 false,
             ),
-            rope: RoPE::<CpuRuntime>::precompute_freqs(16, HEAD_DIM, 10000.0, None, device)
-                .expect("rope"),
+            rope: (!no_rope).then(|| {
+                RoPE::<CpuRuntime>::precompute_freqs(16, HEAD_DIM, 10000.0, None, device)
+                    .expect("rope")
+            }),
             hidden_size: HIDDEN,
         }
     }
@@ -260,6 +293,71 @@ pub(crate) mod tests {
             base_out[..prefix],
             perturbed_out[..prefix],
             "earlier positions changed: attention is not causal"
+        );
+        assert!(
+            base_out[prefix..]
+                .iter()
+                .zip(&perturbed_out[prefix..])
+                .any(|(a, b)| (a - b).abs() > 1e-4),
+            "final position did not react to its own perturbation"
+        );
+    }
+
+    /// The flag has to be load-bearing: a NoPE stack must not reproduce the
+    /// rotary stack's numbers on the same weights and the same input.
+    #[test]
+    fn nope_output_differs_from_rotary_output() {
+        let (client, device) = cpu_setup();
+        let rotary = tiny_model(&device);
+        let nope = tiny_nope_model(&device);
+        assert!(rotary.uses_rope());
+        assert!(!nope.uses_rope());
+
+        let x = Var::new(filled(&[1, 4, HIDDEN], 99, &device), false);
+        let rotary_out = out_values(&rotary.forward(&client, &x).expect("forward"));
+        let nope_out = out_values(&nope.forward(&client, &x).expect("forward"));
+
+        assert!(
+            rotary_out
+                .iter()
+                .zip(&nope_out)
+                .any(|(a, b)| (a - b).abs() > 1e-4),
+            "no_rope changed nothing: the flag is not reaching the attention blocks"
+        );
+        assert!(nope_out.iter().all(|v| v.is_finite()));
+    }
+
+    /// NoPE drops the rotation and substitutes NOTHING, but the causal mask
+    /// still applies: earlier positions may not see a later one.
+    #[test]
+    fn nope_attention_is_still_causal() {
+        let (client, device) = cpu_setup();
+        let model = tiny_nope_model(&device);
+
+        let seq = 4;
+        let mut data: Vec<f32> = (0..seq * HIDDEN)
+            .map(|i| ((i % 7) as f32 - 3.0) / 10.0)
+            .collect();
+        let base = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&data, &[1, seq, HIDDEN], &device).expect("x"),
+            false,
+        );
+        let base_out = out_values(&model.forward(&client, &base).expect("forward"));
+
+        for value in data.iter_mut().skip((seq - 1) * HIDDEN) {
+            *value += 3.0;
+        }
+        let perturbed = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&data, &[1, seq, HIDDEN], &device).expect("x"),
+            false,
+        );
+        let perturbed_out = out_values(&model.forward(&client, &perturbed).expect("forward"));
+
+        let prefix = (seq - 1) * HIDDEN;
+        assert_eq!(
+            base_out[..prefix],
+            perturbed_out[..prefix],
+            "earlier positions changed: NoPE attention is not causal"
         );
         assert!(
             base_out[prefix..]

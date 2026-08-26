@@ -34,7 +34,10 @@ pub struct MiniCpm4Layer<R: Runtime> {
 
 impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
     /// `x: [batch, seq, hidden]` -> `[batch, seq, hidden]`.
-    pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
+    ///
+    /// `rope` is `None` only for a NoPE (`no_rope`) stack, which has no table;
+    /// [`MiniCpm4Attention`] rejects a `None` it is not entitled to.
+    pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: Option<&RoPE<R>>) -> Result<Var<R>>
     where
         C: ModelClient<R>,
         R::Client: TensorOps<R>
@@ -67,7 +70,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
         &self,
         client: &C,
         x: &Var<R>,
-        rope: &RoPE<R>,
+        rope: Option<&RoPE<R>>,
         kv_cache: &mut KvCache<R>,
         position: usize,
     ) -> Result<Var<R>>

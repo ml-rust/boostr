@@ -5,7 +5,9 @@
 //! `llama/model/blocks/attention.rs` uses.
 
 use super::*;
-use crate::model::audio::voxcpm::minicpm4::model::tests::{HIDDEN, filled, tiny_model};
+use crate::model::audio::voxcpm::minicpm4::model::tests::{
+    HIDDEN, filled, tiny_model, tiny_nope_model,
+};
 use crate::test_utils::cpu_setup;
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
@@ -198,4 +200,53 @@ fn prefill_rejects_batch_mismatch() {
     let x = embeds(3, &device);
     let err = model.prefill(&client, &x, &mut cache).unwrap_err();
     assert!(err.to_string().contains("batch"), "got {err}");
+}
+
+/// The NoPE (`residual_lm`) stack has TWO RoPE call sites to skip — the
+/// full-sequence one inside `attention_core_masked` and the direct one in
+/// `forward_cached`. Honouring only one leaves the paths computing different
+/// models, which is exactly what this comparison catches.
+#[test]
+fn nope_step_wise_matches_full_sequence() {
+    let (client, device) = cpu_setup();
+    let model = tiny_nope_model(&device);
+    assert!(!model.uses_rope());
+    let seq = 5;
+
+    let x = embeds(seq, &device);
+    let full = values(&model.forward(&client, &x).expect("forward"));
+
+    let mut cache = model.new_kv_cache(1, 8).expect("cache");
+    for position in 0..seq {
+        let row = row_at(&x, position);
+        let step = values(
+            &model
+                .decode_step(&client, &row, &mut cache, position)
+                .expect("decode_step"),
+        );
+        let expected = &full[position * HIDDEN..(position + 1) * HIDDEN];
+        for (got, want) in step.iter().zip(expected) {
+            assert!(
+                (got - want).abs() < 1e-5,
+                "position {position}: step {got} vs full {want}"
+            );
+        }
+        assert!(step.iter().any(|v| v.abs() > 1e-6), "degenerate output");
+    }
+    assert_eq!(cache.seq_len(), seq);
+}
+
+/// A NoPE stack owns no RoPE table, so the cache length it can serve is
+/// bounded by the cache alone.
+#[test]
+fn nope_kv_cache_is_not_bounded_by_a_rope_table() {
+    let (_client, device) = cpu_setup();
+    let model = tiny_nope_model(&device);
+    // 17 exceeds the 16-position table the rotary tiny model carries; this one
+    // has no table to exceed.
+    assert!(model.new_kv_cache(1, 17).is_ok());
+    assert!(
+        model.new_kv_cache(1, 0).is_err(),
+        "zero max_length accepted"
+    );
 }

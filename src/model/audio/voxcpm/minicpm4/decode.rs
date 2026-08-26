@@ -65,9 +65,10 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     }
 
     /// Number of RoPE positions the loader precomputed
-    /// (`max_position_embeddings`). A cache may not outrun it.
-    fn rope_positions(&self) -> usize {
-        self.rope.cos_cache().shape()[0]
+    /// (`max_position_embeddings`), or `None` for a NoPE (`no_rope`) stack,
+    /// which has no table. A cache may not outrun a table that exists.
+    fn rope_positions(&self) -> Option<usize> {
+        self.rope.as_ref().map(|rope| rope.cos_cache().shape()[0])
     }
 
     /// Allocate a KV cache for this model, sized by the caller.
@@ -81,7 +82,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     ///
     /// Errors when `batch_size` or `max_length` is zero, or when `max_length`
     /// exceeds the precomputed RoPE table (a longer cache could be filled but
-    /// never rotated).
+    /// never rotated). A NoPE (`no_rope`) stack has no table and rotates
+    /// nothing, so only the zero check applies there.
     pub fn new_kv_cache(&self, batch_size: usize, max_length: usize) -> Result<LayeredKvCache<R>>
     where
         R::Client: IndexingOps<R>,
@@ -92,8 +94,15 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
                 reason: "expected at least 1, got 0".to_string(),
             });
         }
-        let rope_positions = self.rope_positions();
-        if max_length == 0 || max_length > rope_positions {
+        if max_length == 0 {
+            return Err(Error::InvalidArgument {
+                arg: "max_length",
+                reason: "expected at least 1, got 0".to_string(),
+            });
+        }
+        if let Some(rope_positions) = self.rope_positions()
+            && max_length > rope_positions
+        {
             return Err(Error::InvalidArgument {
                 arg: "max_length",
                 reason: format!(
@@ -332,7 +341,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
             let cache = kv_cache.layer_mut(i).ok_or_else(|| Error::ModelError {
                 reason: format!("KV cache missing for layer {i}"),
             })?;
-            h = layer.forward_cached(client, &h, &self.rope, cache, position)?;
+            h = layer.forward_cached(client, &h, self.rope.as_ref(), cache, position)?;
         }
         self.norm.forward(client, &h)
     }

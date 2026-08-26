@@ -3,8 +3,14 @@
 //!
 //! Every architectural knob is config-driven on purpose: VoxCPM2's
 //! `residual_lm` is the SAME architecture as `base_lm` with a different
-//! config (8 layers, `vocab_size` 0, hence no `embed_tokens` table), so it
-//! becomes a second [`MiniCpm4Config`] rather than a forked module.
+//! config (8 layers, `vocab_size` 0 hence no `embed_tokens` table, and no
+//! RoPE), so it becomes a second [`MiniCpm4Config`] rather than a forked
+//! module.
+//!
+//! `residual_lm` has NO section of its own in `config.json`. The reference
+//! deep-copies `lm_config` and overrides three fields, so
+//! [`MiniCpm4Config::residual_lm_from_config_json`] does the same here,
+//! reading the two top-level `residual_lm_*` keys.
 
 use crate::error::{Error, Result};
 use serde::Deserialize;
@@ -13,11 +19,19 @@ use std::path::Path;
 /// `config.json` sub-object holding `base_lm`'s architecture.
 pub const DEFAULT_CONFIG_SECTION: &str = "lm_config";
 
+/// Top-level `config.json` key holding `residual_lm`'s layer count.
+pub const RESIDUAL_LM_NUM_LAYERS_KEY: &str = "residual_lm_num_layers";
+
+/// Top-level `config.json` key holding `residual_lm`'s NoPE switch.
+pub const RESIDUAL_LM_NO_ROPE_KEY: &str = "residual_lm_no_rope";
+
 /// Resolved config for
 /// [`MiniCpm4Model`](crate::model::audio::voxcpm::minicpm4::MiniCpm4Model).
 ///
 /// Read from a single `config.json` sub-object (`lm_config` for `base_lm`)
-/// by [`MiniCpm4Config::from_config_json_section`].
+/// by [`MiniCpm4Config::from_config_json_section`], or derived from
+/// `lm_config` plus the top-level `residual_lm_*` keys by
+/// [`MiniCpm4Config::residual_lm_from_config_json`].
 #[derive(Debug, Clone)]
 pub struct MiniCpm4Config {
     pub num_layers: usize,
@@ -51,6 +65,14 @@ pub struct MiniCpm4Config {
     /// `rope_short_factor` is always selected in practice and the LongRoPE
     /// `attention_scaling` collapses to 1.0.
     pub rope_long_factor: Vec<f32>,
+    /// NoPE: run this instantiation with NO rotary embedding at all
+    /// (`residual_lm`). `true` makes the loader skip building a RoPE cache and
+    /// makes every attention block skip the rotation on BOTH the full-sequence
+    /// and the KV-cached path.
+    ///
+    /// Nothing takes RoPE's place — no ALiBi, no learned positions. Position
+    /// then reaches the block only through the causal mask.
+    pub no_rope: bool,
 }
 
 impl Default for MiniCpm4Config {
@@ -80,6 +102,7 @@ impl Default for MiniCpm4Config {
             original_max_position_embeddings: 32768,
             rope_short_factor: vec![1.0; head_dim / 2],
             rope_long_factor: vec![1.0; head_dim / 2],
+            no_rope: false,
         }
     }
 }
@@ -92,18 +115,76 @@ impl MiniCpm4Config {
 
     /// Parse an arbitrary sub-object of a VoxCPM2 `config.json`.
     ///
-    /// `section` is a top-level key (`"lm_config"` for `base_lm`). The
-    /// section is taken as a parameter because `residual_lm` is the same
-    /// architecture under a different key, and must not require a second
-    /// parser.
+    /// `section` is a top-level key (`"lm_config"` for `base_lm`). It is a
+    /// parameter so a checkpoint that DOES carry a second architecture
+    /// sub-object needs no second parser.
+    ///
+    /// This does NOT reach `residual_lm`: that checkpoint has no
+    /// `residual_lm_config` section to name. Use
+    /// [`residual_lm_from_config_json`](Self::residual_lm_from_config_json).
     pub fn from_config_json_section<P: AsRef<Path>>(path: P, section: &str) -> Result<Self> {
-        let content = std::fs::read_to_string(path.as_ref()).map_err(|e| Error::ModelError {
-            reason: format!("failed to read {}: {e}", path.as_ref().display()),
-        })?;
-        let root: serde_json::Value =
-            serde_json::from_str(&content).map_err(|e| Error::ModelError {
-                reason: format!("invalid VoxCPM2 config.json: {e}"),
+        Self::from_root(&read_config_root(path)?, section)
+    }
+
+    /// Resolve `residual_lm`'s config from a VoxCPM2 `config.json`.
+    ///
+    /// `residual_lm` has no sub-object of its own. The reference deep-copies
+    /// `lm_config` and overrides exactly three fields
+    /// (`voxcpm2.py:189-193`), and this reproduces that:
+    ///
+    /// | field | value |
+    /// | --- | --- |
+    /// | `num_layers` | top-level `residual_lm_num_layers` |
+    /// | `no_rope` | top-level `residual_lm_no_rope` |
+    /// | `vocab_size` | `0` — no `embed_tokens`, no `lm_head` |
+    ///
+    /// Both top-level keys are REQUIRED. Defaulting a missing
+    /// `residual_lm_no_rope` to `false` would silently rotate a stack the
+    /// reference never rotates, staying shape-valid while computing a
+    /// different model.
+    pub fn residual_lm_from_config_json<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let root = read_config_root(path)?;
+        let base = Self::from_root(&root, DEFAULT_CONFIG_SECTION)?;
+        let num_layers = root
+            .get(RESIDUAL_LM_NUM_LAYERS_KEY)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| Error::ModelError {
+                reason: format!(
+                    "VoxCPM2 config.json has no integer `{RESIDUAL_LM_NUM_LAYERS_KEY}`; \
+                     residual_lm has no config section of its own, so its layer count \
+                     can only come from that top-level key"
+                ),
+            })? as usize;
+        let no_rope = root
+            .get(RESIDUAL_LM_NO_ROPE_KEY)
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| Error::ModelError {
+                reason: format!(
+                    "VoxCPM2 config.json has no boolean `{RESIDUAL_LM_NO_ROPE_KEY}`; \
+                     guessing it would silently apply or drop RoPE"
+                ),
             })?;
+        Ok(base.into_residual_lm(num_layers, no_rope))
+    }
+
+    /// Apply `residual_lm`'s three overrides to a parsed `lm_config`.
+    ///
+    /// Split out from [`residual_lm_from_config_json`](Self::residual_lm_from_config_json)
+    /// so the override rule is testable without a file, and so a caller that
+    /// already holds the `base_lm` config does not re-read the JSON.
+    ///
+    /// `vocab_size` drops to `0` — `residual_lm` is fed pre-computed
+    /// embeddings and the checkpoint carries neither `embed_tokens` nor
+    /// `lm_head` for it.
+    pub fn into_residual_lm(mut self, num_layers: usize, no_rope: bool) -> Self {
+        self.num_layers = num_layers;
+        self.vocab_size = 0;
+        self.no_rope = no_rope;
+        self
+    }
+
+    /// Resolve one architecture sub-object out of an already-parsed root.
+    fn from_root(root: &serde_json::Value, section: &str) -> Result<Self> {
         let sub = root.get(section).ok_or_else(|| Error::ModelError {
             reason: format!("VoxCPM2 config.json has no `{section}` object"),
         })?;
@@ -121,6 +202,24 @@ impl MiniCpm4Config {
     pub fn has_embedding(&self) -> bool {
         self.vocab_size > 0
     }
+
+    /// Whether this instantiation rotates Q/K.
+    ///
+    /// `false` for a NoPE config (`residual_lm`), for which the loader builds
+    /// no RoPE cache at all.
+    pub fn uses_rope(&self) -> bool {
+        !self.no_rope
+    }
+}
+
+/// Read and parse a VoxCPM2 `config.json` once.
+fn read_config_root<P: AsRef<Path>>(path: P) -> Result<serde_json::Value> {
+    let content = std::fs::read_to_string(path.as_ref()).map_err(|e| Error::ModelError {
+        reason: format!("failed to read {}: {e}", path.as_ref().display()),
+    })?;
+    serde_json::from_str(&content).map_err(|e| Error::ModelError {
+        reason: format!("invalid VoxCPM2 config.json: {e}"),
+    })
 }
 
 /// One MiniCPM4 config sub-object.
@@ -222,114 +321,12 @@ impl RawLmConfig {
                 .unwrap_or(self.max_position_embeddings),
             rope_short_factor: self.rope_scaling.short_factor,
             rope_long_factor: self.rope_scaling.long_factor,
+            // `lm_config` carries no `no_rope`: NoPE is a `residual_lm`
+            // override applied by `into_residual_lm`, never a parsed field.
+            no_rope: false,
         })
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `lm_config` body with `head_dim` (`kv_channels`) 4, so the RoPE factor
-    /// lists stay short enough to write out.
-    fn config_json(extra: &str) -> String {
-        format!(
-            r#"{{"lm_config":{{
-                "num_hidden_layers": 2,
-                "hidden_size": 8,
-                "intermediate_size": 16,
-                "num_attention_heads": 4,
-                "num_key_value_heads": 2,
-                "kv_channels": 4,
-                "vocab_size": 100,
-                "rms_norm_eps": 1e-05,
-                "rope_theta": 10000.0,
-                "max_position_embeddings": 512,
-                "rope_scaling": {{
-                    "short_factor": [1.0, 2.0],
-                    "long_factor": [3.0, 4.0],
-                    "original_max_position_embeddings": 256
-                }}{extra}
-            }}}}"#
-        )
-    }
-
-    fn write_temp(name: &str, body: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(name);
-        std::fs::write(&path, body).expect("write temp config");
-        path
-    }
-
-    #[test]
-    fn default_head_dim_matches_short_factor_len() {
-        let cfg = MiniCpm4Config::default();
-        assert_eq!(cfg.rope_short_factor.len(), cfg.head_dim / 2);
-        assert_eq!(cfg.rope_long_factor.len(), cfg.head_dim / 2);
-        assert!(cfg.has_embedding());
-    }
-
-    #[test]
-    fn parses_lm_config_section() {
-        let path = write_temp("boostr_minicpm4_ok.json", &config_json(""));
-        let cfg = MiniCpm4Config::from_config_json(&path).expect("parse");
-        let _ = std::fs::remove_file(&path);
-
-        assert_eq!(cfg.num_layers, 2);
-        assert_eq!(cfg.hidden_size, 8);
-        assert_eq!(cfg.intermediate_size, 16);
-        assert_eq!(cfg.num_heads, 4);
-        assert_eq!(cfg.num_kv_heads, 2);
-        // head_dim comes from kv_channels (4), NOT hidden_size/num_heads (2).
-        assert_eq!(cfg.head_dim, 4);
-        assert_eq!(cfg.vocab_size, 100);
-        assert_eq!(cfg.max_position_embeddings, 512);
-        assert_eq!(cfg.original_max_position_embeddings, 256);
-        assert_eq!(cfg.rope_short_factor, vec![1.0, 2.0]);
-        assert_eq!(cfg.rope_long_factor, vec![3.0, 4.0]);
-    }
-
-    #[test]
-    fn zero_vocab_has_no_embedding() {
-        let body = config_json("").replace("\"vocab_size\": 100", "\"vocab_size\": 0");
-        let path = write_temp("boostr_minicpm4_novocab.json", &body);
-        let cfg = MiniCpm4Config::from_config_json(&path).expect("parse");
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(cfg.vocab_size, 0);
-        assert!(!cfg.has_embedding());
-    }
-
-    #[test]
-    fn rejects_use_mup() {
-        let path = write_temp(
-            "boostr_minicpm4_mup.json",
-            &config_json(",\n\"use_mup\": true"),
-        );
-        let err = MiniCpm4Config::from_config_json(&path).unwrap_err();
-        let _ = std::fs::remove_file(&path);
-        assert!(err.to_string().contains("use_mup"), "got {err}");
-    }
-
-    #[test]
-    fn rejects_short_factor_length_mismatch() {
-        let body =
-            config_json("").replace("\"short_factor\": [1.0, 2.0]", "\"short_factor\": [1.0]");
-        let path = write_temp("boostr_minicpm4_badrope.json", &body);
-        let err = MiniCpm4Config::from_config_json(&path).unwrap_err();
-        let _ = std::fs::remove_file(&path);
-        assert!(err.to_string().contains("short_factor"), "got {err}");
-    }
-
-    #[test]
-    fn rejects_missing_section() {
-        let path = write_temp("boostr_minicpm4_nosection.json", &config_json(""));
-        let err =
-            MiniCpm4Config::from_config_json_section(&path, "residual_lm_config").unwrap_err();
-        let _ = std::fs::remove_file(&path);
-        assert!(err.to_string().contains("residual_lm_config"), "got {err}");
-    }
-
-    #[test]
-    fn rejects_missing_file() {
-        assert!(MiniCpm4Config::from_config_json("/nonexistent/config.json").is_err());
-    }
-}
+mod tests;

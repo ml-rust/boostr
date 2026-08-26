@@ -54,6 +54,9 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             q_norm: self.q_norm.as_ref(),
             k_norm: self.k_norm.as_ref(),
             use_alibi: self.use_alibi,
+            // LLaMA-lineage blocks always rotate (or use ALiBi); NoPE is a
+            // VoxCPM2 `residual_lm` property, never one of theirs.
+            skip_rope: false,
             sliding_window: self.sliding_window,
             // This block runs the materialized-mask kernel. Its ALiBi variants
             // require it, and `tests/qwen3_parity.rs` pins its numbers.
@@ -134,8 +137,8 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             q,
             k,
             v,
-            rope.cos_cache(),
-            rope.sin_cache(),
+            Some(rope.cos_cache()),
+            Some(rope.sin_cache()),
             &self.core_spec(),
         )?;
 

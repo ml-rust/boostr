@@ -142,6 +142,7 @@ fn run_case(num_heads: usize, num_kv_heads: usize, dtype: DType, label: &str) {
         q_norm: None,
         k_norm: None,
         use_alibi: false,
+        skip_rope: false,
         sliding_window: 0,
         // Ignored by `attention_core_flash`; stated for honesty.
         kernel: AttentionKernel::Flash,
@@ -152,8 +153,8 @@ fn run_case(num_heads: usize, num_kv_heads: usize, dtype: DType, label: &str) {
         &q,
         &k,
         &v,
-        rope.cos_cache(),
-        rope.sin_cache(),
+        Some(rope.cos_cache()),
+        Some(rope.sin_cache()),
         &spec,
     )
     .unwrap_or_else(|e| panic!("{label}: attention_core_flash forward failed: {e}"));

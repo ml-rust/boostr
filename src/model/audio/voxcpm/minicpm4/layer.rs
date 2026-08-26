@@ -12,6 +12,7 @@
 //! layer compute a different model in silence.
 
 use crate::error::{Error, Result};
+use crate::inference::KvCache;
 use crate::model::audio::voxcpm::minicpm4::attention::MiniCpm4Attention;
 use crate::model::audio::voxcpm::minicpm4::mlp::MiniCpm4Mlp;
 use crate::model::traits::ModelClient;
@@ -49,6 +50,44 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
     {
         let normed = self.input_layernorm.forward(client, x)?;
         let attn_out = self.self_attn.forward(client, &normed, rope)?;
+        let h = var_add(x, &attn_out, client).map_err(Error::Numr)?;
+
+        let normed = self.post_attention_layernorm.forward(client, &h)?;
+        let mlp_out = self.mlp.forward(client, &normed)?;
+        var_add(&h, &mlp_out, client).map_err(Error::Numr)
+    }
+
+    /// KV-cached variant of [`forward`](Self::forward): `x: [batch, seq,
+    /// hidden]` covering absolute positions `position..position + seq` ->
+    /// `[batch, seq, hidden]`.
+    ///
+    /// Identical residual/norm/MLP structure — only attention differs, reading
+    /// and extending `kv_cache` instead of recomputing the whole prefix.
+    pub fn forward_cached<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        rope: &RoPE<R>,
+        kv_cache: &mut KvCache<R>,
+        position: usize,
+    ) -> Result<Var<R>>
+    where
+        C: ModelClient<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>,
+    {
+        let normed = self.input_layernorm.forward(client, x)?;
+        let attn_out = self
+            .self_attn
+            .forward_cached(client, &normed, rope, kv_cache, position)?;
         let h = var_add(x, &attn_out, client).map_err(Error::Numr)?;
 
         let normed = self.post_attention_layernorm.forward(client, &h)?;

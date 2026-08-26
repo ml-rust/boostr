@@ -1,8 +1,9 @@
-//! VoxCPM2's MiniCPM4 decoder-only transformer (`base_lm`): full-sequence
-//! causal forward over pre-computed embeddings, no KV cache, no `lm_head`.
+//! VoxCPM2's MiniCPM4 decoder-only transformer (`base_lm`): causal forward
+//! over pre-computed embeddings, full-sequence or KV-cached, no `lm_head`.
 
 pub mod attention;
 pub mod config;
+pub mod decode;
 pub mod layer;
 pub mod loader;
 pub mod mlp;

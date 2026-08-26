@@ -21,9 +21,15 @@
 //! 9e-6 relative. The error grows with sequence length because a longer
 //! sequence accumulates through more attention terms, not because the
 //! behaviour differs - all three run the same 28 layers in f32.
+//!
+//! A fourth check exercises the incremental (KV-cached) `decode_step` path,
+//! comparing against the reference's own step-wise output rather than its
+//! full-sequence output. Same 2e-3 tolerance. Observed: 1.1e-4 on a span of
+//! 25.4, i.e. 4e-6 relative - the same order as the 9.9e-5 by which the
+//! reference's own two paths disagree, which is the floor for this check.
 use boostr::format::safetensors_loader::SafeTensorsLoader;
 use boostr::model::audio::voxcpm::minicpm4::{MiniCpm4Config, MiniCpm4Model};
-use numr::autograd::Var;
+use numr::autograd::{Var, var_cat, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use std::path::PathBuf;
@@ -76,6 +82,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if pass { "OK" } else { "MISMATCH" }
         );
     }
+    // Case 3: incremental (KV-cached) decode, checked against the
+    // reference's own STEP-WISE output (`decode_out`, produced by feeding
+    // `decode_in` through the reference's KV cache one position at a
+    // time) rather than its full-sequence output. The reference's own
+    // full-sequence and step-wise paths differ by 9.9e-5 on this model
+    // (different reduction orders over the key axis), so this path is
+    // inherently noisier than the three full-sequence cases above and
+    // exact agreement is not expected; same 2e-3 absolute tolerance.
+    {
+        let decode_in = fx.load_tensor::<CpuRuntime>("decode_in", &device)?;
+        let want = fx.load_tensor::<CpuRuntime>("decode_out", &device)?;
+        let shape = decode_in.shape().to_vec();
+        let (batch, steps, hidden) = (shape[0], shape[1], shape[2]);
+        let decode_in = Var::new(decode_in, false);
+
+        let mut cache = model.new_kv_cache(batch, steps)?;
+        let mut outs = Vec::with_capacity(steps);
+        for p in 0..steps {
+            let step_in = var_narrow(&decode_in, 1, p, 1)?;
+            let step_in = var_reshape(&step_in, &[batch, hidden])?;
+            let step_out = model.decode_step(&client, &step_in, &mut cache, p)?;
+            outs.push(var_reshape(&step_out, &[batch, 1, hidden])?);
+        }
+        let out_refs: Vec<&Var<CpuRuntime>> = outs.iter().collect();
+        let got = var_cat(&out_refs, 1, &client)?;
+        let got = got.tensor();
+        println!(
+            "decode (step-wise, KV cache): {:?} -> got {:?} want {:?}",
+            shape,
+            got.shape(),
+            want.shape()
+        );
+        assert_eq!(got.shape(), want.shape());
+        let g: Vec<f32> = got.contiguous()?.to_vec();
+        let w: Vec<f32> = want.contiguous()?.to_vec();
+        let max = g
+            .iter()
+            .zip(&w)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let span =
+            w.iter().cloned().fold(f32::MIN, f32::max) - w.iter().cloned().fold(f32::MAX, f32::min);
+        let pass = max <= 2e-3;
+        ok &= pass;
+        println!(
+            "  max abs err {max:.3e}  span {span:.4}  rel {:.2e}  {}",
+            max / span.max(1e-9),
+            if pass { "OK" } else { "MISMATCH" }
+        );
+    }
+
     println!("\n{}", if ok { "VERIFIED" } else { "FAILED" });
     std::process::exit(if ok { 0 } else { 1 });
 }

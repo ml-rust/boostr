@@ -11,8 +11,11 @@
 //!
 //! - **No `lm_head`.** The checkpoint has none. [`MiniCpm4Model::forward`]
 //!   returns hidden states, never logits.
-//! - **No KV cache.** This is the full-sequence path only; every position is
-//!   recomputed on every call. Incremental decode is a separate unit.
+//! - **No KV cache on this path.** [`forward`](MiniCpm4Model::forward)
+//!   recomputes every position on every call. The incremental (KV-cached)
+//!   decode path — `new_kv_cache` / `prefill` / `decode_step` — lives in the
+//!   sibling [`decode`](crate::model::audio::voxcpm::minicpm4::decode) module
+//!   and leaves this one untouched.
 //!
 //! [`forward`](MiniCpm4Model::forward) takes pre-computed `inputs_embeds`
 //! rather than token ids, matching the real pipeline (which feeds a combined
@@ -137,7 +140,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::audio::voxcpm::minicpm4::attention::MiniCpm4Attention;
     use crate::model::audio::voxcpm::minicpm4::mlp::MiniCpm4Mlp;
@@ -145,7 +148,7 @@ mod tests {
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
-    const HIDDEN: usize = 8;
+    pub(crate) const HIDDEN: usize = 8;
     const NUM_HEADS: usize = 2;
     const NUM_KV_HEADS: usize = 1;
     const HEAD_DIM: usize = 4;
@@ -154,7 +157,7 @@ mod tests {
 
     /// Deterministic, non-degenerate weights: zeros would make every
     /// causality/shape assertion below pass vacuously.
-    fn filled(shape: &[usize], salt: usize, device: &CpuDevice) -> Tensor<CpuRuntime> {
+    pub(crate) fn filled(shape: &[usize], salt: usize, device: &CpuDevice) -> Tensor<CpuRuntime> {
         let n: usize = shape.iter().product();
         let data: Vec<f32> = (0..n)
             .map(|i| (((i * 37 + salt * 11) % 13) as f32 - 6.0) / 20.0)
@@ -166,7 +169,7 @@ mod tests {
         Linear::new(filled(&[out, in_dim], salt, device), None, false)
     }
 
-    fn tiny_model(device: &CpuDevice) -> MiniCpm4Model<CpuRuntime> {
+    pub(crate) fn tiny_model(device: &CpuDevice) -> MiniCpm4Model<CpuRuntime> {
         let q_dim = NUM_HEADS * HEAD_DIM;
         let kv_dim = NUM_KV_HEADS * HEAD_DIM;
         let layers = (0..NUM_LAYERS)

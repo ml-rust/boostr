@@ -13,6 +13,7 @@ pub mod resample;
 pub mod stft;
 pub mod tts_bundle;
 pub mod vad;
+pub mod voxcpm;
 pub mod wav_decode;
 pub mod wav_encode;
 pub(crate) mod wav_format;

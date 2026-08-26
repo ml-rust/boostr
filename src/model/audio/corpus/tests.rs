@@ -271,3 +271,12 @@ fn the_default_options_render_no_speaker_prefix() {
         "adding the speaker option must not change what an existing run tokenizes"
     );
 }
+
+#[test]
+fn enhancement_is_off_unless_asked_for() {
+    // A corpus tool must not alter the caller's audio by default. Someone
+    // arriving with an already-treated corpus gets it through untouched, and
+    // someone with a raw home recording opts in deliberately — see
+    // `CorpusOptions::enhance` for what that choice costs either way.
+    assert!(CorpusOptions::default().enhance.is_none());
+}

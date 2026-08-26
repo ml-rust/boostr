@@ -185,6 +185,34 @@ impl<R: Runtime<DType = DType>> SpeechCorpusBuilder<R> {
         }
         check_max_speech_duration(opts.vad.max_speech_duration_s)?;
 
+        // Enhancement runs over the WHOLE recording, before segmentation: the
+        // gate needs the pauses between phrases to read a floor from, and one
+        // gain per recording keeps the relative loudness between utterances
+        // that per-clip normalization would erase. See `CorpusOptions::enhance`.
+        let enhanced;
+        let samples = match opts.enhance {
+            Some(enhance_opts) => {
+                let rate = u32::try_from(opts.sample_rate).map_err(|_| Error::InvalidArgument {
+                    arg: "opts.sample_rate",
+                    reason: format!("{} does not fit a u32 sample rate", opts.sample_rate),
+                })?;
+                let (out, report) =
+                    crate::model::audio::enhance::enhance(samples, rate, enhance_opts)?;
+                tracing::info!(
+                    input_lufs = report.input_lufs,
+                    output_lufs = report.output_lufs,
+                    input_floor_dbfs = report.input_noise_floor_dbfs,
+                    output_floor_dbfs = report.output_noise_floor_dbfs,
+                    limiting_db = report.limiter_reduction_db,
+                    reached_target = report.reached_target,
+                    "enhanced recording before segmentation"
+                );
+                enhanced = out;
+                enhanced.as_slice()
+            }
+            None => samples,
+        };
+
         let segments = self.vad.speech_timestamps(client, samples, &opts.vad)?;
 
         let min_samples = if opts.min_utterance_secs > 0.0 {

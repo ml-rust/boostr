@@ -5,6 +5,7 @@ use std::path::Path;
 use splintr::{AnyTokenizer, PretrainedVocab, from_json_path, from_vocab};
 
 use crate::error::{Error, Result};
+use crate::model::audio::enhance::EnhanceOptions;
 use crate::model::audio::vad::VadSegmentOptions;
 
 /// Whisper's fixed encoder window, in seconds.
@@ -113,6 +114,28 @@ pub struct CorpusOptions<'a> {
     pub min_utterance_secs: f32,
     /// Pad the packed stream to a multiple of this. `None` is no padding.
     pub pad_to_multiple: Option<usize>,
+    /// Run [`enhance`](crate::model::audio::enhance::enhance) over each
+    /// recording before segmenting it. `None` — the default — takes the audio
+    /// exactly as given, which is what a caller with an already-treated corpus
+    /// wants.
+    ///
+    /// **Applied to the WHOLE recording, before the VAD, never per utterance.**
+    /// Two reasons, both measured:
+    ///
+    /// - The spectral gate needs pauses to read a noise floor from. A 3.4 s
+    ///   utterance has none: enhancing one alone gained 0.4 dB where enhancing
+    ///   its 30 s parent gained 27.9 dB.
+    /// - Per-utterance loudness normalization would level every clip
+    ///   independently and erase the relative loudness between them, which is
+    ///   the vocal-effort cue prosody is learned from. Per recording it is a
+    ///   single gain and the relationship survives.
+    ///
+    /// A raw home recording is not neutral input. Measured on a real take,
+    /// a reference cut from an untreated recording produced clones at -36 LUFS
+    /// against -14 LUFS from the same segment enhanced — the level is inherited
+    /// straight from the audio. Leaving this `None` on untreated audio teaches
+    /// the model that level and that noise floor.
+    pub enhance: Option<EnhanceOptions>,
 }
 
 impl Default for CorpusOptions<'_> {
@@ -128,6 +151,7 @@ impl Default for CorpusOptions<'_> {
             max_new_tokens: None,
             min_utterance_secs: 0.5,
             pad_to_multiple: None,
+            enhance: None,
         }
     }
 }

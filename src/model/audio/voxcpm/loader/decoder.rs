@@ -23,8 +23,8 @@
 //! (see that constant's doc comment), so the boundaries used to derive a
 //! bucket from an arbitrary target rate are never consulted.
 
-use super::support::checked_tensor;
-use crate::error::Result;
+use super::support::TensorLoader;
+use crate::error::{Error, Result};
 use crate::format::safetensors_loader::SafeTensorsLoader;
 use crate::model::audio::voxcpm::causal_conv1d::CausalConv1d;
 use crate::model::audio::voxcpm::causal_transpose_conv1d::CausalTransposeConv1d;
@@ -33,11 +33,8 @@ use crate::model::audio::voxcpm::decoder::{
     INPUT_CHANNELS, NUM_SR_BUCKETS, OUTPUT_CHANNELS, RES_UNIT_DILATIONS, STRIDES,
 };
 use crate::model::audio::voxcpm::decoder_block::{DecoderBlock, DecoderBlockWeights};
-use crate::model::audio::voxcpm::res_unit::ResUnit;
-use crate::model::audio::voxcpm::snake::Snake;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
-use numr::tensor::Tensor;
 use std::path::Path;
 
 /// Default top-level prefix for the `AudioVAE` decoder's tensors in the
@@ -50,52 +47,13 @@ fn block_dims() -> [(usize, usize); 6] {
     std::array::from_fn(|i| (FRONT_HIDDEN >> i, FRONT_HIDDEN >> (i + 1)))
 }
 
-/// Reads `decoder.*` tensors and assembles an [`AudioVaeDecoder`].
-struct DecoderLoader<'a, R: Runtime<DType = DType>> {
-    loader: &'a mut SafeTensorsLoader,
-    device: &'a R::Device,
-    prefix: String,
-}
+/// Reads `decoder.*` tensors and assembles an [`AudioVaeDecoder`]. The
+/// tensor/snake/conv/`ResUnit` reads themselves are shared with the encoder
+/// loader via [`TensorLoader`]; only the block/front/tail assembly below is
+/// decoder-specific.
+type DecoderLoader<'a, R> = TensorLoader<'a, R>;
 
 impl<R: Runtime<DType = DType>> DecoderLoader<'_, R> {
-    fn tensor(&mut self, name: &str, expected: &[usize]) -> Result<Tensor<R>> {
-        checked_tensor::<R>(self.loader, self.device, &self.prefix, name, expected)
-    }
-
-    fn snake(&mut self, name: &str, channels: usize) -> Result<Snake<R>> {
-        let alpha = self.tensor(&format!("{name}.alpha"), &[1, channels, 1])?;
-        Snake::new(alpha)
-    }
-
-    /// Depthwise causal conv: `[channels, 1, kernel]`.
-    fn depthwise_conv(
-        &mut self,
-        name: &str,
-        channels: usize,
-        kernel: usize,
-        dilation: usize,
-    ) -> Result<CausalConv1d<R>> {
-        let weight = self.tensor(&format!("{name}.weight"), &[channels, 1, kernel])?;
-        let bias = self.tensor(&format!("{name}.bias"), &[channels])?;
-        CausalConv1d::new(weight, Some(bias), kernel, dilation, channels)
-    }
-
-    /// Pointwise (`k=1`, `groups=1`) causal conv: `[out, in, 1]`.
-    fn pointwise_conv(&mut self, name: &str, in_c: usize, out_c: usize) -> Result<CausalConv1d<R>> {
-        let weight = self.tensor(&format!("{name}.weight"), &[out_c, in_c, 1])?;
-        let bias = self.tensor(&format!("{name}.bias"), &[out_c])?;
-        CausalConv1d::new(weight, Some(bias), 1, 1, 1)
-    }
-
-    fn res_unit(&mut self, name: &str, dim: usize, dilation: usize) -> Result<ResUnit<R>> {
-        let snake1 = self.snake(&format!("{name}.block.0"), dim)?;
-        let dilated_conv =
-            self.depthwise_conv(&format!("{name}.block.1"), dim, CAUSAL_KERNEL, dilation)?;
-        let snake2 = self.snake(&format!("{name}.block.2"), dim)?;
-        let pointwise_conv = self.pointwise_conv(&format!("{name}.block.3"), dim, dim)?;
-        Ok(ResUnit::new(snake1, dilated_conv, snake2, pointwise_conv))
-    }
-
     fn decoder_block(
         &mut self,
         model_idx: usize,
@@ -116,16 +74,19 @@ impl<R: Runtime<DType = DType>> DecoderLoader<'_, R> {
         let res1 = self.res_unit(
             &format!("{block_name}.2"),
             output_dim,
+            CAUSAL_KERNEL,
             RES_UNIT_DILATIONS[0],
         )?;
         let res3 = self.res_unit(
             &format!("{block_name}.3"),
             output_dim,
+            CAUSAL_KERNEL,
             RES_UNIT_DILATIONS[1],
         )?;
         let res9 = self.res_unit(
             &format!("{block_name}.4"),
             output_dim,
+            CAUSAL_KERNEL,
             RES_UNIT_DILATIONS[2],
         )?;
 
@@ -150,7 +111,7 @@ impl<R: Runtime<DType = DType>> DecoderLoader<'_, R> {
         })
     }
 
-    fn build(&mut self) -> Result<AudioVaeDecoderWeights<R>> {
+    fn build_decoder(&mut self) -> Result<AudioVaeDecoderWeights<R>> {
         let front_dw = self.depthwise_conv("model.0", INPUT_CHANNELS, CAUSAL_KERNEL, 1)?;
         let front_pw = self.pointwise_conv("model.1", INPUT_CHANNELS, FRONT_HIDDEN)?;
 
@@ -159,9 +120,11 @@ impl<R: Runtime<DType = DType>> DecoderLoader<'_, R> {
         for (i, (input_dim, output_dim)) in dims.into_iter().enumerate() {
             blocks_vec.push(self.decoder_block(i + 2, input_dim, output_dim, STRIDES[i])?);
         }
-        let blocks: [DecoderBlock<R>; 6] = blocks_vec
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("exactly 6 DecoderBlocks were pushed"));
+        let got = blocks_vec.len();
+        let blocks: [DecoderBlock<R>; 6] =
+            blocks_vec.try_into().map_err(|_| Error::ModelError {
+                reason: format!("expected 6 DecoderBlocks, assembled {got}"),
+            })?;
 
         let final_snake = self.snake("model.8", FINAL_CHANNELS)?;
         let final_conv = {
@@ -204,7 +167,7 @@ impl<R: Runtime<DType = DType>> AudioVaeDecoder<R> {
             device,
             prefix: prefix.to_string(),
         }
-        .build()?;
+        .build_decoder()?;
         Ok(Self::new(weights))
     }
 }

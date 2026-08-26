@@ -204,3 +204,6 @@ required-features = ["audio"]
 name = "whisper_mel_parity"
 required-features = ["audio"]
 
+[[example]]
+name = "voxcpm_vae_check"
+required-features = ["audio"]

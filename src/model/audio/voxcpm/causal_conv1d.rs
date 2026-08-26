@@ -55,6 +55,51 @@ impl<R: Runtime<DType = DType>> CausalConv1d<R> {
         })
     }
 
+    /// Strided causal Conv1d for the `AudioVAE` encoder's downsampling stage:
+    /// `kernel_size` must equal `2 * stride`, `dilation = 1`. Left-pad follows
+    /// the same `padding = ceil(stride/2)`, `output_padding = stride % 2`
+    /// convention as [`super::causal_transpose_conv1d::CausalTransposeConv1d`],
+    /// but applied as a LEFT-only pad on a plain (non-transposed) conv rather
+    /// than a tail trim: `left_pad = 2*padding - output_padding`, right pad 0.
+    /// With `T` a multiple of `stride`, output length is exactly `T / stride`.
+    pub fn new_strided(
+        weight: Tensor<R>,
+        bias: Option<Tensor<R>>,
+        stride: usize,
+        groups: usize,
+    ) -> Result<Self> {
+        if stride == 0 {
+            return Err(Error::InvalidArgument {
+                arg: "stride",
+                reason: "must be > 0".into(),
+            });
+        }
+        let kernel_size = 2 * stride;
+        if weight.shape().len() != 3 || weight.shape()[2] != kernel_size {
+            return Err(Error::InvalidArgument {
+                arg: "weight",
+                reason: format!(
+                    "expected [_, _, {kernel_size}] (kernel = 2*stride), got {:?}",
+                    weight.shape()
+                ),
+            });
+        }
+        let padding = stride.div_ceil(2);
+        let output_padding = stride % 2;
+        let left_pad = 2 * padding - output_padding;
+        Ok(Self {
+            conv: Conv1d::new(
+                weight,
+                bias,
+                stride,
+                PaddingMode::conv1d(left_pad, 0),
+                1,
+                groups,
+                false,
+            ),
+        })
+    }
+
     /// `x [B, C_in, T] -> [B, C_out, T]`.
     pub fn forward<C>(&self, client: &C, x: &Tensor<R>) -> Result<Tensor<R>>
     where
@@ -120,5 +165,34 @@ mod tests {
         let (_client, device) = cpu_setup();
         let weight = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 6], &[2, 1, 3], &device).unwrap();
         assert!(CausalConv1d::new(weight, None, 7, 1, 2).is_err());
+    }
+
+    #[test]
+    fn strided_output_length_matches_input_over_stride() {
+        let (client, device) = cpu_setup();
+        for stride in [2usize, 5, 8] {
+            let c = 2;
+            let k = 2 * stride;
+            let t = stride * 4; // multiple of stride
+            let weight =
+                Tensor::<CpuRuntime>::from_slice(&vec![0.01f32; c * k], &[c, 1, k], &device)
+                    .unwrap();
+            let bias = Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; c], &[c], &device).unwrap();
+            let conv = CausalConv1d::new_strided(weight, Some(bias), stride, c).unwrap();
+            let x = Tensor::<CpuRuntime>::from_slice(&vec![1.0f32; c * t], &[1, c, t], &device)
+                .unwrap();
+            let out = conv.forward(&client, &x).unwrap();
+            assert_eq!(out.shape(), &[1, c, t / stride], "stride {stride}");
+            for v in out.contiguous().unwrap().to_vec::<f32>() {
+                assert!(v.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn new_strided_rejects_wrong_kernel_size() {
+        let (_client, device) = cpu_setup();
+        let weight = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 6], &[2, 1, 3], &device).unwrap();
+        assert!(CausalConv1d::new_strided(weight, None, 2, 2).is_err());
     }
 }

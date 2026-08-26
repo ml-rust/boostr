@@ -96,14 +96,24 @@ where
     R::Client: NeuCodecClient<R>,
 {
     println!(
-        "\n{:<16} {:>5} {:>7} {:>9} {:>9} {:>9} {:>8} {:>8} {:>8}",
-        "arm", "seed", "dur_s", "peak_dB", "rms_dB", "floor_dB", "snr_dB", "clipped", "hnr_dB"
+        "\n{:<16} {:>5} {:>7} {:>9} {:>9} {:>9} {:>8} {:>8} {:>8} {:>7}",
+        "arm",
+        "seed",
+        "dur_s",
+        "peak_dB",
+        "rms_dB",
+        "floor_dB",
+        "snr_dB",
+        "clipped",
+        "hnr_dB",
+        "f0_Hz"
     );
     println!("{}", "-".repeat(90));
 
     let mut by_arm: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
     let mut snr_by_arm: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
     let mut hnr_by_arm: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
+    let mut f0_by_arm: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
 
     for take in &probe.results {
         if take.codes.is_empty() {
@@ -119,13 +129,16 @@ where
         // HNR measures noise DURING speech, which the floor cannot: the floor
         // is set by the pauses, and this model's pauses are digitally silent
         // under every prompt.
-        let hnr = estimate_pitch(&samples, probe.sample_rate, PitchOptions::default())
-            .ok()
-            .and_then(|t| t.mean_hnr_db);
+        let track = estimate_pitch(&samples, probe.sample_rate, PitchOptions::default()).ok();
+        let hnr = track.as_ref().and_then(|t| t.mean_hnr_db);
+        // Mean F0 over voiced frames. Male speech typically sits 85-180 Hz and
+        // female 165-255 Hz, so this is what says whether a base model's
+        // speaker prior can carry the voice being cloned.
+        let f0 = track.as_ref().and_then(|t| t.mean_hz);
 
         let flag = if take.complete { "" } else { "  TRUNCATED" };
         println!(
-            "{:<16} {:>5} {:>7.2} {:>9.1} {:>9.1} {:>9.1} {:>8.1} {:>8} {:>8}{}",
+            "{:<16} {:>5} {:>7.2} {:>9.1} {:>9.1} {:>9.1} {:>8.1} {:>8} {:>8} {:>7}{}",
             take.arm,
             take.seed,
             q.duration_s,
@@ -135,6 +148,7 @@ where
             q.snr_db,
             q.clipped_samples,
             hnr.map_or("-".to_string(), |h| format!("{h:.1}")),
+            f0.map_or("-".to_string(), |v| format!("{v:.0}")),
             flag
         );
 
@@ -150,6 +164,9 @@ where
             if let Some(h) = hnr {
                 hnr_by_arm.entry(take.arm.clone()).or_default().push(h);
             }
+            if let Some(v) = f0 {
+                f0_by_arm.entry(take.arm.clone()).or_default().push(v);
+            }
         }
 
         if let Some(dir) = out_dir {
@@ -160,8 +177,8 @@ where
 
     println!("\nComplete takes only, floor_dBFS (lower = quieter background):");
     println!(
-        "{:<16} {:>3} {:>12} {:>10} {:>12} {:>10} {:>8}",
-        "arm", "n", "floor mean", "floor sd", "snr mean", "hnr mean", "hnr sd"
+        "{:<16} {:>3} {:>12} {:>10} {:>12} {:>10} {:>8} {:>9} {:>7}",
+        "arm", "n", "floor mean", "floor sd", "snr mean", "hnr mean", "hnr sd", "f0 mean", "f0 sd"
     );
     println!("{}", "-".repeat(78));
     for (arm, floors) in &by_arm {
@@ -176,8 +193,13 @@ where
             .get(arm)
             .and_then(|h| mean_sd(h))
             .unwrap_or((f64::NAN, f64::NAN));
+        let (f0_mean, f0_sd) = f0_by_arm
+            .get(arm)
+            .and_then(|f| mean_sd(f))
+            .unwrap_or((f64::NAN, f64::NAN));
         println!(
-            "{arm:<16} {:>3} {fm:>12.1} {fsd:>10.2} {snr_mean:>12.1} {hnr_mean:>10.2} {hnr_sd:>8.2}",
+            "{arm:<16} {:>3} {fm:>12.1} {fsd:>10.2} {snr_mean:>12.1} {hnr_mean:>10.2} \
+             {hnr_sd:>8.2} {f0_mean:>9.0} {f0_sd:>7.1}",
             floors.len()
         );
     }

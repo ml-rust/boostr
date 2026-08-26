@@ -18,6 +18,7 @@ pub mod moe;
 pub mod rmsnorm;
 pub mod rope;
 pub mod stochastic_depth;
+pub mod timestep_embedding;
 pub mod var_builder;
 pub mod var_ops;
 pub mod varmap;
@@ -51,6 +52,7 @@ pub use moe::{
 pub use rmsnorm::RmsNorm;
 pub use rope::RoPE;
 pub use stochastic_depth::StochasticDepth;
+pub use timestep_embedding::{SinusoidalPosEmb, TimestepEmbedding};
 pub use var_builder::VarBuilder;
 pub use var_ops::{repeat_kv, var_contiguous};
 pub use varmap::{Init, VarMap};

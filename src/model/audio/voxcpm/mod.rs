@@ -7,6 +7,7 @@
 pub mod bidirectional;
 pub mod client;
 pub mod loader;
+pub mod local_dit;
 pub mod local_encoder;
 pub mod minicpm4;
 pub mod vae;

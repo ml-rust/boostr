@@ -25,9 +25,10 @@
 //! MLPs (`time_mlp`, `delta_time_mlp`) are biased; every projection/norm inside
 //! the 12-layer block stack is bias-free — same split as `feat_encoder`.
 //!
-//! Does NOT load or construct a `SinusoidalPosEmb`: it carries no weights (see
-//! `crate::nn::timestep_embedding::SinusoidalPosEmb`), so the estimator
-//! forward pass (a later unit) builds it on demand from `hidden_dim`.
+//! Does not load a `SinusoidalPosEmb` from the checkpoint (it carries no
+//! weights — see `crate::nn::timestep_embedding::SinusoidalPosEmb`), but
+//! still builds one once here, alongside the RoPE cache, so the estimator
+//! forward pass never reconstructs it per call.
 
 use crate::error::Result;
 use crate::format::safetensors_loader::SafeTensorsLoader;
@@ -38,7 +39,7 @@ use crate::model::audio::voxcpm::bidirectional::{
 use crate::model::audio::voxcpm::loader::support::TensorLoader;
 use crate::model::audio::voxcpm::local_dit::config::LocalDitConfig;
 use crate::model::config::RopeScalingConfig;
-use crate::nn::{Linear, RmsNorm, RoPE, TimestepEmbedding};
+use crate::nn::{Linear, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding};
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
@@ -50,8 +51,9 @@ pub const DEFAULT_LOCAL_DIT_PREFIX: &str = "feat_decoder";
 
 /// VoxCPM2's `feat_decoder` local DiT ("locdit"): loaded weights only. The
 /// estimator forward pass (assembling `[mu, t, cond, x]` and running
-/// `decoder`) is a separate unit — this type exposes its pieces as
-/// accessors for that unit to drive.
+/// `decoder`) is a separate unit that reads these fields directly (they are
+/// `pub(crate)`); the accessors below are this type's public API for
+/// consumers outside this crate, which cannot reach `pub(crate)` fields.
 pub struct LocalDit<R: Runtime> {
     pub(crate) in_proj: Linear<R>,
     pub(crate) cond_proj: Linear<R>,
@@ -61,6 +63,7 @@ pub struct LocalDit<R: Runtime> {
     pub(crate) layers: Vec<BidirectionalLayer<R>>,
     pub(crate) norm: RmsNorm<R>,
     pub(crate) rope: RoPE<R>,
+    pub(crate) time_embeddings: SinusoidalPosEmb<R>,
     pub(crate) hidden_dim: usize,
     pub(crate) feat_dim: usize,
     pub(crate) patch_size: usize,
@@ -219,6 +222,10 @@ where
         // patch_size (x)` — never hardcoded 11.
         let rope = rope.narrow_positions(cfg.sequence_len())?;
 
+        // No learned weights (see the module doc); built once here, like
+        // `rope` above, so `forward` never re-uploads its frequency table.
+        let time_embeddings = SinusoidalPosEmb::<R>::new(cfg.hidden_dim, device)?;
+
         Ok(Self {
             in_proj,
             cond_proj,
@@ -228,6 +235,7 @@ where
             layers,
             norm,
             rope,
+            time_embeddings,
             hidden_dim: cfg.hidden_dim,
             feat_dim: cfg.feat_dim,
             patch_size: cfg.patch_size,

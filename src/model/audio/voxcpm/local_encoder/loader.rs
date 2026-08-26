@@ -24,9 +24,9 @@
 
 use crate::error::Result;
 use crate::format::safetensors_loader::SafeTensorsLoader;
-use crate::model::audio::voxcpm::bidirectional::attention::BidirectionalAttention;
-use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
-use crate::model::audio::voxcpm::bidirectional::mlp::BidirectionalMlp;
+use crate::model::audio::voxcpm::bidirectional::{
+    BidirectionalLayerDims, load_bidirectional_layer,
+};
 use crate::model::audio::voxcpm::loader::support::TensorLoader;
 use crate::model::audio::voxcpm::local_encoder::config::LocalEncoderConfig;
 use crate::model::audio::voxcpm::local_encoder::encoder::LocalEncoder;
@@ -89,11 +89,21 @@ where
 
         let special_token = tl.tensor("special_token", &[1, 1, 1, cfg.hidden_dim])?;
 
-        let q_dim = cfg.num_heads * cfg.head_dim;
-        let kv_dim = cfg.num_kv_heads * cfg.head_dim;
+        let dims = BidirectionalLayerDims {
+            hidden_dim: cfg.hidden_dim,
+            ffn_dim: cfg.ffn_dim,
+            num_heads: cfg.num_heads,
+            num_kv_heads: cfg.num_kv_heads,
+            head_dim: cfg.head_dim,
+            rms_norm_eps: cfg.rms_norm_eps,
+        };
         let mut layers = Vec::with_capacity(cfg.num_layers);
         for i in 0..cfg.num_layers {
-            layers.push(load_layer::<R>(&mut tl, i, &cfg, q_dim, kv_dim)?);
+            layers.push(load_bidirectional_layer::<R>(
+                &mut tl,
+                &format!("encoder.layers.{i}"),
+                &dims,
+            )?);
         }
 
         let norm = RmsNorm::new(
@@ -145,123 +155,6 @@ where
             hidden_dim: cfg.hidden_dim,
         })
     }
-}
-
-/// Load one `feat_encoder.encoder.layers.{i}` transformer layer.
-fn load_layer<R: Runtime<DType = DType>>(
-    tl: &mut TensorLoader<'_, R>,
-    i: usize,
-    cfg: &LocalEncoderConfig,
-    q_dim: usize,
-    kv_dim: usize,
-) -> Result<BidirectionalLayer<R>>
-where
-    R::Client: TypeConversionOps<R>,
-{
-    let layer_prefix = format!("encoder.layers.{i}");
-
-    let input_layernorm = RmsNorm::new(
-        tl.tensor(
-            &format!("{layer_prefix}.input_layernorm.weight"),
-            &[cfg.hidden_dim],
-        )?,
-        cfg.rms_norm_eps,
-        false,
-    );
-
-    let self_attn = {
-        let attn_prefix = format!("{layer_prefix}.self_attn");
-        let q_proj = Linear::new(
-            tl.tensor(
-                &format!("{attn_prefix}.q_proj.weight"),
-                &[q_dim, cfg.hidden_dim],
-            )?,
-            None,
-            false,
-        );
-        let k_proj = Linear::new(
-            tl.tensor(
-                &format!("{attn_prefix}.k_proj.weight"),
-                &[kv_dim, cfg.hidden_dim],
-            )?,
-            None,
-            false,
-        );
-        let v_proj = Linear::new(
-            tl.tensor(
-                &format!("{attn_prefix}.v_proj.weight"),
-                &[kv_dim, cfg.hidden_dim],
-            )?,
-            None,
-            false,
-        );
-        let o_proj = Linear::new(
-            tl.tensor(
-                &format!("{attn_prefix}.o_proj.weight"),
-                &[cfg.hidden_dim, q_dim],
-            )?,
-            None,
-            false,
-        );
-        BidirectionalAttention {
-            q_proj,
-            k_proj,
-            v_proj,
-            o_proj,
-            num_heads: cfg.num_heads,
-            num_kv_heads: cfg.num_kv_heads,
-            head_dim: cfg.head_dim,
-        }
-    };
-
-    let post_attention_layernorm = RmsNorm::new(
-        tl.tensor(
-            &format!("{layer_prefix}.post_attention_layernorm.weight"),
-            &[cfg.hidden_dim],
-        )?,
-        cfg.rms_norm_eps,
-        false,
-    );
-
-    let mlp = {
-        let mlp_prefix = format!("{layer_prefix}.mlp");
-        let gate_proj = Linear::new(
-            tl.tensor(
-                &format!("{mlp_prefix}.gate_proj.weight"),
-                &[cfg.ffn_dim, cfg.hidden_dim],
-            )?,
-            None,
-            false,
-        );
-        let up_proj = Linear::new(
-            tl.tensor(
-                &format!("{mlp_prefix}.up_proj.weight"),
-                &[cfg.ffn_dim, cfg.hidden_dim],
-            )?,
-            None,
-            false,
-        );
-        let down_proj = Linear::new(
-            tl.tensor(
-                &format!("{mlp_prefix}.down_proj.weight"),
-                &[cfg.hidden_dim, cfg.ffn_dim],
-            )?,
-            None,
-            false,
-        );
-        BidirectionalMlp {
-            gate_proj,
-            up_proj,
-            down_proj,
-        }
-    };
-
-    Ok(BidirectionalLayer {
-        input_layernorm,
-        self_attn,
-        post_attention_layernorm,
-        mlp,
-    })
 }
 
 #[cfg(test)]

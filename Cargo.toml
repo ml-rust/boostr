@@ -207,3 +207,31 @@ required-features = ["audio"]
 [[example]]
 name = "voxcpm_vae_check"
 required-features = ["audio"]
+
+[[example]]
+name = "voxcpm_locenc_check"
+required-features = ["audio", "f16"]
+
+[[example]]
+name = "voxcpm_baselm_check"
+required-features = ["audio", "f16"]
+
+[[example]]
+name = "voxcpm_residual_lm_check"
+required-features = ["audio", "f16"]
+
+[[example]]
+name = "voxcpm_dit_check"
+required-features = ["audio", "f16"]
+
+[[example]]
+name = "voxcpm_cfm_check"
+required-features = ["audio", "f16"]
+
+[[example]]
+name = "voxcpm_fsq_check"
+required-features = ["audio", "f16"]
+
+[[example]]
+name = "inspect_kokoro"
+required-features = ["audio"]

@@ -24,12 +24,12 @@
 
 use crate::error::Result;
 use crate::format::safetensors_loader::SafeTensorsLoader;
+use crate::model::audio::voxcpm::bidirectional::attention::BidirectionalAttention;
+use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
+use crate::model::audio::voxcpm::bidirectional::mlp::BidirectionalMlp;
 use crate::model::audio::voxcpm::loader::support::TensorLoader;
-use crate::model::audio::voxcpm::local_encoder::attention::LocalEncoderAttention;
 use crate::model::audio::voxcpm::local_encoder::config::LocalEncoderConfig;
 use crate::model::audio::voxcpm::local_encoder::encoder::LocalEncoder;
-use crate::model::audio::voxcpm::local_encoder::layer::LocalEncoderLayer;
-use crate::model::audio::voxcpm::local_encoder::mlp::LocalEncoderMlp;
 use crate::model::config::RopeScalingConfig;
 use crate::nn::{Linear, RmsNorm, RoPE};
 use numr::autograd::Var;
@@ -154,7 +154,7 @@ fn load_layer<R: Runtime<DType = DType>>(
     cfg: &LocalEncoderConfig,
     q_dim: usize,
     kv_dim: usize,
-) -> Result<LocalEncoderLayer<R>>
+) -> Result<BidirectionalLayer<R>>
 where
     R::Client: TypeConversionOps<R>,
 {
@@ -203,7 +203,7 @@ where
             None,
             false,
         );
-        LocalEncoderAttention {
+        BidirectionalAttention {
             q_proj,
             k_proj,
             v_proj,
@@ -249,14 +249,14 @@ where
             None,
             false,
         );
-        LocalEncoderMlp {
+        BidirectionalMlp {
             gate_proj,
             up_proj,
             down_proj,
         }
     };
 
-    Ok(LocalEncoderLayer {
+    Ok(BidirectionalLayer {
         input_layernorm,
         self_attn,
         post_attention_layernorm,

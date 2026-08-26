@@ -1,18 +1,25 @@
-//! Non-causal (bidirectional) GQA attention for `feat_encoder`.
+//! Non-causal (bidirectional) GQA attention for VoxCPM2's shared MiniCPM4
+//! block stack, used by both `feat_encoder` (`local_encoder`) and the local
+//! DiT (`feat_decoder`).
 //!
 //! Every other transformer block in this crate runs through
 //! `crate::model::attention_core`, which hardcodes causal(+window) masking —
-//! `feat_encoder` is the one bidirectional transformer in the VoxCPM2 stack,
-//! attending its fixed 5-position `[CLS, p0, p1, p2, p3]` sequence with no
-//! mask at all. That orchestration is written by hand here; every primitive
-//! it calls (`Linear`, `RoPE`/`apply_rope`, `multi_head_attention_impl`,
-//! `repeat_kv`, `var_contiguous`) is reused as-is. `LlamaAttention` itself is
-//! `pub(super)` to `model::llama::model` and not reachable from here, and its
-//! `forward` methods are unconditionally causal regardless.
+//! this is the one bidirectional transformer stack in VoxCPM2, attending its
+//! sequence with no mask at all (`feat_encoder`'s fixed 5-position
+//! `[CLS, p0, p1, p2, p3]`; `feat_decoder`'s own assembled sequence). This
+//! differs from `minicpm4`'s causal blocks, which mask via
+//! `attention_core` and cannot be reused here. That orchestration is written
+//! by hand here; every primitive it calls (`Linear`, `RoPE`/`apply_rope`,
+//! `multi_head_attention_impl`, `repeat_kv`, `var_contiguous`) is reused
+//! as-is. `LlamaAttention` itself is `pub(super)` to `model::llama::model`
+//! and not reachable from here, and its `forward` methods are
+//! unconditionally causal regardless.
 //!
 //! `head_dim` (128) is independent of `hidden_size / num_heads` (1024/16 =
-//! 64) here — read from config, never derived, and passed straight to the
-//! projections and the RoPE cache.
+//! 64) here — read from config (`kv_channels`), never derived, and passed
+//! straight to the projections and the RoPE cache. `num_kv_heads` (GQA, 2
+//! heads) is inherited from `lm_config`, not derivable from the per-caller
+//! encoder/decoder config alone.
 
 use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
@@ -28,7 +35,7 @@ use numr::runtime::Runtime;
 
 /// `q_proj`: 1024 -> 2048 (16 heads), `k_proj`/`v_proj`: 1024 -> 256 (2
 /// heads, GQA group size 8), `o_proj`: 2048 -> 1024. All bias-free.
-pub struct LocalEncoderAttention<R: Runtime> {
+pub struct BidirectionalAttention<R: Runtime> {
     pub(crate) q_proj: Linear<R>,
     pub(crate) k_proj: Linear<R>,
     pub(crate) v_proj: Linear<R>,
@@ -38,10 +45,11 @@ pub struct LocalEncoderAttention<R: Runtime> {
     pub(crate) head_dim: usize,
 }
 
-impl<R: Runtime<DType = DType>> LocalEncoderAttention<R> {
+impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
     /// Bidirectional GQA attention over `x: [N, S, hidden]` (`N = B*T`,
-    /// `S = num_positions`, fixed at 5). No mask: every position is valid
-    /// and attends every other, including itself. Softmax scale is
+    /// `S = num_positions` — fixed at 5 for `feat_encoder`; caller-defined
+    /// for `feat_decoder`). No mask: every position is valid and attends
+    /// every other, including itself. Softmax scale is
     /// `1/sqrt(head_dim)`, derived from `q`'s actual last dimension by
     /// `multi_head_attention_impl`.
     pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>

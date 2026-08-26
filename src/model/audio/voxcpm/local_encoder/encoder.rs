@@ -21,7 +21,7 @@
 //! posture as `AudioVaeEncoder`/`AudioVaeDecoder` in this module.
 
 use crate::error::{Error, Result};
-use crate::model::audio::voxcpm::local_encoder::layer::LocalEncoderLayer;
+use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
 use crate::model::traits::ModelClient;
 use crate::nn::{Linear, RmsNorm, RoPE, var_contiguous};
 use numr::autograd::{Var, var_broadcast_to, var_cat, var_narrow, var_reshape};
@@ -37,7 +37,7 @@ pub struct LocalEncoder<R: Runtime> {
     /// `[1, 1, 1, hidden_dim]`, broadcast to `[B, T, 1, hidden_dim]` and
     /// prepended along the patch axis.
     pub(crate) special_token: Var<R>,
-    pub(crate) layers: Vec<LocalEncoderLayer<R>>,
+    pub(crate) layers: Vec<BidirectionalLayer<R>>,
     pub(crate) norm: RmsNorm<R>,
     pub(crate) rope: RoPE<R>,
     pub(crate) hidden_dim: usize,

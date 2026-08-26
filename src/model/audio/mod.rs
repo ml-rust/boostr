@@ -1,5 +1,6 @@
 pub mod corpus;
 pub mod decode;
+pub mod enhance;
 pub mod eval;
 pub mod g2p;
 pub mod kokoro;
@@ -38,7 +39,7 @@ pub use reflection_pad::reflection_pad_1d;
 pub use resample::{
     DEFAULT_TAPS_PER_PHASE, MAX_FILTER_TAPS, resample, resample_with_taps, to_mono_at_rate,
 };
-pub use stft::{StftOptions, stft};
+pub use stft::{StftClient, StftOptions, stft};
 pub use tts_bundle::{SynthesizeOptions, TtsBundle, TtsError, Voice, default_kokoro_voices};
 pub use vad::{
     SileroVad, SileroVadWeights, SpeechSegment, VadConfig, VadSegmentOptions, VadState,

@@ -197,7 +197,10 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
 
     /// Validate an `[batch, feat_dim, patch_size]` input, returning its batch.
     /// `expected_batch` pins the batch against an earlier input.
-    fn check_patch_input(
+    ///
+    /// `pub(super)` so the sibling CFM sampler validates `z`/`cond` up front
+    /// with the same rules, instead of waiting for the first estimator call.
+    pub(super) fn check_patch_input(
         &self,
         arg: &'static str,
         v: &Var<R>,
@@ -234,8 +237,9 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
     }
 
     /// Validate `mu: [batch, mu_tokens * hidden_dim]` and return `mu_tokens`
-    /// — derived from the width, never hardcoded to 2.
-    fn check_mu(&self, mu: &Var<R>, batch: usize) -> Result<usize> {
+    /// — derived from the width, never hardcoded to 2. `pub(super)` for the
+    /// same reason as [`Self::check_patch_input`].
+    pub(super) fn check_mu(&self, mu: &Var<R>, batch: usize) -> Result<usize> {
         let shape = mu.shape();
         if shape.len() != 2 || shape[0] != batch {
             return Err(Error::InvalidArgument {

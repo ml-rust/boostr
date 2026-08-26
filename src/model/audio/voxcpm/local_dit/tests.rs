@@ -2,6 +2,10 @@
 //!
 //! Weights are tiny and synthetic; these pin SHAPE and the output SLICE
 //! WINDOW, which are the two things the reference makes easy to get wrong.
+//!
+//! [`model`], [`t`] and the dimension constants are `pub(super)` so the
+//! sampler's tests integrate this same tiny estimator instead of rebuilding
+//! one.
 
 use crate::model::audio::voxcpm::bidirectional::attention::BidirectionalAttention;
 use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
@@ -13,9 +17,9 @@ use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 
-const FEAT_DIM: usize = 3;
-const PATCH_SIZE: usize = 2;
-const HIDDEN_DIM: usize = 8;
+pub(super) const FEAT_DIM: usize = 3;
+pub(super) const PATCH_SIZE: usize = 2;
+pub(super) const HIDDEN_DIM: usize = 8;
 const FFN_DIM: usize = 8;
 const NUM_HEADS: usize = 2;
 const NUM_KV_HEADS: usize = 1;
@@ -23,11 +27,11 @@ const HEAD_DIM: usize = 4;
 /// `mu(2) + t(1) + cond(2) + x(2)` — the same derivation as
 /// `LocalDitConfig::sequence_len`, at `PATCH_SIZE = 2`.
 const SEQUENCE_LEN: usize = 2 + 1 + PATCH_SIZE + PATCH_SIZE;
-const MU_TOKENS: usize = 2;
+pub(super) const MU_TOKENS: usize = 2;
 
 /// Deterministic non-degenerate values: a constant fill would make every
 /// position identical and hide a wrong slice window.
-fn t(shape: &[usize], seed: f32, device: &CpuDevice) -> Tensor<CpuRuntime> {
+pub(super) fn t(shape: &[usize], seed: f32, device: &CpuDevice) -> Tensor<CpuRuntime> {
     let n: usize = shape.iter().product();
     let data: Vec<f32> = (0..n)
         .map(|i| 0.4 * ((i as f32) * 0.37 + seed).sin())
@@ -82,7 +86,7 @@ fn layer(seed: f32, device: &CpuDevice) -> BidirectionalLayer<CpuRuntime> {
 /// `num_layers = 0` builds the same model minus the transformer stack — the
 /// only way to observe the slice window in isolation (see
 /// `slice_window_keeps_only_the_trailing_x_positions`).
-fn model(num_layers: usize, device: &CpuDevice) -> LocalDit<CpuRuntime> {
+pub(super) fn model(num_layers: usize, device: &CpuDevice) -> LocalDit<CpuRuntime> {
     let rope = RoPE::<CpuRuntime>::precompute_freqs(32, HEAD_DIM, 10000.0, None, device)
         .unwrap()
         .narrow_positions(SEQUENCE_LEN)

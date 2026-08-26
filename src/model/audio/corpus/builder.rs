@@ -353,12 +353,15 @@ impl<R: Runtime<DType = DType>> SpeechCorpusBuilder<R> {
             }
             let slice = &samples[segment.start..segment.end];
 
-            let whisper = self.whisper.as_ref().ok_or_else(|| Error::InvalidArgument {
-                arg: "builder",
-                reason: "this builder was constructed for a SCRIPTED corpus and has no \
+            let whisper = self
+                .whisper
+                .as_ref()
+                .ok_or_else(|| Error::InvalidArgument {
+                    arg: "builder",
+                    reason: "this builder was constructed for a SCRIPTED corpus and has no \
                          recognizer; use `scripted_utterance` with the known transcript"
-                    .to_string(),
-            })?;
+                        .to_string(),
+                })?;
             let transcription =
                 whisper.transcribe(client, slice, opts.sample_rate, &transcribe_opts)?;
             let text = transcription.text.trim();

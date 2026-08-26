@@ -280,4 +280,3 @@ fn enhancement_is_off_unless_asked_for() {
     // `CorpusOptions::enhance` for what that choice costs either way.
     assert!(CorpusOptions::default().enhance.is_none());
 }
-

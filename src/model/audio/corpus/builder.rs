@@ -10,7 +10,7 @@ use crate::model::audio::corpus::options::{
 use crate::model::audio::corpus::utterance::{Utterance, pack_utterances_with_layout};
 use crate::model::audio::neucodec::NeuCodecEncoder;
 use crate::model::audio::neucodec::client::NeuCodecClient;
-use crate::model::audio::vad::SileroVad;
+use crate::model::audio::vad::{SileroVad, SpeechSegment};
 use crate::model::audio::whisper_loader::WhisperBundle;
 use crate::model::audio::whisper_transcribe::TranscribeOptions;
 use crate::model::speech_lm::codec::CodecVocab;
@@ -30,8 +30,12 @@ use numr::runtime::Runtime;
 /// [`new_expressive_tts`](Self::new_expressive_tts) for the
 /// `Multilingual-Expressive-TTS-1.7B` base.
 pub struct SpeechCorpusBuilder<R: Runtime> {
-    vad: SileroVad<R>,
-    whisper: WhisperBundle<R>,
+    /// Absent in a SCRIPTED corpus, where the transcript is already known and
+    /// neither segmentation nor recognition has anything to contribute. Keeping
+    /// them optional is what lets a prompted-recording run avoid loading a
+    /// multi-gigabyte Whisper checkpoint it would never call.
+    vad: Option<SileroVad<R>>,
+    whisper: Option<WhisperBundle<R>>,
     codec: NeuCodecEncoder<R>,
     tokenizer: AnyTokenizer,
     layout: SpeechLayout,
@@ -78,8 +82,8 @@ impl<R: Runtime<DType = DType>> SpeechCorpusBuilder<R> {
         let vocab = SpeechVocab::with_default_specials(text_vocab_size, codec_vocab)?;
 
         Ok(Self {
-            vad,
-            whisper,
+            vad: Some(vad),
+            whisper: Some(whisper),
             codec,
             tokenizer,
             layout: SpeechLayout::Native(vocab),
@@ -123,11 +127,129 @@ impl<R: Runtime<DType = DType>> SpeechCorpusBuilder<R> {
         let tokenizer = tokenizer.resolve()?;
 
         Ok(Self {
-            vad,
-            whisper,
+            vad: Some(vad),
+            whisper: Some(whisper),
             codec,
             tokenizer,
             layout: SpeechLayout::ExpressiveTts(ExpressiveTtsLayout::new()),
+        })
+    }
+
+    /// Run the enhancement chain over a WHOLE recording when the caller asked
+    /// for it, borrowing the input unchanged when they did not.
+    ///
+    /// Shared by both corpus paths so a scripted run and a segmented one cannot
+    /// treat the audio differently. See `CorpusOptions::enhance` for why this
+    /// is per recording and never per utterance.
+    fn maybe_enhance<'a>(
+        &self,
+        samples: &'a [f32],
+        opts: &CorpusOptions<'_>,
+    ) -> Result<std::borrow::Cow<'a, [f32]>> {
+        let Some(enhance_opts) = opts.enhance else {
+            return Ok(std::borrow::Cow::Borrowed(samples));
+        };
+        let rate = u32::try_from(opts.sample_rate).map_err(|_| Error::InvalidArgument {
+            arg: "opts.sample_rate",
+            reason: format!("{} does not fit a u32 sample rate", opts.sample_rate),
+        })?;
+        let (out, report) = crate::model::audio::enhance::enhance(samples, rate, enhance_opts)?;
+        tracing::info!(
+            input_lufs = report.input_lufs,
+            output_lufs = report.output_lufs,
+            input_floor_dbfs = report.input_noise_floor_dbfs,
+            output_floor_dbfs = report.output_noise_floor_dbfs,
+            limiting_db = report.limiter_reduction_db,
+            reached_target = report.reached_target,
+            "enhanced recording"
+        );
+        Ok(std::borrow::Cow::Owned(out))
+    }
+
+    /// A builder for a SCRIPTED corpus, packing into the
+    /// `Multilingual-Expressive-TTS-1.7B` layout.
+    ///
+    /// Takes no VAD and no Whisper, because a scripted corpus has neither to do:
+    /// each recording is one prompt whose text is already known exactly.
+    ///
+    /// This is the accurate path, and for prompted recording it is the only
+    /// correct one. Measured on 52 prompted takes, running ASR over them
+    /// instead scored **31.6% WER** against the prompts that produced them —
+    /// most of it because a single `--language` forces one language on a
+    /// code-switching corpus and TRANSLATES the rest: "Before we go further,
+    /// save what you have right now" came back as "Sebelum kita pergi lebih
+    /// lanjut, simpan apa yang anda ada sekarang". That pairs English audio
+    /// with Malay text, and nothing downstream can notice.
+    pub fn new_scripted_expressive_tts(
+        codec: NeuCodecEncoder<R>,
+        tokenizer: TextTokenizer<'_>,
+    ) -> Result<Self> {
+        Ok(Self {
+            vad: None,
+            whisper: None,
+            codec,
+            tokenizer: tokenizer.resolve()?,
+            layout: SpeechLayout::ExpressiveTts(ExpressiveTtsLayout::new()),
+        })
+    }
+
+    /// One utterance from a recording whose transcript is already known.
+    ///
+    /// The whole recording is one utterance: no segmentation, because a prompt
+    /// read aloud is one unit and splitting it would leave fragments paired
+    /// with the whole prompt's text.
+    ///
+    /// `text` is used verbatim, save for the `opts.speaker` prefix, so a caller
+    /// that needs normalization must do it before calling.
+    pub fn scripted_utterance<C>(
+        &self,
+        client: &C,
+        samples: &[f32],
+        text: &str,
+        opts: &CorpusOptions<'_>,
+    ) -> Result<Utterance>
+    where
+        C: NeuCodecClient<R> + MatmulOps<R>,
+        R::Client: NeuCodecClient<R>,
+    {
+        if opts.sample_rate == 0 {
+            return Err(Error::InvalidArgument {
+                arg: "opts.sample_rate",
+                reason: "sample rate must be non-zero".to_string(),
+            });
+        }
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(Error::InvalidArgument {
+                arg: "text",
+                reason: "a scripted utterance needs its transcript".to_string(),
+            });
+        }
+        if samples.is_empty() {
+            return Err(Error::InvalidArgument {
+                arg: "samples",
+                reason: "no samples".to_string(),
+            });
+        }
+
+        let samples = self.maybe_enhance(samples, opts)?;
+        let samples = samples.as_ref();
+
+        let text = match opts.speaker {
+            Some(speaker) => format!("{speaker}: {text}"),
+            None => text.to_string(),
+        };
+        let text_tokens = self.tokenizer.encode(&text);
+        let frames = self.codec.encode_frames(client, samples, client.device())?;
+
+        Ok(Utterance {
+            segment: SpeechSegment {
+                start: 0,
+                end: samples.len(),
+            },
+            text,
+            text_tokens,
+            frames,
         })
     }
 
@@ -189,31 +311,16 @@ impl<R: Runtime<DType = DType>> SpeechCorpusBuilder<R> {
         // gate needs the pauses between phrases to read a floor from, and one
         // gain per recording keeps the relative loudness between utterances
         // that per-clip normalization would erase. See `CorpusOptions::enhance`.
-        let enhanced;
-        let samples = match opts.enhance {
-            Some(enhance_opts) => {
-                let rate = u32::try_from(opts.sample_rate).map_err(|_| Error::InvalidArgument {
-                    arg: "opts.sample_rate",
-                    reason: format!("{} does not fit a u32 sample rate", opts.sample_rate),
-                })?;
-                let (out, report) =
-                    crate::model::audio::enhance::enhance(samples, rate, enhance_opts)?;
-                tracing::info!(
-                    input_lufs = report.input_lufs,
-                    output_lufs = report.output_lufs,
-                    input_floor_dbfs = report.input_noise_floor_dbfs,
-                    output_floor_dbfs = report.output_noise_floor_dbfs,
-                    limiting_db = report.limiter_reduction_db,
-                    reached_target = report.reached_target,
-                    "enhanced recording before segmentation"
-                );
-                enhanced = out;
-                enhanced.as_slice()
-            }
-            None => samples,
-        };
+        let samples = self.maybe_enhance(samples, opts)?;
+        let samples = samples.as_ref();
 
-        let segments = self.vad.speech_timestamps(client, samples, &opts.vad)?;
+        let vad = self.vad.as_ref().ok_or_else(|| Error::InvalidArgument {
+            arg: "builder",
+            reason: "this builder was constructed for a SCRIPTED corpus and has no VAD; \
+                     use `scripted_utterance` with the known transcript"
+                .to_string(),
+        })?;
+        let segments = vad.speech_timestamps(client, samples, &opts.vad)?;
 
         let min_samples = if opts.min_utterance_secs > 0.0 {
             (f64::from(opts.min_utterance_secs) * opts.sample_rate as f64).ceil() as usize
@@ -246,9 +353,14 @@ impl<R: Runtime<DType = DType>> SpeechCorpusBuilder<R> {
             }
             let slice = &samples[segment.start..segment.end];
 
+            let whisper = self.whisper.as_ref().ok_or_else(|| Error::InvalidArgument {
+                arg: "builder",
+                reason: "this builder was constructed for a SCRIPTED corpus and has no \
+                         recognizer; use `scripted_utterance` with the known transcript"
+                    .to_string(),
+            })?;
             let transcription =
-                self.whisper
-                    .transcribe(client, slice, opts.sample_rate, &transcribe_opts)?;
+                whisper.transcribe(client, slice, opts.sample_rate, &transcribe_opts)?;
             let text = transcription.text.trim();
             if text.is_empty() {
                 empty_transcripts += 1;

@@ -192,3 +192,45 @@ fn a_zero_window_is_rejected_by_both_layouts() {
         );
     }
 }
+
+#[test]
+fn is_audio_classifies_both_layouts_at_their_own_boundary() {
+    // The property a trainer's loss mask depends on: the id one below
+    // `audio_base` is not audio, the id at it is, and `total_size` is past the
+    // end. Checked on both variants because a mask built for a corpus packed
+    // under either must select the same positions the packer wrote audio into.
+    for layout in [SpeechLayout::expressive_tts(), native()] {
+        let base = layout.audio_base() as u32;
+        let total = layout.total_size() as u32;
+        assert!(!layout.is_audio(0), "{}: id 0", layout.name());
+        assert!(!layout.is_audio(base - 1), "{}: below base", layout.name());
+        assert!(layout.is_audio(base), "{}: at base", layout.name());
+        assert!(
+            layout.is_audio(total - 1),
+            "{}: last audio id",
+            layout.name()
+        );
+        assert!(!layout.is_audio(total), "{}: past the end", layout.name());
+    }
+}
+
+#[test]
+fn is_audio_agrees_with_the_native_vocab_it_wraps() {
+    // `SpeechVocab::is_audio` is the existing answer for the native layout;
+    // the layout-level one must not drift from it.
+    let layout = native();
+    let vocab = layout
+        .vocab()
+        .expect("native layout carries its vocab")
+        .clone();
+    for id in [
+        0u32,
+        1,
+        vocab.audio_base() as u32 - 1,
+        vocab.audio_base() as u32,
+        vocab.total_size() as u32 - 1,
+        vocab.total_size() as u32,
+    ] {
+        assert_eq!(layout.is_audio(id), vocab.is_audio(id), "id {id}");
+    }
+}

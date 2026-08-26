@@ -81,6 +81,19 @@ impl SpeechLayout {
     }
 
     /// True if a checkpoint with `rows` embedding rows matches this layout.
+    /// True if `id` is an audio token under this layout.
+    ///
+    /// Mirrors [`SpeechVocab::is_audio`] and answers it for BOTH layouts, which
+    /// is what lets a trainer build an audio-only loss mask for a corpus packed
+    /// under either. Without it, masking could only be expressed for
+    /// [`Self::Native`], and a corpus packed as `expressive_tts` had to train
+    /// with loss on its text tokens too — where the text is the conditioning,
+    /// not the target.
+    pub fn is_audio(&self, id: u32) -> bool {
+        let id = id as usize;
+        id >= self.audio_base() && id < self.total_size()
+    }
+
     pub fn matches_embedding_rows(&self, rows: usize) -> bool {
         rows == self.total_size()
     }

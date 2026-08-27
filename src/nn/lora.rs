@@ -5,20 +5,31 @@
 //!
 //! where A: [rank, in_features], B: [out_features, rank], scaling = alpha / rank.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::nn::module::Module;
+use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{Var, var_add, var_matmul, var_mul_scalar, var_transpose};
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ScalarOps, TensorOps};
+use numr::ops::{BinaryOps, ScalarOps, TensorOps, TypeConversionOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
-use super::Linear;
+use super::{Linear, MaybeQuantLinear};
 
-/// LoRA adapter wrapping a frozen base Linear layer.
+/// LoRA adapter wrapping a frozen base linear layer.
+///
+/// The base is [`MaybeQuantLinear`] rather than [`Linear`] because LoRA's
+/// base is frozen by construction — only `lora_a`/`lora_b` train. A frozen
+/// weight does not need to be dense: it can just as well be a block-quantized
+/// GGUF weight (`MaybeQuantLinear::Quantized`) or a decomposed AWQ/GPTQ one.
+/// A dense trainable adapter riding on a frozen quantized base is exactly
+/// QLoRA, and it means fine-tuning can run directly on a quantized checkpoint
+/// without ever dequantizing the base weights. `MaybeQuantLinear::Standard`
+/// covers the plain dense case exactly, so this is a strict generalization —
+/// no behavior change for existing dense-base callers.
 pub struct LoraLinear<R: Runtime> {
-    /// Frozen base linear layer
-    base: Linear<R>,
+    /// Frozen base linear layer — dense, block-quantized, or decomposed.
+    base: MaybeQuantLinear<R>,
     /// Low-rank down-projection: [rank, in_features]
     lora_a: Var<R>,
     /// Low-rank up-projection: [out_features, rank]
@@ -30,13 +41,27 @@ pub struct LoraLinear<R: Runtime> {
 impl<R: Runtime<DType = DType>> LoraLinear<R> {
     /// Create a LoRA adapter around an existing linear layer.
     ///
-    /// - `base`: The frozen base linear layer
+    /// - `base`: The frozen base linear layer — a plain `Linear` converts in
+    ///   automatically (dense case), or pass a `MaybeQuantLinear` directly
+    ///   for a quantized base (QLoRA)
     /// - `rank`: Low-rank dimension (typical: 4, 8, 16, 32)
     /// - `alpha`: Scaling factor (typical: rank or 2*rank)
     /// - `device`: Device to allocate LoRA weights on
-    pub fn new(base: Linear<R>, rank: usize, alpha: f32, device: &R::Device) -> Result<Self> {
-        let in_features = base.weight().tensor().shape()[1];
-        let out_features = base.weight().tensor().shape()[0];
+    pub fn new(
+        base: impl Into<MaybeQuantLinear<R>>,
+        rank: usize,
+        alpha: f32,
+        device: &R::Device,
+    ) -> Result<Self> {
+        let base = base.into();
+        let shape = base.shape();
+        let out_features = *shape.first().ok_or_else(|| Error::ModelError {
+            reason: "LoRA base weight has no dimensions to derive out_features from".into(),
+        })?;
+        let in_features = *shape.get(1).ok_or_else(|| Error::ModelError {
+            reason: "LoRA base weight must have at least 2 dimensions [out_features, in_features]"
+                .into(),
+        })?;
 
         // Initialize A with Kaiming uniform (simple LCG PRNG), B with zeros (standard LoRA init)
         let a_data = {
@@ -80,7 +105,7 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
     /// checkpoint load). The base layer's own trainability is unaffected —
     /// pass it separately when constructing `base`.
     pub fn from_weights(
-        base: Linear<R>,
+        base: impl Into<MaybeQuantLinear<R>>,
         lora_a: Tensor<R>,
         lora_b: Tensor<R>,
         alpha: f32,
@@ -88,7 +113,7 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
     ) -> Self {
         let rank = lora_a.shape()[0];
         Self {
-            base,
+            base: base.into(),
             lora_a: Var::new(lora_a, trainable),
             lora_b: Var::new(lora_b, trainable),
             scaling: alpha / rank as f32,
@@ -108,7 +133,7 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
     /// `trainable` applies to `lora_a`/`lora_b` only; the base carries its own
     /// flag from however `base` was constructed.
     pub fn with_ids(
-        base: Linear<R>,
+        base: impl Into<MaybeQuantLinear<R>>,
         lora_a: Tensor<R>,
         lora_a_id: TensorId,
         lora_b: Tensor<R>,
@@ -118,7 +143,7 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
     ) -> Self {
         let rank = lora_a.shape()[0];
         Self {
-            base,
+            base: base.into(),
             lora_a: Var::with_id(lora_a, lora_a_id, trainable),
             lora_b: Var::with_id(lora_b, lora_b_id, trainable),
             scaling: alpha / rank as f32,
@@ -136,9 +161,18 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
     }
 
     /// Forward: base(x) + (x @ A^T @ B^T) * scaling
+    ///
+    /// `base(x)` goes through [`MaybeQuantLinear::forward`], so this works
+    /// identically whether the frozen base is dense, block-quantized, or
+    /// decomposed — only the adapter path below ever needs a gradient.
     pub fn forward<C>(&self, client: &C, input: &Var<R>) -> Result<Var<R>>
     where
-        C: RuntimeClient<R> + TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
+        C: RuntimeClient<R>
+            + TensorOps<R>
+            + BinaryOps<R>
+            + ScalarOps<R>
+            + QuantMatmulOps<R>
+            + TypeConversionOps<R>,
         R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
     {
         let base_out = self.base.forward(client, input)?;
@@ -163,8 +197,16 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
     }
 
     /// Get reference to the base linear layer.
-    pub fn base(&self) -> &Linear<R> {
+    pub fn base(&self) -> &MaybeQuantLinear<R> {
         &self.base
+    }
+
+    /// The base weight, if it is `Var`-wrapped — i.e. only when the base is
+    /// dense (`MaybeQuantLinear::Standard`). A quantized base has no
+    /// `Var<R>` weight: block-quantized storage carries nothing trainable,
+    /// so `None` here signals "quantized base", not an error.
+    pub fn weight(&self) -> Option<&Var<R>> {
+        self.base.weight()
     }
 
     /// Get LoRA rank.
@@ -184,11 +226,32 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
     /// `[rank, in]`, so `B @ A` is `[out, in]`). The result carries no adapter
     /// and is not part of any gradient path — for export and inference after
     /// training. The base's bias, if any, is carried over unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Only the dense (`Standard`) base can be merged. A quantized base
+    /// (`Quantized` or `DecomposedQuant`) has no `Var<R>` weight to add the
+    /// low-rank delta into — folding the adapter in would require
+    /// requantizing the merged result, which this does not do. Keep the
+    /// adapter separate (train and serve it alongside the quantized base)
+    /// instead of merging.
     pub fn merge_into_base<C>(&self, client: &C) -> Result<Linear<R>>
     where
         C: RuntimeClient<R> + TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
         R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
     {
+        let base = match &self.base {
+            MaybeQuantLinear::Standard(linear) => linear,
+            MaybeQuantLinear::Quantized(_) | MaybeQuantLinear::DecomposedQuant(_) => {
+                return Err(Error::ModelError {
+                    reason: "cannot merge a LoRA adapter into a quantized base — merging would \
+                             require requantizing the result; keep the adapter separate instead \
+                             of merging"
+                        .into(),
+                });
+            }
+        };
+
         let ba = client
             .matmul(self.lora_b.tensor(), self.lora_a.tensor())
             .map_err(crate::error::Error::Numr)?;
@@ -196,15 +259,25 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
             .mul_scalar(&ba, self.scaling as f64)
             .map_err(crate::error::Error::Numr)?;
         let merged_weight = client
-            .add(self.base.weight().tensor(), &scaled)
+            .add(base.weight().tensor(), &scaled)
             .map_err(crate::error::Error::Numr)?;
 
-        let bias = self.base.bias().map(|b| b.tensor().clone());
+        let bias = base.bias().map(|b| b.tensor().clone());
         Ok(Linear::new(merged_weight, bias, false))
     }
 }
 
 impl<R: Runtime> Module<R> for LoraLinear<R> {
+    // Enumerate the base as well as the adapters, and let the caller's
+    // `requires_grad` filter decide what actually trains. Returning only the
+    // adapters would be wrong in both directions: a QUANTIZED base already
+    // contributes nothing here (`MaybeQuantLinear::parameters` is empty for
+    // the quantized variants), so nothing needs suppressing for QLoRA; while
+    // a DENSE base that a caller deliberately left trainable — oxidizr's
+    // `lora.train_modules` opts a named projection's base back in even under
+    // `freeze_base: true` — would silently vanish from the optimizer's
+    // parameter set while still being checkpointed, so the weight would be
+    // saved every step and never once updated.
     fn parameters(&self) -> Vec<&Var<R>> {
         // `Linear` also has an INHERENT `parameters()` returning `(TensorId, &Var)`
         // pairs, which shadows the trait method — disambiguate explicitly.

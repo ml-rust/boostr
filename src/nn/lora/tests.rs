@@ -68,15 +68,29 @@ fn test_lora_forward_propagates_gradient_to_factors() {
     );
 }
 
+/// `Module::parameters` is UNFILTERED: it reports the dense base's
+/// weight/bias alongside the adapter factors, and the caller's
+/// `requires_grad` filter decides what actually trains.
+///
+/// Reporting only the adapters would break a real caller. oxidizr's
+/// `lora.train_modules` deliberately opts a named projection's base back
+/// into training even under `freeze_base: true`; if `parameters()` dropped
+/// it, that weight would be checkpointed every step and never once updated
+/// by the optimizer — silently, with a healthy-looking run.
+///
+/// A QUANTIZED base needs no special handling here: it has no `Var` weight,
+/// and `MaybeQuantLinear::parameters` is already empty for those variants,
+/// so this same code reports adapters alone. See
+/// `test_quantized_base_trainable_parameters_are_adapters_only`.
 #[test]
-fn test_module_parameters_enumerates_base_and_adapters() {
+fn test_module_parameters_reports_base_and_adapters() {
     let device = <CpuRuntime as Runtime>::default_device();
     let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
     let bias = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4], &device).unwrap();
     let base = Linear::new(weight, Some(bias), true);
     let lora = LoraLinear::new(base, 2, 4.0, &device).expect("lora new must succeed on CPU");
 
-    // base.weight + base.bias + lora_a + lora_b
+    // base.weight + base.bias + lora_a + lora_b.
     assert_eq!(lora.parameters().len(), 4);
 
     let named = lora.named_parameters();
@@ -85,6 +99,20 @@ fn test_module_parameters_enumerates_base_and_adapters() {
     assert!(named.iter().any(|(n, _)| n == "lora_b"));
     assert!(named.iter().any(|(n, _)| n == "base.weight"));
     assert!(named.iter().any(|(n, _)| n == "base.bias"));
+}
+
+/// The regression the doc comment above describes, pinned directly: a dense
+/// base left TRAINABLE must survive `trainable_parameters()`.
+#[test]
+fn test_trainable_base_is_not_dropped_from_trainable_parameters() {
+    let device = <CpuRuntime as Runtime>::default_device();
+    let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
+    let base = Linear::new(weight, None, true); // deliberately trainable
+    let lora = LoraLinear::new(base, 2, 4.0, &device).expect("lora new must succeed on CPU");
+
+    // base.weight + lora_a + lora_b: the optimizer must be able to step all
+    // three, or `lora.train_modules` silently stops working.
+    assert_eq!(lora.trainable_parameters().len(), 3);
 }
 
 /// With a frozen base, only the adapter factors are trainable — this is
@@ -368,4 +396,108 @@ fn test_merge_matches_forward_and_preserves_bias() {
 
     let merged_bias: Vec<f32> = merged.bias().expect("bias preserved").tensor().to_vec();
     assert_eq!(merged_bias, bias_v);
+}
+
+// --- QLoRA: adapter over a quantized base -----------------------------
+
+/// Build a `LoraLinear` whose frozen base is a Q6_K block-quantized weight
+/// (`in_features` must be a multiple of Q6_K's 256-element block size).
+fn quantized_lora(
+    client: &numr::runtime::cpu::CpuClient,
+    device: &numr::runtime::cpu::CpuDevice,
+    out_features: usize,
+    in_features: usize,
+    rank: usize,
+    alpha: f32,
+) -> LoraLinear<CpuRuntime> {
+    use crate::nn::linear::{MaybeQuantLinear, QuantLinear};
+    use crate::quant::format::QuantFormat;
+    use crate::quant::traits::QuantizeOps;
+
+    let base_w: Vec<f32> = (0..out_features * in_features)
+        .map(|i| (i as f32 * 0.013).sin() * 0.3)
+        .collect();
+    let base_tensor =
+        Tensor::<CpuRuntime>::from_slice(&base_w, &[out_features, in_features], device).unwrap();
+    let quant = client
+        .quantize(&base_tensor, QuantFormat::Q6K)
+        .expect("Q6_K quantize");
+    let base = MaybeQuantLinear::Quantized(QuantLinear::new(quant, None));
+
+    LoraLinear::new(base, rank, alpha, device).expect("lora new must succeed over a quantized base")
+}
+
+/// A LoRA adapter over a `MaybeQuantLinear::Quantized` base must still
+/// produce a finite, correctly-shaped forward output — this is the whole
+/// point of QLoRA: fine-tune directly on a quantized checkpoint.
+#[test]
+fn test_lora_forward_over_quantized_base_is_finite_and_correct_shape() {
+    use crate::test_utils::cpu_setup;
+
+    let (client, device) = cpu_setup();
+    let (out_features, in_features, rank) = (4usize, 256usize, 2usize);
+    let lora = quantized_lora(&client, &device, out_features, in_features, rank, 8.0);
+
+    let x_vals: Vec<f32> = (0..2 * in_features)
+        .map(|i| (i as f32 * 0.004) - 1.0)
+        .collect();
+    let x = Var::new(
+        Tensor::<CpuRuntime>::from_slice(&x_vals, &[2, in_features], &device).unwrap(),
+        false,
+    );
+
+    let out = lora
+        .forward(&client, &x)
+        .expect("lora forward over quantized base");
+    assert_eq!(out.shape(), &[2, out_features]);
+
+    let vals: Vec<f32> = out.tensor().contiguous().expect("contig").to_vec();
+    assert!(
+        vals.iter().all(|v| v.is_finite()),
+        "quantized-base LoRA output must be finite: {vals:?}"
+    );
+}
+
+/// `trainable_parameters()` on a quantized-base adapter must report exactly
+/// the two adapter tensors and nothing from the base — the base has no
+/// `Var<R>` weight to report in the first place.
+#[test]
+fn test_quantized_base_trainable_parameters_are_adapters_only() {
+    use crate::test_utils::cpu_setup;
+
+    let (client, device) = cpu_setup();
+    let lora = quantized_lora(&client, &device, 4, 256, 2, 8.0);
+
+    let trainable = lora.trainable_parameters();
+    assert_eq!(trainable.len(), 2);
+    assert_eq!(trainable[0].0, lora.lora_a().id());
+    assert_eq!(trainable[1].0, lora.lora_b().id());
+
+    // The base itself has no `Var<R>` weight to have contributed one.
+    assert!(lora.weight().is_none());
+
+    let params = lora.parameters();
+    assert_eq!(params.len(), 2);
+}
+
+/// Merging a LoRA adapter into a quantized base is not possible without
+/// requantizing the merged result — `merge_into_base` must error, not panic,
+/// and the error must say so explicitly.
+#[test]
+fn test_merge_into_base_errors_on_quantized_base() {
+    use crate::test_utils::cpu_setup;
+
+    let (client, device) = cpu_setup();
+    let lora = quantized_lora(&client, &device, 4, 256, 2, 8.0);
+
+    // `Linear<R>` is not `Debug`, so `expect_err` (which needs `T: Debug`)
+    // cannot be used on this `Result<Linear<R>, _>`.
+    let message = match lora.merge_into_base(&client) {
+        Ok(_) => panic!("merging into a quantized base must fail"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        message.contains("quantiz") && message.contains("requant"),
+        "error must name the quantized base and the requantization requirement: {message}"
+    );
 }

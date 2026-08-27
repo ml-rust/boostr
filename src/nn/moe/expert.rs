@@ -4,9 +4,12 @@ use crate::error::{Error, Result};
 use crate::nn::linear::Linear;
 use crate::nn::maybe_lora::MaybeLoraLinear;
 use crate::nn::module::Module;
+use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{Var, var_mul, var_silu};
 use numr::dtype::DType;
-use numr::ops::{ActivationOps, BinaryOps, ReduceOps, ScalarOps, ShapeOps, TensorOps};
+use numr::ops::{
+    ActivationOps, BinaryOps, ReduceOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps,
+};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
@@ -72,7 +75,9 @@ impl<R: Runtime<DType = DType>> Expert<R> {
             + ReduceOps<R>
             + ShapeOps<R>
             + ActivationOps<R>
-            + BinaryOps<R>,
+            + BinaryOps<R>
+            + QuantMatmulOps<R>
+            + TypeConversionOps<R>,
         R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R> + BinaryOps<R>,
     {
         let gate = self.gate_proj.forward(client, x)?;

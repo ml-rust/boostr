@@ -106,8 +106,14 @@ fn test_plain_expert_matches_direct_linear_path() {
 }
 
 /// An adapted expert exposes its base weights AND both adapter factors.
+///
+/// `Module::parameters` is unfiltered — whether a base TRAINS is decided by
+/// its `requires_grad`, which `trainable_parameters` filters on (see
+/// `test_frozen_bases_leave_only_adapters_trainable`). Enumeration and
+/// trainability are deliberately separate: dropping a base here would also
+/// drop one a caller had deliberately left trainable.
 #[test]
-fn test_adapted_expert_parameters_include_adapters_and_bases() {
+fn test_adapted_expert_parameters_include_bases_and_adapters() {
     let (_client, device) = cpu_setup();
     let (gate, up, down) = projections(&device, true);
     let expert = Expert::new_adapted(
@@ -117,21 +123,26 @@ fn test_adapted_expert_parameters_include_adapters_and_bases() {
     );
 
     let params = Module::parameters_with_ids(&expert);
-    // 3 base weights (no biases) + 2 adapters x 2 factors.
+    // 3 base weights (no biases) + 2 adapted projections x 2 factors.
     assert_eq!(params.len(), 7);
 
     for proj in [expert.gate_proj(), expert.up_proj()] {
         let (a, b) = proj.adapters().expect("projection is adapted");
         assert!(params.iter().any(|(id, _)| *id == a.id()));
         assert!(params.iter().any(|(id, _)| *id == b.id()));
-        assert!(params.iter().any(|(id, _)| *id == proj.weight().id()));
+        let base_weight_id = proj.weight().expect("dense base has a Var weight").id();
+        assert!(
+            params.iter().any(|(id, _)| *id == base_weight_id),
+            "an adapted projection's dense base weight is still enumerated"
+        );
     }
     assert!(expert.down_proj().adapters().is_none());
-    assert!(
-        params
-            .iter()
-            .any(|(id, _)| *id == expert.down_proj().weight().id())
-    );
+    let down_weight_id = expert
+        .down_proj()
+        .weight()
+        .expect("dense base has a Var weight")
+        .id();
+    assert!(params.iter().any(|(id, _)| *id == down_weight_id));
 }
 
 /// With frozen bases, only the adapter factors are trainable.

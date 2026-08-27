@@ -192,6 +192,26 @@ impl<R: Runtime> MaybeQuantLinear<R> {
         }
     }
 
+    /// The base weight, if it is `Var`-wrapped — i.e. only for the dense
+    /// `Standard` variant. Block-quantized and decomposed storage carry no
+    /// trainable `Var<R>`, so this is `None` for those, not a panic.
+    pub fn weight(&self) -> Option<&Var<R>> {
+        match self {
+            Self::Standard(linear) => Some(linear.weight()),
+            Self::Quantized(_) | Self::DecomposedQuant(_) => None,
+        }
+    }
+
+    /// The base bias, if it is `Var`-wrapped. Mirrors [`Self::weight`]: only
+    /// the dense `Standard` variant's bias is `Var`-wrapped; a quantized
+    /// bias (when present) is a plain frozen `Tensor<R>`.
+    pub fn bias(&self) -> Option<&Var<R>> {
+        match self {
+            Self::Standard(linear) => linear.bias(),
+            Self::Quantized(_) | Self::DecomposedQuant(_) => None,
+        }
+    }
+
     /// Forward pass: works for standard, quantized, and decomposed quantized weights.
     pub fn forward<C>(&self, client: &C, input: &Var<R>) -> Result<Var<R>>
     where
@@ -285,6 +305,33 @@ impl<R: Runtime> MaybeQuantLinear<R> {
     }
 }
 
+// `QuantTensor::shape` is only available under `DType = DType`, so `shape`
+// lives in its own block rather than constraining every other method on
+// `MaybeQuantLinear` (`from_weight`, `forward`, `parameters`) that does not
+// need it.
+impl<R: Runtime<DType = numr::dtype::DType>> MaybeQuantLinear<R> {
+    /// Logical weight shape `[out_features, in_features]`, for every variant.
+    ///
+    /// A block-quantized or decomposed base has no `Var<R>` weight to read
+    /// `.shape()` off of, but its logical element shape is tracked
+    /// regardless — this is what lets a LoRA adapter size its low-rank
+    /// factors from a frozen QUANTIZED base, without caring whether that
+    /// base is dense or quantized.
+    pub fn shape(&self) -> &[usize] {
+        match self {
+            Self::Standard(linear) => linear.weight().tensor().shape(),
+            Self::Quantized(qlinear) => qlinear.weight().shape(),
+            Self::DecomposedQuant(dqlinear) => dqlinear.weight().shape(),
+        }
+    }
+}
+
+impl<R: Runtime> From<Linear<R>> for MaybeQuantLinear<R> {
+    fn from(linear: Linear<R>) -> Self {
+        Self::Standard(linear)
+    }
+}
+
 impl<R: Runtime> Module<R> for MaybeQuantLinear<R> {
     fn parameters(&self) -> Vec<&Var<R>> {
         MaybeQuantLinear::parameters(self)
@@ -307,57 +354,4 @@ impl<R: Runtime> Module<R> for MaybeQuantLinear<R> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_utils::cpu_setup;
-    use numr::runtime::cpu::CpuRuntime;
-
-    #[test]
-    fn test_linear_output_shape() {
-        let (client, device) = cpu_setup();
-        // weight: [out=4, in=3]
-        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
-        let linear = Linear::new(weight, None, false);
-
-        // input: [2, 3]
-        let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap(),
-            false,
-        );
-        let out = linear.forward(&client, &input).unwrap();
-        assert_eq!(out.shape(), &[2, 4]);
-    }
-
-    #[test]
-    fn test_linear_with_bias() {
-        let (client, device) = cpu_setup();
-        let weight =
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, 0.0, 1.0], &[2, 2], &device).unwrap();
-        let bias = Tensor::<CpuRuntime>::from_slice(&[10.0f32, 20.0], &[2], &device).unwrap();
-        let linear = Linear::new(weight, Some(bias), false);
-
-        let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[1, 2], &device).unwrap(),
-            false,
-        );
-        let out = linear.forward(&client, &input).unwrap();
-        let data: Vec<f32> = out.tensor().to_vec();
-        // [1,2] @ [[1,0],[0,1]] + [10,20] = [1,2] + [10,20] = [11,22]
-        assert_eq!(data, vec![11.0, 22.0]);
-    }
-
-    #[test]
-    fn test_linear_batched() {
-        let (client, device) = cpu_setup();
-        let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 3], &device).unwrap();
-        let linear = Linear::new(weight, None, false);
-
-        // input: [4, 5, 3] — batched
-        let input = Var::new(
-            Tensor::<CpuRuntime>::from_slice(&[0.1f32; 60], &[4, 5, 3], &device).unwrap(),
-            false,
-        );
-        let out = linear.forward(&client, &input).unwrap();
-        assert_eq!(out.shape(), &[4, 5, 2]);
-    }
-}
+mod tests;

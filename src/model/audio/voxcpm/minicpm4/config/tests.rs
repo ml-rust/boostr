@@ -186,3 +186,58 @@ fn residual_lm_rejects_missing_num_layers_key() {
         "got {err}"
     );
 }
+
+/// The string entry point parses the same body the file entry point does,
+/// and lands on the same config — a GGUF's embedded `config.json` is not a
+/// second parser.
+#[test]
+fn from_config_str_matches_from_config_json() {
+    let body = config_json("");
+    let path = write_temp("boostr_minicpm4_str.json", &body);
+    let from_file = MiniCpm4Config::from_config_json(&path).expect("parse");
+    let _ = std::fs::remove_file(&path);
+    let from_str = MiniCpm4Config::from_config_str(&body).expect("parse");
+    assert_eq!(from_str.num_layers, from_file.num_layers);
+    assert_eq!(from_str.hidden_size, from_file.hidden_size);
+    assert_eq!(from_str.head_dim, from_file.head_dim);
+    assert_eq!(from_str.vocab_size, from_file.vocab_size);
+    assert_eq!(from_str.rope_short_factor, from_file.rope_short_factor);
+    assert_eq!(from_str.rope_long_factor, from_file.rope_long_factor);
+}
+
+/// The reference-parity trap the file path guards must still fire on the
+/// string path: muP is REJECTED, never ignored.
+#[test]
+fn from_config_str_rejects_use_mup() {
+    let err = MiniCpm4Config::from_config_str(&config_json(",\n\"use_mup\": true")).unwrap_err();
+    assert!(err.to_string().contains("use_mup"), "got {err}");
+}
+
+#[test]
+fn from_config_str_rejects_missing_section_and_bad_json() {
+    assert!(MiniCpm4Config::from_config_str("{}").is_err());
+    assert!(MiniCpm4Config::from_config_str("not json").is_err());
+}
+
+#[test]
+fn residual_lm_from_config_str_applies_the_three_overrides() {
+    let body = residual_config_json("\"residual_lm_num_layers\": 8, \"residual_lm_no_rope\": true");
+    let cfg = MiniCpm4Config::residual_lm_from_config_str(&body).expect("parse");
+    assert_eq!(cfg.num_layers, 8);
+    assert_eq!(cfg.vocab_size, 0);
+    assert!(cfg.no_rope);
+}
+
+#[test]
+fn residual_lm_from_config_str_rejects_missing_keys() {
+    let no_rope_missing = residual_config_json("\"residual_lm_num_layers\": 8");
+    let err = MiniCpm4Config::residual_lm_from_config_str(&no_rope_missing).unwrap_err();
+    assert!(err.to_string().contains("residual_lm_no_rope"), "got {err}");
+
+    let layers_missing = residual_config_json("\"residual_lm_no_rope\": true");
+    let err = MiniCpm4Config::residual_lm_from_config_str(&layers_missing).unwrap_err();
+    assert!(
+        err.to_string().contains("residual_lm_num_layers"),
+        "got {err}"
+    );
+}

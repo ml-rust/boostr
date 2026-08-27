@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! cargo run --release --features audio,f16 --example voxcpm_clone -- \
-//!     --ckpt CKPT_DIR --audiovae audiovae.safetensors \
+//!     (--ckpt CKPT_DIR | --gguf MODEL.gguf [--config config.json]) \
+//!     --audiovae audiovae.safetensors \
 //!     --ref REF.wav --text "..." --out OUT.wav \
 //!     [--n-timesteps 32] [--cfg 2.0] [--min-len 2] [--max-len N] \
 //!     [--seed 0] [--best-of N] [--dtype f32]
@@ -13,6 +14,14 @@
 //! `CKPT_DIR` holds `config.json`, `model.safetensors` and `tokenizer.json`.
 //! `--audiovae` is the separately converted `audiovae.safetensors` written by
 //! `audio/pipeline/convert_audiovae.py`.
+//!
+//! `--gguf` is the single-file alternative, written by `compressr convert
+//! CKPT_DIR --format gguf --quantization q4_k`. It is mutually exclusive with
+//! `--ckpt`. A GGUF carries the transformer stack ONLY, so `--audiovae` is
+//! still required, `--config` supplies the `config.json` the file has no
+//! embedded copy of, and `tokenizer.json` is looked for beside the `.gguf`
+//! and then beside `--config`. The weights arrive DEQUANTIZED to F32, so a
+//! Q4_K file is smaller on disk but not in memory.
 //!
 //! # Reference mode, never continuation
 //!
@@ -95,9 +104,23 @@ const PROGRESS_EVERY: usize = 25;
 /// Peak below this counts as silence, not audio.
 const SILENCE_EPSILON: f32 = 1e-4;
 
+/// Where the transformer stack's weights come from.
+///
+/// `--ckpt` names a checkpoint DIRECTORY (`config.json`,
+/// `model.safetensors`, `tokenizer.json`); `--gguf` names a single file that
+/// carries the weights and nothing else. Mutually exclusive, and one of them
+/// is required.
+enum Weights {
+    Checkpoint(PathBuf),
+    Gguf(PathBuf),
+}
+
 /// Parsed command line.
 struct Args {
-    ckpt: PathBuf,
+    weights: Weights,
+    /// `config.json` for the GGUF path. Ignored for `--ckpt`, which reads the
+    /// one in the checkpoint directory.
+    config: Option<PathBuf>,
     audiovae: PathBuf,
     reference: PathBuf,
     text: String,
@@ -130,7 +153,8 @@ fn parse_dtype(value: &str) -> Result<Option<DType>, String> {
     }
 }
 
-const USAGE: &str = "usage: voxcpm_clone --ckpt DIR --audiovae PATH --ref REF.wav \
+const USAGE: &str = "usage: voxcpm_clone (--ckpt DIR | --gguf MODEL.gguf [--config config.json]) \
+--audiovae PATH --ref REF.wav \
 --text \"...\" --out OUT.wav [--n-timesteps 32] [--cfg 2.0] [--min-len 2] \
 [--max-len N] [--seed 0] [--best-of 1] [--dtype f32|bf16|f16|native]";
 
@@ -153,6 +177,8 @@ fn take_value(argv: &[String], i: &mut usize, flag: &str) -> Result<String, Stri
 fn parse_args() -> Result<Args, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let (mut ckpt, mut audiovae, mut reference, mut text, mut out) = (None, None, None, None, None);
+    let mut gguf: Option<PathBuf> = None;
+    let mut config: Option<PathBuf> = None;
     let mut n_timesteps = 32usize;
     let mut cfg = 2.0f32;
     let mut min_len = 2usize;
@@ -166,6 +192,8 @@ fn parse_args() -> Result<Args, String> {
         let flag = argv[i].as_str();
         match flag {
             "--ckpt" => ckpt = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
+            "--gguf" => gguf = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
+            "--config" => config = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
             "--audiovae" => audiovae = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
             "--ref" => reference = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
             "--text" => text = Some(take_value(&argv, &mut i, flag)?),
@@ -219,8 +247,20 @@ fn parse_args() -> Result<Args, String> {
         return Err("--max-len must be at least 1".to_string());
     }
 
+    // Exactly one weight source. Accepting both and silently preferring one
+    // would load a different model than the operator asked for.
+    let weights = match (ckpt, gguf) {
+        (Some(_), Some(_)) => {
+            return Err(format!("--ckpt and --gguf are mutually exclusive\n{USAGE}"));
+        }
+        (Some(dir), None) => Weights::Checkpoint(dir),
+        (None, Some(path)) => Weights::Gguf(path),
+        (None, None) => return Err(format!("--ckpt or --gguf is required\n{USAGE}")),
+    };
+
     Ok(Args {
-        ckpt: ckpt.ok_or_else(|| format!("--ckpt is required\n{USAGE}"))?,
+        weights,
+        config,
         audiovae: audiovae.ok_or_else(|| format!("--audiovae is required\n{USAGE}"))?,
         reference: reference.ok_or_else(|| format!("--ref is required\n{USAGE}"))?,
         text: text.ok_or_else(|| format!("--text is required\n{USAGE}"))?,
@@ -233,6 +273,35 @@ fn parse_args() -> Result<Args, String> {
         best_of,
         dtype,
     })
+}
+
+/// Locate `tokenizer.json`.
+///
+/// A checkpoint directory holds it outright. A GGUF carries no tokenizer at
+/// all, so it is looked for beside the `.gguf` first and beside `--config`
+/// second — both of those normally sit in, or are copied from, the same
+/// checkpoint directory. Neither: an error, rather than a tokenizer guess
+/// that would silently produce the wrong token ids.
+fn tokenizer_path(weights: &Weights, config: Option<&Path>) -> Result<PathBuf, String> {
+    match weights {
+        Weights::Checkpoint(dir) => Ok(dir.join("tokenizer.json")),
+        Weights::Gguf(path) => {
+            let beside = |p: &Path| {
+                p.parent()
+                    .map(|dir| dir.join("tokenizer.json"))
+                    .filter(|candidate| candidate.is_file())
+            };
+            beside(path)
+                .or_else(|| config.and_then(beside))
+                .ok_or_else(|| {
+                    format!(
+                        "no tokenizer.json beside {} (a GGUF carries none); put it there \
+                     or pass --config pointing into the checkpoint directory",
+                        path.display()
+                    )
+                })
+        }
+    }
 }
 
 /// Median of `values`, or `None` when empty.
@@ -334,20 +403,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- model --------------------------------------------------------------
     let device = CpuDevice::default();
     let client = CpuClient::new(device.clone());
-    eprintln!("loading {} ...", args.ckpt.display());
-    let model = VoxCpm2Model::<CpuRuntime>::from_checkpoint(
-        &args.ckpt,
-        &args.audiovae,
-        &device,
-        args.dtype,
-    )?;
+    let model = match &args.weights {
+        Weights::Checkpoint(dir) => {
+            eprintln!("loading {} ...", dir.display());
+            VoxCpm2Model::<CpuRuntime>::from_checkpoint(dir, &args.audiovae, &device, args.dtype)?
+        }
+        Weights::Gguf(path) => {
+            eprintln!("loading {} (dequantizing to F32) ...", path.display());
+            VoxCpm2Model::<CpuRuntime>::from_gguf(
+                path,
+                args.config.as_deref(),
+                &args.audiovae,
+                &device,
+                args.dtype,
+            )?
+        }
+    };
 
     let ref_feat = model.encode_reference(&client, &ref_wav)?;
     let t_ref = ref_feat.shape()[0];
     eprintln!("T_ref: {t_ref} reference patches");
 
     // --- text ---------------------------------------------------------------
-    let tokenizer = load_tokenizer(args.ckpt.join("tokenizer.json"))?;
+    let tokenizer = load_tokenizer(tokenizer_path(&args.weights, args.config.as_deref())?)?;
     let normalized = normalize_whitespace(&args.text);
     let mut text_token_ids = tokenize(&tokenizer, &normalized);
     let text_len = text_token_ids.len();

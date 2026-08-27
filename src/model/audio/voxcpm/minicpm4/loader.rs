@@ -36,7 +36,7 @@
 
 use crate::error::Result;
 use crate::format::safetensors_loader::SafeTensorsLoader;
-use crate::model::audio::voxcpm::loader::support::TensorLoader;
+use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
 use crate::model::audio::voxcpm::minicpm4::attention::MiniCpm4Attention;
 use crate::model::audio::voxcpm::minicpm4::config::MiniCpm4Config;
 use crate::model::audio::voxcpm::minicpm4::layer::MiniCpm4Layer;
@@ -93,9 +93,26 @@ where
         device: &R::Device,
         dtype: Option<DType>,
     ) -> Result<Self> {
-        let mut loader = SafeTensorsLoader::open(path)?;
-        let mut tl = TensorLoader::<R> {
-            loader: &mut loader,
+        let mut source = SafeTensorsLoader::open(path)?;
+        Self::from_source(&mut source, prefix, cfg, device, dtype)
+    }
+
+    /// Load from an ALREADY-OPEN checkpoint (safetensors or GGUF — see
+    /// [`WeightSource`]).
+    ///
+    /// The VoxCPM2 orchestrator loads seven sub-models out of one 4.3 GB
+    /// file; going through `from_safetensors_with` would reopen and re-parse
+    /// that file's header once per sub-model, so it opens the source once and
+    /// hands the same `&mut` to each.
+    pub fn from_source<S: WeightSource<R>>(
+        source: &mut S,
+        prefix: &str,
+        cfg: MiniCpm4Config,
+        device: &R::Device,
+        dtype: Option<DType>,
+    ) -> Result<Self> {
+        let mut tl = TensorLoader::<R, S> {
+            loader: source,
             device,
             prefix: prefix.to_string(),
             dtype,
@@ -116,7 +133,7 @@ where
         let kv_dim = cfg.num_kv_heads * cfg.head_dim;
         let mut layers = Vec::with_capacity(cfg.num_layers);
         for i in 0..cfg.num_layers {
-            layers.push(load_layer::<R>(&mut tl, i, &cfg, q_dim, kv_dim)?);
+            layers.push(load_layer::<R, S>(&mut tl, i, &cfg, q_dim, kv_dim)?);
         }
 
         let norm = RmsNorm::new(
@@ -183,8 +200,8 @@ where
 }
 
 /// Load one `{prefix}.layers.{i}` decoder layer.
-fn load_layer<R: Runtime<DType = DType>>(
-    tl: &mut TensorLoader<'_, R>,
+fn load_layer<R: Runtime<DType = DType>, S: WeightSource<R>>(
+    tl: &mut TensorLoader<'_, R, S>,
     i: usize,
     cfg: &MiniCpm4Config,
     q_dim: usize,

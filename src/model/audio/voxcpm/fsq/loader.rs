@@ -23,7 +23,7 @@ use crate::error::Result;
 use crate::format::safetensors_loader::SafeTensorsLoader;
 use crate::model::audio::voxcpm::fsq::config::FsqConfig;
 use crate::model::audio::voxcpm::fsq::layer::{AuxProjections, ScalarQuantization};
-use crate::model::audio::voxcpm::loader::support::TensorLoader;
+use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
 use crate::nn::Linear;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
@@ -48,9 +48,22 @@ where
         device: &R::Device,
         dtype: Option<DType>,
     ) -> Result<Self> {
-        let mut loader = SafeTensorsLoader::open(path)?;
-        let mut tl = TensorLoader::<R> {
-            loader: &mut loader,
+        let mut source = SafeTensorsLoader::open(path)?;
+        Self::from_source(&mut source, cfg, device, dtype)
+    }
+
+    /// Load from an ALREADY-OPEN checkpoint (safetensors or GGUF — see
+    /// [`WeightSource`]), so the VoxCPM2 orchestrator opens its one
+    /// multi-gigabyte weight file once for all seven sub-models instead of
+    /// reopening and re-parsing its header per sub-model.
+    pub fn from_source<S: WeightSource<R>>(
+        source: &mut S,
+        cfg: FsqConfig,
+        device: &R::Device,
+        dtype: Option<DType>,
+    ) -> Result<Self> {
+        let mut tl = TensorLoader::<R, S> {
+            loader: source,
             device,
             prefix: FSQ_LAYER_PREFIX.to_string(),
             dtype,
@@ -85,9 +98,22 @@ where
         device: &R::Device,
         dtype: Option<DType>,
     ) -> Result<Self> {
-        let mut loader = SafeTensorsLoader::open(path)?;
-        let mut tl = TensorLoader::<R> {
-            loader: &mut loader,
+        let mut source = SafeTensorsLoader::open(path)?;
+        Self::from_source(&mut source, cfg, device, dtype)
+    }
+
+    /// Load from an ALREADY-OPEN checkpoint (safetensors or GGUF — see
+    /// [`WeightSource`]), so the VoxCPM2 orchestrator opens its one
+    /// multi-gigabyte weight file once for all seven sub-models instead of
+    /// reopening and re-parsing its header per sub-model.
+    pub fn from_source<S: WeightSource<R>>(
+        source: &mut S,
+        cfg: FsqConfig,
+        device: &R::Device,
+        dtype: Option<DType>,
+    ) -> Result<Self> {
+        let mut tl = TensorLoader::<R, S> {
+            loader: source,
             device,
             prefix: String::new(),
             dtype,
@@ -130,8 +156,8 @@ where
 /// biased [`Linear`]. Shared shape for five of the six auxiliary
 /// projections (`stop_head` is the bias-free exception, handled inline in
 /// [`AuxProjections::from_safetensors`]).
-fn biased_linear<R: Runtime<DType = DType>>(
-    tl: &mut TensorLoader<'_, R>,
+fn biased_linear<R: Runtime<DType = DType>, S: WeightSource<R>>(
+    tl: &mut TensorLoader<'_, R, S>,
     name: &str,
     in_dim: usize,
     out_dim: usize,

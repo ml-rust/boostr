@@ -20,7 +20,7 @@
 
 use crate::error::{Error, Result};
 use crate::format::safetensors_loader::SafeTensorsLoader;
-use crate::model::audio::voxcpm::loader::support::TensorLoader;
+use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
 use crate::model::audio::voxcpm::vae::causal_conv1d::CausalConv1d;
 use crate::model::audio::voxcpm::vae::encoder::{
     AudioVaeEncoder, AudioVaeEncoderWeights, FINAL_HIDDEN, FRONT_HIDDEN, HEAD_KERNEL,
@@ -46,9 +46,9 @@ fn block_dims() -> [(usize, usize); 4] {
 /// tensor/snake/conv/`ResUnit` reads themselves are shared with the decoder
 /// loader via [`TensorLoader`]; only the block/front/head assembly below is
 /// encoder-specific.
-type EncoderLoader<'a, R> = TensorLoader<'a, R>;
+type EncoderLoader<'a, R, S> = TensorLoader<'a, R, S>;
 
-impl<R: Runtime<DType = DType>> EncoderLoader<'_, R>
+impl<R: Runtime<DType = DType>, S: WeightSource<R>> EncoderLoader<'_, R, S>
 where
     R::Client: TypeConversionOps<R>,
 {
@@ -155,7 +155,7 @@ where
         device: &R::Device,
     ) -> Result<Self> {
         let mut loader = SafeTensorsLoader::open(path)?;
-        let weights = EncoderLoader::<R> {
+        let weights = EncoderLoader::<R, SafeTensorsLoader> {
             loader: &mut loader,
             device,
             prefix: prefix.to_string(),

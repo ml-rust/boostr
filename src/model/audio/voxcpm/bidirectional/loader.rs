@@ -21,7 +21,7 @@ use crate::error::Result;
 use crate::model::audio::voxcpm::bidirectional::attention::BidirectionalAttention;
 use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
 use crate::model::audio::voxcpm::bidirectional::mlp::BidirectionalMlp;
-use crate::model::audio::voxcpm::loader::support::TensorLoader;
+use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
 use crate::nn::{Linear, RmsNorm};
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
@@ -41,8 +41,8 @@ pub(crate) struct BidirectionalLayerDims {
 
 /// Load one bidirectional transformer layer at `layer_prefix` (e.g.
 /// `decoder.layers.3` or `encoder.layers.3`).
-pub(crate) fn load_bidirectional_layer<R: Runtime<DType = DType>>(
-    tl: &mut TensorLoader<'_, R>,
+pub(crate) fn load_bidirectional_layer<R: Runtime<DType = DType>, S: WeightSource<R>>(
+    tl: &mut TensorLoader<'_, R, S>,
     layer_prefix: &str,
     dims: &BidirectionalLayerDims,
 ) -> Result<BidirectionalLayer<R>>

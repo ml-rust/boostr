@@ -1,15 +1,15 @@
-//! VoxCPM2 end-to-end orchestrator: [`config`] (patch geometry and special
-//! token ids), [`loader`] ([`VoxCpm2Model`], every sub-model plus its
-//! checkpoint loader), [`sequence`] (host-side prefix layout and mask
-//! complementarity), [`patches`] (wav padding and the VAE patch fold),
-//! [`prefill`] (reference encode and the two-LM prefill), [`generate`] (the
-//! per-patch sampling loop and its stop logic), [`decode`] (unfolding
-//! patches back to a latent and VAE-decoding to a waveform).
+//! VoxCPM2 end-to-end orchestrator: [`config`] (patch geometry and special token ids),
+//! [`loader`] ([`VoxCpm2Model`], every sub-model plus its checkpoint loader), [`gguf_loader`]
+//! (the single-file GGUF entry point), [`sequence`] (prefix layout and mask complementarity),
+//! [`patches`] (wav padding and the VAE patch fold), [`prefill`] (reference encode and the
+//! two-LM prefill), [`generate`] (the per-patch sampling loop and its stop logic), [`decode`]
+//! (unfolding patches back to a latent and VAE-decoding to a waveform).
 //! The wav file wrapper is a separate, later unit and does not live here.
 
 pub mod config;
 pub mod decode;
 pub mod generate;
+pub mod gguf_loader;
 pub mod loader;
 pub mod patches;
 pub mod prefill;
@@ -22,6 +22,7 @@ pub use decode::unfold_patches;
 pub use generate::{
     GenerateOptions, GenerateOutcome, GenerateState, PatchGenerator, StepIntermediates, StepOutcome,
 };
+pub use gguf_loader::GGUF_CONFIG_JSON_KEY;
 pub use loader::{DEFAULT_CONFIG_FILE, DEFAULT_WEIGHTS_FILE, VoxCpm2Model};
 pub use patches::{fold_patches, pad_to_multiple};
 pub use prefill::{PrefillIntermediates, PrefillState};

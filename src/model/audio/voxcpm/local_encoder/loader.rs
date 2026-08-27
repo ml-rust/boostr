@@ -27,7 +27,7 @@ use crate::format::safetensors_loader::SafeTensorsLoader;
 use crate::model::audio::voxcpm::bidirectional::{
     BidirectionalLayerDims, load_bidirectional_layer,
 };
-use crate::model::audio::voxcpm::loader::support::TensorLoader;
+use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
 use crate::model::audio::voxcpm::local_encoder::config::LocalEncoderConfig;
 use crate::model::audio::voxcpm::local_encoder::encoder::LocalEncoder;
 use crate::model::config::RopeScalingConfig;
@@ -73,9 +73,23 @@ where
         device: &R::Device,
         dtype: Option<DType>,
     ) -> Result<Self> {
-        let mut loader = SafeTensorsLoader::open(path)?;
-        let mut tl = TensorLoader::<R> {
-            loader: &mut loader,
+        let mut source = SafeTensorsLoader::open(path)?;
+        Self::from_source(&mut source, prefix, cfg, device, dtype)
+    }
+
+    /// Load from an ALREADY-OPEN checkpoint (safetensors or GGUF — see
+    /// [`WeightSource`]), so the VoxCPM2 orchestrator opens its one
+    /// multi-gigabyte weight file once for all seven sub-models instead of
+    /// reopening and re-parsing its header per sub-model.
+    pub fn from_source<S: WeightSource<R>>(
+        source: &mut S,
+        prefix: &str,
+        cfg: LocalEncoderConfig,
+        device: &R::Device,
+        dtype: Option<DType>,
+    ) -> Result<Self> {
+        let mut tl = TensorLoader::<R, S> {
+            loader: source,
             device,
             prefix: prefix.to_string(),
             dtype,
@@ -99,7 +113,7 @@ where
         };
         let mut layers = Vec::with_capacity(cfg.num_layers);
         for i in 0..cfg.num_layers {
-            layers.push(load_bidirectional_layer::<R>(
+            layers.push(load_bidirectional_layer::<R, S>(
                 &mut tl,
                 &format!("encoder.layers.{i}"),
                 &dims,

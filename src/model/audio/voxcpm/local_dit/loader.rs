@@ -36,7 +36,7 @@ use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
 use crate::model::audio::voxcpm::bidirectional::{
     BidirectionalLayerDims, load_bidirectional_layer,
 };
-use crate::model::audio::voxcpm::loader::support::TensorLoader;
+use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
 use crate::model::audio::voxcpm::local_dit::config::LocalDitConfig;
 use crate::model::config::RopeScalingConfig;
 use crate::nn::{Linear, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding};
@@ -145,9 +145,23 @@ where
         device: &R::Device,
         dtype: Option<DType>,
     ) -> Result<Self> {
-        let mut loader = SafeTensorsLoader::open(path)?;
-        let mut tl = TensorLoader::<R> {
-            loader: &mut loader,
+        let mut source = SafeTensorsLoader::open(path)?;
+        Self::from_source(&mut source, prefix, cfg, device, dtype)
+    }
+
+    /// Load from an ALREADY-OPEN checkpoint (safetensors or GGUF — see
+    /// [`WeightSource`]), so the VoxCPM2 orchestrator opens its one
+    /// multi-gigabyte weight file once for all seven sub-models instead of
+    /// reopening and re-parsing its header per sub-model.
+    pub fn from_source<S: WeightSource<R>>(
+        source: &mut S,
+        prefix: &str,
+        cfg: LocalDitConfig,
+        device: &R::Device,
+        dtype: Option<DType>,
+    ) -> Result<Self> {
+        let mut tl = TensorLoader::<R, S> {
+            loader: source,
             device,
             prefix: format!("{prefix}.estimator"),
             dtype,
@@ -182,7 +196,7 @@ where
         };
         let mut layers = Vec::with_capacity(cfg.num_layers);
         for i in 0..cfg.num_layers {
-            layers.push(load_bidirectional_layer::<R>(
+            layers.push(load_bidirectional_layer::<R, S>(
                 &mut tl,
                 &format!("decoder.layers.{i}"),
                 &dims,
@@ -246,8 +260,8 @@ where
 /// Load a `{name}.linear_1`/`{name}.linear_2` [`TimestepEmbedding`] (both
 /// linears biased, `dim -> dim -> dim`) — shared shape for `time_mlp` and
 /// `delta_time_mlp`.
-fn load_timestep_mlp<R: Runtime<DType = DType>>(
-    tl: &mut TensorLoader<'_, R>,
+fn load_timestep_mlp<R: Runtime<DType = DType>, S: WeightSource<R>>(
+    tl: &mut TensorLoader<'_, R, S>,
     name: &str,
     dim: usize,
 ) -> Result<TimestepEmbedding<R>>

@@ -126,6 +126,16 @@ impl MiniCpm4Config {
         Self::from_root(&read_config_root(path)?, section)
     }
 
+    /// Parse `lm_config` out of the VERBATIM CONTENTS of a `config.json`.
+    ///
+    /// Split from [`from_config_json`](Self::from_config_json) so a container
+    /// that carries the config as a string rather than a file — a GGUF's
+    /// `voxcpm2.config_json` metadata key — runs through exactly this parse
+    /// and every validation the file path applies, `use_mup` included.
+    pub fn from_config_str(content: &str) -> Result<Self> {
+        Self::from_root(&parse_config_root(content)?, DEFAULT_CONFIG_SECTION)
+    }
+
     /// Resolve `residual_lm`'s config from a VoxCPM2 `config.json`.
     ///
     /// `residual_lm` has no sub-object of its own. The reference deep-copies
@@ -143,8 +153,21 @@ impl MiniCpm4Config {
     /// reference never rotates, staying shape-valid while computing a
     /// different model.
     pub fn residual_lm_from_config_json<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let root = read_config_root(path)?;
-        let base = Self::from_root(&root, DEFAULT_CONFIG_SECTION)?;
+        Self::residual_lm_from_root(&read_config_root(path)?)
+    }
+
+    /// Resolve `residual_lm`'s config from the VERBATIM CONTENTS of a
+    /// `config.json` — the string sibling of
+    /// [`residual_lm_from_config_json`](Self::residual_lm_from_config_json),
+    /// for a GGUF's `voxcpm2.config_json` metadata key. Both top-level keys
+    /// stay REQUIRED here for the same reason.
+    pub fn residual_lm_from_config_str(content: &str) -> Result<Self> {
+        Self::residual_lm_from_root(&parse_config_root(content)?)
+    }
+
+    /// The shared `residual_lm` resolution, once the root JSON is parsed.
+    fn residual_lm_from_root(root: &serde_json::Value) -> Result<Self> {
+        let base = Self::from_root(root, DEFAULT_CONFIG_SECTION)?;
         let num_layers = root
             .get(RESIDUAL_LM_NUM_LAYERS_KEY)
             .and_then(serde_json::Value::as_u64)
@@ -217,7 +240,12 @@ fn read_config_root<P: AsRef<Path>>(path: P) -> Result<serde_json::Value> {
     let content = std::fs::read_to_string(path.as_ref()).map_err(|e| Error::ModelError {
         reason: format!("failed to read {}: {e}", path.as_ref().display()),
     })?;
-    serde_json::from_str(&content).map_err(|e| Error::ModelError {
+    parse_config_root(&content)
+}
+
+/// Parse an already-read VoxCPM2 `config.json` body.
+fn parse_config_root(content: &str) -> Result<serde_json::Value> {
+    serde_json::from_str(content).map_err(|e| Error::ModelError {
         reason: format!("invalid VoxCPM2 config.json: {e}"),
     })
 }

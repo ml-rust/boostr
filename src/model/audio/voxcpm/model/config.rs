@@ -76,7 +76,17 @@ impl VoxCpm2Config {
         let content = std::fs::read_to_string(path.as_ref()).map_err(|e| Error::ModelError {
             reason: format!("failed to read {}: {e}", path.as_ref().display()),
         })?;
-        let raw: RawConfig = serde_json::from_str(&content).map_err(|e| Error::ModelError {
+        Self::from_config_str(&content)
+    }
+
+    /// Parse the same keys out of the VERBATIM CONTENTS of a `config.json`.
+    ///
+    /// Split from [`from_config_json`](Self::from_config_json) so a container
+    /// that carries the config as a string rather than a file — a GGUF's
+    /// `voxcpm2.config_json` metadata key — runs through exactly this parse
+    /// and these validations, with no second copy to drift.
+    pub fn from_config_str(content: &str) -> Result<Self> {
+        let raw: RawConfig = serde_json::from_str(content).map_err(|e| Error::ModelError {
             reason: format!("invalid VoxCPM2 config.json: {e}"),
         })?;
         if raw.patch_size == 0 {
@@ -127,5 +137,22 @@ mod tests {
     #[test]
     fn rejects_missing_file() {
         assert!(VoxCpm2Config::from_config_json("/nonexistent/config.json").is_err());
+    }
+
+    #[test]
+    fn parses_from_str() {
+        let cfg = VoxCpm2Config::from_config_str(r#"{"patch_size": 4, "feat_dim": 64}"#)
+            .expect("valid config");
+        assert_eq!(cfg.patch_size, 4);
+        assert_eq!(cfg.feat_dim, 64);
+    }
+
+    /// The string path keeps every validation the file path has — a GGUF's
+    /// embedded config is not a way around them.
+    #[test]
+    fn from_str_rejects_zero_dims_and_bad_json() {
+        assert!(VoxCpm2Config::from_config_str(r#"{"patch_size": 0, "feat_dim": 64}"#).is_err());
+        assert!(VoxCpm2Config::from_config_str(r#"{"patch_size": 4, "feat_dim": 0}"#).is_err());
+        assert!(VoxCpm2Config::from_config_str("not json").is_err());
     }
 }

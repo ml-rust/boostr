@@ -15,7 +15,9 @@ pub mod local_dit;
 pub mod local_encoder;
 pub mod minicpm4;
 pub mod model;
+pub mod tokenizer;
 pub mod vae;
 
 pub use client::VoxCpmClient;
 pub use model::{PrefillState, VoxCpm2Config, VoxCpm2Model};
+pub use tokenizer::{load_tokenizer, normalize_whitespace, tokenize};

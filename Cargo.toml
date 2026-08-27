@@ -241,5 +241,9 @@ name = "voxcpm_step_check"
 required-features = ["audio", "f16"]
 
 [[example]]
+name = "voxcpm_tokenizer_check"
+required-features = ["audio", "f16"]
+
+[[example]]
 name = "inspect_kokoro"
 required-features = ["audio"]

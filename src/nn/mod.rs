@@ -15,6 +15,7 @@ pub mod maybe_lora;
 pub mod mla;
 pub mod module;
 pub mod moe;
+pub mod quant_embedding;
 pub mod rmsnorm;
 pub mod rope;
 pub mod stochastic_depth;
@@ -49,6 +50,7 @@ pub use moe::{
     Expert, MoeLayer, MoeLayerConfig, MoeLoadBalanceLossMode, MoeOutput, MoeRouter,
     MoeRouterConfig, RouterOutput,
 };
+pub use quant_embedding::{MaybeQuantEmbedding, QuantEmbedding};
 pub use rmsnorm::RmsNorm;
 pub use rope::RoPE;
 pub use stochastic_depth::StochasticDepth;

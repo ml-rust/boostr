@@ -35,6 +35,7 @@ use crate::model::audio::voxcpm::model::patches::{fold_patches, pad_to_multiple}
 use crate::model::audio::voxcpm::model::sequence::SequenceLayout;
 use crate::model::traits::ModelClient;
 use crate::nn::var_contiguous;
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_add, var_cat, var_mul, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
@@ -125,7 +126,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         max_length: usize,
     ) -> Result<PrefillState<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R>,
+        C: ModelClient<R> + TypeConversionOps<R> + DequantOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -153,7 +154,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         max_length: usize,
     ) -> Result<PrefillState<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R>,
+        C: ModelClient<R> + TypeConversionOps<R> + DequantOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -177,7 +178,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         capture: bool,
     ) -> Result<PrefillState<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R>,
+        C: ModelClient<R> + TypeConversionOps<R> + DequantOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>

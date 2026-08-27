@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::vae::causal_conv1d::CausalConv1d;
 use crate::model::audio::voxcpm::vae::res_unit::ResUnit;
 use crate::model::audio::voxcpm::vae::snake::Snake;
-use crate::nn::{MaybeQuantLinear, Weight};
+use crate::nn::{MaybeQuantEmbedding, MaybeQuantLinear, Weight};
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
@@ -54,7 +54,8 @@ pub(crate) fn checked_tensor<R: Runtime<DType = DType>, S: WeightSource<R>>(
 /// quantized weight is gated by exactly the same check a dense one is — a
 /// packed weight must never be the one that skips validation.
 ///
-/// Used only by [`TensorLoader::linear`] below, so it stays private here.
+/// Used only by [`TensorLoader::linear`] and [`TensorLoader::embedding`]
+/// below, so it stays private here.
 fn checked_weight<R: Runtime<DType = DType>, S: WeightSource<R>>(
     loader: &mut S,
     device: &R::Device,
@@ -189,6 +190,54 @@ where
         };
 
         Ok(MaybeQuantLinear::from_weight(weight, bias))
+    }
+
+    /// Read `{name}.weight` (`[vocab_size, hidden_size]`) as an embedding
+    /// table that keeps a block-quantized weight PACKED.
+    ///
+    /// Same rule as [`Self::linear`]: a quantized weight fixes the output
+    /// dtype at F32 (`QuantEmbedding::forward` dequantizes gathered rows to
+    /// F32), so a non-F32 `self.dtype` request is an error, named, at load
+    /// time rather than a silent downgrade of what the caller asked for.
+    pub(crate) fn embedding(
+        &mut self,
+        name: &str,
+        vocab_size: usize,
+        hidden_size: usize,
+    ) -> Result<MaybeQuantEmbedding<R>> {
+        let weight_key = format!("{name}.weight");
+        let weight = checked_weight::<R, S>(
+            self.loader,
+            self.device,
+            &self.prefix,
+            &weight_key,
+            &[vocab_size, hidden_size],
+        )?;
+
+        let weight = match weight {
+            Weight::Standard(t) => Weight::Standard(match self.dtype {
+                Some(want) => t.to_dtype(want)?,
+                None => t,
+            }),
+            packed => {
+                if let Some(want) = self.dtype
+                    && want != DType::F32
+                {
+                    return Err(Error::ModelError {
+                        reason: format!(
+                            "{}: requested dtype {want:?}, but the checkpoint stores this \
+                             embedding table quantized and QuantEmbedding::forward \
+                             dequantizes gathered rows to F32; load this model with \
+                             dtype F32 or None",
+                            full_name(&self.prefix, &weight_key)
+                        ),
+                    });
+                }
+                packed
+            }
+        };
+
+        MaybeQuantEmbedding::from_weight(weight, false)
     }
 
     pub(crate) fn snake(&mut self, name: &str, channels: usize) -> Result<Snake<R>> {

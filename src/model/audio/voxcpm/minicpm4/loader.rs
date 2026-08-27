@@ -43,7 +43,7 @@ use crate::model::audio::voxcpm::minicpm4::layer::MiniCpm4Layer;
 use crate::model::audio::voxcpm::minicpm4::mlp::MiniCpm4Mlp;
 use crate::model::audio::voxcpm::minicpm4::model::MiniCpm4Model;
 use crate::model::config::RopeScalingConfig;
-use crate::nn::{Embedding, RmsNorm, RoPE};
+use crate::nn::{RmsNorm, RoPE};
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
@@ -121,17 +121,16 @@ where
         // `vocab_size == 0` means the checkpoint has no `embed_tokens` tensor
         // at all; requesting it would fail the load rather than yield `None`.
         //
-        // This stays DENSE even from a GGUF, and it is the single biggest
-        // tensor in the stack ([73448, 2048]). `Embedding` is a row gather,
-        // not a matmul: it takes a `Tensor<R>` and there is no gather kernel
-        // that reads GGML blocks, so `tl.tensor` (the dequantizing read) is
-        // the only correct call here. Nothing special-cases it — the dense
-        // path is simply what `load_named` already does.
+        // This is the single biggest tensor in the stack ([73448, 2048]) — on
+        // a GGUF checkpoint it may ship block-quantized (e.g. Q6_K: 123 MB
+        // packed vs 602 MB dense), and `tl.embedding` keeps it PACKED rather
+        // than dequantizing the whole table on load. `MaybeQuantEmbedding`
+        // dequantizes only the rows a forward pass actually gathers, via
+        // `QuantTensor::gather_rows` + numr's existing `index_select` — no
+        // new gather-over-GGML-blocks kernel is needed. On safetensors (never
+        // quantized) this is exactly the same dense path as before.
         let embed_tokens = if cfg.has_embedding() {
-            Some(Embedding::new(
-                tl.tensor("embed_tokens.weight", &[cfg.vocab_size, cfg.hidden_size])?,
-                false,
-            ))
+            Some(tl.embedding("embed_tokens", cfg.vocab_size, cfg.hidden_size)?)
         } else {
             None
         };

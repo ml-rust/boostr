@@ -308,10 +308,8 @@ impl Gguf {
                     ),
                 })?;
                 let numel: usize = shape.iter().product();
-                let block_size = format.block_size();
-                let block_bytes = format.block_bytes();
                 let row_k = info.shape[0]; // innermost dim (before reversal) = K per row
-                let row_bytes = row_k / block_size * block_bytes;
+                let row_bytes = format.storage_bytes(row_k)?;
                 let n_rows = numel / row_k;
                 let expected_bytes = n_rows * row_bytes;
                 if bytes.len() < expected_bytes {
@@ -426,10 +424,8 @@ impl Gguf {
                 ),
             })?;
 
-        let block_size = format.block_size();
-        let block_bytes = format.block_bytes();
         let row_k = info.shape[0]; // innermost dim (GGML order, before reversal)
-        let row_bytes = row_k / block_size * block_bytes;
+        let row_bytes = format.storage_bytes(row_k)?;
         let n_rows = numel / row_k;
         let expected_bytes = n_rows * row_bytes;
 

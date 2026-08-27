@@ -34,7 +34,8 @@
 use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::minicpm4::layer::MiniCpm4Layer;
 use crate::model::traits::ModelClient;
-use crate::nn::{Embedding, RmsNorm, RoPE};
+use crate::nn::{MaybeQuantEmbedding, RmsNorm, RoPE};
+use crate::quant::traits::DequantOps;
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{
@@ -47,8 +48,10 @@ use numr::tensor::Tensor;
 pub struct MiniCpm4Model<R: Runtime> {
     /// `[vocab_size, hidden_size]` lookup table. `None` when the config
     /// carries `vocab_size == 0` (`residual_lm`), which has no such tensor in
-    /// the checkpoint.
-    pub(crate) embed_tokens: Option<Embedding<R>>,
+    /// the checkpoint. May be block-quantized (packed on device, dequantized
+    /// only for the rows a forward pass gathers) or standard, depending on
+    /// what the checkpoint stores — see [`MaybeQuantEmbedding`].
+    pub(crate) embed_tokens: Option<MaybeQuantEmbedding<R>>,
     pub(crate) layers: Vec<MiniCpm4Layer<R>>,
     pub(crate) norm: RmsNorm<R>,
     /// Precomputed cos/sin tables. `None` when the config carries
@@ -93,7 +96,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// instantiation is fed pre-computed embeddings and has no table to read.
     pub fn embed<C>(&self, client: &C, ids: &Tensor<R>) -> Result<Var<R>>
     where
-        C: ModelClient<R>,
+        C: ModelClient<R> + DequantOps<R>,
         R::Client: IndexingOps<R>,
     {
         let table = self

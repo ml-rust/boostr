@@ -121,6 +121,24 @@ impl<R: Runtime<DType = numr::dtype::DType>> QuantTensor<R> {
         &self.device
     }
 
+    /// Copy the tightly-packed block bytes to host memory
+    ///
+    /// Returns exactly [`Self::storage_bytes`] bytes, in the format's own block
+    /// layout — the bytes a GGUF writer puts on disk verbatim.
+    ///
+    /// This exists because the writer side of the format needs the bytes and
+    /// [`Self::storage`] cannot give them safely: `as_host_slice` is `unsafe`
+    /// and only valid when the storage is host memory, so a consumer using it
+    /// would silently read a device pointer on CUDA. This copies through the
+    /// runtime instead and works on every backend.
+    ///
+    /// # Errors
+    ///
+    /// If the device-to-host copy fails.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        self.storage.try_to_vec::<u8>().map_err(Error::Numr)
+    }
+
     /// Raw storage
     pub fn storage(&self) -> &Storage<R> {
         &self.storage
@@ -193,6 +211,18 @@ mod tests {
         let data = vec![0u8; 18];
         let result = QuantTensor::<CpuRuntime>::from_bytes(&data, QuantFormat::Q4_0, &[], &device);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_to_bytes_round_trips_from_bytes() {
+        let device = cpu_device();
+        let data: Vec<u8> = (0..18u8).collect();
+        let qt = QuantTensor::<CpuRuntime>::from_bytes(&data, QuantFormat::Q4_0, &[32], &device)
+            .unwrap();
+
+        let out = qt.to_bytes().unwrap();
+        assert_eq!(out.len(), qt.storage_bytes());
+        assert_eq!(out, data);
     }
 
     #[test]

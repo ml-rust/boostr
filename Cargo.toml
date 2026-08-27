@@ -245,6 +245,10 @@ name = "voxcpm_tokenizer_check"
 required-features = ["audio", "f16"]
 
 [[example]]
+name = "gguf_diff"
+required-features = ["audio", "f16"]
+
+[[example]]
 name = "voxcpm_clone"
 required-features = ["audio", "f16"]
 

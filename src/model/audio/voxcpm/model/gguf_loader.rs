@@ -1,18 +1,34 @@
-//! [`VoxCpm2Model::from_gguf`]: load the whole model from a single GGUF file
-//! written by `compressr convert <ckpt-dir> --format gguf`.
+//! [`VoxCpm2Model::from_gguf`]: load the whole model from a single GGUF file.
 //!
-//! # What a VoxCPM2 GGUF holds
+//! # Two naming conventions, both loadable
 //!
-//! 577 tensors — the transformer stack, under their ORIGINAL HuggingFace
-//! names. compressr writes the checkpoint's key strings verbatim, so
-//! [`gguf_to_hf_name`](crate::format::gguf::gguf_to_hf_name) is deliberately
-//! NOT applied here: the sub-loaders ask for exactly the keys they ask a
-//! safetensors checkpoint for, and renaming would break every one of them.
+//! A VoxCPM2 GGUF holds 577 tensors — the transformer stack — but under one
+//! of two mutually exclusive name schemes:
 //!
-//! It does NOT hold the AudioVAE (a separate file that is not part of the
-//! checkpoint compressr converts) and it does not hold `tokenizer.json`.
-//! `from_gguf` therefore takes the VAE path as its own argument, exactly like
-//! [`from_checkpoint`](VoxCpm2Model::from_checkpoint).
+//! - **Verbatim HuggingFace**, what `compressr convert <ckpt-dir> --format
+//!   gguf` writes: the checkpoint's own key strings, unchanged
+//!   (`base_lm.layers.0.self_attn.q_proj.weight`). The generic
+//!   [`gguf_to_hf_name`](crate::format::gguf::gguf_to_hf_name) is deliberately
+//!   NOT applied to these — the sub-loaders already ask for exactly these
+//!   keys, and renaming would break every one of them.
+//! - **ggml-conventional**, what third-party llama.cpp-style ports such as
+//!   `cstr/voxcpm2-GGUF` write (`tslm.blk.0.attn_q.weight`). These are
+//!   translated on the way in by `loader::cstr::GgmlNamedGguf`.
+//!
+//! Which one a file uses is decided by probing for a sentinel tensor, NOT by
+//! `general.architecture` — both files set that key to `voxcpm2`. See
+//! `loader::cstr::probe_naming`.
+//!
+//! # What a VoxCPM2 GGUF does NOT hold
+//!
+//! The AudioVAE, on either convention. Our own converter never sees it (it is
+//! a separate file, not part of the checkpoint compressr converts), and
+//! cstr's `vae.*` tensors use a third naming scheme with `weight_norm` still
+//! unfolded into `weight_g`/`weight_v` pairs, which needs a second map plus a
+//! fold that does not exist here. `from_gguf` therefore takes the VAE path as
+//! its own argument on both paths, exactly like
+//! [`from_checkpoint`](VoxCpm2Model::from_checkpoint). It holds no
+//! `tokenizer.json` either.
 //!
 //! # What stays quantized in memory, and what does not
 //!
@@ -31,6 +47,7 @@
 
 use crate::error::{Error, Result};
 use crate::format::gguf::Gguf;
+use crate::model::audio::voxcpm::loader::cstr::{GgmlNamedGguf, GgufNaming, probe_naming};
 use crate::model::audio::voxcpm::model::loader::{StackConfigs, VoxCpm2Model};
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
@@ -43,6 +60,10 @@ use std::path::Path;
 /// compressr does not write this key yet; a later unit adds it. Reading it
 /// now means that unit lands with no boostr change, and a GGUF written today
 /// still loads through the `config_json` path argument.
+///
+/// cstr's ggml-conventional file embeds no `config.json` either, so it too
+/// needs the path argument. Its `voxcpm2.*` metadata keys do carry every
+/// config value, but reading config out of GGUF metadata is its own unit.
 pub const GGUF_CONFIG_JSON_KEY: &str = "voxcpm2.config_json";
 
 impl<R: Runtime<DType = DType>> VoxCpm2Model<R>
@@ -79,7 +100,25 @@ where
         let embedded = source.metadata().get_string(GGUF_CONFIG_JSON_KEY);
         let content = resolve_config_text(embedded, config_json)?;
         let cfgs = StackConfigs::from_config_str(&content)?;
-        Self::from_source(&mut source, cfgs, audiovae_path.as_ref(), device, dtype)
+        // Two conventions, one walk: `from_source` is generic over the
+        // source, so the only difference is whether the names are rewritten
+        // on the way in.
+        // Bound before the match so the probe's borrow of `source` ends
+        // here: a match scrutinee's temporaries live for the whole match,
+        // and the arms below need `source` by `&mut` and by value.
+        let naming = probe_naming(&source)?;
+        match naming {
+            GgufNaming::Verbatim => {
+                Self::from_source(&mut source, cfgs, audiovae_path.as_ref(), device, dtype)
+            }
+            GgufNaming::Ggml => Self::from_source(
+                &mut GgmlNamedGguf::new(source),
+                cfgs,
+                audiovae_path.as_ref(),
+                device,
+                dtype,
+            ),
+        }
     }
 }
 

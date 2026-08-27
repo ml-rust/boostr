@@ -8,7 +8,7 @@
 //!     --audiovae audiovae.safetensors \
 //!     --ref REF.wav --text "..." --out OUT.wav \
 //!     [--n-timesteps 32] [--cfg 2.0] [--min-len 2] [--max-len N] \
-//!     [--seed 0] [--best-of N] [--dtype f32]
+//!     [--seed 0] [--best-of N] [--dtype f32] [--device cpu]
 //! ```
 //!
 //! `CKPT_DIR` holds `config.json`, `model.safetensors` and `tokenizer.json`.
@@ -82,12 +82,19 @@ use boostr::model::audio::voxcpm::model::{
     GenerateOptions, GenerateOutcome, GenerateState, StepOutcome, VoxCpm2Model,
 };
 use boostr::model::audio::voxcpm::vae::decoder::{HOP_LENGTH, SAMPLE_RATE};
-use boostr::model::audio::voxcpm::{load_tokenizer, normalize_whitespace, tokenize};
+use boostr::model::audio::voxcpm::{VoxCpmClient, load_tokenizer, normalize_whitespace, tokenize};
 use boostr::model::audio::{
     PitchOptions, decode_audio, encode_wav_pcm16, estimate_pitch, extension_hint, to_mono_at_rate,
 };
 use numr::dtype::DType;
+use numr::ops::{
+    ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, RandomOps, ReduceOps,
+    ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
+};
+use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+#[cfg(feature = "cuda")]
+use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
 
 /// Rate the reference wav is resampled to before the AudioVAE encoder. Fixed
 /// by the encoder, not a choice: `AudioVaeEncoder` hops 640 samples at
@@ -115,6 +122,24 @@ enum Weights {
     Gguf(PathBuf),
 }
 
+/// Runtime to build the model and run generation on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Device {
+    Cpu,
+    Cuda,
+}
+
+/// Parse a `--device` value.
+fn parse_device(value: &str) -> Result<Device, String> {
+    match value {
+        "cpu" => Ok(Device::Cpu),
+        "cuda" => Ok(Device::Cuda),
+        other => Err(format!(
+            "--device: expected one of cpu, cuda, got {other:?}"
+        )),
+    }
+}
+
 /// Parsed command line.
 struct Args {
     weights: Weights,
@@ -135,6 +160,8 @@ struct Args {
     /// Transformer-stack dtype. `None` keeps every weight at the dtype it has
     /// in the checkpoint (BF16 for VoxCPM2). The `AudioVAE` is never cast.
     dtype: Option<DType>,
+    /// Runtime to build the model and run generation on.
+    device: Device,
 }
 
 /// Parse a `--dtype` value into the cast the loader takes.
@@ -156,7 +183,8 @@ fn parse_dtype(value: &str) -> Result<Option<DType>, String> {
 const USAGE: &str = "usage: voxcpm_clone (--ckpt DIR | --gguf MODEL.gguf [--config config.json]) \
 --audiovae PATH --ref REF.wav \
 --text \"...\" --out OUT.wav [--n-timesteps 32] [--cfg 2.0] [--min-len 2] \
-[--max-len N] [--seed 0] [--best-of 1] [--dtype f32|bf16|f16|native]";
+[--max-len N] [--seed 0] [--best-of 1] [--dtype f32|bf16|f16|native] \
+[--device cpu|cuda]";
 
 /// Hard cap on emitted patches when `--max-len` is not given.
 ///
@@ -186,6 +214,7 @@ fn parse_args() -> Result<Args, String> {
     let mut seed = 0u64;
     let mut best_of = 1usize;
     let mut dtype = Some(DType::F32);
+    let mut device = Device::Cpu;
 
     let mut i = 0usize;
     while i < argv.len() {
@@ -231,6 +260,7 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--best-of: {e}"))?
             }
             "--dtype" => dtype = parse_dtype(&take_value(&argv, &mut i, flag)?)?,
+            "--device" => device = parse_device(&take_value(&argv, &mut i, flag)?)?,
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown flag {other}\n{USAGE}")),
         }
@@ -272,6 +302,7 @@ fn parse_args() -> Result<Args, String> {
         seed,
         best_of,
         dtype,
+        device,
     })
 }
 
@@ -375,52 +406,51 @@ fn load_reference(path: &Path) -> Result<ReferenceAudio, Box<dyn std::error::Err
     })
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = match parse_args() {
-        Ok(args) => args,
-        Err(message) => {
-            eprintln!("{message}");
-            std::process::exit(2);
-        }
-    };
-    let started = Instant::now();
-
-    // --- reference audio ----------------------------------------------------
-    let reference = load_reference(&args.reference)?;
-    let ReferenceAudio {
-        samples: ref_wav,
-        native_rate,
-        native_channels: channels,
-        native_frames,
-    } = reference;
-    eprintln!(
-        "reference: {} ({:.2}s, {native_rate} Hz, {channels} ch) -> {} samples at {REF_RATE} Hz",
-        args.reference.display(),
-        native_frames as f64 / native_rate as f64,
-        ref_wav.len()
-    );
-
+/// The model-and-generation body: everything that runs on the chosen
+/// runtime `R`, from loading the transformer stack through the structural
+/// self-checks. Returns the chosen take's waveform samples and their peak
+/// absolute value, which is all `main`'s write step and closing report
+/// need. Exits the process on a failed structural check, same as the
+/// single-runtime version this was split out of.
+fn run<R: Runtime<DType = DType>>(
+    args: &Args,
+    device: &R::Device,
+    client: &(impl VoxCpmClient<R> + TypeConversionOps<R> + RandomOps<R>),
+    ref_wav: &[f32],
+    started: Instant,
+) -> Result<(Vec<f32>, f32), Box<dyn std::error::Error>>
+where
+    R::Client: TensorOps<R>
+        + ScalarOps<R>
+        + ReduceOps<R>
+        + IndexingOps<R>
+        + ShapeOps<R>
+        + ActivationOps<R>
+        + BinaryOps<R>
+        + UnaryOps<R>
+        + CompareOps<R>
+        + ConditionalOps<R>
+        + TypeConversionOps<R>,
+{
     // --- model --------------------------------------------------------------
-    let device = CpuDevice::default();
-    let client = CpuClient::new(device.clone());
     let model = match &args.weights {
         Weights::Checkpoint(dir) => {
             eprintln!("loading {} ...", dir.display());
-            VoxCpm2Model::<CpuRuntime>::from_checkpoint(dir, &args.audiovae, &device, args.dtype)?
+            VoxCpm2Model::<R>::from_checkpoint(dir, &args.audiovae, device, args.dtype)?
         }
         Weights::Gguf(path) => {
             eprintln!("loading {} (dequantizing to F32) ...", path.display());
-            VoxCpm2Model::<CpuRuntime>::from_gguf(
+            VoxCpm2Model::<R>::from_gguf(
                 path,
                 args.config.as_deref(),
                 &args.audiovae,
-                &device,
+                device,
                 args.dtype,
             )?
         }
     };
 
-    let ref_feat = model.encode_reference(&client, &ref_wav)?;
+    let ref_feat = model.encode_reference(client, ref_wav)?;
     let t_ref = ref_feat.shape()[0];
     eprintln!("T_ref: {t_ref} reference patches");
 
@@ -465,7 +495,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- reference pitch, only when it decides something ---------------------
     let ref_f0 = if args.best_of > 1 {
-        let f0 = median_f0(&ref_wav, REF_RATE);
+        let f0 = median_f0(ref_wav, REF_RATE);
         match f0 {
             Some(hz) => eprintln!("reference median F0: {hz:.1} Hz"),
             None => {
@@ -489,7 +519,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // The prefill is re-run per take: GenerateState::start consumes the
         // PrefillState and the loop advances its KV caches in place.
-        let prefill = model.prefill(&client, &ref_feat, &text_token_ids, max_length)?;
+        let prefill = model.prefill(client, &ref_feat, &text_token_ids, max_length)?;
         let mut state = GenerateState::start(prefill, model.config)?;
 
         // Mirrors PatchGenerator::generate exactly (cap first, then step,
@@ -501,7 +531,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if state.patches.len() >= options.max_len {
                 break GenerateOutcome::MaxLen;
             }
-            let step = generator.step(&client, &mut state, &options)?;
+            let step = generator.step(client, &mut state, &options)?;
             let emitted = state.patches.len();
             if emitted % PROGRESS_EVERY == 0 {
                 eprintln!(
@@ -516,7 +546,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let patches = state.patches.len();
-        let decoded = model.decode_patches(&client, &state.patches)?;
+        let decoded = model.decode_patches(client, &state.patches)?;
         let samples: Vec<f32> = decoded.contiguous()?.to_vec();
         eprintln!(
             "  {} after {patches} patches, {} samples ({:.2}s audio, {:.1}s wall)",
@@ -637,13 +667,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    // `chosen` is always a valid index: it is either the literal `0` or a
+    // position `min_by` found by iterating `takes` itself.
+    Ok((takes.swap_remove(chosen).samples, peak))
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = match parse_args() {
+        Ok(args) => args,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    };
+    let started = Instant::now();
+
+    // --- reference audio ----------------------------------------------------
+    let reference = load_reference(&args.reference)?;
+    let ReferenceAudio {
+        samples: ref_wav,
+        native_rate,
+        native_channels: channels,
+        native_frames,
+    } = reference;
+    eprintln!(
+        "reference: {} ({:.2}s, {native_rate} Hz, {channels} ch) -> {} samples at {REF_RATE} Hz",
+        args.reference.display(),
+        native_frames as f64 / native_rate as f64,
+        ref_wav.len()
+    );
+
+    let (samples, peak) = match args.device {
+        Device::Cpu => {
+            let device = CpuDevice::default();
+            let client = CpuClient::new(device.clone());
+            run::<CpuRuntime>(&args, &device, &client, &ref_wav, started)?
+        }
+        #[cfg(feature = "cuda")]
+        Device::Cuda => {
+            let device = CudaDevice::new(0);
+            let client = CudaClient::new(device.clone())?;
+            run::<CudaRuntime>(&args, &device, &client, &ref_wav, started)?
+        }
+        #[cfg(not(feature = "cuda"))]
+        Device::Cuda => {
+            eprintln!(
+                "--device cuda: this binary was built without CUDA support; rebuild with \
+                 --features cuda"
+            );
+            std::process::exit(2);
+        }
+    };
+
     // --- write --------------------------------------------------------------
-    let wav = encode_wav_pcm16(&take.samples, SAMPLE_RATE as u32)?;
+    let wav = encode_wav_pcm16(&samples, SAMPLE_RATE as u32)?;
     std::fs::write(&args.out, wav)?;
     eprintln!(
         "wrote {} ({:.2}s at {SAMPLE_RATE} Hz, peak {peak:.4})",
         args.out.display(),
-        take.samples.len() as f64 / SAMPLE_RATE as f64
+        samples.len() as f64 / SAMPLE_RATE as f64
     );
     eprintln!("total {:.1}s", started.elapsed().as_secs_f64());
     Ok(())

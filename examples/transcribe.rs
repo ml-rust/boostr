@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use boostr::model::audio::{
     TranscribeOptions, WhisperBundle, decode_audio, extension_hint, to_mono_at_rate,
 };
+use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
 /// Sample rate Whisper's mel front end is defined at.
@@ -121,7 +122,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     eprintln!("loading {} ...", args.model.display());
-    let bundle = WhisperBundle::<CpuRuntime>::from_dir(&args.model, &device)?;
+    // Whisper's mel spectrogram is built in F32 and numr's ops require the
+    // input and the weight to share a dtype, so an F16 checkpoint (large-v3
+    // ships one) fails with `conv1d requires same dtype` unless the weights
+    // are cast on the way in. F32 is the only dtype the mel path produces, so
+    // it is what every checkpoint is loaded as here.
+    let bundle = WhisperBundle::<CpuRuntime>::from_dir_with_dtype(
+        &args.model,
+        &device,
+        &client,
+        DType::F32,
+    )?;
 
     let out = bundle.transcribe(
         &client,

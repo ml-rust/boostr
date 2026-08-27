@@ -4,7 +4,7 @@
 //! ```text
 //! patches: Vec<Var<R>>, each [1, patch_size, feat_dim]
 //!   -> unfold_patches -> latent [1, feat_dim, n_patches * patch_size]
-//!   -> AudioVaeDecoder::forward (sr bucket 3, 48 kHz)     -> waveform [1, 1, samples]
+//!   -> chunked_decode::decode_latent_windowed (sr bucket 3, 48 kHz) -> waveform [1, 1, samples]
 //! ```
 //!
 //! [`unfold_patches`] is the exact inverse of
@@ -18,7 +18,9 @@
 //! In REFERENCE (voice-clone) mode `context_len == 0`, so the reference does
 //! NOT trim the decoded waveform. A trim applies only in continuation mode,
 //! which this orchestrator does not implement, so [`VoxCpm2Model::decode_patches`]
-//! never trims either.
+//! never trims for that reason. (`chunked_decode` does trim internally, per
+//! window, to remove the overlap context added for chunking — an unrelated,
+//! purely-internal trim that leaves the total sample count unchanged.)
 //!
 //! # The one device read
 //!
@@ -28,6 +30,7 @@
 
 use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::client::VoxCpmClient;
+use crate::model::audio::voxcpm::model::chunked_decode::decode_latent_windowed;
 use crate::model::audio::voxcpm::model::loader::VoxCpm2Model;
 use numr::autograd::Var;
 use numr::dtype::DType;
@@ -95,7 +98,10 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     /// Unfolds `patches` with [`unfold_patches`] using `self.config`'s patch
     /// geometry, then runs [`super::loader::VoxCpm2Model::vae_decoder`] at
     /// the fixed 48 kHz sample-rate bucket
-    /// ([`crate::model::audio::voxcpm::vae::decoder::DEFAULT_SR_BUCKET`]).
+    /// ([`crate::model::audio::voxcpm::vae::decoder::DEFAULT_SR_BUCKET`]),
+    /// windowed via [`super::chunked_decode::decode_latent_windowed`] so peak
+    /// decoder activation memory is bounded by a fixed number of latent
+    /// frames rather than growing linearly with the utterance length.
     /// Returns `[1, 1, samples]` at [`crate::model::audio::voxcpm::vae::decoder::SAMPLE_RATE`]
     /// Hz, un-trimmed (reference/voice-clone mode has no context to trim).
     pub fn decode_patches<C>(&self, client: &C, patches: &[Var<R>]) -> Result<Tensor<R>>
@@ -109,7 +115,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         // between them, mirroring `prefill`'s cast of the encoder's F32
         // reference features up into the stack's dtype.
         let latent = latent.to_dtype(self.vae_decoder.dtype())?;
-        self.vae_decoder.forward(client, &latent)
+        decode_latent_windowed(client, &self.vae_decoder, &latent)
     }
 }
 

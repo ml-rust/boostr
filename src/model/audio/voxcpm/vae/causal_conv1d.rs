@@ -27,6 +27,15 @@ pub struct CausalConv1d<R: Runtime> {
 }
 
 impl<R: Runtime<DType = DType>> CausalConv1d<R> {
+    /// Dtype of the convolution weight.
+    ///
+    /// `conv1d` refuses a dtype mismatch between input and weight, so a caller
+    /// crossing into this layer from a differently-typed stack reads the target
+    /// dtype here rather than assuming F32.
+    pub fn dtype(&self) -> DType {
+        self.conv.weight().tensor().dtype()
+    }
+
     /// `weight`: `[out_channels, in_channels/groups, kernel_size]`.
     pub fn new(
         weight: Tensor<R>,

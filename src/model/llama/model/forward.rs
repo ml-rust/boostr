@@ -97,7 +97,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         let mut rope = rope;
         if let Some(first_layer) = layers.first() {
             let weight_dtype = first_layer.input_layernorm.weight().tensor().dtype();
-            rope.cast_caches(weight_dtype);
+            rope.cast_caches(weight_dtype)?;
         }
 
         Ok(Self {

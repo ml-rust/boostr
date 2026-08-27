@@ -6,7 +6,7 @@ use crate::model::attention_mask::causal_window_mask;
 use crate::ops::traits::position::alibi::AlibiOps;
 use numr::autograd::Var;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, LinalgOps, ScalarOps};
+use numr::ops::{BinaryOps, LinalgOps, ScalarOps, TypeConversionOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -14,6 +14,10 @@ use numr::tensor::Tensor;
 ///
 /// Split out so the masking rule is directly testable — a non-causal mask here
 /// is invisible to shape checks and still produces fluent text.
+///
+/// `dtype` is the dtype the mask is returned in; it MUST match the attention
+/// scores it will be added to. See [`causal_window_mask`] for why the build
+/// runs in F32 and casts once.
 ///
 /// Row `i` is at ABSOLUTE position `sk - sq + i`, matching
 /// `causal_window_mask` and `flash_standard::build_attention_mask`. Prefill and
@@ -24,11 +28,13 @@ pub fn prefill_attention_mask<R, C>(
     sq: usize,
     sk: usize,
     spec: &AttentionCoreSpec<'_, R>,
+    dtype: DType,
     device: &R::Device,
 ) -> Result<Var<R>>
 where
     R: Runtime<DType = DType>,
     C: ScalarOps<R> + LinalgOps<R> + BinaryOps<R> + AlibiOps<R>,
+    R::Client: TypeConversionOps<R>,
 {
     Ok(if spec.use_alibi {
         // MUST be the `_causal` kernel. `alibi_add_bias` writes a SYMMETRIC
@@ -50,13 +56,15 @@ where
             sk,
             sk.saturating_sub(sq),
         )?;
-        Var::new(mask, false)
+        // `alibi_add_bias_causal` writes F32 slopes, so the bias is built in
+        // F32 and cast once here, exactly as `causal_window_mask` does.
+        Var::new(mask.to_dtype(dtype)?, false)
     } else {
         // `causal_window_mask` owns causality, the inclusive sliding window,
         // the `sk - sq` key offset, and the `f32::MIN` fill for every
         // architecture.
         Var::new(
-            causal_window_mask::<R, C>(client, sq, sk, spec.sliding_window, device)?,
+            causal_window_mask::<R, C>(client, sq, sk, spec.sliding_window, dtype, device)?,
             false,
         )
     })

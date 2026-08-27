@@ -228,7 +228,15 @@ where
 
     let sq = q.shape()[2];
     let sk = k.shape()[2];
-    let mask = prefill_attention_mask(client, batch, sq, sk, spec, q.tensor().device())?;
+    let mask = prefill_attention_mask(
+        client,
+        batch,
+        sq,
+        sk,
+        spec,
+        q.tensor().dtype(),
+        q.tensor().device(),
+    )?;
     let attn_out = multi_head_attention_impl(client, &q, &k, &v, Some(&mask), spec.num_heads)?;
 
     attention_epilogue(&attn_out, batch, spec)

@@ -156,21 +156,23 @@ impl<R: Runtime> RoPE<R> {
 
     /// Cast cos/sin caches to the given dtype (e.g. BF16) so that
     /// per-token casts are avoided during inference.
-    pub fn cast_caches(&mut self, dtype: numr::dtype::DType)
+    ///
+    /// Errors propagate: a cast that fails must not leave the caches at a
+    /// dtype the attention path will later reject with a bare
+    /// `DTypeMismatch` far from its cause.
+    pub fn cast_caches(&mut self, dtype: numr::dtype::DType) -> Result<()>
     where
         R: Runtime<DType = numr::dtype::DType>,
         R::Client: numr::ops::TypeConversionOps<R>,
     {
-        if self.cos_cache.tensor().dtype() != dtype {
-            let device = self.cos_cache.tensor().device().clone();
-            let client = R::default_client(&device);
-            if let Ok(cos) = client.cast(self.cos_cache.tensor(), dtype) {
-                self.cos_cache = Var::new(cos, false);
-            }
-            if let Ok(sin) = client.cast(self.sin_cache.tensor(), dtype) {
-                self.sin_cache = Var::new(sin, false);
-            }
+        if self.cos_cache.tensor().dtype() == dtype {
+            return Ok(());
         }
+        let device = self.cos_cache.tensor().device().clone();
+        let client = R::default_client(&device);
+        self.cos_cache = Var::new(client.cast(self.cos_cache.tensor(), dtype)?, false);
+        self.sin_cache = Var::new(client.cast(self.sin_cache.tensor(), dtype)?, false);
+        Ok(())
     }
 
     pub fn cos_cache(&self) -> &Var<R> {

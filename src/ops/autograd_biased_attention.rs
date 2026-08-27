@@ -110,8 +110,14 @@ where
         AttentionCausality::Mask { window_size } => {
             let sq = q_shape[2];
             let sk = k_shape[2];
-            let mask =
-                causal_window_mask::<R, C>(client, sq, sk, window_size, q.tensor().device())?;
+            let mask = causal_window_mask::<R, C>(
+                client,
+                sq,
+                sk,
+                window_size,
+                q.tensor().dtype(),
+                q.tensor().device(),
+            )?;
             let summed = client.add(bias, &mask)?;
             client.clamp(&summed, f32::MIN as f64, f32::MAX as f64)?
         }

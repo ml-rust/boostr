@@ -4,9 +4,9 @@
 //! sliding-window) additive mask, so the masking rule lives in a single place
 //! and cannot drift between architectures.
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, LinalgOps, ScalarOps};
+use numr::ops::{BinaryOps, LinalgOps, ScalarOps, TypeConversionOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -35,6 +35,14 @@ use numr::tensor::Tensor;
 /// key_offset + i]` — exactly `window_size` keys. This matches the kernel
 /// contract in `ops/impl_generic/attention/flash_standard.rs`.
 ///
+/// `dtype` is the dtype the mask is returned in — it MUST be the dtype of the
+/// attention scores it will be added to, because the additive-mask sites do not
+/// reconcile dtypes for it. The triangular construction always runs in F32 and
+/// the result is cast once at the end, so a BF16/F16 mask is bit-identical to
+/// rounding the F32 mask. `f32::MIN` is representable in BF16 and F16 alike
+/// (F16 saturates to its own most-negative finite value), so the fill stays a
+/// finite large negative and the `0 * -inf = NaN` hazard stays closed.
+///
 /// The two masked regions are DISJOINT for every `window_size >= 1`:
 /// `triu(key_offset + 1)` keeps `j >= key_offset + i + 1` and
 /// `tril(key_offset - window_size)` keeps `j <= key_offset + i - window_size`.
@@ -46,6 +54,7 @@ pub fn causal_window_mask<R, C>(
     sq: usize,
     sk: usize,
     window_size: usize,
+    dtype: DType,
     device: &R::Device,
 ) -> Result<Tensor<R>>
 where
@@ -54,6 +63,7 @@ where
     // A caller with a small bound list (a trainer's model) must be able to
     // build the same mask without inheriting 17 supertraits.
     C: ScalarOps<R> + LinalgOps<R> + BinaryOps<R>,
+    R::Client: TypeConversionOps<R>,
 {
     let key_offset = sk.saturating_sub(sq) as i64;
     let zeros = Tensor::<R>::zeros(&[sq, sk], DType::F32, device)?;
@@ -65,5 +75,7 @@ where
         let too_old = client.tril(&filled, key_offset - window_size as i64)?;
         client.add(&future, &too_old)?
     };
-    masked.reshape(&[1, 1, sq, sk]).map_err(Error::Numr)
+    // `to_dtype` is a no-op clone when `dtype` is already F32, so the common
+    // case pays nothing for this call.
+    Ok(masked.reshape(&[1, 1, sq, sk])?.to_dtype(dtype)?)
 }

@@ -60,7 +60,7 @@ fn mask_values(window_size: usize, sq: usize, sk: usize, position: usize) -> Vec
     let (client, device) = cpu_setup();
     let block = flag_block(false, window_size);
     let mask = block
-        .attention_mask(&client, 1, sq, sk, position, &device)
+        .attention_mask(&client, 1, sq, sk, position, DType::F32, &device)
         .unwrap()
         .expect("a positive window must produce a mask");
     assert_eq!(mask.shape(), &[1, 1, sq, sk]);
@@ -118,7 +118,7 @@ fn alibi_mask_covers_every_batch_and_head() {
     let (client, device) = cpu_setup();
     let block = flag_block(true, 0);
     let mask = block
-        .attention_mask(&client, 2, 3, 3, 0, &device)
+        .attention_mask(&client, 2, 3, 3, 0, DType::F32, &device)
         .unwrap()
         .expect("ALiBi always produces a bias mask");
     assert_eq!(mask.shape(), &[2, 2, 3, 3]);
@@ -130,11 +130,11 @@ fn alibi_ignores_the_sliding_window() {
     // mechanisms do not compose, so the window must not change the result.
     let (client, device) = cpu_setup();
     let unwindowed = flag_block(true, 0)
-        .attention_mask(&client, 1, 4, 4, 0, &device)
+        .attention_mask(&client, 1, 4, 4, 0, DType::F32, &device)
         .unwrap()
         .expect("ALiBi always produces a bias mask");
     let windowed = flag_block(true, 2)
-        .attention_mask(&client, 1, 4, 4, 0, &device)
+        .attention_mask(&client, 1, 4, 4, 0, DType::F32, &device)
         .unwrap()
         .expect("ALiBi always produces a bias mask");
     assert_eq!(
@@ -154,7 +154,7 @@ fn plain_attention_is_still_causal() {
 
     // Prefill: strictly-upper triangle masked, diagonal and below visible.
     let mask = block
-        .attention_mask(&client, 1, 4, 4, 0, &device)
+        .attention_mask(&client, 1, 4, 4, 0, DType::F32, &device)
         .unwrap()
         .expect("prefill must be masked, or attention sees the future");
     let values = mask.tensor().to_vec::<f32>();
@@ -171,7 +171,7 @@ fn plain_attention_is_still_causal() {
 
     // Decode: one query against five cached keys — all are in the past.
     let mask = block
-        .attention_mask(&client, 1, 1, 6, 5, &device)
+        .attention_mask(&client, 1, 1, 6, 5, DType::F32, &device)
         .unwrap()
         .expect("decode is masked too");
     assert!(

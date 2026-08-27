@@ -31,7 +31,7 @@ use crate::model::audio::voxcpm::client::VoxCpmClient;
 use crate::model::audio::voxcpm::model::loader::VoxCpm2Model;
 use numr::autograd::Var;
 use numr::dtype::DType;
-use numr::ops::ShapeOps;
+use numr::ops::{ShapeOps, TypeConversionOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -101,9 +101,14 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     pub fn decode_patches<C>(&self, client: &C, patches: &[Var<R>]) -> Result<Tensor<R>>
     where
         C: VoxCpmClient<R>,
-        R::Client: ShapeOps<R>,
+        R::Client: ShapeOps<R> + TypeConversionOps<R>,
     {
         let latent = unfold_patches(patches, self.config.patch_size, self.config.feat_dim)?;
+        // The transformer stack runs at whatever dtype it was loaded at; the
+        // AudioVAE is always left at its own (F32). This is the boundary
+        // between them, mirroring `prefill`'s cast of the encoder's F32
+        // reference features up into the stack's dtype.
+        let latent = latent.to_dtype(self.vae_decoder.dtype())?;
         self.vae_decoder.forward(client, &latent)
     }
 }

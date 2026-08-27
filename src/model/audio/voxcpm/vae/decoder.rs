@@ -87,6 +87,15 @@ impl<R: Runtime<DType = DType>> AudioVaeDecoder<R> {
         }
     }
 
+    /// Dtype every decoder weight was loaded at.
+    ///
+    /// The `AudioVAE` is never cast at load time (it is verified against F32
+    /// PyTorch fixtures), so a transformer stack running at another dtype must
+    /// convert its latent to THIS dtype before decoding.
+    pub fn dtype(&self) -> DType {
+        self.front_dw.dtype()
+    }
+
     /// Full forward with the default sample-rate bucket ([`DEFAULT_SR_BUCKET`]
     /// = 48 kHz, the only rate VoxCPM2's `decode()` ever produces).
     pub fn forward<C>(&self, client: &C, latent: &Tensor<R>) -> Result<Tensor<R>>

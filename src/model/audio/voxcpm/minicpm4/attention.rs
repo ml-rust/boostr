@@ -254,6 +254,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             seq,
             sk,
             &self.core_spec(),
+            q.tensor().dtype(),
             q.tensor().device(),
         )?;
         let attn_out =

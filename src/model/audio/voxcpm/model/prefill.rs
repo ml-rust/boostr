@@ -215,7 +215,9 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         // audio_feat: z1 ++ ref_feat ++ z1 ++ zeros(text_length), i.e. one
         // leading zero patch and `1 + text_length` trailing ones.
         let ref_patches = Var::new(
-            to_dtype(ref_feat, dtype)?.reshape(&[1, layout.t_ref, patch_size, feat_dim])?,
+            ref_feat
+                .to_dtype(dtype)?
+                .reshape(&[1, layout.t_ref, patch_size, feat_dim])?,
             false,
         );
         let head = Var::new(
@@ -328,17 +330,5 @@ where
     R::Client: TypeConversionOps<R>,
 {
     let tensor = Tensor::<R>::from_slice(mask, &[1, mask.len(), 1], device)?;
-    Ok(Var::new(to_dtype(&tensor, dtype)?, false))
-}
-
-/// Cast only when the dtype actually differs. `cast` reads elementwise and
-/// refuses a strided source, so make it contiguous first.
-fn to_dtype<R: Runtime<DType = DType>>(tensor: &Tensor<R>, dtype: DType) -> Result<Tensor<R>>
-where
-    R::Client: TypeConversionOps<R>,
-{
-    if tensor.dtype() == dtype {
-        return Ok(tensor.clone());
-    }
-    Ok(tensor.contiguous()?.to_dtype(dtype)?.contiguous()?)
+    Ok(Var::new(tensor.to_dtype(dtype)?, false))
 }

@@ -70,10 +70,11 @@ where
         // mixing the two errors rather than promoting, so the caller states
         // which dtype it wants and the cast happens once, here.
         match self.dtype {
-            // `contiguous` first: a cast reads the source elementwise and the
-            // safetensors view may be strided, which `cast` refuses.
-            Some(want) if t.dtype() != want => Ok(t.contiguous()?.to_dtype(want)?.contiguous()?),
-            _ => Ok(t),
+            // `to_dtype` is a no-op clone when the dtypes already agree and
+            // makes a strided safetensors view contiguous itself, so neither
+            // needs handling here.
+            Some(want) => Ok(t.to_dtype(want)?),
+            None => Ok(t),
         }
     }
 

@@ -157,7 +157,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
             &device,
         )?;
         if cdtype == DType::F16 {
-            rope.cast_caches(DType::F16);
+            rope.cast_caches(DType::F16)?;
         }
         let rope = Arc::new(rope);
 

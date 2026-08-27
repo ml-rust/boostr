@@ -7,7 +7,7 @@
 //!     --ckpt CKPT_DIR --audiovae audiovae.safetensors \
 //!     --ref REF.wav --text "..." --out OUT.wav \
 //!     [--n-timesteps 32] [--cfg 2.0] [--min-len 2] [--max-len N] \
-//!     [--seed 0] [--best-of N]
+//!     [--seed 0] [--best-of N] [--dtype f32]
 //! ```
 //!
 //! `CKPT_DIR` holds `config.json`, `model.safetensors` and `tokenizer.json`.
@@ -109,11 +109,30 @@ struct Args {
     max_len: Option<usize>,
     seed: u64,
     best_of: usize,
+    /// Transformer-stack dtype. `None` keeps every weight at the dtype it has
+    /// in the checkpoint (BF16 for VoxCPM2). The `AudioVAE` is never cast.
+    dtype: Option<DType>,
+}
+
+/// Parse a `--dtype` value into the cast the loader takes.
+///
+/// `native` means "no cast", which loads the checkpoint's own BF16 weights and
+/// roughly halves resident memory against `f32`.
+fn parse_dtype(value: &str) -> Result<Option<DType>, String> {
+    match value {
+        "f32" => Ok(Some(DType::F32)),
+        "bf16" => Ok(Some(DType::BF16)),
+        "f16" => Ok(Some(DType::F16)),
+        "native" => Ok(None),
+        other => Err(format!(
+            "--dtype: expected one of f32, bf16, f16, native, got {other:?}"
+        )),
+    }
 }
 
 const USAGE: &str = "usage: voxcpm_clone --ckpt DIR --audiovae PATH --ref REF.wav \
 --text \"...\" --out OUT.wav [--n-timesteps 32] [--cfg 2.0] [--min-len 2] \
-[--max-len N] [--seed 0] [--best-of 1]";
+[--max-len N] [--seed 0] [--best-of 1] [--dtype f32|bf16|f16|native]";
 
 /// Hard cap on emitted patches when `--max-len` is not given.
 ///
@@ -140,6 +159,7 @@ fn parse_args() -> Result<Args, String> {
     let mut max_len = None;
     let mut seed = 0u64;
     let mut best_of = 1usize;
+    let mut dtype = Some(DType::F32);
 
     let mut i = 0usize;
     while i < argv.len() {
@@ -182,6 +202,7 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--best-of: {e}"))?
             }
+            "--dtype" => dtype = parse_dtype(&take_value(&argv, &mut i, flag)?)?,
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown flag {other}\n{USAGE}")),
         }
@@ -210,6 +231,7 @@ fn parse_args() -> Result<Args, String> {
         max_len,
         seed,
         best_of,
+        dtype,
     })
 }
 
@@ -317,7 +339,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &args.ckpt,
         &args.audiovae,
         &device,
-        Some(DType::F32),
+        args.dtype,
     )?;
 
     let ref_feat = model.encode_reference(&client, &ref_wav)?;

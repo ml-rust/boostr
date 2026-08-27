@@ -156,13 +156,20 @@ where
                 short_factor: Some(cfg.rope_short_factor.clone()),
                 long_factor: Some(cfg.rope_long_factor.clone()),
             };
-            Some(RoPE::<R>::precompute_freqs(
+            let mut rope = RoPE::<R>::precompute_freqs(
                 cfg.max_position_embeddings,
                 cfg.head_dim,
                 cfg.rope_theta,
                 Some(&rope_scaling),
                 device,
-            )?)
+            )?;
+            // `precompute_freqs` always builds F32 tables. The attention path
+            // multiplies them straight against q/k, so they must carry the
+            // dtype the weights were loaded at, not the dtype the trig ran in.
+            // `norm.weight` is the dtype witness: every MiniCPM4 stack has it,
+            // including the residual LM whose embedding table is absent.
+            rope.cast_caches(norm.weight().tensor().dtype())?;
+            Some(rope)
         };
 
         Ok(Self {

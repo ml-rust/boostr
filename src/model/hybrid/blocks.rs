@@ -163,7 +163,15 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
 
         let sq = q.shape()[2];
         let sk = cached_k.shape()[2];
-        let mask = self.attention_mask(client, batch, sq, sk, position, q.tensor().device())?;
+        let mask = self.attention_mask(
+            client,
+            batch,
+            sq,
+            sk,
+            position,
+            q.tensor().dtype(),
+            q.tensor().device(),
+        )?;
 
         // Multi-head attention (Q attends to full cached K/V)
         let attn_out = multi_head_attention_impl(
@@ -186,15 +194,27 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
         self.o_proj.forward(client, &attn_out)
     }
 
-    /// Additive attention mask for one attention step, or `None`.
+    /// Additive attention mask for one attention step.
     ///
-    /// `None` — no ALiBi, no sliding window — is the historical behaviour and
-    /// is preserved bit-for-bit: the mask is materialized only when one of the
-    /// two features asks for it.
+    /// Always `Some`: the ALiBi branch returns the bias, and every other
+    /// configuration returns a causal mask (windowed when `sliding_window > 0`).
+    /// The `Option` is the caller's argument type, not a signal that masking is
+    /// optional — an unmasked prefill lets every position attend to FUTURE
+    /// tokens, which stays invisible to shape checks and still emits fluent
+    /// text.
+    ///
+    /// `dtype` is the dtype of the attention scores this mask is added to. The
+    /// additive-mask sites do not reconcile dtypes, so a stack running in
+    /// BF16/F16 must state its dtype here.
     ///
     /// Row `i` is absolute position `position + i` and the cache holds
     /// `sk = position + sq` keys, so [`causal_window_mask`] derives the key
     /// offset from `sk - sq` and needs no extra argument.
+    // Seven independent scalars, none derivable from another: `position` is the
+    // ALiBi branch's own key offset, and `dtype`/`device` describe the scores
+    // this mask is added to, not each other. Bundling them into a struct would
+    // add a type whose only job is to be destructured back at the one call site.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn attention_mask<C>(
         &self,
         client: &C,
@@ -202,16 +222,21 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
         sq: usize,
         sk: usize,
         position: usize,
+        dtype: DType,
         device: &R::Device,
     ) -> Result<Option<Var<R>>>
     where
         C: ModelClient<R>,
+        R::Client: numr::ops::TypeConversionOps<R>,
     {
         if self.use_alibi {
             // ALiBi's own kernel writes the causal structure along with the
             // distance bias, so the sliding window does not apply here.
             let bias = Tensor::<R>::zeros(&[batch, self.num_heads, sq, sk], DType::F32, device)?;
             client.alibi_add_bias_causal(&bias, batch, self.num_heads, sq, sk, position)?;
+            // The ALiBi kernel writes F32 slopes; cast once so the bias
+            // carries the dtype of the scores it is added to.
+            let bias = bias.to_dtype(dtype)?;
             Ok(Some(Var::new(bias, false)))
         } else {
             // ALWAYS masked, even with no sliding window. This branch is the
@@ -229,7 +254,7 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
             //
             // The window predicate alone does not mask the future — the shared
             // builder always applies causality alongside it.
-            let mask = causal_window_mask(client, sq, sk, self.sliding_window, device)?;
+            let mask = causal_window_mask(client, sq, sk, self.sliding_window, dtype, device)?;
             Ok(Some(Var::new(mask, false)))
         }
     }

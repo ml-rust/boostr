@@ -33,6 +33,7 @@ fn mask_values(sq: usize, sk: usize, window_size: usize) -> Vec<f32> {
         sq,
         sk,
         window_size,
+        DType::F32,
         &device,
     )
     .unwrap();
@@ -210,6 +211,7 @@ attention:
         sq,
         sq,
         &block.self_attn.core_spec(),
+        DType::F32,
         &device,
     )
     .expect("mask builds");

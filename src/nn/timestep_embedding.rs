@@ -7,12 +7,13 @@
 //! that projects that embedding through the model's hidden width.
 
 use crate::error::{Error, Result};
-use crate::nn::linear::Linear;
+use crate::nn::linear::MaybeQuantLinear;
+use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{
     Var, var_cat, var_cos, var_mul, var_mul_scalar, var_reshape, var_silu, var_sin,
 };
 use numr::dtype::DType;
-use numr::ops::{ActivationOps, ScalarOps, ShapeOps, TensorOps};
+use numr::ops::{ActivationOps, BinaryOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -119,22 +120,38 @@ impl<R: Runtime<DType = DType>> SinusoidalPosEmb<R> {
 /// `linear_2(silu(linear_1(x)))`, `dim -> dim -> dim`, both linears biased.
 ///
 /// Reference: `TimestepEmbedding` (`local_dit_v2.py:25-47`).
+///
+/// Built on [`MaybeQuantLinear`] rather than plain `Linear`: its only caller
+/// (VoxCPM2's local DiT) also ships as a GGUF, where these two weights are
+/// block-quantized and multiply PACKED through `quant_matmul` instead of
+/// being expanded to dense F32 at load. A safetensors checkpoint yields the
+/// `Standard` variant and the dense path is unchanged.
 pub struct TimestepEmbedding<R: Runtime> {
-    linear_1: Linear<R>,
-    linear_2: Linear<R>,
+    linear_1: MaybeQuantLinear<R>,
+    linear_2: MaybeQuantLinear<R>,
 }
 
 impl<R: Runtime<DType = DType>> TimestepEmbedding<R> {
     /// Build from loaded `linear_1`/`linear_2` weights. Both MUST carry a
     /// bias — the reference constructs both with `bias=True`.
-    pub fn new(linear_1: Linear<R>, linear_2: Linear<R>) -> Self {
+    pub fn new(linear_1: MaybeQuantLinear<R>, linear_2: MaybeQuantLinear<R>) -> Self {
         Self { linear_1, linear_2 }
     }
 
     /// `x: [..., dim]` -> `[..., dim]`.
     pub fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
     where
-        C: RuntimeClient<R> + TensorOps<R> + ActivationOps<R> + ScalarOps<R>,
+        // `QuantMatmulOps` + `BinaryOps` + `TypeConversionOps` are what
+        // `MaybeQuantLinear::forward` needs over a dense `Linear::forward`:
+        // the packed multiply, its bias add, and the decomposed-quant arm's
+        // cast of activations to F32.
+        C: RuntimeClient<R>
+            + TensorOps<R>
+            + ActivationOps<R>
+            + ScalarOps<R>
+            + QuantMatmulOps<R>
+            + BinaryOps<R>
+            + TypeConversionOps<R>,
         R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R>,
     {
         let hidden = self.linear_1.forward(client, x)?;
@@ -146,6 +163,7 @@ impl<R: Runtime<DType = DType>> TimestepEmbedding<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nn::Weight;
     use numr::runtime::cpu::CpuRuntime;
 
     /// `dim = 8` -> `half_dim = 4`, divisor = `half_dim - 1 = 3`.
@@ -270,8 +288,8 @@ mod tests {
         let w2 = Tensor::<CpuRuntime>::from_slice(&[0.02f32; 16], &[4, 4], &device).unwrap();
         let b2 = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4], &device).unwrap();
         let mlp = TimestepEmbedding::<CpuRuntime>::new(
-            Linear::new(w1, Some(b1), false),
-            Linear::new(w2, Some(b2), false),
+            MaybeQuantLinear::from_weight(Weight::Standard(w1), Some(b1)),
+            MaybeQuantLinear::from_weight(Weight::Standard(w2), Some(b2)),
         );
 
         let x = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[2, 4], &device).unwrap();

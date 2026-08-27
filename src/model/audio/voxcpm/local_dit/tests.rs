@@ -11,7 +11,7 @@ use crate::model::audio::voxcpm::bidirectional::attention::BidirectionalAttentio
 use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
 use crate::model::audio::voxcpm::bidirectional::mlp::BidirectionalMlp;
 use crate::model::audio::voxcpm::local_dit::loader::LocalDit;
-use crate::nn::{Linear, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding};
+use crate::nn::{MaybeQuantLinear, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding, Weight};
 use crate::test_utils::cpu_setup;
 use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -39,15 +39,17 @@ pub(crate) fn t(shape: &[usize], seed: f32, device: &CpuDevice) -> Tensor<CpuRun
     Tensor::<CpuRuntime>::from_slice(&data, shape, device).unwrap()
 }
 
+/// Always the `Standard` variant: a safetensors checkpoint yields exactly
+/// this, and it is the arm every assertion below is written against.
 pub(crate) fn linear(
     out: usize,
     inp: usize,
     seed: f32,
     bias: bool,
     device: &CpuDevice,
-) -> Linear<CpuRuntime> {
+) -> MaybeQuantLinear<CpuRuntime> {
     let b = bias.then(|| t(&[out], seed + 5.0, device));
-    Linear::new(t(&[out, inp], seed, device), b, false)
+    MaybeQuantLinear::from_weight(Weight::Standard(t(&[out, inp], seed, device)), b)
 }
 
 pub(crate) fn norm(device: &CpuDevice) -> RmsNorm<CpuRuntime> {

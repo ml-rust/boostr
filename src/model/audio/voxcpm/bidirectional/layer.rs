@@ -19,7 +19,7 @@ use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
-    ShapeOps, TensorOps, UnaryOps,
+    ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
 
@@ -33,7 +33,10 @@ pub struct BidirectionalLayer<R: Runtime> {
 impl<R: Runtime<DType = DType>> BidirectionalLayer<R> {
     pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
     where
-        C: ModelClient<R>,
+        // `TypeConversionOps` comes from the `MaybeQuantLinear` projections
+        // inside the attention and MLP sub-blocks; the norms below need
+        // nothing extra.
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>

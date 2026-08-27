@@ -32,18 +32,27 @@
 //!
 //! # What stays quantized in memory, and what does not
 //!
-//! The MiniCPM4 stack (`base_lm` and `residual_lm` — 327 of the 577 tensors,
-//! the bulk of the model) keeps its attention and MLP projections PACKED:
-//! its loader reads them through
+//! EVERY matmul weight in the transformer stack stays PACKED: the MiniCPM4
+//! stack (`base_lm` and `residual_lm` — 327 of the 577 tensors), the shared
+//! `bidirectional` block stack behind BOTH `feat_encoder` and `local_dit`,
+//! those two sub-models' own projections and time MLPs, and the `fsq`
+//! in/out projections plus the six auxiliary ones. Each is read through
 //! [`WeightSource::load_named_weight`](crate::model::audio::voxcpm::loader::support::WeightSource::load_named_weight),
-//! which hands back a `QuantTensor`, and multiplies them with
-//! `quant_matmul`. A Q4_K weight there costs Q4_K-sized memory.
+//! which hands back a `QuantTensor`, and multiplied with `quant_matmul`. A
+//! Q4_K weight costs Q4_K-sized memory.
 //!
-//! Everything else still DEQUANTIZES on the way in — `feat_encoder` /
-//! `bidirectional`, `local_dit`, the `fsq` aux projections, and, on every
-//! stack, the norms, biases and embedding tables, which are row gathers and
-//! element-wise ops with no packed kernel to run against. Those sub-models
-//! are a later unit.
+//! What still arrives DENSE is what has no packed kernel to run against:
+//! every norm weight, every bias, the embedding tables (a row gather, not a
+//! matmul) and `feat_encoder.special_token` (concatenated, never
+//! multiplied). Three matmul weights land dense too, and not by choice:
+//! `feat_decoder.estimator.in_proj`/`cond_proj` and
+//! `feat_encoder.in_proj` have 64-element rows, which no K-quant block size
+//! divides, so a GGUF writer stores them unquantized. Nothing special-cases
+//! them — `load_named_weight` returns `Weight::Standard` for whatever the
+//! file did not quantize, and `MaybeQuantLinear` runs the dense path there.
+//!
+//! The AudioVAE is untouched by all of this: it is a separate F32-native
+//! file, verified against PyTorch fixtures, and is never cast or packed.
 
 use crate::error::{Error, Result};
 use crate::format::gguf::Gguf;

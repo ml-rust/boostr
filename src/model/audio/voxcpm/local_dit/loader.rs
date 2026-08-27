@@ -39,7 +39,7 @@ use crate::model::audio::voxcpm::bidirectional::{
 use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
 use crate::model::audio::voxcpm::local_dit::config::LocalDitConfig;
 use crate::model::config::RopeScalingConfig;
-use crate::nn::{Linear, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding};
+use crate::nn::{MaybeQuantLinear, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding};
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
@@ -54,10 +54,20 @@ pub const DEFAULT_LOCAL_DIT_PREFIX: &str = "feat_decoder";
 /// `decoder`) is a separate unit that reads these fields directly (they are
 /// `pub(crate)`); the accessors below are this type's public API for
 /// consumers outside this crate, which cannot reach `pub(crate)` fields.
+///
+/// The three projections are [`MaybeQuantLinear`], not plain `Linear` (as are
+/// the two [`TimestepEmbedding`] MLPs and every projection in the block
+/// stack): a GGUF stores them block-quantized, and the quantized variant
+/// multiplies the weight PACKED through `quant_matmul` instead of expanding
+/// it to dense F32 at load. This is the hottest stack in the model — 32 CFM
+/// timesteps x 2 CFG branches per generated patch — so it is also where the
+/// integer activation dot product pays the most. A safetensors checkpoint
+/// yields the `Standard` variant and runs exactly the dense path it always
+/// did.
 pub struct LocalDit<R: Runtime> {
-    pub(crate) in_proj: Linear<R>,
-    pub(crate) cond_proj: Linear<R>,
-    pub(crate) out_proj: Linear<R>,
+    pub(crate) in_proj: MaybeQuantLinear<R>,
+    pub(crate) cond_proj: MaybeQuantLinear<R>,
+    pub(crate) out_proj: MaybeQuantLinear<R>,
     pub(crate) time_mlp: TimestepEmbedding<R>,
     pub(crate) delta_time_mlp: TimestepEmbedding<R>,
     pub(crate) layers: Vec<BidirectionalLayer<R>>,
@@ -70,15 +80,15 @@ pub struct LocalDit<R: Runtime> {
 }
 
 impl<R: Runtime<DType = DType>> LocalDit<R> {
-    pub fn in_proj(&self) -> &Linear<R> {
+    pub fn in_proj(&self) -> &MaybeQuantLinear<R> {
         &self.in_proj
     }
 
-    pub fn cond_proj(&self) -> &Linear<R> {
+    pub fn cond_proj(&self) -> &MaybeQuantLinear<R> {
         &self.cond_proj
     }
 
-    pub fn out_proj(&self) -> &Linear<R> {
+    pub fn out_proj(&self) -> &MaybeQuantLinear<R> {
         &self.out_proj
     }
 
@@ -167,21 +177,14 @@ where
             dtype,
         };
 
-        let in_proj = {
-            let weight = tl.tensor("in_proj.weight", &[cfg.hidden_dim, cfg.feat_dim])?;
-            let bias = tl.tensor("in_proj.bias", &[cfg.hidden_dim])?;
-            Linear::new(weight, Some(bias), false)
-        };
-        let cond_proj = {
-            let weight = tl.tensor("cond_proj.weight", &[cfg.hidden_dim, cfg.feat_dim])?;
-            let bias = tl.tensor("cond_proj.bias", &[cfg.hidden_dim])?;
-            Linear::new(weight, Some(bias), false)
-        };
-        let out_proj = {
-            let weight = tl.tensor("out_proj.weight", &[cfg.feat_dim, cfg.hidden_dim])?;
-            let bias = tl.tensor("out_proj.bias", &[cfg.feat_dim])?;
-            Linear::new(weight, Some(bias), false)
-        };
+        // `TensorLoader::linear` keeps a block-quantized weight PACKED, so on
+        // a GGUF these three multiply through `quant_matmul`; on safetensors
+        // they are the same dense `Linear` they always were. All three are
+        // biased, and a packed weight forces that bias to F32 (see
+        // `TensorLoader::linear`).
+        let in_proj = tl.linear("in_proj", cfg.hidden_dim, cfg.feat_dim, true)?;
+        let cond_proj = tl.linear("cond_proj", cfg.hidden_dim, cfg.feat_dim, true)?;
+        let out_proj = tl.linear("out_proj", cfg.feat_dim, cfg.hidden_dim, true)?;
 
         let time_mlp = load_timestep_mlp(&mut tl, "time_mlp", cfg.hidden_dim)?;
         let delta_time_mlp = load_timestep_mlp(&mut tl, "delta_time_mlp", cfg.hidden_dim)?;
@@ -203,6 +206,8 @@ where
             )?);
         }
 
+        // DENSE, deliberately: an RmsNorm weight is an element-wise scale,
+        // not a matmul weight, and a GGUF stores it unquantized anyway.
         let norm = RmsNorm::new(
             tl.tensor("decoder.norm.weight", &[cfg.hidden_dim])?,
             cfg.rms_norm_eps,
@@ -268,16 +273,8 @@ fn load_timestep_mlp<R: Runtime<DType = DType>, S: WeightSource<R>>(
 where
     R::Client: TypeConversionOps<R>,
 {
-    let linear_1 = {
-        let weight = tl.tensor(&format!("{name}.linear_1.weight"), &[dim, dim])?;
-        let bias = tl.tensor(&format!("{name}.linear_1.bias"), &[dim])?;
-        Linear::new(weight, Some(bias), false)
-    };
-    let linear_2 = {
-        let weight = tl.tensor(&format!("{name}.linear_2.weight"), &[dim, dim])?;
-        let bias = tl.tensor(&format!("{name}.linear_2.bias"), &[dim])?;
-        Linear::new(weight, Some(bias), false)
-    };
+    let linear_1 = tl.linear(&format!("{name}.linear_1"), dim, dim, true)?;
+    let linear_2 = tl.linear(&format!("{name}.linear_2"), dim, dim, true)?;
     Ok(TimestepEmbedding::new(linear_1, linear_2))
 }
 

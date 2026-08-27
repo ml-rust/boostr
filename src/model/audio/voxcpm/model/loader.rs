@@ -39,6 +39,7 @@ use crate::model::audio::voxcpm::minicpm4::{
 };
 use crate::model::audio::voxcpm::model::config::VoxCpm2Config;
 use crate::model::audio::voxcpm::vae::{AudioVaeDecoder, AudioVaeEncoder};
+use crate::nn::MaybeQuantLinear;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
@@ -205,13 +206,38 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     /// module builds are guaranteed to match the tensors they meet. Reading
     /// it beats threading the loader's `Option<DType>` through, which is
     /// `None` for "whatever the checkpoint had" and so answers nothing.
-    pub fn lm_dtype(&self) -> DType {
-        self.aux.enc_to_lm_proj.weight().tensor().dtype()
+    pub fn lm_dtype(&self) -> Result<DType> {
+        Ok(self.lm_dtype_device()?.0)
     }
 
     /// Device every transformer-stack tensor lives on.
-    pub fn device(&self) -> &R::Device {
-        self.aux.enc_to_lm_proj.weight().tensor().device()
+    pub fn device(&self) -> Result<&R::Device> {
+        Ok(self.lm_dtype_device()?.1)
+    }
+
+    /// The dtype and device the stack's ARITHMETIC actually runs at.
+    ///
+    /// A packed `enc_to_lm_proj` cannot answer this from its weight:
+    /// `quant_matmul` consumes F32 and emits F32 whatever block format the
+    /// weight holds, so the answer is F32 there — the packed weight has no
+    /// element dtype to copy. Same shape as
+    /// `MiniCpm4Attention::kv_dtype_device`, and both return `Result` rather
+    /// than guessing for the decomposed-quant arm no VoxCPM2 checkpoint
+    /// loads.
+    pub(crate) fn lm_dtype_device(&self) -> Result<(DType, &R::Device)> {
+        match &self.aux.enc_to_lm_proj {
+            MaybeQuantLinear::Standard(linear) => {
+                let w = linear.weight().tensor();
+                Ok((w.dtype(), w.device()))
+            }
+            MaybeQuantLinear::Quantized(qlinear) => Ok((DType::F32, qlinear.weight().device())),
+            MaybeQuantLinear::DecomposedQuant(_) => Err(Error::ModelError {
+                reason: "VoxCPM2 enc_to_lm_proj: no VoxCPM2 checkpoint loads \
+                         decomposed-quantized (AWQ/GPTQ) weights, so the stack \
+                         dtype is undefined here"
+                    .to_string(),
+            }),
+        }
     }
 }
 

@@ -31,7 +31,7 @@ use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
 use crate::model::audio::voxcpm::local_encoder::config::LocalEncoderConfig;
 use crate::model::audio::voxcpm::local_encoder::encoder::LocalEncoder;
 use crate::model::config::RopeScalingConfig;
-use crate::nn::{Linear, RmsNorm, RoPE};
+use crate::nn::{RmsNorm, RoPE};
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
@@ -95,12 +95,16 @@ where
             dtype,
         };
 
-        let in_proj = {
-            let weight = tl.tensor("in_proj.weight", &[cfg.hidden_dim, cfg.patch_dim])?;
-            let bias = tl.tensor("in_proj.bias", &[cfg.hidden_dim])?;
-            Linear::new(weight, Some(bias), false)
-        };
+        // `TensorLoader::linear` keeps a block-quantized weight PACKED, so
+        // on a GGUF this multiplies through `quant_matmul`; on safetensors it
+        // is the same dense `Linear` it always was. `with_bias: true` — it is
+        // the only biased projection in the module, and a packed weight
+        // forces that bias to F32 (see `TensorLoader::linear`).
+        let in_proj = tl.linear("in_proj", cfg.hidden_dim, cfg.patch_dim, true)?;
 
+        // DENSE, deliberately: `special_token` is concatenated onto the
+        // sequence, never multiplied, so it has no packed kernel to feed —
+        // `tl.tensor` (the dequantizing read) is the only correct call.
         let special_token = tl.tensor("special_token", &[1, 1, 1, cfg.hidden_dim])?;
 
         let dims = BidirectionalLayerDims {
@@ -120,6 +124,8 @@ where
             )?);
         }
 
+        // DENSE, deliberately: an RmsNorm weight is an element-wise scale,
+        // not a matmul weight, and a GGUF stores it unquantized anyway.
         let norm = RmsNorm::new(
             tl.tensor("encoder.norm.weight", &[cfg.hidden_dim])?,
             cfg.rms_norm_eps,

@@ -100,7 +100,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             });
         }
         let padded = pad_to_multiple(ref_wav_16k, self.config.ref_pad_multiple())?;
-        let wave = Tensor::<R>::from_slice(padded.as_ref(), &[1, 1, padded.len()], self.device())?;
+        let wave = Tensor::<R>::from_slice(padded.as_ref(), &[1, 1, padded.len()], self.device()?)?;
         let latent = self.vae_encoder.forward(client, &wave)?;
         fold_patches(&latent, self.config.patch_size, self.config.feat_dim)
     }
@@ -208,8 +208,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             });
         }
 
-        let dtype = self.lm_dtype();
-        let device = self.device();
+        let (dtype, device) = self.lm_dtype_device()?;
 
         // audio_feat: z1 ++ ref_feat ++ z1 ++ zeros(text_length), i.e. one
         // leading zero patch and `1 + text_length` trailing ones.

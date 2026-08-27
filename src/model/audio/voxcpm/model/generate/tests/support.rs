@@ -15,7 +15,7 @@ use crate::model::audio::voxcpm::local_dit::tests::{
     FEAT_DIM, HEAD_DIM, HIDDEN_DIM, PATCH_SIZE, layer, linear, model as dit_model, norm, t,
 };
 use crate::model::audio::voxcpm::minicpm4::model::tests::{HIDDEN, tiny_model, tiny_nope_model};
-use crate::nn::{Linear, RoPE};
+use crate::nn::{MaybeQuantLinear, RoPE, Weight};
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
 /// `base_lm`/`residual_lm` hidden width and `feat_encoder`'s pooled width are
@@ -83,19 +83,24 @@ fn feat_encoder(device: &CpuDevice) -> LocalEncoder<CpuRuntime> {
 /// constant `silu(1) > 0` in every channel whatever the hidden state was.
 /// `stop_head` then reads class 0 off an all-zero row (logit exactly 0) and
 /// class 1 off a row of `sign`, so class 1 wins iff `sign` is positive.
-fn stop_chain(stop: bool, device: &CpuDevice) -> (Linear<CpuRuntime>, Linear<CpuRuntime>) {
+fn stop_chain(
+    stop: bool,
+    device: &CpuDevice,
+) -> (MaybeQuantLinear<CpuRuntime>, MaybeQuantLinear<CpuRuntime>) {
     let sign = if stop { 1.0f32 } else { -1.0 };
-    let stop_proj = Linear::new(
-        Tensor::<CpuRuntime>::zeros(&[HIDDEN, HIDDEN], DType::F32, device).expect("zeros"),
+    let stop_proj = MaybeQuantLinear::from_weight(
+        Weight::Standard(
+            Tensor::<CpuRuntime>::zeros(&[HIDDEN, HIDDEN], DType::F32, device).expect("zeros"),
+        ),
         Some(Tensor::<CpuRuntime>::from_slice(&[1.0f32; HIDDEN], &[HIDDEN], device).expect("bias")),
-        false,
     );
     let mut head = vec![0.0f32; 2 * HIDDEN];
     head[HIDDEN..].fill(sign);
-    let stop_head = Linear::new(
-        Tensor::<CpuRuntime>::from_slice(&head, &[2, HIDDEN], device).expect("head"),
+    let stop_head = MaybeQuantLinear::from_weight(
+        Weight::Standard(
+            Tensor::<CpuRuntime>::from_slice(&head, &[2, HIDDEN], device).expect("head"),
+        ),
         None,
-        false,
     );
     (stop_proj, stop_head)
 }

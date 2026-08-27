@@ -23,19 +23,28 @@
 use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
 use crate::model::traits::ModelClient;
-use crate::nn::{Linear, RmsNorm, RoPE, var_contiguous};
+use crate::nn::{MaybeQuantLinear, RmsNorm, RoPE, var_contiguous};
 use numr::autograd::{Var, var_broadcast_to, var_cat, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
-    ShapeOps, TensorOps, UnaryOps,
+    ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
 
 pub struct LocalEncoder<R: Runtime> {
-    pub(crate) in_proj: Linear<R>,
+    /// [`MaybeQuantLinear`], not plain `Linear`: a GGUF stores this
+    /// projection block-quantized, and the quantized variant multiplies it
+    /// PACKED through `quant_matmul` rather than expanding it to dense F32 at
+    /// load. Its 4-D `[B, T, num_patches, patch_dim]` input is fine —
+    /// `quant_matmul`'s contract is `[..., M, K]`, the same leading-dims rule
+    /// dense `matmul` follows, so nothing reshapes here.
+    pub(crate) in_proj: MaybeQuantLinear<R>,
     /// `[1, 1, 1, hidden_dim]`, broadcast to `[B, T, 1, hidden_dim]` and
     /// prepended along the patch axis.
+    ///
+    /// DENSE, deliberately: it is a learned constant that is concatenated,
+    /// never multiplied, so there is no packed kernel it could feed.
     pub(crate) special_token: Var<R>,
     pub(crate) layers: Vec<BidirectionalLayer<R>>,
     pub(crate) norm: RmsNorm<R>,
@@ -47,7 +56,10 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
     /// `x: [B, T, num_patches, patch_dim]` -> `[B, T, hidden_dim]`.
     pub fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
     where
-        C: ModelClient<R>,
+        // `TypeConversionOps` is what `MaybeQuantLinear::forward` adds over a
+        // dense `Linear::forward`, here for `in_proj` and for every
+        // projection inside the layer stack.
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>

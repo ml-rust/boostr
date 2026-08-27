@@ -22,7 +22,7 @@ use crate::model::audio::voxcpm::bidirectional::attention::BidirectionalAttentio
 use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
 use crate::model::audio::voxcpm::bidirectional::mlp::BidirectionalMlp;
 use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
-use crate::nn::{Linear, RmsNorm};
+use crate::nn::RmsNorm;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
@@ -52,6 +52,10 @@ where
     let q_dim = dims.num_heads * dims.head_dim;
     let kv_dim = dims.num_kv_heads * dims.head_dim;
 
+    // DENSE, deliberately: an RmsNorm weight is an element-wise scale, not a
+    // matmul weight — there is no packed kernel to run it against, and a
+    // GGUF stores it unquantized anyway. `tl.tensor` (the dequantizing read)
+    // is the only correct call here, for this norm and the one below.
     let input_layernorm = RmsNorm::new(
         tl.tensor(
             &format!("{layer_prefix}.input_layernorm.weight"),
@@ -61,40 +65,37 @@ where
         false,
     );
 
+    // `TensorLoader::linear` keeps a block-quantized weight PACKED, so on a
+    // GGUF these four (and the three below) hold K-quant blocks and multiply
+    // through `quant_matmul`. On safetensors they are the same dense
+    // `Linear` they always were. Every projection is bias-free — hence
+    // `with_bias: false` throughout.
     let self_attn = {
         let attn_prefix = format!("{layer_prefix}.self_attn");
-        let q_proj = Linear::new(
-            tl.tensor(
-                &format!("{attn_prefix}.q_proj.weight"),
-                &[q_dim, dims.hidden_dim],
-            )?,
-            None,
+        let q_proj = tl.linear(
+            &format!("{attn_prefix}.q_proj"),
+            q_dim,
+            dims.hidden_dim,
             false,
-        );
-        let k_proj = Linear::new(
-            tl.tensor(
-                &format!("{attn_prefix}.k_proj.weight"),
-                &[kv_dim, dims.hidden_dim],
-            )?,
-            None,
+        )?;
+        let k_proj = tl.linear(
+            &format!("{attn_prefix}.k_proj"),
+            kv_dim,
+            dims.hidden_dim,
             false,
-        );
-        let v_proj = Linear::new(
-            tl.tensor(
-                &format!("{attn_prefix}.v_proj.weight"),
-                &[kv_dim, dims.hidden_dim],
-            )?,
-            None,
+        )?;
+        let v_proj = tl.linear(
+            &format!("{attn_prefix}.v_proj"),
+            kv_dim,
+            dims.hidden_dim,
             false,
-        );
-        let o_proj = Linear::new(
-            tl.tensor(
-                &format!("{attn_prefix}.o_proj.weight"),
-                &[dims.hidden_dim, q_dim],
-            )?,
-            None,
+        )?;
+        let o_proj = tl.linear(
+            &format!("{attn_prefix}.o_proj"),
+            dims.hidden_dim,
+            q_dim,
             false,
-        );
+        )?;
         BidirectionalAttention {
             q_proj,
             k_proj,
@@ -117,30 +118,24 @@ where
 
     let mlp = {
         let mlp_prefix = format!("{layer_prefix}.mlp");
-        let gate_proj = Linear::new(
-            tl.tensor(
-                &format!("{mlp_prefix}.gate_proj.weight"),
-                &[dims.ffn_dim, dims.hidden_dim],
-            )?,
-            None,
+        let gate_proj = tl.linear(
+            &format!("{mlp_prefix}.gate_proj"),
+            dims.ffn_dim,
+            dims.hidden_dim,
             false,
-        );
-        let up_proj = Linear::new(
-            tl.tensor(
-                &format!("{mlp_prefix}.up_proj.weight"),
-                &[dims.ffn_dim, dims.hidden_dim],
-            )?,
-            None,
+        )?;
+        let up_proj = tl.linear(
+            &format!("{mlp_prefix}.up_proj"),
+            dims.ffn_dim,
+            dims.hidden_dim,
             false,
-        );
-        let down_proj = Linear::new(
-            tl.tensor(
-                &format!("{mlp_prefix}.down_proj.weight"),
-                &[dims.hidden_dim, dims.ffn_dim],
-            )?,
-            None,
+        )?;
+        let down_proj = tl.linear(
+            &format!("{mlp_prefix}.down_proj"),
+            dims.hidden_dim,
+            dims.ffn_dim,
             false,
-        );
+        )?;
         BidirectionalMlp {
             gate_proj,
             up_proj,

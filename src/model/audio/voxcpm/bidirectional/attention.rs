@@ -23,23 +23,31 @@
 
 use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
-use crate::nn::{Linear, RoPE, repeat_kv, var_contiguous};
+use crate::nn::{MaybeQuantLinear, RoPE, repeat_kv, var_contiguous};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use numr::autograd::{Var, var_permute, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
-    ShapeOps, TensorOps, UnaryOps,
+    ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
 
 /// `q_proj`: 1024 -> 2048 (16 heads), `k_proj`/`v_proj`: 1024 -> 256 (2
 /// heads, GQA group size 8), `o_proj`: 2048 -> 1024. All bias-free.
+///
+/// The projections are [`MaybeQuantLinear`], not plain `Linear`, for the
+/// same reason `MiniCpm4Attention`'s are: a GGUF checkpoint stores them
+/// block-quantized, and the quantized variant multiplies through
+/// `quant_matmul` with the weight left PACKED instead of expanded to dense
+/// F32 at load. This block stack is shared, so one conversion here covers
+/// BOTH `feat_encoder` and `local_dit`. A safetensors checkpoint yields the
+/// `Standard` variant and runs exactly the dense path it always did.
 pub struct BidirectionalAttention<R: Runtime> {
-    pub(crate) q_proj: Linear<R>,
-    pub(crate) k_proj: Linear<R>,
-    pub(crate) v_proj: Linear<R>,
-    pub(crate) o_proj: Linear<R>,
+    pub(crate) q_proj: MaybeQuantLinear<R>,
+    pub(crate) k_proj: MaybeQuantLinear<R>,
+    pub(crate) v_proj: MaybeQuantLinear<R>,
+    pub(crate) o_proj: MaybeQuantLinear<R>,
     pub(crate) num_heads: usize,
     pub(crate) num_kv_heads: usize,
     pub(crate) head_dim: usize,
@@ -54,7 +62,10 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
     /// `multi_head_attention_impl`.
     pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
     where
-        C: ModelClient<R>,
+        // `TypeConversionOps` is what `MaybeQuantLinear::forward` adds over a
+        // dense `Linear::forward`: its decomposed-quant arm casts activations
+        // to F32. `ModelClient` already carries `QuantMatmulOps`.
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>

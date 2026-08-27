@@ -24,7 +24,7 @@ use crate::format::safetensors_loader::SafeTensorsLoader;
 use crate::model::audio::voxcpm::fsq::config::FsqConfig;
 use crate::model::audio::voxcpm::fsq::layer::{AuxProjections, ScalarQuantization};
 use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
-use crate::nn::Linear;
+use crate::nn::MaybeQuantLinear;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
@@ -69,16 +69,13 @@ where
             dtype,
         };
 
-        let in_proj = {
-            let weight = tl.tensor("in_proj.weight", &[cfg.latent_dim, cfg.lm_hidden])?;
-            let bias = tl.tensor("in_proj.bias", &[cfg.latent_dim])?;
-            Linear::new(weight, Some(bias), false)
-        };
-        let out_proj = {
-            let weight = tl.tensor("out_proj.weight", &[cfg.lm_hidden, cfg.latent_dim])?;
-            let bias = tl.tensor("out_proj.bias", &[cfg.lm_hidden])?;
-            Linear::new(weight, Some(bias), false)
-        };
+        // `TensorLoader::linear` keeps a block-quantized weight PACKED, so on
+        // a GGUF these two multiply through `quant_matmul`; on safetensors
+        // they are the same dense `Linear` they always were. Both are biased,
+        // and a packed weight forces that bias to F32 (see
+        // `TensorLoader::linear`).
+        let in_proj = tl.linear("in_proj", cfg.latent_dim, cfg.lm_hidden, true)?;
+        let out_proj = tl.linear("out_proj", cfg.lm_hidden, cfg.latent_dim, true)?;
 
         Ok(Self::new(in_proj, out_proj, cfg.scale))
     }
@@ -136,10 +133,7 @@ where
         // `stop_head` is bias-free on this checkpoint — see the module doc
         // for why a bias key is never read here.
         const STOP_CLASSES: usize = 2;
-        let stop_head = {
-            let weight = tl.tensor("stop_head.weight", &[STOP_CLASSES, cfg.lm_hidden])?;
-            Linear::new(weight, None, false)
-        };
+        let stop_head = tl.linear("stop_head", STOP_CLASSES, cfg.lm_hidden, false)?;
 
         Ok(Self {
             enc_to_lm_proj,
@@ -153,21 +147,28 @@ where
 }
 
 /// Load `{name}.weight[out_dim, in_dim]` + `{name}.bias[out_dim]` as a
-/// biased [`Linear`]. Shared shape for five of the six auxiliary
+/// biased [`MaybeQuantLinear`]. Shared shape for five of the six auxiliary
 /// projections (`stop_head` is the bias-free exception, handled inline in
 /// [`AuxProjections::from_safetensors`]).
+///
+/// `TensorLoader::linear` keeps a block-quantized weight PACKED, so on a GGUF
+/// each of these multiplies through `quant_matmul`; on safetensors they are
+/// the same dense `Linear` they always were.
+///
+/// This exists only to flip `TensorLoader::linear`'s argument order: the
+/// callers below read `(in_dim, out_dim)`, matching how the reference names
+/// each bridge (`enc_to_lm`, `lm_to_dit`, ...), while `TensorLoader::linear`
+/// takes `(out_features, in_features)` to match the `[out, in]` weight shape.
 fn biased_linear<R: Runtime<DType = DType>, S: WeightSource<R>>(
     tl: &mut TensorLoader<'_, R, S>,
     name: &str,
     in_dim: usize,
     out_dim: usize,
-) -> Result<Linear<R>>
+) -> Result<MaybeQuantLinear<R>>
 where
     R::Client: TypeConversionOps<R>,
 {
-    let weight = tl.tensor(&format!("{name}.weight"), &[out_dim, in_dim])?;
-    let bias = tl.tensor(&format!("{name}.bias"), &[out_dim])?;
-    Ok(Linear::new(weight, Some(bias), false))
+    tl.linear(name, out_dim, in_dim, true)
 }
 
 #[cfg(test)]

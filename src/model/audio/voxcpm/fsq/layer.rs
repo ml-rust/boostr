@@ -8,10 +8,11 @@
 //! is deliberately NOT ported here.
 
 use crate::error::{Error, Result};
-use crate::nn::Linear;
+use crate::nn::MaybeQuantLinear;
+use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{Var, var_div_scalar, var_mul_scalar, var_silu, var_tanh};
 use numr::dtype::DType;
-use numr::ops::{ActivationOps, ScalarOps, TensorOps, UnaryOps};
+use numr::ops::{ActivationOps, BinaryOps, ScalarOps, TensorOps, TypeConversionOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
 
 /// `fsq_layer`: `out_proj(round_ties_even(tanh(in_proj(hidden)) * scale) /
@@ -22,9 +23,15 @@ use numr::runtime::{Runtime, RuntimeClient};
 /// `(-1, 1)`; scaling by `scale` (9) and rounding to the nearest integer
 /// before dividing back snaps each of the 512 channels onto one of 19 evenly
 /// spaced levels, `k / 9` for `k` in `-9..=9`.
+///
+/// Both projections are [`MaybeQuantLinear`], not plain `Linear`: a GGUF
+/// stores them block-quantized, and the quantized variant multiplies the
+/// weight PACKED through `quant_matmul` instead of expanding it to dense F32
+/// at load. A safetensors checkpoint yields the `Standard` variant and runs
+/// exactly the dense path it always did.
 pub struct ScalarQuantization<R: Runtime> {
-    in_proj: Linear<R>,
-    out_proj: Linear<R>,
+    in_proj: MaybeQuantLinear<R>,
+    out_proj: MaybeQuantLinear<R>,
     /// Rounding-grid divisor (`FsqConfig::scale`, 9 on the verified
     /// checkpoint).
     scale: f32,
@@ -34,7 +41,7 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
     /// Wrap already-loaded `in_proj`/`out_proj` weights with `scale`. Use
     /// [`crate::model::audio::voxcpm::fsq::loader`] to build one from a
     /// checkpoint.
-    pub fn new(in_proj: Linear<R>, out_proj: Linear<R>, scale: f32) -> Self {
+    pub fn new(in_proj: MaybeQuantLinear<R>, out_proj: MaybeQuantLinear<R>, scale: f32) -> Self {
         Self {
             in_proj,
             out_proj,
@@ -57,7 +64,16 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
     /// for `round`: the two only agree away from `.5` boundaries.
     pub fn forward<C>(&self, client: &C, hidden: &Var<R>) -> Result<Var<R>>
     where
-        C: RuntimeClient<R> + TensorOps<R> + ScalarOps<R>,
+        // `QuantMatmulOps` + `BinaryOps` + `TypeConversionOps` are what
+        // `MaybeQuantLinear::forward` needs over a dense `Linear::forward`:
+        // the packed multiply, its bias add, and the decomposed-quant arm's
+        // cast of activations to F32.
+        C: RuntimeClient<R>
+            + TensorOps<R>
+            + ScalarOps<R>
+            + QuantMatmulOps<R>
+            + BinaryOps<R>
+            + TypeConversionOps<R>,
         R::Client: TensorOps<R> + ScalarOps<R> + UnaryOps<R>,
     {
         match hidden.shape().len() {
@@ -90,15 +106,20 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
 /// `VoxCpm2Model` orchestrator will own: encoder/DiT bridges and the stop
 /// classifier. See [`crate::model::audio::voxcpm::fsq::loader`] for the
 /// checkpoint key layout each field is loaded from.
+///
+/// All six are [`MaybeQuantLinear`] for the same reason
+/// [`ScalarQuantization`]'s pair is: a GGUF stores them block-quantized and
+/// they multiply PACKED, while a safetensors checkpoint yields the
+/// `Standard` variant and the dense path is unchanged.
 pub struct AuxProjections<R: Runtime> {
-    pub enc_to_lm_proj: Linear<R>,
-    pub lm_to_dit_proj: Linear<R>,
-    pub res_to_dit_proj: Linear<R>,
-    pub fusion_concat_proj: Linear<R>,
-    pub stop_proj: Linear<R>,
+    pub enc_to_lm_proj: MaybeQuantLinear<R>,
+    pub lm_to_dit_proj: MaybeQuantLinear<R>,
+    pub res_to_dit_proj: MaybeQuantLinear<R>,
+    pub fusion_concat_proj: MaybeQuantLinear<R>,
+    pub stop_proj: MaybeQuantLinear<R>,
     /// Bias-free: the checkpoint carries no `stop_head.bias` tensor. See
     /// [`crate::model::audio::voxcpm::fsq::loader`] for how this is loaded.
-    pub stop_head: Linear<R>,
+    pub stop_head: MaybeQuantLinear<R>,
 }
 
 impl<R: Runtime<DType = DType>> AuxProjections<R> {
@@ -106,7 +127,15 @@ impl<R: Runtime<DType = DType>> AuxProjections<R> {
     /// reference always runs together to produce stop-token logits.
     pub fn stop<C>(&self, client: &C, hidden: &Var<R>) -> Result<Var<R>>
     where
-        C: RuntimeClient<R> + TensorOps<R> + ActivationOps<R> + ScalarOps<R>,
+        // The extra three bounds over a dense `Linear::forward` — see
+        // [`ScalarQuantization::forward`].
+        C: RuntimeClient<R>
+            + TensorOps<R>
+            + ActivationOps<R>
+            + ScalarOps<R>
+            + QuantMatmulOps<R>
+            + BinaryOps<R>
+            + TypeConversionOps<R>,
         R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R>,
     {
         let projected = self.stop_proj.forward(client, hidden)?;
@@ -118,6 +147,7 @@ impl<R: Runtime<DType = DType>> AuxProjections<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nn::Weight;
     use crate::test_utils::cpu_setup;
     use numr::tensor::Tensor;
 
@@ -133,15 +163,13 @@ mod tests {
             .map(|i| if i / hidden == i % hidden { 1.0 } else { 0.0 })
             .collect();
         let zeros = vec![0.0f32; hidden];
-        let in_proj = Linear::new(
-            Tensor::from_slice(&identity, &[hidden, hidden], device).unwrap(),
+        let in_proj = MaybeQuantLinear::from_weight(
+            Weight::Standard(Tensor::from_slice(&identity, &[hidden, hidden], device).unwrap()),
             Some(Tensor::from_slice(&zeros, &[hidden], device).unwrap()),
-            false,
         );
-        let out_proj = Linear::new(
-            Tensor::from_slice(&identity, &[hidden, hidden], device).unwrap(),
+        let out_proj = MaybeQuantLinear::from_weight(
+            Weight::Standard(Tensor::from_slice(&identity, &[hidden, hidden], device).unwrap()),
             Some(Tensor::from_slice(&zeros, &[hidden], device).unwrap()),
-            false,
         );
         ScalarQuantization::new(in_proj, out_proj, scale)
     }
@@ -160,17 +188,15 @@ mod tests {
     ) -> ScalarQuantization<numr::runtime::cpu::CpuRuntime> {
         let zero_weight = vec![0.0f32; 4]; // [2, 2], all zero
         let bias = vec![-40.0f32, 40.0]; // saturates tanh to exactly [-1.0, 1.0]
-        let in_proj = Linear::new(
-            Tensor::from_slice(&zero_weight, &[2, 2], device).unwrap(),
+        let in_proj = MaybeQuantLinear::from_weight(
+            Weight::Standard(Tensor::from_slice(&zero_weight, &[2, 2], device).unwrap()),
             Some(Tensor::from_slice(&bias, &[2], device).unwrap()),
-            false,
         );
         let identity = vec![1.0f32, 0.0, 0.0, 1.0];
         let zeros = vec![0.0f32, 0.0];
-        let out_proj = Linear::new(
-            Tensor::from_slice(&identity, &[2, 2], device).unwrap(),
+        let out_proj = MaybeQuantLinear::from_weight(
+            Weight::Standard(Tensor::from_slice(&identity, &[2, 2], device).unwrap()),
             Some(Tensor::from_slice(&zeros, &[2], device).unwrap()),
-            false,
         );
         ScalarQuantization::new(in_proj, out_proj, scale)
     }

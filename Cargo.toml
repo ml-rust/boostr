@@ -249,6 +249,10 @@ name = "gguf_diff"
 required-features = ["audio", "f16"]
 
 [[example]]
+name = "transcribe"
+required-features = ["audio"]
+
+[[example]]
 name = "voxcpm_clone"
 required-features = ["audio", "f16"]
 

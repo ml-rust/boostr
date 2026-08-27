@@ -3,10 +3,12 @@
 //! checkpoint loader), [`sequence`] (host-side prefix layout and mask
 //! complementarity), [`patches`] (wav padding and the VAE patch fold),
 //! [`prefill`] (reference encode and the two-LM prefill), [`generate`] (the
-//! per-patch sampling loop and its stop logic).
-//! The VAE decode and wav wrapper are a separate unit and do not live here.
+//! per-patch sampling loop and its stop logic), [`decode`] (unfolding
+//! patches back to a latent and VAE-decoding to a waveform).
+//! The wav file wrapper is a separate, later unit and does not live here.
 
 pub mod config;
+pub mod decode;
 pub mod generate;
 pub mod loader;
 pub mod patches;
@@ -16,6 +18,7 @@ pub mod sequence;
 pub use config::{
     AUDIO_START_ID, REF_AUDIO_END_ID, REF_AUDIO_FILLER_ID, REF_AUDIO_START_ID, VoxCpm2Config,
 };
+pub use decode::unfold_patches;
 pub use generate::{
     GenerateOptions, GenerateOutcome, GenerateState, PatchGenerator, StepIntermediates, StepOutcome,
 };

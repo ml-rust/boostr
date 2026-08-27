@@ -39,7 +39,7 @@ use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
-    ShapeOps, TensorOps, UnaryOps,
+    ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -116,7 +116,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// (`no_rope`) stack has no such cache and no such bound.
     pub fn forward<C>(&self, client: &C, inputs_embeds: &Var<R>) -> Result<Var<R>>
     where
-        C: ModelClient<R>,
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -161,7 +161,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::model::audio::voxcpm::minicpm4::attention::MiniCpm4Attention;
     use crate::model::audio::voxcpm::minicpm4::mlp::MiniCpm4Mlp;
-    use crate::nn::Linear;
+    use crate::nn::{MaybeQuantLinear, Weight};
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
@@ -182,8 +182,13 @@ pub(crate) mod tests {
         Tensor::<CpuRuntime>::from_slice(&data, shape, device).expect("weights")
     }
 
-    fn linear(out: usize, in_dim: usize, salt: usize, device: &CpuDevice) -> Linear<CpuRuntime> {
-        Linear::new(filled(&[out, in_dim], salt, device), None, false)
+    fn linear(
+        out: usize,
+        in_dim: usize,
+        salt: usize,
+        device: &CpuDevice,
+    ) -> MaybeQuantLinear<CpuRuntime> {
+        MaybeQuantLinear::from_weight(Weight::Standard(filled(&[out, in_dim], salt, device)), None)
     }
 
     /// `base_lm`-shaped tiny model: rotary, exactly as before `no_rope`

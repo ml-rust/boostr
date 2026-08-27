@@ -92,7 +92,6 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     pub fn encode_reference<C>(&self, client: &C, ref_wav_16k: &[f32]) -> Result<Tensor<R>>
     where
         C: VoxCpmClient<R>,
-        R::Client: TypeConversionOps<R>,
     {
         if ref_wav_16k.is_empty() {
             return Err(Error::InvalidArgument {
@@ -126,7 +125,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         max_length: usize,
     ) -> Result<PrefillState<R>>
     where
-        C: ModelClient<R>,
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -154,7 +153,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         max_length: usize,
     ) -> Result<PrefillState<R>>
     where
-        C: ModelClient<R>,
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -178,7 +177,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         capture: bool,
     ) -> Result<PrefillState<R>>
     where
-        C: ModelClient<R>,
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>

@@ -45,7 +45,7 @@ use numr::autograd::{Var, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
-    ShapeOps, TensorOps, UnaryOps,
+    ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
 
@@ -77,8 +77,10 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// `max_length`), matching the reference's preallocated cache: the
     /// generation loop then never triggers a reallocation mid-decode.
     ///
-    /// Dtype and device come from the first layer's `k_proj` weight — the
-    /// tensor whose dtype the cached keys will actually have.
+    /// Dtype and device come from the first layer's `k_proj` — see
+    /// [`MiniCpm4Attention::kv_dtype_device`], which reports the dtype of
+    /// that projection's OUTPUT (F32 for a quantized weight) rather than
+    /// reading a weight tensor that a packed weight does not have.
     ///
     /// Errors when `batch_size` or `max_length` is zero, or when `max_length`
     /// exceeds the precomputed RoPE table (a longer cache could be filled but
@@ -112,16 +114,16 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         }
 
         let attn = self.first_attention()?;
-        let weight = attn.k_proj.weight().tensor();
+        let (dtype, device) = attn.kv_dtype_device()?;
         let config = LayeredKvCacheConfig {
             batch_size,
             num_kv_heads: attn.num_kv_heads,
             initial_capacity: max_length,
             max_seq_len: max_length,
             head_dim: attn.head_dim,
-            dtype: weight.dtype(),
+            dtype,
         };
-        LayeredKvCache::new(self.layers.len(), &config, weight.device())
+        LayeredKvCache::new(self.layers.len(), &config, device)
     }
 
     /// Run the full prefix and populate `kv_cache` with its K/V.
@@ -141,7 +143,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         kv_cache: &mut LayeredKvCache<R>,
     ) -> Result<Var<R>>
     where
-        C: ModelClient<R>,
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -195,7 +197,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         position: usize,
     ) -> Result<Var<R>>
     where
-        C: ModelClient<R>,
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -324,7 +326,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         position: usize,
     ) -> Result<Var<R>>
     where
-        C: ModelClient<R>,
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>

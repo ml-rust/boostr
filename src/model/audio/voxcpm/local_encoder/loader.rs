@@ -51,8 +51,8 @@ where
     /// for reading those out of the checkpoint's `config.json`). `path` may
     /// be the `model.safetensors` file or its containing directory.
     /// `dtype`: cast every loaded tensor to this dtype (`None` keeps the
-    /// checkpoint's own) — see
-    /// [`checked_tensor`](crate::model::audio::voxcpm::loader::support::checked_tensor).
+    /// checkpoint's own) — the cast happens once, in
+    /// `TensorLoader::tensor`.
     pub fn from_safetensors<P: AsRef<Path>>(
         path: P,
         cfg: LocalEncoderConfig,

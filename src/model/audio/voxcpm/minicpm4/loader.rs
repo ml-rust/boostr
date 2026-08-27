@@ -43,7 +43,7 @@ use crate::model::audio::voxcpm::minicpm4::layer::MiniCpm4Layer;
 use crate::model::audio::voxcpm::minicpm4::mlp::MiniCpm4Mlp;
 use crate::model::audio::voxcpm::minicpm4::model::MiniCpm4Model;
 use crate::model::config::RopeScalingConfig;
-use crate::nn::{Embedding, Linear, RmsNorm, RoPE};
+use crate::nn::{Embedding, RmsNorm, RoPE};
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
@@ -70,8 +70,8 @@ where
     /// for reading those out of the checkpoint's `config.json`). `path` may
     /// be the `model.safetensors` file or its containing directory.
     /// `dtype`: cast every loaded tensor to this dtype (`None` keeps the
-    /// checkpoint's own) — see
-    /// [`checked_tensor`](crate::model::audio::voxcpm::loader::support::checked_tensor).
+    /// checkpoint's own) — the cast happens once, in
+    /// `TensorLoader::tensor`.
     pub fn from_safetensors<P: AsRef<Path>>(
         path: P,
         cfg: MiniCpm4Config,
@@ -120,6 +120,13 @@ where
 
         // `vocab_size == 0` means the checkpoint has no `embed_tokens` tensor
         // at all; requesting it would fail the load rather than yield `None`.
+        //
+        // This stays DENSE even from a GGUF, and it is the single biggest
+        // tensor in the stack ([73448, 2048]). `Embedding` is a row gather,
+        // not a matmul: it takes a `Tensor<R>` and there is no gather kernel
+        // that reads GGML blocks, so `tl.tensor` (the dequantizing read) is
+        // the only correct call here. Nothing special-cases it — the dense
+        // path is simply what `load_named` already does.
         let embed_tokens = if cfg.has_embedding() {
             Some(Embedding::new(
                 tl.tensor("embed_tokens.weight", &[cfg.vocab_size, cfg.hidden_size])?,
@@ -221,40 +228,37 @@ where
         false,
     );
 
+    // `TensorLoader::linear` keeps a block-quantized weight PACKED, so on a
+    // GGUF these four (and the three below) hold Q4_K blocks and multiply
+    // through `quant_matmul`. On safetensors they are the same dense
+    // `Linear` they always were. Every projection is bias-free — hence
+    // `with_bias: false` throughout.
     let self_attn = {
         let attn_prefix = format!("{layer_prefix}.self_attn");
-        let q_proj = Linear::new(
-            tl.tensor(
-                &format!("{attn_prefix}.q_proj.weight"),
-                &[q_dim, cfg.hidden_size],
-            )?,
-            None,
+        let q_proj = tl.linear(
+            &format!("{attn_prefix}.q_proj"),
+            q_dim,
+            cfg.hidden_size,
             false,
-        );
-        let k_proj = Linear::new(
-            tl.tensor(
-                &format!("{attn_prefix}.k_proj.weight"),
-                &[kv_dim, cfg.hidden_size],
-            )?,
-            None,
+        )?;
+        let k_proj = tl.linear(
+            &format!("{attn_prefix}.k_proj"),
+            kv_dim,
+            cfg.hidden_size,
             false,
-        );
-        let v_proj = Linear::new(
-            tl.tensor(
-                &format!("{attn_prefix}.v_proj.weight"),
-                &[kv_dim, cfg.hidden_size],
-            )?,
-            None,
+        )?;
+        let v_proj = tl.linear(
+            &format!("{attn_prefix}.v_proj"),
+            kv_dim,
+            cfg.hidden_size,
             false,
-        );
-        let o_proj = Linear::new(
-            tl.tensor(
-                &format!("{attn_prefix}.o_proj.weight"),
-                &[cfg.hidden_size, q_dim],
-            )?,
-            None,
+        )?;
+        let o_proj = tl.linear(
+            &format!("{attn_prefix}.o_proj"),
+            cfg.hidden_size,
+            q_dim,
             false,
-        );
+        )?;
         MiniCpm4Attention {
             q_proj,
             k_proj,
@@ -278,30 +282,24 @@ where
 
     let mlp = {
         let mlp_prefix = format!("{layer_prefix}.mlp");
-        let gate_proj = Linear::new(
-            tl.tensor(
-                &format!("{mlp_prefix}.gate_proj.weight"),
-                &[cfg.intermediate_size, cfg.hidden_size],
-            )?,
-            None,
+        let gate_proj = tl.linear(
+            &format!("{mlp_prefix}.gate_proj"),
+            cfg.intermediate_size,
+            cfg.hidden_size,
             false,
-        );
-        let up_proj = Linear::new(
-            tl.tensor(
-                &format!("{mlp_prefix}.up_proj.weight"),
-                &[cfg.intermediate_size, cfg.hidden_size],
-            )?,
-            None,
+        )?;
+        let up_proj = tl.linear(
+            &format!("{mlp_prefix}.up_proj"),
+            cfg.intermediate_size,
+            cfg.hidden_size,
             false,
-        );
-        let down_proj = Linear::new(
-            tl.tensor(
-                &format!("{mlp_prefix}.down_proj.weight"),
-                &[cfg.hidden_size, cfg.intermediate_size],
-            )?,
-            None,
+        )?;
+        let down_proj = tl.linear(
+            &format!("{mlp_prefix}.down_proj"),
+            cfg.hidden_size,
+            cfg.intermediate_size,
             false,
-        );
+        )?;
         MiniCpm4Mlp {
             gate_proj,
             up_proj,

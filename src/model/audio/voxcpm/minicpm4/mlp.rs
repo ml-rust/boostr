@@ -1,34 +1,41 @@
 //! SwiGLU MLP for VoxCPM2's MiniCPM4 decoder layers.
 //!
 //! `down_proj(silu(gate_proj(x)) * up_proj(x))`, via numr's fused
-//! `var_silu_mul` kernel. Built on plain [`Linear`] rather than
-//! `MaybeQuantLinear`: VoxCPM2 ships dense safetensors, never GGUF-quantized,
-//! so that indirection is dropped. Same shape as the `feat_encoder` sibling's
-//! MLP, at the decoder's wider dimensions.
+//! `var_silu_mul` kernel. Built on [`MaybeQuantLinear`]: VoxCPM2 ships BOTH
+//! dense safetensors and GGUF, and in a GGUF these three projections are
+//! block-quantized. The quantized variant multiplies the weight PACKED
+//! through `quant_matmul`, so a Q4_K file is not expanded to dense F32 at
+//! load; a safetensors checkpoint yields the `Standard` variant and the
+//! dense path is unchanged. Same shape as the `feat_encoder` sibling's MLP,
+//! at the decoder's wider dimensions.
 
 use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
-use crate::nn::Linear;
+use crate::nn::MaybeQuantLinear;
 use numr::autograd::{Var, var_silu_mul};
 use numr::dtype::DType;
 use numr::ops::{
-    ActivationOps, BinaryOps, CompareOps, ConditionalOps, ScalarOps, TensorOps, UnaryOps,
+    ActivationOps, BinaryOps, CompareOps, ConditionalOps, ScalarOps, TensorOps, TypeConversionOps,
+    UnaryOps,
 };
 use numr::runtime::Runtime;
 
 /// `gate_proj`/`up_proj`: 2048 -> 6144, `down_proj`: 6144 -> 2048. All
 /// bias-free.
 pub struct MiniCpm4Mlp<R: Runtime> {
-    pub(crate) gate_proj: Linear<R>,
-    pub(crate) up_proj: Linear<R>,
-    pub(crate) down_proj: Linear<R>,
+    pub(crate) gate_proj: MaybeQuantLinear<R>,
+    pub(crate) up_proj: MaybeQuantLinear<R>,
+    pub(crate) down_proj: MaybeQuantLinear<R>,
 }
 
 impl<R: Runtime<DType = DType>> MiniCpm4Mlp<R> {
     /// `down_proj(silu(gate_proj(x)) * up_proj(x))`
     pub fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
     where
-        C: ModelClient<R>,
+        // `TypeConversionOps` is what `MaybeQuantLinear::forward` adds over a
+        // dense `Linear::forward`; `ModelClient` already carries
+        // `QuantMatmulOps`.
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ActivationOps<R>

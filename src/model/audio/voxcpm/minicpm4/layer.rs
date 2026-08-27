@@ -21,7 +21,7 @@ use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
-    ShapeOps, TensorOps, UnaryOps,
+    ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
 
@@ -39,7 +39,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
     /// [`MiniCpm4Attention`] rejects a `None` it is not entitled to.
     pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: Option<&RoPE<R>>) -> Result<Var<R>>
     where
-        C: ModelClient<R>,
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -75,7 +75,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
         position: usize,
     ) -> Result<Var<R>>
     where
-        C: ModelClient<R>,
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>

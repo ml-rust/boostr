@@ -31,23 +31,30 @@ use crate::model::attention_core::{
 };
 use crate::model::traits::ModelClient;
 use crate::nn::var_ops::{repeat_kv, var_contiguous};
-use crate::nn::{Linear, RoPE};
+use crate::nn::{MaybeQuantLinear, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use numr::autograd::{Var, var_narrow, var_permute, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
-    ShapeOps, TensorOps, UnaryOps,
+    ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
 
 /// `q_proj`: 2048 -> 2048 (16 heads x 128), `k_proj`/`v_proj`: 2048 -> 256
 /// (2 heads x 128, GQA group size 8), `o_proj`: 2048 -> 2048. All bias-free.
+///
+/// The projections are [`MaybeQuantLinear`], not plain `Linear`: a GGUF
+/// checkpoint stores them block-quantized, and this is the bulk of VoxCPM2's
+/// weights. The quantized variant multiplies through `quant_matmul` with the
+/// weight left PACKED, so a Q4_K file costs Q4_K-sized memory instead of
+/// being expanded to dense F32 at load. A safetensors checkpoint yields the
+/// `Standard` variant and runs exactly the dense path it always did.
 pub struct MiniCpm4Attention<R: Runtime> {
-    pub(crate) q_proj: Linear<R>,
-    pub(crate) k_proj: Linear<R>,
-    pub(crate) v_proj: Linear<R>,
-    pub(crate) o_proj: Linear<R>,
+    pub(crate) q_proj: MaybeQuantLinear<R>,
+    pub(crate) k_proj: MaybeQuantLinear<R>,
+    pub(crate) v_proj: MaybeQuantLinear<R>,
+    pub(crate) o_proj: MaybeQuantLinear<R>,
     pub(crate) num_heads: usize,
     pub(crate) num_kv_heads: usize,
     pub(crate) head_dim: usize,
@@ -86,6 +93,28 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
         }
     }
 
+    /// Dtype and device the K/V this block writes will actually have.
+    ///
+    /// Read off `k_proj` because it is that projection's OUTPUT that lands in
+    /// the cache. A quantized projection cannot answer this from its weight:
+    /// `quant_matmul` consumes F32 and emits F32 whatever block format the
+    /// weight is packed in, so the cached keys are F32 there — the packed
+    /// weight has no element dtype to copy.
+    pub(crate) fn kv_dtype_device(&self) -> Result<(DType, &R::Device)> {
+        match &self.k_proj {
+            MaybeQuantLinear::Standard(linear) => {
+                let w = linear.weight().tensor();
+                Ok((w.dtype(), w.device()))
+            }
+            MaybeQuantLinear::Quantized(qlinear) => Ok((DType::F32, qlinear.weight().device())),
+            MaybeQuantLinear::DecomposedQuant(_) => Err(Error::ModelError {
+                reason: "MiniCPM4 k_proj: no VoxCPM2 checkpoint loads decomposed-quantized \
+                         (AWQ/GPTQ) weights, so the KV cache dtype is undefined here"
+                    .to_string(),
+            }),
+        }
+    }
+
     /// Causal GQA attention over `x: [batch, seq, hidden]`, returning
     /// `[batch, seq, hidden]`.
     ///
@@ -97,7 +126,10 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
     /// shape-valid while computing a different model.
     pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: Option<&RoPE<R>>) -> Result<Var<R>>
     where
-        C: ModelClient<R>,
+        // `TypeConversionOps` is what `MaybeQuantLinear::forward` adds over a
+        // dense `Linear::forward`: its decomposed-quant arm casts activations
+        // to F32. `ModelClient` already carries `QuantMatmulOps`.
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -168,7 +200,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
         position: usize,
     ) -> Result<Var<R>>
     where
-        C: ModelClient<R>,
+        // `TypeConversionOps` for the same reason `forward` needs it.
+        C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -286,6 +319,7 @@ fn missing_rope() -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nn::Weight;
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
     use numr::tensor::Tensor;
@@ -306,7 +340,12 @@ mod tests {
     }
 
     fn tiny_attention(no_rope: bool, device: &CpuDevice) -> MiniCpm4Attention<CpuRuntime> {
-        let linear = |salt| Linear::new(filled(&[HIDDEN, HIDDEN], salt, device), None, false);
+        let linear = |salt| {
+            MaybeQuantLinear::from_weight(
+                Weight::Standard(filled(&[HIDDEN, HIDDEN], salt, device)),
+                None,
+            )
+        };
         MiniCpm4Attention {
             q_proj: linear(1),
             k_proj: linear(2),

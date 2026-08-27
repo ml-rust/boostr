@@ -14,13 +14,20 @@
 //! `from_gguf` therefore takes the VAE path as its own argument, exactly like
 //! [`from_checkpoint`](VoxCpm2Model::from_checkpoint).
 //!
-//! # Dequantized, not quantized
+//! # What stays quantized in memory, and what does not
 //!
-//! Loading goes through [`WeightSource`](crate::model::audio::voxcpm::loader::support::WeightSource)
-//! for [`Gguf`], which dequantizes to F32 — see that impl's comment. A 1.2 GB
-//! Q4_K file becomes a full-size dense weight set in memory. Resident-quantized
-//! weights need `QuantTensor` plus a quant-aware `Linear`, which is a later
-//! unit.
+//! The MiniCPM4 stack (`base_lm` and `residual_lm` — 327 of the 577 tensors,
+//! the bulk of the model) keeps its attention and MLP projections PACKED:
+//! its loader reads them through
+//! [`WeightSource::load_named_weight`](crate::model::audio::voxcpm::loader::support::WeightSource::load_named_weight),
+//! which hands back a `QuantTensor`, and multiplies them with
+//! `quant_matmul`. A Q4_K weight there costs Q4_K-sized memory.
+//!
+//! Everything else still DEQUANTIZES on the way in — `feat_encoder` /
+//! `bidirectional`, `local_dit`, the `fsq` aux projections, and, on every
+//! stack, the norms, biases and embedding tables, which are row gathers and
+//! element-wise ops with no packed kernel to run against. Those sub-models
+//! are a later unit.
 
 use crate::error::{Error, Result};
 use crate::format::gguf::Gguf;
@@ -50,10 +57,15 @@ where
     /// 2. the `config_json` path argument;
     /// 3. neither — an error naming both options.
     ///
-    /// `dtype` casts every transformer-stack tensor, same as
-    /// [`from_checkpoint`](Self::from_checkpoint). The GGUF path arrives as
-    /// F32 (dequantized), so `None` here means F32 rather than the BF16 a
+    /// `dtype` casts every transformer-stack tensor that arrives dense, same
+    /// as [`from_checkpoint`](Self::from_checkpoint). Dequantized tensors
+    /// arrive as F32, so `None` here means F32 rather than the BF16 a
     /// safetensors checkpoint would give.
+    ///
+    /// `Some(BF16)`/`Some(F16)` is REJECTED for a GGUF whose MiniCPM4
+    /// projections are quantized: `quant_matmul` requires F32 activations,
+    /// so honouring the request would mean dequantizing the very weights
+    /// this path keeps packed. The error names the tensor.
     pub fn from_gguf<P: AsRef<Path>, Q: AsRef<Path>>(
         gguf_path: P,
         config_json: Option<&Path>,

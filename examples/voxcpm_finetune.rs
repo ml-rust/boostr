@@ -1032,11 +1032,20 @@ where
     let mut params: HashMap<TensorId, Tensor<R>> = Module::trainable_parameter_tensors(&model);
     eprintln!("trainable adapter tensors: {}", params.len());
     // The ONLY ids any optimizer step reads back. `backward_wrt` prunes the
-    // traversal to these: in a LoRA graph most nodes are reachable only from
-    // frozen weights, and a plain `backward` still computes and STORES a
-    // full-size gradient for every one of them under an id nothing can read.
-    // That waste is what caps this trainer at batch 1. Collected once — the
-    // adapter set never changes after `apply_lora`.
+    // traversal to these, which is the semantically correct request: a plain
+    // `backward` also stores a full-size gradient under every id nothing can
+    // read back.
+    //
+    // MEASURED: this prunes almost NOTHING here, and is not why the trainer is
+    // capped at batch 1. Peak VRAM 11819 MiB with it vs 11808 without, runtime
+    // unchanged, losses bit-identical. The reason is that ~120 LoRA adapters
+    // sit throughout the network, so nearly every node is an ancestor of some
+    // wanted id and survives pruning. The real cost is forward ACTIVATION
+    // LIFETIME: training state measured 6266 MiB at a 24-patch cap and 8831
+    // MiB at 31, so it scales with sequence length. Activation checkpointing
+    // is the fix; do not expect this call to deliver memory.
+    //
+    // Collected once — the adapter set never changes after `apply_lora`.
     let wanted: Vec<TensorId> = params.keys().copied().collect();
 
     let config = TrainingConfig::default().with_lr(args.lr);

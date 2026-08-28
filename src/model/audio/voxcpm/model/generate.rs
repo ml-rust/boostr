@@ -75,7 +75,9 @@ use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
 mod capture;
+mod teacher_forced;
 pub use capture::StepIntermediates;
+pub use teacher_forced::TeacherForcedConditioning;
 
 /// Stop-token class index in `stop_head`'s 2-wide output. Class 0 is
 /// "continue", class 1 is "stop".

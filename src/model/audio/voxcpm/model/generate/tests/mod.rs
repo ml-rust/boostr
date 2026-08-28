@@ -6,6 +6,7 @@
 //! functions themselves.
 
 mod support;
+mod teacher_forced;
 
 use super::*;
 use crate::model::audio::voxcpm::local_dit::tests::{FEAT_DIM, HIDDEN_DIM, PATCH_SIZE, t};

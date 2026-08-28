@@ -22,7 +22,8 @@ pub use config::{
 };
 pub use decode::unfold_patches;
 pub use generate::{
-    GenerateOptions, GenerateOutcome, GenerateState, PatchGenerator, StepIntermediates, StepOutcome,
+    GenerateOptions, GenerateOutcome, GenerateState, PatchGenerator, StepIntermediates,
+    StepOutcome, TeacherForcedConditioning,
 };
 pub use gguf_loader::GGUF_CONFIG_JSON_KEY;
 pub use loader::{DEFAULT_CONFIG_FILE, DEFAULT_WEIGHTS_FILE, VoxCpm2Model};

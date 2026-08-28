@@ -55,6 +55,56 @@
 //! should leave `ref_wav` blank (empty cell, or the column absent entirely)
 //! on 50-70% of rows to match that.
 //!
+//! # Bounding training memory: `--max-patches`
+//!
+//! Measured peak RSS scales ~1.36 GB per SECOND of target audio (q6_k on
+//! CPU: 3.5 s -> 6353 MB, 4.9 s -> 8049 MB, 12.5 s -> 18598 MB). A single
+//! 12.5 s clip needs ~18.6 GB. Upstream's own fine-tuning guide hits the
+//! same wall and handles it with `max_batch_tokens: 8192`, which FILTERS
+//! long samples out of the run rather than shortening them.
+//!
+//! `--max-patches` (default [`DEFAULT_MAX_PATCHES`]) caps a clip's patch
+//! count, but the target `wav` and `ref_wav` are NOT handled the same way,
+//! because they play different roles:
+//!
+//! - The target `wav` is what `loss/diff` and `loss/stop` are computed
+//!   against. Truncating it while keeping the full transcript would train
+//!   the model to emit part of an utterance for the WHOLE text — a silent
+//!   data-corruption bug, not a memory fix. So a row whose target exceeds
+//!   the cap is DROPPED, never truncated.
+//! - `ref_wav` is speaker conditioning ONLY — nothing computes loss against
+//!   it. Truncating it to the cap is exactly what inference already does
+//!   (`voxcpm_clone` conditions on a ~3 s reference routinely), so an
+//!   over-cap reference is TRUNCATED to its leading
+//!   `max_patches * patch_size * HOP_LENGTH` samples instead of dropping the
+//!   row.
+//!
+//! The patch count is computed from the decoded 16 kHz sample count alone
+//! (`frames = ceil(samples / HOP_LENGTH)`, `patches = ceil(frames /
+//! patch_size)`) so a dropped row never reaches the AudioVAE encoder, let
+//! alone the transformer — it costs nothing. Every dropped row is printed
+//! with the offending path, its computed patch count, and the cap; every
+//! truncated reference is printed separately, since a truncated reference is
+//! NOT a dropped row. Manifest filtering ends with a summary line (rows
+//! kept, rows skipped, references truncated, total duration retained), and
+//! if EVERY row is skipped that is a hard error, not a quietly empty run.
+//!
+//! ## Choosing `--max-patches`
+//!
+//! Measured on the real corpus (57 takes, min 3.5 s / 22 patches, median
+//! 4.9 s / 31 patches, max 12.5 s / 79 patches):
+//!
+//! | cap       | target retention | est. peak |
+//! | --------- | ----------------- | --------- |
+//! | 25 (4 s)  | 12/57 (21%)        | ~7.0 GB   |
+//! | 38 (6 s)  | 45/57 (78%)        | ~9.8 GB   |
+//! | 50 (8 s)  | 50/57 (87%)        | ~12.5 GB  |
+//! | 82 (13 s) | 57/57 (100%)       | ~19.3 GB  |
+//!
+//! [`DEFAULT_MAX_PATCHES`] is 38: keeps 78% of targets while staying under
+//! ~10 GB peak. Raise `--max-patches` deliberately if the extra retention is
+//! worth the extra memory.
+//!
 //! [`SequenceLayout::build`](boostr::model::audio::voxcpm::model::sequence::SequenceLayout::build)
 //! rejects `t_ref == 0`, so `prefill`/`prefill_capturing` have NO supported
 //! no-reference form today — every row this binary actually trains on must
@@ -102,7 +152,7 @@ use std::time::Instant;
 
 use boostr::format::safetensors::save_safetensors;
 use boostr::model::audio::voxcpm::model::VoxCpm2Model;
-use boostr::model::audio::voxcpm::model::config::AUDIO_START_ID;
+use boostr::model::audio::voxcpm::model::config::{AUDIO_START_ID, VoxCpm2Config};
 use boostr::model::audio::voxcpm::{VoxCpmClient, load_tokenizer, normalize_whitespace, tokenize};
 use boostr::model::audio::{decode_audio, extension_hint, to_mono_at_rate};
 use boostr::nn::{LoraTargets, Module};
@@ -146,6 +196,19 @@ const LAMBDA_DIFF: f64 = 1.0;
 /// explicitly not to train with this at 0: `--training-cfg-rate` exists so
 /// an operator can raise it, not so it gets turned off.
 const DEFAULT_TRAINING_CFG_RATE: f64 = 0.1;
+/// Default `--max-patches`: retains 78% of targets on the measured real
+/// corpus while staying under ~10 GB peak RSS — see the module docs'
+/// "Choosing `--max-patches`" table. Measured scaling is ~1.36 GB per second
+/// of target audio (q6_k, CPU), so a 6.0 s cap keeps peak near `6.0 * 1.36
+/// GB ≈ 8.2 GB` plus fixed model/runtime overhead — ~9.8 GB total. Converted
+/// to patches at `patch_size = 4`
+/// ([`VoxCpm2Config::default`](boostr::model::audio::voxcpm::model::config::VoxCpm2Config::default),
+/// the checkpoint's usual value) and `HOP_LENGTH` (640): `6.0 s * 16_000
+/// samples/s = 96_000 samples`; `ceil(96_000 / 640) = 150 frames`;
+/// `ceil(150 / 4) = 38 patches`. A checkpoint with a different `patch_size`
+/// shifts the seconds-per-patch ratio this default assumes, so pass
+/// `--max-patches` explicitly for one.
+const DEFAULT_MAX_PATCHES: usize = 38;
 
 /// Where the transformer stack's weights come from.
 ///
@@ -197,6 +260,11 @@ struct Args {
     /// explicitly DO NOT set this to 0 — leave it at the default unless a
     /// specific reason says otherwise.
     training_cfg_rate: f64,
+    /// Upper bound on the target `wav`'s patch count — see the module docs'
+    /// "Bounding training memory" section. A row whose target exceeds it is
+    /// dropped. A `ref_wav` over the same cap is truncated instead, never
+    /// dropped, since it is conditioning only.
+    max_patches: usize,
 }
 
 const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf [--config config.json]) \
@@ -205,7 +273,10 @@ const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf [--c
 [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] \
 [--alpha 32] [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors] \
 [--lambda-stop 1.0] [--training-cfg-rate 0.1 (DO NOT set to 0 — upstream's FAQ \
-names text-ignoring as the most common fine-tuning failure mode)]";
+names text-ignoring as the most common fine-tuning failure mode)] \
+[--max-patches 38 (caps the target wav's patch count; over-cap targets are \
+dropped, over-cap ref_wav clips are truncated to the cap instead — see the \
+module docs)]";
 
 /// Consume the value that follows `flag`, advancing `i` past it.
 fn take_value(argv: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -230,6 +301,7 @@ fn parse_args() -> Result<Args, String> {
     let mut out = None;
     let mut lambda_stop = DEFAULT_LAMBDA_STOP;
     let mut training_cfg_rate = DEFAULT_TRAINING_CFG_RATE;
+    let mut max_patches = DEFAULT_MAX_PATCHES;
 
     let mut i = 0usize;
     while i < argv.len() {
@@ -278,6 +350,11 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--training-cfg-rate: {e}"))?
             }
+            "--max-patches" => {
+                max_patches = take_value(&argv, &mut i, flag)?
+                    .parse()
+                    .map_err(|e| format!("--max-patches: {e}"))?
+            }
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown flag {other}\n{USAGE}")),
         }
@@ -297,6 +374,9 @@ fn parse_args() -> Result<Args, String> {
         return Err(format!(
             "--training-cfg-rate must be in [0.0, 1.0], got {training_cfg_rate}"
         ));
+    }
+    if max_patches == 0 {
+        return Err("--max-patches must be at least 1".to_string());
     }
 
     // Exactly one weight source. Accepting both and silently preferring one
@@ -325,6 +405,7 @@ fn parse_args() -> Result<Args, String> {
         out,
         lambda_stop,
         training_cfg_rate,
+        max_patches,
     })
 }
 
@@ -450,6 +531,98 @@ fn load_manifest(path: &Path) -> Result<Vec<ManifestRow>, Box<dyn std::error::Er
     Ok(rows)
 }
 
+/// Patch count a clip of `samples` 16 kHz samples folds to, WITHOUT running
+/// the AudioVAE encoder. `VoxCpm2Config::ref_pad_multiple` right-pads to a
+/// multiple of `patch_size * HOP_LENGTH` before the real encode, so the true
+/// frame count is always a multiple of `patch_size`; `ceil(ceil(samples /
+/// HOP_LENGTH) / patch_size)` equals `ceil(samples / (patch_size *
+/// HOP_LENGTH))`, exactly that padded-then-folded patch count — this is not
+/// an approximation. Reuses [`VoxCpm2Config::ref_pad_multiple`] rather than
+/// re-deriving `patch_size * HOP_LENGTH` here.
+fn estimate_patches(samples: usize, cfg: &VoxCpm2Config) -> usize {
+    samples.div_ceil(cfg.ref_pad_multiple())
+}
+
+/// Truncate a `ref_wav`'s 16 kHz samples to its leading
+/// `max_patches * ref_pad_multiple()` samples — the same cap
+/// [`estimate_patches`] checks against — so the AudioVAE encoder never sees
+/// the excess. Safe ONLY for the reference clip, never the target `wav`:
+/// see the module docs' "Bounding training memory" section for why the two
+/// are treated differently. A clip already at or under the cap is returned
+/// unchanged.
+fn truncate_reference(mut samples: Vec<f32>, cfg: &VoxCpm2Config, max_patches: usize) -> Vec<f32> {
+    let cap_samples = max_patches * cfg.ref_pad_multiple();
+    samples.truncate(cap_samples);
+    samples
+}
+
+/// Filter `rows` to those whose target `wav` folds to at most `max_patches`
+/// patches, without ever running the AudioVAE encoder — see the module
+/// docs' "Bounding training memory" section. An over-cap `ref_wav` is NOT a
+/// reason to drop the row — it is reported here as truncated (a separate
+/// count from skipped rows) and the actual truncation happens where
+/// `ref_wav` is loaded for training, via [`truncate_reference`]; this
+/// function only measures and reports. Decodes each candidate clip once
+/// here (cheap PCM decode, not the VAE) purely to read its sample count;
+/// the training loop below decodes again per epoch, same as it always has.
+fn filter_rows_by_patch_cap<'a>(
+    rows: &'a [ManifestRow],
+    cfg: &VoxCpm2Config,
+    max_patches: usize,
+) -> Result<Vec<&'a ManifestRow>, Box<dyn std::error::Error>> {
+    let mut kept = Vec::new();
+    let mut skipped = 0usize;
+    let mut truncated_refs = 0usize;
+    let mut retained_seconds = 0.0f64;
+
+    for row in rows {
+        let wav = load_wav_16k(&row.wav).map_err(|e| format!("{}: {e}", row.wav.display()))?;
+        let wav_patches = estimate_patches(wav.len(), cfg);
+        if wav_patches > max_patches {
+            eprintln!(
+                "skip {}: {wav_patches} patches > --max-patches {max_patches}",
+                row.wav.display()
+            );
+            skipped += 1;
+            continue;
+        }
+
+        if let Some(ref_wav_path) = &row.ref_wav {
+            let ref_wav = load_wav_16k(ref_wav_path)
+                .map_err(|e| format!("{}: {e}", ref_wav_path.display()))?;
+            let ref_patches = estimate_patches(ref_wav.len(), cfg);
+            if ref_patches > max_patches {
+                eprintln!(
+                    "truncate {}: ref_wav {} {ref_patches} patches > --max-patches \
+                     {max_patches}, using the leading {max_patches} (reference is speaker \
+                     conditioning only, never the training target — see the module docs)",
+                    row.wav.display(),
+                    ref_wav_path.display()
+                );
+                truncated_refs += 1;
+            }
+        }
+
+        retained_seconds += wav.len() as f64 / f64::from(REF_RATE);
+        kept.push(row);
+    }
+
+    eprintln!(
+        "manifest filter: {} row(s) kept, {skipped} skipped, {truncated_refs} reference(s) \
+         truncated, {retained_seconds:.1}s retained (--max-patches {max_patches})",
+        kept.len()
+    );
+    if kept.is_empty() {
+        return Err(format!(
+            "every one of {} manifest row(s) exceeds --max-patches {max_patches}; nothing to \
+             train on",
+            rows.len()
+        )
+        .into());
+    }
+    Ok(kept)
+}
+
 /// Read a manifest wav as mono 16 kHz PCM, matching `voxcpm_clone.rs`'s
 /// `load_reference` exactly (`decode_audio` plus `to_mono_at_rate`).
 fn load_wav_16k(path: &Path) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -548,6 +721,11 @@ where
         }
     };
 
+    // Filter BEFORE any LoRA/optimizer setup: a row over --max-patches must
+    // never reach `encode_reference` (the AudioVAE encoder), which is the
+    // whole point of the cap — see the module docs.
+    let rows = filter_rows_by_patch_cap(rows, &model.config, args.max_patches)?;
+
     let tokenizer = load_tokenizer(tokenizer_path(&args.weights, args.config.as_deref())?)?;
 
     let target_names: Vec<String> = args
@@ -604,6 +782,10 @@ where
             })?;
             let ref_wav = load_wav_16k(ref_wav_path)
                 .map_err(|e| format!("{}: {e}", ref_wav_path.display()))?;
+            // Truncate, never drop: `ref_wav` is speaker conditioning only,
+            // not the loss target — see [`truncate_reference`] and the
+            // module docs' "Bounding training memory" section.
+            let ref_wav = truncate_reference(ref_wav, &model.config, args.max_patches);
             let ref_patches = model.encode_reference(client, &ref_wav)?;
             let t_ref = ref_patches.shape()[0];
 

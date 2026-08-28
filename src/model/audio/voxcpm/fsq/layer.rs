@@ -10,12 +10,14 @@
 use crate::error::{Error, Result};
 use crate::nn::{
     LoraTargets, MaybeLoraLinear, Module, adapt_if_targeted, child_params, extend_named,
+    load_lora_child,
 };
 use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{Var, var_add, var_div_scalar, var_mul_scalar, var_silu, var_tanh};
 use numr::dtype::DType;
 use numr::ops::{ActivationOps, BinaryOps, ScalarOps, TensorOps, TypeConversionOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
+use numr::tensor::{Tensor, TensorId};
 
 /// `fsq_layer`: `out_proj(round_ties_even(tanh(in_proj(hidden)) * scale) /
 /// scale)`.
@@ -167,6 +169,20 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
         )?;
         Ok(adapted)
     }
+
+    /// Write back updated `in_proj`/`out_proj` adapter values from an
+    /// optimizer's `params` map, keeping their [`numr::tensor::TensorId`]s.
+    /// See [`crate::nn::MaybeLoraLinear::load_lora_parameters`] for the
+    /// per-projection semantics. No `prefix`/target matching needed here —
+    /// unlike [`Self::apply_lora`], lookup is by ID.
+    pub fn load_lora_parameters(
+        &mut self,
+        params: &std::collections::HashMap<TensorId, Tensor<R>>,
+    ) -> Result<usize> {
+        let mut written = load_lora_child(&mut self.in_proj, params, "in_proj")?;
+        written += load_lora_child(&mut self.out_proj, params, "out_proj")?;
+        Ok(written)
+    }
 }
 
 /// Names mirror `fsq_layer.{in_proj,out_proj}.*` — the checkpoint prefix
@@ -305,6 +321,24 @@ impl<R: Runtime<DType = DType>> AuxProjections<R> {
             "stop_head",
         )?;
         Ok(adapted)
+    }
+
+    /// Write back updated adapter values across all six projections from an
+    /// optimizer's `params` map, keeping each adapter's [`TensorId`]s. See
+    /// [`crate::nn::MaybeLoraLinear::load_lora_parameters`] for the
+    /// per-projection semantics. No prefix needed — unlike
+    /// [`Self::apply_lora`], lookup is by ID.
+    pub fn load_lora_parameters(
+        &mut self,
+        params: &std::collections::HashMap<TensorId, Tensor<R>>,
+    ) -> Result<usize> {
+        let mut written = load_lora_child(&mut self.enc_to_lm_proj, params, "enc_to_lm_proj")?;
+        written += load_lora_child(&mut self.lm_to_dit_proj, params, "lm_to_dit_proj")?;
+        written += load_lora_child(&mut self.res_to_dit_proj, params, "res_to_dit_proj")?;
+        written += load_lora_child(&mut self.fusion_concat_proj, params, "fusion_concat_proj")?;
+        written += load_lora_child(&mut self.stop_proj, params, "stop_proj")?;
+        written += load_lora_child(&mut self.stop_head, params, "stop_head")?;
+        Ok(written)
     }
 }
 

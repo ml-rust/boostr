@@ -45,6 +45,7 @@ use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
+use numr::tensor::{Tensor, TensorId};
 use std::path::Path;
 
 /// Checkpoint file name holding the transformer stack.
@@ -318,6 +319,39 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         // Root-level, no prefix — see `Module::named_parameters` above.
         adapted += self.aux.apply_lora(targets, rank, alpha, device, "")?;
         Ok(adapted)
+    }
+
+    /// THE write-back entry point: apply an optimizer's updated adapter
+    /// tensors — keyed by [`TensorId`], e.g.
+    /// [`SimpleTrainer::step`](crate::trainer::simple::SimpleTrainer::step)'s
+    /// output — back onto every `MaybeLoraLinear` adapter across the whole
+    /// model, in place, preserving each adapter's `TensorId`.
+    ///
+    /// Without this, a training loop that calls `backward` then
+    /// `SimpleTrainer::step` never actually updates the model: `step` writes
+    /// into the `HashMap<TensorId, Tensor<R>>` it returns, but the `Var`s
+    /// this model's `MaybeLoraLinear`s hold are untouched by that write, so
+    /// every subsequent forward pass would keep recomputing from the SAME
+    /// pre-update weights.
+    ///
+    /// Unlike [`Self::apply_lora`], this needs no `targets`/`prefix`
+    /// threading and no [`LoraTargets::ensure_all_match`] validation:
+    /// [`crate::nn::MaybeLoraLinear::load_lora_parameters`] looks each
+    /// adapter up by its own stable `TensorId`, which is already unique —
+    /// there is no dotted path to match against and no zero-match trap to
+    /// guard. Returns the total number of adapter TENSORS written (2 per
+    /// adapted projection whose ids are both present in `params`).
+    pub fn load_lora_parameters(
+        &mut self,
+        params: &std::collections::HashMap<TensorId, Tensor<R>>,
+    ) -> Result<usize> {
+        let mut written = self.feat_encoder.load_lora_parameters(params)?;
+        written += self.base_lm.load_lora_parameters(params)?;
+        written += self.residual_lm.load_lora_parameters(params)?;
+        written += self.feat_decoder.load_lora_parameters(params)?;
+        written += self.fsq.load_lora_parameters(params)?;
+        written += self.aux.load_lora_parameters(params)?;
+        Ok(written)
     }
 }
 

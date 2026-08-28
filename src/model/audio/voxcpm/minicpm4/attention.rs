@@ -33,7 +33,7 @@ use crate::model::traits::ModelClient;
 use crate::nn::var_ops::{repeat_kv, var_contiguous};
 use crate::nn::{
     LoraTargets, MaybeLoraLinear, MaybeQuantLinear, Module, RoPE, adapt_if_targeted, child_params,
-    extend_named,
+    extend_named, load_lora_child,
 };
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use numr::autograd::{Var, var_narrow, var_permute, var_reshape};
@@ -43,6 +43,7 @@ use numr::ops::{
     ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
+use numr::tensor::{Tensor, TensorId};
 
 /// `q_proj`: 2048 -> 2048 (16 heads x 128), `k_proj`/`v_proj`: 2048 -> 256
 /// (2 heads x 128, GQA group size 8), `o_proj`: 2048 -> 2048. All bias-free.
@@ -365,6 +366,22 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             "o_proj",
         )?;
         Ok(adapted)
+    }
+
+    /// Write back updated `q_proj`/`k_proj`/`v_proj`/`o_proj` adapter values
+    /// from an optimizer's `params` map, keeping their [`TensorId`]s. See
+    /// [`crate::nn::MaybeLoraLinear::load_lora_parameters`] for the
+    /// per-projection semantics. No prefix needed — unlike
+    /// [`Self::apply_lora`], lookup is by ID.
+    pub fn load_lora_parameters(
+        &mut self,
+        params: &std::collections::HashMap<TensorId, Tensor<R>>,
+    ) -> Result<usize> {
+        let mut written = load_lora_child(&mut self.q_proj, params, "q_proj")?;
+        written += load_lora_child(&mut self.k_proj, params, "k_proj")?;
+        written += load_lora_child(&mut self.v_proj, params, "v_proj")?;
+        written += load_lora_child(&mut self.o_proj, params, "o_proj")?;
+        Ok(written)
     }
 }
 

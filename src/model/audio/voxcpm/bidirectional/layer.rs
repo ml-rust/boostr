@@ -22,6 +22,7 @@ use numr::ops::{
     ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
+use numr::tensor::{Tensor, TensorId};
 
 pub struct BidirectionalLayer<R: Runtime> {
     pub(crate) input_layernorm: RmsNorm<R>,
@@ -87,6 +88,19 @@ impl<R: Runtime<DType = DType>> BidirectionalLayer<R> {
             &LoraTargets::join(prefix, "mlp"),
         )?;
         Ok(adapted)
+    }
+
+    /// Delegate to `BidirectionalAttention::load_lora_parameters` and
+    /// `BidirectionalMlp::load_lora_parameters`, summing their counts. No
+    /// prefix needed — unlike [`Self::apply_lora`], lookup is by ID, not by
+    /// dotted path.
+    pub fn load_lora_parameters(
+        &mut self,
+        params: &std::collections::HashMap<TensorId, Tensor<R>>,
+    ) -> Result<usize> {
+        let mut written = self.self_attn.load_lora_parameters(params)?;
+        written += self.mlp.load_lora_parameters(params)?;
+        Ok(written)
     }
 }
 

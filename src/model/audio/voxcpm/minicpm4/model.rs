@@ -45,7 +45,7 @@ use numr::ops::{
     ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
-use numr::tensor::Tensor;
+use numr::tensor::{Tensor, TensorId};
 
 pub struct MiniCpm4Model<R: Runtime> {
     /// `[vocab_size, hidden_size]` lookup table. `None` when the config
@@ -214,6 +214,23 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
             )?;
         }
         Ok(adapted)
+    }
+
+    /// Write back updated adapter values across every layer from an
+    /// optimizer's `params` map, keeping every adapter's [`TensorId`]s. See
+    /// [`crate::nn::MaybeLoraLinear::load_lora_parameters`] for the
+    /// per-projection semantics. No prefix or target validation needed here
+    /// — unlike [`Self::apply_lora`], lookup is by ID, not by dotted path,
+    /// so there is no zero-match trap to guard against.
+    pub fn load_lora_parameters(
+        &mut self,
+        params: &std::collections::HashMap<TensorId, Tensor<R>>,
+    ) -> Result<usize> {
+        let mut written = 0;
+        for layer in self.layers.iter_mut() {
+            written += layer.load_lora_parameters(params)?;
+        }
+        Ok(written)
     }
 }
 

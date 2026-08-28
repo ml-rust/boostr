@@ -25,7 +25,7 @@ use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
 use crate::model::traits::ModelClient;
 use crate::nn::{
     LoraTargets, MaybeLoraLinear, Module, RmsNorm, RoPE, adapt_if_targeted, child_params,
-    extend_named, var_contiguous,
+    extend_named, load_lora_child, var_contiguous,
 };
 use numr::autograd::{Var, var_broadcast_to, var_cat, var_narrow, var_reshape};
 use numr::dtype::DType;
@@ -34,6 +34,7 @@ use numr::ops::{
     ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
+use numr::tensor::{Tensor, TensorId};
 
 pub struct LocalEncoder<R: Runtime> {
     /// [`MaybeLoraLinear`], not plain `Linear`: a GGUF stores this
@@ -182,6 +183,22 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
             )?;
         }
         Ok(adapted)
+    }
+
+    /// Write back updated adapter values for `in_proj` and every layer from
+    /// an optimizer's `params` map, keeping every adapter's [`TensorId`]s.
+    /// See [`crate::nn::MaybeLoraLinear::load_lora_parameters`] for the
+    /// per-projection semantics. No prefix or target validation needed here
+    /// — unlike [`Self::apply_lora`], lookup is by ID, not by dotted path.
+    pub fn load_lora_parameters(
+        &mut self,
+        params: &std::collections::HashMap<TensorId, Tensor<R>>,
+    ) -> Result<usize> {
+        let mut written = load_lora_child(&mut self.in_proj, params, "in_proj")?;
+        for layer in self.layers.iter_mut() {
+            written += layer.load_lora_parameters(params)?;
+        }
+        Ok(written)
     }
 }
 

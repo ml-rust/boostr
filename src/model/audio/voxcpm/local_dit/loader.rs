@@ -41,12 +41,13 @@ use crate::model::audio::voxcpm::local_dit::config::LocalDitConfig;
 use crate::model::config::RopeScalingConfig;
 use crate::nn::{
     LoraTargets, MaybeLoraLinear, Module, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding,
-    adapt_if_targeted, child_params, extend_named,
+    adapt_if_targeted, child_params, extend_named, load_lora_child,
 };
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
+use numr::tensor::{Tensor, TensorId};
 use std::path::Path;
 
 /// Default top-level prefix for `feat_decoder`'s tensors in the VoxCPM2
@@ -223,6 +224,27 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
             )?;
         }
         Ok(adapted)
+    }
+
+    /// Write back updated adapter values for `in_proj`/`cond_proj`/`out_proj`,
+    /// `time_mlp`/`delta_time_mlp`, and every layer from an optimizer's
+    /// `params` map, keeping every adapter's [`TensorId`]s. See
+    /// [`crate::nn::MaybeLoraLinear::load_lora_parameters`] for the
+    /// per-projection semantics. No prefix or target validation needed here
+    /// — unlike [`Self::apply_lora`], lookup is by ID, not by dotted path.
+    pub fn load_lora_parameters(
+        &mut self,
+        params: &std::collections::HashMap<TensorId, Tensor<R>>,
+    ) -> Result<usize> {
+        let mut written = load_lora_child(&mut self.in_proj, params, "estimator.in_proj")?;
+        written += load_lora_child(&mut self.cond_proj, params, "estimator.cond_proj")?;
+        written += load_lora_child(&mut self.out_proj, params, "estimator.out_proj")?;
+        written += self.time_mlp.load_lora_parameters(params)?;
+        written += self.delta_time_mlp.load_lora_parameters(params)?;
+        for layer in self.layers.iter_mut() {
+            written += layer.load_lora_parameters(params)?;
+        }
+        Ok(written)
     }
 }
 

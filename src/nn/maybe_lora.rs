@@ -111,6 +111,55 @@ impl<R: Runtime<DType = DType>> MaybeLoraLinear<R> {
         }
     }
 
+    /// Write back updated adapter values from an optimizer's `params` map,
+    /// keeping `lora_a`/`lora_b`'s existing [`TensorId`]s. See
+    /// [`Self::set_adapters_with_ids`] for why a training loop needs an
+    /// in-place overwrite rather than a fresh `Var`.
+    ///
+    /// Looks the adapter factors up BY ID, not by name — unlike
+    /// [`Self::apply_lora`], this needs no `prefix`/target matching. Returns
+    /// the count of adapter TENSORS written (0 or 2).
+    ///
+    /// `Self::Plain` always returns `0`: not every projection is adapted,
+    /// and that is normal. `Self::Lora` with NEITHER id present in `params`
+    /// also returns `0`: the caller trained a subset of adapters and this
+    /// one was not among them. `Self::Lora` with EXACTLY ONE id present
+    /// errors — that is a torn update, half an adapter stepped and half
+    /// not, and it means the caller's `params` map is inconsistent.
+    /// Silently applying only the present half would leave `lora_a` and
+    /// `lora_b` out of sync with each other, which corrupts every forward
+    /// pass through this projection from then on; erroring is the only safe
+    /// response.
+    pub fn load_lora_parameters(
+        &mut self,
+        params: &std::collections::HashMap<TensorId, Tensor<R>>,
+    ) -> Result<usize> {
+        let Self::Lora(lora) = self else {
+            return Ok(0);
+        };
+        let lora_a_id = lora.lora_a().id();
+        let lora_b_id = lora.lora_b().id();
+        match (params.get(&lora_a_id), params.get(&lora_b_id)) {
+            (Some(lora_a), Some(lora_b)) => {
+                lora.set_adapters_with_ids(lora_a.clone(), lora_a_id, lora_b.clone(), lora_b_id);
+                Ok(2)
+            }
+            (None, None) => Ok(0),
+            (Some(_), None) => Err(Error::ModelError {
+                reason: format!(
+                    "torn LoRA update: lora_a ({lora_a_id}) is present in params but its pair \
+                     lora_b ({lora_b_id}) is missing"
+                ),
+            }),
+            (None, Some(_)) => Err(Error::ModelError {
+                reason: format!(
+                    "torn LoRA update: lora_b ({lora_b_id}) is present in params but its pair \
+                     lora_a ({lora_a_id}) is missing"
+                ),
+            }),
+        }
+    }
+
     /// Wrap this projection's frozen base in a fresh [`LoraLinear`] adapter,
     /// in place. `rank`/`alpha`/`device` go straight to [`LoraLinear::new`].
     ///

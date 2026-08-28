@@ -14,6 +14,8 @@ use crate::error::{Error, Result};
 use crate::nn::maybe_lora::MaybeLoraLinear;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
+use numr::tensor::{Tensor, TensorId};
+use std::collections::HashMap;
 
 /// Named projections to wrap with a LoRA adapter, matched by dot-segment
 /// against a full checkpoint-style path (e.g. `"q_proj"`, `"v_proj"`).
@@ -123,6 +125,27 @@ pub fn adapt_if_targeted<R: Runtime<DType = DType>>(
     }
     field.apply_lora(rank, alpha, device)?;
     Ok(1)
+}
+
+/// Write back `field`'s adapter values (if any) from `params`, tagging a
+/// torn-update error with `local_name` so the caller learns WHICH
+/// projection has a half-applied pair, not just which
+/// [`TensorId`](numr::tensor::TensorId)s.
+///
+/// Shared by every leaf `load_lora_parameters` in the crate, mirroring how
+/// [`adapt_if_targeted`] is shared by every leaf `apply_lora`. Unlike
+/// `adapt_if_targeted`, `local_name` here does no path matching — see
+/// [`MaybeLoraLinear::load_lora_parameters`], which looks adapters up by ID.
+pub fn load_lora_child<R: Runtime<DType = DType>>(
+    field: &mut MaybeLoraLinear<R>,
+    params: &HashMap<TensorId, Tensor<R>>,
+    local_name: &str,
+) -> Result<usize> {
+    field
+        .load_lora_parameters(params)
+        .map_err(|source| Error::ModelError {
+            reason: format!("{local_name}: {source}"),
+        })
 }
 
 #[cfg(test)]

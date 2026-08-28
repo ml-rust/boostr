@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
 use crate::nn::{
     LoraTargets, MaybeLoraLinear, Module, adapt_if_targeted, child_params, extend_named,
+    load_lora_child,
 };
 use numr::autograd::{Var, var_silu_mul};
 use numr::dtype::DType;
@@ -22,6 +23,7 @@ use numr::ops::{
     UnaryOps,
 };
 use numr::runtime::Runtime;
+use numr::tensor::{Tensor, TensorId};
 
 /// `gate_proj`/`up_proj`: 2048 -> 6144, `down_proj`: 6144 -> 2048. All
 /// bias-free.
@@ -97,6 +99,21 @@ impl<R: Runtime<DType = DType>> MiniCpm4Mlp<R> {
             "down_proj",
         )?;
         Ok(adapted)
+    }
+
+    /// Write back updated `gate_proj`/`up_proj`/`down_proj` adapter values
+    /// from an optimizer's `params` map, keeping their [`TensorId`]s. See
+    /// [`crate::nn::MaybeLoraLinear::load_lora_parameters`] for the
+    /// per-projection semantics. No prefix needed — unlike
+    /// [`Self::apply_lora`], lookup is by ID.
+    pub fn load_lora_parameters(
+        &mut self,
+        params: &std::collections::HashMap<TensorId, Tensor<R>>,
+    ) -> Result<usize> {
+        let mut written = load_lora_child(&mut self.gate_proj, params, "gate_proj")?;
+        written += load_lora_child(&mut self.up_proj, params, "up_proj")?;
+        written += load_lora_child(&mut self.down_proj, params, "down_proj")?;
+        Ok(written)
     }
 }
 

@@ -7,7 +7,7 @@
 //! that projects that embedding through the model's hidden width.
 
 use crate::error::{Error, Result};
-use crate::nn::lora_targets::{LoraTargets, adapt_if_targeted};
+use crate::nn::lora_targets::{LoraTargets, adapt_if_targeted, load_lora_child};
 use crate::nn::maybe_lora::MaybeLoraLinear;
 use crate::nn::module::{Module, child_params, extend_named};
 use crate::quant::traits::QuantMatmulOps;
@@ -17,7 +17,7 @@ use numr::autograd::{
 use numr::dtype::DType;
 use numr::ops::{ActivationOps, BinaryOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps};
 use numr::runtime::{Runtime, RuntimeClient};
-use numr::tensor::Tensor;
+use numr::tensor::{Tensor, TensorId};
 
 /// Log-spaced sinusoidal position/timestep embedding.
 ///
@@ -197,6 +197,20 @@ impl<R: Runtime<DType = DType>> TimestepEmbedding<R> {
             "linear_2",
         )?;
         Ok(adapted)
+    }
+
+    /// Write back updated `linear_1`/`linear_2` adapter values from an
+    /// optimizer's `params` map, keeping their [`TensorId`]s. See
+    /// [`crate::nn::MaybeLoraLinear::load_lora_parameters`] for the
+    /// per-projection semantics. No prefix needed — unlike
+    /// [`Self::apply_lora`], lookup is by ID.
+    pub fn load_lora_parameters(
+        &mut self,
+        params: &std::collections::HashMap<TensorId, Tensor<R>>,
+    ) -> Result<usize> {
+        let mut written = load_lora_child(&mut self.linear_1, params, "linear_1")?;
+        written += load_lora_child(&mut self.linear_2, params, "linear_2")?;
+        Ok(written)
     }
 }
 

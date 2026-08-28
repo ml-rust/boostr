@@ -11,11 +11,14 @@ use crate::model::audio::voxcpm::bidirectional::attention::BidirectionalAttentio
 use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
 use crate::model::audio::voxcpm::bidirectional::mlp::BidirectionalMlp;
 use crate::model::audio::voxcpm::local_dit::loader::LocalDit;
-use crate::nn::{MaybeQuantLinear, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding, Weight};
+use crate::nn::{
+    MaybeQuantLinear, Module, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding, Weight,
+};
 use crate::test_utils::cpu_setup;
 use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
+use std::collections::HashSet;
 
 pub(crate) const FEAT_DIM: usize = 3;
 pub(crate) const PATCH_SIZE: usize = 2;
@@ -272,5 +275,127 @@ fn rejects_wrong_shapes() {
     assert!(
         m.forward(&client, &good.x, &good.mu, &good.t, &good.cond, &bad_dt)
             .is_err()
+    );
+}
+
+/// [`LocalDit::parameters`]/[`LocalDit::named_parameters`] (via `Module`) on
+/// the 2-layer tiny model built by [`model`]: the largest sub-module this
+/// crate can build standalone in a unit test, reusing the same fixture the
+/// forward-pass tests above already build.
+#[test]
+fn module_enumeration_is_non_empty_with_unique_ids_and_names() {
+    let (_client, device) = cpu_setup();
+    let m = model(2, &device);
+
+    let params = m.parameters();
+    assert!(!params.is_empty(), "a 2-layer LocalDit must own parameters");
+
+    let ids: HashSet<_> = params.iter().map(|var| var.id()).collect();
+    assert_eq!(
+        ids.len(),
+        params.len(),
+        "duplicate TensorId: two fields alias the same Var, so an optimizer \
+         would double-step it"
+    );
+
+    let named = m.named_parameters();
+    assert_eq!(
+        named.len(),
+        params.len(),
+        "named_parameters() must enumerate exactly the same parameters as parameters()"
+    );
+    let names: HashSet<_> = named.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names.len(), named.len(), "duplicate parameter name");
+
+    // Spot-check the dotted paths against the verified checkpoint key
+    // layout in this module's loader doc (`estimator.*`, `estimator.decoder.*`).
+    assert!(named.iter().any(|(n, _)| n == "estimator.in_proj.weight"));
+    assert!(named.iter().any(|(n, _)| n == "estimator.in_proj.bias"));
+    assert!(
+        named
+            .iter()
+            .any(|(n, _)| n == "estimator.decoder.norm.weight")
+    );
+    assert!(
+        named
+            .iter()
+            .any(|(n, _)| n == "estimator.decoder.layers.0.self_attn.q_proj.weight")
+    );
+    assert!(
+        named
+            .iter()
+            .any(|(n, _)| n == "estimator.decoder.layers.1.mlp.down_proj.weight")
+    );
+    assert!(
+        named
+            .iter()
+            .any(|(n, _)| n == "estimator.time_mlp.linear_1.weight")
+    );
+}
+
+/// A block-quantized projection contributes NO `Var<R>` (block-quantized
+/// storage has no gradient — see `MaybeQuantLinear::parameters`), while
+/// dense parameters (the layer's `RmsNorm` weights) still appear.
+#[test]
+fn quantized_projections_contribute_nothing_dense_norms_still_appear() {
+    use crate::quant::format::QuantFormat;
+    use crate::quant::traits::QuantizeOps;
+
+    let (client, device) = cpu_setup();
+    const DIM: usize = 32; // Q4_0 block_size, so a single block quantizes cleanly.
+
+    let quantized_linear = |seed: f32| {
+        let data: Vec<f32> = (0..DIM * DIM)
+            .map(|i| (i as f32 * 0.01 + seed).sin())
+            .collect();
+        let w = Tensor::<CpuRuntime>::from_slice(&data, &[DIM, DIM], &device).unwrap();
+        let qt = client.quantize(&w, QuantFormat::Q4_0).unwrap();
+        MaybeQuantLinear::Quantized(crate::nn::QuantLinear::new(qt, None))
+    };
+
+    let layer = BidirectionalLayer {
+        input_layernorm: norm(&device),
+        self_attn: BidirectionalAttention {
+            q_proj: quantized_linear(1.0),
+            k_proj: quantized_linear(2.0),
+            v_proj: quantized_linear(3.0),
+            o_proj: quantized_linear(4.0),
+            num_heads: NUM_HEADS,
+            num_kv_heads: NUM_KV_HEADS,
+            head_dim: HEAD_DIM,
+        },
+        post_attention_layernorm: norm(&device),
+        mlp: BidirectionalMlp {
+            gate_proj: quantized_linear(5.0),
+            up_proj: quantized_linear(6.0),
+            down_proj: quantized_linear(7.0),
+        },
+    };
+
+    let named = layer.named_parameters();
+    let names: Vec<&str> = named.iter().map(|(n, _)| n.as_str()).collect();
+
+    // Every quantized projection is absent...
+    for proj in [
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+        "mlp.gate_proj",
+        "mlp.up_proj",
+        "mlp.down_proj",
+    ] {
+        assert!(
+            !names.iter().any(|n| n.starts_with(proj)),
+            "quantized projection {proj} must contribute no Var<R>, found in {names:?}"
+        );
+    }
+    // ...while the dense norms still appear.
+    assert!(names.contains(&"input_layernorm.weight"));
+    assert!(names.contains(&"post_attention_layernorm.weight"));
+    assert_eq!(
+        named.len(),
+        2,
+        "only the two RmsNorm weights should survive: {names:?}"
     );
 }

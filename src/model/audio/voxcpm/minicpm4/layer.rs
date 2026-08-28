@@ -16,7 +16,7 @@ use crate::inference::KvCache;
 use crate::model::audio::voxcpm::minicpm4::attention::MiniCpm4Attention;
 use crate::model::audio::voxcpm::minicpm4::mlp::MiniCpm4Mlp;
 use crate::model::traits::ModelClient;
-use crate::nn::{RmsNorm, RoPE};
+use crate::nn::{Module, RmsNorm, RoPE, child_params, extend_named};
 use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{
@@ -96,5 +96,38 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
         let normed = self.post_attention_layernorm.forward(client, &h)?;
         let mlp_out = self.mlp.forward(client, &normed)?;
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
+    }
+}
+
+/// Names ARE the field names (`input_layernorm`, `self_attn.*`,
+/// `post_attention_layernorm`, `mlp.*`) — this matches the
+/// `{prefix}.layers.{i}.*` checkpoint layout
+/// ([`crate::model::audio::voxcpm::minicpm4::loader`]) exactly, so the
+/// owning [`MiniCpm4Model`](super::model::MiniCpm4Model) need only prefix
+/// by `layers.{i}` to reach the full checkpoint key.
+impl<R: Runtime> Module<R> for MiniCpm4Layer<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        let mut params = child_params(&self.input_layernorm);
+        params.extend(child_params(&self.self_attn));
+        params.extend(child_params(&self.post_attention_layernorm));
+        params.extend(child_params(&self.mlp));
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = Vec::new();
+        extend_named(
+            &mut params,
+            "input_layernorm",
+            self.input_layernorm.named_parameters(),
+        );
+        extend_named(&mut params, "self_attn", self.self_attn.named_parameters());
+        extend_named(
+            &mut params,
+            "post_attention_layernorm",
+            self.post_attention_layernorm.named_parameters(),
+        );
+        extend_named(&mut params, "mlp", self.mlp.named_parameters());
+        params
     }
 }

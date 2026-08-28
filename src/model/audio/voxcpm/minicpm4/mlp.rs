@@ -11,7 +11,7 @@
 
 use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
-use crate::nn::MaybeQuantLinear;
+use crate::nn::{MaybeQuantLinear, Module, child_params, extend_named};
 use numr::autograd::{Var, var_silu_mul};
 use numr::dtype::DType;
 use numr::ops::{
@@ -48,5 +48,25 @@ impl<R: Runtime<DType = DType>> MiniCpm4Mlp<R> {
         let up = self.up_proj.forward(client, x)?;
         let hidden = var_silu_mul(&gate, &up, client).map_err(Error::Numr)?;
         self.down_proj.forward(client, &hidden)
+    }
+}
+
+/// Names ARE the field names (`gate_proj`, `up_proj`, `down_proj`) — the
+/// `mlp` checkpoint segment is added by the owning
+/// [`MiniCpm4Layer`](super::layer::MiniCpm4Layer).
+impl<R: Runtime> Module<R> for MiniCpm4Mlp<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        let mut params = child_params(&self.gate_proj);
+        params.extend(child_params(&self.up_proj));
+        params.extend(child_params(&self.down_proj));
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = Vec::new();
+        extend_named(&mut params, "gate_proj", self.gate_proj.named_parameters());
+        extend_named(&mut params, "up_proj", self.up_proj.named_parameters());
+        extend_named(&mut params, "down_proj", self.down_proj.named_parameters());
+        params
     }
 }

@@ -14,7 +14,7 @@ use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::bidirectional::attention::BidirectionalAttention;
 use crate::model::audio::voxcpm::bidirectional::mlp::BidirectionalMlp;
 use crate::model::traits::ModelClient;
-use crate::nn::{RmsNorm, RoPE};
+use crate::nn::{Module, RmsNorm, RoPE, child_params, extend_named};
 use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{
@@ -55,5 +55,39 @@ impl<R: Runtime<DType = DType>> BidirectionalLayer<R> {
         let normed = self.post_attention_layernorm.forward(client, &h)?;
         let mlp_out = self.mlp.forward(client, &normed)?;
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
+    }
+}
+
+/// Names ARE the field names (`input_layernorm`, `self_attn.*`,
+/// `post_attention_layernorm`, `mlp.*`) — this matches the shared
+/// `{layer_prefix}.*` checkpoint layout
+/// ([`crate::model::audio::voxcpm::bidirectional::loader`]) exactly, so the
+/// owning `LocalEncoder`/`LocalDit` need only prefix by `{layer_prefix}` (a
+/// numeric layer index under `encoder.layers`/`decoder.layers`) to reach the
+/// full checkpoint key.
+impl<R: Runtime> Module<R> for BidirectionalLayer<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        let mut params = child_params(&self.input_layernorm);
+        params.extend(child_params(&self.self_attn));
+        params.extend(child_params(&self.post_attention_layernorm));
+        params.extend(child_params(&self.mlp));
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = Vec::new();
+        extend_named(
+            &mut params,
+            "input_layernorm",
+            self.input_layernorm.named_parameters(),
+        );
+        extend_named(&mut params, "self_attn", self.self_attn.named_parameters());
+        extend_named(
+            &mut params,
+            "post_attention_layernorm",
+            self.post_attention_layernorm.named_parameters(),
+        );
+        extend_named(&mut params, "mlp", self.mlp.named_parameters());
+        params
     }
 }

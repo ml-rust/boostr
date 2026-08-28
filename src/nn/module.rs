@@ -97,6 +97,45 @@ pub trait TrainMode {
     }
 }
 
+/// Collect a child module's bare `Var<R>` references, for composing a
+/// container's own `Module::parameters()`.
+///
+/// Goes through `parameters_with_ids()` (trait-dispatched, unambiguous)
+/// rather than calling `child.parameters()` directly: several leaf types
+/// (`MaybeQuantLinear`, `RmsNorm`, `Embedding`, `MaybeQuantEmbedding`, ...)
+/// ALSO define an inherent `parameters() -> Vec<(TensorId, &Var<R>)>` for
+/// their own optimizer-facing callers, and Rust's method resolution always
+/// picks that inherent method over `Module::parameters`'s `Vec<&Var<R>>` —
+/// silently producing a type error at best, or the wrong method at worst if
+/// the signatures ever coincide. Calling through this generic function
+/// pins the dispatch to the trait.
+pub fn child_params<R: Runtime, M: Module<R> + ?Sized>(child: &M) -> Vec<&Var<R>> {
+    child
+        .parameters_with_ids()
+        .into_iter()
+        .map(|(_, var)| var)
+        .collect()
+}
+
+/// Prefix a child module's `named_parameters()` with a dotted path segment
+/// and append the result to `params`.
+///
+/// Shared by every composite `Module` impl (container modules that own
+/// child modules rather than raw `Var<R>` fields) so the dotted-path
+/// convention — `"{prefix}.{child_name}"` — is written once instead of
+/// reimplemented per container.
+pub fn extend_named<'a, R: Runtime>(
+    params: &mut Vec<(String, &'a Var<R>)>,
+    prefix: &str,
+    child: Vec<(String, &'a Var<R>)>,
+) {
+    params.extend(
+        child
+            .into_iter()
+            .map(|(name, var)| (format!("{prefix}.{name}"), var)),
+    );
+}
+
 /// State dict serialization for model checkpointing.
 ///
 /// Compatible with SafeTensors format via `boostr::format::safetensors`.

@@ -8,6 +8,7 @@
 
 use crate::error::{Error, Result};
 use crate::nn::linear::MaybeQuantLinear;
+use crate::nn::module::{Module, child_params, extend_named};
 use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{
     Var, var_cat, var_cos, var_mul, var_mul_scalar, var_reshape, var_silu, var_sin,
@@ -157,6 +158,24 @@ impl<R: Runtime<DType = DType>> TimestepEmbedding<R> {
         let hidden = self.linear_1.forward(client, x)?;
         let hidden = var_silu(&hidden, client).map_err(Error::Numr)?;
         self.linear_2.forward(client, &hidden)
+    }
+}
+
+/// Names ARE the field names (`linear_1`, `linear_2`) — the owning
+/// `time_mlp`/`delta_time_mlp` checkpoint segment is added by the caller
+/// (VoxCPM2's local DiT).
+impl<R: Runtime> Module<R> for TimestepEmbedding<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        let mut params = child_params(&self.linear_1);
+        params.extend(child_params(&self.linear_2));
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = Vec::new();
+        extend_named(&mut params, "linear_1", self.linear_1.named_parameters());
+        extend_named(&mut params, "linear_2", self.linear_2.named_parameters());
+        params
     }
 }
 

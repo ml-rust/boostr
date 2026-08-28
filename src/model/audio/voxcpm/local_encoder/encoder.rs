@@ -23,7 +23,9 @@
 use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
 use crate::model::traits::ModelClient;
-use crate::nn::{MaybeQuantLinear, RmsNorm, RoPE, var_contiguous};
+use crate::nn::{
+    MaybeQuantLinear, Module, RmsNorm, RoPE, child_params, extend_named, var_contiguous,
+};
 use numr::autograd::{Var, var_broadcast_to, var_cat, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
@@ -114,5 +116,40 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
         // materialized before it can reinterpret the layout.
         let cls = var_contiguous(&var_narrow(&h, 1, 0, 1).map_err(Error::Numr)?)?;
         var_reshape(&cls, &[batch, seq_t, self.hidden_dim]).map_err(Error::Numr)
+    }
+}
+
+/// Names mirror `feat_encoder.{in_proj,special_token,encoder.layers.{i},
+/// encoder.norm}` (checkpoint prefix `feat_encoder` added by
+/// [`VoxCpm2Model`](crate::model::audio::voxcpm::model::VoxCpm2Model)).
+/// `layers`/`norm` are hardcoded under an `encoder.` segment rather than
+/// their bare field names: the checkpoint nests the transformer stack under
+/// `feat_encoder.encoder.*` (see
+/// [`crate::model::audio::voxcpm::local_encoder::loader`]), a level this
+/// struct's field names do not carry.
+impl<R: Runtime> Module<R> for LocalEncoder<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        let mut params = child_params(&self.in_proj);
+        params.push(&self.special_token);
+        for layer in &self.layers {
+            params.extend(child_params(layer));
+        }
+        params.extend(child_params(&self.norm));
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = Vec::new();
+        extend_named(&mut params, "in_proj", self.in_proj.named_parameters());
+        params.push(("special_token".to_string(), &self.special_token));
+        for (i, layer) in self.layers.iter().enumerate() {
+            extend_named(
+                &mut params,
+                &format!("encoder.layers.{i}"),
+                layer.named_parameters(),
+            );
+        }
+        extend_named(&mut params, "encoder.norm", self.norm.named_parameters());
+        params
     }
 }

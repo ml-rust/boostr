@@ -32,7 +32,11 @@ use std::path::Path;
 
 /// Checkpoint prefix for `fsq_layer`'s own tensors. The other six
 /// projections live at the checkpoint root (empty prefix).
-const FSQ_LAYER_PREFIX: &str = "fsq_layer";
+///
+/// `pub(crate)` so [`VoxCpm2Model`](crate::model::audio::voxcpm::model::VoxCpm2Model)'s
+/// `Module::named_parameters` reuses this exact constant instead of a
+/// duplicated `"fsq_layer"` literal that could drift from the loader.
+pub(crate) const FSQ_LAYER_PREFIX: &str = "fsq_layer";
 
 impl<R: Runtime<DType = DType>> ScalarQuantization<R>
 where

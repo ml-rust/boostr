@@ -8,7 +8,7 @@
 //! is deliberately NOT ported here.
 
 use crate::error::{Error, Result};
-use crate::nn::MaybeQuantLinear;
+use crate::nn::{MaybeQuantLinear, Module, child_params, extend_named};
 use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{Var, var_div_scalar, var_mul_scalar, var_silu, var_tanh};
 use numr::dtype::DType;
@@ -102,6 +102,26 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
     }
 }
 
+/// Names mirror `fsq_layer.{in_proj,out_proj}.*` — the checkpoint prefix
+/// (`fsq_layer`) is added by the top-level [`crate::model::audio::voxcpm::model::VoxCpm2Model`]
+/// composition, not here. Both projections may enumerate empty (a
+/// block-quantized `in_proj`/`out_proj` has no `Var<R>` weight) — see
+/// [`MaybeQuantLinear::parameters`](crate::nn::linear::MaybeQuantLinear).
+impl<R: Runtime> Module<R> for ScalarQuantization<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        let mut params = child_params(&self.in_proj);
+        params.extend(child_params(&self.out_proj));
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = Vec::new();
+        extend_named(&mut params, "in_proj", self.in_proj.named_parameters());
+        extend_named(&mut params, "out_proj", self.out_proj.named_parameters());
+        params
+    }
+}
+
 /// The six auxiliary projections around `fsq_layer` that a future
 /// `VoxCpm2Model` orchestrator will own: encoder/DiT bridges and the stop
 /// classifier. See [`crate::model::audio::voxcpm::fsq::loader`] for the
@@ -141,6 +161,51 @@ impl<R: Runtime<DType = DType>> AuxProjections<R> {
         let projected = self.stop_proj.forward(client, hidden)?;
         let activated = var_silu(&projected, client).map_err(Error::Numr)?;
         self.stop_head.forward(client, &activated)
+    }
+}
+
+/// Names ARE the checkpoint root-level keys verbatim (`enc_to_lm_proj`,
+/// `lm_to_dit_proj`, `res_to_dit_proj`, `fusion_concat_proj`, `stop_proj`,
+/// `stop_head`) — these six live at the checkpoint root with no shared
+/// prefix (see [`crate::model::audio::voxcpm::fsq::loader`]), so the
+/// top-level [`VoxCpm2Model`](crate::model::audio::voxcpm::model::VoxCpm2Model)
+/// composition adds NO prefix here, unlike every other sub-model.
+impl<R: Runtime> Module<R> for AuxProjections<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        let mut params = child_params(&self.enc_to_lm_proj);
+        params.extend(child_params(&self.lm_to_dit_proj));
+        params.extend(child_params(&self.res_to_dit_proj));
+        params.extend(child_params(&self.fusion_concat_proj));
+        params.extend(child_params(&self.stop_proj));
+        params.extend(child_params(&self.stop_head));
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = Vec::new();
+        extend_named(
+            &mut params,
+            "enc_to_lm_proj",
+            self.enc_to_lm_proj.named_parameters(),
+        );
+        extend_named(
+            &mut params,
+            "lm_to_dit_proj",
+            self.lm_to_dit_proj.named_parameters(),
+        );
+        extend_named(
+            &mut params,
+            "res_to_dit_proj",
+            self.res_to_dit_proj.named_parameters(),
+        );
+        extend_named(
+            &mut params,
+            "fusion_concat_proj",
+            self.fusion_concat_proj.named_parameters(),
+        );
+        extend_named(&mut params, "stop_proj", self.stop_proj.named_parameters());
+        extend_named(&mut params, "stop_head", self.stop_head.named_parameters());
+        params
     }
 }
 

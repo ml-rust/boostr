@@ -39,7 +39,11 @@ use crate::model::audio::voxcpm::bidirectional::{
 use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
 use crate::model::audio::voxcpm::local_dit::config::LocalDitConfig;
 use crate::model::config::RopeScalingConfig;
-use crate::nn::{MaybeQuantLinear, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding};
+use crate::nn::{
+    MaybeQuantLinear, Module, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding, child_params,
+    extend_named,
+};
+use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
@@ -276,6 +280,73 @@ where
     let linear_1 = tl.linear(&format!("{name}.linear_1"), dim, dim, true)?;
     let linear_2 = tl.linear(&format!("{name}.linear_2"), dim, dim, true)?;
     Ok(TimestepEmbedding::new(linear_1, linear_2))
+}
+
+/// Names mirror `feat_decoder.estimator.*` (checkpoint prefix `feat_decoder`
+/// added by [`VoxCpm2Model`](crate::model::audio::voxcpm::model::VoxCpm2Model)).
+/// `estimator.decoder.layers.{i}`/`estimator.decoder.norm` hardcode a
+/// `decoder.` segment this struct's own field names (`layers`, `norm`) do
+/// not carry — the checkpoint nests the transformer block stack under
+/// `feat_decoder.estimator.decoder.*` (see the module doc's key layout).
+/// `rope` and `time_embeddings` carry no `Var<R>` (`time_embeddings`'s
+/// frequency table is a fixed, non-learned constant — see
+/// [`SinusoidalPosEmb`]) and are correctly absent from every collection
+/// below.
+impl<R: Runtime> Module<R> for LocalDit<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        let mut params = child_params(&self.in_proj);
+        params.extend(child_params(&self.cond_proj));
+        params.extend(child_params(&self.out_proj));
+        params.extend(child_params(&self.time_mlp));
+        params.extend(child_params(&self.delta_time_mlp));
+        for layer in &self.layers {
+            params.extend(child_params(layer));
+        }
+        params.extend(child_params(&self.norm));
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = Vec::new();
+        extend_named(
+            &mut params,
+            "estimator.in_proj",
+            self.in_proj.named_parameters(),
+        );
+        extend_named(
+            &mut params,
+            "estimator.cond_proj",
+            self.cond_proj.named_parameters(),
+        );
+        extend_named(
+            &mut params,
+            "estimator.out_proj",
+            self.out_proj.named_parameters(),
+        );
+        extend_named(
+            &mut params,
+            "estimator.time_mlp",
+            self.time_mlp.named_parameters(),
+        );
+        extend_named(
+            &mut params,
+            "estimator.delta_time_mlp",
+            self.delta_time_mlp.named_parameters(),
+        );
+        for (i, layer) in self.layers.iter().enumerate() {
+            extend_named(
+                &mut params,
+                &format!("estimator.decoder.layers.{i}"),
+                layer.named_parameters(),
+            );
+        }
+        extend_named(
+            &mut params,
+            "estimator.decoder.norm",
+            self.norm.named_parameters(),
+        );
+        params
+    }
 }
 
 #[cfg(test)]

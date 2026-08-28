@@ -31,7 +31,7 @@ use crate::model::attention_core::{
 };
 use crate::model::traits::ModelClient;
 use crate::nn::var_ops::{repeat_kv, var_contiguous};
-use crate::nn::{MaybeQuantLinear, RoPE};
+use crate::nn::{MaybeQuantLinear, Module, RoPE, child_params, extend_named};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use numr::autograd::{Var, var_narrow, var_permute, var_reshape};
 use numr::dtype::DType;
@@ -313,6 +313,30 @@ fn missing_rope() -> Error {
         reason: "expected Some(RoPE) for a MiniCPM4 block with no_rope unset, got None; \
                  only a no_rope (NoPE) block runs without a rotary table"
             .to_string(),
+    }
+}
+
+/// Names ARE the field names (`q_proj`, `k_proj`, `v_proj`, `o_proj`) —
+/// the `self_attn` checkpoint segment is added by the owning
+/// [`MiniCpm4Layer`](super::layer::MiniCpm4Layer). `no_rope` carries no
+/// `Var<R>` (it is a `bool`), so it is correctly absent from every
+/// collection below.
+impl<R: Runtime> Module<R> for MiniCpm4Attention<R> {
+    fn parameters(&self) -> Vec<&Var<R>> {
+        let mut params = child_params(&self.q_proj);
+        params.extend(child_params(&self.k_proj));
+        params.extend(child_params(&self.v_proj));
+        params.extend(child_params(&self.o_proj));
+        params
+    }
+
+    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
+        let mut params = Vec::new();
+        extend_named(&mut params, "q_proj", self.q_proj.named_parameters());
+        extend_named(&mut params, "k_proj", self.k_proj.named_parameters());
+        extend_named(&mut params, "v_proj", self.v_proj.named_parameters());
+        extend_named(&mut params, "o_proj", self.o_proj.named_parameters());
+        params
     }
 }
 

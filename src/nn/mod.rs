@@ -46,7 +46,7 @@ pub use loss::{
 pub use lstm::{BiLstm, Lstm};
 pub use maybe_lora::MaybeLoraLinear;
 pub use mla::{Mla, MlaConfig, MlaWeights};
-pub use module::{Module, StateDict, TrainMode};
+pub use module::{Module, StateDict, TrainMode, child_params, extend_named};
 pub use moe::{
     Expert, MoeLayer, MoeLayerConfig, MoeLoadBalanceLossMode, MoeOutput, MoeRouter,
     MoeRouterConfig, RouterOutput,

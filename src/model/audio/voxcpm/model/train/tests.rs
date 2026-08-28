@@ -39,6 +39,7 @@ use crate::nn::{LoraTargets, MaybeLoraLinear, Module};
 use crate::test_utils::cpu_setup;
 use crate::trainer::{SimpleTrainer, TrainingConfig};
 use numr::autograd::backward;
+use numr::ops::RandomOps;
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 use numr::tensor::TensorId;
 use std::collections::HashMap;
@@ -65,7 +66,7 @@ fn cfm_loss_with_noise_is_finite_and_positive() {
     let ts = Tensor::<CpuRuntime>::from_slice(&[0.2f32, 0.5, 0.8], &[T], &device).expect("t");
 
     let loss = generator
-        .cfm_loss_with_noise(&client, &st.prefill, &target, &ts, &noise)
+        .cfm_loss_with_noise(&client, &st.prefill, &target, &ts, &noise, false)
         .expect("cfm_loss_with_noise");
     let val = loss.tensor().to_vec::<f32>()[0];
     assert!(val.is_finite(), "loss must be finite, got {val}");
@@ -84,7 +85,7 @@ fn cfm_loss_seeded_wrapper_is_finite_and_positive() {
 
     let target = target_patches(2.3, &device);
     let loss = generator
-        .cfm_loss(&client, &st.prefill, &target, 42)
+        .cfm_loss(&client, &st.prefill, &target, 42, 0.0)
         .expect("cfm_loss");
     let val = loss.tensor().to_vec::<f32>()[0];
     assert!(val.is_finite(), "loss must be finite, got {val}");
@@ -193,7 +194,7 @@ fn gradients_reach_every_lora_adapter() {
 
     let target = target_patches(0.6, &device);
     let loss = generator
-        .cfm_loss(&client, &st.prefill, &target, 99)
+        .cfm_loss(&client, &st.prefill, &target, 99, 0.0)
         .expect("cfm_loss");
     let grads = backward(&loss, &client).expect("backward");
 
@@ -320,7 +321,7 @@ fn cfm_loss_decreases_when_overfitting_one_batch() {
         let loss = {
             let generator = fx.generator();
             generator
-                .cfm_loss_with_noise(&client, &st.prefill, &target, &ts, &noise)
+                .cfm_loss_with_noise(&client, &st.prefill, &target, &ts, &noise, false)
                 .expect("cfm_loss_with_noise")
         };
         let loss_val = loss.tensor().to_vec::<f32>()[0] as f64;
@@ -369,7 +370,7 @@ fn cfm_loss_with_noise_rejects_bad_shapes() {
             .expect("zeros");
     assert!(
         generator
-            .cfm_loss_with_noise(&client, &st.prefill, &bad_target, &ts, &noise)
+            .cfm_loss_with_noise(&client, &st.prefill, &bad_target, &ts, &noise, false)
             .is_err(),
         "a shape-mismatched target_patches must error, not panic"
     );
@@ -377,7 +378,7 @@ fn cfm_loss_with_noise_rejects_bad_shapes() {
     let bad_t = Tensor::<CpuRuntime>::zeros(&[T + 1], DType::F32, &device).expect("zeros");
     assert!(
         generator
-            .cfm_loss_with_noise(&client, &st.prefill, &target, &bad_t, &noise)
+            .cfm_loss_with_noise(&client, &st.prefill, &target, &bad_t, &noise, false)
             .is_err(),
         "a shape-mismatched t must error, not panic"
     );
@@ -387,7 +388,7 @@ fn cfm_loss_with_noise_rejects_bad_shapes() {
             .expect("zeros");
     assert!(
         generator
-            .cfm_loss_with_noise(&client, &st.prefill, &target, &ts, &bad_noise)
+            .cfm_loss_with_noise(&client, &st.prefill, &target, &ts, &bad_noise, false)
             .is_err(),
         "a shape-mismatched noise must error, not panic"
     );
@@ -399,7 +400,7 @@ fn cfm_loss_with_noise_rejects_bad_shapes() {
         .expect("zeros");
     assert!(
         generator
-            .cfm_loss_with_noise(&client, &st.prefill, &empty, &empty_t, &empty_noise)
+            .cfm_loss_with_noise(&client, &st.prefill, &empty, &empty_t, &empty_noise, false)
             .is_err(),
         "T = 0 must error, not panic"
     );
@@ -417,7 +418,9 @@ fn cfm_loss_seeded_wrapper_rejects_bad_target_shape() {
         .reshape(&[T * PATCH_SIZE, FEAT_DIM])
         .expect("reshape to wrong rank");
     assert!(
-        generator.cfm_loss(&client, &st.prefill, &bad, 7).is_err(),
+        generator
+            .cfm_loss(&client, &st.prefill, &bad, 7, 0.0)
+            .is_err(),
         "a rank-2 target_patches must error, not panic"
     );
 }
@@ -555,7 +558,7 @@ fn stop_loss_reaches_stop_head_but_diff_alone_does_not() {
     let diff_only = {
         let generator = fx.generator();
         generator
-            .cfm_loss_with_noise(&client, &st.prefill, &target, &ts, &noise)
+            .cfm_loss_with_noise(&client, &st.prefill, &target, &ts, &noise, false)
             .expect("cfm_loss_with_noise")
     };
     let diff_grads = backward(&diff_only, &client).expect("backward diff_only");
@@ -579,7 +582,7 @@ fn stop_loss_reaches_stop_head_but_diff_alone_does_not() {
     let losses = {
         let generator = fx.generator();
         generator
-            .train_losses_with_noise(&client, &st.prefill, &target, &ts, &noise, 1.0, 1.0)
+            .train_losses_with_noise(&client, &st.prefill, &target, &ts, &noise, 1.0, 1.0, false)
             .expect("train_losses_with_noise")
     };
     let total_grads = backward(&losses.total, &client).expect("backward total");
@@ -620,12 +623,12 @@ fn lambda_stop_zero_matches_diff_loss_alone() {
     let ts = Tensor::<CpuRuntime>::from_slice(&[0.2f32, 0.5, 0.8], &[T], &device).expect("t");
 
     let diff_alone = generator
-        .cfm_loss_with_noise(&client, &st.prefill, &target, &ts, &noise)
+        .cfm_loss_with_noise(&client, &st.prefill, &target, &ts, &noise, false)
         .expect("cfm_loss_with_noise");
     let diff_alone_val = diff_alone.tensor().to_vec::<f32>()[0];
 
     let losses = generator
-        .train_losses_with_noise(&client, &st.prefill, &target, &ts, &noise, 1.0, 0.0)
+        .train_losses_with_noise(&client, &st.prefill, &target, &ts, &noise, 1.0, 0.0, false)
         .expect("train_losses_with_noise");
     let total_val = losses.total.tensor().to_vec::<f32>()[0];
     let diff_val = losses.diff.tensor().to_vec::<f32>()[0];
@@ -640,4 +643,180 @@ fn lambda_stop_zero_matches_diff_loss_alone() {
         "TrainLosses::diff must equal cfm_loss_with_noise's own value: \
          diff={diff_val} diff_alone={diff_alone_val}"
     );
+}
+
+/// `drop_cond = true` must produce a finite loss that DIFFERS from
+/// `drop_cond = false` on the identical `t`/`noise` — otherwise the
+/// dropout parameter is wired in but never actually changes anything.
+#[test]
+fn drop_cond_true_changes_the_diff_loss() {
+    let (client, device) = cpu_setup();
+    let fx = fixture(false, &device);
+    let generator = fx.generator();
+    let st = state(&fx, &device);
+
+    let target = target_patches(0.6, &device);
+    let noise = target_patches(1.9, &device);
+    let ts = Tensor::<CpuRuntime>::from_slice(&[0.2f32, 0.5, 0.8], &[T], &device).expect("t");
+
+    let loss_kept = generator
+        .cfm_loss_with_noise(&client, &st.prefill, &target, &ts, &noise, false)
+        .expect("cfm_loss_with_noise drop_cond=false");
+    let loss_dropped = generator
+        .cfm_loss_with_noise(&client, &st.prefill, &target, &ts, &noise, true)
+        .expect("cfm_loss_with_noise drop_cond=true");
+
+    let val_kept = loss_kept.tensor().to_vec::<f32>()[0];
+    let val_dropped = loss_dropped.tensor().to_vec::<f32>()[0];
+    assert!(
+        val_dropped.is_finite(),
+        "drop_cond=true loss must be finite, got {val_dropped}"
+    );
+    assert!(
+        (val_dropped - val_kept).abs() > 1e-6,
+        "drop_cond=true must change the diff loss: kept={val_kept} dropped={val_dropped}"
+    );
+}
+
+/// `drop_cond = false` must be bit-identical to the pre-dropout behaviour:
+/// [`PatchGenerator::teacher_forced_conditioning`] followed by
+/// [`PatchGenerator::cfm_loss_from_conditioning`] directly, with no dropout
+/// applied anywhere. Pins that the default path is untouched by this unit.
+#[test]
+fn drop_cond_false_matches_conditioning_computed_directly() {
+    let (client, device) = cpu_setup();
+    let fx = fixture(false, &device);
+    let generator = fx.generator();
+    let st = state(&fx, &device);
+
+    let target = target_patches(0.6, &device);
+    let noise = target_patches(1.9, &device);
+    let ts = Tensor::<CpuRuntime>::from_slice(&[0.2f32, 0.5, 0.8], &[T], &device).expect("t");
+
+    let via_wrapper = generator
+        .cfm_loss_with_noise(&client, &st.prefill, &target, &ts, &noise, false)
+        .expect("cfm_loss_with_noise");
+
+    let cond = generator
+        .teacher_forced_conditioning(&client, &st.prefill, &target)
+        .expect("teacher_forced_conditioning");
+    let direct = generator
+        .cfm_loss_from_conditioning(&client, &cond, &target, &ts, &noise, T)
+        .expect("cfm_loss_from_conditioning");
+
+    let val_wrapper = via_wrapper.tensor().to_vec::<f32>()[0];
+    let val_direct = direct.tensor().to_vec::<f32>()[0];
+    assert_eq!(
+        val_wrapper.to_bits(),
+        val_direct.to_bits(),
+        "drop_cond=false must be bit-identical to the undropped direct computation: \
+         wrapper={val_wrapper} direct={val_direct}"
+    );
+}
+
+/// The stop loss reads `cond.lm_hidden`, not `cond.mu`, so `drop_cond` must
+/// leave it numerically IDENTICAL — the dropout must not leak into the stop
+/// term.
+#[test]
+fn drop_cond_does_not_change_the_stop_loss() {
+    let (client, device) = cpu_setup();
+    let fx = fixture(false, &device);
+    let generator = fx.generator();
+    let st = state(&fx, &device);
+
+    let target = target_patches(0.6, &device);
+    let noise = target_patches(1.9, &device);
+    let ts = Tensor::<CpuRuntime>::from_slice(&[0.2f32, 0.5, 0.8], &[T], &device).expect("t");
+
+    let kept = generator
+        .train_losses_with_noise(&client, &st.prefill, &target, &ts, &noise, 1.0, 1.0, false)
+        .expect("train_losses_with_noise drop_cond=false");
+    let dropped = generator
+        .train_losses_with_noise(&client, &st.prefill, &target, &ts, &noise, 1.0, 1.0, true)
+        .expect("train_losses_with_noise drop_cond=true");
+
+    let stop_kept = kept.stop.tensor().to_vec::<f32>()[0];
+    let stop_dropped = dropped.stop.tensor().to_vec::<f32>()[0];
+    assert_eq!(
+        stop_kept.to_bits(),
+        stop_dropped.to_bits(),
+        "loss/stop must be identical regardless of drop_cond: kept={stop_kept} \
+         dropped={stop_dropped}"
+    );
+}
+
+/// `training_cfg_rate = 0.0` must never drop and `1.0` must always drop,
+/// checked through the seeded wrapper across several seeds by comparing
+/// against the deterministic form with the matching `t`/`noise` draws and
+/// an explicit `drop_cond`.
+#[test]
+fn training_cfg_rate_boundaries_are_deterministic() {
+    let (client, device) = cpu_setup();
+    let fx = fixture(false, &device);
+    let generator = fx.generator();
+    let st = state(&fx, &device);
+
+    let target = target_patches(0.6, &device);
+    let dtype = target.dtype();
+    let shape = target.shape();
+
+    for seed in [1u64, 42, 100, 9_999] {
+        let t_draw = client
+            .rand_seeded(&[T], dtype, seed)
+            .expect("rand_seeded t");
+        let noise_draw = client
+            .randn_seeded(shape, dtype, seed.wrapping_add(1))
+            .expect("randn_seeded noise");
+
+        let never_dropped = generator
+            .cfm_loss(&client, &st.prefill, &target, seed, 0.0)
+            .expect("cfm_loss rate=0.0");
+        let never_dropped_direct = generator
+            .cfm_loss_with_noise(&client, &st.prefill, &target, &t_draw, &noise_draw, false)
+            .expect("cfm_loss_with_noise drop_cond=false");
+        assert_eq!(
+            never_dropped.tensor().to_vec::<f32>()[0].to_bits(),
+            never_dropped_direct.tensor().to_vec::<f32>()[0].to_bits(),
+            "training_cfg_rate=0.0 must never drop (seed={seed})"
+        );
+
+        let always_dropped = generator
+            .cfm_loss(&client, &st.prefill, &target, seed, 1.0)
+            .expect("cfm_loss rate=1.0");
+        let always_dropped_direct = generator
+            .cfm_loss_with_noise(&client, &st.prefill, &target, &t_draw, &noise_draw, true)
+            .expect("cfm_loss_with_noise drop_cond=true");
+        assert_eq!(
+            always_dropped.tensor().to_vec::<f32>()[0].to_bits(),
+            always_dropped_direct.tensor().to_vec::<f32>()[0].to_bits(),
+            "training_cfg_rate=1.0 must always drop (seed={seed})"
+        );
+    }
+}
+
+/// An out-of-range `training_cfg_rate` must error, not panic — from both
+/// [`PatchGenerator::cfm_loss`] and [`PatchGenerator::train_losses`].
+#[test]
+fn training_cfg_rate_out_of_range_errors() {
+    let (client, device) = cpu_setup();
+    let fx = fixture(false, &device);
+    let generator = fx.generator();
+    let st = state(&fx, &device);
+
+    let target = target_patches(0.6, &device);
+
+    for bad_rate in [-0.1, 1.5] {
+        assert!(
+            generator
+                .cfm_loss(&client, &st.prefill, &target, 1, bad_rate)
+                .is_err(),
+            "cfm_loss must reject training_cfg_rate={bad_rate}, not panic"
+        );
+        assert!(
+            generator
+                .train_losses(&client, &st.prefill, &target, 1, 1.0, 1.0, bad_rate)
+                .is_err(),
+            "train_losses must reject training_cfg_rate={bad_rate}, not panic"
+        );
+    }
 }

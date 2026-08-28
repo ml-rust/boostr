@@ -27,7 +27,10 @@
 //! re-running `base_lm`/`residual_lm`'s full-sequence forward a second
 //! time.
 
-use super::{Error, ModelClient, PatchGenerator, PrefillState, Result, TeacherForcedConditioning};
+use super::{
+    Error, ModelClient, PatchGenerator, PrefillState, Result, TeacherForcedConditioning,
+    apply_cond_dropout, check_training_cfg_rate, draw_drop_cond,
+};
 use crate::model::audio::voxcpm::model::generate::STOP_CLASS;
 use crate::nn::cross_entropy_loss;
 use crate::quant::traits::DequantOps;
@@ -140,6 +143,15 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// `lambda_diff * diff` (`stop` is still computed and returned, just
     /// weighted out of `total`) — see `train/tests.rs` for the check that
     /// pins this against [`Self::cfm_loss_with_noise`] directly.
+    ///
+    /// `drop_cond` (upstream's `training_cfg_rate` draw) is applied to
+    /// `cond` ONCE, right after [`Self::teacher_forced_conditioning`]
+    /// returns, so BOTH `diff` and `stop` see the same conditioning object
+    /// — see [`super::apply_cond_dropout`] and
+    /// [`Self::cfm_loss_with_noise`]'s `drop_cond` doc for why only `mu` is
+    /// zeroed. `stop` reads `cond.lm_hidden`, not `cond.mu`, so it is
+    /// numerically UNAFFECTED by `drop_cond` either way — the dropout is
+    /// deliberately scoped to the diffusion term alone, matching upstream.
     #[allow(clippy::too_many_arguments)]
     pub fn train_losses_with_noise<C>(
         &self,
@@ -150,6 +162,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         noise: &Tensor<R>,
         lambda_diff: f64,
         lambda_stop: f64,
+        drop_cond: bool,
     ) -> Result<TrainLosses<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -192,6 +205,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         // full-sequence forward exactly once, the same as
         // `cfm_loss_with_noise` alone would.
         let cond = self.teacher_forced_conditioning(client, prefill, target_patches)?;
+        let cond = apply_cond_dropout(cond, drop_cond)?;
 
         let diff =
             self.cfm_loss_from_conditioning(client, &cond, target_patches, t, noise, tcount)?;
@@ -207,6 +221,12 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// [`Self::train_losses_with_noise`], drawing `t` and `noise` itself —
     /// the combined-loss counterpart of [`Self::cfm_loss`], same seeded-draw
     /// convention (`t` from `seed`, `noise` from `seed + 1`).
+    ///
+    /// `training_cfg_rate` is upstream's per-step conditioning-dropout
+    /// probability, drawn from `seed.wrapping_add(2)` — see
+    /// [`super::PatchGenerator::cfm_loss`]'s doc for the default (0.1) and
+    /// why 0 is discouraged. Must be in `[0.0, 1.0]`, else
+    /// [`Error::InvalidArgument`].
     #[allow(clippy::too_many_arguments)]
     pub fn train_losses<C>(
         &self,
@@ -216,6 +236,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         seed: u64,
         lambda_diff: f64,
         lambda_stop: f64,
+        training_cfg_rate: f64,
     ) -> Result<TrainLosses<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R> + RandomOps<R>,
@@ -232,6 +253,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + TypeConversionOps<R>
             + DequantOps<R>,
     {
+        check_training_cfg_rate(training_cfg_rate)?;
         let shape = target_patches.shape();
         if shape.len() != 3 || shape[0] == 0 {
             return Err(Error::InvalidArgument {
@@ -244,6 +266,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
 
         let t = client.rand_seeded(&[tcount], dtype, seed)?;
         let noise = client.randn_seeded(shape, dtype, seed.wrapping_add(1))?;
+        let drop_cond = draw_drop_cond::<C, R>(client, seed, training_cfg_rate)?;
         self.train_losses_with_noise(
             client,
             prefill,
@@ -252,6 +275,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             &noise,
             lambda_diff,
             lambda_stop,
+            drop_cond,
         )
     }
 }

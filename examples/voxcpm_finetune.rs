@@ -6,7 +6,7 @@
 //!     --audiovae audiovae.safetensors --manifest FILE.tsv \
 //!     [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] [--alpha 32] \
 //!     [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors] \
-//!     [--lambda-stop 1.0]
+//!     [--lambda-stop 1.0] [--training-cfg-rate 0.1]
 //! ```
 //!
 //! `CKPT_DIR` holds `config.json`, `model.safetensors` and `tokenizer.json`,
@@ -141,6 +141,11 @@ const DEFAULT_LAMBDA_STOP: f64 = 1.0;
 /// default — unlike `lambda_stop`, upstream's FAQ names no failure mode
 /// that calls for retuning it, so it is not exposed as a flag.
 const LAMBDA_DIFF: f64 = 1.0;
+/// `training_cfg_rate` — upstream's default, matched here. Upstream's FAQ
+/// calls text-ignoring "the most common fine-tuning failure mode" and says
+/// explicitly not to train with this at 0: `--training-cfg-rate` exists so
+/// an operator can raise it, not so it gets turned off.
+const DEFAULT_TRAINING_CFG_RATE: f64 = 0.1;
 
 /// Where the transformer stack's weights come from.
 ///
@@ -186,6 +191,12 @@ struct Args {
     seed: u64,
     out: Option<PathBuf>,
     lambda_stop: f64,
+    /// Upstream's `training_cfg_rate`: the per-step probability of
+    /// conditioning dropout during training. Upstream's FAQ calls text
+    /// ignoring "the most common fine-tuning failure mode" and says
+    /// explicitly DO NOT set this to 0 — leave it at the default unless a
+    /// specific reason says otherwise.
+    training_cfg_rate: f64,
 }
 
 const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf [--config config.json]) \
@@ -193,7 +204,8 @@ const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf [--c
 --manifest FILE.tsv (header-named TSV: wav, text, optional ref_wav) \
 [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] \
 [--alpha 32] [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors] \
-[--lambda-stop 1.0]";
+[--lambda-stop 1.0] [--training-cfg-rate 0.1 (DO NOT set to 0 — upstream's FAQ \
+names text-ignoring as the most common fine-tuning failure mode)]";
 
 /// Consume the value that follows `flag`, advancing `i` past it.
 fn take_value(argv: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -217,6 +229,7 @@ fn parse_args() -> Result<Args, String> {
     let mut seed = DEFAULT_SEED;
     let mut out = None;
     let mut lambda_stop = DEFAULT_LAMBDA_STOP;
+    let mut training_cfg_rate = DEFAULT_TRAINING_CFG_RATE;
 
     let mut i = 0usize;
     while i < argv.len() {
@@ -260,6 +273,11 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--lambda-stop: {e}"))?
             }
+            "--training-cfg-rate" => {
+                training_cfg_rate = take_value(&argv, &mut i, flag)?
+                    .parse()
+                    .map_err(|e| format!("--training-cfg-rate: {e}"))?
+            }
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown flag {other}\n{USAGE}")),
         }
@@ -274,6 +292,11 @@ fn parse_args() -> Result<Args, String> {
     }
     if targets.trim().is_empty() {
         return Err("--targets must name at least one projection".to_string());
+    }
+    if !(0.0..=1.0).contains(&training_cfg_rate) {
+        return Err(format!(
+            "--training-cfg-rate must be in [0.0, 1.0], got {training_cfg_rate}"
+        ));
     }
 
     // Exactly one weight source. Accepting both and silently preferring one
@@ -301,6 +324,7 @@ fn parse_args() -> Result<Args, String> {
         seed,
         out,
         lambda_stop,
+        training_cfg_rate,
     })
 }
 
@@ -597,7 +621,14 @@ where
                 model.prefill_capturing(client, &ref_patches, &text_token_ids, max_length)?;
 
             let generator = model.patch_generator();
-            let seed_for_step = args.seed.wrapping_add(step_counter.wrapping_mul(2));
+            // Stride 3, not 2: `train_losses` consumes THREE independent
+            // streams per call — `seed` for the flow timestep, `seed + 1` for
+            // the noise, `seed + 2` for the conditioning-dropout draw. A
+            // stride of 2 would put this step's dropout draw on the same seed
+            // value as the next step's timestep draw, correlating consecutive
+            // steps. The stride must match the number of streams the callee
+            // uses.
+            let seed_for_step = args.seed.wrapping_add(step_counter.wrapping_mul(3));
             let losses = generator.train_losses(
                 client,
                 &prefill,
@@ -605,6 +636,7 @@ where
                 seed_for_step,
                 LAMBDA_DIFF,
                 args.lambda_stop,
+                args.training_cfg_rate,
             )?;
             let diff_val = losses.diff.tensor().to_vec::<f32>()[0] as f64;
             let stop_val = losses.stop.tensor().to_vec::<f32>()[0] as f64;

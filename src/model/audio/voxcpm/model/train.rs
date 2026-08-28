@@ -71,6 +71,70 @@ use numr::tensor::Tensor;
 mod stop;
 pub use stop::{TrainLosses, stop_loss_from_logits};
 
+/// Training-time conditioning dropout (upstream's `training_cfg_rate`):
+/// when `drop_cond`, replace `cond.mu` with a zero tensor of the same
+/// shape/dtype/device, everything else passed through unchanged. `pub(crate)`
+/// so [`PatchGenerator::train_losses_with_noise`] applies it once, upstream
+/// of BOTH the diff and stop terms, instead of each computing its own copy.
+/// See [`PatchGenerator::cfm_loss_with_noise`]'s `drop_cond` doc for why
+/// `mu` alone is the right tensor to zero.
+pub(crate) fn apply_cond_dropout<R: Runtime<DType = DType>>(
+    cond: TeacherForcedConditioning<R>,
+    drop_cond: bool,
+) -> Result<TeacherForcedConditioning<R>> {
+    if !drop_cond {
+        return Ok(cond);
+    }
+    let mu_zero = Var::new(
+        Tensor::<R>::zeros(
+            cond.mu.shape(),
+            cond.mu.tensor().dtype(),
+            cond.mu.tensor().device(),
+        )
+        .map_err(Error::Numr)?,
+        false,
+    );
+    Ok(TeacherForcedConditioning {
+        mu: mu_zero,
+        ..cond
+    })
+}
+
+/// Draws the conditioning-dropout bool for one training step from
+/// `seed.wrapping_add(2)` — a THIRD independent stream alongside `t`
+/// (`seed`) and `noise` (`seed + 1`), reusing [`RandomOps::rand_seeded`]
+/// rather than a new RNG. `rate` is assumed already validated to `[0.0,
+/// 1.0]` by the caller ([`check_training_cfg_rate`]).
+fn draw_drop_cond<C, R>(client: &C, seed: u64, rate: f64) -> Result<bool>
+where
+    R: Runtime<DType = DType>,
+    C: RandomOps<R>,
+{
+    if rate <= 0.0 {
+        return Ok(false);
+    }
+    if rate >= 1.0 {
+        return Ok(true);
+    }
+    let draw = client.rand_seeded(&[1], DType::F32, seed.wrapping_add(2))?;
+    let value = draw.item::<f32>().map_err(Error::Numr)? as f64;
+    Ok(value < rate)
+}
+
+/// Validates `training_cfg_rate` is in `[0.0, 1.0]` — a rate above 1 would
+/// silently always-drop instead of erroring, and a negative rate is
+/// meaningless. See [`PatchGenerator::cfm_loss`]'s doc comment for why 0 is
+/// accepted but discouraged (upstream's default is 0.1).
+fn check_training_cfg_rate(rate: f64) -> Result<()> {
+    if !(0.0..=1.0).contains(&rate) {
+        return Err(Error::InvalidArgument {
+            arg: "training_cfg_rate",
+            reason: format!("expected a value in [0.0, 1.0], got {rate}"),
+        });
+    }
+    Ok(())
+}
+
 impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// One CFM training step's loss, with `t` and `noise` supplied by the
     /// caller — the training-step counterpart of
@@ -89,6 +153,20 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     ///   error, and [`flow_matching_interpolate`]'s formula is well-defined
     ///   for any `t`).
     /// - `noise`: `[T, patch_size, feat_dim]`, matching `target_patches`.
+    /// - `drop_cond`: training-time conditioning dropout (upstream's
+    ///   `training_cfg_rate`). When true, `cond.mu` is replaced with a zero
+    ///   tensor of the same shape/dtype/device BEFORE either loss term is
+    ///   computed — the same construction
+    ///   [`LocalDit::solve_euler`](crate::model::audio::voxcpm::local_dit::LocalDit::solve_euler)
+    ///   uses to build its unconditional half at inference (`sampler.rs`'s
+    ///   `mu_zero`: the CFG-doubled batch differs in `mu` ALONE, `cond` is
+    ///   duplicated unchanged). Zeroing `mu` some fraction of training steps
+    ///   teaches the model to produce a sane, TEXT-INDEPENDENT prediction
+    ///   when `mu` is absent, which is what makes classifier-free guidance
+    ///   at inference actually work; upstream's FAQ calls skipping this "the
+    ///   most common fine-tuning failure mode" (text gets ignored) and says
+    ///   explicitly not to train with it always off. `cond`, `x_t`/`noise`
+    ///   and `t` are untouched — only `mu` defines the unconditional branch.
     ///
     /// Returns a scalar `Var<R>` whose graph reaches every adapter
     /// `apply_lora` attached under `feat_encoder`, `base_lm`,
@@ -110,6 +188,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         target_patches: &Tensor<R>,
         t: &Tensor<R>,
         noise: &Tensor<R>,
+        drop_cond: bool,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -152,6 +231,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         // noise/data match, `LocalDit::forward`'s own checks) is already
         // enforced by the callee — not re-implemented here.
         let cond = self.teacher_forced_conditioning(client, prefill, target_patches)?;
+        let cond = apply_cond_dropout(cond, drop_cond)?;
         self.cfm_loss_from_conditioning(client, &cond, target_patches, t, noise, tcount)
     }
 
@@ -229,6 +309,15 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// [`numr::ops::RandomOps::randn_seeded`] for why a CPU run and a CUDA
     /// run of one seed draw differently.
     ///
+    /// `training_cfg_rate` is upstream's `training_cfg_rate` — the per-step
+    /// probability of conditioning dropout (see
+    /// [`Self::cfm_loss_with_noise`]'s `drop_cond` doc), drawn from
+    /// `seed.wrapping_add(2)`: a third stream independent of `t`/`noise`.
+    /// Upstream defaults this to 0.1 and its FAQ calls 0 "the most common
+    /// fine-tuning failure mode" (the model learns to ignore the text).
+    /// Must be in `[0.0, 1.0]` — an out-of-range rate is an
+    /// [`Error::InvalidArgument`], not a silent always-drop.
+    ///
     /// Errors on a shape-mismatched `target_patches` — same as
     /// [`Self::cfm_loss_with_noise`] once the draw shapes are derived from
     /// it, so a caller cannot see a panic from either path.
@@ -238,6 +327,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         prefill: &PrefillState<R>,
         target_patches: &Tensor<R>,
         seed: u64,
+        training_cfg_rate: f64,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R> + RandomOps<R>,
@@ -254,6 +344,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + TypeConversionOps<R>
             + DequantOps<R>,
     {
+        check_training_cfg_rate(training_cfg_rate)?;
         let shape = target_patches.shape();
         if shape.len() != 3 || shape[0] == 0 {
             return Err(Error::InvalidArgument {
@@ -266,7 +357,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
 
         let t = client.rand_seeded(&[tcount], dtype, seed)?;
         let noise = client.randn_seeded(shape, dtype, seed.wrapping_add(1))?;
-        self.cfm_loss_with_noise(client, prefill, target_patches, &t, &noise)
+        let drop_cond = draw_drop_cond::<C, R>(client, seed, training_cfg_rate)?;
+        self.cfm_loss_with_noise(client, prefill, target_patches, &t, &noise, drop_cond)
     }
 }
 

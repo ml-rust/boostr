@@ -227,7 +227,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     /// than guessing for the decomposed-quant arm no VoxCPM2 checkpoint
     /// loads.
     pub(crate) fn lm_dtype_device(&self) -> Result<(DType, &R::Device)> {
-        match &self.aux.enc_to_lm_proj {
+        match self.aux.enc_to_lm_proj.base() {
             MaybeQuantLinear::Standard(linear) => {
                 let w = linear.weight().tensor();
                 Ok((w.dtype(), w.device()))
@@ -267,7 +267,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
 /// implements `Module<R>` — their `CausalConv1d`/`EncoderBlock` internals
 /// were not audited for this unit. A caller needing to enumerate them
 /// would need that follow-up unit first.
-impl<R: Runtime> Module<R> for VoxCpm2Model<R> {
+impl<R: Runtime<DType = DType>> Module<R> for VoxCpm2Model<R> {
     fn parameters(&self) -> Vec<&Var<R>> {
         let mut params = self.feat_encoder.parameters();
         params.extend(self.base_lm.parameters());

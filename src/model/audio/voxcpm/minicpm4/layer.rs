@@ -105,7 +105,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
 /// ([`crate::model::audio::voxcpm::minicpm4::loader`]) exactly, so the
 /// owning [`MiniCpm4Model`](super::model::MiniCpm4Model) need only prefix
 /// by `layers.{i}` to reach the full checkpoint key.
-impl<R: Runtime> Module<R> for MiniCpm4Layer<R> {
+impl<R: Runtime<DType = DType>> Module<R> for MiniCpm4Layer<R> {
     fn parameters(&self) -> Vec<&Var<R>> {
         let mut params = child_params(&self.input_layernorm);
         params.extend(child_params(&self.self_attn));

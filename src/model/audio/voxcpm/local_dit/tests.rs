@@ -12,7 +12,8 @@ use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
 use crate::model::audio::voxcpm::bidirectional::mlp::BidirectionalMlp;
 use crate::model::audio::voxcpm::local_dit::loader::LocalDit;
 use crate::nn::{
-    MaybeQuantLinear, Module, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding, Weight,
+    MaybeLoraLinear, MaybeQuantLinear, Module, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding,
+    Weight,
 };
 use crate::test_utils::cpu_setup;
 use numr::autograd::Var;
@@ -50,9 +51,9 @@ pub(crate) fn linear(
     seed: f32,
     bias: bool,
     device: &CpuDevice,
-) -> MaybeQuantLinear<CpuRuntime> {
+) -> MaybeLoraLinear<CpuRuntime> {
     let b = bias.then(|| t(&[out], seed + 5.0, device));
-    MaybeQuantLinear::from_weight(Weight::Standard(t(&[out, inp], seed, device)), b)
+    MaybeQuantLinear::from_weight(Weight::Standard(t(&[out, inp], seed, device)), b).into()
 }
 
 pub(crate) fn norm(device: &CpuDevice) -> RmsNorm<CpuRuntime> {
@@ -334,7 +335,7 @@ fn module_enumeration_is_non_empty_with_unique_ids_and_names() {
 }
 
 /// A block-quantized projection contributes NO `Var<R>` (block-quantized
-/// storage has no gradient — see `MaybeQuantLinear::parameters`), while
+/// storage has no gradient — see `MaybeLoraLinear::parameters`), while
 /// dense parameters (the layer's `RmsNorm` weights) still appear.
 #[test]
 fn quantized_projections_contribute_nothing_dense_norms_still_appear() {
@@ -350,7 +351,9 @@ fn quantized_projections_contribute_nothing_dense_norms_still_appear() {
             .collect();
         let w = Tensor::<CpuRuntime>::from_slice(&data, &[DIM, DIM], &device).unwrap();
         let qt = client.quantize(&w, QuantFormat::Q4_0).unwrap();
-        MaybeQuantLinear::Quantized(crate::nn::QuantLinear::new(qt, None))
+        let linear: MaybeLoraLinear<CpuRuntime> =
+            MaybeQuantLinear::Quantized(crate::nn::QuantLinear::new(qt, None)).into();
+        linear
     };
 
     let layer = BidirectionalLayer {

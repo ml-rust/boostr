@@ -15,7 +15,7 @@ use crate::model::audio::voxcpm::local_dit::tests::{
     FEAT_DIM, HEAD_DIM, HIDDEN_DIM, PATCH_SIZE, layer, linear, model as dit_model, norm, t,
 };
 use crate::model::audio::voxcpm::minicpm4::model::tests::{HIDDEN, tiny_model, tiny_nope_model};
-use crate::nn::{MaybeQuantLinear, RoPE, Weight};
+use crate::nn::{MaybeLoraLinear, MaybeQuantLinear, RoPE, Weight};
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
 /// `base_lm`/`residual_lm` hidden width and `feat_encoder`'s pooled width are
@@ -86,22 +86,24 @@ fn feat_encoder(device: &CpuDevice) -> LocalEncoder<CpuRuntime> {
 fn stop_chain(
     stop: bool,
     device: &CpuDevice,
-) -> (MaybeQuantLinear<CpuRuntime>, MaybeQuantLinear<CpuRuntime>) {
+) -> (MaybeLoraLinear<CpuRuntime>, MaybeLoraLinear<CpuRuntime>) {
     let sign = if stop { 1.0f32 } else { -1.0 };
-    let stop_proj = MaybeQuantLinear::from_weight(
+    let stop_proj: MaybeLoraLinear<CpuRuntime> = MaybeQuantLinear::from_weight(
         Weight::Standard(
             Tensor::<CpuRuntime>::zeros(&[HIDDEN, HIDDEN], DType::F32, device).expect("zeros"),
         ),
         Some(Tensor::<CpuRuntime>::from_slice(&[1.0f32; HIDDEN], &[HIDDEN], device).expect("bias")),
-    );
+    )
+    .into();
     let mut head = vec![0.0f32; 2 * HIDDEN];
     head[HIDDEN..].fill(sign);
-    let stop_head = MaybeQuantLinear::from_weight(
+    let stop_head: MaybeLoraLinear<CpuRuntime> = MaybeQuantLinear::from_weight(
         Weight::Standard(
             Tensor::<CpuRuntime>::from_slice(&head, &[2, HIDDEN], device).expect("head"),
         ),
         None,
-    );
+    )
+    .into();
     (stop_proj, stop_head)
 }
 

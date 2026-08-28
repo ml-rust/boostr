@@ -2,7 +2,7 @@ use super::tensor_loader::checked_tensor;
 use super::*;
 use crate::error::{Error, Result};
 use crate::format::safetensors_loader::SafeTensorsLoader;
-use crate::nn::{MaybeQuantLinear, Weight};
+use crate::nn::{MaybeLoraLinear, MaybeQuantLinear, Weight};
 use crate::quant::{QuantFormat, QuantTensor};
 use crate::test_utils::cpu_setup;
 use numr::dtype::DType;
@@ -90,7 +90,7 @@ fn quantized_weight_is_shape_checked() {
     let ok = tl.linear("q_proj", 2, 32, false);
     assert!(ok.is_ok(), "matching shape rejected: {:?}", ok.err());
 
-    // `MaybeQuantLinear` is not `Debug`, so `expect_err` cannot be used.
+    // `MaybeLoraLinear` is not `Debug`, so `expect_err` cannot be used.
     let Err(err) = tl.linear("q_proj", 4, 32, false) else {
         panic!("wrong out_features accepted");
     };
@@ -139,7 +139,10 @@ fn quantized_weight_survives_an_f32_request() {
 
         let layer = tl.linear("q_proj", 2, 32, false).expect("linear");
         assert!(
-            matches!(layer, MaybeQuantLinear::Quantized(_)),
+            matches!(
+                layer,
+                MaybeLoraLinear::Plain(MaybeQuantLinear::Quantized(_))
+            ),
             "the weight was dequantized instead of staying packed"
         );
     }

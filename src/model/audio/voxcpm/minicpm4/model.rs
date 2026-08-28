@@ -169,7 +169,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
 /// zero-filled placeholder. `rope` carries no `Var<R>` (a precomputed,
 /// non-learned cos/sin cache, like every other `RoPE` table in this crate)
 /// and is correctly absent below.
-impl<R: Runtime> Module<R> for MiniCpm4Model<R> {
+impl<R: Runtime<DType = DType>> Module<R> for MiniCpm4Model<R> {
     fn parameters(&self) -> Vec<&Var<R>> {
         let mut params = self
             .embed_tokens
@@ -205,7 +205,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::model::audio::voxcpm::minicpm4::attention::MiniCpm4Attention;
     use crate::model::audio::voxcpm::minicpm4::mlp::MiniCpm4Mlp;
-    use crate::nn::{MaybeQuantLinear, Weight};
+    use crate::nn::{MaybeLoraLinear, MaybeQuantLinear, Weight};
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
@@ -231,8 +231,9 @@ pub(crate) mod tests {
         in_dim: usize,
         salt: usize,
         device: &CpuDevice,
-    ) -> MaybeQuantLinear<CpuRuntime> {
+    ) -> MaybeLoraLinear<CpuRuntime> {
         MaybeQuantLinear::from_weight(Weight::Standard(filled(&[out, in_dim], salt, device)), None)
+            .into()
     }
 
     /// `base_lm`-shaped tiny model: rotary, exactly as before `no_rope`

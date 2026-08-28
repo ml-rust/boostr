@@ -24,7 +24,7 @@
 use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
 use crate::nn::{
-    MaybeQuantLinear, Module, RoPE, child_params, extend_named, repeat_kv, var_contiguous,
+    MaybeLoraLinear, Module, RoPE, child_params, extend_named, repeat_kv, var_contiguous,
 };
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use numr::autograd::{Var, var_permute, var_reshape};
@@ -38,18 +38,19 @@ use numr::runtime::Runtime;
 /// `q_proj`: 1024 -> 2048 (16 heads), `k_proj`/`v_proj`: 1024 -> 256 (2
 /// heads, GQA group size 8), `o_proj`: 2048 -> 1024. All bias-free.
 ///
-/// The projections are [`MaybeQuantLinear`], not plain `Linear`, for the
+/// The projections are [`MaybeLoraLinear`], not plain `Linear`, for the
 /// same reason `MiniCpm4Attention`'s are: a GGUF checkpoint stores them
 /// block-quantized, and the quantized variant multiplies through
 /// `quant_matmul` with the weight left PACKED instead of expanded to dense
 /// F32 at load. This block stack is shared, so one conversion here covers
 /// BOTH `feat_encoder` and `local_dit`. A safetensors checkpoint yields the
 /// `Standard` variant and runs exactly the dense path it always did.
+/// `MaybeLoraLinear` additionally lets any of the four carry a LoRA adapter.
 pub struct BidirectionalAttention<R: Runtime> {
-    pub(crate) q_proj: MaybeQuantLinear<R>,
-    pub(crate) k_proj: MaybeQuantLinear<R>,
-    pub(crate) v_proj: MaybeQuantLinear<R>,
-    pub(crate) o_proj: MaybeQuantLinear<R>,
+    pub(crate) q_proj: MaybeLoraLinear<R>,
+    pub(crate) k_proj: MaybeLoraLinear<R>,
+    pub(crate) v_proj: MaybeLoraLinear<R>,
+    pub(crate) o_proj: MaybeLoraLinear<R>,
     pub(crate) num_heads: usize,
     pub(crate) num_kv_heads: usize,
     pub(crate) head_dim: usize,
@@ -64,7 +65,7 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
     /// `multi_head_attention_impl`.
     pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
     where
-        // `TypeConversionOps` is what `MaybeQuantLinear::forward` adds over a
+        // `TypeConversionOps` is what `MaybeLoraLinear::forward` adds over a
         // dense `Linear::forward`: its decomposed-quant arm casts activations
         // to F32. `ModelClient` already carries `QuantMatmulOps`.
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -129,8 +130,8 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
 /// the `self_attn` checkpoint segment is added by the owning
 /// [`BidirectionalLayer`](super::layer::BidirectionalLayer). Every
 /// projection may enumerate empty when block-quantized — see
-/// [`MaybeQuantLinear::parameters`](crate::nn::linear::MaybeQuantLinear).
-impl<R: Runtime> Module<R> for BidirectionalAttention<R> {
+/// [`MaybeLoraLinear::parameters`](crate::nn::maybe_lora::MaybeLoraLinear).
+impl<R: Runtime<DType = DType>> Module<R> for BidirectionalAttention<R> {
     fn parameters(&self) -> Vec<&Var<R>> {
         let mut params = child_params(&self.q_proj);
         params.extend(child_params(&self.k_proj));

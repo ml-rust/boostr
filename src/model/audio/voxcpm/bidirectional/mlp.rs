@@ -4,18 +4,19 @@
 //!
 //! Same math as `LlamaMlp`'s dense fallback (`down_proj(silu(gate_proj(x)) *
 //! up_proj(x))`, via numr's fused `var_silu_mul` kernel), built on
-//! [`MaybeQuantLinear`]: VoxCPM2 ships BOTH dense safetensors and GGUF, and
+//! [`MaybeLoraLinear`]: VoxCPM2 ships BOTH dense safetensors and GGUF, and
 //! in a GGUF these three projections are block-quantized. The quantized
 //! variant multiplies the weight PACKED through `quant_matmul`, so a Q4_K
 //! file is not expanded to dense F32 at load; a safetensors checkpoint
-//! yields the `Standard` variant and the dense path is unchanged. This block
-//! stack is shared, so one conversion here covers BOTH `feat_encoder` and
-//! `local_dit`. `LlamaMlp` itself is `pub(super)` to `model::llama::model`
-//! and not reachable from here.
+//! yields the `Standard` variant and the dense path is unchanged.
+//! `MaybeLoraLinear` additionally lets any of the three carry a LoRA
+//! adapter. This block stack is shared, so one conversion here covers BOTH
+//! `feat_encoder` and `local_dit`. `LlamaMlp` itself is `pub(super)` to
+//! `model::llama::model` and not reachable from here.
 
 use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
-use crate::nn::{MaybeQuantLinear, Module, child_params, extend_named};
+use crate::nn::{MaybeLoraLinear, Module, child_params, extend_named};
 use numr::autograd::{Var, var_silu_mul};
 use numr::dtype::DType;
 use numr::ops::{
@@ -27,16 +28,16 @@ use numr::runtime::Runtime;
 /// `gate_proj`/`up_proj`: 1024 -> 4096, `down_proj`: 4096 -> 1024. All
 /// bias-free.
 pub struct BidirectionalMlp<R: Runtime> {
-    pub(crate) gate_proj: MaybeQuantLinear<R>,
-    pub(crate) up_proj: MaybeQuantLinear<R>,
-    pub(crate) down_proj: MaybeQuantLinear<R>,
+    pub(crate) gate_proj: MaybeLoraLinear<R>,
+    pub(crate) up_proj: MaybeLoraLinear<R>,
+    pub(crate) down_proj: MaybeLoraLinear<R>,
 }
 
 impl<R: Runtime<DType = DType>> BidirectionalMlp<R> {
     /// `down_proj(silu(gate_proj(x)) * up_proj(x))`
     pub fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
     where
-        // `TypeConversionOps` is what `MaybeQuantLinear::forward` adds over a
+        // `TypeConversionOps` is what `MaybeLoraLinear::forward` adds over a
         // dense `Linear::forward`; `ModelClient` already carries
         // `QuantMatmulOps`.
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -58,7 +59,7 @@ impl<R: Runtime<DType = DType>> BidirectionalMlp<R> {
 /// Names ARE the field names (`gate_proj`, `up_proj`, `down_proj`) — the
 /// `mlp` checkpoint segment is added by the owning
 /// [`BidirectionalLayer`](super::layer::BidirectionalLayer).
-impl<R: Runtime> Module<R> for BidirectionalMlp<R> {
+impl<R: Runtime<DType = DType>> Module<R> for BidirectionalMlp<R> {
     fn parameters(&self) -> Vec<&Var<R>> {
         let mut params = child_params(&self.gate_proj);
         params.extend(child_params(&self.up_proj));

@@ -40,7 +40,7 @@ use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
 use crate::model::audio::voxcpm::local_dit::config::LocalDitConfig;
 use crate::model::config::RopeScalingConfig;
 use crate::nn::{
-    MaybeQuantLinear, Module, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding, child_params,
+    MaybeLoraLinear, Module, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding, child_params,
     extend_named,
 };
 use numr::autograd::Var;
@@ -59,7 +59,7 @@ pub const DEFAULT_LOCAL_DIT_PREFIX: &str = "feat_decoder";
 /// `pub(crate)`); the accessors below are this type's public API for
 /// consumers outside this crate, which cannot reach `pub(crate)` fields.
 ///
-/// The three projections are [`MaybeQuantLinear`], not plain `Linear` (as are
+/// The three projections are [`MaybeLoraLinear`], not plain `Linear` (as are
 /// the two [`TimestepEmbedding`] MLPs and every projection in the block
 /// stack): a GGUF stores them block-quantized, and the quantized variant
 /// multiplies the weight PACKED through `quant_matmul` instead of expanding
@@ -67,11 +67,12 @@ pub const DEFAULT_LOCAL_DIT_PREFIX: &str = "feat_decoder";
 /// timesteps x 2 CFG branches per generated patch — so it is also where the
 /// integer activation dot product pays the most. A safetensors checkpoint
 /// yields the `Standard` variant and runs exactly the dense path it always
-/// did.
+/// did. `MaybeLoraLinear` additionally lets any of the three carry a LoRA
+/// adapter.
 pub struct LocalDit<R: Runtime> {
-    pub(crate) in_proj: MaybeQuantLinear<R>,
-    pub(crate) cond_proj: MaybeQuantLinear<R>,
-    pub(crate) out_proj: MaybeQuantLinear<R>,
+    pub(crate) in_proj: MaybeLoraLinear<R>,
+    pub(crate) cond_proj: MaybeLoraLinear<R>,
+    pub(crate) out_proj: MaybeLoraLinear<R>,
     pub(crate) time_mlp: TimestepEmbedding<R>,
     pub(crate) delta_time_mlp: TimestepEmbedding<R>,
     pub(crate) layers: Vec<BidirectionalLayer<R>>,
@@ -84,15 +85,15 @@ pub struct LocalDit<R: Runtime> {
 }
 
 impl<R: Runtime<DType = DType>> LocalDit<R> {
-    pub fn in_proj(&self) -> &MaybeQuantLinear<R> {
+    pub fn in_proj(&self) -> &MaybeLoraLinear<R> {
         &self.in_proj
     }
 
-    pub fn cond_proj(&self) -> &MaybeQuantLinear<R> {
+    pub fn cond_proj(&self) -> &MaybeLoraLinear<R> {
         &self.cond_proj
     }
 
-    pub fn out_proj(&self) -> &MaybeQuantLinear<R> {
+    pub fn out_proj(&self) -> &MaybeLoraLinear<R> {
         &self.out_proj
     }
 
@@ -292,7 +293,7 @@ where
 /// frequency table is a fixed, non-learned constant — see
 /// [`SinusoidalPosEmb`]) and are correctly absent from every collection
 /// below.
-impl<R: Runtime> Module<R> for LocalDit<R> {
+impl<R: Runtime<DType = DType>> Module<R> for LocalDit<R> {
     fn parameters(&self) -> Vec<&Var<R>> {
         let mut params = child_params(&self.in_proj);
         params.extend(child_params(&self.cond_proj));

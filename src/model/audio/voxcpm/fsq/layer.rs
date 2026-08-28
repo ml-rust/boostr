@@ -8,7 +8,7 @@
 //! is deliberately NOT ported here.
 
 use crate::error::{Error, Result};
-use crate::nn::{MaybeQuantLinear, Module, child_params, extend_named};
+use crate::nn::{MaybeLoraLinear, Module, child_params, extend_named};
 use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{Var, var_div_scalar, var_mul_scalar, var_silu, var_tanh};
 use numr::dtype::DType;
@@ -24,14 +24,15 @@ use numr::runtime::{Runtime, RuntimeClient};
 /// before dividing back snaps each of the 512 channels onto one of 19 evenly
 /// spaced levels, `k / 9` for `k` in `-9..=9`.
 ///
-/// Both projections are [`MaybeQuantLinear`], not plain `Linear`: a GGUF
+/// Both projections are [`MaybeLoraLinear`], not plain `Linear`: a GGUF
 /// stores them block-quantized, and the quantized variant multiplies the
 /// weight PACKED through `quant_matmul` instead of expanding it to dense F32
 /// at load. A safetensors checkpoint yields the `Standard` variant and runs
-/// exactly the dense path it always did.
+/// exactly the dense path it always did. `MaybeLoraLinear` additionally lets
+/// either projection carry a LoRA adapter.
 pub struct ScalarQuantization<R: Runtime> {
-    in_proj: MaybeQuantLinear<R>,
-    out_proj: MaybeQuantLinear<R>,
+    in_proj: MaybeLoraLinear<R>,
+    out_proj: MaybeLoraLinear<R>,
     /// Rounding-grid divisor (`FsqConfig::scale`, 9 on the verified
     /// checkpoint).
     scale: f32,
@@ -41,7 +42,7 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
     /// Wrap already-loaded `in_proj`/`out_proj` weights with `scale`. Use
     /// [`crate::model::audio::voxcpm::fsq::loader`] to build one from a
     /// checkpoint.
-    pub fn new(in_proj: MaybeQuantLinear<R>, out_proj: MaybeQuantLinear<R>, scale: f32) -> Self {
+    pub fn new(in_proj: MaybeLoraLinear<R>, out_proj: MaybeLoraLinear<R>, scale: f32) -> Self {
         Self {
             in_proj,
             out_proj,
@@ -65,7 +66,7 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
     pub fn forward<C>(&self, client: &C, hidden: &Var<R>) -> Result<Var<R>>
     where
         // `QuantMatmulOps` + `BinaryOps` + `TypeConversionOps` are what
-        // `MaybeQuantLinear::forward` needs over a dense `Linear::forward`:
+        // `MaybeLoraLinear::forward` needs over a dense `Linear::forward`:
         // the packed multiply, its bias add, and the decomposed-quant arm's
         // cast of activations to F32.
         C: RuntimeClient<R>
@@ -74,7 +75,7 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
             + QuantMatmulOps<R>
             + BinaryOps<R>
             + TypeConversionOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + UnaryOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + UnaryOps<R> + BinaryOps<R>,
     {
         match hidden.shape().len() {
             2 | 3 => {}
@@ -106,8 +107,8 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
 /// (`fsq_layer`) is added by the top-level [`crate::model::audio::voxcpm::model::VoxCpm2Model`]
 /// composition, not here. Both projections may enumerate empty (a
 /// block-quantized `in_proj`/`out_proj` has no `Var<R>` weight) — see
-/// [`MaybeQuantLinear::parameters`](crate::nn::linear::MaybeQuantLinear).
-impl<R: Runtime> Module<R> for ScalarQuantization<R> {
+/// [`MaybeLoraLinear::parameters`](crate::nn::maybe_lora::MaybeLoraLinear).
+impl<R: Runtime<DType = DType>> Module<R> for ScalarQuantization<R> {
     fn parameters(&self) -> Vec<&Var<R>> {
         let mut params = child_params(&self.in_proj);
         params.extend(child_params(&self.out_proj));
@@ -127,19 +128,20 @@ impl<R: Runtime> Module<R> for ScalarQuantization<R> {
 /// classifier. See [`crate::model::audio::voxcpm::fsq::loader`] for the
 /// checkpoint key layout each field is loaded from.
 ///
-/// All six are [`MaybeQuantLinear`] for the same reason
+/// All six are [`MaybeLoraLinear`] for the same reason
 /// [`ScalarQuantization`]'s pair is: a GGUF stores them block-quantized and
 /// they multiply PACKED, while a safetensors checkpoint yields the
-/// `Standard` variant and the dense path is unchanged.
+/// `Standard` variant and the dense path is unchanged. `MaybeLoraLinear`
+/// additionally lets any of the six carry a LoRA adapter.
 pub struct AuxProjections<R: Runtime> {
-    pub enc_to_lm_proj: MaybeQuantLinear<R>,
-    pub lm_to_dit_proj: MaybeQuantLinear<R>,
-    pub res_to_dit_proj: MaybeQuantLinear<R>,
-    pub fusion_concat_proj: MaybeQuantLinear<R>,
-    pub stop_proj: MaybeQuantLinear<R>,
+    pub enc_to_lm_proj: MaybeLoraLinear<R>,
+    pub lm_to_dit_proj: MaybeLoraLinear<R>,
+    pub res_to_dit_proj: MaybeLoraLinear<R>,
+    pub fusion_concat_proj: MaybeLoraLinear<R>,
+    pub stop_proj: MaybeLoraLinear<R>,
     /// Bias-free: the checkpoint carries no `stop_head.bias` tensor. See
     /// [`crate::model::audio::voxcpm::fsq::loader`] for how this is loaded.
-    pub stop_head: MaybeQuantLinear<R>,
+    pub stop_head: MaybeLoraLinear<R>,
 }
 
 impl<R: Runtime<DType = DType>> AuxProjections<R> {
@@ -156,7 +158,7 @@ impl<R: Runtime<DType = DType>> AuxProjections<R> {
             + QuantMatmulOps<R>
             + BinaryOps<R>
             + TypeConversionOps<R>,
-        R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R> + BinaryOps<R>,
     {
         let projected = self.stop_proj.forward(client, hidden)?;
         let activated = var_silu(&projected, client).map_err(Error::Numr)?;
@@ -170,7 +172,7 @@ impl<R: Runtime<DType = DType>> AuxProjections<R> {
 /// prefix (see [`crate::model::audio::voxcpm::fsq::loader`]), so the
 /// top-level [`VoxCpm2Model`](crate::model::audio::voxcpm::model::VoxCpm2Model)
 /// composition adds NO prefix here, unlike every other sub-model.
-impl<R: Runtime> Module<R> for AuxProjections<R> {
+impl<R: Runtime<DType = DType>> Module<R> for AuxProjections<R> {
     fn parameters(&self) -> Vec<&Var<R>> {
         let mut params = child_params(&self.enc_to_lm_proj);
         params.extend(child_params(&self.lm_to_dit_proj));
@@ -212,6 +214,9 @@ impl<R: Runtime> Module<R> for AuxProjections<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests construct a base projection directly; the library builds
+    // them through `TensorLoader::linear`, which returns `MaybeLoraLinear`.
+    use crate::nn::MaybeQuantLinear;
     use crate::nn::Weight;
     use crate::test_utils::cpu_setup;
     use numr::tensor::Tensor;
@@ -228,14 +233,16 @@ mod tests {
             .map(|i| if i / hidden == i % hidden { 1.0 } else { 0.0 })
             .collect();
         let zeros = vec![0.0f32; hidden];
-        let in_proj = MaybeQuantLinear::from_weight(
+        let in_proj: MaybeLoraLinear<_> = MaybeQuantLinear::from_weight(
             Weight::Standard(Tensor::from_slice(&identity, &[hidden, hidden], device).unwrap()),
             Some(Tensor::from_slice(&zeros, &[hidden], device).unwrap()),
-        );
-        let out_proj = MaybeQuantLinear::from_weight(
+        )
+        .into();
+        let out_proj: MaybeLoraLinear<_> = MaybeQuantLinear::from_weight(
             Weight::Standard(Tensor::from_slice(&identity, &[hidden, hidden], device).unwrap()),
             Some(Tensor::from_slice(&zeros, &[hidden], device).unwrap()),
-        );
+        )
+        .into();
         ScalarQuantization::new(in_proj, out_proj, scale)
     }
 
@@ -253,16 +260,18 @@ mod tests {
     ) -> ScalarQuantization<numr::runtime::cpu::CpuRuntime> {
         let zero_weight = vec![0.0f32; 4]; // [2, 2], all zero
         let bias = vec![-40.0f32, 40.0]; // saturates tanh to exactly [-1.0, 1.0]
-        let in_proj = MaybeQuantLinear::from_weight(
+        let in_proj: MaybeLoraLinear<_> = MaybeQuantLinear::from_weight(
             Weight::Standard(Tensor::from_slice(&zero_weight, &[2, 2], device).unwrap()),
             Some(Tensor::from_slice(&bias, &[2], device).unwrap()),
-        );
+        )
+        .into();
         let identity = vec![1.0f32, 0.0, 0.0, 1.0];
         let zeros = vec![0.0f32, 0.0];
-        let out_proj = MaybeQuantLinear::from_weight(
+        let out_proj: MaybeLoraLinear<_> = MaybeQuantLinear::from_weight(
             Weight::Standard(Tensor::from_slice(&identity, &[2, 2], device).unwrap()),
             Some(Tensor::from_slice(&zeros, &[2], device).unwrap()),
-        );
+        )
+        .into();
         ScalarQuantization::new(in_proj, out_proj, scale)
     }
 

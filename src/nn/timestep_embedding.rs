@@ -7,7 +7,7 @@
 //! that projects that embedding through the model's hidden width.
 
 use crate::error::{Error, Result};
-use crate::nn::linear::MaybeQuantLinear;
+use crate::nn::maybe_lora::MaybeLoraLinear;
 use crate::nn::module::{Module, child_params, extend_named};
 use crate::quant::traits::QuantMatmulOps;
 use numr::autograd::{
@@ -122,20 +122,21 @@ impl<R: Runtime<DType = DType>> SinusoidalPosEmb<R> {
 ///
 /// Reference: `TimestepEmbedding` (`local_dit_v2.py:25-47`).
 ///
-/// Built on [`MaybeQuantLinear`] rather than plain `Linear`: its only caller
+/// Built on [`MaybeLoraLinear`] rather than plain `Linear`: its only caller
 /// (VoxCPM2's local DiT) also ships as a GGUF, where these two weights are
 /// block-quantized and multiply PACKED through `quant_matmul` instead of
 /// being expanded to dense F32 at load. A safetensors checkpoint yields the
-/// `Standard` variant and the dense path is unchanged.
+/// `Standard` variant and the dense path is unchanged. `MaybeLoraLinear`
+/// additionally lets either linear carry a LoRA adapter.
 pub struct TimestepEmbedding<R: Runtime> {
-    linear_1: MaybeQuantLinear<R>,
-    linear_2: MaybeQuantLinear<R>,
+    linear_1: MaybeLoraLinear<R>,
+    linear_2: MaybeLoraLinear<R>,
 }
 
 impl<R: Runtime<DType = DType>> TimestepEmbedding<R> {
     /// Build from loaded `linear_1`/`linear_2` weights. Both MUST carry a
     /// bias — the reference constructs both with `bias=True`.
-    pub fn new(linear_1: MaybeQuantLinear<R>, linear_2: MaybeQuantLinear<R>) -> Self {
+    pub fn new(linear_1: MaybeLoraLinear<R>, linear_2: MaybeLoraLinear<R>) -> Self {
         Self { linear_1, linear_2 }
     }
 
@@ -143,7 +144,7 @@ impl<R: Runtime<DType = DType>> TimestepEmbedding<R> {
     pub fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
     where
         // `QuantMatmulOps` + `BinaryOps` + `TypeConversionOps` are what
-        // `MaybeQuantLinear::forward` needs over a dense `Linear::forward`:
+        // `MaybeLoraLinear::forward` needs over a dense `Linear::forward`:
         // the packed multiply, its bias add, and the decomposed-quant arm's
         // cast of activations to F32.
         C: RuntimeClient<R>
@@ -153,7 +154,7 @@ impl<R: Runtime<DType = DType>> TimestepEmbedding<R> {
             + QuantMatmulOps<R>
             + BinaryOps<R>
             + TypeConversionOps<R>,
-        R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R> + BinaryOps<R>,
     {
         let hidden = self.linear_1.forward(client, x)?;
         let hidden = var_silu(&hidden, client).map_err(Error::Numr)?;
@@ -164,7 +165,7 @@ impl<R: Runtime<DType = DType>> TimestepEmbedding<R> {
 /// Names ARE the field names (`linear_1`, `linear_2`) — the owning
 /// `time_mlp`/`delta_time_mlp` checkpoint segment is added by the caller
 /// (VoxCPM2's local DiT).
-impl<R: Runtime> Module<R> for TimestepEmbedding<R> {
+impl<R: Runtime<DType = DType>> Module<R> for TimestepEmbedding<R> {
     fn parameters(&self) -> Vec<&Var<R>> {
         let mut params = child_params(&self.linear_1);
         params.extend(child_params(&self.linear_2));
@@ -182,7 +183,7 @@ impl<R: Runtime> Module<R> for TimestepEmbedding<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nn::Weight;
+    use crate::nn::{MaybeQuantLinear, Weight};
     use numr::runtime::cpu::CpuRuntime;
 
     /// `dim = 8` -> `half_dim = 4`, divisor = `half_dim - 1 = 3`.
@@ -307,8 +308,8 @@ mod tests {
         let w2 = Tensor::<CpuRuntime>::from_slice(&[0.02f32; 16], &[4, 4], &device).unwrap();
         let b2 = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 4], &[4], &device).unwrap();
         let mlp = TimestepEmbedding::<CpuRuntime>::new(
-            MaybeQuantLinear::from_weight(Weight::Standard(w1), Some(b1)),
-            MaybeQuantLinear::from_weight(Weight::Standard(w2), Some(b2)),
+            MaybeQuantLinear::from_weight(Weight::Standard(w1), Some(b1)).into(),
+            MaybeQuantLinear::from_weight(Weight::Standard(w2), Some(b2)).into(),
         );
 
         let x = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 8], &[2, 4], &device).unwrap();

@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::vae::causal_conv1d::CausalConv1d;
 use crate::model::audio::voxcpm::vae::res_unit::ResUnit;
 use crate::model::audio::voxcpm::vae::snake::Snake;
-use crate::nn::{MaybeQuantEmbedding, MaybeQuantLinear, Weight};
+use crate::nn::{MaybeLoraLinear, MaybeQuantEmbedding, MaybeQuantLinear, Weight};
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
@@ -120,13 +120,18 @@ where
     /// `[out, in]` is the order both the safetensors checkpoint and
     /// `quant_matmul`'s `[N, K]` contract use, so nothing is transposed on
     /// either path.
+    ///
+    /// Returns [`MaybeLoraLinear`], not a bare [`MaybeQuantLinear`], so every
+    /// projection loaded through this single funnel can later carry a LoRA
+    /// adapter; a freshly loaded projection is always the unadapted `Plain`
+    /// variant, wrapped at the very end via `.into()`.
     pub(crate) fn linear(
         &mut self,
         name: &str,
         out_features: usize,
         in_features: usize,
         with_bias: bool,
-    ) -> Result<MaybeQuantLinear<R>> {
+    ) -> Result<MaybeLoraLinear<R>> {
         let weight_key = format!("{name}.weight");
         let weight = checked_weight::<R, S>(
             self.loader,
@@ -189,7 +194,7 @@ where
             None
         };
 
-        Ok(MaybeQuantLinear::from_weight(weight, bias))
+        Ok(MaybeQuantLinear::from_weight(weight, bias).into())
     }
 
     /// Read `{name}.weight` (`[vocab_size, hidden_size]`) as an embedding

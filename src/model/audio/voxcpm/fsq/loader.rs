@@ -24,7 +24,7 @@ use crate::format::safetensors_loader::SafeTensorsLoader;
 use crate::model::audio::voxcpm::fsq::config::FsqConfig;
 use crate::model::audio::voxcpm::fsq::layer::{AuxProjections, ScalarQuantization};
 use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
-use crate::nn::MaybeQuantLinear;
+use crate::nn::MaybeLoraLinear;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
@@ -151,7 +151,7 @@ where
 }
 
 /// Load `{name}.weight[out_dim, in_dim]` + `{name}.bias[out_dim]` as a
-/// biased [`MaybeQuantLinear`]. Shared shape for five of the six auxiliary
+/// biased [`MaybeLoraLinear`]. Shared shape for five of the six auxiliary
 /// projections (`stop_head` is the bias-free exception, handled inline in
 /// [`AuxProjections::from_safetensors`]).
 ///
@@ -168,7 +168,7 @@ fn biased_linear<R: Runtime<DType = DType>, S: WeightSource<R>>(
     name: &str,
     in_dim: usize,
     out_dim: usize,
-) -> Result<MaybeQuantLinear<R>>
+) -> Result<MaybeLoraLinear<R>>
 where
     R::Client: TypeConversionOps<R>,
 {

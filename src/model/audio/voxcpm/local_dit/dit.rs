@@ -182,8 +182,12 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client:
-            TensorOps<R> + ScalarOps<R> + ShapeOps<R> + ActivationOps<R> + TypeConversionOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + TypeConversionOps<R>,
     {
         let step = var_cast(step, DType::F32, client).map_err(Error::Numr)?;
         let emb = time_embeddings.forward(client, &step)?;

@@ -49,7 +49,7 @@
 //! `feat_encoder.in_proj` have 64-element rows, which no K-quant block size
 //! divides, so a GGUF writer stores them unquantized. Nothing special-cases
 //! them — `load_named_weight` returns `Weight::Standard` for whatever the
-//! file did not quantize, and `MaybeQuantLinear` runs the dense path there.
+//! file did not quantize, and `MaybeLoraLinear` runs the dense path there.
 //!
 //! The AudioVAE is untouched by all of this: it is a separate F32-native
 //! file, verified against PyTorch fixtures, and is never cast or packed.

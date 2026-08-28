@@ -33,7 +33,7 @@ pub struct BidirectionalLayer<R: Runtime> {
 impl<R: Runtime<DType = DType>> BidirectionalLayer<R> {
     pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
     where
-        // `TypeConversionOps` comes from the `MaybeQuantLinear` projections
+        // `TypeConversionOps` comes from the `MaybeLoraLinear` projections
         // inside the attention and MLP sub-blocks; the norms below need
         // nothing extra.
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -65,7 +65,7 @@ impl<R: Runtime<DType = DType>> BidirectionalLayer<R> {
 /// owning `LocalEncoder`/`LocalDit` need only prefix by `{layer_prefix}` (a
 /// numeric layer index under `encoder.layers`/`decoder.layers`) to reach the
 /// full checkpoint key.
-impl<R: Runtime> Module<R> for BidirectionalLayer<R> {
+impl<R: Runtime<DType = DType>> Module<R> for BidirectionalLayer<R> {
     fn parameters(&self) -> Vec<&Var<R>> {
         let mut params = child_params(&self.input_layernorm);
         params.extend(child_params(&self.self_attn));

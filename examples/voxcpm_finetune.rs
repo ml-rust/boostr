@@ -32,21 +32,33 @@
 //! `text` are required and are looked up BY NAME, not by column position, so
 //! a manifest can carry extra columns (speaker id, duration, ...) this
 //! reader ignores. `wav` may be absolute or relative to the manifest's own
-//! directory.
+//! directory. `ref_wav`, same resolution rules as `wav`, is OPTIONAL — see
+//! below.
 //!
-//! # Why the reference clip IS the training target
+//! # Why `ref_wav` must name a DIFFERENT clip than `wav`
 //!
 //! [`VoxCpm2Model::prefill`]/[`prefill_capturing`] take a `ref_feat`
-//! argument — the reference-audio conditioning prefix — and that is the
-//! ONLY conditioning input either function accepts; there is no separate
-//! "training target" parameter. `VoxCpm2Model::encode_reference` produces
-//! exactly the `[T, patch_size, feat_dim]` layout both `ref_feat` and a CFM
-//! loss's `target_patches` need. Fine-tuning here means teaching the model
-//! to reconstruct a speaker's own clip conditioned on that SAME clip as the
-//! reference — a standard voice-adaptation setup — so this file calls
-//! `encode_reference` once per row and feeds its output to both roles: the
-//! prefill's `ref_feat` and `cfm_loss`'s `target_patches`. There is no
-//! separate reference clip in the manifest to prefer instead.
+//! argument — the reference-audio conditioning prefix the model is allowed
+//! to copy voice characteristics from — and `cfm_loss`'s `target_patches` is
+//! the ground truth the loss is computed against. Feeding the SAME clip to
+//! both is degenerate: the model can pass the reference straight through to
+//! the output and score a low, still-falling loss without ever learning to
+//! synthesize from text. So `ref_wav` names a *different* clip from the
+//! *same speaker* as `wav`, per upstream's fine-tuning guide, and this file
+//! never lets `wav`'s own patches serve as `ref_feat`.
+//!
+//! Upstream also specifies that only 30-50% of training rows should carry a
+//! `ref_audio` at all, so the model keeps its zero-shot (no-reference)
+//! ability alongside reference-based cloning. Whoever builds the manifest
+//! should leave `ref_wav` blank (empty cell, or the column absent entirely)
+//! on 50-70% of rows to match that.
+//!
+//! [`SequenceLayout::build`](boostr::model::audio::voxcpm::model::sequence::SequenceLayout::build)
+//! rejects `t_ref == 0`, so `prefill`/`prefill_capturing` have NO supported
+//! no-reference form today — every row this binary actually trains on must
+//! carry a `ref_wav` until that gap is closed upstream. A row without one
+//! fails loudly, naming the row, rather than silently falling back to
+//! self-referencing `wav`.
 //!
 //! # Why `prefill_capturing`, never plain `prefill`
 //!
@@ -165,7 +177,8 @@ struct Args {
 
 const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf [--config config.json]) \
 --audiovae audiovae.safetensors \
---manifest FILE.tsv [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] \
+--manifest FILE.tsv (header-named TSV: wav, text, optional ref_wav) \
+[--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] \
 [--alpha 32] [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors]";
 
 /// Consume the value that follows `flag`, advancing `i` past it.
@@ -299,16 +312,34 @@ fn tokenizer_path(weights: &Weights, config: Option<&Path>) -> Result<PathBuf, S
     }
 }
 
-/// One `(wav, text)` row resolved from the manifest.
+/// One `(wav, text, ref_wav)` row resolved from the manifest.
 struct ManifestRow {
     wav: PathBuf,
     text: String,
+    /// The reference-conditioning clip, a DIFFERENT clip from the same
+    /// speaker as `wav` — never `wav` itself. `None` when the manifest row
+    /// left the (optional) `ref_wav` column empty or absent.
+    ref_wav: Option<PathBuf>,
 }
 
-/// Parse a header-named TSV manifest: `wav` and `text` columns, located by
-/// NAME so extra columns (speaker id, duration, ...) are ignored rather than
-/// rejected. `wav` paths are resolved relative to the manifest's own
-/// directory when not already absolute.
+/// Resolve a manifest-relative wav path: absolute paths pass through,
+/// everything else is joined onto `manifest_dir`.
+fn resolve_wav_path(manifest_dir: &Path, field: &str) -> PathBuf {
+    let path = PathBuf::from(field);
+    if path.is_absolute() {
+        path
+    } else {
+        manifest_dir.join(path)
+    }
+}
+
+/// Parse a header-named TSV manifest: `wav` and `text` columns are required
+/// and an optional `ref_wav` column, all located by NAME so extra columns
+/// (speaker id, duration, ...) are ignored rather than rejected. A row with
+/// no `ref_wav` value (empty cell, short row, or the column absent from the
+/// header entirely) gets `ManifestRow::ref_wav == None`. `wav`/`ref_wav`
+/// paths are resolved relative to the manifest's own directory when not
+/// already absolute.
 fn load_manifest(path: &Path) -> Result<Vec<ManifestRow>, Box<dyn std::error::Error>> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| format!("{}: failed to read manifest: {e}", path.display()))?;
@@ -333,6 +364,8 @@ fn load_manifest(path: &Path) -> Result<Vec<ManifestRow>, Box<dyn std::error::Er
             path.display()
         )
     })?;
+    // Optional: absent entirely means every row trains without a reference.
+    let ref_wav_idx = columns.iter().position(|c| *c == "ref_wav");
     let needed = wav_idx.max(text_idx) + 1;
 
     let manifest_dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -352,16 +385,18 @@ fn load_manifest(path: &Path) -> Result<Vec<ManifestRow>, Box<dyn std::error::Er
             )
             .into());
         }
-        let wav_field = fields[wav_idx].trim();
-        let wav_path = PathBuf::from(wav_field);
-        let wav_path = if wav_path.is_absolute() {
-            wav_path
-        } else {
-            manifest_dir.join(wav_path)
-        };
+        let wav_path = resolve_wav_path(manifest_dir, fields[wav_idx].trim());
+        // A short row (ref_wav column present in the header but this line
+        // has fewer fields) is the same as an empty cell: no reference.
+        let ref_wav = ref_wav_idx
+            .and_then(|idx| fields.get(idx))
+            .map(|field| field.trim())
+            .filter(|field| !field.is_empty())
+            .map(|field| resolve_wav_path(manifest_dir, field));
         rows.push(ManifestRow {
             wav: wav_path,
             text: fields[text_idx].trim().to_string(),
+            ref_wav,
         });
     }
     if rows.is_empty() {
@@ -503,11 +538,27 @@ where
 
         for (row_index, row) in rows.iter().enumerate() {
             let wav = load_wav_16k(&row.wav).map_err(|e| format!("{}: {e}", row.wav.display()))?;
-
-            // The reference clip doubles as the training target — see the
-            // module docs.
+            // The training target: what the loss is computed against.
             let target_patches = model.encode_reference(client, &wav)?;
-            let t_ref = target_patches.shape()[0];
+
+            // The reference-conditioning clip MUST be a different clip than
+            // `wav` — see the module docs for why self-referencing is
+            // degenerate. `prefill`/`prefill_capturing` have no supported
+            // no-reference form (`SequenceLayout::build` rejects `t_ref ==
+            // 0`), so a row missing `ref_wav` is a hard error naming the
+            // row, never a silent fallback to `target_patches`.
+            let ref_wav_path = row.ref_wav.as_ref().ok_or_else(|| {
+                format!(
+                    "{} (row {row_index}): no ref_wav column value, and \
+                     VoxCpm2Model::prefill has no supported no-reference form; add a \
+                     ref_wav naming a DIFFERENT clip from the same speaker",
+                    row.wav.display()
+                )
+            })?;
+            let ref_wav = load_wav_16k(ref_wav_path)
+                .map_err(|e| format!("{}: {e}", ref_wav_path.display()))?;
+            let ref_patches = model.encode_reference(client, &ref_wav)?;
+            let t_ref = ref_patches.shape()[0];
 
             let normalized = normalize_whitespace(&row.text);
             let mut text_token_ids = tokenize(&tokenizer, &normalized);
@@ -520,7 +571,7 @@ where
             // needs `PrefillState::intermediates`, and every row here has a
             // non-empty prefix — see the module docs.
             let prefill =
-                model.prefill_capturing(client, &target_patches, &text_token_ids, max_length)?;
+                model.prefill_capturing(client, &ref_patches, &text_token_ids, max_length)?;
 
             let generator = model.patch_generator();
             let seed_for_step = args.seed.wrapping_add(step_counter.wrapping_mul(2));

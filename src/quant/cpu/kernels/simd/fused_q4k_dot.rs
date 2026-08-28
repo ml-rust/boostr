@@ -111,7 +111,7 @@ pub fn fused_dot_q4k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return unsafe { fused_dot_q4k_avx2(act, blocks, k) };
         }
-        super::super::fused_dot::fused_dot_row(act, blocks, k, crate::quant::QuantFormat::Q4K)
+        super::super::fused_dot::fused_dot_q4k(act, blocks, k)
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -120,7 +120,7 @@ pub fn fused_dot_q4k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
     }
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    super::super::fused_dot::fused_dot_row(act, blocks, k, crate::quant::QuantFormat::Q4K)
+    super::super::fused_dot::fused_dot_q4k(act, blocks, k)
 }
 
 #[cfg(test)]

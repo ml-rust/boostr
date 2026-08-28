@@ -17,19 +17,24 @@ pub fn fused_dot_row(
     weight_row_bytes: &[u8],
     k: usize,
     format: QuantFormat,
-) -> f32 {
+) -> Option<f32> {
     match format {
-        QuantFormat::Q4_0 => fused_dot_q4_0(act_row, weight_row_bytes, k),
-        QuantFormat::Q8_0 => fused_dot_q8_0(act_row, weight_row_bytes, k),
-        QuantFormat::Q4K => fused_dot_q4k(act_row, weight_row_bytes, k),
-        QuantFormat::Q5K => fused_dot_q5k(act_row, weight_row_bytes, k),
-        QuantFormat::Q6K => fused_dot_q6k(act_row, weight_row_bytes, k),
-        _ => 0.0, // caller should validate
+        QuantFormat::Q4_0 => Some(fused_dot_q4_0(act_row, weight_row_bytes, k)),
+        QuantFormat::Q8_0 => Some(fused_dot_q8_0(act_row, weight_row_bytes, k)),
+        QuantFormat::Q4K => Some(fused_dot_q4k(act_row, weight_row_bytes, k)),
+        QuantFormat::Q5K => Some(fused_dot_q5k(act_row, weight_row_bytes, k)),
+        QuantFormat::Q6K => Some(fused_dot_q6k(act_row, weight_row_bytes, k)),
+        // `None`, never a value. This arm returned 0.0 with a comment saying
+        // the caller should validate — a silent wrong answer for any format
+        // that gains a fused path later, indistinguishable from a genuine
+        // zero dot product. A caller that cannot handle `None` must dequantize
+        // and use the generic path instead.
+        _ => None,
     }
 }
 
 /// Fused dequant+dot for Q4_0 (32-element blocks, 18 bytes each)
-fn fused_dot_q4_0(act: &[f32], blocks: &[u8], k: usize) -> f32 {
+pub(crate) fn fused_dot_q4_0(act: &[f32], blocks: &[u8], k: usize) -> f32 {
     const BLOCK_SIZE: usize = 32;
     const BLOCK_BYTES: usize = 18;
     let num_blocks = k / BLOCK_SIZE;
@@ -58,7 +63,7 @@ fn fused_dot_q4_0(act: &[f32], blocks: &[u8], k: usize) -> f32 {
 }
 
 /// Fused dequant+dot for Q8_0 (32-element blocks, 34 bytes each)
-fn fused_dot_q8_0(act: &[f32], blocks: &[u8], k: usize) -> f32 {
+pub(crate) fn fused_dot_q8_0(act: &[f32], blocks: &[u8], k: usize) -> f32 {
     const BLOCK_SIZE: usize = 32;
     const BLOCK_BYTES: usize = 34;
     let num_blocks = k / BLOCK_SIZE;
@@ -83,7 +88,7 @@ fn fused_dot_q8_0(act: &[f32], blocks: &[u8], k: usize) -> f32 {
 ///
 /// This is the hot path for Q4_K_M models (e.g. Mistral 7B).
 /// Processes 8 sub-blocks of 32 elements per block.
-fn fused_dot_q4k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
+pub(crate) fn fused_dot_q4k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
     const BLOCK_SIZE: usize = 256;
     const BLOCK_BYTES: usize = 144;
     let num_blocks = k / BLOCK_SIZE;
@@ -133,7 +138,7 @@ fn fused_dot_q4k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
 ///
 /// Layout: [d: f16, dmin: f16, scales: 12B, qh: 32B, qs: 128B]
 /// 5-bit quantization: 4 low bits from qs + 1 high bit from qh.
-fn fused_dot_q5k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
+pub(crate) fn fused_dot_q5k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
     const BLOCK_SIZE: usize = 256;
     const BLOCK_BYTES: usize = 176;
     let num_blocks = k / BLOCK_SIZE;
@@ -183,7 +188,7 @@ fn fused_dot_q5k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
 }
 
 /// Fused dequant+dot for Q6_K (256-element blocks, 210 bytes each)
-fn fused_dot_q6k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
+pub(crate) fn fused_dot_q6k(act: &[f32], blocks: &[u8], k: usize) -> f32 {
     const BLOCK_SIZE: usize = 256;
     const BLOCK_BYTES: usize = 210;
     let num_blocks = k / BLOCK_SIZE;
@@ -234,7 +239,8 @@ mod tests {
 
     /// Helper: compare fused dot against dequant-then-dot for a given format
     fn verify_fused_vs_dequant(act: &[f32], weight_bytes: &[u8], k: usize, format: QuantFormat) {
-        let fused = fused_dot_row(act, weight_bytes, k, format);
+        let fused = fused_dot_row(act, weight_bytes, k, format)
+            .expect("test formats all have a fused path");
 
         // Reference: dequant then dot
         let mut dequant_buf = vec![0.0f32; k];

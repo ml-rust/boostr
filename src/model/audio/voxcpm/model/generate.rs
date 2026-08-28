@@ -416,5 +416,8 @@ fn check_patch<R: Runtime<DType = DType>>(
     Ok(())
 }
 
+// `pub(crate)`, not private: `train/tests.rs` (a sibling of `generate`, not
+// a descendant) reuses `tests::support`'s fixture directly — see
+// `generate/tests/support.rs`'s `Fixture` doc comment.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

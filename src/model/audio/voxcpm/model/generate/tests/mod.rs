@@ -5,7 +5,10 @@
 //! Fixtures and helpers live in [`support`]; this file holds the `#[test]`
 //! functions themselves.
 
-mod support;
+// `pub(crate)`, not private: `train/tests.rs` (a sibling of `generate`, not
+// a descendant) reuses this fixture directly — see `support::Fixture`'s doc
+// comment.
+pub(crate) mod support;
 mod teacher_forced;
 
 use super::*;

@@ -4,7 +4,8 @@
 //! [`patches`] (wav padding and the VAE patch fold), [`prefill`] (reference encode and the
 //! two-LM prefill), [`generate`] (the per-patch sampling loop and its stop logic), [`decode`]
 //! (unfolding patches back to a latent and VAE-decoding to a waveform), `chunked_decode`
-//! (windowed VAE decode so peak memory does not scale with utterance length).
+//! (windowed VAE decode so peak memory does not scale with utterance length), [`train`] (the
+//! CFM training loss, wiring teacher-forced conditioning into a differentiable `Var`).
 //! The wav file wrapper is a separate, later unit and does not live here.
 
 pub(crate) mod chunked_decode;
@@ -16,6 +17,7 @@ pub mod loader;
 pub mod patches;
 pub mod prefill;
 pub mod sequence;
+pub mod train;
 
 pub use config::{
     AUDIO_START_ID, REF_AUDIO_END_ID, REF_AUDIO_FILLER_ID, REF_AUDIO_START_ID, VoxCpm2Config,

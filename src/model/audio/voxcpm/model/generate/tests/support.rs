@@ -33,17 +33,22 @@ const N_TIMESTEPS: usize = 2;
 
 /// Every sub-model the loop touches, owned so the borrowed
 /// [`PatchGenerator`] can point at it.
-pub(super) struct Fixture {
-    feat_encoder: LocalEncoder<CpuRuntime>,
-    feat_decoder: LocalDit<CpuRuntime>,
-    base_lm: MiniCpm4Model<CpuRuntime>,
-    residual_lm: MiniCpm4Model<CpuRuntime>,
-    fsq: ScalarQuantization<CpuRuntime>,
-    pub(super) aux: AuxProjections<CpuRuntime>,
+///
+/// Fields are `pub(crate)`, not `pub(super)`: `train/tests.rs` (a sibling
+/// of `generate`, not a descendant) reuses this exact fixture and needs
+/// direct field access to `apply_lora` individual sub-models — see that
+/// module's doc comment.
+pub(crate) struct Fixture {
+    pub(crate) feat_encoder: LocalEncoder<CpuRuntime>,
+    pub(crate) feat_decoder: LocalDit<CpuRuntime>,
+    pub(crate) base_lm: MiniCpm4Model<CpuRuntime>,
+    pub(crate) residual_lm: MiniCpm4Model<CpuRuntime>,
+    pub(crate) fsq: ScalarQuantization<CpuRuntime>,
+    pub(crate) aux: AuxProjections<CpuRuntime>,
 }
 
 impl Fixture {
-    pub(super) fn generator(&self) -> PatchGenerator<'_, CpuRuntime> {
+    pub(crate) fn generator(&self) -> PatchGenerator<'_, CpuRuntime> {
         PatchGenerator {
             feat_encoder: &self.feat_encoder,
             feat_decoder: &self.feat_decoder,
@@ -107,7 +112,7 @@ fn stop_chain(
     (stop_proj, stop_head)
 }
 
-pub(super) fn fixture(stop: bool, device: &CpuDevice) -> Fixture {
+pub(crate) fn fixture(stop: bool, device: &CpuDevice) -> Fixture {
     let (stop_proj, stop_head) = stop_chain(stop, device);
     Fixture {
         feat_encoder: feat_encoder(device),
@@ -132,7 +137,7 @@ pub(super) fn fixture(stop: bool, device: &CpuDevice) -> Fixture {
 
 /// A [`PrefillState`] with both caches empty, so `position` starts at 0 and
 /// `decode_step`'s write-order rule is satisfied without running a prefill.
-pub(super) fn state(fx: &Fixture, device: &CpuDevice) -> GenerateState<CpuRuntime> {
+pub(crate) fn state(fx: &Fixture, device: &CpuDevice) -> GenerateState<CpuRuntime> {
     let prefill = PrefillState {
         lm_hidden: Var::new(t(&[1, HIDDEN], 0.9, device), false),
         residual_hidden: Var::new(t(&[1, HIDDEN], 1.3, device), false),
@@ -154,7 +159,7 @@ pub(super) fn state(fx: &Fixture, device: &CpuDevice) -> GenerateState<CpuRuntim
     .expect("start")
 }
 
-pub(super) fn options(min_len: usize, max_len: usize) -> GenerateOptions {
+pub(crate) fn options(min_len: usize, max_len: usize) -> GenerateOptions {
     GenerateOptions {
         cfm: CfmOptions {
             n_timesteps: N_TIMESTEPS,
@@ -166,10 +171,10 @@ pub(super) fn options(min_len: usize, max_len: usize) -> GenerateOptions {
     }
 }
 
-pub(super) fn values(v: &Var<CpuRuntime>) -> Vec<f32> {
+pub(crate) fn values(v: &Var<CpuRuntime>) -> Vec<f32> {
     v.tensor().contiguous().expect("contiguous").to_vec::<f32>()
 }
 
-pub(super) fn noise(seed: f32, device: &CpuDevice) -> Var<CpuRuntime> {
+pub(crate) fn noise(seed: f32, device: &CpuDevice) -> Var<CpuRuntime> {
     Var::new(t(&[1, FEAT_DIM, PATCH_SIZE], seed, device), false)
 }

@@ -2,22 +2,24 @@
 //!
 //! Unlike the `feat_encoder` sibling in this module — the one bidirectional
 //! transformer in the VoxCPM2 stack, which hand-writes its own unmasked
-//! orchestration — this block is a plain causal decoder, so it runs the
-//! shared [`attention_core_masked`] sequence that every other causal block in
-//! the crate uses (`LlamaAttention` included). That helper owns
-//! reshape/permute, contiguity, RoPE, the GQA head repeat, and the causal
-//! mask; nothing here re-derives any of it.
+//! orchestration — this block is a plain causal decoder, so its full-sequence
+//! [`MiniCpm4Attention::forward`] runs the shared [`attention_core_masked`]
+//! sequence that every other causal block in the crate uses (`LlamaAttention`
+//! included). That helper owns reshape/permute, contiguity, RoPE, the GQA head
+//! repeat, and the causal mask; nothing here re-derives any of it.
 //!
-//! Causality is not a flag on that path: `attention_core_masked` always
-//! builds a causal mask. This is the full-sequence forward, so without it
-//! every position would attend to FUTURE positions while every shape stayed
-//! valid.
+//! Causality is not a flag there: `attention_core_masked` always builds a
+//! causal mask. That is the full-sequence forward, so without it every
+//! position would attend to FUTURE positions while every shape stayed valid.
+//!
+//! The KV-cached [`MiniCpm4Attention::forward_cached`] instead calls the flash
+//! kernel directly, as `LlamaAttention::forward_with_kv_cache` does.
 //!
 //! Both entry points take the RoPE tables as `Option`: VoxCPM2's
 //! `residual_lm` is this same block with `no_rope` set, and its loader builds
 //! no table at all. `no_rope` is NoPE — the rotation is dropped and NOTHING
 //! replaces it (no ALiBi, no learned positions), so position reaches the block
-//! only through the causal mask. A `None` table with `no_rope` unset is an
+//! only through causal ordering. A `None` table with `no_rope` unset is an
 //! error, never a silent skip.
 //!
 //! `head_dim` (128) is read from config, never derived from
@@ -26,16 +28,13 @@
 
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
-use crate::model::attention_core::{
-    AttentionCoreSpec, AttentionKernel, attention_core_masked, prefill_attention_mask,
-};
+use crate::model::attention_core::{AttentionCoreSpec, AttentionKernel, attention_core_masked};
 use crate::model::traits::ModelClient;
-use crate::nn::var_ops::{repeat_kv, var_contiguous};
+use crate::nn::var_ops::var_contiguous;
 use crate::nn::{
     LoraTargets, MaybeLoraLinear, MaybeQuantLinear, Module, RoPE, adapt_if_targeted, child_params,
     extend_named, load_lora_child, push_projection_name,
 };
-use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_narrow, var_permute, var_reshape};
 use numr::dtype::DType;
@@ -92,9 +91,12 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             use_alibi: false,
             skip_rope: self.no_rope,
             sliding_window: 0,
-            // Materialized-mask kernel: the same entry point `LlamaAttention`
-            // uses, and the one that does not add an `R::Client:
-            // FlashAttentionOps` bound here.
+            // Only `forward` reads this field. `attention_core_flash` builds a
+            // backward node that resolves its client from the runtime, so it
+            // requires `R::Client: FlashAttentionOps<R>` — a bound this block's
+            // where-clause does not carry. `forward_cached` is unaffected: it
+            // calls `flash_attention_fwd` on `client` (already a
+            // `FlashAttentionOps<R>` via `ModelClient<R>`), with no backward.
             kernel: AttentionKernel::Masked,
         }
     }
@@ -170,28 +172,31 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
     /// Serves BOTH cached shapes: prefill passes the whole prefix at
     /// `position == 0`, a decode step passes `seq == 1` at the next position.
     ///
-    /// This does not call [`attention_core_masked`]: that entry point takes RAW
-    /// K/V projections and rotates them itself, so handing it the cache would
-    /// re-apply RoPE to keys that were already rotated when they were written.
-    /// The step order is otherwise the same one that function documents —
-    /// reshape/permute, contiguous Q/K, (no Q/K norm here), RoPE, GQA repeat,
-    /// additive causal mask, attend — and the mask still comes from the shared
-    /// [`prefill_attention_mask`] builder, so causality is not re-derived here.
+    /// This does not call [`attention_core_masked`]: that entry point rotates
+    /// the RAW K it is given, so handing it the cache would re-apply RoPE to
+    /// keys already rotated when they were written.
+    /// The prologue is otherwise the same one that function documents —
+    /// reshape/permute, contiguous Q/K, (no Q/K norm here), RoPE. The attention
+    /// is the flash kernel, reading the cache in place and masking internally:
+    /// nothing here materializes a mask, repeats KV heads, or copies history.
     ///
-    /// # Mask equivalence with the reference
+    /// # Masking
     ///
-    /// The reference preallocates the cache to `max_length` and masks with
-    /// `arange(max_length) <= position_id`, i.e. a row spanning the FULL
-    /// preallocated width that admits keys `0..=position_id` and rejects the
-    /// zeroed tail. [`KvCache`] instead exposes only the `seq_len` slots
-    /// actually written, so `sk == position + seq` and
-    /// [`prefill_attention_mask`] (key offset `sk - sq`) admits exactly keys
-    /// `0..=position + i` for query row `i`. The two masks select the SAME
-    /// keys; the reference additionally multiplies zeroed, never-written slots
-    /// by `-inf`, which contribute nothing to the softmax either way. The
-    /// equivalence holds ONLY because the caller writes positions in order
-    /// starting at 0 — [`MiniCpm4Model::decode_step`] enforces that by
-    /// requiring `position == kv_cache.seq_len()`.
+    /// `causal` is `seq > 1`. A prefill chunk needs it, because each query row
+    /// must reject the rows after it. A decode step (`seq == 1`) does not: its
+    /// one query row is the last position, so a causal mask would be all zeros.
+    ///
+    /// The admitted key set is the reference's. `build_attention_mask` in
+    /// `ops::impl_generic::attention::flash_standard` offsets keys by
+    /// `seq_len_k - seq_len_q` — the offset the shared `prefill_attention_mask`
+    /// builder used — so query row `i` admits exactly keys `0..=position + i`.
+    /// The reference instead masks with `arange(max_length) <= position_id`
+    /// across the FULL preallocated width: same keys, plus `-inf` on zeroed
+    /// never-written slots that contribute nothing to the softmax either way,
+    /// and `kv_seq_len` stops the kernel reading those slots at all. The
+    /// equivalence holds ONLY because the caller writes positions in order from
+    /// 0, which [`MiniCpm4Model::decode_step`] enforces by requiring
+    /// `position == kv_cache.seq_len()`.
     ///
     /// [`MiniCpm4Model::decode_step`]:
     ///     crate::model::audio::voxcpm::minicpm4::MiniCpm4Model::decode_step
@@ -271,35 +276,30 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
 
         let v = var_contiguous(&v)?;
 
-        // Post-RoPE K/V land in the cache, exactly as the reference writes
-        // rotated keys at index `position_id`.
-        kv_cache.update(k.tensor(), v.tensor())?;
-        let (k_full, v_full) = kv_cache.get_kv()?;
-        let k_full = Var::new(k_full.contiguous()?, false);
-        let v_full = Var::new(v_full.contiguous()?, false);
+        // Post-RoPE K/V land in the cache, as the reference writes rotated keys
+        // at index `position_id`. `update_fused` writes the new slots IN PLACE
+        // through `KvCacheOps::kv_cache_update`; `update` would `slice_assign`,
+        // which is functional — a second buffer of the whole preallocated
+        // cache, allocated and copied per layer per step.
+        require_preallocated_cache(kv_cache, seq)?;
+        kv_cache.update_fused(k.tensor(), v.tensor(), client)?;
 
-        let (k_full, v_full) = if self.num_kv_heads < self.num_heads {
-            let repeat = self.num_heads / self.num_kv_heads;
-            (
-                repeat_kv(&k_full, repeat).map_err(Error::Numr)?,
-                repeat_kv(&v_full, repeat).map_err(Error::Numr)?,
-            )
-        } else {
-            (k_full, v_full)
-        };
-
-        let sk = k_full.shape()[2];
-        let mask = prefill_attention_mask(
-            client,
-            batch,
-            seq,
-            sk,
-            &self.core_spec(),
-            q.tensor().dtype(),
-            q.tensor().device(),
+        // The kernel broadcasts the GQA heads itself, so the raw cache buffers
+        // go in untouched, bounded to the written slots by `kv_seq_len`.
+        let (out, _lse) = client.flash_attention_fwd(
+            q.tensor(),
+            kv_cache.k_cache_raw(),
+            kv_cache.v_cache_raw(),
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            // Prefill chunk masks; a single decode row has nothing to reject.
+            seq > 1,
+            // The disabled-window sentinel `core_spec` declares.
+            self.core_spec().sliding_window,
+            Some(kv_cache.seq_len()),
         )?;
-        let attn_out =
-            multi_head_attention_impl(client, &q, &k_full, &v_full, Some(&mask), self.num_heads)?;
+        let attn_out = Var::new(out, false);
 
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
         let attn_out = var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
@@ -428,6 +428,35 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             no_rope: self.no_rope,
         }
     }
+}
+
+/// Reject a cache that would GROW while writing `seq` more slots.
+///
+/// The in-place `update_fused` write and the flash read of `k_cache_raw` both
+/// assume one buffer for the whole sequence. A grow reallocates it and copies
+/// every written slot across — the per-step full-buffer copy this path exists
+/// to avoid. VoxCPM2 never hits it (`new_kv_cache` passes
+/// `initial_capacity == max_seq_len`); this makes that invariant loud.
+fn require_preallocated_cache<R: Runtime<DType = DType>>(
+    kv_cache: &KvCache<R>,
+    seq: usize,
+) -> Result<()>
+where
+    R::Client: IndexingOps<R>,
+{
+    let (written, capacity) = (kv_cache.seq_len(), kv_cache.capacity());
+    if written + seq > capacity {
+        return Err(Error::InferenceError {
+            reason: format!(
+                "MiniCPM4 cached attention needs a KV cache preallocated to its full \
+                 width: writing {seq} slots at position {written} needs capacity {}, \
+                 got {capacity}. Build the cache with initial_capacity == max_seq_len, \
+                 as MiniCpm4Model::new_kv_cache does.",
+                written + seq,
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// The error for a `None` RoPE table on a block that rotates.

@@ -86,8 +86,10 @@
 //! with the offending path, its computed patch count, and the cap; every
 //! truncated reference is printed separately, since a truncated reference is
 //! NOT a dropped row. Manifest filtering ends with a summary line (rows
-//! kept, rows skipped, references truncated, total duration retained), and
-//! if EVERY row is skipped that is a hard error, not a quietly empty run.
+//! kept, rows skipped, references truncated, total duration retained) and a
+//! second line splitting the kept rows into with-reference and
+//! no-reference, and if EVERY row is skipped that is a hard error, not a
+//! quietly empty run.
 //!
 //! ## Choosing `--max-patches`
 //!
@@ -140,12 +142,15 @@
 //! `backward` or the optimizer. `--eval-rows 0` disables eval outright: no
 //! split, no eval batch, no eval logging.
 //!
+//! A row without a `ref_wav` trains ZERO-SHOT: `prefill_capturing` gets
+//! `None`, and
 //! [`SequenceLayout::build`](boostr::model::audio::voxcpm::model::sequence::SequenceLayout::build)
-//! rejects `t_ref == 0`, so `prefill`/`prefill_capturing` have NO supported
-//! no-reference form today — every row this binary actually trains on must
-//! carry a `ref_wav` until that gap is closed upstream. A row without one
-//! fails loudly, naming the row, rather than silently falling back to
-//! self-referencing `wav`.
+//! drops the reference prefix entirely, matching upstream's no-ref packer. A
+//! missing `ref_wav` NEVER falls back to self-referencing `wav`.
+//!
+//! The run summary prints the with/without-reference split. That printed
+//! split is the ONLY check on a manifest whose `ref_wav` column got renamed
+//! or lost: such a run trains entirely zero-shot and otherwise looks healthy.
 //!
 //! # Why `prefill_capturing`, never plain `prefill`
 //!
@@ -634,6 +639,8 @@ fn truncate_reference(mut samples: Vec<f32>, cfg: &VoxCpm2Config, max_patches: u
 /// function only measures and reports. Decodes each candidate clip once
 /// here (cheap PCM decode, not the VAE) purely to read its sample count;
 /// the training loop below decodes again per epoch, same as it always has.
+/// Prints the kept rows' with-reference / no-reference split, the only
+/// signal that a manifest lost its `ref_wav` column.
 fn filter_rows_by_patch_cap<'a>(
     rows: &'a [ManifestRow],
     cfg: &VoxCpm2Config,
@@ -680,6 +687,17 @@ fn filter_rows_by_patch_cap<'a>(
         "manifest filter: {} row(s) kept, {skipped} skipped, {truncated_refs} reference(s) \
          truncated, {retained_seconds:.1}s retained (--max-patches {max_patches})",
         kept.len()
+    );
+    // MANDATORY, never drop this line. Removing the old hard error on a
+    // missing `ref_wav` removed the only thing that caught a manifest whose
+    // `ref_wav` column got renamed or lost. Without the printed split such a
+    // run trains entirely zero-shot, looks healthy, and surfaces days later
+    // as a model that never learned reference cloning.
+    let with_ref = kept.iter().filter(|row| row.ref_wav.is_some()).count();
+    eprintln!(
+        "manifest: {with_ref} row(s) with reference, {} without (upstream recommends 30-50% \
+         with no reference, which is what keeps zero-shot cloning alive)",
+        kept.len() - with_ref
     );
     if kept.is_empty() {
         return Err(format!(
@@ -738,15 +756,15 @@ fn collect_adapter_tensors<R: Runtime<DType = DType>>(
 /// Decode `row`'s target and (truncated) reference audio, encode both
 /// through the AudioVAE, tokenize the text, and run `prefill_capturing` —
 /// the exact per-row setup the training loop and the eval-batch builder both
-/// need. Shared here so the sequence is defined once. `row_desc` names the
-/// row in the no-`ref_wav` error, e.g. `"row 3"` or `"eval row 1"`.
+/// need. Shared here so the sequence is defined once. A row without a
+/// `ref_wav` builds the zero-shot form: `prefill_capturing` gets `None` and
+/// the reference prefix is absent, so `S == text_token_ids.len()`.
 fn build_prefill_and_target<R, C>(
     model: &VoxCpm2Model<R>,
     client: &C,
     tokenizer: &AnyTokenizer,
     row: &ManifestRow,
     max_patches: usize,
-    row_desc: &str,
 ) -> Result<(PrefillState<R>, Tensor<R>), Box<dyn std::error::Error>>
 where
     R: Runtime<DType = DType>,
@@ -769,39 +787,39 @@ where
     let target_patches = model.encode_reference(client, &wav)?;
 
     // The reference-conditioning clip MUST be a different clip than `wav` —
-    // see the module docs for why self-referencing is degenerate.
-    // `prefill`/`prefill_capturing` have no supported no-reference form
-    // (`SequenceLayout::build` rejects `t_ref == 0`), so a row missing
-    // `ref_wav` is a hard error naming the row, never a silent fallback to
+    // see the module docs for why self-referencing is degenerate. A row with
+    // no `ref_wav` trains zero-shot (`None`), never a silent fallback to
     // `target_patches`.
-    let ref_wav_path = row.ref_wav.as_ref().ok_or_else(|| {
-        format!(
-            "{} ({row_desc}): no ref_wav column value, and VoxCpm2Model::prefill has no \
-             supported no-reference form; add a ref_wav naming a DIFFERENT clip from the \
-             same speaker",
-            row.wav.display()
-        )
-    })?;
-    let ref_wav =
-        load_wav_16k(ref_wav_path).map_err(|e| format!("{}: {e}", ref_wav_path.display()))?;
-    // Truncate, never drop: `ref_wav` is speaker conditioning only, not the
-    // loss target — see [`truncate_reference`] and the module docs' "Bounding
-    // training memory" section.
-    let ref_wav = truncate_reference(ref_wav, &model.config, max_patches);
-    let ref_patches = model.encode_reference(client, &ref_wav)?;
-    let t_ref = ref_patches.shape()[0];
+    let ref_patches = match &row.ref_wav {
+        Some(ref_wav_path) => {
+            let ref_wav = load_wav_16k(ref_wav_path)
+                .map_err(|e| format!("{}: {e}", ref_wav_path.display()))?;
+            // Truncate, never drop: `ref_wav` is speaker conditioning only,
+            // not the loss target — see [`truncate_reference`] and the module
+            // docs' "Bounding training memory" section.
+            let ref_wav = truncate_reference(ref_wav, &model.config, max_patches);
+            Some(model.encode_reference(client, &ref_wav)?)
+        }
+        None => None,
+    };
 
     let normalized = normalize_whitespace(&row.text);
     let mut text_token_ids = tokenize(tokenizer, &normalized);
     // `prefill` requires the sequence to end here: AUDIO_START_ID is the
     // position the first (only, here) patch attends from.
     text_token_ids.push(AUDIO_START_ID);
-    let max_length = t_ref + 2 + text_token_ids.len();
+    // S, exactly: the reference prefix contributes `t_ref + 2` rows, and
+    // nothing at all when there is no reference.
+    let max_length = match &ref_patches {
+        Some(ref_patches) => ref_patches.shape()[0] + 2 + text_token_ids.len(),
+        None => text_token_ids.len(),
+    };
 
     // ALWAYS `prefill_capturing`: `cfm_loss`'s teacher-forced path needs
     // `PrefillState::intermediates`, and every row here has a non-empty
     // prefix — see the module docs.
-    let prefill = model.prefill_capturing(client, &ref_patches, &text_token_ids, max_length)?;
+    let prefill =
+        model.prefill_capturing(client, ref_patches.as_ref(), &text_token_ids, max_length)?;
     Ok((prefill, target_patches))
 }
 
@@ -848,12 +866,11 @@ where
 {
     let mut eval_batch = Vec::with_capacity(eval_source_rows.len());
     for (eval_index, row) in eval_source_rows.iter().enumerate() {
-        let row_desc = format!("eval row {eval_index}");
         // Built once here ONLY to read the target's shape and dtype, which
         // fix `t`/`noise`. Both are dropped immediately: every eval pass
         // rebuilds them against the CURRENT weights (see `EvalRow`).
         let (prefill, target_patches) =
-            build_prefill_and_target(model, client, tokenizer, row, max_patches, &row_desc)?;
+            build_prefill_and_target(model, client, tokenizer, row, max_patches)?;
         let tcount = target_patches.shape()[0];
         let dtype = target_patches.dtype();
         let noise_shape = target_patches.shape().to_vec();
@@ -913,16 +930,9 @@ where
     let mut diff_sum = 0.0f64;
     let mut stop_sum = 0.0f64;
     let mut total_sum = 0.0f64;
-    for (eval_index, eval_row) in eval_batch.iter().enumerate() {
-        let row_desc = format!("eval row {eval_index}");
-        let (prefill, target_patches) = build_prefill_and_target(
-            model,
-            client,
-            tokenizer,
-            eval_row.row,
-            max_patches,
-            &row_desc,
-        )?;
+    for eval_row in eval_batch {
+        let (prefill, target_patches) =
+            build_prefill_and_target(model, client, tokenizer, eval_row.row, max_patches)?;
         let losses = generator.train_losses_with_noise(
             client,
             &prefill,
@@ -1113,15 +1123,8 @@ where
         let mut epoch_steps = 0usize;
 
         for (row_index, row) in rows.iter().enumerate() {
-            let row_desc = format!("row {row_index}");
-            let (prefill, target_patches) = build_prefill_and_target(
-                &model,
-                client,
-                &tokenizer,
-                row,
-                args.max_patches,
-                &row_desc,
-            )?;
+            let (prefill, target_patches) =
+                build_prefill_and_target(&model, client, &tokenizer, row, args.max_patches)?;
 
             let generator = model.patch_generator();
             // Stride 3, not 2: `train_losses` consumes THREE independent

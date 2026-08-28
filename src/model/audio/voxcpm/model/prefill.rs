@@ -13,9 +13,9 @@
 //!
 //! # Traps this file exists to get right
 //!
-//! - `lm_hidden` is the LAST row of the post-blend `enc_outputs`. In
-//!   reference mode that row is a TEXT position, so the blend left it
-//!   UN-fsq'd. Do NOT apply `fsq` to it again.
+//! - `lm_hidden` is the LAST row of the post-blend `enc_outputs`. In BOTH
+//!   modes that row is a TEXT position, so the blend left it UN-fsq'd. Do
+//!   NOT apply `fsq` to it again.
 //! - `feat_encoder` runs over ALL `S` rows, text rows included, whose patches
 //!   are zeros. Skipping them is not an optimization; it changes the result.
 //! - `fusion_concat_proj`'s argument is `cat(enc_outputs, audio_mask *
@@ -109,19 +109,25 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     /// Prefill both LMs over the reference prefix and the prompt.
     ///
     /// `ref_feat` is [`encode_reference`](Self::encode_reference)'s output,
-    /// `[T_ref, patch_size, feat_dim]`. `text_token_ids` is the already
-    /// tokenized prompt and must end with
+    /// `[T_ref, patch_size, feat_dim]`. `None` selects no-reference
+    /// (zero-shot) mode: the whole reference prefix, delimiters and zero-patch
+    /// bookends included, is dropped and `S = text_token_ids.len()`.
+    ///
+    /// No-reference is a type-level state, never an empty tensor. A `Some`
+    /// holding `T_ref == 0` is rejected.
+    ///
+    /// `text_token_ids` is the already tokenized prompt and must end with
     /// [`AUDIO_START_ID`](super::config::AUDIO_START_ID) — boostr does not
     /// tokenize here. `max_length` sizes both KV caches; it must be at least
-    /// `S = T_ref + 2 + text_token_ids.len()` and should leave room for
-    /// however many patches the later sampling loop will generate.
+    /// `S` and should leave room for however many patches the later sampling
+    /// loop will generate.
     ///
     /// [`PrefillState::intermediates`] is `None`; use
     /// [`prefill_capturing`](Self::prefill_capturing) to get them.
     pub fn prefill<C>(
         &self,
         client: &C,
-        ref_feat: &Tensor<R>,
+        ref_feat: Option<&Tensor<R>>,
         text_token_ids: &[u32],
         max_length: usize,
     ) -> Result<PrefillState<R>>
@@ -150,7 +156,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     pub fn prefill_capturing<C>(
         &self,
         client: &C,
-        ref_feat: &Tensor<R>,
+        ref_feat: Option<&Tensor<R>>,
         text_token_ids: &[u32],
         max_length: usize,
     ) -> Result<PrefillState<R>>
@@ -174,7 +180,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     fn prefill_inner<C>(
         &self,
         client: &C,
-        ref_feat: &Tensor<R>,
+        ref_feat: Option<&Tensor<R>>,
         text_token_ids: &[u32],
         max_length: usize,
         capture: bool,
@@ -194,14 +200,32 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             + DequantOps<R>,
     {
         let (patch_size, feat_dim) = (self.config.patch_size, self.config.feat_dim);
-        let ref_shape = ref_feat.shape().to_vec();
-        if ref_shape.len() != 3 || ref_shape[1] != patch_size || ref_shape[2] != feat_dim {
-            return Err(Error::InvalidArgument {
-                arg: "ref_feat",
-                reason: format!("expected [T_ref, {patch_size}, {feat_dim}], got {ref_shape:?}"),
-            });
-        }
-        let layout = SequenceLayout::build(ref_shape[0], text_token_ids)?;
+        let t_ref = match ref_feat {
+            Some(ref_feat) => {
+                let ref_shape = ref_feat.shape().to_vec();
+                if ref_shape.len() != 3 || ref_shape[1] != patch_size || ref_shape[2] != feat_dim {
+                    return Err(Error::InvalidArgument {
+                        arg: "ref_feat",
+                        reason: format!(
+                            "expected [T_ref, {patch_size}, {feat_dim}], got {ref_shape:?}"
+                        ),
+                    });
+                }
+                // No-reference is `None`, never a zero-length tensor: a
+                // `Some` here must carry at least one patch.
+                if ref_shape[0] == 0 {
+                    return Err(Error::InvalidArgument {
+                        arg: "ref_feat",
+                        reason: "expected at least 1 reference patch, got 0; pass None for \
+                                 no-reference (zero-shot) mode"
+                            .to_string(),
+                    });
+                }
+                ref_shape[0]
+            }
+            None => 0,
+        };
+        let layout = SequenceLayout::build(t_ref, text_token_ids)?;
         let seq_len = layout.seq_len();
         if max_length < seq_len {
             return Err(Error::InvalidArgument {
@@ -214,27 +238,43 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
 
         let (dtype, device) = self.lm_dtype_device()?;
 
-        // audio_feat: z1 ++ ref_feat ++ z1 ++ zeros(text_length), i.e. one
-        // leading zero patch and `1 + text_length` trailing ones.
-        let ref_patches = Var::new(
-            ref_feat
-                .to_dtype(dtype)?
-                .reshape(&[1, layout.t_ref, patch_size, feat_dim])?,
-            false,
-        );
-        let head = Var::new(
-            Tensor::<R>::zeros(&[1, 1, patch_size, feat_dim], dtype, device)?,
-            false,
-        );
-        let tail = Var::new(
-            Tensor::<R>::zeros(
-                &[1, 1 + layout.text_length, patch_size, feat_dim],
-                dtype,
-                device,
-            )?,
-            false,
-        );
-        let audio_feat = var_cat(&[&head, &ref_patches, &tail], 1, client)?;
+        // audio_feat, reference mode: z1 ++ ref_feat ++ z1 ++
+        // zeros(text_length), i.e. one leading zero patch and `1 +
+        // text_length` trailing ones.
+        //
+        // No-reference mode: zeros(text_length) alone. Both bookends go with
+        // the delimiters they back — see `SequenceLayout`.
+        let audio_feat = match ref_feat {
+            Some(ref_feat) => {
+                let ref_patches = Var::new(
+                    ref_feat
+                        .to_dtype(dtype)?
+                        .reshape(&[1, layout.t_ref, patch_size, feat_dim])?,
+                    false,
+                );
+                let head = Var::new(
+                    Tensor::<R>::zeros(&[1, 1, patch_size, feat_dim], dtype, device)?,
+                    false,
+                );
+                let tail = Var::new(
+                    Tensor::<R>::zeros(
+                        &[1, 1 + layout.text_length, patch_size, feat_dim],
+                        dtype,
+                        device,
+                    )?,
+                    false,
+                );
+                var_cat(&[&head, &ref_patches, &tail], 1, client)?
+            }
+            None => Var::new(
+                Tensor::<R>::zeros(
+                    &[1, layout.text_length, patch_size, feat_dim],
+                    dtype,
+                    device,
+                )?,
+                false,
+            ),
+        };
 
         // feat_encoder runs over ALL S rows, text rows included — their
         // patches are zeros, not absent.
@@ -270,8 +310,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             client,
         )?;
 
-        // LAST row. In reference mode this is a text position, hence
-        // un-fsq'd by the blend above; do NOT fsq it again.
+        // LAST row. In both modes this is a text position, hence un-fsq'd
+        // by the blend above; do NOT fsq it again.
         let lm_hidden = last_row(&enc_outputs, seq_len)?;
 
         // Argument order is (enc_outputs, masked feat_embed) — and

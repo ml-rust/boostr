@@ -26,6 +26,24 @@
 //! audio_mask = ref_a_mask ++ [0; text_length]
 //! ```
 //!
+//! # No-reference ("zero-shot") mode
+//!
+//! With `t_ref == 0` the whole reference prefix vanishes: no `103`, no filler
+//! rows, no `104`, and NEITHER zero-patch bookend. The sequence is the prompt
+//! alone, of length `S = text_length`:
+//!
+//! ```text
+//! text_token = text_token
+//! audio_feat = zeros([text_length, patch_size, feat_dim])
+//! text_mask  = [1; text_length]
+//! audio_mask = [0; text_length]
+//! ```
+//!
+//! This matches upstream's zero-shot packer (`voxcpm/training/packers.py`,
+//! `process_tts_data`) and its zero-shot inference path
+//! (`voxcpm/model/voxcpm2.py`). Training mixes the two modes: 30-50% of rows
+//! carry no reference, which is what keeps zero-shot cloning alive.
+//!
 //! # Why complementarity is checked, not assumed
 //!
 //! `combined_embed` is a SUM of `text_mask * text_embed` and `audio_mask *
@@ -49,12 +67,14 @@ pub struct SequenceLayout {
     /// `[S]` token ids. Reference-audio positions carry
     /// [`REF_AUDIO_FILLER_ID`], whose embedding is masked out.
     pub token_ids: Vec<i64>,
-    /// `[S]`, 1.0 at every text position (the two delimiters plus the whole
-    /// prompt), 0.0 elsewhere.
+    /// `[S]`, 1.0 at every text position (the whole prompt, plus the two
+    /// delimiters in reference mode), 0.0 elsewhere.
     pub text_mask: Vec<f32>,
-    /// `[S]`, 1.0 at every reference-audio position, 0.0 elsewhere.
+    /// `[S]`, 1.0 at every reference-audio position, 0.0 elsewhere. All zeros
+    /// in no-reference mode.
     pub audio_mask: Vec<f32>,
-    /// Reference-audio patches, i.e. `ref_feat`'s leading axis.
+    /// Reference-audio patches, i.e. `ref_feat`'s leading axis. 0 marks
+    /// no-reference mode.
     pub t_ref: usize,
     /// Prompt length, including its trailing [`AUDIO_START_ID`].
     pub text_length: usize,
@@ -64,20 +84,34 @@ impl SequenceLayout {
     /// Build the layout for `t_ref` reference-audio patches followed by
     /// `text_token_ids`.
     ///
+    /// `t_ref > 0` gives the reference layout, `S = t_ref + 2 + text_length`:
+    ///
+    /// ```text
+    /// tokens = [103] ++ [0; t_ref] ++ [104] ++ text_token_ids
+    /// t_mask = [1]   ++ [0; t_ref] ++ [1]   ++ [1; text_length]
+    /// a_mask = [0]   ++ [1; t_ref] ++ [0]   ++ [0; text_length]
+    /// ```
+    ///
+    /// `t_ref == 0` gives the no-reference layout, `S = text_length`:
+    ///
+    /// ```text
+    /// tokens = text_token_ids
+    /// t_mask = [1; text_length]
+    /// a_mask = [0; text_length]
+    /// ```
+    ///
+    /// The no-reference form drops the delimiters entirely, matching
+    /// upstream's zero-shot packer (`process_tts_data`). It emits no residual
+    /// `103`/`104` and no zero-patch bookend.
+    ///
     /// `text_token_ids` must be non-empty and must already end with
     /// [`AUDIO_START_ID`] — boostr does not tokenize on this path, so it
     /// cannot append the terminator itself, and a prompt missing it prefills
     /// a sequence the sampling loop was never primed for.
     ///
-    /// Errors when `t_ref` is 0, when `text_token_ids` is empty, or when the
-    /// prompt does not end with [`AUDIO_START_ID`].
+    /// Errors when `text_token_ids` is empty, or when the prompt does not end
+    /// with [`AUDIO_START_ID`].
     pub fn build(t_ref: usize, text_token_ids: &[u32]) -> Result<Self> {
-        if t_ref == 0 {
-            return Err(Error::InvalidArgument {
-                arg: "t_ref",
-                reason: "expected at least 1 reference-audio patch, got 0".to_string(),
-            });
-        }
         let text_length = text_token_ids.len();
         let last = *text_token_ids
             .last()
@@ -95,25 +129,29 @@ impl SequenceLayout {
             });
         }
 
-        let seq_len = t_ref + 2 + text_length;
+        let seq_len = text_length + if t_ref > 0 { t_ref + 2 } else { 0 };
         let mut token_ids = Vec::with_capacity(seq_len);
         let mut text_mask = Vec::with_capacity(seq_len);
         let mut audio_mask = Vec::with_capacity(seq_len);
 
-        // [103]: a TEXT position backed by a zero audio patch.
-        token_ids.push(i64::from(REF_AUDIO_START_ID));
-        text_mask.push(1.0);
-        audio_mask.push(0.0);
+        // The whole reference prefix — delimiters included — is present only
+        // in reference mode. Zero-shot emits the prompt alone.
+        if t_ref > 0 {
+            // [103]: a TEXT position backed by a zero audio patch.
+            token_ids.push(i64::from(REF_AUDIO_START_ID));
+            text_mask.push(1.0);
+            audio_mask.push(0.0);
 
-        // [0; T_ref]: the reference-audio span. Filler ids, audio mask only.
-        token_ids.extend(std::iter::repeat_n(i64::from(REF_AUDIO_FILLER_ID), t_ref));
-        text_mask.extend(std::iter::repeat_n(0.0f32, t_ref));
-        audio_mask.extend(std::iter::repeat_n(1.0f32, t_ref));
+            // [0; T_ref]: the reference-audio span. Filler ids, audio mask only.
+            token_ids.extend(std::iter::repeat_n(i64::from(REF_AUDIO_FILLER_ID), t_ref));
+            text_mask.extend(std::iter::repeat_n(0.0f32, t_ref));
+            audio_mask.extend(std::iter::repeat_n(1.0f32, t_ref));
 
-        // [104]: closes the span, again a TEXT position.
-        token_ids.push(i64::from(REF_AUDIO_END_ID));
-        text_mask.push(1.0);
-        audio_mask.push(0.0);
+            // [104]: closes the span, again a TEXT position.
+            token_ids.push(i64::from(REF_AUDIO_END_ID));
+            text_mask.push(1.0);
+            audio_mask.push(0.0);
+        }
 
         // The prompt: every position is text, none carries audio. The LAST
         // row of the whole sequence therefore lands here, which is why
@@ -133,7 +171,7 @@ impl SequenceLayout {
         })
     }
 
-    /// `S = T_ref + 2 + text_length`.
+    /// `S = text_length + (if t_ref > 0 { t_ref + 2 } else { 0 })`.
     pub fn seq_len(&self) -> usize {
         self.token_ids.len()
     }
@@ -262,8 +300,38 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_prompt_and_zero_reference() {
+    fn rejects_empty_prompt() {
         assert!(SequenceLayout::build(2, &[]).is_err());
-        assert!(SequenceLayout::build(0, &PROMPT).is_err());
+        assert!(SequenceLayout::build(0, &[]).is_err());
+    }
+
+    #[test]
+    fn zero_reference_is_the_prompt_alone() {
+        let layout = SequenceLayout::build(0, &PROMPT).expect("layout");
+
+        assert_eq!(layout.seq_len(), PROMPT.len(), "S == text_length");
+        assert_eq!(layout.t_ref, 0);
+        assert_eq!(layout.text_length, PROMPT.len());
+
+        let prompt: Vec<i64> = PROMPT.iter().map(|&id| i64::from(id)).collect();
+        assert_eq!(layout.token_ids, prompt, "tokens are the prompt verbatim");
+        assert_eq!(
+            *layout.token_ids.last().expect("non-empty"),
+            i64::from(AUDIO_START_ID)
+        );
+
+        // No residual delimiter survives the drop of the reference prefix.
+        for id in [REF_AUDIO_START_ID, REF_AUDIO_END_ID, REF_AUDIO_FILLER_ID] {
+            assert!(
+                !layout.token_ids.contains(&i64::from(id)),
+                "no-reference layout must not carry token {id}"
+            );
+        }
+
+        assert!(layout.text_mask.iter().all(|&m| m == 1.0), "all text");
+        assert!(layout.audio_mask.iter().all(|&m| m == 0.0), "no audio");
+        assert_eq!(layout.text_mask.len(), layout.seq_len());
+        assert_eq!(layout.audio_mask.len(), layout.seq_len());
+        check_mask_complementarity(&layout.text_mask, &layout.audio_mask).expect("complementary");
     }
 }

@@ -602,7 +602,7 @@ where
 
         // The prefill is re-run per take: GenerateState::start consumes the
         // PrefillState and the loop advances its KV caches in place.
-        let prefill = model.prefill(client, &ref_feat, &text_token_ids, max_length)?;
+        let prefill = model.prefill(client, Some(&ref_feat), &text_token_ids, max_length)?;
         let mut state = GenerateState::start(prefill, model.config)?;
 
         // Mirrors PatchGenerator::generate exactly (cap first, then step,

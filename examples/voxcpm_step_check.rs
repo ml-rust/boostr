@@ -254,7 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let layout = SequenceLayout::build(t_ref, &text_token_ids)?;
     assert_eq!(layout.seq_len(), seq_len_want);
 
-    let prefill_state = model.prefill(&client, &ref_feat, &text_token_ids, MAX_LENGTH)?;
+    let prefill_state = model.prefill(&client, Some(&ref_feat), &text_token_ids, MAX_LENGTH)?;
 
     // --- Starting state: prefill handoff -> GenerateState::start -------------
     // Checked BEFORE any step, and reported as its own section: a mismatch

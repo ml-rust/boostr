@@ -201,6 +201,30 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
         &self.base
     }
 
+    /// Overwrite `lora_a`/`lora_b` in place with new VALUES, keeping their
+    /// stable [`TensorId`]s — the in-place counterpart of [`Self::with_ids`]
+    /// for a training loop that keeps the same `LoraLinear` alive across
+    /// steps instead of rebuilding one.
+    ///
+    /// An optimizer step (e.g. `AdamW::step`) is FUNCTIONAL: it writes a
+    /// brand-new `Tensor<R>` (a fresh internal id) into the caller's
+    /// `TensorId`-keyed param map, never mutating the old one in place. A
+    /// naive `Var::new(new_tensor, true)` would inherit that fresh id and
+    /// silently detach this adapter from the optimizer state and from the
+    /// autograd graph's own id-keyed bookkeeping on the NEXT step. This pins
+    /// the original `lora_a_id`/`lora_b_id` back on, exactly like
+    /// `with_ids` does at construction.
+    pub fn set_adapters_with_ids(
+        &mut self,
+        lora_a: Tensor<R>,
+        lora_a_id: TensorId,
+        lora_b: Tensor<R>,
+        lora_b_id: TensorId,
+    ) {
+        self.lora_a = Var::with_id(lora_a, lora_a_id, true);
+        self.lora_b = Var::with_id(lora_b, lora_b_id, true);
+    }
+
     /// The base weight, if it is `Var`-wrapped — i.e. only when the base is
     /// dense (`MaybeQuantLinear::Standard`). A quantized base has no
     /// `Var<R>` weight: block-quantized storage carries nothing trainable,

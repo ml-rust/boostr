@@ -84,6 +84,33 @@ impl<R: Runtime<DType = DType>> MaybeLoraLinear<R> {
         matches!(self, Self::Lora(_))
     }
 
+    /// Overwrite an attached adapter's `lora_a`/`lora_b` in place, keeping
+    /// their stable [`TensorId`]s. See
+    /// [`LoraLinear::set_adapters_with_ids`] for why a training loop needs
+    /// this rather than rebuilding a fresh `Var` from an optimizer's
+    /// updated tensor.
+    ///
+    /// Errors on `Self::Plain` — there is no adapter to overwrite.
+    pub fn set_adapters_with_ids(
+        &mut self,
+        lora_a: Tensor<R>,
+        lora_a_id: TensorId,
+        lora_b: Tensor<R>,
+        lora_b_id: TensorId,
+    ) -> Result<()> {
+        match self {
+            Self::Plain(_) => Err(Error::ModelError {
+                reason: "cannot set adapter values on an unadapted (Plain) projection — call \
+                         apply_lora first"
+                    .into(),
+            }),
+            Self::Lora(lora) => {
+                lora.set_adapters_with_ids(lora_a, lora_a_id, lora_b, lora_b_id);
+                Ok(())
+            }
+        }
+    }
+
     /// Wrap this projection's frozen base in a fresh [`LoraLinear`] adapter,
     /// in place. `rank`/`alpha`/`device` go straight to [`LoraLinear::new`].
     ///

@@ -16,7 +16,9 @@
 
 use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
-use crate::nn::{MaybeLoraLinear, Module, child_params, extend_named};
+use crate::nn::{
+    LoraTargets, MaybeLoraLinear, Module, adapt_if_targeted, child_params, extend_named,
+};
 use numr::autograd::{Var, var_silu_mul};
 use numr::dtype::DType;
 use numr::ops::{
@@ -53,6 +55,53 @@ impl<R: Runtime<DType = DType>> BidirectionalMlp<R> {
         let up = self.up_proj.forward(client, x)?;
         let hidden = var_silu_mul(&gate, &up, client).map_err(Error::Numr)?;
         self.down_proj.forward(client, &hidden)
+    }
+
+    /// Wrap `gate_proj`/`up_proj`/`down_proj` that `targets` names with a
+    /// fresh LoRA adapter each, returning how many were adapted. `prefix` is
+    /// the dotted path the owning [`BidirectionalLayer`](super::layer::BidirectionalLayer)
+    /// would pass to `extend_named` for this block — `"mlp"` — so each
+    /// projection's path (via [`LoraTargets::join`]) matches
+    /// `named_parameters()`'s path exactly. A leaf step: no zero-match check
+    /// here — see
+    /// [`MiniCpm4Attention::apply_lora`](crate::model::audio::voxcpm::minicpm4::MiniCpm4Attention::apply_lora)'s
+    /// doc comment for why.
+    pub fn apply_lora(
+        &mut self,
+        targets: &LoraTargets,
+        rank: usize,
+        alpha: f32,
+        device: &R::Device,
+        prefix: &str,
+    ) -> Result<usize> {
+        let mut adapted = adapt_if_targeted(
+            &mut self.gate_proj,
+            targets,
+            rank,
+            alpha,
+            device,
+            prefix,
+            "gate_proj",
+        )?;
+        adapted += adapt_if_targeted(
+            &mut self.up_proj,
+            targets,
+            rank,
+            alpha,
+            device,
+            prefix,
+            "up_proj",
+        )?;
+        adapted += adapt_if_targeted(
+            &mut self.down_proj,
+            targets,
+            rank,
+            alpha,
+            device,
+            prefix,
+            "down_proj",
+        )?;
+        Ok(adapted)
     }
 }
 

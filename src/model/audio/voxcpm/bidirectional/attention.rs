@@ -24,7 +24,8 @@
 use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
 use crate::nn::{
-    MaybeLoraLinear, Module, RoPE, child_params, extend_named, repeat_kv, var_contiguous,
+    LoraTargets, MaybeLoraLinear, Module, RoPE, adapt_if_targeted, child_params, extend_named,
+    repeat_kv, var_contiguous,
 };
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use numr::autograd::{Var, var_permute, var_reshape};
@@ -123,6 +124,62 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
             .map_err(Error::Numr)?;
 
         self.o_proj.forward(client, &attn_out)
+    }
+
+    /// Wrap `q_proj`/`k_proj`/`v_proj`/`o_proj` that `targets` names with a
+    /// fresh LoRA adapter each, returning how many were adapted. `prefix` is
+    /// the dotted path the owning [`BidirectionalLayer`](super::layer::BidirectionalLayer)
+    /// would pass to `extend_named` for this block — `"self_attn"` — so each
+    /// projection's path (via [`LoraTargets::join`]) matches
+    /// `named_parameters()`'s path exactly. A leaf step: no zero-match check
+    /// here — see
+    /// [`MiniCpm4Attention::apply_lora`](crate::model::audio::voxcpm::minicpm4::MiniCpm4Attention::apply_lora)'s
+    /// doc comment for why.
+    pub fn apply_lora(
+        &mut self,
+        targets: &LoraTargets,
+        rank: usize,
+        alpha: f32,
+        device: &R::Device,
+        prefix: &str,
+    ) -> Result<usize> {
+        let mut adapted = adapt_if_targeted(
+            &mut self.q_proj,
+            targets,
+            rank,
+            alpha,
+            device,
+            prefix,
+            "q_proj",
+        )?;
+        adapted += adapt_if_targeted(
+            &mut self.k_proj,
+            targets,
+            rank,
+            alpha,
+            device,
+            prefix,
+            "k_proj",
+        )?;
+        adapted += adapt_if_targeted(
+            &mut self.v_proj,
+            targets,
+            rank,
+            alpha,
+            device,
+            prefix,
+            "v_proj",
+        )?;
+        adapted += adapt_if_targeted(
+            &mut self.o_proj,
+            targets,
+            rank,
+            alpha,
+            device,
+            prefix,
+            "o_proj",
+        )?;
+        Ok(adapted)
     }
 }
 

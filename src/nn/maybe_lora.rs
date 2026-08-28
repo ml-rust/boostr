@@ -9,7 +9,7 @@ use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ScalarOps, TensorOps, TypeConversionOps};
 use numr::runtime::{Runtime, RuntimeClient};
-use numr::tensor::TensorId;
+use numr::tensor::{Tensor, TensorId};
 
 /// A linear projection that is either plain or LoRA-adapted.
 ///
@@ -82,6 +82,49 @@ impl<R: Runtime<DType = DType>> MaybeLoraLinear<R> {
     /// `true` when a LoRA adapter is attached.
     pub fn is_adapted(&self) -> bool {
         matches!(self, Self::Lora(_))
+    }
+
+    /// Wrap this projection's frozen base in a fresh [`LoraLinear`] adapter,
+    /// in place. `rank`/`alpha`/`device` go straight to [`LoraLinear::new`].
+    ///
+    /// # Errors
+    ///
+    /// `Self::Lora` errors rather than silently discarding the existing
+    /// adapter and re-wrapping the frozen base underneath a second one —
+    /// a caller that re-runs `apply_lora` over an already-adapted checkpoint
+    /// must be told, not have its prior adapter vanish.
+    pub fn apply_lora(&mut self, rank: usize, alpha: f32, device: &R::Device) -> Result<()> {
+        if self.is_adapted() {
+            return Err(Error::ModelError {
+                reason: "projection already carries a LoRA adapter; apply_lora would discard \
+                         it and re-wrap the frozen base underneath a second adapter — adapt \
+                         each projection at most once"
+                    .into(),
+            });
+        }
+        // `Self` has no `Default`, so `self` cannot be moved out of `&mut
+        // self` directly to build the new `Lora` variant from its own
+        // `Plain` base. Swap in a throwaway one-element placeholder — never
+        // read, immediately overwritten below — so the real base can be
+        // taken by value.
+        let placeholder = Self::Plain(
+            Linear::new(
+                Tensor::<R>::zeros(&[1, 1], DType::F32, device)?,
+                None,
+                false,
+            )
+            .into(),
+        );
+        let previous = std::mem::replace(self, placeholder);
+        let Self::Plain(base) = previous else {
+            return Err(Error::ModelError {
+                reason: "internal: MaybeLoraLinear::apply_lora expected the Plain variant after \
+                         is_adapted() returned false"
+                    .into(),
+            });
+        };
+        *self = Self::Lora(Box::new(LoraLinear::new(base, rank, alpha, device)?));
+        Ok(())
     }
 
     /// All parameters with their stable autograd IDs.

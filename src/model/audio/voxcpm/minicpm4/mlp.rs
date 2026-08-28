@@ -12,7 +12,9 @@
 
 use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
-use crate::nn::{MaybeLoraLinear, Module, child_params, extend_named};
+use crate::nn::{
+    LoraTargets, MaybeLoraLinear, Module, adapt_if_targeted, child_params, extend_named,
+};
 use numr::autograd::{Var, var_silu_mul};
 use numr::dtype::DType;
 use numr::ops::{
@@ -49,6 +51,52 @@ impl<R: Runtime<DType = DType>> MiniCpm4Mlp<R> {
         let up = self.up_proj.forward(client, x)?;
         let hidden = var_silu_mul(&gate, &up, client).map_err(Error::Numr)?;
         self.down_proj.forward(client, &hidden)
+    }
+
+    /// Wrap `gate_proj`/`up_proj`/`down_proj` that `targets` names with a
+    /// fresh LoRA adapter each, returning how many were adapted. `prefix` is
+    /// the dotted path the owning [`super::layer::MiniCpm4Layer`] would pass
+    /// to `extend_named` for this block — `"mlp"` — so each projection's
+    /// path (via [`LoraTargets::join`]) matches `named_parameters()`'s path
+    /// exactly. A leaf step: see
+    /// [`MiniCpm4Attention::apply_lora`](super::attention::MiniCpm4Attention::apply_lora)
+    /// for why this does not call `LoraTargets::ensure_all_match` itself.
+    pub fn apply_lora(
+        &mut self,
+        targets: &LoraTargets,
+        rank: usize,
+        alpha: f32,
+        device: &R::Device,
+        prefix: &str,
+    ) -> Result<usize> {
+        let mut adapted = adapt_if_targeted(
+            &mut self.gate_proj,
+            targets,
+            rank,
+            alpha,
+            device,
+            prefix,
+            "gate_proj",
+        )?;
+        adapted += adapt_if_targeted(
+            &mut self.up_proj,
+            targets,
+            rank,
+            alpha,
+            device,
+            prefix,
+            "up_proj",
+        )?;
+        adapted += adapt_if_targeted(
+            &mut self.down_proj,
+            targets,
+            rank,
+            alpha,
+            device,
+            prefix,
+            "down_proj",
+        )?;
+        Ok(adapted)
     }
 }
 

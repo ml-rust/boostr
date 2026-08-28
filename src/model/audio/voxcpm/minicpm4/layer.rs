@@ -16,7 +16,7 @@ use crate::inference::KvCache;
 use crate::model::audio::voxcpm::minicpm4::attention::MiniCpm4Attention;
 use crate::model::audio::voxcpm::minicpm4::mlp::MiniCpm4Mlp;
 use crate::model::traits::ModelClient;
-use crate::nn::{Module, RmsNorm, RoPE, child_params, extend_named};
+use crate::nn::{LoraTargets, Module, RmsNorm, RoPE, child_params, extend_named};
 use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{
@@ -96,6 +96,38 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
         let normed = self.post_attention_layernorm.forward(client, &h)?;
         let mlp_out = self.mlp.forward(client, &normed)?;
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
+    }
+
+    /// Delegate to [`MiniCpm4Attention::apply_lora`](super::attention::MiniCpm4Attention::apply_lora)
+    /// and [`MiniCpm4Mlp::apply_lora`](super::mlp::MiniCpm4Mlp::apply_lora),
+    /// summing their counts. `prefix` is the dotted path the owning
+    /// [`super::model::MiniCpm4Model`] would pass to `extend_named` for this
+    /// layer — `"layers.{i}"` — extended here by `"self_attn"`/`"mlp"`
+    /// exactly as `Module::named_parameters` extends it above. No zero-match
+    /// check here: see `MiniCpm4Attention::apply_lora`'s doc comment.
+    pub fn apply_lora(
+        &mut self,
+        targets: &LoraTargets,
+        rank: usize,
+        alpha: f32,
+        device: &R::Device,
+        prefix: &str,
+    ) -> Result<usize> {
+        let mut adapted = self.self_attn.apply_lora(
+            targets,
+            rank,
+            alpha,
+            device,
+            &LoraTargets::join(prefix, "self_attn"),
+        )?;
+        adapted += self.mlp.apply_lora(
+            targets,
+            rank,
+            alpha,
+            device,
+            &LoraTargets::join(prefix, "mlp"),
+        )?;
+        Ok(adapted)
     }
 }
 

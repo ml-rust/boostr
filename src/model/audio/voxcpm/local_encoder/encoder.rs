@@ -24,7 +24,8 @@ use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
 use crate::model::traits::ModelClient;
 use crate::nn::{
-    MaybeLoraLinear, Module, RmsNorm, RoPE, child_params, extend_named, var_contiguous,
+    LoraTargets, MaybeLoraLinear, Module, RmsNorm, RoPE, adapt_if_targeted, child_params,
+    extend_named, var_contiguous,
 };
 use numr::autograd::{Var, var_broadcast_to, var_cat, var_narrow, var_reshape};
 use numr::dtype::DType;
@@ -117,6 +118,70 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
         // materialized before it can reinterpret the layout.
         let cls = var_contiguous(&var_narrow(&h, 1, 0, 1).map_err(Error::Numr)?)?;
         var_reshape(&cls, &[batch, seq_t, self.hidden_dim]).map_err(Error::Numr)
+    }
+
+    /// Wrap `in_proj` and every layer's targeted projections with a fresh
+    /// LoRA adapter, returning the total adapted. `prefix` mirrors
+    /// `Module::named_parameters` below exactly: `in_proj` is joined
+    /// straight onto `prefix`, and each layer is joined at
+    /// `"encoder.layers.{i}"`.
+    ///
+    /// This is the entry point for adapting this sub-model DIRECTLY (a
+    /// caller may adapt just `feat_encoder` on its own), so it validates
+    /// every target up front with [`LoraTargets::ensure_all_match`] against
+    /// this tree's OWN full candidate set (`self.named_parameters()`,
+    /// joined with `prefix`) before delegating to
+    /// [`Self::apply_lora_unchecked`].
+    pub fn apply_lora(
+        &mut self,
+        targets: &LoraTargets,
+        rank: usize,
+        alpha: f32,
+        device: &R::Device,
+        prefix: &str,
+    ) -> Result<usize> {
+        let candidates: Vec<String> = self
+            .named_parameters()
+            .into_iter()
+            .map(|(name, _)| LoraTargets::join(prefix, &name))
+            .collect();
+        targets.ensure_all_match(&candidates)?;
+        self.apply_lora_unchecked(targets, rank, alpha, device, prefix)
+    }
+
+    /// Same walk as [`Self::apply_lora`] but skips
+    /// [`LoraTargets::ensure_all_match`]. Exists for a parent
+    /// (`VoxCpm2Model`) that has already validated `targets` against the
+    /// WHOLE model: re-validating here against only this subtree would
+    /// reject a target that lives in a sibling (`base_lm`, `residual_lm`,
+    /// `feat_decoder`, `aux`), even though it is perfectly valid at root.
+    pub(crate) fn apply_lora_unchecked(
+        &mut self,
+        targets: &LoraTargets,
+        rank: usize,
+        alpha: f32,
+        device: &R::Device,
+        prefix: &str,
+    ) -> Result<usize> {
+        let mut adapted = adapt_if_targeted(
+            &mut self.in_proj,
+            targets,
+            rank,
+            alpha,
+            device,
+            prefix,
+            "in_proj",
+        )?;
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            adapted += layer.apply_lora(
+                targets,
+                rank,
+                alpha,
+                device,
+                &LoraTargets::join(prefix, &format!("encoder.layers.{i}")),
+            )?;
+        }
+        Ok(adapted)
     }
 }
 

@@ -40,7 +40,7 @@ use crate::model::audio::voxcpm::minicpm4::{
 };
 use crate::model::audio::voxcpm::model::config::VoxCpm2Config;
 use crate::model::audio::voxcpm::vae::{AudioVaeDecoder, AudioVaeEncoder};
-use crate::nn::{MaybeQuantLinear, Module, extend_named};
+use crate::nn::{LoraTargets, MaybeQuantLinear, Module, extend_named};
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
@@ -240,6 +240,84 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
                     .to_string(),
             }),
         }
+    }
+
+    /// THE entry point: wrap every `targets`-named projection across the
+    /// whole model — `feat_encoder`, `base_lm`, `residual_lm`,
+    /// `feat_decoder`, `fsq_layer`, and `aux`'s six root-level projections —
+    /// with a fresh LoRA adapter, so a fine-tune can train adapters over the
+    /// frozen base (every VoxCPM2 weight loads `requires_grad = false`; see
+    /// `local_encoder/encoder.rs:19`, `minicpm4/model.rs:30`). Returns the
+    /// total number of projections adapted.
+    ///
+    /// `vae_encoder`/`vae_decoder` are never touched: they are a separately
+    /// checkpointed, frozen audio codec (see the module docs) and neither
+    /// implements `Module<R>` — same exclusion [`Self::named_parameters`]
+    /// documents.
+    ///
+    /// Delegates to each sub-model's own `apply_lora`, joining ITS prefix
+    /// with the same constant [`Self::named_parameters`] uses below
+    /// (`DEFAULT_LOCAL_ENCODER_PREFIX`, `DEFAULT_MINICPM4_PREFIX`, ...) so a
+    /// target's full path here always matches the same-named path
+    /// `named_parameters()` would produce — the two are never built by
+    /// separately hand-written logic.
+    ///
+    /// As the actual top of the call graph, this is the ONE place that
+    /// validates every target up front with [`LoraTargets::ensure_all_match`]
+    /// against the WHOLE model's candidate set before adapting anything.
+    /// Each sub-model child is then walked via its `apply_lora_unchecked`,
+    /// not its validating `apply_lora`: re-validating a cross-subtree target
+    /// list against only one child's own candidate set would reject a
+    /// target that lives in a sibling (e.g. `stop_proj`, which lives under
+    /// `aux`, is not a candidate inside `feat_encoder`'s own subtree).
+    pub fn apply_lora(
+        &mut self,
+        targets: &LoraTargets,
+        rank: usize,
+        alpha: f32,
+        device: &R::Device,
+    ) -> Result<usize> {
+        let candidates: Vec<String> = self
+            .named_parameters()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        targets.ensure_all_match(&candidates)?;
+
+        let mut adapted = self.feat_encoder.apply_lora_unchecked(
+            targets,
+            rank,
+            alpha,
+            device,
+            DEFAULT_LOCAL_ENCODER_PREFIX,
+        )?;
+        adapted += self.base_lm.apply_lora_unchecked(
+            targets,
+            rank,
+            alpha,
+            device,
+            DEFAULT_MINICPM4_PREFIX,
+        )?;
+        adapted += self.residual_lm.apply_lora_unchecked(
+            targets,
+            rank,
+            alpha,
+            device,
+            DEFAULT_RESIDUAL_LM_PREFIX,
+        )?;
+        adapted += self.feat_decoder.apply_lora_unchecked(
+            targets,
+            rank,
+            alpha,
+            device,
+            DEFAULT_LOCAL_DIT_PREFIX,
+        )?;
+        adapted += self
+            .fsq
+            .apply_lora(targets, rank, alpha, device, FSQ_LAYER_PREFIX)?;
+        // Root-level, no prefix — see `Module::named_parameters` above.
+        adapted += self.aux.apply_lora(targets, rank, alpha, device, "")?;
+        Ok(adapted)
     }
 }
 

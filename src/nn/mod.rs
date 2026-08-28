@@ -9,6 +9,7 @@ pub mod groupnorm;
 pub mod layernorm;
 pub mod linear;
 pub mod lora;
+pub mod lora_targets;
 pub mod loss;
 pub mod lstm;
 pub mod maybe_lora;
@@ -38,6 +39,7 @@ pub use groupnorm::GroupNorm;
 pub use layernorm::LayerNorm;
 pub use linear::{Linear, MaybeQuantLinear, QuantLinear};
 pub use lora::LoraLinear;
+pub use lora_targets::{LoraTargets, adapt_if_targeted};
 pub use loss::{
     contrastive_loss, cross_entropy_loss, cross_entropy_loss_masked, cross_entropy_loss_smooth,
     flow_matching_interpolate, flow_matching_loss, flow_matching_target, focal_loss, kl_div_loss,

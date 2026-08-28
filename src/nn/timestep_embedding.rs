@@ -7,6 +7,7 @@
 //! that projects that embedding through the model's hidden width.
 
 use crate::error::{Error, Result};
+use crate::nn::lora_targets::{LoraTargets, adapt_if_targeted};
 use crate::nn::maybe_lora::MaybeLoraLinear;
 use crate::nn::module::{Module, child_params, extend_named};
 use crate::quant::traits::QuantMatmulOps;
@@ -159,6 +160,43 @@ impl<R: Runtime<DType = DType>> TimestepEmbedding<R> {
         let hidden = self.linear_1.forward(client, x)?;
         let hidden = var_silu(&hidden, client).map_err(Error::Numr)?;
         self.linear_2.forward(client, &hidden)
+    }
+
+    /// Wrap `linear_1`/`linear_2` that `targets` names with a fresh LoRA
+    /// adapter each, returning how many were adapted. `prefix` is the
+    /// dotted path the owning `local_dit` `time_mlp`/`delta_time_mlp` field
+    /// would pass to `extend_named` for this MLP, so each linear's path
+    /// (via [`LoraTargets::join`]) matches `named_parameters()`'s path
+    /// exactly. A leaf step: no zero-match check here — see
+    /// [`crate::model::audio::voxcpm::minicpm4::MiniCpm4Attention::apply_lora`]'s
+    /// doc comment for why.
+    pub fn apply_lora(
+        &mut self,
+        targets: &LoraTargets,
+        rank: usize,
+        alpha: f32,
+        device: &R::Device,
+        prefix: &str,
+    ) -> Result<usize> {
+        let mut adapted = adapt_if_targeted(
+            &mut self.linear_1,
+            targets,
+            rank,
+            alpha,
+            device,
+            prefix,
+            "linear_1",
+        )?;
+        adapted += adapt_if_targeted(
+            &mut self.linear_2,
+            targets,
+            rank,
+            alpha,
+            device,
+            prefix,
+            "linear_2",
+        )?;
+        Ok(adapted)
     }
 }
 

@@ -82,6 +82,11 @@ pub struct LocalDit<R: Runtime> {
     pub(crate) hidden_dim: usize,
     pub(crate) feat_dim: usize,
     pub(crate) patch_size: usize,
+    /// Run every layer through
+    /// [`BidirectionalLayer::forward_checkpointed`] instead of
+    /// [`BidirectionalLayer::forward`]. `false` by default, so inference
+    /// pays nothing — see [`LocalDit::set_activation_checkpointing`].
+    pub(crate) activation_checkpointing: bool,
 }
 
 impl<R: Runtime<DType = DType>> LocalDit<R> {
@@ -263,6 +268,7 @@ where
             hidden_dim: cfg.hidden_dim,
             feat_dim: cfg.feat_dim,
             patch_size: cfg.patch_size,
+            activation_checkpointing: false,
         })
     }
 }

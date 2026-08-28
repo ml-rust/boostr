@@ -122,6 +122,7 @@ pub(crate) fn model(num_layers: usize, device: &CpuDevice) -> LocalDit<CpuRuntim
         hidden_dim: HIDDEN_DIM,
         feat_dim: FEAT_DIM,
         patch_size: PATCH_SIZE,
+        activation_checkpointing: false,
     }
 }
 

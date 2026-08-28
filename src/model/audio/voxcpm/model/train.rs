@@ -192,7 +192,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client: TensorOps<R>
+        R::Client: ModelClient<R>
+            + TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -254,7 +255,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client: TensorOps<R>
+        R::Client: ModelClient<R>
+            + TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -331,7 +333,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R> + RandomOps<R>,
-        R::Client: TensorOps<R>
+        R::Client: ModelClient<R>
+            + TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>

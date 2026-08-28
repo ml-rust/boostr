@@ -415,6 +415,11 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
 // model-architecture files.
 mod lora_named;
 
+// `set_activation_checkpointing` lives in `loader/checkpointing.rs`, in its
+// own `impl<R: Runtime<DType = DType>> VoxCpm2Model<R>` block — split out for
+// the same 500-line reason as `lora_named` above.
+mod checkpointing;
+
 /// Whole-model parameter enumeration for fine-tuning (e.g. LoRA target
 /// matching, [`SimpleTrainer`](crate::trainer::simple::SimpleTrainer)'s
 /// `HashMap<TensorId, Tensor<R>>` build). Names are checkpoint keys

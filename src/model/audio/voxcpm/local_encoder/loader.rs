@@ -173,6 +173,7 @@ where
             norm,
             rope,
             hidden_dim: cfg.hidden_dim,
+            activation_checkpointing: false,
         })
     }
 }

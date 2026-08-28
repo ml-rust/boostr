@@ -61,6 +61,11 @@ pub struct MiniCpm4Model<R: Runtime> {
     /// table rather than a `max_position_embeddings`-row cache nothing reads.
     pub(crate) rope: Option<RoPE<R>>,
     pub(crate) hidden_size: usize,
+    /// Run every layer through
+    /// [`MiniCpm4Layer::forward_checkpointed`] instead of
+    /// [`MiniCpm4Layer::forward`]. `false` by default, so inference pays
+    /// nothing — see [`Self::set_activation_checkpointing`].
+    pub(crate) activation_checkpointing: bool,
 }
 
 impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
@@ -77,6 +82,25 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// Whether this instantiation owns an `embed_tokens` table.
     pub fn has_embedding(&self) -> bool {
         self.embed_tokens.is_some()
+    }
+
+    /// Turn activation checkpointing on or off for every layer in this stack.
+    ///
+    /// `on` trades ~33% extra compute for dropping each layer's
+    /// intermediates during the forward pass and recomputing them during
+    /// backward, which is what caps training VRAM. Default is `off`, so an
+    /// inference path pays nothing.
+    ///
+    /// Set it only for training: the KV-cached decode path
+    /// ([`decode`](crate::model::audio::voxcpm::minicpm4::decode)) never
+    /// reads this flag, since a recomputed segment must not touch the cache.
+    pub fn set_activation_checkpointing(&mut self, on: bool) {
+        self.activation_checkpointing = on;
+    }
+
+    /// Whether this stack runs its layers with activation checkpointing.
+    pub fn activation_checkpointing(&self) -> bool {
+        self.activation_checkpointing
     }
 
     /// Whether this instantiation rotates Q/K.
@@ -119,10 +143,18 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// hidden_size]` after the final `norm`. `seq` may not exceed the RoPE
     /// cache length the loader built (`max_position_embeddings`); a NoPE
     /// (`no_rope`) stack has no such cache and no such bound.
+    ///
+    /// When [`set_activation_checkpointing`](Self::set_activation_checkpointing)
+    /// is on, every layer runs through
+    /// [`MiniCpm4Layer::forward_checkpointed`] — same ops, same order, same
+    /// output values, at ~33% extra compute. Off (the default), the walk is
+    /// exactly what it was before that flag existed.
     pub fn forward<C>(&self, client: &C, inputs_embeds: &Var<R>) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client: TensorOps<R>
+        R::Client: ModelClient<R>
+            + TypeConversionOps<R>
+            + TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -154,9 +186,15 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
             });
         }
 
-        let mut h = inputs_embeds.clone();
+        // `alias`, never `clone`: `Var::clone` mints a fresh `TensorId`,
+        // which orphans a caller's gradient when `inputs_embeds` is a leaf.
+        let mut h = inputs_embeds.alias();
         for layer in &self.layers {
-            h = layer.forward(client, &h, self.rope.as_ref())?;
+            h = if self.activation_checkpointing {
+                layer.forward_checkpointed(&h, self.rope.as_ref())?
+            } else {
+                layer.forward(client, &h, self.rope.as_ref())?
+            };
         }
         self.norm.forward(client, &h)
     }

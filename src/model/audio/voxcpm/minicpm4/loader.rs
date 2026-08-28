@@ -201,6 +201,7 @@ where
             norm,
             rope,
             hidden_size: cfg.hidden_size,
+            activation_checkpointing: false,
         })
     }
 }

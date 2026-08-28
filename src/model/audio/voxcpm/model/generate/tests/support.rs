@@ -79,6 +79,7 @@ fn feat_encoder(device: &CpuDevice) -> LocalEncoder<CpuRuntime> {
         norm: norm(device),
         rope,
         hidden_dim: HIDDEN_DIM,
+        activation_checkpointing: false,
     }
 }
 

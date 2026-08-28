@@ -66,6 +66,23 @@ use numr::ops::{
 use numr::runtime::Runtime;
 
 impl<R: Runtime<DType = DType>> LocalDit<R> {
+    /// Turn activation checkpointing on or off for every backbone layer.
+    ///
+    /// `on` trades ~33% extra compute for dropping each layer's
+    /// intermediates during the forward pass and recomputing them during
+    /// backward, which is what caps training VRAM. Default is `off`, so an
+    /// inference path — including [`solve_euler`](Self::solve_euler) — pays
+    /// nothing.
+    pub fn set_activation_checkpointing(&mut self, on: bool) {
+        self.activation_checkpointing = on;
+    }
+
+    /// Whether this stack runs its backbone layers with activation
+    /// checkpointing.
+    pub fn activation_checkpointing(&self) -> bool {
+        self.activation_checkpointing
+    }
+
     /// One estimator evaluation.
     ///
     /// - `x`: `[batch, feat_dim, patch_size]` — the current CFM sample.
@@ -78,6 +95,12 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
     ///   still a live input: see the module docs.
     ///
     /// Returns `[batch, feat_dim, patch_size]`.
+    ///
+    /// When
+    /// [`set_activation_checkpointing`](Self::set_activation_checkpointing)
+    /// is on, every backbone layer runs through
+    /// [`BidirectionalLayer::forward_checkpointed`](crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer::forward_checkpointed)
+    /// — same ops, same order, same output values, at ~33% extra compute.
     pub fn forward<C>(
         &self,
         client: &C,
@@ -89,7 +112,8 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client: TensorOps<R>
+        R::Client: ModelClient<R>
+            + TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -143,7 +167,11 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
 
         let mut h = seq;
         for layer in &self.layers {
-            h = layer.forward(client, &h, &self.rope)?;
+            h = if self.activation_checkpointing {
+                layer.forward_checkpointed(&h, &self.rope)?
+            } else {
+                layer.forward(client, &h, &self.rope)?
+            };
         }
         // Final norm BEFORE the slice — it is part of `self.decoder`.
         let h = self.norm.forward(client, &h)?;

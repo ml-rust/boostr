@@ -78,6 +78,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use boostr::format::SafeTensors;
+use boostr::model::ModelClient;
 use boostr::model::audio::voxcpm::model::config::AUDIO_START_ID;
 use boostr::model::audio::voxcpm::model::{
     GenerateOptions, GenerateOutcome, GenerateState, StepOutcome, VoxCpm2Model,
@@ -470,7 +471,8 @@ fn run<R: Runtime<DType = DType>>(
     started: Instant,
 ) -> Result<(Vec<f32>, f32), Box<dyn std::error::Error>>
 where
-    R::Client: TensorOps<R>
+    R::Client: ModelClient<R>
+        + TensorOps<R>
         + ScalarOps<R>
         + ReduceOps<R>
         + IndexingOps<R>

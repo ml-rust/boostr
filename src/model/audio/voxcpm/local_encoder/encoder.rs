@@ -56,17 +56,44 @@ pub struct LocalEncoder<R: Runtime> {
     pub(crate) norm: RmsNorm<R>,
     pub(crate) rope: RoPE<R>,
     pub(crate) hidden_dim: usize,
+    /// Run every layer through
+    /// [`BidirectionalLayer::forward_checkpointed`] instead of
+    /// [`BidirectionalLayer::forward`]. `false` by default, so inference
+    /// pays nothing — see [`Self::set_activation_checkpointing`].
+    pub(crate) activation_checkpointing: bool,
 }
 
 impl<R: Runtime<DType = DType>> LocalEncoder<R> {
+    /// Turn activation checkpointing on or off for every layer in this stack.
+    ///
+    /// `on` trades ~33% extra compute for dropping each layer's
+    /// intermediates during the forward pass and recomputing them during
+    /// backward, which is what caps training VRAM. Default is `off`, so an
+    /// inference path pays nothing.
+    pub fn set_activation_checkpointing(&mut self, on: bool) {
+        self.activation_checkpointing = on;
+    }
+
+    /// Whether this stack runs its layers with activation checkpointing.
+    pub fn activation_checkpointing(&self) -> bool {
+        self.activation_checkpointing
+    }
+
     /// `x: [B, T, num_patches, patch_dim]` -> `[B, T, hidden_dim]`.
+    ///
+    /// When [`set_activation_checkpointing`](Self::set_activation_checkpointing)
+    /// is on, every layer runs through
+    /// [`BidirectionalLayer::forward_checkpointed`] — same ops, same order,
+    /// same output values, at ~33% extra compute.
     pub fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
     where
         // `TypeConversionOps` is what `MaybeLoraLinear::forward` adds over a
         // dense `Linear::forward`, here for `in_proj` and for every
         // projection inside the layer stack.
         C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client: TensorOps<R>
+        R::Client: ModelClient<R>
+            + TypeConversionOps<R>
+            + TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -112,7 +139,11 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
 
         let mut h = flat;
         for layer in &self.layers {
-            h = layer.forward(client, &h, &self.rope)?;
+            h = if self.activation_checkpointing {
+                layer.forward_checkpointed(&h, &self.rope)?
+            } else {
+                layer.forward(client, &h, &self.rope)?
+            };
         }
         let h = self.norm.forward(client, &h)?;
 

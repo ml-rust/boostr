@@ -100,6 +100,7 @@ fn tiny_model_with(device: &CpuDevice, no_rope: bool) -> MiniCpm4Model<CpuRuntim
             RoPE::<CpuRuntime>::precompute_freqs(16, HEAD_DIM, 10000.0, None, device).expect("rope")
         }),
         hidden_size: HIDDEN,
+        activation_checkpointing: false,
     }
 }
 
@@ -162,6 +163,7 @@ fn quantized_tiny_model(device: &CpuDevice, client: &CpuClient) -> MiniCpm4Model
         norm: quantized_norm(),
         rope: None,
         hidden_size: QDIM,
+        activation_checkpointing: false,
     }
 }
 

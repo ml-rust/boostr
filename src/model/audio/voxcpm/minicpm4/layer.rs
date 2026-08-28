@@ -18,7 +18,7 @@ use crate::model::audio::voxcpm::minicpm4::mlp::MiniCpm4Mlp;
 use crate::model::traits::ModelClient;
 use crate::nn::{LoraTargets, Module, RmsNorm, RoPE, child_params, extend_named};
 use crate::quant::traits::DequantOps;
-use numr::autograd::{Var, var_add};
+use numr::autograd::{Var, checkpoint, var_add};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
@@ -61,6 +61,71 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
         let normed = self.post_attention_layernorm.forward(client, &h)?;
         let mlp_out = self.mlp.forward(client, &normed)?;
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
+    }
+
+    /// Same result as [`forward`](Self::forward), computed with activation
+    /// checkpointing: the layer's intermediates are dropped during the
+    /// forward pass and recomputed during backward.
+    ///
+    /// Costs ~33% extra compute. Call it only on a training pass; inference
+    /// must use [`forward`](Self::forward) and pay nothing.
+    ///
+    /// Takes no `client`: `numr::autograd::checkpoint` runs the segment with
+    /// `R::default_client` for the input's device, on both the forward pass
+    /// and the recompute. Same ops in the same order as
+    /// [`forward`](Self::forward), so the output values match exactly.
+    ///
+    /// The closure `checkpoint` stores is `Send + Sync + 'static`, so it
+    /// cannot borrow `&self`. This captures [`Self::alias`] and an aliased
+    /// `rope` instead, which preserves every `TensorId` — a `Clone` would
+    /// mint fresh ids and orphan the adapters' gradients.
+    ///
+    /// Every trainable parameter this layer owns is passed to `checkpoint`
+    /// alongside `x`. `checkpoint`'s backward prunes its re-entrant pass to
+    /// exactly the ids it was handed, so a parameter left out of that list
+    /// gets NO gradient — the adapters would silently stop training.
+    pub fn forward_checkpointed(&self, x: &Var<R>, rope: Option<&RoPE<R>>) -> Result<Var<R>>
+    where
+        R::Client: ModelClient<R>
+            + TypeConversionOps<R>
+            + TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + DequantOps<R>,
+    {
+        let layer = self.alias();
+        let rope = rope.map(RoPE::alias);
+        // `x` first, then every trainable parameter: `checkpoint`'s backward
+        // returns a gradient only for an id it was given as an input.
+        let trainable = Module::trainable_parameters(self);
+        let mut inputs: Vec<&Var<R>> = Vec::with_capacity(trainable.len() + 1);
+        inputs.push(x);
+        inputs.extend(trainable.iter().map(|(_, param)| *param));
+        checkpoint(
+            move |segment_inputs, client: &R::Client| {
+                let input = segment_inputs.first().ok_or_else(|| {
+                    numr::error::Error::Internal(
+                        "checkpointed MiniCpm4Layer segment received no input".to_string(),
+                    )
+                })?;
+                layer
+                    .forward::<R::Client>(client, input, rope.as_ref())
+                    .map_err(|e| {
+                        numr::error::Error::Backend(format!(
+                            "checkpointed MiniCpm4Layer forward: {e}"
+                        ))
+                    })
+            },
+            &inputs,
+        )
+        .map_err(Error::Numr)
     }
 
     /// KV-cached variant of [`forward`](Self::forward): `x: [batch, seq,
@@ -216,9 +281,12 @@ impl<R: Runtime<DType = DType>> Module<R> for MiniCpm4Layer<R> {
 #[cfg(test)]
 mod alias_tests {
     use super::*;
-    use crate::model::audio::voxcpm::minicpm4::model::tests::tiny_model;
+    use crate::model::audio::voxcpm::minicpm4::model::tests::{HIDDEN, filled, tiny_model};
     use crate::nn::LoraTargets;
+    use crate::test_utils::cpu_setup;
+    use numr::autograd::{backward, var_sum};
     use numr::runtime::cpu::CpuRuntime;
+    use std::collections::HashMap;
 
     /// The whole point of a layer's `alias()`: prove it preserves every
     /// `Var<R>` `TensorId`, including a LoRA adapter's, not mints fresh
@@ -259,6 +327,113 @@ mod alias_tests {
             layer.input_layernorm.weight().id(),
             aliased.input_layernorm.weight().id(),
             "input_layernorm weight id must survive alias()"
+        );
+    }
+
+    fn values(tensor: &Tensor<CpuRuntime>) -> Vec<f32> {
+        tensor.contiguous().expect("contiguous").to_vec::<f32>()
+    }
+
+    /// [`MiniCpm4Layer::forward_checkpointed`] must be
+    /// [`MiniCpm4Layer::forward`] in values AND in gradients.
+    ///
+    /// A forward-only comparison would pass on a `forward_checkpointed` that
+    /// never reconstructs a usable graph, which is the whole failure mode.
+    /// Equality is EXACT: `checkpoint` re-runs the same ops in the same order
+    /// on the same values, and the loss is a plain sum, so the incoming
+    /// `grad_output` is all ones and the extra `mul` the checkpoint backward
+    /// inserts multiplies by exactly 1.0.
+    #[test]
+    fn checkpointed_forward_matches_forward_in_values_and_lora_gradients() {
+        let (client, device) = cpu_setup();
+        let mut model = tiny_model(&device);
+        let rope = model.rope.as_ref().map(RoPE::alias);
+        let layer = &mut model.layers[0];
+        let adapted = layer
+            .apply_lora(
+                &LoraTargets::new(["q_proj", "down_proj"]),
+                2,
+                4.0,
+                &device,
+                "",
+            )
+            .expect("apply_lora must adapt q_proj and down_proj");
+        assert_eq!(adapted, 2, "expected one attention and one MLP projection");
+
+        // `LoraLinear::new` zeroes `lora_b`, which would leave
+        // d(loss)/d(lora_a) exactly zero and that half of the comparison
+        // vacuous. Overwrite both adapters with non-degenerate values;
+        // `load_lora_parameters` keeps every `TensorId`.
+        let seeded: HashMap<TensorId, Tensor<CpuRuntime>> = Module::trainable_parameters(layer)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (id, var))| (id, filled(var.shape(), 7 + i, &device)))
+            .collect();
+        let written = layer
+            .load_lora_parameters(&seeded)
+            .expect("load_lora_parameters must write every seeded adapter");
+        assert_eq!(
+            written,
+            seeded.len(),
+            "every seeded adapter must be written"
+        );
+
+        let x = Var::new(filled(&[1, 4, HIDDEN], 99, &device), true);
+
+        let out_plain = layer.forward(&client, &x, rope.as_ref()).expect("forward");
+        let loss_plain = var_sum(&out_plain, &[], false, &client).expect("sum");
+        let grads_plain = backward(&loss_plain, &client).expect("backward");
+
+        let out_ckpt = layer
+            .forward_checkpointed(&x, rope.as_ref())
+            .expect("forward_checkpointed");
+        let loss_ckpt = var_sum(&out_ckpt, &[], false, &client).expect("sum");
+        let grads_ckpt = backward(&loss_ckpt, &client).expect("checkpointed backward");
+
+        assert_eq!(
+            values(out_plain.tensor()),
+            values(out_ckpt.tensor()),
+            "forward_checkpointed must produce the same values as forward"
+        );
+
+        let adapters = Module::trainable_parameters(layer);
+        assert_eq!(
+            adapters.len(),
+            4,
+            "two adapted projections, lora_a + lora_b"
+        );
+        let mut any_nonzero = false;
+        for (id, _) in &adapters {
+            let plain = values(
+                grads_plain
+                    .get(*id)
+                    .expect("forward must produce an adapter gradient"),
+            );
+            let ckpt = values(
+                grads_ckpt
+                    .get(*id)
+                    .expect("forward_checkpointed must produce an adapter gradient"),
+            );
+            assert_eq!(
+                plain, ckpt,
+                "adapter gradient must match between forward and forward_checkpointed"
+            );
+            any_nonzero |= plain.iter().any(|g| *g != 0.0);
+        }
+        assert!(
+            any_nonzero,
+            "an all-zero adapter gradient would pass this test vacuously"
+        );
+
+        let gx_plain = values(grads_plain.get(x.id()).expect("input gradient"));
+        let gx_ckpt = values(
+            grads_ckpt
+                .get(x.id())
+                .expect("checkpointed input gradient — the segment input id must survive"),
+        );
+        assert_eq!(
+            gx_plain, gx_ckpt,
+            "input gradient must match between forward and forward_checkpointed"
         );
     }
 }

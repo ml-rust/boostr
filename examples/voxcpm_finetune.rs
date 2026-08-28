@@ -186,6 +186,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use boostr::format::safetensors::save_safetensors;
+use boostr::model::ModelClient;
 use boostr::model::audio::voxcpm::model::config::{AUDIO_START_ID, VoxCpm2Config};
 use boostr::model::audio::voxcpm::model::{PatchGenerator, VoxCpm2Model};
 use boostr::model::audio::voxcpm::{
@@ -315,6 +316,12 @@ struct Args {
     /// fixed eval batch — see the module docs' "Eval batch" section. `0`
     /// disables eval entirely.
     eval_rows: usize,
+    /// Run every transformer layer with activation checkpointing: drop the
+    /// intermediates during the forward pass and recompute them during
+    /// backward. Cuts the activation memory that dominates training peak
+    /// VRAM, at ~33% extra compute. OFF by default, so a run without the
+    /// flag behaves exactly as it did before the flag existed.
+    activation_checkpointing: bool,
 }
 
 const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf [--config config.json]) \
@@ -327,7 +334,9 @@ names text-ignoring as the most common fine-tuning failure mode)] \
 [--max-patches 38 (caps the target wav's patch count; over-cap targets are \
 dropped, over-cap ref_wav clips are truncated to the cap instead — see the \
 module docs)] \
-[--eval-rows 4 (rows held out for the fixed eval batch; 0 disables eval)]";
+[--eval-rows 4 (rows held out for the fixed eval batch; 0 disables eval)] \
+[--checkpoint (activation checkpointing: recompute each layer's intermediates \
+during backward instead of holding them, ~33% slower, much less VRAM)]";
 
 /// Consume the value that follows `flag`, advancing `i` past it.
 fn take_value(argv: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -354,6 +363,7 @@ fn parse_args() -> Result<Args, String> {
     let mut training_cfg_rate = DEFAULT_TRAINING_CFG_RATE;
     let mut max_patches = DEFAULT_MAX_PATCHES;
     let mut eval_rows = DEFAULT_EVAL_ROWS;
+    let mut activation_checkpointing = false;
 
     let mut i = 0usize;
     while i < argv.len() {
@@ -412,6 +422,7 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--eval-rows: {e}"))?
             }
+            "--checkpoint" => activation_checkpointing = true,
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown flag {other}\n{USAGE}")),
         }
@@ -464,6 +475,7 @@ fn parse_args() -> Result<Args, String> {
         training_cfg_rate,
         max_patches,
         eval_rows,
+        activation_checkpointing,
     })
 }
 
@@ -740,7 +752,8 @@ fn build_prefill_and_target<R, C>(
 where
     R: Runtime<DType = DType>,
     C: VoxCpmClient<R> + TypeConversionOps<R>,
-    R::Client: TensorOps<R>
+    R::Client: ModelClient<R>
+        + TensorOps<R>
         + ScalarOps<R>
         + ReduceOps<R>
         + IndexingOps<R>
@@ -822,7 +835,8 @@ fn build_eval_batch<'a, R, C>(
 where
     R: Runtime<DType = DType>,
     C: VoxCpmClient<R> + TypeConversionOps<R> + RandomOps<R>,
-    R::Client: TensorOps<R>
+    R::Client: ModelClient<R>
+        + TensorOps<R>
         + ScalarOps<R>
         + ReduceOps<R>
         + IndexingOps<R>
@@ -886,7 +900,8 @@ fn score_eval_batch<R, C>(
 where
     R: Runtime<DType = DType>,
     C: VoxCpmClient<R> + TypeConversionOps<R>,
-    R::Client: TensorOps<R>
+    R::Client: ModelClient<R>
+        + TensorOps<R>
         + ScalarOps<R>
         + ReduceOps<R>
         + IndexingOps<R>
@@ -943,7 +958,8 @@ fn run<R: Runtime<DType = DType>>(
     started: Instant,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    R::Client: TensorOps<R>
+    R::Client: ModelClient<R>
+        + TensorOps<R>
         + ScalarOps<R>
         + ReduceOps<R>
         + IndexingOps<R>
@@ -986,6 +1002,19 @@ where
             )?
         }
     };
+
+    // Activation checkpointing, applied to every stack a training pass runs
+    // (`feat_encoder`, `base_lm`, `residual_lm`, `feat_decoder`). Set BEFORE
+    // any forward pass so the eval batch and the training loop agree.
+    model.set_activation_checkpointing(args.activation_checkpointing);
+    if args.activation_checkpointing {
+        eprintln!(
+            "activation checkpointing: ON (--checkpoint) — layer intermediates are \
+             recomputed during backward, ~33% extra compute"
+        );
+    } else {
+        eprintln!("activation checkpointing: off (pass --checkpoint to enable)");
+    }
 
     // Filter BEFORE any LoRA/optimizer setup: a row over --max-patches must
     // never reach `encode_reference` (the AudioVAE encoder), which is the
@@ -1043,7 +1072,8 @@ where
     // wanted id and survives pruning. The real cost is forward ACTIVATION
     // LIFETIME: training state measured 6266 MiB at a 24-patch cap and 8831
     // MiB at 31, so it scales with sequence length. Activation checkpointing
-    // is the fix; do not expect this call to deliver memory.
+    // is the fix, and `--checkpoint` turns it on; do not expect this call to
+    // deliver memory.
     //
     // Collected once — the adapter set never changes after `apply_lora`.
     let wanted: Vec<TensorId> = params.keys().copied().collect();

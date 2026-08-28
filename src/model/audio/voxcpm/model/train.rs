@@ -16,6 +16,11 @@
 //! same way `crate::trainer` already works for every other model in this
 //! crate — nothing here is VoxCPM2-specific about running an optimizer.
 //!
+//! The sibling [`stop`] module adds the SECOND term upstream's fine-tuning
+//! guide trains, `loss/stop`, and [`PatchGenerator::train_losses_with_noise`]/
+//! [`PatchGenerator::train_losses`] combine it with this file's `loss/diff`
+//! from ONE shared [`PatchGenerator::teacher_forced_conditioning`] call.
+//!
 //! # Why the DiT's `x`/`cond` need a transpose and `target_patches`/`noise`
 //! do not
 //!
@@ -49,7 +54,7 @@
 //! still contributes a real bias.
 
 use crate::error::{Error, Result};
-use crate::model::audio::voxcpm::model::generate::PatchGenerator;
+use crate::model::audio::voxcpm::model::generate::{PatchGenerator, TeacherForcedConditioning};
 use crate::model::audio::voxcpm::model::prefill::PrefillState;
 use crate::model::traits::ModelClient;
 use crate::nn::{flow_matching_interpolate, flow_matching_loss, var_contiguous};
@@ -62,6 +67,9 @@ use numr::ops::{
 };
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
+
+mod stop;
+pub use stop::{TrainLosses, stop_loss_from_logits};
 
 impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// One CFM training step's loss, with `t` and `noise` supplied by the
@@ -144,7 +152,41 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         // noise/data match, `LocalDit::forward`'s own checks) is already
         // enforced by the callee — not re-implemented here.
         let cond = self.teacher_forced_conditioning(client, prefill, target_patches)?;
+        self.cfm_loss_from_conditioning(client, &cond, target_patches, t, noise, tcount)
+    }
 
+    /// The diffusion half of [`Self::cfm_loss_with_noise`], factored out so
+    /// [`Self::train_losses_with_noise`] can share ONE
+    /// [`Self::teacher_forced_conditioning`] call with the stop loss instead
+    /// of paying for `base_lm`/`residual_lm`'s full-sequence forward twice.
+    /// `tcount` is `target_patches.shape()[0]`, already validated by the
+    /// caller. `pub(crate)`, not private: the sibling `train::stop` module's
+    /// `Self::train_losses_with_noise` shares this exact diffusion
+    /// computation instead of recomputing it.
+    pub(crate) fn cfm_loss_from_conditioning<C>(
+        &self,
+        client: &C,
+        cond: &TeacherForcedConditioning<R>,
+        target_patches: &Tensor<R>,
+        t: &Tensor<R>,
+        noise: &Tensor<R>,
+        tcount: usize,
+    ) -> Result<Var<R>>
+    where
+        C: ModelClient<R> + TypeConversionOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + TypeConversionOps<R>
+            + DequantOps<R>,
+    {
         let dtype = cond.mu.tensor().dtype();
         let device = cond.mu.tensor().device();
         let target_var = Var::new(target_patches.to_dtype(dtype)?, false);

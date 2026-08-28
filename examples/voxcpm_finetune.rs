@@ -5,7 +5,8 @@
 //!     (--ckpt CKPT_DIR | --gguf MODEL.gguf [--config config.json]) \
 //!     --audiovae audiovae.safetensors --manifest FILE.tsv \
 //!     [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] [--alpha 32] \
-//!     [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors]
+//!     [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors] \
+//!     [--lambda-stop 1.0]
 //! ```
 //!
 //! `CKPT_DIR` holds `config.json`, `model.safetensors` and `tokenizer.json`,
@@ -39,8 +40,9 @@
 //!
 //! [`VoxCpm2Model::prefill`]/[`prefill_capturing`] take a `ref_feat`
 //! argument — the reference-audio conditioning prefix the model is allowed
-//! to copy voice characteristics from — and `cfm_loss`'s `target_patches` is
-//! the ground truth the loss is computed against. Feeding the SAME clip to
+//! to copy voice characteristics from — and `train_losses`'s
+//! `target_patches` is the ground truth both `loss/diff` and `loss/stop`
+//! are computed against. Feeding the SAME clip to
 //! both is degenerate: the model can pass the reference straight through to
 //! the output and score a low, still-falling loss without ever learning to
 //! synthesize from text. So `ref_wav` names a *different* clip from the
@@ -62,8 +64,9 @@
 //!
 //! # Why `prefill_capturing`, never plain `prefill`
 //!
-//! [`PatchGenerator::teacher_forced_conditioning`] (what [`PatchGenerator::cfm_loss`]
-//! calls internally) needs [`PrefillState::intermediates`] whenever
+//! [`PatchGenerator::teacher_forced_conditioning`] (what
+//! [`PatchGenerator::train_losses`] calls internally, ONCE, sharing it
+//! between `loss/diff` and `loss/stop`) needs [`PrefillState::intermediates`] whenever
 //! `prefill.position > 0` — the prefix embeddings it re-runs through a
 //! batched forward pass live only there, not in the KV caches
 //! `MiniCpm4Model::forward` cannot read. Every row here has a non-empty
@@ -129,6 +132,15 @@ const DEFAULT_ALPHA: f32 = 32.0;
 const DEFAULT_LR: f64 = 1e-4;
 const DEFAULT_EPOCHS: usize = 3;
 const DEFAULT_SEED: u64 = 0;
+/// `lambda_stop` in upstream's `lambdas:` fine-tuning block. Upstream's own
+/// default is `1.0`, matched here; upstream's FAQ names runaway generation
+/// ("generation doesn't stop") as a top failure mode and recommends raising
+/// this weight when it happens — see `--lambda-stop` in [`USAGE`].
+const DEFAULT_LAMBDA_STOP: f64 = 1.0;
+/// `lambda_diff` in upstream's `lambdas:` block. Fixed at upstream's own
+/// default — unlike `lambda_stop`, upstream's FAQ names no failure mode
+/// that calls for retuning it, so it is not exposed as a flag.
+const LAMBDA_DIFF: f64 = 1.0;
 
 /// Where the transformer stack's weights come from.
 ///
@@ -173,13 +185,15 @@ struct Args {
     epochs: usize,
     seed: u64,
     out: Option<PathBuf>,
+    lambda_stop: f64,
 }
 
 const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf [--config config.json]) \
 --audiovae audiovae.safetensors \
 --manifest FILE.tsv (header-named TSV: wav, text, optional ref_wav) \
 [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] \
-[--alpha 32] [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors]";
+[--alpha 32] [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors] \
+[--lambda-stop 1.0]";
 
 /// Consume the value that follows `flag`, advancing `i` past it.
 fn take_value(argv: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -202,6 +216,7 @@ fn parse_args() -> Result<Args, String> {
     let mut epochs = DEFAULT_EPOCHS;
     let mut seed = DEFAULT_SEED;
     let mut out = None;
+    let mut lambda_stop = DEFAULT_LAMBDA_STOP;
 
     let mut i = 0usize;
     while i < argv.len() {
@@ -240,6 +255,11 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--seed: {e}"))?
             }
             "--out" => out = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
+            "--lambda-stop" => {
+                lambda_stop = take_value(&argv, &mut i, flag)?
+                    .parse()
+                    .map_err(|e| format!("--lambda-stop: {e}"))?
+            }
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown flag {other}\n{USAGE}")),
         }
@@ -280,6 +300,7 @@ fn parse_args() -> Result<Args, String> {
         epochs,
         seed,
         out,
+        lambda_stop,
     })
 }
 
@@ -525,15 +546,17 @@ where
     let mut trainer = SimpleTrainer::<R>::new(config)?;
 
     eprintln!(
-        "manifest: {} row(s), {} epoch(s), lr={}",
+        "manifest: {} row(s), {} epoch(s), lr={}, lambda_diff={LAMBDA_DIFF}, lambda_stop={}",
         rows.len(),
         args.epochs,
-        args.lr
+        args.lr,
+        args.lambda_stop
     );
 
     let mut step_counter: u64 = 0;
     for epoch in 1..=args.epochs {
-        let mut epoch_loss_sum = 0.0f64;
+        let mut epoch_diff_sum = 0.0f64;
+        let mut epoch_stop_sum = 0.0f64;
         let mut epoch_steps = 0usize;
 
         for (row_index, row) in rows.iter().enumerate() {
@@ -575,33 +598,50 @@ where
 
             let generator = model.patch_generator();
             let seed_for_step = args.seed.wrapping_add(step_counter.wrapping_mul(2));
-            let loss = generator.cfm_loss(client, &prefill, &target_patches, seed_for_step)?;
-            let loss_val = loss.tensor().to_vec::<f32>()[0] as f64;
+            let losses = generator.train_losses(
+                client,
+                &prefill,
+                &target_patches,
+                seed_for_step,
+                LAMBDA_DIFF,
+                args.lambda_stop,
+            )?;
+            let diff_val = losses.diff.tensor().to_vec::<f32>()[0] as f64;
+            let stop_val = losses.stop.tensor().to_vec::<f32>()[0] as f64;
+            let loss_val = losses.total.tensor().to_vec::<f32>()[0] as f64;
 
-            let grads = backward(&loss, client)?;
+            let grads = backward(&losses.total, client)?;
             if let Some(_metrics) = trainer.step(client, &mut params, grads, loss_val)? {
                 // REQUIRED every finalized step: `trainer.step` updates
                 // `params` only, not the model's own `Var`s — see the
                 // module docs.
                 model.load_lora_parameters(&params)?;
-                epoch_loss_sum += loss_val;
+                epoch_diff_sum += diff_val;
+                epoch_stop_sum += stop_val;
                 epoch_steps += 1;
             }
 
             eprintln!(
-                "epoch {epoch}/{} row {row_index}/{}: loss {loss_val:.6}",
+                "epoch {epoch}/{} row {row_index}/{}: loss/diff {diff_val:.6} loss/stop \
+                 {stop_val:.6} total {loss_val:.6}",
                 args.epochs,
                 rows.len()
             );
             step_counter += 1;
         }
 
-        let mean = if epoch_steps > 0 {
-            epoch_loss_sum / epoch_steps as f64
+        let (diff_mean, stop_mean) = if epoch_steps > 0 {
+            (
+                epoch_diff_sum / epoch_steps as f64,
+                epoch_stop_sum / epoch_steps as f64,
+            )
         } else {
-            f64::NAN
+            (f64::NAN, f64::NAN)
         };
-        eprintln!("epoch {epoch}/{} mean loss: {mean:.6}", args.epochs);
+        eprintln!(
+            "epoch {epoch}/{} mean loss/diff: {diff_mean:.6} mean loss/stop: {stop_mean:.6}",
+            args.epochs
+        );
     }
 
     if let Some(out) = &args.out {

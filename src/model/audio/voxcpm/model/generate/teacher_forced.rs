@@ -73,6 +73,14 @@ pub struct TeacherForcedConditioning<R: Runtime> {
     /// `curr_embed`, batched). Kept for tests/debug; nothing past this call
     /// requires it.
     pub curr_embed: Var<R>,
+    /// `[1, T, lm_hidden]` — per-patch stop-head input: the SAME shifted
+    /// hidden state `mu`'s `lm_to_dit_proj` half reads (step 1's row,
+    /// pre-`lm_to_dit_proj`), because step 5 in `generate.rs`'s per-patch
+    /// loop (`aux.stop(client, &state.prefill.lm_hidden)`) reads that
+    /// identical CURRENT `lm_hidden` before steps 6-7 overwrite it for the
+    /// next iteration. This is `lm_shifted` below, exposed rather than
+    /// recomputed, so `Self::stop_loss` never re-runs `base_lm`.
+    pub lm_hidden: Var<R>,
 }
 
 impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
@@ -235,6 +243,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             mu,
             cond,
             curr_embed,
+            lm_hidden: lm_shifted,
         })
     }
 }

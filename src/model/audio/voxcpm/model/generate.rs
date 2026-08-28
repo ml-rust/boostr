@@ -81,8 +81,11 @@ pub use capture::StepIntermediates;
 pub use teacher_forced::TeacherForcedConditioning;
 
 /// Stop-token class index in `stop_head`'s 2-wide output. Class 0 is
-/// "continue", class 1 is "stop".
-const STOP_CLASS: i64 = 1;
+/// "continue", class 1 is "stop". `pub(crate)` so
+/// [`super::train::stop_targets`](crate::model::audio::voxcpm::model::train)
+/// can build the SAME class index as a training target instead of
+/// duplicating the magic number.
+pub(crate) const STOP_CLASS: i64 = 1;
 
 /// Knobs for the per-patch loop.
 ///

@@ -77,6 +77,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use boostr::format::SafeTensors;
 use boostr::model::audio::voxcpm::model::config::AUDIO_START_ID;
 use boostr::model::audio::voxcpm::model::{
     GenerateOptions, GenerateOutcome, GenerateState, StepOutcome, VoxCpm2Model,
@@ -86,6 +87,7 @@ use boostr::model::audio::voxcpm::{VoxCpmClient, load_tokenizer, normalize_white
 use boostr::model::audio::{
     PitchOptions, decode_audio, encode_wav_pcm16, estimate_pitch, extension_hint, to_mono_at_rate,
 };
+use boostr::nn::{LoraTargets, check_lora_metadata};
 use boostr::quant::traits::DequantOps;
 use numr::dtype::DType;
 use numr::ops::{
@@ -111,6 +113,13 @@ const PROGRESS_EVERY: usize = 25;
 
 /// Peak below this counts as silence, not audio.
 const SILENCE_EPSILON: f32 = 1e-4;
+
+/// Default LoRA rank, matching `voxcpm_finetune`'s default.
+const DEFAULT_LORA_RANK: usize = 16;
+/// Default LoRA alpha, matching `voxcpm_finetune`'s default.
+const DEFAULT_LORA_ALPHA: f32 = 32.0;
+/// Default LoRA target projections, matching `voxcpm_finetune`'s default.
+const DEFAULT_LORA_TARGETS: &str = "q_proj,v_proj";
 
 /// Where the transformer stack's weights come from.
 ///
@@ -163,6 +172,19 @@ struct Args {
     dtype: Option<DType>,
     /// Runtime to build the model and run generation on.
     device: Device,
+    /// LoRA adapter safetensors file, saved by `voxcpm_finetune`. `None`
+    /// runs the base model unchanged.
+    lora: Option<PathBuf>,
+    /// Rank the adapter was trained at. Must match the adapter file's
+    /// `__metadata__` or loading it fails.
+    lora_rank: usize,
+    /// Alpha the adapter was trained at. Must match the adapter file's
+    /// `__metadata__` or loading it fails.
+    lora_alpha: f32,
+    /// Comma-separated projection names the adapter targets, e.g.
+    /// `q_proj,v_proj`. Must match the adapter file's `__metadata__` or
+    /// loading it fails.
+    lora_targets: String,
 }
 
 /// Parse a `--dtype` value into the cast the loader takes.
@@ -185,7 +207,8 @@ const USAGE: &str = "usage: voxcpm_clone (--ckpt DIR | --gguf MODEL.gguf [--conf
 --audiovae PATH --ref REF.wav \
 --text \"...\" --out OUT.wav [--n-timesteps 10] [--cfg 2.0] [--min-len 2] \
 [--max-len N] [--seed 0] [--best-of 1] [--dtype f32|bf16|f16|native] \
-[--device cpu|cuda]";
+[--device cpu|cuda] [--lora ADAPTER.safetensors] [--lora-rank 16] \
+[--lora-alpha 32.0] [--lora-targets q_proj,v_proj]";
 
 /// Hard cap on emitted patches when `--max-len` is not given.
 ///
@@ -216,6 +239,10 @@ fn parse_args() -> Result<Args, String> {
     let mut best_of = 1usize;
     let mut dtype = Some(DType::F32);
     let mut device = Device::Cpu;
+    let mut lora: Option<PathBuf> = None;
+    let mut lora_rank = DEFAULT_LORA_RANK;
+    let mut lora_alpha = DEFAULT_LORA_ALPHA;
+    let mut lora_targets = DEFAULT_LORA_TARGETS.to_string();
 
     let mut i = 0usize;
     while i < argv.len() {
@@ -262,6 +289,18 @@ fn parse_args() -> Result<Args, String> {
             }
             "--dtype" => dtype = parse_dtype(&take_value(&argv, &mut i, flag)?)?,
             "--device" => device = parse_device(&take_value(&argv, &mut i, flag)?)?,
+            "--lora" => lora = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
+            "--lora-rank" => {
+                lora_rank = take_value(&argv, &mut i, flag)?
+                    .parse()
+                    .map_err(|e| format!("--lora-rank: {e}"))?
+            }
+            "--lora-alpha" => {
+                lora_alpha = take_value(&argv, &mut i, flag)?
+                    .parse()
+                    .map_err(|e| format!("--lora-alpha: {e}"))?
+            }
+            "--lora-targets" => lora_targets = take_value(&argv, &mut i, flag)?,
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown flag {other}\n{USAGE}")),
         }
@@ -276,6 +315,12 @@ fn parse_args() -> Result<Args, String> {
     }
     if max_len == Some(0) {
         return Err("--max-len must be at least 1".to_string());
+    }
+    if lora.is_some() && lora_rank == 0 {
+        return Err("--lora-rank must be at least 1".to_string());
+    }
+    if lora.is_some() && lora_targets.trim().is_empty() {
+        return Err("--lora-targets must name at least one projection".to_string());
     }
 
     // Exactly one weight source. Accepting both and silently preferring one
@@ -304,6 +349,10 @@ fn parse_args() -> Result<Args, String> {
         best_of,
         dtype,
         device,
+        lora,
+        lora_rank,
+        lora_alpha,
+        lora_targets,
     })
 }
 
@@ -435,7 +484,7 @@ where
         + DequantOps<R>,
 {
     // --- model --------------------------------------------------------------
-    let model = match &args.weights {
+    let mut model = match &args.weights {
         Weights::Checkpoint(dir) => {
             eprintln!("loading {} ...", dir.display());
             VoxCpm2Model::<R>::from_checkpoint(dir, &args.audiovae, device, args.dtype)?
@@ -451,6 +500,38 @@ where
             )?
         }
     };
+
+    // --- LoRA adapter -------------------------------------------------------
+    // `apply_lora` must run before `load_lora_named`: it allocates the
+    // `lora_a`/`lora_b` Vars that name lookup then resolves against.
+    // `check_lora_metadata` runs first, against the file's own
+    // `__metadata__`, so a rank/alpha/targets mismatch aborts before the
+    // model is mutated at all.
+    if let Some(lora_path) = &args.lora {
+        let lora_target_names: Vec<String> = args
+            .lora_targets
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        eprintln!("loading LoRA adapter {} ...", lora_path.display());
+        let mut adapter = SafeTensors::open(lora_path)?;
+        check_lora_metadata(
+            adapter.metadata(),
+            args.lora_rank,
+            args.lora_alpha,
+            &lora_target_names,
+        )?;
+        let lora_targets = LoraTargets::new(lora_target_names.clone());
+        let adapted = model.apply_lora(&lora_targets, args.lora_rank, args.lora_alpha, device)?;
+        let lora_tensors = adapter.load_all::<R>(device)?;
+        let loaded = model.load_lora_named(&lora_tensors)?;
+        eprintln!(
+            "LoRA: targets={lora_target_names:?} rank={} alpha={} -> {adapted} projection(s) \
+             adapted, {loaded} tensor(s) loaded",
+            args.lora_rank, args.lora_alpha
+        );
+    }
 
     let ref_feat = model.encode_reference(client, ref_wav)?;
     let t_ref = ref_feat.shape()[0];

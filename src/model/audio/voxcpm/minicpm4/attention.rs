@@ -36,6 +36,7 @@ use crate::nn::{
     extend_named, load_lora_child, push_projection_name,
 };
 use crate::quant::traits::DequantOps;
+use guards::{missing_rope, require_preallocated_cache};
 use numr::autograd::{Var, var_narrow, var_permute, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
@@ -265,6 +266,29 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
         let (q, k) = match (self.no_rope, rope) {
             (true, _) => (q, k),
             (false, Some(rope)) => {
+                // `position` rotates the query; `kv_cache` stores it at its own
+                // `seq_len`. They MUST agree, or the query is rotated for one
+                // absolute position and attended at another — shapes stay
+                // valid and the output is silently wrong.
+                //
+                // Checked here, not at the top, because this is the ONLY site
+                // that reads `position`. A NoPE stack never rotates, so its
+                // `position` is genuinely unused and stays unconstrained —
+                // which is what
+                // `nope_output_is_independent_of_absolute_position` asserts by
+                // passing a `position` a cache-aligned call could not use.
+                let written = kv_cache.seq_len();
+                if position != written {
+                    return Err(Error::InferenceError {
+                        reason: format!(
+                            "RoPE position {position} disagrees with the KV cache's next \
+                             write index {written}: the query would be rotated for position \
+                             {position} but stored and attended at {written}. Pass \
+                             position == kv_cache.seq_len(), as MiniCpm4Model::decode_step \
+                             does."
+                        ),
+                    });
+                }
                 let cos = var_narrow(rope.cos_cache(), 0, position, seq).map_err(Error::Numr)?;
                 let sin = var_narrow(rope.sin_cache(), 0, position, seq).map_err(Error::Numr)?;
                 let q = client.apply_rope(&q, &cos, &sin)?;
@@ -430,48 +454,6 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
     }
 }
 
-/// Reject a cache that would GROW while writing `seq` more slots.
-///
-/// The in-place `update_fused` write and the flash read of `k_cache_raw` both
-/// assume one buffer for the whole sequence. A grow reallocates it and copies
-/// every written slot across — the per-step full-buffer copy this path exists
-/// to avoid. VoxCPM2 never hits it (`new_kv_cache` passes
-/// `initial_capacity == max_seq_len`); this makes that invariant loud.
-fn require_preallocated_cache<R: Runtime<DType = DType>>(
-    kv_cache: &KvCache<R>,
-    seq: usize,
-) -> Result<()>
-where
-    R::Client: IndexingOps<R>,
-{
-    let (written, capacity) = (kv_cache.seq_len(), kv_cache.capacity());
-    if written + seq > capacity {
-        return Err(Error::InferenceError {
-            reason: format!(
-                "MiniCPM4 cached attention needs a KV cache preallocated to its full \
-                 width: writing {seq} slots at position {written} needs capacity {}, \
-                 got {capacity}. Build the cache with initial_capacity == max_seq_len, \
-                 as MiniCpm4Model::new_kv_cache does.",
-                written + seq,
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// The error for a `None` RoPE table on a block that rotates.
-///
-/// Shared by both paths so neither can degrade into an unrotated forward that
-/// stays shape-valid while computing a different model.
-fn missing_rope() -> Error {
-    Error::InvalidArgument {
-        arg: "rope",
-        reason: "expected Some(RoPE) for a MiniCPM4 block with no_rope unset, got None; \
-                 only a no_rope (NoPE) block runs without a rotary table"
-            .to_string(),
-    }
-}
-
 /// Names ARE the field names (`q_proj`, `k_proj`, `v_proj`, `o_proj`) —
 /// the `self_attn` checkpoint segment is added by the owning
 /// [`MiniCpm4Layer`](super::layer::MiniCpm4Layer). `no_rope` carries no
@@ -495,6 +477,8 @@ impl<R: Runtime<DType = DType>> Module<R> for MiniCpm4Attention<R> {
         params
     }
 }
+
+mod guards;
 
 #[cfg(test)]
 mod tests;

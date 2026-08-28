@@ -95,16 +95,62 @@ fn nope_output_is_independent_of_absolute_position() {
         );
     }
 
-    let rotary_near = run(false, 1);
-    let rotary_far = run(false, 9);
+    // The NoPE half above is only meaningful if a rotating block is NOT
+    // position-invariant. Proving that by re-querying at a mismatched
+    // `position` is no longer possible — and should not be: a rotating block
+    // now rejects a `position` that disagrees with the cache's next write
+    // index, because the query would be rotated for one absolute position and
+    // attended at another. So compare rotating against NoPE at the SAME valid
+    // position instead: identical weights, identical keys, identical mask, the
+    // rotation the only difference.
+    let rotary_valid = run(false, 1);
     assert!(
-        rotary_near
+        rotary_valid
             .iter()
-            .zip(&rotary_far)
+            .zip(&near)
             .any(|(a, b)| (a - b).abs() > 1e-4),
-        "the rotary block was position-invariant too, so the NoPE half of \
-         this test proves nothing"
+        "rotating and NoPE agreed at the same position, so rotation was never \
+         applied and the NoPE half of this test proves nothing"
     );
+}
+
+/// A rotating block rejects a `position` that disagrees with the cache's
+/// next write index.
+///
+/// The query would be rotated for `position` and then stored and attended at
+/// `kv_cache.seq_len()`. Every shape stays valid, so without this the output
+/// is silently wrong. `MiniCpm4Model::decode_step` keeps the two in step; a
+/// direct caller can not be trusted to.
+#[test]
+fn rotating_block_rejects_a_position_the_cache_disagrees_with() {
+    let (client, device) = cpu_setup();
+    let rope =
+        RoPE::<CpuRuntime>::precompute_freqs(16, HEAD_DIM, 10000.0, None, &device).expect("rope");
+    let attn = tiny_attention(false, &device);
+    let mut cache =
+        KvCache::<CpuRuntime>::new(1, NUM_KV_HEADS, 4, 4, HEAD_DIM, DType::F32, &device)
+            .expect("cache");
+
+    attn.forward_cached(&client, &embed(1, &device), Some(&rope), &mut cache, 0)
+        .expect("position 0 matches an empty cache");
+    assert_eq!(cache.seq_len(), 1, "one slot written");
+
+    let err = attn
+        .forward_cached(&client, &embed(2, &device), Some(&rope), &mut cache, 9)
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains('9'), "error must name the position: {msg}");
+    assert!(msg.contains("seq_len"), "error must name the fix: {msg}");
+
+    // A NoPE block never rotates, so its `position` is unused and unchecked.
+    let nope = tiny_attention(true, &device);
+    let mut nope_cache =
+        KvCache::<CpuRuntime>::new(1, NUM_KV_HEADS, 4, 4, HEAD_DIM, DType::F32, &device)
+            .expect("cache");
+    nope.forward_cached(&client, &embed(1, &device), None, &mut nope_cache, 0)
+        .expect("prior");
+    nope.forward_cached(&client, &embed(2, &device), None, &mut nope_cache, 9)
+        .expect("NoPE ignores position, so a mismatch is not an error");
 }
 
 /// A block that rotates must not fall back to an unrotated forward when

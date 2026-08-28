@@ -95,4 +95,23 @@ impl<R: Runtime> DecomposedQuantLinear<R> {
     pub fn bias(&self) -> Option<&Tensor<R>> {
         self.bias.as_ref()
     }
+
+    /// Cheap duplicate for a `'static` activation-checkpointing closure.
+    ///
+    /// This layer carries no `Var<R>`, so there is no `TensorId` to
+    /// preserve — every field is a frozen `Tensor<R>`, cloned like any other
+    /// (`Tensor::clone` is `Arc`-backed and cheap).
+    pub fn alias(&self) -> Self {
+        Self {
+            weight: DecomposedQuantTensor::new(
+                self.weight.qweight.clone(),
+                self.weight.scales.clone(),
+                self.weight.qzeros.clone(),
+                self.weight.g_idx.clone(),
+                self.weight.method,
+                self.weight.logical_shape.clone(),
+            ),
+            bias: self.bias.clone(),
+        }
+    }
 }

@@ -255,6 +255,22 @@ impl<R: Runtime<DType = numr::dtype::DType>> QuantTensor<R> {
     }
 }
 
+// Manual, not derived: `#[derive(Clone)]` would add an `R: Clone` bound on
+// the runtime type parameter itself, which no caller needs and no `Runtime`
+// impl provides. `storage` is `Arc`-backed (see `Storage`), so this clone
+// shares the underlying block bytes with the original rather than copying
+// them — cheap, and the two `QuantTensor`s alias the same device memory.
+impl<R: Runtime> Clone for QuantTensor<R> {
+    fn clone(&self) -> Self {
+        Self {
+            storage: self.storage.clone(),
+            format: self.format,
+            shape: self.shape.clone(),
+            device: self.device.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

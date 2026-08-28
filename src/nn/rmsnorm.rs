@@ -97,6 +97,17 @@ impl<R: Runtime> RmsNorm<R> {
             .filter(|param| param.1.requires_grad())
             .collect()
     }
+
+    /// Cheap duplicate that preserves `weight`'s `TensorId`, for capturing
+    /// this layer by owned value in a `'static` activation-checkpointing
+    /// closure. Uses [`Var::alias`], not [`Clone`]: a `clone` would mint a
+    /// fresh id and silently orphan `weight`'s gradient.
+    pub fn alias(&self) -> Self {
+        Self {
+            weight: self.weight.alias(),
+            eps: self.eps,
+        }
+    }
 }
 
 impl<R: Runtime> Module<R> for RmsNorm<R> {

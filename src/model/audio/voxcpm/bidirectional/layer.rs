@@ -120,6 +120,22 @@ impl<R: Runtime<DType = DType>> BidirectionalLayer<R> {
         written += self.mlp.load_lora_parameters(params)?;
         Ok(written)
     }
+
+    /// Cheap duplicate that preserves every child's `Var<R>` `TensorId`s,
+    /// for capturing this layer by owned value in a `'static`
+    /// activation-checkpointing closure — `numr::autograd::checkpoint`'s
+    /// closure is `Fn(...) + Send + Sync + 'static`, so a layer cannot be
+    /// borrowed into it. Every child routes through its own `alias()`,
+    /// never [`Clone`], so the optimizer, keyed by `TensorId`, still sees
+    /// the original parameters' gradients.
+    pub fn alias(&self) -> Self {
+        Self {
+            input_layernorm: self.input_layernorm.alias(),
+            self_attn: self.self_attn.alias(),
+            post_attention_layernorm: self.post_attention_layernorm.alias(),
+            mlp: self.mlp.alias(),
+        }
+    }
 }
 
 /// Names ARE the field names (`input_layernorm`, `self_attn.*`,

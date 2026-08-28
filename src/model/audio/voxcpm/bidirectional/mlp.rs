@@ -140,6 +140,21 @@ impl<R: Runtime<DType = DType>> BidirectionalMlp<R> {
         written += load_lora_child(&mut self.down_proj, params, "down_proj")?;
         Ok(written)
     }
+
+    /// Cheap duplicate that preserves every projection's `Var<R>`
+    /// `TensorId`s, for capturing this block by owned value in a `'static`
+    /// activation-checkpointing closure — `numr::autograd::checkpoint`'s
+    /// closure is `Fn(...) + Send + Sync + 'static`, so a layer cannot be
+    /// borrowed into it. Each projection routes through
+    /// [`MaybeLoraLinear::alias`], never [`Clone`], so the optimizer, keyed
+    /// by `TensorId`, still sees the original parameters' gradients.
+    pub fn alias(&self) -> Self {
+        Self {
+            gate_proj: self.gate_proj.alias(),
+            up_proj: self.up_proj.alias(),
+            down_proj: self.down_proj.alias(),
+        }
+    }
 }
 
 /// Names ARE the field names (`gate_proj`, `up_proj`, `down_proj`) — the

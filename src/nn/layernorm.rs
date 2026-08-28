@@ -84,6 +84,19 @@ impl<R: Runtime> LayerNorm<R> {
             .filter(|param| param.1.requires_grad())
             .collect()
     }
+
+    /// Cheap duplicate that preserves `weight`'s and `bias`'s `TensorId`s,
+    /// for capturing this layer by owned value in a `'static`
+    /// activation-checkpointing closure. Uses [`Var::alias`], not
+    /// [`Clone`]: a `clone` would mint fresh ids and silently orphan their
+    /// gradients.
+    pub fn alias(&self) -> Self {
+        Self {
+            weight: self.weight.alias(),
+            bias: self.bias.alias(),
+            eps: self.eps,
+        }
+    }
 }
 
 impl<R: Runtime> Module<R> for LayerNorm<R> {

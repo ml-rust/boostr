@@ -183,6 +183,20 @@ impl<R: Runtime> RoPE<R> {
         &self.sin_cache
     }
 
+    /// Cheap duplicate that preserves `cos_cache`'s and `sin_cache`'s
+    /// `TensorId`s, for capturing this table by owned value in a `'static`
+    /// activation-checkpointing closure. Both caches are non-trainable
+    /// (`requires_grad = false`), so no gradient is at stake here, but
+    /// [`Var::alias`] is used anyway — not [`Clone`] — to avoid needless id
+    /// churn and stay consistent with every other aliased field a
+    /// checkpointed layer captures.
+    pub fn alias(&self) -> Self {
+        Self {
+            cos_cache: self.cos_cache.alias(),
+            sin_cache: self.sin_cache.alias(),
+        }
+    }
+
     /// Keep only the first `num_positions` rows of the cos/sin caches.
     ///
     /// The caches are built at the model's configured `max_position_embeddings`

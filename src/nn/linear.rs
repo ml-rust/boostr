@@ -113,6 +113,17 @@ impl<R: Runtime> Linear<R> {
             .filter(|param| param.1.requires_grad())
             .collect()
     }
+
+    /// Cheap duplicate that preserves every field's `TensorId`, for capturing
+    /// this layer by owned value in a `'static` activation-checkpointing
+    /// closure. Uses [`Var::alias`], not [`Clone`]: a `clone` would mint a
+    /// fresh id for `weight`/`bias` and silently orphan their gradients.
+    pub fn alias(&self) -> Self {
+        Self {
+            weight: self.weight.alias(),
+            bias: self.bias.as_ref().map(Var::alias),
+        }
+    }
 }
 
 impl<R: Runtime> Module<R> for Linear<R> {
@@ -166,6 +177,19 @@ impl<R: Runtime> QuantLinear<R> {
 
     pub fn bias(&self) -> Option<&Tensor<R>> {
         self.bias.as_ref()
+    }
+
+    /// Cheap duplicate for a `'static` activation-checkpointing closure.
+    ///
+    /// This layer carries no `Var<R>` — a quantized weight is inference-only
+    /// and never trains — so there is no `TensorId` to preserve.
+    /// `QuantTensor::clone` is `Arc`-backed and cheap; `bias` is a frozen
+    /// `Tensor<R>`, cloned like any other.
+    pub fn alias(&self) -> Self {
+        Self {
+            weight: self.weight.clone(),
+            bias: self.bias.clone(),
+        }
     }
 }
 
@@ -330,6 +354,21 @@ impl<R: Runtime> MaybeQuantLinear<R> {
         match self {
             Self::Standard(linear) => linear.named_parameters(),
             Self::Quantized(_) | Self::DecomposedQuant(_) => Vec::new(),
+        }
+    }
+
+    /// Cheap duplicate that preserves every `Var<R>`'s `TensorId`, for
+    /// capturing this layer by owned value in a `'static`
+    /// activation-checkpointing closure. Every variant delegates to that
+    /// variant's own `alias()`, so a dense base still routes its weight
+    /// through [`Var::alias`] — never [`Clone`] — and a quantized or
+    /// decomposed base (no `Var<R>` to preserve an id for) shares its
+    /// underlying storage cheaply instead.
+    pub fn alias(&self) -> Self {
+        match self {
+            Self::Standard(linear) => Self::Standard(linear.alias()),
+            Self::Quantized(qlinear) => Self::Quantized(qlinear.alias()),
+            Self::DecomposedQuant(dqlinear) => Self::DecomposedQuant(Box::new(dqlinear.alias())),
         }
     }
 }

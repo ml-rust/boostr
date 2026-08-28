@@ -272,6 +272,20 @@ impl<R: Runtime<DType = DType>> MaybeLoraLinear<R> {
             Self::Lora(lora) => lora.merge_into_base(client),
         }
     }
+
+    /// Cheap duplicate that preserves every `Var<R>`'s `TensorId` — the
+    /// base weight, and the adapter factors when present — for capturing
+    /// this projection by owned value in a `'static`
+    /// activation-checkpointing closure. Delegates to [`MaybeQuantLinear::alias`]
+    /// and [`LoraLinear::alias`], both of which route every `Var<R>` through
+    /// [`Var::alias`] — never [`Clone`] — so the optimizer, keyed by
+    /// `TensorId`, still sees the original parameters' gradients.
+    pub fn alias(&self) -> Self {
+        match self {
+            Self::Plain(base) => Self::Plain(base.alias()),
+            Self::Lora(lora) => Self::Lora(Box::new(lora.alias())),
+        }
+    }
 }
 
 impl<R: Runtime> From<Linear<R>> for MaybeLoraLinear<R> {
@@ -310,5 +324,33 @@ impl<R: Runtime<DType = DType>> Module<R> for MaybeLoraLinear<R> {
 
     fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
         MaybeLoraLinear::trainable_parameters(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use numr::runtime::cpu::CpuRuntime;
+
+    /// The whole point of `alias()`: prove it preserves `TensorId`, not
+    /// mints a fresh one like `Clone` would. If a future edit swaps
+    /// `.alias()` for `.clone()` anywhere in `MaybeLoraLinear::alias` or
+    /// `LoraLinear::alias`, this test must fail — a fresh id would silently
+    /// orphan the adapter's gradient from the optimizer's `TensorId`-keyed
+    /// state.
+    #[test]
+    fn alias_preserves_lora_adapter_ids() {
+        let device = <CpuRuntime as Runtime>::default_device();
+        let weight: Tensor<CpuRuntime> = Tensor::zeros(&[8, 4], DType::F32, &device).unwrap();
+        let base = Linear::new(weight, None, false);
+        let lora = LoraLinear::new(base, 2, 4.0, &device).expect("lora new must succeed on CPU");
+        let original: MaybeLoraLinear<CpuRuntime> = lora.into();
+
+        let aliased = original.alias();
+
+        let (orig_a, orig_b) = original.adapters().expect("original is Lora");
+        let (alias_a, alias_b) = aliased.adapters().expect("aliased is Lora");
+        assert_eq!(orig_a.id(), alias_a.id(), "lora_a id must survive alias()");
+        assert_eq!(orig_b.id(), alias_b.id(), "lora_b id must survive alias()");
     }
 }

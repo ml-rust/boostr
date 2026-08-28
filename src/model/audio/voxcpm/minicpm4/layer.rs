@@ -162,6 +162,22 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
         written += self.mlp.load_lora_parameters(params)?;
         Ok(written)
     }
+
+    /// Cheap duplicate that preserves every child's `Var<R>` `TensorId`s,
+    /// for capturing this layer by owned value in a `'static`
+    /// activation-checkpointing closure — `numr::autograd::checkpoint`'s
+    /// closure is `Fn(...) + Send + Sync + 'static`, so a layer cannot be
+    /// borrowed into it. Every child routes through its own `alias()`,
+    /// never [`Clone`], so the optimizer, keyed by `TensorId`, still sees
+    /// the original parameters' gradients.
+    pub fn alias(&self) -> Self {
+        Self {
+            input_layernorm: self.input_layernorm.alias(),
+            self_attn: self.self_attn.alias(),
+            post_attention_layernorm: self.post_attention_layernorm.alias(),
+            mlp: self.mlp.alias(),
+        }
+    }
 }
 
 /// Names ARE the field names (`input_layernorm`, `self_attn.*`,
@@ -194,5 +210,55 @@ impl<R: Runtime<DType = DType>> Module<R> for MiniCpm4Layer<R> {
         );
         extend_named(&mut params, "mlp", self.mlp.named_parameters());
         params
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+    use crate::model::audio::voxcpm::minicpm4::model::tests::tiny_model;
+    use crate::nn::LoraTargets;
+    use numr::runtime::cpu::CpuRuntime;
+
+    /// The whole point of a layer's `alias()`: prove it preserves every
+    /// `Var<R>` `TensorId`, including a LoRA adapter's, not mints fresh
+    /// ones like `Clone` would. If a future edit swaps `.alias()` for
+    /// `.clone()` anywhere along the chain this test exercises
+    /// (`MiniCpm4Layer` -> `MiniCpm4Attention` -> `MaybeLoraLinear` ->
+    /// `LoraLinear`), this test must fail — a fresh id would silently
+    /// orphan the adapter's gradient from the optimizer's `TensorId`-keyed
+    /// state, which is exactly the trap `numr::autograd::Var::alias`'s doc
+    /// comment warns about.
+    #[test]
+    fn alias_preserves_lora_adapter_ids_through_a_full_layer() {
+        let device = <CpuRuntime as Runtime>::default_device();
+        let mut model = tiny_model(&device);
+        let layer = &mut model.layers[0];
+        layer
+            .self_attn
+            .apply_lora(&LoraTargets::new(["q_proj"]), 2, 4.0, &device, "self_attn")
+            .expect("apply_lora on q_proj must succeed");
+
+        let aliased = layer.alias();
+
+        let (orig_a, orig_b) = layer
+            .self_attn
+            .q_proj
+            .adapters()
+            .expect("q_proj carries a LoRA adapter after apply_lora");
+        let (alias_a, alias_b) = aliased
+            .self_attn
+            .q_proj
+            .adapters()
+            .expect("aliased q_proj must still carry the adapter");
+        assert_eq!(orig_a.id(), alias_a.id(), "lora_a id must survive alias()");
+        assert_eq!(orig_b.id(), alias_b.id(), "lora_b id must survive alias()");
+
+        // Every other Var-bearing child must alias too, not just the adapter.
+        assert_eq!(
+            layer.input_layernorm.weight().id(),
+            aliased.input_layernorm.weight().id(),
+            "input_layernorm weight id must survive alias()"
+        );
     }
 }

@@ -289,6 +289,20 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
         let bias = base.bias().map(|b| b.tensor().clone());
         Ok(Linear::new(merged_weight, bias, false))
     }
+
+    /// Cheap duplicate that preserves `base`'s and `lora_a`/`lora_b`'s
+    /// `TensorId`s, for capturing this adapter by owned value in a
+    /// `'static` activation-checkpointing closure. `lora_a`/`lora_b` go
+    /// through [`Var::alias`] — never [`Clone`] — so the optimizer, keyed by
+    /// `TensorId`, still sees their gradients after the alias is dropped.
+    pub fn alias(&self) -> Self {
+        Self {
+            base: self.base.alias(),
+            lora_a: self.lora_a.alias(),
+            lora_b: self.lora_b.alias(),
+            scaling: self.scaling,
+        }
+    }
 }
 
 impl<R: Runtime> Module<R> for LoraLinear<R> {

@@ -219,6 +219,25 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
         written += load_lora_child(&mut self.o_proj, params, "o_proj")?;
         Ok(written)
     }
+
+    /// Cheap duplicate that preserves every projection's `Var<R>`
+    /// `TensorId`s, for capturing this block by owned value in a `'static`
+    /// activation-checkpointing closure — `numr::autograd::checkpoint`'s
+    /// closure is `Fn(...) + Send + Sync + 'static`, so a layer cannot be
+    /// borrowed into it. Each projection routes through
+    /// [`MaybeLoraLinear::alias`], never [`Clone`], so the optimizer, keyed
+    /// by `TensorId`, still sees the original parameters' gradients.
+    pub fn alias(&self) -> Self {
+        Self {
+            q_proj: self.q_proj.alias(),
+            k_proj: self.k_proj.alias(),
+            v_proj: self.v_proj.alias(),
+            o_proj: self.o_proj.alias(),
+            num_heads: self.num_heads,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+        }
+    }
 }
 
 /// Names ARE the field names (`q_proj`, `k_proj`, `v_proj`, `o_proj`) —

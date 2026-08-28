@@ -178,13 +178,34 @@
 //!
 //! # Saving
 //!
-//! `--out` writes ONLY the adapter tensors (`named_parameters()` entries
-//! ending `lora_a`/`lora_b`), named by their full checkpoint-style path, via
-//! this crate's own [`boostr::format::safetensors::save_safetensors`]
-//! writer — never a hand-rolled one. That writer accepts CPU tensors only,
-//! so each adapter tensor is round-tripped through `to_bytes`/`from_bytes`
-//! (the same device-to-host pattern `trainer::async_checkpoint` uses),
-//! which works whether the run trained on CPU or CUDA.
+//! Adapters are written the same way every time: ONLY the adapter tensors
+//! (`named_parameters()` entries ending `lora_a`/`lora_b`), named by their
+//! full checkpoint-style path, via this crate's own
+//! [`boostr::format::safetensors::save_safetensors`] writer — never a
+//! hand-rolled one — carrying the same [`build_lora_metadata`] (rank, alpha,
+//! targets) on every write, so every artifact this file produces loads in
+//! `voxcpm_clone` the same way. That writer accepts CPU tensors only, so
+//! each adapter tensor is round-tripped through `to_bytes`/`from_bytes` (the
+//! same device-to-host pattern `trainer::async_checkpoint` uses), which
+//! works whether the run trained on CPU or CUDA.
+//!
+//! Two artifact layouts come out of `--out PATH`:
+//!
+//! - A numbered file PER EPOCH, `PATH` with `.epochN` inserted before its
+//!   extension (`lora.safetensors` -> `lora.epoch1.safetensors`,
+//!   `lora.epoch2.safetensors`, ... — a `PATH` with no extension gets
+//!   `lora.epoch1`; see [`epoch_checkpoint_path`]). Written after every
+//!   epoch, unconditionally.
+//! - `PATH` itself, unmodified — the PRIMARY artifact `voxcpm_clone` is
+//!   expected to load. With eval enabled (`--eval-rows` > 0) this is the
+//!   BEST epoch by `eval/total`, not necessarily the last: the trainer
+//!   overwrites `PATH` only when an epoch's `eval/total` beats every prior
+//!   epoch's, so a run that diverges in its final epoch still leaves the
+//!   best checkpoint at `PATH`, with the worse-but-later epochs available
+//!   only under their numbered names. With `--eval-rows 0` there is no
+//!   `eval/total` to rank epochs by, so `PATH` instead gets the LAST epoch's
+//!   adapters, same as this file did before per-epoch saving existed — the
+//!   end-of-run log line says explicitly that no selection happened.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -696,7 +717,8 @@ fn filter_rows_by_patch_cap<'a>(
     let with_ref = kept.iter().filter(|row| row.ref_wav.is_some()).count();
     eprintln!(
         "manifest: {with_ref} row(s) with reference, {} without (upstream recommends 30-50% \
-         with no reference, which is what keeps zero-shot cloning alive)",
+         of rows WITH a reference, so most rows train reference-free; that is what keeps \
+         zero-shot cloning alive)",
         kept.len() - with_ref
     );
     if kept.is_empty() {
@@ -736,6 +758,28 @@ fn to_cpu_tensor<R: Runtime<DType = DType>>(
         tensor.dtype(),
         &device,
     )?)
+}
+
+/// Derive the per-epoch checkpoint path for epoch `epoch` from `--out`'s
+/// `out`, inserting `.epochN` before the extension. Operates on `out`'s
+/// FILE NAME only (`Path::file_stem`/`extension` already do this), so a
+/// directory component containing dots (`a.b/lora.safetensors`) never
+/// affects where the extension is split — a naive string split on `'.'`
+/// would corrupt exactly that case. `out` with no extension
+/// (`lora`) gets `lora.epoch1`, no trailing dot.
+fn epoch_checkpoint_path(out: &Path, epoch: usize) -> PathBuf {
+    let stem = out
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("adapters");
+    let file_name = match out.extension().and_then(|s| s.to_str()) {
+        Some(ext) => format!("{stem}.epoch{epoch}.{ext}"),
+        None => format!("{stem}.epoch{epoch}"),
+    };
+    match out.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(file_name),
+        _ => PathBuf::from(file_name),
+    }
 }
 
 /// Collect every LoRA adapter tensor (`named_parameters()` entries ending
@@ -1116,6 +1160,16 @@ where
         Vec::new()
     };
 
+    // Metadata is identical for every checkpoint this run writes (per-epoch
+    // and the primary `--out`) — collected once, reused on every save so an
+    // epoch checkpoint is never missing the rank/alpha/targets
+    // `check_lora_metadata` hard-requires on load.
+    let lora_metadata = build_lora_metadata(args.rank, args.alpha, &target_names);
+    // Tracks the best epoch by `eval/total` so far. `None` until the first
+    // eval pass runs; stays `None` for the whole run when `--eval-rows 0`,
+    // which is the signal used below to fall back to "last epoch wins".
+    let mut best_epoch: Option<(usize, f64)> = None;
+
     let mut step_counter: u64 = 0;
     for epoch in 1..=args.epochs {
         let mut epoch_diff_sum = 0.0f64;
@@ -1181,6 +1235,7 @@ where
             args.epochs
         );
 
+        let mut this_epoch_eval_total = None;
         if !eval_batch.is_empty() {
             let generator = model.patch_generator();
             let (eval_diff, eval_stop, eval_total) = score_eval_batch(
@@ -1198,19 +1253,57 @@ where
                 args.epochs,
                 eval_batch.len()
             );
+            this_epoch_eval_total = Some(eval_total);
+        }
+
+        // Per-epoch save: unconditional, since a diverging final epoch must
+        // never be the only artifact on disk — see the module docs'
+        // "Saving" section.
+        if let Some(out) = &args.out {
+            let adapters = collect_adapter_tensors(&model)?;
+            let epoch_path = epoch_checkpoint_path(out, epoch);
+            eprintln!(
+                "saving epoch {epoch}/{} adapters ({} tensor(s)) to {} ...",
+                args.epochs,
+                adapters.len(),
+                epoch_path.display()
+            );
+            save_safetensors(&epoch_path, &adapters, Some(&lora_metadata))?;
+
+            // `PATH` (`--out`) tracks the best epoch by `eval/total` when
+            // eval is enabled, and the LAST epoch when it is not (eval
+            // disabled leaves `this_epoch_eval_total` `None` every epoch, so
+            // this branch always overwrites `out`, matching the old
+            // save-once-at-the-end behaviour).
+            let is_best = match (this_epoch_eval_total, best_epoch) {
+                (Some(total), Some((_, best_total))) => total < best_total,
+                (Some(_), None) => true,
+                (None, _) => true,
+            };
+            if is_best {
+                save_safetensors(out, &adapters, Some(&lora_metadata))?;
+                if let Some(total) = this_epoch_eval_total {
+                    best_epoch = Some((epoch, total));
+                }
+            }
         }
     }
 
     if let Some(out) = &args.out {
-        let adapters = collect_adapter_tensors(&model)?;
-        eprintln!(
-            "saving {} adapter tensor(s) to {} ...",
-            adapters.len(),
-            out.display()
-        );
-        let metadata = build_lora_metadata(args.rank, args.alpha, &target_names);
-        save_safetensors(out, &adapters, Some(&metadata))?;
-        eprintln!("wrote {}", out.display());
+        match best_epoch {
+            Some((epoch, eval_total)) => eprintln!(
+                "best epoch: {epoch}/{} (eval/total {eval_total:.6}) written to {}",
+                args.epochs,
+                out.display()
+            ),
+            None => eprintln!(
+                "--eval-rows 0: no eval basis for selecting a best epoch; {} holds the final \
+                 epoch ({}/{}) unmodified, not a selected best",
+                out.display(),
+                args.epochs,
+                args.epochs
+            ),
+        }
     }
 
     eprintln!("total {:.1}s", started.elapsed().as_secs_f64());

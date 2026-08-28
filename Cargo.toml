@@ -56,6 +56,9 @@ symphonia = { version = "0.5", optional = true, default-features = false, featur
   "wav",
 ] }
 memmap2 = "0.9"
+# TCF (Tensor Contract Format) container and reference codec, read by
+# `format::tcf`. One dependency (blake3), no default features.
+tcf-core = { path = "../hats/tcf/tcf-core" }
 splintr = { version = "0.19", features = ["vocab-whisper"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 

@@ -78,7 +78,6 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use boostr::format::SafeTensors;
-use boostr::model::ModelClient;
 use boostr::model::audio::voxcpm::model::config::AUDIO_START_ID;
 use boostr::model::audio::voxcpm::model::{
     GenerateOptions, GenerateOutcome, GenerateState, StepOutcome, VoxCpm2Model,
@@ -466,13 +465,12 @@ fn load_reference(path: &Path) -> Result<ReferenceAudio, Box<dyn std::error::Err
 fn run<R: Runtime<DType = DType>>(
     args: &Args,
     device: &R::Device,
-    client: &(impl VoxCpmClient<R> + TypeConversionOps<R> + RandomOps<R>),
+    client: &(impl VoxCpmClient<R> + TypeConversionOps<R> + RandomOps<R> + 'static),
     ref_wav: &[f32],
     started: Instant,
 ) -> Result<(Vec<f32>, f32), Box<dyn std::error::Error>>
 where
-    R::Client: ModelClient<R>
-        + TensorOps<R>
+    R::Client: TensorOps<R>
         + ScalarOps<R>
         + ReduceOps<R>
         + IndexingOps<R>

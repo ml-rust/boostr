@@ -18,7 +18,7 @@ use crate::model::audio::voxcpm::minicpm4::mlp::MiniCpm4Mlp;
 use crate::model::traits::ModelClient;
 use crate::nn::{LoraTargets, Module, RmsNorm, RoPE, child_params, extend_named};
 use crate::quant::traits::DequantOps;
-use numr::autograd::{Var, checkpoint, var_add};
+use numr::autograd::{Var, checkpoint_with_client, var_add};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
@@ -70,25 +70,31 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
     /// Costs ~33% extra compute. Call it only on a training pass; inference
     /// must use [`forward`](Self::forward) and pay nothing.
     ///
-    /// Takes no `client`: `numr::autograd::checkpoint` runs the segment with
-    /// `R::default_client` for the input's device, on both the forward pass
-    /// and the recompute. Same ops in the same order as
+    /// `numr::autograd::checkpoint_with_client` runs the segment on the
+    /// caller's `client`, on both the forward pass and the recompute, so the
+    /// closure needs the same bounds on `C` that [`forward`](Self::forward)
+    /// needs and nothing extra on `R::Client`. Same ops in the same order as
     /// [`forward`](Self::forward), so the output values match exactly.
     ///
-    /// The closure `checkpoint` stores is `Send + Sync + 'static`, so it
-    /// cannot borrow `&self`. This captures [`Self::alias`] and an aliased
-    /// `rope` instead, which preserves every `TensorId` — a `Clone` would
-    /// mint fresh ids and orphan the adapters' gradients.
+    /// The stored closure is `Send + Sync + 'static`, so it cannot borrow
+    /// `&self`, and `C` must be `'static`. This captures [`Self::alias`] and
+    /// an aliased `rope` instead, which preserves every `TensorId` — a
+    /// `Clone` would mint fresh ids and orphan the adapters' gradients.
     ///
-    /// Every trainable parameter this layer owns is passed to `checkpoint`
-    /// alongside `x`. `checkpoint`'s backward prunes its re-entrant pass to
-    /// exactly the ids it was handed, so a parameter left out of that list
-    /// gets NO gradient — the adapters would silently stop training.
-    pub fn forward_checkpointed(&self, x: &Var<R>, rope: Option<&RoPE<R>>) -> Result<Var<R>>
+    /// Every trainable parameter this layer owns is passed alongside `x`.
+    /// The recompute differentiates only with respect to the ids it was
+    /// handed, so a parameter left out of that list gets NO gradient — the
+    /// adapters would silently stop training. numr rejects that case at
+    /// forward time.
+    pub fn forward_checkpointed<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        rope: Option<&RoPE<R>>,
+    ) -> Result<Var<R>>
     where
-        R::Client: ModelClient<R>
-            + TypeConversionOps<R>
-            + TensorOps<R>
+        C: ModelClient<R> + TypeConversionOps<R> + 'static,
+        R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -102,21 +108,21 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
     {
         let layer = self.alias();
         let rope = rope.map(RoPE::alias);
-        // `x` first, then every trainable parameter: `checkpoint`'s backward
+        // `x` first, then every trainable parameter: the backward pass
         // returns a gradient only for an id it was given as an input.
         let trainable = Module::trainable_parameters(self);
         let mut inputs: Vec<&Var<R>> = Vec::with_capacity(trainable.len() + 1);
         inputs.push(x);
         inputs.extend(trainable.iter().map(|(_, param)| *param));
-        checkpoint(
-            move |segment_inputs, client: &R::Client| {
+        checkpoint_with_client(
+            move |segment_inputs, client: &C| {
                 let input = segment_inputs.first().ok_or_else(|| {
                     numr::error::Error::Internal(
                         "checkpointed MiniCpm4Layer segment received no input".to_string(),
                     )
                 })?;
                 layer
-                    .forward::<R::Client>(client, input, rope.as_ref())
+                    .forward::<C>(client, input, rope.as_ref())
                     .map_err(|e| {
                         numr::error::Error::Backend(format!(
                             "checkpointed MiniCpm4Layer forward: {e}"
@@ -124,6 +130,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
                     })
             },
             &inputs,
+            client,
         )
         .map_err(Error::Numr)
     }
@@ -385,7 +392,7 @@ mod alias_tests {
         let grads_plain = backward(&loss_plain, &client).expect("backward");
 
         let out_ckpt = layer
-            .forward_checkpointed(&x, rope.as_ref())
+            .forward_checkpointed(&client, &x, rope.as_ref())
             .expect("forward_checkpointed");
         let loss_ckpt = var_sum(&out_ckpt, &[], false, &client).expect("sum");
         let grads_ckpt = backward(&loss_ckpt, &client).expect("checkpointed backward");

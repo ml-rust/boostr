@@ -267,9 +267,8 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
         mut trajectory: Option<&mut Vec<Var<R>>>,
     ) -> Result<Var<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client: ModelClient<R>
-            + TensorOps<R>
+        C: ModelClient<R> + TypeConversionOps<R> + 'static,
+        R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -374,9 +373,8 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
         seed: u64,
     ) -> Result<Var<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R> + RandomOps<R>,
-        R::Client: ModelClient<R>
-            + TensorOps<R>
+        C: ModelClient<R> + TypeConversionOps<R> + RandomOps<R> + 'static,
+        R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>

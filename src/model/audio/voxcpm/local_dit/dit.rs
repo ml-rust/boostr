@@ -111,9 +111,10 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
         dt: &Var<R>,
     ) -> Result<Var<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client: ModelClient<R>
-            + TensorOps<R>
+        // `'static` is what `forward_checkpointed` adds: the closure numr
+        // stores for the backward recompute owns the client.
+        C: ModelClient<R> + TypeConversionOps<R> + 'static,
+        R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -168,7 +169,7 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
         let mut h = seq;
         for layer in &self.layers {
             h = if self.activation_checkpointing {
-                layer.forward_checkpointed(&h, &self.rope)?
+                layer.forward_checkpointed(client, &h, &self.rope)?
             } else {
                 layer.forward(client, &h, &self.rope)?
             };

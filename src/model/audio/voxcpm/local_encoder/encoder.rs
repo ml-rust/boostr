@@ -90,10 +90,10 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
         // `TypeConversionOps` is what `MaybeLoraLinear::forward` adds over a
         // dense `Linear::forward`, here for `in_proj` and for every
         // projection inside the layer stack.
-        C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client: ModelClient<R>
-            + TypeConversionOps<R>
-            + TensorOps<R>
+        // `'static` is what `forward_checkpointed` adds: the closure numr
+        // stores for the backward recompute owns the client.
+        C: ModelClient<R> + TypeConversionOps<R> + 'static,
+        R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -140,7 +140,7 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
         let mut h = flat;
         for layer in &self.layers {
             h = if self.activation_checkpointing {
-                layer.forward_checkpointed(&h, &self.rope)?
+                layer.forward_checkpointed(client, &h, &self.rope)?
             } else {
                 layer.forward(client, &h, &self.rope)?
             };

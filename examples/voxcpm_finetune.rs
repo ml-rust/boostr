@@ -186,7 +186,6 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use boostr::format::safetensors::save_safetensors;
-use boostr::model::ModelClient;
 use boostr::model::audio::voxcpm::model::config::{AUDIO_START_ID, VoxCpm2Config};
 use boostr::model::audio::voxcpm::model::{PatchGenerator, VoxCpm2Model};
 use boostr::model::audio::voxcpm::{
@@ -751,9 +750,8 @@ fn build_prefill_and_target<R, C>(
 ) -> Result<(PrefillState<R>, Tensor<R>), Box<dyn std::error::Error>>
 where
     R: Runtime<DType = DType>,
-    C: VoxCpmClient<R> + TypeConversionOps<R>,
-    R::Client: ModelClient<R>
-        + TensorOps<R>
+    C: VoxCpmClient<R> + TypeConversionOps<R> + 'static,
+    R::Client: TensorOps<R>
         + ScalarOps<R>
         + ReduceOps<R>
         + IndexingOps<R>
@@ -834,9 +832,8 @@ fn build_eval_batch<'a, R, C>(
 ) -> Result<Vec<EvalRow<'a, R>>, Box<dyn std::error::Error>>
 where
     R: Runtime<DType = DType>,
-    C: VoxCpmClient<R> + TypeConversionOps<R> + RandomOps<R>,
-    R::Client: ModelClient<R>
-        + TensorOps<R>
+    C: VoxCpmClient<R> + TypeConversionOps<R> + RandomOps<R> + 'static,
+    R::Client: TensorOps<R>
         + ScalarOps<R>
         + ReduceOps<R>
         + IndexingOps<R>
@@ -899,9 +896,8 @@ fn score_eval_batch<R, C>(
 ) -> Result<(f64, f64, f64), Box<dyn std::error::Error>>
 where
     R: Runtime<DType = DType>,
-    C: VoxCpmClient<R> + TypeConversionOps<R>,
-    R::Client: ModelClient<R>
-        + TensorOps<R>
+    C: VoxCpmClient<R> + TypeConversionOps<R> + 'static,
+    R::Client: TensorOps<R>
         + ScalarOps<R>
         + ReduceOps<R>
         + IndexingOps<R>
@@ -953,13 +949,14 @@ where
 fn run<R: Runtime<DType = DType>>(
     args: &Args,
     device: &R::Device,
-    client: &(impl VoxCpmClient<R> + TypeConversionOps<R> + RandomOps<R> + FusedOptimizerOps<R>),
+    client: &(
+         impl VoxCpmClient<R> + TypeConversionOps<R> + RandomOps<R> + FusedOptimizerOps<R> + 'static
+     ),
     rows: &[ManifestRow],
     started: Instant,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    R::Client: ModelClient<R>
-        + TensorOps<R>
+    R::Client: TensorOps<R>
         + ScalarOps<R>
         + ReduceOps<R>
         + IndexingOps<R>

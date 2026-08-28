@@ -126,10 +126,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         max_length: usize,
     ) -> Result<PrefillState<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R> + DequantOps<R>,
-        R::Client: ModelClient<R>
-            + TypeConversionOps<R>
-            + TensorOps<R>
+        C: ModelClient<R> + TypeConversionOps<R> + DequantOps<R> + 'static,
+        R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -157,10 +155,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         max_length: usize,
     ) -> Result<PrefillState<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R> + DequantOps<R>,
-        R::Client: ModelClient<R>
-            + TypeConversionOps<R>
-            + TensorOps<R>
+        C: ModelClient<R> + TypeConversionOps<R> + DequantOps<R> + 'static,
+        R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -184,10 +180,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         capture: bool,
     ) -> Result<PrefillState<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R> + DequantOps<R>,
-        R::Client: ModelClient<R>
-            + TypeConversionOps<R>
-            + TensorOps<R>
+        C: ModelClient<R> + TypeConversionOps<R> + DequantOps<R> + 'static,
+        R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>

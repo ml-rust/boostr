@@ -151,10 +151,10 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// exactly what it was before that flag existed.
     pub fn forward<C>(&self, client: &C, inputs_embeds: &Var<R>) -> Result<Var<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client: ModelClient<R>
-            + TypeConversionOps<R>
-            + TensorOps<R>
+        // `'static` is what `forward_checkpointed` adds: the closure numr
+        // stores for the backward recompute owns the client.
+        C: ModelClient<R> + TypeConversionOps<R> + 'static,
+        R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -191,7 +191,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         let mut h = inputs_embeds.alias();
         for layer in &self.layers {
             h = if self.activation_checkpointing {
-                layer.forward_checkpointed(&h, self.rope.as_ref())?
+                layer.forward_checkpointed(client, &h, self.rope.as_ref())?
             } else {
                 layer.forward(client, &h, self.rope.as_ref())?
             };

@@ -191,9 +191,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         drop_cond: bool,
     ) -> Result<Var<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client: ModelClient<R>
-            + TensorOps<R>
+        C: ModelClient<R> + TypeConversionOps<R> + 'static,
+        R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -254,9 +253,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         tcount: usize,
     ) -> Result<Var<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client: ModelClient<R>
-            + TensorOps<R>
+        C: ModelClient<R> + TypeConversionOps<R> + 'static,
+        R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>
@@ -332,9 +330,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         training_cfg_rate: f64,
     ) -> Result<Var<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R> + RandomOps<R>,
-        R::Client: ModelClient<R>
-            + TensorOps<R>
+        C: ModelClient<R> + TypeConversionOps<R> + RandomOps<R> + 'static,
+        R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>

@@ -115,9 +115,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         target_patches: &Tensor<R>,
     ) -> Result<TeacherForcedConditioning<R>>
     where
-        C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client: ModelClient<R>
-            + TensorOps<R>
+        C: ModelClient<R> + TypeConversionOps<R> + 'static,
+        R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
             + IndexingOps<R>

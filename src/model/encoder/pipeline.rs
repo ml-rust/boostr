@@ -113,7 +113,7 @@ impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
     pub fn embed_text<C>(&self, client: &C, text: &str) -> Result<Vec<f32>>
     where
         C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R> + DequantOps<R>,
     {
         let max_seq = self.encoder.config().max_position_embeddings;
         let token_ids = self.wrap_special_tokens(self.tokenizer.encode_raw(text), max_seq);
@@ -136,7 +136,7 @@ impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
     pub fn embed_texts<C>(&self, client: &C, texts: &[&str]) -> Result<Vec<Vec<f32>>>
     where
         C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R> + DequantOps<R>,
     {
         if texts.is_empty() {
             return Ok(vec![]);
@@ -254,7 +254,7 @@ impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
     fn embed_texts_varlen<C>(&self, client: &C, all_ids: &[Vec<u32>]) -> Result<Vec<Vec<f32>>>
     where
         C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R> + DequantOps<R>,
     {
         use super::config::DEFAULT_MAX_TOKENS_PER_FORWARD;
 
@@ -309,7 +309,7 @@ impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
     fn embed_one_varlen_batch<C>(&self, client: &C, ids_chunk: &[Vec<u32>]) -> Result<Vec<Vec<f32>>>
     where
         C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R> + DequantOps<R>,
     {
         let sub_batch = ids_chunk.len();
         if sub_batch == 0 {

@@ -3,7 +3,7 @@
 use super::encoder_layer::EncoderLayer;
 use crate::error::{Error, Result};
 use crate::model::encoder::config::{FfnVariant, HiddenAct};
-use crate::quant::traits::QuantMatmulOps;
+use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{Var, var_mul, var_silu};
 use numr::dtype::DType;
 use numr::ops::{ActivationOps, BinaryOps, ScalarOps, TensorOps, TypeConversionOps};
@@ -19,7 +19,7 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
             + QuantMatmulOps<R>
             + BinaryOps<R>
             + TypeConversionOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + DequantOps<R>,
     {
         match self.ffn_variant {
             FfnVariant::Standard => {
@@ -61,7 +61,7 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
             + ScalarOps<R>
             + QuantMatmulOps<R>
             + TypeConversionOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + DequantOps<R>,
     {
         self.ffn_gate
             .as_ref()

@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::nn::linear::{Linear, MaybeQuantLinear};
 use crate::nn::lora::LoraLinear;
 use crate::nn::module::Module;
-use crate::quant::traits::QuantMatmulOps;
+use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ScalarOps, TensorOps, TypeConversionOps};
@@ -42,7 +42,7 @@ impl<R: Runtime<DType = DType>> MaybeLoraLinear<R> {
             + ScalarOps<R>
             + QuantMatmulOps<R>
             + TypeConversionOps<R>,
-        R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R> + DequantOps<R>,
     {
         match self {
             Self::Plain(base) => base.forward(client, input),
@@ -248,7 +248,7 @@ impl<R: Runtime<DType = DType>> MaybeLoraLinear<R> {
     pub fn merge_into_base<C>(&self, client: &C) -> Result<Linear<R>>
     where
         C: RuntimeClient<R> + TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
-        R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R> + DequantOps<R>,
     {
         match self {
             Self::Plain(MaybeQuantLinear::Standard(linear)) => {

@@ -9,6 +9,7 @@ use crate::model::config::moe::MoeConfig;
 use crate::model::traits::ModelClient;
 use crate::nn::MaybeQuantLinear;
 use crate::ops::traits::architecture::moe::{MoEActivation, MoEOps};
+use crate::quant::traits::DequantOps;
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{
@@ -276,7 +277,8 @@ impl<R: Runtime<DType = DType>> LlamaMoeMlp<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let input = x.tensor();
         let num_tokens = input.shape()[0];
@@ -359,7 +361,8 @@ impl<R: Runtime<DType = DType>> LlamaFfn<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         match self {
             LlamaFfn::Dense(mlp) => mlp.forward(client, x),

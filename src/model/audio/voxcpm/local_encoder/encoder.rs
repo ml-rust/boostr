@@ -25,8 +25,9 @@ use crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer;
 use crate::model::traits::ModelClient;
 use crate::nn::{
     LoraTargets, MaybeLoraLinear, Module, RmsNorm, RoPE, adapt_if_targeted, child_params,
-    extend_named, load_lora_child, var_contiguous,
+    extend_named, load_lora_child, push_projection_name, var_contiguous,
 };
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_broadcast_to, var_cat, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
@@ -74,7 +75,8 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let shape = x.shape().to_vec();
         if shape.len() != 4 {
@@ -141,13 +143,39 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
         device: &R::Device,
         prefix: &str,
     ) -> Result<usize> {
-        let candidates: Vec<String> = self
-            .named_parameters()
-            .into_iter()
-            .map(|(name, _)| LoraTargets::join(prefix, &name))
-            .collect();
+        let candidates = self.lora_projection_names(prefix);
         targets.ensure_all_match(&candidates)?;
         self.apply_lora_unchecked(targets, rank, alpha, device, prefix)
+    }
+
+    /// Every dotted projection path [`Self::apply_lora`] would adapt under
+    /// `prefix` — `in_proj` plus every layer's projections —
+    /// INDEPENDENT of whether `in_proj` or any layer projection is dense,
+    /// block-quantized, or decomposed-quantized. This is what fixes the
+    /// QLoRA validation bug: on a GGUF checkpoint `in_proj` and every layer
+    /// projection are block-quantized, so `named_parameters()` returns
+    /// EMPTY for all of them and a valid target would be rejected as
+    /// matching nothing. `special_token`/`norm` carry no
+    /// [`MaybeLoraLinear`] projections, so neither contributes a name.
+    /// Matches [`Self::apply_lora_unchecked`]'s walk exactly: `in_proj` is
+    /// joined straight onto `prefix` via the SAME
+    /// [`crate::nn::push_projection_name`] helper `apply_lora`'s
+    /// [`adapt_if_targeted`] call uses, and each layer is joined at the
+    /// SAME `"encoder.layers.{i}"` prefix passed to
+    /// [`crate::model::audio::voxcpm::bidirectional::layer::BidirectionalLayer::apply_lora`],
+    /// so a path here is never built by separately hand-written logic.
+    pub fn lora_projection_names(&self, prefix: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        push_projection_name(&mut names, prefix, "in_proj");
+        for (i, layer) in self.layers.iter().enumerate() {
+            names.extend(
+                layer.lora_projection_names(&LoraTargets::join(
+                    prefix,
+                    &format!("encoder.layers.{i}"),
+                )),
+            );
+        }
+        names
     }
 
     /// Same walk as [`Self::apply_lora`] but skips

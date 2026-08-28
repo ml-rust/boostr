@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::nn::loss::router_z_loss;
 use crate::nn::moe::expert::Expert;
 use crate::nn::moe::router::{MoeRouter, RouterOutput};
-use crate::quant::traits::QuantMatmulOps;
+use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{Var, var_add, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
@@ -133,7 +133,8 @@ impl<R: Runtime> MoeLayer<R> {
             + ReduceOps<R>
             + ShapeOps<R>
             + BinaryOps<R>
-            + UnaryOps<R>,
+            + UnaryOps<R>
+            + DequantOps<R>,
     {
         let num_tokens = x.shape()[0];
         let hidden_size = x.shape()[1];

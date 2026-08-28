@@ -7,6 +7,7 @@ use crate::model::llama::model::blocks::ExpertWeights;
 use crate::model::multimodal::ModelInput;
 use crate::model::registry::LoadedModel;
 use crate::model::traits::ModelClient;
+use crate::quant::traits::DequantOps;
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, ConvOps, IndexingOps, NormalizationOps, ScalarOps, ShapeOps,
@@ -35,7 +36,7 @@ where
         position: usize,
     ) -> Result<Tensor<R>>
     where
-        R::Client: ModelClient<R>,
+        R::Client: ModelClient<R> + DequantOps<R>,
     {
         let device = input_ids.device();
         let client = R::default_client(device);
@@ -74,7 +75,7 @@ where
         position: usize,
     ) -> Result<Tensor<R>>
     where
-        R::Client: ModelClient<R>,
+        R::Client: ModelClient<R> + DequantOps<R>,
     {
         let device = input_ids.device();
         let client = R::default_client(device);
@@ -216,7 +217,7 @@ where
     /// Only supported for Llama-family models.
     pub fn forward_hidden(&self, input_ids: &Tensor<R>) -> Result<numr::autograd::Var<R>>
     where
-        R::Client: ModelClient<R> + numr::ops::ConvOps<R>,
+        R::Client: ModelClient<R> + numr::ops::ConvOps<R> + DequantOps<R>,
     {
         let device = input_ids.device();
         let client = R::default_client(device);
@@ -247,7 +248,7 @@ where
         position: usize,
     ) -> Result<(numr::autograd::Var<R>, Option<numr::autograd::Var<R>>)>
     where
-        R::Client: ModelClient<R>,
+        R::Client: ModelClient<R> + DequantOps<R>,
     {
         let device = hidden.tensor().device();
         let client = R::default_client(device);
@@ -292,7 +293,7 @@ where
         prev_mlp_out: Option<numr::autograd::Var<R>>,
     ) -> Result<Tensor<R>>
     where
-        R::Client: ModelClient<R>,
+        R::Client: ModelClient<R> + DequantOps<R>,
     {
         let device = hidden.tensor().device();
         let client = R::default_client(device);
@@ -366,7 +367,7 @@ where
         position: usize,
     ) -> Result<Tensor<R>>
     where
-        R::Client: ModelClient<R> + BinaryOps<R> + ShapeOps<R>,
+        R::Client: ModelClient<R> + BinaryOps<R> + ShapeOps<R> + DequantOps<R>,
     {
         match input {
             ModelInput::TextOnly(input_ids) => {

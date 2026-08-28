@@ -8,6 +8,7 @@
 use super::layer::{VarlenCtx, ensure_varlen_span_is_unconstrained};
 use super::{Encoder, EncoderClient, Pooling};
 use crate::error::{Error, Result};
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{IndexingOps, ScalarOps, ScatterReduceOp, TensorOps};
@@ -34,7 +35,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
     ) -> Result<Tensor<R>>
     where
         C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R> + DequantOps<R>,
     {
         // The varlen kernel has no bounded-span support, so refuse rather than
         // silently returning unwindowed results for a windowed model.
@@ -146,7 +147,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
     ) -> Result<Tensor<R>>
     where
         C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R> + DequantOps<R>,
     {
         let hidden_out = self.encode_inference_varlen(
             client,

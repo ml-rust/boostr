@@ -7,6 +7,7 @@ use crate::model::config::ModelConfig;
 use crate::model::traits::{Model, ModelClient};
 use crate::model::vocab_growth::fit_vocab_rows;
 use crate::nn::{Embedding, Linear, MaybeQuantLinear, RmsNorm, RoPE};
+use crate::quant::traits::DequantOps;
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{
@@ -206,7 +207,8 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let hidden = self.forward_hidden(client, input_ids.tensor())?;
         self.lm_head.forward(client, &hidden)

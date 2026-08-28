@@ -5,7 +5,7 @@ use crate::nn::module::Module;
 use crate::nn::weight::Weight;
 use crate::quant::decomposed::DecomposedQuantLinear;
 use crate::quant::tensor::QuantTensor;
-use crate::quant::traits::QuantMatmulOps;
+use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{Var, var_add, var_matmul, var_reshape, var_transpose};
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, TensorOps, TypeConversionOps};
@@ -221,14 +221,31 @@ impl<R: Runtime> MaybeQuantLinear<R> {
             + BinaryOps<R>
             + TypeConversionOps<R>,
         R: Runtime<DType = DType>,
-        R::Client: TensorOps<R>,
+        R::Client: TensorOps<R> + DequantOps<R> + numr::ops::MatmulOps<R>,
     {
         match self {
             Self::Standard(linear) => linear.forward(client, input),
+            // Forward always uses the fast quantized kernel. When `input`
+            // needs no gradient (inference), the output stays a detached
+            // leaf — zero extra allocation, unchanged from before. When it
+            // does (QLoRA training), `attach_quant_linear_backward` wires up
+            // a node whose backward dequantizes the FROZEN weight only then
+            // — see `crate::quant::autograd` for why the base weight itself
+            // never gets a gradient.
             Self::Quantized(qlinear) => {
                 let out = qlinear.forward(client, input.tensor())?;
-                Ok(Var::new(out, false))
+                if input.requires_grad() {
+                    crate::quant::attach_quant_linear_backward(input, out, qlinear.weight())
+                } else {
+                    Ok(Var::new(out, false))
+                }
             }
+            // AWQ/GPTQ packed layouts have no elementwise dequant op in
+            // `DequantOps` (only fused `int4_gemm`/`int4_gemm_gptq`/
+            // `marlin_gemm`, which take an activation, not just the weight),
+            // so there is no existing op to build a clean input-gradient
+            // from without guessing at backward math. Left detached, same as
+            // before, until such an op exists.
             Self::DecomposedQuant(dqlinear) => {
                 let out = dqlinear.forward(client, input.tensor())?;
                 Ok(Var::new(out, false))
@@ -253,7 +270,7 @@ impl<R: Runtime> MaybeQuantLinear<R> {
             + BinaryOps<R>
             + TypeConversionOps<R>,
         R: Runtime<DType = DType>,
-        R::Client: TensorOps<R>,
+        R::Client: TensorOps<R> + DequantOps<R> + numr::ops::MatmulOps<R>,
     {
         // Check if all are block-quantized (no bias) — enables batch path
         let all_quantized_no_bias = layers
@@ -270,7 +287,19 @@ impl<R: Runtime> MaybeQuantLinear<R> {
                 .collect();
 
             let outputs = client.quant_matmul_batch(input.tensor(), &weights)?;
-            Ok(outputs.into_iter().map(|t| Var::new(t, false)).collect())
+            // Same detach-vs-attach split as the single-layer path: only
+            // pay for the graph node when `input` actually needs a gradient.
+            if input.requires_grad() {
+                outputs
+                    .into_iter()
+                    .zip(weights)
+                    .map(|(out, weight)| {
+                        crate::quant::attach_quant_linear_backward(input, out, weight)
+                    })
+                    .collect()
+            } else {
+                Ok(outputs.into_iter().map(|t| Var::new(t, false)).collect())
+            }
         } else {
             // Fallback: individual forward passes
             layers.iter().map(|l| l.forward(client, input)).collect()

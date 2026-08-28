@@ -136,7 +136,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         self.prefill_inner(client, ref_feat, text_token_ids, max_length, false)
     }
@@ -164,7 +165,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         self.prefill_inner(client, ref_feat, text_token_ids, max_length, true)
     }
@@ -188,7 +190,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let (patch_size, feat_dim) = (self.config.patch_size, self.config.feat_dim);
         let ref_shape = ref_feat.shape().to_vec();

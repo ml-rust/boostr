@@ -265,12 +265,34 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     ///
     /// As the actual top of the call graph, this is the ONE place that
     /// validates every target up front with [`LoraTargets::ensure_all_match`]
-    /// against the WHOLE model's candidate set before adapting anything.
-    /// Each sub-model child is then walked via its `apply_lora_unchecked`,
-    /// not its validating `apply_lora`: re-validating a cross-subtree target
+    /// against the WHOLE model's candidate set — [`Self::lora_projection_names`],
+    /// NOT `self.named_parameters()` — before adapting anything. Each
+    /// sub-model child is then walked via its `apply_lora_unchecked`, not
+    /// its validating `apply_lora`: re-validating a cross-subtree target
     /// list against only one child's own candidate set would reject a
     /// target that lives in a sibling (e.g. `stop_proj`, which lives under
     /// `aux`, is not a candidate inside `feat_encoder`'s own subtree).
+    ///
+    /// # Why the candidate set must be STRUCTURAL, not parameter-derived
+    ///
+    /// `named_parameters()` answers "which projections currently carry a
+    /// dense `Var<R>`", which on a QUANTIZED (GGUF) checkpoint is nearly
+    /// EMPTY: `MaybeQuantLinear::named_parameters()` returns nothing for a
+    /// block-quantized projection (the weight has no `Var<R>`, only packed
+    /// bytes `quant_matmul` reads directly). Measured on a real VoxCPM2
+    /// GGUF, that shrank the candidate set from 577 (dense) to 131,
+    /// rejecting a perfectly valid `["q_proj", "v_proj"]` target with
+    /// "matched no projection by dot-segment name" — QLoRA's entire
+    /// reason to exist is adapting a quantized base, so that checkpoint is
+    /// exactly the one this validation must not reject.
+    /// [`Self::lora_projection_names`] instead answers "which projections
+    /// this tree's `MaybeLoraLinear` FIELDS structurally are", which is the
+    /// same 577-projection set on every checkpoint dtype: dense,
+    /// block-quantized, or decomposed-quantized. The wrapping itself was
+    /// never the bug — [`LoraLinear::new`](crate::nn::LoraLinear::new) sizes
+    /// its adapter from [`MaybeQuantLinear::shape`](crate::nn::MaybeQuantLinear::shape),
+    /// which works on every variant — only this validation's candidate
+    /// source was.
     pub fn apply_lora(
         &mut self,
         targets: &LoraTargets,
@@ -278,11 +300,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         alpha: f32,
         device: &R::Device,
     ) -> Result<usize> {
-        let candidates: Vec<String> = self
-            .named_parameters()
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
+        let candidates = self.lora_projection_names();
         targets.ensure_all_match(&candidates)?;
 
         let mut adapted = self.feat_encoder.apply_lora_unchecked(
@@ -319,6 +337,42 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         // Root-level, no prefix — see `Module::named_parameters` above.
         adapted += self.aux.apply_lora(targets, rank, alpha, device, "")?;
         Ok(adapted)
+    }
+
+    /// Every dotted projection path [`Self::apply_lora`] would adapt across
+    /// the WHOLE model — `feat_encoder`, `base_lm`, `residual_lm`,
+    /// `feat_decoder`, `fsq_layer`, and `aux`'s six root-level projections —
+    /// INDEPENDENT of whether any of them is dense, block-quantized, or
+    /// decomposed-quantized. See [`Self::apply_lora`]'s doc comment for WHY
+    /// this must be structural rather than parameter-derived (the GGUF
+    /// case).
+    ///
+    /// Delegates to each sub-model's own `lora_projection_names`, joined at
+    /// the SAME prefix constants [`Self::apply_lora`] passes to that same
+    /// sub-model's `apply_lora_unchecked` — `DEFAULT_LOCAL_ENCODER_PREFIX`,
+    /// `DEFAULT_MINICPM4_PREFIX`, `DEFAULT_RESIDUAL_LM_PREFIX`,
+    /// `DEFAULT_LOCAL_DIT_PREFIX`, `FSQ_LAYER_PREFIX`, and `aux`'s bare `""`
+    /// — so a path here is never built by separately hand-written logic:
+    /// [`Self::apply_lora`] and this walk read the SAME constants in the
+    /// SAME order, the only difference being `_unchecked`'s mutable adapt
+    /// vs. this method's read-only name collection.
+    pub fn lora_projection_names(&self) -> Vec<String> {
+        let mut names = self
+            .feat_encoder
+            .lora_projection_names(DEFAULT_LOCAL_ENCODER_PREFIX);
+        names.extend(self.base_lm.lora_projection_names(DEFAULT_MINICPM4_PREFIX));
+        names.extend(
+            self.residual_lm
+                .lora_projection_names(DEFAULT_RESIDUAL_LM_PREFIX),
+        );
+        names.extend(
+            self.feat_decoder
+                .lora_projection_names(DEFAULT_LOCAL_DIT_PREFIX),
+        );
+        names.extend(self.fsq.lora_projection_names(FSQ_LAYER_PREFIX));
+        // Root-level, no prefix — see `Module::named_parameters` above.
+        names.extend(self.aux.lora_projection_names(""));
+        names
     }
 
     /// THE write-back entry point: apply an optimizer's updated adapter
@@ -420,21 +474,4 @@ impl<R: Runtime<DType = DType>> Module<R> for VoxCpm2Model<R> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use numr::runtime::cpu::CpuRuntime;
-
-    #[test]
-    fn rejects_missing_checkpoint() {
-        let device = <CpuRuntime as Runtime>::default_device();
-        assert!(
-            VoxCpm2Model::<CpuRuntime>::from_checkpoint(
-                "/nonexistent/voxcpm2",
-                "/nonexistent/audiovae.safetensors",
-                &device,
-                Some(DType::F32),
-            )
-            .is_err()
-        );
-    }
-}
+mod tests;

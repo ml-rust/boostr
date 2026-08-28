@@ -7,6 +7,7 @@ use super::layer::SpanMasks;
 use super::pooling::pool_padded;
 use super::{Encoder, EncoderClient};
 use crate::error::{Error, Result};
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{IndexingOps, ScalarOps, TensorOps};
@@ -30,7 +31,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
     ) -> Result<Var<R>>
     where
         C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R> + DequantOps<R>,
     {
         let shape = input_ids.shape().to_vec();
         let seq_len = *shape.last().ok_or_else(|| Error::ModelError {
@@ -111,7 +112,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
     ) -> Result<Var<R>>
     where
         C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R> + DequantOps<R>,
     {
         let hidden = self.encode(client, input_ids, attention_mask)?;
         let pooled = pool_padded(client, hidden.tensor(), attention_mask, self.pooling, None)?;

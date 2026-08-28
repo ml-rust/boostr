@@ -7,7 +7,7 @@
 
 use crate::error::{Error, Result};
 use crate::nn::module::Module;
-use crate::quant::traits::QuantMatmulOps;
+use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{Var, var_add, var_matmul, var_mul_scalar, var_transpose};
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ScalarOps, TensorOps, TypeConversionOps};
@@ -173,7 +173,7 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
             + ScalarOps<R>
             + QuantMatmulOps<R>
             + TypeConversionOps<R>,
-        R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R> + DequantOps<R>,
     {
         let base_out = self.base.forward(client, input)?;
 

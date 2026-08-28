@@ -39,7 +39,7 @@ pub use groupnorm::GroupNorm;
 pub use layernorm::LayerNorm;
 pub use linear::{Linear, MaybeQuantLinear, QuantLinear};
 pub use lora::LoraLinear;
-pub use lora_targets::{LoraTargets, adapt_if_targeted, load_lora_child};
+pub use lora_targets::{LoraTargets, adapt_if_targeted, load_lora_child, push_projection_name};
 pub use loss::{
     contrastive_loss, cross_entropy_loss, cross_entropy_loss_masked, cross_entropy_loss_smooth,
     flow_matching_interpolate, flow_matching_loss, flow_matching_target, focal_loss, kl_div_loss,

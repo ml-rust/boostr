@@ -14,7 +14,7 @@ use crate::model::audio::voxcpm::minicpm4::attention::MiniCpm4Attention;
 use crate::model::audio::voxcpm::minicpm4::mlp::MiniCpm4Mlp;
 use crate::nn::{LoraTargets, MaybeLoraLinear, MaybeQuantLinear, Weight};
 use crate::test_utils::cpu_setup;
-use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
 pub(crate) const HIDDEN: usize = 8;
 const NUM_HEADS: usize = 2;
@@ -100,6 +100,68 @@ fn tiny_model_with(device: &CpuDevice, no_rope: bool) -> MiniCpm4Model<CpuRuntim
             RoPE::<CpuRuntime>::precompute_freqs(16, HEAD_DIM, 10000.0, None, device).expect("rope")
         }),
         hidden_size: HIDDEN,
+    }
+}
+
+/// Q4_0's block size — every dimension below is a multiple of it so a
+/// single block quantizes cleanly (`QuantFormat` requires the logical
+/// element count be a multiple of `block_size`).
+const QDIM: usize = 32;
+
+/// A `MiniCpm4Model` built ENTIRELY from `MaybeQuantLinear::Quantized`
+/// projections (via `client.quantize`, the same helper
+/// `local_dit/tests.rs::quantized_projections_contribute_nothing_dense_norms_still_appear`
+/// uses) — the checkpoint shape that made QLoRA validation reject a valid
+/// target (see `apply_lora_adapts_quantized_projections_instead_of_rejecting_them`).
+/// `num_heads`/`num_kv_heads` are both 1 so every projection is a plain
+/// `QDIM -> QDIM` square, matching `quantized_linear`'s fixed shape.
+fn quantized_tiny_model(device: &CpuDevice, client: &CpuClient) -> MiniCpm4Model<CpuRuntime> {
+    use crate::nn::QuantLinear;
+    use crate::quant::format::QuantFormat;
+    use crate::quant::traits::QuantizeOps;
+
+    let quantized_linear = |seed: f32| -> MaybeLoraLinear<CpuRuntime> {
+        let data: Vec<f32> = (0..QDIM * QDIM)
+            .map(|i| (i as f32 * 0.01 + seed).sin())
+            .collect();
+        let w = Tensor::<CpuRuntime>::from_slice(&data, &[QDIM, QDIM], device).unwrap();
+        let qt = client.quantize(&w, QuantFormat::Q4_0).unwrap();
+        MaybeQuantLinear::Quantized(QuantLinear::new(qt, None)).into()
+    };
+    let quantized_norm = || {
+        RmsNorm::new(
+            Tensor::<CpuRuntime>::ones(&[QDIM], DType::F32, device).expect("norm"),
+            1e-5,
+            false,
+        )
+    };
+    let layers: Vec<MiniCpm4Layer<CpuRuntime>> = (0..NUM_LAYERS)
+        .map(|i| MiniCpm4Layer {
+            input_layernorm: quantized_norm(),
+            self_attn: MiniCpm4Attention {
+                q_proj: quantized_linear(i as f32 * 8.0 + 1.0),
+                k_proj: quantized_linear(i as f32 * 8.0 + 2.0),
+                v_proj: quantized_linear(i as f32 * 8.0 + 3.0),
+                o_proj: quantized_linear(i as f32 * 8.0 + 4.0),
+                num_heads: 1,
+                num_kv_heads: 1,
+                head_dim: QDIM,
+                no_rope: true,
+            },
+            post_attention_layernorm: quantized_norm(),
+            mlp: MiniCpm4Mlp {
+                gate_proj: quantized_linear(i as f32 * 8.0 + 5.0),
+                up_proj: quantized_linear(i as f32 * 8.0 + 6.0),
+                down_proj: quantized_linear(i as f32 * 8.0 + 7.0),
+            },
+        })
+        .collect();
+    MiniCpm4Model {
+        embed_tokens: None,
+        layers,
+        norm: quantized_norm(),
+        rope: None,
+        hidden_size: QDIM,
     }
 }
 
@@ -397,6 +459,101 @@ fn apply_lora_dot_segment_matching_rejects_bare_substring() {
     let targets = LoraTargets::new(["roj"]);
     let err = model.apply_lora(&targets, 2, 4.0, &device, "").unwrap_err();
     assert!(err.to_string().contains("roj"), "got {err}");
+}
+
+/// The regression this fix targets: measured on a real VoxCPM2 GGUF,
+/// `named_parameters()` shrank from 577 candidates (dense) to 131
+/// (quantized), rejecting a valid `["q_proj", "v_proj"]` target as matching
+/// nothing — QLoRA's entire reason to exist is adapting a quantized base, so
+/// that checkpoint is exactly the one `apply_lora` must not reject. Pinned
+/// here at the smallest reproducing shape: every projection in every layer
+/// is `MaybeQuantLinear::Quantized` (block-quantized via `client.quantize`,
+/// the same helper
+/// `local_dit/tests.rs::quantized_projections_contribute_nothing_dense_norms_still_appear`
+/// uses), so `named_parameters()` is provably EMPTY, yet `apply_lora(["q_proj"])`
+/// must still adapt exactly one projection per layer.
+#[test]
+fn apply_lora_adapts_quantized_projections_instead_of_rejecting_them() {
+    let (client, device) = cpu_setup();
+    let mut model = quantized_tiny_model(&device, &client);
+
+    // The old, buggy candidate source. It is not EMPTY — the RMSNorm weights
+    // are dense `Var`s and still appear — but it contains no PROJECTION at
+    // all, because block-quantized storage has no `Var` to enumerate. That is
+    // exactly why validating targets against it broke QLoRA: `q_proj` was
+    // absent from the candidate list, so a valid target was rejected.
+    let param_names: Vec<String> = model
+        .named_parameters()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        !param_names.iter().any(|n| n.contains("_proj")),
+        "a fully-quantized model must expose no projection parameters, got {param_names:?}"
+    );
+    assert!(
+        param_names.iter().any(|n| n.contains("layernorm")),
+        "the dense RMSNorm weights should still be enumerated, got {param_names:?}"
+    );
+
+    let targets = LoraTargets::new(["q_proj"]);
+    let adapted = model
+        .apply_lora(&targets, 2, 4.0, &device, "")
+        .expect("apply_lora must accept a valid target on a fully-quantized model");
+    assert_eq!(adapted, NUM_LAYERS);
+    for layer in &model.layers {
+        assert!(layer.self_attn.q_proj.is_adapted());
+        assert!(!layer.self_attn.k_proj.is_adapted());
+        assert!(!layer.self_attn.v_proj.is_adapted());
+        assert!(!layer.self_attn.o_proj.is_adapted());
+        assert!(!layer.mlp.gate_proj.is_adapted());
+    }
+}
+
+/// The zero-match trap must survive this fix: a genuinely bogus target
+/// still errors on a fully-quantized model, exactly as it does on the dense
+/// [`tiny_model`] in `apply_lora_errors_when_a_target_matches_nothing`. The
+/// structural candidate source must not accidentally accept everything —
+/// only real projection names.
+#[test]
+fn apply_lora_on_quantized_model_still_errors_on_bogus_target() {
+    let (client, device) = cpu_setup();
+    let mut model = quantized_tiny_model(&device, &client);
+    let targets = LoraTargets::new(["q_projj"]);
+    let err = model.apply_lora(&targets, 2, 4.0, &device, "").unwrap_err();
+    assert!(err.to_string().contains("q_projj"), "got {err}");
+}
+
+/// [`MiniCpm4Model::lora_projection_names`] is STRUCTURAL, not
+/// parameter-derived: the dense [`tiny_model`] and an all-quantized model
+/// built with the SAME layer/projection shape return the identical name
+/// list, even though their `named_parameters()` differ completely (full
+/// coverage vs. empty). This is the property that makes the fix correct —
+/// not merely that the regression test above happens to pass.
+#[test]
+fn lora_projection_names_is_identical_for_dense_and_quantized_models() {
+    let (client, device) = cpu_setup();
+    let quantized_model = quantized_tiny_model(&device, &client);
+    let dense_model = tiny_model(&device);
+
+    assert_eq!(
+        dense_model.lora_projection_names(""),
+        quantized_model.lora_projection_names("")
+    );
+    // The property is only meaningful because the two candidate sources
+    // actually disagree here — otherwise this test would pass vacuously.
+    assert_ne!(
+        dense_model
+            .named_parameters()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>(),
+        quantized_model
+            .named_parameters()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>()
+    );
 }
 
 /// Adapting an already-adapted model errors on the second call rather than

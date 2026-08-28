@@ -97,7 +97,12 @@ pub trait Model<R: Runtime>: Sized {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>;
+            + ConditionalOps<R>
+            // Required because a projection may be block-quantized: its
+            // backward dequantizes the frozen weight to carry the gradient
+            // through to the input (QLoRA). Declared on the trait because an
+            // impl may not add bounds the trait does not have.
+            + DequantOps<R>;
 
     /// Get the model configuration
     fn config(&self) -> &ModelConfig;

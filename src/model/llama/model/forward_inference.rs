@@ -6,6 +6,7 @@ use crate::inference::LayeredKvCache;
 use crate::inference::kv_cache::LayeredPagedKvCache;
 use crate::model::traits::ModelClient;
 use crate::ops::traits::{KvCacheOps, PagedAttentionOps};
+use crate::quant::traits::DequantOps;
 use numr::autograd::var_add;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
@@ -35,7 +36,8 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let mut hidden = self.embed_tokens.forward(client, input_ids)?;
         for layer in &self.layers {
@@ -78,7 +80,8 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let profile = std::env::var("BLAZR_PROFILE").is_ok();
         let device = input_ids.device();
@@ -203,7 +206,8 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let end_layer = end_layer.min(self.layers.len());
         let mut hidden = hidden;
@@ -255,7 +259,8 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let mut hidden = hidden;
         if let Some(last_mlp) = prev_mlp_out {
@@ -302,7 +307,8 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + KvCacheOps<R>
-            + PagedAttentionOps<R>,
+            + PagedAttentionOps<R>
+            + DequantOps<R>,
     {
         // Embed tokens: [B, S] -> [B, S, hidden]
         let mut hidden = self.embed_tokens.forward(client, input_ids)?;

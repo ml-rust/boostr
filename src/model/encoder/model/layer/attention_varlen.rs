@@ -12,7 +12,7 @@
 use super::encoder_layer::{EncoderLayer, VarlenCtx};
 use crate::error::{Error, Result};
 use crate::ops::{RoPEPackedOps, VarLenAttentionOps};
-use crate::quant::traits::QuantMatmulOps;
+use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{Var, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, NormalizationOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps};
@@ -41,7 +41,7 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
             + NormalizationOps<R>
             + RoPEPackedOps<R>
             + VarLenAttentionOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + DequantOps<R>,
     {
         let x_shape = x.shape().to_vec();
         let total_tokens = x_shape[0];

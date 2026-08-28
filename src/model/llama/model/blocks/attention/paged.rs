@@ -7,6 +7,7 @@ use crate::inference::kv_cache::LayeredPagedKvCache;
 use crate::model::traits::ModelClient;
 use crate::nn::{MaybeQuantLinear, RoPE};
 use crate::ops::traits::{KvCacheOps, PagedAttentionOps};
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
@@ -43,7 +44,8 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + KvCacheOps<R>
-            + PagedAttentionOps<R>,
+            + PagedAttentionOps<R>
+            + DequantOps<R>,
     {
         let shape = x.shape().to_vec();
         let batch = shape[0];

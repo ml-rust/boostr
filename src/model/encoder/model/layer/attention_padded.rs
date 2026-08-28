@@ -3,7 +3,7 @@
 use super::encoder_layer::EncoderLayer;
 use crate::error::{Error, Result};
 use crate::ops::RoPEOps;
-use crate::quant::traits::QuantMatmulOps;
+use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{Var, var_permute, var_reshape, var_transpose};
 use numr::dtype::DType;
 use numr::ops::{
@@ -35,7 +35,7 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
             + TypeConversionOps<R>
             + NormalizationOps<R>
             + RoPEOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + DequantOps<R>,
     {
         use numr::autograd::var_matmul;
 

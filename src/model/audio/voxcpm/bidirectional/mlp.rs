@@ -18,8 +18,9 @@ use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
 use crate::nn::{
     LoraTargets, MaybeLoraLinear, Module, adapt_if_targeted, child_params, extend_named,
-    load_lora_child,
+    load_lora_child, push_projection_name,
 };
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_silu_mul};
 use numr::dtype::DType;
 use numr::ops::{
@@ -51,7 +52,8 @@ impl<R: Runtime<DType = DType>> BidirectionalMlp<R> {
             + BinaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + UnaryOps<R>,
+            + UnaryOps<R>
+            + DequantOps<R>,
     {
         let gate = self.gate_proj.forward(client, x)?;
         let up = self.up_proj.forward(client, x)?;
@@ -104,6 +106,24 @@ impl<R: Runtime<DType = DType>> BidirectionalMlp<R> {
             "down_proj",
         )?;
         Ok(adapted)
+    }
+
+    /// Every dotted projection path [`Self::apply_lora`] would adapt under
+    /// `prefix` — `gate_proj`, `up_proj`, `down_proj` — INDEPENDENT of
+    /// whether a projection is dense, block-quantized, or
+    /// decomposed-quantized. Unlike `named_parameters()`, this never
+    /// enumerates empty for a quantized projection: which projections exist
+    /// is a STRUCTURAL property of this type, not a function of whether its
+    /// weights happen to carry a `Var<R>`. Built with the same
+    /// [`crate::nn::push_projection_name`] helper `apply_lora`'s
+    /// [`adapt_if_targeted`] calls use, so a path here is never hand-written
+    /// separately from the one `apply_lora` matches.
+    pub fn lora_projection_names(&self, prefix: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        push_projection_name(&mut names, prefix, "gate_proj");
+        push_projection_name(&mut names, prefix, "up_proj");
+        push_projection_name(&mut names, prefix, "down_proj");
+        names
     }
 
     /// Write back updated `gate_proj`/`up_proj`/`down_proj` adapter values

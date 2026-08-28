@@ -7,10 +7,12 @@
 //! that projects that embedding through the model's hidden width.
 
 use crate::error::{Error, Result};
-use crate::nn::lora_targets::{LoraTargets, adapt_if_targeted, load_lora_child};
+use crate::nn::lora_targets::{
+    LoraTargets, adapt_if_targeted, load_lora_child, push_projection_name,
+};
 use crate::nn::maybe_lora::MaybeLoraLinear;
 use crate::nn::module::{Module, child_params, extend_named};
-use crate::quant::traits::QuantMatmulOps;
+use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{
     Var, var_cat, var_cos, var_mul, var_mul_scalar, var_reshape, var_silu, var_sin,
 };
@@ -155,7 +157,7 @@ impl<R: Runtime<DType = DType>> TimestepEmbedding<R> {
             + QuantMatmulOps<R>
             + BinaryOps<R>
             + TypeConversionOps<R>,
-        R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R> + BinaryOps<R>,
+        R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R> + BinaryOps<R> + DequantOps<R>,
     {
         let hidden = self.linear_1.forward(client, x)?;
         let hidden = var_silu(&hidden, client).map_err(Error::Numr)?;
@@ -197,6 +199,22 @@ impl<R: Runtime<DType = DType>> TimestepEmbedding<R> {
             "linear_2",
         )?;
         Ok(adapted)
+    }
+
+    /// Every dotted projection path [`Self::apply_lora`] would adapt under
+    /// `prefix` — `linear_1`, `linear_2` — INDEPENDENT of whether either
+    /// linear is dense, block-quantized, or decomposed-quantized. Unlike
+    /// `named_parameters()`, this never enumerates empty for a quantized
+    /// linear: which projections exist is a STRUCTURAL property of this
+    /// type, not a function of whether its weights happen to carry a
+    /// `Var<R>`. Built with the same [`crate::nn::push_projection_name`]
+    /// helper `apply_lora`'s [`adapt_if_targeted`] calls use, so a path here
+    /// is never hand-written separately from the one `apply_lora` matches.
+    pub fn lora_projection_names(&self, prefix: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        push_projection_name(&mut names, prefix, "linear_1");
+        push_projection_name(&mut names, prefix, "linear_2");
+        names
     }
 
     /// Write back updated `linear_1`/`linear_2` adapter values from an

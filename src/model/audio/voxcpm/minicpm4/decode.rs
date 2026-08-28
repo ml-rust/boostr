@@ -41,6 +41,7 @@ use crate::inference::{LayeredKvCache, LayeredKvCacheConfig};
 use crate::model::audio::voxcpm::minicpm4::attention::MiniCpm4Attention;
 use crate::model::audio::voxcpm::minicpm4::model::MiniCpm4Model;
 use crate::model::traits::ModelClient;
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
@@ -153,7 +154,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let shape = inputs_embeds.shape().to_vec();
         if shape.len() != 3 {
@@ -207,7 +209,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let shape = embed.shape().to_vec();
         if shape.len() != 2 {
@@ -336,7 +339,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let mut h = x.clone();
         for (i, layer) in self.layers.iter().enumerate() {

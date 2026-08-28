@@ -3,6 +3,7 @@
 use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
 use crate::nn::MaybeQuantLinear;
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_silu_mul};
 use numr::dtype::DType;
 use numr::ops::{
@@ -32,7 +33,8 @@ impl<R: Runtime<DType = DType>> LlamaMlp<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         // Try fused SwiGLU path: single kernel for silu(gate_proj(x)) * up_proj(x)
         if let (MaybeQuantLinear::Quantized(gate_ql), MaybeQuantLinear::Quantized(up_ql)) =

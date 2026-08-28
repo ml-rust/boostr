@@ -501,3 +501,68 @@ fn test_merge_into_base_errors_on_quantized_base() {
         "error must name the quantized base and the requantization requirement: {message}"
     );
 }
+
+/// The exact QLoRA arrangement the fix targets: a LoRA adapter over a
+/// quantized base feeds a SECOND, downstream quantized projection before the
+/// loss (`adapter -> quantized projection -> loss`). Before the fix, that
+/// downstream `MaybeQuantLinear::Quantized::forward` detached the graph, so
+/// `backward` reached neither this adapter nor anything upstream of it.
+#[test]
+fn test_lora_gradient_reaches_adapter_through_downstream_quantized_projection() {
+    use crate::nn::linear::{MaybeQuantLinear, QuantLinear};
+    use crate::quant::format::QuantFormat;
+    use crate::quant::traits::QuantizeOps;
+    use crate::test_utils::cpu_setup;
+    use numr::autograd::{backward, var_sum};
+
+    let (client, device) = cpu_setup();
+    // First layer's out_features (32) doubles as the second layer's
+    // in_features, so it must satisfy Q8_0's 32-element block size too.
+    let (in_features, mid_features, out_features, rank) = (256usize, 32usize, 4usize, 2usize);
+    let lora = quantized_lora(&client, &device, mid_features, in_features, rank, 8.0);
+
+    let second_w: Vec<f32> = (0..out_features * mid_features)
+        .map(|i| (i as f32 * 0.021).cos() * 0.4)
+        .collect();
+    let second_tensor =
+        Tensor::<CpuRuntime>::from_slice(&second_w, &[out_features, mid_features], &device)
+            .unwrap();
+    let second_quant = client
+        .quantize(&second_tensor, QuantFormat::Q8_0)
+        .expect("Q8_0 quantize");
+    let second_layer = MaybeQuantLinear::Quantized(QuantLinear::new(second_quant, None));
+
+    let x_vals: Vec<f32> = (0..2 * in_features)
+        .map(|i| (i as f32 * 0.005) - 0.5)
+        .collect();
+    let x = Var::new(
+        Tensor::<CpuRuntime>::from_slice(&x_vals, &[2, in_features], &device).unwrap(),
+        false,
+    );
+
+    let mid = lora.forward(&client, &x).expect("adapter forward");
+    assert!(
+        mid.requires_grad(),
+        "adapter output must require grad (lora_a/lora_b are trainable)"
+    );
+
+    let out = second_layer
+        .forward(&client, &mid)
+        .expect("downstream quantized projection forward");
+    assert!(
+        out.requires_grad(),
+        "downstream quantized projection must not detach the adapter's graph"
+    );
+
+    let loss = var_sum(&out, &[0, 1], false, &client).unwrap();
+    let grads = backward(&loss, &client).unwrap();
+
+    assert!(
+        grads.get(lora.lora_b().id()).is_some(),
+        "lora_b must receive a gradient through the downstream quantized projection"
+    );
+    assert!(
+        grads.get(lora.lora_a().id()).is_some(),
+        "lora_a must receive a gradient through the downstream quantized projection"
+    );
+}

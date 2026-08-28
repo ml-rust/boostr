@@ -25,9 +25,10 @@ use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
 use crate::nn::{
     LoraTargets, MaybeLoraLinear, Module, RoPE, adapt_if_targeted, child_params, extend_named,
-    load_lora_child, repeat_kv, var_contiguous,
+    load_lora_child, push_projection_name, repeat_kv, var_contiguous,
 };
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_permute, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
@@ -80,7 +81,8 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let shape = x.shape().to_vec();
         let (batch, seq_len) = (shape[0], shape[1]);
@@ -181,6 +183,25 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
             "o_proj",
         )?;
         Ok(adapted)
+    }
+
+    /// Every dotted projection path [`Self::apply_lora`] would adapt under
+    /// `prefix` — `q_proj`, `k_proj`, `v_proj`, `o_proj` — INDEPENDENT of
+    /// whether a projection is dense, block-quantized, or
+    /// decomposed-quantized. Unlike `named_parameters()`, this never
+    /// enumerates empty for a quantized projection: which projections exist
+    /// is a STRUCTURAL property of this type, not a function of whether its
+    /// weights happen to carry a `Var<R>`. Built with the same
+    /// [`crate::nn::push_projection_name`] helper `apply_lora`'s
+    /// [`adapt_if_targeted`] calls use, so a path here is never hand-written
+    /// separately from the one `apply_lora` matches.
+    pub fn lora_projection_names(&self, prefix: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        push_projection_name(&mut names, prefix, "q_proj");
+        push_projection_name(&mut names, prefix, "k_proj");
+        push_projection_name(&mut names, prefix, "v_proj");
+        push_projection_name(&mut names, prefix, "o_proj");
+        names
     }
 
     /// Write back updated `q_proj`/`k_proj`/`v_proj`/`o_proj` adapter values

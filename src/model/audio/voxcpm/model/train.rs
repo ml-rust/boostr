@@ -53,6 +53,7 @@ use crate::model::audio::voxcpm::model::generate::PatchGenerator;
 use crate::model::audio::voxcpm::model::prefill::PrefillState;
 use crate::model::traits::ModelClient;
 use crate::nn::{flow_matching_interpolate, flow_matching_loss, var_contiguous};
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_transpose};
 use numr::dtype::DType;
 use numr::ops::{
@@ -114,7 +115,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + TypeConversionOps<R>,
+            + TypeConversionOps<R>
+            + DequantOps<R>,
     {
         let shape = target_patches.shape().to_vec();
         if shape.len() != 3 || shape[0] == 0 {
@@ -207,7 +209,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + TypeConversionOps<R>,
+            + TypeConversionOps<R>
+            + DequantOps<R>,
     {
         let shape = target_patches.shape();
         if shape.len() != 3 || shape[0] == 0 {

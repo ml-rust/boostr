@@ -10,9 +10,9 @@
 use crate::error::{Error, Result};
 use crate::nn::{
     LoraTargets, MaybeLoraLinear, Module, adapt_if_targeted, child_params, extend_named,
-    load_lora_child,
+    load_lora_child, push_projection_name,
 };
-use crate::quant::traits::QuantMatmulOps;
+use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{Var, var_add, var_div_scalar, var_mul_scalar, var_silu, var_tanh};
 use numr::dtype::DType;
 use numr::ops::{ActivationOps, BinaryOps, ScalarOps, TensorOps, TypeConversionOps, UnaryOps};
@@ -79,7 +79,7 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
             + QuantMatmulOps<R>
             + BinaryOps<R>
             + TypeConversionOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + UnaryOps<R> + BinaryOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + UnaryOps<R> + BinaryOps<R> + DequantOps<R>,
     {
         match hidden.shape().len() {
             2 | 3 => {}
@@ -170,6 +170,22 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
         Ok(adapted)
     }
 
+    /// Every dotted projection path [`Self::apply_lora`] would adapt under
+    /// `prefix` — `in_proj`, `out_proj` — INDEPENDENT of whether either is
+    /// dense, block-quantized, or decomposed-quantized. Unlike
+    /// `named_parameters()`, this never enumerates empty for a quantized
+    /// projection: which projections exist is a STRUCTURAL property of this
+    /// type, not a function of whether its weights happen to carry a
+    /// `Var<R>`. Built with the same [`crate::nn::push_projection_name`]
+    /// helper `apply_lora`'s [`adapt_if_targeted`] calls use, so a path here
+    /// is never hand-written separately from the one `apply_lora` matches.
+    pub fn lora_projection_names(&self, prefix: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        push_projection_name(&mut names, prefix, "in_proj");
+        push_projection_name(&mut names, prefix, "out_proj");
+        names
+    }
+
     /// Write back updated `in_proj`/`out_proj` adapter values from an
     /// optimizer's `params` map, keeping their [`numr::tensor::TensorId`]s.
     /// See [`crate::nn::MaybeLoraLinear::load_lora_parameters`] for the
@@ -240,7 +256,7 @@ impl<R: Runtime<DType = DType>> AuxProjections<R> {
             + QuantMatmulOps<R>
             + BinaryOps<R>
             + TypeConversionOps<R>,
-        R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R> + BinaryOps<R>,
+        R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R> + BinaryOps<R> + DequantOps<R>,
     {
         let projected = self.stop_proj.forward(client, hidden)?;
         let activated = var_silu(&projected, client).map_err(Error::Numr)?;
@@ -321,6 +337,28 @@ impl<R: Runtime<DType = DType>> AuxProjections<R> {
             "stop_head",
         )?;
         Ok(adapted)
+    }
+
+    /// Every dotted projection path [`Self::apply_lora`] would adapt under
+    /// `prefix` — the six root-level projections, `prefix` passed straight
+    /// through with NO segment appended, exactly as [`Self::apply_lora`]
+    /// does — INDEPENDENT of whether any of the six is dense,
+    /// block-quantized, or decomposed-quantized. Unlike `named_parameters()`,
+    /// this never enumerates empty for a quantized projection: which
+    /// projections exist is a STRUCTURAL property of this type, not a
+    /// function of whether its weights happen to carry a `Var<R>`. Built
+    /// with the same [`crate::nn::push_projection_name`] helper
+    /// `apply_lora`'s [`adapt_if_targeted`] calls use, so a path here is
+    /// never hand-written separately from the one `apply_lora` matches.
+    pub fn lora_projection_names(&self, prefix: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        push_projection_name(&mut names, prefix, "enc_to_lm_proj");
+        push_projection_name(&mut names, prefix, "lm_to_dit_proj");
+        push_projection_name(&mut names, prefix, "res_to_dit_proj");
+        push_projection_name(&mut names, prefix, "fusion_concat_proj");
+        push_projection_name(&mut names, prefix, "stop_proj");
+        push_projection_name(&mut names, prefix, "stop_head");
+        names
     }
 
     /// Write back updated adapter values across all six projections from an

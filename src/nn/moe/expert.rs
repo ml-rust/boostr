@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::nn::linear::Linear;
 use crate::nn::maybe_lora::MaybeLoraLinear;
 use crate::nn::module::Module;
-use crate::quant::traits::QuantMatmulOps;
+use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{Var, var_mul, var_silu};
 use numr::dtype::DType;
 use numr::ops::{
@@ -78,7 +78,7 @@ impl<R: Runtime<DType = DType>> Expert<R> {
             + BinaryOps<R>
             + QuantMatmulOps<R>
             + TypeConversionOps<R>,
-        R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R> + BinaryOps<R>,
+        R::Client: TensorOps<R> + ActivationOps<R> + ScalarOps<R> + BinaryOps<R> + DequantOps<R>,
     {
         let gate = self.gate_proj.forward(client, x)?;
         let up = self.up_proj.forward(client, x)?;
@@ -95,7 +95,7 @@ impl<R: Runtime<DType = DType>> Expert<R> {
     pub fn merge_adapters<C>(&self, client: &C) -> Result<Self>
     where
         C: RuntimeClient<R> + TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
-        R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R> + DequantOps<R>,
     {
         Ok(Self::new(
             self.gate_proj.merge_into_base(client)?,

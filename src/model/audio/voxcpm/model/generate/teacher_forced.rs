@@ -55,6 +55,7 @@
 
 use super::*;
 use crate::nn::var_contiguous;
+use crate::quant::traits::DequantOps;
 use numr::autograd::{var_cat, var_narrow, var_reshape};
 
 /// Every patch's DiT conditioning, teacher-forced from ground-truth patches
@@ -117,7 +118,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + TypeConversionOps<R>,
+            + TypeConversionOps<R>
+            + DequantOps<R>,
     {
         let (patch_size, feat_dim) = (self.config.patch_size, self.config.feat_dim);
         let shape = target_patches.shape().to_vec();

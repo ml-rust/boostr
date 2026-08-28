@@ -7,6 +7,7 @@
 pub mod config;
 pub mod dit;
 pub mod loader;
+pub mod lora;
 pub mod sampler;
 
 #[cfg(test)]

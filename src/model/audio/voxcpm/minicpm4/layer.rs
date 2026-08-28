@@ -17,6 +17,7 @@ use crate::model::audio::voxcpm::minicpm4::attention::MiniCpm4Attention;
 use crate::model::audio::voxcpm::minicpm4::mlp::MiniCpm4Mlp;
 use crate::model::traits::ModelClient;
 use crate::nn::{LoraTargets, Module, RmsNorm, RoPE, child_params, extend_named};
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{
@@ -50,7 +51,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let normed = self.input_layernorm.forward(client, x)?;
         let attn_out = self.self_attn.forward(client, &normed, rope)?;
@@ -86,7 +88,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let normed = self.input_layernorm.forward(client, x)?;
         let attn_out = self
@@ -129,6 +132,22 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
             &LoraTargets::join(prefix, "mlp"),
         )?;
         Ok(adapted)
+    }
+
+    /// Every dotted projection path [`Self::apply_lora`] would adapt under
+    /// `prefix`, delegating to `MiniCpm4Attention::lora_projection_names`
+    /// and `MiniCpm4Mlp::lora_projection_names` at the SAME
+    /// `"self_attn"`/`"mlp"`-joined prefixes [`Self::apply_lora`] passes
+    /// them, so a path here is never built by separately hand-written logic.
+    pub fn lora_projection_names(&self, prefix: &str) -> Vec<String> {
+        let mut names = self
+            .self_attn
+            .lora_projection_names(&LoraTargets::join(prefix, "self_attn"));
+        names.extend(
+            self.mlp
+                .lora_projection_names(&LoraTargets::join(prefix, "mlp")),
+        );
+        names
     }
 
     /// Delegate to `MiniCpm4Attention::load_lora_parameters` and

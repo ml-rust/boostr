@@ -12,6 +12,7 @@
 use super::*;
 use crate::model::audio::voxcpm::local_dit::cfm_time_span;
 use crate::nn::var_contiguous;
+use crate::quant::traits::DequantOps;
 use numr::autograd::{var_cat, var_reshape, var_transpose};
 
 /// Per-step intermediates for a gate to compare against the reference,
@@ -58,7 +59,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + TypeConversionOps<R>,
+            + TypeConversionOps<R>
+            + DequantOps<R>,
     {
         let (outcome, intermediates) =
             self.step_with_noise_inner(client, state, z, options, true)?;
@@ -105,7 +107,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + TypeConversionOps<R>,
+            + TypeConversionOps<R>
+            + DequantOps<R>,
     {
         let (patch_size, feat_dim) = (self.config.patch_size, self.config.feat_dim);
         check_patch("z", z, &[1, feat_dim, patch_size])?;

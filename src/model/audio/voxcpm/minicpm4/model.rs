@@ -131,7 +131,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let shape = inputs_embeds.shape().to_vec();
         if shape.len() != 3 {
@@ -170,8 +171,17 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// instantiates this type twice — `base_lm`/`residual_lm` — and a caller
     /// may adapt either on its own), so it validates every target up front
     /// with [`LoraTargets::ensure_all_match`] against this tree's OWN full
-    /// candidate set (`self.named_parameters()`, joined with `prefix`)
-    /// before delegating to [`Self::apply_lora_unchecked`].
+    /// candidate set — [`Self::lora_projection_names`], NOT
+    /// `self.named_parameters()` — before delegating to
+    /// [`Self::apply_lora_unchecked`].
+    ///
+    /// The candidate set MUST be structural (every projection this model
+    /// COULD adapt), not parameter-derived (every projection that HAPPENS
+    /// to carry a dense `Var<R>` right now): on a GGUF checkpoint every
+    /// `MiniCpm4Attention`/`MiniCpm4Mlp` projection is block-quantized, so
+    /// `named_parameters()` returns EMPTY for all of them and a valid
+    /// `q_proj`/`v_proj` target would be rejected as matching nothing —
+    /// exactly the QLoRA-unusable bug this candidate source fixes.
     pub fn apply_lora(
         &mut self,
         targets: &LoraTargets,
@@ -180,13 +190,28 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         device: &R::Device,
         prefix: &str,
     ) -> Result<usize> {
-        let candidates: Vec<String> = self
-            .named_parameters()
-            .into_iter()
-            .map(|(name, _)| LoraTargets::join(prefix, &name))
-            .collect();
+        let candidates = self.lora_projection_names(prefix);
         targets.ensure_all_match(&candidates)?;
         self.apply_lora_unchecked(targets, rank, alpha, device, prefix)
+    }
+
+    /// Every dotted projection path [`Self::apply_lora`] would adapt under
+    /// `prefix` — INDEPENDENT of whether each layer's projections are
+    /// dense, block-quantized, or decomposed-quantized. `embed_tokens`/
+    /// `norm` carry no [`crate::nn::MaybeLoraLinear`] projections, so
+    /// neither contributes a name, matching [`Self::apply_lora_unchecked`]'s
+    /// walk exactly: each layer is joined at the SAME `"layers.{i}"` prefix
+    /// [`Self::apply_lora_unchecked`] passes to
+    /// [`crate::model::audio::voxcpm::minicpm4::layer::MiniCpm4Layer::apply_lora`],
+    /// so a path here is never built by separately hand-written logic.
+    pub fn lora_projection_names(&self, prefix: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        for (i, layer) in self.layers.iter().enumerate() {
+            names.extend(
+                layer.lora_projection_names(&LoraTargets::join(prefix, &format!("layers.{i}"))),
+            );
+        }
+        names
     }
 
     /// Same walk as [`Self::apply_lora`] but skips

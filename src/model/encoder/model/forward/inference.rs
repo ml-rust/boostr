@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use crate::model::encoder::model::layer::SpanMasks;
 use crate::model::encoder::model::pooling::pool_padded;
 use crate::model::encoder::model::{Encoder, EncoderClient};
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{IndexingOps, ScalarOps, TensorOps};
@@ -26,7 +27,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
     ) -> Result<Tensor<R>>
     where
         C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R> + DequantOps<R>,
     {
         let tok_emb = self.token_embed.forward(client, input_ids)?;
 
@@ -104,7 +105,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
     ) -> Result<Tensor<R>>
     where
         C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R> + DequantOps<R>,
     {
         let shape = input_ids.shape().to_vec();
         let seq_len = *shape.last().ok_or_else(|| Error::ModelError {
@@ -128,7 +129,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
     ) -> Result<Tensor<R>>
     where
         C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R> + DequantOps<R>,
     {
         #[cfg(feature = "cuda")]
         if let Some(result) = crate::model::encoder::model::cuda_graph::try_graph_embed(
@@ -155,7 +156,7 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
     ) -> Result<Tensor<R>>
     where
         C: EncoderClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + IndexingOps<R> + DequantOps<R>,
     {
         let hidden = self.encode_inference(client, input_ids, attention_mask)?;
         pool_padded(client, &hidden, attention_mask, self.pooling, None)

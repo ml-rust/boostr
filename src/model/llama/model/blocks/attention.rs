@@ -7,6 +7,7 @@ use crate::model::attention_core::{AttentionCoreSpec, AttentionKernel, attention
 use crate::model::traits::ModelClient;
 use crate::nn::{MaybeQuantLinear, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
@@ -115,7 +116,8 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         // Q/K/V projections (batched: quantize activation once for all 3)
         let qkv = MaybeQuantLinear::forward_batch(
@@ -165,7 +167,8 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         let shape = x.shape().to_vec();
         let batch = shape[0];

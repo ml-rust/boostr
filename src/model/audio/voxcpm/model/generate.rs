@@ -65,6 +65,7 @@ use crate::model::audio::voxcpm::model::config::VoxCpm2Config;
 use crate::model::audio::voxcpm::model::loader::VoxCpm2Model;
 use crate::model::audio::voxcpm::model::prefill::PrefillState;
 use crate::model::traits::ModelClient;
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_mul_scalar};
 use numr::dtype::DType;
 use numr::ops::{
@@ -267,7 +268,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + TypeConversionOps<R>,
+            + TypeConversionOps<R>
+            + DequantOps<R>,
     {
         self.step_with_noise_inner(client, state, z, options, false)
             .map(|(outcome, _)| outcome)
@@ -300,7 +302,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + TypeConversionOps<R>,
+            + TypeConversionOps<R>
+            + DequantOps<R>,
     {
         let hidden = state.prefill.lm_hidden.tensor();
         let noise = client
@@ -347,7 +350,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + TypeConversionOps<R>,
+            + TypeConversionOps<R>
+            + DequantOps<R>,
     {
         if options.max_len == 0 {
             return Err(Error::InvalidArgument {

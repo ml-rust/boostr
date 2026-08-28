@@ -127,6 +127,20 @@ pub fn adapt_if_targeted<R: Runtime<DType = DType>>(
     Ok(1)
 }
 
+/// Push `local_name`'s full dotted path onto `names`, joined with `prefix`
+/// via [`LoraTargets::join`] — the SAME construction [`adapt_if_targeted`]
+/// uses to build the path it matches `targets` against.
+///
+/// Shared by every leaf `lora_projection_names` in the crate for the same
+/// reason [`adapt_if_targeted`] is shared by every leaf `apply_lora`: a path
+/// built by separately hand-written logic could drift from the one
+/// `apply_lora` actually adapts, which would let a target validate and then
+/// adapt nothing — the very failure [`LoraTargets::ensure_all_match`] exists
+/// to catch.
+pub fn push_projection_name(names: &mut Vec<String>, prefix: &str, local_name: &str) {
+    names.push(LoraTargets::join(prefix, local_name));
+}
+
 /// Write back `field`'s adapter values (if any) from `params`, tagging a
 /// torn-update error with `local_name` so the caller learns WHICH
 /// projection has a half-applied pair, not just which

@@ -8,6 +8,7 @@ use crate::inference::kv_cache::LayeredPagedKvCache;
 use crate::model::traits::ModelClient;
 use crate::nn::{RmsNorm, RoPE};
 use crate::ops::traits::{KvCacheOps, PagedAttentionOps};
+use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{
@@ -38,7 +39,8 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         // Pre-norm attention + residual
         let normed = self.input_layernorm.forward(client, x)?;
@@ -76,7 +78,8 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
             + BinaryOps<R>
             + UnaryOps<R>
             + CompareOps<R>
-            + ConditionalOps<R>,
+            + ConditionalOps<R>
+            + DequantOps<R>,
     {
         // Fuse previous layer's residual add with this layer's input norm
         let (normed, x) = if let Some(prev_mlp) = prev_mlp_out {
@@ -129,7 +132,8 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + KvCacheOps<R>
-            + PagedAttentionOps<R>,
+            + PagedAttentionOps<R>
+            + DequantOps<R>,
     {
         let (normed, x) = if let Some(prev_mlp) = prev_mlp_out {
             self.input_layernorm

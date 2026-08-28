@@ -86,6 +86,7 @@ use boostr::model::audio::voxcpm::{VoxCpmClient, load_tokenizer, normalize_white
 use boostr::model::audio::{
     PitchOptions, decode_audio, encode_wav_pcm16, estimate_pitch, extension_hint, to_mono_at_rate,
 };
+use boostr::quant::traits::DequantOps;
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, RandomOps, ReduceOps,
@@ -430,7 +431,8 @@ where
         + UnaryOps<R>
         + CompareOps<R>
         + ConditionalOps<R>
-        + TypeConversionOps<R>,
+        + TypeConversionOps<R>
+        + DequantOps<R>,
 {
     // --- model --------------------------------------------------------------
     let model = match &args.weights {

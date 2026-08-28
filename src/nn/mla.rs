@@ -15,7 +15,7 @@ use crate::nn::{Linear, MaybeQuantLinear, RmsNorm, RoPE, VarBuilder};
 use crate::ops::RoPEOps;
 use crate::ops::impl_generic::attention::mla::scaled_dot_product_attention_impl;
 use crate::ops::impl_generic::attention::rope::apply_rope_impl;
-use crate::quant::traits::QuantMatmulOps;
+use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{Var, var_broadcast_to, var_cat, var_narrow, var_permute, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
@@ -347,7 +347,7 @@ impl<R: Runtime<DType = DType>> Mla<R> {
             + TypeConversionOps<R>
             + QuantMatmulOps<R>
             + RoPEOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + DequantOps<R>,
     {
         let shape = hidden.shape().to_vec();
         let batch = shape[0];

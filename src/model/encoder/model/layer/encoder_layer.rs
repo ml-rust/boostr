@@ -7,7 +7,7 @@ use crate::model::encoder::config::{
 };
 use crate::nn::{MaybeQuantLinear, RmsNorm, RoPE};
 use crate::ops::{RoPEOps, RoPEPackedOps, VarLenAttentionOps};
-use crate::quant::traits::QuantMatmulOps;
+use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::ops::{
@@ -124,7 +124,7 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
             + RoPEOps<R>
             + RoPEPackedOps<R>
             + VarLenAttentionOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + DequantOps<R>,
     {
         // Two independent axes: the norm scheme, and whether attention runs
         // packed or padded. All combinations are handled.

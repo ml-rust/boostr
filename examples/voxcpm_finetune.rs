@@ -6,7 +6,7 @@
 //!     --audiovae audiovae.safetensors --manifest FILE.tsv \
 //!     [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] [--alpha 32] \
 //!     [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors] \
-//!     [--lambda-stop 1.0] [--training-cfg-rate 0.1]
+//!     [--lambda-stop 1.0] [--training-cfg-rate 0.1] [--eval-rows 4]
 //! ```
 //!
 //! `CKPT_DIR` holds `config.json`, `model.safetensors` and `tokenizer.json`,
@@ -105,6 +105,41 @@
 //! ~10 GB peak. Raise `--max-patches` deliberately if the extra retention is
 //! worth the extra memory.
 //!
+//! # `loss/diff` is not a progress signal — the eval batch is
+//!
+//! [`PatchGenerator::train_losses`] draws a FRESH flow-matching timestep
+//! `t`, fresh noise, and a fresh CFG-dropout coin from the seed on every
+//! training step. So the per-step `loss/diff`/`loss/stop` printed in the
+//! training loop moves with WHICH `t`/noise got sampled that step, not with
+//! how much the model has learned — a low value can be an easy `t`, a high
+//! value a hard one, independent of training progress. Do not read a trend
+//! into it step to step.
+//!
+//! `--eval-rows` (default [`DEFAULT_EVAL_ROWS`]) carves that many rows off
+//! the END of the kept (post-filter) manifest, by index, before training
+//! starts. For each held-out row this file decodes the audio, truncates the
+//! reference exactly as training does, runs the same prefill path, and
+//! draws exactly ONE `t` and ONE `noise` from the fixed [`EVAL_NOISE_SEED`]
+//! — not `--seed`, not `step_counter`, so the eval metric stays comparable
+//! across runs and across every step of a run.
+//!
+//! Only `t` and `noise` are cached. The prefill and target patches are
+//! REBUILT at every eval pass, against the current weights. Caching them
+//! would pin the conditioning to the weights at initialization, and since
+//! the default `--targets q_proj,v_proj` adapt the very projections the
+//! prefill runs through, `eval/diff` would then never see the LM learn.
+//!
+//! Once per epoch, after that epoch's training rows finish, every eval row
+//! is scored with `train_losses_with_noise(..., drop_cond = false)` — always
+//! the conditioned branch, since that is what inference actually runs — and
+//! printed as `eval/diff`, `eval/stop`, `eval/total` (the mean over eval
+//! rows), a series distinct from the per-row training prints. Pinning
+//! `drop_cond = false` means `eval/diff` and the training `loss/diff` are
+//! NOT perfectly apples-to-apples: training mixes in `--training-cfg-rate`
+//! conditioning dropout, eval never does. The eval forward pass never calls
+//! `backward` or the optimizer. `--eval-rows 0` disables eval outright: no
+//! split, no eval batch, no eval logging.
+//!
 //! [`SequenceLayout::build`](boostr::model::audio::voxcpm::model::sequence::SequenceLayout::build)
 //! rejects `t_ref == 0`, so `prefill`/`prefill_capturing` have NO supported
 //! no-reference form today — every row this binary actually trains on must
@@ -151,9 +186,11 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use boostr::format::safetensors::save_safetensors;
-use boostr::model::audio::voxcpm::model::VoxCpm2Model;
 use boostr::model::audio::voxcpm::model::config::{AUDIO_START_ID, VoxCpm2Config};
-use boostr::model::audio::voxcpm::{VoxCpmClient, load_tokenizer, normalize_whitespace, tokenize};
+use boostr::model::audio::voxcpm::model::{PatchGenerator, VoxCpm2Model};
+use boostr::model::audio::voxcpm::{
+    PrefillState, VoxCpmClient, load_tokenizer, normalize_whitespace, tokenize,
+};
 use boostr::model::audio::{decode_audio, extension_hint, to_mono_at_rate};
 use boostr::nn::{LoraTargets, Module};
 use boostr::ops::FusedOptimizerOps;
@@ -170,6 +207,7 @@ use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 #[cfg(feature = "cuda")]
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
 use numr::tensor::{Tensor, TensorId};
+use splintr::AnyTokenizer;
 
 /// Rate every manifest wav is resampled to before the AudioVAE encoder.
 /// Fixed by the encoder, not a choice — see `voxcpm_clone.rs`'s identical
@@ -209,6 +247,14 @@ const DEFAULT_TRAINING_CFG_RATE: f64 = 0.1;
 /// shifts the seconds-per-patch ratio this default assumes, so pass
 /// `--max-patches` explicitly for one.
 const DEFAULT_MAX_PATCHES: usize = 38;
+/// Default `--eval-rows`: how many of the kept manifest rows are held out
+/// for the fixed eval batch — see the module docs' "Eval batch" section.
+const DEFAULT_EVAL_ROWS: usize = 4;
+/// Seed for the eval batch's ONE draw of `t` and noise per row. Fixed here,
+/// not derived from `--seed` or `step_counter`, so the eval metric is
+/// comparable across runs that only differ in `--seed` — the whole point of
+/// the eval batch is a number that moves with LEARNING, not with sampling.
+const EVAL_NOISE_SEED: u64 = 0xE7A1_5EED;
 
 /// Where the transformer stack's weights come from.
 ///
@@ -265,6 +311,10 @@ struct Args {
     /// dropped. A `ref_wav` over the same cap is truncated instead, never
     /// dropped, since it is conditioning only.
     max_patches: usize,
+    /// Rows carved off the END of the kept (post-filter) manifest for the
+    /// fixed eval batch — see the module docs' "Eval batch" section. `0`
+    /// disables eval entirely.
+    eval_rows: usize,
 }
 
 const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf [--config config.json]) \
@@ -276,7 +326,8 @@ const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf [--c
 names text-ignoring as the most common fine-tuning failure mode)] \
 [--max-patches 38 (caps the target wav's patch count; over-cap targets are \
 dropped, over-cap ref_wav clips are truncated to the cap instead — see the \
-module docs)]";
+module docs)] \
+[--eval-rows 4 (rows held out for the fixed eval batch; 0 disables eval)]";
 
 /// Consume the value that follows `flag`, advancing `i` past it.
 fn take_value(argv: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -302,6 +353,7 @@ fn parse_args() -> Result<Args, String> {
     let mut lambda_stop = DEFAULT_LAMBDA_STOP;
     let mut training_cfg_rate = DEFAULT_TRAINING_CFG_RATE;
     let mut max_patches = DEFAULT_MAX_PATCHES;
+    let mut eval_rows = DEFAULT_EVAL_ROWS;
 
     let mut i = 0usize;
     while i < argv.len() {
@@ -355,6 +407,11 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--max-patches: {e}"))?
             }
+            "--eval-rows" => {
+                eval_rows = take_value(&argv, &mut i, flag)?
+                    .parse()
+                    .map_err(|e| format!("--eval-rows: {e}"))?
+            }
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown flag {other}\n{USAGE}")),
         }
@@ -406,6 +463,7 @@ fn parse_args() -> Result<Args, String> {
         lambda_stop,
         training_cfg_rate,
         max_patches,
+        eval_rows,
     })
 }
 
@@ -666,6 +724,214 @@ fn collect_adapter_tensors<R: Runtime<DType = DType>>(
     Ok(out)
 }
 
+/// Decode `row`'s target and (truncated) reference audio, encode both
+/// through the AudioVAE, tokenize the text, and run `prefill_capturing` —
+/// the exact per-row setup the training loop and the eval-batch builder both
+/// need. Shared here so the sequence is defined once. `row_desc` names the
+/// row in the no-`ref_wav` error, e.g. `"row 3"` or `"eval row 1"`.
+fn build_prefill_and_target<R, C>(
+    model: &VoxCpm2Model<R>,
+    client: &C,
+    tokenizer: &AnyTokenizer,
+    row: &ManifestRow,
+    max_patches: usize,
+    row_desc: &str,
+) -> Result<(PrefillState<R>, Tensor<R>), Box<dyn std::error::Error>>
+where
+    R: Runtime<DType = DType>,
+    C: VoxCpmClient<R> + TypeConversionOps<R>,
+    R::Client: TensorOps<R>
+        + ScalarOps<R>
+        + ReduceOps<R>
+        + IndexingOps<R>
+        + ShapeOps<R>
+        + ActivationOps<R>
+        + BinaryOps<R>
+        + UnaryOps<R>
+        + CompareOps<R>
+        + ConditionalOps<R>
+        + TypeConversionOps<R>
+        + DequantOps<R>,
+{
+    let wav = load_wav_16k(&row.wav).map_err(|e| format!("{}: {e}", row.wav.display()))?;
+    // The training target: what the loss is computed against.
+    let target_patches = model.encode_reference(client, &wav)?;
+
+    // The reference-conditioning clip MUST be a different clip than `wav` —
+    // see the module docs for why self-referencing is degenerate.
+    // `prefill`/`prefill_capturing` have no supported no-reference form
+    // (`SequenceLayout::build` rejects `t_ref == 0`), so a row missing
+    // `ref_wav` is a hard error naming the row, never a silent fallback to
+    // `target_patches`.
+    let ref_wav_path = row.ref_wav.as_ref().ok_or_else(|| {
+        format!(
+            "{} ({row_desc}): no ref_wav column value, and VoxCpm2Model::prefill has no \
+             supported no-reference form; add a ref_wav naming a DIFFERENT clip from the \
+             same speaker",
+            row.wav.display()
+        )
+    })?;
+    let ref_wav =
+        load_wav_16k(ref_wav_path).map_err(|e| format!("{}: {e}", ref_wav_path.display()))?;
+    // Truncate, never drop: `ref_wav` is speaker conditioning only, not the
+    // loss target — see [`truncate_reference`] and the module docs' "Bounding
+    // training memory" section.
+    let ref_wav = truncate_reference(ref_wav, &model.config, max_patches);
+    let ref_patches = model.encode_reference(client, &ref_wav)?;
+    let t_ref = ref_patches.shape()[0];
+
+    let normalized = normalize_whitespace(&row.text);
+    let mut text_token_ids = tokenize(tokenizer, &normalized);
+    // `prefill` requires the sequence to end here: AUDIO_START_ID is the
+    // position the first (only, here) patch attends from.
+    text_token_ids.push(AUDIO_START_ID);
+    let max_length = t_ref + 2 + text_token_ids.len();
+
+    // ALWAYS `prefill_capturing`: `cfm_loss`'s teacher-forced path needs
+    // `PrefillState::intermediates`, and every row here has a non-empty
+    // prefix — see the module docs.
+    let prefill = model.prefill_capturing(client, &ref_patches, &text_token_ids, max_length)?;
+    Ok((prefill, target_patches))
+}
+
+/// One eval row: the manifest row plus the FIXED `t`/`noise` it is always
+/// scored with. Only weight-INDEPENDENT state is cached here. `prefill` is
+/// deliberately NOT cached: it runs the base and residual LMs, whose
+/// `q_proj`/`v_proj` are the default LoRA targets, so a cached `prefill`
+/// would pin the conditioning to the weights at initialization and
+/// `eval/diff` would never see the LM learn. See the module docs' "Eval
+/// batch" section.
+struct EvalRow<'a, R: Runtime> {
+    row: &'a ManifestRow,
+    t: Tensor<R>,
+    noise: Tensor<R>,
+}
+
+/// Build the fixed eval batch from the LAST `eval_rows` of `kept_rows`,
+/// drawing each row's `t`/`noise` ONCE from [`EVAL_NOISE_SEED`] — never
+/// re-derived per epoch, never mixed with `args.seed` or `step_counter`, so
+/// the eval metric stays comparable across runs and across steps within a
+/// run. See the module docs' "Eval batch" section.
+fn build_eval_batch<'a, R, C>(
+    model: &VoxCpm2Model<R>,
+    client: &C,
+    tokenizer: &AnyTokenizer,
+    eval_source_rows: &[&'a ManifestRow],
+    max_patches: usize,
+) -> Result<Vec<EvalRow<'a, R>>, Box<dyn std::error::Error>>
+where
+    R: Runtime<DType = DType>,
+    C: VoxCpmClient<R> + TypeConversionOps<R> + RandomOps<R>,
+    R::Client: TensorOps<R>
+        + ScalarOps<R>
+        + ReduceOps<R>
+        + IndexingOps<R>
+        + ShapeOps<R>
+        + ActivationOps<R>
+        + BinaryOps<R>
+        + UnaryOps<R>
+        + CompareOps<R>
+        + ConditionalOps<R>
+        + TypeConversionOps<R>
+        + DequantOps<R>,
+{
+    let mut eval_batch = Vec::with_capacity(eval_source_rows.len());
+    for (eval_index, row) in eval_source_rows.iter().enumerate() {
+        let row_desc = format!("eval row {eval_index}");
+        // Built once here ONLY to read the target's shape and dtype, which
+        // fix `t`/`noise`. Both are dropped immediately: every eval pass
+        // rebuilds them against the CURRENT weights (see `EvalRow`).
+        let (prefill, target_patches) =
+            build_prefill_and_target(model, client, tokenizer, row, max_patches, &row_desc)?;
+        let tcount = target_patches.shape()[0];
+        let dtype = target_patches.dtype();
+        let noise_shape = target_patches.shape().to_vec();
+        drop(prefill);
+        drop(target_patches);
+        // Stride 2, matching `train_losses`'s own `seed`/`seed + 1` split
+        // between the timestep and noise draws — each eval row gets its own
+        // pair of streams off the same fixed base, never reused across rows.
+        let row_seed = EVAL_NOISE_SEED.wrapping_add((eval_index as u64).wrapping_mul(2));
+        let t = client.rand_seeded(&[tcount], dtype, row_seed)?;
+        let noise = client.randn_seeded(&noise_shape, dtype, row_seed.wrapping_add(1))?;
+        eval_batch.push(EvalRow { row, t, noise });
+    }
+    Ok(eval_batch)
+}
+
+/// Mean `(diff, stop, total)` over `eval_batch`, scored with `drop_cond =
+/// false` (the conditioned branch — what inference actually runs; the
+/// module docs explain why this makes eval not perfectly apples-to-apples
+/// with train's CFG-dropout-mixed `loss/diff`). Forward only: never calls
+/// `backward` or the optimizer. numr's autograd has no no-grad/detached-
+/// forward context (checked: no `no_grad`/`NoGrad` construct exists, only
+/// per-`Var` `detach()`/`requires_grad()`, and the model's own LoRA `Var`s
+/// still require grad through this call), so each row is built, scored, and
+/// dropped before the next row starts, keeping graph retention from stacking
+/// across the batch.
+///
+/// `prefill`/`target_patches` are rebuilt HERE, every call, against the
+/// current weights — only `t`/`noise` come cached from [`EvalRow`]. That is
+/// what makes `eval/diff` a learning signal: the sampling is pinned, the
+/// model is not.
+fn score_eval_batch<R, C>(
+    model: &VoxCpm2Model<R>,
+    generator: &PatchGenerator<'_, R>,
+    client: &C,
+    tokenizer: &AnyTokenizer,
+    eval_batch: &[EvalRow<'_, R>],
+    max_patches: usize,
+    lambda_stop: f64,
+) -> Result<(f64, f64, f64), Box<dyn std::error::Error>>
+where
+    R: Runtime<DType = DType>,
+    C: VoxCpmClient<R> + TypeConversionOps<R>,
+    R::Client: TensorOps<R>
+        + ScalarOps<R>
+        + ReduceOps<R>
+        + IndexingOps<R>
+        + ShapeOps<R>
+        + ActivationOps<R>
+        + BinaryOps<R>
+        + UnaryOps<R>
+        + CompareOps<R>
+        + ConditionalOps<R>
+        + TypeConversionOps<R>
+        + DequantOps<R>,
+{
+    let mut diff_sum = 0.0f64;
+    let mut stop_sum = 0.0f64;
+    let mut total_sum = 0.0f64;
+    for (eval_index, eval_row) in eval_batch.iter().enumerate() {
+        let row_desc = format!("eval row {eval_index}");
+        let (prefill, target_patches) = build_prefill_and_target(
+            model,
+            client,
+            tokenizer,
+            eval_row.row,
+            max_patches,
+            &row_desc,
+        )?;
+        let losses = generator.train_losses_with_noise(
+            client,
+            &prefill,
+            &target_patches,
+            &eval_row.t,
+            &eval_row.noise,
+            LAMBDA_DIFF,
+            lambda_stop,
+            false,
+        )?;
+        diff_sum += losses.diff.tensor().to_vec::<f32>()[0] as f64;
+        stop_sum += losses.stop.tensor().to_vec::<f32>()[0] as f64;
+        total_sum += losses.total.tensor().to_vec::<f32>()[0] as f64;
+        // `losses` (and the autograd graph it pinned alive) drops here,
+        // before the next row's forward pass starts.
+    }
+    let n = eval_batch.len() as f64;
+    Ok((diff_sum / n, stop_sum / n, total_sum / n))
+}
+
 /// The model-and-training body: everything that runs on the chosen runtime
 /// `R`. Loads the checkpoint, adapts it with LoRA, then trains one epoch at
 /// a time over every manifest row, printing per-step and per-epoch loss.
@@ -726,6 +992,28 @@ where
     // whole point of the cap — see the module docs.
     let rows = filter_rows_by_patch_cap(rows, &model.config, args.max_patches)?;
 
+    // Carve the eval set off the END of the kept rows, by index — no RNG, no
+    // shuffle, so the split is deterministic and reproducing a run always
+    // yields the same train/eval partition. `--eval-rows 0` disables eval
+    // entirely: no split, no eval batch, no eval logging.
+    if args.eval_rows >= rows.len() {
+        return Err(format!(
+            "--eval-rows {} >= {} kept manifest row(s); that would leave zero training rows",
+            args.eval_rows,
+            rows.len()
+        )
+        .into());
+    }
+    let split_at = rows.len() - args.eval_rows;
+    let (train_rows, eval_source_rows) = rows.split_at(split_at);
+    eprintln!(
+        "eval split: {} training row(s), {} eval row(s) (--eval-rows {})",
+        train_rows.len(),
+        eval_source_rows.len(),
+        args.eval_rows
+    );
+    let rows = train_rows;
+
     let tokenizer = load_tokenizer(tokenizer_path(&args.weights, args.config.as_deref())?)?;
 
     let target_names: Vec<String> = args
@@ -755,6 +1043,26 @@ where
         args.lambda_stop
     );
 
+    // Built ONCE, here, before any training step — never rebuilt or
+    // re-derived per epoch. `prefill`/`target_patches`/`t`/`noise` are all
+    // fixed for the whole run: `eval/diff` moving is then a LEARNING signal,
+    // not a resampling artifact. Empty when `--eval-rows 0`.
+    let eval_batch = if args.eval_rows > 0 {
+        eprintln!(
+            "building eval batch ({} row(s)) ...",
+            eval_source_rows.len()
+        );
+        build_eval_batch(
+            &model,
+            client,
+            &tokenizer,
+            eval_source_rows,
+            args.max_patches,
+        )?
+    } else {
+        Vec::new()
+    };
+
     let mut step_counter: u64 = 0;
     for epoch in 1..=args.epochs {
         let mut epoch_diff_sum = 0.0f64;
@@ -762,45 +1070,15 @@ where
         let mut epoch_steps = 0usize;
 
         for (row_index, row) in rows.iter().enumerate() {
-            let wav = load_wav_16k(&row.wav).map_err(|e| format!("{}: {e}", row.wav.display()))?;
-            // The training target: what the loss is computed against.
-            let target_patches = model.encode_reference(client, &wav)?;
-
-            // The reference-conditioning clip MUST be a different clip than
-            // `wav` — see the module docs for why self-referencing is
-            // degenerate. `prefill`/`prefill_capturing` have no supported
-            // no-reference form (`SequenceLayout::build` rejects `t_ref ==
-            // 0`), so a row missing `ref_wav` is a hard error naming the
-            // row, never a silent fallback to `target_patches`.
-            let ref_wav_path = row.ref_wav.as_ref().ok_or_else(|| {
-                format!(
-                    "{} (row {row_index}): no ref_wav column value, and \
-                     VoxCpm2Model::prefill has no supported no-reference form; add a \
-                     ref_wav naming a DIFFERENT clip from the same speaker",
-                    row.wav.display()
-                )
-            })?;
-            let ref_wav = load_wav_16k(ref_wav_path)
-                .map_err(|e| format!("{}: {e}", ref_wav_path.display()))?;
-            // Truncate, never drop: `ref_wav` is speaker conditioning only,
-            // not the loss target — see [`truncate_reference`] and the
-            // module docs' "Bounding training memory" section.
-            let ref_wav = truncate_reference(ref_wav, &model.config, args.max_patches);
-            let ref_patches = model.encode_reference(client, &ref_wav)?;
-            let t_ref = ref_patches.shape()[0];
-
-            let normalized = normalize_whitespace(&row.text);
-            let mut text_token_ids = tokenize(&tokenizer, &normalized);
-            // `prefill` requires the sequence to end here: AUDIO_START_ID is
-            // the position the first (only, here) patch attends from.
-            text_token_ids.push(AUDIO_START_ID);
-            let max_length = t_ref + 2 + text_token_ids.len();
-
-            // ALWAYS `prefill_capturing`: `cfm_loss`'s teacher-forced path
-            // needs `PrefillState::intermediates`, and every row here has a
-            // non-empty prefix — see the module docs.
-            let prefill =
-                model.prefill_capturing(client, &ref_patches, &text_token_ids, max_length)?;
+            let row_desc = format!("row {row_index}");
+            let (prefill, target_patches) = build_prefill_and_target(
+                &model,
+                client,
+                &tokenizer,
+                row,
+                args.max_patches,
+                &row_desc,
+            )?;
 
             let generator = model.patch_generator();
             // Stride 3, not 2: `train_losses` consumes THREE independent
@@ -856,6 +1134,25 @@ where
             "epoch {epoch}/{} mean loss/diff: {diff_mean:.6} mean loss/stop: {stop_mean:.6}",
             args.epochs
         );
+
+        if !eval_batch.is_empty() {
+            let generator = model.patch_generator();
+            let (eval_diff, eval_stop, eval_total) = score_eval_batch(
+                &model,
+                &generator,
+                client,
+                &tokenizer,
+                &eval_batch,
+                args.max_patches,
+                args.lambda_stop,
+            )?;
+            eprintln!(
+                "epoch {epoch}/{} eval/diff {eval_diff:.6} eval/stop {eval_stop:.6} eval/total \
+                 {eval_total:.6} ({} eval row(s))",
+                args.epochs,
+                eval_batch.len()
+            );
+        }
     }
 
     if let Some(out) = &args.out {

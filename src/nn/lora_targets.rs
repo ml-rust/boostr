@@ -12,6 +12,7 @@
 
 use crate::error::{Error, Result};
 use crate::nn::maybe_lora::MaybeLoraLinear;
+use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::{Tensor, TensorId};
@@ -162,9 +163,165 @@ pub fn load_lora_child<R: Runtime<DType = DType>>(
         })
 }
 
+/// Build the `TensorId`-keyed map a leaf `load_lora_parameters` needs, from
+/// a NAME-keyed map — the only thing a saved adapter safetensors file
+/// carries, since [`LoraLinear::new`](crate::nn::LoraLinear::new) mints a
+/// fresh `TensorId` every process and it carries no meaning across a
+/// save/load boundary.
+///
+/// `named` is (a filtered subset of) a tree's
+/// [`crate::nn::Module::named_parameters()`] output — the caller decides
+/// what counts as an adapter name (e.g. a `lora_a`/`lora_b` suffix filter).
+/// Shared by every model's `load_lora_named` so the name-to-id resolution
+/// and its three failure modes are written once, not re-implemented per
+/// model tree.
+///
+/// Hard-errors, rather than silently skipping, on:
+/// - a `tensors` key matching no name in `named` (stale/extra key — the
+///   wrong `--targets` case)
+/// - a `named` entry with no matching `tensors` key (missing key — a
+///   partial adapter file)
+/// - a shape mismatch between a `named` Var and its `tensors` entry (the
+///   wrong `--rank` case)
+pub fn named_tensors_to_id_map<R: Runtime>(
+    named: &[(String, &Var<R>)],
+    tensors: &HashMap<String, Tensor<R>>,
+) -> Result<HashMap<TensorId, Tensor<R>>> {
+    let known: std::collections::HashSet<&str> = named.iter().map(|(n, _)| n.as_str()).collect();
+    let mut extra: Vec<&str> = tensors
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !known.contains(k))
+        .collect();
+    if !extra.is_empty() {
+        extra.sort_unstable();
+        return Err(Error::InvalidArgument {
+            arg: "tensors",
+            reason: format!(
+                "key(s) {extra:?} match no LoRA adapter Var in the model (stale/extra key, or \
+                 apply_lora ran with different --targets than this file was saved with)"
+            ),
+        });
+    }
+
+    let mut by_id = HashMap::with_capacity(named.len());
+    for (name, var) in named {
+        let tensor = tensors.get(name).ok_or_else(|| Error::InvalidArgument {
+            arg: "tensors",
+            reason: format!(
+                "missing key '{name}': the model has this LoRA adapter Var but no matching \
+                 tensor was supplied (partial adapter file)"
+            ),
+        })?;
+        if tensor.shape() != var.shape() {
+            return Err(Error::InvalidArgument {
+                arg: "tensors",
+                reason: format!(
+                    "shape mismatch for '{name}': model expects {:?}, adapter file has {:?} \
+                     (likely a --rank mismatch between the saved adapter and this model)",
+                    var.shape(),
+                    tensor.shape()
+                ),
+            });
+        }
+        by_id.insert(var.id(), tensor.clone());
+    }
+    Ok(by_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use numr::runtime::cpu::CpuRuntime;
+
+    fn cpu_var(shape: &[usize], fill: f32) -> Var<CpuRuntime> {
+        let device = <CpuRuntime as Runtime>::default_device();
+        let numel: usize = shape.iter().product();
+        let tensor =
+            Tensor::<CpuRuntime>::from_slice(&vec![fill; numel], shape, &device).expect("tensor");
+        Var::new(tensor, false)
+    }
+
+    #[test]
+    fn named_tensors_to_id_map_writes_matching_names() {
+        let device = <CpuRuntime as Runtime>::default_device();
+        let a = cpu_var(&[2, 2], 1.0);
+        let b = cpu_var(&[2, 2], 2.0);
+        let named: Vec<(String, &Var<CpuRuntime>)> =
+            vec![("x.lora_a".to_string(), &a), ("x.lora_b".to_string(), &b)];
+
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "x.lora_a".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[9.0f32; 4], &[2, 2], &device).expect("t"),
+        );
+        tensors.insert(
+            "x.lora_b".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[8.0f32; 4], &[2, 2], &device).expect("t"),
+        );
+
+        let by_id = named_tensors_to_id_map(&named, &tensors).expect("map");
+        assert_eq!(by_id.len(), 2);
+        assert_eq!(by_id[&a.id()].to_vec::<f32>(), vec![9.0; 4]);
+        assert_eq!(by_id[&b.id()].to_vec::<f32>(), vec![8.0; 4]);
+    }
+
+    #[test]
+    fn named_tensors_to_id_map_rejects_extra_key() {
+        let a = cpu_var(&[2, 2], 1.0);
+        let named: Vec<(String, &Var<CpuRuntime>)> = vec![("x.lora_a".to_string(), &a)];
+        let device = <CpuRuntime as Runtime>::default_device();
+
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "x.lora_a".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[9.0f32; 4], &[2, 2], &device).expect("t"),
+        );
+        tensors.insert(
+            "y.lora_a".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[9.0f32; 4], &[2, 2], &device).expect("t"),
+        );
+
+        let err = named_tensors_to_id_map(&named, &tensors).unwrap_err();
+        assert!(err.to_string().contains("y.lora_a"), "got {err}");
+    }
+
+    #[test]
+    fn named_tensors_to_id_map_rejects_missing_key() {
+        let a = cpu_var(&[2, 2], 1.0);
+        let b = cpu_var(&[2, 2], 2.0);
+        let named: Vec<(String, &Var<CpuRuntime>)> =
+            vec![("x.lora_a".to_string(), &a), ("x.lora_b".to_string(), &b)];
+        let device = <CpuRuntime as Runtime>::default_device();
+
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "x.lora_a".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[9.0f32; 4], &[2, 2], &device).expect("t"),
+        );
+
+        let err = named_tensors_to_id_map(&named, &tensors).unwrap_err();
+        assert!(err.to_string().contains("x.lora_b"), "got {err}");
+    }
+
+    #[test]
+    fn named_tensors_to_id_map_rejects_shape_mismatch() {
+        let a = cpu_var(&[2, 2], 1.0);
+        let named: Vec<(String, &Var<CpuRuntime>)> = vec![("x.lora_a".to_string(), &a)];
+        let device = <CpuRuntime as Runtime>::default_device();
+
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "x.lora_a".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[9.0f32; 8], &[2, 4], &device).expect("t"),
+        );
+
+        let err = named_tensors_to_id_map(&named, &tensors).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("x.lora_a"), "got {message}");
+        assert!(message.contains("[2, 2]"), "got {message}");
+        assert!(message.contains("[2, 4]"), "got {message}");
+    }
 
     #[test]
     fn matches_dot_segment_not_substring() {

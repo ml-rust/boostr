@@ -192,7 +192,7 @@ use boostr::model::audio::voxcpm::{
     PrefillState, VoxCpmClient, load_tokenizer, normalize_whitespace, tokenize,
 };
 use boostr::model::audio::{decode_audio, extension_hint, to_mono_at_rate};
-use boostr::nn::{LoraTargets, Module};
+use boostr::nn::{LoraTargets, Module, build_lora_metadata};
 use boostr::ops::FusedOptimizerOps;
 use boostr::quant::traits::DequantOps;
 use boostr::trainer::{SimpleTrainer, TrainingConfig};
@@ -1162,7 +1162,8 @@ where
             adapters.len(),
             out.display()
         );
-        save_safetensors(out, &adapters, None)?;
+        let metadata = build_lora_metadata(args.rank, args.alpha, &target_names);
+        save_safetensors(out, &adapters, Some(&metadata))?;
         eprintln!("wrote {}", out.display());
     }
 

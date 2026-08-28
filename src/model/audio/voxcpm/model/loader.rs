@@ -409,6 +409,12 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     }
 }
 
+// `load_lora_named` lives in `loader/lora_named.rs`, in its own
+// `impl<R: Runtime<DType = DType>> VoxCpm2Model<R>` block — split out to
+// keep this file under the crate's 500-line hard limit for
+// model-architecture files.
+mod lora_named;
+
 /// Whole-model parameter enumeration for fine-tuning (e.g. LoRA target
 /// matching, [`SimpleTrainer`](crate::trainer::simple::SimpleTrainer)'s
 /// `HashMap<TensorId, Tensor<R>>` build). Names are checkpoint keys

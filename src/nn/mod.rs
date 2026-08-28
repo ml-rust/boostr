@@ -9,6 +9,7 @@ pub mod groupnorm;
 pub mod layernorm;
 pub mod linear;
 pub mod lora;
+pub mod lora_metadata;
 pub mod lora_targets;
 pub mod loss;
 pub mod lstm;
@@ -39,7 +40,10 @@ pub use groupnorm::GroupNorm;
 pub use layernorm::LayerNorm;
 pub use linear::{Linear, MaybeQuantLinear, QuantLinear};
 pub use lora::LoraLinear;
-pub use lora_targets::{LoraTargets, adapt_if_targeted, load_lora_child, push_projection_name};
+pub use lora_metadata::{build_lora_metadata, check_lora_metadata};
+pub use lora_targets::{
+    LoraTargets, adapt_if_targeted, load_lora_child, named_tensors_to_id_map, push_projection_name,
+};
 pub use loss::{
     contrastive_loss, cross_entropy_loss, cross_entropy_loss_masked, cross_entropy_loss_smooth,
     flow_matching_interpolate, flow_matching_loss, flow_matching_target, focal_loss, kl_div_loss,

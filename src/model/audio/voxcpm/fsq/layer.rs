@@ -12,7 +12,7 @@ use crate::nn::{
     LoraTargets, MaybeLoraLinear, Module, adapt_if_targeted, child_params, extend_named,
 };
 use crate::quant::traits::QuantMatmulOps;
-use numr::autograd::{Var, var_div_scalar, var_mul_scalar, var_silu, var_tanh};
+use numr::autograd::{Var, var_add, var_div_scalar, var_mul_scalar, var_silu, var_tanh};
 use numr::dtype::DType;
 use numr::ops::{ActivationOps, BinaryOps, ScalarOps, TensorOps, TypeConversionOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
@@ -98,7 +98,31 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
 
         // Ties-to-even, NOT ties-away — see the doc comment above.
         let rounded_tensor = scaled.tensor().round_ties_even().map_err(Error::Numr)?;
-        let rounded = Var::new(rounded_tensor, false);
+
+        // STRAIGHT-THROUGH ESTIMATOR: forward is exactly `round(scaled)`,
+        // backward is the identity.
+        //
+        // `round` has zero derivative almost everywhere, so wrapping the
+        // rounded tensor in a fresh detached `Var` — which is what this used
+        // to do — cuts the autograd graph here. That is harmless for
+        // inference and was the deliberate original choice, but it silently
+        // severs EVERYTHING upstream of the quantizer from any training
+        // loss: measured on the CFM loss, all of `base_lm` and
+        // `fsq.in_proj` received no gradient entry at all, while every
+        // module downstream of this point trained normally. A LoRA adapter
+        // on `base_lm` would sit at its initial value forever and the loss
+        // would still fall (the downstream modules learn), so nothing would
+        // look wrong.
+        //
+        // `scaled + (round(scaled) - scaled)_detached` is bit-identical to
+        // `round(scaled)` in the forward direction — the subtraction is
+        // exact in floating point because both operands come from the same
+        // value — and passes the incoming gradient through unchanged. This
+        // is the same estimator the reference implementation uses in its
+        // training branch, which was previously omitted here as dead code.
+        let residual_tensor = rounded_tensor.sub(scaled.tensor()).map_err(Error::Numr)?;
+        let residual = Var::new(residual_tensor, false);
+        let rounded = var_add(&scaled, &residual, client).map_err(Error::Numr)?;
 
         let levels = var_div_scalar(&rounded, self.scale as f64, client).map_err(Error::Numr)?;
         self.out_proj.forward(client, &levels)

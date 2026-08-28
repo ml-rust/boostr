@@ -206,42 +206,52 @@ required-features = ["audio"]
 
 [[example]]
 name = "voxcpm_vae_check"
+path = "examples/voxcpm/vae_check.rs"
 required-features = ["audio"]
 
 [[example]]
 name = "voxcpm_locenc_check"
+path = "examples/voxcpm/locenc_check.rs"
 required-features = ["audio", "f16"]
 
 [[example]]
 name = "voxcpm_baselm_check"
+path = "examples/voxcpm/baselm_check.rs"
 required-features = ["audio", "f16"]
 
 [[example]]
 name = "voxcpm_residual_lm_check"
+path = "examples/voxcpm/residual_lm_check.rs"
 required-features = ["audio", "f16"]
 
 [[example]]
 name = "voxcpm_dit_check"
+path = "examples/voxcpm/dit_check.rs"
 required-features = ["audio", "f16"]
 
 [[example]]
 name = "voxcpm_cfm_check"
+path = "examples/voxcpm/cfm_check.rs"
 required-features = ["audio", "f16"]
 
 [[example]]
 name = "voxcpm_fsq_check"
+path = "examples/voxcpm/fsq_check.rs"
 required-features = ["audio", "f16"]
 
 [[example]]
 name = "voxcpm_prefill_check"
+path = "examples/voxcpm/prefill_check.rs"
 required-features = ["audio", "f16"]
 
 [[example]]
 name = "voxcpm_step_check"
+path = "examples/voxcpm/step_check.rs"
 required-features = ["audio", "f16"]
 
 [[example]]
 name = "voxcpm_tokenizer_check"
+path = "examples/voxcpm/tokenizer_check.rs"
 required-features = ["audio", "f16"]
 
 [[example]]
@@ -254,10 +264,12 @@ required-features = ["audio"]
 
 [[example]]
 name = "voxcpm_clone"
+path = "examples/voxcpm/clone.rs"
 required-features = ["audio", "f16"]
 
 [[example]]
 name = "voxcpm_finetune"
+path = "examples/voxcpm/finetune.rs"
 required-features = ["audio", "f16"]
 
 [[example]]

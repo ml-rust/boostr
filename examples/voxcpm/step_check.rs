@@ -73,9 +73,24 @@
 //! report the post-quantizer stages as information instead of loosening
 //! their bound.
 //!
-//! Recorded baseline (this gate's own prior run, not re-litigated here):
+//! Recorded baseline (this gate's own prior run, not re-litigated here).
+//!
+//! Step 0 is listed FIRST because it is the only fully hard-gated step, and
+//! it was previously unrecorded — which left "a kernel change moves the
+//! gated numerics" unfalsifiable. It is now the reference an incremental
+//! attention or cache change must be compared against. `curr_embed` and
+//! `pred_feat` already consume 61% and 53% of the 2e-3 tolerance, so they
+//! are the two that will fail first.
 //!
 //! ```text
+//! step0: mu               6.962e-5  over 0/2048   OK
+//! step0: curr_embed       1.211e-3  over 0/2048   OK
+//! step0: pred_feat        1.065e-3  over 0/256    OK
+//! step0: lm_hidden_pre_fsq 4.113e-5 over 0/2048   OK
+//! step0: lm_hidden_post   4.768e-7  over 0/2048   OK
+//! step0: residual_hidden_post 3.712e-4 over 0/2048 OK
+//! step0: stop_logits      9.155e-5  over 0/2      OK
+//!
 //! step1: mu               5.198e-4  over 0/2048   OK
 //! step1: curr_embed       2.423e-3  over 1/2048   MISMATCH
 //! step1: pred_feat        8.576e-4  over 0/256    OK

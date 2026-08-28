@@ -134,7 +134,9 @@ where
     let rand_tensor = client
         .rand(&[1], numr::dtype::DType::F32)
         .map_err(crate::error::Error::Numr)?;
-    let random_val: f32 = rand_tensor.to_vec::<f32>()[0];
+    let random_val: f32 = rand_tensor
+        .item::<f32>()
+        .map_err(crate::error::Error::Numr)?;
 
     // Renormalize and sample
     let total: f32 = indexed.iter().map(|(_, p)| p).sum();
@@ -300,7 +302,9 @@ where
                 .rand(&[1], numr::dtype::DType::F32)
                 .map_err(crate::error::Error::Numr)?
         };
-        let random_val: f32 = rand_tensor.to_vec::<f32>()[0];
+        let random_val: f32 = rand_tensor
+            .item::<f32>()
+            .map_err(crate::error::Error::Numr)?;
 
         // Renormalize and sample
         let total: f32 = indexed.iter().map(|(_, p)| p).sum();

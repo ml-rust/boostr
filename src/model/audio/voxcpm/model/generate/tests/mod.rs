@@ -239,12 +239,26 @@ fn rejects_wrong_shapes_and_a_zero_cap() {
     );
 }
 
-/// The tiny fixture must be able to run a whole clone-shaped loop: the
-/// options constructor's real settings, not the test's cheap ones.
+/// The options constructor's real settings, not the test's cheap ones.
+///
+/// `n_timesteps` is 10, DELIBERATELY not the reference clone script's 32.
+/// Measured on an RTX 3060: 32 costs 4x the compute of 10 (RTF 4.00 vs 1.30)
+/// and sounds flatter — more solver steps converge harder toward the mode of
+/// the flow and smooth away prosodic variation. Whisper transcribes 10, 16,
+/// 24 and 32 word-perfect, so this was decided by listening, not by WER.
+///
+/// If this assertion ever fails because someone "restored" 32 to match the
+/// reference, that is a regression in both speed and quality — see
+/// `GenerateOptions::new`'s doc comment. The parity gate
+/// `examples/voxcpm_step_check.rs` pins 32 separately and on purpose,
+/// because its Python fixtures were generated at that step count.
 #[test]
 fn default_options_carry_the_clone_scripts_values() {
     let opts = GenerateOptions::new(600, 0);
-    assert_eq!(opts.cfm.n_timesteps, 32, "the clone script overrides 10");
+    assert_eq!(
+        opts.cfm.n_timesteps, 10,
+        "10 is chosen over the reference 32"
+    );
     assert_eq!(opts.cfm.cfg_value, 2.0);
     assert_eq!(opts.min_len, 2);
     assert_eq!(opts.max_len, 600);

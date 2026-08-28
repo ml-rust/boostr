@@ -7,7 +7,7 @@
 //!     (--ckpt CKPT_DIR | --gguf MODEL.gguf [--config config.json]) \
 //!     --audiovae audiovae.safetensors \
 //!     --ref REF.wav --text "..." --out OUT.wav \
-//!     [--n-timesteps 32] [--cfg 2.0] [--min-len 2] [--max-len N] \
+//!     [--n-timesteps 10] [--cfg 2.0] [--min-len 2] [--max-len N] \
 //!     [--seed 0] [--best-of N] [--dtype f32] [--device cpu]
 //! ```
 //!
@@ -182,7 +182,7 @@ fn parse_dtype(value: &str) -> Result<Option<DType>, String> {
 
 const USAGE: &str = "usage: voxcpm_clone (--ckpt DIR | --gguf MODEL.gguf [--config config.json]) \
 --audiovae PATH --ref REF.wav \
---text \"...\" --out OUT.wav [--n-timesteps 32] [--cfg 2.0] [--min-len 2] \
+--text \"...\" --out OUT.wav [--n-timesteps 10] [--cfg 2.0] [--min-len 2] \
 [--max-len N] [--seed 0] [--best-of 1] [--dtype f32|bf16|f16|native] \
 [--device cpu|cuda]";
 
@@ -207,7 +207,7 @@ fn parse_args() -> Result<Args, String> {
     let (mut ckpt, mut audiovae, mut reference, mut text, mut out) = (None, None, None, None, None);
     let mut gguf: Option<PathBuf> = None;
     let mut config: Option<PathBuf> = None;
-    let mut n_timesteps = 32usize;
+    let mut n_timesteps = 10usize;
     let mut cfg = 2.0f32;
     let mut min_len = 2usize;
     let mut max_len = None;

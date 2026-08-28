@@ -304,11 +304,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .pass;
 
     // --- Steps 0..3, noise injected from the fixture --------------------------
-    // n_timesteps=32, cfg_value=2.0, min_len=2 all come from
-    // GenerateOptions::new (the clone script's verified settings); only
+    // cfg_value=2.0 and min_len=2 come from `GenerateOptions::new`; only
     // max_len and seed are chosen here, and seed is never consumed because
     // every step below is step_with_noise, not step.
-    let options = GenerateOptions::new(MAX_LEN, SEED);
+    //
+    // `n_timesteps` is PINNED to 32 here rather than taken from
+    // `GenerateOptions::new`, which now defaults to 10. The Python fixtures
+    // this gate compares against were generated at 32, so the step count is
+    // part of the fixture's identity, not a tunable: reading the default
+    // would silently compare a 10-step trajectory against a 32-step
+    // reference and report a parity failure that is really a config drift.
+    const FIXTURE_N_TIMESTEPS: usize = 32;
+    let mut options = GenerateOptions::new(MAX_LEN, SEED);
+    options.cfm.n_timesteps = FIXTURE_N_TIMESTEPS;
     println!(
         "options: n_timesteps={} cfg_value={} min_len={} max_len={} seed={} (seed unused: step_with_noise never draws)",
         options.cfm.n_timesteps,

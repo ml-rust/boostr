@@ -196,7 +196,7 @@ use boostr::nn::{LoraTargets, Module, build_lora_metadata};
 use boostr::ops::FusedOptimizerOps;
 use boostr::quant::traits::DequantOps;
 use boostr::trainer::{SimpleTrainer, TrainingConfig};
-use numr::autograd::backward;
+use numr::autograd::backward_wrt;
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, RandomOps, ReduceOps,
@@ -1031,6 +1031,13 @@ where
 
     let mut params: HashMap<TensorId, Tensor<R>> = Module::trainable_parameter_tensors(&model);
     eprintln!("trainable adapter tensors: {}", params.len());
+    // The ONLY ids any optimizer step reads back. `backward_wrt` prunes the
+    // traversal to these: in a LoRA graph most nodes are reachable only from
+    // frozen weights, and a plain `backward` still computes and STORES a
+    // full-size gradient for every one of them under an id nothing can read.
+    // That waste is what caps this trainer at batch 1. Collected once — the
+    // adapter set never changes after `apply_lora`.
+    let wanted: Vec<TensorId> = params.keys().copied().collect();
 
     let config = TrainingConfig::default().with_lr(args.lr);
     let mut trainer = SimpleTrainer::<R>::new(config)?;
@@ -1102,7 +1109,7 @@ where
             let stop_val = losses.stop.tensor().to_vec::<f32>()[0] as f64;
             let loss_val = losses.total.tensor().to_vec::<f32>()[0] as f64;
 
-            let grads = backward(&losses.total, client)?;
+            let grads = backward_wrt(&losses.total, &wanted, client)?;
             if let Some(_metrics) = trainer.step(client, &mut params, grads, loss_val)? {
                 // REQUIRED every finalized step: `trainer.step` updates
                 // `params` only, not the model's own `Var`s — see the

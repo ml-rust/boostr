@@ -13,6 +13,11 @@ pub const FUSED_INT4_SWIGLU_MODULE: &str = "fused_int4_swiglu";
 pub const FUSED_INT4_QKV_MODULE: &str = "fused_int4_qkv";
 pub const QUANT_ACT_MODULE: &str = "quant_act";
 
+/// TCF native quantized kernels: dequantization, GEMV, and GEMM in one module.
+/// One translation unit because all three share the device decoder in
+/// `tcf.cuh`, and a second copy of that decoder is what the format forbids.
+pub const TCF_MODULE: &str = "tcf";
+
 // Per-format GEMV kernels
 pub const GEMV_Q5_K_MODULE: &str = "gemv_q5_k";
 pub const GEMV_Q3_K_MODULE: &str = "gemv_q3_k";

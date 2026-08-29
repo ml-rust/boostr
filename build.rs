@@ -59,6 +59,9 @@ fn compile_cuda_kernels() {
         ),
         k!("src/quant/cuda/kernels", "fused_int4_qkv.cu", "sm_75", true),
         k!("src/quant/cuda/kernels", "quant_act.cu", "sm_75", true),
+        // TCF native quantized kernels: dequant, GEMV, GEMM in one module,
+        // sharing the device decoder in tcf.cuh.
+        k!("src/quant/cuda/kernels", "tcf.cu", "sm_75", true),
     ];
 
     // Per-format GEMV + GEMM kernels: each format generates a gemv/ and gemm/ entry.
@@ -382,6 +385,12 @@ fn compile_cuda_kernels() {
         let ptx_path = out_dir.join(&ptx_name);
 
         println!("cargo:rerun-if-changed={}", cu_path.display());
+        // A shared header is not a compilation unit, so `cu_path` alone would
+        // leave every kernel that includes one stale after the header changes.
+        let header_path = cu_path.with_extension("cuh");
+        if header_path.exists() {
+            println!("cargo:rerun-if-changed={}", header_path.display());
+        }
 
         if !cu_path.exists() {
             panic!(

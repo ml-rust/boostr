@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::quant::traits::QuantMatmulOps;
-use crate::quant::{QuantFormat, QuantTensor};
+use crate::quant::{QuantFormat, QuantScheme, QuantTensor};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
@@ -14,6 +14,7 @@ use super::super::int4_gemm as int4_dispatch;
 use super::super::kernels::{
     self, GEMV_Q2_K_MODULE, GEMV_Q3_K_MODULE, GEMV_Q5_K_MODULE, QUANT_GEMV_MODULE,
 };
+use super::super::tcf::{self as tcf_dispatch, MatmulShape};
 use super::fallback::{quant_matmul_via_dequant, quant_swiglu_via_dequant};
 use super::format_dispatch::{dispatch_gemv, dispatch_matmul};
 use super::helpers::{quantize_activation_q8_1, validate_input_cuda};
@@ -155,6 +156,29 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         out_shape.push(n);
         let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, activation.device())?;
         let output_ptr = output.ptr();
+
+        // TCF weights take their own kernels: a GGUF kernel finds a block's
+        // codes and its scale adjacent, while TCF spreads them over
+        // whole-tensor planes. Same M <= 64 split between GEMV and GEMM.
+        if let QuantScheme::Tcf(encoding) = weight.scheme() {
+            let at = MatmulShape { m, k, n };
+            let device_index = activation.device().id();
+            let launch = if m <= 64 {
+                tcf_dispatch::launch_gemv
+            } else {
+                tcf_dispatch::launch_gemm
+            };
+            launch(
+                self,
+                device_index,
+                act_contig.ptr(),
+                weight.storage().ptr(),
+                output_ptr,
+                encoding,
+                at,
+            )?;
+            return Ok(output);
+        }
 
         if m <= 64 {
             match dispatch_gemv(self, &act_contig, weight, output_ptr, m, k, n)? {
@@ -360,6 +384,15 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                     up_weight.shape()
                 ),
             });
+        }
+        // The fused SwiGLU kernels read a GGUF block layout. A TCF weight goes
+        // through two fused matmuls and numr's `silu_mul` instead, which is
+        // what the CPU backend does for every codec.
+        if !gate_weight.scheme().is_row_blocked() || !up_weight.scheme().is_row_blocked() {
+            let gate = self.quant_matmul(activation, gate_weight)?;
+            let up = self.quant_matmul(activation, up_weight)?;
+            use numr::ops::ActivationOps;
+            return self.silu_mul(&gate, &up).map_err(Error::Numr);
         }
         let gate_format = gate_weight.format()?;
         let up_format = up_weight.format()?;

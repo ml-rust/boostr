@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::quant::traits::DequantOps;
-use crate::quant::{QuantFormat, QuantTensor};
+use crate::quant::{QuantFormat, QuantScheme, QuantTensor};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
@@ -13,6 +13,7 @@ use numr::tensor::Tensor;
 
 use super::kernels::{self, DEQUANT_GENERIC_MODULE, DEQUANT_MODULE};
 use super::nf4 as nf4_dispatch;
+use super::tcf as tcf_dispatch;
 
 impl DequantOps<CudaRuntime> for CudaClient {
     fn nf4_dequant(
@@ -85,7 +86,16 @@ impl DequantOps<CudaRuntime> for CudaClient {
             });
         }
 
-        let kernel_name = match qt.format()? {
+        // TCF is plane-major and its two-level encodings carry a second scale
+        // level, so it has its own kernel rather than a `QuantFormat` arm.
+        let format = match qt.scheme() {
+            QuantScheme::Gguf(format) => format,
+            QuantScheme::Tcf(encoding) => {
+                return dequant_tcf(self, qt, encoding, target_dtype);
+            }
+        };
+
+        let kernel_name = match format {
             QuantFormat::Q4_0 => "dequant_q4_0_f32",
             QuantFormat::Q5_0 => "dequant_q5_0_f32",
             QuantFormat::Q8_0 => "dequant_q8_0_f32",
@@ -143,6 +153,34 @@ impl DequantOps<CudaRuntime> for CudaClient {
         } else {
             self.cast(&f32_out, target_dtype).map_err(Error::Numr)
         }
+    }
+}
+
+/// Dequantize a TCF native quantized payload on the GPU.
+///
+/// The device decoder in `kernels/tcf.cuh` reproduces `tcf_core::unpack`
+/// followed by `tcf_core::dequantize`, and `tests/backend_parity/quant_tcf.rs`
+/// is the gate that says so for every encoding.
+fn dequant_tcf(
+    client: &CudaClient,
+    qt: &QuantTensor<CudaRuntime>,
+    encoding: crate::quant::TcfEncoding,
+    target_dtype: DType,
+) -> Result<Tensor<CudaRuntime>> {
+    let f32_out = Tensor::<CudaRuntime>::empty(qt.shape(), DType::F32, qt.device())?;
+    tcf_dispatch::launch_dequant(
+        client,
+        qt.device().id(),
+        qt.storage().ptr(),
+        f32_out.ptr(),
+        encoding,
+        qt.shape(),
+    )?;
+
+    if target_dtype == DType::F32 {
+        Ok(f32_out)
+    } else {
+        client.cast(&f32_out, target_dtype).map_err(Error::Numr)
     }
 }
 

@@ -18,7 +18,7 @@
 // What is NOT duplicated: plane order, plane sizes, and every byte offset
 // between planes. The host computes those from `tcf-core`'s own `QuantLayout`
 // and passes them in, so a layout change reaches this file as new numbers
-// rather than as a stale constant. See `quant/cuda/tcf/layout.rs`.
+// rather than as a stale constant. See `quant/tcf/planes.rs`.
 //
 // The gate is `tests/backend_parity/quant_tcf.rs`: every encoding, decoded by
 // this file and by `tcf_core::unpack` + `tcf_core::dequantize`, must agree.
@@ -28,7 +28,7 @@
 #include <cuda_fp16.h>
 
 // Scale forms, mirroring `tcf_core::encoding::ScaleForm`. The host passes the
-// discriminant; see `quant/cuda/tcf/layout.rs` for the one place it is set.
+// discriminant; see `quant/tcf/planes.rs` for the one place it is set.
 #define TCF_SCALE_FLAT 0u
 #define TCF_SCALE_TWO_LEVEL_U8 1u
 #define TCF_SCALE_TWO_LEVEL_U6M6 2u

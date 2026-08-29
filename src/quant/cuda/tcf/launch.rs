@@ -4,7 +4,7 @@
 //! whole tensor as f32, [`launch_gemv`] serves the decode and short-prefill
 //! path, and [`launch_gemm`] serves a large batch. All three drive the same
 //! device decoder in `kernels/tcf.cuh` and take the same plane offsets from
-//! [`TcfLaunchArgs`], so no two of them can disagree about the layout.
+//! [`TcfPlanes`], so no two of them can disagree about the layout.
 //!
 //! # What the GPU path does not check
 //!
@@ -31,9 +31,9 @@ use numr::runtime::cuda::CudaClient;
 
 use crate::error::{Error, Result};
 use crate::quant::TcfEncoding;
+use crate::quant::tcf::TcfPlanes;
 
 use super::super::kernels::{self, TCF_MODULE};
-use super::layout::TcfLaunchArgs;
 
 /// Execution tiles one dequantization block owns. One super-block, matching
 /// `TCF_DEQUANT_TILES`.
@@ -83,7 +83,7 @@ pub(crate) fn launch_dequant(
     encoding: TcfEncoding,
     shape: &[usize],
 ) -> Result<()> {
-    let args = TcfLaunchArgs::new(encoding, shape)?;
+    let args = TcfPlanes::new(encoding, shape)?;
     let tiles = u32::try_from(args.tiles).map_err(|_| Error::QuantError {
         reason: format!("{}: {} tiles exceed u32", encoding.name(), args.tiles),
     })?;
@@ -131,7 +131,7 @@ pub(crate) struct MatmulShape {
 /// column. The path for a decode step or a short prefill.
 ///
 /// # Errors
-/// Every error [`TcfLaunchArgs::new`] raises, plus [`Error::QuantError`] when
+/// Every error [`TcfPlanes::new`] raises, plus [`Error::QuantError`] when
 /// a dimension exceeds `u32` or the launch fails.
 pub(crate) fn launch_gemv(
     client: &CudaClient,
@@ -220,7 +220,7 @@ pub(crate) fn launch_gemm(
 /// `K` must be a whole number of execution tiles: the kernels walk a weight
 /// row tile by tile, and a partial trailing tile would read a neighbouring
 /// row's codes.
-fn matmul_setup(encoding: TcfEncoding, at: MatmulShape) -> Result<(TcfLaunchArgs, u32, u32, u32)> {
+fn matmul_setup(encoding: TcfEncoding, at: MatmulShape) -> Result<(TcfPlanes, u32, u32, u32)> {
     let name = encoding.name();
     let tile = encoding.tile();
     if tile == 0 || at.k == 0 || !at.k.is_multiple_of(tile) {
@@ -231,7 +231,7 @@ fn matmul_setup(encoding: TcfEncoding, at: MatmulShape) -> Result<(TcfLaunchArgs
             ),
         });
     }
-    let args = TcfLaunchArgs::new(encoding, &[at.n, at.k])?;
+    let args = TcfPlanes::new(encoding, &[at.n, at.k])?;
     let narrow = |value: usize, label: &str| -> Result<u32> {
         u32::try_from(value).map_err(|_| Error::QuantError {
             reason: format!("{name}: {label}={value} exceeds u32"),

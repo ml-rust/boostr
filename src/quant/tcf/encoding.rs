@@ -1,4 +1,4 @@
-//! TCF native quantized encodings, as a runtime layout descriptor.
+//! [`TcfEncoding`]: a TCF native quantized encoding, as a runtime descriptor.
 //!
 //! A TCF payload is NOT block-structured the way [`crate::quant::QuantFormat`]
 //! describes. `QuantFormat` states one flat `block_size`/`block_bytes` pair and

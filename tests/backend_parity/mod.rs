@@ -17,6 +17,7 @@ pub mod quant_int4_gemm;
 pub mod quant_matmul_q4k;
 pub mod quant_nf4;
 pub mod quant_tcf;
+pub mod quant_tcf_wgpu;
 pub mod rope;
 pub mod rope_packed;
 pub mod router_z;

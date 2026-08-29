@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::quant::traits::QuantMatmulOps;
-use crate::quant::{QuantFormat, QuantTensor};
+use crate::quant::{QuantFormat, QuantScheme, QuantTensor};
 use numr::dtype::DType;
 use numr::runtime::wgpu::{WgpuClient, WgpuRuntime, get_buffer};
 use numr::tensor::Tensor;
@@ -10,6 +10,7 @@ use wgpu::BufferUsages;
 
 use super::int4_gemm as int4_dispatch;
 use super::shaders::quant_matmul as shader_gen;
+use super::tcf::{self as tcf_dispatch, MatmulShape};
 
 /// Params struct matching WGSL MatmulParams
 #[repr(C)]
@@ -173,6 +174,26 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
                     a_k, k
                 ),
             });
+        }
+
+        // TCF weights take their own shader: a GGUF kernel finds a block's
+        // codes and its scale adjacent, while TCF spreads them over
+        // whole-tensor planes.
+        if let QuantScheme::Tcf(encoding) = weight.scheme() {
+            let m = a_shape.iter().product::<usize>() / k;
+            let act_contig = activation.contiguous()?;
+            let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
+            out_shape.push(n);
+            let output = Tensor::<WgpuRuntime>::empty(&out_shape, DType::F32, activation.device())?;
+            tcf_dispatch::dispatch_matmul(
+                self,
+                act_contig.storage().ptr(),
+                weight.storage().ptr(),
+                output.storage().ptr(),
+                encoding,
+                MatmulShape { m, k, n },
+            )?;
+            return Ok(output);
         }
 
         let (shader_source, entry_point) = match weight.format()? {

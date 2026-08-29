@@ -5,5 +5,6 @@ pub mod helpers;
 pub mod int4_gemm;
 pub mod nf4;
 pub mod quant_matmul;
+pub mod tcf;
 
 pub use helpers::{common_helpers, read_f16_inline, read_i8_inline, read_u8_inline};

@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::quant::traits::DequantOps;
-use crate::quant::{QuantFormat, QuantTensor};
+use crate::quant::{QuantFormat, QuantScheme, QuantTensor};
 use numr::dtype::DType;
 use numr::runtime::wgpu::{WgpuClient, WgpuRuntime, get_buffer};
 use numr::tensor::Tensor;
@@ -10,6 +10,7 @@ use wgpu::BufferUsages;
 
 use super::nf4 as nf4_dispatch;
 use super::shaders::dequant as shader_gen;
+use super::tcf as tcf_dispatch;
 
 /// Params struct matching WGSL DequantParams
 #[repr(C)]
@@ -91,7 +92,12 @@ impl DequantOps<WgpuRuntime> for WgpuClient {
             });
         }
 
-        let format = qt.format()?;
+        // TCF is plane-major and its two-level encodings carry a second scale
+        // level, so it has its own shader rather than a `QuantFormat` arm.
+        let format = match qt.scheme() {
+            QuantScheme::Gguf(format) => format,
+            QuantScheme::Tcf(encoding) => return dequant_tcf(self, qt, encoding),
+        };
         let (shader_source, entry_point) = match format {
             QuantFormat::Q4_0 => (shader_gen::generate_dequant_q4_0_shader(), "dequant_q4_0"),
             QuantFormat::Q8_0 => (shader_gen::generate_dequant_q8_0_shader(), "dequant_q8_0"),
@@ -186,4 +192,25 @@ impl DequantOps<WgpuRuntime> for WgpuClient {
 
         Ok(f32_out)
     }
+}
+
+/// Dequantize a TCF native quantized payload on the GPU.
+///
+/// The shader in `shaders::tcf` reproduces `tcf_core::unpack` followed by
+/// `tcf_core::dequantize`, and `tests/backend_parity/quant_tcf_wgpu.rs` is the
+/// gate that says so for every encoding.
+fn dequant_tcf(
+    client: &WgpuClient,
+    qt: &QuantTensor<WgpuRuntime>,
+    encoding: crate::quant::TcfEncoding,
+) -> Result<Tensor<WgpuRuntime>> {
+    let f32_out = Tensor::<WgpuRuntime>::empty(qt.shape(), DType::F32, qt.device())?;
+    tcf_dispatch::dispatch_dequant(
+        client,
+        qt.storage().ptr(),
+        f32_out.storage().ptr(),
+        encoding,
+        qt.shape(),
+    )?;
+    Ok(f32_out)
 }

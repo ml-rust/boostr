@@ -1,46 +1,59 @@
-//! Plane offsets and geometry of one TCF payload, as CUDA kernel arguments.
+//! Plane offsets and geometry of one TCF payload, as device kernel arguments.
 //!
 //! # Why the offsets are computed here and not in the kernel
 //!
-//! A CUDA kernel cannot call `tcf-core`, so the read-direction bit positions
-//! had to be written a second time in `kernels/tcf.cuh`. Everything that did
-//! NOT have to be is kept here instead: plane order, plane sizes, and the byte
-//! offset of each plane are read off `tcf-core`'s own [`QuantLayout`], exactly
-//! as `quant::cpu::kernels::tcf`'s gather does, and handed to the kernel as
-//! numbers.
+//! Neither a CUDA kernel nor a WGSL shader can call `tcf-core`, so the
+//! read-direction bit positions had to be written a second time per backend —
+//! in `quant/cuda/kernels/tcf.cuh` and in `quant/wgpu/shaders/tcf.rs`.
+//! Everything that did NOT have to be is kept here instead: plane order, plane
+//! sizes, and the byte offset of each plane are read off `tcf-core`'s own
+//! [`QuantLayout`], exactly as `quant::cpu::kernels::tcf`'s gather does, and
+//! handed to the device as numbers.
 //!
-//! So a layout change — a new scale form, a plane that grows — reaches the
-//! device as different arguments rather than as a constant that silently went
+//! So a layout change — a new scale form, a plane that grows — reaches every
+//! backend as different arguments rather than as a constant that silently went
 //! stale. MIGRATION.md Section 4.5.3 forbids a second copy of a block layout,
 //! and this is how much of that copy can be avoided when the consumer is a GPU.
+//!
+//! One module serves both GPU backends. A per-backend copy of this arithmetic
+//! is the same duplication in a new place: CUDA and WGSL would then be free to
+//! disagree about where a plane starts, and the disagreement would surface as
+//! plausible wrong weights rather than as an error.
 
 use tcf_core::{QuantLayout, ScaleForm};
 
 use crate::error::{Error, Result};
 use crate::format::tcf::tcf_error;
-use crate::quant::TcfEncoding;
+
+use super::TcfEncoding;
 
 /// `ScaleForm::Flat` as the kernel's discriminant. Mirrors `TCF_SCALE_FLAT`.
-const SCALE_FORM_FLAT: u32 = 0;
+pub(crate) const SCALE_FORM_FLAT: u32 = 0;
 /// `ScaleForm::TwoLevelU8` as the kernel's discriminant.
-const SCALE_FORM_TWO_LEVEL_U8: u32 = 1;
+pub(crate) const SCALE_FORM_TWO_LEVEL_U8: u32 = 1;
 /// `ScaleForm::TwoLevelU6M6` as the kernel's discriminant.
-const SCALE_FORM_TWO_LEVEL_U6M6: u32 = 2;
+pub(crate) const SCALE_FORM_TWO_LEVEL_U6M6: u32 = 2;
 
 /// The execution tile width every v1 encoding uses, in logical elements.
 ///
 /// `tcf-core` fixes it: `checked_groups_per_tile` rejects any other width
 /// because `Code64` holds exactly 64 codes. The kernels assume it too, so
-/// [`TcfLaunchArgs::new`] refuses anything else rather than launching a kernel
+/// [`TcfPlanes::new`] refuses anything else rather than launching a kernel
 /// whose tile strides no longer describe the payload.
-const TILE: usize = 64;
+pub(crate) const TILE: usize = 64;
 
-/// Everything a TCF CUDA kernel needs about one payload's layout.
+/// Everything a TCF device kernel needs about one payload's layout.
 ///
 /// Every field is either read off [`QuantLayout`] or derived from the shape.
 /// None is a hard-coded byte count.
+// Every field is a kernel argument. A CPU-only build compiles this type for
+// its tests but reads only the offsets, so the shape fields look dead here.
+#[cfg_attr(
+    not(any(feature = "cuda", feature = "wgpu")),
+    allow(dead_code, reason = "read only by the CUDA and WGPU kernels")
+)]
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct TcfLaunchArgs {
+pub(crate) struct TcfPlanes {
     /// Execution tiles in the tensor.
     pub tiles: u64,
     /// Byte offset of the 6-bit high-two-bit code sub-plane (Section 14.2).
@@ -68,8 +81,8 @@ pub(crate) struct TcfLaunchArgs {
     pub sub_block_bytes: u32,
 }
 
-impl TcfLaunchArgs {
-    /// Derive the launch arguments for `encoding` over a tensor of `shape`.
+impl TcfPlanes {
+    /// Derive the device arguments for `encoding` over a tensor of `shape`.
     ///
     /// # Errors
     /// [`Error::QuantError`] when the tile width is not 64, when a plane span
@@ -84,7 +97,7 @@ impl TcfLaunchArgs {
         if usize::from(geometry.tile) != TILE {
             return Err(Error::QuantError {
                 reason: format!(
-                    "{name}: the CUDA kernels decode a {TILE}-element tile, layout states {}",
+                    "{name}: the GPU kernels decode a {TILE}-element tile, layout states {}",
                     geometry.tile
                 ),
             });
@@ -185,7 +198,7 @@ mod tests {
             let encoding = TcfEncoding::new(native);
             // 15 tiles: three whole super-blocks and a partial fourth.
             let shape = [3usize, 320];
-            let args = TcfLaunchArgs::new(encoding, &shape).expect("args");
+            let args = TcfPlanes::new(encoding, &shape).expect("args");
             let layout = encoding.layout();
             assert_eq!(args.tiles, 15, "{native:?}");
 
@@ -203,7 +216,7 @@ mod tests {
     #[test]
     fn a_six_bit_code_plane_splits_into_two_whole_sub_planes() {
         let encoding = TcfEncoding::new(NativeEncoding::Q6S32T64);
-        let args = TcfLaunchArgs::new(encoding, &[3, 320]).expect("args");
+        let args = TcfPlanes::new(encoding, &[3, 320]).expect("args");
         assert_eq!(args.code_high_off, 15 * 32);
         assert_eq!(args.scale_off, 15 * 48);
     }
@@ -213,7 +226,7 @@ mod tests {
     #[test]
     fn a_four_or_eight_bit_code_plane_has_no_high_sub_plane() {
         for native in [NativeEncoding::Q4S32T64, NativeEncoding::Q8S32T64] {
-            let args = TcfLaunchArgs::new(TcfEncoding::new(native), &[3, 320]).expect("args");
+            let args = TcfPlanes::new(TcfEncoding::new(native), &[3, 320]).expect("args");
             assert_eq!(args.code_high_off, 0, "{native:?}");
         }
     }
@@ -222,8 +235,8 @@ mod tests {
     /// which is the one field the bit-packed reader is addressed by.
     #[test]
     fn the_two_level_asymmetric_sub_planes_are_six_bytes_per_super_block() {
-        let args = TcfLaunchArgs::new(TcfEncoding::new(NativeEncoding::Q4AS32DT64), &[3, 320])
-            .expect("args");
+        let args =
+            TcfPlanes::new(TcfEncoding::new(NativeEncoding::Q4AS32DT64), &[3, 320]).expect("args");
         assert_eq!(args.scale_form, SCALE_FORM_TWO_LEVEL_U6M6);
         assert_eq!(args.sub_block_bytes, 6);
         assert_eq!(args.groups_per_tile, 2);
@@ -233,6 +246,6 @@ mod tests {
     #[test]
     fn a_row_width_that_is_not_a_whole_tile_is_refused() {
         let encoding = TcfEncoding::new(NativeEncoding::Q4S32T64);
-        assert!(TcfLaunchArgs::new(encoding, &[2, 100]).is_err());
+        assert!(TcfPlanes::new(encoding, &[2, 100]).is_err());
     }
 }

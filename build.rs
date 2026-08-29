@@ -366,6 +366,21 @@ fn compile_cuda_kernels() {
         ),
     ]);
 
+    // Shared headers are not compilation units, so the `.cu` paths above do not
+    // cover them. Emit every `.cuh` under the kernel source roots instead of
+    // guessing one from the `.cu` stem: that guess matched only same-stem pairs
+    // and left `dtype_traits.cuh`, `attention/atomics.cuh`, `gemm/common.cuh`
+    // and `gemv/common.cuh` untracked. Scanning `#include` lines is not an
+    // option either — it misses transitive includes.
+    //
+    // No stale-PTX window is open today: the loop below invokes `nvcc` for
+    // every kernel on every run, so a header change is always picked up. This
+    // makes the declared dependency honest, and is what keeps the build correct
+    // if that unconditional rebuild ever becomes incremental.
+    for root in ["src/ops/cuda/kernels", "src/quant/cuda/kernels"] {
+        emit_header_deps(std::path::Path::new(root));
+    }
+
     let nvcc = find_nvcc().unwrap_or_else(|| {
         eprintln!();
         eprintln!("=== CUDA COMPILATION ERROR ===");
@@ -385,12 +400,6 @@ fn compile_cuda_kernels() {
         let ptx_path = out_dir.join(&ptx_name);
 
         println!("cargo:rerun-if-changed={}", cu_path.display());
-        // A shared header is not a compilation unit, so `cu_path` alone would
-        // leave every kernel that includes one stale after the header changes.
-        let header_path = cu_path.with_extension("cuh");
-        if header_path.exists() {
-            println!("cargo:rerun-if-changed={}", header_path.display());
-        }
 
         if !cu_path.exists() {
             panic!(
@@ -498,4 +507,23 @@ fn find_nvcc() -> Option<String> {
     }
 
     None
+}
+
+/// Emit `cargo:rerun-if-changed` for every `.cuh` under `dir`, recursively.
+///
+/// A missing or unreadable directory is skipped: a build script must not abort
+/// the build over a directory that holds no compilation unit of its own.
+#[cfg(feature = "cuda")]
+fn emit_header_deps(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            emit_header_deps(&path);
+        } else if path.extension().is_some_and(|ext| ext == "cuh") {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
 }

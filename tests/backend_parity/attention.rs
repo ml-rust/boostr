@@ -1455,6 +1455,127 @@ fn test_flash_attention_bwd_fp8_no_gqa_parity() {
     assert_flash_bwd_fp8_kv_parity(4, 4, "flash_bwd_fp8 4h/4kv");
 }
 
+/// FP8 GQA vs PRE-EXPANDED KV: everything before the group reduction must be
+/// bit-identical.
+///
+/// `flash_attention_bwd_fp8` repeats the KV heads itself and runs the kernel
+/// over the expanded layout, so a `num_kv_heads`-head run and a run whose K/V
+/// are already repeated hand the kernel the same bytes. O, LSE and dQ pass
+/// through NO group reduction, so any difference in them is upstream of
+/// `sum_gqa_grads_fp8`.
+///
+/// This is the discriminator for the dK group-sum parity failure. Exact
+/// agreement here means the per-head dK of the two runs agree as well, leaving
+/// only the F32 reduction and the single requantization to explain a dK
+/// mismatch. A difference here means the fault is in the kernel or the forward,
+/// and the group sum is a bystander.
+#[cfg(feature = "cuda")]
+fn assert_flash_fp8_gqa_upstream_identical(num_heads: usize, num_kv_heads: usize, label: &str) {
+    use numr::dtype::DType;
+    use numr::ops::TypeConversionOps;
+    use numr::tensor::Tensor;
+
+    let (_cpu_client, cpu_device) = setup_cpu();
+    let (b, s, d) = (1usize, 8usize, 32usize);
+    let repeats = num_heads / num_kv_heads;
+
+    let q = det_tensor(&[b, num_heads, s, d], &cpu_device).to_vec::<f32>();
+    let k = det_tensor(&[b, num_kv_heads, s, d], &cpu_device).to_vec::<f32>();
+    let v = det_tensor(&[b, num_kv_heads, s, d], &cpu_device).to_vec::<f32>();
+    let dout = det_tensor(&[b, num_heads, s, d], &cpu_device).to_vec::<f32>();
+
+    let expand = |src: &[f32]| -> Vec<f32> {
+        let mut out = Vec::with_capacity(num_heads * s * d);
+        for h in 0..num_heads {
+            let kv = h / repeats;
+            out.extend_from_slice(&src[kv * s * d..(kv + 1) * s * d]);
+        }
+        out
+    };
+    let k_expanded = expand(&k);
+    let v_expanded = expand(&v);
+
+    with_cuda_backend(|cuda_client, cuda_device| {
+        let to_fp8 = |data: &[f32], shape: &[usize]| {
+            let t = Tensor::from_slice(data, shape, &cuda_device).unwrap();
+            cuda_client.cast(&t, DType::FP8E4M3).unwrap()
+        };
+
+        // Returns (O, LSE, dQ) as F32 vectors — none of them group-reduced.
+        let run = |heads: usize, kv_heads: usize, k_data: &[f32], v_data: &[f32]| {
+            let q_c = to_fp8(&q, &[b, heads, s, d]);
+            let k_c = to_fp8(k_data, &[b, kv_heads, s, d]);
+            let v_c = to_fp8(v_data, &[b, kv_heads, s, d]);
+            let dout_c = to_fp8(&dout, &[b, heads, s, d]);
+
+            let (out_c, lse_c) = match cuda_client.flash_attention_fwd_fp8(
+                &q_c, &k_c, &v_c, heads, kv_heads, d, false, 1.0, 1.0, 1.0, 1.0,
+            ) {
+                Ok(v) => v,
+                Err(e) => return skip_or_fail(label, "forward", &e),
+            };
+            let (dq_c, _dk_c, _dv_c) = match cuda_client.flash_attention_bwd_fp8(
+                &dout_c, &q_c, &k_c, &v_c, &out_c, &lse_c, heads, kv_heads, d, false, 1.0, 1.0,
+                1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            ) {
+                Ok(v) => v,
+                Err(e) => return skip_or_fail(label, "backward", &e),
+            };
+
+            let out_f32 = cuda_client
+                .cast(&out_c, DType::F32)
+                .unwrap()
+                .to_vec::<f32>();
+            let dq_f32 = cuda_client.cast(&dq_c, DType::F32).unwrap().to_vec::<f32>();
+            Some((out_f32, lse_c.to_vec::<f32>(), dq_f32))
+        };
+
+        let Some((out_gqa, lse_gqa, dq_gqa)) = run(num_heads, num_kv_heads, &k, &v) else {
+            eprintln!("{}: FP8 flash unavailable on this GPU, skipping", label);
+            return;
+        };
+        let Some((out_full, lse_full, dq_full)) =
+            run(num_heads, num_heads, &k_expanded, &v_expanded)
+        else {
+            eprintln!("{}: FP8 reference run unavailable, skipping", label);
+            return;
+        };
+
+        // Exact equality, not a tolerance: the two runs execute the same kernel
+        // over the same bytes, so a single differing element is a real defect.
+        assert_eq!(
+            out_gqa, out_full,
+            "{}: FP8 forward output differs from the pre-expanded run",
+            label
+        );
+        assert_eq!(
+            lse_gqa, lse_full,
+            "{}: FP8 forward LSE differs from the pre-expanded run",
+            label
+        );
+        assert_eq!(
+            dq_gqa, dq_full,
+            "{}: FP8 dQ differs from the pre-expanded run",
+            label
+        );
+    });
+}
+
+/// FP8 MQA: 4 query heads over 1 KV head, everything upstream of the dK group
+/// sum compared against the pre-expanded run.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_flash_attention_fp8_mqa_upstream_identical() {
+    assert_flash_fp8_gqa_upstream_identical(4, 1, "flash_fp8 mqa 4h/1kv upstream");
+}
+
+/// FP8 GQA: 4 query heads over 2 KV heads, same upstream comparison.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_flash_attention_fp8_gqa_upstream_identical() {
+    assert_flash_fp8_gqa_upstream_identical(4, 2, "flash_fp8 gqa 4h/2kv upstream");
+}
+
 /// GQA backward at head dims the backward kernel previously could NOT run on a card
 /// with under ~128KB of opt-in shared memory: the forward-derived block config asked
 /// for more shared memory than the backward layout could get, and no `_sm` backward

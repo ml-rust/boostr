@@ -105,17 +105,14 @@ __device__ void flash_attention_fwd_fp8_impl(
     }
     __syncthreads();
 
+    // Each thread owns one Q row. Threads past the tile MUST stay alive: the K/V
+    // load below strides by blockDim.x, so every thread of the block is needed to
+    // cover the tile. Returning early left K_smem/V_smem partly UNINITIALIZED
+    // whenever q_tile_size < BLOCK_M, and the stale shared memory it read instead
+    // made the output depend on whatever ran before. Same structure as
+    // flash_v2.cu's `is_valid_thread`.
     const int q_row = tid;
-
-    if (q_row >= q_tile_size) {
-        if (q_start + q_row < seq_len_q) {
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                O_base[(q_start + q_row) * HEAD_DIM + d] = boostr_fp8_e4m3(0);
-            }
-            L_base[q_start + q_row] = -INFINITY;
-        }
-        return;
-    }
+    const bool is_valid_thread = (q_row < q_tile_size);
 
     // FP32 accumulation (CRITICAL for FP8)
     float O_local[HEAD_DIM];
@@ -142,66 +139,70 @@ __device__ void flash_attention_fwd_fp8_impl(
         }
         __syncthreads();
 
-        float m_new = m_local;
-        for (int j = 0; j < k_tile_size; ++j) {
-            if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
+        if (is_valid_thread) {
+            float m_new = m_local;
+            for (int j = 0; j < k_tile_size; ++j) {
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
-            float score = 0.0f;
-            #pragma unroll
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                // Dequantize FP8 → FP32 for computation
-                float q_val = fp8_e4m3_to_f32(Q_smem(q_row, d), q_scale);
-                float k_val = fp8_e4m3_to_f32(K_smem(j, d), k_scale);
-                score += q_val * k_val;
+                float score = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    // Dequantize FP8 → FP32 for computation
+                    float q_val = fp8_e4m3_to_f32(Q_smem(q_row, d), q_scale);
+                    float k_val = fp8_e4m3_to_f32(K_smem(j, d), k_scale);
+                    score += q_val * k_val;
+                }
+                score *= scale;
+                m_new = fmaxf(m_new, score);
             }
-            score *= scale;
-            m_new = fmaxf(m_new, score);
-        }
 
-        const float alpha = __expf(m_local - m_new);
-
-        #pragma unroll
-        for (int d = 0; d < HEAD_DIM; ++d) {
-            O_local[d] *= alpha;
-        }
-
-        float l_new = alpha * l_local;
-        for (int j = 0; j < k_tile_size; ++j) {
-            if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
-
-            float score = 0.0f;
-            #pragma unroll
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                float q_val = fp8_e4m3_to_f32(Q_smem(q_row, d), q_scale);
-                float k_val = fp8_e4m3_to_f32(K_smem(j, d), k_scale);
-                score += q_val * k_val;
-            }
-            score *= scale;
-            const float exp_score = __expf(score - m_new);
-            l_new += exp_score;
+            const float alpha = __expf(m_local - m_new);
 
             #pragma unroll
             for (int d = 0; d < HEAD_DIM; ++d) {
-                float v_val = fp8_e4m3_to_f32(V_smem(j, d), v_scale);
-                O_local[d] += exp_score * v_val;
+                O_local[d] *= alpha;
             }
-        }
 
-        m_local = m_new;
-        l_local = l_new;
+            float l_new = alpha * l_local;
+            for (int j = 0; j < k_tile_size; ++j) {
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
+
+                float score = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    float q_val = fp8_e4m3_to_f32(Q_smem(q_row, d), q_scale);
+                    float k_val = fp8_e4m3_to_f32(K_smem(j, d), k_scale);
+                    score += q_val * k_val;
+                }
+                score *= scale;
+                const float exp_score = __expf(score - m_new);
+                l_new += exp_score;
+
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    float v_val = fp8_e4m3_to_f32(V_smem(j, d), v_scale);
+                    O_local[d] += exp_score * v_val;
+                }
+            }
+
+            m_local = m_new;
+            l_local = l_new;
+        }
         __syncthreads();
     }
 
-    const float inv_l = (l_local == 0.0f) ? 1.0f : 1.0f / l_local;
-    #pragma unroll
-    for (int d = 0; d < HEAD_DIM; ++d) {
-        // Quantize FP32 → FP8 for output
-        float out_val = O_local[d] * inv_l;
-        uint8_t fp8_val = f32_to_fp8_e4m3_raw(out_val, o_scale);
-        O_base[(q_start + q_row) * HEAD_DIM + d] = boostr_fp8_e4m3(fp8_val);
-    }
+    if (is_valid_thread) {
+        const float inv_l = (l_local == 0.0f) ? 1.0f : 1.0f / l_local;
+        #pragma unroll
+        for (int d = 0; d < HEAD_DIM; ++d) {
+            // Quantize FP32 → FP8 for output
+            float out_val = O_local[d] * inv_l;
+            uint8_t fp8_val = f32_to_fp8_e4m3_raw(out_val, o_scale);
+            O_base[(q_start + q_row) * HEAD_DIM + d] = boostr_fp8_e4m3(fp8_val);
+        }
 
-    L_base[q_start + q_row] = m_local + __logf(l_local);
+        L_base[q_start + q_row] = m_local + __logf(l_local);
+    }
 
     #undef Q_smem
     #undef K_smem

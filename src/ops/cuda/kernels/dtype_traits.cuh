@@ -54,6 +54,235 @@ struct boostr_fp8_e5m2 {
 #if __CUDA_ARCH__ >= 800  // Ampere and newer have FP8 support
 
 // ============================================================================
+// FP8 Software Conversion — numr is the source of truth
+// ============================================================================
+//
+// Bodies below are a VERBATIM port of numr's kernels, taken from
+// `numr/src/runtime/cuda/kernels/dtype_traits.cuh` (`fp8_e4m3_to_f32`,
+// `f32_to_fp8_e4m3`, `fp8_e5m2_to_f32`, `f32_to_fp8_e5m2`), which are
+// themselves bit-exact ports of numr's `src/dtype/fp8.rs`. numr owns the FP8
+// encoding; boostr must not diverge from it.
+//
+// Including numr's header directly is not possible: numr declares no `links`
+// key, so it emits no `DEP_NUMR_*` include path for nvcc, and its names collide
+// with boostr's (`fp8_e4m3_to_f32` differs only by a defaulted `scale`
+// parameter, which makes every one-argument call ambiguous).
+//
+// E4M3: 1 sign + 4 exponent + 3 mantissa, bias 7, no infinity.
+//   Normals ±[2^-6, 448]; subnormals (m / 8) * 2^-6 for m in 1..=7.
+// E5M2: 1 sign + 5 exponent + 2 mantissa, bias 15, with infinity.
+//   Normals ±[2^-14, 57344]; subnormals (m / 4) * 2^-14 for m in 1..=3.
+//
+// Rounding is round-to-nearest-even in every path, including subnormals.
+
+__device__ __forceinline__ float boostr_fp8_e4m3_to_f32_bits(uint8_t u) {
+    int sign = (u >> 7) & 1;
+    int exp_bits = (u >> 3) & 0x0F;
+    int mant_bits = u & 0x07;
+
+    // E4M3 spends its all-ones exponent on NaN instead of infinity.
+    if (exp_bits == 15 && mant_bits == 7) {
+        return __int_as_float(0x7FC00000);
+    }
+
+    if (exp_bits == 0 && mant_bits == 0) {
+        return sign ? -0.0f : 0.0f;
+    }
+
+    if (exp_bits == 0) {
+        // Subnormal: value = (mant / 8) * 2^-6.
+        float value = ldexpf(mant_bits * (1.0f / 8.0f), -6);
+        return sign ? -value : value;
+    }
+
+    // Normal: 1.mant * 2^(exp - 7), so the f32 exponent field is exp + 120.
+    unsigned int f32_bits = ((unsigned int)sign << 31)
+                          | ((unsigned int)(exp_bits + 120) << 23)
+                          | ((unsigned int)mant_bits << 20);
+    return __uint_as_float(f32_bits);
+}
+
+__device__ __forceinline__ uint8_t boostr_f32_to_fp8_e4m3_bits(float x) {
+    unsigned int bits = __float_as_uint(x);
+    unsigned int sign = bits >> 31;
+    int exp = (int)((bits >> 23) & 0xFF);
+    unsigned int mant = bits & 0x7FFFFF;
+
+    if (exp == 255) {
+        // NaN stays NaN; infinity saturates because E4M3 cannot represent it.
+        if (mant != 0) return (uint8_t)(0x7F | (sign << 7));
+        return (uint8_t)(0x7E | (sign << 7));
+    }
+
+    if (exp == 0 && mant == 0) {
+        return (uint8_t)(sign << 7);
+    }
+
+    int unbiased_exp = (exp == 0) ? -126 : exp - 127;
+
+    if (unbiased_exp > 8) {
+        return (uint8_t)(0x7E | (sign << 7));
+    }
+
+    if (unbiased_exp < -10) {
+        // Below half the smallest subnormal (2^-10), so round-to-nearest gives zero.
+        return (uint8_t)(sign << 7);
+    }
+
+    if (unbiased_exp < -6) {
+        // E4M3 subnormal: exp=0, implicit leading 0.
+        // Value = (fp8_mant / 8) * 2^-6 = fp8_mant * 2^-9.
+        // The f32 significand is the value scaled by 2^(23 - unbiased_exp),
+        // so fp8_mant = significand >> (14 - unbiased_exp).
+        unsigned int significand = (exp == 0) ? mant : (0x800000u | mant);
+        unsigned int shift = (unsigned int)(14 - unbiased_exp);
+        unsigned int truncated = significand >> shift;
+        unsigned int round_bit = (significand >> (shift - 1)) & 1u;
+        unsigned int remainder = significand & ((1u << (shift - 1)) - 1u);
+        unsigned int fp8_mant = truncated;
+        if (round_bit != 0 && (remainder != 0 || (truncated & 1u) != 0)) {
+            fp8_mant = truncated + 1u;
+        }
+        // A carry out of the 3-bit mantissa lands in the exponent field, which is
+        // exactly the smallest normal. No mask, or the carry would be discarded.
+        return (uint8_t)((sign << 7) | fp8_mant);
+    }
+
+    unsigned int fp8_exp = (unsigned int)(unbiased_exp + 7);
+    unsigned int fp8_mant;
+
+    if (exp == 0) {
+        fp8_mant = mant >> (23 - 3);
+    } else {
+        // Round to nearest even: keep one extra bit below the 3-bit mantissa.
+        unsigned int mant_shifted = mant >> (23 - 3 - 1);
+        unsigned int round_bit = mant_shifted & 1u;
+        unsigned int mant_3bit = mant_shifted >> 1;
+
+        fp8_mant = mant_3bit;
+        if (round_bit != 0) {
+            unsigned int remainder = mant & ((1u << (23 - 4)) - 1u);
+            if (remainder != 0 || (mant_3bit & 1u) != 0) {
+                if (mant_3bit == 0x07u) {
+                    // Mantissa overflow carries into the exponent.
+                    if (fp8_exp >= 15u) return (uint8_t)(0x7E | (sign << 7));
+                    return (uint8_t)((sign << 7) | ((fp8_exp + 1u) << 3));
+                }
+                fp8_mant = mant_3bit + 1u;
+            }
+        }
+    }
+
+    // exp=15, mant=7 is the NaN encoding, so a finite value saturates instead.
+    if (fp8_exp == 15u && fp8_mant == 7u) {
+        return (uint8_t)(0x7E | (sign << 7));
+    }
+
+    return (uint8_t)((sign << 7) | (fp8_exp << 3) | (fp8_mant & 0x07u));
+}
+
+__device__ __forceinline__ float boostr_fp8_e5m2_to_f32_bits(uint8_t u) {
+    int sign = (u >> 7) & 1;
+    int exp_bits = (u >> 2) & 0x1F;
+    int mant_bits = u & 0x03;
+
+    if (exp_bits == 31) {
+        if (mant_bits != 0) {
+            return __int_as_float(0x7FC00000);
+        }
+        return sign ? -INFINITY : INFINITY;
+    }
+
+    if (exp_bits == 0 && mant_bits == 0) {
+        return sign ? -0.0f : 0.0f;
+    }
+
+    if (exp_bits == 0) {
+        // Subnormal: value = (mant / 4) * 2^-14.
+        float value = ldexpf(mant_bits * 0.25f, -14);
+        return sign ? -value : value;
+    }
+
+    // Normal: 1.mant * 2^(exp - 15), so the f32 exponent field is exp + 112.
+    unsigned int f32_bits = ((unsigned int)sign << 31)
+                          | ((unsigned int)(exp_bits + 112) << 23)
+                          | ((unsigned int)mant_bits << 21);
+    return __uint_as_float(f32_bits);
+}
+
+__device__ __forceinline__ uint8_t boostr_f32_to_fp8_e5m2_bits(float x) {
+    unsigned int bits = __float_as_uint(x);
+    unsigned int sign = bits >> 31;
+    int exp = (int)((bits >> 23) & 0xFF);
+    unsigned int mant = bits & 0x7FFFFF;
+
+    if (exp == 255) {
+        if (mant != 0) return (uint8_t)(0x7F | (sign << 7));
+        return (uint8_t)(0x7C | (sign << 7));
+    }
+
+    if (exp == 0 && mant == 0) {
+        return (uint8_t)(sign << 7);
+    }
+
+    int unbiased_exp = (exp == 0) ? -126 : exp - 127;
+
+    if (unbiased_exp > 15) {
+        // E5M2 has infinity, so overflow goes there rather than to the max finite.
+        return (uint8_t)(0x7C | (sign << 7));
+    }
+
+    if (unbiased_exp < -17) {
+        // Below half the smallest subnormal (2^-17), so round-to-nearest gives zero.
+        return (uint8_t)(sign << 7);
+    }
+
+    if (unbiased_exp < -14) {
+        // E5M2 subnormal: exp=0, implicit leading 0.
+        // Value = (fp8_mant / 4) * 2^-14 = fp8_mant * 2^-16.
+        // The f32 significand is the value scaled by 2^(23 - unbiased_exp),
+        // so fp8_mant = significand >> (7 - unbiased_exp).
+        unsigned int significand = (exp == 0) ? mant : (0x800000u | mant);
+        unsigned int shift = (unsigned int)(7 - unbiased_exp);
+        unsigned int truncated = significand >> shift;
+        unsigned int round_bit = (significand >> (shift - 1)) & 1u;
+        unsigned int remainder = significand & ((1u << (shift - 1)) - 1u);
+        unsigned int fp8_mant = truncated;
+        if (round_bit != 0 && (remainder != 0 || (truncated & 1u) != 0)) {
+            fp8_mant = truncated + 1u;
+        }
+        // A carry out of the 2-bit mantissa lands in the exponent field, which is
+        // exactly the smallest normal. No mask, or the carry would be discarded.
+        return (uint8_t)((sign << 7) | fp8_mant);
+    }
+
+    unsigned int fp8_exp = (unsigned int)(unbiased_exp + 15);
+    unsigned int fp8_mant;
+
+    if (exp == 0) {
+        fp8_mant = mant >> (23 - 2);
+    } else {
+        unsigned int mant_shifted = mant >> (23 - 2 - 1);
+        unsigned int round_bit = mant_shifted & 1u;
+        unsigned int mant_2bit = mant_shifted >> 1;
+
+        fp8_mant = mant_2bit;
+        if (round_bit != 0) {
+            unsigned int remainder = mant & ((1u << (23 - 3)) - 1u);
+            if (remainder != 0 || (mant_2bit & 1u) != 0) {
+                if (mant_2bit == 0x03u) {
+                    if (fp8_exp >= 30u) return (uint8_t)(0x7C | (sign << 7));
+                    return (uint8_t)((sign << 7) | ((fp8_exp + 1u) << 2));
+                }
+                fp8_mant = mant_2bit + 1u;
+            }
+        }
+    }
+
+    return (uint8_t)((sign << 7) | (fp8_exp << 2) | (fp8_mant & 0x03u));
+}
+
+// ============================================================================
 // FP8 → F32 Conversion
 // ============================================================================
 
@@ -72,19 +301,8 @@ __device__ __forceinline__ float fp8_e4m3_to_f32(uint8_t u, float scale = 1.0f) 
     );
     return result / scale;
 #else
-    // Ampere and older: Software emulation
-    int sign = (u >> 7) & 1;
-    int exp_bits = (u >> 3) & 0xF;
-    int mant_bits = u & 0x7;
-
-    float result = 0.0f;
-    if (exp_bits != 0) {
-        float mant = 1.0f + mant_bits * (1.0f / 8.0f);
-        int exp = exp_bits - 7;
-        result = ldexpf(mant, exp);
-    }
-
-    return (sign ? -result : result) / scale;
+    // Ampere and older: numr's bit-exact decoder (subnormals included).
+    return boostr_fp8_e4m3_to_f32_bits(u) / scale;
 #endif
 }
 
@@ -104,26 +322,9 @@ __device__ __forceinline__ uint8_t f32_to_fp8_e4m3_raw(float x, float scale = 1.
          : "f"(x), "f"(0.0f));  // Padding: e4m3x2 packs 2 scalars, second is zeroed
     return (uint8_t)result;
 #else
-    // Ampere and older: Software emulation
-    x = x * scale;
-    if (x == 0.0f) return 0;
-
-    int sign = (x < 0.0f) ? 1 : 0;
-    float abs_x = fabsf(x);
-
-    int exp_bits;
-    float mant;
-    frexpf(abs_x, &exp_bits);
-    exp_bits = exp_bits - 1;
-    mant = ldexpf(abs_x, -exp_bits);
-
-    exp_bits = max(-7, min(8, exp_bits));
-    int exp_encoded = exp_bits + 7;
-
-    int mant_bits = (int)roundf((mant - 1.0f) * 8.0f);
-    mant_bits = max(0, min(7, mant_bits));
-
-    return (sign << 7) | (exp_encoded << 3) | mant_bits;
+    // Ampere and older: numr's bit-exact encoder (round-to-nearest-even,
+    // mantissa carry into the exponent, real subnormal path).
+    return boostr_f32_to_fp8_e4m3_bits(x * scale);
 #endif
 }
 
@@ -142,19 +343,8 @@ __device__ __forceinline__ float fp8_e5m2_to_f32(uint8_t u, float scale = 1.0f) 
     );
     return result / scale;
 #else
-    // Ampere and older: Software emulation
-    int sign = (u >> 7) & 1;
-    int exp_bits = (u >> 2) & 0x1F;
-    int mant_bits = u & 0x3;
-
-    float result = 0.0f;
-    if (exp_bits != 0) {
-        float mant = 1.0f + mant_bits * 0.25f;
-        int exp = exp_bits - 15;
-        result = ldexpf(mant, exp);
-    }
-
-    return (sign ? -result : result) / scale;
+    // Ampere and older: numr's bit-exact decoder (subnormals included).
+    return boostr_fp8_e5m2_to_f32_bits(u) / scale;
 #endif
 }
 
@@ -168,26 +358,9 @@ __device__ __forceinline__ uint8_t f32_to_fp8_e5m2_raw(float x, float scale = 1.
          : "f"(x), "f"(0.0f));  // Padding: e5m2x2 packs 2 scalars, second is zeroed
     return (uint8_t)result;
 #else
-    // Ampere and older: Software emulation
-    x = x * scale;
-    if (x == 0.0f) return 0;
-
-    int sign = (x < 0.0f) ? 1 : 0;
-    float abs_x = fabsf(x);
-
-    int exp_bits;
-    float mant;
-    frexpf(abs_x, &exp_bits);
-    exp_bits = exp_bits - 1;
-    mant = ldexpf(abs_x, -exp_bits);
-
-    exp_bits = max(-15, min(16, exp_bits));
-    int exp_encoded = exp_bits + 15;
-
-    int mant_bits = (int)roundf((mant - 1.0f) * 4.0f);
-    mant_bits = max(0, min(3, mant_bits));
-
-    return (sign << 7) | (exp_encoded << 2) | mant_bits;
+    // Ampere and older: numr's bit-exact encoder (round-to-nearest-even,
+    // mantissa carry into the exponent, real subnormal path).
+    return boostr_f32_to_fp8_e5m2_bits(x * scale);
 #endif
 }
 #endif  // __CUDA_ARCH__ >= 800

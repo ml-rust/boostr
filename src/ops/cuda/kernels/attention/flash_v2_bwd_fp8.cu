@@ -508,4 +508,44 @@ extern "C" __global__ void flash_attention_bwd_256_sm_fp8(
     );
 }
 
+// ============================================================================
+// Diagnostic probe: E4M3 round trip AS COMPILED IN THIS TRANSLATION UNIT
+// ============================================================================
+//
+// Exercises the same `f32_to_fp8_e4m3_raw` / `fp8_e4m3_to_f32` pair the
+// backward kernel above uses, at the same arch (sm_80) and under the same
+// `--use_fast_math` flag. Tests compare its two outputs against numr's cast:
+// `raw` isolates the ENCODER, `dec` isolates the DECODER. A disagreement names
+// which converter is wrong; agreement rules both out and moves the search
+// upstream into the gradient itself.
+//
+// `scale` is 1.0f so the probe measures rounding only, not the scale multiply.
+extern "C" __global__ void fp8_e4m3_roundtrip_probe(
+    const float* __restrict__ in,
+    boostr_fp8_e4m3* __restrict__ raw,
+    float* __restrict__ dec,
+    const int n
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    const uint8_t byte = f32_to_fp8_e4m3_raw(in[idx], 1.0f);
+    raw[idx] = boostr_fp8_e4m3(byte);
+    dec[idx] = fp8_e4m3_to_f32(byte, 1.0f);
+}
+
+// Same probe for E5M2, which shares the converter family and therefore shares
+// every rounding, carry, and subnormal path with E4M3.
+extern "C" __global__ void fp8_e5m2_roundtrip_probe(
+    const float* __restrict__ in,
+    boostr_fp8_e5m2* __restrict__ raw,
+    float* __restrict__ dec,
+    const int n
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    const uint8_t byte = f32_to_fp8_e5m2_raw(in[idx], 1.0f);
+    raw[idx] = boostr_fp8_e5m2(byte);
+    dec[idx] = fp8_e5m2_to_f32(byte, 1.0f);
+}
+
 #endif  // __CUDA_ARCH__ >= 800

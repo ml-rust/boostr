@@ -16,8 +16,9 @@
 //! slabs are one staging buffer the workers split with
 //! [`rayon::slice::ParallelSliceMut::par_chunks_mut`], and each worker holds one
 //! tile buffer and one reconstruction buffer that
-//! [`unpack_tile_range`] and [`dequantize_into`] refill in place. So the
-//! allocation count is a small constant, not a multiple of the chunk count.
+//! [`unpack_tile_range`] and [`super::dequantize_tiles_into`] refill in
+//! place. So the allocation count is a small constant, not a multiple of the
+//! chunk count.
 //!
 //! # What the plane layout costs
 //!
@@ -29,20 +30,29 @@
 //! CONFORMANCE.md Section 8.1 leaves code-plane ordering unfrozen and settles
 //! it by benchmark; this kernel is where that measurement is taken.
 //!
-//! # Scalar, and shaped for SIMD
+//! # Where the vector work is
 //!
-//! [`tile_dot`] is the single arithmetic entry point, and reconstruction runs
-//! through `tcf-core`'s own [`dequantize_into`]. A SIMD unit replaces the body
-//! of `tile_dot` and adds a widened reconstruction behind the same call, with
-//! no change to the traversal above it.
+//! Two places, both resolved once per matmul rather than per tile.
+//! Reconstruction runs through [`super::dequantize_tiles_into`], which
+//! applies Section 13.0's arithmetic eight elements at a time and is
+//! bit-identical to `tcf-core`'s scalar definition. The dot is
+//! [`select_dot_f32`], which accumulates in vector lanes.
+//!
+//! The dot is the one place this kernel does NOT reproduce the reference bit
+//! for bit: lane accumulation reorders a float sum, and FMA rounds a
+//! multiply-add once instead of twice. Both are summation-order effects on an
+//! already-approximate reduction, so the correctness gate below compares
+//! against a dense reference within tolerance — as it did before the vector
+//! path existed. The reconstruction feeding it stays exact.
 
 use rayon::prelude::*;
-use tcf_core::{LogicalTile, dequantize_into};
+use tcf_core::LogicalTile;
 
 use crate::error::{Error, Result};
 use crate::format::tcf::tcf_error;
 use crate::quant::TcfEncoding;
 
+use super::super::simd::dot_f32::{DotF32, select_dot_f32};
 use super::stream::unpack_tile_range;
 
 /// Execution tiles one worker decodes at a time.
@@ -135,6 +145,8 @@ pub fn tcf_matmul_f32(
         .checked_mul(rows_per_group)
         .ok_or_else(|| overflow(encoding))?;
     let mut staging = vec![0.0f32; m.checked_mul(n).ok_or_else(|| overflow(encoding))?];
+    // One CPU feature probe for the whole matmul, not one per tile.
+    let dot = select_dot_f32();
     staging
         .par_chunks_mut(slab_stride)
         .enumerate()
@@ -155,6 +167,7 @@ pub fn tcf_matmul_f32(
                         total_tiles,
                     },
                     encoding,
+                    dot,
                     slab,
                     tiles,
                     values,
@@ -201,12 +214,15 @@ struct RowGroup {
 ///
 /// `slab` arrives zeroed and is accumulated into. `tiles` and `values` are the
 /// worker's reusable decode buffers: both are refilled per chunk, so a whole
-/// row group allocates nothing.
+/// row group allocates nothing. `dot` is the caller's already-selected f32
+/// dot, so no worker probes CPU features per tile.
+#[allow(clippy::too_many_arguments)]
 fn row_group(
     act: &[f32],
     payload: &[u8],
     at: RowGroup,
     encoding: TcfEncoding,
+    dot: DotF32,
     slab: &mut [f32],
     tiles: &mut Vec<LogicalTile>,
     values: &mut Vec<f32>,
@@ -239,7 +255,7 @@ fn row_group(
             u64::try_from(take).map_err(|_| overflow(encoding))?,
             tiles,
         )?;
-        dequantize_into(tiles.as_slice(), layout, values)
+        super::dequantize_tiles_into(tiles.as_slice(), layout, values)
             .map_err(|e| tcf_error(&format!("{} dequantize range", encoding.name()), e))?;
 
         for (index, weights) in values.chunks_exact(at.tile).enumerate() {
@@ -262,22 +278,12 @@ fn row_group(
                 let slot = slab
                     .get_mut(row * rows + slab_column)
                     .ok_or_else(|| short(encoding))?;
-                *slot += tile_dot(activations, weights);
+                *slot += dot(activations, weights);
             }
         }
         decoded += take;
     }
     Ok(())
-}
-
-/// Dot product of one reconstructed tile against the activation window it
-/// covers. Scalar; the SIMD unit replaces this body.
-fn tile_dot(activations: &[f32], weights: &[f32]) -> f32 {
-    let mut sum = 0.0f32;
-    for (a, w) in activations.iter().zip(weights.iter()) {
-        sum += a * w;
-    }
-    sum
 }
 
 /// Greatest common divisor, for the row step that lands on a super-block.

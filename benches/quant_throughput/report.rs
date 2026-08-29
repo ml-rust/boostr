@@ -224,10 +224,11 @@ fn print_caveats(context: &Context) {
     println!();
     println!("What this does NOT measure");
     println!("  - Quality. Section 8.4's gate is cost AND quality; this is the cost half.");
-    println!("  - A layout comparison on CPU. boostr's TCF fused matmul is SCALAR");
-    println!("    (quant/cpu/kernels/tcf/matmul.rs), while Q4_K and Q6_K run an AVX2 integer");
-    println!("    dp4a-style path over Q8_K-quantized activations and Q8_0 runs a dequantize");
-    println!("    row plus AVX2/FMA dot. A CPU fused-vs-fused row is mostly SIMD versus scalar.");
+    println!("  - A layout comparison on CPU. boostr's TCF fused matmul reconstructs each");
+    println!("    tile to f32 with AVX2 and dots it with AVX2/FMA, like the Q8_0 row, while");
+    println!("    Q4_K and Q6_K run an AVX2 INTEGER dp4a-style path over Q8_K-quantized");
+    println!("    activations. Those two rows compare float arithmetic against integer");
+    println!("    arithmetic, not a layout against a layout.");
     println!("  - Kernel time on CUDA or WebGPU. Instructions there count host-side LAUNCH");
     println!("    work. Judge those rows by ns*, and only on a verified quiet machine.");
     println!("  - End-to-end model throughput, memory bandwidth, or load time.");

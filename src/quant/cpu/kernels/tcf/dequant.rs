@@ -1,4 +1,4 @@
-//! CPU scalar dequantization of a TCF native quantized payload.
+//! CPU dequantization of a TCF native quantized payload.
 //!
 //! # Why there is no unpack loop here
 //!
@@ -6,16 +6,25 @@
 //! implementation the definition of the semantics, and MIGRATION.md
 //! Section 4.5.3 forbids a second copy of a block layout. So this kernel
 //! holds no plane offset, no nibble index, no 6-bit field position and no
-//! super-block stride. It calls [`unpack`] to rebuild the logical tiles and
-//! [`dequantize`] to apply Section 13.0 / Section 13.0.1 / Section 13.3 /
-//! Section 13.4, and its whole job is the surrounding shape and length
-//! checks plus the `Result` mapping into boostr's error type.
+//! super-block stride. It calls [`unpack`] to rebuild the logical tiles, and
+//! its whole job is the surrounding shape and length checks plus the
+//! `Result` mapping into boostr's error type.
 //!
 //! That is not a placeholder. A hand-written unpack here would be a second
 //! definition of the format, and Q6_K already shipped once in this codebase
-//! with a wrong field order that its own reader agreed with. If a future
-//! unit needs a faster unpack for a fused kernel, it must be added beside a
-//! test asserting bit-for-bit equality with this path, never instead of it.
+//! with a wrong field order that its own reader agreed with.
+//!
+//! # Where the reconstruction runs
+//!
+//! Section 13.0's arithmetic is applied by
+//! [`super::dequantize_tiles_into`], eight elements per vector iteration,
+//! because `tcf-core`'s per-element `f32::from(i8)` has no shape a compiler
+//! vectorizes. That is arithmetic, not format: the codes are already whole
+//! bytes by then, and the two-level `(d, m)` resolution of Section 13.3 and
+//! Section 13.4 still runs inside `tcf-core`. It is admitted only because
+//! the gate below asserts it equals `tcf_core::dequantize` bit for bit, for
+//! all seven v1 encodings — the condition this module named in advance for
+//! any faster path added beside it.
 //!
 //! # Seam for the fused quantized matmul
 //!
@@ -26,7 +35,7 @@
 //! reach `tcf-core` through this module's shape math, so neither can disagree
 //! with the other on tile count.
 
-use tcf_core::{LogicalTile, dequantize, unpack};
+use tcf_core::{LogicalTile, unpack};
 
 use crate::error::{Error, Result};
 use crate::format::tcf::tcf_error;
@@ -56,7 +65,7 @@ pub fn unpack_tiles(
 /// Dequantize a TCF payload into `product(shape)` row-major f32 values.
 ///
 /// Bit for bit what `tcf_core::unpack` followed by `tcf_core::dequantize`
-/// produces, because that is literally what runs.
+/// produces, over the vectorized element loop rather than the scalar one.
 ///
 /// # Errors
 /// Every error [`unpack_tiles`] raises, plus [`Error::ModelError`] when the
@@ -65,7 +74,8 @@ pub fn unpack_tiles(
 pub fn dequant_tcf(payload: &[u8], encoding: TcfEncoding, shape: &[usize]) -> Result<Vec<f32>> {
     let expected: usize = shape.iter().product();
     let tiles = unpack_tiles(payload, encoding, shape)?;
-    let values = dequantize(&tiles, encoding.layout())
+    let mut values = Vec::new();
+    super::dequantize_tiles_into(&tiles, encoding.layout(), &mut values)
         .map_err(|e| tcf_error(&format!("{} dequantize", encoding.name()), e))?;
 
     if values.len() != expected {
@@ -83,7 +93,7 @@ pub fn dequant_tcf(payload: &[u8], encoding: TcfEncoding, shape: &[usize]) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tcf_core::{NativeEncoding, pack, quantize};
+    use tcf_core::{NativeEncoding, dequantize, pack, quantize};
 
     /// Every v1 native quantized encoding, the two two-level forms included.
     const ENCODINGS: [NativeEncoding; 7] = [

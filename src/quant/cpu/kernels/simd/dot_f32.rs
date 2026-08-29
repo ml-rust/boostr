@@ -59,3 +59,96 @@ pub unsafe fn dot_f32_avx2_fma(a: *const f32, b: *const f32, len: usize) -> f32 
         result
     }
 }
+
+/// An f32 dot product over two equal-length windows, resolved once and then
+/// called per tile.
+///
+/// A fused matmul calls the dot once per tile per activation row, so probing
+/// CPU features inside it would repeat an atomic load every 64 elements.
+/// [`select_dot_f32`] pays that once per matmul instead.
+pub type DotF32 = fn(&[f32], &[f32]) -> f32;
+
+/// The fastest f32 dot this CPU supports.
+///
+/// Every returned implementation accumulates in vector lanes, so the sum is
+/// NOT in the scalar left-to-right order and NOT bit-identical to it. A
+/// caller that needs bit-identity must not use this.
+pub fn select_dot_f32() -> DotF32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return dot_f32_avx2_fma_slices;
+        }
+        dot_f32_scalar
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        dot_f32_neon_slices
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        dot_f32_scalar
+    }
+}
+
+/// [`dot_f32_avx2_fma`] over slices, so the pointer contract is discharged
+/// by the slice lengths.
+#[cfg(target_arch = "x86_64")]
+fn dot_f32_avx2_fma_slices(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len().min(b.len());
+    // SAFETY: AVX2 and FMA were checked by `select_dot_f32`, which is the
+    // only producer of this function pointer. `len` is bounded by both
+    // slice lengths, so both are valid for `len` f32 reads.
+    unsafe { dot_f32_avx2_fma(a.as_ptr(), b.as_ptr(), len) }
+}
+
+/// [`dot_f32_neon`] over slices, under the same length rule.
+#[cfg(target_arch = "aarch64")]
+fn dot_f32_neon_slices(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len().min(b.len());
+    // SAFETY: NEON is architectural on AArch64. `len` is bounded by both
+    // slice lengths, so both are valid for `len` f32 reads.
+    unsafe { super::aarch64::dot_f32::dot_f32_neon(a.as_ptr(), b.as_ptr(), len) }
+}
+
+/// Left-to-right f32 dot product. Correct on every machine.
+pub fn dot_f32_scalar(a: &[f32], b: &[f32]) -> f32 {
+    let mut sum = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        sum += x * y;
+    }
+    sum
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The selected dot tracks the scalar one within f32 accumulation
+    /// error. It is NOT asserted bit-identical: lane accumulation reorders
+    /// the sum, which is exactly why this tolerance exists.
+    #[test]
+    fn the_selected_dot_tracks_the_scalar_dot() {
+        for len in [0usize, 1, 7, 8, 63, 64, 257] {
+            let a: Vec<f32> = (0..len).map(|i| ((i as f32) * 0.017).sin()).collect();
+            let b: Vec<f32> = (0..len).map(|i| ((i as f32) * 0.031).cos() * 1.5).collect();
+            let got = select_dot_f32()(&a, &b);
+            let want = dot_f32_scalar(&a, &b);
+            assert!(
+                (got - want).abs() <= 1e-4 * want.abs().max(1.0),
+                "len {len}: selected {got}, scalar {want}"
+            );
+        }
+    }
+
+    /// A shorter operand bounds the dot, so no read runs past either slice.
+    #[test]
+    fn the_shorter_operand_bounds_the_dot() {
+        let a = vec![1.0f32; 40];
+        let b = vec![2.0f32; 12];
+        assert!((select_dot_f32()(&a, &b) - 24.0).abs() < 1e-5);
+        assert!((select_dot_f32()(&b, &a) - 24.0).abs() < 1e-5);
+    }
+}

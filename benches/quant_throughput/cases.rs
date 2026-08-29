@@ -85,7 +85,8 @@ const DECODE_M: [usize; 1] = [1];
 const PREFILL_M: [usize; 2] = [32, 256];
 
 /// Shapes the prefill sizes run on. Restricted to two, because a `M = 256`
-/// GEMM against a scalar CPU kernel is minutes of work per extra shape.
+/// GEMM does 256 times the arithmetic a GEMV does, which is minutes of work
+/// per extra shape.
 const PREFILL_SHAPES: [&str; 2] = ["q_proj", "down_proj"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]

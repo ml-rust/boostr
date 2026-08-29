@@ -1,10 +1,12 @@
 //! One tensor's payload bytes to dense row-major f32 values.
 //!
 //! Native quantized encodings decode through `tcf-core`'s reference codec:
-//! `unpack` rebuilds the logical tiles, `dequantize` applies Section 13.0 or
-//! Section 13.0.1. Nothing here holds a bit position or a plane order — a
-//! second copy of a block layout is exactly what this format exists to
-//! prevent (MIGRATION.md Section 4.5.3).
+//! `unpack` rebuilds the logical tiles, and
+//! [`crate::quant::cpu::kernels::tcf::dequantize_tiles_into`] applies
+//! Section 13.0 or Section 13.0.1 with a vector element loop that is
+//! bit-identical to `tcf_core::dequantize`. Nothing here holds a bit
+//! position or a plane order — a second copy of a block layout is exactly
+//! what this format exists to prevent (MIGRATION.md Section 4.5.3).
 //!
 //! Raw encodings convert element by element through numr's dtype
 //! conversions. Section 12: a raw encoding stores literal values with no
@@ -12,7 +14,9 @@
 
 use crate::error::{Error, Result};
 use numr::dtype::{FP8E4M3, FP8E5M2};
-use tcf_core::{Encoding, RawEncoding, TensorRecord, dequantize, tile_count, unpack};
+use tcf_core::{Encoding, RawEncoding, TensorRecord, tile_count, unpack};
+
+use crate::quant::cpu::kernels::tcf::dequantize_tiles_into;
 
 use super::error::tcf_tensor_error;
 use super::metadata::encoding_name;
@@ -57,7 +61,10 @@ pub fn decode_tensor_f32(record: &TensorRecord, payload: &[u8], name: &str) -> R
                 .map_err(|e| tcf_tensor_error(name, "tile count", e))?;
             let logical =
                 unpack(payload, tiles, layout).map_err(|e| tcf_tensor_error(name, "unpack", e))?;
-            dequantize(&logical, layout).map_err(|e| tcf_tensor_error(name, "dequantize", e))?
+            let mut decoded = Vec::new();
+            dequantize_tiles_into(&logical, layout, &mut decoded)
+                .map_err(|e| tcf_tensor_error(name, "dequantize", e))?;
+            decoded
         }
         Encoding::Raw(raw) => decode_raw(raw, payload, name)?,
         other => {

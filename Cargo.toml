@@ -258,6 +258,11 @@ path = "examples/voxcpm/tokenizer_check.rs"
 required-features = ["audio", "f16"]
 
 [[example]]
+name = "voxcpm_quant_error_check"
+path = "examples/voxcpm/quant_error_check.rs"
+required-features = ["audio", "f16"]
+
+[[example]]
 name = "gguf_diff"
 required-features = ["audio", "f16"]
 

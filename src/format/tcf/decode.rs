@@ -50,12 +50,14 @@ pub fn decode_tensor_f32(record: &TensorRecord, payload: &[u8], name: &str) -> R
     let expected = element_count(record, name)?;
     let values = match record.encoding {
         Encoding::Native(native) => {
-            let geometry = native.geometry();
-            let tiles = tile_count(record.shape(), record.rank, geometry.tile)
+            // The layout, never the bare geometry: a `QuantGeometry` converts
+            // to a flat scale form, which sizes a two-level payload wrong.
+            let layout = native.layout();
+            let tiles = tile_count(record.shape(), record.rank, layout.geometry.tile)
                 .map_err(|e| tcf_tensor_error(name, "tile count", e))?;
-            let logical = unpack(payload, tiles, geometry)
-                .map_err(|e| tcf_tensor_error(name, "unpack", e))?;
-            dequantize(&logical, geometry).map_err(|e| tcf_tensor_error(name, "dequantize", e))?
+            let logical =
+                unpack(payload, tiles, layout).map_err(|e| tcf_tensor_error(name, "unpack", e))?;
+            dequantize(&logical, layout).map_err(|e| tcf_tensor_error(name, "dequantize", e))?
         }
         Encoding::Raw(raw) => decode_raw(raw, payload, name)?,
         other => {

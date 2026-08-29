@@ -193,17 +193,20 @@ pub fn good_file() -> Vec<u8> {
     w.add_contract(contract()).expect("adds");
 
     let weight = w.intern("layer.w").expect("interns");
-    let tile = LogicalTile {
-        group0: GroupParams {
-            scale: F16_ONE,
-            min: None,
-        },
-        group1: Some(GroupParams {
-            scale: F16_HALF,
-            min: None,
-        }),
-        code: Code64::Signed(q4_codes()),
-    };
+    let tile = LogicalTile::new(
+        &[
+            GroupParams {
+                scale: F16_ONE,
+                min: None,
+            },
+            GroupParams {
+                scale: F16_HALF,
+                min: None,
+            },
+        ],
+        Code64::Signed(q4_codes()),
+    )
+    .expect("two groups fit a 64-element tile");
     w.add_quantized_tensor(
         tensor(
             0,

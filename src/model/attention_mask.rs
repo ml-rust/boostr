@@ -125,6 +125,8 @@ mod tests {
 
     /// A built BF16 mask carries finite masked entries and exact zeros on the
     /// admitted side, so the F32 build + single cast survives the round trip.
+    // BF16 casts need numr's `f16` feature; without it `to_dtype` errors.
+    #[cfg(feature = "f16")]
     #[test]
     fn bf16_mask_is_finite_and_causal() {
         let (client, device) = cpu_setup();

@@ -414,9 +414,8 @@ mod tests {
         let device = cpu_device();
         let client = CpuClient::new(device.clone());
         let encoding = TcfEncoding::new(NativeEncoding::Q4S32T64);
-        let qt =
-            QuantTensor::<CpuRuntime>::from_bytes(&[0u8; 2 * 36], encoding, &[2, 64], &device)
-                .expect("two tiles");
+        let qt = QuantTensor::<CpuRuntime>::from_bytes(&[0u8; 2 * 36], encoding, &[2, 64], &device)
+            .expect("two tiles");
         let indices = Tensor::<CpuRuntime>::from_slice(&[0i64], &[1], &device).unwrap();
 
         let err = qt.gather_rows(&client, &indices).expect_err("refused");

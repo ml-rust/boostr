@@ -1,13 +1,13 @@
 //! CPU implementation of QuantMatmulOps for CpuClient.
 
 use crate::error::{Error, Result};
-use crate::quant::QuantTensor;
 use crate::quant::traits::QuantMatmulOps;
+use crate::quant::{QuantScheme, QuantTensor};
 use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
 
-use super::super::kernels::{int4_gemm, int4_gemm_gptq, marlin_gemm, quant_matmul};
+use super::super::kernels::{int4_gemm, int4_gemm_gptq, marlin_gemm, quant_matmul, tcf};
 use super::helpers::{output_shape, validate_input};
 
 impl QuantMatmulOps<CpuRuntime> for CpuClient {
@@ -194,8 +194,15 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         let total_elements: usize = a_shape.iter().product();
         let m = total_elements / k;
 
-        // Validate all weights have same format and K
-        let format = weights[0].format()?;
+        // The batch kernel amortizes activation preprocessing across one GGUF
+        // block format. A TCF weight has no place in it, so a batch holding one
+        // goes through the per-weight fused path instead of erroring.
+        let Some(format) = weights[0].scheme().gguf() else {
+            return weights
+                .iter()
+                .map(|w| self.quant_matmul(activation, w))
+                .collect();
+        };
         for (i, w) in weights.iter().enumerate() {
             let ws = w.shape();
             if ws.len() != 2 {
@@ -208,8 +215,8 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
                     reason: format!("weight[{}] K={} != activation K={}", i, ws[1], k),
                 });
             }
-            if w.format()? != format {
-                // Fall back to sequential if mixed formats
+            if w.scheme().gguf() != Some(format) {
+                // Fall back to sequential if mixed formats or mixed codecs
                 return weights
                     .iter()
                     .map(|w| self.quant_matmul(activation, w))
@@ -322,17 +329,27 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         let act_data = unsafe { activation.storage().as_host_slice::<f32>() };
         let weight_bytes = unsafe { weight.storage().as_host_slice::<u8>() };
 
-        // Run kernel
+        // Run kernel. Both codecs are fused: the weight stays packed, and no
+        // f32 copy of it is ever built. They need different kernels because
+        // GGUF finds a block's codes and its scale adjacent while TCF spreads
+        // them over whole-tensor planes.
         let mut output = vec![0.0f32; m * n];
-        quant_matmul::quant_matmul_f32(
-            act_data,
-            weight_bytes,
-            &mut output,
-            m,
-            k,
-            n,
-            weight.format()?,
-        );
+        match weight.scheme() {
+            QuantScheme::Gguf(format) => {
+                quant_matmul::quant_matmul_f32(
+                    act_data,
+                    weight_bytes,
+                    &mut output,
+                    m,
+                    k,
+                    n,
+                    format,
+                );
+            }
+            QuantScheme::Tcf(encoding) => {
+                tcf::tcf_matmul_f32(act_data, weight_bytes, &mut output, m, k, n, encoding)?;
+            }
+        }
 
         // Build output shape: [..., M, N] (replace last dim K with N)
         let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();

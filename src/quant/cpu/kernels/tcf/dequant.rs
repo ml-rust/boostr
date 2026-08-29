@@ -19,10 +19,12 @@
 //!
 //! # Seam for the fused quantized matmul
 //!
-//! [`unpack_tiles`] is the tile-level entry point. A fused matmul iterates
-//! the tiles it returns and accumulates per tile, so the f32 tensor
-//! [`dequant_tcf`] builds is never materialized. Both functions share this
-//! module's shape math, so the two paths cannot disagree on tile count.
+//! [`unpack_tiles`] is the tile-level entry point, and it decodes the WHOLE
+//! tensor. The fused matmul cannot use it for that reason: it takes bounded
+//! ranges from [`super::unpack_tile_range`] instead and accumulates per tile,
+//! so the f32 tensor [`dequant_tcf`] builds is never materialized. Both paths
+//! reach `tcf-core` through this module's shape math, so neither can disagree
+//! with the other on tile count.
 
 use tcf_core::{LogicalTile, dequantize, unpack};
 

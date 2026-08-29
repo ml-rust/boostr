@@ -14,8 +14,14 @@ use numr::tensor::Tensor;
 /// # Contract
 ///
 /// - `activation` shape: `[..., M, K]` where K matches weight's last-but-one dim
-/// - `weight` shape: `[N, K]` (2D quantized weight — N output rows, K input cols; blocks packed along K)
+/// - `weight` shape: `[N, K]` (2D quantized weight — N output rows, K input cols)
 /// - Output shape: `[..., M, N]` with same dtype as `activation`
+///
+/// The weight's [`crate::quant::QuantScheme`] decides how those bytes are
+/// addressed, and an implementation dispatches on it: a GGUF scheme packs
+/// blocks contiguously along K, while a TCF scheme stores whole planes over the
+/// whole tensor and needs its own kernel. Both stay packed — an implementation
+/// that dequantizes the weight first has not implemented this trait.
 ///
 /// The result should match `matmul(activation, dequantize(weight))` within
 /// quantization tolerance (see Verification Standards).

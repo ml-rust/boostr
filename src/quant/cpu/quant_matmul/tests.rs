@@ -247,3 +247,88 @@ fn test_quant_matmul_q3k_matches_dequant_matmul() {
         );
     }
 }
+
+/// A TCF weight reaches a fused kernel through the same trait method a GGUF
+/// weight does — no second trait, no dequantize-first fallback — and its result
+/// agrees with dequantize-then-dense-matmul.
+#[test]
+fn quant_matmul_dispatches_every_tcf_encoding_to_a_fused_kernel() {
+    use crate::quant::TcfEncoding;
+    use tcf_core::{NativeEncoding, pack, quantize};
+
+    let (client, device) = setup();
+    // [3, 320]: 15 tiles, five per row, so the trailing super-block is partial.
+    let (n, k, m) = (3usize, 320usize, 2usize);
+    let weight: Vec<f32> = (0..n * k).map(|i| (i as f32 * 0.021).sin() * 1.4).collect();
+    let act: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.013).cos()).collect();
+    let activation = Tensor::<CpuRuntime>::from_slice(&act, &[m, k], &device).unwrap();
+
+    for native in [
+        NativeEncoding::Q4S32T64,
+        NativeEncoding::Q4AS32T64,
+        NativeEncoding::Q4AS64T64,
+        NativeEncoding::Q6S32T64,
+        NativeEncoding::Q8S32T64,
+        NativeEncoding::Q6S16DT64,
+        NativeEncoding::Q4AS32DT64,
+    ] {
+        let layout = native.layout();
+        let tiles = quantize(&weight, &[n as u64, k as u64], 2, layout).unwrap();
+        let payload = pack(&tiles, layout).unwrap();
+        let encoding = TcfEncoding::new(native);
+        let qt =
+            QuantTensor::<CpuRuntime>::from_bytes(&payload, encoding, &[n, k], &device).unwrap();
+
+        let fused = client.quant_matmul(&activation, &qt).unwrap();
+        assert_eq!(fused.shape(), &[m, n]);
+        let got = fused.to_vec::<f32>();
+
+        let dense = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+        for row in 0..m {
+            for column in 0..n {
+                let mut want = 0.0f32;
+                for index in 0..k {
+                    want += act[row * k + index] * dense[column * k + index];
+                }
+                let tolerance = 1e-3 * want.abs().max(1.0);
+                assert!(
+                    (got[row * n + column] - want).abs() <= tolerance,
+                    "{} at [{row}, {column}]: fused {}, dense {want}",
+                    encoding.name(),
+                    got[row * n + column],
+                );
+            }
+        }
+    }
+}
+
+/// The batch entry point amortizes activation work across one GGUF block
+/// format. A TCF weight in the batch takes the per-weight fused path rather
+/// than erroring.
+#[test]
+fn quant_matmul_batch_accepts_a_tcf_weight() {
+    use crate::quant::TcfEncoding;
+    use tcf_core::{NativeEncoding, pack, quantize};
+
+    let (client, device) = setup();
+    let (n, k) = (4usize, 128usize);
+    let weight: Vec<f32> = (0..n * k).map(|i| (i as f32 * 0.03).cos()).collect();
+    let act: Vec<f32> = (0..k).map(|i| (i as f32 * 0.05).sin()).collect();
+    let activation = Tensor::<CpuRuntime>::from_slice(&act, &[1, k], &device).unwrap();
+
+    let layout = NativeEncoding::Q8S32T64.layout();
+    let tiles = quantize(&weight, &[n as u64, k as u64], 2, layout).unwrap();
+    let payload = pack(&tiles, layout).unwrap();
+    let encoding = TcfEncoding::new(NativeEncoding::Q8S32T64);
+    let qt = QuantTensor::<CpuRuntime>::from_bytes(&payload, encoding, &[n, k], &device).unwrap();
+
+    let batched = client.quant_matmul_batch(&activation, &[&qt, &qt]).unwrap();
+    assert_eq!(batched.len(), 2);
+    let single = client
+        .quant_matmul(&activation, &qt)
+        .unwrap()
+        .to_vec::<f32>();
+    for result in &batched {
+        assert_eq!(result.to_vec::<f32>(), single);
+    }
+}

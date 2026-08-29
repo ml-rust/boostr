@@ -273,7 +273,7 @@ mod tests {
         assert!(q4_w.is_quantized());
         let qt = q4_w.as_quant_tensor().unwrap();
         assert_eq!(qt.shape(), &[32]);
-        assert_eq!(qt.format(), QuantFormat::Q4_0);
+        assert_eq!(qt.format().unwrap(), QuantFormat::Q4_0);
     }
 
     #[test]

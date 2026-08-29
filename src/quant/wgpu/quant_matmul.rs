@@ -175,7 +175,7 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
             });
         }
 
-        let (shader_source, entry_point) = match weight.format() {
+        let (shader_source, entry_point) = match weight.format()? {
             QuantFormat::Q4_0 => (
                 shader_gen::generate_quant_matmul_q4_0_shader(),
                 "quant_matmul_q4_0",

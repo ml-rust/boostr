@@ -134,7 +134,7 @@ where
 {
     let weight_ref = QuantTensor::from_storage(
         weight.storage().clone(),
-        weight.format(),
+        weight.scheme(),
         weight.shape(),
         weight.device(),
     )?;

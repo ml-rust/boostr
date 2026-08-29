@@ -2,13 +2,13 @@
 
 use crate::error::{Error, Result};
 use crate::quant::traits::DequantOps;
-use crate::quant::{QuantFormat, QuantTensor};
+use crate::quant::{QuantFormat, QuantScheme, QuantTensor};
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
 
-use super::kernels::{dequant, nf4};
+use super::kernels::{dequant, nf4, tcf};
 
 impl DequantOps<CpuRuntime> for CpuClient {
     fn nf4_dequant(
@@ -81,38 +81,46 @@ impl DequantOps<CpuRuntime> for CpuClient {
 
         let numel = qt.numel();
 
-        // Read raw block bytes from storage (zero-copy for CPU)
+        // Read raw packed bytes from storage (zero-copy for CPU)
         // SAFETY: CpuRuntime stores data as host pointers
         let block_bytes = unsafe { qt.storage().as_host_slice::<u8>() };
 
         // Dequantize to f32 first
-        let mut f32_output = vec![0.0f32; numel];
-
-        match qt.format() {
-            QuantFormat::Q4_0 => dequant::dequant_q4_0(block_bytes, &mut f32_output),
-            QuantFormat::Q4_1 => dequant::dequant_q4_1(block_bytes, &mut f32_output),
-            QuantFormat::Q5_0 => dequant::dequant_q5_0(block_bytes, &mut f32_output),
-            QuantFormat::Q5_1 => dequant::dequant_q5_1(block_bytes, &mut f32_output),
-            QuantFormat::Q8_0 => dequant::dequant_q8_0(block_bytes, &mut f32_output),
-            QuantFormat::Q8_1 => dequant::dequant_q8_1(block_bytes, &mut f32_output),
-            QuantFormat::Q2K => dequant::dequant_q2k(block_bytes, &mut f32_output),
-            QuantFormat::Q3K => dequant::dequant_q3k(block_bytes, &mut f32_output),
-            QuantFormat::Q4K => dequant::dequant_q4k(block_bytes, &mut f32_output),
-            QuantFormat::Q5K => dequant::dequant_q5k(block_bytes, &mut f32_output),
-            QuantFormat::Q6K => dequant::dequant_q6k(block_bytes, &mut f32_output),
-            QuantFormat::Q8K => dequant::dequant_q8k(block_bytes, &mut f32_output),
-            QuantFormat::IQ4NL => dequant::dequant_iq4_nl(block_bytes, &mut f32_output),
-            QuantFormat::IQ4XS => dequant::dequant_iq4_xs(block_bytes, &mut f32_output),
-            QuantFormat::IQ2XXS => dequant::dequant_iq2_xxs(block_bytes, &mut f32_output),
-            QuantFormat::IQ2XS => dequant::dequant_iq2_xs(block_bytes, &mut f32_output),
-            QuantFormat::IQ2S => dequant::dequant_iq2_s(block_bytes, &mut f32_output),
-            QuantFormat::IQ3XXS => dequant::dequant_iq3_xxs(block_bytes, &mut f32_output),
-            QuantFormat::IQ3S => dequant::dequant_iq3_s(block_bytes, &mut f32_output),
-            QuantFormat::IQ1S => dequant::dequant_iq1_s(block_bytes, &mut f32_output),
-            QuantFormat::IQ1M => dequant::dequant_iq1_m(block_bytes, &mut f32_output),
-            QuantFormat::TQ1_0 => dequant::dequant_tq1_0(block_bytes, &mut f32_output),
-            QuantFormat::TQ2_0 => dequant::dequant_tq2_0(block_bytes, &mut f32_output),
-        }
+        let f32_output = match qt.scheme() {
+            QuantScheme::Gguf(format) => {
+                let mut out = vec![0.0f32; numel];
+                match format {
+                    QuantFormat::Q4_0 => dequant::dequant_q4_0(block_bytes, &mut out),
+                    QuantFormat::Q4_1 => dequant::dequant_q4_1(block_bytes, &mut out),
+                    QuantFormat::Q5_0 => dequant::dequant_q5_0(block_bytes, &mut out),
+                    QuantFormat::Q5_1 => dequant::dequant_q5_1(block_bytes, &mut out),
+                    QuantFormat::Q8_0 => dequant::dequant_q8_0(block_bytes, &mut out),
+                    QuantFormat::Q8_1 => dequant::dequant_q8_1(block_bytes, &mut out),
+                    QuantFormat::Q2K => dequant::dequant_q2k(block_bytes, &mut out),
+                    QuantFormat::Q3K => dequant::dequant_q3k(block_bytes, &mut out),
+                    QuantFormat::Q4K => dequant::dequant_q4k(block_bytes, &mut out),
+                    QuantFormat::Q5K => dequant::dequant_q5k(block_bytes, &mut out),
+                    QuantFormat::Q6K => dequant::dequant_q6k(block_bytes, &mut out),
+                    QuantFormat::Q8K => dequant::dequant_q8k(block_bytes, &mut out),
+                    QuantFormat::IQ4NL => dequant::dequant_iq4_nl(block_bytes, &mut out),
+                    QuantFormat::IQ4XS => dequant::dequant_iq4_xs(block_bytes, &mut out),
+                    QuantFormat::IQ2XXS => dequant::dequant_iq2_xxs(block_bytes, &mut out),
+                    QuantFormat::IQ2XS => dequant::dequant_iq2_xs(block_bytes, &mut out),
+                    QuantFormat::IQ2S => dequant::dequant_iq2_s(block_bytes, &mut out),
+                    QuantFormat::IQ3XXS => dequant::dequant_iq3_xxs(block_bytes, &mut out),
+                    QuantFormat::IQ3S => dequant::dequant_iq3_s(block_bytes, &mut out),
+                    QuantFormat::IQ1S => dequant::dequant_iq1_s(block_bytes, &mut out),
+                    QuantFormat::IQ1M => dequant::dequant_iq1_m(block_bytes, &mut out),
+                    QuantFormat::TQ1_0 => dequant::dequant_tq1_0(block_bytes, &mut out),
+                    QuantFormat::TQ2_0 => dequant::dequant_tq2_0(block_bytes, &mut out),
+                }
+                out
+            }
+            // TCF is plane-major and its two-level encodings carry a second
+            // scale level, so it has its own kernel. See
+            // `kernels::tcf` for why that kernel delegates to `tcf-core`.
+            QuantScheme::Tcf(encoding) => tcf::dequant_tcf(block_bytes, encoding, qt.shape())?,
+        };
 
         // Create f32 tensor
         let f32_tensor = Tensor::<CpuRuntime>::from_slice(&f32_output, qt.shape(), qt.device())?;
@@ -253,5 +261,42 @@ mod tests {
         // I32 is not a valid dequant target
         let result = client.dequantize(&qt, DType::I32);
         assert!(result.is_err());
+    }
+
+    /// A TCF weight reaches `DequantOps` through the SAME trait and the same
+    /// tensor type as a GGUF weight, and its values are `tcf-core`'s own,
+    /// bit for bit.
+    #[test]
+    fn a_tcf_tensor_dequantizes_through_the_same_trait() {
+        use crate::quant::TcfEncoding;
+        use tcf_core::{NativeEncoding, dequantize as tcf_dequantize, pack, quantize, unpack};
+
+        let (client, device) = setup();
+        let shape = [3usize, 320];
+        let values: Vec<f32> = (0..shape[0] * shape[1])
+            .map(|i| (i as f32 * 0.021).sin() * 2.0 - 0.3)
+            .collect();
+
+        let native = NativeEncoding::Q4AS32DT64;
+        let layout = native.layout();
+        let dims: Vec<u64> = shape.iter().map(|d| *d as u64).collect();
+        let tiles = quantize(&values, &dims, 2, layout).expect("quantizes");
+        let payload = pack(&tiles, layout).expect("packs");
+
+        let encoding = TcfEncoding::new(native);
+        let qt = QuantTensor::<CpuRuntime>::from_bytes(&payload, encoding, &shape, &device)
+            .expect("packed bytes go to the device as-is");
+        assert_eq!(qt.storage_bytes(), payload.len());
+
+        let got = client
+            .dequantize(&qt, DType::F32)
+            .expect("dequantizes")
+            .to_vec::<f32>();
+        let reference = tcf_dequantize(&unpack(&payload, 15, layout).expect("unpacks"), layout)
+            .expect("dequantizes");
+
+        let got_bits: Vec<u32> = got.iter().map(|v| v.to_bits()).collect();
+        let reference_bits: Vec<u32> = reference.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(got_bits, reference_bits);
     }
 }

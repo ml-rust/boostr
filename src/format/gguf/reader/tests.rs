@@ -130,7 +130,7 @@ fn test_load_quantized_tensor() {
         .load_tensor_quantized::<numr::runtime::cpu::CpuRuntime>("weight_q4", &device)
         .unwrap();
     assert_eq!(qt.shape(), &[32]);
-    assert_eq!(qt.format(), crate::quant::QuantFormat::Q4_0);
+    assert_eq!(qt.format().unwrap(), crate::quant::QuantFormat::Q4_0);
 }
 
 #[test]
@@ -210,7 +210,7 @@ fn test_from_bytes_load_quantized() {
         .load_tensor_quantized::<CpuRuntime>("weight_q4", &device)
         .unwrap();
     assert_eq!(qt.shape(), &[32]);
-    assert_eq!(qt.format(), crate::quant::QuantFormat::Q4_0);
+    assert_eq!(qt.format().unwrap(), crate::quant::QuantFormat::Q4_0);
 }
 
 /// Verify that `load_tensor_f32_streaming` with a zero threshold (streaming

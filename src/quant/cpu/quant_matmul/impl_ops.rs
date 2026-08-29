@@ -195,7 +195,7 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         let m = total_elements / k;
 
         // Validate all weights have same format and K
-        let format = weights[0].format();
+        let format = weights[0].format()?;
         for (i, w) in weights.iter().enumerate() {
             let ws = w.shape();
             if ws.len() != 2 {
@@ -208,7 +208,7 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
                     reason: format!("weight[{}] K={} != activation K={}", i, ws[1], k),
                 });
             }
-            if w.format() != format {
+            if w.format()? != format {
                 // Fall back to sequential if mixed formats
                 return weights
                     .iter()
@@ -331,7 +331,7 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
             m,
             k,
             n,
-            weight.format(),
+            weight.format()?,
         );
 
         // Build output shape: [..., M, N] (replace last dim K with N)

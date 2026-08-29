@@ -18,12 +18,13 @@ use memmap2::Mmap;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
-use tcf_core::TcfFile;
+use tcf_core::{Encoding, TcfFile};
 
 use super::decode::decode_tensor_f32;
 use super::error::{tcf_error, tcf_tensor_error};
-use super::metadata::{TcfHeaderInfo, TcfModuleInfo, TcfTensorInfo};
+use super::metadata::{TcfHeaderInfo, TcfModuleInfo, TcfTensorInfo, encoding_name};
 use crate::error::{Error, Result};
+use crate::quant::{QuantTensor, TcfEncoding};
 
 /// A memory-mapped TCF file with its directory decoded.
 ///
@@ -208,6 +209,66 @@ impl TcfLoader {
         Ok(out)
     }
 
+    /// Verify `name` and place it on `device` STILL QUANTIZED.
+    ///
+    /// The packed payload goes to the device verbatim, so a TCF model is held
+    /// at its on-disk size rather than at 8x that as f32. Dequantization
+    /// happens per use, through `DequantOps`, or not at all once a fused
+    /// quantized matmul consumes the [`QuantTensor`] directly.
+    ///
+    /// Native quantized encodings only. A raw encoding stores literal values
+    /// with no scale (Section 12), so it has no quantized form to hold —
+    /// load it with [`TcfLoader::load_tensor`].
+    ///
+    /// # Errors
+    /// [`Error::ModelError`] for an unknown name, a failed digest or proof
+    /// check, or a non-native encoding.
+    /// [`Error::QuantError`] when the shape and the payload length disagree.
+    pub fn load_quant_tensor<R: Runtime<DType = DType>>(
+        &self,
+        name: &str,
+        device: &R::Device,
+    ) -> Result<QuantTensor<R>> {
+        let index = self.index_of(name)?;
+        let file = self.file()?;
+        self.quant_at(&file, index, device)
+    }
+
+    /// Verify and place several tensors quantized, opening the file once.
+    ///
+    /// Prefer this over repeated [`TcfLoader::load_quant_tensor`] calls: each
+    /// call revalidates the whole directory, which is O(directory) work per
+    /// tensor.
+    ///
+    /// # Errors
+    /// Every error [`TcfLoader::load_quant_tensor`] raises, for the first name
+    /// that fails.
+    pub fn load_quant_tensors<R: Runtime<DType = DType>>(
+        &self,
+        names: &[&str],
+        device: &R::Device,
+    ) -> Result<Vec<QuantTensor<R>>> {
+        let file = self.file()?;
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            let index = self.index_of(name)?;
+            out.push(self.quant_at(&file, index, device)?);
+        }
+        Ok(out)
+    }
+
+    /// The runtime encoding descriptor for `name`, or an error naming the
+    /// encoding when it is not a native quantized one.
+    ///
+    /// A placement planner calls this to size a tensor before deciding where
+    /// it lives, without reading a payload page.
+    ///
+    /// # Errors
+    /// [`Error::ModelError`] for an unknown name or a non-native encoding.
+    pub fn quant_encoding(&self, name: &str) -> Result<TcfEncoding> {
+        native_encoding(self.tensor_info(name)?.encoding(), name)
+    }
+
     /// Verify every tensor's digests and proof vector without decoding.
     /// Section 15.
     ///
@@ -248,6 +309,27 @@ impl TcfLoader {
         decode_tensor_f32(record, payload, name)
     }
 
+    /// Verify tensor `index`, then place its packed payload on `device`.
+    fn quant_at<R: Runtime<DType = DType>>(
+        &self,
+        file: &TcfFile<'_>,
+        index: usize,
+        device: &R::Device,
+    ) -> Result<QuantTensor<R>> {
+        let name = self.name_at(index);
+        let record = file.tensors().get(index).ok_or_else(|| Error::ModelError {
+            reason: format!("TCF tensor index {index} is out of range"),
+        })?;
+        file.verify_tensor(record)
+            .map_err(|e| tcf_tensor_error(name, "verify", e))?;
+        let encoding = native_encoding(record.encoding, name)?;
+        let payload = file
+            .payload(record)
+            .map_err(|e| tcf_tensor_error(name, "payload", e))?;
+        let shape = self.shape_at(index)?;
+        QuantTensor::<R>::from_bytes(payload, encoding, &shape, device)
+    }
+
     /// The row-major shape of tensor `index`.
     fn shape_at(&self, index: usize) -> Result<Vec<usize>> {
         self.tensors
@@ -274,6 +356,23 @@ impl TcfLoader {
             .ok_or_else(|| Error::ModelError {
                 reason: format!("TCF tensor not found: {name}"),
             })
+    }
+}
+
+/// The runtime descriptor for a native quantized encoding.
+///
+/// # Errors
+/// [`Error::ModelError`] naming the encoding and the tensor, when the
+/// encoding is raw or outside the native range.
+fn native_encoding(encoding: Encoding, name: &str) -> Result<TcfEncoding> {
+    match encoding {
+        Encoding::Native(native) => Ok(TcfEncoding::new(native)),
+        other => Err(Error::ModelError {
+            reason: format!(
+                "TCF tensor '{name}': encoding {} is not natively quantized, so it has no packed form; load it as a dense tensor",
+                encoding_name(other),
+            ),
+        }),
     }
 }
 
@@ -349,6 +448,57 @@ mod tests {
             .expect("loads");
         assert_eq!(tensor.shape(), &[1, 64]);
         assert_eq!(tensor.to_vec::<f32>(), fixtures::expected_q4_values());
+    }
+
+    /// The point of the packed path: the device holds the payload at its
+    /// on-disk size, and dequantizing it later gives the same values the
+    /// dense path gives.
+    #[test]
+    fn a_quantized_tensor_loads_still_packed_and_dequantizes_identically() {
+        use crate::quant::DequantOps;
+
+        let (_file, loader) = open_fixture(&fixtures::good_file()).expect("opens");
+        let (client, device) = cpu_setup();
+        let qt = loader
+            .load_quant_tensor::<CpuRuntime>("layer.w", &device)
+            .expect("loads packed");
+
+        assert_eq!(qt.shape(), &[1, 64]);
+        // One tile of Q4S32_T64: 32 code bytes plus two binary16 scales.
+        assert_eq!(qt.storage_bytes(), 36);
+        assert_eq!(
+            qt.scheme(),
+            crate::quant::QuantScheme::Tcf(crate::quant::TcfEncoding::new(
+                NativeEncoding::Q4S32T64
+            ))
+        );
+
+        let dense = client
+            .dequantize(&qt, numr::dtype::DType::F32)
+            .expect("dequantizes");
+        assert_eq!(dense.shape(), &[1, 64]);
+        assert_eq!(dense.to_vec::<f32>(), fixtures::expected_q4_values());
+    }
+
+    /// A raw encoding has no packed form, and the error says so rather than
+    /// reinterpreting its literal values as codes.
+    #[test]
+    fn a_raw_tensor_has_no_packed_form() {
+        let (_file, loader) = open_fixture(&fixtures::good_file()).expect("opens");
+        let (_client, device) = cpu_setup();
+        let err = loader
+            .load_quant_tensor::<CpuRuntime>("layer.bias", &device)
+            .expect_err("rejects");
+        assert!(err.to_string().contains("not natively quantized"), "{err}");
+        assert!(loader.quant_encoding("layer.bias").is_err());
+    }
+
+    #[test]
+    fn the_encoding_descriptor_is_reachable_without_reading_a_payload() {
+        let (_file, loader) = open_fixture(&fixtures::good_file()).expect("opens");
+        let encoding = loader.quant_encoding("layer.w").expect("native");
+        assert_eq!(encoding.native(), NativeEncoding::Q4S32T64);
+        assert_eq!(encoding.payload_bytes(&[1, 64]).expect("bytes"), 36);
     }
 
     #[test]

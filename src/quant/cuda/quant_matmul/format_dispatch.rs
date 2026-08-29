@@ -39,13 +39,14 @@ pub(super) fn dispatch_gemv(
     n: usize,
 ) -> Result<Option<()>> {
     let device_index = act_contig.device().id();
+    let format = weight.format()?;
     let m_u32 = m as u32;
     let k_u32 = k as u32;
     let n_u32 = n as u32;
 
     // dp4a path: formats with Q8_1 activation + dp4a MWR kernels, aligned K
     if matches!(
-        weight.format(),
+        format,
         QuantFormat::Q4K
             | QuantFormat::Q6K
             | QuantFormat::Q8_0
@@ -55,8 +56,10 @@ pub(super) fn dispatch_gemv(
     ) && k.is_multiple_of(32)
     {
         tracing::debug!(
-            format = ?weight.format(),
-            m, k, n,
+            ?format,
+            m,
+            k,
+            n,
             path = "dp4a_gemv",
             "CUDA quant kernel: dp4a GEMV (optimized)"
         );
@@ -64,7 +67,7 @@ pub(super) fn dispatch_gemv(
         let q8_ptr = q8_buf.ptr();
         let weight_ptr = weight.storage().ptr();
 
-        let (kernel_name, module_name) = match weight.format() {
+        let (kernel_name, module_name) = match format {
             QuantFormat::Q4K => ("quant_gemv_q4_k_q8_1_mwr", QUANT_GEMV_MODULE),
             QuantFormat::Q6K => ("quant_gemv_q6_k_q8_1_mwr", QUANT_GEMV_MODULE),
             QuantFormat::Q8_0 => ("quant_gemv_q8_0_q8_1_mwr", QUANT_GEMV_MODULE),
@@ -101,15 +104,17 @@ pub(super) fn dispatch_gemv(
 
     // F32 activation path for formats with dedicated F32 GEMV kernels
     tracing::debug!(
-        format = ?weight.format(),
-        m, k, n,
+        ?format,
+        m,
+        k,
+        n,
         path = "f32_gemv",
         "CUDA quant kernel: F32 GEMV (optimized)"
     );
     let act_ptr = act_contig.ptr();
     let weight_ptr = weight.storage().ptr();
 
-    let (kernel_name, module_name) = match weight.format() {
+    let (kernel_name, module_name) = match format {
         QuantFormat::Q4_0 => ("quant_gemv_q4_0_f32", QUANT_GEMV_MODULE),
         QuantFormat::Q8_0 => ("quant_gemv_q8_0_f32", QUANT_GEMV_MODULE),
         QuantFormat::Q4K => ("quant_gemv_q4_k_f32", QUANT_GEMV_MODULE),
@@ -175,8 +180,9 @@ pub(super) fn dispatch_matmul(
     n: usize,
 ) -> Result<Option<()>> {
     let device_index = act_contig.device().id();
+    let format = weight.format()?;
 
-    let (kernel_name, module_name) = match weight.format() {
+    let (kernel_name, module_name) = match format {
         QuantFormat::Q4_0 => ("quant_matmul_q4_0_f32", QUANT_MATMUL_MODULE),
         QuantFormat::Q8_0 => ("quant_matmul_q8_0_f32", QUANT_MATMUL_MODULE),
         QuantFormat::Q4K => ("quant_matmul_q4_k_f32", QUANT_MATMUL_MODULE),
@@ -203,8 +209,10 @@ pub(super) fn dispatch_matmul(
     };
 
     tracing::debug!(
-        format = ?weight.format(),
-        m, k, n,
+        ?format,
+        m,
+        k,
+        n,
         path = "dedicated_gemm",
         "CUDA quant kernel: dedicated tiled GEMM (optimized)"
     );
@@ -220,7 +228,7 @@ pub(super) fn dispatch_matmul(
     // activation tile (TM × 256 × 4 = 16 KB). Grid = (ceil(N/16), ceil(M/16)).
     // For M=2000, N=4096: grid = (256, 125) = 32,000 blocks vs 8M previously.
     // All other formats use the classic 16×16 tiled GEMM.
-    let cfg = if weight.format() == QuantFormat::Q4K {
+    let cfg = if format == QuantFormat::Q4K {
         LaunchConfig {
             grid_dim: (n_u32.div_ceil(16), m_u32.div_ceil(16), 1),
             block_dim: (128, 1, 1),

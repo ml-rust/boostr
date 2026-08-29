@@ -201,15 +201,17 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
 
         // Check if all weights support dp4a (Q4_K, Q6_K, Q8_0, Q5_K, Q3_K, Q2_K)
         let all_dp4a = weights.iter().all(|w| {
-            matches!(
-                w.format(),
-                QuantFormat::Q4K
-                    | QuantFormat::Q6K
-                    | QuantFormat::Q8_0
-                    | QuantFormat::Q5K
-                    | QuantFormat::Q3K
-                    | QuantFormat::Q2K
-            )
+            w.format().is_ok_and(|f| {
+                matches!(
+                    f,
+                    QuantFormat::Q4K
+                        | QuantFormat::Q6K
+                        | QuantFormat::Q8_0
+                        | QuantFormat::Q5K
+                        | QuantFormat::Q3K
+                        | QuantFormat::Q2K
+                )
+            })
         });
         let use_dp4a = all_dp4a && m <= 4 && k.is_multiple_of(32);
 
@@ -230,9 +232,15 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             let func_q8_0 = kernels::get_kernel_function(&module_main, "quant_gemv_q8_0_q8_1_mwr")?;
 
             // Lazily load per-format modules only if needed
-            let has_q5k = weights.iter().any(|w| w.format() == QuantFormat::Q5K);
-            let has_q3k = weights.iter().any(|w| w.format() == QuantFormat::Q3K);
-            let has_q2k = weights.iter().any(|w| w.format() == QuantFormat::Q2K);
+            let has_q5k = weights
+                .iter()
+                .any(|w| w.format().is_ok_and(|f| f == QuantFormat::Q5K));
+            let has_q3k = weights
+                .iter()
+                .any(|w| w.format().is_ok_and(|f| f == QuantFormat::Q3K));
+            let has_q2k = weights
+                .iter()
+                .any(|w| w.format().is_ok_and(|f| f == QuantFormat::Q2K));
 
             let func_q5k = if has_q5k {
                 let m =
@@ -279,7 +287,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 let n = w_shape[0];
                 let n_u32 = n as u32;
 
-                let func = match w.format() {
+                let func = match w.format()? {
                     QuantFormat::Q4K => &func_q4k,
                     QuantFormat::Q6K => &func_q6k,
                     QuantFormat::Q8_0 => &func_q8_0,
@@ -353,13 +361,11 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 ),
             });
         }
-        if gate_weight.format() != up_weight.format() {
+        let gate_format = gate_weight.format()?;
+        let up_format = up_weight.format()?;
+        if gate_format != up_format {
             return Err(Error::QuantError {
-                reason: format!(
-                    "gate format {:?} != up format {:?}",
-                    gate_weight.format(),
-                    up_weight.format()
-                ),
+                reason: format!("gate format {gate_format:?} != up format {up_format:?}"),
             });
         }
 
@@ -376,7 +382,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         // Use fused kernel for GEMV path (decode + short prefill)
         let use_fused = m <= 64
             && matches!(
-                gate_weight.format(),
+                gate_format,
                 QuantFormat::Q4K
                     | QuantFormat::Q6K
                     | QuantFormat::Q8_0
@@ -392,7 +398,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             let gate_ptr = gate_weight.storage().ptr();
             let up_ptr = up_weight.storage().ptr();
 
-            let (kernel_name, module_name) = match gate_weight.format() {
+            let (kernel_name, module_name) = match gate_format {
                 QuantFormat::Q4K => ("fused_swiglu_q4k_q8_1_mwr", QUANT_GEMV_MODULE),
                 QuantFormat::Q6K => ("fused_swiglu_q6k_q8_1_mwr", QUANT_GEMV_MODULE),
                 QuantFormat::Q8_0 => ("fused_swiglu_q8_0_q8_1_mwr", QUANT_GEMV_MODULE),

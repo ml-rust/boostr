@@ -91,7 +91,8 @@ impl DequantOps<WgpuRuntime> for WgpuClient {
             });
         }
 
-        let (shader_source, entry_point) = match qt.format() {
+        let format = qt.format()?;
+        let (shader_source, entry_point) = match format {
             QuantFormat::Q4_0 => (shader_gen::generate_dequant_q4_0_shader(), "dequant_q4_0"),
             QuantFormat::Q8_0 => (shader_gen::generate_dequant_q8_0_shader(), "dequant_q8_0"),
             QuantFormat::Q4K => (shader_gen::generate_dequant_q4_k_shader(), "dequant_q4_k"),
@@ -111,7 +112,7 @@ impl DequantOps<WgpuRuntime> for WgpuClient {
                 return Err(Error::UnsupportedQuantFormat {
                     format: format!(
                         "{}: no WebGPU shader available. Use CPU runtime for IQ/TQ formats.",
-                        qt.format()
+                        format
                     ),
                 });
             }

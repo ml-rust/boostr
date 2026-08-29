@@ -45,7 +45,7 @@ pub(super) fn quant_matmul_via_dequant(
     let m_u32 = m as u32;
     let k_u32 = k as u32;
     let n_u32 = n as u32;
-    let format_id = weight.format().format_id();
+    let format_id = weight.format()?.format_id();
 
     // Grid: (N, M, 1), Block: (32, 1, 1) — one warp per output element
     let cfg = LaunchConfig {
@@ -96,7 +96,7 @@ pub(super) fn quant_swiglu_via_dequant(
     let m_u32 = m as u32;
     let k_u32 = k as u32;
     let n_u32 = n as u32;
-    let format_id = gate_weight.format().format_id();
+    let format_id = gate_weight.format()?.format_id();
 
     let cfg = LaunchConfig {
         grid_dim: (n_u32, m_u32, 1),

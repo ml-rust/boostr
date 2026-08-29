@@ -85,7 +85,7 @@ impl DequantOps<CudaRuntime> for CudaClient {
             });
         }
 
-        let kernel_name = match qt.format() {
+        let kernel_name = match qt.format()? {
             QuantFormat::Q4_0 => "dequant_q4_0_f32",
             QuantFormat::Q5_0 => "dequant_q5_0_f32",
             QuantFormat::Q8_0 => "dequant_q8_0_f32",
@@ -167,7 +167,8 @@ fn dequant_via_generic_kernel(
     let threads = 256u32;
     let grid_size = (num_blocks as u32).div_ceil(threads);
     let num_blocks_u32 = num_blocks as u32;
-    let format_id = qt.format().format_id();
+    let format = qt.format()?;
+    let format_id = format.format_id();
 
     let cfg = LaunchConfig {
         grid_dim: (grid_size, 1, 1),
@@ -184,8 +185,7 @@ fn dequant_via_generic_kernel(
         builder.launch(cfg).map_err(|e| Error::QuantError {
             reason: format!(
                 "CUDA dequant_generic kernel launch failed for {}: {:?}",
-                qt.format(),
-                e
+                format, e
             ),
         })?;
     }

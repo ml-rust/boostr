@@ -7,263 +7,114 @@
 //! 1.29 GB weight would become a multi-gigabyte tile vector before the first
 //! dot product ran, which is the cost the fused kernel exists to remove.
 //!
-//! # Why a copy, and what it is NOT
+//! # No gather, and no second copy of the plane layout
 //!
 //! TCF stores whole planes over the whole tensor (SPECIFICATION.md Section 14):
 //! all codes, then all scales, then all minima, then the per-super-block
-//! values. A tile range is therefore a set of disjoint byte runs, one per
-//! plane, never a single slice. [`unpack_tile_range`] gathers those runs into a
-//! chunk-sized buffer that is byte-for-byte the payload of a `tiles`-tile
-//! tensor, then hands it to `tcf-core`'s own reader.
+//! values. `tcf-core`'s [`unpack_range_into`] indexes those planes directly
+//! from the WHOLE payload, so a range needs no contiguity and this module
+//! copies nothing into a scratch buffer first.
 //!
-//! So this module holds plane *extents*, which CONFORMANCE.md Section 0.1
-//! names as shareable schema-derived constants, and every one of them is read
-//! off [`QuantLayout`] rather than restated here. It holds no bit position, no
-//! nibble index, no field order, and no scale resolution — a second copy of
-//! those is what MIGRATION.md Section 4.5.3 forbids and what shipped Q6_K with
-//! a wrong field order once already. The one packing fact it does encode, the
-//! Section 14.2 split of a 6-bit code plane into a low-nibble sub-plane
-//! followed by a high-two-bit sub-plane, is checked in two ways: the assembled
-//! chunk must equal `logical_payload_bytes(tiles)`, and the tests compare every
-//! range against `tcf_core::unpack` over the whole payload.
+//! So this module holds no plane extent, no bit position, no nibble index, no
+//! field order, and no scale resolution — including no copy of Section 14.2's
+//! low-nibble / high-two-bit sub-plane split. A second copy of those is what
+//! MIGRATION.md Section 4.5.3 forbids and what shipped Q6_K with a wrong field
+//! order once already. What is left here is the range's admission rules and the
+//! `Result` mapping into boostr's error type.
 
-use tcf_core::{LogicalTile, QuantLayout, unpack};
+use tcf_core::{LogicalTile, QuantLayout, unpack_range_into};
 
 use crate::error::{Error, Result};
 use crate::format::tcf::tcf_error;
 use crate::quant::TcfEncoding;
 
-/// One contiguous plane region of a payload, and the unit it is charged in.
+/// Decode tiles `first_tile..first_tile + tiles` of `payload` into `out`.
 ///
-/// A zero stride is a plane this encoding does not spend, and contributes
-/// nothing at every tile count — so the region list below is one fixed shape
-/// for all seven encodings rather than a per-encoding branch.
-#[derive(Debug, Clone, Copy)]
-enum Region {
-    /// `stride` bytes per execution tile.
-    PerTile(usize),
-    /// `stride` bytes per super-block, a partial trailing block charged whole.
-    PerBlock(usize),
-}
-
-/// Planes of a TCF payload, in the storage order of Section 14: codes,
-/// scales, minima, super-scales, super-minima.
+/// `payload` is the WHOLE tensor payload of `total_tiles` tiles, never a
+/// chunk: Section 14's planes are addressed absolutely, and the decode indexes
+/// them where they lie.
 ///
-/// The scale plane is charged per tile under a flat or two-level-`u8` form and
-/// per super-block under the two-level 6-bit form, exactly as
-/// [`QuantLayout::scale_plane_bytes`] sums the two terms; the minimum plane
-/// mirrors it. A 6-bit code plane occupies two sub-planes (Section 14.2), so
-/// the code entry is a pair.
-fn regions(layout: QuantLayout) -> Result<[Region; 8]> {
-    let geometry = layout.geometry;
-    let tile = usize::from(geometry.tile);
-    let code_bytes =
-        usize::try_from(geometry.code_bytes_per_tile()).map_err(|_| Error::QuantError {
-            reason: "TCF code stride exceeds usize".into(),
-        })?;
-
-    // Section 14.1 / 14.3 pack a tile's codes as one run; Section 14.2 splits
-    // a 6-bit plane into a whole low-nibble sub-plane and a whole high-two-bit
-    // sub-plane, each strided per tile.
-    let (code_low, code_high) = match geometry.bits {
-        4 | 8 => (code_bytes, 0),
-        6 => (tile / 2, tile / 4),
-        other => {
-            return Err(Error::QuantError {
-                reason: format!("TCF: Section 14 defines no {other}-bit code packing"),
-            });
-        }
-    };
-
-    let widen_u32 = |value: u32| -> Result<usize> {
-        usize::try_from(value).map_err(|_| Error::QuantError {
-            reason: "TCF plane stride exceeds usize".into(),
-        })
-    };
-
-    Ok([
-        Region::PerTile(code_low),
-        Region::PerTile(code_high),
-        Region::PerTile(widen_u32(layout.scale_bytes_per_tile())?),
-        Region::PerBlock(widen_u32(layout.sub_scale_bytes_per_block())?),
-        Region::PerTile(widen_u32(layout.min_bytes_per_tile())?),
-        Region::PerBlock(widen_u32(layout.sub_min_bytes_per_block())?),
-        Region::PerBlock(widen_u32(layout.super_scale_bytes_per_block())?),
-        Region::PerBlock(widen_u32(layout.super_min_bytes_per_block())?),
-    ])
-}
-
-/// Super-blocks covering `tiles`, a partial trailing block counted whole.
-fn blocks(layout: QuantLayout, tiles: usize) -> Result<usize> {
-    let per_block = usize::from(layout.tiles_per_super_block());
-    if per_block == 0 {
-        return Err(Error::QuantError {
-            reason: "TCF layout reports a zero-tile super-block".into(),
-        });
-    }
-    Ok(tiles.div_ceil(per_block))
-}
-
-/// Bytes `region` occupies over `tiles` tiles.
-fn region_bytes(region: Region, layout: QuantLayout, tiles: usize) -> Result<usize> {
-    let (unit, stride) = match region {
-        Region::PerTile(stride) => (tiles, stride),
-        Region::PerBlock(stride) => (blocks(layout, tiles)?, stride),
-    };
-    unit.checked_mul(stride).ok_or_else(|| Error::QuantError {
-        reason: "TCF plane span overflows usize".into(),
-    })
-}
-
-/// The offset of a range's first unit inside `region`, in units.
-fn region_offset(region: Region, layout: QuantLayout, first_tile: usize) -> Result<usize> {
-    match region {
-        Region::PerTile(_) => Ok(first_tile),
-        Region::PerBlock(_) => {
-            let per_block = usize::from(layout.tiles_per_super_block());
-            first_tile
-                .checked_div(per_block)
-                .ok_or_else(|| Error::QuantError {
-                    reason: "TCF layout reports a zero-tile super-block".into(),
-                })
-        }
-    }
-}
-
-/// A checked `a + b`, named so the error says which sum overflowed.
-fn add(a: usize, b: usize) -> Result<usize> {
-    a.checked_add(b).ok_or_else(|| Error::QuantError {
-        reason: "TCF plane offset overflows usize".into(),
-    })
-}
-
-/// Decode tiles `first_tile..first_tile + tiles` of `payload`.
-///
-/// `scratch` is the caller's reusable gather buffer; it is cleared and refilled
-/// on every call, so one buffer per worker serves a whole matmul and the kernel
-/// allocates no byte buffer per range.
+/// `out` is the caller's reusable tile buffer; it is cleared and refilled on
+/// every call, so one buffer per worker serves a whole matmul and the kernel
+/// allocates nothing per range. On an error `out` holds whatever was decoded
+/// before the failure and MUST be treated as scratch.
 ///
 /// `first_tile` MUST be a multiple of the layout's super-block width. A
 /// super-block's scales are addressed by the tile's position within its own
 /// block (Section 14.6), so a range starting mid-block would read every
 /// two-level group's parameters from the wrong slot — plausible numbers, not an
-/// error. The end need not be aligned: a partial trailing block is charged
-/// whole on both sides.
+/// error. The end need not be aligned: a range may stop inside a super-block.
 ///
 /// # Errors
 /// [`Error::QuantError`] when `first_tile` is not block-aligned, when the range
-/// runs past `total_tiles`, when `payload` is shorter than `total_tiles`
-/// requires, or when the assembled chunk disagrees with the layout's own
-/// payload size. [`Error::ModelError`] carrying the spec's `E_*` code when
-/// `tcf-core` rejects the chunk.
+/// runs past `total_tiles`, or when `payload` is shorter than `total_tiles`
+/// requires. [`Error::ModelError`] carrying the spec's `E_*` code when
+/// `tcf-core` rejects the payload.
 pub fn unpack_tile_range(
     payload: &[u8],
     encoding: TcfEncoding,
     total_tiles: u64,
     first_tile: u64,
     tiles: u64,
-    scratch: &mut Vec<u8>,
-) -> Result<Vec<LogicalTile>> {
+    out: &mut Vec<LogicalTile>,
+) -> Result<()> {
     let layout = encoding.layout();
-    let name = encoding.name();
 
-    let widen = |value: u64| -> Result<usize> {
-        usize::try_from(value).map_err(|_| Error::QuantError {
-            reason: format!("{name}: tile index {value} exceeds usize"),
-        })
-    };
-    let total = widen(total_tiles)?;
-    let first = widen(first_tile)?;
-    let count = widen(tiles)?;
-
-    let per_block = usize::from(layout.tiles_per_super_block());
-    if per_block == 0 || !first.is_multiple_of(per_block) {
+    let per_block = u64::from(layout.tiles_per_super_block());
+    if per_block == 0 || !first_tile.is_multiple_of(per_block) {
         return Err(Error::QuantError {
             reason: format!(
-                "{name}: tile range must start on a {per_block}-tile super-block, got {first}"
+                "{}: tile range must start on a {per_block}-tile super-block, got {first_tile}",
+                encoding.name()
             ),
         });
     }
-    let end = add(first, count)?;
-    if end > total {
+    let end = first_tile
+        .checked_add(tiles)
+        .ok_or_else(|| Error::QuantError {
+            reason: format!("{}: tile range end overflows u64", encoding.name()),
+        })?;
+    if end > total_tiles {
         return Err(Error::QuantError {
-            reason: format!("{name}: tile range {first}..{end} exceeds {total} tiles"),
+            reason: format!(
+                "{}: tile range {first_tile}..{end} exceeds {total_tiles} tiles",
+                encoding.name()
+            ),
         });
     }
 
-    let expected_total = encoding_payload_bytes(layout, total_tiles, &name)?;
+    let expected_total = encoding_payload_bytes(layout, total_tiles, encoding)?;
     if payload.len() < expected_total {
         return Err(Error::QuantError {
             reason: format!(
-                "{name}: payload of {} bytes is shorter than the {expected_total} bytes {total} tiles require",
+                "{}: payload of {} bytes is shorter than the {expected_total} bytes {total_tiles} tiles require",
+                encoding.name(),
                 payload.len(),
             ),
         });
     }
 
-    let plan = regions(layout)?;
-    scratch.clear();
-    let mut plane_base = 0usize;
-    for region in plan {
-        let plane_bytes = region_bytes(region, layout, total)?;
-        let offset = region_offset(region, layout, first)?;
-        let stride = match region {
-            Region::PerTile(stride) | Region::PerBlock(stride) => stride,
-        };
-        let skip = offset
-            .checked_mul(stride)
-            .ok_or_else(|| Error::QuantError {
-                reason: format!("{name}: plane offset overflows usize"),
-            })?;
-        let start = add(plane_base, skip)?;
-        let len = region_bytes(region, layout, count)?;
-        let run = payload
-            .get(start..add(start, len)?)
-            .ok_or_else(|| Error::QuantError {
-                reason: format!("{name}: tile range reads past the payload"),
-            })?;
-        scratch.extend_from_slice(run);
-        plane_base = add(plane_base, plane_bytes)?;
-    }
-
-    // Two checks in one line each. The first says the region list reproduces
-    // the layout's own total, so no plane was dropped or double-counted; the
-    // second says the gathered chunk is exactly a `count`-tile payload, which
-    // is what `unpack` is about to assume.
-    if plane_base != expected_total {
-        return Err(Error::QuantError {
-            reason: format!(
-                "{name}: planes sum to {plane_base} bytes, layout requires {expected_total}"
-            ),
-        });
-    }
-    let expected_chunk = encoding_payload_bytes(layout, tiles, &name)?;
-    if scratch.len() != expected_chunk {
-        return Err(Error::QuantError {
-            reason: format!(
-                "{name}: gathered {} bytes for {count} tiles, layout requires {expected_chunk}",
-                scratch.len(),
-            ),
-        });
-    }
-
-    unpack(scratch, tiles, layout).map_err(|e| tcf_error(&format!("{name} unpack range"), e))
+    unpack_range_into(payload, total_tiles, first_tile, tiles, layout, out)
+        .map_err(|e| tcf_error(&format!("{} unpack range", encoding.name()), e))
 }
 
 /// `logical_payload_bytes` narrowed to `usize`, with the encoding named.
-fn encoding_payload_bytes(layout: QuantLayout, tiles: u64, name: &str) -> Result<usize> {
+fn encoding_payload_bytes(layout: QuantLayout, tiles: u64, encoding: TcfEncoding) -> Result<usize> {
     let bytes = layout
         .logical_payload_bytes(tiles)
-        .map_err(|e| tcf_error(&format!("{name} payload bytes"), e))?;
+        .map_err(|e| tcf_error(&format!("{} payload bytes", encoding.name()), e))?;
     usize::try_from(bytes).map_err(|_| Error::QuantError {
-        reason: format!("{name}: payload of {bytes} bytes exceeds usize"),
+        reason: format!(
+            "{}: payload of {bytes} bytes exceeds usize",
+            encoding.name()
+        ),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tcf_core::{NativeEncoding, pack, quantize};
+    use tcf_core::{NativeEncoding, pack, quantize, unpack};
 
     const ENCODINGS: [NativeEncoding; 7] = [
         NativeEncoding::Q4S32T64,
@@ -301,7 +152,7 @@ mod tests {
 
     /// Every range this seam decodes MUST equal the same tiles of a whole
     /// payload decoded by `tcf-core` in one call. That is the whole contract:
-    /// the gather may not change a single field.
+    /// the range may not change a single field.
     #[test]
     fn every_range_matches_the_whole_payload_decode() {
         let values = source_values(SHAPE[0] * SHAPE[1]);
@@ -311,13 +162,12 @@ mod tests {
             let whole = unpack(&payload, TILES, encoding.layout()).expect("unpacks");
 
             let per_block = u64::from(encoding.layout().tiles_per_super_block());
-            let mut scratch = Vec::new();
+            let mut got = Vec::new();
             for start in (0..TILES).step_by(per_block as usize) {
                 for len in [per_block, per_block * 3, per_block * 7 + 1] {
                     let len = len.min(TILES - start);
-                    let got =
-                        unpack_tile_range(&payload, encoding, TILES, start, len, &mut scratch)
-                            .expect("unpacks range");
+                    unpack_tile_range(&payload, encoding, TILES, start, len, &mut got)
+                        .expect("unpacks range");
                     let want = whole
                         .get(start as usize..(start + len) as usize)
                         .expect("in range");
@@ -332,16 +182,42 @@ mod tests {
         }
     }
 
-    /// The gather buffer never grows with the tensor: it holds one range.
+    /// The decode buffer holds one range, never the tensor, and a second range
+    /// of the same width reuses it without reallocating.
     #[test]
-    fn the_gather_buffer_is_sized_by_the_range_not_the_tensor() {
+    fn the_decode_buffer_is_sized_by_the_range_and_reused() {
         let values = source_values(SHAPE[0] * SHAPE[1]);
         let encoding = TcfEncoding::new(NativeEncoding::Q4AS32DT64);
         let payload = packed(NativeEncoding::Q4AS32DT64, &values);
-        let mut scratch = Vec::new();
-        unpack_tile_range(&payload, encoding, TILES, 0, 4, &mut scratch).expect("unpacks");
-        assert_eq!(scratch.len(), 4 * 32 + 16);
-        assert!(scratch.len() * 8 < payload.len());
+        let mut out = Vec::new();
+
+        unpack_tile_range(&payload, encoding, TILES, 0, 4, &mut out).expect("unpacks");
+        assert_eq!(out.len(), 4);
+        assert!((out.len() as u64) * 8 < TILES);
+        let capacity = out.capacity();
+
+        unpack_tile_range(&payload, encoding, TILES, 4, 4, &mut out).expect("unpacks");
+        assert_eq!(out.len(), 4);
+        assert_eq!(out.capacity(), capacity, "a second range reuses the buffer");
+    }
+
+    /// The property the old gather needed a size check for: this module owns no
+    /// plane-extent arithmetic at all, so there is nothing here to disagree with
+    /// Section 14. Asserted on the source, with every needle assembled at
+    /// runtime so the assertion does not match itself.
+    #[test]
+    fn the_range_seam_holds_no_plane_extent_arithmetic_of_its_own() {
+        let source = include_str!("stream.rs");
+        for needle in [
+            format!("code_bytes_per_{}", "tile"),
+            format!("scale_bytes_per_{}", "tile"),
+            format!("min_bytes_per_{}", "tile"),
+            format!("sub_scale_bytes_per_{}", "block"),
+            format!("super_scale_bytes_per_{}", "block"),
+            format!("extend_from_{}", "slice"),
+        ] {
+            assert!(!source.contains(&needle), "{needle} is reachable here");
+        }
     }
 
     /// A range starting mid-super-block would read two-level sub-scales from
@@ -351,9 +227,9 @@ mod tests {
         let values = source_values(SHAPE[0] * SHAPE[1]);
         let encoding = TcfEncoding::new(NativeEncoding::Q6S16DT64);
         let payload = packed(NativeEncoding::Q6S16DT64, &values);
-        let mut scratch = Vec::new();
+        let mut out = Vec::new();
         let err =
-            unpack_tile_range(&payload, encoding, TILES, 5, 4, &mut scratch).expect_err("refuses");
+            unpack_tile_range(&payload, encoding, TILES, 5, 4, &mut out).expect_err("refuses");
         assert!(err.to_string().contains("super-block"), "{err}");
     }
 
@@ -362,39 +238,20 @@ mod tests {
         let values = source_values(SHAPE[0] * SHAPE[1]);
         let encoding = TcfEncoding::new(NativeEncoding::Q8S32T64);
         let payload = packed(NativeEncoding::Q8S32T64, &values);
-        let mut scratch = Vec::new();
-        assert!(unpack_tile_range(&payload, encoding, TILES, 116, 8, &mut scratch).is_err());
+        let mut out = Vec::new();
+        assert!(unpack_tile_range(&payload, encoding, TILES, 116, 8, &mut out).is_err());
     }
 
     #[test]
-    fn a_short_payload_is_refused_before_any_gather() {
+    fn a_short_payload_is_refused_before_any_decode() {
         let values = source_values(SHAPE[0] * SHAPE[1]);
         let encoding = TcfEncoding::new(NativeEncoding::Q4S32T64);
         let mut payload = packed(NativeEncoding::Q4S32T64, &values);
         payload.truncate(payload.len() - 1);
-        let mut scratch = Vec::new();
+        let mut out = Vec::new();
         let err =
-            unpack_tile_range(&payload, encoding, TILES, 0, 4, &mut scratch).expect_err("refuses");
+            unpack_tile_range(&payload, encoding, TILES, 0, 4, &mut out).expect_err("refuses");
         assert!(err.to_string().contains("shorter"), "{err}");
-    }
-
-    /// The region list must reproduce the layout's own payload size for every
-    /// encoding, at a tile count with a partial trailing super-block.
-    #[test]
-    fn the_region_list_reproduces_every_layouts_payload_size() {
-        for native in ENCODINGS {
-            let layout = native.layout();
-            for tiles in [1usize, 4, 15, 120] {
-                let sum: usize = regions(layout)
-                    .expect("regions")
-                    .into_iter()
-                    .map(|r| region_bytes(r, layout, tiles).expect("bytes"))
-                    .sum();
-                let want = layout
-                    .logical_payload_bytes(tiles as u64)
-                    .expect("payload bytes");
-                assert_eq!(sum as u64, want, "{native:?} at {tiles} tiles");
-            }
-        }
+        assert!(out.is_empty(), "no tile is decoded from a short payload");
     }
 }

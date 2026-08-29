@@ -10,26 +10,34 @@
 //! a TCF model runs at its quantized memory cost instead of the roughly
 //! sevenfold f32 expansion a dequantize-then-dense-matmul path pays.
 //!
+//! # Allocation is fixed, not per chunk
+//!
+//! Every buffer this kernel needs is allocated once and reused. The output
+//! slabs are one staging buffer the workers split with
+//! [`rayon::slice::ParallelSliceMut::par_chunks_mut`], and each worker holds one
+//! tile buffer and one reconstruction buffer that
+//! [`unpack_tile_range`] and [`dequantize_into`] refill in place. So the
+//! allocation count is a small constant, not a multiple of the chunk count.
+//!
 //! # What the plane layout costs
 //!
 //! GGUF packs a block's codes and its scale adjacent, so a GGUF kernel reads
 //! one contiguous run per block. TCF packs whole planes over the whole tensor
-//! (SPECIFICATION.md Section 14), so a tile range is up to six disjoint runs
-//! that [`unpack_tile_range`] gathers before decoding. The gather is charged
-//! once per [`FUSED_TILE_CHUNK`]-tile range, not once per group, and it costs
-//! one extra pass over the packed bytes plus up to six read streams instead of
-//! one. CONFORMANCE.md Section 8.1 leaves code-plane ordering unfrozen and
-//! settles it by benchmark; this kernel is where that measurement is taken.
+//! (SPECIFICATION.md Section 14), so decoding a tile range touches up to five
+//! separated read streams instead of one. `tcf-core` indexes them directly out
+//! of the whole payload, so the cost is the extra streams, never a copy.
+//! CONFORMANCE.md Section 8.1 leaves code-plane ordering unfrozen and settles
+//! it by benchmark; this kernel is where that measurement is taken.
 //!
 //! # Scalar, and shaped for SIMD
 //!
 //! [`tile_dot`] is the single arithmetic entry point, and reconstruction runs
-//! through `tcf-core`'s own `dequantize`. A SIMD unit replaces the body of
-//! `tile_dot` and adds a widened reconstruction behind the same call, with no
-//! change to the traversal above it.
+//! through `tcf-core`'s own [`dequantize_into`]. A SIMD unit replaces the body
+//! of `tile_dot` and adds a widened reconstruction behind the same call, with
+//! no change to the traversal above it.
 
 use rayon::prelude::*;
-use tcf_core::dequantize;
+use tcf_core::{LogicalTile, dequantize_into};
 
 use crate::error::{Error, Result};
 use crate::format::tcf::tcf_error;
@@ -69,11 +77,11 @@ pub fn tcf_matmul_f32(
     n: usize,
     encoding: TcfEncoding,
 ) -> Result<()> {
-    let name = encoding.name();
     if act.len() != m.saturating_mul(k) {
         return Err(Error::QuantError {
             reason: format!(
-                "{name}: activation holds {} values, {m}x{k} required",
+                "{}: activation holds {} values, {m}x{k} required",
+                encoding.name(),
                 act.len()
             ),
         });
@@ -81,7 +89,8 @@ pub fn tcf_matmul_f32(
     if output.len() != m.saturating_mul(n) {
         return Err(Error::QuantError {
             reason: format!(
-                "{name}: output holds {} values, {m}x{n} required",
+                "{}: output holds {} values, {m}x{n} required",
+                encoding.name(),
                 output.len()
             ),
         });
@@ -93,7 +102,10 @@ pub fn tcf_matmul_f32(
     let tile = encoding.tile();
     if tile == 0 || k == 0 || !k.is_multiple_of(tile) {
         return Err(Error::QuantError {
-            reason: format!("{name}: K={k} is not a positive multiple of the tile width {tile}"),
+            reason: format!(
+                "{}: K={k} is not a positive multiple of the tile width {tile}",
+                encoding.name()
+            ),
         });
     }
     let tiles_per_row = k / tile;
@@ -101,7 +113,10 @@ pub fn tcf_matmul_f32(
     let per_block = usize::from(layout.tiles_per_super_block());
     if per_block == 0 || !FUSED_TILE_CHUNK.is_multiple_of(per_block) {
         return Err(Error::QuantError {
-            reason: format!("{name}: super-block width {per_block} does not divide the chunk"),
+            reason: format!(
+                "{}: super-block width {per_block} does not divide the chunk",
+                encoding.name()
+            ),
         });
     }
     let total_tiles = encoding.tile_count(&[n, k])?;
@@ -111,30 +126,43 @@ pub fn tcf_matmul_f32(
     // therefore `per_block / gcd(tiles_per_row, per_block)` — 1 whenever a row
     // is a whole number of super-blocks, which is the common case.
     let rows_per_group = per_block / gcd(tiles_per_row, per_block);
-    let group_count = n.div_ceil(rows_per_group);
 
-    let groups = (0..group_count)
-        .into_par_iter()
-        .map(|group| {
-            row_group(
-                act,
-                payload,
-                RowGroup {
-                    group,
-                    rows_per_group,
-                    m,
-                    k,
-                    n,
-                    tile,
-                    tiles_per_row,
-                    total_tiles,
-                },
-                encoding,
-            )
-        })
-        .collect::<Result<Vec<Vec<f32>>>>()?;
+    // One staging buffer for every worker's slab, split by `par_chunks_mut`.
+    // `m` and `n` are non-zero here, so the stride is non-zero, and the chunk
+    // count is exactly `n.div_ceil(rows_per_group)` — one per row group, the
+    // last holding a partial group's rows.
+    let slab_stride = m
+        .checked_mul(rows_per_group)
+        .ok_or_else(|| overflow(encoding))?;
+    let mut staging = vec![0.0f32; m.checked_mul(n).ok_or_else(|| overflow(encoding))?];
+    staging
+        .par_chunks_mut(slab_stride)
+        .enumerate()
+        .try_for_each_init(
+            || (Vec::new(), Vec::new()),
+            |(tiles, values), (group, slab)| {
+                row_group(
+                    act,
+                    payload,
+                    RowGroup {
+                        group,
+                        rows_per_group,
+                        m,
+                        k,
+                        n,
+                        tile,
+                        tiles_per_row,
+                        total_tiles,
+                    },
+                    encoding,
+                    slab,
+                    tiles,
+                    values,
+                )
+            },
+        )?;
 
-    for (group, values) in groups.iter().enumerate() {
+    for (group, values) in staging.chunks(slab_stride).enumerate() {
         let row_start = group.saturating_mul(rows_per_group);
         let rows = rows_per_group.min(n.saturating_sub(row_start));
         for row in 0..m {
@@ -142,10 +170,10 @@ pub fn tcf_matmul_f32(
                 let value = values
                     .get(row * rows + column)
                     .copied()
-                    .ok_or_else(|| short(&name))?;
+                    .ok_or_else(|| short(encoding))?;
                 *output
                     .get_mut(row * n + row_start + column)
-                    .ok_or_else(|| short(&name))? = value;
+                    .ok_or_else(|| short(encoding))? = value;
             }
         }
     }
@@ -170,69 +198,76 @@ struct RowGroup {
 /// The slab is row-major in the activation's row index, so a worker writes a
 /// dense buffer and the caller scatters it into the strided output once. That
 /// keeps every write in this function local and needs no shared mutable state.
-fn row_group(act: &[f32], payload: &[u8], at: RowGroup, encoding: TcfEncoding) -> Result<Vec<f32>> {
-    let name = encoding.name();
+///
+/// `slab` arrives zeroed and is accumulated into. `tiles` and `values` are the
+/// worker's reusable decode buffers: both are refilled per chunk, so a whole
+/// row group allocates nothing.
+fn row_group(
+    act: &[f32],
+    payload: &[u8],
+    at: RowGroup,
+    encoding: TcfEncoding,
+    slab: &mut [f32],
+    tiles: &mut Vec<LogicalTile>,
+    values: &mut Vec<f32>,
+) -> Result<()> {
     let layout = encoding.layout();
     let row_start = at.group.saturating_mul(at.rows_per_group);
     let rows = at.rows_per_group.min(at.n.saturating_sub(row_start));
-    let mut slab = vec![0.0f32; at.m.saturating_mul(rows)];
     if rows == 0 {
-        return Ok(slab);
+        return Ok(());
     }
 
     let first_tile = row_start
         .checked_mul(at.tiles_per_row)
-        .ok_or_else(|| overflow(&name))?;
+        .ok_or_else(|| overflow(encoding))?;
     let group_tiles = rows
         .checked_mul(at.tiles_per_row)
-        .ok_or_else(|| overflow(&name))?;
+        .ok_or_else(|| overflow(encoding))?;
 
-    // One gather buffer per worker, refilled per range. The reconstruction
-    // buffer `tcf-core` returns is bounded the same way.
-    let mut scratch: Vec<u8> = Vec::new();
     let mut decoded = 0usize;
     while decoded < group_tiles {
         let take = FUSED_TILE_CHUNK.min(group_tiles - decoded);
         let range_start = first_tile
             .checked_add(decoded)
-            .ok_or_else(|| overflow(&name))?;
-        let tiles = unpack_tile_range(
+            .ok_or_else(|| overflow(encoding))?;
+        unpack_tile_range(
             payload,
             encoding,
             at.total_tiles,
-            u64::try_from(range_start).map_err(|_| overflow(&name))?,
-            u64::try_from(take).map_err(|_| overflow(&name))?,
-            &mut scratch,
+            u64::try_from(range_start).map_err(|_| overflow(encoding))?,
+            u64::try_from(take).map_err(|_| overflow(encoding))?,
+            tiles,
         )?;
-        let values = dequantize(&tiles, layout)
-            .map_err(|e| tcf_error(&format!("{name} dequantize range"), e))?;
+        dequantize_into(tiles.as_slice(), layout, values)
+            .map_err(|e| tcf_error(&format!("{} dequantize range", encoding.name()), e))?;
 
         for (index, weights) in values.chunks_exact(at.tile).enumerate() {
             let global = range_start
                 .checked_add(index)
-                .ok_or_else(|| overflow(&name))?;
+                .ok_or_else(|| overflow(encoding))?;
             let weight_row = global / at.tiles_per_row;
             let column = (global % at.tiles_per_row)
                 .checked_mul(at.tile)
-                .ok_or_else(|| overflow(&name))?;
+                .ok_or_else(|| overflow(encoding))?;
             let slab_column = weight_row
                 .checked_sub(row_start)
-                .ok_or_else(|| short(&name))?;
+                .ok_or_else(|| short(encoding))?;
 
             for row in 0..at.m {
-                let base = row.checked_mul(at.k).ok_or_else(|| overflow(&name))?;
+                let base = row.checked_mul(at.k).ok_or_else(|| overflow(encoding))?;
                 let activations = act
                     .get(base + column..base + column + at.tile)
-                    .ok_or_else(|| short(&name))?;
+                    .ok_or_else(|| short(encoding))?;
                 let slot = slab
                     .get_mut(row * rows + slab_column)
-                    .ok_or_else(|| short(&name))?;
+                    .ok_or_else(|| short(encoding))?;
                 *slot += tile_dot(activations, weights);
             }
         }
         decoded += take;
     }
-    Ok(slab)
+    Ok(())
 }
 
 /// Dot product of one reconstructed tile against the activation window it
@@ -256,24 +291,25 @@ fn gcd(a: usize, b: usize) -> usize {
     a.max(1)
 }
 
-/// A slice ended before the geometry said it would.
-fn short(name: &str) -> Error {
+/// A slice ended before the geometry said it would. The encoding is named
+/// here rather than at the call site, so the happy path never builds the name.
+fn short(encoding: TcfEncoding) -> Error {
     Error::QuantError {
-        reason: format!("{name}: fused matmul indexed past a buffer"),
+        reason: format!("{}: fused matmul indexed past a buffer", encoding.name()),
     }
 }
 
 /// An index product exceeded `usize`.
-fn overflow(name: &str) -> Error {
+fn overflow(encoding: TcfEncoding) -> Error {
     Error::QuantError {
-        reason: format!("{name}: fused matmul index overflows usize"),
+        reason: format!("{}: fused matmul index overflows usize", encoding.name()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tcf_core::{NativeEncoding, pack, quantize, unpack};
+    use tcf_core::{NativeEncoding, dequantize, pack, quantize, unpack};
 
     const ENCODINGS: [NativeEncoding; 7] = [
         NativeEncoding::Q4S32T64,

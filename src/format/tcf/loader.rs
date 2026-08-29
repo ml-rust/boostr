@@ -419,14 +419,14 @@ mod tests {
     #[test]
     fn an_unassigned_encoding_is_rejected_by_identifier() {
         let mut bytes = fixtures::good_file();
-        // 0x0107 is a deliberate gap in the native quantized range.
-        fixtures::set_encoding(&mut bytes, fixtures::T_Q4, 0x0107);
+        // 0x0109 is a deliberate gap in the native quantized range.
+        fixtures::set_encoding(&mut bytes, fixtures::T_Q4, 0x0109);
 
         let file = fixtures::write_temp(&bytes);
         let err = TcfLoader::open(file.path()).expect_err("an unknown encoding is rejected");
         let text = err.to_string();
         assert!(text.contains("E_UNSUPPORTED_ENCODING"), "{text}");
-        assert!(text.contains("0107"), "{text}");
+        assert!(text.contains("0109"), "{text}");
     }
 
     #[test]

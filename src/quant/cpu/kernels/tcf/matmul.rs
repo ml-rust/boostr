@@ -74,13 +74,6 @@ const TILE_SCRATCH: usize = 64;
 /// the walk is named once, where its result is mapped.
 const GEOMETRY: TcfError = TcfError::InvalidQuantGeometry;
 
-/// Execution tiles the range-at-a-time decode shape used to take at once.
-/// The kernel below no longer chunks: it asks for one row group's whole tile
-/// range in a single [`for_each_group`] call, whose first tile `rows_per_group`
-/// already lands on a super-block. Nothing outside this module's tests reads
-/// the constant now, and being public it is kept rather than removed here.
-pub const FUSED_TILE_CHUNK: usize = 64;
-
 /// `activation [M, K] × weight [N, K]^T -> output [M, N]`, against a TCF
 /// native quantized weight held in its packed plane-major form.
 ///
@@ -496,18 +489,6 @@ mod tests {
             !source.contains(&whole_tensor_seam),
             "whole-tensor unpack is reachable here"
         );
-    }
-
-    /// The working set is fixed by the chunk, not by the weight: a worker holds
-    /// 64 tiles of reconstruction whether the weight has 15 tiles or millions.
-    #[test]
-    fn the_working_set_is_bounded_by_the_chunk_not_the_weight() {
-        let tile = TcfEncoding::new(NativeEncoding::Q4S32T64).tile();
-        let scratch = FUSED_TILE_CHUNK * tile;
-        assert_eq!(scratch, 4096);
-        // A 4096x4096 weight is four thousand times this working set.
-        assert!(scratch * 4000 < 4096 * 4096);
-        assert!(FUSED_TILE_CHUNK.is_multiple_of(4));
     }
 
     /// A weight the payload cannot back is refused, not read past.

@@ -50,17 +50,43 @@ pub fn dequantize_tiles_into(
     layout: QuantLayout,
     out: &mut Vec<f32>,
 ) -> Result<(), TcfError> {
+    out.clear();
+    dequantize_tiles_append(tiles, layout, out)
+}
+
+/// [`dequantize_tiles_into`], but appending to whatever `out` already holds.
+///
+/// A chunked whole-tensor decode wants every range written into ONE output
+/// vector, at the offset the previous range stopped at. Going through
+/// [`dequantize_tiles_into`] forces a scratch buffer per range plus a copy
+/// out of it, because that function refills its output. Appending removes
+/// both: the element loop's vector stores land directly in the final buffer.
+///
+/// The error contract is the clearing variant's, shifted to the append point.
+/// `out` keeps everything it held on entry plus the prefix decoded before the
+/// failure, and that tail MUST be treated as scratch.
+///
+/// # Errors
+/// Every error [`dequantize_tiles_into`] raises, from the same checks.
+pub fn dequantize_tiles_append(
+    tiles: &[LogicalTile],
+    layout: QuantLayout,
+    out: &mut Vec<f32>,
+) -> Result<(), TcfError> {
     let tile_width = usize::from(layout.geometry.tile);
+    let start = out.len();
     // Sized once rather than grown per group, so the element loop writes
     // into a slice a vector store can address. The zero fill this costs is
     // one store pass over the same bytes the decode overwrites immediately.
-    out.clear();
-    out.resize(tiles.len().saturating_mul(tile_width), 0.0);
+    out.resize(
+        start.saturating_add(tiles.len().saturating_mul(tile_width)),
+        0.0,
+    );
 
     let mut written = 0usize;
-    let outcome = fill(tiles, layout, out.as_mut_slice(), &mut written);
+    let outcome = fill(tiles, layout, &mut out[start..], &mut written);
     if outcome.is_err() {
-        out.truncate(written);
+        out.truncate(start.saturating_add(written));
     }
     outcome
 }

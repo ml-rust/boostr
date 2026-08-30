@@ -10,7 +10,7 @@ mod dequant;
 mod matmul;
 mod stream;
 
-pub use decode::dequantize_tiles_into;
+pub use decode::{dequantize_tiles_append, dequantize_tiles_into};
 pub use dequant::{dequant_tcf, unpack_tiles};
 pub use matmul::{FUSED_TILE_CHUNK, tcf_matmul_f32};
 pub use stream::unpack_tile_range;

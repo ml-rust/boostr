@@ -22,7 +22,7 @@
 //! order once already. What is left here is the range's admission rules and the
 //! `Result` mapping into boostr's error type.
 
-use tcf_core::{LogicalTile, QuantLayout, unpack_range_into};
+use tcf_core::{LogicalTile, QuantLayout, TcfError, unpack_range_into};
 
 use crate::error::{Error, Result};
 use crate::format::tcf::tcf_error;
@@ -85,13 +85,21 @@ pub fn unpack_tile_range(
 
     let expected_total = encoding_payload_bytes(layout, total_tiles, encoding)?;
     if payload.len() < expected_total {
-        return Err(Error::QuantError {
-            reason: format!(
+        // A short payload is a Section 14 bounds violation, and the spec gives
+        // it a code. Raising boostr's own `QuantError` here would shadow that
+        // code with a local one, so a caller that checks conformance behaviour
+        // would see a short payload reported differently depending on whether
+        // it entered through this bounded seam or through `tcf_core::unpack`.
+        // The precheck stays — it is what keeps `out` empty rather than
+        // half-decoded — but it reports what the codec itself would.
+        return Err(tcf_error(
+            &format!(
                 "{}: payload of {} bytes is shorter than the {expected_total} bytes {total_tiles} tiles require",
                 encoding.name(),
                 payload.len(),
             ),
-        });
+            TcfError::SectionBounds { section: "payload" },
+        ));
     }
 
     unpack_range_into(payload, total_tiles, first_tile, tiles, layout, out)

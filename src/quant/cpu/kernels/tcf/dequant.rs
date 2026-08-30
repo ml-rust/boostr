@@ -6,9 +6,10 @@
 //! implementation the definition of the semantics, and MIGRATION.md
 //! Section 4.5.3 forbids a second copy of a block layout. So this kernel
 //! holds no plane offset, no nibble index, no 6-bit field position and no
-//! super-block stride. It calls [`unpack`] to rebuild the logical tiles, and
-//! its whole job is the surrounding shape and length checks plus the
-//! `Result` mapping into boostr's error type.
+//! super-block stride. It calls [`unpack`] or [`super::unpack_tile_range`] to
+//! rebuild logical tiles, and its whole job is the surrounding shape and
+//! length checks, the chunk loop, and the `Result` mapping into boostr's
+//! error type.
 //!
 //! That is not a placeholder. A hand-written unpack here would be a second
 //! definition of the format, and Q6_K already shipped once in this codebase
@@ -26,20 +27,46 @@
 //! all seven v1 encodings — the condition this module named in advance for
 //! any faster path added beside it.
 //!
-//! # Seam for the fused quantized matmul
+//! # Two tile-level entry points
 //!
-//! [`unpack_tiles`] is the tile-level entry point, and it decodes the WHOLE
-//! tensor. The fused matmul cannot use it for that reason: it takes bounded
-//! ranges from [`super::unpack_tile_range`] instead and accumulates per tile,
-//! so the f32 tensor [`dequant_tcf`] builds is never materialized. Both paths
-//! reach `tcf-core` through this module's shape math, so neither can disagree
-//! with the other on tile count.
+//! [`unpack_tiles`] decodes the WHOLE tensor into one `Vec<LogicalTile>` and
+//! stays public because tests and other callers name it directly. [`dequant_tcf`]
+//! does not call it: a 2048x6144 weight is 196,608 tiles, and materializing
+//! all of them before a single f32 is produced is an extra full pass plus its
+//! allocation, for a value nothing downstream of `dequant_tcf` needs held at
+//! once. So [`dequant_tcf`] walks the payload in bounded ranges through
+//! [`super::unpack_tile_range`] instead — the same seam the fused matmul in
+//! [`super::matmul`] uses — decoding [`DEQUANT_TILE_CHUNK`] tiles into one
+//! reusable buffer at a time. Both entry points reach `tcf-core` through this
+//! module's shape math, so neither can disagree with the other on tile count,
+//! and both are checked bit-exact against `tcf_core::unpack` plus
+//! `tcf_core::dequantize` below.
 
 use tcf_core::{LogicalTile, unpack};
 
 use crate::error::{Error, Result};
 use crate::format::tcf::tcf_error;
 use crate::quant::TcfEncoding;
+
+/// Execution tiles decoded per range in [`dequant_tcf`]'s streaming loop.
+///
+/// A [`LogicalTile`] is on the order of 96 bytes, so 512 tiles is roughly
+/// 48 KB of tile-buffer scratch — L2-resident on any target, and four orders
+/// of magnitude below [`unpack_tiles`]'s full `Vec<LogicalTile>`, which for a
+/// 2048x6144 weight is 196,608 tiles and about 19 MB.
+///
+/// The size is a throughput floor, not a cache limit. Every range re-runs
+/// [`super::unpack_tile_range`]'s admission arithmetic — the block-alignment
+/// test, the payload-length test, and the layout's own byte-count math — all
+/// of which are invariant across this loop. That fixed cost is divided by the
+/// chunk's element count, so 64 tiles charged a measurable 0.2 retired
+/// instructions per element and 512 tiles charges an eighth of that.
+///
+/// Both v1 super-block widths (1 flat, 4 two-level) divide it, which
+/// [`dequant_tcf`] checks rather than assumes. Enlarging it further buys
+/// nothing: the overhead it amortizes is already below the noise floor, and
+/// the intermediate would grow back toward the size streaming exists to avoid.
+const DEQUANT_TILE_CHUNK: u64 = 512;
 
 /// Rebuild the logical tiles a TCF payload encodes. Section 14.
 ///
@@ -67,16 +94,59 @@ pub fn unpack_tiles(
 /// Bit for bit what `tcf_core::unpack` followed by `tcf_core::dequantize`
 /// produces, over the vectorized element loop rather than the scalar one.
 ///
+/// Unlike [`unpack_tiles`], this never holds the whole tensor as
+/// `LogicalTile`s at once. It walks the payload in [`DEQUANT_TILE_CHUNK`]-tile
+/// ranges through [`super::unpack_tile_range`], the same bounded seam the
+/// fused matmul uses, decoding each range into one reusable tile buffer and
+/// appending its f32 reconstruction to `values`. Only the final f32 output is
+/// fully materialized — the intermediate tile vector stays chunk-sized for the
+/// whole call, which is the allocation and cache-traffic this function exists
+/// to remove.
+///
 /// # Errors
 /// Every error [`unpack_tiles`] raises, plus [`Error::ModelError`] when the
 /// value count disagrees with `shape` — which would mean the tile arithmetic
 /// and the shape had drifted apart.
 pub fn dequant_tcf(payload: &[u8], encoding: TcfEncoding, shape: &[usize]) -> Result<Vec<f32>> {
     let expected: usize = shape.iter().product();
-    let tiles = unpack_tiles(payload, encoding, shape)?;
-    let mut values = Vec::new();
-    super::dequantize_tiles_into(&tiles, encoding.layout(), &mut values)
-        .map_err(|e| tcf_error(&format!("{} dequantize", encoding.name()), e))?;
+    let total_tiles = encoding.tile_count(shape)?;
+    let layout = encoding.layout();
+
+    // `DEQUANT_TILE_CHUNK` must itself be a whole number of super-blocks, or
+    // every chunk after the first would start mid-block — Section 14.6's
+    // failure mode `unpack_tile_range` exists to refuse. True for both v1
+    // widths (1, 4); checked rather than assumed for whatever comes after.
+    let per_block = u64::from(layout.tiles_per_super_block());
+    if per_block == 0 || !DEQUANT_TILE_CHUNK.is_multiple_of(per_block) {
+        return Err(Error::QuantError {
+            reason: format!(
+                "{}: super-block width {per_block} does not divide the chunk",
+                encoding.name()
+            ),
+        });
+    }
+
+    // Sized once to the tensor's full element count, so the loop below only
+    // ever appends into already-reserved capacity: no repeated reallocation
+    // as `values` grows chunk by chunk.
+    let mut values = Vec::with_capacity(expected);
+    // The one buffer the streaming seam refills in place. It starts empty and
+    // is grown once to the chunk's size, then reused unchanged for every
+    // remaining range in this call. There is deliberately no matching f32
+    // scratch buffer: `dequantize_tiles_append` writes each range straight
+    // into `values` at the offset the previous range stopped at, so the
+    // element loop's vector stores land in the final buffer and the decode
+    // costs no copy per chunk.
+    let mut tiles: Vec<LogicalTile> = Vec::new();
+
+    let mut first_tile = 0u64;
+    while first_tile < total_tiles {
+        let take = DEQUANT_TILE_CHUNK.min(total_tiles - first_tile);
+        super::unpack_tile_range(payload, encoding, total_tiles, first_tile, take, &mut tiles)?;
+        super::dequantize_tiles_append(&tiles, layout, &mut values)
+            .map_err(|e| tcf_error(&format!("{} dequantize", encoding.name()), e))?;
+        first_tile += take;
+    }
 
     if values.len() != expected {
         return Err(Error::ModelError {

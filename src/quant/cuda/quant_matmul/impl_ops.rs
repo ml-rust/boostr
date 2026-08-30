@@ -159,11 +159,33 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
 
         // TCF weights take their own kernels: a GGUF kernel finds a block's
         // codes and its scale adjacent, while TCF spreads them over
-        // whole-tensor planes. Same M <= 64 split between GEMV and GEMM.
+        // whole-tensor planes.
+        //
+        // The GEMV/GEMM crossover is TCF's own, NOT the `M <= 64` the GGUF
+        // path below uses. Measured on an RTX 3060, `q_proj` 2048x2048,
+        // minimum nanoseconds over iterations, both kernels at every M:
+        //
+        // | M  | GEMV Q8 | GEMM Q8 | GEMV Q4 | GEMM Q4 | GEMV Q6 | GEMM Q6 |
+        // |----|---------|---------|---------|---------|---------|---------|
+        // |  2 |   107us |   280us |   151us |   257us |   127us |   284us |
+        // |  4 |   191us |   282us |   285us |   258us |   232us |   284us |
+        // |  8 |   370us |   287us |   560us |   261us |   435us |   288us |
+        // | 16 |   756us |   297us |  1100us |   267us |   855us |   300us |
+        // | 32 |  1500us |   522us |  2080us |   482us |  1690us |   534us |
+        // | 64 |  2880us |   958us |  4110us |   892us |  3370us |   972us |
+        //
+        // GEMV is linear in M; GEMM is nearly flat to M = 16 because its tile
+        // is already paid for. They cross at 4. Carrying GGUF's 64 ran GEMV
+        // three to four times past its useful range — at M = 64 a Q4 GEMV
+        // cost more than a GEMM of FOUR TIMES the work.
+        //
+        // 4 goes to GEMV, which costs Q4 about 10% at exactly that M and wins
+        // on Q6 and Q8 there. A per-encoding threshold would recover that 10%
+        // at one point of one encoding and is not worth the branch.
         if let QuantScheme::Tcf(encoding) = weight.scheme() {
             let at = MatmulShape { m, k, n };
             let device_index = activation.device().id();
-            let launch = if m <= 64 {
+            let launch = if m <= 4 {
                 tcf_dispatch::launch_gemv
             } else {
                 tcf_dispatch::launch_gemm

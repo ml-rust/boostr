@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! cargo run --release --features audio,f16 --example voxcpm_clone -- \
-//!     (--ckpt CKPT_DIR | --gguf MODEL.gguf [--config config.json]) \
+//!     (--ckpt CKPT_DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
+//!     [--config config.json] \
 //!     --audiovae audiovae.pth \
 //!     --ref REF.wav --text "..." --out OUT.wav \
 //!     [--n-timesteps 10] [--cfg 2.0] [--min-len 2] [--max-len N] \
@@ -21,8 +22,15 @@
 //! `--ckpt`. A GGUF carries the transformer stack ONLY, so `--audiovae` is
 //! still required, `--config` supplies the `config.json` the file has no
 //! embedded copy of, and `tokenizer.json` is looked for beside the `.gguf`
-//! and then beside `--config`. The weights arrive DEQUANTIZED to F32, so a
-//! Q4_K file is smaller on disk but not in memory.
+//! and then beside `--config`.
+//!
+//! `--tcf` is the third single-file form, written by `compressr convert
+//! CKPT_DIR --format tcf`, and is mutually exclusive with both of the above.
+//! It carries the transformer stack only, on the same terms as `--gguf`,
+//! except that `--config` is REQUIRED rather than optional: the format has no
+//! metadata map a `config.json` could ever be embedded in. Every tensor at a
+//! native encoding stays PACKED in memory, so a 1.2 GB file costs about 1.2
+//! GB rather than its f32 expansion.
 //!
 //! # Reference mode, never continuation
 //!
@@ -125,12 +133,13 @@ const DEFAULT_LORA_TARGETS: &str = "q_proj,v_proj";
 /// Where the transformer stack's weights come from.
 ///
 /// `--ckpt` names a checkpoint DIRECTORY (`config.json`,
-/// `model.safetensors`, `tokenizer.json`); `--gguf` names a single file that
-/// carries the weights and nothing else. Mutually exclusive, and one of them
-/// is required.
+/// `model.safetensors`, `tokenizer.json`); `--gguf` and `--tcf` each name a
+/// single file that carries the weights and nothing else. Mutually
+/// exclusive, and exactly one of them is required.
 enum Weights {
     Checkpoint(PathBuf),
     Gguf(PathBuf),
+    Tcf(PathBuf),
 }
 
 /// Runtime to build the model and run generation on.
@@ -154,8 +163,9 @@ fn parse_device(value: &str) -> Result<Device, String> {
 /// Parsed command line.
 struct Args {
     weights: Weights,
-    /// `config.json` for the GGUF path. Ignored for `--ckpt`, which reads the
-    /// one in the checkpoint directory.
+    /// `config.json` for the single-file paths. Ignored for `--ckpt`, which
+    /// reads the one in the checkpoint directory. Optional for `--gguf`,
+    /// required for `--tcf`.
     config: Option<PathBuf>,
     audiovae: PathBuf,
     reference: PathBuf,
@@ -204,7 +214,8 @@ fn parse_dtype(value: &str) -> Result<Option<DType>, String> {
     }
 }
 
-const USAGE: &str = "usage: voxcpm_clone (--ckpt DIR | --gguf MODEL.gguf [--config config.json]) \
+const USAGE: &str = "usage: voxcpm_clone (--ckpt DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
+[--config config.json] \
 --audiovae PATH --ref REF.wav \
 --text \"...\" --out OUT.wav [--n-timesteps 10] [--cfg 2.0] [--min-len 2] \
 [--max-len N] [--seed 0] [--best-of 1] [--dtype f32|bf16|f16|native] \
@@ -231,6 +242,7 @@ fn parse_args() -> Result<Args, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let (mut ckpt, mut audiovae, mut reference, mut text, mut out) = (None, None, None, None, None);
     let mut gguf: Option<PathBuf> = None;
+    let mut tcf: Option<PathBuf> = None;
     let mut config: Option<PathBuf> = None;
     let mut n_timesteps = 10usize;
     let mut cfg = 2.0f32;
@@ -251,6 +263,7 @@ fn parse_args() -> Result<Args, String> {
         match flag {
             "--ckpt" => ckpt = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
             "--gguf" => gguf = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
+            "--tcf" => tcf = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
             "--config" => config = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
             "--audiovae" => audiovae = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
             "--ref" => reference = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
@@ -324,16 +337,27 @@ fn parse_args() -> Result<Args, String> {
         return Err("--lora-targets must name at least one projection".to_string());
     }
 
-    // Exactly one weight source. Accepting both and silently preferring one
+    // Exactly one weight source. Accepting two and silently preferring one
     // would load a different model than the operator asked for.
-    let weights = match (ckpt, gguf) {
-        (Some(_), Some(_)) => {
-            return Err(format!("--ckpt and --gguf are mutually exclusive\n{USAGE}"));
+    let weights = match (ckpt, gguf, tcf) {
+        (Some(dir), None, None) => Weights::Checkpoint(dir),
+        (None, Some(path), None) => Weights::Gguf(path),
+        (None, None, Some(path)) => Weights::Tcf(path),
+        (None, None, None) => {
+            return Err(format!("--ckpt, --gguf or --tcf is required\n{USAGE}"));
         }
-        (Some(dir), None) => Weights::Checkpoint(dir),
-        (None, Some(path)) => Weights::Gguf(path),
-        (None, None) => return Err(format!("--ckpt or --gguf is required\n{USAGE}")),
+        _ => {
+            return Err(format!(
+                "--ckpt, --gguf and --tcf are mutually exclusive\n{USAGE}"
+            ));
+        }
     };
+    // A TCF has no metadata map to embed a config.json in, so the path is
+    // the only way the architecture can be known. Caught here rather than
+    // after the 1.2 GB file has been mapped and verified.
+    if matches!(weights, Weights::Tcf(_)) && config.is_none() {
+        return Err(format!("--config is required with --tcf\n{USAGE}"));
+    }
 
     Ok(Args {
         weights,
@@ -359,15 +383,15 @@ fn parse_args() -> Result<Args, String> {
 
 /// Locate `tokenizer.json`.
 ///
-/// A checkpoint directory holds it outright. A GGUF carries no tokenizer at
-/// all, so it is looked for beside the `.gguf` first and beside `--config`
-/// second — both of those normally sit in, or are copied from, the same
+/// A checkpoint directory holds it outright. Neither a GGUF nor a TCF carries
+/// a tokenizer at all, so it is looked for beside the model file first and
+/// beside `--config` second — both of those normally sit in, or are copied from, the same
 /// checkpoint directory. Neither: an error, rather than a tokenizer guess
 /// that would silently produce the wrong token ids.
 fn tokenizer_path(weights: &Weights, config: Option<&Path>) -> Result<PathBuf, String> {
     match weights {
         Weights::Checkpoint(dir) => Ok(dir.join("tokenizer.json")),
-        Weights::Gguf(path) => {
+        Weights::Gguf(path) | Weights::Tcf(path) => {
             let beside = |p: &Path| {
                 p.parent()
                     .map(|dir| dir.join("tokenizer.json"))
@@ -377,8 +401,9 @@ fn tokenizer_path(weights: &Weights, config: Option<&Path>) -> Result<PathBuf, S
                 .or_else(|| config.and_then(beside))
                 .ok_or_else(|| {
                     format!(
-                        "no tokenizer.json beside {} (a GGUF carries none); put it there \
-                     or pass --config pointing into the checkpoint directory",
+                        "no tokenizer.json beside {} (a single-file model carries none); \
+                     put it there or pass --config pointing into the checkpoint \
+                     directory",
                         path.display()
                     )
                 })
@@ -491,7 +516,7 @@ where
             VoxCpm2Model::<R>::from_checkpoint(dir, &args.audiovae, device, args.dtype)?
         }
         Weights::Gguf(path) => {
-            eprintln!("loading {} (dequantizing to F32) ...", path.display());
+            eprintln!("loading {} ...", path.display());
             VoxCpm2Model::<R>::from_gguf(
                 path,
                 args.config.as_deref(),
@@ -499,6 +524,16 @@ where
                 device,
                 args.dtype,
             )?
+        }
+        Weights::Tcf(path) => {
+            eprintln!("loading {} ...", path.display());
+            // `parse_args` already rejected a missing `--config`; this arm
+            // repeats the check rather than unwrapping on that invariant.
+            let config = args
+                .config
+                .as_deref()
+                .ok_or("--config is required with --tcf")?;
+            VoxCpm2Model::<R>::from_tcf(path, config, &args.audiovae, device, args.dtype)?
         }
     };
 

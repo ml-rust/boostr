@@ -12,5 +12,5 @@ pub use gguf::{GgmlType, Gguf, GgufMetadata, GgufTensorInfo, GgufValue, GgufValu
 pub use gguf_vocab::extract_gguf_vocab;
 pub use safetensors::{SafeTensors, TensorInfo};
 pub use safetensors_loader::SafeTensorsLoader;
-pub use tcf::{TcfHeaderInfo, TcfLoader, TcfModuleInfo, TcfTensorInfo};
+pub use tcf::{TcfHeaderInfo, TcfLoader, TcfModuleInfo, TcfSession, TcfTensorInfo};
 pub use torch_pt::{TorchStateDict, load_tensor_pt, load_voice_pt};

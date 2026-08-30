@@ -198,15 +198,31 @@ impl TcfLoader {
         names: &[&str],
         device: &R::Device,
     ) -> Result<Vec<Tensor<R>>> {
-        let file = self.file()?;
+        let session = self.session()?;
         let mut out = Vec::with_capacity(names.len());
         for name in names {
-            let index = self.index_of(name)?;
-            let values = self.decode_at(&file, index)?;
-            let shape = self.shape_at(index)?;
-            out.push(Tensor::<R>::from_slice(&values, &shape, device).map_err(Error::Numr)?);
+            out.push(session.tensor::<R>(name, device)?);
         }
         Ok(out)
+    }
+
+    /// Bind the directory ONCE for a run of loads whose names are not all
+    /// known up front.
+    ///
+    /// [`TcfLoader::load_tensors`] answers that for a fixed list; a model
+    /// loader walking hundreds of names one at a time cannot use it, and the
+    /// one-shot loads reparse and revalidate the whole directory per call
+    /// (see [`TcfLoader::file`]). Over a 577-tensor file that is quadratic.
+    /// A session pays it once and keeps every per-tensor check intact.
+    ///
+    /// # Errors
+    /// [`Error::ModelError`] carrying the spec's `E_*` code, if the mapped
+    /// bytes no longer validate.
+    pub fn session(&self) -> Result<TcfSession<'_>> {
+        Ok(TcfSession {
+            loader: self,
+            file: self.file()?,
+        })
     }
 
     /// Verify `name` and place it on `device` STILL QUANTIZED.
@@ -248,11 +264,10 @@ impl TcfLoader {
         names: &[&str],
         device: &R::Device,
     ) -> Result<Vec<QuantTensor<R>>> {
-        let file = self.file()?;
+        let session = self.session()?;
         let mut out = Vec::with_capacity(names.len());
         for name in names {
-            let index = self.index_of(name)?;
-            out.push(self.quant_at(&file, index, device)?);
+            out.push(session.quant_tensor::<R>(name, device)?);
         }
         Ok(out)
     }
@@ -356,6 +371,64 @@ impl TcfLoader {
             .ok_or_else(|| Error::ModelError {
                 reason: format!("TCF tensor not found: {name}"),
             })
+    }
+}
+
+/// One validated view of a [`TcfLoader`]'s directory, reused across loads.
+///
+/// Bound by [`TcfLoader::session`]. What a session skips is the repeated
+/// DIRECTORY parse, never a payload check: every load below still verifies
+/// the tensor's digests and proof vector first (Section 15).
+///
+/// The borrow is what makes this sound — the validated view points into the
+/// loader's mapping, so it cannot outlive the loader that owns it.
+pub struct TcfSession<'a> {
+    loader: &'a TcfLoader,
+    file: TcfFile<'a>,
+}
+
+impl<'a> TcfSession<'a> {
+    /// The loader this session reads through.
+    pub fn loader(&self) -> &'a TcfLoader {
+        self.loader
+    }
+
+    /// Verify and decode `name` into host f32 values, row-major.
+    ///
+    /// # Errors
+    /// Every error [`TcfLoader::load_tensor_f32`] raises.
+    pub fn tensor_f32(&self, name: &str) -> Result<Vec<f32>> {
+        let index = self.loader.index_of(name)?;
+        self.loader.decode_at(&self.file, index)
+    }
+
+    /// Verify and decode `name` onto `device` as a dense f32 tensor.
+    ///
+    /// # Errors
+    /// Every error [`TcfLoader::load_tensor`] raises.
+    pub fn tensor<R: Runtime<DType = DType>>(
+        &self,
+        name: &str,
+        device: &R::Device,
+    ) -> Result<Tensor<R>> {
+        let index = self.loader.index_of(name)?;
+        let values = self.loader.decode_at(&self.file, index)?;
+        let shape = self.loader.shape_at(index)?;
+        Tensor::<R>::from_slice(&values, &shape, device).map_err(Error::Numr)
+    }
+
+    /// Verify `name` and place it on `device` STILL QUANTIZED.
+    ///
+    /// # Errors
+    /// Every error [`TcfLoader::load_quant_tensor`] raises, a non-native
+    /// encoding included.
+    pub fn quant_tensor<R: Runtime<DType = DType>>(
+        &self,
+        name: &str,
+        device: &R::Device,
+    ) -> Result<QuantTensor<R>> {
+        let index = self.loader.index_of(name)?;
+        self.loader.quant_at(&self.file, index, device)
     }
 }
 

@@ -8,9 +8,9 @@ pub mod loader;
 pub mod metadata;
 
 #[cfg(test)]
-mod fixtures;
+pub(crate) mod fixtures;
 
 pub use decode::{decode_tensor_f32, element_count};
 pub use error::{tcf_error, tcf_tensor_error};
-pub use loader::TcfLoader;
+pub use loader::{TcfLoader, TcfSession};
 pub use metadata::{TcfHeaderInfo, TcfModuleInfo, TcfTensorInfo, encoding_name};

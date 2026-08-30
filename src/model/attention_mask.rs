@@ -104,8 +104,14 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "f16")]
+    use super::causal_window_mask;
     use super::mask_fill;
+    #[cfg(feature = "f16")]
+    use crate::test_utils::cpu_setup;
     use numr::dtype::DType;
+    #[cfg(feature = "f16")]
+    use numr::runtime::cpu::CpuRuntime;
 
     /// The whole point of the fill: it must stay FINITE after the cast into
     /// the mask's own dtype. `f32::MIN` does not — casting it to either half

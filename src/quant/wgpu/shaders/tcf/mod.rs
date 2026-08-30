@@ -103,21 +103,30 @@
 //! # Why the matmul comes in two shapes
 //!
 //! Phase 1 above amortizes a group parameter over a group. It does NOT amortize
-//! the code decode itself, and the per-element matmul gives every invocation
-//! its own weight row, so the sixteen invocations of a workgroup that share a
-//! weight row each decode it. That is affordable when there are few activation
-//! rows and ruinous when there are many: on this project's RTX 3060 the WebGPU
-//! path won dequantization by 2.6x to 5.7x and LOST a 256-row prefill by up to
-//! 2.1x, against a GGUF block layout the same kernels beat on CUDA. The cost is
-//! structural, not a property of the encoding.
+//! the code decode itself. A per-element kernel that gave every invocation its
+//! own weight row — so the sixteen invocations of a workgroup that share a
+//! weight row each decode it — was measured against `generate_tcf_matmul_tiled_shader`
+//! and lost at every M sampled including 1, so it was removed rather than kept
+//! as an unreachable dispatch branch. See `generate_tcf_matmul_tiled_shader`'s
+//! doc for the numbers.
 //!
-//! So `generate_tcf_matmul_tiled_shader` takes the CUDA GEMM's shape: per
-//! K-tile a workgroup decodes its sixteen weight rows into workgroup memory
-//! ONCE and stages the sixteen matching activation rows beside them, and every
-//! output element then reads decoded f32. `generate_tcf_matmul_shader` stays
-//! for a small M, where a workgroup cannot fill its activation tile and the
-//! staging traffic buys nothing. `MATMUL_TILED_MIN_M` is the crossover and is
-//! provisional until the M sweep sets it.
+//! `generate_tcf_matmul_tiled_shader` takes the CUDA GEMM's shape: per K-tile a
+//! workgroup decodes its sixteen weight rows into workgroup memory ONCE and
+//! stages the sixteen matching activation rows beside them, and every output
+//! element then reads decoded f32.
+//!
+//! It is `@workgroup_size(16, 16)` over `(n, m)`, and that shape is itself a
+//! defect at a small M. Dispatched `(N/16, M/16)`, a workgroup at `M = 1` holds
+//! sixteen invocations with a real activation row and 240 without: 94% masked.
+//! Measured, that made a WebGPU matmul of ONE row cost more than dequantizing
+//! the whole weight to f32 — 412us against 238us for `Q8S32_T64` on a 2048x2048
+//! `q_proj` — while CUDA's relationship on the same shapes runs the other way,
+//! 22us against 131us. So `generate_tcf_matmul_gemv_shader` drops the `m` axis
+//! entirely: a one-dimensional grid over N, eight weight rows per workgroup, 32
+//! lanes splitting each row's K, and the few activation rows walked INSIDE the
+//! invocation against weights decoded once. `MATMUL_GEMV_MAX_M` is that band's
+//! measured ceiling; above it the tiled kernel wins instead. See
+//! `MATMUL_GEMV_MAX_M`'s doc for the numbers.
 //!
 //! The gate is `tests/backend_parity/quant_tcf_wgpu.rs`: every encoding,
 //! decoded by these shaders and by `tcf_core::unpack` + `tcf_core::dequantize`,
@@ -127,7 +136,7 @@ mod decoder;
 mod kernels;
 
 pub use kernels::{
-    DEQUANT_ENTRY, DEQUANT_TILES_PER_GROUP, DEQUANT_WORKGROUP, MATMUL_ENTRY, MATMUL_TILE,
-    MATMUL_TILED_ENTRY, MATMUL_TILED_MIN_M, generate_tcf_dequant_shader,
-    generate_tcf_matmul_shader, generate_tcf_matmul_tiled_shader,
+    DEQUANT_ENTRY, DEQUANT_TILES_PER_GROUP, DEQUANT_WORKGROUP, MATMUL_GEMV_COLS, MATMUL_GEMV_ENTRY,
+    MATMUL_GEMV_MAX_M, MATMUL_TILE, MATMUL_TILED_ENTRY, generate_tcf_dequant_shader,
+    generate_tcf_matmul_gemv_shader, generate_tcf_matmul_tiled_shader,
 };

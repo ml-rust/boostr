@@ -23,6 +23,14 @@
 //! exceed the tile in both `M` and `N`, one an exact multiple of it and one
 //! not, so the boundary masking is covered rather than assumed.
 //!
+//! They also all have a row of 4, 5 or 7 execution tiles, which is BELOW the
+//! small-M GEMV kernel's eight-tile run, so they only ever reach that kernel's
+//! tail. `tcf_wgpu_gemv_matmul_matches_cpu` adds three shapes whose rows
+//! exceed the run width, one an exact multiple of it and two not, so the run
+//! path and the transition into the tail are both covered. A CUDA fast path
+//! shipped once whose every test shape was under its new run width; the
+//! kernel was never executed by its own gate.
+//!
 //! # Tolerances
 //!
 //! Dequantization is compared BIT FOR BIT, the same gate the CUDA path meets.
@@ -200,8 +208,8 @@ fn tcf_wgpu_matmul_matches_cpu() {
     });
 }
 
-/// The workgroup-tiled matmul, which `dispatch_matmul` selects at
-/// `MATMUL_TILED_MIN_M` activation rows and above.
+/// The workgroup-tiled matmul, which `dispatch_matmul` selects above
+/// `MATMUL_GEMV_MAX_M` activation rows.
 ///
 /// # Why this test exists separately
 ///
@@ -247,6 +255,68 @@ fn tcf_wgpu_tiled_matmul_matches_cpu() {
                     &want,
                     &format!(
                         "{} tiled matmul {m}x{k}x{n}",
+                        TcfEncoding::new(native).name()
+                    ),
+                    1e-3,
+                    1e-5,
+                );
+            }
+        }
+    });
+}
+
+/// The small-M GEMV, which `dispatch_matmul` selects at `MATMUL_GEMV_MAX_M`
+/// activation rows and below.
+///
+/// # Why this test exists separately
+///
+/// The kernel walks a weight row EIGHT execution tiles at a time and finishes
+/// whatever a whole run cannot cover on a tile-at-a-time tail. Every `k` in
+/// `SHAPES` is 4, 5 or 7 tiles per row, so those tests enter the tail
+/// immediately and the run path — where the group parameters are resolved
+/// once per 512 weights rather than once per 64 — never executes. A CUDA fast
+/// path shipped through exactly that hole.
+///
+/// So every `k` here exceeds the run width in tiles per row, and the three
+/// cover both sides of the tail:
+///
+/// - `m=1, k=1024, n=32`: 16 tiles per row, an exact multiple of the run, so
+///   two whole runs and NO tail. `n` is a multiple of the workgroup's eight
+///   columns, so no column is masked either. This is the `M = 1` case the
+///   kernel exists for.
+/// - `m=4, k=704, n=19`: 11 tiles per row, one whole run plus a three-tile
+///   tail. `n` is not a multiple of eight, so the last workgroup overhangs `N`
+///   by five and those invocations must still reach every barrier.
+/// - `m=8, k=576, n=8`: 9 tiles per row, one run plus a one-tile tail, at the
+///   band's ceiling, where eight accumulators per invocation are live.
+#[test]
+fn tcf_wgpu_gemv_matmul_matches_cpu() {
+    // `(m, k, n)`. Every `m` is at or below the GEMV band's ceiling, so every
+    // shape takes the GEMV path.
+    const GEMV_SHAPES: [(usize, usize, usize); 3] = [(1, 1024, 32), (4, 704, 19), (8, 576, 8)];
+
+    with_wgpu_backend(|client, device| {
+        for (m, k, n) in GEMV_SHAPES {
+            let weight_values = source_values(n * k, 5);
+            let act = source_values(m * k, 29);
+            for native in ENCODINGS {
+                let payload = packed(native, &weight_values, &[n, k]);
+                let want = cpu_matmul(&act, &payload, native, m, k, n);
+
+                let activation = Tensor::from_slice(&act, &[m, k], &device).expect("activation");
+                let weight =
+                    QuantTensor::from_bytes(&payload, TcfEncoding::new(native), &[n, k], &device)
+                        .expect("WebGPU TCF QuantTensor");
+                let got = client
+                    .quant_matmul(&activation, &weight)
+                    .expect("WebGPU quant_matmul")
+                    .to_vec::<f32>();
+
+                assert_parity_f32_tol(
+                    &got,
+                    &want,
+                    &format!(
+                        "{} gemv matmul {m}x{k}x{n}",
                         TcfEncoding::new(native).name()
                     ),
                     1e-3,

@@ -1,4 +1,4 @@
-//! The two TCF entry points, and the bindings they declare around the shared
+//! The four TCF entry points, and the bindings they declare around the shared
 //! decoder.
 //!
 //! Each generator emits its own uniform block, storage bindings and workgroup
@@ -41,39 +41,62 @@ const MATMUL_TILED_ROUNDS: u32 = MATMUL_TILE * TCF_TILE as u32 / MATMUL_TILED_TH
 /// (staged weight row, group).
 const MATMUL_TILED_PARAM_SLOTS: u32 = MATMUL_TILE * MAX_GROUPS_PER_TILE;
 
-/// Activation rows at or above which [`generate_tcf_matmul_tiled_shader`] is
-/// dispatched instead of [`generate_tcf_matmul_shader`].
+/// Invocations cooperating on one weight row in the GEMV kernel, and so the
+/// width the final reduction folds. Thirty-two matches the CUDA kernel's warp
+/// and is a power of two, which the reduction tree needs.
+const MATMUL_GEMV_LANES: u32 = 32;
+/// Weight rows (output columns) one GEMV workgroup owns, and so the width of
+/// the one-dimensional grid the host dispatches over `N`.
+pub const MATMUL_GEMV_COLS: u32 = 8;
+/// Invocations in a GEMV workgroup: `MATMUL_GEMV_COLS` rows of
+/// `MATMUL_GEMV_LANES` lanes.
+const MATMUL_GEMV_THREADS: u32 = MATMUL_GEMV_LANES * MATMUL_GEMV_COLS;
+/// Execution tiles one GEMV run covers, matching CUDA's `TCF_RUN_TILES`. The
+/// unit of work is widened to a run so a group parameter is resolved once per
+/// 512 weights rather than once per 64 — the cost the CUDA ablation found
+/// dominant, not the width of a code load.
+const MATMUL_GEMV_RUN_TILES: u32 = 8;
+/// Run elements one lane owns: `8 * 64 / 32`. Sixteen elements from a multiple
+/// of sixteen lie inside ONE tile and ONE quantization group at every group
+/// width v1 defines (16, 32, 64), so a lane reads one resolved
+/// `(scale, minimum)` pair for its whole run.
+const MATMUL_GEMV_PER_LANE: u32 = MATMUL_GEMV_RUN_TILES * TCF_TILE as u32 / MATMUL_GEMV_LANES;
+/// Elements one lane owns per tail tile: `64 / 32`.
+const MATMUL_GEMV_TAIL_PER_LANE: u32 = TCF_TILE as u32 / MATMUL_GEMV_LANES;
+/// Workgroup slots holding one run's resolved group parameters, one per
+/// (owned weight row, run tile, group). Exactly `MATMUL_GEMV_THREADS` at the
+/// widest group count, so the resolve phase is one slot per invocation and no
+/// group is resolved twice.
+const MATMUL_GEMV_PARAM_SLOTS: u32 = MATMUL_GEMV_COLS * MATMUL_GEMV_RUN_TILES * MAX_GROUPS_PER_TILE;
+
+/// Activation rows at or below which [`generate_tcf_matmul_gemv_shader`] is
+/// dispatched, in preference to [`generate_tcf_matmul_tiled_shader`].
 ///
-/// MEASURED, `q_proj` 2048x2048 on an RTX 3060 via Vulkan, minimum nanoseconds,
-/// per-element kernel against tiled kernel at the same M:
+/// It is a compile-time bound as well as a dispatch threshold — the kernel
+/// keeps one accumulator register per activation row, and the WGSL array
+/// holding them is sized by this constant — so raising it costs register
+/// pressure in the M = 1 case that the kernel exists for.
 ///
-/// | M | Q8 per-elem | Q8 tiled | Q6 per-elem | Q6 tiled |
-/// |---|-------------|----------|-------------|----------|
-/// | 1 |       457us |    412us |       582us |    458us |
-/// | 4 |       469us |    409us |       662us |    456us |
-/// | 8 |       526us |    403us |       923us |    456us |
+/// MEASURED on an RTX 3060 via Vulkan, `q_proj` 2048x2048, minimum
+/// nanoseconds, GEMV kernel against tiled kernel at the same M:
 ///
-/// The expectation was a crossover — that staging traffic and three barriers
-/// per K-tile could not pay for themselves until a workgroup had enough
-/// activation rows to fill its tile. There is no crossover on this adapter.
-/// The tiled kernel wins at EVERY M including 1, because the decode it
-/// amortizes costs far more than the staging does, and a partly filled tile
-/// still decodes each weight once instead of `MATMUL_TILE` times.
+/// | M | Q8 gemv | Q8 tiled | Q6 gemv | Q6 tiled | Q4 gemv | Q4 tiled |
+/// |---|---------|----------|---------|----------|---------|----------|
+/// | 1 |   165us |    412us |   212us |    458us |   191us |    436us |
+/// | 4 |   293us |    409us |   339us |    456us |   320us |    437us |
+/// | 8 |   483us |    403us |   521us |    456us |   502us |    439us |
 ///
-/// So 1: the per-element kernel is currently never dispatched. It is kept, and
-/// this stays a constant rather than becoming an unconditional call, because
-/// the result above is from ONE desktop adapter. A mobile adapter has less
-/// workgroup memory bandwidth and lower occupancy, which is exactly where a
-/// staging cost could start to matter, and this crate targets those. Re-run
-/// the sweep there before assuming the answer transfers.
-pub const MATMUL_TILED_MIN_M: u32 = 1;
+/// GEMV wins at 1 and 4 and LOSES at 8 on every encoding, so the ceiling sits
+/// at 4: the band below it uses the kernel that wins there, and M = 8 is
+/// dispatched to the tiled kernel instead.
+pub const MATMUL_GEMV_MAX_M: u32 = 4;
 
 /// Entry point name of the dequantization shader.
 pub const DEQUANT_ENTRY: &str = "tcf_dequant_f32";
-/// Entry point name of the fused quantized matmul shader.
-pub const MATMUL_ENTRY: &str = "tcf_quant_matmul_f32";
 /// Entry point name of the workgroup-tiled fused quantized matmul shader.
 pub const MATMUL_TILED_ENTRY: &str = "tcf_quant_matmul_tiled_f32";
+/// Entry point name of the small-M fused quantized matmul shader.
+pub const MATMUL_GEMV_ENTRY: &str = "tcf_quant_matmul_gemv_f32";
 
 /// The uniform block and storage bindings both TCF shaders declare.
 ///
@@ -170,76 +193,34 @@ fn {entry}(
     )
 }
 
-/// `activation [M, K] x weight [N, K]^T -> output [M, N]`, one invocation per
-/// output element, matching the other WebGPU quantized matmul shaders.
-///
-/// The weight is never materialized as f32: each invocation walks its own
-/// weight row tile by tile, resolves each tile's group parameters once, then
-/// decodes that group's codes straight into the accumulator.
-#[must_use]
-pub fn generate_tcf_matmul_shader() -> String {
-    format!(
-        r#"// Fused matmul: activation [M,K] x TCF weight [N,K] -> output [M,N]
-{bindings}
-@group(0) @binding(2) var<storage, read_write> output: array<f32>;
-@group(0) @binding(3) var<uniform> params: TcfParams;
-{decoder}
-
-@compute @workgroup_size({tile_edge}, {tile_edge})
-fn {entry}(@builtin(global_invocation_id) gid: vec3<u32>) {{
-    let n = gid.x;
-    let m = gid.y;
-    if (m >= params.m || n >= params.n) {{
-        return;
-    }}
-
-    let tiles_per_row = params.k / TCF_TILE;
-    let row_first_tile = n * tiles_per_row;
-    let act_row_base = m * params.k;
-    let groups_per_tile = params.groups_per_tile;
-
-    var acc: f32 = 0.0;
-    for (var t: u32 = 0u; t < tiles_per_row; t = t + 1u) {{
-        let tile = row_first_tile + t;
-        let k_base = act_row_base + t * TCF_TILE;
-        for (var g: u32 = 0u; g < groups_per_tile; g = g + 1u) {{
-            let values = tcf_group_values(tile, g);
-            let first = g * params.group;
-            for (var i: u32 = 0u; i < params.group; i = i + 1u) {{
-                let e = first + i;
-                let w = tcf_value(tcf_code(tile, e), values.scale, values.min_value);
-                acc = acc + activation[k_base + e] * w;
-            }}
-        }}
-    }}
-
-    output[m * params.n + n] = acc;
-}}
-"#,
-        bindings = bindings(
-            1,
-            "\n@group(0) @binding(0) var<storage, read_write> activation: array<f32>;"
-        ),
-        decoder = decoder(),
-        tile_edge = MATMUL_TILE,
-        entry = MATMUL_ENTRY,
-    )
-}
-
 /// `activation [M, K] x weight [N, K]^T -> output [M, N]`, workgroup-tiled:
 /// a `MATMUL_TILE` square of output elements per workgroup, one invocation
 /// each, with the weights decoded into workgroup memory once per K-tile.
 ///
-/// # Why a second matmul kernel exists
+/// # Why the weight decode is amortized over a workgroup
 ///
-/// [`generate_tcf_matmul_shader`] gives every invocation its own weight row and
-/// lets it decode every element itself, so the sixteen invocations of a
-/// workgroup that share a weight row decode that row sixteen times. A TCF
-/// decode is not a table lookup — it is two code-plane reads for a 6-bit
-/// encoding, a group-parameter resolution, and a two-level integer division —
-/// so paying for it once per OUTPUT element rather than once per weight element
-/// is what made this backend lose large-batch prefill to a GGUF block layout,
-/// while winning dequantization outright.
+/// An invocation given its own weight row and left to decode every element
+/// itself would have the sixteen invocations of a workgroup that share a
+/// weight row decode that row sixteen times. A TCF decode is not a table
+/// lookup — it is two code-plane reads for a 6-bit encoding, a
+/// group-parameter resolution, and a two-level integer division — so paying
+/// for it once per OUTPUT element rather than once per weight element is what
+/// made this backend lose large-batch prefill to a GGUF block layout, while
+/// winning dequantization outright. A per-element kernel of that shape was
+/// measured against this one, `q_proj` 2048x2048 on an RTX 3060 via Vulkan,
+/// minimum nanoseconds, and lost at every M sampled including 1:
+///
+/// | M | Q8 per-elem | Q8 tiled |
+/// |---|-------------|----------|
+/// | 1 |       457us |    412us |
+/// | 4 |       469us |    409us |
+/// | 8 |       526us |    403us |
+///
+/// The expectation had been a crossover — that staging traffic and three
+/// barriers per K-tile could not pay for themselves until a workgroup had
+/// enough activation rows to fill its tile. There was no crossover on that
+/// adapter: the amortized decode outweighed the staging cost even at M = 1.
+/// The per-element kernel was removed rather than kept unreachable.
 ///
 /// This kernel is the CUDA `tcf_gemm_f32` shape: per K-tile the workgroup
 /// resolves its sixteen weight rows' group parameters, decodes those rows'
@@ -386,6 +367,268 @@ fn {entry}(
     )
 }
 
+/// `activation [M, K] x weight [N, K]^T -> output [M, N]` for a small `M`: one
+/// output column per group of `MATMUL_GEMV_LANES` invocations, eight columns
+/// per workgroup, one dimension of workgroups over `N`.
+///
+/// # Why a third matmul kernel exists
+///
+/// Both kernels above are `@workgroup_size(16, 16)` over `(n, m)` and are
+/// dispatched `(N/16, M/16)`. At `M = 1` that gives a workgroup 16 real
+/// activation rows' worth of invocations out of 256, so 94% of it is masked
+/// off, and the tiled kernel additionally stages 16 activation rows and
+/// discards 15 of them. The result, measured, was a WebGPU matmul at `M = 1`
+/// costing MORE than dequantizing the entire weight to f32 — the opposite of
+/// the CUDA relationship on the same shapes. See [`MATMUL_GEMV_MAX_M`].
+///
+/// # Why every invocation is useful at M = 1
+///
+/// The grid is `(N / MATMUL_GEMV_COLS, 1)` and the workgroup is
+/// `(MATMUL_GEMV_LANES, MATMUL_GEMV_COLS)`. `M` enters neither. A workgroup
+/// owns eight weight ROWS, and its 32 lanes split each row's `K` elements
+/// between them, so at `M = 1` every one of the 256 invocations decodes 16
+/// distinct weights per run and accumulates them against a real activation
+/// element. Nothing is masked but a partial trailing workgroup in `N`.
+///
+/// `M > 1` is handled inside the invocation rather than by a second grid
+/// dimension: a lane decodes its 16 weights into registers ONCE and then walks
+/// the `M` activation rows against them, so the total decode count stays `N*K`
+/// however many rows there are, instead of `M*N*K`.
+///
+/// # Why a run of eight tiles
+///
+/// This is the CUDA GEMV's finding, restated. Its first form walked a tile at
+/// a time and reached a fifth of the card's bandwidth; the ablation showed the
+/// dominant cost was NOT narrow code loads but resolving a group's scale once
+/// per 64-element tile. `TwoLevelU6M6` is the expensive form — four scattered
+/// plane reads per group — and holding the scale constant alone roughly
+/// halved the old kernel at every width. So the unit of work here is a RUN of
+/// `MATMUL_GEMV_RUN_TILES` tiles, 512 elements, and the workgroup resolves the
+/// whole run's `8 * 8 * groups_per_tile <= 256` group parameters in ONE step,
+/// one slot per invocation, before any lane decodes a code.
+///
+/// A lane's 16 run elements start at a multiple of 16, so they lie inside one
+/// tile and inside one group at every group width v1 defines, and the lane
+/// reads exactly one resolved pair for the whole run.
+///
+/// # The tail
+///
+/// A row whose tile count is not a multiple of `MATMUL_GEMV_RUN_TILES`
+/// finishes on a tile-at-a-time loop, which is also the only path when `K` is
+/// under eight tiles. It is the same shape CUDA keeps for the same reason:
+/// two elements per lane, the workgroup's `8 * groups_per_tile <= 32` group
+/// parameters resolved in one step. Both paths call the SAME `tcf_code` and
+/// `tcf_value`, so there is one decode, not two.
+///
+/// # Workgroup memory budget
+///
+/// One scale and one minimum per run slot, plus one reduction slot per
+/// invocation:
+///
+/// - run scales: `256 * 4` = 1024 bytes
+/// - run minima: `256 * 4` = 1024 bytes
+/// - reduction: `256 * 4` = 1024 bytes
+///
+/// 3072 bytes, well inside the 16384 WebGPU guarantees as
+/// `maxComputeWorkgroupStorageSize`. The reduction plane is one f32 per
+/// invocation rather than one per `(invocation, activation row)` precisely so
+/// the `M = 1` case this kernel exists for keeps its occupancy.
+///
+/// # Why every barrier is uniformly reached
+///
+/// WGSL Section 14.7 makes a barrier in non-uniform control flow undefined
+/// behaviour. The kernel has NO `return`, and every barrier sits at statement
+/// level in a loop whose trip count is workgroup-uniform:
+///
+/// - the run loop, `params.k / TCF_TILE / MATMUL_GEMV_RUN_TILES`, two
+///   barriers — one after the resolve phase, one read-before-overwrite before
+///   the next run rewrites the slots,
+/// - the tail loop, over the same uniform tile count, two barriers for the
+///   same two reasons,
+/// - the reduction, `min(params.m, MATMUL_GEMV_MAX_M)` rows each with one
+///   barrier after the accumulator store and one per tree step.
+///
+/// Every guard — `n < params.n`, `tid < slots`, `lane < offset` — masks a
+/// WRITE and never encloses a barrier. An invocation whose column overhangs
+/// `N` runs the whole loop and is masked at the single store.
+///
+/// The reduction needs no trailing barrier per row: the tree's last step is
+/// followed by one, and the only slot an invocation reads after it is its own,
+/// which no other invocation writes.
+#[must_use]
+pub fn generate_tcf_matmul_gemv_shader() -> String {
+    format!(
+        r#"// Small-M matmul: activation [M,K] x TCF weight [N,K] -> output [M,N]
+{bindings}
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<uniform> params: TcfParams;
+{decoder}
+
+const TCF_GEMV_LANES: u32 = {lanes}u;
+const TCF_GEMV_COLS: u32 = {cols}u;
+const TCF_GEMV_RUN_TILES: u32 = {run_tiles}u;
+const TCF_GEMV_PER_LANE: u32 = {per_lane}u;
+const TCF_GEMV_TAIL_PER_LANE: u32 = {tail_per_lane}u;
+const TCF_GEMV_MAX_M: u32 = {max_m}u;
+
+// 1024 + 1024 + 1024 = 3072 bytes, inside the 16384-byte WebGPU minimum.
+var<workgroup> tcf_run_scale: array<f32, {slots}u>;
+var<workgroup> tcf_run_min: array<f32, {slots}u>;
+var<workgroup> tcf_reduce: array<f32, {threads}u>;
+
+@compute @workgroup_size({lanes}, {cols})
+fn {entry}(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {{
+    // No early return: every invocation below must reach every barrier, so a
+    // workgroup overhanging N is masked at its stores instead.
+    let lane = lid.x;
+    let col = lid.y;
+    let tid = col * TCF_GEMV_LANES + lane;
+    let n0 = wid.x * TCF_GEMV_COLS;
+    let n = n0 + col;
+    let live = n < params.n;
+
+    // Uniform: all four come from the uniform block, so every loop bound below
+    // is workgroup-uniform and so is every barrier inside those loops.
+    let tiles_per_row = params.k / TCF_TILE;
+    let groups_per_tile = params.groups_per_tile;
+    let runs = tiles_per_row / TCF_GEMV_RUN_TILES;
+    let rows = min(params.m, TCF_GEMV_MAX_M);
+    let run_slots = TCF_GEMV_RUN_TILES * groups_per_tile;
+    let tail_slots = TCF_GEMV_COLS * groups_per_tile;
+
+    // One accumulator per activation row, so a decoded weight is reused across
+    // all of them instead of being decoded once per row.
+    var acc: array<f32, {max_m}u>;
+    for (var mi: u32 = 0u; mi < TCF_GEMV_MAX_M; mi = mi + 1u) {{
+        acc[mi] = 0.0;
+    }}
+
+    // This lane's slice of a run. `e0` is a multiple of sixteen, so the slice
+    // stays inside one tile and one group and `slot_in_tile` is constant.
+    let e0 = lane * TCF_GEMV_PER_LANE;
+    let run_tile = e0 / TCF_TILE;
+    let e_base = e0 % TCF_TILE;
+    let slot_in_tile = e_base / params.group;
+
+    for (var r: u32 = 0u; r < runs; r = r + 1u) {{
+        // Phase 1: resolve the whole run's group parameters, one slot per
+        // invocation, so a scale plane is read once per 512 weights.
+        let tile0 = r * TCF_GEMV_RUN_TILES;
+        if (tid < TCF_GEMV_COLS * run_slots) {{
+            let param_n = n0 + tid / run_slots;
+            let within = tid % run_slots;
+            var scale: f32 = 0.0;
+            var min_value: f32 = 0.0;
+            if (param_n < params.n) {{
+                let tile = param_n * tiles_per_row + tile0 + within / groups_per_tile;
+                let values = tcf_group_values(tile, within % groups_per_tile);
+                scale = values.scale;
+                min_value = values.min_value;
+            }}
+            tcf_run_scale[tid] = scale;
+            tcf_run_min[tid] = min_value;
+        }}
+        workgroupBarrier();
+
+        // Phase 2: decode this lane's sixteen weights once, then walk the M
+        // activation rows against them.
+        if (live) {{
+            let tile = n * tiles_per_row + tile0 + run_tile;
+            let slot = col * run_slots + run_tile * groups_per_tile + slot_in_tile;
+            let scale = tcf_run_scale[slot];
+            let min_value = tcf_run_min[slot];
+
+            var w: array<f32, {per_lane}u>;
+            for (var i: u32 = 0u; i < TCF_GEMV_PER_LANE; i = i + 1u) {{
+                w[i] = tcf_value(tcf_code(tile, e_base + i), scale, min_value);
+            }}
+
+            let k_base = tile0 * TCF_TILE + e0;
+            for (var mi: u32 = 0u; mi < rows; mi = mi + 1u) {{
+                let act_base = mi * params.k + k_base;
+                var sum = acc[mi];
+                for (var i: u32 = 0u; i < TCF_GEMV_PER_LANE; i = i + 1u) {{
+                    sum = sum + activation[act_base + i] * w[i];
+                }}
+                acc[mi] = sum;
+            }}
+        }}
+        // Read-before-overwrite: the next run's phase 1 rewrites both slot
+        // planes, so no invocation may start it while another still reads.
+        workgroupBarrier();
+    }}
+
+    // The tiles a whole run cannot cover, one at a time, two elements per
+    // lane. Same decode, narrower unit of work.
+    for (var j: u32 = runs * TCF_GEMV_RUN_TILES; j < tiles_per_row; j = j + 1u) {{
+        if (tid < tail_slots) {{
+            let param_n = n0 + tid / groups_per_tile;
+            var scale: f32 = 0.0;
+            var min_value: f32 = 0.0;
+            if (param_n < params.n) {{
+                let values = tcf_group_values(
+                    param_n * tiles_per_row + j, tid % groups_per_tile);
+                scale = values.scale;
+                min_value = values.min_value;
+            }}
+            tcf_run_scale[tid] = scale;
+            tcf_run_min[tid] = min_value;
+        }}
+        workgroupBarrier();
+
+        if (live) {{
+            let tile = n * tiles_per_row + j;
+            let k_base = j * TCF_TILE;
+            for (var h: u32 = 0u; h < TCF_GEMV_TAIL_PER_LANE; h = h + 1u) {{
+                let e = lane + h * TCF_GEMV_LANES;
+                let slot = col * groups_per_tile + e / params.group;
+                let w = tcf_value(tcf_code(tile, e), tcf_run_scale[slot], tcf_run_min[slot]);
+                for (var mi: u32 = 0u; mi < rows; mi = mi + 1u) {{
+                    acc[mi] = acc[mi] + activation[mi * params.k + k_base + e] * w;
+                }}
+            }}
+        }}
+        workgroupBarrier();
+    }}
+
+    // Reduce the lanes of each column, one activation row at a time. One f32
+    // per invocation of workgroup memory rather than one per (invocation,
+    // row), because M = 1 is the case this kernel exists for.
+    for (var mi: u32 = 0u; mi < rows; mi = mi + 1u) {{
+        tcf_reduce[tid] = acc[mi];
+        workgroupBarrier();
+        for (var offset: u32 = TCF_GEMV_LANES / 2u; offset > 0u; offset = offset >> 1u) {{
+            if (lane < offset) {{
+                tcf_reduce[tid] = tcf_reduce[tid] + tcf_reduce[tid + offset];
+            }}
+            workgroupBarrier();
+        }}
+        if (lane == 0u && live) {{
+            output[mi * params.n + n] = tcf_reduce[tid];
+        }}
+    }}
+}}
+"#,
+        bindings = bindings(
+            1,
+            "\n@group(0) @binding(0) var<storage, read_write> activation: array<f32>;"
+        ),
+        decoder = decoder(),
+        lanes = MATMUL_GEMV_LANES,
+        cols = MATMUL_GEMV_COLS,
+        threads = MATMUL_GEMV_THREADS,
+        run_tiles = MATMUL_GEMV_RUN_TILES,
+        per_lane = MATMUL_GEMV_PER_LANE,
+        tail_per_lane = MATMUL_GEMV_TAIL_PER_LANE,
+        max_m = MATMUL_GEMV_MAX_M,
+        slots = MATMUL_GEMV_PARAM_SLOTS,
+        entry = MATMUL_GEMV_ENTRY,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,8 +639,8 @@ mod tests {
     fn all_shaders() -> [String; 3] {
         [
             generate_tcf_dequant_shader(),
-            generate_tcf_matmul_shader(),
             generate_tcf_matmul_tiled_shader(),
+            generate_tcf_matmul_gemv_shader(),
         ]
     }
 
@@ -406,7 +649,7 @@ mod tests {
     /// forbids a second copy of a bit position, and a Q6_K release once shipped
     /// wrong because one existed.
     #[test]
-    fn both_shaders_carry_the_same_decoder() {
+    fn every_shader_carries_the_same_decoder() {
         let decoder = decoder();
         for source in all_shaders() {
             assert!(source.contains(&decoder));
@@ -440,7 +683,7 @@ mod tests {
     /// Every kernel declares the always-zero uniform field the decoder's
     /// contraction barrier reads, under the name the host writes.
     #[test]
-    fn both_shaders_declare_the_zero_barrier_field() {
+    fn every_shader_declares_the_zero_barrier_field() {
         for source in all_shaders() {
             assert_eq!(source.matches("zero_barrier: u32,").count(), 1);
         }
@@ -489,15 +732,96 @@ mod tests {
         assert_eq!(body.matches("workgroupBarrier();").count(), 3);
     }
 
-    /// Both matmul kernels dispatch the same output grid, so the host picks
-    /// between them without recomputing the workgroup count.
+    /// The tiled matmul kernel declares the `MATMUL_TILE` square workgroup
+    /// its output grid is dispatched over.
     #[test]
-    fn both_matmul_kernels_share_an_output_grid() {
-        for source in [
-            generate_tcf_matmul_shader(),
-            generate_tcf_matmul_tiled_shader(),
-        ] {
-            assert!(source.contains(&format!("@workgroup_size({MATMUL_TILE}, {MATMUL_TILE})")));
+    fn the_tiled_matmul_kernel_declares_its_output_grid() {
+        let source = generate_tcf_matmul_tiled_shader();
+        assert!(source.contains(&format!("@workgroup_size({MATMUL_TILE}, {MATMUL_TILE})")));
+    }
+
+    /// A GEMV workgroup's lanes cover a run exactly, and a lane's slice starts
+    /// at a multiple of sixteen, which is what lets it read ONE resolved
+    /// `(scale, minimum)` pair for its whole run at every group width v1
+    /// defines.
+    #[test]
+    fn a_gemv_run_is_covered_by_its_lanes_exactly() {
+        assert_eq!(MATMUL_GEMV_THREADS, 256);
+        assert_eq!(
+            MATMUL_GEMV_LANES * MATMUL_GEMV_PER_LANE,
+            MATMUL_GEMV_RUN_TILES * TCF_TILE as u32
+        );
+        assert_eq!(MATMUL_GEMV_PER_LANE, 16);
+        assert_eq!(
+            MATMUL_GEMV_LANES * MATMUL_GEMV_TAIL_PER_LANE,
+            TCF_TILE as u32
+        );
+        // Sixteen elements from a multiple of sixteen lie inside one group at
+        // every group width v1 defines.
+        for group in [16u32, 32, 64] {
+            assert_eq!(group % MATMUL_GEMV_PER_LANE, 0);
         }
+    }
+
+    /// The resolve phase is one slot per invocation at the widest group count,
+    /// so no group is resolved twice and no invocation idles through it.
+    #[test]
+    fn a_gemv_run_resolves_one_group_per_invocation() {
+        assert_eq!(MATMUL_GEMV_PARAM_SLOTS, MATMUL_GEMV_THREADS);
+        assert_eq!(
+            MATMUL_GEMV_PARAM_SLOTS,
+            MATMUL_GEMV_COLS * MATMUL_GEMV_RUN_TILES * MAX_GROUPS_PER_TILE
+        );
+    }
+
+    /// The GEMV's workgroup memory is the two slot planes and one reduction
+    /// f32 per invocation, with the budget the generator's comment states.
+    #[test]
+    fn the_gemv_workgroup_memory_fits_the_webgpu_minimum() {
+        let bytes = (2 * MATMUL_GEMV_PARAM_SLOTS + MATMUL_GEMV_THREADS) * 4;
+        assert_eq!(bytes, 3072);
+        assert!(bytes <= 16384);
+    }
+
+    /// The GEMV reaches every barrier from workgroup-uniform control flow: no
+    /// invocation returns early, and every barrier sits at statement level in
+    /// a loop bounded by a uniform value rather than inside a conditional.
+    #[test]
+    fn the_gemv_kernel_has_no_early_return_before_a_barrier() {
+        let source = generate_tcf_matmul_gemv_shader();
+        let body = source
+            .split_once(&format!("fn {MATMUL_GEMV_ENTRY}("))
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_default();
+        assert!(!body.is_empty());
+        assert!(!body.contains("return;"));
+        // Two per run, two per tail tile, one after the accumulator store and
+        // one per reduction tree step.
+        assert_eq!(body.matches("workgroupBarrier();").count(), 6);
+    }
+
+    /// The GEMV is one-dimensional over N, which is what makes every
+    /// invocation useful at M = 1: `M` appears in neither the workgroup shape
+    /// nor the grid, so no invocation is masked for want of an activation row.
+    #[test]
+    fn the_gemv_workgroup_is_one_column_group_per_lane_group() {
+        let source = generate_tcf_matmul_gemv_shader();
+        assert!(source.contains(&format!(
+            "@workgroup_size({MATMUL_GEMV_LANES}, {MATMUL_GEMV_COLS})"
+        )));
+    }
+
+    /// The GEMV ceiling is readable by the host, so `dispatch_matmul` picks
+    /// between the two kernels without restating the bound, and it is also
+    /// the WGSL accumulator array's compile-time size.
+    #[test]
+    fn the_gemv_ceiling_matches_the_accumulator_array() {
+        // One accumulator register per activation row, so the dispatch
+        // threshold and the WGSL array bound are the same constant.
+        let source = generate_tcf_matmul_gemv_shader();
+        assert!(source.contains(&format!("var acc: array<f32, {MATMUL_GEMV_MAX_M}u>;")));
+        assert!(source.contains(&format!(
+            "const TCF_GEMV_MAX_M: u32 = {MATMUL_GEMV_MAX_M}u;"
+        )));
     }
 }

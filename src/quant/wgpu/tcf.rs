@@ -2,8 +2,8 @@
 //!
 //! Two entry points, one per shape of work: [`dispatch_dequant`] rebuilds a
 //! whole tensor as f32, and [`dispatch_matmul`] multiplies against a packed
-//! weight without ever materializing it — choosing between a per-element and a
-//! workgroup-tiled kernel on `M`. All of them drive the same decoder in
+//! weight without ever materializing it — choosing between a small-M GEMV and
+//! a workgroup-tiled kernel on `M`. All of them drive the same decoder in
 //! `shaders::tcf` and take the same plane offsets from [`TcfPlanes`], so
 //! neither can disagree with the other — or with the CUDA launches, which read
 //! that type too — about the layout.
@@ -219,13 +219,19 @@ pub fn dispatch_dequant(
 ///
 /// # Which kernel runs
 ///
-/// Both kernels write the same `MATMUL_TILE` square of output elements per
-/// workgroup, so the grid is the same and only the entry point differs. At
-/// `M >= MATMUL_TILED_MIN_M` the workgroup-tiled kernel runs, which decodes a
-/// weight element once per workgroup instead of once per output element; below
-/// it the per-element kernel runs, which does strictly less work when a
-/// workgroup cannot fill its activation tile. That threshold is provisional
-/// until the M sweep sets it; see `shaders::tcf`.
+/// Two bands on `M`:
+///
+/// | Band | Kernel | Grid |
+/// |---|---|---|
+/// | `M <= MATMUL_GEMV_MAX_M` | GEMV | `(N / MATMUL_GEMV_COLS, 1)` |
+/// | otherwise | workgroup-tiled | `(N / TILE, M / TILE)` |
+///
+/// The GEMV band has a grid of its own because it drops the `m` axis: a
+/// `(16, 16)` workgroup over `(n, m)` is 94% masked at `M = 1`, which is what
+/// made a one-row matmul cost more than dequantizing the whole weight. The
+/// tiled kernel decodes a weight element once per workgroup instead of once
+/// per output element. `MATMUL_GEMV_MAX_M` is the measured ceiling; see
+/// `shaders::tcf`.
 ///
 /// # Errors
 /// Every error [`dispatch_dequant`] raises, plus [`Error::QuantError`] when `K`
@@ -260,15 +266,20 @@ pub fn dispatch_matmul(
     let params_buf = params_buffer(client, &params);
 
     let edge = shader_gen::MATMUL_TILE;
-    let (entry, source) = if params.m >= shader_gen::MATMUL_TILED_MIN_M {
+    // The tiled arm's grid: a `MATMUL_TILE` square of output elements per
+    // workgroup, dispatched over the full `(n, m)` output.
+    let square = (params.n.div_ceil(edge), params.m.div_ceil(edge));
+    let (entry, source, workgroups) = if params.m <= shader_gen::MATMUL_GEMV_MAX_M {
         (
-            shader_gen::MATMUL_TILED_ENTRY,
-            shader_gen::generate_tcf_matmul_tiled_shader(),
+            shader_gen::MATMUL_GEMV_ENTRY,
+            shader_gen::generate_tcf_matmul_gemv_shader(),
+            (params.n.div_ceil(shader_gen::MATMUL_GEMV_COLS), 1),
         )
     } else {
         (
-            shader_gen::MATMUL_ENTRY,
-            shader_gen::generate_tcf_matmul_shader(),
+            shader_gen::MATMUL_TILED_ENTRY,
+            shader_gen::generate_tcf_matmul_tiled_shader(),
+            square,
         )
     };
     run(
@@ -277,7 +288,7 @@ pub fn dispatch_matmul(
         &source,
         3,
         &[&act_buf, &weight_buf, &output_buf, &params_buf],
-        (params.n.div_ceil(edge), params.m.div_ceil(edge)),
+        workgroups,
     );
     Ok(())
 }

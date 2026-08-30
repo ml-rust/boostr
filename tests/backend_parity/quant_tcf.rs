@@ -17,6 +17,11 @@
 //! - `[2, 448]`: 14 tiles, seven per row. An odd row width, partial trailing
 //!   super-block again.
 //!
+//! Every one of those is under eight tiles per row, which is the GEMV's
+//! `TCF_RUN_TILES`. They therefore gate only its tile-at-a-time tail.
+//! `tcf_cuda_gemv_run_path_matches_cpu` adds the widths that reach the
+//! eight-tile run the GEMV actually spends its time in.
+//!
 //! # Tolerances
 //!
 //! Dequantization is compared BIT FOR BIT. The device decoder reconstructs a
@@ -153,7 +158,7 @@ fn tcf_cuda_dequant_matches_cpu_bit_for_bit() {
     });
 }
 
-/// The GEMV path, M <= 64. One warp per output column.
+/// The GEMV path, M <= 16. One warp per output column.
 #[test]
 fn tcf_cuda_gemv_matches_cpu() {
     with_cuda_backend(|client, device| {
@@ -192,7 +197,59 @@ fn tcf_cuda_gemv_matches_cpu() {
     });
 }
 
-/// The GEMM path, M > 64. A 16x16 output tile with the weight staged in shared
+/// The GEMV's eight-tile run path, which `SHAPES` is too narrow to reach.
+///
+/// `TCF_RUN_TILES` is 8, so a row of fewer than eight tiles runs entirely on
+/// the tail. These widths reach the run itself, and cover both the case where
+/// it divides the row exactly and the case where it leaves a tail behind:
+///
+/// - `[3, 512]`: 8 tiles per row, one whole run, no tail.
+/// - `[2, 704]`: 11 tiles per row, one run and a 3-tile tail. The row width is
+///   not a whole number of super-blocks either, so a run's eight tiles straddle
+///   super-block boundaries and the two-level forms resolve across them.
+/// - `[5, 1024]`: 16 tiles per row, two whole runs.
+///
+/// `M = 16` is the GEMV/GEMM dispatch boundary in `quant/cuda/quant_matmul`,
+/// so it is pinned here rather than assumed.
+#[test]
+fn tcf_cuda_gemv_run_path_matches_cpu() {
+    with_cuda_backend(|client, device| {
+        for (n, k) in [(3usize, 512usize), (2, 704), (5, 1024)] {
+            for m in [1usize, 16] {
+                let weight_values = source_values(n * k, 0);
+                let act = source_values(m * k, 41);
+                for native in ENCODINGS {
+                    let payload = packed(native, &weight_values, &[n, k]);
+                    let want = cpu_matmul(&act, &payload, native, m, k, n);
+
+                    let activation =
+                        Tensor::from_slice(&act, &[m, k], &device).expect("activation");
+                    let weight = QuantTensor::from_bytes(
+                        &payload,
+                        TcfEncoding::new(native),
+                        &[n, k],
+                        &device,
+                    )
+                    .expect("CUDA TCF QuantTensor");
+                    let got = client
+                        .quant_matmul(&activation, &weight)
+                        .expect("CUDA quant_matmul")
+                        .to_vec::<f32>();
+
+                    assert_parity_f32_tol(
+                        &got,
+                        &want,
+                        &format!("{} gemv run {m}x{k}x{n}", TcfEncoding::new(native).name()),
+                        1e-3,
+                        1e-5,
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// The GEMM path, M > 16. A 16x16 output tile with the weight staged in shared
 /// memory, including an M that is not a multiple of the tile edge.
 #[test]
 fn tcf_cuda_gemm_matches_cpu() {

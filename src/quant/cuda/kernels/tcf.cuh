@@ -180,6 +180,30 @@ static __device__ __forceinline__ void tcf_group_values(
         : tcf_read_binary16(payload + l.min_off + global * 2u);
 }
 
+// Section 13.2 sign resolution of one raw code field.
+//
+// An asymmetric code is an unsigned level. A symmetric code sign-extends from
+// `bits`; Section 13.2's reserved most-negative pattern is rejected by
+// `tcf-core` when the payload is read, so device code sign-extends it rather
+// than re-checking per element.
+//
+// Factored out because two readers need it — `tcf_code` below, one element at
+// a time, and `tcf_run_code`, a whole word of codes at a time. A second copy
+// of this expression is exactly the kind of drift the parity test would only
+// catch after it had already shipped a wrong sign.
+static __device__ __forceinline__ int tcf_sign_resolve(
+    unsigned int field,
+    unsigned int bits,
+    unsigned int symmetric
+) {
+    if (symmetric == 0u) {
+        return (int)field;
+    }
+    int reserved = (int)(1u << (bits - 1u));
+    int value = (int)field;
+    return (value > reserved) ? value - 2 * reserved : value;
+}
+
 // The code of element `e` of tile `tile`, already sign-resolved.
 //
 // Section 14.1 / Section 14.1.1: a 4-bit tile is a 32-byte run, element `e` in
@@ -188,9 +212,7 @@ static __device__ __forceinline__ void tcf_group_values(
 // sub-plane followed by a whole high-two-bit sub-plane, the second starting at
 // `code_high_off`.
 //
-// Symmetric codes sign-extend from `bits`; Section 13.2's reserved
-// most-negative pattern is rejected by `tcf-core` when the payload is read, so
-// device code sign-extends it rather than re-checking per element.
+// The sign is resolved by `tcf_sign_resolve`.
 static __device__ __forceinline__ int tcf_code(
     const unsigned char* __restrict__ payload,
     TcfLayout l,
@@ -215,12 +237,101 @@ static __device__ __forceinline__ int tcf_code(
         field = low | (top << 4);
     }
 
-    if (l.symmetric == 0u) {
-        return (int)field;
+    return tcf_sign_resolve(field, l.bits, l.symmetric);
+}
+
+// Execution tiles one warp decodes per step of the GEMV inner loop, and the
+// elements one lane owns of that step. 8 * 64 / 32 == 16.
+#define TCF_RUN_TILES 8u
+#define TCF_RUN (TCF_RUN_TILES * TCF_TILE)
+#define TCF_RUN_PER_LANE 16u
+
+// The 16 codes lane `lane` owns of the eight-tile run starting at `tile0`,
+// read as whole machine words.
+//
+// # Why a run, and why sixteen elements
+//
+// `tcf_code` recomputes a byte address per element and issues one narrow load,
+// so a warp reading 32 codes covers 32 bytes for an 8-bit encoding and 16 for
+// a 4-bit one — against the 128 bytes a memory transaction carries. Reading
+// the same codes as one `uint4` (8-bit) or one `uint2` plus one `uint` (4- and
+// 6-bit) per lane puts 512 or 256 consecutive bytes under one instruction.
+//
+// Sixteen elements per lane is the width that makes the SCALE side work out
+// too. `tcf-core`'s `MAX_GROUPS_PER_TILE` fixes the group at 16, 32, or 64
+// elements, so 16 consecutive elements starting at a multiple of 16 always lie
+// in ONE group: a lane needs one `(scale, minimum)` pair for its whole run,
+// and the eight tiles' `8 * groups_per_tile <= 32` groups are resolved by one
+// warp-wide step instead of eight serialized ones.
+//
+// # Alignment, proven from the layout rather than assumed
+//
+// `payload` is a device allocation base, so 256-byte aligned. On top of that,
+// with offsets as `quant/tcf/planes.rs` computes them:
+//   - Section 14.3, 8-bit: the run starts at `tile0 * 64`, 64-byte aligned for
+//     any `tile0`, and lane `l` reads at `+ 16 * l`. A `uint4` needs 16.
+//   - Section 14.1, 4-bit, and Section 14.2's low sub-plane: the run starts at
+//     `tile0 * 32`, and lane `l` reads at `+ 8 * l`. A `uint2` needs 8.
+//   - Section 14.2's high sub-plane: `code_high_off` is `tiles * 32`, the run
+//     adds `tile0 * 16`, and lane `l` reads at `+ 4 * l`. A `uint` needs 4.
+// No case depends on `tile0` being run-aligned, which it is not when a row's
+// tile count is not a multiple of eight.
+struct TcfCodeRun {
+    unsigned int w[4];
+};
+
+static __device__ __forceinline__ TcfCodeRun tcf_code_run(
+    const unsigned char* __restrict__ payload,
+    TcfLayout l,
+    unsigned int tile0,
+    unsigned int lane
+) {
+    TcfCodeRun run;
+    if (l.bits == 8u) {
+        const uint4 v =
+            ((const uint4*)(payload + (size_t)tile0 * (size_t)TCF_TILE))[lane];
+        run.w[0] = v.x;
+        run.w[1] = v.y;
+        run.w[2] = v.z;
+        run.w[3] = v.w;
+        return run;
     }
-    int reserved = (int)(1u << (l.bits - 1u));
-    int value = (int)field;
-    return (value > reserved) ? value - 2 * reserved : value;
+    const uint2 v =
+        ((const uint2*)(payload + (size_t)tile0 * (size_t)(TCF_TILE / 2u)))[lane];
+    run.w[0] = v.x;
+    run.w[1] = v.y;
+    run.w[2] = 0u;
+    run.w[3] = 0u;
+    if (l.bits == 6u) {
+        run.w[2] = ((const unsigned int*)(payload + l.code_high_off
+                                         + (size_t)tile0 * (size_t)(TCF_TILE / 4u)))[lane];
+    }
+    return run;
+}
+
+// Element `i` of `tcf_code_run`'s 16, sign-resolved. `i` indexes the lane's own
+// run elements, so run-local element `TCF_RUN_PER_LANE * lane + i`.
+//
+// The bit positions restate Section 14 in word terms and must agree with
+// `tcf_code` element for element; `tests/backend_parity/quant_tcf.rs` is what
+// holds them together. Little-endian: an 8-bit code sits at bit `8 * i` of
+// word `i / 4`, a 4-bit code at bit `4 * i` of word `i / 8`, and a 6-bit
+// code's high two bits at bit `2 * i` of the single high word.
+static __device__ __forceinline__ int tcf_run_code(
+    TcfCodeRun run,
+    TcfLayout l,
+    unsigned int i
+) {
+    unsigned int field;
+    if (l.bits == 8u) {
+        field = (run.w[i >> 2] >> ((i & 3u) * 8u)) & 0xffu;
+    } else {
+        field = (run.w[i >> 3] >> ((i & 7u) * 4u)) & 0x0fu;
+        if (l.bits == 6u) {
+            field |= ((run.w[2] >> (i * 2u)) & 0x03u) << 4u;
+        }
+    }
+    return tcf_sign_resolve(field, l.bits, l.symmetric);
 }
 
 // Section 13.0 / Section 13.0.1 applied to one element, against its group's

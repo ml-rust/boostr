@@ -167,25 +167,29 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         //
         // | M  | GEMV Q8 | GEMM Q8 | GEMV Q4 | GEMM Q4 | GEMV Q6 | GEMM Q6 |
         // |----|---------|---------|---------|---------|---------|---------|
-        // |  2 |   107us |   280us |   151us |   257us |   127us |   284us |
-        // |  4 |   191us |   282us |   285us |   258us |   232us |   284us |
-        // |  8 |   370us |   287us |   560us |   261us |   435us |   288us |
-        // | 16 |   756us |   297us |  1100us |   267us |   855us |   300us |
-        // | 32 |  1500us |   522us |  2080us |   482us |  1690us |   534us |
-        // | 64 |  2880us |   958us |  4110us |   892us |  3370us |   972us |
+        // |  2 |    33us |   278us |    36us |   240us |    38us |   281us |
+        // |  4 |    59us |   280us |    67us |   243us |    69us |   283us |
+        // |  8 |   113us |   286us |   130us |   245us |   132us |   288us |
+        // | 16 |   218us |   298us |   254us |   251us |   256us |   301us |
+        // | 32 |   429us |   518us |   503us |   456us |   506us |   523us |
+        // | 64 |   851us |   951us |   999us |   847us |   965us |   923us |
         //
         // GEMV is linear in M; GEMM is nearly flat to M = 16 because its tile
-        // is already paid for. They cross at 4. Carrying GGUF's 64 ran GEMV
-        // three to four times past its useful range — at M = 64 a Q4 GEMV
-        // cost more than a GEMM of FOUR TIMES the work.
+        // is already paid for. They cross at 16 for Q4 and past 64 for Q8.
         //
-        // 4 goes to GEMV, which costs Q4 about 10% at exactly that M and wins
-        // on Q6 and Q8 there. A per-encoding threshold would recover that 10%
-        // at one point of one encoding and is not worth the branch.
+        // 16 goes to GEMV, which costs Q4 about 1% at exactly that M and wins
+        // by 15% on Q6 and 27% on Q8 there. A per-encoding threshold would
+        // recover that 1% at one point of one encoding and is not worth the
+        // branch.
+        //
+        // The threshold was 4 while the GEMV read one code per load and
+        // resolved a scale per tile. Widening both (see `kernels/tcf.cu`) made
+        // the GEMV three to four times faster and moved the crossover with it,
+        // so 4 would now send M = 8 to a GEMM that is nearly twice as slow.
         if let QuantScheme::Tcf(encoding) = weight.scheme() {
             let at = MatmulShape { m, k, n };
             let device_index = activation.device().id();
-            let launch = if m <= 4 {
+            let launch = if m <= 16 {
                 tcf_dispatch::launch_gemv
             } else {
                 tcf_dispatch::launch_gemm

@@ -25,6 +25,12 @@
 // What plane-major costs is concurrent read STREAMS — two for a flat symmetric
 // encoding, up to five for the two-level asymmetric one — not coalescing.
 //
+// Coalescing is necessary and was not sufficient. The GEMV's first form read
+// consecutive bytes and still reached a fifth of this card's bandwidth,
+// because coalesced 32-byte warp loads and a scale resolution every 64
+// elements both cost per ELEMENT. Both were fixed by widening the unit of
+// work, not by reordering the payload; see the GEMV section for the numbers.
+//
 // CONFORMANCE.md Section 8.1 leaves code-plane ordering unfrozen, to be settled
 // by benchmark. These kernels are one input to that: they show plane-major
 // imposes no structural penalty on a GPU decode, only extra address streams.
@@ -59,6 +65,69 @@ static __device__ __forceinline__ float tcf_warp_reduce_sum(float acc) {
 #pragma unroll
     for (unsigned int offset = TCF_WARP_SIZE / 2u; offset > 0u; offset >>= 1) {
         acc += __shfl_down_sync(0xFFFFFFFFu, acc, offset);
+    }
+    return acc;
+}
+
+// The whole-run part of one warp's GEMV dot product over weight row `col`:
+// `runs` steps of `TCF_RUN_TILES` tiles, sixteen elements per lane per step.
+//
+// `ActWide` is the caller's alignment finding, not a hint. It is a template
+// parameter rather than a branch inside the loop because the branch cost 10%
+// of the kernel; the two instantiations differ only in how four activation
+// floats are fetched. Both are warp-uniform, so every lane reaches the
+// `__shfl_sync` below and the full-mask shuffles are legal.
+template <bool ActWide>
+static __device__ __forceinline__ float tcf_gemv_runs(
+    const float* __restrict__ act_row,
+    const unsigned char* __restrict__ weight,
+    TcfLayout l,
+    unsigned int col,
+    unsigned int tiles_per_row,
+    unsigned int runs,
+    unsigned int lane
+) {
+    const unsigned int resolved = TCF_RUN_TILES * l.groups_per_tile;
+    const unsigned int e0 = TCF_RUN_PER_LANE * lane;
+    // Sixteen elements from a multiple of sixteen lie in one group at every
+    // group width v1 defines, so one broadcast serves the lane's whole run.
+    const unsigned int slot = e0 / l.group;
+    float acc = 0.0f;
+
+    for (unsigned int r = 0; r < runs; ++r) {
+        const unsigned int tile0 = col * tiles_per_row + r * TCF_RUN_TILES;
+        float scale = 0.0f;
+        float min_value = 0.0f;
+        if (lane < resolved) {
+            tcf_group_values(weight, l, tile0 + lane / l.groups_per_tile,
+                             lane % l.groups_per_tile, &scale, &min_value);
+        }
+        const float s = __shfl_sync(0xFFFFFFFFu, scale, slot);
+        const float mn = __shfl_sync(0xFFFFFFFFu, min_value, slot);
+        const TcfCodeRun run = tcf_code_run(weight, l, tile0, lane);
+        const float* act = act_row + (size_t)r * (size_t)TCF_RUN + (size_t)e0;
+
+#pragma unroll
+        for (unsigned int c = 0; c < TCF_RUN_PER_LANE / 4u; ++c) {
+            float a[4];
+            if (ActWide) {
+                const float4 v = *(const float4*)(act + c * 4u);
+                a[0] = v.x;
+                a[1] = v.y;
+                a[2] = v.z;
+                a[3] = v.w;
+            } else {
+#pragma unroll
+                for (unsigned int k = 0; k < 4u; ++k) {
+                    a[k] = act[c * 4u + k];
+                }
+            }
+#pragma unroll
+            for (unsigned int k = 0; k < 4u; ++k) {
+                const int code = tcf_run_code(run, l, c * 4u + k);
+                acc += a[k] * tcf_value(code, s, mn, l.symmetric);
+            }
+        }
     }
     return acc;
 }
@@ -129,20 +198,43 @@ __global__ __launch_bounds__(TCF_DEQUANT_BLOCK, 1) void tcf_dequant_f32(
 }
 
 // ============================================================================
-// GEMV: activation [M, K] x weight [N, K]^T -> output [M, N], for M <= 64.
+// GEMV: activation [M, K] x weight [N, K]^T -> output [M, N], for a small M.
 //
 // One warp per output column, eight warps per block. A warp owns weight row
 // `col`, whose tiles are `col * tiles_per_row ..` — a contiguous run of the
-// code plane. Each lane takes elements `lane` and `lane + 32` of every tile,
-// so the warp's loads cover consecutive bytes.
+// code plane — and walks it EIGHT TILES AT A TIME, `TCF_RUN_TILES`.
 //
-// Group parameters are resolved by the warp's first `groups_per_tile` lanes and
-// broadcast with a shuffle, so the scale planes are touched once per tile
-// rather than once per lane.
+// # Why eight tiles and not one
 //
-// Unlike the CPU fused kernel, no tile range needs super-block alignment: the
-// kernel addresses each tile by its global index, which is what a super-block's
-// sub-plane is keyed on.
+// A tile-at-a-time loop gave 20% of this card's bandwidth and got SLOWER as
+// the encoding got narrower, which is the signature of a cost tracking element
+// count rather than byte count. Two causes, measured separately on an RTX 3060
+// with `q_proj` 2048x2048 at M = 1:
+//
+//   - Narrow code loads. `tcf_code` issues one byte load per element, so a
+//     warp covered 32 bytes per instruction at 8 bits and 16 at 4 bits.
+//     `tcf_code_run` reads the same codes as one `uint4` or `uint2` per lane:
+//     512 or 256 consecutive bytes per instruction.
+//   - Scale resolution once per TILE. Holding scale and minimum constant cut
+//     the old kernel's time roughly in half at every width, and the whole of
+//     the 4-bit deficit was here: `TwoLevelU6M6` costs four scattered plane
+//     reads, and paying them every 64 elements dominated everything else.
+//     A run pays them every 512 elements instead, and resolves the run's
+//     `8 * groups_per_tile <= 32` groups in ONE warp-wide step.
+//
+// Together: 62.3 -> 19.5 us at 8 bits, 72.9 -> 21.5 at 6, 86.9 -> 21.5 at 4.
+// The 8-bit case then sits within 4 us of a kernel that only streams the code
+// plane and discards it, so it is at the memory system's limit.
+//
+// Sixteen elements per lane is one whole quantization group at every group
+// width v1 defines, so a lane broadcasts one `(scale, minimum)` pair for its
+// whole run. See `tcf_code_run` for that and for the alignment argument.
+//
+// A row whose tile count is not a multiple of eight finishes on the
+// tile-at-a-time path below, which is also the only path when `K` is under
+// eight tiles. Nothing here needs super-block alignment: the kernel addresses
+// each tile by its global index, which is what a super-block's sub-plane is
+// keyed on.
 // ============================================================================
 
 __global__ __launch_bounds__(TCF_GEMV_BLOCK, 1) void tcf_gemv_f32(
@@ -178,9 +270,20 @@ __global__ __launch_bounds__(TCF_GEMV_BLOCK, 1) void tcf_gemv_f32(
 
     const unsigned int tiles_per_row = K / TCF_TILE;
     const float* act_row = activation + (size_t)m * (size_t)K;
-    float acc = 0.0f;
+    const unsigned int runs = tiles_per_row / TCF_RUN_TILES;
+    // A `float4` activation load needs a 16-byte-aligned row. The activation
+    // pointer is a tensor VIEW's, so it carries that view's element offset and
+    // is only guaranteed 4-byte aligned. Checked, not assumed: a misaligned
+    // wide load is undefined behaviour, not a slow one. `K` is a whole number
+    // of 64-element tiles, so one row being aligned makes every row aligned,
+    // and the choice is uniform across the warp.
+    const bool act_wide = ((size_t)act_row & 15u) == 0u;
+    float acc = act_wide
+        ? tcf_gemv_runs<true>(act_row, weight, l, col, tiles_per_row, runs, lane)
+        : tcf_gemv_runs<false>(act_row, weight, l, col, tiles_per_row, runs, lane);
 
-    for (unsigned int j = 0; j < tiles_per_row; ++j) {
+    // The tiles a whole run cannot cover, one at a time.
+    for (unsigned int j = runs * TCF_RUN_TILES; j < tiles_per_row; ++j) {
         const unsigned int tile = col * tiles_per_row + j;
         float scale = 0.0f;
         float min_value = 0.0f;
@@ -192,10 +295,10 @@ __global__ __launch_bounds__(TCF_GEMV_BLOCK, 1) void tcf_gemv_f32(
         for (unsigned int half = 0; half < 2u; ++half) {
             const unsigned int e = lane + half * TCF_WARP_SIZE;
             const unsigned int g = e / l.group;
-            const float s = __shfl_sync(0xFFFFFFFFu, scale, g);
-            const float mn = __shfl_sync(0xFFFFFFFFu, min_value, g);
+            const float gs = __shfl_sync(0xFFFFFFFFu, scale, g);
+            const float gm = __shfl_sync(0xFFFFFFFFu, min_value, g);
             const int code = tcf_code(weight, l, tile, e);
-            acc += act_row[base + e] * tcf_value(code, s, mn, l.symmetric);
+            acc += act_row[base + e] * tcf_value(code, gs, gm, l.symmetric);
         }
     }
 

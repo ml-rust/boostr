@@ -17,6 +17,12 @@
 //! - `[2, 448]`: 14 tiles, seven per row. An odd row width, partial trailing
 //!   super-block again.
 //!
+//! Those three all have an `n` below the matmul kernels' 16-wide output tile,
+//! which is enough for the decode but leaves the workgroup-tiled kernel's
+//! interior untested. `tcf_wgpu_tiled_matmul_matches_cpu` adds two shapes that
+//! exceed the tile in both `M` and `N`, one an exact multiple of it and one
+//! not, so the boundary masking is covered rather than assumed.
+//!
 //! # Tolerances
 //!
 //! Dequantization is compared BIT FOR BIT, the same gate the CUDA path meets.
@@ -189,6 +195,63 @@ fn tcf_wgpu_matmul_matches_cpu() {
                         1e-5,
                     );
                 }
+            }
+        }
+    });
+}
+
+/// The workgroup-tiled matmul, which `dispatch_matmul` selects at
+/// `MATMUL_TILED_MIN_M` activation rows and above.
+///
+/// # Why this test exists separately
+///
+/// `tcf_wgpu_matmul_matches_cpu` runs `n` of 2, 3 and 6, all below the kernel's
+/// 16-wide output tile, so every workgroup there is a boundary workgroup in `N`
+/// and no invocation with `lid.x` past the weight count ever carries a real
+/// value. That would have gated the kernel without ever exercising its interior
+/// — the exact hole a CUDA fast path shipped through, whose tests all used
+/// shapes below its blocking factor.
+///
+/// So both shapes here exceed the 16x16 output tile in BOTH `M` and `N`:
+///
+/// - `m=32, n=32`: an exact multiple of the tile in both, four full
+///   workgroups, no masking anywhere.
+/// - `m=37, n=19`: a multiple of neither, so the last workgroup row overhangs
+///   `M` by 11 and the last column overhangs `N` by 13. Those invocations must
+///   still reach every barrier and stage `0.0` rather than return.
+#[test]
+fn tcf_wgpu_tiled_matmul_matches_cpu() {
+    // `(m, k, n)`. Both `m` are at or above the tiled kernel's threshold, so
+    // both take the tiled path.
+    const TILED_SHAPES: [(usize, usize, usize); 2] = [(32, 256, 32), (37, 192, 19)];
+
+    with_wgpu_backend(|client, device| {
+        for (m, k, n) in TILED_SHAPES {
+            let weight_values = source_values(n * k, 3);
+            let act = source_values(m * k, 23);
+            for native in ENCODINGS {
+                let payload = packed(native, &weight_values, &[n, k]);
+                let want = cpu_matmul(&act, &payload, native, m, k, n);
+
+                let activation = Tensor::from_slice(&act, &[m, k], &device).expect("activation");
+                let weight =
+                    QuantTensor::from_bytes(&payload, TcfEncoding::new(native), &[n, k], &device)
+                        .expect("WebGPU TCF QuantTensor");
+                let got = client
+                    .quant_matmul(&activation, &weight)
+                    .expect("WebGPU quant_matmul")
+                    .to_vec::<f32>();
+
+                assert_parity_f32_tol(
+                    &got,
+                    &want,
+                    &format!(
+                        "{} tiled matmul {m}x{k}x{n}",
+                        TcfEncoding::new(native).name()
+                    ),
+                    1e-3,
+                    1e-5,
+                );
             }
         }
     });

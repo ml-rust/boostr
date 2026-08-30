@@ -100,6 +100,25 @@
 //! is the third backend to reach the same conclusion, which CONFORMANCE.md
 //! Section 8.1 leaves open pending benchmark.
 //!
+//! # Why the matmul comes in two shapes
+//!
+//! Phase 1 above amortizes a group parameter over a group. It does NOT amortize
+//! the code decode itself, and the per-element matmul gives every invocation
+//! its own weight row, so the sixteen invocations of a workgroup that share a
+//! weight row each decode it. That is affordable when there are few activation
+//! rows and ruinous when there are many: on this project's RTX 3060 the WebGPU
+//! path won dequantization by 2.6x to 5.7x and LOST a 256-row prefill by up to
+//! 2.1x, against a GGUF block layout the same kernels beat on CUDA. The cost is
+//! structural, not a property of the encoding.
+//!
+//! So `generate_tcf_matmul_tiled_shader` takes the CUDA GEMM's shape: per
+//! K-tile a workgroup decodes its sixteen weight rows into workgroup memory
+//! ONCE and stages the sixteen matching activation rows beside them, and every
+//! output element then reads decoded f32. `generate_tcf_matmul_shader` stays
+//! for a small M, where a workgroup cannot fill its activation tile and the
+//! staging traffic buys nothing. `MATMUL_TILED_MIN_M` is the crossover and is
+//! provisional until the M sweep sets it.
+//!
 //! The gate is `tests/backend_parity/quant_tcf_wgpu.rs`: every encoding,
 //! decoded by these shaders and by `tcf_core::unpack` + `tcf_core::dequantize`,
 //! must agree.
@@ -109,5 +128,6 @@ mod kernels;
 
 pub use kernels::{
     DEQUANT_ENTRY, DEQUANT_TILES_PER_GROUP, DEQUANT_WORKGROUP, MATMUL_ENTRY, MATMUL_TILE,
-    generate_tcf_dequant_shader, generate_tcf_matmul_shader,
+    MATMUL_TILED_ENTRY, MATMUL_TILED_MIN_M, generate_tcf_dequant_shader,
+    generate_tcf_matmul_shader, generate_tcf_matmul_tiled_shader,
 };

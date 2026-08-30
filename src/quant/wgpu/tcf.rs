@@ -2,7 +2,8 @@
 //!
 //! Two entry points, one per shape of work: [`dispatch_dequant`] rebuilds a
 //! whole tensor as f32, and [`dispatch_matmul`] multiplies against a packed
-//! weight without ever materializing it. Both drive the same decoder in
+//! weight without ever materializing it — choosing between a per-element and a
+//! workgroup-tiled kernel on `M`. All of them drive the same decoder in
 //! `shaders::tcf` and take the same plane offsets from [`TcfPlanes`], so
 //! neither can disagree with the other — or with the CUDA launches, which read
 //! that type too — about the layout.
@@ -210,12 +211,21 @@ pub fn dispatch_dequant(
     Ok(())
 }
 
-/// `activation [M, K] x weight [N, K]^T -> output [M, N]`, one invocation per
-/// output element.
+/// `activation [M, K] x weight [N, K]^T -> output [M, N]`.
 ///
-/// `K` must be a whole number of execution tiles: the shader walks a weight row
-/// tile by tile, and a partial trailing tile would read a neighbouring row's
-/// codes.
+/// `K` must be a whole number of execution tiles: both shaders walk a weight
+/// row tile by tile, and a partial trailing tile would read a neighbouring
+/// row's codes.
+///
+/// # Which kernel runs
+///
+/// Both kernels write the same `MATMUL_TILE` square of output elements per
+/// workgroup, so the grid is the same and only the entry point differs. At
+/// `M >= MATMUL_TILED_MIN_M` the workgroup-tiled kernel runs, which decodes a
+/// weight element once per workgroup instead of once per output element; below
+/// it the per-element kernel runs, which does strictly less work when a
+/// workgroup cannot fill its activation tile. That threshold is provisional
+/// until the M sweep sets it; see `shaders::tcf`.
 ///
 /// # Errors
 /// Every error [`dispatch_dequant`] raises, plus [`Error::QuantError`] when `K`
@@ -250,10 +260,21 @@ pub fn dispatch_matmul(
     let params_buf = params_buffer(client, &params);
 
     let edge = shader_gen::MATMUL_TILE;
+    let (entry, source) = if params.m >= shader_gen::MATMUL_TILED_MIN_M {
+        (
+            shader_gen::MATMUL_TILED_ENTRY,
+            shader_gen::generate_tcf_matmul_tiled_shader(),
+        )
+    } else {
+        (
+            shader_gen::MATMUL_ENTRY,
+            shader_gen::generate_tcf_matmul_shader(),
+        )
+    };
     run(
         client,
-        shader_gen::MATMUL_ENTRY,
-        &shader_gen::generate_tcf_matmul_shader(),
+        entry,
+        &source,
         3,
         &[&act_buf, &weight_buf, &output_buf, &params_buf],
         (params.n.div_ceil(edge), params.m.div_ceil(edge)),

@@ -6,7 +6,7 @@
 //! a module-scope `payload: array<u32>` binding and a `params: TcfParams`
 //! uniform, both declared by `super::kernels`.
 
-use tcf_core::{MAX_SUB_MIN_6, MAX_SUB_SCALE, MAX_SUB_SCALE_6};
+use tcf_core::MAX_SUB_MIN_6;
 
 use crate::quant::tcf::{
     SCALE_FORM_FLAT, SCALE_FORM_TWO_LEVEL_U6M6, SCALE_FORM_TWO_LEVEL_U8, TCF_TILE,
@@ -25,9 +25,6 @@ const TCF_SUPER_BLOCK_TILES: u32 = 4u;
 const TCF_SCALE_FLAT: u32 = {flat}u;
 const TCF_SCALE_TWO_LEVEL_U8: u32 = {two_u8}u;
 const TCF_SCALE_TWO_LEVEL_U6M6: u32 = {two_u6m6}u;
-const TCF_SUB_SCALE_LEVELS_U8: u32 = {levels_u8}u;
-const TCF_SUB_SCALE_LEVELS_U6: u32 = {levels_u6}u;
-const TCF_SUB_MIN_LEVELS_U6: u32 = {min_levels_u6}u;
 const TCF_SUB_MIN_SIGN_6: i32 = {min_levels_u6};
 const TCF_SUB_MIN_SPAN_6: i32 = 64;
 
@@ -41,11 +38,11 @@ fn tcf_byte(index: u32) -> u32 {{
 // a power of two: the value's magnitude is `mant * 2^exp2`.
 //
 // A binary16 is an integer significand times a power of two in every class but
-// infinity and NaN, so this loses nothing. Both readers below start here, so
-// the field extraction is written once.
+// infinity and NaN, so this loses nothing. `tcf_binary16` is built on it, and
+// the split keeps the field extraction separate from the encode step.
 struct TcfBin16 {{
     // Integer significand, with the implicit bit restored for a normal.
-    // At most 11 bits, so `mant * sub` stays exact in f32 and in u32.
+    // At most 11 bits, which fits an f32 significand with room to spare.
     mant: u32,
     // Power of two the significand carries.
     exp2: i32,
@@ -103,111 +100,21 @@ fn tcf_binary16(index: u32) -> f32 {{
     return bitcast<f32>(parts.sign | (u32(biased) << 23u) | frac32);
 }}
 
-// `(binary16 at `index` * signed_factor) / den`, CORRECTLY ROUNDED, computed
-// entirely in integers.
+// A little-endian bfloat16 at an arbitrary byte offset, decoded as f32,
+// EXACTLY. Section 13.3, Section 13.4.
 //
-// # Why this is not a float divide
+// bfloat16's sign bit and 8-bit exponent field ARE f32's, and its 7 fraction
+// bits are f32's leading 7, so widening is a 16-bit left shift into the f32 bit
+// pattern and nothing else. It is exact for every one of the 65536 patterns —
+// subnormals, infinities and NaN payloads included — so it mirrors
+// `tcf_core::bfloat16::bits_to_f32` with no normalize step, no class test, and
+// no float operation whose accuracy an adapter could choose.
 //
-// The CPU reference is `(bits_to_f32(super) * f32(sub)) / den` in
-// `QuantLayout::group_scale` and `QuantLayout::group_min`, an IEEE f32 divide
-// and so correctly rounded. WGSL specifies `x / y` at 2.5 ULP, NOT correctly
-// rounded, and a real adapter was measured one ULP off on `Q6S16D_T64`.
-//
-// WGSL's `fma` cannot repair it. Section 15.7.4's accuracy table gives
-// `fma(x, y, z)` the accuracy of `x * y + z`, so a single rounding is
-// PERMITTED, never required, and naga's HLSL backend emits `mad` while its
-// GLSL backend expands to `(x * y + z)` when the target lacks `fma`. A
-// Markstein refinement built on it would be exact on some adapters and not on
-// others, which is the bug being fixed.
-//
-// # Why integers are enough
-//
-// The numerator is exact and small. `super` is a binary16, so its significand
-// is at most 11 bits, and the factor is at most an 8-bit magnitude, so their
-// integer product `num` needs at most 19 bits. The quotient is then a rational
-// with a small integer numerator and a constant denominator, and its correctly
-// rounded f32 follows from restoring long division plus a round-to-nearest-even
-// on the 25th significant bit — no float operation, so no adapter's division
-// accuracy can enter.
-//
-// `magnitude` is the factor's absolute value and `negative` is `1u` when the
-// factor is negative; rounding to nearest even is sign-symmetric, so the sign
-// is carried through untouched.
-fn tcf_scaled_quotient(index: u32, magnitude: u32, negative: u32, den: u32) -> f32 {{
-    let parts = tcf_binary16_parts(index);
-    var sign = parts.sign;
-    if (negative != 0u) {{
-        sign = sign ^ 0x80000000u;
-    }}
-
-    if (parts.finite == 0u) {{
-        // An infinity or a NaN super-value, which no payload `tcf-core`
-        // accepted carries. Keep the function total by falling back to the
-        // float expression rather than encoding a wrong exponent.
-        var factor = f32(magnitude);
-        if (negative != 0u) {{
-            factor = -factor;
-        }}
-        return (tcf_binary16(index) * factor) / f32(den);
-    }}
-
-    // Exact: at most 11 bits times at most 8 bits.
-    let num = parts.mant * magnitude;
-    if (num == 0u) {{
-        // `(+-x) * 0` is a zero of the product's sign, and dividing it keeps
-        // that sign. `tcf_value` adds this minimum, so the sign matters.
-        return bitcast<f32>(sign);
-    }}
-
-    // Restoring long division of `num / den` down to 25 significant bits,
-    // keeping the remainder as the sticky bit. `rem` stays below `2 * den`,
-    // and `q` stays below `2^25`, so neither can overflow a u32.
-    var rem = num % den;
-    var q = num / den;
-    var shift: i32 = 0;
-    // `num >= 1` and `den <= 255`, so the quotient reaches 2^24 within 32
-    // steps; the bound only makes termination syntactic.
-    for (var iteration: i32 = 0; iteration < 64; iteration = iteration + 1) {{
-        if (q >= 0x1000000u) {{
-            break;
-        }}
-        rem = rem << 1u;
-        q = q << 1u;
-        if (rem >= den) {{
-            rem = rem - den;
-            q = q + 1u;
-        }}
-        shift = shift + 1;
-    }}
-
-    // `q` now holds 25 significant bits of `num / den * 2^shift`, and `rem`
-    // is nonzero exactly when more nonzero bits follow. Round the 25th bit
-    // away, to nearest with ties to even.
-    let guard = q & 1u;
-    var mant = q >> 1u;
-    if (guard == 1u && (rem != 0u || (mant & 1u) == 1u)) {{
-        mant = mant + 1u;
-    }}
-    // Magnitude is `mant * 2^pow2`, with `mant` in [2^23, 2^24] before the
-    // carry check and in [2^23, 2^24) after it.
-    var pow2 = parts.exp2 + 1 - shift;
-    if (mant == 0x1000000u) {{
-        mant = 0x800000u;
-        pow2 = pow2 + 1;
-    }}
-
-    let biased = pow2 + 150;
-    if (biased < 1 || biased > 254) {{
-        // Outside the f32 normal range. Unreachable for a TCF payload: the
-        // smallest nonzero magnitude here is 2^-24 / 255 and the largest is
-        // 65504 * 255. Fall back rather than encode a wrong exponent.
-        var factor = f32(magnitude);
-        if (negative != 0u) {{
-            factor = -factor;
-        }}
-        return (tcf_binary16(index) * factor) / f32(den);
-    }}
-    return bitcast<f32>(sign | (u32(biased) << 23u) | (mant - 0x800000u));
+// This reads a two-level SUPER value and nothing else. Every other stored scale
+// and minimum is a binary16 and goes through `tcf_binary16`.
+fn tcf_bfloat16(index: u32) -> f32 {{
+    let bits = tcf_byte(index) | (tcf_byte(index + 1u) << 8u);
+    return bitcast<f32>(bits << 16u);
 }}
 
 // Section 14.6 read direction. Field `slot` of super-block `block` occupies
@@ -236,14 +143,18 @@ struct TcfGroup {{
 //
 // Section 13.0 / Section 13.0.1: a flat layout stores both outright as
 // binary16. Section 13.3: a two-level u8 layout stores a u8 sub-scale under a
-// per-super-block binary16 super-scale. Section 13.4: a two-level 6-bit layout
-// stores a 6-bit unsigned sub-scale and a 6-bit signed sub-minimum, both
-// bit-packed per super-block, under a super-scale and a super-minimum.
+// per-super-block super-scale. Section 13.4: a two-level 6-bit layout stores a
+// 6-bit unsigned sub-scale and a 6-bit signed sub-minimum, both bit-packed per
+// super-block, under a super-scale and a super-minimum.
 //
-// Multiply then divide once, in that fixed order, matching
-// `QuantLayout::group_scale` and `QuantLayout::group_min`. The product is
-// exact, so the division is the expression's only rounding, and
-// `tcf_scaled_quotient` does both in integers so that rounding is the CPU's.
+// A two-level resolution is ONE multiply, matching `QuantLayout::group_scale`
+// and `QuantLayout::group_min` exactly. Section 13.3 and Section 13.4 store
+// every super value PRE-DIVIDED by its form's sub-level count, as a bfloat16,
+// so nothing is divided at decode — which matters here because Section 15.7.4
+// specifies WGSL's f32 `/` at 2.5 ULP, not correctly rounded. The multiply that
+// replaces it is exact: a bfloat16 carries an 8-bit significand and the widest
+// sub-level field is 8 bits, so the product needs at most 16 of f32's 24
+// significand bits and no adapter has a rounding choice to make.
 fn tcf_group_values(tile: u32, g: u32) -> TcfGroup {{
     let block = tile / TCF_SUPER_BLOCK_TILES;
     let slot = (tile % TCF_SUPER_BLOCK_TILES) * params.groups_per_tile + g;
@@ -252,15 +163,13 @@ fn tcf_group_values(tile: u32, g: u32) -> TcfGroup {{
 
     if (params.scale_form == TCF_SCALE_TWO_LEVEL_U8) {{
         let sub = tcf_byte(params.scale_off + global);
-        out.scale = tcf_scaled_quotient(
-            params.super_off + block * 2u, sub, 0u, TCF_SUB_SCALE_LEVELS_U8);
+        out.scale = tcf_bfloat16(params.super_off + block * 2u) * f32(sub);
         out.min_value = 0.0;
         return out;
     }}
     if (params.scale_form == TCF_SCALE_TWO_LEVEL_U6M6) {{
         let sub = tcf_packed6(params.scale_off, block, slot);
-        out.scale = tcf_scaled_quotient(
-            params.super_off + block * 2u, sub, 0u, TCF_SUB_SCALE_LEVELS_U6);
+        out.scale = tcf_bfloat16(params.super_off + block * 2u) * f32(sub);
 
         let field = tcf_packed6(params.min_off, block, slot);
         // A 6-bit two's-complement field: 0..=31 is itself, 32..=63 is
@@ -270,11 +179,7 @@ fn tcf_group_values(tile: u32, g: u32) -> TcfGroup {{
         if (level > TCF_SUB_MIN_SIGN_6) {{
             level = level - TCF_SUB_MIN_SPAN_6;
         }}
-        out.min_value = tcf_scaled_quotient(
-            params.super_min_off + block * 2u,
-            u32(abs(level)),
-            select(0u, 1u, level < 0),
-            TCF_SUB_MIN_LEVELS_U6);
+        out.min_value = tcf_bfloat16(params.super_min_off + block * 2u) * f32(level);
         return out;
     }}
 
@@ -376,8 +281,6 @@ fn tcf_value(code: i32, scale: f32, min_value: f32) -> f32 {{
         flat = SCALE_FORM_FLAT,
         two_u8 = SCALE_FORM_TWO_LEVEL_U8,
         two_u6m6 = SCALE_FORM_TWO_LEVEL_U6M6,
-        levels_u8 = MAX_SUB_SCALE,
-        levels_u6 = MAX_SUB_SCALE_6,
         min_levels_u6 = MAX_SUB_MIN_6,
     )
 }
@@ -386,17 +289,32 @@ fn tcf_value(code: i32, scale: f32, min_value: f32) -> f32 {{
 mod tests {
     use super::*;
 
-    /// The sub-scale and sub-minimum level counts the shader divides by are
-    /// `tcf-core`'s, never restated numbers.
+    /// The sub-minimum sign threshold is `tcf-core`'s, never a restated
+    /// number. No sub-level COUNT appears at all: Section 13.3 and Section 13.4
+    /// store a pre-divided super value, so the shader never divides by one.
     #[test]
     fn the_level_counts_come_from_tcf_core() {
         let source = decoder();
-        assert!(source.contains(&format!("TCF_SUB_SCALE_LEVELS_U8: u32 = {MAX_SUB_SCALE}u")));
-        assert!(source.contains(&format!(
-            "TCF_SUB_SCALE_LEVELS_U6: u32 = {MAX_SUB_SCALE_6}u"
-        )));
-        assert!(source.contains(&format!("TCF_SUB_MIN_LEVELS_U6: u32 = {MAX_SUB_MIN_6}u")));
         assert!(source.contains(&format!("TCF_SUB_MIN_SIGN_6: i32 = {MAX_SUB_MIN_6};")));
+        assert!(!source.contains("TCF_SUB_SCALE_LEVELS"));
+        assert!(!source.contains("TCF_SUB_MIN_LEVELS"));
+    }
+
+    /// Neither two-level form divides at decode, and each reads its super
+    /// value as a bfloat16. Section 13.3 and Section 13.4 store that value
+    /// PRE-DIVIDED, so a resolution is one exact multiply and WGSL's 2.5 ULP
+    /// `/` never enters. `Flat` must keep reading binary16.
+    #[test]
+    fn a_two_level_resolution_is_one_multiply_of_a_bfloat16_super() {
+        let source = decoder();
+        assert!(
+            source.contains("out.scale = tcf_bfloat16(params.super_off + block * 2u) * f32(sub);")
+        );
+        assert!(source.contains(
+            "out.min_value = tcf_bfloat16(params.super_min_off + block * 2u) * f32(level);"
+        ));
+        assert!(source.contains("out.scale = tcf_binary16(params.scale_off + global * 2u);"));
+        assert!(!source.contains("tcf_scaled_quotient"));
     }
 
     /// The scale-form discriminants the shader tests against are the host's,

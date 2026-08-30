@@ -25,26 +25,32 @@
 //!
 //! WGSL has no 8-bit or 16-bit scalar type and no `f16` without an optional
 //! extension, so a payload arrives as `array<u32>` and every byte, nibble,
-//! 2-bit field, 6-bit field and binary16 is extracted by shifting and masking.
-//! The generated decoder holds all of it, including ONE `tcf_binary16` function that
-//! reproduces `tcf_core::binary16::bits_to_f32` by pure integer bit
-//! manipulation — no `exp2`, no float multiply — so its result cannot drift
-//! from the CPU value by a library's exponentiation accuracy.
+//! 2-bit field, 6-bit field, binary16 and bfloat16 is extracted by shifting and
+//! masking. The generated decoder holds all of it, including ONE `tcf_binary16`
+//! function that reproduces `tcf_core::binary16::bits_to_f32` by pure integer
+//! bit manipulation — no `exp2`, no float multiply — so its result cannot drift
+//! from the CPU value by a library's exponentiation accuracy, and ONE
+//! `tcf_bfloat16` that mirrors `tcf_core::bfloat16::bits_to_f32` as the 16-bit
+//! left shift that format is.
 //!
-//! # Why a two-level scale is divided in integers
+//! # Why a two-level scale no longer divides
 //!
 //! Section 15.7.4 of the WGSL specification gives f32 `*` and `+` correct
-//! rounding but f32 `/` only 2.5 ULP. A two-level effective scale is
-//! `(super * sub) / 255` — or `/ 63`, `/ 31` — and an adapter this project was
-//! measured on returned the neighbouring float for `Q6S16D_T64`, one ULP off
-//! the CPU. `fma` cannot repair it: the same section gives `fma(x, y, z)` the
-//! accuracy of `x * y + z`, so a single rounding is permitted and never
-//! required, and naga emits `mad` on HLSL and expands to `(x * y + z)` on a
-//! GLSL target without `fma`. So `tcf_scaled_quotient` computes the quotient by
-//! integer long division and rounds to nearest even itself. The numerator is a
-//! binary16's 11-bit significand times an 8-bit factor, at most 19 bits, so it
-//! is exact as an integer and the quotient's correctly rounded f32 is a matter
-//! of bookkeeping, not of any adapter's divider.
+//! rounding but f32 `/` only 2.5 ULP, and an adapter this project was measured
+//! on returned the neighbouring float for `Q6S16D_T64`, one ULP off the CPU,
+//! back when a two-level effective scale was `(super * sub) / 255`. `fma`
+//! cannot repair that: the same section gives `fma(x, y, z)` the accuracy of
+//! `x * y + z`, so a single rounding is permitted and never required.
+//!
+//! The format removed the division instead. Section 13.3 and Section 13.4 store
+//! every super value PRE-DIVIDED by its form's sub-level count, as a bfloat16,
+//! so a resolution is `super * sub` and nothing else. Both halves are exact:
+//! bfloat16 widens to f32 by a 16-bit left shift, and a bfloat16's 8-bit
+//! significand times an at-most-8-bit sub-level needs 16 of f32's 24 significand
+//! bits. `tcf_bfloat16` is therefore three lines where the integer long division
+//! it replaced was seventy, and no adapter has a rounding choice left to make on
+//! this path. `ScaleForm::Flat` is unaffected — its scale plane is still
+//! binary16 and still goes through `tcf_binary16`.
 //!
 //! # Why the asymmetric product is pinned before the add
 //!

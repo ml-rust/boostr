@@ -40,11 +40,6 @@
 // what `Code64` can address. The host refuses any other width before launch.
 #define TCF_TILE 64u
 
-// Section 13.3 / Section 13.4 decode divisors for the two-level forms.
-#define TCF_SUB_SCALE_LEVELS_U8 255.0f
-#define TCF_SUB_SCALE_LEVELS_U6 63.0f
-#define TCF_SUB_MIN_LEVELS_U6 31.0f
-
 // Byte offsets of every plane of one payload, plus the geometry needed to
 // address a group. Assembled inside a kernel from its scalar arguments, so
 // nothing here depends on a host/device struct layout agreeing.
@@ -93,10 +88,28 @@ static __device__ __forceinline__ TcfLayout tcf_layout(
 // A little-endian binary16 read as f32. Every binary16 is exactly
 // representable in f32, so this agrees with `tcf_core::binary16::bits_to_f32`
 // bit for bit.
+//
+// Section 13.0 / Section 13.0.1 scales and minima only. A two-level SUPER
+// value is a bfloat16 and belongs to `tcf_read_bfloat16`; the two formats
+// never share a reader.
 static __device__ __forceinline__ float tcf_read_binary16(const unsigned char* p) {
     __half h;
     memcpy(&h, p, sizeof(__half));
     return __half2float(h);
+}
+
+// A little-endian bfloat16 read as f32, exactly. Section 13.3, Section 13.4.
+//
+// bfloat16's sign bit and 8-bit exponent field ARE f32's, and its 7 fraction
+// bits are f32's leading 7, so widening is a 16-bit left shift into the f32 bit
+// pattern and nothing else. It is exact for every one of the 65536 patterns —
+// subnormals, infinities and NaN payloads included — so it agrees with
+// `tcf_core::bfloat16::bits_to_f32` bit for bit with no normalize step and no
+// float operation that `--use_fast_math` could reach.
+static __device__ __forceinline__ float tcf_read_bfloat16(const unsigned char* p) {
+    unsigned short bits;
+    memcpy(&bits, p, sizeof(unsigned short));
+    return __uint_as_float((unsigned int)bits << 16u);
 }
 
 // Section 14.6 read direction. Field `slot` of super-block `block` occupies
@@ -123,15 +136,17 @@ static __device__ __forceinline__ unsigned int tcf_read_packed6(
 //
 // Section 13.0 / Section 13.0.1: a flat layout stores both outright as
 // binary16. Section 13.3: a two-level u8 layout stores a u8 sub-scale under a
-// per-super-block binary16 super-scale. Section 13.4: a two-level 6-bit layout
-// stores a 6-bit unsigned sub-scale and a 6-bit signed sub-minimum, both
-// bit-packed per super-block, under a super-scale and a super-minimum.
+// per-super-block super-scale. Section 13.4: a two-level 6-bit layout stores a
+// 6-bit unsigned sub-scale and a 6-bit signed sub-minimum, both bit-packed per
+// super-block, under a super-scale and a super-minimum.
 //
-// Multiply then divide once, in that fixed order, matching
-// `QuantLayout::group_scale` and `QuantLayout::group_min`. The rounding
-// intrinsics are deliberate: this translation unit is compiled with
-// `--use_fast_math`, whose approximate division would otherwise put the last
-// bit of every two-level scale out of step with the CPU path.
+// A two-level resolution is ONE multiply, matching `QuantLayout::group_scale`
+// and `QuantLayout::group_min` exactly. Section 13.3 and Section 13.4 store
+// every super value PRE-DIVIDED by its form's sub-level count, as a bfloat16,
+// so nothing is divided at decode. The product is exact as well: a bfloat16
+// carries an 8-bit significand and the widest sub-level field is 8 bits, so it
+// needs at most 16 of f32's 24 significand bits. `__fmul_rn` still names the
+// rounding rather than leaving the multiply to `--use_fast_math` contraction.
 //
 // A symmetric group has no minimum and yields 0.0f, which its caller must not
 // add — see `tcf_value`.
@@ -148,19 +163,19 @@ static __device__ __forceinline__ void tcf_group_values(
     size_t global = (size_t)tile * (size_t)l.groups_per_tile + (size_t)g;
 
     if (l.scale_form == TCF_SCALE_TWO_LEVEL_U8) {
-        float super = tcf_read_binary16(payload + l.super_off + (size_t)block * 2u);
+        float super = tcf_read_bfloat16(payload + l.super_off + (size_t)block * 2u);
         unsigned int sub = (unsigned int)payload[(size_t)l.scale_off + global];
-        *out_scale = __fdiv_rn(__fmul_rn(super, (float)sub), TCF_SUB_SCALE_LEVELS_U8);
+        *out_scale = __fmul_rn(super, (float)sub);
         *out_min = 0.0f;
         return;
     }
     if (l.scale_form == TCF_SCALE_TWO_LEVEL_U6M6) {
-        float super = tcf_read_binary16(payload + l.super_off + (size_t)block * 2u);
+        float super = tcf_read_bfloat16(payload + l.super_off + (size_t)block * 2u);
         unsigned int sub = tcf_read_packed6(
             payload + l.scale_off, block, slot, l.sub_block_bytes);
-        *out_scale = __fdiv_rn(__fmul_rn(super, (float)sub), TCF_SUB_SCALE_LEVELS_U6);
+        *out_scale = __fmul_rn(super, (float)sub);
 
-        float super_min = tcf_read_binary16(payload + l.super_min_off + (size_t)block * 2u);
+        float super_min = tcf_read_bfloat16(payload + l.super_min_off + (size_t)block * 2u);
         unsigned int field = tcf_read_packed6(
             payload + l.min_off, block, slot, l.sub_block_bytes);
         // A 6-bit two's-complement field: 0..=31 is itself, 32..=63 is
@@ -170,7 +185,7 @@ static __device__ __forceinline__ void tcf_group_values(
         if (level > 31) {
             level -= 64;
         }
-        *out_min = __fdiv_rn(__fmul_rn(super_min, (float)level), TCF_SUB_MIN_LEVELS_U6);
+        *out_min = __fmul_rn(super_min, (float)level);
         return;
     }
 

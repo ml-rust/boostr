@@ -665,18 +665,18 @@ mod tests {
         }
     }
 
-    /// One helper divides every two-level scale and minimum, so no divisor can
-    /// keep a float divide that WGSL specifies at 2.5 ULP.
+    /// No two-level resolution divides. Section 13.3 and Section 13.4 store a
+    /// PRE-DIVIDED super value as a bfloat16, so each of the three — the u8
+    /// scale, the 6-bit scale, the 6-bit minimum — is one exact multiply, and
+    /// the float divide WGSL specifies at 2.5 ULP is gone from every shader.
     #[test]
-    fn every_two_level_divisor_goes_through_the_integer_quotient() {
+    fn no_two_level_resolution_divides() {
         for source in all_shaders() {
-            assert_eq!(source.matches("fn tcf_scaled_quotient(").count(), 1);
-            assert_eq!(source.matches("tcf_scaled_quotient(\n").count(), 3);
-            // The only remaining `/` on a level count is the helper's own
-            // fallback for a non-finite super-value.
-            assert!(!source.contains("/ TCF_SUB_SCALE_LEVELS_U8"));
-            assert!(!source.contains("/ TCF_SUB_SCALE_LEVELS_U6"));
-            assert!(!source.contains("/ TCF_SUB_MIN_LEVELS_U6"));
+            assert_eq!(source.matches("fn tcf_bfloat16(").count(), 1);
+            assert_eq!(source.matches("tcf_bfloat16(params.super").count(), 3);
+            assert!(!source.contains("tcf_scaled_quotient"));
+            assert!(!source.contains("TCF_SUB_SCALE_LEVELS"));
+            assert!(!source.contains("TCF_SUB_MIN_LEVELS"));
         }
     }
 

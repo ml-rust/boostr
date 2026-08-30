@@ -296,3 +296,14 @@ required-features = ["audio"]
 name = "quant_throughput"
 path = "benches/quant_throughput/main.rs"
 harness = false
+
+# A shipped inference build links boostr against `tcf-core`, `numr`, and the
+# format crates, and the hot quantized paths cross those boundaries per group:
+# `QuantLayout`'s scale and minimum accessors are a few instructions each and
+# are called once per quantization group. Without cross-crate inlining they are
+# real calls, and measurement puts that at 9-14% of TCF dequantization —
+# `Q6S16D_T64` moves 24.76 -> 21.31 retired instructions per element, while
+# GGUF, whose kernels are all in-crate, does not move at all.
+[profile.release]
+lto = "fat"
+codegen-units = 1

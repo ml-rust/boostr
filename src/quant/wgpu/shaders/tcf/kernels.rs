@@ -222,11 +222,16 @@ fn {entry}(
 /// adapter: the amortized decode outweighed the staging cost even at M = 1.
 /// The per-element kernel was removed rather than kept unreachable.
 ///
-/// This kernel is the CUDA `tcf_gemm_f32` shape: per K-tile the workgroup
-/// resolves its sixteen weight rows' group parameters, decodes those rows'
-/// sixty-four codes into workgroup memory, stages the sixteen matching
-/// activation rows beside them, and only then accumulates. A weight element is
-/// decoded once per workgroup.
+/// Per K-tile the workgroup resolves its sixteen weight rows' group
+/// parameters, decodes those rows' sixty-four codes into workgroup memory,
+/// stages the sixteen matching activation rows beside them, and only then
+/// accumulates. A weight element is decoded once per workgroup.
+///
+/// This was the CUDA `tcf_gemm_f32` shape and no longer is: that kernel now
+/// gives each thread a 4x4 register patch, because one output element per
+/// thread costs two shared-memory loads per multiply-add and pinned it at an
+/// eighth of the card's f32 rate. The same change is open here and unmeasured
+/// on a wgpu adapter.
 ///
 /// # Workgroup memory budget
 ///

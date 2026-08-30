@@ -162,34 +162,29 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         // whole-tensor planes.
         //
         // The GEMV/GEMM crossover is TCF's own, NOT the `M <= 64` the GGUF
-        // path below uses. Measured on an RTX 3060, `q_proj` 2048x2048,
-        // minimum nanoseconds over iterations, both kernels at every M:
+        // path below uses. RE-MEASURED after the GEMM was register-blocked:
+        // that kernel now computes a 4x4 output patch per thread instead of
+        // one element, so it is nearly FLAT from M=4 to M=32 and the crossover
+        // moved down twice — 64 -> 16 when the GEMV gained 8-tile runs, then
+        // 16 -> 4 when the GEMM stopped being shared-load-issue bound.
         //
-        // | M  | GEMV Q8 | GEMM Q8 | GEMV Q4 | GEMM Q4 | GEMV Q6 | GEMM Q6 |
-        // |----|---------|---------|---------|---------|---------|---------|
-        // |  2 |    33us |   278us |    36us |   240us |    38us |   281us |
-        // |  4 |    59us |   280us |    67us |   243us |    69us |   283us |
-        // |  8 |   113us |   286us |   130us |   245us |   132us |   288us |
-        // | 16 |   218us |   298us |   254us |   251us |   256us |   301us |
-        // | 32 |   429us |   518us |   503us |   456us |   506us |   523us |
-        // | 64 |   851us |   951us |   999us |   847us |   965us |   923us |
+        // RTX 3060, `q_proj` 2048x2048, minimum nanoseconds, both kernels at
+        // every M:
         //
-        // GEMV is linear in M; GEMM is nearly flat to M = 16 because its tile
-        // is already paid for. They cross at 16 for Q4 and past 64 for Q8.
+        // | M | GEMV Q8 | GEMM Q8 | GEMV Q4 | GEMM Q4 | GEMV Q6 | GEMM Q6 |
+        // |---|---------|---------|---------|---------|---------|---------|
+        // | 1 |  22.7us |       - |  22.6us |       - |  25.9us |       - |
+        // | 4 |  65.4us | 108.7us |  67.9us | 111.1us |  71.0us | 114.7us |
+        // | 8 | 117.3us | 109.3us | 129.0us | 112.1us | 132.9us | 115.6us |
+        // |32 | 419.0us | 114.7us |       - | 115.4us | 550.0us | 119.1us |
         //
-        // 16 goes to GEMV, which costs Q4 about 1% at exactly that M and wins
-        // by 15% on Q6 and 27% on Q8 there. A per-encoding threshold would
-        // recover that 1% at one point of one encoding and is not worth the
-        // branch.
-        //
-        // The threshold was 4 while the GEMV read one code per load and
-        // resolved a scale per tile. Widening both (see `kernels/tcf.cu`) made
-        // the GEMV three to four times faster and moved the crossover with it,
-        // so 4 would now send M = 8 to a GEMM that is nearly twice as slow.
+        // GEMV stays linear in M; the GEMM is flat. They cross between 4 and 8
+        // on every encoding, so 4 goes to GEMV. Leaving this at 16 sent M=8..16
+        // to a path measurably slower than the GEMM.
         if let QuantScheme::Tcf(encoding) = weight.scheme() {
             let at = MatmulShape { m, k, n };
             let device_index = activation.device().id();
-            let launch = if m <= 16 {
+            let launch = if m <= 4 {
                 tcf_dispatch::launch_gemv
             } else {
                 tcf_dispatch::launch_gemm

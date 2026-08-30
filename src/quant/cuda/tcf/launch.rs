@@ -31,7 +31,7 @@ use numr::runtime::cuda::CudaClient;
 
 use crate::error::{Error, Result};
 use crate::quant::TcfEncoding;
-use crate::quant::tcf::TcfPlanes;
+use crate::quant::tcf::{TCF_TILE, TcfPlanes};
 
 use super::super::kernels::{self, TCF_MODULE};
 
@@ -45,8 +45,15 @@ const DEQUANT_BLOCK: u32 = 256;
 const GEMV_COLUMNS_PER_BLOCK: u32 = 8;
 /// Threads per GEMV block: eight warps.
 const GEMV_BLOCK: u32 = 256;
-/// Output tile edge of the GEMM kernel, matching `TCF_GEMM_TM` / `TCF_GEMM_TN`.
-const GEMM_TILE: u32 = 16;
+/// Output tile edge of the GEMM kernel, matching `TCF_GEMM_BM` / `TCF_GEMM_BN`.
+const GEMM_TILE: u32 = 32;
+/// Threads one GEMM K slice owns, matching `TCF_GEMM_THREADS`.
+const GEMM_SLICE_THREADS: u32 = 64;
+/// Shared memory one GEMM K slice stages, matching `TCF_GEMM_SLICE_FLOATS`:
+/// `TCF_GEMM_BK * (TCF_GEMM_ASTRIDE + TCF_GEMM_WSTRIDE)` floats.
+const GEMM_SLICE_BYTES: u32 = 32 * (36 + 36) * 4;
+/// Largest K split a GEMM block may take, matching `TCF_GEMM_MAX_SPLIT`.
+const GEMM_MAX_SPLIT: u32 = 4;
 
 /// Push the eleven layout arguments every TCF kernel takes, in the order the
 /// kernel signatures declare them.
@@ -171,9 +178,41 @@ pub(crate) fn launch_gemv(
     Ok(())
 }
 
-/// `activation [M, K] x weight [N, K]^T -> output [M, N]`, a 16x16 output tile
-/// per block with the weight decoded once per block into shared memory. The
-/// path for a large batch.
+/// K slices one GEMM block splits its work into.
+///
+/// A block owns a 32x32 output tile and 16 outputs per thread, so the grid a
+/// skinny batch leaves is small: M = 32, N = 1024 is 32 blocks against this
+/// card's 28 SMs, and no tiling of that output can produce more. Splitting K
+/// gives each block more warps over the same tile. Minimum microseconds on an
+/// RTX 3060, `Q8S32_T64`, over the shapes a TTS render issues:
+///
+/// | blocks | split 1 | split 2 | split 4 |
+/// |--------|---------|---------|---------|
+/// |      8 |    61.1 |    34.5 |    25.8 |
+/// |     32 |   285.8 |   179.3 |   152.2 |
+/// |     64 |    84.0 |    56.1 |    62.1 |
+/// |    128 |   102.4 |    99.6 |    99.6 |
+/// |    896 |   482.5 |   508.6 |   579.1 |
+/// |   2176 |  1127.9 |  1214.6 |  1357.7 |
+///
+/// A split costs two barriers and a shared-memory fold, and its per-slice
+/// staging cuts the blocks an SM can hold, so it loses once the grid fills the
+/// card on its own. A slice with no tile left to walk still runs its steps —
+/// see the kernel — so the split is capped at the row's tile count.
+fn gemm_split(blocks: u64, tiles_per_row: u32) -> u32 {
+    let split = if blocks < 64 {
+        GEMM_MAX_SPLIT
+    } else if blocks < 256 {
+        2
+    } else {
+        1
+    };
+    split.min(tiles_per_row.max(1))
+}
+
+/// `activation [M, K] x weight [N, K]^T -> output [M, N]`, a 32x32 output tile
+/// per block and a 4x4 register patch per thread, over `split` independent K
+/// ranges. The path for a batch the GEMV no longer covers.
 ///
 /// # Errors
 /// Every error [`launch_gemv`] raises.
@@ -190,10 +229,14 @@ pub(crate) fn launch_gemm(
     let module = kernels::get_or_load_module(client.context(), device_index, TCF_MODULE)?;
     let func = kernels::get_kernel_function(&module, "tcf_gemm_f32")?;
 
+    let grid_n = n.div_ceil(GEMM_TILE);
+    let grid_m = m.div_ceil(GEMM_TILE);
+    let tiles_per_row = k / (TCF_TILE as u32);
+    let split = gemm_split(u64::from(grid_n) * u64::from(grid_m), tiles_per_row);
     let cfg = LaunchConfig {
-        grid_dim: (n.div_ceil(GEMM_TILE), m.div_ceil(GEMM_TILE), 1),
-        block_dim: (GEMM_TILE, GEMM_TILE, 1),
-        shared_mem_bytes: 0,
+        grid_dim: (grid_n, grid_m, 1),
+        block_dim: (GEMM_SLICE_THREADS * split, 1, 1),
+        shared_mem_bytes: GEMM_SLICE_BYTES * split,
     };
 
     unsafe {
@@ -205,6 +248,7 @@ pub(crate) fn launch_gemm(
         builder.arg(&k);
         builder.arg(&n);
         push_layout!(builder, args);
+        builder.arg(&split);
         builder.launch(cfg).map_err(|e| Error::QuantError {
             reason: format!(
                 "CUDA tcf_gemm_f32 launch failed for {}: {e:?}",

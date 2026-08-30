@@ -11,9 +11,7 @@ mod planes;
 
 pub use encoding::TcfEncoding;
 
-#[cfg(any(feature = "cuda", feature = "wgpu"))]
-pub(crate) use planes::TcfPlanes;
 #[cfg(feature = "wgpu")]
-pub(crate) use planes::{
-    SCALE_FORM_FLAT, SCALE_FORM_TWO_LEVEL_U6M6, SCALE_FORM_TWO_LEVEL_U8, TILE as TCF_TILE,
-};
+pub(crate) use planes::{SCALE_FORM_FLAT, SCALE_FORM_TWO_LEVEL_U6M6, SCALE_FORM_TWO_LEVEL_U8};
+#[cfg(any(feature = "cuda", feature = "wgpu"))]
+pub(crate) use planes::{TILE as TCF_TILE, TcfPlanes};

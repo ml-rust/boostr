@@ -52,12 +52,37 @@
 #define TCF_DEQUANT_TILES TCF_SUPER_BLOCK_TILES
 #define TCF_DEQUANT_BLOCK (TCF_DEQUANT_TILES * TCF_TILE)
 
-// GEMM output tile: 16 activation rows by 16 weight rows, 256 threads.
-#define TCF_GEMM_TM 16u
-#define TCF_GEMM_TN 16u
-// Row stride of a staged 64-element run, padded by one float so 16 lanes
-// reading the same element index of 16 different rows hit 16 distinct banks.
-#define TCF_GEMM_STRIDE 65u
+// GEMM block tile: 32 activation rows by 32 weight rows, staged 32 elements of
+// K at a time. 64 threads per K range, each owning a 4x4 register patch.
+#define TCF_GEMM_BM 32u
+#define TCF_GEMM_BN 32u
+#define TCF_GEMM_BK 32u
+#define TCF_GEMM_TM 4u
+#define TCF_GEMM_TN 4u
+#define TCF_GEMM_THREADS \
+    ((TCF_GEMM_BM / TCF_GEMM_TM) * (TCF_GEMM_BN / TCF_GEMM_TN))
+// Independent K ranges one block may split its work into, a thread group of
+// `TCF_GEMM_THREADS` each. The host picks the count per shape and sizes the
+// dynamic shared memory to match; this is only the ceiling.
+#define TCF_GEMM_MAX_SPLIT 4u
+#define TCF_GEMM_MAX_BLOCK (TCF_GEMM_THREADS * TCF_GEMM_MAX_SPLIT)
+// Floats one K slice stages: its activation rows then its weight rows. The
+// host multiplies this by the split it chose to size the dynamic shared
+// memory, so `GEMM_SLICE_BYTES` in `quant/cuda/tcf/launch.rs` restates it.
+#define TCF_GEMM_SLICE_FLOATS \
+    (TCF_GEMM_BK * (TCF_GEMM_ASTRIDE + TCF_GEMM_WSTRIDE))
+// Threads spanning the N edge of the block tile; the rest span the M edge.
+#define TCF_GEMM_TX (TCF_GEMM_BN / TCF_GEMM_TN)
+// Row stride of one staged K row. Padded by FOUR, not one: a `float4` read
+// needs a 16-byte-aligned start, so the pad has to keep the stride a multiple
+// of four floats. 36 is odd in units of float4, so consecutive K rows start on
+// different bank quartets.
+#define TCF_GEMM_ASTRIDE (TCF_GEMM_BM + 4u)
+#define TCF_GEMM_WSTRIDE (TCF_GEMM_BN + 4u)
+// Codes one thread decodes per staging step: one `tcf_code_run` word group.
+#define TCF_GEMM_CHUNK TCF_RUN_PER_LANE
+// Activation values one thread stages per step.
+#define TCF_GEMM_ALOADS ((TCF_GEMM_BM * TCF_GEMM_BK) / TCF_GEMM_THREADS)
 // Largest group count a tile can carry (group 16 over a 64-element tile).
 #define TCF_MAX_GROUPS 4u
 
@@ -309,17 +334,93 @@ __global__ __launch_bounds__(TCF_GEMV_BLOCK, 1) void tcf_gemv_f32(
 }
 
 // ============================================================================
-// GEMM: activation [M, K] x weight [N, K]^T -> output [M, N], for M > 64.
+// GEMM: activation [M, K] x weight [N, K]^T -> output [M, N], for a batch the
+// GEMV no longer covers.
 //
-// A 16x16 output tile per block, 256 threads, one output element each. Per
-// K-tile the block decodes its 16 weight rows into shared memory ONCE and
-// stages the matching 16 activation rows beside them, so a weight element is
-// decoded once per block instead of once per output element. The naive
-// thread-per-output form would decode every weight 16 times, which a TCF
-// decode — two plane reads plus a two-level product — cannot afford.
+// A 32x32 output tile per block and a 4x4 REGISTER PATCH per thread, so 64
+// threads cover the tile. Every 32 elements of K they stage 32 decoded weight
+// rows and the matching 32 activation rows into shared memory, transposed to
+// K-major, and each thread then reads one `float4` from each and issues
+// sixteen FMAs. A block may run several such thread groups over independent K
+// ranges; see below.
+//
+// # Why a register patch, measured
+//
+// The first form gave each thread ONE output element and read both operands
+// from shared memory, so every fused multiply-add cost two shared loads. That
+// ratio, not the decode, is what the kernel was spending its time on. An
+// Ampere SM retires four warp-wide FMAs per clock and services one warp-wide
+// shared load per clock, so two loads per FMA pins the kernel at an EIGHTH of
+// the card's f32 rate whatever the encoding does. On an RTX 3060 at M = 32,
+// N = 4096, K = 1024 that predicted 337 us of shared-load issue against a
+// measured 454 us, and the kernel ran at 1.2 TFLOP/s of a 12.7 peak.
+//
+// The decode is not the problem it looks like. At M = 32 the tile grid decodes
+// the weight twice, 8.4M decodes; even at ten instructions each that is 13 us
+// of this card, three per cent of the 454. Cost tracking M is not evidence of
+// a decode that fails to amortize — the FLOP count tracks M too.
+//
+// A 4x4 patch reads four activations and four weights for sixteen FMAs: eight
+// loads become two `float4` loads, and the ratio goes from 2.0 to 0.125 shared
+// instructions per FMA. Within a warp the four M positions are shared by eight
+// lanes and the eight N positions by four, so the two loads broadcast down to
+// 64 and 128 bytes — one clock each against the four clocks of FMA they feed.
+// The inner loop is FMA-bound rather than shared-load-bound.
+//
+// # Why 32x32 and 64 threads, and not a larger tile
+//
+// M is 32 for 97.6% of the launches a TTS render issues, so BM = 32 covers the
+// whole batch in one block row and decodes the weight ONCE. What is then
+// scarce is blocks: at M = 32 the whole output is M * N elements, and a thread
+// holding sixteen of them leaves M * N / 1024 blocks. N = 1024 gives 32 and
+// N = 256 gives 8, against 28 SMs. Every doubling of the tile halves that
+// count, so a 64x64 tile — the usual choice when M is large — would leave
+// N = 1024 with sixteen blocks on 28 SMs and idle 40% of the card. 32x32 is
+// the largest tile that still fills this GPU at the shape that dominates.
+//
+// # Why the block also splits K
+//
+// 32x32 is not small enough on its own. At M = 32 the whole output is M * N
+// elements and every tiling of it that keeps sixteen outputs per thread yields
+// the same M * N / 1024 thread groups: 32 for N = 1024, 8 for N = 256. Shrinking
+// the tile moves warps between blocks without creating any.
+//
+// So a block takes `split` INDEPENDENT K ranges, one 64-thread group each, and
+// folds their partial sums at the end. That multiplies the warps in flight
+// without touching the output tiling, and costs two barriers and one shared
+// fold per block. It is not free: each slice stages its own operands, so
+// `split` also divides the blocks an SM can hold — 9216 bytes per slice against
+// a 48 KB budget, five blocks at split 1 and one at split 4. The host picks the
+// count from the grid size and sizes the dynamic shared memory to match; see
+// `gemm_split` in `quant/cuda/tcf/launch.rs` for the measured table. A grid that
+// already fills the card is launched at split 1 and pays none of it.
+//
+// # Why the staging reads whole code words
+//
+// The old form called `tcf_code` once per element, which recomputes a byte
+// address and issues one narrow load, and divided by the runtime group width
+// per element. Here each thread stages one 16-code chunk through
+// `tcf_code_run`, the same reader the GEMV uses: one `uint4` (8-bit) or one
+// `uint2` plus one `uint` (4- and 6-bit) covering all sixteen. Sixteen codes
+// from a multiple of sixteen lie in ONE group at every group width v1 defines,
+// so the chunk also resolves its `(scale, minimum)` once instead of sixteen
+// times, and no scale ever reaches shared memory.
+//
+// # Accumulation order
+//
+// Within a slice: K ascending, element by element within a tile and tile by
+// tile, which is the order the first form used and the order the CPU path
+// uses. At split 1 this kernel is therefore BIT-IDENTICAL to the 16x16 form it
+// replaces, checked over every bit width and scale form. A split folds the
+// slices' partials in slice order afterwards, which is a blocked summation of
+// the same products — measured at 2e-6 of the largest output against split 1,
+// the same order as the GEMV/GEMM difference the matmul gate already accepts.
+//
+// The DECODED VALUE is `tcf_value`'s either way and is unchanged; that is what
+// `tests/backend_parity/quant_tcf.rs` holds.
 // ============================================================================
 
-__global__ __launch_bounds__(TCF_GEMM_TM * TCF_GEMM_TN, 1) void tcf_gemm_f32(
+__global__ __launch_bounds__(TCF_GEMM_MAX_BLOCK, 1) void tcf_gemm_f32(
     const float* __restrict__ activation,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
@@ -336,77 +437,166 @@ __global__ __launch_bounds__(TCF_GEMM_TM * TCF_GEMM_TN, 1) void tcf_gemm_f32(
     unsigned int groups_per_tile,
     unsigned int symmetric,
     unsigned int scale_form,
-    unsigned int sub_block_bytes
+    unsigned int sub_block_bytes,
+    unsigned int split
 ) {
     const TcfLayout l = tcf_layout(code_high_off, scale_off, min_off, super_off,
                                    super_min_off, bits, group, groups_per_tile,
                                    symmetric, scale_form, sub_block_bytes);
 
-    __shared__ float s_act[TCF_GEMM_TM * TCF_GEMM_STRIDE];
-    __shared__ float s_weight[TCF_GEMM_TN * TCF_GEMM_STRIDE];
-    __shared__ float s_scale[TCF_GEMM_TN * TCF_MAX_GROUPS];
-    __shared__ float s_min[TCF_GEMM_TN * TCF_MAX_GROUPS];
+    // `split * TCF_GEMM_SLICE_FLOATS` floats, the activation staging of every
+    // slice first so the reduction below can reuse it as one flat run.
+    extern __shared__ __align__(16) float s_dyn[];
+    float* const s_act = s_dyn;
+    float* const s_weight = s_dyn + split * (TCF_GEMM_BK * TCF_GEMM_ASTRIDE);
 
-    const unsigned int tid = threadIdx.y * blockDim.x + threadIdx.x;
-    const unsigned int threads = TCF_GEMM_TM * TCF_GEMM_TN;
-    const unsigned int row0 = blockIdx.y * TCF_GEMM_TM;
-    const unsigned int col0 = blockIdx.x * TCF_GEMM_TN;
-    const unsigned int row = row0 + threadIdx.y;
-    const unsigned int col = col0 + threadIdx.x;
+    const unsigned int slice = threadIdx.x / TCF_GEMM_THREADS;
+    const unsigned int tid = threadIdx.x % TCF_GEMM_THREADS;
+    float* const act_slice = s_act + slice * (TCF_GEMM_BK * TCF_GEMM_ASTRIDE);
+    float* const w_slice = s_weight + slice * (TCF_GEMM_BK * TCF_GEMM_WSTRIDE);
+
+    const unsigned int tx = tid % TCF_GEMM_TX;
+    const unsigned int ty = tid / TCF_GEMM_TX;
+    const unsigned int row0 = blockIdx.y * TCF_GEMM_BM;
+    const unsigned int col0 = blockIdx.x * TCF_GEMM_BN;
+
+    // Two threads stage one weight row per K slice, sixteen codes each.
+    const unsigned int stage_row = tid / 2u;
+    const unsigned int stage_e0 = (tid & 1u) * TCF_GEMM_CHUNK;
+    const unsigned int stage_col = col0 + stage_row;
+    const bool stage_live = stage_col < N;
 
     const unsigned int tiles_per_row = K / TCF_TILE;
-    const unsigned int resolved = TCF_GEMM_TN * l.groups_per_tile;
-    float acc = 0.0f;
+    // Every slice runs the same number of steps whether or not its range has
+    // that many tiles left: `__syncthreads` is block-wide, so a slice that
+    // stopped early would leave the others waiting on a barrier it never
+    // reaches. A step past the end stages zeros and accumulates them.
+    const unsigned int steps = (tiles_per_row + split - 1u) / split;
+    const unsigned int j0 = slice * steps;
 
-    for (unsigned int j = 0; j < tiles_per_row; ++j) {
-        if (tid < resolved) {
-            const unsigned int r = tid / l.groups_per_tile;
-            const unsigned int g = tid % l.groups_per_tile;
-            float scale = 0.0f;
-            float min_value = 0.0f;
-            if (col0 + r < N) {
-                tcf_group_values(weight, l, (col0 + r) * tiles_per_row + j, g,
-                                 &scale, &min_value);
-            }
-            s_scale[tid] = scale;
-            s_min[tid] = min_value;
-        }
-        __syncthreads();
-
-        // 16 rows x 64 elements = 1024 values per stage, four per thread.
+    float acc[TCF_GEMM_TM][TCF_GEMM_TN];
 #pragma unroll
-        for (unsigned int i = 0; i < 4u; ++i) {
-            const unsigned int index = tid + i * threads;
-            const unsigned int r = index / TCF_TILE;
-            const unsigned int e = index % TCF_TILE;
-
-            float w = 0.0f;
-            if (col0 + r < N) {
-                const unsigned int tile = (col0 + r) * tiles_per_row + j;
-                const unsigned int slot = r * l.groups_per_tile + (e / l.group);
-                w = tcf_value(tcf_code(weight, l, tile, e), s_scale[slot],
-                              s_min[slot], l.symmetric);
-            }
-            s_weight[r * TCF_GEMM_STRIDE + e] = w;
-
-            float a = 0.0f;
-            if (row0 + r < M) {
-                a = activation[(size_t)(row0 + r) * (size_t)K + (size_t)(j * TCF_TILE + e)];
-            }
-            s_act[r * TCF_GEMM_STRIDE + e] = a;
+    for (unsigned int u = 0; u < TCF_GEMM_TM; ++u) {
+#pragma unroll
+        for (unsigned int v = 0; v < TCF_GEMM_TN; ++v) {
+            acc[u][v] = 0.0f;
         }
-        __syncthreads();
-
-#pragma unroll 8
-        for (unsigned int e = 0; e < TCF_TILE; ++e) {
-            acc += s_act[threadIdx.y * TCF_GEMM_STRIDE + e]
-                 * s_weight[threadIdx.x * TCF_GEMM_STRIDE + e];
-        }
-        __syncthreads();
     }
 
-    if (row < M && col < N) {
-        output[(size_t)row * (size_t)N + (size_t)col] = acc;
+    for (unsigned int step = 0; step < steps; ++step) {
+        const unsigned int j = j0 + step;
+        const bool live = stage_live && j < tiles_per_row;
+        const unsigned int tile = live ? stage_col * tiles_per_row + j : 0u;
+#pragma unroll
+        for (unsigned int h = 0; h < TCF_TILE / TCF_GEMM_BK; ++h) {
+            // The chunk this thread owns inside the 64-element execution tile.
+            const unsigned int sub = h * (TCF_GEMM_BK / TCF_GEMM_CHUNK) + (tid & 1u);
+
+            // Guards the staging the previous step is still reading.
+            __syncthreads();
+
+            float scale = 0.0f;
+            float min_value = 0.0f;
+            TcfCodeRun run;
+            run.w[0] = 0u;
+            run.w[1] = 0u;
+            run.w[2] = 0u;
+            run.w[3] = 0u;
+            if (live) {
+                tcf_group_values(weight, l, tile, (TCF_GEMM_CHUNK * sub) / l.group,
+                                 &scale, &min_value);
+                run = tcf_code_run(weight, l, tile, sub);
+            }
+#pragma unroll
+            for (unsigned int i = 0; i < TCF_GEMM_CHUNK; ++i) {
+                const float w = live
+                    ? tcf_value(tcf_run_code(run, l, i), scale, min_value, l.symmetric)
+                    : 0.0f;
+                w_slice[(stage_e0 + i) * TCF_GEMM_WSTRIDE + stage_row] = w;
+            }
+
+            const unsigned int kbase = j * TCF_TILE + h * TCF_GEMM_BK;
+#pragma unroll
+            for (unsigned int p = 0; p < TCF_GEMM_ALOADS; ++p) {
+                const unsigned int index = tid + p * TCF_GEMM_THREADS;
+                const unsigned int e = index % TCF_GEMM_BK;
+                const unsigned int m = index / TCF_GEMM_BK;
+                float a = 0.0f;
+                if (j < tiles_per_row && row0 + m < M) {
+                    a = activation[(size_t)(row0 + m) * (size_t)K
+                                   + (size_t)(kbase + e)];
+                }
+                act_slice[e * TCF_GEMM_ASTRIDE + m] = a;
+            }
+            __syncthreads();
+
+#pragma unroll
+            for (unsigned int kk = 0; kk < TCF_GEMM_BK; ++kk) {
+                const float4 av =
+                    *(const float4*)&act_slice[kk * TCF_GEMM_ASTRIDE + ty * TCF_GEMM_TM];
+                const float4 bv =
+                    *(const float4*)&w_slice[kk * TCF_GEMM_WSTRIDE + tx * TCF_GEMM_TN];
+                const float a[TCF_GEMM_TM] = {av.x, av.y, av.z, av.w};
+                const float b[TCF_GEMM_TN] = {bv.x, bv.y, bv.z, bv.w};
+#pragma unroll
+                for (unsigned int u = 0; u < TCF_GEMM_TM; ++u) {
+#pragma unroll
+                    for (unsigned int v = 0; v < TCF_GEMM_TN; ++v) {
+                        acc[u][v] += a[u] * b[v];
+                    }
+                }
+            }
+        }
+    }
+
+    // Fold the slices' partial sums into slice 0, in slice order — a blocked
+    // summation of the same products, which the matmul gate's 1e-3 relative
+    // tolerance covers and every BLAS does. The staging buffer is dead by now,
+    // and its `split * TCF_GEMM_BK * TCF_GEMM_ASTRIDE` activation floats
+    // exceed the `(split - 1) * TCF_GEMM_THREADS * patch` this needs.
+    const unsigned int patch = TCF_GEMM_TM * TCF_GEMM_TN;
+    if (split > 1u) {
+        __syncthreads();
+        if (slice > 0u) {
+            float* dst = s_act + (slice - 1u) * (TCF_GEMM_THREADS * patch) + tid * patch;
+#pragma unroll
+            for (unsigned int u = 0; u < TCF_GEMM_TM; ++u) {
+#pragma unroll
+                for (unsigned int v = 0; v < TCF_GEMM_TN; ++v) {
+                    dst[u * TCF_GEMM_TN + v] = acc[u][v];
+                }
+            }
+        }
+        __syncthreads();
+        if (slice != 0u) {
+            return;
+        }
+        for (unsigned int s = 1; s < split; ++s) {
+            const float* src =
+                s_act + (s - 1u) * (TCF_GEMM_THREADS * patch) + tid * patch;
+#pragma unroll
+            for (unsigned int u = 0; u < TCF_GEMM_TM; ++u) {
+#pragma unroll
+                for (unsigned int v = 0; v < TCF_GEMM_TN; ++v) {
+                    acc[u][v] += src[u * TCF_GEMM_TN + v];
+                }
+            }
+        }
+    }
+
+#pragma unroll
+    for (unsigned int u = 0; u < TCF_GEMM_TM; ++u) {
+        const unsigned int row = row0 + ty * TCF_GEMM_TM + u;
+        if (row >= M) {
+            continue;
+        }
+#pragma unroll
+        for (unsigned int v = 0; v < TCF_GEMM_TN; ++v) {
+            const unsigned int col = col0 + tx * TCF_GEMM_TN + v;
+            if (col < N) {
+                output[(size_t)row * (size_t)N + (size_t)col] = acc[u][v];
+            }
+        }
     }
 }
 

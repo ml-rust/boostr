@@ -6,17 +6,21 @@
 //! The transformer stack (`base_lm`, `residual_lm`, `feat_encoder`,
 //! `feat_decoder`, `fsq_layer` and the six auxiliary projections) lives in the
 //! checkpoint directory's `model.safetensors`. The AudioVAE ships SEPARATELY
-//! as `audiovae.safetensors` (produced by the reference repo's
-//! `convert_audiovae.py`), so its path is a second argument — see
-//! [`VoxCpm2Model::from_checkpoint`].
+//! as `audiovae.pth`, so its path is a second argument — see
+//! [`VoxCpm2Model::from_checkpoint`]. That `.pth` is read as published,
+//! `weight_norm` folded at load time
+//! ([`VaeCheckpoint`](crate::model::audio::voxcpm::vae::VaeCheckpoint)); an
+//! `audiovae.safetensors` converted by the reference repo's
+//! `convert_audiovae.py` is still accepted, so a tree that already holds one
+//! keeps loading.
 //!
 //! The same split holds for the GGUF entry point
 //! ([`from_gguf`](crate::model::audio::voxcpm::model::gguf_loader)): a
 //! VoxCPM2 GGUF written by `compressr convert --format gguf` carries the
 //! TRANSFORMER STACK ONLY. The AudioVAE is not in it, because it is not part
 //! of the checkpoint compressr converts — it arrives as its own
-//! `audiovae.safetensors` from a separate conversion script — so `from_gguf`
-//! takes the VAE path as its own argument exactly like `from_checkpoint`.
+//! `audiovae.pth` — so `from_gguf` takes the VAE path as its own argument
+//! exactly like `from_checkpoint`.
 //!
 //! # Dtype
 //!
@@ -43,7 +47,7 @@ use crate::model::audio::voxcpm::vae::{AudioVaeDecoder, AudioVaeEncoder};
 use crate::nn::{LoraTargets, MaybeQuantLinear, Module, extend_named};
 use numr::autograd::Var;
 use numr::dtype::DType;
-use numr::ops::TypeConversionOps;
+use numr::ops::{BinaryOps, ReduceOps, TensorOps, TypeConversionOps, UnaryOps};
 use numr::runtime::Runtime;
 use numr::tensor::{Tensor, TensorId};
 use std::path::Path;
@@ -122,13 +126,14 @@ pub struct VoxCpm2Model<R: Runtime> {
 
 impl<R: Runtime<DType = DType>> VoxCpm2Model<R>
 where
-    R::Client: TypeConversionOps<R>,
+    R::Client: TypeConversionOps<R> + ReduceOps<R> + UnaryOps<R> + BinaryOps<R> + TensorOps<R>,
 {
     /// Load the whole model.
     ///
     /// `checkpoint_dir` must contain `config.json` and `model.safetensors`.
-    /// `audiovae_path` is the separately converted `audiovae.safetensors`
-    /// (file or its containing directory).
+    /// `audiovae_path` is the separately shipped `audiovae.pth`, or an
+    /// `audiovae.safetensors` converted from it (file or containing
+    /// directory) — see the module docs.
     ///
     /// `dtype` casts every transformer-stack tensor (`None` keeps the
     /// checkpoint's BF16). The AudioVAE is never cast — see the module docs.
@@ -164,8 +169,8 @@ where
         dtype: Option<DType>,
     ) -> Result<Self> {
         Ok(Self {
-            vae_encoder: AudioVaeEncoder::from_safetensors(audiovae_path, device)?,
-            vae_decoder: AudioVaeDecoder::from_safetensors(audiovae_path, device)?,
+            vae_encoder: AudioVaeEncoder::from_checkpoint(audiovae_path, device)?,
+            vae_decoder: AudioVaeDecoder::from_checkpoint(audiovae_path, device)?,
             feat_encoder: LocalEncoder::from_source(
                 source,
                 DEFAULT_LOCAL_ENCODER_PREFIX,
@@ -439,7 +444,7 @@ mod checkpointing;
 ///
 /// `vae_encoder`/`vae_decoder` are DELIBERATELY EXCLUDED: the AudioVAE is a
 /// frozen audio codec loaded from a SEPARATE checkpoint
-/// (`audiovae.safetensors`, see the module docs) that is never a
+/// (`audiovae.pth`, see the module docs) that is never a
 /// fine-tuning target, and neither `AudioVaeEncoder` nor `AudioVaeDecoder`
 /// implements `Module<R>` — their `CausalConv1d`/`EncoderBlock` internals
 /// were not audited for this unit. A caller needing to enumerate them

@@ -1,7 +1,9 @@
 //! Loads `encoder.*` tensors and assembles an [`AudioVaeEncoder`].
 //!
-//! Verified key layout (already weight-norm folded — `.weight`/`.bias` only,
-//! no `weight_g`/`weight_v`):
+//! Verified key layout, as it stands AFTER the weight-norm fold
+//! ([`VaeCheckpoint`] folds `weight_g`/`weight_v` pairs while reading the
+//! published `audiovae.pth`, and a converted `audiovae.safetensors` arrives
+//! folded already), so every conv here is a plain `.weight`/`.bias`:
 //!
 //! ```text
 //! encoder.block.0.{weight[128,1,7],bias[128]}                        front conv
@@ -19,7 +21,6 @@
 //! (see [`crate::model::audio::voxcpm::vae::encoder`] module docs).
 
 use crate::error::{Error, Result};
-use crate::format::safetensors_loader::SafeTensorsLoader;
 use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
 use crate::model::audio::voxcpm::vae::causal_conv1d::CausalConv1d;
 use crate::model::audio::voxcpm::vae::encoder::{
@@ -27,8 +28,9 @@ use crate::model::audio::voxcpm::vae::encoder::{
     INPUT_CHANNELS, OUTPUT_CHANNELS, RES_KERNEL, RES_UNIT_DILATIONS, STRIDES,
 };
 use crate::model::audio::voxcpm::vae::encoder_block::{EncoderBlock, EncoderBlockWeights};
+use crate::model::audio::voxcpm::vae::loader::VaeCheckpoint;
 use numr::dtype::DType;
-use numr::ops::TypeConversionOps;
+use numr::ops::{BinaryOps, ReduceOps, TensorOps, TypeConversionOps, UnaryOps};
 use numr::runtime::Runtime;
 use std::path::Path;
 
@@ -138,25 +140,26 @@ where
 
 impl<R: Runtime<DType = DType>> AudioVaeEncoder<R>
 where
-    R::Client: TypeConversionOps<R>,
+    R::Client: TypeConversionOps<R> + ReduceOps<R> + UnaryOps<R> + BinaryOps<R> + TensorOps<R>,
 {
     /// Load the `AudioVAE` encoder from a VoxCPM2 checkpoint.
     ///
-    /// `path` may be either the `model.safetensors` file or the directory
-    /// containing it.
-    pub fn from_safetensors<P: AsRef<Path>>(path: P, device: &R::Device) -> Result<Self> {
-        Self::from_safetensors_with(path, DEFAULT_ENCODER_PREFIX, device)
+    /// `path` is either the published `audiovae.pth`, an `audiovae.safetensors`
+    /// converted from it, or a directory holding one of the two —
+    /// [`VaeCheckpoint`] decides which from the file's own bytes.
+    pub fn from_checkpoint<P: AsRef<Path>>(path: P, device: &R::Device) -> Result<Self> {
+        Self::from_checkpoint_with(path, DEFAULT_ENCODER_PREFIX, device)
     }
 
     /// Load with an explicit checkpoint prefix.
-    pub fn from_safetensors_with<P: AsRef<Path>>(
+    pub fn from_checkpoint_with<P: AsRef<Path>>(
         path: P,
         prefix: &str,
         device: &R::Device,
     ) -> Result<Self> {
-        let mut loader = SafeTensorsLoader::open(path)?;
-        let weights = EncoderLoader::<R, SafeTensorsLoader> {
-            loader: &mut loader,
+        let mut checkpoint = VaeCheckpoint::open(path)?;
+        let weights = EncoderLoader::<R, VaeCheckpoint> {
+            loader: &mut checkpoint,
             device,
             prefix: prefix.to_string(),
             dtype: None,
@@ -175,8 +178,8 @@ mod tests {
     fn rejects_missing_file() {
         let device = <CpuRuntime as Runtime>::default_device();
         assert!(
-            AudioVaeEncoder::<CpuRuntime>::from_safetensors(
-                "/nonexistent/model.safetensors",
+            AudioVaeEncoder::<CpuRuntime>::from_checkpoint(
+                "/nonexistent/audiovae.safetensors",
                 &device
             )
             .is_err()

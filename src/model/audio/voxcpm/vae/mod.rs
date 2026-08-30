@@ -20,6 +20,6 @@ pub use decoder::{AudioVaeDecoder, AudioVaeDecoderWeights, DEFAULT_SR_BUCKET};
 pub use decoder_block::{DecoderBlock, DecoderBlockWeights};
 pub use encoder::{AudioVaeEncoder, AudioVaeEncoderWeights};
 pub use encoder_block::{EncoderBlock, EncoderBlockWeights};
-pub use loader::{DEFAULT_DECODER_PREFIX, DEFAULT_ENCODER_PREFIX};
+pub use loader::{DEFAULT_DECODER_PREFIX, DEFAULT_ENCODER_PREFIX, VaeCheckpoint};
 pub use res_unit::ResUnit;
 pub use snake::Snake;

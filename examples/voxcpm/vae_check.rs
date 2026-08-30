@@ -4,9 +4,9 @@
 //! cargo run --release --features audio --example voxcpm_vae_check -- DIR
 //! ```
 //!
-//! `DIR` holds `audiovae.safetensors` (produced by
-//! `audio/pipeline/convert_audiovae.py`) and the two fixtures written by
-//! `make_vae_fixture.py` / `make_vae_enc_fixture.py`.
+//! `DIR` holds `audiovae.safetensors` — the fixture generator's converted
+//! copy; the loader reads the published `audiovae.pth` just as well — and the
+//! two fixtures written by `make_vae_fixture.py` / `make_vae_enc_fixture.py`.
 //!
 //! This is the gate for the port. A Rust reimplementation that merely runs and
 //! produces plausible audio proves nothing; the only evidence that matters is
@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ok = true;
 
     println!("decoder:");
-    let dec = AudioVaeDecoder::<CpuRuntime>::from_safetensors(&vae, &device)?;
+    let dec = AudioVaeDecoder::<CpuRuntime>::from_checkpoint(&vae, &device)?;
     let mut fd = SafeTensorsLoader::open(dir.join("vae_decoder_fixture.safetensors"))?;
     for c in 0..2 {
         let latent = fd.load_tensor::<CpuRuntime>(&format!("case{c}_latent"), &device)?;
@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("encoder:");
-    let enc = AudioVaeEncoder::<CpuRuntime>::from_safetensors(&vae, &device)?;
+    let enc = AudioVaeEncoder::<CpuRuntime>::from_checkpoint(&vae, &device)?;
     let mut fe = SafeTensorsLoader::open(dir.join("vae_encoder_fixture.safetensors"))?;
     for c in 0..2 {
         let wave = fe.load_tensor::<CpuRuntime>(&format!("case{c}_wave"), &device)?;

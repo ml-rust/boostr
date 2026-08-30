@@ -26,8 +26,9 @@ use numr::tensor::Tensor;
 /// them. Their VAE uses a different scheme again (`vae.enc.conv0.*`,
 /// `vae.enc.blk.0.res.0.0.alpha`) AND keeps `weight_norm` unfolded as
 /// `weight_g`/`weight_v` pairs, which is where the extra 76 tensors over our
-/// 236 come from. Reading it needs a second name map plus a `weight_norm`
-/// fold that does not exist in Rust here yet, so
+/// 236 come from. Reading it needs a second name map — the `weight_norm`
+/// fold itself is [`crate::nn::fuse_weight_norm`], already used by the
+/// `.pth` reader and callable from here — so
 /// [`from_gguf`](crate::model::audio::voxcpm::model::VoxCpm2Model::from_gguf)
 /// still takes `audiovae_path` separately for BOTH conventions.
 ///

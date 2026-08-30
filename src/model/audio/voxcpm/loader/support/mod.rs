@@ -7,7 +7,9 @@
 mod tensor_loader;
 #[cfg(test)]
 mod tests;
+mod torch_pth;
 mod weight_source;
 
 pub(crate) use tensor_loader::TensorLoader;
+pub use torch_pth::TorchPthSource;
 pub use weight_source::WeightSource;

@@ -5,15 +5,16 @@
 //! ```text
 //! cargo run --release --features audio,f16 --example voxcpm_clone -- \
 //!     (--ckpt CKPT_DIR | --gguf MODEL.gguf [--config config.json]) \
-//!     --audiovae audiovae.safetensors \
+//!     --audiovae audiovae.pth \
 //!     --ref REF.wav --text "..." --out OUT.wav \
 //!     [--n-timesteps 10] [--cfg 2.0] [--min-len 2] [--max-len N] \
 //!     [--seed 0] [--best-of N] [--dtype f32] [--device cpu]
 //! ```
 //!
 //! `CKPT_DIR` holds `config.json`, `model.safetensors` and `tokenizer.json`.
-//! `--audiovae` is the separately converted `audiovae.safetensors` written by
-//! `audio/pipeline/convert_audiovae.py`.
+//! `--audiovae` is the separately shipped `audiovae.pth`; an
+//! `audiovae.safetensors` converted from it is accepted too, and which one a
+//! path holds is read off the file's bytes, not its name.
 //!
 //! `--gguf` is the single-file alternative, written by `compressr convert
 //! CKPT_DIR --format gguf --quantization q4_k`. It is mutually exclusive with

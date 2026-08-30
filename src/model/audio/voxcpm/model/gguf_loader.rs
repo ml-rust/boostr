@@ -24,8 +24,9 @@
 //! The AudioVAE, on either convention. Our own converter never sees it (it is
 //! a separate file, not part of the checkpoint compressr converts), and
 //! cstr's `vae.*` tensors use a third naming scheme with `weight_norm` still
-//! unfolded into `weight_g`/`weight_v` pairs, which needs a second map plus a
-//! fold that does not exist here. `from_gguf` therefore takes the VAE path as
+//! unfolded into `weight_g`/`weight_v` pairs, which needs a second map (the
+//! fold itself is [`crate::nn::fuse_weight_norm`], already shared with the
+//! `.pth` reader). `from_gguf` therefore takes the VAE path as
 //! its own argument on both paths, exactly like
 //! [`from_checkpoint`](VoxCpm2Model::from_checkpoint). It holds no
 //! `tokenizer.json` either.
@@ -59,7 +60,7 @@ use crate::format::gguf::Gguf;
 use crate::model::audio::voxcpm::loader::cstr::{GgmlNamedGguf, GgufNaming, probe_naming};
 use crate::model::audio::voxcpm::model::loader::{StackConfigs, VoxCpm2Model};
 use numr::dtype::DType;
-use numr::ops::TypeConversionOps;
+use numr::ops::{BinaryOps, ReduceOps, TensorOps, TypeConversionOps, UnaryOps};
 use numr::runtime::Runtime;
 use std::path::Path;
 
@@ -77,7 +78,7 @@ pub const GGUF_CONFIG_JSON_KEY: &str = "voxcpm2.config_json";
 
 impl<R: Runtime<DType = DType>> VoxCpm2Model<R>
 where
-    R::Client: TypeConversionOps<R>,
+    R::Client: TypeConversionOps<R> + ReduceOps<R> + UnaryOps<R> + BinaryOps<R> + TensorOps<R>,
 {
     /// Load the whole model from a GGUF plus the separate AudioVAE file.
     ///

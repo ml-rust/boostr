@@ -29,3 +29,43 @@ pub(super) fn output_shape(input_shape: &[usize], n: usize) -> Vec<usize> {
     s.push(n);
     s
 }
+
+/// The `m * k` activation values a tensor VIEW actually holds.
+///
+/// `Storage::as_host_slice` hands back the WHOLE allocation, never the view's
+/// window. A row narrowed out of a `[1, T, K]` batch is contiguous and holds
+/// `m * k` values, but its storage still holds `T * K` of them, so reading
+/// from the start of that slice multiplies the wrong rows — silently,
+/// whenever the view begins past element zero. Taking the window here is what
+/// stops that, and it is why every kernel below is handed a slice rather than
+/// a tensor.
+///
+/// # Errors
+/// [`Error::QuantError`] when the tensor is not contiguous (its elements are
+/// then not one run of memory at all), or when the window falls outside its
+/// storage.
+pub(super) fn activation_window(
+    activation: &Tensor<CpuRuntime>,
+    m: usize,
+    k: usize,
+) -> Result<&[f32]> {
+    if !activation.is_contiguous() {
+        return Err(Error::QuantError {
+            reason: "activation must be contiguous to be read as a flat slice".into(),
+        });
+    }
+    let start = activation.offset();
+    let end = start
+        .checked_add(m.saturating_mul(k))
+        .ok_or_else(|| Error::QuantError {
+            reason: format!("activation window {start}+{m}x{k} overflows"),
+        })?;
+    // SAFETY: CpuRuntime stores data as host pointers.
+    let all = unsafe { activation.storage().as_host_slice::<f32>() };
+    all.get(start..end).ok_or_else(|| Error::QuantError {
+        reason: format!(
+            "activation window [{start}, {end}) falls outside its {} value storage",
+            all.len()
+        ),
+    })
+}

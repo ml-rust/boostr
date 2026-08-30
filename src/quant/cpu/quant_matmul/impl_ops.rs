@@ -8,7 +8,7 @@ use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
 
 use super::super::kernels::{int4_gemm, int4_gemm_gptq, marlin_gemm, quant_matmul, tcf};
-use super::helpers::{output_shape, validate_input};
+use super::helpers::{activation_window, output_shape, validate_input};
 
 impl QuantMatmulOps<CpuRuntime> for CpuClient {
     fn int4_gemm(
@@ -28,7 +28,7 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         }
         let n = qw_shape[1] * 8;
 
-        let inp = unsafe { input.storage().as_host_slice::<f32>() };
+        let inp = activation_window(input, m, k)?;
         let qw = unsafe { qweight.storage().as_host_slice::<u32>() };
         let sc = unsafe { scales.storage().as_host_slice::<f32>() };
         let zr = unsafe { zeros.storage().as_host_slice::<f32>() };
@@ -110,7 +110,7 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         }
         let n = qw_shape[1];
 
-        let inp = unsafe { input.storage().as_host_slice::<f32>() };
+        let inp = activation_window(input, m, k)?;
         let qw = unsafe { qweight.storage().as_host_slice::<u32>() };
         let qz = unsafe { qzeros.storage().as_host_slice::<u32>() };
         let sc = unsafe { scales.storage().as_host_slice::<f32>() };
@@ -147,7 +147,7 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         }
         let n = w_shape[1];
 
-        let inp = unsafe { input.storage().as_host_slice::<f32>() };
+        let inp = activation_window(input, m, k)?;
         let wt = unsafe { weight.storage().as_host_slice::<u32>() };
         let sc = unsafe { scales.storage().as_host_slice::<f32>() };
         let zr = unsafe { zeros.storage().as_host_slice::<f32>() };
@@ -224,7 +224,12 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
             }
         }
 
-        let act_data = unsafe { activation.storage().as_host_slice::<f32>() };
+        let activation = if activation.is_contiguous() {
+            activation.clone()
+        } else {
+            activation.contiguous()?
+        };
+        let act_data = activation_window(&activation, m, k)?;
 
         // Build weight list and output buffers
         let weight_list: Vec<(&[u8], usize)> = weights
@@ -324,9 +329,11 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
             activation.clone()
         };
 
-        // Get raw data (zero-copy for CPU)
-        // SAFETY: CpuRuntime stores data as host pointers
-        let act_data = unsafe { activation.storage().as_host_slice::<f32>() };
+        // The activation's OWN window, not its whole allocation: a decode
+        // step hands in one row narrowed out of a prefill-sized batch, and
+        // that row does not start at element zero. See `activation_window`.
+        let act_data = activation_window(&activation, m, k)?;
+        // SAFETY: CpuRuntime stores data as host pointers.
         let weight_bytes = unsafe { weight.storage().as_host_slice::<u8>() };
 
         // Run kernel. Both codecs are fused: the weight stays packed, and no

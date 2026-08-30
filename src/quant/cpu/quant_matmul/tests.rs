@@ -332,3 +332,40 @@ fn quant_matmul_batch_accepts_a_tcf_weight() {
         assert_eq!(result.to_vec::<f32>(), single);
     }
 }
+
+/// A decode step multiplies ONE row narrowed out of a prefill-sized batch.
+/// That row is contiguous but does not start at element zero, and
+/// `as_host_slice` hands back the whole allocation — so reading from its
+/// start would multiply row 0 no matter which row was asked for. The result
+/// must equal what the same values give in a tensor of their own.
+#[test]
+fn quant_matmul_reads_the_narrowed_rows_not_the_first() {
+    let (client, device) = setup();
+
+    // Three distinct rows of 32, so picking the wrong one cannot coincide.
+    let mut rows = vec![0.0f32; 3 * 32];
+    for (i, v) in rows.iter_mut().enumerate() {
+        *v = (i % 32) as f32 * 0.25 + (i / 32) as f32;
+    }
+    let batch = Tensor::<CpuRuntime>::from_slice(&rows, &[3, 32], &device).unwrap();
+
+    let mut block = [0u8; 18];
+    block[0..2].copy_from_slice(&f16::from_f32(0.5).to_le_bytes());
+    block[2..18].fill(0x71);
+    let qt = QuantTensor::<CpuRuntime>::from_bytes(&block, QuantFormat::Q4_0, &[1, 32], &device)
+        .unwrap();
+
+    for row in 0..3 {
+        let view = batch.narrow(0, row, 1).unwrap();
+        // Non-vacuous only while the view really is an offset into the batch.
+        assert!(view.is_contiguous());
+        assert_eq!(view.offset(), row * 32);
+        let got: Vec<f32> = client.quant_matmul(&view, &qt).unwrap().to_vec();
+
+        let own =
+            Tensor::<CpuRuntime>::from_slice(&rows[row * 32..(row + 1) * 32], &[1, 32], &device)
+                .unwrap();
+        let want: Vec<f32> = client.quant_matmul(&own, &qt).unwrap().to_vec();
+        assert_eq!(got, want, "row {row}");
+    }
+}

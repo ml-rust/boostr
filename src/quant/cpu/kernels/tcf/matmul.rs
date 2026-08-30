@@ -2,65 +2,83 @@
 //!
 //! # What "fused" means here
 //!
-//! The weight is never materialized as f32. The kernel walks the weight one
-//! bounded tile range at a time, reconstructs that range's 64-element tiles
-//! into a fixed scratch buffer, accumulates their contribution to the output,
-//! and drops them. Peak working set per worker is
-//! [`FUSED_TILE_CHUNK`] tiles, independent of `n` and of the weight's size — so
-//! a TCF model runs at its quantized memory cost instead of the roughly
-//! sevenfold f32 expansion a dequantize-then-dense-matmul path pays.
+//! The weight is never materialized as f32. A worker walks its own rows
+//! through `tcf-core`'s [`for_each_group`], reconstructs one execution tile
+//! into a stack buffer group by group, accumulates that whole tile against
+//! every activation row, and overwrites the buffer with the next tile. The
+//! working set below the output is one tile — 64 f32 at the v1 tile width —
+//! whatever `m`, `n`, and the weight's size are.
 //!
-//! # Allocation is fixed, not per chunk
+//! # Why the decoded weights never reach memory
 //!
-//! Every buffer this kernel needs is allocated once and reused. The output
-//! slabs are one staging buffer the workers split with
-//! [`rayon::slice::ParallelSliceMut::par_chunks_mut`], and each worker holds one
-//! tile buffer and one reconstruction buffer that
-//! [`unpack_tile_range`] and [`super::dequantize_tiles_into`] refill in
-//! place. So the allocation count is a small constant, not a multiple of the
-//! chunk count.
+//! An earlier shape decoded a fixed tile range into an f32 slab and walked
+//! that slab tile by tile. At `m = 1` every decoded weight was stored and
+//! reloaded for exactly one dot, costing +8.1 retired instructions per
+//! multiply-accumulate over this kernel's own dequantization — where a GGUF
+//! fused gemv costs +0.63 over its. The penalty fell as `m` grew, because one
+//! decode then served `m` dots. The slab is gone, and with it every per-worker
+//! `Vec`: a row group allocates nothing, and the only memory traffic left is
+//! the activation reads the dot needs anyway.
+//!
+//! The dot stays a WHOLE tile wide. Narrowing it to the group instead cost
+//! 2.70 instructions per multiply-accumulate at `m = 256` against the slab
+//! shape's 1.41, and 5.25 against 1.46 for group-16 `Q6S16D_T64`: every call
+//! pays one accumulator init and one horizontal reduction, so a half or
+//! quarter width multiplies that fixed cost by the same factor. Decode is per
+//! group; accumulation is per tile.
 //!
 //! # What the plane layout costs
 //!
 //! GGUF packs a block's codes and its scale adjacent, so a GGUF kernel reads
 //! one contiguous run per block. TCF packs whole planes over the whole tensor
-//! (SPECIFICATION.md Section 14), so decoding a tile range touches up to five
-//! separated read streams instead of one. `tcf-core` indexes them directly out
-//! of the whole payload, so the cost is the extra streams, never a copy.
-//! CONFORMANCE.md Section 8.1 leaves code-plane ordering unfrozen and settles
-//! it by benchmark; this kernel is where that measurement is taken.
+//! (SPECIFICATION.md Section 14), so decoding a range touches up to five
+//! separated read streams instead of one, indexed out of the payload by
+//! `tcf-core` — the cost is the extra streams, never a copy. CONFORMANCE.md
+//! Section 8.1 leaves code-plane ordering unfrozen and settles it by
+//! benchmark, and this kernel is where that measurement is taken.
 //!
 //! # Where the vector work is
 //!
-//! Two places, both resolved once per matmul rather than per tile.
-//! Reconstruction runs through [`super::dequantize_tiles_into`], which
-//! applies Section 13.0's arithmetic eight elements at a time and is
-//! bit-identical to `tcf-core`'s scalar definition. The dot is
-//! [`select_dot_f32`], which accumulates in vector lanes.
+//! Two places, both resolved once per row group. Reconstruction runs through
+//! [`Decoder`], which applies Section 13.0's arithmetic eight elements at a
+//! time, bit-identically to `tcf-core`'s scalar definition. The dot is
+//! [`select_dot_f32`], accumulating in vector lanes.
 //!
 //! The dot is the one place this kernel does NOT reproduce the reference bit
 //! for bit: lane accumulation reorders a float sum, and FMA rounds a
 //! multiply-add once instead of twice. Both are summation-order effects on an
-//! already-approximate reduction, so the correctness gate below compares
-//! against a dense reference within tolerance — as it did before the vector
-//! path existed. The reconstruction feeding it stays exact.
+//! already-approximate reduction, so the gate below compares within tolerance,
+//! as it did before the vector path existed. The order is otherwise the slab
+//! shape's exactly — one 64-element dot per tile per row. The reconstruction
+//! stays exact: `(d, m)` arrives resolved from `tcf-core`, and no scale is
+//! folded into an activation or hoisted out of a dot.
 
 use rayon::prelude::*;
-use tcf_core::LogicalTile;
+use tcf_core::{GroupCodes, TcfError, for_each_group};
 
 use crate::error::{Error, Result};
 use crate::format::tcf::tcf_error;
 use crate::quant::TcfEncoding;
+use crate::quant::cpu::kernels::simd::tcf_decode::Decoder;
 
 use super::super::simd::dot_f32::{DotF32, select_dot_f32};
-use super::stream::unpack_tile_range;
 
-/// Execution tiles one worker decodes at a time.
-///
-/// A multiple of the four-tile super-block, so every range this kernel asks
-/// for starts on a block boundary. At the v1 tile width of 64 elements this is
-/// 4096 f32 of reconstruction scratch per worker — a fixed cost, whatever the
-/// weight's size.
+/// Elements one reconstructed tile can hold, and the whole working set below
+/// the output. v1 fixes the execution tile at 64 elements (SPECIFICATION.md
+/// Section 12.1), and a group never exceeds the tile it sits in, so this
+/// bounds both. A wider tile is refused, never truncated.
+const TILE_SCRATCH: usize = 64;
+
+/// The rejection every guard inside the group walk raises. [`for_each_group`]'s
+/// closure returns [`TcfError`], so a guard there carries no boostr message —
+/// the walk is named once, where its result is mapped.
+const GEOMETRY: TcfError = TcfError::InvalidQuantGeometry;
+
+/// Execution tiles the range-at-a-time decode shape used to take at once.
+/// The kernel below no longer chunks: it asks for one row group's whole tile
+/// range in a single [`for_each_group`] call, whose first tile `rows_per_group`
+/// already lands on a super-block. Nothing outside this module's tests reads
+/// the constant now, and being public it is kept rather than removed here.
 pub const FUSED_TILE_CHUNK: usize = 64;
 
 /// `activation [M, K] × weight [N, K]^T -> output [M, N]`, against a TCF
@@ -121,12 +139,9 @@ pub fn tcf_matmul_f32(
     let tiles_per_row = k / tile;
     let layout = encoding.layout();
     let per_block = usize::from(layout.tiles_per_super_block());
-    if per_block == 0 || !FUSED_TILE_CHUNK.is_multiple_of(per_block) {
+    if per_block == 0 {
         return Err(Error::QuantError {
-            reason: format!(
-                "{}: super-block width {per_block} does not divide the chunk",
-                encoding.name()
-            ),
+            reason: format!("{}: super-block width is zero", encoding.name()),
         });
     }
     let total_tiles = encoding.tile_count(&[n, k])?;
@@ -150,30 +165,25 @@ pub fn tcf_matmul_f32(
     staging
         .par_chunks_mut(slab_stride)
         .enumerate()
-        .try_for_each_init(
-            || (Vec::new(), Vec::new()),
-            |(tiles, values), (group, slab)| {
-                row_group(
-                    act,
-                    payload,
-                    RowGroup {
-                        group,
-                        rows_per_group,
-                        m,
-                        k,
-                        n,
-                        tile,
-                        tiles_per_row,
-                        total_tiles,
-                    },
-                    encoding,
-                    dot,
-                    slab,
-                    tiles,
-                    values,
-                )
-            },
-        )?;
+        .try_for_each(|(group, slab)| {
+            row_group(
+                act,
+                payload,
+                RowGroup {
+                    group,
+                    rows_per_group,
+                    m,
+                    k,
+                    n,
+                    tile,
+                    tiles_per_row,
+                    total_tiles,
+                },
+                encoding,
+                dot,
+                slab,
+            )
+        })?;
 
     for (group, values) in staging.chunks(slab_stride).enumerate() {
         let row_start = group.saturating_mul(rows_per_group);
@@ -209,14 +219,30 @@ struct RowGroup {
 /// Accumulate one worker's `[m, rows]` slab of the output.
 ///
 /// The slab is row-major in the activation's row index, so a worker writes a
-/// dense buffer and the caller scatters it into the strided output once. That
-/// keeps every write in this function local and needs no shared mutable state.
+/// dense buffer and the caller scatters it into the strided output once. Every
+/// write here is local, and no shared mutable state is needed. `slab` arrives
+/// zeroed and is accumulated into; `dot` is the caller's already-selected f32
+/// dot, so no worker probes CPU features per group.
 ///
-/// `slab` arrives zeroed and is accumulated into. `tiles` and `values` are the
-/// worker's reusable decode buffers: both are refilled per chunk, so a whole
-/// row group allocates nothing. `dot` is the caller's already-selected f32
-/// dot, so no worker probes CPU features per tile.
-#[allow(clippy::too_many_arguments)]
+/// # Decode per group, accumulate per tile
+///
+/// A group is narrower than a tile — 32 elements, or 16 under `Q6S16D_T64` —
+/// so each is decoded into its own slot of the tile scratch, and the row loop
+/// runs only once the slots sum to the tile width. The dot therefore keeps the
+/// 64-element width the tile-at-a-time shape gave it, and the accumulation
+/// order is that shape's exactly.
+///
+/// # How a tile finds its place
+///
+/// [`for_each_group`] yields the range's groups in ascending order and never
+/// splits one across a tile, and `first_tile` is the first tile of row
+/// `row_start`. Every weight row is a whole number of tiles — `k` is a multiple
+/// of the tile width, checked by the caller — so `elements`, advanced one whole
+/// tile at a time, is an element offset from that row's start. Its quotient by
+/// `k` is the slab row and its remainder the column, the `weight_row`/`column`
+/// pair a tile index gave before. A row boundary needs no case of its own: a
+/// row's last tile ends on a multiple of `k`, so the next quotient steps by one
+/// and the remainder restarts at zero.
 fn row_group(
     act: &[f32],
     payload: &[u8],
@@ -224,8 +250,6 @@ fn row_group(
     encoding: TcfEncoding,
     dot: DotF32,
     slab: &mut [f32],
-    tiles: &mut Vec<LogicalTile>,
-    values: &mut Vec<f32>,
 ) -> Result<()> {
     let layout = encoding.layout();
     let row_start = at.group.saturating_mul(at.rows_per_group);
@@ -241,47 +265,94 @@ fn row_group(
         .checked_mul(at.tiles_per_row)
         .ok_or_else(|| overflow(encoding))?;
 
-    let mut decoded = 0usize;
-    while decoded < group_tiles {
-        let take = FUSED_TILE_CHUNK.min(group_tiles - decoded);
-        let range_start = first_tile
-            .checked_add(decoded)
-            .ok_or_else(|| overflow(encoding))?;
-        unpack_tile_range(
-            payload,
-            encoding,
-            at.total_tiles,
-            u64::try_from(range_start).map_err(|_| overflow(encoding))?,
-            u64::try_from(take).map_err(|_| overflow(encoding))?,
-            tiles,
-        )?;
-        super::dequantize_tiles_into(tiles.as_slice(), layout, values)
-            .map_err(|e| tcf_error(&format!("{} dequantize range", encoding.name()), e))?;
+    // One feature probe per row group, not per group: a row group resolves
+    // thousands of groups, and a probe is an atomic load no branch predictor
+    // removes.
+    let decoder = Decoder::detect();
+    // The whole working set below the output, on the stack. A tile is read by
+    // the dots below and then overwritten, so it never leaves the core.
+    let mut scratch = [0.0f32; TILE_SCRATCH];
+    // Elements of the tile in progress already reconstructed. Zero means no
+    // tile is open, and reaching `at.tile` closes one.
+    let mut filled = 0usize;
+    // Which tile they belong to, read only while a tile is open.
+    let mut current = 0u32;
+    // Elements consumed by CLOSED tiles, from row `row_start`'s first.
+    let mut elements = 0usize;
 
-        for (index, weights) in values.chunks_exact(at.tile).enumerate() {
-            let global = range_start
-                .checked_add(index)
-                .ok_or_else(|| overflow(encoding))?;
-            let weight_row = global / at.tiles_per_row;
-            let column = (global % at.tiles_per_row)
-                .checked_mul(at.tile)
-                .ok_or_else(|| overflow(encoding))?;
-            let slab_column = weight_row
-                .checked_sub(row_start)
-                .ok_or_else(|| short(encoding))?;
+    for_each_group(
+        payload,
+        at.total_tiles,
+        u64::try_from(first_tile).map_err(|_| overflow(encoding))?,
+        u64::try_from(group_tiles).map_err(|_| overflow(encoding))?,
+        layout,
+        |tile_index, codes, values| {
+            let width = codes.len();
+            let end = filled.checked_add(width).ok_or(GEOMETRY)?;
+            // A group that would overrun the tile it sits in is refused, not
+            // reconstructed in part.
+            if width == 0 || end > at.tile {
+                return Err(GEOMETRY);
+            }
+            // The boundary, from `tcf-core`'s own tile index rather than an
+            // assumed groups-per-tile. `filled == 0` opens a tile; a later
+            // group naming a different one means the open tile's groups never
+            // summed to the width, so its scratch is short and is refused
+            // rather than dotted.
+            if filled == 0 {
+                current = tile_index;
+            } else if tile_index != current {
+                return Err(GEOMETRY);
+            }
+            let slots = scratch.get_mut(filled..end).ok_or(GEOMETRY)?;
+            // `values` arrives resolved: Section 13.3's and Section 13.4's
+            // two-level products ran inside `tcf-core`. What is left is
+            // Section 13.0's `d * f32(q)` and Section 13.0.1's `d * f32(u) + m`,
+            // through the decoder the whole-tensor path uses. No scale is
+            // folded into an activation, none hoisted out of the dot below.
+            match codes {
+                GroupCodes::Signed(q) => decoder.signed(q, values.scale, slots),
+                GroupCodes::Unsigned(u) => {
+                    let min = values.min.ok_or(GEOMETRY)?;
+                    decoder.unsigned(u, values.scale, min, slots);
+                }
+            }
+            filled = end;
+            if filled < at.tile {
+                return Ok(());
+            }
 
+            let weights = scratch.get(..at.tile).ok_or(GEOMETRY)?;
+            let start = elements;
+            elements = start.checked_add(at.tile).ok_or(GEOMETRY)?;
+            let slab_column = start / at.k;
+            let column = start % at.k;
+            // A tile that would run off the end of its own row means the
+            // geometry and `k` have drifted apart.
+            if column.checked_add(at.tile).is_none_or(|stop| stop > at.k) {
+                return Err(GEOMETRY);
+            }
             for row in 0..at.m {
-                let base = row.checked_mul(at.k).ok_or_else(|| overflow(encoding))?;
-                let activations = act
-                    .get(base + column..base + column + at.tile)
-                    .ok_or_else(|| short(encoding))?;
-                let slot = slab
-                    .get_mut(row * rows + slab_column)
-                    .ok_or_else(|| short(encoding))?;
+                let from = row
+                    .checked_mul(at.k)
+                    .and_then(|base| base.checked_add(column))
+                    .ok_or(GEOMETRY)?;
+                let to = from.checked_add(at.tile).ok_or(GEOMETRY)?;
+                let activations = act.get(from..to).ok_or(GEOMETRY)?;
+                let slot = slab.get_mut(row * rows + slab_column).ok_or(GEOMETRY)?;
                 *slot += dot(activations, weights);
             }
-        }
-        decoded += take;
+            filled = 0;
+            Ok(())
+        },
+    )
+    .map_err(|e| tcf_error(&format!("{} fused matmul", encoding.name()), e))?;
+
+    // The range's last tile was left open, so its groups never summed to the
+    // tile width. Its contribution is missing from the slab, and a partial
+    // scratch must never be dotted.
+    if filled != 0 {
+        return Err(short(encoding));
     }
     Ok(())
 }

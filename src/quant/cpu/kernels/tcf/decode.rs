@@ -18,10 +18,10 @@
 //! of the format, and MIGRATION.md Section 4.5.3's rule against a second
 //! copy of a block layout is not reached.
 //!
-//! The bit-identity that permits it is asserted, not asserted-in-prose:
-//! [`super::dequant_tcf`]'s test compares this path against
-//! `tcf_core::unpack` plus `tcf_core::dequantize` bit for bit, for all seven
-//! v1 encodings, and the test below does the same directly.
+//! The bit-identity that permits it is asserted, not asserted-in-prose: the
+//! test below compares this path against `tcf_core::dequantize` bit for bit,
+//! for all seven v1 encodings, over a tensor with a partial trailing
+//! super-block.
 
 use tcf_core::{Code64, LogicalTile, QuantLayout, TcfError};
 

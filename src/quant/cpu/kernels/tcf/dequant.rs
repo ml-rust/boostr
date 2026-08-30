@@ -6,10 +6,10 @@
 //! implementation the definition of the semantics, and MIGRATION.md
 //! Section 4.5.3 forbids a second copy of a block layout. So this kernel
 //! holds no plane offset, no nibble index, no 6-bit field position and no
-//! super-block stride. It calls [`unpack`] or [`super::unpack_tile_range`] to
-//! rebuild logical tiles, and its whole job is the surrounding shape and
-//! length checks, the chunk loop, and the `Result` mapping into boostr's
-//! error type.
+//! super-block stride. It calls [`unpack`] or [`for_each_group`] to reach the
+//! payload's contents, and its whole job is the surrounding shape and length
+//! checks, the element loop, and the `Result` mapping into boostr's error
+//! type.
 //!
 //! That is not a placeholder. A hand-written unpack here would be a second
 //! definition of the format, and Q6_K already shipped once in this codebase
@@ -17,56 +17,37 @@
 //!
 //! # Where the reconstruction runs
 //!
-//! Section 13.0's arithmetic is applied by
-//! [`super::dequantize_tiles_into`], eight elements per vector iteration,
-//! because `tcf-core`'s per-element `f32::from(i8)` has no shape a compiler
-//! vectorizes. That is arithmetic, not format: the codes are already whole
-//! bytes by then, and the two-level `(d, m)` resolution of Section 13.3 and
-//! Section 13.4 still runs inside `tcf-core`. It is admitted only because
-//! the gate below asserts it equals `tcf_core::dequantize` bit for bit, for
-//! all seven v1 encodings — the condition this module named in advance for
-//! any faster path added beside it.
+//! Section 13.0's arithmetic is applied by [`Decoder`], eight elements per
+//! vector iteration, because `tcf-core`'s per-element `f32::from(i8)` has no
+//! shape a compiler vectorizes. That is arithmetic, not format: the codes
+//! [`for_each_group`] hands over are already whole bytes, and the two-level
+//! `(d, m)` resolution of Section 13.3 and Section 13.4 has already run
+//! inside `tcf-core`. It is admitted only because the gate below asserts it
+//! equals `tcf_core::dequantize` bit for bit, for all seven v1 encodings —
+//! the condition this module named in advance for any faster path added
+//! beside it.
 //!
-//! # Two tile-level entry points
+//! # Two entry points, and why only one of them builds tiles
 //!
 //! [`unpack_tiles`] decodes the WHOLE tensor into one `Vec<LogicalTile>` and
-//! stays public because tests and other callers name it directly. [`dequant_tcf`]
-//! does not call it: a 2048x6144 weight is 196,608 tiles, and materializing
-//! all of them before a single f32 is produced is an extra full pass plus its
-//! allocation, for a value nothing downstream of `dequant_tcf` needs held at
-//! once. So [`dequant_tcf`] walks the payload in bounded ranges through
-//! [`super::unpack_tile_range`] instead — the same seam the fused matmul in
-//! [`super::matmul`] uses — decoding [`DEQUANT_TILE_CHUNK`] tiles into one
-//! reusable buffer at a time. Both entry points reach `tcf-core` through this
-//! module's shape math, so neither can disagree with the other on tile count,
-//! and both are checked bit-exact against `tcf_core::unpack` plus
-//! `tcf_core::dequantize` below.
+//! stays public because tests and other callers name it directly.
+//! [`dequant_tcf`] builds no [`LogicalTile`] at all: a 2048x6144 weight is
+//! 196,608 tiles, and routing every element through that intermediate cost
+//! 6.34 of 12.50 retired instructions per element — half the work, for a
+//! value nothing downstream holds. So it walks the payload through
+//! `tcf-core`'s [`for_each_group`], which streams the planes itself and
+//! yields one group's widened codes and its resolved `(d, m)` at a time,
+//! straight into the vector element loop. Both entry points reach `tcf-core`
+//! through this module's shape math, so neither can disagree with the other
+//! on tile count, and both are checked bit-exact against `tcf_core::unpack`
+//! plus `tcf_core::dequantize` below.
 
-use tcf_core::{LogicalTile, unpack};
+use tcf_core::{GroupCodes, LogicalTile, TcfError, for_each_group, unpack};
 
 use crate::error::{Error, Result};
 use crate::format::tcf::tcf_error;
 use crate::quant::TcfEncoding;
-
-/// Execution tiles decoded per range in [`dequant_tcf`]'s streaming loop.
-///
-/// A [`LogicalTile`] is on the order of 96 bytes, so 512 tiles is roughly
-/// 48 KB of tile-buffer scratch — L2-resident on any target, and four orders
-/// of magnitude below [`unpack_tiles`]'s full `Vec<LogicalTile>`, which for a
-/// 2048x6144 weight is 196,608 tiles and about 19 MB.
-///
-/// The size is a throughput floor, not a cache limit. Every range re-runs
-/// [`super::unpack_tile_range`]'s admission arithmetic — the block-alignment
-/// test, the payload-length test, and the layout's own byte-count math — all
-/// of which are invariant across this loop. That fixed cost is divided by the
-/// chunk's element count, so 64 tiles charged a measurable 0.2 retired
-/// instructions per element and 512 tiles charges an eighth of that.
-///
-/// Both v1 super-block widths (1 flat, 4 two-level) divide it, which
-/// [`dequant_tcf`] checks rather than assumes. Enlarging it further buys
-/// nothing: the overhead it amortizes is already below the noise floor, and
-/// the intermediate would grow back toward the size streaming exists to avoid.
-const DEQUANT_TILE_CHUNK: u64 = 512;
+use crate::quant::cpu::kernels::simd::tcf_decode::Decoder;
 
 /// Rebuild the logical tiles a TCF payload encodes. Section 14.
 ///
@@ -94,13 +75,13 @@ pub fn unpack_tiles(
 /// Bit for bit what `tcf_core::unpack` followed by `tcf_core::dequantize`
 /// produces, over the vectorized element loop rather than the scalar one.
 ///
-/// Unlike [`unpack_tiles`], this never holds the whole tensor as
-/// `LogicalTile`s at once. It walks the payload in [`DEQUANT_TILE_CHUNK`]-tile
-/// ranges through [`super::unpack_tile_range`], the same bounded seam the
-/// fused matmul uses, decoding each range into one reusable tile buffer and
-/// appending its f32 reconstruction to `values`. Only the final f32 output is
-/// fully materialized — the intermediate tile vector stays chunk-sized for the
-/// whole call, which is the allocation and cache-traffic this function exists
+/// Unlike [`unpack_tiles`], this materializes no intermediate at all. One
+/// [`for_each_group`] call covers the whole tensor: `tcf-core` walks the
+/// planes, resolves each group's `(d, m)` once, and hands over that group's
+/// widened codes, and the closure below reconstructs them directly into
+/// `values`. Groups arrive in tile order, so appending is already row-major
+/// and no gather or reorder is needed. Only the f32 output is ever fully
+/// held, which is the allocation and the cache traffic this function exists
 /// to remove.
 ///
 /// # Errors
@@ -112,48 +93,70 @@ pub fn dequant_tcf(payload: &[u8], encoding: TcfEncoding, shape: &[usize]) -> Re
     let total_tiles = encoding.tile_count(shape)?;
     let layout = encoding.layout();
 
-    // `DEQUANT_TILE_CHUNK` must itself be a whole number of super-blocks, or
-    // every chunk after the first would start mid-block — Section 14.6's
-    // failure mode `unpack_tile_range` exists to refuse. True for both v1
-    // widths (1, 4); checked rather than assumed for whatever comes after.
-    let per_block = u64::from(layout.tiles_per_super_block());
-    if per_block == 0 || !DEQUANT_TILE_CHUNK.is_multiple_of(per_block) {
-        return Err(Error::QuantError {
-            reason: format!(
-                "{}: super-block width {per_block} does not divide the chunk",
-                encoding.name()
-            ),
-        });
-    }
+    // Sized once to the tensor's full element count, so the walk below only
+    // ever grows into already-reserved capacity: no reallocation as `values`
+    // fills group by group. It is a capacity, not a length, because a shape
+    // whose tile arithmetic yields MORE elements than `expected` must still
+    // reach the count check at the end rather than be refused mid-decode.
+    // Sized and zeroed ONCE, not grown per group. A tensor resolves hundreds
+    // of thousands of groups, and growing per group charged each one a capacity
+    // check plus a 128-byte zero fill the decoder overwrote immediately. One
+    // `vec![0.0; expected]` is a single bulk store pass the allocator and libc
+    // already do at full width, after which every group writes into a slice
+    // that is simply there.
+    let mut values = vec![0.0f32; expected];
+    // How many elements the walk has written. `values` is at full length from
+    // the start, so its own length can no longer detect tile arithmetic that
+    // disagrees with `shape` — this cursor is what the count check below reads.
+    let mut written = 0usize;
+    // One feature probe per call, not per group: a tensor resolves hundreds
+    // of thousands of groups, and a probe is an atomic load that no branch
+    // predictor removes.
+    let decoder = Decoder::detect();
 
-    // Sized once to the tensor's full element count, so the loop below only
-    // ever appends into already-reserved capacity: no repeated reallocation
-    // as `values` grows chunk by chunk.
-    let mut values = Vec::with_capacity(expected);
-    // The one buffer the streaming seam refills in place. It starts empty and
-    // is grown once to the chunk's size, then reused unchanged for every
-    // remaining range in this call. There is deliberately no matching f32
-    // scratch buffer: `dequantize_tiles_append` writes each range straight
-    // into `values` at the offset the previous range stopped at, so the
-    // element loop's vector stores land in the final buffer and the decode
-    // costs no copy per chunk.
-    let mut tiles: Vec<LogicalTile> = Vec::new();
+    for_each_group(
+        payload,
+        total_tiles,
+        0,
+        total_tiles,
+        layout,
+        |_tile, codes, group| {
+            // The group's slot in the already-sized output. `get_mut` is also
+            // the over-count guard: a walk that yielded more elements than
+            // `shape` admits runs off the end and is refused here rather than
+            // growing the buffer past what the caller asked for.
+            let start = written;
+            let end = start
+                .checked_add(codes.len())
+                .ok_or(TcfError::InvalidQuantGeometry)?;
+            let slots = values
+                .get_mut(start..end)
+                .ok_or(TcfError::InvalidQuantGeometry)?;
+            // `group.scale` and `group.min` are already resolved: Section 13.3's
+            // and Section 13.4's two-level products ran inside `tcf-core`, so
+            // what is left here is Section 13.0's `d * f32(q)` and Section
+            // 13.0.1's `d * f32(u) + m` and nothing else. The minimum is the
+            // asymmetric form's second operand, so it is required exactly where
+            // the codes are unsigned, and absent everywhere else.
+            match codes {
+                GroupCodes::Signed(q) => decoder.signed(q, group.scale, slots),
+                GroupCodes::Unsigned(u) => {
+                    let min = group.min.ok_or(TcfError::InvalidQuantGeometry)?;
+                    decoder.unsigned(u, group.scale, min, slots);
+                }
+            }
+            written = end;
+            Ok(())
+        },
+    )
+    .map_err(|e| tcf_error(&format!("{} dequantize", encoding.name()), e))?;
 
-    let mut first_tile = 0u64;
-    while first_tile < total_tiles {
-        let take = DEQUANT_TILE_CHUNK.min(total_tiles - first_tile);
-        super::unpack_tile_range(payload, encoding, total_tiles, first_tile, take, &mut tiles)?;
-        super::dequantize_tiles_append(&tiles, layout, &mut values)
-            .map_err(|e| tcf_error(&format!("{} dequantize", encoding.name()), e))?;
-        first_tile += take;
-    }
-
-    if values.len() != expected {
+    if written != expected {
         return Err(Error::ModelError {
             reason: format!(
                 "{}: dequantized {} values, shape {shape:?} requires {expected}",
                 encoding.name(),
-                values.len(),
+                written,
             ),
         });
     }

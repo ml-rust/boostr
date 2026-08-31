@@ -26,7 +26,7 @@ const GEMM_M: usize = 128;
 const SAMPLED_ROWS: [usize; 4] = [0, 1, 63, 127];
 
 /// Relative error allowed between the two paths, against the row's own scale.
-const TOLERANCE: f32 = 3e-2;
+const TOLERANCE: f32 = 1e-4;
 
 fn formats() -> [QuantFormat; 3] {
     [QuantFormat::Q8_0, QuantFormat::Q6K, QuantFormat::Q4K]

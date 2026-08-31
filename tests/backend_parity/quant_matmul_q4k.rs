@@ -2,10 +2,11 @@
 //!
 //! Verifies the refactored 4-warp K-parallel kernel against a serial Rust
 //! reference that mirrors the kernel's exact dequantisation logic.
-//! Tolerance 1e-3: covers f32 accumulation-order divergence between GPU
-//! parallel-warp reduction and CPU sequential sum (both use f32 throughout).
+//! The CUDA path quantizes the activation to Q8_1 before the dot product, so
+//! the tolerance covers ~8 bits of activation quantization, not just f32
+//! accumulation order. See the assertion for the split.
 //!
-//! M=128 forces the GEMM dispatch path (threshold M <= 64 → GEMV).
+//! M=128 forces the GEMM dispatch path.
 
 use super::helpers::*;
 use boostr::QuantMatmulOps;
@@ -182,9 +183,8 @@ fn test_q4k_gemm_mwr_correctness() {
         assert!(v.is_finite(), "CPU result[{}] not finite: {}", i, v);
     }
 
-    // CUDA must match the serial f32 reference within 1e-3 relative error.
-    // Both paths accumulate in f32; parallel warp reduction vs sequential sum
-    // may differ by at most a few ULPs × K, well within 0.1% for K=512.
+    // CUDA is checked against the serial f32 reference; see the assertion for
+    // why the tolerance is what it is.
     #[cfg(feature = "cuda")]
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::QuantMatmulOps as _;
@@ -200,15 +200,32 @@ fn test_q4k_gemm_mwr_correctness() {
             .expect("CUDA quant_matmul Q4K")
             .to_vec::<f32>();
 
-        // Both paths use f32 throughout; parallel warp reduction vs sequential
-        // sum can differ by a few ULPs × K. 2e-3 relative tolerance is tight
-        // enough to catch wrong answers yet loose enough for FP ordering.
-        assert_parity_f32_tol(
-            &cuda_vec,
-            &reference,
-            "Q4K CUDA MWR vs reference",
-            2e-3,
-            1e-4,
-        );
+        // The reference keeps the activation in f32; the CUDA path QUANTIZES it
+        // to Q8_1 before the dot product, at every M (the GEMV always did, and
+        // the MMQ GEMM now does too). So the gap is activation quantization,
+        // about 8 bits of it, not accumulation order.
+        //
+        // That error is set by the LARGEST terms in the dot product and is
+        // therefore roughly constant across the output, which makes a per-element
+        // relative bound the wrong instrument: an output that lands near zero by
+        // cancellation carries the same absolute error as the largest one and so
+        // shows an arbitrarily large relative error. The bound is taken against
+        // the output's own scale instead.
+        //
+        // That the kernel is right — as opposed to merely close — is held by
+        // `quant_matmul_gguf_gemm.rs`, which compares this GEMM against the GEMV
+        // where BOTH quantize identically and which agree to 1e-4.
+        let scale = reference
+            .iter()
+            .fold(0.0f32, |a, v| a.max(v.abs()))
+            .max(1e-6);
+        for (i, (&got, &want)) in cuda_vec.iter().zip(&reference).enumerate() {
+            let error = (got - want).abs() / scale;
+            assert!(
+                error < 3e-3,
+                "Q4K CUDA MWR vs reference at {i}: {got} vs {want}, \
+                 {error} of the output scale {scale}"
+            );
+        }
     });
 }

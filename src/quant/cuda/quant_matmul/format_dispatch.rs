@@ -221,10 +221,18 @@ pub(super) fn dispatch_matmul(
     let k_u32 = k as u32;
     let n_u32 = n as u32;
 
-    // Q8_0 takes the MMQ path: int8 tiles in shared memory and dp4a, the same
-    // shape the GEMV's dp4a path uses, but reusing the weight tile across a
-    // 128-row batch tile instead of re-reading it per output row.
-    if format == QuantFormat::Q8_0 && k.is_multiple_of(32) {
+    // Q8_0, Q4_K and Q6_K take the MMQ path: int8 tiles in shared memory and
+    // dp4a, the same shape the GEMV's dp4a path uses, but reusing the weight
+    // tile across a 128-row batch tile instead of re-reading it per output row.
+    // The K-quants additionally need K to be a whole number of 256-element
+    // super-blocks, which their own layout already guarantees.
+    let mmq = match format {
+        QuantFormat::Q8_0 if k.is_multiple_of(32) => Some("quant_mmq_q8_0_q8_1"),
+        QuantFormat::Q4K if k.is_multiple_of(256) => Some("quant_mmq_q4_k_q8_1"),
+        QuantFormat::Q6K if k.is_multiple_of(256) => Some("quant_mmq_q6_k_q8_1"),
+        _ => None,
+    };
+    if let Some(mmq_kernel) = mmq {
         let q8_buf = quantize_activation_q8_1(client, act_contig, m, k)?;
         let q8_ptr = q8_buf.ptr();
         let weight_ptr = weight.storage().ptr();
@@ -235,7 +243,7 @@ pub(super) fn dispatch_matmul(
         };
         let module =
             kernels::get_or_load_module(client.context(), device_index, QUANT_GEMV_MODULE)?;
-        let func = kernels::get_kernel_function(&module, "quant_mmq_q8_0_q8_1")?;
+        let func = kernels::get_kernel_function(&module, mmq_kernel)?;
         unsafe {
             let mut builder = client.stream().launch_builder(&func);
             builder.arg(&q8_ptr);
@@ -245,7 +253,7 @@ pub(super) fn dispatch_matmul(
             builder.arg(&k_u32);
             builder.arg(&n_u32);
             builder.launch(cfg).map_err(|e| Error::QuantError {
-                reason: format!("CUDA quant_mmq_q8_0_q8_1 launch failed: {:?}", e),
+                reason: format!("CUDA {mmq_kernel} launch failed: {:?}", e),
             })?;
         }
         return Ok(Some(()));

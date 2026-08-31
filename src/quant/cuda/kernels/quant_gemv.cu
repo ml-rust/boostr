@@ -9,6 +9,8 @@
 
 #include <cuda_fp16.h>
 
+#include "decode.cuh"
+
 #define WARP_SIZE 32
 
 // ============================================================================
@@ -316,24 +318,8 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q4_k_q8_1_mwr(
         const unsigned char* qs = q4k + 16;
 
         // Selective scale unpacking via 16-bit loads
-        const unsigned short* sc16 = (const unsigned short*)sc;
         unsigned char scale_lo, scale_hi, min_lo, min_hi;
-        const int j = j_lo / 2;
-        if (j < 2) {
-            unsigned short s0 = sc16[j] & 0x3F3F;
-            unsigned short s1 = sc16[j + 2] & 0x3F3F;
-            scale_lo = (unsigned char)(s0);
-            scale_hi = (unsigned char)(s0 >> 8);
-            min_lo = (unsigned char)(s1);
-            min_hi = (unsigned char)(s1 >> 8);
-        } else {
-            unsigned short s0 = ((sc16[j + 2]) & 0x0F0F) | ((sc16[j - 2] & 0xC0C0) >> 2);
-            unsigned short s1 = ((sc16[j + 2] >> 4) & 0x0F0F) | ((sc16[j] & 0xC0C0) >> 2);
-            scale_lo = (unsigned char)(s0);
-            scale_hi = (unsigned char)(s0 >> 8);
-            min_lo = (unsigned char)(s1);
-            min_hi = (unsigned char)(s1 >> 8);
-        }
+        unpack_scales_mwr(sc, j_lo, &scale_lo, &scale_hi, &min_lo, &min_hi);
 
         int v = *(const int*)(qs + lane_id * 4);
         int v_lo = v & 0x0F0F0F0F;
@@ -847,20 +833,8 @@ extern "C" __global__ __launch_bounds__(128, 1) void fused_swiglu_q4k_q8_1_mwr(
 
         // Gate projection dot product
         {
-            const unsigned short* sc16 = (const unsigned short*)gsc;
             unsigned char scale_lo, scale_hi, min_lo, min_hi;
-            const int j = j_lo / 2;
-            if (j < 2) {
-                unsigned short s0 = sc16[j] & 0x3F3F;
-                unsigned short s1 = sc16[j + 2] & 0x3F3F;
-                scale_lo = (unsigned char)(s0); scale_hi = (unsigned char)(s0 >> 8);
-                min_lo = (unsigned char)(s1); min_hi = (unsigned char)(s1 >> 8);
-            } else {
-                unsigned short s0 = ((sc16[j + 2]) & 0x0F0F) | ((sc16[j - 2] & 0xC0C0) >> 2);
-                unsigned short s1 = ((sc16[j + 2] >> 4) & 0x0F0F) | ((sc16[j] & 0xC0C0) >> 2);
-                scale_lo = (unsigned char)(s0); scale_hi = (unsigned char)(s0 >> 8);
-                min_lo = (unsigned char)(s1); min_hi = (unsigned char)(s1 >> 8);
-            }
+            unpack_scales_mwr(gsc, j_lo, &scale_lo, &scale_hi, &min_lo, &min_hi);
             int v = *(const int*)(gqs + lane_id * 4);
             int dot_lo = dp4a(v & 0x0F0F0F0F, u_lo, 0);
             int dot_hi = dp4a((v >> 4) & 0x0F0F0F0F, u_hi, 0);
@@ -872,20 +846,8 @@ extern "C" __global__ __launch_bounds__(128, 1) void fused_swiglu_q4k_q8_1_mwr(
 
         // Up projection dot product
         {
-            const unsigned short* sc16 = (const unsigned short*)usc;
             unsigned char scale_lo, scale_hi, min_lo, min_hi;
-            const int j = j_lo / 2;
-            if (j < 2) {
-                unsigned short s0 = sc16[j] & 0x3F3F;
-                unsigned short s1 = sc16[j + 2] & 0x3F3F;
-                scale_lo = (unsigned char)(s0); scale_hi = (unsigned char)(s0 >> 8);
-                min_lo = (unsigned char)(s1); min_hi = (unsigned char)(s1 >> 8);
-            } else {
-                unsigned short s0 = ((sc16[j + 2]) & 0x0F0F) | ((sc16[j - 2] & 0xC0C0) >> 2);
-                unsigned short s1 = ((sc16[j + 2] >> 4) & 0x0F0F) | ((sc16[j] & 0xC0C0) >> 2);
-                scale_lo = (unsigned char)(s0); scale_hi = (unsigned char)(s0 >> 8);
-                min_lo = (unsigned char)(s1); min_hi = (unsigned char)(s1 >> 8);
-            }
+            unpack_scales_mwr(usc, j_lo, &scale_lo, &scale_hi, &min_lo, &min_hi);
             int v = *(const int*)(uqs + lane_id * 4);
             int dot_lo = dp4a(v & 0x0F0F0F0F, u_lo, 0);
             int dot_hi = dp4a((v >> 4) & 0x0F0F0F0F, u_hi, 0);
@@ -1312,21 +1274,8 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q8_0_q8_1
     }
 }
 
-// Decode one Q4_K sub-block scale/min pair, `j` in 0..7. The 12 scale bytes
-// pack eight 6-bit scales and eight 6-bit minima: the first four of each sit
-// whole in bytes 0..7, the last four take a low nibble from bytes 8..11 and
-// their top two bits from the high bits of bytes 0..7.
-static __device__ __forceinline__ void mmq_q4k_scale_min(
-    const unsigned char* sc, int j, int* scale, int* minimum
-) {
-    if (j < 4) {
-        *scale = sc[j] & 63;
-        *minimum = sc[j + 4] & 63;
-    } else {
-        *scale = (sc[j + 4] & 0x0F) | ((sc[j - 4] >> 6) << 4);
-        *minimum = (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4);
-    }
-}
+// mmq_q4k_scale_min (one Q4_K sub-block scale/min pair, `j` in 0..7) now
+// lives in decode.cuh as q4k_scale_min, included above.
 
 // ============================================================================
 // Q4_K x Q8_1 -> f32  (MMQ)
@@ -1398,7 +1347,7 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q4_k_q8_1
                 const float dmin = __half2float(*reinterpret_cast<const __half*>(blk + 2));
                 int scale;
                 int minimum;
-                mmq_q4k_scale_min(blk + 4, (int)j, &scale, &minimum);
+                q4k_scale_min(blk + 4, (int)j, &scale, &minimum);
                 sd = d * (float)scale;
                 sm = dmin * (float)minimum;
                 // 144 is 16-aligned and every offset here is a multiple of 4,

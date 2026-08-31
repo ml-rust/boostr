@@ -9,6 +9,8 @@
 
 #include <cuda_fp16.h>
 
+#include "../decode.cuh"
+
 // ── Safe unaligned load helpers ─────────────────────────────────────────
 
 static __device__ __forceinline__ float load_f16_as_f32_gemm(const unsigned char* p) {
@@ -18,48 +20,23 @@ static __device__ __forceinline__ float load_f16_as_f32_gemm(const unsigned char
 }
 
 // ── Q4_K / Q5_K scale unpacking (shared) ────────────────────────────────
+// Thin forwarding wrapper: keeps the GEMM-side name stable for callers
+// while the packing itself lives once in decode.cuh.
 
 static __device__ __forceinline__ void unpack_q4k_q5k_scales_gemm(
     const unsigned char* sc,
     unsigned char* scales,
     unsigned char* mins
 ) {
-    for (int i = 0; i < 4; i++) {
-        scales[i] = sc[i] & 0x3F;
-        mins[i] = sc[i + 4] & 0x3F;
-    }
-    for (int i = 4; i < 8; i++) {
-        scales[i] = (sc[i + 4] & 0x0F) | ((sc[i - 4] >> 6) << 4);
-        mins[i] = (sc[i + 4] >> 4) | ((sc[i] >> 6) << 4);
-    }
+    unpack_q4k_q5k_scales(sc, scales, mins);
 }
 
 // ── Q3_K scale unpacking ────────────────────────────────────────────────
+// Thin forwarding wrapper, see unpack_q4k_q5k_scales_gemm above.
 
 static __device__ __forceinline__ void unpack_q3k_scales_gemm(
     const unsigned char* sc_raw,
     signed char* scales
 ) {
-    unsigned int aux[4];
-    unsigned char aux_bytes[12];
-    for (int i = 0; i < 12; i++) aux_bytes[i] = sc_raw[i];
-    memcpy(&aux[0], aux_bytes, 4);
-    memcpy(&aux[1], aux_bytes + 4, 4);
-    memcpy(&aux[2], aux_bytes + 8, 4);
-
-    unsigned int tmp = aux[2];
-    const unsigned int KMASK1 = 0x03030303u;
-    const unsigned int KMASK2 = 0x0f0f0f0fu;
-    unsigned int a0 = aux[0], a1 = aux[1];
-    aux[0] = (a0 & KMASK2) | ((tmp & KMASK1) << 4);
-    aux[1] = (a1 & KMASK2) | (((tmp >> 2) & KMASK1) << 4);
-    aux[2] = ((a0 >> 4) & KMASK2) | (((tmp >> 4) & KMASK1) << 4);
-    aux[3] = ((a1 >> 4) & KMASK2) | (((tmp >> 6) & KMASK1) << 4);
-
-    memcpy(&scales[0],  &aux[0], 4);
-    memcpy(&scales[4],  &aux[1], 4);
-    memcpy(&scales[8],  &aux[2], 4);
-    memcpy(&scales[12], &aux[3], 4);
-    for (int i = 0; i < 16; i++)
-        scales[i] = (signed char)((unsigned char)scales[i] - 32);
+    unpack_q3k_scales(sc_raw, scales);
 }

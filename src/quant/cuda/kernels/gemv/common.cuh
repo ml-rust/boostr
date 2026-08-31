@@ -12,6 +12,8 @@
 
 #include <cuda_fp16.h>
 
+#include "../decode.cuh"
+
 #define WARP_SIZE 32
 #define WARPS_PER_BLOCK 8
 #define BLOCK_SIZE_256 (WARP_SIZE * WARPS_PER_BLOCK)
@@ -41,83 +43,8 @@ static __device__ __forceinline__ float silu_f(float x) {
     return x / (1.0f + expf(-x));
 }
 
-// ── Q4_K / Q5_K scale unpacking ────────────────────────────────────────
-// Shared by Q4_K and Q5_K: 12-byte packed 6-bit scales and mins → 8 each
-
-static __device__ __forceinline__ void unpack_q4k_q5k_scales(
-    const unsigned char* sc,
-    unsigned char* scales,
-    unsigned char* mins
-) {
-    for (int i = 0; i < 4; i++) {
-        scales[i] = sc[i] & 0x3F;
-        mins[i] = sc[i + 4] & 0x3F;
-    }
-    for (int i = 4; i < 8; i++) {
-        scales[i] = (sc[i + 4] & 0x0F) | ((sc[i - 4] >> 6) << 4);
-        mins[i] = (sc[i + 4] >> 4) | ((sc[i] >> 6) << 4);
-    }
-}
-
-// ── Selective scale unpack via 16-bit loads (MWR optimized) ─────────────
-// Used by Q4_K and Q5_K MWR kernels. Given chunk index (j_lo/2),
-// returns the scale/min pair for j_lo and j_hi sub-blocks.
-
-static __device__ __forceinline__ void unpack_scales_mwr(
-    const unsigned char* sc,
-    int j_lo,
-    unsigned char* scale_lo, unsigned char* scale_hi,
-    unsigned char* min_lo, unsigned char* min_hi
-) {
-    const unsigned short* sc16 = (const unsigned short*)sc;
-    const int j = j_lo / 2;
-    if (j < 2) {
-        unsigned short s0 = sc16[j] & 0x3F3F;
-        unsigned short s1 = sc16[j + 2] & 0x3F3F;
-        *scale_lo = (unsigned char)(s0);
-        *scale_hi = (unsigned char)(s0 >> 8);
-        *min_lo = (unsigned char)(s1);
-        *min_hi = (unsigned char)(s1 >> 8);
-    } else {
-        unsigned short s0 = ((sc16[j + 2]) & 0x0F0F) | ((sc16[j - 2] & 0xC0C0) >> 2);
-        unsigned short s1 = ((sc16[j + 2] >> 4) & 0x0F0F) | ((sc16[j] & 0xC0C0) >> 2);
-        *scale_lo = (unsigned char)(s0);
-        *scale_hi = (unsigned char)(s0 >> 8);
-        *min_lo = (unsigned char)(s1);
-        *min_hi = (unsigned char)(s1 >> 8);
-    }
-}
-
-// ── Q3_K scale unpacking ────────────────────────────────────────────────
-// 12 bytes → 16 signed 6-bit scales
-
-static __device__ __forceinline__ void unpack_q3k_scales(
-    const unsigned char* sc_raw,
-    signed char* scales
-) {
-    unsigned int aux[4];
-    unsigned char aux_bytes[12];
-    for (int i = 0; i < 12; i++) aux_bytes[i] = sc_raw[i];
-    memcpy(&aux[0], aux_bytes, 4);
-    memcpy(&aux[1], aux_bytes + 4, 4);
-    memcpy(&aux[2], aux_bytes + 8, 4);
-
-    unsigned int tmp = aux[2];
-    const unsigned int KMASK1 = 0x03030303u;
-    const unsigned int KMASK2 = 0x0f0f0f0fu;
-    unsigned int a0 = aux[0], a1 = aux[1];
-    aux[0] = (a0 & KMASK2) | ((tmp & KMASK1) << 4);
-    aux[1] = (a1 & KMASK2) | (((tmp >> 2) & KMASK1) << 4);
-    aux[2] = ((a0 >> 4) & KMASK2) | (((tmp >> 4) & KMASK1) << 4);
-    aux[3] = ((a1 >> 4) & KMASK2) | (((tmp >> 6) & KMASK1) << 4);
-
-    memcpy(&scales[0],  &aux[0], 4);
-    memcpy(&scales[4],  &aux[1], 4);
-    memcpy(&scales[8],  &aux[2], 4);
-    memcpy(&scales[12], &aux[3], 4);
-    for (int i = 0; i < 16; i++)
-        scales[i] = (signed char)((unsigned char)scales[i] - 32);
-}
+// Q4_K/Q5_K/Q3_K scale unpacking (unpack_q4k_q5k_scales, unpack_scales_mwr,
+// unpack_q3k_scales) now lives in decode.cuh, included above.
 
 // ── MWR reduction template ──────────────────────────────────────────────
 // Used by all MWR kernels: shared memory reduction across NWARPS_K warps

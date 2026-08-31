@@ -8,6 +8,8 @@
 
 #include <cuda_fp16.h>
 
+#include "decode.cuh"
+
 #define WARP_SIZE 32
 
 extern "C" {
@@ -96,22 +98,8 @@ __global__ void quant_matmul_q4_0_f32(
 #define TILED_GEMM_TM 4
 #define TILED_GEMM_TN 4
 
-// Decode one Q4_K sub-block scale/min pair, `j` in 0..7.
-//
-// The 12 scale bytes pack eight 6-bit scales and eight 6-bit minima: the first
-// four of each sit whole in bytes 0..7, and the last four are split, low nibble
-// in bytes 8..11 and high two bits borrowed from the top of bytes 0..7.
-static __device__ __forceinline__ void q4k_scale_min(
-    const unsigned char* sc, int j, int* scale, int* minimum
-) {
-    if (j < 4) {
-        *scale = sc[j] & 63;
-        *minimum = sc[j + 4] & 63;
-    } else {
-        *scale = (sc[j + 4] & 0x0F) | ((sc[j - 4] >> 6) << 4);
-        *minimum = (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4);
-    }
-}
+// q4k_scale_min (one Q4_K sub-block scale/min pair, `j` in 0..7) now lives in
+// decode.cuh, included above.
 
 // ============================================================================
 // Shared-memory tiled GEMM, one instantiation per weight format.

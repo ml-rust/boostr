@@ -1065,9 +1065,16 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr(
     const int m = blockIdx.y;
     if (col >= N) return;
 
-    // Follow Q4_K structure exactly: virtual super-blocks of 8 Q8_0 blocks (256 elements)
-    const int sbpr = K / 256;  // super-blocks per row
+    // Follow Q4_K structure: virtual super-blocks of 8 Q8_0 blocks (256 elements).
+    //
+    // A Q8_0 block is 32 elements, NOT the 256 a K-quant super-block holds, so
+    // the group count must round UP. `K / 256` truncates every row shorter than
+    // 256 to ZERO groups, which skips the accumulation loop entirely and writes
+    // an all-zero output. VoxCPM2 has three [64, 1024] projections that hit
+    // exactly that: K = 64 is two blocks, and only Q8_0 can encode them at all
+    // (a K-quant needs 256 per row, so Q6_K and Q4_K leave them F32).
     const int q8_bpr = K / 32; // Q8_1 blocks per row
+    const int sbpr = (q8_bpr + 7) / 8; // groups of 8 blocks, rounded up
 
     const unsigned char* w_row = weight + (unsigned long long)col * q8_bpr * 34;
     const unsigned char* q8_row = q8_act + (unsigned long long)m * q8_bpr * 36;
@@ -1082,26 +1089,27 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr(
     // Each warp strides over super-blocks with step NWARPS_K (same as Q4_K)
     for (int sb = warp_id; sb < sbpr; sb += NWARPS_K) {
         // Two Q8_0 sub-blocks per chunk (j_lo, j_hi), same pattern as Q4_K
-        int q8_0_idx_lo = sb * 8 + j_lo;
-        int q8_0_idx_hi = sb * 8 + j_hi;
+        // A trailing group is partial whenever the row is not a multiple of 8
+        // blocks, so each half is bounds-checked rather than read past the row.
+        const int q8_0_idx_lo = sb * 8 + j_lo;
+        const int q8_0_idx_hi = sb * 8 + j_hi;
 
-        const unsigned char* wblk_lo = w_row + q8_0_idx_lo * 34;
-        const unsigned char* wblk_hi = w_row + q8_0_idx_hi * 34;
-
-        float dw_lo = __half2float(*(const __half*)wblk_lo);
-        float dw_hi = __half2float(*(const __half*)wblk_hi);
-        int w_lo = load_int_ua(wblk_lo + 2 + pos);
-        int w_hi = load_int_ua(wblk_hi + 2 + pos);
-
-        int q8_idx_lo = sb * 8 + j_lo;
-        int q8_idx_hi = sb * 8 + j_hi;
-        float da_lo = __half2float(*(const __half*)(q8_row + q8_idx_lo * 36));
-        float da_hi = __half2float(*(const __half*)(q8_row + q8_idx_hi * 36));
-        int a_lo = *(const int*)(q8_row + q8_idx_lo * 36 + 4 + pos);
-        int a_hi = *(const int*)(q8_row + q8_idx_hi * 36 + 4 + pos);
-
-        acc += dw_lo * da_lo * (float)dp4a(w_lo, a_lo, 0)
-             + dw_hi * da_hi * (float)dp4a(w_hi, a_hi, 0);
+        if (q8_0_idx_lo < q8_bpr) {
+            const unsigned char* wblk = w_row + q8_0_idx_lo * 34;
+            float dw = __half2float(*(const __half*)wblk);
+            int w = load_int_ua(wblk + 2 + pos);
+            float da = __half2float(*(const __half*)(q8_row + q8_0_idx_lo * 36));
+            int a = *(const int*)(q8_row + q8_0_idx_lo * 36 + 4 + pos);
+            acc += dw * da * (float)dp4a(w, a, 0);
+        }
+        if (q8_0_idx_hi < q8_bpr) {
+            const unsigned char* wblk = w_row + q8_0_idx_hi * 34;
+            float dw = __half2float(*(const __half*)wblk);
+            int w = load_int_ua(wblk + 2 + pos);
+            float da = __half2float(*(const __half*)(q8_row + q8_0_idx_hi * 36));
+            int a = *(const int*)(q8_row + q8_0_idx_hi * 36 + 4 + pos);
+            acc += dw * da * (float)dp4a(w, a, 0);
+        }
     }
 
     // Multi-warp reduction via shared memory (identical to Q4_K)
@@ -1142,9 +1150,11 @@ extern "C" __global__ __launch_bounds__(128, 1) void fused_swiglu_q8_0_q8_1_mwr(
     const int m = blockIdx.y;
     if (col >= N) return;
 
-    // Follow Q4_K structure: virtual super-blocks of 8 Q8_0 blocks (256 elements)
-    const int sbpr = K / 256;
+    // Follow Q4_K structure: virtual super-blocks of 8 Q8_0 blocks (256 elements).
+    // Rounded UP for the same reason as `quant_gemv_q8_0_q8_1_mwr`: a Q8_0 block
+    // is 32 elements, so `K / 256` zeroes the loop for any row under 256 wide.
     const int q8_bpr = K / 32;
+    const int sbpr = (q8_bpr + 7) / 8;
 
     const unsigned char* g_row = gate_weight + (unsigned long long)col * q8_bpr * 34;
     const unsigned char* u_row = up_weight   + (unsigned long long)col * q8_bpr * 34;
@@ -1159,34 +1169,40 @@ extern "C" __global__ __launch_bounds__(128, 1) void fused_swiglu_q8_0_q8_1_mwr(
     float up_acc = 0.0f;
 
     for (int sb = warp_id; sb < sbpr; sb += NWARPS_K) {
-        int idx_lo = sb * 8 + j_lo;
-        int idx_hi = sb * 8 + j_hi;
+        // Each half is bounds-checked: a trailing group is partial whenever the
+        // row is not a multiple of 8 blocks.
+        const int idx_lo = sb * 8 + j_lo;
+        const int idx_hi = sb * 8 + j_hi;
 
-        // Q8_1 activation (read ONCE for both projections)
-        float da_lo = __half2float(*(const __half*)(q8_row + idx_lo * 36));
-        float da_hi = __half2float(*(const __half*)(q8_row + idx_hi * 36));
-        int a_lo = *(const int*)(q8_row + idx_lo * 36 + 4 + pos);
-        int a_hi = *(const int*)(q8_row + idx_hi * 36 + 4 + pos);
+        if (idx_lo < q8_bpr) {
+            // Q8_1 activation (read ONCE for both projections)
+            float da = __half2float(*(const __half*)(q8_row + idx_lo * 36));
+            int a = *(const int*)(q8_row + idx_lo * 36 + 4 + pos);
 
-        // Gate weight
-        const unsigned char* gblk_lo = g_row + idx_lo * 34;
-        const unsigned char* gblk_hi = g_row + idx_hi * 34;
-        float gd_lo = __half2float(*(const __half*)gblk_lo);
-        float gd_hi = __half2float(*(const __half*)gblk_hi);
-        int gw_lo = load_int_ua(gblk_lo + 2 + pos);
-        int gw_hi = load_int_ua(gblk_hi + 2 + pos);
-        gate_acc += gd_lo * da_lo * (float)dp4a(gw_lo, a_lo, 0)
-                  + gd_hi * da_hi * (float)dp4a(gw_hi, a_hi, 0);
+            const unsigned char* gblk = g_row + idx_lo * 34;
+            float gd = __half2float(*(const __half*)gblk);
+            int gw = load_int_ua(gblk + 2 + pos);
+            gate_acc += gd * da * (float)dp4a(gw, a, 0);
 
-        // Up weight
-        const unsigned char* ublk_lo = u_row + idx_lo * 34;
-        const unsigned char* ublk_hi = u_row + idx_hi * 34;
-        float ud_lo = __half2float(*(const __half*)ublk_lo);
-        float ud_hi = __half2float(*(const __half*)ublk_hi);
-        int uw_lo = load_int_ua(ublk_lo + 2 + pos);
-        int uw_hi = load_int_ua(ublk_hi + 2 + pos);
-        up_acc += ud_lo * da_lo * (float)dp4a(uw_lo, a_lo, 0)
-                + ud_hi * da_hi * (float)dp4a(uw_hi, a_hi, 0);
+            const unsigned char* ublk = u_row + idx_lo * 34;
+            float ud = __half2float(*(const __half*)ublk);
+            int uw = load_int_ua(ublk + 2 + pos);
+            up_acc += ud * da * (float)dp4a(uw, a, 0);
+        }
+        if (idx_hi < q8_bpr) {
+            float da = __half2float(*(const __half*)(q8_row + idx_hi * 36));
+            int a = *(const int*)(q8_row + idx_hi * 36 + 4 + pos);
+
+            const unsigned char* gblk = g_row + idx_hi * 34;
+            float gd = __half2float(*(const __half*)gblk);
+            int gw = load_int_ua(gblk + 2 + pos);
+            gate_acc += gd * da * (float)dp4a(gw, a, 0);
+
+            const unsigned char* ublk = u_row + idx_hi * 34;
+            float ud = __half2float(*(const __half*)ublk);
+            int uw = load_int_ua(ublk + 2 + pos);
+            up_acc += ud * da * (float)dp4a(uw, a, 0);
+        }
     }
 
     // Multi-warp reduction (2 accumulators)

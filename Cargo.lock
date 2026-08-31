@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "numr"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "bytemuck",
  "cudarc",

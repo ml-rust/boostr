@@ -58,45 +58,235 @@ __global__ void quant_matmul_q4_0_f32(
 }
 
 // ============================================================================
-// Q8_0 × f32 → f32
-// Weight block: 32 elements, 34 bytes
+// Q8_0 × f32 → f32  (shared-memory tiled GEMM, 64x64 output tile)
+//
+// Weight block: 32 elements, 34 bytes.
+//
+// # Why this is tiled and the GEMV is not
+//
+// One thread per output element re-reads the ENTIRE weight row from global
+// memory for every batch row, so a batch of M costs M full passes over the
+// weight. That is invisible at M = 1 and ruinous at M = 512: measured against
+// llama.cpp's tiled path at N = 4096, K = 14336, the untiled form was 192x
+// slower at M = 512 while matching it at M = 1. The weight is the largest
+// operand in a quantized matmul, so reading it once per BLOCK rather than once
+// per OUTPUT is the whole game.
+//
+// # The tiling
+//
+// A block owns a 64x64 output tile and walks K in steps of 32. Each step stages
+// one activation tile [64][32] and one dequantized weight tile [32][64] in
+// shared memory, then every thread accumulates a 4x4 register patch across the
+// staged K range. 256 threads x 16 outputs = the 4096-element tile.
+//
+// BK = 32 is not arbitrary: it is exactly one Q8_0 block, so a staging thread
+// reads one `d` and a contiguous run of quants with no block straddling.
+//
+// # Bounds
+//
+// M and N need not be multiples of 64. Staging zero-fills past the edge and the
+// store is predicated, so a partial tile computes the same values it would in a
+// full one — a zero staged operand contributes nothing to the dot product.
 // ============================================================================
 
-__global__ void quant_matmul_q8_0_f32(
-    const float* __restrict__ activation,
-    const unsigned char* __restrict__ weight,
-    float* __restrict__ output,
-    unsigned int M,
-    unsigned int K,
-    unsigned int N
+#define TILED_GEMM_BM 64
+#define TILED_GEMM_BN 64
+#define TILED_GEMM_BK 32
+#define TILED_GEMM_THREADS 256
+#define TILED_GEMM_TM 4
+#define TILED_GEMM_TN 4
+
+// Decode one Q4_K sub-block scale/min pair, `j` in 0..7.
+//
+// The 12 scale bytes pack eight 6-bit scales and eight 6-bit minima: the first
+// four of each sit whole in bytes 0..7, and the last four are split, low nibble
+// in bytes 8..11 and high two bits borrowed from the top of bytes 0..7.
+static __device__ __forceinline__ void q4k_scale_min(
+    const unsigned char* sc, int j, int* scale, int* minimum
 ) {
-    unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
-    unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (row >= M || col >= N) return;
-
-    unsigned int blocks_per_row = K / 32;
-    unsigned int row_bytes = blocks_per_row * 34;
-
-    const float* act_row = activation + row * K;
-    const unsigned char* w_row = weight + col * row_bytes;
-
-    float sum = 0.0f;
-
-    for (unsigned int b = 0; b < blocks_per_row; b++) {
-        const unsigned char* block = w_row + b * 34;
-        __half d_half = *reinterpret_cast<const __half*>(block);
-        float d = __half2float(d_half);
-        const signed char* qs = reinterpret_cast<const signed char*>(block + 2);
-        unsigned int base = b * 32;
-
-        for (int i = 0; i < 32; i++) {
-            sum += act_row[base + i] * ((float)qs[i] * d);
-        }
+    if (j < 4) {
+        *scale = sc[j] & 63;
+        *minimum = sc[j + 4] & 63;
+    } else {
+        *scale = (sc[j + 4] & 0x0F) | ((sc[j - 4] >> 6) << 4);
+        *minimum = (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4);
     }
-
-    output[row * N + col] = sum;
 }
+
+// ============================================================================
+// Shared-memory tiled GEMM, one instantiation per weight format.
+//
+// # Why tiled at all
+//
+// One thread per output element re-reads the ENTIRE weight row from global
+// memory for every batch row, so a batch of M costs M full passes over the
+// weight. That is invisible at M = 1 and ruinous at M = 512: measured against
+// llama.cpp's tiled path at N = 4096, K = 14336, the untiled form was 192x
+// slower at M = 512 while matching it at M = 1. The weight is the largest
+// operand in a quantized matmul, so reading it once per BLOCK rather than once
+// per OUTPUT is the whole game.
+//
+// # The tiling
+//
+// A block owns a 64x64 output tile and walks K in steps of 32. Each step stages
+// one activation tile [64][32] and one dequantized weight tile [32][64] in
+// shared memory, then every thread accumulates a 4x4 register patch. 256
+// threads x 16 outputs = the 4096-element tile.
+//
+// BK = 32 is every supported format's natural sub-block, so a staging step
+// never straddles a scale boundary: Q8_0 blocks ARE 32 elements, and the K-quant
+// 256-element super-block is eight 32-element sub-blocks each with its own
+// scale.
+//
+// # Coalescing
+//
+// Staging is BY WARP, one column at a time, because the weight is laid out
+// [N, K] with K contiguous: a thread-per-column split has adjacent threads
+// reading addresses a full row apart and coalesces into nothing. A warp taking
+// lane i -> element i of one sub-block reads a contiguous run.
+//
+// # Bounds
+//
+// M and N need not be multiples of 64. Staging zero-fills past the edge and the
+// store is predicated, so a partial tile computes the same values a full one
+// would: a zero staged operand contributes nothing to the dot product.
+//
+// STAGE_ONE must set `value` to the dequantized weight at (column `gcol`,
+// sub-block `b`, element `lane`).
+// ============================================================================
+#define DEFINE_TILED_GEMM(NAME, ...)                                           \
+__global__ __launch_bounds__(TILED_GEMM_THREADS, 1) void NAME(                 \
+    const float* __restrict__ activation,                                      \
+    const unsigned char* __restrict__ weight,                                  \
+    float* __restrict__ output,                                                \
+    unsigned int M,                                                            \
+    unsigned int K,                                                            \
+    unsigned int N                                                             \
+) {                                                                            \
+    __shared__ float s_act[TILED_GEMM_BM][TILED_GEMM_BK];                      \
+    __shared__ float s_w[TILED_GEMM_BK][TILED_GEMM_BN + 1];                    \
+                                                                               \
+    const unsigned int tid = threadIdx.x;                                      \
+    const unsigned int lane = tid % WARP_SIZE;                                 \
+    const unsigned int warp = tid / WARP_SIZE;                                 \
+    const unsigned int warps = TILED_GEMM_THREADS / WARP_SIZE;                 \
+    const unsigned int row0 = blockIdx.y * TILED_GEMM_BM;                      \
+    const unsigned int col0 = blockIdx.x * TILED_GEMM_BN;                      \
+    const unsigned int sub_blocks = K / TILED_GEMM_BK;                         \
+                                                                               \
+    const unsigned int tx = tid % 16;                                          \
+    const unsigned int ty = tid / 16;                                          \
+                                                                               \
+    float acc[TILED_GEMM_TM][TILED_GEMM_TN];                                   \
+    _Pragma("unroll")                                                          \
+    for (int u = 0; u < TILED_GEMM_TM; ++u) {                                  \
+        _Pragma("unroll")                                                      \
+        for (int v = 0; v < TILED_GEMM_TN; ++v) acc[u][v] = 0.0f;              \
+    }                                                                          \
+                                                                               \
+    for (unsigned int b = 0; b < sub_blocks; ++b) {                            \
+        __syncthreads();                                                       \
+        for (unsigned int c = warp; c < TILED_GEMM_BN; c += warps) {           \
+            const unsigned int gcol = col0 + c;                                \
+            float value = 0.0f;                                                \
+            if (gcol < N) { __VA_ARGS__ }                                      \
+            s_w[lane][c] = value;                                              \
+        }                                                                      \
+        {                                                                      \
+            const unsigned int kbase = b * TILED_GEMM_BK;                      \
+            _Pragma("unroll")                                                  \
+            for (int i = 0; i < 8; ++i) {                                      \
+                const unsigned int idx = tid + i * TILED_GEMM_THREADS;         \
+                const unsigned int r = idx / TILED_GEMM_BK;                    \
+                const unsigned int kk = idx % TILED_GEMM_BK;                   \
+                const unsigned int g_row = row0 + r;                           \
+                s_act[r][kk] = (g_row < M)                                     \
+                    ? activation[(unsigned long long)g_row * K + kbase + kk]   \
+                    : 0.0f;                                                    \
+            }                                                                  \
+        }                                                                      \
+        __syncthreads();                                                       \
+        _Pragma("unroll")                                                      \
+        for (unsigned int kk = 0; kk < TILED_GEMM_BK; ++kk) {                  \
+            float a[TILED_GEMM_TM];                                            \
+            float w[TILED_GEMM_TN];                                            \
+            _Pragma("unroll")                                                  \
+            for (int u = 0; u < TILED_GEMM_TM; ++u)                            \
+                a[u] = s_act[ty * TILED_GEMM_TM + u][kk];                      \
+            _Pragma("unroll")                                                  \
+            for (int v = 0; v < TILED_GEMM_TN; ++v)                            \
+                w[v] = s_w[kk][tx * TILED_GEMM_TN + v];                        \
+            _Pragma("unroll")                                                  \
+            for (int u = 0; u < TILED_GEMM_TM; ++u) {                          \
+                _Pragma("unroll")                                              \
+                for (int v = 0; v < TILED_GEMM_TN; ++v)                        \
+                    acc[u][v] += a[u] * w[v];                                  \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+                                                                               \
+    _Pragma("unroll")                                                          \
+    for (int u = 0; u < TILED_GEMM_TM; ++u) {                                  \
+        const unsigned int r = row0 + ty * TILED_GEMM_TM + u;                  \
+        if (r >= M) continue;                                                  \
+        _Pragma("unroll")                                                      \
+        for (int v = 0; v < TILED_GEMM_TN; ++v) {                              \
+            const unsigned int c = col0 + tx * TILED_GEMM_TN + v;              \
+            if (c < N) output[(unsigned long long)r * N + c] = acc[u][v];      \
+        }                                                                      \
+    }                                                                          \
+}
+
+// Q8_0: the sub-block IS the block, 34 bytes of f16 scale then 32 quants.
+DEFINE_TILED_GEMM(quant_matmul_q8_0_f32,
+    const unsigned char* blk = weight + ((unsigned long long)gcol * sub_blocks + b) * 34;
+    const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+    value = (float)reinterpret_cast<const signed char*>(blk + 2)[lane] * d;
+)
+
+// Q4_K: 144-byte super-block of eight 32-element sub-blocks. Sub-block `j`
+// takes the low nibble of `qs[(j/2)*32 + e]` when even and the high nibble when
+// odd, scaled by its own 6-bit scale and offset by its own 6-bit minimum.
+DEFINE_TILED_GEMM(quant_matmul_q4_k_tiled_f32,
+    const unsigned int sup = b / 8;
+    const unsigned int j = b % 8;
+    const unsigned char* blk =
+        weight + ((unsigned long long)gcol * (sub_blocks / 8) + sup) * 144;
+    const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+    const float dmin = __half2float(*reinterpret_cast<const __half*>(blk + 2));
+    int scale;
+    int minimum;
+    q4k_scale_min(blk + 4, (int)j, &scale, &minimum);
+    const unsigned char byte = blk[16 + (j / 2) * 32 + lane];
+    const int nib = (j & 1) ? (byte >> 4) : (byte & 0x0F);
+    value = d * (float)scale * (float)nib - dmin * (float)minimum;
+)
+
+// Q6_K: 210-byte super-block, 128 low-nibble bytes, 64 high-bit-pair bytes,
+// 16 signed scales, then the f16 scale. Sub-block `j` selects a half (j/4), one
+// of four quarter patterns, and a scale index; the quant is a 6-bit unsigned
+// value biased by 32.
+DEFINE_TILED_GEMM(quant_matmul_q6_k_tiled_f32,
+    const unsigned int sup = b / 8;
+    const unsigned int j = b % 8;
+    const unsigned char* blk =
+        weight + ((unsigned long long)gcol * (sub_blocks / 8) + sup) * 210;
+    const unsigned int half = j / 4;
+    const unsigned int t = j % 4;
+    const unsigned char* ql = blk + half * 64;
+    const unsigned char* qh = blk + 128 + half * 32;
+    const signed char* sc = reinterpret_cast<const signed char*>(blk + 192) + half * 8;
+    __half d_h;
+    memcpy(&d_h, blk + 208, 2);
+    const float d = __half2float(d_h);
+    const unsigned int ql_index = (t & 1) ? (lane + 32) : lane;
+    const int ql_shift = (t & 2) ? 4 : 0;
+    const int low = (ql[ql_index] >> ql_shift) & 0x0F;
+    const int high = (qh[lane] >> (t * 2)) & 0x03;
+    const int q = (low | (high << 4)) - 32;
+    const int scale = sc[(int)(t * 2) + (int)(lane / 16)];
+    value = d * (float)scale * (float)q;
+)
 
 // ============================================================================
 // Q4_K × f32 → f32  (output-tiled GEMM, 16×16 tile per block)

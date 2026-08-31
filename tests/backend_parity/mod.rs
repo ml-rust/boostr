@@ -14,6 +14,7 @@ pub mod mqa_gqa_attention;
 pub mod paged_attention;
 pub mod quant_fused;
 pub mod quant_int4_gemm;
+pub mod quant_matmul_gguf_gemm;
 pub mod quant_matmul_q4k;
 pub mod quant_matmul_q8_0;
 pub mod quant_nf4;

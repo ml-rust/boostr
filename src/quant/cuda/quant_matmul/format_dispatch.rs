@@ -185,8 +185,8 @@ pub(super) fn dispatch_matmul(
     let (kernel_name, module_name) = match format {
         QuantFormat::Q4_0 => ("quant_matmul_q4_0_f32", QUANT_MATMUL_MODULE),
         QuantFormat::Q8_0 => ("quant_matmul_q8_0_f32", QUANT_MATMUL_MODULE),
-        QuantFormat::Q4K => ("quant_matmul_q4_k_f32", QUANT_MATMUL_MODULE),
-        QuantFormat::Q6K => ("quant_matmul_q6_k_f32", QUANT_MATMUL_MODULE),
+        QuantFormat::Q4K => ("quant_matmul_q4_k_tiled_f32", QUANT_MATMUL_MODULE),
+        QuantFormat::Q6K => ("quant_matmul_q6_k_tiled_f32", QUANT_MATMUL_MODULE),
         QuantFormat::Q5K => ("quant_matmul_q5_k_f32", GEMM_Q5_K_MODULE),
         QuantFormat::Q3K => ("quant_matmul_q3_k_f32", GEMM_Q3_K_MODULE),
         QuantFormat::Q2K => ("quant_matmul_q2_k_f32", GEMM_Q2_K_MODULE),
@@ -217,23 +217,57 @@ pub(super) fn dispatch_matmul(
         "CUDA quant kernel: dedicated tiled GEMM (optimized)"
     );
 
-    let act_ptr = act_contig.ptr();
-    let weight_ptr = weight.storage().ptr();
     let m_u32 = m as u32;
     let k_u32 = k as u32;
     let n_u32 = n as u32;
 
-    // Q4K uses a 16×16 output-tiled kernel: each block computes a TM×TN=16×16
-    // output tile with 128 threads (2 outputs/thread). Shared memory holds the
-    // activation tile (TM × 256 × 4 = 16 KB). Grid = (ceil(N/16), ceil(M/16)).
-    // For M=2000, N=4096: grid = (256, 125) = 32,000 blocks vs 8M previously.
-    // All other formats use the classic 16×16 tiled GEMM.
-    let cfg = if format == QuantFormat::Q4K {
+    // Q8_0 takes the MMQ path: int8 tiles in shared memory and dp4a, the same
+    // shape the GEMV's dp4a path uses, but reusing the weight tile across a
+    // 128-row batch tile instead of re-reading it per output row.
+    if format == QuantFormat::Q8_0 && k.is_multiple_of(32) {
+        let q8_buf = quantize_activation_q8_1(client, act_contig, m, k)?;
+        let q8_ptr = q8_buf.ptr();
+        let weight_ptr = weight.storage().ptr();
+        let cfg = LaunchConfig {
+            grid_dim: (n_u32.div_ceil(64), m_u32.div_ceil(128), 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let module =
+            kernels::get_or_load_module(client.context(), device_index, QUANT_GEMV_MODULE)?;
+        let func = kernels::get_kernel_function(&module, "quant_mmq_q8_0_q8_1")?;
+        unsafe {
+            let mut builder = client.stream().launch_builder(&func);
+            builder.arg(&q8_ptr);
+            builder.arg(&weight_ptr);
+            builder.arg(&output_ptr);
+            builder.arg(&m_u32);
+            builder.arg(&k_u32);
+            builder.arg(&n_u32);
+            builder.launch(cfg).map_err(|e| Error::QuantError {
+                reason: format!("CUDA quant_mmq_q8_0_q8_1 launch failed: {:?}", e),
+            })?;
+        }
+        return Ok(Some(()));
+    }
+
+    let act_ptr = act_contig.ptr();
+    let weight_ptr = weight.storage().ptr();
+
+    // Q8_0, Q4_K and Q6_K share one 64×64-tile kernel with 256 threads, each
+    // holding a 4×4 register patch and both operands staged in shared memory.
+    // The weight is then read once per BLOCK instead of once per OUTPUT, which
+    // is what stops the cost scaling with the batch; see the kernel comment.
+    // Shared memory is declared statically inside it, so none is requested here.
+    // Every other format still uses the classic per-element 16×16 GEMM.
+    let cfg = if matches!(
+        format,
+        QuantFormat::Q8_0 | QuantFormat::Q4K | QuantFormat::Q6K
+    ) {
         LaunchConfig {
-            grid_dim: (n_u32.div_ceil(16), m_u32.div_ceil(16), 1),
-            block_dim: (128, 1, 1),
-            // activation tile: TM(16) × 256 × 4 bytes = 16,384 bytes
-            shared_mem_bytes: 16384,
+            grid_dim: (n_u32.div_ceil(64), m_u32.div_ceil(64), 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
         }
     } else {
         let block_x = 16u32;

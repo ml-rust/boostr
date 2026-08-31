@@ -201,7 +201,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             return Ok(output);
         }
 
-        if m <= 64 {
+        if m <= 16 {
             match dispatch_gemv(self, &act_contig, weight, output_ptr, m, k, n)? {
                 Some(()) => {}
                 None => return quant_matmul_via_dequant(self, activation, weight),

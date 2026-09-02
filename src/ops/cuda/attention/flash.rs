@@ -91,13 +91,15 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             return Ok(result);
         }
 
-        // Dedicated MQA/GQA kernels, for the shapes their heuristic targets.
+        // Dedicated MQA/GQA kernels, for the shapes they're capable of.
         //
-        // Gated on three things the kernels actually support, not just the
-        // heuristic: `window_size == 0` because they have no sliding-window
-        // path, and F32/F16/BF16 because those are the only dtype variants
-        // instantiated. Anything else falls through to the general kernel
-        // below, which is what ran for every shape before this was wired up.
+        // `should_use_mqa_gqa` is a capability gate, not a performance
+        // heuristic — see its doc comment. Gated on two more things the
+        // kernels actually support: `window_size == 0` because they have no
+        // sliding-window path, and F32/F16/BF16 because those are the only
+        // dtype variants instantiated. Anything else falls through to the
+        // general kernel below, which is what ran for every shape before
+        // this was wired up.
         if window_size == 0
             && matches!(q.dtype(), DType::F32 | DType::F16 | DType::BF16)
             && mqa_gqa::should_use_mqa_gqa(num_heads, num_kv_heads, head_dim)

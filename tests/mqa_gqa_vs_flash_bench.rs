@@ -1,7 +1,7 @@
 //! On-demand GPU benchmark: is the dedicated MQA/GQA CUDA kernel
 //! (`boostr::ops::cuda::attention::mqa_gqa::{mqa_gqa_fwd, mqa_gqa_bwd}`) faster
 //! than the general `FlashAttentionOps::flash_attention_fwd/bwd` path, at the
-//! shapes the kernel's own selection heuristic (`should_use_mqa_gqa`) targets?
+//! shapes the kernel's own capability gate (`should_use_mqa_gqa`) admits?
 //!
 //! This is NOT a correctness test — numerical parity against the CPU
 //! reference is already covered by `tests/backend_parity/mqa_gqa_attention.rs`.
@@ -71,19 +71,20 @@ const MAX_ITERS: usize = 32;
 ///
 /// A FIXED iteration count is wrong here: attention backward is O(batch * seq^2),
 /// so across this sweep's shapes the per-call cost spans roughly three orders of
-/// magnitude (~120 ms at `b=1, seq=512` to ~60 s at `b=8, seq=4096`). A count
-/// tuned for the small end runs for hours at the large end. Budgeting time
-/// instead gives many samples where they are cheap and few where they are not,
-/// which is where the extra samples were buying nothing anyway.
+/// magnitude between `b=1, seq=512` and `b=8, seq=4096`. A count tuned for the
+/// small end runs for hours at the large end. Budgeting time instead gives many
+/// samples where they are cheap and few where they are not, which is where the
+/// extra samples were buying nothing anyway.
 const BUDGET_PER_MEASUREMENT: Duration = Duration::from_secs(4);
 
 /// Upper bound on a shape's cost proxy `batch * seq^2 * head_dim`.
 ///
-/// Calibrated against measurement: `b=1, seq=512, hd=64` (proxy 1.7e7) runs a
-/// backward in ~120 ms, and `b=1, seq=4096, hd=64` (proxy 1.1e9) takes ~7.7 s.
-/// This ceiling keeps the longest-sequence cell — the one the kernel's whole
-/// memory-amortization argument is about — while dropping the cells that cost
-/// minutes per row. Raise it deliberately, and expect the sweep to get slow.
+/// Calibrated against measurement: the proxy spans about two orders of
+/// magnitude between `b=1, seq=512, hd=64` (1.7e7) and `b=1, seq=4096, hd=64`
+/// (1.1e9), and the wall-clock cost tracks it. This ceiling keeps the
+/// longest-sequence cell — the one the kernel's whole memory-amortization
+/// argument is about — while dropping the cells that cost minutes per row.
+/// Raise it deliberately, and expect the sweep to get slow.
 const MAX_SHAPE_COST: usize = 1_100_000_000;
 
 /// One shape point in the sweep.
@@ -186,10 +187,16 @@ fn mqa_gqa_vs_flash_bench() {
         budget = BUDGET_PER_MEASUREMENT
     );
 
-    // num_kv_heads=1 => true MQA (ratio 32). num_kv_heads=8 => the ratio-4
-    // floor of the kernel's selection heuristic. Both use num_heads=32.
-    let kv_configs: [(&str, usize, usize); 2] =
-        [("mqa(kv=1,ratio=32)", 32, 1), ("gqa(kv=8,ratio=4)", 32, 8)];
+    // num_kv_heads=1 => true MQA (ratio 32). The kernel has no ratio floor —
+    // it is measured to win a small, flat margin at every ratio — so this
+    // matrix also covers ratio 2 (kv=16) and ratio 1 (kv=32, plain MHA
+    // through the dedicated kernel). All use num_heads=32.
+    let kv_configs: [(&str, usize, usize); 4] = [
+        ("mqa(kv=1,ratio=32)", 32, 1),
+        ("gqa(kv=8,ratio=4)", 32, 8),
+        ("gqa(kv=16,ratio=2)", 32, 16),
+        ("mha(kv=32,ratio=1)", 32, 32),
+    ];
     let head_dims = [64usize, 128usize];
     // Short sequence vs long: the amortization argument for this kernel is
     // K/V memory traffic, which should matter more as seq grows.
@@ -202,7 +209,7 @@ fn mqa_gqa_vs_flash_bench() {
                 for &batch in &batches {
                     // Bound the sweep by predicted cost. Attention backward is
                     // O(batch * seq^2 * head_dim), and across this matrix that spans
-                    // ~3 orders of magnitude: ~120 ms at the small end, ~60 s at
+                    // ~3 orders of magnitude between the small end and
                     // b=8/seq=4096. The expensive cells cost minutes per row even at
                     // MIN_ITERS and add no signal the cheaper ones do not already
                     // carry, so skip them LOUDLY rather than pretending the matrix
@@ -219,7 +226,7 @@ fn mqa_gqa_vs_flash_bench() {
                     assert!(
                         should_use_mqa_gqa(num_heads, num_kv_heads, head_dim),
                         "shape matrix entry ({num_heads}/{num_kv_heads}, hd={head_dim}) is \
-                         outside the kernel's own selection heuristic — fix the matrix, not \
+                         outside the kernel's own capability gate — fix the matrix, not \
                          the assertion"
                     );
 

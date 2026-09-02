@@ -156,15 +156,40 @@ pub(super) fn mqa_bwd_block_config(head_dim: usize) -> Result<(usize, usize, boo
     })
 }
 
-/// Returns true if the GQA ratio warrants using dedicated MQA/GQA kernels.
+/// Returns true if the dedicated MQA/GQA kernels are CAPABLE of this shape.
 ///
-/// Heuristic: use dedicated kernels when:
-/// - num_heads / num_kv_heads >= 4 (extreme GQA ratio)
-/// - head_dim is 32, 64, or 128 (supported by MQA/GQA kernels)
+/// Both conditions below are capability limits — "the kernel cannot correctly
+/// or completely handle this shape" — not a performance judgment call:
+///
+/// - `head_dim ∈ {32, 64, 128}`: the exact template set `.cu` instantiates.
+///   See [`mqa_fwd_block_config_large`] / [`mqa_fwd_block_config_small`] in
+///   this file, which mirror those instantiations. Any other head_dim has no
+///   kernel symbol to call.
+/// - `num_heads.is_multiple_of(num_kv_heads)`: the kernel maps
+///   `kv_head_idx = q_head_idx / (num_heads / num_kv_heads)`. When that
+///   division isn't exact, the mapping reads past the end of the KV heads.
+///   Both call sites in `flash.rs` already run `flash_utils::validate_qkv`
+///   first, which rejects a non-divisible pair before this gate runs — the
+///   check here is a second, cheap guard for any other caller of this public
+///   function.
+///
+/// There used to be a third condition, `num_heads / num_kv_heads >= 4`: a
+/// performance guess from the original skeleton, gating out shapes the kernel
+/// handles correctly, on the theory that the dedicated kernel only paid off
+/// at extreme GQA ratios. Measurement (F32, causal, batch 1, head_dim
+/// 32/64/128, seq 512/4096, ratios 1 through 32) found no crossover — the
+/// dedicated kernel wins a small, flat margin at every ratio, MHA (ratio 1)
+/// included, with no ratio dependence. boostr is a library: the automatic
+/// route is a default, and the default is the measured-best choice, not a
+/// guessed threshold — so this condition is gone. Capability, not performance
+/// policy, is the only thing that should gate this function; do not re-add a
+/// ratio floor without a new measurement showing an actual crossover.
+///
+/// Gates PREFILL only: both call sites in `flash.rs` route `seq_len_q == 1` to
+/// the decode path before reaching this check.
 pub fn should_use_mqa_gqa(num_heads: usize, num_kv_heads: usize, head_dim: usize) -> bool {
     if num_kv_heads == 0 {
         return false;
     }
-    let ratio = num_heads / num_kv_heads;
-    ratio >= 4 && matches!(head_dim, 32 | 64 | 128)
+    num_heads.is_multiple_of(num_kv_heads) && matches!(head_dim, 32 | 64 | 128)
 }

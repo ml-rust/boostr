@@ -1,7 +1,9 @@
 //! MQA/GQA dedicated attention CUDA forward launcher
 //!
-//! Optimized kernel for extreme GQA ratios (num_kv_heads=1 for MQA).
-//! For moderate ratios, the standard flash_v2 with num_kv_heads is used instead.
+//! Used at every GQA ratio the kernel is capable of (see
+//! [`super::block_config::should_use_mqa_gqa`] for the capability gate),
+//! from true MQA (num_kv_heads=1) through plain MHA (ratio 1). flash_v2 is
+//! the fallback only for shapes this kernel cannot handle.
 //!
 //! Kernel: mqa_gqa.cu
 
@@ -17,7 +19,7 @@ use super::super::flash_utils::{compute_smem, set_smem_attribute};
 use super::block_config::mqa_fwd_block_config;
 use crate::ops::cuda::kernels::{self, MQA_GQA_MODULE};
 
-/// MQA/GQA forward pass — dedicated kernel for extreme GQA ratios.
+/// MQA/GQA forward pass — dedicated kernel, used at every capable ratio.
 #[allow(clippy::too_many_arguments)]
 pub fn mqa_gqa_fwd(
     client: &CudaClient,

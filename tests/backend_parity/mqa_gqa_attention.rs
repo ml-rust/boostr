@@ -218,6 +218,46 @@ fn mqa_gqa_fwd_gqa_ratio4_hd64_causal_parity() {
     );
 }
 
+/// Ratio 2 (4 query heads per 2 KV heads) at head_dim 32. Newly reachable now
+/// that the removed `ratio >= 4` floor no longer excludes it.
+#[test]
+fn mqa_gqa_fwd_gqa_ratio2_hd32_causal_parity() {
+    run_fwd_case(
+        Case {
+            label: "fwd gqa 8/4 hd32 causal",
+            batch: 2,
+            num_heads: 8,
+            num_kv_heads: 4,
+            seq_q: 16,
+            seq_k: 16,
+            head_dim: 32,
+            causal: true,
+        },
+        TestDType::F32,
+    );
+}
+
+/// Ratio 1 — plain MHA routed through the dedicated MQA/GQA kernel. This is
+/// the highest-risk newly-reachable case: `kv_head_idx = q_head_idx / 1 =
+/// q_head_idx`, so every query head maps to its own, distinct KV head, unlike
+/// every other case in this file where several query heads share one.
+#[test]
+fn mqa_gqa_fwd_mha_ratio1_hd64_causal_parity() {
+    run_fwd_case(
+        Case {
+            label: "fwd mha 8/8 (ratio 1) hd64 causal",
+            batch: 2,
+            num_heads: 8,
+            num_kv_heads: 8,
+            seq_q: 16,
+            seq_k: 16,
+            head_dim: 64,
+            causal: true,
+        },
+        TestDType::F32,
+    );
+}
+
 /// `seq_len_q != seq_len_k`, non-causal. `seq_k = 37` is not a multiple of any
 /// BLOCK_N the launcher can pick (128/64/32), so the last K tile is a partial
 /// tail: a kernel that read a full BLOCK_N tile would pull garbage past
@@ -482,6 +522,48 @@ fn mqa_gqa_bwd_gqa_ratio4_hd64_causal_parity() {
     );
 }
 
+/// Ratio 2 backward at head_dim 32. Newly reachable now that the removed
+/// `ratio >= 4` floor no longer excludes it.
+#[test]
+fn mqa_gqa_bwd_gqa_ratio2_hd32_causal_parity() {
+    run_bwd_case(
+        Case {
+            label: "bwd gqa 8/4 hd32 causal",
+            batch: 2,
+            num_heads: 8,
+            num_kv_heads: 4,
+            seq_q: 16,
+            seq_k: 16,
+            head_dim: 32,
+            causal: true,
+        },
+        TestDType::F32,
+    );
+}
+
+/// Ratio 1 — plain MHA backward through the dedicated MQA/GQA kernel. Highest
+/// risk case for dK/dV: with one query head per KV head, atomicAdd accumulates
+/// only ITS OWN head's contribution, so a kernel that assumed multiple heads
+/// always share a KV head (and, say, skipped the atomic in favor of a plain
+/// write on the theory that "there's always accumulation to do here") would
+/// still pass every other case in this file and fail only here.
+#[test]
+fn mqa_gqa_bwd_mha_ratio1_hd64_causal_parity() {
+    run_bwd_case(
+        Case {
+            label: "bwd mha 8/8 (ratio 1) hd64 causal",
+            batch: 2,
+            num_heads: 8,
+            num_kv_heads: 8,
+            seq_q: 16,
+            seq_k: 16,
+            head_dim: 64,
+            causal: true,
+        },
+        TestDType::F32,
+    );
+}
+
 /// Ragged non-causal backward. dK/dV cover 37 key rows while dQ covers 5 —
 /// the out-of-bounds dK/dV write class shows up here, because the tail K tile
 /// is partial and the kernel indexes dK/dV by `k_start + k_row`.
@@ -558,11 +640,11 @@ fn mqa_gqa_bwd_mqa_hd64_causal_f16_parity() {
 }
 
 // ============================================================================
-// Dispatch heuristic
+// Dispatch capability gate
 // ============================================================================
 
 #[test]
-fn should_use_mqa_gqa_matches_documented_heuristic() {
+fn should_use_mqa_gqa_matches_documented_gate() {
     run_should_use_case();
 }
 
@@ -996,7 +1078,8 @@ fn run_causal_first_row_case() {
 fn run_should_use_case() {
     use boostr::ops::cuda::attention::mqa_gqa::should_use_mqa_gqa;
 
-    // Documented heuristic: ratio >= 4 AND head_dim in {32, 64, 128}.
+    // Capability-only gate: head_dim in {32, 64, 128} AND num_heads divisible
+    // by num_kv_heads. No ratio floor — the kernel is used whenever capable.
     assert!(should_use_mqa_gqa(8, 1, 32), "MQA at head_dim 32 qualifies");
     assert!(
         should_use_mqa_gqa(8, 2, 64),
@@ -1007,8 +1090,12 @@ fn run_should_use_case() {
         "ratio 4 at head_dim 128 qualifies"
     );
     assert!(
-        !should_use_mqa_gqa(8, 4, 64),
-        "ratio 2 is below the threshold and must fall back to flash_v2"
+        should_use_mqa_gqa(8, 4, 64),
+        "ratio 2 has no capability limit and must qualify (no ratio floor)"
+    );
+    assert!(
+        should_use_mqa_gqa(8, 8, 64),
+        "ratio 1 (plain MHA) has no capability limit and must qualify"
     );
     assert!(
         !should_use_mqa_gqa(8, 1, 96),
@@ -1018,12 +1105,17 @@ fn run_should_use_case() {
         !should_use_mqa_gqa(8, 0, 64),
         "num_kv_heads = 0 must not divide by zero"
     );
+    assert!(
+        !should_use_mqa_gqa(9, 2, 64),
+        "num_heads=9 is not divisible by num_kv_heads=2 (ratio 4 would floor to 4, but q_head 8 \
+         would map past the last KV head) — must fall back to flash_v2"
+    );
 }
 
 #[cfg(not(feature = "cuda"))]
 fn run_should_use_case() {
     eprintln!(
-        "SKIPPED: should_use_mqa_gqa heuristic — boostr built without the `cuda` feature; \
-         the function is gated behind it."
+        "SKIPPED: should_use_mqa_gqa capability gate — boostr built without the `cuda` \
+         feature; the function is gated behind it."
     );
 }

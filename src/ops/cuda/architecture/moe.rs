@@ -245,11 +245,11 @@ fn launch_grouped_gemm(
     let out_dim = ew_shape[2];
     let device = permuted_tokens.device();
 
-    // F32 goes to numr's grouped matmul, which wraps the same compile-time
-    // tiled, register-blocked GEMM core as the dense path. boostr's own kernel
-    // is a plain 32x32 tile with one accumulator per thread and stays only for
-    // the half dtypes, which numr's F32 core does not cover yet.
-    if dtype == DType::F32 {
+    // numr's grouped matmul wraps the same compile-time tiled, register-blocked
+    // GEMM core as the dense path, and accumulates in F32 for every storage
+    // dtype. boostr's own kernel is a plain 32x32 tile with one accumulator per
+    // thread; nothing routed here should reach it.
+    if matches!(dtype, DType::F32 | DType::F16 | DType::BF16) {
         let act = match activation {
             MoEActivation::None => GemmActivation::None,
             MoEActivation::SiLU => GemmActivation::SiLU,

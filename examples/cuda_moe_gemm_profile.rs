@@ -38,35 +38,36 @@ fn main() {
         (32usize, 2048usize, 1024usize, 1024usize),
     ];
 
-    for &(num_experts, total_tokens, in_dim, out_dim) in &cases {
-        let tokens = client.rand(&[total_tokens, in_dim], DType::F32).unwrap();
-        let weights = client
-            .rand(&[num_experts, in_dim, out_dim], DType::F32)
-            .unwrap();
+    // F16 is what serving uses; sweeping both shows each reaching the same core.
+    for &dtype in &[DType::F32, DType::F16] {
+        for &(num_experts, total_tokens, in_dim, out_dim) in &cases {
+            let tokens = client.rand(&[total_tokens, in_dim], dtype).unwrap();
+            let weights = client.rand(&[num_experts, in_dim, out_dim], dtype).unwrap();
 
-        // Even split, so every expert owns the same slice and the useful
-        // fraction of the launched grid is exactly 1 / num_experts.
-        let per_expert = total_tokens / num_experts;
-        let offsets: Vec<i32> = (0..=num_experts).map(|e| (e * per_expert) as i32).collect();
-        let expert_offsets = Tensor::from_slice(&offsets, &[num_experts + 1], &device).unwrap();
+            // Even split, so every expert owns the same slice and the useful
+            // fraction of the launched grid is exactly 1 / num_experts.
+            let per_expert = total_tokens / num_experts;
+            let offsets: Vec<i32> = (0..=num_experts).map(|e| (e * per_expert) as i32).collect();
+            let expert_offsets = Tensor::from_slice(&offsets, &[num_experts + 1], &device).unwrap();
 
-        for _ in 0..ITERS {
-            let out = client
-                .moe_grouped_gemm(&tokens, &weights, &expert_offsets)
-                .unwrap();
-            std::hint::black_box(&out);
+            for _ in 0..ITERS {
+                let out = client
+                    .moe_grouped_gemm(&tokens, &weights, &expert_offsets)
+                    .unwrap();
+                std::hint::black_box(&out);
+            }
+            client.synchronize();
+
+            // Reference ceiling: one dense matmul of the same total FLOPs, through
+            // numr's tuned kernel. An even split means the experts together do
+            // exactly `total_tokens x in_dim x out_dim`, so the two are comparable
+            // and the gap is the grouped kernel's own quality, not its shape.
+            let dense_b = client.rand(&[in_dim, out_dim], dtype).unwrap();
+            for _ in 0..ITERS {
+                let out = client.matmul(&tokens, &dense_b).unwrap();
+                std::hint::black_box(&out);
+            }
+            client.synchronize();
         }
-        client.synchronize();
-
-        // Reference ceiling: one dense matmul of the same total FLOPs, through
-        // numr's tuned kernel. An even split means the experts together do
-        // exactly `total_tokens x in_dim x out_dim`, so the two are comparable
-        // and the gap is the grouped kernel's own quality, not its shape.
-        let dense_b = client.rand(&[in_dim, out_dim], DType::F32).unwrap();
-        for _ in 0..ITERS {
-            let out = client.matmul(&tokens, &dense_b).unwrap();
-            std::hint::black_box(&out);
-        }
-        client.synchronize();
     }
 }

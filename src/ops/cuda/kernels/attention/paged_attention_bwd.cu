@@ -9,6 +9,15 @@
 // - Block table maps logical positions to physical block addresses
 // - Gradients dK and dV are accumulated using atomics for shared blocks
 //
+// dK/dV ownership: the tile loop runs two phases. The dQ phase gives each
+// thread one Q row; the dK/dV phase transposes that and gives each thread one
+// K row of the tile, summing over the tile's Q rows into FP32 registers and
+// emitting ONE atomic per (k_row, head_dim element). The scores are recomputed
+// in the second phase rather than staged in shared memory, so the shared-memory
+// layout is unchanged — the same trade `mqa_gqa_bwd.cu` makes. Atomics cannot
+// be dropped entirely: under causal masking and GQA a paged K/V slot receives
+// contributions from several query blocks and several query heads.
+//
 // Causal convention: ABSOLUTE (bottom-right) alignment. The block table indexes
 // keys by their absolute position in the sequence, and the seq_len_q query rows
 // are the LAST positions of that seq_len_k context, so query row r sits at
@@ -185,30 +194,31 @@ __device__ void paged_flash_attention_bwd_fp32_impl(
     }
     __syncthreads();
 
-    // Each thread handles one Q row
+    // Each thread owns one Q row for the dQ phase.
     const int q_row = tid;
     const bool is_valid_thread = (q_row < q_tile_size);
 
-    // Get logsumexp for this row
-    float lse_val = 0.0f;
-    if (is_valid_thread) {
-        lse_val = L_base[q_start + q_row];
+    // D = rowsum(dO * O) for softmax backward, plus the forward logsumexp.
+    // Staged in shared memory because the dK/dV phase below transposes
+    // ownership to K rows and needs both for every Q row of the tile.
+    __shared__ float D_smem[BLOCK_M];
+    __shared__ float lse_smem[BLOCK_M];
+    for (int row = tid; row < q_tile_size; row += blockDim.x) {
+        float d_acc = 0.0f;
+        #pragma unroll
+        for (int d = 0; d < HEAD_DIM; ++d) {
+            d_acc += dO_smem[row * HEAD_DIM + d] * O_smem[row * HEAD_DIM + d];
+        }
+        D_smem[row] = d_acc;
+        lse_smem[row] = L_base[q_start + row];
     }
+    __syncthreads();
 
     // Per-thread dQ accumulator
     float dQ_local[HEAD_DIM];
     #pragma unroll
     for (int d = 0; d < HEAD_DIM; ++d) {
         dQ_local[d] = 0.0f;
-    }
-
-    // Compute D = rowsum(dO * O) for softmax backward
-    float D_local = 0.0f;
-    if (is_valid_thread) {
-        #pragma unroll
-        for (int d = 0; d < HEAD_DIM; ++d) {
-            D_local += dO_smem[q_row * HEAD_DIM + d] * O_smem[q_row * HEAD_DIM + d];
-        }
     }
 
     // Iterate over K/V tiles
@@ -234,8 +244,11 @@ __device__ void paged_flash_attention_bwd_fp32_impl(
         }
         __syncthreads();
 
+        // dQ phase: this thread owns Q row `q_row` and sweeps the K tile.
         if (is_valid_thread) {
-            // Compute attention scores and gradients for this tile
+            const float lse_val = lse_smem[q_row];
+            const float D_local = D_smem[q_row];
+
             for (int j = 0; j < k_tile_size; ++j) {
                 const int k_idx = k_start + j;
                 if (causal && (key_offset + q_start + q_row) < k_idx) continue;
@@ -266,19 +279,62 @@ __device__ void paged_flash_attention_bwd_fp32_impl(
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     dQ_local[d] += dS * K_smem[j * HEAD_DIM + d];
                 }
+            }
+        }
 
-                // Accumulate dK and dV using atomics (paged blocks may be shared)
-                const int kv_offset = get_paged_kv_offset(
-                    block_table, batch_idx, max_num_blocks, k_idx, block_size, num_kv_heads, kv_head_idx, HEAD_DIM
-                );
+        // dK/dV phase: ownership transposes — this thread owns K row `k_row`
+        // and sweeps the Q tile, accumulating in FP32 registers. The scores are
+        // recomputed rather than staged in shared memory (same trade as
+        // `mqa_gqa_bwd.cu`), so the shared-memory layout is unchanged. One
+        // atomic per (k_row, d) replaces one per (q_row, k_row, d).
+        for (int k_row = tid; k_row < k_tile_size; k_row += blockDim.x) {
+            const int k_idx = k_start + k_row;
+
+            float dK_local[HEAD_DIM];
+            float dV_local[HEAD_DIM];
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dK_local[d] = 0.0f;
+                dV_local[d] = 0.0f;
+            }
+
+            for (int qr = 0; qr < q_tile_size; ++qr) {
+                if (causal && (key_offset + q_start + qr) < k_idx) continue;
+
+                float score = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    score += Q_smem[qr * HEAD_DIM + d] * K_smem[k_row * HEAD_DIM + d];
+                }
+                score *= scale;
+
+                float p = __expf(score - lse_smem[qr]);
+
+                float dP = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    dP += dO_smem[qr * HEAD_DIM + d] * V_smem[k_row * HEAD_DIM + d];
+                }
+
+                float dS = p * (dP - D_smem[qr]) * scale;
 
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    // dK += dS * Q
-                    atomicAdd(&dK_blocks[kv_offset + d], dS * Q_smem[q_row * HEAD_DIM + d]);
-                    // dV += P * dO
-                    atomicAdd(&dV_blocks[kv_offset + d], p * dO_smem[q_row * HEAD_DIM + d]);
+                    dK_local[d] += dS * Q_smem[qr * HEAD_DIM + d];
+                    dV_local[d] += p * dO_smem[qr * HEAD_DIM + d];
                 }
+            }
+
+            // Paged blocks may be shared across query blocks and query heads,
+            // so the single write per element still has to be atomic.
+            const int kv_offset = get_paged_kv_offset(
+                block_table, batch_idx, max_num_blocks, k_idx, block_size, num_kv_heads, kv_head_idx, HEAD_DIM
+            );
+
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                atomicAdd(&dK_blocks[kv_offset + d], dK_local[d]);
+                atomicAdd(&dV_blocks[kv_offset + d], dV_local[d]);
             }
         }
         __syncthreads();
@@ -402,25 +458,26 @@ __device__ void paged_flash_attention_bwd_fp16_impl(
     const int q_row = tid;
     const bool is_valid_thread = (q_row < q_tile_size);
 
-    float lse_val = 0.0f;
-    if (is_valid_thread) {
-        lse_val = L_base[q_start + q_row];
+    // D = rowsum(dO * O) and the forward logsumexp, staged in shared memory for
+    // the transposed dK/dV phase. See the FP32 impl for the full rationale.
+    __shared__ float D_smem[BLOCK_M];
+    __shared__ float lse_smem[BLOCK_M];
+    for (int row = tid; row < q_tile_size; row += blockDim.x) {
+        float d_acc = 0.0f;
+        #pragma unroll
+        for (int d = 0; d < HEAD_DIM; ++d) {
+            d_acc += __half2float(dO_smem[row * HEAD_DIM + d]) *
+                     __half2float(O_smem[row * HEAD_DIM + d]);
+        }
+        D_smem[row] = d_acc;
+        lse_smem[row] = L_base[q_start + row];
     }
+    __syncthreads();
 
     float dQ_local[HEAD_DIM];
     #pragma unroll
     for (int d = 0; d < HEAD_DIM; ++d) {
         dQ_local[d] = 0.0f;
-    }
-
-    // Compute D = rowsum(dO * O)
-    float D_local = 0.0f;
-    if (is_valid_thread) {
-        #pragma unroll
-        for (int d = 0; d < HEAD_DIM; ++d) {
-            D_local += __half2float(dO_smem[q_row * HEAD_DIM + d]) *
-                       __half2float(O_smem[q_row * HEAD_DIM + d]);
-        }
     }
 
     const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
@@ -445,7 +502,11 @@ __device__ void paged_flash_attention_bwd_fp16_impl(
         }
         __syncthreads();
 
+        // dQ phase: this thread owns Q row `q_row` and sweeps the K tile.
         if (is_valid_thread) {
+            const float lse_val = lse_smem[q_row];
+            const float D_local = D_smem[q_row];
+
             for (int j = 0; j < k_tile_size; ++j) {
                 const int k_idx = k_start + j;
                 if (causal && (key_offset + q_start + q_row) < k_idx) continue;
@@ -473,18 +534,62 @@ __device__ void paged_flash_attention_bwd_fp16_impl(
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     dQ_local[d] += dS * __half2float(K_smem[j * HEAD_DIM + d]);
                 }
+            }
+        }
 
-                const int kv_offset = get_paged_kv_offset(
-                    block_table, batch_idx, max_num_blocks, k_idx, block_size, num_kv_heads, kv_head_idx, HEAD_DIM
-                );
+        // dK/dV phase: ownership transposes — this thread owns K row `k_row`
+        // and sweeps the Q tile, accumulating in FP32 registers so the half
+        // storage is rounded once, at the single atomic per (k_row, d).
+        for (int k_row = tid; k_row < k_tile_size; k_row += blockDim.x) {
+            const int k_idx = k_start + k_row;
+
+            float dK_local[HEAD_DIM];
+            float dV_local[HEAD_DIM];
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dK_local[d] = 0.0f;
+                dV_local[d] = 0.0f;
+            }
+
+            for (int qr = 0; qr < q_tile_size; ++qr) {
+                if (causal && (key_offset + q_start + qr) < k_idx) continue;
+
+                float score = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    score += __half2float(Q_smem[qr * HEAD_DIM + d]) *
+                             __half2float(K_smem[k_row * HEAD_DIM + d]);
+                }
+                score *= scale;
+
+                float p = __expf(score - lse_smem[qr]);
+
+                float dP = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    dP += __half2float(dO_smem[qr * HEAD_DIM + d]) *
+                          __half2float(V_smem[k_row * HEAD_DIM + d]);
+                }
+
+                float dS = p * (dP - D_smem[qr]) * scale;
 
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    atomicAddHalf(&dK_blocks[kv_offset + d],
-                                  dS * __half2float(Q_smem[q_row * HEAD_DIM + d]));
-                    atomicAddHalf(&dV_blocks[kv_offset + d],
-                                  p * __half2float(dO_smem[q_row * HEAD_DIM + d]));
+                    dK_local[d] += dS * __half2float(Q_smem[qr * HEAD_DIM + d]);
+                    dV_local[d] += p * __half2float(dO_smem[qr * HEAD_DIM + d]);
                 }
+            }
+
+            // Paged blocks may be shared across query blocks and query heads,
+            // so the single write per element still has to be atomic.
+            const int kv_offset = get_paged_kv_offset(
+                block_table, batch_idx, max_num_blocks, k_idx, block_size, num_kv_heads, kv_head_idx, HEAD_DIM
+            );
+
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                atomicAddHalf(&dK_blocks[kv_offset + d], dK_local[d]);
+                atomicAddHalf(&dV_blocks[kv_offset + d], dV_local[d]);
             }
         }
         __syncthreads();
@@ -603,25 +708,26 @@ __device__ void paged_flash_attention_bwd_bf16_impl(
     const int q_row = tid;
     const bool is_valid_thread = (q_row < q_tile_size);
 
-    float lse_val = 0.0f;
-    if (is_valid_thread) {
-        lse_val = L_base[q_start + q_row];
+    // D = rowsum(dO * O) and the forward logsumexp, staged in shared memory for
+    // the transposed dK/dV phase. See the FP32 impl for the full rationale.
+    __shared__ float D_smem[BLOCK_M];
+    __shared__ float lse_smem[BLOCK_M];
+    for (int row = tid; row < q_tile_size; row += blockDim.x) {
+        float d_acc = 0.0f;
+        #pragma unroll
+        for (int d = 0; d < HEAD_DIM; ++d) {
+            d_acc += __bfloat162float(dO_smem[row * HEAD_DIM + d]) *
+                     __bfloat162float(O_smem[row * HEAD_DIM + d]);
+        }
+        D_smem[row] = d_acc;
+        lse_smem[row] = L_base[q_start + row];
     }
+    __syncthreads();
 
     float dQ_local[HEAD_DIM];
     #pragma unroll
     for (int d = 0; d < HEAD_DIM; ++d) {
         dQ_local[d] = 0.0f;
-    }
-
-    // Compute D = rowsum(dO * O)
-    float D_local = 0.0f;
-    if (is_valid_thread) {
-        #pragma unroll
-        for (int d = 0; d < HEAD_DIM; ++d) {
-            D_local += __bfloat162float(dO_smem[q_row * HEAD_DIM + d]) *
-                       __bfloat162float(O_smem[q_row * HEAD_DIM + d]);
-        }
     }
 
     const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
@@ -646,7 +752,11 @@ __device__ void paged_flash_attention_bwd_bf16_impl(
         }
         __syncthreads();
 
+        // dQ phase: this thread owns Q row `q_row` and sweeps the K tile.
         if (is_valid_thread) {
+            const float lse_val = lse_smem[q_row];
+            const float D_local = D_smem[q_row];
+
             for (int j = 0; j < k_tile_size; ++j) {
                 const int k_idx = k_start + j;
                 if (causal && (key_offset + q_start + q_row) < k_idx) continue;
@@ -674,18 +784,62 @@ __device__ void paged_flash_attention_bwd_bf16_impl(
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     dQ_local[d] += dS * __bfloat162float(K_smem[j * HEAD_DIM + d]);
                 }
+            }
+        }
 
-                const int kv_offset = get_paged_kv_offset(
-                    block_table, batch_idx, max_num_blocks, k_idx, block_size, num_kv_heads, kv_head_idx, HEAD_DIM
-                );
+        // dK/dV phase: ownership transposes — this thread owns K row `k_row`
+        // and sweeps the Q tile, accumulating in FP32 registers so the bf16
+        // storage is rounded once, at the single atomic per (k_row, d).
+        for (int k_row = tid; k_row < k_tile_size; k_row += blockDim.x) {
+            const int k_idx = k_start + k_row;
+
+            float dK_local[HEAD_DIM];
+            float dV_local[HEAD_DIM];
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dK_local[d] = 0.0f;
+                dV_local[d] = 0.0f;
+            }
+
+            for (int qr = 0; qr < q_tile_size; ++qr) {
+                if (causal && (key_offset + q_start + qr) < k_idx) continue;
+
+                float score = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    score += __bfloat162float(Q_smem[qr * HEAD_DIM + d]) *
+                             __bfloat162float(K_smem[k_row * HEAD_DIM + d]);
+                }
+                score *= scale;
+
+                float p = __expf(score - lse_smem[qr]);
+
+                float dP = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    dP += __bfloat162float(dO_smem[qr * HEAD_DIM + d]) *
+                          __bfloat162float(V_smem[k_row * HEAD_DIM + d]);
+                }
+
+                float dS = p * (dP - D_smem[qr]) * scale;
 
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    atomicAddBF16(&dK_blocks[kv_offset + d],
-                                  dS * __bfloat162float(Q_smem[q_row * HEAD_DIM + d]));
-                    atomicAddBF16(&dV_blocks[kv_offset + d],
-                                  p * __bfloat162float(dO_smem[q_row * HEAD_DIM + d]));
+                    dK_local[d] += dS * __bfloat162float(Q_smem[qr * HEAD_DIM + d]);
+                    dV_local[d] += p * __bfloat162float(dO_smem[qr * HEAD_DIM + d]);
                 }
+            }
+
+            // Paged blocks may be shared across query blocks and query heads,
+            // so the single write per element still has to be atomic.
+            const int kv_offset = get_paged_kv_offset(
+                block_table, batch_idx, max_num_blocks, k_idx, block_size, num_kv_heads, kv_head_idx, HEAD_DIM
+            );
+
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                atomicAddBF16(&dK_blocks[kv_offset + d], dK_local[d]);
+                atomicAddBF16(&dV_blocks[kv_offset + d], dV_local[d]);
             }
         }
         __syncthreads();
@@ -737,15 +891,19 @@ extern "C" __global__ void paged_flash_attention_bwd_128_bf16(
 // ============================================================================
 // Shared memory calculation for backward:
 //   Q_smem + K_smem + V_smem + dO_smem + O_smem = (3*BLOCK_M + 2*BLOCK_N) * HEAD_DIM * sizeof(dtype)
+// That is the DYNAMIC allocation, sized by `bwd_smem_size` in
+// `paged_attention_bwd_block_config.rs`. Each impl also declares two STATIC
+// shared arrays, D_smem and lse_smem, adding 2 * BLOCK_M * 4 bytes; the totals
+// below include that term.
 // For 48KB (49152 bytes) limit:
 //
 // FP32 (4 bytes):
-//   head_dim=64:  BLOCK_M=32, BLOCK_N=32 -> (96+64)*64*4 = 40960 bytes ✓
-//   head_dim=128: BLOCK_M=16, BLOCK_N=16 -> (48+32)*128*4 = 40960 bytes ✓
+//   head_dim=64:  BLOCK_M=32, BLOCK_N=32 -> (96+64)*64*4 = 40960 + 256 = 41216 bytes ✓
+//   head_dim=128: BLOCK_M=16, BLOCK_N=16 -> (48+32)*128*4 = 40960 + 128 = 41088 bytes ✓
 //
 // FP16/BF16 (2 bytes):
-//   head_dim=64:  BLOCK_M=64, BLOCK_N=32 -> (192+64)*64*2 = 32768 bytes ✓
-//   head_dim=128: BLOCK_M=32, BLOCK_N=32 -> (96+64)*128*2 = 40960 bytes ✓
+//   head_dim=64:  BLOCK_M=64, BLOCK_N=32 -> (192+64)*64*2 = 32768 + 512 = 33280 bytes ✓
+//   head_dim=128: BLOCK_M=32, BLOCK_N=32 -> (96+64)*128*2 = 40960 + 256 = 41216 bytes ✓
 
 // FP32 Small Variants
 extern "C" __global__ void paged_flash_attention_bwd_64_fp32_small(
@@ -756,7 +914,7 @@ extern "C" __global__ void paged_flash_attention_bwd_64_fp32_small(
     int batch_size, int num_heads, int num_kv_heads, int seq_len_q, int seq_len_k,
     int max_num_blocks, int block_size, float scale, int causal
 ) {
-    // BLOCK_M=32, BLOCK_N=32: (3*32 + 2*32) * 64 * 4 = 40960 bytes
+    // BLOCK_M=32, BLOCK_N=32: (3*32 + 2*32) * 64 * 4 = 40960 dynamic + 256 static
     paged_flash_attention_bwd_fp32_impl<64, 32, 32>(
         Q, K_blocks, V_blocks, O, dO, L, block_table,
         dQ, dK_blocks, dV_blocks,
@@ -773,7 +931,7 @@ extern "C" __global__ void paged_flash_attention_bwd_128_fp32_small(
     int batch_size, int num_heads, int num_kv_heads, int seq_len_q, int seq_len_k,
     int max_num_blocks, int block_size, float scale, int causal
 ) {
-    // BLOCK_M=16, BLOCK_N=16: (3*16 + 2*16) * 128 * 4 = 40960 bytes
+    // BLOCK_M=16, BLOCK_N=16: (3*16 + 2*16) * 128 * 4 = 40960 dynamic + 128 static
     paged_flash_attention_bwd_fp32_impl<128, 16, 16>(
         Q, K_blocks, V_blocks, O, dO, L, block_table,
         dQ, dK_blocks, dV_blocks,
@@ -791,7 +949,7 @@ extern "C" __global__ void paged_flash_attention_bwd_64_fp16_small(
     int batch_size, int num_heads, int num_kv_heads, int seq_len_q, int seq_len_k,
     int max_num_blocks, int block_size, float scale, int causal
 ) {
-    // BLOCK_M=64, BLOCK_N=32: (3*64 + 2*32) * 64 * 2 = 32768 bytes
+    // BLOCK_M=64, BLOCK_N=32: (3*64 + 2*32) * 64 * 2 = 32768 dynamic + 512 static
     paged_flash_attention_bwd_fp16_impl<64, 64, 32>(
         Q, K_blocks, V_blocks, O, dO, L, block_table,
         dQ, dK_blocks, dV_blocks,
@@ -808,7 +966,7 @@ extern "C" __global__ void paged_flash_attention_bwd_128_fp16_small(
     int batch_size, int num_heads, int num_kv_heads, int seq_len_q, int seq_len_k,
     int max_num_blocks, int block_size, float scale, int causal
 ) {
-    // BLOCK_M=32, BLOCK_N=32: (3*32 + 2*32) * 128 * 2 = 40960 bytes
+    // BLOCK_M=32, BLOCK_N=32: (3*32 + 2*32) * 128 * 2 = 40960 dynamic + 256 static
     paged_flash_attention_bwd_fp16_impl<128, 32, 32>(
         Q, K_blocks, V_blocks, O, dO, L, block_table,
         dQ, dK_blocks, dV_blocks,
@@ -826,7 +984,7 @@ extern "C" __global__ void paged_flash_attention_bwd_64_bf16_small(
     int batch_size, int num_heads, int num_kv_heads, int seq_len_q, int seq_len_k,
     int max_num_blocks, int block_size, float scale, int causal
 ) {
-    // BLOCK_M=64, BLOCK_N=32: (3*64 + 2*32) * 64 * 2 = 32768 bytes
+    // BLOCK_M=64, BLOCK_N=32: (3*64 + 2*32) * 64 * 2 = 32768 dynamic + 512 static
     paged_flash_attention_bwd_bf16_impl<64, 64, 32>(
         Q, K_blocks, V_blocks, O, dO, L, block_table,
         dQ, dK_blocks, dV_blocks,
@@ -843,7 +1001,7 @@ extern "C" __global__ void paged_flash_attention_bwd_128_bf16_small(
     int batch_size, int num_heads, int num_kv_heads, int seq_len_q, int seq_len_k,
     int max_num_blocks, int block_size, float scale, int causal
 ) {
-    // BLOCK_M=32, BLOCK_N=32: (3*32 + 2*32) * 128 * 2 = 40960 bytes
+    // BLOCK_M=32, BLOCK_N=32: (3*32 + 2*32) * 128 * 2 = 40960 dynamic + 256 static
     paged_flash_attention_bwd_bf16_impl<128, 32, 32>(
         Q, K_blocks, V_blocks, O, dO, L, block_table,
         dQ, dK_blocks, dV_blocks,

@@ -195,7 +195,14 @@ fn test_paged_attention_bwd_parity() {
 /// positions of the `seq_len_k` context). `absolute = false` reproduces the
 /// legacy top-left rule, where `i` was taken as the position itself.
 ///
-/// Assumes `num_kv_heads == 1`, matching the CPU paged path.
+/// Assumes `num_kv_heads == 1`: the key/value lookup below has no `kv_head`
+/// term in `kv_off`, so it only ever reads the first (and only) KV head's
+/// slot in the cache. This is a property of THIS naive reference, not of the
+/// production CPU paged path — `gather_paged_kv`/`expand_kv_heads` in
+/// `src/ops/cpu/attention/paged_kv_layout.rs` handle arbitrary `num_kv_heads`
+/// correctly (that gather/expand/reduce/scatter grouping is exactly what a
+/// prior fix corrected). Every call site below passes `num_kv_heads = 1`, so
+/// the mismatch is latent, not exercised.
 #[allow(clippy::too_many_arguments)]
 fn paged_reference_fwd(
     q: &[f32],
@@ -549,20 +556,53 @@ fn from_paged_layout(
 
 /// CPU/CUDA parity for the paged backward with `num_kv_heads` KV heads.
 ///
-/// `head_dim` is 64: paged backward has no head_dim-32 kernel, and 64 is the
-/// smallest supported size — its small-block config needs 40KB of shared memory,
-/// which fits every card that runs these tests.
+/// `head_dim` must be 64 or 128: paged backward has no head_dim-32 kernel, and
+/// those are the two sizes its shared-memory block configs are compiled for.
 ///
 /// The reference is the CPU standard-attention backward over the equivalent
-/// CONTIGUOUS K/V, which supports GQA directly. The CPU paged path cannot serve
-/// as the reference: it gathers blocks as if `num_kv_heads == 1`.
+/// CONTIGUOUS K/V, which supports GQA directly.
+///
+/// The CPU paged path (`gather_paged_kv`/`expand_kv_heads`/`reduce_kv_heads`/
+/// `scatter_to_paged` in `src/ops/cpu/attention/paged_kv_layout.rs`) now
+/// handles arbitrary `num_kv_heads` correctly — a prior fix corrected the bug
+/// where it gathered blocks as if `num_kv_heads == 1`. It is still not reused
+/// as the reference here: it shares the same gather/scatter contract the CUDA
+/// paged kernel is being checked against, so a bug in that shared contract
+/// would cancel out. The flash-attention reference is independent of that
+/// contract, which is a stronger check.
+///
+/// `dtype` casts Q/K/V/dO to `F16`/`BF16` before the CUDA call and casts the
+/// results back to `F32` for comparison (`BF16`/`F16` require boostr's `f16`
+/// feature; the case is skipped and reported if it is off). `seq_len` is
+/// exposed because the backward atomicAdd defect (see `paged_bwd_tol` below)
+/// scales with how many query rows share a KV head over how many keys — a
+/// longer sequence makes it visible; the three existing `F32` call sites keep
+/// `seq_len = 8` unchanged so this stays a pure regression guard for them.
 #[cfg(feature = "cuda")]
-fn assert_paged_bwd_kv_parity(num_heads: usize, num_kv_heads: usize, label: &str) {
+#[allow(clippy::too_many_arguments)]
+fn assert_paged_bwd_kv_parity(
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    seq_len: usize,
+    dtype: numr::dtype::DType,
+    label: &str,
+) {
     use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
+    use numr::dtype::DType;
     use numr::tensor::Tensor;
 
+    if dtype != DType::F32 && !cfg!(feature = "f16") {
+        eprintln!(
+            "SKIPPED: {label} [{:?}] — boostr built without the `f16` feature, so \
+             {:?} tensors cannot be constructed",
+            dtype, dtype
+        );
+        return;
+    }
+
     let (cpu_client, cpu_device) = setup_cpu();
-    let (b, s, d) = (1usize, 8usize, 64usize);
+    let (b, s, d) = (1usize, seq_len, head_dim);
     let block_size = 4usize;
     let num_blocks = s / block_size;
     let bt_data: Vec<i32> = (0..num_blocks as i32).collect();
@@ -597,23 +637,39 @@ fn assert_paged_bwd_kv_parity(num_heads: usize, num_kv_heads: usize, label: &str
     let k_paged = to_paged_layout(&k.to_vec::<f32>(), num_kv_heads, s, d);
     let v_paged = to_paged_layout(&v.to_vec::<f32>(), num_kv_heads, s, d);
 
+    // n_contrib: retained at `seq_len * heads_per_kv` — see `paged_bwd_tol`'s
+    // doc for why this deliberately overstates the kernel's actual per-tile
+    // atomic count rather than being tightened to match it.
+    let heads_per_kv = num_heads / num_kv_heads;
+    let n_contrib = s * heads_per_kv;
+    let (dq_atol, dq_rtol) = paged_bwd_tol(dtype, None);
+    let (dkv_atol, dkv_rtol) = paged_bwd_tol(dtype, Some(n_contrib));
+
     with_cuda_backend(|cuda_client, cuda_device| {
-        let q_c =
-            Tensor::from_slice(&q.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device).unwrap();
-        let dout_c =
-            Tensor::from_slice(&dout.to_vec::<f32>(), &[b, num_heads, s, d], &cuda_device).unwrap();
-        let kb = Tensor::from_slice(
+        let q_c = cast_to_dtype(
+            &q.to_vec::<f32>(),
+            &[b, num_heads, s, d],
+            &cuda_device,
+            dtype,
+        );
+        let dout_c = cast_to_dtype(
+            &dout.to_vec::<f32>(),
+            &[b, num_heads, s, d],
+            &cuda_device,
+            dtype,
+        );
+        let kb = cast_to_dtype(
             &k_paged,
             &[num_blocks, block_size, num_kv_heads, d],
             &cuda_device,
-        )
-        .unwrap();
-        let vb = Tensor::from_slice(
+            dtype,
+        );
+        let vb = cast_to_dtype(
             &v_paged,
             &[num_blocks, block_size, num_kv_heads, d],
             &cuda_device,
-        )
-        .unwrap();
+            dtype,
+        );
         let bt = Tensor::from_slice(&bt_data, &[b, num_blocks], &cuda_device).unwrap();
 
         let (out_c, lse_c) = cuda_client
@@ -663,24 +719,271 @@ fn assert_paged_bwd_kv_parity(num_heads: usize, num_kv_heads: usize, label: &str
             label
         );
 
-        let dk_contig = from_paged_layout(&dk_c.to_vec::<f32>(), num_kv_heads, s, d);
-        let dv_contig = from_paged_layout(&dv_c.to_vec::<f32>(), num_kv_heads, s, d);
-        assert_parity_f32_relaxed(
-            &dq_c.to_vec::<f32>(),
+        let dk_contig = from_paged_layout(&read_back_f32(&dk_c), num_kv_heads, s, d);
+        let dv_contig = from_paged_layout(&read_back_f32(&dv_c), num_kv_heads, s, d);
+        // dQ accumulates in FP32 registers inside the kernel (only the final
+        // store rounds to `dtype`) — it should track the reference far more
+        // tightly than dK/dV, which round on every atomicAdd. That gap is
+        // the signature of the accumulation defect, not the input rounding.
+        let dq_norm = assert_paged_bwd_diff(
+            &read_back_f32(&dq_c),
             &cpu_dq_vec,
-            &format!("{} dQ CUDA vs CPU", label),
+            dq_atol,
+            dq_rtol,
+            &format!("{} dQ CUDA vs CPU [{:?}]", label, dtype),
+            "dQ",
+            dtype,
+            num_heads,
+            num_kv_heads,
+            d,
+            s,
         );
-        assert_parity_f32_relaxed(
+        let dk_norm = assert_paged_bwd_diff(
             &dk_contig,
             &cpu_dk_vec,
-            &format!("{} dK CUDA vs CPU", label),
+            dkv_atol,
+            dkv_rtol,
+            &format!("{} dK CUDA vs CPU [{:?}]", label, dtype),
+            "dK",
+            dtype,
+            num_heads,
+            num_kv_heads,
+            d,
+            s,
         );
-        assert_parity_f32_relaxed(
+        let dv_norm = assert_paged_bwd_diff(
             &dv_contig,
             &cpu_dv_vec,
-            &format!("{} dV CUDA vs CPU", label),
+            dkv_atol,
+            dkv_rtol,
+            &format!("{} dV CUDA vs CPU [{:?}]", label, dtype),
+            "dV",
+            dtype,
+            num_heads,
+            num_kv_heads,
+            d,
+            s,
         );
+
+        // ADDITIONAL guard, on top of the absolute tolerances above: dQ is
+        // the FP32-accumulated control (never touched by any half-storage
+        // accumulation, defect or fix), so its normalized error tracks pure
+        // input-quantization error only. dK/dV normalized error should sit
+        // within a fixed multiple of dQ's at the same shape and dtype — that
+        // RATIO, not the absolute tolerance (which stays wide enough to
+        // tolerate real cancellation, see `paged_bwd_tol`), is what actually
+        // detects a return to per-(q_row, k_idx, d) half accumulation:
+        // measured, that regression put dK/dV up to ~780x less accurate than
+        // dQ at the same shape; the current one-atomic-per-Q-block kernel
+        // measures 2.8x (F16) to 6.7x (BF16). 25x is chosen to give the
+        // current numbers real headroom (>3x above the worst measured 6.7x)
+        // while staying more than an order of magnitude below the pre-fix
+        // 780x, so ordinary kernel/compiler variation will not trip it but a
+        // real regression to per-element rounding will.
+        const DKV_TO_DQ_RATIO_LIMIT: f32 = 25.0;
+        for (name, norm) in [("dK", dk_norm), ("dV", dv_norm)] {
+            let ratio = norm / dq_norm;
+            assert!(
+                ratio <= DKV_TO_DQ_RATIO_LIMIT,
+                "{label} {name} CUDA vs CPU [{dtype:?}]: normalized error (max_abs_diff / \
+                 ref_rms) is {norm:.4e}, {ratio:.1}x dQ's {dq_norm:.4e} (limit \
+                 {DKV_TO_DQ_RATIO_LIMIT}x) — this most likely means {name}'s atomicAdd \
+                 accumulation regressed from one atomic per (k_idx, d) per Q-block back to \
+                 one atomic per (q_row, k_idx, d), rounding the running sum to `{dtype:?}` on \
+                 every contribution instead of once per tile"
+            );
+        }
     });
+}
+
+/// Casts a fixture built as `F32` (via `Tensor::from_slice`, since `half::f16`
+/// is not a numr `Element`) to the dtype under test.
+#[cfg(feature = "cuda")]
+fn cast_to_dtype(
+    data: &[f32],
+    shape: &[usize],
+    device: &numr::runtime::cuda::CudaDevice,
+    dtype: numr::dtype::DType,
+) -> numr::tensor::Tensor<numr::runtime::cuda::CudaRuntime> {
+    use numr::dtype::DType;
+    use numr::tensor::Tensor;
+    let t = Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(data, shape, device).unwrap();
+    if dtype == DType::F32 {
+        t
+    } else {
+        t.to_dtype(dtype).unwrap_or_else(|e| {
+            panic!("cast fixture to {dtype:?} failed: {e}");
+        })
+    }
+}
+
+/// Reads a CUDA result tensor back to `Vec<f32>`, casting through `F32` first
+/// when it is stored as `F16`/`BF16`.
+#[cfg(feature = "cuda")]
+fn read_back_f32(t: &numr::tensor::Tensor<numr::runtime::cuda::CudaRuntime>) -> Vec<f32> {
+    use numr::dtype::DType;
+    if t.dtype() == DType::F32 {
+        t.to_vec::<f32>()
+    } else {
+        t.to_dtype(DType::F32)
+            .expect("cast kernel result back to F32 for comparison")
+            .to_vec::<f32>()
+    }
+}
+
+/// Backward tolerance for the paged kernel, derived from first principles —
+/// NOT tuned to make any particular case pass.
+///
+/// `(atol, rtol)` where `rtol` scales the reference RMS, matching the
+/// `report_and_assert` convention in `mqa_gqa_attention.rs`. The base pair is
+/// the quantization-only backward error: Q/K/V/dO are rounded to `dtype`
+/// before the kernel runs, then that rounding propagates through the
+/// score/softmax/dS chain. `mqa_gqa_attention.rs` measured this same
+/// mechanism for its own backward pass, so its numbers are reused here
+/// (`f16`: atol 6e-3, rtol 3e-2; `bf16`: atol 4e-2, rtol 1e-1); `f32` keeps
+/// this file's original 1e-5/1e-4.
+///
+/// `dQ` accumulates in FP32 registers inside the kernel and is cast to
+/// `dtype` exactly once, at the very end — the base pair is its whole
+/// tolerance. Pass `n_contrib = None`.
+///
+/// `dK`/`dV` accumulate every Q row of a tile into an FP32 register per
+/// K-row, then issue ONE `atomicAdd` into `dtype` storage per `(k_idx, d)`
+/// per Q-block — not once per `(q_row, k_idx, d)` as an earlier version of
+/// this kernel did. Each such add still rounds the running sum to `dtype`'s
+/// mantissa, so for `n` sequential rounded additions Higham's classical
+/// recursive-summation bound still applies: extra relative error `(n-1) * u`
+/// (`u` = unit roundoff: `2^-24` f32, `2^-11` f16, `2^-8` bf16), added to the
+/// base `rtol`.
+///
+/// The STRICT `n` for the current kernel is `num_q_blocks * heads_per_kv`,
+/// where `num_q_blocks = ceil(seq_len_q / BLOCK_M)` — for this file's fixtures
+/// (`seq_len_q = 32`, `BLOCK_M` in `{32, 64}` for the head_dim/dtype configs
+/// tested) that is 1, not `seq_len_q`. The caller instead passes
+/// `n = seq_len * (num_heads / num_kv_heads)`, ~16x larger — DELIBERATELY,
+/// not by oversight. Measured (max abs deviation / reference RMS): the
+/// strict, ~16x-tighter bound sits BELOW the measured BF16 dK/dV deviation
+/// and would fail. That is not the kernel being wrong — Higham's bound is
+/// normalized by `sum(|x_i|)`, not `|sum(x_i)|`, so it does not model the
+/// real partial cancellation across a tile's contributions, and the strict
+/// bound under-predicts the true error for that reason. The looser, retained
+/// `n` is a deliberately conservative upper bound chosen to stay robust to
+/// that modeling gap. Do NOT tighten it to the strict value: that would
+/// convert this into a test that flakes on ordinary kernel/compiler
+/// variation rather than on an actual regression. (The dK/dV-to-dQ ratio
+/// guard in `assert_paged_bwd_kv_parity` is what actually re-detects a
+/// regression to per-`(q_row, k_idx, d)` accumulation — this tolerance is a
+/// coarse sanity floor, not the precise instrument.)
+#[cfg(feature = "cuda")]
+fn paged_bwd_tol(dtype: numr::dtype::DType, n_contrib: Option<usize>) -> (f32, f32) {
+    use numr::dtype::DType;
+    let (atol, rtol_base) = match dtype {
+        DType::F32 => (1e-5, 1e-4),
+        DType::F16 => (6e-3, 3e-2),
+        DType::BF16 => (4e-2, 1e-1),
+        other => unimplemented!("paged_bwd_tol: unsupported dtype {other:?}"),
+    };
+    let u: f32 = match dtype {
+        DType::F32 => 2f32.powi(-24),
+        DType::F16 => 2f32.powi(-11),
+        DType::BF16 => 2f32.powi(-8),
+        other => unimplemented!("paged_bwd_tol: unsupported dtype {other:?}"),
+    };
+    let rtol = match n_contrib {
+        None => rtol_base,
+        Some(n) => rtol_base + (n.saturating_sub(1) as f32) * u,
+    };
+    (atol, rtol)
+}
+
+/// Compares against the reference, reporting the max absolute deviation, the
+/// max relative deviation, and the index of each — so a failure shows how bad
+/// it is, not just that it failed. Returns the normalized error
+/// (`max_abs_diff / ref_rms`) so callers can compare it across tensors, e.g.
+/// the dK/dV-to-dQ ratio guard in `assert_paged_bwd_kv_parity`.
+///
+/// Also prints a `PAGED_BWD_DIAG` line UNCONDITIONALLY (pass or fail) via
+/// `println!`, so the measured deviation is visible even when the run is
+/// green — a wide `rtol` (BF16 MQA is 0.596) passing proves only that the
+/// kernel isn't catastrophically broken, not that the deviation is small.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn assert_paged_bwd_diff(
+    actual: &[f32],
+    expected: &[f32],
+    atol: f32,
+    rtol: f32,
+    label: &str,
+    tensor: &str,
+    dtype: numr::dtype::DType,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    seq_len: usize,
+) -> f32 {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{label}: element count mismatch: kernel {} vs reference {}",
+        actual.len(),
+        expected.len()
+    );
+
+    let mut max_abs = 0.0f32;
+    let mut max_abs_idx = 0usize;
+    let mut max_rel = 0.0f32;
+    let mut max_rel_idx = 0usize;
+    let mut sq_sum = 0.0f64;
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            a.is_finite(),
+            "{label}: kernel produced non-finite value {a} at index {i} (reference {e})"
+        );
+        let diff = (a - e).abs();
+        if diff > max_abs {
+            max_abs = diff;
+            max_abs_idx = i;
+        }
+        let rel = diff / (e.abs() + 1e-12);
+        if rel > max_rel {
+            max_rel = rel;
+            max_rel_idx = i;
+        }
+        sq_sum += (*e as f64) * (*e as f64);
+    }
+    let rms = (sq_sum / expected.len() as f64).sqrt() as f32;
+    let tol = atol + rtol * rms;
+
+    println!(
+        "PAGED_BWD_DIAG tensor={tensor} dtype={:?} num_heads={num_heads} \
+         num_kv_heads={num_kv_heads} head_dim={head_dim} seq_len={seq_len} \
+         max_abs={max_abs:.6e} max_abs_idx={max_abs_idx} max_rel={max_rel:.6e} \
+         max_rel_idx={max_rel_idx} ref_rms={rms:.6e} atol={atol:.6e} rtol={rtol:.6e} \
+         tol={tol:.6e} label=\"{label}\"",
+        dtype
+    );
+
+    eprintln!(
+        "{label}: n={}, max_abs_diff={max_abs:.4e} (index {max_abs_idx}), \
+         max_rel_diff={max_rel:.4e} (index {max_rel_idx}), ref_rms={rms:.4e}, tol={tol:.4e}",
+        expected.len()
+    );
+
+    assert!(
+        rms > 1e-6,
+        "{label}: reference RMS is {rms:.4e} — the fixture is degenerate, so agreement \
+         would prove nothing. Fix the fixture, not the tolerance."
+    );
+    assert!(
+        max_abs <= tol,
+        "{label}: max_abs_diff {max_abs:.4e} at index {max_abs_idx} (max_rel_diff \
+         {max_rel:.4e} at index {max_rel_idx}) exceeds tol {tol:.4e} (ref_rms {rms:.4e}); \
+         kernel={} reference={}",
+        actual[max_abs_idx],
+        expected[max_abs_idx]
+    );
+
+    max_abs / rms
 }
 
 /// GQA paged backward: 4 query heads over 2 KV heads.
@@ -693,21 +996,200 @@ fn assert_paged_bwd_kv_parity(num_heads: usize, num_kv_heads: usize, label: &str
 #[cfg(feature = "cuda")]
 #[test]
 fn test_paged_attention_bwd_gqa_parity() {
-    assert_paged_bwd_kv_parity(4, 2, "paged_bwd gqa 4h/2kv");
+    assert_paged_bwd_kv_parity(4, 2, 64, 8, numr::dtype::DType::F32, "paged_bwd gqa 4h/2kv");
 }
 
 /// MQA paged backward: 4 query heads share a single KV head.
 #[cfg(feature = "cuda")]
 #[test]
 fn test_paged_attention_bwd_mqa_parity() {
-    assert_paged_bwd_kv_parity(4, 1, "paged_bwd mqa 4h/1kv");
+    assert_paged_bwd_kv_parity(4, 1, 64, 8, numr::dtype::DType::F32, "paged_bwd mqa 4h/1kv");
 }
 
 /// Non-GQA paged backward stays correct: one KV head per query head.
 #[cfg(feature = "cuda")]
 #[test]
 fn test_paged_attention_bwd_no_gqa_parity() {
-    assert_paged_bwd_kv_parity(4, 4, "paged_bwd 4h/4kv");
+    assert_paged_bwd_kv_parity(4, 4, 64, 8, numr::dtype::DType::F32, "paged_bwd 4h/4kv");
+}
+
+// ============================================================================
+// F16 / BF16 paged backward parity
+//
+// `seq_len = 32` (vs 8 for the F32 regression tests above) so the atomicAdd
+// accumulation defect described in `paged_bwd_tol` has enough contributions
+// per element to be visible: under causal masking, key 0 in each of these
+// configs is written `seq_len * (num_heads / num_kv_heads)` times.
+// ============================================================================
+
+/// GQA, head_dim 64, F16: 4 query heads over 2 KV heads (16 contributions/key).
+#[cfg(feature = "cuda")]
+#[test]
+fn test_paged_attention_bwd_gqa_hd64_f16_parity() {
+    assert_paged_bwd_kv_parity(
+        4,
+        2,
+        64,
+        32,
+        numr::dtype::DType::F16,
+        "paged_bwd gqa 4h/2kv hd64",
+    );
+}
+
+/// GQA, head_dim 64, BF16.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_paged_attention_bwd_gqa_hd64_bf16_parity() {
+    assert_paged_bwd_kv_parity(
+        4,
+        2,
+        64,
+        32,
+        numr::dtype::DType::BF16,
+        "paged_bwd gqa 4h/2kv hd64",
+    );
+}
+
+/// GQA, head_dim 128, F16.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_paged_attention_bwd_gqa_hd128_f16_parity() {
+    assert_paged_bwd_kv_parity(
+        4,
+        2,
+        128,
+        32,
+        numr::dtype::DType::F16,
+        "paged_bwd gqa 4h/2kv hd128",
+    );
+}
+
+/// GQA, head_dim 128, BF16.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_paged_attention_bwd_gqa_hd128_bf16_parity() {
+    assert_paged_bwd_kv_parity(
+        4,
+        2,
+        128,
+        32,
+        numr::dtype::DType::BF16,
+        "paged_bwd gqa 4h/2kv hd128",
+    );
+}
+
+/// MQA, head_dim 64, F16: 4 query heads share 1 KV head (32 contributions/key
+/// — the worst case among these three head configs).
+#[cfg(feature = "cuda")]
+#[test]
+fn test_paged_attention_bwd_mqa_hd64_f16_parity() {
+    assert_paged_bwd_kv_parity(
+        4,
+        1,
+        64,
+        32,
+        numr::dtype::DType::F16,
+        "paged_bwd mqa 4h/1kv hd64",
+    );
+}
+
+/// MQA, head_dim 64, BF16.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_paged_attention_bwd_mqa_hd64_bf16_parity() {
+    assert_paged_bwd_kv_parity(
+        4,
+        1,
+        64,
+        32,
+        numr::dtype::DType::BF16,
+        "paged_bwd mqa 4h/1kv hd64",
+    );
+}
+
+/// MQA, head_dim 128, F16.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_paged_attention_bwd_mqa_hd128_f16_parity() {
+    assert_paged_bwd_kv_parity(
+        4,
+        1,
+        128,
+        32,
+        numr::dtype::DType::F16,
+        "paged_bwd mqa 4h/1kv hd128",
+    );
+}
+
+/// MQA, head_dim 128, BF16.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_paged_attention_bwd_mqa_hd128_bf16_parity() {
+    assert_paged_bwd_kv_parity(
+        4,
+        1,
+        128,
+        32,
+        numr::dtype::DType::BF16,
+        "paged_bwd mqa 4h/1kv hd128",
+    );
+}
+
+/// No-GQA, head_dim 64, F16: one KV head per query head (8 contributions/key
+/// — the best case among these three head configs).
+#[cfg(feature = "cuda")]
+#[test]
+fn test_paged_attention_bwd_no_gqa_hd64_f16_parity() {
+    assert_paged_bwd_kv_parity(
+        4,
+        4,
+        64,
+        32,
+        numr::dtype::DType::F16,
+        "paged_bwd 4h/4kv hd64",
+    );
+}
+
+/// No-GQA, head_dim 64, BF16.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_paged_attention_bwd_no_gqa_hd64_bf16_parity() {
+    assert_paged_bwd_kv_parity(
+        4,
+        4,
+        64,
+        32,
+        numr::dtype::DType::BF16,
+        "paged_bwd 4h/4kv hd64",
+    );
+}
+
+/// No-GQA, head_dim 128, F16.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_paged_attention_bwd_no_gqa_hd128_f16_parity() {
+    assert_paged_bwd_kv_parity(
+        4,
+        4,
+        128,
+        32,
+        numr::dtype::DType::F16,
+        "paged_bwd 4h/4kv hd128",
+    );
+}
+
+/// No-GQA, head_dim 128, BF16.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_paged_attention_bwd_no_gqa_hd128_bf16_parity() {
+    assert_paged_bwd_kv_parity(
+        4,
+        4,
+        128,
+        32,
+        numr::dtype::DType::BF16,
+        "paged_bwd 4h/4kv hd128",
+    );
 }
 
 /// `num_kv_heads == 0` is rejected: the kernel's head mapping divides by

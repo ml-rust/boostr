@@ -50,6 +50,12 @@ fn bwd_block_config_large(head_dim: usize) -> Option<(usize, usize)> {
 /// `dO_smem = smem + BLOCK_M*HD + 2*BLOCK_N*HD`, `O_smem = smem + 2*BLOCK_M*HD + 2*BLOCK_N*HD`,
 /// with Q implicitly at the base (`smem`) and O's tile bringing the total to
 /// `3*BLOCK_M + 2*BLOCK_N` rows of `HEAD_DIM` elements, no bank-conflict padding.
+///
+/// This is the DYNAMIC allocation only. Each kernel also declares two static
+/// shared arrays — `D_smem` and `lse_smem`, `BLOCK_M` floats each — so the
+/// block's real shared-memory footprint is this value plus `2*BLOCK_M*4` bytes.
+/// That term is at most 1KB (large tile, `BLOCK_M=128`) and no config sits
+/// within 1KB of a device opt-in limit, so it does not change any verdict here.
 pub(super) fn bwd_smem_size(
     block_m: usize,
     block_n: usize,

@@ -360,3 +360,265 @@ fn test_gptq_quantize_column_wgpu_parity() {
         );
     });
 }
+
+// ============================================================================
+// F16/BF16 accumulation-precision defect (CUDA)
+//
+// `fisher_accumulate_*` and `awq_score_reduce_*` issue one atomic per matrix
+// element straight into F16/BF16 output storage (a CAS loop that rounds the
+// running sum to the storage mantissa on every add), with no block-level
+// reduction. Squared-gradient / abs-weight terms are strictly positive, so
+// this is a systematic UNDERCOUNT that grows with the accumulation count,
+// not noise — once the running sum outgrows a term by more than the mantissa
+// resolves, further terms round to a no-op.
+//
+// The comparison below isolates this from ordinary input-rounding error: the
+// SAME already-rounded (F16/BF16 -> F32) values are run once through the
+// CUDA half-precision kernel and once through the CPU F32 reference path, so
+// any divergence is accumulation loss, not quantization of the inputs. `N` /
+// `M` (the swept dimension) is exactly the reduction count: `N` for
+// `fisher_information` (gradient samples), `M` for `awq_channel_scores`
+// (weight rows in `awq_score_reduce_*`).
+//
+// Tolerance derivation: a CORRECT kernel accumulates in fp32 and rounds to
+// half storage exactly ONCE (the final write), so the only expected
+// deviation from the F32 reference is that single rounding — bounded by the
+// dtype's relative machine epsilon (F16 mantissa 10 bits -> 2^-11, BF16
+// mantissa 7 bits -> 2^-8, per the existing `mqa_gqa_attention.rs` table).
+// `rtol`/`atol` below use 3x that eps as headroom for the extra ops (square,
+// mean-divide) — anything beyond that is accumulation loss, not rounding.
+//
+// Prediction (stall point where relative error crosses the tolerance):
+// BF16 around N/M ~ 256 (7-bit mantissa exhausts fastest), F16 around
+// N/M ~ 2000-4000 (10-bit mantissa). Error sign should be consistently
+// NEGATIVE (undercount) and its magnitude should GROW monotonically with
+// N/M — that trend, not a single large-N failure, is what proves the
+// accumulation mechanism (vs. e.g. a one-off rounding artifact).
+//
+// This test failed against the pre-fix kernel (the atomic-into-half-storage
+// accumulation described above) and passes against the fixed one below — it
+// exists to give before/after evidence for the fix. Do not loosen the
+// tolerance to make it pass.
+// ============================================================================
+
+#[cfg(feature = "cuda")]
+fn fisher_accum_defect_case(dtype: DType, eps: f32, dtype_name: &str) {
+    if !cfg!(feature = "f16") {
+        eprintln!(
+            "SKIPPED: fisher_information/{dtype_name} accumulation defect — boostr built \
+             without the `f16` feature, so {:?} tensors cannot be constructed",
+            dtype
+        );
+        return;
+    }
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use numr::runtime::cuda::CudaRuntime;
+        let (cpu_client, cpu_device) = setup_cpu();
+        const P: usize = 4;
+        let ns = [64usize, 256, 1024, 4096];
+        let mut failures: Vec<String> = Vec::new();
+
+        for &n in &ns {
+            let raw: Vec<f32> = (0..n * P)
+                .map(|i| 0.4 + 0.35 * ((i as f32) * 0.083).sin())
+                .collect();
+            let grad_f32 = Tensor::<CpuRuntime>::from_slice(&raw, &[n, P], &cpu_device).unwrap();
+            let grad_rounded = grad_f32
+                .to_dtype(dtype)
+                .unwrap()
+                .to_dtype(DType::F32)
+                .unwrap();
+            let rounded_vec = grad_rounded.to_vec::<f32>();
+
+            // F32 reference accumulation over the SAME already-rounded values.
+            let reference = cpu_client.fisher_information(&grad_rounded).unwrap();
+            let ref_vec = reference.to_vec::<f32>();
+
+            // CUDA half-precision accumulation path (the kernel under test).
+            let grad_c = Tensor::<CudaRuntime>::from_slice(&rounded_vec, &[n, P], &cuda_device)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap();
+            let actual = cuda_client.fisher_information(&grad_c).unwrap();
+            let actual_vec = actual.to_dtype(DType::F32).unwrap().to_vec::<f32>();
+
+            let max_abs = actual_vec
+                .iter()
+                .zip(ref_vec.iter())
+                .map(|(a, r)| (a - r).abs())
+                .fold(0.0f32, f32::max);
+            let mean_signed_rel_err: f32 = actual_vec
+                .iter()
+                .zip(ref_vec.iter())
+                .map(|(a, r)| (a - r) / r)
+                .sum::<f32>()
+                / P as f32;
+            let ref_mag: f32 = ref_vec.iter().map(|v| v.abs()).sum::<f32>() / P as f32;
+            let rtol = 3.0 * eps;
+            let atol = 3.0 * eps * ref_mag.max(1e-6);
+
+            println!(
+                "CALIB_DIAG op=fisher_information kernel=fisher_accumulate_{dtype_name} \
+                 dtype={dtype_name} n={n} p={P} max_abs={max_abs:.6e} \
+                 mean_signed_rel_err={mean_signed_rel_err:.6e} ref_mag={ref_mag:.6e} \
+                 rtol={rtol:.6e} atol={atol:.6e}"
+            );
+
+            let mut case_ok = true;
+            for (i, (a, r)) in actual_vec.iter().zip(ref_vec.iter()).enumerate() {
+                let diff = (a - r).abs();
+                let tol = atol + rtol * r.abs();
+                if diff > tol {
+                    case_ok = false;
+                    if failures.len() < 4 {
+                        failures.push(format!(
+                            "n={n} idx={i}: actual={a} ref={r} diff={diff:.6e} tol={tol:.6e}"
+                        ));
+                    }
+                }
+            }
+            if !case_ok {
+                failures.push(format!("n={n}: FAILED (see CALIB_DIAG line above)"));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "fisher_information/{dtype_name}: CUDA accumulation diverges from the F32 \
+             reference beyond a single-rounding tolerance — atomic accumulation into half \
+             storage undercounts as N grows:\n{}",
+            failures.join("\n")
+        );
+    });
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_fisher_information_cuda_f16_accum_defect() {
+    fisher_accum_defect_case(DType::F16, 2f32.powi(-11), "f16");
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_fisher_information_cuda_bf16_accum_defect() {
+    fisher_accum_defect_case(DType::BF16, 2f32.powi(-8), "bf16");
+}
+
+#[cfg(feature = "cuda")]
+fn awq_score_reduce_accum_defect_case(dtype: DType, eps: f32, dtype_name: &str) {
+    if !cfg!(feature = "f16") {
+        eprintln!(
+            "SKIPPED: awq_channel_scores/{dtype_name} accumulation defect — boostr built \
+             without the `f16` feature, so {:?} tensors cannot be constructed",
+            dtype
+        );
+        return;
+    }
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use numr::runtime::cuda::CudaRuntime;
+        let (cpu_client, cpu_device) = setup_cpu();
+        const K: usize = 4;
+        const N_ACT: usize = 4; // activation rows — fixed; NOT the swept accumulation dim
+        let ms = [64usize, 256, 1024, 4096]; // M = weight rows = awq_score_reduce's accumulation count
+        let mut failures: Vec<String> = Vec::new();
+
+        // Activations (and their act_scale) are shared across every M — build once.
+        let act_raw: Vec<f32> = (0..N_ACT * K)
+            .map(|i| 0.2 + 0.6 * ((i as f32) * 0.29).sin().abs())
+            .collect();
+        let act_f32 = Tensor::<CpuRuntime>::from_slice(&act_raw, &[N_ACT, K], &cpu_device).unwrap();
+        let act_rounded = act_f32
+            .to_dtype(dtype)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap();
+        let act_rounded_vec = act_rounded.to_vec::<f32>();
+
+        for &m in &ms {
+            let w_raw: Vec<f32> = (0..m * K)
+                .map(|i| 0.3 + 0.25 * ((i as f32) * 0.071).sin())
+                .collect();
+            let w_f32 = Tensor::<CpuRuntime>::from_slice(&w_raw, &[m, K], &cpu_device).unwrap();
+            let w_rounded = w_f32.to_dtype(dtype).unwrap().to_dtype(DType::F32).unwrap();
+            let w_rounded_vec = w_rounded.to_vec::<f32>();
+
+            // F32 reference accumulation over the SAME already-rounded values.
+            let reference = cpu_client
+                .awq_channel_scores(&act_rounded, &w_rounded)
+                .unwrap();
+            let ref_vec = reference.to_vec::<f32>();
+
+            // CUDA half-precision accumulation path (the kernel under test).
+            let act_c =
+                Tensor::<CudaRuntime>::from_slice(&act_rounded_vec, &[N_ACT, K], &cuda_device)
+                    .unwrap()
+                    .to_dtype(dtype)
+                    .unwrap();
+            let w_c = Tensor::<CudaRuntime>::from_slice(&w_rounded_vec, &[m, K], &cuda_device)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap();
+            let actual = cuda_client.awq_channel_scores(&act_c, &w_c).unwrap();
+            let actual_vec = actual.to_dtype(DType::F32).unwrap().to_vec::<f32>();
+
+            let max_abs = actual_vec
+                .iter()
+                .zip(ref_vec.iter())
+                .map(|(a, r)| (a - r).abs())
+                .fold(0.0f32, f32::max);
+            let mean_signed_rel_err: f32 = actual_vec
+                .iter()
+                .zip(ref_vec.iter())
+                .map(|(a, r)| (a - r) / r)
+                .sum::<f32>()
+                / K as f32;
+            let ref_mag: f32 = ref_vec.iter().map(|v| v.abs()).sum::<f32>() / K as f32;
+            let rtol = 3.0 * eps;
+            let atol = 3.0 * eps * ref_mag.max(1e-6);
+
+            println!(
+                "CALIB_DIAG op=awq_channel_scores kernel=awq_score_reduce_{dtype_name} \
+                 dtype={dtype_name} m={m} k={K} max_abs={max_abs:.6e} \
+                 mean_signed_rel_err={mean_signed_rel_err:.6e} ref_mag={ref_mag:.6e} \
+                 rtol={rtol:.6e} atol={atol:.6e}"
+            );
+
+            let mut case_ok = true;
+            for (i, (a, r)) in actual_vec.iter().zip(ref_vec.iter()).enumerate() {
+                let diff = (a - r).abs();
+                let tol = atol + rtol * r.abs();
+                if diff > tol {
+                    case_ok = false;
+                    if failures.len() < 4 {
+                        failures.push(format!(
+                            "m={m} idx={i}: actual={a} ref={r} diff={diff:.6e} tol={tol:.6e}"
+                        ));
+                    }
+                }
+            }
+            if !case_ok {
+                failures.push(format!("m={m}: FAILED (see CALIB_DIAG line above)"));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "awq_channel_scores/{dtype_name}: CUDA awq_score_reduce accumulation diverges \
+             from the F32 reference beyond a single-rounding tolerance — atomic accumulation \
+             into half storage undercounts as M grows:\n{}",
+            failures.join("\n")
+        );
+    });
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_awq_channel_scores_cuda_f16_accum_defect() {
+    awq_score_reduce_accum_defect_case(DType::F16, 2f32.powi(-11), "f16");
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_awq_channel_scores_cuda_bf16_accum_defect() {
+    awq_score_reduce_accum_defect_case(DType::BF16, 2f32.powi(-8), "bf16");
+}

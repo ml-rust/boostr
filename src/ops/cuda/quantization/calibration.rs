@@ -14,9 +14,32 @@ use crate::ops::traits::CalibrationOps;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
+use numr::ops::TypeConversionOps;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
+
+/// Columns handled per block by the summing reduction kernels.
+/// Must match `CALIB_BLOCK_X` in `calibration.cu`.
+const CALIB_BLOCK_X: usize = 32;
+/// Rows handled per block iteration. Must match `CALIB_BLOCK_Y` in `calibration.cu`.
+const CALIB_BLOCK_Y: usize = 8;
+/// Cap on the row-splitting grid dimension. Every row block contributes one
+/// atomic per column, so this bounds the atomic traffic at `cols * this`.
+const CALIB_MAX_ROW_BLOCKS: usize = 64;
+
+/// Launch geometry for the column-segmented reductions over a [rows, cols] matrix.
+fn calib_reduce_config(rows: usize, cols: usize) -> LaunchConfig {
+    LaunchConfig {
+        grid_dim: (
+            cols.div_ceil(CALIB_BLOCK_X).max(1) as u32,
+            rows.div_ceil(CALIB_BLOCK_Y).clamp(1, CALIB_MAX_ROW_BLOCKS) as u32,
+            1,
+        ),
+        block_dim: (CALIB_BLOCK_X as u32, CALIB_BLOCK_Y as u32, 1),
+        shared_mem_bytes: 0,
+    }
+}
 
 impl CalibrationOps<CudaRuntime> for CudaClient {
     fn awq_channel_scores(
@@ -93,19 +116,18 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
         }
 
         // Step 2: score[j] = mean_i(act_scale[j] * |W[i,j]|) → [K]
-        let scores = Tensor::<CudaRuntime>::zeros(&[k], dtype, device)?;
+        //
+        // ALWAYS F32, whatever `dtype` is. Each score is the sum of M weight
+        // magnitudes delivered by cross-block atomics; an atomic into 16-bit
+        // storage re-rounds the running sum on every add, and the terms are all
+        // positive, so the error never cancels. Accumulate in F32 and narrow
+        // once, below.
+        let scores = Tensor::<CudaRuntime>::zeros(&[k], DType::F32, device)?;
         {
             let func_name = format!("awq_score_reduce_{}", kernel_prefix);
             let func = kernels::get_kernel_function(&module, &func_name)?;
 
-            let total = (m * k) as u32;
-            let block = 256u32;
-            let grid = total.div_ceil(block);
-            let cfg = LaunchConfig {
-                grid_dim: (grid, 1, 1),
-                block_dim: (block, 1, 1),
-                shared_mem_bytes: 0,
-            };
+            let cfg = calib_reduce_config(m, k);
 
             let w_ptr = weights.ptr();
             let scale_ptr = act_scale.ptr();
@@ -126,6 +148,12 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
             }
         }
 
+        // Narrow the F32 accumulator to the caller's dtype. The kernel already
+        // applied the /M normalization, so this is a plain cast.
+        if dtype == DType::F32 {
+            return Ok(scores);
+        }
+        let scores = self.cast(&scores, dtype)?;
         Ok(scores)
     }
 
@@ -157,18 +185,14 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
         let device_index = device.id();
         let module = kernels::get_or_load_module(self.context(), device_index, CALIBRATION_MODULE)?;
 
-        let output = Tensor::<CudaRuntime>::zeros(&[p], dtype, device)?;
+        // ALWAYS F32, whatever `dtype` is — see the note on `scores` above. Here
+        // the terms are squares, so the one-directional rounding loss of a
+        // 16-bit atomic accumulator grows with N without ever cancelling.
+        let output = Tensor::<CudaRuntime>::zeros(&[p], DType::F32, device)?;
         let func_name = format!("fisher_accumulate_{}", kernel_prefix);
         let func = kernels::get_kernel_function(&module, &func_name)?;
 
-        let total = (n * p) as u32;
-        let block = 256u32;
-        let grid = total.div_ceil(block);
-        let cfg = LaunchConfig {
-            grid_dim: (grid, 1, 1),
-            block_dim: (block, 1, 1),
-            shared_mem_bytes: 0,
-        };
+        let cfg = calib_reduce_config(n, p);
 
         let grad_ptr = gradients.ptr();
         let out_ptr = output.ptr();
@@ -186,6 +210,12 @@ impl CalibrationOps<CudaRuntime> for CudaClient {
             })?;
         }
 
+        // Narrow the F32 accumulator to the caller's dtype. The kernel already
+        // applied the /N normalization, so this is a plain cast.
+        if dtype == DType::F32 {
+            return Ok(output);
+        }
+        let output = self.cast(&output, dtype)?;
         Ok(output)
     }
 

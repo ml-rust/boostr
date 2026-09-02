@@ -41,6 +41,14 @@ extern "C" __global__ void moe_grouped_gemm##SUFFIX( \
     int tile_row = blockIdx.y * TILE_M; \
     int tile_col = blockIdx.x * TILE_N; \
     \
+    /* The launcher sizes grid.y from the TOTAL token count for every expert, \
+       because the per-expert counts live in device memory. A tile entirely \
+       past this expert's count has no row to compute, and the test is \
+       block-uniform, so returning here is safe and skips the whole K loop. \
+       Without it such a block still loads every B tile and does every FMA \
+       before discarding the result. */ \
+    if (tile_row >= count) return; \
+    \
     int row = tile_row + threadIdx.y; \
     int col = tile_col + threadIdx.x; \
     \

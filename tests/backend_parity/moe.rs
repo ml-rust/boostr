@@ -534,3 +534,101 @@ fn test_moe_end_to_end_parity() {
         );
     });
 }
+
+/// Runs one grouped-GEMM shape on CPU, CUDA and WebGPU and asserts they agree.
+///
+/// `counts` is the token count per expert, so the caller states the split
+/// directly. The CUDA launcher sizes `grid.y` from the TOTAL token count for
+/// every expert, because the per-expert counts live in device memory; a shape
+/// where some expert owns far fewer tokens than the total is what puts blocks
+/// past their expert's range.
+fn assert_grouped_gemm_parity(label: &str, counts: &[usize], in_dim: usize, out_dim: usize) {
+    let (cpu_client, cpu_device) = setup_cpu();
+
+    let num_experts = counts.len();
+    let total_tokens: usize = counts.iter().sum();
+
+    let mut offsets = Vec::with_capacity(num_experts + 1);
+    let mut running = 0i32;
+    offsets.push(0i32);
+    for &c in counts {
+        running += c as i32;
+        offsets.push(running);
+    }
+
+    let tok_shape = [total_tokens, in_dim];
+    let w_shape = [num_experts, in_dim, out_dim];
+    let off_shape = [num_experts + 1];
+
+    let tokens = det_tensor(&tok_shape, &cpu_device);
+    let weights = det_tensor(&w_shape, &cpu_device);
+    let expert_offsets = det_i32_tensor(&offsets, &off_shape, &cpu_device);
+
+    let cpu_out = cpu_client
+        .moe_grouped_gemm(&tokens, &weights, &expert_offsets)
+        .unwrap_or_else(|e| panic!("CPU grouped gemm failed for {label}: {e}"));
+    let cpu_out_vec = cpu_out.to_vec::<f32>();
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|client, device| {
+        use numr::tensor::Tensor;
+        let t = Tensor::from_slice(&tokens.to_vec::<f32>(), &tok_shape, &device).unwrap();
+        let w = Tensor::from_slice(&weights.to_vec::<f32>(), &w_shape, &device).unwrap();
+        let o = Tensor::from_slice(&offsets, &off_shape, &device).unwrap();
+        let out = client
+            .moe_grouped_gemm(&t, &w, &o)
+            .unwrap_or_else(|e| panic!("CUDA grouped gemm failed for {label}: {e}"));
+        assert_parity_f32_tol(
+            &out.to_vec::<f32>(),
+            &cpu_out_vec,
+            &format!("{label} CUDA vs CPU"),
+            1e-4,
+            1e-5,
+        );
+    });
+
+    #[cfg(feature = "wgpu")]
+    with_wgpu_backend(|client, device| {
+        use numr::tensor::Tensor;
+        let t = Tensor::from_slice(&tokens.to_vec::<f32>(), &tok_shape, &device).unwrap();
+        let w = Tensor::from_slice(&weights.to_vec::<f32>(), &w_shape, &device).unwrap();
+        let o = Tensor::from_slice(&offsets, &off_shape, &device).unwrap();
+        let out = client
+            .moe_grouped_gemm(&t, &w, &o)
+            .unwrap_or_else(|e| panic!("WebGPU grouped gemm failed for {label}: {e}"));
+        assert_parity_f32_tol(
+            &out.to_vec::<f32>(),
+            &cpu_out_vec,
+            &format!("{label} WebGPU vs CPU"),
+            1e-4,
+            1e-5,
+        );
+    });
+}
+
+/// Even split wide enough that each expert owns several row tiles, so most of
+/// the launched grid sits past its expert's range.
+#[test]
+fn test_moe_grouped_gemm_many_row_tiles_parity() {
+    assert_grouped_gemm_parity("grouped_gemm_many_tiles", &[96, 96, 96, 96], 64, 48);
+}
+
+/// Uneven split, so the cut-off row tile lands at a different place for each
+/// expert and no single bound works for all of them.
+#[test]
+fn test_moe_grouped_gemm_uneven_split_parity() {
+    assert_grouped_gemm_parity("grouped_gemm_uneven", &[5, 70, 33, 120], 64, 48);
+}
+
+/// An expert with no tokens at all, between two that have them.
+#[test]
+fn test_moe_grouped_gemm_empty_expert_parity() {
+    assert_grouped_gemm_parity("grouped_gemm_empty_expert", &[64, 0, 64], 48, 32);
+}
+
+/// A count that is not a whole number of row tiles, so the last tile of each
+/// expert is partly valid — the boundary an all-or-nothing tile test would miss.
+#[test]
+fn test_moe_grouped_gemm_partial_last_tile_parity() {
+    assert_grouped_gemm_parity("grouped_gemm_partial_tile", &[33, 65, 97], 48, 32);
+}

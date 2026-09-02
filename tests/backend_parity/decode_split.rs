@@ -111,6 +111,48 @@ fn assert_decode_parity(
             1e-6,
         );
     });
+
+    // WebGPU is 32-bit only by design, so it takes the F32 shapes here and none
+    // of the half-dtype tests below. It has no separate KV-stride argument
+    // either, so it gets the KV tensors at exactly `seq_len_k` — the same
+    // values, without the capacity padding.
+    #[cfg(feature = "wgpu")]
+    with_wgpu_backend(|wgpu_client, wgpu_device| {
+        use numr::tensor::Tensor;
+
+        let q_w = Tensor::from_slice(&q_vec, &q_shape, &wgpu_device).unwrap();
+        let k_w = Tensor::from_slice(&k_vec, &kv_shape, &wgpu_device).unwrap();
+        let v_w = Tensor::from_slice(&v_vec, &kv_shape, &wgpu_device).unwrap();
+
+        let (wgpu_out, wgpu_lse) = wgpu_client
+            .flash_attention_fwd(
+                &q_w,
+                &k_w,
+                &v_w,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                false,
+                0,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("WebGPU decode failed for {label}: {e}"));
+
+        assert_parity_f32_tol(
+            &wgpu_out.to_vec::<f32>(),
+            &cpu_out_vec,
+            &format!("{label} output WebGPU vs CPU"),
+            1e-4,
+            1e-6,
+        );
+        assert_parity_f32_tol(
+            &wgpu_lse.to_vec::<f32>(),
+            &cpu_lse_vec,
+            &format!("{label} lse WebGPU vs CPU"),
+            1e-4,
+            1e-6,
+        );
+    });
 }
 
 /// Below the minimum chunk: the whole-sequence kernel runs, one block per

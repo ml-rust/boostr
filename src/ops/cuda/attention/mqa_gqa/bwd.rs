@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
+use numr::ops::TypeConversionOps;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
@@ -66,17 +67,28 @@ pub fn mqa_gqa_bwd(
     let device = q.device();
     let device_index = device.id();
 
-    // Allocate gradients (dQ zeroed for atomicAdd)
-    let dq =
-        Tensor::<CudaRuntime>::zeros(&[batch_size, num_heads, seq_len_q, head_dim], dtype, device)?;
-    let dk = Tensor::<CudaRuntime>::zeros(
-        &[batch_size, num_kv_heads, seq_len_k, head_dim],
-        dtype,
+    // Allocate gradient accumulators, zeroed for atomicAdd.
+    //
+    // These are ALWAYS F32, whatever `dtype` is. Every gradient element is the
+    // sum of several cross-block atomic contributions: each K block adds into
+    // one dQ element, and the `num_heads / num_kv_heads` Q heads of a GQA group
+    // add into one dK/dV element. An atomic into low-precision storage is a
+    // read-modify-write that re-rounds the running sum on every add, so the
+    // error grows with the contribution count. Accumulating in F32 and casting
+    // down once, after the kernel, rounds each element exactly once.
+    let dq_acc = Tensor::<CudaRuntime>::zeros(
+        &[batch_size, num_heads, seq_len_q, head_dim],
+        DType::F32,
         device,
     )?;
-    let dv = Tensor::<CudaRuntime>::zeros(
+    let dk_acc = Tensor::<CudaRuntime>::zeros(
         &[batch_size, num_kv_heads, seq_len_k, head_dim],
-        dtype,
+        DType::F32,
+        device,
+    )?;
+    let dv_acc = Tensor::<CudaRuntime>::zeros(
+        &[batch_size, num_kv_heads, seq_len_k, head_dim],
+        DType::F32,
         device,
     )?;
 
@@ -153,9 +165,9 @@ pub fn mqa_gqa_bwd(
         let dout_ptr = dout.ptr();
         let lse_ptr = lse.ptr();
         let d_ptr = d_buf.ptr();
-        let dq_ptr = dq.ptr();
-        let dk_ptr = dk.ptr();
-        let dv_ptr = dv.ptr();
+        let dq_ptr = dq_acc.ptr();
+        let dk_ptr = dk_acc.ptr();
+        let dv_ptr = dv_acc.ptr();
         let scale = (head_dim as f32).sqrt().recip();
         let batch_i32 = batch_size as i32;
         let nh_i32 = num_heads as i32;
@@ -196,6 +208,16 @@ pub fn mqa_gqa_bwd(
             })?;
         }
     }
+
+    // Narrow the F32 accumulators back to the caller's dtype. The kernel already
+    // applied the dQ/dK/dV scales at the atomic, so this is a plain cast.
+    if dtype == DType::F32 {
+        return Ok((dq_acc, dk_acc, dv_acc));
+    }
+
+    let dq = client.cast(&dq_acc, dtype)?;
+    let dk = client.cast(&dk_acc, dtype)?;
+    let dv = client.cast(&dv_acc, dtype)?;
 
     Ok((dq, dk, dv))
 }

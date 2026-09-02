@@ -640,6 +640,203 @@ fn mqa_gqa_bwd_mqa_hd64_causal_f16_parity() {
 }
 
 // ============================================================================
+// Backward cross-block accumulation rounding (dQ/dK/dV atomic re-rounding)
+// ============================================================================
+//
+// `mqa_gqa_bwd.cu`'s F16/BF16 paths accumulate dQ/dK/dV gradients ACROSS CUDA
+// BLOCKS with `atomicAdd`/`atomicAddHalf` directly into `__half`/
+// `__nv_bfloat16` storage: every atomic is a read-modify-write that re-rounds
+// the running sum to the storage dtype's mantissa (10 bits f16, 7 bits bf16).
+// The F32 path accumulates into `float*` with an exact-to-FP32 `atomicAdd`,
+// so it has no such defect — this is the section's control, not a case here.
+//
+// This is NOT a Q/K/V-input-rounding test (that is already covered by
+// `bwd_tol()` above). Both sides below run the SAME already-rounded inputs:
+// the low-precision path natively, and an F32 run of the SAME kernel fed the
+// low-precision values cast back up to F32 (`to_dtype(F32)`), so its own
+// accumulation is exact-to-FP32. Any excess deviation of the low-precision
+// path over that F32-on-identical-inputs run is the atomic re-rounding
+// defect, isolated from input quantization.
+//
+// Roundings per output element (mirrors `mqa_gqa_bwd.cu` / `block_config.rs`):
+//   dQ:    ceil(seq_len_k / BLOCK_N)      (BLOCK_N: 128 @ hd 32/64, 64 @ hd 128,
+//                                          assuming the device fits the large
+//                                          block config `mqa_bwd_block_config`
+//                                          prefers; a device that falls back to
+//                                          the small config gets a SMALLER
+//                                          BLOCK_N, i.e. MORE roundings, so this
+//                                          count is a floor, not a ceiling)
+//   dK/dV: num_q_heads / num_kv_heads     (GQA cross-head atomic contention)
+#[test]
+fn mqa_gqa_bwd_defect_mqa_ratio32_hd64_f16() {
+    run_bwd_defect_case(
+        Case {
+            label: "defect mqa ratio32 hd64 sq=sk=512 non-causal",
+            batch: 1,
+            num_heads: 32,
+            num_kv_heads: 1,
+            seq_q: 512,
+            seq_k: 512,
+            head_dim: 64,
+            causal: false,
+        },
+        TestDType::F16,
+        4,
+        32,
+    );
+}
+
+#[test]
+fn mqa_gqa_bwd_defect_mqa_ratio32_hd64_bf16() {
+    run_bwd_defect_case(
+        Case {
+            label: "defect mqa ratio32 hd64 sq=sk=512 non-causal",
+            batch: 1,
+            num_heads: 32,
+            num_kv_heads: 1,
+            seq_q: 512,
+            seq_k: 512,
+            head_dim: 64,
+            causal: false,
+        },
+        TestDType::BF16,
+        4,
+        32,
+    );
+}
+
+/// Contrast to the ratio-32 case above: SAME shape, ratio 4 instead of 32
+/// (`num_kv_heads` 8 instead of 1), so dK/dV get 4 roundings instead of 32
+/// while dQ's rounding count (4) is unchanged. dK/dV error is predicted to
+/// come in visibly smaller than the ratio-32 case — evidence the error scales
+/// with the atomic contention count, not a fixed per-kernel offset.
+#[test]
+fn mqa_gqa_bwd_defect_gqa_ratio4_hd64_f16() {
+    run_bwd_defect_case(
+        Case {
+            label: "defect gqa ratio4 hd64 sq=sk=512 non-causal",
+            batch: 1,
+            num_heads: 32,
+            num_kv_heads: 8,
+            seq_q: 512,
+            seq_k: 512,
+            head_dim: 64,
+            causal: false,
+        },
+        TestDType::F16,
+        4,
+        4,
+    );
+}
+
+#[test]
+fn mqa_gqa_bwd_defect_gqa_ratio4_hd64_bf16() {
+    run_bwd_defect_case(
+        Case {
+            label: "defect gqa ratio4 hd64 sq=sk=512 non-causal",
+            batch: 1,
+            num_heads: 32,
+            num_kv_heads: 8,
+            seq_q: 512,
+            seq_k: 512,
+            head_dim: 64,
+            causal: false,
+        },
+        TestDType::BF16,
+        4,
+        4,
+    );
+}
+
+/// Small-seq contrast half of the hd128 pair below: `BLOCK_N=64` at head_dim
+/// 128 gives `ceil(512/64) = 8` dQ roundings, versus 32 at `seq_len=2048`.
+/// dK/dV roundings (8, ratio 8/1) are IDENTICAL in both members of the pair,
+/// so any widening of the dQ gap alone isolates seq_len's effect on the dQ
+/// rounding count from the (unchanged) GQA-ratio effect on dK/dV.
+#[test]
+fn mqa_gqa_bwd_defect_mqa_hd128_sq512_f16() {
+    run_bwd_defect_case(
+        Case {
+            label: "defect mqa hd128 sq=sk=512 non-causal",
+            batch: 1,
+            num_heads: 8,
+            num_kv_heads: 1,
+            seq_q: 512,
+            seq_k: 512,
+            head_dim: 128,
+            causal: false,
+        },
+        TestDType::F16,
+        8,
+        8,
+    );
+}
+
+#[test]
+fn mqa_gqa_bwd_defect_mqa_hd128_sq512_bf16() {
+    run_bwd_defect_case(
+        Case {
+            label: "defect mqa hd128 sq=sk=512 non-causal",
+            batch: 1,
+            num_heads: 8,
+            num_kv_heads: 1,
+            seq_q: 512,
+            seq_k: 512,
+            head_dim: 128,
+            causal: false,
+        },
+        TestDType::BF16,
+        8,
+        8,
+    );
+}
+
+/// `seq_len=2048` rather than the `4096` the theoretical maximum would use:
+/// at head_dim 128 (BLOCK_M=128 rows/tile) and batch=1, 2048 already drives
+/// 16 Q tiles x 32 K tiles of backward work per (batch, head) for 8 heads —
+/// 4096 roughly quadruples kernel time and doubles peak device memory for a
+/// rounding-count gain (32 -> 64) the 512-vs-2048 contrast above does not
+/// need to be conclusive; 2048 already clears 1% and 2% error thresholds by a
+/// wide margin per the predictions below.
+#[test]
+fn mqa_gqa_bwd_defect_mqa_hd128_sq2048_f16() {
+    run_bwd_defect_case(
+        Case {
+            label: "defect mqa hd128 sq=sk=2048 non-causal",
+            batch: 1,
+            num_heads: 8,
+            num_kv_heads: 1,
+            seq_q: 2048,
+            seq_k: 2048,
+            head_dim: 128,
+            causal: false,
+        },
+        TestDType::F16,
+        32,
+        8,
+    );
+}
+
+#[test]
+fn mqa_gqa_bwd_defect_mqa_hd128_sq2048_bf16() {
+    run_bwd_defect_case(
+        Case {
+            label: "defect mqa hd128 sq=sk=2048 non-causal",
+            batch: 1,
+            num_heads: 8,
+            num_kv_heads: 1,
+            seq_q: 2048,
+            seq_k: 2048,
+            head_dim: 128,
+            causal: false,
+        },
+        TestDType::BF16,
+        32,
+        8,
+    );
+}
+
+// ============================================================================
 // Dispatch capability gate
 // ============================================================================
 
@@ -1071,6 +1268,257 @@ fn run_causal_first_row_case() {
     eprintln!(
         "SKIPPED: mqa_gqa fwd causal first-query closed form — boostr built without the \
          `cuda` feature; the MQA/GQA kernels are CUDA-only."
+    );
+}
+
+// ============================================================================
+// Backward cross-block accumulation rounding — runner and tolerance
+// ============================================================================
+
+/// Honest tolerance for the backward atomic-rounding defect check.
+///
+/// This is deliberately NOT `TestDType::bwd_tol()` — that table's job is
+/// covering Q/K/V INPUT rounding, which both sides of this comparison share
+/// (both run the identical already-rounded values), so it cancels out here.
+/// What is legitimately left over, IF the kernel accumulated in fp32 and
+/// rounded to the storage dtype only ONCE at the final store (the correct
+/// behavior), is: the F32 kernel's own baseline noise (`__expf` ulps, a
+/// different accumulation order — `TestDType::F32.bwd_tol()`) plus exactly
+/// one storage-precision rounding of the result. `u` is the same per-dtype
+/// unit-roundoff convention `paged_bwd_tol` in `paged_attention.rs` already
+/// uses: `2^-11` for f16 (10 explicit mantissa bits), `2^-8` for bf16 (7).
+///
+/// A kernel that instead re-rounds on EVERY cross-block atomic compounds `u`
+/// like an independent-rounding random walk, roughly `sqrt(n_roundings) * u`
+/// relative error, instead of the single `u` this function allows — so a
+/// case with `n_roundings > 1` clearing this tolerance anyway would mean the
+/// defect isn't observable at that rounding count, not that the tolerance was
+/// tuned to hide it.
+#[cfg(feature = "cuda")]
+fn mqa_gqa_bwd_defect_tol(dtype: TestDType) -> (f32, f32) {
+    let (base_atol, base_rtol) = TestDType::F32.bwd_tol();
+    let u: f32 = match dtype {
+        TestDType::F16 => 2f32.powi(-11),
+        TestDType::BF16 => 2f32.powi(-8),
+        TestDType::F32 => return (base_atol, base_rtol),
+    };
+    (base_atol, base_rtol + u)
+}
+
+/// Compares the low-precision kernel's output against the F32-on-identical-
+/// inputs run, printing an always-on `MQA_GQA_BWD_DIAG` line (pass or fail)
+/// so two runs (before/after a kernel fix) diff mechanically.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn assert_bwd_defect_diag(
+    actual: &[f32],
+    expected: &[f32],
+    atol: f32,
+    rtol: f32,
+    label: &str,
+    tensor: &str,
+    dtype: TestDType,
+    case: &Case,
+    n_roundings: usize,
+) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{label}: element count mismatch: kernel {} vs reference {}",
+        actual.len(),
+        expected.len()
+    );
+
+    let mut max_abs = 0.0f32;
+    let mut max_abs_idx = 0usize;
+    let mut sq_sum = 0.0f64;
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            a.is_finite(),
+            "{label}: kernel produced non-finite value {a} at index {i} (reference {e})"
+        );
+        let diff = (a - e).abs();
+        if diff > max_abs {
+            max_abs = diff;
+            max_abs_idx = i;
+        }
+        sq_sum += (*e as f64) * (*e as f64);
+    }
+    let rms = (sq_sum / expected.len() as f64).sqrt() as f32;
+    let tol = atol + rtol * rms;
+
+    println!(
+        "MQA_GQA_BWD_DIAG tensor={tensor} dtype={} num_q_heads={} num_kv_heads={} \
+         head_dim={} seq_len={} causal={} n_roundings={n_roundings} max_abs={max_abs:.6e} \
+         max_abs_idx={max_abs_idx} ref_rms={rms:.6e} atol={atol:.6e} rtol={rtol:.6e} \
+         tol={tol:.6e} label=\"{label}\"",
+        dtype.name(),
+        case.num_heads,
+        case.num_kv_heads,
+        case.head_dim,
+        case.seq_q,
+        case.causal,
+    );
+
+    assert!(
+        rms > 1e-6,
+        "{label}: reference RMS is {rms:.4e} — the fixture is degenerate, so agreement \
+         would prove nothing. Fix the fixture, not the tolerance."
+    );
+    assert!(
+        max_abs <= tol,
+        "{label}: max_abs_diff {max_abs:.4e} at index {max_abs_idx} exceeds tol {tol:.4e} \
+         (ref_rms {rms:.4e}, n_roundings={n_roundings}); kernel={} reference={} — this is the \
+         cross-block atomic re-rounding defect in mqa_gqa_bwd.cu's {dtype_name} path, not input \
+         quantization (both sides ran identical already-rounded inputs)",
+        actual[max_abs_idx],
+        expected[max_abs_idx],
+        dtype_name = dtype.name()
+    );
+}
+
+/// Runs the SAME already-rounded (dtype-cast-down-then-up) Q/K/V/dO through
+/// the low-precision kernel and through the F32 kernel, and compares dQ/dK/dV
+/// separately. `dq_roundings`/`dkv_roundings` are the atomic-rounding counts
+/// this case is expected to hit (see the module-doc comment above the
+/// `#[test]` cases), threaded through only for the diagnostic line.
+#[cfg(feature = "cuda")]
+fn run_bwd_defect_case(case: Case, dtype: TestDType, dq_roundings: usize, dkv_roundings: usize) {
+    use boostr::ops::cuda::attention::mqa_gqa::{mqa_gqa_bwd, mqa_gqa_fwd};
+    use numr::dtype::DType;
+
+    if !skip_guard(&case, dtype, "bwd-defect") {
+        return;
+    }
+
+    let q_shape = [case.batch, case.num_heads, case.seq_q, case.head_dim];
+    let kv_shape = [case.batch, case.num_kv_heads, case.seq_k, case.head_dim];
+    let q_data = det_data(&q_shape, 0.0);
+    let k_data = det_data(&kv_shape, 1.7);
+    let v_data = det_data(&kv_shape, 3.1);
+    let dout_data = det_data(&q_shape, 5.3);
+
+    let (atol, rtol) = mqa_gqa_bwd_defect_tol(dtype);
+    let label = format!("mqa_gqa bwd-defect {} [{}]", case.label, dtype.name());
+
+    let mut ran = false;
+    with_cuda_backend(|cuda_client, cuda_device| {
+        ran = true;
+
+        // Low-precision path: native storage dtype, so mqa_gqa_bwd.cu's
+        // atomicAdd/atomicAddHalf re-rounds into it on every cross-block add.
+        let q_low = to_cuda(&q_data, &q_shape, &cuda_device, dtype);
+        let k_low = to_cuda(&k_data, &kv_shape, &cuda_device, dtype);
+        let v_low = to_cuda(&v_data, &kv_shape, &cuda_device, dtype);
+        let dout_low = to_cuda(&dout_data, &q_shape, &cuda_device, dtype);
+
+        let (out_low, lse_low) = mqa_gqa_fwd(
+            &cuda_client,
+            &q_low,
+            &k_low,
+            &v_low,
+            case.num_heads,
+            case.num_kv_heads,
+            case.head_dim,
+            case.causal,
+        )
+        .expect("mqa_gqa_fwd (low-precision) returned an error");
+        let (dq_low, dk_low, dv_low) = mqa_gqa_bwd(
+            &cuda_client,
+            &dout_low,
+            &q_low,
+            &k_low,
+            &v_low,
+            &out_low,
+            &lse_low,
+            case.num_heads,
+            case.num_kv_heads,
+            case.head_dim,
+            case.causal,
+        )
+        .expect("mqa_gqa_bwd (low-precision) returned an error");
+
+        // F32 path fed the SAME rounded values (cast back up), so it isolates
+        // accumulator-width — both runs see bit-identical Q/K/V/dO.
+        let q_f32 = q_low.to_dtype(DType::F32).expect("cast Q back to F32");
+        let k_f32 = k_low.to_dtype(DType::F32).expect("cast K back to F32");
+        let v_f32 = v_low.to_dtype(DType::F32).expect("cast V back to F32");
+        let dout_f32 = dout_low.to_dtype(DType::F32).expect("cast dO back to F32");
+
+        let (out_f32, lse_f32) = mqa_gqa_fwd(
+            &cuda_client,
+            &q_f32,
+            &k_f32,
+            &v_f32,
+            case.num_heads,
+            case.num_kv_heads,
+            case.head_dim,
+            case.causal,
+        )
+        .expect("mqa_gqa_fwd (f32 reference on rounded inputs) returned an error");
+        let (dq_f32, dk_f32, dv_f32) = mqa_gqa_bwd(
+            &cuda_client,
+            &dout_f32,
+            &q_f32,
+            &k_f32,
+            &v_f32,
+            &out_f32,
+            &lse_f32,
+            case.num_heads,
+            case.num_kv_heads,
+            case.head_dim,
+            case.causal,
+        )
+        .expect("mqa_gqa_bwd (f32 reference on rounded inputs) returned an error");
+
+        assert_bwd_defect_diag(
+            &read_f32(&dq_low),
+            &dq_f32.to_vec::<f32>(),
+            atol,
+            rtol,
+            &format!("{label} dQ"),
+            "dQ",
+            dtype,
+            &case,
+            dq_roundings,
+        );
+        assert_bwd_defect_diag(
+            &read_f32(&dk_low),
+            &dk_f32.to_vec::<f32>(),
+            atol,
+            rtol,
+            &format!("{label} dK"),
+            "dK",
+            dtype,
+            &case,
+            dkv_roundings,
+        );
+        assert_bwd_defect_diag(
+            &read_f32(&dv_low),
+            &dv_f32.to_vec::<f32>(),
+            atol,
+            rtol,
+            &format!("{label} dV"),
+            "dV",
+            dtype,
+            &case,
+            dkv_roundings,
+        );
+    });
+    assert!(
+        ran,
+        "{label}: the CUDA closure never executed, so nothing was verified — \
+         refusing to report a pass"
+    );
+}
+
+#[cfg(not(feature = "cuda"))]
+fn run_bwd_defect_case(case: Case, dtype: TestDType, _dq_roundings: usize, _dkv_roundings: usize) {
+    eprintln!(
+        "SKIPPED: mqa_gqa bwd-defect [{}] '{}' — boostr built without the `cuda` feature; \
+         the MQA/GQA kernels are CUDA-only. Re-run with `--features cuda,f16`.",
+        dtype.name(),
+        case.label
     );
 }
 

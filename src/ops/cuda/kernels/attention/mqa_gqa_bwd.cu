@@ -11,9 +11,14 @@
 //   Example: MQA with 8 Q heads sharing 1 KV head → 8 CUDA blocks accumulate into same dK/dV
 //
 // Atomic Strategy:
-// - FP32 atomics: atomicAdd (hardware support)
-// - FP16/BF16: atomicAdd via __half2 or atomicCAS emulation
-// - FP8: Accumulate in higher precision (BF16 on sm_80+, F32 otherwise)
+// - Every kernel accumulates dQ/dK/dV into FP32 buffers with native
+//   atomicAdd(float*), whatever the storage dtype of Q/K/V/dO is.
+// - A low-precision atomic is a read-modify-write that re-rounds the running
+//   sum on every add, so the error grows with the number of contributions.
+//   GQA has many: num_q_heads / num_kv_heads blocks add into one dK/dV element,
+//   and every K block adds into one dQ element.
+// - The launcher casts the FP32 gradients down to the caller's dtype ONCE,
+//   after the kernel, so each gradient element is rounded exactly once.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -37,6 +42,8 @@ __device__ __forceinline__ float warp_reduce_sum(float val) {
 // Atomic Add Helpers for FP16/BF16
 // ============================================================================
 
+// Retained for reference: the gradient paths below accumulate in FP32 and no
+// longer call these helpers.
 #if __CUDA_ARCH__ >= 700
 __device__ __forceinline__ void atomicAddHalf(__half* address, __half val) {
     // TEMPORARY: Force CAS-based implementation instead of native atomicAdd
@@ -381,6 +388,12 @@ __device__ void mqa_gqa_preprocess_bwd_fp16_impl(
 // FP16 Backward Implementation (dtype-specific, like forward)
 // ============================================================================
 
+// `dQ`, `dK` and `dV` are FP32 accumulators, NOT FP16 buffers. Every gradient
+// element here is the sum of several cross-block `atomicAdd` contributions: K
+// blocks for dQ, and the Q heads of a GQA group for dK/dV. A low-precision
+// atomic is a read-modify-write that re-rounds the running sum on every one of
+// those adds, so the error grows with the contribution count. Accumulating in
+// FP32 and casting down ONCE, after the kernel, keeps a single rounding.
 template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
 __device__ void mqa_gqa_bwd_fp16_impl(
     const __half* __restrict__ Q,
@@ -390,9 +403,9 @@ __device__ void mqa_gqa_bwd_fp16_impl(
     const __half* __restrict__ dO,
     const float* __restrict__ LSE,
     const float* __restrict__ D,
-    __half* __restrict__ dQ,
-    __half* __restrict__ dK,
-    __half* __restrict__ dV,
+    float* __restrict__ dQ,
+    float* __restrict__ dK,
+    float* __restrict__ dV,
     const int batch_size,
     const int num_q_heads,
     const int num_kv_heads,
@@ -440,9 +453,9 @@ __device__ void mqa_gqa_bwd_fp16_impl(
     const __half* dO_base = dO + q_offset;
     const float* LSE_base = LSE + lse_offset;
     const float* D_base = D + lse_offset;
-    __half* dQ_base = dQ + q_offset;
-    __half* dK_base = dK + kv_offset;
-    __half* dV_base = dV + kv_offset;
+    float* dQ_base = dQ + q_offset;
+    float* dK_base = dK + kv_offset;
+    float* dV_base = dV + kv_offset;
 
     // Load K and V tiles (convert F16 to F32 in shared memory)
     for (int i = tid; i < k_tile_size * HEAD_DIM; i += blockDim.x) {
@@ -559,7 +572,7 @@ __device__ void mqa_gqa_bwd_fp16_impl(
             if (tid == q_row) {
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    atomicAddHalf(&dQ_base[q_pos * HEAD_DIM + d], __float2half(dQ_local[d]));
+                    atomicAdd(&dQ_base[q_pos * HEAD_DIM + d], dQ_local[d]);
                 }
             }
         }
@@ -571,8 +584,8 @@ __device__ void mqa_gqa_bwd_fp16_impl(
     if (k_row < k_tile_size && (k_start + k_row) < seq_len_k) {
         #pragma unroll
         for (int d = 0; d < HEAD_DIM; ++d) {
-            atomicAddHalf(&dK_base[(k_start + k_row) * HEAD_DIM + d], __float2half(dK_local[d]));
-            atomicAddHalf(&dV_base[(k_start + k_row) * HEAD_DIM + d], __float2half(dV_local[d]));
+            atomicAdd(&dK_base[(k_start + k_row) * HEAD_DIM + d], dK_local[d]);
+            atomicAdd(&dV_base[(k_start + k_row) * HEAD_DIM + d], dV_local[d]);
         }
     }
 
@@ -637,12 +650,14 @@ EXPORT_MQA_GQA_BWD_FP32(128, 64, 32, fp32_sm)
 // Kernel Exports - FP16
 // ============================================================================
 
+// The gradient parameters are `float*`: the launcher passes F32 scratch buffers
+// and casts them down to the caller's dtype once, after the kernel.
 #define EXPORT_MQA_GQA_BWD_FP16(HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX) \
 extern "C" __global__ void mqa_gqa_bwd_##HEAD_DIM##_##SUFFIX( \
     const __half* Q, const __half* K, const __half* V, \
     const __half* O, const __half* dO, \
     const float* LSE, const float* D, \
-    __half* dQ, __half* dK, __half* dV, \
+    float* dQ, float* dK, float* dV, \
     const int batch_size, const int num_q_heads, const int num_kv_heads, \
     const int seq_len_q, const int seq_len_k, \
     const float scale, const int causal \
@@ -759,6 +774,10 @@ EXPORT_PREPROCESS_BWD_DTYPE(boostr_fp8_e5m2, 128, fp8_e5m2)
 // Dtype-Generic Main Backward Implementation
 // ============================================================================
 
+// `dQ`, `dK` and `dV` are FP32 accumulators, NOT `T` buffers — see the note on
+// `mqa_gqa_bwd_fp16_impl`. `scale_dq` / `scale_dk` / `scale_dv` are applied to
+// each contribution before the FP32 atomic, exactly as before, so the cast that
+// follows the kernel must not reapply them.
 template<typename T, int HEAD_DIM, int BLOCK_M, int BLOCK_N>
 __device__ void mqa_gqa_bwd_dtype_impl(
     const T* __restrict__ Q,
@@ -768,9 +787,9 @@ __device__ void mqa_gqa_bwd_dtype_impl(
     const T* __restrict__ dO,
     const float* __restrict__ LSE,
     const float* __restrict__ D,
-    T* __restrict__ dQ,
-    T* __restrict__ dK,
-    T* __restrict__ dV,
+    float* __restrict__ dQ,
+    float* __restrict__ dK,
+    float* __restrict__ dV,
     const int batch_size,
     const int num_q_heads,
     const int num_kv_heads,
@@ -826,9 +845,9 @@ __device__ void mqa_gqa_bwd_dtype_impl(
     const T* dO_base = dO + q_offset;
     const float* LSE_base = LSE + lse_offset;
     const float* D_base = D + lse_offset;
-    T* dQ_base = dQ + q_offset;
-    T* dK_base = dK + kv_offset;
-    T* dV_base = dV + kv_offset;
+    float* dQ_base = dQ + q_offset;
+    float* dK_base = dK + kv_offset;
+    float* dV_base = dV + kv_offset;
 
     // Load K and V tiles
     for (int i = tid; i < k_tile_size * HEAD_DIM; i += blockDim.x) {
@@ -946,7 +965,7 @@ __device__ void mqa_gqa_bwd_dtype_impl(
             if (tid == q_row) {
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    atomic_add_dtype(&dQ_base[q_pos * HEAD_DIM + d], dQ_local[d] * scale_dq);
+                    atomicAdd(&dQ_base[q_pos * HEAD_DIM + d], dQ_local[d] * scale_dq);
                 }
             }
         }
@@ -958,8 +977,8 @@ __device__ void mqa_gqa_bwd_dtype_impl(
     if (k_row < k_tile_size && (k_start + k_row) < seq_len_k) {
         #pragma unroll
         for (int d = 0; d < HEAD_DIM; ++d) {
-            atomic_add_dtype(&dK_base[(k_start + k_row) * HEAD_DIM + d], dK_local[d] * scale_dk);
-            atomic_add_dtype(&dV_base[(k_start + k_row) * HEAD_DIM + d], dV_local[d] * scale_dv);
+            atomicAdd(&dK_base[(k_start + k_row) * HEAD_DIM + d], dK_local[d] * scale_dk);
+            atomicAdd(&dV_base[(k_start + k_row) * HEAD_DIM + d], dV_local[d] * scale_dv);
         }
     }
 
@@ -973,12 +992,14 @@ __device__ void mqa_gqa_bwd_dtype_impl(
 // Kernel Exports - dtype-generic (BF16, FP8)
 // ============================================================================
 
+// The gradient parameters are `float*`: the launcher passes F32 scratch buffers
+// and casts them down to the caller's dtype once, after the kernel.
 #define EXPORT_MQA_GQA_BWD_DTYPE(T, HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX) \
 extern "C" __global__ void mqa_gqa_bwd_##HEAD_DIM##_##SUFFIX( \
     const T* Q, const T* K, const T* V, \
     const T* O, const T* dO, \
     const float* LSE, const float* D, \
-    T* dQ, T* dK, T* dV, \
+    float* dQ, float* dK, float* dV, \
     const int batch_size, const int num_q_heads, const int num_kv_heads, \
     const int seq_len_q, const int seq_len_k, \
     const float scale, const int causal, \

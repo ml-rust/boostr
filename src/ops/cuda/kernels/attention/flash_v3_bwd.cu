@@ -16,6 +16,14 @@
 //      - Compute dS_ij = P_ij * (dP_ij - D_i) * scale (softmax backward)
 //      - Accumulate dK_j += dS_ij^T @ Q_i (local, no atomics)
 //      - Compute dQ_i = dS_ij @ K_j and write with atomics (multiple K blocks contribute)
+//
+// Launch contract (set by ops/cuda/attention/flash_v3.rs):
+//   grid  = (batch_size * num_heads, ceil(seq_len_k / BLOCK_N))
+//   block = (BLOCK_N, 1, 1)
+// Each K block is therefore owned by exactly ONE CUDA block, and thread `tid`
+// owns K row `tid` of that block's tile. dK/dV accumulate in FP32 registers
+// keyed by K position across the whole Q-block loop and are stored WITHOUT
+// atomics. dQ is the only gradient that needs them, one per (q_row, element).
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -176,6 +184,22 @@ __device__ void flash_attention_v3_bwd_kernel(
         q_block_start = k_start / BLOCK_M;
     }
 
+    // dK/dV ownership: thread `tid` owns K row `tid` of this tile for the whole
+    // kernel. The launcher sets blockDim.x == BLOCK_N and the grid hands each K
+    // block to exactly ONE CUDA block, so these accumulators carry K identity
+    // across every Q block and the final store needs no atomics.
+    const int k_row_own = tid;
+    const bool k_valid = (k_row_own < k_size);
+    const int k_global_own = k_start + k_row_own;
+
+    float dK_local[HEAD_DIM];
+    float dV_local[HEAD_DIM];
+    #pragma unroll
+    for (int d = 0; d < HEAD_DIM; ++d) {
+        dK_local[d] = 0.0f;
+        dV_local[d] = 0.0f;
+    }
+
     // Iterate over Q blocks
     for (int q_block_idx = q_block_start; q_block_idx < num_q_blocks; ++q_block_idx) {
         const int q_start = q_block_idx * BLOCK_M;
@@ -191,64 +215,111 @@ __device__ void flash_attention_v3_bwd_kernel(
         }
         __syncthreads();
 
-        // Each thread processes (q,k) pairs
-        for (int qk_idx = tid; qk_idx < q_size * k_size; qk_idx += blockDim.x) {
-            const int q_row = qk_idx / k_size;
-            const int k_row = qk_idx % k_size;
+        // Phase 1 — dQ: thread owns Q row `q_row` and sweeps this K tile,
+        // accumulating in FP32 and emitting ONE atomic per (q_row, d) after the
+        // K loop. dQ keeps atomics because every K block adds to the same Q row.
+        for (int q_row = tid; q_row < q_size; q_row += blockDim.x) {
             const int q_global = q_start + q_row;
-            const int k_global = k_start + k_row;
-
-            // Check causal masking
-            if (causal && q_global < k_global) {
-                continue;
-            }
-
-            // Load saved statistics
             const float lse_val = LSE_base[q_global];
             const float d_val = D_base[q_global];
 
-            // Recompute attention score: S = Q @ K^T
-            float score = 0.0f;
+            float dQ_local[HEAD_DIM];
             #pragma unroll
             for (int d = 0; d < HEAD_DIM; ++d) {
-                score += Q_smem[q_row * HEAD_DIM + d] * K_smem[k_row * HEAD_DIM + d];
-            }
-            score *= scale;
-
-            // Recompute attention probability: P = exp(S - LSE)
-            const float prob = expf(score - lse_val);
-
-            // Compute dP = dO @ V^T
-            float dp = 0.0f;
-            #pragma unroll
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                dp += dO_smem[q_row * HEAD_DIM + d] * V_smem[k_row * HEAD_DIM + d];
+                dQ_local[d] = 0.0f;
             }
 
-            // Compute dS = P * (dP - D) (softmax backward)
-            const float ds = prob * (dp - d_val);
+            for (int j = 0; j < k_size; ++j) {
+                const int k_global = k_start + j;
+                if (causal && q_global < k_global) {
+                    continue;
+                }
 
-            // Accumulate dV += P^T @ dO (use atomics for thread safety)
-            #pragma unroll
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                atomicAdd(&dV_base[k_global * HEAD_DIM + d], prob * dO_smem[q_row * HEAD_DIM + d]);
+                // Recompute attention score: S = Q @ K^T
+                float score = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    score += Q_smem[q_row * HEAD_DIM + d] * K_smem[j * HEAD_DIM + d];
+                }
+                score *= scale;
+
+                // Recompute attention probability: P = exp(S - LSE)
+                const float prob = expf(score - lse_val);
+
+                // Compute dP = dO @ V^T
+                float dp = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    dp += dO_smem[q_row * HEAD_DIM + d] * V_smem[j * HEAD_DIM + d];
+                }
+
+                // Softmax backward: dS = P * (dP - D) * scale
+                const float ds = prob * (dp - d_val) * scale;
+
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    dQ_local[d] += ds * K_smem[j * HEAD_DIM + d];
+                }
             }
 
-            // Accumulate dK += scale * dS^T @ Q (use atomics for thread safety)
             #pragma unroll
             for (int d = 0; d < HEAD_DIM; ++d) {
-                atomicAdd(&dK_base[k_global * HEAD_DIM + d], scale * ds * Q_smem[q_row * HEAD_DIM + d]);
+                atomicAdd(&dQ_base[q_global * HEAD_DIM + d], dQ_local[d]);
             }
+        }
 
-            // Compute dQ = scale * dS @ K and write with atomic
-            #pragma unroll
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                const float dq_val = scale * ds * K_smem[k_row * HEAD_DIM + d];
-                atomicAdd(&dQ_base[q_global * HEAD_DIM + d], dq_val);
+        // Phase 2 — dK/dV: ownership transposes to K rows. Thread `k_row_own`
+        // sweeps this tile's Q rows and sums into its FP32 accumulators, so each
+        // accumulator holds sum_q for exactly one K position. Scores are
+        // recomputed rather than staged: a BLOCK_M x BLOCK_N P/dS tile would not
+        // fit the shared-memory budget this kernel is launched with.
+        if (k_valid) {
+            for (int qr = 0; qr < q_size; ++qr) {
+                const int q_global = q_start + qr;
+                if (causal && q_global < k_global_own) {
+                    continue;
+                }
+
+                const float lse_val = LSE_base[q_global];
+                const float d_val = D_base[q_global];
+
+                float score = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    score += Q_smem[qr * HEAD_DIM + d] * K_smem[k_row_own * HEAD_DIM + d];
+                }
+                score *= scale;
+
+                const float prob = expf(score - lse_val);
+
+                float dp = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    dp += dO_smem[qr * HEAD_DIM + d] * V_smem[k_row_own * HEAD_DIM + d];
+                }
+
+                const float ds = prob * (dp - d_val) * scale;
+
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    dK_local[d] += ds * Q_smem[qr * HEAD_DIM + d];
+                    dV_local[d] += prob * dO_smem[qr * HEAD_DIM + d];
+                }
             }
         }
 
         __syncthreads();
+    }
+
+    // Write dK/dV. Each K block is owned by exactly one CUDA block, so a plain
+    // store is correct — and required, since the launcher allocates dK/dV
+    // without zeroing them.
+    if (k_valid) {
+        #pragma unroll
+        for (int d = 0; d < HEAD_DIM; ++d) {
+            dK_base[k_global_own * HEAD_DIM + d] = dK_local[d];
+            dV_base[k_global_own * HEAD_DIM + d] = dV_local[d];
+        }
     }
 }
 
@@ -406,7 +477,14 @@ __device__ void flash_attention_v3_bwd_fp16_kernel(
         q_block_start = k_start / BLOCK_M;
     }
 
-    // FP32 accumulators for dK and dV
+    // dK/dV ownership: thread `tid` owns K row `tid` of this tile for the whole
+    // kernel. The launcher sets blockDim.x == BLOCK_N and the grid hands each K
+    // block to exactly ONE CUDA block, so these FP32 accumulators carry K
+    // identity across every Q block and the final store needs no atomics.
+    const int k_row_own = tid;
+    const bool k_valid = (k_row_own < k_size);
+    const int k_global_own = k_start + k_row_own;
+
     float dK_local[HEAD_DIM];
     float dV_local[HEAD_DIM];
 
@@ -431,15 +509,23 @@ __device__ void flash_attention_v3_bwd_fp16_kernel(
         }
         __syncthreads();
 
-        // Process each query position
+        // Phase 1 — dQ: thread owns Q row `q_row` and sweeps this K tile,
+        // accumulating in FP32 and emitting ONE atomic per (q_row, d) after the
+        // K loop. dQ keeps atomics because every K block adds to the same Q row.
         for (int q_row = tid; q_row < q_size; q_row += blockDim.x) {
             const int q_global = q_start + q_row;
 
             const float lse_val = LSE_base[q_global];
             const float d_val = D_base[q_global];
 
-            for (int k_row = 0; k_row < k_size; ++k_row) {
-                const int k_global = k_start + k_row;
+            float dQ_local[HEAD_DIM];
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dQ_local[d] = 0.0f;
+            }
+
+            for (int j = 0; j < k_size; ++j) {
+                const int k_global = k_start + j;
 
                 if (causal && q_global < k_global) {
                     continue;
@@ -449,7 +535,7 @@ __device__ void flash_attention_v3_bwd_fp16_kernel(
                 float score = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += __half2float(Q_smem[q_row * HEAD_DIM + d]) * __half2float(K_smem[k_row * HEAD_DIM + d]);
+                    score += __half2float(Q_smem[q_row * HEAD_DIM + d]) * __half2float(K_smem[j * HEAD_DIM + d]);
                 }
                 score *= scale;
 
@@ -459,22 +545,58 @@ __device__ void flash_attention_v3_bwd_fp16_kernel(
                 float dp = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    dp += __half2float(dO_smem[q_row * HEAD_DIM + d]) * __half2float(V_smem[k_row * HEAD_DIM + d]);
+                    dp += __half2float(dO_smem[q_row * HEAD_DIM + d]) * __half2float(V_smem[j * HEAD_DIM + d]);
                 }
 
                 const float ds = prob * (dp - d_val) * scale;
 
-                // Accumulate dV and dK in FP32
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    dV_local[d] += prob * __half2float(dO_smem[q_row * HEAD_DIM + d]);
-                    dK_local[d] += ds * __half2float(Q_smem[q_row * HEAD_DIM + d]);
+                    dQ_local[d] += ds * __half2float(K_smem[j * HEAD_DIM + d]);
+                }
+            }
+
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                atomic_add_dtype(&dQ_base[q_global * HEAD_DIM + d], dQ_local[d]);
+            }
+        }
+
+        // Phase 2 — dK/dV: ownership transposes to K rows. Thread `k_row_own`
+        // sweeps this tile's Q rows and sums into its FP32 accumulators, so each
+        // accumulator holds sum_q for exactly one K position.
+        if (k_valid) {
+            for (int qr = 0; qr < q_size; ++qr) {
+                const int q_global = q_start + qr;
+
+                if (causal && q_global < k_global_own) {
+                    continue;
                 }
 
-                // Compute dQ and write with atomic using dtype-safe helper
+                const float lse_val = LSE_base[q_global];
+                const float d_val = D_base[q_global];
+
+                float score = 0.0f;
+                #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    const float dq_val = ds * __half2float(K_smem[k_row * HEAD_DIM + d]);
-                    atomic_add_dtype(&dQ_base[q_global * HEAD_DIM + d], dq_val);
+                    score += __half2float(Q_smem[qr * HEAD_DIM + d]) * __half2float(K_smem[k_row_own * HEAD_DIM + d]);
+                }
+                score *= scale;
+
+                const float prob = expf(score - lse_val);
+
+                float dp = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    dp += __half2float(dO_smem[qr * HEAD_DIM + d]) * __half2float(V_smem[k_row_own * HEAD_DIM + d]);
+                }
+
+                const float ds = prob * (dp - d_val) * scale;
+
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    dK_local[d] += ds * __half2float(Q_smem[qr * HEAD_DIM + d]);
+                    dV_local[d] += prob * __half2float(dO_smem[qr * HEAD_DIM + d]);
                 }
             }
         }
@@ -482,13 +604,14 @@ __device__ void flash_attention_v3_bwd_fp16_kernel(
         __syncthreads();
     }
 
-    // Write final dK and dV (convert FP32 -> FP16)
-    for (int k_row = tid; k_row < k_size; k_row += blockDim.x) {
-        const int k_global = k_start + k_row;
+    // Write final dK and dV (convert FP32 -> FP16). Each K block is owned by
+    // exactly one CUDA block, so a plain store is correct — and required, since
+    // the launcher allocates dK/dV without zeroing them.
+    if (k_valid) {
         #pragma unroll
         for (int d = 0; d < HEAD_DIM; ++d) {
-            dK_base[k_global * HEAD_DIM + d] = __float2half(dK_local[d]);
-            dV_base[k_global * HEAD_DIM + d] = __float2half(dV_local[d]);
+            dK_base[k_global_own * HEAD_DIM + d] = __float2half(dK_local[d]);
+            dV_base[k_global_own * HEAD_DIM + d] = __float2half(dV_local[d]);
         }
     }
 }
@@ -643,7 +766,14 @@ __device__ void flash_attention_v3_bwd_bf16_kernel(
         q_block_start = k_start / BLOCK_M;
     }
 
-    // FP32 accumulators for dK and dV
+    // dK/dV ownership: thread `tid` owns K row `tid` of this tile for the whole
+    // kernel. The launcher sets blockDim.x == BLOCK_N and the grid hands each K
+    // block to exactly ONE CUDA block, so these FP32 accumulators carry K
+    // identity across every Q block and the final store needs no atomics.
+    const int k_row_own = tid;
+    const bool k_valid = (k_row_own < k_size);
+    const int k_global_own = k_start + k_row_own;
+
     float dK_local[HEAD_DIM];
     float dV_local[HEAD_DIM];
 
@@ -668,15 +798,23 @@ __device__ void flash_attention_v3_bwd_bf16_kernel(
         }
         __syncthreads();
 
-        // Process each query position
+        // Phase 1 — dQ: thread owns Q row `q_row` and sweeps this K tile,
+        // accumulating in FP32 and emitting ONE atomic per (q_row, d) after the
+        // K loop. dQ keeps atomics because every K block adds to the same Q row.
         for (int q_row = tid; q_row < q_size; q_row += blockDim.x) {
             const int q_global = q_start + q_row;
 
             const float lse_val = LSE_base[q_global];
             const float d_val = D_base[q_global];
 
-            for (int k_row = 0; k_row < k_size; ++k_row) {
-                const int k_global = k_start + k_row;
+            float dQ_local[HEAD_DIM];
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dQ_local[d] = 0.0f;
+            }
+
+            for (int j = 0; j < k_size; ++j) {
+                const int k_global = k_start + j;
 
                 if (causal && q_global < k_global) {
                     continue;
@@ -686,7 +824,7 @@ __device__ void flash_attention_v3_bwd_bf16_kernel(
                 float score = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += __bfloat162float(Q_smem[q_row * HEAD_DIM + d]) * __bfloat162float(K_smem[k_row * HEAD_DIM + d]);
+                    score += __bfloat162float(Q_smem[q_row * HEAD_DIM + d]) * __bfloat162float(K_smem[j * HEAD_DIM + d]);
                 }
                 score *= scale;
 
@@ -696,22 +834,58 @@ __device__ void flash_attention_v3_bwd_bf16_kernel(
                 float dp = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    dp += __bfloat162float(dO_smem[q_row * HEAD_DIM + d]) * __bfloat162float(V_smem[k_row * HEAD_DIM + d]);
+                    dp += __bfloat162float(dO_smem[q_row * HEAD_DIM + d]) * __bfloat162float(V_smem[j * HEAD_DIM + d]);
                 }
 
                 const float ds = prob * (dp - d_val) * scale;
 
-                // Accumulate dV and dK in FP32
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    dV_local[d] += prob * __bfloat162float(dO_smem[q_row * HEAD_DIM + d]);
-                    dK_local[d] += ds * __bfloat162float(Q_smem[q_row * HEAD_DIM + d]);
+                    dQ_local[d] += ds * __bfloat162float(K_smem[j * HEAD_DIM + d]);
+                }
+            }
+
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                atomic_add_dtype(&dQ_base[q_global * HEAD_DIM + d], dQ_local[d]);
+            }
+        }
+
+        // Phase 2 — dK/dV: ownership transposes to K rows. Thread `k_row_own`
+        // sweeps this tile's Q rows and sums into its FP32 accumulators, so each
+        // accumulator holds sum_q for exactly one K position.
+        if (k_valid) {
+            for (int qr = 0; qr < q_size; ++qr) {
+                const int q_global = q_start + qr;
+
+                if (causal && q_global < k_global_own) {
+                    continue;
                 }
 
-                // Compute dQ and write with atomic using dtype-safe helper
+                const float lse_val = LSE_base[q_global];
+                const float d_val = D_base[q_global];
+
+                float score = 0.0f;
+                #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    const float dq_val = ds * __bfloat162float(K_smem[k_row * HEAD_DIM + d]);
-                    atomic_add_dtype(&dQ_base[q_global * HEAD_DIM + d], dq_val);
+                    score += __bfloat162float(Q_smem[qr * HEAD_DIM + d]) * __bfloat162float(K_smem[k_row_own * HEAD_DIM + d]);
+                }
+                score *= scale;
+
+                const float prob = expf(score - lse_val);
+
+                float dp = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    dp += __bfloat162float(dO_smem[qr * HEAD_DIM + d]) * __bfloat162float(V_smem[k_row_own * HEAD_DIM + d]);
+                }
+
+                const float ds = prob * (dp - d_val) * scale;
+
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    dK_local[d] += ds * __bfloat162float(Q_smem[qr * HEAD_DIM + d]);
+                    dV_local[d] += prob * __bfloat162float(dO_smem[qr * HEAD_DIM + d]);
                 }
             }
         }
@@ -719,13 +893,14 @@ __device__ void flash_attention_v3_bwd_bf16_kernel(
         __syncthreads();
     }
 
-    // Write final dK and dV (convert FP32 -> BF16)
-    for (int k_row = tid; k_row < k_size; k_row += blockDim.x) {
-        const int k_global = k_start + k_row;
+    // Write final dK and dV (convert FP32 -> BF16). Each K block is owned by
+    // exactly one CUDA block, so a plain store is correct — and required, since
+    // the launcher allocates dK/dV without zeroing them.
+    if (k_valid) {
         #pragma unroll
         for (int d = 0; d < HEAD_DIM; ++d) {
-            dK_base[k_global * HEAD_DIM + d] = __float2bfloat16(dK_local[d]);
-            dV_base[k_global * HEAD_DIM + d] = __float2bfloat16(dV_local[d]);
+            dK_base[k_global_own * HEAD_DIM + d] = __float2bfloat16(dK_local[d]);
+            dV_base[k_global_own * HEAD_DIM + d] = __float2bfloat16(dV_local[d]);
         }
     }
 }
@@ -897,7 +1072,15 @@ __device__ void flash_attention_v3_bwd_fp8_kernel(
         q_block_start = k_start / BLOCK_M;
     }
 
-    // FP32 accumulators for dK and dV
+    // dK/dV ownership: thread `tid` owns K row `tid` of this tile for the whole
+    // kernel. The launcher sets blockDim.x == BLOCK_N and the grid hands each K
+    // block to exactly ONE CUDA block, so these FP32 accumulators carry K
+    // identity across every Q block and the final store needs no atomics. Every
+    // product is summed in FP32 and rounded to FP8 exactly once, at the store.
+    const int k_row_own = tid;
+    const bool k_valid = (k_row_own < k_size);
+    const int k_global_own = k_start + k_row_own;
+
     float dK_local[HEAD_DIM];
     float dV_local[HEAD_DIM];
 
@@ -922,15 +1105,23 @@ __device__ void flash_attention_v3_bwd_fp8_kernel(
         }
         __syncthreads();
 
-        // Process each query position
+        // Phase 1 — dQ: thread owns Q row `q_row` and sweeps this K tile,
+        // accumulating in FP32 and emitting ONE atomic per (q_row, d) after the
+        // K loop. dQ keeps atomics because every K block adds to the same Q row.
         for (int q_row = tid; q_row < q_size; q_row += blockDim.x) {
             const int q_global = q_start + q_row;
 
             const float lse_val = LSE_base[q_global];
             const float d_val = D_base[q_global];
 
-            for (int k_row = 0; k_row < k_size; ++k_row) {
-                const int k_global = k_start + k_row;
+            float dQ_local[HEAD_DIM];
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dQ_local[d] = 0.0f;
+            }
+
+            for (int j = 0; j < k_size; ++j) {
+                const int k_global = k_start + j;
 
                 if (causal && q_global < k_global) {
                     continue;
@@ -941,7 +1132,7 @@ __device__ void flash_attention_v3_bwd_fp8_kernel(
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     float q_val = fp8_e4m3_to_f32(Q_smem[q_row * HEAD_DIM + d], Q_scale);
-                    float k_val = fp8_e4m3_to_f32(K_smem[k_row * HEAD_DIM + d], K_scale);
+                    float k_val = fp8_e4m3_to_f32(K_smem[j * HEAD_DIM + d], K_scale);
                     score += q_val * k_val;
                 }
                 score *= scale;
@@ -953,26 +1144,69 @@ __device__ void flash_attention_v3_bwd_fp8_kernel(
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     float dO_val = fp8_e4m3_to_f32(dO_smem[q_row * HEAD_DIM + d], dO_scale);
-                    float v_val = fp8_e4m3_to_f32(V_smem[k_row * HEAD_DIM + d], V_scale);
+                    float v_val = fp8_e4m3_to_f32(V_smem[j * HEAD_DIM + d], V_scale);
                     dp += dO_val * v_val;
                 }
 
                 const float ds = prob * (dp - d_val) * scale;
 
-                // Accumulate dV and dK in FP32
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    float dO_val = fp8_e4m3_to_f32(dO_smem[q_row * HEAD_DIM + d], dO_scale);
-                    float q_val = fp8_e4m3_to_f32(Q_smem[q_row * HEAD_DIM + d], Q_scale);
-                    dV_local[d] += prob * dO_val;
-                    dK_local[d] += ds * q_val;
+                    dQ_local[d] += ds * fp8_e4m3_to_f32(K_smem[j * HEAD_DIM + d], K_scale);
+                }
+            }
+
+            // `atomic_add_dtype` for FP8 accumulates in the raw code domain
+            // (decode and encode without a scale), so the delta is pre-scaled by
+            // dQ_scale to match the storage convention `stored_code / dQ_scale`
+            // used by `fp8_e4m3_to_f32` and by the dK/dV stores below.
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                atomic_add_dtype(&dQ_base[q_global * HEAD_DIM + d], dQ_local[d] * dQ_scale);
+            }
+        }
+
+        // Phase 2 — dK/dV: ownership transposes to K rows. Thread `k_row_own`
+        // sweeps this tile's Q rows and sums into its FP32 accumulators, so each
+        // accumulator holds sum_q for exactly one K position.
+        if (k_valid) {
+            for (int qr = 0; qr < q_size; ++qr) {
+                const int q_global = q_start + qr;
+
+                if (causal && q_global < k_global_own) {
+                    continue;
                 }
 
-                // Compute dQ and write with atomic using dtype-safe helper
+                const float lse_val = LSE_base[q_global];
+                const float d_val = D_base[q_global];
+
+                float score = 0.0f;
+                #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    float k_val = fp8_e4m3_to_f32(K_smem[k_row * HEAD_DIM + d], K_scale);
-                    const float dq_val = ds * k_val;
-                    atomic_add_dtype(&dQ_base[q_global * HEAD_DIM + d], dq_val);
+                    float q_val = fp8_e4m3_to_f32(Q_smem[qr * HEAD_DIM + d], Q_scale);
+                    float k_val = fp8_e4m3_to_f32(K_smem[k_row_own * HEAD_DIM + d], K_scale);
+                    score += q_val * k_val;
+                }
+                score *= scale;
+
+                const float prob = expf(score - lse_val);
+
+                float dp = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    float dO_val = fp8_e4m3_to_f32(dO_smem[qr * HEAD_DIM + d], dO_scale);
+                    float v_val = fp8_e4m3_to_f32(V_smem[k_row_own * HEAD_DIM + d], V_scale);
+                    dp += dO_val * v_val;
+                }
+
+                const float ds = prob * (dp - d_val) * scale;
+
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    float dO_val = fp8_e4m3_to_f32(dO_smem[qr * HEAD_DIM + d], dO_scale);
+                    float q_val = fp8_e4m3_to_f32(Q_smem[qr * HEAD_DIM + d], Q_scale);
+                    dK_local[d] += ds * q_val;
+                    dV_local[d] += prob * dO_val;
                 }
             }
         }
@@ -980,13 +1214,14 @@ __device__ void flash_attention_v3_bwd_fp8_kernel(
         __syncthreads();
     }
 
-    // Write final dK and dV (convert FP32 -> FP8)
-    for (int k_row = tid; k_row < k_size; k_row += blockDim.x) {
-        const int k_global = k_start + k_row;
+    // Write final dK and dV (convert FP32 -> FP8). Each K block is owned by
+    // exactly one CUDA block, so a plain store is correct — and required, since
+    // the launcher allocates dK/dV without zeroing them.
+    if (k_valid) {
         #pragma unroll
         for (int d = 0; d < HEAD_DIM; ++d) {
-            dK_base[k_global * HEAD_DIM + d] = boostr_fp8_e4m3(f32_to_fp8_e4m3_raw(dK_local[d], dK_scale));
-            dV_base[k_global * HEAD_DIM + d] = boostr_fp8_e4m3(f32_to_fp8_e4m3_raw(dV_local[d], dV_scale));
+            dK_base[k_global_own * HEAD_DIM + d] = boostr_fp8_e4m3(f32_to_fp8_e4m3_raw(dK_local[d], dK_scale));
+            dV_base[k_global_own * HEAD_DIM + d] = boostr_fp8_e4m3(f32_to_fp8_e4m3_raw(dV_local[d], dV_scale));
         }
     }
 }

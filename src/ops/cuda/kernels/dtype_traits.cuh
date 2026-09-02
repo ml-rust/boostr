@@ -51,7 +51,15 @@ struct boostr_fp8_e5m2 {
 // - SM 8.9+ (Hopper): Hardware intrinsics for maximum performance
 // ============================================================================
 
-#if __CUDA_ARCH__ >= 800  // Ampere and newer have FP8 support
+// Compiled for every architecture, and for the host pass.
+//
+// `convert_dtype` names these helpers from branches that `if constexpr`
+// discards for non-FP8 types, but the names are still bound when the template
+// is parsed. Excluding them below SM 8.0 therefore broke every translation unit
+// that instantiates `convert_dtype` at all, on the compute_75 pass and on the
+// host pass. Nothing here needs SM 8.0: the hardware `cvt` intrinsics are
+// already behind their own `__CUDA_ARCH__ >= 890` guards, each with a software
+// fallback that is plain bit manipulation.
 
 // ============================================================================
 // FP8 Software Conversion — numr is the source of truth
@@ -363,7 +371,7 @@ __device__ __forceinline__ uint8_t f32_to_fp8_e5m2_raw(float x, float scale = 1.
     return boostr_f32_to_fp8_e5m2_bits(x * scale);
 #endif
 }
-#endif  // __CUDA_ARCH__ >= 800
+// End of the FP8 conversion utilities.
 
 // ============================================================================
 // DType Traits - Compile-time type information

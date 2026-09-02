@@ -9,7 +9,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::decode_split::decode_split_count;
+use super::decode_split::{decode_dtype_suffix, decode_split_count};
 
 /// Paged decode attention — S_q=1 specialized fast path.
 ///
@@ -31,7 +31,8 @@ pub(super) fn paged_decode_attention_fwd(
     head_dim: usize,
     block_size: usize,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
-    let stem = format!("paged_decode_attention_{}_fp32", head_dim);
+    let suffix = decode_dtype_suffix(q.dtype())?;
+    let stem = format!("paged_decode_attention_{head_dim}_{suffix}");
     let device = q.device();
     let device_index = device.id();
 
@@ -42,7 +43,7 @@ pub(super) fn paged_decode_attention_fwd(
     )?;
 
     let output =
-        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, 1, head_dim], DType::F32, device)?;
+        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, 1, head_dim], q.dtype(), device)?;
     let lse = Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, 1], DType::F32, device)?;
 
     let max_num_blocks = block_table.shape()[1];
@@ -109,7 +110,7 @@ pub(super) fn paged_decode_attention_fwd(
             kernels::get_or_load_module(client.context(), device_index, DECODE_ATTENTION_MODULE)?;
         let combine_func = kernels::get_kernel_function(
             &combine_module,
-            &format!("decode_attention_{head_dim}_fp32_combine"),
+            &format!("decode_attention_{head_dim}_{suffix}_combine"),
         )?;
         let combine_cfg = LaunchConfig {
             grid_dim: (base_blocks as u32, 1, 1),
@@ -188,7 +189,10 @@ pub fn paged_decode_attention_fwd_graph(
     block_size: usize,
     max_num_blocks: usize,
 ) -> Result<()> {
-    let kernel_name = format!("paged_decode_attention_{}_fp32_graph", head_dim);
+    let kernel_name = format!(
+        "paged_decode_attention_{head_dim}_{}_graph",
+        decode_dtype_suffix(q.dtype())?
+    );
     let device = q.device();
     let device_index = device.id();
 

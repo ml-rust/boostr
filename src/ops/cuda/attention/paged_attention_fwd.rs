@@ -9,6 +9,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
+use super::decode_split::decode_supports_dtype;
 use super::paged_attention::fwd_block_config;
 use super::paged_decode::paged_decode_attention_fwd;
 
@@ -39,7 +40,7 @@ pub(super) fn paged_attention_fwd_impl(
     let dtype = q.dtype();
 
     // Fast path: S_q=1 decode with specialized kernel (no shared memory tiling overhead)
-    if seq_len_q == 1 && dtype == DType::F32 && (head_dim == 64 || head_dim == 128) {
+    if seq_len_q == 1 && decode_supports_dtype(dtype) && (head_dim == 64 || head_dim == 128) {
         return paged_decode_attention_fwd(
             client,
             q,

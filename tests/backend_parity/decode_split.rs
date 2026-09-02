@@ -161,3 +161,150 @@ fn decode_split_wide_score_range_parity() {
 fn decode_split_batched_parity() {
     assert_decode_parity("decode_batched", 3, 4, 4, 64, 512, 512, 1.0);
 }
+
+/// Runs one decode shape in a half dtype and compares against the F32 CUDA
+/// decode of the same values.
+///
+/// F32 is the reference rather than CPU: the kernel keeps its softmax state and
+/// accumulator in F32 whatever the tensor dtype, so the only difference is the
+/// rounding of the stored Q/K/V and output. Comparing against CPU F32 would
+/// fold in that storage rounding and say nothing about the kernel.
+#[cfg(all(feature = "cuda", feature = "f16"))]
+#[allow(clippy::too_many_arguments)]
+fn assert_decode_half_parity(
+    label: &str,
+    dtype: numr::dtype::DType,
+    batch: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    seq_len_k: usize,
+) {
+    use numr::ops::TypeConversionOps;
+    use numr::tensor::Tensor;
+
+    let (_, cpu_device) = setup_cpu();
+    let q_shape = [batch, num_heads, 1, head_dim];
+    let kv_shape = [batch, num_kv_heads, seq_len_k, head_dim];
+    let q_vec = det_tensor(&q_shape, &cpu_device).to_vec::<f32>();
+    let k_vec = det_tensor(&kv_shape, &cpu_device).to_vec::<f32>();
+    let v_vec = det_tensor(&kv_shape, &cpu_device).to_vec::<f32>();
+
+    with_cuda_backend(|client, device| {
+        let q32 = Tensor::from_slice(&q_vec, &q_shape, &device).unwrap();
+        let k32 = Tensor::from_slice(&k_vec, &kv_shape, &device).unwrap();
+        let v32 = Tensor::from_slice(&v_vec, &kv_shape, &device).unwrap();
+
+        // Round-trip through the half dtype first, so both runs see the SAME
+        // values and the comparison isolates the kernel from the rounding.
+        let q_h = client.cast(&q32, dtype).unwrap();
+        let k_h = client.cast(&k32, dtype).unwrap();
+        let v_h = client.cast(&v32, dtype).unwrap();
+        let q_ref = client.cast(&q_h, numr::dtype::DType::F32).unwrap();
+        let k_ref = client.cast(&k_h, numr::dtype::DType::F32).unwrap();
+        let v_ref = client.cast(&v_h, numr::dtype::DType::F32).unwrap();
+
+        let (ref_out, ref_lse) = client
+            .flash_attention_fwd(
+                &q_ref,
+                &k_ref,
+                &v_ref,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                false,
+                0,
+                Some(seq_len_k),
+            )
+            .unwrap_or_else(|e| panic!("F32 reference failed for {label}: {e}"));
+
+        let (half_out, half_lse) = client
+            .flash_attention_fwd(
+                &q_h,
+                &k_h,
+                &v_h,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                false,
+                0,
+                Some(seq_len_k),
+            )
+            .unwrap_or_else(|e| panic!("half decode failed for {label}: {e}"));
+
+        let half_out_f32 = client.cast(&half_out, numr::dtype::DType::F32).unwrap();
+
+        // Only the stored output is rounded to the half dtype; BF16 carries 8
+        // mantissa bits, so the bound is set by that storage step.
+        let (rtol, atol) = match dtype {
+            numr::dtype::DType::BF16 => (8e-3f32, 1e-3f32),
+            _ => (1e-3f32, 1e-4f32),
+        };
+        assert_parity_f32_tol(
+            &half_out_f32.to_vec::<f32>(),
+            &ref_out.to_vec::<f32>(),
+            &format!("{label} output vs F32 decode"),
+            rtol,
+            atol,
+        );
+        assert_parity_f32_tol(
+            &half_lse.to_vec::<f32>(),
+            &ref_lse.to_vec::<f32>(),
+            &format!("{label} lse vs F32 decode"),
+            1e-5,
+            1e-6,
+        );
+    });
+}
+
+/// F16 on the whole-sequence path.
+#[cfg(all(feature = "cuda", feature = "f16"))]
+#[test]
+fn decode_f16_whole_sequence_parity() {
+    assert_decode_half_parity("decode_f16_short", numr::dtype::DType::F16, 1, 4, 4, 64, 64);
+}
+
+/// F16 on the split path, with a KV head group so both index maps run.
+#[cfg(all(feature = "cuda", feature = "f16"))]
+#[test]
+fn decode_f16_split_parity() {
+    assert_decode_half_parity(
+        "decode_f16_split",
+        numr::dtype::DType::F16,
+        1,
+        8,
+        2,
+        128,
+        1024,
+    );
+}
+
+/// BF16 on the whole-sequence path.
+#[cfg(all(feature = "cuda", feature = "f16"))]
+#[test]
+fn decode_bf16_whole_sequence_parity() {
+    assert_decode_half_parity(
+        "decode_bf16_short",
+        numr::dtype::DType::BF16,
+        1,
+        4,
+        4,
+        64,
+        64,
+    );
+}
+
+/// BF16 on the split path.
+#[cfg(all(feature = "cuda", feature = "f16"))]
+#[test]
+fn decode_bf16_split_parity() {
+    assert_decode_half_parity(
+        "decode_bf16_split",
+        numr::dtype::DType::BF16,
+        1,
+        2,
+        2,
+        128,
+        896,
+    );
+}

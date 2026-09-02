@@ -10,6 +10,8 @@
 //! Each slice keeps its own `(m, l)` softmax statistics, so a combine pass
 //! merges them exactly; this module owns only the choice of `splits`.
 
+use crate::error::{Error, Result};
+use numr::dtype::DType;
 use numr::runtime::Device;
 use numr::runtime::cuda::CudaDevice;
 
@@ -65,6 +67,27 @@ fn decode_split_for_units(compute_units: usize, base_blocks: usize, kv_len: usiz
     }
 
     target_blocks.div_ceil(base_blocks).clamp(1, max_splits)
+}
+
+/// Kernel-name dtype suffix for the decode kernels.
+///
+/// The decode kernels are instantiated for the three float dtypes serving uses.
+/// Anything else has no decode kernel and belongs on the general path.
+pub(super) fn decode_dtype_suffix(dtype: DType) -> Result<&'static str> {
+    match dtype {
+        DType::F32 => Ok("fp32"),
+        DType::F16 => Ok("fp16"),
+        DType::BF16 => Ok("bf16"),
+        other => Err(Error::InvalidArgument {
+            arg: "dtype",
+            reason: format!("decode attention supports F32/F16/BF16, got {other:?}"),
+        }),
+    }
+}
+
+/// Whether a decode kernel exists for `dtype`.
+pub(super) fn decode_supports_dtype(dtype: DType) -> bool {
+    matches!(dtype, DType::F32 | DType::F16 | DType::BF16)
 }
 
 #[cfg(test)]

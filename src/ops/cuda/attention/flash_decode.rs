@@ -9,19 +9,21 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::decode_split::decode_split_count;
+use super::decode_split::{decode_dtype_suffix, decode_split_count};
 use super::flash_utils::AttentionParams;
 
-/// Kernel name stem for a supported decode `head_dim`.
-fn decode_kernel_stem(head_dim: usize) -> Result<&'static str> {
-    match head_dim {
-        64 => Ok("decode_attention_64_fp32"),
-        128 => Ok("decode_attention_128_fp32"),
-        other => Err(Error::InvalidArgument {
+/// Kernel name stem for a supported decode `(head_dim, dtype)`.
+fn decode_kernel_stem(head_dim: usize, dtype: DType) -> Result<String> {
+    if head_dim != 64 && head_dim != 128 {
+        return Err(Error::InvalidArgument {
             arg: "head_dim",
-            reason: format!("decode attention supports head_dim 64/128, got {other}"),
-        }),
+            reason: format!("decode attention supports head_dim 64/128, got {head_dim}"),
+        });
     }
+    Ok(format!(
+        "decode_attention_{head_dim}_{}",
+        decode_dtype_suffix(dtype)?
+    ))
 }
 
 /// Decode attention for S_q=1: lightweight vec kernel, no tiling.
@@ -42,7 +44,7 @@ pub(super) fn decode_attention_fwd(
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let device = q.device();
     let device_index = device.id();
-    let stem = decode_kernel_stem(p.head_dim)?;
+    let stem = decode_kernel_stem(p.head_dim, q.dtype())?;
 
     let module = kernels::get_or_load_module(
         client.context(),
@@ -128,7 +130,7 @@ pub(super) fn decode_attention_fwd(
         return Ok((output, lse));
     }
 
-    let func = kernels::get_kernel_function(&module, stem)?;
+    let func = kernels::get_kernel_function(&module, &stem)?;
     let cfg = LaunchConfig {
         grid_dim: (base_blocks as u32, 1, 1),
         block_dim: (p.head_dim as u32, 1, 1),
@@ -184,7 +186,7 @@ pub fn decode_attention_graph_fwd(
 
     // Unlike the non-graph path, nothing upstream of graph mode filters head_dim,
     // so an unsupported one is an error, not an unreachable case.
-    let kernel_name = format!("{}_graph", decode_kernel_stem(head_dim)?);
+    let kernel_name = format!("{}_graph", decode_kernel_stem(head_dim, q.dtype())?);
 
     let module = kernels::get_or_load_module(
         client.context(),

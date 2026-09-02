@@ -37,38 +37,45 @@ fn main() {
     let num_heads = 32usize;
     let head_dim = 128usize;
 
-    // The decode fast path is gated to F32 and to num_kv_heads == num_heads,
-    // so this configuration is what actually reaches it. The GQA case that real
-    // serving uses takes a different kernel; measuring both is the point.
-    for &num_kv_heads in &[32usize, 8] {
-        for &seq_len_k in &[512usize, 4096, 16384] {
-            let q = client
-                .rand(&[1, num_heads, 1, head_dim], DType::F32)
-                .unwrap();
-            let k = client
-                .rand(&[1, num_kv_heads, seq_len_k, head_dim], DType::F32)
-                .unwrap();
-            let v = client
-                .rand(&[1, num_kv_heads, seq_len_k, head_dim], DType::F32)
-                .unwrap();
+    // F16 is what real serving uses. Sweeping both dtypes, plus the window_size
+    // toggle below, shows which kernel each configuration actually reaches.
+    let dtypes: &[DType] = &[DType::F32, DType::F16];
 
-            for _ in 0..ITERS {
-                let out = client
-                    .flash_attention_fwd(
-                        &q,
-                        &k,
-                        &v,
-                        num_heads,
-                        num_kv_heads,
-                        head_dim,
-                        false,
-                        0,
-                        Some(seq_len_k),
-                    )
+    for &dtype in dtypes {
+        for &num_kv_heads in &[32usize, 8] {
+            for &seq_len_k in &[512usize, 4096, 16384] {
+                let q = client.rand(&[1, num_heads, 1, head_dim], dtype).unwrap();
+                let k = client
+                    .rand(&[1, num_kv_heads, seq_len_k, head_dim], dtype)
                     .unwrap();
-                std::hint::black_box(&out);
+                let v = client
+                    .rand(&[1, num_kv_heads, seq_len_k, head_dim], dtype)
+                    .unwrap();
+
+                // `window_size == 0` selects the decode kernel; a window
+                // covering the whole cache is the same computation but routes
+                // to the general tiled kernel — what a dtype without a decode
+                // instantiation falls through to. Measuring both is the point.
+                for &window_size in &[0usize, seq_len_k] {
+                    for _ in 0..ITERS {
+                        let out = client
+                            .flash_attention_fwd(
+                                &q,
+                                &k,
+                                &v,
+                                num_heads,
+                                num_kv_heads,
+                                head_dim,
+                                false,
+                                window_size,
+                                Some(seq_len_k),
+                            )
+                            .unwrap();
+                        std::hint::black_box(&out);
+                    }
+                }
+                client.synchronize();
             }
-            client.synchronize();
         }
     }
 }

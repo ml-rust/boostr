@@ -10,6 +10,7 @@ use numr::dtype::DType;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
+use super::decode_split;
 use super::flash_bwd;
 use super::flash_bwd_fp8;
 use super::flash_decode;
@@ -42,9 +43,11 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             p.seq_len_k = seq_len;
         }
 
-        // Decode path: S_q=1, use lightweight vec kernel (supports separate stride)
+        // Decode path: S_q=1, use lightweight vec kernel (supports separate stride).
+        // Instantiated for F32/F16/BF16; anything else falls through to the
+        // general kernel, which tiles a one-row query and is far slower here.
         if p.seq_len_q == 1
-            && q.dtype() == DType::F32
+            && decode_split::decode_supports_dtype(q.dtype())
             && (head_dim == 64 || head_dim == 128)
             && window_size == 0
         {

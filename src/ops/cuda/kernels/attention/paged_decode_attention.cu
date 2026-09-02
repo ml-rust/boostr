@@ -5,7 +5,10 @@
 //
 // Cache layout: [num_blocks, block_size, num_kv_heads, head_dim]
 // Q layout: [B, num_heads, 1, D]
-// Output: [B, num_heads, 1, D], LSE: [B, num_heads, 1]
+// Output: [B, num_heads, 1, D], LSE: [B, num_heads, 1] (always F32)
+//
+// Q/K/V/O carry the tensor dtype; the softmax state and the accumulator are
+// always F32.
 //
 // Two grid shapes, matching decode_attention.cu:
 //   - Whole-sequence: one block per (batch, Q head). The grid is then
@@ -18,7 +21,7 @@
 // Splitting on KV blocks rather than tokens keeps every slice boundary aligned
 // with a block_table entry, so a slice never straddles a page.
 
-#include <cuda_runtime.h>
+#include "../dtype_traits.cuh"
 #include <stdint.h>
 
 // Positions consumed per barrier round. The block reduces one dot product per
@@ -37,11 +40,11 @@
 //
 // Every thread of the block must call this with the same range: it contains
 // block-wide barriers.
-template<int D>
+template<typename T, int D>
 __device__ __forceinline__ void paged_decode_core(
-    const float* __restrict__ q_row,
-    const float* __restrict__ K_blocks,
-    const float* __restrict__ V_blocks,
+    const T* __restrict__ q_row,
+    const T* __restrict__ K_blocks,
+    const T* __restrict__ V_blocks,
     const int* __restrict__ bt,
     int kv_h, int num_kv_heads, int seq_len_k, int block_size,
     int blk_begin, int blk_end, float scale,
@@ -55,7 +58,7 @@ __device__ __forceinline__ void paged_decode_core(
 
     __shared__ float smem_qk[PAGED_DECODE_PER_ITER][NW];
 
-    const float q_val = q_row[tid] * scale;
+    const float q_val = convert_dtype<float>(q_row[tid]) * scale;
 
     acc = 0.0f;
     m = -INFINITY;
@@ -75,7 +78,8 @@ __device__ __forceinline__ void paged_decode_core(
             float qk[PAGED_DECODE_PER_ITER];
             #pragma unroll
             for (int r = 0; r < PAGED_DECODE_PER_ITER; r++)
-                qk[r] = q_val * K_blocks[block_base + (size_t)(off + r) * kv_stride + tid];
+                qk[r] = q_val * convert_dtype<float>(
+                    K_blocks[block_base + (size_t)(off + r) * kv_stride + tid]);
 
             #pragma unroll
             for (int r = 0; r < PAGED_DECODE_PER_ITER; r++) {
@@ -100,7 +104,8 @@ __device__ __forceinline__ void paged_decode_core(
                 for (int w = 0; w < NW; w++)
                     dot += smem_qk[r][w];
 
-                float v_val = V_blocks[block_base + (size_t)(off + r) * kv_stride + tid];
+                float v_val = convert_dtype<float>(
+                    V_blocks[block_base + (size_t)(off + r) * kv_stride + tid]);
                 float m_new = fmaxf(m, dot);
                 float exp_old = expf(m - m_new);
                 float exp_new = expf(dot - m_new);
@@ -112,7 +117,8 @@ __device__ __forceinline__ void paged_decode_core(
         }
 
         for (; off < tokens_in_block; off++) {
-            float qk = q_val * K_blocks[block_base + (size_t)off * kv_stride + tid];
+            float qk = q_val * convert_dtype<float>(
+                K_blocks[block_base + (size_t)off * kv_stride + tid]);
 
             #pragma unroll
             for (int s = 16; s > 0; s >>= 1)
@@ -127,7 +133,8 @@ __device__ __forceinline__ void paged_decode_core(
             for (int w = 0; w < NW; w++)
                 dot += smem_qk[0][w];
 
-            float v_val = V_blocks[block_base + (size_t)off * kv_stride + tid];
+            float v_val = convert_dtype<float>(
+                V_blocks[block_base + (size_t)off * kv_stride + tid]);
             float m_new = fmaxf(m, dot);
             float exp_old = expf(m - m_new);
             float exp_new = expf(dot - m_new);
@@ -143,13 +150,13 @@ __device__ __forceinline__ void paged_decode_core(
 // Whole-sequence kernel: one block per (batch, Q head)
 // ============================================================================
 
-template<int D>
+template<typename T, int D>
 __device__ __forceinline__ void paged_decode_impl(
-    const float* __restrict__ Q,
-    const float* __restrict__ K_blocks,
-    const float* __restrict__ V_blocks,
+    const T* __restrict__ Q,
+    const T* __restrict__ K_blocks,
+    const T* __restrict__ V_blocks,
     const int* __restrict__ block_table,
-    float* __restrict__ O,
+    T* __restrict__ O,
     float* __restrict__ LSE,
     int num_heads, int num_kv_heads,
     int seq_len_k, int max_num_blocks,
@@ -161,15 +168,16 @@ __device__ __forceinline__ void paged_decode_impl(
     const int kv_h = h / (num_heads / num_kv_heads);
     const int tid = threadIdx.x;
 
-    const float* q_row = Q + (size_t)(b * num_heads + h) * D;
+    const T* q_row = Q + (size_t)(b * num_heads + h) * D;
     const int* bt = block_table + b * max_num_blocks;
     const int num_kv_blocks = (seq_len_k + block_size - 1) / block_size;
 
     float acc, m, l;
-    paged_decode_core<D>(q_row, K_blocks, V_blocks, bt, kv_h, num_kv_heads,
-                         seq_len_k, block_size, 0, num_kv_blocks, scale, acc, m, l);
+    paged_decode_core<T, D>(q_row, K_blocks, V_blocks, bt, kv_h, num_kv_heads,
+                            seq_len_k, block_size, 0, num_kv_blocks, scale, acc, m, l);
 
-    O[(size_t)(b * num_heads + h) * D + tid] = (l > 0.0f) ? acc / l : 0.0f;
+    O[(size_t)(b * num_heads + h) * D + tid] =
+        convert_dtype<T>((l > 0.0f) ? acc / l : 0.0f);
     if (tid == 0)
         LSE[b * num_heads + h] = (l > 0.0f) ? (m + logf(l)) : -INFINITY;
 }
@@ -180,11 +188,11 @@ __device__ __forceinline__ void paged_decode_impl(
 
 // `partial_o` is [B * num_heads, num_splits, D] and `partial_ml` is
 // [B * num_heads, num_splits, 2] — the layout the shared combine kernel reads.
-template<int D>
+template<typename T, int D>
 __device__ __forceinline__ void paged_decode_split_impl(
-    const float* __restrict__ Q,
-    const float* __restrict__ K_blocks,
-    const float* __restrict__ V_blocks,
+    const T* __restrict__ Q,
+    const T* __restrict__ K_blocks,
+    const T* __restrict__ V_blocks,
     const int* __restrict__ block_table,
     float* __restrict__ partial_o,
     float* __restrict__ partial_ml,
@@ -199,7 +207,7 @@ __device__ __forceinline__ void paged_decode_split_impl(
     const int kv_h = h / (num_heads / num_kv_heads);
     const int tid = threadIdx.x;
 
-    const float* q_row = Q + (size_t)(b * num_heads + h) * D;
+    const T* q_row = Q + (size_t)(b * num_heads + h) * D;
     const int* bt = block_table + b * max_num_blocks;
 
     const int num_kv_blocks = (seq_len_k + block_size - 1) / block_size;
@@ -213,8 +221,8 @@ __device__ __forceinline__ void paged_decode_split_impl(
     // Block-uniform: the bounds derive only from block indices, so the barriers
     // inside the core stay reachable by the whole block.
     if (blk_begin < blk_end)
-        paged_decode_core<D>(q_row, K_blocks, V_blocks, bt, kv_h, num_kv_heads,
-                             seq_len_k, block_size, blk_begin, blk_end, scale, acc, m, l);
+        paged_decode_core<T, D>(q_row, K_blocks, V_blocks, bt, kv_h, num_kv_heads,
+                                seq_len_k, block_size, blk_begin, blk_end, scale, acc, m, l);
 
     const size_t slot = (size_t)bh * num_splits + split;
     partial_o[slot * D + tid] = acc;
@@ -225,103 +233,49 @@ __device__ __forceinline__ void paged_decode_split_impl(
 }
 
 // ============================================================================
-// Non-graph entry points: seq_len_k as plain int
+// Entry points, one set per (head_dim, dtype)
 // ============================================================================
 
-extern "C" __global__ void paged_decode_attention_128_fp32(
-    const float* __restrict__ Q,
-    const float* __restrict__ K_blocks,
-    const float* __restrict__ V_blocks,
-    const int* __restrict__ block_table,
-    float* __restrict__ O,
-    float* __restrict__ LSE,
-    int num_heads, int num_kv_heads,
-    int seq_len_k, int max_num_blocks,
-    int block_size, float scale
-) {
-    paged_decode_impl<128>(Q, K_blocks, V_blocks, block_table, O, LSE, num_heads,
-                           num_kv_heads, seq_len_k, max_num_blocks, block_size, scale);
+#define PAGED_DECODE_KERNELS(D, SUFFIX, T)                                          \
+extern "C" __global__ void paged_decode_attention_##D##_##SUFFIX(                   \
+    const T* __restrict__ Q, const T* __restrict__ K_blocks,                        \
+    const T* __restrict__ V_blocks, const int* __restrict__ block_table,            \
+    T* __restrict__ O, float* __restrict__ LSE,                                     \
+    int num_heads, int num_kv_heads, int seq_len_k, int max_num_blocks,             \
+    int block_size, float scale                                                     \
+) {                                                                                 \
+    paged_decode_impl<T, D>(Q, K_blocks, V_blocks, block_table, O, LSE, num_heads,  \
+                            num_kv_heads, seq_len_k, max_num_blocks, block_size,    \
+                            scale);                                                 \
+}                                                                                   \
+                                                                                    \
+extern "C" __global__ void paged_decode_attention_##D##_##SUFFIX##_graph(           \
+    const T* __restrict__ Q, const T* __restrict__ K_blocks,                        \
+    const T* __restrict__ V_blocks, const int* __restrict__ block_table,            \
+    T* __restrict__ O, float* __restrict__ LSE,                                     \
+    int num_heads, int num_kv_heads, const int* __restrict__ seq_len_k_ptr,         \
+    int max_num_blocks, int block_size, float scale                                 \
+) {                                                                                 \
+    paged_decode_impl<T, D>(Q, K_blocks, V_blocks, block_table, O, LSE, num_heads,  \
+                            num_kv_heads, *seq_len_k_ptr, max_num_blocks,           \
+                            block_size, scale);                                     \
+}                                                                                   \
+                                                                                    \
+extern "C" __global__ void paged_decode_attention_##D##_##SUFFIX##_split(           \
+    const T* __restrict__ Q, const T* __restrict__ K_blocks,                        \
+    const T* __restrict__ V_blocks, const int* __restrict__ block_table,            \
+    float* __restrict__ partial_o, float* __restrict__ partial_ml,                  \
+    int num_heads, int num_kv_heads, int seq_len_k, int max_num_blocks,             \
+    int block_size, float scale, int num_splits                                     \
+) {                                                                                 \
+    paged_decode_split_impl<T, D>(Q, K_blocks, V_blocks, block_table, partial_o,    \
+                                  partial_ml, num_heads, num_kv_heads, seq_len_k,   \
+                                  max_num_blocks, block_size, scale, num_splits);   \
 }
 
-extern "C" __global__ void paged_decode_attention_64_fp32(
-    const float* __restrict__ Q,
-    const float* __restrict__ K_blocks,
-    const float* __restrict__ V_blocks,
-    const int* __restrict__ block_table,
-    float* __restrict__ O,
-    float* __restrict__ LSE,
-    int num_heads, int num_kv_heads,
-    int seq_len_k, int max_num_blocks,
-    int block_size, float scale
-) {
-    paged_decode_impl<64>(Q, K_blocks, V_blocks, block_table, O, LSE, num_heads,
-                          num_kv_heads, seq_len_k, max_num_blocks, block_size, scale);
-}
-
-extern "C" __global__ void paged_decode_attention_128_fp32_split(
-    const float* __restrict__ Q,
-    const float* __restrict__ K_blocks,
-    const float* __restrict__ V_blocks,
-    const int* __restrict__ block_table,
-    float* __restrict__ partial_o,
-    float* __restrict__ partial_ml,
-    int num_heads, int num_kv_heads,
-    int seq_len_k, int max_num_blocks,
-    int block_size, float scale, int num_splits
-) {
-    paged_decode_split_impl<128>(Q, K_blocks, V_blocks, block_table, partial_o, partial_ml,
-                                 num_heads, num_kv_heads, seq_len_k, max_num_blocks,
-                                 block_size, scale, num_splits);
-}
-
-extern "C" __global__ void paged_decode_attention_64_fp32_split(
-    const float* __restrict__ Q,
-    const float* __restrict__ K_blocks,
-    const float* __restrict__ V_blocks,
-    const int* __restrict__ block_table,
-    float* __restrict__ partial_o,
-    float* __restrict__ partial_ml,
-    int num_heads, int num_kv_heads,
-    int seq_len_k, int max_num_blocks,
-    int block_size, float scale, int num_splits
-) {
-    paged_decode_split_impl<64>(Q, K_blocks, V_blocks, block_table, partial_o, partial_ml,
-                                num_heads, num_kv_heads, seq_len_k, max_num_blocks,
-                                block_size, scale, num_splits);
-}
-
-// ============================================================================
-// Graph-mode entry points: seq_len_k from device pointer
-// ============================================================================
-
-extern "C" __global__ void paged_decode_attention_128_fp32_graph(
-    const float* __restrict__ Q,
-    const float* __restrict__ K_blocks,
-    const float* __restrict__ V_blocks,
-    const int* __restrict__ block_table,
-    float* __restrict__ O,
-    float* __restrict__ LSE,
-    int num_heads, int num_kv_heads,
-    const int* __restrict__ seq_len_k_ptr,
-    int max_num_blocks,
-    int block_size, float scale
-) {
-    paged_decode_impl<128>(Q, K_blocks, V_blocks, block_table, O, LSE, num_heads,
-                           num_kv_heads, *seq_len_k_ptr, max_num_blocks, block_size, scale);
-}
-
-extern "C" __global__ void paged_decode_attention_64_fp32_graph(
-    const float* __restrict__ Q,
-    const float* __restrict__ K_blocks,
-    const float* __restrict__ V_blocks,
-    const int* __restrict__ block_table,
-    float* __restrict__ O,
-    float* __restrict__ LSE,
-    int num_heads, int num_kv_heads,
-    const int* __restrict__ seq_len_k_ptr,
-    int max_num_blocks,
-    int block_size, float scale
-) {
-    paged_decode_impl<64>(Q, K_blocks, V_blocks, block_table, O, LSE, num_heads,
-                          num_kv_heads, *seq_len_k_ptr, max_num_blocks, block_size, scale);
-}
+PAGED_DECODE_KERNELS(64, fp32, float)
+PAGED_DECODE_KERNELS(128, fp32, float)
+PAGED_DECODE_KERNELS(64, fp16, __half)
+PAGED_DECODE_KERNELS(128, fp16, __half)
+PAGED_DECODE_KERNELS(64, bf16, __nv_bfloat16)
+PAGED_DECODE_KERNELS(128, bf16, __nv_bfloat16)

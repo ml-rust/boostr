@@ -1,3 +1,4 @@
+pub mod decode_split;
 pub mod flash;
 pub mod flash_bwd;
 pub mod flash_bwd_fp8;

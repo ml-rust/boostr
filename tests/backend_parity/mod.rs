@@ -3,6 +3,7 @@ pub mod helpers;
 pub mod alibi;
 pub mod attention;
 pub mod calibration;
+pub mod decode_split;
 pub mod fused_fp8;
 pub mod fused_optimizer;
 pub mod fused_qkv;

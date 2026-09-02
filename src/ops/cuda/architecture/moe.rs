@@ -14,6 +14,7 @@ use crate::ops::traits::architecture::moe::{MoEActivation, MoEOps};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
+use numr::ops::{GemmActivation, GroupedMatmulOps};
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
@@ -243,6 +244,21 @@ fn launch_grouped_gemm(
     let num_experts = ew_shape[0];
     let out_dim = ew_shape[2];
     let device = permuted_tokens.device();
+
+    // F32 goes to numr's grouped matmul, which wraps the same compile-time
+    // tiled, register-blocked GEMM core as the dense path. boostr's own kernel
+    // is a plain 32x32 tile with one accumulator per thread and stays only for
+    // the half dtypes, which numr's F32 core does not cover yet.
+    if dtype == DType::F32 {
+        let act = match activation {
+            MoEActivation::None => GemmActivation::None,
+            MoEActivation::SiLU => GemmActivation::SiLU,
+            MoEActivation::GeLU => GemmActivation::GELU,
+        };
+        return client
+            .grouped_matmul_activation(permuted_tokens, expert_weights, expert_offsets, act)
+            .map_err(Error::Numr);
+    }
 
     let kernel_name = grouped_gemm_kernel_name(dtype, activation)?;
 

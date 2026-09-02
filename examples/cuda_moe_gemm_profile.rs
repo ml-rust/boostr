@@ -23,7 +23,7 @@ fn main() {
 fn main() {
     use boostr::ops::MoEOps;
     use boostr::{CudaDevice, CudaRuntime, DType, Runtime, RuntimeClient};
-    use numr::ops::RandomOps;
+    use numr::ops::{MatmulOps, RandomOps};
     use numr::tensor::Tensor;
 
     /// Enough launches for a profiler to sample each shape.
@@ -54,6 +54,17 @@ fn main() {
             let out = client
                 .moe_grouped_gemm(&tokens, &weights, &expert_offsets)
                 .unwrap();
+            std::hint::black_box(&out);
+        }
+        client.synchronize();
+
+        // Reference ceiling: one dense matmul of the same total FLOPs, through
+        // numr's tuned kernel. An even split means the experts together do
+        // exactly `total_tokens x in_dim x out_dim`, so the two are comparable
+        // and the gap is the grouped kernel's own quality, not its shape.
+        let dense_b = client.rand(&[in_dim, out_dim], DType::F32).unwrap();
+        for _ in 0..ITERS {
+            let out = client.matmul(&tokens, &dense_b).unwrap();
             std::hint::black_box(&out);
         }
         client.synchronize();

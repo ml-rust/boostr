@@ -13,6 +13,7 @@ pub mod mla;
 pub mod moe;
 pub mod mqa_gqa_attention;
 pub mod paged_attention;
+pub mod paged_decode_split;
 pub mod quant_fused;
 pub mod quant_int4_gemm;
 pub mod quant_matmul_gguf_gemm;

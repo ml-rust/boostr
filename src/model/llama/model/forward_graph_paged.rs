@@ -130,6 +130,13 @@ impl Llama<numr::runtime::cuda::CudaRuntime> {
                 numr::dtype::DType::F32,
                 input_ids.device(),
             )?;
+            // The kernel writes the log-sum-exp too, so it needs the same
+            // capture-stable lifetime even though decode discards it.
+            let attn_lse = numr::tensor::Tensor::<numr::runtime::cuda::CudaRuntime>::empty(
+                &[batch, attn.num_heads, 1],
+                numr::dtype::DType::F32,
+                input_ids.device(),
+            )?;
 
             // Paged decode attention with device-side seq_len_k
             paged_decode_attention_fwd_graph(
@@ -139,6 +146,7 @@ impl Llama<numr::runtime::cuda::CudaRuntime> {
                 layer_cache.v_cache(),
                 block_table,
                 &attn_output,
+                &attn_lse,
                 batch,
                 attn.num_heads,
                 attn.num_kv_heads,

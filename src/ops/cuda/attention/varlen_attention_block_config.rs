@@ -95,6 +95,14 @@ fn head_dim_256_config(dtype: DType) -> (usize, usize) {
 /// sizing. Layout: `[Q][K][V][dO]`, each `BLOCK_M` or `BLOCK_N` rows of
 /// `HEAD_DIM + 1` elements — see `varlen_flash_attention_bwd_fp32_impl` /
 /// `_fp16_impl` in `varlen_attention_bwd.cu` / `varlen_attention_bwd_fp16.cu`.
+///
+/// This is the DYNAMIC allocation only, and it is what the launcher passes as
+/// `shared_mem_bytes`. Each backward kernel also declares two STATIC shared
+/// arrays — `D_smem` and `lse_smem`, `BLOCK_M` floats each — for the
+/// transposed dK/dV phase, so the block's real footprint is this value plus
+/// `2 * BLOCK_M * 4` bytes. That term is at most 1KB (large tile,
+/// `BLOCK_M=128`) and no instantiated config sits within 1KB of a real device
+/// opt-in limit (48/64/96/99/163/227KB), so it changes no verdict below.
 fn varlen_bwd_smem(block_m: usize, block_n: usize, head_dim: usize, elem_bytes: usize) -> usize {
     let head_stride = head_dim + 1;
     (2 * block_m + 2 * block_n) * head_stride * elem_bytes

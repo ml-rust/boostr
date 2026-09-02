@@ -35,10 +35,13 @@
 // VarLen Attention Backward - FP32, full GQA
 // ============================================================================
 //
-// Per-Q-row kernel: one thread per Q token row in the tile.
-// dK/dV use atomicAdd to scatter across multiple Q heads sharing one KV head.
-// dQ is accumulated locally and written once (no atomics needed for dQ here
-// because each Q row is owned by exactly one block).
+// Two-phase tile loop. Phase 1 gives each thread one Q token row of the tile
+// and accumulates dQ locally (no atomics: each Q row is owned by exactly one
+// block). Phase 2 transposes ownership — each thread takes one K row of the
+// tile, sweeps the tile's Q rows into fp32 registers, and emits ONE atomicAdd
+// per (k_row, head_dim element) for each of dK and dV. Atomics cannot be
+// dropped: under GQA several Q heads scatter into the same KV head, and each Q
+// block of the sequence contributes to the same K rows.
 
 template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
 __device__ void varlen_flash_attention_bwd_fp32_impl(
@@ -137,19 +140,23 @@ __device__ void varlen_flash_attention_bwd_fp32_impl(
         dQ_local[d] = 0.0f;
     }
 
-    // Get logsumexp and compute D = sum(dO * O) for this row
-    float lse = 0.0f;
-    float D   = 0.0f;
-    if (is_valid_thread) {
-        const int global_q_pos = seq_start_q + q_start + q_row;
-        lse = L[global_q_pos * num_heads + head_idx];
-
+    // D = rowsum(grad_O * O) and the forward logsumexp, staged in STATIC shared
+    // memory rather than per-thread registers: the dK/dV phase below transposes
+    // ownership to K rows, and a K-row-owning thread needs both values for
+    // every Q row of the tile. Adds 2 * BLOCK_M * sizeof(float) bytes on top of
+    // the dynamic allocation sized by `varlen_attention_block_config.rs`.
+    __shared__ float D_smem[BLOCK_M];
+    __shared__ float lse_smem[BLOCK_M];
+    for (int row = tid; row < q_tile_size; row += blockDim.x) {
+        const int global_q_pos = seq_start_q + q_start + row;
+        float d_acc = 0.0f;
         for (int d = 0; d < HEAD_DIM; ++d) {
-            float o_val  = O_head[global_q_pos * num_heads * HEAD_DIM + d];
-            float do_val = dO_smem(q_row, d);
-            D += o_val * do_val;
+            d_acc += O_head[global_q_pos * num_heads * HEAD_DIM + d] * dO_smem(row, d);
         }
+        D_smem[row] = d_acc;
+        lse_smem[row] = L[global_q_pos * num_heads + head_idx];
     }
+    __syncthreads();
 
     // Iterate over K/V tiles
     const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
@@ -169,7 +176,11 @@ __device__ void varlen_flash_attention_bwd_fp32_impl(
         }
         __syncthreads();
 
+        // grad_Q phase: this thread owns Q row `q_row` and sweeps the K tile.
         if (is_valid_thread) {
+            const float lse = lse_smem[q_row];
+            const float D   = D_smem[q_row];
+
             for (int j = 0; j < k_tile_size; ++j) {
                 if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
@@ -197,17 +208,61 @@ __device__ void varlen_flash_attention_bwd_fp32_impl(
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     dQ_local[d] += scale * grad_score * K_smem(j, d);
                 }
+            }
+        }
 
-                // Scatter grad_K and grad_V via atomicAdd (GQA: multiple Q heads
-                // map to the same KV head, so atomics are required).
-                const int global_k_pos = seq_start_k + k_start + j;
+        // grad_K/grad_V phase: ownership transposes — this thread owns K row
+        // `k_row` of the tile and sweeps the tile's Q rows, summing into fp32
+        // registers and emitting ONE atomic per (k_row, head_dim element)
+        // instead of one per (q_row, k_row, head_dim element). The scores are
+        // recomputed here rather than staged in shared memory: staging P and
+        // dS as BLOCK_M x BLOCK_N floats would break the shared-memory budget
+        // the `_small` tiles exist to respect, while recomputing costs only
+        // the score dot-product flops and no extra shared memory.
+        // Atomics remain required: under GQA several Q heads scatter into the
+        // same KV head, and each Q block of the sequence adds its own share.
+        for (int k_row = tid; k_row < k_tile_size; k_row += blockDim.x) {
+            const int k_idx = k_start + k_row;
+
+            float dK_local[HEAD_DIM];
+            float dV_local[HEAD_DIM];
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dK_local[d] = 0.0f;
+                dV_local[d] = 0.0f;
+            }
+
+            for (int qr = 0; qr < q_tile_size; ++qr) {
+                if (causal && (key_offset + q_start + qr) < k_idx) continue;
+
+                float score = 0.0f;
+                #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    float dk = scale * grad_score * Q_smem(q_row, d);
-                    atomicAdd(&dK_head[global_k_pos * num_kv_heads * HEAD_DIM + d], dk);
-
-                    float dv = prob * dO_smem(q_row, d);
-                    atomicAdd(&dV_head[global_k_pos * num_kv_heads * HEAD_DIM + d], dv);
+                    score += Q_smem(qr, d) * K_smem(k_row, d);
                 }
+                score *= scale;
+                const float prob = __expf(score - lse_smem[qr]);
+
+                float grad_prob = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    grad_prob += V_smem(k_row, d) * dO_smem(qr, d);
+                }
+
+                const float grad_score = prob * (grad_prob - D_smem[qr]);
+
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    dK_local[d] += scale * grad_score * Q_smem(qr, d);
+                    dV_local[d] += prob * dO_smem(qr, d);
+                }
+            }
+
+            const int global_k_pos = seq_start_k + k_idx;
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                atomicAdd(&dK_head[global_k_pos * num_kv_heads * HEAD_DIM + d], dK_local[d]);
+                atomicAdd(&dV_head[global_k_pos * num_kv_heads * HEAD_DIM + d], dV_local[d]);
             }
         }
         __syncthreads();

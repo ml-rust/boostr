@@ -30,6 +30,16 @@
 // the dK/dV atomic scatters involve half-precision conversion.
 // atomicAddHalf from atomics.cuh is used for dK/dV (replaces the broken
 // `atomicAdd(reinterpret_cast<float*>(__half_ptr), val)` from the old code).
+//
+// Two-phase tile loop. Phase 1 gives each thread one Q token row of the tile
+// and accumulates dQ locally (no atomics: each Q row is owned by exactly one
+// block). Phase 2 transposes ownership — each thread takes one K row of the
+// tile, sweeps the tile's Q rows into fp32 registers, and emits ONE
+// atomicAddHalf per (k_row, head_dim element) for each of dK and dV. The half
+// storage is therefore rounded once per tile per element rather than once per
+// (q_row, k_row, element). Atomics cannot be dropped: under GQA several Q
+// heads scatter into the same KV head, and each Q block of the sequence
+// contributes to the same K rows.
 
 template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
 __device__ void varlen_flash_attention_bwd_fp16_impl(
@@ -123,18 +133,24 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
         dQ_local[d] = 0.0f;
     }
 
-    float lse = 0.0f;
-    float D   = 0.0f;
-    if (is_valid_thread) {
-        const int global_q_pos = seq_start_q + q_start + q_row;
-        lse = L[global_q_pos * num_heads + head_idx];
-
+    // D = rowsum(grad_O * O) and the forward logsumexp, staged in STATIC shared
+    // memory rather than per-thread registers: the dK/dV phase below transposes
+    // ownership to K rows, and a K-row-owning thread needs both values for
+    // every Q row of the tile. Adds 2 * BLOCK_M * sizeof(float) bytes on top of
+    // the dynamic allocation sized by `varlen_attention_block_config.rs`.
+    __shared__ float D_smem[BLOCK_M];
+    __shared__ float lse_smem[BLOCK_M];
+    for (int row = tid; row < q_tile_size; row += blockDim.x) {
+        const int global_q_pos = seq_start_q + q_start + row;
+        float d_acc = 0.0f;
         for (int d = 0; d < HEAD_DIM; ++d) {
-            float o_val  = __half2float(O_head[global_q_pos * num_heads * HEAD_DIM + d]);
-            float do_val = __half2float(dO_smem(q_row, d));
-            D += o_val * do_val;
+            d_acc += __half2float(O_head[global_q_pos * num_heads * HEAD_DIM + d]) *
+                     __half2float(dO_smem(row, d));
         }
+        D_smem[row] = d_acc;
+        lse_smem[row] = L[global_q_pos * num_heads + head_idx];
     }
+    __syncthreads();
 
     const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
 
@@ -153,7 +169,11 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
         }
         __syncthreads();
 
+        // grad_Q phase: this thread owns Q row `q_row` and sweeps the K tile.
         if (is_valid_thread) {
+            const float lse = lse_smem[q_row];
+            const float D   = D_smem[q_row];
+
             for (int j = 0; j < k_tile_size; ++j) {
                 if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
@@ -178,28 +198,83 @@ __device__ void varlen_flash_attention_bwd_fp16_impl(
                 for (int d = 0; d < HEAD_DIM; ++d) {
                     dQ_local[d] += scale * grad_score * __half2float(K_smem(j, d));
                 }
-
-                // Atomic scatter dK and dV into the kv_head's buffer.
-                // Accumulate per-thread in fp32 first, then convert and atomicAddHalf.
-                // This avoids the broken reinterpret_cast-to-float* pattern.
-                const int global_k_pos = seq_start_k + k_start + j;
-#if __CUDA_ARCH__ >= 700
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    float dk_val = scale * grad_score * __half2float(Q_smem(q_row, d));
-                    atomicAddHalf(
-                        &dK_head[global_k_pos * num_kv_heads * HEAD_DIM + d],
-                        __float2half(dk_val)
-                    );
-
-                    float dv_val = prob * __half2float(dO_smem(q_row, d));
-                    atomicAddHalf(
-                        &dV_head[global_k_pos * num_kv_heads * HEAD_DIM + d],
-                        __float2half(dv_val)
-                    );
-                }
-#endif
             }
         }
+
+        // grad_K/grad_V phase: ownership transposes — this thread owns K row
+        // `k_row` of the tile and sweeps the tile's Q rows, summing into fp32
+        // registers and emitting ONE atomicAddHalf per (k_row, head_dim
+        // element) for each of dK and dV, instead of one per (q_row, k_row,
+        // head_dim element). Two wins over the old inner-loop scatter: the tile
+        // is summed at full fp32 precision and rounded to half once, and the
+        // atomic traffic drops by the Q-tile factor.
+        // The scores are recomputed here rather than staged in shared memory:
+        // staging P and dS as BLOCK_M x BLOCK_N floats would break the
+        // shared-memory budget the `_small` tiles exist to respect, while
+        // recomputing costs only the score dot-product flops and no extra
+        // shared memory.
+        // Atomics remain required: under GQA several Q heads scatter into the
+        // same KV head, and each Q block of the sequence adds its own share.
+        //
+        // The guard below tracks `atomicAddHalf`, which `atomics.cuh` defines
+        // only from arch 700. `build.rs` compiles this file at sm_75, so the
+        // branch is always taken. There is deliberately no `#else`: lowering
+        // that arch floor would drop dK/dV accumulation silently, with no
+        // compile error and no failing launch, leaving the gradients simply
+        // wrong. Change the floor only together with a fallback here.
+#if __CUDA_ARCH__ >= 700
+        for (int k_row = tid; k_row < k_tile_size; k_row += blockDim.x) {
+            const int k_idx = k_start + k_row;
+
+            float dK_local[HEAD_DIM];
+            float dV_local[HEAD_DIM];
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                dK_local[d] = 0.0f;
+                dV_local[d] = 0.0f;
+            }
+
+            for (int qr = 0; qr < q_tile_size; ++qr) {
+                if (causal && (key_offset + q_start + qr) < k_idx) continue;
+
+                float score = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    score += __half2float(Q_smem(qr, d)) * __half2float(K_smem(k_row, d));
+                }
+                score *= scale;
+
+                const float prob = __expf(score - lse_smem[qr]);
+
+                float grad_prob = 0.0f;
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    grad_prob += __half2float(V_smem(k_row, d)) * __half2float(dO_smem(qr, d));
+                }
+
+                const float grad_score = prob * (grad_prob - D_smem[qr]);
+
+                #pragma unroll
+                for (int d = 0; d < HEAD_DIM; ++d) {
+                    dK_local[d] += scale * grad_score * __half2float(Q_smem(qr, d));
+                    dV_local[d] += prob * __half2float(dO_smem(qr, d));
+                }
+            }
+
+            const int global_k_pos = seq_start_k + k_idx;
+            #pragma unroll
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                atomicAddHalf(
+                    &dK_head[global_k_pos * num_kv_heads * HEAD_DIM + d],
+                    __float2half(dK_local[d])
+                );
+                atomicAddHalf(
+                    &dV_head[global_k_pos * num_kv_heads * HEAD_DIM + d],
+                    __float2half(dV_local[d])
+                );
+            }
+        }
+#endif
         __syncthreads();
     }
 
@@ -259,8 +334,9 @@ extern "C" __global__ void varlen_flash_attention_bwd_128_fp16(
 // HEAD_DIM=128, small tile fallback (BLOCK_M=32, BLOCK_N=32) — see the
 // matching forward small-tile comment in varlen_attention_fwd_fp16.cu for the
 // smem byte counts. head_dim=64 fp16 needs no small variant: both its
-// forward (33280 B) and backward (49920 B) requirements fit comfortably
-// under a 99KB opt-in shared-memory device at the large tile.
+// forward (33280 B) and backward (49920 B dynamic + 1024 B of static D_smem /
+// lse_smem) requirements fit comfortably under a 99KB opt-in shared-memory
+// device at the large tile.
 // ============================================================================
 
 extern "C" __global__ void varlen_flash_attention_bwd_128_fp16_small(

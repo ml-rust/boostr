@@ -2,48 +2,32 @@
 //!
 //! Gathers paged KV blocks into contiguous tensors, then delegates to
 //! the existing CPU FlashAttentionOps (standard O(N²) attention).
+//!
+//! The cache layout mapping lives in `paged_kv_layout`; this file owns the
+//! attention itself.
 
 use crate::error::{Error, Result};
 use crate::ops::traits::PagedAttentionOps;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
 
-/// Gather paged KV blocks into a contiguous [B, 1, S_k, D] tensor.
+use super::paged_kv_layout::{expand_kv_heads, gather_paged_kv, reduce_kv_heads, scatter_to_paged};
+
+/// Rejects a head count that is not a whole multiple of the KV head count.
 ///
-/// k_blocks: [num_blocks, block_size, head_dim]
-/// block_table: [B, max_num_blocks] (i32)
-/// Returns: [B, 1, seq_len_k, head_dim] (single head — caller repeats for GQA)
-fn gather_paged_kv(
-    kv_blocks: &Tensor<CpuRuntime>,
-    block_table: &Tensor<CpuRuntime>,
-    batch_size: usize,
-    seq_len_k: usize,
-    head_dim: usize,
-    block_size: usize,
-) -> Result<Tensor<CpuRuntime>> {
-    let kv_data = kv_blocks.to_vec::<f32>();
-    let bt_data = block_table.to_vec::<i32>();
-    let max_num_blocks = block_table.shape()[1];
-
-    let mut out = vec![0.0f32; batch_size * seq_len_k * head_dim];
-
-    for b in 0..batch_size {
-        for t in 0..seq_len_k {
-            let logical_block = t / block_size;
-            let block_offset = t % block_size;
-            let physical_block = bt_data[b * max_num_blocks + logical_block] as usize;
-            let src_offset = physical_block * block_size * head_dim + block_offset * head_dim;
-            let dst_offset = b * seq_len_k * head_dim + t * head_dim;
-            out[dst_offset..dst_offset + head_dim]
-                .copy_from_slice(&kv_data[src_offset..src_offset + head_dim]);
-        }
+/// Grouped-query attention maps query head `h` to KV head
+/// `h / (num_heads / num_kv_heads)`, which is only well defined when the
+/// division is exact.
+fn validate_head_grouping(num_heads: usize, num_kv_heads: usize) -> Result<()> {
+    if num_kv_heads == 0 || !num_heads.is_multiple_of(num_kv_heads) {
+        return Err(Error::InvalidArgument {
+            arg: "num_kv_heads",
+            reason: format!(
+                "num_heads={num_heads} must be a multiple of num_kv_heads={num_kv_heads}"
+            ),
+        });
     }
-
-    Ok(Tensor::<CpuRuntime>::from_slice(
-        &out,
-        &[batch_size, 1, seq_len_k, head_dim],
-        kv_blocks.device(),
-    )?)
+    Ok(())
 }
 
 impl PagedAttentionOps<CpuRuntime> for CpuClient {
@@ -54,20 +38,22 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
         v_blocks: &Tensor<CpuRuntime>,
         block_table: &Tensor<CpuRuntime>,
         num_heads: usize,
-        _num_kv_heads: usize,
+        num_kv_heads: usize,
         _seq_len_q: usize,
         seq_len_k: usize,
         head_dim: usize,
         block_size: usize,
         causal: bool,
     ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+        validate_head_grouping(num_heads, num_kv_heads)?;
         let batch_size = q.shape()[0];
 
-        // Gather paged blocks into contiguous tensors [B, 1, S_k, D]
+        // Gather paged blocks into contiguous [B, num_kv_heads, S_k, D]
         let k_cont = gather_paged_kv(
             k_blocks,
             block_table,
             batch_size,
+            num_kv_heads,
             seq_len_k,
             head_dim,
             block_size,
@@ -76,19 +62,14 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
             v_blocks,
             block_table,
             batch_size,
+            num_kv_heads,
             seq_len_k,
             head_dim,
             block_size,
         )?;
 
-        // Expand single KV head to num_heads via repeat: [B, 1, S_k, D] → [B, H, S_k, D]
-        use numr::ops::ShapeOps;
-        let k_expanded = self
-            .repeat_interleave(&k_cont, num_heads, Some(1))
-            .map_err(Error::Numr)?;
-        let v_expanded = self
-            .repeat_interleave(&v_cont, num_heads, Some(1))
-            .map_err(Error::Numr)?;
+        let k_expanded = expand_kv_heads(self, &k_cont, num_heads, num_kv_heads)?;
+        let v_expanded = expand_kv_heads(self, &v_cont, num_heads, num_kv_heads)?;
 
         // Delegate to existing FlashAttentionOps
         use crate::ops::traits::FlashAttentionOps;
@@ -139,20 +120,22 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
         lse: &Tensor<CpuRuntime>,
         block_table: &Tensor<CpuRuntime>,
         num_heads: usize,
-        _num_kv_heads: usize,
+        num_kv_heads: usize,
         _seq_len_q: usize,
         seq_len_k: usize,
         head_dim: usize,
         block_size: usize,
         causal: bool,
     ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+        validate_head_grouping(num_heads, num_kv_heads)?;
         let batch_size = q.shape()[0];
 
-        // Gather paged blocks into contiguous tensors
+        // Gather paged blocks into contiguous [B, num_kv_heads, S_k, D]
         let k_cont = gather_paged_kv(
             k_blocks,
             block_table,
             batch_size,
+            num_kv_heads,
             seq_len_k,
             head_dim,
             block_size,
@@ -161,19 +144,14 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
             v_blocks,
             block_table,
             batch_size,
+            num_kv_heads,
             seq_len_k,
             head_dim,
             block_size,
         )?;
 
-        // Expand KV to num_heads
-        use numr::ops::ShapeOps;
-        let k_expanded = self
-            .repeat_interleave(&k_cont, num_heads, Some(1))
-            .map_err(Error::Numr)?;
-        let v_expanded = self
-            .repeat_interleave(&v_cont, num_heads, Some(1))
-            .map_err(Error::Numr)?;
+        let k_expanded = expand_kv_heads(self, &k_cont, num_heads, num_kv_heads)?;
+        let v_expanded = expand_kv_heads(self, &v_cont, num_heads, num_kv_heads)?;
 
         // Delegate backward to FlashAttentionOps
         use crate::ops::traits::FlashAttentionOps;
@@ -191,17 +169,32 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
             0,
         )?;
 
-        // Sum dk/dv back from [B, H, S_k, D] to [B, 1, S_k, D] then scatter to paged blocks
-        use numr::ops::ReduceOps;
-        let dk_summed = self.sum(&dk_exp, &[1], true).map_err(Error::Numr)?;
-        let dv_summed = self.sum(&dv_exp, &[1], true).map_err(Error::Numr)?;
+        // Sum the query heads that shared each KV head, then scatter back to pages.
+        let dk_summed = reduce_kv_heads(
+            self,
+            &dk_exp,
+            batch_size,
+            num_heads,
+            num_kv_heads,
+            seq_len_k,
+            head_dim,
+        )?;
+        let dv_summed = reduce_kv_heads(
+            self,
+            &dv_exp,
+            batch_size,
+            num_heads,
+            num_kv_heads,
+            seq_len_k,
+            head_dim,
+        )?;
 
-        // Scatter contiguous gradients back to paged block layout
         let dk_blocks = scatter_to_paged(
             &dk_summed,
             k_blocks,
             block_table,
             batch_size,
+            num_kv_heads,
             seq_len_k,
             head_dim,
             block_size,
@@ -211,6 +204,7 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
             v_blocks,
             block_table,
             batch_size,
+            num_kv_heads,
             seq_len_k,
             head_dim,
             block_size,
@@ -218,44 +212,6 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
 
         Ok((dq, dk_blocks, dv_blocks))
     }
-}
-
-/// Scatter contiguous gradients [B, 1, S_k, D] back to paged block layout.
-fn scatter_to_paged(
-    grad_cont: &Tensor<CpuRuntime>,
-    kv_blocks_ref: &Tensor<CpuRuntime>,
-    block_table: &Tensor<CpuRuntime>,
-    batch_size: usize,
-    seq_len_k: usize,
-    head_dim: usize,
-    block_size: usize,
-) -> Result<Tensor<CpuRuntime>> {
-    let grad_data = grad_cont.to_vec::<f32>();
-    let bt_data = block_table.to_vec::<i32>();
-    let max_num_blocks = block_table.shape()[1];
-    let block_shape = kv_blocks_ref.shape();
-
-    let total_blocks = block_shape[0];
-    let mut out = vec![0.0f32; total_blocks * block_size * head_dim];
-
-    for b in 0..batch_size {
-        for t in 0..seq_len_k {
-            let logical_block = t / block_size;
-            let block_offset = t % block_size;
-            let physical_block = bt_data[b * max_num_blocks + logical_block] as usize;
-            let dst_offset = physical_block * block_size * head_dim + block_offset * head_dim;
-            let src_offset = b * seq_len_k * head_dim + t * head_dim;
-            for d in 0..head_dim {
-                out[dst_offset + d] += grad_data[src_offset + d];
-            }
-        }
-    }
-
-    Ok(Tensor::<CpuRuntime>::from_slice(
-        &out,
-        block_shape,
-        kv_blocks_ref.device(),
-    )?)
 }
 
 #[cfg(test)]
@@ -275,13 +231,13 @@ mod tests {
     #[test]
     fn test_paged_attention_fwd_shape() {
         let (client, device) = cpu_setup();
-        let (b, h, s, d, bs): (usize, usize, usize, usize, usize) = (1, 4, 8, 16, 4);
+        let (b, h, kvh, s, d, bs): (usize, usize, usize, usize, usize, usize) = (1, 4, 2, 8, 16, 4);
         let num_blocks = s.div_ceil(bs);
         let total_blocks = b * num_blocks;
 
         let q = rand_tensor(&[b, h, s, d], &device);
-        let k_blocks = rand_tensor(&[total_blocks, bs, d], &device);
-        let v_blocks = rand_tensor(&[total_blocks, bs, d], &device);
+        let k_blocks = rand_tensor(&[total_blocks, bs, kvh, d], &device);
+        let v_blocks = rand_tensor(&[total_blocks, bs, kvh, d], &device);
 
         // Identity block table
         let bt_data: Vec<i32> = (0..b * num_blocks).map(|i| i as i32).collect();
@@ -295,7 +251,7 @@ mod tests {
                 &v_blocks,
                 &block_table,
                 h,
-                1, // num_kv_heads
+                kvh,
                 s,
                 s,
                 d,
@@ -310,13 +266,13 @@ mod tests {
     #[test]
     fn test_paged_attention_fwd_causal() {
         let (client, device) = cpu_setup();
-        let (b, h, s, d, bs): (usize, usize, usize, usize, usize) = (1, 2, 8, 8, 4);
+        let (b, h, kvh, s, d, bs): (usize, usize, usize, usize, usize, usize) = (1, 2, 2, 8, 8, 4);
         let num_blocks = s.div_ceil(bs);
         let total_blocks = b * num_blocks;
 
         let q = rand_tensor(&[b, h, s, d], &device);
-        let k_blocks = rand_tensor(&[total_blocks, bs, d], &device);
-        let v_blocks = rand_tensor(&[total_blocks, bs, d], &device);
+        let k_blocks = rand_tensor(&[total_blocks, bs, kvh, d], &device);
+        let v_blocks = rand_tensor(&[total_blocks, bs, kvh, d], &device);
 
         let bt_data: Vec<i32> = (0..b * num_blocks).map(|i| i as i32).collect();
         let block_table =
@@ -329,7 +285,7 @@ mod tests {
                 &v_blocks,
                 &block_table,
                 h,
-                1,
+                kvh,
                 s,
                 s,
                 d,
@@ -344,7 +300,7 @@ mod tests {
                 &v_blocks,
                 &block_table,
                 h,
-                1, // num_kv_heads
+                kvh,
                 s,
                 s,
                 d,
@@ -366,13 +322,13 @@ mod tests {
     #[test]
     fn test_paged_attention_bwd_shapes() {
         let (client, device) = cpu_setup();
-        let (b, h, s, d, bs): (usize, usize, usize, usize, usize) = (1, 2, 8, 8, 4);
+        let (b, h, kvh, s, d, bs): (usize, usize, usize, usize, usize, usize) = (1, 2, 2, 8, 8, 4);
         let num_blocks = s.div_ceil(bs);
         let total_blocks = b * num_blocks;
 
         let q = rand_tensor(&[b, h, s, d], &device);
-        let k_blocks = rand_tensor(&[total_blocks, bs, d], &device);
-        let v_blocks = rand_tensor(&[total_blocks, bs, d], &device);
+        let k_blocks = rand_tensor(&[total_blocks, bs, kvh, d], &device);
+        let v_blocks = rand_tensor(&[total_blocks, bs, kvh, d], &device);
 
         let bt_data: Vec<i32> = (0..b * num_blocks).map(|i| i as i32).collect();
         let block_table =
@@ -385,7 +341,7 @@ mod tests {
                 &v_blocks,
                 &block_table,
                 h,
-                1, // num_kv_heads
+                kvh,
                 s,
                 s,
                 d,
@@ -405,7 +361,7 @@ mod tests {
                 &lse,
                 &block_table,
                 h,
-                1, // num_kv_heads
+                kvh,
                 s,
                 s,
                 d,

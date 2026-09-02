@@ -13,6 +13,7 @@ pub const FLASH_V3_MODULE: &str = "flash_v3";
 pub const FLASH_V3_BWD_MODULE: &str = "flash_v3_bwd";
 pub const KV_CACHE_UPDATE_MODULE: &str = "kv_cache_update";
 pub const VARLEN_ATTENTION_MODULE: &str = "varlen_attention";
+pub const VARLEN_ATTENTION_FWD_FP16_MODULE: &str = "varlen_attention_fwd_fp16";
 pub const VARLEN_ATTENTION_BWD_MODULE: &str = "varlen_attention_bwd";
 pub const VARLEN_ATTENTION_BWD_FP16_MODULE: &str = "varlen_attention_bwd_fp16";
 pub const MQA_GQA_MODULE: &str = "mqa_gqa";

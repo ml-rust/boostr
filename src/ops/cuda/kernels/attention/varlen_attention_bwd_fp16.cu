@@ -255,6 +255,31 @@ extern "C" __global__ void varlen_flash_attention_bwd_128_fp16(
     );
 }
 
+// ============================================================================
+// HEAD_DIM=128, small tile fallback (BLOCK_M=32, BLOCK_N=32) — see the
+// matching forward small-tile comment in varlen_attention_fwd_fp16.cu for the
+// smem byte counts. head_dim=64 fp16 needs no small variant: both its
+// forward (33280 B) and backward (49920 B) requirements fit comfortably
+// under a 99KB opt-in shared-memory device at the large tile.
+// ============================================================================
+
+extern "C" __global__ void varlen_flash_attention_bwd_128_fp16_small(
+    const __half* Q, const __half* K, const __half* V,
+    const __half* O, const float* L, const __half* grad_O,
+    const int* cu_seqlens_q, const int* cu_seqlens_k,
+    __half* grad_Q, __half* grad_K, __half* grad_V,
+    int batch_size, int num_heads, int num_kv_heads,
+    int max_seqlen_q, int max_seqlen_k, float scale, int causal
+) {
+    varlen_flash_attention_bwd_fp16_impl<128, 32, 32>(
+        Q, K, V, O, L, grad_O,
+        cu_seqlens_q, cu_seqlens_k,
+        grad_Q, grad_K, grad_V,
+        batch_size, num_heads, num_kv_heads,
+        max_seqlen_q, max_seqlen_k, scale, causal
+    );
+}
+
 // head_dim=256: use the same small tiles as the fwd 256 fp16 kernel
 extern "C" __global__ void varlen_flash_attention_bwd_256_fp16(
     const __half* Q, const __half* K, const __half* V,

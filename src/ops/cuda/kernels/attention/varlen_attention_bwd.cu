@@ -266,6 +266,45 @@ extern "C" __global__ void varlen_flash_attention_bwd_128_fp32(
     );
 }
 
+// ============================================================================
+// HEAD_DIM=64/128, small tile fallback (BLOCK_M=32/16) — see the matching
+// forward small-tile comment in varlen_attention.cu for the smem byte counts.
+// ============================================================================
+
+extern "C" __global__ void varlen_flash_attention_bwd_64_fp32_small(
+    const float* Q, const float* K, const float* V,
+    const float* O, const float* L, const float* grad_O,
+    const int* cu_seqlens_q, const int* cu_seqlens_k,
+    float* grad_Q, float* grad_K, float* grad_V,
+    int batch_size, int num_heads, int num_kv_heads,
+    int max_seqlen_q, int max_seqlen_k, float scale, int causal
+) {
+    varlen_flash_attention_bwd_fp32_impl<64, 32, 32>(
+        Q, K, V, O, L, grad_O,
+        cu_seqlens_q, cu_seqlens_k,
+        grad_Q, grad_K, grad_V,
+        batch_size, num_heads, num_kv_heads,
+        max_seqlen_q, max_seqlen_k, scale, causal
+    );
+}
+
+extern "C" __global__ void varlen_flash_attention_bwd_128_fp32_small(
+    const float* Q, const float* K, const float* V,
+    const float* O, const float* L, const float* grad_O,
+    const int* cu_seqlens_q, const int* cu_seqlens_k,
+    float* grad_Q, float* grad_K, float* grad_V,
+    int batch_size, int num_heads, int num_kv_heads,
+    int max_seqlen_q, int max_seqlen_k, float scale, int causal
+) {
+    varlen_flash_attention_bwd_fp32_impl<128, 16, 16>(
+        Q, K, V, O, L, grad_O,
+        cu_seqlens_q, cu_seqlens_k,
+        grad_Q, grad_K, grad_V,
+        batch_size, num_heads, num_kv_heads,
+        max_seqlen_q, max_seqlen_k, scale, causal
+    );
+}
+
 // head_dim=256: use the same small tiles as the fwd 256 fp32 kernel
 extern "C" __global__ void varlen_flash_attention_bwd_256_fp32(
     const float* Q, const float* K, const float* V,

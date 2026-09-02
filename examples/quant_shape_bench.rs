@@ -18,19 +18,36 @@
 //! tensor: a matmul's cost does not depend on the VALUES, only on the layout,
 //! and this keeps the benchmark free of any checkpoint.
 
+/// Without the CUDA backend there is no client to time against, so the example
+/// reports that rather than failing to build.
+#[cfg(not(feature = "cuda"))]
+fn main() {
+    eprintln!("quant_shape_bench needs --features cuda");
+}
+
+#[cfg(feature = "cuda")]
 use boostr::QuantMatmulOps;
+#[cfg(feature = "cuda")]
 use boostr::quant::{QuantFormat, QuantScheme, QuantTensor, TcfEncoding};
+#[cfg(feature = "cuda")]
 use numr::runtime::RuntimeClient;
+#[cfg(feature = "cuda")]
 use numr::runtime::cuda::{CudaClient, CudaDevice};
+#[cfg(feature = "cuda")]
 use numr::tensor::Tensor;
+#[cfg(feature = "cuda")]
 use tcf_core::NativeEncoding;
+#[cfg(feature = "cuda")]
 use tcf_core::encoding::{pack, quantize};
 
 /// Calls timed per measurement, after warmup.
+#[cfg(feature = "cuda")]
 const ITERS: usize = 100;
 /// Calls made before timing starts, to cover module load and any autotune.
+#[cfg(feature = "cuda")]
 const WARMUP: usize = 20;
 
+#[cfg(feature = "cuda")]
 fn parse_format(name: &str) -> QuantScheme {
     match name {
         "q8_0" => QuantScheme::Gguf(QuantFormat::Q8_0),
@@ -50,6 +67,7 @@ fn parse_format(name: &str) -> QuantScheme {
 /// GGUF goes through the CPU quantizer and TCF through `tcf-core`'s own writer,
 /// so each codec is measured on the bytes its own encoder produces rather than
 /// on a second encoder written here.
+#[cfg(feature = "cuda")]
 fn packed_weight(scheme: QuantScheme, n: usize, k: usize) -> Result<Vec<u8>, String> {
     // Deterministic source values; a matmul's cost is set by the layout, not
     // the bits, but a real encode keeps the block statistics realistic.
@@ -78,6 +96,7 @@ fn packed_weight(scheme: QuantScheme, n: usize, k: usize) -> Result<Vec<u8>, Str
     }
 }
 
+#[cfg(feature = "cuda")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut format = QuantScheme::Gguf(QuantFormat::Q8_0);

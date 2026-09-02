@@ -22,24 +22,28 @@
 // with a block_table entry, so a slice never straddles a page.
 
 #include "../dtype_traits.cuh"
+#include "decode_warp_merge.cuh"
 #include <stdint.h>
-
-// Positions consumed per barrier round. The block reduces one dot product per
-// position through shared memory, so a round costs two `__syncthreads()`
-// whatever it covers; batching positions amortizes those barriers and keeps
-// that many independent K loads in flight.
-#define PAGED_DECODE_PER_ITER 4
 
 // ============================================================================
 // Online-softmax pass over a run of KV blocks
 // ============================================================================
+//
+// One WARP owns one KV position, matching decode_attention.cu. Each lane holds
+// `D / 32` of the head's dimensions, so a position's dot product is a single
+// warp reduction with no shared memory and no barrier. Warps split the offsets
+// WITHIN a page rather than striding across pages, so they share one block
+// table entry and no per-position division is needed.
+//
+// See decode_attention.cu for why the block-per-position shape this replaced
+// was the wrong one.
 
 // Accumulates KV blocks `[blk_begin, blk_end)` into this thread's output
 // dimension, leaving the accumulator UNNORMALIZED alongside the running max `m`
 // and denominator `l`.
 //
-// Every thread of the block must call this with the same range: it contains
-// block-wide barriers.
+// Every thread of the block must call this with the same range: the merge at
+// the end is block-wide.
 template<typename T, int D>
 __device__ __forceinline__ void paged_decode_core(
     const T* __restrict__ q_row,
@@ -50,19 +54,28 @@ __device__ __forceinline__ void paged_decode_core(
     int blk_begin, int blk_end, float scale,
     float& acc, float& m, float& l
 ) {
-    constexpr int NW = D / 32;
+    constexpr int NW = D / DECODE_LANES;
+    constexpr int VPT = D / DECODE_LANES;
 
     const int tid = threadIdx.x;
-    const int warp_id = tid >> 5;
-    const int lane_id = tid & 31;
+    const int warp_id = tid / DECODE_LANES;
+    const int lane_id = tid % DECODE_LANES;
 
-    __shared__ float smem_qk[PAGED_DECODE_PER_ITER][NW];
+    __shared__ float smem_acc[NW][D];
+    __shared__ float smem_m[NW];
+    __shared__ float smem_l[NW];
 
-    const float q_val = convert_dtype<float>(q_row[tid]) * scale;
+    float q_reg[VPT];
+    #pragma unroll
+    for (int u = 0; u < VPT; u++)
+        q_reg[u] = convert_dtype<float>(q_row[lane_id + u * DECODE_LANES]) * scale;
 
-    acc = 0.0f;
-    m = -INFINITY;
-    l = 0.0f;
+    float w_acc[VPT];
+    #pragma unroll
+    for (int u = 0; u < VPT; u++)
+        w_acc[u] = 0.0f;
+    float w_m = -INFINITY;
+    float w_l = 0.0f;
 
     const int kv_stride = num_kv_heads * D;
 
@@ -73,77 +86,42 @@ __device__ __forceinline__ void paged_decode_core(
         const size_t block_base = (size_t)physical_block * block_size * num_kv_heads * D
                                 + (size_t)kv_h * D;
 
-        int off = 0;
-        for (; off + PAGED_DECODE_PER_ITER <= tokens_in_block; off += PAGED_DECODE_PER_ITER) {
-            float qk[PAGED_DECODE_PER_ITER];
-            #pragma unroll
-            for (int r = 0; r < PAGED_DECODE_PER_ITER; r++)
-                qk[r] = q_val * convert_dtype<float>(
-                    K_blocks[block_base + (size_t)(off + r) * kv_stride + tid]);
-
-            #pragma unroll
-            for (int r = 0; r < PAGED_DECODE_PER_ITER; r++) {
-                #pragma unroll
-                for (int s = 16; s > 0; s >>= 1)
-                    qk[r] += __shfl_down_sync(0xFFFFFFFF, qk[r], s);
-            }
-
-            // Guards the previous round's readers against this round's writes.
-            __syncthreads();
-            if (lane_id == 0) {
-                #pragma unroll
-                for (int r = 0; r < PAGED_DECODE_PER_ITER; r++)
-                    smem_qk[r][warp_id] = qk[r];
-            }
-            __syncthreads();
-
-            #pragma unroll
-            for (int r = 0; r < PAGED_DECODE_PER_ITER; r++) {
-                float dot = 0.0f;
-                #pragma unroll
-                for (int w = 0; w < NW; w++)
-                    dot += smem_qk[r][w];
-
-                float v_val = convert_dtype<float>(
-                    V_blocks[block_base + (size_t)(off + r) * kv_stride + tid]);
-                float m_new = fmaxf(m, dot);
-                float exp_old = expf(m - m_new);
-                float exp_new = expf(dot - m_new);
-
-                acc = acc * exp_old + v_val * exp_new;
-                l = l * exp_old + exp_new;
-                m = m_new;
-            }
-        }
-
-        for (; off < tokens_in_block; off++) {
-            float qk = q_val * convert_dtype<float>(
-                K_blocks[block_base + (size_t)off * kv_stride + tid]);
-
-            #pragma unroll
-            for (int s = 16; s > 0; s >>= 1)
-                qk += __shfl_down_sync(0xFFFFFFFF, qk, s);
-
-            __syncthreads();
-            if (lane_id == 0) smem_qk[0][warp_id] = qk;
-            __syncthreads();
+        for (int off = warp_id; off < tokens_in_block; off += NW) {
+            const size_t base = block_base + (size_t)off * kv_stride + lane_id;
 
             float dot = 0.0f;
             #pragma unroll
-            for (int w = 0; w < NW; w++)
-                dot += smem_qk[0][w];
+            for (int u = 0; u < VPT; u++)
+                dot += q_reg[u] * convert_dtype<float>(K_blocks[base + u * DECODE_LANES]);
 
-            float v_val = convert_dtype<float>(
-                V_blocks[block_base + (size_t)off * kv_stride + tid]);
-            float m_new = fmaxf(m, dot);
-            float exp_old = expf(m - m_new);
+            #pragma unroll
+            for (int s = 16; s > 0; s >>= 1)
+                dot += __shfl_xor_sync(0xFFFFFFFF, dot, s);
+
+            float m_new = fmaxf(w_m, dot);
+            float exp_old = expf(w_m - m_new);
             float exp_new = expf(dot - m_new);
 
-            acc = acc * exp_old + v_val * exp_new;
-            l = l * exp_old + exp_new;
-            m = m_new;
+            #pragma unroll
+            for (int u = 0; u < VPT; u++) {
+                float v_val = convert_dtype<float>(V_blocks[base + u * DECODE_LANES]);
+                w_acc[u] = w_acc[u] * exp_old + v_val * exp_new;
+            }
+            w_l = w_l * exp_old + exp_new;
+            w_m = m_new;
         }
     }
+
+    #pragma unroll
+    for (int u = 0; u < VPT; u++)
+        smem_acc[warp_id][lane_id + u * DECODE_LANES] = w_acc[u];
+    if (lane_id == 0) {
+        smem_m[warp_id] = w_m;
+        smem_l[warp_id] = w_l;
+    }
+    __syncthreads();
+
+    decode_merge_warps<D>(&smem_acc[0][0], smem_m, smem_l, acc, m, l);
 }
 
 // ============================================================================

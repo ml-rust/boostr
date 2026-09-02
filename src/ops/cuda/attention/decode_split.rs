@@ -26,10 +26,13 @@ const DECODE_BLOCKS_PER_UNIT: usize = 8;
 /// Fewest KV positions a slice may own.
 ///
 /// Below this the per-slice prologue and the combine pass cost more than the
-/// widened grid returns, and the partial buffers grow for nothing. Measured:
-/// at a 512-position cache this bound is what selects the split count, and
-/// halving it from 256 moved that shape closer to the memory floor.
-const DECODE_MIN_CHUNK: usize = 128;
+/// widened grid returns, and the partial buffers grow for nothing.
+///
+/// Measured: this bound, not the device-fill target, is what selects the split
+/// count at short context, and a short cache was leaving the device at well
+/// under one wave. A slice still gives every warp of its block several
+/// positions to walk.
+const DECODE_MIN_CHUNK: usize = 32;
 
 /// Upper bound on the split count.
 ///
@@ -107,8 +110,8 @@ mod tests {
 
     #[test]
     fn short_sequence_is_left_alone() {
-        // 200 positions cannot yield even two slices of the minimum chunk.
-        assert_eq!(decode_split_for_units(28, 32, 200), 1);
+        // Fewer than two minimum chunks, so there is nothing to split.
+        assert_eq!(decode_split_for_units(28, 32, 2 * DECODE_MIN_CHUNK - 1), 1);
     }
 
     #[test]

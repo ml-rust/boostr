@@ -1,7 +1,7 @@
 //! ALiBi (Attention with Linear Biases) traits
 //!
 //! Adds position-dependent bias to attention scores before softmax.
-//! Formula: bias[i,j] = -slope * |i - j|
+//! Formula: `bias[i,j]` = -slope * |i - j|
 //! Slope per head: slope_h = 2^(-8h/H)
 //!
 //! Used in BLOOM, MPT, Falcon for length extrapolation.

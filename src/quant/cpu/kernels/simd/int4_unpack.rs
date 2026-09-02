@@ -8,7 +8,7 @@ use std::arch::x86_64::*;
 use super::super::int4_gemm::AWQ_SHIFTS;
 
 /// Unpack 8 INT4 values from a u32 (AWQ bit layout) into 8 f32s.
-/// Also loads scales and zeros, applies dequant: out[i] = (q[i] - zero[i]) * scale[i]
+/// Also loads scales and zeros, applies dequant: `out[i]` = (`q[i]` - `zero[i]`) * `scale[i]`
 ///
 /// Returns the 8 dequantized f32 weight values.
 ///

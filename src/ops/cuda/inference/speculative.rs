@@ -1,7 +1,7 @@
 //! CUDA implementation of SpeculativeOps
 //!
 //! verify_speculative_tokens: delegates to impl_generic (uses numr philox_uniform,
-//!   results are Vec<VerificationResult> — CPU-side — so serial loop on CPU is correct).
+//!   results are `Vec<VerificationResult>` — CPU-side — so serial loop on CPU is correct).
 //! compute_acceptance_probs: fused element-wise CUDA kernel (no RNG, fully parallel).
 //! compute_expected_tokens: one thread per batch element CUDA kernel.
 

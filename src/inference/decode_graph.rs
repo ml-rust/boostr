@@ -291,7 +291,7 @@ mod cuda_impl {
     pub struct DecodeGraph {
         /// The captured CUDA graph — replayed once per token.
         ///
-        /// Stored as a [`CapturedGraph`] so the input/output tensors whose device
+        /// Stored as a [`numr::runtime::CapturedGraph`] so the input/output tensors whose device
         /// addresses are encoded in the graph are kept alive for as long as the
         /// graph can be replayed.
         pub graph: numr::runtime::CapturedGraph<CudaRuntime>,

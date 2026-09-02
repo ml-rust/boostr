@@ -5,9 +5,9 @@
 //! and dispatches through the generic op system. This kernel fuses everything
 //! into a single pass per head:
 //!
-//!   1. Compute score[j] = dot(q[h], k[kv_h][j]) * scale  (AVX2 dot)
+//!   1. Compute `score[j]` = dot(`q[h]`, `k[kv_h][j]`) * scale  (AVX2 dot)
 //!   2. Softmax: find max, compute exp, normalize
-//!   3. output[h] = sum(weight[j] * v[kv_h][j])           (AVX2 FMA)
+//!   3. `output[h]` = sum(`weight[j]` * `v[kv_h][j]`)           (AVX2 FMA)
 //!
 //! No tensor allocations. No GQA expansion. Handles GQA by mapping query heads
 //! to KV heads directly.

@@ -199,7 +199,7 @@ pub(super) fn mqa_bwd_block_config(head_dim: usize) -> Result<(usize, usize, boo
 /// or completely handle this shape" — not a performance judgment call:
 ///
 /// - `head_dim ∈ {32, 64, 128}`: the exact template set `.cu` instantiates.
-///   See [`mqa_fwd_block_config_large`] / [`mqa_fwd_block_config_small`] in
+///   See `mqa_fwd_block_config_large` / `mqa_fwd_block_config_small` in
 ///   this file, which mirror those instantiations. Any other head_dim has no
 ///   kernel symbol to call.
 /// - `num_heads.is_multiple_of(num_kv_heads)`: the kernel maps

@@ -1,6 +1,6 @@
 //! GPU-accelerated prefix cache with two-tier storage (VRAM → RAM).
 //!
-//! `GpuPrefixCache` combines a CPU-side [`GpuRadixTree`] (hash table bookkeeping)
+//! `GpuPrefixCache` combines a CPU-side [`super::gpu_radix::GpuRadixTree`] (hash table bookkeeping)
 //! with device-mirrored tensors, enabling batch prefix lookups via a CUDA kernel
 //! without CPU round-trips.
 //!
@@ -100,7 +100,7 @@ mod inner {
         /// returning these to the block allocator.
         ///
         /// **Note:** This does NOT demote to RAM tier — the hash is lost during
-        /// tree eviction. To keep entries warm in RAM, call [`demote_to_ram`]
+        /// tree eviction. To keep entries warm in RAM, call [`Self::demote_to_ram`]
         /// with the known hash *before* eviction.
         pub fn evict_lru(&mut self, count: usize) -> Vec<BlockId> {
             let evicted_block_ids = self.tree.evict_lru(count);

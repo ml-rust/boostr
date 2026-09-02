@@ -13,7 +13,7 @@ use numr::ops::{
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
-/// Cross-entropy loss: -mean(log_softmax(logits, -1)[targets])
+/// Cross-entropy loss: `-mean(log_softmax(logits, -1)[targets])`
 ///
 /// This is the standard loss for classification / language modeling.
 ///

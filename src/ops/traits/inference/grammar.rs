@@ -17,12 +17,12 @@ pub struct DeviceGrammarDfa<R: Runtime> {
     /// Flattened transition table: [num_states * 256] i32
     /// transition_table[state * 256 + byte] = next_state or -1 for invalid
     pub transition_table: Tensor<R>,
-    /// Accepting state mask: [num_states] i32 (1 = accepting, 0 = not)
+    /// Accepting state mask: `[num_states]` i32 (1 = accepting, 0 = not)
     pub accepting_mask: Tensor<R>,
-    /// Vocabulary byte sequences, concatenated: [total_bytes] u8
+    /// Vocabulary byte sequences, concatenated: `[total_bytes]` u8
     pub vocab_bytes: Tensor<R>,
     /// Offsets into vocab_bytes for each token: [vocab_size + 1] i32
-    /// Token i's bytes are vocab_bytes[offsets[i]..offsets[i+1]]
+    /// Token i's bytes are `vocab_bytes[offsets[i]..offsets[i+1]]`
     pub vocab_offsets: Tensor<R>,
     /// Current DFA state
     pub current_state: u32,

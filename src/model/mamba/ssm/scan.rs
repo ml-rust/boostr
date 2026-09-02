@@ -11,12 +11,12 @@ use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
 /// Sequential SSM scan: for each position t:
-///   h[t] = exp(dt[t] * A) * h[t-1] + dt[t] * B[t] * x[t]
-///   y[t] = (C[t] @ h[t]) + D * x[t]
+///   `h[t]` = exp(`dt[t]` * A) * `h[t-1]` + `dt[t]` * `B[t]` * `x[t]`
+///   `y[t]` = (`C[t]` @ `h[t]`) + D * `x[t]`
 ///
-/// x: [B, S, nheads, headdim], A: [nheads] or [nheads, d_state],
-/// B: [B, S, ngroups, d_state], C: [B, S, ngroups, d_state],
-/// dt: [B, S, nheads], D: [nheads] (optional)
+/// x: `[B, S, nheads, headdim]`, A: `[nheads]` or `[nheads, d_state]`,
+/// B: `[B, S, ngroups, d_state]`, C: `[B, S, ngroups, d_state]`,
+/// dt: `[B, S, nheads]`, D: `[nheads]` (optional)
 pub fn ssm_forward_sequential<R, C>(client: &C, input: &SsmInput<'_, R>) -> Result<Var<R>>
 where
     R: Runtime<DType = DType>,

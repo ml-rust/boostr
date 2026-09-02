@@ -34,7 +34,7 @@ pub struct KokoroConfig {
     pub hidden_dim: usize,
     /// Per-head style dimensionality (default 128). Voice files contain a
     /// 256-d vector = concat of decoder style (128) + predictor style (128);
-    /// each half feeds its respective module. See [`voice_style_dim`].
+    /// each half feeds its respective module. See [`Self::voice_style_dim`].
     #[serde(default = "default_style_dim")]
     pub style_dim: usize,
     /// Full voice-file style width (default 256 = 2 × `style_dim`).

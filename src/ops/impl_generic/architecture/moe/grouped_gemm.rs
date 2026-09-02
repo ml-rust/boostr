@@ -13,7 +13,7 @@ use numr::tensor::Tensor;
 /// Grouped GEMM: per-expert matmul on contiguous token groups.
 ///
 /// For each expert e, computes:
-///   output[offsets[e]..offsets[e+1]] = tokens[offsets[e]..offsets[e+1]] @ weights[e]
+///   `output[offsets[e]..offsets[e+1]]` = `tokens[offsets[e]..offsets[e+1]]` @ `weights[e]`
 pub fn moe_grouped_gemm_impl<R, C>(
     client: &C,
     permuted_tokens: &Tensor<R>,

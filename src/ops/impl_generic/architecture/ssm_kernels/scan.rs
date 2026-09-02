@@ -8,7 +8,7 @@ use numr::ops::{
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
-/// Chunk scan: y[t] = C[t] @ h[chunk_of(t)] + D * x[t].
+/// Chunk scan: `y[t]` = `C[t]` @ `h[chunk_of(t)]` + D * `x[t]`.
 ///
 /// This computes the off-diagonal contribution from propagated states.
 /// The full intra-chunk diagonal contribution (L ⊙ (C @ B^T) @ X) is

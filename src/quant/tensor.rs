@@ -102,7 +102,7 @@ impl<R: Runtime<DType = numr::dtype::DType>> QuantTensor<R> {
     /// buffer on the host.
     ///
     /// Applies the same invariant checks as [`Self::from_bytes`] (see
-    /// [`Self::validate_shape_and_bytes`]) against `storage`'s byte length,
+    /// `Self::validate_shape_and_bytes`) against `storage`'s byte length,
     /// so a caller cannot alias in storage that doesn't actually match
     /// `format`/`shape`.
     ///

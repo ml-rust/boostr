@@ -9,8 +9,8 @@ use numr::runtime::{Runtime, RuntimeClient};
 /// Apply Rotary Position Embedding — interleaved variant (GPT-NeoX/Qwen style).
 ///
 /// Pairs adjacent elements: `(x[..., 2d], x[..., 2d+1])`.
-///   x_rot[..., 2d]   = x[..., 2d] * cos[d] - x[..., 2d+1] * sin[d]
-///   x_rot[..., 2d+1] = x[..., 2d] * sin[d] + x[..., 2d+1] * cos[d]
+///   `x_rot[..., 2d]`   = `x[..., 2d]` * `cos[d]` - `x[..., 2d+1]` * `sin[d]`
+///   `x_rot[..., 2d+1]` = `x[..., 2d]` * `sin[d]` + `x[..., 2d+1]` * `cos[d]`
 ///
 /// # Arguments
 ///

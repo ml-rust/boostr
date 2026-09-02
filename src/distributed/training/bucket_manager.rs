@@ -40,7 +40,7 @@ struct Bucket<R: Runtime> {
 /// Parameters are grouped into buckets of approximately `bucket_size_bytes`.
 /// When all gradients in a bucket are ready, they are flattened into a
 /// contiguous buffer and allreduced. After backward completes, call
-/// [`wait_and_unflatten`] to sync pending allreduce ops and scatter
+/// [`GradientBucketManager::wait_and_unflatten`] to sync pending allreduce ops and scatter
 /// the averaged gradients back into the grad store.
 ///
 /// # Event-Based Compute-Communication Overlap

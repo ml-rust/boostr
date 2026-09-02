@@ -12,7 +12,7 @@
 //!
 //! 8 sub-blocks of 32 elements. Sub-blocks 0,1 share qs[0..32]; 2,3 share qs[32..64]; etc.
 //! Even sub-blocks use low nibble, odd sub-blocks use high nibble.
-//! dequant(i) = d * scale[j] * nibble - dmin * min[j]
+//! dequant(i) = d * `scale[j]` * nibble - dmin * `min[j]`
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -23,7 +23,7 @@ use super::super::dequant_k_quants::unpack_q4k_q5k_scales;
 
 /// Fused dequant+dot for Q4_K using AVX2+FMA.
 ///
-/// Computes: sum_i(act[i] * dequant(weight[i])) for a full weight row.
+/// Computes: sum_i(`act[i]` * dequant(`weight[i]`)) for a full weight row.
 ///
 /// # Safety
 /// Requires AVX2+FMA. Caller must ensure act.len() >= k and blocks covers k/256 blocks.

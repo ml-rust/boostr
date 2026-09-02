@@ -9,8 +9,8 @@
 use rayon::prelude::*;
 
 /// AWQ bit-shift table for unpacking 8 INT4 values from a u32.
-/// AWQ packs with order [0,2,4,6,1,3,5,7], so to extract column j
-/// the shift is: [0, 16, 4, 20, 8, 24, 12, 28][j]
+/// AWQ packs with order `[0,2,4,6,1,3,5,7]`, so to extract column j
+/// the shift is: `[0, 16, 4, 20, 8, 24, 12, 28][j]`
 pub const AWQ_SHIFTS: [u32; 8] = [0, 16, 4, 20, 8, 24, 12, 28];
 
 /// Extract the i-th INT4 value (unsigned, 0..15) from an AWQ-packed u32.

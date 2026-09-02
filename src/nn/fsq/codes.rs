@@ -1,5 +1,5 @@
 //! Mixed-radix index packing/unpacking and straight-through/identity helpers
-//! for [`Fsq`](super::quantizer::Fsq).
+//! for [`Fsq`].
 //!
 //! Split out of `quantizer.rs` to keep that file readable — these are the
 //! mechanically separable pieces (index codec + STE/passthrough), not part

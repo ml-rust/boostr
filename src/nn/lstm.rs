@@ -95,7 +95,7 @@ impl<R: Runtime> Lstm<R> {
     ///
     /// * `x` — `[B, T, input_size]`.
     /// * `reverse` — process the sequence from t = T-1 down to 0. The returned
-    ///   outputs are still ordered by the ORIGINAL t index (output[t] = hidden
+    ///   outputs are still ordered by the ORIGINAL t index (`output[t]` = hidden
     ///   computed while the cell was positioned at timestep t), matching how
     ///   PyTorch BiLSTM concatenates the reverse direction's outputs.
     ///

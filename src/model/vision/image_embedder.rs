@@ -27,7 +27,7 @@ pub enum VisionEncoderKind<R: Runtime> {
     SigLip(Box<SigLipEncoder<R>>),
 }
 
-/// Standalone image embedder: bytes -> preprocess -> encode -> mean pool -> Vec<f32>.
+/// Standalone image embedder: bytes -> preprocess -> encode -> mean pool -> `Vec<f32>`.
 pub struct ImageEmbedder<R: Runtime> {
     encoder: VisionEncoderKind<R>,
     image_size: usize,

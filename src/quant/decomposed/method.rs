@@ -10,7 +10,7 @@
 pub enum DecomposedQuantMethod {
     /// AWQ (Activation-aware Weight Quantization)
     ///
-    /// Packing: 8 INT4 values per u32, AWQ order shifts [0,16,4,20,8,24,12,28]
+    /// Packing: 8 INT4 values per u32, AWQ order shifts `[0,16,4,20,8,24,12,28]`
     /// Dequant: w = (q - zero) * scale
     Awq { group_size: usize },
 

@@ -8,7 +8,7 @@
 //!   [48..176] qs (128 bytes of 4-bit low nibbles, 2 per byte)
 //!
 //! 8 sub-blocks of 32 elements. Value = low4 | (high1 << 4), range [0, 31].
-//! dequant(i) = d * scale[j] * value - dmin * min[j]
+//! dequant(i) = d * `scale[j]` * value - dmin * `min[j]`
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;

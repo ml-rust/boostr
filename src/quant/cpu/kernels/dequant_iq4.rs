@@ -7,7 +7,7 @@ use half::f16;
 /// Dequantize IQ4_NL blocks to f32
 ///
 /// IQ4_NL: 32 elements, 18 bytes/block (f16 scale + 16 bytes nibbles)
-/// Uses non-linear codebook: x = scale * KVALUES_IQ4NL[nibble]
+/// Uses non-linear codebook: x = scale * `KVALUES_IQ4NL[nibble]`
 pub fn dequant_iq4_nl(blocks: &[u8], output: &mut [f32]) {
     const BLOCK_SIZE: usize = 32;
     const BLOCK_BYTES: usize = 18;

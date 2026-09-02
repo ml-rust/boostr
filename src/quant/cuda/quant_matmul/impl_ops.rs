@@ -1,4 +1,4 @@
-//! impl QuantMatmulOps<CudaRuntime> for CudaClient
+//! impl `QuantMatmulOps<CudaRuntime>` for CudaClient
 
 use crate::error::{Error, Result};
 use crate::quant::traits::QuantMatmulOps;

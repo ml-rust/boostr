@@ -204,7 +204,7 @@ impl<R: Runtime<DType = DType>> LayeredPagedKvCache<R> {
 
     /// Compute slot mapping for token positions `start..start+count`.
     ///
-    /// Returns a Vec<i32> suitable for uploading as a tensor.
+    /// Returns a `Vec<i32>` suitable for uploading as a tensor.
     /// Uses layer 0's block table (all layers have the same logical mapping).
     pub fn compute_slot_mapping(&self, start: usize, count: usize) -> Result<Vec<i32>> {
         let bt = &self.block_tables[0];

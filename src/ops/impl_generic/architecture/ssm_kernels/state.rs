@@ -159,7 +159,7 @@ where
     Ok(states)
 }
 
-/// Propagate states across chunks: h[c] = exp(dA_last[c]) * h[c-1] + h[c].
+/// Propagate states across chunks: `h[c]` = exp(`dA_last[c]`) * `h[c-1]` + `h[c]`.
 ///
 /// Returns `states_out: [batch, nchunks, nheads, headdim, dstate]`
 #[allow(non_snake_case)]

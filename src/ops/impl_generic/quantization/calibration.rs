@@ -9,9 +9,9 @@ use numr::ops::{BinaryOps, MatmulOps, ReduceOps, ScalarOps, ShapeOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
-/// AWQ channel importance: score[j] = mean_i(max_batch(|act[:,j]|) * |W[i,j]|)
+/// AWQ channel importance: `score[j]` = mean_i(max_batch(|`act[:,j]`|) * |`W[i,j]`|)
 ///
-/// activations: [N, K], weights: [M, K] → output: [K]
+/// activations: [N, K], weights: [M, K] → output: `[K]`
 pub fn awq_channel_scores_impl<R, C>(
     client: &C,
     activations: &Tensor<R>,
@@ -60,9 +60,9 @@ where
     client.mean(&scaled, &[0], false).map_err(Error::Numr)
 }
 
-/// Diagonal Fisher Information: fisher[i] = mean_n(grad[n, i]^2)
+/// Diagonal Fisher Information: `fisher[i]` = mean_n(grad[n, i]^2)
 ///
-/// gradients: [N, P] → output: [P]
+/// gradients: [N, P] → output: `[P]`
 pub fn fisher_information_impl<R, C>(client: &C, gradients: &Tensor<R>) -> Result<Tensor<R>>
 where
     R: Runtime<DType = DType>,

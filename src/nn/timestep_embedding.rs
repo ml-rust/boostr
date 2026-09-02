@@ -170,7 +170,7 @@ impl<R: Runtime<DType = DType>> TimestepEmbedding<R> {
     /// would pass to `extend_named` for this MLP, so each linear's path
     /// (via [`LoraTargets::join`]) matches `named_parameters()`'s path
     /// exactly. A leaf step: no zero-match check here — see
-    /// [`crate::model::audio::voxcpm::minicpm4::MiniCpm4Attention::apply_lora`]'s
+    /// `crate::model::audio::voxcpm::minicpm4::MiniCpm4Attention::apply_lora`'s
     /// doc comment for why.
     pub fn apply_lora(
         &mut self,

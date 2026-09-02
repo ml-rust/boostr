@@ -65,7 +65,7 @@ use numr::runtime::{Runtime, RuntimeClient};
 /// before rotating it, and HuggingFace's `Qwen3Attention` does the same.
 /// Swapping them keeps every shape valid and still emits fluent text — a silent
 /// corruption that only a logits-level parity test catches
-/// (`tests/qwen3_parity.rs`). [`attention_prologue`] owns the order for BOTH
+/// (`tests/qwen3_parity.rs`). `attention_prologue` owns the order for BOTH
 /// kernels so that no two callers, and no two kernels, can disagree about it.
 ///
 /// ⚠ Causality is NOT optional on either kernel. This is the prefill/training
@@ -127,7 +127,7 @@ where
 ///
 /// `cos`/`sin`: `None` means NoPE and is only valid with `spec.skip_rope` set
 /// — this kernel runs the same
-/// [`apply_rotary_if_needed`](super::stages) gate as `Masked`,
+/// `apply_rotary_if_needed` gate as `Masked`,
 /// so a rotating spec (`skip_rope` false) given `None` returns
 /// [`Error::InvalidArgument`] rather than silently skipping the rotation.
 pub fn attention_core_flash<R, C>(
@@ -191,7 +191,7 @@ where
 /// pick the entry point deliberately.
 ///
 /// `cos`/`sin`: `None` means NoPE and is only valid with `spec.skip_rope` set
-/// (see [`super::stages`]). A rotating spec given `None` returns
+/// (see `super::stages`). A rotating spec given `None` returns
 /// [`Error::InvalidArgument`] rather than silently skipping the rotation.
 pub fn attention_core_masked<R, C>(
     client: &C,

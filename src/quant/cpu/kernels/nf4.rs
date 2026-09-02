@@ -13,7 +13,7 @@ pub const NF4_CODEBOOK: [f32; 16] = [
 /// Dequantize NF4 data to f32.
 ///
 /// `nf4_data`: packed bytes, 2 indices per byte (low nibble first).
-/// `absmax`: per-block scaling factors, shape [num_blocks].
+/// `absmax`: per-block scaling factors, shape `[num_blocks]`.
 /// `output`: f32 output, length = nf4_data.len() * 2.
 pub fn nf4_dequant_f32(nf4_data: &[u8], absmax: &[f32], blocksize: usize, output: &mut [f32]) {
     let n = nf4_data.len() * 2;

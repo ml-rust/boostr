@@ -11,7 +11,7 @@
 //!
 //! 2 halves of 128 elements. Each half has 4 groups of 32, sharing scale indices.
 //! Per element: q6 = (ql_nibble | (qh_bits << 4)) - 32
-//! dequant(i) = d * sc[idx] * q6
+//! dequant(i) = d * `sc[idx]` * q6
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -20,7 +20,7 @@ use half::f16;
 
 /// Fused dequant+dot for Q6_K using AVX2+FMA.
 ///
-/// Computes: sum_i(act[i] * dequant(weight[i])) for a full weight row.
+/// Computes: sum_i(`act[i]` * dequant(`weight[i]`)) for a full weight row.
 ///
 /// # Safety
 /// Requires AVX2+FMA. Caller must ensure act.len() >= k and blocks covers k/256 blocks.

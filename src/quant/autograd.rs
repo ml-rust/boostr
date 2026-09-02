@@ -10,7 +10,7 @@
 //! arrangement: forward stays on the fast quantized kernel, backward
 //! dequantizes.
 //!
-//! The dequantize in [`QuantLinearBackward::backward`] runs ONLY when
+//! The dequantize in `QuantLinearBackward::backward` runs ONLY when
 //! `backward()` is actually called, i.e. only during training. Inference
 //! never touches this module: a `requires_grad == false` input keeps using
 //! the cheap detached `Var::new(out, false)` path in `MaybeQuantLinear::forward`,

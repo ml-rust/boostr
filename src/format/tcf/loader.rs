@@ -212,7 +212,7 @@ impl TcfLoader {
     /// [`TcfLoader::load_tensors`] answers that for a fixed list; a model
     /// loader walking hundreds of names one at a time cannot use it, and the
     /// one-shot loads reparse and revalidate the whole directory per call
-    /// (see [`TcfLoader::file`]). Over a 577-tensor file that is quadratic.
+    /// (see `TcfLoader::file`). Over a 577-tensor file that is quadratic.
     /// A session pays it once and keeps every per-tensor check intact.
     ///
     /// # Errors

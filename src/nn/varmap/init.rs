@@ -42,7 +42,7 @@ pub enum Init {
     /// Kaiming uniform (PyTorch `Linear`/`Conv` default):
     /// U(-1/sqrt(fan_in), 1/sqrt(fan_in)).
     ///
-    /// `fan_in` follows PyTorch exactly — see [`pytorch_fan_in`]. For a
+    /// `fan_in` follows PyTorch exactly — see `pytorch_fan_in`. For a
     /// `[out_features, in_features]` weight that is `in_features`, NOT
     /// `out_features`: the leading dimension is the output side.
     PyTorchLinear,
@@ -51,7 +51,7 @@ pub enum Init {
     /// Kaiming (He) normal: N(0, sqrt(2 / fan_in))
     ///
     /// Standard initialization for ReLU networks. `fan_in` follows
-    /// [`pytorch_fan_in`], the same convention as [`Init::PyTorchLinear`]: for
+    /// `pytorch_fan_in`, the same convention as [`Init::PyTorchLinear`]: for
     /// a `[out_features, in_features]` weight it is `in_features`.
     ///
     /// This previously read `fan_in` off the OPPOSITE end of the shape, so for

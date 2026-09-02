@@ -5,8 +5,8 @@ use half::f16;
 /// Dequantize Q2_K blocks to f32
 ///
 /// Q2_K: 256 elements, 84 bytes/block
-/// Layout (ggml): scales[16] + qs[64] + d(f16) + dmin(f16)
-/// 16 sub-blocks of 16 elements. scales[i]: low 4 bits = sub-scale, high 4 bits = sub-min.
+/// Layout (ggml): `scales[16]` + `qs[64]` + d(f16) + dmin(f16)
+/// 16 sub-blocks of 16 elements. `scales[i]`: low 4 bits = sub-scale, high 4 bits = sub-min.
 /// Formula: x = d * sub_scale * q - dmin * sub_min
 #[allow(clippy::needless_range_loop)]
 pub fn dequant_q2k(blocks: &[u8], output: &mut [f32]) {
@@ -57,7 +57,7 @@ pub fn dequant_q2k(blocks: &[u8], output: &mut [f32]) {
 /// Dequantize Q3_K blocks to f32
 ///
 /// Q3_K: 256 elements, 110 bytes/block
-/// Layout (ggml): hmask[32] + qs[64] + scales[12] + d(f16)
+/// Layout (ggml): `hmask[32]` + `qs[64]` + `scales[12]` + d(f16)
 /// 16 sub-blocks of 16 elements with 6-bit signed sub-block scales.
 /// 3-bit values: 2 low bits from qs + 1 high bit from hmask.
 /// Formula: x = d * sub_scale * (q - 4)

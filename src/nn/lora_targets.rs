@@ -145,7 +145,7 @@ pub fn push_projection_name(names: &mut Vec<String>, prefix: &str, local_name: &
 /// Write back `field`'s adapter values (if any) from `params`, tagging a
 /// torn-update error with `local_name` so the caller learns WHICH
 /// projection has a half-applied pair, not just which
-/// [`TensorId`](numr::tensor::TensorId)s.
+/// [`TensorId`]s.
 ///
 /// Shared by every leaf `load_lora_parameters` in the crate, mirroring how
 /// [`adapt_if_targeted`] is shared by every leaf `apply_lora`. Unlike

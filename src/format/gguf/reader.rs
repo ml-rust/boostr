@@ -336,7 +336,7 @@ impl Gguf {
     /// Load an F32 tensor using a streaming dequant path for large tensors.
     ///
     /// For tensors whose dequantized size is ≤ `STREAMING_THRESHOLD` bytes this
-    /// is identical to [`load_tensor_f32`].  For larger tensors the method:
+    /// is identical to [`Gguf::load_tensor_f32`].  For larger tensors the method:
     ///
     /// 1. Allocates the destination `Tensor<R>` of the correct shape once on the
     ///    device via `Tensor::empty`.

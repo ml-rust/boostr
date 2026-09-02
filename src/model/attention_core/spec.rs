@@ -47,7 +47,7 @@ pub struct AttentionCoreSpec<'a, R: Runtime> {
     pub use_alibi: bool,
     /// Run NoPE: apply no rotary embedding at all (VoxCPM2's `residual_lm`).
     ///
-    /// When set, [`apply_rotary_if_needed`](super::stages::apply_rotary_if_needed)
+    /// When set, `apply_rotary_if_needed`
     /// returns Q and K untouched and `cos`/`sin` are never read. NOTHING
     /// replaces the rotation: no ALiBi bias, no learned table, no substitute
     /// of any kind, so the block carries ZERO positional signal and its only

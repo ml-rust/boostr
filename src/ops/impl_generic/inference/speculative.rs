@@ -6,7 +6,7 @@
 //!
 //! `to_vec()` here transfers probability and random data to CPU for the serial
 //! accept/reject loop. All backends ultimately need CPU-side results
-//! (Vec<VerificationResult>), so this is the correct place to do transfers.
+//! (`Vec<VerificationResult>`), so this is the correct place to do transfers.
 //! Random values are generated via `philox_uniform` — same algorithm on CPU,
 //! CUDA, and WebGPU — guaranteeing identical results given the same seed.
 
@@ -206,8 +206,8 @@ where
 
 /// Compute acceptance and residual probabilities element-wise.
 ///
-/// - acceptance_prob[i] = min(1, target[i] / draft[i])
-/// - residual_prob[i] = max(0, target[i] - draft[i])
+/// - `acceptance_prob[i]` = min(1, `target[i]` / `draft[i]`)
+/// - `residual_prob[i]` = max(0, `target[i]` - `draft[i]`)
 pub fn compute_acceptance_probs_impl<R, C>(
     client: &C,
     draft_probs: &Tensor<R>,
@@ -249,7 +249,7 @@ where
 
 /// Compute expected tokens per verification step.
 ///
-/// expected[b] = sum_{i=0}^{K-1} prod_{j=0}^{i} rates[b,j] + 1
+/// `expected[b]` = sum_{i=0}^{K-1} prod_{j=0}^{i} `rates[b,j]` + 1
 pub fn compute_expected_tokens_impl<R, C>(
     _client: &C,
     acceptance_rates: &Tensor<R>,

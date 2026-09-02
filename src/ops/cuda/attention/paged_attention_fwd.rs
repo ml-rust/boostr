@@ -10,7 +10,10 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::decode_split::decode_supports_dtype;
-use super::paged_attention::fwd_block_config;
+use super::flash_utils::set_smem_attribute;
+use super::paged_attention_fwd_block_config::{
+    fwd_block_config, fwd_block_config_with_override, fwd_smem_size,
+};
 use super::paged_decode::paged_decode_attention_fwd;
 
 /// Standard (non-FP8) paged attention forward.
@@ -28,6 +31,81 @@ pub(super) fn paged_attention_fwd_impl(
     head_dim: usize,
     block_size: usize,
     causal: bool,
+) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
+    paged_attention_fwd_impl_inner(
+        client,
+        q,
+        k_blocks,
+        v_blocks,
+        block_table,
+        num_heads,
+        num_kv_heads,
+        seq_len_q,
+        seq_len_k,
+        head_dim,
+        block_size,
+        causal,
+        None,
+    )
+}
+
+/// Test-only entry point: run the standard (non-FP8) paged attention prefill
+/// forward with an explicit large/small tile choice instead of reading
+/// `BOOSTR_PAGED_PREFILL_TILE`. Rust test binaries run multi-threaded in one
+/// process, so setting that process-wide env var from a test would race with
+/// every other test reading or setting it; parity tests call this instead to
+/// force each side safely. Has no effect on tile choice when `seq_len_q == 1`
+/// — that shape always takes the specialized decode fast path, which has no
+/// large/small tile of its own.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn paged_attention_fwd_with_tile_for_test(
+    client: &CudaClient,
+    q: &Tensor<CudaRuntime>,
+    k_blocks: &Tensor<CudaRuntime>,
+    v_blocks: &Tensor<CudaRuntime>,
+    block_table: &Tensor<CudaRuntime>,
+    num_heads: usize,
+    num_kv_heads: usize,
+    seq_len_q: usize,
+    seq_len_k: usize,
+    head_dim: usize,
+    block_size: usize,
+    causal: bool,
+    force_large: bool,
+) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
+    paged_attention_fwd_impl_inner(
+        client,
+        q,
+        k_blocks,
+        v_blocks,
+        block_table,
+        num_heads,
+        num_kv_heads,
+        seq_len_q,
+        seq_len_k,
+        head_dim,
+        block_size,
+        causal,
+        Some(force_large),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paged_attention_fwd_impl_inner(
+    client: &CudaClient,
+    q: &Tensor<CudaRuntime>,
+    k_blocks: &Tensor<CudaRuntime>,
+    v_blocks: &Tensor<CudaRuntime>,
+    block_table: &Tensor<CudaRuntime>,
+    num_heads: usize,
+    num_kv_heads: usize,
+    seq_len_q: usize,
+    seq_len_k: usize,
+    head_dim: usize,
+    block_size: usize,
+    causal: bool,
+    force_large: Option<bool>,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let q_shape = q.shape();
     if q_shape.len() != 4 {
@@ -71,26 +149,46 @@ pub(super) fn paged_attention_fwd_impl(
         }
     };
 
-    let (block_m, block_n) = fwd_block_config(head_dim, dtype)?;
+    let device = q.device();
+    let device_index = device.id();
+    let (block_m, block_n, use_large) = match force_large {
+        Some(forced) => fwd_block_config_with_override(
+            head_dim,
+            dtype,
+            seq_len_q,
+            num_heads,
+            batch_size,
+            device_index,
+            Some(forced),
+        )?,
+        None => fwd_block_config(
+            head_dim,
+            dtype,
+            seq_len_q,
+            num_heads,
+            batch_size,
+            device_index,
+        )?,
+    };
+    let tile_suffix = if use_large { "" } else { "_small" };
     let kernel_name = format!(
-        "paged_flash_attention_fwd_{}_{}_small",
-        head_dim, dtype_suffix
+        "paged_flash_attention_fwd_{}_{}{}",
+        head_dim, dtype_suffix, tile_suffix
     );
 
-    let device = q.device();
     let output =
         Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q, head_dim], dtype, device)?;
     let lse =
         Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
 
     let dtype_size = dtype.size_in_bytes();
-    let smem_size = (block_m * head_dim + block_n * head_dim + block_n * head_dim) * dtype_size;
+    let smem_size = fwd_smem_size(block_m, block_n, head_dim, dtype_size);
 
     let max_num_blocks = block_table.shape()[1];
-    let device_index = device.id();
     let module =
         kernels::get_or_load_module(client.context(), device_index, PAGED_ATTENTION_MODULE)?;
     let func = kernels::get_kernel_function(&module, &kernel_name)?;
+    set_smem_attribute(&func, smem_size)?;
 
     let cfg = LaunchConfig {
         grid_dim: (
@@ -187,27 +285,37 @@ pub(super) fn paged_attention_fwd_fp8_impl(
         }
     };
 
-    let (block_m, _block_n) = fwd_block_config(head_dim, dtype)?;
+    let device = q.device();
+    let device_index = device.id();
+    // FP8 always takes the `_small` config path inside `fwd_block_config`
+    // regardless of `seq_len_q`/`num_heads`/`batch_size` — no large FP8
+    // kernel exists — so the prefill performance policy never runs for it.
+    let (block_m, block_n, _use_large) = fwd_block_config(
+        head_dim,
+        dtype,
+        seq_len_q,
+        num_heads,
+        batch_size,
+        device_index,
+    )?;
     let kernel_name = format!(
         "paged_flash_attention_fwd_{}_{}_small",
         head_dim, dtype_suffix
     );
 
-    let device = q.device();
     let output =
         Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q, head_dim], dtype, device)?;
     let lse =
         Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
 
-    // FP8 uses FP32 smem: (BLOCK_M + 2*BLOCK_N) * HEAD_DIM * 4
-    let (bm, bn) = fwd_block_config(head_dim, dtype)?;
-    let smem_size = (bm * head_dim + 2 * bn * head_dim) * 4;
+    // FP8 uses FP32 smem for compute regardless of the tensor's own element size.
+    let smem_size = fwd_smem_size(block_m, block_n, head_dim, 4);
 
     let max_num_blocks = block_table.shape()[1];
-    let device_index = device.id();
     let module =
         kernels::get_or_load_module(client.context(), device_index, PAGED_ATTENTION_MODULE)?;
     let func = kernels::get_kernel_function(&module, &kernel_name)?;
+    set_smem_attribute(&func, smem_size)?;
 
     let cfg = LaunchConfig {
         grid_dim: (

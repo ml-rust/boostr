@@ -9,7 +9,8 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::paged_attention::bwd_block_config;
+use super::flash_utils::set_smem_attribute;
+use super::paged_attention_bwd_block_config::{bwd_block_config, bwd_smem_size};
 
 /// Paged attention backward kernel launcher.
 #[allow(clippy::too_many_arguments)]
@@ -68,10 +69,11 @@ pub(super) fn paged_attention_bwd_impl(
         }
     };
 
-    let (block_m, block_n) = bwd_block_config(head_dim, dtype)?;
+    let (block_m, block_n, use_large) = bwd_block_config(head_dim, dtype)?;
+    let tile_suffix = if use_large { "" } else { "_small" };
     let kernel_name = format!(
-        "paged_flash_attention_bwd_{}_{}_small",
-        head_dim, dtype_suffix
+        "paged_flash_attention_bwd_{}_{}{}",
+        head_dim, dtype_suffix, tile_suffix
     );
 
     let device = q.device();
@@ -85,12 +87,13 @@ pub(super) fn paged_attention_bwd_impl(
     let dv_blocks = Tensor::<CudaRuntime>::zeros(v_blocks.shape(), dtype, device)?;
 
     let dtype_size = dtype.size_in_bytes();
-    let smem_size = (3 * block_m * head_dim + 2 * block_n * head_dim) * dtype_size;
+    let smem_size = bwd_smem_size(block_m, block_n, head_dim, dtype_size);
 
     let device_index = device.id();
     let module =
         kernels::get_or_load_module(client.context(), device_index, PAGED_ATTENTION_BWD_MODULE)?;
     let func = kernels::get_kernel_function(&module, &kernel_name)?;
+    set_smem_attribute(&func, smem_size)?;
 
     let cfg = LaunchConfig {
         grid_dim: (

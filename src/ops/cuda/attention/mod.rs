@@ -12,6 +12,8 @@ pub mod mla;
 pub mod mqa_gqa;
 pub mod paged_attention;
 pub mod paged_attention_bwd;
+pub mod paged_attention_bwd_block_config;
 pub mod paged_attention_fwd;
+pub mod paged_attention_fwd_block_config;
 pub mod paged_decode;
 pub mod varlen_attention;

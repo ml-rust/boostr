@@ -297,6 +297,17 @@ extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split(             
                                       scale, 0, num_splits);                       \
 }                                                                                  \
                                                                                    \
+extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split_graph(          \
+    const T* __restrict__ Q, const T* __restrict__ K, const T* __restrict__ V,     \
+    float* __restrict__ partial_o, float* __restrict__ partial_ml,                 \
+    int num_heads, int num_kv_heads, const int* seq_len_k_ptr, int kv_seq_stride,  \
+    float scale, int window_size, int num_splits                                   \
+) {                                                                                \
+    decode_attention_split_impl<T, D>(Q, K, V, partial_o, partial_ml, num_heads,   \
+                                      num_kv_heads, *seq_len_k_ptr, kv_seq_stride, \
+                                      scale, window_size, num_splits);             \
+}                                                                                  \
+                                                                                   \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_combine(              \
     const float* __restrict__ partial_o, const float* __restrict__ partial_ml,     \
     T* __restrict__ O, float* __restrict__ LSE, int num_splits                     \

@@ -169,9 +169,12 @@ pub(super) fn paged_decode_attention_fwd(
 /// via `cuMemsetD32Async`.
 ///
 /// `output` and `lse` are caller-owned so they outlive the capture; a tensor
-/// allocated here would be freed while the captured graph still writes to it.
-/// The grid stays one block per `(batch, Q head)`: the split path needs scratch
-/// buffers with the same lifetime, which the capture does not yet provide.
+/// allocated here for them would be freed while the captured graph still
+/// writes to it. Split-KV scratch is different: it is written and consumed
+/// entirely within this call, so it is allocated here exactly like the
+/// non-graph path's — during capture numr's allocator is frozen and a
+/// `Tensor::empty` becomes a real graph alloc node, its `Drop` a matched graph
+/// free node, replayed every launch.
 #[allow(clippy::too_many_arguments)]
 pub fn paged_decode_attention_fwd_graph(
     client: &CudaClient,
@@ -189,10 +192,8 @@ pub fn paged_decode_attention_fwd_graph(
     block_size: usize,
     max_num_blocks: usize,
 ) -> Result<()> {
-    let kernel_name = format!(
-        "paged_decode_attention_{head_dim}_{}_graph",
-        decode_dtype_suffix(q.dtype())?
-    );
+    let suffix = decode_dtype_suffix(q.dtype())?;
+    let stem = format!("paged_decode_attention_{head_dim}_{suffix}");
     let device = q.device();
     let device_index = device.id();
 
@@ -201,15 +202,8 @@ pub fn paged_decode_attention_fwd_graph(
         device_index,
         PAGED_DECODE_ATTENTION_MODULE,
     )?;
-    let func = kernels::get_kernel_function(&module, &kernel_name)?;
 
     let scale = (head_dim as f32).sqrt().recip();
-
-    let cfg = LaunchConfig {
-        grid_dim: ((batch_size * num_heads) as u32, 1, 1),
-        block_dim: (head_dim as u32, 1, 1),
-        shared_mem_bytes: 0,
-    };
 
     let q_ptr = q.ptr();
     let kb_ptr = k_blocks.ptr();
@@ -221,6 +215,96 @@ pub fn paged_decode_attention_fwd_graph(
     let nkvh_i32 = num_kv_heads as i32;
     let mnb_i32 = max_num_blocks as i32;
     let bs_i32 = block_size as i32;
+
+    let base_blocks = batch_size * num_heads;
+
+    // The grid is baked in at capture time, so the split count cannot come
+    // from the device-resident seq_len_k (only known per-replay) — it comes
+    // from max_num_blocks * block_size, the static upper bound on KV
+    // positions. At replay, slices whose block range falls past the real
+    // seq_len_k are empty; the split kernel's `blk_begin < blk_end` guard and
+    // the combine kernel's `l <= 0` guard both skip them for free.
+    // Consequence: at early decode steps, with the cache nearly empty, most
+    // slices do no work — correct, but the grid stays sized for a full cache
+    // every step, not just the steps that need it.
+    let kv_capacity = max_num_blocks * block_size;
+    let splits = decode_split_count(device_index, base_blocks, kv_capacity);
+
+    if splits > 1 {
+        // Unnormalized per-slice accumulators plus their (m, l) statistics, in
+        // the layout the contiguous decode path's combine kernel reads.
+        let partial_o =
+            Tensor::<CudaRuntime>::empty(&[base_blocks, splits, head_dim], DType::F32, device)?;
+        let partial_ml =
+            Tensor::<CudaRuntime>::empty(&[base_blocks, splits, 2], DType::F32, device)?;
+        let po_ptr = partial_o.ptr();
+        let pml_ptr = partial_ml.ptr();
+        let splits_i32 = splits as i32;
+
+        let split_func = kernels::get_kernel_function(&module, &format!("{stem}_split_graph"))?;
+        let split_cfg = LaunchConfig {
+            grid_dim: (base_blocks as u32, splits as u32, 1),
+            block_dim: (head_dim as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            let mut builder = client.stream().launch_builder(&split_func);
+            builder.arg(&q_ptr);
+            builder.arg(&kb_ptr);
+            builder.arg(&vb_ptr);
+            builder.arg(&bt_ptr);
+            builder.arg(&po_ptr);
+            builder.arg(&pml_ptr);
+            builder.arg(&nh_i32);
+            builder.arg(&nkvh_i32);
+            builder.arg(&seq_len_k_ptr); // device pointer to i32
+            builder.arg(&mnb_i32);
+            builder.arg(&bs_i32);
+            builder.arg(&scale);
+            builder.arg(&splits_i32);
+            builder.launch(split_cfg).map_err(|e| Error::KernelError {
+                reason: format!("Paged decode graph split kernel launch failed: {:?}", e),
+            })?;
+        }
+
+        // The partials carry no paging structure, so the contiguous decode
+        // path's combine kernel merges them unchanged — same entry point the
+        // non-graph split path uses, and capture-safe since num_splits is a
+        // static plain int.
+        let combine_module =
+            kernels::get_or_load_module(client.context(), device_index, DECODE_ATTENTION_MODULE)?;
+        let combine_func = kernels::get_kernel_function(
+            &combine_module,
+            &format!("decode_attention_{head_dim}_{suffix}_combine"),
+        )?;
+        let combine_cfg = LaunchConfig {
+            grid_dim: (base_blocks as u32, 1, 1),
+            block_dim: (head_dim as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            let mut builder = client.stream().launch_builder(&combine_func);
+            builder.arg(&po_ptr);
+            builder.arg(&pml_ptr);
+            builder.arg(&o_ptr);
+            builder.arg(&lse_ptr);
+            builder.arg(&splits_i32);
+            builder
+                .launch(combine_cfg)
+                .map_err(|e| Error::KernelError {
+                    reason: format!("Paged decode graph combine kernel launch failed: {:?}", e),
+                })?;
+        }
+
+        return Ok(());
+    }
+
+    let func = kernels::get_kernel_function(&module, &format!("{stem}_graph"))?;
+    let cfg = LaunchConfig {
+        grid_dim: (base_blocks as u32, 1, 1),
+        block_dim: (head_dim as u32, 1, 1),
+        shared_mem_bytes: 0,
+    };
 
     unsafe {
         let mut builder = client.stream().launch_builder(&func);

@@ -249,6 +249,19 @@ extern "C" __global__ void paged_decode_attention_##D##_##SUFFIX##_split(       
     paged_decode_split_impl<T, D>(Q, K_blocks, V_blocks, block_table, partial_o,    \
                                   partial_ml, num_heads, num_kv_heads, seq_len_k,   \
                                   max_num_blocks, block_size, scale, num_splits);   \
+}                                                                                   \
+                                                                                    \
+extern "C" __global__ void paged_decode_attention_##D##_##SUFFIX##_split_graph(     \
+    const T* __restrict__ Q, const T* __restrict__ K_blocks,                        \
+    const T* __restrict__ V_blocks, const int* __restrict__ block_table,            \
+    float* __restrict__ partial_o, float* __restrict__ partial_ml,                  \
+    int num_heads, int num_kv_heads, const int* __restrict__ seq_len_k_ptr,         \
+    int max_num_blocks, int block_size, float scale, int num_splits                 \
+) {                                                                                 \
+    paged_decode_split_impl<T, D>(Q, K_blocks, V_blocks, block_table, partial_o,    \
+                                  partial_ml, num_heads, num_kv_heads,              \
+                                  *seq_len_k_ptr, max_num_blocks, block_size,       \
+                                  scale, num_splits);                               \
 }
 
 PAGED_DECODE_KERNELS(64, fp32, float)

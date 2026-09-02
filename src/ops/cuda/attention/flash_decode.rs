@@ -186,14 +186,13 @@ pub fn decode_attention_graph_fwd(
 
     // Unlike the non-graph path, nothing upstream of graph mode filters head_dim,
     // so an unsupported one is an error, not an unreachable case.
-    let kernel_name = format!("{}_graph", decode_kernel_stem(head_dim, q.dtype())?);
+    let stem = decode_kernel_stem(head_dim, q.dtype())?;
 
     let module = kernels::get_or_load_module(
         client.context(),
         device_index,
         kernels::DECODE_ATTENTION_MODULE,
     )?;
-    let func = kernels::get_kernel_function(&module, &kernel_name)?;
 
     let output =
         Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, 1, head_dim], q.dtype(), device)?;
@@ -210,9 +209,87 @@ pub fn decode_attention_graph_fwd(
     let window_i32 = window_size as i32;
     let scale = (head_dim as f32).sqrt().recip();
 
-    let num_blocks = batch_size * num_heads;
+    let base_blocks = batch_size * num_heads;
+
+    // The grid is baked in at capture time, so the split count cannot come from
+    // the device-resident seq_len_k (only known per-replay, not at capture) — it
+    // comes from kv_capacity, the static upper bound. At replay, slices whose
+    // `[begin, end)` falls past the real seq_len_k are empty; the split kernel's
+    // `begin < end` guard and the combine kernel's `l <= 0` guard both skip them
+    // for free. Consequence: at early decode steps, with the cache nearly empty,
+    // most slices do no work — correct, but the grid stays sized for a full cache
+    // every step, not just the steps that need it.
+    let splits = decode_split_count(device_index, base_blocks, kv_capacity);
+
+    if splits > 1 {
+        // Unnormalized per-slice accumulators plus their (m, l) statistics.
+        // Allocated inside the capture closure: numr's allocator is frozen during
+        // capture, so this becomes a graph alloc/free node pair replayed every
+        // launch, exactly like the non-graph split path's scratch.
+        let partial_o =
+            Tensor::<CudaRuntime>::empty(&[base_blocks, splits, head_dim], DType::F32, device)?;
+        let partial_ml =
+            Tensor::<CudaRuntime>::empty(&[base_blocks, splits, 2], DType::F32, device)?;
+        let po_ptr = partial_o.ptr();
+        let pml_ptr = partial_ml.ptr();
+        let splits_i32 = splits as i32;
+
+        let split_func = kernels::get_kernel_function(&module, &format!("{stem}_split_graph"))?;
+        let split_cfg = LaunchConfig {
+            grid_dim: (base_blocks as u32, splits as u32, 1),
+            block_dim: (head_dim as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            let mut builder = client.stream().launch_builder(&split_func);
+            builder.arg(&q_ptr);
+            builder.arg(&k_ptr);
+            builder.arg(&v_ptr);
+            builder.arg(&po_ptr);
+            builder.arg(&pml_ptr);
+            builder.arg(&nh_i32);
+            builder.arg(&nkv_i32);
+            builder.arg(&seq_len_k_ptr);
+            builder.arg(&stride_i32);
+            builder.arg(&scale);
+            builder.arg(&window_i32);
+            builder.arg(&splits_i32);
+            builder.launch(split_cfg).map_err(|e| Error::KernelError {
+                reason: format!("decode_attention_graph split kernel launch failed: {:?}", e),
+            })?;
+        }
+
+        // Static num_splits, so the combine kernel is capture-safe unchanged —
+        // the same entry point the non-graph split path already uses.
+        let combine_func = kernels::get_kernel_function(&module, &format!("{stem}_combine"))?;
+        let combine_cfg = LaunchConfig {
+            grid_dim: (base_blocks as u32, 1, 1),
+            block_dim: (head_dim as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            let mut builder = client.stream().launch_builder(&combine_func);
+            builder.arg(&po_ptr);
+            builder.arg(&pml_ptr);
+            builder.arg(&o_ptr);
+            builder.arg(&lse_ptr);
+            builder.arg(&splits_i32);
+            builder
+                .launch(combine_cfg)
+                .map_err(|e| Error::KernelError {
+                    reason: format!(
+                        "decode_attention_graph combine kernel launch failed: {:?}",
+                        e
+                    ),
+                })?;
+        }
+
+        return Ok((output, lse));
+    }
+
+    let func = kernels::get_kernel_function(&module, &format!("{stem}_graph"))?;
     let cfg = LaunchConfig {
-        grid_dim: (num_blocks as u32, 1, 1),
+        grid_dim: (base_blocks as u32, 1, 1),
         block_dim: (head_dim as u32, 1, 1),
         shared_mem_bytes: 0,
     };

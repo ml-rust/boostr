@@ -121,13 +121,14 @@ pub(super) fn validate_qkv(
     }
 
     let elem_bytes = q.dtype().size_in_bytes();
-    let (block_m, block_n, use_sm_kernel) = block_config(head_dim, elem_bytes)?;
+    let seq_len_q = q_shape[2];
+    let (block_m, block_n, use_sm_kernel) = block_config(head_dim, elem_bytes, seq_len_q)?;
 
     Ok(AttentionParams {
         batch_size: q_shape[0],
         num_heads,
         num_kv_heads,
-        seq_len_q: q_shape[2],
+        seq_len_q,
         seq_len_k: k_shape[2],
         head_dim,
         block_m,
@@ -251,7 +252,8 @@ pub(super) fn bwd_block_config(head_dim: usize, elem_bytes: usize) -> Result<(us
     })
 }
 
-/// Standard (large) block config — best performance on high-smem GPUs.
+/// Standard (large) block config — used when the device's shared memory fits it.
+/// [`block_config_small`] is the fallback when it does not.
 fn block_config_large(head_dim: usize) -> Option<(usize, usize)> {
     match head_dim {
         32 => Some((128, 128)),
@@ -276,13 +278,53 @@ fn block_config_small(head_dim: usize) -> Option<(usize, usize)> {
     }
 }
 
-/// Get block configuration for a head dimension, accounting for device shared memory limits.
-/// Returns (block_m, block_n, use_sm_kernel).
-pub(super) fn block_config(head_dim: usize, elem_bytes: usize) -> Result<(usize, usize, bool)> {
+/// Get block configuration for a head dimension, accounting for device shared memory
+/// limits and the query tile's row count. Returns (block_m, block_n, use_sm_kernel).
+///
+/// Two independent gates, in order:
+///
+/// 1. Shared-memory CAPABILITY (hard): the large config is only a candidate when it
+///    fits `device_max_smem()`. This part is unchanged from before `seq_len_q` was a
+///    factor — if the large config does not fit, the small one is tried, and if
+///    neither fits this returns an error.
+/// 2. A `seq_len_q` PERFORMANCE rule (soft): the grid launches
+///    `seq_len_q.div_ceil(block_m)` row tiles per (batch, head), and the kernel does a
+///    full `BLOCK_M`-row tile of work regardless of how many rows are real. When the
+///    large config fits but `seq_len_q` is small, most of its `BLOCK_M` rows go to
+///    waste; the small config wastes fewer. The boundary used here is
+///    `seq_len_q <= small_block_m`: at or below the small tile's own `BLOCK_M`, the
+///    large tile can only be wasting rows the small tile would not, while the small
+///    tile's extra K-loop iterations (smaller `BLOCK_N`, more iterations to cover the
+///    same `seq_len_k`) are the cost being traded against. The rule itself is measured,
+///    not guessed — see [`super::mqa_gqa::block_config::mqa_fwd_block_config`], which
+///    carries the same boundary and the measurement behind it on the MQA/GQA forward
+///    path — and the row-waste argument above applies here by the same reasoning. It
+///    has NOT, however, been observed to change a selection on this path: at
+///    head_dim=96, [`block_config_large`]'s shared-memory requirement (196KB+) is well
+///    beyond any current device's opt-in limit, so head_dim=96 is already forced onto
+///    the small config by gate 1 before this rule ever runs, and head_dim 32/64/128 no
+///    longer reach this function at all — [`super::mqa_gqa::should_use_mqa_gqa`] in `mqa_gqa/block_config.rs`
+///    routes them to the dedicated MQA/GQA kernels instead. So on the head_dims that
+///    currently reach this path, the rule is correct and harmless but inert. This step
+///    only ever downgrades large -> small, and only when a small config exists for this
+///    head_dim and it also fits; it never overrides the capability gate in step 1.
+pub(super) fn block_config(
+    head_dim: usize,
+    elem_bytes: usize,
+    seq_len_q: usize,
+) -> Result<(usize, usize, bool)> {
     // Try large config first
     if let Some((bm, bn)) = block_config_large(head_dim) {
         let smem = compute_smem(bm, bn, head_dim, elem_bytes);
         if smem <= device_max_smem() {
+            // Large config fits. Check whether the seq_len_q heuristic above prefers
+            // the small config instead, purely to cut wasted masked rows.
+            if let Some((small_bm, small_bn)) = block_config_small(head_dim)
+                && seq_len_q <= small_bm
+                && compute_smem(small_bm, small_bn, head_dim, elem_bytes) <= device_max_smem()
+            {
+                return Ok((small_bm, small_bn, true));
+            }
             return Ok((bm, bn, false));
         }
     }
@@ -360,4 +402,113 @@ pub(crate) fn set_smem_attribute(func: &CudaFunction, smem_size: usize) -> Resul
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod block_config_tests {
+    use super::*;
+    use numr::runtime::cuda::is_cuda_available;
+
+    // elem_bytes=4 (F32) for all cases below; head_dim=96 has a small config
+    // ((32, 32)) and head_dim=64 does not, per block_config_small. Each test
+    // that exercises a real smem fit checks the fit at runtime and skips
+    // rather than assume a specific device's opt-in shared-memory limit.
+
+    /// Same gate the CUDA integration tests use: the `cuda` feature can be on
+    /// while no device is present, and the suite must skip, not fail.
+    fn require_cuda() -> bool {
+        if !is_cuda_available() {
+            eprintln!("CUDA feature enabled but runtime unavailable, skipping");
+            return false;
+        }
+        true
+    }
+
+    #[test]
+    fn short_seq_len_q_prefers_small_config_when_both_fit() {
+        if !require_cuda() {
+            return;
+        }
+        let (large_bm, large_bn) = block_config_large(96).expect("head_dim 96 has a large config");
+        let (small_bm, small_bn) = block_config_small(96).expect("head_dim 96 has a small config");
+        let max_smem = device_max_smem();
+        if compute_smem(large_bm, large_bn, 96, 4) > max_smem
+            || compute_smem(small_bm, small_bn, 96, 4) > max_smem
+        {
+            eprintln!("device shared memory too small for this precondition, skipping");
+            return;
+        }
+        let (block_m, _block_n, use_sm_kernel) = block_config(96, 4, 2).unwrap();
+        assert!(use_sm_kernel);
+        assert_eq!(block_m, small_bm);
+    }
+
+    #[test]
+    fn long_seq_len_q_keeps_large_config() {
+        if !require_cuda() {
+            return;
+        }
+        let (large_bm, large_bn) = block_config_large(96).expect("head_dim 96 has a large config");
+        if compute_smem(large_bm, large_bn, 96, 4) > device_max_smem() {
+            eprintln!("device shared memory too small for this precondition, skipping");
+            return;
+        }
+        let (block_m, _block_n, use_sm_kernel) = block_config(96, 4, 4096).unwrap();
+        assert!(!use_sm_kernel);
+        assert_eq!(block_m, large_bm);
+    }
+
+    #[test]
+    fn head_dim_without_small_config_keeps_large_at_short_seq_len_q() {
+        if !require_cuda() {
+            return;
+        }
+        // head_dim=64 has no entry in block_config_small, so the seq_len_q
+        // heuristic has nothing to downgrade to and must not error out.
+        assert!(block_config_small(64).is_none());
+        let (large_bm, large_bn) = block_config_large(64).expect("head_dim 64 has a large config");
+        if compute_smem(large_bm, large_bn, 64, 4) > device_max_smem() {
+            eprintln!("device shared memory too small for this precondition, skipping");
+            return;
+        }
+        let (block_m, _block_n, use_sm_kernel) = block_config(64, 4, 2).unwrap();
+        assert!(!use_sm_kernel);
+        assert_eq!(block_m, large_bm);
+    }
+
+    #[test]
+    fn smem_forcing_to_small_config_is_unchanged_by_seq_len_q() {
+        if !require_cuda() {
+            return;
+        }
+        // head_dim=256 large needs ~193KB, over the opt-in limit on most GPUs
+        // (e.g. A100's 164KB) even though it is under H100's 227KB — so this
+        // precondition, not the seq_len_q heuristic, is what is under test:
+        // capability forcing must win regardless of seq_len_q.
+        let (large_bm, large_bn) =
+            block_config_large(256).expect("head_dim 256 has a large config");
+        let (small_bm, small_bn) =
+            block_config_small(256).expect("head_dim 256 has a small config");
+        let max_smem = device_max_smem();
+        if compute_smem(large_bm, large_bn, 256, 4) <= max_smem {
+            eprintln!("device shared memory fits the large config here, skipping");
+            return;
+        }
+        if compute_smem(small_bm, small_bn, 256, 4) > max_smem {
+            eprintln!("device shared memory too small for the small config too, skipping");
+            return;
+        }
+        // A long seq_len_q would normally keep the large config, but it does
+        // not fit here, so the small config is forced either way.
+        let (block_m, _block_n, use_sm_kernel) = block_config(256, 4, 4096).unwrap();
+        assert!(use_sm_kernel);
+        assert_eq!(block_m, small_bm);
+    }
+
+    #[test]
+    fn unsupported_head_dim_still_errors() {
+        // No config exists for head_dim=999 at any seq_len_q, so this must
+        // error regardless of the device's shared-memory limit.
+        assert!(block_config(999, 4, 4096).is_err());
+    }
 }

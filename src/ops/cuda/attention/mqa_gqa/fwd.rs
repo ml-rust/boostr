@@ -65,7 +65,7 @@ pub fn mqa_gqa_fwd(
     // the dtype size. (The FP8 impls stage in f32 instead, but this launcher
     // rejects FP8 above.)
     let elem_bytes = dtype.size_in_bytes();
-    let (block_m, block_n, use_sm_kernel) = mqa_fwd_block_config(head_dim, elem_bytes)?;
+    let (block_m, block_n, use_sm_kernel) = mqa_fwd_block_config(head_dim, elem_bytes, seq_len_q)?;
 
     let variant = if use_sm_kernel { "_sm" } else { "" };
     let kernel_name = format!("mqa_gqa_fwd_{}_{}{}", head_dim, dtype_suffix, variant);

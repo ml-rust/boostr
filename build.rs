@@ -65,6 +65,9 @@ fn compile_cuda_kernels() {
         // sm_80, not sm_75: `mma.sync.aligned.m16n8k32...s8.s8.s32` is an
         // Ampere+ instruction, unavailable at sm_75.
         k!("src/quant/cuda/kernels", "mma_int8_probe.cu", "sm_80", true),
+        // sm_80, not sm_75: `mma.sync.aligned.m16n8k32...s8.s8.s32` is an
+        // Ampere+ instruction, unavailable at sm_75.
+        k!("src/quant/cuda/kernels", "quant_mmq_mma.cu", "sm_80", true),
     ];
 
     // Per-format GEMV + GEMM kernels: each format generates a gemv/ and gemm/ entry.

@@ -13,6 +13,10 @@
 #define MMQ_BM 128
 #define MMQ_BN 64
 #define MMQ_BK 32
+// Row-stride padding, in ints. 8 makes the padded stride 8 mod 32, so the four
+// word indices a lane reads land 8 banks apart and the warp's 32 accesses cover
+// all 32 banks.
+#define MMQ_SMEM_PAD 8
 #define MMQ_THREADS 256
 // Four consecutive k values per int, which is one dp4a/mma operand word.
 #define MMQ_K4 (MMQ_BK / 4)
@@ -29,8 +33,11 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q8_0_q8_1
     float* __restrict__ output,
     unsigned int M, unsigned int K, unsigned int N
 ) {
-    __shared__ int s_w[MMQ_K4][MMQ_BN];
-    __shared__ int s_a[MMQ_K4][MMQ_BM];
+    // Padded by MMQ_SMEM_PAD so the word index reaches the bank index. An
+    // unpadded row stride of 128 or 64 ints is a multiple of 32, so every
+    // fragment word lands in the same bank and the warp serializes 4 ways.
+    __shared__ int s_w[MMQ_K4][MMQ_BN + MMQ_SMEM_PAD];
+    __shared__ int s_a[MMQ_K4][MMQ_BM + MMQ_SMEM_PAD];
     __shared__ float s_wd[MMQ_BN];
     __shared__ float s_ad[MMQ_BM];
 

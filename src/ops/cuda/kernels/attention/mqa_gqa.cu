@@ -12,8 +12,20 @@
 // 2. Same Flash V2 algorithm, just different head indexing
 // 3. Same performance characteristics as MHA
 //
-// Shared memory padding strategy:
-// - Custom padding per dimension (default: +1 for head dims to avoid bank conflicts)
+// One implementation and one entry-point signature, all dtypes:
+// `mqa_gqa_fwd_impl<T, HEAD_DIM, BLOCK_M, BLOCK_N>` serves F32, F16, BF16 and
+// both FP8 formats.
+//
+// Shared memory:
+// - Layout [Q: BLOCK_M x HEAD_STRIDE][K: BLOCK_N x HEAD_STRIDE]
+//   [V: BLOCK_N x HEAD_STRIDE], HEAD_STRIDE = head_dim + 1 to avoid bank
+//   conflicts. Unlike the backward layout, the forward pads by +1.
+// - The ELEMENT TYPE is the tensor dtype for F32/F16/BF16, which stage
+//   verbatim and convert to float on read, and `float` for FP8, which
+//   dequantizes on load. So the requirement is
+//   (BLOCK_M + 2*BLOCK_N) * (head_dim + 1) * sizeof(smem element),
+//   and FP8 needs 4 bytes per element, not 1. `mqa_fwd_block_config` takes
+//   that element size as its `elem_bytes` argument — the two must agree.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -24,35 +36,48 @@
 #define SMEM_STRIDE(dim, pad) ((dim) + (pad))
 
 // ============================================================================
-// Warp-level Primitives
+// Shared-memory staging
 // ============================================================================
 
-__device__ __forceinline__ float warp_reduce_max(float val) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val = fmaxf(val, __shfl_down_sync(0xffffffff, val, offset));
+// Element type of the Q/K/V tiles: the tensor dtype, except FP8, which cannot
+// be multiplied in place and is dequantized to float at the load.
+template<typename T>
+using fwd_smem_t = std::conditional_t<DTypeTraits<T>::needs_scale, float, T>;
+
+// Stage one element from global into shared memory. Non-FP8 dtypes copy
+// verbatim — no conversion, no rounding — and are converted to float by
+// `load_dtype` when read back out of shared memory.
+template<typename T>
+__device__ __forceinline__
+fwd_smem_t<T> stage_dtype(const T* ptr, int idx, float scale) {
+    if constexpr (DTypeTraits<T>::needs_scale) {
+        return load_dtype(ptr, idx, scale);
+    } else {
+        return ptr[idx];
     }
-    return val;
 }
 
-__device__ __forceinline__ float warp_reduce_sum(float val) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    }
-    return val;
-}
+// A template cannot redeclare `extern __shared__` per instantiation type, so
+// the tiles are carved out of one raw byte array. The dynamic shared-memory
+// base is the same address every dtype saw before.
+extern __shared__ __align__(16) unsigned char mqa_gqa_fwd_smem_raw[];
 
 // ============================================================================
-// FP32 MQA/GQA Implementation
+// MQA/GQA Forward - templated implementation
+//
+// Grid: (batch_size * num_q_heads, ceil(seq_len_q / BLOCK_M))
+// Block: BLOCK_M threads; thread `tid` owns Q row `tid` of the tile.
+//
+// `q_scale` / `k_scale` / `v_scale` / `o_scale` are the FP8 dequant/quant
+// scales. `stage_dtype` and `store_dtype` ignore them for every non-FP8 dtype.
 // ============================================================================
 
-template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
-__device__ void mqa_gqa_fwd_fp32_impl(
-    const float* __restrict__ Q,
-    const float* __restrict__ K,
-    const float* __restrict__ V,
-    float* __restrict__ O,
+template<typename T, int HEAD_DIM, int BLOCK_M, int BLOCK_N>
+__device__ void mqa_gqa_fwd_impl(
+    const T* __restrict__ Q,
+    const T* __restrict__ K,
+    const T* __restrict__ V,
+    T* __restrict__ O,
     float* __restrict__ L,
     const int batch_size,
     const int num_q_heads,
@@ -60,19 +85,29 @@ __device__ void mqa_gqa_fwd_fp32_impl(
     const int seq_len_q,
     const int seq_len_k,
     const float scale,
-    const int causal
+    const int causal,
+    const float q_scale,
+    const float k_scale,
+    const float v_scale,
+    const float o_scale
 ) {
     constexpr int HEAD_STRIDE = SMEM_STRIDE(HEAD_DIM, 1);
 
-    extern __shared__ float smem[];
+    using SmemT = fwd_smem_t<T>;
+    SmemT* smem = reinterpret_cast<SmemT*>(mqa_gqa_fwd_smem_raw);
 
-    float* Q_smem_flat = smem;
-    float* K_smem_flat = smem + BLOCK_M * HEAD_STRIDE;
-    float* V_smem_flat = smem + BLOCK_M * HEAD_STRIDE + BLOCK_N * HEAD_STRIDE;
+    SmemT* Q_smem_flat = smem;
+    SmemT* K_smem_flat = smem + BLOCK_M * HEAD_STRIDE;
+    SmemT* V_smem_flat = smem + BLOCK_M * HEAD_STRIDE + BLOCK_N * HEAD_STRIDE;
 
     #define Q_smem(i, j) Q_smem_flat[(i) * HEAD_STRIDE + (j)]
     #define K_smem(i, j) K_smem_flat[(i) * HEAD_STRIDE + (j)]
     #define V_smem(i, j) V_smem_flat[(i) * HEAD_STRIDE + (j)]
+
+    // Read one staged element back as float.
+    #define Q_smem_f(i, j) load_dtype(Q_smem_flat, (i) * HEAD_STRIDE + (j))
+    #define K_smem_f(i, j) load_dtype(K_smem_flat, (i) * HEAD_STRIDE + (j))
+    #define V_smem_f(i, j) load_dtype(V_smem_flat, (i) * HEAD_STRIDE + (j))
 
     const int tid = threadIdx.x;
     const int batch_head_idx = blockIdx.x;
@@ -91,10 +126,10 @@ __device__ void mqa_gqa_fwd_fp32_impl(
                         + kv_head_idx * seq_len_k * HEAD_DIM;
     const int lse_offset = batch_idx * num_q_heads * seq_len_q + q_head_idx * seq_len_q;
 
-    const float* Q_base = Q + q_offset;
-    const float* K_base = K + kv_offset;
-    const float* V_base = V + kv_offset;
-    float* O_base = O + q_offset;
+    const T* Q_base = Q + q_offset;
+    const T* K_base = K + kv_offset;
+    const T* V_base = V + kv_offset;
+    T* O_base = O + q_offset;
     float* L_base = L + lse_offset;
 
     const int q_start = q_block_idx * BLOCK_M;
@@ -105,14 +140,14 @@ __device__ void mqa_gqa_fwd_fp32_impl(
     for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
         const int row = i / HEAD_DIM;
         const int col = i % HEAD_DIM;
-        Q_smem(row, col) = Q_base[(q_start + row) * HEAD_DIM + col];
+        Q_smem(row, col) = stage_dtype(Q_base, (q_start + row) * HEAD_DIM + col, q_scale);
     }
     __syncthreads();
 
     const int q_row = tid;
     const bool is_valid_thread = (q_row < q_tile_size);
 
-    // Per-thread accumulation
+    // Per-thread accumulation, always in FP32
     float O_local[HEAD_DIM];
     float m_local = -INFINITY;
     float l_local = 0.0f;
@@ -133,8 +168,8 @@ __device__ void mqa_gqa_fwd_fp32_impl(
         for (int i = tid; i < k_tile_size * HEAD_DIM; i += blockDim.x) {
             const int row = i / HEAD_DIM;
             const int col = i % HEAD_DIM;
-            K_smem(row, col) = K_base[(k_start + row) * HEAD_DIM + col];
-            V_smem(row, col) = V_base[(k_start + row) * HEAD_DIM + col];
+            K_smem(row, col) = stage_dtype(K_base, (k_start + row) * HEAD_DIM + col, k_scale);
+            V_smem(row, col) = stage_dtype(V_base, (k_start + row) * HEAD_DIM + col, v_scale);
         }
         __syncthreads();
 
@@ -147,7 +182,7 @@ __device__ void mqa_gqa_fwd_fp32_impl(
                 float score = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += Q_smem(q_row, d) * K_smem(j, d);
+                    score += Q_smem_f(q_row, d) * K_smem_f(j, d);
                 }
                 score *= scale;
                 m_new = fmaxf(m_new, score);
@@ -168,7 +203,7 @@ __device__ void mqa_gqa_fwd_fp32_impl(
                 float score = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += Q_smem(q_row, d) * K_smem(j, d);
+                    score += Q_smem_f(q_row, d) * K_smem_f(j, d);
                 }
                 score *= scale;
                 const float exp_score = __expf(score - m_new);
@@ -176,7 +211,7 @@ __device__ void mqa_gqa_fwd_fp32_impl(
 
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    O_local[d] += exp_score * V_smem(j, d);
+                    O_local[d] += exp_score * V_smem_f(j, d);
                 }
             }
 
@@ -192,7 +227,7 @@ __device__ void mqa_gqa_fwd_fp32_impl(
 
         #pragma unroll
         for (int d = 0; d < HEAD_DIM; ++d) {
-            O_base[(q_start + q_row) * HEAD_DIM + d] = O_local[d] * inv_l;
+            store_dtype(O_base, (q_start + q_row) * HEAD_DIM + d, O_local[d] * inv_l, o_scale);
         }
 
         L_base[q_start + q_row] = m_local + __logf(l_local);
@@ -201,614 +236,82 @@ __device__ void mqa_gqa_fwd_fp32_impl(
     #undef Q_smem
     #undef K_smem
     #undef V_smem
+    #undef Q_smem_f
+    #undef K_smem_f
+    #undef V_smem_f
 }
 
 // ============================================================================
-// FP16 MQA/GQA Implementation
-// ============================================================================
-
-template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
-__device__ void mqa_gqa_fwd_fp16_impl(
-    const __half* __restrict__ Q,
-    const __half* __restrict__ K,
-    const __half* __restrict__ V,
-    __half* __restrict__ O,
-    float* __restrict__ L,
-    const int batch_size,
-    const int num_q_heads,
-    const int num_kv_heads,
-    const int seq_len_q,
-    const int seq_len_k,
-    const float scale,
-    const int causal
-) {
-    constexpr int HEAD_STRIDE = SMEM_STRIDE(HEAD_DIM, 1);
-
-    extern __shared__ __half smem_fp16[];
-
-    __half* Q_smem_flat = smem_fp16;
-    __half* K_smem_flat = smem_fp16 + BLOCK_M * HEAD_STRIDE;
-    __half* V_smem_flat = smem_fp16 + BLOCK_M * HEAD_STRIDE + BLOCK_N * HEAD_STRIDE;
-
-    #define Q_smem(i, j) Q_smem_flat[(i) * HEAD_STRIDE + (j)]
-    #define K_smem(i, j) K_smem_flat[(i) * HEAD_STRIDE + (j)]
-    #define V_smem(i, j) V_smem_flat[(i) * HEAD_STRIDE + (j)]
-
-    const int tid = threadIdx.x;
-    const int batch_head_idx = blockIdx.x;
-    const int q_block_idx = blockIdx.y;
-
-    const int batch_idx = batch_head_idx / num_q_heads;
-    const int q_head_idx = batch_head_idx % num_q_heads;
-    const int kv_head_idx = q_head_idx / (num_q_heads / num_kv_heads);
-
-    const int q_offset = batch_idx * num_q_heads * seq_len_q * HEAD_DIM
-                       + q_head_idx * seq_len_q * HEAD_DIM;
-    const int kv_offset = batch_idx * num_kv_heads * seq_len_k * HEAD_DIM
-                        + kv_head_idx * seq_len_k * HEAD_DIM;
-    const int lse_offset = batch_idx * num_q_heads * seq_len_q + q_head_idx * seq_len_q;
-
-    const __half* Q_base = Q + q_offset;
-    const __half* K_base = K + kv_offset;
-    const __half* V_base = V + kv_offset;
-    __half* O_base = O + q_offset;
-    float* L_base = L + lse_offset;
-
-    const int q_start = q_block_idx * BLOCK_M;
-    const int q_end = min(q_start + BLOCK_M, seq_len_q);
-    const int q_tile_size = q_end - q_start;
-
-    for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
-        const int row = i / HEAD_DIM;
-        const int col = i % HEAD_DIM;
-        Q_smem(row, col) = Q_base[(q_start + row) * HEAD_DIM + col];
-    }
-    __syncthreads();
-
-    const int q_row = tid;
-    const bool is_valid_thread = (q_row < q_tile_size);
-
-    // FP32 accumulation
-    float O_local[HEAD_DIM];
-    float m_local = -INFINITY;
-    float l_local = 0.0f;
-
-    #pragma unroll
-    for (int d = 0; d < HEAD_DIM; ++d) {
-        O_local[d] = 0.0f;
-    }
-
-    const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
-
-    for (int k_block = 0; k_block < num_k_blocks; ++k_block) {
-        const int k_start = k_block * BLOCK_N;
-        const int k_end = min(k_start + BLOCK_N, seq_len_k);
-        const int k_tile_size = k_end - k_start;
-
-        for (int i = tid; i < k_tile_size * HEAD_DIM; i += blockDim.x) {
-            const int row = i / HEAD_DIM;
-            const int col = i % HEAD_DIM;
-            K_smem(row, col) = K_base[(k_start + row) * HEAD_DIM + col];
-            V_smem(row, col) = V_base[(k_start + row) * HEAD_DIM + col];
-        }
-        __syncthreads();
-
-        if (is_valid_thread) {
-            float m_new = m_local;
-            for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
-
-                float score = 0.0f;
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += __half2float(Q_smem(q_row, d)) * __half2float(K_smem(j, d));
-                }
-                score *= scale;
-                m_new = fmaxf(m_new, score);
-            }
-
-            const float alpha = __expf(m_local - m_new);
-
-            #pragma unroll
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                O_local[d] *= alpha;
-            }
-
-            float l_new = alpha * l_local;
-            for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
-
-                float score = 0.0f;
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += __half2float(Q_smem(q_row, d)) * __half2float(K_smem(j, d));
-                }
-                score *= scale;
-                const float exp_score = __expf(score - m_new);
-                l_new += exp_score;
-
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    O_local[d] += exp_score * __half2float(V_smem(j, d));
-                }
-            }
-
-            m_local = m_new;
-            l_local = l_new;
-        }
-        __syncthreads();
-    }
-
-    if (is_valid_thread) {
-        const float inv_l = (l_local == 0.0f) ? 1.0f : 1.0f / l_local;
-        #pragma unroll
-        for (int d = 0; d < HEAD_DIM; ++d) {
-            O_base[(q_start + q_row) * HEAD_DIM + d] = __float2half(O_local[d] * inv_l);
-        }
-
-        L_base[q_start + q_row] = m_local + __logf(l_local);
-    }
-
-    #undef Q_smem
-    #undef K_smem
-    #undef V_smem
-}
-
-// ============================================================================
-// BF16 MQA/GQA Implementation
-// ============================================================================
-
-template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
-__device__ void mqa_gqa_fwd_bf16_impl(
-    const __nv_bfloat16* __restrict__ Q,
-    const __nv_bfloat16* __restrict__ K,
-    const __nv_bfloat16* __restrict__ V,
-    __nv_bfloat16* __restrict__ O,
-    float* __restrict__ L,
-    const int batch_size,
-    const int num_q_heads,
-    const int num_kv_heads,
-    const int seq_len_q,
-    const int seq_len_k,
-    const float scale,
-    const int causal
-) {
-    constexpr int HEAD_STRIDE = SMEM_STRIDE(HEAD_DIM, 1);
-
-    extern __shared__ __nv_bfloat16 smem_bf16[];
-
-    __nv_bfloat16* Q_smem_flat = smem_bf16;
-    __nv_bfloat16* K_smem_flat = smem_bf16 + BLOCK_M * HEAD_STRIDE;
-    __nv_bfloat16* V_smem_flat = smem_bf16 + BLOCK_M * HEAD_STRIDE + BLOCK_N * HEAD_STRIDE;
-
-    #define Q_smem(i, j) Q_smem_flat[(i) * HEAD_STRIDE + (j)]
-    #define K_smem(i, j) K_smem_flat[(i) * HEAD_STRIDE + (j)]
-    #define V_smem(i, j) V_smem_flat[(i) * HEAD_STRIDE + (j)]
-
-    const int tid = threadIdx.x;
-    const int batch_head_idx = blockIdx.x;
-    const int q_block_idx = blockIdx.y;
-
-    const int batch_idx = batch_head_idx / num_q_heads;
-    const int q_head_idx = batch_head_idx % num_q_heads;
-    const int kv_head_idx = q_head_idx / (num_q_heads / num_kv_heads);
-
-    const int q_offset = batch_idx * num_q_heads * seq_len_q * HEAD_DIM
-                       + q_head_idx * seq_len_q * HEAD_DIM;
-    const int kv_offset = batch_idx * num_kv_heads * seq_len_k * HEAD_DIM
-                        + kv_head_idx * seq_len_k * HEAD_DIM;
-    const int lse_offset = batch_idx * num_q_heads * seq_len_q + q_head_idx * seq_len_q;
-
-    const __nv_bfloat16* Q_base = Q + q_offset;
-    const __nv_bfloat16* K_base = K + kv_offset;
-    const __nv_bfloat16* V_base = V + kv_offset;
-    __nv_bfloat16* O_base = O + q_offset;
-    float* L_base = L + lse_offset;
-
-    const int q_start = q_block_idx * BLOCK_M;
-    const int q_end = min(q_start + BLOCK_M, seq_len_q);
-    const int q_tile_size = q_end - q_start;
-
-    for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
-        const int row = i / HEAD_DIM;
-        const int col = i % HEAD_DIM;
-        Q_smem(row, col) = Q_base[(q_start + row) * HEAD_DIM + col];
-    }
-    __syncthreads();
-
-    const int q_row = tid;
-    const bool is_valid_thread = (q_row < q_tile_size);
-
-    float O_local[HEAD_DIM];
-    float m_local = -INFINITY;
-    float l_local = 0.0f;
-
-    #pragma unroll
-    for (int d = 0; d < HEAD_DIM; ++d) {
-        O_local[d] = 0.0f;
-    }
-
-    const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
-
-    for (int k_block = 0; k_block < num_k_blocks; ++k_block) {
-        const int k_start = k_block * BLOCK_N;
-        const int k_end = min(k_start + BLOCK_N, seq_len_k);
-        const int k_tile_size = k_end - k_start;
-
-        for (int i = tid; i < k_tile_size * HEAD_DIM; i += blockDim.x) {
-            const int row = i / HEAD_DIM;
-            const int col = i % HEAD_DIM;
-            K_smem(row, col) = K_base[(k_start + row) * HEAD_DIM + col];
-            V_smem(row, col) = V_base[(k_start + row) * HEAD_DIM + col];
-        }
-        __syncthreads();
-
-        if (is_valid_thread) {
-            float m_new = m_local;
-            for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
-
-                float score = 0.0f;
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += __bfloat162float(Q_smem(q_row, d)) * __bfloat162float(K_smem(j, d));
-                }
-                score *= scale;
-                m_new = fmaxf(m_new, score);
-            }
-
-            const float alpha = __expf(m_local - m_new);
-
-            #pragma unroll
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                O_local[d] *= alpha;
-            }
-
-            float l_new = alpha * l_local;
-            for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
-
-                float score = 0.0f;
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += __bfloat162float(Q_smem(q_row, d)) * __bfloat162float(K_smem(j, d));
-                }
-                score *= scale;
-                const float exp_score = __expf(score - m_new);
-                l_new += exp_score;
-
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    O_local[d] += exp_score * __bfloat162float(V_smem(j, d));
-                }
-            }
-
-            m_local = m_new;
-            l_local = l_new;
-        }
-        __syncthreads();
-    }
-
-    if (is_valid_thread) {
-        const float inv_l = (l_local == 0.0f) ? 1.0f : 1.0f / l_local;
-        #pragma unroll
-        for (int d = 0; d < HEAD_DIM; ++d) {
-            O_base[(q_start + q_row) * HEAD_DIM + d] = __float2bfloat16(O_local[d] * inv_l);
-        }
-
-        L_base[q_start + q_row] = m_local + __logf(l_local);
-    }
-
-    #undef Q_smem
-    #undef K_smem
-    #undef V_smem
-}
-
-// ============================================================================
-// Kernel Exports - runtime block-size selection
-// ============================================================================
+// Kernel Entry Points - runtime block-size selection
+//
 // BOTH block-size variants are emitted unconditionally, as separate symbols:
 //   mqa_gqa_fwd_{head_dim}_{dtype}       large blocks (128x128, 128x64)
 //   mqa_gqa_fwd_{head_dim}_{dtype}_sm    small blocks (64x64, 64x32)
-// The launcher in src/ops/cuda/attention/mqa_gqa/ picks the symbol at runtime
-// from the device's opt-in shared-memory limit; nothing here is compile-time
-// gated on the GPU architecture.
+// `mqa_fwd_block_config` picks the symbol at runtime from the device's opt-in
+// shared-memory limit; nothing here is compile-time gated on the GPU
+// architecture.
 //
-// The forward layout is [Q: BLOCK_M x HEAD_STRIDE][K: BLOCK_N x HEAD_STRIDE]
-// [V: BLOCK_N x HEAD_STRIDE] with HEAD_STRIDE = head_dim + 1, so the
-// requirement is:
-//   (BLOCK_M + 2*BLOCK_N) * (head_dim + 1) * sizeof(smem element)
-// The smem element is the tensor dtype for FP32/FP16/BF16, but `float` for the
-// FP8 impls, which dequantize on load. Unlike the backward layout, the forward
-// pads by +1 to avoid bank conflicts.
+// ONE signature for every dtype, including the four trailing quantization
+// scales. `stage_dtype` and `store_dtype` ignore them for every non-FP8 dtype,
+// and the launcher passes 1.0f, so only the FP8 entries read them.
 // ============================================================================
 
-// ============================================================================
-// Kernel Exports - FP32
-// ============================================================================
-
-#define EXPORT_MQA_GQA_FWD_FP32(HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX) \
-extern "C" __global__ void mqa_gqa_fwd_##HEAD_DIM##_##SUFFIX( \
-    const float* Q, const float* K, const float* V, \
-    float* O, float* L, \
-    const int batch_size, const int num_q_heads, const int num_kv_heads, \
-    const int seq_len_q, const int seq_len_k, \
-    const float scale, const int causal \
-) { \
-    mqa_gqa_fwd_fp32_impl<HEAD_DIM, BLOCK_M, BLOCK_N>( \
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal \
-    ); \
-}
-
-// Large blocks
-EXPORT_MQA_GQA_FWD_FP32(32, 128, 128, fp32)
-EXPORT_MQA_GQA_FWD_FP32(64, 128, 128, fp32)
-EXPORT_MQA_GQA_FWD_FP32(128, 128, 64, fp32)
-
-// Small blocks
-EXPORT_MQA_GQA_FWD_FP32(32, 64, 64, fp32_sm)
-EXPORT_MQA_GQA_FWD_FP32(64, 64, 32, fp32_sm)
-EXPORT_MQA_GQA_FWD_FP32(128, 64, 32, fp32_sm)
-
-#undef EXPORT_MQA_GQA_FWD_FP32
-
-// ============================================================================
-// Kernel Exports - FP16
-// ============================================================================
-
-#define EXPORT_MQA_GQA_FWD_FP16(HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX) \
-extern "C" __global__ void mqa_gqa_fwd_##HEAD_DIM##_##SUFFIX( \
-    const __half* Q, const __half* K, const __half* V, \
-    __half* O, float* L, \
-    const int batch_size, const int num_q_heads, const int num_kv_heads, \
-    const int seq_len_q, const int seq_len_k, \
-    const float scale, const int causal \
-) { \
-    mqa_gqa_fwd_fp16_impl<HEAD_DIM, BLOCK_M, BLOCK_N>( \
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal \
-    ); \
-}
-
-// Large blocks
-EXPORT_MQA_GQA_FWD_FP16(32, 128, 128, fp16)
-EXPORT_MQA_GQA_FWD_FP16(64, 128, 128, fp16)
-EXPORT_MQA_GQA_FWD_FP16(128, 128, 64, fp16)
-
-// Small blocks
-EXPORT_MQA_GQA_FWD_FP16(32, 64, 64, fp16_sm)
-EXPORT_MQA_GQA_FWD_FP16(64, 64, 32, fp16_sm)
-EXPORT_MQA_GQA_FWD_FP16(128, 64, 32, fp16_sm)
-
-#undef EXPORT_MQA_GQA_FWD_FP16
-
-// ============================================================================
-// Kernel Exports - BF16
-// ============================================================================
-
-#define EXPORT_MQA_GQA_FWD_BF16(HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX) \
-extern "C" __global__ void mqa_gqa_fwd_##HEAD_DIM##_##SUFFIX( \
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V, \
-    __nv_bfloat16* O, float* L, \
-    const int batch_size, const int num_q_heads, const int num_kv_heads, \
-    const int seq_len_q, const int seq_len_k, \
-    const float scale, const int causal \
-) { \
-    mqa_gqa_fwd_bf16_impl<HEAD_DIM, BLOCK_M, BLOCK_N>( \
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal \
-    ); \
-}
-
-// Large blocks
-EXPORT_MQA_GQA_FWD_BF16(32, 128, 128, bf16)
-EXPORT_MQA_GQA_FWD_BF16(64, 128, 128, bf16)
-EXPORT_MQA_GQA_FWD_BF16(128, 128, 64, bf16)
-
-// Small blocks
-EXPORT_MQA_GQA_FWD_BF16(32, 64, 64, bf16_sm)
-EXPORT_MQA_GQA_FWD_BF16(64, 64, 32, bf16_sm)
-EXPORT_MQA_GQA_FWD_BF16(128, 64, 32, bf16_sm)
-
-#undef EXPORT_MQA_GQA_FWD_BF16
-
-// ============================================================================
-// FP8 MQA/GQA Implementation
-// ============================================================================
-
-template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
-__device__ void mqa_gqa_fwd_fp8_impl(
-    const boostr_fp8_e4m3* __restrict__ Q,
-    const boostr_fp8_e4m3* __restrict__ K,
-    const boostr_fp8_e4m3* __restrict__ V,
-    boostr_fp8_e4m3* __restrict__ O,
-    float* __restrict__ L,
-    const int batch_size,
-    const int num_q_heads,
-    const int num_kv_heads,
-    const int seq_len_q,
-    const int seq_len_k,
-    const float scale,
-    const int causal,
-    const float q_scale,
-    const float k_scale,
-    const float v_scale,
-    const float o_scale
-) {
-    constexpr int HEAD_STRIDE = SMEM_STRIDE(HEAD_DIM, 1);
-    extern __shared__ float smem[];
-
-    float* Q_smem_flat = smem;
-    float* K_smem_flat = smem + BLOCK_M * HEAD_STRIDE;
-    float* V_smem_flat = smem + BLOCK_M * HEAD_STRIDE + BLOCK_N * HEAD_STRIDE;
-
-    #define Q_smem(i, j) Q_smem_flat[(i) * HEAD_STRIDE + (j)]
-    #define K_smem(i, j) K_smem_flat[(i) * HEAD_STRIDE + (j)]
-    #define V_smem(i, j) V_smem_flat[(i) * HEAD_STRIDE + (j)]
-
-    const int tid = threadIdx.x;
-    const int batch_head_idx = blockIdx.x;
-    const int q_block_idx = blockIdx.y;
-
-    const int batch_idx = batch_head_idx / num_q_heads;
-    const int q_head_idx = batch_head_idx % num_q_heads;
-    const int kv_head_idx = q_head_idx / (num_q_heads / num_kv_heads);
-
-    const int q_offset = batch_idx * num_q_heads * seq_len_q * HEAD_DIM
-                       + q_head_idx * seq_len_q * HEAD_DIM;
-    const int kv_offset = batch_idx * num_kv_heads * seq_len_k * HEAD_DIM
-                        + kv_head_idx * seq_len_k * HEAD_DIM;
-    const int lse_offset = batch_idx * num_q_heads * seq_len_q + q_head_idx * seq_len_q;
-
-    const boostr_fp8_e4m3* Q_base = Q + q_offset;
-    const boostr_fp8_e4m3* K_base = K + kv_offset;
-    const boostr_fp8_e4m3* V_base = V + kv_offset;
-    boostr_fp8_e4m3* O_base = O + q_offset;
-    float* L_base = L + lse_offset;
-
-    const int q_start = q_block_idx * BLOCK_M;
-    const int q_end = min(q_start + BLOCK_M, seq_len_q);
-    const int q_tile_size = q_end - q_start;
-
-    // Load Q tile (dequantize FP8 → FP32)
-    for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
-        const int row = i / HEAD_DIM;
-        const int col = i % HEAD_DIM;
-        boostr_fp8_e4m3 q_fp8 = Q_base[(q_start + row) * HEAD_DIM + col];
-        Q_smem(row, col) = fp8_e4m3_to_f32((uint8_t)q_fp8, q_scale);
-    }
-    __syncthreads();
-
-    const int q_row = tid;
-    const bool is_valid_thread = (q_row < q_tile_size);
-
-    float O_local[HEAD_DIM];
-    float m_local = -INFINITY;
-    float l_local = 0.0f;
-
-    #pragma unroll
-    for (int d = 0; d < HEAD_DIM; ++d) {
-        O_local[d] = 0.0f;
+#define MQA_GQA_FWD_ENTRY(T, HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX)               \
+    extern "C" __global__ void mqa_gqa_fwd_##HEAD_DIM##_##SUFFIX(              \
+        const T* Q, const T* K, const T* V,                                    \
+        T* O, float* L,                                                        \
+        const int batch_size, const int num_q_heads, const int num_kv_heads,   \
+        const int seq_len_q, const int seq_len_k,                              \
+        const float scale, const int causal,                                   \
+        const float q_scale, const float k_scale,                              \
+        const float v_scale, const float o_scale                               \
+    ) {                                                                        \
+        mqa_gqa_fwd_impl<T, HEAD_DIM, BLOCK_M, BLOCK_N>(                       \
+            Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads,              \
+            seq_len_q, seq_len_k, scale, causal,                               \
+            q_scale, k_scale, v_scale, o_scale                                 \
+        );                                                                     \
     }
 
-    const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
+// FP32 - large then small blocks
+MQA_GQA_FWD_ENTRY(float, 32, 128, 128, fp32)
+MQA_GQA_FWD_ENTRY(float, 64, 128, 128, fp32)
+MQA_GQA_FWD_ENTRY(float, 128, 128, 64, fp32)
+MQA_GQA_FWD_ENTRY(float, 32, 64, 64, fp32_sm)
+MQA_GQA_FWD_ENTRY(float, 64, 64, 32, fp32_sm)
+MQA_GQA_FWD_ENTRY(float, 128, 64, 32, fp32_sm)
 
-    for (int k_block = 0; k_block < num_k_blocks; ++k_block) {
-        const int k_start = k_block * BLOCK_N;
-        const int k_end = min(k_start + BLOCK_N, seq_len_k);
-        const int k_tile_size = k_end - k_start;
+// FP16 - large then small blocks
+MQA_GQA_FWD_ENTRY(__half, 32, 128, 128, fp16)
+MQA_GQA_FWD_ENTRY(__half, 64, 128, 128, fp16)
+MQA_GQA_FWD_ENTRY(__half, 128, 128, 64, fp16)
+MQA_GQA_FWD_ENTRY(__half, 32, 64, 64, fp16_sm)
+MQA_GQA_FWD_ENTRY(__half, 64, 64, 32, fp16_sm)
+MQA_GQA_FWD_ENTRY(__half, 128, 64, 32, fp16_sm)
 
-        // Load K and V tiles (dequantize FP8 → FP32)
-        for (int i = tid; i < k_tile_size * HEAD_DIM; i += blockDim.x) {
-            const int row = i / HEAD_DIM;
-            const int col = i % HEAD_DIM;
-            boostr_fp8_e4m3 k_fp8 = K_base[(k_start + row) * HEAD_DIM + col];
-            boostr_fp8_e4m3 v_fp8 = V_base[(k_start + row) * HEAD_DIM + col];
-            K_smem(row, col) = fp8_e4m3_to_f32((uint8_t)k_fp8, k_scale);
-            V_smem(row, col) = fp8_e4m3_to_f32((uint8_t)v_fp8, v_scale);
-        }
-        __syncthreads();
+// BF16 - large then small blocks
+MQA_GQA_FWD_ENTRY(__nv_bfloat16, 32, 128, 128, bf16)
+MQA_GQA_FWD_ENTRY(__nv_bfloat16, 64, 128, 128, bf16)
+MQA_GQA_FWD_ENTRY(__nv_bfloat16, 128, 128, 64, bf16)
+MQA_GQA_FWD_ENTRY(__nv_bfloat16, 32, 64, 64, bf16_sm)
+MQA_GQA_FWD_ENTRY(__nv_bfloat16, 64, 64, 32, bf16_sm)
+MQA_GQA_FWD_ENTRY(__nv_bfloat16, 128, 64, 32, bf16_sm)
 
-        if (is_valid_thread) {
-            float m_new = m_local;
-            for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
+// FP8 E4M3 - large then small blocks. The FP8 tiles stage as `float`, so these
+// need the same shared-memory bytes as the FP32 variants, not one quarter.
+MQA_GQA_FWD_ENTRY(boostr_fp8_e4m3, 32, 128, 128, fp8_e4m3)
+MQA_GQA_FWD_ENTRY(boostr_fp8_e4m3, 64, 128, 128, fp8_e4m3)
+MQA_GQA_FWD_ENTRY(boostr_fp8_e4m3, 128, 128, 64, fp8_e4m3)
+MQA_GQA_FWD_ENTRY(boostr_fp8_e4m3, 32, 64, 64, fp8_e4m3_sm)
+MQA_GQA_FWD_ENTRY(boostr_fp8_e4m3, 64, 64, 32, fp8_e4m3_sm)
+MQA_GQA_FWD_ENTRY(boostr_fp8_e4m3, 128, 64, 32, fp8_e4m3_sm)
 
-                float score = 0.0f;
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += Q_smem(q_row, d) * K_smem(j, d);
-                }
-                score *= scale;
-                m_new = fmaxf(m_new, score);
-            }
+// FP8 E5M2 - large then small blocks
+MQA_GQA_FWD_ENTRY(boostr_fp8_e5m2, 32, 128, 128, fp8_e5m2)
+MQA_GQA_FWD_ENTRY(boostr_fp8_e5m2, 64, 128, 128, fp8_e5m2)
+MQA_GQA_FWD_ENTRY(boostr_fp8_e5m2, 128, 128, 64, fp8_e5m2)
+MQA_GQA_FWD_ENTRY(boostr_fp8_e5m2, 32, 64, 64, fp8_e5m2_sm)
+MQA_GQA_FWD_ENTRY(boostr_fp8_e5m2, 64, 64, 32, fp8_e5m2_sm)
+MQA_GQA_FWD_ENTRY(boostr_fp8_e5m2, 128, 64, 32, fp8_e5m2_sm)
 
-            const float m_old = m_local;
-            m_local = m_new;
-            const float exp_diff = __expf(m_old - m_new);
-            l_local *= exp_diff;
-
-            #pragma unroll
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                O_local[d] *= exp_diff;
-            }
-
-            for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (max(0, seq_len_k - seq_len_q) + q_start + q_row) < (k_start + j)) continue;
-
-                float score = 0.0f;
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += Q_smem(q_row, d) * K_smem(j, d);
-                }
-                score *= scale;
-                const float p = __expf(score - m_new);
-                l_local += p;
-
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    O_local[d] += p * V_smem(j, d);
-                }
-            }
-        }
-        __syncthreads();
-    }
-
-    if (is_valid_thread) {
-        const float inv_l = (l_local == 0.0f) ? 1.0f : 1.0f / l_local;
-        #pragma unroll
-        for (int d = 0; d < HEAD_DIM; ++d) {
-            float out_val = O_local[d] * inv_l;
-            uint8_t fp8_val = f32_to_fp8_e4m3_raw(out_val, o_scale);
-            O_base[(q_start + q_row) * HEAD_DIM + d] = boostr_fp8_e4m3(fp8_val);
-        }
-        L_base[q_start + q_row] = m_local + __logf(l_local);
-    }
-
-    #undef Q_smem
-    #undef K_smem
-    #undef V_smem
-}
-
-// ============================================================================
-// Kernel Exports - FP8 (E4M3 and E5M2 share one impl, distinct symbol names)
-// ============================================================================
-// The FP8 impl dequantizes into `float` shared memory, so its requirement is
-// 4x the naive dtype-size estimate — same bytes as the FP32 variants.
-
-#define EXPORT_MQA_GQA_FWD_FP8(HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX) \
-extern "C" __global__ void mqa_gqa_fwd_##HEAD_DIM##_##SUFFIX( \
-    const boostr_fp8_e4m3* Q, const boostr_fp8_e4m3* K, const boostr_fp8_e4m3* V, \
-    boostr_fp8_e4m3* O, float* L, \
-    const int batch_size, const int num_q_heads, const int num_kv_heads, \
-    const int seq_len_q, const int seq_len_k, \
-    const float scale, const int causal, \
-    const float q_scale, const float k_scale, const float v_scale, const float o_scale \
-) { \
-    mqa_gqa_fwd_fp8_impl<HEAD_DIM, BLOCK_M, BLOCK_N>( \
-        Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, \
-        q_scale, k_scale, v_scale, o_scale \
-    ); \
-}
-
-// FP8 E4M3 — large blocks
-EXPORT_MQA_GQA_FWD_FP8(32, 128, 128, fp8_e4m3)
-EXPORT_MQA_GQA_FWD_FP8(64, 128, 128, fp8_e4m3)
-EXPORT_MQA_GQA_FWD_FP8(128, 128, 64, fp8_e4m3)
-
-// FP8 E4M3 — small blocks
-EXPORT_MQA_GQA_FWD_FP8(32, 64, 64, fp8_e4m3_sm)
-EXPORT_MQA_GQA_FWD_FP8(64, 64, 32, fp8_e4m3_sm)
-EXPORT_MQA_GQA_FWD_FP8(128, 64, 32, fp8_e4m3_sm)
-
-// FP8 E5M2 — large blocks
-EXPORT_MQA_GQA_FWD_FP8(32, 128, 128, fp8_e5m2)
-EXPORT_MQA_GQA_FWD_FP8(64, 128, 128, fp8_e5m2)
-EXPORT_MQA_GQA_FWD_FP8(128, 128, 64, fp8_e5m2)
-
-// FP8 E5M2 — small blocks
-EXPORT_MQA_GQA_FWD_FP8(32, 64, 64, fp8_e5m2_sm)
-EXPORT_MQA_GQA_FWD_FP8(64, 64, 32, fp8_e5m2_sm)
-EXPORT_MQA_GQA_FWD_FP8(128, 64, 32, fp8_e5m2_sm)
-
-#undef EXPORT_MQA_GQA_FWD_FP8
-
-
+#undef MQA_GQA_FWD_ENTRY

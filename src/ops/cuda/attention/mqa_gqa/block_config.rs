@@ -47,9 +47,9 @@ fn mqa_fwd_block_config_small(head_dim: usize) -> Option<(usize, usize)> {
 /// the `_sm`-suffixed kernel symbol, and `block_m` is the launcher's `block_dim.x`.
 ///
 /// `elem_bytes` is the shared-memory ELEMENT size, not always the tensor dtype
-/// size: `mqa_gqa_fwd_fp8_impl` declares `extern __shared__ float smem[]` and
-/// dequantizes on load, so FP8 needs 4 bytes per element, not 1. The FP32/FP16/
-/// BF16 impls stage in the tensor dtype.
+/// size: `mqa_gqa_fwd_impl` stages its tiles in the tensor dtype for F32/F16/
+/// BF16, but dequantizes FP8 into `float`, so FP8 needs 4 bytes per element,
+/// not 1.
 ///
 /// Two independent gates, in order:
 ///

@@ -61,9 +61,10 @@ pub fn mqa_gqa_fwd(
         }
     };
 
-    // F32/F16/BF16 stage the tile in the tensor dtype, so the element size is
-    // the dtype size. (The FP8 impls stage in f32 instead, but this launcher
-    // rejects FP8 above.)
+    // `mqa_gqa_fwd_impl` stages the Q/K/V tiles in the TENSOR dtype for
+    // F32/F16/BF16 and converts to float on read, so the shared-memory element
+    // size is the dtype size. (FP8 stages in f32 instead — 4 bytes, not 1 — but
+    // this launcher rejects FP8 above.)
     let elem_bytes = dtype.size_in_bytes();
     let (block_m, block_n, use_sm_kernel) = mqa_fwd_block_config(head_dim, elem_bytes, seq_len_q)?;
 
@@ -105,6 +106,10 @@ pub fn mqa_gqa_fwd(
     let sq_i32 = seq_len_q as i32;
     let sk_i32 = seq_len_k as i32;
     let causal_i32 = if causal { 1i32 } else { 0i32 };
+    // Every entry point declares the four trailing FP8 quantization scales.
+    // Only the FP8 entries read them, and this launcher rejects FP8 above, so
+    // 1.0f is the identity here.
+    let one = 1.0f32;
 
     unsafe {
         let mut builder = client.stream().launch_builder(&func);
@@ -120,6 +125,10 @@ pub fn mqa_gqa_fwd(
         builder.arg(&sk_i32);
         builder.arg(&scale);
         builder.arg(&causal_i32);
+        // q_scale, k_scale, v_scale, o_scale
+        for _ in 0..4 {
+            builder.arg(&one);
+        }
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("MQA/GQA fwd kernel launch failed: {:?}", e),
         })?;

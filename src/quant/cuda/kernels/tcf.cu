@@ -233,8 +233,8 @@ __global__ __launch_bounds__(TCF_DEQUANT_BLOCK, 1) void tcf_dequant_f32(
 //
 // A tile-at-a-time loop gave 20% of this card's bandwidth and got SLOWER as
 // the encoding got narrower, which is the signature of a cost tracking element
-// count rather than byte count. Two causes, measured separately on an RTX 3060
-// with `q_proj` 2048x2048 at M = 1:
+// count rather than byte count. Two causes, measured separately with a
+// `q_proj`-shaped 2048x2048 weight at M = 1:
 //
 //   - Narrow code loads. `tcf_code` issues one byte load per element, so a
 //     warp covered 32 bytes per instruction at 8 bits and 16 at 4 bits.
@@ -351,9 +351,10 @@ __global__ __launch_bounds__(TCF_GEMV_BLOCK, 1) void tcf_gemv_f32(
 // ratio, not the decode, is what the kernel was spending its time on. An
 // Ampere SM retires four warp-wide FMAs per clock and services one warp-wide
 // shared load per clock, so two loads per FMA pins the kernel at an EIGHTH of
-// the card's f32 rate whatever the encoding does. On an RTX 3060 at M = 32,
-// N = 4096, K = 1024 that predicted 337 us of shared-load issue against a
-// measured 454 us, and the kernel ran at 1.2 TFLOP/s of a 12.7 peak.
+// the card's f32 rate whatever the encoding does. At M = 32, N = 4096,
+// K = 1024 the shared-load issue cost predicted by that model came within
+// about a quarter of the measured runtime, and the kernel sat near the
+// eighth-of-peak the model implies.
 //
 // The decode is not the problem it looks like. At M = 32 the tile grid decodes
 // the weight twice, 8.4M decodes; even at ten instructions each that is 13 us

@@ -1,7 +1,7 @@
-//! Regression tests for the MLA SDPA shared-memory opt-in in
-//! `src/ops/cuda/attention/mla.rs`.
+//! Regression tests for the MLA SDPA shared-memory opt-in and tile selection
+//! in `src/ops/cuda/attention/mla.rs` + `mla_block_config.rs`.
 //!
-//! Two defects lived in that launcher:
+//! Three defects lived in that launcher:
 //!
 //! 1. It set `LaunchConfig::shared_mem_bytes` above the 48KB CUDA default
 //!    without ever calling `set_smem_attribute`, so every configuration
@@ -9,34 +9,36 @@
 //!    `CUDA_ERROR_INVALID_VALUE` ("invalid argument") on a device that would
 //!    have granted the request. Every other smem-using attention launcher in
 //!    the crate opts in; this one did not.
-//! 2. It sized shared memory with the *input* dtype's element size. All three
-//!    kernels in `sdpa.cu` stage Q/K/V as `float` and convert F16/BF16 on
+//! 2. It sized shared memory with the *input* dtype's element size. Every
+//!    kernel in `sdpa.cu` stages Q/K/V as `float` and converts F16/BF16 on
 //!    load, so an F16/BF16 launch requested half the bytes the kernel indexes
 //!    and read/wrote past the end of the allocation.
+//! 3. `sdpa.cu` hardcoded `BLOCK_M = BLOCK_N = 128` and exported exactly three
+//!    kernels, so there was no smaller tile to fall back to. A DeepSeek-V2/V3
+//!    -shaped MLA (`head_dim_k = head_dim + rope_head_dim = 192`,
+//!    `head_dim_v = 128`) needs 256KB at that tile and was refused outright on
+//!    every device.
 //!
-//! Both are fixed by `sdpa_smem_size` (always `sizeof(float)` per element) plus
-//! a `device_max_smem()` gate and a `set_smem_attribute` call.
-//!
-//! `sdpa.cu` hardcodes `BLOCK_M = BLOCK_N = 128` in `#define`s and exports
-//! exactly three `extern "C"` kernels, so there is no smaller-tile variant to
-//! fall back to. A shape that does not fit after opt-in must therefore produce
-//! a clear error naming the requirement, the device's real limit, and the
-//! shape — never a launch crash and never a baked-in ceiling.
+//! The fix: `sdpa_impl<T, BLOCK_M, BLOCK_N>` in `sdpa.cu`, instantiated at
+//! `(128, 128)` under the unsuffixed names and at `(64, 32)` under
+//! `sdpa_{f32,f16,bf16}_small`, plus `mla_block_config::block_config`, which
+//! picks the largest tile that fits `device_max_smem()` and returns the
+//! matching kernel name, `block_dim.x` and smem request together.
 //!
 //! Shared memory for one launch is
 //!   `(BLOCK_M * head_dim_k + BLOCK_N * head_dim_k + BLOCK_N * head_dim_v) * 4`
-//! = `512 * (2 * head_dim_k + head_dim_v)` bytes, independent of dtype.
+//! bytes, independent of dtype — every tile is staged as `float`.
 //!
 //! Run with:
-//!   cd boostr && cargo test --features cuda --test mla_smem_optin_cuda
+//!   cd boostr && cargo test --features cuda,f16 --test mla_smem_optin_cuda
 
 #![cfg(feature = "cuda")]
 
 use std::sync::{Mutex, OnceLock};
 
+use boostr::ops::cuda::attention::mla_block_config::mla_tile_for_test;
 use boostr::ops::traits::attention::mla::MlaOps;
 use numr::autograd::Var;
-#[cfg(feature = "f16")]
 use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
@@ -74,14 +76,80 @@ fn values(len: usize, seed: f32) -> Vec<f32> {
         .collect()
 }
 
-/// Shared memory the SDPA kernel indexes, mirroring `sdpa_smem_size`.
-fn smem_bytes(head_dim_k: usize, head_dim_v: usize) -> usize {
-    (128 * head_dim_k + 128 * head_dim_k + 128 * head_dim_v) * 4
+/// `(BLOCK_M, BLOCK_N)` of the two tiles `sdpa.cu` instantiates.
+const LARGE_TILE: (usize, usize) = (128, 128);
+const SMALL_TILE: (usize, usize) = (64, 32);
+
+/// Shared memory the SDPA kernel indexes for a tile, mirroring
+/// `mla_block_config::sdpa_smem_size`. Dtype-independent by construction.
+fn smem_bytes(tile: (usize, usize), head_dim_k: usize, head_dim_v: usize) -> usize {
+    let (block_m, block_n) = tile;
+    (block_m * head_dim_k + block_n * head_dim_k + block_n * head_dim_v) * 4
+}
+
+/// Base kernel name for a dtype, without the tile suffix.
+fn base_name(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F32 => "sdpa_f32",
+        DType::F16 => "sdpa_f16",
+        DType::BF16 => "sdpa_bf16",
+        other => panic!("unexpected dtype {other:?}"),
+    }
+}
+
+/// Resolve the tile this device picks for a shape and assert the whole
+/// resolution is self-consistent: the kernel name's suffix, `block_m`,
+/// `block_n` and the smem figure must all describe the SAME tile, and that
+/// tile must be the largest one that fits. A name that disagrees with the
+/// tile it was selected for is the exact failure `TileVariant::suffix` exists
+/// to prevent — it produced a symbol that was never compiled.
+///
+/// Returns `(kernel_name, block_m, block_n, smem, device_max_smem)`.
+fn resolved_tile(
+    dtype: DType,
+    head_dim_k: usize,
+    head_dim_v: usize,
+) -> (String, usize, usize, usize, usize) {
+    let (name, block_m, block_n, smem, max_smem) = mla_tile_for_test(dtype, head_dim_k, head_dim_v)
+        .unwrap_or_else(|e| panic!("no tile for {head_dim_k}/{head_dim_v} {dtype:?}: {e}"));
+
+    let expected_tile = if smem_bytes(LARGE_TILE, head_dim_k, head_dim_v) <= max_smem {
+        LARGE_TILE
+    } else {
+        SMALL_TILE
+    };
+    let expected_suffix = if expected_tile == LARGE_TILE {
+        ""
+    } else {
+        "_small"
+    };
+    assert_eq!(
+        name,
+        format!("{}{}", base_name(dtype), expected_suffix),
+        "resolved kernel name does not match the largest tile that fits \
+         (device limit {max_smem} bytes)"
+    );
+    assert_eq!(
+        (block_m, block_n),
+        expected_tile,
+        "resolved block dims do not match the kernel name {name}"
+    );
+    assert_eq!(
+        smem,
+        smem_bytes(expected_tile, head_dim_k, head_dim_v),
+        "resolved smem does not match the resolved tile {expected_tile:?}"
+    );
+    assert!(
+        smem <= max_smem,
+        "resolved tile needs {smem} bytes, above this device's {max_smem} byte limit"
+    );
+    (name, block_m, block_n, smem, max_smem)
 }
 
 /// CPU-vs-CUDA tolerance for the SDPA forward. Both run the same math in
-/// `f32`, but the CUDA kernel rescales its running max/sum once per 128-column
-/// K tile while the CPU reference materializes the full score row, so the two
+/// `f32`, but the CUDA kernel rescales its running max/sum once per K tile
+/// (`BLOCK_N` columns) while the CPU reference materializes the full score row,
+/// so the two
 /// accumulate rounding in a different order. With `seq_len_k` in the low
 /// hundreds that is a handful of rescalings per row; 1e-4 relative is a
 /// generous bound with headroom, not a widened-to-pass number.
@@ -211,7 +279,8 @@ fn head_dim_64_needs_the_smem_opt_in_and_matches_cpu() {
         );
         return;
     }
-    assert_eq!(smem_bytes(64, 64), 98304);
+    assert_eq!(smem_bytes(LARGE_TILE, 64, 64), 98304);
+    resolved_tile(DType::F32, 64, 64);
 
     let (actual, expected) = run_both(1, 2, 192, 64, 64, false);
     let actual = actual.expect("head_dim_k=64, head_dim_v=64 (96KB smem) must launch after opt-in");
@@ -229,75 +298,149 @@ fn head_dim_32_at_the_48kb_boundary_matches_cpu() {
         eprintln!("SKIPPED head_dim_32_at_the_48kb_boundary_matches_cpu: CUDA runtime unavailable");
         return;
     }
-    assert_eq!(smem_bytes(32, 32), 49152);
+    assert_eq!(smem_bytes(LARGE_TILE, 32, 32), 49152);
 
     let (actual, expected) = run_both(1, 2, 192, 32, 32, true);
     let actual = actual.expect("head_dim_k=32, head_dim_v=32 (48KB smem) must launch after opt-in");
     assert_close(&actual, &expected, "mla_sdpa hdk=32 hdv=32 causal");
 }
 
-/// 128KB. Above the opt-in limit of some supported GPUs and within it on
-/// others, so both outcomes are checked rather than skipped: either it
-/// computes the right answer, or it refuses with the graceful error.
+/// 131072 bytes at the large tile — above the opt-in limit of some supported
+/// GPUs and within it on others. Either way it must now COMPUTE: the small
+/// tile needs only 45056 bytes for this shape, which fits every device the
+/// opt-in path targets. Before the tile fallback existed, half the supported
+/// devices refused this shape outright.
 #[test]
-fn head_dim_k_96_head_dim_v_64_either_computes_or_refuses_cleanly() {
+fn head_dim_k_96_head_dim_v_64_computes_on_whichever_tile_fits() {
     let _guard = cuda_lock();
     if !numr::runtime::cuda::is_cuda_available() {
         eprintln!(
-            "SKIPPED head_dim_k_96_head_dim_v_64_either_computes_or_refuses_cleanly: \
+            "SKIPPED head_dim_k_96_head_dim_v_64_computes_on_whichever_tile_fits: \
              CUDA runtime unavailable"
         );
         return;
     }
-    let smem = smem_bytes(96, 64);
-    assert_eq!(smem, 131072);
+    assert_eq!(smem_bytes(LARGE_TILE, 96, 64), 131072);
+    assert_eq!(smem_bytes(SMALL_TILE, 96, 64), 45056);
+    let (name, _, _, smem, _) = resolved_tile(DType::F32, 96, 64);
+    eprintln!("head_dim_k=96, head_dim_v=64 resolved to {name} ({smem} bytes)");
 
     let (actual, expected) = run_both(1, 2, 192, 96, 64, false);
-    match actual {
-        Ok(out) => {
-            eprintln!(
-                "head_dim_k=96, head_dim_v=64 ({smem} bytes) fits this device; checking parity"
-            );
-            assert_close(&out, &expected, "mla_sdpa hdk=96 hdv=64");
-        }
-        Err(e) => {
-            eprintln!("head_dim_k=96, head_dim_v=64 ({smem} bytes) exceeds this device: {e}");
-            assert_graceful_smem_error(&e, smem, 96, 64);
-        }
-    }
+    let actual = actual.expect("head_dim_k=96, head_dim_v=64 must run on one of the two tiles");
+    assert_close(&actual, &expected, "mla_sdpa hdk=96 hdv=64");
 }
 
 /// DeepSeek-V2/V3-shaped MLA: `head_dim_k = head_dim + rope_head_dim = 192`,
-/// `head_dim_v = 128`, i.e. 256KB with the single 128x128 tile `sdpa.cu`
-/// compiles. That is above the opt-in limit of every shipping GPU, so it must
-/// produce the graceful error naming the device's real limit — not a launch
-/// crash, and not a refusal quoting a hardcoded ceiling.
+/// `head_dim_v = 128`. The large 128x128 tile needs 262144 bytes, above the
+/// opt-in limit of every shipping GPU, so before the fallback existed this
+/// shape could not run anywhere. The small 64x32 tile needs 90112 bytes and
+/// fits a ~99KB device, so it must now COMPUTE — and compute the right
+/// answer, which is why this checks values against the CPU reference rather
+/// than settling for `Ok`.
 #[test]
-fn deepseek_shaped_mla_reports_the_device_limit_not_a_launch_crash() {
+fn deepseek_shaped_mla_runs_on_the_small_tile_and_matches_cpu() {
     let _guard = cuda_lock();
     if !numr::runtime::cuda::is_cuda_available() {
         eprintln!(
-            "SKIPPED deepseek_shaped_mla_reports_the_device_limit_not_a_launch_crash: \
+            "SKIPPED deepseek_shaped_mla_runs_on_the_small_tile_and_matches_cpu: \
              CUDA runtime unavailable"
         );
         return;
     }
-    let smem = smem_bytes(192, 128);
-    assert_eq!(smem, 262144);
+    assert_eq!(smem_bytes(LARGE_TILE, 192, 128), 262144);
+    assert_eq!(smem_bytes(SMALL_TILE, 192, 128), 90112);
 
-    let (actual, _expected) = run_both(1, 2, 128, 192, 128, true);
-    let err = match actual {
-        Ok(_) => panic!(
-            "head_dim_k=192, head_dim_v=128 needs {smem} bytes of shared memory; \
-             a device granting that would be new — re-check this test's assumption"
-        ),
-        Err(e) => e,
-    };
-    assert_graceful_smem_error(&err, smem, 192, 128);
+    let (name, block_m, block_n, smem, max_smem) = resolved_tile(DType::F32, 192, 128);
     assert!(
-        !err.to_string().contains("96 KB"),
-        "error still quotes the removed hardcoded ceiling: {err}"
+        max_smem < 262144,
+        "this device grants {max_smem} bytes, enough for the large tile at 192/128; \
+         a GPU that big would be new — re-check this test's assumption"
     );
+    assert_eq!(name, "sdpa_f32_small");
+    assert_eq!((block_m, block_n), SMALL_TILE);
+    assert_eq!(smem, 90112);
+
+    let (actual, expected) = run_both(1, 2, 128, 192, 128, true);
+    let actual = actual
+        .expect("DeepSeek-shaped MLA (192/128) must run on the small tile after the fallback");
+    assert_close(&actual, &expected, "mla_sdpa hdk=192 hdv=128 causal");
+}
+
+/// The fallback must not have become unconditional. A shape whose LARGE tile
+/// fits this device must resolve to the unsuffixed kernel and `BLOCK_M=128`,
+/// and a shape whose large tile does not fit must resolve to `_small` and
+/// `BLOCK_M=64` — asserted on the resolved tile, not inferred from a launch
+/// succeeding. `resolved_tile` checks name, block dims and smem describe one
+/// and the same tile, which is what keeps `block_dim.x` in step with the
+/// kernel `sdpa.cu` compiled.
+#[test]
+fn tile_selection_tracks_the_device_limit_in_both_directions() {
+    let _guard = cuda_lock();
+    if !numr::runtime::cuda::is_cuda_available() {
+        eprintln!(
+            "SKIPPED tile_selection_tracks_the_device_limit_in_both_directions: \
+             CUDA runtime unavailable"
+        );
+        return;
+    }
+    // 32/32 needs 49152 bytes large — inside every opt-in limit, so the large
+    // tile must be selected here on any device this path supports.
+    let (name, block_m, block_n, _, _) = resolved_tile(DType::F32, 32, 32);
+    assert_eq!(name, "sdpa_f32", "large tile must still win when it fits");
+    assert_eq!((block_m, block_n), LARGE_TILE);
+
+    // 192/128 needs 262144 bytes large — outside every opt-in limit.
+    let (name, block_m, block_n, _, _) = resolved_tile(DType::F32, 192, 128);
+    assert_eq!(
+        name, "sdpa_f32_small",
+        "small tile must take over when the large one does not fit"
+    );
+    assert_eq!((block_m, block_n), SMALL_TILE);
+}
+
+/// The refusal path still has to exist and still has to be graceful. The
+/// small tile pushes the ceiling far out, but not to infinity:
+/// `head_dim_k=4096, head_dim_v=256` needs 1605632 bytes even at 64x32, well
+/// past any device. That must be a pre-launch error naming the requirement,
+/// the device's real limit and the shape — never a driver launch failure.
+#[test]
+fn a_shape_too_large_for_even_the_small_tile_is_refused_gracefully() {
+    let _guard = cuda_lock();
+    if !numr::runtime::cuda::is_cuda_available() {
+        eprintln!(
+            "SKIPPED a_shape_too_large_for_even_the_small_tile_is_refused_gracefully: \
+             CUDA runtime unavailable"
+        );
+        return;
+    }
+    let (head_dim_k, head_dim_v) = (4096, 256);
+    let smem = smem_bytes(SMALL_TILE, head_dim_k, head_dim_v);
+    assert_eq!(smem, 1605632);
+    assert!(mla_tile_for_test(DType::F32, head_dim_k, head_dim_v).is_err());
+
+    let (cuda_client, cuda_device) = cuda_setup();
+    let (b, h, s) = (1, 1, 8);
+    let make = |seed: f32, dim: usize| {
+        Var::<CudaRuntime>::new(
+            Tensor::from_slice(
+                &values(b * h * s * dim, seed),
+                &[b, h, s, dim],
+                &cuda_device,
+            )
+            .unwrap(),
+            false,
+        )
+    };
+    let err = cuda_client
+        .scaled_dot_product_attention(
+            &make(0.1, head_dim_k),
+            &make(0.2, head_dim_k),
+            &make(0.3, head_dim_v),
+            0.5,
+            false,
+        )
+        .expect_err("a shape needing 1.5MB of shared memory must be refused");
+    assert_graceful_smem_error(&err, smem, head_dim_k, head_dim_v);
 }
 
 /// `head_dim_v` indexes a fixed 256-element per-thread array in `sdpa.cu`.
@@ -365,8 +508,8 @@ fn head_dim_v_above_the_accumulator_length_is_refused() {
 // succeeded — that is precisely why this survived. Returning `Ok` proves
 // nothing here; only comparing values does.
 //
-// All half tests below use `seq_len = 192` so the grid spans two Q tiles
-// (128 + 64) and the K loop spans two K/V tiles. The second K/V tile is what
+// All half tests below use `seq_len = 192` so the grid spans more than one Q
+// tile and the K loop spans more than one K/V tile. The second K/V tile is what
 // forces the `__half2float` / `__bfloat162float` store paths into `K_smem`
 // and `V_smem` to run past the first block, which is where an undersized
 // allocation is overrun.
@@ -490,8 +633,8 @@ fn run_both_typed(
 /// 1. The kernel stores the output once in `dtype`, so element `i` carries at
 ///    most `half_eps/2 * |o_i|` of rounding. `4 * half_eps` relative gives 8
 ///    ULP of headroom over that bound.
-/// 2. The CUDA online softmax rescales its running max/sum once per 128-column
-///    K tile while the CPU reference materializes the whole score row, so the
+/// 2. The CUDA online softmax rescales its running max/sum once per K tile
+///    (`BLOCK_N` columns) while the CPU reference materializes the whole score row, so the
 ///    two `f32` accumulations round in a different order. With `seq_len_k` in
 ///    the low hundreds that is a couple of rescalings per row, bounded well
 ///    inside `1e3 * f32::EPSILON` relative to the accumulation's scale — hence
@@ -528,24 +671,6 @@ fn assert_close_half(actual: &[f32], expected: &[f32], dtype: DType, label: &str
     }
 }
 
-/// Pull the byte figure out of the graceful shared-memory refusal.
-#[cfg(feature = "f16")]
-fn reported_smem_bytes(err: &boostr::error::Error) -> usize {
-    let msg = err.to_string();
-    const HEAD: &str = "SDPA shared memory requirement (";
-    let start = msg
-        .find(HEAD)
-        .unwrap_or_else(|| panic!("not a shared-memory refusal: {msg}"))
-        + HEAD.len();
-    let rest = &msg[start..];
-    let end = rest
-        .find(" bytes)")
-        .unwrap_or_else(|| panic!("malformed shared-memory refusal: {msg}"));
-    rest[..end]
-        .parse()
-        .unwrap_or_else(|e| panic!("unparseable byte count in {msg}: {e}"))
-}
-
 /// F16 at 48KB. Under the old sizing this asked for 24576 bytes and indexed
 /// 49152, so both K/V tiles ran off the end of the allocation.
 #[test]
@@ -562,7 +687,7 @@ fn f16_head_dim_32_matches_cpu() {
             eprintln!("SKIPPED f16_head_dim_32_matches_cpu: CUDA runtime unavailable");
             return;
         }
-        assert_eq!(smem_bytes(32, 32), 49152);
+        assert_eq!(smem_bytes(LARGE_TILE, 32, 32), 49152);
 
         let (actual, expected) = run_both_typed(DType::F16, 1, 2, 192, 32, 32, false);
         let actual = actual.expect("f16 head_dim 32/32 (48KB smem) must launch after opt-in");
@@ -586,7 +711,7 @@ fn f16_head_dim_64_matches_cpu() {
             eprintln!("SKIPPED f16_head_dim_64_matches_cpu: CUDA runtime unavailable");
             return;
         }
-        assert_eq!(smem_bytes(64, 64), 98304);
+        assert_eq!(smem_bytes(LARGE_TILE, 64, 64), 98304);
 
         let (actual, expected) = run_both_typed(DType::F16, 1, 2, 192, 64, 64, true);
         let actual = actual.expect("f16 head_dim 64/64 (96KB smem) must launch after opt-in");
@@ -615,7 +740,7 @@ fn bf16_head_dim_32_matches_cpu() {
             eprintln!("SKIPPED bf16_head_dim_32_matches_cpu: CUDA runtime unavailable");
             return;
         }
-        assert_eq!(smem_bytes(32, 32), 49152);
+        assert_eq!(smem_bytes(LARGE_TILE, 32, 32), 49152);
 
         let (actual, expected) = run_both_typed(DType::BF16, 1, 2, 192, 32, 32, false);
         let actual = actual.expect("bf16 head_dim 32/32 (48KB smem) must launch after opt-in");
@@ -644,7 +769,7 @@ fn bf16_head_dim_64_matches_cpu() {
             eprintln!("SKIPPED bf16_head_dim_64_matches_cpu: CUDA runtime unavailable");
             return;
         }
-        assert_eq!(smem_bytes(64, 64), 98304);
+        assert_eq!(smem_bytes(LARGE_TILE, 64, 64), 98304);
 
         let (actual, expected) = run_both_typed(DType::BF16, 1, 2, 192, 64, 64, true);
         let actual = actual.expect("bf16 head_dim 64/64 (96KB smem) must launch after opt-in");
@@ -657,25 +782,22 @@ fn bf16_head_dim_64_matches_cpu() {
     }
 }
 
-/// The direct regression guard for the element-size bug: the shared memory
-/// requested for a given shape must be IDENTICAL across F32, F16 and BF16.
+/// The direct regression guard for the element-size bug: the tile resolved
+/// for a given shape — its kernel, its block dims and its shared-memory
+/// request — must be IDENTICAL across F32, F16 and BF16 apart from the dtype
+/// in the kernel name.
 ///
 /// `sdpa.cu` stages every tile as `float` and converts F16/BF16 on load, so
-/// the requirement depends only on the shape. Reintroducing
+/// the requirement depends only on the SHAPE and the TILE. Reintroducing
 /// `* dtype.size_in_bytes()` makes the half dtypes ask for exactly half the
-/// bytes the kernel indexes; this test fails the moment that happens.
-///
-/// `head_dim_k=96, head_dim_v=64` is 131072 bytes, above some supported
-/// devices' opt-in limit and within others', so both outcomes are checked
-/// rather than skipped. Either every dtype is refused with the same byte
-/// figure, or every dtype computes the right answer — dtype-independence
-/// holds on both paths. A split outcome is itself the bug: under the old
-/// sizing F32 was refused at 131072 while F16/BF16 sailed through at 65536.
+/// bytes the kernel indexes; this test fails the moment that happens — and it
+/// would also let a half dtype resolve to a larger tile than F32 for the same
+/// shape, which is the same bug wearing the tile selector's clothes.
 #[test]
-fn requested_smem_is_identical_across_f32_f16_and_bf16() {
+fn resolved_tile_is_identical_across_f32_f16_and_bf16() {
     #[cfg(not(feature = "f16"))]
     eprintln!(
-        "SKIPPED requested_smem_is_identical_across_f32_f16_and_bf16: built without the \
+        "SKIPPED resolved_tile_is_identical_across_f32_f16_and_bf16: built without the \
          `f16` feature; run with --features cuda,f16"
     );
     #[cfg(feature = "f16")]
@@ -683,67 +805,113 @@ fn requested_smem_is_identical_across_f32_f16_and_bf16() {
         let _guard = cuda_lock();
         if !numr::runtime::cuda::is_cuda_available() {
             eprintln!(
-                "SKIPPED requested_smem_is_identical_across_f32_f16_and_bf16: \
+                "SKIPPED resolved_tile_is_identical_across_f32_f16_and_bf16: \
                  CUDA runtime unavailable"
             );
             return;
         }
-        let smem = smem_bytes(96, 64);
-        assert_eq!(smem, 131072);
 
-        let dtypes = [DType::F32, DType::F16, DType::BF16];
-        let mut outcomes = Vec::new();
-        for dtype in dtypes {
-            let (actual, expected) = run_both_typed(dtype, 1, 2, 192, 96, 64, false);
-            match actual {
-                Ok(out) => {
-                    let label = format!("mla_sdpa {} hdk=96 hdv=64", dtype_label(dtype));
-                    if dtype == DType::F32 {
-                        assert_close(&out, &expected, &label);
-                    } else {
-                        assert_close_half(&out, &expected, dtype, &label);
-                    }
-                    outcomes.push((dtype, None));
-                }
-                Err(e) => {
-                    assert_graceful_smem_error(&e, smem, 96, 64);
-                    outcomes.push((dtype, Some(reported_smem_bytes(&e))));
+        // Both a shape that takes the large tile and one that takes the small
+        // one, so dtype-independence is checked on each branch of the selector.
+        for (head_dim_k, head_dim_v) in [(64usize, 64usize), (192, 128)] {
+            let mut seen: Option<(usize, usize, usize)> = None;
+            for dtype in [DType::F32, DType::F16, DType::BF16] {
+                let (name, block_m, block_n, smem, _) =
+                    resolved_tile(dtype, head_dim_k, head_dim_v);
+                assert!(
+                    name.starts_with(base_name(dtype)),
+                    "{name} is not the kernel for {}",
+                    dtype_label(dtype)
+                );
+                match seen {
+                    None => seen = Some((block_m, block_n, smem)),
+                    Some(first) => assert_eq!(
+                        (block_m, block_n, smem),
+                        first,
+                        "SDPA tile selection is dtype-dependent at {head_dim_k}/{head_dim_v}: \
+                         {} resolved {:?} where the first dtype resolved {:?}. sdpa.cu stages \
+                         every tile as `float` and converts F16/BF16 on load, so the \
+                         requirement is a function of the SHAPE and the TILE alone. A size \
+                         scaled by `dtype.size_in_bytes()` asks for half the bytes the half \
+                         kernels index and overruns the allocation — that was the original \
+                         defect.",
+                        dtype_label(dtype),
+                        (block_m, block_n, smem),
+                        first
+                    ),
                 }
             }
         }
+    }
+}
 
-        let first = outcomes[0].1;
-        for (dtype, reported) in &outcomes {
-            assert_eq!(
-                *reported,
-                first,
-                "SDPA shared memory is dtype-dependent: {} reported {:?} where {} reported {:?}. \
-                 sdpa.cu stages every tile as `float` and converts F16/BF16 on load, so the \
-                 requirement is a function of the SHAPE alone. A size scaled by \
-                 `dtype.size_in_bytes()` asks for half the bytes the half kernels index and \
-                 overruns the allocation — that was the original defect.",
-                dtype_label(*dtype),
-                reported,
-                dtype_label(outcomes[0].0),
-                first
+/// F16 on the SMALL tile, DeepSeek-shaped. The small tile is new code, and
+/// F32-only coverage of it would repeat exactly the gap that let the
+/// element-size defect survive: an undersized or mis-strided `_small`
+/// allocation still launches, and only comparing values catches it.
+#[test]
+fn f16_deepseek_shaped_small_tile_matches_cpu() {
+    #[cfg(not(feature = "f16"))]
+    eprintln!(
+        "SKIPPED f16_deepseek_shaped_small_tile_matches_cpu: built without the `f16` \
+         feature; run with --features cuda,f16"
+    );
+    #[cfg(feature = "f16")]
+    {
+        let _guard = cuda_lock();
+        if !numr::runtime::cuda::is_cuda_available() {
+            eprintln!(
+                "SKIPPED f16_deepseek_shaped_small_tile_matches_cpu: CUDA runtime unavailable"
             );
+            return;
         }
+        let (name, block_m, block_n, smem, _) = resolved_tile(DType::F16, 192, 128);
+        assert_eq!(name, "sdpa_f16_small");
+        assert_eq!((block_m, block_n), SMALL_TILE);
+        assert_eq!(smem, 90112);
 
-        match first {
-            Some(bytes) => {
-                assert_eq!(
-                    bytes, smem,
-                    "refusal must report the shape-derived requirement of {smem} bytes"
-                );
-                eprintln!(
-                    "head_dim_k=96, head_dim_v=64 exceeds this device for all three dtypes; \
-                     all reported {bytes} bytes"
-                );
-            }
-            None => eprintln!(
-                "head_dim_k=96, head_dim_v=64 ({smem} bytes) fits this device for all three \
-                 dtypes; parity checked for each"
-            ),
+        let (actual, expected) = run_both_typed(DType::F16, 1, 2, 192, 192, 128, false);
+        let actual = actual.expect("f16 192/128 must run on the small tile");
+        assert_close_half(
+            &actual,
+            &expected,
+            DType::F16,
+            "mla_sdpa f16 small hdk=192 hdv=128",
+        );
+    }
+}
+
+/// BF16 on the SMALL tile, DeepSeek-shaped and causal. Same reason as the
+/// F16 case, through the `__bfloat162float` load path — and causal so the
+/// small tile's masking runs against a `BLOCK_N` of 32 rather than 128.
+#[test]
+fn bf16_deepseek_shaped_small_tile_matches_cpu() {
+    #[cfg(not(feature = "f16"))]
+    eprintln!(
+        "SKIPPED bf16_deepseek_shaped_small_tile_matches_cpu: built without the `f16` \
+         feature; run with --features cuda,f16"
+    );
+    #[cfg(feature = "f16")]
+    {
+        let _guard = cuda_lock();
+        if !numr::runtime::cuda::is_cuda_available() {
+            eprintln!(
+                "SKIPPED bf16_deepseek_shaped_small_tile_matches_cpu: CUDA runtime unavailable"
+            );
+            return;
         }
+        let (name, block_m, block_n, smem, _) = resolved_tile(DType::BF16, 192, 128);
+        assert_eq!(name, "sdpa_bf16_small");
+        assert_eq!((block_m, block_n), SMALL_TILE);
+        assert_eq!(smem, 90112);
+
+        let (actual, expected) = run_both_typed(DType::BF16, 1, 2, 192, 192, 128, true);
+        let actual = actual.expect("bf16 192/128 must run on the small tile");
+        assert_close_half(
+            &actual,
+            &expected,
+            DType::BF16,
+            "mla_sdpa bf16 small hdk=192 hdv=128 causal",
+        );
     }
 }

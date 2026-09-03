@@ -1,17 +1,18 @@
-//! `DequantOps::dequantize` against llama.cpp's OWN reference implementation,
-//! on verbatim block bytes lifted out of real GGUF model files.
+//! `DequantOps::dequantize` against llama.cpp's OWN reference implementation.
 //!
-//! Every `*_ref.bin` comes from `gguf.quants.dequantize` in the `gguf` Python
-//! package, maintained in the llama.cpp tree. No boostr code produces it.
+//! Every expectation comes from llama.cpp, by one of two routes: the `gguf`
+//! Python package maintained in the llama.cpp tree, or ggml's C library
+//! directly. No boostr code produces any of them. The provenance tables below
+//! name the route per fixture.
 //!
 //! Keep the reference EXTERNAL. A comparison against boostr's own writer,
 //! against `QuantTensor` round-tripping, or against a Rust restatement of the
 //! block layout passes while the decode is wrong, and is not a substitute.
 //!
-//! `tests/gguf_dequant_cpu_cuda_parity.rs` is the other half and covers all 23
-//! `QuantFormat` variants, but only proves CPU and CUDA agree with each other —
-//! it passes on any error the two backends share. Neither file subsumes the
-//! other.
+//! `tests/gguf_dequant_cpu_cuda_parity.rs` is the other half. It proves only
+//! that CPU and CUDA agree with each other, so it passes on any error the two
+//! backends share. It does cover the quant-matmul kernels, which this file does
+//! not. Neither file subsumes the other.
 //!
 //! # Fixture provenance
 //!
@@ -72,6 +73,18 @@
 //! these fixtures pin. It must come from a CAUSAL model: `llama-imatrix` aborts
 //! on an encoder-only embedding model, and on one whose tokenizer appends EOS.
 //!
+//! Q8_1 and Q8K are activation formats: no model file stores them, and the
+//! `gguf` Python package implements neither `quantize` nor `dequantize` for
+//! either. Both fixtures instead come from ggml's C routines directly
+//! (`libggml-base` / `libggml-cpu`), not from a model file or `gguf`:
+//!
+//! | fixture | produced by | blocks | elements |
+//! |---|---|---|---|
+//! | `q8_k_raw.bin` | ggml `quantize_row_q8_K` | 8 | 2048 |
+//! | `q8_k_ref.bin` | ggml `dequantize_row_q8_K` on `q8_k_raw.bin` | 8 | 2048 |
+//! | `q8_1_raw.bin` | ggml `quantize_row_q8_1` | 8 | 256 |
+//! | `q8_1_src.bin` | the pre-quantization floats fed to `quantize_row_q8_1` | 8 | 256 |
+//!
 //! Eight blocks each: one block cannot expose a per-block indexing or stride
 //! error, and two cannot separate "off by one block" from "reversed". Real
 //! model weights also defeat a permutation the way a uniform synthetic block
@@ -112,33 +125,38 @@
 //! and TQ2_0; every other format raises `NotImplementedError` and needs a real
 //! model file.
 //!
+//! For Q8_1 and Q8K, call ggml's C routines instead. Declare the prototypes
+//! and link against the installed library — no ggml headers needed:
+//!
+//! ```c
+//! void quantize_row_q8_1(const float *x, void *y, int64_t k);
+//! void quantize_row_q8_K(const float *x, void *y, int64_t k);
+//! void dequantize_row_q8_K(const void *x, float *y, int64_t k);
+//! // gcc gen.c -o gen -lggml-base -lggml-cpu
+//! ```
+//!
+//! Scale each block by a different factor when generating the source floats.
+//! A single scale across all blocks lets a per-block stride error pass.
+//!
 //! A new format needs the two files plus one `_cpu` and one `_cuda` test,
 //! written out explicitly like the existing ones below.
 //!
-//! # Comparison is EXACT
+//! # Comparison is EXACT, except Q8_1
 //!
-//! There is no tolerance. Measured on CPU, every format covered here matches
-//! the llama.cpp reference bit-for-bit: zero mismatching elements, `max_abs =
-//! 0.0`. Treat any future approximate result as an error requiring review.
+//! Every `QuantFormat` variant is gated against llama.cpp. Every format but
+//! Q8_1 uses `assert_matches_llama_cpp`: no tolerance, bit-for-bit against the
+//! llama.cpp reference, zero mismatching elements, `max_abs = 0.0`. Treat any
+//! future approximate result on one of these as an error requiring review.
 //! Never absorb it into a widened epsilon. If CUDA ever differs by an ulp or
 //! two because nvcc contracts a scale multiply into an FMA, report the exact
 //! indices and magnitudes rather than widening the check here.
 //!
-//! # Formats NOT covered
-//!
-//! Most `QuantFormat` variants are gated against llama.cpp. The remaining two,
-//! Q8_1 and Q8K, rest solely on the CPU/CUDA mutual-agreement gate. That gate
-//! is weaker: two backends that share a decode also share its mistakes, so it
-//! cannot catch an error both backends make the same way.
-//!
-//! Neither fixture route reaches them: `gguf.quants.quantize` raises
-//! `NotImplementedError` for both, and no model file carries either, because
-//! both are intermediate ACTIVATION formats — quantized at runtime to feed a
-//! matmul, never stored as weights. Closing them takes a reference that
-//! quantizes an activation tensor directly rather than a model file.
-//!
-//! That is a small and well-understood gap. It is recorded here so nobody
-//! reads "most formats" as "all of them".
+//! Q8K has a `dequantize_row_q8_K` in ggml, so it fits this bit-exact gate
+//! despite being an activation format. Q8_1 has no `dequantize_row_q8_1` —
+//! the format is write-only, produced for `vec_dot` — so it uses
+//! `assert_round_trip_within` instead: llama.cpp quantizes known floats, and
+//! boostr's dequant must land within a fixed tolerance of `0.04` of them, not
+//! match bit-for-bit.
 //!
 //! Run with:
 //!   cd boostr && cargo test --test gguf_conformance_llama_cpp
@@ -242,6 +260,64 @@ fn assert_matches_llama_cpp(format: &str, backend: &str, got: &[f32], reference:
     );
 }
 
+/// Asserts `got` lands within `tol` of `source`, the pre-quantization floats.
+/// Q8_1 has no external dequantized reference, so this is a round trip, not a
+/// bit-exact comparison: `source` fed llama.cpp's quantizer, and `got` is
+/// boostr's dequant of the bytes it produced. Always prints one flat
+/// `GGUF_CONFORMANCE_DIAG` line — pass or fail — so a green run still records
+/// what each format produced.
+fn assert_round_trip_within(format: &str, backend: &str, got: &[f32], source: &[f32], tol: f32) {
+    assert_eq!(
+        got.len(),
+        source.len(),
+        "{format}/{backend}: element count {} does not match the pre-quantization source {}",
+        got.len(),
+        source.len()
+    );
+
+    let mut mismatches = 0usize;
+    let mut max_abs = 0.0f32;
+    let mut first_mismatch: i64 = -1;
+    let mut report = String::new();
+    for i in 0..got.len() {
+        let (a, b) = (got[i], source[i]);
+        let diff = (a - b).abs();
+        if diff > max_abs {
+            max_abs = diff;
+        }
+        if diff > tol {
+            if first_mismatch < 0 {
+                first_mismatch = i as i64;
+            }
+            mismatches += 1;
+            if mismatches <= 16 {
+                report.push_str(&format!(
+                    "\n  idx {i:5}  boostr {a:14.6}  pre-quant {b:14.6}"
+                ));
+            }
+        }
+    }
+
+    println!(
+        "GGUF_CONFORMANCE_DIAG format={format} backend={backend} elements={} \
+         mismatches={mismatches} max_abs={max_abs:.6e}",
+        got.len()
+    );
+
+    assert_eq!(
+        mismatches,
+        0,
+        "{format}/{backend}: boostr's dequant lands outside tolerance {tol} of the \
+         pre-quantization floats on {mismatches} of {} elements (first at index \
+         {first_mismatch}, max_abs {max_abs:.6e}). First mismatches:{report}\n\
+         This is a ROUND TRIP against the source floats llama.cpp quantized, not a \
+         bit-exact reference — Q8_1 has no dequantize_row_q8_1 in ggml. A mismatch \
+         within a small multiple of tol is a rounding drift; one off by whole \
+         magnitudes is a layout error.",
+        got.len()
+    );
+}
+
 #[test]
 fn q4_0_matches_llama_cpp_cpu() {
     let bytes = raw_blocks("q4_0_raw.bin");
@@ -297,6 +373,36 @@ fn q6_k_matches_llama_cpp_cpu() {
         QuantTensor::<CpuRuntime>::from_bytes(&bytes, QuantFormat::Q6K, &[2048], &device).unwrap();
     let got = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
     assert_matches_llama_cpp("Q6K", "cpu", &got, &reference);
+}
+
+#[test]
+fn q8_k_matches_llama_cpp_cpu() {
+    let bytes = raw_blocks("q8_k_raw.bin");
+    let reference = llama_cpp_reference("q8_k_ref.bin");
+    let (client, device) = cpu_setup();
+    let qt =
+        QuantTensor::<CpuRuntime>::from_bytes(&bytes, QuantFormat::Q8K, &[2048], &device).unwrap();
+    let got = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+    assert_matches_llama_cpp("Q8K", "cpu", &got, &reference);
+}
+
+/// Q8_1 is write-only for `vec_dot`: ggml exports no `dequantize_row_q8_1`, so
+/// the gate is a round trip against the floats llama.cpp quantized.
+///
+/// Tolerance derivation: Q8_1 stores 8-bit values with per-block scale
+/// `d = max_abs / 127`. The source reaches magnitude ~7.71, so the largest
+/// block's `d` is about `7.71 / 127`. Round-to-nearest error is at most `d / 2`,
+/// about 0.030. `0.04` leaves margin without admitting a layout error, which
+/// is wrong by whole magnitudes rather than a fraction of a step.
+#[test]
+fn q8_1_matches_llama_cpp_cpu() {
+    let bytes = raw_blocks("q8_1_raw.bin");
+    let source = llama_cpp_reference("q8_1_src.bin");
+    let (client, device) = cpu_setup();
+    let qt =
+        QuantTensor::<CpuRuntime>::from_bytes(&bytes, QuantFormat::Q8_1, &[256], &device).unwrap();
+    let got = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+    assert_round_trip_within("Q8_1", "cpu", &got, &source, 0.04);
 }
 
 #[test]
@@ -491,7 +597,9 @@ fn iq2_s_matches_llama_cpp_cpu() {
 
 #[cfg(feature = "cuda")]
 mod cuda {
-    use super::{assert_matches_llama_cpp, llama_cpp_reference, raw_blocks};
+    use super::{
+        assert_matches_llama_cpp, assert_round_trip_within, llama_cpp_reference, raw_blocks,
+    };
 
     use std::sync::{Mutex, OnceLock};
 
@@ -659,6 +767,58 @@ mod cuda {
         };
         client.synchronize();
         assert_matches_llama_cpp("Q6K", "cuda", &got, &reference);
+    }
+
+    #[test]
+    fn q8_k_matches_llama_cpp_cuda() {
+        if !numr::runtime::cuda::is_cuda_available() {
+            loud_skip("Q8K");
+            return;
+        }
+        let _lock = cuda_lock();
+        let bytes = raw_blocks("q8_k_raw.bin");
+        let reference = llama_cpp_reference("q8_k_ref.bin");
+        let (client, device) = cuda_setup();
+        client.synchronize();
+        let got = {
+            let qt =
+                QuantTensor::<CudaRuntime>::from_bytes(&bytes, QuantFormat::Q8K, &[2048], &device)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "Q8K/cuda: device allocation failed: {e}. This is a FAILURE, not a \
+                             skip — Q8K was NOT compared against llama.cpp."
+                        )
+                    });
+            client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>()
+        };
+        client.synchronize();
+        assert_matches_llama_cpp("Q8K", "cuda", &got, &reference);
+    }
+
+    #[test]
+    fn q8_1_matches_llama_cpp_cuda() {
+        if !numr::runtime::cuda::is_cuda_available() {
+            loud_skip("Q8_1");
+            return;
+        }
+        let _lock = cuda_lock();
+        let bytes = raw_blocks("q8_1_raw.bin");
+        let source = llama_cpp_reference("q8_1_src.bin");
+        let (client, device) = cuda_setup();
+        client.synchronize();
+        let got = {
+            let qt =
+                QuantTensor::<CudaRuntime>::from_bytes(&bytes, QuantFormat::Q8_1, &[256], &device)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "Q8_1/cuda: device allocation failed: {e}. This is a FAILURE, not a \
+                             skip — Q8_1 was NOT compared against llama.cpp."
+                        )
+                    });
+            client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>()
+        };
+        client.synchronize();
+        assert_round_trip_within("Q8_1", "cuda", &got, &source, 0.04);
     }
 
     #[test]

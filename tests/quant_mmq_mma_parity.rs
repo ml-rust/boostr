@@ -82,6 +82,144 @@ fn build_q8_1_activation(m: usize, k: usize) -> Vec<u8> {
     out
 }
 
+/// Builds a Q4_K weight buffer: `n * (k / 256)` super-blocks of 144 bytes —
+/// f16 `d` at byte 0, f16 `dmin` at byte 2, 12 bytes of packed 6-bit
+/// scales/minimums at byte 4, 128 bytes of nibble-packed quants at byte 16.
+fn build_q4_k_weight(n: usize, k: usize) -> Vec<u8> {
+    let supers = k / 256;
+    let mut out = vec![0u8; n * supers * 144];
+    for row in 0..n {
+        for s in 0..supers {
+            let block = row * supers + s;
+            let base = block * 144;
+            out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
+            out[base + 2..base + 4].copy_from_slice(
+                &half::f16::from_f32(0.02 + (block as f32 * 0.005) % 0.3).to_le_bytes(),
+            );
+            for i in 0..12 {
+                out[base + 4 + i] = (((block * 71 + i * 13) % 256) as i32 - 128) as u8;
+            }
+            for i in 0..128 {
+                out[base + 16 + i] = (((block * 197 + i * 29) % 256) as i32 - 128) as u8;
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn q4_k_mma_kernel_matches_dp4a_kernel() {
+    if !numr::runtime::cuda::is_cuda_available() {
+        println!(
+            "!! q4_k_mma_kernel_matches_dp4a_kernel SKIPPED: CUDA is not available on this \
+             machine. NOTHING WAS VERIFIED."
+        );
+        eprintln!(
+            "!! q4_k_mma_kernel_matches_dp4a_kernel SKIPPED: CUDA is not available on this \
+             machine. NOTHING WAS VERIFIED."
+        );
+        return;
+    }
+    let _lock = cuda_lock();
+
+    // `m16n8k32` needs sm_80. `caps.bf16` marks that floor, so a pre-Ampere
+    // device skips here instead of failing to load the module.
+    if !CudaDevice::new(0).profile().caps.bf16 {
+        println!(
+            "!! q4_k_mma_kernel_matches_dp4a_kernel SKIPPED: this GPU predates sm_80, which \
+             `mma.sync.aligned.m16n8k32` requires. NOTHING WAS VERIFIED."
+        );
+        eprintln!(
+            "!! q4_k_mma_kernel_matches_dp4a_kernel SKIPPED: this GPU predates sm_80, which \
+             `mma.sync.aligned.m16n8k32` requires. NOTHING WAS VERIFIED."
+        );
+        return;
+    }
+
+    // K must be a multiple of 256 for Q4_K's super-block layout.
+    let m: usize = 64;
+    let k: usize = 512;
+    let n: usize = 96;
+
+    let weight_bytes = build_q4_k_weight(n, k);
+    let act_bytes = build_q8_1_activation(m, k);
+
+    let device = CudaDevice::new(0);
+    let client = CudaRuntime::default_client(&device);
+    client.synchronize();
+    let device_index = device.id();
+
+    let weight =
+        Tensor::<CudaRuntime>::from_slice(&weight_bytes, &[weight_bytes.len()], &device).unwrap();
+    let act = Tensor::<CudaRuntime>::from_slice(&act_bytes, &[act_bytes.len()], &device).unwrap();
+    let out_dp4a = Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device).unwrap();
+    let out_mma = Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device).unwrap();
+
+    let weight_ptr = weight.ptr();
+    let act_ptr = act.ptr();
+    let out_dp4a_ptr = out_dp4a.ptr();
+    let out_mma_ptr = out_mma.ptr();
+    let m_u32 = m as u32;
+    let k_u32 = k as u32;
+    let n_u32 = n as u32;
+
+    let cfg = LaunchConfig {
+        grid_dim: (n_u32.div_ceil(64), m_u32.div_ceil(128), 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    let dp4a_module =
+        kernels::get_or_load_module(client.context(), device_index, QUANT_GEMV_MODULE).unwrap();
+    let dp4a_func = kernels::get_kernel_function(&dp4a_module, "quant_mmq_q4_k_q8_1").unwrap();
+
+    let mma_module =
+        kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE).unwrap();
+    let mma_func = kernels::get_kernel_function(&mma_module, "quant_mmq_q4_k_q8_1_mma").unwrap();
+
+    unsafe {
+        let mut builder = client.stream().launch_builder(&dp4a_func);
+        builder.arg(&act_ptr);
+        builder.arg(&weight_ptr);
+        builder.arg(&out_dp4a_ptr);
+        builder.arg(&m_u32);
+        builder.arg(&k_u32);
+        builder.arg(&n_u32);
+        builder.launch(cfg).unwrap();
+    }
+
+    unsafe {
+        let mut builder = client.stream().launch_builder(&mma_func);
+        builder.arg(&act_ptr);
+        builder.arg(&weight_ptr);
+        builder.arg(&out_mma_ptr);
+        builder.arg(&m_u32);
+        builder.arg(&k_u32);
+        builder.arg(&n_u32);
+        builder.launch(cfg).unwrap();
+    }
+
+    client.synchronize();
+
+    let dp4a_host = out_dp4a.to_vec::<f32>();
+    let mma_host = out_mma.to_vec::<f32>();
+
+    for row in 0..m {
+        for col in 0..n {
+            let idx = row * n + col;
+            let a = dp4a_host[idx];
+            let b = mma_host[idx];
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "mismatch at (row={row}, col={col}): dp4a={a}, mma={b}. The two kernels must \
+                 agree bitwise: they accumulate the same int32 products and row sums and apply \
+                 the same scales in the same order."
+            );
+        }
+    }
+}
+
 #[test]
 fn mma_kernel_matches_dp4a_kernel() {
     if !numr::runtime::cuda::is_cuda_available() {

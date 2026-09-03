@@ -226,10 +226,9 @@ pub(super) fn dispatch_matmul(
     // tile across a 128-row batch tile instead of re-reading it per output row.
     // The K-quants additionally need K to be a whole number of 256-element
     // super-blocks, which their own layout already guarantees.
-    // Q8_0 needs sm_80 for `quant_mmq_q8_0_q8_1_mma` (module
-    // `QUANT_MMQ_MMA_MODULE`). Below sm_80 it falls back to the dp4a kernel
-    // `quant_mmq_q8_0_q8_1` (module `QUANT_GEMV_MODULE`). Both produce
-    // bit-identical output.
+    // Q8_0 and Q4_K need sm_80 for their `_mma` kernels (module
+    // `QUANT_MMQ_MMA_MODULE`). Below sm_80 each falls back to its dp4a kernel
+    // (module `QUANT_GEMV_MODULE`). Both produce bit-identical output.
     let mmq = match format {
         QuantFormat::Q8_0 if k.is_multiple_of(32) => {
             let caps = numr::runtime::cuda::CudaDevice::new(device_index)
@@ -242,7 +241,14 @@ pub(super) fn dispatch_matmul(
             }
         }
         QuantFormat::Q4K if k.is_multiple_of(256) => {
-            Some(("quant_mmq_q4_k_q8_1", QUANT_GEMV_MODULE))
+            let caps = numr::runtime::cuda::CudaDevice::new(device_index)
+                .profile()
+                .caps;
+            if caps.int8_mma_m16n8k32 {
+                Some(("quant_mmq_q4_k_q8_1_mma", QUANT_MMQ_MMA_MODULE))
+            } else {
+                Some(("quant_mmq_q4_k_q8_1", QUANT_GEMV_MODULE))
+            }
         }
         QuantFormat::Q6K if k.is_multiple_of(256) => {
             Some(("quant_mmq_q6_k_q8_1", QUANT_GEMV_MODULE))

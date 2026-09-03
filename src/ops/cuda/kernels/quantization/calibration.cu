@@ -160,10 +160,15 @@ extern "C" __global__ void fisher_accumulate_f32(
 }
 
 // ============================================================================
-// 16-bit atomic helpers (CAS loop — works for both F16 and BF16)
+// 16-bit atomic max helpers (CAS loop — works for both F16 and BF16)
 //
-// CUDA has no native atomicMax/atomicAdd for __half/__nv_bfloat16 on individual
-// elements. The standard approach is a 32-bit CAS loop: read the aligned 32-bit
+// CUDA has no native atomicMax for __half/__nv_bfloat16 on individual elements,
+// and dtype_traits.cuh has no `atomic_max_dtype`, so the two helpers below stay
+// local. Atomic ADD is not defined here: the summing reductions accumulate into
+// an F32 buffer with native atomicAdd(float*), and any 16-bit add goes through
+// `atomic_add_dtype` in dtype_traits.cuh.
+//
+// The standard approach is a 32-bit CAS loop: read the aligned 32-bit
 // word containing our 16-bit slot, compute the new value, and swap atomically.
 // The loop retries only on contention (another thread updated the same 32-bit
 // word between our read and our CAS).
@@ -173,25 +178,6 @@ extern "C" __global__ void fisher_accumulate_f32(
 // buffer are 2-byte aligned. The `(size_t)addr & 2` test selects the upper or
 // lower 16-bit slot within the surrounding aligned 32-bit word.
 // ============================================================================
-
-// atomicAdd for a single __half element. Unused: the summing reductions above
-// accumulate into an F32 buffer with native atomicAdd(float*).
-static __device__ __forceinline__ void atomic_add_f16(__half* addr, float addend) {
-    unsigned int* base = (unsigned int*)((size_t)addr & ~(size_t)2);
-    unsigned int old_word = *base;
-    unsigned int assumed;
-    const bool hi = (size_t)addr & 2;
-    do {
-        assumed = old_word;
-        unsigned short slot = hi ? (unsigned short)(assumed >> 16)
-                                 : (unsigned short)(assumed & 0xffffu);
-        float updated = __half2float(__ushort_as_half(slot)) + addend;
-        unsigned short new_slot = __half_as_ushort(__float2half(updated));
-        unsigned int new_word = hi ? ((assumed & 0x0000ffffu) | ((unsigned int)new_slot << 16))
-                                   : ((assumed & 0xffff0000u) | new_slot);
-        old_word = atomicCAS(base, assumed, new_word);
-    } while (old_word != assumed);
-}
 
 // atomicMax for a single __half element (non-negative values only — safe for
 // abs-max accumulation used in AWQ act-scale).
@@ -207,25 +193,6 @@ static __device__ __forceinline__ void atomic_max_f16(__half* addr, float candid
         float current = __half2float(__ushort_as_half(slot));
         if (candidate <= current) return;  // No update needed — early exit
         unsigned short new_slot = __half_as_ushort(__float2half(candidate));
-        unsigned int new_word = hi ? ((assumed & 0x0000ffffu) | ((unsigned int)new_slot << 16))
-                                   : ((assumed & 0xffff0000u) | new_slot);
-        old_word = atomicCAS(base, assumed, new_word);
-    } while (old_word != assumed);
-}
-
-// atomicAdd for a single __nv_bfloat16 element. Unused, for the same reason as
-// atomic_add_f16 above.
-static __device__ __forceinline__ void atomic_add_bf16(__nv_bfloat16* addr, float addend) {
-    unsigned int* base = (unsigned int*)((size_t)addr & ~(size_t)2);
-    unsigned int old_word = *base;
-    unsigned int assumed;
-    const bool hi = (size_t)addr & 2;
-    do {
-        assumed = old_word;
-        unsigned short slot = hi ? (unsigned short)(assumed >> 16)
-                                 : (unsigned short)(assumed & 0xffffu);
-        float updated = __bfloat162float(__ushort_as_bfloat16(slot)) + addend;
-        unsigned short new_slot = __bfloat16_as_ushort(__float2bfloat16(updated));
         unsigned int new_word = hi ? ((assumed & 0x0000ffffu) | ((unsigned int)new_slot << 16))
                                    : ((assumed & 0xffff0000u) | new_slot);
         old_word = atomicCAS(base, assumed, new_word);

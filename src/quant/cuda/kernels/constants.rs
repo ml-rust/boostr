@@ -12,6 +12,7 @@ pub const MARLIN_GEMM_MODULE: &str = "marlin_gemm";
 pub const FUSED_INT4_SWIGLU_MODULE: &str = "fused_int4_swiglu";
 pub const FUSED_INT4_QKV_MODULE: &str = "fused_int4_qkv";
 pub const QUANT_ACT_MODULE: &str = "quant_act";
+pub const MMA_INT8_PROBE_MODULE: &str = "mma_int8_probe";
 
 /// TCF native quantized kernels: dequantization, GEMV, and GEMM in one module.
 /// One translation unit because all three share the device decoder in

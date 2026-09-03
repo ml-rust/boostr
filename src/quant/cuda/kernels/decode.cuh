@@ -6,7 +6,7 @@
 // no activation helpers. Self-contained — no dependency on WARP_SIZE,
 // load_int_ua, or dp4a from the per-kernel-family common.cuh files, since
 // quant_gemv.cu and quant_matmul.cu define their own copies of those and a
-// second definition here would conflict.
+// second definition here conflicts.
 
 #pragma once
 
@@ -134,7 +134,7 @@ static __device__ __forceinline__ int gguf_split_half_nibble(
 // the start, and both order elements level-major rather than byte-major.
 // Reading `d` from offset 0 yields a scale built from packed trits — a small
 // denormal-ish number that keeps the tensor finite while every weight is
-// wrong, which is exactly the failure class CLAUDE.md warns about.
+// wrong, which is exactly the error class CLAUDE.md warns about.
 //
 //   TQ1_0 (54B): qs[0..48], qh[48..52], d[52..54]
 //   TQ2_0 (66B): qs[0..64],             d[64..66]

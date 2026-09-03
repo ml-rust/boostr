@@ -21,12 +21,10 @@
 //!
 //! # The coverage gap this closes
 //!
-//! Before this file there was NO CPU-vs-CUDA parity test for GGUF
-//! dequantization of any format, and `DequantOps::dequantize` had no
-//! value-level test for any GGUF format on the GPU at all. The quant tests
-//! that did exist compared a CUDA GEMM against a CUDA GEMV — both wrong
-//! together — or against a reference that mirrors the kernel's own
-//! dequantisation logic, which proves nothing.
+//! No other test compares CPU against CUDA at the value level for any GGUF
+//! format. The other quant tests compare a CUDA GEMM against a CUDA GEMV —
+//! both wrong together — or against a reference that mirrors the kernel's
+//! own dequantisation logic, which proves nothing.
 //!
 //! # Format coverage
 //!
@@ -67,7 +65,7 @@
 //! order-dependent way that looks like a per-format defect and is not one.
 //! The next person adding a format here inherits that trap.
 //!
-//! An allocation error is a FAILURE, never a skip: a format that could not
+//! An allocation error is a FAILURE, never a skip: a format that fails to
 //! run its comparison must not report `ok`.
 //!
 //! Run with:
@@ -273,13 +271,29 @@ fn assert_dequant_parity(label: &str, format: QuantFormat, bytes: &[u8]) {
 /// orders of magnitude below the change a permuted weight makes to a dot
 /// product.
 fn assert_matmul_parity(label: &str, format: QuantFormat, weight_bytes: &[u8], n: usize, k: usize) {
+    assert_matmul_parity_m(label, format, weight_bytes, 2, n, k);
+}
+
+/// Same as `assert_matmul_parity`, with the batch dimension `m` exposed as a
+/// parameter. `m` is what selects the CUDA kernel family in
+/// `src/quant/cuda/quant_matmul/impl_ops.rs`: `m <= 16` dispatches the GEMV
+/// kernel, anything larger dispatches the GEMM kernel — so tests calling this
+/// with `m = 2` and tests calling it with `m = 32` exercise different CUDA
+/// kernels entirely.
+fn assert_matmul_parity_m(
+    label: &str,
+    format: QuantFormat,
+    weight_bytes: &[u8],
+    m: usize,
+    n: usize,
+    k: usize,
+) {
     if !cuda_available() {
         loud_skip(label, "CUDA is not available on this machine");
         return;
     }
     let _lock = cuda_lock();
 
-    let m = 2usize;
     let act: Vec<f32> = (0..m * k)
         .map(|i| {
             let x = i as f32 * 0.017 + 0.31;
@@ -460,8 +474,8 @@ fn q8_0_dequant_matches_cpu() {
 /// `s` is llama.cpp's precomputed `sum(qs) * d`, used by dot-product kernels
 /// and NOT part of the dequantized value. It is deliberately NON-ZERO here:
 /// an implementation that folds `s` into the output is only detectable when
-/// the field is set, and a zero `s` would hide exactly that class of defect
-/// the same way uniform nibbles hide the ordering one.
+/// the field is set, and a zero `s` hides exactly that class of defect the
+/// same way uniform nibbles hide the ordering one.
 #[test]
 fn q8_1_dequant_matches_cpu() {
     let mut data = vec![0u8; BLOCKS * 36];
@@ -524,8 +538,8 @@ fn q2k_dequant_matches_cpu() {
 ///
 /// All three payload fields carry index-varying bytes, so the running hmask
 /// bit, the 2-bit code shift and the 6-bit scale unpacking each contribute a
-/// different value per sub-block. A uniform hmask would make the `-4` branch
-/// constant and hide any indexing error in it.
+/// different value per sub-block. A uniform hmask makes the `-4` branch
+/// constant and hides any indexing error in it.
 #[test]
 fn q3k_dequant_matches_cpu() {
     let mut data = vec![0u8; BLOCKS * 110];
@@ -650,7 +664,7 @@ fn q8k_dequant_matches_cpu() {
 /// Each of the 16 sub-blocks takes its 12-bit grid index from a different
 /// `qs` pair and its signs from a different `qh` byte, so index-varying
 /// payloads give all 16 sub-blocks different values and different sign
-/// patterns. A uniform payload would make every sub-block identical and hide
+/// patterns. A uniform payload makes every sub-block identical and hides
 /// any sub-block indexing error.
 #[test]
 fn iq1s_dequant_matches_cpu() {
@@ -706,7 +720,7 @@ fn iq2xxs_dequant_matches_cpu() {
 ///
 /// The 16 scale bytes are read as i8, so an index-varying field gives both
 /// positive and negative sub-block scales — a sub-block permutation then
-/// changes signs, not just magnitudes. Grid index and sign field come from
+/// changes signs as well as magnitudes. Grid index and sign field come from
 /// the same 16-bit word, both varying per sub-block.
 #[test]
 fn iq2xs_dequant_matches_cpu() {
@@ -961,6 +975,160 @@ fn iq4_nl_quant_matmul_matches_cpu() {
     );
 }
 
+/// IQ1_S weight `[3, 512]` — 2 blocks per row, 6 blocks total.
+#[test]
+fn iq1_s_quant_matmul_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 50];
+    for b in 0..blocks {
+        let blk = &mut data[b * 50..(b + 1) * 50];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..48 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity(
+        "iq1_s_quant_matmul_matches_cpu",
+        QuantFormat::IQ1S,
+        &data,
+        n,
+        k,
+    );
+}
+
+/// IQ1_M weight `[3, 512]` — 2 blocks per row, 6 blocks total.
+#[test]
+fn iq1_m_quant_matmul_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 56];
+    for b in 0..blocks {
+        let blk = &mut data[b * 56..(b + 1) * 56];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..54 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity(
+        "iq1_m_quant_matmul_matches_cpu",
+        QuantFormat::IQ1M,
+        &data,
+        n,
+        k,
+    );
+}
+
+/// IQ2_XXS weight `[3, 512]` — 2 blocks per row, 6 blocks total.
+#[test]
+fn iq2_xxs_quant_matmul_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 66];
+    for b in 0..blocks {
+        let blk = &mut data[b * 66..(b + 1) * 66];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..64 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity(
+        "iq2_xxs_quant_matmul_matches_cpu",
+        QuantFormat::IQ2XXS,
+        &data,
+        n,
+        k,
+    );
+}
+
+/// IQ2_XS weight `[3, 512]` — 2 blocks per row, 6 blocks total.
+#[test]
+fn iq2_xs_quant_matmul_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 74];
+    for b in 0..blocks {
+        let blk = &mut data[b * 74..(b + 1) * 74];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..72 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity(
+        "iq2_xs_quant_matmul_matches_cpu",
+        QuantFormat::IQ2XS,
+        &data,
+        n,
+        k,
+    );
+}
+
+/// IQ2_S weight `[3, 512]` — 2 blocks per row, 6 blocks total.
+#[test]
+fn iq2_s_quant_matmul_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 82];
+    for b in 0..blocks {
+        let blk = &mut data[b * 82..(b + 1) * 82];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..80 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity(
+        "iq2_s_quant_matmul_matches_cpu",
+        QuantFormat::IQ2S,
+        &data,
+        n,
+        k,
+    );
+}
+
+/// IQ3_XXS weight `[3, 512]` — 2 blocks per row, 6 blocks total.
+#[test]
+fn iq3_xxs_quant_matmul_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 98];
+    for b in 0..blocks {
+        let blk = &mut data[b * 98..(b + 1) * 98];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..96 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity(
+        "iq3_xxs_quant_matmul_matches_cpu",
+        QuantFormat::IQ3XXS,
+        &data,
+        n,
+        k,
+    );
+}
+
+/// IQ3_S weight `[3, 512]` — 2 blocks per row, 6 blocks total.
+#[test]
+fn iq3_s_quant_matmul_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 110];
+    for b in 0..blocks {
+        let blk = &mut data[b * 110..(b + 1) * 110];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..108 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity(
+        "iq3_s_quant_matmul_matches_cpu",
+        QuantFormat::IQ3S,
+        &data,
+        n,
+        k,
+    );
+}
+
 /// IQ4_XS weight `[3, 512]` — 2 super-blocks per row, 6 total.
 #[test]
 fn iq4_xs_quant_matmul_matches_cpu() {
@@ -983,6 +1151,348 @@ fn iq4_xs_quant_matmul_matches_cpu() {
         "iq4_xs_quant_matmul_matches_cpu",
         QuantFormat::IQ4XS,
         &data,
+        n,
+        k,
+    );
+}
+
+// ── GEMM path (m = 32) ────────────────────────────────────────────────
+//
+// Every case above runs with `m = 2`, which is at or below the `m <= 16`
+// threshold in `src/quant/cuda/quant_matmul/impl_ops.rs`, so it dispatches
+// the GEMV kernel. The GEMM kernels in `src/quant/cuda/kernels/gemm/` are
+// otherwise exercised by no test at all. These cases repeat each weight
+// fixture above with `m = 32` to force the GEMM path instead.
+
+/// Q4_0 weight `[3, 64]` — 2 blocks per row, 6 blocks total. `m = 32` is
+/// above the `m <= 16` threshold, so this forces the GEMM path rather than
+/// GEMV.
+#[test]
+fn q4_0_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (3usize, 64usize);
+    let blocks = n * k / 32;
+    let mut data = vec![0u8; blocks * 18];
+    for b in 0..blocks {
+        let blk = &mut data[b * 18..(b + 1) * 18];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for j in 0..16 {
+            blk[2 + j] = nibble_byte(j, b);
+        }
+    }
+    assert_matmul_parity_m(
+        "q4_0_quant_matmul_gemm_matches_cpu",
+        QuantFormat::Q4_0,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// Q4_1 weight `[3, 64]` — 2 blocks per row, 6 blocks total. `m = 32` is
+/// above the `m <= 16` threshold, so this forces the GEMM path rather than
+/// GEMV.
+#[test]
+fn q4_1_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (3usize, 64usize);
+    let blocks = n * k / 32;
+    let mut data = vec![0u8; blocks * 20];
+    for b in 0..blocks {
+        let blk = &mut data[b * 20..(b + 1) * 20];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        blk[2..4].copy_from_slice(&M_BITS[b % BLOCKS].to_le_bytes());
+        for j in 0..16 {
+            blk[4 + j] = nibble_byte(j, b);
+        }
+    }
+    assert_matmul_parity_m(
+        "q4_1_quant_matmul_gemm_matches_cpu",
+        QuantFormat::Q4_1,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// Q5_0 weight `[3, 64]` — 2 blocks per row, 6 blocks total. `m = 32` is
+/// above the `m <= 16` threshold, so this forces the GEMM path rather than
+/// GEMV.
+#[test]
+fn q5_0_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (3usize, 64usize);
+    let blocks = n * k / 32;
+    let mut data = vec![0u8; blocks * 22];
+    for b in 0..blocks {
+        let blk = &mut data[b * 22..(b + 1) * 22];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        blk[2..6].copy_from_slice(&QH_WORDS[b % BLOCKS].to_le_bytes());
+        for j in 0..16 {
+            blk[6 + j] = nibble_byte(j, b);
+        }
+    }
+    assert_matmul_parity_m(
+        "q5_0_quant_matmul_gemm_matches_cpu",
+        QuantFormat::Q5_0,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// Q5_1 weight `[3, 64]` — 2 blocks per row, 6 blocks total. `m = 32` is
+/// above the `m <= 16` threshold, so this forces the GEMM path rather than
+/// GEMV.
+#[test]
+fn q5_1_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (3usize, 64usize);
+    let blocks = n * k / 32;
+    let mut data = vec![0u8; blocks * 24];
+    for b in 0..blocks {
+        let blk = &mut data[b * 24..(b + 1) * 24];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        blk[2..4].copy_from_slice(&M_BITS[b % BLOCKS].to_le_bytes());
+        blk[4..8].copy_from_slice(&QH_WORDS[b % BLOCKS].to_le_bytes());
+        for j in 0..16 {
+            blk[8 + j] = nibble_byte(j, b);
+        }
+    }
+    assert_matmul_parity_m(
+        "q5_1_quant_matmul_gemm_matches_cpu",
+        QuantFormat::Q5_1,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// IQ4_NL weight `[3, 64]` — 2 blocks per row, 6 blocks total. `m = 32` is
+/// above the `m <= 16` threshold, so this forces the GEMM path rather than
+/// GEMV.
+#[test]
+fn iq4_nl_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (3usize, 64usize);
+    let blocks = n * k / 32;
+    let mut data = vec![0u8; blocks * 18];
+    for b in 0..blocks {
+        let blk = &mut data[b * 18..(b + 1) * 18];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for j in 0..16 {
+            blk[2 + j] = nibble_byte(j, b);
+        }
+    }
+    assert_matmul_parity_m(
+        "iq4_nl_quant_matmul_gemm_matches_cpu",
+        QuantFormat::IQ4NL,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// IQ1_S weight `[3, 512]` — 2 blocks per row, 6 blocks total. `m = 32` is
+/// above the `m <= 16` threshold, so this forces the GEMM path rather than
+/// GEMV.
+#[test]
+fn iq1_s_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 50];
+    for b in 0..blocks {
+        let blk = &mut data[b * 50..(b + 1) * 50];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..48 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity_m(
+        "iq1_s_quant_matmul_gemm_matches_cpu",
+        QuantFormat::IQ1S,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// IQ1_M weight `[3, 512]` — 2 blocks per row, 6 blocks total. `m = 32` is
+/// above the `m <= 16` threshold, so this forces the GEMM path rather than
+/// GEMV.
+#[test]
+fn iq1_m_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 56];
+    for b in 0..blocks {
+        let blk = &mut data[b * 56..(b + 1) * 56];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..54 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity_m(
+        "iq1_m_quant_matmul_gemm_matches_cpu",
+        QuantFormat::IQ1M,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// IQ2_XXS weight `[3, 512]` — 2 blocks per row, 6 blocks total. `m = 32`
+/// is above the `m <= 16` threshold, so this forces the GEMM path rather
+/// than GEMV.
+#[test]
+fn iq2_xxs_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 66];
+    for b in 0..blocks {
+        let blk = &mut data[b * 66..(b + 1) * 66];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..64 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity_m(
+        "iq2_xxs_quant_matmul_gemm_matches_cpu",
+        QuantFormat::IQ2XXS,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// IQ2_XS weight `[3, 512]` — 2 blocks per row, 6 blocks total. `m = 32`
+/// is above the `m <= 16` threshold, so this forces the GEMM path rather
+/// than GEMV.
+#[test]
+fn iq2_xs_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 74];
+    for b in 0..blocks {
+        let blk = &mut data[b * 74..(b + 1) * 74];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..72 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity_m(
+        "iq2_xs_quant_matmul_gemm_matches_cpu",
+        QuantFormat::IQ2XS,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// IQ2_S weight `[3, 512]` — 2 blocks per row, 6 blocks total. `m = 32` is
+/// above the `m <= 16` threshold, so this forces the GEMM path rather than
+/// GEMV.
+#[test]
+fn iq2_s_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 82];
+    for b in 0..blocks {
+        let blk = &mut data[b * 82..(b + 1) * 82];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..80 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity_m(
+        "iq2_s_quant_matmul_gemm_matches_cpu",
+        QuantFormat::IQ2S,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// IQ3_XXS weight `[3, 512]` — 2 blocks per row, 6 blocks total. `m = 32`
+/// is above the `m <= 16` threshold, so this forces the GEMM path rather
+/// than GEMV.
+#[test]
+fn iq3_xxs_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 98];
+    for b in 0..blocks {
+        let blk = &mut data[b * 98..(b + 1) * 98];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..96 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity_m(
+        "iq3_xxs_quant_matmul_gemm_matches_cpu",
+        QuantFormat::IQ3XXS,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// IQ3_S weight `[3, 512]` — 2 blocks per row, 6 blocks total. `m = 32` is
+/// above the `m <= 16` threshold, so this forces the GEMM path rather than
+/// GEMV.
+#[test]
+fn iq3_s_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let mut data = vec![0u8; blocks * 110];
+    for b in 0..blocks {
+        let blk = &mut data[b * 110..(b + 1) * 110];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..108 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity_m(
+        "iq3_s_quant_matmul_gemm_matches_cpu",
+        QuantFormat::IQ3S,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// IQ4_XS weight `[3, 512]` — 2 super-blocks per row, 6 total. `m = 32` is
+/// above the `m <= 16` threshold, so this forces the GEMM path rather than
+/// GEMV.
+#[test]
+fn iq4_xs_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (3usize, 512usize);
+    let blocks = n * k / 256;
+    let scales_l: [u8; 4] = [0x21, 0x43, 0x65, 0x87];
+    let mut data = vec![0u8; blocks * 136];
+    for b in 0..blocks {
+        let blk = &mut data[b * 136..(b + 1) * 136];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        blk[2..4].copy_from_slice(&0xB1E4u16.to_le_bytes());
+        blk[4..8].copy_from_slice(&scales_l);
+        for sb in 0..8 {
+            for j in 0..16 {
+                blk[8 + sb * 16 + j] = nibble_byte(j, b + sb);
+            }
+        }
+    }
+    assert_matmul_parity_m(
+        "iq4_xs_quant_matmul_gemm_matches_cpu",
+        QuantFormat::IQ4XS,
+        &data,
+        32,
         n,
         k,
     );

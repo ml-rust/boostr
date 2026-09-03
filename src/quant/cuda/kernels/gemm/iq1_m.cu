@@ -1,7 +1,19 @@
-// IQ1_M tiled GEMM — activation [M,K] × weight [N,K]^T → output [M,N]
-// IQ1_M block: 256 elements, 56 bytes
+// IQ1_M tiled GEMM — activation [M,K] x weight [N,K]^T -> output [M,N]
+//
+// IQ1_M block: 256 elements, 56 bytes.
+//
+// IQ1_M is a codebook quantization: `qs` holds INDICES into a grid of
+// precomputed points, not magnitudes. The layout and the grid tables live once
+// in ../iq_dequant.cuh, shared with the dequant and GEMV paths and gated
+// against llama.cpp by tests/gguf_conformance_llama_cpp.rs. The kernel
+// decodes each block, then takes its dot product with the activation.
 
 #include <cuda_fp16.h>
+
+#include "../iq_dequant.cuh"
+
+#define IQ1_M_BLOCK_BYTES 56
+#define IQ1_M_BLOCK_SIZE 256
 
 extern "C" __global__ void quant_matmul_iq1_m_f32(
     const float* __restrict__ activation,
@@ -13,51 +25,18 @@ extern "C" __global__ void quant_matmul_iq1_m_f32(
     unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= M || col >= N) return;
 
-    unsigned int blocks_per_row = K / 256;
-    unsigned int row_bytes = blocks_per_row * 56;
+    unsigned int blocks_per_row = K / IQ1_M_BLOCK_SIZE;
+    unsigned int row_bytes = blocks_per_row * IQ1_M_BLOCK_BYTES;
     const float* act_row = activation + row * K;
     const unsigned char* w_row = weight + col * row_bytes;
 
+    float w[IQ1_M_BLOCK_SIZE];
     float sum = 0.0f;
     for (unsigned int b = 0; b < blocks_per_row; b++) {
-        const unsigned char* block = w_row + b * 56;
-        __half d_half;
-        memcpy(&d_half, block, sizeof(__half));
-        float d = __half2float(d_half);
-        const unsigned char* scales_data = block + 2;
-        const unsigned char* qs = block + 8;
-        const unsigned char* qh = block + 40;
-        unsigned int base = b * 256;
-
-        for (int sb = 0; sb < 16; sb++) {
-            // Extract 3-bit scale
-            int scale_bit_offset = sb * 3;
-            int byte_idx = scale_bit_offset / 8;
-            int bit_offset = scale_bit_offset % 8;
-            unsigned int raw;
-            if (byte_idx + 1 < 6) {
-                unsigned int lo = (unsigned int)scales_data[byte_idx];
-                unsigned int hi = (unsigned int)scales_data[byte_idx + 1];
-                raw = ((lo | (hi << 8)) >> bit_offset) & 0x07;
-            } else if (byte_idx < 6) {
-                raw = ((unsigned int)(scales_data[byte_idx] >> bit_offset)) & 0x07;
-            } else {
-                raw = 0;
-            }
-            float sub_scale = d * ((float)raw + 0.5f);
-
-            unsigned int qs_val = (unsigned int)qs[sb * 2] | ((unsigned int)qs[sb * 2 + 1] << 8);
-            unsigned int grid_idx = qs_val & 0x0FFF;
-            unsigned char sign_bits = qh[sb];
-
-            unsigned int grid_val = grid_idx;
-            for (int k = 0; k < 16; k++) {
-                int t = (int)(grid_val % 3) - 1;
-                float sign = ((sign_bits >> (k % 8)) & 1) ? -1.0f : 1.0f;
-                sum += act_row[base + sb * 16 + k] * (sub_scale * (float)t * sign);
-                grid_val /= 3;
-            }
-        }
+        iq1_m_dequant_block(w_row + (unsigned long long)b * IQ1_M_BLOCK_BYTES, w);
+        const float* act = act_row + (unsigned long long)b * IQ1_M_BLOCK_SIZE;
+        for (int k = 0; k < IQ1_M_BLOCK_SIZE; k++)
+            sum += act[k] * w[k];
     }
     output[row * N + col] = sum;
 }

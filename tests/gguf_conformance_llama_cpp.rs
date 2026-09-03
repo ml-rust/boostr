@@ -1,45 +1,17 @@
 //! `DequantOps::dequantize` against llama.cpp's OWN reference implementation,
 //! on verbatim block bytes lifted out of real GGUF model files.
 //!
-//! # Why this file exists
+//! Every `*_ref.bin` comes from `gguf.quants.dequantize` in the `gguf` Python
+//! package, maintained in the llama.cpp tree. No boostr code produces it.
 //!
-//! `CLAUDE.md` records the defect this guards against: "Q6_K once shipped with
-//! the wrong field order and compressr's own reader agreed with it while every
-//! real reader produced NaN." A writer checked against the reader beside it
-//! proves nothing, and neither does a reader checked against a reference that
-//! restates the reader's own decode.
+//! Keep the reference EXTERNAL. A comparison against boostr's own writer,
+//! against `QuantTensor` round-tripping, or against a Rust restatement of the
+//! block layout passes while the decode is wrong, and is not a substitute.
 //!
-//! Every fixture here therefore carries an EXTERNAL expectation. The `*_ref.bin`
-//! files were produced by `gguf.quants.dequantize` from the `gguf` Python
-//! package — llama.cpp's own reference implementation, maintained in the
-//! llama.cpp tree. No boostr code took part in producing them. That
-//! independence is the entire value of this file.
-//!
-//! Do NOT "simplify" this into a comparison against boostr's own writer,
-//! against `QuantTensor` round-tripping, or against a Rust reimplementation of
-//! the block layout. Any of those turns the gate back into the circular check
-//! CLAUDE.md warns about, and it will pass while the decode is wrong.
-//!
-//! # Relationship to `tests/gguf_dequant_cpu_cuda_parity.rs`
-//!
-//! The two files gate different things and neither subsumes the other:
-//!
-//! - `gguf_dequant_cpu_cuda_parity.rs` proves CPU and CUDA agree with EACH
-//!   OTHER, across all 23 `QuantFormat` variants, on synthetic block bytes.
-//! - THIS file proves both backends agree with LLAMA.CPP, for the twelve
-//!   formats an independent reference could be obtained for.
-//!
-//! Agreeing with each other while both being wrong is exactly the failure mode
-//! CLAUDE.md describes, and it is not hypothetical here: TQ1_0 and TQ2_0 passed
-//! the mutual-agreement gate for as long as it existed while BOTH backends read
-//! the scale from the wrong end of the block. Only the external reference caught
-//! it. Agreeing with llama.cpp on twelve formats still says nothing about the
-//! other eleven. Both gates are required.
-//!
-//! The CUDA half here is the one that matters most in practice: CUDA decoded
-//! 10 of 23 formats wrong until commit `202d6aa`, and a wrong decode errors
-//! nothing — shape, block count and tensor RMS all stay plausible while the
-//! model silently produces wrong numbers.
+//! `tests/gguf_dequant_cpu_cuda_parity.rs` is the other half and covers all 23
+//! `QuantFormat` variants, but only proves CPU and CUDA agree with each other —
+//! it passes on any error the two backends share. Neither file subsumes the
+//! other.
 //!
 //! # Fixture provenance
 //!
@@ -74,9 +46,31 @@
 //! | `tq2_0_*` | same | 8 | 2048 |
 //!
 //! The ternary pair carries only three distinct magnitudes per block, so it is
-//! weaker at exposing an in-block permutation than real weights are. It caught
-//! its defect regardless: both TQ decoders read `d` from offset 0 when the
-//! format stores it last.
+//! weaker at exposing an in-block permutation than real weights are. Prefer a
+//! model file for those two if one ever turns up.
+//!
+//! `gguf.quants.quantize` produces no IQ format. Those `_raw.bin` come from
+//! llama.cpp's `llama-quantize` binary over an F16 or Q8_0 model, and their
+//! `_ref.bin` from `gguf.quants.dequantize` on the bytes it emitted:
+//!
+//! | fixture | quantized from | tensor | blocks | elements |
+//! |---|---|---|---|---|
+//! | `iq4_nl_*` | `nomic-embed-text-v1.5.f16.gguf` | `blk.0.attn_output.weight` | 8 | 256 |
+//! | `iq4_xs_*` | same | `blk.0.attn_output.weight` | 8 | 2048 |
+//! | `iq3_s_*` | same | `blk.0.attn_output.weight` | 8 | 2048 |
+//! | `iq3_xxs_*` | same | `blk.0.attn_qkv.weight` | 8 | 2048 |
+//! | `iq2_s_*` | `mistral-7b-v0.1.Q8_0.gguf` | `blk.0.attn_k.weight` | 8 | 2048 |
+//! | `iq2_xs_*` | same | `blk.0.attn_k.weight` | 8 | 2048 |
+//! | `iq2_xxs_*` | same | `blk.0.attn_k.weight` | 8 | 2048 |
+//! | `iq1_s_*` | same | `blk.0.attn_k.weight` | 8 | 2048 |
+//! | `iq1_m_*` | same | `blk.0.attn_k.weight` | 8 | 2048 |
+//!
+//! The low-bit half of that list needs a second input: `llama-quantize` refuses
+//! IQ1_S, IQ1_M, IQ2_S, IQ2_XS and IQ2_XXS outright without an importance
+//! matrix. One from `llama-imatrix` over any text corpus will do — it steers
+//! which weights get more bits, and changes nothing about the block layout
+//! these fixtures pin. It must come from a CAUSAL model: `llama-imatrix` aborts
+//! on an encoder-only embedding model, and on one whose tokenizer appends EOS.
 //!
 //! Eight blocks each: one block cannot expose a per-block indexing or stride
 //! error, and two cannot separate "off by one block" from "reversed". Real
@@ -118,34 +112,33 @@
 //! and TQ2_0; every other format raises `NotImplementedError` and needs a real
 //! model file.
 //!
-//! A new format needs the two files plus one `_cpu` and one `_cuda` test below,
-//! written out explicitly like the existing twenty-four.
+//! A new format needs the two files plus one `_cpu` and one `_cuda` test,
+//! written out explicitly like the existing ones below.
 //!
 //! # Comparison is EXACT
 //!
-//! There is no tolerance. Measured on CPU, all twelve formats match the
-//! llama.cpp reference bit-for-bit: zero mismatching elements, `max_abs = 0.0`. A future
-//! change that makes any of them merely approximate is a change worth seeing,
-//! not one worth absorbing into an epsilon. If CUDA ever differs by an ulp or
+//! There is no tolerance. Measured on CPU, every format covered here matches
+//! the llama.cpp reference bit-for-bit: zero mismatching elements, `max_abs =
+//! 0.0`. Treat any future approximate result as an error requiring review.
+//! Never absorb it into a widened epsilon. If CUDA ever differs by an ulp or
 //! two because nvcc contracts a scale multiply into an FMA, report the exact
 //! indices and magnitudes rather than widening the check here.
 //!
 //! # Formats NOT covered
 //!
-//! Twelve of the 23 `QuantFormat` variants are gated against llama.cpp. The
-//! remaining eleven rest solely on the CPU/CUDA mutual-agreement gate, which
-//! the TQ defect above showed is not sufficient on its own: Q8_1, Q8K, IQ1S,
-//! IQ1M, IQ2XXS, IQ2XS, IQ2S, IQ3XXS, IQ3S, IQ4NL, IQ4XS.
+//! Most `QuantFormat` variants are gated against llama.cpp. The remaining two,
+//! Q8_1 and Q8K, rest solely on the CPU/CUDA mutual-agreement gate. That gate
+//! is weaker: two backends that share a decode also share its mistakes, so it
+//! cannot catch an error both backends make the same way.
 //!
-//! Neither route above reaches them. `gguf.quants.quantize` raises
-//! `NotImplementedError` for all eleven, and none of the GGUF files the
-//! fixtures above were drawn from stores a tensor in any of them — between them
-//! they cover Q2_K, Q3_K, Q4_0, Q4_K, Q5_0, Q5_K, Q6_K and Q8_0 only. Q8_1 and
-//! Q8K are intermediate activation formats that models do not ship weights in
-//! at all, so for those two a model file is unlikely ever to be the answer.
+//! Neither fixture route reaches them: `gguf.quants.quantize` raises
+//! `NotImplementedError` for both, and no model file carries either, because
+//! both are intermediate ACTIVATION formats — quantized at runtime to feed a
+//! matmul, never stored as weights. Closing them takes a reference that
+//! quantizes an activation tensor directly rather than a model file.
 //!
-//! That is a real gap, not a closed one. Closing the nine IQ formats means
-//! obtaining a model file that carries one and following the recipe above.
+//! That is a small and well-understood gap. It is recorded here so nobody
+//! reads "most formats" as "all of them".
 //!
 //! Run with:
 //!   cd boostr && cargo test --test gguf_conformance_llama_cpp
@@ -192,7 +185,7 @@ fn cpu_setup() -> (CpuClient, CpuDevice) {
 /// flat `GGUF_CONFORMANCE_DIAG` line — pass or fail — so a green run still
 /// records what each format produced.
 ///
-/// On failure it names the first mismatching indices with BOTH values. The
+/// On error it names the first mismatching indices with BOTH values. The
 /// pattern is what identifies the defect: reference values reappearing at a
 /// different position inside the same block is a permutation (the split-half
 /// vs interleaved nibble ordering), while a constant ratio down the two
@@ -293,8 +286,8 @@ fn q8_0_matches_llama_cpp_cpu() {
     assert_matches_llama_cpp("Q8_0", "cpu", &got, &reference);
 }
 
-/// Q6_K is the format `CLAUDE.md` names by way of warning: it once shipped with
-/// the wrong field order and passed every check that used boostr's own reader.
+/// Q6_K needs an external reference: boostr's own reader can agree with a
+/// field-order error, so an internal-only check cannot catch it.
 #[test]
 fn q6_k_matches_llama_cpp_cpu() {
     let bytes = raw_blocks("q6_k_raw.bin");
@@ -383,17 +376,117 @@ fn tq2_0_matches_llama_cpp_cpu() {
     assert_matches_llama_cpp("TQ2_0", "cpu", &got, &reference);
 }
 
+#[test]
+fn iq4_nl_matches_llama_cpp_cpu() {
+    let bytes = raw_blocks("iq4_nl_raw.bin");
+    let reference = llama_cpp_reference("iq4_nl_ref.bin");
+    let (client, device) = cpu_setup();
+    let qt =
+        QuantTensor::<CpuRuntime>::from_bytes(&bytes, QuantFormat::IQ4NL, &[256], &device).unwrap();
+    let got = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+    assert_matches_llama_cpp("IQ4NL", "cpu", &got, &reference);
+}
+
+#[test]
+fn iq4_xs_matches_llama_cpp_cpu() {
+    let bytes = raw_blocks("iq4_xs_raw.bin");
+    let reference = llama_cpp_reference("iq4_xs_ref.bin");
+    let (client, device) = cpu_setup();
+    let qt = QuantTensor::<CpuRuntime>::from_bytes(&bytes, QuantFormat::IQ4XS, &[2048], &device)
+        .unwrap();
+    let got = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+    assert_matches_llama_cpp("IQ4XS", "cpu", &got, &reference);
+}
+
+#[test]
+fn iq3_s_matches_llama_cpp_cpu() {
+    let bytes = raw_blocks("iq3_s_raw.bin");
+    let reference = llama_cpp_reference("iq3_s_ref.bin");
+    let (client, device) = cpu_setup();
+    let qt =
+        QuantTensor::<CpuRuntime>::from_bytes(&bytes, QuantFormat::IQ3S, &[2048], &device).unwrap();
+    let got = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+    assert_matches_llama_cpp("IQ3S", "cpu", &got, &reference);
+}
+
+#[test]
+fn iq3_xxs_matches_llama_cpp_cpu() {
+    let bytes = raw_blocks("iq3_xxs_raw.bin");
+    let reference = llama_cpp_reference("iq3_xxs_ref.bin");
+    let (client, device) = cpu_setup();
+    let qt = QuantTensor::<CpuRuntime>::from_bytes(&bytes, QuantFormat::IQ3XXS, &[2048], &device)
+        .unwrap();
+    let got = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+    assert_matches_llama_cpp("IQ3XXS", "cpu", &got, &reference);
+}
+
+#[test]
+fn iq2_xxs_matches_llama_cpp_cpu() {
+    let bytes = raw_blocks("iq2_xxs_raw.bin");
+    let reference = llama_cpp_reference("iq2_xxs_ref.bin");
+    let (client, device) = cpu_setup();
+    let qt = QuantTensor::<CpuRuntime>::from_bytes(&bytes, QuantFormat::IQ2XXS, &[2048], &device)
+        .unwrap();
+    let got = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+    assert_matches_llama_cpp("IQ2XXS", "cpu", &got, &reference);
+}
+
+#[test]
+fn iq2_xs_matches_llama_cpp_cpu() {
+    let bytes = raw_blocks("iq2_xs_raw.bin");
+    let reference = llama_cpp_reference("iq2_xs_ref.bin");
+    let (client, device) = cpu_setup();
+    let qt = QuantTensor::<CpuRuntime>::from_bytes(&bytes, QuantFormat::IQ2XS, &[2048], &device)
+        .unwrap();
+    let got = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+    assert_matches_llama_cpp("IQ2XS", "cpu", &got, &reference);
+}
+
+#[test]
+fn iq1_s_matches_llama_cpp_cpu() {
+    let bytes = raw_blocks("iq1_s_raw.bin");
+    let reference = llama_cpp_reference("iq1_s_ref.bin");
+    let (client, device) = cpu_setup();
+    let qt =
+        QuantTensor::<CpuRuntime>::from_bytes(&bytes, QuantFormat::IQ1S, &[2048], &device).unwrap();
+    let got = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+    assert_matches_llama_cpp("IQ1S", "cpu", &got, &reference);
+}
+
+#[test]
+fn iq1_m_matches_llama_cpp_cpu() {
+    let bytes = raw_blocks("iq1_m_raw.bin");
+    let reference = llama_cpp_reference("iq1_m_ref.bin");
+    let (client, device) = cpu_setup();
+    let qt =
+        QuantTensor::<CpuRuntime>::from_bytes(&bytes, QuantFormat::IQ1M, &[2048], &device).unwrap();
+    let got = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+    assert_matches_llama_cpp("IQ1M", "cpu", &got, &reference);
+}
+
+#[test]
+fn iq2_s_matches_llama_cpp_cpu() {
+    let bytes = raw_blocks("iq2_s_raw.bin");
+    let reference = llama_cpp_reference("iq2_s_ref.bin");
+    let (client, device) = cpu_setup();
+    let qt =
+        QuantTensor::<CpuRuntime>::from_bytes(&bytes, QuantFormat::IQ2S, &[2048], &device).unwrap();
+    let got = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+    assert_matches_llama_cpp("IQ2S", "cpu", &got, &reference);
+}
+
 // ---------------------------------------------------------------------------
 // CUDA
 //
 // Same fixtures, same exact comparison, against the CUDA dequant kernels. This
-// is the half that makes the pre-`202d6aa` class of defect — a CUDA kernel
-// decoding a format wrong while erroring nothing — impossible to reintroduce
-// silently for these five formats.
+// is the half that catches a CUDA kernel decoding a format wrong while
+// erroring nothing — shape, block count and RMS all stay plausible, so only
+// this comparison against an external reference reveals it.
 //
 // A machine without CUDA skips loudly, in the style of
-// `tests/gguf_dequant_cpu_cuda_parity.rs`: a silent skip is how the nibble-order
-// defect survived. An allocation error is a FAILURE, never a skip.
+// `tests/gguf_dequant_cpu_cuda_parity.rs`: a silent skip lets exactly that
+// class of bug through undetected. An allocation error is a FAILURE, never
+// a skip.
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "cuda")]
@@ -756,5 +849,255 @@ mod cuda {
         };
         client.synchronize();
         assert_matches_llama_cpp("TQ2_0", "cuda", &got, &reference);
+    }
+
+    #[test]
+    fn iq4_nl_matches_llama_cpp_cuda() {
+        if !numr::runtime::cuda::is_cuda_available() {
+            loud_skip("IQ4NL");
+            return;
+        }
+        let _lock = cuda_lock();
+        let bytes = raw_blocks("iq4_nl_raw.bin");
+        let reference = llama_cpp_reference("iq4_nl_ref.bin");
+        let (client, device) = cuda_setup();
+        client.synchronize();
+        let got = {
+            let qt =
+                QuantTensor::<CudaRuntime>::from_bytes(&bytes, QuantFormat::IQ4NL, &[256], &device)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "IQ4NL/cuda: device allocation failed: {e}. This is a FAILURE, not a \
+                             skip — IQ4NL was NOT compared against llama.cpp."
+                        )
+                    });
+            client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>()
+        };
+        client.synchronize();
+        assert_matches_llama_cpp("IQ4NL", "cuda", &got, &reference);
+    }
+
+    #[test]
+    fn iq4_xs_matches_llama_cpp_cuda() {
+        if !numr::runtime::cuda::is_cuda_available() {
+            loud_skip("IQ4XS");
+            return;
+        }
+        let _lock = cuda_lock();
+        let bytes = raw_blocks("iq4_xs_raw.bin");
+        let reference = llama_cpp_reference("iq4_xs_ref.bin");
+        let (client, device) = cuda_setup();
+        client.synchronize();
+        let got = {
+            let qt = QuantTensor::<CudaRuntime>::from_bytes(
+                &bytes,
+                QuantFormat::IQ4XS,
+                &[2048],
+                &device,
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "IQ4XS/cuda: device allocation failed: {e}. This is a FAILURE, not a \
+                             skip — IQ4XS was NOT compared against llama.cpp."
+                )
+            });
+            client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>()
+        };
+        client.synchronize();
+        assert_matches_llama_cpp("IQ4XS", "cuda", &got, &reference);
+    }
+
+    #[test]
+    fn iq3_s_matches_llama_cpp_cuda() {
+        if !numr::runtime::cuda::is_cuda_available() {
+            loud_skip("IQ3S");
+            return;
+        }
+        let _lock = cuda_lock();
+        let bytes = raw_blocks("iq3_s_raw.bin");
+        let reference = llama_cpp_reference("iq3_s_ref.bin");
+        let (client, device) = cuda_setup();
+        client.synchronize();
+        let got = {
+            let qt =
+                QuantTensor::<CudaRuntime>::from_bytes(&bytes, QuantFormat::IQ3S, &[2048], &device)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "IQ3S/cuda: device allocation failed: {e}. This is a FAILURE, not a \
+                             skip — IQ3S was NOT compared against llama.cpp."
+                        )
+                    });
+            client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>()
+        };
+        client.synchronize();
+        assert_matches_llama_cpp("IQ3S", "cuda", &got, &reference);
+    }
+
+    #[test]
+    fn iq3_xxs_matches_llama_cpp_cuda() {
+        if !numr::runtime::cuda::is_cuda_available() {
+            loud_skip("IQ3XXS");
+            return;
+        }
+        let _lock = cuda_lock();
+        let bytes = raw_blocks("iq3_xxs_raw.bin");
+        let reference = llama_cpp_reference("iq3_xxs_ref.bin");
+        let (client, device) = cuda_setup();
+        client.synchronize();
+        let got = {
+            let qt = QuantTensor::<CudaRuntime>::from_bytes(
+                &bytes,
+                QuantFormat::IQ3XXS,
+                &[2048],
+                &device,
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "IQ3XXS/cuda: device allocation failed: {e}. This is a FAILURE, not a \
+                             skip — IQ3XXS was NOT compared against llama.cpp."
+                )
+            });
+            client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>()
+        };
+        client.synchronize();
+        assert_matches_llama_cpp("IQ3XXS", "cuda", &got, &reference);
+    }
+
+    #[test]
+    fn iq2_xxs_matches_llama_cpp_cuda() {
+        if !numr::runtime::cuda::is_cuda_available() {
+            loud_skip("IQ2XXS");
+            return;
+        }
+        let _lock = cuda_lock();
+        let bytes = raw_blocks("iq2_xxs_raw.bin");
+        let reference = llama_cpp_reference("iq2_xxs_ref.bin");
+        let (client, device) = cuda_setup();
+        client.synchronize();
+        let got = {
+            let qt = QuantTensor::<CudaRuntime>::from_bytes(
+                &bytes,
+                QuantFormat::IQ2XXS,
+                &[2048],
+                &device,
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "IQ2XXS/cuda: device allocation failed: {e}. This is a FAILURE, not a \
+                             skip — IQ2XXS was NOT compared against llama.cpp."
+                )
+            });
+            client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>()
+        };
+        client.synchronize();
+        assert_matches_llama_cpp("IQ2XXS", "cuda", &got, &reference);
+    }
+
+    #[test]
+    fn iq2_xs_matches_llama_cpp_cuda() {
+        if !numr::runtime::cuda::is_cuda_available() {
+            loud_skip("IQ2XS");
+            return;
+        }
+        let _lock = cuda_lock();
+        let bytes = raw_blocks("iq2_xs_raw.bin");
+        let reference = llama_cpp_reference("iq2_xs_ref.bin");
+        let (client, device) = cuda_setup();
+        client.synchronize();
+        let got = {
+            let qt = QuantTensor::<CudaRuntime>::from_bytes(
+                &bytes,
+                QuantFormat::IQ2XS,
+                &[2048],
+                &device,
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "IQ2XS/cuda: device allocation failed: {e}. This is a FAILURE, not a \
+                             skip — IQ2XS was NOT compared against llama.cpp."
+                )
+            });
+            client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>()
+        };
+        client.synchronize();
+        assert_matches_llama_cpp("IQ2XS", "cuda", &got, &reference);
+    }
+
+    #[test]
+    fn iq1_s_matches_llama_cpp_cuda() {
+        if !numr::runtime::cuda::is_cuda_available() {
+            loud_skip("IQ1S");
+            return;
+        }
+        let _lock = cuda_lock();
+        let bytes = raw_blocks("iq1_s_raw.bin");
+        let reference = llama_cpp_reference("iq1_s_ref.bin");
+        let (client, device) = cuda_setup();
+        client.synchronize();
+        let got = {
+            let qt =
+                QuantTensor::<CudaRuntime>::from_bytes(&bytes, QuantFormat::IQ1S, &[2048], &device)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "IQ1S/cuda: device allocation failed: {e}. This is a FAILURE, not a \
+                             skip — IQ1S was NOT compared against llama.cpp."
+                        )
+                    });
+            client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>()
+        };
+        client.synchronize();
+        assert_matches_llama_cpp("IQ1S", "cuda", &got, &reference);
+    }
+
+    #[test]
+    fn iq1_m_matches_llama_cpp_cuda() {
+        if !numr::runtime::cuda::is_cuda_available() {
+            loud_skip("IQ1M");
+            return;
+        }
+        let _lock = cuda_lock();
+        let bytes = raw_blocks("iq1_m_raw.bin");
+        let reference = llama_cpp_reference("iq1_m_ref.bin");
+        let (client, device) = cuda_setup();
+        client.synchronize();
+        let got = {
+            let qt =
+                QuantTensor::<CudaRuntime>::from_bytes(&bytes, QuantFormat::IQ1M, &[2048], &device)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "IQ1M/cuda: device allocation failed: {e}. This is a FAILURE, not a \
+                             skip — IQ1M was NOT compared against llama.cpp."
+                        )
+                    });
+            client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>()
+        };
+        client.synchronize();
+        assert_matches_llama_cpp("IQ1M", "cuda", &got, &reference);
+    }
+
+    #[test]
+    fn iq2_s_matches_llama_cpp_cuda() {
+        if !numr::runtime::cuda::is_cuda_available() {
+            loud_skip("IQ2S");
+            return;
+        }
+        let _lock = cuda_lock();
+        let bytes = raw_blocks("iq2_s_raw.bin");
+        let reference = llama_cpp_reference("iq2_s_ref.bin");
+        let (client, device) = cuda_setup();
+        client.synchronize();
+        let got = {
+            let qt =
+                QuantTensor::<CudaRuntime>::from_bytes(&bytes, QuantFormat::IQ2S, &[2048], &device)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "IQ2S/cuda: device allocation failed: {e}. This is a FAILURE, not a \
+                             skip — IQ2S was NOT compared against llama.cpp."
+                        )
+                    });
+            client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>()
+        };
+        client.synchronize();
+        assert_matches_llama_cpp("IQ2S", "cuda", &got, &reference);
     }
 }

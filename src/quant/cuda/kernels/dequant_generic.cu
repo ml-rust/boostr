@@ -4,16 +4,17 @@
 // One thread per quant block. The format_id parameter selects the decode path
 // via a switch statement. Not optimal, but correct for all 23 formats.
 //
-// Optimized kernels in dequant.cu (Q4_0, Q8_0, Q4_K, Q6_K) should be
-// preferred when available; this is the catch-all fallback.
+// Callers must prefer the optimized kernels in dequant.cu (Q4_0, Q8_0,
+// Q4_K, Q6_K) when available; this is the catch-all fallback.
 //
 // IMPORTANT: All multi-byte loads from quant block data use memcpy to avoid
 // misaligned access errors. Quant blocks are packed contiguously and their
-// internal fields may not be naturally aligned.
+// internal fields are not always naturally aligned.
 
 #include <cuda_fp16.h>
 
 #include "decode.cuh"
+#include "iq_dequant.cuh"
 
 // Format IDs (must match QuantFormat::format_id() in Rust)
 #define FMT_Q4_0    0
@@ -46,7 +47,7 @@ __constant__ signed char KVALUES_IQ4NL[16] = {
 };
 
 // ── Safe unaligned load helpers ─────────────────────────────────────
-// Quant blocks are packed contiguously; internal fields may not be
+// Quant blocks are packed contiguously; internal fields are not always
 // naturally aligned for their type. memcpy avoids misaligned-access traps.
 
 __device__ __forceinline__ float load_f16_as_f32(const unsigned char* p) {
@@ -185,7 +186,7 @@ __device__ void dequant_q3k_block(const unsigned char* block, float* out) {
     const unsigned char* sc_raw = block + 96;
     float d = load_f16_as_f32(block + 108);
 
-    // Unpack 16 6-bit scales from 12 bytes — byte-by-byte to avoid alignment issues
+    // Unpack 16 6-bit scales from 12 bytes — byte-by-byte to avoid unaligned access
     unsigned int aux[4];
     unsigned char aux_bytes[12];
     memcpy(aux_bytes, sc_raw, 12);
@@ -387,200 +388,16 @@ __device__ void dequant_tq1_0_block(const unsigned char* block, float* out) {
     }
 }
 
-__device__ void dequant_iq2_xxs_block(const unsigned char* block, float* out) {
-    float d = load_f16_as_f32(block);
-    const unsigned char* qs = block + 2;
+// The seven IQ formats are codebook quantizations; their block layouts live
+// once in iq_dequant.cuh, shared with the quant-matmul and GEMV/GEMM paths.
 
-    for (int group = 0; group < 8; group++) {
-        const unsigned char* gdata = qs + group * 8;
-        unsigned long long q64 = load_u64(gdata);
-        unsigned int grid_indices = (unsigned int)q64;
-        unsigned int signs_and_scales = (unsigned int)(q64 >> 32);
-        unsigned int sub_scale_bits = (signs_and_scales >> 28) & 0x0F;
-        float sub_scale = d * (0.5f + (float)sub_scale_bits);
-        float* group_out = out + group * 32;
-
-        for (int sub = 0; sub < 4; sub++) {
-            unsigned int grid_idx = (grid_indices >> (8 * sub)) & 0xFF;
-            unsigned char sign_bits = (unsigned char)((signs_and_scales >> (7 * sub)) & 0x7F);
-            for (int k = 0; k < 8; k++) {
-                // Extract 2-bit grid value
-                int shift = k * 2;
-                int bits;
-                if (shift < 8) bits = (grid_idx >> shift) & 0x03;
-                else           bits = ((grid_idx >> (shift - 8)) ^ (grid_idx >> 1)) & 0x03;
-                float grid_val;
-                switch (bits) {
-                    case 0: grid_val = 0.0f; break;
-                    case 1: grid_val = 1.0f; break;
-                    case 2: grid_val = 2.0f; break;
-                    default: grid_val = 3.0f; break;
-                }
-                float sign = ((sign_bits >> k) & 1) ? -1.0f : 1.0f;
-                group_out[sub * 8 + k] = sub_scale * grid_val * sign;
-            }
-        }
-    }
-}
-
-__device__ void dequant_iq2_xs_block(const unsigned char* block, float* out) {
-    float d = load_f16_as_f32(block);
-    const unsigned char* scales = block + 2;
-    const unsigned char* qs = block + 18;
-
-    for (int sb = 0; sb < 16; sb++) {
-        float scale = d * ((float)((signed char)scales[sb]) + 0.5f);
-        unsigned int q_val = (unsigned int)qs[sb * 2] | ((unsigned int)qs[sb * 2 + 1] << 8);
-        unsigned int grid_idx = q_val & 0x1FF;
-        unsigned char signs = (unsigned char)(q_val >> 9);
-        float* sub_out = out + sb * 16;
-
-        for (int k = 0; k < 16; k++) {
-            int pos = k % 8;
-            int bits = (grid_idx >> (pos * 2)) & 0x03;
-            float grid_val;
-            switch (bits) {
-                case 0: grid_val = 0.0f; break;
-                case 1: grid_val = 1.0f; break;
-                case 2: grid_val = 2.0f; break;
-                default: grid_val = 3.0f; break;
-            }
-            float sign = ((signs >> (k % 8)) & 1) ? -1.0f : 1.0f;
-            sub_out[k] = scale * grid_val * sign;
-        }
-    }
-}
-
-__device__ void dequant_iq2_s_block(const unsigned char* block, float* out) {
-    float d = load_f16_as_f32(block);
-    const unsigned char* qs = block + 2;
-    const unsigned char* signs_data = block + 38;
-    const unsigned char* scales = block + 54;
-
-    for (int sb = 0; sb < 16; sb++) {
-        unsigned char scale_byte = (sb < 28) ? scales[sb] : 0;
-        float sub_scale = d * ((float)((signed char)scale_byte) + 0.5f);
-        float* sub_out = out + sb * 16;
-
-        for (int k = 0; k < 16; k++) {
-            int byte_idx = sb * 2 + k / 8;
-            unsigned char grid_byte = (byte_idx < 32) ? qs[byte_idx] : 0;
-            int bit_pos = k % 8;
-            unsigned char sign_byte = (sb < 16) ? signs_data[sb] : 0;
-            float sign = ((sign_byte >> bit_pos) & 1) ? -1.0f : 1.0f;
-            float val = (float)((grid_byte >> ((bit_pos % 4) * 2)) & 0x03);
-            sub_out[k] = sub_scale * val * sign;
-        }
-    }
-}
-
-__device__ void dequant_iq3_xxs_block(const unsigned char* block, float* out) {
-    float d = load_f16_as_f32(block);
-    const unsigned char* qs = block + 2;
-
-    for (int group = 0; group < 8; group++) {
-        const unsigned char* gdata = qs + group * 12;
-        unsigned int signs = load_u32(gdata + 8);
-        unsigned int sub_scale_bits = (signs >> 28) & 0x0F;
-        float sub_scale = d * (1.0f + (float)sub_scale_bits);
-        float* group_out = out + group * 32;
-
-        for (int sub = 0; sub < 4; sub++) {
-            unsigned int grid_idx = (unsigned int)gdata[sub * 2] |
-                                    ((unsigned int)gdata[sub * 2 + 1] << 8);
-            for (int k = 0; k < 8; k++) {
-                float val = (float)((grid_idx >> (k * 2)) & 0x03) + 1.0f;
-                unsigned int sign_bit = (signs >> (sub * 8 + k)) & 1;
-                float sign = sign_bit ? -1.0f : 1.0f;
-                group_out[sub * 8 + k] = sub_scale * val * sign;
-            }
-        }
-    }
-}
-
-__device__ void dequant_iq3_s_block(const unsigned char* block, float* out) {
-    float d = load_f16_as_f32(block);
-    const unsigned char* qs = block + 2;
-    const unsigned char* qh = block + 34;
-    const unsigned char* signs_data = block + 38;
-    const unsigned char* scales = block + 70;
-
-    for (int sb = 0; sb < 8; sb++) {
-        float sub_scale = d * (1.0f + (float)(scales[sb] & 0x0F));
-        float* sub_out = out + sb * 32;
-
-        for (int k = 0; k < 32; k++) {
-            int byte_idx = sb * 4 + k / 8;
-            int bit_pos = k % 8;
-            int q3 = (byte_idx < 32) ? ((qs[byte_idx] >> ((bit_pos % 4) * 2)) & 0x03) : 0;
-            int qh_byte_idx = (sb * 32 + k) / 8;
-            int qh_bit = (qh_byte_idx < 4) ? ((qh[qh_byte_idx] >> ((sb * 32 + k) % 8)) & 1) : 0;
-            float val = (float)q3 + (float)qh_bit * 4.0f + 1.0f;
-            int sign_byte_idx = sb * 4 + k / 8;
-            unsigned char sign_byte = (sign_byte_idx < 32) ? signs_data[sign_byte_idx] : 0;
-            float sign = ((sign_byte >> (k % 8)) & 1) ? -1.0f : 1.0f;
-            sub_out[k] = sub_scale * val * sign;
-        }
-    }
-}
-
-__device__ void dequant_iq1_s_block(const unsigned char* block, float* out) {
-    float d = load_f16_as_f32(block);
-    const unsigned char* qs = block + 2;
-    const unsigned char* qh = block + 34;
-
-    for (int sb = 0; sb < 16; sb++) {
-        unsigned int qs_val = (unsigned int)qs[sb * 2] | ((unsigned int)qs[sb * 2 + 1] << 8);
-        unsigned int grid_idx = qs_val & 0x0FFF;
-        unsigned char sign_bits = qh[sb];
-        float* sub_out = out + sb * 16;
-
-        unsigned int grid_val = grid_idx;
-        for (int k = 0; k < 16; k++) {
-            int t = (int)(grid_val % 3) - 1;
-            float sign = ((sign_bits >> (k % 8)) & 1) ? -1.0f : 1.0f;
-            sub_out[k] = d * (float)t * sign;
-            grid_val /= 3;
-        }
-    }
-}
-
-__device__ void dequant_iq1_m_block(const unsigned char* block, float* out) {
-    float d = load_f16_as_f32(block);
-    const unsigned char* scales_data = block + 2;
-    const unsigned char* qs = block + 8;
-    const unsigned char* qh = block + 40;
-
-    for (int sb = 0; sb < 16; sb++) {
-        int scale_bit_offset = sb * 3;
-        int byte_idx = scale_bit_offset / 8;
-        int bit_offset = scale_bit_offset % 8;
-        unsigned int raw;
-        if (byte_idx + 1 < 6) {
-            unsigned int lo = (unsigned int)scales_data[byte_idx];
-            unsigned int hi = (unsigned int)scales_data[byte_idx + 1];
-            raw = ((lo | (hi << 8)) >> bit_offset) & 0x07;
-        } else if (byte_idx < 6) {
-            raw = ((unsigned int)(scales_data[byte_idx] >> bit_offset)) & 0x07;
-        } else {
-            raw = 0;
-        }
-        float sub_scale = d * ((float)raw + 0.5f);
-
-        unsigned int qs_val = (unsigned int)qs[sb * 2] | ((unsigned int)qs[sb * 2 + 1] << 8);
-        unsigned int grid_idx = qs_val & 0x0FFF;
-        unsigned char sign_bits = qh[sb];
-        float* sub_out = out + sb * 16;
-
-        unsigned int grid_val = grid_idx;
-        for (int k = 0; k < 16; k++) {
-            int t = (int)(grid_val % 3) - 1;
-            float sign = ((sign_bits >> (k % 8)) & 1) ? -1.0f : 1.0f;
-            sub_out[k] = sub_scale * (float)t * sign;
-            grid_val /= 3;
-        }
-    }
-}
+__device__ void dequant_iq2_xxs_block(const unsigned char* b, float* o) { iq2_xxs_dequant_block(b, o); }
+__device__ void dequant_iq2_xs_block (const unsigned char* b, float* o) { iq2_xs_dequant_block(b, o);  }
+__device__ void dequant_iq2_s_block  (const unsigned char* b, float* o) { iq2_s_dequant_block(b, o);   }
+__device__ void dequant_iq3_xxs_block(const unsigned char* b, float* o) { iq3_xxs_dequant_block(b, o); }
+__device__ void dequant_iq3_s_block  (const unsigned char* b, float* o) { iq3_s_dequant_block(b, o);   }
+__device__ void dequant_iq1_s_block  (const unsigned char* b, float* o) { iq1_s_dequant_block(b, o);   }
+__device__ void dequant_iq1_m_block  (const unsigned char* b, float* o) { iq1_m_dequant_block(b, o);   }
 
 // ── Main dispatch kernel ─────────────────────────────────────────────
 

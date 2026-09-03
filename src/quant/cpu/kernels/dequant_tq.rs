@@ -53,7 +53,7 @@ fn tq2_0_trit(block: &[u8], elem: usize) -> i32 {
     i32::from((block[group * 32 + m] >> (2 * level)) & 0x03) - 1
 }
 
-/// Dequantize TQ2_0 blocks to f32
+/// Dequantizes TQ2_0 blocks to f32
 ///
 /// TQ2_0: 256 elements, 66 bytes/block. Layout `qs[64] + d:f16`.
 pub fn dequant_tq2_0(blocks: &[u8], output: &mut [f32]) {
@@ -74,7 +74,7 @@ pub fn dequant_tq2_0(blocks: &[u8], output: &mut [f32]) {
     }
 }
 
-/// Dequantize TQ1_0 blocks to f32
+/// Dequantizes TQ1_0 blocks to f32
 ///
 /// TQ1_0: 256 elements, 54 bytes/block. Layout `qs[48] + qh[4] + d:f16`.
 pub fn dequant_tq1_0(blocks: &[u8], output: &mut [f32]) {

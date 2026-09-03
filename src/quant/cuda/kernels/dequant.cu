@@ -6,6 +6,8 @@
 
 #include <cuda_fp16.h>
 
+#include "iq_dequant.cuh"
+
 extern "C" {
 
 // ============================================================================
@@ -476,10 +478,12 @@ __global__ void dequant_iq4_xs_f32(
 }
 
 // ============================================================================
-// IQ3_S Dequantization
-// Block: 256 elements, 110 bytes
-// Layout: f16 d (2B) + qs (32B) + qh (4B) + signs (32B) + scales (8B)
-// 8 sub-blocks of 32, 3-bit values with sign bits
+// IQ3_S and IQ2_XS Dequantization
+//
+// Both are codebook quantizations. The block layouts and the grid tables live
+// once in iq_dequant.cuh, shared with dequant_generic.cu, the quant-matmul
+// path and the GEMV/GEMM kernels, and gated against llama.cpp by
+// tests/gguf_conformance_llama_cpp.rs.
 // ============================================================================
 
 __global__ void dequant_iq3_s_f32(
@@ -489,47 +493,8 @@ __global__ void dequant_iq3_s_f32(
 ) {
     unsigned int bid = blockIdx.x * blockDim.x + threadIdx.x;
     if (bid >= num_blocks) return;
-
-    const unsigned char* block = input + bid * 110;
-    float* out = output + bid * 256;
-
-    __half d_half;
-    memcpy(&d_half, block, sizeof(__half));
-    float d = __half2float(d_half);
-    const unsigned char* qs = block + 2;
-    const unsigned char* qh = block + 34;
-    const unsigned char* signs = block + 38;
-    const unsigned char* scales = block + 70;
-
-    for (int sb = 0; sb < 8; sb++) {
-        float sub_scale = d * (1.0f + (float)(scales[sb] & 0x0F));
-        float* sub_out = out + sb * 32;
-
-        for (int k = 0; k < 32; k++) {
-            int byte_idx = sb * 4 + k / 8;
-            // Four 2-bit grid values per byte: the bit position within the byte
-            // is (k % 8) % 4, so the shift is (k % 4) * 2.
-            int bit_pos = k % 8;
-            int q3 = (byte_idx < 32) ? ((qs[byte_idx] >> ((bit_pos % 4) * 2)) & 0x03) : 0;
-            int qh_byte_idx = (sb * 32 + k) / 8;
-            int qh_bit = (qh_byte_idx < 4) ? ((qh[qh_byte_idx] >> ((sb * 32 + k) % 8)) & 1) : 0;
-            float val = (float)q3 + (float)qh_bit * 4.0f + 1.0f;
-
-            int sign_byte_idx = sb * 4 + k / 8;
-            int sign_bit = (sign_byte_idx < 32) ? ((signs[sign_byte_idx] >> (k % 8)) & 1) : 0;
-            float sign = sign_bit ? -1.0f : 1.0f;
-
-            sub_out[k] = sub_scale * val * sign;
-        }
-    }
+    iq3_s_dequant_block(input + (unsigned long long)bid * 110, output + (unsigned long long)bid * 256);
 }
-
-// ============================================================================
-// IQ2_XS Dequantization
-// Block: 256 elements, 74 bytes
-// Layout: f16 d (2B) + scales (16B) + qs (56B)
-// 16 sub-blocks of 16 values
-// ============================================================================
 
 __global__ void dequant_iq2_xs_f32(
     const unsigned char* __restrict__ input,
@@ -538,37 +503,7 @@ __global__ void dequant_iq2_xs_f32(
 ) {
     unsigned int bid = blockIdx.x * blockDim.x + threadIdx.x;
     if (bid >= num_blocks) return;
-
-    const unsigned char* block = input + bid * 74;
-    float* out = output + bid * 256;
-
-    __half d_half;
-    memcpy(&d_half, block, sizeof(__half));
-    float d = __half2float(d_half);
-    const unsigned char* sc = block + 2;
-    const unsigned char* qs = block + 18;
-
-    for (int sb = 0; sb < 16; sb++) {
-        float scale = d * ((float)((signed char)sc[sb]) + 0.5f);
-
-        unsigned int q_offset = sb * 2;
-        unsigned int q_val = (unsigned int)qs[q_offset] | ((unsigned int)qs[q_offset + 1] << 8);
-
-        // The 16-bit field splits at bit 9: the low 9 bits are the grid index
-        // (four 2-bit values, reused for both halves of the sub-block), the
-        // bits above it are the per-element signs. The magnitude is the raw
-        // 2-bit grid value — there is no +0.5 offset on it.
-        unsigned int grid_idx = q_val & 0x1FF;
-        unsigned int signs = q_val >> 9;
-
-        float* sub_out = out + sb * 16;
-        for (int k = 0; k < 16; k++) {
-            int pos = k % 8;
-            float magnitude = (float)((grid_idx >> (pos * 2)) & 0x03);
-            float sign = ((signs >> pos) & 1) ? -1.0f : 1.0f;
-            sub_out[k] = scale * magnitude * sign;
-        }
-    }
+    iq2_xs_dequant_block(input + (unsigned long long)bid * 74, output + (unsigned long long)bid * 256);
 }
 
 } // extern "C"

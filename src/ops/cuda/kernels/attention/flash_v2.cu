@@ -169,17 +169,17 @@ __device__ void flash_attention_fwd_fp32_impl(
 
         // Sliding window optimization: skip entire K blocks outside window
         // For any Q position in this tile, the earliest K position we need is:
-        //   min_k_needed = max(0, q_start - window_size + 1)
+        //   min_k_needed = max(0, (key_offset + q_start) - window_size + 1)
         // The latest K position we need is:
         //   max_k_needed = q_end - 1 (for causal) or seq_len_k - 1
         // Skip this K block if it's entirely outside the window for ALL Q positions in this tile
         if (window_size > 0) {
-            // For the last Q position in this tile (q_start + BLOCK_M - 1 or q_end - 1),
-            // the earliest K we might need is (q_end - 1) - window_size + 1
-            // If k_end - 1 < this value, skip entire block
-            int last_q_pos = key_offset + min(q_start + BLOCK_M - 1, seq_len_q - 1);
-            int min_k_for_last_q = max(0, last_q_pos - window_size + 1);
-            if (k_end - 1 < min_k_for_last_q) {
+            // Skip this K block only if it is outside the window for EVERY query
+            // in the tile. That is governed by the FIRST query row, whose window
+            // reaches furthest back - not the last, which reaches back the least.
+            int first_q_pos = key_offset + q_start;
+            int min_k_needed = max(0, first_q_pos - window_size + 1);
+            if (k_end - 1 < min_k_needed) {
                 continue;  // Skip this K block entirely - outside window for all Q
             }
         }
@@ -217,8 +217,14 @@ __device__ void flash_attention_fwd_fp32_impl(
                 m_new = fmaxf(m_new, score);
             }
 
-            // Compute correction factor for online softmax
-            const float alpha = __expf(m_local - m_new);
+            // Online-softmax correction. A K block kept by the block-level skip can
+            // still be fully masked for THIS query row; if it is also the row's
+            // first block, m_new == m_local == -INFINITY and __expf(-inf - -inf) is
+            // __expf(NaN) = NaN, poisoning O_local/l_local for the rest of the
+            // kernel. alpha = 1 makes such a block an exact no-op (the second pass
+            // below runs zero unmasked iterations). Any unmasked position yields a
+            // finite score, so m_new == -INFINITY identifies exactly that case.
+            const float alpha = (m_new == -INFINITY) ? 1.0f : __expf(m_local - m_new);
 
             // Rescale previous output in registers
             #pragma unroll
@@ -514,9 +520,12 @@ __device__ void flash_attention_fwd_fp16_impl(
 
         // Sliding window optimization: skip entire K blocks outside window
         if (window_size > 0) {
-            int last_q_pos = key_offset + min(q_start + BLOCK_M - 1, seq_len_q - 1);
-            int min_k_for_last_q = max(0, last_q_pos - window_size + 1);
-            if (k_end - 1 < min_k_for_last_q) {
+            // Skip this K block only if it is outside the window for EVERY query
+            // in the tile. That is governed by the FIRST query row, whose window
+            // reaches furthest back - not the last, which reaches back the least.
+            int first_q_pos = key_offset + q_start;
+            int min_k_needed = max(0, first_q_pos - window_size + 1);
+            if (k_end - 1 < min_k_needed) {
                 continue;  // Skip this K block entirely - outside window for all Q
             }
         }
@@ -553,7 +562,14 @@ __device__ void flash_attention_fwd_fp16_impl(
                 m_new = fmaxf(m_new, score);
             }
 
-            const float alpha = __expf(m_local - m_new);
+            // Online-softmax correction. A K block kept by the block-level skip can
+            // still be fully masked for THIS query row; if it is also the row's
+            // first block, m_new == m_local == -INFINITY and __expf(-inf - -inf) is
+            // __expf(NaN) = NaN, poisoning O_local/l_local for the rest of the
+            // kernel. alpha = 1 makes such a block an exact no-op (the second pass
+            // below runs zero unmasked iterations). Any unmasked position yields a
+            // finite score, so m_new == -INFINITY identifies exactly that case.
+            const float alpha = (m_new == -INFINITY) ? 1.0f : __expf(m_local - m_new);
 
             #pragma unroll
             for (int d = 0; d < HEAD_DIM; ++d) {
@@ -777,9 +793,12 @@ __device__ void flash_attention_fwd_bf16_impl(
 
         // Sliding window optimization: skip entire K blocks outside window
         if (window_size > 0) {
-            int last_q_pos = key_offset + min(q_start + BLOCK_M - 1, seq_len_q - 1);
-            int min_k_for_last_q = max(0, last_q_pos - window_size + 1);
-            if (k_end - 1 < min_k_for_last_q) {
+            // Skip this K block only if it is outside the window for EVERY query
+            // in the tile. That is governed by the FIRST query row, whose window
+            // reaches furthest back - not the last, which reaches back the least.
+            int first_q_pos = key_offset + q_start;
+            int min_k_needed = max(0, first_q_pos - window_size + 1);
+            if (k_end - 1 < min_k_needed) {
                 continue;  // Skip this K block entirely - outside window for all Q
             }
         }
@@ -815,7 +834,14 @@ __device__ void flash_attention_fwd_bf16_impl(
                 m_new = fmaxf(m_new, score);
             }
 
-            const float alpha = __expf(m_local - m_new);
+            // Online-softmax correction. A K block kept by the block-level skip can
+            // still be fully masked for THIS query row; if it is also the row's
+            // first block, m_new == m_local == -INFINITY and __expf(-inf - -inf) is
+            // __expf(NaN) = NaN, poisoning O_local/l_local for the rest of the
+            // kernel. alpha = 1 makes such a block an exact no-op (the second pass
+            // below runs zero unmasked iterations). Any unmasked position yields a
+            // finite score, so m_new == -INFINITY identifies exactly that case.
+            const float alpha = (m_new == -INFINITY) ? 1.0f : __expf(m_local - m_new);
 
             #pragma unroll
             for (int d = 0; d < HEAD_DIM; ++d) {

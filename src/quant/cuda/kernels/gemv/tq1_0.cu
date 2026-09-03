@@ -1,9 +1,10 @@
 // TQ1_0 GEMV kernel — F32 activation path
 //
 // TQ1_0 block: 256 elements, 54 bytes
-// Layout: [d:f16(2), qs:52B]
-// Base-3 encoding: each byte decodes 5 ternary values via val%3, val/=3
-// Values are {-1, 0, 1} * d
+// Layout: [qs:48B, qh:4B, d:f16(2)] — the scale is at the END.
+// Base-3 encoding: five trits per byte, recovered by a WRAPPING 8-bit multiply
+// against a power of three, not by repeated division. Element order and the
+// unpack itself live in decode.cuh, included via common.cuh.
 
 #include "common.cuh"
 
@@ -31,21 +32,12 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_tq1_0_f32(
     for (unsigned int b = lane; b < blocks_per_row; b += WARP_SIZE) {
         const unsigned char* block = w_row + b * TQ1_0_BLOCK_BYTES;
         __half d_half;
-        memcpy(&d_half, block, sizeof(__half));
+        memcpy(&d_half, block + GGUF_TQ1_0_D_OFFSET, sizeof(__half));
         float d = __half2float(d_half);
-        const unsigned char* qs = block + 2;
         unsigned int base = b * TQ1_0_BLOCK_SIZE;
 
-        int idx = 0;
-        for (int i = 0; i < 52; i++) {
-            unsigned int val = (unsigned int)qs[i];
-            for (int j = 0; j < 5; j++) {
-                if (idx >= 256) break;
-                int t = (int)(val % 3) - 1;
-                sum += act_row[base + idx] * (d * (float)t);
-                val /= 3;
-                idx++;
-            }
+        for (int i = 0; i < TQ1_0_BLOCK_SIZE; i++) {
+            sum += act_row[base + i] * (d * (float)gguf_tq1_0_trit(block, i));
         }
     }
 

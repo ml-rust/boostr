@@ -14,6 +14,8 @@
 
 #include <cuda_fp16.h>
 
+#include "decode.cuh"
+
 #define WARP_SIZE 32
 
 // Format IDs — must match QuantFormat::format_id() and dequant_generic.cu
@@ -320,24 +322,15 @@ __device__ void dq_iq4_xs(const unsigned char* b, float* out) {
 }
 
 __device__ void dq_tq2_0(const unsigned char* b, float* out) {
-    float d = load_f16_as_f32(b);
-    for (int i = 0; i < 64; i++) {
-        unsigned char v = b[2+i];
-        for (int j = 0; j < 4; j++)
-            out[i*4+j] = d * (float)(((v >> (2*j)) & 0x03) - 1);
-    }
+    float d = load_f16_as_f32(b + GGUF_TQ2_0_D_OFFSET);
+    for (int i = 0; i < 256; i++)
+        out[i] = d * (float)gguf_tq2_0_trit(b, i);
 }
 
 __device__ void dq_tq1_0(const unsigned char* b, float* out) {
-    float d = load_f16_as_f32(b);
-    int idx = 0;
-    for (int i = 0; i < 52 && idx < 256; i++) {
-        unsigned int val = (unsigned int)b[2+i];
-        for (int j = 0; j < 5 && idx < 256; j++) {
-            out[idx++] = d * (float)((int)(val % 3) - 1);
-            val /= 3;
-        }
-    }
+    float d = load_f16_as_f32(b + GGUF_TQ1_0_D_OFFSET);
+    for (int i = 0; i < 256; i++)
+        out[i] = d * (float)gguf_tq1_0_trit(b, i);
 }
 
 __device__ void dq_iq2_xxs(const unsigned char* b, float* out) {

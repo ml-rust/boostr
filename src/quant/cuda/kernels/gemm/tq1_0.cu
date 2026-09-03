@@ -3,6 +3,8 @@
 
 #include <cuda_fp16.h>
 
+#include "../decode.cuh"
+
 extern "C" __global__ void quant_matmul_tq1_0_f32(
     const float* __restrict__ activation,
     const unsigned char* __restrict__ weight,
@@ -22,21 +24,12 @@ extern "C" __global__ void quant_matmul_tq1_0_f32(
     for (unsigned int b = 0; b < blocks_per_row; b++) {
         const unsigned char* block = w_row + b * 54;
         __half d_half;
-        memcpy(&d_half, block, sizeof(__half));
+        memcpy(&d_half, block + GGUF_TQ1_0_D_OFFSET, sizeof(__half));
         float d = __half2float(d_half);
-        const unsigned char* qs = block + 2;
         unsigned int base = b * 256;
 
-        int idx = 0;
-        for (int i = 0; i < 52; i++) {
-            unsigned int val = (unsigned int)qs[i];
-            for (int j = 0; j < 5; j++) {
-                if (idx >= 256) break;
-                int t = (int)(val % 3) - 1;
-                sum += act_row[base + idx] * (d * (float)t);
-                val /= 3;
-                idx++;
-            }
+        for (int i = 0; i < 256; i++) {
+            sum += act_row[base + i] * (d * (float)gguf_tq1_0_trit(block, i));
         }
     }
     output[row * N + col] = sum;

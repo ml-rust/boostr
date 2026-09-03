@@ -127,3 +127,64 @@ static __device__ __forceinline__ int gguf_split_half_nibble(
     const unsigned char byte = qs[elem & 15];
     return (elem & 16) ? ((byte >> 4) & 0x0F) : (byte & 0x0F);
 }
+
+// ── TQ1_0 / TQ2_0 ternary block layout ─────────────────────────────────
+//
+// Both ternary formats store the f16 scale `d` at the END of the block, not
+// the start, and both order elements level-major rather than byte-major.
+// Reading `d` from offset 0 yields a scale built from packed trits — a small
+// denormal-ish number that keeps the tensor finite while every weight is
+// wrong, which is exactly the failure class CLAUDE.md warns about.
+//
+//   TQ1_0 (54B): qs[0..48], qh[48..52], d[52..54]
+//   TQ2_0 (66B): qs[0..64],             d[64..66]
+//
+// TQ1_0 packs FIVE trits per byte in base 3, and does not decode them by
+// repeated division. llama.cpp stores each byte pre-scaled so a trit is
+// recovered by a wrapping 8-bit multiply against a power of three followed by
+// a multiply-shift: `q = (uint8)(byte * pow3[l])`, `trit = ((uint16)q*3 >> 8)`.
+// The multiply MUST wrap at 8 bits; widening it changes the result.
+//
+// The 256 elements come from three differently shaped runs, in this order:
+//   [  0, 160)  qs[0..32]   x 5 levels, 32 per level
+//   [160, 240)  qs[32..48]  x 5 levels, 16 per level
+//   [240, 256)  qh[0..4]    x 4 levels,  4 per level
+
+#define GGUF_TQ1_0_D_OFFSET 52
+#define GGUF_TQ2_0_D_OFFSET 64
+
+// Returns the ternary value {-1, 0, 1} of element `elem` (0..256) of a TQ1_0
+// block. `block` points at the start of the 54-byte block.
+static __device__ __forceinline__ int gguf_tq1_0_trit(
+    const unsigned char* block, int elem
+) {
+    const unsigned char pow3[5] = { 1, 3, 9, 27, 81 };
+    unsigned char byte;
+    int level;
+    if (elem < 160) {
+        level = elem >> 5;
+        byte = block[elem & 31];
+    } else if (elem < 240) {
+        const int r = elem - 160;
+        level = r >> 4;
+        byte = block[32 + (r & 15)];
+    } else {
+        const int r = elem - 240;
+        level = r >> 2;
+        byte = block[48 + (r & 3)];
+    }
+    const unsigned char q = (unsigned char)(byte * pow3[level]);
+    return (int)(((unsigned short)q * 3) >> 8) - 1;
+}
+
+// Returns the ternary value {-1, 0, 1} of element `elem` (0..256) of a TQ2_0
+// block. `block` points at the start of the 66-byte block.
+static __device__ __forceinline__ int gguf_tq2_0_trit(
+    const unsigned char* block, int elem
+) {
+    const int group = elem >> 7;         // 128 elements per 32-byte group
+    const int r     = elem & 127;
+    const int level = r >> 5;            // which 2-bit field
+    const int m     = r & 31;            // which byte in the group
+    return (int)((block[group * 32 + m] >> (2 * level)) & 0x03) - 1;
+}

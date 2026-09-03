@@ -13,6 +13,8 @@
 
 #include <cuda_fp16.h>
 
+#include "decode.cuh"
+
 // Format IDs (must match QuantFormat::format_id() in Rust)
 #define FMT_Q4_0    0
 #define FMT_Q4_1    1
@@ -372,32 +374,17 @@ __device__ void dequant_iq4_xs_block(const unsigned char* block, float* out) {
 }
 
 __device__ void dequant_tq2_0_block(const unsigned char* block, float* out) {
-    float d = load_f16_as_f32(block);
-    const unsigned char* qs = block + 2;
-    for (int i = 0; i < 64; i++) {
-        unsigned char byte = qs[i];
-        for (int j = 0; j < 4; j++) {
-            int val = ((byte >> (2 * j)) & 0x03) - 1;
-            out[i * 4 + j] = d * (float)val;
-        }
+    float d = load_f16_as_f32(block + GGUF_TQ2_0_D_OFFSET);
+    for (int i = 0; i < 256; i++) {
+        out[i] = d * (float)gguf_tq2_0_trit(block, i);
     }
 }
 
 __device__ void dequant_tq1_0_block(const unsigned char* block, float* out) {
-    float d = load_f16_as_f32(block);
-    const unsigned char* qs = block + 2;
-    int idx = 0;
-    for (int i = 0; i < 52; i++) {
-        unsigned int val = (unsigned int)qs[i];
-        for (int j = 0; j < 5; j++) {
-            if (idx >= 256) break;
-            int t = (int)(val % 3) - 1;
-            out[idx] = d * (float)t;
-            val /= 3;
-            idx++;
-        }
+    float d = load_f16_as_f32(block + GGUF_TQ1_0_D_OFFSET);
+    for (int i = 0; i < 256; i++) {
+        out[i] = d * (float)gguf_tq1_0_trit(block, i);
     }
-    // Zero remaining (52*5=260 > 256, but loop breaks at 256)
 }
 
 __device__ void dequant_iq2_xxs_block(const unsigned char* block, float* out) {

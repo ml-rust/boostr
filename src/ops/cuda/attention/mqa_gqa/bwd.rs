@@ -119,9 +119,8 @@ pub fn mqa_gqa_bwd(
         let batch_i32 = batch_size as i32;
         let nh_i32 = num_heads as i32;
         let sq_i32 = seq_len_q as i32;
-        // The F32/BF16 preprocess kernels declare trailing dequant scales and
-        // ignore them; the F16 kernel declares neither. Push them either way so
-        // no kernel reads a parameter slot that was never written.
+        // Every preprocess kernel declares the same trailing dequant scales.
+        // Only the FP8 entry points read them, so 1.0f is the identity here.
         let scale_do = 1.0f32;
         let scale_o = 1.0f32;
 
@@ -175,9 +174,10 @@ pub fn mqa_gqa_bwd(
         let sq_i32 = seq_len_q as i32;
         let sk_i32 = seq_len_k as i32;
         let causal_i32 = if causal { 1i32 } else { 0i32 };
-        // The F32/BF16 kernels declare eight trailing quantization scales and
-        // ignore them; the F16 kernel declares none. Push them either way so no
-        // kernel reads a parameter slot that was never written.
+        // Every backward kernel declares the same eight trailing quantization
+        // scales. Only the FP8 entry points read them, so 1.0f is the identity:
+        // the dQ/dK/dV scales multiply each contribution before the atomic, and
+        // the input scales are discarded by `load_dtype` for every non-FP8 dtype.
         let one = 1.0f32;
 
         unsafe {

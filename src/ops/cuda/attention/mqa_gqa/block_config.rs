@@ -11,10 +11,9 @@ use super::super::flash_utils::{compute_bwd_smem, compute_smem, device_max_smem}
 
 /// Shared memory element size of the MQA/GQA backward kernels.
 ///
-/// `mqa_gqa_bwd.cu` declares `extern __shared__ float smem[]` in every backward
-/// impl (`mqa_gqa_bwd_fp32_impl`, `mqa_gqa_bwd_fp16_impl`, `mqa_gqa_bwd_dtype_impl`)
-/// and stages K/V/Q/dO as f32 there, converting on load. The requirement is
-/// therefore independent of the tensor dtype.
+/// `mqa_gqa_bwd.cu` has a single backward impl, `mqa_gqa_bwd_impl`. It declares
+/// `extern __shared__ float smem[]` and stages K/V/Q/dO as f32 there, converting
+/// on load, so the requirement is independent of the tensor dtype.
 pub(super) const BWD_SMEM_ELEM_BYTES: usize = 4;
 
 /// Block config of the unsuffixed `mqa_gqa_fwd_{head_dim}_{dtype}` kernels.

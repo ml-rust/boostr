@@ -4,12 +4,16 @@
 //
 // Implementation matches PyTorch Flash Attention reference (research/flash-attention-main/)
 //
-// Key optimizations:
+// Key properties:
 // 1. Padded shared memory strides (eliminates bank conflicts on power-of-2 dimensions)
-// 2. Multi-precision support (FP32, FP16, BF16, FP8)
-// 3. Register-based accumulation for numerical stability
-// 4. Warp-shuffle reductions (minimize shared memory traffic)
+// 2. Register-based FP32 accumulation for numerical stability, whatever T is
+// 3. Native GQA: num_kv_heads can be less than num_heads (KV heads are broadcast)
+// 4. Native sliding window: window_size restricts attention to local context
 // 5. All head dimensions (32, 64, 96, 128, 192, 256)
+//
+// One implementation and one entry-point signature, all dtypes:
+// `flash_attention_fwd_impl<T, HEAD_DIM, BLOCK_M, BLOCK_N>` serves F32, F16 and
+// BF16. FP8 lives in the separate `flash_v2_fp8.cu`.
 //
 // Query positions are ABSOLUTE: query row `i` sits at sequence position
 // `key_offset + i`, where `key_offset = seq_len_k - seq_len_q`. A KV-cached
@@ -19,9 +23,21 @@
 // gives key_offset == 0 and leaves the masks unchanged. Same convention as
 // `ops/impl_generic/attention/flash_standard.rs::build_attention_mask`.
 //
-// Shared memory padding strategy:
-// - Custom padding per dimension (default: +8 for general case, +1 for head dims)
-// - Avoids 32-way bank conflicts on NVIDIA GPUs (32 banks, 4-byte words)
+// SHARED MEMORY - the element type is the TENSOR DTYPE, not float. Q/K/V stage
+// verbatim as `T` and convert to float only when read back through `load_dtype`,
+// so the dynamic allocation is
+// (BLOCK_M + 2*BLOCK_N) * (HEAD_DIM + 1) * sizeof(T). The `+1` is bank-conflict
+// padding on the head dimension and IS part of the allocation, unlike the
+// backward layout. That matches `compute_smem` in
+// `src/ops/cuda/attention/flash_utils.rs`, which multiplies by
+// `dtype.size_in_bytes()`. Staging as float instead would make the F16/BF16
+// kernels write twice their allocation.
+//
+// BLOCK_M is ALSO the thread count of the block: the launcher sets
+// blockDim.x = BLOCK_M and each thread owns exactly one Q row
+// (`is_valid_thread = q_row < q_tile_size`). A tile instantiated here is only
+// correct when the launcher's block_dim matches its BLOCK_M - both come from
+// `flash_utils::block_config`, the single source of the pair.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -30,54 +46,18 @@
 #include "dtype_traits.cuh"
 
 // ============================================================================
-// Shared Memory Stride Padding
-// ============================================================================
-// Padding eliminates bank conflicts on power-of-2 dimensions
-//
-// Usage:
-//   __shared__ float Q_smem[BLOCK_M][SMEM_STRIDE(HEAD_DIM, 1)];  // +1 padding
-//   __shared__ float K_smem[BLOCK_N][HEAD_DIM + 8];              // +8 padding
-
-#define SMEM_STRIDE(dim, pad) ((dim) + (pad))
-
-// ============================================================================
-// Warp-level Primitives
-// ============================================================================
-
-__device__ __forceinline__ float warp_reduce_max(float val) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val = fmaxf(val, __shfl_down_sync(0xffffffff, val, offset));
-    }
-    return val;
-}
-
-__device__ __forceinline__ float warp_reduce_sum(float val) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    }
-    return val;
-}
-
-// ============================================================================
-// FP32 Kernels with Dynamic Shared Memory
-// ============================================================================
-
-// Flash Attention forward pass - FP32 with GQA support
-// Supports arbitrary head dimensions via template parameter
-// Native GQA: num_kv_heads can be less than num_heads (KV heads are broadcast)
-// Native sliding window: window_size parameter restricts attention to local context
+// Flash Attention forward - templated implementation
 //
 // Grid: (batch_size * num_heads, ceil(seq_len_q / BLOCK_M))
-// Block: BLOCK_M threads (typically 128)
-// Shared memory: Padded strides to eliminate bank conflicts
-template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
-__device__ void flash_attention_fwd_fp32_impl(
-    const float* __restrict__ Q,
-    const float* __restrict__ K,
-    const float* __restrict__ V,
-    float* __restrict__ O,
+// Block: BLOCK_M threads
+// ============================================================================
+
+template<typename T, int HEAD_DIM, int BLOCK_M, int BLOCK_N>
+__device__ void flash_attention_fwd_impl(
+    const T* __restrict__ Q,
+    const T* __restrict__ K,
+    const T* __restrict__ V,
+    T* __restrict__ O,
     float* __restrict__ L,
     const int batch_size,
     const int num_heads,
@@ -88,21 +68,17 @@ __device__ void flash_attention_fwd_fp32_impl(
     const int causal,
     const int window_size    // Sliding window: 0 or -1 = full attention, >0 = local window
 ) {
-    // Padded strides (+1 for power-of-2 head dims like 64, 128)
-    constexpr int HEAD_STRIDE = SMEM_STRIDE(HEAD_DIM, 1);
+    // Padded stride (+1) avoids bank conflicts on power-of-2 head dims.
+    constexpr int HEAD_STRIDE = HEAD_DIM + 1;
 
-    // Use dynamic shared memory with padded strides
-    extern __shared__ float smem[];
-
-    // Partition shared memory manually with padding
-    float* Q_smem_flat = smem;
-    float* K_smem_flat = smem + BLOCK_M * HEAD_STRIDE;
-    float* V_smem_flat = smem + BLOCK_M * HEAD_STRIDE + BLOCK_N * HEAD_STRIDE;
-
-    // Helper macros for 2D indexing with padded stride
-    #define Q_smem(i, j) Q_smem_flat[(i) * HEAD_STRIDE + (j)]
-    #define K_smem(i, j) K_smem_flat[(i) * HEAD_STRIDE + (j)]
-    #define V_smem(i, j) V_smem_flat[(i) * HEAD_STRIDE + (j)]
+    // Dynamic shared memory layout, elements of type T:
+    // [Q: BLOCK_M x HEAD_STRIDE][K: BLOCK_N x HEAD_STRIDE][V: BLOCK_N x HEAD_STRIDE]
+    // A template cannot redeclare `extern __shared__` per instantiation, so the
+    // tiles are carved out of one raw byte array.
+    extern __shared__ __align__(16) unsigned char flash_fwd_smem_raw[];
+    T* Q_smem_flat = reinterpret_cast<T*>(flash_fwd_smem_raw);
+    T* K_smem_flat = Q_smem_flat + BLOCK_M * HEAD_STRIDE;
+    T* V_smem_flat = K_smem_flat + BLOCK_N * HEAD_STRIDE;
 
     const int tid = threadIdx.x;
     const int batch_head_idx = blockIdx.x;
@@ -114,18 +90,17 @@ __device__ void flash_attention_fwd_fp32_impl(
     // GQA: Map query head to KV head (multiple Q heads share one KV head)
     const int kv_head_idx = head_idx / (num_heads / num_kv_heads);
 
-    // Base pointers for this (batch, head)
-    // Q/O use num_heads, K/V use num_kv_heads
+    // Base pointers for this (batch, head). Q/O use num_heads, K/V use num_kv_heads.
     const int head_offset = batch_idx * num_heads * seq_len_q * HEAD_DIM
                            + head_idx * seq_len_q * HEAD_DIM;
     const int kv_head_offset = batch_idx * num_kv_heads * seq_len_k * HEAD_DIM
                               + kv_head_idx * seq_len_k * HEAD_DIM;
     const int lse_offset = batch_idx * num_heads * seq_len_q + head_idx * seq_len_q;
 
-    const float* Q_base = Q + head_offset;
-    const float* K_base = K + kv_head_offset;
-    const float* V_base = V + kv_head_offset;
-    float* O_base = O + head_offset;
+    const T* Q_base = Q + head_offset;
+    const T* K_base = K + kv_head_offset;
+    const T* V_base = V + kv_head_offset;
+    T* O_base = O + head_offset;
     float* L_base = L + lse_offset;
 
     // Q tile indices
@@ -140,7 +115,7 @@ __device__ void flash_attention_fwd_fp32_impl(
     for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
         const int row = i / HEAD_DIM;
         const int col = i % HEAD_DIM;
-        Q_smem(row, col) = Q_base[(q_start + row) * HEAD_DIM + col];
+        Q_smem_flat[row * HEAD_STRIDE + col] = Q_base[(q_start + row) * HEAD_DIM + col];
     }
     __syncthreads();
 
@@ -148,12 +123,12 @@ __device__ void flash_attention_fwd_fp32_impl(
     const int q_row = tid;
     const bool is_valid_thread = (q_row < q_tile_size);
 
-    // Per-thread accumulation in registers (all threads initialize, but only valid ones compute)
+    // Per-thread accumulation in FP32 registers (all threads initialize, only
+    // valid ones compute). FP32 accumulation regardless of T.
     float O_local[HEAD_DIM];
     float m_local = -INFINITY;
     float l_local = 0.0f;
 
-    // Initialize output accumulator to zero
     #pragma unroll
     for (int d = 0; d < HEAD_DIM; ++d) {
         O_local[d] = 0.0f;
@@ -167,16 +142,13 @@ __device__ void flash_attention_fwd_fp32_impl(
         const int k_end = min(k_start + BLOCK_N, seq_len_k);
         const int k_tile_size = k_end - k_start;
 
-        // Sliding window optimization: skip entire K blocks outside window
-        // For any Q position in this tile, the earliest K position we need is:
-        //   min_k_needed = max(0, (key_offset + q_start) - window_size + 1)
-        // The latest K position we need is:
-        //   max_k_needed = q_end - 1 (for causal) or seq_len_k - 1
-        // Skip this K block if it's entirely outside the window for ALL Q positions in this tile
+        // Sliding window optimization: skip entire K blocks outside the window.
+        // Skip this K block only if it is outside the window for EVERY query in
+        // the tile. That is governed by the FIRST query row, whose window reaches
+        // furthest back - not the last, which reaches back the least. The
+        // condition is block-uniform, so the `continue` past the `__syncthreads()`
+        // below is taken by every thread of the block.
         if (window_size > 0) {
-            // Skip this K block only if it is outside the window for EVERY query
-            // in the tile. That is governed by the FIRST query row, whose window
-            // reaches furthest back - not the last, which reaches back the least.
             int first_q_pos = key_offset + q_start;
             int min_k_needed = max(0, first_q_pos - window_size + 1);
             if (k_end - 1 < min_k_needed) {
@@ -188,8 +160,8 @@ __device__ void flash_attention_fwd_fp32_impl(
         for (int i = tid; i < k_tile_size * HEAD_DIM; i += blockDim.x) {
             const int row = i / HEAD_DIM;
             const int col = i % HEAD_DIM;
-            K_smem(row, col) = K_base[(k_start + row) * HEAD_DIM + col];
-            V_smem(row, col) = V_base[(k_start + row) * HEAD_DIM + col];
+            K_smem_flat[row * HEAD_STRIDE + col] = K_base[(k_start + row) * HEAD_DIM + col];
+            V_smem_flat[row * HEAD_STRIDE + col] = V_base[(k_start + row) * HEAD_DIM + col];
         }
         __syncthreads();
 
@@ -207,11 +179,12 @@ __device__ void flash_attention_fwd_fp32_impl(
                 // Sliding window: skip if k_pos < q_pos - window_size + 1
                 if (window_size > 0 && k_pos < q_pos - window_size + 1) continue;
 
-                // Compute Q @ K^T score
+                // Compute Q @ K^T score in FP32
                 float score = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += Q_smem(q_row, d) * K_smem(j, d);
+                    score += load_dtype(Q_smem_flat, q_row * HEAD_STRIDE + d) *
+                             load_dtype(K_smem_flat, j * HEAD_STRIDE + d);
                 }
                 score *= scale;
                 m_new = fmaxf(m_new, score);
@@ -224,6 +197,9 @@ __device__ void flash_attention_fwd_fp32_impl(
             // kernel. alpha = 1 makes such a block an exact no-op (the second pass
             // below runs zero unmasked iterations). Any unmasked position yields a
             // finite score, so m_new == -INFINITY identifies exactly that case.
+            // This must NOT become a `continue`: the update sits inside
+            // `if (is_valid_thread)` and the loop ends with a `__syncthreads()`
+            // outside it, so a per-thread divergent skip would break the barrier.
             const float alpha = (m_new == -INFINITY) ? 1.0f : __expf(m_local - m_new);
 
             // Rescale previous output in registers
@@ -247,7 +223,8 @@ __device__ void flash_attention_fwd_fp32_impl(
                 float score = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += Q_smem(q_row, d) * K_smem(j, d);
+                    score += load_dtype(Q_smem_flat, q_row * HEAD_STRIDE + d) *
+                             load_dtype(K_smem_flat, j * HEAD_STRIDE + d);
                 }
                 score *= scale;
                 const float exp_score = __expf(score - m_new);
@@ -256,7 +233,7 @@ __device__ void flash_attention_fwd_fp32_impl(
                 // Accumulate weighted V values in registers
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d) {
-                    O_local[d] += exp_score * V_smem(j, d);
+                    O_local[d] += exp_score * load_dtype(V_smem_flat, j * HEAD_STRIDE + d);
                 }
             }
 
@@ -272,699 +249,87 @@ __device__ void flash_attention_fwd_fp32_impl(
 
         #pragma unroll
         for (int d = 0; d < HEAD_DIM; ++d) {
-            O_base[(q_start + q_row) * HEAD_DIM + d] = O_local[d] * inv_l;
+            store_dtype(O_base, (q_start + q_row) * HEAD_DIM + d, O_local[d] * inv_l);
         }
 
         // Write logsumexp (for backward pass)
         L_base[q_start + q_row] = m_local + __logf(l_local);
     }
-
-    #undef Q_smem
-    #undef K_smem
-    #undef V_smem
 }
 
 // ============================================================================
-// Kernel Instantiations - FP32 with GQA and Sliding Window support
+// Kernel Entry Points
+//
+// Two symbol families per dtype, over head_dim in {32, 64, 96, 128, 192, 256}:
+//   flash_attention_fwd_{head_dim}_{dtype}          large block config
+//   flash_attention_fwd_{head_dim}_sm_{dtype}       small block config
+//
+// The `_sm` entries use the same template with smaller BLOCK_M/BLOCK_N so the
+// layout [Q: BLOCK_M x HEAD_STRIDE][K|V: BLOCK_N x HEAD_STRIDE] fits GPUs with a
+// limited opt-in shared-memory budget. `block_config` in
+// `src/ops/cuda/attention/flash_utils.rs` picks the symbol and computes the
+// allocation - keep the block sizes below in sync with `block_config_large` and
+// `block_config_small` there. A small config exists only for head_dim
+// 96/128/192/256, matching `block_config_small`; 32 and 64 have none, and the
+// launcher never builds an `_sm` name for them.
+//
+// Nothing here is compile-time gated on the GPU architecture: this translation
+// unit builds at sm_75, and the BF16 entries must exist there. All BF16 work
+// goes through `load_dtype` / `store_dtype`, whose conversions have a valid
+// path at every architecture.
 // ============================================================================
 
-// head_dim=64, BLOCK_M=128, BLOCK_N=128 (PyTorch standard)
-extern "C" __global__ void flash_attention_fwd_64_fp32(
-    const float* Q, const float* K, const float* V,
-    float* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp32_impl<64, 128, 128>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-// head_dim=128, BLOCK_M=128, BLOCK_N=64 (PyTorch standard for sm80)
-extern "C" __global__ void flash_attention_fwd_128_fp32(
-    const float* Q, const float* K, const float* V,
-    float* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp32_impl<128, 128, 64>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-// head_dim=128, BLOCK_M=64, BLOCK_N=32 (small shared memory variant for <=100KB GPUs)
-// smem: (64*129 + 2*32*129)*4 = 66048 bytes = 64.5KB
-extern "C" __global__ void flash_attention_fwd_128_sm_fp32(
-    const float* Q, const float* K, const float* V,
-    float* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp32_impl<128, 64, 32>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-// head_dim=96, BLOCK_M=32, BLOCK_N=32 (small shared memory variant for <=100KB GPUs)
-// smem: (32*97 + 2*32*97)*4 = 37248 bytes = 36.4KB
-extern "C" __global__ void flash_attention_fwd_96_sm_fp32(
-    const float* Q, const float* K, const float* V,
-    float* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp32_impl<96, 32, 32>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-// head_dim=192, BLOCK_M=32, BLOCK_N=16 (small shared memory variant for <=100KB GPUs)
-// smem: (32*193 + 2*16*193)*4 = 49408 bytes = 48.25KB
-extern "C" __global__ void flash_attention_fwd_192_sm_fp32(
-    const float* Q, const float* K, const float* V,
-    float* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp32_impl<192, 32, 16>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-// head_dim=256, BLOCK_M=16, BLOCK_N=16 (small shared memory variant for <=100KB GPUs)
-// smem: (16*257 + 2*16*257)*4 = 49344 bytes = 48.2KB
-extern "C" __global__ void flash_attention_fwd_256_sm_fp32(
-    const float* Q, const float* K, const float* V,
-    float* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp32_impl<256, 16, 16>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-// head_dim=32, BLOCK_M=128, BLOCK_N=128
-extern "C" __global__ void flash_attention_fwd_32_fp32(
-    const float* Q, const float* K, const float* V,
-    float* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp32_impl<32, 128, 128>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-// head_dim=96, BLOCK_M=64, BLOCK_N=128 (nvcc segfaults with 64x256)
-extern "C" __global__ void flash_attention_fwd_96_fp32(
-    const float* Q, const float* K, const float* V,
-    float* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp32_impl<96, 64, 128>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-// head_dim=192, BLOCK_M=64, BLOCK_N=64
-extern "C" __global__ void flash_attention_fwd_192_fp32(
-    const float* Q, const float* K, const float* V,
-    float* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp32_impl<192, 64, 64>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-// head_dim=256, BLOCK_M=64, BLOCK_N=64
-extern "C" __global__ void flash_attention_fwd_256_fp32(
-    const float* Q, const float* K, const float* V,
-    float* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp32_impl<256, 64, 64>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-// ============================================================================
-// FP16 Kernels - Mixed Precision with FP32 Accumulation
-// ============================================================================
-
-// Flash Attention forward pass - FP16 input/output, FP32 accumulation with GQA support
-// Numerical stability: All accumulation (m, l, O_local) done in FP32
-// Native sliding window: window_size parameter restricts attention to local context
-template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
-__device__ void flash_attention_fwd_fp16_impl(
-    const __half* __restrict__ Q,
-    const __half* __restrict__ K,
-    const __half* __restrict__ V,
-    __half* __restrict__ O,
-    float* __restrict__ L,
-    const int batch_size,
-    const int num_heads,
-    const int num_kv_heads,  // GQA: can be less than num_heads
-    const int seq_len_q,
-    const int seq_len_k,
-    const float scale,
-    const int causal,
-    const int window_size    // Sliding window: 0 or -1 = full attention, >0 = local window
-) {
-    // Padded strides
-    constexpr int HEAD_STRIDE = SMEM_STRIDE(HEAD_DIM, 1);
-
-    // Use dynamic shared memory with padded strides
-    extern __shared__ __half smem_fp16[];
-
-    // Partition shared memory with padding
-    __half* Q_smem_flat = smem_fp16;
-    __half* K_smem_flat = smem_fp16 + BLOCK_M * HEAD_STRIDE;
-    __half* V_smem_flat = smem_fp16 + BLOCK_M * HEAD_STRIDE + BLOCK_N * HEAD_STRIDE;
-
-    #define Q_smem(i, j) Q_smem_flat[(i) * HEAD_STRIDE + (j)]
-    #define K_smem(i, j) K_smem_flat[(i) * HEAD_STRIDE + (j)]
-    #define V_smem(i, j) V_smem_flat[(i) * HEAD_STRIDE + (j)]
-
-    const int tid = threadIdx.x;
-    const int batch_head_idx = blockIdx.x;
-    const int q_block_idx = blockIdx.y;
-
-    const int batch_idx = batch_head_idx / num_heads;
-    const int head_idx = batch_head_idx % num_heads;
-
-    // GQA: Map query head to KV head (multiple Q heads share one KV head)
-    const int kv_head_idx = head_idx / (num_heads / num_kv_heads);
-
-    // Q/O use num_heads, K/V use num_kv_heads
-    const int head_offset = batch_idx * num_heads * seq_len_q * HEAD_DIM
-                           + head_idx * seq_len_q * HEAD_DIM;
-    const int kv_head_offset = batch_idx * num_kv_heads * seq_len_k * HEAD_DIM
-                              + kv_head_idx * seq_len_k * HEAD_DIM;
-    const int lse_offset = batch_idx * num_heads * seq_len_q + head_idx * seq_len_q;
-
-    const __half* Q_base = Q + head_offset;
-    const __half* K_base = K + kv_head_offset;
-    const __half* V_base = V + kv_head_offset;
-    __half* O_base = O + head_offset;
-    float* L_base = L + lse_offset;
-
-    const int q_start = q_block_idx * BLOCK_M;
-    const int q_end = min(q_start + BLOCK_M, seq_len_q);
-    const int q_tile_size = q_end - q_start;
-
-    // Absolute position of query row 0 (see the header note); 0 on prefill.
-    const int key_offset = max(0, seq_len_k - seq_len_q);
-
-    // Load Q tile into shared memory (all threads cooperate)
-    for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
-        const int row = i / HEAD_DIM;
-        const int col = i % HEAD_DIM;
-        Q_smem(row, col) = Q_base[(q_start + row) * HEAD_DIM + col];
-    }
-    __syncthreads();
-
-    const int q_row = tid;
-    const bool is_valid_thread = (q_row < q_tile_size);
-
-    // Per-thread accumulation in FP32 registers (KEY: mixed precision)
-    float O_local[HEAD_DIM];
-    float m_local = -INFINITY;
-    float l_local = 0.0f;
-
-    #pragma unroll
-    for (int d = 0; d < HEAD_DIM; ++d) {
-        O_local[d] = 0.0f;
+#define FLASH_FWD_ENTRY(T, HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX)                 \
+    extern "C" __global__ void flash_attention_fwd_##HEAD_DIM##_##SUFFIX(      \
+        const T* Q, const T* K, const T* V,                                    \
+        T* O, float* L,                                                        \
+        const int batch_size, const int num_heads, const int num_kv_heads,     \
+        const int seq_len_q, const int seq_len_k,                              \
+        const float scale, const int causal, const int window_size             \
+    ) {                                                                        \
+        flash_attention_fwd_impl<T, HEAD_DIM, BLOCK_M, BLOCK_N>(               \
+            Q, K, V, O, L, batch_size, num_heads, num_kv_heads,                \
+            seq_len_q, seq_len_k, scale, causal, window_size                   \
+        );                                                                     \
     }
 
-    const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
-
-    for (int k_block = 0; k_block < num_k_blocks; ++k_block) {
-        const int k_start = k_block * BLOCK_N;
-        const int k_end = min(k_start + BLOCK_N, seq_len_k);
-        const int k_tile_size = k_end - k_start;
-
-        // Sliding window optimization: skip entire K blocks outside window
-        if (window_size > 0) {
-            // Skip this K block only if it is outside the window for EVERY query
-            // in the tile. That is governed by the FIRST query row, whose window
-            // reaches furthest back - not the last, which reaches back the least.
-            int first_q_pos = key_offset + q_start;
-            int min_k_needed = max(0, first_q_pos - window_size + 1);
-            if (k_end - 1 < min_k_needed) {
-                continue;  // Skip this K block entirely - outside window for all Q
-            }
-        }
-
-        // Load K and V tiles (ALL threads cooperate - critical!)
-        for (int i = tid; i < k_tile_size * HEAD_DIM; i += blockDim.x) {
-            const int row = i / HEAD_DIM;
-            const int col = i % HEAD_DIM;
-            K_smem(row, col) = K_base[(k_start + row) * HEAD_DIM + col];
-            V_smem(row, col) = V_base[(k_start + row) * HEAD_DIM + col];
-        }
-        __syncthreads();
-
-        // Only valid threads compute attention
-        if (is_valid_thread) {
-            // First pass: compute max (FP32 accumulation)
-            float m_new = m_local;
-            for (int j = 0; j < k_tile_size; ++j) {
-                const int q_pos = key_offset + q_start + q_row;
-                const int k_pos = k_start + j;
-
-                // Causal masking: skip if q_pos < k_pos
-                if (causal && q_pos < k_pos) continue;
-
-                // Sliding window: skip if k_pos < q_pos - window_size + 1
-                if (window_size > 0 && k_pos < q_pos - window_size + 1) continue;
-
-                float score = 0.0f;
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += __half2float(Q_smem(q_row, d)) * __half2float(K_smem(j, d));
-                }
-                score *= scale;
-                m_new = fmaxf(m_new, score);
-            }
-
-            // Online-softmax correction. A K block kept by the block-level skip can
-            // still be fully masked for THIS query row; if it is also the row's
-            // first block, m_new == m_local == -INFINITY and __expf(-inf - -inf) is
-            // __expf(NaN) = NaN, poisoning O_local/l_local for the rest of the
-            // kernel. alpha = 1 makes such a block an exact no-op (the second pass
-            // below runs zero unmasked iterations). Any unmasked position yields a
-            // finite score, so m_new == -INFINITY identifies exactly that case.
-            const float alpha = (m_new == -INFINITY) ? 1.0f : __expf(m_local - m_new);
-
-            #pragma unroll
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                O_local[d] *= alpha;
-            }
-
-            // Second pass: accumulate weighted values (FP32 accumulation)
-            float l_new = alpha * l_local;
-            for (int j = 0; j < k_tile_size; ++j) {
-                const int q_pos = key_offset + q_start + q_row;
-                const int k_pos = k_start + j;
-
-                // Causal masking: skip if q_pos < k_pos
-                if (causal && q_pos < k_pos) continue;
-
-                // Sliding window: skip if k_pos < q_pos - window_size + 1
-                if (window_size > 0 && k_pos < q_pos - window_size + 1) continue;
-
-                float score = 0.0f;
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += __half2float(Q_smem(q_row, d)) * __half2float(K_smem(j, d));
-                }
-                score *= scale;
-                const float exp_score = __expf(score - m_new);
-                l_new += exp_score;
-
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    O_local[d] += exp_score * __half2float(V_smem(j, d));
-                }
-            }
-
-            m_local = m_new;
-            l_local = l_new;
-        }
-        __syncthreads();
-    }
-
-    // Final normalization and write (only valid threads)
-    if (is_valid_thread) {
-        const float inv_l = (l_local == 0.0f) ? 1.0f : 1.0f / l_local;
-        #pragma unroll
-        for (int d = 0; d < HEAD_DIM; ++d) {
-            O_base[(q_start + q_row) * HEAD_DIM + d] = __float2half(O_local[d] * inv_l);
-        }
-
-        L_base[q_start + q_row] = m_local + __logf(l_local);
-    }
-
-    #undef Q_smem
-    #undef K_smem
-    #undef V_smem
-}
-
-// Kernel instantiations for FP16 with GQA and Sliding Window support
-extern "C" __global__ void flash_attention_fwd_64_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    __half* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp16_impl<64, 128, 128>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-extern "C" __global__ void flash_attention_fwd_128_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    __half* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp16_impl<128, 128, 64>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-extern "C" __global__ void flash_attention_fwd_32_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    __half* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp16_impl<32, 128, 128>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-extern "C" __global__ void flash_attention_fwd_96_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    __half* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp16_impl<96, 64, 128>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-extern "C" __global__ void flash_attention_fwd_192_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    __half* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp16_impl<192, 64, 64>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-extern "C" __global__ void flash_attention_fwd_256_fp16(
-    const __half* Q, const __half* K, const __half* V,
-    __half* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_fp16_impl<256, 64, 64>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-// ============================================================================
-// BF16 Kernels - For Ampere+ GPUs with FP32 Accumulation
-// ============================================================================
-
-// Flash Attention forward pass - BF16 input/output, FP32 accumulation with GQA support
-// Native sliding window: window_size parameter restricts attention to local context
-template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
-__device__ void flash_attention_fwd_bf16_impl(
-    const __nv_bfloat16* __restrict__ Q,
-    const __nv_bfloat16* __restrict__ K,
-    const __nv_bfloat16* __restrict__ V,
-    __nv_bfloat16* __restrict__ O,
-    float* __restrict__ L,
-    const int batch_size,
-    const int num_heads,
-    const int num_kv_heads,  // GQA: can be less than num_heads
-    const int seq_len_q,
-    const int seq_len_k,
-    const float scale,
-    const int causal,
-    const int window_size    // Sliding window: 0 or -1 = full attention, >0 = local window
-) {
-    // Padded strides
-    constexpr int HEAD_STRIDE = SMEM_STRIDE(HEAD_DIM, 1);
-
-    extern __shared__ __nv_bfloat16 smem_bf16[];
-
-    __nv_bfloat16* Q_smem_flat = smem_bf16;
-    __nv_bfloat16* K_smem_flat = smem_bf16 + BLOCK_M * HEAD_STRIDE;
-    __nv_bfloat16* V_smem_flat = smem_bf16 + BLOCK_M * HEAD_STRIDE + BLOCK_N * HEAD_STRIDE;
-
-    #define Q_smem(i, j) Q_smem_flat[(i) * HEAD_STRIDE + (j)]
-    #define K_smem(i, j) K_smem_flat[(i) * HEAD_STRIDE + (j)]
-    #define V_smem(i, j) V_smem_flat[(i) * HEAD_STRIDE + (j)]
-
-    const int tid = threadIdx.x;
-    const int batch_head_idx = blockIdx.x;
-    const int q_block_idx = blockIdx.y;
-
-    const int batch_idx = batch_head_idx / num_heads;
-    const int head_idx = batch_head_idx % num_heads;
-
-    // GQA: Map query head to KV head (multiple Q heads share one KV head)
-    const int kv_head_idx = head_idx / (num_heads / num_kv_heads);
-
-    // Q/O use num_heads, K/V use num_kv_heads
-    const int head_offset = batch_idx * num_heads * seq_len_q * HEAD_DIM
-                           + head_idx * seq_len_q * HEAD_DIM;
-    const int kv_head_offset = batch_idx * num_kv_heads * seq_len_k * HEAD_DIM
-                              + kv_head_idx * seq_len_k * HEAD_DIM;
-    const int lse_offset = batch_idx * num_heads * seq_len_q + head_idx * seq_len_q;
-
-    const __nv_bfloat16* Q_base = Q + head_offset;
-    const __nv_bfloat16* K_base = K + kv_head_offset;
-    const __nv_bfloat16* V_base = V + kv_head_offset;
-    __nv_bfloat16* O_base = O + head_offset;
-    float* L_base = L + lse_offset;
-
-    const int q_start = q_block_idx * BLOCK_M;
-    const int q_end = min(q_start + BLOCK_M, seq_len_q);
-    const int q_tile_size = q_end - q_start;
-
-    // Absolute position of query row 0 (see the header note); 0 on prefill.
-    const int key_offset = max(0, seq_len_k - seq_len_q);
-
-    // Load Q tile into shared memory (all threads cooperate)
-    for (int i = tid; i < q_tile_size * HEAD_DIM; i += blockDim.x) {
-        const int row = i / HEAD_DIM;
-        const int col = i % HEAD_DIM;
-        Q_smem(row, col) = Q_base[(q_start + row) * HEAD_DIM + col];
-    }
-    __syncthreads();
-
-    const int q_row = tid;
-    const bool is_valid_thread = (q_row < q_tile_size);
-
-    // FP32 accumulation for numerical stability
-    float O_local[HEAD_DIM];
-    float m_local = -INFINITY;
-    float l_local = 0.0f;
-
-    #pragma unroll
-    for (int d = 0; d < HEAD_DIM; ++d) {
-        O_local[d] = 0.0f;
-    }
-
-    const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
-
-    for (int k_block = 0; k_block < num_k_blocks; ++k_block) {
-        const int k_start = k_block * BLOCK_N;
-        const int k_end = min(k_start + BLOCK_N, seq_len_k);
-        const int k_tile_size = k_end - k_start;
-
-        // Sliding window optimization: skip entire K blocks outside window
-        if (window_size > 0) {
-            // Skip this K block only if it is outside the window for EVERY query
-            // in the tile. That is governed by the FIRST query row, whose window
-            // reaches furthest back - not the last, which reaches back the least.
-            int first_q_pos = key_offset + q_start;
-            int min_k_needed = max(0, first_q_pos - window_size + 1);
-            if (k_end - 1 < min_k_needed) {
-                continue;  // Skip this K block entirely - outside window for all Q
-            }
-        }
-
-        // Load K and V tiles (ALL threads cooperate - critical!)
-        for (int i = tid; i < k_tile_size * HEAD_DIM; i += blockDim.x) {
-            const int row = i / HEAD_DIM;
-            const int col = i % HEAD_DIM;
-            K_smem(row, col) = K_base[(k_start + row) * HEAD_DIM + col];
-            V_smem(row, col) = V_base[(k_start + row) * HEAD_DIM + col];
-        }
-        __syncthreads();
-
-        // Only valid threads compute attention
-        if (is_valid_thread) {
-            float m_new = m_local;
-            for (int j = 0; j < k_tile_size; ++j) {
-                const int q_pos = key_offset + q_start + q_row;
-                const int k_pos = k_start + j;
-
-                // Causal masking: skip if q_pos < k_pos
-                if (causal && q_pos < k_pos) continue;
-
-                // Sliding window: skip if k_pos < q_pos - window_size + 1
-                if (window_size > 0 && k_pos < q_pos - window_size + 1) continue;
-
-                float score = 0.0f;
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += __bfloat162float(Q_smem(q_row, d)) * __bfloat162float(K_smem(j, d));
-                }
-                score *= scale;
-                m_new = fmaxf(m_new, score);
-            }
-
-            // Online-softmax correction. A K block kept by the block-level skip can
-            // still be fully masked for THIS query row; if it is also the row's
-            // first block, m_new == m_local == -INFINITY and __expf(-inf - -inf) is
-            // __expf(NaN) = NaN, poisoning O_local/l_local for the rest of the
-            // kernel. alpha = 1 makes such a block an exact no-op (the second pass
-            // below runs zero unmasked iterations). Any unmasked position yields a
-            // finite score, so m_new == -INFINITY identifies exactly that case.
-            const float alpha = (m_new == -INFINITY) ? 1.0f : __expf(m_local - m_new);
-
-            #pragma unroll
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                O_local[d] *= alpha;
-            }
-
-            float l_new = alpha * l_local;
-            for (int j = 0; j < k_tile_size; ++j) {
-                const int q_pos = key_offset + q_start + q_row;
-                const int k_pos = k_start + j;
-
-                // Causal masking: skip if q_pos < k_pos
-                if (causal && q_pos < k_pos) continue;
-
-                // Sliding window: skip if k_pos < q_pos - window_size + 1
-                if (window_size > 0 && k_pos < q_pos - window_size + 1) continue;
-
-                float score = 0.0f;
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    score += __bfloat162float(Q_smem(q_row, d)) * __bfloat162float(K_smem(j, d));
-                }
-                score *= scale;
-                const float exp_score = __expf(score - m_new);
-                l_new += exp_score;
-
-                #pragma unroll
-                for (int d = 0; d < HEAD_DIM; ++d) {
-                    O_local[d] += exp_score * __bfloat162float(V_smem(j, d));
-                }
-            }
-
-            m_local = m_new;
-            l_local = l_new;
-        }
-        __syncthreads();
-    }
-
-    // Final normalization and write (only valid threads)
-    if (is_valid_thread) {
-        const float inv_l = (l_local == 0.0f) ? 1.0f : 1.0f / l_local;
-        #pragma unroll
-        for (int d = 0; d < HEAD_DIM; ++d) {
-            O_base[(q_start + q_row) * HEAD_DIM + d] = __float2bfloat16(O_local[d] * inv_l);
-        }
-
-        L_base[q_start + q_row] = m_local + __logf(l_local);
-    }
-
-    #undef Q_smem
-    #undef K_smem
-    #undef V_smem
-}
-
-// Kernel instantiations for BF16 with GQA and Sliding Window support
-extern "C" __global__ void flash_attention_fwd_64_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    __nv_bfloat16* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_bf16_impl<64, 128, 128>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-extern "C" __global__ void flash_attention_fwd_128_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    __nv_bfloat16* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_bf16_impl<128, 128, 64>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-extern "C" __global__ void flash_attention_fwd_32_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    __nv_bfloat16* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_bf16_impl<32, 128, 128>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-extern "C" __global__ void flash_attention_fwd_96_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    __nv_bfloat16* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_bf16_impl<96, 64, 128>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-extern "C" __global__ void flash_attention_fwd_192_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    __nv_bfloat16* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_bf16_impl<192, 64, 64>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
-
-extern "C" __global__ void flash_attention_fwd_256_bf16(
-    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V,
-    __nv_bfloat16* O, float* L,
-    const int batch_size, const int num_heads, const int num_kv_heads,
-    const int seq_len_q, const int seq_len_k,
-    const float scale, const int causal, const int window_size
-) {
-    flash_attention_fwd_bf16_impl<256, 64, 64>(
-        Q, K, V, O, L, batch_size, num_heads, num_kv_heads, seq_len_q, seq_len_k, scale, causal, window_size
-    );
-}
+// --- FP32 ---
+FLASH_FWD_ENTRY(float, 32, 128, 128, fp32)
+FLASH_FWD_ENTRY(float, 64, 128, 128, fp32)
+FLASH_FWD_ENTRY(float, 96, 64, 128, fp32)
+FLASH_FWD_ENTRY(float, 128, 128, 64, fp32)
+FLASH_FWD_ENTRY(float, 192, 64, 64, fp32)
+FLASH_FWD_ENTRY(float, 256, 64, 64, fp32)
+
+FLASH_FWD_ENTRY(float, 96, 32, 32, sm_fp32)
+FLASH_FWD_ENTRY(float, 128, 64, 32, sm_fp32)
+FLASH_FWD_ENTRY(float, 192, 32, 16, sm_fp32)
+FLASH_FWD_ENTRY(float, 256, 16, 16, sm_fp32)
+
+// --- FP16 (FP16 I/O, FP32 accumulation) ---
+FLASH_FWD_ENTRY(__half, 32, 128, 128, fp16)
+FLASH_FWD_ENTRY(__half, 64, 128, 128, fp16)
+FLASH_FWD_ENTRY(__half, 96, 64, 128, fp16)
+FLASH_FWD_ENTRY(__half, 128, 128, 64, fp16)
+FLASH_FWD_ENTRY(__half, 192, 64, 64, fp16)
+FLASH_FWD_ENTRY(__half, 256, 64, 64, fp16)
+
+FLASH_FWD_ENTRY(__half, 96, 32, 32, sm_fp16)
+FLASH_FWD_ENTRY(__half, 128, 64, 32, sm_fp16)
+FLASH_FWD_ENTRY(__half, 192, 32, 16, sm_fp16)
+FLASH_FWD_ENTRY(__half, 256, 16, 16, sm_fp16)
+
+// --- BF16 (BF16 I/O, FP32 accumulation) ---
+FLASH_FWD_ENTRY(__nv_bfloat16, 32, 128, 128, bf16)
+FLASH_FWD_ENTRY(__nv_bfloat16, 64, 128, 128, bf16)
+FLASH_FWD_ENTRY(__nv_bfloat16, 96, 64, 128, bf16)
+FLASH_FWD_ENTRY(__nv_bfloat16, 128, 128, 64, bf16)
+FLASH_FWD_ENTRY(__nv_bfloat16, 192, 64, 64, bf16)
+FLASH_FWD_ENTRY(__nv_bfloat16, 256, 64, 64, bf16)
+
+FLASH_FWD_ENTRY(__nv_bfloat16, 96, 32, 32, sm_bf16)
+FLASH_FWD_ENTRY(__nv_bfloat16, 128, 64, 32, sm_bf16)
+FLASH_FWD_ENTRY(__nv_bfloat16, 192, 32, 16, sm_bf16)
+FLASH_FWD_ENTRY(__nv_bfloat16, 256, 16, 16, sm_bf16)
+
+#undef FLASH_FWD_ENTRY

@@ -23,6 +23,13 @@
 #define BLOCK_M 128  // Number of Q rows per thread block
 #define BLOCK_N 128  // Number of K/V columns (KV pairs) per iteration
 
+// Shared memory layout, identical in all three kernels below:
+//   [Q: BLOCK_M x head_dim_k][K: BLOCK_N x head_dim_k][V: BLOCK_N x head_dim_v]
+// No +1 bank-conflict padding, and every tile is staged as `float` even for the
+// FP16/BF16 kernels, which convert on load. The dynamic shared memory the host
+// requests must therefore use sizeof(float) per element regardless of the input
+// dtype -- see `sdpa_smem_size` in src/ops/cuda/attention/mla.rs.
+
 // ============================================================================
 // SDPA Forward - FP32
 // ============================================================================

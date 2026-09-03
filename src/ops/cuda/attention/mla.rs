@@ -3,6 +3,7 @@
 //! Multi-Head Latent Attention (MLA) scaled dot-product attention.
 //! Unlike standard attention, K and V can have different last dimensions.
 
+use super::flash_utils::{device_max_smem, set_smem_attribute};
 use crate::error::{Error, Result};
 use crate::ops::cuda::kernels::{self, SDPA_MODULE};
 use crate::ops::traits::MlaOps;
@@ -12,6 +13,15 @@ use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
+
+/// Q rows per thread block. Must stay in sync with `BLOCK_M` in `sdpa.cu`;
+/// it is also the block's thread count.
+const SDPA_BLOCK_M: usize = 128;
+/// K/V columns staged per iteration. Must stay in sync with `BLOCK_N` in `sdpa.cu`.
+const SDPA_BLOCK_N: usize = 128;
+/// Length of the per-thread `float O_local[256]` accumulator in `sdpa.cu`.
+/// `head_dim_v` indexes it directly, so a larger value corrupts the stack.
+const SDPA_MAX_HEAD_DIM_V: usize = 256;
 
 impl MlaOps<CudaRuntime> for CudaClient {
     fn scaled_dot_product_attention(
@@ -82,6 +92,18 @@ impl MlaOps<CudaRuntime> for CudaClient {
             });
         }
 
+        // The kernel accumulates the output row in a fixed-length per-thread
+        // register array, indexed by `head_dim_v` with no bounds check.
+        if head_dim_v > SDPA_MAX_HEAD_DIM_V {
+            return Err(Error::InvalidArgument {
+                arg: "head_dim",
+                reason: format!(
+                    "V head_dim must be at most {}: v={}",
+                    SDPA_MAX_HEAD_DIM_V, head_dim_v
+                ),
+            });
+        }
+
         // Verify dtype consistency
         let dtype = q_tensor.dtype();
         if k_tensor.dtype() != dtype || v_tensor.dtype() != dtype {
@@ -118,16 +140,32 @@ impl MlaOps<CudaRuntime> for CudaClient {
         let module = kernels::get_or_load_module(self.context(), device_index, SDPA_MODULE)?;
         let func = kernels::get_kernel_function(&module, kernel_name)?;
 
-        // Configure launch
-        // Grid: (batch_size * num_heads, ceil(seq_len_q / BLOCK_M), 1)
-        // Block: (BLOCK_M, 1, 1) where BLOCK_M = 128
-        const BLOCK_M: usize = 128;
-        let grid_dim_y = seq_len_q.div_ceil(BLOCK_M) as u32;
+        // Opt in to more than the 48KB default dynamic shared memory before
+        // sizing the launch, exactly as the flash/varlen/paged launchers do.
+        let smem_size = sdpa_smem_size(head_dim_k, head_dim_v);
+        let max_smem = device_max_smem();
+        if smem_size > max_smem {
+            return Err(Error::KernelError {
+                reason: format!(
+                    "SDPA shared memory requirement ({} bytes) exceeds the device opt-in limit \
+                     ({} bytes) for head_dim_k={}, head_dim_v={}: sdpa.cu instantiates only \
+                     BLOCK_M={}, BLOCK_N={}, so there is no smaller tile to fall back to",
+                    smem_size, max_smem, head_dim_k, head_dim_v, SDPA_BLOCK_M, SDPA_BLOCK_N
+                ),
+            });
+        }
+        set_smem_attribute(&func, smem_size)?;
 
+        // Grid: (batch_size * num_heads, ceil(seq_len_q / BLOCK_M), 1)
+        // Block: (BLOCK_M, 1, 1)
         let cfg = LaunchConfig {
-            grid_dim: ((batch_size * num_heads) as u32, grid_dim_y, 1),
-            block_dim: (BLOCK_M as u32, 1, 1),
-            shared_mem_bytes: calculate_shared_mem(head_dim_k, head_dim_v, dtype)?,
+            grid_dim: (
+                (batch_size * num_heads) as u32,
+                seq_len_q.div_ceil(SDPA_BLOCK_M) as u32,
+                1,
+            ),
+            block_dim: (SDPA_BLOCK_M as u32, 1, 1),
+            shared_mem_bytes: smem_size as u32,
         };
 
         // Extract pointers
@@ -172,28 +210,17 @@ impl MlaOps<CudaRuntime> for CudaClient {
     }
 }
 
-/// Calculate shared memory size for SDPA kernel
-fn calculate_shared_mem(head_dim_k: usize, head_dim_v: usize, dtype: DType) -> Result<u32> {
-    const BLOCK_M: usize = 128;
-    const BLOCK_N: usize = 128;
-
-    let dtype_size = dtype.size_in_bytes();
-
-    // Shared memory layout:
-    // Q_smem: BLOCK_M * head_dim_k
-    // K_smem: BLOCK_N * head_dim_k
-    // V_smem: BLOCK_N * head_dim_v
-    let smem_size =
-        (BLOCK_M * head_dim_k + BLOCK_N * head_dim_k + BLOCK_N * head_dim_v) * dtype_size;
-
-    if smem_size > 98304 {
-        return Err(Error::KernelError {
-            reason: format!(
-                "SDPA shared memory requirement ({} bytes) exceeds GPU limit (96 KB)",
-                smem_size
-            ),
-        });
-    }
-
-    Ok(smem_size as u32)
+/// Shared memory bytes the SDPA kernel needs.
+///
+/// Layout in `sdpa.cu` (`sdpa_f32` / `sdpa_f16` / `sdpa_bf16`):
+/// `[Q: BLOCK_M x head_dim_k][K: BLOCK_N x head_dim_k][V: BLOCK_N x head_dim_v]`,
+/// with NO `+1` bank-conflict padding — unlike the flash forward layout in
+/// `compute_smem`.
+///
+/// All three kernels declare the tiles as `float*` and convert F16/BF16 inputs
+/// to `float` on load, so the element size is always `f32` and NOT the input
+/// dtype.
+fn sdpa_smem_size(head_dim_k: usize, head_dim_v: usize) -> usize {
+    (SDPA_BLOCK_M * head_dim_k + SDPA_BLOCK_N * head_dim_k + SDPA_BLOCK_N * head_dim_v)
+        * size_of::<f32>()
 }

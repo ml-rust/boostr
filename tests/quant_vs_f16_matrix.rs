@@ -1,12 +1,15 @@
 //! Ground-truth matrix: every quantization of ONE model vs its f16 build.
 //!
-//! `#[ignore]` by default — needs a directory holding several GGUF builds of
-//! the same model, one of which is f16 (or f32).
+//! Needs a directory holding several GGUF builds of the same model, one of
+//! which is f16 or f32. Without one the test skips loudly and reports nothing.
 //!
 //! ```bash
 //! BOOSTR_QUANT_MATRIX_DIR=/path/to/models BOOSTR_QUANT_MATRIX_STEM=nomic-embed-text-v1.5 \
-//!   cargo nextest run -p boostr --test quant_vs_f16_matrix --no-capture --run-ignored all
+//!   cargo nextest run -p boostr --test quant_vs_f16_matrix --no-capture
 //! ```
+//!
+//! `BOOSTR_MODELS_DIR` serves as the fallback when the specific variable is
+//! unset. `BOOSTR_QUANT_MATRIX_STEM` defaults to `nomic-embed-text-v1.5`.
 //!
 //! # Why this exists
 //!
@@ -81,8 +84,11 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     dot / (na * nb)
 }
 
+/// Skips loudly when no model directory is configured, in the style of the
+/// CUDA-gated tests. `#[ignore]` would hide it from every default run instead,
+/// which for a layout gate means it reports nothing on the machines that DO
+/// have the models.
 #[test]
-#[ignore]
 fn every_quantization_matches_the_f16_reference() {
     let Some(dir) = model_fixture("BOOSTR_QUANT_MATRIX_DIR", "") else {
         common::skip_notice("quant matrix models dir", "BOOSTR_QUANT_MATRIX_DIR");

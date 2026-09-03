@@ -1,0 +1,20 @@
+# Local build overrides. Copy to `.cargo/config.toml`, which is gitignored.
+#
+# boostr depends on sibling crates by path. Without this patch cargo resolves
+# them from crates.io and the build fails on APIs the published versions lack.
+[patch.crates-io]
+numr = { path = "../numr" }
+splintr = { path = "../splintr" }
+regexr = { path = "../regexr" }
+nexar = { path = "../nexar/nexar" }
+
+# Model fixtures live outside the repo. Point this at your own checkpoint
+# directory. Tests that need a real model skip loudly when it is unset, so a
+# run without it reports success while checking nothing.
+#
+# `tests/quant_vs_f16_matrix.rs` wants several GGUF builds of one model, one of
+# them f16 or f32. It compares every quantization against the f16 tensor and
+# catches a block-layout error, which otherwise leaves shape, block count and
+# RMS all correct while the values are wrong.
+[env]
+BOOSTR_MODELS_DIR = "/path/to/models"

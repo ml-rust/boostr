@@ -20,7 +20,7 @@ use super::super::kernels::{
     GEMV_IQ2_XXS_MODULE, GEMV_IQ3_S_MODULE, GEMV_IQ3_XXS_MODULE, GEMV_IQ4_NL_MODULE,
     GEMV_IQ4_XS_MODULE, GEMV_Q2_K_MODULE, GEMV_Q3_K_MODULE, GEMV_Q4_1_MODULE, GEMV_Q5_0_MODULE,
     GEMV_Q5_1_MODULE, GEMV_Q5_K_MODULE, GEMV_Q8_1_MODULE, GEMV_Q8_K_MODULE, GEMV_TQ1_0_MODULE,
-    GEMV_TQ2_0_MODULE, QUANT_GEMV_MODULE, QUANT_MATMUL_MODULE,
+    GEMV_TQ2_0_MODULE, QUANT_GEMV_MODULE, QUANT_MATMUL_MODULE, QUANT_MMQ_MMA_MODULE,
 };
 use super::helpers::quantize_activation_q8_1;
 
@@ -226,13 +226,30 @@ pub(super) fn dispatch_matmul(
     // tile across a 128-row batch tile instead of re-reading it per output row.
     // The K-quants additionally need K to be a whole number of 256-element
     // super-blocks, which their own layout already guarantees.
+    // Q8_0 needs sm_80 for `quant_mmq_q8_0_q8_1_mma` (module
+    // `QUANT_MMQ_MMA_MODULE`). Below sm_80 it falls back to the dp4a kernel
+    // `quant_mmq_q8_0_q8_1` (module `QUANT_GEMV_MODULE`). Both produce
+    // bit-identical output.
     let mmq = match format {
-        QuantFormat::Q8_0 if k.is_multiple_of(32) => Some("quant_mmq_q8_0_q8_1"),
-        QuantFormat::Q4K if k.is_multiple_of(256) => Some("quant_mmq_q4_k_q8_1"),
-        QuantFormat::Q6K if k.is_multiple_of(256) => Some("quant_mmq_q6_k_q8_1"),
+        QuantFormat::Q8_0 if k.is_multiple_of(32) => {
+            let caps = numr::runtime::cuda::CudaDevice::new(device_index)
+                .profile()
+                .caps;
+            if caps.int8_mma_m16n8k32 {
+                Some(("quant_mmq_q8_0_q8_1_mma", QUANT_MMQ_MMA_MODULE))
+            } else {
+                Some(("quant_mmq_q8_0_q8_1", QUANT_GEMV_MODULE))
+            }
+        }
+        QuantFormat::Q4K if k.is_multiple_of(256) => {
+            Some(("quant_mmq_q4_k_q8_1", QUANT_GEMV_MODULE))
+        }
+        QuantFormat::Q6K if k.is_multiple_of(256) => {
+            Some(("quant_mmq_q6_k_q8_1", QUANT_GEMV_MODULE))
+        }
         _ => None,
     };
-    if let Some(mmq_kernel) = mmq {
+    if let Some((mmq_kernel, mmq_module)) = mmq {
         let q8_buf = quantize_activation_q8_1(client, act_contig, m, k)?;
         let q8_ptr = q8_buf.ptr();
         let weight_ptr = weight.storage().ptr();
@@ -241,8 +258,7 @@ pub(super) fn dispatch_matmul(
             block_dim: (256, 1, 1),
             shared_mem_bytes: 0,
         };
-        let module =
-            kernels::get_or_load_module(client.context(), device_index, QUANT_GEMV_MODULE)?;
+        let module = kernels::get_or_load_module(client.context(), device_index, mmq_module)?;
         let func = kernels::get_kernel_function(&module, mmq_kernel)?;
         unsafe {
             let mut builder = client.stream().launch_builder(&func);

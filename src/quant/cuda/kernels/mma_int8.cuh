@@ -31,36 +31,45 @@ static __device__ __forceinline__ void mma_m16n8k32_s8(
 // which arranges registers to the A operand's own layout. Reusing the D map to
 // gather A yields wrong products with no error, so the two are separate here.
 
-// Row of the 16x8 A operand held by lane `threadIdx.x` at element `l`.
+// `mma.sync` is warp-collective, so every index below is a position within the
+// WARP. llama.cpp reads `threadIdx.x` directly because its kernels launch with
+// `blockDim.x == 32`. A 256-thread block makes `threadIdx.x` span eight warps,
+// so the lane must be masked out here or warps above the first index past
+// their fragment and read another warp's data.
+static __device__ __forceinline__ int mma_lane() {
+    return threadIdx.x & 31;
+}
+
+// Row of the 16x8 A operand held by this lane at element `l`.
 // A has 4 elements per lane. `l % 2` picks the row half, `l / 2` the k half.
 static __device__ __forceinline__ int mma_a_i(const int l) {
-    return ((l % 2) * 8) + (threadIdx.x / 4);
+    return ((l % 2) * 8) + (mma_lane() / 4);
 }
 
-// Column of the 16x8 A operand, in 32-bit words, held by lane `threadIdx.x`
-// at element `l`. Word `w` covers k in `4*w .. 4*w+3`.
+// Column of the 16x8 A operand, in 32-bit words, held by this lane at element
+// `l`. Word `w` covers k in `4*w .. 4*w+3`.
 static __device__ __forceinline__ int mma_a_j(const int l) {
-    return ((l / 2) * 4) + (threadIdx.x % 4);
+    return ((l / 2) * 4) + (mma_lane() % 4);
 }
 
-// Row of the 16x8 D accumulator held by lane `threadIdx.x` at element `l`.
+// Row of the 16x8 D accumulator held by this lane at element `l`.
 static __device__ __forceinline__ int mma_d_i(const int l) {
-    return ((l / 2) * 8) + (threadIdx.x / 4);
+    return ((l / 2) * 8) + (mma_lane() / 4);
 }
 
-// Column of the 16x8 D accumulator held by lane `threadIdx.x` at element `l`.
+// Column of the 16x8 D accumulator held by this lane at element `l`.
 static __device__ __forceinline__ int mma_d_j(const int l) {
-    return ((threadIdx.x % 4) * 2) + (l % 2);
+    return ((mma_lane() % 4) * 2) + (l % 2);
 }
 
-// Row of the 8x8 B tile held by lane `threadIdx.x` at fragment element `l`.
+// Row of the 8x8 B operand held by this lane at element `l`.
 // B has 2 elements per lane.
 static __device__ __forceinline__ int mma_b_i(const int l) {
-    return threadIdx.x / 4;
+    return mma_lane() / 4;
 }
 
-// Column of the 8x8 B tile held by lane `threadIdx.x` at fragment element
+// Column of the 8x8 B operand, in 32-bit words, held by this lane at element
 // `l`.
 static __device__ __forceinline__ int mma_b_j(const int l) {
-    return (l * 4) + (threadIdx.x % 4);
+    return (l * 4) + (mma_lane() % 4);
 }

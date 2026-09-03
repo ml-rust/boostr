@@ -71,10 +71,12 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             );
         }
 
-        // Try Flash v3 on Hopper (SM 90+) for supported configs
+        // Flash v3 on SM 90+ for supported configs, when v3 is dispatchable
+        // at all. `flash_v3::dispatch_enabled` is the single decision point and
+        // is currently false — see its doc comment.
         if num_kv_heads == num_heads
             && window_size == 0
-            && flash_v3::is_hopper(self, q.device())
+            && flash_v3::dispatch_enabled(self, q.device())
             && let Some(result) = flash_v3::flash_v3_fwd(
                 self,
                 q,
@@ -162,10 +164,11 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
     )> {
         let p = validate_qkv(q, k, v, num_heads, num_kv_heads, head_dim)?;
 
-        // Try Flash v3 on Hopper (SM 90+) for supported configs
+        // Same v3 gate as the forward, through the same single decision
+        // point: a v3 forward with a v2 backward would mix causal conventions.
         if num_kv_heads == num_heads
             && window_size == 0
-            && flash_v3::is_hopper(self, q.device())
+            && flash_v3::dispatch_enabled(self, q.device())
             && let Some(result) = flash_v3::flash_v3_bwd(
                 self,
                 dout,

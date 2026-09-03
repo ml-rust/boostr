@@ -1,8 +1,13 @@
-//! Flash Attention v3 (Hopper/H100) CUDA launchers
+//! Flash Attention v3 (SM 90+) CUDA launchers
 //!
 //! Warp-specialized forward and backward kernels for SM 90+ GPUs.
-//! Called from the main flash.rs when Hopper is detected.
 //! Supports: F32, F16, BF16, FP8E4M3 with head dims 64 and 128.
+//!
+//! NOT currently dispatched to. `flash.rs` routes every shape to flash v2
+//! instead — see `dispatch_enabled` below for the reason and for what must
+//! happen to turn it back on. `tests/flash_v3_bwd_parity_cuda.rs` calls
+//! `flash_v3_fwd`/`flash_v3_bwd` directly, so these launchers stay live and
+//! stay the validation gate.
 
 use crate::error::{Error, Result};
 use cudarc::driver::PushKernelArg;
@@ -43,6 +48,54 @@ fn get_compute_capability() -> (i32, i32) {
 
         (major, minor)
     })
+}
+
+/// Master switch for routing production traffic to flash v3.
+///
+/// Currently `false`: v3 has five defects found by source reading, NONE of
+/// which anyone has ever executed, because no machine available to this
+/// project is SM 90 and no CI runs these kernels.
+///
+/// 1. dK/dV attributed to the wrong K positions in the fp16/bf16/fp8
+///    backward — accumulators keyed by the thread's Q row, stored at K
+///    position `k_start + tid` with a plain `=`, so Q blocks overwrote each
+///    other. Fixed, unvalidated.
+/// 2. The fp32 backward `atomicAdd`s dK/dV into buffers allocated here with
+///    `Tensor::empty` — accumulation into uninitialised memory. Fixed,
+///    unvalidated.
+/// 3. TOP-LEFT causal convention where the CPU reference, flash v2, varlen
+///    and paged all use BOTTOM-RIGHT. Fixed, unvalidated.
+/// 4. `float O_local[128]` in the forward is indexed
+///    `(i - warp_q_start) * HEAD_DIM + d`, reaching 1023 at `HEAD_DIM = 64`
+///    and 2047 at `HEAD_DIM = 128` — an 8x to 16x stack overrun. NOT fixed.
+/// 5. The forward's `warp_reduce_max` uses a full `__shfl_down_sync` mask
+///    while lanes have diverged on the causal `continue` (undefined
+///    behaviour), and all 32 lanes then update the same `m_local`/`l_local`/
+///    `O_local` accumulators for one row, racing. NOT fixed.
+///
+/// Defects 4 and 5 are outstanding memory-safety/UB defects in the forward.
+/// Flash v2 runs on SM 90 through the same JIT path and is covered by the
+/// parity suite, so v2 is strictly the better route until v3 is executed.
+///
+/// To re-enable: on an SM 90 device run `tests/flash_v3_bwd_parity_cuda.rs`
+/// and the other flash parity tests with `--nocapture`, confirm they PASS
+/// rather than print their `FLASH_V3_BWD_SKIPPED` banner, then flip this to
+/// `true`.
+const V3_DISPATCH_ENABLED: bool = false;
+
+/// THE single decision point for whether `flash.rs` uses flash v3.
+///
+/// Both the forward and the backward dispatch site consult this and nothing
+/// else. They must agree: a v3 forward paired with a v2 backward would mix
+/// causal conventions.
+pub fn dispatch_enabled(
+    client: &CudaClient,
+    device: &<CudaRuntime as numr::runtime::Runtime>::Device,
+) -> bool {
+    if !V3_DISPATCH_ENABLED {
+        return false;
+    }
+    is_hopper(client, device)
 }
 
 /// Check if the current device supports SM 90+ (Hopper).

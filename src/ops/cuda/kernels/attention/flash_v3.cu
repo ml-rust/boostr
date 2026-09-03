@@ -11,6 +11,14 @@
 // 6. Padded shared memory strides: Eliminates bank conflicts
 //
 // Requirements: SM 90 (Hopper), CUDA 12.0+
+//
+// Causal convention (BOTTOM-RIGHT): query row `i` sits at ABSOLUTE sequence
+// position `key_offset + i`, where `key_offset = max(0, seq_len_k - seq_len_q)`.
+// A KV-cached decode or chunked prefill passes seq_len_q < seq_len_k, and those
+// queries are the LAST seq_len_q positions of the key sequence. Prefill
+// (seq_len_q == seq_len_k) gives key_offset == 0. Same rule as flash_v2.cu,
+// varlen, paged, and the CPU reference
+// `ops/impl_generic/attention/flash_standard.rs::build_attention_mask`.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -115,6 +123,9 @@ __device__ void flash_attention_v3_fwd_kernel(
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_size = q_end - q_start;
 
+    // Absolute position of query row 0 (see the header note); 0 on prefill.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
 
     // Warp specialization: Producer warps vs Consumer warps
@@ -214,8 +225,9 @@ __device__ void flash_attention_v3_fwd_kernel(
             // Compute attention scores: S = Q @ K^T (scaled)
             for (int i = warp_q_start; i < warp_q_end; ++i) {
                 for (int j = lane_id; j < k_size; j += 32) {
-                    // Apply causal masking if needed
-                    if (causal && (q_start + i) < (k_start + j)) {
+                    // Causal masking (bottom-right): query row i sits at absolute
+                    // position key_offset + q_start + i.
+                    if (causal && (key_offset + q_start + i) < (k_start + j)) {
                         continue;
                     }
 
@@ -339,6 +351,9 @@ __device__ void flash_attention_v3_fwd_fp16_impl(
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_size = q_end - q_start;
 
+    // Absolute position of query row 0 (see the header note); 0 on prefill.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
 
     // Warp specialization: Producer warps vs Consumer warps
@@ -438,8 +453,9 @@ __device__ void flash_attention_v3_fwd_fp16_impl(
             // Compute attention scores: S = Q @ K^T (scaled) - FP32 accumulation
             for (int i = warp_q_start; i < warp_q_end; ++i) {
                 for (int j = lane_id; j < k_size; j += 32) {
-                    // Apply causal masking if needed
-                    if (causal && (q_start + i) < (k_start + j)) {
+                    // Causal masking (bottom-right): query row i sits at absolute
+                    // position key_offset + q_start + i.
+                    if (causal && (key_offset + q_start + i) < (k_start + j)) {
                         continue;
                     }
 
@@ -559,6 +575,9 @@ __device__ void flash_attention_v3_fwd_bf16_impl(
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_size = q_end - q_start;
 
+    // Absolute position of query row 0 (see the header note); 0 on prefill.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
 
     // Warp specialization: Producer warps vs Consumer warps
@@ -651,8 +670,9 @@ __device__ void flash_attention_v3_fwd_bf16_impl(
             // Compute attention scores: S = Q @ K^T (scaled) - FP32 accumulation
             for (int i = warp_q_start; i < warp_q_end; ++i) {
                 for (int j = lane_id; j < k_size; j += 32) {
-                    // Apply causal masking if needed
-                    if (causal && (q_start + i) < (k_start + j)) {
+                    // Causal masking (bottom-right): query row i sits at absolute
+                    // position key_offset + q_start + i.
+                    if (causal && (key_offset + q_start + i) < (k_start + j)) {
                         continue;
                     }
 
@@ -778,6 +798,9 @@ __device__ void flash_attention_v3_fwd_fp8_impl(
     const int q_end = min(q_start + BLOCK_M, seq_len_q);
     const int q_size = q_end - q_start;
 
+    // Absolute position of query row 0 (see the header note); 0 on prefill.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     const int num_k_blocks = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
 
     // Warp specialization: Producer warps vs Consumer warps
@@ -870,8 +893,9 @@ __device__ void flash_attention_v3_fwd_fp8_impl(
             // Compute attention scores: S = Q @ K^T (scaled) - FP32 accumulation
             for (int i = warp_q_start; i < warp_q_end; ++i) {
                 for (int j = lane_id; j < k_size; j += 32) {
-                    // Apply causal masking if needed
-                    if (causal && (q_start + i) < (k_start + j)) {
+                    // Causal masking (bottom-right): query row i sits at absolute
+                    // position key_offset + q_start + i.
+                    if (causal && (key_offset + q_start + i) < (k_start + j)) {
                         continue;
                     }
 

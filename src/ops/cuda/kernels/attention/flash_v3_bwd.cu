@@ -17,6 +17,14 @@
 //      - Accumulate dK_j += dS_ij^T @ Q_i (local, no atomics)
 //      - Compute dQ_i = dS_ij @ K_j and write with atomics (multiple K blocks contribute)
 //
+// Causal convention (BOTTOM-RIGHT): query row `i` sits at ABSOLUTE sequence
+// position `key_offset + i`, where `key_offset = max(0, seq_len_k - seq_len_q)`.
+// A KV-cached decode or chunked prefill passes seq_len_q < seq_len_k, and those
+// queries are the LAST seq_len_q positions of the key sequence. Prefill
+// (seq_len_q == seq_len_k) gives key_offset == 0. Same rule as flash_v2.cu,
+// flash_v2_bwd.cu, varlen, paged, and the CPU reference
+// `ops/impl_generic/attention/flash_standard.rs::build_attention_mask`.
+//
 // Launch contract (set by ops/cuda/attention/flash_v3.rs):
 //   grid  = (batch_size * num_heads, ceil(seq_len_k / BLOCK_N))
 //   block = (BLOCK_N, 1, 1)
@@ -175,13 +183,17 @@ __device__ void flash_attention_v3_bwd_kernel(
     }
     __syncthreads();
 
+    // Absolute position of query row 0 (see the header note); 0 on prefill.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     // Determine Q block range (with causal masking optimization)
     const int num_q_blocks = (seq_len_q + BLOCK_M - 1) / BLOCK_M;
     int q_block_start = 0;
     if (causal) {
-        // For causal attention: Q can only attend to K where k <= q
-        // So for K block at k_start, only Q blocks where q >= k_start can have gradients
-        q_block_start = k_start / BLOCK_M;
+        // Causal: skip Q blocks fully masked. Token positions, not block indices.
+        // Query row q attends K position k only when key_offset + q >= k, so the
+        // first query row that can see k_start is q = k_start - key_offset.
+        q_block_start = max(0, k_start - key_offset) / BLOCK_M;
     }
 
     // dK/dV ownership: thread `tid` owns K row `tid` of this tile for the whole
@@ -231,7 +243,9 @@ __device__ void flash_attention_v3_bwd_kernel(
 
             for (int j = 0; j < k_size; ++j) {
                 const int k_global = k_start + j;
-                if (causal && q_global < k_global) {
+                // Causal mask (position-level, bottom-right): query row q_global
+                // sits at absolute position key_offset + q_global.
+                if (causal && key_offset + q_global < k_global) {
                     continue;
                 }
 
@@ -276,7 +290,9 @@ __device__ void flash_attention_v3_bwd_kernel(
         if (k_valid) {
             for (int qr = 0; qr < q_size; ++qr) {
                 const int q_global = q_start + qr;
-                if (causal && q_global < k_global_own) {
+                // Causal mask (position-level, bottom-right); must stay identical
+                // to the dQ phase above or dK/dV disagree with dQ.
+                if (causal && key_offset + q_global < k_global_own) {
                     continue;
                 }
 
@@ -471,10 +487,14 @@ __device__ void flash_attention_v3_bwd_fp16_kernel(
     }
     __syncthreads();
 
+    // Absolute position of query row 0 (see the header note); 0 on prefill.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     const int num_q_blocks = (seq_len_q + BLOCK_M - 1) / BLOCK_M;
     int q_block_start = 0;
     if (causal) {
-        q_block_start = k_start / BLOCK_M;
+        // Causal: skip Q blocks fully masked. Token positions, not block indices.
+        q_block_start = max(0, k_start - key_offset) / BLOCK_M;
     }
 
     // dK/dV ownership: thread `tid` owns K row `tid` of this tile for the whole
@@ -527,7 +547,9 @@ __device__ void flash_attention_v3_bwd_fp16_kernel(
             for (int j = 0; j < k_size; ++j) {
                 const int k_global = k_start + j;
 
-                if (causal && q_global < k_global) {
+                // Causal mask (position-level, bottom-right): query row q_global
+                // sits at absolute position key_offset + q_global.
+                if (causal && key_offset + q_global < k_global) {
                     continue;
                 }
 
@@ -569,7 +591,9 @@ __device__ void flash_attention_v3_bwd_fp16_kernel(
             for (int qr = 0; qr < q_size; ++qr) {
                 const int q_global = q_start + qr;
 
-                if (causal && q_global < k_global_own) {
+                // Causal mask (position-level, bottom-right); must stay identical
+                // to the dQ phase above or dK/dV disagree with dQ.
+                if (causal && key_offset + q_global < k_global_own) {
                     continue;
                 }
 
@@ -760,10 +784,14 @@ __device__ void flash_attention_v3_bwd_bf16_kernel(
     }
     __syncthreads();
 
+    // Absolute position of query row 0 (see the header note); 0 on prefill.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     const int num_q_blocks = (seq_len_q + BLOCK_M - 1) / BLOCK_M;
     int q_block_start = 0;
     if (causal) {
-        q_block_start = k_start / BLOCK_M;
+        // Causal: skip Q blocks fully masked. Token positions, not block indices.
+        q_block_start = max(0, k_start - key_offset) / BLOCK_M;
     }
 
     // dK/dV ownership: thread `tid` owns K row `tid` of this tile for the whole
@@ -816,7 +844,9 @@ __device__ void flash_attention_v3_bwd_bf16_kernel(
             for (int j = 0; j < k_size; ++j) {
                 const int k_global = k_start + j;
 
-                if (causal && q_global < k_global) {
+                // Causal mask (position-level, bottom-right): query row q_global
+                // sits at absolute position key_offset + q_global.
+                if (causal && key_offset + q_global < k_global) {
                     continue;
                 }
 
@@ -858,7 +888,9 @@ __device__ void flash_attention_v3_bwd_bf16_kernel(
             for (int qr = 0; qr < q_size; ++qr) {
                 const int q_global = q_start + qr;
 
-                if (causal && q_global < k_global_own) {
+                // Causal mask (position-level, bottom-right); must stay identical
+                // to the dQ phase above or dK/dV disagree with dQ.
+                if (causal && key_offset + q_global < k_global_own) {
                     continue;
                 }
 
@@ -1066,10 +1098,14 @@ __device__ void flash_attention_v3_bwd_fp8_kernel(
     }
     __syncthreads();
 
+    // Absolute position of query row 0 (see the header note); 0 on prefill.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     const int num_q_blocks = (seq_len_q + BLOCK_M - 1) / BLOCK_M;
     int q_block_start = 0;
     if (causal) {
-        q_block_start = k_start / BLOCK_M;
+        // Causal: skip Q blocks fully masked. Token positions, not block indices.
+        q_block_start = max(0, k_start - key_offset) / BLOCK_M;
     }
 
     // dK/dV ownership: thread `tid` owns K row `tid` of this tile for the whole
@@ -1123,7 +1159,9 @@ __device__ void flash_attention_v3_bwd_fp8_kernel(
             for (int j = 0; j < k_size; ++j) {
                 const int k_global = k_start + j;
 
-                if (causal && q_global < k_global) {
+                // Causal mask (position-level, bottom-right): query row q_global
+                // sits at absolute position key_offset + q_global.
+                if (causal && key_offset + q_global < k_global) {
                     continue;
                 }
 
@@ -1173,7 +1211,9 @@ __device__ void flash_attention_v3_bwd_fp8_kernel(
             for (int qr = 0; qr < q_size; ++qr) {
                 const int q_global = q_start + qr;
 
-                if (causal && q_global < k_global_own) {
+                // Causal mask (position-level, bottom-right); must stay identical
+                // to the dQ phase above or dK/dV disagree with dQ.
+                if (causal && key_offset + q_global < k_global_own) {
                     continue;
                 }
 

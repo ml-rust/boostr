@@ -19,6 +19,25 @@
 //! defect class, and it reuses that file's diagnostic line and dK/dV-to-dQ
 //! error ratio guard.
 //!
+//! # v3 is NOT dispatched to
+//!
+//! `flash.rs` no longer routes any production shape to v3: both dispatch
+//! sites consult `flash_v3::dispatch_enabled`, which is off. Five defects
+//! were found in v3 by source reading, three fixed and two — a `float
+//! O_local[128]` stack overrun and a diverged-lane `__shfl_down_sync` race in
+//! the forward — still open, and NONE of the five has ever been executed
+//! because no machine available to this project is SM 90. See
+//! `dispatch_enabled` in `src/ops/cuda/attention/flash_v3.rs` for the full
+//! list.
+//!
+//! That makes this file the re-enable gate, not dead weight. It calls
+//! `flash_v3::flash_v3_fwd` and `flash_v3::flash_v3_bwd` DIRECTLY, so it still
+//! exercises the kernels with dispatch off. Run it plus the other flash parity
+//! tests on an SM 90 device, confirm they PASS instead of printing the skip
+//! banner below, and only then flip `V3_DISPATCH_ENABLED`. Do not weaken
+//! anything here: these assertions are the only evidence that would justify
+//! turning v3 back on.
+//!
 //! # LOUD SKIP
 //!
 //! flash_v3 is gated behind `flash_v3::is_hopper` (compute capability major
@@ -37,15 +56,28 @@
 //! `standard_attention_bwd`), always in F32. It shares no indexing,
 //! accumulation, or tiling code with the CUDA kernel.
 //!
-//! # `seq_len_q == seq_len_k` is REQUIRED here
+//! # The ragged (`seq_len_q != seq_len_k`) cases
 //!
-//! flash_v3's causal rule is TOP-LEFT (`if (causal && q_global < k_global)`),
-//! while the CPU reference is BOTTOM-RIGHT
-//! (`key_offset = seq_len_k - seq_len_q`, masking `key_offset + i < j`; see
-//! `impl_generic/attention/flash_standard.rs`). The two agree only when
-//! `seq_len_q == seq_len_k`, which every case here uses. A ragged case would
-//! measure that convention divergence, not the gradient defect this file
-//! guards.
+//! flash_v3 previously used a TOP-LEFT causal rule
+//! (`if (causal && q_global < k_global)`) while the CPU reference, flash_v2,
+//! varlen and paged all use BOTTOM-RIGHT: query row `i` sits at absolute
+//! position `key_offset + i`, `key_offset = max(0, seq_len_k - seq_len_q)`, and
+//! key position `j` is masked when `key_offset + i < j` (see
+//! `impl_generic/attention/flash_standard.rs::build_attention_mask`). The two
+//! agree ONLY when `seq_len_q == seq_len_k`, so the square cases below cannot
+//! distinguish them. flash_v3 now uses BOTTOM-RIGHT, and the
+//! `..._ragged_causal_hopper_only` cases below are what proves it: they pass
+//! `seq_len_q = SEQ_Q_RAGGED` against `seq_len_k = SEQ_K_RAGGED` with
+//! `causal = true`, the exact shape a KV-cached decode or chunked prefill
+//! produces.
+//!
+//! Those cases also cover the backward's Q-block skip. For `head_dim = 64`
+//! (`BLOCK_M = 32`, `BLOCK_N = 64`) the K block at `k_start = 128` yields
+//! `q_block_start = max(0, 128 - 64) / 32 = 2` out of 3 Q blocks — a real
+//! nonzero skip that is still in range. Under the old TOP-LEFT rule the same
+//! block computed `128 / 32 = 4 >= 3`, skipped every Q block, and stored a
+//! zero dK/dV for K positions 128..160. `head_dim = 128`
+//! (`BLOCK_M = 16`, `BLOCK_N = 32`) exercises the same edge with more blocks.
 //!
 //! Run with:
 //!   cd boostr && cargo test --features cuda,f16 --test flash_v3_bwd_parity_cuda -- --nocapture
@@ -90,6 +122,29 @@ const NUM_HEADS: usize = 4;
 /// A single-K-block, single-Q-block shape would hide both the cross-Q-block
 /// overwrite and the wrong-K-position attribution this file exists to catch.
 const SEQ: usize = 96;
+
+/// Query length for the ragged (`seq_len_q != seq_len_k`) causal cases. Reuses
+/// `SEQ` so the Q-side tiling rationale above still applies.
+const SEQ_Q_RAGGED: usize = SEQ;
+
+/// Key length for the ragged causal cases. `160 - 96 = 64`, so
+/// `key_offset = 64`, which is nonzero — the square cases already cover
+/// `key_offset == 0`, where the two causal conventions agree.
+///
+/// The backward tiling this produces:
+///   - head_dim 64 (`BLOCK_M = 32`, `BLOCK_N = 64`): K blocks at 0, 64, 128
+///     (the last a PARTIAL tile, `k_size = 32`) against 3 Q blocks.
+///     `q_block_start` is 0, 0, 2 — the last is nonzero AND in range, so the
+///     skip is exercised without being vacuous. Under the old top-left rule it
+///     was 0, 2, 4, and 4 >= 3 skipped every Q block, storing a zero dK/dV for
+///     K positions 128..160.
+///   - head_dim 128 (`BLOCK_M = 16`, `BLOCK_N = 32`): K blocks at 0, 32, 64,
+///     96, 128 against 6 Q blocks; `q_block_start` is 0, 0, 0, 2, 4. The old
+///     rule gave 0, 2, 4, 6, 8, dropping K positions 96..160 entirely.
+///
+/// 160 is also `128 + 32`, so the FORWARD (`BLOCK_N = 128`) sees two K blocks,
+/// the second a partial tile.
+const SEQ_K_RAGGED: usize = 160;
 
 /// Prints the skip banner to stdout AND stderr, then returns. Deliberately
 /// noisy: a silent skip is how the original defect survived.
@@ -222,6 +277,8 @@ fn assert_flash_v3_bwd_diff(
     dtype: DType,
     head_dim: usize,
     causal: bool,
+    seq_q: usize,
+    seq_k: usize,
 ) -> f32 {
     assert_eq!(
         actual.len(),
@@ -258,7 +315,7 @@ fn assert_flash_v3_bwd_diff(
 
     println!(
         "FLASH_V3_BWD_DIAG tensor={tensor} dtype={:?} batch={BATCH} num_heads={NUM_HEADS} \
-         seq={SEQ} head_dim={head_dim} causal={causal} max_abs={max_abs:.6e} \
+         seq_q={seq_q} seq_k={seq_k} head_dim={head_dim} causal={causal} max_abs={max_abs:.6e} \
          max_abs_idx={max_abs_idx} max_rel={max_rel:.6e} max_rel_idx={max_rel_idx} \
          ref_rms={rms:.6e} atol={atol:.6e} rtol={rtol:.6e} tol={tol:.6e} label=\"{label}\"",
         dtype
@@ -285,6 +342,21 @@ fn assert_flash_v3_bwd_diff(
 /// backward at `dtype` (casting inputs down and results back up through F32),
 /// and checks dQ/dK/dV against the reference with the dK/dV-to-dQ ratio guard.
 fn assert_flash_v3_bwd_parity(head_dim: usize, causal: bool, dtype: DType, label: &str) {
+    assert_flash_v3_bwd_parity_shaped(head_dim, causal, dtype, SEQ, SEQ, label);
+}
+
+/// Same check with independent query and key lengths. `seq_q != seq_k` is what
+/// distinguishes the bottom-right causal convention from the top-left one; see
+/// the module header.
+#[allow(clippy::too_many_arguments)]
+fn assert_flash_v3_bwd_parity_shaped(
+    head_dim: usize,
+    causal: bool,
+    dtype: DType,
+    seq_q: usize,
+    seq_k: usize,
+    label: &str,
+) {
     if dtype != DType::F32 && !cfg!(feature = "f16") {
         loud_skip(
             label,
@@ -307,19 +379,23 @@ fn assert_flash_v3_bwd_parity(head_dim: usize, causal: bool, dtype: DType, label
         return;
     }
 
-    let n = BATCH * NUM_HEADS * SEQ * head_dim;
-    let shape = [BATCH, NUM_HEADS, SEQ, head_dim];
-    let q_data = values(n, 0.1);
-    let k_data = values(n, 1.3);
-    let v_data = values(n, 2.7);
-    let do_data = values(n, 3.9);
+    // Q and dO are seq_q long; K and V are seq_k long. They are equal only in
+    // the square cases.
+    let nq = BATCH * NUM_HEADS * seq_q * head_dim;
+    let nk = BATCH * NUM_HEADS * seq_k * head_dim;
+    let q_shape = [BATCH, NUM_HEADS, seq_q, head_dim];
+    let k_shape = [BATCH, NUM_HEADS, seq_k, head_dim];
+    let q_data = values(nq, 0.1);
+    let k_data = values(nk, 1.3);
+    let v_data = values(nk, 2.7);
+    let do_data = values(nq, 3.9);
 
     // CPU reference, always F32.
     let (cpu_client, cpu_dev) = cpu_setup();
-    let q_cpu = Tensor::<CpuRuntime>::from_slice(&q_data, &shape, &cpu_dev).unwrap();
-    let k_cpu = Tensor::<CpuRuntime>::from_slice(&k_data, &shape, &cpu_dev).unwrap();
-    let v_cpu = Tensor::<CpuRuntime>::from_slice(&v_data, &shape, &cpu_dev).unwrap();
-    let do_cpu = Tensor::<CpuRuntime>::from_slice(&do_data, &shape, &cpu_dev).unwrap();
+    let q_cpu = Tensor::<CpuRuntime>::from_slice(&q_data, &q_shape, &cpu_dev).unwrap();
+    let k_cpu = Tensor::<CpuRuntime>::from_slice(&k_data, &k_shape, &cpu_dev).unwrap();
+    let v_cpu = Tensor::<CpuRuntime>::from_slice(&v_data, &k_shape, &cpu_dev).unwrap();
+    let do_cpu = Tensor::<CpuRuntime>::from_slice(&do_data, &q_shape, &cpu_dev).unwrap();
 
     let (out_cpu, lse_cpu) = cpu_client
         .flash_attention_fwd(
@@ -338,10 +414,10 @@ fn assert_flash_v3_bwd_parity(head_dim: usize, causal: bool, dtype: DType, label
 
     // CUDA flash_v3 at `dtype`. Both halves come from flash_v3 itself so the
     // LSE convention the backward consumes is the one its own forward wrote.
-    let q_c = cast_to_dtype(&q_data, &shape, &cuda_dev, dtype);
-    let k_c = cast_to_dtype(&k_data, &shape, &cuda_dev, dtype);
-    let v_c = cast_to_dtype(&v_data, &shape, &cuda_dev, dtype);
-    let do_c = cast_to_dtype(&do_data, &shape, &cuda_dev, dtype);
+    let q_c = cast_to_dtype(&q_data, &q_shape, &cuda_dev, dtype);
+    let k_c = cast_to_dtype(&k_data, &k_shape, &cuda_dev, dtype);
+    let v_c = cast_to_dtype(&v_data, &k_shape, &cuda_dev, dtype);
+    let do_c = cast_to_dtype(&do_data, &q_shape, &cuda_dev, dtype);
 
     let (out_c, lse_c) = flash_v3::flash_v3_fwd(
         &cuda_client,
@@ -350,8 +426,8 @@ fn assert_flash_v3_bwd_parity(head_dim: usize, causal: bool, dtype: DType, label
         &v_c,
         BATCH,
         NUM_HEADS,
-        SEQ,
-        SEQ,
+        seq_q,
+        seq_k,
         head_dim,
         causal,
     )
@@ -373,8 +449,8 @@ fn assert_flash_v3_bwd_parity(head_dim: usize, causal: bool, dtype: DType, label
         &lse_c,
         BATCH,
         NUM_HEADS,
-        SEQ,
-        SEQ,
+        seq_q,
+        seq_k,
         head_dim,
         causal,
     )
@@ -386,7 +462,7 @@ fn assert_flash_v3_bwd_parity(head_dim: usize, causal: bool, dtype: DType, label
         )
     });
 
-    let (dq_atol, dq_rtol) = flash_v3_bwd_tol(dtype, Some(SEQ));
+    let (dq_atol, dq_rtol) = flash_v3_bwd_tol(dtype, Some(seq_k));
     let (dkv_atol, dkv_rtol) = flash_v3_bwd_tol(dtype, None);
 
     let dq_norm = assert_flash_v3_bwd_diff(
@@ -399,6 +475,8 @@ fn assert_flash_v3_bwd_parity(head_dim: usize, causal: bool, dtype: DType, label
         dtype,
         head_dim,
         causal,
+        seq_q,
+        seq_k,
     );
     let dk_norm = assert_flash_v3_bwd_diff(
         &read_back_f32(&dk_c),
@@ -410,6 +488,8 @@ fn assert_flash_v3_bwd_parity(head_dim: usize, causal: bool, dtype: DType, label
         dtype,
         head_dim,
         causal,
+        seq_q,
+        seq_k,
     );
     let dv_norm = assert_flash_v3_bwd_diff(
         &read_back_f32(&dv_c),
@@ -421,6 +501,8 @@ fn assert_flash_v3_bwd_parity(head_dim: usize, causal: bool, dtype: DType, label
         dtype,
         head_dim,
         causal,
+        seq_q,
+        seq_k,
     );
 
     // dQ is the control: it is the one gradient flash_v3 still accumulates
@@ -515,4 +597,89 @@ fn test_flash_v3_bwd_parity_hd128_bf16_causal_hopper_only() {
 #[test]
 fn test_flash_v3_bwd_parity_hd128_bf16_noncausal_hopper_only() {
     assert_flash_v3_bwd_parity(128, false, DType::BF16, "flash_v3_bwd hd128 bf16 noncausal");
+}
+
+// ============================================================================
+// Ragged causal: seq_len_q != seq_len_k
+//
+// THE cases that pin the causal convention. flash_v3 must mask with
+// `key_offset + q_global < k_global`, `key_offset = max(0, seq_k - seq_q)`,
+// matching the CPU reference, flash_v2, varlen and paged. The square cases
+// above pass under either convention; these fail under the old top-left one.
+//
+// Noncausal ragged shapes are deliberately absent: with `causal = false` the
+// mask is empty and the two conventions are again indistinguishable, so such a
+// case would add runtime without adding a guard.
+// ============================================================================
+
+#[test]
+fn test_flash_v3_bwd_parity_hd64_f32_ragged_causal_hopper_only() {
+    assert_flash_v3_bwd_parity_shaped(
+        64,
+        true,
+        DType::F32,
+        SEQ_Q_RAGGED,
+        SEQ_K_RAGGED,
+        "flash_v3_bwd hd64 f32 ragged causal",
+    );
+}
+
+#[test]
+fn test_flash_v3_bwd_parity_hd64_f16_ragged_causal_hopper_only() {
+    assert_flash_v3_bwd_parity_shaped(
+        64,
+        true,
+        DType::F16,
+        SEQ_Q_RAGGED,
+        SEQ_K_RAGGED,
+        "flash_v3_bwd hd64 f16 ragged causal",
+    );
+}
+
+#[test]
+fn test_flash_v3_bwd_parity_hd64_bf16_ragged_causal_hopper_only() {
+    assert_flash_v3_bwd_parity_shaped(
+        64,
+        true,
+        DType::BF16,
+        SEQ_Q_RAGGED,
+        SEQ_K_RAGGED,
+        "flash_v3_bwd hd64 bf16 ragged causal",
+    );
+}
+
+#[test]
+fn test_flash_v3_bwd_parity_hd128_f32_ragged_causal_hopper_only() {
+    assert_flash_v3_bwd_parity_shaped(
+        128,
+        true,
+        DType::F32,
+        SEQ_Q_RAGGED,
+        SEQ_K_RAGGED,
+        "flash_v3_bwd hd128 f32 ragged causal",
+    );
+}
+
+#[test]
+fn test_flash_v3_bwd_parity_hd128_f16_ragged_causal_hopper_only() {
+    assert_flash_v3_bwd_parity_shaped(
+        128,
+        true,
+        DType::F16,
+        SEQ_Q_RAGGED,
+        SEQ_K_RAGGED,
+        "flash_v3_bwd hd128 f16 ragged causal",
+    );
+}
+
+#[test]
+fn test_flash_v3_bwd_parity_hd128_bf16_ragged_causal_hopper_only() {
+    assert_flash_v3_bwd_parity_shaped(
+        128,
+        true,
+        DType::BF16,
+        SEQ_Q_RAGGED,
+        SEQ_K_RAGGED,
+        "flash_v3_bwd hd128 bf16 ragged causal",
+    );
 }

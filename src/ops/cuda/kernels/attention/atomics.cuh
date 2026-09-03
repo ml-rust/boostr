@@ -1,15 +1,21 @@
 #pragma once
-// Atomic add helpers for FP16 and BF16
+// FP16 atomic add helper taking a __half addend
 //
-// Included by kernels that need to scatter gradients into half-precision
-// buffers using atomicAdd (e.g. GQA backward where multiple Q heads write
-// to the same KV head's dK/dV).
+// Included by kernels that scatter gradients into half-precision buffers where
+// several producers hit the same element (e.g. GQA backward, where multiple Q
+// heads write to one KV head's dK/dV).
 //
-// FP16 uses a CAS-based implementation on sm_70+ (Volta and later).
-// BF16 uses the native atomicAdd available on sm_80+ (Ampere and later).
+// This is NOT a duplicate of `atomic_add_dtype(__half*, float)` in
+// dtype_traits.cuh: that one takes a float addend and rounds once, after adding
+// in float. This one takes a __half addend and adds with `__hadd`, so the
+// caller's value is rounded to half before the accumulate. The two round
+// differently, so they are not interchangeable without changing kernel
+// numerics. `varlen_attention_bwd_fp16.cu` is the only includer.
+//
+// The BF16 counterpart was removed: nothing called it, and 16-bit BF16 adds go
+// through `atomic_add_dtype` in dtype_traits.cuh.
 
 #include <cuda_fp16.h>
-#include <cuda_bf16.h>
 
 // ============================================================================
 // atomicAddHalf — FP16 atomic add (sm_70+)
@@ -49,14 +55,3 @@ __device__ __forceinline__ void atomicAddHalf(__half* address, __half val) {
     } while (assumed != old);
 }
 #endif  // __CUDA_ARCH__ >= 700
-
-// ============================================================================
-// atomicAddBF16 — BF16 atomic add (sm_80+)
-// ============================================================================
-
-#if __CUDA_ARCH__ >= 800
-__device__ __forceinline__ void atomicAddBF16(__nv_bfloat16* address, __nv_bfloat16 val) {
-    // Ampere and later support native BF16 atomicAdd.
-    atomicAdd(address, val);
-}
-#endif  // __CUDA_ARCH__ >= 800

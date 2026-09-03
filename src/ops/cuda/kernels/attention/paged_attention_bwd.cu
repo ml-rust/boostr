@@ -74,63 +74,13 @@ __device__ __forceinline__ int get_paged_kv_offset(
 // ============================================================================
 // Half-precision atomics
 //
-// This translation unit compiles at sm_75, so both helpers below need a real
-// pre-Ampere path, and both have one.
-//
-// `atomic_add_dtype` in dtype_traits.cuh once had its whole BF16 body behind
-// `#if __CUDA_ARCH__ >= 800` with no `#else`, which made it an empty function
-// here and silently dropped every BF16 dK/dV contribution. That header now
-// carries an equivalent pre-Ampere CAS fallback, so switching to it is safe —
-// it is simply a separate change from this one.
+// dK/dV scatter uses `atomic_add_dtype` from dtype_traits.cuh, which carries a
+// real pre-Ampere CAS fallback for every dtype. This file kept private
+// `atomicAddHalf`/`atomicAddBF16` copies only while that header's BF16 body sat
+// behind `#if __CUDA_ARCH__ >= 800` with no `#else` and compiled to nothing at
+// the sm_75 `build.rs` targets here. It does not any more, so there is one
+// implementation.
 // ============================================================================
-
-__device__ __forceinline__ void atomicAddHalf(__half* address, float val) {
-#if __CUDA_ARCH__ >= 700
-    atomicAdd(address, __float2half(val));
-#else
-    // Fallback for older architectures
-    unsigned int* address_as_ui = (unsigned int*)((char*)address - ((size_t)address & 2));
-    unsigned int old = *address_as_ui;
-    unsigned int assumed;
-    do {
-        assumed = old;
-        __half_raw hsum;
-        hsum.x = (size_t)address & 2 ? (old >> 16) : (old & 0xffff);
-        hsum = __float2half_rn(__half2float(hsum) + val);
-        old = (size_t)address & 2
-            ? (old & 0xffff) | (hsum.x << 16)
-            : (old & 0xffff0000) | hsum.x;
-        old = atomicCAS(address_as_ui, assumed, old);
-    } while (assumed != old);
-#endif
-}
-
-__device__ __forceinline__ void atomicAddBF16(__nv_bfloat16* address, float val) {
-#if __CUDA_ARCH__ >= 800
-    atomicAdd(address, __float2bfloat16(val));
-#else
-    // Fallback for older architectures
-    unsigned int* address_as_ui = (unsigned int*)((char*)address - ((size_t)address & 2));
-    unsigned int old = *address_as_ui;
-    unsigned int assumed;
-    do {
-        assumed = old;
-        unsigned short bits = (size_t)address & 2 ? (old >> 16) : (old & 0xffff);
-        float current = __uint_as_float(((unsigned int)bits) << 16);
-        float sum = current + val;
-        unsigned short new_bits = __float_as_uint(sum) >> 16;
-        old = (size_t)address & 2
-            ? (old & 0xffff) | (((unsigned int)new_bits) << 16)
-            : (old & 0xffff0000) | new_bits;
-        old = atomicCAS(address_as_ui, assumed, old);
-    } while (assumed != old);
-#endif
-}
-
-// Overload set so one template body dispatches to the right atomic per dtype.
-__device__ __forceinline__ void paged_atomic_add(float* a, float v) { atomicAdd(a, v); }
-__device__ __forceinline__ void paged_atomic_add(__half* a, float v) { atomicAddHalf(a, v); }
-__device__ __forceinline__ void paged_atomic_add(__nv_bfloat16* a, float v) { atomicAddBF16(a, v); }
 
 // A template cannot redeclare `extern __shared__` per instantiation type, so
 // the tiles are carved out of one raw byte array. The dynamic shared-memory
@@ -362,8 +312,8 @@ __device__ void paged_attention_bwd_impl(
 
             #pragma unroll
             for (int d = 0; d < HEAD_DIM; ++d) {
-                paged_atomic_add(&dK_blocks[kv_offset + d], dK_local[d]);
-                paged_atomic_add(&dV_blocks[kv_offset + d], dV_local[d]);
+                atomic_add_dtype(&dK_blocks[kv_offset + d], dK_local[d]);
+                atomic_add_dtype(&dV_blocks[kv_offset + d], dV_local[d]);
             }
         }
         __syncthreads();
@@ -388,7 +338,7 @@ __device__ void paged_attention_bwd_impl(
 // `bwd_block_config` picks the symbol at runtime; the large tile is reachable
 // only through `BOOSTR_PAGED_BWD_TILE=large`. Nothing here is compile-time
 // gated on the GPU architecture — the BF16 entries must exist at sm_75, where
-// `atomicAddBF16` takes its CAS fallback.
+// `atomic_add_dtype` takes its CAS fallback.
 //
 // The small tiles differ per dtype because the shared-memory element is T:
 // F32 gets half the rows F16/BF16 do at the same 48KB budget. These pairs must

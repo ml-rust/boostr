@@ -271,15 +271,10 @@ pub(super) fn flash_attention_bwd_impl(
         }
     }
 
-    // Sync stream: BWD uses atomicAdd so must complete before results are read
-    client
-        .stream()
-        .synchronize()
-        .map_err(|e| Error::KernelError {
-            reason: format!("Flash Attention bwd sync failed: {:?}", e),
-        })?;
-
-    // Narrow the F32 dQ accumulator back to the caller's dtype.
+    // Narrow the F32 dQ accumulator back to the caller's dtype. No stream sync
+    // first: `cast` launches on the same `CudaClient` stream as the kernel above,
+    // and a stream runs in issue order, so the cast cannot read `dq_acc` before
+    // the atomics into it have retired. Same shape as `mqa_gqa/bwd.rs`.
     let dq = if dtype == DType::F32 {
         dq_acc
     } else {

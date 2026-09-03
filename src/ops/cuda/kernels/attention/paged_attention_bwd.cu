@@ -74,11 +74,14 @@ __device__ __forceinline__ int get_paged_kv_offset(
 // ============================================================================
 // Half-precision atomics
 //
-// NOT interchangeable with `atomic_add_dtype` from dtype_traits.cuh: this
-// translation unit compiles at sm_75, where that header's BF16 overload has an
-// empty body (its whole body sits behind `#if __CUDA_ARCH__ >= 800`) and would
-// silently drop every BF16 dK/dV contribution. `atomicAddBF16` below carries a
-// real pre-Ampere CAS fallback, so it stays.
+// This translation unit compiles at sm_75, so both helpers below need a real
+// pre-Ampere path, and both have one.
+//
+// `atomic_add_dtype` in dtype_traits.cuh once had its whole BF16 body behind
+// `#if __CUDA_ARCH__ >= 800` with no `#else`, which made it an empty function
+// here and silently dropped every BF16 dK/dV contribution. That header now
+// carries an equivalent pre-Ampere CAS fallback, so switching to it is safe —
+// it is simply a separate change from this one.
 // ============================================================================
 
 __device__ __forceinline__ void atomicAddHalf(__half* address, float val) {

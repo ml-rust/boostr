@@ -516,14 +516,16 @@ template<typename T>
 __device__ __forceinline__
 float load_dtype(const T* ptr, int idx, float scale = 1.0f) {
     if constexpr (DTypeTraits<T>::needs_scale) {
-        #if __CUDA_ARCH__ >= 800
+        // No arch guard: `fp8_*_to_f32` carries its own `__CUDA_ARCH__ >= 890`
+        // hardware branch with a bit-exact software decoder below it, so the
+        // decode is correct on every architecture. The guard that used to wrap
+        // these two branches made every FP8 load return 0.0f below sm_80.
         if constexpr (DTypeTraits<T>::dtype_enum == DTypeEnum::FP8E4M3) {
             return fp8_e4m3_to_f32(static_cast<uint8_t>(ptr[idx]), scale);
         } else if constexpr (DTypeTraits<T>::dtype_enum == DTypeEnum::FP8E5M2) {
             return fp8_e5m2_to_f32(static_cast<uint8_t>(ptr[idx]), scale);
         }
-        #endif
-        return 0.0f; // Fallback for old architectures
+        return 0.0f; // Unreachable: needs_scale is true only for the two FP8 types
     } else {
         // F32, F16, BF16 - convert to float explicitly
         if constexpr (DTypeTraits<T>::dtype_enum == DTypeEnum::F32) {
@@ -542,13 +544,15 @@ template<typename T>
 __device__ __forceinline__
 void store_dtype(T* ptr, int idx, float value, float scale = 1.0f) {
     if constexpr (DTypeTraits<T>::needs_scale) {
-        #if __CUDA_ARCH__ >= 800
+        // No arch guard: `f32_to_fp8_*_raw` carries its own
+        // `__CUDA_ARCH__ >= 890` hardware branch with a bit-exact software
+        // encoder below it. The guard that used to wrap these two branches
+        // made every FP8 store a no-op below sm_80.
         if constexpr (DTypeTraits<T>::dtype_enum == DTypeEnum::FP8E4M3) {
             ptr[idx] = boostr_fp8_e4m3(f32_to_fp8_e4m3_raw(value, scale));
         } else if constexpr (DTypeTraits<T>::dtype_enum == DTypeEnum::FP8E5M2) {
             ptr[idx] = boostr_fp8_e5m2(f32_to_fp8_e5m2_raw(value, scale));
         }
-        #endif
     } else {
         // F32, F16, BF16 - use proper conversion functions
         if constexpr (DTypeTraits<T>::dtype_enum == DTypeEnum::F32) {
@@ -767,14 +771,27 @@ __device__ __forceinline__ void atomic_add_dtype(__half* addr, float val) {
     // Volta+: Use native atomicAdd for __half
     atomicAdd(addr, __float2half(val));
     #else
-    // Pre-Volta: Fallback to CAS
-    unsigned short int* addr_as_ushort = (unsigned short int*)addr;
-    unsigned short int old = *addr_as_ushort, assumed;
+    // Pre-Volta: CAS on the containing 32-bit word.
+    //
+    // The 16-bit form of `atomicCAS` itself needs sm_70, so a fallback that
+    // used it would not compile on the architectures it exists to serve. The
+    // 32-bit form is available everywhere, so read-modify-write the aligned
+    // word that holds this element and leave the neighbouring element alone.
+    //
+    // Rounding and accumulation match the sm_70+ path exactly: add in float,
+    // round to nearest half. Only the CAS width differs.
+    unsigned int* addr_as_uint = (unsigned int*)((char*)addr - ((size_t)addr & 2));
+    unsigned int hi_half = (unsigned int)((size_t)addr & 2);
+    unsigned int old = *addr_as_uint, assumed;
     do {
         assumed = old;
-        __half h_old = __ushort_as_half(assumed);
-        __half h_new = __float2half(__half2float(h_old) + val);
-        old = atomicCAS(addr_as_ushort, assumed, __half_as_ushort(h_new));
+        unsigned short int bits = hi_half ? (unsigned short int)(assumed >> 16)
+                                          : (unsigned short int)(assumed & 0xffffu);
+        __half h_new = __float2half(__half2float(__ushort_as_half(bits)) + val);
+        unsigned int new_bits = (unsigned int)__half_as_ushort(h_new);
+        unsigned int updated = hi_half ? ((assumed & 0x0000ffffu) | (new_bits << 16))
+                                       : ((assumed & 0xffff0000u) | new_bits);
+        old = atomicCAS(addr_as_uint, assumed, updated);
     } while (assumed != old);
     #endif
 }
@@ -791,12 +808,40 @@ __device__ __forceinline__ void atomic_add_dtype(__nv_bfloat16* addr, float val)
         __nv_bfloat16 bf_new = __float2bfloat16(__bfloat162float(bf_old) + val);
         old = atomicCAS(addr_as_ushort, assumed, __bfloat16_as_ushort(bf_new));
     } while (assumed != old);
+    #else
+    // Pre-Ampere: CAS on the containing 32-bit word.
+    //
+    // Without this branch the function had no body below sm_80 and every
+    // contribution was dropped with no compile error and no launch failure —
+    // the caller saw a gradient buffer that stayed at its initial value.
+    //
+    // The 16-bit form of `atomicCAS` needs sm_70, so the fallback widens to
+    // the aligned 32-bit word that holds this element and preserves the
+    // neighbouring element. Rounding and accumulation match the sm_80+ path
+    // exactly: add in float, round to nearest bfloat16.
+    unsigned int* addr_as_uint = (unsigned int*)((char*)addr - ((size_t)addr & 2));
+    unsigned int hi_half = (unsigned int)((size_t)addr & 2);
+    unsigned int old = *addr_as_uint, assumed;
+    do {
+        assumed = old;
+        unsigned short int bits = hi_half ? (unsigned short int)(assumed >> 16)
+                                          : (unsigned short int)(assumed & 0xffffu);
+        __nv_bfloat16 bf_old = __ushort_as_bfloat16(bits);
+        __nv_bfloat16 bf_new = __float2bfloat16(__bfloat162float(bf_old) + val);
+        unsigned int new_bits = (unsigned int)__bfloat16_as_ushort(bf_new);
+        unsigned int updated = hi_half ? ((assumed & 0x0000ffffu) | (new_bits << 16))
+                                       : ((assumed & 0xffff0000u) | new_bits);
+        old = atomicCAS(addr_as_uint, assumed, updated);
+    } while (assumed != old);
     #endif
 }
 
 /// FP8 E4M3: Byte-level atomic add via CAS on aligned uint32_t
 __device__ __forceinline__ void atomic_add_dtype(boostr_fp8_e4m3* addr, float val) {
-    #if __CUDA_ARCH__ >= 800
+    // No arch guard: every step below is a 32-bit `atomicCAS` plus the
+    // software FP8 codec above, both available on every architecture. The
+    // guard that used to wrap this body left the function empty below sm_80,
+    // dropping contributions silently.
     // Align to 4-byte boundary and operate on the containing uint32_t
     unsigned int* addr_as_uint = (unsigned int*)((size_t)addr & ~3u);
     unsigned int offset = (size_t)addr & 3u;
@@ -813,12 +858,14 @@ __device__ __forceinline__ void atomic_add_dtype(boostr_fp8_e4m3* addr, float va
         unsigned int new_val = (old & ~mask) | ((unsigned int)new_byte << shift);
         old = atomicCAS(addr_as_uint, assumed, new_val);
     } while (assumed != old);
-    #endif
 }
 
 /// FP8 E5M2: Byte-level atomic add via CAS on aligned uint32_t
 __device__ __forceinline__ void atomic_add_dtype(boostr_fp8_e5m2* addr, float val) {
-    #if __CUDA_ARCH__ >= 800
+    // No arch guard: every step below is a 32-bit `atomicCAS` plus the
+    // software FP8 codec above, both available on every architecture. The
+    // guard that used to wrap this body left the function empty below sm_80,
+    // dropping contributions silently.
     // Align to 4-byte boundary and operate on the containing uint32_t
     unsigned int* addr_as_uint = (unsigned int*)((size_t)addr & ~3u);
     unsigned int offset = (size_t)addr & 3u;
@@ -835,7 +882,6 @@ __device__ __forceinline__ void atomic_add_dtype(boostr_fp8_e5m2* addr, float va
         unsigned int new_val = (old & ~mask) | ((unsigned int)new_byte << shift);
         old = atomicCAS(addr_as_uint, assumed, new_val);
     } while (assumed != old);
-    #endif
 }
 
 // ============================================================================

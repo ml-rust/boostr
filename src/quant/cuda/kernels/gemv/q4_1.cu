@@ -32,10 +32,10 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q4_1_f32(
         float mn = __half2float(*reinterpret_cast<const __half*>(block + 2));
         const unsigned char* qs = block + 4;
 
-        int byte_idx = lane_id >> 1;
-        int is_high = lane_id & 1;
-        unsigned char byte = qs[byte_idx];
-        int nibble = is_high ? ((byte >> 4) & 0x0F) : (byte & 0x0F);
+        // Split-half nibble order: lane `l` takes the LOW nibble of qs[l] for
+        // l < 16, the HIGH nibble of qs[l - 16] for l >= 16 (llama.cpp
+        // dequantize_row_q4_1). See gguf_split_half_nibble in decode.cuh.
+        int nibble = gguf_split_half_nibble(qs, (int)lane_id);
         float val = d * (float)nibble + mn;
         acc += act_row[b * 32 + lane_id] * val;
     }

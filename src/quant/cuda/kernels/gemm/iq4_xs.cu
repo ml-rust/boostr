@@ -1,6 +1,9 @@
 // IQ4_XS tiled GEMM — activation [M,K] × weight [N,K]^T → output [M,N]
 // IQ4_XS block: 256 elements, 136 bytes
-// Layout: [d:f16(2), scales_h:1B, scales_l:4B, pad:1B, qs:128B]
+// Layout matches llama.cpp `block_iq4_xs`:
+//   { ggml_half d; uint16_t scales_h; uint8_t scales_l[4]; uint8_t qs[128]; }
+// scales_h is TWO bytes at offset 2, scales_l starts at 4 (no pad byte), and
+// scales_h carries high scale bits for all EIGHT sub-blocks (16 bits = 8 x 2).
 // 8 sub-blocks of 32 elements, 6-bit scales, KVALUES_IQ4NL codebook
 
 #include <cuda_fp16.h>
@@ -32,22 +35,24 @@ extern "C" __global__ void quant_matmul_iq4_xs_f32(
         __half d_half;
         memcpy(&d_half, block, sizeof(__half));
         float d = __half2float(d_half);
-        unsigned char scales_h = block[2];
-        const unsigned char* scales_l = block + 3;
+        unsigned short scales_h;
+        memcpy(&scales_h, block + 2, sizeof(unsigned short));
+        const unsigned char* scales_l = block + 4;
         const unsigned char* qs = block + 8;
         unsigned int base = b * 256;
 
         for (int sb = 0; sb < 8; sb++) {
-            unsigned char sl = (sb % 2 == 0) ? (scales_l[sb / 2] & 0x0F) : ((scales_l[sb / 2] >> 4) & 0x0F);
-            unsigned char sh = (sb < 4) ? ((scales_h >> (2 * sb)) & 0x03) : 0;
-            int scale_6bit = (int)(sl | (sh << 4));
+            int sl = (scales_l[sb / 2] >> (4 * (sb % 2))) & 0x0F;
+            int sh = ((unsigned int)scales_h >> (2 * sb)) & 0x03;
+            int scale_6bit = sl | (sh << 4);
             float sub_scale = d * (float)(scale_6bit - 32);
 
             const unsigned char* sub_qs = qs + sb * 16;
-            for (int i = 0; i < 16; i++) {
-                unsigned char byte = sub_qs[i];
-                sum += act_row[base + sb * 32 + i * 2]     * sub_scale * (float)KVALUES_IQ4NL_GEMM_XS[byte & 0x0F];
-                sum += act_row[base + sb * 32 + i * 2 + 1] * sub_scale * (float)KVALUES_IQ4NL_GEMM_XS[(byte >> 4) & 0x0F];
+            // Split-half nibble order within each sub-block.
+            for (int j = 0; j < 16; j++) {
+                unsigned char byte = sub_qs[j];
+                sum += act_row[base + sb * 32 + j]      * sub_scale * (float)KVALUES_IQ4NL_GEMM_XS[byte & 0x0F];
+                sum += act_row[base + sb * 32 + j + 16] * sub_scale * (float)KVALUES_IQ4NL_GEMM_XS[(byte >> 4) & 0x0F];
             }
         }
     }

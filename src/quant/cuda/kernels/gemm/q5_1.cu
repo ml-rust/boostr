@@ -31,12 +31,15 @@ extern "C" __global__ void quant_matmul_q5_1_f32(
         const unsigned char* qs = block + 8;
         unsigned int base = b * 32;
 
-        for (int i = 0; i < 16; i++) {
-            unsigned char byte = qs[i];
-            int low  = (byte & 0x0F) | (((qh >> (i * 2))     & 1) << 4);
-            int high = ((byte >> 4) & 0x0F) | (((qh >> (i * 2 + 1)) & 1) << 4);
-            sum += act_row[base + i * 2]     * (d * (float)low + m);
-            sum += act_row[base + i * 2 + 1] * (d * (float)high + m);
+        // Split-half order (llama.cpp dequantize_row_q5_1): qs[j] holds element
+        // j in its low nibble and element j + 16 in its high nibble, and the
+        // fifth bits are `qh` bit j and bit j + 16.
+        for (int j = 0; j < 16; j++) {
+            unsigned char byte = qs[j];
+            int low  = (byte & 0x0F) | (((qh >> j) & 1) << 4);
+            int high = ((byte >> 4) & 0x0F) | (((qh >> (j + 16)) & 1) << 4);
+            sum += act_row[base + j]      * (d * (float)low + m);
+            sum += act_row[base + j + 16] * (d * (float)high + m);
         }
     }
     output[row * N + col] = sum;

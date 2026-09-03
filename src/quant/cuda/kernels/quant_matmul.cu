@@ -47,12 +47,14 @@ __global__ void quant_matmul_q4_0_f32(
         const unsigned char* qs = block + 2;
         unsigned int base = b * 32;
 
-        for (int i = 0; i < 16; i++) {
-            unsigned char byte = qs[i];
+        // Split-half nibble order: qs[j] holds element j in its low nibble and
+        // element j + 16 in its high nibble (llama.cpp dequantize_row_q4_0).
+        for (int j = 0; j < 16; j++) {
+            unsigned char byte = qs[j];
             float low = (float)((int)(byte & 0x0F) - 8) * d;
             float high = (float)((int)((byte >> 4) & 0x0F) - 8) * d;
-            sum += act_row[base + i * 2] * low;
-            sum += act_row[base + i * 2 + 1] * high;
+            sum += act_row[base + j] * low;
+            sum += act_row[base + j + 16] * high;
         }
     }
 

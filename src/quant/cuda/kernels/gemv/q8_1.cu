@@ -2,7 +2,7 @@
 //
 // Q8_1 block: 32 elements, 36 bytes
 // Layout: [d:f16(2), s:f16(2), qs:32B signed]
-// dequant = d * qs[i] + s
+// dequant = d * qs[i]; `s` is a precomputed dot-product sum, not a min
 
 #include "common.cuh"
 
@@ -29,10 +29,11 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q8_1_f32(
     for (unsigned int b = 0; b < blocks_per_row; b++) {
         const unsigned char* block = w_row + b * Q8_1_BLOCK_BYTES;
         float d = __half2float(*reinterpret_cast<const __half*>(block));
-        float s = __half2float(*reinterpret_cast<const __half*>(block + 2));
+        // block[2..4] is `s`, llama.cpp's precomputed dot-product sum in
+        // `block_q8_1` — NOT a min. The weight value is q * d alone.
         const signed char* qs = reinterpret_cast<const signed char*>(block + 4);
 
-        float val = d * (float)qs[lane_id] + s;
+        float val = d * (float)qs[lane_id];
         acc += act_row[b * 32 + lane_id] * val;
     }
 

@@ -48,14 +48,16 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q5_k_f32(
         for (int j = 0; j < 8; j++) {
             float dl = d * (float)scales[j];
             float ml = dmin * (float)mins[j];
-            int idx = j * 32 + lane_id;
-            int qs_idx = j * 16 + lane_id / 2;
-            int low4 = (lane_id % 2 == 0)
-                ? (qs[qs_idx] & 0x0F)
-                : ((qs[qs_idx] >> 4) & 0x0F);
-            int high1 = (qh[idx / 8] >> (idx % 8)) & 0x01;
+            // Sub-block PAIRS share one 32-byte run of qs (even sub-block takes
+            // the low nibbles, odd the high nibbles of the SAME bytes), and qh
+            // is indexed by ELEMENT with the BIT selected by sub-block index.
+            // Must match the CPU `dequant_q5k` / llama.cpp exactly.
+            int qs_idx = (j / 2) * 32 + lane_id;
+            int low4 = (j % 2) ? ((qs[qs_idx] >> 4) & 0x0F)
+                               : (qs[qs_idx] & 0x0F);
+            int high1 = (qh[lane_id] >> j) & 0x01;
             float q = (float)(low4 | (high1 << 4));
-            acc += act_row[base + idx] * (dl * q - ml);
+            acc += act_row[base + j * 32 + lane_id] * (dl * q - ml);
         }
     }
 
@@ -70,7 +72,10 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q5_k_f32(
 // Lane mapping: chunk = lane/8, pos = (lane%8)*4
 // Each lane reads 4 bytes of qs (8 nibbles for 2 sub-blocks) + high bits from qh.
 //
-// The 5th bit is packed in qh: bit (j*32+l) is the high bit for element j*32+l.
+// The 5th bit is packed in qh by ELEMENT, not as a flat bitstream: bit j of
+// qh[l] is the high bit for element l of sub-block j, so one qh byte carries
+// that element's high bit for all 8 sub-blocks (CPU `dequant_q5k`, llama.cpp
+// `dequantize_row_q5_K`).
 // For dp4a we need to construct packed int8 values with the 5th bit included.
 // ============================================================================
 
@@ -115,15 +120,13 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q5_k_q8_1_mwr(
         int v_lo = v & 0x0F0F0F0F;
         int v_hi = (v >> 4) & 0x0F0F0F0F;
 
-        // Extract high bits from qh for the 4 elements this lane covers
-        // j_lo sub-block: elements at indices j_lo*32 + pos..pos+3
-        // j_hi sub-block: elements at indices j_hi*32 + pos..pos+3
+        // Extract high bits from qh for the 4 elements this lane covers: the
+        // byte is the ELEMENT index within the sub-block (pos..pos+3) and the
+        // bit is the sub-block index.
         int qh_lo = 0, qh_hi = 0;
         for (int i = 0; i < 4; i++) {
-            int idx_lo = j_lo * 32 + pos + i;
-            int idx_hi = j_hi * 32 + pos + i;
-            int h_lo = (qh[idx_lo / 8] >> (idx_lo % 8)) & 1;
-            int h_hi = (qh[idx_hi / 8] >> (idx_hi % 8)) & 1;
+            int h_lo = (qh[pos + i] >> j_lo) & 1;
+            int h_hi = (qh[pos + i] >> j_hi) & 1;
             qh_lo |= (h_lo << 4) << (i * 8);
             qh_hi |= (h_hi << 4) << (i * 8);
         }
@@ -215,12 +218,11 @@ extern "C" __global__ __launch_bounds__(128, 1) void fused_swiglu_q5k_q8_1_mwr(
             int v_lo = v & 0x0F0F0F0F;
             int v_hi = (v >> 4) & 0x0F0F0F0F;
 
+            // qh byte = ELEMENT index within the sub-block, bit = sub-block index.
             int qh_lo = 0, qh_hi = 0;
             for (int i = 0; i < 4; i++) {
-                int idx_lo = j_lo * 32 + pos + i;
-                int idx_hi = j_hi * 32 + pos + i;
-                int h_lo = (qh[idx_lo / 8] >> (idx_lo % 8)) & 1;
-                int h_hi = (qh[idx_hi / 8] >> (idx_hi % 8)) & 1;
+                int h_lo = (qh[pos + i] >> j_lo) & 1;
+                int h_hi = (qh[pos + i] >> j_hi) & 1;
                 qh_lo |= (h_lo << 4) << (i * 8);
                 qh_hi |= (h_hi << 4) << (i * 8);
             }

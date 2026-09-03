@@ -135,9 +135,10 @@ __device__ void dq_q8_0(const unsigned char* b, float* out) {
 
 __device__ void dq_q8_1(const unsigned char* b, float* out) {
     float d = load_f16_as_f32(b);
-    float s = load_f16_as_f32(b+2);
+    // b[2..4] is `s`, llama.cpp's precomputed dot-product sum in `block_q8_1`,
+    // NOT a min. Dequant is q * d and must ignore it.
     const signed char* qs = (const signed char*)(b+4);
-    for (int i = 0; i < 32; i++) out[i] = (float)qs[i] * d + s;
+    for (int i = 0; i < 32; i++) out[i] = (float)qs[i] * d;
 }
 
 __device__ void dq_q2k(const unsigned char* b, float* out) {

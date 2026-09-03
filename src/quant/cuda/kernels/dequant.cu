@@ -32,12 +32,15 @@ __global__ void dequant_q4_0_f32(
 
     const unsigned char* qs = block + 2;
 
-    for (int i = 0; i < 16; i++) {
-        unsigned char byte = qs[i];
+    // Split-half nibble order (llama.cpp `dequantize_row_q4_0`): element j takes
+    // the LOW nibble of qs[j], element j+16 the HIGH nibble of the SAME byte.
+    // They are 16 apart, not adjacent — see decode.cuh.
+    for (int j = 0; j < 16; j++) {
+        unsigned char byte = qs[j];
         int low = (int)(byte & 0x0F) - 8;
         int high = (int)((byte >> 4) & 0x0F) - 8;
-        out[i * 2] = (float)low * d;
-        out[i * 2 + 1] = (float)high * d;
+        out[j] = (float)low * d;
+        out[j + 16] = (float)high * d;
     }
 }
 
@@ -60,15 +63,23 @@ __global__ void dequant_q5_0_f32(
 
     __half d_half = *reinterpret_cast<const __half*>(block);
     float d = __half2float(d_half);
-    unsigned int qh = *reinterpret_cast<const unsigned int*>(block + 2);
+    // The block stride is 22 bytes, so `block + 2` is only 2-byte aligned for
+    // odd blocks: a 4-byte load through a `unsigned int*` traps with
+    // CUDA_ERROR_MISALIGNED_ADDRESS, which poisons the context for every later
+    // launch. memcpy is the portable unaligned load.
+    unsigned int qh;
+    memcpy(&qh, block + 2, sizeof(unsigned int));
     const unsigned char* qs = block + 6;
 
-    for (int i = 0; i < 16; i++) {
-        unsigned char byte = qs[i];
-        int low  = (byte & 0x0F) | (((qh >> (i * 2))     & 1) << 4);
-        int high = ((byte >> 4) & 0x0F) | (((qh >> (i * 2 + 1)) & 1) << 4);
-        out[i * 2]     = (float)(low - 16) * d;
-        out[i * 2 + 1] = (float)(high - 16) * d;
+    // Split-half nibble order (llama.cpp `dequantize_row_q5_0`): element j takes
+    // the LOW nibble of qs[j] and fifth bit `qh` bit j; element j+16 takes the
+    // HIGH nibble of the same byte and `qh` bit j+16. See decode.cuh.
+    for (int j = 0; j < 16; j++) {
+        unsigned char byte = qs[j];
+        int low  = (byte & 0x0F) | (((qh >> j) & 1) << 4);
+        int high = ((byte >> 4) & 0x0F) | (((qh >> (j + 16)) & 1) << 4);
+        out[j]      = (float)(low - 16) * d;
+        out[j + 16] = (float)(high - 16) * d;
     }
 }
 
@@ -359,15 +370,23 @@ __global__ void dequant_q5_k_f32(
     for (int j = 0; j < 8; j++) {
         float dl = d * (float)scales[j];
         float ml = dmin * (float)mins[j];
+
+        // llama.cpp `dequantize_row_q5_K`: sub-block PAIRS share one 32-byte run
+        // of `qs` — the even sub-block takes the low nibbles, the odd one the
+        // high nibbles of the SAME bytes (identical to Q4_K above). It is NOT a
+        // per-sub-block 16-byte run with interleaved nibbles.
+        int qs_base = (j / 2) * 32;
+        int is_high_nibble = j % 2;
+
         for (int l = 0; l < 32; l++) {
-            int idx = j * 32 + l;
-            int qs_idx = j * 16 + l / 2;
-            int low4;
-            if (l % 2 == 0) low4 = qs[qs_idx] & 0x0F;
-            else            low4 = (qs[qs_idx] >> 4) & 0x0F;
-            int high1 = (qh[idx / 8] >> (idx % 8)) & 0x01;
+            int low4 = is_high_nibble ? ((qs[qs_base + l] >> 4) & 0x0F)
+                                      : (qs[qs_base + l] & 0x0F);
+            // 5th bit: `qh` is indexed by ELEMENT within the sub-block and the
+            // BIT is the sub-block index — one qh byte per element carries that
+            // element's high bit for all 8 sub-blocks. Not a flat bitstream.
+            int high1 = (qh[l] >> j) & 0x01;
             float q = (float)(low4 | (high1 << 4));
-            out[idx] = dl * q - ml;
+            out[j * 32 + l] = dl * q - ml;
         }
     }
 }
@@ -398,17 +417,23 @@ __global__ void dequant_iq4_nl_f32(
     float d = __half2float(d_half);
     const unsigned char* qs = block + 2;
 
-    for (int i = 0; i < 16; i++) {
-        unsigned char byte = qs[i];
-        out[i * 2]     = d * (float)KVALUES_IQ4NL[byte & 0x0F];
-        out[i * 2 + 1] = d * (float)KVALUES_IQ4NL[(byte >> 4) & 0x0F];
+    // Split-half nibble order (llama.cpp `dequantize_row_iq4_nl`): `y[j]` takes
+    // the low nibble, `y[j + QK4_NL/2]` the high nibble of the SAME byte.
+    for (int j = 0; j < 16; j++) {
+        unsigned char byte = qs[j];
+        out[j]      = d * (float)KVALUES_IQ4NL[byte & 0x0F];
+        out[j + 16] = d * (float)KVALUES_IQ4NL[(byte >> 4) & 0x0F];
     }
 }
 
 // ============================================================================
 // IQ4_XS Dequantization
 // Block: 256 elements, 136 bytes
-// Layout: f16 d (2B) + scales_h (1B) + scales_l (4B) + pad (1B) + qs (128B)
+// Layout matches llama.cpp `block_iq4_xs` exactly:
+//   { ggml_half d; uint16_t scales_h; uint8_t scales_l[4]; uint8_t qs[128]; }
+// so scales_h is a TWO-byte field at 2..4 and scales_l occupies 4..8. There is
+// no pad byte, and scales_h carries high scale bits for all EIGHT sub-blocks
+// (16 bits = 8 x 2).
 // 8 sub-blocks of 32 elements, 6-bit scales, KVALUES_IQ4NL codebook
 // ============================================================================
 
@@ -426,22 +451,26 @@ __global__ void dequant_iq4_xs_f32(
     __half d_half;
     memcpy(&d_half, block, sizeof(__half));
     float d = __half2float(d_half);
-    unsigned char scales_h = block[2];
-    const unsigned char* scales_l = block + 3;
+    unsigned short scales_h;
+    memcpy(&scales_h, block + 2, sizeof(unsigned short));
+    const unsigned char* scales_l = block + 4;
     const unsigned char* qs = block + 8;
 
     for (int sb = 0; sb < 8; sb++) {
-        unsigned char sl = (sb % 2 == 0) ? (scales_l[sb / 2] & 0x0F) : ((scales_l[sb / 2] >> 4) & 0x0F);
-        unsigned char sh = (sb < 4) ? ((scales_h >> (2 * sb)) & 0x03) : 0;
-        int scale_6bit = (int)(sl | (sh << 4));
+        // 4 low bits from scales_l (one nibble per sub-block), 2 high bits from
+        // scales_h (2 bits per sub-block across all 8).
+        int sl = (scales_l[sb / 2] >> (4 * (sb % 2))) & 0x0F;
+        int sh = ((unsigned int)scales_h >> (2 * sb)) & 0x03;
+        int scale_6bit = sl | (sh << 4);
         float sub_scale = d * (float)(scale_6bit - 32);
 
         const unsigned char* sub_qs = qs + sb * 16;
         float* sub_out = out + sb * 32;
-        for (int i = 0; i < 16; i++) {
-            unsigned char byte = sub_qs[i];
-            sub_out[i * 2]     = sub_scale * (float)KVALUES_IQ4NL[byte & 0x0F];
-            sub_out[i * 2 + 1] = sub_scale * (float)KVALUES_IQ4NL[(byte >> 4) & 0x0F];
+        // Split-half nibble order within each sub-block.
+        for (int j = 0; j < 16; j++) {
+            unsigned char byte = sub_qs[j];
+            sub_out[j]      = sub_scale * (float)KVALUES_IQ4NL[byte & 0x0F];
+            sub_out[j + 16] = sub_scale * (float)KVALUES_IQ4NL[(byte >> 4) & 0x0F];
         }
     }
 }
@@ -478,7 +507,10 @@ __global__ void dequant_iq3_s_f32(
 
         for (int k = 0; k < 32; k++) {
             int byte_idx = sb * 4 + k / 8;
-            int q3 = (byte_idx < 32) ? ((qs[byte_idx] >> ((k % 8) / 2 * 2)) & 0x03) : 0;
+            // Four 2-bit grid values per byte: the bit position within the byte
+            // is (k % 8) % 4, so the shift is (k % 4) * 2.
+            int bit_pos = k % 8;
+            int q3 = (byte_idx < 32) ? ((qs[byte_idx] >> ((bit_pos % 4) * 2)) & 0x03) : 0;
             int qh_byte_idx = (sb * 32 + k) / 8;
             int qh_bit = (qh_byte_idx < 4) ? ((qh[qh_byte_idx] >> ((sb * 32 + k) % 8)) & 1) : 0;
             float val = (float)q3 + (float)qh_bit * 4.0f + 1.0f;
@@ -522,14 +554,18 @@ __global__ void dequant_iq2_xs_f32(
         unsigned int q_offset = sb * 2;
         unsigned int q_val = (unsigned int)qs[q_offset] | ((unsigned int)qs[q_offset + 1] << 8);
 
+        // The 16-bit field splits at bit 9: the low 9 bits are the grid index
+        // (four 2-bit values, reused for both halves of the sub-block), the
+        // bits above it are the per-element signs. The magnitude is the raw
+        // 2-bit grid value — there is no +0.5 offset on it.
+        unsigned int grid_idx = q_val & 0x1FF;
+        unsigned int signs = q_val >> 9;
+
         float* sub_out = out + sb * 16;
         for (int k = 0; k < 16; k++) {
-            int bits = (q_val >> k) & 1;
-            // IQ2_XS: each element is sign * (grid_magnitude)
-            // Simplified: use 2-bit value extraction
-            int val_2bit = (q_val >> (k % 8 * 2)) & 0x03;
-            float magnitude = (float)val_2bit + 0.5f;
-            float sign = ((q_val >> (8 + k)) & 1) ? -1.0f : 1.0f;
+            int pos = k % 8;
+            float magnitude = (float)((grid_idx >> (pos * 2)) & 0x03);
+            float sign = ((signs >> pos) & 1) ? -1.0f : 1.0f;
             sub_out[k] = scale * magnitude * sign;
         }
     }

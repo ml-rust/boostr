@@ -33,14 +33,19 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q5_0_f32(
     for (unsigned int b = 0; b < blocks_per_row; b++) {
         const unsigned char* block = w_row + b * Q5_0_BLOCK_BYTES;
         float d = __half2float(*reinterpret_cast<const __half*>(block));
-        unsigned int qh = *reinterpret_cast<const unsigned int*>(block + 2);
+        // The block stride is 22 bytes, so `block + 2` is only 2-byte aligned on
+        // odd blocks: a 4-byte load through `unsigned int*` traps with
+        // CUDA_ERROR_MISALIGNED_ADDRESS and poisons the context for every later
+        // launch. memcpy is the portable unaligned load.
+        unsigned int qh;
+        memcpy(&qh, block + 2, sizeof(unsigned int));
         const unsigned char* qs = block + 6;
 
-        // Each lane handles one of 32 elements
-        int byte_idx = lane_id >> 1;
-        int is_high = lane_id & 1;
-        unsigned char byte = qs[byte_idx];
-        int low4 = is_high ? ((byte >> 4) & 0x0F) : (byte & 0x0F);
+        // Each lane handles one of 32 elements. Split-half nibble order: lane
+        // `l` takes the LOW nibble of qs[l] for l < 16, the HIGH nibble of
+        // qs[l - 16] for l >= 16 (llama.cpp dequantize_row_q5_0). The fifth bit
+        // is `qh` bit `l`, which already matches the element index.
+        int low4 = gguf_split_half_nibble(qs, (int)lane_id);
         int high1 = (qh >> lane_id) & 1;
         int val = (low4 | (high1 << 4)) - 16;
         acc += act_row[b * 32 + lane_id] * ((float)val * d);

@@ -64,11 +64,10 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q4_0_f32(
         const unsigned char* block = w_row + b * 18;
         float d = __half2float(*reinterpret_cast<const __half*>(block));
         const unsigned char* qs = block + 2;
-        unsigned int byte_idx = lane_id >> 1;
-        unsigned int is_high = lane_id & 1;
-        unsigned char bv = qs[byte_idx];
-        float q = is_high ? (float)((int)((bv >> 4) & 0x0F) - 8) * d
-                          : (float)((int)(bv & 0x0F) - 8) * d;
+        // Split-half nibble order: lane `l` decodes the LOW nibble of qs[l] for
+        // l < 16 and the HIGH nibble of qs[l - 16] for l >= 16 — the byte index
+        // is NOT lane/2. See gguf_split_half_nibble in decode.cuh.
+        float q = (float)(gguf_split_half_nibble(qs, (int)lane_id) - 8) * d;
         acc += act_row[b * 32 + lane_id] * q;
     }
 

@@ -105,3 +105,25 @@ static __device__ __forceinline__ void q4k_scale_min(
         *minimum = (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4);
     }
 }
+
+// ── Split-half nibble order (4-bit formats over 32-element blocks) ───────
+// llama.cpp `dequantize_row_q4_0` packs element `j` and element `j + 16` of a
+// block into ONE byte:
+//
+//     y[i*qk + j + 0    ] = (qs[j] & 0x0F) * d;   // first half
+//     y[i*qk + j + qk/2 ] = (qs[j] >>   4) * d;   // second half
+//
+// The two nibbles of a byte are 16 elements apart in the output, NOT adjacent.
+// Q4_0, Q4_1, Q5_0, Q5_1, IQ4_NL and IQ4_XS all use it. Emitting them to
+// consecutive positions permutes every weight inside the block and nothing
+// errors: shape, block count and tensor RMS all stay correct. Q5_0/Q5_1 index
+// their fifth-bit word `qh` with the SAME element index — bit `j` for the
+// first half, bit `j + 16` for the second.
+//
+// `elem` is the element index within the 32-element block.
+static __device__ __forceinline__ int gguf_split_half_nibble(
+    const unsigned char* qs, int elem
+) {
+    const unsigned char byte = qs[elem & 15];
+    return (elem & 16) ? ((byte >> 4) & 0x0F) : (byte & 0x0F);
+}

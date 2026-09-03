@@ -59,6 +59,12 @@ __device__ __forceinline__ float load_f32(const unsigned char* p) {
     return tmp;
 }
 
+__device__ __forceinline__ unsigned short load_u16(const unsigned char* p) {
+    unsigned short tmp;
+    memcpy(&tmp, p, sizeof(unsigned short));
+    return tmp;
+}
+
 __device__ __forceinline__ unsigned int load_u32(const unsigned char* p) {
     unsigned int tmp;
     memcpy(&tmp, p, sizeof(unsigned int));
@@ -73,13 +79,19 @@ __device__ __forceinline__ unsigned long long load_u64(const unsigned char* p) {
 
 // ── Simple quant device functions ────────────────────────────────────
 
+// Split-half nibble order, shared by every 4-bit format below: llama.cpp
+// `dequantize_row_q4_0` writes the LOW nibble of qs[j] to element j and the
+// HIGH nibble of the SAME byte to element j + 16. The two nibbles are 16
+// elements apart, never adjacent. Q5_0/Q5_1 index the fifth-bit word `qh` with
+// the same element index — bit j and bit j + 16.
+
 __device__ void dequant_q4_0_block(const unsigned char* block, float* out) {
     float d = load_f16_as_f32(block);
     const unsigned char* qs = block + 2;
-    for (int i = 0; i < 16; i++) {
-        unsigned char byte = qs[i];
-        out[i * 2]     = (float)((int)(byte & 0x0F) - 8) * d;
-        out[i * 2 + 1] = (float)((int)((byte >> 4) & 0x0F) - 8) * d;
+    for (int j = 0; j < 16; j++) {
+        unsigned char byte = qs[j];
+        out[j]      = (float)((int)(byte & 0x0F) - 8) * d;
+        out[j + 16] = (float)((int)((byte >> 4) & 0x0F) - 8) * d;
     }
 }
 
@@ -87,10 +99,10 @@ __device__ void dequant_q4_1_block(const unsigned char* block, float* out) {
     float d = load_f16_as_f32(block);
     float m = load_f16_as_f32(block + 2);
     const unsigned char* qs = block + 4;
-    for (int i = 0; i < 16; i++) {
-        unsigned char byte = qs[i];
-        out[i * 2]     = d * (float)(byte & 0x0F) + m;
-        out[i * 2 + 1] = d * (float)((byte >> 4) & 0x0F) + m;
+    for (int j = 0; j < 16; j++) {
+        unsigned char byte = qs[j];
+        out[j]      = d * (float)(byte & 0x0F) + m;
+        out[j + 16] = d * (float)((byte >> 4) & 0x0F) + m;
     }
 }
 
@@ -98,12 +110,12 @@ __device__ void dequant_q5_0_block(const unsigned char* block, float* out) {
     float d = load_f16_as_f32(block);
     unsigned int qh = load_u32(block + 2);
     const unsigned char* qs = block + 6;
-    for (int i = 0; i < 16; i++) {
-        unsigned char byte = qs[i];
-        int low  = (byte & 0x0F) | (((qh >> (i * 2))     & 1) << 4);
-        int high = ((byte >> 4) & 0x0F) | (((qh >> (i * 2 + 1)) & 1) << 4);
-        out[i * 2]     = (float)(low - 16) * d;
-        out[i * 2 + 1] = (float)(high - 16) * d;
+    for (int j = 0; j < 16; j++) {
+        unsigned char byte = qs[j];
+        int low  = (byte & 0x0F) | (((qh >> j) & 1) << 4);
+        int high = ((byte >> 4) & 0x0F) | (((qh >> (j + 16)) & 1) << 4);
+        out[j]      = (float)(low - 16) * d;
+        out[j + 16] = (float)(high - 16) * d;
     }
 }
 
@@ -112,12 +124,12 @@ __device__ void dequant_q5_1_block(const unsigned char* block, float* out) {
     float m = load_f16_as_f32(block + 2);
     unsigned int qh = load_u32(block + 4);
     const unsigned char* qs = block + 8;
-    for (int i = 0; i < 16; i++) {
-        unsigned char byte = qs[i];
-        int low  = (byte & 0x0F) | (((qh >> (i * 2))     & 1) << 4);
-        int high = ((byte >> 4) & 0x0F) | (((qh >> (i * 2 + 1)) & 1) << 4);
-        out[i * 2]     = d * (float)low + m;
-        out[i * 2 + 1] = d * (float)high + m;
+    for (int j = 0; j < 16; j++) {
+        unsigned char byte = qs[j];
+        int low  = (byte & 0x0F) | (((qh >> j) & 1) << 4);
+        int high = ((byte >> 4) & 0x0F) | (((qh >> (j + 16)) & 1) << 4);
+        out[j]      = d * (float)low + m;
+        out[j + 16] = d * (float)high + m;
     }
 }
 
@@ -131,10 +143,11 @@ __device__ void dequant_q8_0_block(const unsigned char* block, float* out) {
 
 __device__ void dequant_q8_1_block(const unsigned char* block, float* out) {
     float d = load_f16_as_f32(block);
-    float s = load_f16_as_f32(block + 2);
+    // block[2..4] is `s`, a precomputed dot-product sum in llama.cpp's
+    // `block_q8_1` — NOT a min. Dequant is q * d and must ignore it.
     const signed char* qs = reinterpret_cast<const signed char*>(block + 4);
     for (int i = 0; i < 32; i++) {
-        out[i] = (float)qs[i] * d + s;
+        out[i] = (float)qs[i] * d;
     }
 }
 
@@ -269,17 +282,18 @@ __device__ void dequant_q5k_block(const unsigned char* block, float* out) {
     for (int j = 0; j < 8; j++) {
         float dl = d * (float)scales[j];
         float ml = dmin * (float)mins[j];
+        // llama.cpp `dequantize_row_q5_K`: sub-block PAIRS share one 32-byte run
+        // of `qs` (even sub-block low nibbles, odd sub-block high nibbles of the
+        // SAME bytes), and `qh` is indexed by ELEMENT with the BIT selected by
+        // the sub-block index — not a flat bitstream over the 256 values.
+        int qs_base = (j / 2) * 32;
+        int is_high_nibble = j % 2;
         for (int l = 0; l < 32; l++) {
-            int idx = j * 32 + l;
-            int qs_idx = j * 16 + l / 2;
-            int low4;
-            if (l % 2 == 0) low4 = qs[qs_idx] & 0x0F;
-            else            low4 = (qs[qs_idx] >> 4) & 0x0F;
-            int qh_byte = idx / 8;
-            int qh_bit  = idx % 8;
-            int high1 = (qh[qh_byte] >> qh_bit) & 0x01;
+            int low4 = is_high_nibble ? ((qs[qs_base + l] >> 4) & 0x0F)
+                                      : (qs[qs_base + l] & 0x0F);
+            int high1 = (qh[l] >> j) & 0x01;
             float q = (float)(low4 | (high1 << 4));
-            out[idx] = dl * q - ml;
+            out[j * 32 + l] = dl * q - ml;
         }
     }
 }
@@ -322,31 +336,37 @@ __device__ void dequant_q8k_block(const unsigned char* block, float* out) {
 __device__ void dequant_iq4_nl_block(const unsigned char* block, float* out) {
     float d = load_f16_as_f32(block);
     const unsigned char* qs = block + 2;
-    for (int i = 0; i < 16; i++) {
-        unsigned char byte = qs[i];
-        out[i * 2]     = d * (float)KVALUES_IQ4NL[byte & 0x0F];
-        out[i * 2 + 1] = d * (float)KVALUES_IQ4NL[(byte >> 4) & 0x0F];
+    // Split-half nibble order (llama.cpp `dequantize_row_iq4_nl`).
+    for (int j = 0; j < 16; j++) {
+        unsigned char byte = qs[j];
+        out[j]      = d * (float)KVALUES_IQ4NL[byte & 0x0F];
+        out[j + 16] = d * (float)KVALUES_IQ4NL[(byte >> 4) & 0x0F];
     }
 }
 
 __device__ void dequant_iq4_xs_block(const unsigned char* block, float* out) {
+    // llama.cpp `block_iq4_xs`:
+    //   { ggml_half d; uint16_t scales_h; uint8_t scales_l[4]; uint8_t qs[128]; }
+    // scales_h is TWO bytes at offset 2, so scales_l starts at 4 (no pad byte)
+    // and scales_h supplies high scale bits for all EIGHT sub-blocks.
     float d = load_f16_as_f32(block);
-    unsigned char scales_h = block[2];
-    const unsigned char* scales_l = block + 3;
+    unsigned int scales_h = (unsigned int)load_u16(block + 2);
+    const unsigned char* scales_l = block + 4;
     const unsigned char* qs = block + 8;
 
     for (int sb = 0; sb < 8; sb++) {
-        int sl = (sb % 2 == 0) ? (scales_l[sb/2] & 0x0F) : ((scales_l[sb/2] >> 4) & 0x0F);
-        int sh = (sb < 4) ? ((scales_h >> (2 * sb)) & 0x03) : 0;
+        int sl = (scales_l[sb / 2] >> (4 * (sb % 2))) & 0x0F;
+        int sh = (scales_h >> (2 * sb)) & 0x03;
         int scale_6bit = sl | (sh << 4);
         float sub_scale = d * (float)(scale_6bit - 32);
 
         const unsigned char* sub_qs = qs + sb * 16;
         float* sub_out = out + sb * 32;
-        for (int i = 0; i < 16; i++) {
-            unsigned char byte = sub_qs[i];
-            sub_out[i * 2]     = sub_scale * (float)KVALUES_IQ4NL[byte & 0x0F];
-            sub_out[i * 2 + 1] = sub_scale * (float)KVALUES_IQ4NL[(byte >> 4) & 0x0F];
+        // Split-half nibble order within each sub-block.
+        for (int j = 0; j < 16; j++) {
+            unsigned char byte = sub_qs[j];
+            sub_out[j]      = sub_scale * (float)KVALUES_IQ4NL[byte & 0x0F];
+            sub_out[j + 16] = sub_scale * (float)KVALUES_IQ4NL[(byte >> 4) & 0x0F];
         }
     }
 }

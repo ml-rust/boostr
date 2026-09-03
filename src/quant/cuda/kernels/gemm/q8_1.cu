@@ -21,16 +21,16 @@ extern "C" __global__ void quant_matmul_q8_1_f32(
     float sum = 0.0f;
     for (unsigned int b = 0; b < blocks_per_row; b++) {
         const unsigned char* block = w_row + b * 36;
-        __half d_half, s_half;
+        __half d_half;
         memcpy(&d_half, block, sizeof(__half));
-        memcpy(&s_half, block + 2, sizeof(__half));
         float d = __half2float(d_half);
-        float s = __half2float(s_half);
+        // block[2..4] is `s`, llama.cpp's precomputed dot-product sum in
+        // `block_q8_1` — NOT a min. The weight value is q * d alone.
         const signed char* qs = reinterpret_cast<const signed char*>(block + 4);
         unsigned int base = b * 32;
 
         for (int i = 0; i < 32; i++) {
-            sum += act_row[base + i] * ((float)qs[i] * d + s);
+            sum += act_row[base + i] * ((float)qs[i] * d);
         }
     }
     output[row * N + col] = sum;

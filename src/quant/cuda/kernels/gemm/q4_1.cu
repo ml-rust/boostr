@@ -29,10 +29,12 @@ extern "C" __global__ void quant_matmul_q4_1_f32(
         const unsigned char* qs = block + 4;
         unsigned int base = b * 32;
 
-        for (int i = 0; i < 16; i++) {
-            unsigned char byte = qs[i];
-            sum += act_row[base + i * 2]     * (d * (float)(byte & 0x0F) + m);
-            sum += act_row[base + i * 2 + 1] * (d * (float)((byte >> 4) & 0x0F) + m);
+        // Split-half nibble order: qs[j] holds element j in its low nibble and
+        // element j + 16 in its high nibble (llama.cpp dequantize_row_q4_1).
+        for (int j = 0; j < 16; j++) {
+            unsigned char byte = qs[j];
+            sum += act_row[base + j]      * (d * (float)(byte & 0x0F) + m);
+            sum += act_row[base + j + 16] * (d * (float)((byte >> 4) & 0x0F) + m);
         }
     }
     output[row * N + col] = sum;

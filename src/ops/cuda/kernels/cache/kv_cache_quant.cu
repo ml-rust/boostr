@@ -64,11 +64,12 @@ __device__ __forceinline__ void quantize_kv_fp8_per_token_impl(
         __syncthreads();
     }
 
-    // Compute scale: max_val / FP8_max (448 for E4M3)
+    // 448 is the FP8 E4M3 max. `f32_to_fp8_e4m3_raw` does `val * scale` and
+    // `fp8_e4m3_to_f32` does `fp8_val / scale`, so this stores 448/max.
     __shared__ float scale;
     if (tid == 0) {
         float max_val = sdata[0];
-        scale = (max_val > 0.0f) ? (max_val / 448.0f) : 1.0f;
+        scale = (max_val > 0.0f) ? (448.0f / max_val) : 1.0f;
         scales[token_idx] = scale;
     }
     __syncthreads();
@@ -375,10 +376,13 @@ __device__ __forceinline__ void quantize_kv_fp8_per_head_impl(
         __syncthreads();
     }
 
+    // 448 is the FP8 E4M3 max. `f32_to_fp8_e4m3_raw` does `val * scale` and
+    // `fp8_e4m3_to_f32` does `fp8_val / scale`, so this stores 448/max, not
+    // max/448. The same convention holds in kv_cache_fp8.cu's per-token path.
     __shared__ float scale;
     if (tid == 0) {
         float max_val = sdata[0];
-        scale = (max_val > 0.0f) ? (max_val / 448.0f) : 1.0f;
+        scale = (max_val > 0.0f) ? (448.0f / max_val) : 1.0f;
         scales[head_idx] = scale;
     }
     __syncthreads();

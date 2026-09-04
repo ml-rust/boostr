@@ -153,3 +153,99 @@ fn mma_int8_matches_scalar_reference() {
         }
     }
 }
+
+#[test]
+fn mma_int8_k16_matches_scalar_reference() {
+    if !numr::runtime::cuda::is_cuda_available() {
+        println!(
+            "!! mma_int8_k16_matches_scalar_reference SKIPPED: CUDA is not available on this \
+             machine. NOTHING WAS VERIFIED."
+        );
+        eprintln!(
+            "!! mma_int8_k16_matches_scalar_reference SKIPPED: CUDA is not available on this \
+             machine. NOTHING WAS VERIFIED."
+        );
+        return;
+    }
+    let _lock = cuda_lock();
+
+    // `m16n8k16` needs sm_80. `caps.bf16` marks that floor, so a pre-Ampere
+    // device skips here instead of failing to load the module.
+    if !CudaDevice::new(0).profile().caps.bf16 {
+        println!(
+            "!! mma_int8_k16_matches_scalar_reference SKIPPED: this GPU predates sm_80, which \
+             `mma.sync.aligned.m16n8k16` requires. NOTHING WAS VERIFIED."
+        );
+        eprintln!(
+            "!! mma_int8_k16_matches_scalar_reference SKIPPED: this GPU predates sm_80, which \
+             `mma.sync.aligned.m16n8k16` requires. NOTHING WAS VERIFIED."
+        );
+        return;
+    }
+
+    let a_host: Vec<i32> = (0..16)
+        .flat_map(|row| (0..4).map(move |word| pack_word(row, word)))
+        .collect();
+    let b_host: Vec<i32> = (0..8)
+        .flat_map(|row| (0..4).map(move |word| pack_word(row, word)))
+        .collect();
+
+    let mut reference = [[0i32; 8]; 16];
+    for i in 0..16 {
+        for j in 0..8 {
+            let mut sum = 0i32;
+            for k in 0..16 {
+                sum += element(i, k) * element(j, k);
+            }
+            reference[i][j] = sum;
+        }
+    }
+
+    let device = CudaDevice::new(0);
+    let client = CudaRuntime::default_client(&device);
+    client.synchronize();
+
+    let device_index = device.id();
+    let module =
+        kernels::get_or_load_module(client.context(), device_index, MMA_INT8_PROBE_MODULE).unwrap();
+    let func = kernels::get_kernel_function(&module, "mma_int8_k16_probe").unwrap();
+
+    let d_host = {
+        let a = Tensor::<CudaRuntime>::from_slice(&a_host, &[16, 4], &device).unwrap();
+        let b = Tensor::<CudaRuntime>::from_slice(&b_host, &[8, 4], &device).unwrap();
+        let d = Tensor::<CudaRuntime>::from_slice(&[0i32; 128], &[16, 8], &device).unwrap();
+
+        let a_ptr = a.ptr();
+        let b_ptr = b.ptr();
+        let d_ptr = d.ptr();
+
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            let mut builder = client.stream().launch_builder(&func);
+            builder.arg(&a_ptr);
+            builder.arg(&b_ptr);
+            builder.arg(&d_ptr);
+            builder.launch(cfg).unwrap();
+        }
+
+        d.to_vec::<i32>()
+    };
+    client.synchronize();
+
+    for i in 0..16 {
+        for j in 0..8 {
+            let got = d_host[i * 8 + j];
+            let want = reference[i][j];
+            assert_eq!(
+                got, want,
+                "mismatch at (i={i}, j={j}): got {got}, want {want}. A wrong value here means \
+                 the k16 fragment index map in mma_int8.cuh is wrong, not the arithmetic."
+            );
+        }
+    }
+}

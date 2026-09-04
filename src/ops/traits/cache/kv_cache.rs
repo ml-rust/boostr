@@ -81,4 +81,55 @@ pub trait KvCacheOps<R: Runtime> {
         position: usize,
         group_size: Int4GroupSize,
     ) -> Result<()>;
+
+    /// Duplicate physical blocks within the same K and V caches.
+    ///
+    /// Used for prefix caching / prefix-sharing: forking a sequence copies
+    /// its shared prefix blocks into new physical blocks before the fork
+    /// diverges, without touching the original blocks.
+    ///
+    /// # Layout contract
+    ///
+    /// - `key_cache`, `value_cache`: `[num_blocks, block_size, num_heads, head_dim]`
+    /// - `block_mapping`: `[num_pairs * 2]` (I32) — `[i*2]` is the source
+    ///   block index, `[i*2+1]` is the destination block index, for pair `i`
+    ///
+    /// Every pair copies its source block into its destination block inside
+    /// both `key_cache` and `value_cache`. This does not perform host
+    /// (CPU) offload — both caches stay on the same device.
+    fn copy_blocks(
+        &self,
+        key_cache: &Tensor<R>,
+        value_cache: &Tensor<R>,
+        block_mapping: &Tensor<R>,
+        num_heads: usize,
+        head_dim: usize,
+        block_size: usize,
+    ) -> Result<()>;
+
+    /// Move blocks between two distinct device-resident cache buffers.
+    ///
+    /// Unlike [`KvCacheOps::copy_blocks`], which duplicates blocks within one
+    /// K/V cache pair, this moves blocks between two separate buffers
+    /// (`src_cache` and `dst_cache`), one tensor at a time — call it once for
+    /// K and once for V.
+    ///
+    /// # Layout contract
+    ///
+    /// - `src_cache`, `dst_cache`: `[num_blocks, block_size, num_heads, head_dim]`
+    /// - `block_mapping`: `[num_pairs * 2]` (I32) — `[i*2]` is the source
+    ///   block index, `[i*2+1]` is the destination block index, for pair `i`
+    ///
+    /// Both buffers must already be resident on the same device. This does
+    /// NOT perform host (CPU) offload — a caller must never feed it host
+    /// memory.
+    fn swap_blocks(
+        &self,
+        src_cache: &Tensor<R>,
+        dst_cache: &Tensor<R>,
+        block_mapping: &Tensor<R>,
+        num_heads: usize,
+        head_dim: usize,
+        block_size: usize,
+    ) -> Result<()>;
 }

@@ -50,7 +50,10 @@ __global__ void reshape_and_cache_f32(
     const int cache_offset = ((block_idx * block_size + block_offset) * num_heads + head_idx) * head_dim;
 
     const int vec_size = 4;
-    const int num_vecs = head_dim / vec_size;
+    // input_offset/cache_offset scale with head_dim; a head_dim not a multiple
+    // of vec_size misaligns the Float4 cast, so fall back to scalar-only.
+    const bool vec_ok = (input_offset % vec_size == 0) && (cache_offset % vec_size == 0);
+    const int num_vecs = vec_ok ? (head_dim / vec_size) : 0;
 
     if (tid < num_vecs) {
         const int elem_offset = tid * vec_size;
@@ -95,7 +98,10 @@ __global__ void reshape_and_cache_f16(
     const int cache_offset = ((block_idx * block_size + block_offset) * num_heads + head_idx) * head_dim;
 
     const int vec_size = 8;
-    const int num_vecs = head_dim / vec_size;
+    // input_offset/cache_offset scale with head_dim; a head_dim not a multiple
+    // of vec_size misaligns the float4 cast, so fall back to scalar-only.
+    const bool vec_ok = (input_offset % vec_size == 0) && (cache_offset % vec_size == 0);
+    const int num_vecs = vec_ok ? (head_dim / vec_size) : 0;
 
     if (tid < num_vecs) {
         const int elem_offset = tid * vec_size;
@@ -140,7 +146,10 @@ __global__ void reshape_and_cache_bf16(
     const int cache_offset = ((block_idx * block_size + block_offset) * num_heads + head_idx) * head_dim;
 
     const int vec_size = 8;
-    const int num_vecs = head_dim / vec_size;
+    // input_offset/cache_offset scale with head_dim; a head_dim not a multiple
+    // of vec_size misaligns the float4 cast, so fall back to scalar-only.
+    const bool vec_ok = (input_offset % vec_size == 0) && (cache_offset % vec_size == 0);
+    const int num_vecs = vec_ok ? (head_dim / vec_size) : 0;
 
     if (tid < num_vecs) {
         const int elem_offset = tid * vec_size;
@@ -185,7 +194,10 @@ __global__ void copy_blocks_f32(
     const int dst_offset = ((dst_block * block_size + slot_in_block) * num_heads + head_idx) * head_dim;
 
     const int vec_size = 4;
-    const int num_vecs = head_dim / vec_size;
+    // src_offset/dst_offset scale with head_dim; a head_dim not a multiple
+    // of vec_size misaligns the Float4 cast, so fall back to scalar-only.
+    const bool vec_ok = (src_offset % vec_size == 0) && (dst_offset % vec_size == 0);
+    const int num_vecs = vec_ok ? (head_dim / vec_size) : 0;
 
     if (tid < num_vecs) {
         const int elem_offset = tid * vec_size;
@@ -226,7 +238,10 @@ __global__ void copy_blocks_f16(
     const int dst_offset = ((dst_block * block_size + slot_in_block) * num_heads + head_idx) * head_dim;
 
     const int vec_size = 8;
-    const int num_vecs = head_dim / vec_size;
+    // src_offset/dst_offset scale with head_dim; a head_dim not a multiple
+    // of vec_size misaligns the float4 cast, so fall back to scalar-only.
+    const bool vec_ok = (src_offset % vec_size == 0) && (dst_offset % vec_size == 0);
+    const int num_vecs = vec_ok ? (head_dim / vec_size) : 0;
 
     if (tid < num_vecs) {
         const int elem_offset = tid * vec_size;
@@ -267,7 +282,10 @@ __global__ void copy_blocks_bf16(
     const int dst_offset = ((dst_block * block_size + slot_in_block) * num_heads + head_idx) * head_dim;
 
     const int vec_size = 8;
-    const int num_vecs = head_dim / vec_size;
+    // src_offset/dst_offset scale with head_dim; a head_dim not a multiple
+    // of vec_size misaligns the float4 cast, so fall back to scalar-only.
+    const bool vec_ok = (src_offset % vec_size == 0) && (dst_offset % vec_size == 0);
+    const int num_vecs = vec_ok ? (head_dim / vec_size) : 0;
 
     if (tid < num_vecs) {
         const int elem_offset = tid * vec_size;
@@ -287,7 +305,9 @@ __global__ void copy_blocks_bf16(
 }
 
 // ============================================================================
-// Swap Blocks — for CPU offloading
+// Swap Blocks — device-to-device block transfer between two distinct cache
+// buffers (e.g. moving blocks between paged-attention cache allocations).
+// Runs entirely on-device; callers must never pass host pointers here.
 // ============================================================================
 
 __global__ void swap_blocks_f32(
@@ -312,7 +332,10 @@ __global__ void swap_blocks_f32(
     const int dst_offset = ((dst_block * block_size + slot_in_block) * num_heads + head_idx) * head_dim;
 
     const int vec_size = 4;
-    const int num_vecs = head_dim / vec_size;
+    // src_offset/dst_offset scale with head_dim; a head_dim not a multiple
+    // of vec_size misaligns the Float4 cast, so fall back to scalar-only.
+    const bool vec_ok = (src_offset % vec_size == 0) && (dst_offset % vec_size == 0);
+    const int num_vecs = vec_ok ? (head_dim / vec_size) : 0;
 
     if (tid < num_vecs) {
         const int elem_offset = tid * vec_size;
@@ -350,7 +373,10 @@ __global__ void swap_blocks_f16(
     const int dst_offset = ((dst_block * block_size + slot_in_block) * num_heads + head_idx) * head_dim;
 
     const int vec_size = 8;
-    const int num_vecs = head_dim / vec_size;
+    // src_offset/dst_offset scale with head_dim; a head_dim not a multiple
+    // of vec_size misaligns the float4 cast, so fall back to scalar-only.
+    const bool vec_ok = (src_offset % vec_size == 0) && (dst_offset % vec_size == 0);
+    const int num_vecs = vec_ok ? (head_dim / vec_size) : 0;
 
     if (tid < num_vecs) {
         const int elem_offset = tid * vec_size;
@@ -388,7 +414,10 @@ __global__ void swap_blocks_bf16(
     const int dst_offset = ((dst_block * block_size + slot_in_block) * num_heads + head_idx) * head_dim;
 
     const int vec_size = 8;
-    const int num_vecs = head_dim / vec_size;
+    // src_offset/dst_offset scale with head_dim; a head_dim not a multiple
+    // of vec_size misaligns the float4 cast, so fall back to scalar-only.
+    const bool vec_ok = (src_offset % vec_size == 0) && (dst_offset % vec_size == 0);
+    const int num_vecs = vec_ok ? (head_dim / vec_size) : 0;
 
     if (tid < num_vecs) {
         const int elem_offset = tid * vec_size;

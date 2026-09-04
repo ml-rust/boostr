@@ -272,4 +272,34 @@ impl KvCacheOps<WgpuRuntime> for WgpuClient {
             reason: "append_kv_int4 not yet implemented on WebGPU".into(),
         })
     }
+
+    fn copy_blocks(
+        &self,
+        _key_cache: &Tensor<WgpuRuntime>,
+        _value_cache: &Tensor<WgpuRuntime>,
+        _block_mapping: &Tensor<WgpuRuntime>,
+        _num_heads: usize,
+        _head_dim: usize,
+        _block_size: usize,
+    ) -> Result<()> {
+        // No WGSL shader for copy_blocks yet — CUDA and CPU cover this op.
+        Err(Error::KernelError {
+            reason: "copy_blocks not yet implemented on WebGPU".into(),
+        })
+    }
+
+    fn swap_blocks(
+        &self,
+        _src_cache: &Tensor<WgpuRuntime>,
+        _dst_cache: &Tensor<WgpuRuntime>,
+        _block_mapping: &Tensor<WgpuRuntime>,
+        _num_heads: usize,
+        _head_dim: usize,
+        _block_size: usize,
+    ) -> Result<()> {
+        // No WGSL shader for swap_blocks yet — CUDA and CPU cover this op.
+        Err(Error::KernelError {
+            reason: "swap_blocks not yet implemented on WebGPU".into(),
+        })
+    }
 }

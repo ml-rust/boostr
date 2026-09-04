@@ -138,10 +138,18 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         scales: &Tensor<WgpuRuntime>,
         num_tokens: usize,
         head_dim: usize,
-        _output_dtype: DType,
+        output_dtype: DType,
     ) -> Result<Tensor<WgpuRuntime>> {
         validate_f32(quantized, "dequantize_kv_fp8_per_token")?;
         validate_f32(scales, "dequantize_kv_fp8_per_token")?;
+        if output_dtype != DType::F32 {
+            return Err(Error::InvalidArgument {
+                arg: "output_dtype",
+                reason: format!(
+                    "dequantize_kv_fp8_per_token: WebGPU only supports F32 output, got {output_dtype:?}"
+                ),
+            });
+        }
 
         let output =
             Tensor::<WgpuRuntime>::zeros(&[num_tokens, head_dim], DType::F32, quantized.device())?;

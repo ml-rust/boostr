@@ -49,7 +49,7 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
         scales: &Tensor<CpuRuntime>,
         num_tokens: usize,
         head_dim: usize,
-        _output_dtype: DType,
+        output_dtype: DType,
     ) -> Result<Tensor<CpuRuntime>> {
         let q_data = quantized.to_vec::<u8>();
         let s_data = scales.to_vec::<f32>();
@@ -64,11 +64,14 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
             }
         }
 
-        Ok(Tensor::<CpuRuntime>::from_slice(
-            &output,
-            &[num_tokens, head_dim],
-            device,
-        )?)
+        let f32_out = Tensor::<CpuRuntime>::from_slice(&output, &[num_tokens, head_dim], device)?;
+        match output_dtype {
+            DType::F32 => Ok(f32_out),
+            DType::F16 | DType::BF16 => Ok(f32_out.to_dtype(output_dtype)?),
+            _ => Err(Error::KernelError {
+                reason: format!("FP8 dequant: unsupported output dtype {output_dtype:?}"),
+            }),
+        }
     }
 
     fn quantize_kv_int4(

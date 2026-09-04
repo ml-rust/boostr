@@ -421,6 +421,122 @@ fn test_quantize_kv_int4_bf16_cuda() {
     });
 }
 
+// Covers dequantize_kv_fp8_per_token's F16 and BF16 output-dtype kernels,
+// which run on every supported device.
+#[test]
+fn test_dequantize_kv_fp8_narrow_output_dtypes() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let num_tokens = 8;
+    let head_dim = 32;
+    let input = det_tensor(&[num_tokens, head_dim], &cpu_device);
+
+    let (quantized, scales) = cpu_client
+        .quantize_kv_fp8_per_token(&input, num_tokens, head_dim)
+        .unwrap();
+    let cpu_deq_f32 = cpu_client
+        .dequantize_kv_fp8_per_token(
+            &quantized,
+            &scales,
+            num_tokens,
+            head_dim,
+            numr::dtype::DType::F32,
+        )
+        .unwrap();
+    let cpu_deq_f32_vec = cpu_deq_f32.to_vec::<f32>();
+
+    // FP8 e4m3 carries 3 mantissa bits, so FP8 quantization error dominates
+    // over F16/BF16 output rounding.
+    let rtol = 0.1;
+    let atol = 0.01;
+
+    // The CPU path narrows through numr's cast, which only handles F16/BF16
+    // when boostr is built with the `f16` feature. CUDA below needs no feature.
+    #[cfg(feature = "f16")]
+    {
+        for (dtype, label) in [
+            (numr::dtype::DType::F16, "F16"),
+            (numr::dtype::DType::BF16, "BF16"),
+        ] {
+            let narrow = cpu_client
+                .dequantize_kv_fp8_per_token(&quantized, &scales, num_tokens, head_dim, dtype)
+                .unwrap();
+            assert_eq!(narrow.dtype(), dtype);
+            let narrow_vec = narrow
+                .to_dtype(numr::dtype::DType::F32)
+                .unwrap()
+                .to_vec::<f32>();
+            assert_parity_f32_tol(
+                &narrow_vec,
+                &cpu_deq_f32_vec,
+                &format!("dequantize_kv_fp8_per_token {label} output vs F32 output (CPU)"),
+                rtol,
+                atol,
+            );
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
+        use numr::dtype::DType;
+        use numr::tensor::Tensor;
+
+        let inp = Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(
+            &input.to_vec::<f32>(),
+            &[num_tokens, head_dim],
+            &cuda_device,
+        )
+        .unwrap();
+        let (cuda_quantized, cuda_scales) = cuda_client
+            .quantize_kv_fp8_per_token(&inp, num_tokens, head_dim)
+            .expect("quantize_kv_fp8_per_token must succeed on CUDA");
+
+        let cuda_deq_f16 = cuda_client
+            .dequantize_kv_fp8_per_token(
+                &cuda_quantized,
+                &cuda_scales,
+                num_tokens,
+                head_dim,
+                DType::F16,
+            )
+            .expect("F16-output dequantize_kv_fp8_per_token must succeed on CUDA");
+        assert_eq!(cuda_deq_f16.dtype(), DType::F16);
+        let cuda_deq_f16_vec = cuda_deq_f16
+            .to_dtype(DType::F32)
+            .expect("cast F16 output to F32 for comparison")
+            .to_vec::<f32>();
+        assert_parity_f32_tol(
+            &cuda_deq_f16_vec,
+            &cpu_deq_f32_vec,
+            "dequantize_kv_fp8_per_token F16 output CUDA vs CPU F32 reference",
+            rtol,
+            atol,
+        );
+
+        let cuda_deq_bf16 = cuda_client
+            .dequantize_kv_fp8_per_token(
+                &cuda_quantized,
+                &cuda_scales,
+                num_tokens,
+                head_dim,
+                DType::BF16,
+            )
+            .expect("BF16-output dequantize_kv_fp8_per_token must succeed on CUDA");
+        assert_eq!(cuda_deq_bf16.dtype(), DType::BF16);
+        let cuda_deq_bf16_vec = cuda_deq_bf16
+            .to_dtype(DType::F32)
+            .expect("cast BF16 output to F32 for comparison")
+            .to_vec::<f32>();
+        assert_parity_f32_tol(
+            &cuda_deq_bf16_vec,
+            &cpu_deq_f32_vec,
+            "dequantize_kv_fp8_per_token BF16 output CUDA vs CPU F32 reference",
+            rtol,
+            atol,
+        );
+    });
+}
+
 // Covers dequantize_kv_int4's F16 and BF16 output-dtype kernels, which run on
 // every supported device (they compile at sm_75, no capability gate needed).
 #[test]

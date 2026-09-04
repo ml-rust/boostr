@@ -21,7 +21,7 @@ use cudarc::driver::safe::LaunchConfig;
 #[cfg(feature = "cuda")]
 use numr::runtime::Device;
 #[cfg(feature = "cuda")]
-use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
+use numr::runtime::cuda::{CudaDevice, CudaRuntime};
 #[cfg(feature = "cuda")]
 use numr::runtime::{Runtime, RuntimeClient};
 #[cfg(feature = "cuda")]

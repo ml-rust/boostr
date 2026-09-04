@@ -23,7 +23,7 @@ use boostr::quant::cuda::kernels::{self, MMA_INT8_PROBE_MODULE};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::runtime::Device;
-use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
+use numr::runtime::cuda::{CudaDevice, CudaRuntime};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -95,13 +95,13 @@ fn mma_int8_matches_scalar_reference() {
         .collect();
 
     let mut reference = [[0i32; 8]; 16];
-    for i in 0..16 {
-        for j in 0..8 {
+    for (i, row) in reference.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
             let mut sum = 0i32;
             for k in 0..32 {
                 sum += element(i, k) * element(j, k);
             }
-            reference[i][j] = sum;
+            *cell = sum;
         }
     }
 
@@ -141,10 +141,9 @@ fn mma_int8_matches_scalar_reference() {
     };
     client.synchronize();
 
-    for i in 0..16 {
-        for j in 0..8 {
+    for (i, row) in reference.iter().enumerate() {
+        for (j, &want) in row.iter().enumerate() {
             let got = d_host[i * 8 + j];
-            let want = reference[i][j];
             assert_eq!(
                 got, want,
                 "mismatch at (i={i}, j={j}): got {got}, want {want}. A wrong value here means \
@@ -191,13 +190,13 @@ fn mma_int8_k16_matches_scalar_reference() {
         .collect();
 
     let mut reference = [[0i32; 8]; 16];
-    for i in 0..16 {
-        for j in 0..8 {
+    for (i, row) in reference.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
             let mut sum = 0i32;
             for k in 0..16 {
                 sum += element(i, k) * element(j, k);
             }
-            reference[i][j] = sum;
+            *cell = sum;
         }
     }
 
@@ -237,10 +236,9 @@ fn mma_int8_k16_matches_scalar_reference() {
     };
     client.synchronize();
 
-    for i in 0..16 {
-        for j in 0..8 {
+    for (i, row) in reference.iter().enumerate() {
+        for (j, &want) in row.iter().enumerate() {
             let got = d_host[i * 8 + j];
-            let want = reference[i][j];
             assert_eq!(
                 got, want,
                 "mismatch at (i={i}, j={j}): got {got}, want {want}. A wrong value here means \

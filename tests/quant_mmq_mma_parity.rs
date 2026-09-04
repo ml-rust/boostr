@@ -4,8 +4,8 @@
 //! the same int8 products in int32, and apply the same two f16 scales once
 //! per 32-element block in the same block order. Nothing about that changes
 //! between dp4a and `mma.sync.aligned.m16n8k32` — only the instruction that
-//! does the multiply-accumulate. So the outputs must match down to the bit,
-//! not just within a float tolerance.
+//! does the multiply-accumulate. The outputs must match to the bit, not to a
+//! float tolerance.
 //!
 //! Run with:
 //!   cd boostr && cargo test --features cuda --test quant_mmq_mma_parity
@@ -18,7 +18,7 @@ use boostr::quant::cuda::kernels::{self, QUANT_GEMV_MODULE, QUANT_MMQ_MMA_MODULE
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::runtime::Device;
-use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
+use numr::runtime::cuda::{CudaDevice, CudaRuntime};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 

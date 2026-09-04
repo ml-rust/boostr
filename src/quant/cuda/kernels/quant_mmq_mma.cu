@@ -1,6 +1,11 @@
 // Q8_0 x Q8_1 -> f32 (MMQ), tensor-core variant of `quant_mmq_q8_0_q8_1` in
-// `quant_gemv.cu`. Staging is copied verbatim; only the compute loop and the
-// output write use `mma_m16n8k32_s8` instead of `dp4a`.
+// `quant_gemv.cu`. The compute loop and the output write use
+// `mma_m16n8k32_s8` instead of `dp4a`.
+//
+// All three kernels here stage one k-block ahead: the global loads for block
+// `b+1` are issued before block `b`'s `mma` sequence, so their latency
+// overlaps compute. nvcc does not reorder this itself: the loads must cross a
+// `__syncthreads()` to move earlier.
 //
 // This is a separate translation unit, so the tile constants and
 // `load_int_ua` are re-declared rather than shared via a header.
@@ -22,10 +27,54 @@
 // Four consecutive k values per int, which is one dp4a/mma operand word.
 #define MMQ_K4 (MMQ_BK / 4)
 
+#define MMQ_WARPS (MMQ_THREADS / WARP_SIZE)
+// A staging warp covers four columns at once, so the block advances by this
+// many columns or rows per staging step.
+#define MMQ_STAGE_STRIDE (MMQ_WARPS * 4)
+#define MMQ_W_STAGES (MMQ_BN / MMQ_STAGE_STRIDE)
+#define MMQ_A_STAGES (MMQ_BM / MMQ_STAGE_STRIDE)
+
 // 2-byte-aligned 4-byte load (quant blocks are not always 4-byte aligned).
 static __device__ __forceinline__ int load_int_ua(const unsigned char* p) {
     const unsigned short* p16 = (const unsigned short*)p;
     return (int)p16[0] | ((int)p16[1] << 16);
+}
+
+// Reads k-block `b` of both operands into registers. Held separate from the
+// shared-memory write so the caller issues it one iteration ahead of use.
+// Global load latency dominates this loop; nothing else overlaps it.
+static __device__ __forceinline__ void mmq_q8_0_stage_load(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    unsigned int M, unsigned int N, unsigned int bpr, unsigned int b,
+    unsigned int row0, unsigned int col0, unsigned int base, unsigned int stage_k4,
+    int (&w_packed)[MMQ_W_STAGES], float (&w_d)[MMQ_W_STAGES],
+    int (&a_packed)[MMQ_A_STAGES], float (&a_d)[MMQ_A_STAGES]
+) {
+#pragma unroll
+    for (int i = 0; i < MMQ_W_STAGES; ++i) {
+        const unsigned int gcol = col0 + base + i * MMQ_STAGE_STRIDE;
+        w_packed[i] = 0;
+        w_d[i] = 0.0f;
+        if (gcol < N) {
+            const unsigned char* blk = weight + ((unsigned long long)gcol * bpr + b) * 34;
+            w_d[i] = __half2float(*reinterpret_cast<const __half*>(blk));
+            // The quants start at byte 2, so only 2-byte alignment holds.
+            w_packed[i] = load_int_ua(blk + 2 + stage_k4 * 4);
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < MMQ_A_STAGES; ++i) {
+        const unsigned int grow = row0 + base + i * MMQ_STAGE_STRIDE;
+        a_packed[i] = 0;
+        a_d[i] = 0.0f;
+        if (grow < M) {
+            // Q8_1: d, then the block sum, then 32 quants at byte 4.
+            const unsigned char* blk = q8_act + ((unsigned long long)grow * bpr + b) * 36;
+            a_d[i] = __half2float(*reinterpret_cast<const __half*>(blk));
+            a_packed[i] = *reinterpret_cast<const int*>(blk + 4 + stage_k4 * 4);
+        }
+    }
 }
 
 extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q8_0_q8_1_mma(
@@ -45,7 +94,6 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q8_0_q8_1
     const unsigned int tid = threadIdx.x;
     const unsigned int lane = tid % WARP_SIZE;
     const unsigned int warp = tid / WARP_SIZE;
-    const unsigned int warps = MMQ_THREADS / WARP_SIZE;
 
     const unsigned int row0 = blockIdx.y * MMQ_BM;
     const unsigned int col0 = blockIdx.x * MMQ_BN;
@@ -66,40 +114,39 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q8_0_q8_1
         }
     }
 
+    const unsigned int stage_base = warp * 4 + stage_sub;
+    int w_packed[MMQ_W_STAGES];
+    float w_d[MMQ_W_STAGES];
+    int a_packed[MMQ_A_STAGES];
+    float a_d[MMQ_A_STAGES];
+
+    if (bpr > 0) {
+        mmq_q8_0_stage_load(q8_act, weight, M, N, bpr, 0, row0, col0, stage_base,
+                            stage_k4, w_packed, w_d, a_packed, a_d);
+    }
+
     for (unsigned int b = 0; b < bpr; ++b) {
         __syncthreads();
 
-        for (unsigned int c = warp * 4 + stage_sub; c < MMQ_BN; c += warps * 4) {
-            const unsigned int gcol = col0 + c;
-            int packed = 0;
-            float d = 0.0f;
-            if (gcol < N) {
-                const unsigned char* blk =
-                    weight + ((unsigned long long)gcol * bpr + b) * 34;
-                d = __half2float(*reinterpret_cast<const __half*>(blk));
-                // The quants start at byte 2, so only 2-byte alignment holds.
-                packed = load_int_ua(blk + 2 + stage_k4 * 4);
-            }
-            s_w[stage_k4][c] = packed;
-            if (stage_k4 == 0) s_wd[c] = d;
+#pragma unroll
+        for (int i = 0; i < MMQ_W_STAGES; ++i) {
+            const unsigned int c = stage_base + i * MMQ_STAGE_STRIDE;
+            s_w[stage_k4][c] = w_packed[i];
+            if (stage_k4 == 0) s_wd[c] = w_d[i];
         }
-
-        for (unsigned int r = warp * 4 + stage_sub; r < MMQ_BM; r += warps * 4) {
-            const unsigned int grow = row0 + r;
-            int packed = 0;
-            float d = 0.0f;
-            if (grow < M) {
-                // Q8_1: d, then the block sum, then 32 quants at byte 4.
-                const unsigned char* blk =
-                    q8_act + ((unsigned long long)grow * bpr + b) * 36;
-                d = __half2float(*reinterpret_cast<const __half*>(blk));
-                packed = *reinterpret_cast<const int*>(blk + 4 + stage_k4 * 4);
-            }
-            s_a[stage_k4][r] = packed;
-            if (stage_k4 == 0) s_ad[r] = d;
+#pragma unroll
+        for (int i = 0; i < MMQ_A_STAGES; ++i) {
+            const unsigned int r = stage_base + i * MMQ_STAGE_STRIDE;
+            s_a[stage_k4][r] = a_packed[i];
+            if (stage_k4 == 0) s_ad[r] = a_d[i];
         }
 
         __syncthreads();
+
+        if (b + 1 < bpr) {
+            mmq_q8_0_stage_load(q8_act, weight, M, N, bpr, b + 1, row0, col0, stage_base,
+                                stage_k4, w_packed, w_d, a_packed, a_d);
+        }
 
         // One `mma_m16n8k32_s8` consumes a whole 32-element Q8_0/Q8_1 block
         // as a single k-step, so the block loop needs no inner k4 loop. The
@@ -150,9 +197,58 @@ static __device__ __forceinline__ int dp4a(int a, int b, int c) {
 #endif
 }
 
+// Reads Q8_1 sub-block `b` of both operands into registers, one iteration
+// ahead, same reason as `mmq_q8_0_stage_load`.
+static __device__ __forceinline__ void mmq_q4_k_stage_load(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    unsigned int M, unsigned int N, unsigned int sub_blocks, unsigned int supers,
+    unsigned int b, unsigned int row0, unsigned int col0, unsigned int base,
+    unsigned int stage_k4,
+    int (&w_packed)[MMQ_W_STAGES], float (&w_sd)[MMQ_W_STAGES],
+    float (&w_sm)[MMQ_W_STAGES],
+    int (&a_packed)[MMQ_A_STAGES], float (&a_d)[MMQ_A_STAGES]
+) {
+    const unsigned int sup = b / 8;
+    const unsigned int j = b % 8;
+#pragma unroll
+    for (int i = 0; i < MMQ_W_STAGES; ++i) {
+        const unsigned int gcol = col0 + base + i * MMQ_STAGE_STRIDE;
+        w_packed[i] = 0;
+        w_sd[i] = 0.0f;
+        w_sm[i] = 0.0f;
+        if (gcol < N) {
+            const unsigned char* blk = weight + ((unsigned long long)gcol * supers + sup) * 144;
+            const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+            const float dmin = __half2float(*reinterpret_cast<const __half*>(blk + 2));
+            int scale;
+            int minimum;
+            q4k_scale_min(blk + 4, (int)j, &scale, &minimum);
+            w_sd[i] = d * (float)scale;
+            w_sm[i] = dmin * (float)minimum;
+            // 144 is 16-aligned and every offset here is a multiple of 4, so a
+            // plain int load is aligned.
+            const int v = *reinterpret_cast<const int*>(blk + 16 + (j / 2) * 32 + stage_k4 * 4);
+            w_packed[i] = (j & 1) ? ((v >> 4) & 0x0F0F0F0F) : (v & 0x0F0F0F0F);
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < MMQ_A_STAGES; ++i) {
+        const unsigned int grow = row0 + base + i * MMQ_STAGE_STRIDE;
+        a_packed[i] = 0;
+        a_d[i] = 0.0f;
+        if (grow < M) {
+            const unsigned char* blk =
+                q8_act + ((unsigned long long)grow * sub_blocks + b) * 36;
+            a_d[i] = __half2float(*reinterpret_cast<const __half*>(blk));
+            a_packed[i] = *reinterpret_cast<const int*>(blk + 4 + stage_k4 * 4);
+        }
+    }
+}
+
 // Q4_K x Q8_1 -> f32 (MMQ), tensor-core variant of `quant_mmq_q4_k_q8_1` in
-// `quant_gemv.cu`. Staging is copied verbatim; only the compute loop and the
-// output write use `mma_m16n8k32_s8` instead of `dp4a`.
+// `quant_gemv.cu`. Only the compute loop and the output write use
+// `mma_m16n8k32_s8` instead of `dp4a`.
 //
 // Q4_K adds an asymmetric minimum term, `-dmin * minimum * rowsum`, that one
 // `mma` cannot produce: it depends only on the row, not the column, so it is
@@ -172,7 +268,6 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q4_k_q8_1
     const unsigned int tid = threadIdx.x;
     const unsigned int lane = tid % WARP_SIZE;
     const unsigned int warp = tid / WARP_SIZE;
-    const unsigned int warps = MMQ_THREADS / WARP_SIZE;
 
     const unsigned int row0 = blockIdx.y * MMQ_BM;
     const unsigned int col0 = blockIdx.x * MMQ_BN;
@@ -192,55 +287,43 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q4_k_q8_1
         }
     }
 
+    const unsigned int stage_base = warp * 4 + stage_sub;
+    int w_packed[MMQ_W_STAGES];
+    float w_sd[MMQ_W_STAGES];
+    float w_sm[MMQ_W_STAGES];
+    int a_packed[MMQ_A_STAGES];
+    float a_d[MMQ_A_STAGES];
+
+    if (sub_blocks > 0) {
+        mmq_q4_k_stage_load(q8_act, weight, M, N, sub_blocks, supers, 0, row0, col0,
+                            stage_base, stage_k4, w_packed, w_sd, w_sm, a_packed, a_d);
+    }
+
     for (unsigned int b = 0; b < sub_blocks; ++b) {
-        const unsigned int sup = b / 8;
-        const unsigned int j = b % 8;
-
         __syncthreads();
 
-        for (unsigned int c = warp * 4 + stage_sub; c < MMQ_BN; c += warps * 4) {
-            const unsigned int gcol = col0 + c;
-            int packed = 0;
-            float sd = 0.0f;
-            float sm = 0.0f;
-            if (gcol < N) {
-                const unsigned char* blk =
-                    weight + ((unsigned long long)gcol * supers + sup) * 144;
-                const float d = __half2float(*reinterpret_cast<const __half*>(blk));
-                const float dmin = __half2float(*reinterpret_cast<const __half*>(blk + 2));
-                int scale;
-                int minimum;
-                q4k_scale_min(blk + 4, (int)j, &scale, &minimum);
-                sd = d * (float)scale;
-                sm = dmin * (float)minimum;
-                // 144 is 16-aligned and every offset here is a multiple of 4,
-                // so a plain int load is aligned.
-                const int v = *reinterpret_cast<const int*>(
-                    blk + 16 + (j / 2) * 32 + stage_k4 * 4);
-                packed = (j & 1) ? ((v >> 4) & 0x0F0F0F0F) : (v & 0x0F0F0F0F);
-            }
-            s_w[stage_k4][c] = packed;
+#pragma unroll
+        for (int i = 0; i < MMQ_W_STAGES; ++i) {
+            const unsigned int c = stage_base + i * MMQ_STAGE_STRIDE;
+            s_w[stage_k4][c] = w_packed[i];
             if (stage_k4 == 0) {
-                s_wd[c] = sd;
-                s_wm[c] = sm;
+                s_wd[c] = w_sd[i];
+                s_wm[c] = w_sm[i];
             }
         }
-
-        for (unsigned int r = warp * 4 + stage_sub; r < MMQ_BM; r += warps * 4) {
-            const unsigned int grow = row0 + r;
-            int packed = 0;
-            float d = 0.0f;
-            if (grow < M) {
-                const unsigned char* blk =
-                    q8_act + ((unsigned long long)grow * sub_blocks + b) * 36;
-                d = __half2float(*reinterpret_cast<const __half*>(blk));
-                packed = *reinterpret_cast<const int*>(blk + 4 + stage_k4 * 4);
-            }
-            s_a[stage_k4][r] = packed;
-            if (stage_k4 == 0) s_ad[r] = d;
+#pragma unroll
+        for (int i = 0; i < MMQ_A_STAGES; ++i) {
+            const unsigned int r = stage_base + i * MMQ_STAGE_STRIDE;
+            s_a[stage_k4][r] = a_packed[i];
+            if (stage_k4 == 0) s_ad[r] = a_d[i];
         }
 
         __syncthreads();
+
+        if (b + 1 < sub_blocks) {
+            mmq_q4_k_stage_load(q8_act, weight, M, N, sub_blocks, supers, b + 1, row0, col0,
+                                stage_base, stage_k4, w_packed, w_sd, w_sm, a_packed, a_d);
+        }
 
         // `mma_d_i(l)` takes only two distinct values per lane, one per half
         // of `l / 2`. `rsum2[h]` covers the two rows this lane's accumulator
@@ -290,9 +373,65 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q4_k_q8_1
     }
 }
 
+// Reads Q8_1 sub-block `b` of both operands into registers, one iteration
+// ahead, same reason as `mmq_q8_0_stage_load`.
+static __device__ __forceinline__ void mmq_q6_k_stage_load(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    unsigned int M, unsigned int N, unsigned int sub_blocks, unsigned int supers,
+    unsigned int b, unsigned int row0, unsigned int col0, unsigned int base,
+    unsigned int stage_k4,
+    int (&w_packed)[MMQ_W_STAGES], float (&w_sd_lo)[MMQ_W_STAGES],
+    float (&w_sd_hi)[MMQ_W_STAGES],
+    int (&a_packed)[MMQ_A_STAGES], float (&a_d)[MMQ_A_STAGES]
+) {
+    const unsigned int sup = b / 8;
+    const unsigned int j = b % 8;
+    const unsigned int half = j / 4;
+    const unsigned int t = j % 4;
+#pragma unroll
+    for (int i = 0; i < MMQ_W_STAGES; ++i) {
+        const unsigned int gcol = col0 + base + i * MMQ_STAGE_STRIDE;
+        w_packed[i] = 0;
+        w_sd_lo[i] = 0.0f;
+        w_sd_hi[i] = 0.0f;
+        if (gcol < N) {
+            const unsigned char* blk = weight + ((unsigned long long)gcol * supers + sup) * 210;
+            const unsigned char* ql = blk + half * 64;
+            const unsigned char* qh = blk + 128 + half * 32;
+            const signed char* sc = reinterpret_cast<const signed char*>(blk + 192) + half * 8;
+            __half d_h;
+            memcpy(&d_h, blk + 208, 2);
+            const float d = __half2float(d_h);
+            w_sd_lo[i] = d * (float)sc[t * 2];
+            w_sd_hi[i] = d * (float)sc[t * 2 + 1];
+
+            // 210 is only 2-byte aligned, so the 4-byte reads are unaligned.
+            const unsigned int e0 = stage_k4 * 4;
+            const int ql4 = load_int_ua(ql + ((t & 1) ? e0 + 32 : e0));
+            const int qh4 = load_int_ua(qh + e0);
+            const int low = (ql4 >> ((t & 2) ? 4 : 0)) & 0x0F0F0F0F;
+            const int high = ((qh4 >> (t * 2)) & 0x03030303) << 4;
+            // The 6-bit value is unsigned 0..63 biased by 32.
+            w_packed[i] = __vsubss4(low | high, 0x20202020);
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < MMQ_A_STAGES; ++i) {
+        const unsigned int grow = row0 + base + i * MMQ_STAGE_STRIDE;
+        a_packed[i] = 0;
+        a_d[i] = 0.0f;
+        if (grow < M) {
+            const unsigned char* blk =
+                q8_act + ((unsigned long long)grow * sub_blocks + b) * 36;
+            a_d[i] = __half2float(*reinterpret_cast<const __half*>(blk));
+            a_packed[i] = *reinterpret_cast<const int*>(blk + 4 + stage_k4 * 4);
+        }
+    }
+}
+
 // Q6_K x Q8_1 -> f32 (MMQ), tensor-core variant of `quant_mmq_q6_k_q8_1` in
-// `quant_gemv.cu`. Staging is copied verbatim; only the compute loop and the
-// output write differ.
+// `quant_gemv.cu`. Only the compute loop and the output write differ.
 //
 // Q6_K's scale changes every 16 elements, so one 32-wide `mma` cannot express
 // it. Two `m16n8k16` calls run instead, one per 16-element half, each scaled
@@ -312,7 +451,6 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q6_k_q8_1
     const unsigned int tid = threadIdx.x;
     const unsigned int lane = tid % WARP_SIZE;
     const unsigned int warp = tid / WARP_SIZE;
-    const unsigned int warps = MMQ_THREADS / WARP_SIZE;
 
     const unsigned int row0 = blockIdx.y * MMQ_BM;
     const unsigned int col0 = blockIdx.x * MMQ_BN;
@@ -332,63 +470,43 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q6_k_q8_1
         }
     }
 
+    const unsigned int stage_base = warp * 4 + stage_sub;
+    int w_packed[MMQ_W_STAGES];
+    float w_sd_lo[MMQ_W_STAGES];
+    float w_sd_hi[MMQ_W_STAGES];
+    int a_packed[MMQ_A_STAGES];
+    float a_d[MMQ_A_STAGES];
+
+    if (sub_blocks > 0) {
+        mmq_q6_k_stage_load(q8_act, weight, M, N, sub_blocks, supers, 0, row0, col0,
+                            stage_base, stage_k4, w_packed, w_sd_lo, w_sd_hi, a_packed, a_d);
+    }
+
     for (unsigned int b = 0; b < sub_blocks; ++b) {
-        const unsigned int sup = b / 8;
-        const unsigned int j = b % 8;
-        const unsigned int half = j / 4;
-        const unsigned int t = j % 4;
-
         __syncthreads();
 
-        for (unsigned int c = warp * 4 + stage_sub; c < MMQ_BN; c += warps * 4) {
-            const unsigned int gcol = col0 + c;
-            int packed = 0;
-            float sd_lo = 0.0f;
-            float sd_hi = 0.0f;
-            if (gcol < N) {
-                const unsigned char* blk =
-                    weight + ((unsigned long long)gcol * supers + sup) * 210;
-                const unsigned char* ql = blk + half * 64;
-                const unsigned char* qh = blk + 128 + half * 32;
-                const signed char* sc =
-                    reinterpret_cast<const signed char*>(blk + 192) + half * 8;
-                __half d_h;
-                memcpy(&d_h, blk + 208, 2);
-                const float d = __half2float(d_h);
-                sd_lo = d * (float)sc[t * 2];
-                sd_hi = d * (float)sc[t * 2 + 1];
-
-                // 210 is only 2-byte aligned, so the 4-byte reads are unaligned.
-                const unsigned int e0 = stage_k4 * 4;
-                const int ql4 = load_int_ua(ql + ((t & 1) ? e0 + 32 : e0));
-                const int qh4 = load_int_ua(qh + e0);
-                const int low = (ql4 >> ((t & 2) ? 4 : 0)) & 0x0F0F0F0F;
-                const int high = ((qh4 >> (t * 2)) & 0x03030303) << 4;
-                // The 6-bit value is unsigned 0..63 biased by 32.
-                packed = __vsubss4(low | high, 0x20202020);
-            }
-            s_w[stage_k4][c] = packed;
+#pragma unroll
+        for (int i = 0; i < MMQ_W_STAGES; ++i) {
+            const unsigned int c = stage_base + i * MMQ_STAGE_STRIDE;
+            s_w[stage_k4][c] = w_packed[i];
             if (stage_k4 == 0) {
-                s_wd_lo[c] = sd_lo;
-                s_wd_hi[c] = sd_hi;
+                s_wd_lo[c] = w_sd_lo[i];
+                s_wd_hi[c] = w_sd_hi[i];
             }
         }
-
-        for (unsigned int r = warp * 4 + stage_sub; r < MMQ_BM; r += warps * 4) {
-            const unsigned int grow = row0 + r;
-            int packed = 0;
-            float d = 0.0f;
-            if (grow < M) {
-                const unsigned char* blk =
-                    q8_act + ((unsigned long long)grow * sub_blocks + b) * 36;
-                d = __half2float(*reinterpret_cast<const __half*>(blk));
-                packed = *reinterpret_cast<const int*>(blk + 4 + stage_k4 * 4);
-            }
-            s_a[stage_k4][r] = packed;
-            if (stage_k4 == 0) s_ad[r] = d;
+#pragma unroll
+        for (int i = 0; i < MMQ_A_STAGES; ++i) {
+            const unsigned int r = stage_base + i * MMQ_STAGE_STRIDE;
+            s_a[stage_k4][r] = a_packed[i];
+            if (stage_k4 == 0) s_ad[r] = a_d[i];
         }
 
         __syncthreads();
+
+        if (b + 1 < sub_blocks) {
+            mmq_q6_k_stage_load(q8_act, weight, M, N, sub_blocks, supers, b + 1, row0, col0,
+                                stage_base, stage_k4, w_packed, w_sd_lo, w_sd_hi, a_packed, a_d);
+        }
 
         // Words 0..3 of the staged block are the low 16-element half, words
         // 4..7 the high half, the same split the dp4a kernel makes at

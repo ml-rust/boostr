@@ -26,30 +26,37 @@ use super::helpers::quantize_activation_q8_1;
 
 /// Largest `m` for which the GEMV path beats the GEMM path.
 ///
-/// The crossover is measured per format: a faster GEMM moves it down. Q8_0,
-/// Q4_K and Q6_K get the lower value only when the device has the tensor-core
-/// GEMM (`caps.int8_mma_m16n8k32`); every other format keeps the dp4a-GEMM
+/// GEMV cost grows with `m`; GEMM cost is flat until `m` fills the 128-row
+/// tile. The crossover is where the two lines meet, so it differs per format
+/// and moves whenever either kernel changes. Q8_0, Q4_K and Q6_K take these
+/// values only on a device with the tensor-core GEMM
+/// (`caps.int8_mma_m16n8k32`); every other format keeps the dp4a-GEMM
 /// crossover.
+///
+/// Q4_K sits far above the other two because its GEMV reads half the weight
+/// bytes per row, so its per-row cost is about half.
 pub(super) fn gemv_max_m(format: QuantFormat, device_index: usize) -> usize {
-    if matches!(
-        format,
-        QuantFormat::Q8_0 | QuantFormat::Q4K | QuantFormat::Q6K
-    ) {
-        let caps = numr::runtime::cuda::CudaDevice::new(device_index)
-            .profile()
-            .caps;
-        if caps.int8_mma_m16n8k32 {
-            return 8;
-        }
+    let mma_crossover = match format {
+        QuantFormat::Q8_0 => 5,
+        QuantFormat::Q6K => 6,
+        QuantFormat::Q4K => 13,
+        _ => return 16,
+    };
+    let caps = numr::runtime::cuda::CudaDevice::new(device_index)
+        .profile()
+        .caps;
+    if caps.int8_mma_m16n8k32 {
+        mma_crossover
+    } else {
+        16
     }
-    16
 }
 
 /// GEMV dispatch for M <= 64 (decode + short prefill).
 ///
 /// Chooses the dp4a MWR path for Q4_K / Q6_K / Q8_0 and the F32 activation
 /// path for other formats. Returns `Ok(None)` if the format has no dedicated
-/// kernel (callers should then fall back to `quant_matmul_via_dequant`).
+/// kernel; callers fall back to `quant_matmul_via_dequant`.
 pub(super) fn dispatch_gemv(
     client: &CudaClient,
     act_contig: &Tensor<CudaRuntime>,

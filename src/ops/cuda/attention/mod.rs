@@ -14,6 +14,7 @@ pub mod flash_smem;
 pub mod flash_utils;
 pub mod flash_v3;
 pub mod fused_qkv;
+pub mod fused_qkv_launch;
 pub mod kv_insert;
 pub mod mla;
 pub mod mla_block_config;

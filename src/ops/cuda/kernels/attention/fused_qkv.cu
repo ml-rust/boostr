@@ -1,14 +1,10 @@
 // Fused QKV projection CUDA kernels
 //
-// Forward: fused matmul + optional bias + split into Q/K/V + reshape
-// Currently delegates to impl_generic via numr's CUDA matmul.
-// These kernels are placeholders for future optimization when profiling
-// shows benefit from a fully fused CUDA implementation.
-//
-// The primary win from FusedQkvOps comes from the API-level fusion
-// (single matmul instead of 3 separate ones), which already uses
-// numr's optimized CUDA matmul. A custom kernel would additionally
-// fuse the bias add + split + reshape into the matmul epilogue.
+// The GEMM itself still runs through numr's CUDA matmul. These kernels
+// fuse the epilogue that follows it: bias-add + split + transpose for
+// the forward split, bias-add + residual for the output projection, and
+// transpose + concat for the QKV backward gather. Only F32/F64 are
+// implemented; other dtypes fall back to the generic elementwise path.
 
 #include "dtype_traits.cuh"
 
@@ -83,14 +79,15 @@ __device__ void fused_output_bias_residual_kernel(
     const T* __restrict__ bias,       // [H] or nullptr
     const T* __restrict__ residual,   // [B*S, H]
     T* __restrict__ output,           // [B*S, H]
-    unsigned int total                // B*S*H
+    unsigned int total,               // B*S*H
+    unsigned int hidden_dim           // H
 ) {
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total) return;
 
     T val = proj[idx];
     if (bias != nullptr) {
-        unsigned int h_idx = idx % (total / 1); // simplified — bias broadcast handled by caller
+        unsigned int h_idx = idx % hidden_dim;
         val = val + bias[h_idx];
     }
     output[idx] = val + residual[idx];
@@ -201,15 +198,15 @@ extern "C" {
 
     __global__ void fused_output_bias_residual_f32(
         const float* proj, const float* bias, const float* residual,
-        float* output, unsigned int total
+        float* output, unsigned int total, unsigned int hidden_dim
     ) {
-        fused_output_bias_residual_kernel<float>(proj, bias, residual, output, total);
+        fused_output_bias_residual_kernel<float>(proj, bias, residual, output, total, hidden_dim);
     }
 
     __global__ void fused_output_bias_residual_f64(
         const double* proj, const double* bias, const double* residual,
-        double* output, unsigned int total
+        double* output, unsigned int total, unsigned int hidden_dim
     ) {
-        fused_output_bias_residual_kernel<double>(proj, bias, residual, output, total);
+        fused_output_bias_residual_kernel<double>(proj, bias, residual, output, total, hidden_dim);
     }
 }

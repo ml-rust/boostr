@@ -8,7 +8,8 @@ pub mod training;
 
 pub use architecture::MoEOps;
 pub use attention::{
-    AttentionOps, FlashAttentionOps, FusedQkvOps, MlaOps, PagedAttentionOps, VarLenAttentionOps,
+    AttentionOps, FlashAlibiOps, FlashAttentionOps, FusedQkvOps, MlaOps, PagedAttentionOps,
+    VarLenAttentionOps,
 };
 pub use cache::{Int4GroupSize, KvCacheOps, KvCacheQuantOps, KvQuantMode};
 pub use inference::{DeviceGrammarDfa, GrammarDfaOps, SamplingOps, SpeculativeOps};

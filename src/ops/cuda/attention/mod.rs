@@ -6,6 +6,7 @@ pub mod flash_bwd_fp8;
 pub mod flash_bwd_fp8_gqa;
 pub mod flash_decode;
 pub mod flash_fwd;
+pub mod flash_fwd_alibi;
 pub mod flash_fwd_fp8_kv;
 pub mod flash_fwd_int4_kv;
 pub mod flash_params;

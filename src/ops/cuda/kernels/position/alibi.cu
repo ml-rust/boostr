@@ -351,6 +351,13 @@ __device__ void flash_attention_alibi_fp32_impl(
 ) {
     constexpr int HEAD_STRIDE = SMEM_STRIDE(HEAD_DIM, 1);
 
+    // Bottom-right causal masking: a KV-cached decode step of `seq_len_q`
+    // queries maps onto the LAST `seq_len_q` positions of the key sequence,
+    // not positions `[0, seq_len_q)`. `key_offset` shifts the query position
+    // accordingly. `seq_len_q == seq_len_k` gives `key_offset == 0` and
+    // leaves the mask/bias unchanged. Same convention as `flash_v2.cu`.
+    const int key_offset = causal ? max(0, seq_len_k - seq_len_q) : 0;
+
     extern __shared__ float smem[];
 
     float* Q_smem_flat = smem;
@@ -430,7 +437,7 @@ __device__ void flash_attention_alibi_fp32_impl(
                 const int q_pos = q_start + q_row;
                 const int k_pos = k_start + j;
 
-                if (causal && q_pos < k_pos) continue;
+                if (causal && key_offset + q_pos < k_pos) continue;
 
                 // Compute Q @ K^T score
                 float score = 0.0f;
@@ -441,7 +448,7 @@ __device__ void flash_attention_alibi_fp32_impl(
                 score *= scale;
 
                 // Add ALiBi bias: -slope * |q_pos - k_pos|
-                const int distance = q_pos - k_pos;
+                const int distance = key_offset + q_pos - k_pos;
                 const float alibi_bias = -alibi_slope * abs(distance);
                 score += alibi_bias;
 
@@ -461,7 +468,7 @@ __device__ void flash_attention_alibi_fp32_impl(
                 const int q_pos = q_start + q_row;
                 const int k_pos = k_start + j;
 
-                if (causal && q_pos < k_pos) continue;
+                if (causal && key_offset + q_pos < k_pos) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -470,7 +477,7 @@ __device__ void flash_attention_alibi_fp32_impl(
                 }
                 score *= scale;
 
-                const int distance = q_pos - k_pos;
+                const int distance = key_offset + q_pos - k_pos;
                 const float alibi_bias = -alibi_slope * abs(distance);
                 score += alibi_bias;
 

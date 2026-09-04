@@ -109,6 +109,31 @@ impl FlashAttentionOps<CpuRuntime> for CpuClient {
         })
     }
 
+    fn flash_attention_fwd_fp8_kv(
+        &self,
+        q: &Tensor<CpuRuntime>,
+        k_quant: &Tensor<CpuRuntime>,
+        v_quant: &Tensor<CpuRuntime>,
+        k_scales: &Tensor<CpuRuntime>,
+        v_scales: &Tensor<CpuRuntime>,
+        num_heads: usize,
+        _head_dim: usize,
+        causal: bool,
+        per_token_scales: bool,
+    ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+        super::flash_fp8_kv::flash_attention_fwd_fp8_kv_impl(
+            self,
+            q,
+            k_quant,
+            v_quant,
+            k_scales,
+            v_scales,
+            num_heads,
+            causal,
+            per_token_scales,
+        )
+    }
+
     fn flash_attention_bwd(
         &self,
         dout: &Tensor<CpuRuntime>,

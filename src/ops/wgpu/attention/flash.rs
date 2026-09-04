@@ -207,6 +207,26 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
         })
     }
 
+    fn flash_attention_fwd_fp8_kv(
+        &self,
+        _q: &Tensor<WgpuRuntime>,
+        _k_quant: &Tensor<WgpuRuntime>,
+        _v_quant: &Tensor<WgpuRuntime>,
+        _k_scales: &Tensor<WgpuRuntime>,
+        _v_scales: &Tensor<WgpuRuntime>,
+        _num_heads: usize,
+        _head_dim: usize,
+        _causal: bool,
+        _per_token_scales: bool,
+    ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
+        // No WGSL shader for FP8 KV-cache Flash Attention.
+        Err(Error::InvalidArgument {
+            arg: "op",
+            reason: "flash_attention_fwd_fp8_kv not implemented on WebGPU: no WGSL shader for it"
+                .into(),
+        })
+    }
+
     fn flash_attention_bwd(
         &self,
         dout: &Tensor<WgpuRuntime>,

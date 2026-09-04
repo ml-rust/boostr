@@ -1654,3 +1654,196 @@ fn test_flash_attention_bwd_head_dim_sweep_parity() {
         }
     }
 }
+
+/// Quantize `[batch, heads, seq_len, head_dim]` F32 data to FP8 E4M3 with the
+/// convention `flash_attention_fwd_fp8_kv` expects: a stored scale is
+/// `448 / max_abs`, and the FP8 byte is `f32_to_fp8_e4m3(value * scale)`.
+/// `per_token`: one scale per `(batch, head, token)`; otherwise one per
+/// `(batch, head)`. Returns `(fp8_bytes, scales)`.
+fn quantize_fp8_kv_fixture(
+    data: &[f32],
+    batch: usize,
+    heads: usize,
+    seq_len: usize,
+    head_dim: usize,
+    per_token: bool,
+) -> (Vec<numr::dtype::fp8::FP8E4M3>, Vec<f32>) {
+    use numr::dtype::fp8::{FP8E4M3, f32_to_fp8_e4m3};
+
+    let mut bytes = vec![FP8E4M3::from_bits(0); data.len()];
+    let scale_len = if per_token {
+        batch * heads * seq_len
+    } else {
+        batch * heads
+    };
+    let mut scales = vec![1.0f32; scale_len];
+
+    for b in 0..batch {
+        for h in 0..heads {
+            if per_token {
+                for s in 0..seq_len {
+                    let base = ((b * heads + h) * seq_len + s) * head_dim;
+                    let max_abs = data[base..base + head_dim]
+                        .iter()
+                        .fold(0.0f32, |m, x| m.max(x.abs()));
+                    let scale = if max_abs > 0.0 { 448.0 / max_abs } else { 1.0 };
+                    scales[(b * heads + h) * seq_len + s] = scale;
+                    for d in 0..head_dim {
+                        bytes[base + d] =
+                            FP8E4M3::from_bits(f32_to_fp8_e4m3(data[base + d] * scale));
+                    }
+                }
+            } else {
+                let head_base = (b * heads + h) * seq_len * head_dim;
+                let span = seq_len * head_dim;
+                let max_abs = data[head_base..head_base + span]
+                    .iter()
+                    .fold(0.0f32, |m, x| m.max(x.abs()));
+                let scale = if max_abs > 0.0 { 448.0 / max_abs } else { 1.0 };
+                scales[b * heads + h] = scale;
+                for i in 0..span {
+                    bytes[head_base + i] =
+                        FP8E4M3::from_bits(f32_to_fp8_e4m3(data[head_base + i] * scale));
+                }
+            }
+        }
+    }
+    (bytes, scales)
+}
+
+/// `flash_attention_fwd_fp8_kv` CUDA vs CPU parity: FP32 Q, FP8 E4M3 K/V,
+/// tensor (not scalar) per-token or per-head scales. No CPU fused kernel
+/// exists for this op — the CPU side runs `FlashAttentionOps`'s own
+/// dequantize-then-`standard_attention_fwd` reference (`flash_fp8_kv.rs`),
+/// so this checks the CUDA kernel against boostr's own contract, not an
+/// independent implementation.
+///
+/// rtol 0.1 / atol 0.01: E4M3 has 3 mantissa bits (~6.25% per rounding step),
+/// so FP8 quantization error dominates over attention's own float error —
+/// the same tolerance this file already uses for FP8 flash attention parity.
+#[cfg(feature = "cuda")]
+fn assert_flash_fwd_fp8_kv_parity(
+    head_dim: usize,
+    per_token_scales: bool,
+    causal: bool,
+    label: &str,
+) {
+    use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
+    use numr::tensor::Tensor;
+
+    // The kernel stages Q plus two K/V tiles in shared memory:
+    // (BLOCK_M + 2 * BLOCK_N) * head_dim * 4 bytes, with BLOCK_M 128 and
+    // BLOCK_N 64. head_dim 128 needs 128KB, which exceeds what most devices
+    // allow per block. Gate on the device's limit, never on the returned
+    // error — a missing symbol returns an error too.
+    #[cfg(feature = "cuda")]
+    {
+        use numr::runtime::Device;
+        let required = (128 + 2 * 64) * head_dim * 4;
+        let available = numr::runtime::cuda::CudaDevice::new(0)
+            .profile()
+            .shared_mem_per_unit as usize;
+        if required > available {
+            println!(
+                "!! {label} SKIPPED: needs {required} bytes of shared memory, this device \
+                 allows {available}. NOTHING WAS VERIFIED."
+            );
+            eprintln!(
+                "!! {label} SKIPPED: needs {required} bytes of shared memory, this device \
+                 allows {available}. NOTHING WAS VERIFIED."
+            );
+            return;
+        }
+    }
+
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, h, sq, sk) = (1usize, 2usize, 6usize, 8usize);
+
+    let q = det_tensor(&[b, h, sq, head_dim], &cpu_device).to_vec::<f32>();
+    let k = det_tensor(&[b, h, sk, head_dim], &cpu_device).to_vec::<f32>();
+    let v = det_tensor(&[b, h, sk, head_dim], &cpu_device).to_vec::<f32>();
+
+    let (k_bytes, k_scales) = quantize_fp8_kv_fixture(&k, b, h, sk, head_dim, per_token_scales);
+    let (v_bytes, v_scales) = quantize_fp8_kv_fixture(&v, b, h, sk, head_dim, per_token_scales);
+    let k_scale_shape: &[usize] = if per_token_scales {
+        &[b, h, sk]
+    } else {
+        &[b, h]
+    };
+    let v_scale_shape = k_scale_shape;
+
+    let q_cpu = Tensor::from_slice(&q, &[b, h, sq, head_dim], &cpu_device).unwrap();
+    let k_cpu = Tensor::from_slice(&k_bytes, &[b, h, sk, head_dim], &cpu_device).unwrap();
+    let v_cpu = Tensor::from_slice(&v_bytes, &[b, h, sk, head_dim], &cpu_device).unwrap();
+    let ks_cpu = Tensor::from_slice(&k_scales, k_scale_shape, &cpu_device).unwrap();
+    let vs_cpu = Tensor::from_slice(&v_scales, v_scale_shape, &cpu_device).unwrap();
+
+    let (cpu_out, _cpu_lse) = cpu_client
+        .flash_attention_fwd_fp8_kv(
+            &q_cpu,
+            &k_cpu,
+            &v_cpu,
+            &ks_cpu,
+            &vs_cpu,
+            h,
+            head_dim,
+            causal,
+            per_token_scales,
+        )
+        .unwrap();
+    let cpu_out_vec = cpu_out.to_vec::<f32>();
+
+    with_cuda_backend(|cuda_client, cuda_device| {
+        let q_c = Tensor::from_slice(&q, &[b, h, sq, head_dim], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k_bytes, &[b, h, sk, head_dim], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&v_bytes, &[b, h, sk, head_dim], &cuda_device).unwrap();
+        let ks_c = Tensor::from_slice(&k_scales, k_scale_shape, &cuda_device).unwrap();
+        let vs_c = Tensor::from_slice(&v_scales, v_scale_shape, &cuda_device).unwrap();
+
+        let (cuda_out, _cuda_lse) = match cuda_client.flash_attention_fwd_fp8_kv(
+            &q_c,
+            &k_c,
+            &v_c,
+            &ks_c,
+            &vs_c,
+            h,
+            head_dim,
+            causal,
+            per_token_scales,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let msg = e.to_string();
+                let absent =
+                    msg.contains("CUDA_ERROR_NOT_FOUND") || msg.contains("named symbol not found");
+                assert!(
+                    absent,
+                    "{label}: flash_attention_fwd_fp8_kv failed for a reason other than the \
+                     kernel being absent: {e}"
+                );
+                eprintln!("{label}: kernel absent ({e}); skipping");
+                return;
+            }
+        };
+
+        assert_parity_f32_tol(&cuda_out.to_vec::<f32>(), &cpu_out_vec, label, 0.1, 0.01);
+    });
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_flash_attention_fwd_fp8_kv_head64_per_token() {
+    assert_flash_fwd_fp8_kv_parity(64, true, false, "flash_fwd_fp8_kv hd64 per-token");
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_flash_attention_fwd_fp8_kv_head64_per_token_causal() {
+    assert_flash_fwd_fp8_kv_parity(64, true, true, "flash_fwd_fp8_kv hd64 per-token causal");
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_flash_attention_fwd_fp8_kv_head128_per_head() {
+    assert_flash_fwd_fp8_kv_parity(128, false, false, "flash_fwd_fp8_kv hd128 per-head");
+}

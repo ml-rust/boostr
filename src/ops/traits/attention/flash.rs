@@ -101,6 +101,37 @@ pub trait FlashAttentionOps<R: Runtime> {
         o_scale: f32,
     ) -> Result<(Tensor<R>, Tensor<R>)>;
 
+    /// Flash Attention forward pass with an FP8-quantized KV cache
+    ///
+    /// `q` stays F32 — only `k_quant`/`v_quant` are FP8 (E4M3). This differs
+    /// from `flash_attention_fwd_fp8`, which quantizes Q/K/V/O uniformly with
+    /// one scalar scale per tensor.
+    ///
+    /// - `k_scales`, `v_scales`: F32 dequantization scales, shaped
+    ///   `[batch, heads, seq_len_k]` when `per_token_scales` is true (one
+    ///   scale per token) or `[batch, heads]` when false (one scale per
+    ///   head). A stored scale is `448 / max_abs`; dequantization divides
+    ///   the FP8 value by it.
+    ///
+    /// # No GQA
+    ///
+    /// The kernel indexes K/V with `num_heads` directly and takes no
+    /// `num_kv_heads` argument. `k_quant`/`v_quant` must carry `num_heads`
+    /// heads, matching `q`.
+    #[allow(clippy::too_many_arguments)]
+    fn flash_attention_fwd_fp8_kv(
+        &self,
+        q: &Tensor<R>,
+        k_quant: &Tensor<R>,
+        v_quant: &Tensor<R>,
+        k_scales: &Tensor<R>,
+        v_scales: &Tensor<R>,
+        num_heads: usize,
+        head_dim: usize,
+        causal: bool,
+        per_token_scales: bool,
+    ) -> Result<(Tensor<R>, Tensor<R>)>;
+
     /// Flash Attention backward pass
     ///
     /// Computes gradients dQ, dK, dV given output gradient dO and

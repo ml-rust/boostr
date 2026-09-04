@@ -16,6 +16,7 @@ use super::flash_bwd;
 use super::flash_bwd_fp8;
 use super::flash_decode;
 use super::flash_fwd;
+use super::flash_fwd_fp8_kv;
 use super::flash_utils::validate_qkv;
 use super::flash_v3;
 use super::mqa_gqa;
@@ -162,6 +163,32 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
 
         flash_fwd::flash_attention_fwd_fp8_impl(
             self, q, k, v, &p, causal, q_scale, k_scale, v_scale, o_scale,
+        )
+    }
+
+    fn flash_attention_fwd_fp8_kv(
+        &self,
+        q: &Tensor<CudaRuntime>,
+        k_quant: &Tensor<CudaRuntime>,
+        v_quant: &Tensor<CudaRuntime>,
+        k_scales: &Tensor<CudaRuntime>,
+        v_scales: &Tensor<CudaRuntime>,
+        num_heads: usize,
+        head_dim: usize,
+        causal: bool,
+        per_token_scales: bool,
+    ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
+        flash_fwd_fp8_kv::flash_attention_fwd_fp8_kv_impl(
+            self,
+            q,
+            k_quant,
+            v_quant,
+            k_scales,
+            v_scales,
+            num_heads,
+            head_dim,
+            causal,
+            per_token_scales,
         )
     }
 

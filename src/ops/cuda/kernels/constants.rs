@@ -25,6 +25,7 @@ pub const KV_CACHE_INT4_MODULE: &str = "kv_cache_int4";
 pub const KV_CACHE_FP8_MODULE: &str = "kv_cache_fp8";
 pub const KV_CACHE_FP8_BWD_MODULE: &str = "kv_cache_fp8_bwd";
 pub const KV_CACHE_QUANT_MODULE: &str = "kv_cache_quant";
+pub const KV_CACHE_QUANT_BF16_MODULE: &str = "kv_cache_quant_bf16";
 pub const RESHAPE_AND_CACHE_MODULE: &str = "reshape_and_cache";
 pub const FUSED_ADAMW_MODULE: &str = "fused_adamw";
 pub const FUSED_SGD_MODULE: &str = "fused_sgd";

@@ -14,7 +14,8 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use crate::ops::cuda::kernels::{
-    self, KV_CACHE_FP8_MODULE, KV_CACHE_INT4_MODULE, KV_CACHE_QUANT_MODULE,
+    self, KV_CACHE_FP8_MODULE, KV_CACHE_INT4_MODULE, KV_CACHE_QUANT_BF16_MODULE,
+    KV_CACHE_QUANT_MODULE,
 };
 
 impl KvCacheQuantOps<CudaRuntime> for CudaClient {
@@ -310,10 +311,26 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         head_dim: usize,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
         let dtype = input.dtype();
-        let dtype_suffix = match dtype {
-            DType::F32 => "fp32",
-            DType::F16 => "fp16",
-            DType::BF16 => "bf16",
+        let device = input.device();
+        let device_index = device.id();
+
+        let (dtype_suffix, module_const) = match dtype {
+            DType::F32 => ("fp32", KV_CACHE_QUANT_MODULE),
+            DType::F16 => ("fp16", KV_CACHE_QUANT_MODULE),
+            DType::BF16 => {
+                // kv_cache_quant_bf16.cu compiles at sm_80. Below that, the
+                // device has no BF16 symbol to launch.
+                if !numr::runtime::cuda::CudaDevice::new(device_index)
+                    .profile()
+                    .caps
+                    .bf16
+                {
+                    return Err(Error::KernelError {
+                        reason: "quantize_kv_int8: device lacks BF16 support".into(),
+                    });
+                }
+                ("bf16", KV_CACHE_QUANT_BF16_MODULE)
+            }
             _ => {
                 return Err(Error::KernelError {
                     reason: format!("INT8 quant: unsupported dtype {dtype:?}"),
@@ -322,10 +339,7 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         };
 
         let kernel_name = format!("quantize_kv_int8_per_token_{dtype_suffix}");
-        let device = input.device();
-        let device_index = device.id();
-        let module =
-            kernels::get_or_load_module(self.context(), device_index, KV_CACHE_QUANT_MODULE)?;
+        let module = kernels::get_or_load_module(self.context(), device_index, module_const)?;
         let func = kernels::get_kernel_function(&module, &kernel_name)?;
 
         let quantized = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], DType::I8, device)?;

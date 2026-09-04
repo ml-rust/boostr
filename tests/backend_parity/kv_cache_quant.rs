@@ -199,3 +199,80 @@ fn test_quantize_dequantize_int8_roundtrip_parity() {
         );
     });
 }
+
+// `quantize_kv_int8_per_token_bf16` lives in kv_cache_quant_bf16.cu, a separate
+// translation unit from kv_cache_quant.cu, resolved through its own
+// `KV_CACHE_QUANT_BF16_MODULE` constant (src/ops/cuda/kernels/constants.rs).
+// A dispatch bug pointing BF16 at the wrong module fails at runtime with a
+// missing-symbol lookup. Nothing else in this crate exercises that path.
+#[test]
+fn test_quantize_kv_int8_bf16_cuda() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let num_tokens = 8;
+    let head_dim = 32;
+    let input = det_tensor(&[num_tokens, head_dim], &cpu_device);
+
+    // Reference computed on CPU in F32, per house rule for BF16 fixtures.
+    let (cpu_quantized, cpu_scales) = cpu_client
+        .quantize_kv_int8(&input, num_tokens, head_dim)
+        .unwrap();
+    let cpu_deq = cpu_client
+        .dequantize_kv_int8(&cpu_quantized, &cpu_scales, num_tokens, head_dim)
+        .unwrap();
+    let cpu_deq_vec = cpu_deq.to_vec::<f32>();
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
+        use numr::dtype::DType;
+        use numr::runtime::Device;
+        use numr::tensor::Tensor;
+
+        // Gate on the capability, never on the returned error. A device below
+        // sm_80 returns KernelError here. So does a missing-symbol lookup from
+        // a mis-wired module — the defect this test exists to catch. Matching
+        // on the error skips that defect and reports it as old hardware.
+        if !numr::runtime::cuda::CudaDevice::new(cuda_device.id())
+            .profile()
+            .caps
+            .bf16
+        {
+            println!(
+                "!! test_quantize_kv_int8_bf16_cuda SKIPPED: this GPU predates sm_80, which BF16 \
+                 kv-cache quant requires. NOTHING WAS VERIFIED."
+            );
+            eprintln!(
+                "!! test_quantize_kv_int8_bf16_cuda SKIPPED: this GPU predates sm_80, which BF16 \
+                 kv-cache quant requires. NOTHING WAS VERIFIED."
+            );
+            return;
+        }
+
+        let inp_f32 = Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(
+            &input.to_vec::<f32>(),
+            &[num_tokens, head_dim],
+            &cuda_device,
+        )
+        .unwrap();
+        let inp_bf16 = inp_f32
+            .to_dtype(DType::BF16)
+            .expect("cast input fixture to BF16");
+
+        let (quantized, scales) = cuda_client
+            .quantize_kv_int8(&inp_bf16, num_tokens, head_dim)
+            .expect("BF16 quantize_kv_int8 must succeed on an sm_80+ device");
+        let deq = cuda_client
+            .dequantize_kv_int8(&quantized, &scales, num_tokens, head_dim)
+            .expect("dequantize_kv_int8 must succeed after a successful BF16 quantize");
+
+        // BF16 keeps ~8 mantissa bits, so tolerance is set by the dtype, not
+        // by the op.
+        assert_parity_f32_tol(
+            &deq.to_vec::<f32>(),
+            &cpu_deq_vec,
+            "quantize_kv_int8 BF16 CUDA vs CPU",
+            4e-2,
+            2e-2,
+        );
+    });
+}

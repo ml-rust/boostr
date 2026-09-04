@@ -252,6 +252,14 @@ fn compile_cuda_kernels() {
         k!(
             "src/ops/cuda/kernels/cache",
             "kv_cache_quant.cu",
+            "sm_75",
+            true
+        ),
+        // sm_80, not sm_75: bf16 kv-cache quant needs `__nv_bfloat16` conversion support.
+        // Split out of kv_cache_quant.cu so the F32/F16/FP8 kernels there load on Turing.
+        k!(
+            "src/ops/cuda/kernels/cache",
+            "kv_cache_quant_bf16.cu",
             "sm_80",
             true
         ),

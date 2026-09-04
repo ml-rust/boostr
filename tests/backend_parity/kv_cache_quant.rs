@@ -251,3 +251,130 @@ fn test_quantize_kv_int8_bf16_cuda() {
         );
     });
 }
+
+// Covers the F16 INT4 kv-cache quant kernel, which runs on every supported device.
+#[test]
+fn test_quantize_kv_int4_f16_cuda() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let num_tokens = 8;
+    let head_dim = 64;
+    let group_size = Int4GroupSize::Group64;
+    let input = det_tensor(&[num_tokens, head_dim], &cpu_device);
+
+    // Reference computed on CPU in F32, per house rule for narrow-dtype fixtures.
+    let (cpu_packed, cpu_scales, cpu_zeros) = cpu_client
+        .quantize_kv_int4(&input, num_tokens, head_dim, group_size)
+        .unwrap();
+    let cpu_deq = cpu_client
+        .dequantize_kv_int4(
+            &cpu_packed,
+            &cpu_scales,
+            &cpu_zeros,
+            num_tokens,
+            head_dim,
+            group_size,
+        )
+        .unwrap();
+    let cpu_deq_vec = cpu_deq.to_vec::<f32>();
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
+        use numr::dtype::DType;
+        use numr::tensor::Tensor;
+
+        let inp_f32 = Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(
+            &input.to_vec::<f32>(),
+            &[num_tokens, head_dim],
+            &cuda_device,
+        )
+        .unwrap();
+        let inp_f16 = inp_f32
+            .to_dtype(DType::F16)
+            .expect("cast input fixture to F16");
+
+        let (packed, scales, zeros) = cuda_client
+            .quantize_kv_int4(&inp_f16, num_tokens, head_dim, group_size)
+            .expect("F16 quantize_kv_int4 must succeed");
+        let deq = cuda_client
+            .dequantize_kv_int4(&packed, &scales, &zeros, num_tokens, head_dim, group_size)
+            .expect("dequantize_kv_int4 must succeed after a successful F16 quantize");
+
+        // INT4 has 16 levels. This fixture spans about 1.0 per Group64 group,
+        // so the quantization step is about 0.067. F16 input rounding is far
+        // smaller than that step, but near a bucket edge it can flip which
+        // bucket a value lands in, so the round-trip can differ by up to one
+        // step. atol is set just above one step; rtol stays small since the
+        // error is bucket-sized, not proportional to the value.
+        assert_parity_f32_tol(
+            &deq.to_vec::<f32>(),
+            &cpu_deq_vec,
+            "quantize_kv_int4 F16 CUDA vs CPU",
+            2e-2,
+            7e-2,
+        );
+    });
+}
+
+// Covers the BF16 INT4 kv-cache quant kernel, which runs on every supported device.
+#[test]
+fn test_quantize_kv_int4_bf16_cuda() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let num_tokens = 8;
+    let head_dim = 64;
+    let group_size = Int4GroupSize::Group64;
+    let input = det_tensor(&[num_tokens, head_dim], &cpu_device);
+
+    // Reference computed on CPU in F32, per house rule for narrow-dtype fixtures.
+    let (cpu_packed, cpu_scales, cpu_zeros) = cpu_client
+        .quantize_kv_int4(&input, num_tokens, head_dim, group_size)
+        .unwrap();
+    let cpu_deq = cpu_client
+        .dequantize_kv_int4(
+            &cpu_packed,
+            &cpu_scales,
+            &cpu_zeros,
+            num_tokens,
+            head_dim,
+            group_size,
+        )
+        .unwrap();
+    let cpu_deq_vec = cpu_deq.to_vec::<f32>();
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
+        use numr::dtype::DType;
+        use numr::tensor::Tensor;
+
+        let inp_f32 = Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(
+            &input.to_vec::<f32>(),
+            &[num_tokens, head_dim],
+            &cuda_device,
+        )
+        .unwrap();
+        let inp_bf16 = inp_f32
+            .to_dtype(DType::BF16)
+            .expect("cast input fixture to BF16");
+
+        let (packed, scales, zeros) = cuda_client
+            .quantize_kv_int4(&inp_bf16, num_tokens, head_dim, group_size)
+            .expect("BF16 quantize_kv_int4 must succeed");
+        let deq = cuda_client
+            .dequantize_kv_int4(&packed, &scales, &zeros, num_tokens, head_dim, group_size)
+            .expect("dequantize_kv_int4 must succeed after a successful BF16 quantize");
+
+        // INT4 has 16 levels. This fixture spans about 1.0 per Group64 group,
+        // so the quantization step is about 0.067. BF16 input rounding is
+        // coarser than F16 but still far smaller than that step; the same
+        // one-bucket boundary flip risk applies, so the tolerance matches
+        // the F16 case rather than widening further.
+        assert_parity_f32_tol(
+            &deq.to_vec::<f32>(),
+            &cpu_deq_vec,
+            "quantize_kv_int4 BF16 CUDA vs CPU",
+            2e-2,
+            7e-2,
+        );
+    });
+}

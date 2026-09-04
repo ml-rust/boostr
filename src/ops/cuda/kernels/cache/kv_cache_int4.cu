@@ -331,6 +331,13 @@ __device__ void flash_attention_int4_kv_impl(
     const int batch_head_idx = blockIdx.x;
     const int q_block_idx = blockIdx.y;
 
+    // BOTTOM-RIGHT causal: query row `i` sits at absolute position
+    // `key_offset + i`, where `key_offset = max(0, seq_len_k - seq_len_q)`.
+    // Same convention as flash_v2.cu, varlen, paged and the CPU reference. A
+    // KV-cached decode has more keys than queries, so omitting the offset
+    // masks positions the rest of the repo keeps.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     const int batch_idx = batch_head_idx / num_heads;
     const int head_idx = batch_head_idx % num_heads;
 
@@ -428,7 +435,7 @@ __device__ void flash_attention_int4_kv_impl(
             // First pass: compute max
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -448,7 +455,7 @@ __device__ void flash_attention_int4_kv_impl(
             // Second pass: accumulate
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll

@@ -1,12 +1,12 @@
-// Quantized KV Cache - FP8 compression for 2x memory savings
-// Reduces KV cache from FP16/BF16 → FP8 for long-context inference
+// Quantized KV cache: FP8 and INT8 compression.
 //
-// Key features:
-// 1. Per-token or per-head quantization with dynamic scales
-// 2. On-the-fly dequantization during attention
-// 3. 2x memory savings (FP16→FP8) with minimal quality loss
-// 4. Compatible with Flash Attention v2
-// 5. Uses centralized dtype_traits.cuh conversions for type safety
+// Holds per-token and per-head FP8 quantizers, an INT8 per-token quantizer
+// with its F32 dequantizer, and a flash-attention kernel that reads an FP8
+// KV cache with FP32 queries.
+//
+// Scale convention: `f32_to_fp8_e4m3_raw` does `val * scale` and
+// `fp8_e4m3_to_f32` does `fp8_val / scale`, so a stored FP8 scale is
+// 448/max_abs, where 448 is the E4M3 maximum. INT8 stores max_abs/127.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -165,6 +165,13 @@ __device__ void flash_attention_fp8_kv_impl(
     const int batch_head_idx = blockIdx.x;
     const int q_block_idx = blockIdx.y;
 
+    // BOTTOM-RIGHT causal: query row `i` sits at absolute position
+    // `key_offset + i`, where `key_offset = max(0, seq_len_k - seq_len_q)`.
+    // Same convention as flash_v2.cu, varlen, paged and the CPU reference. A
+    // KV-cached decode has more keys than queries, so omitting the offset
+    // masks positions the rest of the repo keeps.
+    const int key_offset = max(0, seq_len_k - seq_len_q);
+
     const int batch_idx = batch_head_idx / num_heads;
     const int head_idx = batch_head_idx % num_heads;
 
@@ -239,7 +246,7 @@ __device__ void flash_attention_fp8_kv_impl(
             // First pass: compute max
             float m_new = m_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll
@@ -259,7 +266,7 @@ __device__ void flash_attention_fp8_kv_impl(
             // Second pass: accumulate
             float l_new = alpha * l_local;
             for (int j = 0; j < k_tile_size; ++j) {
-                if (causal && (q_start + q_row) < (k_start + j)) continue;
+                if (causal && (key_offset + q_start + q_row) < (k_start + j)) continue;
 
                 float score = 0.0f;
                 #pragma unroll

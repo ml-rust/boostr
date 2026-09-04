@@ -7,6 +7,7 @@
 use crate::error::{Error, Result};
 use crate::ops::traits::FlashAttentionOps;
 use numr::dtype::DType;
+use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
@@ -102,8 +103,14 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         // dtype variants instantiated. Anything else falls through to the
         // general kernel below, which is what ran for every shape before
         // this was wired up.
+        // `caps.bf16` gates mqa_gqa.cu, which needs sm_80. See
+        // `should_use_mqa_gqa`'s doc for why.
         if window_size == 0
             && matches!(q.dtype(), DType::F32 | DType::F16 | DType::BF16)
+            && numr::runtime::cuda::CudaDevice::new(q.device().id())
+                .profile()
+                .caps
+                .bf16
             && mqa_gqa::should_use_mqa_gqa(num_heads, num_kv_heads, head_dim)
         {
             return mqa_gqa::mqa_gqa_fwd(self, q, k, v, num_heads, num_kv_heads, head_dim, causal);
@@ -136,6 +143,18 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                     "flash_attention_fwd_fp8 requires FP8 dtype, got {:?}",
                     dtype
                 ),
+            });
+        }
+
+        // flash_v2_fp8.cu compiles at sm_80, guarded by `#if __CUDA_ARCH__ >= 800`.
+        // Below that, the device has no FP8 symbol to launch.
+        if !numr::runtime::cuda::CudaDevice::new(q.device().id())
+            .profile()
+            .caps
+            .fp8
+        {
+            return Err(Error::KernelError {
+                reason: "flash_attention_fwd_fp8: device lacks FP8 support".into(),
             });
         }
 
@@ -191,8 +210,13 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         // Same gate as the forward. Both halves must agree: routing the forward
         // to the MQA/GQA kernel and the backward to the general one would pair
         // kernels that were never parity-tested together.
+        // `caps.bf16` gates this for the same sm_80 reason as the forward path.
         if window_size == 0
             && matches!(q.dtype(), DType::F32 | DType::F16 | DType::BF16)
+            && numr::runtime::cuda::CudaDevice::new(q.device().id())
+                .profile()
+                .caps
+                .bf16
             && mqa_gqa::should_use_mqa_gqa(num_heads, num_kv_heads, head_dim)
         {
             return mqa_gqa::mqa_gqa_bwd(
@@ -259,6 +283,17 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                     "flash_attention_bwd_fp8 requires FP8 dtype, got {:?}",
                     dtype
                 ),
+            });
+        }
+
+        // flash_v2_bwd_fp8.cu compiles at sm_80, same guard as the forward gate above.
+        if !numr::runtime::cuda::CudaDevice::new(q.device().id())
+            .profile()
+            .caps
+            .fp8
+        {
+            return Err(Error::KernelError {
+                reason: "flash_attention_bwd_fp8: device lacks FP8 support".into(),
             });
         }
 

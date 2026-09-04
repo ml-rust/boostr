@@ -47,6 +47,19 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
 
         let device = input.device();
         let device_index = device.id();
+
+        // kv_cache_fp8.cu compiles at sm_80, guarded by `#if __CUDA_ARCH__ >= 800`.
+        // Below that, the device has no FP8 symbol to launch.
+        if !numr::runtime::cuda::CudaDevice::new(device_index)
+            .profile()
+            .caps
+            .fp8
+        {
+            return Err(Error::KernelError {
+                reason: "quantize_kv_fp8_per_token: device lacks FP8 support".into(),
+            });
+        }
+
         let module =
             kernels::get_or_load_module(self.context(), device_index, KV_CACHE_FP8_MODULE)?;
         let func = kernels::get_kernel_function(&module, kernel_name)?;
@@ -112,6 +125,18 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
 
         let device = quantized.device();
         let device_index = device.id();
+
+        // Same sm_80 gate as `quantize_kv_fp8_per_token` above.
+        if !numr::runtime::cuda::CudaDevice::new(device_index)
+            .profile()
+            .caps
+            .fp8
+        {
+            return Err(Error::KernelError {
+                reason: "dequantize_kv_fp8_per_token: device lacks FP8 support".into(),
+            });
+        }
+
         let module =
             kernels::get_or_load_module(self.context(), device_index, KV_CACHE_FP8_MODULE)?;
         let func = kernels::get_kernel_function(&module, kernel_name)?;

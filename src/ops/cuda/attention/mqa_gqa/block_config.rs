@@ -221,6 +221,12 @@ pub(super) fn mqa_bwd_block_config(head_dim: usize) -> Result<(usize, usize, boo
 /// policy, is the only thing that should gate this function; do not re-add a
 /// ratio floor without a new measurement showing an actual crossover.
 ///
+/// Shape only, so this stays testable without a device. `mqa_gqa.cu` compiles
+/// at sm_80 because its bf16 instantiations use `__nv_bfloat16` natively, so
+/// the whole translation unit is absent below Ampere. Both call sites in
+/// `flash.rs` gate this behind `caps.bf16`. Below sm_80 they fall back to the
+/// general flash kernel, which runs F32/F16/BF16 on Turing.
+///
 /// Gates PREFILL only: both call sites in `flash.rs` route `seq_len_q == 1` to
 /// the decode path before reaching this check.
 pub fn should_use_mqa_gqa(num_heads: usize, num_kv_heads: usize, head_dim: usize) -> bool {

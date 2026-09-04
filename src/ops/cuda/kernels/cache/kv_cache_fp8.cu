@@ -1,19 +1,15 @@
-// FP8 KV Cache Quantization for H100/Hopper (Better than INT8)
-// Reference: "FP8 Formats for Deep Learning" (NVIDIA H100 Architecture Whitepaper)
-// https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/
+// FP8 KV cache quantization.
 //
-// Key benefits over INT8:
-// - Better numerical accuracy (E4M3: 4 exp bits, 3 mantissa vs INT8: 7 mantissa + sign)
-// - Native H100 tensor core support (2x throughput vs FP16)
-// - Larger dynamic range (E5M2 variant for extreme values)
+// E4M3 carries 4 exponent bits and 3 mantissa bits, so it holds a wider
+// dynamic range than INT8 at the same one byte per element. E5M2 trades
+// mantissa for range again.
 //
-// Performance:
-// - 2x memory savings vs FP16 (1 byte vs 2 bytes)
-// - 2-4x faster attention on H100 with FP8 tensor cores
-// - Minimal accuracy loss (<0.1% perplexity increase)
+// Scale convention: `f32_to_fp8_e4m3_raw` does `val * scale` and
+// `fp8_e4m3_to_f32` does `fp8_val / scale`, so a stored scale is 448/max_abs,
+// where 448 is the E4M3 maximum.
 //
-// NOTE: This kernel is optimized for Hopper (sm_90+, H100)
-//       On Ampere/Ada (sm_80-89), FP8 is software-emulated (slower than INT8)
+// The conversion helpers use hardware FP8 from sm_89 and a bit-exact software
+// encoder below it, so this unit compiles and runs correctly at sm_75.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

@@ -132,6 +132,62 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         Ok((quantized, scales))
     }
 
+    fn quantize_kv_fp8_per_head(
+        &self,
+        input: &Tensor<WgpuRuntime>,
+        num_heads: usize,
+        seq_len: usize,
+        head_dim: usize,
+    ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
+        validate_f32(input, "quantize_kv_fp8_per_head")?;
+
+        // The FP8 shader reduces over a per-unit contiguous span sized by
+        // `head_dim` in its params. A head's `seq_len * head_dim` span is a
+        // wider span of the same kind, so no per-head branch exists.
+        // `quantize_kv_fp8_per_head` reuses the per-token entry point with
+        // num_units = num_heads and span = seq_len * head_dim.
+        let span = seq_len * head_dim;
+
+        let quantized = Tensor::<WgpuRuntime>::zeros(
+            &[num_heads, seq_len, head_dim],
+            DType::F32,
+            input.device(),
+        )?;
+        let scales = Tensor::<WgpuRuntime>::zeros(&[num_heads], DType::F32, input.device())?;
+
+        let input_buf = get_buffer(input.storage().ptr()).ok_or_else(|| Error::KernelError {
+            reason: "input buffer not found".into(),
+        })?;
+        let quant_buf =
+            get_buffer(quantized.storage().ptr()).ok_or_else(|| Error::KernelError {
+                reason: "quantized buffer not found".into(),
+            })?;
+        let scales_buf = get_buffer(scales.storage().ptr()).ok_or_else(|| Error::KernelError {
+            reason: "scales buffer not found".into(),
+        })?;
+
+        let params = QuantParams {
+            num_tokens: num_heads as u32,
+            head_dim: span as u32,
+            group_size: 0,
+            mode: 1,
+        };
+        let params_buf = create_params_buf(self, &params);
+
+        // Shader bindings: 0=input(read), 1=output(rw), 2=scales(rw)
+        dispatch(
+            self,
+            QUANT_FP8_SRC,
+            "quantize_kv_fp8_per_token_f32",
+            &[&input_buf, &quant_buf, &scales_buf, &params_buf],
+            3, // num_storage
+            1, // num_readonly (binding 0 = input)
+            (num_heads as u32).div_ceil(256),
+        )?;
+
+        Ok((quantized, scales))
+    }
+
     fn dequantize_kv_fp8_per_token(
         &self,
         quantized: &Tensor<WgpuRuntime>,

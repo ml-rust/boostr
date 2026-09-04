@@ -43,6 +43,41 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
         Ok((q_tensor, s_tensor))
     }
 
+    fn quantize_kv_fp8_per_head(
+        &self,
+        input: &Tensor<CpuRuntime>,
+        num_heads: usize,
+        seq_len: usize,
+        head_dim: usize,
+    ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+        let data = input.to_vec::<f32>();
+        let device = input.device();
+        let span = seq_len * head_dim;
+        let mut quantized = vec![0u8; num_heads * span];
+        let mut scales = vec![0.0f32; num_heads];
+
+        for (h, scale_out) in scales.iter_mut().enumerate().take(num_heads) {
+            let offset = h * span;
+            let mut max_abs = 0.0f32;
+            for d in 0..span {
+                max_abs = max_abs.max(data[offset + d].abs());
+            }
+            // Scale so max maps to 127 (symmetric INT8-like quant for CPU fallback)
+            let scale = if max_abs > 0.0 { max_abs / 127.0 } else { 1.0 };
+            *scale_out = scale;
+
+            for d in 0..span {
+                let val = (data[offset + d] / scale).round().clamp(-127.0, 127.0) as i8;
+                quantized[offset + d] = val as u8;
+            }
+        }
+
+        let q_tensor =
+            Tensor::<CpuRuntime>::from_slice(&quantized, &[num_heads, seq_len, head_dim], device)?;
+        let s_tensor = Tensor::<CpuRuntime>::from_slice(&scales, &[num_heads], device)?;
+        Ok((q_tensor, s_tensor))
+    }
+
     fn dequantize_kv_fp8_per_token(
         &self,
         quantized: &Tensor<CpuRuntime>,

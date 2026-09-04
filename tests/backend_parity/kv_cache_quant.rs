@@ -76,6 +76,87 @@ fn test_quantize_dequantize_fp8_roundtrip_parity() {
 }
 
 #[test]
+fn test_quantize_dequantize_fp8_per_head_roundtrip_parity() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let num_heads = 4;
+    let seq_len = 8;
+    let head_dim = 32;
+    let span = seq_len * head_dim;
+    let input = det_tensor(&[num_heads, seq_len, head_dim], &cpu_device);
+
+    let (quantized, scales) = cpu_client
+        .quantize_kv_fp8_per_head(&input, num_heads, seq_len, head_dim)
+        .unwrap();
+    assert_eq!(scales.shape(), &[num_heads]);
+
+    // One scale per head, so the existing per-token dequantizer applies
+    // directly with num_tokens = num_heads and head_dim = the head's span.
+    let cpu_deq = cpu_client
+        .dequantize_kv_fp8_per_token(
+            &quantized,
+            &scales,
+            num_heads,
+            span,
+            numr::dtype::DType::F32,
+        )
+        .unwrap();
+    let cpu_deq_vec = cpu_deq.to_vec::<f32>();
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
+        use numr::tensor::Tensor;
+        let inp = Tensor::from_slice(
+            &input.to_vec::<f32>(),
+            &[num_heads, seq_len, head_dim],
+            &cuda_device,
+        )
+        .unwrap();
+        let (q, s) = cuda_client
+            .quantize_kv_fp8_per_head(&inp, num_heads, seq_len, head_dim)
+            .unwrap();
+        assert_eq!(s.shape(), &[num_heads]);
+        let deq = cuda_client
+            .dequantize_kv_fp8_per_token(&q, &s, num_heads, span, numr::dtype::DType::F32)
+            .unwrap();
+        // FP8 quantization is inherently lossy (3 mantissa bits for e4m3).
+        assert_parity_f32_tol(
+            &deq.to_vec::<f32>(),
+            &cpu_deq_vec,
+            "fp8 per-head roundtrip CUDA vs CPU",
+            0.1,  // 10% relative — FP8 has only 3 mantissa bits
+            0.01, // absolute tolerance for values near zero
+        );
+    });
+
+    #[cfg(feature = "wgpu")]
+    with_wgpu_backend(|wgpu_client, wgpu_device| {
+        use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
+        use numr::tensor::Tensor;
+        let inp = Tensor::from_slice(
+            &input.to_vec::<f32>(),
+            &[num_heads, seq_len, head_dim],
+            &wgpu_device,
+        )
+        .unwrap();
+        let (q, s) = wgpu_client
+            .quantize_kv_fp8_per_head(&inp, num_heads, seq_len, head_dim)
+            .unwrap();
+        assert_eq!(s.shape(), &[num_heads]);
+        let deq = wgpu_client
+            .dequantize_kv_fp8_per_token(&q, &s, num_heads, span, numr::dtype::DType::F32)
+            .unwrap();
+        assert_parity_f32_tol(
+            &deq.to_vec::<f32>(),
+            &cpu_deq_vec,
+            "fp8 per-head roundtrip WGPU vs CPU",
+            0.1,
+            0.01,
+        );
+    });
+}
+
+#[test]
 fn test_quantize_dequantize_int4_roundtrip_parity() {
     let (cpu_client, cpu_device) = setup_cpu();
     let num_tokens = 8;

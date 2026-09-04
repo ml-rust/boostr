@@ -87,6 +87,67 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         Ok((quantized, scales))
     }
 
+    fn quantize_kv_fp8_per_head(
+        &self,
+        input: &Tensor<CudaRuntime>,
+        num_heads: usize,
+        seq_len: usize,
+        head_dim: usize,
+    ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
+        let dtype = input.dtype();
+        let dtype_suffix = match dtype {
+            DType::F32 => "fp32",
+            DType::F16 => "fp16",
+            DType::BF16 => "bf16",
+            _ => {
+                return Err(Error::KernelError {
+                    reason: format!("FP8 per-head quant: unsupported dtype {dtype:?}"),
+                });
+            }
+        };
+
+        let kernel_name = format!("quantize_kv_fp8_per_head_{dtype_suffix}");
+        let device = input.device();
+        let device_index = device.id();
+
+        let module =
+            kernels::get_or_load_module(self.context(), device_index, KV_CACHE_QUANT_MODULE)?;
+        let func = kernels::get_kernel_function(&module, &kernel_name)?;
+
+        // Output: FP8 (u8) same shape, scales: [num_heads] F32
+        let quantized =
+            Tensor::<CudaRuntime>::empty(&[num_heads, seq_len, head_dim], DType::U8, device)?;
+        let scales = Tensor::<CudaRuntime>::empty(&[num_heads], DType::F32, device)?;
+
+        let cfg = LaunchConfig {
+            grid_dim: (num_heads as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 256 * 4,
+        };
+
+        let i_ptr = input.ptr();
+        let q_ptr = quantized.ptr();
+        let s_ptr = scales.ptr();
+        let nh_i32 = num_heads as i32;
+        let sl_i32 = seq_len as i32;
+        let hd_i32 = head_dim as i32;
+
+        unsafe {
+            let mut builder = self.stream().launch_builder(&func);
+            builder.arg(&i_ptr);
+            builder.arg(&q_ptr);
+            builder.arg(&s_ptr);
+            builder.arg(&nh_i32);
+            builder.arg(&sl_i32);
+            builder.arg(&hd_i32);
+            builder.launch(cfg).map_err(|e| Error::KernelError {
+                reason: format!("FP8 per-head quant failed: {e:?}"),
+            })?;
+        }
+
+        Ok((quantized, scales))
+    }
+
     fn dequantize_kv_fp8_per_token(
         &self,
         quantized: &Tensor<CudaRuntime>,

@@ -48,6 +48,19 @@ pub trait KvCacheQuantOps<R: Runtime> {
         head_dim: usize,
     ) -> Result<(Tensor<R>, Tensor<R>)>;
 
+    /// Quantize KV cache to FP8 (E4M3) with per-head scaling
+    ///
+    /// One scale covers a head's whole `seq_len * head_dim` span, unlike
+    /// `quantize_kv_fp8_per_token`, which produces one scale per token.
+    /// Returns `(quantized, scales)` where scales is `[num_heads]` F32.
+    fn quantize_kv_fp8_per_head(
+        &self,
+        input: &Tensor<R>,
+        num_heads: usize,
+        seq_len: usize,
+        head_dim: usize,
+    ) -> Result<(Tensor<R>, Tensor<R>)>;
+
     /// Dequantize FP8 KV cache back to original dtype
     fn dequantize_kv_fp8_per_token(
         &self,

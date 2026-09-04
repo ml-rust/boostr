@@ -200,11 +200,7 @@ fn test_quantize_dequantize_int8_roundtrip_parity() {
     });
 }
 
-// `quantize_kv_int8_per_token_bf16` lives in kv_cache_quant_bf16.cu, a separate
-// translation unit from kv_cache_quant.cu, resolved through its own
-// `KV_CACHE_QUANT_BF16_MODULE` constant (src/ops/cuda/kernels/constants.rs).
-// A dispatch bug pointing BF16 at the wrong module fails at runtime with a
-// missing-symbol lookup. Nothing else in this crate exercises that path.
+// Covers the bf16 INT8 kv-cache quant kernel, which runs on every supported device.
 #[test]
 fn test_quantize_kv_int8_bf16_cuda() {
     let (cpu_client, cpu_device) = setup_cpu();
@@ -225,28 +221,7 @@ fn test_quantize_kv_int8_bf16_cuda() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
         use numr::dtype::DType;
-        use numr::runtime::Device;
         use numr::tensor::Tensor;
-
-        // Gate on the capability, never on the returned error. A device below
-        // sm_80 returns KernelError here. So does a missing-symbol lookup from
-        // a mis-wired module — the defect this test exists to catch. Matching
-        // on the error skips that defect and reports it as old hardware.
-        if !numr::runtime::cuda::CudaDevice::new(cuda_device.id())
-            .profile()
-            .caps
-            .bf16
-        {
-            println!(
-                "!! test_quantize_kv_int8_bf16_cuda SKIPPED: this GPU predates sm_80, which BF16 \
-                 kv-cache quant requires. NOTHING WAS VERIFIED."
-            );
-            eprintln!(
-                "!! test_quantize_kv_int8_bf16_cuda SKIPPED: this GPU predates sm_80, which BF16 \
-                 kv-cache quant requires. NOTHING WAS VERIFIED."
-            );
-            return;
-        }
 
         let inp_f32 = Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(
             &input.to_vec::<f32>(),
@@ -260,7 +235,7 @@ fn test_quantize_kv_int8_bf16_cuda() {
 
         let (quantized, scales) = cuda_client
             .quantize_kv_int8(&inp_bf16, num_tokens, head_dim)
-            .expect("BF16 quantize_kv_int8 must succeed on an sm_80+ device");
+            .expect("BF16 quantize_kv_int8 must succeed");
         let deq = cuda_client
             .dequantize_kv_int8(&quantized, &scales, num_tokens, head_dim)
             .expect("dequantize_kv_int8 must succeed after a successful BF16 quantize");

@@ -103,8 +103,10 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         // dtype variants instantiated. Anything else falls through to the
         // general kernel below, which is what ran for every shape before
         // this was wired up.
-        // `caps.bf16` gates mqa_gqa.cu, which needs sm_80. See
-        // `should_use_mqa_gqa`'s doc for why.
+        // `caps.bf16` gates this because `mqa_gqa_bwd.cu` needs sm_80 for its
+        // native bf16 backward kernels. The forward runs fine below sm_80, but
+        // gating it here too keeps forward and backward on the same kernel
+        // family. Falling through reaches the general flash kernel.
         if window_size == 0
             && matches!(q.dtype(), DType::F32 | DType::F16 | DType::BF16)
             && numr::runtime::cuda::CudaDevice::new(q.device().id())
@@ -210,7 +212,9 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         // Same gate as the forward. Both halves must agree: routing the forward
         // to the MQA/GQA kernel and the backward to the general one would pair
         // kernels that were never parity-tested together.
-        // `caps.bf16` gates this for the same sm_80 reason as the forward path.
+        // `caps.bf16` gates this because `mqa_gqa_bwd.cu` needs sm_80 for its
+        // native bf16 backward kernels. Falling through reaches the general
+        // flash kernel.
         if window_size == 0
             && matches!(q.dtype(), DType::F32 | DType::F16 | DType::BF16)
             && numr::runtime::cuda::CudaDevice::new(q.device().id())

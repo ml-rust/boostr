@@ -221,11 +221,13 @@ pub(super) fn mqa_bwd_block_config(head_dim: usize) -> Result<(usize, usize, boo
 /// policy, is the only thing that should gate this function; do not re-add a
 /// ratio floor without a new measurement showing an actual crossover.
 ///
-/// Shape only, so this stays testable without a device. `mqa_gqa.cu` compiles
-/// at sm_80 because its bf16 instantiations use `__nv_bfloat16` natively, so
-/// the whole translation unit is absent below Ampere. Both call sites in
-/// `flash.rs` gate this behind `caps.bf16`. Below sm_80 they fall back to the
-/// general flash kernel, which runs F32/F16/BF16 on Turing.
+/// Shape only, so this stays testable without a device. `mqa_gqa.cu` (forward)
+/// has no native bf16 arithmetic and compiles at sm_75. `mqa_gqa_bwd.cu` has
+/// real `__CUDA_ARCH__` guards around native bf16 arithmetic and needs sm_80.
+/// Both call sites in `flash.rs` gate this behind `caps.bf16` so the forward
+/// and backward stay on the same kernel family — never forward on the
+/// dedicated kernel with backward on the general fallback. Below sm_80 both
+/// fall back to the general flash kernel, which runs F32/F16/BF16 on Turing.
 ///
 /// Gates PREFILL only: both call sites in `flash.rs` route `seq_len_q == 1` to
 /// the decode path before reaching this check.

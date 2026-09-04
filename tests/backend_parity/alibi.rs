@@ -52,10 +52,7 @@ fn test_alibi_add_bias_parity() {
     });
 }
 
-// `alibi_bf16.cu` is a separate translation unit from `alibi.cu`, resolved
-// through its own `ALIBI_BF16_MODULE` constant (src/ops/cuda/kernels/constants.rs).
-// A dispatch bug pointing BF16 at the wrong module fails at runtime with a
-// missing-symbol lookup, and nothing else in this crate exercises that path.
+// Covers the bf16 ALiBi kernels, which run on every supported device.
 #[test]
 fn test_alibi_add_bias_bf16_cuda() {
     let (cpu_client, cpu_device) = setup_cpu();
@@ -71,29 +68,7 @@ fn test_alibi_add_bias_bf16_cuda() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::position::alibi::AlibiOps as _;
         use numr::dtype::DType;
-        use numr::runtime::Device;
         use numr::tensor::Tensor;
-
-        // Gate on the capability, never on the returned error. A device below
-        // sm_80 returns KernelError here, but so does a missing-symbol lookup
-        // from a mis-wired module — the defect this test exists to catch.
-        // Matching on the error would skip on that defect and report it as old
-        // hardware.
-        if !numr::runtime::cuda::CudaDevice::new(cuda_device.id())
-            .profile()
-            .caps
-            .bf16
-        {
-            println!(
-                "!! test_alibi_add_bias_bf16_cuda SKIPPED: this GPU predates sm_80, which BF16 \
-                 ALiBi requires. NOTHING WAS VERIFIED."
-            );
-            eprintln!(
-                "!! test_alibi_add_bias_bf16_cuda SKIPPED: this GPU predates sm_80, which BF16 \
-                 ALiBi requires. NOTHING WAS VERIFIED."
-            );
-            return;
-        }
 
         let s_f32 = Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(
             &vec![0.0f32; b * h * sq * sk],
@@ -107,7 +82,7 @@ fn test_alibi_add_bias_bf16_cuda() {
 
         cuda_client
             .alibi_add_bias(&s_bf16, b, h, sq, sk)
-            .expect("BF16 alibi_add_bias must succeed on an sm_80+ device");
+            .expect("BF16 alibi_add_bias must succeed");
 
         let result_f32 = s_bf16
             .to_dtype(DType::F32)
@@ -142,26 +117,7 @@ fn test_alibi_add_bias_causal_bf16_cuda() {
     with_cuda_backend(|cuda_client, cuda_device| {
         use boostr::ops::traits::position::alibi::AlibiOps as _;
         use numr::dtype::DType;
-        use numr::runtime::Device;
         use numr::tensor::Tensor;
-
-        // Same reasoning as the non-causal test above: gate on the capability,
-        // never on the returned error.
-        if !numr::runtime::cuda::CudaDevice::new(cuda_device.id())
-            .profile()
-            .caps
-            .bf16
-        {
-            println!(
-                "!! test_alibi_add_bias_causal_bf16_cuda SKIPPED: this GPU predates sm_80, which \
-                 BF16 ALiBi requires. NOTHING WAS VERIFIED."
-            );
-            eprintln!(
-                "!! test_alibi_add_bias_causal_bf16_cuda SKIPPED: this GPU predates sm_80, which \
-                 BF16 ALiBi requires. NOTHING WAS VERIFIED."
-            );
-            return;
-        }
 
         let s_f32 = Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(
             &vec![0.0f32; b * h * sq * sk],
@@ -175,7 +131,7 @@ fn test_alibi_add_bias_causal_bf16_cuda() {
 
         cuda_client
             .alibi_add_bias_causal(&s_bf16, b, h, sq, sk, position)
-            .expect("BF16 alibi_add_bias_causal must succeed on an sm_80+ device");
+            .expect("BF16 alibi_add_bias_causal must succeed");
 
         let result_f32 = s_bf16
             .to_dtype(DType::F32)

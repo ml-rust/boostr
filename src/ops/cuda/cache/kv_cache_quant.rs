@@ -14,8 +14,7 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use crate::ops::cuda::kernels::{
-    self, KV_CACHE_FP8_MODULE, KV_CACHE_INT4_MODULE, KV_CACHE_QUANT_BF16_MODULE,
-    KV_CACHE_QUANT_MODULE,
+    self, KV_CACHE_FP8_MODULE, KV_CACHE_INT4_MODULE, KV_CACHE_QUANT_MODULE,
 };
 
 impl KvCacheQuantOps<CudaRuntime> for CudaClient {
@@ -48,18 +47,6 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
 
         let device = input.device();
         let device_index = device.id();
-
-        // kv_cache_fp8.cu compiles at sm_80, guarded by `#if __CUDA_ARCH__ >= 800`.
-        // Below that, the device has no FP8 symbol to launch.
-        if !numr::runtime::cuda::CudaDevice::new(device_index)
-            .profile()
-            .caps
-            .fp8
-        {
-            return Err(Error::KernelError {
-                reason: "quantize_kv_fp8_per_token: device lacks FP8 support".into(),
-            });
-        }
 
         let module =
             kernels::get_or_load_module(self.context(), device_index, KV_CACHE_FP8_MODULE)?;
@@ -126,17 +113,6 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
 
         let device = quantized.device();
         let device_index = device.id();
-
-        // Same sm_80 gate as `quantize_kv_fp8_per_token` above.
-        if !numr::runtime::cuda::CudaDevice::new(device_index)
-            .profile()
-            .caps
-            .fp8
-        {
-            return Err(Error::KernelError {
-                reason: "dequantize_kv_fp8_per_token: device lacks FP8 support".into(),
-            });
-        }
 
         let module =
             kernels::get_or_load_module(self.context(), device_index, KV_CACHE_FP8_MODULE)?;
@@ -311,26 +287,10 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         head_dim: usize,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
         let dtype = input.dtype();
-        let device = input.device();
-        let device_index = device.id();
-
-        let (dtype_suffix, module_const) = match dtype {
-            DType::F32 => ("fp32", KV_CACHE_QUANT_MODULE),
-            DType::F16 => ("fp16", KV_CACHE_QUANT_MODULE),
-            DType::BF16 => {
-                // kv_cache_quant_bf16.cu compiles at sm_80. Below that, the
-                // device has no BF16 symbol to launch.
-                if !numr::runtime::cuda::CudaDevice::new(device_index)
-                    .profile()
-                    .caps
-                    .bf16
-                {
-                    return Err(Error::KernelError {
-                        reason: "quantize_kv_int8: device lacks BF16 support".into(),
-                    });
-                }
-                ("bf16", KV_CACHE_QUANT_BF16_MODULE)
-            }
+        let dtype_suffix = match dtype {
+            DType::F32 => "fp32",
+            DType::F16 => "fp16",
+            DType::BF16 => "bf16",
             _ => {
                 return Err(Error::KernelError {
                     reason: format!("INT8 quant: unsupported dtype {dtype:?}"),
@@ -339,7 +299,10 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         };
 
         let kernel_name = format!("quantize_kv_int8_per_token_{dtype_suffix}");
-        let module = kernels::get_or_load_module(self.context(), device_index, module_const)?;
+        let device = input.device();
+        let device_index = device.id();
+        let module =
+            kernels::get_or_load_module(self.context(), device_index, KV_CACHE_QUANT_MODULE)?;
         let func = kernels::get_kernel_function(&module, &kernel_name)?;
 
         let quantized = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], DType::I8, device)?;

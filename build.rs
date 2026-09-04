@@ -181,14 +181,16 @@ fn compile_cuda_kernels() {
         k!(
             "src/ops/cuda/kernels/attention",
             "mqa_gqa.cu",
-            "sm_80",
+            "sm_75",
             true
         ),
         // sm_80, not sm_75: the bf16 backward kernels are guarded by
         // `#if __CUDA_ARCH__ >= 800`, so compiling this at sm_75 silently drops
         // every bf16 symbol while the launcher still accepts `DType::BF16` —
         // a runtime kernel-lookup failure on the primary training dtype.
-        // The forward (mqa_gqa.cu) is already sm_80, so nothing is lost.
+        // The forward (mqa_gqa.cu) has no native bf16 arithmetic and runs at
+        // sm_75; `flash.rs` gates both call sites on `caps.bf16` so the two
+        // stay on the same kernel family instead of pairing an untested mix.
         k!(
             "src/ops/cuda/kernels/attention",
             "mqa_gqa_bwd.cu",
@@ -249,27 +251,19 @@ fn compile_cuda_kernels() {
         k!(
             "src/ops/cuda/kernels/cache",
             "kv_cache_fp8.cu",
-            "sm_80",
+            "sm_75",
             true
         ),
         k!(
             "src/ops/cuda/kernels/cache",
             "kv_cache_fp8_bwd.cu",
-            "sm_80",
+            "sm_75",
             true
         ),
         k!(
             "src/ops/cuda/kernels/cache",
             "kv_cache_quant.cu",
             "sm_75",
-            true
-        ),
-        // sm_80, not sm_75: bf16 kv-cache quant needs `__nv_bfloat16` conversion support.
-        // Split out of kv_cache_quant.cu so the F32/F16/FP8 kernels there load on Turing.
-        k!(
-            "src/ops/cuda/kernels/cache",
-            "kv_cache_quant_bf16.cu",
-            "sm_80",
             true
         ),
         k!(
@@ -280,14 +274,6 @@ fn compile_cuda_kernels() {
         ),
         // Position kernels
         k!("src/ops/cuda/kernels/position", "alibi.cu", "sm_75", true),
-        // sm_80, not sm_75: bf16 alibi needs `__nv_bfloat16` conversion support.
-        // Split out of alibi.cu so the F32/F16 kernels there load on Turing.
-        k!(
-            "src/ops/cuda/kernels/position",
-            "alibi_bf16.cu",
-            "sm_80",
-            true
-        ),
         k!(
             "src/ops/cuda/kernels/position",
             "alibi_bwd.cu",

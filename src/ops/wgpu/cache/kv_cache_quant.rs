@@ -370,4 +370,30 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
 
         Ok(output)
     }
+
+    fn kv_fp8_bwd_per_tensor(
+        &self,
+        _grad_output: &Tensor<WgpuRuntime>,
+        _kv_fp8: &Tensor<WgpuRuntime>,
+        _scale: f32,
+    ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
+        Err(Error::KernelError {
+            reason: "kv_fp8_bwd_per_tensor not implemented on WebGPU: no WGSL shader for it".into(),
+        })
+    }
+
+    fn kv_fp8_bwd_per_token(
+        &self,
+        _grad_output: &Tensor<WgpuRuntime>,
+        _kv_fp8: &Tensor<WgpuRuntime>,
+        _scales: &Tensor<WgpuRuntime>,
+        _batch: usize,
+        _num_kv_heads: usize,
+        _seq_len: usize,
+        _head_dim: usize,
+    ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
+        Err(Error::KernelError {
+            reason: "kv_fp8_bwd_per_token not implemented on WebGPU: no WGSL shader for it".into(),
+        })
+    }
 }

@@ -119,4 +119,42 @@ pub trait KvCacheQuantOps<R: Runtime> {
         num_tokens: usize,
         head_dim: usize,
     ) -> Result<Tensor<R>>;
+
+    /// Backward for FP8 fake-quantization with a single tensor-wide scale.
+    ///
+    /// `grad_kv` is a straight-through-estimator identity: `grad_kv =
+    /// grad_output`. `grad_scale` differentiates the dequant `x_hat = c /
+    /// scale` with the FP8 code `c` held constant, so `grad_scale =
+    /// sum(grad_output * -c / scale^2)`, returned as a 1-element F32 tensor.
+    ///
+    /// `grad_output`'s dtype (F32/F16/BF16) selects the kernel. `kv_fp8` must
+    /// be `DType::FP8E4M3`. Returns `(grad_kv, grad_scale)`.
+    fn kv_fp8_bwd_per_tensor(
+        &self,
+        grad_output: &Tensor<R>,
+        kv_fp8: &Tensor<R>,
+        scale: f32,
+    ) -> Result<(Tensor<R>, Tensor<R>)>;
+
+    /// Backward for FP8 fake-quantization with one scale per token.
+    ///
+    /// Same STE identity and scale-gradient formula as
+    /// `kv_fp8_bwd_per_tensor`, but reduced per token instead of over the
+    /// whole tensor: `grad_scales[token] = sum_d(grad_output[d] * -c_d /
+    /// scale[token]^2)`. Pairs with `quantize_kv_fp8_per_token`'s forward
+    /// layout, where `scales` is flat `[num_tokens]` with `num_tokens ==
+    /// batch * num_kv_heads * seq_len`. `scales` must be F32.
+    ///
+    /// Returns `(grad_kv, grad_scales)`.
+    #[allow(clippy::too_many_arguments)]
+    fn kv_fp8_bwd_per_token(
+        &self,
+        grad_output: &Tensor<R>,
+        kv_fp8: &Tensor<R>,
+        scales: &Tensor<R>,
+        batch: usize,
+        num_kv_heads: usize,
+        seq_len: usize,
+        head_dim: usize,
+    ) -> Result<(Tensor<R>, Tensor<R>)>;
 }

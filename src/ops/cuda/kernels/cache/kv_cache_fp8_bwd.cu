@@ -56,6 +56,7 @@ extern "C" __global__ void kv_cache_fp8_bwd_per_tensor_fp16(
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
+    // blockDim.x must be a power of two, <= 256 (see FP8_BWD_BLOCK in kv_cache_fp8_bwd.rs)
     __shared__ float smem_sum[256];
 
     float local_grad_scale = 0.0f;
@@ -118,6 +119,7 @@ extern "C" __global__ void kv_cache_fp8_bwd_per_token_fp16(
     const float token_scale = scales[token_idx];
     const float inv_scale_sq = 1.0f / (token_scale * token_scale);
 
+    // blockDim.x must be a power of two, <= 256 (see FP8_BWD_BLOCK in kv_cache_fp8_bwd.rs)
     __shared__ float smem_sum[256];
 
     float local_grad_scale = 0.0f;
@@ -166,6 +168,7 @@ extern "C" __global__ void kv_cache_fp8_bwd_per_tensor_bf16(
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
+    // blockDim.x must be a power of two, <= 256 (see FP8_BWD_BLOCK in kv_cache_fp8_bwd.rs)
     __shared__ float smem_sum[256];
 
     float local_grad_scale = 0.0f;
@@ -218,6 +221,7 @@ extern "C" __global__ void kv_cache_fp8_bwd_per_token_bf16(
     const float token_scale = scales[token_idx];
     const float inv_scale_sq = 1.0f / (token_scale * token_scale);
 
+    // blockDim.x must be a power of two, <= 256 (see FP8_BWD_BLOCK in kv_cache_fp8_bwd.rs)
     __shared__ float smem_sum[256];
 
     float local_grad_scale = 0.0f;
@@ -261,6 +265,7 @@ extern "C" __global__ void kv_cache_fp8_bwd_per_tensor_fp32(
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
+    // blockDim.x must be a power of two, <= 256 (see FP8_BWD_BLOCK in kv_cache_fp8_bwd.rs)
     __shared__ float smem_sum[256];
 
     float local_grad_scale = 0.0f;
@@ -313,6 +318,7 @@ extern "C" __global__ void kv_cache_fp8_bwd_per_token_fp32(
     const float token_scale = scales[token_idx];
     const float inv_scale_sq = 1.0f / (token_scale * token_scale);
 
+    // blockDim.x must be a power of two, <= 256 (see FP8_BWD_BLOCK in kv_cache_fp8_bwd.rs)
     __shared__ float smem_sum[256];
 
     float local_grad_scale = 0.0f;

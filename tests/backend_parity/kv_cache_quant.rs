@@ -1051,3 +1051,359 @@ fn test_append_kv_int4_matches_batch_quantize() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// kv_fp8_bwd_per_{tensor,token}: backward of FP8 KV-cache fake-quantization.
+//
+// Synthetic fixtures are exact here: the backward takes (grad_output,
+// kv_fp8, scale) directly, with no forward op needed to construct them.
+//
+// Both grad_kv AND grad_scale(s) are checked. grad_kv is a straight-through
+// identity, so checking it alone would pass trivially and never exercise the
+// block reduction that produces the scale gradient.
+//
+// head_dim (37) is not a power of two, and the per-tensor element count
+// (300) does not divide FP8_BWD_BLOCK (256): both push the kernels' strided
+// tree reduction through its partial (non-full-warp) path.
+// ---------------------------------------------------------------------------
+
+const FP8BWD_TOTAL_ELEMENTS: usize = 300;
+const FP8BWD_BATCH: usize = 2;
+const FP8BWD_KV_HEADS: usize = 3;
+const FP8BWD_SEQ_LEN: usize = 5;
+const FP8BWD_HEAD_DIM: usize = 37;
+const FP8BWD_TOTAL_TOKENS: usize = FP8BWD_BATCH * FP8BWD_KV_HEADS * FP8BWD_SEQ_LEN;
+
+/// Deterministic values in roughly [-2.0, 2.0], wide enough that FP8E4M3
+/// encodes a spread of distinct codes rather than clustering near zero.
+fn fp8bwd_vals(n: usize, phase: f32) -> Vec<f32> {
+    (0..n)
+        .map(|i| ((i as f32) * 0.29 + phase).sin() * 2.0)
+        .collect()
+}
+
+/// A plausible stored scale: the repo convention is `448 / max_abs`, so with
+/// fixture values in [-2, 2] a realistic scale is on the order of 200, not
+/// `max_abs / 448`.
+const FP8BWD_SCALE: f32 = 200.0;
+
+/// Tolerance scaled by the reference gradient's own magnitude, so a
+/// small-valued gradient is not waved through by a fixed absolute tolerance.
+#[cfg(feature = "cuda")]
+fn assert_fp8bwd_grad_close(actual: &[f32], expected: &[f32], op: &str, rtol: f32, atol_frac: f32) {
+    let max_abs = expected.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    assert!(max_abs > 0.0, "{op}: reference gradient is all zeros");
+    assert_parity_f32_tol(actual, expected, op, rtol, atol_frac * max_abs);
+}
+
+#[test]
+fn test_kv_fp8_bwd_per_tensor_cpu_reference_is_sane() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    use numr::dtype::DType;
+    use numr::tensor::Tensor;
+
+    let go_data = fp8bwd_vals(FP8BWD_TOTAL_ELEMENTS, 0.13);
+    let kv_data = fp8bwd_vals(FP8BWD_TOTAL_ELEMENTS, 1.7);
+
+    let go = Tensor::from_slice(&go_data, &[FP8BWD_TOTAL_ELEMENTS], &cpu_device).unwrap();
+    let kv_f32 = Tensor::from_slice(&kv_data, &[FP8BWD_TOTAL_ELEMENTS], &cpu_device).unwrap();
+    let kv_fp8 = kv_f32
+        .to_dtype(DType::FP8E4M3)
+        .expect("cast fixture to FP8E4M3");
+
+    let (grad_kv, grad_scale) = cpu_client
+        .kv_fp8_bwd_per_tensor(&go, &kv_fp8, FP8BWD_SCALE)
+        .expect("CPU kv_fp8_bwd_per_tensor must succeed");
+
+    assert_eq!(grad_kv.shape(), &[FP8BWD_TOTAL_ELEMENTS]);
+    assert_eq!(grad_scale.shape(), &[1]);
+    assert_eq!(
+        grad_kv.to_vec::<f32>(),
+        go_data,
+        "grad_kv must equal grad_output (STE identity)"
+    );
+    let gs = grad_scale.to_vec::<f32>()[0];
+    assert!(
+        gs.is_finite() && gs != 0.0,
+        "grad_scale must be a finite, non-zero reduction"
+    );
+}
+
+#[cfg(feature = "cuda")]
+fn run_kv_fp8_bwd_per_tensor_cuda_case(
+    dtype: numr::dtype::DType,
+    label: &str,
+    rtol: f32,
+    atol_frac: f32,
+) {
+    use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
+    use numr::dtype::DType;
+    use numr::tensor::Tensor;
+
+    let (cpu_client, cpu_device) = setup_cpu();
+    let go_data = fp8bwd_vals(FP8BWD_TOTAL_ELEMENTS, 0.13);
+    let kv_data = fp8bwd_vals(FP8BWD_TOTAL_ELEMENTS, 1.7);
+
+    let go_cpu = Tensor::from_slice(&go_data, &[FP8BWD_TOTAL_ELEMENTS], &cpu_device).unwrap();
+    let kv_cpu_f32 = Tensor::from_slice(&kv_data, &[FP8BWD_TOTAL_ELEMENTS], &cpu_device).unwrap();
+    let kv_cpu_fp8 = kv_cpu_f32
+        .to_dtype(DType::FP8E4M3)
+        .expect("cast CPU fixture to FP8E4M3");
+    let (cpu_grad_kv, cpu_grad_scale) = cpu_client
+        .kv_fp8_bwd_per_tensor(&go_cpu, &kv_cpu_fp8, FP8BWD_SCALE)
+        .expect("CPU kv_fp8_bwd_per_tensor must succeed");
+    let cpu_grad_kv_vec = cpu_grad_kv.to_vec::<f32>();
+    let cpu_grad_scale_vec = cpu_grad_scale.to_vec::<f32>();
+
+    with_cuda_backend(|cuda_client, cuda_device| {
+        let go_f32 = Tensor::from_slice(&go_data, &[FP8BWD_TOTAL_ELEMENTS], &cuda_device).unwrap();
+        let go = if dtype == DType::F32 {
+            go_f32
+        } else {
+            go_f32
+                .to_dtype(dtype)
+                .unwrap_or_else(|e| panic!("cast grad_output fixture to {dtype:?}: {e:?}"))
+        };
+        let kv_f32 = Tensor::from_slice(&kv_data, &[FP8BWD_TOTAL_ELEMENTS], &cuda_device).unwrap();
+        let kv_fp8 = kv_f32
+            .to_dtype(DType::FP8E4M3)
+            .expect("cast CUDA fixture to FP8E4M3");
+
+        let (grad_kv, grad_scale) = cuda_client
+            .kv_fp8_bwd_per_tensor(&go, &kv_fp8, FP8BWD_SCALE)
+            .unwrap_or_else(|e| panic!("{label} kv_fp8_bwd_per_tensor must succeed: {e:?}"));
+
+        let grad_kv_f32 = if dtype == DType::F32 {
+            grad_kv.to_vec::<f32>()
+        } else {
+            grad_kv
+                .to_dtype(DType::F32)
+                .expect("cast grad_kv result back to F32 for comparison")
+                .to_vec::<f32>()
+        };
+
+        assert_fp8bwd_grad_close(
+            &grad_kv_f32,
+            &cpu_grad_kv_vec,
+            &format!("kv_fp8_bwd_per_tensor grad_kv {label} CUDA vs CPU"),
+            rtol,
+            atol_frac,
+        );
+        assert_fp8bwd_grad_close(
+            &grad_scale.to_vec::<f32>(),
+            &cpu_grad_scale_vec,
+            &format!("kv_fp8_bwd_per_tensor grad_scale {label} CUDA vs CPU"),
+            rtol,
+            atol_frac,
+        );
+    });
+}
+
+#[test]
+fn test_kv_fp8_bwd_per_tensor_f32_cuda() {
+    #[cfg(feature = "cuda")]
+    run_kv_fp8_bwd_per_tensor_cuda_case(numr::dtype::DType::F32, "F32", 1e-4, 1e-5);
+}
+
+#[test]
+fn test_kv_fp8_bwd_per_tensor_f16_cuda() {
+    #[cfg(feature = "cuda")]
+    run_kv_fp8_bwd_per_tensor_cuda_case(numr::dtype::DType::F16, "F16", 4e-2, 2e-2);
+}
+
+#[test]
+fn test_kv_fp8_bwd_per_tensor_bf16_cuda() {
+    #[cfg(feature = "cuda")]
+    run_kv_fp8_bwd_per_tensor_cuda_case(numr::dtype::DType::BF16, "BF16", 4e-2, 2e-2);
+}
+
+#[test]
+fn test_kv_fp8_bwd_per_token_cpu_reference_is_sane() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    use numr::dtype::DType;
+    use numr::tensor::Tensor;
+
+    let total = FP8BWD_TOTAL_TOKENS * FP8BWD_HEAD_DIM;
+    let go_data = fp8bwd_vals(total, 0.31);
+    let kv_data = fp8bwd_vals(total, 2.3);
+    let scale_data: Vec<f32> = (0..FP8BWD_TOTAL_TOKENS)
+        .map(|t| FP8BWD_SCALE + (t as f32))
+        .collect();
+
+    let go = Tensor::from_slice(
+        &go_data,
+        &[FP8BWD_TOTAL_TOKENS, FP8BWD_HEAD_DIM],
+        &cpu_device,
+    )
+    .unwrap();
+    let kv_f32 = Tensor::from_slice(
+        &kv_data,
+        &[FP8BWD_TOTAL_TOKENS, FP8BWD_HEAD_DIM],
+        &cpu_device,
+    )
+    .unwrap();
+    let kv_fp8 = kv_f32
+        .to_dtype(DType::FP8E4M3)
+        .expect("cast fixture to FP8E4M3");
+    let scales = Tensor::from_slice(&scale_data, &[FP8BWD_TOTAL_TOKENS], &cpu_device).unwrap();
+
+    let (grad_kv, grad_scales) = cpu_client
+        .kv_fp8_bwd_per_token(
+            &go,
+            &kv_fp8,
+            &scales,
+            FP8BWD_BATCH,
+            FP8BWD_KV_HEADS,
+            FP8BWD_SEQ_LEN,
+            FP8BWD_HEAD_DIM,
+        )
+        .expect("CPU kv_fp8_bwd_per_token must succeed");
+
+    assert_eq!(grad_kv.shape(), &[FP8BWD_TOTAL_TOKENS, FP8BWD_HEAD_DIM]);
+    assert_eq!(grad_scales.shape(), &[FP8BWD_TOTAL_TOKENS]);
+    assert_eq!(
+        grad_kv.to_vec::<f32>(),
+        go_data,
+        "grad_kv must equal grad_output (STE identity)"
+    );
+    let gs = grad_scales.to_vec::<f32>();
+    assert!(
+        gs.iter().all(|x| x.is_finite()),
+        "grad_scales must all be finite"
+    );
+    assert!(
+        gs.iter().any(|x| *x != 0.0),
+        "grad_scales must not be entirely zero"
+    );
+}
+
+#[cfg(feature = "cuda")]
+fn run_kv_fp8_bwd_per_token_cuda_case(
+    dtype: numr::dtype::DType,
+    label: &str,
+    rtol: f32,
+    atol_frac: f32,
+) {
+    use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
+    use numr::dtype::DType;
+    use numr::tensor::Tensor;
+
+    let (cpu_client, cpu_device) = setup_cpu();
+    let total = FP8BWD_TOTAL_TOKENS * FP8BWD_HEAD_DIM;
+    let go_data = fp8bwd_vals(total, 0.31);
+    let kv_data = fp8bwd_vals(total, 2.3);
+    let scale_data: Vec<f32> = (0..FP8BWD_TOTAL_TOKENS)
+        .map(|t| FP8BWD_SCALE + (t as f32))
+        .collect();
+
+    let go_cpu = Tensor::from_slice(
+        &go_data,
+        &[FP8BWD_TOTAL_TOKENS, FP8BWD_HEAD_DIM],
+        &cpu_device,
+    )
+    .unwrap();
+    let kv_cpu_f32 = Tensor::from_slice(
+        &kv_data,
+        &[FP8BWD_TOTAL_TOKENS, FP8BWD_HEAD_DIM],
+        &cpu_device,
+    )
+    .unwrap();
+    let kv_cpu_fp8 = kv_cpu_f32
+        .to_dtype(DType::FP8E4M3)
+        .expect("cast CPU fixture to FP8E4M3");
+    let scales_cpu = Tensor::from_slice(&scale_data, &[FP8BWD_TOTAL_TOKENS], &cpu_device).unwrap();
+
+    let (cpu_grad_kv, cpu_grad_scales) = cpu_client
+        .kv_fp8_bwd_per_token(
+            &go_cpu,
+            &kv_cpu_fp8,
+            &scales_cpu,
+            FP8BWD_BATCH,
+            FP8BWD_KV_HEADS,
+            FP8BWD_SEQ_LEN,
+            FP8BWD_HEAD_DIM,
+        )
+        .expect("CPU kv_fp8_bwd_per_token must succeed");
+    let cpu_grad_kv_vec = cpu_grad_kv.to_vec::<f32>();
+    let cpu_grad_scales_vec = cpu_grad_scales.to_vec::<f32>();
+
+    with_cuda_backend(|cuda_client, cuda_device| {
+        let go_f32 = Tensor::from_slice(
+            &go_data,
+            &[FP8BWD_TOTAL_TOKENS, FP8BWD_HEAD_DIM],
+            &cuda_device,
+        )
+        .unwrap();
+        let go = if dtype == DType::F32 {
+            go_f32
+        } else {
+            go_f32
+                .to_dtype(dtype)
+                .unwrap_or_else(|e| panic!("cast grad_output fixture to {dtype:?}: {e:?}"))
+        };
+        let kv_f32 = Tensor::from_slice(
+            &kv_data,
+            &[FP8BWD_TOTAL_TOKENS, FP8BWD_HEAD_DIM],
+            &cuda_device,
+        )
+        .unwrap();
+        let kv_fp8 = kv_f32
+            .to_dtype(DType::FP8E4M3)
+            .expect("cast CUDA fixture to FP8E4M3");
+        let scales = Tensor::from_slice(&scale_data, &[FP8BWD_TOTAL_TOKENS], &cuda_device).unwrap();
+
+        let (grad_kv, grad_scales) = cuda_client
+            .kv_fp8_bwd_per_token(
+                &go,
+                &kv_fp8,
+                &scales,
+                FP8BWD_BATCH,
+                FP8BWD_KV_HEADS,
+                FP8BWD_SEQ_LEN,
+                FP8BWD_HEAD_DIM,
+            )
+            .unwrap_or_else(|e| panic!("{label} kv_fp8_bwd_per_token must succeed: {e:?}"));
+
+        let grad_kv_f32 = if dtype == DType::F32 {
+            grad_kv.to_vec::<f32>()
+        } else {
+            grad_kv
+                .to_dtype(DType::F32)
+                .expect("cast grad_kv result back to F32 for comparison")
+                .to_vec::<f32>()
+        };
+
+        assert_fp8bwd_grad_close(
+            &grad_kv_f32,
+            &cpu_grad_kv_vec,
+            &format!("kv_fp8_bwd_per_token grad_kv {label} CUDA vs CPU"),
+            rtol,
+            atol_frac,
+        );
+        assert_fp8bwd_grad_close(
+            &grad_scales.to_vec::<f32>(),
+            &cpu_grad_scales_vec,
+            &format!("kv_fp8_bwd_per_token grad_scales {label} CUDA vs CPU"),
+            rtol,
+            atol_frac,
+        );
+    });
+}
+
+#[test]
+fn test_kv_fp8_bwd_per_token_f32_cuda() {
+    #[cfg(feature = "cuda")]
+    run_kv_fp8_bwd_per_token_cuda_case(numr::dtype::DType::F32, "F32", 1e-4, 1e-5);
+}
+
+#[test]
+fn test_kv_fp8_bwd_per_token_f16_cuda() {
+    #[cfg(feature = "cuda")]
+    run_kv_fp8_bwd_per_token_cuda_case(numr::dtype::DType::F16, "F16", 4e-2, 2e-2);
+}
+
+#[test]
+fn test_kv_fp8_bwd_per_token_bf16_cuda() {
+    #[cfg(feature = "cuda")]
+    run_kv_fp8_bwd_per_token_cuda_case(numr::dtype::DType::BF16, "BF16", 4e-2, 2e-2);
+}

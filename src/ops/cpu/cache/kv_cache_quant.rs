@@ -258,6 +258,37 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
             device,
         )?)
     }
+
+    fn kv_fp8_bwd_per_tensor(
+        &self,
+        grad_output: &Tensor<CpuRuntime>,
+        kv_fp8: &Tensor<CpuRuntime>,
+        scale: f32,
+    ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+        super::kv_cache_fp8_bwd::kv_fp8_bwd_per_tensor_impl(self, grad_output, kv_fp8, scale)
+    }
+
+    fn kv_fp8_bwd_per_token(
+        &self,
+        grad_output: &Tensor<CpuRuntime>,
+        kv_fp8: &Tensor<CpuRuntime>,
+        scales: &Tensor<CpuRuntime>,
+        batch: usize,
+        num_kv_heads: usize,
+        seq_len: usize,
+        head_dim: usize,
+    ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+        super::kv_cache_fp8_bwd::kv_fp8_bwd_per_token_impl(
+            self,
+            grad_output,
+            kv_fp8,
+            scales,
+            batch,
+            num_kv_heads,
+            seq_len,
+            head_dim,
+        )
+    }
 }
 
 #[cfg(test)]

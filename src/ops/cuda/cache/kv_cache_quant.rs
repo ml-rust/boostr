@@ -236,18 +236,30 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         num_tokens: usize,
         head_dim: usize,
         group_size: Int4GroupSize,
+        output_dtype: DType,
     ) -> Result<Tensor<CudaRuntime>> {
+        let kernel_name = match output_dtype {
+            DType::F32 => "dequantize_kv_int4_per_group_fp32",
+            DType::F16 => "dequantize_kv_int4_per_group_fp16",
+            DType::BF16 => "dequantize_kv_int4_per_group_bf16",
+            _ => {
+                return Err(Error::KernelError {
+                    reason: format!("INT4 dequant: unsupported output dtype {output_dtype:?}"),
+                });
+            }
+        };
+
         let device = packed.device();
         let device_index = device.id();
         let module =
             kernels::get_or_load_module(self.context(), device_index, KV_CACHE_INT4_MODULE)?;
-        let func = kernels::get_kernel_function(&module, "dequantize_kv_int4_per_group_fp32")?;
+        let func = kernels::get_kernel_function(&module, kernel_name)?;
 
         let gs = group_size as usize;
         let total = num_tokens * head_dim;
         let num_groups = total.div_ceil(gs);
 
-        let output = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], DType::F32, device)?;
+        let output = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], output_dtype, device)?;
 
         let cfg = LaunchConfig {
             grid_dim: (num_groups as u32, 1, 1),

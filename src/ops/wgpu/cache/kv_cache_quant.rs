@@ -250,10 +250,19 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         num_tokens: usize,
         head_dim: usize,
         group_size: Int4GroupSize,
+        output_dtype: DType,
     ) -> Result<Tensor<WgpuRuntime>> {
         validate_f32(packed, "dequantize_kv_int4")?;
         validate_f32(scales, "dequantize_kv_int4")?;
         validate_f32(zeros, "dequantize_kv_int4")?;
+        if output_dtype != DType::F32 {
+            return Err(Error::InvalidArgument {
+                arg: "output_dtype",
+                reason: format!(
+                    "dequantize_kv_int4: WebGPU only supports F32 output, got {output_dtype:?}"
+                ),
+            });
+        }
 
         let output =
             Tensor::<WgpuRuntime>::zeros(&[num_tokens, head_dim], DType::F32, packed.device())?;

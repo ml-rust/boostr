@@ -2,7 +2,7 @@
 //!
 //! Provides correct (but not optimized) implementations for testing.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::ops::traits::cache::kv_cache_quant::{Int4GroupSize, KvCacheQuantOps};
 use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
@@ -128,6 +128,7 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
         num_tokens: usize,
         head_dim: usize,
         group_size: Int4GroupSize,
+        output_dtype: DType,
     ) -> Result<Tensor<CpuRuntime>> {
         let p_data = packed.to_vec::<u8>();
         let s_data = scales.to_vec::<f32>();
@@ -149,11 +150,15 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
             output[i] = nibble as f32 * s_data[g] + z_data[g];
         }
 
-        Ok(Tensor::<CpuRuntime>::from_slice(
-            &output,
-            &[num_tokens, head_dim],
-            device,
-        )?)
+        let shape = [num_tokens, head_dim];
+        let f32_out = Tensor::<CpuRuntime>::from_slice(&output, &shape, device)?;
+        match output_dtype {
+            DType::F32 => Ok(f32_out),
+            DType::F16 | DType::BF16 => Ok(f32_out.to_dtype(output_dtype)?),
+            _ => Err(Error::KernelError {
+                reason: format!("INT4 dequant: unsupported output dtype {output_dtype:?}"),
+            }),
+        }
     }
 
     fn quantize_kv_int8(
@@ -262,7 +267,15 @@ mod tests {
         assert_eq!(p.shape(), &[num_tokens, head_dim / 2]);
 
         let output = client
-            .dequantize_kv_int4(&p, &s, &z, num_tokens, head_dim, Int4GroupSize::Group32)
+            .dequantize_kv_int4(
+                &p,
+                &s,
+                &z,
+                num_tokens,
+                head_dim,
+                Int4GroupSize::Group32,
+                DType::F32,
+            )
             .unwrap();
         let out_data = output.to_vec::<f32>();
         let max_err: f32 = data

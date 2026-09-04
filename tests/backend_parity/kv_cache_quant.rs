@@ -87,7 +87,15 @@ fn test_quantize_dequantize_int4_roundtrip_parity() {
         .quantize_kv_int4(&input, num_tokens, head_dim, group_size)
         .unwrap();
     let cpu_deq = cpu_client
-        .dequantize_kv_int4(&packed, &scales, &zeros, num_tokens, head_dim, group_size)
+        .dequantize_kv_int4(
+            &packed,
+            &scales,
+            &zeros,
+            num_tokens,
+            head_dim,
+            group_size,
+            numr::dtype::DType::F32,
+        )
         .unwrap();
     let cpu_deq_vec = cpu_deq.to_vec::<f32>();
 
@@ -105,7 +113,15 @@ fn test_quantize_dequantize_int4_roundtrip_parity() {
             .quantize_kv_int4(&inp, num_tokens, head_dim, group_size)
             .unwrap();
         let deq = cuda_client
-            .dequantize_kv_int4(&p, &s, &z, num_tokens, head_dim, group_size)
+            .dequantize_kv_int4(
+                &p,
+                &s,
+                &z,
+                num_tokens,
+                head_dim,
+                group_size,
+                numr::dtype::DType::F32,
+            )
             .unwrap();
         assert_parity_f32(
             &deq.to_vec::<f32>(),
@@ -128,7 +144,15 @@ fn test_quantize_dequantize_int4_roundtrip_parity() {
             .quantize_kv_int4(&inp, num_tokens, head_dim, group_size)
             .unwrap();
         let deq = wgpu_client
-            .dequantize_kv_int4(&p, &s, &z, num_tokens, head_dim, group_size)
+            .dequantize_kv_int4(
+                &p,
+                &s,
+                &z,
+                num_tokens,
+                head_dim,
+                group_size,
+                numr::dtype::DType::F32,
+            )
             .unwrap();
         assert_parity_f32(
             &deq.to_vec::<f32>(),
@@ -273,6 +297,7 @@ fn test_quantize_kv_int4_f16_cuda() {
             num_tokens,
             head_dim,
             group_size,
+            numr::dtype::DType::F32,
         )
         .unwrap();
     let cpu_deq_vec = cpu_deq.to_vec::<f32>();
@@ -297,7 +322,15 @@ fn test_quantize_kv_int4_f16_cuda() {
             .quantize_kv_int4(&inp_f16, num_tokens, head_dim, group_size)
             .expect("F16 quantize_kv_int4 must succeed");
         let deq = cuda_client
-            .dequantize_kv_int4(&packed, &scales, &zeros, num_tokens, head_dim, group_size)
+            .dequantize_kv_int4(
+                &packed,
+                &scales,
+                &zeros,
+                num_tokens,
+                head_dim,
+                group_size,
+                DType::F32,
+            )
             .expect("dequantize_kv_int4 must succeed after a successful F16 quantize");
 
         // INT4 has 16 levels. This fixture spans about 1.0 per Group64 group,
@@ -337,6 +370,7 @@ fn test_quantize_kv_int4_bf16_cuda() {
             num_tokens,
             head_dim,
             group_size,
+            numr::dtype::DType::F32,
         )
         .unwrap();
     let cpu_deq_vec = cpu_deq.to_vec::<f32>();
@@ -361,7 +395,15 @@ fn test_quantize_kv_int4_bf16_cuda() {
             .quantize_kv_int4(&inp_bf16, num_tokens, head_dim, group_size)
             .expect("BF16 quantize_kv_int4 must succeed");
         let deq = cuda_client
-            .dequantize_kv_int4(&packed, &scales, &zeros, num_tokens, head_dim, group_size)
+            .dequantize_kv_int4(
+                &packed,
+                &scales,
+                &zeros,
+                num_tokens,
+                head_dim,
+                group_size,
+                DType::F32,
+            )
             .expect("dequantize_kv_int4 must succeed after a successful BF16 quantize");
 
         // INT4 has 16 levels. This fixture spans about 1.0 per Group64 group,
@@ -375,6 +417,133 @@ fn test_quantize_kv_int4_bf16_cuda() {
             "quantize_kv_int4 BF16 CUDA vs CPU",
             2e-2,
             7e-2,
+        );
+    });
+}
+
+// Covers dequantize_kv_int4's F16 and BF16 output-dtype kernels, which run on
+// every supported device (they compile at sm_75, no capability gate needed).
+#[test]
+fn test_dequantize_kv_int4_narrow_output_dtypes() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let num_tokens = 8;
+    let head_dim = 64;
+    let group_size = Int4GroupSize::Group64;
+    let input = det_tensor(&[num_tokens, head_dim], &cpu_device);
+
+    let (packed, scales, zeros) = cpu_client
+        .quantize_kv_int4(&input, num_tokens, head_dim, group_size)
+        .unwrap();
+    let cpu_deq_f32 = cpu_client
+        .dequantize_kv_int4(
+            &packed,
+            &scales,
+            &zeros,
+            num_tokens,
+            head_dim,
+            group_size,
+            numr::dtype::DType::F32,
+        )
+        .unwrap();
+    let cpu_deq_f32_vec = cpu_deq_f32.to_vec::<f32>();
+
+    // INT4 has 16 levels; this fixture spans about 1.0 per Group64 group, so
+    // the quantization step is about 0.067. F16/BF16 output rounding is at
+    // most ~4e-3 relative, far smaller than the INT4 step, so the step
+    // dominates the tolerance rather than the output dtype.
+    let rtol = 2e-2;
+    let atol = 7e-2;
+
+    // The CPU path narrows through numr's cast, which only handles F16/BF16
+    // when boostr is built with the `f16` feature. CUDA below needs no feature.
+    #[cfg(feature = "f16")]
+    {
+        for (dtype, label) in [
+            (numr::dtype::DType::F16, "F16"),
+            (numr::dtype::DType::BF16, "BF16"),
+        ] {
+            let narrow = cpu_client
+                .dequantize_kv_int4(
+                    &packed, &scales, &zeros, num_tokens, head_dim, group_size, dtype,
+                )
+                .unwrap();
+            assert_eq!(narrow.dtype(), dtype);
+            let narrow_vec = narrow
+                .to_dtype(numr::dtype::DType::F32)
+                .unwrap()
+                .to_vec::<f32>();
+            assert_parity_f32_tol(
+                &narrow_vec,
+                &cpu_deq_f32_vec,
+                &format!("dequantize_kv_int4 {label} output vs F32 output (CPU)"),
+                rtol,
+                atol,
+            );
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
+        use numr::dtype::DType;
+        use numr::tensor::Tensor;
+
+        let inp = Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(
+            &input.to_vec::<f32>(),
+            &[num_tokens, head_dim],
+            &cuda_device,
+        )
+        .unwrap();
+        let (cuda_packed, cuda_scales, cuda_zeros) = cuda_client
+            .quantize_kv_int4(&inp, num_tokens, head_dim, group_size)
+            .expect("F32 quantize_kv_int4 must succeed on CUDA");
+
+        let cuda_deq_f16 = cuda_client
+            .dequantize_kv_int4(
+                &cuda_packed,
+                &cuda_scales,
+                &cuda_zeros,
+                num_tokens,
+                head_dim,
+                group_size,
+                DType::F16,
+            )
+            .expect("F16-output dequantize_kv_int4 must succeed on CUDA");
+        assert_eq!(cuda_deq_f16.dtype(), DType::F16);
+        let cuda_deq_f16_vec = cuda_deq_f16
+            .to_dtype(DType::F32)
+            .expect("cast F16 output to F32 for comparison")
+            .to_vec::<f32>();
+        assert_parity_f32_tol(
+            &cuda_deq_f16_vec,
+            &cpu_deq_f32_vec,
+            "dequantize_kv_int4 F16 output CUDA vs CPU F32 reference",
+            rtol,
+            atol,
+        );
+
+        let cuda_deq_bf16 = cuda_client
+            .dequantize_kv_int4(
+                &cuda_packed,
+                &cuda_scales,
+                &cuda_zeros,
+                num_tokens,
+                head_dim,
+                group_size,
+                DType::BF16,
+            )
+            .expect("BF16-output dequantize_kv_int4 must succeed on CUDA");
+        assert_eq!(cuda_deq_bf16.dtype(), DType::BF16);
+        let cuda_deq_bf16_vec = cuda_deq_bf16
+            .to_dtype(DType::F32)
+            .expect("cast BF16 output to F32 for comparison")
+            .to_vec::<f32>();
+        assert_parity_f32_tol(
+            &cuda_deq_bf16_vec,
+            &cpu_deq_f32_vec,
+            "dequantize_kv_int4 BF16 output CUDA vs CPU F32 reference",
+            rtol,
+            atol,
         );
     });
 }

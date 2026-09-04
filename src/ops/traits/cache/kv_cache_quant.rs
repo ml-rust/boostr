@@ -72,7 +72,11 @@ pub trait KvCacheQuantOps<R: Runtime> {
         group_size: Int4GroupSize,
     ) -> Result<(Tensor<R>, Tensor<R>, Tensor<R>)>;
 
-    /// Dequantize INT4 KV cache back to F32
+    /// Dequantize INT4 KV cache back to `output_dtype`
+    ///
+    /// INT4 needs a zeros tensor and a group size on top of scales, so this
+    /// carries more parameters than the symmetric INT8 and FP8 dequantizers.
+    #[allow(clippy::too_many_arguments)]
     fn dequantize_kv_int4(
         &self,
         packed: &Tensor<R>,
@@ -81,6 +85,7 @@ pub trait KvCacheQuantOps<R: Runtime> {
         num_tokens: usize,
         head_dim: usize,
         group_size: Int4GroupSize,
+        output_dtype: numr::dtype::DType,
     ) -> Result<Tensor<R>>;
 
     /// Quantize KV cache to INT8 with per-token scaling

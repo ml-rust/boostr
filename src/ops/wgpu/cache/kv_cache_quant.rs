@@ -12,21 +12,22 @@ use wgpu::BufferUsages;
 
 const QUANT_FP8_SRC: &str = include_str!("../shaders/cache/kv_cache_quant_fp8.wgsl");
 const DEQUANT_FP8_SRC: &str = include_str!("../shaders/cache/kv_cache_dequant_fp8.wgsl");
-const QUANT_INT4_SRC: &str = include_str!("../shaders/cache/kv_cache_quant_int4.wgsl");
-const DEQUANT_INT4_SRC: &str = include_str!("../shaders/cache/kv_cache_dequant_int4.wgsl");
+pub(super) const QUANT_INT4_SRC: &str = include_str!("../shaders/cache/kv_cache_quant_int4.wgsl");
+pub(super) const DEQUANT_INT4_SRC: &str =
+    include_str!("../shaders/cache/kv_cache_dequant_int4.wgsl");
 const QUANT_INT8_SRC: &str = include_str!("../shaders/cache/kv_cache_quant_int8.wgsl");
 const DEQUANT_INT8_SRC: &str = include_str!("../shaders/cache/kv_cache_dequant_int8.wgsl");
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct QuantParams {
-    num_tokens: u32,
-    head_dim: u32,
-    group_size: u32,
-    mode: u32,
+pub(super) struct QuantParams {
+    pub(super) num_tokens: u32,
+    pub(super) head_dim: u32,
+    pub(super) group_size: u32,
+    pub(super) mode: u32,
 }
 
-fn validate_f32(t: &Tensor<WgpuRuntime>, op: &str) -> Result<()> {
+pub(super) fn validate_f32(t: &Tensor<WgpuRuntime>, op: &str) -> Result<()> {
     if t.dtype() != DType::F32 {
         return Err(Error::InvalidArgument {
             arg: "dtype",
@@ -36,7 +37,7 @@ fn validate_f32(t: &Tensor<WgpuRuntime>, op: &str) -> Result<()> {
     Ok(())
 }
 
-fn create_params_buf(client: &WgpuClient, params: &QuantParams) -> wgpu::Buffer {
+pub(super) fn create_params_buf(client: &WgpuClient, params: &QuantParams) -> wgpu::Buffer {
     let buf = client.wgpu_device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("quant_params"),
         size: std::mem::size_of::<QuantParams>() as u64,
@@ -49,7 +50,7 @@ fn create_params_buf(client: &WgpuClient, params: &QuantParams) -> wgpu::Buffer 
     buf
 }
 
-fn dispatch(
+pub(super) fn dispatch(
     client: &WgpuClient,
     shader_src: &'static str,
     entry: &'static str,
@@ -254,56 +255,7 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         Tensor<WgpuRuntime>,
         Tensor<WgpuRuntime>,
     )> {
-        validate_f32(input, "quantize_kv_int4")?;
-
-        let group_sz = group_size as usize;
-        let num_groups = (num_tokens * head_dim) / group_sz;
-
-        // Packed uses u32 via DType::I32 (same size), but we use F32 for WebGPU compatibility
-        let packed =
-            Tensor::<WgpuRuntime>::zeros(&[num_tokens, head_dim / 2], DType::F32, input.device())?;
-        let scales = Tensor::<WgpuRuntime>::zeros(&[num_groups], DType::F32, input.device())?;
-        let zeros = Tensor::<WgpuRuntime>::zeros(&[num_groups], DType::F32, input.device())?;
-
-        let input_buf = get_buffer(input.storage().ptr()).ok_or_else(|| Error::KernelError {
-            reason: "input buffer not found".into(),
-        })?;
-        let packed_buf = get_buffer(packed.storage().ptr()).ok_or_else(|| Error::KernelError {
-            reason: "packed buffer not found".into(),
-        })?;
-        let scales_buf = get_buffer(scales.storage().ptr()).ok_or_else(|| Error::KernelError {
-            reason: "scales buffer not found".into(),
-        })?;
-        let zeros_buf = get_buffer(zeros.storage().ptr()).ok_or_else(|| Error::KernelError {
-            reason: "zeros buffer not found".into(),
-        })?;
-
-        let params = QuantParams {
-            num_tokens: num_tokens as u32,
-            head_dim: head_dim as u32,
-            group_size: group_sz as u32,
-            mode: 0,
-        };
-        let params_buf = create_params_buf(self, &params);
-
-        // Shader bindings: 0=input(read), 1=packed(rw), 2=scales(rw), 3=zeros(rw)
-        dispatch(
-            self,
-            QUANT_INT4_SRC,
-            "quantize_kv_int4_f32",
-            &[
-                &input_buf,
-                &packed_buf,
-                &scales_buf,
-                &zeros_buf,
-                &params_buf,
-            ],
-            4,
-            1,
-            (num_groups as u32).div_ceil(256),
-        )?;
-
-        Ok((packed, scales, zeros))
+        super::kv_cache_int4::quantize_kv_int4_impl(self, input, num_tokens, head_dim, group_size)
     }
 
     fn dequantize_kv_int4(
@@ -316,56 +268,16 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         group_size: Int4GroupSize,
         output_dtype: DType,
     ) -> Result<Tensor<WgpuRuntime>> {
-        validate_f32(packed, "dequantize_kv_int4")?;
-        validate_f32(scales, "dequantize_kv_int4")?;
-        validate_f32(zeros, "dequantize_kv_int4")?;
-        if output_dtype != DType::F32 {
-            return Err(Error::InvalidArgument {
-                arg: "output_dtype",
-                reason: format!(
-                    "dequantize_kv_int4: WebGPU only supports F32 output, got {output_dtype:?}"
-                ),
-            });
-        }
-
-        let output =
-            Tensor::<WgpuRuntime>::zeros(&[num_tokens, head_dim], DType::F32, packed.device())?;
-
-        let packed_buf = get_buffer(packed.storage().ptr()).ok_or_else(|| Error::KernelError {
-            reason: "packed buffer not found".into(),
-        })?;
-        let scales_buf = get_buffer(scales.storage().ptr()).ok_or_else(|| Error::KernelError {
-            reason: "scales buffer not found".into(),
-        })?;
-        let zeros_buf = get_buffer(zeros.storage().ptr()).ok_or_else(|| Error::KernelError {
-            reason: "zeros buffer not found".into(),
-        })?;
-        let out_buf = get_buffer(output.storage().ptr()).ok_or_else(|| Error::KernelError {
-            reason: "output buffer not found".into(),
-        })?;
-
-        let group_sz = group_size as usize;
-        let num_groups = (num_tokens * head_dim) / group_sz;
-        let params = QuantParams {
-            num_tokens: num_tokens as u32,
-            head_dim: head_dim as u32,
-            group_size: group_sz as u32,
-            mode: 0,
-        };
-        let params_buf = create_params_buf(self, &params);
-
-        // Shader bindings: 0=packed(read), 1=scales(read), 2=zeros(read), 3=output(rw)
-        dispatch(
+        super::kv_cache_int4::dequantize_kv_int4_impl(
             self,
-            DEQUANT_INT4_SRC,
-            "dequantize_kv_int4_f32",
-            &[&packed_buf, &scales_buf, &zeros_buf, &out_buf, &params_buf],
-            4,
-            3,
-            (num_groups as u32).div_ceil(256),
-        )?;
-
-        Ok(output)
+            packed,
+            scales,
+            zeros,
+            num_tokens,
+            head_dim,
+            group_size,
+            output_dtype,
+        )
     }
 
     fn quantize_kv_int8(

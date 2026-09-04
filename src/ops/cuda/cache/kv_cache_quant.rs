@@ -13,9 +13,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use crate::ops::cuda::kernels::{
-    self, KV_CACHE_FP8_MODULE, KV_CACHE_INT4_MODULE, KV_CACHE_QUANT_MODULE,
-};
+use crate::ops::cuda::kernels::{self, KV_CACHE_FP8_MODULE, KV_CACHE_QUANT_MODULE};
 
 impl KvCacheQuantOps<CudaRuntime> for CudaClient {
     fn quantize_kv_fp8_per_token(
@@ -231,62 +229,7 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         Tensor<CudaRuntime>,
         Tensor<CudaRuntime>,
     )> {
-        let dtype = input.dtype();
-        let dtype_suffix = match dtype {
-            DType::F32 => "fp32",
-            DType::F16 => "fp16",
-            DType::BF16 => "bf16",
-            _ => {
-                return Err(Error::KernelError {
-                    reason: format!("INT4 quant: unsupported dtype {dtype:?}"),
-                });
-            }
-        };
-
-        let kernel_name = format!("quantize_kv_int4_per_group_{dtype_suffix}");
-        let device = input.device();
-        let device_index = device.id();
-        let module =
-            kernels::get_or_load_module(self.context(), device_index, KV_CACHE_INT4_MODULE)?;
-        let func = kernels::get_kernel_function(&module, &kernel_name)?;
-
-        let gs = group_size as usize;
-        let total = num_tokens * head_dim;
-        let num_groups = total.div_ceil(gs);
-
-        let packed = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim / 2], DType::U8, device)?;
-        let scales_t = Tensor::<CudaRuntime>::empty(&[num_groups], DType::F32, device)?;
-        let zeros_t = Tensor::<CudaRuntime>::empty(&[num_groups], DType::F32, device)?;
-
-        let cfg = LaunchConfig {
-            grid_dim: (num_groups as u32, 1, 1),
-            block_dim: (256, 1, 1),
-            shared_mem_bytes: 256 * 4,
-        };
-
-        let i_ptr = input.ptr();
-        let p_ptr = packed.ptr();
-        let s_ptr = scales_t.ptr();
-        let z_ptr = zeros_t.ptr();
-        let nt_i32 = num_tokens as i32;
-        let hd_i32 = head_dim as i32;
-        let gs_i32 = gs as i32;
-
-        unsafe {
-            let mut builder = self.stream().launch_builder(&func);
-            builder.arg(&i_ptr);
-            builder.arg(&p_ptr);
-            builder.arg(&s_ptr);
-            builder.arg(&z_ptr);
-            builder.arg(&nt_i32);
-            builder.arg(&hd_i32);
-            builder.arg(&gs_i32);
-            builder.launch(cfg).map_err(|e| Error::KernelError {
-                reason: format!("INT4 quant failed: {e:?}"),
-            })?;
-        }
-
-        Ok((packed, scales_t, zeros_t))
+        super::kv_cache_int4::quantize_kv_int4_impl(self, input, num_tokens, head_dim, group_size)
     }
 
     fn dequantize_kv_int4(
@@ -299,58 +242,16 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         group_size: Int4GroupSize,
         output_dtype: DType,
     ) -> Result<Tensor<CudaRuntime>> {
-        let kernel_name = match output_dtype {
-            DType::F32 => "dequantize_kv_int4_per_group_fp32",
-            DType::F16 => "dequantize_kv_int4_per_group_fp16",
-            DType::BF16 => "dequantize_kv_int4_per_group_bf16",
-            _ => {
-                return Err(Error::KernelError {
-                    reason: format!("INT4 dequant: unsupported output dtype {output_dtype:?}"),
-                });
-            }
-        };
-
-        let device = packed.device();
-        let device_index = device.id();
-        let module =
-            kernels::get_or_load_module(self.context(), device_index, KV_CACHE_INT4_MODULE)?;
-        let func = kernels::get_kernel_function(&module, kernel_name)?;
-
-        let gs = group_size as usize;
-        let total = num_tokens * head_dim;
-        let num_groups = total.div_ceil(gs);
-
-        let output = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], output_dtype, device)?;
-
-        let cfg = LaunchConfig {
-            grid_dim: (num_groups as u32, 1, 1),
-            block_dim: (256, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        let p_ptr = packed.ptr();
-        let o_ptr = output.ptr();
-        let s_ptr = scales.ptr();
-        let z_ptr = zeros.ptr();
-        let nt_i32 = num_tokens as i32;
-        let hd_i32 = head_dim as i32;
-        let gs_i32 = gs as i32;
-
-        unsafe {
-            let mut builder = self.stream().launch_builder(&func);
-            builder.arg(&p_ptr);
-            builder.arg(&s_ptr);
-            builder.arg(&z_ptr);
-            builder.arg(&o_ptr);
-            builder.arg(&nt_i32);
-            builder.arg(&hd_i32);
-            builder.arg(&gs_i32);
-            builder.launch(cfg).map_err(|e| Error::KernelError {
-                reason: format!("INT4 dequant failed: {e:?}"),
-            })?;
-        }
-
-        Ok(output)
+        super::kv_cache_int4::dequantize_kv_int4_impl(
+            self,
+            packed,
+            scales,
+            zeros,
+            num_tokens,
+            head_dim,
+            group_size,
+            output_dtype,
+        )
     }
 
     fn quantize_kv_int8(

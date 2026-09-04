@@ -1262,3 +1262,96 @@ fn test_paged_attention_bwd_zero_kv_heads_rejected() {
         );
     });
 }
+
+// `paged_flash_attention_fwd_64_fp8_e4m3_small` lives in paged_attention_fp8.cu,
+// a separate translation unit from paged_attention.cu, resolved through its own
+// `PAGED_ATTENTION_FP8_MODULE` constant (src/ops/cuda/kernels/constants.rs). A
+// dispatch bug pointing FP8 at the wrong module fails at runtime with a
+// missing-symbol lookup. Nothing else in this crate exercises that path.
+//
+// No CPU FP8 paged attention kernel exists. FP8 E4M3 keeps only 3 mantissa
+// bits, so a numeric parity check against an F32 CPU reference mostly
+// measures quantization error, not kernel correctness. This test proves
+// symbol resolution and a clean launch instead.
+#[test]
+fn test_paged_attention_fwd_fp8_cuda() {
+    let (b, h, s, d) = (1, 2, 4, 64);
+    let block_size = 4;
+    let num_blocks = 1;
+    let (_cpu_client, cpu_device) = setup_cpu();
+    let q = det_tensor(&[b, h, s, d], &cpu_device);
+    let k_blocks = det_tensor(&[num_blocks, block_size, 1, d], &cpu_device);
+    let v_blocks = det_tensor(&[num_blocks, block_size, 1, d], &cpu_device);
+    let bt_data: Vec<i32> = vec![0];
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::attention::paged_attention::PagedAttentionOps as _;
+        use numr::dtype::DType;
+        use numr::ops::TypeConversionOps;
+        use numr::runtime::Device;
+        use numr::tensor::Tensor;
+
+        // Gate on the capability, never on the returned error. A device below
+        // sm_80 returns KernelError here. So does a missing-symbol lookup from
+        // a mis-wired module — the defect this test exists to catch. Matching
+        // on the error skips that defect and reports it as old hardware.
+        if !numr::runtime::cuda::CudaDevice::new(cuda_device.id())
+            .profile()
+            .caps
+            .fp8
+        {
+            println!(
+                "!! test_paged_attention_fwd_fp8_cuda SKIPPED: this GPU predates sm_80, which \
+                 FP8 paged attention requires. NOTHING WAS VERIFIED."
+            );
+            eprintln!(
+                "!! test_paged_attention_fwd_fp8_cuda SKIPPED: this GPU predates sm_80, which \
+                 FP8 paged attention requires. NOTHING WAS VERIFIED."
+            );
+            return;
+        }
+
+        let q_f32 = Tensor::from_slice(&q.to_vec::<f32>(), &[b, h, s, d], &cuda_device).unwrap();
+        let kb_f32 = Tensor::from_slice(
+            &k_blocks.to_vec::<f32>(),
+            &[num_blocks, block_size, 1, d],
+            &cuda_device,
+        )
+        .unwrap();
+        let vb_f32 = Tensor::from_slice(
+            &v_blocks.to_vec::<f32>(),
+            &[num_blocks, block_size, 1, d],
+            &cuda_device,
+        )
+        .unwrap();
+        let bt = Tensor::from_slice(&bt_data, &[b, 1], &cuda_device).unwrap();
+
+        let q_fp8 = cuda_client.cast(&q_f32, DType::FP8E4M3).unwrap();
+        let kb_fp8 = cuda_client.cast(&kb_f32, DType::FP8E4M3).unwrap();
+        let vb_fp8 = cuda_client.cast(&vb_f32, DType::FP8E4M3).unwrap();
+
+        let (out, lse) = cuda_client
+            .paged_attention_fwd_fp8(
+                &q_fp8, &kb_fp8, &vb_fp8, &bt, h, 1, s, s, d, block_size, false, 1.0, 1.0, 1.0, 1.0,
+            )
+            .expect("FP8 paged_attention_fwd must succeed on an sm_80+ device");
+
+        assert_eq!(out.shape(), [b, h, s, d], "fp8 output shape mismatch");
+        assert_eq!(lse.shape(), [b, h, s], "fp8 logsumexp shape mismatch");
+
+        let out_f32 = out
+            .to_dtype(DType::F32)
+            .expect("cast FP8 output back to F32")
+            .to_vec::<f32>();
+        assert!(
+            out_f32.iter().all(|v| v.is_finite()),
+            "fp8 paged attention output must be finite"
+        );
+    });
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (&cpu_device, &q, &k_blocks, &v_blocks, &bt_data);
+    }
+}

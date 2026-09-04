@@ -1,7 +1,7 @@
 //! Paged attention forward kernel launchers (standard and FP8).
 
 use crate::error::{Error, Result};
-use crate::ops::cuda::kernels::{self, PAGED_ATTENTION_MODULE};
+use crate::ops::cuda::kernels::{self, PAGED_ATTENTION_FP8_MODULE, PAGED_ATTENTION_MODULE};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
@@ -312,8 +312,21 @@ pub(super) fn paged_attention_fwd_fp8_impl(
     let smem_size = fwd_smem_size(block_m, block_n, head_dim, 4);
 
     let max_num_blocks = block_table.shape()[1];
+
+    // paged_attention_fp8.cu compiles at sm_80. Below that, the device has no
+    // FP8 symbol to launch.
+    if !numr::runtime::cuda::CudaDevice::new(device_index)
+        .profile()
+        .caps
+        .fp8
+    {
+        return Err(Error::KernelError {
+            reason: "paged_attention_fwd_fp8: device lacks FP8 support".into(),
+        });
+    }
+
     let module =
-        kernels::get_or_load_module(client.context(), device_index, PAGED_ATTENTION_MODULE)?;
+        kernels::get_or_load_module(client.context(), device_index, PAGED_ATTENTION_FP8_MODULE)?;
     let func = kernels::get_kernel_function(&module, &kernel_name)?;
     set_smem_attribute(&func, smem_size)?;
 

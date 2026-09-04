@@ -48,28 +48,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "dtype_traits.cuh"
-
-// ============================================================================
-// Paged KV Cache Indexing Helper
-// ============================================================================
-
-__device__ __forceinline__ int get_paged_kv_offset(
-    const int* __restrict__ block_table,
-    int batch_idx,
-    int max_num_blocks,
-    int token_idx,
-    int block_size,
-    int num_kv_heads,
-    int kv_head_idx,
-    int head_dim
-) {
-    int logical_block = token_idx / block_size;
-    int block_offset = token_idx % block_size;
-    int physical_block = block_table[batch_idx * max_num_blocks + logical_block];
-    return physical_block * block_size * num_kv_heads * head_dim
-         + block_offset * num_kv_heads * head_dim
-         + kv_head_idx * head_dim;
-}
+#include "paged_attention.cuh"
 
 // ============================================================================
 // Half-precision atomics

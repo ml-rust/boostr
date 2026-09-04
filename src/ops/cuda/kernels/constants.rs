@@ -8,6 +8,7 @@ pub const FLASH_V2_BWD_MODULE: &str = "flash_v2_bwd";
 pub const FLASH_V2_FP8_MODULE: &str = "flash_v2_fp8";
 pub const FLASH_V2_BWD_FP8_MODULE: &str = "flash_v2_bwd_fp8";
 pub const PAGED_ATTENTION_MODULE: &str = "paged_attention";
+pub const PAGED_ATTENTION_FP8_MODULE: &str = "paged_attention_fp8";
 pub const PAGED_ATTENTION_BWD_MODULE: &str = "paged_attention_bwd";
 pub const FLASH_V3_MODULE: &str = "flash_v3";
 pub const FLASH_V3_BWD_MODULE: &str = "flash_v3_bwd";

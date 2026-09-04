@@ -139,6 +139,15 @@ fn compile_cuda_kernels() {
             "sm_75",
             true
         ),
+        // sm_80, not sm_75: the FP8 kernels need `__CUDA_ARCH__ >= 800` intrinsics.
+        // Compiling them at sm_75 dropped every FP8 symbol while the launcher still
+        // accepted FP8 dtypes, so the lookup failed on every device.
+        k!(
+            "src/ops/cuda/kernels/attention",
+            "paged_attention_fp8.cu",
+            "sm_80",
+            true
+        ),
         k!(
             "src/ops/cuda/kernels/attention",
             "paged_attention_bwd.cu",

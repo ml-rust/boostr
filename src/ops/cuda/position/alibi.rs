@@ -25,12 +25,15 @@ impl AlibiOps<CudaRuntime> for CudaClient {
             DType::F32 => "alibi_add_bias_fp32",
             DType::F16 => "alibi_add_bias_fp16",
             DType::BF16 => "alibi_add_bias_bf16",
+            DType::FP8E4M3 => "alibi_add_bias_fp8_e4m3",
+            DType::FP8E5M2 => "alibi_add_bias_fp8_e5m2",
             _ => {
                 return Err(Error::KernelError {
                     reason: format!("ALiBi: unsupported dtype {dtype:?}"),
                 });
             }
         };
+        let is_fp8 = matches!(dtype, DType::FP8E4M3 | DType::FP8E5M2);
 
         let device = scores.device();
         let device_index = device.id();
@@ -52,6 +55,14 @@ impl AlibiOps<CudaRuntime> for CudaClient {
         let nh_i32 = num_heads as i32;
         let sq_i32 = seq_len_q as i32;
         let sk_i32 = seq_len_k as i32;
+        // The FP8 kernels decode/encode `scores` through `score_scale`/`out_scale`
+        // factors (see `alibi_add_bias_fp8_e4m3`/`_e5m2` in alibi.cu). `scores`
+        // is a plain `Tensor`, which carries no scale metadata (unlike the KV
+        // cache quant path, where a separate scale tensor travels with the
+        // data) and this trait's signature takes no scale argument, so both
+        // factors are fixed at 1.0 — the same "unscaled" convention numr's
+        // `TypeConversionOps::cast` uses for F32<->FP8 conversion.
+        let unit_scale = 1.0f32;
 
         unsafe {
             let mut builder = self.stream().launch_builder(&func);
@@ -60,6 +71,10 @@ impl AlibiOps<CudaRuntime> for CudaClient {
             builder.arg(&nh_i32);
             builder.arg(&sq_i32);
             builder.arg(&sk_i32);
+            if is_fp8 {
+                builder.arg(&unit_scale);
+                builder.arg(&unit_scale);
+            }
             builder.launch(cfg).map_err(|e| Error::KernelError {
                 reason: format!("ALiBi kernel failed: {e:?}"),
             })?;
@@ -77,6 +92,9 @@ impl AlibiOps<CudaRuntime> for CudaClient {
         seq_len_k: usize,
         position: usize,
     ) -> Result<()> {
+        // No `alibi_add_bias_causal_fp8_*` kernel exists in alibi.cu, so FP8
+        // falls into the `_` arm below and errors naming the dtype instead of
+        // silently running a wrong kernel.
         let dtype = scores.dtype();
         let kernel_name = match dtype {
             DType::F32 => "alibi_add_bias_causal_fp32",

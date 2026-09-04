@@ -100,6 +100,81 @@ fn test_alibi_add_bias_bf16_cuda() {
     });
 }
 
+// Covers the two FP8 ALiBi kernels (`alibi_add_bias_fp8_e4m3`/`_e5m2`), which
+// had no Rust dispatch site before this test and had never executed. There is
+// no FP8 CPU reference (`alibi_add_bias` on CPU is F32 only), so the FP8 CUDA
+// path is checked against the CUDA F32 path instead of against CPU.
+#[cfg(feature = "cuda")]
+fn run_alibi_add_bias_fp8_case(dtype: numr::dtype::DType, label: &str, rtol: f32, atol: f32) {
+    use boostr::ops::traits::position::alibi::AlibiOps as _;
+    use numr::tensor::Tensor;
+
+    let (b, h, sq, sk) = (1, 4, 8, 8);
+
+    with_cuda_backend(|cuda_client, cuda_device| {
+        // F32 reference, computed on CUDA.
+        let s_f32 = Tensor::from_slice(
+            &vec![0.0f32; b * h * sq * sk],
+            &[b, h, sq, sk],
+            &cuda_device,
+        )
+        .unwrap();
+        cuda_client
+            .alibi_add_bias(&s_f32, b, h, sq, sk)
+            .expect("F32 alibi_add_bias must succeed");
+        let f32_result = s_f32.to_vec::<f32>();
+
+        // Same fixture, quantized to FP8, biased in place, then dequantized
+        // for comparison.
+        let s_zero = Tensor::from_slice(
+            &vec![0.0f32; b * h * sq * sk],
+            &[b, h, sq, sk],
+            &cuda_device,
+        )
+        .unwrap();
+        let s_fp8 = s_zero
+            .to_dtype(dtype)
+            .unwrap_or_else(|e| panic!("cast zeros fixture to {dtype:?}: {e:?}"));
+        cuda_client
+            .alibi_add_bias(&s_fp8, b, h, sq, sk)
+            .unwrap_or_else(|e| panic!("{label} alibi_add_bias must succeed: {e:?}"));
+        let fp8_result = s_fp8
+            .to_dtype(numr::dtype::DType::F32)
+            .expect("cast FP8 result back to F32 for comparison")
+            .to_vec::<f32>();
+
+        // Gated on the CUDA runtime being present (with_cuda_backend), never
+        // on matching an error string.
+        assert_parity_f32_tol(
+            &fp8_result,
+            &f32_result,
+            &format!("alibi_add_bias {label} CUDA vs F32 CUDA"),
+            rtol,
+            atol,
+        );
+    });
+}
+
+// The input fixture is zeros, so the kernel stores `quantize(bias)` and the
+// only error is FP8's own rounding of that value — purely RELATIVE. So rtol
+// carries the tolerance and atol stays near zero. An atol sized to the bias
+// magnitudes (which reach ~1.75 here) would accept a wrong answer outright,
+// since the comparator's tolerance is `atol + rtol * |reference|`.
+//
+// e4m3 keeps 3 explicit mantissa bits, so eps = 2^-4 = 0.0625.
+#[test]
+fn test_alibi_add_bias_fp8_e4m3_cuda() {
+    #[cfg(feature = "cuda")]
+    run_alibi_add_bias_fp8_case(numr::dtype::DType::FP8E4M3, "FP8E4M3", 7e-2, 1e-3);
+}
+
+// e5m2 keeps only 2 explicit mantissa bits, so eps = 2^-3 = 0.125.
+#[test]
+fn test_alibi_add_bias_fp8_e5m2_cuda() {
+    #[cfg(feature = "cuda")]
+    run_alibi_add_bias_fp8_case(numr::dtype::DType::FP8E5M2, "FP8E5M2", 1.4e-1, 1e-3);
+}
+
 #[test]
 fn test_alibi_add_bias_causal_bf16_cuda() {
     let (cpu_client, cpu_device) = setup_cpu();

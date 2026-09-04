@@ -1,9 +1,23 @@
 //! CPU implementation of ALiBi attention bias
+//!
+//! F32 only. There is no FP8 CPU compute path for this op — any other dtype
+//! is refused rather than mis-computed by reinterpreting its bytes as f32.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::ops::traits::AlibiOps;
+use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
+
+fn check_f32(t: &Tensor<CpuRuntime>, arg: &'static str) -> Result<()> {
+    if t.dtype() != DType::F32 {
+        return Err(Error::InvalidArgument {
+            arg,
+            reason: format!("ALiBi bias ops on CPU are F32 only, got {:?}", t.dtype()),
+        });
+    }
+    Ok(())
+}
 
 impl AlibiOps<CpuRuntime> for CpuClient {
     fn alibi_add_bias(
@@ -14,6 +28,7 @@ impl AlibiOps<CpuRuntime> for CpuClient {
         seq_len_q: usize,
         seq_len_k: usize,
     ) -> Result<()> {
+        check_f32(scores, "scores")?;
         let ptr = scores.ptr() as *mut f32;
 
         unsafe {
@@ -43,6 +58,7 @@ impl AlibiOps<CpuRuntime> for CpuClient {
         seq_len_k: usize,
         position: usize,
     ) -> Result<()> {
+        check_f32(scores, "scores")?;
         let ptr = scores.ptr() as *mut f32;
 
         unsafe {
@@ -141,5 +157,33 @@ mod tests {
         assert!((result[1] - (-1.0)).abs() < 1e-6);
         assert!((result[2] - 0.0).abs() < 1e-6);
         assert!(result[3] == f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn test_alibi_bias_rejects_non_f32() {
+        let (client, dev) = cpu_setup();
+        let (b, h, sq, sk) = (1, 2, 3, 3);
+
+        let data = vec![0u8; b * h * sq * sk];
+        let scores =
+            Tensor::<CpuRuntime>::from_slice(&data, &[b, h, sq, sk], &dev).unwrap_or_else(|e| {
+                panic!("build a non-F32 (U8) fixture for the dtype-rejection test: {e:?}")
+            });
+
+        let err = client
+            .alibi_add_bias(&scores, b, h, sq, sk)
+            .expect_err("alibi_add_bias must refuse a non-F32 dtype, not mis-compute it");
+        assert!(
+            matches!(err, Error::InvalidArgument { .. }),
+            "expected InvalidArgument, got {err:?}"
+        );
+
+        let err = client
+            .alibi_add_bias_causal(&scores, b, h, sq, sk, 0)
+            .expect_err("alibi_add_bias_causal must refuse a non-F32 dtype, not mis-compute it");
+        assert!(
+            matches!(err, Error::InvalidArgument { .. }),
+            "expected InvalidArgument, got {err:?}"
+        );
     }
 }

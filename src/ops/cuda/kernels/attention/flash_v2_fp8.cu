@@ -1,12 +1,9 @@
 // Flash Attention v2 Forward - FP8 Kernels (separate translation unit)
 //
-// Split out of flash_v2.cu: these kernels are guarded by
-// `#if __CUDA_ARCH__ >= 800`, but flash_v2.cu is compiled at sm_75 because
-// lines outside this block are the general Turing-capable flash kernels.
-// Compiled at sm_75 the guard erased every FP8 symbol from the PTX, so
-// `flash_attention_fwd_*_fp8` was never found at runtime on any GPU.
-// As its own translation unit this file is compiled at sm_80 (see build.rs)
-// and the guard now documents a real requirement instead of erasing the file.
+// Split out of flash_v2.cu, which holds the general Turing-capable flash
+// kernels and compiles at sm_75. These FP8 kernels need Ampere or newer, so
+// this unit compiles at sm_80 (see build.rs) — no `__CUDA_ARCH__` guard, so a
+// future arch mistake fails to build instead of silently dropping symbols.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -33,8 +30,6 @@
 // This implementation uses E4M3 format with FP32 accumulation for stability
 // Note: On Ampere (sm_80-sm_89), FP8 ops are emulated in software (slower than native)
 //       On Hopper/Ada (sm_89+), FP8 ops use hardware tensor cores (4x faster)
-
-#if __CUDA_ARCH__ >= 800  // Ampere and newer (sm_80+)
 
 template<int HEAD_DIM, int BLOCK_M, int BLOCK_N>
 __device__ void flash_attention_fwd_fp8_impl(
@@ -293,5 +288,3 @@ extern "C" __global__ void flash_attention_fwd_256_fp8(
         q_scale, k_scale, v_scale, o_scale
     );
 }
-
-#endif  // __CUDA_ARCH__ >= 800

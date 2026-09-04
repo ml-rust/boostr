@@ -148,8 +148,8 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             });
         }
 
-        // flash_v2_fp8.cu compiles at sm_80, guarded by `#if __CUDA_ARCH__ >= 800`.
-        // Below that, the device has no FP8 symbol to launch.
+        // flash_v2_fp8.cu compiles at sm_80. Below that, the device has no
+        // FP8 symbol to launch.
         if !numr::runtime::cuda::CudaDevice::new(q.device().id())
             .profile()
             .caps
@@ -290,7 +290,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             });
         }
 
-        // flash_v2_bwd_fp8.cu compiles at sm_80, same guard as the forward gate above.
+        // flash_v2_bwd_fp8.cu compiles at sm_80, same arch requirement as the forward gate above.
         if !numr::runtime::cuda::CudaDevice::new(q.device().id())
             .profile()
             .caps

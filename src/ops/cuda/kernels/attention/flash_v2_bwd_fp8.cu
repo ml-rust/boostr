@@ -1,12 +1,9 @@
 // Flash Attention v2 Backward - FP8 Kernels (separate translation unit)
 //
-// Split out of flash_v2_bwd.cu: these kernels are guarded by
-// `#if __CUDA_ARCH__ >= 800`, but flash_v2_bwd.cu is compiled at sm_75 because
-// lines outside this block are the general Turing-capable flash kernels.
-// Compiled at sm_75 the guard erased every FP8 symbol from the PTX, so
-// `flash_attention_bwd_*_fp8` was never found at runtime on any GPU.
-// As its own translation unit this file is compiled at sm_80 (see build.rs)
-// and the guard now documents a real requirement instead of erasing the file.
+// Split out of flash_v2_bwd.cu, which holds the general Turing-capable flash
+// kernels and compiles at sm_75. These FP8 kernels need Ampere or newer, so
+// this unit compiles at sm_80 (see build.rs) — no `__CUDA_ARCH__` guard, so a
+// future arch mistake fails to build instead of silently dropping symbols.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -17,8 +14,6 @@
 // ============================================================================
 // FP8 Backward Kernels - For Ampere/Hopper GPUs (FP8 I/O, FP32 accumulation)
 // ============================================================================
-
-#if __CUDA_ARCH__ >= 800  // Ampere and newer
 
 // Preprocessing for FP8
 template<int HEAD_DIM>
@@ -547,5 +542,3 @@ extern "C" __global__ void fp8_e5m2_roundtrip_probe(
     raw[idx] = boostr_fp8_e5m2(byte);
     dec[idx] = fp8_e5m2_to_f32(byte, 1.0f);
 }
-
-#endif  // __CUDA_ARCH__ >= 800

@@ -181,4 +181,27 @@ impl AlibiOps<WgpuRuntime> for WgpuClient {
 
         Ok(())
     }
+
+    fn alibi_attention_bwd(
+        &self,
+        _grad_output: &Tensor<WgpuRuntime>,
+        _probs: &Tensor<WgpuRuntime>,
+        _q: &Tensor<WgpuRuntime>,
+        _k: &Tensor<WgpuRuntime>,
+        _v: &Tensor<WgpuRuntime>,
+        _batch_size: usize,
+        _num_heads: usize,
+        _head_dim: usize,
+        _scale: f32,
+    ) -> Result<(
+        Tensor<WgpuRuntime>,
+        Tensor<WgpuRuntime>,
+        Tensor<WgpuRuntime>,
+    )> {
+        // No WGSL shader for the biased-attention backward pass.
+        Err(Error::InvalidArgument {
+            arg: "op",
+            reason: "alibi_attention_bwd not implemented on WebGPU: no WGSL shader for it".into(),
+        })
+    }
 }

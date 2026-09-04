@@ -67,6 +67,32 @@ impl AlibiOps<CpuRuntime> for CpuClient {
 
         Ok(())
     }
+
+    fn alibi_attention_bwd(
+        &self,
+        grad_output: &Tensor<CpuRuntime>,
+        probs: &Tensor<CpuRuntime>,
+        q: &Tensor<CpuRuntime>,
+        k: &Tensor<CpuRuntime>,
+        v: &Tensor<CpuRuntime>,
+        batch_size: usize,
+        num_heads: usize,
+        head_dim: usize,
+        scale: f32,
+    ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+        super::alibi_bwd::alibi_attention_bwd_impl(
+            self,
+            grad_output,
+            probs,
+            q,
+            k,
+            v,
+            batch_size,
+            num_heads,
+            head_dim,
+            scale,
+        )
+    }
 }
 
 #[cfg(test)]

@@ -126,4 +126,34 @@ impl AlibiOps<CudaRuntime> for CudaClient {
 
         Ok(())
     }
+
+    fn alibi_attention_bwd(
+        &self,
+        grad_output: &Tensor<CudaRuntime>,
+        probs: &Tensor<CudaRuntime>,
+        q: &Tensor<CudaRuntime>,
+        k: &Tensor<CudaRuntime>,
+        v: &Tensor<CudaRuntime>,
+        batch_size: usize,
+        num_heads: usize,
+        head_dim: usize,
+        scale: f32,
+    ) -> Result<(
+        Tensor<CudaRuntime>,
+        Tensor<CudaRuntime>,
+        Tensor<CudaRuntime>,
+    )> {
+        super::alibi_bwd::alibi_attention_bwd_impl(
+            self,
+            grad_output,
+            probs,
+            q,
+            k,
+            v,
+            batch_size,
+            num_heads,
+            head_dim,
+            scale,
+        )
+    }
 }

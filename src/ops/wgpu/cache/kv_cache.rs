@@ -4,7 +4,7 @@
 //! F32 only (WebGPU limitation).
 
 use crate::error::{Error, Result};
-use crate::ops::traits::KvCacheOps;
+use crate::ops::traits::{Int4GroupSize, KvCacheOps};
 use numr::dtype::DType;
 use numr::runtime::wgpu::{WgpuClient, WgpuRuntime, get_buffer};
 use numr::tensor::Tensor;
@@ -247,5 +247,29 @@ impl KvCacheOps<WgpuRuntime> for WgpuClient {
         self.wgpu_queue().submit(std::iter::once(encoder.finish()));
 
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_kv_int4(
+        &self,
+        _k_cache: &Tensor<WgpuRuntime>,
+        _v_cache: &Tensor<WgpuRuntime>,
+        _k_scales: &Tensor<WgpuRuntime>,
+        _k_zeros: &Tensor<WgpuRuntime>,
+        _v_scales: &Tensor<WgpuRuntime>,
+        _v_zeros: &Tensor<WgpuRuntime>,
+        _new_k: &Tensor<WgpuRuntime>,
+        _new_v: &Tensor<WgpuRuntime>,
+        _position: usize,
+        _group_size: Int4GroupSize,
+    ) -> Result<()> {
+        // The existing INT4 shaders (kv_cache_quant_int4.wgsl) quantize a flat
+        // [num_tokens, head_dim] input from scratch into a freshly sized output.
+        // They carry no batch/head/max_seq_len addressing and no position
+        // offset, so writing one token into an existing [batch, num_heads,
+        // max_seq_len, head_dim/2] cache needs a new shader, not a branch.
+        Err(Error::KernelError {
+            reason: "append_kv_int4 not yet implemented on WebGPU".into(),
+        })
     }
 }

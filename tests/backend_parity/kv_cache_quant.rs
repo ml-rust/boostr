@@ -744,3 +744,310 @@ fn test_dequantize_kv_int4_narrow_output_dtypes() {
         );
     });
 }
+
+// Covers `KvCacheOps::append_kv_int4`: quantizing one token at a time into a
+// preallocated cache must agree with quantizing all tokens in one batch call,
+// since both use the identical per-group min/max formula.
+//
+// Needs the `f16` feature. `append_kv_int4` stores scales and zeros as F16,
+// while `dequantize_kv_int4` reads them as F32, so checking the round trip
+// converts between the two. The CPU backend only casts F16 under that feature.
+#[cfg(feature = "f16")]
+#[test]
+fn test_append_kv_int4_matches_batch_quantize() {
+    use boostr::ops::traits::cache::kv_cache::KvCacheOps;
+    use numr::dtype::DType;
+    use numr::tensor::Tensor;
+
+    let (cpu_client, cpu_device) = setup_cpu();
+    let batch = 1;
+    let heads = 1;
+    let head_dim = 64;
+    let max_seq_len = 4;
+    let group_size = Int4GroupSize::Group64;
+    let groups_per_token = 1; // head_dim / group_size
+
+    let tokens_k: Vec<Vec<f32>> = (0..max_seq_len)
+        .map(|t| {
+            (0..head_dim)
+                .map(|d| ((t * head_dim + d) as f32 * 0.037).sin())
+                .collect()
+        })
+        .collect();
+    let tokens_v: Vec<Vec<f32>> = (0..max_seq_len)
+        .map(|t| {
+            (0..head_dim)
+                .map(|d| ((t * head_dim + d) as f32 * 0.071 + 1.0).cos())
+                .collect()
+        })
+        .collect();
+
+    let k_cache = Tensor::<numr::runtime::cpu::CpuRuntime>::zeros(
+        &[batch, heads, max_seq_len, head_dim / 2],
+        DType::U8,
+        &cpu_device,
+    )
+    .unwrap();
+    let v_cache = Tensor::<numr::runtime::cpu::CpuRuntime>::zeros(
+        &[batch, heads, max_seq_len, head_dim / 2],
+        DType::U8,
+        &cpu_device,
+    )
+    .unwrap();
+    let k_scales = Tensor::<numr::runtime::cpu::CpuRuntime>::zeros(
+        &[batch, heads, max_seq_len * groups_per_token],
+        DType::F16,
+        &cpu_device,
+    )
+    .unwrap();
+    let k_zeros = Tensor::<numr::runtime::cpu::CpuRuntime>::zeros(
+        &[batch, heads, max_seq_len * groups_per_token],
+        DType::F16,
+        &cpu_device,
+    )
+    .unwrap();
+    let v_scales = Tensor::<numr::runtime::cpu::CpuRuntime>::zeros(
+        &[batch, heads, max_seq_len * groups_per_token],
+        DType::F16,
+        &cpu_device,
+    )
+    .unwrap();
+    let v_zeros = Tensor::<numr::runtime::cpu::CpuRuntime>::zeros(
+        &[batch, heads, max_seq_len * groups_per_token],
+        DType::F16,
+        &cpu_device,
+    )
+    .unwrap();
+
+    for (t, (k_tok, v_tok)) in tokens_k.iter().zip(tokens_v.iter()).enumerate() {
+        let new_k = Tensor::from_slice(k_tok, &[batch, heads, head_dim], &cpu_device).unwrap();
+        let new_v = Tensor::from_slice(v_tok, &[batch, heads, head_dim], &cpu_device).unwrap();
+        cpu_client
+            .append_kv_int4(
+                &k_cache, &v_cache, &k_scales, &k_zeros, &v_scales, &v_zeros, &new_k, &new_v, t,
+                group_size,
+            )
+            .expect("append_kv_int4 must succeed on CPU");
+    }
+
+    // Reinterpret the [batch, heads, max_seq_len, head_dim/2] cache as the
+    // flat [num_tokens, head_dim/2] shape `dequantize_kv_int4` expects.
+    let k_packed_flat = Tensor::from_slice(
+        &k_cache.to_vec::<u8>(),
+        &[max_seq_len, head_dim / 2],
+        &cpu_device,
+    )
+    .unwrap();
+    let v_packed_flat = Tensor::from_slice(
+        &v_cache.to_vec::<u8>(),
+        &[max_seq_len, head_dim / 2],
+        &cpu_device,
+    )
+    .unwrap();
+    let k_scales_flat = Tensor::from_slice(
+        &k_scales.to_dtype(DType::F32).unwrap().to_vec::<f32>(),
+        &[max_seq_len * groups_per_token],
+        &cpu_device,
+    )
+    .unwrap();
+    let k_zeros_flat = Tensor::from_slice(
+        &k_zeros.to_dtype(DType::F32).unwrap().to_vec::<f32>(),
+        &[max_seq_len * groups_per_token],
+        &cpu_device,
+    )
+    .unwrap();
+    let v_scales_flat = Tensor::from_slice(
+        &v_scales.to_dtype(DType::F32).unwrap().to_vec::<f32>(),
+        &[max_seq_len * groups_per_token],
+        &cpu_device,
+    )
+    .unwrap();
+    let v_zeros_flat = Tensor::from_slice(
+        &v_zeros.to_dtype(DType::F32).unwrap().to_vec::<f32>(),
+        &[max_seq_len * groups_per_token],
+        &cpu_device,
+    )
+    .unwrap();
+
+    let k_deq_appended = cpu_client
+        .dequantize_kv_int4(
+            &k_packed_flat,
+            &k_scales_flat,
+            &k_zeros_flat,
+            max_seq_len,
+            head_dim,
+            group_size,
+            DType::F32,
+        )
+        .unwrap();
+    let v_deq_appended = cpu_client
+        .dequantize_kv_int4(
+            &v_packed_flat,
+            &v_scales_flat,
+            &v_zeros_flat,
+            max_seq_len,
+            head_dim,
+            group_size,
+            DType::F32,
+        )
+        .unwrap();
+
+    // Reference: quantize all tokens in one batch call. head_dim == group_size,
+    // so `quantize_kv_int4`'s flat grouping lines up exactly with append's
+    // per-token grouping.
+    let k_all: Vec<f32> = tokens_k.iter().flatten().copied().collect();
+    let v_all: Vec<f32> = tokens_v.iter().flatten().copied().collect();
+    let k_input = Tensor::from_slice(&k_all, &[max_seq_len, head_dim], &cpu_device).unwrap();
+    let v_input = Tensor::from_slice(&v_all, &[max_seq_len, head_dim], &cpu_device).unwrap();
+
+    let (k_packed_b, k_scales_b, k_zeros_b) = cpu_client
+        .quantize_kv_int4(&k_input, max_seq_len, head_dim, group_size)
+        .unwrap();
+    let (v_packed_b, v_scales_b, v_zeros_b) = cpu_client
+        .quantize_kv_int4(&v_input, max_seq_len, head_dim, group_size)
+        .unwrap();
+    let k_deq_batch = cpu_client
+        .dequantize_kv_int4(
+            &k_packed_b,
+            &k_scales_b,
+            &k_zeros_b,
+            max_seq_len,
+            head_dim,
+            group_size,
+            DType::F32,
+        )
+        .unwrap();
+    let v_deq_batch = cpu_client
+        .dequantize_kv_int4(
+            &v_packed_b,
+            &v_scales_b,
+            &v_zeros_b,
+            max_seq_len,
+            head_dim,
+            group_size,
+            DType::F32,
+        )
+        .unwrap();
+
+    // Append's scale/zero round through F16 storage (the kernel contract);
+    // batch quantize keeps them in F32. That is the only source of drift.
+    assert_parity_f32_tol(
+        &k_deq_appended.to_vec::<f32>(),
+        &k_deq_batch.to_vec::<f32>(),
+        "int4 append vs batch quantize (K)",
+        1e-3,
+        5e-3,
+    );
+    assert_parity_f32_tol(
+        &v_deq_appended.to_vec::<f32>(),
+        &v_deq_batch.to_vec::<f32>(),
+        "int4 append vs batch quantize (V)",
+        1e-3,
+        5e-3,
+    );
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
+        use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
+        use numr::dtype::DType;
+        use numr::tensor::Tensor;
+
+        let cuda_k_cache = Tensor::<numr::runtime::cuda::CudaRuntime>::zeros(
+            &[batch, heads, max_seq_len, head_dim / 2],
+            DType::U8,
+            &cuda_device,
+        )
+        .unwrap();
+        let cuda_v_cache = Tensor::<numr::runtime::cuda::CudaRuntime>::zeros(
+            &[batch, heads, max_seq_len, head_dim / 2],
+            DType::U8,
+            &cuda_device,
+        )
+        .unwrap();
+        let cuda_k_scales = Tensor::<numr::runtime::cuda::CudaRuntime>::zeros(
+            &[batch, heads, max_seq_len * groups_per_token],
+            DType::F16,
+            &cuda_device,
+        )
+        .unwrap();
+        let cuda_k_zeros = Tensor::<numr::runtime::cuda::CudaRuntime>::zeros(
+            &[batch, heads, max_seq_len * groups_per_token],
+            DType::F16,
+            &cuda_device,
+        )
+        .unwrap();
+        let cuda_v_scales = Tensor::<numr::runtime::cuda::CudaRuntime>::zeros(
+            &[batch, heads, max_seq_len * groups_per_token],
+            DType::F16,
+            &cuda_device,
+        )
+        .unwrap();
+        let cuda_v_zeros = Tensor::<numr::runtime::cuda::CudaRuntime>::zeros(
+            &[batch, heads, max_seq_len * groups_per_token],
+            DType::F16,
+            &cuda_device,
+        )
+        .unwrap();
+
+        for (t, (k_tok, v_tok)) in tokens_k.iter().zip(tokens_v.iter()).enumerate() {
+            let new_k = Tensor::from_slice(k_tok, &[batch, heads, head_dim], &cuda_device).unwrap();
+            let new_v = Tensor::from_slice(v_tok, &[batch, heads, head_dim], &cuda_device).unwrap();
+            cuda_client
+                .append_kv_int4(
+                    &cuda_k_cache,
+                    &cuda_v_cache,
+                    &cuda_k_scales,
+                    &cuda_k_zeros,
+                    &cuda_v_scales,
+                    &cuda_v_zeros,
+                    &new_k,
+                    &new_v,
+                    t,
+                    group_size,
+                )
+                .expect("append_kv_int4 must succeed on CUDA");
+        }
+
+        let cuda_k_packed_flat = Tensor::from_slice(
+            &cuda_k_cache.to_vec::<u8>(),
+            &[max_seq_len, head_dim / 2],
+            &cuda_device,
+        )
+        .unwrap();
+        let cuda_k_scales_flat = Tensor::from_slice(
+            &cuda_k_scales.to_dtype(DType::F32).unwrap().to_vec::<f32>(),
+            &[max_seq_len * groups_per_token],
+            &cuda_device,
+        )
+        .unwrap();
+        let cuda_k_zeros_flat = Tensor::from_slice(
+            &cuda_k_zeros.to_dtype(DType::F32).unwrap().to_vec::<f32>(),
+            &[max_seq_len * groups_per_token],
+            &cuda_device,
+        )
+        .unwrap();
+
+        let cuda_k_deq = cuda_client
+            .dequantize_kv_int4(
+                &cuda_k_packed_flat,
+                &cuda_k_scales_flat,
+                &cuda_k_zeros_flat,
+                max_seq_len,
+                head_dim,
+                group_size,
+                DType::F32,
+            )
+            .unwrap();
+
+        // Same formula, same F16 scale/zero storage on both sides: tolerance
+        // only needs to absorb float rounding, not a full quant bucket.
+        assert_parity_f32_tol(
+            &cuda_k_deq.to_vec::<f32>(),
+            &k_deq_appended.to_vec::<f32>(),
+            "append_kv_int4 CUDA vs CPU reference (K)",
+            1e-3,
+            5e-3,
+        );
+    });
+}

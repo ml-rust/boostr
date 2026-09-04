@@ -3,6 +3,7 @@
 //! Fused kernel operations for efficient KV cache management during inference.
 
 use crate::error::Result;
+use crate::ops::traits::cache::kv_cache_quant::Int4GroupSize;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -46,5 +47,38 @@ pub trait KvCacheOps<R: Runtime> {
         value_cache: &Tensor<R>,
         slot_mapping: &Tensor<R>,
         block_size: usize,
+    ) -> Result<()>;
+
+    /// Quantize one new token of K/V to INT4 and append into the cache in place.
+    ///
+    /// For autoregressive decoding: each generated token is quantized and
+    /// written directly into its cache slot, without materializing a
+    /// dequantized or full-tensor intermediate.
+    ///
+    /// # Layout contract
+    ///
+    /// - `k_cache`, `v_cache`: `[batch, num_heads, max_seq_len, head_dim/2]` u8,
+    ///   packed INT4 (2 values per byte)
+    /// - `k_scales`, `k_zeros`, `v_scales`, `v_zeros`:
+    ///   `[batch, num_heads, max_seq_len * groups_per_token]` F16
+    /// - `new_k`, `new_v`: `[batch, num_heads, head_dim]` — the token to append
+    /// - `position`: slot in the cache sequence dimension to write
+    /// - `group_size`: elements per quantization group
+    ///
+    /// `groups_per_token = ceil(head_dim / group_size)`. Writes only slot
+    /// `position` in each cache; call once per generated token.
+    #[allow(clippy::too_many_arguments)]
+    fn append_kv_int4(
+        &self,
+        k_cache: &Tensor<R>,
+        v_cache: &Tensor<R>,
+        k_scales: &Tensor<R>,
+        k_zeros: &Tensor<R>,
+        v_scales: &Tensor<R>,
+        v_zeros: &Tensor<R>,
+        new_k: &Tensor<R>,
+        new_v: &Tensor<R>,
+        position: usize,
+        group_size: Int4GroupSize,
     ) -> Result<()>;
 }

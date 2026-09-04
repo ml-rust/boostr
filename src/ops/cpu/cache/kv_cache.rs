@@ -3,6 +3,7 @@
 //! Direct memory copies for cache update and reshape_and_cache.
 
 mod append_kv_int4;
+mod batched;
 mod block_ops;
 
 use crate::error::{Error, Result};
@@ -63,11 +64,19 @@ impl KvCacheOps<CpuRuntime> for CpuClient {
             });
         }
 
+        let dtype = k_cache.dtype();
+        if v_cache.dtype() != dtype || new_k.dtype() != dtype || new_v.dtype() != dtype {
+            return Err(Error::InvalidArgument {
+                arg: "dtype",
+                reason: format!("all tensors must share one dtype, expected {:?}", dtype),
+            });
+        }
+
         // Copy using byte-level operations to support any dtype (F32, BF16, F16, etc.)
         // Use raw pointers directly since both source and dest are CPU memory.
         // Cannot use to_vec::<u8>() because Storage::to_vec uses inner.len (element count)
         // as the number of T values, which gives wrong byte count for non-u8 dtypes.
-        let elem_size = k_cache.dtype().size_in_bytes();
+        let elem_size = dtype.size_in_bytes();
         let nk_ptr = new_k.ptr() as *const u8;
         let nv_ptr = new_v.ptr() as *const u8;
         let kc_ptr = k_cache.ptr() as *mut u8;
@@ -97,6 +106,27 @@ impl KvCacheOps<CpuRuntime> for CpuClient {
         }
 
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn kv_cache_update_batched(
+        &self,
+        k_caches: &[&Tensor<CpuRuntime>],
+        v_caches: &[&Tensor<CpuRuntime>],
+        new_ks: &[&Tensor<CpuRuntime>],
+        new_vs: &[&Tensor<CpuRuntime>],
+        max_seq_len: usize,
+        position: usize,
+    ) -> Result<()> {
+        batched::kv_cache_update_batched(
+            self,
+            k_caches,
+            v_caches,
+            new_ks,
+            new_vs,
+            max_seq_len,
+            position,
+        )
     }
 
     fn reshape_and_cache(

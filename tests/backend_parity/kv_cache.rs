@@ -139,6 +139,601 @@ fn test_kv_cache_update_parity() {
     });
 }
 
+/// A `new_k`/`new_v` whose head_dim disagrees with the cache must be
+/// rejected identically by both backends — this is the case that drives the
+/// offset math in the CUDA kernel, so a missed check here is an OOB write.
+#[test]
+fn test_kv_cache_update_head_dim_mismatch_is_error() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, kv_heads, max_seq, d) = (1, 2, 8, 4);
+    let position = 0;
+
+    let zeros = vec![0.0f32; b * kv_heads * max_seq * d];
+    let k_cache =
+        numr::tensor::Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cpu_device).unwrap();
+    let v_cache =
+        numr::tensor::Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cpu_device).unwrap();
+    // new_k/new_v head_dim (d+1) disagrees with the cache's head_dim (d).
+    let new_k = det_tensor(&[b, kv_heads, 2, d + 1], &cpu_device);
+    let new_v = det_tensor(&[b, kv_heads, 2, d + 1], &cpu_device);
+
+    let result = cpu_client.kv_cache_update(&k_cache, &v_cache, &new_k, &new_v, position);
+    assert!(result.is_err(), "CPU: head_dim mismatch must be rejected");
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
+        use numr::tensor::Tensor;
+        let k_c = Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let nk = Tensor::from_slice(
+            &new_k.to_vec::<f32>(),
+            &[b, kv_heads, 2, d + 1],
+            &cuda_device,
+        )
+        .unwrap();
+        let nv = Tensor::from_slice(
+            &new_v.to_vec::<f32>(),
+            &[b, kv_heads, 2, d + 1],
+            &cuda_device,
+        )
+        .unwrap();
+        let result = cuda_client.kv_cache_update(&k_c, &v_c, &nk, &nv, position);
+        assert!(result.is_err(), "CUDA: head_dim mismatch must be rejected");
+    });
+}
+
+/// A `new_k`/`new_v` batch dimension disagreeing with the cache must be
+/// rejected identically by both backends.
+#[test]
+fn test_kv_cache_update_batch_mismatch_is_error() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, kv_heads, max_seq, d) = (2, 2, 8, 4);
+    let position = 0;
+
+    let zeros = vec![0.0f32; b * kv_heads * max_seq * d];
+    let k_cache =
+        numr::tensor::Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cpu_device).unwrap();
+    let v_cache =
+        numr::tensor::Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cpu_device).unwrap();
+    // new_k/new_v batch (b-1) disagrees with the cache's batch (b).
+    let new_k = det_tensor(&[b - 1, kv_heads, 2, d], &cpu_device);
+    let new_v = det_tensor(&[b - 1, kv_heads, 2, d], &cpu_device);
+
+    let result = cpu_client.kv_cache_update(&k_cache, &v_cache, &new_k, &new_v, position);
+    assert!(result.is_err(), "CPU: batch mismatch must be rejected");
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
+        use numr::tensor::Tensor;
+        let k_c = Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let nk = Tensor::from_slice(
+            &new_k.to_vec::<f32>(),
+            &[b - 1, kv_heads, 2, d],
+            &cuda_device,
+        )
+        .unwrap();
+        let nv = Tensor::from_slice(
+            &new_v.to_vec::<f32>(),
+            &[b - 1, kv_heads, 2, d],
+            &cuda_device,
+        )
+        .unwrap();
+        let result = cuda_client.kv_cache_update(&k_c, &v_c, &nk, &nv, position);
+        assert!(result.is_err(), "CUDA: batch mismatch must be rejected");
+    });
+}
+
+/// A dtype mismatch among the four tensors must be rejected identically by
+/// both backends — CPU derives its byte-copy width from `k_cache`'s dtype
+/// alone, so a silent mismatch would miscopy rather than error.
+#[test]
+fn test_kv_cache_update_dtype_mismatch_is_error() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, kv_heads, max_seq, d) = (1, 2, 8, 4);
+    let position = 0;
+
+    let zeros = vec![0.0f32; b * kv_heads * max_seq * d];
+    let k_cache =
+        numr::tensor::Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cpu_device).unwrap();
+    let v_cache =
+        numr::tensor::Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cpu_device).unwrap();
+    let new_k = det_tensor(&[b, kv_heads, 2, d], &cpu_device);
+    // new_v is F16 while k_cache, v_cache, and new_k are F32.
+    let new_v = det_tensor(&[b, kv_heads, 2, d], &cpu_device)
+        .to_dtype(numr::dtype::DType::F16)
+        .unwrap();
+
+    let result = cpu_client.kv_cache_update(&k_cache, &v_cache, &new_k, &new_v, position);
+    assert!(result.is_err(), "CPU: dtype mismatch must be rejected");
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
+        use numr::tensor::Tensor;
+        let k_c = Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let nk =
+            Tensor::from_slice(&new_k.to_vec::<f32>(), &[b, kv_heads, 2, d], &cuda_device).unwrap();
+        let nv_f32 = new_v
+            .to_dtype(numr::dtype::DType::F32)
+            .unwrap()
+            .to_vec::<f32>();
+        let nv = Tensor::from_slice(&nv_f32, &[b, kv_heads, 2, d], &cuda_device)
+            .unwrap()
+            .to_dtype(numr::dtype::DType::F16)
+            .unwrap();
+        let result = cuda_client.kv_cache_update(&k_c, &v_c, &nk, &nv, position);
+        assert!(result.is_err(), "CUDA: dtype mismatch must be rejected");
+    });
+}
+
+/// CPU-vs-CUDA parity for `kv_cache_update_batched`, checked against the
+/// already-trusted `kv_cache_update` called once per layer.
+///
+/// Uses >=3 layers with different data per layer (a kernel that ignores the
+/// `y` grid dimension, or overwrites layer 0 repeatedly, would still pass a
+/// single-layer test), a non-zero `position`, and `new_len > 1` so the
+/// offset arithmetic is exercised.
+#[cfg(feature = "cuda")]
+fn assert_kv_cache_update_batched_parity(dtype: numr::dtype::DType, label: &str) {
+    use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
+    use numr::tensor::Tensor;
+
+    let (b, kv_heads, max_seq, d) = (2, 3, 16, 8);
+    let new_len = 3;
+    let position = 5;
+    let num_layers = 4;
+
+    let (cpu_client, cpu_device) = setup_cpu();
+
+    let cache_shape = [b, kv_heads, max_seq, d];
+    let new_shape = [b, kv_heads, new_len, d];
+    let zeros_cache = vec![0.0f32; b * kv_heads * max_seq * d];
+
+    // Distinct data per layer via a per-layer seed, so a layer-index bug
+    // (wrong y-index, or every layer reading layer 0's pointers) is caught.
+    let new_k_data: Vec<Vec<f32>> = (0..num_layers)
+        .map(|l| det_f32_seeded(&new_shape, l as f32 * 17.0))
+        .collect();
+    let new_v_data: Vec<Vec<f32>> = (0..num_layers)
+        .map(|l| det_f32_seeded(&new_shape, l as f32 * 17.0 + 500.0))
+        .collect();
+
+    // Oracle: call the trusted single-layer kv_cache_update once per layer.
+    let mut oracle_k = Vec::with_capacity(num_layers);
+    let mut oracle_v = Vec::with_capacity(num_layers);
+    for l in 0..num_layers {
+        let kc = Tensor::from_slice(&zeros_cache, &cache_shape, &cpu_device)
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap();
+        let vc = Tensor::from_slice(&zeros_cache, &cache_shape, &cpu_device)
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap();
+        let nk = Tensor::from_slice(&new_k_data[l], &new_shape, &cpu_device)
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap();
+        let nv = Tensor::from_slice(&new_v_data[l], &new_shape, &cpu_device)
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap();
+        cpu_client
+            .kv_cache_update(&kc, &vc, &nk, &nv, position)
+            .unwrap();
+        oracle_k.push(
+            kc.to_dtype(numr::dtype::DType::F32)
+                .unwrap()
+                .to_vec::<f32>(),
+        );
+        oracle_v.push(
+            vc.to_dtype(numr::dtype::DType::F32)
+                .unwrap()
+                .to_vec::<f32>(),
+        );
+    }
+
+    // CPU batched result, compared against the oracle.
+    let cpu_k_caches: Vec<Tensor<numr::runtime::cpu::CpuRuntime>> = (0..num_layers)
+        .map(|_| {
+            Tensor::from_slice(&zeros_cache, &cache_shape, &cpu_device)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap()
+        })
+        .collect();
+    let cpu_v_caches: Vec<Tensor<numr::runtime::cpu::CpuRuntime>> = (0..num_layers)
+        .map(|_| {
+            Tensor::from_slice(&zeros_cache, &cache_shape, &cpu_device)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap()
+        })
+        .collect();
+    let cpu_new_ks: Vec<Tensor<numr::runtime::cpu::CpuRuntime>> = (0..num_layers)
+        .map(|l| {
+            Tensor::from_slice(&new_k_data[l], &new_shape, &cpu_device)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap()
+        })
+        .collect();
+    let cpu_new_vs: Vec<Tensor<numr::runtime::cpu::CpuRuntime>> = (0..num_layers)
+        .map(|l| {
+            Tensor::from_slice(&new_v_data[l], &new_shape, &cpu_device)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap()
+        })
+        .collect();
+
+    let kc_refs: Vec<&Tensor<_>> = cpu_k_caches.iter().collect();
+    let vc_refs: Vec<&Tensor<_>> = cpu_v_caches.iter().collect();
+    let nk_refs: Vec<&Tensor<_>> = cpu_new_ks.iter().collect();
+    let nv_refs: Vec<&Tensor<_>> = cpu_new_vs.iter().collect();
+
+    cpu_client
+        .kv_cache_update_batched(&kc_refs, &vc_refs, &nk_refs, &nv_refs, max_seq, position)
+        .unwrap();
+
+    for l in 0..num_layers {
+        assert_eq!(
+            cpu_k_caches[l]
+                .to_dtype(numr::dtype::DType::F32)
+                .unwrap()
+                .to_vec::<f32>(),
+            oracle_k[l],
+            "{label} CPU batched layer {l} K vs per-layer oracle"
+        );
+        assert_eq!(
+            cpu_v_caches[l]
+                .to_dtype(numr::dtype::DType::F32)
+                .unwrap()
+                .to_vec::<f32>(),
+            oracle_v[l],
+            "{label} CPU batched layer {l} V vs per-layer oracle"
+        );
+    }
+
+    with_cuda_backend(|cuda_client, cuda_device| {
+        let cuda_k_caches: Vec<Tensor<numr::runtime::cuda::CudaRuntime>> = (0..num_layers)
+            .map(|_| {
+                Tensor::from_slice(&zeros_cache, &cache_shape, &cuda_device)
+                    .unwrap()
+                    .to_dtype(dtype)
+                    .unwrap()
+            })
+            .collect();
+        let cuda_v_caches: Vec<Tensor<numr::runtime::cuda::CudaRuntime>> = (0..num_layers)
+            .map(|_| {
+                Tensor::from_slice(&zeros_cache, &cache_shape, &cuda_device)
+                    .unwrap()
+                    .to_dtype(dtype)
+                    .unwrap()
+            })
+            .collect();
+        let cuda_new_ks: Vec<Tensor<numr::runtime::cuda::CudaRuntime>> = (0..num_layers)
+            .map(|l| {
+                Tensor::from_slice(&new_k_data[l], &new_shape, &cuda_device)
+                    .unwrap()
+                    .to_dtype(dtype)
+                    .unwrap()
+            })
+            .collect();
+        let cuda_new_vs: Vec<Tensor<numr::runtime::cuda::CudaRuntime>> = (0..num_layers)
+            .map(|l| {
+                Tensor::from_slice(&new_v_data[l], &new_shape, &cuda_device)
+                    .unwrap()
+                    .to_dtype(dtype)
+                    .unwrap()
+            })
+            .collect();
+
+        let kc_refs: Vec<&Tensor<_>> = cuda_k_caches.iter().collect();
+        let vc_refs: Vec<&Tensor<_>> = cuda_v_caches.iter().collect();
+        let nk_refs: Vec<&Tensor<_>> = cuda_new_ks.iter().collect();
+        let nv_refs: Vec<&Tensor<_>> = cuda_new_vs.iter().collect();
+
+        cuda_client
+            .kv_cache_update_batched(&kc_refs, &vc_refs, &nk_refs, &nv_refs, max_seq, position)
+            .unwrap();
+
+        for l in 0..num_layers {
+            assert_eq!(
+                cuda_k_caches[l]
+                    .to_dtype(numr::dtype::DType::F32)
+                    .unwrap()
+                    .to_vec::<f32>(),
+                oracle_k[l],
+                "{label} CUDA batched layer {l} K vs per-layer oracle"
+            );
+            assert_eq!(
+                cuda_v_caches[l]
+                    .to_dtype(numr::dtype::DType::F32)
+                    .unwrap()
+                    .to_vec::<f32>(),
+                oracle_v[l],
+                "{label} CUDA batched layer {l} V vs per-layer oracle"
+            );
+        }
+    });
+}
+
+/// Deterministic F32 fixture matching `det_f32`'s formula, taking an
+/// explicit shape slice (used for per-layer seeding above).
+fn det_f32_seeded(shape: &[usize], seed: f32) -> Vec<f32> {
+    let n: usize = shape.iter().product();
+    (0..n)
+        .map(|i| ((i as f32 + seed) * 0.137).sin() * 0.6)
+        .collect()
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_kv_cache_update_batched_f32_parity() {
+    assert_kv_cache_update_batched_parity(numr::dtype::DType::F32, "kv_cache_update_batched f32");
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_kv_cache_update_batched_f16_parity() {
+    assert_kv_cache_update_batched_parity(numr::dtype::DType::F16, "kv_cache_update_batched f16");
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_kv_cache_update_batched_bf16_parity() {
+    assert_kv_cache_update_batched_parity(numr::dtype::DType::BF16, "kv_cache_update_batched bf16");
+}
+
+#[test]
+fn test_kv_cache_update_batched_mismatched_lengths_is_error() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, kv_heads, max_seq, d) = (1, 2, 8, 4);
+    let new_len = 2;
+    let position = 0;
+
+    let zeros_cache = vec![0.0f32; b * kv_heads * max_seq * d];
+    let k0 =
+        numr::tensor::Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cpu_device)
+            .unwrap();
+    let k1 =
+        numr::tensor::Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cpu_device)
+            .unwrap();
+    let v0 =
+        numr::tensor::Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cpu_device)
+            .unwrap();
+    let nk0 = det_tensor(&[b, kv_heads, new_len, d], &cpu_device);
+    let nv0 = det_tensor(&[b, kv_heads, new_len, d], &cpu_device);
+
+    // 2 K caches but only 1 V cache: lengths must match.
+    let result = cpu_client.kv_cache_update_batched(
+        &[&k0, &k1],
+        &[&v0],
+        &[&nk0, &nk0],
+        &[&nv0, &nv0],
+        max_seq,
+        position,
+    );
+    assert!(result.is_err(), "mismatched slice lengths must be rejected");
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
+        use numr::tensor::Tensor;
+        let k0 =
+            Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let k1 =
+            Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let v0 =
+            Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let nk0 = Tensor::from_slice(
+            &nk0.to_vec::<f32>(),
+            &[b, kv_heads, new_len, d],
+            &cuda_device,
+        )
+        .unwrap();
+        let nv0 = Tensor::from_slice(
+            &nv0.to_vec::<f32>(),
+            &[b, kv_heads, new_len, d],
+            &cuda_device,
+        )
+        .unwrap();
+        let result = cuda_client.kv_cache_update_batched(
+            &[&k0, &k1],
+            &[&v0],
+            &[&nk0, &nk0],
+            &[&nv0, &nv0],
+            max_seq,
+            position,
+        );
+        assert!(
+            result.is_err(),
+            "CUDA: mismatched slice lengths must be rejected"
+        );
+    });
+}
+
+/// The batched CUDA path validates cache-vs-new_k/new_v compatibility
+/// directly (it does not delegate to the single-layer `kv_cache_update`),
+/// so it needs its own head_dim-mismatch coverage.
+#[test]
+fn test_kv_cache_update_batched_head_dim_mismatch_is_error() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, kv_heads, max_seq, d) = (1, 2, 8, 4);
+    let new_len = 2;
+    let position = 0;
+
+    let zeros_cache = vec![0.0f32; b * kv_heads * max_seq * d];
+    let k0 =
+        numr::tensor::Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cpu_device)
+            .unwrap();
+    let v0 =
+        numr::tensor::Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cpu_device)
+            .unwrap();
+    // new_k/new_v head_dim (d+1) disagrees with the cache's head_dim (d).
+    let nk0 = det_tensor(&[b, kv_heads, new_len, d + 1], &cpu_device);
+    let nv0 = det_tensor(&[b, kv_heads, new_len, d + 1], &cpu_device);
+
+    let result =
+        cpu_client.kv_cache_update_batched(&[&k0], &[&v0], &[&nk0], &[&nv0], max_seq, position);
+    assert!(result.is_err(), "CPU: head_dim mismatch must be rejected");
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
+        use numr::tensor::Tensor;
+        let k0 =
+            Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let v0 =
+            Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let nk0 = Tensor::from_slice(
+            &nk0.to_vec::<f32>(),
+            &[b, kv_heads, new_len, d + 1],
+            &cuda_device,
+        )
+        .unwrap();
+        let nv0 = Tensor::from_slice(
+            &nv0.to_vec::<f32>(),
+            &[b, kv_heads, new_len, d + 1],
+            &cuda_device,
+        )
+        .unwrap();
+        let result = cuda_client.kv_cache_update_batched(
+            &[&k0],
+            &[&v0],
+            &[&nk0],
+            &[&nv0],
+            max_seq,
+            position,
+        );
+        assert!(result.is_err(), "CUDA: head_dim mismatch must be rejected");
+    });
+}
+
+/// A dtype mismatch among the four tensors must be rejected identically by
+/// both backends through the batched path too.
+#[test]
+fn test_kv_cache_update_batched_dtype_mismatch_is_error() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, kv_heads, max_seq, d) = (1, 2, 8, 4);
+    let new_len = 2;
+    let position = 0;
+
+    let zeros_cache = vec![0.0f32; b * kv_heads * max_seq * d];
+    let k0 =
+        numr::tensor::Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cpu_device)
+            .unwrap();
+    let v0 =
+        numr::tensor::Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cpu_device)
+            .unwrap();
+    let nk0 = det_tensor(&[b, kv_heads, new_len, d], &cpu_device);
+    // nv0 is F16 while k0, v0, and nk0 are F32.
+    let nv0 = det_tensor(&[b, kv_heads, new_len, d], &cpu_device)
+        .to_dtype(numr::dtype::DType::F16)
+        .unwrap();
+
+    let result =
+        cpu_client.kv_cache_update_batched(&[&k0], &[&v0], &[&nk0], &[&nv0], max_seq, position);
+    assert!(result.is_err(), "CPU: dtype mismatch must be rejected");
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
+        use numr::tensor::Tensor;
+        let k0 =
+            Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let v0 =
+            Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let nk0 = Tensor::from_slice(
+            &nk0.to_vec::<f32>(),
+            &[b, kv_heads, new_len, d],
+            &cuda_device,
+        )
+        .unwrap();
+        let nv0_f32 = nv0
+            .to_dtype(numr::dtype::DType::F32)
+            .unwrap()
+            .to_vec::<f32>();
+        let nv0 = Tensor::from_slice(&nv0_f32, &[b, kv_heads, new_len, d], &cuda_device)
+            .unwrap()
+            .to_dtype(numr::dtype::DType::F16)
+            .unwrap();
+        let result = cuda_client.kv_cache_update_batched(
+            &[&k0],
+            &[&v0],
+            &[&nk0],
+            &[&nv0],
+            max_seq,
+            position,
+        );
+        assert!(result.is_err(), "CUDA: dtype mismatch must be rejected");
+    });
+}
+
+#[test]
+fn test_kv_cache_update_batched_position_overflow_is_error() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, kv_heads, max_seq, d) = (1, 2, 4, 4);
+    let new_len = 2;
+    let position = 3; // 3 + 2 > 4
+
+    let zeros_cache = vec![0.0f32; b * kv_heads * max_seq * d];
+    let k0 =
+        numr::tensor::Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cpu_device)
+            .unwrap();
+    let v0 =
+        numr::tensor::Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cpu_device)
+            .unwrap();
+    let nk0 = det_tensor(&[b, kv_heads, new_len, d], &cpu_device);
+    let nv0 = det_tensor(&[b, kv_heads, new_len, d], &cpu_device);
+
+    let result =
+        cpu_client.kv_cache_update_batched(&[&k0], &[&v0], &[&nk0], &[&nv0], max_seq, position);
+    assert!(
+        result.is_err(),
+        "position + new_len > max_seq_len must be rejected"
+    );
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
+        use numr::tensor::Tensor;
+        let k0 =
+            Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let v0 =
+            Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cuda_device).unwrap();
+        let nk0 = Tensor::from_slice(
+            &nk0.to_vec::<f32>(),
+            &[b, kv_heads, new_len, d],
+            &cuda_device,
+        )
+        .unwrap();
+        let nv0 = Tensor::from_slice(
+            &nv0.to_vec::<f32>(),
+            &[b, kv_heads, new_len, d],
+            &cuda_device,
+        )
+        .unwrap();
+        let result = cuda_client.kv_cache_update_batched(
+            &[&k0],
+            &[&v0],
+            &[&nk0],
+            &[&nv0],
+            max_seq,
+            position,
+        );
+        assert!(
+            result.is_err(),
+            "CUDA: position + new_len > max_seq_len must be rejected"
+        );
+    });
+}
+
 #[test]
 fn test_reshape_and_cache_parity() {
     let (cpu_client, cpu_device) = setup_cpu();

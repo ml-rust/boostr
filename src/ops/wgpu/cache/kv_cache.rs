@@ -144,6 +144,23 @@ impl KvCacheOps<WgpuRuntime> for WgpuClient {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn kv_cache_update_batched(
+        &self,
+        _k_caches: &[&Tensor<WgpuRuntime>],
+        _v_caches: &[&Tensor<WgpuRuntime>],
+        _new_ks: &[&Tensor<WgpuRuntime>],
+        _new_vs: &[&Tensor<WgpuRuntime>],
+        _max_seq_len: usize,
+        _position: usize,
+    ) -> Result<()> {
+        // No WGSL shader for the multi-layer batched update yet — CUDA and
+        // CPU cover this op; WebGPU has only the single-layer kv_cache_update.
+        Err(Error::KernelError {
+            reason: "kv_cache_update_batched not yet implemented on WebGPU".into(),
+        })
+    }
+
     fn reshape_and_cache(
         &self,
         key: &Tensor<WgpuRuntime>,

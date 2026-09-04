@@ -1,6 +1,7 @@
 //! CUDA KV cache operations — fused update, reshape-and-cache, and INT4 append
 
 mod append_kv_int4;
+mod batched;
 mod block_ops;
 
 use crate::error::{Error, Result};
@@ -33,10 +34,45 @@ impl KvCacheOps<CudaRuntime> for CudaClient {
             });
         }
 
+        let batch = cache_shape[0];
+        let num_heads = cache_shape[1];
         let max_seq_len = cache_shape[2];
         let head_dim = cache_shape[3];
         let new_len = new_shape[2];
-        let outer_size = cache_shape[0] * cache_shape[1];
+        let outer_size = batch * num_heads;
+
+        // Validate that batch, heads, and head_dim are compatible.
+        if new_shape[0] != batch || new_shape[1] != num_heads || new_shape[3] != head_dim {
+            return Err(Error::InvalidArgument {
+                arg: "shape",
+                reason: format!(
+                    "new_k shape [{},{},{},{}] is incompatible with cache shape [{},{},{},{}]",
+                    new_shape[0],
+                    new_shape[1],
+                    new_len,
+                    new_shape[3],
+                    batch,
+                    num_heads,
+                    max_seq_len,
+                    head_dim,
+                ),
+            });
+        }
+
+        // One kernel serves all four tensors, so they must share a dtype.
+        let dtype = k_cache.dtype();
+        if v_cache.dtype() != dtype || new_k.dtype() != dtype || new_v.dtype() != dtype {
+            return Err(Error::InvalidArgument {
+                arg: "dtype",
+                reason: format!(
+                    "k_cache {:?}, v_cache {:?}, new_k {:?}, new_v {:?} must all match",
+                    dtype,
+                    v_cache.dtype(),
+                    new_k.dtype(),
+                    new_v.dtype()
+                ),
+            });
+        }
 
         if position + new_len > max_seq_len {
             return Err(Error::InvalidArgument {
@@ -106,6 +142,27 @@ impl KvCacheOps<CudaRuntime> for CudaClient {
         }
 
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn kv_cache_update_batched(
+        &self,
+        k_caches: &[&Tensor<CudaRuntime>],
+        v_caches: &[&Tensor<CudaRuntime>],
+        new_ks: &[&Tensor<CudaRuntime>],
+        new_vs: &[&Tensor<CudaRuntime>],
+        max_seq_len: usize,
+        position: usize,
+    ) -> Result<()> {
+        batched::kv_cache_update_batched(
+            self,
+            k_caches,
+            v_caches,
+            new_ks,
+            new_vs,
+            max_seq_len,
+            position,
+        )
     }
 
     fn reshape_and_cache(

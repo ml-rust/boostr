@@ -28,6 +28,33 @@ pub trait KvCacheOps<R: Runtime> {
         position: usize,
     ) -> Result<()>;
 
+    /// Fused KV cache update for every layer in one launch.
+    ///
+    /// Same write as [`KvCacheOps::kv_cache_update`] applied to each layer,
+    /// but issued as a single kernel instead of one launch per layer.
+    /// `position` is shared across all layers.
+    ///
+    /// # Layout contract
+    ///
+    /// - `k_caches`, `v_caches`, `new_ks`, `new_vs`: one entry per layer, all
+    ///   four slices the same length, every tensor the same dtype
+    /// - every `k_caches`/`v_caches` entry shares one `[B, num_kv_heads,
+    ///   max_seq_len, head_dim]` shape; every `new_ks`/`new_vs` entry shares
+    ///   one `[B, num_kv_heads, new_len, head_dim]` shape — layers differ
+    ///   only in data, never in shape
+    /// - `max_seq_len`: cache sequence-dimension size, shared across layers
+    /// - `position`: starting write position, shared across layers
+    #[allow(clippy::too_many_arguments)]
+    fn kv_cache_update_batched(
+        &self,
+        k_caches: &[&Tensor<R>],
+        v_caches: &[&Tensor<R>],
+        new_ks: &[&Tensor<R>],
+        new_vs: &[&Tensor<R>],
+        max_seq_len: usize,
+        position: usize,
+    ) -> Result<()>;
+
     /// Reshape and cache — writes new K/V tokens into paged KV cache blocks.
     ///
     /// Used with PagedAttention for non-contiguous KV storage.

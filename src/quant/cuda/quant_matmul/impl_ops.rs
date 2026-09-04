@@ -16,7 +16,7 @@ use super::super::kernels::{
 };
 use super::super::tcf::{self as tcf_dispatch, MatmulShape};
 use super::fallback::{quant_matmul_via_dequant, quant_swiglu_via_dequant};
-use super::format_dispatch::{dispatch_gemv, dispatch_matmul};
+use super::format_dispatch::{dispatch_gemv, dispatch_matmul, gemv_max_m};
 use super::helpers::{quantize_activation_q8_1, validate_input_cuda};
 
 impl QuantMatmulOps<CudaRuntime> for CudaClient {
@@ -201,7 +201,11 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             return Ok(output);
         }
 
-        if m <= 16 {
+        // The GEMV/GEMM crossover is measured per format: a faster GEMM moves
+        // it down. `gemv_max_m` holds the current value for each format.
+        let format = weight.format()?;
+        let device_index = activation.device().id();
+        if m <= gemv_max_m(format, device_index) {
             match dispatch_gemv(self, &act_contig, weight, output_ptr, m, k, n)? {
                 Some(()) => {}
                 None => return quant_matmul_via_dequant(self, activation, weight),

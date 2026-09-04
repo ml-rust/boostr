@@ -24,6 +24,27 @@ use super::super::kernels::{
 };
 use super::helpers::quantize_activation_q8_1;
 
+/// Largest `m` for which the GEMV path beats the GEMM path.
+///
+/// The crossover is measured per format: a faster GEMM moves it down. Q8_0,
+/// Q4_K and Q6_K get the lower value only when the device has the tensor-core
+/// GEMM (`caps.int8_mma_m16n8k32`); every other format keeps the dp4a-GEMM
+/// crossover.
+pub(super) fn gemv_max_m(format: QuantFormat, device_index: usize) -> usize {
+    if matches!(
+        format,
+        QuantFormat::Q8_0 | QuantFormat::Q4K | QuantFormat::Q6K
+    ) {
+        let caps = numr::runtime::cuda::CudaDevice::new(device_index)
+            .profile()
+            .caps;
+        if caps.int8_mma_m16n8k32 {
+            return 8;
+        }
+    }
+    16
+}
+
 /// GEMV dispatch for M <= 64 (decode + short prefill).
 ///
 /// Chooses the dp4a MWR path for Q4_K / Q6_K / Q8_0 and the F32 activation

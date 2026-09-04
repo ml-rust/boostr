@@ -1847,3 +1847,254 @@ fn test_flash_attention_fwd_fp8_kv_head64_per_token_causal() {
 fn test_flash_attention_fwd_fp8_kv_head128_per_head() {
     assert_flash_fwd_fp8_kv_parity(128, false, false, "flash_fwd_fp8_kv hd128 per-head");
 }
+
+/// Quantize `[batch, heads, seq_len, head_dim]` F32 data to packed INT4 with
+/// the convention `flash_attention_fwd_int4_kv` expects (the CUDA kernel's
+/// per-token grouping in `kv_cache_int4.cu`, `flash_attention_int4_kv_impl`):
+/// group `i` of token `t` covers `data[t, i*group_size..(i+1)*group_size]`,
+/// `scale = (max - min) / 15`, `zero = min`,
+/// `q = round((x - zero) / scale).clamp(0, 15)`, two values packed per byte
+/// (low nibble first). Matches `quantize_kv_int4`'s CPU formula exactly —
+/// this only equals `quantize_kv_int4`'s flattened grouping when `head_dim %
+/// group_size == 0`, which every caller of this fixture guarantees.
+/// Returns `(packed_bytes, scales, zeros)`, scales/zeros as F32 — callers
+/// cast to F16 via `Tensor::to_dtype` since `half::f16` is not a numr
+/// `Element` and `Tensor::from_slice` can never take it directly.
+fn quantize_int4_kv_fixture(
+    data: &[f32],
+    batch: usize,
+    heads: usize,
+    seq_len: usize,
+    head_dim: usize,
+    group_size: usize,
+) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
+    let groups_per_token = head_dim / group_size;
+    let mut packed = vec![0u8; batch * heads * seq_len * (head_dim / 2)];
+    let mut scales = vec![1.0f32; batch * heads * seq_len * groups_per_token];
+    let mut zeros = vec![0.0f32; batch * heads * seq_len * groups_per_token];
+
+    for b in 0..batch {
+        for h in 0..heads {
+            for t in 0..seq_len {
+                let token_base = ((b * heads + h) * seq_len + t) * head_dim;
+                let packed_token_base = ((b * heads + h) * seq_len + t) * (head_dim / 2);
+                let group_token_base = ((b * heads + h) * seq_len + t) * groups_per_token;
+
+                for g in 0..groups_per_token {
+                    let start = token_base + g * group_size;
+                    let end = start + group_size;
+                    let min_val = data[start..end].iter().copied().fold(f32::MAX, f32::min);
+                    let max_val = data[start..end].iter().copied().fold(f32::MIN, f32::max);
+                    let range = max_val - min_val;
+                    let scale = if range > 0.0 { range / 15.0 } else { 1.0 };
+                    scales[group_token_base + g] = scale;
+                    zeros[group_token_base + g] = min_val;
+
+                    for (i, &x) in data.iter().enumerate().take(end).skip(start) {
+                        let q = ((x - min_val) / scale).round().clamp(0.0, 15.0) as u8;
+                        let col = i - token_base;
+                        let byte_idx = packed_token_base + col / 2;
+                        if col.is_multiple_of(2) {
+                            packed[byte_idx] |= q & 0xF;
+                        } else {
+                            packed[byte_idx] |= (q & 0xF) << 4;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (packed, scales, zeros)
+}
+
+/// `flash_attention_fwd_int4_kv` CUDA vs CPU parity: FP32 Q, packed INT4 K/V
+/// with per-token (scale, zero) groups. No independent CPU fused kernel
+/// exists for this op — the CPU side runs `FlashAttentionOps`'s own
+/// dequantize-then-`standard_attention_fwd` reference (`flash_int4_kv.rs`),
+/// so this checks the CUDA kernel against boostr's own contract, matching
+/// `assert_flash_fwd_fp8_kv_parity`'s shape.
+///
+/// rtol 0.15 / atol 0.05: INT4's 4-bit min-max quantization has a coarser
+/// step than FP8 E4M3 (`range / 15` per group vs FP8's ~6.25% relative
+/// step), so this needs a looser tolerance than the FP8-KV parity test's.
+///
+/// F16 scale/zero tensors are built via an F32-`from_slice`-then-`to_dtype`
+/// cast (`half::f16` is not a numr `Element`, so `from_slice` can never take
+/// it directly). The CPU reference then widens those F16 tensors back to
+/// F32 through `dequantize_kv_int4`'s cast path, which numr only compiles
+/// for F16/BF16 when the `f16` feature is on — so this test is gated on it.
+#[cfg(all(feature = "cuda", feature = "f16"))]
+fn assert_flash_fwd_int4_kv_parity(
+    head_dim: usize,
+    group_size: boostr::ops::traits::Int4GroupSize,
+    causal: bool,
+    label: &str,
+) {
+    use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
+    use numr::dtype::DType;
+    use numr::tensor::Tensor;
+
+    // Dispatch tries the large tile first (same layout/formula as FP8-KV's
+    // gate) and falls back to the `_small` kernel when the large tile does
+    // not fit. Gate on the SMALLEST variant the dispatch could still land
+    // on — a device that only fits `_small` must still run this test, not
+    // skip it, since the fallback path is exactly what this test exists to
+    // exercise. Gate on device capability, never on the returned error: a
+    // missing symbol also returns an error, and matching `KernelError`
+    // strings would make this test skip on the exact defect it checks for.
+    #[cfg(feature = "cuda")]
+    {
+        use numr::runtime::Device;
+        // `_64_small` is (block_m=64, block_n=32): (64+2*32)*64*4 = 32KB.
+        // `_128_small` is (block_m=32, block_n=32): (32+2*32)*128*4 = 48KB.
+        let required = match head_dim {
+            64 => (64 + 2 * 32) * 64 * 4,
+            128 => (32 + 2 * 32) * 128 * 4,
+            other => panic!("{label}: unsupported head_dim {other} in test gate"),
+        };
+        let available = numr::runtime::cuda::CudaDevice::new(0)
+            .profile()
+            .shared_mem_per_unit as usize;
+        if required > available {
+            println!(
+                "!! {label} SKIPPED: needs {required} bytes of shared memory even for the \
+                 small tile, this device allows {available}. NOTHING WAS VERIFIED."
+            );
+            eprintln!(
+                "!! {label} SKIPPED: needs {required} bytes of shared memory even for the \
+                 small tile, this device allows {available}. NOTHING WAS VERIFIED."
+            );
+            return;
+        }
+    }
+
+    let (cpu_client, cpu_device) = setup_cpu();
+    let (b, h, sq, sk) = (1usize, 2usize, 6usize, 8usize);
+    let gs = group_size as usize;
+    let groups_per_token = head_dim / gs;
+
+    let q = det_tensor(&[b, h, sq, head_dim], &cpu_device).to_vec::<f32>();
+    let k = det_tensor(&[b, h, sk, head_dim], &cpu_device).to_vec::<f32>();
+    let v = det_tensor(&[b, h, sk, head_dim], &cpu_device).to_vec::<f32>();
+
+    let (k_packed, k_scales, k_zeros) = quantize_int4_kv_fixture(&k, b, h, sk, head_dim, gs);
+    let (v_packed, v_scales, v_zeros) = quantize_int4_kv_fixture(&v, b, h, sk, head_dim, gs);
+    let kv_shape = &[b, h, sk, head_dim / 2];
+    let scale_shape = &[b, h, sk * groups_per_token];
+
+    let q_cpu = Tensor::from_slice(&q, &[b, h, sq, head_dim], &cpu_device).unwrap();
+    let k_cpu = Tensor::from_slice(&k_packed, kv_shape, &cpu_device).unwrap();
+    let v_cpu = Tensor::from_slice(&v_packed, kv_shape, &cpu_device).unwrap();
+    // `half::f16` is not a numr `Element`, so `from_slice` builds the F32
+    // tensor first and `to_dtype` narrows it to the F16 the op requires.
+    let ks_cpu = Tensor::from_slice(&k_scales, scale_shape, &cpu_device)
+        .unwrap()
+        .to_dtype(DType::F16)
+        .unwrap();
+    let kz_cpu = Tensor::from_slice(&k_zeros, scale_shape, &cpu_device)
+        .unwrap()
+        .to_dtype(DType::F16)
+        .unwrap();
+    let vs_cpu = Tensor::from_slice(&v_scales, scale_shape, &cpu_device)
+        .unwrap()
+        .to_dtype(DType::F16)
+        .unwrap();
+    let vz_cpu = Tensor::from_slice(&v_zeros, scale_shape, &cpu_device)
+        .unwrap()
+        .to_dtype(DType::F16)
+        .unwrap();
+
+    let (cpu_out, _cpu_lse) = cpu_client
+        .flash_attention_fwd_int4_kv(
+            &q_cpu, &k_cpu, &v_cpu, &ks_cpu, &kz_cpu, &vs_cpu, &vz_cpu, h, head_dim, causal,
+            group_size,
+        )
+        .unwrap();
+    let cpu_out_vec = cpu_out.to_vec::<f32>();
+
+    with_cuda_backend(|cuda_client, cuda_device| {
+        let q_c = Tensor::from_slice(&q, &[b, h, sq, head_dim], &cuda_device).unwrap();
+        let k_c = Tensor::from_slice(&k_packed, kv_shape, &cuda_device).unwrap();
+        let v_c = Tensor::from_slice(&v_packed, kv_shape, &cuda_device).unwrap();
+        let ks_c = Tensor::from_slice(&k_scales, scale_shape, &cuda_device)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+        let kz_c = Tensor::from_slice(&k_zeros, scale_shape, &cuda_device)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+        let vs_c = Tensor::from_slice(&v_scales, scale_shape, &cuda_device)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+        let vz_c = Tensor::from_slice(&v_zeros, scale_shape, &cuda_device)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+
+        let (cuda_out, _cuda_lse) = match cuda_client.flash_attention_fwd_int4_kv(
+            &q_c, &k_c, &v_c, &ks_c, &kz_c, &vs_c, &vz_c, h, head_dim, causal, group_size,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let msg = e.to_string();
+                let absent =
+                    msg.contains("CUDA_ERROR_NOT_FOUND") || msg.contains("named symbol not found");
+                assert!(
+                    absent,
+                    "{label}: flash_attention_fwd_int4_kv failed for a reason other than the \
+                     kernel being absent: {e}"
+                );
+                eprintln!("{label}: kernel absent ({e}); skipping");
+                return;
+            }
+        };
+
+        assert_parity_f32_tol(&cuda_out.to_vec::<f32>(), &cpu_out_vec, label, 0.15, 0.05);
+    });
+}
+
+#[cfg(all(feature = "cuda", feature = "f16"))]
+#[test]
+fn test_flash_attention_fwd_int4_kv_head64_group32() {
+    assert_flash_fwd_int4_kv_parity(
+        64,
+        boostr::ops::traits::Int4GroupSize::Group32,
+        false,
+        "flash_fwd_int4_kv hd64 group32",
+    );
+}
+
+#[cfg(all(feature = "cuda", feature = "f16"))]
+#[test]
+fn test_flash_attention_fwd_int4_kv_head64_group64_causal() {
+    assert_flash_fwd_int4_kv_parity(
+        64,
+        boostr::ops::traits::Int4GroupSize::Group64,
+        true,
+        "flash_fwd_int4_kv hd64 group64 causal",
+    );
+}
+
+#[cfg(all(feature = "cuda", feature = "f16"))]
+#[test]
+fn test_flash_attention_fwd_int4_kv_head128_group64() {
+    assert_flash_fwd_int4_kv_parity(
+        128,
+        boostr::ops::traits::Int4GroupSize::Group64,
+        false,
+        "flash_fwd_int4_kv hd128 group64",
+    );
+}
+
+#[cfg(all(feature = "cuda", feature = "f16"))]
+#[test]
+fn test_flash_attention_fwd_int4_kv_head128_group128_causal() {
+    assert_flash_fwd_int4_kv_parity(
+        128,
+        boostr::ops::traits::Int4GroupSize::Group128,
+        true,
+        "flash_fwd_int4_kv hd128 group128 causal",
+    );
+}

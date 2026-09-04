@@ -17,9 +17,11 @@ use super::flash_bwd_fp8;
 use super::flash_decode;
 use super::flash_fwd;
 use super::flash_fwd_fp8_kv;
+use super::flash_fwd_int4_kv;
 use super::flash_utils::validate_qkv;
 use super::flash_v3;
 use super::mqa_gqa;
+use crate::ops::traits::cache::kv_cache_quant::Int4GroupSize;
 
 pub use super::flash_decode::decode_attention_graph_fwd;
 pub(crate) use super::flash_utils::set_smem_attribute;
@@ -189,6 +191,26 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             head_dim,
             causal,
             per_token_scales,
+        )
+    }
+
+    fn flash_attention_fwd_int4_kv(
+        &self,
+        q: &Tensor<CudaRuntime>,
+        k_quant: &Tensor<CudaRuntime>,
+        v_quant: &Tensor<CudaRuntime>,
+        k_scales: &Tensor<CudaRuntime>,
+        k_zeros: &Tensor<CudaRuntime>,
+        v_scales: &Tensor<CudaRuntime>,
+        v_zeros: &Tensor<CudaRuntime>,
+        num_heads: usize,
+        head_dim: usize,
+        causal: bool,
+        group_size: Int4GroupSize,
+    ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
+        flash_fwd_int4_kv::flash_attention_fwd_int4_kv_impl(
+            self, q, k_quant, v_quant, k_scales, k_zeros, v_scales, v_zeros, num_heads, head_dim,
+            causal, group_size,
         )
     }
 

@@ -1,6 +1,7 @@
 pub mod decode_attention;
 pub mod flash;
 pub mod flash_fp8_kv;
+pub mod flash_int4_kv;
 pub mod fused_qkv;
 pub mod mla;
 pub mod paged_attention;

@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::ops::impl_generic::attention::{
     StandardAttnConfig, multi_head_attention_impl, standard_attention_bwd,
 };
+use crate::ops::traits::cache::kv_cache_quant::Int4GroupSize;
 use crate::ops::traits::{AttentionOps, FlashAttentionOps};
 use numr::autograd::Var;
 use numr::dtype::DType;
@@ -223,6 +224,28 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
         Err(Error::InvalidArgument {
             arg: "op",
             reason: "flash_attention_fwd_fp8_kv not implemented on WebGPU: no WGSL shader for it"
+                .into(),
+        })
+    }
+
+    fn flash_attention_fwd_int4_kv(
+        &self,
+        _q: &Tensor<WgpuRuntime>,
+        _k_quant: &Tensor<WgpuRuntime>,
+        _v_quant: &Tensor<WgpuRuntime>,
+        _k_scales: &Tensor<WgpuRuntime>,
+        _k_zeros: &Tensor<WgpuRuntime>,
+        _v_scales: &Tensor<WgpuRuntime>,
+        _v_zeros: &Tensor<WgpuRuntime>,
+        _num_heads: usize,
+        _head_dim: usize,
+        _causal: bool,
+        _group_size: Int4GroupSize,
+    ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
+        // No WGSL shader for INT4 KV-cache Flash Attention.
+        Err(Error::InvalidArgument {
+            arg: "op",
+            reason: "flash_attention_fwd_int4_kv not implemented on WebGPU: no WGSL shader for it"
                 .into(),
         })
     }

@@ -19,6 +19,7 @@ pub const VARLEN_ATTENTION_BWD_FP16_MODULE: &str = "varlen_attention_bwd_fp16";
 pub const MQA_GQA_MODULE: &str = "mqa_gqa";
 pub const MQA_GQA_BWD_MODULE: &str = "mqa_gqa_bwd";
 pub const ALIBI_MODULE: &str = "alibi";
+pub const ALIBI_BF16_MODULE: &str = "alibi_bf16";
 pub const ALIBI_BWD_MODULE: &str = "alibi_bwd";
 pub const KV_CACHE_INT4_MODULE: &str = "kv_cache_int4";
 pub const KV_CACHE_FP8_MODULE: &str = "kv_cache_fp8";

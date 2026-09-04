@@ -9,7 +9,26 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use crate::ops::cuda::kernels::{self, ALIBI_MODULE};
+use crate::ops::cuda::kernels::{self, ALIBI_BF16_MODULE, ALIBI_MODULE};
+
+/// Picks the BF16 kernel name and module, after checking the device supports BF16.
+/// `label` names the caller in the error message (e.g. "ALiBi" or "ALiBi causal").
+fn bf16_kernel(
+    device_index: usize,
+    kernel_name: &'static str,
+    label: &str,
+) -> Result<(&'static str, &'static str)> {
+    if !numr::runtime::cuda::CudaDevice::new(device_index)
+        .profile()
+        .caps
+        .bf16
+    {
+        return Err(Error::KernelError {
+            reason: format!("{label}: bf16 requires an Ampere or newer device"),
+        });
+    }
+    Ok((kernel_name, ALIBI_BF16_MODULE))
+}
 
 impl AlibiOps<CudaRuntime> for CudaClient {
     fn alibi_add_bias(
@@ -21,10 +40,13 @@ impl AlibiOps<CudaRuntime> for CudaClient {
         seq_len_k: usize,
     ) -> Result<()> {
         let dtype = scores.dtype();
-        let kernel_name = match dtype {
-            DType::F32 => "alibi_add_bias_fp32",
-            DType::F16 => "alibi_add_bias_fp16",
-            DType::BF16 => "alibi_add_bias_bf16",
+        let device = scores.device();
+        let device_index = device.id();
+
+        let (kernel_name, module_const) = match dtype {
+            DType::F32 => ("alibi_add_bias_fp32", ALIBI_MODULE),
+            DType::F16 => ("alibi_add_bias_fp16", ALIBI_MODULE),
+            DType::BF16 => bf16_kernel(device_index, "alibi_add_bias_bf16", "ALiBi")?,
             _ => {
                 return Err(Error::KernelError {
                     reason: format!("ALiBi: unsupported dtype {dtype:?}"),
@@ -32,9 +54,7 @@ impl AlibiOps<CudaRuntime> for CudaClient {
             }
         };
 
-        let device = scores.device();
-        let device_index = device.id();
-        let module = kernels::get_or_load_module(self.context(), device_index, ALIBI_MODULE)?;
+        let module = kernels::get_or_load_module(self.context(), device_index, module_const)?;
         let func = kernels::get_kernel_function(&module, kernel_name)?;
 
         let total = (batch_size * num_heads * seq_len_q * seq_len_k) as u32;
@@ -78,10 +98,13 @@ impl AlibiOps<CudaRuntime> for CudaClient {
         position: usize,
     ) -> Result<()> {
         let dtype = scores.dtype();
-        let kernel_name = match dtype {
-            DType::F32 => "alibi_add_bias_causal_fp32",
-            DType::F16 => "alibi_add_bias_causal_fp16",
-            DType::BF16 => "alibi_add_bias_causal_bf16",
+        let device = scores.device();
+        let device_index = device.id();
+
+        let (kernel_name, module_const) = match dtype {
+            DType::F32 => ("alibi_add_bias_causal_fp32", ALIBI_MODULE),
+            DType::F16 => ("alibi_add_bias_causal_fp16", ALIBI_MODULE),
+            DType::BF16 => bf16_kernel(device_index, "alibi_add_bias_causal_bf16", "ALiBi causal")?,
             _ => {
                 return Err(Error::KernelError {
                     reason: format!("ALiBi causal: unsupported dtype {dtype:?}"),
@@ -89,9 +112,7 @@ impl AlibiOps<CudaRuntime> for CudaClient {
             }
         };
 
-        let device = scores.device();
-        let device_index = device.id();
-        let module = kernels::get_or_load_module(self.context(), device_index, ALIBI_MODULE)?;
+        let module = kernels::get_or_load_module(self.context(), device_index, module_const)?;
         let func = kernels::get_kernel_function(&module, kernel_name)?;
 
         let total = (batch_size * num_heads * seq_len_q * seq_len_k) as u32;

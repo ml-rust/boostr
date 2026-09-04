@@ -262,7 +262,15 @@ fn compile_cuda_kernels() {
             true
         ),
         // Position kernels
-        k!("src/ops/cuda/kernels/position", "alibi.cu", "sm_80", true),
+        k!("src/ops/cuda/kernels/position", "alibi.cu", "sm_75", true),
+        // sm_80, not sm_75: bf16 alibi needs `__nv_bfloat16` conversion support.
+        // Split out of alibi.cu so the F32/F16 kernels there load on Turing.
+        k!(
+            "src/ops/cuda/kernels/position",
+            "alibi_bf16.cu",
+            "sm_80",
+            true
+        ),
         k!(
             "src/ops/cuda/kernels/position",
             "alibi_bwd.cu",

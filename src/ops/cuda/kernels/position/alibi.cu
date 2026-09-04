@@ -20,28 +20,10 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#include <cuda_bf16.h>
 #include <stdint.h>
 #include <math.h>
 #include "dtype_traits.cuh"
-
-// ============================================================================
-// ALiBi Bias Computation
-// ============================================================================
-
-// Compute head-specific ALiBi slope
-// Formula: m_h = 2^(-8h/H) where h = head index, H = total heads
-//
-// Example (H=8):
-//   Head 0: m = 2^0 = 1.0
-//   Head 1: m = 2^(-1) = 0.5
-//   Head 2: m = 2^(-2) = 0.25
-//   ...
-//   Head 7: m = 2^(-7) = 0.0078125
-
-__device__ __forceinline__ float get_alibi_slope(int head_idx, int num_heads) {
-    return powf(2.0f, -8.0f * head_idx / (float)num_heads);
-}
+#include "alibi.cuh"
 
 // ============================================================================
 // ALiBi Bias Injection - FP32
@@ -142,46 +124,6 @@ extern "C" __global__ void alibi_add_bias_fp16(
 }
 
 // ============================================================================
-// ALiBi Bias Injection - BF16
-// ============================================================================
-
-__device__ void alibi_add_bias_bf16_impl(
-    __nv_bfloat16* __restrict__ scores,
-    const int batch_size,
-    const int num_heads,
-    const int seq_len_q,
-    const int seq_len_k
-) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int total = batch_size * num_heads * seq_len_q * seq_len_k;
-
-    if (idx >= total) return;
-
-    const int k_pos = idx % seq_len_k;
-    const int q_pos = (idx / seq_len_k) % seq_len_q;
-    const int head_idx = (idx / (seq_len_k * seq_len_q)) % num_heads;
-    const int batch_idx = idx / (seq_len_k * seq_len_q * num_heads);
-
-    const float slope = get_alibi_slope(head_idx, num_heads);
-    const int distance = q_pos - k_pos;
-    const float bias = -slope * abs(distance);
-
-    float score = __bfloat162float(scores[idx]);
-    score += bias;
-    scores[idx] = __float2bfloat16(score);
-}
-
-extern "C" __global__ void alibi_add_bias_bf16(
-    __nv_bfloat16* scores,
-    const int batch_size,
-    const int num_heads,
-    const int seq_len_q,
-    const int seq_len_k
-) {
-    alibi_add_bias_bf16_impl(scores, batch_size, num_heads, seq_len_q, seq_len_k);
-}
-
-// ============================================================================
 // ALiBi Bias + Causal Mask (combined, single pass)
 // ============================================================================
 
@@ -274,50 +216,6 @@ extern "C" __global__ void alibi_add_bias_causal_fp16(
     const int position
 ) {
     alibi_add_bias_causal_fp16_impl(scores, batch_size, num_heads, seq_len_q, seq_len_k, position);
-}
-
-__device__ void alibi_add_bias_causal_bf16_impl(
-    __nv_bfloat16* __restrict__ scores,
-    const int batch_size,
-    const int num_heads,
-    const int seq_len_q,
-    const int seq_len_k,
-    const int position
-) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int total = batch_size * num_heads * seq_len_q * seq_len_k;
-
-    if (idx >= total) return;
-
-    const int k_pos = idx % seq_len_k;
-    const int q_pos = (idx / seq_len_k) % seq_len_q;
-    const int head_idx = (idx / (seq_len_k * seq_len_q)) % num_heads;
-
-    const int abs_q_pos = q_pos + position;
-
-    if (k_pos > abs_q_pos) {
-        scores[idx] = __float2bfloat16(-INFINITY);
-        return;
-    }
-
-    const float slope = get_alibi_slope(head_idx, num_heads);
-    const int distance = abs_q_pos - k_pos;
-    const float bias = -slope * (float)distance;
-
-    float score = __bfloat162float(scores[idx]);
-    score += bias;
-    scores[idx] = __float2bfloat16(score);
-}
-
-extern "C" __global__ void alibi_add_bias_causal_bf16(
-    __nv_bfloat16* scores,
-    const int batch_size,
-    const int num_heads,
-    const int seq_len_q,
-    const int seq_len_k,
-    const int position
-) {
-    alibi_add_bias_causal_bf16_impl(scores, batch_size, num_heads, seq_len_q, seq_len_k, position);
 }
 
 // ============================================================================
@@ -554,7 +452,7 @@ extern "C" __global__ void alibi_add_bias_fp8_e4m3(
     const int q_pos = (idx / seq_len_k) % seq_len_q;
     const int head_idx = (idx / (seq_len_k * seq_len_q)) % num_heads;
 
-    const float slope = powf(2.0f, -8.0f * head_idx / (float)num_heads);
+    const float slope = get_alibi_slope(head_idx, num_heads);
     const int distance = q_pos - k_pos;
     const float alibi_bias = -slope * abs(distance);
 
@@ -578,7 +476,7 @@ extern "C" __global__ void alibi_add_bias_fp8_e5m2(
     const int q_pos = (idx / seq_len_k) % seq_len_q;
     const int head_idx = (idx / (seq_len_k * seq_len_q)) % num_heads;
 
-    const float slope = powf(2.0f, -8.0f * head_idx / (float)num_heads);
+    const float slope = get_alibi_slope(head_idx, num_heads);
     const int distance = q_pos - k_pos;
     const float alibi_bias = -slope * abs(distance);
 

@@ -662,12 +662,8 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q6_k_q8_1_mwr(
             float d8 = __half2float(*(const __half*)(q8_row + q8_idx * 36));
             int u = *(const int*)(q8_row + q8_idx * 36 + 4 + pos);
 
-            int ql4_lo = load_int_ua(ql + ql_base + pos);
-            int ql4_hi = load_int_ua(ql + ql_base + 32 + pos);
-            int qh4    = load_int_ua(qh + qh_base + pos);
-
-            // Branchless Q6_K dequantization
-            int ql4 = use_hi ? ql4_hi : ql4_lo;
+            int ql4 = load_int_ua(ql + ql_base + (use_hi ? 32 : 0) + pos);
+            int qh4 = load_int_ua(qh + qh_base + pos);
             int ql_nibble = (ql4 >> ql_shift) & 0x0F0F0F0F;
             unsigned int qh_bits = (unsigned int)qh4 & qh_mask;
             int qh_positioned = (int)((qh_left >= 0)

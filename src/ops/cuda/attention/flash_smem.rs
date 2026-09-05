@@ -82,28 +82,21 @@ pub(crate) fn set_smem_attribute(func: &CudaFunction, smem_size: usize) -> Resul
         });
     }
 
-    // Extract CUfunction handle (second field of CudaFunction)
-    let cu_function: sys::CUfunction = unsafe {
-        let kernel_ptr = func as *const _ as *const usize;
-        std::ptr::read(kernel_ptr.add(1)) as sys::CUfunction
-    };
-
-    unsafe {
-        let result = sys::cuFuncSetAttribute(
-            cu_function,
-            sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-            smem_size as i32,
-        );
-        if result != sys::CUresult::CUDA_SUCCESS {
-            return Err(Error::KernelError {
-                reason: format!(
-                    "failed to set dynamic shared memory to {}KB: {:?}",
-                    smem_size / 1024,
-                    result
-                ),
-            });
-        }
-    }
+    // cudarc's own accessor. This previously read `CudaFunction`'s private
+    // `cu_function` field by pointer offset; that struct is `repr(Rust)`, so
+    // field order is not guaranteed and a layout change would have silently
+    // yielded a handle to some other kernel rather than failing to compile.
+    func.set_attribute(
+        sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+        smem_size as i32,
+    )
+    .map_err(|e| Error::KernelError {
+        reason: format!(
+            "failed to set dynamic shared memory to {}KB: {:?}",
+            smem_size / 1024,
+            e
+        ),
+    })?;
 
     Ok(())
 }

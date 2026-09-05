@@ -348,6 +348,35 @@ extern "C" __global__ void flash_attention_fp8_kv_128(
     );
 }
 
+// Smaller block size version for 48KB shared memory limit
+extern "C" __global__ void flash_attention_fp8_kv_64_small(
+    const float* Q, const boostr_fp8_e4m3* K_quant, const boostr_fp8_e4m3* V_quant,
+    const float* K_scales, const float* V_scales,
+    float* O, float* L,
+    int batch_size, int num_heads, int seq_len_q, int seq_len_k,
+    float scale, int causal, int per_token_scales
+) {
+    flash_attention_fp8_kv_impl<64, 64, 32>(
+        Q, K_quant, V_quant, K_scales, V_scales, O, L,
+        batch_size, num_heads, seq_len_q, seq_len_k,
+        scale, causal, per_token_scales
+    );
+}
+
+extern "C" __global__ void flash_attention_fp8_kv_128_small(
+    const float* Q, const boostr_fp8_e4m3* K_quant, const boostr_fp8_e4m3* V_quant,
+    const float* K_scales, const float* V_scales,
+    float* O, float* L,
+    int batch_size, int num_heads, int seq_len_q, int seq_len_k,
+    float scale, int causal, int per_token_scales
+) {
+    flash_attention_fp8_kv_impl<128, 32, 32>(
+        Q, K_quant, V_quant, K_scales, V_scales, O, L,
+        batch_size, num_heads, seq_len_q, seq_len_k,
+        scale, causal, per_token_scales
+    );
+}
+
 // ============================================================================
 // Per-Head Quantization (Coarser granularity, faster)
 // ============================================================================

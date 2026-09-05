@@ -2,11 +2,13 @@
 //! FP8-quantized KV cache.
 //!
 //! Kernel: `kv_cache_quant.cu`, `flash_attention_fp8_kv_impl<HEAD_DIM, BLOCK_M,
-//! BLOCK_N>`, entry points `flash_attention_fp8_kv_64`/`_128` (both
-//! BLOCK_M=128, BLOCK_N=64). Q stays F32; only K and V are FP8 E4M3. Unlike
-//! `flash_v2_fp8.cu`, K/V scales are per-token or per-head TENSORS, and the
-//! kernel takes no `num_kv_heads` — it indexes K/V with `num_heads` directly,
-//! so it has no GQA path.
+//! BLOCK_N>`, entry points `flash_attention_fp8_kv_64`/`_128` (large tile,
+//! BLOCK_M=128, BLOCK_N=64) and `_64_small`/`_128_small` (fallback tile for
+//! devices that can't fit the large tile's shared memory). Q stays F32; only
+//! K and V are FP8 E4M3. Unlike `flash_v2_fp8.cu`, K/V scales are per-token or
+//! per-head TENSORS, and the kernel takes no `num_kv_heads` — it indexes K/V
+//! with `num_heads` directly, so it has no GQA path. Same large/`_small`
+//! fallback pattern as `flash_fwd_int4_kv.rs`.
 
 use crate::error::{Error, Result};
 use crate::ops::cuda::kernels::{self, KV_CACHE_QUANT_MODULE};
@@ -19,16 +21,64 @@ use numr::tensor::Tensor;
 
 use super::flash_utils::{device_max_smem, set_smem_attribute};
 
-const BLOCK_M: usize = 128;
-const BLOCK_N: usize = 64;
+/// (BLOCK_M, BLOCK_N) for the large and `_small` kernel variants, keyed by
+/// head_dim. Must stay in sync with the `extern "C"` instantiations in
+/// `kv_cache_quant.cu`.
+fn block_config(head_dim: usize) -> Result<((usize, usize), (usize, usize))> {
+    match head_dim {
+        64 => Ok(((128, 64), (64, 32))),
+        128 => Ok(((128, 64), (32, 32))),
+        other => Err(Error::InvalidArgument {
+            arg: "head_dim",
+            reason: format!("flash_attention_fwd_fp8_kv supports head_dim 64 or 128, got {other}"),
+        }),
+    }
+}
 
 /// Shared memory `flash_attention_fp8_kv_impl` needs:
 /// `(BLOCK_M + 2*BLOCK_N) * HEAD_DIM * sizeof(f32)`. K and V are dequantized
 /// into F32 shared-memory tiles, so the byte size uses `f32`, not the FP8
 /// element size. No bank-conflict `+1` padding, unlike `flash_smem::compute_smem`
 /// — `Q_smem`/`K_smem`/`V_smem` in `kv_cache_quant.cu` pack `HEAD_DIM` tight.
-fn fp8_kv_smem_bytes(head_dim: usize) -> usize {
-    (BLOCK_M + 2 * BLOCK_N) * head_dim * std::mem::size_of::<f32>()
+fn fp8_kv_smem_bytes(block_m: usize, block_n: usize, head_dim: usize) -> usize {
+    (block_m + 2 * block_n) * head_dim * std::mem::size_of::<f32>()
+}
+
+/// Pick the large or `_small` kernel variant for `head_dim`, based on which
+/// fits this device's opt-in shared-memory limit. Returns
+/// `(kernel_name, block_m, block_n, smem_bytes)`.
+fn select_kernel(head_dim: usize) -> Result<(&'static str, usize, usize, usize)> {
+    let ((large_m, large_n), (small_m, small_n)) = block_config(head_dim)?;
+    let max_smem = device_max_smem();
+
+    let large_smem = fp8_kv_smem_bytes(large_m, large_n, head_dim);
+    if large_smem <= max_smem {
+        let name = match head_dim {
+            64 => "flash_attention_fp8_kv_64",
+            128 => "flash_attention_fp8_kv_128",
+            _ => unreachable!("block_config already validated head_dim"),
+        };
+        return Ok((name, large_m, large_n, large_smem));
+    }
+
+    let small_smem = fp8_kv_smem_bytes(small_m, small_n, head_dim);
+    if small_smem <= max_smem {
+        let name = match head_dim {
+            64 => "flash_attention_fp8_kv_64_small",
+            128 => "flash_attention_fp8_kv_128_small",
+            _ => unreachable!("block_config already validated head_dim"),
+        };
+        return Ok((name, small_m, small_n, small_smem));
+    }
+
+    Err(Error::KernelError {
+        reason: format!(
+            "flash_attention_fwd_fp8_kv: head_dim={head_dim} needs at least {}KB shared memory \
+             even for the small tile, device limit is {}KB",
+            small_smem / 1024,
+            max_smem / 1024
+        ),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -64,19 +114,6 @@ pub(super) fn flash_attention_fwd_fp8_kv_impl(
             });
         }
     }
-
-    let kernel_name = match head_dim {
-        64 => "flash_attention_fp8_kv_64",
-        128 => "flash_attention_fp8_kv_128",
-        other => {
-            return Err(Error::InvalidArgument {
-                arg: "head_dim",
-                reason: format!(
-                    "flash_attention_fwd_fp8_kv supports head_dim 64 or 128, got {other}"
-                ),
-            });
-        }
-    };
 
     let q_shape = q.shape();
     if q_shape.len() != 4 {
@@ -144,23 +181,7 @@ pub(super) fn flash_attention_fwd_fp8_kv_impl(
         }
     }
 
-    // Check the shared-memory requirement before launching: the default CUDA
-    // cap is 48KB per block, and both head dims here need more than that
-    // (64KB for head_dim=64, 128KB for head_dim=128), so `set_smem_attribute`
-    // always takes the opt-in path below. Naming the head dim here gives a
-    // clearer error than its generic message would.
-    let smem_size = fp8_kv_smem_bytes(head_dim);
-    let max_smem = device_max_smem();
-    if smem_size > max_smem {
-        return Err(Error::KernelError {
-            reason: format!(
-                "flash_attention_fwd_fp8_kv: head_dim={head_dim} needs {}KB shared memory, \
-                 device limit is {}KB",
-                smem_size / 1024,
-                max_smem / 1024
-            ),
-        });
-    }
+    let (kernel_name, block_m, _block_n, smem_size) = select_kernel(head_dim)?;
 
     let device = q.device();
     let output = Tensor::<CudaRuntime>::empty(
@@ -180,10 +201,10 @@ pub(super) fn flash_attention_fwd_fp8_kv_impl(
     let cfg = LaunchConfig {
         grid_dim: (
             (batch_size * num_heads) as u32,
-            seq_len_q.div_ceil(BLOCK_M) as u32,
+            seq_len_q.div_ceil(block_m) as u32,
             1,
         ),
-        block_dim: (BLOCK_M as u32, 1, 1),
+        block_dim: (block_m as u32, 1, 1),
         shared_mem_bytes: smem_size as u32,
     };
 

@@ -1731,26 +1731,35 @@ fn assert_flash_fwd_fp8_kv_parity(
     use boostr::ops::traits::attention::flash::FlashAttentionOps as _;
     use numr::tensor::Tensor;
 
-    // The kernel stages Q plus two K/V tiles in shared memory:
-    // (BLOCK_M + 2 * BLOCK_N) * head_dim * 4 bytes, with BLOCK_M 128 and
-    // BLOCK_N 64. head_dim 128 needs 128KB, which exceeds what most devices
-    // allow per block. Gate on the device's limit, never on the returned
-    // error — a missing symbol returns an error too.
+    // Dispatch tries the large tile first (BLOCK_M=128, BLOCK_N=64) and
+    // falls back to the `_small` kernel when the large tile does not fit.
+    // Gate on the SMALLEST variant the dispatch could still land on — a
+    // device that only fits `_small` must still run this test, not skip it,
+    // since the fallback path is exactly what this test exists to exercise.
+    // Gate on device capability, never on the returned error: a missing
+    // symbol also returns an error, and matching `KernelError` strings would
+    // make this test skip on the exact defect it checks for.
     #[cfg(feature = "cuda")]
     {
         use numr::runtime::Device;
-        let required = (128 + 2 * 64) * head_dim * 4;
+        // `_64_small` is (block_m=64, block_n=32): (64+2*32)*64*4 = 32KB.
+        // `_128_small` is (block_m=32, block_n=32): (32+2*32)*128*4 = 48KB.
+        let required = match head_dim {
+            64 => (64 + 2 * 32) * 64 * 4,
+            128 => (32 + 2 * 32) * 128 * 4,
+            other => panic!("{label}: unsupported head_dim {other} in test gate"),
+        };
         let available = numr::runtime::cuda::CudaDevice::new(0)
             .profile()
             .shared_mem_per_unit as usize;
         if required > available {
             println!(
-                "!! {label} SKIPPED: needs {required} bytes of shared memory, this device \
-                 allows {available}. NOTHING WAS VERIFIED."
+                "!! {label} SKIPPED: needs {required} bytes of shared memory even for the \
+                 small tile, this device allows {available}. NOTHING WAS VERIFIED."
             );
             eprintln!(
-                "!! {label} SKIPPED: needs {required} bytes of shared memory, this device \
-                 allows {available}. NOTHING WAS VERIFIED."
+                "!! {label} SKIPPED: needs {required} bytes of shared memory even for the \
+                 small tile, this device allows {available}. NOTHING WAS VERIFIED."
             );
             return;
         }
@@ -1846,6 +1855,16 @@ fn test_flash_attention_fwd_fp8_kv_head64_per_token_causal() {
 #[test]
 fn test_flash_attention_fwd_fp8_kv_head128_per_head() {
     assert_flash_fwd_fp8_kv_parity(128, false, false, "flash_fwd_fp8_kv hd128 per-head");
+}
+
+// seq_len_q (6) != seq_len_k (8) in the fixture, so this exercises the
+// BOTTOM-RIGHT causal `key_offset` at head_dim=128 — the `_small` tile
+// this head_dim falls back to on a 48KB device changes BLOCK_M/BLOCK_N,
+// exactly where a masking or offset bug would show up.
+#[cfg(feature = "cuda")]
+#[test]
+fn test_flash_attention_fwd_fp8_kv_head128_per_token_causal() {
+    assert_flash_fwd_fp8_kv_parity(128, true, true, "flash_fwd_fp8_kv hd128 per-token causal");
 }
 
 /// Quantize `[batch, heads, seq_len, head_dim]` F32 data to packed INT4 with

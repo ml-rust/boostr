@@ -5,8 +5,8 @@
 //! BLOCK_M, BLOCK_N>`, entry points `flash_attention_int4_kv_64`/`_128` (large
 //! tile) and `_64_small`/`_128_small` (fallback tile for devices that can't
 //! fit the large tile's shared memory). Q stays F32; K/V are packed INT4 with
-//! per-group asymmetric (scale, zero) in F16. Unlike `flash_fwd_fp8_kv.rs`
-//! (large tile only), this launcher tries the large tile first and falls
+//! per-group asymmetric (scale, zero) in F16. Same large/`_small` fallback
+//! pattern as `flash_fwd_fp8_kv.rs` — tries the large tile first and falls
 //! back to `_small` when it doesn't fit — same module as `append_kv_int4`
 //! (`KV_CACHE_INT4_MODULE`), reused rather than re-registered.
 

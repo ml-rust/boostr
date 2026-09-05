@@ -208,7 +208,12 @@ extern "C" __global__ void clip_scale_f16(
 
 #endif // __CUDA_ARCH__ >= 700
 
-#if __CUDA_ARCH__ >= 800
+// No arch guard. These kernels only CONVERT bf16 and do the arithmetic in
+// float: `__bfloat162float` carries no arch guard and `__float2bfloat16` has
+// an RNE software fallback below sm_80. A `#if __CUDA_ARCH__ >= 800` here
+// emitted nothing at this unit's sm_75 target while `kernel_suffix` still
+// dispatched BF16, so every BF16 caller hit "named symbol not found".
+// Only NATIVE bf16 arithmetic (`__hadd`/`__hmul`/...) would need sm_80.
 
 #include <cuda_bf16.h>
 
@@ -273,4 +278,3 @@ extern "C" __global__ void clip_scale_bf16(
     }
 }
 
-#endif // __CUDA_ARCH__ >= 800

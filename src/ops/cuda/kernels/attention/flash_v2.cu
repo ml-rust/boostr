@@ -2,7 +2,7 @@
 // Based on "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning"
 // Tri Dao, 2023 (https://arxiv.org/abs/2307.08691)
 //
-// Implementation matches PyTorch Flash Attention reference (research/flash-attention-main/)
+// Numerics match the reference implementation published with that paper.
 //
 // Key properties:
 // 1. Padded shared memory strides (eliminates bank conflicts on power-of-2 dimensions)

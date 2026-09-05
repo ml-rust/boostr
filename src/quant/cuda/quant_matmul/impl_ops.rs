@@ -169,19 +169,16 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         // moved down twice — 64 -> 16 when the GEMV gained 8-tile runs, then
         // 16 -> 4 when the GEMM stopped being shared-load-issue bound.
         //
-        // RTX 3060, `q_proj` 2048x2048, minimum nanoseconds, both kernels at
-        // every M:
+        // The mechanism, which is what carries across devices: GEMV cost grows
+        // linearly in M because it re-reads the weights once per row, while the
+        // register-blocked GEMM is nearly flat from M=4 to M=32 because a 4x4
+        // patch per thread leaves it bound by weight streaming rather than by
+        // output count. The two therefore cross at a small M on every encoding.
+        // Leaving the threshold at 16 sent M=8..16 to the slower path.
         //
-        // | M | GEMV Q8 | GEMM Q8 | GEMV Q4 | GEMM Q4 | GEMV Q6 | GEMM Q6 |
-        // |---|---------|---------|---------|---------|---------|---------|
-        // | 1 |  22.7us |       - |  22.6us |       - |  25.9us |       - |
-        // | 4 |  65.4us | 108.7us |  67.9us | 111.1us |  71.0us | 114.7us |
-        // | 8 | 117.3us | 109.3us | 129.0us | 112.1us | 132.9us | 115.6us |
-        // |32 | 419.0us | 114.7us |       - | 115.4us | 550.0us | 119.1us |
-        //
-        // GEMV stays linear in M; the GEMM is flat. They cross between 4 and 8
-        // on every encoding, so 4 goes to GEMV. Leaving this at 16 sent M=8..16
-        // to a path measurably slower than the GEMM.
+        // Re-measure this crossover whenever either kernel changes — a speedup
+        // on one side moves it, and the value below is a measured constant, not
+        // a derived one.
         if let QuantScheme::Tcf(encoding) = weight.scheme() {
             let at = MatmulShape { m, k, n };
             let device_index = activation.device().id();

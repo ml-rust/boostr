@@ -1131,13 +1131,18 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr(
 #define MMQ_BM 128
 #define MMQ_BN 64
 #define MMQ_BK 32
+// The MMQ kernels below pass the block size to `__launch_bounds__` and NOTHING
+// else. A minimum-blocks-per-SM of 1 tells ptxas one resident block suffices,
+// so it spends registers freely and occupancy falls; leaving it out lets ptxas
+// size the register budget per target architecture. Same reasoning as the
+// tensor-core variants in `quant_mmq_mma.cu`.
 #define MMQ_THREADS 256
 #define MMQ_TM 8
 #define MMQ_TN 4
 // Four consecutive k values per int, which is one dp4a operand.
 #define MMQ_K4 (MMQ_BK / 4)
 
-extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q8_0_q8_1(
+extern "C" __global__ __launch_bounds__(MMQ_THREADS) void quant_mmq_q8_0_q8_1(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
@@ -1288,7 +1293,7 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q8_0_q8_1
 // A Q4_K 32-element sub-block has ONE scale and ONE minimum, so both are
 // constant across the staged block and are applied once.
 // ============================================================================
-extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q4_k_q8_1(
+extern "C" __global__ __launch_bounds__(MMQ_THREADS) void quant_mmq_q4_k_q8_1(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
@@ -1435,7 +1440,7 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q4_k_q8_1
 // accumulators and two scales rather than being staged at BK = 16, which would
 // double the barrier count for the same work.
 // ============================================================================
-extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q6_k_q8_1(
+extern "C" __global__ __launch_bounds__(MMQ_THREADS) void quant_mmq_q6_k_q8_1(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,

@@ -1,3 +1,4 @@
+pub mod batched_gemv;
 pub mod fallback;
 pub mod format_dispatch;
 pub mod helpers;

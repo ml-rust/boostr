@@ -108,6 +108,24 @@ fn varlen_bwd_smem(block_m: usize, block_n: usize, head_dim: usize, elem_bytes: 
     (2 * block_m + 2 * block_n) * head_stride * elem_bytes
 }
 
+/// head_dims with a compiled varlen kernel. Forward and backward are
+/// instantiated as a matched set, so one list serves both.
+const SUPPORTED_HEAD_DIMS: [usize; 3] = [64, 128, 256];
+
+/// Reject a head_dim with no compiled varlen kernel. `context` names the
+/// direction, so fwd and bwd share this check without sharing a message.
+///
+/// Kept ahead of [`block_config_with_override`], which reports which TILE did
+/// not fit — a device-capability message, wrong for a head_dim never compiled.
+pub(super) fn validate_head_dim(head_dim: usize, context: &str) -> Result<()> {
+    if SUPPORTED_HEAD_DIMS.contains(&head_dim) {
+        return Ok(());
+    }
+    Err(Error::KernelError {
+        reason: format!("{context}: unsupported head_dim {head_dim}, only 64/128/256"),
+    })
+}
+
 /// Pick the varlen attention tile that fits this device's opt-in shared
 /// memory. Returns `(block_m, block_n, variant)`. `varlen_attention.rs`'s
 /// production path calls this with `override_large: None`; the

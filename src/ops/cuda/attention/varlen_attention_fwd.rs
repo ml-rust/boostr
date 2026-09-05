@@ -13,7 +13,9 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::flash::impl_ops::set_smem_attribute;
-use super::varlen_attention_block_config::{block_config_with_override, fwd_smem_size};
+use super::varlen_attention_block_config::{
+    block_config_with_override, fwd_smem_size, validate_head_dim,
+};
 use crate::ops::cuda::kernels::{self, VARLEN_ATTENTION_FWD_FP16_MODULE, VARLEN_ATTENTION_MODULE};
 
 /// Production entry point: normal capability-gated tile selection (no override).
@@ -111,11 +113,7 @@ fn varlen_attention_fwd_impl_inner(
     causal: bool,
     force_large: Option<bool>,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
-    if head_dim != 64 && head_dim != 128 && head_dim != 256 {
-        return Err(Error::KernelError {
-            reason: format!("varlen attention: unsupported head_dim {head_dim}, only 64/128/256"),
-        });
-    }
+    validate_head_dim(head_dim, "varlen attention")?;
 
     let dtype = q.dtype();
     let dtype_suffix = match dtype {

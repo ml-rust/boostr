@@ -71,6 +71,22 @@ pub trait KvCacheQuantOps<R: Runtime> {
         output_dtype: numr::dtype::DType,
     ) -> Result<Tensor<R>>;
 
+    /// Quantize KV cache to FP8 (E4M3) with a single tensor-wide scale
+    ///
+    /// One scale covers the whole tensor, unlike `quantize_kv_fp8_per_token`
+    /// and `quantize_kv_fp8_per_head`. CUDA's kernel is F16-input only.
+    /// Returns `(quantized, scale)` where `scale` is a 1-element F32 tensor.
+    fn quantize_kv_fp8_per_tensor(&self, input: &Tensor<R>) -> Result<(Tensor<R>, Tensor<R>)>;
+
+    /// Dequantize FP8 KV cache back to `output_dtype` using a single
+    /// tensor-wide `scale`. CUDA's kernel is F16-output only.
+    fn dequantize_kv_fp8_per_tensor(
+        &self,
+        quantized: &Tensor<R>,
+        scale: &Tensor<R>,
+        output_dtype: numr::dtype::DType,
+    ) -> Result<Tensor<R>>;
+
     /// Quantize KV cache to INT4 with per-group asymmetric scaling
     ///
     /// Returns `(packed_int4, scales, zeros)`.

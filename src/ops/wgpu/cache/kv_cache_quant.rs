@@ -15,8 +15,6 @@ const DEQUANT_FP8_SRC: &str = include_str!("../shaders/cache/kv_cache_dequant_fp
 pub(super) const QUANT_INT4_SRC: &str = include_str!("../shaders/cache/kv_cache_quant_int4.wgsl");
 pub(super) const DEQUANT_INT4_SRC: &str =
     include_str!("../shaders/cache/kv_cache_dequant_int4.wgsl");
-const QUANT_INT8_SRC: &str = include_str!("../shaders/cache/kv_cache_quant_int8.wgsl");
-const DEQUANT_INT8_SRC: &str = include_str!("../shaders/cache/kv_cache_dequant_int8.wgsl");
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -244,6 +242,28 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         Ok(output)
     }
 
+    fn quantize_kv_fp8_per_tensor(
+        &self,
+        _input: &Tensor<WgpuRuntime>,
+    ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
+        Err(Error::KernelError {
+            reason: "quantize_kv_fp8_per_tensor not implemented on WebGPU: no WGSL shader for it"
+                .into(),
+        })
+    }
+
+    fn dequantize_kv_fp8_per_tensor(
+        &self,
+        _quantized: &Tensor<WgpuRuntime>,
+        _scale: &Tensor<WgpuRuntime>,
+        _output_dtype: DType,
+    ) -> Result<Tensor<WgpuRuntime>> {
+        Err(Error::KernelError {
+            reason: "dequantize_kv_fp8_per_tensor not implemented on WebGPU: no WGSL shader for it"
+                .into(),
+        })
+    }
+
     fn quantize_kv_int4(
         &self,
         input: &Tensor<WgpuRuntime>,
@@ -286,43 +306,7 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         num_tokens: usize,
         head_dim: usize,
     ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
-        validate_f32(input, "quantize_kv_int8")?;
-
-        let quantized =
-            Tensor::<WgpuRuntime>::zeros(&[num_tokens, head_dim], DType::F32, input.device())?;
-        let scales = Tensor::<WgpuRuntime>::zeros(&[num_tokens], DType::F32, input.device())?;
-
-        let input_buf = get_buffer(input.storage().ptr()).ok_or_else(|| Error::KernelError {
-            reason: "input buffer not found".into(),
-        })?;
-        let quant_buf =
-            get_buffer(quantized.storage().ptr()).ok_or_else(|| Error::KernelError {
-                reason: "quantized buffer not found".into(),
-            })?;
-        let scales_buf = get_buffer(scales.storage().ptr()).ok_or_else(|| Error::KernelError {
-            reason: "scales buffer not found".into(),
-        })?;
-
-        let params = QuantParams {
-            num_tokens: num_tokens as u32,
-            head_dim: head_dim as u32,
-            group_size: 0,
-            mode: 1,
-        };
-        let params_buf = create_params_buf(self, &params);
-
-        // Shader bindings: 0=input(read), 1=output(rw), 2=scales(rw)
-        dispatch(
-            self,
-            QUANT_INT8_SRC,
-            "quantize_kv_int8_f32",
-            &[&input_buf, &quant_buf, &scales_buf, &params_buf],
-            3,
-            1,
-            (num_tokens as u32).div_ceil(256),
-        )?;
-
-        Ok((quantized, scales))
+        super::kv_cache_int8::quantize_kv_int8_impl(self, input, num_tokens, head_dim)
     }
 
     fn dequantize_kv_int8(
@@ -332,43 +316,7 @@ impl KvCacheQuantOps<WgpuRuntime> for WgpuClient {
         num_tokens: usize,
         head_dim: usize,
     ) -> Result<Tensor<WgpuRuntime>> {
-        validate_f32(quantized, "dequantize_kv_int8")?;
-        validate_f32(scales, "dequantize_kv_int8")?;
-
-        let output =
-            Tensor::<WgpuRuntime>::zeros(&[num_tokens, head_dim], DType::F32, quantized.device())?;
-
-        let quant_buf =
-            get_buffer(quantized.storage().ptr()).ok_or_else(|| Error::KernelError {
-                reason: "quantized buffer not found".into(),
-            })?;
-        let scales_buf = get_buffer(scales.storage().ptr()).ok_or_else(|| Error::KernelError {
-            reason: "scales buffer not found".into(),
-        })?;
-        let out_buf = get_buffer(output.storage().ptr()).ok_or_else(|| Error::KernelError {
-            reason: "output buffer not found".into(),
-        })?;
-
-        let params = QuantParams {
-            num_tokens: num_tokens as u32,
-            head_dim: head_dim as u32,
-            group_size: 0,
-            mode: 1,
-        };
-        let params_buf = create_params_buf(self, &params);
-
-        // Shader bindings: 0=input(read), 1=scales(read), 2=output(rw)
-        dispatch(
-            self,
-            DEQUANT_INT8_SRC,
-            "dequantize_kv_int8_f32",
-            &[&quant_buf, &scales_buf, &out_buf, &params_buf],
-            3,
-            2,
-            (num_tokens as u32).div_ceil(256),
-        )?;
-
-        Ok(output)
+        super::kv_cache_int8::dequantize_kv_int8_impl(self, quantized, scales, num_tokens, head_dim)
     }
 
     fn kv_fp8_bwd_per_tensor(

@@ -156,6 +156,141 @@ fn test_quantize_dequantize_fp8_per_head_roundtrip_parity() {
     });
 }
 
+// Covers quantize_kv_fp8_per_tensor/dequantize_kv_fp8_per_tensor: a single
+// tensor-wide scale instead of one scale per token or per head.
+#[test]
+fn test_quantize_dequantize_fp8_per_tensor_roundtrip_parity() {
+    let (cpu_client, cpu_device) = setup_cpu();
+    let shape = [4usize, 32usize];
+    let input = det_tensor(&shape, &cpu_device);
+    let orig = input.to_vec::<f32>();
+
+    let (cpu_q, cpu_s) = cpu_client.quantize_kv_fp8_per_tensor(&input).unwrap();
+    assert_eq!(cpu_q.dtype(), numr::dtype::DType::FP8E4M3);
+    assert_eq!(cpu_s.shape(), &[1]);
+    let cpu_deq = cpu_client
+        .dequantize_kv_fp8_per_tensor(&cpu_q, &cpu_s, numr::dtype::DType::F32)
+        .unwrap();
+    let cpu_deq_vec = cpu_deq.to_vec::<f32>();
+
+    // FP8 e4m3 keeps 3 mantissa bits, a relative step of ~1/8 near any
+    // representable value; 15% covers that plus scale-rounding slop. The
+    // error is relative (with an absolute floor for values near zero), not
+    // a large flat absolute tolerance.
+    let max_rel_err: f32 = orig
+        .iter()
+        .zip(cpu_deq_vec.iter())
+        .map(|(a, b)| (a - b).abs() / a.abs().max(1e-6))
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_rel_err < 0.15,
+        "CPU FP8 per-tensor roundtrip relative error too high: {max_rel_err}"
+    );
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
+        use numr::dtype::DType;
+        use numr::tensor::Tensor;
+
+        // CUDA's per-tensor kernel is F16-input/output only; build F32 then
+        // narrow (`half::f16` is not a numr `Element`, so `from_slice`
+        // cannot build an F16 tensor directly).
+        let inp_f32 =
+            Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(&orig, &shape, &cuda_device)
+                .unwrap();
+        let inp_f16 = inp_f32.to_dtype(DType::F16).expect("cast fixture to F16");
+
+        let (q, s) = cuda_client
+            .quantize_kv_fp8_per_tensor(&inp_f16)
+            .expect("quantize_kv_fp8_per_tensor must succeed on CUDA");
+        assert_eq!(q.dtype(), DType::FP8E4M3);
+        assert_eq!(s.shape(), &[1]);
+        let deq = cuda_client
+            .dequantize_kv_fp8_per_tensor(&q, &s, DType::F16)
+            .expect("dequantize_kv_fp8_per_tensor must succeed on CUDA")
+            .to_dtype(DType::F32)
+            .expect("cast F16 output to F32 for comparison");
+
+        assert_parity_f32_tol(
+            &deq.to_vec::<f32>(),
+            &cpu_deq_vec,
+            "fp8 per-tensor roundtrip CUDA vs CPU",
+            0.1,  // 10% relative — FP8 has only 3 mantissa bits
+            0.01, // absolute tolerance for values near zero
+        );
+    });
+}
+
+// Regression test for the multi-block per-tensor quantize bug: the original
+// kernel wrote `scale` from block 0's local max only (`blockIdx.x == 0`),
+// silently dropping every other block's contribution. The CUDA launcher's
+// block size is 256 threads, so 1200 elements (not a multiple of 256) force
+// 5 blocks (`ceil(1200 / 256)`) with a ragged last block, and the tensor is
+// built so its max-abs element sits outside block 0 — a build that used the
+// buggy single-block reduction would compute a scale from the wrong (too
+// small) max and this test would fail.
+#[test]
+fn test_quantize_kv_fp8_per_tensor_multi_block() {
+    let shape = [4usize, 300usize]; // 1200 elements, 5 blocks of 256
+    let mut data: Vec<f32> = (0..1200).map(|i| (i as f32 * 0.037).sin() * 0.4).collect();
+    // Force the global max into the last (ragged) block, which the buggy
+    // block-0-only implementation would never see.
+    let last = data.len() - 1;
+    data[last] = 6.0;
+
+    #[cfg(feature = "cuda")]
+    with_cuda_backend(|cuda_client, cuda_device| {
+        use boostr::ops::traits::cache::kv_cache_quant::KvCacheQuantOps as _;
+        use numr::dtype::DType;
+        use numr::tensor::Tensor;
+
+        let inp_f32 =
+            Tensor::<numr::runtime::cuda::CudaRuntime>::from_slice(&data, &shape, &cuda_device)
+                .unwrap();
+        let inp_f16 = inp_f32.to_dtype(DType::F16).expect("cast fixture to F16");
+        // Expected max-abs at F16 precision, matching what the kernel
+        // actually reduces over.
+        let f16_vals = inp_f16
+            .to_dtype(DType::F32)
+            .expect("cast back for reference")
+            .to_vec::<f32>();
+        let expected_max_abs = f16_vals.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+        let expected_scale = 448.0f32 / expected_max_abs;
+
+        let (q, s) = cuda_client
+            .quantize_kv_fp8_per_tensor(&inp_f16)
+            .expect("quantize_kv_fp8_per_tensor must succeed on CUDA");
+        let scale_val = s.to_vec::<f32>()[0];
+        assert_parity_f32_tol(
+            &[scale_val],
+            &[expected_scale],
+            "fp8 per-tensor multi-block scale (whole-tensor max, not block 0's)",
+            1e-3,
+            1e-6,
+        );
+
+        let deq = cuda_client
+            .dequantize_kv_fp8_per_tensor(&q, &s, DType::F16)
+            .expect("dequantize_kv_fp8_per_tensor must succeed on CUDA")
+            .to_dtype(DType::F32)
+            .expect("cast F16 output to F32 for comparison");
+        let deq_vec = deq.to_vec::<f32>();
+
+        let max_rel_err: f32 = f16_vals
+            .iter()
+            .zip(deq_vec.iter())
+            .map(|(a, b)| (a - b).abs() / a.abs().max(1e-3))
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_rel_err < 0.2,
+            "fp8 per-tensor multi-block roundtrip relative error too high: {max_rel_err}"
+        );
+    });
+    #[cfg(not(feature = "cuda"))]
+    let _ = (&shape, &data);
+}
+
 #[test]
 fn test_quantize_dequantize_int4_roundtrip_parity() {
     let (cpu_client, cpu_device) = setup_cpu();

@@ -7,6 +7,13 @@
 // Scale convention: `f32_to_fp8_e4m3_raw` does `val * scale` and
 // `fp8_e4m3_to_f32` does `fp8_val / scale`, so a stored FP8 scale is
 // 448/max_abs, where 448 is the E4M3 maximum. INT8 stores max_abs/127.
+//
+// kv_cache_fp8.cu is canonical for per-token FP8 quantize/dequantize
+// dispatch; this file's fp16/bf16 quantize entry points below are
+// unreachable duplicates. This file's quantize_kv_fp8_per_token_fp32 has no
+// dispatch site at all: no dequantize_kv_fp8_per_token_fp32 kernel exists
+// anywhere (only fp16/bf16 dequant, in kv_cache_fp8.cu), so a real fp32
+// quantize path would have no matching-precision dequant to pair with.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -88,7 +95,8 @@ __device__ __forceinline__ void quantize_kv_fp8_per_token_impl(
     }
 }
 
-// FP32 quantization
+// Unwired: no dequantize_kv_fp8_per_token_fp32 kernel exists anywhere, so
+// nothing can dequantize this at matching precision. See the file header.
 extern "C" __global__ void quantize_kv_fp8_per_token_fp32(
     const float* input, boostr_fp8_e4m3* output, float* scales,
     int num_tokens, int head_dim
@@ -96,7 +104,9 @@ extern "C" __global__ void quantize_kv_fp8_per_token_fp32(
     quantize_kv_fp8_per_token_impl<float>(input, output, scales, num_tokens, head_dim);
 }
 
-// FP16 quantization
+// Superseded: kv_cache_fp8.cu's quantize_kv_fp8_per_token_fp16 is the
+// dispatched copy (that module is canonical for per-token FP8). This copy
+// is behaviourally identical but unreachable from Rust; kept, not deleted.
 extern "C" __global__ void quantize_kv_fp8_per_token_fp16(
     const __half* input, boostr_fp8_e4m3* output, float* scales,
     int num_tokens, int head_dim
@@ -104,7 +114,10 @@ extern "C" __global__ void quantize_kv_fp8_per_token_fp16(
     quantize_kv_fp8_per_token_impl<__half>(input, output, scales, num_tokens, head_dim);
 }
 
-// BF16 quantization
+// Superseded: kv_cache_fp8.cu's quantize_kv_fp8_per_token_bf16 is the
+// dispatched copy, for the same reason as quantize_kv_fp8_per_token_fp16
+// above. This copy is behaviourally identical but unreachable from Rust;
+// kept, not deleted.
 extern "C" __global__ void quantize_kv_fp8_per_token_bf16(
     const __nv_bfloat16* input, boostr_fp8_e4m3* output, float* scales,
     int num_tokens, int head_dim

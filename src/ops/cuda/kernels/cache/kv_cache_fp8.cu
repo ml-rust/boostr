@@ -10,6 +10,12 @@
 //
 // The conversion helpers use hardware FP8 from sm_89 and a bit-exact software
 // encoder below it, so this unit compiles and runs correctly at sm_75.
+//
+// This file is canonical for per-token FP8 quantize/dequantize dispatch.
+// kv_cache_quant.cu duplicates the fp16 and bf16 quantize entry points and
+// additionally has an fp32 quantize kernel with no matching fp32 dequant
+// anywhere; see the Rust dispatch in cuda/cache/kv_cache_quant.rs for why
+// that fp32 kernel stays unwired.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -21,28 +27,36 @@
 // Per-Tensor Quantization (Global scale for entire KV cache)
 // ============================================================================
 
-// Quantize FP16 KV cache to FP8 with per-tensor scaling
-// Scale is computed as: scale = max(abs(tensor)) / max_fp8_value
-//
-// Args:
-//   kv_fp8: Output FP8 tensor [batch, num_kv_heads, seq_len, head_dim]
-//   kv_fp16: Input FP16 tensor [batch, num_kv_heads, seq_len, head_dim]
-//   scale: Output scale factor (single value for entire tensor)
-//   total_elements: batch * num_kv_heads * seq_len * head_dim
+// Per-tensor quantization needs a max-abs reduced over the WHOLE tensor
+// before any element can be quantized, but CUDA has no grid-wide barrier
+// inside a single kernel. A prior version tried to do the reduction and the
+// quantize pass in one launch, gated by `blockIdx.x == 0`: that silently
+// discarded every block's local max except block 0's, and even for block 0
+// the `__syncthreads()` between the two passes only fences within a block,
+// giving other blocks no ordering guarantee against block 0's write. This
+// is a three-kernel pipeline instead:
+//   1. `quantize_kv_fp8_per_tensor_fp16_find_max` — every block folds its
+//      slice to a local max, then contributes via `atomicMax` into `scale`
+//      (reinterpreted as `int`; ordering over non-negative floats matches
+//      ordering over their bit patterns, the same trick as
+//      `awq_act_scale_f32` in quantization/calibration.cu). The caller MUST
+//      zero-initialize `scale` first — an atomic max over garbage is a
+//      silent wrong-answer bug.
+//   2. `quantize_kv_fp8_per_tensor_fp16_finalize_scale` — single thread,
+//      converts the reduced max-abs into the stored scale `448/max_abs`.
+//      Stream ordering between sequential launches guarantees stage 1 has
+//      fully finished before this runs.
+//   3. `quantize_kv_fp8_per_tensor_fp16` — quantizes every element with the
+//      now-finalized `*scale`.
 
-extern "C" __global__ void quantize_kv_fp8_per_tensor_fp16(
-    boostr_fp8_e4m3* __restrict__ kv_fp8,
+// Stage 1: block-local max-abs, folded into a global max via atomicMax.
+extern "C" __global__ void quantize_kv_fp8_per_tensor_fp16_find_max(
     const __half* __restrict__ kv_fp16,
     float* __restrict__ scale,
     const int total_elements
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Two-pass algorithm:
-    // Pass 1: Find max absolute value (parallel reduction)
-    // Pass 2: Quantize with computed scale
-
-    // Shared memory for reduction
     __shared__ float smem_max[256];
 
     float local_max = 0.0f;
@@ -50,7 +64,6 @@ extern "C" __global__ void quantize_kv_fp8_per_tensor_fp16(
         local_max = fabsf(__half2float(kv_fp16[idx]));
     }
 
-    // Block-level reduction to find max
     smem_max[threadIdx.x] = local_max;
     __syncthreads();
 
@@ -61,19 +74,40 @@ extern "C" __global__ void quantize_kv_fp8_per_tensor_fp16(
         __syncthreads();
     }
 
-    // First thread of each block writes to global atomicMax
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        // FP8 E4M3 max value is ~448 (before normalization)
-        float max_val = smem_max[0];
-        *scale = (max_val > 0.0f) ? (448.0f / max_val) : 1.0f;
+    if (threadIdx.x == 0) {
+        int* scale_int = (int*)scale;
+        atomicMax(scale_int, __float_as_int(smem_max[0]));
     }
-    __syncthreads();
+}
 
-    // Pass 2: Quantize with computed scale
-    if (idx < total_elements) {
-        float val = __half2float(kv_fp16[idx]);
-        kv_fp8[idx] = boostr_fp8_e4m3(f32_to_fp8_e4m3_raw(val, *scale));
-    }
+// Stage 2: convert the reduced max-abs (still raw bits in `scale` from stage
+// 1) into the stored scale convention `448/max_abs`.
+extern "C" __global__ void quantize_kv_fp8_per_tensor_fp16_finalize_scale(
+    float* __restrict__ scale
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    float max_val = *scale;
+    *scale = (max_val > 0.0f) ? (448.0f / max_val) : 1.0f;
+}
+
+// Stage 3: quantize every element with the finalized `*scale`.
+//
+// Args:
+//   kv_fp8: Output FP8 tensor [batch, num_kv_heads, seq_len, head_dim]
+//   kv_fp16: Input FP16 tensor [batch, num_kv_heads, seq_len, head_dim]
+//   scale: Finalized scale factor (single value for entire tensor)
+//   total_elements: batch * num_kv_heads * seq_len * head_dim
+extern "C" __global__ void quantize_kv_fp8_per_tensor_fp16(
+    boostr_fp8_e4m3* __restrict__ kv_fp8,
+    const __half* __restrict__ kv_fp16,
+    const float* __restrict__ scale,
+    const int total_elements
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_elements) return;
+
+    float val = __half2float(kv_fp16[idx]);
+    kv_fp8[idx] = boostr_fp8_e4m3(f32_to_fp8_e4m3_raw(val, *scale));
 }
 
 // Dequantize FP8 KV cache to FP16 with per-tensor scaling

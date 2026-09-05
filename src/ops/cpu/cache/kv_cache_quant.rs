@@ -109,6 +109,27 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
         }
     }
 
+    fn quantize_kv_fp8_per_tensor(
+        &self,
+        input: &Tensor<CpuRuntime>,
+    ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+        super::kv_cache_fp8_per_tensor::quantize_kv_fp8_per_tensor_impl(self, input)
+    }
+
+    fn dequantize_kv_fp8_per_tensor(
+        &self,
+        quantized: &Tensor<CpuRuntime>,
+        scale: &Tensor<CpuRuntime>,
+        output_dtype: DType,
+    ) -> Result<Tensor<CpuRuntime>> {
+        super::kv_cache_fp8_per_tensor::dequantize_kv_fp8_per_tensor_impl(
+            self,
+            quantized,
+            scale,
+            output_dtype,
+        )
+    }
+
     fn quantize_kv_int4(
         &self,
         input: &Tensor<CpuRuntime>,
@@ -291,93 +312,8 @@ impl KvCacheQuantOps<CpuRuntime> for CpuClient {
     }
 }
 
+// Split into `kv_cache_quant_tests.rs` to keep this file under the crate's
+// `cpu/*.rs` line-count limit — still ordinary same-crate unit tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_utils::cpu_setup;
-
-    #[test]
-    fn test_fp8_roundtrip() {
-        let (client, dev) = cpu_setup();
-        let num_tokens = 4;
-        let head_dim = 8;
-        let data: Vec<f32> = (0..num_tokens * head_dim)
-            .map(|i| (i as f32 * 0.3).sin())
-            .collect();
-        let input = Tensor::<CpuRuntime>::from_slice(&data, &[num_tokens, head_dim], &dev).unwrap();
-
-        let (q, s) = client
-            .quantize_kv_fp8_per_token(&input, num_tokens, head_dim)
-            .unwrap();
-        let output = client
-            .dequantize_kv_fp8_per_token(&q, &s, num_tokens, head_dim, DType::F32)
-            .unwrap();
-
-        let out_data = output.to_vec::<f32>();
-        let max_err: f32 = data
-            .iter()
-            .zip(out_data.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-        assert!(max_err < 0.1, "FP8 roundtrip error too high: {max_err}");
-    }
-
-    #[test]
-    fn test_int4_roundtrip() {
-        let (client, dev) = cpu_setup();
-        let num_tokens = 2;
-        let head_dim = 8;
-        let data: Vec<f32> = (0..num_tokens * head_dim).map(|i| i as f32 * 0.1).collect();
-        let input = Tensor::<CpuRuntime>::from_slice(&data, &[num_tokens, head_dim], &dev).unwrap();
-
-        let (p, s, z) = client
-            .quantize_kv_int4(&input, num_tokens, head_dim, Int4GroupSize::Group32)
-            .unwrap();
-        assert_eq!(p.shape(), &[num_tokens, head_dim / 2]);
-
-        let output = client
-            .dequantize_kv_int4(
-                &p,
-                &s,
-                &z,
-                num_tokens,
-                head_dim,
-                Int4GroupSize::Group32,
-                DType::F32,
-            )
-            .unwrap();
-        let out_data = output.to_vec::<f32>();
-        let max_err: f32 = data
-            .iter()
-            .zip(out_data.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-        assert!(max_err < 0.2, "INT4 roundtrip error too high: {max_err}");
-    }
-
-    #[test]
-    fn test_int8_roundtrip() {
-        let (client, dev) = cpu_setup();
-        let num_tokens = 4;
-        let head_dim = 8;
-        let data: Vec<f32> = (0..num_tokens * head_dim)
-            .map(|i| (i as f32 * 0.5).sin())
-            .collect();
-        let input = Tensor::<CpuRuntime>::from_slice(&data, &[num_tokens, head_dim], &dev).unwrap();
-
-        let (q, s) = client
-            .quantize_kv_int8(&input, num_tokens, head_dim)
-            .unwrap();
-        let output = client
-            .dequantize_kv_int8(&q, &s, num_tokens, head_dim)
-            .unwrap();
-
-        let out_data = output.to_vec::<f32>();
-        let max_err: f32 = data
-            .iter()
-            .zip(out_data.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-        assert!(max_err < 0.02, "INT8 roundtrip error too high: {max_err}");
-    }
-}
+#[path = "kv_cache_quant_tests.rs"]
+mod tests;

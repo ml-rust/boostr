@@ -22,8 +22,15 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         num_tokens: usize,
         head_dim: usize,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
+        // kv_cache_quant.cu's quantize_kv_fp8_per_token_fp32 could quantize
+        // F32 input directly, at full precision. It stays unused here: no
+        // matching dequantize_kv_fp8_per_token_fp32 kernel exists anywhere
+        // (only fp16/bf16 dequant, in kv_cache_fp8.cu), so a genuine fp32
+        // quantize would produce output only readable back through a
+        // different-precision dequant path. Casting to F16 first keeps
+        // quantize and dequant symmetric at the same representable
+        // precision.
         let input_to_use = if input.dtype() == DType::F32 {
-            // Cast F32 to F16 if needed (CUDA FP8 kernel only supports F16/BF16 input)
             let vars = Var::new(input.clone(), false);
             let cast_var =
                 numr::autograd::var_cast(&vars, DType::F16, self).map_err(Error::Numr)?;
@@ -218,6 +225,27 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         }
     }
 
+    fn quantize_kv_fp8_per_tensor(
+        &self,
+        input: &Tensor<CudaRuntime>,
+    ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
+        super::kv_cache_fp8_per_tensor::quantize_kv_fp8_per_tensor_impl(self, input)
+    }
+
+    fn dequantize_kv_fp8_per_tensor(
+        &self,
+        quantized: &Tensor<CudaRuntime>,
+        scale: &Tensor<CudaRuntime>,
+        output_dtype: DType,
+    ) -> Result<Tensor<CudaRuntime>> {
+        super::kv_cache_fp8_per_tensor::dequantize_kv_fp8_per_tensor_impl(
+            self,
+            quantized,
+            scale,
+            output_dtype,
+        )
+    }
+
     fn quantize_kv_int4(
         &self,
         input: &Tensor<CudaRuntime>,
@@ -260,53 +288,7 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         num_tokens: usize,
         head_dim: usize,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
-        let dtype = input.dtype();
-        let dtype_suffix = match dtype {
-            DType::F32 => "fp32",
-            DType::F16 => "fp16",
-            DType::BF16 => "bf16",
-            _ => {
-                return Err(Error::KernelError {
-                    reason: format!("INT8 quant: unsupported dtype {dtype:?}"),
-                });
-            }
-        };
-
-        let kernel_name = format!("quantize_kv_int8_per_token_{dtype_suffix}");
-        let device = input.device();
-        let device_index = device.id();
-        let module =
-            kernels::get_or_load_module(self.context(), device_index, KV_CACHE_QUANT_MODULE)?;
-        let func = kernels::get_kernel_function(&module, &kernel_name)?;
-
-        let quantized = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], DType::I8, device)?;
-        let scales = Tensor::<CudaRuntime>::empty(&[num_tokens], DType::F32, device)?;
-
-        let cfg = LaunchConfig {
-            grid_dim: (num_tokens as u32, 1, 1),
-            block_dim: (256, 1, 1),
-            shared_mem_bytes: 256 * 4,
-        };
-
-        let i_ptr = input.ptr();
-        let q_ptr = quantized.ptr();
-        let s_ptr = scales.ptr();
-        let nt_i32 = num_tokens as i32;
-        let hd_i32 = head_dim as i32;
-
-        unsafe {
-            let mut builder = self.stream().launch_builder(&func);
-            builder.arg(&i_ptr);
-            builder.arg(&q_ptr);
-            builder.arg(&s_ptr);
-            builder.arg(&nt_i32);
-            builder.arg(&hd_i32);
-            builder.launch(cfg).map_err(|e| Error::KernelError {
-                reason: format!("INT8 quant failed: {e:?}"),
-            })?;
-        }
-
-        Ok((quantized, scales))
+        super::kv_cache_int8::quantize_kv_int8_impl(self, input, num_tokens, head_dim)
     }
 
     fn dequantize_kv_int8(
@@ -316,39 +298,7 @@ impl KvCacheQuantOps<CudaRuntime> for CudaClient {
         num_tokens: usize,
         head_dim: usize,
     ) -> Result<Tensor<CudaRuntime>> {
-        let device = quantized.device();
-        let device_index = device.id();
-        let module =
-            kernels::get_or_load_module(self.context(), device_index, KV_CACHE_QUANT_MODULE)?;
-        let func = kernels::get_kernel_function(&module, "dequantize_kv_int8_per_token_fp32")?;
-
-        let output = Tensor::<CudaRuntime>::empty(&[num_tokens, head_dim], DType::F32, device)?;
-
-        let cfg = LaunchConfig {
-            grid_dim: (num_tokens as u32, 1, 1),
-            block_dim: (256, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        let q_ptr = quantized.ptr();
-        let o_ptr = output.ptr();
-        let s_ptr = scales.ptr();
-        let nt_i32 = num_tokens as i32;
-        let hd_i32 = head_dim as i32;
-
-        unsafe {
-            let mut builder = self.stream().launch_builder(&func);
-            builder.arg(&q_ptr);
-            builder.arg(&o_ptr);
-            builder.arg(&s_ptr);
-            builder.arg(&nt_i32);
-            builder.arg(&hd_i32);
-            builder.launch(cfg).map_err(|e| Error::KernelError {
-                reason: format!("INT8 dequant failed: {e:?}"),
-            })?;
-        }
-
-        Ok(output)
+        super::kv_cache_int8::dequantize_kv_int8_impl(self, quantized, scales, num_tokens, head_dim)
     }
 
     fn kv_fp8_bwd_per_tensor(

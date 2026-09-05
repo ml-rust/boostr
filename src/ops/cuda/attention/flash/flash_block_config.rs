@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use super::flash_smem::{compute_bwd_smem, compute_smem, device_max_smem};
 
 /// Block config of the unsuffixed `flash_attention_bwd_{head_dim}_{dtype}` kernels.
-/// Must stay in sync with the `extern "C"` instantiations in `flash_v2_bwd.cu`.
+/// Sync with `flash_v2_bwd.cu` is enforced by `tests/flash_bwd_block_config_sync.rs`.
 fn bwd_block_config_large(head_dim: usize) -> Option<(usize, usize)> {
     match head_dim {
         32 => Some((128, 128)),
@@ -22,7 +22,7 @@ fn bwd_block_config_large(head_dim: usize) -> Option<(usize, usize)> {
 }
 
 /// Block config of the `flash_attention_bwd_{head_dim}_sm_{dtype}` kernels.
-/// Must stay in sync with the `extern "C"` instantiations in `flash_v2_bwd.cu`.
+/// Sync with `flash_v2_bwd.cu` is enforced by `tests/flash_bwd_block_config_sync.rs`.
 ///
 /// Sized so the F32 backward fits in 64KB, the smallest opt-in limit on GPUs that
 /// support this code path; F16/BF16 need half that and FP8 a quarter.
@@ -36,6 +36,22 @@ fn bwd_block_config_small(head_dim: usize) -> Option<(usize, usize)> {
         256 => Some((16, 16)),
         _ => None,
     }
+}
+
+/// Test-only accessor for [`bwd_block_config_large`], so
+/// `tests/flash_bwd_block_config_sync.rs` can assert this table matches the
+/// `FLASH_BWD_ENTRY` instantiations in `flash_v2_bwd.cu` without launching a
+/// kernel or requiring a GPU.
+#[doc(hidden)]
+pub fn bwd_block_config_large_for_test(head_dim: usize) -> Option<(usize, usize)> {
+    bwd_block_config_large(head_dim)
+}
+
+/// Test-only accessor for [`bwd_block_config_small`] — see
+/// [`bwd_block_config_large_for_test`].
+#[doc(hidden)]
+pub fn bwd_block_config_small_for_test(head_dim: usize) -> Option<(usize, usize)> {
+    bwd_block_config_small(head_dim)
 }
 
 /// Pick the backward block config that fits this device's opt-in shared memory.

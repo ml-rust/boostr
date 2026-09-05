@@ -24,6 +24,13 @@
 // all 32 banks.
 #define MMQ_SMEM_PAD 8
 #define MMQ_THREADS 256
+// `__launch_bounds__` below passes the block size ONLY. The second argument
+// (minimum blocks per SM) is deliberately omitted: setting it to 1 tells ptxas
+// that a single resident block suffices, so it spends registers freely on the
+// accumulator tile and occupancy drops. Left unconstrained, ptxas picks the
+// register count itself, per target architecture, at compile or JIT time —
+// which is where that decision belongs, since the register file and the
+// latency it has to cover are properties of the device, not of this file.
 // Four consecutive k values per int, which is one dp4a/mma operand word.
 #define MMQ_K4 (MMQ_BK / 4)
 
@@ -77,7 +84,7 @@ static __device__ __forceinline__ void mmq_q8_0_stage_load(
     }
 }
 
-extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q8_0_q8_1_mma(
+extern "C" __global__ __launch_bounds__(MMQ_THREADS) void quant_mmq_q8_0_q8_1_mma(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
@@ -253,7 +260,7 @@ static __device__ __forceinline__ void mmq_q4_k_stage_load(
 // Q4_K adds an asymmetric minimum term, `-dmin * minimum * rowsum`, that one
 // `mma` cannot produce: it depends only on the row, not the column, so it is
 // reduced separately with `dp4a` the same way the dp4a kernel reduces it.
-extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q4_k_q8_1_mma(
+extern "C" __global__ __launch_bounds__(MMQ_THREADS) void quant_mmq_q4_k_q8_1_mma(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
@@ -436,7 +443,7 @@ static __device__ __forceinline__ void mmq_q6_k_stage_load(
 // Q6_K's scale changes every 16 elements, so one 32-wide `mma` cannot express
 // it. Two `m16n8k16` calls run instead, one per 16-element half, each scaled
 // by its own `s_wd_lo` / `s_wd_hi`.
-extern "C" __global__ __launch_bounds__(MMQ_THREADS, 1) void quant_mmq_q6_k_q8_1_mma(
+extern "C" __global__ __launch_bounds__(MMQ_THREADS) void quant_mmq_q6_k_q8_1_mma(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,

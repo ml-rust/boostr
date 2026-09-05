@@ -12,4 +12,8 @@
 pub(super) use super::flash_block_config::bwd_block_config;
 pub(super) use super::flash_params::{AttentionParams, validate_qkv};
 pub(crate) use super::flash_smem::set_smem_attribute;
-pub(super) use super::flash_smem::{compute_bwd_smem, compute_smem, device_max_smem};
+// Widened past `pub(super)`: these are consumed by paged/varlen/mla/mqa_gqa,
+// which are siblings of `flash`, not of this file.
+pub(in crate::ops::cuda::attention) use super::flash_smem::{
+    compute_bwd_smem, compute_smem, device_max_smem,
+};

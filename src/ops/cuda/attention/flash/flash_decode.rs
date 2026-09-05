@@ -9,7 +9,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::decode_split::{decode_dtype_suffix, decode_split_count};
+use super::super::decode_split::{decode_dtype_suffix, decode_split_count};
 use super::flash_utils::AttentionParams;
 
 /// Kernel name stem for a supported decode `(head_dim, dtype)`.

@@ -86,7 +86,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use boostr::ops::cuda::attention::flash_v3;
+use boostr::ops::cuda::attention::flash::flash_v3;
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
 use numr::dtype::DType;
 use numr::runtime::Runtime;

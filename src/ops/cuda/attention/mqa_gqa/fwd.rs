@@ -15,7 +15,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::super::flash_utils::{compute_smem, set_smem_attribute};
+use super::super::flash::flash_utils::{compute_smem, set_smem_attribute};
 use super::block_config::mqa_fwd_block_config;
 use crate::ops::cuda::kernels::{self, MQA_GQA_MODULE};
 

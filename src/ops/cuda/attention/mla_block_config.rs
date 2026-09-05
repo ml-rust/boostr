@@ -12,7 +12,7 @@
 use crate::error::{Error, Result};
 use numr::dtype::DType;
 
-use super::flash_utils::device_max_smem;
+use super::flash::flash_utils::device_max_smem;
 
 /// Length of the per-thread `float O_local[SDPA_MAX_HEAD_DIM_V]` accumulator
 /// in `sdpa.cu`. `head_dim_v` indexes it directly with no bounds check, so a

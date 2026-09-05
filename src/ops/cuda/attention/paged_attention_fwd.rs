@@ -10,7 +10,7 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::decode_split::decode_supports_dtype;
-use super::flash_utils::set_smem_attribute;
+use super::flash::flash_utils::set_smem_attribute;
 use super::paged_attention_fwd_block_config::{
     fwd_block_config, fwd_block_config_with_override, fwd_smem_size,
 };

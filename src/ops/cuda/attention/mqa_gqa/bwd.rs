@@ -11,7 +11,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::super::flash_utils::{compute_bwd_smem, set_smem_attribute};
+use super::super::flash::flash_utils::{compute_bwd_smem, set_smem_attribute};
 use super::block_config::{BWD_SMEM_ELEM_BYTES, mqa_bwd_block_config};
 use crate::ops::cuda::kernels::{self, MQA_GQA_BWD_MODULE};
 

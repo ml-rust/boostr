@@ -7,7 +7,7 @@
 
 use crate::error::{Error, Result};
 
-use super::super::flash_utils::{compute_bwd_smem, compute_smem, device_max_smem};
+use super::super::flash::flash_utils::{compute_bwd_smem, compute_smem, device_max_smem};
 
 /// Shared memory element size of the MQA/GQA backward kernels.
 ///

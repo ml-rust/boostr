@@ -125,14 +125,14 @@ fn block_config_small(head_dim: usize) -> Option<(usize, usize)> {
 ///    large tile can only be wasting rows the small tile would not, while the small
 ///    tile's extra K-loop iterations (smaller `BLOCK_N`, more iterations to cover the
 ///    same `seq_len_k`) are the cost being traded against. The rule itself is measured,
-///    not guessed — see [`super::mqa_gqa::block_config::mqa_fwd_block_config`], which
+///    not guessed — see [`super::super::mqa_gqa::block_config::mqa_fwd_block_config`], which
 ///    carries the same boundary and the measurement behind it on the MQA/GQA forward
 ///    path — and the row-waste argument above applies here by the same reasoning. It
 ///    has NOT, however, been observed to change a selection on this path: at
 ///    head_dim=96, [`block_config_large`]'s shared-memory requirement (196KB+) is well
 ///    beyond any current device's opt-in limit, so head_dim=96 is already forced onto
 ///    the small config by gate 1 before this rule ever runs, and head_dim 32/64/128 no
-///    longer reach this function at all — [`super::mqa_gqa::should_use_mqa_gqa`] in `mqa_gqa/block_config.rs`
+///    longer reach this function at all — [`super::super::mqa_gqa::should_use_mqa_gqa`] in `mqa_gqa/block_config.rs`
 ///    routes them to the dedicated MQA/GQA kernels instead. So on the head_dims that
 ///    currently reach this path, the rule is correct and harmless but inert. This step
 ///    only ever downgrades large -> small, and only when a small config exists for this

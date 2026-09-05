@@ -24,7 +24,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use boostr::ops::cuda::attention::flash::decode_attention_graph_fwd;
+use boostr::ops::cuda::attention::flash::impl_ops::decode_attention_graph_fwd;
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
 use numr::runtime::Runtime;
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};

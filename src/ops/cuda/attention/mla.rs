@@ -3,7 +3,7 @@
 //! Multi-Head Latent Attention (MLA) scaled dot-product attention.
 //! Unlike standard attention, K and V can have different last dimensions.
 
-use super::flash_utils::set_smem_attribute;
+use super::flash::flash_utils::set_smem_attribute;
 use super::mla_block_config::{SDPA_MAX_HEAD_DIM_V, block_config};
 use crate::error::{Error, Result};
 use crate::ops::cuda::kernels::{self, SDPA_MODULE};

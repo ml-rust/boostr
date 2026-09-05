@@ -11,7 +11,8 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::decode_split;
+use super::super::decode_split;
+use super::super::mqa_gqa;
 use super::flash_bwd;
 use super::flash_bwd_fp8;
 use super::flash_decode;
@@ -20,7 +21,6 @@ use super::flash_fwd_fp8_kv;
 use super::flash_fwd_int4_kv;
 use super::flash_utils::validate_qkv;
 use super::flash_v3;
-use super::mqa_gqa;
 use crate::ops::traits::cache::kv_cache_quant::Int4GroupSize;
 
 pub use super::flash_decode::decode_attention_graph_fwd;

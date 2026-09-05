@@ -9,7 +9,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::flash_utils::set_smem_attribute;
+use super::flash::flash_utils::set_smem_attribute;
 use super::paged_attention_bwd_block_config::{bwd_block_config, bwd_smem_size};
 
 /// Paged attention backward kernel launcher.

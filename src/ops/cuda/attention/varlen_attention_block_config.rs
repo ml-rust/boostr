@@ -8,7 +8,7 @@
 use crate::error::{Error, Result};
 use numr::dtype::DType;
 
-use super::flash_utils::{compute_smem, device_max_smem};
+use super::flash::flash_utils::{compute_smem, device_max_smem};
 
 /// Which compiled kernel variant a `(head_dim, dtype)` request resolves to.
 /// The variant, not a bare `bool`, is what determines the kernel-name suffix

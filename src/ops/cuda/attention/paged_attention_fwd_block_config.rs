@@ -15,7 +15,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::CudaDevice;
 use std::env;
 
-use super::flash_utils::device_max_smem;
+use super::flash::flash_utils::device_max_smem;
 
 /// Small-memory block config for paged attention forward (`_small` kernels).
 /// Sized to fit in 48KB shared memory. See [`fwd_smem_size`] for the layout.

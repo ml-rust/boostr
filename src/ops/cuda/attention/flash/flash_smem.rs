@@ -11,7 +11,7 @@ use cudarc::driver::safe::CudaFunction;
 use cudarc::driver::sys;
 
 /// Query the device's max dynamic shared memory per block (opt-in).
-pub(super) fn device_max_smem() -> usize {
+pub(in crate::ops::cuda::attention) fn device_max_smem() -> usize {
     unsafe {
         let mut cuda_dev: i32 = 0;
         sys::cuCtxGetDevice(&mut cuda_dev);
@@ -26,7 +26,7 @@ pub(super) fn device_max_smem() -> usize {
 }
 
 /// Compute shared memory bytes for given block config, head_dim, and element size.
-pub(super) fn compute_smem(
+pub(in crate::ops::cuda::attention) fn compute_smem(
     block_m: usize,
     block_n: usize,
     head_dim: usize,
@@ -42,7 +42,7 @@ pub(super) fn compute_smem(
 /// `[K: BLOCK_N x HEAD_DIM][V: BLOCK_N x HEAD_DIM][Q: BLOCK_M x HEAD_DIM][dO: BLOCK_M x HEAD_DIM]`,
 /// stored in the kernel's element type with NO `+1` bank-conflict padding — unlike
 /// the forward layout in `compute_smem`.
-pub(super) fn compute_bwd_smem(
+pub(in crate::ops::cuda::attention) fn compute_bwd_smem(
     block_m: usize,
     block_n: usize,
     head_dim: usize,

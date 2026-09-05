@@ -12,7 +12,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::flash::set_smem_attribute;
+use super::flash::impl_ops::set_smem_attribute;
 use super::varlen_attention_block_config::{block_config_with_override, bwd_smem_size};
 use crate::ops::cuda::kernels::{
     self, VARLEN_ATTENTION_BWD_FP16_MODULE, VARLEN_ATTENTION_BWD_MODULE,

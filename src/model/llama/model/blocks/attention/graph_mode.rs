@@ -39,7 +39,7 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
             + numr::ops::CompareOps<numr::runtime::cuda::CudaRuntime>
             + numr::ops::ConditionalOps<numr::runtime::cuda::CudaRuntime>,
     {
-        use crate::ops::cuda::attention::flash::decode_attention_graph_fwd;
+        use crate::ops::cuda::attention::flash::impl_ops::decode_attention_graph_fwd;
         use crate::ops::cuda::attention::kv_insert::kv_insert;
 
         let shape = x.shape().to_vec();

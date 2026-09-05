@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use numr::dtype::DType;
 use std::env;
 
-use super::flash_utils::device_max_smem;
+use super::flash::flash_utils::device_max_smem;
 
 /// Small-memory block config for paged attention backward (`_small` kernels).
 /// Sized to fit in 48KB shared memory. See [`bwd_smem_size`] for the layout.

@@ -67,9 +67,15 @@ fn test_fused_grad_unscale_clip_inf_detection_cpu() {
     let (client, device) = setup_cpu();
     let grad = Tensor::from_slice(&[1.0f32, f32::INFINITY, 3.0, 4.0], &[4], &device).unwrap();
 
-    let (_clipped, _norm, found_inf) = client.fused_grad_unscale_clip(&grad, 1.0, 1.0).unwrap();
+    let (clipped, _norm, found_inf) = client.fused_grad_unscale_clip(&grad, 1.0, 1.0).unwrap();
 
     assert!(found_inf, "should detect infinity");
+    // Matches CUDA's clip_scale_* early-return: data stays unscaled, not zeroed.
+    let data = clipped.to_vec::<f32>();
+    assert!((data[0] - 1.0).abs() < 1e-5, "data[0]={}", data[0]);
+    assert!(data[1].is_infinite(), "data[1]={}", data[1]);
+    assert!((data[2] - 3.0).abs() < 1e-5, "data[2]={}", data[2]);
+    assert!((data[3] - 4.0).abs() < 1e-5, "data[3]={}", data[3]);
 }
 
 #[test]
@@ -77,9 +83,15 @@ fn test_fused_grad_unscale_clip_nan_detection_cpu() {
     let (client, device) = setup_cpu();
     let grad = Tensor::from_slice(&[1.0f32, f32::NAN, 3.0, 4.0], &[4], &device).unwrap();
 
-    let (_clipped, _norm, found_inf) = client.fused_grad_unscale_clip(&grad, 1.0, 1.0).unwrap();
+    let (clipped, _norm, found_inf) = client.fused_grad_unscale_clip(&grad, 1.0, 1.0).unwrap();
 
     assert!(found_inf, "should detect NaN");
+    // Matches CUDA's clip_scale_* early-return: data stays unscaled, not zeroed.
+    let data = clipped.to_vec::<f32>();
+    assert!((data[0] - 1.0).abs() < 1e-5, "data[0]={}", data[0]);
+    assert!(data[1].is_nan(), "data[1]={}", data[1]);
+    assert!((data[2] - 3.0).abs() < 1e-5, "data[2]={}", data[2]);
+    assert!((data[3] - 4.0).abs() < 1e-5, "data[3]={}", data[3]);
 }
 
 // ---- Dynamic loss scale parity ----
@@ -165,6 +177,57 @@ fn test_fused_grad_unscale_clip_inf_cuda() {
             .fused_grad_unscale_clip(&cuda_grad, 1.0, 1.0)
             .unwrap();
         assert!(found_inf, "CUDA should detect infinity");
+    });
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn test_fused_grad_unscale_clip_inf_cpu_cuda_parity() {
+    use super::helpers::with_cuda_backend;
+
+    // Finite value at index 0, inf at a later index — proves finite elements
+    // stay unscaled rather than zeroed, on both backends.
+    let grad_data = [1.0f32, 2.0, f32::INFINITY, 4.0];
+    let shape = [4];
+    let max_norm = 1.0;
+    let loss_scale = 1.0;
+
+    let (cpu_client, cpu_device) = setup_cpu();
+    let cpu_grad = Tensor::from_slice(&grad_data, &shape, &cpu_device).unwrap();
+    let (cpu_out, cpu_norm, cpu_inf) = cpu_client
+        .fused_grad_unscale_clip(&cpu_grad, max_norm, loss_scale)
+        .unwrap();
+
+    with_cuda_backend(|cuda_client, cuda_device| {
+        let cuda_grad = Tensor::from_slice(&grad_data, &shape, &cuda_device).unwrap();
+        let (cuda_out, cuda_norm, cuda_inf) = cuda_client
+            .fused_grad_unscale_clip(&cuda_grad, max_norm, loss_scale)
+            .unwrap();
+
+        assert_eq!(cpu_inf, cuda_inf, "found_inf mismatch");
+        assert!(cpu_inf, "fixture must trigger found_inf");
+
+        // norm_sq folds in the inf element on both backends, so norm is
+        // non-finite here — nothing meaningful to compare numerically.
+        assert!(!cpu_norm.is_finite(), "cpu_norm={}", cpu_norm);
+        assert!(!cuda_norm.is_finite(), "cuda_norm={}", cuda_norm);
+
+        let cpu_data = cpu_out.to_vec::<f32>();
+        let cuda_data = cuda_out.to_vec::<f32>();
+        assert_eq!(cpu_data.len(), cuda_data.len());
+        for (i, (a, b)) in cpu_data.iter().zip(cuda_data.iter()).enumerate() {
+            if a.is_infinite() || b.is_infinite() {
+                assert!(
+                    a.is_infinite() && b.is_infinite(),
+                    "fused_grad_unscale_clip inf parity at {i}: {a} vs {b}"
+                );
+            } else {
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "fused_grad_unscale_clip inf parity at {i}: {a} vs {b}"
+                );
+            }
+        }
     });
 }
 

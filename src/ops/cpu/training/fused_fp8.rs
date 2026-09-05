@@ -54,7 +54,9 @@ fn fused_grad_unscale_clip_f32(
     let inv_scale = (1.0 / loss_scale) as f32;
     let max_norm_f = max_norm as f32;
 
-    // Pass 1: check inf/nan + unscale + accumulate norm²
+    // Pass 1: unscale every element + accumulate norm² + detect inf/nan.
+    // Matches CUDA: an inf/nan input still gets unscaled and folded into
+    // norm_sq (so norm is non-finite on this path), never zeroed.
     let mut unscaled = vec![0.0f32; n];
     let mut norm_sq: f64 = 0.0;
     let mut found_inf = false;
@@ -63,23 +65,18 @@ fn fused_grad_unscale_clip_f32(
         let gi = g[i];
         if gi.is_infinite() || gi.is_nan() {
             found_inf = true;
-            break;
         }
         let u = gi * inv_scale;
         unscaled[i] = u;
         norm_sq += (u as f64) * (u as f64);
     }
 
-    if found_inf {
-        // Return zeros — caller should skip this step
-        let zeros = Tensor::<CpuRuntime>::zeros(grad.shape(), DType::F32, grad.device())?;
-        return Ok((zeros, 0.0, true));
-    }
-
     let norm = (norm_sq as f32).sqrt();
 
-    // Pass 2: clip if norm > max_norm
-    if norm > max_norm_f && max_norm_f > 0.0 {
+    // Pass 2: clip if norm > max_norm. Skipped when found_inf, matching
+    // CUDA's clip_scale_* early-return — caller skips the optimizer step
+    // instead, leaving the gradient buffer unscaled rather than destroyed.
+    if !found_inf && norm > max_norm_f && max_norm_f > 0.0 {
         let clip_coef = max_norm_f / (norm + 1e-6);
         for u in &mut unscaled {
             *u *= clip_coef;
@@ -87,7 +84,7 @@ fn fused_grad_unscale_clip_f32(
     }
 
     let result = Tensor::<CpuRuntime>::from_slice(&unscaled, grad.shape(), grad.device())?;
-    Ok((result, norm as f64, false))
+    Ok((result, norm as f64, found_inf))
 }
 
 fn fused_grad_unscale_clip_f64(
@@ -99,7 +96,9 @@ fn fused_grad_unscale_clip_f64(
     let g = grad.to_vec::<f64>();
     let inv_scale = 1.0 / loss_scale;
 
-    // Pass 1: check inf/nan + unscale + accumulate norm²
+    // Pass 1: unscale every element + accumulate norm² + detect inf/nan.
+    // Matches CUDA: an inf/nan input still gets unscaled and folded into
+    // norm_sq (so norm is non-finite on this path), never zeroed.
     let mut unscaled = vec![0.0f64; n];
     let mut norm_sq: f64 = 0.0;
     let mut found_inf = false;
@@ -108,22 +107,18 @@ fn fused_grad_unscale_clip_f64(
         let gi = g[i];
         if gi.is_infinite() || gi.is_nan() {
             found_inf = true;
-            break;
         }
         let u = gi * inv_scale;
         unscaled[i] = u;
         norm_sq += u * u;
     }
 
-    if found_inf {
-        let zeros = Tensor::<CpuRuntime>::zeros(grad.shape(), DType::F64, grad.device())?;
-        return Ok((zeros, 0.0, true));
-    }
-
     let norm = norm_sq.sqrt();
 
-    // Pass 2: clip if norm > max_norm
-    if norm > max_norm && max_norm > 0.0 {
+    // Pass 2: clip if norm > max_norm. Skipped when found_inf, matching
+    // CUDA's clip_scale_* early-return — caller skips the optimizer step
+    // instead, leaving the gradient buffer unscaled rather than destroyed.
+    if !found_inf && norm > max_norm && max_norm > 0.0 {
         let clip_coef = max_norm / (norm + 1e-6);
         for u in &mut unscaled {
             *u *= clip_coef;
@@ -131,7 +126,7 @@ fn fused_grad_unscale_clip_f64(
     }
 
     let result = Tensor::<CpuRuntime>::from_slice(&unscaled, grad.shape(), grad.device())?;
-    Ok((result, norm, false))
+    Ok((result, norm, found_inf))
 }
 
 #[cfg(test)]
@@ -185,9 +180,17 @@ mod tests {
             Tensor::<CpuRuntime>::from_slice(&[1.0f32, f32::INFINITY, 3.0, 4.0], &[4], &device)
                 .unwrap();
 
-        let (_clipped, _norm, found_inf) = client.fused_grad_unscale_clip(&grad, 1.0, 1.0).unwrap();
+        let (clipped, norm, found_inf) = client.fused_grad_unscale_clip(&grad, 1.0, 1.0).unwrap();
 
         assert!(found_inf);
+        // inv_scale = 1.0: finite elements keep their unscaled values, not zeroed.
+        let data = clipped.to_vec::<f32>();
+        assert!((data[0] - 1.0).abs() < 1e-5);
+        assert!(data[1].is_infinite());
+        assert!((data[2] - 3.0).abs() < 1e-5);
+        assert!((data[3] - 4.0).abs() < 1e-5);
+        // norm_sq includes the inf element, so norm is non-finite.
+        assert!(!norm.is_finite());
     }
 
     #[test]
@@ -196,9 +199,17 @@ mod tests {
         let grad =
             Tensor::<CpuRuntime>::from_slice(&[1.0f32, f32::NAN, 3.0, 4.0], &[4], &device).unwrap();
 
-        let (_clipped, _norm, found_inf) = client.fused_grad_unscale_clip(&grad, 1.0, 1.0).unwrap();
+        let (clipped, norm, found_inf) = client.fused_grad_unscale_clip(&grad, 1.0, 1.0).unwrap();
 
         assert!(found_inf);
+        // inv_scale = 1.0: finite elements keep their unscaled values, not zeroed.
+        let data = clipped.to_vec::<f32>();
+        assert!((data[0] - 1.0).abs() < 1e-5);
+        assert!(data[1].is_nan());
+        assert!((data[2] - 3.0).abs() < 1e-5);
+        assert!((data[3] - 4.0).abs() < 1e-5);
+        // norm_sq includes the nan element, so norm is non-finite.
+        assert!(!norm.is_finite());
     }
 
     #[test]

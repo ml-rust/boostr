@@ -23,6 +23,7 @@ use super::super::kernels::{
     GEMV_TQ2_0_MODULE, QUANT_GEMV_MODULE, QUANT_MATMUL_MODULE, QUANT_MMQ_MMA_MODULE,
 };
 use super::helpers::quantize_activation_q8_1;
+use super::mmq_feat_major;
 
 /// Largest `m` for which the GEMV path beats the GEMM path.
 ///
@@ -248,6 +249,24 @@ pub(super) fn dispatch_matmul(
     let m_u32 = m as u32;
     let k_u32 = k as u32;
     let n_u32 = n as u32;
+
+    // Q8_0 on sm_80+ takes the feature-major tensor-core kernels: a 128-feature
+    // tile against a token tile chosen per batch size, with the weight as MMA
+    // operand A and a repacked activation layout of its own. It picks between a
+    // tile-parallel grid and stream-k internally. `Ok(None)` means no compiled
+    // variant fits the device, and the `quant_mmq_q8_0_q8_1_mma` kernel below
+    // still serves the shape.
+    let q8_0_takes_feat_major = matches!(format, QuantFormat::Q8_0)
+        && k.is_multiple_of(32)
+        && numr::runtime::cuda::CudaDevice::new(device_index)
+            .profile()
+            .caps
+            .int8_mma_m16n8k32;
+    if q8_0_takes_feat_major
+        && mmq_feat_major::dispatch_q8_0(client, act_contig, weight, output_ptr, m, k, n)?.is_some()
+    {
+        return Ok(Some(()));
+    }
 
     // Q8_0, Q4_K and Q6_K take the MMQ path: int8 tiles in shared memory and
     // dp4a, the same shape the GEMV's dp4a path uses, but reusing the weight

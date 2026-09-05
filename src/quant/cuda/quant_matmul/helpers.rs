@@ -71,3 +71,64 @@ pub(super) fn quantize_activation_q8_1(
 
     Ok(q8_buf)
 }
+
+/// Quantize F32 activation into the repacked Q8_1 layout the feature-major MMQ
+/// kernels read.
+///
+/// A record holds 128 k-values of one token — four F32 block scales then 128
+/// int8 — and records are indexed k-group-major, token-minor, so the `mmq_x`
+/// records a token tile needs are contiguous and the kernel stages them with a
+/// flat copy. Padded token slots and padded k-blocks are zeroed by the kernel.
+///
+/// Distinct from [`quantize_activation_q8_1`], which stays the producer for the
+/// dp4a, `quant_mmq_q8_0_q8_1_mma`, and K-quant kernels. Returns the buffer and
+/// its token stride.
+///
+/// Format-neutral: every MMQ path quantizes activations to Q8_1, so a future
+/// format (Q4_K, Q6_K) reuses this producer rather than adding its own.
+pub(super) fn quantize_activation_q8_1_mmq(
+    client: &CudaClient,
+    activation: &Tensor<CudaRuntime>,
+    m: usize,
+    k: usize,
+    mmq_x: usize,
+) -> Result<(Tensor<CudaRuntime>, u32)> {
+    let device_index = activation.device().id();
+    // Rounding the token count up to the tile makes the last tile's flat copy
+    // land inside the buffer without a bounds test in the kernel.
+    let ntok = m.div_ceil(mmq_x) * mmq_x;
+    let kgroups = k.div_ceil(128);
+    let bytes = kgroups * ntok * 144;
+
+    let buf = Tensor::<CudaRuntime>::empty(&[bytes], DType::U8, activation.device())?;
+
+    let module = kernels::get_or_load_module(client.context(), device_index, QUANT_ACT_MODULE)?;
+    let func = kernels::get_kernel_function(&module, "quantize_f32_q8_1_mmq")?;
+
+    let act_ptr = activation.ptr();
+    let out_ptr = buf.ptr();
+    let m_u32 = m as u32;
+    let k_u32 = k as u32;
+    let ntok_u32 = ntok as u32;
+
+    // One warp per 32-value block, one grid row per token slot.
+    let cfg = LaunchConfig {
+        grid_dim: ((kgroups * 4) as u32, ntok_u32, 1),
+        block_dim: (32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    unsafe {
+        let mut builder = client.stream().launch_builder(&func);
+        builder.arg(&act_ptr);
+        builder.arg(&out_ptr);
+        builder.arg(&m_u32);
+        builder.arg(&k_u32);
+        builder.arg(&ntok_u32);
+        builder.launch(cfg).map_err(|e| Error::QuantError {
+            reason: format!("CUDA quantize_f32_q8_1_mmq kernel launch failed: {:?}", e),
+        })?;
+    }
+
+    Ok((buf, ntok_u32))
+}

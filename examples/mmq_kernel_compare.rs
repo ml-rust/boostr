@@ -31,6 +31,117 @@ use numr::runtime::{Runtime, RuntimeClient};
 #[cfg(feature = "cuda")]
 use numr::tensor::Tensor;
 
+/// Mirror of the production selection rule. The authoritative copy lives in
+/// `src/quant/cuda/quant_matmul/mmq_feat_major.rs`; keep the two in step.
+///
+/// Compiled feature-major token-tile variants, ascending. A variant needs a
+/// 128-row weight tile at a 76-int stride plus an `mmq_x`-row activation tile
+/// at a 36-int stride. The list skips every `mmq_x` the kernel's granularity
+/// rule rejects: below 48 the tile steps by 8, at and above it by 16.
+#[cfg(feature = "cuda")]
+const MMQ_X_VARIANTS: &[u32] = &[8, 16, 24, 32, 40, 48, 64, 80, 96, 112, 128];
+
+/// Dynamic shared memory one feature-major variant needs. The larger ones are
+/// above the 48KB static limit, so it is allocated dynamically and opted into.
+#[cfg(feature = "cuda")]
+const fn mmq_x_smem_bytes(mmq_x: u32) -> u32 {
+    4 * (128 * 76 + mmq_x * 36)
+}
+
+/// Picks the feature-major variant that launches the fewest token tiles for
+/// `m`, breaking ties toward the smaller tile because it costs fewer registers
+/// and less shared memory. `smem_limit` is the device's per-block opt-in
+/// maximum.
+#[cfg(feature = "cuda")]
+fn select_mmq_x(m: u32, smem_limit: u32) -> Option<u32> {
+    let mut best: Option<(u32, u32)> = None;
+    for &mmq_x in MMQ_X_VARIANTS {
+        if mmq_x_smem_bytes(mmq_x) > smem_limit {
+            continue;
+        }
+        let tiles = m.div_ceil(mmq_x);
+        if best.is_none_or(|(_, b)| tiles < b) {
+            best = Some((mmq_x, tiles));
+        }
+        if tiles == 1 {
+            break;
+        }
+    }
+    best.map(|(mmq_x, _)| mmq_x)
+}
+
+/// Exact reference for one output element, in f64.
+///
+/// This is the ground truth every kernel is checked against. It is not another
+/// GPU kernel: the per-block int32 dot product is exact in integer arithmetic,
+/// so the only inexact step anywhere is the accumulation across blocks, and
+/// doing that in f64 bounds every f32 kernel's error regardless of the order it
+/// sums in. That is what lets stream-k — which reassociates the k sum across
+/// blocks by construction — be checked at all.
+#[cfg(feature = "cuda")]
+fn q8_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> f64 {
+    let bpr = k / 32;
+    let mut sum = 0.0f64;
+    for b in 0..bpr {
+        let wb = (feat * bpr + b) * 34;
+        let ab = (token * bpr + b) * 36;
+        let wd = f64::from(half::f16::from_le_bytes([weight[wb], weight[wb + 1]]).to_f32());
+        let ad = f64::from(half::f16::from_le_bytes([act[ab], act[ab + 1]]).to_f32());
+        let mut dot = 0i64;
+        for p in 0..32 {
+            dot += i64::from(weight[wb + 2 + p] as i8) * i64::from(act[ab + 4 + p] as i8);
+        }
+        sum += dot as f64 * ad * wd;
+    }
+    sum
+}
+
+/// Output positions sampled for the reference check. A full f64 pass is
+/// O(M*N*K) and far too slow at benchmark shapes, so a fixed spread of
+/// positions is checked instead — enough to catch a wrong index map, a dropped
+/// k-block, or a double-counted partial, which are the failure modes that
+/// matter here.
+#[cfg(feature = "cuda")]
+const REFERENCE_SAMPLES: usize = 256;
+
+/// Relative error permitted against the f64 reference. Summing `K/32` block
+/// products in f32 gives a worst case around `sqrt(K/32) * f32::EPSILON`; this
+/// leaves roughly an order of magnitude of headroom above that at the shapes
+/// this tool runs, while still failing loudly on a real indexing error, which
+/// lands orders of magnitude away rather than a few ulps.
+#[cfg(feature = "cuda")]
+const REFERENCE_RTOL: f64 = 1e-5;
+
+/// Checks sampled outputs against [`q8_0_reference`], panicking with the
+/// position and both values on the first breach.
+#[cfg(feature = "cuda")]
+fn check_against_reference(
+    label: &str,
+    got: &[f32],
+    weight: &[u8],
+    act: &[u8],
+    m: usize,
+    n: usize,
+    k: usize,
+) {
+    let total = m * n;
+    let stride = (total / REFERENCE_SAMPLES).max(1);
+    let mut checked = 0usize;
+    for idx in (0..total).step_by(stride) {
+        let (token, feat) = (idx / n, idx % n);
+        let want = q8_0_reference(weight, act, token, feat, k);
+        let have = f64::from(got[idx]);
+        let err = (have - want).abs() / want.abs().max(f64::MIN_POSITIVE);
+        assert!(
+            err <= REFERENCE_RTOL,
+            "{label} disagrees with the f64 reference at (token={token}, feat={feat}): \
+             got {have}, want {want}, relative error {err:.3e} exceeds {REFERENCE_RTOL:.0e}"
+        );
+        checked += 1;
+    }
+    println!("{label}: {checked} sampled outputs within {REFERENCE_RTOL:.0e} of the f64 reference");
+}
+
 /// Calls timed per kernel, after warmup.
 #[cfg(feature = "cuda")]
 const ITERS: usize = 100;
@@ -155,6 +266,33 @@ fn build_q8_1_activation(m: usize, k: usize) -> Vec<u8> {
                 // never coincide, even for the same block index.
                 out[base + 4 + pos] = quant_byte(block, pos + 1000) as u8;
             }
+        }
+    }
+    out
+}
+
+/// Repacks the per-token Q8_1 buffer into the layout the feature-major kernels
+/// read.
+///
+/// Mirrors `quantize_f32_q8_1_mmq` in `src/quant/cuda/kernels/quant_act.cu`: a
+/// 144-byte record holds 128 k-values of one token as four F32 block scales
+/// then 128 int8, and records are indexed `kgroup * ntok + token`. Deriving it
+/// from the per-token bytes here, rather than re-quantizing, keeps this example
+/// and the f64 reference reading one set of quantized values.
+#[cfg(feature = "cuda")]
+fn repack_q8_1_mmq(act: &[u8], m: usize, k: usize, ntok: usize) -> Vec<u8> {
+    let bpr = k / 32;
+    let kgroups = bpr.div_ceil(4);
+    let mut out = vec![0u8; kgroups * ntok * 144];
+    for token in 0..m {
+        for b in 0..bpr {
+            let src = (token * bpr + b) * 36;
+            let rec = ((b / 4) * ntok + token) * 144;
+            let sub = b % 4;
+            let d = half::f16::from_le_bytes([act[src], act[src + 1]]).to_f32();
+            out[rec + sub * 4..rec + sub * 4 + 4].copy_from_slice(&d.to_le_bytes());
+            out[rec + 16 + sub * 32..rec + 16 + sub * 32 + 32]
+                .copy_from_slice(&act[src + 4..src + 36]);
         }
     }
     out
@@ -299,6 +437,8 @@ fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let (mut n, mut k, mut m) = (4096usize, 14336usize, 512usize);
     let mut format = MmqFormat::Q8_0;
+    let mut force_mmq_x: Option<u32> = None;
+    let mut stream_k = false;
 
     let mut i = 0;
     while i < argv.len() {
@@ -308,7 +448,22 @@ fn main() {
             "--k" => k = value().parse().expect("--k must be a usize"),
             "--m" => m = value().parse().expect("--m must be a usize"),
             "--format" => format = MmqFormat::parse(&value()),
-            other => panic!("unknown flag {other}, expected --n, --k, --m, or --format"),
+            // Overrides the feature-major token-tile choice. The selection rule trades
+            // tile efficiency against how many blocks the grid launches, and
+            // the two pull opposite ways; this pins one so the trade can be
+            // measured directly instead of inferred.
+            "--mmq-x" => force_mmq_x = Some(value().parse().expect("--mmq-x must be a u32")),
+            // Runs the stream-k pair alongside the tile-parallel kernel so the
+            // two decompositions can be compared on one shape.
+            "--stream-k" => {
+                stream_k = true;
+                i -= 1;
+            }
+            other => {
+                panic!(
+                    "unknown flag {other}, expected --n, --k, --m, --format, --mmq-x, or --stream-k"
+                )
+            }
         }
         i += 2;
     }
@@ -352,8 +507,19 @@ fn main() {
     let out_dp4a = Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device).unwrap();
     let out_mma = Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device).unwrap();
 
+    // Both feature-major paths use the same token tile, and the repacked
+    // activation layout is strided by it, so choose it once and repack once.
+    let fm_mmq_x = force_mmq_x.unwrap_or_else(|| {
+        select_mmq_x(m as u32, mmq_x_smem_bytes(128)).expect("a feature-major variant fits")
+    });
+    let fm_ntok = (m as u32).div_ceil(fm_mmq_x) * fm_mmq_x;
+    let packed_bytes = repack_q8_1_mmq(&act_bytes, m, k, fm_ntok as usize);
+    let packed =
+        Tensor::<CudaRuntime>::from_slice(&packed_bytes, &[packed_bytes.len()], &device).unwrap();
+
     let weight_ptr = weight.ptr();
     let act_ptr = act.ptr();
+    let packed_ptr = packed.ptr();
     let out_dp4a_ptr = out_dp4a.ptr();
     let out_mma_ptr = out_mma.ptr();
     let m_u32 = m as u32;
@@ -424,8 +590,159 @@ fn main() {
     client.synchronize();
     let mma_us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
 
+    // The feature-major kernel is the llama.cpp-geometry port and currently
+    // exists for Q8_0 only: feature-major tiles, weights as MMA operand A, 256
+    // k staged per step. Its grid axes are transposed against
+    // `quant_mmq_q8_0_q8_1_mma`, its token tile is chosen per batch size, and
+    // its shared memory is dynamic, so it needs its own config and an opt-in.
+    let feat_major = match format {
+        MmqFormat::Q8_0 => {
+            let mmq_x = fm_mmq_x;
+            assert!(
+                MMQ_X_VARIANTS.contains(&mmq_x),
+                "--mmq-x {mmq_x} is not a compiled variant; compiled: {MMQ_X_VARIANTS:?}"
+            );
+            let name = format!("quant_mmq_q8_0_q8_1_mma_x{mmq_x}");
+            let func = kernels::get_kernel_function(&mma_module, &name)
+                .unwrap_or_else(|_| panic!("resolve {name}"));
+            func.set_attribute(
+                cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                mmq_x_smem_bytes(mmq_x) as i32,
+            )
+            .expect("opt in to dynamic shared memory for the feature-major kernel");
+            let out =
+                Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device).unwrap();
+            Some((func, out, mmq_x, name))
+        }
+        _ => None,
+    };
+
+    let feat_major_us = feat_major.as_ref().map(|(func, out, mmq_x, _)| {
+        let out_ptr = out.ptr();
+        let cfg_fm = LaunchConfig {
+            grid_dim: (m_u32.div_ceil(*mmq_x), n_u32.div_ceil(128), 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: mmq_x_smem_bytes(*mmq_x),
+        };
+        let launch = || unsafe {
+            let mut builder = client.stream().launch_builder(func);
+            builder.arg(&packed_ptr);
+            builder.arg(&weight_ptr);
+            builder.arg(&out_ptr);
+            builder.arg(&m_u32);
+            builder.arg(&k_u32);
+            builder.arg(&n_u32);
+            builder.arg(&fm_ntok);
+            builder
+                .launch(cfg_fm)
+                .expect("launch mma feature-major kernel");
+        };
+        for _ in 0..WARMUP {
+            launch();
+        }
+        client.synchronize();
+        let started = std::time::Instant::now();
+        for _ in 0..ITERS {
+            launch();
+        }
+        client.synchronize();
+        started.elapsed().as_secs_f64() * 1e6 / ITERS as f64
+    });
+
+    // Stream-k: one block per SM walking a contiguous slice of the flattened
+    // (feature-tile, token-tile, k-block) space, then a fixup pass folding the
+    // partial tiles. It exists for the case where the tile count alone does not
+    // fill the device. It reassociates the k sum across blocks, so it is checked
+    // against the f64 reference, never against another kernel bit-for-bit.
+    let sk = match format {
+        MmqFormat::Q8_0 if stream_k => {
+            let mmq_x = fm_mmq_x;
+            let grid = device.profile().compute_units;
+            let sk_name = format!("quant_mmq_q8_0_q8_1_mma_sk_x{mmq_x}");
+            let fx_name = format!("quant_mmq_q8_0_q8_1_mma_fixup_x{mmq_x}");
+            let sk_func = kernels::get_kernel_function(&mma_module, &sk_name)
+                .unwrap_or_else(|_| panic!("resolve {sk_name}"));
+            let fx_func = kernels::get_kernel_function(&mma_module, &fx_name)
+                .unwrap_or_else(|_| panic!("resolve {fx_name}"));
+            sk_func
+                .set_attribute(
+                    cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    mmq_x_smem_bytes(mmq_x) as i32,
+                )
+                .expect("opt in to dynamic shared memory for the stream-k kernel");
+            // Never zeroed: the fixup reads only slots whose block provably
+            // wrote a partial, so a memset would be pure cost.
+            let ws_len = grid as usize * mmq_x as usize * 128;
+            let ws =
+                Tensor::<CudaRuntime>::from_slice(&vec![0f32; ws_len], &[ws_len], &device).unwrap();
+            let out =
+                Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device).unwrap();
+            Some((sk_func, fx_func, out, ws, mmq_x, grid, sk_name))
+        }
+        _ => None,
+    };
+
+    let sk_us = sk
+        .as_ref()
+        .map(|(sk_func, fx_func, out, ws, mmq_x, grid, _)| {
+            let out_ptr = out.ptr();
+            let ws_ptr = ws.ptr();
+            let cfg_sk = LaunchConfig {
+                grid_dim: (*grid, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: mmq_x_smem_bytes(*mmq_x),
+            };
+            let cfg_fx = LaunchConfig {
+                grid_dim: (*grid, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let launch = || unsafe {
+                let mut b = client.stream().launch_builder(sk_func);
+                b.arg(&packed_ptr);
+                b.arg(&weight_ptr);
+                b.arg(&out_ptr);
+                b.arg(&ws_ptr);
+                b.arg(&m_u32);
+                b.arg(&k_u32);
+                b.arg(&n_u32);
+                b.arg(&fm_ntok);
+                b.launch(cfg_sk).expect("launch stream-k kernel");
+                // Separate launch on the same stream: the fixup reads what the
+                // main kernel wrote, so it must not be fused.
+                let mut f = client.stream().launch_builder(fx_func);
+                f.arg(&out_ptr);
+                f.arg(&ws_ptr);
+                f.arg(&m_u32);
+                f.arg(&k_u32);
+                f.arg(&n_u32);
+                f.launch(cfg_fx).expect("launch stream-k fixup");
+            };
+            for _ in 0..WARMUP {
+                launch();
+            }
+            client.synchronize();
+            let started = std::time::Instant::now();
+            for _ in 0..ITERS {
+                launch();
+            }
+            client.synchronize();
+            started.elapsed().as_secs_f64() * 1e6 / ITERS as f64
+        });
+
     let dp4a_host = out_dp4a.to_vec::<f32>();
     let mma_host = out_mma.to_vec::<f32>();
+
+    check_against_reference("dp4a", &dp4a_host, &weight_bytes, &act_bytes, m, n, k);
+    check_against_reference(mma_kernel, &mma_host, &weight_bytes, &act_bytes, m, n, k);
+    if let Some((_, out, _, name)) = feat_major.as_ref() {
+        let feat_major_host = out.to_vec::<f32>();
+        check_against_reference(name, &feat_major_host, &weight_bytes, &act_bytes, m, n, k);
+    }
+    if let Some((_, _, out, _, _, _, name)) = sk.as_ref() {
+        let sk_host = out.to_vec::<f32>();
+        check_against_reference(name, &sk_host, &weight_bytes, &act_bytes, m, n, k);
+    }
 
     let mut mismatch = None;
     'outer: for row in 0..m {
@@ -452,4 +769,12 @@ fn main() {
     println!("{dp4a_kernel} (dp4a) {dp4a_us:9.2} us/call");
     println!("{mma_kernel}    {mma_us:9.2} us/call");
     println!("ratio dp4a/mma: {:.3}", dp4a_us / mma_us);
+    if let (Some(us), Some((_, _, _, _, mmq_x, grid, name))) = (sk_us, sk.as_ref()) {
+        println!("{name} (grid {grid}, mmq_x {mmq_x}) {us:9.2} us/call");
+        println!("ratio mma/stream-k: {:.3}", mma_us / us);
+    }
+    if let (Some(us), Some((_, _, _, name))) = (feat_major_us, feat_major.as_ref()) {
+        println!("{name} {us:9.2} us/call");
+        println!("ratio mma/feature-major: {:.3}", mma_us / us);
+    }
 }

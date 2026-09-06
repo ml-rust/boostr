@@ -22,10 +22,17 @@ use std::fs;
 use std::path::PathBuf;
 
 /// One parsed `FLASH_BWD_ENTRY(T, HEAD_DIM, BLOCK_M, BLOCK_N, SUFFIX)` call.
+///
+/// `block_m`/`block_n` are read only by the comparison against the Rust
+/// tables, which lives in the `cuda`-gated module below. Parsing still
+/// validates them in every build, so the fields stay populated and the
+/// allow is scoped to the configuration that genuinely never reads them.
 #[derive(Debug, Clone)]
 struct BwdEntry {
     head_dim: usize,
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     block_m: usize,
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     block_n: usize,
     suffix: String,
     is_small: bool,

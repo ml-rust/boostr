@@ -1879,6 +1879,10 @@ fn test_flash_attention_fwd_fp8_kv_head128_per_token_causal() {
 /// Returns `(packed_bytes, scales, zeros)`, scales/zeros as F32 — callers
 /// cast to F16 via `Tensor::to_dtype` since `half::f16` is not a numr
 /// `Element` and `Tensor::from_slice` can never take it directly.
+///
+/// Gated to match its only caller, `assert_flash_fwd_int4_kv_parity`: the
+/// fixture feeds F16 scales, so it has no meaning without that feature.
+#[cfg(all(feature = "cuda", feature = "f16"))]
 fn quantize_int4_kv_fixture(
     data: &[f32],
     batch: usize,

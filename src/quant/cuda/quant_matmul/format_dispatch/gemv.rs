@@ -39,11 +39,11 @@ pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
 ) -> usize {
     let mma_crossover = match format {
         QuantFormat::Q4K => 2,
-        QuantFormat::Q8_0
-        | QuantFormat::Q6K
-        | QuantFormat::Q5K
-        | QuantFormat::Q3K
-        | QuantFormat::Q2K => 1,
+        // Q8_0's token-batched GEMV covers up to four token columns in one
+        // block, so it stays ahead of the feature-major tile further than the
+        // per-token kernels do.
+        QuantFormat::Q8_0 => 4,
+        QuantFormat::Q6K | QuantFormat::Q5K | QuantFormat::Q3K | QuantFormat::Q2K => 1,
         _ => 0,
     };
     let caps = numr::runtime::cuda::CudaDevice::new(device_index)
@@ -109,9 +109,22 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
             _ => unreachable!(),
         };
 
+        // Q8_0 has token-batched variants: one block covers `tokens_per_block`
+        // token columns, so a weight block is loaded once and dot-producted
+        // against all of them. The per-token kernel re-reads the whole weight
+        // matrix for every token, which is what makes its cost scale with M.
+        // Pick the narrowest tile that covers M in one block — a wider tile
+        // would idle its spare columns, a narrower one would need two passes.
+        let (kernel_name, tokens_per_block) = match (format, m) {
+            (QuantFormat::Q8_0, 0..=1) => (kernel_name, 1),
+            (QuantFormat::Q8_0, 2) => ("quant_gemv_q8_0_q8_1_mwr_n2", 2),
+            (QuantFormat::Q8_0, _) => ("quant_gemv_q8_0_q8_1_mwr_n4", 4),
+            _ => (kernel_name, 1),
+        };
+
         // MWR: one output column per block, 128 threads (4 warps)
         let cfg = LaunchConfig {
-            grid_dim: (n_u32, m_u32, 1),
+            grid_dim: (n_u32, m_u32.div_ceil(tokens_per_block), 1),
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };

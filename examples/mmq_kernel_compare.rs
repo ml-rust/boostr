@@ -17,6 +17,13 @@
 //! Q8_0, Q5_K, Q3_K and Q2_K print both a `..._q8_1_mwr` line and a `..._f32`
 //! line, every other format only the `..._f32` line.
 //!
+//! For Q8_0, `--gemv` also runs the token-batched MWR kernel
+//! (`quant_gemv_q8_0_q8_1_mwr_n2` / `_n4` / `_n8`), checked against the same
+//! f64 reference. The tile is the narrowest one that covers `--m` in a single
+//! block, which is the rule `dispatch_gemv` applies — a wider tile idles its
+//! spare columns, a narrower one needs two passes. Keep the two in step, or
+//! these timings stop describing the path production takes.
+//!
 //! ```text
 //! cargo run --release --features cuda --example mmq_kernel_compare -- \
 //!     --format q8_0 --n 4096 --k 14336 --m 512
@@ -1405,6 +1412,25 @@ impl MmqFormat {
         }
     }
 
+    /// Token-batched dp4a MWR GEMV kernel for `m` tokens, or `None` for a
+    /// format that has no batched variant. The batched kernels cover NTOK
+    /// consecutive tokens per block — grid `(N, m.div_ceil(NTOK), 1)`, block
+    /// `(128, 1, 1)` — and load each weight block once per block rather than
+    /// once per token. Returns the kernel, its module and its NTOK, picking
+    /// the widest tile that does not exceed `m`; a tile wider than `m` would
+    /// spend most of its token slots on the clamped ragged tail.
+    fn batched_mwr_gemv_kernel(&self, m: usize) -> Option<(&'static str, &'static str, u32)> {
+        match self {
+            MmqFormat::Q8_0 => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_q8_0_q8_1_mwr_n2", QUANT_GEMV_MODULE, 2)),
+                3..=4 => Some(("quant_gemv_q8_0_q8_1_mwr_n4", QUANT_GEMV_MODULE, 4)),
+                _ => Some(("quant_gemv_q8_0_q8_1_mwr_n8", QUANT_GEMV_MODULE, 8)),
+            },
+            _ => None,
+        }
+    }
+
     /// Format name inside the feature-major kernel symbols. `None` marks a
     /// format the family does not compile; every format this tool knows is
     /// compiled today. Mirrors the `FeatMajorFormat`
@@ -2625,7 +2651,56 @@ fn main() {
                 (mwr_kernel, mwr_us, out_mwr)
             });
 
-        (f32_kernel, f32_us, out_f32, mwr)
+        // Token-batched MWR: same activation buffer and same block shape, but
+        // one block covers NTOK token columns, so the grid's token axis is
+        // `m.div_ceil(NTOK)` and each weight block is decoded once for all
+        // NTOK of them. Not wired into `dispatch_gemv` — this tool is how the
+        // crossover against the MMQ kernels is measured.
+        let batched =
+            format
+                .batched_mwr_gemv_kernel(m)
+                .map(|(bat_kernel, bat_module_name, ntok)| {
+                    let bat_module = kernels::get_or_load_module(
+                        client.context(),
+                        device_index,
+                        bat_module_name,
+                    )
+                    .expect("load batched gemv module");
+                    let bat_func = kernels::get_kernel_function(&bat_module, bat_kernel)
+                        .unwrap_or_else(|_| panic!("resolve {bat_kernel}"));
+                    let out_bat =
+                        Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device)
+                            .unwrap();
+                    let out_bat_ptr = out_bat.ptr();
+                    let cfg_bat = LaunchConfig {
+                        grid_dim: (n_u32, m_u32.div_ceil(ntok), 1),
+                        block_dim: (128, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+                    let launch_bat = || unsafe {
+                        let mut builder = client.stream().launch_builder(&bat_func);
+                        builder.arg(&act_ptr);
+                        builder.arg(&weight_ptr);
+                        builder.arg(&out_bat_ptr);
+                        builder.arg(&m_u32);
+                        builder.arg(&k_u32);
+                        builder.arg(&n_u32);
+                        builder.launch(cfg_bat).expect("launch batched gemv kernel");
+                    };
+                    for _ in 0..WARMUP {
+                        launch_bat();
+                    }
+                    client.synchronize();
+                    let started = std::time::Instant::now();
+                    for _ in 0..ITERS {
+                        launch_bat();
+                    }
+                    client.synchronize();
+                    let bat_us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+                    (bat_kernel, bat_us, out_bat, ntok)
+                });
+
+        (f32_kernel, f32_us, out_f32, mwr, batched)
     });
 
     // The feature-major kernels are the llama.cpp-geometry port: feature-major
@@ -2817,12 +2892,16 @@ fn main() {
         let sk_host = out.to_vec::<f32>();
         check_against_reference(name, format, &sk_host, &case);
     }
-    if let Some((f32_kernel, _, out_f32, mwr)) = gemv_case.as_ref() {
+    if let Some((f32_kernel, _, out_f32, mwr, batched)) = gemv_case.as_ref() {
         let f32_host = out_f32.to_vec::<f32>();
         check_against_reference(f32_kernel, format, &f32_host, &case);
         if let Some((mwr_kernel, _, out_mwr)) = mwr {
             let mwr_host = out_mwr.to_vec::<f32>();
             check_against_reference(mwr_kernel, format, &mwr_host, &case);
+        }
+        if let Some((bat_kernel, _, out_bat, _)) = batched {
+            let bat_host = out_bat.to_vec::<f32>();
+            check_against_reference(bat_kernel, format, &bat_host, &case);
         }
     }
 
@@ -2845,15 +2924,24 @@ fn main() {
             println!("ratio mma/feature-major: {:.3}", mma_us / us);
         }
     }
-    if let Some((f32_kernel, f32_us, _, mwr)) = gemv_case.as_ref() {
+    if let Some((f32_kernel, f32_us, _, mwr, batched)) = gemv_case.as_ref() {
         println!("{f32_kernel} {f32_us:9.2} us/call");
         if let Some((mwr_kernel, mwr_us, _)) = mwr {
             println!("{mwr_kernel} {mwr_us:9.2} us/call");
+        }
+        if let Some((bat_kernel, bat_us, _, ntok)) = batched {
+            println!("{bat_kernel} (ntok {ntok}) {bat_us:9.2} us/call");
+            if let Some((_, mwr_us, _)) = mwr {
+                println!("ratio gemv-mwr/gemv-batched: {:.3}", mwr_us / bat_us);
+            }
         }
         if let Some(fm_us) = feat_major_us {
             println!("ratio gemv-f32/feature-major: {:.3}", f32_us / fm_us);
             if let Some((_, mwr_us, _)) = mwr {
                 println!("ratio gemv-mwr/feature-major: {:.3}", mwr_us / fm_us);
+            }
+            if let Some((_, bat_us, _, _)) = batched {
+                println!("ratio gemv-batched/feature-major: {:.3}", bat_us / fm_us);
             }
         }
     }

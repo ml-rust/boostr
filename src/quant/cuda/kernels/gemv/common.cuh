@@ -111,3 +111,46 @@ static __device__ __forceinline__ float warp_reduce_sum(float acc) {
         acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
     return acc;
 }
+
+// ── Token-batched MWR reduction ─────────────────────────────────────────
+// NTOK-wide counterpart of `mwr_reduce`, for MWR kernels whose block covers
+// several token columns at once. Layout mirrors ggml-cuda's
+// `tmp_shared[nwarps-1][ncols_dst][rows_per_cuda_block][warp_size]`
+// (`ggml-cuda/mmvq.cu`) with one output row per block, so the shared array is
+// `[NWARPS_K - 1][NTOK][WARP_SIZE]`.
+//
+// Warp 0 keeps its own partials in registers and never stores, which is why
+// the leading extent is NWARPS_K - 1: the per-block footprint is
+// (NWARPS_K - 1) * NTOK * WARP_SIZE * 4 bytes.
+//
+// Every thread of the block must reach this call — it contains a barrier.
+// `out` is written by warp 0 only, and only lane 0 holds the final sums.
+
+template <int NTOK>
+static __device__ __forceinline__ void mwr_reduce_ntok(
+    const float acc[NTOK], int warp_id, int lane_id,
+    float smem[NWARPS_K - 1][NTOK][WARP_SIZE],
+    float out[NTOK]
+) {
+    if (warp_id != 0) {
+        #pragma unroll
+        for (int j = 0; j < NTOK; j++)
+            smem[warp_id - 1][j][lane_id] = acc[j];
+    }
+    __syncthreads();
+
+    #pragma unroll
+    for (int j = 0; j < NTOK; j++)
+        out[j] = 0.0f;
+
+    if (warp_id != 0) return;
+
+    #pragma unroll
+    for (int j = 0; j < NTOK; j++) {
+        float sum = acc[j];
+        #pragma unroll
+        for (int w = 0; w < NWARPS_K - 1; w++)
+            sum += smem[w][j][lane_id];
+        out[j] = warp_reduce_sum(sum);
+    }
+}

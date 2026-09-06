@@ -9,37 +9,15 @@
 
 #include <cuda_fp16.h>
 
-#include "decode.cuh"
-
-#define WARP_SIZE 32
-
-// ============================================================================
-// dp4a intrinsic — 4-element int8 dot product in a single instruction
-// Available on compute capability >= 6.1 (Pascal GP102+, all Turing/Ampere/etc)
-// ============================================================================
-
-// 2-byte-aligned 4-byte load (Q6_K blocks are 210 bytes — always 2-byte aligned,
-// and all internal offsets are even, so uint16 loads are safe)
-static __device__ __forceinline__ int load_int_ua(const unsigned char* p) {
-    const unsigned short* p16 = (const unsigned short*)p;
-    return (int)p16[0] | ((int)p16[1] << 16);
-}
-
-static __device__ __forceinline__ int dp4a(int a, int b, int c) {
-#if __CUDA_ARCH__ >= 610
-    return __dp4a(a, b, c);
-#else
-    const signed char* a8 = (const signed char*)&a;
-    const signed char* b8 = (const signed char*)&b;
-    return c + a8[0]*b8[0] + a8[1]*b8[1] + a8[2]*b8[2] + a8[3]*b8[3];
-#endif
-}
+// The GEMV helper header, shared with the per-format kernels under `gemv/`:
+// WARP_SIZE, WARPS_PER_BLOCK, NWARPS_K, `load_int_ua`, `dp4a`, `silu_f`,
+// `warp_reduce_sum` and the MWR reductions. It includes `decode.cuh` itself.
+#include "gemv/common.cuh"
 
 // ============================================================================
 // Q4_0 GEMV (F32 activation)
 // ============================================================================
 
-#define WARPS_PER_BLOCK 8
 #define BLOCK_SIZE (WARP_SIZE * WARPS_PER_BLOCK)
 
 extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q4_0_f32(
@@ -280,8 +258,6 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q4_k_q8_1(
 // Grid: (N, M, 1) — one block per output column
 // Block: (128, 1, 1) — 4 warps of 32 threads
 // ============================================================================
-
-#define NWARPS_K 4
 
 extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q4_k_q8_1_mwr(
     const unsigned char* __restrict__ q8_act,
@@ -769,10 +745,6 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q6_k_f32(
 // Grid: (N, M, 1), Block: (128, 1, 1) — 4 warps cooperating on K
 // ============================================================================
 
-static __device__ __forceinline__ float silu_f(float x) {
-    return x / (1.0f + expf(-x));
-}
-
 extern "C" __global__ __launch_bounds__(128, 1) void fused_swiglu_q4k_q8_1_mwr(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ gate_weight,
@@ -1086,6 +1058,144 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr(
         sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
 
     if (lane_id == 0) output[m * N + col] = sum;
+}
+
+// ============================================================================
+// Token-batched Q8_0 GEMV with dp4a (Q8_0 weight × Q8_1 activation)
+//
+// `quant_gemv_q8_0_q8_1_mwr` above launches grid (N, M, 1): one block per
+// (output column, token), so the whole weight matrix is re-read once per
+// token and the weight traffic grows linearly with M.
+//
+// The weight decode there is already token-invariant — the token index enters
+// only as the activation base pointer and the output offset — so one block can
+// cover NTOK consecutive tokens, load and decode each weight block ONCE, and
+// dot-product it against every token column in an unrolled loop. That is the
+// shape ggml-cuda's `mul_mat_vec_q<type, ncols_dst>` uses
+// (`ggml-cuda/mmvq.cu`), with `ncols_dst` a compile-time tile width.
+//
+// Grid: (N, ceil(M / NTOK), 1) — one output column, NTOK tokens per block
+// Block: (128, 1, 1) — 4 warps cooperating on K, unchanged
+//
+// Ragged tail: M need not be a multiple of NTOK. Each token slot clamps its
+// activation row index to M - 1, so every load stays inside the activation
+// buffer, and the write is skipped for slots past M - 1. A clamped slot
+// therefore recomputes the last token's dot product and discards it, which
+// costs at most NTOK - 1 wasted columns in one block of the grid.
+//
+// The existing single-token kernel is kept: it serves M = 1, where this
+// kernel's token loop is pure overhead, and the fused-SwiGLU sibling below
+// shares its shape.
+// ============================================================================
+
+template <int NTOK>
+static __device__ __forceinline__ void quant_gemv_q8_0_q8_1_mwr_ntok(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    const int warp_id = threadIdx.x / WARP_SIZE;
+    const int lane_id = threadIdx.x % WARP_SIZE;
+    const int col = blockIdx.x;
+    const unsigned int m0 = blockIdx.y * NTOK;
+    // Uniform across the block, so the barrier inside the reduction below is
+    // still reached by every thread that does not take this exit.
+    if (col >= N || m0 >= M) return;
+
+    // Rounded UP for the same reason as the single-token kernel: a Q8_0 block
+    // is 32 elements, so `K / 256` would truncate a short row to zero groups.
+    const int q8_bpr = K / 32;         // Q8_1 blocks per row
+    const int sbpr = (q8_bpr + 7) / 8; // groups of 8 blocks, rounded up
+
+    const unsigned char* w_row = weight + (unsigned long long)col * q8_bpr * 34;
+
+    // Ragged tail: clamp, never read past the activation buffer.
+    const unsigned char* q8_rows[NTOK];
+    #pragma unroll
+    for (int j = 0; j < NTOK; j++) {
+        const unsigned int mj = (m0 + j < M) ? (m0 + j) : (M - 1);
+        q8_rows[j] = q8_act + (unsigned long long)mj * q8_bpr * 36;
+    }
+
+    const int chunk = lane_id / 8;
+    const int pos = (lane_id % 8) * 4;
+    const int j_lo = chunk * 2;
+    const int j_hi = chunk * 2 + 1;
+
+    float acc[NTOK];
+    #pragma unroll
+    for (int j = 0; j < NTOK; j++) acc[j] = 0.0f;
+
+    for (int sb = warp_id; sb < sbpr; sb += NWARPS_K) {
+        const int q8_0_idx_lo = sb * 8 + j_lo;
+        const int q8_0_idx_hi = sb * 8 + j_hi;
+
+        // The weight block is loaded and decoded outside the token loop: that
+        // is the whole point of the tile.
+        if (q8_0_idx_lo < q8_bpr) {
+            const unsigned char* wblk = w_row + q8_0_idx_lo * 34;
+            const float dw = __half2float(*(const __half*)wblk);
+            const int w = load_int_ua(wblk + 2 + pos);
+            #pragma unroll
+            for (int j = 0; j < NTOK; j++) {
+                const unsigned char* ablk = q8_rows[j] + q8_0_idx_lo * 36;
+                const float da = __half2float(*(const __half*)ablk);
+                const int a = *(const int*)(ablk + 4 + pos);
+                acc[j] += dw * da * (float)dp4a(w, a, 0);
+            }
+        }
+        if (q8_0_idx_hi < q8_bpr) {
+            const unsigned char* wblk = w_row + q8_0_idx_hi * 34;
+            const float dw = __half2float(*(const __half*)wblk);
+            const int w = load_int_ua(wblk + 2 + pos);
+            #pragma unroll
+            for (int j = 0; j < NTOK; j++) {
+                const unsigned char* ablk = q8_rows[j] + q8_0_idx_hi * 36;
+                const float da = __half2float(*(const __half*)ablk);
+                const int a = *(const int*)(ablk + 4 + pos);
+                acc[j] += dw * da * (float)dp4a(w, a, 0);
+            }
+        }
+    }
+
+    __shared__ float smem[NWARPS_K - 1][NTOK][WARP_SIZE];
+    float sums[NTOK];
+    mwr_reduce_ntok<NTOK>(acc, warp_id, lane_id, smem, sums);
+
+    if (warp_id != 0 || lane_id != 0) return;
+    #pragma unroll
+    for (int j = 0; j < NTOK; j++) {
+        const unsigned int mj = m0 + j;
+        if (mj < M) output[(unsigned long long)mj * N + col] = sums[j];
+    }
+}
+
+extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr_n2(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    quant_gemv_q8_0_q8_1_mwr_ntok<2>(q8_act, weight, output, M, K, N);
+}
+
+extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr_n4(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    quant_gemv_q8_0_q8_1_mwr_ntok<4>(q8_act, weight, output, M, K, N);
+}
+
+extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr_n8(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    quant_gemv_q8_0_q8_1_mwr_ntok<8>(q8_act, weight, output, M, K, N);
 }
 
 // ============================================================================

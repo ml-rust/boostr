@@ -27,6 +27,14 @@ use std::path::{Path, PathBuf};
 const ALLOWED_UNWIRED: &[(&str, &str)] = &[
     // (kernel_name, reason)
     (
+        "quant_gemv_q8_0_q8_1_mwr_n8",
+        "The eight-column sibling of the _n2/_n4 kernels dispatch_gemv selects. \
+         Its accumulator array costs enough registers that the block count per \
+         SM falls, and the feature-major tile measured faster at that width, so \
+         gemv_max_m stops below it. Wire it once the wide tile drops to two \
+         warps per block, which is what upstream does at this column count.",
+    ),
+    (
         "quantize_kv_fp8_per_token_fp32",
         "No dequantize_kv_fp8_per_token_fp32 kernel exists, so an F32 quantize \
          has no matching-precision inverse. The CUDA dispatch casts F32 to F16 \

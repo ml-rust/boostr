@@ -112,6 +112,46 @@ pub(in crate::quant::cuda::quant_matmul) const IQ2_XXS: FeatMajorFormat = FeatMa
     act_scratch_ints_per_token: 0,
 };
 
+/// IQ2_XS: 74-byte blocks of 256 elements, staged as Q6_K's row int for int —
+/// 64 quant words plus 16 f32 group scales plus 4 ints of bank padding. Each of
+/// the 32 `u16` in `qs` packs a 9-bit index into a 512-entry codebook, whose
+/// entry expands to EIGHT magnitude bytes, under a 7-bit index into a sign
+/// table that supplies one bit per expanded component. The kernel expands the
+/// point and folds the sign in while staging, so the staged lanes are signed
+/// int8, exactly as for IQ2_XXS.
+///
+/// The row is Q6_K's rather than Q8_0's because the scale granularity differs
+/// from IQ2_XXS's: the 4-bit scale is packed two to a `scales` byte, one per
+/// two grid entries, so it changes every 16 elements and a single 32-k MMA
+/// cannot express it. The staged scale is f32 and already multiplied by `d`,
+/// for the same parity reason as Q4_K. K must be a whole number of blocks.
+pub(in crate::quant::cuda::quant_matmul) const IQ2_XS: FeatMajorFormat = FeatMajorFormat {
+    kernel_infix: "iq2_xs",
+    x_stride: 84,
+    k_multiple: 256,
+    act_scratch_ints_per_token: 0,
+};
+
+/// IQ2_S: 82-byte blocks of 256 elements, staged as Q6_K's row int for int —
+/// 64 quant words plus 16 f32 group scales plus 4 ints of bank padding. Each of
+/// the 32 entries takes eight index bits from `qs` and two more from `qh`,
+/// selecting among 1024 codebook points of eight magnitude bytes each.
+///
+/// Its signs are EXPLICIT bits — one byte of eight per entry, from `signs[32]`
+/// — with no sign-table indirection, which is the one way it diverges from
+/// IQ2_XXS and IQ2_XS. Everything after that byte is reached is shared: the
+/// kernel folds the sign in while staging, so the staged lanes are signed int8.
+/// Its scale packing is IQ2_XS's exactly, so it carries the same 16-element
+/// granularity and the same Q6_K row. The staged scale is f32 and already
+/// multiplied by `d`, for the same parity reason as Q4_K. K must be a whole
+/// number of blocks.
+pub(in crate::quant::cuda::quant_matmul) const IQ2_S: FeatMajorFormat = FeatMajorFormat {
+    kernel_infix: "iq2_s",
+    x_stride: 84,
+    k_multiple: 256,
+    act_scratch_ints_per_token: 0,
+};
+
 #[cfg(test)]
 mod tests {
     use super::super::super::dispatch::{FEAT_TILE, VARIANTS, smem_bytes, smem_opt_in_limit};
@@ -345,6 +385,64 @@ mod tests {
             VARIANTS
                 .iter()
                 .all(|&x| smem_bytes(&IQ2_XXS, x) == smem_bytes(&Q8_0, x))
+        );
+    }
+
+    /// IQ2_XS expands the same 8-component grid as IQ2_XXS, so its quant words
+    /// are Q8_0's, but its 4-bit scale is packed two to a `scales` byte, one
+    /// per two grid entries — a change every 16 elements, not every 32. That
+    /// puts it on Q6_K's row and Q6_K's `vec_dot`, so the two strides must stay
+    /// equal, and with them the family's shared-memory request at every token
+    /// tile.
+    #[test]
+    fn the_iq2_xs_descriptor_names_the_compiled_symbols() {
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_x{}", IQ2_XS.kernel_infix, 8),
+            "quant_mmq_iq2_xs_q8_1_mma_x8"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_sk_x{}", IQ2_XS.kernel_infix, 128),
+            "quant_mmq_iq2_xs_q8_1_mma_sk_x128"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_fixup_x{}", IQ2_XS.kernel_infix, 128),
+            "quant_mmq_iq2_xs_q8_1_mma_fixup_x128"
+        );
+        assert_eq!(IQ2_XS.k_multiple, 256);
+        assert_eq!(IQ2_XS.x_stride, Q6_K.x_stride);
+        assert_eq!(IQ2_XS.x_stride, IQ2_XXS.x_stride + 8);
+        assert!(
+            VARIANTS
+                .iter()
+                .all(|&x| smem_bytes(&IQ2_XS, x) == smem_bytes(&Q6_K, x))
+        );
+    }
+
+    /// IQ2_S packs its scales exactly as IQ2_XS does, so it stages the same
+    /// Q6_K row; only the sign source differs, and that is consumed during
+    /// staging. The three strides must therefore stay equal, and with them the
+    /// family's shared-memory request at every token tile.
+    #[test]
+    fn the_iq2_s_descriptor_names_the_compiled_symbols() {
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_x{}", IQ2_S.kernel_infix, 8),
+            "quant_mmq_iq2_s_q8_1_mma_x8"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_sk_x{}", IQ2_S.kernel_infix, 128),
+            "quant_mmq_iq2_s_q8_1_mma_sk_x128"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_fixup_x{}", IQ2_S.kernel_infix, 128),
+            "quant_mmq_iq2_s_q8_1_mma_fixup_x128"
+        );
+        assert_eq!(IQ2_S.k_multiple, 256);
+        assert_eq!(IQ2_S.x_stride, Q6_K.x_stride);
+        assert_eq!(IQ2_S.x_stride, IQ2_XS.x_stride);
+        assert!(
+            VARIANTS
+                .iter()
+                .all(|&x| smem_bytes(&IQ2_S, x) == smem_bytes(&Q6_K, x))
         );
     }
 }

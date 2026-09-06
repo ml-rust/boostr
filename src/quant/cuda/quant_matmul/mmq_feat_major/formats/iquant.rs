@@ -4,7 +4,8 @@
 //! Split from `kquant.rs`, which now holds only the true K-quants. Every
 //! format here resolves its index during staging, so the staged row is always
 //! one an existing `vec_dot` already consumes — Q8_0's where the scale changes
-//! every 32 elements, Q6_K's where it changes every 16.
+//! every 32 elements, Q6_K's where it changes every 16, and Q4_K's for IQ1_S,
+//! whose affine value needs a scale/min pair rather than a bare scale.
 
 use super::FeatMajorFormat;
 
@@ -127,11 +128,45 @@ pub(in crate::quant::cuda::quant_matmul) const IQ3_S: FeatMajorFormat = FeatMajo
     act_scratch_ints_per_token: 0,
 };
 
+/// IQ1_S: 50-byte blocks of 256 elements, staged as Q4_K's row int for int —
+/// 64 quant words plus 8 `(f32, f32)` pairs plus 4 ints of bank padding. It is
+/// the only i-quant that does NOT stage a `vec_dot_d`-shaped row.
+///
+/// Its 8-component grid is the IQ2 formats' width, but its entries are
+/// ALREADY-SIGNED bytes in `{-1, 0, 1}`: there is no sign table and nothing to
+/// fold. An 8-element sub-group takes its low 8 index bits from `qs` and three
+/// more from its group's `qh` u16, an 11-bit index into 2048 points.
+///
+/// THE AFFINE VALUE. Its dequantized value is `dl * (g + delta)` with
+/// `delta = +/- 0.125` — an affine transform, not a scale times an int8, so a
+/// single scaled int32 dot cannot express it. Over one 32-element group the
+/// contribution splits as `dl * dot(a, g) + dl * delta * sum(a)`, which is
+/// exactly the two-term shape `mmqf_vec_dot_dm` already computes for Q4_K,
+/// Q5_K, Q4_1 and Q5_1. So the kernel stages `(dl, dl * delta)` where those
+/// formats stage `(d, m)` and reuses their `vec_dot` unchanged. The split is
+/// exact: the block sum that second term multiplies is the int16 the
+/// activation producer stores in its header word, not a rounded `half`.
+///
+/// The delta term is ADDITIVE, so the pair's second component is stored
+/// unnegated — Q4_1's convention, not Q4_K's `-dmin * m`. The delta's own sign
+/// comes from bit 15 of the group's `qh` word and is folded in at staging.
+///
+/// `dl` and `delta` are both constant across a whole 32-element group, which
+/// is the granularity `mmqf_vec_dot_dm` indexes at, so the row carries 8 pairs
+/// and needs no widening. Both components are f32, never `half`, for the same
+/// parity reason as Q4_K. K must be a whole number of blocks.
+pub(in crate::quant::cuda::quant_matmul) const IQ1_S: FeatMajorFormat = FeatMajorFormat {
+    kernel_infix: "iq1_s",
+    x_stride: 84,
+    k_multiple: 256,
+    act_scratch_ints_per_token: 0,
+};
+
 #[cfg(test)]
 mod tests {
     use super::super::super::dispatch::{VARIANTS, smem_bytes};
-    use super::super::kquant::Q6_K;
-    use super::super::legacy::Q8_0;
+    use super::super::kquant::{Q4_K, Q6_K};
+    use super::super::legacy::{Q4_1, Q8_0};
     use super::*;
 
     /// IQ4_XS is the first 256-element format in the family that stages the
@@ -309,13 +344,46 @@ mod tests {
         );
     }
 
-    /// No i-quant carries a minimum term, so none asks for activation scratch;
-    /// Q2_K remains the family's only claimant. Asserted here as well as in
-    /// `kquant.rs` so a new i-quant descriptor that copies the wrong template
-    /// fails a test rather than silently enlarging every launch's request.
+    /// IQ1_S is the family's only AFFINE format: its value is
+    /// `dl * (grid + delta)`, so it cannot stage a `vec_dot_d` row. The split
+    /// `dl * dot(a, g) + dl * delta * sum(a)` is per 32 elements, which is the
+    /// scale/min shape `mmqf_vec_dot_dm` already consumes, so it stages Q4_K's
+    /// row — and Q4_1's, whose ADDITIVE min sign it also takes. All three
+    /// strides must stay equal, and with them the family's shared-memory
+    /// request at every token tile.
+    #[test]
+    fn the_iq1_s_descriptor_names_the_compiled_symbols() {
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_x{}", IQ1_S.kernel_infix, 8),
+            "quant_mmq_iq1_s_q8_1_mma_x8"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_sk_x{}", IQ1_S.kernel_infix, 128),
+            "quant_mmq_iq1_s_q8_1_mma_sk_x128"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_fixup_x{}", IQ1_S.kernel_infix, 128),
+            "quant_mmq_iq1_s_q8_1_mma_fixup_x128"
+        );
+        assert_eq!(IQ1_S.k_multiple, 256);
+        assert_eq!(IQ1_S.x_stride, Q4_K.x_stride);
+        assert_eq!(IQ1_S.x_stride, Q4_1.x_stride);
+        assert!(
+            VARIANTS
+                .iter()
+                .all(|&x| smem_bytes(&IQ1_S, x) == smem_bytes(&Q4_K, x))
+        );
+    }
+
+    /// No i-quant asks for activation scratch; Q2_K remains the family's only
+    /// claimant. IQ1_S does carry a minimum term, but at the 32-element
+    /// granularity the activation record's own block sum already has, so it
+    /// needs no per-16 split. Asserted here as well as in `kquant.rs` so a new
+    /// i-quant descriptor that copies the wrong template fails a test rather
+    /// than silently enlarging every launch's request.
     #[test]
     fn no_iquant_asks_for_activation_scratch() {
-        for f in [&IQ4_XS, &IQ2_XXS, &IQ2_XS, &IQ2_S, &IQ3_XXS, &IQ3_S] {
+        for f in [&IQ4_XS, &IQ2_XXS, &IQ2_XS, &IQ2_S, &IQ3_XXS, &IQ3_S, &IQ1_S] {
             assert_eq!(f.act_scratch_ints_per_token, 0);
             // The family's bank-padding rule, asserted in the kernel as well.
             assert_eq!(f.x_stride % 8, 4);

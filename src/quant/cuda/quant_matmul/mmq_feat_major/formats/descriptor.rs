@@ -21,9 +21,17 @@ pub(in crate::quant::cuda::quant_matmul) struct FeatMajorFormat {
     /// `true` when tile-parallel outruns stream-k at a geometry where
     /// `dispatch.rs` picks stream-k.
     ///
-    /// The rule `tiles < 2 * sms` assumes stream-k's saved wave outweighs its
-    /// fixup pass and longer serial K chain. That holds for most formats. For
-    /// a few, per-K-slice decode cost makes tile-parallel win instead.
+    /// The rule `tiles < 2 * sms` assumes the wave stream-k saves is what
+    /// binds. For most formats it is. For a few it is not: their stream-k
+    /// kernel stalls on global-memory dependencies and saturates neither
+    /// compute nor bandwidth, so saving a wave buys nothing. The fixup pass
+    /// is not the cost.
+    ///
+    /// A decode that chains a dependent table lookup shows this most
+    /// clearly. Stream-k runs one block per SM, too few warps to cover the
+    /// second load; the tile-parallel grid packs more blocks per SM and
+    /// covers it. That does not account for every format flagged here, so
+    /// measure the two kernels rather than infer from the decode shape.
     ///
     /// Measured, not derived. No device capability predicts it. Taken on one
     /// GPU architecture, so it can differ on others.

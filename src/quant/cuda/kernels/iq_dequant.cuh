@@ -57,6 +57,19 @@ static __device__ __forceinline__ float iq_sign(unsigned char sign_byte, int pos
     return ((sign_byte >> pos) & 1) ? -1.0f : 1.0f;
 }
 
+// Per-byte negation mask for four consecutive components of a sign byte:
+// byte `t` is 0xFF when bit `4 * nib + t` of `sign_byte` is set, else 0x00.
+// `__vsub4(mag ^ mask, mask)` then negates exactly the components the sign
+// table marks, with no branch and no per-byte select — the packed-int form of
+// `iq_sign` above, for a decoder that keeps four magnitudes in one int.
+static __device__ __forceinline__ unsigned int iq_sign_mask4(unsigned char sign_byte, int nib) {
+    const unsigned int bits = ((unsigned int)sign_byte >> (4 * nib)) & 0x0Fu;
+    // Bit `t` moves to bit `8 * t`: shifts of 0, 7, 14 and 21 spread the
+    // nibble one bit per byte, and the mask drops everything else.
+    const unsigned int spread = (bits | (bits << 7) | (bits << 14) | (bits << 21)) & 0x01010101u;
+    return __vcmpne4(spread, 0u);
+}
+
 // The 4-bit scale for grid entry `entry`, packed two per byte.
 static __device__ __forceinline__ int iq_packed_scale(const unsigned char* scales, int entry) {
     const int k = entry / 2;

@@ -372,7 +372,11 @@ const COSINE_FLOOR: f64 = 0.999;
 
 /// Cosine gate for formats whose CUDA `quant_matmul` quantizes the activation
 /// to Q8_1 while CPU uses f32: `Q8_0`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q4K`,
-/// `Q5K`, `Q6K`, `Q2K`, `Q3K`, `IQ4NL`, `IQ4XS`.
+/// `Q5K`, `Q6K`, `Q2K`, `Q3K`, `IQ4NL`, `IQ4XS`, `IQ2XXS`.
+///
+/// Only the GEMM (`m > 16`) callers of these formats take that path; their
+/// `m = 2` twins route to GEMV, which reads the f32 activation, and stay on
+/// the element-wise gate.
 ///
 /// An element-wise tolerance cannot gate these: per-element activation error
 /// enters the output multiplied by `sum|w|` over the reduction, while the
@@ -1764,7 +1768,7 @@ fn iq2_xxs_quant_matmul_gemm_matches_cpu() {
             blk[2 + i] = payload(i, b);
         }
     }
-    assert_matmul_parity_m(
+    assert_matmul_parity_q8_1_activation(
         "iq2_xxs_quant_matmul_gemm_matches_cpu",
         QuantFormat::IQ2XXS,
         &data,

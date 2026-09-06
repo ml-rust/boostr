@@ -93,6 +93,25 @@ pub(in crate::quant::cuda::quant_matmul) const IQ4_XS: FeatMajorFormat = FeatMaj
     act_scratch_ints_per_token: 0,
 };
 
+/// IQ2_XXS: 66-byte blocks of 256 elements, staged as Q8_0's row byte for byte
+/// — 64 quant words plus 8 f32 sub-block scales plus 4 ints of bank padding.
+/// The family's first GRID-INDEXED format: each byte of `qs` is an index into
+/// a 256-entry codebook whose entry expands to EIGHT magnitude bytes, and a
+/// 7-bit field of the same group's `aux` word indexes a sign table that
+/// supplies one bit per expanded component. The kernel expands the point and
+/// folds the sign in while staging, so the staged lanes are signed int8 and
+/// the whole `vec_dot` is Q8_0's. Its scale changes every 32 elements, which
+/// is the granularity that `vec_dot` already indexes at, so it stages 8 f32
+/// rather than Q6_K's 16 and needs no wider row. The staged scale is f32 and
+/// already multiplied by `d`, for the same parity reason as Q4_K. K must be a
+/// whole number of blocks.
+pub(in crate::quant::cuda::quant_matmul) const IQ2_XXS: FeatMajorFormat = FeatMajorFormat {
+    kernel_infix: "iq2_xxs",
+    x_stride: 76,
+    k_multiple: 256,
+    act_scratch_ints_per_token: 0,
+};
+
 #[cfg(test)]
 mod tests {
     use super::super::super::dispatch::{FEAT_TILE, VARIANTS, smem_bytes, smem_opt_in_limit};
@@ -297,6 +316,35 @@ mod tests {
             VARIANTS
                 .iter()
                 .all(|&x| smem_bytes(&IQ4_XS, x) == smem_bytes(&Q8_0, x))
+        );
+    }
+
+    /// IQ2_XXS stages the Q8_0 row like IQ4_XS: staging expands its grid point
+    /// to signed int8 and folds the sign in, and its scale granularity is the
+    /// 32 elements `mmqf_vec_dot_d` already indexes at, so it needs neither a
+    /// bias nor a wider scale record. The two strides must therefore stay
+    /// equal, and with them the family's shared-memory request at every token
+    /// tile.
+    #[test]
+    fn the_iq2_xxs_descriptor_names_the_compiled_symbols() {
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_x{}", IQ2_XXS.kernel_infix, 8),
+            "quant_mmq_iq2_xxs_q8_1_mma_x8"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_sk_x{}", IQ2_XXS.kernel_infix, 128),
+            "quant_mmq_iq2_xxs_q8_1_mma_sk_x128"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_fixup_x{}", IQ2_XXS.kernel_infix, 128),
+            "quant_mmq_iq2_xxs_q8_1_mma_fixup_x128"
+        );
+        assert_eq!(IQ2_XXS.k_multiple, 256);
+        assert_eq!(IQ2_XXS.x_stride, Q8_0.x_stride);
+        assert!(
+            VARIANTS
+                .iter()
+                .all(|&x| smem_bytes(&IQ2_XXS, x) == smem_bytes(&Q8_0, x))
         );
     }
 }

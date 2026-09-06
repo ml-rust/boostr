@@ -13,6 +13,7 @@
 #include <cuda_fp16.h>
 
 #include "decode.cuh"
+#include "iq_dequant.cuh"
 #include "mma_int8.cuh"
 
 #define WARP_SIZE 32
@@ -314,12 +315,12 @@ extern __shared__ int mmqf_smem[];
 // serialize on the load.
 
 // Shared `vec_dot` for the formats whose weight term is a scale alone. Q8_0,
-// Q4_0, Q5_0, IQ4_NL and IQ4_XS differ ONLY in how `stage` unpacks quants;
-// once staged, their weight row is the same shape — signed quants in the int8
-// lanes plus eight f32 scales, one per 32 elements — and their arithmetic is
-// identical, so all five formats' `vec_dot` forward here. IQ4_XS is the one
-// 256-element super-block among them: its scale granularity is still 32
-// elements, so a staged 256-k group takes the same eight scales.
+// Q4_0, Q5_0, IQ4_NL, IQ4_XS and IQ2_XXS differ ONLY in how `stage` unpacks
+// quants; once staged, their weight row is the same shape — signed quants in
+// the int8 lanes plus eight f32 scales, one per 32 elements — and their
+// arithmetic is identical, so all six formats' `vec_dot` forward here. IQ4_XS
+// and IQ2_XXS are the 256-element blocks among them: their scale granularity
+// is still 32 elements, so a staged 256-k group takes the same eight scales.
 // The three offsets are template parameters rather than hard constants so a
 // format that shifts its row layout still reuses this body.
 //
@@ -417,8 +418,8 @@ static __device__ __forceinline__ void mmqf_vec_dot_d(
 // Weight format policy. The format-generic machinery below reaches the weight
 // tile only through one of these: the on-disk block geometry, the staged
 // weight-row layout, and the two functions that touch weight data. Q8_0, Q4_0,
-// Q4_1, Q5_0, Q5_1, Q4_K, Q5_K, Q6_K, Q3_K, Q2_K, IQ4_NL and IQ4_XS are the
-// instantiations.
+// Q4_1, Q5_0, Q5_1, Q4_K, Q5_K, Q6_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS and IQ2_XXS
+// are the instantiations.
 struct MmqfQ80 {
     // On-disk block: one f16 scale then 32 int8 quants.
     static constexpr int BLOCK_BYTES = 34;
@@ -2530,6 +2531,179 @@ struct MmqfIQ4XS {
     }
 };
 
+// IQ2_XXS weight format policy, same contract as `MmqfQ80`.
+//
+// The family's first GRID-INDEXED format. IQ2_XXS is a 256-element block of 66
+// bytes: `f16 d`@0 then `qs[64]`@2, read as eight pairs of u32. The first u32
+// of a pair holds four 8-bit indices into `IQ2XXS_GRID`, whose entry expands to
+// EIGHT magnitude bytes; the second holds the group's 4-bit scale in its top
+// nibble over four 7-bit indices into `KSIGNS`, one sign bit per expanded
+// component. Reading `qs` as packed 2-bit magnitudes still yields finite,
+// plausibly scaled numbers, which is why both tables live in exactly one place
+// (`iq_grid.cuh`) for every CUDA kernel.
+//
+// Staging EXPANDS the grid point to signed int8 and folds the sign in, so the
+// staged row is Q8_0's unchanged — signed quants in the int8 lanes plus one f32
+// scale per 32-element sub-block — and `vec_dot` is Q8_0's. The grid's only
+// magnitudes are 8, 25 and 43, so a negated component still fits an int8 lane.
+// A group of 32 elements is exactly one sub-block, which is the granularity
+// `mmqf_vec_dot_d` already indexes at.
+//
+// The scale is staged as f32 already multiplied by `d`, never through `half`:
+// `half` has an 11-bit significand and rounding `d * (0.5 + s) * 0.25` to it
+// perturbs every sub-block's contribution past the bound the GEMM/GEMV parity
+// tests hold this path to.
+//
+// ALIGNMENT. The block is 66 bytes, so a row base (`supers * 66`) and every
+// block base inside it are only 2-byte aligned, and `qs`@2 with it. Every
+// 4-byte read of `qs` therefore goes through `load_int_ua`; a plain `int` load
+// raises CUDA_ERROR_MISALIGNED_ADDRESS, which poisons the context for every
+// later launch on it. The `f16 d`@0 is 2-byte aligned, which is
+// `alignof(__half)`, and is read directly.
+struct MmqfIQ2XXS {
+    // On-disk block: one f16 scale then 64 bytes of grid indices, scales and
+    // sign-table indices.
+    static constexpr int BLOCK_BYTES = 66;
+    static constexpr int BLOCK_ELEMS = 256;
+    // Dispatch gates on `k % 256 == 0`, so a row's last 256-k group is always
+    // whole and the ragged tail path is not compiled.
+    static constexpr bool RAGGED_K = false;
+    // No per-16 minimum, so no activation scratch.
+    static constexpr int Y_SCRATCH = 0;
+
+    // Staged weight row: Q8_0's, byte for byte. 64 quant words (256 k-values),
+    // then 8 f32 sub-block scales, then padding that makes the stride an odd
+    // multiple of 4 ints so the strided fragment gathers hit all 32 banks.
+    static constexpr int X_QS = 0;
+    static constexpr int X_DS = 64;
+    static constexpr int X_STRIDE = 76;
+    static_assert(X_DS + 8 <= X_STRIDE, "Weight row too short: 8 sub-block scales.");
+    static_assert(
+        X_QS == MmqfQ80::X_QS && X_DS == MmqfQ80::X_DS && X_STRIDE == MmqfQ80::X_STRIDE,
+        "IQ2_XXS must stage into the Q8_0 row; the two share `mmqf_vec_dot_d`."
+    );
+
+    // Stages 256 k-values, which for this format is exactly ONE block. `b0`
+    // counts 32-element Q8_1 activation blocks, so the block index is `b0 / 8`.
+    //
+    // Quant map, derived from `dequant_iq2_xxs` in
+    // `src/quant/cpu/kernels/dequant_iq2.rs` and matching the per-block decoder
+    // `iq2_xxs_dequant_block` in `iq_dequant.cuh`. Element `e` sits at
+    // `group = e / 32`, `sub = (e % 32) / 8`, `j = e % 8`. Its group's index
+    // word is at `qs + 8 * group` and its `aux` word 4 bytes further on; `sub`
+    // picks the byte of the index word and the 7-bit `KSIGNS` field of `aux`;
+    // `j` picks the magnitude byte of the grid entry and the sign bit.
+    //
+    // A lane therefore owns one (group, sub) pair: `group = lane / 4`,
+    // `sub = lane % 4`, which covers all 8 groups with 4 lanes each and needs
+    // TWO global loads per lane. That pair is 8 elements, so it fills the two
+    // staged words `8 * group + 2 * sub` and the next — the grid entry's low
+    // u32 holds components 0..3 and its high u32 components 4..7, in element
+    // order, which is the order an int8 lane quadruple is read back in. Under
+    // that map a staged word `w` belongs to group `w / 8`, which is exactly the
+    // scale index `mmqf_vec_dot_d` reads at `X_DS + kw / 8`.
+    template <int MMQ_X, bool CLAMP_K>
+    static __device__ __forceinline__ void stage(
+        const unsigned char* __restrict__ weight, int* __restrict__ s_x, unsigned int N,
+        unsigned int bpr, unsigned int feat0, unsigned int b0
+    ) {
+        const unsigned int lane = threadIdx.x % WARP_SIZE;
+        const unsigned int warp = threadIdx.x / WARP_SIZE;
+        const unsigned int grp = lane / 4;   // 32-element group within the block
+        const unsigned int sub = lane % 4;   // 8-element run within that group
+
+        // Tile-local cap: clamping `i` to this and adding `feat0` back gives a
+        // feature row inside the matrix. The clamp is on the TILE-LOCAL index;
+        // the tile origin is added after it, never folded into it.
+        const unsigned int i_max = N - feat0 - 1;
+        const unsigned int supers = bpr / (BLOCK_ELEMS / 32);
+        const unsigned long long rstride = (unsigned long long)supers * BLOCK_BYTES;
+        const unsigned int sup =
+            CLAMP_K ? min(b0 / (BLOCK_ELEMS / 32), supers - 1) : b0 / (BLOCK_ELEMS / 32);
+        const unsigned long long off_blk = (unsigned long long)sup * BLOCK_BYTES;
+
+        // Row-invariant, so the addressing collapses to one add per row.
+        const unsigned long long off_ind = off_blk + 2 + (unsigned long long)grp * 8;
+        const unsigned long long off_aux = off_ind + 4;
+        const unsigned int w_lo = grp * 8 + sub * 2;
+
+        constexpr int ROWS = MMQF_Y / MMQF_WARPS;
+        constexpr int BATCH = MMQF_STAGE_BATCH(MMQ_X);
+        static_assert(ROWS % BATCH == 0, "Weight row batches are ragged.");
+
+#pragma unroll
+        for (int g = 0; g < ROWS / BATCH; ++g) {
+            int vi[BATCH];
+            int va[BATCH];
+#pragma unroll
+            for (int u = 0; u < BATCH; ++u) {
+                const unsigned int i = (unsigned int)((g * BATCH + u) * MMQF_WARPS) + warp;
+                const unsigned char* row = weight + (feat0 + min(i, i_max)) * rstride;
+                vi[u] = load_int_ua(row + off_ind);
+                va[u] = load_int_ua(row + off_aux);
+            }
+#pragma unroll
+            for (int u = 0; u < BATCH; ++u) {
+                const unsigned int i = (unsigned int)((g * BATCH + u) * MMQF_WARPS) + warp;
+                // Both table lookups sit in the SECOND loop, so neither
+                // separates a global load from the next load's issue.
+                const unsigned long long point =
+                    IQ2XXS_GRID[((unsigned int)vi[u] >> (8 * sub)) & 0xFFu];
+                const unsigned char signs = KSIGNS[((unsigned int)va[u] >> (7 * sub)) & 0x7Fu];
+                // `__vsub4(mag ^ mask, mask)` is a per-byte negate-if: a byte
+                // whose mask is 0xFF becomes `(255 - mag) - 255 = -mag`, and a
+                // byte whose mask is 0 is untouched. No borrow crosses a lane.
+                const unsigned int m_lo = iq_sign_mask4(signs, 0);
+                const unsigned int m_hi = iq_sign_mask4(signs, 1);
+                const unsigned int mag_lo = (unsigned int)point;
+                const unsigned int mag_hi = (unsigned int)(point >> 32);
+                s_x[i * X_STRIDE + X_QS + w_lo] = (int)__vsub4(mag_lo ^ m_lo, m_lo);
+                s_x[i * X_STRIDE + X_QS + w_lo + 1] = (int)__vsub4(mag_hi ^ m_hi, m_hi);
+            }
+        }
+
+        // Scale pass: eight per row, so a warp covers four rows. `d` and the
+        // group's `aux` word are at row-invariant offsets, so the first loop is
+        // pure loads and the 4-bit scale is unpacked in the second, on
+        // registers.
+        float* s_xd = (float*)s_x;
+        const unsigned int sb = lane % 8;  // 32-element group
+        const unsigned int rsub = lane / 8;
+        const unsigned long long off_sc = off_blk + 2 + (unsigned long long)sb * 8 + 4;
+
+        constexpr int SROWS = MMQF_Y / (MMQF_WARPS * 4);
+        __half d_h[SROWS];
+        int aux[SROWS];
+#pragma unroll
+        for (int u = 0; u < SROWS; ++u) {
+            const unsigned int i = (unsigned int)(u * MMQF_WARPS * 4) + warp * 4 + rsub;
+            const unsigned char* row = weight + (feat0 + min(i, i_max)) * rstride;
+            d_h[u] = *reinterpret_cast<const __half*>(row + off_blk);
+            aux[u] = load_int_ua(row + off_sc);
+        }
+#pragma unroll
+        for (int u = 0; u < SROWS; ++u) {
+            const unsigned int i = (unsigned int)(u * MMQF_WARPS * 4) + warp * 4 + rsub;
+            // Top nibble of `aux` is the group's 4-bit scale `s`, and the
+            // sub-block scale is `d * (0.5 + s) * 0.25`.
+            const float s = (float)((unsigned int)aux[u] >> 28);
+            s_xd[i * X_STRIDE + X_DS + sb] = __half2float(d_h[u]) * (0.5f + s) * 0.25f;
+        }
+    }
+
+    // Forwards to `mmqf_vec_dot_d`, shared with Q8_0: once staging has expanded
+    // the grid point and folded the sign in, the two rows are
+    // indistinguishable.
+    template <int MMQ_X, bool FULL>
+    static __device__ __forceinline__ void vec_dot(
+        const int* __restrict__ s_x, const int* __restrict__ s_y,
+        float (&acc)[MMQF_NJ(MMQ_X)][MMQF_NTX(MMQ_X)][4], unsigned int i0, unsigned int jb,
+        unsigned int k00, unsigned int nks
+    ) {
+        mmqf_vec_dot_d<MMQ_X, FULL, X_QS, X_DS, X_STRIDE>(s_x, s_y, acc, i0, jb, k00, nks);
+    }
+};
+
 // Stages 128 k-values of the activation tile as a FLAT COPY. The repacked
 // layout indexes records k-group-major, token-minor, so the `MMQ_X` records a
 // token tile needs are contiguous and the shared row IS the record: 4 header
@@ -3164,6 +3338,18 @@ MMQ_FM_KERNEL(MmqfIQ4XS, iq4_xs, 80)
 MMQ_FM_KERNEL(MmqfIQ4XS, iq4_xs, 96)
 MMQ_FM_KERNEL(MmqfIQ4XS, iq4_xs, 112)
 MMQ_FM_KERNEL(MmqfIQ4XS, iq4_xs, 128)
+
+MMQ_FM_KERNEL(MmqfIQ2XXS, iq2_xxs, 8)
+MMQ_FM_KERNEL(MmqfIQ2XXS, iq2_xxs, 16)
+MMQ_FM_KERNEL(MmqfIQ2XXS, iq2_xxs, 24)
+MMQ_FM_KERNEL(MmqfIQ2XXS, iq2_xxs, 32)
+MMQ_FM_KERNEL(MmqfIQ2XXS, iq2_xxs, 40)
+MMQ_FM_KERNEL(MmqfIQ2XXS, iq2_xxs, 48)
+MMQ_FM_KERNEL(MmqfIQ2XXS, iq2_xxs, 64)
+MMQ_FM_KERNEL(MmqfIQ2XXS, iq2_xxs, 80)
+MMQ_FM_KERNEL(MmqfIQ2XXS, iq2_xxs, 96)
+MMQ_FM_KERNEL(MmqfIQ2XXS, iq2_xxs, 112)
+MMQ_FM_KERNEL(MmqfIQ2XXS, iq2_xxs, 128)
 
 // Reads Q8_1 sub-block `b` of both operands into registers, one iteration
 // ahead, same reason as `mmq_q8_0_stage_load`.

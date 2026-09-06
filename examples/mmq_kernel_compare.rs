@@ -1,11 +1,12 @@
 //! Launches the dp4a and tensor-core MMQ kernels back to back in one process,
 //! on identical inputs, so a profiler attributes instruction counts to each
-//! kernel without an A/B rebuild. Covers Q8_0, Q4_0, Q4_K, Q5_K and Q6_K via
-//! `--format`.
+//! kernel without an A/B rebuild. Covers Q8_0, Q4_0, Q4_K, Q5_K, Q6_K, Q3_K
+//! and Q2_K via `--format`.
 //!
-//! Q4_0 and Q5_K have no token-major kernel of either kind — neither
-//! `quant_mmq_q4_0_q8_1` / `quant_mmq_q5_k_q8_1` nor their `_mma` twins exist —
-//! so for those formats the tool runs and checks the feature-major kernels
+//! Q4_0, Q5_K, Q3_K and Q2_K have no token-major kernel of either kind —
+//! neither `quant_mmq_q4_0_q8_1` / `quant_mmq_q5_k_q8_1` /
+//! `quant_mmq_q3_k_q8_1` / `quant_mmq_q2_k_q8_1` nor their `_mma` twins exist
+//! — so for those formats the tool runs and checks the feature-major kernels
 //! alone and skips the token-major comparison rather than resolving a symbol
 //! that is not compiled.
 //!
@@ -20,6 +21,10 @@
 //!     --format q5_k --n 4096 --k 14336 --m 512
 //! cargo run --release --features cuda --example mmq_kernel_compare -- \
 //!     --format q6_k --n 4096 --k 14336 --m 512
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format q3_k --n 4096 --k 14336 --m 512
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format q2_k --n 4096 --k 14336 --m 512
 //! ```
 
 #[cfg(not(feature = "cuda"))]
@@ -57,9 +62,15 @@ const MMQ_X_VARIANTS: &[u32] = &[8, 16, 24, 32, 40, 48, 64, 80, 96, 112, 128];
 
 /// Dynamic shared memory one feature-major variant needs. The larger ones are
 /// above the 48KB static limit, so it is allocated dynamically and opted into.
+///
+/// `act_scratch` is the format's per-token scratch region after the activation
+/// tile, which only Q2_K asks for. It MUST be threaded through here as well as
+/// through the stride: this mirror has desynced from
+/// `mmq_feat_major::dispatch::smem_bytes` before, and a kernel opted in to less
+/// shared memory than it indexes fails in a way that reads as a kernel bug.
 #[cfg(feature = "cuda")]
-const fn mmq_x_smem_bytes(x_stride: u32, mmq_x: u32) -> u32 {
-    4 * (128 * x_stride + mmq_x * 36)
+const fn mmq_x_smem_bytes(x_stride: u32, act_scratch: u32, mmq_x: u32) -> u32 {
+    4 * (128 * x_stride + mmq_x * (36 + act_scratch))
 }
 
 /// Picks the feature-major variant that launches the fewest token tiles for
@@ -67,10 +78,10 @@ const fn mmq_x_smem_bytes(x_stride: u32, mmq_x: u32) -> u32 {
 /// and less shared memory. `smem_limit` is the device's per-block opt-in
 /// maximum.
 #[cfg(feature = "cuda")]
-fn select_mmq_x(m: u32, smem_limit: u32, x_stride: u32) -> Option<u32> {
+fn select_mmq_x(m: u32, smem_limit: u32, x_stride: u32, act_scratch: u32) -> Option<u32> {
     let mut best: Option<(u32, u32)> = None;
     for &mmq_x in MMQ_X_VARIANTS {
-        if mmq_x_smem_bytes(x_stride, mmq_x) > smem_limit {
+        if mmq_x_smem_bytes(x_stride, act_scratch, mmq_x) > smem_limit {
             continue;
         }
         let tiles = m.div_ceil(mmq_x);
@@ -355,6 +366,125 @@ fn q6_k_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize
     (sum, magnitude)
 }
 
+/// Unpacks Q3_K's 16 signed 6-bit scales from the 12 packed bytes.
+///
+/// Ground-truthed against `unpack_q3k_scales` in
+/// `src/quant/cpu/kernels/dequant_k_quants/q2k_q3k.rs`, restated here per
+/// scale rather than as four u32 lanes. With `g = j / 4`, scale `j` takes its
+/// low nibble from byte `j % 4 + 4 * (g & 1)` (nibble `g / 2`) and its high
+/// bit pair from byte `8 + j % 4` (bit pair `g`), and the 6-bit result is
+/// biased by 32.
+#[cfg(feature = "cuda")]
+fn q3_k_scales(sc: &[u8]) -> [i32; 16] {
+    let mut out = [0i32; 16];
+    for (j, slot) in out.iter_mut().enumerate() {
+        let g = j / 4;
+        let lo = i32::from(sc[j % 4 + 4 * (g & 1)] >> (4 * (g / 2))) & 0x0F;
+        let hi = i32::from(sc[8 + j % 4] >> (2 * g)) & 0x03;
+        *slot = (lo | (hi << 4)) - 32;
+    }
+    out
+}
+
+/// Exact reference for one output element, in f64, for a Q3_K weight against
+/// a Q8_1 activation, plus the accumulated magnitude of the sum.
+///
+/// Dequant math and byte offsets are ground-truthed against `dequant_q3k` in
+/// `src/quant/cpu/kernels/dequant_k_quants/q2k_q3k.rs`: per 256-element
+/// super-block, 32-byte `hmask`@0, 64-byte `qs`@32, 12 packed 6-bit signed
+/// scales@96 (one per 16 elements), f16 `d`@108 (last, not first). Element
+/// `pos` takes two low bits from `qs[32 * (pos / 128) + pos % 32]` at shift
+/// `2 * ((pos % 128) / 32)` and one high bit from `hmask[pos % 32]` at bit
+/// `4 * (pos / 128) + (pos % 128) / 32`. That high bit is INVERTED: a SET bit
+/// means do NOT subtract 4, so the quant is `low2 - (bit ? 0 : 4)`, in
+/// [-4, 3], and `x = d * scale * q`.
+#[cfg(feature = "cuda")]
+fn q3_k_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
+    const SUPER: usize = 256;
+    const BYTES: usize = 110;
+    let bpr = k / SUPER;
+    let abpr = k / 32;
+    let mut sum = 0.0f64;
+    let mut magnitude = 0.0f64;
+    for sup in 0..bpr {
+        let wb = (feat * bpr + sup) * BYTES;
+        let hmask = &weight[wb..wb + 32];
+        let qs = &weight[wb + 32..wb + 96];
+        let scales = q3_k_scales(&weight[wb + 96..wb + 108]);
+        let d = f64::from(half::f16::from_le_bytes([weight[wb + 108], weight[wb + 109]]).to_f32());
+
+        for pos in 0..SUPER {
+            let n = pos / 128;
+            let t = (pos % 128) / 32;
+            let r = pos % 32;
+            let low2 = i32::from((qs[32 * n + r] >> (2 * t)) & 3);
+            let high_sub = if hmask[r] & (1u8 << (4 * n + t)) != 0 {
+                0
+            } else {
+                4
+            };
+            let w = d * f64::from(scales[pos / 16]) * f64::from(low2 - high_sub);
+            let elem = sup * SUPER + pos;
+            let ab = (token * abpr + elem / 32) * 36;
+            let ad = f64::from(half::f16::from_le_bytes([act[ab], act[ab + 1]]).to_f32());
+            let aq = f64::from(act[ab + 4 + elem % 32] as i8);
+            let contribution = w * ad * aq;
+            sum += contribution;
+            magnitude += contribution.abs();
+        }
+    }
+    (sum, magnitude)
+}
+
+/// Exact reference for one output element, in f64, for a Q2_K weight against
+/// a Q8_1 activation, plus the accumulated magnitude of the sum.
+///
+/// Dequant math and byte offsets are ground-truthed against `dequant_q2k` in
+/// `src/quant/cpu/kernels/dequant_k_quants/q2k_q3k.rs`: per 256-element
+/// super-block, 16 `scales`@0 (low nibble the scale, high nibble the minimum,
+/// one pair per 16 elements), 64-byte `qs`@16, f16 `d`@80, f16 `dmin`@82.
+///
+/// Element `pos` takes two UNSIGNED bits from
+/// `qs[32 * (pos / 128) + 16 * ((pos % 32) / 16) + pos % 16]` at shift
+/// `2 * ((pos % 128) / 32)`, and its scale pair is `scales[pos / 16]`, so
+/// `x = d * (sc & 0x0F) * q - dmin * (sc >> 4)`. The minimum does not depend
+/// on `q` — it is the term the kernel folds into a rank-1 correction against
+/// the activation's per-16 quant sum.
+#[cfg(feature = "cuda")]
+fn q2_k_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
+    const SUPER: usize = 256;
+    const BYTES: usize = 84;
+    let bpr = k / SUPER;
+    let abpr = k / 32;
+    let mut sum = 0.0f64;
+    let mut magnitude = 0.0f64;
+    for sup in 0..bpr {
+        let wb = (feat * bpr + sup) * BYTES;
+        let scales = &weight[wb..wb + 16];
+        let qs = &weight[wb + 16..wb + 80];
+        let d = f64::from(half::f16::from_le_bytes([weight[wb + 80], weight[wb + 81]]).to_f32());
+        let dmin = f64::from(half::f16::from_le_bytes([weight[wb + 82], weight[wb + 83]]).to_f32());
+
+        for pos in 0..SUPER {
+            let n = pos / 128;
+            let t = (pos % 128) / 32;
+            let h = (pos % 32) / 16;
+            let l = pos % 16;
+            let q = f64::from(i32::from((qs[32 * n + 16 * h + l] >> (2 * t)) & 3));
+            let sc = scales[pos / 16];
+            let w = d * f64::from(i32::from(sc & 0x0F)) * q - dmin * f64::from(i32::from(sc >> 4));
+            let elem = sup * SUPER + pos;
+            let ab = (token * abpr + elem / 32) * 36;
+            let ad = f64::from(half::f16::from_le_bytes([act[ab], act[ab + 1]]).to_f32());
+            let aq = f64::from(act[ab + 4 + elem % 32] as i8);
+            let contribution = w * ad * aq;
+            sum += contribution;
+            magnitude += contribution.abs();
+        }
+    }
+    (sum, magnitude)
+}
+
 /// Output positions sampled for the reference check. A full f64 pass is
 /// O(M*N*K) and far too slow at benchmark shapes, so a fixed spread of
 /// positions is checked instead — enough to catch a wrong index map, a dropped
@@ -372,7 +502,7 @@ const REFERENCE_SAMPLES: usize = 256;
 /// larger than the final result, so f32 rounding error is proportional to
 /// that summed magnitude, not to the result. Dividing by magnitude instead of
 /// result measures error against the quantity f32 rounding is actually
-/// proportional to, so one tight bound serves Q8_0, Q4_K, and Q6_K alike
+/// proportional to, so one tight bound serves Q8_0, Q4_K, Q6_K and Q3_K alike
 /// regardless of how much cancellation each carries.
 ///
 /// The bound must clear the f32 accumulation floor. Summing `K/32` block
@@ -411,8 +541,9 @@ struct RefCase<'a> {
 
 /// Checks sampled outputs against the f64 reference for `format`
 /// ([`q8_0_reference`], [`q4_0_reference`], [`q4_k_reference`],
-/// [`q5_k_reference`], or [`q6_k_reference`]), panicking with the position and both values on the
-/// first breach.
+/// [`q5_k_reference`], [`q6_k_reference`], [`q3_k_reference`], or
+/// [`q2_k_reference`]), panicking
+/// with the position and both values on the first breach.
 #[cfg(feature = "cuda")]
 fn check_against_reference(label: &str, format: MmqFormat, got: &[f32], case: &RefCase) {
     let rtol = REFERENCE_RTOL;
@@ -422,6 +553,8 @@ fn check_against_reference(label: &str, format: MmqFormat, got: &[f32], case: &R
         MmqFormat::Q4K => q4_k_reference,
         MmqFormat::Q5K => q5_k_reference,
         MmqFormat::Q6K => q6_k_reference,
+        MmqFormat::Q3K => q3_k_reference,
+        MmqFormat::Q2K => q2_k_reference,
     };
     let RefCase {
         weight,
@@ -488,6 +621,8 @@ enum MmqFormat {
     Q4K,
     Q5K,
     Q6K,
+    Q3K,
+    Q2K,
 }
 
 #[cfg(feature = "cuda")]
@@ -499,9 +634,12 @@ impl MmqFormat {
             "q4_k" => MmqFormat::Q4K,
             "q5_k" => MmqFormat::Q5K,
             "q6_k" => MmqFormat::Q6K,
-            other => {
-                panic!("unknown --format {other}, expected one of: q8_0, q4_0, q4_k, q5_k, q6_k")
-            }
+            "q3_k" => MmqFormat::Q3K,
+            "q2_k" => MmqFormat::Q2K,
+            other => panic!(
+                "unknown --format {other}, expected one of: \
+                 q8_0, q4_0, q4_k, q5_k, q6_k, q3_k, q2_k"
+            ),
         }
     }
 
@@ -512,6 +650,8 @@ impl MmqFormat {
             MmqFormat::Q4K => "q4_k",
             MmqFormat::Q5K => "q5_k",
             MmqFormat::Q6K => "q6_k",
+            MmqFormat::Q3K => "q3_k",
+            MmqFormat::Q2K => "q2_k",
         }
     }
 
@@ -522,12 +662,15 @@ impl MmqFormat {
     fn block_elems(&self) -> usize {
         match self {
             MmqFormat::Q8_0 | MmqFormat::Q40 => 32,
-            MmqFormat::Q4K | MmqFormat::Q5K | MmqFormat::Q6K => 256,
+            MmqFormat::Q4K | MmqFormat::Q5K | MmqFormat::Q6K | MmqFormat::Q3K | MmqFormat::Q2K => {
+                256
+            }
         }
     }
 
     /// Token-major dp4a MMQ kernel, or `None` for a format that has none.
-    /// Q4_0 and Q5_K have no `quant_mmq_q4_0_q8_1` / `quant_mmq_q5_k_q8_1`:
+    /// Q4_0, Q5_K, Q3_K and Q2_K have no `quant_mmq_q4_0_q8_1` /
+    /// `quant_mmq_q5_k_q8_1` / `quant_mmq_q3_k_q8_1` / `quant_mmq_q2_k_q8_1`:
     /// their only pre-feature-major GEMM path is the dequantize-then-f32
     /// kernel, which this tool does not time.
     fn dp4a_kernel(&self) -> Option<&'static str> {
@@ -537,12 +680,14 @@ impl MmqFormat {
             MmqFormat::Q4K => Some("quant_mmq_q4_k_q8_1"),
             MmqFormat::Q5K => None,
             MmqFormat::Q6K => Some("quant_mmq_q6_k_q8_1"),
+            MmqFormat::Q3K => None,
+            MmqFormat::Q2K => None,
         }
     }
 
     /// Token-major tensor-core MMQ kernel, or `None` for a format that has
-    /// none. Q4_0 and Q5_K have no `_mma` twin; both went straight to the
-    /// feature-major family.
+    /// none. Q4_0, Q5_K, Q3_K and Q2_K have no `_mma` twin; all four went
+    /// straight to the feature-major family.
     fn mma_kernel(&self) -> Option<&'static str> {
         match self {
             MmqFormat::Q8_0 => Some("quant_mmq_q8_0_q8_1_mma"),
@@ -550,6 +695,8 @@ impl MmqFormat {
             MmqFormat::Q4K => Some("quant_mmq_q4_k_q8_1_mma"),
             MmqFormat::Q5K => None,
             MmqFormat::Q6K => Some("quant_mmq_q6_k_q8_1_mma"),
+            MmqFormat::Q3K => None,
+            MmqFormat::Q2K => None,
         }
     }
 
@@ -565,6 +712,8 @@ impl MmqFormat {
             MmqFormat::Q4K => Some("q4_k"),
             MmqFormat::Q5K => Some("q5_k"),
             MmqFormat::Q6K => Some("q6_k"),
+            MmqFormat::Q3K => Some("q3_k"),
+            MmqFormat::Q2K => Some("q2_k"),
         }
     }
 
@@ -578,10 +727,27 @@ impl MmqFormat {
     /// the Q4_K row verbatim; its extra bit changes staging, not layout. Q6_K
     /// reaches the same 84 by a different split: 64 quant words, 16 f32 group
     /// scales (its scale changes every 16 elements) and 4 ints of padding.
+    /// Q3_K stages the Q6_K row verbatim: it shares that 16-element scale
+    /// granularity and, like Q6_K, has no minimum term. Q2_K is the widest at
+    /// 100: 64 quant words, 16 `float2` scale/min pairs (32 ints, twice Q4_K's
+    /// because the granularity is 16 rather than 32) and 4 ints of padding.
     fn feat_major_x_stride(&self) -> u32 {
         match self {
             MmqFormat::Q8_0 | MmqFormat::Q40 => 76,
-            MmqFormat::Q4K | MmqFormat::Q5K | MmqFormat::Q6K => 84,
+            MmqFormat::Q4K | MmqFormat::Q5K | MmqFormat::Q6K | MmqFormat::Q3K => 84,
+            MmqFormat::Q2K => 100,
+        }
+    }
+
+    /// Per-token ints of shared scratch after the activation tile, mirroring
+    /// `FeatMajorFormat::act_scratch_ints_per_token`. Only Q2_K asks for it:
+    /// its minimum changes every 16 elements while the activation record
+    /// stores one sum per 32, so the kernel derives the per-16 split into this
+    /// region once per staged activation tile.
+    fn feat_major_act_scratch(&self) -> u32 {
+        match self {
+            MmqFormat::Q2K => 4,
+            _ => 0,
         }
     }
 
@@ -592,6 +758,8 @@ impl MmqFormat {
             MmqFormat::Q4K => build_q4_k_weight(n, k),
             MmqFormat::Q5K => build_q5_k_weight(n, k),
             MmqFormat::Q6K => build_q6_k_weight(n, k),
+            MmqFormat::Q3K => build_q3_k_weight(n, k),
+            MmqFormat::Q2K => build_q2_k_weight(n, k),
         }
     }
 }
@@ -902,6 +1070,107 @@ fn build_q6_k_weight(n: usize, k: usize) -> Vec<u8> {
     out
 }
 
+/// Builds a Q3_K weight buffer: `n * (k / 256)` super-blocks of 110 bytes.
+///
+/// Layout (authoritative source: `dequant_q3k` in
+/// `src/quant/cpu/kernels/dequant_k_quants/q2k_q3k.rs`): 32-byte `hmask`@0,
+/// 64-byte `qs`@32, 12 packed 6-bit signed scales@96, f16 `d`@108. `d` comes
+/// LAST, not first.
+///
+/// This is the inverse of [`q3_k_reference`]'s unpack, and there is no Q3_K
+/// quantizer in `src/quant/cpu/kernels/quantize/` to copy from, so the packing
+/// is written against that dequantizer directly. Element `pos` contributes its
+/// two low bits to `qs[32 * (pos / 128) + pos % 32]` at shift
+/// `2 * ((pos % 128) / 32)` and its high bit to `hmask[pos % 32]` at bit
+/// `4 * (pos / 128) + (pos % 128) / 32`. The high bit is INVERTED — it is SET
+/// when the value is non-negative — so a target value `v` in [-4, 3] packs as
+/// `low2 = (v + 4) & 3` with the bit set exactly when `v >= 0`.
+#[cfg(feature = "cuda")]
+fn build_q3_k_weight(n: usize, k: usize) -> Vec<u8> {
+    const SUPER: usize = 256;
+    const BYTES: usize = 110;
+    let bpr = k / SUPER;
+    let mut out = vec![0u8; n * bpr * BYTES];
+    for row in 0..n {
+        for sup in 0..bpr {
+            let block = row * bpr + sup;
+            let base = block * BYTES;
+
+            for pos in 0..SUPER {
+                // Target quant, spread over the format's whole [-4, 3] range.
+                let v = ((i32::from(quant_byte(block, pos)) + 128) % 8) - 4;
+                let nn = pos / 128;
+                let t = (pos % 128) / 32;
+                let r = pos % 32;
+                out[base + 32 + 32 * nn + r] |= (((v + 4) & 3) as u8) << (2 * t);
+                if v >= 0 {
+                    out[base + r] |= 1u8 << (4 * nn + t);
+                }
+            }
+
+            // 16 signed 6-bit scales, one per 16 elements, stored biased by 32.
+            for j in 0..16 {
+                let scale = ((block * 17 + j * 9) % 64) as i32 - 32;
+                let u = (scale + 32) as u8;
+                let g = j / 4;
+                out[base + 96 + j % 4 + 4 * (g & 1)] |= (u & 0x0F) << (4 * (g / 2));
+                out[base + 96 + 8 + j % 4] |= ((u >> 4) & 0x03) << (2 * g);
+            }
+
+            out[base + 108..base + 110].copy_from_slice(&block_scale(block).to_le_bytes());
+        }
+    }
+    out
+}
+
+/// Builds a Q2_K weight buffer: `n * (k / 256)` super-blocks of 84 bytes.
+///
+/// Layout (authoritative source: `dequant_q2k` in
+/// `src/quant/cpu/kernels/dequant_k_quants/q2k_q3k.rs`): 16 scale/min bytes@0,
+/// 64-byte `qs`@16, f16 `d`@80, f16 `dmin`@82. Both `d` and `dmin` come LAST.
+///
+/// This is the inverse of [`q2_k_reference`]'s unpack. Element `pos`
+/// contributes its two UNSIGNED bits to
+/// `qs[32 * (pos / 128) + 16 * ((pos % 32) / 16) + pos % 16]` at shift
+/// `2 * ((pos % 128) / 32)`. Each scale byte packs the scale in its low nibble
+/// and the minimum in its high nibble, both unsigned 0..15.
+#[cfg(feature = "cuda")]
+fn build_q2_k_weight(n: usize, k: usize) -> Vec<u8> {
+    const SUPER: usize = 256;
+    const BYTES: usize = 84;
+    let bpr = k / SUPER;
+    let mut out = vec![0u8; n * bpr * BYTES];
+    for row in 0..n {
+        for sup in 0..bpr {
+            let block = row * bpr + sup;
+            let base = block * BYTES;
+
+            for pos in 0..SUPER {
+                // Target quant, spread over the format's whole 0..3 range.
+                let v = ((i32::from(quant_byte(block, pos)) + 128) % 4) as u8;
+                let nn = pos / 128;
+                let t = (pos % 128) / 32;
+                let h = (pos % 32) / 16;
+                let l = pos % 16;
+                out[base + 16 + 32 * nn + 16 * h + l] |= v << (2 * t);
+            }
+
+            // 16 scale/min pairs, one per 16 elements. Both nibbles are kept
+            // non-zero across the block so a dropped minimum term shows up.
+            for j in 0..16 {
+                let scale = ((block * 17 + j * 9) % 15 + 1) as u8;
+                let minimum = ((block * 11 + j * 5) % 15 + 1) as u8;
+                out[base + j] = scale | (minimum << 4);
+            }
+
+            out[base + 80..base + 82].copy_from_slice(&block_scale(block).to_le_bytes());
+            // A distinct `dmin`, so a kernel that read `d` twice fails here.
+            out[base + 82..base + 84].copy_from_slice(&block_scale(block + 3).to_le_bytes());
+        }
+    }
+    out
+}
+
 #[cfg(feature = "cuda")]
 fn main() {
     if !numr::runtime::cuda::is_cuda_available() {
@@ -985,9 +1254,15 @@ fn main() {
     // Both feature-major paths use the same token tile, and the repacked
     // activation layout is strided by it, so choose it once and repack once.
     let fm_x_stride = format.feat_major_x_stride();
+    let fm_scratch = format.feat_major_act_scratch();
     let fm_mmq_x = force_mmq_x.unwrap_or_else(|| {
-        select_mmq_x(m as u32, mmq_x_smem_bytes(fm_x_stride, 128), fm_x_stride)
-            .expect("a feature-major variant fits")
+        select_mmq_x(
+            m as u32,
+            mmq_x_smem_bytes(fm_x_stride, fm_scratch, 128),
+            fm_x_stride,
+            fm_scratch,
+        )
+        .expect("a feature-major variant fits")
     });
     let fm_ntok = (m as u32).div_ceil(fm_mmq_x) * fm_mmq_x;
     let packed_bytes = repack_q8_1_mmq(&act_bytes, m, k, fm_ntok as usize);
@@ -1014,8 +1289,8 @@ fn main() {
             .expect("load mma module");
 
     // Token-major pair: the dp4a MMQ kernel and its tensor-core twin, which
-    // share a grid and a per-token activation layout. Q4_0 and Q5_K compile
-    // NEITHER, so for those formats this whole comparison — both timings, both
+    // share a grid and a per-token activation layout. Q4_0, Q5_K and Q3_K
+    // compile NEITHER, so for those formats this whole comparison — both timings, both
     // reference checks, and the bit-for-bit agreement below — is skipped, and
     // only the feature-major kernels run. Resolving a symbol that is not compiled would
     // abort the tool instead.
@@ -1084,8 +1359,8 @@ fn main() {
     // tiles, weights as MMA operand A, 256 k staged per step. Their grid axes
     // are transposed against the token-major `_mma` kernel, their token tile is
     // chosen per batch size, and their shared memory is dynamic, so they need
-    // their own config and an opt-in. Compiled for Q8_0, Q4_0, Q4_K, Q5_K and
-    // Q6_K.
+    // their own config and an opt-in. Compiled for Q8_0, Q4_0, Q4_K, Q5_K,
+    // Q6_K and Q3_K.
     let feat_major = match format.feat_major_infix() {
         Some(infix) => {
             let mmq_x = fm_mmq_x;
@@ -1098,7 +1373,7 @@ fn main() {
                 .unwrap_or_else(|_| panic!("resolve {name}"));
             func.set_attribute(
                 cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                mmq_x_smem_bytes(fm_x_stride, mmq_x) as i32,
+                mmq_x_smem_bytes(fm_x_stride, fm_scratch, mmq_x) as i32,
             )
             .expect("opt in to dynamic shared memory for the feature-major kernel");
             let out =
@@ -1113,7 +1388,7 @@ fn main() {
         let cfg_fm = LaunchConfig {
             grid_dim: (m_u32.div_ceil(*mmq_x), n_u32.div_ceil(128), 1),
             block_dim: (256, 1, 1),
-            shared_mem_bytes: mmq_x_smem_bytes(fm_x_stride, *mmq_x),
+            shared_mem_bytes: mmq_x_smem_bytes(fm_x_stride, fm_scratch, *mmq_x),
         };
         let launch = || unsafe {
             let mut builder = client.stream().launch_builder(func);
@@ -1158,7 +1433,7 @@ fn main() {
             sk_func
                 .set_attribute(
                     cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                    mmq_x_smem_bytes(fm_x_stride, mmq_x) as i32,
+                    mmq_x_smem_bytes(fm_x_stride, fm_scratch, mmq_x) as i32,
                 )
                 .expect("opt in to dynamic shared memory for the stream-k kernel");
             // Never zeroed: the fixup reads only slots whose block provably
@@ -1181,7 +1456,7 @@ fn main() {
             let cfg_sk = LaunchConfig {
                 grid_dim: (*grid, 1, 1),
                 block_dim: (256, 1, 1),
-                shared_mem_bytes: mmq_x_smem_bytes(fm_x_stride, *mmq_x),
+                shared_mem_bytes: mmq_x_smem_bytes(fm_x_stride, fm_scratch, *mmq_x),
             };
             let cfg_fx = LaunchConfig {
                 grid_dim: (*grid, 1, 1),

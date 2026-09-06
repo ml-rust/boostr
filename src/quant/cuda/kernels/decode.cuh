@@ -58,34 +58,43 @@ static __device__ __forceinline__ void unpack_scales_mwr(
 }
 
 // ── Q3_K scale unpacking ────────────────────────────────────────────────
-// 12 bytes → 16 signed 6-bit scales
+// 12 bytes → 16 signed 6-bit scales, each stored biased by 32.
+//
+// Register form: returns scale `j` (0..15) from the two `scales` bytes that
+// carry it, so a staging loop that must issue every global load before any ALU
+// work loads those bytes itself and decodes here. Same split as
+// `q4k_scale_min_bytes` below, and the one place the Q3_K 6-bit layout is
+// written — `unpack_q3k_scales` is this plus the loads.
+//
+// With `g = j / 4`:
+//   low 4 bits  — byte `j % 4 + 4 * (g & 1)`, nibble `g / 2`
+//   high 2 bits — byte `8 + j % 4`, bit pair `g`
+//
+// Matches `unpack_q3k_scales` in
+// `src/quant/cpu/kernels/dequant_k_quants/q2k_q3k.rs`, which reaches the same
+// 16 values as four u32 lanes, and `load_tiles_q3_K` in llama.cpp's
+// `ggml-cuda/mmq.cuh`, which reaches them as four vectorized `ksc` groups.
+#define GGUF_Q3K_SC_LOW_BYTE(j) ((j) % 4 + 4 * (((j) / 4) & 1))
+#define GGUF_Q3K_SC_HIGH_BYTE(j) (8 + (j) % 4)
+
+static __device__ __forceinline__ int q3k_scale_bytes(
+    unsigned int b_low, unsigned int b_high, int j
+) {
+    const int g = j / 4;
+    const int lo = (int)((b_low >> (4 * (g / 2))) & 0x0F);
+    const int hi = (int)((b_high >> (2 * g)) & 0x03);
+    return (lo | (hi << 4)) - 32;
+}
 
 static __device__ __forceinline__ void unpack_q3k_scales(
     const unsigned char* sc_raw,
     signed char* scales
 ) {
-    unsigned int aux[4];
-    unsigned char aux_bytes[12];
-    for (int i = 0; i < 12; i++) aux_bytes[i] = sc_raw[i];
-    memcpy(&aux[0], aux_bytes, 4);
-    memcpy(&aux[1], aux_bytes + 4, 4);
-    memcpy(&aux[2], aux_bytes + 8, 4);
-
-    unsigned int tmp = aux[2];
-    const unsigned int KMASK1 = 0x03030303u;
-    const unsigned int KMASK2 = 0x0f0f0f0fu;
-    unsigned int a0 = aux[0], a1 = aux[1];
-    aux[0] = (a0 & KMASK2) | ((tmp & KMASK1) << 4);
-    aux[1] = (a1 & KMASK2) | (((tmp >> 2) & KMASK1) << 4);
-    aux[2] = ((a0 >> 4) & KMASK2) | (((tmp >> 4) & KMASK1) << 4);
-    aux[3] = ((a1 >> 4) & KMASK2) | (((tmp >> 6) & KMASK1) << 4);
-
-    memcpy(&scales[0],  &aux[0], 4);
-    memcpy(&scales[4],  &aux[1], 4);
-    memcpy(&scales[8],  &aux[2], 4);
-    memcpy(&scales[12], &aux[3], 4);
-    for (int i = 0; i < 16; i++)
-        scales[i] = (signed char)((unsigned char)scales[i] - 32);
+    for (int j = 0; j < 16; j++) {
+        scales[j] = (signed char)q3k_scale_bytes(
+            sc_raw[GGUF_Q3K_SC_LOW_BYTE(j)], sc_raw[GGUF_Q3K_SC_HIGH_BYTE(j)], j
+        );
+    }
 }
 
 // ── Q4_K single sub-block scale/min ──────────────────────────────────────

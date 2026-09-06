@@ -263,9 +263,12 @@ fn launch_stream_k(
 /// fixup pass for the wave a ragged tile count leaves half empty. Once the
 /// tiles fill the device, tile-parallel wins and needs no workspace.
 ///
-/// A format vetoes this call through `prefers_tile_parallel`.
+/// A format vetoes this call through `prefers_tile_parallel`, but only once
+/// the tiles cover a full wave. Below that the tile-parallel grid cannot fill
+/// the device at all, and stream-k wins for every format measured, veto or
+/// not.
 const fn use_stream_k(tiles: u32, sms: u32, format: &FeatMajorFormat) -> bool {
-    sms > 0 && tiles < 2 * sms && !format.prefers_tile_parallel
+    sms > 0 && tiles < 2 * sms && !(format.prefers_tile_parallel && tiles >= sms)
 }
 
 #[cfg(test)]
@@ -294,6 +297,16 @@ mod tests {
         assert!(!use_stream_k(32, 28, &IQ3_XXS));
         assert!(!use_stream_k(32, 28, &Q4_0));
         assert!(!use_stream_k(32, 28, &IQ4_NL));
+    }
+
+    #[test]
+    fn the_veto_lifts_below_one_full_wave() {
+        // 16 tiles leaves 12 of 28 SMs with no tile at all. The tile-parallel
+        // grid cannot fill the device there, so stream-k wins even for a
+        // format that vetoes it once a wave is covered.
+        assert!(use_stream_k(16, 28, &IQ3_XXS));
+        assert!(use_stream_k(27, 28, &IQ3_XXS));
+        assert!(!use_stream_k(28, 28, &IQ3_XXS));
     }
 
     #[test]

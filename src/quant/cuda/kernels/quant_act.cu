@@ -82,14 +82,30 @@ extern "C" __global__ void quantize_f32_q8_1(
 // per-element gather.
 //
 // Record = 144 bytes covering 128 k-values of one token:
-//   float  d[4]     — one scale per 32-value block, at byte 0
+//   int    ds[4]    — one header word per 32-value block, at byte 0
 //   int8_t qs[128]  — four 32-value blocks, at byte 16
 // Record index = kgroup * ntok + token.
 //
+// Header word bit layout, per 32-value sub-block:
+//   bits  0..15  __half  d       — the block scale
+//   bits 16..31  int16   sum     — sum of that block's 32 clamped int8 quants
+//
+// The low half is a `half` and the high half is a raw two's-complement integer.
+// Nothing may read the high half as a float. `MmqfQ80` reads only the low half
+// (`__low2float`), which this layout leaves untouched.
+//
+// The sum is an integer, not `d * sum` as a `half`, because it must be EXACT.
+// 32 int8 quants bound the sum by 32 * 128 = 4096, so every attainable value
+// fits int16 with no rounding at all. A `half` carries an 11-bit significand,
+// so `d * sum` rounded to it perturbs each sub-block's min-correction term by
+// that much, and the feature-major Q4_K GEMM then drifts from the GEMV path
+// past the parity bound the backend tests hold both to. The consumer rebuilds
+// the correction as `(-dmin * m) * d * (float)sum`, and `d` is exact here too.
+//
 // `d` is rounded through `__half` before being widened, so the value the matmul
-// consumes is exactly the `half` scale the per-token layout stores. The Q8_1
-// block-sum term has no consumer in the feature-major kernels and is dropped;
-// its space is what makes the record flat-copyable.
+// consumes is exactly the `half` scale the per-token layout stores. `sum` is the
+// warp-reduced sum of the clamped int8 `q` values, not of the input floats, and
+// the reduction runs in `int` so no intermediate rounds.
 //
 // Grid:  (kgroups * 4, ntok, 1)   Block: (32, 1, 1) — one warp per 32-value block
 extern "C" __global__ void quantize_f32_q8_1_mmq(
@@ -128,8 +144,28 @@ extern "C" __global__ void quantize_f32_q8_1_mmq(
         q = (signed char)min(max(qi, -128), 127);
     }
 
+    // Sum of the clamped int8 values, not of the input floats. The reduction is
+    // INTEGER: |sum| <= 32 * 128 = 4096, so it is exact in `int` and then exact
+    // in the int16 it is stored as. A float reduction would round once the
+    // partial sums left the exactly-representable range for the widths the
+    // consumer cares about, and the min correction needs the exact value.
+    int sum = (int)q;
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        sum += __shfl_xor_sync(0xFFFFFFFF, sum, offset);
+    }
+
     ((signed char*)(output + rec + 4))[sub * 32 + lane] = q;
     if (lane == 0) {
-        ((float*)(output + rec))[sub] = d;
+        // Header word assembled explicitly from its two 16-bit fields rather
+        // than through a struct, because the high half is an integer and the
+        // low half is a `half`:
+        //   bits  0..15  __half d
+        //   bits 16..31  int16  sum
+        // `live` false zeros both `q` (above) and `d`/`sum` here, so a padded
+        // or dead slot's word is (d = 0, sum = 0).
+        const unsigned int lo = (unsigned int)__half_as_ushort(__float2half(d));
+        const unsigned int hi = (unsigned int)(unsigned short)(short)sum;
+        output[rec + sub] = (int)(lo | (hi << 16));
     }
 }

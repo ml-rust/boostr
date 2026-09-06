@@ -1,11 +1,16 @@
-//! Q8_0 tensor-core MMQ dispatch, feature-major tiling.
+//! Tensor-core MMQ dispatch, feature-major tiling.
 //!
 //! The output-feature dimension gets the fixed 128 tile and the weight is the
 //! MMA operand A. `quant_mmq_q8_0_q8_1_mma` fixes the token tile instead and
 //! makes the activation operand A; this path swaps those roles. One entry
-//! point is compiled per token tile, in three roles: tile-parallel, stream-k,
-//! and the stream-k fixup. This module owns the rules that choose among them.
-//! The kernels themselves live in `src/quant/cuda/kernels/quant_mmq_mma.cu`.
+//! point is compiled per (weight format, token tile), in three roles:
+//! tile-parallel, stream-k, and the stream-k fixup. This module owns the rules
+//! that choose among them. The kernels themselves live in
+//! `src/quant/cuda/kernels/quant_mmq_mma.cu`.
+//!
+//! The kernel family is parameterized over the weight format; everything that
+//! differs per format is a field of `FeatMajorFormat`. Q8_0, Q4_K and Q6_K are
+//! the formats compiled today.
 //!
 //! This path needs sm_80 and its own repacked activation layout, so the caller
 //! gates on `caps.int8_mma_m16n8k32` and falls back to `quant_mmq_q8_0_q8_1_mma`
@@ -33,14 +38,58 @@ const THREADS: u32 = 256;
 /// above it by 16; the kernel's warp blocking rejects every other value.
 const VARIANTS: &[u32] = &[8, 16, 24, 32, 40, 48, 64, 80, 96, 112, 128];
 
-/// Dynamic shared memory one variant needs: a `FEAT_TILE`-row weight tile at a
-/// 76-int stride plus an `mmq_x`-row activation tile at a 36-int stride.
-///
-/// The `76` is Q8_0's weight-row stride (64 quant words + 8 f32 scales + 4
-/// pad). Q4_K and Q6_K rows are shaped differently, so when either joins this
-/// family the stride must become a parameter instead of a literal.
-const fn smem_bytes(mmq_x: u32) -> u32 {
-    4 * (FEAT_TILE * 76 + mmq_x * 36)
+/// Activation row stride in the shared tile, in ints: 4 half2 scale pairs plus
+/// 32 quant words. The same for every weight format.
+const ACT_STRIDE: u32 = 36;
+
+/// One weight format's share of the feature-major family. Everything else in
+/// this module — variant choice, stream-k decision, launch, fixup — is shared.
+pub(super) struct FeatMajorFormat {
+    /// Format name inside the kernel symbol, as `MMQ_FM_KERNEL`'s `NAME`.
+    pub kernel_infix: &'static str,
+    /// Weight row stride in the shared tile, in ints (`FMT::X_STRIDE`).
+    pub x_stride: u32,
+    /// K must be a whole number of these for the staging map to hold.
+    pub k_multiple: u32,
+}
+
+/// Q8_0: 34-byte blocks of 32 elements, staged as 64 quant words plus 8 f32
+/// scales plus 4 ints of bank padding.
+pub(super) const Q8_0: FeatMajorFormat = FeatMajorFormat {
+    kernel_infix: "q8_0",
+    x_stride: 76,
+    k_multiple: 32,
+};
+
+/// Q4_K: 144-byte super-blocks of 256 elements, staged as 64 quant words plus
+/// 8 `float2` scale/min pairs (16 ints) plus 4 ints of bank padding. The row is
+/// 8 ints wider than Q8_0's because the pair is f32, not `half2`: half rounding
+/// on `d * sc` perturbs every 32-element sub-block and pushed the GEMM path
+/// outside the GEMV parity bound. K must be a whole number of super-blocks,
+/// which also makes every 256-k staging group whole.
+pub(super) const Q4_K: FeatMajorFormat = FeatMajorFormat {
+    kernel_infix: "q4_k",
+    x_stride: 84,
+    k_multiple: 256,
+};
+
+/// Q6_K: 210-byte super-blocks of 256 elements, staged as 64 quant words plus
+/// 16 f32 group scales plus 4 ints of bank padding — the same stride as Q4_K,
+/// reached by a different split. Q6_K's scale changes every 16 elements, so it
+/// stages 16 `d * scale` floats per row rather than 8 scale/min pairs, and the
+/// consumer runs two 16-k MMAs per 32-k step. The staged scale is f32 and
+/// already multiplied by `d`, for the same parity reason as Q4_K. K must be a
+/// whole number of super-blocks.
+pub(super) const Q6_K: FeatMajorFormat = FeatMajorFormat {
+    kernel_infix: "q6_k",
+    x_stride: 84,
+    k_multiple: 256,
+};
+
+/// Dynamic shared memory one variant needs: a `FEAT_TILE`-row weight tile at
+/// the format's stride plus an `mmq_x`-row activation tile at `ACT_STRIDE`.
+const fn smem_bytes(x_stride: u32, mmq_x: u32) -> u32 {
+    4 * (FEAT_TILE * x_stride + mmq_x * ACT_STRIDE)
 }
 
 /// Per-block dynamic shared-memory ceiling this device grants on opt-in.
@@ -55,10 +104,10 @@ fn smem_opt_in_limit(shared_mem_per_unit: u32) -> u32 {
 /// Picks the token tile that launches the fewest tiles for `m`, breaking ties
 /// toward the smaller tile because it costs fewer registers and less shared
 /// memory. `None` means no variant fits the device.
-fn select_variant(m: u32, smem_limit: u32) -> Option<u32> {
+fn select_variant(m: u32, smem_limit: u32, x_stride: u32) -> Option<u32> {
     let mut best: Option<(u32, u32)> = None;
     for &mmq_x in VARIANTS {
-        if smem_bytes(mmq_x) > smem_limit {
+        if smem_bytes(x_stride, mmq_x) > smem_limit {
             continue;
         }
         let tiles = m.div_ceil(mmq_x);
@@ -84,9 +133,12 @@ fn opt_in_shared(func: &CudaFunction, bytes: u32, name: &str) -> Result<()> {
     })
 }
 
-/// Runs Q8_0 x F32 through the feature-major MMQ kernels. `Ok(None)` means no
-/// variant fits, and the caller should keep its existing path.
-pub(super) fn dispatch_q8_0(
+/// Runs one quantized weight x F32 activation through the feature-major MMQ
+/// kernels. `Ok(None)` means no variant fits, and the caller should keep its
+/// existing path.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn dispatch(
+    format: &FeatMajorFormat,
     client: &CudaClient,
     act_contig: &Tensor<CudaRuntime>,
     weight: &QuantTensor<CudaRuntime>,
@@ -103,10 +155,14 @@ pub(super) fn dispatch_q8_0(
     let k_u32 = k as u32;
     let n_u32 = n as u32;
 
-    let Some(mmq_x) = select_variant(m_u32, smem_opt_in_limit(profile.shared_mem_per_unit)) else {
+    let Some(mmq_x) = select_variant(
+        m_u32,
+        smem_opt_in_limit(profile.shared_mem_per_unit),
+        format.x_stride,
+    ) else {
         return Ok(None);
     };
-    let smem = smem_bytes(mmq_x);
+    let smem = smem_bytes(format.x_stride, mmq_x);
 
     let token_tiles = m_u32.div_ceil(mmq_x);
     let feat_tiles = n_u32.div_ceil(FEAT_TILE);
@@ -135,17 +191,18 @@ pub(super) fn dispatch_q8_0(
         mmq_x,
         tiles,
         stream_k,
+        weight_format = format.kernel_infix,
         path = "mmq_feat_major",
-        "CUDA quant kernel: Q8_0 tensor-core MMQ (feature-major)"
+        "CUDA quant kernel: tensor-core MMQ (feature-major)"
     );
 
     if stream_k {
         launch_stream_k(
-            client, device, &module, output_ptr, q8_ptr, weight_ptr, m_u32, k_u32, n_u32, ntok,
-            mmq_x, smem, sms, tiles,
+            format, client, device, &module, output_ptr, q8_ptr, weight_ptr, m_u32, k_u32, n_u32,
+            ntok, mmq_x, smem, sms, tiles,
         )?;
     } else {
-        let name = format!("quant_mmq_q8_0_q8_1_mma_x{mmq_x}");
+        let name = format!("quant_mmq_{}_q8_1_mma_x{mmq_x}", format.kernel_infix);
         let func = kernels::get_kernel_function(&module, &name)?;
         opt_in_shared(&func, smem, &name)?;
 
@@ -177,6 +234,7 @@ pub(super) fn dispatch_q8_0(
 /// two launches must agree on the grid.
 #[allow(clippy::too_many_arguments)]
 fn launch_stream_k(
+    format: &FeatMajorFormat,
     client: &CudaClient,
     device: &CudaDevice,
     module: &std::sync::Arc<CudaModule>,
@@ -207,7 +265,7 @@ fn launch_stream_k(
     let ws = Tensor::<CudaRuntime>::empty(&[ws_len], DType::F32, device)?;
     let ws_ptr = ws.ptr();
 
-    let sk_name = format!("quant_mmq_q8_0_q8_1_mma_sk_x{mmq_x}");
+    let sk_name = format!("quant_mmq_{}_q8_1_mma_sk_x{mmq_x}", format.kernel_infix);
     let sk_func = kernels::get_kernel_function(module, &sk_name)?;
     opt_in_shared(&sk_func, smem, &sk_name)?;
 
@@ -237,7 +295,7 @@ fn launch_stream_k(
 
     // A separate launch on the same stream: the fixup reads what the main
     // kernel wrote, so the two must not be fused.
-    let fx_name = format!("quant_mmq_q8_0_q8_1_mma_fixup_x{mmq_x}");
+    let fx_name = format!("quant_mmq_{}_q8_1_mma_fixup_x{mmq_x}", format.kernel_infix);
     let fx_func = kernels::get_kernel_function(module, &fx_name)?;
     let cfg_fx = LaunchConfig {
         grid_dim: (sms, 1, 1),
@@ -266,32 +324,116 @@ mod tests {
     /// Ample limit: every compiled variant fits.
     const WIDE: u32 = 1 << 20;
 
+    /// The one compiled format's stride.
+    const XS: u32 = Q8_0.x_stride;
+
     #[test]
     fn selects_the_smallest_tile_that_covers_one_batch() {
-        assert_eq!(select_variant(1, WIDE), Some(8));
-        assert_eq!(select_variant(8, WIDE), Some(8));
-        assert_eq!(select_variant(9, WIDE), Some(16));
-        assert_eq!(select_variant(128, WIDE), Some(128));
+        assert_eq!(select_variant(1, WIDE, XS), Some(8));
+        assert_eq!(select_variant(8, WIDE, XS), Some(8));
+        assert_eq!(select_variant(9, WIDE, XS), Some(16));
+        assert_eq!(select_variant(128, WIDE, XS), Some(128));
     }
 
     #[test]
     fn ties_go_to_the_smaller_tile() {
         // 129 needs two tiles at every variant from 80 up, so the scan keeps 80.
-        assert_eq!(select_variant(129, WIDE), Some(80));
+        assert_eq!(select_variant(129, WIDE, XS), Some(80));
     }
 
     #[test]
     fn honours_the_shared_memory_limit() {
         // Only the smallest variants fit under a limit set just above x8.
-        assert_eq!(select_variant(1024, smem_bytes(8)), Some(8));
-        assert_eq!(select_variant(1024, smem_bytes(24)), Some(24));
-        assert_eq!(select_variant(1024, 0), None);
+        assert_eq!(select_variant(1024, smem_bytes(XS, 8), XS), Some(8));
+        assert_eq!(select_variant(1024, smem_bytes(XS, 24), XS), Some(24));
+        assert_eq!(select_variant(1024, 0, XS), None);
     }
 
     #[test]
     fn shared_memory_grows_only_with_the_token_tile() {
-        assert_eq!(smem_bytes(8), 4 * (128 * 76 + 8 * 36));
-        assert_eq!(smem_bytes(128), 57344);
-        assert!(VARIANTS.iter().all(|&x| smem_bytes(x) <= smem_bytes(128)));
+        assert_eq!(smem_bytes(XS, 8), 4 * (128 * 76 + 8 * 36));
+        assert_eq!(smem_bytes(XS, 128), 57344);
+        assert!(
+            VARIANTS
+                .iter()
+                .all(|&x| smem_bytes(XS, x) <= smem_bytes(XS, 128))
+        );
+    }
+
+    #[test]
+    fn the_q8_0_descriptor_names_the_compiled_symbols() {
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_x{}", Q8_0.kernel_infix, 8),
+            "quant_mmq_q8_0_q8_1_mma_x8"
+        );
+        assert_eq!(Q8_0.k_multiple, 32);
+    }
+
+    #[test]
+    fn the_q4_k_descriptor_names_the_compiled_symbols() {
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_x{}", Q4_K.kernel_infix, 8),
+            "quant_mmq_q4_k_q8_1_mma_x8"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_sk_x{}", Q4_K.kernel_infix, 128),
+            "quant_mmq_q4_k_q8_1_mma_sk_x128"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_fixup_x{}", Q4_K.kernel_infix, 128),
+            "quant_mmq_q4_k_q8_1_mma_fixup_x128"
+        );
+        assert_eq!(Q4_K.k_multiple, 256);
+    }
+
+    #[test]
+    fn the_q6_k_descriptor_names_the_compiled_symbols() {
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_x{}", Q6_K.kernel_infix, 8),
+            "quant_mmq_q6_k_q8_1_mma_x8"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_sk_x{}", Q6_K.kernel_infix, 128),
+            "quant_mmq_q6_k_q8_1_mma_sk_x128"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_fixup_x{}", Q6_K.kernel_infix, 128),
+            "quant_mmq_q6_k_q8_1_mma_fixup_x128"
+        );
+        assert_eq!(Q6_K.k_multiple, 256);
+    }
+
+    /// Q6_K reaches Q4_K's row stride by a different split: 16 f32 group
+    /// scales rather than 8 scale/min pairs. Equal strides mean the two share
+    /// the family's shared-memory request at every token tile.
+    #[test]
+    fn q6_k_shares_the_q4_k_row_stride() {
+        assert_eq!(Q6_K.x_stride, Q4_K.x_stride);
+        assert!(
+            VARIANTS
+                .iter()
+                .all(|&x| smem_bytes(Q6_K.x_stride, x) == smem_bytes(Q4_K.x_stride, x))
+        );
+    }
+
+    /// Q4_K's weight row is 8 ints wider than Q8_0's: it stages the scale/min
+    /// pair as two f32 rather than one `half2`, because half rounding on
+    /// `d * sc` broke the GEMM/GEMV parity bound. The 8 extra ints per row
+    /// across the 128-row weight tile are the whole difference in the request,
+    /// and it is the same at every token tile because only the activation tile
+    /// scales with `mmq_x`.
+    #[test]
+    fn q4_k_costs_one_extra_scale_word_per_row_over_q8_0() {
+        const EXTRA: u32 = 4 * FEAT_TILE * 8;
+        assert_eq!(Q4_K.x_stride, Q8_0.x_stride + 8);
+        assert!(
+            VARIANTS
+                .iter()
+                .all(|&x| { smem_bytes(Q4_K.x_stride, x) == smem_bytes(Q8_0.x_stride, x) + EXTRA })
+        );
+        // The widest variant must still fit what a device grants on opt-in.
+        // 96KB per unit is the smallest sm_80-or-later figure the family runs
+        // on, and the launcher subtracts the driver's reservation from it.
+        assert!(smem_bytes(Q4_K.x_stride, 128) <= smem_opt_in_limit(96 * 1024));
     }
 }

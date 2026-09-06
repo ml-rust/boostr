@@ -35,17 +35,20 @@ use numr::tensor::Tensor;
 /// `src/quant/cuda/quant_matmul/mmq_feat_major.rs`; keep the two in step.
 ///
 /// Compiled feature-major token-tile variants, ascending. A variant needs a
-/// 128-row weight tile at a 76-int stride plus an `mmq_x`-row activation tile
-/// at a 36-int stride. The list skips every `mmq_x` the kernel's granularity
-/// rule rejects: below 48 the tile steps by 8, at and above it by 16.
+/// 128-row weight tile at the FORMAT'S stride plus an `mmq_x`-row activation
+/// tile at a 36-int stride. The weight stride differs per format — Q4_K's row
+/// is wider than Q8_0's — so every call here threads the format's stride
+/// through, or the harness opts a kernel in to the wrong size. The list skips
+/// every `mmq_x` the kernel's granularity rule rejects: below 48 the tile steps
+/// by 8, at and above it by 16.
 #[cfg(feature = "cuda")]
 const MMQ_X_VARIANTS: &[u32] = &[8, 16, 24, 32, 40, 48, 64, 80, 96, 112, 128];
 
 /// Dynamic shared memory one feature-major variant needs. The larger ones are
 /// above the 48KB static limit, so it is allocated dynamically and opted into.
 #[cfg(feature = "cuda")]
-const fn mmq_x_smem_bytes(mmq_x: u32) -> u32 {
-    4 * (128 * 76 + mmq_x * 36)
+const fn mmq_x_smem_bytes(x_stride: u32, mmq_x: u32) -> u32 {
+    4 * (128 * x_stride + mmq_x * 36)
 }
 
 /// Picks the feature-major variant that launches the fewest token tiles for
@@ -53,10 +56,10 @@ const fn mmq_x_smem_bytes(mmq_x: u32) -> u32 {
 /// and less shared memory. `smem_limit` is the device's per-block opt-in
 /// maximum.
 #[cfg(feature = "cuda")]
-fn select_mmq_x(m: u32, smem_limit: u32) -> Option<u32> {
+fn select_mmq_x(m: u32, smem_limit: u32, x_stride: u32) -> Option<u32> {
     let mut best: Option<(u32, u32)> = None;
     for &mmq_x in MMQ_X_VARIANTS {
-        if mmq_x_smem_bytes(mmq_x) > smem_limit {
+        if mmq_x_smem_bytes(x_stride, mmq_x) > smem_limit {
             continue;
         }
         let tiles = m.div_ceil(mmq_x);
@@ -70,18 +73,22 @@ fn select_mmq_x(m: u32, smem_limit: u32) -> Option<u32> {
     best.map(|(mmq_x, _)| mmq_x)
 }
 
-/// Exact reference for one output element, in f64.
+/// Exact reference for one output element, in f64, plus the accumulated
+/// magnitude of the sum: the sum over `k`-blocks of `|contribution|`.
 ///
 /// This is the ground truth every kernel is checked against. It is not another
 /// GPU kernel: the per-block int32 dot product is exact in integer arithmetic,
 /// so the only inexact step anywhere is the accumulation across blocks, and
 /// doing that in f64 bounds every f32 kernel's error regardless of the order it
 /// sums in. That is what lets stream-k — which reassociates the k sum across
-/// blocks by construction — be checked at all.
+/// blocks by construction — be checked at all. The magnitude is what f32
+/// accumulation error is actually proportional to; see
+/// [`check_against_reference`].
 #[cfg(feature = "cuda")]
-fn q8_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> f64 {
+fn q8_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
     let bpr = k / 32;
     let mut sum = 0.0f64;
+    let mut magnitude = 0.0f64;
     for b in 0..bpr {
         let wb = (feat * bpr + b) * 34;
         let ab = (token * bpr + b) * 36;
@@ -91,9 +98,146 @@ fn q8_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize
         for p in 0..32 {
             dot += i64::from(weight[wb + 2 + p] as i8) * i64::from(act[ab + 4 + p] as i8);
         }
-        sum += dot as f64 * ad * wd;
+        let contribution = dot as f64 * ad * wd;
+        sum += contribution;
+        magnitude += contribution.abs();
     }
-    sum
+    (sum, magnitude)
+}
+
+/// Exact reference for one output element, in f64, for a Q4_K weight against
+/// a Q8_1 activation, plus the accumulated magnitude of the sum: the sum over
+/// every element of `|contribution|`.
+///
+/// Dequant math and byte offsets are ground-truthed against
+/// `dequant_q4k` and `unpack_q4k_q5k_scales` in
+/// `src/quant/cpu/kernels/dequant_k_quants/q4k_q5k.rs`: per 256-element
+/// super-block, `d`@0 and `dmin`@2 (f16), a 12-byte packed 6-bit scale/min
+/// array@4, and 128 nibble-packed quants@16, unpacked into eight 32-element
+/// sub-blocks as `x = d * sc[j] * q - dmin * m[j]`. The magnitude is what f32
+/// accumulation error is actually proportional to; see
+/// [`check_against_reference`].
+#[cfg(feature = "cuda")]
+fn q4_k_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
+    const SUPER: usize = 256;
+    const BYTES: usize = 144;
+    let bpr = k / SUPER;
+    let abpr = k / 32;
+    let mut sum = 0.0f64;
+    let mut magnitude = 0.0f64;
+    for sup in 0..bpr {
+        let wb = (feat * bpr + sup) * BYTES;
+        let d = f64::from(half::f16::from_le_bytes([weight[wb], weight[wb + 1]]).to_f32());
+        let dmin = f64::from(half::f16::from_le_bytes([weight[wb + 2], weight[wb + 3]]).to_f32());
+        let sc = &weight[wb + 4..wb + 16];
+        let qs = &weight[wb + 16..wb + 144];
+
+        let mut scales = [0u8; 8];
+        let mut mins = [0u8; 8];
+        for i in 0..4 {
+            scales[i] = sc[i] & 0x3F;
+            mins[i] = sc[i + 4] & 0x3F;
+        }
+        for i in 4..8 {
+            scales[i] = (sc[i + 4] & 0x0F) | ((sc[i - 4] >> 6) << 4);
+            mins[i] = (sc[i + 4] >> 4) | ((sc[i] >> 6) << 4);
+        }
+
+        for j in 0..8 {
+            let dl = d * f64::from(scales[j]);
+            let ml = dmin * f64::from(mins[j]);
+            let qs_base = (j / 2) * 32;
+            let is_high = j % 2 == 1;
+            let ab = (token * abpr + sup * 8 + j) * 36;
+            let ad = f64::from(half::f16::from_le_bytes([act[ab], act[ab + 1]]).to_f32());
+            for l in 0..32 {
+                let q = f64::from(if is_high {
+                    (qs[qs_base + l] >> 4) & 0x0F
+                } else {
+                    qs[qs_base + l] & 0x0F
+                });
+                let w = dl * q - ml;
+                let aq = f64::from(act[ab + 4 + l] as i8);
+                let contribution = w * ad * aq;
+                sum += contribution;
+                magnitude += contribution.abs();
+            }
+        }
+    }
+    (sum, magnitude)
+}
+
+/// Exact reference for one output element, in f64, for a Q6_K weight against
+/// a Q8_1 activation, plus the accumulated magnitude of the sum: the sum over
+/// every element of `|contribution|`.
+///
+/// Dequant math and byte offsets are ground-truthed against `dequant_q6k` in
+/// `src/quant/cpu/kernels/dequant_k_quants/q6k_q8k.rs`: per 256-element
+/// super-block, 128-byte `ql` (low nibbles)@0, 64-byte `qh` (high bit
+/// pairs)@128, 16 signed 8-bit sub-block scales@192 (one per 16 elements),
+/// f16 `d`@208 (last, not first). Each half of the super-block (128 elements)
+/// merges `ql`/`qh` into four biased 6-bit levels per lane, `x = d * scale *
+/// (q - 32)`. The magnitude is what f32 accumulation error is actually
+/// proportional to; see [`check_against_reference`].
+#[cfg(feature = "cuda")]
+fn q6_k_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
+    const SUPER: usize = 256;
+    const BYTES: usize = 210;
+    let bpr = k / SUPER;
+    let abpr = k / 32;
+    let mut sum = 0.0f64;
+    let mut magnitude = 0.0f64;
+    for sup in 0..bpr {
+        let wb = (feat * bpr + sup) * BYTES;
+        let ql = &weight[wb..wb + 128];
+        let qh = &weight[wb + 128..wb + 192];
+        let sc = &weight[wb + 192..wb + 208];
+        let d = f64::from(half::f16::from_le_bytes([weight[wb + 208], weight[wb + 209]]).to_f32());
+
+        for n in 0..2 {
+            let y_base = n * 128;
+            let ql_base = n * 64;
+            let qh_base = n * 32;
+            let sc_base = n * 8;
+            for l in 0..32 {
+                let is = l / 16;
+                let q1 = i64::from((ql[ql_base + l] & 0x0F) | ((qh[qh_base + l] & 0x03) << 4)) - 32;
+                let q2 = i64::from(
+                    (ql[ql_base + l + 32] & 0x0F) | (((qh[qh_base + l] >> 2) & 0x03) << 4),
+                ) - 32;
+                let q3 =
+                    i64::from((ql[ql_base + l] >> 4) | (((qh[qh_base + l] >> 4) & 0x03) << 4)) - 32;
+                let q4 =
+                    i64::from((ql[ql_base + l + 32] >> 4) | (((qh[qh_base + l] >> 6) & 0x03) << 4))
+                        - 32;
+
+                let positions = [
+                    y_base + l,
+                    y_base + l + 32,
+                    y_base + l + 64,
+                    y_base + l + 96,
+                ];
+                let qvals = [q1, q2, q3, q4];
+                let scs = [
+                    sc[sc_base + is] as i8,
+                    sc[sc_base + is + 2] as i8,
+                    sc[sc_base + is + 4] as i8,
+                    sc[sc_base + is + 6] as i8,
+                ];
+                for idx in 0..4 {
+                    let w = d * f64::from(scs[idx]) * qvals[idx] as f64;
+                    let elem = sup * SUPER + positions[idx];
+                    let ab = (token * abpr + elem / 32) * 36;
+                    let ad = f64::from(half::f16::from_le_bytes([act[ab], act[ab + 1]]).to_f32());
+                    let aq = f64::from(act[ab + 4 + elem % 32] as i8);
+                    let contribution = w * ad * aq;
+                    sum += contribution;
+                    magnitude += contribution.abs();
+                }
+            }
+        }
+    }
+    (sum, magnitude)
 }
 
 /// Output positions sampled for the reference check. A full f64 pass is
@@ -104,42 +248,93 @@ fn q8_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize
 #[cfg(feature = "cuda")]
 const REFERENCE_SAMPLES: usize = 256;
 
-/// Relative error permitted against the f64 reference. Summing `K/32` block
-/// products in f32 gives a worst case around `sqrt(K/32) * f32::EPSILON`; this
-/// leaves roughly an order of magnitude of headroom above that at the shapes
-/// this tool runs, while still failing loudly on a real indexing error, which
-/// lands orders of magnitude away rather than a few ulps.
+/// Error bound against the f64 reference, shared by every format.
+///
+/// The check divides the absolute error by the accumulated magnitude of the
+/// dot product (see [`check_against_reference`]), not by the result. Q4_K and
+/// Q6_K dequantize through cancellation-heavy terms — `d * sc * q - dmin * m`
+/// and `d * sc * (q - 32)` — where individual block contributions run far
+/// larger than the final result, so f32 rounding error is proportional to
+/// that summed magnitude, not to the result. Dividing by magnitude instead of
+/// result measures error against the quantity f32 rounding is actually
+/// proportional to, so one tight bound serves Q8_0, Q4_K, and Q6_K alike
+/// regardless of how much cancellation each carries.
+///
+/// The bound must clear the f32 accumulation floor. Summing `K/32` block
+/// products in f32 walks to roughly `sqrt(K/32) * f32::EPSILON`, which at the
+/// shapes this tool runs is a few parts in a million, so a bound at 1e-6 sits
+/// under the noise and fails on arithmetic rather than on defects.
+///
+/// A real defect — a wrong index map, a dropped k-block, a double-counted
+/// partial — moves the result by a sizeable fraction of the magnitude and
+/// still lands orders of magnitude above this bound.
+///
+/// One bound covers every kernel here. The feature-major family stages its
+/// weight scales as f32, and the activation record's quant sum is an exact
+/// int16, so the only half-rounded factor left anywhere is the activation
+/// record's `d`, and that rounding stays under this bound. A kernel that put the weight scales back through `half` would
+/// not, and would need its own.
 #[cfg(feature = "cuda")]
 const REFERENCE_RTOL: f64 = 1e-5;
 
-/// Checks sampled outputs against [`q8_0_reference`], panicking with the
-/// position and both values on the first breach.
+/// One reference implementation: quantized weight and activation bytes plus an
+/// output position, returning that output's dot product and the accumulated
+/// magnitude the error is measured against.
 #[cfg(feature = "cuda")]
-fn check_against_reference(
-    label: &str,
-    got: &[f32],
-    weight: &[u8],
-    act: &[u8],
+type ReferenceFn = fn(&[u8], &[u8], usize, usize, usize) -> (f64, f64);
+
+/// The quantized operands and the shape one reference sweep runs over. Bundled
+/// because every reference reads the same five values.
+#[cfg(feature = "cuda")]
+struct RefCase<'a> {
+    weight: &'a [u8],
+    act: &'a [u8],
     m: usize,
     n: usize,
     k: usize,
-) {
+}
+
+/// Checks sampled outputs against the f64 reference for `format`
+/// ([`q8_0_reference`], [`q4_k_reference`], or [`q6_k_reference`]), panicking
+/// with the position and both values on the first breach.
+#[cfg(feature = "cuda")]
+fn check_against_reference(label: &str, format: MmqFormat, got: &[f32], case: &RefCase) {
+    let rtol = REFERENCE_RTOL;
+    let reference: ReferenceFn = match format {
+        MmqFormat::Q8_0 => q8_0_reference,
+        MmqFormat::Q4K => q4_k_reference,
+        MmqFormat::Q6K => q6_k_reference,
+    };
+    let RefCase {
+        weight,
+        act,
+        m,
+        n,
+        k,
+    } = *case;
     let total = m * n;
     let stride = (total / REFERENCE_SAMPLES).max(1);
     let mut checked = 0usize;
+    // Tracked so the line below reports headroom against the bound, which is
+    // what says whether the bound is calibrated or merely passing.
+    let mut worst = 0.0f64;
     for idx in (0..total).step_by(stride) {
         let (token, feat) = (idx / n, idx % n);
-        let want = q8_0_reference(weight, act, token, feat, k);
+        let (want, magnitude) = reference(weight, act, token, feat, k);
         let have = f64::from(got[idx]);
-        let err = (have - want).abs() / want.abs().max(f64::MIN_POSITIVE);
+        let err = (have - want).abs() / magnitude.max(f64::MIN_POSITIVE);
         assert!(
-            err <= REFERENCE_RTOL,
+            err <= rtol,
             "{label} disagrees with the f64 reference at (token={token}, feat={feat}): \
-             got {have}, want {want}, relative error {err:.3e} exceeds {REFERENCE_RTOL:.0e}"
+             got {have}, want {want}, magnitude-relative error {err:.3e} exceeds {rtol:.0e}"
         );
+        worst = worst.max(err);
         checked += 1;
     }
-    println!("{label}: {checked} sampled outputs within {REFERENCE_RTOL:.0e} of the f64 reference");
+    println!(
+        "{label}: {checked} sampled outputs within {rtol:.0e} of the f64 reference \
+         (worst {worst:.2e})"
+    );
 }
 
 /// Calls timed per kernel, after warmup.
@@ -220,6 +415,33 @@ impl MmqFormat {
         }
     }
 
+    /// Format name inside the feature-major kernel symbols. `None` marks a
+    /// format the family does not compile; every format this tool knows is
+    /// compiled today. Mirrors the `FeatMajorFormat`
+    /// constants in `src/quant/cuda/quant_matmul/mmq_feat_major.rs` and the
+    /// `MMQ_FM_KERNEL` instantiations in `quant_mmq_mma.cu`.
+    fn feat_major_infix(&self) -> Option<&'static str> {
+        match self {
+            MmqFormat::Q8_0 => Some("q8_0"),
+            MmqFormat::Q4K => Some("q4_k"),
+            MmqFormat::Q6K => Some("q6_k"),
+        }
+    }
+
+    /// Weight row stride in the shared tile, in ints, mirroring the
+    /// `FeatMajorFormat` constants. Q8_0 stages 64 quant words, 8 f32 scales
+    /// and 4 ints of bank padding. Q4_K stages 64 quant words, 8 `float2`
+    /// scale/min pairs (16 ints) and 4 ints of padding — its pair is two f32
+    /// rather than one packed word, so its row is 8 ints wider. Q6_K reaches
+    /// the same 84 by a different split: 64 quant words, 16 f32 group scales
+    /// (its scale changes every 16 elements) and 4 ints of padding.
+    fn feat_major_x_stride(&self) -> u32 {
+        match self {
+            MmqFormat::Q8_0 => 76,
+            MmqFormat::Q4K | MmqFormat::Q6K => 84,
+        }
+    }
+
     fn build_weight(&self, n: usize, k: usize) -> Vec<u8> {
         match self {
             MmqFormat::Q8_0 => build_q8_0_weight(n, k),
@@ -275,10 +497,20 @@ fn build_q8_1_activation(m: usize, k: usize) -> Vec<u8> {
 /// read.
 ///
 /// Mirrors `quantize_f32_q8_1_mmq` in `src/quant/cuda/kernels/quant_act.cu`: a
-/// 144-byte record holds 128 k-values of one token as four F32 block scales
-/// then 128 int8, and records are indexed `kgroup * ntok + token`. Deriving it
-/// from the per-token bytes here, rather than re-quantizing, keeps this example
-/// and the f64 reference reading one set of quantized values.
+/// 144-byte record holds 128 k-values of one token as four header words then
+/// 128 int8, and records are indexed `kgroup * ntok + token`. Per 32-value
+/// sub-block the header word is `half` `d` in bits 0..15 (bytes 0..1,
+/// little-endian) and the int16 sum of that sub-block's 32 clamped int8 quants
+/// in bits 16..31 (bytes 2..3). The sum is a raw integer, never a float:
+/// |sum| <= 32 * 128 = 4096 fits int16 exactly, and the Q4_K min correction
+/// needs it exact. Deriving it from the per-token bytes here, rather than
+/// re-quantizing, keeps this example and the f64 reference reading one set of
+/// quantized values; `d` is read from the per-token block header, which is
+/// already a half value, so it round-trips exactly.
+///
+/// This is a CPU mirror of a GPU kernel: the two encode the same bytes and
+/// MUST change together, which is what caused this function to fall out of
+/// sync with `quantize_f32_q8_1_mmq` once.
 #[cfg(feature = "cuda")]
 fn repack_q8_1_mmq(act: &[u8], m: usize, k: usize, ntok: usize) -> Vec<u8> {
     let bpr = k / 32;
@@ -290,7 +522,13 @@ fn repack_q8_1_mmq(act: &[u8], m: usize, k: usize, ntok: usize) -> Vec<u8> {
             let rec = ((b / 4) * ntok + token) * 144;
             let sub = b % 4;
             let d = half::f16::from_le_bytes([act[src], act[src + 1]]).to_f32();
-            out[rec + sub * 4..rec + sub * 4 + 4].copy_from_slice(&d.to_le_bytes());
+            let sum: i32 = act[src + 4..src + 36]
+                .iter()
+                .map(|&byte| i32::from(byte as i8))
+                .sum();
+            let slot = rec + sub * 4;
+            out[slot..slot + 2].copy_from_slice(&half::f16::from_f32(d).to_le_bytes());
+            out[slot + 2..slot + 4].copy_from_slice(&(sum as i16).to_le_bytes());
             out[rec + 16 + sub * 32..rec + 16 + sub * 32 + 32]
                 .copy_from_slice(&act[src + 4..src + 36]);
         }
@@ -509,8 +747,10 @@ fn main() {
 
     // Both feature-major paths use the same token tile, and the repacked
     // activation layout is strided by it, so choose it once and repack once.
+    let fm_x_stride = format.feat_major_x_stride();
     let fm_mmq_x = force_mmq_x.unwrap_or_else(|| {
-        select_mmq_x(m as u32, mmq_x_smem_bytes(128)).expect("a feature-major variant fits")
+        select_mmq_x(m as u32, mmq_x_smem_bytes(fm_x_stride, 128), fm_x_stride)
+            .expect("a feature-major variant fits")
     });
     let fm_ntok = (m as u32).div_ceil(fm_mmq_x) * fm_mmq_x;
     let packed_bytes = repack_q8_1_mmq(&act_bytes, m, k, fm_ntok as usize);
@@ -590,31 +830,31 @@ fn main() {
     client.synchronize();
     let mma_us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
 
-    // The feature-major kernel is the llama.cpp-geometry port and currently
-    // exists for Q8_0 only: feature-major tiles, weights as MMA operand A, 256
-    // k staged per step. Its grid axes are transposed against
-    // `quant_mmq_q8_0_q8_1_mma`, its token tile is chosen per batch size, and
-    // its shared memory is dynamic, so it needs its own config and an opt-in.
-    let feat_major = match format {
-        MmqFormat::Q8_0 => {
+    // The feature-major kernels are the llama.cpp-geometry port: feature-major
+    // tiles, weights as MMA operand A, 256 k staged per step. Their grid axes
+    // are transposed against the token-major `_mma` kernel, their token tile is
+    // chosen per batch size, and their shared memory is dynamic, so they need
+    // their own config and an opt-in. Compiled for Q8_0, Q4_K and Q6_K.
+    let feat_major = match format.feat_major_infix() {
+        Some(infix) => {
             let mmq_x = fm_mmq_x;
             assert!(
                 MMQ_X_VARIANTS.contains(&mmq_x),
                 "--mmq-x {mmq_x} is not a compiled variant; compiled: {MMQ_X_VARIANTS:?}"
             );
-            let name = format!("quant_mmq_q8_0_q8_1_mma_x{mmq_x}");
+            let name = format!("quant_mmq_{infix}_q8_1_mma_x{mmq_x}");
             let func = kernels::get_kernel_function(&mma_module, &name)
                 .unwrap_or_else(|_| panic!("resolve {name}"));
             func.set_attribute(
                 cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                mmq_x_smem_bytes(mmq_x) as i32,
+                mmq_x_smem_bytes(fm_x_stride, mmq_x) as i32,
             )
             .expect("opt in to dynamic shared memory for the feature-major kernel");
             let out =
                 Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device).unwrap();
             Some((func, out, mmq_x, name))
         }
-        _ => None,
+        None => None,
     };
 
     let feat_major_us = feat_major.as_ref().map(|(func, out, mmq_x, _)| {
@@ -622,7 +862,7 @@ fn main() {
         let cfg_fm = LaunchConfig {
             grid_dim: (m_u32.div_ceil(*mmq_x), n_u32.div_ceil(128), 1),
             block_dim: (256, 1, 1),
-            shared_mem_bytes: mmq_x_smem_bytes(*mmq_x),
+            shared_mem_bytes: mmq_x_smem_bytes(fm_x_stride, *mmq_x),
         };
         let launch = || unsafe {
             let mut builder = client.stream().launch_builder(func);
@@ -654,12 +894,12 @@ fn main() {
     // partial tiles. It exists for the case where the tile count alone does not
     // fill the device. It reassociates the k sum across blocks, so it is checked
     // against the f64 reference, never against another kernel bit-for-bit.
-    let sk = match format {
-        MmqFormat::Q8_0 if stream_k => {
+    let sk = match format.feat_major_infix() {
+        Some(infix) if stream_k => {
             let mmq_x = fm_mmq_x;
             let grid = device.profile().compute_units;
-            let sk_name = format!("quant_mmq_q8_0_q8_1_mma_sk_x{mmq_x}");
-            let fx_name = format!("quant_mmq_q8_0_q8_1_mma_fixup_x{mmq_x}");
+            let sk_name = format!("quant_mmq_{infix}_q8_1_mma_sk_x{mmq_x}");
+            let fx_name = format!("quant_mmq_{infix}_q8_1_mma_fixup_x{mmq_x}");
             let sk_func = kernels::get_kernel_function(&mma_module, &sk_name)
                 .unwrap_or_else(|_| panic!("resolve {sk_name}"));
             let fx_func = kernels::get_kernel_function(&mma_module, &fx_name)
@@ -667,7 +907,7 @@ fn main() {
             sk_func
                 .set_attribute(
                     cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                    mmq_x_smem_bytes(mmq_x) as i32,
+                    mmq_x_smem_bytes(fm_x_stride, mmq_x) as i32,
                 )
                 .expect("opt in to dynamic shared memory for the stream-k kernel");
             // Never zeroed: the fixup reads only slots whose block provably
@@ -690,7 +930,7 @@ fn main() {
             let cfg_sk = LaunchConfig {
                 grid_dim: (*grid, 1, 1),
                 block_dim: (256, 1, 1),
-                shared_mem_bytes: mmq_x_smem_bytes(*mmq_x),
+                shared_mem_bytes: mmq_x_smem_bytes(fm_x_stride, *mmq_x),
             };
             let cfg_fx = LaunchConfig {
                 grid_dim: (*grid, 1, 1),
@@ -733,15 +973,22 @@ fn main() {
     let dp4a_host = out_dp4a.to_vec::<f32>();
     let mma_host = out_mma.to_vec::<f32>();
 
-    check_against_reference("dp4a", &dp4a_host, &weight_bytes, &act_bytes, m, n, k);
-    check_against_reference(mma_kernel, &mma_host, &weight_bytes, &act_bytes, m, n, k);
+    let case = RefCase {
+        weight: &weight_bytes,
+        act: &act_bytes,
+        m,
+        n,
+        k,
+    };
+    check_against_reference("dp4a", format, &dp4a_host, &case);
+    check_against_reference(mma_kernel, format, &mma_host, &case);
     if let Some((_, out, _, name)) = feat_major.as_ref() {
         let feat_major_host = out.to_vec::<f32>();
-        check_against_reference(name, &feat_major_host, &weight_bytes, &act_bytes, m, n, k);
+        check_against_reference(name, format, &feat_major_host, &case);
     }
     if let Some((_, _, out, _, _, _, name)) = sk.as_ref() {
         let sk_host = out.to_vec::<f32>();
-        check_against_reference(name, &sk_host, &weight_bytes, &act_bytes, m, n, k);
+        check_against_reference(name, format, &sk_host, &case);
     }
 
     let mut mismatch = None;

@@ -75,10 +75,11 @@ pub(super) fn quantize_activation_q8_1(
 /// Quantize F32 activation into the repacked Q8_1 layout the feature-major MMQ
 /// kernels read.
 ///
-/// A record holds 128 k-values of one token — four F32 block scales then 128
-/// int8 — and records are indexed k-group-major, token-minor, so the `mmq_x`
-/// records a token tile needs are contiguous and the kernel stages them with a
-/// flat copy. Padded token slots and padded k-blocks are zeroed by the kernel.
+/// A record holds 128 k-values of one token — four header words, each a `half`
+/// block scale in bits 0..15 and that block's int16 quant sum in bits 16..31,
+/// then 128 int8 — and records are indexed k-group-major, token-minor, so the
+/// `mmq_x` records a token tile needs are contiguous and the kernel stages them
+/// with a flat copy. Padded token slots and padded k-blocks are zeroed by the kernel.
 ///
 /// Distinct from [`quantize_activation_q8_1`], which stays the producer for the
 /// dp4a, `quant_mmq_q8_0_q8_1_mma`, and K-quant kernels. Returns the buffer and

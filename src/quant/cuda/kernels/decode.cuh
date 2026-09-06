@@ -94,16 +94,30 @@ static __device__ __forceinline__ void unpack_q3k_scales(
 // kernels that dequantize one sub-block at a time rather than a whole
 // super-block up front.
 
+// Register form of the same unpack, taking the three `sc` bytes it needs
+// instead of the array: `b_j` is sc[j], `b_j4` is sc[j + 4], `b_jm4` is
+// sc[j - 4] (read only for j >= 4). A staging loop that must issue every
+// global load before any ALU work loads those bytes itself and decodes here,
+// which is why the bit layout lives in this function and `q4k_scale_min`
+// below is just this plus the three loads.
+static __device__ __forceinline__ void q4k_scale_min_bytes(
+    unsigned int b_j, unsigned int b_j4, unsigned int b_jm4, int j, int* scale, int* minimum
+) {
+    if (j < 4) {
+        *scale = b_j & 63;
+        *minimum = b_j4 & 63;
+    } else {
+        *scale = (b_j4 & 0x0F) | ((b_jm4 >> 6) << 4);
+        *minimum = (b_j4 >> 4) | ((b_j >> 6) << 4);
+    }
+}
+
 static __device__ __forceinline__ void q4k_scale_min(
     const unsigned char* sc, int j, int* scale, int* minimum
 ) {
-    if (j < 4) {
-        *scale = sc[j] & 63;
-        *minimum = sc[j + 4] & 63;
-    } else {
-        *scale = (sc[j + 4] & 0x0F) | ((sc[j - 4] >> 6) << 4);
-        *minimum = (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4);
-    }
+    // For j < 4 the third byte is unused; reading sc[j] again keeps the index
+    // inside the 12-byte array without a branch around the load.
+    q4k_scale_min_bytes(sc[j], sc[j + 4], sc[j < 4 ? j : j - 4], j, scale, minimum);
 }
 
 // ── Split-half nibble order (4-bit formats over 32-element blocks) ───────

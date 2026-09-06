@@ -250,20 +250,26 @@ pub(super) fn dispatch_matmul(
     let k_u32 = k as u32;
     let n_u32 = n as u32;
 
-    // Q8_0 on sm_80+ takes the feature-major tensor-core kernels: a 128-feature
-    // tile against a token tile chosen per batch size, with the weight as MMA
-    // operand A and a repacked activation layout of its own. It picks between a
-    // tile-parallel grid and stream-k internally. `Ok(None)` means no compiled
-    // variant fits the device, and the `quant_mmq_q8_0_q8_1_mma` kernel below
-    // still serves the shape.
-    let q8_0_takes_feat_major = matches!(format, QuantFormat::Q8_0)
-        && k.is_multiple_of(32)
+    // Q8_0, Q4_K and Q6_K on sm_80+ take the feature-major tensor-core kernels: a
+    // 128-feature tile against a token tile chosen per batch size, with the
+    // weight as MMA operand A and a repacked activation layout of its own. It
+    // picks between a tile-parallel grid and stream-k internally. `Ok(None)`
+    // means no compiled variant fits the device, and the per-format
+    // `quant_mmq_*_q8_1_mma` kernel below still serves the shape. A new format
+    // joins by adding a `FeatMajorFormat` and a match arm here.
+    let feat_major = match format {
+        QuantFormat::Q8_0 => Some(&mmq_feat_major::Q8_0),
+        QuantFormat::Q4K => Some(&mmq_feat_major::Q4_K),
+        QuantFormat::Q6K => Some(&mmq_feat_major::Q6_K),
+        _ => None,
+    };
+    if let Some(fm) = feat_major
+        && k.is_multiple_of(fm.k_multiple as usize)
         && numr::runtime::cuda::CudaDevice::new(device_index)
             .profile()
             .caps
-            .int8_mma_m16n8k32;
-    if q8_0_takes_feat_major
-        && mmq_feat_major::dispatch_q8_0(client, act_contig, weight, output_ptr, m, k, n)?.is_some()
+            .int8_mma_m16n8k32
+        && mmq_feat_major::dispatch(fm, client, act_contig, weight, output_ptr, m, k, n)?.is_some()
     {
         return Ok(Some(()));
     }

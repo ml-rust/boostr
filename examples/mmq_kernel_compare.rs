@@ -1,14 +1,15 @@
 //! Launches the dp4a and tensor-core MMQ kernels back to back in one process,
 //! on identical inputs, so a profiler attributes instruction counts to each
 //! kernel without an A/B rebuild. Covers Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K,
-//! Q5_K, Q6_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS, IQ2_XS and IQ2_S via
-//! `--format`.
+//! Q5_K, Q6_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS and
+//! IQ3_S via `--format`.
 //!
-//! Q4_0, Q4_1, Q5_0, Q5_1, Q5_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS, IQ2_XS
-//! and IQ2_S have no token-major kernel of either kind — neither a `quant_mmq_<fmt>_q8_1` nor
-//! its `_mma` twin exists — so for those formats the tool runs and checks the
-//! feature-major kernels alone and skips the token-major comparison rather
-//! than resolving a symbol that is not compiled.
+//! Q4_0, Q4_1, Q5_0, Q5_1, Q5_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS, IQ2_XS,
+//! IQ2_S, IQ3_XXS and IQ3_S have no token-major kernel of either kind —
+//! neither a `quant_mmq_<fmt>_q8_1` nor its `_mma` twin exists — so for those
+//! formats the tool runs and checks the feature-major kernels alone and skips
+//! the token-major comparison rather than resolving a symbol that is not
+//! compiled.
 //!
 //! ```text
 //! cargo run --release --features cuda --example mmq_kernel_compare -- \
@@ -41,6 +42,10 @@
 //!     --format iq2_xs --n 4096 --k 14336 --m 512
 //! cargo run --release --features cuda --example mmq_kernel_compare -- \
 //!     --format iq2_s --n 4096 --k 14336 --m 512
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format iq3_xxs --n 4096 --k 14336 --m 512
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format iq3_s --n 4096 --k 14336 --m 512
 //! ```
 
 #[cfg(not(feature = "cuda"))]
@@ -51,9 +56,11 @@ fn main() {
 #[cfg(feature = "cuda")]
 use boostr::quant::cuda::kernels::{self, QUANT_GEMV_MODULE, QUANT_MMQ_MMA_MODULE};
 // The ONE set of grids and the ONE sign table, shared with the CPU
-// dequantizers the IQ2 references mirror.
+// dequantizers the IQ2 and IQ3 references mirror.
 #[cfg(feature = "cuda")]
-use boostr::quant::cpu::kernels::iq_grid::{IQ2S_GRID, IQ2XS_GRID, IQ2XXS_GRID, KSIGNS};
+use boostr::quant::cpu::kernels::iq_grid::{
+    IQ2S_GRID, IQ2XS_GRID, IQ2XXS_GRID, IQ3S_GRID, IQ3XXS_GRID, KSIGNS,
+};
 // The ONE codebook, shared with the CPU dequantizer the references mirror.
 #[cfg(feature = "cuda")]
 use boostr::quant::tables::KVALUES_IQ4NL;
@@ -904,6 +911,109 @@ fn iq2_s_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usiz
     (sum, magnitude)
 }
 
+/// Exact reference for one output element, in f64, for an IQ3_XXS weight
+/// against a Q8_1 activation, plus the accumulated magnitude of the sum.
+///
+/// Dequant math and byte offsets are ground-truthed against `dequant_iq3_xxs`
+/// in `src/quant/cpu/kernels/dequant_iq3.rs`: per 256-element block of 98
+/// bytes, `d`@0 (f16), `qs[64]`@2, then `scales[32]`@66 read as eight
+/// little-endian `u32`, one per 32-element group. A group's `u32` holds its
+/// 4-bit scale in the top nibble over four 7-bit indices into `KSIGNS`. Each
+/// `qs` byte indexes `IQ3XXS_GRID`, whose entry expands to FOUR magnitude
+/// bytes, so the two `qs` bytes of one 8-element sign sub-group split it: the
+/// low byte supplies elements 0..3 and the high byte elements 4..7. The group
+/// scale is `d * (0.5 + s) * 0.5` and covers 32 elements.
+#[cfg(feature = "cuda")]
+fn iq3_xxs_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
+    const SUPER: usize = 256;
+    const BYTES: usize = 98;
+    let bpr = k / SUPER;
+    let abpr = k / 32;
+    let mut sum = 0.0f64;
+    let mut magnitude = 0.0f64;
+    for blk in 0..bpr {
+        let wb = (feat * bpr + blk) * BYTES;
+        let d = f64::from(half::f16::from_le_bytes([weight[wb], weight[wb + 1]]).to_f32());
+        for group in 0..8 {
+            let so = wb + 66 + group * 4;
+            let aux =
+                u32::from_le_bytes([weight[so], weight[so + 1], weight[so + 2], weight[so + 3]]);
+            let db = d * (0.5 + f64::from(aux >> 28)) * 0.5;
+            for sub in 0..4 {
+                let signs = KSIGNS[((aux >> (7 * sub)) & 0x7F) as usize];
+                let lo = usize::from(weight[wb + 2 + group * 8 + sub * 2]);
+                let hi = usize::from(weight[wb + 2 + group * 8 + sub * 2 + 1]);
+                for j in 0..8 {
+                    let (point, pos) = if j < 4 {
+                        (IQ3XXS_GRID[lo], j)
+                    } else {
+                        (IQ3XXS_GRID[hi], j - 4)
+                    };
+                    let mag = f64::from((point >> (8 * pos)) as u8);
+                    let val = if (signs >> j) & 1 != 0 { -mag } else { mag };
+                    let elem = blk * SUPER + group * 32 + sub * 8 + j;
+                    let ab = (token * abpr + elem / 32) * 36;
+                    let ad = f64::from(half::f16::from_le_bytes([act[ab], act[ab + 1]]).to_f32());
+                    let aq = f64::from(act[ab + 4 + elem % 32] as i8);
+                    let contribution = db * val * ad * aq;
+                    sum += contribution;
+                    magnitude += contribution.abs();
+                }
+            }
+        }
+    }
+    (sum, magnitude)
+}
+
+/// Exact reference for one output element, in f64, for an IQ3_S weight against
+/// a Q8_1 activation, plus the accumulated magnitude of the sum.
+///
+/// Dequant math and byte offsets are ground-truthed against `dequant_iq3_s` in
+/// `src/quant/cpu/kernels/dequant_iq3.rs`: per 256-element block of 110 bytes,
+/// `d`@0 (f16), `qs[64]`@2, `qh[8]`@66, `signs[32]`@74, `scales[4]`@106.
+/// Element `e` sits at grid entry `e / 4`, component `e % 4`. Entry `n` takes
+/// eight index bits from `qs[n]` and a NINTH from bit `n % 8` of `qh[n / 8]`,
+/// selecting one of the 512 four-component points of `IQ3S_GRID`. Its sign is
+/// bit `e % 8` of `signs[e / 8]`, explicit, with no sign table. Its scale is
+/// the 4-bit field `e / 32` of `scales`, packed two per byte, giving
+/// `d * (1 + 2 * s)` over 32 elements — a form no other IQ format shares.
+#[cfg(feature = "cuda")]
+fn iq3_s_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
+    const SUPER: usize = 256;
+    const BYTES: usize = 110;
+    let bpr = k / SUPER;
+    let abpr = k / 32;
+    let mut sum = 0.0f64;
+    let mut magnitude = 0.0f64;
+    for blk in 0..bpr {
+        let wb = (feat * bpr + blk) * BYTES;
+        let d = f64::from(half::f16::from_le_bytes([weight[wb], weight[wb + 1]]).to_f32());
+        for e in 0..SUPER {
+            let entry = e / 4;
+            let ninth = usize::from((weight[wb + 66 + entry / 8] >> (entry % 8)) & 1);
+            let point = IQ3S_GRID[usize::from(weight[wb + 2 + entry]) | (ninth << 8)];
+            let g = e / 32;
+            let s = (weight[wb + 106 + g / 2] >> (4 * (g % 2))) & 0x0F;
+            let db = d * (1.0 + 2.0 * f64::from(s));
+            let mag = f64::from((point >> (8 * (e % 4))) as u8);
+            let signs = weight[wb + 74 + e / 8];
+            let val = if (signs >> (e % 8)) & 1 != 0 {
+                -mag
+            } else {
+                mag
+            };
+            let elem = blk * SUPER + e;
+            let ab = (token * abpr + elem / 32) * 36;
+            let ad = f64::from(half::f16::from_le_bytes([act[ab], act[ab + 1]]).to_f32());
+            let aq = f64::from(act[ab + 4 + elem % 32] as i8);
+            let contribution = db * val * ad * aq;
+            sum += contribution;
+            magnitude += contribution.abs();
+        }
+    }
+    (sum, magnitude)
+}
+
 /// The quantized operands and the shape one reference sweep runs over. Bundled
 /// because every reference reads the same five values.
 #[cfg(feature = "cuda")]
@@ -920,7 +1030,8 @@ struct RefCase<'a> {
 /// [`q5_0_reference`], [`q5_1_reference`], [`q4_k_reference`],
 /// [`q5_k_reference`], [`q6_k_reference`], [`q3_k_reference`],
 /// [`q2_k_reference`], [`iq4_nl_reference`], [`iq4_xs_reference`],
-/// [`iq2_xxs_reference`], [`iq2_xs_reference`] or [`iq2_s_reference`]),
+/// [`iq2_xxs_reference`], [`iq2_xs_reference`], [`iq2_s_reference`],
+/// [`iq3_xxs_reference`] or [`iq3_s_reference`]),
 /// panicking with the position and both values on the first breach.
 #[cfg(feature = "cuda")]
 fn check_against_reference(label: &str, format: MmqFormat, got: &[f32], case: &RefCase) {
@@ -941,6 +1052,8 @@ fn check_against_reference(label: &str, format: MmqFormat, got: &[f32], case: &R
         MmqFormat::IQ2XXS => iq2_xxs_reference,
         MmqFormat::IQ2XS => iq2_xs_reference,
         MmqFormat::IQ2S => iq2_s_reference,
+        MmqFormat::IQ3XXS => iq3_xxs_reference,
+        MmqFormat::IQ3S => iq3_s_reference,
     };
     let RefCase {
         weight,
@@ -1025,6 +1138,8 @@ enum MmqFormat {
     IQ2XXS,
     IQ2XS,
     IQ2S,
+    IQ3XXS,
+    IQ3S,
 }
 
 #[cfg(feature = "cuda")]
@@ -1046,10 +1161,12 @@ impl MmqFormat {
             "iq2_xxs" => MmqFormat::IQ2XXS,
             "iq2_xs" => MmqFormat::IQ2XS,
             "iq2_s" => MmqFormat::IQ2S,
+            "iq3_xxs" => MmqFormat::IQ3XXS,
+            "iq3_s" => MmqFormat::IQ3S,
             other => panic!(
                 "unknown --format {other}, expected one of: \
                  q8_0, q4_0, q4_1, q5_0, q5_1, q4_k, q5_k, q6_k, q3_k, q2_k, iq4_nl, iq4_xs, \
-                 iq2_xxs, iq2_xs, iq2_s"
+                 iq2_xxs, iq2_xs, iq2_s, iq3_xxs, iq3_s"
             ),
         }
     }
@@ -1071,12 +1188,14 @@ impl MmqFormat {
             MmqFormat::IQ2XXS => "iq2_xxs",
             MmqFormat::IQ2XS => "iq2_xs",
             MmqFormat::IQ2S => "iq2_s",
+            MmqFormat::IQ3XXS => "iq3_xxs",
+            MmqFormat::IQ3S => "iq3_s",
         }
     }
 
     /// Elements per weight block: 32 for the legacy formats Q8_0, Q4_0, Q4_1,
     /// Q5_0, Q5_1 and IQ4_NL, 256 for the K-quant super-blocks, IQ4_XS and the
-    /// IQ2 formats.
+    /// IQ2 and IQ3 formats.
     /// `k` must be a whole number of these, which
     /// mirrors the `k.is_multiple_of(...)` guards in `dispatch_matmul` and the
     /// `k_multiple` field of each `FeatMajorFormat`.
@@ -1096,15 +1215,17 @@ impl MmqFormat {
             | MmqFormat::IQ4XS
             | MmqFormat::IQ2XXS
             | MmqFormat::IQ2XS
-            | MmqFormat::IQ2S => 256,
+            | MmqFormat::IQ2S
+            | MmqFormat::IQ3XXS
+            | MmqFormat::IQ3S => 256,
         }
     }
 
     /// Token-major dp4a MMQ kernel, or `None` for a format that has none.
     /// Q4_0, Q4_1, Q5_0, Q5_1, Q5_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS,
-    /// IQ2_XS and IQ2_S have no `quant_mmq_*_q8_1` twin: their only
-    /// pre-feature-major GEMM path is the dequantize-then-f32 kernel, which
-    /// this tool does not time.
+    /// IQ2_XS, IQ2_S, IQ3_XXS and IQ3_S have no `quant_mmq_*_q8_1` twin: their
+    /// only pre-feature-major GEMM path is the dequantize-then-f32 kernel,
+    /// which this tool does not time.
     fn dp4a_kernel(&self) -> Option<&'static str> {
         match self {
             MmqFormat::Q8_0 => Some("quant_mmq_q8_0_q8_1"),
@@ -1121,14 +1242,16 @@ impl MmqFormat {
             | MmqFormat::IQ4XS
             | MmqFormat::IQ2XXS
             | MmqFormat::IQ2XS
-            | MmqFormat::IQ2S => None,
+            | MmqFormat::IQ2S
+            | MmqFormat::IQ3XXS
+            | MmqFormat::IQ3S => None,
         }
     }
 
     /// Token-major tensor-core MMQ kernel, or `None` for a format that has
     /// none. Q4_0, Q4_1, Q5_0, Q5_1, Q5_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS,
-    /// IQ2_XXS, IQ2_XS and IQ2_S have no `_mma` twin; all twelve went straight
-    /// to the feature-major family.
+    /// IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS and IQ3_S have no `_mma` twin; all
+    /// fourteen went straight to the feature-major family.
     fn mma_kernel(&self) -> Option<&'static str> {
         match self {
             MmqFormat::Q8_0 => Some("quant_mmq_q8_0_q8_1_mma"),
@@ -1145,7 +1268,9 @@ impl MmqFormat {
             | MmqFormat::IQ4XS
             | MmqFormat::IQ2XXS
             | MmqFormat::IQ2XS
-            | MmqFormat::IQ2S => None,
+            | MmqFormat::IQ2S
+            | MmqFormat::IQ3XXS
+            | MmqFormat::IQ3S => None,
         }
     }
 
@@ -1171,6 +1296,8 @@ impl MmqFormat {
             MmqFormat::IQ2XXS => Some("iq2_xxs"),
             MmqFormat::IQ2XS => Some("iq2_xs"),
             MmqFormat::IQ2S => Some("iq2_s"),
+            MmqFormat::IQ3XXS => Some("iq3_xxs"),
+            MmqFormat::IQ3S => Some("iq3_s"),
         }
     }
 
@@ -1201,7 +1328,10 @@ impl MmqFormat {
     /// also 32 elements. IQ2_XS and IQ2_S expand the same 8-component grid but
     /// stage the Q6_K row: their 4-bit scale is packed two to a `scales` byte,
     /// one per two grid entries, so it changes every 16 elements and needs the
-    /// 16 f32 record.
+    /// 16 f32 record. IQ3_XXS and IQ3_S index a 4-COMPONENT grid, so a sign
+    /// sub-group costs two grid points rather than one — spent entirely inside
+    /// staging — and both keep one scale per 32-element group, so both stage
+    /// the Q8_0 row.
     fn feat_major_x_stride(&self) -> u32 {
         match self {
             MmqFormat::Q8_0
@@ -1209,7 +1339,9 @@ impl MmqFormat {
             | MmqFormat::Q50
             | MmqFormat::IQ4NL
             | MmqFormat::IQ4XS
-            | MmqFormat::IQ2XXS => 76,
+            | MmqFormat::IQ2XXS
+            | MmqFormat::IQ3XXS
+            | MmqFormat::IQ3S => 76,
             MmqFormat::Q4K
             | MmqFormat::Q5K
             | MmqFormat::Q6K
@@ -1251,6 +1383,8 @@ impl MmqFormat {
             MmqFormat::IQ2XXS => build_iq2_xxs_weight(n, k),
             MmqFormat::IQ2XS => build_iq2_xs_weight(n, k),
             MmqFormat::IQ2S => build_iq2_s_weight(n, k),
+            MmqFormat::IQ3XXS => build_iq3_xxs_weight(n, k),
+            MmqFormat::IQ3S => build_iq3_s_weight(n, k),
         }
     }
 }
@@ -1559,6 +1693,81 @@ fn build_iq2_s_weight(n: usize, k: usize) -> Vec<u8> {
             for sk in 0..16 {
                 let s = ((block * 5 + sk * 3) % 16) as u8;
                 out[base + 74 + sk / 2] |= s << (4 * (sk % 2));
+            }
+        }
+    }
+    out
+}
+
+/// Builds an IQ3_XXS weight buffer: `n * (k / 256)` blocks of 98 bytes — half
+/// scale at byte 0, `qs[64]` at byte 2, `scales[32]` at byte 66 written as
+/// eight little-endian `u32`.
+///
+/// The layout is the inverse of `dequant_iq3_xxs` in
+/// `src/quant/cpu/kernels/dequant_iq3.rs`. Every grid index 0..255 is legal, so
+/// the `qs` bytes go in unmasked; each sign field is masked to its 7 bits and
+/// each group's 4-bit scale is varied so no two groups of a block share one — a
+/// dropped or shifted scale cannot cancel out. No scale is degenerate:
+/// `d * (0.5 + s) * 0.5` is non-zero even at `s = 0`.
+#[cfg(feature = "cuda")]
+fn build_iq3_xxs_weight(n: usize, k: usize) -> Vec<u8> {
+    let bpr = k / 256;
+    let mut out = vec![0u8; n * bpr * 98];
+    for row in 0..n {
+        for b in 0..bpr {
+            let block = row * bpr + b;
+            let base = block * 98;
+            out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
+            for i in 0..64 {
+                out[base + 2 + i] = quant_byte(block, i) as u8;
+            }
+            for group in 0..8 {
+                let mut aux = 0u32;
+                for sub in 0..4 {
+                    let signs = quant_byte(block, 64 + group * 4 + sub) as u8 & 0x7F;
+                    aux |= u32::from(signs) << (7 * sub);
+                }
+                aux |= (((block * 3 + group) % 16) as u32) << 28;
+                let off = base + 66 + group * 4;
+                out[off..off + 4].copy_from_slice(&aux.to_le_bytes());
+            }
+        }
+    }
+    out
+}
+
+/// Builds an IQ3_S weight buffer: `n * (k / 256)` blocks of 110 bytes — half
+/// scale at byte 0, `qs[64]` at byte 2, `qh[8]` at byte 66, `signs[32]` at byte
+/// 74, `scales[4]` at byte 106.
+///
+/// The layout is the inverse of `dequant_iq3_s` in
+/// `src/quant/cpu/kernels/dequant_iq3.rs`. Every 9-bit grid index 0..511 is
+/// legal and every sign byte is, so both go in unmasked. The ninth index bit is
+/// varied per entry so the high half of the grid is exercised rather than left
+/// at zero, and each group's 4-bit scale is varied so no two 32-element groups
+/// of a block share one. No scale is degenerate: `d * (1 + 2 * s)` is non-zero
+/// even at `s = 0`.
+#[cfg(feature = "cuda")]
+fn build_iq3_s_weight(n: usize, k: usize) -> Vec<u8> {
+    let bpr = k / 256;
+    let mut out = vec![0u8; n * bpr * 110];
+    for row in 0..n {
+        for b in 0..bpr {
+            let block = row * bpr + b;
+            let base = block * 110;
+            out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
+            for entry in 0..64 {
+                out[base + 2 + entry] = quant_byte(block, entry) as u8;
+                let ninth = ((block + entry) % 2) as u8;
+                out[base + 66 + entry / 8] |= ninth << (entry % 8);
+            }
+            for i in 0..32 {
+                out[base + 74 + i] = quant_byte(block, 64 + i) as u8;
+            }
+            // One 4-bit scale per 32-element group, two groups per byte.
+            for g in 0..8 {
+                let s = ((block * 5 + g * 3) % 16) as u8;
+                out[base + 106 + g / 2] |= s << (4 * (g % 2));
             }
         }
     }

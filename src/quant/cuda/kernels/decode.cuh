@@ -151,6 +151,64 @@ static __device__ __forceinline__ int gguf_split_half_nibble(
     return (elem & 16) ? ((byte >> 4) & 0x0F) : (byte & 0x0F);
 }
 
+// ── IQ4 non-linear codebook ────────────────────────────────────────────
+// IQ4_NL and IQ4_XS are CODEBOOK quantizations: a nibble is an INDEX into
+// this 16-entry signed table, never a magnitude. Reading a nibble as a
+// magnitude yields finite, plausibly scaled numbers, so the mistake shows up
+// as wrong output and never as an error.
+//
+// This is the ONE copy every kernel file that includes `decode.cuh` uses.
+// `KVALUES_IQ4NL` in `src/quant/tables` is the CPU mirror; keep the two in
+// step. Each translation unit here compiles to its own PTX module, so the
+// `__constant__` definition in a header is per-module and never a duplicate
+// symbol.
+//
+// `__align__(16)` is load-bearing: `gguf_iq4_table_lookup` reads the table as
+// four `unsigned int`, and a bare `signed char[16]` carries alignment 1.
+__constant__ __align__(16) signed char KVALUES_IQ4NL[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
+};
+
+// Codebook lookup for the eight nibble indices packed in `q4`, which holds
+// four consecutive `qs` bytes of a 32-element run.
+//
+// `*lo` receives the four LOW nibbles' table values and `*hi` the four HIGH
+// nibbles', each as four signed bytes in one int. Under the split-half nibble
+// order those are elements `j..j+3` and `j+16..j+19` of the run.
+//
+// Transcribed from `get_int_from_table_16` in llama.cpp's
+// `ggml-cuda/vecdotq.cuh`. `__byte_perm` selects a byte with a THREE-bit
+// index, so the fourth index bit is handled by permuting the low and high
+// halves of the table separately and then selecting between the two results
+// on that bit. `q4 & 0x77777777` masks each index to those three bits: a
+// selector nibble with its msb set means "replicate the sign of the selected
+// byte" to `prmt.b32`, not "select byte 8..15", so an unmasked index would
+// return 0x00 or 0xFF for every entry in the table's upper half.
+static __device__ __forceinline__ void gguf_iq4_table_lookup(
+    int q4, int* lo, int* hi
+) {
+    const unsigned int* table32 = (const unsigned int*)KVALUES_IQ4NL;
+    const unsigned int idx3 = (unsigned int)q4 & 0x77777777u;
+    // Bit 3 of index `i` becomes bit 2 of selector nibble `i`, which picks the
+    // upper-half result (`high`, pool bytes 4..7) over the lower (`low`).
+    const unsigned int sel = 0x32103210u | (((unsigned int)q4 & 0x88888888u) >> 1);
+
+    // Two rounds, because one `__byte_perm` consumes only four index nibbles.
+    unsigned int tmp[2];
+#pragma unroll
+    for (unsigned int i = 0; i < 2; ++i) {
+        const unsigned int shift = 16u * i;
+        const unsigned int low = __byte_perm(table32[0], table32[1], idx3 >> shift);
+        const unsigned int high = __byte_perm(table32[2], table32[3], idx3 >> shift);
+        tmp[i] = __byte_perm(low, high, sel >> shift);
+    }
+
+    // `tmp` holds the eight values in nibble order (low, high, low, high...);
+    // these two permutes split them into the all-low and all-high words.
+    *lo = (int)__byte_perm(tmp[0], tmp[1], 0x6420u);
+    *hi = (int)__byte_perm(tmp[0], tmp[1], 0x7531u);
+}
+
 // ── TQ1_0 / TQ2_0 ternary block layout ─────────────────────────────────
 //
 // Both ternary formats store the f16 scale `d` at the END of the block, not

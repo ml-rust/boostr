@@ -41,11 +41,6 @@
 #define FMT_TQ1_0   21
 #define FMT_TQ2_0   22
 
-// IQ4_NL codebook (matches llama.cpp kvalues_iq4nl)
-__constant__ signed char KVALUES_IQ4NL[16] = {
-    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
-};
-
 // ── Safe unaligned load helpers ─────────────────────────────────────
 // Quant blocks are packed contiguously; internal fields are not always
 // naturally aligned for their type. memcpy avoids misaligned-access traps.

@@ -1,44 +1,4 @@
-/// One weight format's share of the feature-major family. Everything else in
-/// this module — variant choice, stream-k decision, launch, fixup — is shared.
-pub(in crate::quant::cuda::quant_matmul) struct FeatMajorFormat {
-    /// Format name inside the kernel symbol, as `MMQ_FM_KERNEL`'s `NAME`.
-    pub kernel_infix: &'static str,
-    /// Weight row stride in the shared tile, in ints (`FMT::X_STRIDE`).
-    pub x_stride: u32,
-    /// K must be a whole number of these for the staging map to hold.
-    pub k_multiple: u32,
-    /// Per-token ints of shared scratch the format's `vec_dot` reads, held in
-    /// its own region after the activation tile (`FMT::Y_SCRATCH`).
-    ///
-    /// Zero for every format whose minimum term is no finer than the shared
-    /// activation record's 32-value sub-block, which is all of them but Q2_K.
-    /// Q2_K's minimum changes every 16 elements, so the kernel derives the
-    /// per-16 split of each stored sum into this region once per staged
-    /// activation tile.
-    pub act_scratch_ints_per_token: u32,
-}
-
-/// Q8_0: 34-byte blocks of 32 elements, staged as 64 quant words plus 8 f32
-/// scales plus 4 ints of bank padding.
-pub(in crate::quant::cuda::quant_matmul) const Q8_0: FeatMajorFormat = FeatMajorFormat {
-    kernel_infix: "q8_0",
-    x_stride: 76,
-    k_multiple: 32,
-    act_scratch_ints_per_token: 0,
-};
-
-/// Q4_0: 18-byte blocks of 32 elements, staged as Q8_0's row byte for byte —
-/// 64 quant words plus 8 f32 scales plus 4 ints of bank padding. Q4_0's quants
-/// are unsigned 4-bit biased by 8, and the kernel folds that bias in while
-/// staging, so the staged row and the whole `vec_dot` are Q8_0's. K needs only
-/// a whole 32-element block, so a row's last 256-k staging group can be
-/// partial.
-pub(in crate::quant::cuda::quant_matmul) const Q4_0: FeatMajorFormat = FeatMajorFormat {
-    kernel_infix: "q4_0",
-    x_stride: 76,
-    k_multiple: 32,
-    act_scratch_ints_per_token: 0,
-};
+use super::FeatMajorFormat;
 
 /// Q4_K: 144-byte super-blocks of 256 elements, staged as 64 quant words plus
 /// 8 `float2` scale/min pairs (16 ints) plus 4 ints of bank padding. The row is
@@ -117,45 +77,27 @@ pub(in crate::quant::cuda::quant_matmul) const Q2_K: FeatMajorFormat = FeatMajor
     act_scratch_ints_per_token: 4,
 };
 
+/// IQ4_XS: 136-byte super-blocks of 256 elements, staged as Q8_0's row byte for
+/// byte — 64 quant words plus 8 f32 sub-block scales plus 4 ints of bank
+/// padding. IQ4_XS is IQ4_NL's 16-entry signed codebook over a super-block: the
+/// kernel resolves each 4-bit index during staging, so the staged lanes are
+/// signed int8 and the whole `vec_dot` is Q8_0's. Its scale changes every 32
+/// elements, which is the granularity that `vec_dot` already indexes at, so it
+/// stages 8 f32 rather than Q6_K's 16 and needs no wider row. The staged scale
+/// is f32 and already multiplied by `d`, for the same parity reason as Q4_K. K
+/// must be a whole number of super-blocks.
+pub(in crate::quant::cuda::quant_matmul) const IQ4_XS: FeatMajorFormat = FeatMajorFormat {
+    kernel_infix: "iq4_xs",
+    x_stride: 76,
+    k_multiple: 256,
+    act_scratch_ints_per_token: 0,
+};
+
 #[cfg(test)]
 mod tests {
-    use super::super::dispatch::{FEAT_TILE, VARIANTS, smem_bytes, smem_opt_in_limit};
+    use super::super::super::dispatch::{FEAT_TILE, VARIANTS, smem_bytes, smem_opt_in_limit};
+    use super::super::legacy::{Q4_0, Q4_1, Q5_0, Q5_1, Q8_0};
     use super::*;
-
-    #[test]
-    fn the_q8_0_descriptor_names_the_compiled_symbols() {
-        assert_eq!(
-            format!("quant_mmq_{}_q8_1_mma_x{}", Q8_0.kernel_infix, 8),
-            "quant_mmq_q8_0_q8_1_mma_x8"
-        );
-        assert_eq!(Q8_0.k_multiple, 32);
-    }
-
-    /// Q4_0 stages into the Q8_0 row, so the two strides must stay equal and
-    /// with them the family's shared-memory request at every token tile. Both
-    /// are 32-element block formats, so both take the ragged-K multiple.
-    #[test]
-    fn the_q4_0_descriptor_names_the_compiled_symbols() {
-        assert_eq!(
-            format!("quant_mmq_{}_q8_1_mma_x{}", Q4_0.kernel_infix, 8),
-            "quant_mmq_q4_0_q8_1_mma_x8"
-        );
-        assert_eq!(
-            format!("quant_mmq_{}_q8_1_mma_sk_x{}", Q4_0.kernel_infix, 128),
-            "quant_mmq_q4_0_q8_1_mma_sk_x128"
-        );
-        assert_eq!(
-            format!("quant_mmq_{}_q8_1_mma_fixup_x{}", Q4_0.kernel_infix, 128),
-            "quant_mmq_q4_0_q8_1_mma_fixup_x128"
-        );
-        assert_eq!(Q4_0.k_multiple, 32);
-        assert_eq!(Q4_0.x_stride, Q8_0.x_stride);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&Q4_0, x) == smem_bytes(&Q8_0, x))
-        );
-    }
 
     #[test]
     fn the_q4_k_descriptor_names_the_compiled_symbols() {
@@ -308,7 +250,9 @@ mod tests {
     /// than as a kernel reading past what the launcher opted in to.
     #[test]
     fn q2_k_is_the_only_format_with_activation_scratch() {
-        for f in [&Q8_0, &Q4_0, &Q4_K, &Q5_K, &Q6_K, &Q3_K] {
+        for f in [
+            &Q8_0, &Q4_0, &Q4_1, &Q5_0, &Q5_1, &Q4_K, &Q5_K, &Q6_K, &Q3_K,
+        ] {
             assert_eq!(f.act_scratch_ints_per_token, 0);
         }
         assert_eq!(Q2_K.act_scratch_ints_per_token, 4);
@@ -325,5 +269,34 @@ mod tests {
         );
         // The widest variant must still fit what a device grants on opt-in.
         assert!(smem_bytes(&Q2_K, 128) <= smem_opt_in_limit(96 * 1024));
+    }
+
+    /// IQ4_XS is the only 256-element format in the family that stages the
+    /// Q8_0 row: its codebook values are signed int8 and its scale granularity
+    /// is the 32 elements `mmqf_vec_dot_d` already indexes at, so it needs
+    /// neither a bias nor a wider scale record. The two strides must therefore
+    /// stay equal, and with them the family's shared-memory request at every
+    /// token tile.
+    #[test]
+    fn the_iq4_xs_descriptor_names_the_compiled_symbols() {
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_x{}", IQ4_XS.kernel_infix, 8),
+            "quant_mmq_iq4_xs_q8_1_mma_x8"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_sk_x{}", IQ4_XS.kernel_infix, 128),
+            "quant_mmq_iq4_xs_q8_1_mma_sk_x128"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_fixup_x{}", IQ4_XS.kernel_infix, 128),
+            "quant_mmq_iq4_xs_q8_1_mma_fixup_x128"
+        );
+        assert_eq!(IQ4_XS.k_multiple, 256);
+        assert_eq!(IQ4_XS.x_stride, Q8_0.x_stride);
+        assert!(
+            VARIANTS
+                .iter()
+                .all(|&x| smem_bytes(&IQ4_XS, x) == smem_bytes(&Q8_0, x))
+        );
     }
 }

@@ -7,6 +7,7 @@
 #include <cuda_fp16.h>
 
 #include "iq_dequant.cuh"
+#include "decode.cuh"  // KVALUES_IQ4NL, shared with the other IQ4 readers
 
 extern "C" {
 
@@ -398,10 +399,6 @@ __global__ void dequant_q5_k_f32(
 // Block: 32 elements, 18 bytes (f16 scale + 16 bytes nibbles)
 // Non-linear codebook: x = scale * KVALUES_IQ4NL[nibble]
 // ============================================================================
-
-__constant__ signed char KVALUES_IQ4NL[16] = {
-    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
-};
 
 __global__ void dequant_iq4_nl_f32(
     const unsigned char* __restrict__ input,

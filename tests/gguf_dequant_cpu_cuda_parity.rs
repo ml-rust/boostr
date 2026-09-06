@@ -366,13 +366,13 @@ fn assert_matmul_parity_m(
 }
 
 /// Lossy-but-correct scores near 1.0. A wrong block layout collapses toward 0:
-/// `tests/quant_vs_f16_matrix.rs` measured 0.03 for one. The six formats here
-/// score 0.999884 and above, so the floor sits in the empty gap between.
+/// `tests/quant_vs_f16_matrix.rs` measured 0.03 for one. The formats measured
+/// here score 0.999884 and above, so the floor sits in the empty gap between.
 const COSINE_FLOOR: f64 = 0.999;
 
 /// Cosine gate for formats whose CUDA `quant_matmul` quantizes the activation
-/// to Q8_1 while CPU uses f32: `Q8_0`, `Q4_0`, `Q4K`, `Q5K`, `Q6K`, `Q2K`,
-/// `Q3K`.
+/// to Q8_1 while CPU uses f32: `Q8_0`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q4K`,
+/// `Q5K`, `Q6K`, `Q2K`, `Q3K`, `IQ4NL`, `IQ4XS`.
 ///
 /// An element-wise tolerance cannot gate these: per-element activation error
 /// enters the output multiplied by `sum|w|` over the reduction, while the
@@ -1458,7 +1458,7 @@ fn q4_1_quant_matmul_gemm_matches_cpu() {
             blk[4 + j] = nibble_byte(j, b);
         }
     }
-    assert_matmul_parity_m(
+    assert_matmul_parity_q8_1_activation(
         "q4_1_quant_matmul_gemm_matches_cpu",
         QuantFormat::Q4_1,
         &data,
@@ -1482,7 +1482,7 @@ fn q5_0_quant_matmul_gemm_matches_cpu() {
             blk[6 + j] = nibble_byte(j, b);
         }
     }
-    assert_matmul_parity_m(
+    assert_matmul_parity_q8_1_activation(
         "q5_0_quant_matmul_gemm_matches_cpu",
         QuantFormat::Q5_0,
         &data,
@@ -1507,7 +1507,7 @@ fn q5_1_quant_matmul_gemm_matches_cpu() {
             blk[8 + j] = nibble_byte(j, b);
         }
     }
-    assert_matmul_parity_m(
+    assert_matmul_parity_q8_1_activation(
         "q5_1_quant_matmul_gemm_matches_cpu",
         QuantFormat::Q5_1,
         &data,
@@ -1695,7 +1695,7 @@ fn iq4_nl_quant_matmul_gemm_matches_cpu() {
             blk[2 + j] = nibble_byte(j, b);
         }
     }
-    assert_matmul_parity_m(
+    assert_matmul_parity_q8_1_activation(
         "iq4_nl_quant_matmul_gemm_matches_cpu",
         QuantFormat::IQ4NL,
         &data,
@@ -1884,7 +1884,7 @@ fn iq4_xs_quant_matmul_gemm_matches_cpu() {
             }
         }
     }
-    assert_matmul_parity_m(
+    assert_matmul_parity_q8_1_activation(
         "iq4_xs_quant_matmul_gemm_matches_cpu",
         QuantFormat::IQ4XS,
         &data,

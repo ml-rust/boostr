@@ -44,10 +44,6 @@
 #define FMT_TQ1_0   21
 #define FMT_TQ2_0   22
 
-__constant__ signed char KVALUES_IQ4NL_GM[16] = {
-    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
-};
-
 // ── Safe unaligned load helpers ─────────────────────────────────────
 
 __device__ __forceinline__ float load_f16_as_f32(const unsigned char* p) {
@@ -292,13 +288,15 @@ __device__ void dq_q8k(const unsigned char* b, float* out) {
     for (int i = 0; i < 256; i++) out[i] = (float)qs[i] * d;
 }
 
+// IQ4_NL and IQ4_XS index `KVALUES_IQ4NL`, defined once in decode.cuh and
+// shared with the dequant, GEMV/GEMM and MMQ paths.
 __device__ void dq_iq4_nl(const unsigned char* b, float* out) {
     float d = load_f16_as_f32(b);
     // Split-half nibble order (llama.cpp dequantize_row_iq4_nl).
     for (int j = 0; j < 16; j++) {
         unsigned char v = b[2+j];
-        out[j]      = d * (float)KVALUES_IQ4NL_GM[v & 0x0F];
-        out[j + 16] = d * (float)KVALUES_IQ4NL_GM[(v>>4) & 0x0F];
+        out[j]      = d * (float)KVALUES_IQ4NL[v & 0x0F];
+        out[j + 16] = d * (float)KVALUES_IQ4NL[(v>>4) & 0x0F];
     }
 }
 
@@ -316,8 +314,8 @@ __device__ void dq_iq4_xs(const unsigned char* b, float* out) {
         float sub_scale = d * (float)((sl | (sh<<4)) - 32);
         for (int j = 0; j < 16; j++) {
             unsigned char v = qs[sb*16+j];
-            out[sb*32 + j]      = sub_scale * (float)KVALUES_IQ4NL_GM[v & 0x0F];
-            out[sb*32 + j + 16] = sub_scale * (float)KVALUES_IQ4NL_GM[(v>>4) & 0x0F];
+            out[sb*32 + j]      = sub_scale * (float)KVALUES_IQ4NL[v & 0x0F];
+            out[sb*32 + j + 16] = sub_scale * (float)KVALUES_IQ4NL[(v>>4) & 0x0F];
         }
     }
 }

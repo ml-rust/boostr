@@ -1,29 +1,10 @@
-//! The i-quant descriptors: 256-element blocks whose `qs` holds CODEBOOK
-//! INDICES rather than magnitudes.
+//! I-quants that resolve a grid entry through `mmqf_stage_iq_grid`.
 //!
-//! Split from `kquant.rs`, which now holds only the true K-quants. Every
-//! format here resolves its index during staging, so the staged row is always
-//! one an existing `vec_dot` already consumes — Q8_0's where the scale changes
-//! every 32 elements, Q6_K's where it changes every 16, and Q4_K's for IQ1_S,
-//! whose affine value needs a scale/min pair rather than a bare scale.
+//! An index selects a grid entry. The entry expands to several magnitude
+//! bytes. A sign table or explicit sign bits fold the sign onto each
+//! component during staging.
 
-use super::FeatMajorFormat;
-
-/// IQ4_XS: 136-byte super-blocks of 256 elements, staged as Q8_0's row byte for
-/// byte — 64 quant words plus 8 f32 sub-block scales plus 4 ints of bank
-/// padding. IQ4_XS is IQ4_NL's 16-entry signed codebook over a super-block: the
-/// kernel resolves each 4-bit index during staging, so the staged lanes are
-/// signed int8 and the whole `vec_dot` is Q8_0's. Its scale changes every 32
-/// elements, which is the granularity that `vec_dot` already indexes at, so it
-/// stages 8 f32 rather than Q6_K's 16 and needs no wider row. The staged scale
-/// is f32 and already multiplied by `d`, for the same parity reason as Q4_K. K
-/// must be a whole number of super-blocks.
-pub(in crate::quant::cuda::quant_matmul) const IQ4_XS: FeatMajorFormat = FeatMajorFormat {
-    kernel_infix: "iq4_xs",
-    x_stride: 76,
-    k_multiple: 256,
-    act_scratch_ints_per_token: 0,
-};
+use super::super::FeatMajorFormat;
 
 /// IQ2_XXS: 66-byte blocks of 256 elements, staged as Q8_0's row byte for byte
 /// — 64 quant words plus 8 f32 sub-block scales plus 4 ints of bank padding.
@@ -42,6 +23,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ2_XXS: FeatMajorFormat = FeatMa
     x_stride: 76,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: false,
 };
 
 /// IQ2_XS: 74-byte blocks of 256 elements, staged as Q6_K's row int for int —
@@ -62,6 +44,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ2_XS: FeatMajorFormat = FeatMaj
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: false,
 };
 
 /// IQ2_S: 82-byte blocks of 256 elements, staged as Q6_K's row int for int —
@@ -82,6 +65,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ2_S: FeatMajorFormat = FeatMajo
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: false,
 };
 
 /// IQ3_XXS: 98-byte blocks of 256 elements, staged as Q8_0's row byte for byte
@@ -100,11 +84,15 @@ pub(in crate::quant::cuda::quant_matmul) const IQ2_S: FeatMajorFormat = FeatMajo
 /// it stages 8 f32 rather than Q6_K's 16 and needs no wider row. The scale is
 /// `d * (0.5 + s) * 0.5`, staged as f32 already multiplied by `d`, for the same
 /// parity reason as Q4_K. K must be a whole number of blocks.
+///
+/// Measured faster on its tile-parallel kernel than on stream-k even where the
+/// geometric rule would pick stream-k — see `prefers_tile_parallel`'s doc.
 pub(in crate::quant::cuda::quant_matmul) const IQ3_XXS: FeatMajorFormat = FeatMajorFormat {
     kernel_infix: "iq3_xxs",
     x_stride: 76,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: true,
 };
 
 /// IQ3_S: 110-byte blocks of 256 elements, staged as Q8_0's row byte for byte —
@@ -126,6 +114,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ3_S: FeatMajorFormat = FeatMajo
     x_stride: 76,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: false,
 };
 
 /// IQ1_S: 50-byte blocks of 256 elements, staged as Q4_K's row int for int —
@@ -160,43 +149,15 @@ pub(in crate::quant::cuda::quant_matmul) const IQ1_S: FeatMajorFormat = FeatMajo
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: false,
 };
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::dispatch::{VARIANTS, smem_bytes};
-    use super::super::kquant::{Q4_K, Q6_K};
-    use super::super::legacy::{Q4_1, Q8_0};
+    use super::super::super::super::dispatch::{VARIANTS, smem_bytes};
+    use super::super::super::kquant::{Q4_K, Q6_K};
+    use super::super::super::legacy::{Q4_1, Q8_0};
     use super::*;
-
-    /// IQ4_XS is the first 256-element format in the family that stages the
-    /// Q8_0 row: its codebook values are signed int8 and its scale granularity
-    /// is the 32 elements `mmqf_vec_dot_d` already indexes at, so it needs
-    /// neither a bias nor a wider scale record. The two strides must therefore
-    /// stay equal, and with them the family's shared-memory request at every
-    /// token tile.
-    #[test]
-    fn the_iq4_xs_descriptor_names_the_compiled_symbols() {
-        assert_eq!(
-            format!("quant_mmq_{}_q8_1_mma_x{}", IQ4_XS.kernel_infix, 8),
-            "quant_mmq_iq4_xs_q8_1_mma_x8"
-        );
-        assert_eq!(
-            format!("quant_mmq_{}_q8_1_mma_sk_x{}", IQ4_XS.kernel_infix, 128),
-            "quant_mmq_iq4_xs_q8_1_mma_sk_x128"
-        );
-        assert_eq!(
-            format!("quant_mmq_{}_q8_1_mma_fixup_x{}", IQ4_XS.kernel_infix, 128),
-            "quant_mmq_iq4_xs_q8_1_mma_fixup_x128"
-        );
-        assert_eq!(IQ4_XS.k_multiple, 256);
-        assert_eq!(IQ4_XS.x_stride, Q8_0.x_stride);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&IQ4_XS, x) == smem_bytes(&Q8_0, x))
-        );
-    }
 
     /// IQ2_XXS stages the Q8_0 row like IQ4_XS: staging expands its grid point
     /// to signed int8 and folds the sign in, and its scale granularity is the
@@ -308,6 +269,7 @@ mod tests {
         );
         assert_eq!(IQ3_XXS.k_multiple, 256);
         assert_eq!(IQ3_XXS.x_stride, Q8_0.x_stride);
+        const { assert!(IQ3_XXS.prefers_tile_parallel) };
         assert!(
             VARIANTS
                 .iter()
@@ -337,6 +299,7 @@ mod tests {
         assert_eq!(IQ3_S.k_multiple, 256);
         assert_eq!(IQ3_S.x_stride, Q8_0.x_stride);
         assert_eq!(IQ3_S.x_stride, IQ3_XXS.x_stride);
+        const { assert!(!IQ3_S.prefers_tile_parallel) };
         assert!(
             VARIANTS
                 .iter()
@@ -373,21 +336,5 @@ mod tests {
                 .iter()
                 .all(|&x| smem_bytes(&IQ1_S, x) == smem_bytes(&Q4_K, x))
         );
-    }
-
-    /// No i-quant asks for activation scratch; Q2_K remains the family's only
-    /// claimant. IQ1_S does carry a minimum term, but at the 32-element
-    /// granularity the activation record's own block sum already has, so it
-    /// needs no per-16 split. Asserted here as well as in `kquant.rs` so a new
-    /// i-quant descriptor that copies the wrong template fails a test rather
-    /// than silently enlarging every launch's request.
-    #[test]
-    fn no_iquant_asks_for_activation_scratch() {
-        for f in [&IQ4_XS, &IQ2_XXS, &IQ2_XS, &IQ2_S, &IQ3_XXS, &IQ3_S, &IQ1_S] {
-            assert_eq!(f.act_scratch_ints_per_token, 0);
-            // The family's bank-padding rule, asserted in the kernel as well.
-            assert_eq!(f.x_stride % 8, 4);
-            assert_eq!(f.k_multiple, 256);
-        }
     }
 }

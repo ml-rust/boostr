@@ -11,6 +11,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q4_K: FeatMajorFormat = FeatMajor
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: false,
 };
 
 /// Q5_K: 176-byte super-blocks of 256 elements, staged exactly as Q4_K — 64
@@ -23,6 +24,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_K: FeatMajorFormat = FeatMajor
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: false,
 };
 
 /// Q6_K: 210-byte super-blocks of 256 elements, staged as 64 quant words plus
@@ -37,6 +39,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q6_K: FeatMajorFormat = FeatMajor
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: false,
 };
 
 /// Q3_K: 110-byte super-blocks of 256 elements, staged as Q6_K's row int for
@@ -50,6 +53,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q3_K: FeatMajorFormat = FeatMajor
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: false,
 };
 
 /// Q2_K: 84-byte super-blocks of 256 elements, staged as 64 quant words plus
@@ -75,6 +79,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q2_K: FeatMajorFormat = FeatMajor
     x_stride: 100,
     k_multiple: 256,
     act_scratch_ints_per_token: 4,
+    prefers_tile_parallel: false,
 };
 
 #[cfg(test)]
@@ -98,6 +103,7 @@ mod tests {
             "quant_mmq_q4_k_q8_1_mma_fixup_x128"
         );
         assert_eq!(Q4_K.k_multiple, 256);
+        const { assert!(!Q4_K.prefers_tile_parallel) };
     }
 
     #[test]
@@ -240,6 +246,7 @@ mod tests {
             assert_eq!(f.act_scratch_ints_per_token, 0);
         }
         assert_eq!(Q2_K.act_scratch_ints_per_token, 4);
+        const { assert!(!Q2_K.prefers_tile_parallel) };
         // 64 quant words + 32 ints of scale/min pairs + 4 ints of padding.
         assert_eq!(Q2_K.x_stride, 100);
         // The family's bank-padding rule, asserted in the kernel as well.

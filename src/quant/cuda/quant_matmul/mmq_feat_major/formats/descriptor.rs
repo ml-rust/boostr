@@ -18,4 +18,21 @@ pub(in crate::quant::cuda::quant_matmul) struct FeatMajorFormat {
     /// per-16 split of each stored sum into this region once per staged
     /// activation tile.
     pub act_scratch_ints_per_token: u32,
+    /// `true` when tile-parallel outruns stream-k at a geometry where
+    /// `dispatch.rs` picks stream-k.
+    ///
+    /// The rule `tiles < 2 * sms` assumes stream-k's saved wave outweighs its
+    /// fixup pass and longer serial K chain. That holds for most formats. For
+    /// a few, per-K-slice decode cost makes tile-parallel win instead.
+    ///
+    /// Measured, not derived. No device capability predicts it. Taken on one
+    /// GPU architecture, so it can differ on others.
+    ///
+    /// At small `m`, `token_tiles` is 1 for every `mmq_x`. Variant selection
+    /// cannot change this trade-off.
+    ///
+    /// Re-measure: run the kernel-comparison example with `--stream-k` at
+    /// small `m`, compare both kernels per format, flip any format whose
+    /// tile-parallel run wins outside noise.
+    pub prefers_tile_parallel: bool,
 }

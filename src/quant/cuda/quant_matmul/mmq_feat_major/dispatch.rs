@@ -122,11 +122,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch(
 
     let module = kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE)?;
 
-    // Stream-k when the tile count alone leaves the device short of work: it
-    // launches one block per SM and splits K across them. Once the tiles fill
-    // the device the tile-parallel grid is the better shape and needs no
-    // workspace or fixup pass.
-    let stream_k = sms > 0 && tiles < 2 * sms;
+    let stream_k = use_stream_k(tiles, sms, format);
 
     tracing::debug!(
         m,
@@ -261,13 +257,44 @@ fn launch_stream_k(
     Ok(())
 }
 
+/// Whether to launch the stream-k pair rather than the tile-parallel grid.
+///
+/// Stream-k launches one block per SM and splits K across them. It trades a
+/// fixup pass for the wave a ragged tile count leaves half empty. Once the
+/// tiles fill the device, tile-parallel wins and needs no workspace.
+///
+/// A format vetoes this call through `prefers_tile_parallel`.
+const fn use_stream_k(tiles: u32, sms: u32, format: &FeatMajorFormat) -> bool {
+    sms > 0 && tiles < 2 * sms && !format.prefers_tile_parallel
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::formats::Q8_0;
+    use super::super::formats::{IQ3_XXS, IQ4_NL, Q4_0, Q8_0};
     use super::*;
 
     /// Ample limit: every compiled variant fits.
     const WIDE: u32 = 1 << 20;
+
+    #[test]
+    fn stream_k_only_when_the_tiles_leave_the_device_short() {
+        // 32 tiles across 28 SMs leaves the second wave nearly empty.
+        assert!(use_stream_k(32, 28, &Q8_0));
+        // Two full waves already fill it, so the tile-parallel grid wins.
+        assert!(!use_stream_k(56, 28, &Q8_0));
+        // No SM count reported: fall back to the tile-parallel grid.
+        assert!(!use_stream_k(32, 0, &Q8_0));
+    }
+
+    #[test]
+    fn a_format_can_veto_stream_k_at_the_same_geometry() {
+        // Identical geometry, opposite answers: the veto is the only input
+        // that differs, which is the whole reason the flag exists.
+        assert!(use_stream_k(32, 28, &Q8_0));
+        assert!(!use_stream_k(32, 28, &IQ3_XXS));
+        assert!(!use_stream_k(32, 28, &Q4_0));
+        assert!(!use_stream_k(32, 28, &IQ4_NL));
+    }
 
     #[test]
     fn selects_the_smallest_tile_that_covers_one_batch() {

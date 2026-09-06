@@ -7,6 +7,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q8_0: FeatMajorFormat = FeatMajor
     x_stride: 76,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: false,
 };
 
 /// Q4_0: 18-byte blocks of 32 elements, staged as Q8_0's row byte for byte —
@@ -15,11 +16,15 @@ pub(in crate::quant::cuda::quant_matmul) const Q8_0: FeatMajorFormat = FeatMajor
 /// staging, so the staged row and the whole `vec_dot` are Q8_0's. K needs only
 /// a whole 32-element block, so a row's last 256-k staging group can be
 /// partial.
+///
+/// Measured faster on its tile-parallel kernel than on stream-k even where the
+/// geometric rule would pick stream-k — see `prefers_tile_parallel`'s doc.
 pub(in crate::quant::cuda::quant_matmul) const Q4_0: FeatMajorFormat = FeatMajorFormat {
     kernel_infix: "q4_0",
     x_stride: 76,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: true,
 };
 
 /// Q4_1: 20-byte blocks of 32 elements, staged as Q4_K's row int for int — 64
@@ -35,6 +40,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q4_1: FeatMajorFormat = FeatMajor
     x_stride: 84,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: false,
 };
 
 /// Q5_0: 22-byte blocks of 32 elements, staged as Q8_0's row byte for byte —
@@ -48,6 +54,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_0: FeatMajorFormat = FeatMajor
     x_stride: 76,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: false,
 };
 
 /// Q5_1: 24-byte blocks of 32 elements, staged as Q4_1's row int for int. Q5_1
@@ -60,6 +67,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_1: FeatMajorFormat = FeatMajor
     x_stride: 84,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: false,
 };
 
 /// IQ4_NL: 18-byte blocks of 32 elements, staged as Q8_0's row byte for byte —
@@ -69,11 +77,15 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_1: FeatMajorFormat = FeatMajor
 /// staged lanes are signed int8 and the whole `vec_dot` is Q8_0's. K needs only
 /// a whole 32-element block, so a row's last 256-k staging group can be
 /// partial.
+///
+/// Measured faster on its tile-parallel kernel than on stream-k even where the
+/// geometric rule would pick stream-k — see `prefers_tile_parallel`'s doc.
 pub(in crate::quant::cuda::quant_matmul) const IQ4_NL: FeatMajorFormat = FeatMajorFormat {
     kernel_infix: "iq4_nl",
     x_stride: 76,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
+    prefers_tile_parallel: true,
 };
 
 #[cfg(test)]
@@ -89,6 +101,9 @@ mod tests {
             "quant_mmq_q8_0_q8_1_mma_x8"
         );
         assert_eq!(Q8_0.k_multiple, 32);
+        // Measured within noise of stream-k at the reference geometry: no
+        // opt-out, so the geometric rule keeps deciding for it.
+        const { assert!(!Q8_0.prefers_tile_parallel) };
     }
 
     /// Q4_0 stages into the Q8_0 row, so the two strides must stay equal and
@@ -115,6 +130,8 @@ mod tests {
                 .iter()
                 .all(|&x| smem_bytes(&Q4_0, x) == smem_bytes(&Q8_0, x))
         );
+        // One of the three measured tile-parallel opt-outs.
+        const { assert!(Q4_0.prefers_tile_parallel) };
     }
 
     /// Q4_1 stages into the Q4_K row, so the two strides must stay equal and
@@ -193,6 +210,7 @@ mod tests {
                 .iter()
                 .all(|&x| smem_bytes(&Q5_1, x) == smem_bytes(&Q4_1, x))
         );
+        const { assert!(!Q5_1.prefers_tile_parallel) };
     }
 
     /// IQ4_NL stages into the Q8_0 row — the codebook values are signed int8,
@@ -221,5 +239,7 @@ mod tests {
                 .iter()
                 .all(|&x| smem_bytes(&IQ4_NL, x) == smem_bytes(&Q8_0, x))
         );
+        // One of the three measured tile-parallel opt-outs.
+        const { assert!(IQ4_NL.prefers_tile_parallel) };
     }
 }

@@ -11,6 +11,12 @@
 //! the token-major comparison rather than resolving a symbol that is not
 //! compiled.
 //!
+//! `--gemv` additionally launches and times the format's GEMV kernel(s) — the
+//! path `dispatch_gemv` takes for `m <= gemv_max_m` — at the same shape, so
+//! the GEMV/MMQ crossover for a format can be read off one run: Q4_K, Q6_K,
+//! Q8_0, Q5_K, Q3_K and Q2_K print both a `..._q8_1_mwr` line and a `..._f32`
+//! line, every other format only the `..._f32` line.
+//!
 //! ```text
 //! cargo run --release --features cuda --example mmq_kernel_compare -- \
 //!     --format q8_0 --n 4096 --k 14336 --m 512
@@ -48,6 +54,8 @@
 //!     --format iq3_s --n 4096 --k 14336 --m 512
 //! cargo run --release --features cuda --example mmq_kernel_compare -- \
 //!     --format iq1_s --n 4096 --k 14336 --m 512
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format q8_0 --n 4096 --k 14336 --m 8 --gemv
 //! ```
 
 #[cfg(not(feature = "cuda"))]
@@ -56,7 +64,12 @@ fn main() {
 }
 
 #[cfg(feature = "cuda")]
-use boostr::quant::cuda::kernels::{self, QUANT_GEMV_MODULE, QUANT_MMQ_MMA_MODULE};
+use boostr::quant::cuda::kernels::{
+    self, GEMV_IQ1_S_MODULE, GEMV_IQ2_S_MODULE, GEMV_IQ2_XS_MODULE, GEMV_IQ2_XXS_MODULE,
+    GEMV_IQ3_S_MODULE, GEMV_IQ3_XXS_MODULE, GEMV_IQ4_NL_MODULE, GEMV_IQ4_XS_MODULE,
+    GEMV_Q2_K_MODULE, GEMV_Q3_K_MODULE, GEMV_Q4_1_MODULE, GEMV_Q5_0_MODULE, GEMV_Q5_1_MODULE,
+    GEMV_Q5_K_MODULE, QUANT_GEMV_MODULE, QUANT_MMQ_MMA_MODULE,
+};
 // The ONE set of grids and the ONE sign table, shared with the CPU
 // dequantizers the IQ1, IQ2 and IQ3 references mirror.
 #[cfg(feature = "cuda")]
@@ -1338,6 +1351,60 @@ impl MmqFormat {
         }
     }
 
+    /// GEMV kernel taken by `m <= gemv_max_m`, F32-activation branch.
+    /// Mirrors the second `match` in `dispatch_gemv`
+    /// (`src/quant/cuda/quant_matmul/format_dispatch/gemv.rs`), which compiles
+    /// this kernel for every format this tool knows.
+    fn f32_gemv_kernel(&self) -> (&'static str, &'static str) {
+        match self {
+            MmqFormat::Q8_0 => ("quant_gemv_q8_0_f32", QUANT_GEMV_MODULE),
+            MmqFormat::Q40 => ("quant_gemv_q4_0_f32", QUANT_GEMV_MODULE),
+            MmqFormat::Q4K => ("quant_gemv_q4_k_f32", QUANT_GEMV_MODULE),
+            MmqFormat::Q6K => ("quant_gemv_q6_k_f32", QUANT_GEMV_MODULE),
+            MmqFormat::Q5K => ("quant_gemv_q5_k_f32", GEMV_Q5_K_MODULE),
+            MmqFormat::Q3K => ("quant_gemv_q3_k_f32", GEMV_Q3_K_MODULE),
+            MmqFormat::Q2K => ("quant_gemv_q2_k_f32", GEMV_Q2_K_MODULE),
+            MmqFormat::Q41 => ("quant_gemv_q4_1_f32", GEMV_Q4_1_MODULE),
+            MmqFormat::Q50 => ("quant_gemv_q5_0_f32", GEMV_Q5_0_MODULE),
+            MmqFormat::Q51 => ("quant_gemv_q5_1_f32", GEMV_Q5_1_MODULE),
+            MmqFormat::IQ4NL => ("quant_gemv_iq4_nl_f32", GEMV_IQ4_NL_MODULE),
+            MmqFormat::IQ4XS => ("quant_gemv_iq4_xs_f32", GEMV_IQ4_XS_MODULE),
+            MmqFormat::IQ2XXS => ("quant_gemv_iq2_xxs_f32", GEMV_IQ2_XXS_MODULE),
+            MmqFormat::IQ2XS => ("quant_gemv_iq2_xs_f32", GEMV_IQ2_XS_MODULE),
+            MmqFormat::IQ2S => ("quant_gemv_iq2_s_f32", GEMV_IQ2_S_MODULE),
+            MmqFormat::IQ3XXS => ("quant_gemv_iq3_xxs_f32", GEMV_IQ3_XXS_MODULE),
+            MmqFormat::IQ3S => ("quant_gemv_iq3_s_f32", GEMV_IQ3_S_MODULE),
+            MmqFormat::IQ1S => ("quant_gemv_iq1_s_f32", GEMV_IQ1_S_MODULE),
+        }
+    }
+
+    /// GEMV kernel taken by `m <= gemv_max_m`, dp4a MWR branch, or `None` for a
+    /// format that only has the F32 kernel. Mirrors the first `match` in
+    /// `dispatch_gemv`: only Q4_K, Q6_K, Q8_0, Q5_K, Q3_K and Q2_K have a
+    /// Q8_1-activation MWR kernel.
+    fn mwr_gemv_kernel(&self) -> Option<(&'static str, &'static str)> {
+        match self {
+            MmqFormat::Q4K => Some(("quant_gemv_q4_k_q8_1_mwr", QUANT_GEMV_MODULE)),
+            MmqFormat::Q6K => Some(("quant_gemv_q6_k_q8_1_mwr", QUANT_GEMV_MODULE)),
+            MmqFormat::Q8_0 => Some(("quant_gemv_q8_0_q8_1_mwr", QUANT_GEMV_MODULE)),
+            MmqFormat::Q5K => Some(("quant_gemv_q5_k_q8_1_mwr", GEMV_Q5_K_MODULE)),
+            MmqFormat::Q3K => Some(("quant_gemv_q3_k_q8_1_mwr", GEMV_Q3_K_MODULE)),
+            MmqFormat::Q2K => Some(("quant_gemv_q2_k_q8_1_mwr", GEMV_Q2_K_MODULE)),
+            MmqFormat::Q40
+            | MmqFormat::Q41
+            | MmqFormat::Q50
+            | MmqFormat::Q51
+            | MmqFormat::IQ4NL
+            | MmqFormat::IQ4XS
+            | MmqFormat::IQ2XXS
+            | MmqFormat::IQ2XS
+            | MmqFormat::IQ2S
+            | MmqFormat::IQ3XXS
+            | MmqFormat::IQ3S
+            | MmqFormat::IQ1S => None,
+        }
+    }
+
     /// Format name inside the feature-major kernel symbols. `None` marks a
     /// format the family does not compile; every format this tool knows is
     /// compiled today. Mirrors the `FeatMajorFormat`
@@ -1909,6 +1976,33 @@ fn build_q8_1_activation(m: usize, k: usize) -> Vec<u8> {
     out
 }
 
+/// Builds the raw `[M, K]` f32 activation matrix the F32-activation GEMV
+/// kernels read, decoded from the SAME per-token Q8_1 buffer the dp4a MWR
+/// GEMV kernel and the token-major MMQ kernels consume directly.
+///
+/// Element `(token, b * 32 + pos)` is `ad * aq`: the per-element value every
+/// Q8_1 reference function ([`q8_0_reference`] and friends) already
+/// dequantizes to internally. Deriving the F32 activation from the same bytes
+/// keeps one reference check valid for both GEMV kernels and the MMQ kernels,
+/// rather than needing an independent one for a differently-sourced float
+/// buffer.
+#[cfg(feature = "cuda")]
+fn build_f32_activation(act_bytes: &[u8], m: usize, k: usize) -> Vec<f32> {
+    let bpr = k / 32;
+    let mut out = vec![0f32; m * k];
+    for token in 0..m {
+        for b in 0..bpr {
+            let base = (token * bpr + b) * 36;
+            let ad = half::f16::from_le_bytes([act_bytes[base], act_bytes[base + 1]]).to_f32();
+            for pos in 0..32 {
+                let aq = act_bytes[base + 4 + pos] as i8 as f32;
+                out[token * k + b * 32 + pos] = ad * aq;
+            }
+        }
+    }
+    out
+}
+
 /// Repacks the per-token Q8_1 buffer into the layout the feature-major kernels
 /// read.
 ///
@@ -2259,6 +2353,7 @@ fn main() {
     let mut format = MmqFormat::Q8_0;
     let mut force_mmq_x: Option<u32> = None;
     let mut stream_k = false;
+    let mut gemv = false;
 
     let mut i = 0;
     while i < argv.len() {
@@ -2279,9 +2374,17 @@ fn main() {
                 stream_k = true;
                 i -= 1;
             }
+            // Also launches and times the format's GEMV kernel(s) — the path
+            // `dispatch_gemv` takes for `m <= gemv_max_m` — at the same shape,
+            // so the GEMV/MMQ crossover can be read off one run instead of two.
+            "--gemv" => {
+                gemv = true;
+                i -= 1;
+            }
             other => {
                 panic!(
-                    "unknown flag {other}, expected --n, --k, --m, --format, --mmq-x, or --stream-k"
+                    "unknown flag {other}, expected --n, --k, --m, --format, --mmq-x, \
+                     --stream-k, or --gemv"
                 )
             }
         }
@@ -2429,6 +2532,100 @@ fn main() {
         client.synchronize();
         let mma_us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
         (dp4a_us, mma_us)
+    });
+
+    // GEMV: the path `dispatch_gemv` takes for `m <= gemv_max_m`. The
+    // F32-activation kernel is compiled for every format; the dp4a MWR kernel
+    // only for Q4_K, Q6_K, Q8_0, Q5_K, Q3_K and Q2_K. The MWR kernel reads the
+    // SAME per-token Q8_1 buffer as the token-major MMQ kernels above (`act`),
+    // never the feature-major repack (`packed`); the F32 kernel reads a raw
+    // `[M, K]` float matrix decoded from that same buffer by
+    // [`build_f32_activation`], so one reference check covers both.
+    let gemv_case = gemv.then(|| {
+        let f32_act_bytes = build_f32_activation(&act_bytes, m, k);
+        let act_f32 = Tensor::<CudaRuntime>::from_slice(&f32_act_bytes, &[m, k], &device).unwrap();
+        let act_f32_ptr = act_f32.ptr();
+
+        let (f32_kernel, f32_module_name) = format.f32_gemv_kernel();
+        let f32_module =
+            kernels::get_or_load_module(client.context(), device_index, f32_module_name)
+                .expect("load f32 gemv module");
+        let f32_func = kernels::get_kernel_function(&f32_module, f32_kernel)
+            .unwrap_or_else(|_| panic!("resolve {f32_kernel}"));
+        let out_f32 =
+            Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device).unwrap();
+        let out_f32_ptr = out_f32.ptr();
+        // Mirrors `dispatch_gemv`'s F32 branch: grid (n.div_ceil(8), m, 1),
+        // block (256, 1, 1) — 8 warps per block, one output column per warp.
+        let cfg_f32 = LaunchConfig {
+            grid_dim: (n_u32.div_ceil(8), m_u32, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let launch_f32 = || unsafe {
+            let mut builder = client.stream().launch_builder(&f32_func);
+            builder.arg(&act_f32_ptr);
+            builder.arg(&weight_ptr);
+            builder.arg(&out_f32_ptr);
+            builder.arg(&m_u32);
+            builder.arg(&k_u32);
+            builder.arg(&n_u32);
+            builder.launch(cfg_f32).expect("launch f32 gemv kernel");
+        };
+        for _ in 0..WARMUP {
+            launch_f32();
+        }
+        client.synchronize();
+        let started = std::time::Instant::now();
+        for _ in 0..ITERS {
+            launch_f32();
+        }
+        client.synchronize();
+        let f32_us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+
+        let mwr = format
+            .mwr_gemv_kernel()
+            .map(|(mwr_kernel, mwr_module_name)| {
+                let mwr_module =
+                    kernels::get_or_load_module(client.context(), device_index, mwr_module_name)
+                        .expect("load mwr gemv module");
+                let mwr_func = kernels::get_kernel_function(&mwr_module, mwr_kernel)
+                    .unwrap_or_else(|_| panic!("resolve {mwr_kernel}"));
+                let out_mwr =
+                    Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device)
+                        .unwrap();
+                let out_mwr_ptr = out_mwr.ptr();
+                // Mirrors `dispatch_gemv`'s dp4a branch: grid (n, m, 1), block
+                // (128, 1, 1) — one output column per block, 4 warps.
+                let cfg_mwr = LaunchConfig {
+                    grid_dim: (n_u32, m_u32, 1),
+                    block_dim: (128, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let launch_mwr = || unsafe {
+                    let mut builder = client.stream().launch_builder(&mwr_func);
+                    builder.arg(&act_ptr);
+                    builder.arg(&weight_ptr);
+                    builder.arg(&out_mwr_ptr);
+                    builder.arg(&m_u32);
+                    builder.arg(&k_u32);
+                    builder.arg(&n_u32);
+                    builder.launch(cfg_mwr).expect("launch mwr gemv kernel");
+                };
+                for _ in 0..WARMUP {
+                    launch_mwr();
+                }
+                client.synchronize();
+                let started = std::time::Instant::now();
+                for _ in 0..ITERS {
+                    launch_mwr();
+                }
+                client.synchronize();
+                let mwr_us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+                (mwr_kernel, mwr_us, out_mwr)
+            });
+
+        (f32_kernel, f32_us, out_f32, mwr)
     });
 
     // The feature-major kernels are the llama.cpp-geometry port: feature-major
@@ -2620,6 +2817,14 @@ fn main() {
         let sk_host = out.to_vec::<f32>();
         check_against_reference(name, format, &sk_host, &case);
     }
+    if let Some((f32_kernel, _, out_f32, mwr)) = gemv_case.as_ref() {
+        let f32_host = out_f32.to_vec::<f32>();
+        check_against_reference(f32_kernel, format, &f32_host, &case);
+        if let Some((mwr_kernel, _, out_mwr)) = mwr {
+            let mwr_host = out_mwr.to_vec::<f32>();
+            check_against_reference(mwr_kernel, format, &mwr_host, &case);
+        }
+    }
 
     if let (Some((dp4a_us, mma_us)), Some((dp4a_kernel, mma_kernel, _, _))) =
         (token_major_us, token_major.as_ref())
@@ -2638,6 +2843,18 @@ fn main() {
         println!("{name} {us:9.2} us/call");
         if let Some((_, mma_us)) = token_major_us {
             println!("ratio mma/feature-major: {:.3}", mma_us / us);
+        }
+    }
+    if let Some((f32_kernel, f32_us, _, mwr)) = gemv_case.as_ref() {
+        println!("{f32_kernel} {f32_us:9.2} us/call");
+        if let Some((mwr_kernel, mwr_us, _)) = mwr {
+            println!("{mwr_kernel} {mwr_us:9.2} us/call");
+        }
+        if let Some(fm_us) = feat_major_us {
+            println!("ratio gemv-f32/feature-major: {:.3}", f32_us / fm_us);
+            if let Some((_, mwr_us, _)) = mwr {
+                println!("ratio gemv-mwr/feature-major: {:.3}", mwr_us / fm_us);
+            }
         }
     }
 }

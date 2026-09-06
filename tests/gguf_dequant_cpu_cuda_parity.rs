@@ -271,9 +271,11 @@ fn assert_matmul_parity(label: &str, format: QuantFormat, weight_bytes: &[u8], n
 
 /// Same as `assert_matmul_parity`, with the batch dimension `m` exposed. `m`
 /// selects the CUDA kernel family in
-/// `src/quant/cuda/quant_matmul/impl_ops.rs`: `m <= 16` dispatches GEMV,
-/// anything larger dispatches GEMM — so `m = 2` and `m = 32` callers exercise
-/// different CUDA kernels entirely.
+/// `src/quant/cuda/quant_matmul/impl_ops.rs`: `m <= gemv_max_m(format, ..)`
+/// dispatches GEMV, anything larger dispatches GEMM/MMQ. `gemv_max_m`
+/// (`src/quant/cuda/quant_matmul/format_dispatch/gemv.rs`) is per format, so
+/// `m = 2` and `m = 32` callers can exercise different CUDA kernels even
+/// across two different formats at the same `m`.
 fn assert_matmul_parity_m(
     label: &str,
     format: QuantFormat,
@@ -375,9 +377,12 @@ const COSINE_FLOOR: f64 = 0.999;
 /// `Q5K`, `Q6K`, `Q2K`, `Q3K`, `IQ4NL`, `IQ4XS`, `IQ2XXS`, `IQ2XS`, `IQ2S`,
 /// `IQ3XXS`, `IQ3S`, `IQ1S`.
 ///
-/// Only the GEMM (`m > 16`) callers of these formats take that path; their
-/// `m = 2` twins route to GEMV, which reads the f32 activation, and stay on
-/// the element-wise gate.
+/// `gemv_max_m` (`src/quant/cuda/quant_matmul/format_dispatch/gemv.rs`) is
+/// very low for every format above, so `m = 2` already exceeds it for all but
+/// `Q4K` and lands on the MMQ/GEMM path, which quantizes the activation. Only
+/// `IQ1M` has no MMQ or feature-major kernel at all: every path it takes
+/// dequantizes the weight and keeps the activation in f32, so its `m = 2` and
+/// `m = 32` cases both stay on the element-wise gate instead of this one.
 ///
 /// An element-wise tolerance cannot gate these: per-element activation error
 /// enters the output multiplied by `sum|w|` over the reduction, while the
@@ -967,10 +972,11 @@ fn q4_0_quant_matmul_matches_cpu() {
             blk[2 + j] = nibble_byte(j, b);
         }
     }
-    assert_matmul_parity(
+    assert_matmul_parity_q8_1_activation(
         "q4_0_quant_matmul_matches_cpu",
         QuantFormat::Q4_0,
         &data,
+        2,
         n,
         k,
     );
@@ -990,10 +996,11 @@ fn q4_1_quant_matmul_matches_cpu() {
             blk[4 + j] = nibble_byte(j, b);
         }
     }
-    assert_matmul_parity(
+    assert_matmul_parity_q8_1_activation(
         "q4_1_quant_matmul_matches_cpu",
         QuantFormat::Q4_1,
         &data,
+        2,
         n,
         k,
     );
@@ -1013,10 +1020,11 @@ fn q5_0_quant_matmul_matches_cpu() {
             blk[6 + j] = nibble_byte(j, b);
         }
     }
-    assert_matmul_parity(
+    assert_matmul_parity_q8_1_activation(
         "q5_0_quant_matmul_matches_cpu",
         QuantFormat::Q5_0,
         &data,
+        2,
         n,
         k,
     );
@@ -1037,10 +1045,11 @@ fn q5_1_quant_matmul_matches_cpu() {
             blk[8 + j] = nibble_byte(j, b);
         }
     }
-    assert_matmul_parity(
+    assert_matmul_parity_q8_1_activation(
         "q5_1_quant_matmul_matches_cpu",
         QuantFormat::Q5_1,
         &data,
+        2,
         n,
         k,
     );
@@ -1224,10 +1233,11 @@ fn iq4_nl_quant_matmul_matches_cpu() {
             blk[2 + j] = nibble_byte(j, b);
         }
     }
-    assert_matmul_parity(
+    assert_matmul_parity_q8_1_activation(
         "iq4_nl_quant_matmul_matches_cpu",
         QuantFormat::IQ4NL,
         &data,
+        2,
         n,
         k,
     );
@@ -1246,10 +1256,11 @@ fn iq1_s_quant_matmul_matches_cpu() {
             blk[2 + i] = payload(i, b);
         }
     }
-    assert_matmul_parity(
+    assert_matmul_parity_q8_1_activation(
         "iq1_s_quant_matmul_matches_cpu",
         QuantFormat::IQ1S,
         &data,
+        2,
         n,
         k,
     );
@@ -1290,10 +1301,11 @@ fn iq2_xxs_quant_matmul_matches_cpu() {
             blk[2 + i] = payload(i, b);
         }
     }
-    assert_matmul_parity(
+    assert_matmul_parity_q8_1_activation(
         "iq2_xxs_quant_matmul_matches_cpu",
         QuantFormat::IQ2XXS,
         &data,
+        2,
         n,
         k,
     );
@@ -1312,10 +1324,11 @@ fn iq2_xs_quant_matmul_matches_cpu() {
             blk[2 + i] = payload(i, b);
         }
     }
-    assert_matmul_parity(
+    assert_matmul_parity_q8_1_activation(
         "iq2_xs_quant_matmul_matches_cpu",
         QuantFormat::IQ2XS,
         &data,
+        2,
         n,
         k,
     );
@@ -1334,10 +1347,11 @@ fn iq2_s_quant_matmul_matches_cpu() {
             blk[2 + i] = payload(i, b);
         }
     }
-    assert_matmul_parity(
+    assert_matmul_parity_q8_1_activation(
         "iq2_s_quant_matmul_matches_cpu",
         QuantFormat::IQ2S,
         &data,
+        2,
         n,
         k,
     );
@@ -1356,10 +1370,11 @@ fn iq3_xxs_quant_matmul_matches_cpu() {
             blk[2 + i] = payload(i, b);
         }
     }
-    assert_matmul_parity(
+    assert_matmul_parity_q8_1_activation(
         "iq3_xxs_quant_matmul_matches_cpu",
         QuantFormat::IQ3XXS,
         &data,
+        2,
         n,
         k,
     );
@@ -1378,10 +1393,11 @@ fn iq3_s_quant_matmul_matches_cpu() {
             blk[2 + i] = payload(i, b);
         }
     }
-    assert_matmul_parity(
+    assert_matmul_parity_q8_1_activation(
         "iq3_s_quant_matmul_matches_cpu",
         QuantFormat::IQ3S,
         &data,
+        2,
         n,
         k,
     );
@@ -1405,10 +1421,11 @@ fn iq4_xs_quant_matmul_matches_cpu() {
             }
         }
     }
-    assert_matmul_parity(
+    assert_matmul_parity_q8_1_activation(
         "iq4_xs_quant_matmul_matches_cpu",
         QuantFormat::IQ4XS,
         &data,
+        2,
         n,
         k,
     );
@@ -1416,10 +1433,13 @@ fn iq4_xs_quant_matmul_matches_cpu() {
 
 // ── GEMM path (m = 32) ────────────────────────────────────────────────
 //
-// Every case above runs with `m = 2`, at or below the `m <= 16` threshold in
-// `src/quant/cuda/quant_matmul/impl_ops.rs`, so it dispatches GEMV. The GEMM
-// kernels in `src/quant/cuda/kernels/gemm/` are otherwise untested. These
-// cases repeat each fixture with `m = 32` to force GEMM.
+// `m = 32` sits above every format's `gemv_max_m` in
+// `src/quant/cuda/quant_matmul/format_dispatch/gemv.rs`, so every case below
+// dispatches GEMM/MMQ regardless of format. Some cases above already reach
+// that path at `m = 2` too (see `assert_matmul_parity_q8_1_activation`'s
+// comment), but the GEMM kernels in `src/quant/cuda/kernels/gemm/` still need
+// their own coverage at a batch size GEMV never reaches. These cases repeat
+// each fixture with `m = 32` to force GEMM.
 
 /// Q4_0 weight `[3, 64]` — 2 blocks per row, 6 blocks total.
 ///

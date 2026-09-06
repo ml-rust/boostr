@@ -16,26 +16,35 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-/// Largest `m` for which the GEMV path beats the GEMM path.
+/// Largest `m` for which the GEMV path beats the feature-major MMQ path.
 ///
-/// GEMV cost grows with `m`; GEMM cost is flat until `m` fills the 128-row
-/// tile. The crossover is where the two lines meet, so it differs per format
-/// and moves whenever either kernel changes. Q8_0, Q4_K and Q6_K take these
-/// values only on a device with the tensor-core GEMM
-/// (`caps.int8_mma_m16n8k32`); every other format keeps the dp4a-GEMM
-/// crossover.
+/// GEMV re-reads the whole weight matrix once per token, so its cost scales
+/// linearly with `m`. MMQ stages a weight tile once per token tile, so its
+/// cost stays flat from `m = 1` up to the tile width. That makes the
+/// crossover very low: GEMV only wins while the per-token weight re-read is
+/// still cheaper than staging the tile, which for most formats is true only
+/// at `m = 1`.
 ///
-/// Q4_K sits far above the other two because its GEMV reads half the weight
-/// bytes per row, so its per-row cost is about half.
+/// The values below are measured (see the kernel-comparison example's
+/// `--gemv` flag to compare both paths at a given shape) on one GPU
+/// architecture and will need re-measuring if either kernel changes or a
+/// materially different architecture is targeted.
+///
+/// The MMQ path needs tensor-core int8 MMA (`caps.int8_mma_m16n8k32`). On a
+/// device without it, MMQ isn't available at all, so every format falls back
+/// to the old, higher GEMV threshold regardless of format.
 pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
     format: QuantFormat,
     device_index: usize,
 ) -> usize {
     let mma_crossover = match format {
-        QuantFormat::Q8_0 => 5,
-        QuantFormat::Q6K => 6,
-        QuantFormat::Q4K => 13,
-        _ => return 16,
+        QuantFormat::Q4K => 2,
+        QuantFormat::Q8_0
+        | QuantFormat::Q6K
+        | QuantFormat::Q5K
+        | QuantFormat::Q3K
+        | QuantFormat::Q2K => 1,
+        _ => 0,
     };
     let caps = numr::runtime::cuda::CudaDevice::new(device_index)
         .profile()

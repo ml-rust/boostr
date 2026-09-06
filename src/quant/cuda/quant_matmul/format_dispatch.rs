@@ -250,16 +250,21 @@ pub(super) fn dispatch_matmul(
     let k_u32 = k as u32;
     let n_u32 = n as u32;
 
-    // Q8_0, Q4_K and Q6_K on sm_80+ take the feature-major tensor-core kernels: a
-    // 128-feature tile against a token tile chosen per batch size, with the
-    // weight as MMA operand A and a repacked activation layout of its own. It
-    // picks between a tile-parallel grid and stream-k internally. `Ok(None)`
-    // means no compiled variant fits the device, and the per-format
-    // `quant_mmq_*_q8_1_mma` kernel below still serves the shape. A new format
-    // joins by adding a `FeatMajorFormat` and a match arm here.
+    // Q8_0, Q4_0, Q4_K, Q5_K and Q6_K on sm_80+ take the feature-major
+    // tensor-core kernels: a 128-feature tile against a token tile chosen per
+    // batch size, with the weight as MMA operand A and a repacked activation
+    // layout of its own. It picks between a tile-parallel grid and stream-k
+    // internally. `Ok(None)` means no compiled variant fits the device, and the
+    // fallback below still serves the shape: the per-format
+    // `quant_mmq_*_q8_1_mma` kernel where one exists, and for Q4_0 and Q5_K the
+    // dequantize-then-f32 GEMM named by `kernel_name` above, which is the only
+    // other GEMM path either has. A new format joins by adding a
+    // `FeatMajorFormat` and a match arm here.
     let feat_major = match format {
         QuantFormat::Q8_0 => Some(&mmq_feat_major::Q8_0),
+        QuantFormat::Q4_0 => Some(&mmq_feat_major::Q4_0),
         QuantFormat::Q4K => Some(&mmq_feat_major::Q4_K),
+        QuantFormat::Q5K => Some(&mmq_feat_major::Q5_K),
         QuantFormat::Q6K => Some(&mmq_feat_major::Q6_K),
         _ => None,
     };

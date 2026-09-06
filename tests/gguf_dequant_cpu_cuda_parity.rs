@@ -371,7 +371,8 @@ fn assert_matmul_parity_m(
 const COSINE_FLOOR: f64 = 0.999;
 
 /// Cosine gate for formats whose CUDA `quant_matmul` quantizes the activation
-/// to Q8_1 while CPU uses f32: `Q8_0`, `Q4K`, `Q6K`, `Q2K`, `Q3K`, `Q5K`.
+/// to Q8_1 while CPU uses f32: `Q8_0`, `Q4_0`, `Q4K`, `Q5K`, `Q6K`, `Q2K`,
+/// `Q3K`.
 ///
 /// An element-wise tolerance cannot gate these: per-element activation error
 /// enters the output multiplied by `sum|w|` over the reduction, while the
@@ -1416,6 +1417,11 @@ fn iq4_xs_quant_matmul_matches_cpu() {
 // cases repeat each fixture with `m = 32` to force GEMM.
 
 /// Q4_0 weight `[3, 64]` — 2 blocks per row, 6 blocks total.
+///
+/// Gated on cosine, not element-wise: Q4_0's CUDA GEMM is the feature-major
+/// MMQ kernel, which quantizes the activation to Q8_1, while CPU keeps it in
+/// f32. Before Q4_0 had an MMQ kernel its GEMM dequantized the weight and kept
+/// the activation exact, which is why this once used the element-wise gate.
 #[test]
 fn q4_0_quant_matmul_gemm_matches_cpu() {
     let (n, k) = (3usize, 64usize);
@@ -1428,7 +1434,7 @@ fn q4_0_quant_matmul_gemm_matches_cpu() {
             blk[2 + j] = nibble_byte(j, b);
         }
     }
-    assert_matmul_parity_m(
+    assert_matmul_parity_q8_1_activation(
         "q4_0_quant_matmul_gemm_matches_cpu",
         QuantFormat::Q4_0,
         &data,

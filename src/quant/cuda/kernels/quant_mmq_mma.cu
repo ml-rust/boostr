@@ -294,10 +294,108 @@ extern __shared__ int mmqf_smem[];
 // stores the group to shared. Interleaving load and store per iteration would
 // serialize on the load.
 
+// Shared `vec_dot` for the scale-only legacy formats. Q8_0 and Q4_0 differ
+// ONLY in how `stage` unpacks quants; once staged, their weight row is the
+// same shape — signed quants in the int8 lanes plus eight f32 block scales —
+// and their arithmetic is identical, so both formats' `vec_dot` forward here.
+// The three offsets are template parameters rather than hard constants so a
+// format that shifts its row layout still reuses this body.
+//
+// Consumes one staged 128-k half. `k00` is the word offset of that half inside
+// a weight row; the activation tile always holds the half at word 0. `i0` is
+// the warp's feature base, `jb` its token base within a group.
+//
+// `FULL` is the whole-half case (four 32-k steps); the tail instantiation stops
+// early rather than running steps whose scales are zero.
+//
+// The k-step loop is outermost so only one A fragment per minitile and its two
+// scales are live at a time.
+//
+// One scalar term per fragment element: the weight scale, the activation
+// scale, and the exact int32 dot. There is no minimum term, which is what
+// separates this body from `mmqf_vec_dot_dm` below.
+template <int MMQ_X, bool FULL, int X_QS, int X_DS, int X_STRIDE>
+static __device__ __forceinline__ void mmqf_vec_dot_d(
+    const int* __restrict__ s_x, const int* __restrict__ s_y,
+    float (&acc)[MMQF_NJ(MMQ_X)][MMQF_NTX(MMQ_X)][4], unsigned int i0, unsigned int jb,
+    unsigned int k00, unsigned int nks
+) {
+    constexpr int NTX = MMQF_NTX(MMQ_X);
+    constexpr int NJ = MMQF_NJ(MMQ_X);
+
+    const float* s_xd = (const float*)s_x;
+    const half2* s_yds = (const half2*)s_y;
+
+#pragma unroll
+    for (unsigned int ks = 0; ks < 4; ++ks) {
+        if (!FULL && ks >= nks) {
+            break;
+        }
+        const unsigned int kw = k00 + ks * 8;
+
+        // Weight is operand A: 16 feature rows x 32 k-values per minitile.
+        int A[NTX][4];
+        float dw[NTX][2];
+#pragma unroll
+        for (int n = 0; n < NTX; ++n) {
+            const unsigned int ir = i0 + n * 16;
+#pragma unroll
+            for (int l = 0; l < 4; ++l) {
+                A[n][l] = s_x[(ir + mma_a_i(l)) * X_STRIDE + X_QS + kw + mma_a_j(l)];
+            }
+            // `mma_d_i(l)` takes one value per `l / 2`, so two weight scales
+            // cover the whole accumulator fragment.
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                dw[n][h] = s_xd[(ir + mma_d_i(2 * h)) * X_STRIDE + X_DS + kw / 8];
+            }
+        }
+
+#pragma unroll
+        for (int jj = 0; jj < NJ; ++jj) {
+            const unsigned int jt = jj * (NTX * 8) + jb;
+
+            // Activation is operand B: 8 tokens x 32 k-values, shared by all
+            // NTX minitiles.
+            int B[2];
+#pragma unroll
+            for (int l = 0; l < 2; ++l) {
+                B[l] = s_y[(jt + mma_b_i(l)) * MMQF_Y_STRIDE + MMQF_Y_QS + ks * 8 + mma_b_j(l)];
+            }
+            // `mma_d_j(l)` takes one value per `l % 2`. `MMQF_Y_STRIDE`/`MMQF_Y_DS`
+            // are int counts and a header word is one int, so the index is
+            // unchanged. The scale is the LOW half of the header word; the high
+            // half is the int16 quant sum, which these formats have no use for
+            // and never touch. The producer already rounds `d` through `half`, so
+            // reading the low half back as float is an exact round-trip,
+            // numerically identical to the old f32-scale layout.
+            float da[2];
+#pragma unroll
+            for (int l = 0; l < 2; ++l) {
+                da[l] = __low2float(s_yds[(jt + mma_d_j(l)) * MMQF_Y_STRIDE + MMQF_Y_DS + ks]);
+            }
+
+#pragma unroll
+            for (int n = 0; n < NTX; ++n) {
+                int D[4] = {0, 0, 0, 0};
+                mma_m16n8k32_s8(D, A[n], B);
+
+#pragma unroll
+                for (int l = 0; l < 4; ++l) {
+                    // `da` is the activation scale, `dw` the weight scale. The
+                    // int32 result is exact, so both apply once per 32-element
+                    // block.
+                    acc[jj][n][l] += (float)D[l] * da[l % 2] * dw[n][l / 2];
+                }
+            }
+        }
+    }
+}
+
 // Weight format policy. The format-generic machinery below reaches the weight
 // tile only through one of these: the on-disk block geometry, the staged
-// weight-row layout, and the two functions that touch weight data. Q8_0, Q4_K
-// and Q6_K are the instantiations.
+// weight-row layout, and the two functions that touch weight data. Q8_0, Q4_0,
+// Q4_K, Q5_K and Q6_K are the instantiations.
 struct MmqfQ80 {
     // On-disk block: one f16 scale then 32 int8 quants.
     static constexpr int BLOCK_BYTES = 34;
@@ -392,94 +490,267 @@ struct MmqfQ80 {
         }
     }
 
-    // Consumes one staged 128-k half. `k00` is the word offset of that half inside
-    // a weight row; the activation tile always holds the half at word 0. `i0` is
-    // the warp's feature base, `jb` its token base within a group.
-    //
-    // `FULL` is the whole-half case (four 32-k steps); the tail instantiation stops
-    // early rather than running steps whose scales are zero.
-    //
-    // The k-step loop is outermost so only one A fragment per minitile and its two
-    // scales are live at a time.
+    // Forwards to `mmqf_vec_dot_d`, which is shared with Q4_0: the staged row
+    // layout and the one-term arithmetic are the same for both.
     template <int MMQ_X, bool FULL>
     static __device__ __forceinline__ void vec_dot(
         const int* __restrict__ s_x, const int* __restrict__ s_y,
         float (&acc)[MMQF_NJ(MMQ_X)][MMQF_NTX(MMQ_X)][4], unsigned int i0, unsigned int jb,
         unsigned int k00, unsigned int nks
     ) {
-        constexpr int NTX = MMQF_NTX(MMQ_X);
-        constexpr int NJ = MMQF_NJ(MMQ_X);
+        mmqf_vec_dot_d<MMQ_X, FULL, X_QS, X_DS, X_STRIDE>(s_x, s_y, acc, i0, jb, k00, nks);
+    }
+};
 
-        const float* s_xd = (const float*)s_x;
-        const half2* s_yds = (const half2*)s_y;
+// Q4_0 weight format policy, same contract as `MmqfQ80`.
+//
+// Q4_0 is a legacy 32-element format like Q8_0, not a K-quant: `f16 d`@0 then
+// 16 bytes holding 32 unsigned 4-bit quants, and the value is `d * (q - 8)`.
+// Biasing by 8 during staging turns it into exactly Q8_0's staged row —
+// signed quants in the int8 lanes plus one f32 scale per 32-element block —
+// so the whole row layout and `vec_dot` are Q8_0's, and `stage` is the only
+// thing this format defines for itself.
+//
+// ALIGNMENT. The block is 18 bytes, so a row base (`bpr * 18`) and every block
+// base inside it are only 2-byte aligned. Every 4-byte read of `qs` therefore
+// goes through `load_int_ua`; a plain `int` load raises
+// CUDA_ERROR_MISALIGNED_ADDRESS, which poisons the context for every later
+// launch on it. The `f16 d` at byte 0 is 2-byte aligned, which is
+// `alignof(__half)`, and is read directly.
+struct MmqfQ40 {
+    // On-disk block: one f16 scale then 16 bytes of nibble-packed quants.
+    static constexpr int BLOCK_BYTES = 18;
+    static constexpr int BLOCK_ELEMS = 32;
+    // K is gated only on `k % 32 == 0`, so a row's last 256-k group can hold
+    // fewer than MMQF_ITER_B blocks and the tail path must be compiled.
+    static constexpr bool RAGGED_K = true;
+
+    // Staged weight row: Q8_0's, byte for byte. 64 quant words (256 k-values),
+    // then 8 f32 block scales, then padding that makes the stride an odd
+    // multiple of 4 ints so the strided fragment gathers hit all 32 banks.
+    static constexpr int X_QS = 0;
+    static constexpr int X_DS = 64;
+    static constexpr int X_STRIDE = 76;
+    static_assert(X_DS + 8 <= X_STRIDE, "Weight row too short: 8 block scales.");
+    static_assert(
+        X_QS == MmqfQ80::X_QS && X_DS == MmqfQ80::X_DS && X_STRIDE == MmqfQ80::X_STRIDE,
+        "Q4_0 must stage into the Q8_0 row; the two share `mmqf_vec_dot_d`."
+    );
+
+    // Stages 256 k-values (8 blocks) of the weight tile. A block holds 4
+    // source ints and produces 8 staged words, so the warp's 32 lanes cover a
+    // whole 256-k group with ONE global load each: lane maps to
+    // (block `lane / 4`, 4-k word `lane % 4`). Independent of MMQ_X.
+    //
+    // Quant map, transcribed from `load_tiles_q4_0` in llama.cpp's
+    // `ggml-cuda/mmq.cuh` and cross-checked against `dequant_q4_0` in
+    // `src/quant/cpu/kernels/dequant_simple.rs`: within one 32-element block,
+    // element `j` (0..15) is the LOW nibble of `qs[j]` and element `j + 16` is
+    // the HIGH nibble of the same byte. So the int at `qs + 4*w` (w = 0..3)
+    // carries elements `4w..4w+3` in its low nibbles and `4w+16..4w+19` in its
+    // high nibbles, which places the two staged words at `8*blk + w` and 4
+    // further along. This is NOT Q4_K's map: Q4_K pairs sub-blocks across a
+    // shared 32-byte run, while a Q4_0 block is a single 32-element run.
+    template <int MMQ_X, bool CLAMP_K>
+    static __device__ __forceinline__ void stage(
+        const unsigned char* __restrict__ weight, int* __restrict__ s_x, unsigned int N,
+        unsigned int bpr, unsigned int feat0, unsigned int b0
+    ) {
+        const unsigned int lane = threadIdx.x % WARP_SIZE;
+        const unsigned int warp = threadIdx.x / WARP_SIZE;
+        const unsigned int kbx = lane / 4;   // block within the 256-k group
+        const unsigned int kqsx = lane % 4;  // 4-k source word within that block
+
+        // Tile-local cap: clamping `i` to this and adding `feat0` back gives a
+        // feature row inside the matrix. The clamp is on the TILE-LOCAL index; the
+        // tile origin is added after it, never folded into it.
+        const unsigned int i_max = N - feat0 - 1;
+        // `bpr` counts 32-element activation blocks and `b0` indexes them.
+        // Q4_0's weight block is also 32 elements, so the counts coincide here;
+        // a 256-element format divides by `BLOCK_ELEMS / 32` first.
+        const unsigned long long rstride = (unsigned long long)bpr * BLOCK_BYTES;
+
+        // Loop-invariant, so the addressing collapses to one add per row.
+        const unsigned int blk = CLAMP_K ? min(b0 + kbx, bpr - 1) : b0 + kbx;
+        // The quants start at byte 2 of an 18-byte block, so only 2-byte
+        // alignment holds and each word is two 16-bit loads.
+        const unsigned long long off_qs = (unsigned long long)blk * BLOCK_BYTES + 2 + kqsx * 4;
+        // Both staged words live in the same 256-k group: words 0..31 are the
+        // first 128-k half, 32..63 the second.
+        const unsigned int w_lo = kbx * 8 + kqsx;
+
+        constexpr int ROWS = MMQF_Y / MMQF_WARPS;
+        constexpr int BATCH = MMQF_STAGE_BATCH(MMQ_X);
+        static_assert(ROWS % BATCH == 0, "Weight row batches are ragged.");
 
 #pragma unroll
-        for (unsigned int ks = 0; ks < 4; ++ks) {
-            if (!FULL && ks >= nks) {
-                break;
+        for (int g = 0; g < ROWS / BATCH; ++g) {
+            int v[BATCH];
+#pragma unroll
+            for (int u = 0; u < BATCH; ++u) {
+                const unsigned int i = (unsigned int)((g * BATCH + u) * MMQF_WARPS) + warp;
+                const unsigned char* row = weight + (feat0 + min(i, i_max)) * rstride;
+                v[u] = load_int_ua(row + off_qs);
             }
-            const unsigned int kw = k00 + ks * 8;
+#pragma unroll
+            for (int u = 0; u < BATCH; ++u) {
+                const unsigned int i = (unsigned int)((g * BATCH + u) * MMQF_WARPS) + warp;
+                // The 8 bias is applied here, per byte, so the staged lanes are
+                // signed -8..7 and `vec_dot` is Q8_0's unchanged. Inputs are
+                // 0..15, so the subtract never saturates.
+                s_x[i * X_STRIDE + X_QS + w_lo] = __vsubss4(v[u] & 0x0F0F0F0F, 0x08080808);
+                s_x[i * X_STRIDE + X_QS + w_lo + 4] =
+                    __vsubss4((v[u] >> 4) & 0x0F0F0F0F, 0x08080808);
+            }
+        }
 
-            // Weight is operand A: 16 feature rows x 32 k-values per minitile.
-            int A[NTX][4];
-            float dw[NTX][2];
+        // Scales are a separate pass: eight per row, so a warp covers four rows.
+        float* s_xd = (float*)s_x;
+        const unsigned int kbxd = lane % 8;
+        const unsigned int rsub = lane / 8;
+        const unsigned int blk_d = CLAMP_K ? min(b0 + kbxd, bpr - 1) : b0 + kbxd;
+        const unsigned long long off_d = (unsigned long long)blk_d * BLOCK_BYTES;
+
+        constexpr int SROWS = MMQF_Y / (MMQF_WARPS * 4);
+        float d[SROWS];
+#pragma unroll
+        for (int u = 0; u < SROWS; ++u) {
+            const unsigned int i = (unsigned int)(u * MMQF_WARPS * 4) + warp * 4 + rsub;
+            const unsigned char* blkp = weight + (feat0 + min(i, i_max)) * rstride + off_d;
+            d[u] = __half2float(*reinterpret_cast<const __half*>(blkp));
+        }
+#pragma unroll
+        for (int u = 0; u < SROWS; ++u) {
+            const unsigned int i = (unsigned int)(u * MMQF_WARPS * 4) + warp * 4 + rsub;
+            s_xd[i * X_STRIDE + X_DS + kbxd] = d[u];
+        }
+    }
+
+    // Forwards to `mmqf_vec_dot_d`, shared with Q8_0: once the bias is folded
+    // in during staging the two rows are indistinguishable.
+    template <int MMQ_X, bool FULL>
+    static __device__ __forceinline__ void vec_dot(
+        const int* __restrict__ s_x, const int* __restrict__ s_y,
+        float (&acc)[MMQF_NJ(MMQ_X)][MMQF_NTX(MMQ_X)][4], unsigned int i0, unsigned int jb,
+        unsigned int k00, unsigned int nks
+    ) {
+        mmqf_vec_dot_d<MMQ_X, FULL, X_QS, X_DS, X_STRIDE>(s_x, s_y, acc, i0, jb, k00, nks);
+    }
+};
+
+// Shared `vec_dot` for the scale/min K-quants. Q4_K and Q5_K differ ONLY in
+// how `stage` unpacks quants; once staged, their weight row is the same shape
+// — unsigned quants in the int8 lanes plus eight `(d * sc_j, -dmin * m_j)`
+// f32 pairs — and their arithmetic is identical, so both formats' `vec_dot`
+// forward here. The three offsets are template parameters rather than hard
+// constants so a format that shifts its row layout still reuses this body.
+//
+// Consumes one staged 128-k half; the loop shape matches `MmqfQ80::vec_dot`
+// exactly, four 32-k steps of one `mma_m16n8k32_s8` per (token group,
+// minitile). Two scalar terms per fragment element instead of one:
+//
+//   acc += (d * sc)     * d_act * int32 dot
+//   acc += (-dmin * m)  * d_act * int32 block sum
+//
+// The second is the minimum correction. Its block sum is the sum of that
+// token's 32 activation quants for this 32-k step, which the producer
+// already computed and stored EXACTLY as the int16 in bits 16..31 of the
+// activation header word. It is read here, not recomputed: an all-ones
+// `mma` also yields it exactly, but costs one extra tensor-core issue per
+// (token group, k-step), and a `half` `d * sum(q)` field is too coarse for
+// the GEMM/GEMV parity bound. |sum| <= 32 * 128 = 4096 fits int16, so the
+// stored value equals the MMA's to the bit.
+//
+// The sum is per token, so it indexes exactly like the scale `da[l % 2]`:
+// both come from the same header word at row `mma_d_j(l)`, and neither
+// depends on the feature minitile.
+template <int MMQ_X, bool FULL, int X_QS, int X_DM, int X_STRIDE>
+static __device__ __forceinline__ void mmqf_vec_dot_dm(
+    const int* __restrict__ s_x, const int* __restrict__ s_y,
+    float (&acc)[MMQF_NJ(MMQ_X)][MMQF_NTX(MMQ_X)][4], unsigned int i0, unsigned int jb,
+    unsigned int k00, unsigned int nks
+) {
+    constexpr int NTX = MMQF_NTX(MMQ_X);
+    constexpr int NJ = MMQF_NJ(MMQ_X);
+
+    // The weight pair is f32. The activation header stays a packed 32-bit
+    // word, which is the producer's record format for every weight format,
+    // and is read here through `s_y` directly.
+    const float2* s_xdm = (const float2*)s_x;
+
+#pragma unroll
+    for (unsigned int ks = 0; ks < 4; ++ks) {
+        if (!FULL && ks >= nks) {
+            break;
+        }
+        const unsigned int kw = k00 + ks * 8;
+
+        int A[NTX][4];
+        float2 dmw[NTX][2];
+#pragma unroll
+        for (int n = 0; n < NTX; ++n) {
+            const unsigned int ir = i0 + n * 16;
+#pragma unroll
+            for (int l = 0; l < 4; ++l) {
+                A[n][l] = s_x[(ir + mma_a_i(l)) * X_STRIDE + X_QS + kw + mma_a_j(l)];
+            }
+            // `mma_d_i(l)` takes one value per `l / 2`, and `kw / 8` is the
+            // sub-block index the staged pair belongs to.
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                dmw[n][h] = s_xdm[((ir + mma_d_i(2 * h)) * X_STRIDE + X_DM) / 2 + kw / 8];
+            }
+        }
+
+#pragma unroll
+        for (int jj = 0; jj < NJ; ++jj) {
+            const unsigned int jt = jj * (NTX * 8) + jb;
+
+            int B[2];
+#pragma unroll
+            for (int l = 0; l < 2; ++l) {
+                B[l] = s_y[(jt + mma_b_i(l)) * MMQF_Y_STRIDE + MMQF_Y_QS + ks * 8 + mma_b_j(l)];
+            }
+            // One header word per token, holding both scalars this format
+            // needs: `half` scale in bits 0..15, int16 quant sum in bits
+            // 16..31. `mma_d_j(l)` takes one value per `l % 2`, so two
+            // words cover the whole accumulator fragment. The producer
+            // rounds `d` through `half`, so reading the low half back as
+            // float is an exact round-trip; the high half is sign-extended
+            // by an arithmetic shift of the signed word, then widened,
+            // which is exact for every attainable value.
+            float da[2];
+            float sum_i[2];
+#pragma unroll
+            for (int l = 0; l < 2; ++l) {
+                const int ds = s_y[(jt + mma_d_j(l)) * MMQF_Y_STRIDE + MMQF_Y_DS + ks];
+                da[l] = __half2float(__ushort_as_half((unsigned short)(ds & 0xFFFF)));
+                sum_i[l] = (float)(ds >> 16);
+            }
+
+            // The activation scale times the block sum is per token, so it
+            // is formed once here rather than once per minitile inside the
+            // `n` loop below.
+            float dsum[2];
+#pragma unroll
+            for (int l = 0; l < 2; ++l) {
+                dsum[l] = da[l] * sum_i[l];
+            }
+
 #pragma unroll
             for (int n = 0; n < NTX; ++n) {
-                const unsigned int ir = i0 + n * 16;
+                int D[4] = {0, 0, 0, 0};
+                mma_m16n8k32_s8(D, A[n], B);
+
 #pragma unroll
                 for (int l = 0; l < 4; ++l) {
-                    A[n][l] = s_x[(ir + mma_a_i(l)) * X_STRIDE + X_QS + kw + mma_a_j(l)];
-                }
-                // `mma_d_i(l)` takes one value per `l / 2`, so two weight scales
-                // cover the whole accumulator fragment.
-#pragma unroll
-                for (int h = 0; h < 2; ++h) {
-                    dw[n][h] = s_xd[(ir + mma_d_i(2 * h)) * X_STRIDE + X_DS + kw / 8];
-                }
-            }
-
-#pragma unroll
-            for (int jj = 0; jj < NJ; ++jj) {
-                const unsigned int jt = jj * (NTX * 8) + jb;
-
-                // Activation is operand B: 8 tokens x 32 k-values, shared by all
-                // NTX minitiles.
-                int B[2];
-#pragma unroll
-                for (int l = 0; l < 2; ++l) {
-                    B[l] = s_y[(jt + mma_b_i(l)) * MMQF_Y_STRIDE + MMQF_Y_QS + ks * 8
-                               + mma_b_j(l)];
-                }
-                // `mma_d_j(l)` takes one value per `l % 2`. `MMQF_Y_STRIDE`/`MMQF_Y_DS`
-                // are int counts and a header word is one int, so the index is
-                // unchanged. The scale is the LOW half of the header word; the high
-                // half is the int16 quant sum, which this format has no use for and
-                // never touches. The producer already rounds `d` through `half`, so
-                // reading the low half back as float is an exact round-trip,
-                // numerically identical to the old f32-scale layout.
-                float da[2];
-#pragma unroll
-                for (int l = 0; l < 2; ++l) {
-                    da[l] = __low2float(s_yds[(jt + mma_d_j(l)) * MMQF_Y_STRIDE + MMQF_Y_DS + ks]);
-                }
-
-#pragma unroll
-                for (int n = 0; n < NTX; ++n) {
-                    int D[4] = {0, 0, 0, 0};
-                    mma_m16n8k32_s8(D, A[n], B);
-
-#pragma unroll
-                    for (int l = 0; l < 4; ++l) {
-                        // `da` is the activation scale, `dw` the weight scale. The
-                        // int32 result is exact, so both apply once per 32-element
-                        // block.
-                        acc[jj][n][l] += (float)D[l] * da[l % 2] * dw[n][l / 2];
-                    }
+                    acc[jj][n][l] += dmw[n][l / 2].x * da[l % 2] * (float)D[l];
+                    acc[jj][n][l] += dmw[n][l / 2].y * dsum[l % 2];
                 }
             }
         }
     }
-};
+}
 
 // Q4_K weight format policy, same contract as `MmqfQ80`.
 //
@@ -619,114 +890,15 @@ struct MmqfQ4K {
         }
     }
 
-    // Consumes one staged 128-k half; the loop shape matches `MmqfQ80::vec_dot`
-    // exactly, four 32-k steps of one `mma_m16n8k32_s8` per (token group,
-    // minitile). Two scalar terms per fragment element instead of one:
-    //
-    //   acc += (d * sc)     * d_act * int32 dot
-    //   acc += (-dmin * m)  * d_act * int32 block sum
-    //
-    // The second is the minimum correction. Its block sum is the sum of that
-    // token's 32 activation quants for this 32-k step, which the producer
-    // already computed and stored EXACTLY as the int16 in bits 16..31 of the
-    // activation header word. It is read here, not recomputed: an all-ones
-    // `mma` also yields it exactly, but costs one extra tensor-core issue per
-    // (token group, k-step), and a `half` `d * sum(q)` field is too coarse for
-    // the GEMM/GEMV parity bound. |sum| <= 32 * 128 = 4096 fits int16, so the
-    // stored value equals the MMA's to the bit.
-    //
-    // The sum is per token, so it indexes exactly like the scale `da[l % 2]`:
-    // both come from the same header word at row `mma_d_j(l)`, and neither
-    // depends on the feature minitile.
+    // Forwards to `mmqf_vec_dot_dm`, which is shared with Q5_K: the staged
+    // row layout and the two-term arithmetic are the same for both.
     template <int MMQ_X, bool FULL>
     static __device__ __forceinline__ void vec_dot(
         const int* __restrict__ s_x, const int* __restrict__ s_y,
         float (&acc)[MMQF_NJ(MMQ_X)][MMQF_NTX(MMQ_X)][4], unsigned int i0, unsigned int jb,
         unsigned int k00, unsigned int nks
     ) {
-        constexpr int NTX = MMQF_NTX(MMQ_X);
-        constexpr int NJ = MMQF_NJ(MMQ_X);
-
-        // The weight pair is f32. The activation header stays a packed 32-bit
-        // word, which is the producer's record format for every weight format,
-        // and is read here through `s_y` directly.
-        const float2* s_xdm = (const float2*)s_x;
-
-#pragma unroll
-        for (unsigned int ks = 0; ks < 4; ++ks) {
-            if (!FULL && ks >= nks) {
-                break;
-            }
-            const unsigned int kw = k00 + ks * 8;
-
-            int A[NTX][4];
-            float2 dmw[NTX][2];
-#pragma unroll
-            for (int n = 0; n < NTX; ++n) {
-                const unsigned int ir = i0 + n * 16;
-#pragma unroll
-                for (int l = 0; l < 4; ++l) {
-                    A[n][l] = s_x[(ir + mma_a_i(l)) * X_STRIDE + X_QS + kw + mma_a_j(l)];
-                }
-                // `mma_d_i(l)` takes one value per `l / 2`, and `kw / 8` is the
-                // sub-block index the staged pair belongs to.
-#pragma unroll
-                for (int h = 0; h < 2; ++h) {
-                    dmw[n][h] =
-                        s_xdm[((ir + mma_d_i(2 * h)) * X_STRIDE + X_DM) / 2 + kw / 8];
-                }
-            }
-
-#pragma unroll
-            for (int jj = 0; jj < NJ; ++jj) {
-                const unsigned int jt = jj * (NTX * 8) + jb;
-
-                int B[2];
-#pragma unroll
-                for (int l = 0; l < 2; ++l) {
-                    B[l] = s_y[(jt + mma_b_i(l)) * MMQF_Y_STRIDE + MMQF_Y_QS + ks * 8
-                               + mma_b_j(l)];
-                }
-                // One header word per token, holding both scalars this format
-                // needs: `half` scale in bits 0..15, int16 quant sum in bits
-                // 16..31. `mma_d_j(l)` takes one value per `l % 2`, so two
-                // words cover the whole accumulator fragment. The producer
-                // rounds `d` through `half`, so reading the low half back as
-                // float is an exact round-trip; the high half is sign-extended
-                // by an arithmetic shift of the signed word, then widened,
-                // which is exact for every attainable value.
-                float da[2];
-                float sum_i[2];
-#pragma unroll
-                for (int l = 0; l < 2; ++l) {
-                    const int ds =
-                        s_y[(jt + mma_d_j(l)) * MMQF_Y_STRIDE + MMQF_Y_DS + ks];
-                    da[l] = __half2float(__ushort_as_half((unsigned short)(ds & 0xFFFF)));
-                    sum_i[l] = (float)(ds >> 16);
-                }
-
-                // The activation scale times the block sum is per token, so it
-                // is formed once here rather than once per minitile inside the
-                // `n` loop below.
-                float dsum[2];
-#pragma unroll
-                for (int l = 0; l < 2; ++l) {
-                    dsum[l] = da[l] * sum_i[l];
-                }
-
-#pragma unroll
-                for (int n = 0; n < NTX; ++n) {
-                    int D[4] = {0, 0, 0, 0};
-                    mma_m16n8k32_s8(D, A[n], B);
-
-#pragma unroll
-                    for (int l = 0; l < 4; ++l) {
-                        acc[jj][n][l] += dmw[n][l / 2].x * da[l % 2] * (float)D[l];
-                        acc[jj][n][l] += dmw[n][l / 2].y * dsum[l % 2];
-                    }
-                }
-            }
-        }
+        mmqf_vec_dot_dm<MMQ_X, FULL, X_QS, X_DM, X_STRIDE>(s_x, s_y, acc, i0, jb, k00, nks);
     }
 };
 
@@ -970,6 +1142,175 @@ struct MmqfQ6K {
     }
 };
 
+// Q5_K weight format policy, same contract as `MmqfQ80`.
+//
+// Q5_K is Q4_K with a fifth bit. Same super-block header (f16 `d`, f16
+// `dmin`, the same 12-byte 6-bit scale/min packing), same eight 32-element
+// sub-blocks, same dequant form `d * sc_j * q - dmin * m_j`, same sub-block
+// PAIRING over `qs` — even sub-block takes the low nibbles, odd the high
+// nibbles of the SAME 32-byte run. Only the quant is wider: unsigned 5-bit,
+// four low bits from `qs` plus one bit from the 32-byte `qh` field.
+//
+// So everything but `stage` is shared with Q4_K: the staged row layout, the
+// `(d * sc, -dmin * m)` f32 pairs at `X_DM`, and `mmqf_vec_dot_dm`.
+//
+// ALIGNMENT. 176 is a multiple of 16, so a row base and every super-block
+// base inside it are 16-byte aligned, and `qs`@48, `qh`@16 and the `d`/`dmin`
+// pair@0 are all 4-byte aligned. Plain `int` loads are legal here; unlike
+// Q6_K this format needs no `load_int_ua`.
+struct MmqfQ5K {
+    // On-disk super-block: f16 d, f16 dmin, 12 packed 6-bit scale/min bytes,
+    // 32 bytes of fifth bits, then 128 nibble-packed quants.
+    static constexpr int BLOCK_BYTES = 176;
+    static constexpr int BLOCK_ELEMS = 256;
+    // Dispatch gates on `k % 256 == 0`, so a row's last 256-k group is always
+    // whole. The ragged tail path is dead for this format and is not compiled.
+    static constexpr bool RAGGED_K = false;
+
+    // Staged weight row: identical to Q4_K's — 64 quant words (256 k-values,
+    // one unsigned 0..31 value per int8 lane), then 8 `float2` holding
+    // `(d * sc_j, -dmin * m_j)`, then padding. Equal stride means Q4_K, Q5_K
+    // and Q6_K share the family's shared-memory request exactly.
+    static constexpr int X_QS = 0;
+    static constexpr int X_DM = 64;
+    static constexpr int X_STRIDE = 84;
+    static_assert(X_DM + 16 <= X_STRIDE, "Weight row too short: 8 scale/min pairs.");
+    static_assert(X_DM % 2 == 0 && X_STRIDE % 2 == 0, "Scale/min pairs are misaligned.");
+
+    // Stages 256 k-values, which for this format is exactly ONE super-block.
+    // `b0` counts 32-element Q8_1 activation blocks, so the super-block index
+    // is `b0 / 8`.
+    //
+    // Quant map, transcribed from `load_tiles_q5_K` in llama.cpp's
+    // `ggml-cuda/mmq.cuh`. Write `lane = 8*a + b` with `a = lane / 8` and
+    // `b = lane % 8`. Lane `l` reads the aligned int at `qs + 4*l`, whose low
+    // nibbles are 4 k-values of the EVEN sub-block `2*a` and whose high
+    // nibbles are the same 4 positions of the ODD sub-block `2*a + 1` — the
+    // pair shares one 32-byte run of `qs`, exactly as in Q4_K. The two staged
+    // words land at `16*a + b` and 8 further along.
+    //
+    // The fifth bits come from the aligned int at `qh + 4*b`, which is `qh`
+    // bytes `4*b .. 4*b+3`. In `qh` the BYTE index is the element within a
+    // sub-block and the BIT index is the sub-block number, so the even word
+    // takes bit `2*a` of each byte and the odd word bit `2*a + 1`.
+    //
+    // Both halves of that map were cross-checked element-by-element against
+    // `dequant_q5k` in `src/quant/cpu/kernels/dequant_k_quants/q4k_q5k.rs`:
+    // staged word `16*a + b` covers k-values `64*a + 4*b .. +3`, which is
+    // sub-block `2*a`, elements `4*b .. 4*b+3` — the CPU kernel reads
+    // `qs[(j/2)*32 + l]` and `qh[l] >> j` at exactly those indices. Getting
+    // either index wrong does not fail loudly; it yields a tensor with the
+    // right shape and RMS and the wrong values.
+    template <int MMQ_X, bool CLAMP_K>
+    static __device__ __forceinline__ void stage(
+        const unsigned char* __restrict__ weight, int* __restrict__ s_x, unsigned int N,
+        unsigned int bpr, unsigned int feat0, unsigned int b0
+    ) {
+        const unsigned int lane = threadIdx.x % WARP_SIZE;
+        const unsigned int warp = threadIdx.x / WARP_SIZE;
+
+        const unsigned int i_max = N - feat0 - 1;
+        const unsigned int supers = bpr / (BLOCK_ELEMS / 32);
+        const unsigned long long rstride = (unsigned long long)supers * BLOCK_BYTES;
+        const unsigned int sup =
+            CLAMP_K ? min(b0 / (BLOCK_ELEMS / 32), supers - 1) : b0 / (BLOCK_ELEMS / 32);
+        const unsigned long long off_blk = (unsigned long long)sup * BLOCK_BYTES;
+
+        // Row-invariant byte offsets, so the addressing collapses to one add
+        // per row. `qh` starts at byte 16 of the super-block, `qs` at byte 48.
+        const unsigned long long off_qs = off_blk + 48 + lane * 4;
+        const unsigned long long off_qh = off_blk + 16 + (lane % 8) * 4;
+        const unsigned int w_lo = 16 * (lane / 8) + lane % 8;
+        const unsigned int sh = 2 * (lane / 8);  // 0, 2, 4 or 6
+
+        constexpr int ROWS = MMQF_Y / MMQF_WARPS;
+        constexpr int BATCH = MMQF_STAGE_BATCH(MMQ_X);
+        static_assert(ROWS % BATCH == 0, "Weight row batches are ragged.");
+
+#pragma unroll
+        for (int g = 0; g < ROWS / BATCH; ++g) {
+            int vl[BATCH];
+            int vh[BATCH];
+#pragma unroll
+            for (int u = 0; u < BATCH; ++u) {
+                const unsigned int i = (unsigned int)((g * BATCH + u) * MMQF_WARPS) + warp;
+                const unsigned char* row = weight + (feat0 + min(i, i_max)) * rstride;
+                vl[u] = *reinterpret_cast<const int*>(row + off_qs);
+                vh[u] = *reinterpret_cast<const int*>(row + off_qh);
+            }
+#pragma unroll
+            for (int u = 0; u < BATCH; ++u) {
+                const unsigned int i = (unsigned int)((g * BATCH + u) * MMQF_WARPS) + warp;
+                // 4 low bits from `qs`, the fifth from `qh`. Unsigned 0..31
+                // sits inside the signed int8 range the `mma` takes, so no
+                // bias is applied; the minimum term is what carries the
+                // format's asymmetry, exactly as in Q4_K.
+                const int lo =
+                    (vl[u] & 0x0F0F0F0F) | (((vh[u] >> sh) & 0x01010101) << 4);
+                const int hi =
+                    ((vl[u] >> 4) & 0x0F0F0F0F) | (((vh[u] >> (sh + 1)) & 0x01010101) << 4);
+                s_x[i * X_STRIDE + X_QS + w_lo] = lo;
+                s_x[i * X_STRIDE + X_QS + w_lo + 8] = hi;
+            }
+        }
+
+        // Scale/min pass: byte-for-byte the same as Q4_K's, because the
+        // header is the same. Eight pairs per row, so a warp covers four
+        // rows. The three packed bytes each lane needs are at row-invariant
+        // offsets, so the first loop is pure loads and the 6-bit unpack
+        // happens in the second, on registers.
+        float2* s_xdm = (float2*)s_x;
+        const unsigned int j = lane % 8;  // sub-block within the super-block
+        const unsigned int rsub = lane / 8;
+        const unsigned int o_j4 = j + 4;
+        // For j < 4 the third byte is unused; re-reading sc[j] keeps the index
+        // in range without a branch around the load.
+        const unsigned int o_jm4 = j < 4 ? j : j - 4;
+
+        constexpr int SROWS = MMQF_Y / (MMQF_WARPS * 4);
+        half2 dm[SROWS];
+        unsigned int b_j[SROWS];
+        unsigned int b_j4[SROWS];
+        unsigned int b_jm4[SROWS];
+#pragma unroll
+        for (int u = 0; u < SROWS; ++u) {
+            const unsigned int i = (unsigned int)(u * MMQF_WARPS * 4) + warp * 4 + rsub;
+            const unsigned char* blk = weight + (feat0 + min(i, i_max)) * rstride + off_blk;
+            // `d` and `dmin` are adjacent f16 at byte 0 of a 16-aligned block,
+            // so the pair is one aligned 4-byte load.
+            dm[u] = *reinterpret_cast<const half2*>(blk);
+            const unsigned char* sc = blk + 4;  // 12 packed 6-bit scale/min bytes
+            b_j[u] = sc[j];
+            b_j4[u] = sc[o_j4];
+            b_jm4[u] = sc[o_jm4];
+        }
+#pragma unroll
+        for (int u = 0; u < SROWS; ++u) {
+            const unsigned int i = (unsigned int)(u * MMQF_WARPS * 4) + warp * 4 + rsub;
+            int scale;
+            int minimum;
+            q4k_scale_min_bytes(b_j[u], b_j4[u], b_jm4[u], (int)j, &scale, &minimum);
+            const float d = __low2float(dm[u]);
+            const float dmin = __high2float(dm[u]);
+            // Stored as f32: no half round-trip on `d * sc`, which is the
+            // term the parity bound is sensitive to.
+            s_xdm[(i * X_STRIDE + X_DM) / 2 + j] =
+                make_float2(d * (float)scale, -dmin * (float)minimum);
+        }
+    }
+
+    // Forwards to `mmqf_vec_dot_dm`, shared with Q4_K: once staged, the two
+    // formats' rows and arithmetic are identical.
+    template <int MMQ_X, bool FULL>
+    static __device__ __forceinline__ void vec_dot(
+        const int* __restrict__ s_x, const int* __restrict__ s_y,
+        float (&acc)[MMQF_NJ(MMQ_X)][MMQF_NTX(MMQ_X)][4], unsigned int i0, unsigned int jb,
+        unsigned int k00, unsigned int nks
+    ) {
+        mmqf_vec_dot_dm<MMQ_X, FULL, X_QS, X_DM, X_STRIDE>(s_x, s_y, acc, i0, jb, k00, nks);
+    }
+};
+
 // Stages 128 k-values of the activation tile as a FLAT COPY. The repacked
 // layout indexes records k-group-major, token-minor, so the `MMQ_X` records a
 // token tile needs are contiguous and the shared row IS the record: 4 header
@@ -1057,8 +1398,9 @@ static __device__ __forceinline__ void mmqf_accumulate(
 
     __syncthreads();
 
-    // Q8_0's K is only guaranteed to be a multiple of one block, so the final
-    // group of a tile can hold fewer than MMQF_ITER_B blocks. A format that
+    // The legacy formats (Q8_0, Q4_0) guarantee K only as a multiple of one
+    // 32-element block, so the final group of a tile can hold fewer than
+    // MMQF_ITER_B blocks. A format that
     // guarantees whole 256-k groups sets `RAGGED_K` false, which folds this to
     // `kb0_stop` and drops the tail instantiations below.
     const unsigned int full_stop =
@@ -1404,6 +1746,18 @@ MMQ_FM_KERNEL(MmqfQ80, q8_0, 96)
 MMQ_FM_KERNEL(MmqfQ80, q8_0, 112)
 MMQ_FM_KERNEL(MmqfQ80, q8_0, 128)
 
+MMQ_FM_KERNEL(MmqfQ40, q4_0, 8)
+MMQ_FM_KERNEL(MmqfQ40, q4_0, 16)
+MMQ_FM_KERNEL(MmqfQ40, q4_0, 24)
+MMQ_FM_KERNEL(MmqfQ40, q4_0, 32)
+MMQ_FM_KERNEL(MmqfQ40, q4_0, 40)
+MMQ_FM_KERNEL(MmqfQ40, q4_0, 48)
+MMQ_FM_KERNEL(MmqfQ40, q4_0, 64)
+MMQ_FM_KERNEL(MmqfQ40, q4_0, 80)
+MMQ_FM_KERNEL(MmqfQ40, q4_0, 96)
+MMQ_FM_KERNEL(MmqfQ40, q4_0, 112)
+MMQ_FM_KERNEL(MmqfQ40, q4_0, 128)
+
 MMQ_FM_KERNEL(MmqfQ4K, q4_k, 8)
 MMQ_FM_KERNEL(MmqfQ4K, q4_k, 16)
 MMQ_FM_KERNEL(MmqfQ4K, q4_k, 24)
@@ -1415,6 +1769,18 @@ MMQ_FM_KERNEL(MmqfQ4K, q4_k, 80)
 MMQ_FM_KERNEL(MmqfQ4K, q4_k, 96)
 MMQ_FM_KERNEL(MmqfQ4K, q4_k, 112)
 MMQ_FM_KERNEL(MmqfQ4K, q4_k, 128)
+
+MMQ_FM_KERNEL(MmqfQ5K, q5_k, 8)
+MMQ_FM_KERNEL(MmqfQ5K, q5_k, 16)
+MMQ_FM_KERNEL(MmqfQ5K, q5_k, 24)
+MMQ_FM_KERNEL(MmqfQ5K, q5_k, 32)
+MMQ_FM_KERNEL(MmqfQ5K, q5_k, 40)
+MMQ_FM_KERNEL(MmqfQ5K, q5_k, 48)
+MMQ_FM_KERNEL(MmqfQ5K, q5_k, 64)
+MMQ_FM_KERNEL(MmqfQ5K, q5_k, 80)
+MMQ_FM_KERNEL(MmqfQ5K, q5_k, 96)
+MMQ_FM_KERNEL(MmqfQ5K, q5_k, 112)
+MMQ_FM_KERNEL(MmqfQ5K, q5_k, 128)
 
 MMQ_FM_KERNEL(MmqfQ6K, q6_k, 8)
 MMQ_FM_KERNEL(MmqfQ6K, q6_k, 16)

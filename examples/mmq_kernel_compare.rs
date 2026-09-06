@@ -1,12 +1,23 @@
 //! Launches the dp4a and tensor-core MMQ kernels back to back in one process,
 //! on identical inputs, so a profiler attributes instruction counts to each
-//! kernel without an A/B rebuild. Covers Q8_0, Q4_K and Q6_K via `--format`.
+//! kernel without an A/B rebuild. Covers Q8_0, Q4_0, Q4_K, Q5_K and Q6_K via
+//! `--format`.
+//!
+//! Q4_0 and Q5_K have no token-major kernel of either kind — neither
+//! `quant_mmq_q4_0_q8_1` / `quant_mmq_q5_k_q8_1` nor their `_mma` twins exist —
+//! so for those formats the tool runs and checks the feature-major kernels
+//! alone and skips the token-major comparison rather than resolving a symbol
+//! that is not compiled.
 //!
 //! ```text
 //! cargo run --release --features cuda --example mmq_kernel_compare -- \
 //!     --format q8_0 --n 4096 --k 14336 --m 512
 //! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format q4_0 --n 4096 --k 14336 --m 512
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
 //!     --format q4_k --n 4096 --k 14336 --m 512
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format q5_k --n 4096 --k 14336 --m 512
 //! cargo run --release --features cuda --example mmq_kernel_compare -- \
 //!     --format q6_k --n 4096 --k 14336 --m 512
 //! ```
@@ -105,6 +116,41 @@ fn q8_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize
     (sum, magnitude)
 }
 
+/// Exact reference for one output element, in f64, for a Q4_0 weight against a
+/// Q8_1 activation, plus the accumulated magnitude of the sum.
+///
+/// Dequant math and byte offsets are ground-truthed against `dequant_q4_0` in
+/// `src/quant/cpu/kernels/dequant_simple.rs`: per 32-element block of 18
+/// bytes, `d`@0 (f16) then 16 nibble-packed quants@2, where element `j`
+/// (0..15) is the LOW nibble of `qs[j]`, element `j + 16` is the HIGH nibble of
+/// the same byte, and the value is `d * (q - 8)` with `q` unsigned 4-bit. The
+/// magnitude is what f32 accumulation error is actually proportional to; see
+/// [`check_against_reference`].
+#[cfg(feature = "cuda")]
+fn q4_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
+    let bpr = k / 32;
+    let mut sum = 0.0f64;
+    let mut magnitude = 0.0f64;
+    for b in 0..bpr {
+        let wb = (feat * bpr + b) * 18;
+        let ab = (token * bpr + b) * 36;
+        let wd = f64::from(half::f16::from_le_bytes([weight[wb], weight[wb + 1]]).to_f32());
+        let ad = f64::from(half::f16::from_le_bytes([act[ab], act[ab + 1]]).to_f32());
+        let mut dot = 0i64;
+        for j in 0..16 {
+            let byte = weight[wb + 2 + j];
+            let lo = i64::from(byte & 0x0F) - 8;
+            let hi = i64::from(byte >> 4) - 8;
+            dot += lo * i64::from(act[ab + 4 + j] as i8);
+            dot += hi * i64::from(act[ab + 4 + j + 16] as i8);
+        }
+        let contribution = dot as f64 * ad * wd;
+        sum += contribution;
+        magnitude += contribution.abs();
+    }
+    (sum, magnitude)
+}
+
 /// Exact reference for one output element, in f64, for a Q4_K weight against
 /// a Q8_1 activation, plus the accumulated magnitude of the sum: the sum over
 /// every element of `|contribution|`.
@@ -156,6 +202,75 @@ fn q4_k_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize
                 } else {
                     qs[qs_base + l] & 0x0F
                 });
+                let w = dl * q - ml;
+                let aq = f64::from(act[ab + 4 + l] as i8);
+                let contribution = w * ad * aq;
+                sum += contribution;
+                magnitude += contribution.abs();
+            }
+        }
+    }
+    (sum, magnitude)
+}
+
+/// Exact reference for one output element, in f64, for a Q5_K weight against
+/// a Q8_1 activation, plus the accumulated magnitude of the sum: the sum over
+/// every element of `|contribution|`.
+///
+/// Dequant math and byte offsets are ground-truthed against `dequant_q5k` and
+/// `unpack_q4k_q5k_scales` in
+/// `src/quant/cpu/kernels/dequant_k_quants/q4k_q5k.rs`: per 256-element
+/// super-block, `d`@0 and `dmin`@2 (f16), a 12-byte packed 6-bit scale/min
+/// array@4, 32 bytes of fifth bits@16, and 128 nibble-packed low quants@48,
+/// unpacked into eight 32-element sub-blocks as `x = d * sc[j] * q - dmin *
+/// m[j]` with `q` five bits wide. The scale/min packing is the same as Q4_K's.
+/// Sub-block PAIRS share one 32-byte run of `qs` (even sub-block reads the low
+/// nibbles, odd the high nibbles of the same bytes), and in `qh` the BYTE index
+/// is the element within the sub-block while the BIT index is the sub-block
+/// number. The magnitude is what f32 accumulation error is actually
+/// proportional to; see [`check_against_reference`].
+#[cfg(feature = "cuda")]
+fn q5_k_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
+    const SUPER: usize = 256;
+    const BYTES: usize = 176;
+    let bpr = k / SUPER;
+    let abpr = k / 32;
+    let mut sum = 0.0f64;
+    let mut magnitude = 0.0f64;
+    for sup in 0..bpr {
+        let wb = (feat * bpr + sup) * BYTES;
+        let d = f64::from(half::f16::from_le_bytes([weight[wb], weight[wb + 1]]).to_f32());
+        let dmin = f64::from(half::f16::from_le_bytes([weight[wb + 2], weight[wb + 3]]).to_f32());
+        let sc = &weight[wb + 4..wb + 16];
+        let qh = &weight[wb + 16..wb + 48];
+        let qs = &weight[wb + 48..wb + 176];
+
+        let mut scales = [0u8; 8];
+        let mut mins = [0u8; 8];
+        for i in 0..4 {
+            scales[i] = sc[i] & 0x3F;
+            mins[i] = sc[i + 4] & 0x3F;
+        }
+        for i in 4..8 {
+            scales[i] = (sc[i + 4] & 0x0F) | ((sc[i - 4] >> 6) << 4);
+            mins[i] = (sc[i + 4] >> 4) | ((sc[i] >> 6) << 4);
+        }
+
+        for j in 0..8 {
+            let dl = d * f64::from(scales[j]);
+            let ml = dmin * f64::from(mins[j]);
+            let qs_base = (j / 2) * 32;
+            let is_high = j % 2 == 1;
+            let ab = (token * abpr + sup * 8 + j) * 36;
+            let ad = f64::from(half::f16::from_le_bytes([act[ab], act[ab + 1]]).to_f32());
+            for l in 0..32 {
+                let low4 = if is_high {
+                    (qs[qs_base + l] >> 4) & 0x0F
+                } else {
+                    qs[qs_base + l] & 0x0F
+                };
+                let high1 = (qh[l] >> j) & 0x01;
+                let q = f64::from(low4 | (high1 << 4));
                 let w = dl * q - ml;
                 let aq = f64::from(act[ab + 4 + l] as i8);
                 let contribution = w * ad * aq;
@@ -295,14 +410,17 @@ struct RefCase<'a> {
 }
 
 /// Checks sampled outputs against the f64 reference for `format`
-/// ([`q8_0_reference`], [`q4_k_reference`], or [`q6_k_reference`]), panicking
-/// with the position and both values on the first breach.
+/// ([`q8_0_reference`], [`q4_0_reference`], [`q4_k_reference`],
+/// [`q5_k_reference`], or [`q6_k_reference`]), panicking with the position and both values on the
+/// first breach.
 #[cfg(feature = "cuda")]
 fn check_against_reference(label: &str, format: MmqFormat, got: &[f32], case: &RefCase) {
     let rtol = REFERENCE_RTOL;
     let reference: ReferenceFn = match format {
         MmqFormat::Q8_0 => q8_0_reference,
+        MmqFormat::Q40 => q4_0_reference,
         MmqFormat::Q4K => q4_k_reference,
+        MmqFormat::Q5K => q5_k_reference,
         MmqFormat::Q6K => q6_k_reference,
     };
     let RefCase {
@@ -366,7 +484,9 @@ fn block_scale(block: usize) -> half::f16 {
 #[derive(Clone, Copy)]
 enum MmqFormat {
     Q8_0,
+    Q40,
     Q4K,
+    Q5K,
     Q6K,
 }
 
@@ -375,43 +495,61 @@ impl MmqFormat {
     fn parse(s: &str) -> Self {
         match s {
             "q8_0" => MmqFormat::Q8_0,
+            "q4_0" => MmqFormat::Q40,
             "q4_k" => MmqFormat::Q4K,
+            "q5_k" => MmqFormat::Q5K,
             "q6_k" => MmqFormat::Q6K,
-            other => panic!("unknown --format {other}, expected one of: q8_0, q4_k, q6_k"),
+            other => {
+                panic!("unknown --format {other}, expected one of: q8_0, q4_0, q4_k, q5_k, q6_k")
+            }
         }
     }
 
     fn label(&self) -> &'static str {
         match self {
             MmqFormat::Q8_0 => "q8_0",
+            MmqFormat::Q40 => "q4_0",
             MmqFormat::Q4K => "q4_k",
+            MmqFormat::Q5K => "q5_k",
             MmqFormat::Q6K => "q6_k",
         }
     }
 
-    /// Q8_0 blocks are 32 elements; Q4_K and Q6_K are 256-element
-    /// super-blocks, so `k` must divide evenly by that instead. This mirrors
-    /// the `k.is_multiple_of(...)` guards in `dispatch_matmul`.
-    fn k_multiple(&self) -> usize {
+    /// Elements per weight block: 32 for the legacy formats Q8_0 and Q4_0, 256
+    /// for the K-quant super-blocks. `k` must be a whole number of these, which
+    /// mirrors the `k.is_multiple_of(...)` guards in `dispatch_matmul` and the
+    /// `k_multiple` field of each `FeatMajorFormat`.
+    fn block_elems(&self) -> usize {
         match self {
-            MmqFormat::Q8_0 => 32,
-            MmqFormat::Q4K | MmqFormat::Q6K => 256,
+            MmqFormat::Q8_0 | MmqFormat::Q40 => 32,
+            MmqFormat::Q4K | MmqFormat::Q5K | MmqFormat::Q6K => 256,
         }
     }
 
-    fn dp4a_kernel(&self) -> &'static str {
+    /// Token-major dp4a MMQ kernel, or `None` for a format that has none.
+    /// Q4_0 and Q5_K have no `quant_mmq_q4_0_q8_1` / `quant_mmq_q5_k_q8_1`:
+    /// their only pre-feature-major GEMM path is the dequantize-then-f32
+    /// kernel, which this tool does not time.
+    fn dp4a_kernel(&self) -> Option<&'static str> {
         match self {
-            MmqFormat::Q8_0 => "quant_mmq_q8_0_q8_1",
-            MmqFormat::Q4K => "quant_mmq_q4_k_q8_1",
-            MmqFormat::Q6K => "quant_mmq_q6_k_q8_1",
+            MmqFormat::Q8_0 => Some("quant_mmq_q8_0_q8_1"),
+            MmqFormat::Q40 => None,
+            MmqFormat::Q4K => Some("quant_mmq_q4_k_q8_1"),
+            MmqFormat::Q5K => None,
+            MmqFormat::Q6K => Some("quant_mmq_q6_k_q8_1"),
         }
     }
 
-    fn mma_kernel(&self) -> &'static str {
+    /// Token-major tensor-core MMQ kernel, or `None` for a format that has
+    /// none. Q4_0 and Q5_K have no `_mma` twin; both went straight to the
+    /// feature-major family.
+    fn mma_kernel(&self) -> Option<&'static str> {
         match self {
-            MmqFormat::Q8_0 => "quant_mmq_q8_0_q8_1_mma",
-            MmqFormat::Q4K => "quant_mmq_q4_k_q8_1_mma",
-            MmqFormat::Q6K => "quant_mmq_q6_k_q8_1_mma",
+            MmqFormat::Q8_0 => Some("quant_mmq_q8_0_q8_1_mma"),
+            MmqFormat::Q40 => None,
+            MmqFormat::Q4K => Some("quant_mmq_q4_k_q8_1_mma"),
+            MmqFormat::Q5K => None,
+            MmqFormat::Q6K => Some("quant_mmq_q6_k_q8_1_mma"),
         }
     }
 
@@ -423,29 +561,36 @@ impl MmqFormat {
     fn feat_major_infix(&self) -> Option<&'static str> {
         match self {
             MmqFormat::Q8_0 => Some("q8_0"),
+            MmqFormat::Q40 => Some("q4_0"),
             MmqFormat::Q4K => Some("q4_k"),
+            MmqFormat::Q5K => Some("q5_k"),
             MmqFormat::Q6K => Some("q6_k"),
         }
     }
 
     /// Weight row stride in the shared tile, in ints, mirroring the
     /// `FeatMajorFormat` constants. Q8_0 stages 64 quant words, 8 f32 scales
-    /// and 4 ints of bank padding. Q4_K stages 64 quant words, 8 `float2`
-    /// scale/min pairs (16 ints) and 4 ints of padding — its pair is two f32
-    /// rather than one packed word, so its row is 8 ints wider. Q6_K reaches
-    /// the same 84 by a different split: 64 quant words, 16 f32 group scales
-    /// (its scale changes every 16 elements) and 4 ints of padding.
+    /// and 4 ints of bank padding; Q4_0 stages that row byte for byte, biasing
+    /// its unsigned nibbles by 8 so the staged lanes are signed. Q4_K stages 64
+    /// quant words, 8 `float2` scale/min pairs (16 ints) and 4 ints of padding
+    /// — its pair is two f32
+    /// rather than one packed word, so its row is 8 ints wider. Q5_K stages
+    /// the Q4_K row verbatim; its extra bit changes staging, not layout. Q6_K
+    /// reaches the same 84 by a different split: 64 quant words, 16 f32 group
+    /// scales (its scale changes every 16 elements) and 4 ints of padding.
     fn feat_major_x_stride(&self) -> u32 {
         match self {
-            MmqFormat::Q8_0 => 76,
-            MmqFormat::Q4K | MmqFormat::Q6K => 84,
+            MmqFormat::Q8_0 | MmqFormat::Q40 => 76,
+            MmqFormat::Q4K | MmqFormat::Q5K | MmqFormat::Q6K => 84,
         }
     }
 
     fn build_weight(&self, n: usize, k: usize) -> Vec<u8> {
         match self {
             MmqFormat::Q8_0 => build_q8_0_weight(n, k),
+            MmqFormat::Q40 => build_q4_0_weight(n, k),
             MmqFormat::Q4K => build_q4_k_weight(n, k),
+            MmqFormat::Q5K => build_q5_k_weight(n, k),
             MmqFormat::Q6K => build_q6_k_weight(n, k),
         }
     }
@@ -464,6 +609,33 @@ fn build_q8_0_weight(n: usize, k: usize) -> Vec<u8> {
             out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
             for pos in 0..32 {
                 out[base + 2 + pos] = quant_byte(block, pos) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Builds a Q4_0 weight buffer: `n * (k / 32)` blocks of 18 bytes, half scale
+/// at byte 0, 16 nibble-packed quant bytes at byte 2.
+///
+/// The nibble layout is the inverse of `dequant_q4_0` in
+/// `src/quant/cpu/kernels/dequant_simple.rs`: element `j` (0..15) goes in the
+/// LOW nibble of `qs[j]` and element `j + 16` in the HIGH nibble of the same
+/// byte. Quants are unsigned 0..15; the dequantizer subtracts 8, so the value
+/// this encodes is `d * (q - 8)`.
+#[cfg(feature = "cuda")]
+fn build_q4_0_weight(n: usize, k: usize) -> Vec<u8> {
+    let bpr = k / 32;
+    let mut out = vec![0u8; n * bpr * 18];
+    for row in 0..n {
+        for b in 0..bpr {
+            let block = row * bpr + b;
+            let base = block * 18;
+            out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
+            for j in 0..16 {
+                let lo = quant_byte(block, j) as u8 & 0x0F;
+                let hi = quant_byte(block, j + 16) as u8 & 0x0F;
+                out[base + 2 + j] = lo | (hi << 4);
             }
         }
     }
@@ -608,6 +780,71 @@ fn build_q4_k_weight(n: usize, k: usize) -> Vec<u8> {
     out
 }
 
+/// Builds a Q5_K weight buffer: `n * (k / 256)` super-blocks of 176 bytes.
+///
+/// Layout (authoritative source: `dequant_q5k` in
+/// `src/quant/cpu/kernels/dequant_k_quants/q4k_q5k.rs`): f16 `d`@0, f16
+/// `dmin`@2, a 12-byte packed 6-bit scale/min array@4, 32-byte `qh`@16, and
+/// 128-byte nibble-packed low quants@48.
+///
+/// The scale/min packing is byte-for-byte Q4_K's, so it is written exactly as
+/// [`build_q4_k_weight`] writes it. The quant packing is the inverse of that
+/// dequantizer: sub-block PAIRS share one 32-byte run of `qs` (even sub-block
+/// in the low nibbles, odd in the high nibbles of the same bytes), and the
+/// fifth bit of element `l` of sub-block `j` is bit `j` of `qh[l]` — one `qh`
+/// byte per element, carrying that element's fifth bit for all eight
+/// sub-blocks, NOT a flat bitstream over the 256 values.
+#[cfg(feature = "cuda")]
+fn build_q5_k_weight(n: usize, k: usize) -> Vec<u8> {
+    const SUPER: usize = 256;
+    const BYTES: usize = 176;
+    let bpr = k / SUPER;
+    let mut out = vec![0u8; n * bpr * BYTES];
+    for row in 0..n {
+        for sup in 0..bpr {
+            let block = row * bpr + sup;
+            let base = block * BYTES;
+            out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
+            out[base + 2..base + 4].copy_from_slice(&block_scale(block * 7 + 1).to_le_bytes());
+
+            let mut scale = [0u8; 8];
+            let mut min = [0u8; 8];
+            for j in 0..8 {
+                scale[j] = ((block * 11 + j * 5) % 64) as u8;
+                min[j] = ((block * 13 + j * 3 + 1) % 64) as u8;
+            }
+            let mut sc = [0u8; 12];
+            for idx in 0..4 {
+                sc[idx] = scale[idx] & 0x3F;
+                sc[4 + idx] = min[idx] & 0x3F;
+            }
+            for idx in 0..4 {
+                let j = 4 + idx;
+                sc[8 + idx] = (scale[j] & 0x0F) | ((min[j] & 0x0F) << 4);
+                sc[idx] |= (scale[j] >> 4) << 6;
+                sc[4 + idx] |= (min[j] >> 4) << 6;
+            }
+            out[base + 4..base + 16].copy_from_slice(&sc);
+
+            for j in 0..8 {
+                let group = base + 48 + (j / 2) * 32;
+                for pos in 0..32 {
+                    // Five bits, 0..31: four into `qs`, the fifth into `qh`.
+                    let q = quant_byte(block * 8 + j, pos) as u8 & 0x1F;
+                    let byte_idx = group + pos;
+                    out[byte_idx] = if j % 2 == 0 {
+                        (out[byte_idx] & 0xF0) | (q & 0x0F)
+                    } else {
+                        (out[byte_idx] & 0x0F) | ((q & 0x0F) << 4)
+                    };
+                    out[base + 16 + pos] |= (q >> 4) << j;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Builds a Q6_K weight buffer: `n * (k / 256)` super-blocks of 210 bytes.
 ///
 /// Layout (authoritative source: `src/quant/cpu/kernels/quantize/q6k.rs`
@@ -706,10 +943,10 @@ fn main() {
         i += 2;
     }
 
-    let k_multiple = format.k_multiple();
-    if k % k_multiple != 0 {
+    let block_elems = format.block_elems();
+    if k % block_elems != 0 {
         eprintln!(
-            "--k must be a multiple of {k_multiple} for --format {}, got {k}",
+            "--k must be a multiple of {block_elems} for --format {}, got {k}",
             format.label()
         );
         std::process::exit(1);
@@ -772,69 +1009,83 @@ fn main() {
         shared_mem_bytes: 0,
     };
 
-    let dp4a_kernel = format.dp4a_kernel();
-    let mma_kernel = format.mma_kernel();
-
-    let dp4a_module =
-        kernels::get_or_load_module(client.context(), device_index, QUANT_GEMV_MODULE)
-            .expect("load dp4a module");
-    let dp4a_func = kernels::get_kernel_function(&dp4a_module, dp4a_kernel)
-        .unwrap_or_else(|_| panic!("resolve {dp4a_kernel}"));
-
     let mma_module =
         kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE)
             .expect("load mma module");
-    let mma_func = kernels::get_kernel_function(&mma_module, mma_kernel)
-        .unwrap_or_else(|_| panic!("resolve {mma_kernel}"));
 
-    let launch_dp4a = || unsafe {
-        let mut builder = client.stream().launch_builder(&dp4a_func);
-        builder.arg(&act_ptr);
-        builder.arg(&weight_ptr);
-        builder.arg(&out_dp4a_ptr);
-        builder.arg(&m_u32);
-        builder.arg(&k_u32);
-        builder.arg(&n_u32);
-        builder.launch(cfg).expect("launch dp4a kernel");
-    };
-    let launch_mma = || unsafe {
-        let mut builder = client.stream().launch_builder(&mma_func);
-        builder.arg(&act_ptr);
-        builder.arg(&weight_ptr);
-        builder.arg(&out_mma_ptr);
-        builder.arg(&m_u32);
-        builder.arg(&k_u32);
-        builder.arg(&n_u32);
-        builder.launch(cfg).expect("launch mma kernel");
-    };
+    // Token-major pair: the dp4a MMQ kernel and its tensor-core twin, which
+    // share a grid and a per-token activation layout. Q4_0 and Q5_K compile
+    // NEITHER, so for those formats this whole comparison — both timings, both
+    // reference checks, and the bit-for-bit agreement below — is skipped, and
+    // only the feature-major kernels run. Resolving a symbol that is not compiled would
+    // abort the tool instead.
+    let token_major =
+        format
+            .dp4a_kernel()
+            .zip(format.mma_kernel())
+            .map(|(dp4a_kernel, mma_kernel)| {
+                let dp4a_module =
+                    kernels::get_or_load_module(client.context(), device_index, QUANT_GEMV_MODULE)
+                        .expect("load dp4a module");
+                let dp4a_func = kernels::get_kernel_function(&dp4a_module, dp4a_kernel)
+                    .unwrap_or_else(|_| panic!("resolve {dp4a_kernel}"));
+                let mma_func = kernels::get_kernel_function(&mma_module, mma_kernel)
+                    .unwrap_or_else(|_| panic!("resolve {mma_kernel}"));
+                (dp4a_kernel, mma_kernel, dp4a_func, mma_func)
+            });
 
-    for _ in 0..WARMUP {
-        launch_dp4a();
-    }
-    client.synchronize();
-    let started = std::time::Instant::now();
-    for _ in 0..ITERS {
-        launch_dp4a();
-    }
-    client.synchronize();
-    let dp4a_us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+    let token_major_us = token_major.as_ref().map(|(_, _, dp4a_func, mma_func)| {
+        let launch_dp4a = || unsafe {
+            let mut builder = client.stream().launch_builder(dp4a_func);
+            builder.arg(&act_ptr);
+            builder.arg(&weight_ptr);
+            builder.arg(&out_dp4a_ptr);
+            builder.arg(&m_u32);
+            builder.arg(&k_u32);
+            builder.arg(&n_u32);
+            builder.launch(cfg).expect("launch dp4a kernel");
+        };
+        let launch_mma = || unsafe {
+            let mut builder = client.stream().launch_builder(mma_func);
+            builder.arg(&act_ptr);
+            builder.arg(&weight_ptr);
+            builder.arg(&out_mma_ptr);
+            builder.arg(&m_u32);
+            builder.arg(&k_u32);
+            builder.arg(&n_u32);
+            builder.launch(cfg).expect("launch mma kernel");
+        };
 
-    for _ in 0..WARMUP {
-        launch_mma();
-    }
-    client.synchronize();
-    let started = std::time::Instant::now();
-    for _ in 0..ITERS {
-        launch_mma();
-    }
-    client.synchronize();
-    let mma_us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+        for _ in 0..WARMUP {
+            launch_dp4a();
+        }
+        client.synchronize();
+        let started = std::time::Instant::now();
+        for _ in 0..ITERS {
+            launch_dp4a();
+        }
+        client.synchronize();
+        let dp4a_us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+
+        for _ in 0..WARMUP {
+            launch_mma();
+        }
+        client.synchronize();
+        let started = std::time::Instant::now();
+        for _ in 0..ITERS {
+            launch_mma();
+        }
+        client.synchronize();
+        let mma_us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+        (dp4a_us, mma_us)
+    });
 
     // The feature-major kernels are the llama.cpp-geometry port: feature-major
     // tiles, weights as MMA operand A, 256 k staged per step. Their grid axes
     // are transposed against the token-major `_mma` kernel, their token tile is
     // chosen per batch size, and their shared memory is dynamic, so they need
-    // their own config and an opt-in. Compiled for Q8_0, Q4_K and Q6_K.
+    // their own config and an opt-in. Compiled for Q8_0, Q4_0, Q4_K, Q5_K and
+    // Q6_K.
     let feat_major = match format.feat_major_infix() {
         Some(infix) => {
             let mmq_x = fm_mmq_x;
@@ -970,9 +1221,6 @@ fn main() {
             started.elapsed().as_secs_f64() * 1e6 / ITERS as f64
         });
 
-    let dp4a_host = out_dp4a.to_vec::<f32>();
-    let mma_host = out_mma.to_vec::<f32>();
-
     let case = RefCase {
         weight: &weight_bytes,
         act: &act_bytes,
@@ -980,8 +1228,39 @@ fn main() {
         n,
         k,
     };
-    check_against_reference("dp4a", format, &dp4a_host, &case);
-    check_against_reference(mma_kernel, format, &mma_host, &case);
+    if let Some((_, mma_kernel, _, _)) = token_major.as_ref() {
+        let dp4a_host = out_dp4a.to_vec::<f32>();
+        let mma_host = out_mma.to_vec::<f32>();
+        check_against_reference("dp4a", format, &dp4a_host, &case);
+        check_against_reference(mma_kernel, format, &mma_host, &case);
+
+        let mut mismatch = None;
+        'outer: for row in 0..m {
+            for col in 0..n {
+                let idx = row * n + col;
+                if dp4a_host[idx].to_bits() != mma_host[idx].to_bits() {
+                    mismatch = Some((idx, dp4a_host[idx], mma_host[idx]));
+                    break 'outer;
+                }
+            }
+        }
+        match mismatch {
+            None => println!(
+                "outputs match: dp4a and mma agree bit-for-bit at all {} elements",
+                m * n
+            ),
+            Some((idx, a, b)) => {
+                eprintln!("outputs MISMATCH at index {idx}: dp4a={a}, mma={b}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        println!(
+            "{}: no token-major dp4a or mma kernel is compiled, so only the \
+             feature-major kernels run",
+            format.label()
+        );
+    }
     if let Some((_, out, _, name)) = feat_major.as_ref() {
         let feat_major_host = out.to_vec::<f32>();
         check_against_reference(name, format, &feat_major_host, &case);
@@ -991,37 +1270,23 @@ fn main() {
         check_against_reference(name, format, &sk_host, &case);
     }
 
-    let mut mismatch = None;
-    'outer: for row in 0..m {
-        for col in 0..n {
-            let idx = row * n + col;
-            if dp4a_host[idx].to_bits() != mma_host[idx].to_bits() {
-                mismatch = Some((idx, dp4a_host[idx], mma_host[idx]));
-                break 'outer;
-            }
-        }
+    if let (Some((dp4a_us, mma_us)), Some((dp4a_kernel, mma_kernel, _, _))) =
+        (token_major_us, token_major.as_ref())
+    {
+        println!("{dp4a_kernel} (dp4a) {dp4a_us:9.2} us/call");
+        println!("{mma_kernel}    {mma_us:9.2} us/call");
+        println!("ratio dp4a/mma: {:.3}", dp4a_us / mma_us);
     }
-
-    match mismatch {
-        None => println!(
-            "outputs match: dp4a and mma agree bit-for-bit at all {} elements",
-            m * n
-        ),
-        Some((idx, a, b)) => {
-            eprintln!("outputs MISMATCH at index {idx}: dp4a={a}, mma={b}");
-            std::process::exit(1);
-        }
-    }
-
-    println!("{dp4a_kernel} (dp4a) {dp4a_us:9.2} us/call");
-    println!("{mma_kernel}    {mma_us:9.2} us/call");
-    println!("ratio dp4a/mma: {:.3}", dp4a_us / mma_us);
     if let (Some(us), Some((_, _, _, _, mmq_x, grid, name))) = (sk_us, sk.as_ref()) {
         println!("{name} (grid {grid}, mmq_x {mmq_x}) {us:9.2} us/call");
-        println!("ratio mma/stream-k: {:.3}", mma_us / us);
+        if let Some((_, mma_us)) = token_major_us {
+            println!("ratio mma/stream-k: {:.3}", mma_us / us);
+        }
     }
     if let (Some(us), Some((_, _, _, name))) = (feat_major_us, feat_major.as_ref()) {
         println!("{name} {us:9.2} us/call");
-        println!("ratio mma/feature-major: {:.3}", mma_us / us);
+        if let Some((_, mma_us)) = token_major_us {
+            println!("ratio mma/feature-major: {:.3}", mma_us / us);
+        }
     }
 }

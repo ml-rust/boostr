@@ -9,8 +9,8 @@
 //! `src/quant/cuda/kernels/quant_mmq_mma.cu`.
 //!
 //! The kernel family is parameterized over the weight format; everything that
-//! differs per format is a field of `FeatMajorFormat`. Q8_0, Q4_K and Q6_K are
-//! the formats compiled today.
+//! differs per format is a field of `FeatMajorFormat`. Q8_0, Q4_0, Q4_K,
+//! Q5_K and Q6_K are the formats compiled today.
 //!
 //! This path needs sm_80 and its own repacked activation layout, so the caller
 //! gates on `caps.int8_mma_m16n8k32` and falls back to `quant_mmq_q8_0_q8_1_mma`
@@ -61,6 +61,18 @@ pub(super) const Q8_0: FeatMajorFormat = FeatMajorFormat {
     k_multiple: 32,
 };
 
+/// Q4_0: 18-byte blocks of 32 elements, staged as Q8_0's row byte for byte —
+/// 64 quant words plus 8 f32 scales plus 4 ints of bank padding. Q4_0's quants
+/// are unsigned 4-bit biased by 8, and the kernel folds that bias in while
+/// staging, so the staged row and the whole `vec_dot` are Q8_0's. K needs only
+/// a whole 32-element block, so a row's last 256-k staging group can be
+/// partial.
+pub(super) const Q4_0: FeatMajorFormat = FeatMajorFormat {
+    kernel_infix: "q4_0",
+    x_stride: 76,
+    k_multiple: 32,
+};
+
 /// Q4_K: 144-byte super-blocks of 256 elements, staged as 64 quant words plus
 /// 8 `float2` scale/min pairs (16 ints) plus 4 ints of bank padding. The row is
 /// 8 ints wider than Q8_0's because the pair is f32, not `half2`: half rounding
@@ -69,6 +81,17 @@ pub(super) const Q8_0: FeatMajorFormat = FeatMajorFormat {
 /// which also makes every 256-k staging group whole.
 pub(super) const Q4_K: FeatMajorFormat = FeatMajorFormat {
     kernel_infix: "q4_k",
+    x_stride: 84,
+    k_multiple: 256,
+};
+
+/// Q5_K: 176-byte super-blocks of 256 elements, staged exactly as Q4_K — 64
+/// quant words plus 8 `float2` scale/min pairs (16 ints) plus 4 ints of bank
+/// padding. Q5_K is Q4_K with a fifth quant bit from a 32-byte `qh` field, so
+/// only the kernel's staging step differs; the staged row and the two-term
+/// arithmetic are shared. K must be a whole number of super-blocks.
+pub(super) const Q5_K: FeatMajorFormat = FeatMajorFormat {
+    kernel_infix: "q5_k",
     x_stride: 84,
     k_multiple: 256,
 };
@@ -324,7 +347,7 @@ mod tests {
     /// Ample limit: every compiled variant fits.
     const WIDE: u32 = 1 << 20;
 
-    /// The one compiled format's stride.
+    /// The stride Q8_0 and Q4_0 share.
     const XS: u32 = Q8_0.x_stride;
 
     #[test]
@@ -369,6 +392,32 @@ mod tests {
         assert_eq!(Q8_0.k_multiple, 32);
     }
 
+    /// Q4_0 stages into the Q8_0 row, so the two strides must stay equal and
+    /// with them the family's shared-memory request at every token tile. Both
+    /// are 32-element block formats, so both take the ragged-K multiple.
+    #[test]
+    fn the_q4_0_descriptor_names_the_compiled_symbols() {
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_x{}", Q4_0.kernel_infix, 8),
+            "quant_mmq_q4_0_q8_1_mma_x8"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_sk_x{}", Q4_0.kernel_infix, 128),
+            "quant_mmq_q4_0_q8_1_mma_sk_x128"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_fixup_x{}", Q4_0.kernel_infix, 128),
+            "quant_mmq_q4_0_q8_1_mma_fixup_x128"
+        );
+        assert_eq!(Q4_0.k_multiple, 32);
+        assert_eq!(Q4_0.x_stride, Q8_0.x_stride);
+        assert!(
+            VARIANTS
+                .iter()
+                .all(|&x| smem_bytes(Q4_0.x_stride, x) == smem_bytes(Q8_0.x_stride, x))
+        );
+    }
+
     #[test]
     fn the_q4_k_descriptor_names_the_compiled_symbols() {
         assert_eq!(
@@ -384,6 +433,36 @@ mod tests {
             "quant_mmq_q4_k_q8_1_mma_fixup_x128"
         );
         assert_eq!(Q4_K.k_multiple, 256);
+    }
+
+    #[test]
+    fn the_q5_k_descriptor_names_the_compiled_symbols() {
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_x{}", Q5_K.kernel_infix, 8),
+            "quant_mmq_q5_k_q8_1_mma_x8"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_sk_x{}", Q5_K.kernel_infix, 128),
+            "quant_mmq_q5_k_q8_1_mma_sk_x128"
+        );
+        assert_eq!(
+            format!("quant_mmq_{}_q8_1_mma_fixup_x{}", Q5_K.kernel_infix, 128),
+            "quant_mmq_q5_k_q8_1_mma_fixup_x128"
+        );
+        assert_eq!(Q5_K.k_multiple, 256);
+    }
+
+    /// Q5_K stages the Q4_K row verbatim — same quant words, same eight
+    /// scale/min pairs — so the two strides must stay equal, and with them the
+    /// family's shared-memory request at every token tile.
+    #[test]
+    fn q5_k_shares_the_q4_k_row_stride() {
+        assert_eq!(Q5_K.x_stride, Q4_K.x_stride);
+        assert!(
+            VARIANTS
+                .iter()
+                .all(|&x| smem_bytes(Q5_K.x_stride, x) == smem_bytes(Q4_K.x_stride, x))
+        );
     }
 
     #[test]

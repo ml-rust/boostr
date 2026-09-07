@@ -9,7 +9,6 @@ use numr::dtype::DType;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
-use tcf_core::NativeEncoding;
 
 use super::super::int4_gemm as int4_dispatch;
 use super::super::kernels::{
@@ -181,11 +180,12 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         //
         // TCF has two crossovers, not one, and they are NOT the `M <= 64` the
         // GGUF path below uses:
-        // - `TCF_FEAT_MAJOR_MIN_M` (below) gates `Q8S32T64` onto the MMQ
-        //   kernel ahead of everything else.
+        // - `TCF_FEAT_MAJOR_MIN_M` (below) gates the encodings that have a
+        //   feature-major kernel onto MMQ ahead of everything else.
         // - The `m <= 4` check further down chooses `launch_gemv` vs
-        //   `launch_gemm` for every encoding that isn't on the MMQ path —
-        //   `Q8S32T64` falls back to it too when the MMQ dispatch declines.
+        //   `launch_gemm` for every encoding that isn't on the MMQ path — an
+        //   encoding that has a kernel falls back to it too when the MMQ
+        //   dispatch declines.
         //
         // The mechanism behind the GEMV/GEMM split, which is what carries
         // across devices: GEMV cost grows linearly in M because it re-reads
@@ -200,21 +200,24 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             let at = MatmulShape { m, k, n };
             let device_index = activation.device().id();
             if m >= TCF_FEAT_MAJOR_MIN_M {
-                // `Q8S32T64` stages into the Q8_0 weight row, so it takes the
-                // feature-major tensor-core family instead of the f32 FMA tile
-                // `launch_gemm` runs. Every other encoding keeps that tile:
-                // none of them has a `FeatMajorFormat` yet. `Ok(None)` means no
-                // compiled variant fits the device, and `launch_gemm` still
-                // serves the shape.
-                let feat_major = encoding.native() == NativeEncoding::Q8S32T64
-                    && k.is_multiple_of(mmq_feat_major::TCF_Q8S32T64.k_multiple as usize)
-                    && numr::runtime::cuda::CudaDevice::new(device_index)
-                        .profile()
-                        .caps
-                        .int8_mma_m16n8k32;
-                if feat_major
+                // An encoding with a `FeatMajorFormat` takes the feature-major
+                // tensor-core family instead of the f32 FMA tile `launch_gemm`
+                // runs; `mmq_feat_major::feat_major_format` is the one place
+                // that says which those are. Every other encoding keeps that
+                // tile, as does any K the format's staging map does not cover.
+                // `Ok(None)` means no compiled variant fits the device, and
+                // `launch_gemm` still serves the shape.
+                let feat_major = mmq_feat_major::feat_major_format(encoding.native())
+                    .filter(|format| k.is_multiple_of(format.k_multiple as usize))
+                    .filter(|_| {
+                        numr::runtime::cuda::CudaDevice::new(device_index)
+                            .profile()
+                            .caps
+                            .int8_mma_m16n8k32
+                    });
+                if let Some(format) = feat_major
                     && mmq_feat_major::dispatch(
-                        &mmq_feat_major::TCF_Q8S32T64,
+                        format,
                         self,
                         &act_contig,
                         weight,

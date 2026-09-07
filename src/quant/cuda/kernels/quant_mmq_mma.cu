@@ -15,6 +15,11 @@
 #include "decode.cuh"
 #include "iq_dequant.cuh"
 #include "mma_int8.cuh"
+// The TCF device decoder. `MmqfTcfQ4AS32DT64` below reads its super-block
+// scale fields through `tcf_read_packed6` and `tcf_read_bfloat16` rather than
+// restating either: a second copy of a bit position or of the bfloat16 widening
+// is the drift the TCF parity test only catches after it ships.
+#include "tcf.cuh"
 
 #define WARP_SIZE 32
 #define MMQ_BM 128
@@ -3869,6 +3874,226 @@ struct MmqfTcfQ8S32T64 {
     }
 };
 
+// Expands four ADJACENT 4-bit TCF codes into one int8 lane word.
+//
+// Section 14.1 packs a 4-bit tile as `byte = u[2e] | (u[2e+1] << 4)`, so four
+// consecutive elements fill bits 0..15 of `h` in element order and the four
+// int8 lanes come out in that same order. This is NOT ggml's 4-bit map, where
+// one byte's low and high nibbles belong to sub-blocks 32 elements apart —
+// compare `MmqfQ4K::stage`, which splits one word into two staged words 8
+// apart. `tcf_code`'s `l.bits == 4u` branch in `tcf.cuh` is the layout this
+// mirrors.
+//
+// The codes are UNSIGNED levels, the encoding being asymmetric, so no sign
+// resolution applies and 0..15 already sits inside the signed int8 range the
+// `mma` reads. The minimum term carries the asymmetry, as it does for Q4_K.
+static __device__ __forceinline__ int tcf_expand_nibble_quad(unsigned int h) {
+    return (int)((h & 0x000Fu) | ((h & 0x00F0u) << 4) | ((h & 0x0F00u) << 8)
+                 | ((h & 0xF000u) << 12));
+}
+
+// TCF `Q4AS32DT64` weight format policy, same contract as `MmqfQ80`.
+//
+// The GGUF format this competes with is Q4_K: 4 bits, a 32-element group, a
+// super-block of 256 elements carrying a 6-bit sub-scale and a 6-bit
+// sub-minimum per group under two super values, 4.50 bpw. So the staged row and
+// the whole `vec_dot` are Q4_K's, and only the addressing and the three unpack
+// routines below are this format's own.
+//
+// PLANES, NOT BLOCKS. TCF stores whole-tensor planes: the 4-bit code plane
+// first, then the bit-packed sub-scale plane, the bit-packed sub-minimum plane,
+// the super-scale plane and the super-minimum plane, in that order and with
+// nothing between them. Every offset is derived below from `N` and `bpr`, the
+// two arguments `stage` already takes. No extra kernel argument.
+//
+// WHY K MUST BE A WHOLE 256. A super-block is indexed by the GLOBAL flattened
+// tile number, so a feature row begins on a super-block boundary only when its
+// tile count is a multiple of four — `K % 256 == 0`. Under that gate a row's
+// super-blocks are a plain stride and every plane offset follows from `N` and
+// `bpr`; without it, a row's scale fields would straddle the block the previous
+// row started. The dispatch gates on it and sends any other K to the
+// global-tile-addressed `tcf_dispatch` kernels instead. Q4_K takes the same
+// multiple for the same reason.
+//
+// ALIGNMENT. A super-block's 256 codes are 128 CONTIGUOUS bytes of the code
+// plane, and a row holds a whole number of super-blocks, so every super-block
+// base is 128-byte aligned and each lane's 4-byte code load is aligned. The
+// scale fields are byte reads and 2-byte bfloat16 reads, neither of which needs
+// more.
+//
+// THE MIN SIGN. A TCF value is `d_eff * u + m_eff` with an UNSIGNED code and a
+// FULLY SIGNED `m_eff`, so the staged pair follows Q4_1's `(d, +m)` convention,
+// not the K-quants' `(d * sc, -dmin * m)`. See the store site below.
+struct MmqfTcfQ4AS32DT64 {
+    // Not an on-disk block: the codes for 32 elements are 16 contiguous bytes
+    // of the code plane, and their scale fields live in planes of their own.
+    static constexpr int BLOCK_BYTES = 16;
+    static constexpr int BLOCK_ELEMS = 32;
+    // Dispatch gates on `k % 256 == 0`, so a row's last 256-k group is always
+    // whole. The ragged tail path is dead for this format and is not compiled.
+    static constexpr bool RAGGED_K = false;
+    // Group width 32 matches the activation record's own sub-block, so no
+    // activation scratch, as for Q4_K.
+    static constexpr int Y_SCRATCH = 0;
+
+    // Section 13.4 geometry, expressed through `tcf.cuh`'s own constants rather
+    // than restated: four 64-element tiles per super-block, two 32-element
+    // groups per tile, and `tile / 2` code bytes per tile.
+    static constexpr int GROUPS_PER_SUPER_BLOCK =
+        (int)(TCF_SUPER_BLOCK_TILES * (TCF_TILE / (unsigned int)BLOCK_ELEMS));
+    static constexpr int SUPER_BLOCK_BYTES = (int)(TCF_SUPER_BLOCK_TILES * (TCF_TILE / 2u));
+    // Eight 6-bit fields is 48 bits, so each bit-packed sub-plane spends 6
+    // bytes per super-block.
+    static constexpr int SUB_BLOCK_BYTES = 6;
+    // One bfloat16 super-scale and one bfloat16 super-minimum per super-block.
+    static constexpr int SUPER_VALUE_BYTES = 2;
+
+    // Staged weight row: Q4_K's, int for int. 64 quant words (256 k-values, one
+    // unsigned nibble per int8 lane), then 8 `float2` holding
+    // `(d_eff, m_eff)`, one per 32-element group, then padding.
+    static constexpr int X_QS = 0;
+    static constexpr int X_DM = 64;
+    static constexpr int X_STRIDE = 84;
+    static_assert(X_DM + 16 <= X_STRIDE, "Weight row too short: 8 scale/min pairs.");
+    static_assert(X_DM % 2 == 0 && X_STRIDE % 2 == 0, "Scale/min pairs are misaligned.");
+    static_assert(
+        X_QS == MmqfQ4K::X_QS && X_DM == MmqfQ4K::X_DM && X_STRIDE == MmqfQ4K::X_STRIDE,
+        "Q4AS32DT64 must stage into the Q4_K row; the two share `mmqf_vec_dot_dm`."
+    );
+
+    // Stages 256 k-values, which for this format is exactly ONE super-block.
+    // `b0` counts 32-element Q8_1 activation blocks, so the super-block index
+    // within a row is `b0 / 8`.
+    template <int MMQ_X, bool CLAMP_K>
+    static __device__ __forceinline__ void stage(
+        const unsigned char* __restrict__ weight, int* __restrict__ s_x, unsigned int N,
+        unsigned int bpr, unsigned int feat0, unsigned int b0
+    ) {
+        const unsigned int lane = threadIdx.x % WARP_SIZE;
+        const unsigned int warp = threadIdx.x / WARP_SIZE;
+
+        const unsigned int i_max = N - feat0 - 1;
+
+        // Plane offsets. `bpr` counts 32-element groups per row and a
+        // super-block is eight of them, so a row holds `bpr / 8` super-blocks
+        // and the tensor holds `N` times that. Each plane's span is its
+        // per-super-block width times that count, and the planes abut.
+        const unsigned int sbpr = bpr / GROUPS_PER_SUPER_BLOCK;
+        const unsigned long long blocks = (unsigned long long)N * sbpr;
+        const unsigned long long sub_scale_off = blocks * SUPER_BLOCK_BYTES;
+        const unsigned long long sub_min_off = sub_scale_off + blocks * SUB_BLOCK_BYTES;
+        const unsigned long long super_d_off = sub_min_off + blocks * SUB_BLOCK_BYTES;
+        const unsigned long long super_m_off = super_d_off + blocks * SUPER_VALUE_BYTES;
+
+        const unsigned int sb = CLAMP_K ? min(b0 / GROUPS_PER_SUPER_BLOCK, sbpr - 1)
+                                        : b0 / GROUPS_PER_SUPER_BLOCK;
+
+        constexpr int ROWS = MMQF_Y / MMQF_WARPS;
+        constexpr int BATCH = MMQF_STAGE_BATCH(MMQ_X);
+        static_assert(ROWS % BATCH == 0, "Weight row batches are ragged.");
+
+        // One aligned `int` per lane covers the whole super-block: 32 lanes x 4
+        // bytes is its 128 code bytes. Those 8 codes are two staged words, at
+        // `2 * lane` and `2 * lane + 1`, because a staged word is 4 consecutive
+        // k-values and the code plane runs in element order.
+        const unsigned long long off_code = (unsigned long long)lane * 4;
+#pragma unroll
+        for (int g = 0; g < ROWS / BATCH; ++g) {
+            int v[BATCH];
+#pragma unroll
+            for (int u = 0; u < BATCH; ++u) {
+                const unsigned int i = (unsigned int)((g * BATCH + u) * MMQF_WARPS) + warp;
+                const unsigned long long block =
+                    (unsigned long long)(feat0 + min(i, i_max)) * sbpr + sb;
+                v[u] = *reinterpret_cast<const int*>(
+                    weight + block * SUPER_BLOCK_BYTES + off_code);
+            }
+#pragma unroll
+            for (int u = 0; u < BATCH; ++u) {
+                const unsigned int i = (unsigned int)((g * BATCH + u) * MMQF_WARPS) + warp;
+                const unsigned int w = (unsigned int)v[u];
+                s_x[i * X_STRIDE + X_QS + 2 * lane] = tcf_expand_nibble_quad(w & 0xFFFFu);
+                s_x[i * X_STRIDE + X_QS + 2 * lane + 1] = tcf_expand_nibble_quad(w >> 16);
+            }
+        }
+
+        // Scale/min pass: eight (sub-scale, sub-minimum) fields per row, so a
+        // warp covers four rows. Lane `l` owns group `l % 8` of row `l / 8`,
+        // and that group index IS the field slot: `tcf_group_values` resolves a
+        // slot as `(tile % 4) * groups_per_tile + g`, which for a 64-element
+        // tile and a 32-element group is the group's own index within the
+        // super-block.
+        float2* s_xdm = (float2*)s_x;
+        const unsigned int j = lane % 8;
+        const unsigned int rsub = lane / 8;
+
+        constexpr int SROWS = MMQF_Y / (MMQF_WARPS * 4);
+        unsigned int f_scale[SROWS];
+        unsigned int f_min[SROWS];
+        float super_d[SROWS];
+        float super_m[SROWS];
+#pragma unroll
+        for (int u = 0; u < SROWS; ++u) {
+            const unsigned int i = (unsigned int)(u * MMQF_WARPS * 4) + warp * 4 + rsub;
+            const unsigned long long block =
+                (unsigned long long)(feat0 + min(i, i_max)) * sbpr + sb;
+            // Section 14.6's 6-bit field position is read through
+            // `tcf_read_packed6` rather than restated. Its block index is a
+            // 32-bit number, so the block stride is applied here in 64-bit and
+            // the helper is handed block 0 of that one super-block's run; the
+            // bit position inside the run is the part being reused.
+            f_scale[u] = tcf_read_packed6(
+                weight + sub_scale_off + block * SUB_BLOCK_BYTES, 0u, j, SUB_BLOCK_BYTES);
+            f_min[u] = tcf_read_packed6(
+                weight + sub_min_off + block * SUB_BLOCK_BYTES, 0u, j, SUB_BLOCK_BYTES);
+            // Section 13.4's super values are bfloat16, NOT the binary16 every
+            // flat scale form uses, so they take `tcf_read_bfloat16`.
+            super_d[u] = tcf_read_bfloat16(weight + super_d_off + block * SUPER_VALUE_BYTES);
+            super_m[u] = tcf_read_bfloat16(weight + super_m_off + block * SUPER_VALUE_BYTES);
+        }
+#pragma unroll
+        for (int u = 0; u < SROWS; ++u) {
+            const unsigned int i = (unsigned int)(u * MMQF_WARPS * 4) + warp * 4 + rsub;
+            // The sub-scale is an unsigned 6-bit level. The sub-minimum is a
+            // two's-complement one: 0..=31 is itself, 32..=63 is `field - 64`.
+            // `tcf-core` rejects the reserved most-negative pattern when it
+            // reads a payload, so device code recovers the sign rather than
+            // re-checking it per field — the same rule `tcf_sign_resolve`
+            // states for a code.
+            int level = (int)f_min[u];
+            if (level > 31) {
+                level -= 64;
+            }
+            // Section 13.4 stores every super value PRE-DIVIDED by its form's
+            // sub-level count, so each effective term is ONE multiply.
+            // `__fmul_rn` names the rounding rather than leaving the multiply to
+            // `--use_fast_math` contraction, matching `tcf_group_values`.
+            const float d_eff = __fmul_rn(super_d[u], (float)f_scale[u]);
+            const float m_eff = __fmul_rn(super_m[u], (float)level);
+            // THE MIN SIGN. `mmqf_vec_dot_dm` always ADDS
+            // `pair.y * (activation scale * block sum)`. A TCF value is
+            // `d_eff * u + m_eff` with `m_eff` fully signed, which is Q4_1's
+            // `d * q + m` convention, so the minimum is stored UNNEGATED. The
+            // K-quants negate because theirs is `d * sc * q - dmin * m` with an
+            // unsigned `m`; negating here would flip the sign of every
+            // minimum term and yield plausible wrong numbers, not an error.
+            // Stored as f32 for the same parity reason Q4_K states.
+            s_xdm[(i * X_STRIDE + X_DM) / 2 + j] = make_float2(d_eff, m_eff);
+        }
+    }
+
+    // Forwards to `mmqf_vec_dot_dm`, shared with Q4_K, Q5_K, Q4_1 and Q5_1:
+    // once staged, the row layout and the two-term arithmetic are Q4_K's.
+    template <int MMQ_X, bool FULL>
+    static __device__ __forceinline__ void vec_dot(
+        const int* __restrict__ s_x, const int* __restrict__ s_y,
+        float (&acc)[MMQF_NJ(MMQ_X)][MMQF_NTX(MMQ_X)][4], unsigned int i0, unsigned int jb,
+        unsigned int k00, unsigned int nks
+    ) {
+        mmqf_vec_dot_dm<MMQ_X, FULL, X_QS, X_DM, X_STRIDE>(s_x, s_y, acc, i0, jb, k00, nks);
+    }
+};
+
 // Stages 128 k-values of the activation tile as a FLAT COPY. The repacked
 // layout indexes records k-group-major, token-minor, so the `MMQ_X` records a
 // token tile needs are contiguous and the shared row IS the record: 4 header
@@ -4587,6 +4812,18 @@ MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 80)
 MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 96)
 MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 112)
 MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 128)
+
+MMQ_FM_KERNEL(MmqfTcfQ4AS32DT64, tcf_q4as32dt64, 8)
+MMQ_FM_KERNEL(MmqfTcfQ4AS32DT64, tcf_q4as32dt64, 16)
+MMQ_FM_KERNEL(MmqfTcfQ4AS32DT64, tcf_q4as32dt64, 24)
+MMQ_FM_KERNEL(MmqfTcfQ4AS32DT64, tcf_q4as32dt64, 32)
+MMQ_FM_KERNEL(MmqfTcfQ4AS32DT64, tcf_q4as32dt64, 40)
+MMQ_FM_KERNEL(MmqfTcfQ4AS32DT64, tcf_q4as32dt64, 48)
+MMQ_FM_KERNEL(MmqfTcfQ4AS32DT64, tcf_q4as32dt64, 64)
+MMQ_FM_KERNEL(MmqfTcfQ4AS32DT64, tcf_q4as32dt64, 80)
+MMQ_FM_KERNEL(MmqfTcfQ4AS32DT64, tcf_q4as32dt64, 96)
+MMQ_FM_KERNEL(MmqfTcfQ4AS32DT64, tcf_q4as32dt64, 112)
+MMQ_FM_KERNEL(MmqfTcfQ4AS32DT64, tcf_q4as32dt64, 128)
 
 // Reads Q8_1 sub-block `b` of both operands into registers, one iteration
 // ahead, same reason as `mmq_q8_0_stage_load`.

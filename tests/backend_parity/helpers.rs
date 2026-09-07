@@ -4,6 +4,7 @@ use numr::ops::{ActivationOps, BinaryOps, MatmulOps, ReduceOps, ScalarOps, Unary
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 use std::sync::{Mutex, OnceLock};
+use tcf_core::NativeEncoding;
 
 #[cfg(feature = "cuda")]
 static CUDA_BACKEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -222,4 +223,28 @@ pub fn max_abs_diff(client: &CpuClient, a: &Tensor<CpuRuntime>, b: &Tensor<CpuRu
     let abs_diff = client.abs(&diff).unwrap();
     let max = client.max(&abs_diff, &[], false).unwrap();
     max.to_vec::<f32>()[0]
+}
+
+/// Whether `native` at `m` tokens takes the feature-major MMQ path rather
+/// than the f32 GEMV/GEMM tile.
+///
+/// True when the encoding has a `FeatMajorFormat` AND `m` is at or above
+/// `TCF_FEAT_MAJOR_MIN_M` (`quant/cuda/quant_matmul/impl_ops.rs`). The
+/// encodings listed here must mirror `feat_major_format` in
+/// `quant/cuda/quant_matmul/mmq_feat_major/formats/tcf.rs`, the single
+/// mapping site in the library — that function is crate-visible only, so
+/// this test cannot call it directly. A missing entry here shows up
+/// immediately as a parity failure rather than as a silent wrong gate, so
+/// the duplication is self-correcting.
+///
+/// This does not model the K-multiple or device-capability gates: on a
+/// device without `int8_mma_m16n8k32`, or at a K the format's `k_multiple`
+/// does not divide, the case actually stays on the f32 path and the cosine
+/// gate is merely looser, never wrong.
+pub fn takes_mmq_path(native: NativeEncoding, m: usize) -> bool {
+    const TCF_FEAT_MAJOR_MIN_M: usize = 2;
+    matches!(
+        native,
+        NativeEncoding::Q8S32T64 | NativeEncoding::Q4AS32DT64
+    ) && m >= TCF_FEAT_MAJOR_MIN_M
 }

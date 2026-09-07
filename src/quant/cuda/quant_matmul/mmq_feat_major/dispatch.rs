@@ -122,28 +122,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch(
 
     let module = kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE)?;
 
-    // The geometric term gates the rest: a shape whose tiles already fill the
-    // device can never take stream-k, so it skips the resolve, the shared-memory
-    // opt-in and the occupancy query the veto term would otherwise need.
-    let sk = if sms > 0 && tiles < 2 * sms {
-        let sk_name = format!("quant_mmq_{}_q8_1_mma_sk_x{mmq_x}", format.kernel_infix);
-        let sk_func = kernels::get_kernel_function(&module, &sk_name)?;
-        opt_in_shared(&sk_func, smem, &sk_name)?;
-
-        // The opt-in must run first: occupancy at the default shared-memory
-        // limit undercounts blocks for every variant above the smallest.
-        let blocks_per_sm = sk_func
-            .occupancy_max_active_blocks_per_multiprocessor(THREADS, smem as usize, None)
-            .unwrap_or(1)
-            .max(1);
-        Some((sk_func, sk_name, blocks_per_sm))
-    } else {
-        None
-    };
-
-    let stream_k = sk
-        .as_ref()
-        .is_some_and(|(_, _, bps)| use_stream_k(tiles, sms, sms * bps, format));
+    let stream_k = use_stream_k(tiles, sms, format);
 
     tracing::debug!(
         m,
@@ -157,26 +136,10 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch(
         "CUDA quant kernel: tensor-core MMQ (feature-major)"
     );
 
-    if let (true, Some((sk_func, sk_name, blocks_per_sm))) = (stream_k, sk.as_ref()) {
+    if stream_k {
         launch_stream_k(
-            format,
-            client,
-            device,
-            &module,
-            sk_func,
-            sk_name,
-            output_ptr,
-            q8_ptr,
-            weight_ptr,
-            m_u32,
-            k_u32,
-            n_u32,
-            ntok,
-            mmq_x,
-            smem,
-            sms,
-            *blocks_per_sm,
-            tiles,
+            format, client, device, &module, output_ptr, q8_ptr, weight_ptr, m_u32, k_u32, n_u32,
+            ntok, mmq_x, smem, sms, tiles,
         )?;
     } else {
         let name = format!("quant_mmq_{}_q8_1_mma_x{mmq_x}", format.kernel_infix);
@@ -223,8 +186,6 @@ fn launch_stream_k(
     client: &CudaClient,
     device: &CudaDevice,
     module: &std::sync::Arc<CudaModule>,
-    sk_func: &CudaFunction,
-    sk_name: &str,
     output_ptr: u64,
     q8_ptr: u64,
     weight_ptr: u64,
@@ -235,9 +196,19 @@ fn launch_stream_k(
     mmq_x: u32,
     smem: u32,
     sms: u32,
-    blocks_per_sm: u32,
     tiles: u32,
 ) -> Result<()> {
+    let sk_name = format!("quant_mmq_{}_q8_1_mma_sk_x{mmq_x}", format.kernel_infix);
+    let sk_func = kernels::get_kernel_function(module, &sk_name)?;
+    opt_in_shared(&sk_func, smem, &sk_name)?;
+
+    // The opt-in must run first: occupancy at the default shared-memory
+    // limit undercounts blocks for every variant above the smallest.
+    let blocks_per_sm = sk_func
+        .occupancy_max_active_blocks_per_multiprocessor(THREADS, smem as usize, None)
+        .unwrap_or(1)
+        .max(1);
+
     let k_blocks = k_u32.div_ceil(SK_K_STEP);
     let blocks = (sms * blocks_per_sm).min(tiles * k_blocks).max(1);
 
@@ -262,7 +233,7 @@ fn launch_stream_k(
         shared_mem_bytes: smem,
     };
     unsafe {
-        let mut builder = client.stream().launch_builder(sk_func);
+        let mut builder = client.stream().launch_builder(&sk_func);
         builder.arg(&q8_ptr);
         builder.arg(&weight_ptr);
         builder.arg(&output_ptr);
@@ -306,25 +277,18 @@ fn launch_stream_k(
 
 /// Whether to launch the stream-k pair rather than the tile-parallel grid.
 ///
-/// Stream-k splits K across `resident_blocks` blocks — the device's occupancy-
-/// derived capacity for the stream-k kernel — trading a fixup pass for the
-/// wave a ragged tile count leaves half empty. Once the tiles fill the
-/// device, tile-parallel wins and needs no workspace.
+/// Stream-k splits every tile's K dimension across blocks and pays a fixup
+/// pass to rejoin the partials, trading that pass for the wave a ragged tile
+/// count leaves half empty. Once the tiles fill the device, tile-parallel
+/// wins and needs no workspace.
 ///
 /// A format vetoes this call through `prefers_tile_parallel`, but only once
-/// the tile-parallel grid already occupies about two thirds of
-/// `resident_blocks`: past that point the split buys too little to pay for
-/// the fixup pass. Below that threshold the tile-parallel grid cannot fill
-/// the device, and stream-k wins for every format, veto or not.
-const fn use_stream_k(
-    tiles: u32,
-    sms: u32,
-    resident_blocks: u32,
-    format: &FeatMajorFormat,
-) -> bool {
-    sms > 0
-        && tiles < 2 * sms
-        && !(format.prefers_tile_parallel && 3 * tiles >= 2 * resident_blocks)
+/// the tile count passes about four thirds of the SM count: past that point
+/// the split saves too little to cover the fixup pass. Below that threshold
+/// the tile-parallel grid cannot fill the device, and stream-k wins for every
+/// format, veto or not.
+const fn use_stream_k(tiles: u32, sms: u32, format: &FeatMajorFormat) -> bool {
+    sms > 0 && tiles < 2 * sms && !(format.prefers_tile_parallel && 3 * tiles >= 4 * sms)
 }
 
 #[cfg(test)]

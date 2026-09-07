@@ -73,13 +73,16 @@ pub(in crate::quant::cuda::quant_matmul) const Q3_K: FeatMajorFormat = FeatMajor
 /// the low end of what this path supports, Q2_K can hold one resident block at
 /// token tiles where the 84-stride formats hold two. That is accepted for this
 /// format rather than paid for by rounding `d * sc` through `half`, which is
-/// what the GEMM/GEMV parity bound rejects.
+/// what the GEMM/GEMV parity bound rejects. One of the measured tile-parallel
+/// opt-outs: holding one resident block halves the stream-k grid width the
+/// 84-stride formats get, so the split stops paying once the tile count nears
+/// the veto threshold.
 pub(in crate::quant::cuda::quant_matmul) const Q2_K: FeatMajorFormat = FeatMajorFormat {
     kernel_infix: "q2_k",
     x_stride: 100,
     k_multiple: 256,
     act_scratch_ints_per_token: 4,
-    prefers_tile_parallel: false,
+    prefers_tile_parallel: true,
 };
 
 #[cfg(test)]
@@ -246,7 +249,8 @@ mod tests {
             assert_eq!(f.act_scratch_ints_per_token, 0);
         }
         assert_eq!(Q2_K.act_scratch_ints_per_token, 4);
-        const { assert!(!Q2_K.prefers_tile_parallel) };
+        // One of the measured tile-parallel opt-outs.
+        const { assert!(Q2_K.prefers_tile_parallel) };
         // 64 quant words + 32 ints of scale/min pairs + 4 ints of padding.
         assert_eq!(Q2_K.x_stride, 100);
         // The family's bank-padding rule, asserted in the kernel as well.

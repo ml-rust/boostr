@@ -47,10 +47,12 @@ pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
         // tile out to a 4-token batch.
         QuantFormat::Q8_0 | QuantFormat::Q6K => 4,
         // Heavier decode crosses earlier: MMQ already wins at m = 3.
-        QuantFormat::Q4K | QuantFormat::Q5K | QuantFormat::Q2K => 2,
-        // Heaviest decode: batching only ties the MMQ tile at m = 2 and
-        // loses from m = 3, so batching buys nothing.
-        QuantFormat::Q3K => 1,
+        QuantFormat::Q4K | QuantFormat::Q5K => 2,
+        // Heaviest decode, and neither gains from batching. Q3_K only ties
+        // the MMQ tile at m = 2 and loses above it. Q2_K's small gain at a
+        // deep reduction reverses into a much larger loss at a shallow one,
+        // so a single crossover cannot hold for it across shapes.
+        QuantFormat::Q3K | QuantFormat::Q2K => 1,
         _ => 0,
     };
     let caps = numr::runtime::cuda::CudaDevice::new(device_index)
@@ -130,7 +132,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
         // kernel.
         let tokens_per_block: u32 = match (format, m) {
             (_, 0..=1) => 1,
-            (QuantFormat::Q3K, _) => 1,
+            (QuantFormat::Q3K | QuantFormat::Q2K, _) => 1,
             (QuantFormat::Q8_0 | QuantFormat::Q6K, m) if m >= 3 => 4,
             _ => 2,
         };
@@ -144,7 +146,6 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
                 (QuantFormat::Q8_0, 2) => "quant_gemv_q8_0_q8_1_mwr_n2",
                 (QuantFormat::Q8_0, _) => "quant_gemv_q8_0_q8_1_mwr_n4",
                 (QuantFormat::Q5K, 2) => "quant_gemv_q5_k_q8_1_mwr_n2",
-                (QuantFormat::Q2K, 2) => "quant_gemv_q2_k_q8_1_mwr_n2",
                 _ => unreachable!(),
             }
         };

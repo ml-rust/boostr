@@ -1435,7 +1435,6 @@ impl MmqFormat {
             MmqFormat::Q4K => None,
             MmqFormat::Q5K if m == 2 => Some(("quant_gemv_q5_k_q8_1_mwr_n2", GEMV_Q5_K_MODULE, 2)),
             MmqFormat::Q5K => None,
-            MmqFormat::Q2K if m == 2 => Some(("quant_gemv_q2_k_q8_1_mwr_n2", GEMV_Q2_K_MODULE, 2)),
             MmqFormat::Q2K => None,
             MmqFormat::Q3K => None,
             MmqFormat::Q6K => match m {

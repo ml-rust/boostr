@@ -29,13 +29,15 @@ const ALLOWED_UNWIRED: &[(&str, &str)] = &[
     (
         "quant_gemv_q8_0_q8_1_mwr_n8",
         "The eight-column sibling of the _n2/_n4 kernels dispatch_gemv selects. \
-         It takes the two-warp block shape upstream uses at this column count, \
-         which cut its cost markedly, and now covers two output columns per \
-         block, so each activation word it loads is dot-producted against two \
-         weight rows. The feature-major tile still wins from five tokens up, \
-         so gemv_max_m stops below it. Both of those addressed a named cost and \
-         both helped; what binds now is not identified, so measure before \
-         changing it again. Wire it when it beats the tile at eight tokens.",
+         It is issue-bound, and profiling attributes that to instruction count: \
+         dp4a retires four k-values for one token per instruction, while one \
+         m16n8k32 MMA covers sixteen features by eight tokens by thirty-two \
+         k-values. At eight tokens the feature-major tile therefore issues far \
+         fewer instructions and wins, despite lower occupancy and a higher \
+         memory stall share. Occupancy, block shape and row reuse were all \
+         tuned and all helped, and none of them reach the instruction gap. \
+         gemv_max_m stops below eight for that reason. Wire it only if a dp4a \
+         path stops being the arithmetic here.",
     ),
     (
         "quantize_kv_fp8_per_token_fp32",

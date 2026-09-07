@@ -5,14 +5,13 @@
 // Non-linear codebook: value = KVALUES_IQ4NL[nibble]
 // dequant(i) = d * KVALUES_IQ4NL[nibble]
 
-#include <cuda_fp16.h>
-
-__constant__ signed char KVALUES_IQ4NL_GEMV[16] = {
-    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
-};
-
-#define WARP_SIZE 32
-#define WARPS_PER_BLOCK 8
+// The shared token-batched body and decode policies for the IQ4 codebook
+// formats. It pulls in `common.cuh` — WARP_SIZE, WARPS_PER_BLOCK,
+// `load_int_ua`, `dp4a`, `warp_reduce_sum` and the MWR reductions — which in
+// turn includes `decode.cuh`, whose `KVALUES_IQ4NL` is the one codebook every
+// CUDA kernel reads. The F32 kernel below uses it too, so this file carries no
+// private copy: a second copy is a second thing to keep in step.
+#include "iq4_ntok.cuh"
 
 extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_iq4_nl_f32(
     const float* __restrict__ activation,
@@ -44,8 +43,8 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_iq4_nl_f32(
         // element j + 16 in its high nibble (llama.cpp dequantize_row_iq4_nl).
         for (int j = 0; j < 16; j++) {
             unsigned char byte = qs[j];
-            sum += act_row[base + j]      * d * (float)KVALUES_IQ4NL_GEMV[byte & 0x0F];
-            sum += act_row[base + j + 16] * d * (float)KVALUES_IQ4NL_GEMV[(byte >> 4) & 0x0F];
+            sum += act_row[base + j]      * d * (float)KVALUES_IQ4NL[byte & 0x0F];
+            sum += act_row[base + j + 16] * d * (float)KVALUES_IQ4NL[(byte >> 4) & 0x0F];
         }
     }
 
@@ -55,4 +54,26 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_iq4_nl_f32(
 
     if (lane == 0)
         output[row * N + col] = sum;
+}
+
+// ============================================================================
+// Token-batched IQ4_NL GEMV with dp4a (IQ4_NL weight x Q8_1 activation)
+//
+// One block covers two token columns and decodes each weight block once for
+// both, instead of re-reading the whole weight matrix per token as the F32
+// kernel above does. Body and decode live in `iq4_ntok.cuh`, shared with
+// IQ4_XS; see the header for the lane map, the ragged-tail rule and the
+// alignment constraint.
+//
+// There is no single-token sibling: at m = 1 the tile's spare column is pure
+// overhead and the F32 kernel above serves that shape.
+// ============================================================================
+
+extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(2) * WARP_SIZE, 1) void quant_gemv_iq4_nl_q8_1_mwr_n2(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    quant_gemv_iq4_q8_1_mwr_ntok<Iq4Nl, 2>(q8_act, weight, output, M, K, N);
 }

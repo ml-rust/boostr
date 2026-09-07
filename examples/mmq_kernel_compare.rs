@@ -19,8 +19,9 @@
 //!
 //! For every dp4a format that has one, `--gemv` also runs the token-batched
 //! MWR kernel checked against the same f64 reference: Q8_0 and Q6_K have
-//! `..._mwr_n2` and `_n4` (Q8_0 also an unwired `_n8`), Q4_K/Q5_K and the four
-//! legacy 32-element formats Q4_0/Q5_0/Q4_1/Q5_1 have only `..._mwr_n2`, and
+//! `..._mwr_n2` and `_n4` (Q8_0 also an unwired `_n8`), Q4_K/Q5_K, the four
+//! legacy 32-element formats Q4_0/Q5_0/Q4_1/Q5_1 and the two IQ4 codebook
+//! formats IQ4_NL/IQ4_XS have only `..._mwr_n2`, and
 //! Q3_K/Q2_K have neither — their batched read never beat the MMQ tile. The tile is the narrowest one that covers `--m` in a single
 //! block, which is the rule `dispatch_gemv` applies — a wider tile idles its
 //! spare columns, a narrower one needs two passes. Keep the two in step, or
@@ -1426,10 +1427,14 @@ impl MmqFormat {
     ///
     /// Which tiles are compiled is per format, matching `dispatch_gemv`:
     /// Q8_0 and Q6_K have `_n2` and `_n4` (Q8_0 also an unwired `_n8`); Q4_K,
-    /// Q5_K and the four legacy 32-element formats Q4_0, Q5_0, Q4_1 and Q5_1
-    /// have only `_n2`, so `m` outside 2 returns `None`; Q3_K and Q2_K have
-    /// neither — their batched read never beat the MMQ tile — so they always
-    /// return `None`.
+    /// Q5_K, the four legacy 32-element formats Q4_0, Q5_0, Q4_1 and Q5_1, and
+    /// the two IQ4 codebook formats IQ4_NL and IQ4_XS have only `_n2`, so `m`
+    /// outside 2 returns `None`; Q3_K and Q2_K have neither — their batched
+    /// read never beat the MMQ tile — so they always return `None`.
+    ///
+    /// IQ4_XS additionally needs `--k` a multiple of 256: its run addressing
+    /// goes through the 256-element super-block, which is why `dispatch_gemv`
+    /// gates it on that rather than the branch's usual 32.
     fn batched_mwr_gemv_kernel(&self, m: usize) -> Option<(&'static str, &'static str, u32)> {
         match self {
             MmqFormat::Q4K if m == 2 => Some(("quant_gemv_q4_k_q8_1_mwr_n2", QUANT_GEMV_MODULE, 2)),
@@ -1444,6 +1449,14 @@ impl MmqFormat {
             MmqFormat::Q41 => None,
             MmqFormat::Q51 if m == 2 => Some(("quant_gemv_q5_1_q8_1_mwr_n2", GEMV_Q5_1_MODULE, 2)),
             MmqFormat::Q51 => None,
+            MmqFormat::IQ4NL if m == 2 => {
+                Some(("quant_gemv_iq4_nl_q8_1_mwr_n2", GEMV_IQ4_NL_MODULE, 2))
+            }
+            MmqFormat::IQ4NL => None,
+            MmqFormat::IQ4XS if m == 2 => {
+                Some(("quant_gemv_iq4_xs_q8_1_mwr_n2", GEMV_IQ4_XS_MODULE, 2))
+            }
+            MmqFormat::IQ4XS => None,
             MmqFormat::Q2K => None,
             MmqFormat::Q3K => None,
             MmqFormat::Q6K => match m {

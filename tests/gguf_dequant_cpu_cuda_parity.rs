@@ -379,8 +379,9 @@ const COSINE_FLOOR: f64 = 0.999;
 ///
 /// `gemv_max_m` (`src/quant/cuda/quant_matmul/format_dispatch/gemv.rs`) is
 /// per-format: at least 2 for every dp4a format except `Q3K` and `Q2K`, and 0
-/// for the rest. `Q4_0`, `Q5_0`, `Q4_1` and `Q5_1` reach 2 through the
-/// token-batched dp4a GEMV, which has no single-token sibling. So `m = 2`
+/// for the rest. `Q4_0`, `Q5_0`, `Q4_1`, `Q5_1`, `IQ4NL` and `IQ4XS` reach 2
+/// through the token-batched dp4a GEMV, which has no single-token sibling.
+/// So `m = 2`
 /// stays on the dp4a GEMV for most of these and lands on the MMQ/GEMM path
 /// for the others. Both quantize the activation to Q8_1, so this gate covers
 /// either one and no threshold change moves a test between gates. Only

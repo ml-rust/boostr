@@ -20,8 +20,9 @@
 //! For every dp4a format that has one, `--gemv` also runs the token-batched
 //! MWR kernel checked against the same f64 reference: Q8_0 and Q6_K have
 //! `..._mwr_n2` and `_n4` (Q8_0 also an unwired `_n8`), Q4_K/Q5_K, the four
-//! legacy 32-element formats Q4_0/Q5_0/Q4_1/Q5_1 and the two IQ4 codebook
-//! formats IQ4_NL/IQ4_XS have only `..._mwr_n2`, and
+//! legacy 32-element formats Q4_0/Q5_0/Q4_1/Q5_1, the two IQ4 codebook
+//! formats IQ4_NL/IQ4_XS and the six grid-indexed IQ formats
+//! IQ2_XXS/IQ2_XS/IQ2_S/IQ3_XXS/IQ3_S/IQ1_S have only `..._mwr_n2`, and
 //! Q3_K/Q2_K have neither — their batched read never beat the MMQ tile. The tile is the narrowest one that covers `--m` in a single
 //! block, which is the rule `dispatch_gemv` applies — a wider tile idles its
 //! spare columns, a narrower one needs two passes. Keep the two in step, or
@@ -1427,14 +1428,17 @@ impl MmqFormat {
     ///
     /// Which tiles are compiled is per format, matching `dispatch_gemv`:
     /// Q8_0 and Q6_K have `_n2` and `_n4` (Q8_0 also an unwired `_n8`); Q4_K,
-    /// Q5_K, the four legacy 32-element formats Q4_0, Q5_0, Q4_1 and Q5_1, and
-    /// the two IQ4 codebook formats IQ4_NL and IQ4_XS have only `_n2`, so `m`
-    /// outside 2 returns `None`; Q3_K and Q2_K have neither — their batched
-    /// read never beat the MMQ tile — so they always return `None`.
+    /// Q5_K, the four legacy 32-element formats Q4_0, Q5_0, Q4_1 and Q5_1, the
+    /// two IQ4 codebook formats IQ4_NL and IQ4_XS, and the six grid-indexed IQ
+    /// formats IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S have only
+    /// `_n2`, so `m` outside 2 returns `None`; Q3_K and Q2_K have neither —
+    /// their batched read never beat the MMQ tile — so they always return
+    /// `None`.
     ///
-    /// IQ4_XS additionally needs `--k` a multiple of 256: its run addressing
-    /// goes through the 256-element super-block, which is why `dispatch_gemv`
-    /// gates it on that rather than the branch's usual 32.
+    /// IQ4_XS and the six grid-indexed IQ formats additionally need `--k` a
+    /// multiple of 256: their run or sub-group addressing goes through the
+    /// 256-element super-block, which is why `dispatch_gemv` gates them on that
+    /// rather than the branch's usual 32.
     fn batched_mwr_gemv_kernel(&self, m: usize) -> Option<(&'static str, &'static str, u32)> {
         match self {
             MmqFormat::Q4K if m == 2 => Some(("quant_gemv_q4_k_q8_1_mwr_n2", QUANT_GEMV_MODULE, 2)),
@@ -1457,6 +1461,30 @@ impl MmqFormat {
                 Some(("quant_gemv_iq4_xs_q8_1_mwr_n2", GEMV_IQ4_XS_MODULE, 2))
             }
             MmqFormat::IQ4XS => None,
+            MmqFormat::IQ2XXS if m == 2 => {
+                Some(("quant_gemv_iq2_xxs_q8_1_mwr_n2", GEMV_IQ2_XXS_MODULE, 2))
+            }
+            MmqFormat::IQ2XXS => None,
+            MmqFormat::IQ2XS if m == 2 => {
+                Some(("quant_gemv_iq2_xs_q8_1_mwr_n2", GEMV_IQ2_XS_MODULE, 2))
+            }
+            MmqFormat::IQ2XS => None,
+            MmqFormat::IQ2S if m == 2 => {
+                Some(("quant_gemv_iq2_s_q8_1_mwr_n2", GEMV_IQ2_S_MODULE, 2))
+            }
+            MmqFormat::IQ2S => None,
+            MmqFormat::IQ3XXS if m == 2 => {
+                Some(("quant_gemv_iq3_xxs_q8_1_mwr_n2", GEMV_IQ3_XXS_MODULE, 2))
+            }
+            MmqFormat::IQ3XXS => None,
+            MmqFormat::IQ3S if m == 2 => {
+                Some(("quant_gemv_iq3_s_q8_1_mwr_n2", GEMV_IQ3_S_MODULE, 2))
+            }
+            MmqFormat::IQ3S => None,
+            MmqFormat::IQ1S if m == 2 => {
+                Some(("quant_gemv_iq1_s_q8_1_mwr_n2", GEMV_IQ1_S_MODULE, 2))
+            }
+            MmqFormat::IQ1S => None,
             MmqFormat::Q2K => None,
             MmqFormat::Q3K => None,
             MmqFormat::Q6K => match m {
@@ -1470,7 +1498,6 @@ impl MmqFormat {
                 3..=4 => Some(("quant_gemv_q8_0_q8_1_mwr_n4", QUANT_GEMV_MODULE, 4)),
                 _ => Some(("quant_gemv_q8_0_q8_1_mwr_n8", QUANT_GEMV_MODULE, 8)),
             },
-            _ => None,
         }
     }
 

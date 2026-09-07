@@ -60,6 +60,14 @@ pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
         // PROVISIONAL — set to match the weight class, not yet measured, so it
         // is the first thing to re-check with the command in this module's
         // doc note.
+        //
+        // The six grid-indexed IQ formats join on the same terms and with the
+        // same PROVISIONAL 2, but they are the heaviest decode on this path by
+        // some margin: each 8-element sub-group costs a codebook read into a
+        // multi-kilobyte grid table on top of the sign and scale unpack. Q2_K
+        // showed that a heavy per-block decode can make batching a LOSS at
+        // shallow K, so these six are the first to re-measure and the most
+        // likely to come back at 1.
         QuantFormat::Q4K
         | QuantFormat::Q5K
         | QuantFormat::Q4_0
@@ -67,7 +75,13 @@ pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
         | QuantFormat::Q4_1
         | QuantFormat::Q5_1
         | QuantFormat::IQ4NL
-        | QuantFormat::IQ4XS => 2,
+        | QuantFormat::IQ4XS
+        | QuantFormat::IQ2XXS
+        | QuantFormat::IQ2XS
+        | QuantFormat::IQ2S
+        | QuantFormat::IQ3XXS
+        | QuantFormat::IQ3S
+        | QuantFormat::IQ1S => 2,
         // Heaviest decode, and neither gains from batching. Q3_K only ties
         // the MMQ tile at m = 2 and loses above it. Q2_K's small gain at a
         // deep reduction reverses into a much larger loss at a shallow one,
@@ -88,9 +102,10 @@ pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
 /// GEMV dispatch for M <= 64 (decode + short prefill).
 ///
 /// Chooses the dp4a MWR path for the formats that have such a kernel and the
-/// F32 activation path for the rest. Q4_0, Q5_0, Q4_1, Q5_1, IQ4_NL and
-/// IQ4_XS have only the token-batched dp4a kernel, so they take the dp4a path
-/// from `m = 2` up and the F32 path at `m = 1`. Returns `Ok(None)` if the
+/// F32 activation path for the rest. Q4_0, Q5_0, Q4_1, Q5_1, IQ4_NL, IQ4_XS
+/// and the six grid-indexed IQ formats IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S
+/// and IQ1_S have only the token-batched dp4a kernel, so they take the dp4a
+/// path from `m = 2` up and the F32 path at `m = 1`. Returns `Ok(None)` if the
 /// format has no dedicated kernel; callers fall back to
 /// `quant_matmul_via_dequant`.
 pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
@@ -108,10 +123,11 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
     let k_u32 = k as u32;
     let n_u32 = n as u32;
 
-    // The four legacy 32-element formats and the two IQ4 codebook formats have
-    // a token-batched dp4a kernel but no single-token one: at m = 1 the batched
-    // tile's spare column is pure overhead, and the F32 path below already
-    // serves that shape. So they join the dp4a branch only from m = 2 up.
+    // The four legacy 32-element formats, the two IQ4 codebook formats and the
+    // six grid-indexed IQ formats have a token-batched dp4a kernel but no
+    // single-token one: at m = 1 the batched tile's spare column is pure
+    // overhead, and the F32 path below already serves that shape. So they join
+    // the dp4a branch only from m = 2 up.
     let dp4a_batched_only = matches!(
         format,
         QuantFormat::Q4_0
@@ -120,14 +136,30 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
             | QuantFormat::Q5_1
             | QuantFormat::IQ4NL
             | QuantFormat::IQ4XS
+            | QuantFormat::IQ2XXS
+            | QuantFormat::IQ2XS
+            | QuantFormat::IQ2S
+            | QuantFormat::IQ3XXS
+            | QuantFormat::IQ3S
+            | QuantFormat::IQ1S
     );
 
     // Every dp4a kernel walks 32-element runs, so `k % 32 == 0` is the floor.
-    // IQ4_XS resolves a run's byte offset through its 256-element super-block,
-    // so a row whose last super-block were partial is unaddressable — and has
-    // no on-disk representation either. It therefore needs the stricter gate;
-    // every other format on this path has a 32-element block and does not.
-    let k_aligned = if matches!(format, QuantFormat::IQ4XS) {
+    // IQ4_XS and the six grid-indexed IQ formats resolve a run's or
+    // sub-group's byte offset through a 256-element super-block, so a row whose
+    // last super-block were partial is unaddressable — and has no on-disk
+    // representation either. They therefore need the stricter gate; every other
+    // format on this path has a 32-element block and does not.
+    let k_aligned = if matches!(
+        format,
+        QuantFormat::IQ4XS
+            | QuantFormat::IQ2XXS
+            | QuantFormat::IQ2XS
+            | QuantFormat::IQ2S
+            | QuantFormat::IQ3XXS
+            | QuantFormat::IQ3S
+            | QuantFormat::IQ1S
+    ) {
         k.is_multiple_of(256)
     } else {
         k.is_multiple_of(32)
@@ -170,6 +202,12 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
             QuantFormat::Q5_1 => GEMV_Q5_1_MODULE,
             QuantFormat::IQ4NL => GEMV_IQ4_NL_MODULE,
             QuantFormat::IQ4XS => GEMV_IQ4_XS_MODULE,
+            QuantFormat::IQ2XXS => GEMV_IQ2_XXS_MODULE,
+            QuantFormat::IQ2XS => GEMV_IQ2_XS_MODULE,
+            QuantFormat::IQ2S => GEMV_IQ2_S_MODULE,
+            QuantFormat::IQ3XXS => GEMV_IQ3_XXS_MODULE,
+            QuantFormat::IQ3S => GEMV_IQ3_S_MODULE,
+            QuantFormat::IQ1S => GEMV_IQ1_S_MODULE,
             _ => unreachable!(),
         };
 
@@ -182,14 +220,15 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
         // would idle its spare columns, a narrower one would need two passes.
         // Which widths exist is per format: Q8_0 and Q6_K crossed over out to
         // a 4-token tile, so both `_n2` and `_n4` exist; Q4_K, Q5_K, the four
-        // legacy 32-element formats and the two IQ4 codebook formats cross over
-        // at a 2-token tile, so only `_n2` exists; Q3_K's and Q2_K's batched
+        // legacy 32-element formats, the two IQ4 codebook formats and the six
+        // grid-indexed IQ formats have only `_n2`; Q3_K's and Q2_K's batched
         // read never wins, so they have neither and always use the per-token
         // kernel.
         //
-        // The legacy four and the two IQ4 formats have no per-token dp4a
-        // kernel at all, so the m = 1 row below never applies to them: the
-        // branch guard above already routed m = 1 to the F32 path.
+        // The legacy four, the two IQ4 formats and the six grid-indexed IQ
+        // formats have no per-token dp4a kernel at all, so the m = 1 row below
+        // never applies to them: the branch guard above already routed m = 1 to
+        // the F32 path.
         let tokens_per_block: u32 = match (format, m) {
             (QuantFormat::Q3K | QuantFormat::Q2K, _) => 1,
             (_, 0..=1) => 1,
@@ -215,6 +254,12 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
             (QuantFormat::Q5_1, _) => "quant_gemv_q5_1_q8_1_mwr_n2",
             (QuantFormat::IQ4NL, _) => "quant_gemv_iq4_nl_q8_1_mwr_n2",
             (QuantFormat::IQ4XS, _) => "quant_gemv_iq4_xs_q8_1_mwr_n2",
+            (QuantFormat::IQ2XXS, _) => "quant_gemv_iq2_xxs_q8_1_mwr_n2",
+            (QuantFormat::IQ2XS, _) => "quant_gemv_iq2_xs_q8_1_mwr_n2",
+            (QuantFormat::IQ2S, _) => "quant_gemv_iq2_s_q8_1_mwr_n2",
+            (QuantFormat::IQ3XXS, _) => "quant_gemv_iq3_xxs_q8_1_mwr_n2",
+            (QuantFormat::IQ3S, _) => "quant_gemv_iq3_s_q8_1_mwr_n2",
+            (QuantFormat::IQ1S, _) => "quant_gemv_iq1_s_q8_1_mwr_n2",
             _ => unreachable!(),
         };
 

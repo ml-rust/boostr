@@ -31,13 +31,17 @@
 //! sides accumulate in f32 and their summation orders differ, exactly as they
 //! do for every GGUF format.
 //!
-//! `Q8S32T64` is the one encoding with a `FeatMajorFormat`
-//! (`quant/cuda/quant_matmul/impl_ops.rs`), so once `m` passes the `m > 4`
-//! guard there, its cases route to the MMQ kernel instead of `tcf_gemm_f32` /
-//! `tcf_gemv_f32` and additionally quantize the activation to Q8_1. Those
-//! cases use `helpers::assert_cosine_parity` instead of the element-wise
-//! tolerance; every other encoding, and `Q8S32T64` at `m <= 4`, still runs the
-//! f32 path and keeps the element-wise gate.
+//! `Q8S32T64` is the one encoding with a `FeatMajorFormat`, so from
+//! `TCF_FEAT_MAJOR_MIN_M` tokens up (`quant/cuda/quant_matmul/impl_ops.rs`)
+//! its cases route to the MMQ kernel rather than `tcf_gemm_f32` /
+//! `tcf_gemv_f32`, and quantize the activation to Q8_1. Those cases take
+//! `helpers::assert_cosine_parity`. Every other encoding at any `m`, and
+//! `Q8S32T64` below that constant, stays on the f32 path and keeps the
+//! element-wise gate.
+//!
+//! The branch condition here must track that constant, not the separate
+//! `m <= 4` split choosing `launch_gemv` against `launch_gemm` for the other
+//! encodings. The two thresholds differ.
 
 #![cfg(feature = "cuda")]
 
@@ -167,7 +171,7 @@ fn tcf_cuda_dequant_matches_cpu_bit_for_bit() {
 }
 
 /// `M = 1` runs the GEMV path, one warp per output column. `M = 8` is past
-/// the `m > 4` GEMV/GEMM boundary in `quant/cuda/quant_matmul/impl_ops.rs`, so
+/// the `m <= 4` GEMV/GEMM boundary in `quant/cuda/quant_matmul/impl_ops.rs`, so
 /// it runs the GEMM path instead — the register-blocked f32 tile for every
 /// encoding except `Q8S32T64`, which instead takes the MMQ kernel under test
 /// in `quant_tcf_feat_major.rs` and quantizes its activation to Q8_1.
@@ -197,7 +201,7 @@ fn tcf_cuda_gemv_matches_cpu() {
                         .to_vec::<f32>();
 
                     let label = format!("{} gemv {m}x{k}x{n}", TcfEncoding::new(native).name());
-                    if native == NativeEncoding::Q8S32T64 && m > 4 {
+                    if native == NativeEncoding::Q8S32T64 && m >= 2 {
                         assert_cosine_parity(&got, &want, &label);
                     } else {
                         assert_parity_f32_tol(&got, &want, &label, 1e-3, 1e-5);
@@ -251,7 +255,7 @@ fn tcf_cuda_gemv_run_path_matches_cpu() {
                         .to_vec::<f32>();
 
                     let label = format!("{} gemv run {m}x{k}x{n}", TcfEncoding::new(native).name());
-                    if native == NativeEncoding::Q8S32T64 && m > 4 {
+                    if native == NativeEncoding::Q8S32T64 && m >= 2 {
                         assert_cosine_parity(&got, &want, &label);
                     } else {
                         assert_parity_f32_tol(&got, &want, &label, 1e-3, 1e-5);
@@ -293,7 +297,7 @@ fn tcf_cuda_gemm_matches_cpu() {
                         .to_vec::<f32>();
 
                     let label = format!("{} gemm {m}x{k}x{n}", TcfEncoding::new(native).name());
-                    if native == NativeEncoding::Q8S32T64 && m > 4 {
+                    if native == NativeEncoding::Q8S32T64 && m >= 2 {
                         assert_cosine_parity(&got, &want, &label);
                     } else {
                         assert_parity_f32_tol(&got, &want, &label, 1e-3, 1e-5);
@@ -306,6 +310,21 @@ fn tcf_cuda_gemm_matches_cpu() {
 
 /// A TCF weight reaching `quant_swiglu` must take the two-matmul path rather
 /// than the GGUF fused kernel, which reads a block layout TCF does not have.
+///
+/// `m` is 4, at or past the `TCF_FEAT_MAJOR_MIN_M` crossover in
+/// `quant/cuda/quant_matmul/impl_ops.rs`, so `Q8S32T64` routes through the
+/// MMQ kernel for both of its matmuls here and quantizes its activation to
+/// Q8_1 each time; the other encodings stay on the f32 tile. SwiGLU then
+/// applies a sigmoid and a product on top, so `Q8S32T64`'s output carries
+/// that Q8_1 error through a nonlinearity rather than a linear combination,
+/// and only `assert_cosine_parity` bounds it; the other encodings keep the
+/// element-wise gate.
+///
+/// The nonlinearity costs roughly one digit of cosine headroom against the
+/// plain matmul cases, which is measured and expected. The score still clears
+/// the floor by a wide margin, so the gate keeps its power to catch a decode
+/// defect: a wrong plane offset or scale index scrambles direction and
+/// collapses the score toward zero regardless of the sigmoid.
 #[test]
 fn tcf_cuda_swiglu_matches_cpu() {
     with_cuda_backend(|client, device| {
@@ -353,13 +372,12 @@ fn tcf_cuda_swiglu_matches_cpu() {
                 .expect("CUDA quant_swiglu")
                 .to_vec::<f32>();
 
-            assert_parity_f32_tol(
-                &got,
-                &want,
-                &format!("{} swiglu", TcfEncoding::new(native).name()),
-                1e-3,
-                1e-5,
-            );
+            let label = format!("{} swiglu", TcfEncoding::new(native).name());
+            if native == NativeEncoding::Q8S32T64 {
+                assert_cosine_parity(&got, &want, &label);
+            } else {
+                assert_parity_f32_tol(&got, &want, &label, 1e-3, 1e-5);
+            }
         }
     });
 }

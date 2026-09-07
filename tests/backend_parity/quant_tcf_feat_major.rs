@@ -27,15 +27,20 @@
 //! - `[257, 512]`: a third feature tile holding one row, and two whole staging
 //!   groups.
 //!
-//! `m` covers several token tiles: 8 and 40 pick the 8-token granularity, 100
-//! and 128 the 16-token one, and 100 is not a multiple of its tile.
+//! `m` covers several token tiles: 2 and 3 sit at and just above the
+//! `TCF_FEAT_MAJOR_MIN_M` dispatch crossover, where the token tile (its
+//! smallest compiled variant is 8) is mostly empty and the clamp is exercised
+//! hardest; 8 and 40 pick the 8-token granularity, 100 and 128 the 16-token
+//! one, and 100 is not a multiple of its tile.
 //!
 //! # Tolerance
 //!
-//! Every case here has `m` above the GEMV/GEMM crossover and a native
-//! encoding of `Q8S32T64`, so every case takes the MMQ kernel under test and
-//! quantizes its activation to Q8_1 while the CPU reference keeps f32. An
-//! element-wise tolerance cannot bound that gap (see
+//! Every case here has `m` at or above `TCF_FEAT_MAJOR_MIN_M`, the GEMV/MMQ
+//! crossover — distinct from the plain `m <= 4` GEMV/GEMM split every other
+//! TCF encoding uses — and a native encoding of `Q8S32T64`, so every case
+//! takes the MMQ kernel under test and quantizes its activation to Q8_1
+//! while the CPU reference keeps f32. An element-wise tolerance cannot bound
+//! that gap (see
 //! `helpers::assert_cosine_parity`), so this file uses the cosine gate for
 //! every case rather than mixing gates.
 
@@ -52,9 +57,12 @@ use tcf_core::NativeEncoding;
 /// tile holding a single row.
 const SHAPES: [(usize, usize); 3] = [(128, 256), (200, 320), (257, 512)];
 
-/// Batch sizes above the TCF GEMV/GEMM crossover, spanning both warp
-/// granularities and one that is not a whole token tile.
-const BATCHES: [usize; 4] = [8, 40, 100, 128];
+/// Batch sizes at or above `TCF_FEAT_MAJOR_MIN_M`, the GEMV/MMQ crossover
+/// (not the plain `m <= 4` GEMV/GEMM split), spanning both warp granularities
+/// and one that is not a whole token tile. `2` and `3` sit at and just above
+/// the crossover, leaving the token tile mostly empty and so exercising the
+/// tile clamp hardest.
+const BATCHES: [usize; 6] = [2, 3, 8, 40, 100, 128];
 
 #[test]
 fn tcf_q8s32t64_feat_major_gemm_matches_cpu() {

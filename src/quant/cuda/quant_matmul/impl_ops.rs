@@ -22,6 +22,21 @@ use super::format_dispatch::{dispatch_gemv, dispatch_matmul, gemv_max_m};
 use super::helpers::{quantize_activation_q8_1, validate_input_cuda};
 use super::mmq_feat_major;
 
+/// Smallest token count that takes the feature-major MMQ kernel rather than
+/// the f32 GEMV.
+///
+/// The MMQ kernel is flat in `m` across a token tile, while the f32 GEMV
+/// re-reads the weight per token, so the GEMV only wins where the tile would
+/// be nearly empty.
+///
+/// Measured: the MMQ kernel wins at every token count from this constant
+/// upward, on both benchmarked projection shapes. `m = 1` stays on the GEMV.
+///
+/// Re-measure: `cargo bench --features cuda --bench quant_throughput --
+/// --backend cuda --filter Q8`, comparing the `tcf` rows against the `gguf`
+/// rows at each `m`.
+const TCF_FEAT_MAJOR_MIN_M: usize = 2;
+
 impl QuantMatmulOps<CudaRuntime> for CudaClient {
     fn int4_gemm(
         &self,
@@ -164,27 +179,27 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         // codes and its scale adjacent, while TCF spreads them over
         // whole-tensor planes.
         //
-        // The GEMV/GEMM crossover is TCF's own, NOT the `M <= 64` the GGUF
-        // path below uses. RE-MEASURED after the GEMM was register-blocked:
-        // that kernel now computes a 4x4 output patch per thread instead of
-        // one element, so it is nearly FLAT from M=4 to M=32 and the crossover
-        // moved down twice — 64 -> 16 when the GEMV gained 8-tile runs, then
-        // 16 -> 4 when the GEMM stopped being shared-load-issue bound.
+        // TCF has two crossovers, not one, and they are NOT the `M <= 64` the
+        // GGUF path below uses:
+        // - `TCF_FEAT_MAJOR_MIN_M` (below) gates `Q8S32T64` onto the MMQ
+        //   kernel ahead of everything else.
+        // - The `m <= 4` check further down chooses `launch_gemv` vs
+        //   `launch_gemm` for every encoding that isn't on the MMQ path —
+        //   `Q8S32T64` falls back to it too when the MMQ dispatch declines.
         //
-        // The mechanism, which is what carries across devices: GEMV cost grows
-        // linearly in M because it re-reads the weights once per row, while the
-        // register-blocked GEMM is nearly flat from M=4 to M=32 because a 4x4
-        // patch per thread leaves it bound by weight streaming rather than by
-        // output count. The two therefore cross at a small M on every encoding.
-        // Leaving the threshold at 16 sent M=8..16 to the slower path.
+        // The mechanism behind the GEMV/GEMM split, which is what carries
+        // across devices: GEMV cost grows linearly in M because it re-reads
+        // the weights once per row, while the register-blocked GEMM computes
+        // a 4x4 output patch per thread and stays nearly flat in M, so the
+        // two cross at a small M on every encoding.
         //
-        // Re-measure this crossover whenever either kernel changes — a speedup
-        // on one side moves it, and the value below is a measured constant, not
-        // a derived one.
+        // Re-measure each crossover whenever its kernel changes — a speedup
+        // on one side moves it, and both values are measured constants, not
+        // derived ones.
         if let QuantScheme::Tcf(encoding) = weight.scheme() {
             let at = MatmulShape { m, k, n };
             let device_index = activation.device().id();
-            if m > 4 {
+            if m >= TCF_FEAT_MAJOR_MIN_M {
                 // `Q8S32T64` stages into the Q8_0 weight row, so it takes the
                 // feature-major tensor-core family instead of the f32 FMA tile
                 // `launch_gemm` runs. Every other encoding keeps that tile:

@@ -80,13 +80,17 @@ const DEQUANT_SHAPES: [&str; 2] = ["q_proj", "down_proj"];
 /// Decode. `M = 1` is the GEMV case and is memory-bound on every backend.
 const DECODE_M: [usize; 1] = [1];
 
-/// Prefill batch sizes. 32 stays inside the CUDA GEMV path's `M <= 64` window;
-/// 256 crosses into the tiled GEMM path, so both kernels are covered.
-/// Prefill batch sizes. 4 and 8 bracket the CUDA TCF GEMV/GEMM crossover, so
-/// a kernel change that moves it shows up here rather than silently costing
-/// small-batch prefill. 32 and 256 are the continuous-batching and full-prefill
-/// points; on CUDA both use the tiled GEMM, so both kernels stay covered.
-const PREFILL_M: [usize; 4] = [4, 8, 32, 256];
+/// Prefill batch sizes. 2 sits at or below every CUDA GEMV crossover (1 for
+/// GGUF Q3_K/Q2_K, 2 for GGUF Q4_K/Q5_K, 4 for every other GGUF format, and
+/// 2 for TCF `Q8S32T64`'s own GEMV/MMQ split), pinning the small-batch side.
+/// 4 and 8 bracket TCF's separate GEMV/GEMM crossover (the split every other
+/// TCF encoding uses, and the one `Q8S32T64` falls back to when the MMQ
+/// dispatch declines), so a kernel change that moves it shows up here rather
+/// than silently costing small-batch prefill. 32 and 256 are the
+/// continuous-batching and full-prefill points; both exceed every crossover
+/// on CUDA and land on the tiled GEMM/MMQ path, so that path stays covered
+/// too.
+const PREFILL_M: [usize; 5] = [2, 4, 8, 32, 256];
 
 /// Shapes the prefill sizes run on. Restricted to two, because a `M = 256`
 /// GEMM does 256 times the arithmetic a GEMV does, which is minutes of work
@@ -262,18 +266,12 @@ pub fn enumerate() -> Vec<Case> {
                             op: Op::Dequant,
                         });
                     }
-                    let ms: &[usize] = if PREFILL_SHAPES.contains(&weight.label) {
-                        &[
-                            DECODE_M[0],
-                            PREFILL_M[0],
-                            PREFILL_M[1],
-                            PREFILL_M[2],
-                            PREFILL_M[3],
-                        ]
+                    let ms: Vec<usize> = if PREFILL_SHAPES.contains(&weight.label) {
+                        DECODE_M.iter().chain(PREFILL_M.iter()).copied().collect()
                     } else {
-                        &DECODE_M
+                        DECODE_M.to_vec()
                     };
-                    for &m in ms {
+                    for &m in &ms {
                         out.push(Case {
                             backend,
                             codec,

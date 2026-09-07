@@ -18,17 +18,22 @@ use numr::tensor::Tensor;
 
 /// Largest `m` for which the GEMV path beats the feature-major MMQ path.
 ///
-/// GEMV re-reads the whole weight matrix once per token, so its cost scales
-/// linearly with `m`. MMQ stages a weight tile once per token tile, so its
-/// cost stays flat from `m = 1` up to the tile width. That makes the
-/// crossover very low: GEMV only wins while the per-token weight re-read is
-/// still cheaper than staging the tile, which for most formats is true only
-/// at `m = 1`.
+/// A per-token GEMV re-reads the whole weight matrix once per token, so its
+/// cost scales linearly with `m`. MMQ stages a weight tile once per token
+/// tile, so its cost stays flat from `m = 1` up to the tile width. The
+/// token-batched dp4a kernels close most of that gap: one block decodes a
+/// weight block once and dot-products it against up to a format-specific
+/// number of token columns, so the weight traffic no longer grows with `m`
+/// inside a tile. GEMV wins while that batched read is still cheaper than
+/// staging the MMQ tile.
 ///
-/// The values below are measured (see the kernel-comparison example's
-/// `--gemv` flag to compare both paths at a given shape) on one GPU
-/// architecture and will need re-measuring if either kernel changes or a
-/// materially different architecture is targeted.
+/// The crossover is per-format because decode cost per weight block differs:
+/// a format with a heavier per-block unpack crosses at a lower `m`, since the
+/// MMQ tile's flat cost overtakes the batched read sooner. The values below
+/// are measured (see the kernel-comparison example's `--gemv` flag to compare
+/// both paths at a given shape) on one GPU architecture, not derived, and
+/// will need re-measuring if either kernel changes or a materially different
+/// architecture is targeted.
 ///
 /// The MMQ path needs tensor-core int8 MMA (`caps.int8_mma_m16n8k32`). On a
 /// device without it, MMQ isn't available at all, so every format falls back
@@ -38,12 +43,14 @@ pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
     device_index: usize,
 ) -> usize {
     let mma_crossover = match format {
-        QuantFormat::Q4K => 2,
-        // Q8_0's token-batched GEMV covers up to four token columns in one
-        // block, so it stays ahead of the feature-major tile further than the
-        // per-token kernels do.
-        QuantFormat::Q8_0 => 4,
-        QuantFormat::Q6K | QuantFormat::Q5K | QuantFormat::Q3K | QuantFormat::Q2K => 1,
+        // Lightest per-block decode: batched GEMV stays ahead of the MMQ
+        // tile out to a 4-token batch.
+        QuantFormat::Q8_0 | QuantFormat::Q6K => 4,
+        // Heavier decode crosses earlier: MMQ already wins at m = 3.
+        QuantFormat::Q4K | QuantFormat::Q5K | QuantFormat::Q2K => 2,
+        // Heaviest decode: batching only ties the MMQ tile at m = 2 and
+        // loses from m = 3, so batching buys nothing.
+        QuantFormat::Q3K => 1,
         _ => 0,
     };
     let caps = numr::runtime::cuda::CudaDevice::new(device_index)
@@ -109,17 +116,37 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
             _ => unreachable!(),
         };
 
-        // Q8_0 has token-batched variants: one block covers `tokens_per_block`
-        // token columns, so a weight block is loaded once and dot-producted
-        // against all of them. The per-token kernel re-reads the whole weight
-        // matrix for every token, which is what makes its cost scale with M.
-        // Pick the narrowest tile that covers M in one block — a wider tile
-        // would idle its spare columns, a narrower one would need two passes.
-        let (kernel_name, tokens_per_block) = match (format, m) {
-            (QuantFormat::Q8_0, 0..=1) => (kernel_name, 1),
-            (QuantFormat::Q8_0, 2) => ("quant_gemv_q8_0_q8_1_mwr_n2", 2),
-            (QuantFormat::Q8_0, _) => ("quant_gemv_q8_0_q8_1_mwr_n4", 4),
-            _ => (kernel_name, 1),
+        // Every format on this path has a token-batched variant up to its own
+        // `gemv_max_m`: one block covers `tokens_per_block` token columns, so
+        // a weight block is loaded and decoded once and dot-producted against
+        // all of them. The per-token kernel re-reads the whole weight matrix
+        // for every token, which is what makes its cost scale with M. Pick
+        // the narrowest tile that covers M in one block — a wider tile would
+        // idle its spare columns, a narrower one would need two passes. Which
+        // widths exist is per format: Q8_0 and Q6_K crossed over out to a
+        // 4-token tile, so both `_n2` and `_n4` exist; Q4_K, Q5_K and Q2_K
+        // cross over at a 2-token tile, so only `_n2` exists; Q3_K's batched
+        // read never wins, so it has neither and always uses the per-token
+        // kernel.
+        let tokens_per_block: u32 = match (format, m) {
+            (_, 0..=1) => 1,
+            (QuantFormat::Q3K, _) => 1,
+            (QuantFormat::Q8_0 | QuantFormat::Q6K, m) if m >= 3 => 4,
+            _ => 2,
+        };
+        let kernel_name = if tokens_per_block == 1 {
+            kernel_name
+        } else {
+            match (format, tokens_per_block) {
+                (QuantFormat::Q4K, 2) => "quant_gemv_q4_k_q8_1_mwr_n2",
+                (QuantFormat::Q6K, 2) => "quant_gemv_q6_k_q8_1_mwr_n2",
+                (QuantFormat::Q6K, _) => "quant_gemv_q6_k_q8_1_mwr_n4",
+                (QuantFormat::Q8_0, 2) => "quant_gemv_q8_0_q8_1_mwr_n2",
+                (QuantFormat::Q8_0, _) => "quant_gemv_q8_0_q8_1_mwr_n4",
+                (QuantFormat::Q5K, 2) => "quant_gemv_q5_k_q8_1_mwr_n2",
+                (QuantFormat::Q2K, 2) => "quant_gemv_q2_k_q8_1_mwr_n2",
+                _ => unreachable!(),
+            }
         };
 
         // MWR: one output column per block. The warp count follows the tile

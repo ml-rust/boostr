@@ -17,9 +17,11 @@
 //! Q8_0, Q5_K, Q3_K and Q2_K print both a `..._q8_1_mwr` line and a `..._f32`
 //! line, every other format only the `..._f32` line.
 //!
-//! For Q8_0, `--gemv` also runs the token-batched MWR kernel
-//! (`quant_gemv_q8_0_q8_1_mwr_n2` / `_n4` / `_n8`), checked against the same
-//! f64 reference. The tile is the narrowest one that covers `--m` in a single
+//! For every dp4a format that has one, `--gemv` also runs the token-batched
+//! MWR kernel checked against the same f64 reference: Q8_0 and Q6_K have
+//! `..._mwr_n2` and `_n4` (Q8_0 also an unwired `_n8`), Q4_K/Q5_K/Q2_K have
+//! only `..._mwr_n2`, and Q3_K has neither — its batched read never beat the
+//! MMQ tile. The tile is the narrowest one that covers `--m` in a single
 //! block, which is the rule `dispatch_gemv` applies — a wider tile idles its
 //! spare columns, a narrower one needs two passes. Keep the two in step, or
 //! these timings stop describing the path production takes.
@@ -1415,12 +1417,32 @@ impl MmqFormat {
     /// Token-batched dp4a MWR GEMV kernel for `m` tokens, or `None` for a
     /// format that has no batched variant. The batched kernels cover NTOK
     /// consecutive tokens per block — grid `(N, m.div_ceil(NTOK), 1)`, block
-    /// `(128, 1, 1)` — and load each weight block once per block rather than
-    /// once per token. Returns the kernel, its module and its NTOK, picking
-    /// the widest tile that does not exceed `m`; a tile wider than `m` would
-    /// spend most of its token slots on the clamped ragged tail.
+    /// `(mwr_nwarps_ntok(NTOK) * 32, 1, 1)` — and load and decode each weight
+    /// block once per block rather than once per token. Returns the kernel,
+    /// its module and its NTOK, picking the narrowest tile that covers `m` in
+    /// one block, which is the rule `dispatch_gemv` applies: a wider tile
+    /// idles its spare columns on the clamped ragged tail, a narrower one
+    /// needs two passes.
+    ///
+    /// Which tiles are compiled is per format, matching `dispatch_gemv`:
+    /// Q8_0 and Q6_K have `_n2` and `_n4` (Q8_0 also an unwired `_n8`); Q4_K,
+    /// Q5_K and Q2_K have only `_n2`, so `m` outside 2 returns `None`; Q3_K
+    /// has neither — its batched read never beat the MMQ tile — so it always
+    /// returns `None`.
     fn batched_mwr_gemv_kernel(&self, m: usize) -> Option<(&'static str, &'static str, u32)> {
         match self {
+            MmqFormat::Q4K if m == 2 => Some(("quant_gemv_q4_k_q8_1_mwr_n2", QUANT_GEMV_MODULE, 2)),
+            MmqFormat::Q4K => None,
+            MmqFormat::Q5K if m == 2 => Some(("quant_gemv_q5_k_q8_1_mwr_n2", GEMV_Q5_K_MODULE, 2)),
+            MmqFormat::Q5K => None,
+            MmqFormat::Q2K if m == 2 => Some(("quant_gemv_q2_k_q8_1_mwr_n2", GEMV_Q2_K_MODULE, 2)),
+            MmqFormat::Q2K => None,
+            MmqFormat::Q3K => None,
+            MmqFormat::Q6K => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_q6_k_q8_1_mwr_n2", QUANT_GEMV_MODULE, 2)),
+                _ => Some(("quant_gemv_q6_k_q8_1_mwr_n4", QUANT_GEMV_MODULE, 4)),
+            },
             MmqFormat::Q8_0 => match m {
                 0..=1 => None,
                 2 => Some(("quant_gemv_q8_0_q8_1_mwr_n2", QUANT_GEMV_MODULE, 2)),
@@ -2654,8 +2676,9 @@ fn main() {
         // Token-batched MWR: same activation buffer and same block shape, but
         // one block covers NTOK token columns, so the grid's token axis is
         // `m.div_ceil(NTOK)` and each weight block is decoded once for all
-        // NTOK of them. Not wired into `dispatch_gemv` — this tool is how the
-        // crossover against the MMQ kernels is measured.
+        // NTOK of them. `dispatch_gemv` selects the `_n2` / `_n4` tiles; this
+        // tool is how each format's crossover against the MMQ kernels is
+        // measured, and the only way to reach Q8_0's unwired `_n8`.
         let batched =
             format
                 .batched_mwr_gemv_kernel(m)

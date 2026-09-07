@@ -378,8 +378,11 @@ const COSINE_FLOOR: f64 = 0.999;
 /// `IQ3XXS`, `IQ3S`, `IQ1S`.
 ///
 /// `gemv_max_m` (`src/quant/cuda/quant_matmul/format_dispatch/gemv.rs`) is
-/// very low for every format above, so `m = 2` already exceeds it for all but
-/// `Q4K` and lands on the MMQ/GEMM path, which quantizes the activation. Only
+/// per-format: at least 2 for every dp4a format except `Q3K`, and 0 for the
+/// rest. So `m = 2` stays on the dp4a GEMV for most of the six and lands on
+/// the MMQ/GEMM path for the others. Both quantize the activation to Q8_1,
+/// so this gate covers either one and no threshold change moves a test
+/// between gates. Only
 /// `IQ1M` has no MMQ or feature-major kernel at all: every path it takes
 /// dequantizes the weight and keeps the activation in f32, so its `m = 2` and
 /// `m = 32` cases both stay on the element-wise gate instead of this one.

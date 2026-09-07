@@ -2,19 +2,41 @@
 //!
 //! ```text
 //! cargo run --release --features audio --example score_asr -- \
-//!     --references PROMPTS.tsv --hypotheses TRANSCRIPTS.tsv \
+//!     --references REFERENCES.tsv --hypotheses HYPOTHESES.tsv \
 //!     [--text-column text] [--group-column NAME] [--cer]
 //! ```
 //!
-//! `--references` is a TSV with a header row. It must have an `id` column and
-//! a text column (`--text-column` names it, default `text`); any other
-//! column may exist and is ignored unless `--group-column` names it.
+//! Neither file ships with the crate; you supply both. They are tab
+//! separated, and this is their whole shape.
 //!
-//! `--hypotheses` is the `path<TAB>text` format the `transcribe` example
-//! writes on stdout, so its output redirects straight into this tool. The id
-//! is the file stem of `path` (`FILE.wav` -> `FILE`). A line without a tab is
-//! not that format and is skipped, so a log with interleaved progress lines
-//! can be passed unfiltered.
+//! `--references`: a header row, an `id` column, and a text column named by
+//! `--text-column` (default `text`). Any other column may exist and is
+//! ignored unless `--group-column` names it. Column order does not matter.
+//!
+//! ```text
+//! id      group   text
+//! u001    plain   the cat sat on the mat
+//! u002    plain   a second sentence
+//! u003    digits  there were 7 of them
+//! ```
+//!
+//! `--hypotheses`: no header, two columns, `path<TAB>text`. The id is the
+//! file stem of `path`, so `u001.wav` pairs with reference id `u001`.
+//!
+//! ```text
+//! renders/u001.wav        the cat sat on the mat
+//! renders/u002.wav        a second sentence
+//! renders/u003.wav        there were seven of them
+//! ```
+//!
+//! That is the format the `transcribe` example writes on stdout, so its
+//! output redirects straight into this tool. A line with no tab is not a
+//! transcript line and is skipped, which is why a log with interleaved
+//! progress lines can be passed unfiltered.
+//!
+//! Scoring those two files with `--group-column group` reports `plain` at
+//! zero and `digits` above it, because `7` and `seven` are two different
+//! tokens — the reason `--group-column` exists.
 //!
 //! `--group-column NAME` reports one row per distinct value of that reference
 //! column; omitted, everything scores as a single group named `all`. This

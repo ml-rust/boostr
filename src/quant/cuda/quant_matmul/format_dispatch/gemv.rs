@@ -269,14 +269,32 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
             _ => unreachable!(),
         };
 
-        // MWR: one output column per block. The warp count follows the tile
-        // width — a wide tile holds one accumulator per token in registers, so
-        // it drops to two warps to keep more blocks resident per SM. This
-        // mirrors `mwr_nwarps_ntok` in gemv/common.cuh; the two must agree,
-        // because the kernel sizes its reduction's shared array from it.
+        // MWR: the warp count follows the tile width — a wide tile holds one
+        // accumulator per token in registers, so it drops to two warps to keep
+        // more blocks resident per SM. This mirrors `mwr_nwarps_ntok` in
+        // gemv/common.cuh; the two must agree, because the kernel sizes its
+        // reduction's shared array from it.
         let block_threads = if tokens_per_block >= 8 { 64 } else { 128 };
+
+        // Output columns per block. Every batched kernel here covers one,
+        // except Q8_0's token-batched tiles, which cover two: with a token
+        // column already in flight, each activation word a thread loads is
+        // dot-producted against both rows' weight words instead of one. That
+        // halves the activation traffic per unit of output, so their grid's x
+        // extent is `ceil(N / 2)`. Mirrors `mwr_rows_ntok` in gemv/common.cuh;
+        // the two must agree or the grid and the kernel disagree on which
+        // output columns a block owns. Q8_0 at `tokens_per_block == 1` is the
+        // single-token kernel, which keeps one column per block.
+        let rows_per_block: u32 = match format {
+            QuantFormat::Q8_0 if tokens_per_block >= 2 => 2,
+            _ => 1,
+        };
         let cfg = LaunchConfig {
-            grid_dim: (n_u32, m_u32.div_ceil(tokens_per_block), 1),
+            grid_dim: (
+                n_u32.div_ceil(rows_per_block),
+                m_u32.div_ceil(tokens_per_block),
+                1,
+            ),
             block_dim: (block_threads, 1, 1),
             shared_mem_bytes: 0,
         };

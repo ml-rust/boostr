@@ -1328,18 +1328,30 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr(
 // shape ggml-cuda's `mul_mat_vec_q<type, ncols_dst>` uses
 // (`ggml-cuda/mmvq.cu`), with `ncols_dst` a compile-time tile width.
 //
-// Grid: (N, ceil(M / NTOK), 1) — one output column, NTOK tokens per block
+// The block also tiles the output-row axis: it covers ROWS consecutive output
+// columns of the weight matrix, and each activation word a thread loads is
+// dot-producted against the weight word of every one of them. The activation
+// load is then paid once per ROWS outputs instead of once per output, which is
+// where the traffic goes at wide tiles. ROWS comes from `mwr_rows_ntok` in
+// gemv/common.cuh, the counterpart of ggml-cuda's `calc_rows_per_block`.
+//
+// Grid: (ceil(N / ROWS), ceil(M / NTOK), 1) — ROWS output columns, NTOK tokens
+// per block.
 // Block: (mwr_nwarps_ntok(NTOK) * WARP_SIZE, 1, 1) — warps cooperating on K.
 // The warp count follows the tile width rather than staying fixed, because a
 // wider tile carries more accumulators per thread; see `mwr_nwarps_ntok` in
 // gemv/common.cuh for the trade-off and its ggml-cuda counterpart. The launch
-// side must size the block from the same function.
+// side must size the block and the grid's x extent from the same two
+// functions.
 //
 // Ragged tail: M need not be a multiple of NTOK. Each token slot clamps its
 // activation row index to M - 1, so every load stays inside the activation
 // buffer, and the write is skipped for slots past M - 1. A clamped slot
 // therefore recomputes the last token's dot product and discards it, which
-// costs at most NTOK - 1 wasted columns in one block of the grid.
+// costs at most NTOK - 1 wasted columns in one block of the grid. N need not
+// be a multiple of ROWS either, and the output-row axis is handled the same
+// way: the weight row index is clamped to N - 1 so the weight walk stays in
+// bounds, and the write is skipped for slots past N - 1.
 //
 // The existing single-token kernel is kept: it serves M = 1, where this
 // kernel's token loop is pure overhead, and the fused-SwiGLU sibling below
@@ -1354,21 +1366,28 @@ static __device__ __forceinline__ void quant_gemv_q8_0_q8_1_mwr_ntok(
     unsigned int M, unsigned int K, unsigned int N
 ) {
     constexpr int NWARPS = mwr_nwarps_ntok(NTOK);
+    constexpr int ROWS = mwr_rows_ntok(NTOK);
 
     const int warp_id = threadIdx.x / WARP_SIZE;
     const int lane_id = threadIdx.x % WARP_SIZE;
-    const int col = blockIdx.x;
+    const unsigned int n0 = blockIdx.x * ROWS;
     const unsigned int m0 = blockIdx.y * NTOK;
     // Uniform across the block, so the barrier inside the reduction below is
     // still reached by every thread that does not take this exit.
-    if (col >= N || m0 >= M) return;
+    if (n0 >= N || m0 >= M) return;
 
     // Rounded UP for the same reason as the single-token kernel: a Q8_0 block
     // is 32 elements, so `K / 256` would truncate a short row to zero groups.
     const int q8_bpr = K / 32;         // Q8_1 blocks per row
     const int sbpr = (q8_bpr + 7) / 8; // groups of 8 blocks, rounded up
 
-    const unsigned char* w_row = weight + (unsigned long long)col * q8_bpr * 34;
+    // Ragged output-row tail: clamp, never walk past the weight matrix.
+    const unsigned char* w_rows[ROWS];
+    #pragma unroll
+    for (int i = 0; i < ROWS; i++) {
+        const unsigned int ni = (n0 + i < N) ? (n0 + i) : (N - 1);
+        w_rows[i] = weight + (unsigned long long)ni * q8_bpr * 34;
+    }
 
     // Ragged tail: clamp, never read past the activation buffer.
     const unsigned char* q8_rows[NTOK];
@@ -1383,51 +1402,60 @@ static __device__ __forceinline__ void quant_gemv_q8_0_q8_1_mwr_ntok(
     const int j_lo = chunk * 2;
     const int j_hi = chunk * 2 + 1;
 
-    float acc[NTOK];
+    float acc[NTOK][ROWS];
     #pragma unroll
-    for (int j = 0; j < NTOK; j++) acc[j] = 0.0f;
+    for (int j = 0; j < NTOK; j++)
+        #pragma unroll
+        for (int i = 0; i < ROWS; i++) acc[j][i] = 0.0f;
+
+    // One Q8_0 block index, against every (token, output row) of the tile.
+    // The weight blocks are loaded and decoded outside the token loop — that
+    // is what the token axis of the tile buys — and each activation word is
+    // loaded once and reused across the ROWS weight words, which is what the
+    // output-row axis buys.
+    const auto accumulate = [&](int q8_0_idx) {
+        float dw[ROWS];
+        int w[ROWS];
+        #pragma unroll
+        for (int i = 0; i < ROWS; i++) {
+            const unsigned char* wblk = w_rows[i] + q8_0_idx * 34;
+            dw[i] = __half2float(*(const __half*)wblk);
+            w[i] = load_int_ua(wblk + 2 + pos);
+        }
+        #pragma unroll
+        for (int j = 0; j < NTOK; j++) {
+            const unsigned char* ablk = q8_rows[j] + q8_0_idx * 36;
+            const float da = __half2float(*(const __half*)ablk);
+            const int a = *(const int*)(ablk + 4 + pos);
+            #pragma unroll
+            for (int i = 0; i < ROWS; i++) {
+                acc[j][i] += dw[i] * da * (float)dp4a(w[i], a, 0);
+            }
+        }
+    };
 
     for (int sb = warp_id; sb < sbpr; sb += NWARPS) {
         const int q8_0_idx_lo = sb * 8 + j_lo;
         const int q8_0_idx_hi = sb * 8 + j_hi;
 
-        // The weight block is loaded and decoded outside the token loop: that
-        // is the whole point of the tile.
-        if (q8_0_idx_lo < q8_bpr) {
-            const unsigned char* wblk = w_row + q8_0_idx_lo * 34;
-            const float dw = __half2float(*(const __half*)wblk);
-            const int w = load_int_ua(wblk + 2 + pos);
-            #pragma unroll
-            for (int j = 0; j < NTOK; j++) {
-                const unsigned char* ablk = q8_rows[j] + q8_0_idx_lo * 36;
-                const float da = __half2float(*(const __half*)ablk);
-                const int a = *(const int*)(ablk + 4 + pos);
-                acc[j] += dw * da * (float)dp4a(w, a, 0);
-            }
-        }
-        if (q8_0_idx_hi < q8_bpr) {
-            const unsigned char* wblk = w_row + q8_0_idx_hi * 34;
-            const float dw = __half2float(*(const __half*)wblk);
-            const int w = load_int_ua(wblk + 2 + pos);
-            #pragma unroll
-            for (int j = 0; j < NTOK; j++) {
-                const unsigned char* ablk = q8_rows[j] + q8_0_idx_hi * 36;
-                const float da = __half2float(*(const __half*)ablk);
-                const int a = *(const int*)(ablk + 4 + pos);
-                acc[j] += dw * da * (float)dp4a(w, a, 0);
-            }
-        }
+        if (q8_0_idx_lo < q8_bpr) accumulate(q8_0_idx_lo);
+        if (q8_0_idx_hi < q8_bpr) accumulate(q8_0_idx_hi);
     }
 
-    __shared__ float smem[NWARPS - 1][NTOK][WARP_SIZE];
-    float sums[NTOK];
-    mwr_reduce_ntok<NTOK, NWARPS>(acc, warp_id, lane_id, smem, sums);
+    __shared__ float smem[NWARPS - 1][NTOK][ROWS][WARP_SIZE];
+    float sums[NTOK][ROWS];
+    mwr_reduce_ntok<NTOK, ROWS, NWARPS>(acc, warp_id, lane_id, smem, sums);
 
     if (warp_id != 0 || lane_id != 0) return;
     #pragma unroll
     for (int j = 0; j < NTOK; j++) {
         const unsigned int mj = m0 + j;
-        if (mj < M) output[(unsigned long long)mj * N + col] = sums[j];
+        if (mj >= M) continue;
+        #pragma unroll
+        for (int i = 0; i < ROWS; i++) {
+            const unsigned int ni = n0 + i;
+            if (ni < N) output[(unsigned long long)mj * N + ni] = sums[j][i];
+        }
     }
 }
 

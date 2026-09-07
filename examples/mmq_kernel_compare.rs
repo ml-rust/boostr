@@ -1418,9 +1418,10 @@ impl MmqFormat {
 
     /// Token-batched dp4a MWR GEMV kernel for `m` tokens, or `None` for a
     /// format that has no batched variant. The batched kernels cover NTOK
-    /// consecutive tokens per block — grid `(N, m.div_ceil(NTOK), 1)`, block
-    /// `(mwr_nwarps_ntok(NTOK) * 32, 1, 1)` — and load and decode each weight
-    /// block once per block rather than once per token. Returns the kernel,
+    /// consecutive tokens per block — grid `(N.div_ceil(ROWS),
+    /// m.div_ceil(NTOK), 1)`, block `(mwr_nwarps_ntok(NTOK) * 32, 1, 1)`, with
+    /// ROWS from `batched_mwr_rows_per_block` below — and load and decode each
+    /// weight block once per block rather than once per token. Returns the kernel,
     /// its module and its NTOK, picking the narrowest tile that covers `m` in
     /// one block, which is the rule `dispatch_gemv` applies: a wider tile
     /// idles its spare columns on the clamped ragged tail, a narrower one
@@ -1518,6 +1519,37 @@ impl MmqFormat {
                 3..=4 => Some(("quant_gemv_q8_0_q8_1_mwr_n4", QUANT_GEMV_MODULE, 4)),
                 _ => Some(("quant_gemv_q8_0_q8_1_mwr_n8", QUANT_GEMV_MODULE, 8)),
             },
+        }
+    }
+
+    /// Output columns one block of the token-batched kernel above covers, so
+    /// the grid's x extent is `n.div_ceil(rows)`. Every format here covers one
+    /// column per block except Q8_0, whose token-batched tiles cover two: with
+    /// a token column already in flight, each activation word a thread loads is
+    /// dot-producted against both rows' weight words rather than one. Mirrors
+    /// `mwr_rows_ntok` in gemv/common.cuh and the same rule in
+    /// `dispatch_gemv`; all three must agree or the grid and the kernel
+    /// disagree on which output columns a block owns.
+    fn batched_mwr_rows_per_block(&self) -> u32 {
+        match self {
+            MmqFormat::Q8_0 => 2,
+            MmqFormat::Q2K
+            | MmqFormat::Q3K
+            | MmqFormat::Q4K
+            | MmqFormat::Q5K
+            | MmqFormat::Q6K
+            | MmqFormat::Q40
+            | MmqFormat::Q50
+            | MmqFormat::Q41
+            | MmqFormat::Q51
+            | MmqFormat::IQ4NL
+            | MmqFormat::IQ4XS
+            | MmqFormat::IQ2XXS
+            | MmqFormat::IQ2XS
+            | MmqFormat::IQ2S
+            | MmqFormat::IQ3XXS
+            | MmqFormat::IQ3S
+            | MmqFormat::IQ1S => 1,
         }
     }
 
@@ -2744,7 +2776,9 @@ fn main() {
         // Token-batched MWR: same activation buffer and same block shape, but
         // one block covers NTOK token columns, so the grid's token axis is
         // `m.div_ceil(NTOK)` and each weight block is decoded once for all
-        // NTOK of them. `dispatch_gemv` selects the `_n2` / `_n4` tiles; this
+        // NTOK of them. Q8_0's tiles additionally cover two output columns per
+        // block, which is what shortens their grid's x axis.
+        // `dispatch_gemv` selects the `_n2` / `_n4` tiles; this
         // tool is how each format's crossover against the MMQ kernels is
         // measured, and the only way to reach Q8_0's unwired `_n8`.
         let batched =
@@ -2768,8 +2802,11 @@ fn main() {
                     // `dispatch_gemv` derives the block the same way; launching
                     // a wider block than the kernel declares is rejected.
                     let bat_threads = if ntok >= 8 { 64 } else { 128 };
+                    // Output columns per block, one for every format but Q8_0.
+                    // `dispatch_gemv` derives the grid's x extent the same way.
+                    let bat_rows = format.batched_mwr_rows_per_block();
                     let cfg_bat = LaunchConfig {
-                        grid_dim: (n_u32, m_u32.div_ceil(ntok), 1),
+                        grid_dim: (n_u32.div_ceil(bat_rows), m_u32.div_ceil(ntok), 1),
                         block_dim: (bat_threads, 1, 1),
                         shared_mem_bytes: 0,
                     };

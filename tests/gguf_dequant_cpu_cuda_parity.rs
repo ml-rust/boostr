@@ -381,7 +381,7 @@ const COSINE_FLOOR: f64 = 0.999;
 /// per-format: at least 2 for every dp4a format except `Q3K` and `Q2K`, and 0
 /// for the rest. `Q4_0`, `Q5_0`, `Q4_1`, `Q5_1`, `IQ4NL`, `IQ4XS` and the six
 /// grid-indexed IQ formats `IQ2XXS`, `IQ2XS`, `IQ2S`, `IQ3XXS`, `IQ3S` and
-/// `IQ1S` reach 2 through the token-batched dp4a GEMV, which has no
+/// `IQ1S` reach it through the token-batched dp4a GEMV, which has no
 /// single-token sibling. So `m = 2`
 /// stays on the dp4a GEMV for most of these and lands on the MMQ/GEMM path
 /// for the others. Both quantize the activation to Q8_1, so this gate covers
@@ -986,6 +986,19 @@ fn q4_0_quant_matmul_matches_cpu() {
         n,
         k,
     );
+    // m = 3 routes to the `_n4` token-batched dp4a GEMV tile (see
+    // `gemv_max_m` / `dispatch_gemv` in
+    // `src/quant/cuda/quant_matmul/format_dispatch/gemv.rs`), untested by
+    // the m = 2 (`_n2`) and m = 32 (MMQ) cases. Odd m also exercises the
+    // ragged tail: one live token slot, three clamped.
+    assert_matmul_parity_q8_1_activation(
+        "q4_0_quant_matmul_matches_cpu_m3",
+        QuantFormat::Q4_0,
+        &data,
+        3,
+        n,
+        k,
+    );
 }
 
 /// Q4_1 weight `[3, 64]`.
@@ -1010,6 +1023,15 @@ fn q4_1_quant_matmul_matches_cpu() {
         n,
         k,
     );
+    // m = 3 routes to the untested `_n4` token-batched dp4a GEMV tile.
+    assert_matmul_parity_q8_1_activation(
+        "q4_1_quant_matmul_matches_cpu_m3",
+        QuantFormat::Q4_1,
+        &data,
+        3,
+        n,
+        k,
+    );
 }
 
 /// Q5_0 weight `[3, 64]`.
@@ -1031,6 +1053,15 @@ fn q5_0_quant_matmul_matches_cpu() {
         QuantFormat::Q5_0,
         &data,
         2,
+        n,
+        k,
+    );
+    // m = 3 routes to the untested `_n4` token-batched dp4a GEMV tile.
+    assert_matmul_parity_q8_1_activation(
+        "q5_0_quant_matmul_matches_cpu_m3",
+        QuantFormat::Q5_0,
+        &data,
+        3,
         n,
         k,
     );
@@ -1059,6 +1090,15 @@ fn q5_1_quant_matmul_matches_cpu() {
         n,
         k,
     );
+    // m = 3 routes to the untested `_n4` token-batched dp4a GEMV tile.
+    assert_matmul_parity_q8_1_activation(
+        "q5_1_quant_matmul_matches_cpu_m3",
+        QuantFormat::Q5_1,
+        &data,
+        3,
+        n,
+        k,
+    );
 }
 
 /// Q8_0 weight `[3, 64]` — 2 blocks per row, 6 blocks total.
@@ -1079,6 +1119,15 @@ fn q8_0_quant_matmul_matches_cpu() {
         QuantFormat::Q8_0,
         &data,
         2,
+        n,
+        k,
+    );
+    // m = 3 routes to the untested `_n4` token-batched dp4a GEMV tile.
+    assert_matmul_parity_q8_1_activation(
+        "q8_0_quant_matmul_matches_cpu_m3",
+        QuantFormat::Q8_0,
+        &data,
+        3,
         n,
         k,
     );
@@ -1135,6 +1184,15 @@ fn q6_k_quant_matmul_matches_cpu() {
         QuantFormat::Q6K,
         &data,
         2,
+        n,
+        k,
+    );
+    // m = 3 routes to the untested `_n4` token-batched dp4a GEMV tile.
+    assert_matmul_parity_q8_1_activation(
+        "q6_k_quant_matmul_matches_cpu_m3",
+        QuantFormat::Q6K,
+        &data,
+        3,
         n,
         k,
     );
@@ -1247,6 +1305,15 @@ fn iq4_nl_quant_matmul_matches_cpu() {
         n,
         k,
     );
+    // m = 3 routes to the untested `_n4` token-batched dp4a GEMV tile.
+    assert_matmul_parity_q8_1_activation(
+        "iq4_nl_quant_matmul_matches_cpu_m3",
+        QuantFormat::IQ4NL,
+        &data,
+        3,
+        n,
+        k,
+    );
 }
 
 /// IQ1_S weight `[3, 512]` — 2 blocks per row, 6 blocks total.
@@ -1267,6 +1334,15 @@ fn iq1_s_quant_matmul_matches_cpu() {
         QuantFormat::IQ1S,
         &data,
         2,
+        n,
+        k,
+    );
+    // m = 3 routes to the untested `_n4` token-batched dp4a GEMV tile.
+    assert_matmul_parity_q8_1_activation(
+        "iq1_s_quant_matmul_matches_cpu_m3",
+        QuantFormat::IQ1S,
+        &data,
+        3,
         n,
         k,
     );
@@ -1315,6 +1391,15 @@ fn iq2_xxs_quant_matmul_matches_cpu() {
         n,
         k,
     );
+    // m = 3 routes to the untested `_n4` token-batched dp4a GEMV tile.
+    assert_matmul_parity_q8_1_activation(
+        "iq2_xxs_quant_matmul_matches_cpu_m3",
+        QuantFormat::IQ2XXS,
+        &data,
+        3,
+        n,
+        k,
+    );
 }
 
 /// IQ2_XS weight `[3, 512]` — 2 blocks per row, 6 blocks total.
@@ -1335,6 +1420,15 @@ fn iq2_xs_quant_matmul_matches_cpu() {
         QuantFormat::IQ2XS,
         &data,
         2,
+        n,
+        k,
+    );
+    // m = 3 routes to the untested `_n4` token-batched dp4a GEMV tile.
+    assert_matmul_parity_q8_1_activation(
+        "iq2_xs_quant_matmul_matches_cpu_m3",
+        QuantFormat::IQ2XS,
+        &data,
+        3,
         n,
         k,
     );
@@ -1361,6 +1455,15 @@ fn iq2_s_quant_matmul_matches_cpu() {
         n,
         k,
     );
+    // m = 3 routes to the untested `_n4` token-batched dp4a GEMV tile.
+    assert_matmul_parity_q8_1_activation(
+        "iq2_s_quant_matmul_matches_cpu_m3",
+        QuantFormat::IQ2S,
+        &data,
+        3,
+        n,
+        k,
+    );
 }
 
 /// IQ3_XXS weight `[3, 512]` — 2 blocks per row, 6 blocks total.
@@ -1384,6 +1487,15 @@ fn iq3_xxs_quant_matmul_matches_cpu() {
         n,
         k,
     );
+    // m = 3 routes to the untested `_n4` token-batched dp4a GEMV tile.
+    assert_matmul_parity_q8_1_activation(
+        "iq3_xxs_quant_matmul_matches_cpu_m3",
+        QuantFormat::IQ3XXS,
+        &data,
+        3,
+        n,
+        k,
+    );
 }
 
 /// IQ3_S weight `[3, 512]` — 2 blocks per row, 6 blocks total.
@@ -1404,6 +1516,15 @@ fn iq3_s_quant_matmul_matches_cpu() {
         QuantFormat::IQ3S,
         &data,
         2,
+        n,
+        k,
+    );
+    // m = 3 routes to the untested `_n4` token-batched dp4a GEMV tile.
+    assert_matmul_parity_q8_1_activation(
+        "iq3_s_quant_matmul_matches_cpu_m3",
+        QuantFormat::IQ3S,
+        &data,
+        3,
         n,
         k,
     );
@@ -1432,6 +1553,15 @@ fn iq4_xs_quant_matmul_matches_cpu() {
         QuantFormat::IQ4XS,
         &data,
         2,
+        n,
+        k,
+    );
+    // m = 3 routes to the untested `_n4` token-batched dp4a GEMV tile.
+    assert_matmul_parity_q8_1_activation(
+        "iq4_xs_quant_matmul_matches_cpu_m3",
+        QuantFormat::IQ4XS,
+        &data,
+        3,
         n,
         k,
     );

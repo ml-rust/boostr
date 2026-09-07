@@ -112,26 +112,45 @@ static __device__ __forceinline__ float warp_reduce_sum(float acc) {
     return acc;
 }
 
+// ── Token-batched MWR block shape ───────────────────────────────────────
+// Warps per block for a token-batched MWR kernel, as a function of the
+// compile-time tile width. A wider tile holds one accumulator per token in
+// registers, so the per-thread register demand grows with NTOK; cutting the
+// warp count at the wide end trades K-parallelism inside a block for more
+// blocks resident per SM. ggml-cuda's `calc_nwarps` (`ggml-cuda/mmvq.cu`)
+// makes the same split, 4 warps up to 4 columns and 2 warps from 5 to 8.
+//
+// Used for the K-stride loop, the reduction's shared array and
+// `__launch_bounds__` alike — all three must agree, so all three read this.
+
+static constexpr __host__ __device__ int mwr_nwarps_ntok(int ntok) {
+    return ntok <= 4 ? NWARPS_K : 2;
+}
+
 // ── Token-batched MWR reduction ─────────────────────────────────────────
 // NTOK-wide counterpart of `mwr_reduce`, for MWR kernels whose block covers
 // several token columns at once. Layout mirrors ggml-cuda's
 // `tmp_shared[nwarps-1][ncols_dst][rows_per_cuda_block][warp_size]`
 // (`ggml-cuda/mmvq.cu`) with one output row per block, so the shared array is
-// `[NWARPS_K - 1][NTOK][WARP_SIZE]`.
+// `[NWARPS - 1][NTOK][WARP_SIZE]`.
+//
+// NWARPS is a parameter rather than a constant so every MWR format can pick
+// its own block shape per tile width — see `mwr_nwarps_ntok` above.
 //
 // Warp 0 keeps its own partials in registers and never stores, which is why
-// the leading extent is NWARPS_K - 1: the per-block footprint is
-// (NWARPS_K - 1) * NTOK * WARP_SIZE * 4 bytes.
+// the leading extent is NWARPS - 1: the per-block footprint is
+// (NWARPS - 1) * NTOK * WARP_SIZE * 4 bytes.
 //
 // Every thread of the block must reach this call — it contains a barrier.
 // `out` is written by warp 0 only, and only lane 0 holds the final sums.
 
-template <int NTOK>
+template <int NTOK, int NWARPS>
 static __device__ __forceinline__ void mwr_reduce_ntok(
     const float acc[NTOK], int warp_id, int lane_id,
-    float smem[NWARPS_K - 1][NTOK][WARP_SIZE],
+    float smem[NWARPS - 1][NTOK][WARP_SIZE],
     float out[NTOK]
 ) {
+    static_assert(NWARPS >= 2, "mwr_reduce_ntok needs at least two warps to reduce across");
     if (warp_id != 0) {
         #pragma unroll
         for (int j = 0; j < NTOK; j++)
@@ -149,7 +168,7 @@ static __device__ __forceinline__ void mwr_reduce_ntok(
     for (int j = 0; j < NTOK; j++) {
         float sum = acc[j];
         #pragma unroll
-        for (int w = 0; w < NWARPS_K - 1; w++)
+        for (int w = 0; w < NWARPS - 1; w++)
             sum += smem[w][j][lane_id];
         out[j] = warp_reduce_sum(sum);
     }

@@ -29,10 +29,12 @@ const ALLOWED_UNWIRED: &[(&str, &str)] = &[
     (
         "quant_gemv_q8_0_q8_1_mwr_n8",
         "The eight-column sibling of the _n2/_n4 kernels dispatch_gemv selects. \
-         Its accumulator array costs enough registers that the block count per \
-         SM falls, and the feature-major tile measured faster at that width, so \
-         gemv_max_m stops below it. Wire it once the wide tile drops to two \
-         warps per block, which is what upstream does at this column count.",
+         It takes the two-warp block shape upstream uses at this column count, \
+         which cut its cost markedly, but the feature-major tile still wins \
+         from five tokens up, so gemv_max_m stops below it. Its weight walk is \
+         serial per warp, and halving the warps doubles that walk, which is \
+         the next thing to attack. Wire it when it beats the tile at eight \
+         tokens, not before.",
     ),
     (
         "quantize_kv_fp8_per_token_fp32",

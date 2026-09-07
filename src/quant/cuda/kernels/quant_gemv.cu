@@ -1075,7 +1075,11 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr(
 // (`ggml-cuda/mmvq.cu`), with `ncols_dst` a compile-time tile width.
 //
 // Grid: (N, ceil(M / NTOK), 1) — one output column, NTOK tokens per block
-// Block: (128, 1, 1) — 4 warps cooperating on K, unchanged
+// Block: (mwr_nwarps_ntok(NTOK) * WARP_SIZE, 1, 1) — warps cooperating on K.
+// The warp count follows the tile width rather than staying fixed, because a
+// wider tile carries more accumulators per thread; see `mwr_nwarps_ntok` in
+// gemv/common.cuh for the trade-off and its ggml-cuda counterpart. The launch
+// side must size the block from the same function.
 //
 // Ragged tail: M need not be a multiple of NTOK. Each token slot clamps its
 // activation row index to M - 1, so every load stays inside the activation
@@ -1095,6 +1099,8 @@ static __device__ __forceinline__ void quant_gemv_q8_0_q8_1_mwr_ntok(
     float* __restrict__ output,
     unsigned int M, unsigned int K, unsigned int N
 ) {
+    constexpr int NWARPS = mwr_nwarps_ntok(NTOK);
+
     const int warp_id = threadIdx.x / WARP_SIZE;
     const int lane_id = threadIdx.x % WARP_SIZE;
     const int col = blockIdx.x;
@@ -1127,7 +1133,7 @@ static __device__ __forceinline__ void quant_gemv_q8_0_q8_1_mwr_ntok(
     #pragma unroll
     for (int j = 0; j < NTOK; j++) acc[j] = 0.0f;
 
-    for (int sb = warp_id; sb < sbpr; sb += NWARPS_K) {
+    for (int sb = warp_id; sb < sbpr; sb += NWARPS) {
         const int q8_0_idx_lo = sb * 8 + j_lo;
         const int q8_0_idx_hi = sb * 8 + j_hi;
 
@@ -1159,9 +1165,9 @@ static __device__ __forceinline__ void quant_gemv_q8_0_q8_1_mwr_ntok(
         }
     }
 
-    __shared__ float smem[NWARPS_K - 1][NTOK][WARP_SIZE];
+    __shared__ float smem[NWARPS - 1][NTOK][WARP_SIZE];
     float sums[NTOK];
-    mwr_reduce_ntok<NTOK>(acc, warp_id, lane_id, smem, sums);
+    mwr_reduce_ntok<NTOK, NWARPS>(acc, warp_id, lane_id, smem, sums);
 
     if (warp_id != 0 || lane_id != 0) return;
     #pragma unroll
@@ -1171,7 +1177,7 @@ static __device__ __forceinline__ void quant_gemv_q8_0_q8_1_mwr_ntok(
     }
 }
 
-extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr_n2(
+extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(2) * WARP_SIZE, 1) void quant_gemv_q8_0_q8_1_mwr_n2(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
@@ -1180,7 +1186,7 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr_n2
     quant_gemv_q8_0_q8_1_mwr_ntok<2>(q8_act, weight, output, M, K, N);
 }
 
-extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr_n4(
+extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(4) * WARP_SIZE, 1) void quant_gemv_q8_0_q8_1_mwr_n4(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,
@@ -1189,7 +1195,7 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr_n4
     quant_gemv_q8_0_q8_1_mwr_ntok<4>(q8_act, weight, output, M, K, N);
 }
 
-extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr_n8(
+extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(8) * WARP_SIZE, 1) void quant_gemv_q8_0_q8_1_mwr_n8(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,

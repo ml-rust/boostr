@@ -122,10 +122,15 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
             _ => (kernel_name, 1),
         };
 
-        // MWR: one output column per block, 128 threads (4 warps)
+        // MWR: one output column per block. The warp count follows the tile
+        // width — a wide tile holds one accumulator per token in registers, so
+        // it drops to two warps to keep more blocks resident per SM. This
+        // mirrors `mwr_nwarps_ntok` in gemv/common.cuh; the two must agree,
+        // because the kernel sizes its reduction's shared array from it.
+        let block_threads = if tokens_per_block >= 8 { 64 } else { 128 };
         let cfg = LaunchConfig {
             grid_dim: (n_u32, m_u32.div_ceil(tokens_per_block), 1),
-            block_dim: (128, 1, 1),
+            block_dim: (block_threads, 1, 1),
             shared_mem_bytes: 0,
         };
 

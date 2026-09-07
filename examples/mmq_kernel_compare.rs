@@ -2672,9 +2672,14 @@ fn main() {
                         Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device)
                             .unwrap();
                     let out_bat_ptr = out_bat.ptr();
+                    // Warp count is a function of the tile width, and the
+                    // kernel's `__launch_bounds__` and shared array follow it.
+                    // `dispatch_gemv` derives the block the same way; launching
+                    // a wider block than the kernel declares is rejected.
+                    let bat_threads = if ntok >= 8 { 64 } else { 128 };
                     let cfg_bat = LaunchConfig {
                         grid_dim: (n_u32, m_u32.div_ceil(ntok), 1),
-                        block_dim: (128, 1, 1),
+                        block_dim: (bat_threads, 1, 1),
                         shared_mem_bytes: 0,
                     };
                     let launch_bat = || unsafe {

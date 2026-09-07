@@ -164,3 +164,70 @@ fn align_is_symmetric_in_cost_but_swaps_deletions_and_insertions() {
     assert_eq!(forward.deletions, 1);
     assert_eq!(backward.insertions, 1);
 }
+
+#[test]
+fn items_in_the_same_group_sum_their_counts() {
+    let items = [
+        ("digits", "satu dua", "satu tiga"),
+        ("digits", "empat lima", "empat lima"),
+    ];
+    let groups = by_group(items, word_error_rate);
+    let digits = groups.get("digits").expect("group must be present");
+    assert_eq!(digits.substitutions, 1, "{digits:?}");
+    assert_eq!(digits.reference_len(), 4);
+}
+
+#[test]
+fn a_group_with_no_errors_reports_zero() {
+    let items = [("clean", "a b c", "a b c")];
+    let groups = by_group(items, word_error_rate);
+    assert_eq!(
+        groups.get("clean").expect("group must be present").errors(),
+        0
+    );
+}
+
+#[test]
+fn groups_are_independent() {
+    let items = [
+        ("bad", "satu dua", "tiga empat"),
+        ("good", "lima enam", "lima enam"),
+    ];
+    let groups = by_group(items, word_error_rate);
+    assert_eq!(
+        groups.get("bad").expect("group must be present").errors(),
+        2
+    );
+    assert_eq!(
+        groups.get("good").expect("group must be present").errors(),
+        0
+    );
+}
+
+#[test]
+fn grand_total_over_groups_matches_total_over_the_same_items_ungrouped() {
+    let items = [
+        ("a", "satu dua", "satu tiga"),
+        ("b", "empat lima enam", "empat lima enam"),
+        ("a", "tujuh", "lapan"),
+    ];
+    let grouped = by_group(items, word_error_rate);
+    let combined = grand_total(&grouped);
+
+    let pairs: Vec<(&str, &str)> = items.iter().map(|(_, r, h)| (*r, *h)).collect();
+    let ungrouped = total(pairs, word_error_rate);
+
+    assert_eq!(combined, ungrouped);
+}
+
+#[test]
+fn by_group_iterates_in_sorted_key_order() {
+    let items = [
+        ("zebra", "a", "a"),
+        ("apple", "a", "a"),
+        ("mango", "a", "a"),
+    ];
+    let groups = by_group(items, word_error_rate);
+    let keys: Vec<&&str> = groups.keys().collect();
+    assert_eq!(keys, vec![&"apple", &"mango", &"zebra"]);
+}

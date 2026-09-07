@@ -177,6 +177,10 @@ name = "noise_probe_decode"
 required-features = ["audio"]
 
 [[example]]
+name = "score_asr"
+required-features = ["audio"]
+
+[[example]]
 name = "synth_kokoro"
 required-features = ["audio"]
 

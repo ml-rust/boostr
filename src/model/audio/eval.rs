@@ -246,5 +246,47 @@ where
         .sum::<ErrorRate>()
 }
 
+/// Corpus-level total per group, over `(group_key, reference, hypothesis)`.
+///
+/// A number-bearing subset needs its own figure rather than being pooled into
+/// the rest of the corpus — see the module docs on why digits and number words
+/// are never reconciled. This is how a caller gets that subset scored without
+/// grouping the pairs by hand first.
+///
+/// Each group sums its counts and divides once, the same corpus definition
+/// [`total`] uses; averaging per-utterance rates within a group is still not
+/// the standard WER. [`total`] over the same items, ungrouped, equals
+/// [`grand_total`] over this map's values — both are sums of the same counts,
+/// just grouped differently before the single division.
+///
+/// A `BTreeMap` orders by key so a report prints groups in a stable order
+/// regardless of the input's iteration order.
+pub fn by_group<'a, K, I, F>(items: I, mut metric: F) -> std::collections::BTreeMap<K, ErrorRate>
+where
+    K: Ord,
+    I: IntoIterator<Item = (K, &'a str, &'a str)>,
+    F: FnMut(&str, &str) -> ErrorRate,
+{
+    let mut groups: std::collections::BTreeMap<K, ErrorRate> = std::collections::BTreeMap::new();
+    for (key, reference, hypothesis) in items {
+        let rate = metric(reference, hypothesis);
+        groups
+            .entry(key)
+            .and_modify(|acc| *acc = *acc + rate)
+            .or_insert(rate);
+    }
+    groups
+}
+
+/// Overall figure across every group in `groups`.
+///
+/// This is exactly [`total`] over the same items before they were grouped —
+/// both sum the same counts and divide once. It exists so a report scores the
+/// groups a single time with [`by_group`] and derives the corpus-wide figure
+/// from that map, instead of scoring every item a second time.
+pub fn grand_total<K>(groups: &std::collections::BTreeMap<K, ErrorRate>) -> ErrorRate {
+    groups.values().copied().sum::<ErrorRate>()
+}
+
 #[cfg(test)]
 mod tests;

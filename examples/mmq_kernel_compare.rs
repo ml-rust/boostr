@@ -19,9 +19,9 @@
 //!
 //! For every dp4a format that has one, `--gemv` also runs the token-batched
 //! MWR kernel checked against the same f64 reference: Q8_0 and Q6_K have
-//! `..._mwr_n2` and `_n4` (Q8_0 also an unwired `_n8`), Q4_K/Q5_K/Q2_K have
-//! only `..._mwr_n2`, and Q3_K has neither — its batched read never beat the
-//! MMQ tile. The tile is the narrowest one that covers `--m` in a single
+//! `..._mwr_n2` and `_n4` (Q8_0 also an unwired `_n8`), Q4_K/Q5_K and the four
+//! legacy 32-element formats Q4_0/Q5_0/Q4_1/Q5_1 have only `..._mwr_n2`, and
+//! Q3_K/Q2_K have neither — their batched read never beat the MMQ tile. The tile is the narrowest one that covers `--m` in a single
 //! block, which is the rule `dispatch_gemv` applies — a wider tile idles its
 //! spare columns, a narrower one needs two passes. Keep the two in step, or
 //! these timings stop describing the path production takes.
@@ -1426,15 +1426,24 @@ impl MmqFormat {
     ///
     /// Which tiles are compiled is per format, matching `dispatch_gemv`:
     /// Q8_0 and Q6_K have `_n2` and `_n4` (Q8_0 also an unwired `_n8`); Q4_K,
-    /// Q5_K and Q2_K have only `_n2`, so `m` outside 2 returns `None`; Q3_K
-    /// has neither — its batched read never beat the MMQ tile — so it always
-    /// returns `None`.
+    /// Q5_K and the four legacy 32-element formats Q4_0, Q5_0, Q4_1 and Q5_1
+    /// have only `_n2`, so `m` outside 2 returns `None`; Q3_K and Q2_K have
+    /// neither — their batched read never beat the MMQ tile — so they always
+    /// return `None`.
     fn batched_mwr_gemv_kernel(&self, m: usize) -> Option<(&'static str, &'static str, u32)> {
         match self {
             MmqFormat::Q4K if m == 2 => Some(("quant_gemv_q4_k_q8_1_mwr_n2", QUANT_GEMV_MODULE, 2)),
             MmqFormat::Q4K => None,
             MmqFormat::Q5K if m == 2 => Some(("quant_gemv_q5_k_q8_1_mwr_n2", GEMV_Q5_K_MODULE, 2)),
             MmqFormat::Q5K => None,
+            MmqFormat::Q40 if m == 2 => Some(("quant_gemv_q4_0_q8_1_mwr_n2", QUANT_GEMV_MODULE, 2)),
+            MmqFormat::Q40 => None,
+            MmqFormat::Q50 if m == 2 => Some(("quant_gemv_q5_0_q8_1_mwr_n2", GEMV_Q5_0_MODULE, 2)),
+            MmqFormat::Q50 => None,
+            MmqFormat::Q41 if m == 2 => Some(("quant_gemv_q4_1_q8_1_mwr_n2", GEMV_Q4_1_MODULE, 2)),
+            MmqFormat::Q41 => None,
+            MmqFormat::Q51 if m == 2 => Some(("quant_gemv_q5_1_q8_1_mwr_n2", GEMV_Q5_1_MODULE, 2)),
+            MmqFormat::Q51 => None,
             MmqFormat::Q2K => None,
             MmqFormat::Q3K => None,
             MmqFormat::Q6K => match m {

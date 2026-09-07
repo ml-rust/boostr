@@ -4,7 +4,7 @@
 // Layout: [d:f16(2), m:f16(2), qh:u32(4), qs:16B]
 // 5-bit unsigned values with min: dequant = d * (low4 | high1<<4) + m
 
-#include "common.cuh"
+#include "legacy_ntok.cuh"
 
 #define Q5_1_BLOCK_BYTES 24
 
@@ -46,4 +46,26 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q5_1_f32(
 
     acc = warp_reduce_sum(acc);
     if (lane_id == 0) output[m * N + col] = acc;
+}
+
+// ============================================================================
+// Token-batched Q5_1 GEMV with dp4a (Q5_1 weight × Q8_1 activation)
+//
+// One block covers two token columns and decodes each weight block once for
+// both, instead of re-reading the whole weight matrix per token as the F32
+// kernel above does. Body and decode live in `legacy_ntok.cuh`, shared with
+// the other legacy 32-element formats; see the header for the lane map, the
+// ragged-tail rule and the alignment constraint.
+//
+// There is no single-token sibling: at m = 1 the tile's spare column is pure
+// overhead and the F32 kernel above serves that shape.
+// ============================================================================
+
+extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(2) * WARP_SIZE, 1) void quant_gemv_q5_1_q8_1_mwr_n2(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    quant_gemv_legacy_q8_1_mwr_ntok<LegacyQ51, 2>(q8_act, weight, output, M, K, N);
 }

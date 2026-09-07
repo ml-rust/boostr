@@ -47,7 +47,18 @@ pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
         // tile out to a 4-token batch.
         QuantFormat::Q8_0 | QuantFormat::Q6K => 4,
         // Heavier decode crosses earlier: MMQ already wins at m = 3.
-        QuantFormat::Q4K | QuantFormat::Q5K => 2,
+        //
+        // The four legacy 32-element formats sit in the same weight class:
+        // their per-block decode is bitfield unpacking, lighter than Q4_K's
+        // 6-bit scale/min pairs. They have only the `_n2` tile, so 2 is also
+        // the widest batch they can serve; at m = 1 they fall through to the
+        // F32 GEMV, which is the only path they have there.
+        QuantFormat::Q4K
+        | QuantFormat::Q5K
+        | QuantFormat::Q4_0
+        | QuantFormat::Q5_0
+        | QuantFormat::Q4_1
+        | QuantFormat::Q5_1 => 2,
         // Heaviest decode, and neither gains from batching. Q3_K only ties
         // the MMQ tile at m = 2 and loses above it. Q2_K's small gain at a
         // deep reduction reverses into a much larger loss at a shallow one,
@@ -67,8 +78,10 @@ pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
 
 /// GEMV dispatch for M <= 64 (decode + short prefill).
 ///
-/// Chooses the dp4a MWR path for Q4_K / Q6_K / Q8_0 and the F32 activation
-/// path for other formats. Returns `Ok(None)` if the format has no dedicated
+/// Chooses the dp4a MWR path for the formats that have such a kernel and the
+/// F32 activation path for the rest. Q4_0, Q5_0, Q4_1 and Q5_1 have only the
+/// token-batched dp4a kernel, so they take the dp4a path from `m = 2` up and
+/// the F32 path at `m = 1`. Returns `Ok(None)` if the format has no dedicated
 /// kernel; callers fall back to `quant_matmul_via_dequant`.
 pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
     client: &CudaClient,
@@ -85,8 +98,19 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
     let k_u32 = k as u32;
     let n_u32 = n as u32;
 
-    // dp4a path: formats with Q8_1 activation + dp4a MWR kernels, aligned K
-    if matches!(
+    // The four legacy 32-element formats have a token-batched dp4a kernel but
+    // no single-token one: at m = 1 the batched tile's spare column is pure
+    // overhead, and the F32 path below already serves that shape. So they join
+    // the dp4a branch only from m = 2 up.
+    let dp4a_batched_only = matches!(
+        format,
+        QuantFormat::Q4_0 | QuantFormat::Q5_0 | QuantFormat::Q4_1 | QuantFormat::Q5_1
+    );
+
+    // dp4a path: formats with Q8_1 activation + dp4a MWR kernels, aligned K.
+    // Every format here has a 32-element block, so `k % 32 == 0` is the only
+    // alignment the kernels need.
+    if (matches!(
         format,
         QuantFormat::Q4K
             | QuantFormat::Q6K
@@ -94,7 +118,8 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
             | QuantFormat::Q5K
             | QuantFormat::Q3K
             | QuantFormat::Q2K
-    ) && k.is_multiple_of(32)
+    ) || (dp4a_batched_only && m >= 2))
+        && k.is_multiple_of(32)
     {
         tracing::debug!(
             ?format,
@@ -108,46 +133,59 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
         let q8_ptr = q8_buf.ptr();
         let weight_ptr = weight.storage().ptr();
 
-        let (kernel_name, module_name) = match format {
-            QuantFormat::Q4K => ("quant_gemv_q4_k_q8_1_mwr", QUANT_GEMV_MODULE),
-            QuantFormat::Q6K => ("quant_gemv_q6_k_q8_1_mwr", QUANT_GEMV_MODULE),
-            QuantFormat::Q8_0 => ("quant_gemv_q8_0_q8_1_mwr", QUANT_GEMV_MODULE),
-            QuantFormat::Q5K => ("quant_gemv_q5_k_q8_1_mwr", GEMV_Q5_K_MODULE),
-            QuantFormat::Q3K => ("quant_gemv_q3_k_q8_1_mwr", GEMV_Q3_K_MODULE),
-            QuantFormat::Q2K => ("quant_gemv_q2_k_q8_1_mwr", GEMV_Q2_K_MODULE),
+        let module_name = match format {
+            QuantFormat::Q4K | QuantFormat::Q6K | QuantFormat::Q8_0 | QuantFormat::Q4_0 => {
+                QUANT_GEMV_MODULE
+            }
+            QuantFormat::Q5K => GEMV_Q5_K_MODULE,
+            QuantFormat::Q3K => GEMV_Q3_K_MODULE,
+            QuantFormat::Q2K => GEMV_Q2_K_MODULE,
+            QuantFormat::Q5_0 => GEMV_Q5_0_MODULE,
+            QuantFormat::Q4_1 => GEMV_Q4_1_MODULE,
+            QuantFormat::Q5_1 => GEMV_Q5_1_MODULE,
             _ => unreachable!(),
         };
 
-        // Every format on this path has a token-batched variant up to its own
-        // `gemv_max_m`: one block covers `tokens_per_block` token columns, so
-        // a weight block is loaded and decoded once and dot-producted against
-        // all of them. The per-token kernel re-reads the whole weight matrix
-        // for every token, which is what makes its cost scale with M. Pick
-        // the narrowest tile that covers M in one block — a wider tile would
-        // idle its spare columns, a narrower one would need two passes. Which
-        // widths exist is per format: Q8_0 and Q6_K crossed over out to a
-        // 4-token tile, so both `_n2` and `_n4` exist; Q4_K, Q5_K and Q2_K
-        // cross over at a 2-token tile, so only `_n2` exists; Q3_K's batched
-        // read never wins, so it has neither and always uses the per-token
-        // kernel.
+        // Most formats on this path have a token-batched variant up to their
+        // own `gemv_max_m`: one block covers `tokens_per_block` token columns,
+        // so a weight block is loaded and decoded once and dot-producted
+        // against all of them. The per-token kernel re-reads the whole weight
+        // matrix for every token, which is what makes its cost scale with M.
+        // Pick the narrowest tile that covers M in one block — a wider tile
+        // would idle its spare columns, a narrower one would need two passes.
+        // Which widths exist is per format: Q8_0 and Q6_K crossed over out to
+        // a 4-token tile, so both `_n2` and `_n4` exist; Q4_K, Q5_K and the
+        // four legacy 32-element formats cross over at a 2-token tile, so only
+        // `_n2` exists; Q3_K's and Q2_K's batched read never wins, so they have
+        // neither and always use the per-token kernel.
+        //
+        // The legacy four have no per-token dp4a kernel at all, so the m = 1
+        // row below never applies to them: the branch guard above already
+        // routed m = 1 to the F32 path.
         let tokens_per_block: u32 = match (format, m) {
-            (_, 0..=1) => 1,
             (QuantFormat::Q3K | QuantFormat::Q2K, _) => 1,
+            (_, 0..=1) => 1,
             (QuantFormat::Q8_0 | QuantFormat::Q6K, m) if m >= 3 => 4,
             _ => 2,
         };
-        let kernel_name = if tokens_per_block == 1 {
-            kernel_name
-        } else {
-            match (format, tokens_per_block) {
-                (QuantFormat::Q4K, 2) => "quant_gemv_q4_k_q8_1_mwr_n2",
-                (QuantFormat::Q6K, 2) => "quant_gemv_q6_k_q8_1_mwr_n2",
-                (QuantFormat::Q6K, _) => "quant_gemv_q6_k_q8_1_mwr_n4",
-                (QuantFormat::Q8_0, 2) => "quant_gemv_q8_0_q8_1_mwr_n2",
-                (QuantFormat::Q8_0, _) => "quant_gemv_q8_0_q8_1_mwr_n4",
-                (QuantFormat::Q5K, 2) => "quant_gemv_q5_k_q8_1_mwr_n2",
-                _ => unreachable!(),
-            }
+        let kernel_name = match (format, tokens_per_block) {
+            (QuantFormat::Q3K, _) => "quant_gemv_q3_k_q8_1_mwr",
+            (QuantFormat::Q2K, _) => "quant_gemv_q2_k_q8_1_mwr",
+            (QuantFormat::Q4K, 1) => "quant_gemv_q4_k_q8_1_mwr",
+            (QuantFormat::Q6K, 1) => "quant_gemv_q6_k_q8_1_mwr",
+            (QuantFormat::Q8_0, 1) => "quant_gemv_q8_0_q8_1_mwr",
+            (QuantFormat::Q5K, 1) => "quant_gemv_q5_k_q8_1_mwr",
+            (QuantFormat::Q4K, _) => "quant_gemv_q4_k_q8_1_mwr_n2",
+            (QuantFormat::Q5K, _) => "quant_gemv_q5_k_q8_1_mwr_n2",
+            (QuantFormat::Q6K, 2) => "quant_gemv_q6_k_q8_1_mwr_n2",
+            (QuantFormat::Q6K, _) => "quant_gemv_q6_k_q8_1_mwr_n4",
+            (QuantFormat::Q8_0, 2) => "quant_gemv_q8_0_q8_1_mwr_n2",
+            (QuantFormat::Q8_0, _) => "quant_gemv_q8_0_q8_1_mwr_n4",
+            (QuantFormat::Q4_0, _) => "quant_gemv_q4_0_q8_1_mwr_n2",
+            (QuantFormat::Q5_0, _) => "quant_gemv_q5_0_q8_1_mwr_n2",
+            (QuantFormat::Q4_1, _) => "quant_gemv_q4_1_q8_1_mwr_n2",
+            (QuantFormat::Q5_1, _) => "quant_gemv_q5_1_q8_1_mwr_n2",
+            _ => unreachable!(),
         };
 
         // MWR: one output column per block. The warp count follows the tile

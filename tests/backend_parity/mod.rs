@@ -21,6 +21,7 @@ pub mod quant_matmul_q4k;
 pub mod quant_matmul_q8_0;
 pub mod quant_nf4;
 pub mod quant_tcf;
+pub mod quant_tcf_feat_major;
 pub mod quant_tcf_wgpu;
 pub mod rope;
 pub mod rope_packed;

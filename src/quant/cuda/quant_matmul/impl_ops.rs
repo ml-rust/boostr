@@ -9,6 +9,7 @@ use numr::dtype::DType;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
+use tcf_core::NativeEncoding;
 
 use super::super::int4_gemm as int4_dispatch;
 use super::super::kernels::{
@@ -19,6 +20,7 @@ use super::batched_gemv::quant_matmul_batch_impl;
 use super::fallback::{quant_matmul_via_dequant, quant_swiglu_via_dequant};
 use super::format_dispatch::{dispatch_gemv, dispatch_matmul, gemv_max_m};
 use super::helpers::{quantize_activation_q8_1, validate_input_cuda};
+use super::mmq_feat_major;
 
 impl QuantMatmulOps<CudaRuntime> for CudaClient {
     fn int4_gemm(
@@ -182,6 +184,35 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         if let QuantScheme::Tcf(encoding) = weight.scheme() {
             let at = MatmulShape { m, k, n };
             let device_index = activation.device().id();
+            if m > 4 {
+                // `Q8S32T64` stages into the Q8_0 weight row, so it takes the
+                // feature-major tensor-core family instead of the f32 FMA tile
+                // `launch_gemm` runs. Every other encoding keeps that tile:
+                // none of them has a `FeatMajorFormat` yet. `Ok(None)` means no
+                // compiled variant fits the device, and `launch_gemm` still
+                // serves the shape.
+                let feat_major = encoding.native() == NativeEncoding::Q8S32T64
+                    && k.is_multiple_of(mmq_feat_major::TCF_Q8S32T64.k_multiple as usize)
+                    && numr::runtime::cuda::CudaDevice::new(device_index)
+                        .profile()
+                        .caps
+                        .int8_mma_m16n8k32;
+                if feat_major
+                    && mmq_feat_major::dispatch(
+                        &mmq_feat_major::TCF_Q8S32T64,
+                        self,
+                        &act_contig,
+                        weight,
+                        output_ptr,
+                        m,
+                        k,
+                        n,
+                    )?
+                    .is_some()
+                {
+                    return Ok(output);
+                }
+            }
             let launch = if m <= 4 {
                 tcf_dispatch::launch_gemv
             } else {

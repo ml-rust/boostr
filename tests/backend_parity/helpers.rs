@@ -54,6 +54,62 @@ pub fn assert_parity_f32_tol(a: &[f32], b: &[f32], op: &str, rtol: f32, atol: f3
     }
 }
 
+/// Cosine floor for a CUDA path that quantizes its activation to Q8_1 while
+/// the CPU reference keeps the activation in f32. `tests/gguf_dequant_cpu_cuda_parity.rs`
+/// establishes this same floor for the GGUF formats that share the pattern.
+pub const COSINE_FLOOR: f64 = 0.999;
+
+/// Gate for a CUDA `quant_matmul` path that quantizes the activation to Q8_1
+/// (e.g. the TCF `Q8S32T64` MMQ kernel) against a CPU reference that keeps the
+/// activation in f32.
+///
+/// An element-wise tolerance cannot bound this comparison: the activation's
+/// per-element quantization error is scaled by the row's weight magnitudes
+/// during the reduction, but the output itself can be much smaller than that
+/// through cancellation between terms, so no fixed ratio between the two
+/// holds for arbitrary weight bytes. Cosine similarity sidesteps this because
+/// it compares direction rather than a per-element bound: a correct-but-lossy
+/// result stays within a hair of 1.0, while a decode or accumulation defect
+/// (e.g. a wrong plane offset or scale index) scrambles the output direction
+/// and drives the score toward 0. `COSINE_FLOOR` sits in the gap between the
+/// two.
+pub fn assert_cosine_parity(a: &[f32], b: &[f32], label: &str) {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "{label}: length mismatch: {} vs {}",
+        a.len(),
+        b.len()
+    );
+
+    let mut dot = 0.0f64;
+    let mut norm_a = 0.0f64;
+    let mut norm_b = 0.0f64;
+    for (i, (&x, &y)) in a.iter().zip(b.iter()).enumerate() {
+        assert!(
+            x.is_finite(),
+            "{label}: index {i} is not finite in the CUDA output: {x}"
+        );
+        assert!(
+            y.is_finite(),
+            "{label}: index {i} is not finite in the CPU output: {y}"
+        );
+        dot += f64::from(x) * f64::from(y);
+        norm_a += f64::from(x) * f64::from(x);
+        norm_b += f64::from(y) * f64::from(y);
+    }
+    let cosine = dot / (norm_a.sqrt() * norm_b.sqrt());
+
+    println!("{label}: cosine={cosine:.6}");
+
+    assert!(
+        cosine >= COSINE_FLOOR,
+        "{label}: cosine {cosine:.6} is below the {COSINE_FLOOR} floor. Correct-but-lossy \
+         results sit near 1.0; a decode or accumulation defect collapses the score toward 0. \
+         Raising the floor is never the fix."
+    );
+}
+
 pub fn assert_parity_f32(a: &[f32], b: &[f32], op: &str) {
     let rtol = 1e-5f32;
     let atol = 1e-7f32;

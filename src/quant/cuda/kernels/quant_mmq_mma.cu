@@ -419,7 +419,8 @@ static __device__ __forceinline__ void mmqf_vec_dot_d(
 // tile only through one of these: the on-disk block geometry, the staged
 // weight-row layout, and the two functions that touch weight data. Q8_0, Q4_0,
 // Q4_1, Q5_0, Q5_1, Q4_K, Q5_K, Q6_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS,
-// IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S are the instantiations.
+// IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S and TCF `Q8S32T64` are the
+// instantiations.
 struct MmqfQ80 {
     // On-disk block: one f16 scale then 32 int8 quants.
     static constexpr int BLOCK_BYTES = 34;
@@ -3728,6 +3729,146 @@ struct MmqfIQ1S {
     }
 };
 
+// TCF `Q8S32T64` weight format policy, same contract as `MmqfQ80`.
+//
+// TCF stores WHOLE-TENSOR PLANES, not blocks that carry their own scale: the
+// code plane first, the scale plane straight after it with no padding between
+// them. For this encoding a 64-element execution tile holds 64 8-bit codes, so
+// the code plane is 64 bytes per tile and tiles are row-major, which makes the
+// plane a DENSE ROW-MAJOR int8 matrix: the byte for feature row `r`, element
+// `e` is at `r * K + e`. The scale plane is dense row-major `binary16`, one
+// scale per 32 elements, at `scale_off + (r * bpr + e / 32) * 2`.
+//
+// `scale_off` is the code plane's size, `N * K`, and `K` is `bpr * 32`, so the
+// two arguments `stage` already takes determine it. No extra kernel argument.
+//
+// The encoding is symmetric with a flat scale form and a 32-element group, so
+// the staged row is Q8_0's — signed quants in the int8 lanes plus one f32
+// scale per 32 elements — and the whole `vec_dot` is Q8_0's. `stage` is the
+// only thing this format defines for itself.
+//
+// THE SIGN. Section 13.2 sign-extends an 8-bit symmetric code from bit 7, and
+// `tcf-core` rejects the reserved most-negative pattern when it reads a
+// payload, so every code the plane can hold is exactly its byte reinterpreted
+// as `int8` — which is what the MMA lanes read. `tcf_sign_resolve` in
+// `tcf.cuh` states the same rule for the decode-direction kernels.
+//
+// ALIGNMENT. A row of codes starts at `r * K` and `K` is a multiple of 64, so
+// every row base is 64-byte aligned and every 4-byte quant word inside it is
+// 4-byte aligned. The quant loads are therefore plain `int` loads, not
+// `load_int_ua`. A scale at an odd group index is only 2-byte aligned, which
+// is `alignof(__half)`, and is read through a `__half` pointer exactly as
+// `MmqfQ80::stage` reads its block scale.
+struct MmqfTcfQ8S32T64 {
+    // Not an on-disk block: the codes for 32 elements occupy 32 contiguous
+    // bytes of the code plane, and the scale for those elements lives in a
+    // plane of its own.
+    static constexpr int BLOCK_BYTES = 32;
+    static constexpr int BLOCK_ELEMS = 32;
+    // K is gated on `k % 64 == 0`, so a row's last 256-k group can hold fewer
+    // than MMQF_ITER_B blocks and the tail path must be compiled.
+    static constexpr bool RAGGED_K = true;
+    // No minimum term, so no activation scratch.
+    static constexpr int Y_SCRATCH = 0;
+
+    // Staged weight row: Q8_0's, int for int. 64 quant words (256 k-values),
+    // then 8 f32 block scales, then padding that makes the stride an odd
+    // multiple of 4 ints so the strided fragment gathers hit all 32 banks.
+    static constexpr int X_QS = 0;
+    static constexpr int X_DS = 64;
+    static constexpr int X_STRIDE = 76;
+    static_assert(X_DS + 8 <= X_STRIDE, "Weight row too short: 8 block scales.");
+
+    // Stages 256 k-values (8 groups of 32) of the weight tile. One warp owns
+    // one feature row per step and steps by the warp count; within the row a
+    // lane maps to (group, 4-k word) and issues two loads, for the group at
+    // `b0` and the one 128 k-values further along. Independent of MMQ_X.
+    template <int MMQ_X, bool CLAMP_K>
+    static __device__ __forceinline__ void stage(
+        const unsigned char* __restrict__ weight, int* __restrict__ s_x, unsigned int N,
+        unsigned int bpr, unsigned int feat0, unsigned int b0
+    ) {
+        const unsigned int lane = threadIdx.x % WARP_SIZE;
+        const unsigned int warp = threadIdx.x / WARP_SIZE;
+        const unsigned int kbx = lane / 8;   // 32-element group within a 128-k half
+        const unsigned int kqsx = lane % 8;  // 4-k word within that group
+
+        // Tile-local cap: clamping `i` to this and adding `feat0` back gives a
+        // feature row inside the matrix. The clamp is on the TILE-LOCAL index;
+        // the tile origin is added after it, never folded into it.
+        const unsigned int i_max = N - feat0 - 1;
+        // The code plane's row stride is K bytes, one byte per element.
+        const unsigned long long rstride = (unsigned long long)bpr * BLOCK_ELEMS;
+        // The scale plane follows the code plane with nothing between them, so
+        // it starts at the code plane's size.
+        const unsigned long long scale_off = (unsigned long long)N * rstride;
+
+        // Both group offsets are loop-invariant, so the addressing collapses to
+        // one add per row.
+        const unsigned int blk_lo = CLAMP_K ? min(b0 + kbx, bpr - 1) : b0 + kbx;
+        const unsigned int blk_hi = CLAMP_K ? min(b0 + 4 + kbx, bpr - 1) : b0 + 4 + kbx;
+        const unsigned long long off_lo = (unsigned long long)blk_lo * BLOCK_ELEMS + kqsx * 4;
+        const unsigned long long off_hi = (unsigned long long)blk_hi * BLOCK_ELEMS + kqsx * 4;
+
+        constexpr int ROWS = MMQF_Y / MMQF_WARPS;
+        constexpr int BATCH = MMQF_STAGE_BATCH(MMQ_X);
+        static_assert(ROWS % BATCH == 0, "Weight row batches are ragged.");
+
+#pragma unroll
+        for (int g = 0; g < ROWS / BATCH; ++g) {
+            int v_lo[BATCH];
+            int v_hi[BATCH];
+#pragma unroll
+            for (int u = 0; u < BATCH; ++u) {
+                const unsigned int i = (unsigned int)((g * BATCH + u) * MMQF_WARPS) + warp;
+                const unsigned char* row = weight + (feat0 + min(i, i_max)) * rstride;
+                v_lo[u] = *reinterpret_cast<const int*>(row + off_lo);
+                v_hi[u] = *reinterpret_cast<const int*>(row + off_hi);
+            }
+#pragma unroll
+            for (int u = 0; u < BATCH; ++u) {
+                const unsigned int i = (unsigned int)((g * BATCH + u) * MMQF_WARPS) + warp;
+                s_x[i * X_STRIDE + X_QS + lane] = v_lo[u];
+                s_x[i * X_STRIDE + X_QS + MMQF_HALF_W + lane] = v_hi[u];
+            }
+        }
+
+        // Scales are a separate pass over the scale plane: eight per row, so a
+        // warp covers four rows.
+        float* s_xd = (float*)s_x;
+        const unsigned int kbxd = lane % 8;
+        const unsigned int rsub = lane / 8;
+        const unsigned int blk_d = CLAMP_K ? min(b0 + kbxd, bpr - 1) : b0 + kbxd;
+
+        constexpr int SROWS = MMQF_Y / (MMQF_WARPS * 4);
+        float d[SROWS];
+#pragma unroll
+        for (int u = 0; u < SROWS; ++u) {
+            const unsigned int i = (unsigned int)(u * MMQF_WARPS * 4) + warp * 4 + rsub;
+            const unsigned long long e =
+                (unsigned long long)(feat0 + min(i, i_max)) * bpr + blk_d;
+            const unsigned char* p = weight + scale_off + e * 2;
+            d[u] = __half2float(*reinterpret_cast<const __half*>(p));
+        }
+#pragma unroll
+        for (int u = 0; u < SROWS; ++u) {
+            const unsigned int i = (unsigned int)(u * MMQF_WARPS * 4) + warp * 4 + rsub;
+            s_xd[i * X_STRIDE + X_DS + kbxd] = d[u];
+        }
+    }
+
+    // Forwards to `mmqf_vec_dot_d`, shared with Q8_0: the staged row layout and
+    // the one-term arithmetic are the same for both.
+    template <int MMQ_X, bool FULL>
+    static __device__ __forceinline__ void vec_dot(
+        const int* __restrict__ s_x, const int* __restrict__ s_y,
+        float (&acc)[MMQF_NJ(MMQ_X)][MMQF_NTX(MMQ_X)][4], unsigned int i0, unsigned int jb,
+        unsigned int k00, unsigned int nks
+    ) {
+        mmqf_vec_dot_d<MMQ_X, FULL, X_QS, X_DS, X_STRIDE>(s_x, s_y, acc, i0, jb, k00, nks);
+    }
+};
+
 // Stages 128 k-values of the activation tile as a FLAT COPY. The repacked
 // layout indexes records k-group-major, token-minor, so the `MMQ_X` records a
 // token tile needs are contiguous and the shared row IS the record: 4 header
@@ -4434,6 +4575,18 @@ MMQ_FM_KERNEL(MmqfIQ1S, iq1_s, 80)
 MMQ_FM_KERNEL(MmqfIQ1S, iq1_s, 96)
 MMQ_FM_KERNEL(MmqfIQ1S, iq1_s, 112)
 MMQ_FM_KERNEL(MmqfIQ1S, iq1_s, 128)
+
+MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 8)
+MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 16)
+MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 24)
+MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 32)
+MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 40)
+MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 48)
+MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 64)
+MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 80)
+MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 96)
+MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 112)
+MMQ_FM_KERNEL(MmqfTcfQ8S32T64, tcf_q8s32t64, 128)
 
 // Reads Q8_1 sub-block `b` of both operands into registers, one iteration
 // ahead, same reason as `mmq_q8_0_stage_load`.

@@ -30,10 +30,18 @@
 //! the CPU value. A matmul is compared with a relative tolerance instead: both
 //! sides accumulate in f32 and their summation orders differ, exactly as they
 //! do for every GGUF format.
+//!
+//! `Q8S32T64` is the one encoding with a `FeatMajorFormat`
+//! (`quant/cuda/quant_matmul/impl_ops.rs`), so once `m` passes the `m > 4`
+//! guard there, its cases route to the MMQ kernel instead of `tcf_gemm_f32` /
+//! `tcf_gemv_f32` and additionally quantize the activation to Q8_1. Those
+//! cases use `helpers::assert_cosine_parity` instead of the element-wise
+//! tolerance; every other encoding, and `Q8S32T64` at `m <= 4`, still runs the
+//! f32 path and keeps the element-wise gate.
 
 #![cfg(feature = "cuda")]
 
-use super::helpers::{assert_parity_f32_tol, setup_cpu, with_cuda_backend};
+use super::helpers::{assert_cosine_parity, assert_parity_f32_tol, setup_cpu, with_cuda_backend};
 use boostr::quant::{QuantTensor, TcfEncoding};
 use boostr::{DequantOps, QuantMatmulOps};
 use numr::dtype::DType;
@@ -58,7 +66,7 @@ const SHAPES: [(usize, usize); 3] = [(3, 320), (5, 256), (2, 448)];
 
 /// A deterministic input with sign changes, a flat run, and a spike, so a
 /// group's scale and minimum both move between groups.
-fn source_values(count: usize, seed: usize) -> Vec<f32> {
+pub fn source_values(count: usize, seed: usize) -> Vec<f32> {
     (0..count)
         .map(|i| {
             let x = (i + seed) as f32;
@@ -74,7 +82,7 @@ fn source_values(count: usize, seed: usize) -> Vec<f32> {
 
 /// Pack a tensor with `tcf-core`'s own writer, so the bytes under test are the
 /// bytes the format defines.
-fn packed(native: NativeEncoding, values: &[f32], shape: &[usize]) -> Vec<u8> {
+pub fn packed(native: NativeEncoding, values: &[f32], shape: &[usize]) -> Vec<u8> {
     let dims: Vec<u64> = shape.iter().map(|d| *d as u64).collect();
     let tiles = quantize(values, &dims, 2, native.layout()).expect("quantizes");
     pack(&tiles, native.layout()).expect("packs")
@@ -95,7 +103,7 @@ fn cpu_dequant(payload: &[u8], native: NativeEncoding, shape: &[usize]) -> Vec<f
 }
 
 /// The CPU path's fused matmul against a packed TCF weight.
-fn cpu_matmul(
+pub fn cpu_matmul(
     act: &[f32],
     payload: &[u8],
     native: NativeEncoding,
@@ -158,7 +166,11 @@ fn tcf_cuda_dequant_matches_cpu_bit_for_bit() {
     });
 }
 
-/// The GEMV path, M <= 16. One warp per output column.
+/// `M = 1` runs the GEMV path, one warp per output column. `M = 8` is past
+/// the `m > 4` GEMV/GEMM boundary in `quant/cuda/quant_matmul/impl_ops.rs`, so
+/// it runs the GEMM path instead — the register-blocked f32 tile for every
+/// encoding except `Q8S32T64`, which instead takes the MMQ kernel under test
+/// in `quant_tcf_feat_major.rs` and quantizes its activation to Q8_1.
 #[test]
 fn tcf_cuda_gemv_matches_cpu() {
     with_cuda_backend(|client, device| {
@@ -184,13 +196,12 @@ fn tcf_cuda_gemv_matches_cpu() {
                         .expect("CUDA quant_matmul")
                         .to_vec::<f32>();
 
-                    assert_parity_f32_tol(
-                        &got,
-                        &want,
-                        &format!("{} gemv {m}x{k}x{n}", TcfEncoding::new(native).name()),
-                        1e-3,
-                        1e-5,
-                    );
+                    let label = format!("{} gemv {m}x{k}x{n}", TcfEncoding::new(native).name());
+                    if native == NativeEncoding::Q8S32T64 && m > 4 {
+                        assert_cosine_parity(&got, &want, &label);
+                    } else {
+                        assert_parity_f32_tol(&got, &want, &label, 1e-3, 1e-5);
+                    }
                 }
             }
         }
@@ -209,8 +220,11 @@ fn tcf_cuda_gemv_matches_cpu() {
 ///   super-block boundaries and the two-level forms resolve across them.
 /// - `[5, 1024]`: 16 tiles per row, two whole runs.
 ///
-/// `M = 16` is the GEMV/GEMM dispatch boundary in `quant/cuda/quant_matmul`,
-/// so it is pinned here rather than assumed.
+/// The GEMV/GEMM dispatch boundary in `quant/cuda/quant_matmul/impl_ops.rs`
+/// is `m > 4`, not 16, so `M = 16` here already runs the GEMM path — the
+/// eight-tile run is exercised through `M = 1` at these wider `k` values, and
+/// `M = 16` additionally checks GEMM (or, for `Q8S32T64`, the Q8_1-activation
+/// MMQ kernel) parity at the same shapes.
 #[test]
 fn tcf_cuda_gemv_run_path_matches_cpu() {
     with_cuda_backend(|client, device| {
@@ -236,21 +250,23 @@ fn tcf_cuda_gemv_run_path_matches_cpu() {
                         .expect("CUDA quant_matmul")
                         .to_vec::<f32>();
 
-                    assert_parity_f32_tol(
-                        &got,
-                        &want,
-                        &format!("{} gemv run {m}x{k}x{n}", TcfEncoding::new(native).name()),
-                        1e-3,
-                        1e-5,
-                    );
+                    let label = format!("{} gemv run {m}x{k}x{n}", TcfEncoding::new(native).name());
+                    if native == NativeEncoding::Q8S32T64 && m > 4 {
+                        assert_cosine_parity(&got, &want, &label);
+                    } else {
+                        assert_parity_f32_tol(&got, &want, &label, 1e-3, 1e-5);
+                    }
                 }
             }
         }
     });
 }
 
-/// The GEMM path, M > 16. A 16x16 output tile with the weight staged in shared
-/// memory, including an M that is not a multiple of the tile edge.
+/// The GEMM path (`m > 4` in `quant/cuda/quant_matmul/impl_ops.rs`). A 16x16
+/// output tile with the weight staged in shared memory, including an M that
+/// is not a multiple of the tile edge. `Q8S32T64` instead takes the MMQ
+/// kernel under test in `quant_tcf_feat_major.rs` and quantizes its
+/// activation to Q8_1.
 #[test]
 fn tcf_cuda_gemm_matches_cpu() {
     with_cuda_backend(|client, device| {
@@ -276,13 +292,12 @@ fn tcf_cuda_gemm_matches_cpu() {
                         .expect("CUDA quant_matmul")
                         .to_vec::<f32>();
 
-                    assert_parity_f32_tol(
-                        &got,
-                        &want,
-                        &format!("{} gemm {m}x{k}x{n}", TcfEncoding::new(native).name()),
-                        1e-3,
-                        1e-5,
-                    );
+                    let label = format!("{} gemm {m}x{k}x{n}", TcfEncoding::new(native).name());
+                    if native == NativeEncoding::Q8S32T64 && m > 4 {
+                        assert_cosine_parity(&got, &want, &label);
+                    } else {
+                        assert_parity_f32_tol(&got, &want, &label, 1e-3, 1e-5);
+                    }
                 }
             }
         }

@@ -1427,13 +1427,13 @@ impl MmqFormat {
     /// needs two passes.
     ///
     /// Which tiles are compiled is per format, matching `dispatch_gemv`:
-    /// Q8_0 and Q6_K have `_n2` and `_n4` (Q8_0 also an unwired `_n8`); Q4_K,
-    /// Q5_K, the four legacy 32-element formats Q4_0, Q5_0, Q4_1 and Q5_1, the
-    /// two IQ4 codebook formats IQ4_NL and IQ4_XS, and the six grid-indexed IQ
-    /// formats IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S have only
-    /// `_n2`, so `m` outside 2 returns `None`; Q3_K and Q2_K have neither —
-    /// their batched read never beat the MMQ tile — so they always return
-    /// `None`.
+    /// Q8_0 and Q6_K have `_n2` and `_n4` (Q8_0 also an unwired `_n8`), and so
+    /// do the four legacy 32-element formats Q4_0, Q5_0, Q4_1 and Q5_1, the two
+    /// IQ4 codebook formats IQ4_NL and IQ4_XS, and the six grid-indexed IQ
+    /// formats IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S; Q4_K and Q5_K
+    /// have only `_n2`, so `m` outside 2 returns `None` for them; Q3_K and Q2_K
+    /// have neither — their batched read never beat the MMQ tile — so they
+    /// always return `None`.
     ///
     /// IQ4_XS and the six grid-indexed IQ formats additionally need `--k` a
     /// multiple of 256: their run or sub-group addressing goes through the
@@ -1445,46 +1445,66 @@ impl MmqFormat {
             MmqFormat::Q4K => None,
             MmqFormat::Q5K if m == 2 => Some(("quant_gemv_q5_k_q8_1_mwr_n2", GEMV_Q5_K_MODULE, 2)),
             MmqFormat::Q5K => None,
-            MmqFormat::Q40 if m == 2 => Some(("quant_gemv_q4_0_q8_1_mwr_n2", QUANT_GEMV_MODULE, 2)),
-            MmqFormat::Q40 => None,
-            MmqFormat::Q50 if m == 2 => Some(("quant_gemv_q5_0_q8_1_mwr_n2", GEMV_Q5_0_MODULE, 2)),
-            MmqFormat::Q50 => None,
-            MmqFormat::Q41 if m == 2 => Some(("quant_gemv_q4_1_q8_1_mwr_n2", GEMV_Q4_1_MODULE, 2)),
-            MmqFormat::Q41 => None,
-            MmqFormat::Q51 if m == 2 => Some(("quant_gemv_q5_1_q8_1_mwr_n2", GEMV_Q5_1_MODULE, 2)),
-            MmqFormat::Q51 => None,
-            MmqFormat::IQ4NL if m == 2 => {
-                Some(("quant_gemv_iq4_nl_q8_1_mwr_n2", GEMV_IQ4_NL_MODULE, 2))
-            }
-            MmqFormat::IQ4NL => None,
-            MmqFormat::IQ4XS if m == 2 => {
-                Some(("quant_gemv_iq4_xs_q8_1_mwr_n2", GEMV_IQ4_XS_MODULE, 2))
-            }
-            MmqFormat::IQ4XS => None,
-            MmqFormat::IQ2XXS if m == 2 => {
-                Some(("quant_gemv_iq2_xxs_q8_1_mwr_n2", GEMV_IQ2_XXS_MODULE, 2))
-            }
-            MmqFormat::IQ2XXS => None,
-            MmqFormat::IQ2XS if m == 2 => {
-                Some(("quant_gemv_iq2_xs_q8_1_mwr_n2", GEMV_IQ2_XS_MODULE, 2))
-            }
-            MmqFormat::IQ2XS => None,
-            MmqFormat::IQ2S if m == 2 => {
-                Some(("quant_gemv_iq2_s_q8_1_mwr_n2", GEMV_IQ2_S_MODULE, 2))
-            }
-            MmqFormat::IQ2S => None,
-            MmqFormat::IQ3XXS if m == 2 => {
-                Some(("quant_gemv_iq3_xxs_q8_1_mwr_n2", GEMV_IQ3_XXS_MODULE, 2))
-            }
-            MmqFormat::IQ3XXS => None,
-            MmqFormat::IQ3S if m == 2 => {
-                Some(("quant_gemv_iq3_s_q8_1_mwr_n2", GEMV_IQ3_S_MODULE, 2))
-            }
-            MmqFormat::IQ3S => None,
-            MmqFormat::IQ1S if m == 2 => {
-                Some(("quant_gemv_iq1_s_q8_1_mwr_n2", GEMV_IQ1_S_MODULE, 2))
-            }
-            MmqFormat::IQ1S => None,
+            MmqFormat::Q40 => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_q4_0_q8_1_mwr_n2", QUANT_GEMV_MODULE, 2)),
+                _ => Some(("quant_gemv_q4_0_q8_1_mwr_n4", QUANT_GEMV_MODULE, 4)),
+            },
+            MmqFormat::Q50 => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_q5_0_q8_1_mwr_n2", GEMV_Q5_0_MODULE, 2)),
+                _ => Some(("quant_gemv_q5_0_q8_1_mwr_n4", GEMV_Q5_0_MODULE, 4)),
+            },
+            MmqFormat::Q41 => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_q4_1_q8_1_mwr_n2", GEMV_Q4_1_MODULE, 2)),
+                _ => Some(("quant_gemv_q4_1_q8_1_mwr_n4", GEMV_Q4_1_MODULE, 4)),
+            },
+            MmqFormat::Q51 => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_q5_1_q8_1_mwr_n2", GEMV_Q5_1_MODULE, 2)),
+                _ => Some(("quant_gemv_q5_1_q8_1_mwr_n4", GEMV_Q5_1_MODULE, 4)),
+            },
+            MmqFormat::IQ4NL => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_iq4_nl_q8_1_mwr_n2", GEMV_IQ4_NL_MODULE, 2)),
+                _ => Some(("quant_gemv_iq4_nl_q8_1_mwr_n4", GEMV_IQ4_NL_MODULE, 4)),
+            },
+            MmqFormat::IQ4XS => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_iq4_xs_q8_1_mwr_n2", GEMV_IQ4_XS_MODULE, 2)),
+                _ => Some(("quant_gemv_iq4_xs_q8_1_mwr_n4", GEMV_IQ4_XS_MODULE, 4)),
+            },
+            MmqFormat::IQ2XXS => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_iq2_xxs_q8_1_mwr_n2", GEMV_IQ2_XXS_MODULE, 2)),
+                _ => Some(("quant_gemv_iq2_xxs_q8_1_mwr_n4", GEMV_IQ2_XXS_MODULE, 4)),
+            },
+            MmqFormat::IQ2XS => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_iq2_xs_q8_1_mwr_n2", GEMV_IQ2_XS_MODULE, 2)),
+                _ => Some(("quant_gemv_iq2_xs_q8_1_mwr_n4", GEMV_IQ2_XS_MODULE, 4)),
+            },
+            MmqFormat::IQ2S => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_iq2_s_q8_1_mwr_n2", GEMV_IQ2_S_MODULE, 2)),
+                _ => Some(("quant_gemv_iq2_s_q8_1_mwr_n4", GEMV_IQ2_S_MODULE, 4)),
+            },
+            MmqFormat::IQ3XXS => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_iq3_xxs_q8_1_mwr_n2", GEMV_IQ3_XXS_MODULE, 2)),
+                _ => Some(("quant_gemv_iq3_xxs_q8_1_mwr_n4", GEMV_IQ3_XXS_MODULE, 4)),
+            },
+            MmqFormat::IQ3S => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_iq3_s_q8_1_mwr_n2", GEMV_IQ3_S_MODULE, 2)),
+                _ => Some(("quant_gemv_iq3_s_q8_1_mwr_n4", GEMV_IQ3_S_MODULE, 4)),
+            },
+            MmqFormat::IQ1S => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_iq1_s_q8_1_mwr_n2", GEMV_IQ1_S_MODULE, 2)),
+                _ => Some(("quant_gemv_iq1_s_q8_1_mwr_n4", GEMV_IQ1_S_MODULE, 4)),
+            },
             MmqFormat::Q2K => None,
             MmqFormat::Q3K => None,
             MmqFormat::Q6K => match m {

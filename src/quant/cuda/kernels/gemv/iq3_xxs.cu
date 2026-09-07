@@ -53,13 +53,17 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_iq3_xxs_f32(
 // ============================================================================
 // Token-batched IQ3_XXS GEMV with dp4a (IQ3_XXS weight x Q8_1 activation)
 //
-// One block covers two token columns and decodes each 8-element sub-group —
-// TWO four-component grid reads, one sign-table read and one scale nibble —
-// ONCE for both, instead of repeating that per token as the F32 kernel above
-// does. Body and decode policy live in `iq_grid_ntok.cuh`, shared with the
+// One block covers NTOK consecutive token columns and decodes each 8-element
+// sub-group — TWO four-component grid reads, one sign-table read and one
+// scale nibble — ONCE for all of them, instead of repeating that per token as
+// the F32 kernel above does.
+// Body and decode policy live in `iq_grid_ntok.cuh`, shared with the
 // other five grid-indexed IQ formats; see the header for the lane map, the
 // ragged-tail rule and the alignment constraint that puts this format's 4-byte
 // `aux` read through `load_int_ua`.
+//
+// Both the `_n2` and `_n4` tile widths exist; `dispatch_gemv` picks the
+// narrowest one that covers M.
 //
 // K MULTIPLE. `dispatch_gemv` gates this format on `k % 256 == 0` rather than
 // the dp4a branch's usual 32: a sub-group's byte offset is resolved through its
@@ -77,4 +81,13 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(2) * WARP_SIZE, 1) void 
     unsigned int M, unsigned int K, unsigned int N
 ) {
     quant_gemv_iq_grid_q8_1_mwr_ntok<IqGridIq3Xxs, 2>(q8_act, weight, output, M, K, N);
+}
+
+extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(4) * WARP_SIZE, 1) void quant_gemv_iq3_xxs_q8_1_mwr_n4(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    quant_gemv_iq_grid_q8_1_mwr_ntok<IqGridIq3Xxs, 4>(q8_act, weight, output, M, K, N);
 }

@@ -1461,11 +1461,13 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(8) * WARP_SIZE, 1) void 
 // ============================================================================
 // Token-batched Q4_0 GEMV with dp4a (Q4_0 weight × Q8_1 activation)
 //
-// One block covers two token columns and decodes each weight block once for
-// both, instead of re-reading the whole weight matrix per token as
-// `quant_gemv_q4_0_f32` at the top of this file does. Body and decode live in
-// `gemv/legacy_ntok.cuh`, shared with Q5_0, Q4_1 and Q5_1; see the header for
-// the lane map, the ragged-tail rule and the alignment constraint.
+// One block covers NTOK consecutive token columns and decodes each weight
+// block once for all of them, instead of re-reading the whole weight matrix
+// per token as `quant_gemv_q4_0_f32` at the top of this file does. Both the
+// `_n2` and `_n4` tile widths exist; `dispatch_gemv` picks the narrowest one
+// that covers M. Body and decode live in `gemv/legacy_ntok.cuh`, shared with
+// Q5_0, Q4_1 and Q5_1; see the header for the lane map, the ragged-tail rule
+// and the alignment constraint.
 //
 // There is no single-token sibling: at m = 1 the tile's spare column is pure
 // overhead and the F32 kernel already serves that shape.
@@ -1483,6 +1485,15 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(2) * WARP_SIZE, 1) void 
     unsigned int M, unsigned int K, unsigned int N
 ) {
     quant_gemv_legacy_q8_1_mwr_ntok<LegacyQ40, 2>(q8_act, weight, output, M, K, N);
+}
+
+extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(4) * WARP_SIZE, 1) void quant_gemv_q4_0_q8_1_mwr_n4(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    quant_gemv_legacy_q8_1_mwr_ntok<LegacyQ40, 4>(q8_act, weight, output, M, K, N);
 }
 
 // ============================================================================

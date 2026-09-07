@@ -59,11 +59,12 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_iq4_nl_f32(
 // ============================================================================
 // Token-batched IQ4_NL GEMV with dp4a (IQ4_NL weight x Q8_1 activation)
 //
-// One block covers two token columns and decodes each weight block once for
-// both, instead of re-reading the whole weight matrix per token as the F32
-// kernel above does. Body and decode live in `iq4_ntok.cuh`, shared with
-// IQ4_XS; see the header for the lane map, the ragged-tail rule and the
-// alignment constraint.
+// One block covers NTOK consecutive token columns and decodes each weight
+// block once for all of them, instead of re-reading the whole weight matrix
+// per token as the F32 kernel above does. Both the `_n2` and `_n4` tile
+// widths exist; `dispatch_gemv` picks the narrowest one that covers M. Body
+// and decode live in `iq4_ntok.cuh`, shared with IQ4_XS; see the header for
+// the lane map, the ragged-tail rule and the alignment constraint.
 //
 // There is no single-token sibling: at m = 1 the tile's spare column is pure
 // overhead and the F32 kernel above serves that shape.
@@ -76,4 +77,13 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(2) * WARP_SIZE, 1) void 
     unsigned int M, unsigned int K, unsigned int N
 ) {
     quant_gemv_iq4_q8_1_mwr_ntok<Iq4Nl, 2>(q8_act, weight, output, M, K, N);
+}
+
+extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(4) * WARP_SIZE, 1) void quant_gemv_iq4_nl_q8_1_mwr_n4(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    quant_gemv_iq4_q8_1_mwr_ntok<Iq4Nl, 4>(q8_act, weight, output, M, K, N);
 }

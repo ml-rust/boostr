@@ -53,9 +53,10 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_iq3_s_f32(
 // ============================================================================
 // Token-batched IQ3_S GEMV with dp4a (IQ3_S weight x Q8_1 activation)
 //
-// One block covers two token columns and decodes each 8-element sub-group —
-// TWO nine-bit grid reads, one explicit sign byte and one scale nibble — ONCE
-// for both, instead of repeating that per token as the F32 kernel above does.
+// One block covers NTOK consecutive token columns and decodes each 8-element
+// sub-group — TWO nine-bit grid reads, one explicit sign byte and one scale
+// nibble — ONCE for all of them, instead of repeating that per token as the
+// F32 kernel above does.
 // Body and decode policy live in `iq_grid_ntok.cuh`, shared with the other
 // five grid-indexed IQ formats; see the header for the lane map and the
 // ragged-tail rule. This format issues no 4-byte read, so `load_int_ua` does
@@ -66,6 +67,9 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_iq3_s_f32(
 // sixteen, and its value is `d * (1 + 2 * s)` rather than `d * (0.5 + s) * 0.25`.
 // The policy in the header follows `dequant_iq3_s`'s index expression, not the
 // packing.
+//
+// Both the `_n2` and `_n4` tile widths exist; `dispatch_gemv` picks the
+// narrowest one that covers M.
 //
 // K MULTIPLE. `dispatch_gemv` gates this format on `k % 256 == 0` rather than
 // the dp4a branch's usual 32: a sub-group's byte offset is resolved through its
@@ -83,4 +87,13 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(2) * WARP_SIZE, 1) void 
     unsigned int M, unsigned int K, unsigned int N
 ) {
     quant_gemv_iq_grid_q8_1_mwr_ntok<IqGridIq3S, 2>(q8_act, weight, output, M, K, N);
+}
+
+extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(4) * WARP_SIZE, 1) void quant_gemv_iq3_s_q8_1_mwr_n4(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    quant_gemv_iq_grid_q8_1_mwr_ntok<IqGridIq3S, 4>(q8_act, weight, output, M, K, N);
 }

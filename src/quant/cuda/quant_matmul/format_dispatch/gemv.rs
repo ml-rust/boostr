@@ -43,33 +43,24 @@ pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
     device_index: usize,
 ) -> usize {
     let mma_crossover = match format {
-        // Lightest per-block decode: batched GEMV stays ahead of the MMQ
-        // tile out to a 4-token batch.
-        QuantFormat::Q8_0 | QuantFormat::Q6K => 4,
-        // Heavier decode crosses earlier: MMQ already wins at m = 3.
+        // Q8_0 and Q6_K have the lightest per-block decode, and their batched
+        // GEMV is MEASURED to stay ahead of the MMQ tile out to a 4-token
+        // batch.
         //
-        // The four legacy 32-element formats sit in the same weight class:
-        // their per-block decode is bitfield unpacking, lighter than Q4_K's
-        // 6-bit scale/min pairs. They have only the `_n2` tile, so 2 is also
-        // the widest batch they can serve; at m = 1 they fall through to the
-        // F32 GEMV, which is the only path they have there.
-        //
-        // IQ4_NL and IQ4_XS join them on the same terms: their decode is the
-        // same nibble unpack plus one codebook permute, and they too have only
-        // the `_n2` tile and no single-token dp4a sibling. Their 2 is
-        // PROVISIONAL — set to match the weight class, not yet measured, so it
-        // is the first thing to re-check with the command in this module's
-        // doc note.
-        //
-        // The six grid-indexed IQ formats join on the same terms and with the
-        // same PROVISIONAL 2, but they are the heaviest decode on this path by
-        // some margin: each 8-element sub-group costs a codebook read into a
-        // multi-kilobyte grid table on top of the sign and scale unpack. Q2_K
-        // showed that a heavy per-block decode can make batching a LOSS at
-        // shallow K, so these six are the first to re-measure and the most
-        // likely to come back at 1.
-        QuantFormat::Q4K
-        | QuantFormat::Q5K
+        // The four legacy 32-element formats, the two IQ4 codebook formats and
+        // the six grid-indexed IQ formats now have the `_n4` tile as well as
+        // `_n2`, so their batched read no longer grows with `m` up to 4
+        // either. Their 4 is PROVISIONAL: it is the widest tile they can serve,
+        // not a measured crossover. Re-measure each with the example named in
+        // this function's doc comment and lower the ones that lose — the
+        // weight-class ordering says the grid-indexed six are the most likely
+        // to come back at 3 or 2, since each of their 8-element sub-groups
+        // costs a codebook read into a multi-kilobyte grid table on top of the
+        // sign and scale unpack, and Q2_K showed a heavy per-block decode can
+        // make batching a LOSS. At m = 1 all twelve fall through to the F32
+        // GEMV, which is the only path they have there.
+        QuantFormat::Q8_0
+        | QuantFormat::Q6K
         | QuantFormat::Q4_0
         | QuantFormat::Q5_0
         | QuantFormat::Q4_1
@@ -81,7 +72,10 @@ pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
         | QuantFormat::IQ2S
         | QuantFormat::IQ3XXS
         | QuantFormat::IQ3S
-        | QuantFormat::IQ1S => 2,
+        | QuantFormat::IQ1S => 4,
+        // Heavier decode crosses earlier: MMQ already wins at m = 3, and these
+        // two have only the `_n2` tile.
+        QuantFormat::Q4K | QuantFormat::Q5K => 2,
         // Heaviest decode, and neither gains from batching. Q3_K only ties
         // the MMQ tile at m = 2 and loses above it. Q2_K's small gain at a
         // deep reduction reverses into a much larger loss at a shallow one,
@@ -218,12 +212,11 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
         // matrix for every token, which is what makes its cost scale with M.
         // Pick the narrowest tile that covers M in one block — a wider tile
         // would idle its spare columns, a narrower one would need two passes.
-        // Which widths exist is per format: Q8_0 and Q6_K crossed over out to
-        // a 4-token tile, so both `_n2` and `_n4` exist; Q4_K, Q5_K, the four
-        // legacy 32-element formats, the two IQ4 codebook formats and the six
-        // grid-indexed IQ formats have only `_n2`; Q3_K's and Q2_K's batched
-        // read never wins, so they have neither and always use the per-token
-        // kernel.
+        // Which widths exist is per format: Q8_0, Q6_K, the four legacy
+        // 32-element formats, the two IQ4 codebook formats and the six
+        // grid-indexed IQ formats have both `_n2` and `_n4`; Q4_K and Q5_K
+        // have only `_n2`; Q3_K's and Q2_K's batched read never wins, so they
+        // have neither and always use the per-token kernel.
         //
         // The legacy four, the two IQ4 formats and the six grid-indexed IQ
         // formats have no per-token dp4a kernel at all, so the m = 1 row below
@@ -232,8 +225,9 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
         let tokens_per_block: u32 = match (format, m) {
             (QuantFormat::Q3K | QuantFormat::Q2K, _) => 1,
             (_, 0..=1) => 1,
-            (QuantFormat::Q8_0 | QuantFormat::Q6K, m) if m >= 3 => 4,
-            _ => 2,
+            (QuantFormat::Q4K | QuantFormat::Q5K, _) => 2,
+            (_, 2) => 2,
+            _ => 4,
         };
         let kernel_name = match (format, tokens_per_block) {
             (QuantFormat::Q3K, _) => "quant_gemv_q3_k_q8_1_mwr",
@@ -248,18 +242,30 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
             (QuantFormat::Q6K, _) => "quant_gemv_q6_k_q8_1_mwr_n4",
             (QuantFormat::Q8_0, 2) => "quant_gemv_q8_0_q8_1_mwr_n2",
             (QuantFormat::Q8_0, _) => "quant_gemv_q8_0_q8_1_mwr_n4",
-            (QuantFormat::Q4_0, _) => "quant_gemv_q4_0_q8_1_mwr_n2",
-            (QuantFormat::Q5_0, _) => "quant_gemv_q5_0_q8_1_mwr_n2",
-            (QuantFormat::Q4_1, _) => "quant_gemv_q4_1_q8_1_mwr_n2",
-            (QuantFormat::Q5_1, _) => "quant_gemv_q5_1_q8_1_mwr_n2",
-            (QuantFormat::IQ4NL, _) => "quant_gemv_iq4_nl_q8_1_mwr_n2",
-            (QuantFormat::IQ4XS, _) => "quant_gemv_iq4_xs_q8_1_mwr_n2",
-            (QuantFormat::IQ2XXS, _) => "quant_gemv_iq2_xxs_q8_1_mwr_n2",
-            (QuantFormat::IQ2XS, _) => "quant_gemv_iq2_xs_q8_1_mwr_n2",
-            (QuantFormat::IQ2S, _) => "quant_gemv_iq2_s_q8_1_mwr_n2",
-            (QuantFormat::IQ3XXS, _) => "quant_gemv_iq3_xxs_q8_1_mwr_n2",
-            (QuantFormat::IQ3S, _) => "quant_gemv_iq3_s_q8_1_mwr_n2",
-            (QuantFormat::IQ1S, _) => "quant_gemv_iq1_s_q8_1_mwr_n2",
+            (QuantFormat::Q4_0, 2) => "quant_gemv_q4_0_q8_1_mwr_n2",
+            (QuantFormat::Q4_0, _) => "quant_gemv_q4_0_q8_1_mwr_n4",
+            (QuantFormat::Q5_0, 2) => "quant_gemv_q5_0_q8_1_mwr_n2",
+            (QuantFormat::Q5_0, _) => "quant_gemv_q5_0_q8_1_mwr_n4",
+            (QuantFormat::Q4_1, 2) => "quant_gemv_q4_1_q8_1_mwr_n2",
+            (QuantFormat::Q4_1, _) => "quant_gemv_q4_1_q8_1_mwr_n4",
+            (QuantFormat::Q5_1, 2) => "quant_gemv_q5_1_q8_1_mwr_n2",
+            (QuantFormat::Q5_1, _) => "quant_gemv_q5_1_q8_1_mwr_n4",
+            (QuantFormat::IQ4NL, 2) => "quant_gemv_iq4_nl_q8_1_mwr_n2",
+            (QuantFormat::IQ4NL, _) => "quant_gemv_iq4_nl_q8_1_mwr_n4",
+            (QuantFormat::IQ4XS, 2) => "quant_gemv_iq4_xs_q8_1_mwr_n2",
+            (QuantFormat::IQ4XS, _) => "quant_gemv_iq4_xs_q8_1_mwr_n4",
+            (QuantFormat::IQ2XXS, 2) => "quant_gemv_iq2_xxs_q8_1_mwr_n2",
+            (QuantFormat::IQ2XXS, _) => "quant_gemv_iq2_xxs_q8_1_mwr_n4",
+            (QuantFormat::IQ2XS, 2) => "quant_gemv_iq2_xs_q8_1_mwr_n2",
+            (QuantFormat::IQ2XS, _) => "quant_gemv_iq2_xs_q8_1_mwr_n4",
+            (QuantFormat::IQ2S, 2) => "quant_gemv_iq2_s_q8_1_mwr_n2",
+            (QuantFormat::IQ2S, _) => "quant_gemv_iq2_s_q8_1_mwr_n4",
+            (QuantFormat::IQ3XXS, 2) => "quant_gemv_iq3_xxs_q8_1_mwr_n2",
+            (QuantFormat::IQ3XXS, _) => "quant_gemv_iq3_xxs_q8_1_mwr_n4",
+            (QuantFormat::IQ3S, 2) => "quant_gemv_iq3_s_q8_1_mwr_n2",
+            (QuantFormat::IQ3S, _) => "quant_gemv_iq3_s_q8_1_mwr_n4",
+            (QuantFormat::IQ1S, 2) => "quant_gemv_iq1_s_q8_1_mwr_n2",
+            (QuantFormat::IQ1S, _) => "quant_gemv_iq1_s_q8_1_mwr_n4",
             _ => unreachable!(),
         };
 

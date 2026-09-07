@@ -21,20 +21,17 @@ pub(in crate::quant::cuda::quant_matmul) struct FeatMajorFormat {
     /// `true` when tile-parallel outruns stream-k at a geometry where
     /// `dispatch.rs` picks stream-k.
     ///
-    /// The rule `tiles < 2 * sms` assumes the wave stream-k saves is what
-    /// binds. For most formats it is. For a few it is not: their stream-k
-    /// kernel stalls on global-memory dependencies and saturates neither
-    /// compute nor bandwidth, so saving a wave buys nothing. The fixup pass
-    /// is not the cost.
+    /// Both grids hold the same blocks per SM, so residency does not separate
+    /// them. The split does: stream-k divides every tile across blocks and
+    /// pays a fixup pass to rejoin the partials. The finer the split, the more
+    /// that pass costs relative to the wave it saves. A format flagged here
+    /// gains too little from the split to cover the pass once the
+    /// tile-parallel grid nearly fills the device.
     ///
-    /// A decode that chains a dependent table lookup shows this most
-    /// clearly. Stream-k runs one block per SM, too few warps to cover the
-    /// second load; the tile-parallel grid packs more blocks per SM and
-    /// covers it. That does not account for every format flagged here, so
-    /// measure the two kernels rather than infer from the decode shape.
-    ///
-    /// Measured, not derived. No device capability predicts it. Taken on one
-    /// GPU architecture, so it can differ on others.
+    /// Measured, not derived. No decode property or device capability picks
+    /// out which formats those are, so measure the two kernels rather than
+    /// infer from the decode shape. Taken on one GPU architecture, so it can
+    /// differ on others.
     ///
     /// At small `m`, `token_tiles` is 1 for every `mmq_x`. Variant selection
     /// cannot change this trade-off.

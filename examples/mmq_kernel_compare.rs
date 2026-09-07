@@ -2502,6 +2502,7 @@ fn main() {
     let mut force_mmq_x: Option<u32> = None;
     let mut stream_k = false;
     let mut gemv = false;
+    let mut sk_waves: Option<u32> = None;
 
     let mut i = 0;
     while i < argv.len() {
@@ -2522,6 +2523,11 @@ fn main() {
                 stream_k = true;
                 i -= 1;
             }
+            // Overrides the stream-k grid with `compute_units * N`. Unset, the
+            // grid matches `dispatch.rs`: the SM count times the driver's
+            // occupancy query, which reports how many blocks actually fit
+            // resident per SM.
+            "--sk-waves" => sk_waves = Some(value().parse().expect("--sk-waves must be a u32")),
             // Also launches and times the format's GEMV kernel(s) — the path
             // `dispatch_gemv` takes for `m <= gemv_max_m` — at the same shape,
             // so the GEMV/MMQ crossover can be read off one run instead of two.
@@ -2532,7 +2538,7 @@ fn main() {
             other => {
                 panic!(
                     "unknown flag {other}, expected --n, --k, --m, --format, --mmq-x, \
-                     --stream-k, or --gemv"
+                     --stream-k, --sk-waves, or --gemv"
                 )
             }
         }
@@ -2904,7 +2910,6 @@ fn main() {
     let sk = match format.feat_major_infix() {
         Some(infix) if stream_k => {
             let mmq_x = fm_mmq_x;
-            let grid = device.profile().compute_units;
             let sk_name = format!("quant_mmq_{infix}_q8_1_mma_sk_x{mmq_x}");
             let fx_name = format!("quant_mmq_{infix}_q8_1_mma_fixup_x{mmq_x}");
             let sk_func = kernels::get_kernel_function(&mma_module, &sk_name)
@@ -2917,8 +2922,23 @@ fn main() {
                     mmq_x_smem_bytes(fm_x_stride, fm_scratch, mmq_x) as i32,
                 )
                 .expect("opt in to dynamic shared memory for the stream-k kernel");
-            // Never zeroed: the fixup reads only slots whose block provably
-            // wrote a partial, so a memset would be pure cost.
+            let compute_units = device.profile().compute_units;
+            let grid = match sk_waves {
+                Some(waves) => compute_units * waves,
+                None => {
+                    let blocks_per_sm = sk_func
+                        .occupancy_max_active_blocks_per_multiprocessor(
+                            256,
+                            mmq_x_smem_bytes(fm_x_stride, fm_scratch, mmq_x) as usize,
+                            None,
+                        )
+                        .expect("query stream-k occupancy");
+                    compute_units * blocks_per_sm
+                }
+            };
+            // Zeroed here only because `from_slice` needs a host buffer. The
+            // fixup reads only slots whose block provably wrote a partial, so
+            // the contents of the rest never reach an output.
             let ws_len = grid as usize * mmq_x as usize * 128;
             let ws =
                 Tensor::<CudaRuntime>::from_slice(&vec![0f32; ws_len], &[ws_len], &device).unwrap();

@@ -19,12 +19,20 @@ use super::tcf as tcf_dispatch;
 /// `kernels/dequant.cu`.
 const DEQUANT_BLOCK: u32 = 256;
 
-/// Output elements one Q4_K thread writes, matching `Q4K_ELEMS_PER_THREAD` in
-/// `kernels/dequant.cu`.
-const Q4K_ELEMS_PER_THREAD: u32 = 4;
+/// Output elements one K-quant thread writes, matching the `*_ELEMS_PER_THREAD`
+/// macros in `kernels/dequant.cu`. Every K-quant kernel there uses the same
+/// four-element run so one `float4` store covers a thread's whole output.
+const KQUANT_ELEMS_PER_THREAD: u32 = 4;
 
-/// Output elements one Q4_K super-block holds.
-const Q4K_ELEMS_PER_SUPER: u32 = 256;
+/// Output elements one K-quant super-block holds.
+const KQUANT_ELEMS_PER_SUPER: u32 = 256;
+
+/// Grid mapping shared by every K-quant dequant kernel: one thread per
+/// four-element run of a 256-element super-block.
+const KQUANT_MAPPING: DequantMapping = DequantMapping::ElementsPerThread {
+    elems_per_thread: KQUANT_ELEMS_PER_THREAD,
+    elems_per_block: KQUANT_ELEMS_PER_SUPER,
+};
 
 /// What one thread of a dequantization kernel owns.
 ///
@@ -155,17 +163,11 @@ impl DequantOps<CudaRuntime> for CudaClient {
             QuantFormat::Q4_0 => ("dequant_q4_0_f32", DequantMapping::BlockPerThread),
             QuantFormat::Q5_0 => ("dequant_q5_0_f32", DequantMapping::BlockPerThread),
             QuantFormat::Q8_0 => ("dequant_q8_0_f32", DequantMapping::BlockPerThread),
-            QuantFormat::Q2K => ("dequant_q2_k_f32", DequantMapping::BlockPerThread),
-            QuantFormat::Q3K => ("dequant_q3_k_f32", DequantMapping::BlockPerThread),
-            QuantFormat::Q4K => (
-                "dequant_q4_k_f32",
-                DequantMapping::ElementsPerThread {
-                    elems_per_thread: Q4K_ELEMS_PER_THREAD,
-                    elems_per_block: Q4K_ELEMS_PER_SUPER,
-                },
-            ),
-            QuantFormat::Q5K => ("dequant_q5_k_f32", DequantMapping::BlockPerThread),
-            QuantFormat::Q6K => ("dequant_q6_k_f32", DequantMapping::BlockPerThread),
+            QuantFormat::Q2K => ("dequant_q2_k_f32", KQUANT_MAPPING),
+            QuantFormat::Q3K => ("dequant_q3_k_f32", KQUANT_MAPPING),
+            QuantFormat::Q4K => ("dequant_q4_k_f32", KQUANT_MAPPING),
+            QuantFormat::Q5K => ("dequant_q5_k_f32", KQUANT_MAPPING),
+            QuantFormat::Q6K => ("dequant_q6_k_f32", KQUANT_MAPPING),
             QuantFormat::IQ4NL => ("dequant_iq4_nl_f32", DequantMapping::BlockPerThread),
             QuantFormat::IQ4XS => ("dequant_iq4_xs_f32", DequantMapping::BlockPerThread),
             QuantFormat::IQ3S => ("dequant_iq3_s_f32", DequantMapping::BlockPerThread),

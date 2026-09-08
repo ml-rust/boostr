@@ -85,6 +85,25 @@ static __device__ __forceinline__ TcfLayout tcf_layout(
     return l;
 }
 
+// One payload byte through the read-only data cache.
+//
+// Every plane this file reads is global memory the kernel never writes, which
+// is exactly `__ldg`'s contract. The scale planes are the reason it is worth
+// naming: a group parameter is one or two bytes out of a whole-tensor plane
+// that sits megabytes from the code plane, so each such read costs a full
+// memory burst that delivers almost nothing else the warp wants. Routing them
+// through the read-only cache lets the burst stay resident for the neighbouring
+// groups the warp resolves next, instead of evicting code-plane lines.
+//
+// A byte load has no alignment requirement, which is why the 16-bit readers
+// below assemble two of these rather than issuing one 16-bit load: plane
+// offsets are computed by `quant/tcf/planes.rs` and are not guaranteed even.
+// `__ldg` is a cache hint and nothing else — the bytes returned are the bytes
+// in memory, so every value built from them is bit-identical to a plain load.
+static __device__ __forceinline__ unsigned int tcf_ldg_u8(const unsigned char* p) {
+    return (unsigned int)__ldg(p);
+}
+
 // A little-endian binary16 read as f32. Every binary16 is exactly
 // representable in f32, so this agrees with `tcf_core::binary16::bits_to_f32`
 // bit for bit.
@@ -93,8 +112,10 @@ static __device__ __forceinline__ TcfLayout tcf_layout(
 // value is a bfloat16 and belongs to `tcf_read_bfloat16`; the two formats
 // never share a reader.
 static __device__ __forceinline__ float tcf_read_binary16(const unsigned char* p) {
+    unsigned short bits =
+        (unsigned short)(tcf_ldg_u8(p) | (tcf_ldg_u8(p + 1) << 8u));
     __half h;
-    memcpy(&h, p, sizeof(__half));
+    memcpy(&h, &bits, sizeof(__half));
     return __half2float(h);
 }
 
@@ -107,9 +128,8 @@ static __device__ __forceinline__ float tcf_read_binary16(const unsigned char* p
 // `tcf_core::bfloat16::bits_to_f32` bit for bit with no normalize step and no
 // float operation that `--use_fast_math` could reach.
 static __device__ __forceinline__ float tcf_read_bfloat16(const unsigned char* p) {
-    unsigned short bits;
-    memcpy(&bits, p, sizeof(unsigned short));
-    return __uint_as_float((unsigned int)bits << 16u);
+    unsigned int bits = tcf_ldg_u8(p) | (tcf_ldg_u8(p + 1) << 8u);
+    return __uint_as_float(bits << 16u);
 }
 
 // Section 14.6 read direction. Field `slot` of super-block `block` occupies
@@ -125,9 +145,9 @@ static __device__ __forceinline__ unsigned int tcf_read_packed6(
     unsigned int bit = slot * 6u;
     size_t byte_index = base + (size_t)(bit >> 3);
     unsigned int offset = bit & 7u;
-    unsigned int value = (unsigned int)plane[byte_index] >> offset;
+    unsigned int value = tcf_ldg_u8(plane + byte_index) >> offset;
     if (offset > 2u) {
-        value |= ((unsigned int)plane[byte_index + 1]) << (8u - offset);
+        value |= tcf_ldg_u8(plane + byte_index + 1) << (8u - offset);
     }
     return value & 0x3fu;
 }
@@ -164,7 +184,7 @@ static __device__ __forceinline__ void tcf_group_values(
 
     if (l.scale_form == TCF_SCALE_TWO_LEVEL_U8) {
         float super = tcf_read_bfloat16(payload + l.super_off + (size_t)block * 2u);
-        unsigned int sub = (unsigned int)payload[(size_t)l.scale_off + global];
+        unsigned int sub = tcf_ldg_u8(payload + (size_t)l.scale_off + global);
         *out_scale = __fmul_rn(super, (float)sub);
         *out_min = 0.0f;
         return;
@@ -277,11 +297,76 @@ static __device__ __forceinline__ int tcf_expand_nibble_quad(unsigned int h) {
                  | ((h & 0xF000u) << 12));
 }
 
-// Execution tiles one warp decodes per step of the GEMV inner loop, and the
-// elements one lane owns of that step. 8 * 64 / 32 == 16.
+// Execution tiles one warp decodes per CODE read of the GEMV inner loop, and
+// the elements one lane owns of that read. 8 * 64 / 32 == 16.
+//
+// This is the CODE-plane unit and is fixed by the wide-load geometry, not a
+// tuning knob: `tcf_code_run` puts a lane's sixteen elements in one `uint4`
+// (8-bit) or one `uint2` plus one `uint` (4- and 6-bit), and 32 lanes times
+// sixteen elements is exactly eight 64-element tiles. The GEMM's staging chunk
+// (`TCF_GEMM_CHUNK`) is the same sixteen. Changing either would change both.
+// The SCALE-plane unit is separate and is `TCF_GEMV_RUN_TILES` below.
 #define TCF_RUN_TILES 8u
 #define TCF_RUN (TCF_RUN_TILES * TCF_TILE)
 #define TCF_RUN_PER_LANE 16u
+
+// Lanes in a warp. The GEMV run geometry below is warp-wide, so the count
+// belongs beside it rather than in one kernel file.
+#define TCF_GEMV_LANES 32u
+
+// Largest group count one execution tile can carry: v1's narrowest group is 16
+// elements over a 64-element tile (`tcf_core::MAX_GROUPS_PER_TILE`). Sizes the
+// dequant kernel's shared parameter arrays and the GEMV's per-lane ones.
+#define TCF_MAX_GROUPS 4u
+
+// ── The GEMV's scale-resolve run width ──────────────────────────────────
+//
+// Execution tiles the f32 GEMV resolves group parameters for in ONE warp-wide
+// step. It is a whole number of `TCF_RUN_TILES` code reads: the code plane is
+// still streamed eight tiles at a time, and this only says how many of those
+// reads share one resolution.
+//
+// # Why it is separate from the code width
+//
+// Resolving one group touches up to FOUR whole-tensor planes — sub-scale,
+// sub-minimum, super-scale, super-minimum for Section 13.4 — that sit megabytes
+// apart. Each touch delivers one or two useful bytes and costs a full memory
+// burst, so the cost tracks the number of RESOLUTIONS, not the number of bytes
+// the row actually needs. A block format that interleaves its scale into the
+// code stream pays none of it. Widening the resolve is what amortizes that
+// fixed four-plane cost over more elements; the code-plane traffic is identical
+// either way.
+//
+// # A measured constant
+//
+// This is the ONE value to edit to re-tune. It must be a multiple of
+// `TCF_RUN_TILES`; 8 (one code read, the un-widened behaviour), 16 and 32 are
+// the widths to compare. Re-measure with:
+//
+//   cargo bench --features cuda --bench quant_throughput -- --backend cuda --filter Q4
+//
+// On a CUDA row, read the `ns*` column, NOT the `tcf/gguf` ratio column: that
+// ratio is built from retired HOST instructions, which on a CUDA row count
+// kernel launch work rather than kernel work.
+//
+// Wider is not automatically better: the resolved parameters live in per-lane
+// registers whose count is `TCF_GEMV_GROUP_SLOTS` below, and register pressure
+// costs occupancy. Measure occupancy alongside runtime.
+#define TCF_GEMV_RUN_TILES 32u
+
+// Code reads inside one scale-resolve run, and its element span.
+#define TCF_GEMV_CODE_RUNS (TCF_GEMV_RUN_TILES / TCF_RUN_TILES)
+#define TCF_GEMV_RUN (TCF_GEMV_RUN_TILES * TCF_TILE)
+
+// Per-lane resolved `(scale, minimum)` slots one scale-resolve run needs.
+//
+// A run holds `TCF_GEMV_RUN_TILES * groups_per_tile` groups, and the warp
+// resolves them 32 at a time — lane `i` taking group `32 * t + i` of slot `t`.
+// The array is sized for the widest case, `groups_per_tile == TCF_MAX_GROUPS`;
+// a wider group leaves the upper slots unused, and the loops that fill them are
+// guarded on the run's real group count.
+#define TCF_GEMV_GROUP_SLOTS \
+    ((TCF_GEMV_RUN_TILES * TCF_MAX_GROUPS + TCF_GEMV_LANES - 1u) / TCF_GEMV_LANES)
 
 // The 16 codes lane `lane` owns of the eight-tile run starting at `tile0`,
 // read as whole machine words.
@@ -387,4 +472,84 @@ static __device__ __forceinline__ float tcf_value(
         return __fmul_rn(scale, (float)code);
     }
     return __fadd_rn(__fmul_rn(scale, (float)code), min_value);
+}
+
+// ── The GEMV's widened scale resolution ─────────────────────────────────
+//
+// One warp's resolved `(scale, minimum)` pairs for a whole scale-resolve run,
+// held in registers: slot `t` of lane `i` is the run's group `32 * t + i`.
+struct TcfGroupRun {
+    float scale[TCF_GEMV_GROUP_SLOTS];
+    float min_value[TCF_GEMV_GROUP_SLOTS];
+};
+
+// Resolves `groups` consecutive groups starting at GLOBAL group index `group0`,
+// 32 per slot, one `tcf_group_values` call per lane per slot.
+//
+// The group index is global — flattened over the whole tensor, the same index
+// the planes are keyed on — so a caller that knows a row's group range needs no
+// super-block alignment and no per-row special case. `groups` is the run's real
+// group count, which is below `32 * TCF_GEMV_GROUP_SLOTS` whenever the encoding
+// uses a group wider than 16; the slots past it stay zero and are never read.
+//
+// The values are `tcf_group_values`' own, unmodified: this only changes HOW
+// OFTEN that function runs, never what it returns.
+static __device__ __forceinline__ TcfGroupRun tcf_resolve_group_run(
+    const unsigned char* __restrict__ payload,
+    TcfLayout l,
+    unsigned int group0,
+    unsigned int groups,
+    unsigned int lane
+) {
+    TcfGroupRun r;
+#pragma unroll
+    for (unsigned int t = 0; t < TCF_GEMV_GROUP_SLOTS; ++t) {
+        const unsigned int index = t * TCF_GEMV_LANES + lane;
+        float scale = 0.0f;
+        float min_value = 0.0f;
+        if (index < groups) {
+            const unsigned int gg = group0 + index;
+            tcf_group_values(payload, l, gg / l.groups_per_tile,
+                             gg % l.groups_per_tile, &scale, &min_value);
+        }
+        r.scale[t] = scale;
+        r.min_value[t] = min_value;
+    }
+    return r;
+}
+
+// The run's group `32 * slot + src`, broadcast to every lane.
+//
+// # `slot` MUST be warp-uniform
+//
+// `__shfl_sync` reads the named variable ON THE SOURCE LANE, so the slot
+// selection has to have already picked the same array entry there. Both callers
+// satisfy this the same way, and it is a property of the geometry rather than a
+// convention: the 32 lanes of one code read span exactly `TCF_RUN / group`
+// consecutive groups, that count divides 32, and a run's group ranges are
+// aligned to it — so the whole warp's group indices for one code read fall
+// inside ONE aligned block of 32, and `index >> 5` is the same on every lane.
+// `src`, `index & 31`, is the part that differs per lane.
+//
+// The selection is a compare chain over a compile-time slot count rather than
+// an array subscript: a runtime subscript on a per-thread array spills it to
+// local memory, which is the one thing a register-held run must not do.
+static __device__ __forceinline__ void tcf_run_broadcast(
+    TcfGroupRun r,
+    unsigned int slot,
+    unsigned int src,
+    float* out_scale,
+    float* out_min
+) {
+    float scale = 0.0f;
+    float min_value = 0.0f;
+#pragma unroll
+    for (unsigned int t = 0; t < TCF_GEMV_GROUP_SLOTS; ++t) {
+        if (t == slot) {
+            scale = r.scale[t];
+            min_value = r.min_value[t];
+        }
+    }
+    *out_scale = __shfl_sync(0xFFFFFFFFu, scale, src);
+    *out_min = __shfl_sync(0xFFFFFFFFu, min_value, src);
 }

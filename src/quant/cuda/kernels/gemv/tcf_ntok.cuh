@@ -39,10 +39,25 @@
 // stores `d * sum(x)` over the ORIGINAL floats rather than `d * sum(q)` over
 // the quants, so it would not match MMQ.
 //
-// # Scale resolution, once per group
+// # Scale resolution, once per RUN of groups
 //
-// `d_eff` and `m_eff` are resolved ONCE per 32-element group, outside the
-// token loop, by `tcf_group_values` in `../tcf.cuh` — which is also the one
+// Resolving one group touches up to four whole-tensor planes that sit megabytes
+// apart, each touch spending a full memory burst to deliver one or two bytes.
+// So the resolution is amortized twice over. First across tokens: it sits
+// outside the token loop, as the weight decode does. Second across groups: a
+// warp takes `TCF_GEMV_RUN_TILES` execution tiles' worth of CONSECUTIVE groups
+// at a time, resolves all of them in one warp-wide step through
+// `tcf_resolve_group_run`, and broadcasts each group's pair to the four lanes
+// that own it with `tcf_run_broadcast`. Without that second step every lane
+// resolves its own group and the four lanes of one group resolve it four times.
+// `TCF_GEMV_RUN_TILES` is the shared width; `../tcf.cuh` documents it.
+//
+// The striding unit is therefore a whole run rather than one 8-group step. A
+// row shorter than one run leaves the extra warps idle, which is the same
+// trade the f32 GEMV's run makes.
+//
+// `d_eff` and `m_eff` are resolved by `tcf_group_values` in `../tcf.cuh` —
+// which is also the one
 // place the Section 13.4 two-level arithmetic, the Section 14.6 6-bit field
 // position (`tcf_read_packed6`) and the bfloat16 widening
 // (`tcf_read_bfloat16`) are written. Nothing here restates any of them.
@@ -60,8 +75,8 @@
 //     256-byte-aligned device allocation, and lane `w` reads at `+ 4 * w`.
 //   - Activations. A Q8_1 record is 36 bytes, its quants start at byte 4, and
 //     a lane reads at `+ 8 * w`.
-// The scale side reads bytes (`tcf_read_packed6`) and `memcpy`s a `short`
-// (`tcf_read_bfloat16`), neither of which has an alignment requirement.
+// The scale side reads single bytes through `tcf_ldg_u8` and assembles the
+// 16-bit values from them, so it has no alignment requirement either.
 
 #pragma once
 
@@ -88,8 +103,11 @@
 // are block-uniform, so every thread reaches the barrier inside the reduction.
 //
 // Ragged K. K is gated only on `k % 32 == 0` by the launcher — and on the
-// tile width by `matmul_setup` — so the last 8-group step can be partial; the
-// group index is bounds-checked rather than read past the row.
+// tile width by `matmul_setup` — so the last resolve run and the last 8-group
+// step inside it can both be partial. The run's group count is clamped to what
+// the row has left, and the per-step group index is bounds-checked, so neither
+// reads past the row. The broadcast still runs on every lane of the warp,
+// before that test: a full-mask shuffle some lanes skip is illegal.
 
 template <int NTOK>
 static __device__ __forceinline__ void quant_gemv_tcf_q4as32dt64_q8_1_mwr_ntok(
@@ -111,6 +129,12 @@ static __device__ __forceinline__ void quant_gemv_tcf_q4as32dt64_q8_1_mwr_ntok(
     // elements, so one count serves both and the group indices coincide.
     const unsigned int bpr = K / 32;
     const unsigned int steps = (bpr + 7) / 8;  // 8-group steps, rounded up
+    // Groups one scale resolution covers, and the 8-group steps inside it. A
+    // warp takes a whole such SUPER-STEP at a time — see the scale-resolution
+    // note in the header — so the striding unit is `inner` steps, not one.
+    const unsigned int gres = TCF_GEMV_RUN_TILES * l.groups_per_tile;
+    const unsigned int inner = gres / 8u;
+    const unsigned int supers = (steps + inner - 1u) / inner;
 
     const unsigned char* q8_rows[NTOK];
     #pragma unroll
@@ -134,44 +158,62 @@ static __device__ __forceinline__ void quant_gemv_tcf_q4as32dt64_q8_1_mwr_ntok(
     #pragma unroll
     for (int j = 0; j < NTOK; j++) acc[j] = 0.0f;
 
-    for (unsigned int step = (unsigned int)warp_id; step < steps; step += NWARPS) {
-        const unsigned int b = step * 8 + kbx;
-        if (b >= bpr) continue;
-
+    for (unsigned int sstep = (unsigned int)warp_id; sstep < supers; sstep += NWARPS) {
+        // Row-local group index this resolution starts at. `sstep < supers`
+        // makes it strictly below `bpr`, so the run always has work.
+        const unsigned int base = sstep * gres;
         // Planes are indexed by the GLOBAL group number, so a row's groups are
         // located by counting from the start of the tensor, not from the start
         // of the row. That is what makes this kernel independent of whether a
         // row starts on a super-block boundary.
-        const unsigned long long gg = (unsigned long long)col * bpr + b;
-        const unsigned int tile = (unsigned int)(gg / l.groups_per_tile);
-        const unsigned int g = (unsigned int)(gg % l.groups_per_tile);
+        const unsigned int run_groups = (bpr - base < gres) ? (bpr - base) : gres;
+        const TcfGroupRun params = tcf_resolve_group_run(
+            weight, l, (unsigned int)((unsigned long long)col * bpr + base),
+            run_groups, (unsigned int)lane_id);
 
-        float dw, mw;
-        tcf_group_values(weight, l, tile, g, &dw, &mw);
+        for (unsigned int i = 0; i < inner; ++i) {
+            // The run's own group index for this lane. The four lanes of one
+            // group share it, and `idx >> 5` is `i / 4` — warp-uniform, which
+            // is what `tcf_run_broadcast` requires. The broadcast runs on EVERY
+            // lane before the bounds test below, because a full-mask shuffle a
+            // skipped lane never reaches is illegal.
+            const unsigned int idx = i * 8u + kbx;
+            float dw = 0.0f;
+            float mw = 0.0f;
+            tcf_run_broadcast(params, idx / TCF_GEMV_LANES, idx % TCF_GEMV_LANES,
+                              &dw, &mw);
 
-        const unsigned char* codes = weight
-            + (size_t)tile * (size_t)(TCF_TILE / 2u)
-            + (size_t)g * (size_t)group_code_bytes
-            + lane_code_off;
-        const unsigned int cw = *(const unsigned int*)codes;
-        // Adjacent-pair nibbles: the low half of the word is elements
-        // 8w..8w+3, the high half is elements 8w+4..8w+7. The codes are
-        // unsigned levels 0..15, already inside the int8 range dp4a reads, and
-        // the asymmetry rides the minimum term below.
-        const int v_lo = tcf_expand_nibble_quad(cw & 0xFFFFu);
-        const int v_hi = tcf_expand_nibble_quad(cw >> 16);
+            const unsigned int b = base + idx;
+            if (b >= bpr) continue;
 
-        #pragma unroll
-        for (int j = 0; j < NTOK; j++) {
-            const unsigned char* ablk = q8_rows[j] + (unsigned long long)b * 36;
-            const float da = __half2float(*(const __half*)ablk);
-            const int a_lo = *(const int*)(ablk + pos_lo);
-            const int a_hi = *(const int*)(ablk + pos_hi);
+            const unsigned long long gg = (unsigned long long)col * bpr + b;
+            const unsigned int tile = (unsigned int)(gg / l.groups_per_tile);
+            const unsigned int g = (unsigned int)(gg % l.groups_per_tile);
 
-            acc[j] += dw * da * (float)dp4a(v_lo, a_lo, dp4a(v_hi, a_hi, 0));
-            // THE MIN SIGN: added, never subtracted. See the header.
-            const int sumi = dp4a(0x01010101, a_lo, dp4a(0x01010101, a_hi, 0));
-            acc[j] += mw * da * (float)sumi;
+            const unsigned char* codes = weight
+                + (size_t)tile * (size_t)(TCF_TILE / 2u)
+                + (size_t)g * (size_t)group_code_bytes
+                + lane_code_off;
+            const unsigned int cw = *(const unsigned int*)codes;
+            // Adjacent-pair nibbles: the low half of the word is elements
+            // 8w..8w+3, the high half is elements 8w+4..8w+7. The codes are
+            // unsigned levels 0..15, already inside the int8 range dp4a reads,
+            // and the asymmetry rides the minimum term below.
+            const int v_lo = tcf_expand_nibble_quad(cw & 0xFFFFu);
+            const int v_hi = tcf_expand_nibble_quad(cw >> 16);
+
+            #pragma unroll
+            for (int j = 0; j < NTOK; j++) {
+                const unsigned char* ablk = q8_rows[j] + (unsigned long long)b * 36;
+                const float da = __half2float(*(const __half*)ablk);
+                const int a_lo = *(const int*)(ablk + pos_lo);
+                const int a_hi = *(const int*)(ablk + pos_hi);
+
+                acc[j] += dw * da * (float)dp4a(v_lo, a_lo, dp4a(v_hi, a_hi, 0));
+                // THE MIN SIGN: added, never subtracted. See the header.
+                const int sumi = dp4a(0x01010101, a_lo, dp4a(0x01010101, a_hi, 0));
+                acc[j] += mw * da * (float)sumi;
+            }
         }
     }
 

@@ -229,17 +229,29 @@ fn tcf_cuda_gemv_matches_cpu() {
     });
 }
 
-/// The GEMV's eight-tile run path, which `SHAPES` is too narrow to reach.
+/// The GEMV's run paths, which `SHAPES` is too narrow to reach.
 ///
-/// `TCF_RUN_TILES` is 8, so a row of fewer than eight tiles runs entirely on
-/// the tail. These widths reach the run itself, and cover both the case where
-/// it divides the row exactly and the case where it leaves a tail behind:
+/// The GEMV walks a row at three granularities: whole scale-resolve runs of
+/// `TCF_GEMV_RUN_TILES` tiles, then whole eight-tile code reads
+/// (`TCF_RUN_TILES`), then single tiles. A row of fewer than eight tiles runs
+/// entirely on the last. These widths reach each of the three, and cover both
+/// the case where a granularity divides the row exactly and the case where it
+/// leaves a tail behind:
 ///
-/// - `[3, 512]`: 8 tiles per row, one whole run, no tail.
-/// - `[2, 704]`: 11 tiles per row, one run and a 3-tile tail. The row width is
-///   not a whole number of super-blocks either, so a run's eight tiles straddle
-///   super-block boundaries and the two-level forms resolve across them.
-/// - `[5, 1024]`: 16 tiles per row, two whole runs.
+/// - `[3, 512]`: 8 tiles per row, one whole code read, no tail.
+/// - `[2, 704]`: 11 tiles per row, one code read and a 3-tile tail. The row
+///   width is not a whole number of super-blocks either, so a read's eight
+///   tiles straddle super-block boundaries and the two-level forms resolve
+///   across them.
+/// - `[5, 1024]`: 16 tiles per row, two whole code reads.
+/// - `[3, 2048]`: 32 tiles per row, one whole scale-resolve run at the
+///   committed width, no tail of either kind.
+/// - `[2, 2752]`: 43 tiles per row — one scale-resolve run, then one whole
+///   code read, then a 3-tile tail, so all three granularities run in one row
+///   and their partial sums must still agree with the CPU.
+///
+/// Widening `TCF_GEMV_RUN_TILES` past 32 leaves the last two too narrow to
+/// reach the widened run; extend them with it.
 ///
 /// The GEMV/GEMM dispatch boundary in `quant/cuda/quant_matmul/tcf_route.rs`
 /// is `m > 4`, not 16, so `M = 16` here already runs the GEMM path — the
@@ -247,16 +259,24 @@ fn tcf_cuda_gemv_matches_cpu() {
 /// `M = 16` additionally checks GEMM (or, for an encoding `takes_mmq_path`
 /// selects, the Q8_1-activation MMQ kernel) parity at the same shapes.
 ///
-/// These `k` values carry the dp4a GEMV's own step geometry for the encoding
-/// `takes_tcf_dp4a_gemv_path` selects, which walks eight 32-element groups per
-/// warp step rather than eight tiles: 512 is two whole steps, 704 is two steps
-/// and a 6-group tail that runs the bounds check, and neither 704 nor a row of
+/// These `k` values carry the dp4a GEMV's own geometry for the encoding
+/// `takes_tcf_dp4a_gemv_path` selects, which resolves a run of 32-element
+/// groups and then walks it eight groups per step: 512 is 16 groups, a partial
+/// run of two whole steps; 704 is 22 groups, two steps and a 6-group tail that
+/// runs the bounds check; 2752 is 86 groups, one whole run followed by a
+/// partial one that ends on that same 6-group tail. Neither 704 nor a row of
 /// 512 at `n = 3` starts on a super-block boundary, so its global-tile scale
 /// resolution is exercised across super-blocks.
 #[test]
 fn tcf_cuda_gemv_run_path_matches_cpu() {
     with_cuda_backend(|client, device| {
-        for (n, k) in [(3usize, 512usize), (2, 704), (5, 1024)] {
+        for (n, k) in [
+            (3usize, 512usize),
+            (2, 704),
+            (5, 1024),
+            (3, 2048),
+            (2, 2752),
+        ] {
             for m in [1usize, 16] {
                 let weight_values = source_values(n * k, 0);
                 let act = source_values(m * k, 41);

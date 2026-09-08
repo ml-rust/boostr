@@ -3874,23 +3874,10 @@ struct MmqfTcfQ8S32T64 {
     }
 };
 
-// Expands four ADJACENT 4-bit TCF codes into one int8 lane word.
-//
-// Section 14.1 packs a 4-bit tile as `byte = u[2e] | (u[2e+1] << 4)`, so four
-// consecutive elements fill bits 0..15 of `h` in element order and the four
-// int8 lanes come out in that same order. This is NOT ggml's 4-bit map, where
-// one byte's low and high nibbles belong to sub-blocks 32 elements apart —
-// compare `MmqfQ4K::stage`, which splits one word into two staged words 8
-// apart. `tcf_code`'s `l.bits == 4u` branch in `tcf.cuh` is the layout this
-// mirrors.
-//
-// The codes are UNSIGNED levels, the encoding being asymmetric, so no sign
-// resolution applies and 0..15 already sits inside the signed int8 range the
-// `mma` reads. The minimum term carries the asymmetry, as it does for Q4_K.
-static __device__ __forceinline__ int tcf_expand_nibble_quad(unsigned int h) {
-    return (int)((h & 0x000Fu) | ((h & 0x00F0u) << 4) | ((h & 0x0F00u) << 8)
-                 | ((h & 0xF000u) << 12));
-}
+// `tcf_expand_nibble_quad`, which the staging below reads a code word with,
+// lives in `tcf.cuh` beside the rest of Section 14's read direction: the dp4a
+// GEMV in `gemv/tcf_ntok.cuh` unpacks the same plane and a second copy of the
+// nibble map is the drift the TCF parity test only catches after it ships.
 
 // TCF `Q4AS32DT64` weight format policy, same contract as `MmqfQ80`.
 //

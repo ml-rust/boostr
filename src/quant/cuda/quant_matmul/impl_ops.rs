@@ -14,27 +14,12 @@ use super::super::int4_gemm as int4_dispatch;
 use super::super::kernels::{
     self, GEMV_Q2_K_MODULE, GEMV_Q3_K_MODULE, GEMV_Q5_K_MODULE, QUANT_GEMV_MODULE,
 };
-use super::super::tcf::{self as tcf_dispatch, MatmulShape};
+use super::super::tcf::MatmulShape;
 use super::batched_gemv::quant_matmul_batch_impl;
 use super::fallback::{quant_matmul_via_dequant, quant_swiglu_via_dequant};
 use super::format_dispatch::{dispatch_gemv, dispatch_matmul, gemv_max_m};
 use super::helpers::{quantize_activation_q8_1, validate_input_cuda};
-use super::mmq_feat_major;
-
-/// Smallest token count that takes the feature-major MMQ kernel rather than
-/// the f32 GEMV.
-///
-/// The MMQ kernel is flat in `m` across a token tile, while the f32 GEMV
-/// re-reads the weight per token, so the GEMV only wins where the tile would
-/// be nearly empty.
-///
-/// Measured: the MMQ kernel wins at every token count from this constant
-/// upward, on both benchmarked projection shapes. `m = 1` stays on the GEMV.
-///
-/// Re-measure: `cargo bench --features cuda --bench quant_throughput --
-/// --backend cuda --filter Q8`, comparing the `tcf` rows against the `gguf`
-/// rows at each `m`.
-const TCF_FEAT_MAJOR_MIN_M: usize = 2;
+use super::tcf_route;
 
 impl QuantMatmulOps<CudaRuntime> for CudaClient {
     fn int4_gemm(
@@ -176,74 +161,16 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
 
         // TCF weights take their own kernels: a GGUF kernel finds a block's
         // codes and its scale adjacent, while TCF spreads them over
-        // whole-tensor planes.
-        //
-        // TCF has two crossovers, not one, and they are NOT the `M <= 64` the
-        // GGUF path below uses:
-        // - `TCF_FEAT_MAJOR_MIN_M` (below) gates the encodings that have a
-        //   feature-major kernel onto MMQ ahead of everything else.
-        // - The `m <= 4` check further down chooses `launch_gemv` vs
-        //   `launch_gemm` for every encoding that isn't on the MMQ path — an
-        //   encoding that has a kernel falls back to it too when the MMQ
-        //   dispatch declines.
-        //
-        // The mechanism behind the GEMV/GEMM split, which is what carries
-        // across devices: GEMV cost grows linearly in M because it re-reads
-        // the weights once per row, while the register-blocked GEMM computes
-        // a 4x4 output patch per thread and stays nearly flat in M, so the
-        // two cross at a small M on every encoding.
-        //
-        // Re-measure each crossover whenever its kernel changes — a speedup
-        // on one side moves it, and both values are measured constants, not
-        // derived ones.
+        // whole-tensor planes. `tcf_route` owns that choice and its three
+        // crossovers, none of which is the `M <= 64` the GGUF path below uses.
         if let QuantScheme::Tcf(encoding) = weight.scheme() {
-            let at = MatmulShape { m, k, n };
-            let device_index = activation.device().id();
-            if m >= TCF_FEAT_MAJOR_MIN_M {
-                // An encoding with a `FeatMajorFormat` takes the feature-major
-                // tensor-core family instead of the f32 FMA tile `launch_gemm`
-                // runs; `mmq_feat_major::feat_major_format` is the one place
-                // that says which those are. Every other encoding keeps that
-                // tile, as does any K the format's staging map does not cover.
-                // `Ok(None)` means no compiled variant fits the device, and
-                // `launch_gemm` still serves the shape.
-                let feat_major = mmq_feat_major::feat_major_format(encoding.native())
-                    .filter(|format| k.is_multiple_of(format.k_multiple as usize))
-                    .filter(|_| {
-                        numr::runtime::cuda::CudaDevice::new(device_index)
-                            .profile()
-                            .caps
-                            .int8_mma_m16n8k32
-                    });
-                if let Some(format) = feat_major
-                    && mmq_feat_major::dispatch(
-                        format,
-                        self,
-                        &act_contig,
-                        weight,
-                        output_ptr,
-                        m,
-                        k,
-                        n,
-                    )?
-                    .is_some()
-                {
-                    return Ok(output);
-                }
-            }
-            let launch = if m <= 4 {
-                tcf_dispatch::launch_gemv
-            } else {
-                tcf_dispatch::launch_gemm
-            };
-            launch(
+            tcf_route::route_tcf(
                 self,
-                device_index,
-                act_contig.ptr(),
-                weight.storage().ptr(),
-                output_ptr,
                 encoding,
-                at,
+                &act_contig,
+                weight,
+                output_ptr,
+                MatmulShape { m, k, n },
             )?;
             return Ok(output);
         }

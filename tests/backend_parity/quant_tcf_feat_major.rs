@@ -52,9 +52,11 @@
 //!
 //! # Tolerance
 //!
-//! Every case here has `m` at or above `TCF_FEAT_MAJOR_MIN_M`, the GEMV/MMQ
-//! crossover — distinct from the plain `m <= 4` GEMV/GEMM split every other
-//! TCF encoding uses — and a native encoding with a feature-major kernel, so
+//! Every case here has an `m` its encoding's dispatch actually sends to MMQ —
+//! at or above `TCF_FEAT_MAJOR_MIN_M` for `Q8S32T64`, and above
+//! `TCF_DP4A_GEMV_MAX_M` for `Q4AS32DT64`, whose token-batched dp4a GEMV is
+//! checked first and would otherwise take the smallest batches — and a native
+//! encoding with a feature-major kernel, so
 //! every case takes an MMQ kernel under test and quantizes its activation to Q8_1
 //! while the CPU reference keeps f32. An element-wise tolerance cannot bound
 //! that gap (see
@@ -85,6 +87,13 @@ const SUPER_BLOCK_SHAPES: [(usize, usize); 3] = [(128, 256), (200, 1024), (257, 
 /// the crossover, leaving the token tile mostly empty and so exercising the
 /// tile clamp hardest.
 const BATCHES: [usize; 6] = [2, 3, 8, 40, 100, 128];
+
+/// `Q4AS32DT64` reaches MMQ at every entry above while
+/// `TCF_DP4A_GEMV_MAX_M` is zero. Should that constant move, the token counts
+/// at or below it would route to the dp4a GEMV instead, leaving the MMQ kernel
+/// this file exists to gate untested there — give this encoding its own list
+/// starting at the smallest `m` that still reaches MMQ, preferring an odd one
+/// so the token tile runs with most slots clamped.
 
 #[test]
 fn tcf_q8s32t64_feat_major_gemm_matches_cpu() {

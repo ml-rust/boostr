@@ -101,6 +101,17 @@ fn compile_cuda_kernels() {
         ));
     }
 
+    // TCF's dp4a GEMV is outside the loop above: a TCF encoding has a GEMV
+    // here but no gemm/ sibling — its large-batch path is the feature-major
+    // MMQ kernel in quant_mmq_mma.cu, or the f32 tile in tcf.cu.
+    kernel_sets.push((
+        gemv_dir,
+        "tcf_q4as32dt64.cu".to_string(),
+        "sm_75".to_string(),
+        true,
+        Some("gemv_tcf_q4as32dt64.ptx".to_string()),
+    ));
+
     kernel_sets.extend([
         // Attention kernels
         k!(

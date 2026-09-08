@@ -30,7 +30,11 @@ pub(super) fn validate_input_cuda(input: &Tensor<CudaRuntime>) -> Result<(usize,
 
 /// Quantize F32 activation to Q8_1 format on GPU.
 /// Returns a raw byte tensor of shape [m * num_blocks * 36] containing Q8_1 blocks.
-pub(super) fn quantize_activation_q8_1(
+///
+/// Visible across `quant::cuda` rather than to this module alone: the TCF dp4a
+/// GEMV in `quant::cuda::tcf` reads the same records, and a second producer
+/// would let the two codecs' activations drift apart.
+pub(in crate::quant::cuda) fn quantize_activation_q8_1(
     client: &CudaClient,
     activation: &Tensor<CudaRuntime>,
     m: usize,

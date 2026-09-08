@@ -77,6 +77,10 @@ macro_rules! push_layout {
     }};
 }
 
+// The dp4a GEMV launcher lives in its own file and pushes the same eleven
+// arguments, so it takes this macro rather than restating the order.
+pub(super) use push_layout;
+
 /// Dequantize a whole TCF payload into `output_ptr`, `product(shape)` f32.
 ///
 /// # Errors
@@ -180,24 +184,15 @@ pub(crate) fn launch_gemv(
 
 /// K slices one GEMM block splits its work into.
 ///
-/// A block owns a 32x32 output tile and 16 outputs per thread, so the grid a
-/// skinny batch leaves is small: M = 32, N = 1024 is 32 blocks against this
-/// card's 28 SMs, and no tiling of that output can produce more. Splitting K
-/// gives each block more warps over the same tile. Minimum microseconds on an
-/// RTX 3060, `Q8S32_T64`, over the shapes a TTS render issues:
-///
-/// | blocks | split 1 | split 2 | split 4 |
-/// |--------|---------|---------|---------|
-/// |      8 |    61.1 |    34.5 |    25.8 |
-/// |     32 |   285.8 |   179.3 |   152.2 |
-/// |     64 |    84.0 |    56.1 |    62.1 |
-/// |    128 |   102.4 |    99.6 |    99.6 |
-/// |    896 |   482.5 |   508.6 |   579.1 |
-/// |   2176 |  1127.9 |  1214.6 |  1357.7 |
+/// A block owns a 32x32 output tile and 16 outputs per thread, so a skinny
+/// batch leaves a grid too small to fill the device on its own — a handful of
+/// blocks against dozens of SMs, with no tiling of that output able to produce
+/// more blocks. Splitting K gives each block more warps over the same tile,
+/// which fills the idle SMs instead.
 ///
 /// A split costs two barriers and a shared-memory fold, and its per-slice
 /// staging cuts the blocks an SM can hold, so it loses once the grid fills the
-/// card on its own. A slice with no tile left to walk still runs its steps —
+/// device on its own. A slice with no tile left to walk still runs its steps —
 /// see the kernel — so the split is capped at the row's tile count.
 fn gemm_split(blocks: u64, tiles_per_row: u32) -> u32 {
     let split = if blocks < 64 {
@@ -264,7 +259,10 @@ pub(crate) fn launch_gemm(
 /// `K` must be a whole number of execution tiles: the kernels walk a weight
 /// row tile by tile, and a partial trailing tile would read a neighbouring
 /// row's codes.
-fn matmul_setup(encoding: TcfEncoding, at: MatmulShape) -> Result<(TcfPlanes, u32, u32, u32)> {
+pub(super) fn matmul_setup(
+    encoding: TcfEncoding,
+    at: MatmulShape,
+) -> Result<(TcfPlanes, u32, u32, u32)> {
     let name = encoding.name();
     let tile = encoding.tile();
     if tile == 0 || at.k == 0 || !at.k.is_multiple_of(tile) {

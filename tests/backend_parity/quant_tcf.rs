@@ -31,22 +31,30 @@
 //! sides accumulate in f32 and their summation orders differ, exactly as they
 //! do for every GGUF format.
 //!
-//! Some encodings have a `FeatMajorFormat`, so from `TCF_FEAT_MAJOR_MIN_M`
-//! tokens up (`quant/cuda/quant_matmul/impl_ops.rs`) their cases route to the
-//! MMQ kernel rather than `tcf_gemm_f32` / `tcf_gemv_f32`, and quantize the
-//! activation to Q8_1. Those cases take `helpers::assert_cosine_parity`. See
-//! `takes_mmq_path` below for which encodings that is. Every other encoding
-//! at any `m`, and a feature-major encoding below that constant, stays on
-//! the f32 path and keeps the element-wise gate.
+//! TWO dispatch conditions move a case off the f32 kernels and onto one that
+//! quantizes the activation to Q8_1 (`quant/cuda/quant_matmul/tcf_route.rs`):
 //!
-//! The branch condition here must track that constant, not the separate
-//! `m <= 4` split choosing `launch_gemv` against `launch_gemm` for the other
-//! encodings. The two thresholds differ.
+//! - `TCF_DP4A_GEMV_MAX_M` and below, `Q4AS32DT64` takes the token-batched
+//!   dp4a GEMV. This one is checked FIRST, so it wins wherever both apply,
+//!   and it covers `m = 1` — the shape that used to be the one place a
+//!   feature-major encoding kept an element-wise bound.
+//! - From `TCF_FEAT_MAJOR_MIN_M` up, an encoding with a `FeatMajorFormat`
+//!   takes the MMQ kernel rather than `tcf_gemm_f32` / `tcf_gemv_f32`.
+//!
+//! A case either condition selects takes `helpers::assert_cosine_parity`;
+//! `takes_mmq_path` and `takes_tcf_dp4a_gemv_path` are the mirrors. Every
+//! other encoding at any `m`, and a feature-major encoding below both
+//! constants, stays on the f32 path and keeps the element-wise gate.
+//!
+//! The branch conditions here must track those two constants, not the
+//! separate `m <= 4` split choosing `launch_gemv` against `launch_gemm` for
+//! the encodings on the f32 path. All three thresholds differ.
 
 #![cfg(feature = "cuda")]
 
 use super::helpers::{
-    assert_cosine_parity, assert_parity_f32_tol, setup_cpu, takes_mmq_path, with_cuda_backend,
+    assert_cosine_parity, assert_parity_f32_tol, setup_cpu, takes_mmq_path,
+    takes_tcf_dp4a_gemv_path, with_cuda_backend,
 };
 use boostr::quant::{QuantTensor, TcfEncoding};
 use boostr::{DequantOps, QuantMatmulOps};
@@ -172,17 +180,23 @@ fn tcf_cuda_dequant_matches_cpu_bit_for_bit() {
     });
 }
 
-/// `M = 1` runs the GEMV path, one warp per output column. `M = 8` is past
-/// the `m <= 4` GEMV/GEMM boundary in `quant/cuda/quant_matmul/impl_ops.rs`, so
-/// it runs the GEMM path instead — the register-blocked f32 tile, except for
-/// an encoding `takes_mmq_path` selects, which instead takes the MMQ kernel
-/// under test in `quant_tcf_feat_major.rs` and quantizes its activation to
-/// Q8_1.
+/// `M = 1` runs the GEMV path, one warp per output column — or, for an
+/// encoding `takes_tcf_dp4a_gemv_path` selects, the single-token tile of the
+/// dp4a GEMV. `M = 8` is past the `m <= 4` GEMV/GEMM boundary in
+/// `quant/cuda/quant_matmul/tcf_route.rs`, so it runs the GEMM path instead —
+/// the register-blocked f32 tile, except for an encoding `takes_mmq_path`
+/// selects, which instead takes the MMQ kernel under test in
+/// `quant_tcf_feat_major.rs`. Both of those quantize the activation to Q8_1.
+///
+/// `M = 2` and `M = 3` exist for the dp4a GEMV's token tiles: 2 reaches the
+/// `_n2` kernel and 3 the `_n4` one with its last slot clamped, so a wired
+/// tile width cannot ship without a parity case that reaches it. For every
+/// other encoding both are ordinary GEMV cases.
 #[test]
 fn tcf_cuda_gemv_matches_cpu() {
     with_cuda_backend(|client, device| {
         for (n, k) in SHAPES {
-            for m in [1usize, 8] {
+            for m in [1usize, 2, 3, 8] {
                 let weight_values = source_values(n * k, 0);
                 let act = source_values(m * k, 17);
                 for native in ENCODINGS {
@@ -204,7 +218,7 @@ fn tcf_cuda_gemv_matches_cpu() {
                         .to_vec::<f32>();
 
                     let label = format!("{} gemv {m}x{k}x{n}", TcfEncoding::new(native).name());
-                    if takes_mmq_path(native, m) {
+                    if takes_mmq_path(native, m) || takes_tcf_dp4a_gemv_path(native, m, k) {
                         assert_cosine_parity(&got, &want, &label);
                     } else {
                         assert_parity_f32_tol(&got, &want, &label, 1e-3, 1e-5);
@@ -227,11 +241,18 @@ fn tcf_cuda_gemv_matches_cpu() {
 ///   super-block boundaries and the two-level forms resolve across them.
 /// - `[5, 1024]`: 16 tiles per row, two whole runs.
 ///
-/// The GEMV/GEMM dispatch boundary in `quant/cuda/quant_matmul/impl_ops.rs`
+/// The GEMV/GEMM dispatch boundary in `quant/cuda/quant_matmul/tcf_route.rs`
 /// is `m > 4`, not 16, so `M = 16` here already runs the GEMM path — the
 /// eight-tile run is exercised through `M = 1` at these wider `k` values, and
 /// `M = 16` additionally checks GEMM (or, for an encoding `takes_mmq_path`
 /// selects, the Q8_1-activation MMQ kernel) parity at the same shapes.
+///
+/// These `k` values carry the dp4a GEMV's own step geometry for the encoding
+/// `takes_tcf_dp4a_gemv_path` selects, which walks eight 32-element groups per
+/// warp step rather than eight tiles: 512 is two whole steps, 704 is two steps
+/// and a 6-group tail that runs the bounds check, and neither 704 nor a row of
+/// 512 at `n = 3` starts on a super-block boundary, so its global-tile scale
+/// resolution is exercised across super-blocks.
 #[test]
 fn tcf_cuda_gemv_run_path_matches_cpu() {
     with_cuda_backend(|client, device| {
@@ -258,7 +279,7 @@ fn tcf_cuda_gemv_run_path_matches_cpu() {
                         .to_vec::<f32>();
 
                     let label = format!("{} gemv run {m}x{k}x{n}", TcfEncoding::new(native).name());
-                    if takes_mmq_path(native, m) {
+                    if takes_mmq_path(native, m) || takes_tcf_dp4a_gemv_path(native, m, k) {
                         assert_cosine_parity(&got, &want, &label);
                     } else {
                         assert_parity_f32_tol(&got, &want, &label, 1e-3, 1e-5);
@@ -269,7 +290,7 @@ fn tcf_cuda_gemv_run_path_matches_cpu() {
     });
 }
 
-/// The GEMM path (`m > 4` in `quant/cuda/quant_matmul/impl_ops.rs`). A 16x16
+/// The GEMM path (`m > 4` in `quant/cuda/quant_matmul/tcf_route.rs`). A 16x16
 /// output tile with the weight staged in shared memory, including an M that
 /// is not a multiple of the tile edge. An encoding `takes_mmq_path` selects
 /// instead takes the MMQ kernel under test in `quant_tcf_feat_major.rs` and
@@ -300,7 +321,7 @@ fn tcf_cuda_gemm_matches_cpu() {
                         .to_vec::<f32>();
 
                     let label = format!("{} gemm {m}x{k}x{n}", TcfEncoding::new(native).name());
-                    if takes_mmq_path(native, m) {
+                    if takes_mmq_path(native, m) || takes_tcf_dp4a_gemv_path(native, m, k) {
                         assert_cosine_parity(&got, &want, &label);
                     } else {
                         assert_parity_f32_tol(&got, &want, &label, 1e-3, 1e-5);
@@ -315,7 +336,7 @@ fn tcf_cuda_gemm_matches_cpu() {
 /// than the GGUF fused kernel, which reads a block layout TCF does not have.
 ///
 /// `m` is 4, at or past the `TCF_FEAT_MAJOR_MIN_M` crossover in
-/// `quant/cuda/quant_matmul/impl_ops.rs`, so an encoding `takes_mmq_path`
+/// `quant/cuda/quant_matmul/tcf_route.rs`, so an encoding `takes_mmq_path`
 /// selects routes through the MMQ kernel for both of its matmuls here and
 /// quantizes its activation to Q8_1 each time; the other encodings stay on
 /// the f32 tile. SwiGLU then applies a sigmoid and a product on top, so that
@@ -376,7 +397,7 @@ fn tcf_cuda_swiglu_matches_cpu() {
                 .to_vec::<f32>();
 
             let label = format!("{} swiglu", TcfEncoding::new(native).name());
-            if takes_mmq_path(native, m) {
+            if takes_mmq_path(native, m) || takes_tcf_dp4a_gemv_path(native, m, k) {
                 assert_cosine_parity(&got, &want, &label);
             } else {
                 assert_parity_f32_tol(&got, &want, &label, 1e-3, 1e-5);

@@ -255,6 +255,28 @@ static __device__ __forceinline__ int tcf_code(
     return tcf_sign_resolve(field, l.bits, l.symmetric);
 }
 
+// Expands four ADJACENT 4-bit TCF codes into one int8 lane word.
+//
+// Section 14.1 packs a 4-bit tile as `byte = u[2e] | (u[2e+1] << 4)`, so four
+// consecutive elements fill bits 0..15 of `h` in element order and the four
+// int8 lanes come out in that same order. This is NOT ggml's 4-bit map, where
+// one byte's low and high nibbles belong to sub-blocks 32 elements apart —
+// compare `MmqfQ4K::stage` in `quant_mmq_mma.cu`, which splits one word into
+// two staged words 8 apart. `tcf_code`'s `l.bits == 4u` branch above is the
+// layout this mirrors.
+//
+// The codes are UNSIGNED levels for an asymmetric encoding, so no sign
+// resolution applies and 0..15 already sits inside the signed int8 range dp4a
+// and `mma` read. The minimum term carries the asymmetry, as it does for Q4_K.
+//
+// Two callers unpack this plane — `MmqfTcfQ4AS32DT64::stage` and the dp4a GEMV
+// body in `gemv/tcf_ntok.cuh` — so the map is written once, here, with the
+// rest of Section 14's read direction.
+static __device__ __forceinline__ int tcf_expand_nibble_quad(unsigned int h) {
+    return (int)((h & 0x000Fu) | ((h & 0x00F0u) << 4) | ((h & 0x0F00u) << 8)
+                 | ((h & 0xF000u) << 12));
+}
+
 // Execution tiles one warp decodes per step of the GEMV inner loop, and the
 // elements one lane owns of that step. 8 * 64 / 32 == 16.
 #define TCF_RUN_TILES 8u

@@ -229,7 +229,7 @@ pub fn max_abs_diff(client: &CpuClient, a: &Tensor<CpuRuntime>, b: &Tensor<CpuRu
 /// than the f32 GEMV/GEMM tile.
 ///
 /// True when the encoding has a `FeatMajorFormat` AND `m` is at or above
-/// `TCF_FEAT_MAJOR_MIN_M` (`quant/cuda/quant_matmul/impl_ops.rs`). The
+/// `TCF_FEAT_MAJOR_MIN_M` (`quant/cuda/quant_matmul/tcf_route.rs`). The
 /// encodings listed here must mirror `feat_major_format` in
 /// `quant/cuda/quant_matmul/mmq_feat_major/formats/tcf.rs`, the single
 /// mapping site in the library — that function is crate-visible only, so
@@ -247,4 +247,27 @@ pub fn takes_mmq_path(native: NativeEncoding, m: usize) -> bool {
         native,
         NativeEncoding::Q8S32T64 | NativeEncoding::Q4AS32DT64
     ) && m >= TCF_FEAT_MAJOR_MIN_M
+}
+
+/// Whether `native` at `m` tokens takes the token-batched dp4a GEMV rather
+/// than `tcf_gemv_f32`.
+///
+/// That kernel quantizes the activation to Q8_1 where the f32 GEMV keeps it
+/// in f32, so a case it selects has no element-wise bound against the CPU
+/// reference — the same reason `takes_mmq_path` exists, and the same
+/// discipline: this mirrors the dispatch condition in
+/// `quant/cuda/quant_matmul/tcf_route.rs` and `supports_dp4a_gemv` in
+/// `quant/cuda/tcf/gemv_dp4a.rs`, neither of which a test can call. A missing
+/// entry shows up as a parity failure rather than a silent mis-gate, so the
+/// duplication is self-correcting.
+///
+/// The dp4a branch is checked BEFORE the MMQ branch in dispatch, so at an `m`
+/// both would accept, this one wins. `K` is modelled here because the
+/// condition is only `K % 32 == 0` — the kernel resolves a super-block by the
+/// global flattened tile number, so it needs no `K % 256` gate.
+pub fn takes_tcf_dp4a_gemv_path(native: NativeEncoding, m: usize, k: usize) -> bool {
+    const TCF_DP4A_GEMV_MAX_M: Option<usize> = None;
+    matches!(native, NativeEncoding::Q4AS32DT64)
+        && TCF_DP4A_GEMV_MAX_M.is_some_and(|max| m <= max)
+        && k.is_multiple_of(32)
 }

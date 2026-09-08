@@ -118,59 +118,110 @@ __global__ void dequant_q8_0_f32(
 // Block: 256 elements, 144 bytes
 // Layout: 2-byte d, 2-byte dmin, 12-byte scales, 128-byte qs
 // 8 sub-blocks of 32 elements with 6-bit scales/mins
+//
+// Thread-to-ELEMENT mapping, four consecutive elements per thread, so
+// warp-consecutive threads write warp-consecutive floats and one store
+// instruction covers one contiguous burst instead of 32 scattered ones.
+//
+// One CUDA block owns Q4K_SUPER_PER_BLOCK super-blocks. Its threads first
+// resolve the packed 6-bit scale/min header of every sub-block it covers into
+// shared memory — one thread per (super-block, sub-block) pair — so the header
+// is decoded once per sub-block rather than eight times per thread. After the
+// barrier each thread reads only the pair its own elements need.
+//
+// The four elements a thread owns are indices 4k..4k+3 of one 32-element
+// sub-block, so they share one (dl, ml) pair and one nibble half, and the four
+// results go out as a single float4.
 // ============================================================================
 
-__global__ void dequant_q4_k_f32(
+// Super-blocks one CUDA block covers, with Q4K_DEQUANT_BLOCK threads of four
+// elements each: 4 * 256 elements / 4 = 256 threads.
+#define Q4K_SUPER_PER_BLOCK 4
+#define Q4K_ELEMS_PER_THREAD 4
+#define Q4K_DEQUANT_BLOCK 256
+// Threads covering one super-block's 256 elements.
+#define Q4K_THREADS_PER_SUPER (256 / Q4K_ELEMS_PER_THREAD)
+
+__global__ __launch_bounds__(Q4K_DEQUANT_BLOCK) void dequant_q4_k_f32(
     const unsigned char* __restrict__ input,
     float* __restrict__ output,
     unsigned int num_blocks
 ) {
-    unsigned int bid = blockIdx.x * blockDim.x + threadIdx.x;
+    // Per sub-block scale and min, already multiplied by the super-block's `d`
+    // and `dmin`. Resolved once, read by all 8 threads that share a sub-block.
+    __shared__ float s_dl[Q4K_SUPER_PER_BLOCK * 8];
+    __shared__ float s_ml[Q4K_SUPER_PER_BLOCK * 8];
+
+    const unsigned int super_base = blockIdx.x * Q4K_SUPER_PER_BLOCK;
+    const unsigned int tid = threadIdx.x;
+
+    // Header decode: threads 0..31 take one (super-block, sub-block) pair each.
+    if (tid < Q4K_SUPER_PER_BLOCK * 8) {
+        const unsigned int local_super = tid / 8;
+        const int j = (int)(tid % 8);
+        const unsigned int bid = super_base + local_super;
+        float dl = 0.0f;
+        float ml = 0.0f;
+        if (bid < num_blocks) {
+            const unsigned char* block = input + (unsigned long long)bid * 144;
+            __half d_half = *reinterpret_cast<const __half*>(block);
+            __half dmin_half = *reinterpret_cast<const __half*>(block + 2);
+            float d = __half2float(d_half);
+            float dmin = __half2float(dmin_half);
+            const unsigned char* sc = block + 4;
+
+            // 6-bit scale/min unpack, one sub-block's pair (matches llama.cpp
+            // get_scale_min_k4 and the loop this kernel replaced).
+            unsigned char scale;
+            unsigned char min_value;
+            if (j < 4) {
+                scale = sc[j] & 0x3F;
+                min_value = sc[j + 4] & 0x3F;
+            } else {
+                scale = (sc[j + 4] & 0x0F) | ((sc[j - 4] >> 6) << 4);
+                min_value = (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4);
+            }
+            dl = d * (float)scale;
+            ml = dmin * (float)min_value;
+        }
+        s_dl[tid] = dl;
+        s_ml[tid] = ml;
+    }
+    __syncthreads();
+
+    const unsigned int local_super = tid / Q4K_THREADS_PER_SUPER;
+    const unsigned int quad = tid % Q4K_THREADS_PER_SUPER;
+    const unsigned int bid = super_base + local_super;
     if (bid >= num_blocks) return;
 
-    const unsigned char* block = input + bid * 144;
-    float* out = output + bid * 256;
+    // Element run this thread owns inside its super-block.
+    const unsigned int e0 = quad * Q4K_ELEMS_PER_THREAD;
+    const unsigned int j = e0 / 32;   // sub-block
+    const unsigned int l = e0 % 32;   // offset inside the sub-block
 
-    __half d_half = *reinterpret_cast<const __half*>(block);
-    __half dmin_half = *reinterpret_cast<const __half*>(block + 2);
-    float d = __half2float(d_half);
-    float dmin = __half2float(dmin_half);
+    const float dl = s_dl[local_super * 8 + j];
+    const float ml = s_ml[local_super * 8 + j];
 
-    const unsigned char* sc = block + 4;   // 12-byte scales
-    const unsigned char* qs = block + 16;  // 128-byte quantized values
+    // Sub-block PAIRS share one 32-byte run of `qs`: the even sub-block takes
+    // the low nibbles, the odd one the high nibbles of the SAME bytes. The
+    // nibble half is fixed for the thread, so the select is one shift, not a
+    // per-element branch.
+    const unsigned char* qs = input + (unsigned long long)bid * 144 + 16;
+    const unsigned int shift = (j % 2) * 4;
+    const unsigned char* q_bytes = qs + (j / 2) * 32 + l;
 
-    // Unpack 6-bit scales and mins (matches llama.cpp get_scale_min_k4)
-    unsigned char scales[8];
-    unsigned char mins[8];
+    float4 v;
+    v.x = dl * (float)((q_bytes[0] >> shift) & 0x0F) - ml;
+    v.y = dl * (float)((q_bytes[1] >> shift) & 0x0F) - ml;
+    v.z = dl * (float)((q_bytes[2] >> shift) & 0x0F) - ml;
+    v.w = dl * (float)((q_bytes[3] >> shift) & 0x0F) - ml;
 
-    for (int i = 0; i < 4; i++) {
-        scales[i] = sc[i] & 0x3F;
-        mins[i] = sc[i + 4] & 0x3F;
-    }
-    for (int i = 4; i < 8; i++) {
-        scales[i] = (sc[i + 4] & 0x0F) | ((sc[i - 4] >> 6) << 4);
-        mins[i] = (sc[i + 4] >> 4) | ((sc[i] >> 6) << 4);
-    }
-
-    // 8 sub-blocks of 32 elements
-    for (int j = 0; j < 8; j++) {
-        float dl = d * (float)scales[j];
-        float ml = dmin * (float)mins[j];
-
-        int chunk = j / 2;
-        int is_high = j % 2;
-        int qs_base = chunk * 32;
-
-        for (int l = 0; l < 32; l++) {
-            float q;
-            if (is_high) {
-                q = (float)((qs[qs_base + l] >> 4) & 0x0F);
-            } else {
-                q = (float)(qs[qs_base + l] & 0x0F);
-            }
-            out[j * 32 + l] = dl * q - ml;
-        }
-    }
+    // The output base is a device allocation, so it is at least 256-byte
+    // aligned, and this offset is a multiple of four floats — the 16-byte
+    // alignment a float4 store needs.
+    float4* out4 = reinterpret_cast<float4*>(
+        output + (unsigned long long)bid * 256 + e0);
+    *out4 = v;
 }
 
 // ============================================================================

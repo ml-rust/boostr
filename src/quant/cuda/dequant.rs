@@ -15,6 +15,62 @@ use super::kernels::{self, DEQUANT_GENERIC_MODULE, DEQUANT_MODULE};
 use super::nf4 as nf4_dispatch;
 use super::tcf as tcf_dispatch;
 
+/// Threads one dequantization CUDA block runs, for every kernel in
+/// `kernels/dequant.cu`.
+const DEQUANT_BLOCK: u32 = 256;
+
+/// Output elements one Q4_K thread writes, matching `Q4K_ELEMS_PER_THREAD` in
+/// `kernels/dequant.cu`.
+const Q4K_ELEMS_PER_THREAD: u32 = 4;
+
+/// Output elements one Q4_K super-block holds.
+const Q4K_ELEMS_PER_SUPER: u32 = 256;
+
+/// What one thread of a dequantization kernel owns.
+///
+/// The kernels do not share a thread mapping, so they cannot share a grid
+/// formula either: sizing an element-mapped kernel's grid by block count
+/// launches a fraction of the threads it needs. Each kernel names its mapping
+/// at the dispatch site and the grid follows from that. Migrating another
+/// format to an element mapping is a change of its arm alone; the formats
+/// still on [`DequantMapping::BlockPerThread`] keep the original grid.
+#[derive(Debug, Clone, Copy)]
+enum DequantMapping {
+    /// One thread decodes one whole quantized block and writes all of its
+    /// output elements.
+    BlockPerThread,
+    /// One thread writes `elems_per_thread` consecutive output elements of a
+    /// quantized block holding `elems_per_block` of them.
+    ElementsPerThread {
+        elems_per_thread: u32,
+        elems_per_block: u32,
+    },
+}
+
+impl DequantMapping {
+    /// CUDA blocks of [`DEQUANT_BLOCK`] threads needed to cover `num_blocks`
+    /// quantized blocks.
+    ///
+    /// # Errors
+    /// [`Error::QuantError`] when the grid does not fit in `u32`.
+    fn grid(self, num_blocks: usize, kernel_name: &str) -> Result<u32> {
+        let threads = match self {
+            Self::BlockPerThread => num_blocks as u64,
+            Self::ElementsPerThread {
+                elems_per_thread,
+                elems_per_block,
+            } => {
+                let elements = num_blocks as u64 * u64::from(elems_per_block);
+                elements.div_ceil(u64::from(elems_per_thread))
+            }
+        };
+        let grid = threads.div_ceil(u64::from(DEQUANT_BLOCK));
+        u32::try_from(grid).map_err(|_| Error::QuantError {
+            reason: format!("{kernel_name}: grid of {grid} blocks exceeds u32"),
+        })
+    }
+}
+
 impl DequantOps<CudaRuntime> for CudaClient {
     fn nf4_dequant(
         &self,
@@ -95,19 +151,25 @@ impl DequantOps<CudaRuntime> for CudaClient {
             }
         };
 
-        let kernel_name = match format {
-            QuantFormat::Q4_0 => "dequant_q4_0_f32",
-            QuantFormat::Q5_0 => "dequant_q5_0_f32",
-            QuantFormat::Q8_0 => "dequant_q8_0_f32",
-            QuantFormat::Q2K => "dequant_q2_k_f32",
-            QuantFormat::Q3K => "dequant_q3_k_f32",
-            QuantFormat::Q4K => "dequant_q4_k_f32",
-            QuantFormat::Q5K => "dequant_q5_k_f32",
-            QuantFormat::Q6K => "dequant_q6_k_f32",
-            QuantFormat::IQ4NL => "dequant_iq4_nl_f32",
-            QuantFormat::IQ4XS => "dequant_iq4_xs_f32",
-            QuantFormat::IQ3S => "dequant_iq3_s_f32",
-            QuantFormat::IQ2XS => "dequant_iq2_xs_f32",
+        let (kernel_name, mapping) = match format {
+            QuantFormat::Q4_0 => ("dequant_q4_0_f32", DequantMapping::BlockPerThread),
+            QuantFormat::Q5_0 => ("dequant_q5_0_f32", DequantMapping::BlockPerThread),
+            QuantFormat::Q8_0 => ("dequant_q8_0_f32", DequantMapping::BlockPerThread),
+            QuantFormat::Q2K => ("dequant_q2_k_f32", DequantMapping::BlockPerThread),
+            QuantFormat::Q3K => ("dequant_q3_k_f32", DequantMapping::BlockPerThread),
+            QuantFormat::Q4K => (
+                "dequant_q4_k_f32",
+                DequantMapping::ElementsPerThread {
+                    elems_per_thread: Q4K_ELEMS_PER_THREAD,
+                    elems_per_block: Q4K_ELEMS_PER_SUPER,
+                },
+            ),
+            QuantFormat::Q5K => ("dequant_q5_k_f32", DequantMapping::BlockPerThread),
+            QuantFormat::Q6K => ("dequant_q6_k_f32", DequantMapping::BlockPerThread),
+            QuantFormat::IQ4NL => ("dequant_iq4_nl_f32", DequantMapping::BlockPerThread),
+            QuantFormat::IQ4XS => ("dequant_iq4_xs_f32", DequantMapping::BlockPerThread),
+            QuantFormat::IQ3S => ("dequant_iq3_s_f32", DequantMapping::BlockPerThread),
+            QuantFormat::IQ2XS => ("dequant_iq2_xs_f32", DequantMapping::BlockPerThread),
             // All other formats: use generic dequant kernel (format dispatch via switch)
             _ => {
                 return dequant_via_generic_kernel(self, qt, target_dtype);
@@ -128,13 +190,14 @@ impl DequantOps<CudaRuntime> for CudaClient {
         let module = kernels::get_or_load_module(self.context(), device_index, DEQUANT_MODULE)?;
         let func = kernels::get_kernel_function(&module, kernel_name)?;
 
-        let block_size = 256u32;
-        let grid_size = (num_blocks as u32).div_ceil(block_size);
-        let num_blocks_u32 = num_blocks as u32;
+        let grid_size = mapping.grid(num_blocks, kernel_name)?;
+        let num_blocks_u32 = u32::try_from(num_blocks).map_err(|_| Error::QuantError {
+            reason: format!("{kernel_name}: {num_blocks} blocks exceed u32"),
+        })?;
 
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
-            block_dim: (block_size, 1, 1),
+            block_dim: (DEQUANT_BLOCK, 1, 1),
             shared_mem_bytes: 0,
         };
 
@@ -203,8 +266,10 @@ fn dequant_via_generic_kernel(
     let func = kernels::get_kernel_function(&module, "dequant_generic_f32")?;
 
     let threads = 256u32;
-    let grid_size = (num_blocks as u32).div_ceil(threads);
-    let num_blocks_u32 = num_blocks as u32;
+    let num_blocks_u32 = u32::try_from(num_blocks).map_err(|_| Error::QuantError {
+        reason: format!("dequant_generic_f32: {num_blocks} blocks exceed u32"),
+    })?;
+    let grid_size = num_blocks_u32.div_ceil(threads);
     let format = qt.format()?;
     let format_id = format.format_id();
 

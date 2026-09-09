@@ -1,3 +1,4 @@
+pub mod block_scale;
 pub mod q4k_q5k;
 pub mod q6k;
 pub mod search;

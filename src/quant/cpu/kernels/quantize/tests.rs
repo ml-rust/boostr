@@ -12,6 +12,7 @@
 
 use super::q4k_q5k::{KSearch, Q4K_SEARCH, Q5K_SEARCH, quantize_q4k_with, quantize_q5k_with};
 use super::q6k::quantize_q6k_absmax;
+use super::simple::{quantize_q4_0_absmax, quantize_q8_0_absmax};
 use super::{
     quantize_q4_0, quantize_q4_1, quantize_q4k, quantize_q5k, quantize_q6k, quantize_q8_0,
 };
@@ -220,4 +221,77 @@ fn q6k_search_beats_absmax() {
         searched_rms < absmax_rms,
         "q6_k: search {searched_rms} must beat absmax {absmax_rms}"
     );
+}
+
+/// The same claim for the single-scale formats, whose search is
+/// [`super::block_scale`].
+///
+/// The baseline is the identical encoder with the sweep replaced by the plain
+/// absmax scale, so the sweep is the only difference between the two packings.
+/// A regression in the search shows up here before it shows up in a converted
+/// checkpoint.
+#[test]
+fn q4_0_search_beats_absmax() {
+    let x = synthetic_weights();
+    let mut searched = vec![0u8; (x.len() / 32) * 18];
+    let mut absmax = vec![0u8; searched.len()];
+    quantize_q4_0(&x, &mut searched);
+    quantize_q4_0_absmax(&x, &mut absmax);
+
+    let (a, b) = decode_pair(&x, &searched, &absmax, dequant_q4_0);
+    assert!(a < b, "q4_0: search {a} must beat absmax {b}");
+}
+
+#[test]
+fn q8_0_search_beats_absmax() {
+    let x = synthetic_weights();
+    let mut searched = vec![0u8; (x.len() / 32) * 34];
+    let mut absmax = vec![0u8; searched.len()];
+    quantize_q8_0(&x, &mut searched);
+    quantize_q8_0_absmax(&x, &mut absmax);
+
+    let (a, b) = decode_pair(&x, &searched, &absmax, dequant_q8_0);
+    assert!(a < b, "q8_0: search {a} must beat absmax {b}");
+}
+
+/// The search moves the scale, never the format.
+///
+/// Q8_0 codes are clamped to `[-127, 127]`, one short of the signed-byte range.
+/// A refit that widened the range to -128 would still decode, and would still
+/// round-trip inside the error band, but the block would no longer be
+/// symmetric and kernels that negate a code would overflow.
+#[test]
+fn q8_0_codes_stay_in_the_symmetric_range() {
+    let x = synthetic_weights();
+    let mut packed = vec![0u8; (x.len() / 32) * 34];
+    quantize_q8_0(&x, &mut packed);
+
+    for (b, block) in packed.as_chunks::<34>().0.iter().enumerate() {
+        for (i, &byte) in block[2..].iter().enumerate() {
+            let code = byte as i8;
+            assert!(
+                code != -128,
+                "block {b} elem {i}: code -128 is out of range"
+            );
+        }
+    }
+}
+
+/// A constant block must come back exactly, which pins Q4_0's sign convention.
+///
+/// The scale takes the opposite sign to the largest-magnitude element, so a
+/// block of -0.75 gets a POSITIVE scale and lands on level -8. Getting that
+/// sign backwards still produces valid nibbles and a plausible tensor RMS, and
+/// only shows up as a reconstruction that misses by a factor near two.
+#[test]
+fn q4_0_round_trips_a_constant_block() {
+    let x = vec![-0.75f32; 32];
+    let mut packed = vec![0u8; 18];
+    quantize_q4_0(&x, &mut packed);
+
+    let mut decoded = vec![0.0f32; 32];
+    dequant_q4_0(&packed, &mut decoded);
+    for (i, &v) in decoded.iter().enumerate() {
+        assert!((v + 0.75).abs() < 0.01, "elem {i}: expected -0.75, got {v}");
+    }
 }

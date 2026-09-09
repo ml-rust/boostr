@@ -19,6 +19,11 @@
 //! disappoint. `make_qx_quants` uses `w = x²`, so large weights dominate.
 //! `make_qkx2_quants` is called with `w = sqrt(Σx²/n) + |x|`, which keeps small
 //! elements from being written off entirely.
+//!
+//! The single-scale formats (Q4_0, Q8_0) sweep their one block scale the same
+//! way, but against an unweighted objective and scoring the binary16 value the
+//! reader actually loads. That search is [`super::block_scale`], not these two
+//! — see its module docs for why it cannot reuse `make_qx_quants`.
 
 /// Below this magnitude a sub-block is treated as all-zero
 ///
@@ -99,7 +104,7 @@ pub fn make_qx_absmax(x: &[f32], nmax: i32, levels: &mut [u8]) -> f32 {
 }
 
 /// Largest magnitude in `x`, and the SIGNED value carrying it
-fn signed_absmax(x: &[f32]) -> (f32, f32) {
+pub(super) fn signed_absmax(x: &[f32]) -> (f32, f32) {
     let mut amax = 0.0f32;
     let mut max = 0.0f32;
     for &v in x {

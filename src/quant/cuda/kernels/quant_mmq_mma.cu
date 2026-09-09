@@ -729,7 +729,7 @@ struct MmqfQ50 {
     // block shares one `qh` word and this lane needs bits `4w..4w+3` for its
     // low word and `4w+16..4w+19` for its high one. Pre-shifting by `4*w`
     // leaves those in bits 0..3 and 16..19, and the four masked shifts below
-    // move bit `t` of that into bit 4 of staged byte `t` — that is upstream's
+    // move bit `t` of that into bit 4 of staged byte `t` — that is llama.cpp's
     // form, kept verbatim because the source bits are packed contiguously
     // inside one nibble rather than spread one per byte, so Q5_K's single
     // `(qh >> sh) & 0x01010101` trick does not apply here.
@@ -1967,7 +1967,7 @@ struct MmqfQ51 {
     // `qh`, so this lane needs bits `4w..4w+3` and `4w+16..4w+19`.
     // Pre-shifting by `4*w` leaves those in bits 0..3 and 16..19, and the four
     // masked shifts move bit `t` of that into bit 4 of staged byte `t`. That
-    // is upstream's form, kept verbatim: the source bits are packed
+    // is llama.cpp's form, kept verbatim: the source bits are packed
     // contiguously inside one nibble rather than spread one per byte, so
     // Q5_K's single `(qh >> sh) & 0x01010101` trick does not apply here.
     template <int MMQ_X, bool CLAMP_K>

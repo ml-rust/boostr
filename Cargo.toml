@@ -63,8 +63,8 @@ symphonia = { version = "0.5", optional = true, default-features = false, featur
 memmap2 = "0.9"
 # TCF (Tensor Contract Format) container and reference codec, read by
 # `format::tcf`. One dependency (blake3), no default features.
-tcf-core = { path = "../hats/tcf/tcf-core" }
-splintr = { version = "0.19", features = ["vocab-whisper"] }
+tcf-core = "0.1"
+splintr = { version = "0.20", features = ["vocab-whisper"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # Optional: TTS grapheme-to-phoneme via espeak-ng (system dep: espeak-ng-dev)
@@ -75,7 +75,7 @@ bytemuck = { version = "1.25", features = ["derive"] }
 # Tests tokenize with cl100k_base. Declaring it here rather than on the main
 # dependency keeps the ~3 MB payload out of every downstream build: dev-dependency
 # features unify only when building boostr's own tests.
-splintr = { version = "0.19", features = ["vocab-cl100k"] }
+splintr = { version = "0.20", features = ["vocab-cl100k"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 rustls = "0.23"

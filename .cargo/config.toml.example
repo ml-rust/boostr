@@ -6,6 +6,7 @@
 numr = { path = "../numr" }
 splintr = { path = "../splintr" }
 regexr = { path = "../regexr" }
+tcf-core = { path = "../tcf-core" }
 nexar = { path = "../nexar/nexar" }
 
 # Model fixtures live outside the repo. Point this at your own checkpoint

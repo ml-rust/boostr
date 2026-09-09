@@ -2,11 +2,13 @@
 //!
 //! ```text
 //! cargo run --release --features audio,f16 --example voxcpm_finetune -- \
-//!     (--ckpt CKPT_DIR | --gguf MODEL.gguf [--config config.json]) \
+//!     (--ckpt CKPT_DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
+//!     [--config config.json] \
 //!     --audiovae audiovae.safetensors --manifest FILE.tsv \
 //!     [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] [--alpha 32] \
 //!     [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors] \
-//!     [--lambda-stop 1.0] [--training-cfg-rate 0.1] [--eval-rows 4]
+//!     [--lambda-stop 1.0] [--training-cfg-rate 0.1] [--eval-rows 4] \
+//!     [--eval-only]
 //! ```
 //!
 //! `CKPT_DIR` holds `config.json`, `model.safetensors` and `tokenizer.json`,
@@ -17,6 +19,17 @@
 //! same as `voxcpm_clone`. `--config` supplies the `config.json` the file has
 //! no embedded copy of, and `tokenizer.json` is looked for beside the
 //! `.gguf` and then beside `--config`.
+//!
+//! `--tcf` is the third single-file form, mutually exclusive with both of the
+//! above, loaded through
+//! [`VoxCpm2Model::from_tcf`](boostr::model::audio::voxcpm::model::VoxCpm2Model::from_tcf)
+//! on exactly the terms `voxcpm_clone`'s own `--tcf` arm uses — same loader,
+//! same auxiliary inputs (`--config`, `--audiovae`, the tokenizer looked for
+//! beside the model file and then beside `--config`). `--config` is REQUIRED
+//! with `--tcf` rather than optional: the format carries no metadata map a
+//! `config.json` could be embedded in. `--dtype` is not a flag here — the
+//! training path always requests `None` (no cast), for the reason the `--gguf`
+//! arm documents.
 //!
 //! # Why the GGUF path is the one QLoRA wants
 //!
@@ -141,6 +154,90 @@
 //! conditioning dropout, eval never does. The eval forward pass never calls
 //! `backward` or the optimizer. `--eval-rows 0` disables eval outright: no
 //! split, no eval batch, no eval logging.
+//!
+//! # `--eval-only`: the metric as a standalone measurement
+//!
+//! `--eval-only` loads an artifact, scores the eval rows once, prints the
+//! metrics and exits. It is the flag a format comparison uses: two artifacts
+//! of the same base weights, differing only in how those weights are stored,
+//! scored over one manifest with one seed. Teacher-forced CFM loss plus stop
+//! loss gives thousands of paired scalar residuals per utterance, where a
+//! transcription metric over the same corpus gives a handful of word
+//! decisions.
+//!
+//! `--epochs 0` does NOT already do this — it is rejected outright
+//! (`--epochs must be at least 1`), and even accepted it would still build
+//! the optimizer and take the save path. So the mode is its own flag.
+//!
+//! `--eval-only` skips, in order: `apply_lora` (no adapters are allocated, so
+//! the artifact is scored exactly as it sits on disk), the trainable-parameter
+//! collection, `SimpleTrainer`, the epoch loop, `backward_wrt`,
+//! `load_lora_parameters`, and every checkpoint write. `--out` is rejected
+//! rather than ignored, since an eval-only run has nothing to save. `--lr`,
+//! `--epochs`, `--rank`, `--alpha`, `--targets` and `--training-cfg-rate`
+//! reach nothing in this mode.
+//!
+//! The eval-row selection differs in one deliberate way. Training must leave
+//! rows to train on, so `--eval-rows N` carves N off the END of the kept rows
+//! and `0` disables eval. Eval-only has no training half, so `--eval-rows 0`
+//! means EVERY kept row is scored — the manifest is itself the held-out set.
+//! A nonzero `--eval-rows N` still takes the last N kept rows, by index, so a
+//! training run and an eval-only run over the same manifest with the same
+//! `--eval-rows` score the same rows in the same order.
+//!
+//! # Machine-readable eval output
+//!
+//! Every eval pass — per epoch during training, once under `--eval-only` —
+//! writes one JSON object on ONE line to STDOUT, alongside the unchanged
+//! human-readable line on stderr. Every other line this file prints goes to
+//! stderr, so stdout carries the metric lines and nothing else, and two runs
+//! diff directly.
+//!
+//! The object carries `eval_diff`, `eval_stop`, `eval_total`, the row count
+//! (`eval_rows`) and the seed (`eval_seed`) the pairing rests on, plus the
+//! weight source, the manifest, the device, `max_patches` and the loss
+//! weights. `epoch` is the 1-based epoch under training and `null` under
+//! `--eval-only`. `mode` is `"train"` or `"eval-only"`.
+//!
+//! # What "deterministic" means here, exactly
+//!
+//! Two `--eval-only` runs of the same artifact, manifest and `--eval-rows` on
+//! the same build and device print byte-identical metrics. Pinned:
+//!
+//! - `t` and the noise, drawn ONCE per eval row from [`EVAL_NOISE_SEED`] (a
+//!   fixed constant, never `--seed`, never `step_counter`), at row-indexed
+//!   stride 2.
+//! - Row order and row membership: the manifest is read in file order, the
+//!   `--max-patches` filter preserves that order, and the eval split takes a
+//!   suffix by index. No shuffle, no RNG anywhere in the selection.
+//! - The conditioning branch: `drop_cond = false` always, so no dropout coin
+//!   is ever flipped in eval.
+//! - The mean: `diff_sum / n` over rows visited in that same fixed order, so
+//!   the floating-point summation order is fixed too.
+//! - No weight updates run in `--eval-only`, so the scored weights are the
+//!   artifact's own.
+//!
+//! What breaks it: a different `--max-patches` (changes which rows survive
+//! and how far a reference is truncated), a different `--eval-rows`, a
+//! reordered or edited manifest, a different `--lambda-stop` (`eval_stop`'s
+//! weight in `eval_total`), a different `--device`, and any change to the
+//! loss itself.
+//!
+//! NOT established as deterministic, and deliberately not claimed:
+//!
+//! - ACROSS devices. `--device cpu` and `--device cuda` run different
+//!   kernels; nothing here checks that they agree bit for bit, and a
+//!   comparison must hold the device fixed.
+//! - ACROSS builds. Feature flags select different kernels, and any
+//!   multi-threaded reduction inside a kernel is free to reorder its partial
+//!   sums between runs. This file does not audit numr's kernels for
+//!   thread-order-independent reductions, so run-to-run bit-identity is an
+//!   empirical property of the backend, not a guarantee this file can make.
+//!   Verify it by running `--eval-only` twice and diffing the stdout lines
+//!   before trusting a small difference between two artifacts.
+//! - ACROSS artifacts of different numeric encodings. That difference is the
+//!   thing being MEASURED; only the sampling is pinned, so a nonzero delta
+//!   between two formats is signal, not noise.
 //!
 //! A row without a `ref_wav` trains ZERO-SHOT: `prefill_capturing` gets
 //! `None`, and
@@ -287,12 +384,31 @@ const EVAL_NOISE_SEED: u64 = 0xE7A1_5EED;
 /// Where the transformer stack's weights come from.
 ///
 /// `--ckpt` names a checkpoint DIRECTORY (`config.json`,
-/// `model.safetensors`, `tokenizer.json`); `--gguf` names a single file that
-/// carries the weights and nothing else. Mutually exclusive, and one of them
-/// is required.
+/// `model.safetensors`, `tokenizer.json`); `--gguf` and `--tcf` each name a
+/// single file that carries the weights and nothing else. Mutually exclusive,
+/// and exactly one of them is required.
 enum Weights {
     Checkpoint(PathBuf),
     Gguf(PathBuf),
+    Tcf(PathBuf),
+}
+
+/// The weight source's short name, for the machine-readable eval record.
+/// Same vocabulary `voxcpm_clone`'s JSONL uses, so a comparison table can key
+/// on one set of names across both binaries.
+fn source_format(weights: &Weights) -> &'static str {
+    match weights {
+        Weights::Checkpoint(_) => "checkpoint",
+        Weights::Gguf(_) => "gguf",
+        Weights::Tcf(_) => "tcf",
+    }
+}
+
+/// The weight file or directory, for the machine-readable eval record.
+fn source_path(weights: &Weights) -> &Path {
+    match weights {
+        Weights::Checkpoint(path) | Weights::Gguf(path) | Weights::Tcf(path) => path,
+    }
 }
 
 /// Runtime to load the model and train on.
@@ -314,8 +430,9 @@ fn parse_device(value: &str) -> Result<Device, String> {
 
 struct Args {
     weights: Weights,
-    /// `config.json` for the GGUF path. Ignored for `--ckpt`, which reads the
-    /// one in the checkpoint directory.
+    /// `config.json` for the single-file paths. Ignored for `--ckpt`, which
+    /// reads the one in the checkpoint directory. Optional for `--gguf`,
+    /// required for `--tcf`.
     config: Option<PathBuf>,
     audiovae: PathBuf,
     manifest: PathBuf,
@@ -342,8 +459,12 @@ struct Args {
     max_patches: usize,
     /// Rows carved off the END of the kept (post-filter) manifest for the
     /// fixed eval batch — see the module docs' "Eval batch" section. `0`
-    /// disables eval entirely.
+    /// disables eval entirely while training, and means "every kept row" under
+    /// [`Args::eval_only`].
     eval_rows: usize,
+    /// Score the artifact once and exit: no LoRA, no optimizer, no weight
+    /// update, no checkpoint — see the module docs' "`--eval-only`" section.
+    eval_only: bool,
     /// Run every transformer layer with activation checkpointing: drop the
     /// intermediates during the forward pass and recompute them during
     /// backward. Cuts the activation memory that dominates training peak
@@ -352,7 +473,8 @@ struct Args {
     activation_checkpointing: bool,
 }
 
-const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf [--config config.json]) \
+const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
+[--config config.json (required with --tcf)] \
 --audiovae audiovae.safetensors \
 --manifest FILE.tsv (header-named TSV: wav, text, optional ref_wav) \
 [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] \
@@ -362,7 +484,10 @@ names text-ignoring as the most common fine-tuning failure mode)] \
 [--max-patches 38 (caps the target wav's patch count; over-cap targets are \
 dropped, over-cap ref_wav clips are truncated to the cap instead — see the \
 module docs)] \
-[--eval-rows 4 (rows held out for the fixed eval batch; 0 disables eval)] \
+[--eval-rows 4 (rows held out for the fixed eval batch; 0 disables eval while \
+training, and means every kept row under --eval-only)] \
+[--eval-only (score the artifact once and exit: no LoRA, no optimizer, no \
+weight update, no checkpoint; prints one JSON metric line on stdout)] \
 [--checkpoint (activation checkpointing: recompute each layer's intermediates \
 during backward instead of holding them, ~33% slower, much less VRAM)]";
 
@@ -378,6 +503,7 @@ fn parse_args() -> Result<Args, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let (mut ckpt, mut audiovae, mut manifest) = (None, None, None);
     let mut gguf: Option<PathBuf> = None;
+    let mut tcf: Option<PathBuf> = None;
     let mut config: Option<PathBuf> = None;
     let mut device = Device::Cpu;
     let mut targets = DEFAULT_TARGETS.to_string();
@@ -391,6 +517,7 @@ fn parse_args() -> Result<Args, String> {
     let mut training_cfg_rate = DEFAULT_TRAINING_CFG_RATE;
     let mut max_patches = DEFAULT_MAX_PATCHES;
     let mut eval_rows = DEFAULT_EVAL_ROWS;
+    let mut eval_only = false;
     let mut activation_checkpointing = false;
 
     let mut i = 0usize;
@@ -399,6 +526,7 @@ fn parse_args() -> Result<Args, String> {
         match flag {
             "--ckpt" => ckpt = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
             "--gguf" => gguf = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
+            "--tcf" => tcf = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
             "--config" => config = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
             "--audiovae" => audiovae = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
             "--manifest" => manifest = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
@@ -450,6 +578,7 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--eval-rows: {e}"))?
             }
+            "--eval-only" => eval_only = true,
             "--checkpoint" => activation_checkpointing = true,
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown flag {other}\n{USAGE}")),
@@ -475,16 +604,36 @@ fn parse_args() -> Result<Args, String> {
         return Err("--max-patches must be at least 1".to_string());
     }
 
-    // Exactly one weight source. Accepting both and silently preferring one
+    // Exactly one weight source. Accepting two and silently preferring one
     // would load a different model than the operator asked for.
-    let weights = match (ckpt, gguf) {
-        (Some(_), Some(_)) => {
-            return Err(format!("--ckpt and --gguf are mutually exclusive\n{USAGE}"));
+    let weights = match (ckpt, gguf, tcf) {
+        (Some(dir), None, None) => Weights::Checkpoint(dir),
+        (None, Some(path), None) => Weights::Gguf(path),
+        (None, None, Some(path)) => Weights::Tcf(path),
+        (None, None, None) => {
+            return Err(format!("--ckpt, --gguf or --tcf is required\n{USAGE}"));
         }
-        (Some(dir), None) => Weights::Checkpoint(dir),
-        (None, Some(path)) => Weights::Gguf(path),
-        (None, None) => return Err(format!("--ckpt or --gguf is required\n{USAGE}")),
+        _ => {
+            return Err(format!(
+                "--ckpt, --gguf and --tcf are mutually exclusive\n{USAGE}"
+            ));
+        }
     };
+    // A TCF has no metadata map to embed a config.json in, so the path is the
+    // only way the architecture can be known — the same check
+    // `voxcpm_clone`'s `--tcf` arm makes, made here before the file is mapped
+    // and verified.
+    if matches!(weights, Weights::Tcf(_)) && config.is_none() {
+        return Err(format!("--config is required with --tcf\n{USAGE}"));
+    }
+
+    // An eval-only run writes nothing, so accepting `--out` would promise a
+    // file that never appears.
+    if eval_only && out.is_some() {
+        return Err(format!(
+            "--out belongs to a training run; --eval-only writes no checkpoint\n{USAGE}"
+        ));
+    }
 
     Ok(Args {
         weights,
@@ -503,21 +652,23 @@ fn parse_args() -> Result<Args, String> {
         training_cfg_rate,
         max_patches,
         eval_rows,
+        eval_only,
         activation_checkpointing,
     })
 }
 
 /// Locate `tokenizer.json`.
 ///
-/// A checkpoint directory holds it outright. A GGUF carries no tokenizer at
-/// all, so it is looked for beside the `.gguf` first and beside `--config`
-/// second — both of those normally sit in, or are copied from, the same
-/// checkpoint directory. Neither: an error, rather than a tokenizer guess
-/// that would silently produce the wrong token ids.
+/// A checkpoint directory holds it outright. Neither a GGUF nor a TCF carries
+/// a tokenizer at all, so it is looked for beside the model file first and
+/// beside `--config` second — both of those normally sit in, or are copied
+/// from, the same checkpoint directory. Neither: an error, rather than a
+/// tokenizer guess that would silently produce the wrong token ids. Same
+/// resolution order `voxcpm_clone` uses.
 fn tokenizer_path(weights: &Weights, config: Option<&Path>) -> Result<PathBuf, String> {
     match weights {
         Weights::Checkpoint(dir) => Ok(dir.join("tokenizer.json")),
-        Weights::Gguf(path) => {
+        Weights::Gguf(path) | Weights::Tcf(path) => {
             let beside = |p: &Path| {
                 p.parent()
                     .map(|dir| dir.join("tokenizer.json"))
@@ -527,8 +678,9 @@ fn tokenizer_path(weights: &Weights, config: Option<&Path>) -> Result<PathBuf, S
                 .or_else(|| config.and_then(beside))
                 .ok_or_else(|| {
                     format!(
-                        "no tokenizer.json beside {} (a GGUF carries none); put it there \
-                     or pass --config pointing into the checkpoint directory",
+                        "no tokenizer.json beside {} (a single-file model carries none); \
+                     put it there or pass --config pointing into the checkpoint \
+                     directory",
                         path.display()
                     )
                 })
@@ -1001,6 +1153,53 @@ where
     Ok((diff_sum / n, stop_sum / n, total_sum / n))
 }
 
+/// Write one eval pass as a single JSON object on ONE line of STDOUT.
+///
+/// Every other line this file prints goes to stderr, so stdout carries the
+/// metric lines and nothing else and two runs diff directly. `epoch` is the
+/// 1-based epoch during training and `null` under `--eval-only`.
+///
+/// The record carries the row count and [`EVAL_NOISE_SEED`] alongside the
+/// three metrics, so the pairing between two artifacts' numbers is auditable
+/// from the output alone rather than assumed: two lines are comparable only
+/// when `eval_rows`, `eval_seed`, `manifest`, `max_patches`, `lambda_diff`,
+/// `lambda_stop` and `device` all match. Serialization is `serde_json`,
+/// already a boostr dependency, and its float formatting is the shortest
+/// round-trip form, so identical `f64` values print identically.
+fn print_eval_record(
+    args: &Args,
+    epoch: Option<usize>,
+    eval_rows: usize,
+    eval_diff: f64,
+    eval_stop: f64,
+    eval_total: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let record = serde_json::json!({
+        "record": "eval",
+        "mode": if args.eval_only { "eval-only" } else { "train" },
+        "epoch": epoch,
+        "source_format": source_format(&args.weights),
+        "model_path": source_path(&args.weights).display().to_string(),
+        "config": args.config.as_ref().map(|p| p.display().to_string()),
+        "audiovae": args.audiovae.display().to_string(),
+        "manifest": args.manifest.display().to_string(),
+        "device": match args.device {
+            Device::Cpu => "cpu",
+            Device::Cuda => "cuda",
+        },
+        "eval_rows": eval_rows,
+        "eval_seed": EVAL_NOISE_SEED,
+        "max_patches": args.max_patches,
+        "lambda_diff": LAMBDA_DIFF,
+        "lambda_stop": args.lambda_stop,
+        "eval_diff": eval_diff,
+        "eval_stop": eval_stop,
+        "eval_total": eval_total,
+    });
+    println!("{}", serde_json::to_string(&record)?);
+    Ok(())
+}
+
 /// The model-and-training body: everything that runs on the chosen runtime
 /// `R`. Loads the checkpoint, adapts it with LoRA, then trains one epoch at
 /// a time over every manifest row, printing per-step and per-epoch loss.
@@ -1056,6 +1255,21 @@ where
                 None,
             )?
         }
+        // Same loader `voxcpm_clone`'s `--tcf` arm calls, on the same
+        // auxiliary inputs, with the `None` dtype the `--gguf` arm above
+        // explains: a natively encoded projection stays PACKED, dense
+        // tensors arrive F32, and `Some(BF16)`/`Some(F16)` would be rejected
+        // by the loader anyway.
+        Weights::Tcf(path) => {
+            eprintln!("loading {} (base stays packed) ...", path.display());
+            // `parse_args` already rejected a missing `--config`; this arm
+            // repeats the check rather than unwrapping on that invariant.
+            let config = args
+                .config
+                .as_deref()
+                .ok_or("--config is required with --tcf")?;
+            VoxCpm2Model::<R>::from_tcf(path, config, &args.audiovae, device, None)?
+        }
     };
 
     // Activation checkpointing, applied to every stack a training pass runs
@@ -1079,26 +1293,98 @@ where
     // Carve the eval set off the END of the kept rows, by index — no RNG, no
     // shuffle, so the split is deterministic and reproducing a run always
     // yields the same train/eval partition. `--eval-rows 0` disables eval
-    // entirely: no split, no eval batch, no eval logging.
-    if args.eval_rows >= rows.len() {
-        return Err(format!(
-            "--eval-rows {} >= {} kept manifest row(s); that would leave zero training rows",
+    // entirely while training: no split, no eval batch, no eval logging.
+    //
+    // `--eval-only` has no training half to protect, so the two guards that
+    // exist for training's sake are lifted there: `--eval-rows 0` means EVERY
+    // kept row is scored (the manifest IS the held-out set), and a count that
+    // would leave zero training rows is fine. A nonzero `--eval-rows N` still
+    // takes the same last N rows either way, so a training run and an
+    // eval-only run over one manifest score the same rows in the same order.
+    let (rows, eval_source_rows): (&[&ManifestRow], &[&ManifestRow]) = if args.eval_only {
+        if args.eval_rows == 0 || args.eval_rows >= rows.len() {
+            (&[], rows.as_slice())
+        } else {
+            rows.split_at(rows.len() - args.eval_rows)
+        }
+    } else {
+        if args.eval_rows >= rows.len() {
+            return Err(format!(
+                "--eval-rows {} >= {} kept manifest row(s); that would leave zero training rows",
+                args.eval_rows,
+                rows.len()
+            )
+            .into());
+        }
+        rows.split_at(rows.len() - args.eval_rows)
+    };
+    if args.eval_only {
+        eprintln!(
+            "eval-only: {} eval row(s) (--eval-rows {}{})",
+            eval_source_rows.len(),
             args.eval_rows,
-            rows.len()
-        )
-        .into());
+            if args.eval_rows == 0 {
+                " = every kept row"
+            } else {
+                ""
+            }
+        );
+    } else {
+        eprintln!(
+            "eval split: {} training row(s), {} eval row(s) (--eval-rows {})",
+            rows.len(),
+            eval_source_rows.len(),
+            args.eval_rows
+        );
     }
-    let split_at = rows.len() - args.eval_rows;
-    let (train_rows, eval_source_rows) = rows.split_at(split_at);
-    eprintln!(
-        "eval split: {} training row(s), {} eval row(s) (--eval-rows {})",
-        train_rows.len(),
-        eval_source_rows.len(),
-        args.eval_rows
-    );
-    let rows = train_rows;
 
     let tokenizer = load_tokenizer(tokenizer_path(&args.weights, args.config.as_deref())?)?;
+
+    // `--eval-only` returns HERE, before `apply_lora` — the artifact is
+    // scored exactly as it sits on disk, with no adapters allocated, no
+    // optimizer built, no backward pass and no checkpoint written. See the
+    // module docs' "`--eval-only`" section.
+    if args.eval_only {
+        if eval_source_rows.is_empty() {
+            return Err("--eval-only: no eval rows survived the --max-patches filter".into());
+        }
+        eprintln!(
+            "building eval batch ({} row(s)) ...",
+            eval_source_rows.len()
+        );
+        let eval_batch = build_eval_batch(
+            &model,
+            client,
+            &tokenizer,
+            eval_source_rows,
+            args.max_patches,
+        )?;
+        let generator = model.patch_generator();
+        let (eval_diff, eval_stop, eval_total) = score_eval_batch(
+            &model,
+            &generator,
+            client,
+            &tokenizer,
+            &eval_batch,
+            args.max_patches,
+            args.lambda_stop,
+        )?;
+        eprintln!(
+            "eval/diff {eval_diff:.6} eval/stop {eval_stop:.6} eval/total {eval_total:.6} \
+             ({} eval row(s))",
+            eval_batch.len()
+        );
+        print_eval_record(
+            args,
+            None,
+            eval_batch.len(),
+            eval_diff,
+            eval_stop,
+            eval_total,
+        )?;
+        eprintln!("total {:.1}s", started.elapsed().as_secs_f64());
+        return Ok(());
+    }
 
     let target_names: Vec<String> = args
         .targets
@@ -1257,6 +1543,14 @@ where
                 args.epochs,
                 eval_batch.len()
             );
+            print_eval_record(
+                args,
+                Some(epoch),
+                eval_batch.len(),
+                eval_diff,
+                eval_stop,
+                eval_total,
+            )?;
             this_epoch_eval_total = Some(eval_total);
         }
 

@@ -1,7 +1,7 @@
 //! Numerical parity for the mel front end against HuggingFace's
 //! `WhisperFeatureExtractor`.
 //!
-//! The fixture is a safetensors file produced by running upstream's own
+//! The fixture is a safetensors file produced by running HuggingFace's own
 //! extractor over 30 s of real speech at 16 kHz. It is NOT checked in (5 MB of
 //! audio and reference features), so these tests skip unless
 //! `WHISPER_MEL_FIXTURE` points at it, or `BOOSTR_MODELS_DIR` contains

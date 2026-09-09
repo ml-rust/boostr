@@ -103,7 +103,7 @@ where
     // DurationEncoder: alternating LSTM / AdaLayerNorm.
     let mut pe_lstms = Vec::new();
     let mut pe_adalns = Vec::new();
-    // The upstream nlayers isn't in config.json — we discover it by probing
+    // The reference Kokoro checkpoint's nlayers isn't in config.json — we discover it by probing
     // for `predictor.text_encoder.lstms.{2i}.weight_ih_l0` until we run out.
     let mut nlayers = 0usize;
     while st.has_tensor(&format!(
@@ -137,7 +137,7 @@ where
     let pred_shared = load_bilstm::<R>(&mut st, "predictor.shared", device)?;
 
     // F0 and N branches: 3 AdainResBlk1d blocks each, middle block upsamples.
-    // Layout from the upstream ProsodyPredictor: F0.0 keeps shape,
+    // Layout from the reference Kokoro implementation's ProsodyPredictor: F0.0 keeps shape,
     // F0.1 halves channels with stride-2 pool + conv1x1 shortcut,
     // F0.2 keeps the reduced shape.
     let plain = AdainResBlk1dLoadOpts::default();
@@ -189,7 +189,7 @@ where
     };
 
     // -------- Decoder (decoder.*) --------
-    // asr_res is weight-normed in upstream Kokoro (checkpoint ships
+    // asr_res is weight-normed in the reference Kokoro implementation (checkpoint ships
     // `decoder.asr_res.0.weight_g`/`weight_v`, not `.weight`).
     let asr_res = load_weight_normed_conv1d::<R, C>(
         client,
@@ -338,7 +338,7 @@ where
     let conv_post_head = MagPhaseHead::new(conv_post, config.n_fft)?;
 
     // Noise-path conditioning: plain Conv1d + AdaINResBlock1 per upsample
-    // stage. Present in the upstream Kokoro checkpoint under
+    // stage. Present in the reference Kokoro checkpoint under
     // `decoder.generator.noise_convs.{i}` / `noise_res.{i}`. If these keys
     // aren't present (e.g. a stripped-down variant), we pass empty vecs and
     // `IStftNetGenerator::new` validates that both-or-neither is populated.
@@ -346,7 +346,7 @@ where
     let mut noise_res = Vec::with_capacity(num_upsamples);
     let has_noise = st.has_tensor("decoder.generator.noise_convs.0.weight");
     if has_noise {
-        // Upstream `noise_convs[i]` convolves the harmonic spectrogram at
+        // The reference Kokoro implementation's `noise_convs[i]` convolves the harmonic spectrogram at
         // audio-spec rate down to the trunk rate at stage `i`:
         //
         //   stride_f0 = prod(upsample_rates[i+1..])   # stage 0: 6, stage 1: 1
@@ -355,7 +355,7 @@ where
         //          padding=(stride_f0+1)//2 if i+1<N else 0)
         //
         // We infer kernel+stride from weights but compute padding from the
-        // upstream formula (weight shape alone doesn't tell us the padding).
+        // reference Kokoro implementation's formula (weight shape alone doesn't tell us the padding).
         for stage in 0..num_upsamples {
             let conv_prefix = format!("decoder.generator.noise_convs.{stage}");
             let (weight, bias) = load_linear_tensors::<R>(&mut st, &conv_prefix, device)?;
@@ -395,7 +395,7 @@ where
             let _ = kernel;
 
             // noise_res: stage 0 uses kernel=7, stage 1 uses kernel=11
-            // (upstream `resblock_kernel_sizes` indices 1 and 2 respectively).
+            // (the reference Kokoro implementation's `resblock_kernel_sizes` indices 1 and 2 respectively).
             let res_kernel = if stage == 0 { 7 } else { 11 };
             let res_opts = AdainResBlock1LoadOpts {
                 dilations: [1, 3, 5],

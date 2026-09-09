@@ -16,8 +16,8 @@
 //! same way `crate::trainer` already works for every other model in this
 //! crate — nothing here is VoxCPM2-specific about running an optimizer.
 //!
-//! The sibling [`stop`] module adds the SECOND term upstream's fine-tuning
-//! guide trains, `loss/stop`, and [`PatchGenerator::train_losses_with_noise`]/
+//! The sibling [`stop`] module adds the SECOND term the reference VoxCPM
+//! fine-tuning guide trains, `loss/stop`, and [`PatchGenerator::train_losses_with_noise`]/
 //! [`PatchGenerator::train_losses`] combine it with this file's `loss/diff`
 //! from ONE shared [`PatchGenerator::teacher_forced_conditioning`] call.
 //!
@@ -71,7 +71,8 @@ use numr::tensor::Tensor;
 mod stop;
 pub use stop::{TrainLosses, stop_loss_from_logits};
 
-/// Training-time conditioning dropout (upstream's `training_cfg_rate`):
+/// Training-time conditioning dropout (the reference VoxCPM implementation's
+/// `training_cfg_rate`):
 /// when `drop_cond`, replace `cond.mu` with a zero tensor of the same
 /// shape/dtype/device, everything else passed through unchanged. `pub(crate)`
 /// so [`PatchGenerator::train_losses_with_noise`] applies it once, upstream
@@ -124,7 +125,8 @@ where
 /// Validates `training_cfg_rate` is in `[0.0, 1.0]` — a rate above 1 would
 /// silently always-drop instead of erroring, and a negative rate is
 /// meaningless. See [`PatchGenerator::cfm_loss`]'s doc comment for why 0 is
-/// accepted but discouraged (upstream's default is 0.1).
+/// accepted but discouraged (the reference VoxCPM implementation's default is
+/// 0.1).
 fn check_training_cfg_rate(rate: f64) -> Result<()> {
     if !(0.0..=1.0).contains(&rate) {
         return Err(Error::InvalidArgument {
@@ -153,8 +155,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     ///   error, and [`flow_matching_interpolate`]'s formula is well-defined
     ///   for any `t`).
     /// - `noise`: `[T, patch_size, feat_dim]`, matching `target_patches`.
-    /// - `drop_cond`: training-time conditioning dropout (upstream's
-    ///   `training_cfg_rate`). When true, `cond.mu` is replaced with a zero
+    /// - `drop_cond`: training-time conditioning dropout (the reference
+    ///   VoxCPM implementation's `training_cfg_rate`). When true, `cond.mu` is replaced with a zero
     ///   tensor of the same shape/dtype/device BEFORE either loss term is
     ///   computed — the same construction
     ///   [`LocalDit::solve_euler`](crate::model::audio::voxcpm::local_dit::LocalDit::solve_euler)
@@ -163,8 +165,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     ///   duplicated unchanged). Zeroing `mu` some fraction of training steps
     ///   teaches the model to produce a sane, TEXT-INDEPENDENT prediction
     ///   when `mu` is absent, which is what makes classifier-free guidance
-    ///   at inference actually work; upstream's FAQ calls skipping this "the
-    ///   most common fine-tuning failure mode" (text gets ignored) and says
+    ///   at inference actually work; the reference VoxCPM FAQ calls skipping
+    ///   this "the most common fine-tuning failure mode" (text gets ignored) and says
     ///   explicitly not to train with it always off. `cond`, `x_t`/`noise`
     ///   and `t` are untouched — only `mu` defines the unconditional branch.
     ///
@@ -309,11 +311,12 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// [`numr::ops::RandomOps::randn_seeded`] for why a CPU run and a CUDA
     /// run of one seed draw differently.
     ///
-    /// `training_cfg_rate` is upstream's `training_cfg_rate` — the per-step
+    /// `training_cfg_rate` is the reference VoxCPM implementation's
+    /// `training_cfg_rate` — the per-step
     /// probability of conditioning dropout (see
     /// [`Self::cfm_loss_with_noise`]'s `drop_cond` doc), drawn from
     /// `seed.wrapping_add(2)`: a third stream independent of `t`/`noise`.
-    /// Upstream defaults this to 0.1 and its FAQ calls 0 "the most common
+    /// The reference implementation defaults this to 0.1 and its FAQ calls 0 "the most common
     /// fine-tuning failure mode" (the model learns to ignore the text).
     /// Must be in `[0.0, 1.0]` — an out-of-range rate is an
     /// [`Error::InvalidArgument`], not a silent always-drop.

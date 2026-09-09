@@ -33,7 +33,7 @@ use common::{cpu_setup, model_fixture, skip_notice};
 const SAMPLE_RATE: usize = 16000;
 const FRAMES: usize = 3000;
 
-/// The reference transcription captured from upstream HuggingFace.
+/// The reference transcription captured from HuggingFace's Whisper implementation.
 #[derive(Debug, Deserialize)]
 struct Reference {
     #[allow(dead_code)]
@@ -100,7 +100,7 @@ fn tiny_fixtures() -> Option<TinyFixtures> {
 }
 
 /// Greedy options taken from the CHECKPOINT'S OWN `generation_config.json`,
-/// which is what upstream applies: the `suppress_tokens` list, the
+/// which is what the reference Whisper implementation applies: the `suppress_tokens` list, the
 /// `begin_suppress_tokens` list at the first generated position only, and the
 /// configured eos.
 ///
@@ -367,8 +367,8 @@ fn whisper_transcribe_segments_covers_each_range() {
     // Exact equality, not a non-empty check: HuggingFace produces these
     // byte-for-byte on the same ranges. Segment 0 comes back in ENGLISH even
     // though the audio is Malay and the prompt carries `<|ms|>` + transcribe —
-    // whisper-tiny translates instead of transcribing, and upstream does the
-    // same, so matching it is correct behaviour, not a bug to chase.
+    // whisper-tiny translates instead of transcribing, and the reference
+    // Whisper implementation does the same, so matching it is correct behaviour, not a bug to chase.
     for (i, (got, want)) in out.iter().zip(reference.segments.iter()).enumerate() {
         eprintln!("segment {i} ours: {:?}", got.text);
         eprintln!("segment {i} ref : {:?}", want.text);

@@ -11,7 +11,8 @@
 //! ```
 //!
 //! Both resamplers use a 12-tap Kaiser-windowed sinc. **The filter taps are NOT
-//! in the checkpoint** — upstream registers them as non-persistent buffers, so
+//! in the checkpoint** — the reference NeuCodec implementation registers them
+//! as non-persistent buffers, so
 //! they must be recomputed here exactly, or every activation in the encoder is
 //! subtly wrong.
 //!
@@ -33,7 +34,7 @@ use numr::tensor::Tensor;
 pub const RESAMPLE_RATIO: usize = 2;
 /// Filter length used by both the up- and down-sampler.
 pub const RESAMPLE_KERNEL_SIZE: usize = 12;
-/// `1e-9` guard upstream adds to `beta` before dividing.
+/// `1e-9` guard the reference NeuCodec implementation adds to `beta` before dividing.
 const SNAKE_EPS: f64 = 1e-9;
 
 /// `sin(pi x) / (pi x)`, with the removable singularity at 0 filled in.
@@ -80,7 +81,7 @@ fn kaiser_window(n: usize, beta: f64) -> Vec<f64> {
 
 /// Kaiser-windowed sinc low-pass, normalized to unit sum.
 ///
-/// Port of upstream `kaiser_sinc_filter1d`. `cutoff` and `half_width` are in
+/// Port of the reference NeuCodec implementation's `kaiser_sinc_filter1d`. `cutoff` and `half_width` are in
 /// cycles/sample; `kernel_size` is even in every use here.
 pub fn kaiser_sinc_filter1d(cutoff: f64, half_width: f64, kernel_size: usize) -> Vec<f32> {
     let half_size = kernel_size / 2;

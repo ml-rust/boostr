@@ -47,7 +47,7 @@ pub struct StftOptions {
     /// `T_spec = 1 + T_time / hop_length`, matching `torch.stft(center=True)`.
     /// If false, no padding; `T_spec` is smaller.
     ///
-    /// Upstream Kokoro's `TorchSTFT` helper sets `pad_mode='reflect'`. Zero
+    /// Kokoro's `TorchSTFT` helper sets `pad_mode='reflect'`. Zero
     /// padding gives the border frames a small amplitude bias and is what the
     /// matching [`crate::model::audio::kokoro::IStftPadding::Center`] trim
     /// undoes.

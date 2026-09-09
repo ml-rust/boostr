@@ -1,4 +1,4 @@
-//! One-off utility: parse the upstream `kokoro-v1_0.pth` and print its
+//! One-off utility: parse the reference Kokoro `kokoro-v1_0.pth` checkpoint and print its
 //! state-dict key layout. Useful for sanity-checking the tier-3 loader
 //! against a live checkpoint.
 //!

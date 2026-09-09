@@ -1,7 +1,8 @@
 //! NeuCodec's acoustic encoder (BigCodec `CodecEncoder`): 16 kHz waveform ->
 //! 50 Hz latent, downsampling by 320.
 //!
-//! Structure, verified against the checkpoint AND the upstream source (the HF
+//! Structure, verified against the checkpoint AND the reference NeuCodec
+//! source (the HF
 //! export renames the package's `conv_blocks` sequence):
 //!
 //! ```text
@@ -25,7 +26,8 @@
 //! `x + conv2(act(conv1(act(x))))` with `conv1` a dilated k=7 (padded to keep
 //! length) and `conv2` a pointwise k=1.
 //!
-//! Upstream wraps every conv in `weight_norm`, but the HF export stores the
+//! The reference NeuCodec implementation wraps every conv in `weight_norm`,
+//! but the HF export stores the
 //! FUSED weights (plain `weight`, no `weight_g`/`weight_v`), so plain `Conv1d`
 //! is correct here — no fusing step is needed at load time.
 
@@ -37,7 +39,8 @@ use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 
-/// Downsampling strides per `EncoderBlock` (`up_ratios` upstream). Their
+/// Downsampling strides per `EncoderBlock` (`up_ratios` in the reference
+/// implementation). Their
 /// product, 320, is the 16 kHz -> 50 Hz ratio.
 pub const ENCODER_STRIDES: [usize; 5] = [2, 2, 4, 4, 5];
 /// Dilations of the three `ResidualUnit`s inside each block.
@@ -57,7 +60,8 @@ pub fn same_padding(kernel_size: usize, dilation: usize) -> usize {
     (kernel_size - 1) * dilation / 2
 }
 
-/// Padding upstream uses on the strided downsampling conv:
+/// Padding the reference NeuCodec implementation uses on the strided
+/// downsampling conv:
 /// `stride / 2 + stride % 2`.
 pub fn downsample_padding(stride: usize) -> usize {
     stride / 2 + stride % 2
@@ -190,7 +194,8 @@ impl<R: Runtime<DType = DType>> AcousticEncoder<R> {
 
     /// Forward: waveform `[B, 1, T]` -> latent `[B, 1024, T / 320]`.
     ///
-    /// Returned CHANNELS-FIRST. Upstream's `CodecEncoder.forward` ends with a
+    /// Returned CHANNELS-FIRST. The reference implementation's
+    /// `CodecEncoder.forward` ends with a
     /// `permute(0, 2, 1)` and `encode_code` immediately transposes it back, so
     /// the two cancel; this port skips both.
     pub fn forward<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
@@ -238,7 +243,8 @@ mod tests {
         }
     }
 
-    /// Upstream's `stride/2 + stride%2` padding with `k = 2*stride` divides the
+    /// The reference implementation's `stride/2 + stride%2` padding with
+    /// `k = 2*stride` divides the
     /// length by exactly `stride`.
     #[test]
     fn downsample_padding_divides_length_by_stride() {

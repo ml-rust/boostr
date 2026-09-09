@@ -80,7 +80,8 @@ impl KokoroEngine {
         // 4. Synthesize. Speed control is applied by scaling the min-frames
         // floor inversely (faster speed → tighter floor). A more principled
         // path would scale the decoded durations directly — that's what the
-        // upstream `speed` param does. We emulate that by pre-scaling here
+        // reference Kokoro implementation's `speed` param does. We emulate
+        // that by pre-scaling here
         // via `min_frames_per_phoneme`. The model's internal duration decode
         // already clamps to this floor.
         let floor = ((self.min_frames_per_phoneme as f32) / speed.max(0.1)).round() as u32;

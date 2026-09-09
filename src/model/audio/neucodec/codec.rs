@@ -6,7 +6,7 @@
 //! The encoder (BigCodec acoustic + Wav2Vec2-BERT semantic branches) lives in
 //! [`super::encoder`] — both directions of NeuCodec are pure Rust.
 //!
-//! Pipeline, matching upstream `NeuCodec.decode_code`:
+//! Pipeline, matching the reference NeuCodec implementation's `NeuCodec.decode_code`:
 //!
 //! ```text
 //! indices [B, T]  (i32, 0..65_536)
@@ -14,7 +14,8 @@
 //!   -> NeuCodecDecoder            -> waveform [B, T * 480]
 //! ```
 //!
-//! Upstream applies a separate `fc_post_a` Linear between the quantizer and the
+//! The reference NeuCodec implementation applies a separate `fc_post_a`
+//! Linear between the quantizer and the
 //! decoder backbone. In this checkpoint that layer is exported as
 //! `acoustic_decoder.fc`, so it is already the decoder's first stage and is NOT
 //! duplicated here.

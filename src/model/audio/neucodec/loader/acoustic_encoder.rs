@@ -94,7 +94,7 @@ impl<R: Runtime<DType = DType>> AcousticEncoderLoader<'_, R> {
         let out_ch = in_ch * 2;
         let mut res_units = Vec::with_capacity(RESIDUAL_DILATIONS.len());
         for (i, dilation) in RESIDUAL_DILATIONS.iter().enumerate() {
-            // Upstream names them res_unit1..3 (1-based).
+            // The reference implementation names them res_unit1..3 (1-based).
             res_units.push(self.residual_unit(
                 &format!("{name}.res_unit{}", i + 1),
                 in_ch,

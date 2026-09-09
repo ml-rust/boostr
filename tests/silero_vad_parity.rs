@@ -1,4 +1,4 @@
-//! Numerical parity for the Silero VAD model against the upstream ONNX graph.
+//! Numerical parity for the Silero VAD model against Silero's own ONNX graph.
 //!
 //! Neither the weights nor the fixture is checked in (they are 1.2 MB of
 //! parameters and 60 s of audio), so these tests skip unless
@@ -12,7 +12,7 @@
 //! * `state_final` `[2, 1, 128]` — `[h, c]` after the last chunk
 //!
 //! What this pins that unit tests cannot: the 64-sample context carried in
-//! FRONT of each chunk, the 64-sample REFLECTION pad after it (upstream uses
+//! FRONT of each chunk, the 64-sample REFLECTION pad after it (Silero uses
 //! `nn.ReflectionPad1d`, not zeros), the real/imaginary channel split of the
 //! STFT basis convolution, the encoder stride schedule,
 //! the PyTorch `[i, f, g, o]` gate order of the LSTM weights, and the ReLU that
@@ -32,7 +32,7 @@ const HIDDEN: usize = 128;
 
 /// Max absolute difference allowed against the ONNX reference.
 ///
-/// Every structural way this port can differ from upstream — a dropped
+/// Every structural way this port can differ from Silero's own model — a dropped
 /// context, a missing tail pad, a swapped real/imaginary half, a reordered LSTM
 /// gate, a misplaced ReLU — moves the probabilities by 1e-2 or more, so
 /// anything above this bound means a formula is wrong, not that the tolerance
@@ -170,7 +170,7 @@ fn a_chunk_that_is_not_512_samples_is_rejected() {
         return;
     };
     let mut state = vad.new_state(&device).expect("fresh VAD state");
-    // Padding a short chunk would return a probability the upstream model never
+    // Padding a short chunk would return a probability the Silero model never
     // produces, so the model refuses instead.
     let short = vec![0.1f32; 480];
     let long = vec![0.1f32; 1024];
@@ -195,9 +195,9 @@ fn a_chunk_that_is_not_512_samples_is_rejected() {
 /// probability for every chunk, so a broken port reads as a cautious one.
 ///
 /// The context is only ONE of four STFT frames, so a quiet context is
-/// indistinguishable from zeros: upstream returns bit-identical `0.094242126`
+/// indistinguishable from zeros: Silero's own model returns bit-identical `0.094242126`
 /// for chunk 500 whether the context is zeroed or the real preceding audio.
-/// A loud context is what separates them — upstream gives `0.041625053` there.
+/// A loud context is what separates them — Silero's own model gives `0.041625053` there.
 /// Both numbers were read off the ONNX model directly.
 ///
 /// This needs the real checkpoint: with synthetic weights every path agrees to
@@ -232,11 +232,11 @@ fn the_context_actually_reaches_the_network() {
     eprintln!("silero vad context: zero {zero_context} vs loud {loud_context}");
     assert!(
         (zero_context - 0.094_242_13).abs() < TOL,
-        "zero-context probability drifted from upstream: {zero_context}"
+        "zero-context probability drifted from Silero's own model: {zero_context}"
     );
     assert!(
         (loud_context - 0.041_625_05).abs() < TOL,
-        "loud-context probability drifted from upstream: {loud_context}"
+        "loud-context probability drifted from Silero's own model: {loud_context}"
     );
 }
 

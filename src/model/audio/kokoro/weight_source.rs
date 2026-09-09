@@ -3,9 +3,9 @@
 //! The tier-3 loader (`load_kokoro_v2`) needs to read tensors by name from
 //! either:
 //!
-//! * a safetensors directory (if the user pre-converted the upstream
+//! * a safetensors directory (if the user pre-converted the reference Kokoro
 //!   checkpoint), or
-//! * the upstream `kokoro-v1_0.pth` directly (via [`TorchStateDict`]).
+//! * the reference Kokoro `kokoro-v1_0.pth` directly (via [`TorchStateDict`]).
 //!
 //! Both source types expose the same two operations the tier-1 helpers need:
 //! "load this tensor by name" and "does this tensor exist". This enum wraps
@@ -27,7 +27,7 @@ pub enum KokoroWeightSource {
 impl KokoroWeightSource {
     /// Auto-detect from a model directory. Prefers a `.safetensors` file if
     /// one exists (faster loads, zero pickle surface); falls back to the
-    /// upstream `.pth` otherwise.
+    /// reference Kokoro `.pth` checkpoint otherwise.
     pub fn open(model_dir: impl AsRef<Path>) -> Result<Self> {
         let dir = model_dir.as_ref();
         // Safetensors first: either `model.safetensors` or any `.safetensors`

@@ -3,7 +3,7 @@
 //! loss, split into its own file to keep `train.rs` under the 500-line
 //! model-file limit.
 //!
-//! Upstream's fine-tuning guide trains BOTH terms (`lambdas: {loss/diff:
+//! The reference VoxCPM fine-tuning guide trains BOTH terms (`lambdas: {loss/diff:
 //! 1.0, loss/stop: 1.0}`) and its own FAQ names runaway generation
 //! ("generation doesn't stop") as a top failure mode, recommending a higher
 //! `loss/stop` weight when it happens. Training on [`super::PatchGenerator::cfm_loss`]
@@ -44,8 +44,8 @@ use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
 /// The diffusion loss (`loss/diff`) and stop loss (`loss/stop`) from one
-/// training step, plus their weighted sum — mirrors upstream's own
-/// TensorBoard scalars so a caller can log all three the same way. See
+/// training step, plus their weighted sum — mirrors the reference VoxCPM
+/// implementation's own TensorBoard scalars so a caller can log all three the same way. See
 /// [`PatchGenerator::train_losses_with_noise`].
 pub struct TrainLosses<R: Runtime> {
     pub diff: Var<R>,
@@ -131,10 +131,10 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
 
     /// [`Self::cfm_loss_with_noise`] and [`Self::stop_loss`] from ONE shared
     /// [`Self::teacher_forced_conditioning`] call, combined as `lambda_diff *
-    /// diff + lambda_stop * stop` — the two terms upstream's fine-tuning
-    /// guide logs separately as `loss/diff` and `loss/stop`. Passing
-    /// `lambda_diff = 1.0, lambda_stop = 1.0` reproduces upstream's own
-    /// default `lambdas:` block; upstream's FAQ recommends raising
+    /// diff + lambda_stop * stop` — the two terms the reference VoxCPM
+    /// fine-tuning guide logs separately as `loss/diff` and `loss/stop`. Passing
+    /// `lambda_diff = 1.0, lambda_stop = 1.0` reproduces the reference VoxCPM
+    /// implementation's own default `lambdas:` block; its FAQ recommends raising
     /// `lambda_stop` specifically when generation runs away (the model never
     /// emits a stop token), which is why both weights are caller-supplied
     /// rather than baked in.
@@ -144,14 +144,15 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// weighted out of `total`) — see `train/tests.rs` for the check that
     /// pins this against [`Self::cfm_loss_with_noise`] directly.
     ///
-    /// `drop_cond` (upstream's `training_cfg_rate` draw) is applied to
+    /// `drop_cond` (the reference VoxCPM implementation's `training_cfg_rate` draw) is applied to
     /// `cond` ONCE, right after [`Self::teacher_forced_conditioning`]
     /// returns, so BOTH `diff` and `stop` see the same conditioning object
     /// — see [`super::apply_cond_dropout`] and
     /// [`Self::cfm_loss_with_noise`]'s `drop_cond` doc for why only `mu` is
     /// zeroed. `stop` reads `cond.lm_hidden`, not `cond.mu`, so it is
     /// numerically UNAFFECTED by `drop_cond` either way — the dropout is
-    /// deliberately scoped to the diffusion term alone, matching upstream.
+    /// deliberately scoped to the diffusion term alone, matching the
+    /// reference VoxCPM implementation.
     #[allow(clippy::too_many_arguments)]
     pub fn train_losses_with_noise<C>(
         &self,
@@ -222,8 +223,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// the combined-loss counterpart of [`Self::cfm_loss`], same seeded-draw
     /// convention (`t` from `seed`, `noise` from `seed + 1`).
     ///
-    /// `training_cfg_rate` is upstream's per-step conditioning-dropout
-    /// probability, drawn from `seed.wrapping_add(2)` — see
+    /// `training_cfg_rate` is the reference VoxCPM implementation's per-step
+    /// conditioning-dropout probability, drawn from `seed.wrapping_add(2)` — see
     /// [`super::PatchGenerator::cfm_loss`]'s doc for the default (0.1) and
     /// why 0 is discouraged. Must be in `[0.0, 1.0]`, else
     /// [`Error::InvalidArgument`].

@@ -92,7 +92,8 @@ impl<R: Runtime> AdaLayerNorm<R> {
         }
 
         // LayerNorm needs the channel axis last: transpose [B,C,T] → [B,T,C],
-        // apply with unit weight / zero bias (no learnable affine upstream),
+        // apply with unit weight / zero bias (no learnable affine in the
+        // reference Kokoro implementation),
         // then transpose back.
         let x_btc = x.transpose(1, 2).map_err(Error::Numr)?.contiguous()?;
         let ones = client

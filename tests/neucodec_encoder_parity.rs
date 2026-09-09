@@ -1,9 +1,9 @@
-//! Numerical parity for the NeuCodec *encoder* primitives against the upstream
-//! `neucodec` Python package.
+//! Numerical parity for the NeuCodec *encoder* primitives against the
+//! reference `neucodec` Python package.
 //!
 //! These are the pieces whose exact numerics the checkpoint cannot pin:
 //!
-//! * the Kaiser-windowed sinc filter taps — upstream registers them as
+//! * the Kaiser-windowed sinc filter taps — the reference implementation registers them as
 //!   NON-PERSISTENT buffers, so they are absent from the weights and must be
 //!   recomputed bit-comparably here;
 //! * `SnakeBeta`, whose `alpha`/`beta` are stored in LOG scale;
@@ -97,9 +97,9 @@ fn setup() -> (CpuClient, CpuDevice) {
 
 /// The filter taps are not in the checkpoint, so a wrong Kaiser `beta` or an
 /// off-by-half `time` grid would silently detune every activation in the
-/// encoder. Compare against upstream's own `kaiser_sinc_filter1d`.
+/// encoder. Compare against the reference implementation's own `kaiser_sinc_filter1d`.
 #[test]
-fn kaiser_filter_matches_upstream() {
+fn kaiser_filter_matches_reference() {
     let Some(dir) = fixtures() else {
         eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_encoder_primitives.py)");
         return;
@@ -110,12 +110,12 @@ fn kaiser_filter_matches_upstream() {
     eprintln!("kaiser taps: max|d|={d:.3e} at {i}");
     assert!(
         d < 1e-6,
-        "filter taps diverge from upstream: max|d|={d} at {i}"
+        "filter taps diverge from the reference implementation: max|d|={d} at {i}"
     );
 }
 
 #[test]
-fn snake_beta_and_activation1d_match_upstream() {
+fn snake_beta_and_activation1d_match_reference() {
     let Some(dir) = fixtures() else {
         eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_encoder_primitives.py)");
         return;
@@ -149,7 +149,7 @@ fn snake_beta_and_activation1d_match_upstream() {
     eprintln!("snake_beta: max|d|={d:.3e} at {i}");
     assert!(
         d < 1e-5,
-        "SnakeBeta diverges from upstream: max|d|={d} at {i} \
+        "SnakeBeta diverges from the reference implementation: max|d|={d} at {i} \
          (a mismatch here usually means alpha/beta were not exponentiated)"
     );
 
@@ -169,7 +169,7 @@ fn snake_beta_and_activation1d_match_upstream() {
     eprintln!("upsample: max|d|={d:.3e} at {i}");
     assert!(
         d < 1e-5,
-        "UpSample1d diverges from upstream: max|d|={d} at {i}"
+        "UpSample1d diverges from the reference implementation: max|d|={d} at {i}"
     );
 
     let got: Vec<f32> = act
@@ -185,7 +185,7 @@ fn snake_beta_and_activation1d_match_upstream() {
     eprintln!("activation1d: max|d|={d:.3e} at {i}");
     assert!(
         d < 1e-5,
-        "Activation1d diverges from upstream: max|d|={d} at {i}"
+        "Activation1d diverges from the reference implementation: max|d|={d} at {i}"
     );
 }
 
@@ -199,12 +199,12 @@ fn checkpoint() -> Option<PathBuf> {
 ///   1. feature projection  (LayerNorm-then-Linear, norm over the 160 input dim)
 ///   2. encoder layer 0 (conformer: ffn1/2 half-residual, relative_key attention,
 ///      causal depthwise conv module)
-///   3. all 16 layers (= upstream `hidden_states[16]`, what NeuCodec reads)
+///   3. all 16 layers (= the reference implementation's `hidden_states[16]`, what NeuCodec reads)
 ///
 /// If (1) passes and (2) fails, the bug is inside the conformer layer; if (2)
 /// passes and (3) fails, it is in the stacking/loader.
 #[test]
-fn semantic_encoder_matches_upstream() {
+fn semantic_encoder_matches_reference() {
     let Some(dir) = fixtures() else {
         eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_encoder_primitives.py)");
         return;
@@ -245,7 +245,7 @@ fn semantic_encoder_matches_upstream() {
         eprintln!("{label}: max|d|={d:.3e} at {i}, reference rms={scale:.3e}");
         assert!(
             d < tol * scale.max(1.0),
-            "{label} diverges from upstream: max|d|={d} at {i} (rms {scale})"
+            "{label} diverges from the reference implementation: max|d|={d} at {i} (rms {scale})"
         );
     };
 
@@ -272,8 +272,8 @@ fn semantic_encoder_matches_upstream() {
     check("hidden_states[16]", &got, "enc_sem_hidden16.f32", 3e-3);
 }
 
-/// The Kaldi-compatible mel frontend, against upstream's own
-/// `SeamlessM4TFeatureExtractor` on a real 1 s waveform.
+/// The Kaldi-compatible mel frontend, against the reference implementation's
+/// own `SeamlessM4TFeatureExtractor` on a real 1 s waveform.
 ///
 /// This is the single highest-risk piece of the semantic branch: at least nine
 /// conventions here have a plausible alternative that yields correctly-shaped
@@ -281,9 +281,9 @@ fn semantic_encoder_matches_upstream() {
 /// mel space vs Hz, DC-removal before vs after pre-emphasis, the exact mel
 /// floor, `ddof=1` vs population variance, `center=false`, the 2^15 scale, and
 /// the Povey window's symmetric-vs-periodic form. Only a numeric comparison
-/// against upstream can tell them apart.
+/// against the reference implementation can tell them apart.
 #[test]
-fn mel_frontend_matches_upstream() {
+fn mel_frontend_matches_reference() {
     let Some(dir) = fixtures() else {
         eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_encoder_primitives.py)");
         return;
@@ -307,7 +307,7 @@ fn mel_frontend_matches_upstream() {
     assert_eq!(
         feats.shape(),
         &[frames, STACKED],
-        "frame count / stacked width must match upstream"
+        "frame count / stacked width must match the reference implementation"
     );
 
     let got: Vec<f32> = feats.contiguous().unwrap().to_vec();
@@ -316,22 +316,24 @@ fn mel_frontend_matches_upstream() {
     eprintln!("mel frontend: max|d|={d:.3e} at {i}, reference rms={scale:.3e}");
     assert!(
         d < 5e-3,
-        "mel frontend diverges from upstream: max|d|={d} at {i} (rms {scale})"
+        "mel frontend diverges from the reference implementation: max|d|={d} at {i} (rms {scale})"
     );
 }
 
-/// The semantic adapter (upstream `SemanticEncoder_module`).
+/// The semantic adapter (the reference implementation's
+/// `SemanticEncoder_module`).
 ///
 /// Pins the residual wiring, which is genuinely counter-intuitive: the skip
 /// adds `relu(conv1(x))`, not `conv1(x)` and not the raw input, because
-/// upstream's first residual-block layer is `nn.ReLU(inplace=True)` and so
+/// the reference implementation's first residual-block layer is
+/// `nn.ReLU(inplace=True)` and so
 /// rewrites the tensor that `residual_blocks(x) + x` goes on to add.
 ///
 /// Every wrong variant still produces correctly-shaped output, which is why
 /// this needs a numeric check: the natural `+ conv1(x)` reading is off by
 /// `max|d| = 2.10` against an output of rms 1.36.
 #[test]
-fn semantic_adapter_matches_upstream() {
+fn semantic_adapter_matches_reference() {
     let Some(dir) = fixtures() else {
         eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_encoder_primitives.py)");
         return;
@@ -372,11 +374,12 @@ fn semantic_adapter_matches_upstream() {
     eprintln!("semantic adapter: max|d|={d:.3e} at {i}, reference rms={scale:.3e}");
     assert!(
         d < 2e-3 * scale.max(1.0),
-        "semantic adapter diverges from upstream: max|d|={d} at {i} (rms {scale})"
+        "semantic adapter diverges from the reference implementation: max|d|={d} at {i} (rms {scale})"
     );
 }
 
-/// The full acoustic (BigCodec) encoder against upstream's `CodecEnc`.
+/// The full acoustic (BigCodec) encoder against the reference
+/// implementation's `CodecEnc`.
 ///
 /// Run on a 3200-sample slice rather than the whole utterance: numr's `conv1d`
 /// is a direct convolution, and 6 s through 1536 channels would dominate the
@@ -386,7 +389,7 @@ fn semantic_adapter_matches_upstream() {
 /// the `stride/2 + stride%2` downsample padding, the residual wiring, and the
 /// alias-free activations at every stage.
 #[test]
-fn acoustic_encoder_matches_upstream() {
+fn acoustic_encoder_matches_reference() {
     let Some(dir) = fixtures() else {
         eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_encoder_primitives.py)");
         return;
@@ -429,11 +432,12 @@ fn acoustic_encoder_matches_upstream() {
     eprintln!("acoustic encoder: max|d|={d:.3e} at {i}, reference rms={scale:.3e}");
     assert!(
         d < 2e-3 * scale.max(1.0),
-        "acoustic encoder diverges from upstream: max|d|={d} at {i} (rms {scale})"
+        "acoustic encoder diverges from the reference implementation: max|d|={d} at {i} (rms {scale})"
     );
 }
 
-/// The `ResidualFSQ` quantizer (`ResidualFsq`) against upstream, on the encode
+/// The `ResidualFSQ` quantizer (`ResidualFsq`) against the reference
+/// implementation, on the encode
 /// path — the one with the load-bearing double `bound` (see
 /// `boostr::nn::fsq::residual` for why collapsing it is wrong).
 ///
@@ -441,9 +445,9 @@ fn acoustic_encoder_matches_upstream() {
 /// the mismatch FRACTION and the first few (position, got, want) triples
 /// rather than a bare assert — a large fraction (e.g. ~43.75%) means the
 /// double bound was lost, while a handful means a float knife-edge in the
-/// upstream reference itself.
+/// reference implementation itself.
 #[test]
-fn residual_fsq_matches_upstream() {
+fn residual_fsq_matches_reference() {
     let Some(dir) = fixtures() else {
         eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_encoder_primitives.py)");
         return;
@@ -498,7 +502,7 @@ fn residual_fsq_matches_upstream() {
         let fraction = mismatches.len() as f64 / got_indices.len() as f64 * 100.0;
         let sample: Vec<_> = mismatches.iter().take(5).collect();
         panic!(
-            "residual fsq indices diverge from upstream: {}/{} mismatched ({fraction:.2}%); \
+            "residual fsq indices diverge from the reference implementation: {}/{} mismatched ({fraction:.2}%); \
              first few (position, got, want): {sample:?}",
             mismatches.len(),
             got_indices.len(),
@@ -517,16 +521,17 @@ fn residual_fsq_matches_upstream() {
     eprintln!("residual fsq quantized_out: max|d|={d:.3e} at {i}, reference rms={scale:.3e}");
     assert!(
         d < 2e-3 * scale.max(1.0),
-        "residual fsq quantized_out diverges from upstream: max|d|={d} at {i} (rms {scale})"
+        "residual fsq quantized_out diverges from the reference implementation: max|d|={d} at {i} (rms {scale})"
     );
 }
 
 /// The FULL encode path — 16 kHz waveform in, FSQ code indices out — against
-/// upstream `NeuCodec.encode_code`.
+/// the reference implementation's `NeuCodec.encode_code`.
 ///
 /// Two clips, because the interesting failures are at the boundaries:
 ///
-/// * `a` is an EXACT multiple of 320. Upstream's `_prepare_audio` pads
+/// * `a` is an EXACT multiple of 320. The reference implementation's
+///   `_prepare_audio` pads
 ///   `320 - (T % 320)`, which at a multiple appends a full extra 320 samples
 ///   rather than none. A port that "optimizes" that case away produces one
 ///   fewer acoustic frame and silently shifts every index.
@@ -535,14 +540,14 @@ fn residual_fsq_matches_upstream() {
 /// Both are checked stage by stage (padding, per-branch frame counts, the
 /// post-`fc_prior` prior, then the indices) so a failure says WHERE. The
 /// branches deliberately disagree on length — acoustic 26 vs semantic 25 for
-/// 8320 samples — and upstream reconciles by truncating both to the minimum,
+/// 8320 samples — and the reference implementation reconciles by truncating both to the minimum,
 /// so the frame-count assertions are part of the contract, not incidental.
 ///
 /// The bar is EXACT integer index match. These are discrete codes: a
 /// near-miss float at a quantization boundary flips one, so any tolerance
 /// would be meaningless. Mismatches are reported as a fraction plus examples.
 #[test]
-fn full_encode_matches_upstream() {
+fn full_encode_matches_reference() {
     let Some(dir) = fixtures() else {
         eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_encoder_primitives.py)");
         return;
@@ -583,8 +588,8 @@ fn full_encode_matches_upstream() {
             .encode_stages(&client, &wave, &device)
             .unwrap_or_else(|e| panic!("clip {clip}: encode failed: {e}"));
 
-        // 1. Padding — the always-pad rule, checked against upstream's own
-        //    padded waveform rather than recomputed here.
+        // 1. Padding — the always-pad rule, checked against the reference
+        //    implementation's own padded waveform rather than recomputed here.
         let want_padded = read_f32(&dir.join(format!("enc_full_{clip}_padded.f32")));
         let got_padded: Vec<f32> = stages
             .padded
@@ -594,7 +599,7 @@ fn full_encode_matches_upstream() {
         assert_eq!(
             got_padded.len(),
             want_padded.len(),
-            "clip {clip}: padded length {} != upstream {} \
+            "clip {clip}: padded length {} != reference {} \
              (input was {} samples; the pad ALWAYS fires, even at a multiple of 320)",
             got_padded.len(),
             want_padded.len(),
@@ -617,16 +622,16 @@ fn full_encode_matches_upstream() {
             "clip {clip}: padded={} semantic frames={ts} acoustic frames={ta} -> {min_len}",
             got_padded.len(),
         );
-        // Upstream's dumps are already truncated to min_len.
+        // The reference implementation's dumps are already truncated to min_len.
         assert_eq!(
             want_sem.len() / CHANNELS,
             min_len,
-            "clip {clip}: upstream semantic frames disagree with min(Ts={ts}, Ta={ta})"
+            "clip {clip}: reference semantic frames disagree with min(Ts={ts}, Ta={ta})"
         );
         assert_eq!(
             want_ac.len() / CHANNELS,
             min_len,
-            "clip {clip}: upstream acoustic frames disagree with min(Ts={ts}, Ta={ta})"
+            "clip {clip}: reference acoustic frames disagree with min(Ts={ts}, Ta={ta})"
         );
 
         // 3. The prior — everything after concat + fc_prior, in one number.
@@ -648,9 +653,9 @@ fn full_encode_matches_upstream() {
         eprintln!("clip {clip}: prior max|d|={d:.3e} at {i}, reference rms={scale:.3e}");
         assert!(
             d < 3e-3 * scale.max(1.0),
-            "clip {clip}: prior diverges from upstream: max|d|={d} at {i} (rms {scale}). \
+            "clip {clip}: prior diverges from the reference implementation: max|d|={d} at {i} (rms {scale}). \
              A large, structured error here usually means the concat order was \
-             reversed (upstream puts SEMANTIC first)."
+             reversed (the reference implementation puts SEMANTIC first)."
         );
 
         // 4. The indices — exact, no tolerance.
@@ -680,7 +685,7 @@ fn full_encode_matches_upstream() {
         );
         assert!(
             mismatches.is_empty(),
-            "clip {clip}: FSQ indices diverge from upstream: {}/{} mismatched ({fraction:.2}%); \
+            "clip {clip}: FSQ indices diverge from the reference implementation: {}/{} mismatched ({fraction:.2}%); \
              first few (position, got, want): {:?}",
             mismatches.len(),
             got_idx.len(),

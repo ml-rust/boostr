@@ -5,14 +5,15 @@
 //! `norm1 -> swish -> conv1(k=3) -> norm2 -> swish -> dropout(0.1) ->
 //! conv2(k=3)`, residual add around the whole block. Both norms carry weight
 //! AND bias over the full 1024-channel width. The dropout carries no weights,
-//! so the checkpoint cannot reveal it — it comes from the upstream
-//! constructor (`ResnetBlock(..., dropout=0.1)`) and is inactive in eval mode.
+//! so the checkpoint cannot reveal it — it comes from the reference
+//! implementation's constructor (`ResnetBlock(..., dropout=0.1)`) and is
+//! inactive in eval mode.
 //!
 //! ## Norm choice: GroupNorm(num_groups=32, eps=1e-6), channels-first
 //!
 //! The checkpoint only records the affine shape (`[1024]`), which cannot on
 //! its own distinguish GroupNorm from a per-timestep LayerNorm over the
-//! channel axis. Upstream `neucodec/codec_decoder_vocos.py` settles it:
+//! channel axis. The reference implementation's `neucodec/codec_decoder_vocos.py` settles it:
 //!
 //! ```python
 //! def Normalize(in_channels, num_groups=32):
@@ -39,10 +40,11 @@ use numr::dtype::DType;
 use numr::runtime::Runtime;
 
 /// Number of GroupNorm groups used by every NeuCodec `ResnetBlock`
-/// (`Normalize(in_channels, num_groups=32)` upstream).
+/// (`Normalize(in_channels, num_groups=32)` in the reference implementation).
 pub const RESNET_NORM_GROUPS: usize = 32;
 
-/// GroupNorm epsilon used by every NeuCodec `ResnetBlock` (upstream `eps=1e-6`,
+/// GroupNorm epsilon used by every NeuCodec `ResnetBlock` (the reference
+/// implementation uses `eps=1e-6`,
 /// NOT PyTorch's `1e-5` default).
 pub const RESNET_NORM_EPS: f32 = 1e-6;
 
@@ -54,7 +56,8 @@ pub struct ResnetBlockWeights<R: Runtime> {
     pub conv2: Conv1d<R>,
 }
 
-/// Dropout probability upstream constructs every NeuCodec `ResnetBlock` with
+/// Dropout probability the reference implementation constructs every
+/// NeuCodec `ResnetBlock` with
 /// (`ResnetBlock(..., dropout=0.1)`). Inactive in eval mode, which is the
 /// default here.
 pub const RESNET_DROPOUT_P: f64 = 0.1;
@@ -356,7 +359,8 @@ mod tests {
     }
 
     /// Blocks default to EVAL, so a loaded pretrained decoder is deterministic;
-    /// `set_training(true)` must actually arm the upstream `dropout=0.1`.
+    /// `set_training(true)` must actually arm the reference implementation's
+    /// `dropout=0.1`.
     #[test]
     fn defaults_to_eval_and_dropout_arms_on_train() {
         let (client, device) = cpu_setup();

@@ -50,7 +50,7 @@ fn load_quantizer_projections<R: Runtime<DType = DType>>(
 /// Load the FSQ quantizer (`quantizer.project_in`/`project_out`) from a
 /// checkpoint.
 ///
-/// Upstream builds it as `ResidualFSQ(dim=2048, levels=[4]*8,
+/// The reference NeuCodec implementation builds it as `ResidualFSQ(dim=2048, levels=[4]*8,
 /// num_quantizers=1)`, which stores exactly these two projections under
 /// `quantizer.*` — the same names this reads.
 ///
@@ -71,13 +71,14 @@ pub fn load_fsq_quantizer<R: Runtime<DType = DType>, P: AsRef<Path>>(
     Fsq::new(config, device, Some(project_in), Some(project_out))
 }
 
-/// Load the quantizer as upstream actually builds it: `ResidualFSQ(dim=2048,
+/// Load the quantizer as the reference NeuCodec implementation actually builds it: `ResidualFSQ(dim=2048,
 /// levels=[4]*8, num_quantizers=1)`.
 ///
 /// Same checkpoint tensors as [`load_fsq_quantizer`] (`quantizer.project_in`/
 /// `project_out`) — the released checkpoint has no per-layer tensors because
 /// the single inner `FSQ` layer is parameterless. Unlike [`load_fsq_quantizer`],
-/// this reproduces the double-`bound` encode path that upstream's residual
+/// this reproduces the double-`bound` encode path that the reference
+/// implementation's residual
 /// wrapper relies on; see [`crate::nn::fsq::residual`] for why that matters.
 pub fn load_residual_fsq<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
@@ -90,7 +91,7 @@ pub fn load_residual_fsq<R: Runtime<DType = DType>, P: AsRef<Path>>(
     let (project_in, project_out) =
         load_quantizer_projections::<R>(&mut loader, device, codebook_dim)?;
 
-    // The inner FSQ layer is parameterless: upstream's per-layer projections
+    // The inner FSQ layer is parameterless: the reference implementation's per-layer projections
     // are always `nn.Identity` (the residual wrapper owns project_in/out).
     let layer_config = config.layer_config()?;
     let layer = Fsq::new(layer_config, device, None, None)?;

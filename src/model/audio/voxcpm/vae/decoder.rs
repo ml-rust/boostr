@@ -12,7 +12,8 @@
 //! ```
 //!
 //! No `NoiseBlock` (`use_noise_block=false` in this checkpoint) and no
-//! `out_layer` for the sample-rate conditioning (`Identity` upstream) — both
+//! `out_layer` for the sample-rate conditioning (`Identity` in the reference
+//! implementation) — both
 //! absent from the real `model.safetensors`, so neither is modeled here.
 //!
 //! Inference-only: built from plain [`Tensor<R>`] weights, no autograd.
@@ -36,7 +37,7 @@ pub const SAMPLE_RATE: usize = 48_000;
 
 /// VoxCPM2 calls `decode()` with no explicit `sr_cond`, which defaults to
 /// `out_sample_rate = 48000`. Bucketizing 48000 against the checkpoint's
-/// `sr_bin_boundaries = [20000, 30000, 40000]` (upstream `torch.bucketize`,
+/// `sr_bin_boundaries = [20000, 30000, 40000]` (the reference implementation's `torch.bucketize`,
 /// right-open bins) lands in bucket 3 — the last bin, for anything at or
 /// above 40 kHz. This is NOT derived from the 16 kHz *input* rate to the
 /// encoder (that would bucketize to 0, a different, wrong affine transform

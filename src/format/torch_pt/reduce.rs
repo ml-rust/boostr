@@ -162,7 +162,7 @@ pub(super) fn finalize_root(root: PValue) -> Result<PtContents> {
             raw.insert(String::new(), meta);
         }
         PValue::Dict(_) => {
-            // Recursively flatten nested dicts. Upstream Kokoro's
+            // Recursively flatten nested dicts. Kokoro's
             // `kokoro-v1_0.pth` is `{top: {module: {sub: tensor, …}}, …}`.
             flatten_into("", &root, &mut raw);
             if raw.is_empty() {
@@ -217,7 +217,7 @@ fn flatten_into(prefix: &str, value: &PValue, out: &mut HashMap<String, PtTensor
             }
         }
         _ => {
-            // List/tuple/opaque values are ignored — upstream kokoro
+            // List/tuple/opaque values are ignored — Kokoro
             // state_dicts only nest dicts and leaf tensors.
         }
     }

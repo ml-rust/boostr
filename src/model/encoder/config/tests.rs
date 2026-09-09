@@ -355,7 +355,7 @@ fn jina_v2_metadata() -> GgufMetadata {
 }
 
 /// jina-bert-v3 must route to its own family, not to the BERT fallback: it
-/// reports `XLMRobertaModel` upstream but has no `position_embd` tensor, and
+/// reports `XLMRobertaModel` in its HuggingFace config but has no `position_embd` tensor, and
 /// its rotary base is 20 000 rather than the usual 10 000.
 #[test]
 fn jina_v3_config_uses_rope_at_its_own_base() {

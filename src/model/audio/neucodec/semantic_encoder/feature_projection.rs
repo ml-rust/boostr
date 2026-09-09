@@ -17,7 +17,8 @@
 //! typecheck against the real tensors — but hand-rolling the order without
 //! looking at the shapes silently produces a differently-normalized encoder.
 //!
-//! Upstream also returns the intermediate `normed` alongside the projection
+//! HF transformers' `Wav2Vec2BertFeatureProjection` also returns the
+//! intermediate `normed` alongside the projection
 //! (it feeds the masked-spec training path). The encoder never consumes it, so
 //! this port returns only the projected value.
 

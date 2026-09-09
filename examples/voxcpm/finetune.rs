@@ -46,10 +46,10 @@
 //! both is degenerate: the model can pass the reference straight through to
 //! the output and score a low, still-falling loss without ever learning to
 //! synthesize from text. So `ref_wav` names a *different* clip from the
-//! *same speaker* as `wav`, per upstream's fine-tuning guide, and this file
+//! *same speaker* as `wav`, per the reference VoxCPM fine-tuning guide, and this file
 //! never lets `wav`'s own patches serve as `ref_feat`.
 //!
-//! Upstream also specifies that only 30-50% of training rows should carry a
+//! The reference VoxCPM fine-tuning guide also specifies that only 30-50% of training rows should carry a
 //! `ref_audio` at all, so the model keeps its zero-shot (no-reference)
 //! ability alongside reference-based cloning. Whoever builds the manifest
 //! should leave `ref_wav` blank (empty cell, or the column absent entirely)
@@ -59,7 +59,7 @@
 //!
 //! Measured peak RSS scales ~1.36 GB per SECOND of target audio (q6_k on
 //! CPU: 3.5 s -> 6353 MB, 4.9 s -> 8049 MB, 12.5 s -> 18598 MB). A single
-//! 12.5 s clip needs ~18.6 GB. Upstream's own fine-tuning guide hits the
+//! 12.5 s clip needs ~18.6 GB. The reference VoxCPM fine-tuning guide hits the
 //! same wall and handles it with `max_batch_tokens: 8192`, which FILTERS
 //! long samples out of the run rather than shortening them.
 //!
@@ -145,7 +145,8 @@
 //! A row without a `ref_wav` trains ZERO-SHOT: `prefill_capturing` gets
 //! `None`, and
 //! [`SequenceLayout::build`](boostr::model::audio::voxcpm::model::sequence::SequenceLayout::build)
-//! drops the reference prefix entirely, matching upstream's no-ref packer. A
+//! drops the reference prefix entirely, matching the reference VoxCPM
+//! implementation's no-ref packer. A
 //! missing `ref_wav` NEVER falls back to self-referencing `wav`.
 //!
 //! The run summary prints the with/without-reference split. That printed
@@ -246,16 +247,17 @@ const DEFAULT_ALPHA: f32 = 32.0;
 const DEFAULT_LR: f64 = 1e-4;
 const DEFAULT_EPOCHS: usize = 3;
 const DEFAULT_SEED: u64 = 0;
-/// `lambda_stop` in upstream's `lambdas:` fine-tuning block. Upstream's own
-/// default is `1.0`, matched here; upstream's FAQ names runaway generation
+/// `lambda_stop` in the reference VoxCPM `lambdas:` fine-tuning block. The
+/// reference implementation's own default is `1.0`, matched here; its FAQ names runaway generation
 /// ("generation doesn't stop") as a top failure mode and recommends raising
 /// this weight when it happens — see `--lambda-stop` in [`USAGE`].
 const DEFAULT_LAMBDA_STOP: f64 = 1.0;
-/// `lambda_diff` in upstream's `lambdas:` block. Fixed at upstream's own
-/// default — unlike `lambda_stop`, upstream's FAQ names no failure mode
+/// `lambda_diff` in the reference VoxCPM `lambdas:` block. Fixed at the
+/// reference implementation's own default — unlike `lambda_stop`, its FAQ names no failure mode
 /// that calls for retuning it, so it is not exposed as a flag.
 const LAMBDA_DIFF: f64 = 1.0;
-/// `training_cfg_rate` — upstream's default, matched here. Upstream's FAQ
+/// `training_cfg_rate` — the reference VoxCPM implementation's default,
+/// matched here. Its FAQ
 /// calls text-ignoring "the most common fine-tuning failure mode" and says
 /// explicitly not to train with this at 0: `--training-cfg-rate` exists so
 /// an operator can raise it, not so it gets turned off.
@@ -326,8 +328,9 @@ struct Args {
     seed: u64,
     out: Option<PathBuf>,
     lambda_stop: f64,
-    /// Upstream's `training_cfg_rate`: the per-step probability of
-    /// conditioning dropout during training. Upstream's FAQ calls text
+    /// The reference VoxCPM implementation's `training_cfg_rate`: the
+    /// per-step probability of
+    /// conditioning dropout during training. Its FAQ calls text
     /// ignoring "the most common fine-tuning failure mode" and says
     /// explicitly DO NOT set this to 0 — leave it at the default unless a
     /// specific reason says otherwise.
@@ -354,7 +357,7 @@ const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf [--c
 --manifest FILE.tsv (header-named TSV: wav, text, optional ref_wav) \
 [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] \
 [--alpha 32] [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors] \
-[--lambda-stop 1.0] [--training-cfg-rate 0.1 (DO NOT set to 0 — upstream's FAQ \
+[--lambda-stop 1.0] [--training-cfg-rate 0.1 (DO NOT set to 0 — the reference VoxCPM FAQ \
 names text-ignoring as the most common fine-tuning failure mode)] \
 [--max-patches 38 (caps the target wav's patch count; over-cap targets are \
 dropped, over-cap ref_wav clips are truncated to the cap instead — see the \
@@ -716,7 +719,8 @@ fn filter_rows_by_patch_cap<'a>(
     // as a model that never learned reference cloning.
     let with_ref = kept.iter().filter(|row| row.ref_wav.is_some()).count();
     eprintln!(
-        "manifest: {with_ref} row(s) with reference, {} without (upstream recommends 30-50% \
+        "manifest: {with_ref} row(s) with reference, {} without (the reference VoxCPM \
+         implementation recommends 30-50% \
          of rows WITH a reference, so most rows train reference-free; that is what keeps \
          zero-shot cloning alive)",
         kept.len() - with_ref

@@ -93,7 +93,8 @@ pub struct AdainResBlk1d<R: Runtime> {
     /// Optional 1×1 conv shortcut when `dim_in != dim_out`. If `None`, the
     /// residual is applied to `x` directly.
     conv1x1: Option<Conv1d<R>>,
-    /// Optional upsampling transposed-conv (scale factor = 2 in upstream).
+    /// Optional upsampling transposed-conv (scale factor = 2 in the reference
+    /// Kokoro implementation).
     /// Pool weight stored as a ConvTranspose1d weight layout `[C_in, C_out, K]`.
     pool: Option<PoolParams<R>>,
     leaky_slope: f64,

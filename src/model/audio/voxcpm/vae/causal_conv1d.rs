@@ -1,7 +1,7 @@
 //! Causal (left-only-padded) 1D convolution used throughout the VoxCPM2
 //! `AudioVAE` decoder.
 //!
-//! Upstream's `CausalConv1d` runs a plain `Conv1d` with `padding=0` and does
+//! The reference VoxCPM implementation's `CausalConv1d` runs a plain `Conv1d` with `padding=0` and does
 //! its own manual left-pad before calling it: `left = padding * 2 -
 //! output_padding`, with `output_padding` always 0 for a non-transposed conv.
 //! For a stride-1 conv, the nominal "same" padding is `dilation * (kernel -

@@ -39,7 +39,7 @@
 //! audio_mask = [0; text_length]
 //! ```
 //!
-//! This matches upstream's zero-shot packer (`voxcpm/training/packers.py`,
+//! This matches the reference VoxCPM implementation's zero-shot packer (`voxcpm/training/packers.py`,
 //! `process_tts_data`) and its zero-shot inference path
 //! (`voxcpm/model/voxcpm2.py`). Training mixes the two modes: 30-50% of rows
 //! carry no reference, which is what keeps zero-shot cloning alive.
@@ -101,7 +101,7 @@ impl SequenceLayout {
     /// ```
     ///
     /// The no-reference form drops the delimiters entirely, matching
-    /// upstream's zero-shot packer (`process_tts_data`). It emits no residual
+    /// the reference VoxCPM implementation's zero-shot packer (`process_tts_data`). It emits no residual
     /// `103`/`104` and no zero-patch bookend.
     ///
     /// `text_token_ids` must be non-empty and must already end with

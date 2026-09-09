@@ -1,7 +1,7 @@
 //! `KokoroModelV2` — the top-level Kokoro assembly.
 //!
-//! Every submodule is a faithful port of the upstream `hexgrad/kokoro`
-//! architecture:
+//! Every submodule is a faithful port of the `hexgrad/kokoro` reference
+//! implementation's architecture:
 //!
 //! ```text
 //! KokoroModelV2
@@ -12,7 +12,8 @@
 //! └── config           : KokoroConfig
 //! ```
 //!
-//! Forward flow (from upstream `forward_with_tokens`):
+//! Forward flow (from the reference Kokoro implementation's
+//! `forward_with_tokens`):
 //!
 //! ```text
 //! d_en       = bert(ids).transpose                       [B, 512, T_phon]
@@ -215,7 +216,8 @@ impl KokoroModelV2<CpuRuntime> {
 /// Build an alignment matrix `[T_phon, T_frames]` from integer durations.
 ///
 /// Entry `(p, f)` is `1.0` iff frame `f` belongs to phoneme `p`, else `0.0`.
-/// Matches upstream `pred_aln_trg` construction. Returned on the same device
+/// Matches the reference Kokoro implementation's `pred_aln_trg` construction.
+/// Returned on the same device
 /// as the reference tensor passed in.
 pub fn alignment_matrix_from_durations<R: Runtime<DType = DType>>(
     durations: &[u32],

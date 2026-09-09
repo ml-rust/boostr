@@ -5,15 +5,16 @@
 //! 2026-08, single-codebook case — `num_codebooks = 1`, `preserve_symmetry =
 //! false`, `bound_hard_clamp = false`, which is how NeuCodec/WideCodec use it).
 //!
-//! This type is upstream's `FSQ` and *only* `FSQ`. The residual wrapper —
-//! upstream's `ResidualFSQ`, which owns the projections, the per-quantizer
+//! This type is lucidrains/vector-quantize-pytorch's `FSQ` and *only* `FSQ`.
+//! The residual wrapper — its `ResidualFSQ`, which owns the projections, the per-quantizer
 //! `scales`, and the extra pre-`bound` on the encode path — lives in
 //! [`super::residual::ResidualFsq`]. Conflating the two is a real numerical
 //! trap; see that module's docs.
 //!
 //! `Fsq` keeps optional `project_in`/`project_out` of its own because callers
-//! configure them through [`FsqConfig`] (`input_dim != levels.len()`); upstream
-//! `FSQ`'s equivalents are `nn.Identity` in that case, which is exactly what
+//! configure them through [`FsqConfig`] (`input_dim != levels.len()`);
+//! lucidrains/vector-quantize-pytorch's `FSQ`'s equivalents are `nn.Identity`
+//! in that case, which is exactly what
 //! `None` means here.
 //!
 //! # Math (mirrors the reference exactly)
@@ -29,7 +30,7 @@
 //! quantize(z) = round_ste(bound(z)) / half_width          // FSQ.quantize
 //! ```
 //!
-//! Note the two are SEPARATE upstream functions (`Fsq::bound` and
+//! Note the two are SEPARATE functions in the reference implementation (`Fsq::bound` and
 //! `Fsq::quantize_codes`) and `bound` is NOT idempotent — its output range is
 //! asymmetric, `(-half_l - offset, half_l - offset)`. `ResidualFsq` applies it
 //! twice on purpose. Do not fuse them back together.
@@ -178,7 +179,7 @@ impl<R: Runtime<DType = DType>> Fsq<R> {
         &self.config
     }
 
-    /// Upstream `FSQ.bound`: `tanh(z + shift) * half_l - offset`.
+    /// lucidrains/vector-quantize-pytorch's `FSQ.bound`: `tanh(z + shift) * half_l - offset`.
     ///
     /// Squashes `z` into the (asymmetric) interval
     /// `(-half_l - offset, half_l - offset)` per dimension. NO rounding, NO
@@ -188,7 +189,8 @@ impl<R: Runtime<DType = DType>> Fsq<R> {
     /// The asymmetry is why this is not idempotent: `bound(bound(z)) !=
     /// bound(z)`. [`ResidualFsq`](super::residual::ResidualFsq) relies on
     /// applying it twice (once to seed the residual, once inside
-    /// `quantize_codes`) exactly as upstream `ResidualFSQ.forward` does.
+    /// `quantize_codes`) exactly as lucidrains/vector-quantize-pytorch's
+    /// `ResidualFSQ.forward` does.
     ///
     /// Every step is a tracked `var_*` op, so gradients reach `z`.
     pub(crate) fn bound<C>(&self, z: &Var<R>, client: &C) -> Result<Var<R>>
@@ -209,7 +211,7 @@ impl<R: Runtime<DType = DType>> Fsq<R> {
         var_sub(&scaled, &offset, client).map_err(Error::Numr)
     }
 
-    /// Upstream `FSQ.quantize`: `round_ste(bound(z)) / half_width`.
+    /// lucidrains/vector-quantize-pytorch's `FSQ.quantize`: `round_ste(bound(z)) / half_width`.
     ///
     /// Snaps `z` onto the FSQ grid, normalized to `[-1, 1]`-ish per dimension.
     /// Straight-through: forward value is the rounded grid point, backward

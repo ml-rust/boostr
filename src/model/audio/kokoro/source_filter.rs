@@ -24,7 +24,7 @@
 //!    time-domain excitation signal.
 //!
 //! The random initial phase and additive noise use the runtime's RNG, matching
-//! the upstream reference. Seed numr's global RNG before synthesis if you need
+//! the reference NSF implementation. Seed numr's global RNG before synthesis if you need
 //! bit-reproducible output.
 
 use crate::error::{Error, Result};
@@ -61,7 +61,7 @@ impl SineGen {
     }
 
     /// Generate `[B, T, harmonic_num + 1]` harmonic-plus-noise excitation from
-    /// `f0 [B, T, 1]`, matching the upstream NSF `SineGen`.
+    /// `f0 [B, T, 1]`, matching the reference NSF `SineGen` implementation.
     ///
     /// `f0` is in Hz. Voiced frames (`f0 > voiced_threshold`) emit the sine
     /// harmonics scaled by `sine_amp` plus `noise_std` Gaussian noise; unvoiced
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn unvoiced_f0_is_noise_driven() {
         // f0 ≤ threshold (0.0) → uv=0 → no harmonics, output is noise with
-        // amplitude sine_amp/3 ≈ 0.0333 (matches upstream NSF). Verify the
+        // amplitude sine_amp/3 ≈ 0.0333 (matches the reference NSF implementation). Verify the
         // noise path is active (non-zero) and its RMS sits near sine_amp/3.
         let (client, device) = cpu_setup();
         let sg = SineGen::new(24_000.0, 2);

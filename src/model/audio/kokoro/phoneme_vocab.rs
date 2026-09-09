@@ -1,12 +1,12 @@
 //! Kokoro phoneme vocabulary — IPA/punctuation string → integer id.
 //!
-//! Upstream ships a `vocab.json` alongside the checkpoint: a flat
+//! The reference Kokoro checkpoint ships a `vocab.json` alongside it: a flat
 //! `{"symbol": id}` object with 178 entries. This module parses that file
 //! (or accepts an in-memory mapping) and implements
 //! [`crate::model::audio::g2p::PhonemeVocab`].
 //!
-//! We don't hardcode the 178-entry table here. The table is upstream data
-//! that ships with the model directory; hardcoding it would mean drift every
+//! We don't hardcode the 178-entry table here. The table is data published
+//! with the model directory; hardcoding it would mean drift every
 //! time Kokoro ships a new vocab. Reading the checkpoint-bundled `vocab.json`
 //! is the cleanest path and matches how other Kokoro ports (Python, ONNX
 //! runtime demos) behave.

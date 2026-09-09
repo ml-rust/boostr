@@ -1,21 +1,22 @@
-//! NeuCodec's semantic adapter (upstream `neucodec.module.SemanticEncoder`):
+//! NeuCodec's semantic adapter (the reference implementation's
+//! `neucodec.module.SemanticEncoder`):
 //! projects the Wav2Vec2-BERT semantic branch into the shared 1024-dim latent
 //! space, channels-first, length-preserving throughout.
 //!
-//! Verified against the upstream source AND the checkpoint's
+//! Verified against the reference NeuCodec source AND the checkpoint's
 //! `semantic_adapter.*` tensors (6 total):
 //!
 //! ```text
 //! x [B, 1024, T]
-//!   -> conv1   Conv1d(1024 -> 1024, k=3, pad=1, no bias)   upstream `initial_conv`
+//!   -> conv1   Conv1d(1024 -> 1024, k=3, pad=1, no bias)   reference impl's `initial_conv`
 //!   -> h    = conv1(x)
 //!   -> skip = relu(h)                                       (see the note below)
-//!   -> r    = conv3(relu(conv2(skip))) + skip               upstream `residual_blocks` + residual
-//!   -> conv4(r)                                             upstream `final_conv`, no bias
+//!   -> r    = conv3(relu(conv2(skip))) + skip               reference impl's `residual_blocks` + residual
+//!   -> conv4(r)                                             reference impl's `final_conv`, no bias
 //! [B, 1024, T]
 //! ```
 //!
-//! HF checkpoint names `conv1..conv4`; upstream names `initial_conv`,
+//! HF checkpoint names `conv1..conv4`; the reference implementation names `initial_conv`,
 //! `residual_blocks.1` (first conv), `residual_blocks.3` (second conv), and
 //! `final_conv`. `residual_blocks.0`/`.2` are the `ReLU`s in between, which
 //! carry no weights. The bias pattern pins the mapping: `conv1`/`conv4` are
@@ -24,7 +25,8 @@
 //!
 //! ## The skip adds `relu(h)`, not `h` — an in-place-ReLU side effect
 //!
-//! Upstream reads `x = self.residual_blocks(x) + x`, where `x` has already
+//! The reference NeuCodec implementation reads
+//! `x = self.residual_blocks(x) + x`, where `x` has already
 //! been reassigned to `initial_conv(x)`. That looks like "add `h`". It is not:
 //! `residual_blocks[0]` is `nn.ReLU(inplace=True)`, so evaluating
 //! `residual_blocks(x)` REWRITES `x` in place before the `+ x` is applied. The
@@ -33,7 +35,8 @@
 //! This is invisible in the checkpoint and easy to read past in the source.
 //! Reconstructing the obvious `+ h` reading gives `max|d| = 2.10` against an
 //! output of rms 1.36 — completely wrong audio, not a rounding difference.
-//! Verified by evaluating six candidate wirings against upstream's own module
+//! Verified by evaluating six candidate wirings against the reference
+//! implementation's own module
 //! on the real weights; only the `relu(h)` skip reproduces it exactly (0.0e0).
 
 use crate::error::{Error, Result};
@@ -94,7 +97,8 @@ impl<R: Runtime<DType = DType>> SemanticAdapter<R> {
 
         let h = self.conv1.forward(client, x)?;
 
-        // The skip adds relu(h), NOT h — see the module doc: upstream's first
+        // The skip adds relu(h), NOT h — see the module doc: the reference
+        // implementation's first
         // residual-block layer is `nn.ReLU(inplace=True)`, which rewrites the
         // very tensor that `residual_blocks(x) + x` then adds.
         let skip = var_relu(&h, client).map_err(Error::Numr)?;

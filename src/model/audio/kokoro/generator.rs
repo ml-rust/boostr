@@ -81,7 +81,8 @@ pub struct IStftNetGenerator<R: Runtime> {
     /// STFT parameters used by the CPU-specialized noise-path forward.
     pub stft: GeneratorStftParams,
     /// Reflection-pad size applied to `x` on the last upsample stage, just
-    /// before `+ x_source`. Matches upstream's `ReflectionPad1d(p)` where
+    /// before `+ x_source`. Matches the reference Kokoro implementation's
+    /// `ReflectionPad1d(p)` where
     /// `p = (conv_post_kernel - 1) / 2`. Set to 0 to skip (legacy callers).
     pub last_stage_reflect_pad: usize,
     /// Total audio-rate upsample factor applied to f0 before the noise-path
@@ -98,8 +99,8 @@ pub struct IStftNetGeneratorOpts {
     pub num_kernels: usize,
     pub leaky_slope: f64,
     pub stft: GeneratorStftParams,
-    /// Reflection-pad size for the last upsample stage. Kokoro's upstream
-    /// uses `(conv_post_kernel - 1) / 2 = 3` (kernel 7). Set to 0 to skip.
+    /// Reflection-pad size for the last upsample stage. The reference Kokoro
+    /// implementation uses `(conv_post_kernel - 1) / 2 = 3` (kernel 7). Set to 0 to skip.
     pub last_stage_reflect_pad: usize,
     /// Audio-rate upsample factor for the noise path (see struct field).
     pub f0_upsample_factor: usize,
@@ -270,8 +271,8 @@ impl IStftNetGenerator<numr::runtime::cpu::CpuRuntime> {
 
     /// Compute the harmonic excitation spectrogram `[B, n_fft+2, T]` from a
     /// frame-rate F0 contour. Concatenates `m_source` output's magnitude and
-    /// phase along the channel axis — the shape upstream `noise_convs[i]`
-    /// modules expect. Exposed as a building block for callers that want to
+    /// phase along the channel axis — the shape the reference Kokoro
+    /// implementation's `noise_convs[i]` modules expect. Exposed as a building block for callers that want to
     /// inspect or reuse the excitation without running the full forward.
     pub fn harmonic_excitation_spec_cpu(
         &self,

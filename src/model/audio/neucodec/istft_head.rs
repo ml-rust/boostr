@@ -7,7 +7,7 @@
 //! `[B, T, 961]`:
 //!
 //! * `magnitude = clamp(exp(mag), max=1e2)` — the clamp is applied to the
-//!   LINEAR magnitude, AFTER `exp`, matching upstream
+//!   LINEAR magnitude, AFTER `exp`, matching the reference implementation's
 //!   `neucodec/codec_decoder_vocos.py`:
 //!
 //!   ```python
@@ -93,7 +93,7 @@ impl<R: Runtime<DType = DType>> IstftHead<R> {
         let mag_log = var_contiguous(&mag_log)?;
         let phase = var_contiguous(&phase)?;
 
-        // exp FIRST, then clamp the linear magnitude (upstream order).
+        // exp FIRST, then clamp the linear magnitude (reference implementation order).
         let mag = var_exp(&mag_log, client).map_err(Error::Numr)?;
         let mag = var_clamp(&mag, f64::NEG_INFINITY, self.mag_clamp_max as f64, client)
             .map_err(Error::Numr)?;

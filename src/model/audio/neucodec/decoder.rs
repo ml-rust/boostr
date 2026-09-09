@@ -116,7 +116,8 @@ impl<R: Runtime<DType = DType>> NeuCodecDecoder<R> {
     }
 
     /// Propagate training/eval mode to every `ResnetBlock` (the only stochastic
-    /// layers in this decoder — each holds an upstream `dropout=0.1`).
+    /// layers in this decoder — each holds a `dropout=0.1` in the reference
+    /// implementation).
     ///
     /// Inherent method rather than a [`TrainMode`] impl so it stays available
     /// without importing the trait; a `TrainMode` impl delegates to it.
@@ -186,7 +187,7 @@ impl<R: Runtime<DType = DType>> NeuCodecDecoder<R> {
         // channels-first -> channels-last, then the FINAL norm.
         //
         // `norm` runs AFTER `post_net`, not between the transformer stack and
-        // `post_net` — upstream `VocosBackbone.forward` is
+        // `post_net` — the reference implementation's `VocosBackbone.forward` is
         // `embed -> prior_net -> transformers -> post_net -> final_layer_norm`.
         // The checkpoint cannot reveal this (it only records that `norm` has a
         // bias); only the source ordering does.
@@ -227,8 +228,9 @@ impl<R: Runtime<DType = DType>> NeuCodecDecoder<R> {
             &window,
             IStftOptions {
                 hop_length: self.config.hop_length,
-                // Vocos `padding="same"`, NOT torch's `center=True`: upstream
-                // trims `(n_fft - hop)/2 = 720` per end, not `n_fft/2 = 960`.
+                // Vocos `padding="same"`, NOT torch's `center=True`: the
+                // reference implementation trims `(n_fft - hop)/2 = 720` per
+                // end, not `n_fft/2 = 960`.
                 // This sets both the output length (`T*hop`, one hop per input
                 // frame) and the alignment, so the two are not interchangeable.
                 padding: IStftPadding::Same,

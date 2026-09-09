@@ -16,8 +16,9 @@ use super::constants::{FRAME_LENGTH, POVEY_EXPONENT};
 /// what most STFT code wants, but here it shifts every tap by a fraction of a
 /// sample and changes the frame-edge taper.
 ///
-/// Settled numerically, not by reading: the parity test against upstream's own
-/// extractor agrees to `max|d| = 4.8e-7` with this symmetric form.
+/// Settled numerically, not by reading: the parity test against
+/// `SeamlessM4TFeatureExtractor`'s own extractor agrees to `max|d| = 4.8e-7`
+/// with this symmetric form.
 ///
 /// Raising to 0.85 is what distinguishes Povey from plain Hann; using plain
 /// Hann changes the effective bandwidth of every FFT bin.

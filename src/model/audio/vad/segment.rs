@@ -3,7 +3,7 @@
 //! [`super::model::SileroVad`] scores one 512-sample chunk at a time. That
 //! per-chunk probability is not a usable answer on its own — a single dip below
 //! the threshold in the middle of a word would end an utterance. This layer is
-//! the port of upstream's `get_speech_timestamps`: hysteresis (a separate,
+//! the port of Silero's `get_speech_timestamps`: hysteresis (a separate,
 //! lower threshold to LEAVE speech), a minimum silence before a segment closes,
 //! a minimum duration before a segment counts, an optional hard cap on segment
 //! length, and a symmetric pad grown around every surviving segment.
@@ -13,10 +13,10 @@
 //! arrays. [`super::model::SileroVad::speech_timestamps`] is the convenience
 //! wrapper that runs the network first.
 //!
-//! # The rules interact, and the order is upstream's
+//! # The rules interact, and the order is Silero's
 //!
 //! The branches below are ported statement by statement, including two places
-//! where upstream's own control flow is asymmetric (one of the three
+//! where Silero's own control flow is asymmetric (one of the three
 //! max-speech sub-branches skips the rest of the iteration, the other two fall
 //! through) and one where a variable is read and then zeroed a few lines later.
 //! Tidying either changes which boundaries come out, so both are reproduced as
@@ -30,7 +30,7 @@ use numr::runtime::{Runtime, RuntimeClient};
 
 /// Tuning for [`segments_from_probabilities`].
 ///
-/// [`Default`] is upstream's own default set, which is what the published
+/// [`Default`] is Silero's own default set, which is what the published
 /// Silero examples run: threshold 0.5, 250 ms minimum speech, 100 ms minimum
 /// silence, 30 ms pad, no cap on segment length.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,7 +57,7 @@ pub struct VadSegmentOptions {
     /// this are candidate split points.
     pub min_silence_at_max_speech_ms: u32,
     /// `true` splits an over-long segment at its LONGEST candidate silence.
-    /// `false` is upstream's older behaviour: split at the most recent
+    /// `false` is Silero's older behaviour: split at the most recent
     /// candidate silence instead.
     pub use_max_possible_silence_at_max_speech: bool,
 }
@@ -112,7 +112,7 @@ impl SpeechSegment {
 ///
 /// `probs[i]` is the probability for the chunk starting at sample
 /// `i * window_size`, so exactly `ceil(num_samples / window_size)` values are
-/// expected — upstream evaluates a ZERO-PADDED final partial chunk rather than
+/// expected — Silero evaluates a ZERO-PADDED final partial chunk rather than
 /// dropping it. Note that [`SileroVad::probabilities`] deliberately drops that
 /// trailing partial chunk instead (its own doc comment says so, and a test
 /// pins it), so its output is one value short for any signal whose length is
@@ -238,14 +238,14 @@ pub fn segments_from_probabilities(
 
         // The segment has outgrown `max_speech_duration_s` and must be split.
         // Signed arithmetic throughout: a small cap makes `max_speech_samples`
-        // negative, and upstream compares against it as a plain number.
+        // negative, and Silero compares against it as a plain number.
         if triggered
             && let Some(seg) = current
             && (cur_sample as f64 - seg.start as f64) > max_speech_samples
         {
             // Python's `max` keeps the FIRST maximum on ties, so this reduces
             // with a strict `>` rather than using `max_by_key`, which keeps
-            // the last. `None` here is upstream's empty-candidate case.
+            // the last. `None` here is Silero's empty-candidate case.
             let longest_silence = possible_ends.iter().copied().reduce(|best, candidate| {
                 if candidate.1 > best.1 {
                     candidate
@@ -257,7 +257,7 @@ pub fn segments_from_probabilities(
             if opts.use_max_possible_silence_at_max_speech
                 && let Some((split_at, dur)) = longest_silence
             {
-                // Upstream binds `prev_end` from the tuple here, uses it for
+                // Silero binds `prev_end` from the tuple here, uses it for
                 // the two lines below, and only then zeroes it — so both reads
                 // see the TUPLE's value, not the loop's `prev_end`.
                 speeches.push(SpeechSegment {
@@ -284,7 +284,7 @@ pub fn segments_from_probabilities(
                     end: prev_end,
                 });
                 // The polarity is the opposite of the branch above. That is
-                // upstream's, not a transcription slip.
+                // Silero's, not a transcription slip.
                 if next_start < prev_end {
                     current = None;
                     triggered = false;
@@ -401,7 +401,7 @@ impl<R: Runtime<DType = DType>> SileroVad<R> {
     /// probabilities with [`segments_from_probabilities`].
     ///
     /// The final partial chunk is ZERO-PADDED to a full chunk and evaluated,
-    /// because upstream's `get_speech_timestamps` scores `ceil(n / chunk)`
+    /// because Silero's `get_speech_timestamps` scores `ceil(n / chunk)`
     /// chunks and every boundary is measured off that grid. This is the one
     /// deliberate difference from [`SileroVad::probabilities`], which DROPS a
     /// trailing partial chunk to stay bit-comparable with the ONNX reference

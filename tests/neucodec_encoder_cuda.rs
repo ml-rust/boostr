@@ -1,5 +1,6 @@
 //! The NeuCodec encode path on CUDA, held to the SAME bar as the CPU port:
-//! FSQ code indices must match upstream `NeuCodec.encode_code` EXACTLY.
+//! FSQ code indices must match the reference implementation's
+//! `NeuCodec.encode_code` EXACTLY.
 //!
 //! Run with:
 //!   `cd boostr && cargo test --release --features cuda --test neucodec_encoder_cuda`
@@ -10,7 +11,7 @@
 //! porting at all. "Should" is not evidence — a differing conv padding
 //! convention, a strided-copy bug, or a reduction ordering difference would all
 //! surface as shifted codes rather than as a compile error. This runs the real
-//! checkpoint on the GPU and compares against the same upstream fixtures.
+//! checkpoint on the GPU and compares against the same reference fixtures.
 //!
 //! Indices are DISCRETE: the bar is exact equality, not a tolerance. A float
 //! difference that stays under any sane epsilon can still flip a code at a
@@ -92,12 +93,14 @@ fn checkpoint() -> Option<PathBuf> {
     model_fixture("NEUCODEC_CHECKPOINT", "neucodec/model.safetensors")
 }
 
-/// Compare, for both fixture clips: CUDA vs upstream (exact indices) and CUDA
+/// Compare, for both fixture clips: CUDA vs the reference implementation
+/// (exact indices) and CUDA
 /// vs CPU (exact indices). The CPU leg makes a failure readable — if CUDA
 /// disagrees with BOTH, the GPU pipeline is wrong; if CUDA and CPU agree with
-/// each other but not upstream, the fixtures or the shared code moved.
+/// each other but not the reference implementation, the fixtures or the
+/// shared code moved.
 #[test]
-fn cuda_encode_matches_upstream_and_cpu() {
+fn cuda_encode_matches_reference_and_cpu() {
     let Some(dir) = fixtures() else {
         eprintln!("skipping: set NEUCODEC_REF_DIR (run dump_full_encode.py)");
         return;
@@ -146,7 +149,7 @@ fn cuda_encode_matches_upstream_and_cpu() {
         let (d, i) = max_abs_diff(&got_prior, &want_prior);
         let scale =
             (want_prior.iter().map(|v| v * v).sum::<f32>() / want_prior.len() as f32).sqrt();
-        eprintln!("clip {clip}: cuda prior vs upstream max|d|={d:.3e} at {i}, rms={scale:.3e}");
+        eprintln!("clip {clip}: cuda prior vs reference max|d|={d:.3e} at {i}, rms={scale:.3e}");
 
         let cpu_prior: Vec<f32> = cpu
             .prior
@@ -156,7 +159,7 @@ fn cuda_encode_matches_upstream_and_cpu() {
         let (dc, ic) = max_abs_diff(&got_prior, &cpu_prior);
         eprintln!("clip {clip}: cuda prior vs cpu       max|d|={dc:.3e} at {ic}");
 
-        // --- the indices: exact, against upstream ---------------------------
+        // --- the indices: exact, against the reference implementation ------
         let want_idx = read_i32(&idx_path);
         let gpu_idx: Vec<i32> = gpu.indices.contiguous().expect("contiguous idx").to_vec();
         let cpu_idx: Vec<i32> = cpu
@@ -193,7 +196,7 @@ fn cuda_encode_matches_upstream_and_cpu() {
                 mism.iter().take(5).collect::<Vec<_>>(),
             );
         };
-        report("cuda vs upstream", &gpu_idx, &want_idx);
+        report("cuda vs reference", &gpu_idx, &want_idx);
         report("cuda vs cpu     ", &gpu_idx, &cpu_idx);
     }
 }

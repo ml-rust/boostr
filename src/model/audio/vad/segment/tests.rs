@@ -1,7 +1,7 @@
 //! Unit tests for the segmentation rules, driven by hand-written probability
 //! arrays — no checkpoint, no client, no tensors.
 //!
-//! Parity with upstream's `get_speech_timestamps` over real audio lives in
+//! Parity with Silero's `get_speech_timestamps` over real audio lives in
 //! `tests/silero_vad_segment_parity.rs`, which needs the weights and the
 //! reference JSON. These tests pin the individual rules instead, one per case,
 //! so a regression names which rule broke.
@@ -106,7 +106,7 @@ fn a_gap_under_two_pads_is_split_between_the_neighbours() {
 #[test]
 fn a_probability_count_that_does_not_match_the_signal_is_rejected() {
     let opts = VadSegmentOptions::default();
-    // 1000 samples at a 512-sample window is 2 chunks, not 1: upstream scores
+    // 1000 samples at a 512-sample window is 2 chunks, not 1: Silero scores
     // a zero-padded final partial chunk.
     let err = segments_from_probabilities(&[0.9], 1000, RATE, WINDOW, &opts)
         .expect_err("one probability cannot cover 1000 samples");

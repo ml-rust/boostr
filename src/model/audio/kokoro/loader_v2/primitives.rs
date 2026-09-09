@@ -61,8 +61,8 @@ fn zeros_1d<R: Runtime<DType = DType>>(
     Ok(numr::tensor::Tensor::<R>::from_slice(&data, &[n], device)?)
 }
 
-/// Load an `AdaLayerNorm` from `{prefix}.fc.*` (no learnable `norm` in
-/// upstream — LayerNorm here is functional).
+/// Load an `AdaLayerNorm` from `{prefix}.fc.*` (no learnable `norm` in the
+/// reference Kokoro implementation — LayerNorm here is functional).
 pub fn load_ada_layer_norm<R: Runtime<DType = DType>>(
     st: &mut super::super::weight_source::KokoroWeightSource,
     prefix: &str,
@@ -195,10 +195,10 @@ where
 #[derive(Debug, Clone, Copy)]
 pub struct AdainResBlock1LoadOpts {
     /// Per-conv dilation factors applied to `convs1.{0,1,2}`. `convs2` always
-    /// uses dilation=1 upstream.
+    /// uses dilation=1 in the reference Kokoro implementation.
     pub dilations: [usize; 3],
-    /// Kernel size for every conv in the block (matches upstream's
-    /// `resblock_kernel_sizes[i]`).
+    /// Kernel size for every conv in the block (matches the reference Kokoro
+    /// implementation's `resblock_kernel_sizes[i]`).
     pub kernel: usize,
     /// ε for each `AdaIN1d`'s `InstanceNorm1d`.
     pub norm_eps: f32,

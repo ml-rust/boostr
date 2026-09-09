@@ -1,7 +1,7 @@
 //! Unit tests for the parts of Silero VAD that do not need the checkpoint:
 //! the input contract (chunk length, carried context) and the config geometry.
 //!
-//! Numerical parity against the upstream ONNX model lives in
+//! Numerical parity against the Silero ONNX model lives in
 //! `tests/silero_vad_parity.rs`, which needs the real weights.
 
 use super::*;

@@ -144,7 +144,8 @@ impl<R: Runtime> Decoder<R> {
 
         // Encode takes the RAW asr features (512 ch) + F0 + N → 514 channel input.
         // asr_res is a SEPARATE projection (512 → 64) used only in the decode
-        // stages, not in encode. This matches upstream's dataflow.
+        // stages, not in encode. This matches the reference Kokoro
+        // implementation's dataflow.
         let x = client.cat(&[asr_feats, &f0, &n], 1).map_err(Error::Numr)?;
         let mut x = self.encode.forward(client, &x, style)?;
 
@@ -328,7 +329,7 @@ mod tests {
     fn forward_returns_mag_phase() {
         let (client, device) = cpu_setup();
         let style_dim = 4;
-        // Channel plan (matches upstream Kokoro dataflow):
+        // Channel plan (matches the reference Kokoro implementation's dataflow):
         //   asr_c_in = 8, F0/N each 1 channel.
         //   Encode input: asr(8) + F0(1) + N(1) = 10 → 8.
         //   asr_res: 8 → 4 (used only in decode).

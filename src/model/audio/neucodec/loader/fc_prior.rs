@@ -1,8 +1,8 @@
-//! Loads `fc_encoder.*` — the encoder-side prior projection that upstream
-//! `NeuCodec.encode_code` calls `fc_prior`.
+//! Loads `fc_encoder.*` — the encoder-side prior projection that the
+//! reference NeuCodec implementation's `NeuCodec.encode_code` calls `fc_prior`.
 //!
-//! The checkpoint name (`fc_encoder`) and the upstream attribute name
-//! (`fc_prior`) disagree; this is the single place that mapping lives.
+//! The checkpoint name (`fc_encoder`) and the reference implementation's
+//! attribute name (`fc_prior`) disagree; this is the single place that mapping lives.
 
 use super::support::checked_tensor;
 use crate::error::Result;

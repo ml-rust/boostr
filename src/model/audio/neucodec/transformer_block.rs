@@ -11,7 +11,8 @@
 //!
 //! ## No positional encoding — deliberately, to match the released weights
 //!
-//! `config.json` advertises `rope_parameters`, and upstream's `Attention` does
+//! `config.json` advertises `rope_parameters`, and the reference NeuCodec
+//! implementation's `Attention` does
 //! call a `RotaryPositionalEmbeddings` on `q` and `k`. It has no effect:
 //!
 //! * `RotaryPositionalEmbeddings.forward` documents its input as
@@ -24,7 +25,7 @@
 //!   `(R_h q_t)·(R_h k_s) = q_t·k_s` — it cancels exactly.
 //!
 //! Both were verified against the installed `neucodec` package: RoPE input
-//! shapes come through as `(2, 16, 7, 64)` for `t = 7`, upstream attention is
+//! shapes come through as `(2, 16, 7, 64)` for `t = 7`, the reference implementation's attention is
 //! exactly permutation-equivariant over time (max deviation 2.9e-7), and
 //! swapping the rotation for the identity changes the output by 1.5e-7 at an
 //! output scale of 0.47 — i.e. float32 noise.
@@ -156,7 +157,7 @@ impl<R: Runtime<DType = DType>> TransformerBlock<R> {
         let k = var_contiguous(&k)?;
         let v = var_contiguous(&v)?;
 
-        // No RoPE — see the module doc: upstream's rotation is a verified
+        // No RoPE — see the module doc: the reference implementation's rotation is a verified
         // no-op, so applying one here would break parity with the weights.
 
         // No mask: NeuCodec's acoustic decoder attends over the full latent

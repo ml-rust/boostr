@@ -1,7 +1,8 @@
 //! Numerical parity for the NeuCodec FSQ quantizer and acoustic decoder
-//! against the upstream `neucodec` Python package.
+//! against the reference `neucodec` Python package.
 //!
-//! The fixtures are produced by running upstream's own `ResidualFSQ`,
+//! The fixtures are produced by running the reference implementation's own
+//! `ResidualFSQ`,
 //! `VocosBackbone` and `ISTFTHead` on the released weights and dumping raw
 //! little-endian f32 blobs. They are NOT checked in (the decoder weights alone
 //! are ~560 MB and the checkpoint lives outside the repo), so these tests are
@@ -113,7 +114,7 @@ fn setup() -> (CpuClient, CpuDevice) {
 }
 
 #[test]
-fn decoder_matches_upstream_neucodec_reference() {
+fn decoder_matches_neucodec_reference() {
     let Some(fx) = fixtures() else {
         eprintln!(
             "skipping: set NEUCODEC_REF_DIR and (NEUCODEC_CHECKPOINT or BOOSTR_MODELS_DIR) to run parity"
@@ -139,12 +140,15 @@ fn decoder_matches_upstream_neucodec_reference() {
         false,
     );
 
-    // --- Head inputs: mag/phase vs upstream's pre-split `x_pred` -----------
+    // --- Head inputs: mag/phase vs the reference implementation's pre-split
+    // `x_pred` -----------
     //
-    // Upstream returns `x_pred = out(x).transpose(1, 2)`, shape [1, 1922, T],
+    // The reference implementation returns
+    // `x_pred = out(x).transpose(1, 2)`, shape [1, 1922, T],
     // i.e. the RAW projection before activation, laid out channels-first. The
-    // first 961 rows are log-magnitude, the rest are phase. Applying upstream's
-    // own activation (`clamp(exp(m), max=1e2)`) reproduces what our head emits.
+    // first 961 rows are log-magnitude, the rest are phase. Applying the
+    // reference implementation's own activation (`clamp(exp(m), max=1e2)`)
+    // reproduces what our head emits.
     let (mag, phase) = decoder.forward_features(&client, &x).expect("features");
     let f = cfg.n_freq_bins();
     let x_pred = read_f32(&fx.dir.join("ref_x_pred.f32"));
@@ -168,11 +172,11 @@ fn decoder_matches_upstream_neucodec_reference() {
     );
     assert!(
         ph_d < 2e-3,
-        "phase diverges from upstream: max|d|={ph_d} at index {ph_i}"
+        "phase diverges from the reference implementation: max|d|={ph_d} at index {ph_i}"
     );
     assert!(
         mag_d < 2e-3,
-        "magnitude diverges from upstream: max|d|={mag_d} at index {mag_i}"
+        "magnitude diverges from the reference implementation: max|d|={mag_d} at index {mag_i}"
     );
 
     // --- End-to-end waveform ---------------------------------------------
@@ -191,19 +195,20 @@ fn decoder_matches_upstream_neucodec_reference() {
     eprintln!("waveform: max|d|={w_d:.3e} at {w_i}, reference rms={scale:.3e}");
     assert!(
         w_d < 1e-3 * scale.max(1.0) + 1e-3,
-        "waveform diverges from upstream: max|d|={w_d} at sample {w_i} (rms {scale})"
+        "waveform diverges from the reference implementation: max|d|={w_d} at sample {w_i} (rms {scale})"
     );
 }
 
 /// The full pure-Rust listening path: FSQ code indices -> 24 kHz waveform,
-/// against upstream `ResidualFSQ.get_output_from_indices` + the same decoder.
+/// against the reference implementation's
+/// `ResidualFSQ.get_output_from_indices` + the same decoder.
 ///
 /// Covers what the decoder-only test cannot: the mixed-radix unpack of a
 /// 65_536-entry codebook and the `project_out` that follows it. The reference
 /// indices deliberately include 0 and 65_535 so the unpack is exercised at both
 /// ends of its range.
 #[test]
-fn codec_matches_upstream_from_indices() {
+fn codec_matches_reference_from_indices() {
     let Some(fx) = fixtures() else {
         eprintln!(
             "skipping: set NEUCODEC_REF_DIR and (NEUCODEC_CHECKPOINT or BOOSTR_MODELS_DIR) to run parity"
@@ -238,7 +243,7 @@ fn codec_matches_upstream_from_indices() {
     );
     assert!(
         d < 1e-4,
-        "FSQ dequantization diverges from upstream: max|d|={d} at index {i}"
+        "FSQ dequantization diverges from the reference implementation: max|d|={d} at index {i}"
     );
 
     // --- End to end -------------------------------------------------------
@@ -252,13 +257,14 @@ fn codec_matches_upstream_from_indices() {
     eprintln!("e2e waveform: max|d|={d:.3e} at {i}, reference rms={scale:.3e}");
     assert!(
         d < 1e-3 * scale.max(1.0) + 1e-3,
-        "indices->waveform diverges from upstream: max|d|={d} at sample {i} (rms {scale})"
+        "indices->waveform diverges from the reference implementation: max|d|={d} at sample {i} (rms {scale})"
     );
 }
 
-/// Reconstruct REAL speech: decode the FSQ codes that upstream's encoder
-/// produced for an actual utterance, and compare against upstream's own
-/// reconstruction of the same codes.
+/// Reconstruct REAL speech: decode the FSQ codes that the reference
+/// implementation's encoder produced for an actual utterance, and compare
+/// against the reference implementation's own reconstruction of the same
+/// codes.
 ///
 /// The synthetic tests prove the arithmetic matches; this proves it holds over
 /// a real 300-frame code sequence (6 s of speech, 293 distinct codes) rather
@@ -267,7 +273,7 @@ fn codec_matches_upstream_from_indices() {
 ///
 /// Fixtures come from `encode_real_audio.py`; skipped when absent.
 #[test]
-fn decodes_real_speech_matching_upstream() {
+fn decodes_real_speech_matching_reference() {
     let Some(fx) = fixtures() else {
         eprintln!(
             "skipping: set NEUCODEC_REF_DIR and (NEUCODEC_CHECKPOINT or BOOSTR_MODELS_DIR) to run parity"

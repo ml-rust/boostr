@@ -189,7 +189,7 @@ pub fn select_voice_style<R: Runtime<DType = DType>>(
 /// Split a row-selected voice style `[1, 2*D]` into `(decoder_style [1, D],
 /// predictor_style [1, D])`. Decoder half is the first `D` channels,
 /// predictor half is the last `D` — matching `ref_s[:, :128]` and
-/// `ref_s[:, 128:]` in the upstream Python source.
+/// `ref_s[:, 128:]` in the reference Kokoro Python source.
 pub fn split_voice_style<R: Runtime<DType = DType>>(
     style_row: &Tensor<R>,
     style_dim: usize,

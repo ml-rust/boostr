@@ -1,6 +1,6 @@
 //! [`NeuCodecEncoder`] — the full "16 kHz waveform in, FSQ code indices out"
-//! half of NeuCodec, wiring the already-ported pieces into upstream's
-//! `NeuCodec.encode_code`.
+//! half of NeuCodec, wiring the already-ported pieces into the reference
+//! implementation's `NeuCodec.encode_code`.
 //!
 //! ```text
 //! samples [T] @ 16 kHz
@@ -14,7 +14,7 @@
 //! ```
 //!
 //! Two steps below look like bugs and are not; both are documented at their
-//! call sites and verified against upstream: the padding ALWAYS fires (even
+//! call sites and verified against the reference implementation: the padding ALWAYS fires (even
 //! when the length is already a multiple of 320), and the two branches produce
 //! different frame counts that are TRUNCATED, never interpolated or aligned.
 
@@ -86,9 +86,10 @@ pub fn encode_alignment() -> usize {
     encoder_hop_length()
 }
 
-/// Samples of right zero-padding upstream appends before encoding.
+/// Samples of right zero-padding the reference NeuCodec implementation
+/// appends before encoding.
 ///
-/// **This always returns a non-zero count.** Upstream computes
+/// **This always returns a non-zero count.** The reference implementation computes
 /// `pad = 320 - (T % 320)` unconditionally, so a length that is already a
 /// multiple of 320 gets a FULL extra 320 samples appended (8000 -> 8320,
 /// 8320 -> 8640). Do not "optimize" the exact-multiple case away — it changes
@@ -121,7 +122,7 @@ pub struct NeuCodecEncoderWeights<R: Runtime> {
     pub acoustic_encoder: AcousticEncoder<R>,
     pub semantic_encoder: SemanticEncoder<R>,
     pub semantic_adapter: SemanticAdapter<R>,
-    /// Upstream `fc_prior`, stored as `fc_encoder.*` in the checkpoint.
+    /// The reference implementation's `fc_prior`, stored as `fc_encoder.*` in the checkpoint.
     pub fc_prior: Linear<R>,
     pub quantizer: ResidualFsq<R>,
 }
@@ -189,7 +190,7 @@ impl<R: Runtime<DType = DType>> NeuCodecEncoder<R> {
 
     /// Encode 16 kHz mono `samples` into FSQ code indices `[1, 1, T]` (I32).
     ///
-    /// `samples` must already be 16 kHz: upstream never resamples a tensor
+    /// `samples` must already be 16 kHz: the reference implementation never resamples a tensor
     /// input, so neither does this. Refuses inputs longer than
     /// [`MAX_ENCODE_SAMPLES`] — see [`Self::encode_with_limit`] to override.
     pub fn encode<C>(&self, client: &C, samples: &[f32], device: &R::Device) -> Result<Tensor<R>>
@@ -264,7 +265,7 @@ impl<R: Runtime<DType = DType>> NeuCodecEncoder<R> {
             .forward(client, &Var::new(waveform.clone(), false))?;
 
         // The branches DISAGREE on frame count (8320 samples -> Ta = 26,
-        // Ts = 25). Upstream neither interpolates nor aligns: it keeps the
+        // Ts = 25). The reference implementation neither interpolates nor aligns: it keeps the
         // earliest `min(Ta, Ts)` frames of both and drops the tail.
         let min_len = min_time(&semantic, &acoustic)?;
         let semantic_cut = narrow_time(&semantic, min_len)?;

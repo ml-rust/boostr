@@ -43,7 +43,7 @@ pub fn load_plain_conv1d<R: Runtime<DType = DType>>(
 /// Load a weight-normed Conv1d. Handles both modern (`parametrizations.weight
 /// .original0/original1`, post PyTorch 2.x `nn.utils.parametrizations`) and
 /// legacy (`weight_v`/`weight_g`, pre `parametrize`) checkpoint layouts, in
-/// that order — Kokoro-82M's upstream checkpoint uses the modern form.
+/// that order — the reference Kokoro-82M checkpoint uses the modern form.
 ///
 /// `original0` is `g` (scale), `original1` is `v` (direction). After fusion,
 /// `dim=0` (out-channel axis) is the normal Conv1d convention; pass `dim=1`
@@ -145,7 +145,7 @@ pub fn load_linear_tensors<R: Runtime<DType = DType>>(
 /// * `.safetensors` — expects a single tensor named `style` (or the only
 ///   tensor in the file).
 /// * `.pt` / `.pth` — accepts a bare tensor (`torch.save(tensor)`), the
-///   canonical upstream form.
+///   form used by the reference Kokoro implementation.
 pub fn load_voice_pack<R: Runtime<DType = DType>>(
     path: impl AsRef<Path>,
     device: &R::Device,

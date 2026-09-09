@@ -23,7 +23,7 @@ pub const DEFAULT_SEMANTIC_ADAPTER_PREFIX: &str = "semantic_adapter";
 /// `conv1.weight` (no bias), `conv2.{weight,bias}`, `conv3.{weight,bias}`,
 /// `conv4.weight` (no bias) — all `[1024, 1024, 3]` / `[1024]`. See
 /// [`semantic_adapter`](crate::model::audio::neucodec::semantic_adapter) for
-/// the upstream name mapping.
+/// the reference implementation's name mapping.
 struct SemanticAdapterLoader<'a, R: Runtime<DType = DType>> {
     loader: &'a mut SafeTensorsLoader,
     device: &'a R::Device,

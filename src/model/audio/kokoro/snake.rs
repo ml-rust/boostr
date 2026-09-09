@@ -11,7 +11,7 @@
 //! `[1, C, 1]` in every `AdaINResBlock1` site (stored as `alpha1` / `alpha2`
 //! `ParameterList`s in the state_dict). `ε` is a tiny positive constant that
 //! keeps the reciprocal bounded when α is near zero — we follow the
-//! `SnakeBeta` upstream in using `1e-9`.
+//! reference `SnakeBeta` implementation in using `1e-9`.
 //!
 //! Composite op: no new kernel needed. Uses mul / sin / div / add from numr.
 
@@ -26,7 +26,8 @@ use numr::tensor::Tensor;
 /// * `x` — activation of shape `[B, C, T]`.
 /// * `alpha` — shape `[1, C, 1]` (matches the state_dict layout used by
 ///   `torch.nn.ParameterList([Parameter(torch.ones(1, ch, 1))])`).
-/// * `eps` — denominator floor; pass `1e-9` to match upstream, or a larger
+/// * `eps` — denominator floor; pass `1e-9` to match the reference `SnakeBeta`
+///   implementation, or a larger
 ///   value if numerical stability is a concern.
 pub fn snake<R, C>(client: &C, x: &Tensor<R>, alpha: &Tensor<R>, eps: f64) -> Result<Tensor<R>>
 where

@@ -19,7 +19,8 @@ fn alignment_is_the_acoustic_stride() {
 }
 
 /// THE regression guard: an exact multiple of 320 still gets a FULL 320
-/// samples of padding. `pad = 320 - (T % 320)` is unconditional upstream.
+/// samples of padding. `pad = 320 - (T % 320)` is unconditional in the
+/// reference NeuCodec implementation.
 #[test]
 fn exact_multiple_still_pads_a_full_stride() {
     assert_eq!(encode_padding(8000), 320);

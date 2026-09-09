@@ -17,7 +17,7 @@
 //!
 //! The reference Kokoro predictor stacks several style-conditioned LSTM +
 //! AdaLayerNorm blocks; a single BiLSTM + projection covers the critical
-//! signal flow and matches upstream checkpoint shapes closely enough to be
+//! signal flow and matches the reference Kokoro checkpoint's shapes closely enough to be
 //! swapped for the multi-block variant when the real weight loader lands
 //! (M7). Keep this interface stable so that swap can happen in one place.
 

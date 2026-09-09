@@ -14,7 +14,7 @@
 //!
 //! # The double-bound trap — do NOT "simplify" this away
 //!
-//! Upstream's forward is:
+//! lucidrains/vector-quantize-pytorch's forward is:
 //!
 //! ```python
 //! x = self.project_in(x)
@@ -38,7 +38,7 @@
 //! `bound` changes **43.75% of the emitted indices**. Anyone tempted to delete
 //! the pre-`bound` on line "seed the residual" below is introducing that bug.
 //!
-//! The decode path ([`ResidualFsq::decode`], upstream `get_output_from_indices`)
+//! The decode path ([`ResidualFsq::decode`], lucidrains/vector-quantize-pytorch's `get_output_from_indices`)
 //! has no such subtlety: per-quantizer codebook lookup, scale, sum, `project_out`.
 
 use super::codes::var_passthrough;
@@ -107,7 +107,7 @@ impl<R: Runtime<DType = DType>> ResidualFsq<R> {
                     ),
                 });
             }
-            // Upstream's inner FSQ projections are nn.Identity; a projecting
+            // lucidrains/vector-quantize-pytorch's inner FSQ projections are nn.Identity; a projecting
             // inner layer would double-project.
             if layer_config.input_dim != codebook_dim {
                 return Err(Error::ModelError {
@@ -184,7 +184,7 @@ impl<R: Runtime<DType = DType>> ResidualFsq<R> {
     /// `codes`: `[..., dim]` (the summed, projected reconstruction).
     /// `indices`: `[..., num_quantizers]`, `DType::I32`.
     ///
-    /// Follows upstream `ResidualFSQ.forward` step for step, including the
+    /// Follows lucidrains/vector-quantize-pytorch's `ResidualFSQ.forward` step for step, including the
     /// pre-`bound` that seeds `residual` — see this module's docs for why that
     /// second bound is load-bearing rather than redundant.
     pub fn encode<C>(&self, client: &C, x: &Var<R>) -> Result<(Var<R>, Tensor<R>)>
@@ -270,7 +270,7 @@ impl<R: Runtime<DType = DType>> ResidualFsq<R> {
     }
 
     /// Decode `indices` (`[..., num_quantizers]`, integer dtype) into codes
-    /// (`[..., dim]`) — upstream `get_output_from_indices`.
+    /// (`[..., dim]`) — lucidrains/vector-quantize-pytorch's `get_output_from_indices`.
     ///
     /// Per-quantizer codebook lookup, multiply by `scales[i]`, sum over
     /// quantizers, then `project_out`. Indices are discrete, so the summed codes

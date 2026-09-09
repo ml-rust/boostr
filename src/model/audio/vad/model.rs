@@ -1,4 +1,4 @@
-//! The Silero VAD network and its forward pass, read off the upstream ONNX
+//! The Silero VAD network and its forward pass, read off Silero's ONNX
 //! graph node by node.
 //!
 //! # The input contract, which is the part that silently produces garbage
@@ -15,7 +15,7 @@
 //!
 //! # Forward pass
 //!
-//! 1. REFLECT-pad `context_samples` at the END of the buffer — upstream's
+//! 1. REFLECT-pad `context_samples` at the END of the buffer — Silero's
 //!    `nn.ReflectionPad1d((0, context))`, exported as an ONNX `Pad` node in
 //!    "reflect" mode. At 16 kHz: 576 -> 640. Zero-padding instead runs fine and
 //!    shifts every probability by up to 0.2.
@@ -181,7 +181,7 @@ impl<R: Runtime<DType = DType>> SileroVad<R> {
     /// The chunk is prefixed with `state`'s carried context and suffixed with a
     /// reflection pad before it reaches the network; the caller passes new
     /// audio only. A chunk of any other length is an error, never a silent pad
-    /// — a padded final chunk would report a probability the upstream model
+    /// — a padded final chunk would report a probability the Silero model
     /// never produces.
     pub fn chunk_probability<C>(
         &self,
@@ -235,7 +235,7 @@ impl<R: Runtime<DType = DType>> SileroVad<R> {
     /// fresh zero state.
     ///
     /// Trailing samples that do not fill a whole chunk are dropped, matching
-    /// upstream's own chunking.
+    /// Silero's own chunking.
     pub fn probabilities<C>(&self, client: &C, samples: &[f32]) -> Result<Vec<f32>>
     where
         C: RuntimeClient<R> + TensorOps<R> + ConvOps<R>,
@@ -266,7 +266,7 @@ impl<R: Runtime<DType = DType>> SileroVad<R> {
     /// Assemble the network's input window: `context ++ chunk`, then a
     /// reflection pad of `context_samples` on the tail.
     ///
-    /// Upstream's STFT front end is `nn.ReflectionPad1d((0, context))`, which
+    /// Silero's STFT front end is `nn.ReflectionPad1d((0, context))`, which
     /// the ONNX graph exports as a `Pad` node in "reflect" mode. Zero-padding
     /// here instead still runs and still looks plausible, but moves every
     /// probability by up to 0.2.

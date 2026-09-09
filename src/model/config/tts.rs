@@ -21,7 +21,7 @@ use std::path::Path;
 
 /// Top-level Kokoro model configuration.
 ///
-/// Defaults derived from the upstream `hexgrad/Kokoro-82M/config.json` and
+/// Defaults derived from Kokoro's `hexgrad/Kokoro-82M/config.json` and
 /// the reference `kokoro/model.py` + `istftnet.py` sources (2026-04). These
 /// are the values actually shipped with the public checkpoint, not guesses.
 #[derive(Debug, Clone, Serialize, Deserialize)]

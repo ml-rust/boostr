@@ -200,7 +200,7 @@ fn test_missing_projection_rejected_when_dims_differ() {
 #[test]
 fn test_projecting_inner_layer_rejected() {
     let (_, device) = cpu_setup();
-    // Inner layers must be plain FSQ (upstream's are nn.Identity-projected).
+    // Inner layers must be plain FSQ (lucidrains/vector-quantize-pytorch's are nn.Identity-projected).
     let config = ResidualFsqConfig::new(vec![4, 4], 2, 1).unwrap();
     let w_in = Tensor::<CpuRuntime>::from_slice(&[0.1f32; 10], &[2, 5], &device).unwrap();
     let w_out = Tensor::<CpuRuntime>::from_slice(&[0.2f32; 10], &[5, 2], &device).unwrap();

@@ -1,8 +1,9 @@
 //! Configuration for the Finite Scalar Quantizers.
 //!
-//! [`FsqConfig`] configures upstream's `FSQ`; [`ResidualFsqConfig`] configures
-//! upstream's `ResidualFSQ`. They are different classes with different forward
-//! math — see [`super::residual`] for the trap that conflating them creates.
+//! [`FsqConfig`] configures lucidrains/vector-quantize-pytorch's `FSQ`;
+//! [`ResidualFsqConfig`] configures its `ResidualFSQ`. They are different
+//! classes with different forward math — see [`super::residual`] for the
+//! trap that conflating them creates.
 
 use crate::error::{Error, Result};
 
@@ -126,7 +127,7 @@ impl ResidualFsqConfig {
     /// The configuration each inner `Fsq` layer must have: the shared grid,
     /// operating directly on `codebook_dim`.
     ///
-    /// Upstream's inner `FSQ` layers always have `nn.Identity` projections —
+    /// lucidrains/vector-quantize-pytorch's inner `FSQ` layers always have `nn.Identity` projections —
     /// the residual wrapper owns the projections — so `input_dim` is
     /// `codebook_dim`, never `dim`.
     pub fn layer_config(&self) -> Result<FsqConfig> {

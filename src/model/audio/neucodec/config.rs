@@ -39,21 +39,26 @@ pub struct NeuCodecDecoderConfig {
     pub mlp_intermediate_size: usize,
     /// Epsilon for the RMSNorm layers inside each `TransformerBlock`.
     pub rms_norm_eps: f32,
-    /// Number of groups in each `ResnetBlock`'s GroupNorm layers. Upstream
+    /// Number of groups in each `ResnetBlock`'s GroupNorm layers. The
+    /// reference NeuCodec implementation uses
     /// `Normalize(in_channels, num_groups=32)`; must divide `hidden_size`.
     pub resnet_norm_groups: usize,
-    /// Epsilon for the `ResnetBlock` GroupNorm layers (upstream `eps=1e-6`,
+    /// Epsilon for the `ResnetBlock` GroupNorm layers (the reference
+    /// NeuCodec implementation uses `eps=1e-6`,
     /// NOT PyTorch's `1e-5` GroupNorm default).
     pub resnet_norm_eps: f32,
-    /// Epsilon for the post-transformer `norm` LayerNorm. Upstream:
+    /// Epsilon for the post-transformer `norm` LayerNorm. The reference
+    /// NeuCodec implementation has:
     /// `self.final_layer_norm = nn.LayerNorm(hidden_dim, eps=1e-6)`.
     pub layer_norm_eps: f32,
-    /// ISTFT FFT size — upstream `ISTFTHead(n_fft=hop_length * 4)`, and
+    /// ISTFT FFT size — the reference NeuCodec implementation uses
+    /// `ISTFTHead(n_fft=hop_length * 4)`, and
     /// `out_dim = n_fft + 2`. The verified `head.linear` output width of 1922
     /// therefore pins `n_fft = 1920`.
     pub n_fft: usize,
-    /// ISTFT hop length. `n_fft = hop_length * 4` upstream, so `n_fft = 1920`
-    /// gives `hop_length = 480` — NOT the 320 default in the upstream
+    /// ISTFT hop length. `n_fft = hop_length * 4` in the reference NeuCodec
+    /// implementation, so `n_fft = 1920`
+    /// gives `hop_length = 480` — NOT the 320 default in the reference
     /// `CodecDecoderVocos.__init__` signature, which does not match this
     /// checkpoint (320 would imply `n_fft = 1280` and a 1282-wide head).
     ///
@@ -62,7 +67,7 @@ pub struct NeuCodecDecoderConfig {
     /// `24000 / 480 = 50` Hz.
     pub hop_length: usize,
     /// Upper clamp applied to the head's LINEAR magnitude, i.e. AFTER `exp()`
-    /// (upstream: `mag = torch.exp(mag); mag = torch.clip(mag, max=1e2)`).
+    /// (the reference NeuCodec implementation: `mag = torch.exp(mag); mag = torch.clip(mag, max=1e2)`).
     pub mag_clamp_max: f32,
 }
 
@@ -227,18 +232,19 @@ mod tests {
         assert!(cfg.validate().is_ok());
     }
 
-    /// Upstream ties the head geometry together: `n_fft = hop_length * 4` and
+    /// The reference NeuCodec implementation ties the head geometry together:
+    /// `n_fft = hop_length * 4` and
     /// `out_dim = n_fft + 2`. The checkpoint's 1922-wide `head.linear` is what
-    /// pins `hop_length = 480` (the 320 in upstream's `__init__` default does
-    /// not describe this checkpoint).
+    /// pins `hop_length = 480` (the 320 in the reference `__init__` default
+    /// does not describe this checkpoint).
     #[test]
     fn hop_length_is_pinned_by_head_width() {
         let cfg = NeuCodecDecoderConfig::default();
-        assert_eq!(cfg.n_fft, cfg.hop_length * 4, "upstream n_fft = hop * 4");
+        assert_eq!(cfg.n_fft, cfg.hop_length * 4, "reference n_fft = hop * 4");
         assert_eq!(
             cfg.head_out_dim(),
             cfg.n_fft + 2,
-            "upstream out_dim = n_fft + 2"
+            "reference out_dim = n_fft + 2"
         );
         assert_eq!(cfg.hop_length, 480);
         // 24 kHz output / 480 = the documented 50 Hz NeuCodec frame rate.

@@ -1,7 +1,7 @@
 //! Kokoro TTS model components (StyleTTS2-lite derivative).
 //!
 //! Inference-only. Training path is not planned — Kokoro weights ship
-//! pre-trained from upstream.
+//! pre-trained, published by the reference Kokoro project.
 
 pub mod ada_layer_norm;
 pub mod adain_resblk1d;

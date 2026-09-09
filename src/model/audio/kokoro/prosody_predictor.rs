@@ -1,7 +1,7 @@
 //! Kokoro `ProsodyPredictor` — duration + F0 + energy head.
 //!
 //! Replaces the speculative `DurationPredictor` / `FramePredictor` placeholders
-//! with the actual upstream architecture:
+//! with the reference Kokoro implementation's actual architecture:
 //!
 //! ```text
 //! ProsodyPredictor
@@ -31,7 +31,8 @@ use numr::ops::{
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
-/// Alternating `LSTM | AdaLayerNorm` stack (upstream `DurationEncoder`).
+/// Alternating `LSTM | AdaLayerNorm` stack (the reference Kokoro
+/// implementation's `DurationEncoder`).
 pub struct DurationEncoder<R: Runtime> {
     lstms: Vec<BiLstm<R>>,
     adalns: Vec<AdaLayerNorm<R>>,
@@ -341,10 +342,11 @@ impl<R: Runtime> ProsodyPredictor<R> {
 /// * `min_frames` — floor for each phoneme, clamped to at least 1.
 ///
 /// Uses the softmax-weighted expected value across duration bins, rounded and
-/// clamped to `[min_frames, max_dur]`. This matches upstream's
-/// `torch.sigmoid(duration).sum(axis=-1)` convention when inputs are treated as
+/// clamped to `[min_frames, max_dur]`. This matches the reference Kokoro
+/// implementation's `torch.sigmoid(duration).sum(axis=-1)` convention when inputs are treated as
 /// per-bin probabilities — but here we stay loyal to the classification head's
-/// softmax output. Callers can swap in their own decoding if upstream diverges.
+/// softmax output. Callers can swap in their own decoding if the reference
+/// implementation's behavior diverges.
 pub fn decode_prosody_durations(
     logits: &[f32],
     t: usize,

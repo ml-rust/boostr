@@ -1,7 +1,7 @@
 //! Causal (tail-trimmed) 1D transposed convolution: the upsampling stage of
 //! each VoxCPM2 `DecoderBlock`.
 //!
-//! Upstream builds this as `ConvTranspose1d(kernel=2*stride,
+//! The reference VoxCPM implementation builds this as `ConvTranspose1d(kernel=2*stride,
 //! padding=ceil(stride/2), output_padding=stride%2)`, then its `CausalConv1d`
 //! wrapper runs the underlying conv with `padding=0, output_padding=0` and
 //! trims `trim = padding*2 - output_padding` samples off the TAIL only

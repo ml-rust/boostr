@@ -9,40 +9,41 @@
 //!
 //! # Two bars, one per group of formats
 //!
-//! **Q4_1, Q4_K, Q5_K, Q6_K — byte equality.** boostr's writer reproduces
-//! llama.cpp's own fit for these: the plain min/max fit for Q4_1, the iterative
-//! per-sub-block scale search for the three K-quants. Matching bytes is the
-//! intended property, not a coincidence of rounding. A future change that lands
-//! close but not exact is a regression worth seeing, never something to absorb
-//! into an epsilon. llama.cpp produced the expectation: fix the writer, never
-//! the fixture.
+//! **Q4_K, Q5_K, Q6_K — byte equality.** boostr's writer reproduces llama.cpp's
+//! own iterative per-sub-block scale search for these three. Matching bytes is
+//! the intended property, not a coincidence of rounding. A future change that
+//! lands close but not exact is a regression worth seeing, never something to
+//! absorb into an epsilon. llama.cpp produced the expectation: fix the writer,
+//! never the fixture.
 //!
-//! **Q4_0 and Q8_0 — deliberately NOT byte equality.** llama.cpp's
-//! `quantize_row_q4_0` and `quantize_row_q8_0` are plain absmax fits with no
-//! search. boostr sweeps the block scale, refits it by least squares, and
-//! derives every code against the binary16 value the reader loads rather than
-//! the wider float it came from. Both changes move codes, so the bytes cannot
-//! match llama.cpp. The owner's decision is that accuracy wins over bit-identity
-//! with llama.cpp. The two tests here gate the properties that decision
-//! requires:
+//! **Q4_0, Q4_1 and Q8_0 — deliberately NOT byte equality.** llama.cpp's
+//! `quantize_row_q4_0`, `quantize_row_q4_1` and `quantize_row_q8_0` are plain
+//! direct fits with no search. boostr sweeps the stored fields, refits them by
+//! least squares, and derives every code against the binary16 values the reader
+//! loads rather than the wider floats they came from. Both changes move codes,
+//! so the bytes cannot match llama.cpp. The owner's decision is that accuracy
+//! wins over bit-identity with llama.cpp. The three tests here gate the
+//! properties that decision requires:
 //!
-//! - the output is a structurally valid block — byte count, field layout, and
-//!   for Q8_0 no code on -128, which is outside the format's `[-127, 127]`,
+//! - the output is a structurally valid block — byte count, field layout,
+//!   finite stored fields, for Q8_0 no code on -128 which is outside the
+//!   format's `[-127, 127]`, and for every one of them the extreme code still
+//!   on the extreme source element,
 //! - boostr's reader decodes it back to the source within the format's own
 //!   per-element step, so the divergence is a better encoding and not a broken
 //!   one,
 //! - boostr's reconstruction error is no worse than llama.cpp's on the same
-//!   input, and the bytes are not llama.cpp's absmax bytes.
+//!   input, and the bytes are not llama.cpp's direct-fit bytes.
 //!
 //! `src/quant/cpu/kernels/quantize/tests.rs` carries the same comparison one
 //! level down, against the `#[cfg(test)]` `quantize_q4_0_absmax` /
-//! `quantize_q8_0_absmax` baselines. Those are crate-private and out of reach
-//! from an integration test. Here llama.cpp's own bytes stand in for that
-//! baseline, because llama.cpp IS the absmax fit.
+//! `quantize_q4_1_minmax` / `quantize_q8_0_absmax` baselines. Those are
+//! crate-private and out of reach from an integration test. Here llama.cpp's own
+//! bytes stand in for those baselines, because llama.cpp IS the direct fit.
 //!
-//! `writer_q4_0_llama.bin` and `writer_q8_0_llama.bin` are no longer
-//! expectations. They are the recorded absmax output the search has to beat, and
-//! both tests read them. Do not delete them.
+//! `writer_q4_0_llama.bin`, `writer_q4_1_llama.bin` and `writer_q8_0_llama.bin`
+//! are no longer expectations. They are the recorded direct-fit output the
+//! searches have to beat, and all three tests read them. Do not delete them.
 //!
 //! boostr writes exactly six formats: `QuantFormat::Q4_0`, `Q4_1`, `Q8_0`,
 //! `Q4K`, `Q5K`, `Q6K`. Every other `QuantFormat` variant returns
@@ -128,8 +129,8 @@ fn cpu_setup() -> (CpuClient, CpuDevice) {
 /// differing payload byte means the packing diverged. llama.cpp produced the
 /// expectation, so the fix is always the writer, never the fixture.
 ///
-/// Only the byte-matching formats call this: Q4_1, Q4_K, Q5_K, Q6_K. Q4_0 and
-/// Q8_0 diverge on purpose and are gated by the two tests below.
+/// Only the byte-matching formats call this: Q4_K, Q5_K, Q6_K. Q4_0, Q4_1 and
+/// Q8_0 diverge on purpose and are gated by the three tests below.
 fn assert_writer_matches_llama_cpp(format: &str, block_bytes: usize, got: &[u8], llama: &[u8]) {
     assert_eq!(
         got.len(),
@@ -169,20 +170,6 @@ fn assert_writer_matches_llama_cpp(format: &str, block_bytes: usize, got: &[u8],
          writer, never the fixture.",
         got.len()
     );
-}
-
-#[test]
-fn q4_1_writer_matches_llama_cpp() {
-    let src = floats("writer_src.bin");
-    let llama = std::fs::read(fixture("writer_q4_1_llama.bin")).unwrap();
-    let (client, device) = cpu_setup();
-    let input = Tensor::<CpuRuntime>::from_slice(&src, &[8, 256], &device).unwrap();
-    let got = client
-        .quantize(&input, QuantFormat::Q4_1)
-        .unwrap()
-        .to_bytes()
-        .unwrap();
-    assert_writer_matches_llama_cpp("Q4_1", 20, &got, &llama);
 }
 
 #[test]
@@ -359,47 +346,47 @@ fn assert_decodes_within_steps(
     println!("GGUF_WRITER_DIAG format={format} worst_step_ratio={worst:.4}");
 }
 
-/// Asserts boostr reconstructs the source at least as well as llama.cpp's absmax
-/// output in `llama`, and that the two are not the same bytes.
+/// Asserts boostr reconstructs the source at least as well as llama.cpp's
+/// direct-fit output in `llama`, and that the two are not the same bytes.
 ///
-/// The inequality alone passes on a silent revert to absmax, because the revert
-/// reproduces llama.cpp exactly and ties. The byte inequality closes that gap.
-/// The search picks a different scale on at least one block of this fixture, so
-/// identical bytes mean the search stopped running.
-fn assert_beats_absmax(format: &str, fmt: QuantFormat, got: &[u8], llama: &[u8]) {
+/// The inequality alone passes on a silent revert to the direct fit, because the
+/// revert reproduces llama.cpp exactly and ties. The byte inequality closes that
+/// gap. The search picks different stored fields on at least one block of this
+/// fixture, so identical bytes mean the search stopped running.
+fn assert_beats_direct_fit(format: &str, fmt: QuantFormat, got: &[u8], llama: &[u8]) {
     let src = floats("writer_src.bin");
     assert_eq!(
         got.len(),
         llama.len(),
-        "{format}: boostr wrote {} bytes, llama.cpp's absmax wrote {}",
+        "{format}: boostr wrote {} bytes, llama.cpp's direct fit wrote {}",
         got.len(),
         llama.len()
     );
 
     let ours = squared_error(&src, &decode(fmt, got));
     let theirs = squared_error(&src, &decode(fmt, llama));
-    println!("GGUF_WRITER_DIAG format={format} sse_boostr={ours:.9e} sse_absmax={theirs:.9e}");
+    println!("GGUF_WRITER_DIAG format={format} sse_boostr={ours:.9e} sse_direct={theirs:.9e}");
 
     assert!(
         ours <= theirs,
         "{format}: boostr's squared reconstruction error {ours:.9e} is WORSE than \
-         llama.cpp's plain absmax fit {theirs:.9e} on the same input. The scale search \
-         exists to be no worse than absmax on every block, so a regression here is in \
+         llama.cpp's plain direct fit {theirs:.9e} on the same input. The search exists \
+         to be no worse than the direct fit on every block, so a regression here is in \
          the search, never in the fixture."
     );
 
     assert!(
         got != llama,
-        "{format}: boostr's bytes are identical to llama.cpp's absmax output. The block \
-         scale search picks a different scale on at least one block of this fixture, so \
-         identical bytes mean the writer reverted to a plain absmax fit."
+        "{format}: boostr's bytes are identical to llama.cpp's direct-fit output. The \
+         block search picks different stored fields on at least one block of this \
+         fixture, so identical bytes mean the writer reverted to a plain direct fit."
     );
 }
 
 /// Q4_0 diverges from llama.cpp on purpose. Gates structure, decode and error
 /// instead of bytes. See the module docs.
 #[test]
-fn q4_0_writer_is_valid_and_no_worse_than_absmax() {
+fn q4_0_writer_is_valid_and_no_worse_than_direct_fit() {
     const BLOCK_BYTES: usize = 18;
     let src = floats("writer_src.bin");
     let got = write_blocks(QuantFormat::Q4_0);
@@ -436,13 +423,13 @@ fn q4_0_writer_is_valid_and_no_worse_than_absmax() {
     assert_decodes_within_steps("Q4_0", &src, &decoded, &got, BLOCK_BYTES, 2.0);
 
     let llama = std::fs::read(fixture("writer_q4_0_llama.bin")).unwrap();
-    assert_beats_absmax("Q4_0", QuantFormat::Q4_0, &got, &llama);
+    assert_beats_direct_fit("Q4_0", QuantFormat::Q4_0, &got, &llama);
 }
 
 /// Q8_0 diverges from llama.cpp on purpose. Gates structure, decode and error
 /// instead of bytes. See the module docs.
 #[test]
-fn q8_0_writer_is_valid_and_no_worse_than_absmax() {
+fn q8_0_writer_is_valid_and_no_worse_than_direct_fit() {
     const BLOCK_BYTES: usize = 34;
     let src = floats("writer_src.bin");
     let got = write_blocks(QuantFormat::Q8_0);
@@ -485,5 +472,121 @@ fn q8_0_writer_is_valid_and_no_worse_than_absmax() {
     assert_decodes_within_steps("Q8_0", &src, &decoded, &got, BLOCK_BYTES, 2.0);
 
     let llama = std::fs::read(fixture("writer_q8_0_llama.bin")).unwrap();
-    assert_beats_absmax("Q8_0", QuantFormat::Q8_0, &got, &llama);
+    assert_beats_direct_fit("Q8_0", QuantFormat::Q8_0, &got, &llama);
+}
+
+/// Asserts the block's largest SOURCE value carries its largest code and the
+/// smallest carries its smallest, then that the two codes span at least
+/// `min_span` levels.
+///
+/// This is Q4_1's index-order gate. Q4_1 splits a block across nibbles — element
+/// `j` low, element `j + 16` high. Unpacking `out[2i]`/`out[2i + 1]` permutes
+/// every weight while leaving the byte count, block count and tensor RMS intact.
+/// A permutation moves the extreme codes off the extreme elements, which this
+/// catches. Q4_1's codes are unsigned and one-sided, so both ends are checked;
+/// the symmetric formats check magnitude at one end instead. Clamping can put
+/// several codes on an extreme, so the assertion is equality with the extreme,
+/// not uniqueness.
+///
+/// The span gate catches the other failure: a scale far too large leaves most of
+/// the code range unused. The sweep moves the range by a fraction of one level,
+/// so a block with any spread still reaches most of `[0, 15]`.
+fn assert_extreme_codes_track_extreme_elements(
+    format: &str,
+    b: usize,
+    xb: &[f32],
+    codes: &[i32],
+    min_span: i32,
+) {
+    let mut arg_hi = 0usize;
+    let mut arg_lo = 0usize;
+    for (i, v) in xb.iter().enumerate() {
+        if *v > xb[arg_hi] {
+            arg_hi = i;
+        }
+        if *v < xb[arg_lo] {
+            arg_lo = i;
+        }
+    }
+    let hi = *codes.iter().max().unwrap();
+    let lo = *codes.iter().min().unwrap();
+
+    assert_eq!(
+        codes[arg_hi], hi,
+        "{format}: block {b} carries its highest code {hi} somewhere other than \
+         element {arg_hi}, which is the block's largest source value ({}). The \
+         search never moves an extreme element off its extreme code; a permuted \
+         unpack does.",
+        xb[arg_hi]
+    );
+    assert_eq!(
+        codes[arg_lo], lo,
+        "{format}: block {b} carries its lowest code {lo} somewhere other than \
+         element {arg_lo}, which is the block's smallest source value ({}).",
+        xb[arg_lo]
+    );
+
+    // A constant block has nothing to spread: one code represents it exactly.
+    if xb[arg_hi] == xb[arg_lo] {
+        return;
+    }
+    assert!(
+        hi - lo >= min_span,
+        "{format}: block {b} spans only codes {lo}..={hi}, under {min_span} levels. \
+         The sweep moves the range by a fraction of one level either side of the \
+         min/max fit, so a span this narrow means the scale came out far too large \
+         and most of the code range is unused."
+    );
+}
+
+/// Q4_1 diverges from llama.cpp on purpose. Gates structure, decode and error
+/// instead of bytes. See the module docs.
+#[test]
+fn q4_1_writer_is_valid_and_no_worse_than_direct_fit() {
+    const BLOCK_BYTES: usize = 20;
+    let src = floats("writer_src.bin");
+    let got = write_blocks(QuantFormat::Q4_1);
+
+    assert_eq!(
+        got.len(),
+        BLOCKS * BLOCK_BYTES,
+        "Q4_1: {BLOCKS} blocks must occupy {} bytes",
+        BLOCKS * BLOCK_BYTES
+    );
+
+    for (b, block) in got.as_chunks::<BLOCK_BYTES>().0.iter().enumerate() {
+        // Bytes 0..2 are the f16 scale `d`, 2..4 the f16 offset `m`, 4..20 the
+        // nibble pairs: element `j` in the low nibble, element `j + 16` in the
+        // high one. The reader computes `d·q + m` with `q` unsigned — no bias.
+        let mut codes = [0i32; BLOCK_SIZE];
+        for (j, &byte) in block[4..].iter().enumerate() {
+            codes[j] = i32::from(byte & 0x0F);
+            codes[j + 16] = i32::from(byte >> 4);
+        }
+        assert!(
+            stored_scale(block).is_finite(),
+            "Q4_1: block {b} stores a non-finite scale, which no reader can use"
+        );
+        assert!(
+            f16::from_le_bytes([block[2], block[3]])
+                .to_f32()
+                .is_finite(),
+            "Q4_1: block {b} stores a non-finite offset. The least-squares refit \
+             can leave binary16's range where the plain min/max fit could not, so \
+             an unstorable pair must never reach the file."
+        );
+        assert_extreme_codes_track_extreme_elements(
+            "Q4_1",
+            b,
+            &src[b * BLOCK_SIZE..][..BLOCK_SIZE],
+            &codes,
+            12,
+        );
+    }
+
+    let decoded = decode(QuantFormat::Q4_1, &got);
+    assert_decodes_within_steps("Q4_1", &src, &decoded, &got, BLOCK_BYTES, 2.0);
+
+    let llama = std::fs::read(fixture("writer_q4_1_llama.bin")).unwrap();
+    assert_beats_direct_fit("Q4_1", QuantFormat::Q4_1, &got, &llama);
 }

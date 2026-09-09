@@ -12,12 +12,13 @@
 
 use super::q4k_q5k::{KSearch, Q4K_SEARCH, Q5K_SEARCH, quantize_q4k_with, quantize_q5k_with};
 use super::q6k::quantize_q6k_absmax;
-use super::simple::{quantize_q4_0_absmax, quantize_q8_0_absmax};
+use super::simple::{quantize_q4_0_absmax, quantize_q4_1_minmax, quantize_q8_0_absmax};
 use super::{
     quantize_q4_0, quantize_q4_1, quantize_q4k, quantize_q5k, quantize_q6k, quantize_q8_0,
 };
 use crate::quant::cpu::kernels::dequant_k_quants::{dequant_q4k, dequant_q5k, dequant_q6k};
 use crate::quant::cpu::kernels::dequant_simple::{dequant_q4_0, dequant_q4_1, dequant_q8_0};
+use half::f16;
 
 /// Number of 256-element super-blocks in the test input
 const SUPER_BLOCKS: usize = 8;
@@ -240,6 +241,43 @@ fn q4_0_search_beats_absmax() {
 
     let (a, b) = decode_pair(&x, &searched, &absmax, dequant_q4_0);
     assert!(a < b, "q4_0: search {a} must beat absmax {b}");
+}
+
+/// Q4_1's search is [`super::block_affine`], which sweeps the scale AND the
+/// added offset. Its baseline is the plain min/max fit through the identical
+/// encoder, so the sweep is the only difference between the two packings.
+#[test]
+fn q4_1_search_beats_minmax() {
+    let x = synthetic_weights();
+    let mut searched = vec![0u8; (x.len() / 32) * 20];
+    let mut minmax = vec![0u8; searched.len()];
+    quantize_q4_1(&x, &mut searched);
+    quantize_q4_1_minmax(&x, &mut minmax);
+
+    let (a, b) = decode_pair(&x, &searched, &minmax, dequant_q4_1);
+    assert!(a < b, "q4_1: search {a} must beat min/max {b}");
+}
+
+/// The search moves the stored fields, never the format.
+///
+/// Q4_1's min/max fit could only ever store a scale and offset drawn from the
+/// block itself. The search stores a LEAST-SQUARES pair instead, which can leave
+/// binary16's range on an extreme block. Both fields must still be values a
+/// reader can multiply and add, so both are checked on every block.
+#[test]
+fn q4_1_stored_fields_stay_finite() {
+    let x = synthetic_weights();
+    let mut packed = vec![0u8; (x.len() / 32) * 20];
+    quantize_q4_1(&x, &mut packed);
+
+    for (b, block) in packed.as_chunks::<20>().0.iter().enumerate() {
+        let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
+        let m = f16::from_le_bytes([block[2], block[3]]).to_f32();
+        assert!(
+            d.is_finite() && m.is_finite(),
+            "block {b} stores a non-finite field, which no reader can use"
+        );
+    }
 }
 
 #[test]

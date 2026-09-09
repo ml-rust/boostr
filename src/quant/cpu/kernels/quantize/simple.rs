@@ -1,32 +1,27 @@
 //! Quantization writers for the simple 32-element block formats
 //!
-//! Q4_0, Q4_1, Q8_0. These have no sub-block structure. The single block scale
-//! is still a free parameter: rounding the codes against a slightly different
-//! scale can reconstruct the block more closely than the absmax fit does. Q4_0
-//! and Q8_0 therefore sweep their scale through [`super::block_scale`]. Only
-//! Q4_1 takes a direct fit.
+//! Q4_0, Q4_1, Q8_0. These have no sub-block structure. Their stored fields are
+//! still free parameters: rounding the codes against a slightly different scale
+//! can reconstruct the block more closely than the direct fit does. Q4_0 and
+//! Q8_0 sweep their single scale through [`super::block_scale`]. Q4_1 sweeps its
+//! scale AND offset through [`super::block_affine`], whose `m` is signed and
+//! added, the sign that keeps it out of both other searches.
 //!
-//! Q4_1 stays on its plain min/max fit because its `m` is a SIGNED stored offset
-//! that is ADDED. Neither search this crate has models that offset.
-//! [`make_qkx2_quants`](super::search::make_qkx2_quants) forces its offset
-//! non-positive to match Q4_K's subtracted `dmin`, which throws away half of
-//! Q4_1's range on an all-positive block.
+//! # Codes are computed against the STORED fields
 //!
-//! # Codes are computed against the STORED scale
+//! Every stored field is binary16, so the reader reconstructs from the ROUNDED
+//! values. Each code here divides by that same rounded scale, and Q4_1 subtracts
+//! the same rounded offset, never the wider floats they came from. Q6_K applies
+//! the same second-pass rule after quantizing its sub-block scales.
 //!
-//! The scale is written as binary16, so the reader multiplies by the ROUNDED
-//! value. Every code here divides by that same rounded value, never by the wider
-//! float it came from. Q6_K applies the same second-pass rule after quantizing
-//! its sub-block scales.
+//! # None of the three match llama.cpp byte for byte
 //!
-//! # Q4_0 and Q8_0 no longer match llama.cpp byte for byte
-//!
-//! llama.cpp's `quantize_row_q4_0` and `quantize_row_q8_0` are plain absmax fits
-//! with no search. Any block where the search picks a different scale produces
-//! different bytes. The output stays a VALID block — same size, layout and code
-//! range, decoded correctly by every reader including llama.cpp's. It is a
-//! better encoding of the same format. [`super::block_scale`] states the full
-//! trade.
+//! llama.cpp's `quantize_row_q4_0`, `quantize_row_q4_1` and
+//! `quantize_row_q8_0` are plain direct fits with no search. Any block where a
+//! search picks different parameters produces different bytes. The output stays
+//! a VALID block — same size, layout and code range, decoded correctly by every
+//! reader including llama.cpp's. It is a better encoding of the same format.
+//! [`super::block_scale`] and [`super::block_affine`] state the full trade.
 //!
 //! # Nibble ordering — the trap
 //!
@@ -39,12 +34,18 @@
 //! authority here.
 
 #[cfg(test)]
+use super::block_affine::minmax_block_affine;
+use super::block_affine::{BlockAffineFit, Q4_1_FIT, affine_code, fit_block_affine};
+#[cfg(test)]
 use super::block_scale::absmax_block_scale;
 use super::block_scale::{BlockScaleFit, Q4_0_FIT, Q8_0_FIT, block_code, fit_block_scale};
 use half::f16;
 
 /// Per-block scale fit: `(values, format) -> stored binary16 scale`
 type ScaleFit = fn(&[f32], &BlockScaleFit) -> f16;
+
+/// Per-block affine fit: `(values, format) -> stored binary16 scale and offset`
+type AffineFit = fn(&[f32], &BlockAffineFit) -> (f16, f16);
 
 /// Q4_0: 32 elements, 18 bytes — 2-byte f16 `d`, then 16 nibble-pair bytes
 ///
@@ -90,12 +91,14 @@ pub(super) fn quantize_q4_0_with(x: &[f32], out: &mut [u8], fit: ScaleFit) {
 /// Inverse of [`dequant_q4_1`](crate::quant::cpu::kernels::dequant_simple::dequant_q4_1),
 /// which reads `d` at byte 0, `m` at byte 2, `qs` at bytes 4..20 and computes
 /// `out = d·q + m`. Note the sign: Q4_1's min is ADDED, unlike Q4_K's `dmin`
-/// which is subtracted.
-///
-/// Direct min/max fit, no search. The module docs state why this crate's
-/// searches do not model Q4_1's signed added offset. This writer matches
-/// llama.cpp byte for byte.
+/// which is subtracted. Both fields are binary16, so the search sweeps and
+/// scores them exactly as the reader loads them.
 pub fn quantize_q4_1(x: &[f32], out: &mut [u8]) {
+    quantize_q4_1_with(x, out, fit_block_affine)
+}
+
+/// Q4_1 with an explicit affine fit — lets tests measure the search against min/max
+pub(super) fn quantize_q4_1_with(x: &[f32], out: &mut [u8], fit: AffineFit) {
     const BLOCK_SIZE: usize = 32;
     const BLOCK_BYTES: usize = 20;
 
@@ -106,21 +109,16 @@ pub fn quantize_q4_1(x: &[f32], out: &mut [u8]) {
         let xb = &x[b * BLOCK_SIZE..][..BLOCK_SIZE];
         let block = &mut out[b * BLOCK_BYTES..][..BLOCK_BYTES];
 
-        let mut min = f32::MAX;
-        let mut max = f32::MIN;
-        for &v in xb {
-            min = min.min(v);
-            max = max.max(v);
-        }
-
-        let d = (max - min) / 15.0;
-        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
-        block[0..2].copy_from_slice(&f16::from_f32(d).to_le_bytes());
-        block[2..4].copy_from_slice(&f16::from_f32(min).to_le_bytes());
+        let (d, m) = fit(xb, &Q4_1_FIT);
+        block[0..2].copy_from_slice(&d.to_le_bytes());
+        block[2..4].copy_from_slice(&m.to_le_bytes());
+        let (df, mf) = (d.to_f32(), m.to_f32());
 
         for j in 0..16 {
-            let lo = (((xb[j] - min) * id + 0.5) as i32).clamp(0, 15) as u8;
-            let hi = (((xb[j + 16] - min) * id + 0.5) as i32).clamp(0, 15) as u8;
+            // `affine_code` clamps to [0, 15], the unsigned nibble range the
+            // reader uses directly with no bias to subtract.
+            let lo = affine_code(xb[j], df, mf, &Q4_1_FIT) as u8;
+            let hi = affine_code(xb[j + 16], df, mf, &Q4_1_FIT) as u8;
             block[4 + j] = lo | (hi << 4);
         }
     }
@@ -172,4 +170,10 @@ pub(super) fn quantize_q4_0_absmax(x: &[f32], out: &mut [u8]) {
 #[cfg(test)]
 pub(super) fn quantize_q8_0_absmax(x: &[f32], out: &mut [u8]) {
     quantize_q8_0_with(x, out, absmax_block_scale)
+}
+
+/// Min/max baseline for Q4_1 — see [`quantize_q4_0_absmax`]
+#[cfg(test)]
+pub(super) fn quantize_q4_1_minmax(x: &[f32], out: &mut [u8]) {
+    quantize_q4_1_with(x, out, minmax_block_affine)
 }

@@ -35,11 +35,19 @@ use crate::quant::tcf::{TCF_TILE, TcfPlanes};
 
 use super::super::kernels::{self, TCF_MODULE};
 
-/// Execution tiles one dequantization block owns. One super-block, matching
-/// `TCF_DEQUANT_TILES`.
-const DEQUANT_TILES_PER_BLOCK: u32 = 4;
-/// Threads per dequantization block: one per element of its four tiles.
+/// Threads per dequantization block, matching `TCF_DEQUANT_BLOCK`.
 const DEQUANT_BLOCK: u32 = 256;
+/// Output elements one dequantization thread writes, matching
+/// `TCF_DEQUANT_ELEMS_PER_THREAD`. One `float4` store covers the run.
+const DEQUANT_ELEMS_PER_THREAD: u32 = 4;
+/// Threads covering one execution tile, matching `TCF_DEQUANT_THREADS_PER_TILE`.
+const DEQUANT_THREADS_PER_TILE: u32 = TCF_TILE as u32 / DEQUANT_ELEMS_PER_THREAD;
+/// Execution tiles one dequantization block owns, matching `TCF_DEQUANT_TILES`.
+///
+/// The grid follows the ELEMENT count, not the tile count: a block covers
+/// `DEQUANT_BLOCK * DEQUANT_ELEMS_PER_THREAD` elements, which is this many
+/// 64-element tiles — four whole super-blocks.
+const DEQUANT_TILES_PER_BLOCK: u32 = DEQUANT_BLOCK / DEQUANT_THREADS_PER_TILE;
 /// Output columns one GEMV block covers, one per warp. Matches
 /// `TCF_WARPS_PER_BLOCK`.
 const GEMV_COLUMNS_PER_BLOCK: u32 = 8;

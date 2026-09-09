@@ -47,10 +47,19 @@
 #define TCF_WARPS_PER_BLOCK 8u
 #define TCF_GEMV_BLOCK (TCF_WARP_SIZE * TCF_WARPS_PER_BLOCK)
 
-// Tiles one dequantization block owns: one super-block, so a block's group
-// parameters come from one bit-packed sub-plane run.
-#define TCF_DEQUANT_TILES TCF_SUPER_BLOCK_TILES
-#define TCF_DEQUANT_BLOCK (TCF_DEQUANT_TILES * TCF_TILE)
+// Dequantization geometry, derived from the ELEMENT count the way every GGUF
+// dequant kernel in `dequant.cu` is: a thread owns a four-element run and
+// stores it as one `float4`, so a 256-thread block covers 1024 elements.
+//
+// 1024 elements is 16 execution tiles, which is four whole super-blocks — the
+// block's group parameters still come from a contiguous run of bit-packed
+// sub-planes, and `tile_base` is still a multiple of `TCF_SUPER_BLOCK_TILES`.
+#define TCF_DEQUANT_ELEMS_PER_THREAD 4u
+#define TCF_DEQUANT_BLOCK 256u
+// Threads covering one execution tile's 64 elements.
+#define TCF_DEQUANT_THREADS_PER_TILE (TCF_TILE / TCF_DEQUANT_ELEMS_PER_THREAD)
+// Execution tiles one CUDA block owns.
+#define TCF_DEQUANT_TILES (TCF_DEQUANT_BLOCK / TCF_DEQUANT_THREADS_PER_TILE)
 
 // GEMM block tile: 32 activation rows by 32 weight rows, staged 32 elements of
 // K at a time. 64 threads per K range, each owning a 4x4 register patch.
@@ -256,10 +265,19 @@ extern "C" {
 // ============================================================================
 // Dequantization: whole payload -> f32, in logical row-major order.
 //
-// One block per super-block of four tiles, 256 threads, one element each.
-// Threads 0..(4 * groups_per_tile) resolve the block's group parameters into
-// shared memory first, so the scale planes are read once per group rather than
-// once per weight.
+// One block per sixteen tiles — four super-blocks — 256 threads, a run of
+// `TCF_DEQUANT_ELEMS_PER_THREAD` consecutive elements each, stored as one
+// `float4`. That is the same thread-to-element shape every GGUF dequant kernel
+// in `dequant.cu` uses: warp-consecutive threads write warp-consecutive floats,
+// and one store instruction covers one contiguous burst instead of 32 scattered
+// ones.
+//
+// Threads 0..(TCF_DEQUANT_TILES * groups_per_tile) resolve the block's group
+// parameters into shared memory first, so the scale planes are read once per
+// group rather than once per weight. A four-element run never straddles a
+// group boundary: v1's narrowest group is 16 elements (`TCF_MAX_GROUPS` over a
+// 64-element tile), every group width is a multiple of four, and a run starts
+// at a multiple of four — so one shared slot serves the whole run.
 // ============================================================================
 
 __global__ __launch_bounds__(TCF_DEQUANT_BLOCK, 1) void tcf_dequant_f32(
@@ -303,17 +321,35 @@ __global__ __launch_bounds__(TCF_DEQUANT_BLOCK, 1) void tcf_dequant_f32(
     }
     __syncthreads();
 
-    const unsigned int local_tile = tid / TCF_TILE;
-    const unsigned int e = tid % TCF_TILE;
+    const unsigned int local_tile = tid / TCF_DEQUANT_THREADS_PER_TILE;
+    const unsigned int quad = tid % TCF_DEQUANT_THREADS_PER_TILE;
     const unsigned int tile = tile_base + local_tile;
     if (tile >= tiles) {
         return;
     }
 
-    const unsigned int slot = local_tile * l.groups_per_tile + (e / l.group);
-    const int code = tcf_code(payload, l, tile, e);
-    output[(size_t)tile * (size_t)TCF_TILE + (size_t)e] =
-        tcf_value(code, s_scale[slot], s_min[slot], l.symmetric);
+    // First element of this thread's run inside its tile.
+    const unsigned int e0 = quad * TCF_DEQUANT_ELEMS_PER_THREAD;
+    const unsigned int slot = local_tile * l.groups_per_tile + (e0 / l.group);
+    const float scale = s_scale[slot];
+    const float min_value = s_min[slot];
+
+    // Per element this is the expression the one-element-per-thread form used,
+    // unchanged and in the same order, so every output bit is the same.
+    float4 v;
+    v.x = tcf_value(tcf_code(payload, l, tile, e0), scale, min_value, l.symmetric);
+    v.y = tcf_value(tcf_code(payload, l, tile, e0 + 1u), scale, min_value, l.symmetric);
+    v.z = tcf_value(tcf_code(payload, l, tile, e0 + 2u), scale, min_value, l.symmetric);
+    v.w = tcf_value(tcf_code(payload, l, tile, e0 + 3u), scale, min_value, l.symmetric);
+
+    // The output base is a device allocation, so it is at least 256-byte
+    // aligned. The tile stride is 64 elements and `e0` is a multiple of four,
+    // so this offset is a multiple of four floats for every tile — including
+    // the last one of a ragged tail — which is the 16-byte alignment a `float4`
+    // store needs.
+    float4* out4 = reinterpret_cast<float4*>(
+        output + (size_t)tile * (size_t)TCF_TILE + (size_t)e0);
+    *out4 = v;
 }
 
 // ============================================================================

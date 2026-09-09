@@ -19,40 +19,44 @@ use super::tcf as tcf_dispatch;
 /// `kernels/dequant.cu`.
 const DEQUANT_BLOCK: u32 = 256;
 
-/// Output elements one K-quant thread writes, matching the `*_ELEMS_PER_THREAD`
-/// macros in `kernels/dequant.cu`. Every K-quant kernel there uses the same
+/// Output elements one dequant thread writes, matching the `*_ELEMS_PER_THREAD`
+/// macros in `kernels/dequant.cu`. Every kernel there uses the same
 /// four-element run so one `float4` store covers a thread's whole output.
-const KQUANT_ELEMS_PER_THREAD: u32 = 4;
+const DEQUANT_ELEMS_PER_THREAD: u32 = 4;
 
-/// Output elements one K-quant super-block holds.
-const KQUANT_ELEMS_PER_SUPER: u32 = 256;
+/// Output elements one 256-element super-block holds: every K-quant, and the
+/// IQ formats that share their super-block size.
+const SUPER_ELEMS_PER_BLOCK: u32 = 256;
 
-/// Grid mapping shared by every K-quant dequant kernel: one thread per
-/// four-element run of a 256-element super-block.
-const KQUANT_MAPPING: DequantMapping = DequantMapping::ElementsPerThread {
-    elems_per_thread: KQUANT_ELEMS_PER_THREAD,
-    elems_per_block: KQUANT_ELEMS_PER_SUPER,
+/// Output elements one 32-element GGUF block holds: Q4_0, Q5_0, Q8_0, IQ4_NL.
+const BLOCK32_ELEMS_PER_BLOCK: u32 = 32;
+
+/// Grid mapping for the super-block kernels: one thread per four-element run
+/// of a 256-element super-block.
+const SUPER_MAPPING: DequantMapping = DequantMapping {
+    elems_per_thread: DEQUANT_ELEMS_PER_THREAD,
+    elems_per_block: SUPER_ELEMS_PER_BLOCK,
 };
 
-/// What one thread of a dequantization kernel owns.
+/// Grid mapping for the 32-element block kernels: one thread per four-element
+/// run of a 32-element block.
+const BLOCK32_MAPPING: DequantMapping = DequantMapping {
+    elems_per_thread: DEQUANT_ELEMS_PER_THREAD,
+    elems_per_block: BLOCK32_ELEMS_PER_BLOCK,
+};
+
+/// What one thread of a dequantization kernel owns: `elems_per_thread`
+/// consecutive output elements of a quantized block holding `elems_per_block`
+/// of them.
 ///
-/// The kernels do not share a thread mapping, so they cannot share a grid
-/// formula either: sizing an element-mapped kernel's grid by block count
-/// launches a fraction of the threads it needs. Each kernel names its mapping
-/// at the dispatch site and the grid follows from that. Migrating another
-/// format to an element mapping is a change of its arm alone; the formats
-/// still on [`DequantMapping::BlockPerThread`] keep the original grid.
+/// The grid follows the ELEMENT count, not the block count. Sizing an
+/// element-mapped kernel's grid by block count launches a fraction of the
+/// threads it needs, so each kernel names its mapping at the dispatch site and
+/// the grid formula reads it from there.
 #[derive(Debug, Clone, Copy)]
-enum DequantMapping {
-    /// One thread decodes one whole quantized block and writes all of its
-    /// output elements.
-    BlockPerThread,
-    /// One thread writes `elems_per_thread` consecutive output elements of a
-    /// quantized block holding `elems_per_block` of them.
-    ElementsPerThread {
-        elems_per_thread: u32,
-        elems_per_block: u32,
-    },
+struct DequantMapping {
+    elems_per_thread: u32,
+    elems_per_block: u32,
 }
 
 impl DequantMapping {
@@ -62,16 +66,8 @@ impl DequantMapping {
     /// # Errors
     /// [`Error::QuantError`] when the grid does not fit in `u32`.
     fn grid(self, num_blocks: usize, kernel_name: &str) -> Result<u32> {
-        let threads = match self {
-            Self::BlockPerThread => num_blocks as u64,
-            Self::ElementsPerThread {
-                elems_per_thread,
-                elems_per_block,
-            } => {
-                let elements = num_blocks as u64 * u64::from(elems_per_block);
-                elements.div_ceil(u64::from(elems_per_thread))
-            }
-        };
+        let elements = num_blocks as u64 * u64::from(self.elems_per_block);
+        let threads = elements.div_ceil(u64::from(self.elems_per_thread));
         let grid = threads.div_ceil(u64::from(DEQUANT_BLOCK));
         u32::try_from(grid).map_err(|_| Error::QuantError {
             reason: format!("{kernel_name}: grid of {grid} blocks exceeds u32"),
@@ -160,18 +156,18 @@ impl DequantOps<CudaRuntime> for CudaClient {
         };
 
         let (kernel_name, mapping) = match format {
-            QuantFormat::Q4_0 => ("dequant_q4_0_f32", DequantMapping::BlockPerThread),
-            QuantFormat::Q5_0 => ("dequant_q5_0_f32", DequantMapping::BlockPerThread),
-            QuantFormat::Q8_0 => ("dequant_q8_0_f32", DequantMapping::BlockPerThread),
-            QuantFormat::Q2K => ("dequant_q2_k_f32", KQUANT_MAPPING),
-            QuantFormat::Q3K => ("dequant_q3_k_f32", KQUANT_MAPPING),
-            QuantFormat::Q4K => ("dequant_q4_k_f32", KQUANT_MAPPING),
-            QuantFormat::Q5K => ("dequant_q5_k_f32", KQUANT_MAPPING),
-            QuantFormat::Q6K => ("dequant_q6_k_f32", KQUANT_MAPPING),
-            QuantFormat::IQ4NL => ("dequant_iq4_nl_f32", DequantMapping::BlockPerThread),
-            QuantFormat::IQ4XS => ("dequant_iq4_xs_f32", DequantMapping::BlockPerThread),
-            QuantFormat::IQ3S => ("dequant_iq3_s_f32", DequantMapping::BlockPerThread),
-            QuantFormat::IQ2XS => ("dequant_iq2_xs_f32", DequantMapping::BlockPerThread),
+            QuantFormat::Q4_0 => ("dequant_q4_0_f32", BLOCK32_MAPPING),
+            QuantFormat::Q5_0 => ("dequant_q5_0_f32", BLOCK32_MAPPING),
+            QuantFormat::Q8_0 => ("dequant_q8_0_f32", BLOCK32_MAPPING),
+            QuantFormat::Q2K => ("dequant_q2_k_f32", SUPER_MAPPING),
+            QuantFormat::Q3K => ("dequant_q3_k_f32", SUPER_MAPPING),
+            QuantFormat::Q4K => ("dequant_q4_k_f32", SUPER_MAPPING),
+            QuantFormat::Q5K => ("dequant_q5_k_f32", SUPER_MAPPING),
+            QuantFormat::Q6K => ("dequant_q6_k_f32", SUPER_MAPPING),
+            QuantFormat::IQ4NL => ("dequant_iq4_nl_f32", BLOCK32_MAPPING),
+            QuantFormat::IQ4XS => ("dequant_iq4_xs_f32", SUPER_MAPPING),
+            QuantFormat::IQ3S => ("dequant_iq3_s_f32", SUPER_MAPPING),
+            QuantFormat::IQ2XS => ("dequant_iq2_xs_f32", SUPER_MAPPING),
             // All other formats: use generic dequant kernel (format dispatch via switch)
             _ => {
                 return dequant_via_generic_kernel(self, qt, target_dtype);

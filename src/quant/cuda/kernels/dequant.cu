@@ -1,8 +1,10 @@
 // Dequantization CUDA kernels for boostr
 // Supports: Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, IQ3_S, IQ2_XS → f32
 //
-// The K-quant kernels map one thread to a four-element run and store a float4;
-// the remaining kernels map one thread to one whole quantized block.
+// Every kernel here maps one thread to a four-element run and stores a float4,
+// so warp-consecutive threads write warp-consecutive floats. The formats
+// differ only in how many quantized blocks one CUDA block covers and in which
+// per-group header values the block resolves into shared memory first.
 // Block formats match llama.cpp bit-for-bit.
 
 #include <cuda_fp16.h>
@@ -13,39 +15,87 @@
 extern "C" {
 
 // ============================================================================
+// Thread mapping shared by the 32-element block formats below (Q4_0, Q5_0,
+// Q8_0, IQ4_NL).
+//
+// Thread-to-ELEMENT mapping, four consecutive elements per thread, so
+// warp-consecutive threads write warp-consecutive floats and one store
+// instruction covers one contiguous burst instead of 32 scattered ones.
+//
+// A CUDA block of BLOCK32_DEQUANT_BLOCK threads writes 4 elements each, so it
+// covers 1024 elements: 32 quantized blocks, eight threads per block. That is
+// a wider block-to-CUDA-block ratio than the K-quants' four, purely because a
+// 32-element block is an eighth of a 256-element super-block.
+//
+// The per-block header — one f16 scale, plus Q5_0's fifth-bit word — is
+// decoded cooperatively by the first 32 threads into shared memory and read
+// after a single barrier, so it is resolved once per block instead of once per
+// thread. `gguf_split_half_nibble` in decode.cuh is the one place the
+// element -> nibble order of these formats is written; a four-aligned run
+// never crosses the 16-element half boundary, so the whole run reads one
+// nibble half of four consecutive `qs` bytes.
+// ============================================================================
+
+#define BLOCK32_ELEMS_PER_THREAD 4
+#define BLOCK32_DEQUANT_BLOCK 256
+// Quantized blocks one CUDA block covers.
+#define BLOCK32_PER_CUDA_BLOCK 32
+// Threads covering one quantized block's 32 elements.
+#define BLOCK32_THREADS_PER_BLOCK (32 / BLOCK32_ELEMS_PER_THREAD)
+
+// ============================================================================
 // Q4_0 Dequantization
 // Block: 32 elements, 18 bytes (2-byte f16 scale + 16 bytes nibbles)
 // Formula: x = (nibble - 8) * scale
-// One thread per block of 32 elements
 // ============================================================================
 
-__global__ void dequant_q4_0_f32(
+__global__ __launch_bounds__(BLOCK32_DEQUANT_BLOCK) void dequant_q4_0_f32(
     const unsigned char* __restrict__ input,
     float* __restrict__ output,
     unsigned int num_blocks
 ) {
-    unsigned int bid = blockIdx.x * blockDim.x + threadIdx.x;
+    // Per-block f16 scale, converted once and read by all 8 threads of a block.
+    __shared__ float s_d[BLOCK32_PER_CUDA_BLOCK];
+
+    const unsigned int block_base = blockIdx.x * BLOCK32_PER_CUDA_BLOCK;
+    const unsigned int tid = threadIdx.x;
+
+    // Header decode: threads 0..31 take one quantized block each.
+    if (tid < BLOCK32_PER_CUDA_BLOCK) {
+        const unsigned int bid = block_base + tid;
+        float d = 0.0f;
+        if (bid < num_blocks) {
+            // The block stride is 18 bytes, so the f16 field is 2-byte aligned
+            // for every block.
+            const unsigned char* block = input + (unsigned long long)bid * 18;
+            __half d_half = *reinterpret_cast<const __half*>(block);
+            d = __half2float(d_half);
+        }
+        s_d[tid] = d;
+    }
+    __syncthreads();
+
+    const unsigned int local = tid / BLOCK32_THREADS_PER_BLOCK;
+    const unsigned int quad = tid % BLOCK32_THREADS_PER_BLOCK;
+    const unsigned int bid = block_base + local;
     if (bid >= num_blocks) return;
 
-    const unsigned char* block = input + bid * 18;
-    float* out = output + bid * 32;
+    const float d = s_d[local];
+    const unsigned int e0 = quad * BLOCK32_ELEMS_PER_THREAD;
+    const unsigned char* qs = input + (unsigned long long)bid * 18 + 2;
 
-    // Read f16 scale
-    __half d_half = *reinterpret_cast<const __half*>(block);
-    float d = __half2float(d_half);
+    float4 v;
+    v.x = (float)(gguf_split_half_nibble(qs, (int)e0)     - 8) * d;
+    v.y = (float)(gguf_split_half_nibble(qs, (int)e0 + 1) - 8) * d;
+    v.z = (float)(gguf_split_half_nibble(qs, (int)e0 + 2) - 8) * d;
+    v.w = (float)(gguf_split_half_nibble(qs, (int)e0 + 3) - 8) * d;
 
-    const unsigned char* qs = block + 2;
-
-    // Split-half nibble order (llama.cpp `dequantize_row_q4_0`): element j takes
-    // the LOW nibble of qs[j], element j+16 the HIGH nibble of the SAME byte.
-    // They are 16 apart, not adjacent — see decode.cuh.
-    for (int j = 0; j < 16; j++) {
-        unsigned char byte = qs[j];
-        int low = (int)(byte & 0x0F) - 8;
-        int high = (int)((byte >> 4) & 0x0F) - 8;
-        out[j] = (float)low * d;
-        out[j + 16] = (float)high * d;
-    }
+    // The output base is a device allocation, so it is at least 256-byte
+    // aligned, and this offset is a multiple of four floats — the 16-byte
+    // alignment a float4 store needs.
+    float4* out4 = reinterpret_cast<float4*>(
+        output + (unsigned long long)bid * 32 + e0);
+    *out4 = v;
 }
 
 // ============================================================================
@@ -54,37 +104,69 @@ __global__ void dequant_q4_0_f32(
 // Formula: x = ((low4 | (high1 << 4)) - 16) * scale
 // ============================================================================
 
-__global__ void dequant_q5_0_f32(
+__global__ __launch_bounds__(BLOCK32_DEQUANT_BLOCK) void dequant_q5_0_f32(
     const unsigned char* __restrict__ input,
     float* __restrict__ output,
     unsigned int num_blocks
 ) {
-    unsigned int bid = blockIdx.x * blockDim.x + threadIdx.x;
+    // Per-block f16 scale and fifth-bit word, resolved once and read by all 8
+    // threads of a block.
+    __shared__ float s_d[BLOCK32_PER_CUDA_BLOCK];
+    __shared__ unsigned int s_qh[BLOCK32_PER_CUDA_BLOCK];
+
+    const unsigned int block_base = blockIdx.x * BLOCK32_PER_CUDA_BLOCK;
+    const unsigned int tid = threadIdx.x;
+
+    // Header decode: threads 0..31 take one quantized block each.
+    if (tid < BLOCK32_PER_CUDA_BLOCK) {
+        const unsigned int bid = block_base + tid;
+        float d = 0.0f;
+        unsigned int qh = 0u;
+        if (bid < num_blocks) {
+            const unsigned char* block = input + (unsigned long long)bid * 22;
+            __half d_half = *reinterpret_cast<const __half*>(block);
+            d = __half2float(d_half);
+            // The block stride is 22 bytes, so `block + 2` is only 2-byte
+            // aligned for odd blocks: a 4-byte load through an
+            // `unsigned int*` traps with CUDA_ERROR_MISALIGNED_ADDRESS, which
+            // poisons the context for every later launch. `iq_load_u32` is the
+            // shared memcpy-based unaligned load.
+            qh = iq_load_u32(block + 2);
+        }
+        s_d[tid] = d;
+        s_qh[tid] = qh;
+    }
+    __syncthreads();
+
+    const unsigned int local = tid / BLOCK32_THREADS_PER_BLOCK;
+    const unsigned int quad = tid % BLOCK32_THREADS_PER_BLOCK;
+    const unsigned int bid = block_base + local;
     if (bid >= num_blocks) return;
 
-    const unsigned char* block = input + bid * 22;
-    float* out = output + bid * 32;
+    const float d = s_d[local];
+    const unsigned int qh = s_qh[local];
+    const unsigned int e0 = quad * BLOCK32_ELEMS_PER_THREAD;
+    const unsigned char* qs = input + (unsigned long long)bid * 22 + 6;
 
-    __half d_half = *reinterpret_cast<const __half*>(block);
-    float d = __half2float(d_half);
-    // The block stride is 22 bytes, so `block + 2` is only 2-byte aligned for
-    // odd blocks: a 4-byte load through a `unsigned int*` traps with
-    // CUDA_ERROR_MISALIGNED_ADDRESS, which poisons the context for every later
-    // launch. memcpy is the portable unaligned load.
-    unsigned int qh;
-    memcpy(&qh, block + 2, sizeof(unsigned int));
-    const unsigned char* qs = block + 6;
+    // `qh` is indexed by the ELEMENT index: bit j for the first half, bit
+    // j + 16 for the second, which is the element index in both cases.
+    const int v0 = gguf_split_half_nibble(qs, (int)e0)     | (int)(((qh >> e0)       & 1u) << 4);
+    const int v1 = gguf_split_half_nibble(qs, (int)e0 + 1) | (int)(((qh >> (e0 + 1)) & 1u) << 4);
+    const int v2 = gguf_split_half_nibble(qs, (int)e0 + 2) | (int)(((qh >> (e0 + 2)) & 1u) << 4);
+    const int v3 = gguf_split_half_nibble(qs, (int)e0 + 3) | (int)(((qh >> (e0 + 3)) & 1u) << 4);
 
-    // Split-half nibble order (llama.cpp `dequantize_row_q5_0`): element j takes
-    // the LOW nibble of qs[j] and fifth bit `qh` bit j; element j+16 takes the
-    // HIGH nibble of the same byte and `qh` bit j+16. See decode.cuh.
-    for (int j = 0; j < 16; j++) {
-        unsigned char byte = qs[j];
-        int low  = (byte & 0x0F) | (((qh >> j) & 1) << 4);
-        int high = ((byte >> 4) & 0x0F) | (((qh >> (j + 16)) & 1) << 4);
-        out[j]      = (float)(low - 16) * d;
-        out[j + 16] = (float)(high - 16) * d;
-    }
+    float4 v;
+    v.x = (float)(v0 - 16) * d;
+    v.y = (float)(v1 - 16) * d;
+    v.z = (float)(v2 - 16) * d;
+    v.w = (float)(v3 - 16) * d;
+
+    // The output base is a device allocation, so it is at least 256-byte
+    // aligned, and this offset is a multiple of four floats — the 16-byte
+    // alignment a float4 store needs.
+    float4* out4 = reinterpret_cast<float4*>(
+        output + (unsigned long long)bid * 32 + e0);
+    *out4 = v;
 }
 
 // ============================================================================
@@ -93,25 +175,54 @@ __global__ void dequant_q5_0_f32(
 // Formula: x = qs[i] * scale
 // ============================================================================
 
-__global__ void dequant_q8_0_f32(
+__global__ __launch_bounds__(BLOCK32_DEQUANT_BLOCK) void dequant_q8_0_f32(
     const unsigned char* __restrict__ input,
     float* __restrict__ output,
     unsigned int num_blocks
 ) {
-    unsigned int bid = blockIdx.x * blockDim.x + threadIdx.x;
+    // Per-block f16 scale, converted once and read by all 8 threads of a block.
+    __shared__ float s_d[BLOCK32_PER_CUDA_BLOCK];
+
+    const unsigned int block_base = blockIdx.x * BLOCK32_PER_CUDA_BLOCK;
+    const unsigned int tid = threadIdx.x;
+
+    // Header decode: threads 0..31 take one quantized block each.
+    if (tid < BLOCK32_PER_CUDA_BLOCK) {
+        const unsigned int bid = block_base + tid;
+        float d = 0.0f;
+        if (bid < num_blocks) {
+            const unsigned char* block = input + (unsigned long long)bid * 34;
+            __half d_half = *reinterpret_cast<const __half*>(block);
+            d = __half2float(d_half);
+        }
+        s_d[tid] = d;
+    }
+    __syncthreads();
+
+    const unsigned int local = tid / BLOCK32_THREADS_PER_BLOCK;
+    const unsigned int quad = tid % BLOCK32_THREADS_PER_BLOCK;
+    const unsigned int bid = block_base + local;
     if (bid >= num_blocks) return;
 
-    const unsigned char* block = input + bid * 34;
-    float* out = output + bid * 32;
+    const float d = s_d[local];
+    const unsigned int e0 = quad * BLOCK32_ELEMS_PER_THREAD;
+    // Q8_0 stores one i8 per element in order, so the element index is the
+    // byte index — no split-half reorder here.
+    const signed char* qs = reinterpret_cast<const signed char*>(
+        input + (unsigned long long)bid * 34 + 2) + e0;
 
-    __half d_half = *reinterpret_cast<const __half*>(block);
-    float d = __half2float(d_half);
+    float4 v;
+    v.x = (float)qs[0] * d;
+    v.y = (float)qs[1] * d;
+    v.z = (float)qs[2] * d;
+    v.w = (float)qs[3] * d;
 
-    const signed char* qs = reinterpret_cast<const signed char*>(block + 2);
-
-    for (int i = 0; i < 32; i++) {
-        out[i] = (float)qs[i] * d;
-    }
+    // The output base is a device allocation, so it is at least 256-byte
+    // aligned, and this offset is a multiple of four floats — the 16-byte
+    // alignment a float4 store needs.
+    float4* out4 = reinterpret_cast<float4*>(
+        output + (unsigned long long)bid * 32 + e0);
+    *out4 = v;
 }
 
 // ============================================================================
@@ -663,29 +774,51 @@ __global__ __launch_bounds__(Q5K_DEQUANT_BLOCK) void dequant_q5_k_f32(
 // Non-linear codebook: x = scale * KVALUES_IQ4NL[nibble]
 // ============================================================================
 
-__global__ void dequant_iq4_nl_f32(
+__global__ __launch_bounds__(BLOCK32_DEQUANT_BLOCK) void dequant_iq4_nl_f32(
     const unsigned char* __restrict__ input,
     float* __restrict__ output,
     unsigned int num_blocks
 ) {
-    unsigned int bid = blockIdx.x * blockDim.x + threadIdx.x;
+    // Per-block f16 scale, converted once and read by all 8 threads of a block.
+    __shared__ float s_d[BLOCK32_PER_CUDA_BLOCK];
+
+    const unsigned int block_base = blockIdx.x * BLOCK32_PER_CUDA_BLOCK;
+    const unsigned int tid = threadIdx.x;
+
+    // Header decode: threads 0..31 take one quantized block each.
+    if (tid < BLOCK32_PER_CUDA_BLOCK) {
+        const unsigned int bid = block_base + tid;
+        float d = 0.0f;
+        if (bid < num_blocks) {
+            d = iq_load_d(input + (unsigned long long)bid * 18);
+        }
+        s_d[tid] = d;
+    }
+    __syncthreads();
+
+    const unsigned int local = tid / BLOCK32_THREADS_PER_BLOCK;
+    const unsigned int quad = tid % BLOCK32_THREADS_PER_BLOCK;
+    const unsigned int bid = block_base + local;
     if (bid >= num_blocks) return;
 
-    const unsigned char* block = input + bid * 18;
-    float* out = output + bid * 32;
+    const float d = s_d[local];
+    const unsigned int e0 = quad * BLOCK32_ELEMS_PER_THREAD;
+    const unsigned char* qs = input + (unsigned long long)bid * 18 + 2;
 
-    __half d_half;
-    memcpy(&d_half, block, sizeof(__half));
-    float d = __half2float(d_half);
-    const unsigned char* qs = block + 2;
+    // Split-half nibble order (llama.cpp `dequantize_row_iq4_nl`), and the
+    // nibble is an INDEX into the codebook, never a magnitude.
+    float4 v;
+    v.x = d * (float)KVALUES_IQ4NL[gguf_split_half_nibble(qs, (int)e0)];
+    v.y = d * (float)KVALUES_IQ4NL[gguf_split_half_nibble(qs, (int)e0 + 1)];
+    v.z = d * (float)KVALUES_IQ4NL[gguf_split_half_nibble(qs, (int)e0 + 2)];
+    v.w = d * (float)KVALUES_IQ4NL[gguf_split_half_nibble(qs, (int)e0 + 3)];
 
-    // Split-half nibble order (llama.cpp `dequantize_row_iq4_nl`): `y[j]` takes
-    // the low nibble, `y[j + QK4_NL/2]` the high nibble of the SAME byte.
-    for (int j = 0; j < 16; j++) {
-        unsigned char byte = qs[j];
-        out[j]      = d * (float)KVALUES_IQ4NL[byte & 0x0F];
-        out[j + 16] = d * (float)KVALUES_IQ4NL[(byte >> 4) & 0x0F];
-    }
+    // The output base is a device allocation, so it is at least 256-byte
+    // aligned, and this offset is a multiple of four floats — the 16-byte
+    // alignment a float4 store needs.
+    float4* out4 = reinterpret_cast<float4*>(
+        output + (unsigned long long)bid * 32 + e0);
+    *out4 = v;
 }
 
 // ============================================================================
@@ -697,44 +830,94 @@ __global__ void dequant_iq4_nl_f32(
 // no pad byte, and scales_h carries high scale bits for all EIGHT sub-blocks
 // (16 bits = 8 x 2).
 // 8 sub-blocks of 32 elements, 6-bit scales, KVALUES_IQ4NL codebook
+//
+// Thread-to-ELEMENT mapping, four consecutive elements per thread, so
+// warp-consecutive threads write warp-consecutive floats and one store
+// instruction covers one contiguous burst instead of 32 scattered ones. A
+// four-aligned run stays inside one 32-element sub-block and inside one half
+// of it, so it shares one sub-block scale and one nibble half.
 // ============================================================================
 
-__global__ void dequant_iq4_xs_f32(
+// ============================================================================
+// Thread mapping shared by the 256-element IQ formats below (IQ4_XS, IQ3_S,
+// IQ2_XS), matching the K-quants above: one CUDA block of
+// IQ_DEQUANT_BLOCK threads writes four elements per thread, so it covers four
+// 256-element super-blocks. Each format resolves its per-group scale factors
+// cooperatively into shared memory before a single barrier, so a factor is
+// computed once per group instead of once per thread.
+// ============================================================================
+
+#define IQ_SUPER_PER_BLOCK 4
+#define IQ_ELEMS_PER_THREAD 4
+#define IQ_DEQUANT_BLOCK 256
+// Threads covering one super-block's 256 elements.
+#define IQ_THREADS_PER_SUPER (256 / IQ_ELEMS_PER_THREAD)
+
+__global__ __launch_bounds__(IQ_DEQUANT_BLOCK) void dequant_iq4_xs_f32(
     const unsigned char* __restrict__ input,
     float* __restrict__ output,
     unsigned int num_blocks
 ) {
-    unsigned int bid = blockIdx.x * blockDim.x + threadIdx.x;
+    // Per sub-block scale, already multiplied by the super-block's `d`.
+    // Resolved once, read by all 8 threads that share a sub-block.
+    __shared__ float s_scale[IQ_SUPER_PER_BLOCK * 8];
+
+    const unsigned int super_base = blockIdx.x * IQ_SUPER_PER_BLOCK;
+    const unsigned int tid = threadIdx.x;
+
+    // Header decode: threads 0..31 take one (super-block, sub-block) pair each.
+    if (tid < IQ_SUPER_PER_BLOCK * 8) {
+        const unsigned int local_super = tid / 8;
+        const int sb = (int)(tid % 8);
+        const unsigned int bid = super_base + local_super;
+        float sub_scale = 0.0f;
+        if (bid < num_blocks) {
+            const unsigned char* block = input + (unsigned long long)bid * 136;
+            // `scales_h` is a two-byte field at offset 2 in a 136-byte block,
+            // so both it and `d` are 2-byte aligned; the shared memcpy-based
+            // loaders read them without assuming more.
+            float d = iq_load_d(block);
+            unsigned short scales_h = iq_load_u16(block + 2);
+            const unsigned char* scales_l = block + 4;
+
+            // 4 low bits from scales_l (one nibble per sub-block), 2 high bits
+            // from scales_h (2 bits per sub-block across all 8).
+            int sl = (scales_l[sb / 2] >> (4 * (sb % 2))) & 0x0F;
+            int sh = ((unsigned int)scales_h >> (2 * sb)) & 0x03;
+            int scale_6bit = sl | (sh << 4);
+            sub_scale = d * (float)(scale_6bit - 32);
+        }
+        s_scale[tid] = sub_scale;
+    }
+    __syncthreads();
+
+    const unsigned int local_super = tid / IQ_THREADS_PER_SUPER;
+    const unsigned int quad = tid % IQ_THREADS_PER_SUPER;
+    const unsigned int bid = super_base + local_super;
     if (bid >= num_blocks) return;
 
-    const unsigned char* block = input + bid * 136;
-    float* out = output + bid * 256;
+    // Element run this thread owns inside its super-block.
+    const unsigned int e0 = quad * IQ_ELEMS_PER_THREAD;
+    const unsigned int sb = e0 / 32;   // sub-block
+    const int l = (int)(e0 % 32);      // element index inside the sub-block
 
-    __half d_half;
-    memcpy(&d_half, block, sizeof(__half));
-    float d = __half2float(d_half);
-    unsigned short scales_h;
-    memcpy(&scales_h, block + 2, sizeof(unsigned short));
-    const unsigned char* scales_l = block + 4;
-    const unsigned char* qs = block + 8;
+    const float sub_scale = s_scale[local_super * 8 + sb];
+    // Split-half nibble order within each sub-block, and the nibble is an
+    // INDEX into the codebook, never a magnitude.
+    const unsigned char* sub_qs = input + (unsigned long long)bid * 136 + 8 + sb * 16;
 
-    for (int sb = 0; sb < 8; sb++) {
-        // 4 low bits from scales_l (one nibble per sub-block), 2 high bits from
-        // scales_h (2 bits per sub-block across all 8).
-        int sl = (scales_l[sb / 2] >> (4 * (sb % 2))) & 0x0F;
-        int sh = ((unsigned int)scales_h >> (2 * sb)) & 0x03;
-        int scale_6bit = sl | (sh << 4);
-        float sub_scale = d * (float)(scale_6bit - 32);
+    float4 v;
+    v.x = sub_scale * (float)KVALUES_IQ4NL[gguf_split_half_nibble(sub_qs, l)];
+    v.y = sub_scale * (float)KVALUES_IQ4NL[gguf_split_half_nibble(sub_qs, l + 1)];
+    v.z = sub_scale * (float)KVALUES_IQ4NL[gguf_split_half_nibble(sub_qs, l + 2)];
+    v.w = sub_scale * (float)KVALUES_IQ4NL[gguf_split_half_nibble(sub_qs, l + 3)];
 
-        const unsigned char* sub_qs = qs + sb * 16;
-        float* sub_out = out + sb * 32;
-        // Split-half nibble order within each sub-block.
-        for (int j = 0; j < 16; j++) {
-            unsigned char byte = sub_qs[j];
-            sub_out[j]      = sub_scale * (float)KVALUES_IQ4NL[byte & 0x0F];
-            sub_out[j + 16] = sub_scale * (float)KVALUES_IQ4NL[(byte >> 4) & 0x0F];
-        }
-    }
+    // The output base is a device allocation, so it is at least 256-byte
+    // aligned, and this offset is a multiple of four floats — the 16-byte
+    // alignment a float4 store needs.
+    float4* out4 = reinterpret_cast<float4*>(
+        output + (unsigned long long)bid * 256 + e0);
+    *out4 = v;
 }
 
 // ============================================================================
@@ -743,27 +926,97 @@ __global__ void dequant_iq4_xs_f32(
 // Both are codebook quantizations. The block layouts and the grid tables live
 // once in iq_dequant.cuh, shared with dequant_generic.cu, the quant-matmul
 // path and the GEMV/GEMM kernels, and gated against llama.cpp by
-// tests/gguf_conformance_llama_cpp.rs.
+// tests/gguf_conformance_llama_cpp.rs. That header also splits each decoder
+// into a per-group scale factor and a four-element run, which is what these
+// two kernels map onto threads: the factor goes to shared memory once per
+// group, the run fills one float4.
 // ============================================================================
 
-__global__ void dequant_iq3_s_f32(
+__global__ __launch_bounds__(IQ_DEQUANT_BLOCK) void dequant_iq3_s_f32(
     const unsigned char* __restrict__ input,
     float* __restrict__ output,
     unsigned int num_blocks
 ) {
-    unsigned int bid = blockIdx.x * blockDim.x + threadIdx.x;
+    // IQ3_S carries one 4-bit scale per 32-element group: 8 per super-block,
+    // each read by the 8 threads whose runs fall in that group.
+    __shared__ float s_db[IQ_SUPER_PER_BLOCK * 8];
+
+    const unsigned int super_base = blockIdx.x * IQ_SUPER_PER_BLOCK;
+    const unsigned int tid = threadIdx.x;
+
+    // Header decode: threads 0..31 take one (super-block, group) pair each.
+    if (tid < IQ_SUPER_PER_BLOCK * 8) {
+        const unsigned int local_super = tid / 8;
+        const int group = (int)(tid % 8);
+        const unsigned int bid = super_base + local_super;
+        float db = 0.0f;
+        if (bid < num_blocks) {
+            db = iq3_s_group_db(input + (unsigned long long)bid * 110, group);
+        }
+        s_db[tid] = db;
+    }
+    __syncthreads();
+
+    const unsigned int local_super = tid / IQ_THREADS_PER_SUPER;
+    const unsigned int quad = tid % IQ_THREADS_PER_SUPER;
+    const unsigned int bid = super_base + local_super;
     if (bid >= num_blocks) return;
-    iq3_s_dequant_block(input + (unsigned long long)bid * 110, output + (unsigned long long)bid * 256);
+
+    const unsigned int e0 = quad * IQ_ELEMS_PER_THREAD;
+    const float db = s_db[local_super * 8 + e0 / 32];
+    const float4 v =
+        iq3_s_dequant_quad(input + (unsigned long long)bid * 110, (int)e0, db);
+
+    // The output base is a device allocation, so it is at least 256-byte
+    // aligned, and this offset is a multiple of four floats — the 16-byte
+    // alignment a float4 store needs.
+    float4* out4 = reinterpret_cast<float4*>(
+        output + (unsigned long long)bid * 256 + e0);
+    *out4 = v;
 }
 
-__global__ void dequant_iq2_xs_f32(
+__global__ __launch_bounds__(IQ_DEQUANT_BLOCK) void dequant_iq2_xs_f32(
     const unsigned char* __restrict__ input,
     float* __restrict__ output,
     unsigned int num_blocks
 ) {
-    unsigned int bid = blockIdx.x * blockDim.x + threadIdx.x;
+    // IQ2_XS carries one 4-bit scale per two 8-element grid entries, so one
+    // factor covers 16 elements: 16 per super-block, each read by the 4
+    // threads whose runs fall in that group.
+    __shared__ float s_db[IQ_SUPER_PER_BLOCK * 16];
+
+    const unsigned int super_base = blockIdx.x * IQ_SUPER_PER_BLOCK;
+    const unsigned int tid = threadIdx.x;
+
+    // Header decode: threads 0..63 take one (super-block, group) pair each.
+    if (tid < IQ_SUPER_PER_BLOCK * 16) {
+        const unsigned int local_super = tid / 16;
+        const int group = (int)(tid % 16);
+        const unsigned int bid = super_base + local_super;
+        float db = 0.0f;
+        if (bid < num_blocks) {
+            db = iq2_xs_group_db(input + (unsigned long long)bid * 74, group);
+        }
+        s_db[tid] = db;
+    }
+    __syncthreads();
+
+    const unsigned int local_super = tid / IQ_THREADS_PER_SUPER;
+    const unsigned int quad = tid % IQ_THREADS_PER_SUPER;
+    const unsigned int bid = super_base + local_super;
     if (bid >= num_blocks) return;
-    iq2_xs_dequant_block(input + (unsigned long long)bid * 74, output + (unsigned long long)bid * 256);
+
+    const unsigned int e0 = quad * IQ_ELEMS_PER_THREAD;
+    const float db = s_db[local_super * 16 + e0 / 16];
+    const float4 v =
+        iq2_xs_dequant_quad(input + (unsigned long long)bid * 74, (int)e0, db);
+
+    // The output base is a device allocation, so it is at least 256-byte
+    // aligned, and this offset is a multiple of four floats — the 16-byte
+    // alignment a float4 store needs.
+    float4* out4 = reinterpret_cast<float4*>(
+        output + (unsigned long long)bid * 256 + e0);
+    *out4 = v;
 }
 
 } // extern "C"

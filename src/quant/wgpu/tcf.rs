@@ -211,6 +211,15 @@ pub fn dispatch_dequant(
     Ok(())
 }
 
+/// The activation contract both [`dispatch_matmul`] arms satisfy.
+///
+/// The GEMV arm and the workgroup-tiled arm read the caller's activation as
+/// f32 and accumulate in f32; the decoder they share reconstructs the weight
+/// and multiplies in f32. Neither quantizes the activation, so the values the
+/// dot product sees are the values the caller handed in.
+pub const MATMUL_CONTRACT: crate::quant::KernelContract =
+    crate::quant::KernelContract::f32_activation("wgpu tcf matmul");
+
 /// `activation [M, K] x weight [N, K]^T -> output [M, N]`.
 ///
 /// `K` must be a whole number of execution tiles: both shaders walk a weight

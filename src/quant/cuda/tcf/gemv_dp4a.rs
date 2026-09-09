@@ -142,3 +142,13 @@ pub(crate) fn launch_gemv_dp4a(
     }
     Ok(())
 }
+
+/// The activation contract [`launch_gemv_dp4a`] satisfies.
+///
+/// This kernel quantizes the caller's activation to 8-bit codes per group of
+/// 32 values along K and runs the dot product on dp4a, rescaling to f32
+/// afterwards. The activation the dot product sees is NOT the activation the
+/// caller handed in, which is exactly what a contract declaring exact f32
+/// activations forbids.
+pub(crate) const DP4A_GEMV_CONTRACT: crate::quant::KernelContract =
+    crate::quant::KernelContract::dynamic_int8_activation("cuda tcf dp4a gemv");

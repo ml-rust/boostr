@@ -11,6 +11,16 @@ use super::super::super::kernels::{self, QUANT_MMQ_MMA_MODULE};
 use super::super::helpers::quantize_activation_q8_1_mmq;
 use super::formats::FeatMajorFormat;
 
+/// The activation contract every kernel in this family satisfies.
+///
+/// [`dispatch`] repacks the caller's activation into the 8-bit dynamic record
+/// `quantize_activation_q8_1_mmq` builds — 8-bit codes per group of 32 values
+/// along K — and the MMA instructions accumulate on integers before rescaling
+/// to f32. The activation the dot product sees is NOT the activation the
+/// caller handed in.
+pub(in crate::quant::cuda::quant_matmul) const CONTRACT: crate::quant::KernelContract =
+    crate::quant::KernelContract::dynamic_int8_activation("cuda feature-major MMQ");
+
 /// Output features per block, fixed by the kernel's weight tile.
 pub(super) const FEAT_TILE: u32 = 128;
 

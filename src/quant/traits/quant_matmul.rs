@@ -23,6 +23,14 @@ use numr::tensor::Tensor;
 /// whole tensor and needs its own kernel. Both stay packed — an implementation
 /// that dequantizes the weight first has not implemented this trait.
 ///
+/// A weight whose source format declares an activation contract
+/// ([`crate::quant::ActivationContract`], carried on the `QuantTensor`) may
+/// only run on a kernel that satisfies it. An implementation checks the
+/// contract against the kernel it selects and returns
+/// [`crate::error::Error::ActivationContractMismatch`] on a mismatch — there
+/// is no fallback kernel to drop to. A weight carrying no contract, which is
+/// every GGUF weight, dispatches unchecked.
+///
 /// The result should match `matmul(activation, dequantize(weight))` within
 /// quantization tolerance (see Verification Standards).
 pub trait QuantMatmulOps<R: Runtime> {

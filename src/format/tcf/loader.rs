@@ -24,6 +24,7 @@ use super::decode::decode_tensor_f32;
 use super::error::{tcf_error, tcf_tensor_error};
 use super::metadata::{TcfHeaderInfo, TcfModuleInfo, TcfTensorInfo, encoding_name};
 use crate::error::{Error, Result};
+use crate::quant::contract::ActivationContract;
 use crate::quant::{QuantTensor, TcfEncoding};
 
 /// A memory-mapped TCF file with its directory decoded.
@@ -342,7 +343,21 @@ impl TcfLoader {
             .payload(record)
             .map_err(|e| tcf_tensor_error(name, "payload", e))?;
         let shape = self.shape_at(index)?;
-        QuantTensor::<R>::from_bytes(payload, encoding, &shape, device)
+
+        // Section 3: every tensor names a `ContractRecord` in its own file,
+        // and `TcfFile::open` has already rejected an id that resolves to
+        // nothing, so this lookup fails only for a record from elsewhere.
+        // The contract rides on the weight from here: a kernel router sees a
+        // `QuantTensor`, never the file it came from.
+        let contract = file
+            .contract(record)
+            .map_err(|e| tcf_tensor_error(name, "activation contract", e))?;
+        let contract = ActivationContract::from_record(name, record.execution_role, contract);
+
+        Ok(
+            QuantTensor::<R>::from_bytes(payload, encoding, &shape, device)?
+                .with_activation_contract(contract),
+        )
     }
 
     /// The row-major shape of tensor `index`.
@@ -551,6 +566,40 @@ mod tests {
             .expect("dequantizes");
         assert_eq!(dense.shape(), &[1, 64]);
         assert_eq!(dense.to_vec::<f32>(), fixtures::expected_q4_values());
+    }
+
+    /// Section 9: the contract rides out of the file on the weight, because
+    /// a kernel router sees a `QuantTensor` and never the file behind it.
+    /// The fixture declares 8-bit dynamic activations, so the f32 CPU matmul
+    /// kernel must refuse it rather than run arithmetic the file never asked
+    /// for.
+    #[test]
+    fn a_quantized_tensor_carries_its_activation_contract_and_gates_dispatch() {
+        use crate::quant::cpu::kernels::tcf::MATMUL_CONTRACT;
+        use tcf_core::{DotAccumulator, ExecutionRole, InputRepresentation};
+
+        let (_file, loader) = open_fixture(&fixtures::good_file()).expect("opens");
+        let (_client, device) = cpu_setup();
+        let qt = loader
+            .load_quant_tensor::<CpuRuntime>("layer.w", &device)
+            .expect("loads packed");
+
+        let declared = qt.activation_contract().expect("a TCF weight declares one");
+        assert_eq!(declared.tensor, "layer.w");
+        assert_eq!(declared.role, ExecutionRole::Matmul);
+        assert_eq!(
+            declared.input_representation,
+            InputRepresentation::A8S32Dynamic
+        );
+        assert_eq!(declared.dot_accumulator, DotAccumulator::I32ThenF32Scale);
+        assert_eq!(declared.quant_group, 32);
+
+        let err = qt
+            .check_activation_contract(&MATMUL_CONTRACT)
+            .expect_err("an f32 kernel does not satisfy an 8-bit activation contract");
+        let text = err.to_string();
+        assert!(text.contains("E_ACTIVATION_CONTRACT_MISMATCH"), "{text}");
+        assert!(text.contains("layer.w"), "{text}");
     }
 
     /// A raw encoding has no packed form, and the error says so rather than

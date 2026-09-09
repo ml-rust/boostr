@@ -180,6 +180,11 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
         // codes and its scale adjacent, while TCF spreads them over
         // whole-tensor planes.
         if let QuantScheme::Tcf(encoding) = weight.scheme() {
+            // A TCF weight declares the activation contract its kernel must
+            // satisfy, and this shader family is the only one the WebGPU
+            // backend runs it on. A weight declaring anything but exact f32
+            // activations is refused here.
+            weight.check_activation_contract(&tcf_dispatch::MATMUL_CONTRACT)?;
             let m = a_shape.iter().product::<usize>() / k;
             let act_contig = activation.contiguous()?;
             let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();

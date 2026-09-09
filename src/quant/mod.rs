@@ -1,4 +1,5 @@
 pub mod autograd;
+pub mod contract;
 pub mod cpu;
 #[cfg(feature = "cuda")]
 pub mod cuda;
@@ -13,6 +14,7 @@ pub mod traits;
 pub mod wgpu;
 
 pub use autograd::attach_quant_linear_backward;
+pub use contract::{ActivationContract, KernelContract};
 pub use decomposed::{DecomposedQuantLinear, DecomposedQuantMethod, DecomposedQuantTensor};
 pub use format::QuantFormat;
 pub use scheme::QuantScheme;

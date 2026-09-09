@@ -9,10 +9,12 @@
 //! every plane offset and bit position inside the codec. Neither materializes
 //! an intermediate, so neither needs a bounded-range entry point of its own.
 
+mod contract;
 mod decode;
 mod dequant;
 mod matmul;
 
+pub use contract::MATMUL_CONTRACT;
 pub use decode::{dequantize_tiles_append, dequantize_tiles_into};
 pub use dequant::{dequant_tcf, unpack_tiles};
 pub use matmul::tcf_matmul_f32;

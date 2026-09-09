@@ -8,5 +8,7 @@
 mod gemv_dp4a;
 mod launch;
 
-pub(super) use gemv_dp4a::{DP4A_GEMV_MAX_TOKENS, launch_gemv_dp4a, supports_dp4a_gemv};
-pub(super) use launch::{MatmulShape, launch_dequant, launch_gemm, launch_gemv};
+pub(super) use gemv_dp4a::{
+    DP4A_GEMV_CONTRACT, DP4A_GEMV_MAX_TOKENS, launch_gemv_dp4a, supports_dp4a_gemv,
+};
+pub(super) use launch::{F32_CONTRACT, MatmulShape, launch_dequant, launch_gemm, launch_gemv};

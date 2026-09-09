@@ -33,6 +33,16 @@ pub struct QuantTensor<R: Runtime> {
     shape: Vec<usize>,
     /// Device where data lives
     device: R::Device,
+    /// The activation contract the source format declared for this weight,
+    /// when the format can declare one.
+    ///
+    /// `Some(..)` for a TCF weight: Section 3 requires every tensor to name a
+    /// `ContractRecord`, and dispatch resolves against it. `None` for a GGUF
+    /// weight, whose block formats have no field to carry one — absence means
+    /// the format cannot say, never that any kernel will do. Set through
+    /// [`QuantTensor::with_activation_contract`] and read through
+    /// [`QuantTensor::activation_contract`], both in `crate::quant::contract`.
+    pub(crate) contract: Option<crate::quant::contract::ActivationContract>,
 }
 
 /// Hand-written because `Storage<R>` and `R::Device` carry no `Debug` bound.
@@ -93,6 +103,7 @@ impl<R: Runtime<DType = numr::dtype::DType>> QuantTensor<R> {
             scheme,
             shape: shape.to_vec(),
             device: device.clone(),
+            contract: None,
         })
     }
 
@@ -125,6 +136,7 @@ impl<R: Runtime<DType = numr::dtype::DType>> QuantTensor<R> {
             scheme,
             shape: shape.to_vec(),
             device: device.clone(),
+            contract: None,
         })
     }
 
@@ -281,6 +293,7 @@ impl<R: Runtime> Clone for QuantTensor<R> {
             scheme: self.scheme,
             shape: self.shape.clone(),
             device: self.device.clone(),
+            contract: self.contract.clone(),
         }
     }
 }

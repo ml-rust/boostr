@@ -90,8 +90,15 @@ const _: usize = match TCF_DP4A_GEMV_MAX_M {
 /// side moves it, and all three values are measured constants, not derived
 /// ones.
 ///
+/// Every arm checks the weight's declared activation contract against the
+/// contract the kernel it just selected satisfies, BEFORE launching. Section 9
+/// defines no float fallback, so a mismatch stops the operation instead of
+/// moving the weight to a kernel with different arithmetic.
+///
 /// # Errors
-/// Whatever the selected launch raises.
+/// [`crate::error::Error::ActivationContractMismatch`] when the selected
+/// kernel does not satisfy the weight's declared contract, and whatever the
+/// selected launch raises otherwise.
 pub(super) fn route_tcf(
     client: &CudaClient,
     encoding: TcfEncoding,
@@ -111,6 +118,13 @@ pub(super) fn route_tcf(
     if TCF_DP4A_GEMV_MAX_M.is_some_and(|max| m <= max)
         && tcf_dispatch::supports_dp4a_gemv(encoding, k)
     {
+        // This kernel quantizes the activation, so it serves only a weight
+        // whose declared contract asks for that. There is no float fallback
+        // to drop to (Section 9): a weight declaring exact f32 activations is
+        // refused here rather than routed on to the kernels below, which
+        // would silently give it different arithmetic than the one it was
+        // just found unfit for.
+        weight.check_activation_contract(&tcf_dispatch::DP4A_GEMV_CONTRACT)?;
         return tcf_dispatch::launch_gemv_dp4a(
             client,
             device_index,
@@ -137,14 +151,25 @@ pub(super) fn route_tcf(
                     .caps
                     .int8_mma_m16n8k32
             });
-        if let Some(format) = feat_major
-            && mmq_feat_major::dispatch(format, client, act_contig, weight, output_ptr, m, k, n)?
+        if let Some(format) = feat_major {
+            // The feature-major family quantizes the activation to the 8-bit
+            // dynamic record its MMA instructions consume. Checking BEFORE
+            // the dispatch, not after, is what makes this a refusal: a
+            // mismatch must not fall through to the f32 tiles below, because
+            // that would answer "no kernel satisfies this contract" with a
+            // different kernel rather than with an error.
+            weight.check_activation_contract(&mmq_feat_major::CONTRACT)?;
+            if mmq_feat_major::dispatch(format, client, act_contig, weight, output_ptr, m, k, n)?
                 .is_some()
-        {
-            return Ok(());
+            {
+                return Ok(());
+            }
         }
     }
 
+    // Both remaining kernels keep the activation in f32 and accumulate in
+    // f32, so one check covers the pair.
+    weight.check_activation_contract(&tcf_dispatch::F32_CONTRACT)?;
     let launch = if m <= 4 {
         tcf_dispatch::launch_gemv
     } else {

@@ -354,6 +354,12 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
                 );
             }
             QuantScheme::Tcf(encoding) => {
+                // A TCF weight declares the activation contract its kernel
+                // must satisfy, and this is the only matmul kernel the CPU
+                // backend runs it on. A weight declaring anything but exact
+                // f32 activations is refused here rather than run on
+                // arithmetic its producer never declared.
+                weight.check_activation_contract(&tcf::MATMUL_CONTRACT)?;
                 tcf::tcf_matmul_f32(act_data, weight_bytes, &mut output, m, k, n, encoding)?;
             }
         }

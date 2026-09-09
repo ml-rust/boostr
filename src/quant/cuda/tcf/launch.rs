@@ -294,3 +294,13 @@ pub(super) fn matmul_setup(
         narrow(at.n, "N")?,
     ))
 }
+
+/// The activation contract [`launch_gemv`] and [`launch_gemm`] satisfy.
+///
+/// Both kernels reconstruct the weight to f32 inside the dot product and
+/// multiply it against the caller's f32 activation, accumulating in f32.
+/// Nothing on the activation side is quantized, so the values the dot product
+/// sees are the values the caller handed in. One constant covers both because
+/// they differ in blocking, not in arithmetic.
+pub(crate) const F32_CONTRACT: crate::quant::KernelContract =
+    crate::quant::KernelContract::f32_activation("cuda tcf_gemv_f32 / tcf_gemm_f32");

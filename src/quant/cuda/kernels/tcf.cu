@@ -412,9 +412,23 @@ __global__ __launch_bounds__(TCF_DEQUANT_BLOCK, 1) void tcf_dequant_f32(
 // Nothing here needs super-block alignment: the kernel addresses
 // each tile by its global index, which is what a super-block's sub-plane is
 // keyed on.
+//
+// # Why the minimum-blocks argument is not one
+//
+// The second `__launch_bounds__` argument is the blocks per multiprocessor the
+// compiler must leave room for. At one, the compiler optimizes for a single
+// resident block and spends registers freely, which caps residency below what
+// the device would otherwise allow; the grid here is thousands of blocks, so
+// one is never the operating point. The value asks the compiler to fit the
+// register budget the device can host, and it does so without spilling to
+// local memory.
+//
+// Measured neutral on the shapes benchmarked so far: the kernel is not limited
+// by residency. It is the honest declaration of how the kernel actually runs,
+// and it keeps registers from growing silently as the body changes.
 // ============================================================================
 
-__global__ __launch_bounds__(TCF_GEMV_BLOCK, 1) void tcf_gemv_f32(
+__global__ __launch_bounds__(TCF_GEMV_BLOCK, 5) void tcf_gemv_f32(
     const float* __restrict__ activation,
     const unsigned char* __restrict__ weight,
     float* __restrict__ output,

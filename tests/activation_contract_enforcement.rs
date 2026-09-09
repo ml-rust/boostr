@@ -26,11 +26,17 @@
 //!
 //! TCF makes the contract part of the dispatch key (SPECIFICATION.md Section 9):
 //! every tensor carries a `ContractRecord`, the loader attaches it to the
-//! weight, and the point where a kernel is selected checks the kernel's own
-//! declared contract against it. A mismatch is
+//! weight, and the contract RESOLVES the kernel rather than vetoing one already
+//! picked on shape. A backend offering several TCF kernels walks them in its
+//! shape order and takes the first the declared contract accepts, so a weight
+//! prepared for exact f32 activations lands on an f32 kernel and runs. Only
+//! when no kernel the shape offers satisfies the contract is the answer
 //! `Error::ActivationContractMismatch` and the operation stops. Section 9
-//! defines no float fallback, so a refusal is never quietly rerouted onto
+//! defines no float fallback, so that refusal is never quietly rerouted onto
 //! whatever kernel happens to be nearby.
+//!
+//! The CPU backend this file exercises offers exactly one TCF matmul kernel, so
+//! resolution there has a single candidate and the refusal is immediate.
 //!
 //! # Reading this file
 //!

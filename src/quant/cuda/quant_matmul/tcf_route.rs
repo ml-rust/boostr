@@ -4,16 +4,32 @@
 //! its scale adjacent, while TCF spreads them over whole-tensor planes. The
 //! choice between those kernels is its own decision with its own crossovers,
 //! so it lives here rather than inline in the `QuantMatmulOps` impl.
+//!
+//! # Resolution, not veto
+//!
+//! Section 9 makes a kernel resolve on `(weight_encoding, contract_digest,
+//! execution_role)`, so the declared activation contract is an INPUT to the
+//! choice. [`resolve`] walks the shape's candidate kernels in preference order
+//! and returns the first one the declared contract accepts, so a weight
+//! declaring exact f32 activations never selects an activation-quantizing
+//! kernel in the first place — it lands on the f32 pair and runs.
+//!
+//! The refusal stays where the format puts it: when NO candidate satisfies the
+//! declared contract, resolution returns the shape's preferred kernel, the
+//! check in [`route_tcf`] rejects it, and the operation stops with
+//! [`crate::error::Error::ActivationContractMismatch`]. Section 9 defines no
+//! float fallback, so "no satisfying kernel" is an error and never a reroute
+//! onto a kernel that computes something else.
 
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use crate::error::Result;
-use crate::quant::{QuantTensor, TcfEncoding};
+use crate::quant::{ActivationContract, KernelContract, QuantTensor, TcfEncoding};
 
 use super::super::tcf::{self as tcf_dispatch, MatmulShape};
-use super::mmq_feat_major;
+use super::mmq_feat_major::{self, FeatMajorFormat};
 
 /// Smallest token count that takes the feature-major MMQ kernel rather than
 /// the f32 GEMV.
@@ -36,10 +52,10 @@ const TCF_FEAT_MAJOR_MIN_M: usize = 2;
 /// This is the ONE place the dp4a-GEMV/MMQ boundary is set. Moving the
 /// boundary is editing this constant and nothing else.
 ///
-/// `None` is "no token count takes it". **Measured off.** The dp4a GEMV is compiled and parity-checked but wins no
-/// token count, so it routes nowhere: `m = 1` keeps the f32 GEMV and every
-/// larger `m` keeps the feature-major MMQ, which is where they were before the
-/// kernel existed.
+/// `None` is "no token count takes it". **Measured off.** The dp4a GEMV is
+/// compiled and parity-checked but wins no token count, so it routes nowhere:
+/// `m = 1` keeps the f32 GEMV and every larger `m` keeps the feature-major
+/// MMQ, which is where they were before the kernel existed.
 ///
 /// The reason is that the TCF GEMV is bound by memory access, not by
 /// arithmetic, so replacing its f32 multiply-accumulate with an integer dp4a
@@ -49,6 +65,11 @@ const TCF_FEAT_MAJOR_MIN_M: usize = 2;
 /// reuse to hide that distance, so TCF trails the GGUF kernel over the same
 /// weight byte count. Until that access pattern changes, no arithmetic
 /// substitution moves this constant.
+///
+/// Contract resolution does not need it turned on: a weight declaring exact
+/// f32 activations resolves to `tcf_gemv_f32` at `m = 1` on its own, and a
+/// weight declaring the 8-bit dynamic contract picks this kernel up as soon as
+/// the constant is `Some`.
 ///
 /// Raising it above `tcf::DP4A_GEMV_MAX_TOKENS` asks for a token tile the
 /// kernel family does not compile, which the assertion below refuses.
@@ -67,8 +88,121 @@ const _: usize = match TCF_DP4A_GEMV_MAX_M {
     None => 0,
 };
 
+/// One TCF matmul kernel a shape can be served by, together with what it
+/// needs to launch.
+///
+/// [`TcfKernel::F32`] covers `tcf_gemv_f32` and `tcf_gemm_f32` as one
+/// candidate: they differ in blocking, not in arithmetic, so they satisfy the
+/// same contract and the choice between them is made at launch by `m`.
+#[derive(Clone, Copy)]
+enum TcfKernel {
+    /// The token-batched dp4a GEMV. Quantizes the activation.
+    Dp4aGemv,
+    /// The feature-major tensor-core MMQ family, with the descriptor the
+    /// encoding and K resolved to. Quantizes the activation.
+    FeatMajorMmq(&'static FeatMajorFormat),
+    /// The f32 GEMV/GEMM pair. Reads the activation as handed in.
+    F32,
+}
+
+impl TcfKernel {
+    /// What this kernel computes, as the kernel itself declares it.
+    ///
+    /// Every value comes from a constant sitting beside its kernel, so this
+    /// restates nothing: a kernel whose arithmetic changes changes its own
+    /// constant and this follows.
+    fn contract(self) -> KernelContract {
+        match self {
+            Self::Dp4aGemv => tcf_dispatch::DP4A_GEMV_CONTRACT,
+            Self::FeatMajorMmq(_) => mmq_feat_major::CONTRACT,
+            Self::F32 => tcf_dispatch::F32_CONTRACT,
+        }
+    }
+
+    /// Whether this kernel computes what `declared` requires.
+    ///
+    /// A weight with no contract accepts every candidate, which is what keeps
+    /// a GGUF-sourced weight on the shape-only order below.
+    fn accepted_by(self, declared: Option<&ActivationContract>) -> bool {
+        declared.is_none_or(|contract| self.contract().satisfies(contract))
+    }
+}
+
+/// The kernel `at` and `declared` resolve to.
+///
+/// Candidates are visited in the shape's preference order, and the first one
+/// the declared contract accepts wins:
+/// 1. [`TCF_DP4A_GEMV_MAX_M`] offers the token-batched dp4a GEMV at the
+///    smallest token counts, for the encodings and K `supports_dp4a_gemv`
+///    serves.
+/// 2. [`TCF_FEAT_MAJOR_MIN_M`] offers the feature-major MMQ family, for an
+///    encoding with a `FeatMajorFormat` on a K and a device it covers.
+/// 3. The f32 pair, which serves every shape.
+///
+/// With no declared contract every candidate is accepted, so the first one the
+/// shape offers wins and the order above IS the routing — unchanged from
+/// before contracts existed.
+///
+/// When a contract is declared and no candidate satisfies it, this returns the
+/// shape's preferred candidate so the caller's check names the kernel the
+/// shape would have run and refuses. It never returns a candidate as a
+/// fallback for a contract that candidate does not satisfy.
+fn resolve(
+    declared: Option<&ActivationContract>,
+    encoding: TcfEncoding,
+    at: MatmulShape,
+    device_index: usize,
+) -> TcfKernel {
+    let MatmulShape { m, k, .. } = at;
+    let mut preferred: Option<TcfKernel> = None;
+
+    // The dp4a GEMV is offered FIRST, ahead of MMQ: at a small token count it
+    // decodes each weight group once per block into int8 and never stages a
+    // tile, which is the cheaper shape of work there. `supports_dp4a_gemv`
+    // covers the encodings and K it serves.
+    if TCF_DP4A_GEMV_MAX_M.is_some_and(|max| m <= max)
+        && tcf_dispatch::supports_dp4a_gemv(encoding, k)
+    {
+        if TcfKernel::Dp4aGemv.accepted_by(declared) {
+            return TcfKernel::Dp4aGemv;
+        }
+        preferred.get_or_insert(TcfKernel::Dp4aGemv);
+    }
+
+    if m >= TCF_FEAT_MAJOR_MIN_M {
+        // An encoding with a `FeatMajorFormat` takes the feature-major
+        // tensor-core family instead of the f32 FMA tile `launch_gemm` runs;
+        // `mmq_feat_major::feat_major_format` is the one place that says which
+        // those are. Every other encoding keeps that tile, as does any K the
+        // format's staging map does not cover, and any device without the
+        // integer MMA shape the family is built on.
+        let feat_major = mmq_feat_major::feat_major_format(encoding.native())
+            .filter(|format| k.is_multiple_of(format.k_multiple as usize))
+            .filter(|_| {
+                numr::runtime::cuda::CudaDevice::new(device_index)
+                    .profile()
+                    .caps
+                    .int8_mma_m16n8k32
+            });
+        if let Some(format) = feat_major {
+            if TcfKernel::FeatMajorMmq(format).accepted_by(declared) {
+                return TcfKernel::FeatMajorMmq(format);
+            }
+            preferred.get_or_insert(TcfKernel::FeatMajorMmq(format));
+        }
+    }
+
+    if TcfKernel::F32.accepted_by(declared) {
+        return TcfKernel::F32;
+    }
+    // Nothing the shape offers satisfies the contract. The caller turns this
+    // into the refusal; the f32 pair is the last resort only for naming which
+    // kernel the shape would have run.
+    preferred.unwrap_or(TcfKernel::F32)
+}
+
 /// Run `act_contig [m, k] x weight [n, k]^T -> output_ptr [m, n]` on whichever
-/// TCF kernel covers the shape.
+/// TCF kernel the shape and the weight's declared contract resolve to.
 ///
 /// TCF has three crossovers, not one, and none of them is the `M <= 64` the
 /// GGUF path uses:
@@ -80,6 +214,9 @@ const _: usize = match TCF_DP4A_GEMV_MAX_M {
 ///   every encoding that is on neither of those — an encoding that has a
 ///   kernel falls back to it too when the MMQ dispatch declines.
 ///
+/// [`resolve`] applies all three against the declared contract, so a crossover
+/// only picks among the kernels that contract accepts.
+///
 /// The mechanism behind the GEMV/GEMM split, which is what carries across
 /// devices: GEMV cost grows linearly in M because it re-reads the weights once
 /// per row, while the register-blocked GEMM computes a 4x4 output patch per
@@ -90,15 +227,10 @@ const _: usize = match TCF_DP4A_GEMV_MAX_M {
 /// side moves it, and all three values are measured constants, not derived
 /// ones.
 ///
-/// Every arm checks the weight's declared activation contract against the
-/// contract the kernel it just selected satisfies, BEFORE launching. Section 9
-/// defines no float fallback, so a mismatch stops the operation instead of
-/// moving the weight to a kernel with different arithmetic.
-///
 /// # Errors
-/// [`crate::error::Error::ActivationContractMismatch`] when the selected
-/// kernel does not satisfy the weight's declared contract, and whatever the
-/// selected launch raises otherwise.
+/// [`crate::error::Error::ActivationContractMismatch`] when no kernel the
+/// shape offers satisfies the weight's declared contract, and whatever the
+/// resolved launch raises otherwise.
 pub(super) fn route_tcf(
     client: &CudaClient,
     encoding: TcfEncoding,
@@ -110,66 +242,40 @@ pub(super) fn route_tcf(
     let MatmulShape { m, k, n } = at;
     let device_index = act_contig.device().id();
 
-    // The dp4a GEMV is checked FIRST, ahead of MMQ: at a small token count it
-    // decodes each weight group once per block into int8 and never stages a
-    // tile, which is the cheaper shape of work there. `supports_dp4a_gemv`
-    // covers the encodings and K it serves; everything else keeps the f32
-    // kernels below.
-    if TCF_DP4A_GEMV_MAX_M.is_some_and(|max| m <= max)
-        && tcf_dispatch::supports_dp4a_gemv(encoding, k)
-    {
-        // This kernel quantizes the activation, so it serves only a weight
-        // whose declared contract asks for that. There is no float fallback
-        // to drop to (Section 9): a weight declaring exact f32 activations is
-        // refused here rather than routed on to the kernels below, which
-        // would silently give it different arithmetic than the one it was
-        // just found unfit for.
-        weight.check_activation_contract(&tcf_dispatch::DP4A_GEMV_CONTRACT)?;
-        return tcf_dispatch::launch_gemv_dp4a(
-            client,
-            device_index,
-            act_contig,
-            weight.storage().ptr(),
-            output_ptr,
-            encoding,
-            at,
-        );
-    }
+    let declared = weight.activation_contract();
+    let resolved = resolve(declared, encoding, at, device_index);
+    // Passes by construction whenever a candidate satisfied the contract, and
+    // raises the refusal when none did. Section 9 defines no float fallback,
+    // so this is where the operation stops.
+    weight.check_activation_contract(&resolved.contract())?;
 
-    if m >= TCF_FEAT_MAJOR_MIN_M {
-        // An encoding with a `FeatMajorFormat` takes the feature-major
-        // tensor-core family instead of the f32 FMA tile `launch_gemm` runs;
-        // `mmq_feat_major::feat_major_format` is the one place that says which
-        // those are. Every other encoding keeps that tile, as does any K the
-        // format's staging map does not cover. `Ok(None)` means no compiled
-        // variant fits the device, and `launch_gemm` still serves the shape.
-        let feat_major = mmq_feat_major::feat_major_format(encoding.native())
-            .filter(|format| k.is_multiple_of(format.k_multiple as usize))
-            .filter(|_| {
-                numr::runtime::cuda::CudaDevice::new(device_index)
-                    .profile()
-                    .caps
-                    .int8_mma_m16n8k32
-            });
-        if let Some(format) = feat_major {
-            // The feature-major family quantizes the activation to the 8-bit
-            // dynamic record its MMA instructions consume. Checking BEFORE
-            // the dispatch, not after, is what makes this a refusal: a
-            // mismatch must not fall through to the f32 tiles below, because
-            // that would answer "no kernel satisfies this contract" with a
-            // different kernel rather than with an error.
-            weight.check_activation_contract(&mmq_feat_major::CONTRACT)?;
+    match resolved {
+        TcfKernel::Dp4aGemv => {
+            return tcf_dispatch::launch_gemv_dp4a(
+                client,
+                device_index,
+                act_contig,
+                weight.storage().ptr(),
+                output_ptr,
+                encoding,
+                at,
+            );
+        }
+        TcfKernel::FeatMajorMmq(format) => {
             if mmq_feat_major::dispatch(format, client, act_contig, weight, output_ptr, m, k, n)?
                 .is_some()
             {
                 return Ok(());
             }
+            // `Ok(None)` is "no compiled variant fits this launch", which
+            // resolution cannot see ahead of the dispatch. The f32 pair below
+            // is a different kernel with different arithmetic, so it is
+            // resolved afresh rather than inherited.
+            weight.check_activation_contract(&TcfKernel::F32.contract())?;
         }
+        TcfKernel::F32 => {}
     }
 
-    // Both remaining kernels keep the activation in f32 and accumulate in
-    // f32, so one check covers the pair.
-    weight.check_activation_contract(&tcf_dispatch::F32_CONTRACT)?;
     let launch = if m <= 4 {
         tcf_dispatch::launch_gemv
     } else {

@@ -14,7 +14,9 @@
 //! error given that assignment of elements to levels. The three routines here
 //! are ports of `make_qx_quants` (symmetric, used by Q6_K), `make_q3_quants`
 //! (symmetric, coordinate descent, used by Q3_K) and `make_qkx2_quants`
-//! (scale + min, used by Q2_K, Q4_K and Q5_K) from `ggml-quants.c`.
+//! (scale + min, used by Q2_K, Q4_K and Q5_K) from `ggml-quants.c`. The
+//! importance-weighted writers reuse all three and add one more routine of
+//! their own — see [`super::search_imatrix`].
 //!
 //! All three are weighted: the weight decides which elements the scale is
 //! allowed to disappoint. `make_qx_quants` and `make_q3_quants` use `w = x²`, so
@@ -59,6 +61,13 @@ pub fn nearest_int(v: f32) -> i32 {
 ///
 /// `weight = x²` (llama.cpp `rmse_type == 1`, which is what Q6_K passes).
 pub fn make_qx_quants(x: &[f32], nmax: i32, levels: &mut [u8]) -> f32 {
+    qx_quants(x, nmax, levels, None)
+}
+
+/// [`make_qx_quants`] with the weight source left open — `qw = None` is
+/// llama.cpp's `rmse_type == 1` (`w = x²`), `qw = Some(..)` the same C routine's
+/// `qw` argument, passed by [`super::search_imatrix::make_qx_quants_weighted`].
+pub(super) fn qx_quants(x: &[f32], nmax: i32, levels: &mut [u8], qw: Option<&[f32]>) -> f32 {
     let (amax, max) = signed_absmax(x);
     if amax < GROUP_MAX_EPS {
         levels.fill(0);
@@ -67,7 +76,7 @@ pub fn make_qx_quants(x: &[f32], nmax: i32, levels: &mut [u8]) -> f32 {
 
     // Absmax starting point, then its least-squares optimum.
     let mut iscale = -(nmax as f32) / max;
-    let (sumlx, suml2) = accumulate_symmetric(x, nmax, iscale, Some(&mut *levels));
+    let (sumlx, suml2) = accumulate_symmetric(x, nmax, iscale, qw, Some(&mut *levels));
     let mut scale = if suml2 != 0.0 { sumlx / suml2 } else { 0.0 };
     let mut best = scale * sumlx;
 
@@ -76,10 +85,10 @@ pub fn make_qx_quants(x: &[f32], nmax: i32, levels: &mut [u8]) -> f32 {
             continue;
         }
         iscale = -((nmax as f32) + 0.1 * is as f32) / max;
-        let (sx, s2) = accumulate_symmetric(x, nmax, iscale, None);
+        let (sx, s2) = accumulate_symmetric(x, nmax, iscale, qw, None);
         // `sx² > best·s2` is `(sx/s2)·sx > best` without the division.
         if s2 > 0.0 && sx * sx > best * s2 {
-            accumulate_symmetric(x, nmax, iscale, Some(&mut *levels));
+            accumulate_symmetric(x, nmax, iscale, qw, Some(&mut *levels));
             scale = sx / s2;
             best = scale * sx;
         }
@@ -101,7 +110,7 @@ pub fn make_qx_absmax(x: &[f32], nmax: i32, levels: &mut [u8]) -> f32 {
         return 0.0;
     }
     let iscale = -(nmax as f32) / max;
-    accumulate_symmetric(x, nmax, iscale, Some(levels));
+    accumulate_symmetric(x, nmax, iscale, None, Some(levels));
     1.0 / iscale
 }
 
@@ -119,11 +128,13 @@ pub(super) fn signed_absmax(x: &[f32]) -> (f32, f32) {
     (amax, max)
 }
 
-/// Accumulate `(Σw·x·l, Σw·l²)` for one candidate scale, optionally recording levels
+/// Accumulate `(Σw·x·l, Σw·l²)` for one candidate scale, optionally recording
+/// levels. `qw = None` means `w = x²`, else the caller supplies the weight.
 fn accumulate_symmetric(
     x: &[f32],
     nmax: i32,
     iscale: f32,
+    qw: Option<&[f32]>,
     mut levels: Option<&mut [u8]>,
 ) -> (f32, f32) {
     let mut sumlx = 0.0f32;
@@ -133,15 +144,17 @@ fn accumulate_symmetric(
         if let Some(out) = levels.as_mut() {
             out[i] = (l + nmax) as u8;
         }
-        let w = v * v;
+        let w = match qw {
+            Some(q) => q[i],
+            None => v * v,
+        };
         sumlx += w * v * l as f32;
         suml2 += w * (l * l) as f32;
     }
     (sumlx, suml2)
 }
 
-/// Per-element error term of the asymmetric search — squared, or absolute when
-/// `use_mad`
+/// Per-element error of the asymmetric search — squared, or absolute if `use_mad`
 #[inline]
 fn penalty(diff: f32, use_mad: bool) -> f32 {
     if use_mad { diff.abs() } else { diff * diff }
@@ -180,7 +193,7 @@ pub fn make_q3_quants(x: &[f32], nmax: i32, levels: &mut [u8]) -> f32 {
     // Absmax starting point. Levels are held BIASED in `levels` throughout, so
     // the routine needs no signed scratch buffer of its own.
     let iscale = -(nmax as f32) / max;
-    let (mut sumlx, mut suml2) = accumulate_symmetric(x, nmax, iscale, Some(&mut *levels));
+    let (mut sumlx, mut suml2) = accumulate_symmetric(x, nmax, iscale, None, Some(&mut *levels));
 
     for _ in 0..5 {
         let mut changed = 0usize;
@@ -353,4 +366,34 @@ pub fn make_qkx2_quants(
     }
 
     (scale, -min)
+}
+
+/// Mean square of a super-block — the `sumx2/QK_K` of every `_impl` writer. The
+/// importance paths disagree on the factor applied to it — Q2_K takes
+/// `sigma2 = Σx²/n`, Q3_K/Q4_K/Q5_K `2·Σx²/n`, Q6_K none — so it stays with the
+/// caller.
+pub fn block_sigma2(x: &[f32]) -> f32 {
+    let sum_x2: f32 = x.iter().map(|v| v * v).sum();
+    sum_x2 / x.len() as f32
+}
+
+/// Per-element weight of an importance-weighted sub-block, and its sum —
+/// `w[l] = qw[l] · sqrt(sigma2 + x[l]²)`
+///
+/// The one expression Q2_K, Q3_K, Q4_K and Q5_K share in their `_impl` paths in
+/// `ggml-quants.c`. The importance `qw` says how much the row's activations
+/// care about each COLUMN; the `sqrt(sigma2 + x²)` term is the data's own say,
+/// so a high-importance column with a tiny weight cannot dominate the sub-block
+/// outright. The returned sum is llama.cpp's `sw[j]`, the weight the sub-block
+/// carries when its own scale is quantized against the super-block factor. A
+/// zero `qw` entry is legal and costs that element its vote, never a NaN —
+/// [`super::search_imatrix`] documents why, and what is rejected instead.
+pub fn importance_weights(x: &[f32], qw: &[f32], sigma2: f32, out: &mut [f32]) -> f32 {
+    let mut sumw = 0.0f32;
+    for (i, &v) in x.iter().enumerate() {
+        let w = qw[i] * (sigma2 + v * v).sqrt();
+        out[i] = w;
+        sumw += w;
+    }
+    sumw
 }

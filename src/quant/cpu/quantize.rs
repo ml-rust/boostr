@@ -16,65 +16,149 @@ impl QuantizeOps<CpuRuntime> for CpuClient {
         input: &Tensor<CpuRuntime>,
         format: QuantFormat,
     ) -> Result<QuantTensor<CpuRuntime>> {
-        if !matches!(input.dtype(), DType::F32 | DType::F16 | DType::BF16) {
-            return Err(Error::QuantError {
-                reason: format!("quantize input must be float, got {:?}", input.dtype()),
-            });
-        }
+        quantize_cpu(self, input, format, None)
+    }
 
-        let shape = input.shape().to_vec();
-        let last_dim = shape.last().copied().unwrap_or(0);
-        if shape.is_empty() || !last_dim.is_multiple_of(format.block_size()) {
-            return Err(Error::QuantError {
-                reason: format!(
-                    "last dimension {} is not a multiple of {}'s block_size {}",
-                    last_dim,
-                    format.name(),
-                    format.block_size(),
+    fn quantize_with_importance(
+        &self,
+        input: &Tensor<CpuRuntime>,
+        format: QuantFormat,
+        importance: Option<&[f32]>,
+    ) -> Result<QuantTensor<CpuRuntime>> {
+        quantize_cpu(self, input, format, importance)
+    }
+}
+
+/// Checks an importance vector against the tensor it will weight
+///
+/// A vector of the wrong length is an ERROR and never a fallback to uniform
+/// weights: the file that fallback writes is byte-indistinguishable from an
+/// unweighted one, so the mistake would survive every check downstream and only
+/// show up as a quality result nobody can explain.
+///
+/// A non-finite entry is rejected because it propagates into every weighted sum
+/// the search takes and reaches the file as a NaN scale no reader can use. A
+/// negative entry is rejected because an importance is a mean square
+/// activation. A ZERO entry is legal and is not rejected: it means that column
+/// contributes nothing, the search already guards every division on a positive
+/// denominator, and llama.cpp treats it the same way.
+///
+/// [`ImportanceMatrix`](crate::quant::ImportanceMatrix) applies the same value
+/// rule when it parses a file. This check is not that one: the slice reaching
+/// a kernel need not have come from a file, and only the tensor being
+/// quantized knows how long the vector has to be.
+fn check_importance(importance: &[f32], last_dim: usize) -> Result<()> {
+    if importance.len() != last_dim {
+        return Err(Error::QuantError {
+            reason: format!(
+                "importance vector has {} entries but the quantized axis has {last_dim}. \
+                 It is one entry per column, and a mismatch is never ignored: the output \
+                 would be indistinguishable from an unweighted quantization.",
+                importance.len(),
+            ),
+        });
+    }
+    if let Some((i, v)) = importance
+        .iter()
+        .enumerate()
+        .find(|(_, v)| !v.is_finite() || **v < 0.0)
+    {
+        return Err(Error::QuantError {
+            reason: format!(
+                "importance entry {i} is {v}. Every entry must be finite and \
+                 non-negative — it is a mean square activation, and a non-finite one \
+                 reaches the file as a scale no reader can use."
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The whole CPU writer, with or without an importance vector
+fn quantize_cpu(
+    client: &CpuClient,
+    input: &Tensor<CpuRuntime>,
+    format: QuantFormat,
+    importance: Option<&[f32]>,
+) -> Result<QuantTensor<CpuRuntime>> {
+    if !matches!(input.dtype(), DType::F32 | DType::F16 | DType::BF16) {
+        return Err(Error::QuantError {
+            reason: format!("quantize input must be float, got {:?}", input.dtype()),
+        });
+    }
+
+    let shape = input.shape().to_vec();
+    let last_dim = shape.last().copied().unwrap_or(0);
+    if shape.is_empty() || !last_dim.is_multiple_of(format.block_size()) {
+        return Err(Error::QuantError {
+            reason: format!(
+                "last dimension {} is not a multiple of {}'s block_size {}",
+                last_dim,
+                format.name(),
+                format.block_size(),
+            ),
+        });
+    }
+
+    if let Some(imatrix) = importance {
+        check_importance(imatrix, last_dim)?;
+    }
+
+    // Quantization is elementwise-per-block, so a contiguous f32 view is all
+    // the kernels need. Cast first when the source is F16/BF16.
+    let cast = if input.dtype() == DType::F32 {
+        None
+    } else {
+        Some(client.cast(input, DType::F32).map_err(Error::Numr)?)
+    };
+    let base = cast.as_ref().unwrap_or(input);
+    // Blocks are packed along the last axis in memory order, so a strided
+    // view has to be materialized before the kernels see it.
+    let packed = if base.is_contiguous() {
+        None
+    } else {
+        Some(base.contiguous().map_err(Error::Numr)?)
+    };
+    let src = packed.as_ref().unwrap_or(base);
+    // SAFETY: CpuRuntime stores data as host pointers, and `src` is F32.
+    let values = unsafe { src.storage().as_host_slice::<f32>() };
+
+    let numel: usize = shape.iter().product();
+    let mut blocks = vec![0u8; format.storage_bytes(numel)?];
+
+    match (format, importance) {
+        (QuantFormat::Q4_0, None) => quantize::quantize_q4_0(values, &mut blocks),
+        (QuantFormat::Q4_1, None) => quantize::quantize_q4_1(values, &mut blocks),
+        (QuantFormat::Q8_0, None) => quantize::quantize_q8_0(values, &mut blocks),
+        (QuantFormat::Q2K, None) => quantize::quantize_q2k(values, &mut blocks),
+        (QuantFormat::Q3K, None) => quantize::quantize_q3k(values, &mut blocks),
+        (QuantFormat::Q4K, None) => quantize::quantize_q4k(values, &mut blocks),
+        (QuantFormat::Q5K, None) => quantize::quantize_q5k(values, &mut blocks),
+        (QuantFormat::Q6K, None) => quantize::quantize_q6k(values, &mut blocks),
+        (QuantFormat::Q2K, Some(m)) => quantize::quantize_q2k_imatrix(values, &mut blocks, m),
+        (QuantFormat::Q3K, Some(m)) => quantize::quantize_q3k_imatrix(values, &mut blocks, m),
+        (QuantFormat::Q4K, Some(m)) => quantize::quantize_q4k_imatrix(values, &mut blocks, m),
+        (QuantFormat::Q5K, Some(m)) => quantize::quantize_q5k_imatrix(values, &mut blocks, m),
+        (QuantFormat::Q6K, Some(m)) => quantize::quantize_q6k_imatrix(values, &mut blocks, m),
+        (other, Some(_)) => {
+            // The five K-quants are the formats `ggml-quants.c` gives an
+            // `_impl` writer. Silently dropping the importance for anything
+            // else would write a file that looks weighted and is not.
+            return Err(Error::UnsupportedQuantFormat {
+                format: format!(
+                    "{} has no importance-weighted CPU quantize kernel",
+                    other.name()
                 ),
             });
         }
-
-        // Quantization is elementwise-per-block, so a contiguous f32 view is all
-        // the kernels need. Cast first when the source is F16/BF16.
-        let cast = if input.dtype() == DType::F32 {
-            None
-        } else {
-            Some(self.cast(input, DType::F32).map_err(Error::Numr)?)
-        };
-        let base = cast.as_ref().unwrap_or(input);
-        // Blocks are packed along the last axis in memory order, so a strided
-        // view has to be materialized before the kernels see it.
-        let packed = if base.is_contiguous() {
-            None
-        } else {
-            Some(base.contiguous().map_err(Error::Numr)?)
-        };
-        let src = packed.as_ref().unwrap_or(base);
-        // SAFETY: CpuRuntime stores data as host pointers, and `src` is F32.
-        let values = unsafe { src.storage().as_host_slice::<f32>() };
-
-        let numel: usize = shape.iter().product();
-        let mut blocks = vec![0u8; format.storage_bytes(numel)?];
-
-        match format {
-            QuantFormat::Q4_0 => quantize::quantize_q4_0(values, &mut blocks),
-            QuantFormat::Q4_1 => quantize::quantize_q4_1(values, &mut blocks),
-            QuantFormat::Q8_0 => quantize::quantize_q8_0(values, &mut blocks),
-            QuantFormat::Q2K => quantize::quantize_q2k(values, &mut blocks),
-            QuantFormat::Q3K => quantize::quantize_q3k(values, &mut blocks),
-            QuantFormat::Q4K => quantize::quantize_q4k(values, &mut blocks),
-            QuantFormat::Q5K => quantize::quantize_q5k(values, &mut blocks),
-            QuantFormat::Q6K => quantize::quantize_q6k(values, &mut blocks),
-            other => {
-                return Err(Error::UnsupportedQuantFormat {
-                    format: format!("{} has no CPU quantize kernel", other.name()),
-                });
-            }
+        (other, None) => {
+            return Err(Error::UnsupportedQuantFormat {
+                format: format!("{} has no CPU quantize kernel", other.name()),
+            });
         }
-
-        QuantTensor::<CpuRuntime>::from_bytes(&blocks, format, &shape, input.device())
     }
+
+    QuantTensor::<CpuRuntime>::from_bytes(&blocks, format, &shape, input.device())
 }
 
 #[cfg(test)]

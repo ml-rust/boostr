@@ -133,12 +133,18 @@ use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
 
 // Which artifact the weights come from, and how one open artifact becomes a
-// `VarMap`. A sibling module because the three formats' resolution rules are
-// one concern and the measurement below is another.
+// `VarMap`. Lives in `examples/shared/` because the `imatrix` example loads
+// the same three artifact forms the same way; the three formats' resolution
+// rules are one concern and the measurement below is another.
+#[path = "../shared/source.rs"]
 mod source;
 use source::{Weights, config_path, load_config, load_varmap, source_format, source_path};
 
-// The corpus, the window selection, and the scored loss.
+// The corpus, the window selection, and the scored loss. Shared with the
+// `imatrix` example so both binaries select the SAME windows from the same
+// `--text`: an importance matrix collected over one corpus slice and an
+// evaluation measuring its effect over a different one are not comparable.
+#[path = "../shared/windows.rs"]
 mod windows;
 use windows::{score_windows, select_windows, tokenize_corpus};
 

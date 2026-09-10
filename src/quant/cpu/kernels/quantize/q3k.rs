@@ -44,15 +44,15 @@ use super::search::{make_q3_quants, nearest_int};
 use crate::quant::cpu::kernels::dequant_k_quants::unpack_q3k_scales;
 use half::f16;
 
-const SUPER_BLOCK: usize = 256;
-const BLOCK_BYTES: usize = 110;
-const SUB_BLOCKS: usize = 16;
+pub(super) const SUPER_BLOCK: usize = 256;
+pub(super) const BLOCK_BYTES: usize = 110;
+pub(super) const SUB_BLOCKS: usize = 16;
 /// Elements per sub-block
-const SUB: usize = 16;
+pub(super) const SUB: usize = 16;
 /// Q3_K levels span `[-4, 3]` and are stored biased by `+4`
-const NMAX: i32 = 4;
+pub(super) const NMAX: i32 = 4;
 /// Stored sub-block scales span `[-32, 31]` and are stored biased by `+32`
-const SCALE_BIAS: i32 = 32;
+pub(super) const SCALE_BIAS: i32 = 32;
 
 /// Per-sub-block scale fit: `(values, nmax, biased_levels) -> scale`
 type ScaleFit = fn(&[f32], i32, &mut [u8]) -> f32;
@@ -130,10 +130,23 @@ pub(super) fn quantize_q3k_with(x: &[f32], out: &mut [u8], fit: ScaleFit) {
 /// [`unpack_q3k_scales`](crate::quant::cpu::kernels::dequant_k_quants::unpack_q3k_scales)
 /// exactly, which reassembles the same fields with 32-bit masks.
 fn pack_q3k_scales(iscale: f32, scales: &[f32; SUB_BLOCKS], sc: &mut [u8]) {
+    let mut biased = [0u8; SUB_BLOCKS];
     for j in 0..SUB_BLOCKS {
-        let biased =
-            nearest_int(iscale * scales[j]).clamp(-SCALE_BIAS, SCALE_BIAS - 1) + SCALE_BIAS;
-        let l = biased as u8;
+        biased[j] =
+            (nearest_int(iscale * scales[j]).clamp(-SCALE_BIAS, SCALE_BIAS - 1) + SCALE_BIAS) as u8;
+    }
+    pack_q3k_scale_levels(&biased, sc);
+}
+
+/// Pack 16 ALREADY-BIASED 6-bit sub-block scales into 12 bytes
+///
+/// Split out because the importance path gets its biased levels straight from
+/// [`super::search_imatrix::make_qx_quants_weighted`], which fits the 16 scales
+/// against a weighted objective instead of dividing them by their maximum. The
+/// bit layout is the same either way, and there is only one copy of it.
+pub(super) fn pack_q3k_scale_levels(biased: &[u8; SUB_BLOCKS], sc: &mut [u8]) {
+    for j in 0..SUB_BLOCKS {
+        let l = biased[j];
         if j < 8 {
             sc[j] = l & 0x0F;
         } else {
@@ -148,7 +161,7 @@ fn pack_q3k_scales(iscale: f32, scales: &[f32; SUB_BLOCKS], sc: &mut [u8]) {
 /// `qs` byte `32n + l` for `l` in `0..32` carries elements `128n + l`,
 /// `+32`, `+64` and `+96` at shifts 0, 2, 4 and 6. `hmask[j % 32]` bit
 /// `j / 32` carries element `j`'s bit 2.
-fn pack_q3k(levels: &[u8; SUPER_BLOCK], block: &mut [u8]) {
+pub(super) fn pack_q3k(levels: &[u8; SUPER_BLOCK], block: &mut [u8]) {
     let mut low = [0u8; SUPER_BLOCK];
     for (j, &l) in levels.iter().enumerate() {
         if l > 3 {

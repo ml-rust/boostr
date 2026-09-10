@@ -11,10 +11,19 @@ use numr::runtime::Runtime;
 
 /// Build `lm_head`, tying it to `embed_tokens` when configured, otherwise
 /// loading it from `vb` and reconciling its row count with `config.vocab_size`.
+///
+/// `embed_name` is the checkpoint key `embed_tokens` was read from. Both
+/// branches below can mint a FRESH autograd id — the tied head wraps a clone
+/// of the embedding, and a grown head wraps a reshaped tensor — and an
+/// importance collection keys on that id, so each rebuilt layer re-binds its
+/// checkpoint key through `imatrix::register_name`. Without it the head's
+/// statistics would arrive nameless and `imatrix::finish` would refuse the
+/// whole run rather than guess.
 pub(super) fn build_lm_head<R: Runtime<DType = DType>>(
     vb: &mut crate::nn::VarBuilder<R>,
     config: &ModelConfig,
     embed_tokens: &Embedding<R>,
+    embed_name: &str,
 ) -> Result<MaybeQuantLinear<R>>
 where
     R::Client:
@@ -25,11 +34,16 @@ where
         // call — cloning it here is what keeps the tied embedding and
         // lm_head structurally identical.
         let embed_w = embed_tokens.weight().tensor().clone();
-        return Ok(MaybeQuantLinear::Standard(Linear::new(
-            embed_w, None, false,
-        )));
+        let head = Linear::new(embed_w, None, false);
+        // A tied head multiplies by the EMBEDDING tensor, so that is the
+        // checkpoint key a quantizer will look this importance vector up
+        // under — the statistics themselves are the head's own, taken from
+        // the hidden states that feed the output projection.
+        crate::quant::imatrix::register_name(head.weight().id(), embed_name);
+        return Ok(MaybeQuantLinear::Standard(head));
     }
 
+    let head_name = vb.full_name("lm_head.weight");
     let lm_head = vb.take_maybe_quant_linear("lm_head.weight", None)?;
     // A head padded above vocab_size is a normal layout and loads as-is;
     // only a head with too FEW rows needs growth. Mean-init isn't
@@ -61,7 +75,11 @@ where
                     vb.device(),
                     "lm_head.weight",
                 )?;
-                MaybeQuantLinear::Standard(Linear::new(weight, bias, requires_grad))
+                let grown = Linear::new(weight, bias, requires_grad);
+                // `Linear::new` minted a fresh id; re-bind the same key the
+                // loader used, or this head's statistics arrive nameless.
+                crate::quant::imatrix::register_name(grown.weight().id(), &head_name);
+                MaybeQuantLinear::Standard(grown)
             }
         }
         MaybeQuantLinear::Quantized(qlinear) => {

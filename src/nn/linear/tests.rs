@@ -1,6 +1,9 @@
 use super::*;
 use crate::test_utils::cpu_setup;
+use numr::autograd::Var;
+use numr::dtype::DType;
 use numr::runtime::cpu::CpuRuntime;
+use numr::tensor::Tensor;
 
 #[test]
 fn test_linear_output_shape() {

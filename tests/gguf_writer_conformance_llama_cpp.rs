@@ -16,6 +16,15 @@
 //! something to absorb into an epsilon. llama.cpp produced the expectation: fix
 //! the writer, never the fixture.
 //!
+//! The SAME bar applies to the importance-weighted (imatrix) writers, which
+//! reproduce llama.cpp's `quantize_row_*_K_impl` — the path `quantize_*_K`
+//! takes whenever an importance matrix is supplied, and the path nearly every
+//! GGUF quant the ecosystem ships comes out of. None of their five fixtures is
+//! committed yet, so all five tests take the loud-skip route below until they
+//! are generated. A skipped imatrix test verifies NOTHING: the round-trip and
+//! divergence tests beside it decode with boostr's own reader and only prove
+//! the output is not the unweighted output, never that it is llama.cpp's.
+//!
 //! `writer_q2_k_llama.bin` and `writer_q3_k_llama.bin` are not committed yet.
 //! Their two tests read the fixture if it is there and print a loud skip banner
 //! if it is not, in the style of `tests/gguf_conformance_llama_cpp.rs`. A
@@ -81,6 +90,22 @@
 //!
 //! Scale each source row by a different factor. A single scale across all
 //! rows lets a per-row stride error produce matching bytes by accident.
+//!
+//! The five imatrix fixtures — `writer_q2_k_imatrix_llama.bin`,
+//! `writer_q3_k_imatrix_llama.bin`, `writer_q4_k_imatrix_llama.bin`,
+//! `writer_q5_k_imatrix_llama.bin` and `writer_q6_k_imatrix_llama.bin` — come
+//! from the same call with the LAST argument non-NULL: a pointer to 256 `float`
+//! importance values, one per column, identical for every row. Those 256 values
+//! are `tests/fixtures/gguf_writer/writer_imatrix.bin`, little-endian `f32`,
+//! and both the generator and this file must read that one file — an importance
+//! vector regenerated from a formula on either side stops being the same
+//! vector. Generate it once with a spread of magnitudes and at least one exact
+//! zero, since a zero importance is legal and takes its own branch.
+//!
+//! ```c
+//! // imatrix: 256 floats read from writer_imatrix.bin, NOT rebuilt here
+//! ggml_quantize_chunk(type, src, dst, 0, 8, 256, imatrix);
+//! ```
 //!
 //! Run with:
 //!   cd boostr && cargo test --test gguf_writer_conformance_llama_cpp
@@ -708,4 +733,263 @@ fn q4_1_writer_is_valid_and_no_worse_than_direct_fit() {
 
     let llama = std::fs::read(fixture("writer_q4_1_llama.bin")).unwrap();
     assert_beats_direct_fit("Q4_1", QuantFormat::Q4_1, &got, &llama);
+}
+
+/// The importance vector, or `None` with a loud banner if it is not committed.
+///
+/// One entry per COLUMN, so 256 for this fixture's `n_per_row`, and the same
+/// vector for all 8 rows — which is what `ggml_quantize_chunk` does with the
+/// pointer it is handed.
+fn importance_fixture() -> Option<Vec<f32>> {
+    let bytes = llama_cpp_bytes("writer_imatrix.bin", "imatrix source")?;
+    assert_eq!(
+        bytes.len(),
+        256 * 4,
+        "writer_imatrix.bin: expected 256 f32 entries, one per column"
+    );
+    Some(
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
+            .collect(),
+    )
+}
+
+/// Quantizes the fixture source with an importance vector, as a caller holding
+/// a loaded importance matrix does.
+fn write_blocks_with_importance(format: QuantFormat, imatrix: &[f32]) -> Vec<u8> {
+    let src = floats("writer_src.bin");
+    let (client, device) = cpu_setup();
+    let input = Tensor::<CpuRuntime>::from_slice(&src, &[8, 256], &device).unwrap();
+    client
+        .quantize_with_importance(&input, format, Some(imatrix))
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+}
+
+/// Byte-equality gate for one importance-weighted writer against
+/// `ggml_quantize_chunk` called with a non-NULL imatrix.
+///
+/// Skips loudly, verifying nothing, until both its fixture and the shared
+/// importance vector are committed — see the module docs for the recipe.
+fn assert_imatrix_writer_matches_llama_cpp(
+    label: &str,
+    format: QuantFormat,
+    fixture_name: &str,
+    block_bytes: usize,
+) {
+    let Some(llama) = llama_cpp_bytes(fixture_name, label) else {
+        return;
+    };
+    let Some(imatrix) = importance_fixture() else {
+        return;
+    };
+    let got = write_blocks_with_importance(format, &imatrix);
+    assert_writer_matches_llama_cpp(label, block_bytes, &got, &llama);
+}
+
+#[test]
+fn q2_k_imatrix_writer_matches_llama_cpp() {
+    assert_imatrix_writer_matches_llama_cpp(
+        "Q2K+imatrix",
+        QuantFormat::Q2K,
+        "writer_q2_k_imatrix_llama.bin",
+        84,
+    );
+}
+
+#[test]
+fn q3_k_imatrix_writer_matches_llama_cpp() {
+    assert_imatrix_writer_matches_llama_cpp(
+        "Q3K+imatrix",
+        QuantFormat::Q3K,
+        "writer_q3_k_imatrix_llama.bin",
+        110,
+    );
+}
+
+#[test]
+fn q4_k_imatrix_writer_matches_llama_cpp() {
+    assert_imatrix_writer_matches_llama_cpp(
+        "Q4K+imatrix",
+        QuantFormat::Q4K,
+        "writer_q4_k_imatrix_llama.bin",
+        144,
+    );
+}
+
+#[test]
+fn q5_k_imatrix_writer_matches_llama_cpp() {
+    assert_imatrix_writer_matches_llama_cpp(
+        "Q5K+imatrix",
+        QuantFormat::Q5K,
+        "writer_q5_k_imatrix_llama.bin",
+        176,
+    );
+}
+
+#[test]
+fn q6_k_imatrix_writer_matches_llama_cpp() {
+    assert_imatrix_writer_matches_llama_cpp(
+        "Q6K+imatrix",
+        QuantFormat::Q6K,
+        "writer_q6_k_imatrix_llama.bin",
+        210,
+    );
+}
+
+/// Runs whether or not any fixture is present, and is deliberately WEAKER than
+/// the five byte-equality tests above — it does not replace them.
+///
+/// Decoding through boostr's own reader proves only that the writer and the
+/// reader agree with each other; both can agree and still disagree with the
+/// format. What this does catch is the failure that would make every quality
+/// comparison against GGUF meaningless: an importance vector that reaches the
+/// writer and changes nothing. A supplied importance must move at least one
+/// stored field on this fixture, so identical bytes mean the weight never
+/// reached the search.
+#[test]
+fn k_quant_imatrix_writers_use_the_importance_and_decode() {
+    // A spread of magnitudes with one exact zero, so the legal zero-importance
+    // branch is exercised even before the fixture lands. This is NOT the
+    // conformance vector — that one is read from writer_imatrix.bin.
+    let imatrix: Vec<f32> = (0..256)
+        .map(|i| {
+            if i % 61 == 0 {
+                0.0
+            } else {
+                0.05 + (i % 17) as f32 * 0.31
+            }
+        })
+        .collect();
+
+    for (label, format, block_bytes) in [
+        ("Q2K", QuantFormat::Q2K, 84usize),
+        ("Q3K", QuantFormat::Q3K, 110),
+        ("Q4K", QuantFormat::Q4K, 144),
+        ("Q5K", QuantFormat::Q5K, 176),
+        ("Q6K", QuantFormat::Q6K, 210),
+    ] {
+        let weighted = write_blocks_with_importance(format, &imatrix);
+        let plain = write_blocks(format);
+        assert_eq!(
+            weighted.len(),
+            8 * block_bytes,
+            "{label}+imatrix: 8 super-blocks must occupy {} bytes",
+            8 * block_bytes
+        );
+        assert_ne!(
+            weighted, plain,
+            "{label}+imatrix: the importance-weighted writer produced the unweighted \
+             writer's bytes. A silently ignored importance vector writes a file no \
+             check downstream can tell from an unweighted one."
+        );
+        let decoded = decode(format, &weighted);
+        assert!(
+            decoded.iter().all(|v| v.is_finite()),
+            "{label}+imatrix: decoded a non-finite value. A zero importance entry is \
+             legal and must never divide by zero."
+        );
+        println!(
+            "GGUF_WRITER_DIAG format={label}+imatrix bytes={}",
+            weighted.len()
+        );
+    }
+}
+
+/// A zero importance vector is legal and must not produce NaN.
+///
+/// Every weighted sum in the search collapses to zero, every division is
+/// guarded on a positive denominator, and the result is a zero scale — the same
+/// all-zero sub-block the writers already handle.
+#[test]
+fn all_zero_importance_decodes_finite() {
+    let imatrix = vec![0.0f32; 256];
+    for format in [
+        QuantFormat::Q2K,
+        QuantFormat::Q3K,
+        QuantFormat::Q4K,
+        QuantFormat::Q5K,
+        QuantFormat::Q6K,
+    ] {
+        let got = write_blocks_with_importance(format, &imatrix);
+        assert!(
+            decode(format, &got).iter().all(|v| v.is_finite()),
+            "{format:?}: an all-zero importance vector produced a non-finite decode"
+        );
+    }
+}
+
+/// A malformed importance vector is an ERROR, never a fallback to uniform
+/// weights.
+///
+/// The fallback would write a file byte-indistinguishable from an unweighted
+/// quantization, so the mistake would survive every check downstream and show
+/// up only as a quality result nobody can account for.
+#[test]
+fn malformed_importance_is_rejected() {
+    let src = floats("writer_src.bin");
+    let (client, device) = cpu_setup();
+    let input = Tensor::<CpuRuntime>::from_slice(&src, &[8, 256], &device).unwrap();
+
+    let short = vec![1.0f32; 255];
+    assert!(
+        client
+            .quantize_with_importance(&input, QuantFormat::Q4K, Some(&short))
+            .is_err(),
+        "an importance vector shorter than the quantized axis must be rejected"
+    );
+
+    let long = vec![1.0f32; 2048];
+    assert!(
+        client
+            .quantize_with_importance(&input, QuantFormat::Q4K, Some(&long))
+            .is_err(),
+        "an importance vector as long as the whole tensor must be rejected: it is \
+         one entry per COLUMN, not one per element"
+    );
+
+    let mut nan = vec![1.0f32; 256];
+    nan[7] = f32::NAN;
+    assert!(
+        client
+            .quantize_with_importance(&input, QuantFormat::Q4K, Some(&nan))
+            .is_err(),
+        "a non-finite importance entry must be rejected: it reaches the file as a \
+         scale no reader can use"
+    );
+
+    let mut negative = vec![1.0f32; 256];
+    negative[3] = -1.0;
+    assert!(
+        client
+            .quantize_with_importance(&input, QuantFormat::Q4K, Some(&negative))
+            .is_err(),
+        "a negative importance entry must be rejected: an importance is a mean \
+         square activation"
+    );
+
+    // Formats with no `_impl` writer in `ggml-quants.c` refuse the importance
+    // rather than dropping it.
+    let uniform = vec![1.0f32; 256];
+    assert!(
+        client
+            .quantize_with_importance(&input, QuantFormat::Q8_0, Some(&uniform))
+            .is_err(),
+        "Q8_0 has no importance-weighted writer and must say so, not ignore the vector"
+    );
+
+    // No importance at all is the plain path, unchanged.
+    assert_eq!(
+        client
+            .quantize_with_importance(&input, QuantFormat::Q4K, None)
+            .unwrap()
+            .to_bytes()
+            .unwrap(),
+        write_blocks(QuantFormat::Q4K),
+        "quantize_with_importance(None) must be quantize() byte for byte"
+    );
 }

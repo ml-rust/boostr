@@ -58,6 +58,12 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         let mut model_vb = vb.pp("model");
 
         // Embedding (dequantize if GGUF stored it as quantized)
+        // The checkpoint key is captured here, from the builder that reads
+        // it, and handed to `build_lm_head`: a TIED head multiplies by this
+        // very tensor and an importance collection records it under this
+        // name. Reading it off the builder is what stops the name from
+        // becoming a second copy that can drift from the loader.
+        let embed_name = model_vb.full_name("embed_tokens.weight");
         let embed_weight = model_vb.take_tensor_dequant("embed_tokens.weight", DType::F32)?;
         // `model_vb.device()` here, not `vb.device()`: `vb` is mutably borrowed by
         // `model_vb` for the rest of this scope.
@@ -92,7 +98,7 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
         );
 
         // LM head (may be tied to embedding weights)
-        let lm_head = build_lm_head(vb, config, &embed_tokens)?;
+        let lm_head = build_lm_head(vb, config, &embed_tokens, &embed_name)?;
 
         // Pre-cast RoPE caches to match weight dtype (avoids per-token F32→BF16 casts)
         let mut rope = rope;

@@ -39,11 +39,11 @@
 use super::search::{KSearch, MAX_SUB_BLOCK, make_qkx2_quants, nearest_int};
 use half::f16;
 
-const SUPER_BLOCK: usize = 256;
-const BLOCK_BYTES: usize = 84;
-const SUB_BLOCKS: usize = 16;
+pub(super) const SUPER_BLOCK: usize = 256;
+pub(super) const BLOCK_BYTES: usize = 84;
+pub(super) const SUB_BLOCKS: usize = 16;
 /// Elements per sub-block — one `scales` byte covers this many values
-const SUB: usize = 16;
+pub(super) const SUB: usize = 16;
 /// Both the scale and the min are stored as a 4-bit fraction of an f16 factor
 ///
 /// llama.cpp's `q4scale`.
@@ -157,7 +157,7 @@ pub(super) fn quantize_q2k_with(x: &[f32], out: &mut [u8], search: &KSearch) {
 /// elements at four shifts: `128n + l` at bits 0-1, `+32` at 2-3, `+64` at 4-5
 /// and `+96` at 6-7. The reader walks the same halves and shifts, so the four
 /// elements sharing a byte sit 32 apart, never adjacent.
-fn pack_q2k(levels: &[u8; SUPER_BLOCK], qs: &mut [u8]) {
+pub(super) fn pack_q2k(levels: &[u8; SUPER_BLOCK], qs: &mut [u8]) {
     for n in 0..2 {
         let base = n * 128;
         for l in 0..32 {

@@ -15,6 +15,13 @@
 //! way in. It is the same decorator the VoxCPM2 dense loaders use, not a
 //! second copy of it, so the two measurements are made under one definition of
 //! "dense".
+//!
+//! Shared by the `token_ce` and `imatrix` examples, in `examples/shared/`, so
+//! both binaries open the same artifact forms by the same rules. Each
+//! compiles this module separately and uses a subset of it, so an item unused
+//! by one of them is not dead code.
+
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 

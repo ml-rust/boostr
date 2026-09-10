@@ -1,197 +1,16 @@
-//! Linear and quantized linear layers
-
+use super::dense::Linear;
+use super::quant_linear::QuantLinear;
 use crate::error::Result;
 use crate::nn::module::Module;
 use crate::nn::weight::Weight;
 use crate::quant::decomposed::DecomposedQuantLinear;
 use crate::quant::tensor::QuantTensor;
 use crate::quant::traits::{DequantOps, QuantMatmulOps};
-use numr::autograd::{Var, var_add, var_matmul, var_reshape, var_transpose};
+use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, TensorOps, TypeConversionOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
-
-/// Dense linear layer: output = input @ weight^T + bias
-///
-/// Uses `Var<R>` throughout — autograd works during training,
-/// near-zero overhead during inference.
-pub struct Linear<R: Runtime> {
-    weight: Var<R>,
-    bias: Option<Var<R>>,
-}
-
-impl<R: Runtime> Linear<R> {
-    /// Create from loaded tensors. `trainable` controls gradient tracking.
-    pub fn new(weight: Tensor<R>, bias: Option<Tensor<R>>, trainable: bool) -> Self {
-        Self {
-            weight: Var::new(weight, trainable),
-            bias: bias.map(|b| Var::new(b, trainable)),
-        }
-    }
-
-    /// Create from tensors while preserving stable autograd IDs.
-    ///
-    /// Use this when rebuilding a layer from optimizer-updated tensors so the
-    /// optimizer state keyed by `TensorId` remains attached to the same logical
-    /// parameters across steps.
-    pub fn with_ids(
-        weight: Tensor<R>,
-        weight_id: TensorId,
-        bias: Option<(Tensor<R>, TensorId)>,
-        trainable: bool,
-    ) -> Self {
-        Self {
-            weight: Var::with_id(weight, weight_id, trainable),
-            bias: bias.map(|(b, id)| Var::with_id(b, id, trainable)),
-        }
-    }
-
-    /// Forward: input @ weight^T + bias
-    ///
-    /// input: `[..., in_features]`, output: `[..., out_features]`
-    pub fn forward<C>(&self, client: &C, input: &Var<R>) -> Result<Var<R>>
-    where
-        C: RuntimeClient<R> + TensorOps<R>,
-        R::Client: TensorOps<R>,
-    {
-        let w_t = var_transpose(&self.weight).map_err(crate::error::Error::Numr)?;
-        let input_shape = input.shape().to_vec();
-
-        if input_shape.len() <= 2 {
-            let output = var_matmul(input, &w_t, client).map_err(crate::error::Error::Numr)?;
-            return match &self.bias {
-                Some(bias) => var_add(&output, bias, client).map_err(crate::error::Error::Numr),
-                None => Ok(output),
-            };
-        }
-
-        let last_axis = input_shape.len() - 1;
-        let in_features = input_shape[last_axis];
-        let leading: usize = input_shape[..last_axis].iter().product();
-        let flat_input =
-            var_reshape(input, &[leading, in_features]).map_err(crate::error::Error::Numr)?;
-        let flat_output =
-            var_matmul(&flat_input, &w_t, client).map_err(crate::error::Error::Numr)?;
-        let flat_output = match &self.bias {
-            Some(bias) => var_add(&flat_output, bias, client).map_err(crate::error::Error::Numr)?,
-            None => flat_output,
-        };
-
-        let weight_shape = self.weight.tensor().shape();
-        if weight_shape.is_empty() {
-            return Err(crate::error::Error::ModelError {
-                reason: "linear weight must have at least one dimension".into(),
-            });
-        }
-        let mut output_shape = input_shape;
-        output_shape[last_axis] = weight_shape[0];
-        var_reshape(&flat_output, &output_shape).map_err(crate::error::Error::Numr)
-    }
-
-    pub fn weight(&self) -> &Var<R> {
-        &self.weight
-    }
-
-    pub fn bias(&self) -> Option<&Var<R>> {
-        self.bias.as_ref()
-    }
-
-    /// All parameters with their stable autograd IDs.
-    pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
-        let mut params = vec![(self.weight.id(), &self.weight)];
-        if let Some(bias) = &self.bias {
-            params.push((bias.id(), bias));
-        }
-        params
-    }
-
-    /// Trainable parameters with their stable autograd IDs.
-    pub fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
-        self.parameters()
-            .into_iter()
-            .filter(|param| param.1.requires_grad())
-            .collect()
-    }
-
-    /// Cheap duplicate that preserves every field's `TensorId`, for capturing
-    /// this layer by owned value in a `'static` activation-checkpointing
-    /// closure. Uses [`Var::alias`], not [`Clone`]: a `clone` would mint a
-    /// fresh id for `weight`/`bias` and silently orphan their gradients.
-    pub fn alias(&self) -> Self {
-        Self {
-            weight: self.weight.alias(),
-            bias: self.bias.as_ref().map(Var::alias),
-        }
-    }
-}
-
-impl<R: Runtime> Module<R> for Linear<R> {
-    fn parameters(&self) -> Vec<&Var<R>> {
-        let mut params = vec![self.weight()];
-        if let Some(bias) = self.bias() {
-            params.push(bias);
-        }
-        params
-    }
-
-    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
-        let mut params = vec![("weight".to_string(), self.weight())];
-        if let Some(bias) = self.bias() {
-            params.push(("bias".to_string(), bias));
-        }
-        params
-    }
-}
-
-/// Quantized linear layer (inference-only — quantized weights don't train)
-///
-/// Uses `QuantTensor<R>` for weights and raw `Tensor<R>` for activations.
-pub struct QuantLinear<R: Runtime> {
-    weight: QuantTensor<R>,
-    bias: Option<Tensor<R>>,
-}
-
-impl<R: Runtime> QuantLinear<R> {
-    pub fn new(weight: QuantTensor<R>, bias: Option<Tensor<R>>) -> Self {
-        Self { weight, bias }
-    }
-
-    /// Forward: quant_matmul(input, weight) + bias
-    ///
-    /// input: `[..., in_features]`, output: `[..., out_features]`
-    pub fn forward<C>(&self, client: &C, input: &Tensor<R>) -> Result<Tensor<R>>
-    where
-        C: QuantMatmulOps<R> + BinaryOps<R> + RuntimeClient<R>,
-    {
-        let output = client.quant_matmul(input, &self.weight)?;
-        match &self.bias {
-            Some(bias) => client.add(&output, bias).map_err(crate::error::Error::Numr),
-            None => Ok(output),
-        }
-    }
-
-    pub fn weight(&self) -> &QuantTensor<R> {
-        &self.weight
-    }
-
-    pub fn bias(&self) -> Option<&Tensor<R>> {
-        self.bias.as_ref()
-    }
-
-    /// Cheap duplicate for a `'static` activation-checkpointing closure.
-    ///
-    /// This layer carries no `Var<R>` — a quantized weight is inference-only
-    /// and never trains — so there is no `TensorId` to preserve.
-    /// `QuantTensor::clone` is `Arc`-backed and cheap; `bias` is a frozen
-    /// `Tensor<R>`, cloned like any other.
-    pub fn alias(&self) -> Self {
-        Self {
-            weight: self.weight.clone(),
-            bias: self.bias.clone(),
-        }
-    }
-}
 
 /// A linear layer that works with either standard or quantized weights.
 ///
@@ -248,7 +67,17 @@ impl<R: Runtime> MaybeQuantLinear<R> {
         R::Client: TensorOps<R> + DequantOps<R> + numr::ops::MatmulOps<R>,
     {
         match self {
-            Self::Standard(linear) => linear.forward(client, input),
+            // The importance-matrix tap — see `crate::quant::imatrix`. Off,
+            // it costs one relaxed load of a process-wide `AtomicBool` and a
+            // branch never taken: no field here, no constructor threading, no
+            // allocation. The DENSE arm only, because an importance matrix
+            // guides the quantization of a dense weight.
+            Self::Standard(linear) => {
+                if crate::quant::imatrix::is_armed() {
+                    crate::quant::imatrix::observe(linear.weight().id(), client, input.tensor())?;
+                }
+                linear.forward(client, input)
+            }
             // Forward always uses the fast quantized kernel. When `input`
             // needs no gradient (inference), the output stays a detached
             // leaf — zero extra allocation, unchanged from before. When it
@@ -420,6 +249,3 @@ impl<R: Runtime> Module<R> for MaybeQuantLinear<R> {
         MaybeQuantLinear::trainable_parameters(self)
     }
 }
-
-#[cfg(test)]
-mod tests;

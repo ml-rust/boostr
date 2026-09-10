@@ -76,8 +76,14 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
         self.push_prefix(segment)
     }
 
-    /// Full name for a weight relative to this builder's prefix.
-    fn full_name(&self, name: &str) -> String {
+    /// Full name for a weight relative to this builder's prefix — the
+    /// checkpoint key this builder reads `name` from.
+    ///
+    /// Public because a caller that REBUILDS a layer around a reshaped tensor
+    /// (a grown or tied `lm_head`) mints a fresh autograd id and has to bind
+    /// the same checkpoint key to it for an importance collection. Asking the
+    /// builder is what keeps that key from being a second, drifting copy.
+    pub fn full_name(&self, name: &str) -> String {
         if self.prefix.is_empty() {
             name.to_string()
         } else {
@@ -217,11 +223,19 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
     /// Take a weight and construct a `MaybeQuantLinear` from it.
     ///
     /// If `bias_name` is provided, attempts to take a standard tensor for bias.
+    ///
+    /// The dense variant's weight is bound to the checkpoint key it was just
+    /// read from, for an importance collection — see
+    /// [`crate::quant::imatrix`]. This is the ONE place the binding can be
+    /// made without guessing: the full dotted name is right here, and it is
+    /// the same string the quantizer will see. The call is a no-op unless a
+    /// collection is armed, and it never runs in a forward pass.
     pub fn take_maybe_quant_linear(
         &mut self,
         name: &str,
         bias_name: Option<&str>,
     ) -> Result<MaybeQuantLinear<R>> {
+        let full = self.full_name(name);
         let weight = self.take_weight(name)?;
         let bias = match bias_name {
             Some(bn) => {
@@ -233,7 +247,11 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
             }
             None => None,
         };
-        Ok(MaybeQuantLinear::from_weight(weight, bias))
+        let layer = MaybeQuantLinear::from_weight(weight, bias);
+        if let MaybeQuantLinear::Standard(linear) = &layer {
+            crate::quant::imatrix::register_name(linear.weight().id(), &full);
+        }
+        Ok(layer)
     }
 
     /// Get a standard tensor and validate its shape.

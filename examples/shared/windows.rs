@@ -6,6 +6,14 @@
 //! in this file and no sampling of any kind: the corpus is tokenized once in
 //! file order, and window `i` starts at `i * stride`. Two runs of one command
 //! line over one text file select the same windows, token for token.
+//!
+//! Shared by the `token_ce` and `imatrix` examples, in `examples/shared/`, so
+//! there is exactly ONE definition of which tokens a run sees. Each binary
+//! compiles this module separately and uses a subset of it — `imatrix`
+//! selects windows but scores no loss — so an item unused by one of them is
+//! not dead code.
+
+#![allow(dead_code)]
 
 use std::error::Error;
 

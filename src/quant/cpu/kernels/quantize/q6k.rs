@@ -16,7 +16,8 @@
 
 #[cfg(test)]
 use super::search::make_qx_absmax;
-use super::search::{GROUP_MAX_EPS, make_qx_quants, nearest_int};
+use super::search::{GROUP_MAX_EPS, nearest_int, qx_quants};
+use super::search_imatrix::block_importance;
 use half::f16;
 
 const SUPER_BLOCK: usize = 256;
@@ -25,18 +26,38 @@ const SUB_BLOCKS: usize = 16;
 /// Q6_K levels span `[-32, 31]` and are stored biased by `+32`
 const NMAX: i32 = 32;
 
-/// Per-sub-block scale fit: `(values, nmax, biased_levels) -> scale`
-type ScaleFit = fn(&[f32], i32, &mut [u8]) -> f32;
+/// Per-sub-block scale fit: `(values, nmax, biased_levels, weights) -> scale`
+///
+/// The weights are `None` on the no-imatrix path, where the fit uses `w = x²`.
+type ScaleFit = fn(&[f32], i32, &mut [u8], Option<&[f32]>) -> f32;
 
 /// Q6_K: 256 elements, 210 bytes
 ///
 /// Inverse of [`dequant_q6k`](crate::quant::cpu::kernels::dequant_k_quants::dequant_q6k).
 pub fn quantize_q6k(x: &[f32], out: &mut [u8]) {
-    quantize_q6k_with(x, out, make_qx_quants)
+    quantize_q6k_with(x, out, qx_quants, None)
+}
+
+/// Q6_K weighted by an importance vector — llama.cpp `quantize_row_q6_K_impl`
+///
+/// `imatrix` holds one non-negative entry per COLUMN of the weight matrix, so
+/// its length is the row length and every row indexes the same vector.
+///
+/// Q6_K is the one K-quant whose importance path does NOT reshape the
+/// importance before use: `ggml-quants.c` builds the shared
+/// `qw · sqrt(sigma2 + x²)` weight, then leaves both that line and the call
+/// that would use it commented out, passing the RAW `qw` to `make_qx_quants`
+/// instead. Reproducing the commented-out version would be a different
+/// quantizer that no llama.cpp fixture agrees with, so the raw importance is
+/// what this passes. Everything after the fit — the signed 8-bit scales, the
+/// second requantization pass, the packing — is the no-imatrix path unchanged,
+/// which is why both entry points are the same function.
+pub fn quantize_q6k_imatrix(x: &[f32], out: &mut [u8], imatrix: &[f32]) {
+    quantize_q6k_with(x, out, qx_quants, Some(imatrix))
 }
 
 /// Q6_K with an explicit scale fit — lets tests measure the search against absmax
-pub(super) fn quantize_q6k_with(x: &[f32], out: &mut [u8], fit: ScaleFit) {
+pub(super) fn quantize_q6k_with(x: &[f32], out: &mut [u8], fit: ScaleFit, imatrix: Option<&[f32]>) {
     let num_blocks = x.len() / SUPER_BLOCK;
     debug_assert_eq!(out.len(), num_blocks * BLOCK_BYTES);
 
@@ -48,10 +69,16 @@ pub(super) fn quantize_q6k_with(x: &[f32], out: &mut [u8], fit: ScaleFit) {
         let block = &mut out[b * BLOCK_BYTES..][..BLOCK_BYTES];
         block.fill(0);
 
+        let qw = imatrix.map(|m| block_importance(m, b, SUPER_BLOCK));
         let mut max_scale = 0.0f32;
         let mut max_abs_scale = 0.0f32;
         for ib in 0..SUB_BLOCKS {
-            let scale = fit(&xb[16 * ib..][..16], NMAX, &mut levels[16 * ib..][..16]);
+            let scale = fit(
+                &xb[16 * ib..][..16],
+                NMAX,
+                &mut levels[16 * ib..][..16],
+                qw.map(|q| &q[16 * ib..][..16]),
+            );
             scales[ib] = scale;
             if scale.abs() > max_abs_scale {
                 max_abs_scale = scale.abs();
@@ -119,5 +146,8 @@ fn pack_q6k(levels: &[u8; SUPER_BLOCK], block: &mut [u8]) {
 /// in the shipped path should ever pick the worse scale on purpose.
 #[cfg(test)]
 pub(super) fn quantize_q6k_absmax(x: &[f32], out: &mut [u8]) {
-    quantize_q6k_with(x, out, make_qx_absmax)
+    fn absmax_fit(x: &[f32], nmax: i32, levels: &mut [u8], _qw: Option<&[f32]>) -> f32 {
+        make_qx_absmax(x, nmax, levels)
+    }
+    quantize_q6k_with(x, out, absmax_fit, None)
 }

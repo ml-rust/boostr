@@ -19,6 +19,18 @@
 //!
 //! Only Q4_1 picks its scale by plain absmax.
 //!
+//! # Importance-weighted (imatrix) K-quants
+//!
+//! `ggml-quants.c` carries a SECOND writer per K-quant, `quantize_row_*_K_impl`,
+//! which `quantize_*_K` takes the moment an importance matrix is supplied. It
+//! derives its per-sub-block weights from the importance as well as the data,
+//! and nearly every GGUF quant the ecosystem ships comes out of it, so a
+//! comparison against the no-imatrix writer is a comparison against something
+//! the ecosystem does not use. [`QuantizeOps::quantize_with_importance`] is that
+//! path — `quant/cpu/kernels/quantize/search_imatrix.rs` and the `*_imatrix`
+//! writers beside it. Passing no importance leaves the output bit-identical to
+//! [`QuantizeOps::quantize`].
+//!
 //! - Q2_K, Q3_K, Q4_K, Q5_K and Q6_K run llama.cpp's iterative per-sub-block
 //!   scale search — `quant/cpu/kernels/quantize/search.rs`.
 //! - Q4_0 and Q8_0 sweep their single block scale against an unweighted
@@ -61,4 +73,42 @@ pub trait QuantizeOps<R: Runtime> {
     /// - [`Error::QuantError`](crate::error::Error::QuantError) on a
     ///   non-float dtype or a block-size mismatch
     fn quantize(&self, input: &Tensor<R>, format: QuantFormat) -> Result<QuantTensor<R>>;
+
+    /// Quantize `input` into `format`, weighting each column by `importance`
+    ///
+    /// `importance` is one non-negative entry per COLUMN of the weight matrix —
+    /// per element of the LAST axis, the axis quantization runs along — so a
+    /// `[out_features, in_features]` weight takes `in_features` entries and
+    /// every row indexes the same vector. `None` is the plain
+    /// [`quantize`](QuantizeOps::quantize) path, bit for bit.
+    ///
+    /// Loading the importance from a file is the caller's job. This takes the
+    /// values.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::QuantError`](crate::error::Error::QuantError) if `importance`
+    ///   is not exactly as long as the last axis, or holds a non-finite or
+    ///   negative entry. A wrong-length vector is NEVER quietly ignored: the
+    ///   file it would produce is indistinguishable from an unweighted one, so
+    ///   the mistake would survive every check downstream.
+    /// - [`Error::UnsupportedQuantFormat`](crate::error::Error::UnsupportedQuantFormat)
+    ///   if `format` has no importance-weighted writer on this backend
+    /// - everything [`quantize`](QuantizeOps::quantize) returns
+    fn quantize_with_importance(
+        &self,
+        input: &Tensor<R>,
+        format: QuantFormat,
+        importance: Option<&[f32]>,
+    ) -> Result<QuantTensor<R>> {
+        match importance {
+            None => self.quantize(input, format),
+            Some(_) => Err(crate::error::Error::UnsupportedQuantFormat {
+                format: format!(
+                    "{} has no importance-weighted quantize kernel on this backend",
+                    format.name()
+                ),
+            }),
+        }
+    }
 }

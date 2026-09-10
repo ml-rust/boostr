@@ -9,12 +9,20 @@
 //!
 //! # Two bars, one per group of formats
 //!
-//! **Q4_K, Q5_K, Q6_K — byte equality.** boostr's writer reproduces llama.cpp's
-//! own iterative per-sub-block scale search for these three. Matching bytes is
-//! the intended property, not a coincidence of rounding. A future change that
-//! lands close but not exact is a regression worth seeing, never something to
-//! absorb into an epsilon. llama.cpp produced the expectation: fix the writer,
-//! never the fixture.
+//! **Q2_K, Q3_K, Q4_K, Q5_K, Q6_K — byte equality.** boostr's writer reproduces
+//! llama.cpp's own iterative per-sub-block scale search for these five. Matching
+//! bytes is the intended property, not a coincidence of rounding. A future
+//! change that lands close but not exact is a regression worth seeing, never
+//! something to absorb into an epsilon. llama.cpp produced the expectation: fix
+//! the writer, never the fixture.
+//!
+//! `writer_q2_k_llama.bin` and `writer_q3_k_llama.bin` are not committed yet.
+//! Their two tests read the fixture if it is there and print a loud skip banner
+//! if it is not, in the style of `tests/gguf_conformance_llama_cpp.rs`. A
+//! skipped run verified NOTHING about those two layouts: boostr's round-trip
+//! tests decode with boostr's own reader, which accepts whatever the writer
+//! emits. Generate both from ggml — the recipe is below — and the skip goes
+//! away.
 //!
 //! **Q4_0, Q4_1 and Q8_0 — deliberately NOT byte equality.** llama.cpp's
 //! `quantize_row_q4_0`, `quantize_row_q4_1` and `quantize_row_q8_0` are plain
@@ -45,8 +53,8 @@
 //! are no longer expectations. They are the recorded direct-fit output the
 //! searches have to beat, and all three tests read them. Do not delete them.
 //!
-//! boostr writes exactly six formats: `QuantFormat::Q4_0`, `Q4_1`, `Q8_0`,
-//! `Q4K`, `Q5K`, `Q6K`. Every other `QuantFormat` variant returns
+//! boostr writes exactly eight formats: `QuantFormat::Q4_0`, `Q4_1`, `Q8_0`,
+//! `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`. Every other `QuantFormat` variant returns
 //! `Error::UnsupportedQuantFormat` from `quantize`, so nothing else needs a gate
 //! here.
 //!
@@ -68,8 +76,8 @@
 //! // gcc gen.c -o gen -lggml-base -lggml-cpu
 //! ```
 //!
-//! ggml type ids used here: Q4_0 2, Q4_1 3, Q8_0 8, Q4_K 12, Q5_K 13, Q6_K 14.
-//! Call with `nrows = 8`, `n_per_row = 256`, `imatrix = NULL`.
+//! ggml type ids used here: Q4_0 2, Q4_1 3, Q8_0 8, Q2_K 10, Q3_K 11, Q4_K 12,
+//! Q5_K 13, Q6_K 14. Call with `nrows = 8`, `n_per_row = 256`, `imatrix = NULL`.
 //!
 //! Scale each source row by a different factor. A single scale across all
 //! rows lets a per-row stride error produce matching bytes by accident.
@@ -170,6 +178,117 @@ fn assert_writer_matches_llama_cpp(format: &str, block_bytes: usize, got: &[u8],
          writer, never the fixture.",
         got.len()
     );
+}
+
+/// Reads a byte-equality fixture, or prints a loud skip banner and returns
+/// `None`.
+///
+/// A silent skip is what lets a layout bug ship: the round-trip tests decode
+/// with boostr's own reader, which agrees with whatever the writer emits, so a
+/// missing external reference means the layout is UNVERIFIED, not correct. The
+/// banner goes to stdout AND stderr so it survives a captured run.
+fn llama_cpp_bytes(name: &str, format: &str) -> Option<Vec<u8>> {
+    match std::fs::read(fixture(name)) {
+        Ok(bytes) => Some(bytes),
+        Err(err) => {
+            let banner = format!(
+                "\n\
+                 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\
+                 !! GGUF_WRITER_CONFORMANCE_SKIPPED  format=\"{format}\"\n\
+                 !! REASON: fixture tests/fixtures/gguf_writer/{name} is missing ({err})\n\
+                 !! NOTHING WAS VERIFIED. This test reported success WITHOUT comparing\n\
+                 !! boostr's writer against llama.cpp's ggml_quantize_chunk. Treat the\n\
+                 !! {format} block layout as UNVERIFIED, not as green. Generate the\n\
+                 !! fixture with the recipe in this file's module docs.\n\
+                 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+            );
+            println!("{banner}");
+            eprintln!("{banner}");
+            None
+        }
+    }
+}
+
+#[test]
+fn q2_k_writer_matches_llama_cpp() {
+    let Some(llama) = llama_cpp_bytes("writer_q2_k_llama.bin", "Q2K") else {
+        return;
+    };
+    let src = floats("writer_src.bin");
+    let (client, device) = cpu_setup();
+    let input = Tensor::<CpuRuntime>::from_slice(&src, &[8, 256], &device).unwrap();
+    let got = client
+        .quantize(&input, QuantFormat::Q2K)
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    assert_writer_matches_llama_cpp("Q2K", 84, &got, &llama);
+}
+
+#[test]
+fn q3_k_writer_matches_llama_cpp() {
+    let Some(llama) = llama_cpp_bytes("writer_q3_k_llama.bin", "Q3K") else {
+        return;
+    };
+    let src = floats("writer_src.bin");
+    let (client, device) = cpu_setup();
+    let input = Tensor::<CpuRuntime>::from_slice(&src, &[8, 256], &device).unwrap();
+    let got = client
+        .quantize(&input, QuantFormat::Q3K)
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    assert_writer_matches_llama_cpp("Q3K", 110, &got, &llama);
+}
+
+/// Structural gate that runs whether or not the byte fixture is present.
+///
+/// It is deliberately weaker than byte equality and does not replace it: an
+/// encoder with a permuted interleave still writes the right byte count and
+/// still decodes through boostr's matching reader. What it does catch is the
+/// class of bug that survives a round trip — a field written outside its own
+/// span, or a super-block whose stored factors are not values a reader can
+/// multiply.
+#[test]
+fn q2_k_and_q3_k_write_structurally_valid_blocks() {
+    // Q2_K: scales@0..16, qs@16..80, d@80..82, dmin@82..84.
+    let got = write_blocks(QuantFormat::Q2K);
+    assert_eq!(
+        got.len(),
+        8 * 84,
+        "Q2K: 8 super-blocks must occupy 672 bytes"
+    );
+    for (b, block) in got.as_chunks::<84>().0.iter().enumerate() {
+        let d = f16::from_le_bytes([block[80], block[81]]).to_f32();
+        let dmin = f16::from_le_bytes([block[82], block[83]]).to_f32();
+        assert!(
+            d.is_finite() && dmin.is_finite(),
+            "Q2K: block {b} stores a non-finite factor, which no reader can use"
+        );
+        assert!(
+            d >= 0.0 && dmin >= 0.0,
+            "Q2K: block {b} stores a negative factor ({d}, {dmin}). Both are \
+             fractions of a non-negative maximum, and the reader multiplies them \
+             by unsigned nibbles."
+        );
+    }
+    assert!(decode(QuantFormat::Q2K, &got).iter().all(|v| v.is_finite()));
+
+    // Q3_K: hmask@0..32, qs@32..96, scales@96..108, d@108..110.
+    let got = write_blocks(QuantFormat::Q3K);
+    assert_eq!(
+        got.len(),
+        8 * 110,
+        "Q3K: 8 super-blocks must occupy 880 bytes"
+    );
+    for (b, block) in got.as_chunks::<110>().0.iter().enumerate() {
+        let d = f16::from_le_bytes([block[108], block[109]]).to_f32();
+        assert!(
+            d.is_finite(),
+            "Q3K: block {b} stores a non-finite scale, which no reader can use"
+        );
+    }
+    assert!(decode(QuantFormat::Q3K, &got).iter().all(|v| v.is_finite()));
 }
 
 #[test]

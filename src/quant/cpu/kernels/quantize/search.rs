@@ -11,14 +11,16 @@
 //! llama.cpp instead SEARCHES: it sweeps a small family of candidate scales
 //! around the absmax choice, and for each candidate solves the weighted
 //! least-squares problem for the scale that actually minimises reconstruction
-//! error given that assignment of elements to levels. The two routines here are
-//! ports of `make_qx_quants` (symmetric, used by Q6_K) and `make_qkx2_quants`
-//! (scale + min, used by Q4_K and Q5_K) from `ggml-quants.c`.
+//! error given that assignment of elements to levels. The three routines here
+//! are ports of `make_qx_quants` (symmetric, used by Q6_K), `make_q3_quants`
+//! (symmetric, coordinate descent, used by Q3_K) and `make_qkx2_quants`
+//! (scale + min, used by Q2_K, Q4_K and Q5_K) from `ggml-quants.c`.
 //!
-//! Both are weighted: the weight decides which elements the scale is allowed to
-//! disappoint. `make_qx_quants` uses `w = x²`, so large weights dominate.
-//! `make_qkx2_quants` is called with `w = sqrt(Σx²/n) + |x|`, which keeps small
-//! elements from being written off entirely.
+//! All three are weighted: the weight decides which elements the scale is
+//! allowed to disappoint. `make_qx_quants` and `make_q3_quants` use `w = x²`, so
+//! large weights dominate. `make_qkx2_quants` is called with
+//! `w = sqrt(Σx²/n) + |x|` by Q4_K and Q5_K, and with `w = |x|` by Q2_K; either
+//! way small elements keep a vote instead of being written off entirely.
 //!
 //! The single-scale formats (Q4_0, Q8_0) sweep their one block scale the same
 //! way, but against an unweighted objective and scoring the binary16 value the
@@ -138,6 +140,106 @@ fn accumulate_symmetric(
     (sumlx, suml2)
 }
 
+/// Per-element error term of the asymmetric search — squared, or absolute when
+/// `use_mad`
+#[inline]
+fn penalty(diff: f32, use_mad: bool) -> f32 {
+    if use_mad { diff.abs() } else { diff * diff }
+}
+
+/// Symmetric coordinate-descent search over one sub-block — llama.cpp
+/// `make_q3_quants` with `do_rmse = true`
+///
+/// Returns the chosen scale and writes BIASED levels (`l + nmax`) into
+/// `levels`, exactly as [`make_qx_quants`] does. Q3_K is the only caller.
+///
+/// Where `make_qx_quants` sweeps the SCALE and re-derives every level for each
+/// candidate, this sweeps the LEVELS one element at a time and lets the scale
+/// fall out of them. For element `i` it removes `i`'s contribution from the
+/// running `(Σw·x·l, Σw·l²)`, picks the level that best explains `x[i]` under
+/// what is left, and keeps the move only when it raises the objective
+/// `(Σw·x·l)² / Σw·l²`. Five passes, stopping early once a pass changes nothing.
+///
+/// `weight = x²`, matching `make_qx_quants`' `rmse_type == 1`.
+///
+/// The levels are working state, not the output: `quantize_q3k` re-derives
+/// every level against the 6-bit scale the reader reconstructs. Only the
+/// returned scale survives, except on a sub-block whose stored scale rounds to
+/// zero — there the second pass is skipped and these levels are what ship.
+pub fn make_q3_quants(x: &[f32], nmax: i32, levels: &mut [u8]) -> f32 {
+    let n = x.len();
+    if n == 0 || levels.len() < n {
+        return 0.0;
+    }
+    let (amax, max) = signed_absmax(x);
+    if amax < GROUP_MAX_EPS {
+        levels.fill(0);
+        return 0.0;
+    }
+
+    // Absmax starting point. Levels are held BIASED in `levels` throughout, so
+    // the routine needs no signed scratch buffer of its own.
+    let iscale = -(nmax as f32) / max;
+    let (mut sumlx, mut suml2) = accumulate_symmetric(x, nmax, iscale, Some(&mut *levels));
+
+    for _ in 0..5 {
+        let mut changed = 0usize;
+        for (i, &v) in x.iter().enumerate() {
+            let l = levels[i] as i32 - nmax;
+            let w = v * v;
+            // Objective without element `i`.
+            let slx = sumlx - w * v * l as f32;
+            if slx <= 0.0 {
+                continue;
+            }
+            let sl2 = suml2 - w * (l * l) as f32;
+            let new_l = nearest_int(v * sl2 / slx).clamp(-nmax, nmax - 1);
+            if new_l == l {
+                continue;
+            }
+            let slx = slx + w * v * new_l as f32;
+            let sl2 = sl2 + w * (new_l * new_l) as f32;
+            // `slx²·suml2 > sumlx²·sl2` compares the two objectives without
+            // dividing, the same trick `make_qx_quants` uses across its sweep.
+            if slx * slx * suml2 > sumlx * sumlx * sl2 {
+                levels[i] = (new_l + nmax) as u8;
+                sumlx = slx;
+                suml2 = sl2;
+                changed += 1;
+            }
+        }
+        if changed == 0 {
+            break;
+        }
+    }
+
+    // The element carrying `max` always lands on a non-zero level, so `suml2`
+    // cannot be zero here. The guard keeps a NaN scale out of the file anyway.
+    if suml2 != 0.0 { sumlx / suml2 } else { 0.0 }
+}
+
+/// Sweep parameters for the asymmetric scale+min search, per format
+///
+/// Taken from the `make_qkx2_quants` call sites in `ggml-quants.c`. The formats
+/// do NOT share them: Q5_K's finer level grid needs a narrower sweep, and Q2_K
+/// scores candidates by absolute rather than squared error.
+pub struct KSearch {
+    /// Top quantization level (`3` for 2-bit, `15` for 4-bit, `31` for 5-bit)
+    pub nmax: i32,
+    /// Lowest sweep offset applied to `nmax`
+    pub rmin: f32,
+    /// Sweep step
+    pub rdelta: f32,
+    /// Number of sweep steps; `0` disables the search (plain min/max fit)
+    pub nstep: i32,
+    /// Score candidates by weighted ABSOLUTE error instead of squared error
+    ///
+    /// llama.cpp's `use_mad`. Only Q2_K sets it. With two bits per element the
+    /// squared metric lets one badly-placed outlier buy the scale, and the
+    /// other fifteen elements pay for it.
+    pub use_mad: bool,
+}
+
 /// Asymmetric scale + min search — llama.cpp `make_qkx2_quants`
 ///
 /// Models the sub-block as `x ≈ scale·l + min` with `l ∈ [0, nmax]` and
@@ -156,14 +258,16 @@ fn accumulate_symmetric(
 ///
 /// A positive `this_min` is rejected (clamped to 0, scale refitted alone)
 /// because the stored `dmin` is unsigned. Candidates are compared by weighted
-/// SQUARED error; llama.cpp's `use_mad` variant is not used by these formats.
+/// SQUARED error, or by weighted ABSOLUTE error when `use_mad` is set —
+/// llama.cpp passes `use_mad = true` for Q2_K only.
 ///
 /// `laux` is caller-provided scratch of at least `x.len()` bytes so the sweep
 /// allocates nothing per sub-block.
-// Eight search parameters plus the input, none derivable from another: `rmin`,
-// `rdelta` and `nstep` define the sweep, `nmax` the level range, and `weights`
-// the error metric. llama.cpp passes different values per format (Q4_K sweeps
-// 20 steps from -1.0, Q5_K sweeps 15 from -0.5), so they cannot be constants.
+// Nine search parameters plus the input, none derivable from another: `rmin`,
+// `rdelta` and `nstep` define the sweep, `nmax` the level range, `weights` and
+// `use_mad` the error metric. llama.cpp passes different values per format
+// (Q4_K sweeps 20 steps from -1.0, Q5_K and Q2_K sweep 15 from -0.5, and only
+// Q2_K scores by absolute error), so they cannot be constants.
 #[allow(clippy::too_many_arguments)]
 pub fn make_qkx2_quants(
     x: &[f32],
@@ -174,6 +278,7 @@ pub fn make_qkx2_quants(
     rmin: f32,
     rdelta: f32,
     nstep: i32,
+    use_mad: bool,
 ) -> (f32, f32) {
     let n = x.len();
     if n == 0 || weights.len() < n || levels.len() < n || laux.len() < n {
@@ -207,7 +312,7 @@ pub fn make_qkx2_quants(
         let l = nearest_int(iscale * (x[i] - min)).clamp(0, nmax);
         levels[i] = l as u8;
         let diff = scale * l as f32 + min - x[i];
-        best_err += weights[i] * diff * diff;
+        best_err += weights[i] * penalty(diff, use_mad);
     }
     if nstep < 1 {
         return (scale, -min);
@@ -237,7 +342,7 @@ pub fn make_qkx2_quants(
         let mut err = 0.0f32;
         for i in 0..n {
             let diff = this_scale * laux[i] as f32 + this_min - x[i];
-            err += weights[i] * diff * diff;
+            err += weights[i] * penalty(diff, use_mad);
         }
         if err < best_err {
             levels[..n].copy_from_slice(&laux[..n]);

@@ -19,8 +19,8 @@
 //!
 //! Only Q4_1 picks its scale by plain absmax.
 //!
-//! - Q4_K, Q5_K and Q6_K run llama.cpp's iterative per-sub-block scale search —
-//!   `quant/cpu/kernels/quantize/search.rs`.
+//! - Q2_K, Q3_K, Q4_K, Q5_K and Q6_K run llama.cpp's iterative per-sub-block
+//!   scale search — `quant/cpu/kernels/quantize/search.rs`.
 //! - Q4_0 and Q8_0 sweep their single block scale against an unweighted
 //!   squared-error objective, scoring the binary16 value the reader loads —
 //!   `quant/cpu/kernels/quantize/block_scale.rs`.

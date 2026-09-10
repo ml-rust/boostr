@@ -61,6 +61,8 @@ impl QuantizeOps<CpuRuntime> for CpuClient {
             QuantFormat::Q4_0 => quantize::quantize_q4_0(values, &mut blocks),
             QuantFormat::Q4_1 => quantize::quantize_q4_1(values, &mut blocks),
             QuantFormat::Q8_0 => quantize::quantize_q8_0(values, &mut blocks),
+            QuantFormat::Q2K => quantize::quantize_q2k(values, &mut blocks),
+            QuantFormat::Q3K => quantize::quantize_q3k(values, &mut blocks),
             QuantFormat::Q4K => quantize::quantize_q4k(values, &mut blocks),
             QuantFormat::Q5K => quantize::quantize_q5k(values, &mut blocks),
             QuantFormat::Q6K => quantize::quantize_q6k(values, &mut blocks),
@@ -132,9 +134,37 @@ mod tests {
     }
 
     #[test]
+    fn quantize_q2k_round_trips_through_dequant() {
+        let (client, device) = setup();
+        let values = ramp(768);
+        let input = Tensor::<CpuRuntime>::from_slice(&values, &[3, 256], &device).unwrap();
+
+        let qt = client.quantize(&input, QuantFormat::Q2K).unwrap();
+        assert_eq!(qt.shape(), &[3, 256]);
+        assert_eq!(qt.storage_bytes(), 3 * 84);
+
+        let back = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+        assert!(back.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn quantize_q3k_round_trips_through_dequant() {
+        let (client, device) = setup();
+        let values = ramp(768);
+        let input = Tensor::<CpuRuntime>::from_slice(&values, &[3, 256], &device).unwrap();
+
+        let qt = client.quantize(&input, QuantFormat::Q3K).unwrap();
+        assert_eq!(qt.shape(), &[3, 256]);
+        assert_eq!(qt.storage_bytes(), 3 * 110);
+
+        let back = client.dequantize(&qt, DType::F32).unwrap().to_vec::<f32>();
+        assert!(back.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
     fn quantize_rejects_format_without_kernel() {
         let (client, device) = setup();
         let input = Tensor::<CpuRuntime>::from_slice(&[0.0f32; 256], &[256], &device).unwrap();
-        assert!(client.quantize(&input, QuantFormat::Q2K).is_err());
+        assert!(client.quantize(&input, QuantFormat::Q8K).is_err());
     }
 }

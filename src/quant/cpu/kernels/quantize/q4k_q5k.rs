@@ -19,27 +19,12 @@
 //! THAT rounded scale, using the same unpacker the reader uses, so the two can
 //! never drift apart.
 
-use super::search::{MAX_SUB_BLOCK, make_qkx2_quants, nearest_int};
+use super::search::{KSearch, MAX_SUB_BLOCK, make_qkx2_quants, nearest_int};
 use crate::quant::cpu::kernels::dequant_k_quants::unpack_q4k_q5k_scales;
 use half::f16;
 
 const SUPER_BLOCK: usize = 256;
 const SUB_BLOCKS: usize = 8;
-
-/// Sweep parameters for the asymmetric scale+min search, per format
-///
-/// Taken from the `make_qkx2_quants` call sites in `ggml-quants.c`. The two
-/// formats do NOT share them: Q5_K's finer level grid needs a narrower sweep.
-pub(super) struct KSearch {
-    /// Top quantization level (`15` for 4-bit, `31` for 5-bit)
-    pub nmax: i32,
-    /// Lowest sweep offset applied to `nmax`
-    pub rmin: f32,
-    /// Sweep step
-    pub rdelta: f32,
-    /// Number of sweep steps; `0` disables the search (plain min/max fit)
-    pub nstep: i32,
-}
 
 /// Q4_K search constants — `make_qkx2_quants(32, 15, ..., -1.0f, 0.1f, 20, false)`
 pub(super) const Q4K_SEARCH: KSearch = KSearch {
@@ -47,6 +32,7 @@ pub(super) const Q4K_SEARCH: KSearch = KSearch {
     rmin: -1.0,
     rdelta: 0.1,
     nstep: 20,
+    use_mad: false,
 };
 
 /// Q5_K search constants — `make_qkx2_quants(32, 31, ..., -0.5f, 0.1f, 15, false)`
@@ -55,6 +41,7 @@ pub(super) const Q5K_SEARCH: KSearch = KSearch {
     rmin: -0.5,
     rdelta: 0.1,
     nstep: 15,
+    use_mad: false,
 };
 
 /// Q4_K: 256 elements, 144 bytes — f16 `d`@0, f16 `dmin`@2, 12-byte scales@4, 128-byte `qs`@16
@@ -179,6 +166,7 @@ fn fit_super_block(
             search.rmin,
             search.rdelta,
             search.nstep,
+            search.use_mad,
         );
         scales[j] = scale;
         mins[j] = min;

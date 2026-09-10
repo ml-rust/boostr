@@ -3,15 +3,22 @@
 //! ```text
 //! cargo run --release --features audio,f16 --example voxcpm_sensitivity -- \
 //!     --ckpt CKPT_DIR --audiovae audiovae.safetensors --manifest FILE.tsv \
-//!     [--device cpu|cuda] [--encoding Q4AS32D_T64] [--eval-rows 4] \
+//!     [--device cpu|cuda] [--encoding Q4_K,Q6_K,Q4AS32D_T64] [--eval-rows 4] \
 //!     [--max-patches 38] [--lambda-stop 1.0] [--reference-bpw 16] \
 //!     [--baseline-every 32] [--top 20] [--skip 0] [--limit 0]
 //! ```
 //!
 //! # What this answers
 //!
-//! Which tensors a target encoding may NOT be spent on, ranked by a measured
-//! TASK metric rather than by weight-space reconstruction error.
+//! What each tensor costs, in TASK metric, at EACH of several candidate
+//! encodings — measured, not predicted from weight-space reconstruction error.
+//!
+//! One damage number per tensor at one base encoding only ever supports
+//! PROMOTION: rank the tensors, move the worst up to a wider encoding. It can
+//! never support demotion, because a delta measured at four bits says nothing
+//! about three: a tensor undamaged at the base can be wrecked one step below
+//! it. Placing each tensor on the cheapest encoding it tolerates needs its
+//! damage AT each candidate, which is the grid this sweep fills in.
 //!
 //! TCF's `PROFILES.md` Section 4 solves a profile in six steps. Step 1 is a
 //! cheap screen — relative RMS of a dequantized tensor against its source is
@@ -29,11 +36,13 @@
 //!
 //! 1. Load the checkpoint ONCE, dense F32.
 //! 2. Score the fixed eval batch. That is the baseline.
-//! 3. For each quantizable weight tensor, in turn: snapshot its bytes,
-//!    overwrite its values with its OWN quantize -> dequantize round trip at
-//!    `--encoding`, re-score the same eval batch, record the delta, then
-//!    write the snapshot back. One tensor perturbed at a time; every other
-//!    tensor stays at full precision for the whole run.
+//! 3. For each quantizable weight tensor, in turn, and within it for each
+//!    encoding named on `--encoding`, in the order given: snapshot the
+//!    tensor's bytes, overwrite its values with its OWN quantize ->
+//!    dequantize round trip at that encoding, re-score the same eval batch,
+//!    record the delta, then write the snapshot back. One tensor perturbed at
+//!    a time, at one encoding at a time; every other tensor stays at full
+//!    precision for the whole run.
 //! 4. Rank by task delta per byte the encoding would save.
 //!
 //! The loss is the one `finetune.rs` already scores under `--eval-only`:
@@ -53,26 +62,53 @@
 //!
 //! # Encodings
 //!
-//! `--encoding` takes any `SPECIFICATION.md` Section 12 native identifier:
-//! `Q4S32_T64`, `Q4AS32_T64`, `Q4AS32D_T64`, `Q4AS64_T64`, `Q6S32_T64`,
-//! `Q6S16D_T64`, `Q8S32_T64`. The default is `Q4AS32D_T64`, `TCF-COMPACT`'s
-//! and `TCF-BALANCED`'s base encoding.
+//! `--encoding` takes a COMMA-SEPARATED LIST, and every entry is measured on
+//! every selected tensor. One entry behaves exactly as the single-encoding
+//! flag always did.
 //!
-//! The ranking is meaningful ONLY relative to the base encoding a profile
-//! actually uses: a tensor's delta at `Q4AS32D_T64` says nothing about its
-//! delta at `Q8S32_T64`. Two rankings at two encodings are two measurements,
-//! never one.
+//! Two families are accepted, because the two are different codecs and a
+//! delta under one is not a delta under the other:
 //!
-//! Quantization uses `tcf_core`'s real `quantize` and `dequantize_into` —
-//! the reference codec, not an approximation of rounding.
+//! - `SPECIFICATION.md` Section 12 TCF native identifiers — `Q4S32_T64`,
+//!   `Q4AS32_T64`, `Q4AS32D_T64`, `Q4AS64_T64`, `Q6S32_T64`, `Q6S16D_T64`,
+//!   `Q8S32_T64`.
+//! - GGUF block formats — `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q4_0`,
+//!   `Q4_1`, `Q8_0`.
+//!
+//! The default is `Q4AS32D_T64`, `TCF-COMPACT`'s and `TCF-BALANCED`'s base
+//! encoding, so a command line that does not name `--encoding` produces the
+//! ranking it always produced.
+//!
+//! GGUF formats are accepted because an allocator planning a GGUF mix must
+//! rank its tensors by damage under the format it will actually WRITE. A TCF
+//! encoding of the same nominal width rounds differently and tiles
+//! differently, so substituting it — or substituting a bit-width model of it
+//! — ranks a codec that never ran.
+//!
+//! A ranking remains meaningful only WITHIN one encoding: the records are
+//! keyed by (tensor, encoding) precisely so a consumer compares like with
+//! like, or compares one tensor's own deltas ACROSS encodings, which is the
+//! comparison a demotion decision needs.
+//!
+//! No codec is re-implemented here. TCF uses `tcf-core`'s reference
+//! `quantize` and `dequantize_into`; GGUF uses boostr's own block writers and
+//! readers. `sweep_encoding.rs` holds both, and its docs record which GGUF
+//! formats have a writer and what happens to the ones that do not.
 //!
 //! # Which tensors are candidates
 //!
-//! `Module::named_parameters()` on the loaded model, filtered to the tensors
-//! a native encoding can legally hold (Section 12): rank at least 2, and a
-//! trailing dimension that is a whole number of 64-element tiles. Everything
-//! rejected is REPORTED with its reason, never silently dropped, so the
-//! candidate count is auditable from the output.
+//! `Module::named_parameters()` on the loaded model, filtered by the checks
+//! no encoding can lift: a contiguous F32 buffer that no earlier parameter
+//! already aliases.
+//!
+//! Whether an encoding can legally HOLD a given shape is asked per (tensor,
+//! encoding) instead, because the answer differs between them — a GGUF
+//! K-quant needs a row that is a whole number of 256-element super-blocks, a
+//! simple GGUF format needs 32, a TCF native encoding needs rank at least 2
+//! and a row that is a whole number of 64-element tiles. A tensor one
+//! encoding refuses is still measured at every other one; only that pair is
+//! skipped. Everything rejected is REPORTED with its reason, never silently
+//! dropped, so the grid is auditable from the output.
 //!
 //! The AudioVAE is out of scope for the same reason `named_parameters()`
 //! excludes it: it is a separately loaded frozen codec, not part of the
@@ -100,11 +136,16 @@
 //!   the floating-point summation order is fixed too.
 //! - Candidate order: `named_parameters()`'s own order, which is a fixed
 //!   traversal of the model, not a hash-map iteration.
+//! - Encoding order: the order given on `--encoding`, never sorted or
+//!   de-duplicated, so one command line always emits its records in one
+//!   order and two runs diff cleanly.
 //! - Model state at the start of every measurement: the baseline weights,
 //!   restored byte for byte after the previous one.
 //!
 //! Two runs of this example over one checkpoint, manifest, `--eval-rows` and
-//! `--encoding`, on one build and one device, produce identical rankings.
+//! `--encoding` list, on one build and one device, produce identical output.
+//! The round trips themselves run on the host for both codecs, so they are
+//! identical across devices too; only the forward pass is device-dependent.
 //!
 //! NOT established as deterministic, and deliberately not claimed: agreement
 //! ACROSS devices or ACROSS builds. Different kernels and any thread-order
@@ -117,14 +158,19 @@
 //! A silent accumulation of perturbations would invalidate every measurement
 //! after the first, so restoration is checked twice, two different ways:
 //!
-//! - Per tensor. The original bytes are snapshotted before the write and
-//!   written back after the score. The buffer is then READ BACK and compared
-//!   to the snapshot bit for bit. A mismatch aborts the run.
-//! - Periodically. Every `--baseline-every` measurements, and once at the
-//!   end, the baseline is re-scored and compared to the first baseline BIT
-//!   for bit (`f64::to_bits`, not an epsilon). This catches drift the
-//!   per-tensor check cannot see, such as a perturbation reaching a buffer
-//!   through an alias.
+//! - Per MEASUREMENT, not per tensor. The original bytes are snapshotted
+//!   once per tensor, then written back after EVERY encoding's score, and the
+//!   buffer is READ BACK and compared to the snapshot bit for bit
+//!   (`f32::to_bits`) each time. A mismatch aborts the run. A multi-encoding
+//!   sweep writes each tensor's buffer several times, so restoring only
+//!   between tensors would let the second encoding be measured on top of the
+//!   first — restoring between encodings is what keeps every record a
+//!   single-perturbation measurement.
+//! - Periodically. Every `--baseline-every` MEASUREMENTS — pairs, not
+//!   tensors — and once at the end, the baseline is re-scored and compared to
+//!   the first baseline BIT for bit (`f64::to_bits`, not an epsilon). This
+//!   catches drift the per-measurement check cannot see, such as a
+//!   perturbation reaching a buffer through an alias.
 //!
 //! Any drift is a hard error naming the tensor last measured. It is never a
 //! warning: a ranking built on drifted weights is worse than no ranking.
@@ -133,17 +179,21 @@
 //!
 //! The model loads ONCE. Each measurement is one forward pass over the eval
 //! rows, plus one quantize/dequantize round trip over the tensor's elements,
-//! which is negligible beside the forward pass. So the run is
-//! `candidates * eval_rows` forward passes, plus `candidates /
-//! baseline_every` more for the drift checks, plus one for the baseline.
+//! which is negligible beside the forward pass. A sweep now measures
+//! `candidates * encodings` pairs, so the run is
+//! `candidates * encodings * eval_rows` forward passes, plus
+//! `candidates * encodings / baseline_every` more for the drift checks, plus
+//! one for the baseline. Adding an encoding costs a full extra sweep.
 //!
 //! `--eval-rows` is therefore the cost dial. A screening pass over every
 //! candidate uses few rows; a confirmation pass over the top of that ranking
-//! uses many. `--skip` and `--limit` split one sweep into shards that can be
-//! run separately and concatenated, since every shard measures against the
-//! same baseline.
+//! uses many. `--skip` and `--limit` shard over TENSORS, never over
+//! encodings, so a shard still measures every encoding for the tensors it
+//! owns and the shards concatenate into a complete grid — every shard
+//! measures against the same baseline.
 //!
-//! Progress is printed per candidate on stderr so a long run is monitorable.
+//! Progress is printed per measurement on stderr, naming both the tensor and
+//! the encoding, so a long run is monitorable.
 //!
 //! # Output
 //!
@@ -151,10 +201,21 @@
 //! line goes to stderr, so two runs diff directly. Records:
 //!
 //! - `"baseline"`, once, first: the loss the deltas are relative to, plus
-//!   the encoding, the row count, the seed and the candidate counts.
-//! - `"sensitivity"`, one per measured tensor: name, element count, absolute
-//!   and baseline-relative delta, bytes saved, and delta per byte saved.
-//! - `"skipped"`, one per rejected parameter, with the reason.
+//!   the LIST of encodings measured, the row count, the seed and the
+//!   candidate counts. `encoding` and `encoded_bpw` are parallel arrays in
+//!   the order the encodings are measured.
+//! - `"sensitivity"`, one per (tensor, encoding) pair: name, element count,
+//!   the encoding's name, absolute and baseline-relative delta, bytes saved,
+//!   delta per byte saved, and `payload_bytes` — the tensor's ACTUAL packed
+//!   size at that encoding, taken from the codec's own layout. Every field
+//!   that existed before keeps its name and its meaning, `bytes_saved`
+//!   included: it is still the nominal `elements * (reference_bpw -
+//!   encoded_bpw) / 8`. `payload_bytes` is the one an allocator should spend
+//!   against, because a nominal width misses what a GGUF block spends on its
+//!   scales and what a TCF partial super-block is charged in full.
+//! - `"skipped"`, one per rejected parameter, with the reason. A rejection
+//!   that belongs to one encoding rather than to the parameter itself also
+//!   carries an `encoding` field naming it; the parameter-level ones do not.
 //!
 //! The final table on stderr is the same data ranked by delta per byte
 //! saved, which is `PROFILES.md` Section 4 step 3's ordering. A NEGATIVE
@@ -165,7 +226,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use boostr::format::tcf::encoding_name;
 use boostr::model::audio::voxcpm::model::VoxCpm2Model;
 use boostr::model::audio::voxcpm::{VoxCpmClient, load_tokenizer};
 use boostr::nn::Module;
@@ -180,7 +240,12 @@ use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 #[cfg(feature = "cuda")]
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
 use numr::tensor::Tensor;
-use tcf_core::{Encoding, NativeEncoding, dequantize_into, quantize, tile_count};
+
+// The candidate encodings, their byte accounting, and their round trips. A
+// sibling module rather than more of this file: the two codecs' size rules and
+// kernel lookups are one concern, and the measurement loop below is another.
+mod sweep_encoding;
+use sweep_encoding::SweepEncoding;
 
 // The manifest reader, the `--max-patches` filter, the per-row
 // prefill/target build, and the eval loss — shared verbatim with
@@ -192,9 +257,10 @@ use eval_common::{
 };
 
 /// `TCF-COMPACT`'s and `TCF-BALANCED`'s base encoding (`PROFILES.md`
-/// Section 2), so the default ranking is the one those profiles are solved
-/// against.
-const DEFAULT_ENCODING: NativeEncoding = NativeEncoding::Q4AS32DT64;
+/// Section 2), so a command line that names no `--encoding` produces the
+/// ranking those profiles are solved against. Spelled as the identifier the
+/// flag accepts, so the default and a hand-typed value take the same path.
+const DEFAULT_ENCODING: &str = "Q4AS32D_T64";
 /// Bits per weight the saving is measured AGAINST: the checkpoint's own
 /// stored width. A safetensors VoxCPM2 checkpoint is BF16, so a byte saving
 /// quoted against 16 bpw is the saving a producer actually realizes.
@@ -226,31 +292,14 @@ fn parse_device(value: &str) -> Result<Device, String> {
     }
 }
 
-/// Parse a `SPECIFICATION.md` Section 12 native encoding identifier. The
-/// spelling is `encoding_name`'s exactly, so a name printed by any of these
-/// examples is a name this flag accepts.
-fn parse_encoding(value: &str) -> Result<NativeEncoding, String> {
-    match value {
-        "Q4S32_T64" => Ok(NativeEncoding::Q4S32T64),
-        "Q4AS32_T64" => Ok(NativeEncoding::Q4AS32T64),
-        "Q4AS32D_T64" => Ok(NativeEncoding::Q4AS32DT64),
-        "Q4AS64_T64" => Ok(NativeEncoding::Q4AS64T64),
-        "Q6S32_T64" => Ok(NativeEncoding::Q6S32T64),
-        "Q6S16D_T64" => Ok(NativeEncoding::Q6S16DT64),
-        "Q8S32_T64" => Ok(NativeEncoding::Q8S32T64),
-        other => Err(format!(
-            "--encoding: expected one of Q4S32_T64, Q4AS32_T64, Q4AS32D_T64, Q4AS64_T64, \
-             Q6S32_T64, Q6S16D_T64, Q8S32_T64, got {other:?}"
-        )),
-    }
-}
-
 struct Args {
     ckpt: PathBuf,
     audiovae: PathBuf,
     manifest: PathBuf,
     device: Device,
-    encoding: NativeEncoding,
+    /// Every encoding to measure, in the order given on the command line.
+    /// Never empty.
+    encodings: Vec<SweepEncoding>,
     eval_rows: usize,
     max_patches: usize,
     lambda_stop: f64,
@@ -259,24 +308,28 @@ struct Args {
     top: usize,
     skip: usize,
     limit: usize,
+    min_elements: usize,
 }
 
 const USAGE: &str = "usage: voxcpm_sensitivity --ckpt DIR --audiovae audiovae.safetensors \
 --manifest FILE.tsv (header-named TSV: wav, text, optional ref_wav) \
 [--device cpu|cuda] \
-[--encoding Q4AS32D_T64 (one of Q4S32_T64, Q4AS32_T64, Q4AS32D_T64, Q4AS64_T64, \
-Q6S32_T64, Q6S16D_T64, Q8S32_T64)] \
+[--encoding Q4AS32D_T64 (comma-separated list, measured in the order given, \
+one record per tensor per entry; TCF native identifiers and GGUF block formats \
+are both accepted, and an unknown name is refused with the full list)] \
 [--eval-rows 4 (rows scored per measurement, taken from the END of the kept \
 rows; 0 means every kept row — this is the cost dial)] \
 [--max-patches 38 (caps the target wav's patch count; over-cap targets are \
 dropped, over-cap ref_wav clips are truncated)] \
 [--lambda-stop 1.0] \
 [--reference-bpw 16 (the width the byte saving is measured against)] \
-[--baseline-every 32 (measurements between two baseline drift checks; 0 \
-disables the periodic check, the final one always runs)] \
+[--baseline-every 32 (measurements between two baseline drift checks, counted \
+in (tensor, encoding) pairs; 0 disables the periodic check, the final one \
+always runs)] \
 [--top 20 (rows of the ranked table on stderr; the full ranking is on stdout)] \
-[--skip 0] [--limit 0 (0 means no limit; --skip/--limit split one sweep into \
-shards that concatenate, since every shard measures against the same baseline)]";
+[--min-elements 0 (0 measures every perturbable tensor; a higher value drops the small ones, which cannot move a byte budget and cost the same forward pass as a large one)] [--skip 0] [--limit 0 (0 means no limit; --skip/--limit shard one sweep over \
+TENSORS into parts that concatenate — every shard measures every encoding for \
+the tensors it owns, against the same baseline)]";
 
 /// Consume the value that follows `flag`, advancing `i` past it.
 fn take_value(argv: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -292,7 +345,7 @@ fn parse_args() -> Result<Args, String> {
     let mut audiovae = None;
     let mut manifest = None;
     let mut device = Device::Cpu;
-    let mut encoding = DEFAULT_ENCODING;
+    let mut encodings = SweepEncoding::parse_list(DEFAULT_ENCODING)?;
     let mut eval_rows = DEFAULT_EVAL_ROWS;
     let mut max_patches = DEFAULT_MAX_PATCHES;
     let mut lambda_stop = 1.0f64;
@@ -300,6 +353,7 @@ fn parse_args() -> Result<Args, String> {
     let mut baseline_every = DEFAULT_BASELINE_EVERY;
     let mut top = DEFAULT_TOP;
     let mut skip = 0usize;
+    let mut min_elements = 0usize;
     let mut limit = 0usize;
 
     let mut i = 0;
@@ -310,7 +364,9 @@ fn parse_args() -> Result<Args, String> {
             "--audiovae" => audiovae = Some(PathBuf::from(take_value(&argv, &mut i, &flag)?)),
             "--manifest" => manifest = Some(PathBuf::from(take_value(&argv, &mut i, &flag)?)),
             "--device" => device = parse_device(&take_value(&argv, &mut i, &flag)?)?,
-            "--encoding" => encoding = parse_encoding(&take_value(&argv, &mut i, &flag)?)?,
+            "--encoding" => {
+                encodings = SweepEncoding::parse_list(&take_value(&argv, &mut i, &flag)?)?;
+            }
             "--eval-rows" => {
                 eval_rows = take_value(&argv, &mut i, &flag)?
                     .parse()
@@ -340,6 +396,11 @@ fn parse_args() -> Result<Args, String> {
                 top = take_value(&argv, &mut i, &flag)?
                     .parse()
                     .map_err(|e| format!("--top: {e}"))?;
+            }
+            "--min-elements" => {
+                min_elements = take_value(&argv, &mut i, &flag)?
+                    .parse()
+                    .map_err(|e| format!("--min-elements: {e}"))?;
             }
             "--skip" => {
                 skip = take_value(&argv, &mut i, &flag)?
@@ -380,7 +441,7 @@ fn parse_args() -> Result<Args, String> {
         audiovae: audiovae.ok_or_else(|| format!("--audiovae is required\n{USAGE}"))?,
         manifest: manifest.ok_or_else(|| format!("--manifest is required\n{USAGE}"))?,
         device,
-        encoding,
+        encodings,
         eval_rows,
         max_patches,
         lambda_stop,
@@ -388,6 +449,7 @@ fn parse_args() -> Result<Args, String> {
         baseline_every,
         top,
         skip,
+        min_elements,
         limit,
     })
 }
@@ -396,6 +458,15 @@ fn parse_args() -> Result<Args, String> {
 struct Measurement {
     name: String,
     elements: usize,
+    /// The encoding this tensor was measured at, as the codec spells it. One
+    /// tensor contributes one `Measurement` per encoding on `--encoding`.
+    encoding: String,
+    /// The tensor's ACTUAL packed size at this encoding, from the codec's own
+    /// layout: the GGUF block table, or `tcf-core`'s span arithmetic. This is
+    /// the cost an allocator spends, and it is NOT `elements * bpw / 8` — a
+    /// GGUF block charges for its scales and a partial TCF super-block is
+    /// charged in full.
+    payload_bytes: usize,
     /// `perturbed_total - baseline_total`, in the loss's own units.
     delta: f64,
     /// `delta / |baseline_total|`. The number that compares across
@@ -407,13 +478,40 @@ struct Measurement {
     delta_per_byte: f64,
 }
 
-/// A parameter that could not be measured, and why. Reported rather than
-/// dropped: a candidate count nobody can audit is a candidate count nobody
-/// can trust.
+/// A parameter that could not be measured at ALL, and why — a dtype, a
+/// layout, or an alias no encoding can lift. Reported rather than dropped: a
+/// candidate count nobody can audit is a candidate count nobody can trust.
+///
+/// A rejection that belongs to ONE encoding is not this: it is emitted inside
+/// the measurement loop as a `"skipped"` record carrying an `encoding` field,
+/// and leaves the tensor measured at every other encoding.
 struct Skipped {
     name: String,
     elements: usize,
     reason: String,
+}
+
+/// Emit one `"skipped"` record for a (tensor, encoding) pair on stdout, and
+/// the same reason on stderr beside the progress it replaces.
+fn skip_pair(
+    progress: &str,
+    name: &str,
+    elements: usize,
+    encoding: &str,
+    reason: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("{progress} {name} @ {encoding}: skipped: {reason}");
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "record": "skipped",
+            "name": name,
+            "elements": elements,
+            "encoding": encoding,
+            "reason": reason,
+        }))?
+    );
+    Ok(())
 }
 
 /// Overwrite `tensor`'s device buffer with `values`.
@@ -430,18 +528,6 @@ fn write_values<R: Runtime<DType = DType>>(
     let bytes: &[u8] = bytemuck::cast_slice(values);
     R::copy_to_device(bytes, tensor.ptr(), tensor.device())?;
     Ok(())
-}
-
-/// Whether a native encoding can legally hold a tensor of this shape:
-/// `SPECIFICATION.md` Section 12 requires rank at least 2 and a trailing
-/// dimension that is a whole number of tiles. Asked by calling the tiling
-/// unit itself rather than by re-deriving the rule here, so the answer can
-/// never disagree with the encoder's.
-fn tiling_error(dims: &[u64], tile: u16) -> Option<String> {
-    match tile_count(dims, dims.len() as u32, tile) {
-        Ok(_) => None,
-        Err(e) => Some(e.to_string()),
-    }
 }
 
 /// Load the model, score the baseline, then perturb one tensor at a time.
@@ -517,9 +603,19 @@ where
         "baseline: eval/diff {base_diff:.6} eval/stop {base_stop:.6} eval/total {base_total:.6}"
     );
 
-    let layout = args.encoding.layout();
-    let encoded_bpw = layout.bits_per_weight();
-    let name = encoding_name(Encoding::Native(args.encoding));
+    // Resolved once. `encoding_names` and `encoded_bpw` are parallel to
+    // `args.encodings`, in the order given on the command line, and the
+    // baseline record publishes them in that same order.
+    let encoding_names: Vec<String> = args.encodings.iter().map(|e| e.name()).collect();
+    let encoded_bpw: Vec<f64> = args.encodings.iter().map(|e| e.bits_per_weight()).collect();
+    // A codec with no round trip in this build damages nothing it is asked
+    // about, so say so ONCE up front rather than only through a skipped
+    // record per tensor thousands of lines into the run.
+    for encoding in &args.encodings {
+        if let Some(reason) = encoding.round_trip_error() {
+            eprintln!("warning: {reason}");
+        }
+    }
 
     // Owned handles, taken before the loop so no `Var` borrow is held across
     // a scoring call. A cloned `Tensor` shares its storage, so writing
@@ -548,10 +644,11 @@ where
         if !tensor.is_contiguous() {
             return reject("not contiguous: its buffer cannot be rewritten in place".to_string());
         }
-        let dims: Vec<u64> = tensor.shape().iter().map(|&d| d as u64).collect();
-        if let Some(reason) = tiling_error(&dims, layout.geometry.tile) {
-            return reject(format!("no native encoding can hold this shape: {reason}"));
-        }
+        // Whether a given encoding can HOLD this shape is asked per (tensor,
+        // encoding) inside the measurement loop instead: the rule differs
+        // between codecs, and a tensor one encoding refuses is still a
+        // measurement at every other one.
+        //
         // A tied parameter shares one buffer with an earlier one. Perturbing
         // it would move two tensors at once, which is not the measurement.
         if !seen_buffers.insert(tensor.ptr()) {
@@ -561,6 +658,28 @@ where
     });
 
     let total_candidates = candidates.len();
+
+    // A tensor too small to shift the byte budget costs the same forward pass
+    // as one that decides it. Dropping those is the cheapest way to shorten a
+    // sweep without weakening any measurement it still takes.
+    let mut below_min = 0usize;
+    let candidates: Vec<(String, Tensor<R>)> = candidates
+        .into_iter()
+        .filter(|(_, tensor)| {
+            let keep = tensor.numel() >= args.min_elements;
+            if !keep {
+                below_min += 1;
+            }
+            keep
+        })
+        .collect();
+    if below_min > 0 {
+        eprintln!(
+            "--min-elements {}: {below_min} tensor(s) dropped as too small to move a byte budget",
+            args.min_elements
+        );
+    }
+
     let selected: Vec<(String, Tensor<R>)> = candidates
         .into_iter()
         .skip(args.skip)
@@ -571,12 +690,18 @@ where
         })
         .collect();
 
+    let planned = selected.len() * args.encodings.len();
     eprintln!(
-        "candidates: {} of {parameter_count} parameter(s) quantizable at {name}, {} skipped, \
+        "candidates: {} of {parameter_count} parameter(s) perturbable, {} skipped, \
          {} selected by --skip/--limit",
         total_candidates,
         skipped.len(),
         selected.len()
+    );
+    eprintln!(
+        "encodings: {} — {planned} measurement(s) at {} eval row(s) each",
+        encoding_names.join(", "),
+        eval_batch.len()
     );
 
     println!(
@@ -586,8 +711,8 @@ where
             "ckpt": args.ckpt.display().to_string(),
             "manifest": args.manifest.display().to_string(),
             "device": match args.device { Device::Cpu => "cpu", Device::Cuda => "cuda" },
-            "encoding": name,
-            "encoded_bpw": encoded_bpw,
+            "encoding": &encoding_names,
+            "encoded_bpw": &encoded_bpw,
             "reference_bpw": args.reference_bpw,
             "eval_rows": eval_batch.len(),
             "eval_seed": EVAL_NOISE_SEED,
@@ -597,6 +722,7 @@ where
             "parameters": parameter_count,
             "candidates": total_candidates,
             "measured": selected.len(),
+            "measurements_planned": planned,
             "baseline_diff": base_diff,
             "baseline_stop": base_stop,
             "baseline_total": base_total,
@@ -614,133 +740,149 @@ where
         );
     }
 
-    let mut measurements: Vec<Measurement> = Vec::with_capacity(selected.len());
+    let mut measurements: Vec<Measurement> = Vec::with_capacity(planned);
+    // Counts PAIRS, not tensors: `--baseline-every` spaces the drift checks
+    // over the work actually done, which a multi-encoding sweep multiplies.
+    let mut done = 0usize;
     for (index, (tensor_name, tensor)) in selected.iter().enumerate() {
         let elements = tensor.numel();
-        let dims: Vec<u64> = tensor.shape().iter().map(|&d| d as u64).collect();
-        let rank = dims.len() as u32;
+        let shape: Vec<usize> = tensor.shape().to_vec();
 
-        // The snapshot restoration is checked against. Read as f32 rather
-        // than as opaque bytes only because the quantizer needs the same
-        // values anyway; the restore writes these exact bits back.
+        // The snapshot every restoration is checked against, taken ONCE per
+        // tensor and written back after EVERY encoding's score. Read as f32
+        // rather than as opaque bytes only because the quantizers need the
+        // same values anyway; the restore writes these exact bits back.
         let original: Vec<f32> = tensor.try_to_vec::<f32>()?;
 
-        let tiles = match quantize(&original, &dims, rank, layout) {
-            Ok(tiles) => tiles,
-            // A tensor the codec refuses (a non-finite value, a scale that
-            // underflows binary16) is a result about the tensor, not a fault
-            // in the run.
-            Err(e) => {
-                eprintln!(
-                    "[{}/{}] {tensor_name}: not encodable: {e}",
-                    index + 1,
-                    selected.len()
-                );
-                println!(
-                    "{}",
-                    serde_json::to_string(&serde_json::json!({
-                        "record": "skipped",
-                        "name": tensor_name,
-                        "elements": elements,
-                        "reason": format!("{name} rejected this tensor: {e}"),
-                    }))?
-                );
+        // Encodings in the order given on the command line, inside tensors in
+        // `named_parameters()` order — the two orders that make two runs of
+        // one command line diff cleanly.
+        for (slot, encoding) in args.encodings.iter().enumerate() {
+            let encoding_name = &encoding_names[slot];
+            done += 1;
+            let progress = format!(
+                "[{done}/{planned} tensor {}/{} enc {}/{}]",
+                index + 1,
+                selected.len(),
+                slot + 1,
+                args.encodings.len()
+            );
+            let label = format!("{tensor_name} @ {encoding_name}");
+
+            // Three reasons this pair may not be measurable, each a result
+            // ABOUT the pair rather than a fault in the run, and none of them
+            // a reason to drop the tensor from the other encodings.
+            if let Some(reason) = encoding.shape_error(&shape) {
+                skip_pair(&progress, tensor_name, elements, encoding_name, &reason)?;
                 continue;
             }
-        };
-        let mut round_trip: Vec<f32> = Vec::new();
-        dequantize_into(&tiles, layout, &mut round_trip)?;
-        drop(tiles);
-        if round_trip.len() != original.len() {
-            return Err(format!(
-                "{tensor_name}: round trip produced {} value(s) for {} element(s)",
-                round_trip.len(),
-                original.len()
-            )
-            .into());
-        }
+            let payload_bytes = match encoding.payload_bytes(&shape) {
+                Ok(bytes) => bytes,
+                Err(reason) => {
+                    skip_pair(&progress, tensor_name, elements, encoding_name, &reason)?;
+                    continue;
+                }
+            };
+            // A codec refusing this tensor (a non-finite value, a scale that
+            // underflows binary16, a format with no writer in this build).
+            let round_trip = match encoding.round_trip(&original, &shape) {
+                Ok(values) => values,
+                Err(reason) => {
+                    skip_pair(&progress, tensor_name, elements, encoding_name, &reason)?;
+                    continue;
+                }
+            };
 
-        write_values(tensor, &round_trip)?;
-        let scored = score(tensor_name);
+            write_values(tensor, &round_trip)?;
+            let scored = score(&label);
 
-        // Restored BEFORE the score is unwrapped, so a scoring error still
-        // leaves the model at its baseline rather than perturbed.
-        write_values(tensor, &original)?;
-        let restored: Vec<f32> = tensor.try_to_vec::<f32>()?;
-        if restored.len() != original.len()
-            || restored
-                .iter()
-                .zip(&original)
-                .any(|(a, b)| a.to_bits() != b.to_bits())
-        {
-            return Err(format!(
-                "{tensor_name}: restoration did not reproduce the original bytes; every \
-                 measurement after this one would be scored against drifted weights"
-            )
-            .into());
-        }
+            // Restored BEFORE the score is unwrapped, so a scoring error
+            // still leaves the model at its baseline rather than perturbed —
+            // and restored between ENCODINGS, so the next encoding on this
+            // same tensor starts from the baseline weights rather than from
+            // this one's reconstruction.
+            write_values(tensor, &original)?;
+            let restored: Vec<f32> = tensor.try_to_vec::<f32>()?;
+            if restored.len() != original.len()
+                || restored
+                    .iter()
+                    .zip(&original)
+                    .any(|(a, b)| a.to_bits() != b.to_bits())
+            {
+                return Err(format!(
+                    "{label}: restoration did not reproduce the original bytes; every \
+                     measurement after this one would be scored against drifted weights"
+                )
+                .into());
+            }
 
-        let (_, _, perturbed_total) = scored?;
-        let delta = perturbed_total - base_total;
-        let relative_delta = if base_total == 0.0 {
-            delta
-        } else {
-            delta / base_total.abs()
-        };
-        let bytes_saved = elements as f64 * (args.reference_bpw - encoded_bpw) / 8.0;
-        let delta_per_byte = if bytes_saved == 0.0 {
-            f64::NAN
-        } else {
-            delta / bytes_saved
-        };
+            let (_, _, perturbed_total) = scored?;
+            let delta = perturbed_total - base_total;
+            let relative_delta = if base_total == 0.0 {
+                delta
+            } else {
+                delta / base_total.abs()
+            };
+            // Unchanged in name and in meaning: the NOMINAL saving against
+            // `--reference-bpw`. `payload_bytes` beside it is the real one.
+            let bytes_saved = elements as f64 * (args.reference_bpw - encoded_bpw[slot]) / 8.0;
+            let delta_per_byte = if bytes_saved == 0.0 {
+                f64::NAN
+            } else {
+                delta / bytes_saved
+            };
 
-        eprintln!(
-            "[{}/{}] {tensor_name} elems={elements} delta={delta:+.6e} rel={relative_delta:+.6e} \
-             bytes_saved={bytes_saved:.0} delta/byte={delta_per_byte:+.6e}",
-            index + 1,
-            selected.len()
-        );
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "record": "sensitivity",
-                "name": tensor_name,
-                "elements": elements,
-                "encoding": name,
-                "delta": delta,
-                "relative_delta": relative_delta,
-                "bytes_saved": bytes_saved,
-                "delta_per_byte": delta_per_byte,
-                "perturbed_total": perturbed_total,
-            }))?
-        );
-        measurements.push(Measurement {
-            name: tensor_name.clone(),
-            elements,
-            delta,
-            relative_delta,
-            bytes_saved,
-            delta_per_byte,
-        });
-
-        let due = args.baseline_every > 0 && (index + 1) % args.baseline_every == 0;
-        if due {
-            check_baseline_drift(&score, base_total, tensor_name)?;
             eprintln!(
-                "baseline re-check after {} measurement(s): unchanged",
-                index + 1
+                "{progress} {label} elems={elements} delta={delta:+.6e} \
+                 rel={relative_delta:+.6e} payload={payload_bytes} \
+                 bytes_saved={bytes_saved:.0} delta/byte={delta_per_byte:+.6e}"
             );
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "record": "sensitivity",
+                    "name": tensor_name,
+                    "elements": elements,
+                    "encoding": encoding_name,
+                    "delta": delta,
+                    "relative_delta": relative_delta,
+                    "bytes_saved": bytes_saved,
+                    "delta_per_byte": delta_per_byte,
+                    "payload_bytes": payload_bytes,
+                    "perturbed_total": perturbed_total,
+                }))?
+            );
+            measurements.push(Measurement {
+                name: tensor_name.clone(),
+                elements,
+                encoding: encoding_names[slot].clone(),
+                payload_bytes,
+                delta,
+                relative_delta,
+                bytes_saved,
+                delta_per_byte,
+            });
+
+            let due = args.baseline_every > 0 && done.is_multiple_of(args.baseline_every);
+            if due {
+                check_baseline_drift(&score, base_total, &label)?;
+                eprintln!("baseline re-check after {done} measurement(s): unchanged");
+            }
         }
     }
 
     // Always, regardless of `--baseline-every`: a run whose last measurement
     // is unverified has an unverified ranking.
     if let Some(last) = measurements.last() {
-        check_baseline_drift(&score, base_total, &last.name)?;
+        check_baseline_drift(
+            &score,
+            base_total,
+            &format!("{} @ {}", last.name, last.encoding),
+        )?;
         eprintln!("final baseline re-check: unchanged");
     }
 
-    report(&measurements, args.top, &name);
+    report(&measurements, args.top, &encoding_names);
     eprintln!("total {:.1}s", started.elapsed().as_secs_f64());
     Ok(())
 }
@@ -775,7 +917,13 @@ where
 /// The ranked table on stderr. `PROFILES.md` Section 4 step 3 ranks by task
 /// delta per unit of cost, so that is the sort key here; the full ranking is
 /// on stdout either way.
-fn report(measurements: &[Measurement], top: usize, encoding: &str) {
+///
+/// Rows from every encoding share one table, ranked together and each naming
+/// its own encoding, because the whole point of a multi-encoding sweep is to
+/// see one tensor's options beside each other. The stable tie-break on
+/// (tensor, encoding) keeps two runs printing the same table even where two
+/// pairs land on the same `delta_per_byte`.
+fn report(measurements: &[Measurement], top: usize, encodings: &[String]) {
     if measurements.is_empty() {
         eprintln!("no tensor was measured");
         return;
@@ -785,25 +933,38 @@ fn report(measurements: &[Measurement], top: usize, encoding: &str) {
         b.delta_per_byte
             .partial_cmp(&a.delta_per_byte)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.encoding.cmp(&b.encoding))
     });
     let shown = ranked.len().min(top.max(1));
     eprintln!(
-        "\ntop {shown} of {} tensor(s) by task delta per byte saved at {encoding} \
+        "\ntop {shown} of {} measurement(s) by task delta per byte saved at {} \
          (most sensitive first):",
-        ranked.len()
+        ranked.len(),
+        encodings.join(", ")
     );
     eprintln!(
-        "{:>4}  {:<52} {:>12} {:>13} {:>13} {:>13} {:>13}",
-        "rank", "tensor", "elements", "delta", "rel delta", "bytes saved", "delta/byte"
+        "{:>4}  {:<44} {:<12} {:>12} {:>13} {:>13} {:>13} {:>13} {:>13}",
+        "rank",
+        "tensor",
+        "encoding",
+        "elements",
+        "delta",
+        "rel delta",
+        "payload",
+        "bytes saved",
+        "delta/byte"
     );
     for (rank, m) in ranked.iter().take(shown).enumerate() {
         eprintln!(
-            "{:>4}  {:<52} {:>12} {:>13.5e} {:>13.5e} {:>13.0} {:>13.5e}",
+            "{:>4}  {:<44} {:<12} {:>12} {:>13.5e} {:>13.5e} {:>13} {:>13.0} {:>13.5e}",
             rank + 1,
             m.name,
+            m.encoding,
             m.elements,
             m.delta,
             m.relative_delta,
+            m.payload_bytes,
             m.bytes_saved,
             m.delta_per_byte
         );

@@ -33,8 +33,9 @@
 
 use crate::error::Result;
 use crate::format::tcf::TcfLoader;
-use crate::model::audio::voxcpm::loader::support::TcfSource;
+use crate::model::audio::voxcpm::loader::support::{DenseWeightSource, TcfSource};
 use crate::model::audio::voxcpm::model::loader::{StackConfigs, VoxCpm2Model};
+use crate::quant::traits::DequantOps;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, TensorOps, TypeConversionOps, UnaryOps};
 use numr::runtime::Runtime;
@@ -76,6 +77,39 @@ where
         let loader = TcfLoader::open(tcf_path.as_ref())?;
         let mut source = TcfSource::new(&loader)?;
         Self::from_source(&mut source, cfgs, audiovae_path.as_ref(), device, dtype)
+    }
+
+    /// Load the whole model from a TCF, materializing EVERY natively encoded
+    /// weight to dense F32 instead of keeping it packed.
+    ///
+    /// The TCF half of the weight-encoding-only measurement mode — see
+    /// [`from_gguf_dense`](Self::from_gguf_dense) for why it exists and
+    /// [`DenseWeightSource`] for the activation-contract argument behind it.
+    /// A cross-format quality comparison is valid only when both artifacts
+    /// run the same activation contract, so both halves of a comparison load
+    /// through the dense entry point or neither does.
+    ///
+    /// There is no `dtype` argument: the mode fixes F32.
+    ///
+    /// # Errors
+    /// Every error [`from_tcf`](Self::from_tcf) raises.
+    pub fn from_tcf_dense<P: AsRef<Path>, Q: AsRef<Path>, C: DequantOps<R>>(
+        tcf_path: P,
+        config_json: &Path,
+        audiovae_path: Q,
+        device: &R::Device,
+        client: &C,
+    ) -> Result<Self> {
+        let cfgs = StackConfigs::from_config_json(config_json)?;
+        let loader = TcfLoader::open(tcf_path.as_ref())?;
+        let mut source = TcfSource::new(&loader)?;
+        Self::from_source(
+            &mut DenseWeightSource::new(&mut source, client),
+            cfgs,
+            audiovae_path.as_ref(),
+            device,
+            Some(DType::F32),
+        )
     }
 }
 

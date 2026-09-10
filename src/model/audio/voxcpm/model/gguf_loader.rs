@@ -58,7 +58,9 @@
 use crate::error::{Error, Result};
 use crate::format::gguf::Gguf;
 use crate::model::audio::voxcpm::loader::cstr::{GgmlNamedGguf, GgufNaming, probe_naming};
+use crate::model::audio::voxcpm::loader::support::DenseWeightSource;
 use crate::model::audio::voxcpm::model::loader::{StackConfigs, VoxCpm2Model};
+use crate::quant::traits::DequantOps;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, TensorOps, TypeConversionOps, UnaryOps};
 use numr::runtime::Runtime;
@@ -128,6 +130,60 @@ where
                 device,
                 dtype,
             ),
+        }
+    }
+
+    /// Load the whole model from a GGUF, materializing EVERY packed weight
+    /// to dense F32 instead of keeping it packed.
+    ///
+    /// This is the weight-encoding-only measurement mode, and it exists for
+    /// one reason: a cross-format quality comparison is valid only when both
+    /// artifacts run the SAME activation contract (CONFORMANCE.md Section
+    /// 7.1). A GGUF declares none, so its packed path may quantize
+    /// activations before the matmul, while a TCF's exact-F32 contract does
+    /// not — read
+    /// [`DenseWeightSource`](crate::model::audio::voxcpm::loader::support::DenseWeightSource)
+    /// for the whole argument. Loaded through here, both formats run dense
+    /// F32 end to end and differ only in weight VALUES.
+    ///
+    /// There is no `dtype` argument: the mode fixes F32, the dtype
+    /// `quant_matmul` would have run the packed weight at.
+    ///
+    /// A dense stack costs what an unquantized checkpoint costs. Use
+    /// [`from_gguf`](Self::from_gguf) for anything but a measurement.
+    pub fn from_gguf_dense<P: AsRef<Path>, Q: AsRef<Path>, C: DequantOps<R>>(
+        gguf_path: P,
+        config_json: Option<&Path>,
+        audiovae_path: Q,
+        device: &R::Device,
+        client: &C,
+    ) -> Result<Self> {
+        let mut source = Gguf::open(gguf_path.as_ref())?;
+        let embedded = source.metadata().get_string(GGUF_CONFIG_JSON_KEY);
+        let content = resolve_config_text(embedded, config_json)?;
+        let cfgs = StackConfigs::from_config_str(&content)?;
+        // Same two-convention dispatch [`from_gguf`] makes, on the same
+        // probe: the decorator changes what a weight arrives AS, never which
+        // name it is read under.
+        let naming = probe_naming(&source)?;
+        match naming {
+            GgufNaming::Verbatim => Self::from_source(
+                &mut DenseWeightSource::new(&mut source, client),
+                cfgs,
+                audiovae_path.as_ref(),
+                device,
+                Some(DType::F32),
+            ),
+            GgufNaming::Ggml => {
+                let mut named = GgmlNamedGguf::new(source);
+                Self::from_source(
+                    &mut DenseWeightSource::new(&mut named, client),
+                    cfgs,
+                    audiovae_path.as_ref(),
+                    device,
+                    Some(DType::F32),
+                )
+            }
         }
     }
 }

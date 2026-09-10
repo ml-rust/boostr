@@ -8,7 +8,7 @@
 //!     [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] [--alpha 32] \
 //!     [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors] \
 //!     [--lambda-stop 1.0] [--training-cfg-rate 0.1] [--eval-rows 4] \
-//!     [--eval-only]
+//!     [--eval-only] [--dequant-weights]
 //! ```
 //!
 //! `CKPT_DIR` holds `config.json`, `model.safetensors` and `tokenizer.json`,
@@ -185,6 +185,46 @@
 //! training run and an eval-only run over the same manifest with the same
 //! `--eval-rows` score the same rows in the same order.
 //!
+//! # Comparing two artifacts: `--dequant-weights`
+//!
+//! A cross-format quality number is only meaningful when both artifacts run
+//! the SAME activation contract. CONFORMANCE.md Section 7.1 says so, and by
+//! default the two single-file paths do NOT match:
+//!
+//! - A TCF from compressr declares an exact F32 contract, so `route_tcf`
+//!   resolves to the F32 kernel and the matmul runs f32 activations.
+//! - A GGUF carries no contract at all, so on CUDA at `m >= 2` it takes the
+//!   feature-major MMQ path, which quantizes the activations (Q8_1-style,
+//!   per-32 dynamic scale) before the tensor-core MMA.
+//!
+//! The GGUF side therefore absorbs activation-quantization error the TCF side
+//! never pays, and the difference reads as a weight-format difference when it
+//! is nothing of the kind.
+//!
+//! `--dequant-weights` removes the confound. It materializes EVERY packed
+//! weight to dense F32 at load, on the `--gguf` and `--tcf` paths alike
+//! (`from_gguf_dense`/`from_tcf_dense`, both of which run the codec's own
+//! `DequantOps::dequantize` — the same op the quantized-projection backward
+//! already uses, and the same kernels `quant_matmul` decodes with). With it
+//! set the forward pass is dense F32 end to end on both formats, so the only
+//! difference left between two artifacts is the weight VALUES — which is the
+//! weight-encoding damage the comparison is after.
+//!
+//! `--ckpt` already loads dense F32, so the flag changes nothing there and
+//! says so at load.
+//!
+//! Everything else is untouched by the flag: the loss, the row selection, the
+//! seed and the `t`/noise draw are identical in both modes, so a with-flag and
+//! a without-flag run of one artifact differ ONLY in weight representation.
+//!
+//! It is a MEASUREMENT mode. A dense stack costs what an unquantized
+//! checkpoint costs, which is the whole thing the packed path exists to
+//! avoid — never fine-tune or serve a quantized artifact through it.
+//!
+//! The mode is printed at load and recorded in the JSON line's
+//! `weights_dense` field, so two result files can never be compared across
+//! modes by accident.
+//!
 //! # Machine-readable eval output
 //!
 //! Every eval pass — per epoch during training, once under `--eval-only` —
@@ -197,7 +237,9 @@
 //! (`eval_rows`) and the seed (`eval_seed`) the pairing rests on, plus the
 //! weight source, the manifest, the device, `max_patches` and the loss
 //! weights. `epoch` is the 1-based epoch under training and `null` under
-//! `--eval-only`. `mode` is `"train"` or `"eval-only"`.
+//! `--eval-only`. `mode` is `"train"` or `"eval-only"`. `weights_dense` is
+//! `--dequant-weights`: two objects that disagree on it were scored under
+//! different activation contracts and must not be compared.
 //!
 //! # What "deterministic" means here, exactly
 //!
@@ -457,6 +499,12 @@ struct Args {
     /// VRAM, at ~33% extra compute. OFF by default, so a run without the
     /// flag behaves exactly as it did before the flag existed.
     activation_checkpointing: bool,
+    /// Materialize every packed weight to dense F32 at load, on the `--gguf`
+    /// and `--tcf` paths alike, so the forward pass is dense F32 end to end
+    /// and two artifacts differ only in weight VALUES — see the module docs'
+    /// "Comparing two artifacts" section. OFF by default, so a run without
+    /// the flag behaves exactly as it did before the flag existed.
+    dequant_weights: bool,
 }
 
 const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
@@ -475,7 +523,15 @@ training, and means every kept row under --eval-only)] \
 [--eval-only (score the artifact once and exit: no LoRA, no optimizer, no \
 weight update, no checkpoint; prints one JSON metric line on stdout)] \
 [--checkpoint (activation checkpointing: recompute each layer's intermediates \
-during backward instead of holding them, ~33% slower, much less VRAM)]";
+during backward instead of holding them, ~33% slower, much less VRAM)] \
+[--dequant-weights (dequantize EVERY packed weight to dense F32 at load, for \
+--gguf and --tcf alike, so the forward pass is dense F32 end to end. A \
+cross-format quality comparison is only valid when both artifacts run the \
+same activation contract: a TCF declares exact F32, a GGUF declares none and \
+may quantize activations before the matmul, so without this flag the formats \
+are scored under different contracts and the gap is not weight-encoding \
+damage. Costs what an unquantized checkpoint costs; a measurement mode, not \
+a way to serve or fine-tune a quantized artifact)]";
 
 /// Consume the value that follows `flag`, advancing `i` past it.
 fn take_value(argv: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -505,6 +561,7 @@ fn parse_args() -> Result<Args, String> {
     let mut eval_rows = DEFAULT_EVAL_ROWS;
     let mut eval_only = false;
     let mut activation_checkpointing = false;
+    let mut dequant_weights = false;
 
     let mut i = 0usize;
     while i < argv.len() {
@@ -566,6 +623,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--eval-only" => eval_only = true,
             "--checkpoint" => activation_checkpointing = true,
+            "--dequant-weights" => dequant_weights = true,
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown flag {other}\n{USAGE}")),
         }
@@ -640,6 +698,7 @@ fn parse_args() -> Result<Args, String> {
         eval_rows,
         eval_only,
         activation_checkpointing,
+        dequant_weights,
     })
 }
 
@@ -761,6 +820,11 @@ fn print_eval_record(
             Device::Cpu => "cpu",
             Device::Cuda => "cuda",
         },
+        // Which weight representation the forward pass ran. Two result
+        // files that disagree here were scored under different activation
+        // contracts and are NOT comparable — see the module docs'
+        // "Comparing two artifacts" section.
+        "weights_dense": args.dequant_weights,
         "eval_rows": eval_rows,
         "eval_seed": EVAL_NOISE_SEED,
         "max_patches": args.max_patches,
@@ -814,10 +878,44 @@ where
     // Requesting `Some(DType::F32)` here would work too (it agrees with the
     // default), but `None` says "no cast" precisely, matching
     // `voxcpm_clone.rs`'s own GGUF arm.
+    //
+    // `--dequant-weights` switches BOTH single-file arms to the `*_dense`
+    // loaders instead, which materialize every packed weight to dense F32 at
+    // load — the weight-encoding-only mode, see the module docs' "Comparing
+    // two artifacts" section. `--ckpt` is dense F32 already, so the flag
+    // changes nothing there and says so.
+    //
+    // MANDATORY, never drop this line: the mode has to be visible in the log
+    // of every run, because two runs that differ only in it are NOT
+    // comparable and nothing else in the output distinguishes them.
+    if args.dequant_weights {
+        eprintln!(
+            "weights: DENSE F32 (--dequant-weights) — every packed weight is dequantized at              load, so both formats run the same dense F32 activation contract and differ only              in weight values; costs what an unquantized checkpoint costs"
+        );
+    } else {
+        eprintln!(
+            "weights: as stored (pass --dequant-weights to dequantize every packed weight to              dense F32 before scoring)"
+        );
+    }
     let mut model = match &args.weights {
         Weights::Checkpoint(dir) => {
             eprintln!("loading {} ...", dir.display());
+            if args.dequant_weights {
+                eprintln!(
+                    "--dequant-weights: --ckpt already loads dense F32, nothing to dequantize"
+                );
+            }
             VoxCpm2Model::<R>::from_checkpoint(dir, &args.audiovae, device, Some(DType::F32))?
+        }
+        Weights::Gguf(path) if args.dequant_weights => {
+            eprintln!("loading {} (dequantized to dense F32) ...", path.display());
+            VoxCpm2Model::<R>::from_gguf_dense(
+                path,
+                args.config.as_deref(),
+                &args.audiovae,
+                device,
+                client,
+            )?
         }
         Weights::Gguf(path) => {
             eprintln!("loading {} (base stays quantized) ...", path.display());
@@ -829,6 +927,16 @@ where
                 None,
             )?
         }
+        Weights::Tcf(path) if args.dequant_weights => {
+            eprintln!("loading {} (dequantized to dense F32) ...", path.display());
+            // `parse_args` already rejected a missing `--config`; this arm
+            // repeats the check rather than unwrapping on that invariant.
+            let config = args
+                .config
+                .as_deref()
+                .ok_or("--config is required with --tcf")?;
+            VoxCpm2Model::<R>::from_tcf_dense(path, config, &args.audiovae, device, client)?
+        }
         // Same loader `voxcpm_clone`'s `--tcf` arm calls, on the same
         // auxiliary inputs, with the `None` dtype the `--gguf` arm above
         // explains: a natively encoded projection stays PACKED, dense
@@ -836,8 +944,6 @@ where
         // by the loader anyway.
         Weights::Tcf(path) => {
             eprintln!("loading {} (base stays packed) ...", path.display());
-            // `parse_args` already rejected a missing `--config`; this arm
-            // repeats the check rather than unwrapping on that invariant.
             let config = args
                 .config
                 .as_deref()

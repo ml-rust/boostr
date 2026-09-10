@@ -290,6 +290,11 @@ path = "examples/voxcpm/finetune.rs"
 required-features = ["audio", "f16"]
 
 [[example]]
+name = "voxcpm_sensitivity"
+path = "examples/voxcpm/sensitivity.rs"
+required-features = ["audio", "f16"]
+
+[[example]]
 name = "inspect_kokoro"
 required-features = ["audio"]
 

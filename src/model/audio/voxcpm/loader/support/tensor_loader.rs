@@ -1,7 +1,7 @@
 //! [`TensorLoader`]: the shape-checked, prefix-aware reader that walks a
 //! checkpoint's key layout on behalf of the encoder/decoder loaders.
 
-use super::weight_source::WeightSource;
+use super::WeightSource;
 use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::vae::causal_conv1d::CausalConv1d;
 use crate::model::audio::voxcpm::vae::res_unit::ResUnit;

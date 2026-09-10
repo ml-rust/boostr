@@ -134,6 +134,45 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
         Ok(map)
     }
 
+    /// Load every name in `names` through a
+    /// [`WeightSource`](crate::format::weight_source::WeightSource), keyed by
+    /// `rename(name)`.
+    ///
+    /// This is the format-agnostic constructor: safetensors, GGUF and TCF all
+    /// implement that trait, so one call site covers all three, and a
+    /// caller that wraps the source in
+    /// [`DenseWeightSource`](crate::format::weight_source::DenseWeightSource)
+    /// gets every packed weight materialized to dense F32 without this
+    /// function knowing that happened. `from_gguf` above stays the
+    /// GGUF-specific convenience; it is the same shape with the source and
+    /// the rename fixed.
+    ///
+    /// `rename` maps a stored tensor name to the name the model asks
+    /// `VarBuilder` for: `gguf_to_hf_name` for a GGUF, identity for a
+    /// safetensors checkpoint or a TCF written with HuggingFace names.
+    ///
+    /// Per-expert MoE tensors are stacked afterwards, exactly as `from_gguf`
+    /// does — the pass matches on `.experts.{N}.` names and is a no-op for a
+    /// source that has none.
+    pub fn from_weight_source<S>(
+        source: &mut S,
+        names: &[String],
+        rename: impl Fn(&str) -> String,
+        device: &R::Device,
+    ) -> Result<Self>
+    where
+        R::Client: numr::ops::ShapeOps<R>,
+        S: crate::format::weight_source::WeightSource<R>,
+    {
+        let mut map = Self::new();
+        for name in names {
+            let weight = source.load_named_weight(name, device)?;
+            map.insert_weight(rename(name), weight);
+        }
+        Self::stack_moe_experts(&mut map, device)?;
+        Ok(map)
+    }
+
     /// Stack per-expert MoE tensors into [num_experts, ...] tensors.
     ///
     /// Finds patterns like `*.experts.{N}.{proj}.weight` and stacks them into

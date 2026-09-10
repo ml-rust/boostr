@@ -9,7 +9,7 @@ use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
-/// A checkpoint a VoxCPM2 sub-loader can read a named tensor out of.
+/// A checkpoint a loader can read a named tensor out of.
 ///
 /// The file format is an I/O detail: every sub-loader below knows the
 /// *layout* (which key holds which weight, and what shape it must have),
@@ -17,9 +17,9 @@ use numr::tensor::Tensor;
 /// GGUF file. Keeping the read behind this trait is what stops that layout
 /// knowledge from being duplicated once per format.
 ///
-/// Public because the sub-model `from_source` constructors take it as a
-/// bound, and those are the API a caller uses to load several sub-models
-/// out of ONE open checkpoint instead of reopening it per sub-model.
+/// Public because the `from_source` constructors take it as a bound, and
+/// those are the API a caller uses to load several sub-models out of ONE
+/// open checkpoint instead of reopening it per sub-model.
 pub trait WeightSource<R: Runtime<DType = DType>> {
     /// Load the tensor stored under exactly `name` as a DENSE tensor.
     ///

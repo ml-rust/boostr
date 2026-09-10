@@ -40,7 +40,7 @@ use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 use tcf_core::Encoding;
 
-use super::weight_source::WeightSource;
+use super::source::WeightSource;
 use crate::error::{Error, Result};
 use crate::format::tcf::{TcfLoader, TcfSession};
 use crate::nn::Weight;

@@ -29,7 +29,7 @@
 //! frozen weight, and the same kernels `quant_matmul` decodes with. Nothing
 //! here reimplements a block or plane layout.
 
-use super::weight_source::WeightSource;
+use super::source::WeightSource;
 use crate::error::{Error, Result};
 use crate::nn::Weight;
 use crate::quant::traits::DequantOps;
@@ -78,9 +78,9 @@ where
             // `DequantOps` carries no elementwise dequantization for an
             // AWQ/GPTQ packed layout — only fused GEMMs that take an
             // activation — so there is no way to honour the contract for
-            // one. No VoxCPM2 source produces this variant; if one ever
-            // does, it is named here rather than silently left packed while
-            // the run reports itself dense.
+            // one. No safetensors, GGUF or TCF source produces this
+            // variant; if one ever does, it is named here rather than
+            // silently left packed while the run reports itself dense.
             Weight::DecomposedQuant(_) => Err(Error::ModelError {
                 reason: format!(
                     "{name}: dense-weight loading has no elementwise dequantization for a \

@@ -21,7 +21,7 @@
 //! Kokoro loaders (and available to the cstr GGUF path, which stores the same
 //! pairs unfolded).
 
-use super::weight_source::WeightSource;
+use super::WeightSource;
 use crate::error::{Error, Result};
 use crate::format::torch_pt::TorchStateDict;
 use crate::nn::fuse_weight_norm;

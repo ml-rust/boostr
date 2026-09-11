@@ -11,6 +11,9 @@
 //! Raw encodings convert element by element through numr's dtype
 //! conversions. Section 12: a raw encoding stores literal values with no
 //! scale of any kind.
+//!
+//! Block encodings are GGML block streams and decode through the CPU dequant
+//! kernels, via [`super::block`].
 
 use crate::error::{Error, Result};
 use numr::dtype::{FP8E4M3, FP8E5M2};
@@ -18,6 +21,7 @@ use tcf_core::{Encoding, RawEncoding, TensorRecord, tile_count, unpack};
 
 use crate::quant::cpu::kernels::tcf::dequantize_tiles_into;
 
+use super::block::decode_block_f32;
 use super::error::tcf_tensor_error;
 use super::metadata::encoding_name;
 
@@ -68,6 +72,7 @@ pub fn decode_tensor_f32(record: &TensorRecord, payload: &[u8], name: &str) -> R
                 .map_err(|e| tcf_tensor_error(name, "dequantize", e))?;
             decoded
         }
+        Encoding::Block(block) => decode_block_f32(block, record, payload, name)?,
         Encoding::Raw(raw) => decode_raw(raw, payload, name)?,
     };
 

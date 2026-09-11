@@ -22,6 +22,7 @@ pub fn encoding_name(encoding: Encoding) -> String {
         Encoding::Native(NativeEncoding::Q6S16DT64) => "Q6S16D_T64".to_string(),
         Encoding::Native(NativeEncoding::Q4AS32DT64) => "Q4AS32D_T64".to_string(),
         Encoding::Native(NativeEncoding::Q8S32T64) => "Q8S32_T64".to_string(),
+        Encoding::Block(block) => block.name().to_string(),
         Encoding::Raw(raw) => format!("{raw:?}").to_uppercase(),
     }
 }

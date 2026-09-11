@@ -257,6 +257,59 @@ pub fn good_file() -> Vec<u8> {
     w.finish().expect("writes a valid file")
 }
 
+/// `Q8_0`, shape `[2, 64]`: four blocks, `f16 d` then 32 `i8` codes each
+/// (`ggml-common.h`). Block `b` has `d = 0.5 + b` and codes `-16 + b ..`.
+pub fn q8_0_stream() -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(4 * 34);
+    for block in 0..4u8 {
+        let d = half::f16::from_f32(0.5 + f32::from(block)).to_bits();
+        bytes.extend_from_slice(&d.to_le_bytes());
+        for code in 0..32u8 {
+            bytes.push((code as i8 - 16 + block as i8) as u8);
+        }
+    }
+    bytes
+}
+
+/// `d * q` for every element of [`q8_0_stream`], by hand.
+pub fn expected_q8_0_values() -> Vec<f32> {
+    let mut out = Vec::with_capacity(128);
+    for block in 0..4i32 {
+        for code in 0..32i32 {
+            out.push((0.5 + block as f32) * (code - 16 + block) as f32);
+        }
+    }
+    out
+}
+
+/// A file whose only weight is the `Q8_0` block tensor `layer.q8`. The proof
+/// values are the hand-computed [`expected_q8_0_values`] at the proof
+/// indices, offset by `proof_bias` — `0.0` for a valid file, anything else
+/// for one whose proof disagrees with the bytes.
+pub fn block_file(proof_bias: f32) -> Vec<u8> {
+    let mut w = TcfWriter::new();
+    let plain = w.intern("model.layers.0.ffn").expect("interns");
+    w.add_module(module(0, plain, None)).expect("adds");
+    w.add_contract(contract()).expect("adds");
+
+    let weight = w.intern("layer.q8").expect("interns");
+    let record = tensor(
+        0,
+        weight,
+        Encoding::Block(tcf_core::BlockEncoding::Q8_0),
+        [2, 64, 0, 0, 0, 0, 0, 0],
+    );
+    let values = expected_q8_0_values();
+    let proof: Vec<f32> = tcf_core::proof_indices(&[2, 64], 2, 0)
+        .expect("indices")
+        .iter()
+        .map(|i| values[*i as usize] + proof_bias)
+        .collect();
+    w.add_block_tensor(record, q8_0_stream(), &proof)
+        .expect("adds");
+    w.finish().expect("writes a valid file")
+}
+
 /// Write `bytes` to a temporary `.tcf` file the caller keeps alive.
 pub fn write_temp(bytes: &[u8]) -> NamedTempFile {
     let mut file = tempfile::Builder::new()

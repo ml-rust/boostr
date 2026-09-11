@@ -2,6 +2,7 @@
 //!
 //! See `hats/tcf/SPECIFICATION.md` for the normative format definition.
 
+pub mod block;
 pub mod decode;
 pub mod error;
 pub mod loader;
@@ -10,6 +11,7 @@ pub mod metadata;
 #[cfg(test)]
 pub(crate) mod fixtures;
 
+pub use block::{BoostrBlockDecoder, block_format, decode_block_f32};
 pub use decode::{decode_tensor_f32, element_count};
 pub use error::{tcf_error, tcf_tensor_error};
 pub use loader::{TcfLoader, TcfSession};

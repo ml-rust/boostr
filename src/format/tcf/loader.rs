@@ -20,12 +20,13 @@ use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 use tcf_core::{Encoding, TcfFile};
 
+use super::block::{BoostrBlockDecoder, block_format};
 use super::decode::decode_tensor_f32;
 use super::error::{tcf_error, tcf_tensor_error};
 use super::metadata::{TcfHeaderInfo, TcfModuleInfo, TcfTensorInfo, encoding_name};
 use crate::error::{Error, Result};
 use crate::quant::contract::ActivationContract;
-use crate::quant::{QuantTensor, TcfEncoding};
+use crate::quant::{QuantScheme, QuantTensor, TcfEncoding};
 
 /// A memory-mapped TCF file with its directory decoded.
 ///
@@ -233,13 +234,16 @@ impl TcfLoader {
     /// happens per use, through `DequantOps`, or not at all once a fused
     /// quantized matmul consumes the [`QuantTensor`] directly.
     ///
-    /// Native quantized encodings only. A raw encoding stores literal values
-    /// with no scale (Section 12), so it has no quantized form to hold —
-    /// load it with [`TcfLoader::load_tensor`].
+    /// Quantized encodings only: a native encoding becomes a
+    /// [`QuantScheme::Tcf`] tensor and a GGML block encoding a
+    /// [`QuantScheme::Gguf`] one, decoded by the same kernels a GGUF file
+    /// reaches. A raw encoding stores literal values with no scale (Section
+    /// 12), so it has no quantized form to hold — load it with
+    /// [`TcfLoader::load_tensor`].
     ///
     /// # Errors
     /// [`Error::ModelError`] for an unknown name, a failed digest or proof
-    /// check, or a non-native encoding.
+    /// check, or a raw encoding.
     /// [`Error::QuantError`] when the shape and the payload length disagree.
     pub fn load_quant_tensor<R: Runtime<DType = DType>>(
         &self,
@@ -273,16 +277,16 @@ impl TcfLoader {
         Ok(out)
     }
 
-    /// The runtime encoding descriptor for `name`, or an error naming the
-    /// encoding when it is not a native quantized one.
+    /// The runtime scheme for `name`, or an error naming the encoding when
+    /// it is raw.
     ///
     /// A placement planner calls this to size a tensor before deciding where
     /// it lives, without reading a payload page.
     ///
     /// # Errors
-    /// [`Error::ModelError`] for an unknown name or a non-native encoding.
-    pub fn quant_encoding(&self, name: &str) -> Result<TcfEncoding> {
-        native_encoding(self.tensor_info(name)?.encoding(), name)
+    /// [`Error::ModelError`] for an unknown name or a raw encoding.
+    pub fn quant_scheme(&self, name: &str) -> Result<QuantScheme> {
+        quant_scheme(self.tensor_info(name)?.encoding(), name)
     }
 
     /// Verify every tensor's digests and proof vector without decoding.
@@ -293,9 +297,7 @@ impl TcfLoader {
     pub fn verify_all(&self) -> Result<()> {
         let file = self.file()?;
         for (index, record) in file.tensors().iter().enumerate() {
-            let name = self.name_at(index);
-            file.verify_tensor(record)
-                .map_err(|e| tcf_tensor_error(name, "verify", e))?;
+            verify_at(&file, record, self.name_at(index))?;
         }
         Ok(())
     }
@@ -317,8 +319,7 @@ impl TcfLoader {
         let record = file.tensors().get(index).ok_or_else(|| Error::ModelError {
             reason: format!("TCF tensor index {index} is out of range"),
         })?;
-        file.verify_tensor(record)
-            .map_err(|e| tcf_tensor_error(name, "verify", e))?;
+        verify_at(file, record, name)?;
         let payload = file
             .payload(record)
             .map_err(|e| tcf_tensor_error(name, "payload", e))?;
@@ -336,9 +337,8 @@ impl TcfLoader {
         let record = file.tensors().get(index).ok_or_else(|| Error::ModelError {
             reason: format!("TCF tensor index {index} is out of range"),
         })?;
-        file.verify_tensor(record)
-            .map_err(|e| tcf_tensor_error(name, "verify", e))?;
-        let encoding = native_encoding(record.encoding, name)?;
+        verify_at(file, record, name)?;
+        let scheme = quant_scheme(record.encoding, name)?;
         let payload = file
             .payload(record)
             .map_err(|e| tcf_tensor_error(name, "payload", e))?;
@@ -355,7 +355,7 @@ impl TcfLoader {
         let contract = ActivationContract::from_record(name, record.execution_role, contract);
 
         Ok(
-            QuantTensor::<R>::from_bytes(payload, encoding, &shape, device)?
+            QuantTensor::<R>::from_bytes(payload, scheme, &shape, device)?
                 .with_activation_contract(contract),
         )
     }
@@ -435,8 +435,8 @@ impl<'a> TcfSession<'a> {
     /// Verify `name` and place it on `device` STILL QUANTIZED.
     ///
     /// # Errors
-    /// Every error [`TcfLoader::load_quant_tensor`] raises, a non-native
-    /// encoding included.
+    /// Every error [`TcfLoader::load_quant_tensor`] raises, a raw encoding
+    /// included.
     pub fn quant_tensor<R: Runtime<DType = DType>>(
         &self,
         name: &str,
@@ -447,18 +447,29 @@ impl<'a> TcfSession<'a> {
     }
 }
 
-/// The runtime descriptor for a native quantized encoding.
+/// Verify one tensor's digests and proof vector. Section 15.
+///
+/// A block tensor's proof is checked with boostr's own decoder, so a stream
+/// these kernels would read differently from the producer fails here rather
+/// than at first use.
+fn verify_at(file: &TcfFile<'_>, record: &tcf_core::TensorRecord, name: &str) -> Result<()> {
+    file.verify_tensor_with(record, Some(&BoostrBlockDecoder))
+        .map_err(|e| tcf_tensor_error(name, "verify", e))
+}
+
+/// The runtime scheme for a quantized encoding.
 ///
 /// # Errors
 /// [`Error::ModelError`] naming the encoding and the tensor, when the
-/// encoding is raw or outside the native range.
-fn native_encoding(encoding: Encoding, name: &str) -> Result<TcfEncoding> {
+/// encoding is raw or a block layout this build has no kernel for.
+fn quant_scheme(encoding: Encoding, name: &str) -> Result<QuantScheme> {
     match encoding {
-        Encoding::Native(native) => Ok(TcfEncoding::new(native)),
-        other => Err(Error::ModelError {
+        Encoding::Native(native) => Ok(QuantScheme::Tcf(TcfEncoding::new(native))),
+        Encoding::Block(block) => Ok(QuantScheme::Gguf(block_format(block, name)?)),
+        raw @ Encoding::Raw(_) => Err(Error::ModelError {
             reason: format!(
-                "TCF tensor '{name}': encoding {} is not natively quantized, so it has no packed form; load it as a dense tensor",
-                encoding_name(other),
+                "TCF tensor '{name}': encoding {} is not quantized, so it has no packed form; load it as a dense tensor",
+                encoding_name(raw),
             ),
         }),
     }
@@ -611,16 +622,64 @@ mod tests {
         let err = loader
             .load_quant_tensor::<CpuRuntime>("layer.bias", &device)
             .expect_err("rejects");
-        assert!(err.to_string().contains("not natively quantized"), "{err}");
-        assert!(loader.quant_encoding("layer.bias").is_err());
+        assert!(err.to_string().contains("not quantized"), "{err}");
+        assert!(loader.quant_scheme("layer.bias").is_err());
     }
 
     #[test]
     fn the_encoding_descriptor_is_reachable_without_reading_a_payload() {
         let (_file, loader) = open_fixture(&fixtures::good_file()).expect("opens");
-        let encoding = loader.quant_encoding("layer.w").expect("native");
-        assert_eq!(encoding.native(), NativeEncoding::Q4S32T64);
-        assert_eq!(encoding.payload_bytes(&[1, 64]).expect("bytes"), 36);
+        let scheme = loader.quant_scheme("layer.w").expect("native");
+        assert_eq!(
+            scheme.tcf().map(|e| e.native()),
+            Some(NativeEncoding::Q4S32T64)
+        );
+        assert_eq!(scheme.payload_bytes(&[1, 64]).expect("bytes"), 36);
+    }
+
+    /// A GGML block tensor loads as a GGUF-scheme `QuantTensor` — the same
+    /// kernels a GGUF file reaches — carrying the file's activation contract,
+    /// and decodes to the hand-computed values.
+    #[test]
+    fn a_block_tensor_loads_as_a_gguf_scheme_quant_tensor() {
+        let (_file, loader) = open_fixture(&fixtures::block_file(0.0)).expect("opens");
+        let (client, device) = cpu_setup();
+        assert_eq!(
+            loader.quant_scheme("layer.q8").expect("scheme"),
+            crate::quant::QuantScheme::Gguf(crate::quant::QuantFormat::Q8_0)
+        );
+        loader
+            .verify_all()
+            .expect("proofs check with boostr's decoder");
+
+        let qt = loader
+            .load_quant_tensor::<CpuRuntime>("layer.q8", &device)
+            .expect("loads");
+        assert_eq!(qt.shape(), &[2, 64]);
+        assert_eq!(qt.scheme().gguf(), Some(crate::quant::QuantFormat::Q8_0));
+        assert!(qt.activation_contract().is_some());
+        let dense =
+            crate::quant::DequantOps::dequantize(&client, &qt, DType::F32).expect("dequantizes");
+        assert_eq!(dense.to_vec::<f32>(), fixtures::expected_q8_0_values());
+
+        let tensor = loader
+            .load_tensor::<CpuRuntime>("layer.q8", &device)
+            .expect("loads dense");
+        assert_eq!(tensor.to_vec::<f32>(), fixtures::expected_q8_0_values());
+    }
+
+    /// A block tensor whose proof disagrees with its bytes is refused: the
+    /// digests pass (the bytes are what the producer wrote), the decoder
+    /// catches it.
+    #[test]
+    fn a_block_tensor_with_a_wrong_proof_is_refused() {
+        let (_file, loader) = open_fixture(&fixtures::block_file(1.0)).expect("opens");
+        let (_client, device) = cpu_setup();
+        let err = loader
+            .load_quant_tensor::<CpuRuntime>("layer.q8", &device)
+            .expect_err("refuses");
+        assert!(err.to_string().contains("E_PROOF_MISMATCH"), "{err}");
+        assert!(loader.verify_all().is_err());
     }
 
     #[test]

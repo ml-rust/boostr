@@ -111,10 +111,11 @@ impl<R: Runtime<DType = DType>> WeightSource<R> for TcfSource<'_> {
         self.session.tensor::<R>(name, device)
     }
 
-    /// Keeps a natively encoded tensor PACKED: its payload reaches the device
-    /// verbatim as a `QuantTensor` carrying `QuantScheme::Tcf`, which
-    /// `quant_matmul` consumes directly. A 1.2 GB Q4 file costs 1.2 GB, not
-    /// the 10 GB its f32 expansion would.
+    /// Keeps a quantized tensor PACKED: its payload reaches the device
+    /// verbatim as a `QuantTensor` — `QuantScheme::Tcf` for a native encoding,
+    /// `QuantScheme::Gguf` for a GGML block encoding — which `quant_matmul`
+    /// consumes directly. A 1.2 GB Q4 file costs 1.2 GB, not the 10 GB its
+    /// f32 expansion would.
     ///
     /// The ENCODING decides, never the name: a raw encoding has no packed
     /// form to hold (Section 12), so it takes the dense path. That is the
@@ -122,10 +123,10 @@ impl<R: Runtime<DType = DType>> WeightSource<R> for TcfSource<'_> {
     /// `MaybeLoraLinear` runs its dense branch there unchanged.
     fn load_named_weight(&mut self, name: &str, device: &R::Device) -> Result<Weight<R>> {
         match self.session.loader().tensor_info(name)?.encoding() {
-            Encoding::Native(_) => Ok(Weight::Quantized(
+            Encoding::Native(_) | Encoding::Block(_) => Ok(Weight::Quantized(
                 self.session.quant_tensor::<R>(name, device)?,
             )),
-            _ => Ok(Weight::Standard(self.session.tensor::<R>(name, device)?)),
+            Encoding::Raw(_) => Ok(Weight::Standard(self.session.tensor::<R>(name, device)?)),
         }
     }
 }
@@ -183,6 +184,35 @@ mod tests {
             }
             _ => panic!("layer.bias is raw-encoded, so it must arrive dense"),
         }
+    }
+
+    /// A GGML block encoding stays packed too, under the GGUF scheme: the
+    /// weight is indistinguishable from one a GGUF file produced.
+    #[test]
+    fn a_block_encoding_stays_packed_under_the_gguf_scheme() {
+        let file = fixtures::write_temp(&fixtures::block_file(0.0));
+        let loader = TcfLoader::open(file.path()).expect("opens");
+        let mut source = TcfSource::new(&loader).expect("binds");
+        let (_client, device) = cpu_setup();
+
+        let packed =
+            WeightSource::<CpuRuntime>::load_named_weight(&mut source, "layer.q8", &device)
+                .expect("loads");
+        match packed {
+            Weight::Quantized(qt) => {
+                assert_eq!(qt.shape(), &[2, 64]);
+                assert_eq!(
+                    qt.scheme(),
+                    QuantScheme::Gguf(crate::quant::QuantFormat::Q8_0)
+                );
+                assert_eq!(qt.storage_bytes(), 4 * 34);
+                assert!(qt.activation_contract().is_some());
+            }
+            _ => panic!("layer.q8 is block encoded, so it must arrive packed"),
+        }
+
+        let dense: Tensor<CpuRuntime> = source.load_named("layer.q8", &device).expect("loads");
+        assert_eq!(dense.to_vec::<f32>(), fixtures::expected_q8_0_values());
     }
 
     /// `load_named` is the dense contract: a packed tensor dequantizes here,

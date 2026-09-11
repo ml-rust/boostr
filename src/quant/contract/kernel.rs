@@ -223,7 +223,6 @@ mod tests {
             dot_accumulator,
             output_dtype: OutputDtype::F32,
             math_mode: MathMode::ReassociationAllowed,
-            kernel_semantics_id: 0,
             calibration_id: 0,
             flags: ContractFlags::NONE,
             contract_digest: [0u8; 16],

@@ -110,7 +110,6 @@ fn contract() -> ContractRecord {
         dot_accumulator: DotAccumulator::I32ThenF32Scale,
         output_dtype: OutputDtype::F32,
         math_mode: MathMode::ReassociationAllowed,
-        kernel_semantics_id: 5,
         calibration_id: 0,
         flags: ContractFlags::NONE,
         contract_digest: [0u8; 16],

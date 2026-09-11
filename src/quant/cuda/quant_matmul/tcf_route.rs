@@ -7,8 +7,9 @@
 //!
 //! # Resolution, not veto
 //!
-//! Section 9 makes a kernel resolve on `(weight_encoding, contract_digest,
-//! execution_role)`, so the declared activation contract is an INPUT to the
+//! Section 9 makes a kernel resolve on `weight_encoding`, `execution_role`,
+//! and the contract's typed semantic fields (never `contract_digest`, an
+//! integrity check), so the declared activation contract is an INPUT to the
 //! choice. [`resolve`] walks the shape's candidate kernels in preference order
 //! and returns the first one the declared contract accepts, so a weight
 //! declaring exact f32 activations never selects an activation-quantizing

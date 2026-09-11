@@ -24,10 +24,11 @@ pub enum Error {
     /// A selected kernel does not compute what the weight's declared
     /// activation contract requires.
     ///
-    /// TCF Section 9 resolves dispatch on
-    /// `(weight_encoding, contract_digest, execution_role)` and defines no
-    /// float fallback, so this is a refusal: the operation stops rather than
-    /// running on a kernel whose arithmetic the producer never declared.
+    /// TCF Section 9 resolves dispatch on `weight_encoding`, `execution_role`,
+    /// and the contract's typed semantic fields (never `contract_digest`,
+    /// an integrity check) and defines no float fallback, so this is a
+    /// refusal: the operation stops rather than running on a kernel whose
+    /// arithmetic the producer never declared.
     /// Only a weight whose source format can express a contract raises it —
     /// a GGUF weight carries none and never reaches this variant.
     #[error("{0}")]

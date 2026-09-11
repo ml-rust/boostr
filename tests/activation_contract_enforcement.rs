@@ -314,7 +314,6 @@ fn contract_record(
         dot_accumulator,
         output_dtype: OutputDtype::F32,
         math_mode: MathMode::ReassociationAllowed,
-        kernel_semantics_id: 5,
         calibration_id: 0,
         flags: ContractFlags::NONE,
         contract_digest: [digest; 16],

@@ -1,11 +1,14 @@
 //! The activation contract a TCF weight carries out of its file.
 //!
 //! TCF Section 9 makes the contract part of the dispatch key: a kernel is
-//! resolved on `(weight_encoding, contract_digest, execution_role)`, and the
-//! format defines no float fallback for a weight whose contract no kernel
-//! satisfies. [`ActivationContract`] is the runtime form of `ContractRecord`,
-//! attached to the weight it governs so a dispatch site can check it without
-//! reopening the file.
+//! resolved on `weight_encoding`, `execution_role`, and the contract's typed
+//! semantic fields (`input_representation`, `dot_accumulator`, `math_mode`,
+//! and the rest `KernelContract::satisfies` checks), never on
+//! `contract_digest` — that field is an integrity check, not a dispatch key.
+//! The format defines no float fallback for a weight whose contract no
+//! kernel satisfies. [`ActivationContract`] is the runtime form of
+//! `ContractRecord`, attached to the weight it governs so a dispatch site
+//! can check it without reopening the file.
 //!
 //! Only a TCF weight has one. A GGUF block format cannot express a contract,
 //! so a GGUF weight carries none and dispatches unchecked — the absence is
@@ -23,14 +26,16 @@ use tcf_core::{
 /// name it in an error.
 ///
 /// `tensor` is provenance, never identity (Section 6): dispatch resolves on
-/// `digest`, `role`, and the encoding, and the name only labels the failure.
+/// `role`, the encoding, and the typed semantic fields below, and the name
+/// only labels the failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivationContract {
     /// Provenance name of the weight this contract governs.
     pub tensor: String,
     /// The execution role the weight is declared for. Section 8.6.1.
     pub role: ExecutionRole,
-    /// `contract_digest`, BLAKE3-128. The dispatch identity. Section 9.
+    /// `contract_digest`, BLAKE3-128. An integrity identity, not a dispatch
+    /// key. Section 9.
     pub digest: [u8; 16],
     /// How the kernel must represent the activation it reads.
     pub input_representation: InputRepresentation,
@@ -82,8 +87,8 @@ impl ActivationContract {
         }
     }
 
-    /// `contract_digest` as lowercase hex — the value a dispatch table is
-    /// keyed on, in the form an error message can be matched against.
+    /// `contract_digest` as lowercase hex — the integrity identity, in the
+    /// form an error message can be matched against.
     #[must_use]
     pub fn digest_hex(&self) -> String {
         let mut out = String::with_capacity(32);
@@ -222,7 +227,6 @@ mod tests {
             dot_accumulator: DotAccumulator::F32,
             output_dtype: OutputDtype::F32,
             math_mode: MathMode::ReassociationAllowed,
-            kernel_semantics_id: 0,
             calibration_id: 0,
             flags: ContractFlags::NONE,
             contract_digest: [0xab; 16],

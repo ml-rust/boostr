@@ -18,11 +18,14 @@
 
 use core::fmt;
 
-use tcf_core::{DotAccumulator, ExecutionRole, InputRepresentation, MathMode, OutputDtype};
+use tcf_core::{
+    DotAccumulator, ExecutionRole, InputRepresentation, MathMode, OutputDtype, QuantAxis,
+    RoundingMode, ScaleComputeDtype,
+};
 
 use super::declared::{
     ActivationContract, dot_accumulator_name, input_representation_name, output_dtype_name,
-    role_name,
+    quant_axis_name, role_name, rounding_mode_name, scale_compute_dtype_name,
 };
 
 /// Values per activation quantization group in the 8-bit dynamic activation
@@ -56,6 +59,18 @@ pub struct KernelContract {
     /// declared permission — this states what the kernel's arithmetic
     /// actually does, checked against `math_mode` in [`Self::satisfies`].
     pub reassociates: bool,
+    /// Which axis the kernel actually groups activation values along, checked
+    /// against `quant_axis` in [`Self::satisfies`]. Set unconditionally, even
+    /// for a kernel with no activation groups — v1 has only `LAST`.
+    pub quant_axis: QuantAxis,
+    /// How the kernel actually rounds an activation value to its integer
+    /// code, checked against `rounding_mode` in [`Self::satisfies`]. Nominal
+    /// on a kernel that never quantizes activations — v1 has only `RN_EVEN`.
+    pub rounding_mode: RoundingMode,
+    /// The dtype the kernel actually computes the activation scale `d_a` in,
+    /// checked against `scale_compute_dtype` in [`Self::satisfies`]. Nominal
+    /// on a kernel that never quantizes activations — v1 has only `F32`.
+    pub scale_compute_dtype: ScaleComputeDtype,
     /// Values per activation quantization group, for a kernel that quantizes
     /// the activation. `None` for a kernel that does not.
     pub quant_group: Option<u16>,
@@ -74,6 +89,11 @@ impl KernelContract {
     /// register-tile blocking with a split-K fixup. WGPU: unverified from
     /// source, so it takes the value that REFUSES rather than the one that
     /// permits), so none reproduces a fixed left-to-right sum.
+    ///
+    /// `quant_axis`, `rounding_mode`, and `scale_compute_dtype` are nominal:
+    /// this path never quantizes the activation, so no axis, rounding, or
+    /// scale dtype is ever computed. Set to v1's single legal value each so
+    /// the comparison in `satisfies` stays unconditional.
     #[must_use]
     pub const fn f32_activation(kernel: &'static str) -> Self {
         Self {
@@ -83,6 +103,9 @@ impl KernelContract {
             output_dtype: OutputDtype::F32,
             role: ExecutionRole::Matmul,
             reassociates: true,
+            quant_axis: QuantAxis::Last,
+            rounding_mode: RoundingMode::RnEven,
+            scale_compute_dtype: ScaleComputeDtype::F32,
             quant_group: None,
             quant_range: None,
         }
@@ -100,6 +123,11 @@ impl KernelContract {
     /// across lanes and reduces them with a multi-warp tree; the MMA family
     /// reduces inside `mma.sync` and again across K tiles. Neither is a
     /// fixed-order sum.
+    ///
+    /// `quant_axis` is `LAST`: every kernel in this family groups activation
+    /// values along K, the innermost (last) axis of the dot product.
+    /// `rounding_mode` is `RN_EVEN`, and `scale_compute_dtype` is `F32`: the
+    /// amax/127 scale this family computes is always an f32 value.
     #[must_use]
     pub const fn dynamic_int8_activation(kernel: &'static str) -> Self {
         Self {
@@ -109,6 +137,9 @@ impl KernelContract {
             output_dtype: OutputDtype::F32,
             role: ExecutionRole::Matmul,
             reassociates: true,
+            quant_axis: QuantAxis::Last,
+            rounding_mode: RoundingMode::RnEven,
+            scale_compute_dtype: ScaleComputeDtype::F32,
             quant_group: Some(DYNAMIC_INT8_GROUP),
             quant_range: Some(DYNAMIC_INT8_RANGE),
         }
@@ -127,6 +158,9 @@ impl KernelContract {
             && self.output_dtype == declared.output_dtype
             && self.role == declared.role
             && (!self.reassociates || declared.math_mode != MathMode::ReassociationForbidden)
+            && self.quant_axis == declared.quant_axis
+            && self.rounding_mode == declared.rounding_mode
+            && self.scale_compute_dtype == declared.scale_compute_dtype
             && self
                 .quant_group
                 .is_none_or(|group| group == declared.quant_group)
@@ -154,8 +188,11 @@ impl fmt::Display for KernelContract {
         }
         write!(
             f,
-            ", reassociates {}, role {}",
+            ", reassociates {}, axis {}, rounding {}, scale dtype {}, role {}",
             self.reassociates,
+            quant_axis_name(self.quant_axis),
+            rounding_mode_name(self.rounding_mode),
+            scale_compute_dtype_name(self.scale_compute_dtype),
             role_name(self.role)
         )
     }
@@ -292,6 +329,41 @@ mod tests {
         assert!(KernelContract::dynamic_int8_activation("int8").reassociates);
     }
 
+    /// v1 defines exactly one variant for `QuantAxis`, `RoundingMode`, and
+    /// `ScaleComputeDtype`, so no kernel can be constructed with a mismatched
+    /// value — there is nothing to test refusing. This locks the one legal
+    /// value on both factories instead, so a future non-`LAST`/`RnEven`/`F32`
+    /// kernel constant is caught here rather than passing silently.
+    #[test]
+    fn every_shipped_kernel_contract_declares_v1_quant_semantics() {
+        for kernel in [
+            KernelContract::f32_activation("f32"),
+            KernelContract::dynamic_int8_activation("int8"),
+        ] {
+            assert_eq!(kernel.quant_axis, QuantAxis::Last);
+            assert_eq!(kernel.rounding_mode, RoundingMode::RnEven);
+            assert_eq!(kernel.scale_compute_dtype, ScaleComputeDtype::F32);
+        }
+    }
+
+    /// A kernel and a declared contract that agree on every field, including
+    /// the three new semantic ones, satisfy each other — the addition must
+    /// not turn an already-passing dispatch into a false refusal.
+    #[test]
+    fn satisfies_when_axis_rounding_and_scale_dtype_all_agree() {
+        let kernel = KernelContract::dynamic_int8_activation("tcf_mmq_feat_major");
+        let contract = declared(
+            InputRepresentation::A8S32Dynamic,
+            DotAccumulator::I32ThenF32Scale,
+            DYNAMIC_INT8_GROUP,
+            DYNAMIC_INT8_RANGE,
+        );
+        assert_eq!(kernel.quant_axis, contract.quant_axis);
+        assert_eq!(kernel.rounding_mode, contract.rounding_mode);
+        assert_eq!(kernel.scale_compute_dtype, contract.scale_compute_dtype);
+        assert!(kernel.satisfies(&contract));
+    }
+
     #[test]
     fn mismatch_error_text_names_the_math_mode() {
         let kernel = KernelContract::f32_activation("tcf_gemv_f32");
@@ -304,6 +376,31 @@ mod tests {
             "{declared_text}"
         );
         assert!(kernel_text.contains("reassociates true"), "{kernel_text}");
+    }
+
+    /// `quant_axis`, `rounding_mode`, and `scale_compute_dtype` have no live
+    /// mismatch to name (v1 has one legal value each), but a future mismatch
+    /// on any of them still needs the value visible in both error operands.
+    #[test]
+    fn display_names_quant_axis_rounding_and_scale_dtype() {
+        let kernel = KernelContract::dynamic_int8_activation("tcf_mmq_feat_major");
+        let contract = declared(
+            InputRepresentation::A8S32Dynamic,
+            DotAccumulator::I32ThenF32Scale,
+            DYNAMIC_INT8_GROUP,
+            DYNAMIC_INT8_RANGE,
+        );
+        let kernel_text = kernel.to_string();
+        let contract_text = contract.to_string();
+        assert!(kernel_text.contains("axis LAST"), "{kernel_text}");
+        assert!(kernel_text.contains("rounding RN_EVEN"), "{kernel_text}");
+        assert!(kernel_text.contains("scale dtype F32"), "{kernel_text}");
+        assert!(contract_text.contains("axis LAST"), "{contract_text}");
+        assert!(
+            contract_text.contains("rounding RN_EVEN"),
+            "{contract_text}"
+        );
+        assert!(contract_text.contains("scale dtype F32"), "{contract_text}");
     }
 
     #[test]

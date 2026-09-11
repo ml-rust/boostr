@@ -16,6 +16,7 @@ use core::fmt::Write as _;
 
 use tcf_core::{
     ContractRecord, DotAccumulator, ExecutionRole, InputRepresentation, MathMode, OutputDtype,
+    QuantAxis, RoundingMode, ScaleComputeDtype,
 };
 
 /// The activation contract one weight declares, with the provenance needed to
@@ -41,6 +42,16 @@ pub struct ActivationContract {
     /// field is what let a `REASSOCIATION_FORBIDDEN` file run on a
     /// reassociating kernel with no refusal — never omit it again.
     pub math_mode: MathMode,
+    /// Which axis activation quantization groups run along. Section 9.1.
+    /// v1 defines only `LAST`, but a future variant must still be handled
+    /// explicitly wherever a kernel states the axis it actually groups on.
+    pub quant_axis: QuantAxis,
+    /// How an activation value is rounded to its integer code. Section 9.1.
+    /// v1 defines only `RN_EVEN`.
+    pub rounding_mode: RoundingMode,
+    /// The dtype the activation scale `d_a` is computed in. Section 9.1.
+    /// v1 defines only `F32`.
+    pub scale_compute_dtype: ScaleComputeDtype,
     /// Values per activation quantization group along the quantization axis.
     /// Section 9.2 defines it for `A8S32_DYNAMIC` alone; every other
     /// representation writes zero.
@@ -63,6 +74,9 @@ impl ActivationContract {
             dot_accumulator: record.dot_accumulator,
             output_dtype: record.output_dtype,
             math_mode: record.math_mode,
+            quant_axis: record.quant_axis,
+            rounding_mode: record.rounding_mode,
+            scale_compute_dtype: record.scale_compute_dtype,
             quant_group: record.quant_group,
             quant_range: (record.qmin, record.qmax),
         }
@@ -86,11 +100,14 @@ impl fmt::Display for ActivationContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "input {}, dot {}, output {}, math {}",
+            "input {}, dot {}, output {}, math {}, axis {}, rounding {}, scale dtype {}",
             input_representation_name(self.input_representation),
             dot_accumulator_name(self.dot_accumulator),
             output_dtype_name(self.output_dtype),
             math_mode_name(self.math_mode),
+            quant_axis_name(self.quant_axis),
+            rounding_mode_name(self.rounding_mode),
+            scale_compute_dtype_name(self.scale_compute_dtype),
         )?;
         if self.quant_group != 0 {
             write!(f, ", group {}", self.quant_group)?;
@@ -157,6 +174,33 @@ pub fn math_mode_name(value: MathMode) -> &'static str {
     }
 }
 
+/// Wire-field spelling of `quant_axis`. Section 9.1.
+#[must_use]
+pub fn quant_axis_name(value: QuantAxis) -> &'static str {
+    match value {
+        QuantAxis::Last => "LAST",
+        _ => "UNKNOWN",
+    }
+}
+
+/// Wire-field spelling of `rounding_mode`. Section 9.1.
+#[must_use]
+pub fn rounding_mode_name(value: RoundingMode) -> &'static str {
+    match value {
+        RoundingMode::RnEven => "RN_EVEN",
+        _ => "UNKNOWN",
+    }
+}
+
+/// Wire-field spelling of `scale_compute_dtype`. Section 9.1.
+#[must_use]
+pub fn scale_compute_dtype_name(value: ScaleComputeDtype) -> &'static str {
+    match value {
+        ScaleComputeDtype::F32 => "F32",
+        _ => "UNKNOWN",
+    }
+}
+
 /// Wire-field spelling of `execution_role`. Section 8.6.1.
 #[must_use]
 pub fn role_name(value: ExecutionRole) -> &'static str {
@@ -210,6 +254,17 @@ mod tests {
         assert_eq!(declared.digest_hex(), "ab".repeat(16));
     }
 
+    /// v1 defines exactly one variant for each of these three, so there is no
+    /// mismatched value to round-trip — only that the record's value survives
+    /// into the runtime form instead of being dropped.
+    #[test]
+    fn quant_axis_rounding_mode_and_scale_dtype_survive_the_record() {
+        let declared = ActivationContract::from_record("w", ExecutionRole::Matmul, &f32_record());
+        assert_eq!(declared.quant_axis, QuantAxis::Last);
+        assert_eq!(declared.rounding_mode, RoundingMode::RnEven);
+        assert_eq!(declared.scale_compute_dtype, ScaleComputeDtype::F32);
+    }
+
     /// The defect this threading fixes: a file declaring
     /// `REASSOCIATION_FORBIDDEN` must keep that value in the runtime form, or
     /// dispatch has nothing left to refuse a reassociating kernel with.
@@ -228,6 +283,9 @@ mod tests {
         assert!(text.contains("input F32"), "{text}");
         assert!(text.contains("dot F32"), "{text}");
         assert!(text.contains("math REASSOCIATION_ALLOWED"), "{text}");
+        assert!(text.contains("axis LAST"), "{text}");
+        assert!(text.contains("rounding RN_EVEN"), "{text}");
+        assert!(text.contains("scale dtype F32"), "{text}");
         assert!(text.contains("role MATMUL"), "{text}");
         assert!(text.contains(&declared.digest_hex()), "{text}");
     }

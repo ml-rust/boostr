@@ -514,6 +514,24 @@ fn compile_cuda_kernels() {
                     args.push(fatbin_path.to_str().unwrap().to_string());
                     args.push(cu_path.to_str().unwrap().to_string());
 
+                    // Cargo reruns this script when ANY kernel source changes,
+                    // and every kernel was then recompiled. A kernel whose
+                    // fatbin is newer than its source, every header it can
+                    // include, this script, and whose recorded nvcc arguments
+                    // are unchanged, is already built.
+                    let args_path = out_dir.join(format!("{fatbin_name}.args"));
+                    let args_text = args.join("\n");
+                    if fatbin_up_to_date(
+                        &fatbin_path,
+                        &args_path,
+                        &args_text,
+                        &cu_path,
+                        &kernels_dir,
+                    ) {
+                        continue;
+                    }
+                    let _ = std::fs::remove_file(&args_path);
+
                     let outcome = match Command::new(&nvcc).args(&args).output() {
                         Ok(output) => KernelOutcome {
                             file: kernel_file.clone(),
@@ -536,6 +554,11 @@ fn compile_cuda_kernels() {
                             exec_error: Some(e.to_string()),
                         },
                     };
+                    if outcome.success {
+                        // Written after a successful compile, so a failed one
+                        // never reads as up to date.
+                        let _ = std::fs::write(&args_path, &args_text);
+                    }
                     outcomes.lock().unwrap().push(outcome);
                 }
             });
@@ -600,6 +623,56 @@ fn compile_cuda_kernels() {
 }
 
 #[cfg(feature = "cuda")]
+#[cfg(feature = "cuda")]
+/// Whether `fatbin` was built from the current sources with the current
+/// nvcc arguments.
+///
+/// Newer than the kernel source, every `.cuh` under its directory and the
+/// shared header directory, and this script; and the recorded arguments equal
+/// `args_text`. A header a kernel does not include still forces a rebuild,
+/// which costs one compile and never a stale kernel.
+fn fatbin_up_to_date(
+    fatbin: &std::path::Path,
+    args_path: &std::path::Path,
+    args_text: &str,
+    cu_path: &std::path::Path,
+    kernels_dir: &std::path::Path,
+) -> bool {
+    use std::path::{Path, PathBuf};
+    let Ok(built) = std::fs::metadata(fatbin).and_then(|m| m.modified()) else {
+        return false;
+    };
+    if std::fs::read_to_string(args_path).ok().as_deref() != Some(args_text) {
+        return false;
+    }
+    let mut inputs: Vec<PathBuf> = vec![cu_path.to_path_buf(), PathBuf::from("build.rs")];
+    for dir in [kernels_dir, Path::new("src/ops/cuda/kernels")] {
+        collect_headers(dir, &mut inputs);
+    }
+    inputs.into_iter().all(|input| {
+        std::fs::metadata(&input)
+            .and_then(|m| m.modified())
+            .is_ok_and(|modified| modified < built)
+    })
+}
+
+/// Every `.cuh` under `dir`, recursively — the same set `emit_header_deps`
+/// registers, so the two views of "what a kernel can include" agree.
+#[cfg(feature = "cuda")]
+fn collect_headers(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_headers(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "cuh") {
+            out.push(path);
+        }
+    }
+}
+
 fn find_nvcc() -> Option<String> {
     use std::env;
     use std::path::PathBuf;

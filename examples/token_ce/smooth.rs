@@ -79,17 +79,25 @@
 //! buffer is dropped before the next tensor starts. The F32 cast allocates
 //! one extra tensor per non-F32 source, freed once `VarMap::insert` replaces
 //! the varmap's old entry.
+//!
+//! # Shared loop
+//!
+//! The cast, candidate selection, importance-entry gating, accounting, and
+//! write-back are [`super::probe::run_probe`], shared with
+//! `codebook.rs`'s codebook probe. This file supplies only the `transform`
+//! closure: scale by `s`, round-trip through `tcf-core`, unscale by `s`.
 
 use boostr::nn::VarMap;
 use boostr::quant::{ImportanceMatrix, smoothing_scale, weight_only_smoothing_scale};
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
-use numr::tensor::Tensor;
 use tcf_core::{
     NativeEncoding, QuantizeParams, SearchEffort, WeightSource, column_weights, dequantize_into,
     quantize_with,
 };
+
+use super::probe::{ProbeSummary, run_probe};
 
 /// Which error objective the quantize call in the round trip scores against.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -160,43 +168,10 @@ pub fn parse_native_encoding(value: &str) -> Result<NativeEncoding, String> {
         })
 }
 
-/// Full accounting of one smoothing pass, so the totals visibly reconcile:
-/// `examined == candidates + non_candidates` and
-/// `candidates == transformed + skipped_no_entry`.
-pub struct SmoothingSummary {
-    /// Varmap entries looked at, of any dtype or shape.
-    pub examined: usize,
-    /// `Standard` tensors cast from a non-F32 dtype to F32. A tensor already
-    /// F32 is not counted here even though it was examined.
-    pub cast_to_f32: usize,
-    /// Rank-2, contiguous, non-quantized tensors — the only shape this pass
-    /// can smooth.
-    pub candidates: usize,
-    /// Candidates with no importance entry, left exactly as loaded.
-    pub skipped_no_entry: usize,
-    /// Entries that are not smoothing candidates at all: block-quantized, or
-    /// not rank-2/contiguous.
-    pub non_candidates: usize,
-    /// Candidates actually put through the round trip.
-    pub transformed: usize,
-}
-
-/// Overwrite `tensor`'s device buffer with `values`. Same entry point
-/// `examples/voxcpm/sensitivity.rs` uses to rewrite a tensor in place.
-fn write_values<R: Runtime<DType = DType>>(
-    tensor: &Tensor<R>,
-    values: &[f32],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let bytes: &[u8] = bytemuck::cast_slice(values);
-    R::copy_to_device(bytes, tensor.ptr(), tensor.device())?;
-    Ok(())
-}
-
-/// Cast every non-quantized, non-F32 tensor in `var_map` to F32, then apply
-/// the smoothing round trip to every rank-2 contiguous weight that has an
-/// importance entry, in place. `source` selects which scale is computed;
-/// either way, the importance matrix decides only which tensors are touched
-/// — see the module docs' "Source" section.
+/// Runs [`super::probe::run_probe`] with the AWQ-style smoothing transform:
+/// derive a per-input-channel scale `s` (via `source`), compute
+/// `W * s`, round-trip it through `tcf-core` under `encoding` and
+/// `objective`, then divide by `s` — see the module docs' numbered steps.
 ///
 /// Returns an error if it transforms zero tensors: see the module docs'
 /// "A null result is an error, not a measurement" section.
@@ -207,169 +182,77 @@ pub fn apply_smoothing<R>(
     alpha: f32,
     objective: SmoothObjective,
     source: SmoothSource,
-) -> Result<SmoothingSummary, Box<dyn std::error::Error>>
+) -> Result<ProbeSummary, Box<dyn std::error::Error>>
 where
     R: Runtime<DType = DType>,
     R::Client: TypeConversionOps<R>,
 {
     let layout = encoding.layout();
-    let names: Vec<String> = var_map.names().map(str::to_string).collect();
-    let examined = names.len();
 
-    let mut cast_to_f32 = 0usize;
-    let mut candidates = 0usize;
-    let mut non_candidates = 0usize;
-    let mut skipped_no_entry = 0usize;
-    let mut transformed = 0usize;
+    run_probe(
+        var_map,
+        imatrix,
+        |name, original, in_features, mean_square| {
+            let out_features = original.len() / in_features;
 
-    for name in &names {
-        // A block-quantized weight cannot occur behind `--ckpt`, but this is
-        // checked rather than assumed: it is not `Standard`, so it has no
-        // dense buffer to cast or rewrite.
-        if var_map.get(name)?.is_quantized() {
-            non_candidates += 1;
-            continue;
-        }
+            // `mean_square` is always usable here: `run_probe` already skipped
+            // any entry without one. The weight-only source never reads it for
+            // the scale itself — see the module docs' "Source" section.
+            let s = match source {
+                SmoothSource::Activation => {
+                    smoothing_scale(mean_square, original, in_features, alpha)
+                }
+                SmoothSource::Weight => weight_only_smoothing_scale(original, in_features, alpha),
+            };
 
-        // Cast BEFORE the shape check: every tensor is cast regardless of
-        // candidacy, mirroring the all-F32 varmap a `--tcf --dequant-weights`
-        // run produces (see the module docs). Each `get_tensor` call's borrow
-        // ends with the value it returns, so the later `insert` never
-        // conflicts with a live reference into the same map.
-        if var_map.get_tensor(name)?.dtype() != DType::F32 {
-            let casted = var_map.get_tensor(name)?.to_dtype(DType::F32)?;
-            var_map.insert(name.clone(), casted);
-            cast_to_f32 += 1;
-        }
-
-        let tensor = var_map.get_tensor(name)?;
-        let shape: Vec<usize> = tensor.shape().to_vec();
-        if shape.len() != 2 || !tensor.is_contiguous() {
-            // Not a candidate at all: an embedding, a norm, a bias, or a
-            // tensor this pass cannot rewrite in place. Left untouched
-            // (beyond the F32 cast above) and not counted as
-            // skipped-for-no-entry, which is a different situation (see the
-            // module docs).
-            non_candidates += 1;
-            continue;
-        }
-        candidates += 1;
-        let out_features = shape[0];
-        let in_features = shape[1];
-
-        let entry = match imatrix.get(name) {
-            Some(entry) => entry,
-            None => {
-                skipped_no_entry += 1;
-                continue;
+            // Step 1: W * s, broadcast along the input (last) dimension.
+            let mut scaled: Vec<f32> = Vec::with_capacity(original.len());
+            for row in 0..out_features {
+                let base = row * in_features;
+                for j in 0..in_features {
+                    scaled.push(original[base + j] * s[j]);
+                }
             }
-        };
-        if entry.in_features() != in_features {
-            return Err(format!(
-                "{name}: importance file holds {} column(s), this weight has {in_features}",
-                entry.in_features()
-            )
-            .into());
-        }
-        // `rows == 0` means the entry carries no usable mean — measured
-        // nothing, in effect. Handled the same as no entry at all: this
-        // tensor is left exactly as loaded.
-        let mean_square = match entry.mean_square() {
-            Some(values) => values,
-            None => {
-                skipped_no_entry += 1;
-                continue;
+
+            // Step 2: quantize -> dequantize through tcf-core, under the
+            // selected error objective.
+            let dims: Vec<u64> = vec![out_features as u64, in_features as u64];
+            let rank = dims.len() as u32;
+            let expanded_weights: Option<Vec<f32>> = match objective {
+                SmoothObjective::Uniform => None,
+                SmoothObjective::Imatrix => Some(
+                    column_weights(mean_square, in_features, 0, scaled.len())
+                        .map_err(|e| format!("{name}: expanding importance weights: {e}"))?,
+                ),
+            };
+            let weights = match &expanded_weights {
+                Some(w) => WeightSource::Explicit(w),
+                None => WeightSource::Uniform,
+            };
+            let params = QuantizeParams {
+                weights,
+                effort: SearchEffort::Standard,
+            };
+            let tiles = quantize_with(&scaled, &dims, rank, layout, params)
+                .map_err(|e| format!("{name}: quantizing the smoothed weight: {e}"))?;
+            drop(scaled);
+            drop(expanded_weights);
+
+            let mut reconstructed: Vec<f32> = Vec::new();
+            dequantize_into(&tiles, layout, &mut reconstructed)
+                .map_err(|e| format!("{name}: dequantizing the smoothed weight: {e}"))?;
+            drop(tiles);
+
+            // Step 3: divide by s, elementwise along the same axis — the
+            // reconstructed weight the probe scores.
+            for row in 0..out_features {
+                let base = row * in_features;
+                for j in 0..in_features {
+                    reconstructed[base + j] /= s[j];
+                }
             }
-        };
 
-        // One tensor in flight: the snapshot, then the scaled copy, then the
-        // round trip, then the reconstruction — each buffer dropped as soon
-        // as the next step no longer needs it.
-        let original: Vec<f32> = tensor.try_to_vec::<f32>()?;
-
-        // `mean_square` is fetched above regardless of `source`: it is what
-        // makes an entry "usable" (see the `rows == 0` comment above), and
-        // `--smooth-objective imatrix` needs it too. The weight-only source
-        // below never reads it for the scale itself — see the module docs.
-        let s = match source {
-            SmoothSource::Activation => {
-                smoothing_scale(&mean_square, &original, in_features, alpha)
-            }
-            SmoothSource::Weight => weight_only_smoothing_scale(&original, in_features, alpha),
-        };
-
-        // Step 1: W * s, broadcast along the input (last) dimension.
-        let mut scaled: Vec<f32> = Vec::with_capacity(original.len());
-        for row in 0..out_features {
-            let base = row * in_features;
-            for j in 0..in_features {
-                scaled.push(original[base + j] * s[j]);
-            }
-        }
-        drop(original);
-
-        // Step 2: quantize -> dequantize through tcf-core, under the
-        // selected error objective.
-        let dims: Vec<u64> = shape.iter().map(|&d| d as u64).collect();
-        let rank = dims.len() as u32;
-        let expanded_weights: Option<Vec<f32>> = match objective {
-            SmoothObjective::Uniform => None,
-            SmoothObjective::Imatrix => Some(
-                column_weights(&mean_square, in_features, 0, scaled.len())
-                    .map_err(|e| format!("{name}: expanding importance weights: {e}"))?,
-            ),
-        };
-        let weights = match &expanded_weights {
-            Some(w) => WeightSource::Explicit(w),
-            None => WeightSource::Uniform,
-        };
-        let params = QuantizeParams {
-            weights,
-            effort: SearchEffort::Standard,
-        };
-        let tiles = quantize_with(&scaled, &dims, rank, layout, params)
-            .map_err(|e| format!("{name}: quantizing the smoothed weight: {e}"))?;
-        drop(scaled);
-        drop(expanded_weights);
-
-        let mut reconstructed: Vec<f32> = Vec::new();
-        dequantize_into(&tiles, layout, &mut reconstructed)
-            .map_err(|e| format!("{name}: dequantizing the smoothed weight: {e}"))?;
-        drop(tiles);
-
-        // Step 3: divide by s, elementwise along the same axis — the
-        // reconstructed weight the probe scores.
-        for row in 0..out_features {
-            let base = row * in_features;
-            for j in 0..in_features {
-                reconstructed[base + j] /= s[j];
-            }
-        }
-
-        write_values(tensor, &reconstructed)?;
-        drop(reconstructed);
-        transformed += 1;
-    }
-
-    if transformed == 0 {
-        return Err(format!(
-            "smoothing transformed 0 tensors — refusing to score an untransformed baseline as \
-             if it were a measurement. Examined {examined} varmap entr{}, found {candidates} \
-             rank-2 contiguous candidate(s) ({non_candidates} non-candidate(s) left alone), of \
-             which {skipped_no_entry} had no usable importance entry. Cast {cast_to_f32} \
-             tensor(s) to F32 first. Check that --smooth-imatrix was collected against this \
-             exact checkpoint's tensor names.",
-            if examined == 1 { "y" } else { "ies" }
-        )
-        .into());
-    }
-
-    Ok(SmoothingSummary {
-        examined,
-        cast_to_f32,
-        candidates,
-        skipped_no_entry,
-        non_candidates,
-        transformed,
-    })
+            Ok(reconstructed)
+        },
+    )
 }

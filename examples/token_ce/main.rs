@@ -150,6 +150,10 @@ use source::{Weights, config_path, load_config, load_varmap, source_format, sour
 mod windows;
 use windows::{score_windows, select_windows, tokenize_corpus};
 
+// The tensor loop shared by every dense-weight probe below: cast-to-F32,
+// candidate selection, importance-entry gating, accounting, write-back.
+mod probe;
+
 // The AWQ-style per-input-channel smoothing PROBE: `--smooth-encoding` and
 // friends transform the loaded `VarMap`'s dense weights before the model is
 // built, so the rest of this file's scoring path runs unchanged. See the
@@ -160,6 +164,14 @@ use smooth::{
     SmoothObjective, SmoothSource, apply_smoothing, parse_native_encoding, parse_smooth_objective,
     parse_smooth_source,
 };
+
+// The codebook PROBE: `--codebook` transforms the loaded `VarMap`'s dense
+// weights through a self-contained 4-bit block quantizer, at identical
+// geometry to the encodings already measured, isolating whether a
+// non-uniform reconstruction codebook reduces task damage. Mutually
+// exclusive with `--smooth-encoding` — see `parse_args`.
+mod codebook;
+use codebook::{CodebookObjective, apply_codebook, parse_codebook, parse_codebook_objective};
 
 /// Tokens per scored window. Long enough that most positions are predicted
 /// with real context, short enough that one `[1, seq_len, vocab]` logit tensor
@@ -209,7 +221,11 @@ struct Args {
     /// default.
     dequant_weights: bool,
     /// The AWQ-style smoothing probe. `Some` turns it on; see `smooth.rs`.
+    /// Mutually exclusive with `codebook`.
     smoothing: Option<SmoothingArgs>,
+    /// The codebook probe. `Some` turns it on; see `codebook.rs`. Mutually
+    /// exclusive with `smoothing`.
+    codebook: Option<CodebookArgs>,
 }
 
 /// `--smooth-*` flags, gathered once presence is confirmed by
@@ -220,6 +236,14 @@ struct SmoothingArgs {
     imatrix: PathBuf,
     objective: SmoothObjective,
     source: SmoothSource,
+}
+
+/// `--codebook*` flags, gathered once presence is confirmed by `--codebook`
+/// being set.
+struct CodebookArgs {
+    codebook: boostr::quant::Codebook,
+    imatrix: PathBuf,
+    objective: CodebookObjective,
 }
 
 const USAGE: &str = "usage: token_ce (--ckpt DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
@@ -248,7 +272,13 @@ objective effect)] \
 requiring --smooth-imatrix's RMS activation AND the weight; weight is calibration-free, \
 derived from the weight's own column magnitudes alone — --smooth-imatrix is still required \
 and still selects which tensors are transformed, for a like-for-like tensor set between the \
-two sources)]";
+two sources)] \
+[--codebook uniform|nf4 (turns on the codebook PROBE: quantize/dequantize every candidate \
+weight through a self-contained 4-bit block quantizer at fixed geometry, comparing an evenly \
+spaced 16-level grid against NF4's non-uniform one; requires --ckpt and --smooth-imatrix; \
+mutually exclusive with --smooth-encoding)] \
+[--codebook-objective uniform|imatrix (default imatrix: the per-element weight the codebook's \
+group scale search scores against, exactly like --smooth-objective)]";
 
 /// Consume the value that follows `flag`, advancing `i` past it.
 fn take_value(argv: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -276,6 +306,8 @@ fn parse_args() -> Result<Args, String> {
     let mut smooth_imatrix: Option<PathBuf> = None;
     let mut smooth_objective = SmoothObjective::Imatrix;
     let mut smooth_source = SmoothSource::Activation;
+    let mut codebook_choice: Option<boostr::quant::Codebook> = None;
+    let mut codebook_objective = CodebookObjective::Imatrix;
 
     let mut i = 0usize;
     while i < argv.len() {
@@ -323,6 +355,12 @@ fn parse_args() -> Result<Args, String> {
             "--smooth-source" => {
                 smooth_source = parse_smooth_source(&take_value(&argv, &mut i, flag)?)?
             }
+            "--codebook" => {
+                codebook_choice = Some(parse_codebook(&take_value(&argv, &mut i, flag)?)?)
+            }
+            "--codebook-objective" => {
+                codebook_objective = parse_codebook_objective(&take_value(&argv, &mut i, flag)?)?
+            }
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown flag {other}\n{USAGE}")),
         }
@@ -357,19 +395,26 @@ fn parse_args() -> Result<Args, String> {
         }
     };
 
-    // The probe is OFF unless `--smooth-encoding` names it. Every other
-    // `--smooth-*` flag is meaningless without it, and a value typed with no
-    // effect is worse than an error naming the missing flag.
-    let smoothing = match smooth_encoding {
-        None => {
+    // Exactly one probe is OFF unless one of `--smooth-encoding` or
+    // `--codebook` names it, and the two are mutually exclusive: each
+    // rewrites the same dense `VarMap` in place, so running both would
+    // score neither transform in isolation.
+    let (smoothing, codebook) = match (smooth_encoding, codebook_choice) {
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "--smooth-encoding and --codebook are mutually exclusive\n{USAGE}"
+            ));
+        }
+        (None, None) => {
             if smooth_imatrix.is_some() {
                 return Err(format!(
-                    "--smooth-imatrix has no effect without --smooth-encoding\n{USAGE}"
+                    "--smooth-imatrix has no effect without --smooth-encoding or \
+                     --codebook\n{USAGE}"
                 ));
             }
-            None
+            (None, None)
         }
-        Some(encoding) => {
+        (Some(encoding), None) => {
             // A packed weight has no dense `Var` to transform — same reason
             // `examples/voxcpm/sensitivity.rs` refuses `--gguf`/`--tcf`.
             if !matches!(weights, Weights::Checkpoint(_)) {
@@ -390,13 +435,36 @@ fn parse_args() -> Result<Args, String> {
                     "--smooth-alpha must be in [0, 1], got {smooth_alpha}\n{USAGE}"
                 ));
             }
-            Some(SmoothingArgs {
+            let smoothing = SmoothingArgs {
                 encoding,
                 alpha: smooth_alpha,
                 imatrix,
                 objective: smooth_objective,
                 source: smooth_source,
-            })
+            };
+            (Some(smoothing), None)
+        }
+        (None, Some(chosen)) => {
+            // Same reasoning as `--smooth-encoding` above: no dense `Var` to
+            // transform behind `--gguf`/`--tcf`.
+            if !matches!(weights, Weights::Checkpoint(_)) {
+                return Err(format!(
+                    "--codebook requires --ckpt: a GGUF or TCF weight is already packed, has \
+                     no dense Var to transform, and the probe would silently no-op on it\n{USAGE}"
+                ));
+            }
+            let imatrix = smooth_imatrix.ok_or_else(|| {
+                format!(
+                    "--codebook requires --smooth-imatrix: without it there is no \
+                     importance-entry-gated candidate set to transform\n{USAGE}"
+                )
+            })?;
+            let codebook = CodebookArgs {
+                codebook: chosen,
+                imatrix,
+                objective: codebook_objective,
+            };
+            (None, Some(codebook))
         }
     };
 
@@ -411,6 +479,7 @@ fn parse_args() -> Result<Args, String> {
         stride,
         dequant_weights,
         smoothing,
+        codebook,
     })
 }
 
@@ -503,6 +572,35 @@ where
             smoothing.alpha,
             smoothing.source,
             smoothing.objective,
+            summary.examined,
+            summary.cast_to_f32,
+            summary.candidates,
+            summary.non_candidates,
+            summary.transformed,
+            summary.skipped_no_entry
+        );
+    }
+
+    if let Some(codebook) = &args.codebook {
+        eprintln!(
+            "codebook: loading importance matrix {} ...",
+            codebook.imatrix.display()
+        );
+        let imatrix = ImportanceMatrix::read_from_path(&codebook.imatrix)?;
+        let summary = apply_codebook::<R>(
+            &mut var_map,
+            &imatrix,
+            codebook.codebook,
+            codebook.objective,
+        )?;
+        // MANDATORY, never drop this line: same reasoning as the smoothing
+        // probe's summary line above — `apply_codebook` already refuses to
+        // return at all when `transformed == 0`.
+        eprintln!(
+            "codebook: codebook={:?} objective={:?} examined={} cast_to_f32={} candidates={} \
+             non_candidates={} transformed={} skipped_no_entry={}",
+            codebook.codebook,
+            codebook.objective,
             summary.examined,
             summary.cast_to_f32,
             summary.candidates,

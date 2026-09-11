@@ -241,9 +241,10 @@ fn test_kv_cache_update_dtype_mismatch_is_error() {
     let v_cache =
         numr::tensor::Tensor::from_slice(&zeros, &[b, kv_heads, max_seq, d], &cpu_device).unwrap();
     let new_k = det_tensor(&[b, kv_heads, 2, d], &cpu_device);
-    // new_v is F16 while k_cache, v_cache, and new_k are F32.
+    // new_v is F64 while k_cache, v_cache, and new_k are F32. F64 exists on
+    // every build; a half type would need the `f16` feature.
     let new_v = det_tensor(&[b, kv_heads, 2, d], &cpu_device)
-        .to_dtype(numr::dtype::DType::F16)
+        .to_dtype(numr::dtype::DType::F64)
         .unwrap();
 
     let result = cpu_client.kv_cache_update(&k_cache, &v_cache, &new_k, &new_v, position);
@@ -263,7 +264,7 @@ fn test_kv_cache_update_dtype_mismatch_is_error() {
             .to_vec::<f32>();
         let nv = Tensor::from_slice(&nv_f32, &[b, kv_heads, 2, d], &cuda_device)
             .unwrap()
-            .to_dtype(numr::dtype::DType::F16)
+            .to_dtype(numr::dtype::DType::F64)
             .unwrap();
         let result = cuda_client.kv_cache_update(&k_c, &v_c, &nk, &nv, position);
         assert!(result.is_err(), "CUDA: dtype mismatch must be rejected");
@@ -632,9 +633,10 @@ fn test_kv_cache_update_batched_dtype_mismatch_is_error() {
         numr::tensor::Tensor::from_slice(&zeros_cache, &[b, kv_heads, max_seq, d], &cpu_device)
             .unwrap();
     let nk0 = det_tensor(&[b, kv_heads, new_len, d], &cpu_device);
-    // nv0 is F16 while k0, v0, and nk0 are F32.
+    // nv0 is F64 while k0, v0, and nk0 are F32. F64 exists on every build;
+    // a half type would need the `f16` feature.
     let nv0 = det_tensor(&[b, kv_heads, new_len, d], &cpu_device)
-        .to_dtype(numr::dtype::DType::F16)
+        .to_dtype(numr::dtype::DType::F64)
         .unwrap();
 
     let result =
@@ -661,7 +663,7 @@ fn test_kv_cache_update_batched_dtype_mismatch_is_error() {
             .to_vec::<f32>();
         let nv0 = Tensor::from_slice(&nv0_f32, &[b, kv_heads, new_len, d], &cuda_device)
             .unwrap()
-            .to_dtype(numr::dtype::DType::F16)
+            .to_dtype(numr::dtype::DType::F64)
             .unwrap();
         let result = cuda_client.kv_cache_update_batched(
             &[&k0],

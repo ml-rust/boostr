@@ -193,7 +193,8 @@ impl QuantFormat {
             Self::IQ3S => 21,
             Self::IQ2S => 22,
             Self::IQ4XS => 23,
-            Self::IQ1M => 24,
+            // ggml.h: 24=I8, 25=I16, 26=I32, 27=I64, 28=F64 are non-quant types, skipped here.
+            Self::IQ1M => 29,
             Self::TQ1_0 => 34,
             Self::TQ2_0 => 35,
         }
@@ -252,7 +253,7 @@ impl QuantFormat {
             21 => Ok(Self::IQ3S),
             22 => Ok(Self::IQ2S),
             23 => Ok(Self::IQ4XS),
-            24 => Ok(Self::IQ1M),
+            29 => Ok(Self::IQ1M),
             34 => Ok(Self::TQ1_0),
             35 => Ok(Self::TQ2_0),
             _ => Err(Error::UnsupportedQuantFormat {
@@ -377,6 +378,22 @@ mod tests {
     #[test]
     fn test_from_ggml_unknown() {
         assert!(QuantFormat::from_ggml_type_id(999).is_err());
+    }
+
+    #[test]
+    fn test_ggml_type_id_24_is_not_iq1m() {
+        // Regression: id 24 is GGML_TYPE_I8 (ggml.h), not IQ1_M (which is 29).
+        // A prior bug wrote 24 for IQ1_M, mislabeling IQ1_M tensors as int8.
+        assert!(QuantFormat::from_ggml_type_id(24).is_err());
+        assert_eq!(QuantFormat::IQ1M.ggml_type_id(), 29);
+    }
+
+    #[test]
+    fn test_ggml_type_id_29_is_iq1m() {
+        assert_eq!(
+            QuantFormat::from_ggml_type_id(29).unwrap(),
+            QuantFormat::IQ1M
+        );
     }
 
     #[test]

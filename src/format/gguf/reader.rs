@@ -385,21 +385,10 @@ impl Gguf {
         // For non-quantized types there is no block structure to chunk over;
         // the bytes map 1-to-1 (or 2-to-1) to the output f32 values.  Use the
         // existing one-shot path which is already optimal.
-        let is_quantized = matches!(
-            info.ggml_type,
-            GgmlType::Q4_0
-                | GgmlType::Q4_1
-                | GgmlType::Q5_0
-                | GgmlType::Q5_1
-                | GgmlType::Q8_0
-                | GgmlType::Q8_1
-                | GgmlType::Q2K
-                | GgmlType::Q3K
-                | GgmlType::Q4K
-                | GgmlType::Q5K
-                | GgmlType::Q6K
-                | GgmlType::Q8K
-        );
+        // Delegates to `GgmlType::is_quantized` so this never drifts from the
+        // enum's own IQ/Q variant list (previously restated here and missed
+        // every IQ format when they were added).
+        let is_quantized = info.ggml_type.is_quantized();
 
         let mut shape = info.shape.clone();
         shape.reverse();

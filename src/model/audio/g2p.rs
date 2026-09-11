@@ -34,6 +34,9 @@ pub enum Lang {
     Pt,
     Zh,
     Ko,
+    /// Bahasa Melayu. Voices of a multilingual model that tokenizes raw text
+    /// carry it as a tag; espeak-ng phonemizes it for the G2P path.
+    Ms,
 }
 
 impl std::str::FromStr for Lang {
@@ -58,6 +61,7 @@ impl Lang {
             "pt" | "pt-br" | "pt-pt" => Ok(Self::Pt),
             "zh" | "zh-cn" | "zh-tw" => Ok(Self::Zh),
             "ko" | "ko-kr" => Ok(Self::Ko),
+            "ms" | "ms-my" => Ok(Self::Ms),
             _ => Err(G2pError::UnsupportedLanguage(s.to_string())),
         }
     }
@@ -75,6 +79,7 @@ impl Lang {
             Self::Pt => "pt",
             Self::Zh => "cmn", // Mandarin
             Self::Ko => "ko",
+            Self::Ms => "ms",
         }
     }
 }

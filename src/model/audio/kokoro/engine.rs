@@ -106,6 +106,22 @@ impl KokoroModelV2<CpuRuntime> {
     }
 }
 
+impl crate::model::audio::TtsEngine for KokoroEngine {
+    fn synthesize(&self, text: &str, voice: &str, speed: f32) -> Result<Vec<f32>> {
+        KokoroEngine::synthesize(self, text, voice, speed)
+    }
+
+    fn sample_rate(&self) -> u32 {
+        KokoroEngine::sample_rate(self)
+    }
+
+    /// The canonical catalog; voice packs beyond it resolve through
+    /// `VoiceResolver` at synthesis time.
+    fn voices(&self) -> Vec<crate::model::audio::Voice> {
+        crate::model::audio::default_kokoro_voices()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::model::audio::kokoro::KokoroConfig;

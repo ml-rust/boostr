@@ -1,19 +1,20 @@
 //! Text-to-speech bundle: G2P + neural acoustic model + vocoder + voice
 //! catalog.
 //!
-//! A bundle can run in two modes. Without an attached [`KokoroEngine`] it
+//! A bundle can run in two modes. Without an attached [`TtsEngine`] it
 //! validates the surrounding pipeline — tokenizer validation, voice lookup,
 //! G2P, and WAV encoding — and returns [`TtsError::NotImplemented`] from the
 //! synthesis step, which lets callers assert their plumbing is correct without
 //! loading model weights. With an engine attached via [`TtsBundle::with_engine`],
-//! `synthesize` runs the full `text → waveform` neural path.
+//! `synthesize` runs the full `text → waveform` neural path. The engine is a
+//! trait object, so one bundle type serves Kokoro and VoxCPM2 alike.
 
 use std::sync::Arc;
 
 use thiserror::Error;
 
 use super::g2p::{G2pError, Lang, Phonemizer};
-use super::kokoro::KokoroEngine;
+use super::tts_engine::TtsEngine;
 
 /// Errors raised by the TTS pipeline.
 #[derive(Debug, Error)]
@@ -28,6 +29,11 @@ pub enum TtsError {
     Load(String),
     #[error("engine error: {0}")]
     Engine(String),
+    /// The engine refused the request itself — an option it has no control
+    /// for, or a voice it does not carry — as opposed to failing while
+    /// rendering. A server answers this with a client error.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
 }
 
 /// A single voice the bundle supports.
@@ -80,7 +86,7 @@ pub struct TtsBundle {
     /// Neural synthesis engine. When `None`, `synthesize` returns
     /// [`TtsError::NotImplemented`] (scaffolding mode). When `Some`, the full
     /// `text → waveform` pipeline runs.
-    engine: Option<Arc<KokoroEngine>>,
+    engine: Option<Arc<dyn TtsEngine>>,
 }
 
 impl TtsBundle {
@@ -97,7 +103,7 @@ impl TtsBundle {
 
     /// Attach a real synthesis engine. Once attached, `synthesize` runs the
     /// full neural path instead of returning `NotImplemented`.
-    pub fn with_engine(mut self, engine: Arc<KokoroEngine>) -> Self {
+    pub fn with_engine(mut self, engine: Arc<dyn TtsEngine>) -> Self {
         self.sample_rate = engine.sample_rate();
         self.engine = Some(engine);
         self
@@ -146,7 +152,12 @@ impl TtsBundle {
         match &self.engine {
             Some(engine) => engine
                 .synthesize(text, voice_id, options.speed)
-                .map_err(|e| TtsError::Engine(e.to_string())),
+                .map_err(|e| match e {
+                    crate::error::Error::InvalidArgument { .. } => {
+                        TtsError::InvalidRequest(e.to_string())
+                    }
+                    other => TtsError::Engine(other.to_string()),
+                }),
             None => {
                 // Scaffolding path: validate voice + run G2P eagerly, then fail
                 // with `NotImplemented`. Exercises the plumbing end-to-end so

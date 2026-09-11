@@ -12,6 +12,7 @@ pub mod reflection_pad;
 pub mod resample;
 pub mod stft;
 pub mod tts_bundle;
+pub mod tts_engine;
 pub mod vad;
 pub mod voxcpm;
 pub mod wav_decode;
@@ -45,6 +46,7 @@ pub use resample::{
 };
 pub use stft::{StftClient, StftOptions, stft};
 pub use tts_bundle::{SynthesizeOptions, TtsBundle, TtsError, Voice, default_kokoro_voices};
+pub use tts_engine::TtsEngine;
 pub use vad::{
     SileroVad, SileroVadWeights, SpeechSegment, VadConfig, VadSegmentOptions, VadState,
     segments_from_probabilities,

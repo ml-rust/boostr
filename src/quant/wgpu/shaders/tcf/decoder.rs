@@ -200,9 +200,9 @@ fn tcf_group_values(tile: u32, g: u32) -> TcfGroup {{
 // sub-plane followed by a whole high-two-bit sub-plane, the second starting at
 // `code_high_off`.
 //
-// Symmetric codes sign-extend from `bits`; Section 13.2's reserved
-// most-negative pattern is rejected by `tcf-core` when the payload is read, so
-// shader code sign-extends the legal range rather than re-checking per element.
+// Symmetric codes sign-extend from `bits` over the full two's-complement
+// range; no code plane reserves a value (Section 13.2), so shader code
+// sign-extends unconditionally.
 fn tcf_code(tile: u32, e: u32) -> i32 {{
     var field: u32 = 0u;
     if (params.bits == 4u) {{

@@ -218,9 +218,8 @@ static __device__ __forceinline__ void tcf_group_values(
 // Section 13.2 sign resolution of one raw code field.
 //
 // An asymmetric code is an unsigned level. A symmetric code sign-extends from
-// `bits`; Section 13.2's reserved most-negative pattern is rejected by
-// `tcf-core` when the payload is read, so device code sign-extends it rather
-// than re-checking per element.
+// `bits` over the full two's-complement range; no code plane reserves a
+// value (Section 13.2), so device code sign-extends unconditionally.
 //
 // Factored out because two readers need it — `tcf_code` below, one element at
 // a time, and `tcf_run_code`, a whole word of codes at a time. A second copy

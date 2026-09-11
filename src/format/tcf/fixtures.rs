@@ -41,8 +41,9 @@ pub const RAW_F16_BITS: [u16; 4] = [0x3c00, 0xc000, 0x3800, 0x0000];
 
 /// The 64 signed codes the `Q4S32_T64` tensor stores.
 ///
-/// Every value stays inside `-7..=7`: `-8` is the reserved most-negative
-/// code a conforming payload never contains (Section 13.2).
+/// Every value stays inside `-7..=7`, the `(i % 15) - 7` formula's own range.
+/// `-8` is a legal code too (Section 13.2 reserves no CODE-plane value); this
+/// fixture simply never emits it.
 pub fn q4_codes() -> [i8; 64] {
     let mut codes = [0i8; 64];
     for (i, slot) in codes.iter_mut().enumerate() {

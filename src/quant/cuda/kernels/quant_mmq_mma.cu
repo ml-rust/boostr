@@ -3752,11 +3752,11 @@ struct MmqfIQ1S {
 // scale per 32 elements — and the whole `vec_dot` is Q8_0's. `stage` is the
 // only thing this format defines for itself.
 //
-// THE SIGN. Section 13.2 sign-extends an 8-bit symmetric code from bit 7, and
-// `tcf-core` rejects the reserved most-negative pattern when it reads a
-// payload, so every code the plane can hold is exactly its byte reinterpreted
-// as `int8` — which is what the MMA lanes read. `tcf_sign_resolve` in
-// `tcf.cuh` states the same rule for the decode-direction kernels.
+// THE SIGN. Section 13.2 sign-extends an 8-bit symmetric code from bit 7 over
+// the full two's-complement range -- no code plane reserves a value -- so
+// every code the plane can hold is exactly its byte reinterpreted as a
+// native `int8_t`, which is what the MMA lanes read directly. `tcf_sign_resolve`
+// in `tcf.cuh` states the same rule for the decode-direction kernels.
 //
 // ALIGNMENT. A row of codes starts at `r * K` and `K` is a multiple of 64, so
 // every row base is 64-byte aligned and every 4-byte quant word inside it is

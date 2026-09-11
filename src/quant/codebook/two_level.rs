@@ -35,10 +35,13 @@ const GROUPS_PER_SUPER: usize = 16;
 /// Elements per super-block.
 const SUPER_BLOCK: usize = GROUP_SIZE * GROUPS_PER_SUPER;
 
-/// The signed 6-bit code grid an arm quantizes onto. Two grids exist
-/// because TCF's SPECIFICATION.md Section 13.2 reserves the most-negative
-/// code as a rejection point and ggml's Q6_K does not; the two differ by one
-/// level in 64, and isolating that cost is what the reserved arm is for.
+/// The signed 6-bit code grid an arm quantizes onto. Two grids exist because
+/// TCF's SPECIFICATION.md Section 13.2 USED TO reserve the most-negative
+/// code as a rejection point (retired: no CODE plane reserves a value now,
+/// full two's-complement range like ggml's Q6_K); the two differ by one
+/// level in 64, and isolating that cost is what motivated the retirement —
+/// [`SuperPrecision::Bf16Reserved`] keeps the old grid around as the
+/// historical comparison point.
 #[derive(Debug, Clone, Copy)]
 struct CodeGrid {
     /// The divisor the fit sweep anchors on: `d = max_abs / (qmax + mult)`.
@@ -49,7 +52,10 @@ struct CodeGrid {
     hi: f32,
 }
 
-/// All 64 codes, `-32..=31`. Q6_K's grid.
+/// All 64 codes, `-32..=31`. Q6_K's grid, and TCF's current grid for every
+/// symmetric encoding since Section 13.2's reservation was retired
+/// (`geometry.qmax()` is still `2^(bits-1) - 1`; the lower bound widened to
+/// `-(qmax + 1)`).
 const FULL_64: CodeGrid = CodeGrid {
     qmax: 32.0,
     lo: -32.0,
@@ -57,7 +63,9 @@ const FULL_64: CodeGrid = CodeGrid {
 };
 
 /// 63 codes, `-31..=31`, the most-negative pattern reserved. TCF's grid for
-/// every symmetric encoding (`geometry.qmax()` is `2^(bits-1) - 1`).
+/// every symmetric encoding BEFORE Section 13.2's reservation was retired;
+/// kept only as [`SuperPrecision::Bf16Reserved`]'s historical comparison
+/// point.
 const RESERVED_63: CodeGrid = CodeGrid {
     qmax: 31.0,
     lo: -31.0,
@@ -89,10 +97,11 @@ pub enum SuperPrecision {
     /// super-precision scheme can beat this — it is the two-level geometry
     /// with zero rounding above the per-group float fit.
     F32,
-    /// TCF's `Q6S16D_T64` EXACTLY: the `Bf16` arm plus SPECIFICATION.md
-    /// Section 13.2's reserved most-negative code, so 63 levels not 64. The
-    /// only arm on [`RESERVED_63`]; against `Bf16` it isolates the reserved
-    /// code's cost with the super-scale held fixed.
+    /// TCF's `Q6S16D_T64` as originally specified, before SPECIFICATION.md
+    /// Section 13.2's reservation was retired: the `Bf16` arm minus its
+    /// most-negative code, so 63 levels not 64. The only arm on
+    /// [`RESERVED_63`]; against `Bf16` it isolates the retired reservation's
+    /// cost with the super-scale held fixed.
     Bf16Reserved,
 }
 

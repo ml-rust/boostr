@@ -8,13 +8,13 @@
 //!
 //! # What the GPU path does not check
 //!
-//! `tcf-core` rejects a payload carrying Section 13.2's reserved code or a
-//! Section 13.1 invalid scale. A kernel cannot return that error per element
-//! without a device-to-host round trip on every launch, so these kernels
-//! decode a payload that has already been accepted — which is what reading a
-//! TCF file produces, the reader having validated and digest-checked it. On a
-//! payload `tcf-core` would reject, the CPU path errors and the CUDA path
-//! returns numbers.
+//! `tcf-core` rejects a payload carrying a Section 13.4 reserved sub-minimum
+//! or a Section 13.1 invalid scale. A kernel cannot return that error per
+//! element without a device-to-host round trip on every launch, so these
+//! kernels decode a payload that has already been accepted — which is what
+//! reading a TCF file produces, the reader having validated and
+//! digest-checked it. On a payload `tcf-core` would reject, the CPU path
+//! errors and the CUDA path returns numbers.
 //!
 //! # Rounding
 //!

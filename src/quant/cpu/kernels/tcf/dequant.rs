@@ -57,8 +57,9 @@ use crate::quant::cpu::kernels::simd::tcf_decode::Decoder;
 ///
 /// # Errors
 /// [`Error::ModelError`] carrying the spec's `E_*` code when the codec
-/// rejects the payload — a short slice, a reserved code (Section 13.2), or a
-/// scale that is NaN, infinite, or negatively signed (Section 13.1).
+/// rejects the payload — a short slice, a reserved two-level sub-minimum
+/// (Section 13.4), or a scale that is NaN, infinite, or negatively signed
+/// (Section 13.1).
 /// [`Error::QuantError`] when `shape` is not a tileable shape.
 pub fn unpack_tiles(
     payload: &[u8],

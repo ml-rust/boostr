@@ -230,7 +230,10 @@ fn tcf_code(tile: u32, e: u32) -> i32 {{
     }}
     let reserved = i32(1u << (params.bits - 1u));
     let value = i32(field);
-    if (value > reserved) {{
+    // `>=`, not `>`: two's complement's most-negative pattern (`value ==
+    // reserved`) is a legal code, not a gap. `>` under-counted it, wrapping
+    // it back to a positive value one past qmax instead of `-reserved`.
+    if (value >= reserved) {{
         return value - 2 * reserved;
     }}
     return value;

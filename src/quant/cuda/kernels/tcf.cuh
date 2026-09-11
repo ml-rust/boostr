@@ -236,7 +236,10 @@ static __device__ __forceinline__ int tcf_sign_resolve(
     }
     int reserved = (int)(1u << (bits - 1u));
     int value = (int)field;
-    return (value > reserved) ? value - 2 * reserved : value;
+    // `>=`, not `>`: two's complement's most-negative pattern (`field ==
+    // reserved`) is a legal code, not a gap. `>` under-counted it, wrapping
+    // it back to a positive value one past qmax instead of `-reserved`.
+    return (value >= reserved) ? value - 2 * reserved : value;
 }
 
 // The code of element `e` of tile `tile`, already sign-resolved.

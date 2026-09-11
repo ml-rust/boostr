@@ -217,6 +217,10 @@ pub fn dispatch_dequant(
 /// f32 and accumulate in f32; the decoder they share reconstructs the weight
 /// and multiplies in f32. Neither quantizes the activation, so the values the
 /// dot product sees are the values the caller handed in.
+///
+/// Reassociates: declared `true` though the WGSL reduction order could not be
+/// confirmed from source. An unverified kernel takes the value that refuses,
+/// never the one that permits.
 pub const MATMUL_CONTRACT: crate::quant::KernelContract =
     crate::quant::KernelContract::f32_activation("wgpu tcf matmul");
 
@@ -300,4 +304,14 @@ pub fn dispatch_matmul(
         workgroups,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::MATMUL_CONTRACT;
+
+    #[test]
+    fn declares_that_it_reassociates() {
+        const { assert!(MATMUL_CONTRACT.reassociates) };
+    }
 }

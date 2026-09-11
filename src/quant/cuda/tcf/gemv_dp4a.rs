@@ -150,5 +150,18 @@ pub(crate) fn launch_gemv_dp4a(
 /// afterwards. The activation the dot product sees is NOT the activation the
 /// caller handed in, which is exactly what a contract declaring exact f32
 /// activations forbids.
+///
+/// Reassociates: dp4a accumulates int32 partials per lane, then a
+/// `__shfl_down_sync` tree reduces across the warp.
 pub(crate) const DP4A_GEMV_CONTRACT: crate::quant::KernelContract =
     crate::quant::KernelContract::dynamic_int8_activation("cuda tcf dp4a gemv");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn declares_that_it_reassociates() {
+        const { assert!(DP4A_GEMV_CONTRACT.reassociates) };
+    }
+}

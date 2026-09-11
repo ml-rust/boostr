@@ -14,7 +14,9 @@
 use core::fmt;
 use core::fmt::Write as _;
 
-use tcf_core::{ContractRecord, DotAccumulator, ExecutionRole, InputRepresentation, OutputDtype};
+use tcf_core::{
+    ContractRecord, DotAccumulator, ExecutionRole, InputRepresentation, MathMode, OutputDtype,
+};
 
 /// The activation contract one weight declares, with the provenance needed to
 /// name it in an error.
@@ -35,6 +37,10 @@ pub struct ActivationContract {
     pub dot_accumulator: DotAccumulator,
     /// The element type the kernel must produce.
     pub output_dtype: OutputDtype,
+    /// Whether the kernel may reorder the sum. Section 9.1. Dropping this
+    /// field is what let a `REASSOCIATION_FORBIDDEN` file run on a
+    /// reassociating kernel with no refusal — never omit it again.
+    pub math_mode: MathMode,
     /// Values per activation quantization group along the quantization axis.
     /// Section 9.2 defines it for `A8S32_DYNAMIC` alone; every other
     /// representation writes zero.
@@ -56,6 +62,7 @@ impl ActivationContract {
             input_representation: record.input_representation,
             dot_accumulator: record.dot_accumulator,
             output_dtype: record.output_dtype,
+            math_mode: record.math_mode,
             quant_group: record.quant_group,
             quant_range: (record.qmin, record.qmax),
         }
@@ -79,10 +86,11 @@ impl fmt::Display for ActivationContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "input {}, dot {}, output {}",
+            "input {}, dot {}, output {}, math {}",
             input_representation_name(self.input_representation),
             dot_accumulator_name(self.dot_accumulator),
             output_dtype_name(self.output_dtype),
+            math_mode_name(self.math_mode),
         )?;
         if self.quant_group != 0 {
             write!(f, ", group {}", self.quant_group)?;
@@ -135,6 +143,16 @@ pub fn output_dtype_name(value: OutputDtype) -> &'static str {
         OutputDtype::F32 => "F32",
         OutputDtype::F16 => "F16",
         OutputDtype::Bf16 => "BF16",
+        _ => "UNKNOWN",
+    }
+}
+
+/// Wire-field spelling of `math_mode`. Section 9.1.
+#[must_use]
+pub fn math_mode_name(value: MathMode) -> &'static str {
+    match value {
+        MathMode::ReassociationAllowed => "REASSOCIATION_ALLOWED",
+        MathMode::ReassociationForbidden => "REASSOCIATION_FORBIDDEN",
         _ => "UNKNOWN",
     }
 }
@@ -192,12 +210,24 @@ mod tests {
         assert_eq!(declared.digest_hex(), "ab".repeat(16));
     }
 
+    /// The defect this threading fixes: a file declaring
+    /// `REASSOCIATION_FORBIDDEN` must keep that value in the runtime form, or
+    /// dispatch has nothing left to refuse a reassociating kernel with.
+    #[test]
+    fn reassociation_forbidden_survives_the_record() {
+        let mut record = f32_record();
+        record.math_mode = MathMode::ReassociationForbidden;
+        let declared = ActivationContract::from_record("w", ExecutionRole::Matmul, &record);
+        assert_eq!(declared.math_mode, MathMode::ReassociationForbidden);
+    }
+
     #[test]
     fn display_names_the_fields_a_reader_dispatches_on() {
         let declared = ActivationContract::from_record("w", ExecutionRole::Matmul, &f32_record());
         let text = declared.to_string();
         assert!(text.contains("input F32"), "{text}");
         assert!(text.contains("dot F32"), "{text}");
+        assert!(text.contains("math REASSOCIATION_ALLOWED"), "{text}");
         assert!(text.contains("role MATMUL"), "{text}");
         assert!(text.contains(&declared.digest_hex()), "{text}");
     }

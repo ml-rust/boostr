@@ -7,6 +7,11 @@ use super::*;
 const WIDE: u32 = 1 << 20;
 
 #[test]
+fn declares_that_it_reassociates() {
+    const { assert!(CONTRACT.reassociates) };
+}
+
+#[test]
 fn stream_k_only_when_the_tiles_leave_the_device_short() {
     // 32 tiles across 28 SMs leaves the second wave nearly empty. Q8_0's
     // veto does not fire yet: 3*32 = 96 < 4*28 = 112.

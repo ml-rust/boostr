@@ -18,6 +18,9 @@ use super::formats::FeatMajorFormat;
 /// along K — and the MMA instructions accumulate on integers before rescaling
 /// to f32. The activation the dot product sees is NOT the activation the
 /// caller handed in.
+///
+/// Reassociates: `mma.sync` reduces inside the instruction, and the split-K
+/// fixup pass above (`use_stream_k`) reduces again across tiles.
 pub(in crate::quant::cuda::quant_matmul) const CONTRACT: crate::quant::KernelContract =
     crate::quant::KernelContract::dynamic_int8_activation("cuda feature-major MMQ");
 

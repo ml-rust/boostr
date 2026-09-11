@@ -18,7 +18,7 @@
 
 use core::fmt;
 
-use tcf_core::{DotAccumulator, ExecutionRole, InputRepresentation, OutputDtype};
+use tcf_core::{DotAccumulator, ExecutionRole, InputRepresentation, MathMode, OutputDtype};
 
 use super::declared::{
     ActivationContract, dot_accumulator_name, input_representation_name, output_dtype_name,
@@ -52,6 +52,10 @@ pub struct KernelContract {
     pub output_dtype: OutputDtype,
     /// The execution role the kernel serves.
     pub role: ExecutionRole,
+    /// Whether the kernel reorders the sum or fuses multiply-add. Never a
+    /// declared permission — this states what the kernel's arithmetic
+    /// actually does, checked against `math_mode` in [`Self::satisfies`].
+    pub reassociates: bool,
     /// Values per activation quantization group, for a kernel that quantizes
     /// the activation. `None` for a kernel that does not.
     pub quant_group: Option<u16>,
@@ -63,6 +67,13 @@ pub struct KernelContract {
 impl KernelContract {
     /// A matmul kernel that reads the activation as f32 and accumulates in
     /// f32 — no activation quantization anywhere in the dot product.
+    ///
+    /// `reassociates` is always `true` here. Every kernel built on this
+    /// constructor blocks or lane-splits the reduction (CPU: 8-lane AVX2 FMA
+    /// plus a horizontal reduction, `cpu/kernels/tcf/matmul.rs`. CUDA GEMM:
+    /// register-tile blocking with a split-K fixup. WGPU: unverified from
+    /// source, so it takes the value that REFUSES rather than the one that
+    /// permits), so none reproduces a fixed left-to-right sum.
     #[must_use]
     pub const fn f32_activation(kernel: &'static str) -> Self {
         Self {
@@ -71,6 +82,7 @@ impl KernelContract {
             dot_accumulator: DotAccumulator::F32,
             output_dtype: OutputDtype::F32,
             role: ExecutionRole::Matmul,
+            reassociates: true,
             quant_group: None,
             quant_range: None,
         }
@@ -83,6 +95,11 @@ impl KernelContract {
     /// This is the contract of the whole dp4a and integer-MMA kernel family:
     /// the activation the caller handed in is NOT the activation the dot
     /// product sees.
+    ///
+    /// `reassociates` is always `true`. dp4a accumulates int32 partials
+    /// across lanes and reduces them with a multi-warp tree; the MMA family
+    /// reduces inside `mma.sync` and again across K tiles. Neither is a
+    /// fixed-order sum.
     #[must_use]
     pub const fn dynamic_int8_activation(kernel: &'static str) -> Self {
         Self {
@@ -91,18 +108,25 @@ impl KernelContract {
             dot_accumulator: DotAccumulator::I32ThenF32Scale,
             output_dtype: OutputDtype::F32,
             role: ExecutionRole::Matmul,
+            reassociates: true,
             quant_group: Some(DYNAMIC_INT8_GROUP),
             quant_range: Some(DYNAMIC_INT8_RANGE),
         }
     }
 
     /// Whether this kernel computes what `declared` requires.
+    ///
+    /// A kernel that reassociates never satisfies `ReassociationForbidden`:
+    /// it reorders the sum regardless of what the file asked for. A kernel
+    /// that does not reassociate satisfies either mode, since a fixed-order
+    /// sum is a special case of "reassociation allowed".
     #[must_use]
     pub fn satisfies(&self, declared: &ActivationContract) -> bool {
         self.input_representation == declared.input_representation
             && self.dot_accumulator == declared.dot_accumulator
             && self.output_dtype == declared.output_dtype
             && self.role == declared.role
+            && (!self.reassociates || declared.math_mode != MathMode::ReassociationForbidden)
             && self
                 .quant_group
                 .is_none_or(|group| group == declared.quant_group)
@@ -128,7 +152,12 @@ impl fmt::Display for KernelContract {
         if let Some((qmin, qmax)) = self.quant_range {
             write!(f, ", range [{qmin}, {qmax}]")?;
         }
-        write!(f, ", role {}", role_name(self.role))
+        write!(
+            f,
+            ", reassociates {}, role {}",
+            self.reassociates,
+            role_name(self.role)
+        )
     }
 }
 
@@ -234,6 +263,47 @@ mod tests {
         let mut contract = declared(InputRepresentation::F32, DotAccumulator::F32, 0, (0, 0));
         contract.role = ExecutionRole::Lookup;
         assert!(!kernel.satisfies(&contract));
+    }
+
+    /// The defect this threading fixes: a kernel that reassociates ran
+    /// unrefused against a `REASSOCIATION_FORBIDDEN` file before this check
+    /// existed. It must refuse now, whatever else the contract agrees on.
+    #[test]
+    fn a_reassociating_kernel_does_not_satisfy_reassociation_forbidden() {
+        let kernel = KernelContract::f32_activation("tcf_gemv_f32");
+        let mut contract = declared(InputRepresentation::F32, DotAccumulator::F32, 0, (0, 0));
+        contract.math_mode = MathMode::ReassociationForbidden;
+        assert!(!kernel.satisfies(&contract));
+    }
+
+    #[test]
+    fn a_reassociating_kernel_satisfies_reassociation_allowed() {
+        let kernel = KernelContract::f32_activation("tcf_gemv_f32");
+        let mut contract = declared(InputRepresentation::F32, DotAccumulator::F32, 0, (0, 0));
+        contract.math_mode = MathMode::ReassociationAllowed;
+        assert!(kernel.satisfies(&contract));
+    }
+
+    /// Every shipped kernel contract is declared `true`. A future kernel
+    /// added with the wrong value fails here, not in the field.
+    #[test]
+    fn every_shipped_kernel_contract_declares_it_reassociates() {
+        assert!(KernelContract::f32_activation("f32").reassociates);
+        assert!(KernelContract::dynamic_int8_activation("int8").reassociates);
+    }
+
+    #[test]
+    fn mismatch_error_text_names_the_math_mode() {
+        let kernel = KernelContract::f32_activation("tcf_gemv_f32");
+        let mut contract = declared(InputRepresentation::F32, DotAccumulator::F32, 0, (0, 0));
+        contract.math_mode = MathMode::ReassociationForbidden;
+        let declared_text = contract.to_string();
+        let kernel_text = kernel.to_string();
+        assert!(
+            declared_text.contains("REASSOCIATION_FORBIDDEN"),
+            "{declared_text}"
+        );
+        assert!(kernel_text.contains("reassociates true"), "{kernel_text}");
     }
 
     #[test]

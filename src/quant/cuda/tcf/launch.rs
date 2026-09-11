@@ -302,5 +302,18 @@ pub(super) fn matmul_setup(
 /// Nothing on the activation side is quantized, so the values the dot product
 /// sees are the values the caller handed in. One constant covers both because
 /// they differ in blocking, not in arithmetic.
+///
+/// Reassociates: the GEMM path is register-tile blocked with an explicit
+/// split-K fixup, which reorders the sum both within and across tiles.
 pub(crate) const F32_CONTRACT: crate::quant::KernelContract =
     crate::quant::KernelContract::f32_activation("cuda tcf_gemv_f32 / tcf_gemm_f32");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn declares_that_it_reassociates() {
+        const { assert!(F32_CONTRACT.reassociates) };
+    }
+}

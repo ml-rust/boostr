@@ -135,7 +135,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch(
 
     let module = kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE)?;
 
-    let stream_k = use_stream_k(tiles, sms, format);
+    let stream_k = use_stream_k(tiles, sms, k_u32, format);
 
     tracing::debug!(
         m,
@@ -300,9 +300,22 @@ fn launch_stream_k(
 /// the split saves too little to cover the fixup pass. Below that threshold
 /// the tile-parallel grid cannot fill the device, and stream-k wins for every
 /// format, veto or not.
-const fn use_stream_k(tiles: u32, sms: u32, format: &FeatMajorFormat) -> bool {
-    sms > 0 && tiles < 2 * sms && !(format.prefers_tile_parallel && 3 * tiles >= 4 * sms)
+///
+/// K gates it too. The partial stores and the fixup pass are a fixed cost per
+/// split, paid once however short the K walk is, so a short K cannot amortise
+/// them and the tile-parallel grid wins even with most SMs idle. Measured on
+/// every K-quant and IQ4 format at the DiT projection shapes: below
+/// `STREAM_K_MIN_K` stream-k loses for every format at every tile count
+/// tried; at and above it stream-k wins.
+const fn use_stream_k(tiles: u32, sms: u32, k: u32, format: &FeatMajorFormat) -> bool {
+    sms > 0
+        && k >= STREAM_K_MIN_K
+        && tiles < 2 * sms
+        && !(format.prefers_tile_parallel && 3 * tiles >= 4 * sms)
 }
+
+/// Shortest K the stream-k split is worth. See [`use_stream_k`].
+const STREAM_K_MIN_K: u32 = 2048;
 
 #[cfg(test)]
 #[path = "dispatch_tests.rs"]

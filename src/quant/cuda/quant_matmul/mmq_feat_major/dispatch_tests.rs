@@ -15,23 +15,32 @@ fn declares_that_it_reassociates() {
 fn stream_k_only_when_the_tiles_leave_the_device_short() {
     // 32 tiles across 28 SMs leaves the second wave nearly empty. Q8_0's
     // veto does not fire yet: 3*32 = 96 < 4*28 = 112.
-    assert!(use_stream_k(32, 28, &Q8_0));
+    assert!(use_stream_k(32, 28, 4096, &Q8_0));
     // Two full waves already fill it, so the tile-parallel grid wins.
-    assert!(!use_stream_k(56, 28, &Q8_0));
+    assert!(!use_stream_k(56, 28, 4096, &Q8_0));
     // No SM count reported: fall back to the tile-parallel grid.
-    assert!(!use_stream_k(32, 0, &Q8_0));
+    assert!(!use_stream_k(32, 0, 4096, &Q8_0));
+}
+
+#[test]
+fn a_short_k_keeps_the_tile_parallel_grid() {
+    // 16 tiles on 28 SMs would take stream-k, but a K walk this short cannot
+    // amortise the partial stores and the fixup pass.
+    assert!(!use_stream_k(16, 28, 1024, &Q4_1));
+    assert!(!use_stream_k(16, 28, 2047, &Q4_1));
+    assert!(use_stream_k(16, 28, 2048, &Q4_1));
 }
 
 #[test]
 fn a_flagged_format_vetoes_stream_k_once_the_tile_count_passes_the_threshold() {
     // 3*40 = 120 >= 4*28 = 112: the tile count has passed about four thirds
     // of the SM count, so a flagged format takes the tile-parallel grid.
-    assert!(!use_stream_k(40, 28, &Q8_0));
+    assert!(!use_stream_k(40, 28, 4096, &Q8_0));
     // Two full waves fill the device regardless of the flag.
-    assert!(!use_stream_k(56, 28, &Q8_0));
+    assert!(!use_stream_k(56, 28, 4096, &Q8_0));
     // An unflagged format is unaffected by the veto term at the same
     // geometry where a flagged format is vetoed.
-    assert!(use_stream_k(40, 28, &Q4_1));
+    assert!(use_stream_k(40, 28, 4096, &Q4_1));
 }
 
 #[test]
@@ -39,10 +48,10 @@ fn the_veto_lifts_below_four_thirds_of_the_sm_count() {
     // 16 tiles leaves 12 of 28 SMs with no tile at all. The tile-parallel
     // grid cannot fill the device there, so stream-k wins even for a
     // format that vetoes it once the tile count passes the threshold.
-    assert!(use_stream_k(16, 28, &IQ3_XXS));
-    assert!(use_stream_k(37, 28, &IQ3_XXS));
+    assert!(use_stream_k(16, 28, 4096, &IQ3_XXS));
+    assert!(use_stream_k(37, 28, 4096, &IQ3_XXS));
     // 3*38 = 114 >= 4*28 = 112: the veto fires just past the threshold.
-    assert!(!use_stream_k(38, 28, &IQ3_XXS));
+    assert!(!use_stream_k(38, 28, 4096, &IQ3_XXS));
 }
 
 #[test]

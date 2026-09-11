@@ -124,6 +124,7 @@ use std::time::Instant;
 use boostr::model::llama::Llama;
 use boostr::model::traits::{Model, ModelClient};
 use boostr::nn::VarBuilder;
+use boostr::quant::ImportanceMatrix;
 use boostr::quant::traits::DequantOps;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
@@ -131,6 +132,7 @@ use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 #[cfg(feature = "cuda")]
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
+use tcf_core::NativeEncoding;
 
 // Which artifact the weights come from, and how one open artifact becomes a
 // `VarMap`. Lives in `examples/shared/` because the `imatrix` example loads
@@ -147,6 +149,17 @@ use source::{Weights, config_path, load_config, load_varmap, source_format, sour
 #[path = "../shared/windows.rs"]
 mod windows;
 use windows::{score_windows, select_windows, tokenize_corpus};
+
+// The AWQ-style per-input-channel smoothing PROBE: `--smooth-encoding` and
+// friends transform the loaded `VarMap`'s dense weights before the model is
+// built, so the rest of this file's scoring path runs unchanged. See the
+// module's own docs for what "probe" means here — TCF stores no scale plane,
+// so this scores the dense weight the format WOULD reconstruct, exactly.
+mod smooth;
+use smooth::{
+    SmoothObjective, SmoothSource, apply_smoothing, parse_native_encoding, parse_smooth_objective,
+    parse_smooth_source,
+};
 
 /// Tokens per scored window. Long enough that most positions are predicted
 /// with real context, short enough that one `[1, seq_len, vocab]` logit tensor
@@ -195,6 +208,18 @@ struct Args {
     /// see the module docs' "Comparing two artifacts" section. OFF by
     /// default.
     dequant_weights: bool,
+    /// The AWQ-style smoothing probe. `Some` turns it on; see `smooth.rs`.
+    smoothing: Option<SmoothingArgs>,
+}
+
+/// `--smooth-*` flags, gathered once presence is confirmed by
+/// `--smooth-encoding` being set.
+struct SmoothingArgs {
+    encoding: NativeEncoding,
+    alpha: f32,
+    imatrix: PathBuf,
+    objective: SmoothObjective,
+    source: SmoothSource,
 }
 
 const USAGE: &str = "usage: token_ce (--ckpt DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
@@ -209,7 +234,21 @@ single-file artifact)] \
 [--dequant-weights (dequantize EVERY packed weight to dense F32 at load, so both \
 artifacts of a comparison run the same dense F32 activation contract and differ only in \
 weight values; costs what an unquantized checkpoint costs, and is required for a valid \
-cross-format comparison)]";
+cross-format comparison)] \
+[--smooth-encoding ENCODING (turns on the AWQ-style per-input-channel smoothing PROBE; a \
+TCF NativeEncoding name, e.g. Q4AS32DT64; requires --ckpt and --smooth-imatrix)] \
+[--smooth-alpha 0.5 (in [0, 1]; trades activation RMS against weight magnitude in the \
+smoothing scale; 0 is the exact no-op control)] \
+[--smooth-imatrix FILE.bstrimtx (required with --smooth-encoding: the activation \
+importance the smoothing scale is derived from)] \
+[--smooth-objective uniform|imatrix (default imatrix: the error objective the probe's \
+quantize call scores against, letting a run separate the smoothing effect from the \
+objective effect)] \
+[--smooth-source activation|weight (default activation: activation is today's behaviour, \
+requiring --smooth-imatrix's RMS activation AND the weight; weight is calibration-free, \
+derived from the weight's own column magnitudes alone — --smooth-imatrix is still required \
+and still selects which tensors are transformed, for a like-for-like tensor set between the \
+two sources)]";
 
 /// Consume the value that follows `flag`, advancing `i` past it.
 fn take_value(argv: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -232,6 +271,11 @@ fn parse_args() -> Result<Args, String> {
     let mut windows = DEFAULT_WINDOWS;
     let mut stride: Option<usize> = None;
     let mut dequant_weights = false;
+    let mut smooth_encoding: Option<NativeEncoding> = None;
+    let mut smooth_alpha = 0.5f32;
+    let mut smooth_imatrix: Option<PathBuf> = None;
+    let mut smooth_objective = SmoothObjective::Imatrix;
+    let mut smooth_source = SmoothSource::Activation;
 
     let mut i = 0usize;
     while i < argv.len() {
@@ -262,6 +306,23 @@ fn parse_args() -> Result<Args, String> {
                 )
             }
             "--dequant-weights" => dequant_weights = true,
+            "--smooth-encoding" => {
+                smooth_encoding = Some(parse_native_encoding(&take_value(&argv, &mut i, flag)?)?)
+            }
+            "--smooth-alpha" => {
+                smooth_alpha = take_value(&argv, &mut i, flag)?
+                    .parse()
+                    .map_err(|e| format!("--smooth-alpha: {e}"))?
+            }
+            "--smooth-imatrix" => {
+                smooth_imatrix = Some(PathBuf::from(take_value(&argv, &mut i, flag)?))
+            }
+            "--smooth-objective" => {
+                smooth_objective = parse_smooth_objective(&take_value(&argv, &mut i, flag)?)?
+            }
+            "--smooth-source" => {
+                smooth_source = parse_smooth_source(&take_value(&argv, &mut i, flag)?)?
+            }
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown flag {other}\n{USAGE}")),
         }
@@ -296,6 +357,49 @@ fn parse_args() -> Result<Args, String> {
         }
     };
 
+    // The probe is OFF unless `--smooth-encoding` names it. Every other
+    // `--smooth-*` flag is meaningless without it, and a value typed with no
+    // effect is worse than an error naming the missing flag.
+    let smoothing = match smooth_encoding {
+        None => {
+            if smooth_imatrix.is_some() {
+                return Err(format!(
+                    "--smooth-imatrix has no effect without --smooth-encoding\n{USAGE}"
+                ));
+            }
+            None
+        }
+        Some(encoding) => {
+            // A packed weight has no dense `Var` to transform — same reason
+            // `examples/voxcpm/sensitivity.rs` refuses `--gguf`/`--tcf`.
+            if !matches!(weights, Weights::Checkpoint(_)) {
+                return Err(format!(
+                    "--smooth-encoding requires --ckpt: a GGUF or TCF weight is already \
+                     packed, has no dense Var to transform, and the probe would silently \
+                     no-op on it\n{USAGE}"
+                ));
+            }
+            let imatrix = smooth_imatrix.ok_or_else(|| {
+                format!(
+                    "--smooth-encoding requires --smooth-imatrix: without it there is no \
+                     activation importance to derive the smoothing scale from\n{USAGE}"
+                )
+            })?;
+            if !(0.0..=1.0).contains(&smooth_alpha) {
+                return Err(format!(
+                    "--smooth-alpha must be in [0, 1], got {smooth_alpha}\n{USAGE}"
+                ));
+            }
+            Some(SmoothingArgs {
+                encoding,
+                alpha: smooth_alpha,
+                imatrix,
+                objective: smooth_objective,
+                source: smooth_source,
+            })
+        }
+    };
+
     Ok(Args {
         weights,
         config,
@@ -306,6 +410,7 @@ fn parse_args() -> Result<Args, String> {
         windows,
         stride,
         dequant_weights,
+        smoothing,
     })
 }
 
@@ -370,6 +475,43 @@ where
 
     eprintln!("loading {} ...", source_path(&args.weights).display());
     let mut var_map = load_varmap::<R, C>(&args.weights, args.dequant_weights, device, client)?;
+
+    if let Some(smoothing) = &args.smoothing {
+        eprintln!(
+            "smoothing: loading importance matrix {} ...",
+            smoothing.imatrix.display()
+        );
+        let imatrix = ImportanceMatrix::read_from_path(&smoothing.imatrix)?;
+        let summary = apply_smoothing::<R>(
+            &mut var_map,
+            &imatrix,
+            smoothing.encoding,
+            smoothing.alpha,
+            smoothing.objective,
+            smoothing.source,
+        )?;
+        // MANDATORY, never drop this line: a probe that silently skipped
+        // most of the model would look like a null result. `apply_smoothing`
+        // already refuses to return at all when `transformed == 0`, so
+        // reaching this line means the totals below reconcile:
+        // `examined == candidates + non_candidates` and
+        // `candidates == transformed + skipped_no_entry`.
+        eprintln!(
+            "smoothing: encoding={:?} alpha={} source={:?} objective={:?} examined={} \
+             cast_to_f32={} candidates={} non_candidates={} transformed={} skipped_no_entry={}",
+            smoothing.encoding,
+            smoothing.alpha,
+            smoothing.source,
+            smoothing.objective,
+            summary.examined,
+            summary.cast_to_f32,
+            summary.candidates,
+            summary.non_candidates,
+            summary.transformed,
+            summary.skipped_no_entry
+        );
+    }
+
     let mut vb = VarBuilder::new(&mut var_map, device);
     let model = Llama::<R>::from_varbuilder(&mut vb, &config)?;
     eprintln!(

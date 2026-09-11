@@ -7,6 +7,7 @@ pub mod decomposed;
 pub mod format;
 pub mod imatrix;
 pub mod scheme;
+pub mod smoothing;
 pub mod tables;
 pub mod tcf;
 pub mod tensor;
@@ -20,6 +21,7 @@ pub use decomposed::{DecomposedQuantLinear, DecomposedQuantMethod, DecomposedQua
 pub use format::QuantFormat;
 pub use imatrix::{ImportanceCheck, ImportanceEntry, ImportanceMatrix};
 pub use scheme::QuantScheme;
+pub use smoothing::{smoothing_scale, weight_only_smoothing_scale};
 pub use tcf::TcfEncoding;
 pub use tensor::QuantTensor;
 pub use traits::DequantOps;

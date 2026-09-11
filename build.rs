@@ -1,7 +1,16 @@
 //! Build script for boostr
 //!
-//! Compiles CUDA kernels to PTX when the cuda feature is enabled.
-//! Follows the same pattern as numr's build.rs.
+//! Compiles CUDA kernels to multi-arch fatbins when the cuda feature is
+//! enabled, following numr's build.rs: real SASS for the local GPU(s) plus
+//! forward-JIT PTX, never PTX alone. A PTX-only module JIT-compiles at every
+//! `cuModuleLoad`, and the MMQ module's PTX runs to a hundred megabytes, so
+//! every process paid that JIT before its first quantized matmul.
+//!
+//! Arch selection reads `BOOSTR_CUDA_ARCH`, falling back to `NUMR_CUDA_ARCH`
+//! so one variable configures both crates: a comma-separated list (`86`,
+//! `sm_86`, `8.6`, `86,89,90`), `all`/`portable` for every supported arch, or
+//! unset to detect the local GPU(s) via `nvidia-smi` (portable when none is
+//! found).
 
 fn main() {
     #[cfg(feature = "cuda")]
@@ -16,12 +25,12 @@ fn compile_cuda_kernels() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // Kernel sets: (directory, filename, arch, required, ptx_name_override)
+    // Kernel sets: (directory, filename, min arch, required, output_name_override)
     // Most kernels target sm_75 (Turing+); flash_v3 needs sm_90 (Hopper)
     // Optional kernels (required=false) warn on failure instead of panicking —
     // they require hardware-specific features (e.g. Hopper) that may not be
     // available on all build machines.
-    // ptx_name_override: Some("name.ptx") overrides the default (filename with .ptx ext).
+    // output_name_override: Some("name.fatbin") overrides the default (filename with .fatbin ext).
     // Needed when files in different subdirs share the same filename (e.g. gemv/q5_k.cu vs gemm/q5_k.cu).
     // Helper to build kernel entries concisely: (dir, file, arch, required, ptx_override=None)
     macro_rules! k {
@@ -71,7 +80,7 @@ fn compile_cuda_kernels() {
     ];
 
     // Per-format GEMV + GEMM kernels: each format generates a gemv/ and gemm/ entry.
-    // All target sm_75, are required, and use the naming convention gemv_{fmt}.ptx / gemm_{fmt}.ptx.
+    // All target sm_75, are required, and use the naming convention gemv_{fmt}.fatbin / gemm_{fmt}.fatbin.
     let per_format_kernels: &[&str] = &[
         // K-quants
         "q5_k", "q3_k", "q2_k", // Simple quants
@@ -90,14 +99,14 @@ fn compile_cuda_kernels() {
             cu_file.clone(),
             "sm_75".to_string(),
             true,
-            Some(format!("gemv_{}.ptx", fmt)),
+            Some(format!("gemv_{}.fatbin", fmt)),
         ));
         kernel_sets.push((
             gemm_dir.clone(),
             cu_file,
             "sm_75".to_string(),
             true,
-            Some(format!("gemm_{}.ptx", fmt)),
+            Some(format!("gemm_{}.fatbin", fmt)),
         ));
     }
 
@@ -109,7 +118,7 @@ fn compile_cuda_kernels() {
         "tcf_q4as32dt64.cu".to_string(),
         "sm_75".to_string(),
         true,
-        Some("gemv_tcf_q4as32dt64.ptx".to_string()),
+        Some("gemv_tcf_q4as32dt64.fatbin".to_string()),
     ));
 
     kernel_sets.extend([
@@ -425,87 +434,160 @@ fn compile_cuda_kernels() {
         panic!("nvcc not found - CUDA Toolkit must be installed for the 'cuda' feature");
     });
 
-    for (kernels_dir, kernel_file, arch, required, ptx_override) in &kernel_sets {
-        let cu_path = kernels_dir.join(kernel_file);
-        let ptx_name = ptx_override
-            .as_deref()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| kernel_file.replace(".cu", ".ptx"));
-        let ptx_path = out_dir.join(&ptx_name);
+    // Re-run when the override changes — otherwise a stale fatbin survives
+    // an `export BOOSTR_CUDA_ARCH=...` until something else invalidates OUT_DIR.
+    println!("cargo:rerun-if-env-changed=BOOSTR_CUDA_ARCH");
+    println!("cargo:rerun-if-env-changed=NUMR_CUDA_ARCH");
+    let (selected_arches, mode_desc) = select_arches();
+    println!(
+        "cargo:warning=boostr: compiling {} CUDA kernels into fatbins for {} \
+         (+ per-kernel PTX floor and compute_120 JIT ceiling)",
+        kernel_sets.len(),
+        mode_desc
+    );
 
-        println!("cargo:rerun-if-changed={}", cu_path.display());
+    struct KernelOutcome {
+        file: String,
+        required: bool,
+        arch: String,
+        fatbin_path: PathBuf,
+        success: bool,
+        stdout: String,
+        stderr: String,
+        exec_error: Option<String>,
+    }
 
-        if !cu_path.exists() {
-            panic!(
-                "CUDA kernel source not found: {}\n\
-                 Ensure kernel files exist in {}",
-                cu_path.display(),
-                kernels_dir.display()
-            );
-        }
+    // Every kernel is compiled for each selected arch plus its PTX floor, so
+    // the work is several times the old single-PTX build. A bounded pool
+    // keeps nvcc's memory use in check; each output path is independent.
+    let worker_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(8);
+    let work_queue = std::sync::Mutex::new(kernel_sets.clone());
+    let outcomes = std::sync::Mutex::new(Vec::<KernelOutcome>::new());
 
-        // Include paths: kernel's own dir + root kernels dir for shared headers (dtype_traits.cuh)
-        let include_arg = format!("-I{}", kernels_dir.display());
-        let root_include_arg = "-Isrc/ops/cuda/kernels".to_string();
-        let arch_arg = format!("-arch={}", arch);
-
-        let output = Command::new(&nvcc)
-            .args([
-                "-ptx",
-                "-O3",
-                "--use_fast_math",
-                &arch_arg,
-                &include_arg,
-                &root_include_arg,
-                "-o",
-                ptx_path.to_str().unwrap(),
-                cu_path.to_str().unwrap(),
-            ])
-            .output();
-
-        match output {
-            Ok(output) => {
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    if *required {
-                        eprintln!();
-                        eprintln!("=== CUDA COMPILATION FAILED ===");
-                        eprintln!("Failed to compile: {}", kernel_file);
-                        if !stdout.is_empty() {
-                            eprintln!("stdout: {}", stdout);
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            scope.spawn(|| {
+                loop {
+                    let (kernels_dir, kernel_file, arch, required, name_override) = {
+                        let mut queue = work_queue.lock().unwrap();
+                        match queue.pop() {
+                            Some(entry) => entry,
+                            None => break,
                         }
-                        if !stderr.is_empty() {
-                            eprintln!("stderr: {}", stderr);
-                        }
-                        panic!("nvcc compilation failed for {}", kernel_file);
-                    } else {
-                        eprintln!(
-                            "cargo:warning=Optional kernel {} ({}) failed to compile — \
-                             skipping (requires {} hardware). stderr: {}",
-                            kernel_file,
-                            arch,
-                            arch.to_uppercase(),
-                            stderr.lines().next().unwrap_or("unknown error")
+                    };
+                    let cu_path = kernels_dir.join(&kernel_file);
+                    let fatbin_name = name_override
+                        .clone()
+                        .unwrap_or_else(|| kernel_file.replace(".cu", ".fatbin"));
+                    let fatbin_path = out_dir.join(&fatbin_name);
+
+                    println!("cargo:rerun-if-changed={}", cu_path.display());
+                    if !cu_path.exists() {
+                        panic!(
+                            "CUDA kernel source not found: {}\n\
+                             Ensure kernel files exist in {}",
+                            cu_path.display(),
+                            kernels_dir.display()
                         );
-                        // Write an empty PTX file so include_str! doesn't fail
-                        std::fs::write(&ptx_path, "// Optional kernel not compiled\n")
-                            .unwrap_or_else(|e| {
-                                panic!("Failed to write placeholder PTX for {}: {}", kernel_file, e)
-                            });
                     }
+
+                    // Include paths: kernel's own dir + root kernels dir for
+                    // shared headers (dtype_traits.cuh).
+                    let include_arg = format!("-I{}", kernels_dir.display());
+                    let root_include_arg = "-Isrc/ops/cuda/kernels".to_string();
+
+                    let mut args: Vec<String> = vec![
+                        "-fatbin".to_string(),
+                        "-O3".to_string(),
+                        "--use_fast_math".to_string(),
+                        include_arg,
+                        root_include_arg,
+                    ];
+                    for gc in gencode_flags(&arch, &selected_arches) {
+                        args.push("-gencode".to_string());
+                        args.push(gc);
+                    }
+                    args.push("-o".to_string());
+                    args.push(fatbin_path.to_str().unwrap().to_string());
+                    args.push(cu_path.to_str().unwrap().to_string());
+
+                    let outcome = match Command::new(&nvcc).args(&args).output() {
+                        Ok(output) => KernelOutcome {
+                            file: kernel_file.clone(),
+                            required,
+                            arch: arch.clone(),
+                            fatbin_path: fatbin_path.clone(),
+                            success: output.status.success(),
+                            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                            exec_error: None,
+                        },
+                        Err(e) => KernelOutcome {
+                            file: kernel_file.clone(),
+                            required,
+                            arch: arch.clone(),
+                            fatbin_path: fatbin_path.clone(),
+                            success: false,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            exec_error: Some(e.to_string()),
+                        },
+                    };
+                    outcomes.lock().unwrap().push(outcome);
                 }
-            }
-            Err(e) => {
-                eprintln!();
-                eprintln!("=== CUDA COMPILATION ERROR ===");
-                eprintln!();
-                eprintln!("Failed to execute nvcc for kernel '{}': {}", kernel_file, e);
-                eprintln!("Install CUDA Toolkit: https://developer.nvidia.com/cuda-downloads");
-                eprintln!();
-                panic!("nvcc execution failed for {}: {}", kernel_file, e);
-            }
+            });
         }
+    });
+
+    // All workers joined: report failures collected, not interleaved.
+    let outcomes = outcomes.into_inner().unwrap();
+    let mut failed_required: Vec<String> = Vec::new();
+    for outcome in outcomes.iter().filter(|o| !o.success) {
+        if let Some(e) = &outcome.exec_error {
+            eprintln!();
+            eprintln!("=== CUDA COMPILATION ERROR ===");
+            eprintln!();
+            eprintln!("Failed to execute nvcc for kernel '{}': {}", outcome.file, e);
+            eprintln!("Install CUDA Toolkit: https://developer.nvidia.com/cuda-downloads");
+            eprintln!();
+            panic!("nvcc execution failed for {}: {}", outcome.file, e);
+        }
+        if outcome.required {
+            eprintln!();
+            eprintln!("=== CUDA COMPILATION FAILED ===");
+            eprintln!("Failed to compile: {}", outcome.file);
+            if !outcome.stdout.is_empty() {
+                eprintln!("stdout: {}", outcome.stdout);
+            }
+            if !outcome.stderr.is_empty() {
+                eprintln!("stderr: {}", outcome.stderr);
+            }
+            failed_required.push(outcome.file.clone());
+        } else {
+            eprintln!(
+                "cargo:warning=Optional kernel {} ({}) failed to compile — \
+                 skipping (requires {} hardware). stderr: {}",
+                outcome.file,
+                outcome.arch,
+                outcome.arch.to_uppercase(),
+                outcome.stderr.lines().next().unwrap_or("unknown error")
+            );
+            // A placeholder keeps the path present; loading it fails, as
+            // loading the kernel on hardware without the feature would.
+            std::fs::write(&outcome.fatbin_path, "// Optional kernel not compiled\n")
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "Failed to write placeholder fatbin for {}: {}",
+                        outcome.file, e
+                    )
+                });
+        }
+    }
+    if !failed_required.is_empty() {
+        panic!("nvcc compilation failed for: {}", failed_required.join(", "));
     }
 
     println!("cargo:rustc-env=CUDA_KERNEL_DIR={}", out_dir.display());
@@ -560,4 +642,150 @@ fn emit_header_deps(dir: &std::path::Path) {
             println!("cargo:rerun-if-changed={}", path.display());
         }
     }
+}
+
+/// Real SASS targets for hardware people own: sm_75 (Turing), sm_80 (A100),
+/// sm_86 (Ampere consumer), sm_89 (Ada), sm_90 (Hopper), sm_100 (Blackwell
+/// datacenter), sm_120 (Blackwell consumer). Same list as numr's.
+#[cfg(feature = "cuda")]
+const REAL_ARCHES: &[&str] = &["75", "80", "86", "89", "90", "100", "120"];
+
+/// The arches to emit SASS for, and a description for the build log.
+///
+/// Four modes: `BOOSTR_CUDA_ARCH` (or `NUMR_CUDA_ARCH`) set to a list builds
+/// exactly those; set to `all`/`portable` builds every arch in `REAL_ARCHES`;
+/// unset with a GPU detected builds the local arch(es); unset with no GPU
+/// builds the portable set and warns, since that is CI or a container.
+#[cfg(feature = "cuda")]
+fn select_arches() -> (Vec<String>, String) {
+    use std::env;
+    let requested = env::var("BOOSTR_CUDA_ARCH")
+        .ok()
+        .or_else(|| env::var("NUMR_CUDA_ARCH").ok());
+    match requested.as_deref() {
+        Some(v)
+            if v.trim().eq_ignore_ascii_case("all")
+                || v.trim().eq_ignore_ascii_case("portable") =>
+        {
+            (
+                REAL_ARCHES.iter().map(|a| a.to_string()).collect(),
+                format!("all {} portable archs (requested {v})", REAL_ARCHES.len()),
+            )
+        }
+        Some(v) => {
+            let mut archs: Vec<String> = v.split(',').map(parse_arch).collect();
+            archs.sort();
+            archs.dedup();
+            let desc = format!("{} arch(es) requested ({v}): {}", archs.len(), archs.join(","));
+            (archs, desc)
+        }
+        None => match detect_local_gpu_arches() {
+            Some(archs) if !archs.is_empty() => {
+                let desc = format!("{} arch(es) detected locally: {}", archs.len(), archs.join(","));
+                (archs, desc)
+            }
+            _ => {
+                println!(
+                    "cargo:warning=boostr: no GPU detected (nvidia-smi missing, failed, or \
+                     reported nothing) — building portable fatbins for all {} archs; set \
+                     BOOSTR_CUDA_ARCH to the local arch(s) to skip this cost",
+                    REAL_ARCHES.len()
+                );
+                (
+                    REAL_ARCHES.iter().map(|a| a.to_string()).collect(),
+                    format!("all {} portable archs (no GPU detected)", REAL_ARCHES.len()),
+                )
+            }
+        },
+    }
+}
+
+/// `-gencode` values for one kernel whose minimum arch is `min_arch`
+/// (`"sm_75"`, `"sm_80"`, `"sm_90"`).
+///
+/// Real SASS for every selected arch at or above the minimum, then two PTX
+/// entries: the kernel's own floor, so any arch at or above it with no cubin
+/// here still loads by forward JIT, and compute_120 for hardware newer than
+/// this toolkit's SASS targets. A kernel whose minimum exceeds every selected
+/// arch gets PTX only, exactly what the old PTX build shipped for it.
+#[cfg(feature = "cuda")]
+fn gencode_flags(min_arch: &str, selected: &[String]) -> Vec<String> {
+    let floor = parse_arch(min_arch);
+    let floor_n: u32 = floor.parse().expect("arch digits validated");
+    let mut flags: Vec<String> = selected
+        .iter()
+        .filter(|a| a.parse::<u32>().expect("arch digits validated") >= floor_n)
+        .map(|a| format!("arch=compute_{a},code=sm_{a}"))
+        .collect();
+    flags.push(format!("arch=compute_{floor},code=compute_{floor}"));
+    if floor_n < 120 {
+        flags.push("arch=compute_120,code=compute_120".to_string());
+    }
+    flags
+}
+
+/// One arch entry to bare digits (`86`), accepting `86`, `8.6`, `sm_86` and
+/// `compute_86`, validated to the supported range.
+#[cfg(feature = "cuda")]
+fn parse_arch(entry: &str) -> String {
+    let v = entry.trim();
+    let bare = v.strip_prefix("sm_").or_else(|| v.strip_prefix("compute_"));
+    let digits = match bare {
+        Some(digits) => digits.to_string(),
+        None => v.replace('.', ""),
+    };
+    assert!(
+        !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()),
+        "CUDA arch entry must be a compute capability such as `86`, `8.6`, `sm_86`, \
+         `compute_86`, or `all`/`portable` — got {v:?}"
+    );
+    validate_arch_range(&digits, v);
+    digits
+}
+
+/// Below the toolkit's floor or above its ceiling is a config error, named
+/// explicitly, never a silent drop from the build.
+#[cfg(feature = "cuda")]
+fn validate_arch_range(digits: &str, original: &str) {
+    let n: u32 = digits.parse().expect("digits already validated numeric");
+    assert!(
+        (75..=120).contains(&n),
+        "compute capability {original:?} (compute_{digits}) is outside the range this \
+         build supports: compute_75 (Turing) to compute_120 (Blackwell consumer)"
+    );
+}
+
+/// Compute capabilities of the local GPUs via `nvidia-smi` (a subprocess,
+/// never the driver API). `None` on any detection failure, so the caller
+/// falls back to the portable build: no GPU at build time is normal in CI.
+#[cfg(feature = "cuda")]
+fn detect_local_gpu_arches() -> Option<Vec<String>> {
+    use std::process::Command;
+    let output = Command::new("nvidia-smi")
+        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut arches: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let digits: String = line.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            continue;
+        }
+        validate_arch_range(&digits, line);
+        arches.push(digits);
+    }
+    if arches.is_empty() {
+        return None;
+    }
+    arches.sort();
+    arches.dedup();
+    Some(arches)
 }

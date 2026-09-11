@@ -7,12 +7,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::error::{Error, Result};
 
-/// Directory containing compiled PTX files (set by build.rs)
+/// Directory containing the compiled fatbins (set by build.rs)
 const KERNEL_DIR: &str = env!("CUDA_KERNEL_DIR");
 
-/// Load PTX from compiled file.
+/// Load a compiled fatbin. `Ptx` is cudarc's name for any module image
+/// `cuModuleLoadData` accepts: PTX, cubin or fatbin.
 fn load_ptx(name: &str) -> Ptx {
-    let path = format!("{}/{}.ptx", KERNEL_DIR, name);
+    let path = format!("{}/{}.fatbin", KERNEL_DIR, name);
     Ptx::from_file(path)
 }
 
@@ -21,7 +22,7 @@ fn load_ptx(name: &str) -> Ptx {
 static MODULE_CACHE: OnceLock<Mutex<HashMap<(usize, &'static str), Arc<CudaModule>>>> =
     OnceLock::new();
 
-/// Get or load a CUDA module from PTX.
+/// Get or load a CUDA module from its fatbin.
 pub fn get_or_load_module(
     context: &Arc<CudaContext>,
     device_index: usize,

@@ -57,9 +57,8 @@ struct boostr_fp8_e5m2 {
 // discards for non-FP8 types, but the names are still bound when the template
 // is parsed. Excluding them below SM 8.0 therefore broke every translation unit
 // that instantiates `convert_dtype` at all, on the compute_75 pass and on the
-// host pass. Nothing here needs SM 8.0: the hardware `cvt` intrinsics are
-// already behind their own `__CUDA_ARCH__ >= 890` guards, each with a software
-// fallback that is plain bit manipulation.
+// host pass. Nothing here needs SM 8.0: every conversion is plain bit
+// manipulation.
 
 // ============================================================================
 // FP8 Software Conversion — numr is the source of truth
@@ -291,85 +290,41 @@ __device__ __forceinline__ uint8_t boostr_f32_to_fp8_e5m2_bits(float x) {
 }
 
 // ============================================================================
-// FP8 → F32 Conversion
+// FP8 ↔ F32 Conversion — software on every arch, by design
 // ============================================================================
+//
+// These run numr's bit-exact software encoders and decoders on every SM, with
+// no `cvt.*.e4m3x2` / `.e5m2x2` hardware path behind an arch guard. Two
+// reasons. First, bit identity across GPU generations: a kernel must produce
+// the same FP8 byte on Ampere and on Ada, and one arch rounding in hardware
+// while another rounds in software cannot promise that. Second, the guarded
+// asm that used to sit here was never assembled by any build (every target
+// was below the guard) and was not valid PTX; the first multi-arch fatbin
+// build rejected it. The software path is a handful of integer ops per
+// element, below the noise of the memory traffic around it.
 
 // E4M3: 4 exponent bits, 3 mantissa bits (higher precision, range: ~[-448, 448])
 __device__ __forceinline__ float fp8_e4m3_to_f32(uint8_t u, float scale = 1.0f) {
-#if __CUDA_ARCH__ >= 890
-    // Hopper+: Use inline PTX for guaranteed hardware acceleration
-    // cvt.rn.f32.e4m3x2 unpacks 2xFP8 -> 2xF32 (we only use the first result)
-    float result;
-    asm volatile (
-        "{ .reg .f32 dummy; \n\t"                      // Declare temp register for 2nd output
-        "cvt.rn.f32.e4m3x2 {%0, dummy}, %1; \n\t"      // Unpack: lower 8 bits -> result, upper 8 bits -> dummy
-        "}"
-        : "=f"(result)
-        : "h"((uint16_t)u)                              // cudarc 0.19: "h" constraint for 16-bit operands
-    );
-    return result / scale;
-#else
-    // Ampere and older: numr's bit-exact decoder (subnormals included).
+    // numr's bit-exact decoder (subnormals included).
     return boostr_fp8_e4m3_to_f32_bits(u) / scale;
-#endif
 }
 
-// ============================================================================
-// F32 → FP8 Conversion
-// ============================================================================
-
 __device__ __forceinline__ uint8_t f32_to_fp8_e4m3_raw(float x, float scale = 1.0f) {
-#if __CUDA_ARCH__ >= 890
-    // Hopper+: Use inline PTX for guaranteed hardware acceleration
-    // cvt.rn.satfinite.e4m3x2.f32 requires PTX ISA 8.0+
-    x = x * scale;
-    uint32_t result;
-    // Saturate to E4M3 range and round to nearest
-    asm ("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;"
-         : "=r"(result)
-         : "f"(x), "f"(0.0f));  // Padding: e4m3x2 packs 2 scalars, second is zeroed
-    return (uint8_t)result;
-#else
-    // Ampere and older: numr's bit-exact encoder (round-to-nearest-even,
-    // mantissa carry into the exponent, real subnormal path).
+    // numr's bit-exact encoder (round-to-nearest-even, mantissa carry into
+    // the exponent, real subnormal path).
     return boostr_f32_to_fp8_e4m3_bits(x * scale);
-#endif
 }
 
 // E5M2: 5 exponent bits, 2 mantissa bits (lower precision, range: ~[-57344, 57344])
 __device__ __forceinline__ float fp8_e5m2_to_f32(uint8_t u, float scale = 1.0f) {
-#if __CUDA_ARCH__ >= 890
-    // Hopper+: Use inline PTX for guaranteed hardware acceleration
-    // cvt.rn.f32.e5m2x2 unpacks 2xFP8 -> 2xF32 (we only use the first result)
-    float result;
-    asm volatile (
-        "{ .reg .f32 dummy; \n\t"                      // Declare temp register for 2nd output
-        "cvt.rn.f32.e5m2x2 {%0, dummy}, %1; \n\t"      // Unpack: lower 8 bits -> result, upper 8 bits -> dummy
-        "}"
-        : "=f"(result)
-        : "h"((uint16_t)u)                              // cudarc 0.19: "h" constraint for 16-bit operands
-    );
-    return result / scale;
-#else
-    // Ampere and older: numr's bit-exact decoder (subnormals included).
+    // numr's bit-exact decoder (subnormals included).
     return boostr_fp8_e5m2_to_f32_bits(u) / scale;
-#endif
 }
 
 __device__ __forceinline__ uint8_t f32_to_fp8_e5m2_raw(float x, float scale = 1.0f) {
-#if __CUDA_ARCH__ >= 890
-    // Hopper+: Use inline PTX for guaranteed hardware acceleration
-    x = x * scale;
-    uint32_t result;
-    asm ("cvt.rn.satfinite.e5m2x2.f32 %0, %1, %2;"
-         : "=r"(result)
-         : "f"(x), "f"(0.0f));  // Padding: e5m2x2 packs 2 scalars, second is zeroed
-    return (uint8_t)result;
-#else
-    // Ampere and older: numr's bit-exact encoder (round-to-nearest-even,
-    // mantissa carry into the exponent, real subnormal path).
+    // numr's bit-exact encoder (round-to-nearest-even, mantissa carry into
+    // the exponent, real subnormal path).
     return boostr_f32_to_fp8_e5m2_bits(x * scale);
-#endif
 }
 // End of the FP8 conversion utilities.
 
@@ -516,10 +471,9 @@ template<typename T>
 __device__ __forceinline__
 float load_dtype(const T* ptr, int idx, float scale = 1.0f) {
     if constexpr (DTypeTraits<T>::needs_scale) {
-        // No arch guard: `fp8_*_to_f32` carries its own `__CUDA_ARCH__ >= 890`
-        // hardware branch with a bit-exact software decoder below it, so the
-        // decode is correct on every architecture. The guard that used to wrap
-        // these two branches made every FP8 load return 0.0f below sm_80.
+        // No arch guard: `fp8_*_to_f32` is a bit-exact software decoder on
+        // every architecture. The guard that used to wrap these two branches
+        // made every FP8 load return 0.0f below sm_80.
         if constexpr (DTypeTraits<T>::dtype_enum == DTypeEnum::FP8E4M3) {
             return fp8_e4m3_to_f32(static_cast<uint8_t>(ptr[idx]), scale);
         } else if constexpr (DTypeTraits<T>::dtype_enum == DTypeEnum::FP8E5M2) {
@@ -544,10 +498,9 @@ template<typename T>
 __device__ __forceinline__
 void store_dtype(T* ptr, int idx, float value, float scale = 1.0f) {
     if constexpr (DTypeTraits<T>::needs_scale) {
-        // No arch guard: `f32_to_fp8_*_raw` carries its own
-        // `__CUDA_ARCH__ >= 890` hardware branch with a bit-exact software
-        // encoder below it. The guard that used to wrap these two branches
-        // made every FP8 store a no-op below sm_80.
+        // No arch guard: `f32_to_fp8_*_raw` is a bit-exact software encoder
+        // on every architecture. The guard that used to wrap these two
+        // branches made every FP8 store a no-op below sm_80.
         if constexpr (DTypeTraits<T>::dtype_enum == DTypeEnum::FP8E4M3) {
             ptr[idx] = boostr_fp8_e4m3(f32_to_fp8_e4m3_raw(value, scale));
         } else if constexpr (DTypeTraits<T>::dtype_enum == DTypeEnum::FP8E5M2) {

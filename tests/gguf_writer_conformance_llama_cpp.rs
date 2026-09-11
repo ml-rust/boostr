@@ -353,6 +353,22 @@ fn iq4_nl_writer_matches_llama_cpp() {
     assert_writer_matches_llama_cpp("IQ4_NL", 18, &got, &llama);
 }
 
+/// IQ4_XS shares IQ4_NL's codebook on super-block geometry: 256 elements, a
+/// 6-bit scale per 32 under one f16 super-scale, 136 bytes.
+#[test]
+fn iq4_xs_writer_matches_llama_cpp() {
+    let src = floats("writer_src.bin");
+    let llama = std::fs::read(fixture("writer_iq4_xs_llama.bin")).unwrap();
+    let (client, device) = cpu_setup();
+    let input = Tensor::<CpuRuntime>::from_slice(&src, &[8, 256], &device).unwrap();
+    let got = client
+        .quantize(&input, QuantFormat::IQ4XS)
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    assert_writer_matches_llama_cpp("IQ4_XS", 136, &got, &llama);
+}
+
 /// Quantizes the fixture source through the public writer, as `compressr` does.
 fn write_blocks(format: QuantFormat) -> Vec<u8> {
     let src = floats("writer_src.bin");
@@ -832,6 +848,16 @@ fn iq4_nl_imatrix_writer_matches_llama_cpp() {
         QuantFormat::IQ4NL,
         "writer_iq4_nl_imatrix_llama.bin",
         18,
+    );
+}
+
+#[test]
+fn iq4_xs_imatrix_writer_matches_llama_cpp() {
+    assert_imatrix_writer_matches_llama_cpp(
+        "IQ4_XS+imatrix",
+        QuantFormat::IQ4XS,
+        "writer_iq4_xs_imatrix_llama.bin",
+        136,
     );
 }
 

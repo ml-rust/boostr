@@ -3,30 +3,33 @@
 //! 32 elements, 18 bytes: f16 `d` then 16 nibble-pair bytes. Unlike Q4_0/Q8_0's
 //! uniform integer levels, each nibble indexes [`KVALUES_IQ4NL`], a fixed
 //! sorted non-linear codebook — nearest-entry lookup is
-//! [`super::codebook::best_index_int8`], shared with the (not yet written)
-//! IQ4_XS writer.
+//! [`super::codebook::best_index_int8`], shared with the IQ4_XS writer.
 //!
 //! `quantize_row_iq4_nl_impl` in `ggml-quants.c` is generic over a
-//! `super_block_size / block_size` ratio that IQ4_XS uses (8 sub-blocks of 32
-//! under one super-block scale). For IQ4_NL the two sizes are equal — one
-//! 32-element block, one scale — so that branch never runs and is not ported
-//! here.
+//! `super_block_size / block_size` ratio that [`super::iq4_xs`] uses (8
+//! sub-blocks of 32 under one super-block scale). For IQ4_NL the two sizes are
+//! equal — one 32-element block, one scale — so that branch never runs and is
+//! not ported here.
 //!
 //! # The scale search — same shape as `d*sumqx` maximisation elsewhere
 //!
-//! `ntry = 7` (fixed, matching `quantize_iq4_nl`'s call site) sweeps 15
-//! candidate scales `id = (itry + values[0]) / max` and keeps whichever
-//! maximises `sumqx² / sumq2` — scored without the division, exactly as
-//! `ggml-quants.c` computes it. The codebook lookup is NOT re-run against the
-//! winning scale inside this loop; only `d` and `best` are updated. That is a
-//! deliberate reproduction of the reference, not a bug: `ggml-quants.c` reuses
-//! whatever `Lb[j]` step 1 assigned until the routine ends.
+//! [`fit_subblock_scale`] is the part of `quantize_row_iq4_nl_impl` that runs
+//! BEFORE the branch on `super_block_size/block_size`, so IQ4_XS calls it once
+//! per sub-block rather than duplicating it. `ntry = 7` (fixed, matching
+//! `quantize_iq4_nl`'s call site) sweeps 15 candidate scales
+//! `id = (itry + values[0]) / max` and keeps whichever maximises
+//! `sumqx² / sumq2` — scored without the division, exactly as `ggml-quants.c`
+//! computes it. The codebook lookup is NOT re-run against the winning scale
+//! inside this loop; only `d` and `best` are updated. That is a deliberate
+//! reproduction of the reference, not a bug: `ggml-quants.c` reuses whatever
+//! `Lb[j]` step 1 assigned until the routine ends.
 //!
 //! # Final levels are re-derived, not carried from the search
 //!
 //! After the sweep picks `d`, every level is thrown away and recomputed once
 //! more from `id = 1/d` — using the f32 `d`, not the f16 value written to the
-//! block. Only THIS pass produces the levels that get packed.
+//! block. Only THIS pass produces the levels that get packed. IQ4_XS instead
+//! re-derives its levels against the QUANTIZED sub-scale — see its module docs.
 
 use super::codebook::best_index_int8;
 use super::search::{GROUP_MAX_EPS, block_sigma2, importance_weights};
@@ -81,6 +84,69 @@ pub fn quantize_iq4_nl_imatrix(x: &[f32], out: &mut [u8], imatrix: &[f32]) {
     }
 }
 
+/// Per-sub-block scale search shared with IQ4_XS — the part of
+/// `quantize_row_iq4_nl_impl` that runs BEFORE the branch on
+/// `super_block_size/block_size` diverges the two formats. Returns the fitted
+/// scale (`scales[ib]` in the source); a near-zero sub-block
+/// (`amax < GROUP_MAX_EPS`) returns `0.0` without running the sweep.
+///
+/// `ntry` is always `7` from both current call sites, so the initial scale
+/// always carries the sign opposite `max` — but the `ntry <= 0` branch is
+/// ported too, matching `ggml-quants.c`'s
+/// `d = ntry>0 ? -max/values[0] : max/values[0]` exactly.
+pub(super) fn fit_subblock_scale(xb: &[f32], weight: &[f32], values: &[i8; 16], ntry: i32) -> f32 {
+    let mut amax = 0.0f32;
+    let mut max = 0.0f32;
+    for &v in xb {
+        let av = v.abs();
+        if av > amax {
+            amax = av;
+            max = v;
+        }
+    }
+    if amax < GROUP_MAX_EPS {
+        return 0.0;
+    }
+
+    let mut id = if ntry > 0 {
+        -values[0] as f32 / max
+    } else {
+        values[0] as f32 / max
+    };
+    let mut sumqx = 0.0f32;
+    let mut sumq2 = 0.0f32;
+    for (j, &xj) in xb.iter().enumerate() {
+        let li = best_index_int8(values, id * xj);
+        let q = values[li] as f32;
+        let w = weight[j];
+        sumqx += w * q * xj;
+        sumq2 += w * q * q;
+    }
+    let mut d = sumqx / sumq2;
+    let mut best = d * sumqx;
+
+    for itry in -ntry..=ntry {
+        id = (itry as f32 + values[0] as f32) / max;
+        sumqx = 0.0;
+        sumq2 = 0.0;
+        for (j, &xj) in xb.iter().enumerate() {
+            let li = best_index_int8(values, id * xj);
+            let q = values[li] as f32;
+            let w = weight[j];
+            sumqx += w * q * xj;
+            sumq2 += w * q * q;
+        }
+        // Deliberately NOT updating any level array here — `ggml-quants.c`
+        // only refits the scale inside this loop and re-derives levels once,
+        // after it, from whichever scale this loop settles on.
+        if sumq2 > 0.0 && sumqx * sumqx > best * sumq2 {
+            d = sumqx / sumq2;
+            best = d * sumqx;
+        }
+    }
+    d
+}
+
 /// One 32-element block, weight already computed by either caller above.
 ///
 /// A near-zero block (`amax < GROUP_MAX_EPS`) is NOT written as all-zero
@@ -91,55 +157,7 @@ pub fn quantize_iq4_nl_imatrix(x: &[f32], out: &mut [u8], imatrix: &[f32]) {
 fn quantize_block(xb: &[f32], weight: &[f32; BLOCK_SIZE], block: &mut [u8]) {
     let values = &KVALUES_IQ4NL;
 
-    let mut amax = 0.0f32;
-    let mut max = 0.0f32;
-    for &v in xb {
-        let av = v.abs();
-        if av > amax {
-            amax = av;
-            max = v;
-        }
-    }
-
-    let d = if amax < GROUP_MAX_EPS {
-        0.0
-    } else {
-        // ntry (7) is always > 0 here, so the initial scale carries the sign
-        // opposite `max`, matching `values[0] == -127` taking the extreme.
-        let mut id = -values[0] as f32 / max;
-        let mut sumqx = 0.0f32;
-        let mut sumq2 = 0.0f32;
-        for j in 0..BLOCK_SIZE {
-            let li = best_index_int8(values, id * xb[j]);
-            let q = values[li] as f32;
-            let w = weight[j];
-            sumqx += w * q * xb[j];
-            sumq2 += w * q * q;
-        }
-        let mut d = sumqx / sumq2;
-        let mut best = d * sumqx;
-
-        for itry in -NTRY..=NTRY {
-            id = (itry as f32 + values[0] as f32) / max;
-            sumqx = 0.0;
-            sumq2 = 0.0;
-            for j in 0..BLOCK_SIZE {
-                let li = best_index_int8(values, id * xb[j]);
-                let q = values[li] as f32;
-                let w = weight[j];
-                sumqx += w * q * xb[j];
-                sumq2 += w * q * q;
-            }
-            // Deliberately NOT updating any level array here — `ggml-quants.c`
-            // only refits the scale inside this loop and re-derives levels
-            // once, after it, from whichever scale this loop settles on.
-            if sumq2 > 0.0 && sumqx * sumqx > best * sumq2 {
-                d = sumqx / sumq2;
-                best = d * sumqx;
-            }
-        }
-        d
-    };
+    let d = fit_subblock_scale(xb, weight, values, NTRY);
 
     block[0..2].copy_from_slice(&f16::from_f32(d).to_le_bytes());
 

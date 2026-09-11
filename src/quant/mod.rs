@@ -19,7 +19,7 @@ pub mod wgpu;
 pub use autograd::attach_quant_linear_backward;
 pub use codebook::{
     AffineCodebook, Codebook, SuperPrecision, affine_codebook_round_trip, codebook_round_trip,
-    two_level_codebook_round_trip,
+    two_level_asymmetric_round_trip, two_level_codebook_round_trip,
 };
 pub use contract::{ActivationContract, KernelContract};
 pub use decomposed::{DecomposedQuantLinear, DecomposedQuantMethod, DecomposedQuantTensor};

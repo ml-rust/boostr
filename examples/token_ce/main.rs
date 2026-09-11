@@ -276,13 +276,15 @@ requiring --smooth-imatrix's RMS activation AND the weight; weight is calibratio
 derived from the weight's own column magnitudes alone — --smooth-imatrix is still required \
 and still selects which tensors are transformed, for a like-for-like tensor set between the \
 two sources)] \
-[--codebook uniform|nf4|uniform-affine|nf4-affine|q6-bf16|q6-f16|q6-f32|q6-bf16-reserved (turns on the codebook \
-PROBE: quantize/dequantize every candidate weight through a self-contained block quantizer at \
-fixed geometry; uniform/nf4 are symmetric 4-bit (d*level), uniform-affine/nf4-affine add a \
-per-group minimum (m+d*level), q6-bf16/q6-f16/q6-f32 are a 6-bit two-level super-scale probe \
-(16-element groups, one super-scale per 256) differing only in how the super-scale is stored \
-(bf16 pre-divided, f16 undivided, f32 unrounded ceiling); requires --ckpt and \
---smooth-imatrix; mutually exclusive with --smooth-encoding)] \
+[--codebook uniform|nf4|uniform-affine|nf4-affine|q6-bf16|q6-f16|q6-f32|q6-bf16-reserved|q4a-bf16|q4a-f16|q4a-f32 \
+(turns on the codebook PROBE: quantize/dequantize every candidate weight through a \
+self-contained block quantizer at fixed geometry; uniform/nf4 are symmetric 4-bit (d*level), \
+uniform-affine/nf4-affine add a per-group minimum (m+d*level), q6-bf16/q6-f16/q6-f32 are a \
+6-bit two-level super-scale probe (16-element groups, one super-scale per 256) differing only \
+in how the super-scale is stored (bf16 pre-divided, f16 undivided, f32 unrounded ceiling), \
+q4a-bf16/q4a-f16/q4a-f32 are the same three storage formats applied to a 4-bit two-level \
+ASYMMETRIC probe (32-element groups, one super-scale AND one super-minimum per 256); requires \
+--ckpt and --smooth-imatrix; mutually exclusive with --smooth-encoding)] \
 [--codebook-objective uniform|imatrix (default imatrix: the per-element weight the codebook's \
 group scale search scores against, exactly like --smooth-objective)]";
 

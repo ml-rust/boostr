@@ -4,18 +4,23 @@
 //! pure scale (symmetric) reduce it? A third, separate geometry probes
 //! whether a two-level super-scale's STORAGE FORMAT (bf16 pre-divided,
 //! f16 undivided, or an unrounded f32 ceiling) explains TCF `Q6S16D_T64`'s
-//! gap against GGUF `q6_k`. `--codebook` selects one of all seven
+//! gap against GGUF `q6_k` — and whether that finding generalizes to
+//! `Q4AS32D_T64`'s asymmetric geometry, which stores TWO such supers (a
+//! scale and a minimum). `--codebook` selects one of all eleven
 //! combinations — see [`parse_codebook`].
 //!
 //! Same probe discipline as `smooth.rs`: transform a loaded `--ckpt`'s dense
 //! weights in F32, write them back, score — no file is written, and TCF's
 //! own codec is not touched. Unlike smoothing, this path applies NO
 //! per-channel scale: `boostr::quant::codebook_round_trip`,
-//! `affine_codebook_round_trip` and `two_level_codebook_round_trip` are
-//! complete block quantizers on their own (group 32 with one scale per
-//! group, plus one minimum for the affine arm; group 16 with one sub-scale
-//! per group and one super-scale per 256 for the two-level arm), so the
-//! transform is exactly quantize-then-dequantize, no unscale step.
+//! `affine_codebook_round_trip`, `two_level_codebook_round_trip` and
+//! `two_level_asymmetric_round_trip` are complete block quantizers on their
+//! own (group 32 with one scale per group, plus one minimum for the affine
+//! arm; group 16 with one sub-scale per group and one super-scale per 256
+//! for the symmetric two-level arm; group 32 with one sub-scale AND one
+//! sub-minimum per group, one super-scale AND one super-minimum per 256,
+//! for the asymmetric two-level arm), so the transform is exactly
+//! quantize-then-dequantize, no unscale step.
 //!
 //! `--codebook-objective` selects the per-element weight the group search
 //! scores against, exactly as `--smooth-objective` does for the smoothing
@@ -27,7 +32,7 @@
 use boostr::nn::VarMap;
 use boostr::quant::{
     AffineCodebook, Codebook, ImportanceMatrix, SuperPrecision, affine_codebook_round_trip,
-    codebook_round_trip, two_level_codebook_round_trip,
+    codebook_round_trip, two_level_asymmetric_round_trip, two_level_codebook_round_trip,
 };
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
@@ -37,16 +42,19 @@ use tcf_core::column_weights;
 use super::probe::{ProbeSummary, run_probe};
 
 /// The codebook this probe quantizes each candidate weight against: a
-/// SYMMETRIC 16-level grid (`d * level`), an AFFINE one (`m + d * level`),
-/// or a TWO-LEVEL super-scale probe (6-bit codes, one super-scale per 256
-/// elements, storage format given by [`SuperPrecision`]). One `--codebook`
-/// flag selects among all seven underlying codebooks — see
-/// [`parse_codebook`].
+/// SYMMETRIC 16-level grid (`d * level`), an AFFINE one (`m + d * level`), a
+/// TWO-LEVEL symmetric super-scale probe (6-bit codes, one super-scale per
+/// 256 elements, storage format given by [`SuperPrecision`]), or a
+/// TWO-LEVEL ASYMMETRIC super-scale probe (4-bit unsigned codes, one
+/// super-scale AND one super-minimum per 256 elements, same
+/// [`SuperPrecision`] applied to both). One `--codebook` flag selects among
+/// all eleven underlying codebooks — see [`parse_codebook`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CodebookChoice {
     Symmetric(Codebook),
     Affine(AffineCodebook),
     TwoLevel(SuperPrecision),
+    TwoLevelAsymmetric(SuperPrecision),
 }
 
 /// Which per-element weight the codebook group search scores against.
@@ -79,9 +87,12 @@ pub fn parse_codebook(value: &str) -> Result<CodebookChoice, String> {
         "q6-f16" => Ok(CodebookChoice::TwoLevel(SuperPrecision::F16)),
         "q6-f32" => Ok(CodebookChoice::TwoLevel(SuperPrecision::F32)),
         "q6-bf16-reserved" => Ok(CodebookChoice::TwoLevel(SuperPrecision::Bf16Reserved)),
+        "q4a-bf16" => Ok(CodebookChoice::TwoLevelAsymmetric(SuperPrecision::Bf16)),
+        "q4a-f16" => Ok(CodebookChoice::TwoLevelAsymmetric(SuperPrecision::F16)),
+        "q4a-f32" => Ok(CodebookChoice::TwoLevelAsymmetric(SuperPrecision::F32)),
         other => Err(format!(
-            "--codebook: expected uniform, nf4, uniform-affine, nf4-affine, q6-bf16, q6-f16 or \
-             q6-f32, q6-bf16-reserved, got {other:?}"
+            "--codebook: expected uniform, nf4, uniform-affine, nf4-affine, q6-bf16, q6-f16, \
+             q6-f32, q6-bf16-reserved, q4a-bf16, q4a-f16 or q4a-f32, got {other:?}"
         )),
     }
 }
@@ -122,6 +133,10 @@ where
                 }
                 CodebookChoice::TwoLevel(precision) => {
                     two_level_codebook_round_trip(original, in_features, precision, &weights)
+                }
+                CodebookChoice::TwoLevelAsymmetric(precision) => {
+                    two_level_asymmetric_round_trip(original, in_features, precision, &weights)
+                        .map_err(|e| format!("{name}: {e}"))?
                 }
             })
         },

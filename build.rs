@@ -550,7 +550,10 @@ fn compile_cuda_kernels() {
             eprintln!();
             eprintln!("=== CUDA COMPILATION ERROR ===");
             eprintln!();
-            eprintln!("Failed to execute nvcc for kernel '{}': {}", outcome.file, e);
+            eprintln!(
+                "Failed to execute nvcc for kernel '{}': {}",
+                outcome.file, e
+            );
             eprintln!("Install CUDA Toolkit: https://developer.nvidia.com/cuda-downloads");
             eprintln!();
             panic!("nvcc execution failed for {}: {}", outcome.file, e);
@@ -587,7 +590,10 @@ fn compile_cuda_kernels() {
         }
     }
     if !failed_required.is_empty() {
-        panic!("nvcc compilation failed for: {}", failed_required.join(", "));
+        panic!(
+            "nvcc compilation failed for: {}",
+            failed_required.join(", ")
+        );
     }
 
     println!("cargo:rustc-env=CUDA_KERNEL_DIR={}", out_dir.display());
@@ -676,12 +682,20 @@ fn select_arches() -> (Vec<String>, String) {
             let mut archs: Vec<String> = v.split(',').map(parse_arch).collect();
             archs.sort();
             archs.dedup();
-            let desc = format!("{} arch(es) requested ({v}): {}", archs.len(), archs.join(","));
+            let desc = format!(
+                "{} arch(es) requested ({v}): {}",
+                archs.len(),
+                archs.join(",")
+            );
             (archs, desc)
         }
         None => match detect_local_gpu_arches() {
             Some(archs) if !archs.is_empty() => {
-                let desc = format!("{} arch(es) detected locally: {}", archs.len(), archs.join(","));
+                let desc = format!(
+                    "{} arch(es) detected locally: {}",
+                    archs.len(),
+                    archs.join(",")
+                );
                 (archs, desc)
             }
             _ => {

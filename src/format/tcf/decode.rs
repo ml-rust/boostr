@@ -44,9 +44,11 @@ pub fn element_count(record: &TensorRecord, name: &str) -> Result<usize> {
 /// `TcfFile::payload` returns. The caller verifies digests first: this
 /// function decodes, it does not authenticate.
 ///
+/// An encoding this reader cannot decode is a compile error, never a runtime
+/// refusal: `Encoding` is exhaustive, so a match with no arm for it fails to
+/// build.
+///
 /// # Errors
-/// - [`Error::ModelError`] naming the encoding and the tensor, when the
-///   encoding has no decode path here.
 /// - [`Error::ModelError`] carrying the spec's `E_*` code, when the codec
 ///   rejects the payload.
 /// - [`Error::ModelError`] when the decoded length disagrees with the shape.
@@ -67,15 +69,6 @@ pub fn decode_tensor_f32(record: &TensorRecord, payload: &[u8], name: &str) -> R
             decoded
         }
         Encoding::Raw(raw) => decode_raw(raw, payload, name)?,
-        other => {
-            return Err(Error::ModelError {
-                reason: format!(
-                    "TCF tensor '{name}': encoding {} (0x{:04x}) has no decode path in this reader",
-                    encoding_name(other),
-                    other.to_u16()
-                ),
-            });
-        }
     };
 
     if values.len() != expected {
@@ -158,14 +151,6 @@ fn decode_raw(raw: RawEncoding, payload: &[u8], name: &str) -> Result<Vec<f32>> 
             .iter()
             .map(|b| u32::from_le_bytes(*b) as f32)
             .collect(),
-        other => {
-            return Err(Error::ModelError {
-                reason: format!(
-                    "TCF tensor '{name}': raw encoding 0x{:04x} has no conversion in this reader",
-                    other.to_u16()
-                ),
-            });
-        }
     };
     Ok(values)
 }

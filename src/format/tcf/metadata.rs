@@ -11,9 +11,8 @@ use tcf_core::{
 
 /// The spec's name for an encoding identifier. Section 12.
 ///
-/// An identifier outside the v1 registry never reaches this function: the
-/// record decoder rejects it first. The catch-all arm exists because
-/// `Encoding` is `#[non_exhaustive]`.
+/// `Encoding` is exhaustive: a variant this function does not name is a
+/// compile error, never a runtime "unknown encoding" value.
 pub fn encoding_name(encoding: Encoding) -> String {
     match encoding {
         Encoding::Native(NativeEncoding::Q4S32T64) => "Q4S32_T64".to_string(),
@@ -24,7 +23,6 @@ pub fn encoding_name(encoding: Encoding) -> String {
         Encoding::Native(NativeEncoding::Q4AS32DT64) => "Q4AS32D_T64".to_string(),
         Encoding::Native(NativeEncoding::Q8S32T64) => "Q8S32_T64".to_string(),
         Encoding::Raw(raw) => format!("{raw:?}").to_uppercase(),
-        other => format!("0x{:04x}", other.to_u16()),
     }
 }
 

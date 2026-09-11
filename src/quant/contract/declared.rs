@@ -136,10 +136,6 @@ pub fn input_representation_name(value: InputRepresentation) -> &'static str {
         InputRepresentation::F16 => "F16",
         InputRepresentation::Bf16 => "BF16",
         InputRepresentation::A8S32Dynamic => "A8S32_DYNAMIC",
-        // `InputRepresentation` is `#[non_exhaustive]`: a representation added
-        // to the registry must be named here, and until it is, it reads as
-        // unknown rather than as one of the values above.
-        _ => "UNKNOWN",
     }
 }
 
@@ -149,7 +145,6 @@ pub fn dot_accumulator_name(value: DotAccumulator) -> &'static str {
     match value {
         DotAccumulator::F32 => "F32",
         DotAccumulator::I32ThenF32Scale => "I32_THEN_F32_SCALE",
-        _ => "UNKNOWN",
     }
 }
 
@@ -160,7 +155,6 @@ pub fn output_dtype_name(value: OutputDtype) -> &'static str {
         OutputDtype::F32 => "F32",
         OutputDtype::F16 => "F16",
         OutputDtype::Bf16 => "BF16",
-        _ => "UNKNOWN",
     }
 }
 
@@ -170,7 +164,6 @@ pub fn math_mode_name(value: MathMode) -> &'static str {
     match value {
         MathMode::ReassociationAllowed => "REASSOCIATION_ALLOWED",
         MathMode::ReassociationForbidden => "REASSOCIATION_FORBIDDEN",
-        _ => "UNKNOWN",
     }
 }
 
@@ -179,7 +172,6 @@ pub fn math_mode_name(value: MathMode) -> &'static str {
 pub fn quant_axis_name(value: QuantAxis) -> &'static str {
     match value {
         QuantAxis::Last => "LAST",
-        _ => "UNKNOWN",
     }
 }
 
@@ -188,7 +180,6 @@ pub fn quant_axis_name(value: QuantAxis) -> &'static str {
 pub fn rounding_mode_name(value: RoundingMode) -> &'static str {
     match value {
         RoundingMode::RnEven => "RN_EVEN",
-        _ => "UNKNOWN",
     }
 }
 
@@ -197,7 +188,6 @@ pub fn rounding_mode_name(value: RoundingMode) -> &'static str {
 pub fn scale_compute_dtype_name(value: ScaleComputeDtype) -> &'static str {
     match value {
         ScaleComputeDtype::F32 => "F32",
-        _ => "UNKNOWN",
     }
 }
 
@@ -211,7 +201,6 @@ pub fn role_name(value: ExecutionRole) -> &'static str {
         ExecutionRole::Indexed => "INDEXED",
         ExecutionRole::StateUpdate => "STATE_UPDATE",
         ExecutionRole::Elementwise => "ELEMENTWISE",
-        _ => "UNKNOWN",
     }
 }
 

@@ -116,6 +116,13 @@ pub fn quant_matmul_f32(
     // Q8_K integer dot product path — quantize activations to Q8_K then integer arithmetic.
     // Matches llama.cpp's approach for K-quant formats.
     // NOTE: Q8_0 intentionally NOT routed here (per-32 scales vs Q8_K's per-256 scales).
+    //
+    // This is GGUF's de facto activation contract, not a shape inference. A GGUF
+    // file carries no contract; llama.cpp runs every K-quant matmul through
+    // Q8_K-quantized activations, and every other GGUF reader inherits that.
+    // The `k % 256` check is Q8_K's block width — a valid K-quant tensor always
+    // satisfies it, so it guards a malformed shape, never chooses semantics. A
+    // consumer needing exact-F32 activations must use TCF, which declares it.
     let use_q8k = use_fused && k.is_multiple_of(256);
 
     // Pre-quantize activation rows to Q8_K (one per M row) if using integer path

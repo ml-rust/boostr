@@ -135,15 +135,17 @@ fn quantize_cpu(
         (QuantFormat::Q4K, None) => quantize::quantize_q4k(values, &mut blocks),
         (QuantFormat::Q5K, None) => quantize::quantize_q5k(values, &mut blocks),
         (QuantFormat::Q6K, None) => quantize::quantize_q6k(values, &mut blocks),
+        (QuantFormat::IQ4NL, None) => quantize::quantize_iq4_nl(values, &mut blocks),
+        (QuantFormat::IQ4NL, Some(m)) => quantize::quantize_iq4_nl_imatrix(values, &mut blocks, m),
         (QuantFormat::Q2K, Some(m)) => quantize::quantize_q2k_imatrix(values, &mut blocks, m),
         (QuantFormat::Q3K, Some(m)) => quantize::quantize_q3k_imatrix(values, &mut blocks, m),
         (QuantFormat::Q4K, Some(m)) => quantize::quantize_q4k_imatrix(values, &mut blocks, m),
         (QuantFormat::Q5K, Some(m)) => quantize::quantize_q5k_imatrix(values, &mut blocks, m),
         (QuantFormat::Q6K, Some(m)) => quantize::quantize_q6k_imatrix(values, &mut blocks, m),
         (other, Some(_)) => {
-            // The five K-quants are the formats `ggml-quants.c` gives an
-            // `_impl` writer. Silently dropping the importance for anything
-            // else would write a file that looks weighted and is not.
+            // The five K-quants and IQ4_NL are the formats `ggml-quants.c`
+            // gives an `_impl` writer. Silently dropping the importance for
+            // anything else would write a file that looks weighted and is not.
             return Err(Error::UnsupportedQuantFormat {
                 format: format!(
                     "{} has no importance-weighted CPU quantize kernel",

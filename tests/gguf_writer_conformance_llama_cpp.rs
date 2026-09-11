@@ -9,29 +9,23 @@
 //!
 //! # Two bars, one per group of formats
 //!
-//! **Q2_K, Q3_K, Q4_K, Q5_K, Q6_K — byte equality.** boostr's writer reproduces
-//! llama.cpp's own iterative per-sub-block scale search for these five. Matching
-//! bytes is the intended property, not a coincidence of rounding. A future
-//! change that lands close but not exact is a regression worth seeing, never
-//! something to absorb into an epsilon. llama.cpp produced the expectation: fix
-//! the writer, never the fixture.
+//! **Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL — byte equality.** boostr's writer
+//! reproduces llama.cpp's own iterative per-sub-block scale search for these
+//! six. Matching bytes is the intended property, not a coincidence of
+//! rounding. A future change that lands close but not exact is a regression
+//! worth seeing, never something to absorb into an epsilon. llama.cpp
+//! produced the expectation: fix the writer, never the fixture.
 //!
 //! The SAME bar applies to the importance-weighted (imatrix) writers, which
-//! reproduce llama.cpp's `quantize_row_*_K_impl` — the path `quantize_*_K`
-//! takes whenever an importance matrix is supplied, and the path nearly every
-//! GGUF quant the ecosystem ships comes out of. None of their five fixtures is
-//! committed yet, so all five tests take the loud-skip route below until they
-//! are generated. A skipped imatrix test verifies NOTHING: the round-trip and
-//! divergence tests beside it decode with boostr's own reader and only prove
-//! the output is not the unweighted output, never that it is llama.cpp's.
+//! reproduce llama.cpp's `quantize_row_*_K_impl` / `quantize_row_iq4_nl_impl`
+//! — the path each quantizer takes whenever an importance matrix is supplied,
+//! and the path nearly every GGUF quant the ecosystem ships comes out of. A
+//! round-trip or divergence test beside these proves only that boostr's
+//! writer and reader agree with each other, never that either agrees with
+//! llama.cpp.
 //!
-//! `writer_q2_k_llama.bin` and `writer_q3_k_llama.bin` are not committed yet.
-//! Their two tests read the fixture if it is there and print a loud skip banner
-//! if it is not, in the style of `tests/gguf_conformance_llama_cpp.rs`. A
-//! skipped run verified NOTHING about those two layouts: boostr's round-trip
-//! tests decode with boostr's own reader, which accepts whatever the writer
-//! emits. Generate both from ggml — the recipe is below — and the skip goes
-//! away.
+//! Every fixture this file reads is committed. A missing one fails the test
+//! loudly, naming the file and the recipe below — see `llama_cpp_bytes`.
 //!
 //! **Q4_0, Q4_1 and Q8_0 — deliberately NOT byte equality.** llama.cpp's
 //! `quantize_row_q4_0`, `quantize_row_q4_1` and `quantize_row_q8_0` are plain
@@ -62,10 +56,10 @@
 //! are no longer expectations. They are the recorded direct-fit output the
 //! searches have to beat, and all three tests read them. Do not delete them.
 //!
-//! boostr writes exactly eight formats: `QuantFormat::Q4_0`, `Q4_1`, `Q8_0`,
-//! `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`. Every other `QuantFormat` variant returns
-//! `Error::UnsupportedQuantFormat` from `quantize`, so nothing else needs a gate
-//! here.
+//! boostr writes exactly nine formats: `QuantFormat::Q4_0`, `Q4_1`, `Q8_0`,
+//! `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`, `IQ4NL`. Every other `QuantFormat`
+//! variant returns `Error::UnsupportedQuantFormat` from `quantize`, so
+//! nothing else needs a gate here.
 //!
 //! boostr has no CUDA or WGPU quantizer. This file is CPU only.
 //!
@@ -86,18 +80,20 @@
 //! ```
 //!
 //! ggml type ids used here: Q4_0 2, Q4_1 3, Q8_0 8, Q2_K 10, Q3_K 11, Q4_K 12,
-//! Q5_K 13, Q6_K 14. Call with `nrows = 8`, `n_per_row = 256`, `imatrix = NULL`.
+//! Q5_K 13, Q6_K 14, IQ4_NL 20. Call with `nrows = 8`, `n_per_row = 256`,
+//! `imatrix = NULL`.
 //!
 //! Scale each source row by a different factor. A single scale across all
 //! rows lets a per-row stride error produce matching bytes by accident.
 //!
-//! The five imatrix fixtures — `writer_q2_k_imatrix_llama.bin`,
+//! The six imatrix fixtures — `writer_q2_k_imatrix_llama.bin`,
 //! `writer_q3_k_imatrix_llama.bin`, `writer_q4_k_imatrix_llama.bin`,
-//! `writer_q5_k_imatrix_llama.bin` and `writer_q6_k_imatrix_llama.bin` — come
-//! from the same call with the LAST argument non-NULL: a pointer to 256 `float`
-//! importance values, one per column, identical for every row. Those 256 values
-//! are `tests/fixtures/gguf_writer/writer_imatrix.bin`, little-endian `f32`,
-//! and both the generator and this file must read that one file — an importance
+//! `writer_q5_k_imatrix_llama.bin`, `writer_q6_k_imatrix_llama.bin` and
+//! `writer_iq4_nl_imatrix_llama.bin` — come from the same call with the LAST
+//! argument non-NULL: a pointer to 256 `float` importance values, one per
+//! column, identical for every row. Those 256 values are
+//! `tests/fixtures/gguf_writer/writer_imatrix.bin`, little-endian `f32`, and
+//! both the generator and this file must read that one file — an importance
 //! vector regenerated from a formula on either side stops being the same
 //! vector. Generate it once with a spread of magnitudes and at least one exact
 //! zero, since a zero importance is legal and takes its own branch.
@@ -205,40 +201,27 @@ fn assert_writer_matches_llama_cpp(format: &str, block_bytes: usize, got: &[u8],
     );
 }
 
-/// Reads a byte-equality fixture, or prints a loud skip banner and returns
-/// `None`.
+/// Reads a byte-equality fixture. Panics naming the missing file and the
+/// generation recipe if it is absent.
 ///
-/// A silent skip is what lets a layout bug ship: the round-trip tests decode
-/// with boostr's own reader, which agrees with whatever the writer emits, so a
-/// missing external reference means the layout is UNVERIFIED, not correct. The
-/// banner goes to stdout AND stderr so it survives a captured run.
-fn llama_cpp_bytes(name: &str, format: &str) -> Option<Vec<u8>> {
-    match std::fs::read(fixture(name)) {
-        Ok(bytes) => Some(bytes),
-        Err(err) => {
-            let banner = format!(
-                "\n\
-                 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\
-                 !! GGUF_WRITER_CONFORMANCE_SKIPPED  format=\"{format}\"\n\
-                 !! REASON: fixture tests/fixtures/gguf_writer/{name} is missing ({err})\n\
-                 !! NOTHING WAS VERIFIED. This test reported success WITHOUT comparing\n\
-                 !! boostr's writer against llama.cpp's ggml_quantize_chunk. Treat the\n\
-                 !! {format} block layout as UNVERIFIED, not as green. Generate the\n\
-                 !! fixture with the recipe in this file's module docs.\n\
-                 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
-            );
-            println!("{banner}");
-            eprintln!("{banner}");
-            None
-        }
-    }
+/// Every fixture this file reads is committed. A missing file here means one
+/// was deleted or corrupted, not that it was never generated, and that must
+/// fail the run: the round-trip tests decode with boostr's own reader, which
+/// agrees with whatever the writer emits, so silently passing without this
+/// fixture would leave the layout UNVERIFIED behind a green run.
+fn llama_cpp_bytes(name: &str, format: &str) -> Vec<u8> {
+    std::fs::read(fixture(name)).unwrap_or_else(|err| {
+        panic!(
+            "{format}: fixture tests/fixtures/gguf_writer/{name} is missing or unreadable \
+             ({err}). It is committed and must not be absent. Regenerate it with the recipe \
+             under \"Regenerating or extending the fixtures\" in this file's module docs."
+        )
+    })
 }
 
 #[test]
 fn q2_k_writer_matches_llama_cpp() {
-    let Some(llama) = llama_cpp_bytes("writer_q2_k_llama.bin", "Q2K") else {
-        return;
-    };
+    let llama = llama_cpp_bytes("writer_q2_k_llama.bin", "Q2K");
     let src = floats("writer_src.bin");
     let (client, device) = cpu_setup();
     let input = Tensor::<CpuRuntime>::from_slice(&src, &[8, 256], &device).unwrap();
@@ -252,9 +235,7 @@ fn q2_k_writer_matches_llama_cpp() {
 
 #[test]
 fn q3_k_writer_matches_llama_cpp() {
-    let Some(llama) = llama_cpp_bytes("writer_q3_k_llama.bin", "Q3K") else {
-        return;
-    };
+    let llama = llama_cpp_bytes("writer_q3_k_llama.bin", "Q3K");
     let src = floats("writer_src.bin");
     let (client, device) = cpu_setup();
     let input = Tensor::<CpuRuntime>::from_slice(&src, &[8, 256], &device).unwrap();
@@ -356,6 +337,20 @@ fn q6_k_writer_matches_llama_cpp() {
         .to_bytes()
         .unwrap();
     assert_writer_matches_llama_cpp("Q6K", 210, &got, &llama);
+}
+
+#[test]
+fn iq4_nl_writer_matches_llama_cpp() {
+    let src = floats("writer_src.bin");
+    let llama = std::fs::read(fixture("writer_iq4_nl_llama.bin")).unwrap();
+    let (client, device) = cpu_setup();
+    let input = Tensor::<CpuRuntime>::from_slice(&src, &[8, 256], &device).unwrap();
+    let got = client
+        .quantize(&input, QuantFormat::IQ4NL)
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    assert_writer_matches_llama_cpp("IQ4_NL", 18, &got, &llama);
 }
 
 /// Quantizes the fixture source through the public writer, as `compressr` does.
@@ -735,26 +730,22 @@ fn q4_1_writer_is_valid_and_no_worse_than_direct_fit() {
     assert_beats_direct_fit("Q4_1", QuantFormat::Q4_1, &got, &llama);
 }
 
-/// The importance vector, or `None` with a loud banner if it is not committed.
-///
-/// One entry per COLUMN, so 256 for this fixture's `n_per_row`, and the same
-/// vector for all 8 rows — which is what `ggml_quantize_chunk` does with the
-/// pointer it is handed.
-fn importance_fixture() -> Option<Vec<f32>> {
-    let bytes = llama_cpp_bytes("writer_imatrix.bin", "imatrix source")?;
+/// The importance vector: one entry per COLUMN, so 256 for this fixture's
+/// `n_per_row`, and the same vector for all 8 rows — which is what
+/// `ggml_quantize_chunk` does with the pointer it is handed.
+fn importance_fixture() -> Vec<f32> {
+    let bytes = llama_cpp_bytes("writer_imatrix.bin", "imatrix source");
     assert_eq!(
         bytes.len(),
         256 * 4,
         "writer_imatrix.bin: expected 256 f32 entries, one per column"
     );
-    Some(
-        bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| f32::from_le_bytes(*c))
-            .collect(),
-    )
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
+        .collect()
 }
 
 /// Quantizes the fixture source with an importance vector, as a caller holding
@@ -772,21 +763,14 @@ fn write_blocks_with_importance(format: QuantFormat, imatrix: &[f32]) -> Vec<u8>
 
 /// Byte-equality gate for one importance-weighted writer against
 /// `ggml_quantize_chunk` called with a non-NULL imatrix.
-///
-/// Skips loudly, verifying nothing, until both its fixture and the shared
-/// importance vector are committed — see the module docs for the recipe.
 fn assert_imatrix_writer_matches_llama_cpp(
     label: &str,
     format: QuantFormat,
     fixture_name: &str,
     block_bytes: usize,
 ) {
-    let Some(llama) = llama_cpp_bytes(fixture_name, label) else {
-        return;
-    };
-    let Some(imatrix) = importance_fixture() else {
-        return;
-    };
+    let llama = llama_cpp_bytes(fixture_name, label);
+    let imatrix = importance_fixture();
     let got = write_blocks_with_importance(format, &imatrix);
     assert_writer_matches_llama_cpp(label, block_bytes, &got, &llama);
 }
@@ -838,6 +822,16 @@ fn q6_k_imatrix_writer_matches_llama_cpp() {
         QuantFormat::Q6K,
         "writer_q6_k_imatrix_llama.bin",
         210,
+    );
+}
+
+#[test]
+fn iq4_nl_imatrix_writer_matches_llama_cpp() {
+    assert_imatrix_writer_matches_llama_cpp(
+        "IQ4_NL+imatrix",
+        QuantFormat::IQ4NL,
+        "writer_iq4_nl_imatrix_llama.bin",
+        18,
     );
 }
 

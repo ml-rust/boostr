@@ -1,5 +1,7 @@
 pub mod block_affine;
 pub mod block_scale;
+pub mod codebook;
+pub mod iq4_nl;
 pub mod q2k;
 pub mod q2k_imatrix;
 pub mod q3k;
@@ -13,6 +15,7 @@ pub mod simple;
 #[cfg(test)]
 mod tests;
 
+pub use iq4_nl::{quantize_iq4_nl, quantize_iq4_nl_imatrix};
 pub use q2k::quantize_q2k;
 pub use q2k_imatrix::quantize_q2k_imatrix;
 pub use q3k::quantize_q3k;

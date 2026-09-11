@@ -1,11 +1,15 @@
 //! Codebook probe: does moving the 16 reconstruction levels off a uniform
-//! grid reduce task damage, holding geometry and byte cost fixed?
+//! grid reduce task damage, holding geometry and byte cost fixed? And,
+//! independently, does adding a per-group minimum (affine) instead of a
+//! pure scale (symmetric) reduce it? `--codebook` selects one of all four
+//! combinations — see [`parse_codebook`].
 //!
 //! Same probe discipline as `smooth.rs`: transform a loaded `--ckpt`'s dense
 //! weights in F32, write them back, score — no file is written, and TCF's
 //! own codec is not touched. Unlike smoothing, this path applies NO
-//! per-channel scale: `boostr::quant::codebook_round_trip` is a complete
-//! block quantizer on its own (symmetric, group 32, one scale per group), so
+//! per-channel scale: `boostr::quant::codebook_round_trip` and
+//! `affine_codebook_round_trip` are complete block quantizers on their own
+//! (group 32, one scale per group, plus one minimum for the affine arm), so
 //! the transform is exactly quantize-then-dequantize, no unscale step.
 //!
 //! `--codebook-objective` selects the per-element weight the group search
@@ -16,13 +20,25 @@
 //! transformed — see `super::probe::run_probe`.
 
 use boostr::nn::VarMap;
-use boostr::quant::{Codebook, ImportanceMatrix, codebook_round_trip};
+use boostr::quant::{
+    AffineCodebook, Codebook, ImportanceMatrix, affine_codebook_round_trip, codebook_round_trip,
+};
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
 use tcf_core::column_weights;
 
 use super::probe::{ProbeSummary, run_probe};
+
+/// The codebook this probe quantizes each candidate weight against: a
+/// SYMMETRIC 16-level grid (`d * level`) or an AFFINE one
+/// (`m + d * level`). One `--codebook` flag selects among all four
+/// underlying codebooks — see [`parse_codebook`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CodebookChoice {
+    Symmetric(Codebook),
+    Affine(AffineCodebook),
+}
 
 /// Which per-element weight the codebook group search scores against.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -44,12 +60,14 @@ pub fn parse_codebook_objective(value: &str) -> Result<CodebookObjective, String
     }
 }
 
-pub fn parse_codebook(value: &str) -> Result<Codebook, String> {
+pub fn parse_codebook(value: &str) -> Result<CodebookChoice, String> {
     match value {
-        "uniform" => Ok(Codebook::Uniform),
-        "nf4" => Ok(Codebook::Nf4),
+        "uniform" => Ok(CodebookChoice::Symmetric(Codebook::Uniform)),
+        "nf4" => Ok(CodebookChoice::Symmetric(Codebook::Nf4)),
+        "uniform-affine" => Ok(CodebookChoice::Affine(AffineCodebook::Uniform)),
+        "nf4-affine" => Ok(CodebookChoice::Affine(AffineCodebook::Nf4Shifted)),
         other => Err(format!(
-            "--codebook: expected uniform or nf4, got {other:?}"
+            "--codebook: expected uniform, nf4, uniform-affine or nf4-affine, got {other:?}"
         )),
     }
 }
@@ -63,7 +81,7 @@ pub fn parse_codebook(value: &str) -> Result<Codebook, String> {
 pub fn apply_codebook<R>(
     var_map: &mut VarMap<R>,
     imatrix: &ImportanceMatrix,
-    codebook: Codebook,
+    codebook: CodebookChoice,
     objective: CodebookObjective,
 ) -> Result<ProbeSummary, Box<dyn std::error::Error>>
 where
@@ -81,12 +99,14 @@ where
                         .map_err(|e| format!("{name}: expanding importance weights: {e}"))?
                 }
             };
-            Ok(codebook_round_trip(
-                original,
-                in_features,
-                codebook,
-                &weights,
-            ))
+            Ok(match codebook {
+                CodebookChoice::Symmetric(codebook) => {
+                    codebook_round_trip(original, in_features, codebook, &weights)
+                }
+                CodebookChoice::Affine(codebook) => {
+                    affine_codebook_round_trip(original, in_features, codebook, &weights)
+                }
+            })
         },
     )
 }

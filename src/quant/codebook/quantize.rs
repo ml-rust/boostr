@@ -15,14 +15,14 @@ const QMAX: f32 = 1.0;
 /// The candidate multiplier sweep: `-9..=9` in steps of `0.1`, the same
 /// shape `tcf-core`'s `SearchEffort::Standard` uses. Each yields a candidate
 /// scale `d = max_abs / (QMAX + multiplier)`.
-fn candidate_multipliers() -> impl Iterator<Item = f32> {
+pub(super) fn candidate_multipliers() -> impl Iterator<Item = f32> {
     (-9..=9).map(|is| 0.1 * is as f32)
 }
 
 /// The codebook level closest to `v`, by absolute difference. Ties (equal
 /// distance to two levels) resolve to the level appearing FIRST in the
 /// ascending array, so the result never depends on float rounding order.
-fn nearest_level(v: f32, levels: &[f32; 16]) -> f32 {
+pub(super) fn nearest_level(v: f32, levels: &[f32; 16]) -> f32 {
     let mut best_index = 0usize;
     let mut best_diff = f32::INFINITY;
     for (index, &level) in levels.iter().enumerate() {

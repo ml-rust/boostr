@@ -168,10 +168,13 @@ use smooth::{
 // The codebook PROBE: `--codebook` transforms the loaded `VarMap`'s dense
 // weights through a self-contained 4-bit block quantizer, at identical
 // geometry to the encodings already measured, isolating whether a
-// non-uniform reconstruction codebook reduces task damage. Mutually
-// exclusive with `--smooth-encoding` — see `parse_args`.
+// non-uniform reconstruction codebook (and, separately, an affine minimum)
+// reduces task damage. Mutually exclusive with `--smooth-encoding` — see
+// `parse_args`.
 mod codebook;
-use codebook::{CodebookObjective, apply_codebook, parse_codebook, parse_codebook_objective};
+use codebook::{
+    CodebookChoice, CodebookObjective, apply_codebook, parse_codebook, parse_codebook_objective,
+};
 
 /// Tokens per scored window. Long enough that most positions are predicted
 /// with real context, short enough that one `[1, seq_len, vocab]` logit tensor
@@ -241,7 +244,7 @@ struct SmoothingArgs {
 /// `--codebook*` flags, gathered once presence is confirmed by `--codebook`
 /// being set.
 struct CodebookArgs {
-    codebook: boostr::quant::Codebook,
+    codebook: CodebookChoice,
     imatrix: PathBuf,
     objective: CodebookObjective,
 }
@@ -273,10 +276,11 @@ requiring --smooth-imatrix's RMS activation AND the weight; weight is calibratio
 derived from the weight's own column magnitudes alone — --smooth-imatrix is still required \
 and still selects which tensors are transformed, for a like-for-like tensor set between the \
 two sources)] \
-[--codebook uniform|nf4 (turns on the codebook PROBE: quantize/dequantize every candidate \
-weight through a self-contained 4-bit block quantizer at fixed geometry, comparing an evenly \
-spaced 16-level grid against NF4's non-uniform one; requires --ckpt and --smooth-imatrix; \
-mutually exclusive with --smooth-encoding)] \
+[--codebook uniform|nf4|uniform-affine|nf4-affine (turns on the codebook PROBE: \
+quantize/dequantize every candidate weight through a self-contained 4-bit block quantizer at \
+fixed geometry; uniform/nf4 are symmetric (d*level), uniform-affine/nf4-affine add a per-group \
+minimum (m+d*level); requires --ckpt and --smooth-imatrix; mutually exclusive with \
+--smooth-encoding)] \
 [--codebook-objective uniform|imatrix (default imatrix: the per-element weight the codebook's \
 group scale search scores against, exactly like --smooth-objective)]";
 
@@ -306,7 +310,7 @@ fn parse_args() -> Result<Args, String> {
     let mut smooth_imatrix: Option<PathBuf> = None;
     let mut smooth_objective = SmoothObjective::Imatrix;
     let mut smooth_source = SmoothSource::Activation;
-    let mut codebook_choice: Option<boostr::quant::Codebook> = None;
+    let mut codebook_choice: Option<CodebookChoice> = None;
     let mut codebook_objective = CodebookObjective::Imatrix;
 
     let mut i = 0usize;

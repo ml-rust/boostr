@@ -8,7 +8,7 @@ use super::quantize::quantize_group;
 /// Weights per scale, along the input dimension — fixed, matching the byte
 /// cost of the 4-bit encodings this probe compares against (4 bits/weight
 /// plus one `f32` scale per 32).
-const GROUP_SIZE: usize = 32;
+pub(super) const GROUP_SIZE: usize = 32;
 
 /// Quantizes then dequantizes every value in `values` against `codebook`,
 /// grouping [`GROUP_SIZE`] consecutive elements at a time WITHIN each row of

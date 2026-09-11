@@ -13,6 +13,13 @@
 //! occupies on its own (K-quants are affine+uniform, IQ formats are
 //! non-uniform+symmetric).
 //!
+//! - TWO-LEVEL SUPER-SCALE (6-bit codes, 16-element groups, one super-scale
+//!   per 256): [`SuperPrecision::Bf16`] (TCF's `Q6S16D_T64` design) vs
+//!   [`SuperPrecision::F16`] (Q6_K's storage design) vs
+//!   [`SuperPrecision::F32`] (the ceiling) — see `two_level.rs`. A separate
+//!   geometry from the two probes above; isolates super-scale STORAGE
+//!   FORMAT rather than reconstruction-level shape.
+//!
 //! Library code: plain slices, no [`numr::runtime::Runtime`], sibling of
 //! `quant::smoothing`.
 
@@ -20,9 +27,11 @@ mod affine;
 mod levels;
 mod quantize;
 mod roundtrip;
+mod two_level;
 
 pub use affine::{
     AFFINE_UNIFORM_LEVELS, AffineCodebook, NF4_SHIFTED_LEVELS, affine_codebook_round_trip,
 };
 pub use levels::{Codebook, NF4_LEVELS, UNIFORM_LEVELS};
 pub use roundtrip::codebook_round_trip;
+pub use two_level::{SuperPrecision, two_level_codebook_round_trip};

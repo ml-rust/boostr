@@ -1,16 +1,21 @@
 //! Codebook probe: does moving the 16 reconstruction levels off a uniform
 //! grid reduce task damage, holding geometry and byte cost fixed? And,
 //! independently, does adding a per-group minimum (affine) instead of a
-//! pure scale (symmetric) reduce it? `--codebook` selects one of all four
+//! pure scale (symmetric) reduce it? A third, separate geometry probes
+//! whether a two-level super-scale's STORAGE FORMAT (bf16 pre-divided,
+//! f16 undivided, or an unrounded f32 ceiling) explains TCF `Q6S16D_T64`'s
+//! gap against GGUF `q6_k`. `--codebook` selects one of all seven
 //! combinations — see [`parse_codebook`].
 //!
 //! Same probe discipline as `smooth.rs`: transform a loaded `--ckpt`'s dense
 //! weights in F32, write them back, score — no file is written, and TCF's
 //! own codec is not touched. Unlike smoothing, this path applies NO
-//! per-channel scale: `boostr::quant::codebook_round_trip` and
-//! `affine_codebook_round_trip` are complete block quantizers on their own
-//! (group 32, one scale per group, plus one minimum for the affine arm), so
-//! the transform is exactly quantize-then-dequantize, no unscale step.
+//! per-channel scale: `boostr::quant::codebook_round_trip`,
+//! `affine_codebook_round_trip` and `two_level_codebook_round_trip` are
+//! complete block quantizers on their own (group 32 with one scale per
+//! group, plus one minimum for the affine arm; group 16 with one sub-scale
+//! per group and one super-scale per 256 for the two-level arm), so the
+//! transform is exactly quantize-then-dequantize, no unscale step.
 //!
 //! `--codebook-objective` selects the per-element weight the group search
 //! scores against, exactly as `--smooth-objective` does for the smoothing
@@ -21,7 +26,8 @@
 
 use boostr::nn::VarMap;
 use boostr::quant::{
-    AffineCodebook, Codebook, ImportanceMatrix, affine_codebook_round_trip, codebook_round_trip,
+    AffineCodebook, Codebook, ImportanceMatrix, SuperPrecision, affine_codebook_round_trip,
+    codebook_round_trip, two_level_codebook_round_trip,
 };
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
@@ -31,13 +37,16 @@ use tcf_core::column_weights;
 use super::probe::{ProbeSummary, run_probe};
 
 /// The codebook this probe quantizes each candidate weight against: a
-/// SYMMETRIC 16-level grid (`d * level`) or an AFFINE one
-/// (`m + d * level`). One `--codebook` flag selects among all four
-/// underlying codebooks — see [`parse_codebook`].
+/// SYMMETRIC 16-level grid (`d * level`), an AFFINE one (`m + d * level`),
+/// or a TWO-LEVEL super-scale probe (6-bit codes, one super-scale per 256
+/// elements, storage format given by [`SuperPrecision`]). One `--codebook`
+/// flag selects among all seven underlying codebooks — see
+/// [`parse_codebook`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CodebookChoice {
     Symmetric(Codebook),
     Affine(AffineCodebook),
+    TwoLevel(SuperPrecision),
 }
 
 /// Which per-element weight the codebook group search scores against.
@@ -66,8 +75,13 @@ pub fn parse_codebook(value: &str) -> Result<CodebookChoice, String> {
         "nf4" => Ok(CodebookChoice::Symmetric(Codebook::Nf4)),
         "uniform-affine" => Ok(CodebookChoice::Affine(AffineCodebook::Uniform)),
         "nf4-affine" => Ok(CodebookChoice::Affine(AffineCodebook::Nf4Shifted)),
+        "q6-bf16" => Ok(CodebookChoice::TwoLevel(SuperPrecision::Bf16)),
+        "q6-f16" => Ok(CodebookChoice::TwoLevel(SuperPrecision::F16)),
+        "q6-f32" => Ok(CodebookChoice::TwoLevel(SuperPrecision::F32)),
+        "q6-bf16-reserved" => Ok(CodebookChoice::TwoLevel(SuperPrecision::Bf16Reserved)),
         other => Err(format!(
-            "--codebook: expected uniform, nf4, uniform-affine or nf4-affine, got {other:?}"
+            "--codebook: expected uniform, nf4, uniform-affine, nf4-affine, q6-bf16, q6-f16 or \
+             q6-f32, q6-bf16-reserved, got {other:?}"
         )),
     }
 }
@@ -105,6 +119,9 @@ where
                 }
                 CodebookChoice::Affine(codebook) => {
                     affine_codebook_round_trip(original, in_features, codebook, &weights)
+                }
+                CodebookChoice::TwoLevel(precision) => {
+                    two_level_codebook_round_trip(original, in_features, precision, &weights)
                 }
             })
         },

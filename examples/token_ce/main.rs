@@ -166,11 +166,11 @@ use smooth::{
 };
 
 // The codebook PROBE: `--codebook` transforms the loaded `VarMap`'s dense
-// weights through a self-contained 4-bit block quantizer, at identical
-// geometry to the encodings already measured, isolating whether a
+// weights through a self-contained block quantizer, isolating whether a
 // non-uniform reconstruction codebook (and, separately, an affine minimum)
-// reduces task damage. Mutually exclusive with `--smooth-encoding` — see
-// `parse_args`.
+// reduces task damage, OR — for the two-level `q6-*` choices — whether a
+// super-scale's storage format explains a real format's measured gap.
+// Mutually exclusive with `--smooth-encoding` — see `parse_args`.
 mod codebook;
 use codebook::{
     CodebookChoice, CodebookObjective, apply_codebook, parse_codebook, parse_codebook_objective,
@@ -276,11 +276,13 @@ requiring --smooth-imatrix's RMS activation AND the weight; weight is calibratio
 derived from the weight's own column magnitudes alone — --smooth-imatrix is still required \
 and still selects which tensors are transformed, for a like-for-like tensor set between the \
 two sources)] \
-[--codebook uniform|nf4|uniform-affine|nf4-affine (turns on the codebook PROBE: \
-quantize/dequantize every candidate weight through a self-contained 4-bit block quantizer at \
-fixed geometry; uniform/nf4 are symmetric (d*level), uniform-affine/nf4-affine add a per-group \
-minimum (m+d*level); requires --ckpt and --smooth-imatrix; mutually exclusive with \
---smooth-encoding)] \
+[--codebook uniform|nf4|uniform-affine|nf4-affine|q6-bf16|q6-f16|q6-f32|q6-bf16-reserved (turns on the codebook \
+PROBE: quantize/dequantize every candidate weight through a self-contained block quantizer at \
+fixed geometry; uniform/nf4 are symmetric 4-bit (d*level), uniform-affine/nf4-affine add a \
+per-group minimum (m+d*level), q6-bf16/q6-f16/q6-f32 are a 6-bit two-level super-scale probe \
+(16-element groups, one super-scale per 256) differing only in how the super-scale is stored \
+(bf16 pre-divided, f16 undivided, f32 unrounded ceiling); requires --ckpt and \
+--smooth-imatrix; mutually exclusive with --smooth-encoding)] \
 [--codebook-objective uniform|imatrix (default imatrix: the per-element weight the codebook's \
 group scale search scores against, exactly like --smooth-objective)]";
 

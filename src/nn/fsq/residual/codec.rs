@@ -1,16 +1,4 @@
-//! Residual Finite Scalar Quantizer — CPU/CUDA/WebGPU generic.
-//!
-//! Ports `ResidualFSQ` from lucidrains/vector-quantize-pytorch
-//! (`vector_quantize_pytorch/residual_fsq.py`, revision as of 2026-08).
-//!
-//! `ResidualFSQ` is a DIFFERENT class from `FSQ` ([`Fsq`]), and the difference
-//! is not cosmetic. `ResidualFSQ` owns:
-//!
-//! * `project_in: Linear(dim -> codebook_dim)` / `project_out: Linear(codebook_dim -> dim)`
-//!   (`nn.Identity` when `dim == codebook_dim`),
-//! * `num_quantizers` inner `FSQ` layers, whose OWN projections are always
-//!   `nn.Identity` — the residual wrapper does all the projecting,
-//! * per-quantizer `scales[i] = (levels - 1) ** -i` (so `scales[0]` is all-ones).
+//! `encode` / `decode` paths of [`ResidualFsq`].
 //!
 //! # The double-bound trap — do NOT "simplify" this away
 //!
@@ -41,144 +29,17 @@
 //! The decode path ([`ResidualFsq::decode`], lucidrains/vector-quantize-pytorch's `get_output_from_indices`)
 //! has no such subtlety: per-quantizer codebook lookup, scale, sum, `project_out`.
 
-use super::codes::var_passthrough;
-use super::config::ResidualFsqConfig;
-use super::quantizer::Fsq;
 use crate::error::{Error, Result};
-use crate::nn::linear::Linear;
-use crate::nn::module::Module;
+use crate::nn::fsq::codes::var_passthrough;
 use numr::autograd::{Var, var_add, var_div, var_mul, var_sub};
 use numr::dtype::DType;
 use numr::ops::{ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
-use numr::tensor::{Tensor, TensorId};
+use numr::tensor::Tensor;
 
-/// Already-built parts for [`ResidualFsq`], following the `*Weights` convention
-/// used throughout `model/audio/neucodec/`.
-pub struct ResidualFsqWeights<R: Runtime> {
-    /// `Linear(dim -> codebook_dim)`; `None` iff `dim == codebook_dim`.
-    pub project_in: Option<Linear<R>>,
-    /// `Linear(codebook_dim -> dim)`; `None` iff `dim == codebook_dim`.
-    pub project_out: Option<Linear<R>>,
-    /// Inner FSQ layers — exactly `num_quantizers` of them, each WITHOUT
-    /// projections (this wrapper owns the projections).
-    pub layers: Vec<Fsq<R>>,
-}
-
-/// Residual Finite Scalar Quantizer: a stack of [`Fsq`] layers, each quantizing
-/// what the previous ones could not represent.
-pub struct ResidualFsq<R: Runtime> {
-    config: ResidualFsqConfig,
-    project_in: Option<Linear<R>>,
-    project_out: Option<Linear<R>>,
-    layers: Vec<Fsq<R>>,
-    /// `scales[i][j] = (levels[j] - 1) ^ -i`, shape `[codebook_dim]` each.
-    /// `scales[0]` is all-ones.
-    scales: Vec<Tensor<R>>,
-}
+use super::ResidualFsq;
 
 impl<R: Runtime<DType = DType>> ResidualFsq<R> {
-    /// Assemble from already-built parts, validating layer count, layer grids,
-    /// and projection shapes against `config`.
-    pub fn new(
-        config: ResidualFsqConfig,
-        weights: ResidualFsqWeights<R>,
-        device: &R::Device,
-    ) -> Result<Self> {
-        config.validate()?;
-        let codebook_dim = config.codebook_dim();
-
-        if weights.layers.len() != config.num_quantizers {
-            return Err(Error::ModelError {
-                reason: format!(
-                    "expected {} FSQ layers (num_quantizers), got {}",
-                    config.num_quantizers,
-                    weights.layers.len()
-                ),
-            });
-        }
-        for (index, layer) in weights.layers.iter().enumerate() {
-            let layer_config = layer.config();
-            if layer_config.levels != config.levels {
-                return Err(Error::ModelError {
-                    reason: format!(
-                        "layer {index} levels {:?} do not match residual levels {:?}",
-                        layer_config.levels, config.levels
-                    ),
-                });
-            }
-            // lucidrains/vector-quantize-pytorch's inner FSQ projections are nn.Identity; a projecting
-            // inner layer would double-project.
-            if layer_config.input_dim != codebook_dim {
-                return Err(Error::ModelError {
-                    reason: format!(
-                        "layer {index} input_dim {} must equal codebook_dim {codebook_dim} \
-                         (inner FSQ layers must not project)",
-                        layer_config.input_dim
-                    ),
-                });
-            }
-        }
-
-        Self::check_projections(&config, &weights, codebook_dim)?;
-
-        let mut scales = Vec::with_capacity(config.num_quantizers);
-        for index in 0..config.num_quantizers {
-            let values: Vec<f32> = config
-                .levels
-                .iter()
-                .map(|&level| ((level as f32) - 1.0).powi(-(index as i32)))
-                .collect();
-            scales.push(Tensor::from_slice(&values, &[codebook_dim], device)?);
-        }
-
-        Ok(Self {
-            config,
-            project_in: weights.project_in,
-            project_out: weights.project_out,
-            layers: weights.layers,
-            scales,
-        })
-    }
-
-    /// Presence + shape validation for `project_in`/`project_out`.
-    fn check_projections(
-        config: &ResidualFsqConfig,
-        weights: &ResidualFsqWeights<R>,
-        codebook_dim: usize,
-    ) -> Result<()> {
-        let needs = config.needs_projection();
-        let present = weights.project_in.is_some() || weights.project_out.is_some();
-        if needs && (weights.project_in.is_none() || weights.project_out.is_none()) {
-            return Err(Error::InvalidArgument {
-                arg: "project_in/project_out",
-                reason: format!(
-                    "dim ({}) != codebook_dim ({codebook_dim}); both projections are required",
-                    config.dim
-                ),
-            });
-        }
-        if !needs && present {
-            return Err(Error::InvalidArgument {
-                arg: "project_in/project_out",
-                reason: "dim == codebook_dim; no projection should be supplied".to_string(),
-            });
-        }
-
-        if let Some(linear) = &weights.project_in {
-            expect_weight_shape(linear, &[codebook_dim, config.dim], "project_in")?;
-        }
-        if let Some(linear) = &weights.project_out {
-            expect_weight_shape(linear, &[config.dim, codebook_dim], "project_out")?;
-        }
-        Ok(())
-    }
-
-    /// The configuration this quantizer was built from.
-    pub fn config(&self) -> &ResidualFsqConfig {
-        &self.config
-    }
-
     /// Encode `x` (`[..., dim]`) into `(codes, indices)`.
     ///
     /// `codes`: `[..., dim]` (the summed, projected reconstruction).
@@ -326,67 +187,121 @@ impl<R: Runtime<DType = DType>> ResidualFsq<R> {
             None => Ok(summed),
         }
     }
-
-    /// All parameters with their stable autograd IDs (projections only — FSQ
-    /// itself has no learned codebook).
-    pub fn parameters(&self) -> Vec<(TensorId, &Var<R>)> {
-        let mut params = Vec::new();
-        if let Some(linear) = &self.project_in {
-            params.extend(linear.parameters());
-        }
-        if let Some(linear) = &self.project_out {
-            params.extend(linear.parameters());
-        }
-        params
-    }
-
-    /// Trainable parameters with their stable autograd IDs.
-    pub fn trainable_parameters(&self) -> Vec<(TensorId, &Var<R>)> {
-        self.parameters()
-            .into_iter()
-            .filter(|param| param.1.requires_grad())
-            .collect()
-    }
-}
-
-/// Check a projection's `[out, in]` weight shape, erroring rather than panicking.
-fn expect_weight_shape<R: Runtime>(
-    linear: &Linear<R>,
-    expected: &[usize],
-    name: &'static str,
-) -> Result<()> {
-    let shape = linear.weight().tensor().shape();
-    if shape != expected {
-        return Err(Error::ModelError {
-            reason: format!("{name} weight shape {shape:?} does not match expected {expected:?}"),
-        });
-    }
-    Ok(())
-}
-
-impl<R: Runtime<DType = DType>> Module<R> for ResidualFsq<R> {
-    fn parameters(&self) -> Vec<&Var<R>> {
-        ResidualFsq::parameters(self)
-            .into_iter()
-            .map(|param| param.1)
-            .collect()
-    }
-
-    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
-        let mut params = Vec::new();
-        if let Some(linear) = &self.project_in {
-            for (name, var) in linear.named_parameters() {
-                params.push((format!("project_in.{name}"), var));
-            }
-        }
-        if let Some(linear) = &self.project_out {
-            for (name, var) in linear.named_parameters() {
-                params.push((format!("project_out.{name}"), var));
-            }
-        }
-        params
-    }
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::super::ResidualFsqWeights;
+    use super::*;
+    use crate::nn::fsq::config::{FsqConfig, ResidualFsqConfig};
+    use crate::nn::fsq::quantizer::Fsq;
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+
+    /// NeuCodec's grid: 8 dims, 4 levels each, no projections (dim == codebook_dim).
+    const NEUCODEC_LEVELS: [u32; 8] = [4; 8];
+
+    fn neucodec_residual() -> (ResidualFsq<CpuRuntime>, CpuClient, CpuDevice) {
+        let (client, device) = cpu_setup();
+        let config = ResidualFsqConfig::new(NEUCODEC_LEVELS.to_vec(), 8, 1).unwrap();
+        let layer = Fsq::new(config.layer_config().unwrap(), &device, None, None).unwrap();
+        let residual = ResidualFsq::new(
+            config,
+            ResidualFsqWeights {
+                project_in: None,
+                project_out: None,
+                layers: vec![layer],
+            },
+            &device,
+        )
+        .unwrap();
+        (residual, client, device)
+    }
+
+    /// `z` chosen so `bound(z) = 0.49` (just BELOW the rounding boundary) while
+    /// `bound(bound(z)) = 0.527` (just ABOVE it), for `levels = 4`:
+    ///
+    /// ```text
+    /// half_l = 3 * 1.001 / 2 = 1.5015, offset = 0.5, shift = atanh(0.5 / half_l)
+    /// bound(0.44542) = 0.49    -> round -> 0 -> level index 2
+    /// bound(0.49)    = 0.5267  -> round -> 1 -> level index 3
+    /// ```
+    ///
+    /// So the single-bound and double-bound encodes MUST disagree here.
+    const DOUBLE_BOUND_DISCRIMINATOR: f32 = 0.44542;
+
+    // --- the double bound is real, and must never silently regress ------------
+
+    /// `ResidualFsq::encode` applies `bound` twice (once to seed `residual`, once
+    /// inside `Fsq::quantize`). A bare `Fsq::quantize` on the same input applies it
+    /// once. Because `bound` is not idempotent, the two MUST produce different
+    /// indices at [`DOUBLE_BOUND_DISCRIMINATOR`].
+    ///
+    /// If someone "simplifies" the pre-bound away, this test fails — which is the
+    /// entire point: on the real NeuCodec checkpoint that change silently rewrites
+    /// 43.75% of emitted indices.
+    #[test]
+    fn test_encode_applies_double_bound() {
+        let (residual, client, device) = neucodec_residual();
+
+        let x = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[DOUBLE_BOUND_DISCRIMINATOR; 8], &[1, 8], &device)
+                .unwrap(),
+            false,
+        );
+
+        // Double-bound (ResidualFSQ semantics): [1, num_quantizers = 1].
+        let (_, double_bound_indices) = residual.encode(&client, &x).unwrap();
+        let double_bound: Vec<i32> = double_bound_indices.contiguous().unwrap().to_vec();
+
+        // Single-bound reference, constructed inline: a bare FSQ layer, which is
+        // exactly `round_ste(bound(x)) / half_width` with NO pre-bound.
+        let single_layer = Fsq::<CpuRuntime>::new(
+            FsqConfig::new(NEUCODEC_LEVELS.to_vec(), 8).unwrap(),
+            &device,
+            None,
+            None,
+        )
+        .unwrap();
+        let (_, single_bound_indices) = single_layer.quantize(&client, &x).unwrap();
+        let single_bound: Vec<i32> = single_bound_indices.contiguous().unwrap().to_vec();
+
+        assert_ne!(
+            double_bound, single_bound,
+            "ResidualFsq::encode collapsed to a single bound — the pre-bound seeding \
+             `residual` was removed or made idempotent"
+        );
+    }
+
+    // --- round trip -----------------------------------------------------------
+
+    /// `decode(indices)` must reproduce `encode`'s codes for a single quantizer
+    /// with no projections, so the two paths are directly comparable.
+    #[test]
+    fn test_decode_round_trips_encode() {
+        let (residual, client, device) = neucodec_residual();
+
+        let values: Vec<f32> = (0..16).map(|i| (i as f32) * 0.37 - 3.0).collect();
+        let x = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&values, &[2, 8], &device).unwrap(),
+            false,
+        );
+
+        let (codes, indices) = residual.encode(&client, &x).unwrap();
+        assert_eq!(codes.shape(), &[2, 8]);
+        assert_eq!(indices.shape(), &[2, 1]);
+
+        let decoded = residual.decode(&client, &indices).unwrap();
+        assert_eq!(decoded.shape(), &[2, 8]);
+
+        let expected: Vec<f32> = codes.tensor().contiguous().unwrap().to_vec();
+        let actual: Vec<f32> = decoded.tensor().contiguous().unwrap().to_vec();
+        assert_eq!(expected.len(), actual.len());
+        for (index, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+            assert!(
+                (e - a).abs() < 1e-5,
+                "element {index}: decode gave {a}, encode gave {e}"
+            );
+        }
+    }
+}

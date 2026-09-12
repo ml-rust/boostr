@@ -47,6 +47,16 @@ const MAX_LEN_CAP: usize = 4096;
 /// voices directory is not a voice.
 const VOICE_EXTENSIONS: [&str; 4] = ["wav", "flac", "mp3", "ogg"];
 
+/// Reserved voice id selecting zero-shot rendering: no reference recording,
+/// no reference encode, `ref_feat = None` straight through to `prefill`.
+///
+/// A fixed literal, not an `Option<String>` layered on top of `render`: an
+/// omitted voice must be an explicit, listable choice — present in
+/// [`VoxCpm2Engine::voices`] like any other id — never a silent fallback a
+/// caller has to infer. A literal also can't collide with a voice file by
+/// accident: [`VoxCpm2Engine::load`] refuses any file stemmed `zero-shot`.
+pub const ZERO_SHOT_VOICE_ID: &str = "zero-shot";
+
 /// Generation settings applied to every request. Defaults are the clone
 /// pipeline's verified values.
 #[derive(Debug, Clone)]
@@ -141,8 +151,11 @@ where
     /// optionally folding a LoRA adapter into the weights first.
     ///
     /// A voice is any wav, flac, mp3 or ogg file in `voices_dir`; its id is
-    /// the file stem. An empty or missing directory is an
-    /// error: an engine with no voice can render nothing.
+    /// the file stem. `voices_dir` is optional: `None`, a missing directory,
+    /// or an empty directory all load fine with zero encoded voices —
+    /// `render` still serves [`ZERO_SHOT_VOICE_ID`], which needs none. A
+    /// voice file stemmed `zero-shot` is refused at load: it would silently
+    /// shadow the reserved id.
     ///
     /// `options.adapter` is applied to the model BEFORE it is wrapped as an
     /// engine — see [`VoxCpm2LoadOptions::adapter`] for the one-adapter-per-
@@ -152,7 +165,7 @@ where
     pub fn load(
         weights: &VoxCpm2Weights,
         audiovae: &Path,
-        voices_dir: &Path,
+        voices_dir: Option<&Path>,
         device: &R::Device,
         client: Arc<R::Client>,
         options: VoxCpm2LoadOptions,
@@ -181,19 +194,13 @@ where
         let tokenizer = load_tokenizer(weights.tokenizer_path()?)?;
 
         let mut voices = BTreeMap::new();
-        for (id, path) in list_voice_files(voices_dir)? {
-            let ref_wav = load_reference_16k(&path)?;
-            let ref_feat = model.encode_reference(client.as_ref(), &ref_wav)?;
-            voices.insert(id, EncodedVoice { ref_feat });
-        }
-        if voices.is_empty() {
-            return Err(Error::ModelError {
-                reason: format!(
-                    "no voice files in {}: a VoxCPM2 voice is a reference recording, \
-                     one audio file per voice, named by voice id",
-                    voices_dir.display()
-                ),
-            });
+        if let Some(dir) = voices_dir {
+            for (id, path) in list_voice_files(dir)? {
+                reject_reserved_voice_id(&id, &path)?;
+                let ref_wav = load_reference_16k(&path)?;
+                let ref_feat = model.encode_reference(client.as_ref(), &ref_wav)?;
+                voices.insert(id, EncodedVoice { ref_feat });
+            }
         }
 
         Ok(Self {
@@ -216,13 +223,23 @@ where
     }
 
     fn render(&self, text: &str, voice_id: &str) -> Result<Vec<f32>> {
-        let voice = self
-            .voices
-            .get(voice_id)
-            .ok_or_else(|| Error::InvalidArgument {
-                arg: "voice",
-                reason: format!("unknown voice {voice_id:?}"),
-            })?;
+        let ref_feat: Option<&Tensor<R>> = if voice_id == ZERO_SHOT_VOICE_ID {
+            None
+        } else {
+            let voice = self
+                .voices
+                .get(voice_id)
+                .ok_or_else(|| Error::InvalidArgument {
+                    arg: "voice",
+                    reason: format!(
+                        "unknown voice {voice_id:?}; available voices: [{}], or {:?} for \
+                         zero-shot rendering",
+                        self.voices.keys().cloned().collect::<Vec<_>>().join(", "),
+                        ZERO_SHOT_VOICE_ID,
+                    ),
+                })?;
+            Some(&voice.ref_feat)
+        };
         let normalized = normalize_whitespace(text);
         if normalized.is_empty() {
             return Err(Error::InvalidArgument {
@@ -237,8 +254,8 @@ where
         // The clone pipeline's budget: six patches per text token plus ten,
         // capped.
         let max_len = (text_len * 6 + 10).min(MAX_LEN_CAP);
-        let t_ref = voice.ref_feat.shape()[0];
-        let max_length = t_ref + 2 + text_token_ids.len() + max_len;
+        let ref_len = ref_feat.map(|f| f.shape()[0]);
+        let max_length = seq_len_for(ref_len, text_token_ids.len()) + max_len;
 
         let mut options = GenerateOptions::new(max_len, self.options.seed);
         options.cfm.n_timesteps = self.options.n_timesteps;
@@ -249,9 +266,9 @@ where
             reason: "VoxCPM2 render lock poisoned by an earlier panic".into(),
         })?;
         let client = self.client.as_ref();
-        let prefill =
-            self.model
-                .prefill(client, Some(&voice.ref_feat), &text_token_ids, max_length)?;
+        let prefill = self
+            .model
+            .prefill(client, ref_feat, &text_token_ids, max_length)?;
         let mut state = GenerateState::start(prefill, self.model.config)?;
         self.model
             .patch_generator()
@@ -300,23 +317,63 @@ where
         SAMPLE_RATE as u32
     }
 
-    /// One entry per reference recording. VoxCPM2 takes raw text in any
-    /// language it was trained on, so every voice carries the product
-    /// language tag rather than a per-voice one.
+    /// [`ZERO_SHOT_VOICE_ID`] first, then one entry per reference recording.
+    /// VoxCPM2 takes raw text in any language it was trained on, so every
+    /// voice carries the product language tag rather than a per-voice one.
     fn voices(&self) -> Vec<Voice> {
-        self.voices
-            .keys()
-            .map(|id| Voice::new(id.clone(), Lang::Ms, id.clone()))
+        std::iter::once(Voice::new(ZERO_SHOT_VOICE_ID, Lang::Ms, ZERO_SHOT_VOICE_ID))
+            .chain(
+                self.voices
+                    .keys()
+                    .map(|id| Voice::new(id.clone(), Lang::Ms, id.clone())),
+            )
             .collect()
     }
 }
 
+/// Sequence length behind `prefill`'s cache sizing. Mirrors `clone.rs`'s
+/// zero-shot/reference branch exactly (see its `SequenceLayout` docs): a
+/// reference prefix adds `t_ref + 2` positions before the text; zero-shot
+/// carries no reference prefix at all, not a reference of zero patches.
+/// `text_len` is the token count AFTER `AUDIO_START_ID` is appended.
+fn seq_len_for(ref_len: Option<usize>, text_len: usize) -> usize {
+    match ref_len {
+        Some(t_ref) => t_ref + 2 + text_len,
+        None => text_len,
+    }
+}
+
+/// Refuse a voice file whose stem is the reserved zero-shot id. Without this
+/// check, a file named `zero-shot.wav` would silently shadow
+/// [`ZERO_SHOT_VOICE_ID`] and `render` could never reach the no-reference
+/// path for that id again.
+fn reject_reserved_voice_id(id: &str, path: &Path) -> Result<()> {
+    if id == ZERO_SHOT_VOICE_ID {
+        return Err(Error::ModelError {
+            reason: format!(
+                "voice file {} has stem {id:?}, which is reserved for zero-shot rendering \
+                 ({ZERO_SHOT_VOICE_ID:?}); rename the file",
+                path.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// `(voice id, path)` for every regular file in `dir` with a recognised
-/// audio extension, sorted by id.
+/// audio extension, sorted by id. A missing directory is not an error: it
+/// loads as zero voices, same as an empty one — a caller relying on
+/// zero-shot rendering need not create `voices/` at all.
 fn list_voice_files(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
-    let entries = std::fs::read_dir(dir).map_err(|e| Error::ModelError {
-        reason: format!("reading voices directory {}: {e}", dir.display()),
-    })?;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(Error::ModelError {
+                reason: format!("reading voices directory {}: {e}", dir.display()),
+            });
+        }
+    };
     let mut voices = Vec::new();
     for entry in entries {
         let path = entry
@@ -374,5 +431,47 @@ mod tests {
         let ids: Vec<&str> = listed.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, ["amir", "zara"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_voice_files_on_missing_dir_is_empty_ok() {
+        let dir = std::env::temp_dir().join("boostr_voxcpm2_engine_voices_missing");
+        let _ = std::fs::remove_dir_all(&dir);
+        let listed = list_voice_files(&dir).unwrap();
+        assert!(listed.is_empty());
+    }
+
+    #[test]
+    fn list_voice_files_on_empty_dir_is_empty_ok() {
+        let dir = std::env::temp_dir().join("boostr_voxcpm2_engine_voices_empty");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let listed = list_voice_files(&dir).unwrap();
+        assert!(listed.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seq_len_for_with_reference_adds_t_ref_plus_two() {
+        assert_eq!(seq_len_for(Some(40), 12), 40 + 2 + 12);
+    }
+
+    #[test]
+    fn seq_len_for_zero_shot_is_text_len_only() {
+        assert_eq!(seq_len_for(None, 12), 12);
+    }
+
+    #[test]
+    fn reserved_voice_id_is_refused_at_load() {
+        let path = PathBuf::from("/voices/zero-shot.wav");
+        let err = reject_reserved_voice_id(ZERO_SHOT_VOICE_ID, &path).unwrap_err();
+        assert!(err.to_string().contains(ZERO_SHOT_VOICE_ID));
+        assert!(err.to_string().contains("zero-shot.wav"));
+    }
+
+    #[test]
+    fn non_reserved_voice_id_is_accepted() {
+        let path = PathBuf::from("/voices/zara.wav");
+        assert!(reject_reserved_voice_id("zara", &path).is_ok());
     }
 }

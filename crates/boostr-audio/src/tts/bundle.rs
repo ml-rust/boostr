@@ -232,4 +232,24 @@ mod tests {
         assert!(voices.iter().any(|v| v.id == "af_nova"));
         assert!(voices.iter().any(|v| v.id == "bm_george"));
     }
+
+    /// A zero-shot voice (VoxCPM2's [`ZERO_SHOT_VOICE_ID`], mirrored here as
+    /// a plain string so this test needs no `voxcpm` feature) behaves like
+    /// any other catalog entry at the bundle layer: `voice()` finds it, and
+    /// `synthesize`'s scaffolding path never reports it unknown.
+    #[test]
+    fn zero_shot_voice_is_found_and_not_reported_unknown() {
+        let mut voices = default_kokoro_voices();
+        voices.push(Voice::new("zero-shot", Lang::EnUs, "zero-shot"));
+        let bundle = TtsBundle::scaffolding(voices, 24_000);
+        assert!(bundle.voice("zero-shot").is_some());
+
+        let err = bundle
+            .synthesize("hello", "zero-shot", &SynthesizeOptions::default())
+            .unwrap_err();
+        #[cfg(feature = "g2p")]
+        assert!(matches!(err, TtsError::NotImplemented));
+        #[cfg(not(feature = "g2p"))]
+        assert!(matches!(err, TtsError::G2p(G2pError::FeatureDisabled)));
+    }
 }

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use crate::tcf::{Encoding, TcfFile};
+use crate::tcf::{CalibrationRecord, Encoding, TcfFile};
 use memmap2::Mmap;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
@@ -38,6 +38,7 @@ pub struct TcfLoader {
     header: TcfHeaderInfo,
     modules: Vec<TcfModuleInfo>,
     tensors: Vec<TcfTensorInfo>,
+    calibrations: Vec<CalibrationRecord>,
     by_name: HashMap<String, usize>,
 }
 
@@ -84,6 +85,7 @@ impl TcfLoader {
             tensors.push(TcfTensorInfo::new(*record, name));
         }
 
+        let calibrations = tcf.calibrations().to_vec();
         drop(tcf);
         Ok(Self {
             mmap,
@@ -91,6 +93,7 @@ impl TcfLoader {
             header,
             modules,
             tensors,
+            calibrations,
             by_name,
         })
     }
@@ -113,6 +116,13 @@ impl TcfLoader {
     /// The module with `module_id`, if the file declares one.
     pub fn module(&self, module_id: u32) -> Option<&TcfModuleInfo> {
         self.modules.iter().find(|m| m.module_id == module_id)
+    }
+
+    /// Every calibration record, in file order. Section 10. A measured
+    /// tensor's `calibration_id` names one of these; an unmeasured file has
+    /// none.
+    pub fn calibrations(&self) -> &[CalibrationRecord] {
+        &self.calibrations
     }
 
     /// Every tensor, in file order. Section 8.

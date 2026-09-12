@@ -480,3 +480,53 @@ where
     let n = eval_batch.len() as f64;
     Ok((diff_sum / n, stop_sum / n, total_sum / n))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+
+    /// A present `ref_wav` cell resolves to `Some`; an empty cell and a short
+    /// row (the column exists in the header but this line has fewer fields)
+    /// both resolve to `None` — the switch that decides which rows the
+    /// training loop builds a zero-shot prefill for.
+    #[test]
+    fn load_manifest_ref_wav_column_is_optional_per_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("manifest.tsv");
+        let mut file = std::fs::File::create(&path).expect("create manifest");
+        writeln!(file, "wav\ttext\tref_wav").expect("write header");
+        writeln!(file, "a.wav\thello\tref_a.wav").expect("write row with ref_wav");
+        writeln!(file, "b.wav\tworld\t").expect("write row with an empty ref_wav cell");
+        writeln!(file, "c.wav\tagain").expect("write a short row with no ref_wav cell at all");
+        drop(file);
+
+        let rows = load_manifest(&path).expect("load_manifest");
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].ref_wav, Some(dir.path().join("ref_a.wav")));
+        assert_eq!(rows[1].ref_wav, None, "an empty ref_wav cell must be None");
+        assert_eq!(
+            rows[2].ref_wav, None,
+            "a short row must be None, not an error"
+        );
+    }
+
+    /// `ref_wav` absent from the header ENTIRELY (not just some rows) must
+    /// leave every row `None` — the manifest-lost-its-column failure mode
+    /// `filter_rows_by_patch_cap`'s printed split exists to catch.
+    #[test]
+    fn load_manifest_without_a_ref_wav_column_is_all_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("manifest.tsv");
+        let mut file = std::fs::File::create(&path).expect("create manifest");
+        writeln!(file, "wav\ttext").expect("write header");
+        writeln!(file, "a.wav\thello").expect("write row");
+        drop(file);
+
+        let rows = load_manifest(&path).expect("load_manifest");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ref_wav, None);
+    }
+}

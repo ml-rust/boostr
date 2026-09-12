@@ -7,8 +7,9 @@
 
 use super::super::*;
 use super::support::*;
-use crate::model::audio::voxcpm::local_dit::tests::{FEAT_DIM, PATCH_SIZE};
+use crate::model::audio::voxcpm::local_dit::tests::{FEAT_DIM, PATCH_SIZE, t};
 use crate::model::audio::voxcpm::minicpm4::model::tests::HIDDEN;
+use crate::model::audio::voxcpm::model::config::AUDIO_START_ID;
 use crate::test_utils::cpu_setup;
 use numr::autograd::var_cat;
 use numr::runtime::cpu::CpuRuntime;
@@ -178,4 +179,74 @@ fn teacher_forced_conditioning_rejects_bad_shapes() {
             .is_err(),
         "T = 0 must error, not panic"
     );
+}
+
+/// Same equivalence as [`teacher_forced_conditioning_reproduces_the_loop`],
+/// but starting from a REAL no-reference prefill (`position > 0`, built via
+/// `VoxCpm2Model::prefill_capturing(client, None, ...)`) instead of the
+/// always-position-0 [`state`] fixture — the exact prefill call the training
+/// loop makes for a manifest row with no `ref_wav` (see
+/// `examples/voxcpm/eval_common.rs`'s `build_prefill_and_target`). Also pins
+/// that `train_losses_with_noise` returns a finite loss off that same
+/// prefill, since it is the second call the training loop makes with it.
+#[test]
+fn no_reference_prefill_agrees_with_the_loop_and_trains_finite() {
+    let (client, device) = cpu_setup();
+    let m = model(fixture(false, &device), &device);
+    let generator = m.patch_generator();
+
+    let text_token_ids = [11u32, 22, AUDIO_START_ID];
+    let max_length = text_token_ids.len() + 8;
+    // Two independent calls against the SAME model: `prefill_capturing` is
+    // deterministic, so `prefill_b` is exactly `prefill_a`'s original state,
+    // before the loop below mutates it.
+    let prefill_a = m
+        .prefill_capturing(&client, None, &text_token_ids, max_length)
+        .expect("no-reference prefill_capturing a");
+    let prefill_b = m
+        .prefill_capturing(&client, None, &text_token_ids, max_length)
+        .expect("no-reference prefill_capturing b");
+    assert_eq!(
+        prefill_a.position,
+        text_token_ids.len(),
+        "S == text_token_ids.len() with no reference prefix"
+    );
+
+    let mut st_a = GenerateState::start(prefill_a, m.config).expect("start");
+    let opts = options(100, 8); // min_len far past this run: guard never fires
+
+    let n = 4;
+    let (mus, embeds) = run_steps(&client, &generator, &mut st_a, &opts, n, &device);
+
+    let patch_refs: Vec<&Var<CpuRuntime>> = st_a.patches.iter().collect();
+    let target = var_cat(&patch_refs, 0, &client).expect("stack patches into [T, P, D]");
+
+    let out = generator
+        .teacher_forced_conditioning(&client, &prefill_b, target.tensor())
+        .expect("teacher_forced_conditioning");
+
+    assert_eq!(out.mu.shape(), &[n, 2 * HIDDEN]);
+    assert_eq!(out.curr_embed.shape(), &[n, HIDDEN]);
+    assert_rows_close(&values(&out.mu), &mus, "mu");
+    assert_rows_close(&values(&out.curr_embed), &embeds, "curr_embed");
+
+    // The training loop's other call against this exact prefill: teacher
+    // forcing plus the CFM/stop loss must stay finite off a real, position >
+    // 0, no-reference prefill.
+    let noise_patches = t(&[n, PATCH_SIZE, FEAT_DIM], 1.9, &device);
+    let ts = Tensor::<CpuRuntime>::from_slice(&[0.2f32, 0.4, 0.6, 0.8], &[n], &device).expect("t");
+    let losses = generator
+        .train_losses_with_noise(
+            &client,
+            &prefill_b,
+            target.tensor(),
+            &ts,
+            &noise_patches,
+            1.0,
+            1.0,
+            false,
+        )
+        .expect("train_losses_with_noise");
+    let total = losses.total.tensor().to_vec::<f32>()[0];
+    assert!(total.is_finite(), "loss must be finite, got {total}");
 }

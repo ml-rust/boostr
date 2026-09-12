@@ -374,3 +374,6 @@ where
     let tensor = Tensor::<R>::from_slice(mask, &[1, mask.len(), 1], device)?;
     Ok(Var::new(tensor.to_dtype(dtype)?, false))
 }
+
+#[cfg(test)]
+mod tests;

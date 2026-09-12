@@ -7,11 +7,15 @@
 //!     (--ckpt CKPT_DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
 //!     [--config config.json] \
 //!     --audiovae audiovae.pth \
-//!     --ref REF.wav (--text "..." --out OUT.wav \
+//!     [--ref REF.wav] (--text "..." --out OUT.wav \
 //!                    | --prompts PROMPTS.tsv --out-dir DIR) [--jsonl LOG.jsonl] \
 //!     [--n-timesteps 10] [--cfg 2.0] [--min-len 2] [--max-len N] \
 //!     [--seed 0] [--best-of N] [--dtype f32] [--device cpu]
 //! ```
+//!
+//! `--ref` is optional: without it, generation is zero-shot, from the text
+//! alone, with no speaker conditioning. `--best-of N` for `N > 1` requires
+//! `--ref`, since it picks the take whose F0 best matches the reference.
 //!
 //! `CKPT_DIR` holds `config.json`, `model.safetensors` and `tokenizer.json`.
 //! `--audiovae` is the separately shipped `audiovae.pth`; an
@@ -247,7 +251,9 @@ struct Args {
     /// required for `--tcf`.
     config: Option<PathBuf>,
     audiovae: PathBuf,
-    reference: PathBuf,
+    /// `None` selects zero-shot generation: no speaker conditioning, no
+    /// AudioVAE reference encode. `--best-of > 1` requires `Some` here.
+    reference: Option<PathBuf>,
     /// Single-render target text. Exactly one of `text` and `prompts` is set.
     text: Option<String>,
     /// Output wav for `--text`. Required with it, rejected with `--prompts`.
@@ -304,12 +310,14 @@ fn parse_dtype(value: &str) -> Result<Option<DType>, String> {
 
 const USAGE: &str = "usage: voxcpm_clone (--ckpt DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
 [--config config.json] \
---audiovae PATH --ref REF.wav \
+--audiovae PATH [--ref REF.wav] \
 (--text \"...\" --out OUT.wav | --prompts FILE.tsv --out-dir DIR) [--jsonl FILE] \
 [--n-timesteps 10] [--cfg 2.0] [--min-len 2] \
 [--max-len N] [--seed 0] [--best-of 1] [--dtype f32|bf16|f16|native] \
 [--device cpu|cuda] [--lora ADAPTER.safetensors] [--lora-rank 16] \
-[--lora-alpha 32.0] [--lora-targets q_proj,v_proj]";
+[--lora-alpha 32.0] [--lora-targets q_proj,v_proj]\n\
+no --ref generates zero-shot from text alone; --best-of > 1 requires --ref \
+(it picks the take whose F0 best matches the reference)";
 
 /// Hard cap on emitted patches when `--max-len` is not given.
 ///
@@ -431,6 +439,15 @@ fn parse_args() -> Result<Args, String> {
     if lora.is_some() && lora_targets.trim().is_empty() {
         return Err("--lora-targets must name at least one projection".to_string());
     }
+    // F0 matching needs the reference audio's own pitch. Silently falling
+    // back to "keep the first take" would make `--best-of` a no-op instead
+    // of an error the operator can act on.
+    if best_of > 1 && reference.is_none() {
+        return Err(format!(
+            "--best-of {best_of} requires --ref: F0 matching needs the reference audio's \
+             pitch; pass --ref REF.wav or drop --best-of to 1\n{USAGE}"
+        ));
+    }
 
     // Exactly one weight source. Accepting two and silently preferring one
     // would load a different model than the operator asked for.
@@ -487,7 +504,7 @@ fn parse_args() -> Result<Args, String> {
         weights,
         config,
         audiovae: audiovae.ok_or_else(|| format!("--audiovae is required\n{USAGE}"))?,
-        reference: reference.ok_or_else(|| format!("--ref is required\n{USAGE}"))?,
+        reference,
         text,
         out,
         prompts,
@@ -902,7 +919,9 @@ fn run<R: Runtime<DType = DType>>(
     args: &Args,
     device: &R::Device,
     client: &(impl VoxCpmClient<R> + TypeConversionOps<R> + RandomOps<R> + 'static),
-    ref_wav: &[f32],
+    // `None` selects zero-shot generation; `parse_args` has already refused
+    // `--best-of > 1` without a reference.
+    ref_wav: Option<&[f32]>,
     jobs: &[Job],
     sink: Option<&mut JsonlSink>,
     started: Instant,
@@ -981,9 +1000,17 @@ where
         );
     }
 
-    let ref_feat = model.encode_reference(client, ref_wav)?;
-    let t_ref = ref_feat.shape()[0];
-    eprintln!("T_ref: {t_ref} reference patches");
+    // `None` skips the AudioVAE reference encode entirely: zero-shot
+    // generation carries no reference prefix at all (see `SequenceLayout`'s
+    // module docs), not a reference of zero patches.
+    let ref_feat = ref_wav
+        .map(|wav| model.encode_reference(client, wav))
+        .transpose()?;
+    // The no-reference case is already announced once, in `main`, when
+    // `--ref` is absent; repeating it here would print it twice per run.
+    if let Some(feat) = &ref_feat {
+        eprintln!("T_ref: {} reference patches", feat.shape()[0]);
+    }
 
     // Loaded once for the whole run. Re-reading tokenizer.json per prompt is
     // the one avoidable cost a sweep could still be left carrying.
@@ -994,8 +1021,10 @@ where
     // sweep reports it here; a single render reports it in its original
     // position below, so `--text` stderr is byte-for-byte what it always was.
     let sweep = args.prompts.is_some();
+    // `parse_args` already refused `--best-of > 1` without `--ref`, so
+    // `ref_wav` is `Some` whenever this branch runs.
     let ref_f0 = if args.best_of > 1 {
-        median_f0(ref_wav, REF_RATE)
+        ref_wav.and_then(|wav| median_f0(wav, REF_RATE))
     } else {
         None
     };
@@ -1018,7 +1047,7 @@ where
             "config": args.config.as_ref().map(|p| p.display().to_string()),
             "lora": args.lora.as_ref().map(|p| p.display().to_string()),
             "audiovae": args.audiovae.display().to_string(),
-            "reference": args.reference.display().to_string(),
+            "reference": args.reference.as_ref().map(|p| p.display().to_string()),
             "prompts": args.prompts.as_ref().map(|p| p.display().to_string()),
             "device": match args.device {
                 Device::Cpu => "cpu",
@@ -1074,8 +1103,13 @@ where
         );
 
         // Both KV caches are sized once, for the prefill prefix plus every patch
-        // the loop may emit.
-        let seq_len = t_ref + 2 + text_token_ids.len();
+        // the loop may emit. Mirrors `eval_common.rs`'s
+        // `build_prefill_and_target`: `S` drops the `t_ref + 2` reference
+        // term entirely in zero-shot mode, it is not `t_ref = 0`'s formula.
+        let seq_len = match &ref_feat {
+            Some(ref_feat) => ref_feat.shape()[0] + 2 + text_token_ids.len(),
+            None => text_token_ids.len(),
+        };
         let max_length = seq_len + max_len;
 
         let mut options = GenerateOptions::new(max_len, args.seed);
@@ -1120,7 +1154,7 @@ where
             // The prefill is re-run per take: GenerateState::start consumes the
             // PrefillState and the loop advances its KV caches in place.
             let prefill_started = Instant::now();
-            let prefill = model.prefill(client, Some(&ref_feat), &text_token_ids, max_length)?;
+            let prefill = model.prefill(client, ref_feat.as_ref(), &text_token_ids, max_length)?;
             let mut state = GenerateState::start(prefill, model.config)?;
             prefill_seconds += prefill_started.elapsed().as_secs_f64();
 
@@ -1421,20 +1455,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("sweep: {} prompt(s)", jobs.len());
     }
 
-    // --- reference audio ----------------------------------------------------
-    let reference = load_reference(&args.reference)?;
-    let ReferenceAudio {
-        samples: ref_wav,
-        native_rate,
-        native_channels: channels,
-        native_frames,
-    } = reference;
-    eprintln!(
-        "reference: {} ({:.2}s, {native_rate} Hz, {channels} ch) -> {} samples at {REF_RATE} Hz",
-        args.reference.display(),
-        native_frames as f64 / native_rate as f64,
-        ref_wav.len()
-    );
+    // --- reference audio, optional: absent means zero-shot generation -------
+    let ref_wav: Option<Vec<f32>> = match &args.reference {
+        Some(path) => {
+            let reference = load_reference(path)?;
+            let ReferenceAudio {
+                samples,
+                native_rate,
+                native_channels: channels,
+                native_frames,
+            } = reference;
+            eprintln!(
+                "reference: {} ({:.2}s, {native_rate} Hz, {channels} ch) -> {} samples at \
+                 {REF_RATE} Hz",
+                path.display(),
+                native_frames as f64 / native_rate as f64,
+                samples.len()
+            );
+            Some(samples)
+        }
+        None => {
+            eprintln!("no --ref: zero-shot generation from text alone");
+            None
+        }
+    };
 
     let all_ok = match args.device {
         Device::Cpu => {
@@ -1444,7 +1488,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &args,
                 &device,
                 &client,
-                &ref_wav,
+                ref_wav.as_deref(),
                 &jobs,
                 sink.as_mut(),
                 started,
@@ -1458,7 +1502,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &args,
                 &device,
                 &client,
-                &ref_wav,
+                ref_wav.as_deref(),
                 &jobs,
                 sink.as_mut(),
                 started,

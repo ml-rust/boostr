@@ -15,7 +15,13 @@ use crate::model::audio::voxcpm::local_dit::tests::{
     FEAT_DIM, HEAD_DIM, HIDDEN_DIM, PATCH_SIZE, layer, linear, model as dit_model, norm, t,
 };
 use crate::model::audio::voxcpm::minicpm4::model::tests::{HIDDEN, tiny_model, tiny_nope_model};
-use crate::nn::{MaybeLoraLinear, MaybeQuantLinear, RoPE, Weight};
+use crate::model::audio::voxcpm::model::config::REF_AUDIO_END_ID;
+use crate::model::audio::voxcpm::vae::{
+    AudioVaeDecoder, AudioVaeDecoderWeights, AudioVaeEncoder, AudioVaeEncoderWeights, CausalConv1d,
+    CausalTransposeConv1d, DecoderBlock, DecoderBlockWeights, EncoderBlock, EncoderBlockWeights,
+    ResUnit, Snake,
+};
+use crate::nn::{MaybeLoraLinear, MaybeQuantEmbedding, MaybeQuantLinear, RoPE, Weight};
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
 /// `base_lm`/`residual_lm` hidden width and `feat_encoder`'s pooled width are
@@ -178,4 +184,137 @@ pub(crate) fn values(v: &Var<CpuRuntime>) -> Vec<f32> {
 
 pub(crate) fn noise(seed: f32, device: &CpuDevice) -> Var<CpuRuntime> {
     Var::new(t(&[1, FEAT_DIM, PATCH_SIZE], seed, device), false)
+}
+
+// --- dimensionally-trivial AudioVAE, for tests that need a whole
+// `VoxCpm2Model` rather than the bare `PatchGenerator` -----------------------
+//
+// `VoxCpm2Model::prefill`/`prefill_capturing` touch neither `vae_encoder` nor
+// `vae_decoder` at all, but the struct still requires both fields. Every
+// tensor below is the smallest shape each constructor accepts (channel = 1,
+// kernel = 1 or 2), so building these costs nothing and is never meant to run
+// a real forward pass.
+
+fn tiny_causal_conv(device: &CpuDevice) -> CausalConv1d<CpuRuntime> {
+    let weight = Tensor::<CpuRuntime>::zeros(&[1, 1, 1], DType::F32, device).expect("zeros");
+    CausalConv1d::new(weight, None, 1, 1, 1).expect("kernel_size 1 always fits")
+}
+
+fn tiny_strided_conv(device: &CpuDevice) -> CausalConv1d<CpuRuntime> {
+    // `new_strided` requires kernel_size == 2 * stride; stride 1 needs a
+    // kernel of 2.
+    let weight = Tensor::<CpuRuntime>::zeros(&[1, 1, 2], DType::F32, device).expect("zeros");
+    CausalConv1d::new_strided(weight, None, 1, 1).expect("kernel_size 2 matches stride 1")
+}
+
+fn tiny_transpose_conv(device: &CpuDevice) -> CausalTransposeConv1d<CpuRuntime> {
+    let weight = Tensor::<CpuRuntime>::zeros(&[1, 1, 2], DType::F32, device).expect("zeros");
+    CausalTransposeConv1d::new(weight, None, 1).expect("kernel_size 2 matches stride 1")
+}
+
+fn tiny_snake(device: &CpuDevice) -> Snake<CpuRuntime> {
+    let alpha = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1, 1, 1], device).expect("alpha");
+    Snake::new(alpha).expect("[1, 1, 1] is a valid Snake shape")
+}
+
+fn tiny_res_unit(device: &CpuDevice) -> ResUnit<CpuRuntime> {
+    ResUnit::new(
+        tiny_snake(device),
+        tiny_causal_conv(device),
+        tiny_snake(device),
+        tiny_causal_conv(device),
+    )
+}
+
+fn tiny_encoder_block(device: &CpuDevice) -> EncoderBlock<CpuRuntime> {
+    EncoderBlock::new(EncoderBlockWeights {
+        res1: tiny_res_unit(device),
+        res3: tiny_res_unit(device),
+        res9: tiny_res_unit(device),
+        snake: tiny_snake(device),
+        downsample: tiny_strided_conv(device),
+    })
+}
+
+fn tiny_vae_encoder(device: &CpuDevice) -> AudioVaeEncoder<CpuRuntime> {
+    AudioVaeEncoder::new(AudioVaeEncoderWeights {
+        front: tiny_causal_conv(device),
+        blocks: std::array::from_fn(|_| tiny_encoder_block(device)),
+        fc_mu: tiny_causal_conv(device),
+    })
+}
+
+fn tiny_decoder_block(device: &CpuDevice) -> DecoderBlock<CpuRuntime> {
+    // `scale_embed`/`bias_embed` must be `[num_sr_buckets, input_dim]`;
+    // `input_dim` is 1 here, and one bucket is enough since `forward` (which
+    // reads `sr_bucket`) is never called.
+    let embed = Tensor::<CpuRuntime>::zeros(&[1, 1], DType::F32, device).expect("zeros");
+    DecoderBlock::new(DecoderBlockWeights {
+        snake: tiny_snake(device),
+        upsample: tiny_transpose_conv(device),
+        res1: tiny_res_unit(device),
+        res3: tiny_res_unit(device),
+        res9: tiny_res_unit(device),
+        scale_embed: embed.clone(),
+        bias_embed: embed,
+    })
+    .expect("input_dim 1 matches scale_embed/bias_embed width 1")
+}
+
+fn tiny_vae_decoder(device: &CpuDevice) -> AudioVaeDecoder<CpuRuntime> {
+    AudioVaeDecoder::new(AudioVaeDecoderWeights {
+        front_dw: tiny_causal_conv(device),
+        front_pw: tiny_causal_conv(device),
+        blocks: std::array::from_fn(|_| tiny_decoder_block(device)),
+        final_snake: tiny_snake(device),
+        final_conv: tiny_causal_conv(device),
+    })
+}
+
+/// Large enough to hold every token id a `model(...)`-based test embeds:
+/// the layout's control ids (`REF_AUDIO_FILLER_ID` 0, `AUDIO_START_ID` 101,
+/// `REF_AUDIO_START_ID` 103, `REF_AUDIO_END_ID` 104 — see `sequence.rs`)
+/// plus every small literal id a test uses as ordinary text.
+const TEXT_VOCAB_SIZE: usize = REF_AUDIO_END_ID as usize + 1;
+
+/// A real `embed_tokens` table for `model(...)`'s `base_lm`.
+///
+/// `tiny_model` builds `base_lm` with `embed_tokens: None`, matching
+/// `residual_lm` (which genuinely has none) — every OTHER test in this
+/// module drives the loop with pre-computed `inputs_embeds` and never calls
+/// `MiniCpm4Model::embed`. Only `model(...)`'s prefill path calls it (via
+/// `base_lm.embed` on the tokenized text), so the table is added HERE rather
+/// than in `tiny_model` itself, which every other fixture user still gets
+/// unchanged. Filled the same deterministic way as the fixture's other
+/// weights, via `t`.
+fn text_embed_tokens(device: &CpuDevice) -> MaybeQuantEmbedding<CpuRuntime> {
+    MaybeQuantEmbedding::from_weight(
+        Weight::Standard(t(&[TEXT_VOCAB_SIZE, HIDDEN], 12.5, device)),
+        false,
+    )
+    .expect("Weight::Standard never errors")
+}
+
+/// A full [`VoxCpm2Model`] for tests that call `prefill`/`prefill_capturing`
+/// directly rather than driving a bare [`PatchGenerator`]. Reuses `fx`'s
+/// sub-models verbatim except `base_lm`, which gains the `embed_tokens`
+/// table above; `vae_encoder`/`vae_decoder` are new, trivial stand-ins since
+/// prefill never reads them.
+pub(crate) fn model(fx: Fixture, device: &CpuDevice) -> VoxCpm2Model<CpuRuntime> {
+    let mut base_lm = fx.base_lm;
+    base_lm.embed_tokens = Some(text_embed_tokens(device));
+    VoxCpm2Model {
+        vae_encoder: tiny_vae_encoder(device),
+        vae_decoder: tiny_vae_decoder(device),
+        feat_encoder: fx.feat_encoder,
+        base_lm,
+        residual_lm: fx.residual_lm,
+        feat_decoder: fx.feat_decoder,
+        fsq: fx.fsq,
+        aux: fx.aux,
+        config: VoxCpm2Config {
+            patch_size: PATCH_SIZE,
+            feat_dim: FEAT_DIM,
+        },
+    }
 }

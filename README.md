@@ -278,9 +278,11 @@ for token_idx in 0..seq_len {
 | `distributed` | Distributed inference over nexar   | nexar, anyhow, bytemuck |
 | `f16`         | Half-precision float support       | numr/f16                |
 | `fp8`         | FP8 precision support              | numr/fp8                |
-| `tts-g2p`     | Grapheme-to-phoneme via espeak-ng¹ | espeakng                |
+| `audio`       | Tensor-level signal ops (STFT, mel) | —                       |
 
-¹ Requires `libespeak-ng` available at runtime.
+Grapheme-to-phoneme via espeak-ng lives in the `boostr-audio` crate
+(`crates/boostr-audio`, feature `g2p`), together with the audio codecs, the
+enhancement chain and the TTS engines.
 
 ## Module Overview
 

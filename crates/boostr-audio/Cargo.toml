@@ -10,7 +10,158 @@ license = "Apache-2.0"
 bench = false
 
 [dependencies]
-boostr = { path = "../.." }
+boostr = { path = "../..", features = ["audio"] }
+# The denoiser runs its STFT through numr's CPU client.
+numr = "0.7"
+thiserror = "2"
+tracing = "0.1"
+# `corpus` and `voxcpm` load `tokenizer.json` files through splintr.
+splintr = { version = "0.20", features = ["vocab-whisper"] }
+
+# Compressed-audio decode (FLAC/MP3/OGG-Vorbis/WAV). Off by default: a
+# WAV-only consumer has no use for four codec decoders.
+symphonia = { version = "0.5", optional = true, default-features = false, features = [
+  "flac",
+  "mp3",
+  "ogg",
+  "vorbis",
+  "pcm",
+  "wav",
+] }
+
+# TTS grapheme-to-phoneme via espeak-ng (system dep: espeak-ng-dev).
+espeakng = { version = "0.2", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# The VoxCPM2 examples read eval manifests and write reports as JSON.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `voxcpm_sensitivity` reinterprets raw weight bytes per quant format.
+bytemuck = { version = "1.25", features = ["derive"] }
+# Tests tokenize with cl100k_base. A dev-dependency feature unifies only when
+# building this crate's own tests, so downstream builds pay nothing.
+splintr = { version = "0.20", features = ["vocab-cl100k"] }
+
+[features]
+default = []
+
+# Compressed containers beyond RIFF/WAVE.
+decode = ["dep:symphonia"]
+# The espeak-ng backend behind `g2p::Phonemizer`. Without it `Phonemizer::new`
+# returns `G2pError::FeatureDisabled`; `Lang` and `tokenize_ipa` need no
+# backend and are always compiled.
+g2p = ["dep:espeakng"]
+# `TtsEngine`, `TtsBundle`, `Voice`: the engine-agnostic synthesis surface.
+tts = []
+# Kokoro synthesis pipeline: model from boostr, voice packs and the engine
+# here. Does NOT imply `g2p`: espeak-ng is a system library, and a consumer
+# that ships without it still builds; `KokoroEngine::synthesize` then reports
+# `G2pError::FeatureDisabled` at run time.
+kokoro = ["boostr/kokoro", "tts"]
+# VoxCPM2 voice cloning: model from boostr, reference decode and tokenizer here.
+voxcpm = ["boostr/voxcpm", "tts", "decode"]
+# Whisper transcription examples.
+whisper = ["boostr/whisper", "decode"]
+# NeuCodec probing examples.
+neucodec = ["boostr/neucodec"]
+# Speech-corpus preparation: VAD, Whisper, NeuCodec, enhancement.
+corpus = ["boostr/whisper", "boostr/silero-vad", "boostr/neucodec", "decode"]
+# Backend pass-through for the examples that pick a device at run time.
+cuda = ["boostr/cuda"]
+f16 = ["boostr/f16"]
+
+[[example]]
+name = "audio_stats"
+
+[[example]]
+name = "enhance_reference"
+
+[[example]]
+name = "score_asr"
+
+[[example]]
+name = "synth_kokoro"
+required-features = ["kokoro"]
+
+[[example]]
+name = "transcribe"
+required-features = ["whisper"]
+
+[[example]]
+name = "codec_hnr_ceiling"
+required-features = ["neucodec", "decode"]
+
+[[example]]
+name = "noise_probe_decode"
+required-features = ["neucodec"]
+
+[[example]]
+name = "voxcpm_vae_check"
+path = "examples/voxcpm/vae_check.rs"
+required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_locenc_check"
+path = "examples/voxcpm/locenc_check.rs"
+required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_baselm_check"
+path = "examples/voxcpm/baselm_check.rs"
+required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_residual_lm_check"
+path = "examples/voxcpm/residual_lm_check.rs"
+required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_dit_check"
+path = "examples/voxcpm/dit_check.rs"
+required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_cfm_check"
+path = "examples/voxcpm/cfm_check.rs"
+required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_fsq_check"
+path = "examples/voxcpm/fsq_check.rs"
+required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_prefill_check"
+path = "examples/voxcpm/prefill_check.rs"
+required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_step_check"
+path = "examples/voxcpm/step_check.rs"
+required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_tokenizer_check"
+path = "examples/voxcpm/tokenizer_check.rs"
+required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_quant_error_check"
+path = "examples/voxcpm/quant_error_check.rs"
+required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_clone"
+path = "examples/voxcpm/clone.rs"
+required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_finetune"
+path = "examples/voxcpm/finetune.rs"
+required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_sensitivity"
+path = "examples/voxcpm/sensitivity.rs"
+required-features = ["voxcpm"]

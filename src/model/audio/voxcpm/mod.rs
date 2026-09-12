@@ -4,22 +4,21 @@
 //! [`minicpm4`] (the `base_lm` decoder), [`fsq`] (the `fsq_layer` bottleneck
 //! and its six sibling projections), [`local_dit`] (`feat_decoder`),
 //! [`model`] (the end-to-end orchestrator: reference encode, two-LM prefill,
-//! per-patch generation loop). Both transformers get LongRoPE via
-//! `crate::nn::RoPE::precompute_freqs`.
+//! per-patch generation loop), [`weights`] (which files the stack loads from).
+//! Both transformers get LongRoPE via `crate::nn::RoPE::precompute_freqs`.
+//! The clone engine, voice directory and tokenizer live in `boostr-audio`.
 
 pub mod bidirectional;
 pub mod client;
-pub mod engine;
 pub mod fsq;
 pub mod loader;
 pub mod local_dit;
 pub mod local_encoder;
 pub mod minicpm4;
 pub mod model;
-pub mod tokenizer;
 pub mod vae;
+pub mod weights;
 
 pub use client::VoxCpmClient;
-pub use engine::{VoxCpm2Engine, VoxCpm2LoadOptions, VoxCpm2SynthOptions, VoxCpm2Weights};
 pub use model::{LoraAdapterReport, PrefillState, VoxCpm2Config, VoxCpm2Model};
-pub use tokenizer::{load_tokenizer, normalize_whitespace, tokenize};
+pub use weights::VoxCpm2Weights;

@@ -248,7 +248,6 @@ dependencies = [
  "blake3",
  "bytemuck",
  "cudarc",
- "espeakng",
  "half",
  "image",
  "memmap2",
@@ -261,7 +260,6 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "splintr",
- "symphonia",
  "tempfile",
  "thiserror",
  "tokio",
@@ -275,7 +273,16 @@ name = "boostr-audio"
 version = "0.1.0"
 dependencies = [
  "boostr",
+ "bytemuck",
+ "espeakng",
+ "numr",
+ "serde",
+ "serde_json",
+ "splintr",
+ "symphonia",
  "tempfile",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

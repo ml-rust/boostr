@@ -3,7 +3,7 @@
 //! The reference Kokoro checkpoint ships a `vocab.json` alongside it: a flat
 //! `{"symbol": id}` object with 178 entries. This module parses that file
 //! (or accepts an in-memory mapping) and implements
-//! [`crate::model::audio::g2p::PhonemeVocab`].
+//! [`crate::model::audio::PhonemeVocab`].
 //!
 //! We don't hardcode the 178-entry table here. The table is data published
 //! with the model directory; hardcoding it would mean drift every
@@ -12,7 +12,7 @@
 //! runtime demos) behave.
 
 use crate::error::{Error, Result};
-use crate::model::audio::g2p::PhonemeVocab;
+use crate::model::audio::PhonemeVocab;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;

@@ -53,24 +53,11 @@ image = { version = "0.25", default-features = false, features = [
   "png",
   "jpeg",
 ] }
-# Compressed-audio decode (FLAC/MP3/OGG-Vorbis/WAV) for the audio corpus loaders.
-# Gated behind `audio`: a text-only build has no use for four codec decoders.
-symphonia = { version = "0.5", optional = true, default-features = false, features = [
-  "flac",
-  "mp3",
-  "ogg",
-  "vorbis",
-  "pcm",
-  "wav",
-] }
 memmap2 = "0.9"
 # BLAKE3: the digests the TCF container (`boostr::tcf`) stores.
 blake3 = "1.8"
 splintr = { version = "0.20", features = ["vocab-whisper"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
-
-# Optional: TTS grapheme-to-phoneme via espeak-ng (system dep: espeak-ng-dev)
-espeakng = { version = "0.2", optional = true }
 
 [dev-dependencies]
 bytemuck = { version = "1.25", features = ["derive"] }
@@ -85,20 +72,15 @@ rustls = "0.23"
 [features]
 default = ["cpu"]
 
-# Speech and audio: `model::audio` in full — corpus preparation (VAD, Whisper,
-# NeuCodec), the enhancement chain, TTS models, and the compressed-audio
-# decoders. Off by default; a text-only training or serving build pays nothing
-# for it.
+# Speech and audio: `model::audio`, the tensor-level signal ops (`stft`/`istft`,
+# `mel`, `reflection_pad`) and the VAD segmenter. Off by default; a text-only
+# training or serving build pays nothing for it. Sample-level DSP, codecs,
+# voices and pipelines live in the `boostr-audio` crate on top of this.
 #
 # `model::speech_lm` is NOT gated. It is token packing and layout — no audio
 # processing, no extra dependency — and the dependency runs one way:
 # `model::audio` uses `speech_lm`, never the reverse.
-audio = ["dep:symphonia"]
-
-# TTS grapheme-to-phoneme (requires libespeak-ng at runtime). Implies `audio`:
-# phonemes exist to be spoken, and every consumer of this feature is in the
-# audio path already.
-tts-g2p = ["audio", "dep:espeakng"]
+audio = []
 
 # Per-architecture model gates. Each implies `audio`: the tensor-level signal
 # ops (`stft`/`istft`, `mel`, `reflection_pad`) that every one of these models
@@ -167,36 +149,12 @@ no-default-features = true
 # `cargo check --all-targets` tries to build them against a boostr that has
 # no audio module and fails on the import rather than skipping the target.
 [[example]]
-name = "audio_stats"
-required-features = ["audio"]
-
-[[example]]
-name = "codec_hnr_ceiling"
-required-features = ["neucodec"]
-
-[[example]]
-name = "enhance_reference"
-required-features = ["audio"]
-
-[[example]]
 name = "load_kokoro"
 required-features = ["kokoro"]
 
 [[example]]
 name = "neucodec_tokenize_bench"
 required-features = ["neucodec"]
-
-[[example]]
-name = "noise_probe_decode"
-required-features = ["neucodec"]
-
-[[example]]
-name = "score_asr"
-required-features = ["audio"]
-
-[[example]]
-name = "synth_kokoro"
-required-features = ["kokoro"]
 
 [[test]]
 name = "istft_backend_parity"
@@ -231,81 +189,7 @@ name = "whisper_mel_parity"
 required-features = ["audio"]
 
 [[example]]
-name = "voxcpm_vae_check"
-path = "examples/voxcpm/vae_check.rs"
-required-features = ["voxcpm"]
-
-[[example]]
-name = "voxcpm_locenc_check"
-path = "examples/voxcpm/locenc_check.rs"
-required-features = ["voxcpm"]
-
-[[example]]
-name = "voxcpm_baselm_check"
-path = "examples/voxcpm/baselm_check.rs"
-required-features = ["voxcpm"]
-
-[[example]]
-name = "voxcpm_residual_lm_check"
-path = "examples/voxcpm/residual_lm_check.rs"
-required-features = ["voxcpm"]
-
-[[example]]
-name = "voxcpm_dit_check"
-path = "examples/voxcpm/dit_check.rs"
-required-features = ["voxcpm"]
-
-[[example]]
-name = "voxcpm_cfm_check"
-path = "examples/voxcpm/cfm_check.rs"
-required-features = ["voxcpm"]
-
-[[example]]
-name = "voxcpm_fsq_check"
-path = "examples/voxcpm/fsq_check.rs"
-required-features = ["voxcpm"]
-
-[[example]]
-name = "voxcpm_prefill_check"
-path = "examples/voxcpm/prefill_check.rs"
-required-features = ["voxcpm"]
-
-[[example]]
-name = "voxcpm_step_check"
-path = "examples/voxcpm/step_check.rs"
-required-features = ["voxcpm"]
-
-[[example]]
-name = "voxcpm_tokenizer_check"
-path = "examples/voxcpm/tokenizer_check.rs"
-required-features = ["voxcpm"]
-
-[[example]]
-name = "voxcpm_quant_error_check"
-path = "examples/voxcpm/quant_error_check.rs"
-required-features = ["voxcpm"]
-
-[[example]]
 name = "gguf_diff"
-required-features = ["voxcpm"]
-
-[[example]]
-name = "transcribe"
-required-features = ["whisper"]
-
-[[example]]
-name = "voxcpm_clone"
-path = "examples/voxcpm/clone.rs"
-required-features = ["voxcpm"]
-
-[[example]]
-name = "voxcpm_finetune"
-path = "examples/voxcpm/finetune.rs"
-required-features = ["voxcpm"]
-
-[[example]]
-name = "voxcpm_sensitivity"
-path = "examples/voxcpm/sensitivity.rs"
 required-features = ["voxcpm"]
 
 # Reads the raw state dict only; needs no model feature.

@@ -10,7 +10,6 @@ pub mod bert;
 pub mod decoder;
 pub mod decoder_block;
 pub mod duration_predictor;
-pub mod engine;
 pub mod frame_predictor;
 pub mod generator;
 pub mod kokoro_v2;
@@ -23,7 +22,7 @@ pub mod snake;
 pub mod source_filter;
 pub mod style_projector;
 pub mod text_encoder;
-pub mod voice;
+pub mod voice_style;
 pub mod weight_source;
 
 // `KokoroConfig` lives with the other model configs under
@@ -40,7 +39,6 @@ pub use bert::{AlbertConfig, AlbertEmbeddings, AlbertLayer, AlbertModel, BertEnc
 pub use decoder::Decoder;
 pub use decoder_block::{DecoderBlock, UpsampleBlock};
 pub use duration_predictor::{DurationPredictor, decode_durations, length_regulator};
-pub use engine::KokoroEngine;
 pub use frame_predictor::{EnergyPredictor, FramePredictor, PitchPredictor};
 pub use generator::{GeneratorStftParams, IStftNetGenerator, IStftNetGeneratorOpts};
 pub use kokoro_v2::{KokoroModelV2, alignment_matrix_from_durations};
@@ -64,5 +62,5 @@ pub use snake::snake;
 pub use source_filter::{SineGen, SourceModuleHnNSF};
 pub use style_projector::StyleProjector;
 pub use text_encoder::{ConvBlock, TextEncoder, TextEncoderConfig};
-pub use voice::{VoiceResolver, resolve_and_load, select_voice_style, split_voice_style};
+pub use voice_style::{select_voice_style, split_voice_style};
 pub use weight_source::KokoroWeightSource;

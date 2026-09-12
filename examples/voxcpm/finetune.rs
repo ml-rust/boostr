@@ -188,18 +188,20 @@
 //! # Comparing two artifacts: `--dequant-weights`
 //!
 //! A cross-format quality number is only meaningful when both artifacts run
-//! the SAME activation contract. CONFORMANCE.md Section 7.1 says so, and by
-//! default the two single-file paths do NOT match:
+//! the SAME activation contract (`boostr/src/tcf/FORMAT.md` Section 9.3).
+//! The two single-file paths do match each other: a block TCF declares the
+//! `GGML_REFERENCE` contract, which is the kernel family a GGUF of the same
+//! ggml types runs, so a TCF and the GGUF it was built from score identically.
+//! Neither matches `--ckpt`:
 //!
-//! - A TCF from compressr declares an exact F32 contract, so `route_tcf`
-//!   resolves to the F32 kernel and the matmul runs f32 activations.
-//! - A GGUF carries no contract at all, so on CUDA at `m >= 2` it takes the
-//!   feature-major MMQ path, which quantizes the activations (Q8_1-style,
-//!   per-32 dynamic scale) before the tensor-core MMA.
+//! - `--ckpt` loads dense F32 and the matmul runs f32 activations.
+//! - `--gguf` and `--tcf` on CUDA at `m >= 2` take the feature-major MMQ
+//!   path, which quantizes the activations (Q8_1-style, per-32 dynamic
+//!   scale) before the tensor-core MMA.
 //!
-//! The GGUF side therefore absorbs activation-quantization error the TCF side
-//! never pays, and the difference reads as a weight-format difference when it
-//! is nothing of the kind.
+//! The packed side therefore absorbs activation-quantization error the dense
+//! side never pays, and the difference reads as a weight-encoding difference
+//! when it is nothing of the kind.
 //!
 //! `--dequant-weights` removes the confound. It materializes EVERY packed
 //! weight to dense F32 at load, on the `--gguf` and `--tcf` paths alike
@@ -527,11 +529,10 @@ during backward instead of holding them, ~33% slower, much less VRAM)] \
 [--dequant-weights (dequantize EVERY packed weight to dense F32 at load, for \
 --gguf and --tcf alike, so the forward pass is dense F32 end to end. A \
 cross-format quality comparison is only valid when both artifacts run the \
-same activation contract: a TCF declares exact F32, a GGUF declares none and \
-may quantize activations before the matmul, so without this flag the formats \
-are scored under different contracts and the gap is not weight-encoding \
-damage. Costs what an unquantized checkpoint costs; a measurement mode, not \
-a way to serve or fine-tune a quantized artifact)]";
+same activation contract: a packed artifact quantizes activations before the \
+matmul and a --ckpt run does not, so without this flag a packed-vs-dense gap \
+is not weight-encoding damage. Costs what an unquantized checkpoint costs; a \
+measurement mode, not a way to serve or fine-tune a quantized artifact)]";
 
 /// Consume the value that follows `flag`, advancing `i` past it.
 fn take_value(argv: &[String], i: &mut usize, flag: &str) -> Result<String, String> {

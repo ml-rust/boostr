@@ -58,8 +58,7 @@ use crate::model::speech_lm::pack::SpeechRecord;
 ///
 /// This and every other id in this module were read from the
 /// `added_tokens.json` and `config.json` of the
-/// `Scicom-intl/Multilingual-Expressive-TTS-1.7B` checkpoint
-/// (`/home/farhan/Projects/models/expressive-tts-1.7b-bf16`). They are FACTS
+/// `Scicom-intl/Multilingual-Expressive-TTS-1.7B` checkpoint. They are FACTS
 /// about that checkpoint's trained embedding rows, stated once here so nobody
 /// re-derives them. Changing one silently retargets every token.
 pub const IM_START: u32 = 151_644;

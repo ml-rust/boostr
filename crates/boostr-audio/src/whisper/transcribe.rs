@@ -4,11 +4,16 @@
 //! end, encoder, greedy decode, detokenize — so a caller never hand-assembles
 //! it. The mel bin count comes from the bundle, so an 80-bin `whisper-tiny` and
 //! a 128-bin `whisper-large-v3` are driven by identical caller code.
+//!
+//! `transcribe_segments` needs the `vad` feature: it consumes the
+//! [`SpeechSegment`]s the segmenter produces, and nothing else in this crate
+//! defines that range type.
 
 use crate::error::{Error, Result};
-use crate::model::audio::mel::{MelOptions, compute_mel_spectrogram_with};
-use crate::model::audio::vad::SpeechSegment;
-use crate::model::audio::whisper_loader::WhisperBundle;
+#[cfg(feature = "vad")]
+use crate::vad::SpeechSegment;
+use crate::whisper::bundle::WhisperBundle;
+use boostr::model::audio::mel::{MelOptions, compute_mel_spectrogram_with};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, ConditionalOps, ConvOps, IndexingOps, MatmulOps, NormalizationOps,
@@ -54,11 +59,9 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
     /// Audio longer than 30 s is **rejected**, not truncated: Whisper's encoder
     /// takes a fixed 30 s window, so a 20-minute recording would otherwise
     /// yield a plausible transcript of its first 30 seconds with nothing to
-    /// mark the rest as lost. Segment first — [`SileroVad::speech_timestamps`]
-    /// produces exactly the [`SpeechSegment`]s
-    /// [`transcribe_segments`](Self::transcribe_segments) consumes.
-    ///
-    /// [`SileroVad::speech_timestamps`]: crate::model::audio::SileroVad::speech_timestamps
+    /// mark the rest as lost. Segment first — `speech_timestamps` in
+    /// `crate::vad` produces exactly the segments `transcribe_segments`
+    /// consumes.
     pub fn transcribe<C>(
         &self,
         client: &C,
@@ -96,7 +99,7 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
                 reason: format!(
                     "audio is {secs:.3} s ({} samples at {sample_rate} Hz), over Whisper's fixed \
                      {WHISPER_WINDOW_SECS} s window ({max_samples} samples); segment the audio \
-                     first (see SileroVad::speech_timestamps) and transcribe each segment",
+                     first (see boostr_audio::vad::speech_timestamps) and transcribe each segment",
                     samples.len()
                 ),
             });
@@ -117,7 +120,7 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
         let num_frames = mel.len() / self.num_mel_bins;
 
         let shape = [1, self.num_mel_bins, num_frames];
-        let mel_t = Tensor::<R>::from_slice(&mel, &shape, client.device()).map_err(Error::Numr)?;
+        let mel_t = Tensor::<R>::from_slice(&mel, &shape, client.device())?;
         let encoded = self.model.encode(client, &mel_t)?;
 
         let prompt = self.sot_prompt(opts.language, opts.translate);
@@ -140,13 +143,13 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
     }
 
     /// Transcribe each segment of `samples`. Segments come from
-    /// [`SileroVad::speech_timestamps`]; each is sliced out of `samples` and
-    /// transcribed independently, so each must still fit Whisper's 30 s window.
+    /// [`speech_timestamps`](crate::vad::speech_timestamps); each is sliced out
+    /// of `samples` and transcribed independently, so each must still fit
+    /// Whisper's 30 s window.
     ///
     /// A segment whose range falls outside `samples` is an error naming the
     /// offending index and its bounds.
-    ///
-    /// [`SileroVad::speech_timestamps`]: crate::model::audio::SileroVad::speech_timestamps
+    #[cfg(feature = "vad")]
     pub fn transcribe_segments<C>(
         &self,
         client: &C,

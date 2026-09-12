@@ -14,7 +14,6 @@
 
 use splintr::Tokenize;
 
-use boostr::model::audio::vad::{SpeechSegment, VadSegmentOptions};
 use boostr::model::speech_lm::codec::CodecVocab;
 use boostr::model::speech_lm::layout::SpeechLayout;
 use boostr::model::speech_lm::pack::{SpeechRecord, pack_records, pack_records_padded};
@@ -23,6 +22,7 @@ use boostr_audio::corpus::{
     CorpusOptions, MAX_UTTERANCE_SECS, PRETRAINED_TOKENIZER_NAMES, TextTokenizer, Utterance,
     check_max_speech_duration, pack_utterances, pack_utterances_with_layout,
 };
+use boostr_audio::{SpeechSegment, VadSegmentOptions};
 
 /// A vocabulary shaped like the real one (NeuCodec's single 65,536-entry
 /// codebook) but over a small text region, so a test can name text ids by hand.

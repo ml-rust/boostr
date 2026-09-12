@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! samples (16 kHz mono)
-//!   -> SileroVad::speech_timestamps      -> Vec<SpeechSegment>
+//!   -> vad::speech_timestamps            -> Vec<SpeechSegment>
 //!   -> WhisperBundle::transcribe         -> text, per segment
 //!   -> NeuCodecEncoder::encode_frames    -> Vec<Vec<usize>>, per segment
 //!   -> speech_lm::pack::pack_records     -> Vec<u32>

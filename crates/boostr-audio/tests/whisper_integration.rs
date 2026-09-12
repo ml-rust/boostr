@@ -17,10 +17,11 @@
 //! The audio is Malay with English technical code-switching, hence language `"ms"`.
 //! With `"en"` the reference model emits a single token — do not "correct" this.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use boostr::model::audio::{GenerateOptions, SpeechSegment, TranscribeOptions, WhisperBundle};
+use boostr::model::audio::GenerateOptions;
 use boostr::nn::VarMap;
+use boostr_audio::{SpeechSegment, TranscribeOptions, WhisperBundle};
 #[cfg(feature = "f16")]
 use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -28,7 +29,7 @@ use numr::tensor::Tensor;
 use serde::Deserialize;
 
 mod common;
-use common::{cpu_setup, model_fixture, skip_notice};
+use common::{cpu_setup, load_json, model_fixture, skip_notice};
 
 const SAMPLE_RATE: usize = 16000;
 const FRAMES: usize = 3000;
@@ -58,11 +59,6 @@ struct ReferenceSegment {
     end: usize,
     token_ids: Vec<u32>,
     text: String,
-}
-
-fn load_reference(path: &Path) -> Reference {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
 }
 
 fn mel_fixture(device: &CpuDevice) -> Option<VarMap<CpuRuntime>> {
@@ -207,7 +203,7 @@ fn whisper_tiny_greedy_matches_reference() {
         skip_notice("whisper mel fixture", "WHISPER_MEL_FIXTURE");
         return;
     };
-    let reference = load_reference(&fx.reference);
+    let reference = load_json::<Reference>(&fx.reference);
     assert_eq!(reference.language, "ms", "reference must be the Malay run");
 
     let bundle =
@@ -250,7 +246,7 @@ fn whisper_tiny_end_to_end_from_samples() {
         skip_notice("whisper mel fixture", "WHISPER_MEL_FIXTURE");
         return;
     };
-    let reference = load_reference(&fx.reference);
+    let reference = load_json::<Reference>(&fx.reference);
     let bundle =
         WhisperBundle::<CpuRuntime>::from_dir(&fx.dir, &fx.device).expect("load whisper-tiny");
 
@@ -335,7 +331,7 @@ fn whisper_transcribe_segments_covers_each_range() {
         WhisperBundle::<CpuRuntime>::from_dir(&fx.dir, &fx.device).expect("load whisper-tiny");
 
     let samples = fixture_tensor(&map, "input");
-    let reference = load_reference(&fx.reference);
+    let reference = load_json::<Reference>(&fx.reference);
     let segments: Vec<SpeechSegment> = reference
         .segments
         .iter()
@@ -418,7 +414,7 @@ fn whisper_large_v3_greedy_matches_reference() {
         skip_notice("whisper mel fixture", "WHISPER_MEL_FIXTURE");
         return;
     };
-    let reference = load_reference(&ref_path);
+    let reference = load_json::<Reference>(&ref_path);
 
     // large-v3 ships fp16 weights, so it must be cast on load: numr requires the
     // input and the weight to share a dtype, and the mel is f32.

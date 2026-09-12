@@ -56,7 +56,9 @@ image = { version = "0.25", default-features = false, features = [
 memmap2 = "0.9"
 # BLAKE3: the digests the TCF container (`boostr::tcf`) stores.
 blake3 = "1.8"
-splintr = { version = "0.20", features = ["vocab-whisper"] }
+# Whisper variant detection and the GGUF/encoder tokenizer plumbing. No
+# vocabulary data: the bundled Whisper vocabulary is loaded by boostr-audio.
+splintr = "0.20"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
@@ -73,9 +75,10 @@ rustls = "0.23"
 default = ["cpu"]
 
 # Speech and audio: `model::audio`, the tensor-level signal ops (`stft`/`istft`,
-# `mel`, `reflection_pad`) and the VAD segmenter. Off by default; a text-only
-# training or serving build pays nothing for it. Sample-level DSP, codecs,
-# voices and pipelines live in the `boostr-audio` crate on top of this.
+# `mel`, `reflection_pad`). Off by default; a text-only training or serving
+# build pays nothing for it. Sample-level DSP, codecs, voices, the VAD
+# segmenter and the Whisper bundle live in the `boostr-audio` crate on top of
+# this.
 #
 # `model::speech_lm` is NOT gated. It is token packing and layout — no audio
 # processing, no extra dependency — and the dependency runs one way:
@@ -119,10 +122,9 @@ fp8 = ["numr/fp8"]
 # family costs 2.6-6.4 MB (all of them, ~42 MB). A consumer loading a
 # checkpoint's own `tokenizer.json` should pay for none of it.
 #
-# `vocab-whisper` is NOT here — it is a hard dependency of
-# `WhisperBundle::from_dir`, which loads the bundled multilingual Whisper
-# vocabulary rather than the checkpoint's `tokenizer.json`, so it stays enabled
-# unconditionally on the splintr dependency itself.
+# `vocab-whisper` is NOT here — `boostr_audio::WhisperBundle::from_dir` loads
+# the bundled multilingual Whisper vocabulary, so boostr-audio's own splintr
+# dependency enables it unconditionally.
 vocab-cl100k = ["splintr/vocab-cl100k"]
 vocab-o200k = ["splintr/vocab-o200k"]
 vocab-gpt-oss = ["splintr/vocab-gpt-oss"]
@@ -175,14 +177,6 @@ required-features = ["neucodec"]
 [[test]]
 name = "silero_vad_parity"
 required-features = ["silero-vad"]
-
-[[test]]
-name = "silero_vad_segment_parity"
-required-features = ["silero-vad"]
-
-[[test]]
-name = "whisper_integration"
-required-features = ["whisper"]
 
 [[test]]
 name = "whisper_mel_parity"

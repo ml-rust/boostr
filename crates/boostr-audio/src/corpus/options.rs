@@ -5,7 +5,7 @@ use std::path::Path;
 use splintr::{AnyTokenizer, PretrainedVocab, from_json_path, from_vocab};
 
 use crate::error::{Error, Result};
-use boostr::model::audio::vad::VadSegmentOptions;
+use crate::vad::VadSegmentOptions;
 
 use crate::enhance::EnhanceOptions;
 
@@ -31,7 +31,7 @@ pub const MAX_UTTERANCE_SECS: f32 = 30.0;
 /// Whisper's own vocabulary is always bundled: [`WhisperBundle::from_dir`]
 /// loads it for multilingual checkpoints instead of their `tokenizer.json`.
 ///
-/// [`WhisperBundle::from_dir`]: boostr::model::audio::WhisperBundle::from_dir
+/// [`WhisperBundle::from_dir`]: crate::whisper::WhisperBundle::from_dir
 pub const PRETRAINED_TOKENIZER_NAMES: [&str; 4] =
     ["cl100k_base", "o200k_base", "llama3", "deepseek_v3"];
 

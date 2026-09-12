@@ -8,8 +8,8 @@
 //! [`resample`]r, the reference-take [`enhance`] chain, [`pitch`], [`quality`]
 //! and ASR [`eval`] metrics, and the backend-free half of [`g2p`]. Feature
 //! gates add the compressed-audio [`decode`]rs, the espeak-ng G2P backend, the
-//! [`tts`] surface, the [`kokoro`] and [`voxcpm`] engines, and [`corpus`]
-//! preparation.
+//! [`tts`] surface, the [`kokoro`] and [`voxcpm`] engines, the [`whisper`]
+//! bundle, the [`vad`] segmenter, and [`corpus`] preparation.
 
 pub mod enhance;
 pub mod error;
@@ -28,8 +28,12 @@ pub mod decode;
 pub mod kokoro;
 #[cfg(feature = "tts")]
 pub mod tts;
+#[cfg(feature = "vad")]
+pub mod vad;
 #[cfg(feature = "voxcpm")]
 pub mod voxcpm;
+#[cfg(feature = "whisper")]
+pub mod whisper;
 
 pub use error::{Error, Result};
 
@@ -53,7 +57,11 @@ pub use resample::{
 };
 #[cfg(feature = "tts")]
 pub use tts::{SynthesizeOptions, TtsBundle, TtsEngine, TtsError, Voice, default_kokoro_voices};
+#[cfg(feature = "vad")]
+pub use vad::{SpeechSegment, VadSegmentOptions, segments_from_probabilities, speech_timestamps};
 pub use wav::{WavData, decode_wav, encode_pcm16_raw, encode_wav_f32, encode_wav_pcm16, to_mono};
+#[cfg(feature = "whisper")]
+pub use whisper::{TranscribeOptions, Transcription, WhisperBundle, WhisperGenerationConfig};
 
 #[cfg(all(test, feature = "decode"))]
 pub(crate) mod test_utils {

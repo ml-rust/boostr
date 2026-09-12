@@ -1,5 +1,6 @@
-//! The Silero VAD network and its forward pass, read off Silero's ONNX
-//! graph node by node.
+//! The Silero VAD network: construction, streaming entry points, and the
+//! input contract. The forward pass itself, read off Silero's ONNX graph node
+//! by node, lives in the sibling `forward` module.
 //!
 //! # The input contract, which is the part that silently produces garbage
 //!
@@ -72,12 +73,15 @@ pub struct SileroVadWeights<R: Runtime> {
 }
 
 /// The Silero VAD network.
+///
+/// Fields are visible to the sibling `forward` module, which holds the graph
+/// transcription; nothing outside `vad` reads them.
 pub struct SileroVad<R: Runtime> {
-    config: VadConfig,
-    stft_basis: Tensor<R>,
-    encoder: Vec<Conv1d<R>>,
-    rnn: Lstm<R>,
-    head: Conv1d<R>,
+    pub(super) config: VadConfig,
+    pub(super) stft_basis: Tensor<R>,
+    pub(super) encoder: Vec<Conv1d<R>>,
+    pub(super) rnn: Lstm<R>,
+    pub(super) head: Conv1d<R>,
 }
 
 impl<R: Runtime<DType = DType>> SileroVad<R> {
@@ -262,116 +266,6 @@ impl<R: Runtime<DType = DType>> SileroVad<R> {
         }
         Ok(out)
     }
-
-    /// Assemble the network's input window: `context ++ chunk`, then a
-    /// reflection pad of `context_samples` on the tail.
-    ///
-    /// Silero's STFT front end is `nn.ReflectionPad1d((0, context))`, which
-    /// the ONNX graph exports as a `Pad` node in "reflect" mode. Zero-padding
-    /// here instead still runs and still looks plausible, but moves every
-    /// probability by up to 0.2.
-    fn window(&self, context: &[f32], chunk: &[f32]) -> Result<Vec<f32>> {
-        let context_len = self.config.context_samples;
-        let body_len = context.len() + chunk.len();
-        if body_len < context_len + 2 {
-            return Err(Error::ModelError {
-                reason: format!(
-                    "a {body_len}-sample window is too short to reflect-pad by {context_len}"
-                ),
-            });
-        }
-        let mut buffer = Vec::with_capacity(self.config.window_samples());
-        buffer.extend_from_slice(context);
-        buffer.extend_from_slice(chunk);
-        for k in 0..context_len {
-            // PyTorch's reflect excludes the boundary sample, so the mirror
-            // starts at body_len - 2, not body_len - 1.
-            let mirrored = buffer[body_len - 2 - k];
-            buffer.push(mirrored);
-        }
-        Ok(buffer)
-    }
-
-    /// STFT magnitude -> encoder -> one LSTM step. `input` is the already
-    /// assembled `[1, 1, window_samples]` buffer.
-    fn forward_window<C>(
-        &self,
-        client: &C,
-        input: &Tensor<R>,
-        h: &Tensor<R>,
-        c: &Tensor<R>,
-    ) -> Result<(Tensor<R>, Tensor<R>)>
-    where
-        C: RuntimeClient<R> + TensorOps<R> + ConvOps<R>,
-    {
-        let bins = self.config.freq_bins();
-
-        // STFT as a strided convolution against the stored basis. No bias.
-        let spectrum = client
-            .conv1d(
-                input,
-                &self.stft_basis,
-                None,
-                self.config.hop(),
-                PaddingMode::Valid,
-                1,
-                1,
-            )
-            .map_err(Error::Numr)?;
-
-        // Channels [0, bins) are real, [bins, 2*bins) imaginary.
-        let real = spectrum
-            .narrow(1, 0, bins)
-            .map_err(Error::Numr)?
-            .contiguous()
-            .map_err(Error::Numr)?;
-        let imag = spectrum
-            .narrow(1, bins, bins)
-            .map_err(Error::Numr)?
-            .contiguous()
-            .map_err(Error::Numr)?;
-        let re2 = client.square(&real).map_err(Error::Numr)?;
-        let im2 = client.square(&imag).map_err(Error::Numr)?;
-        let power = client.add(&re2, &im2).map_err(Error::Numr)?;
-        let mut x = client.sqrt(&power).map_err(Error::Numr)?;
-
-        for conv in &self.encoder {
-            x = conv.forward_inference(client, &x)?;
-            x = client.relu(&x).map_err(Error::Numr)?;
-        }
-
-        // [1, 128, 1] -> [1, 128]: the encoder's stride schedule always
-        // collapses the time axis to one frame for a single chunk.
-        let time = x.shape()[2];
-        if time != 1 {
-            return Err(Error::ModelError {
-                reason: format!("encoder produced {time} frames, expected 1"),
-            });
-        }
-        let flat = x.reshape(&[1, HIDDEN_SIZE]).map_err(Error::Numr)?;
-
-        self.rnn.step(client, &flat, h, c)
-    }
-
-    /// ReLU on the hidden state, a 1x1 conv down to one channel, then sigmoid.
-    fn head_probability<C>(&self, client: &C, h: &Tensor<R>) -> Result<f32>
-    where
-        C: RuntimeClient<R> + TensorOps<R> + ConvOps<R>,
-    {
-        // ReLU comes BEFORE the 1x1 conv, applied to the LSTM hidden state.
-        let activated = client.relu(h).map_err(Error::Numr)?;
-        let shaped = activated
-            .reshape(&[1, HIDDEN_SIZE, 1])
-            .map_err(Error::Numr)?;
-        let logit = self.head.forward_inference(client, &shaped)?;
-        let prob = client.sigmoid(&logit).map_err(Error::Numr)?;
-        match prob.to_vec::<f32>().first() {
-            Some(p) => Ok(*p),
-            None => Err(Error::ModelError {
-                reason: "VAD head produced an empty output".to_string(),
-            }),
-        }
-    }
 }
 
 fn check_shape<R: Runtime>(name: &str, tensor: &Tensor<R>, expected: &[usize]) -> Result<()> {
@@ -384,4 +278,204 @@ fn check_shape<R: Runtime>(name: &str, tensor: &Tensor<R>, expected: &[usize]) -
         });
     }
     Ok(())
+}
+
+/// Unit tests for the parts of the network that do not need the checkpoint:
+/// the input contract (chunk length, carried context) and weight validation.
+///
+/// Numerical parity against the Silero ONNX model lives in
+/// `tests/silero_vad_parity.rs`, which needs the real weights. The synthetic
+/// builders are visible across `vad` so the sibling `forward` tests share them.
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+
+    pub(in crate::model::audio::vad) fn patterned(
+        shape: &[usize],
+        scale: f32,
+        device: &CpuDevice,
+    ) -> Tensor<CpuRuntime> {
+        let n: usize = shape.iter().product();
+        let data: Vec<f32> = (0..n).map(|i| scale * ((i % 17) as f32 - 8.0)).collect();
+        Tensor::<CpuRuntime>::from_slice(&data, shape, device).expect("patterned tensor")
+    }
+
+    /// A structurally correct 16 kHz model with synthetic weights. Every shape
+    /// matches the real checkpoint, so the whole forward pass runs; only the
+    /// numbers are meaningless.
+    pub(in crate::model::audio::vad) fn model(device: &CpuDevice) -> SileroVad<CpuRuntime> {
+        let config = VadConfig::silero_16k();
+        let bins = config.freq_bins();
+        let encoder: Vec<_> = config
+            .encoder_channels()
+            .iter()
+            .map(|&(in_c, out_c)| {
+                (
+                    patterned(&[out_c, in_c, ENCODER_KERNEL], 0.001, device),
+                    patterned(&[out_c], 0.01, device),
+                )
+            })
+            .collect();
+        let weights = SileroVadWeights {
+            stft_basis: patterned(&[2 * bins, 1, config.n_fft], 0.002, device),
+            encoder,
+            rnn_weight_ih: patterned(&[4 * HIDDEN_SIZE, HIDDEN_SIZE], 0.001, device),
+            rnn_weight_hh: patterned(&[4 * HIDDEN_SIZE, HIDDEN_SIZE], 0.001, device),
+            rnn_bias_ih: patterned(&[4 * HIDDEN_SIZE], 0.01, device),
+            rnn_bias_hh: patterned(&[4 * HIDDEN_SIZE], 0.01, device),
+            head_weight: patterned(&[1, HIDDEN_SIZE, 1], 0.01, device),
+            head_bias: patterned(&[1], 0.02, device),
+        };
+        SileroVad::new(config, weights).expect("synthetic weights are shape-correct")
+    }
+
+    /// A deterministic, chunk-length signal that is different from every other
+    /// chunk `seed` produces.
+    pub(in crate::model::audio::vad) fn chunk(seed: f32, len: usize) -> Vec<f32> {
+        (0..len)
+            .map(|i| (seed + i as f32 * 0.01).sin() * 0.5)
+            .collect()
+    }
+
+    #[test]
+    fn context_carries_the_previous_chunks_tail() {
+        let (client, device) = cpu_setup();
+        let vad = model(&device);
+        let mut state = vad.new_state(&device).expect("state");
+        let ctx = vad.config().context_samples;
+        let len = vad.config().chunk_samples;
+
+        // Chunk 0 sees a zero context.
+        assert!(state.context().iter().all(|&v| v == 0.0));
+
+        let first = chunk(0.0, len);
+        vad.chunk_probability(&client, &mut state, &first)
+            .expect("chunk 0");
+        assert_eq!(state.context(), &first[len - ctx..]);
+
+        let second = chunk(3.0, len);
+        vad.chunk_probability(&client, &mut state, &second)
+            .expect("chunk 1");
+        // The tail of chunk 1, NOT of the padded window and not of chunk 0.
+        assert_eq!(state.context(), &second[len - ctx..]);
+    }
+
+    #[test]
+    fn short_chunk_is_an_error_not_a_silent_pad() {
+        let (client, device) = cpu_setup();
+        let vad = model(&device);
+        let mut state = vad.new_state(&device).expect("state");
+        let err = vad
+            .chunk_probability(&client, &mut state, &chunk(0.0, 511))
+            .expect_err("511 samples must be rejected");
+        assert!(matches!(err, Error::InvalidArgument { arg: "chunk", .. }));
+    }
+
+    #[test]
+    fn long_chunk_is_an_error() {
+        let (client, device) = cpu_setup();
+        let vad = model(&device);
+        let mut state = vad.new_state(&device).expect("state");
+        let err = vad
+            .chunk_probability(&client, &mut state, &chunk(0.0, 513))
+            .expect_err("513 samples must be rejected");
+        assert!(matches!(err, Error::InvalidArgument { arg: "chunk", .. }));
+    }
+
+    #[test]
+    fn empty_chunk_is_an_error() {
+        let (client, device) = cpu_setup();
+        let vad = model(&device);
+        let mut state = vad.new_state(&device).expect("state");
+        let err = vad
+            .chunk_probability(&client, &mut state, &[])
+            .expect_err("an empty chunk must be rejected");
+        assert!(matches!(err, Error::InvalidArgument { arg: "chunk", .. }));
+    }
+
+    #[test]
+    fn probabilities_drops_the_trailing_partial_chunk() {
+        let (client, device) = cpu_setup();
+        let vad = model(&device);
+        let len = vad.config().chunk_samples;
+        let samples = chunk(0.0, 3 * len + 100);
+        let probs = vad.probabilities(&client, &samples).expect("probabilities");
+        assert_eq!(probs.len(), 3);
+        assert!(probs.iter().all(|p| (0.0..=1.0).contains(p)));
+    }
+
+    #[test]
+    fn probabilities_with_continues_an_existing_stream() {
+        // Feeding one block of two chunks must equal feeding two blocks of one,
+        // which is only true if the state (h, c AND context) survives the call.
+        let (client, device) = cpu_setup();
+        let vad = model(&device);
+        let len = vad.config().chunk_samples;
+        let mut samples = chunk(0.0, len);
+        samples.extend(chunk(7.0, len));
+
+        let one_shot = vad.probabilities(&client, &samples).expect("one shot");
+
+        let mut state = vad.new_state(&device).expect("state");
+        let mut split = vad
+            .probabilities_with(&client, &mut state, &samples[..len])
+            .expect("first block");
+        split.extend(
+            vad.probabilities_with(&client, &mut state, &samples[len..])
+                .expect("second block"),
+        );
+
+        assert_eq!(one_shot.len(), 2);
+        assert_eq!(split.len(), 2);
+        for (a, b) in one_shot.iter().zip(split.iter()) {
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn wrong_sample_rate_weights_are_rejected() {
+        let (_client, device) = cpu_setup();
+        // 8 kHz-shaped first encoder conv against the 16 kHz config.
+        let config = VadConfig::silero_16k();
+        let bins = config.freq_bins();
+        let encoder: Vec<_> = VadConfig::silero_8k()
+            .encoder_channels()
+            .iter()
+            .map(|&(in_c, out_c)| {
+                (
+                    patterned(&[out_c, in_c, ENCODER_KERNEL], 0.001, &device),
+                    patterned(&[out_c], 0.01, &device),
+                )
+            })
+            .collect();
+        let weights = SileroVadWeights {
+            stft_basis: patterned(&[2 * bins, 1, config.n_fft], 0.002, &device),
+            encoder,
+            rnn_weight_ih: patterned(&[4 * HIDDEN_SIZE, HIDDEN_SIZE], 0.001, &device),
+            rnn_weight_hh: patterned(&[4 * HIDDEN_SIZE, HIDDEN_SIZE], 0.001, &device),
+            rnn_bias_ih: patterned(&[4 * HIDDEN_SIZE], 0.01, &device),
+            rnn_bias_hh: patterned(&[4 * HIDDEN_SIZE], 0.01, &device),
+            head_weight: patterned(&[1, HIDDEN_SIZE, 1], 0.01, &device),
+            head_bias: patterned(&[1], 0.02, &device),
+        };
+        // `SileroVad` holds tensors and is not `Debug`, so `expect_err` is unusable.
+        let Err(err) = SileroVad::<CpuRuntime>::new(config, weights) else {
+            panic!("8 kHz encoder must not load as 16 kHz");
+        };
+        assert!(matches!(err, Error::ModelError { .. }));
+    }
+
+    #[test]
+    fn a_state_from_the_other_sample_rate_is_rejected() {
+        let (client, device) = cpu_setup();
+        let vad = model(&device);
+        let mut state =
+            VadState::<CpuRuntime>::new(&VadConfig::silero_8k(), &device).expect("state");
+        let err = vad
+            .chunk_probability(&client, &mut state, &chunk(0.0, 512))
+            .expect_err("a 32-sample context must be rejected by the 16 kHz model");
+        assert!(matches!(err, Error::InvalidArgument { arg: "state", .. }));
+    }
 }

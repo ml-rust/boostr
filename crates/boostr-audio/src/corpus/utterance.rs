@@ -1,7 +1,7 @@
 //! One prepared utterance, and the flattening of a batch of them.
 
 use crate::error::Result;
-use boostr::model::audio::vad::SpeechSegment;
+use crate::vad::SpeechSegment;
 use boostr::model::speech_lm::layout::SpeechLayout;
 use boostr::model::speech_lm::pack::{SpeechRecord, pack_records, pack_records_padded};
 use boostr::model::speech_lm::vocab::SpeechVocab;

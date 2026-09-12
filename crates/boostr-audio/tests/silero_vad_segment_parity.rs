@@ -30,15 +30,15 @@
 //! wrong chunk, not that the arithmetic is imprecise.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
-use boostr::model::audio::{SileroVad, SpeechSegment, VadSegmentOptions};
+use boostr::model::audio::SileroVad;
 use boostr::nn::VarMap;
+use boostr_audio::{SpeechSegment, VadSegmentOptions, speech_timestamps};
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use serde::Deserialize;
 
 mod common;
-use common::{model_fixture, skip_notice};
+use common::{load_json, model_fixture, skip_notice};
 
 /// The reference file's per-case parameters. Every field is optional: a case
 /// only lists what it changes from Silero's defaults, which are the same
@@ -101,11 +101,6 @@ struct Reference {
     num_samples: usize,
     /// Keyed by case name; `BTreeMap` so the report order is stable.
     cases: BTreeMap<String, Case>,
-}
-
-fn load_reference(path: &Path) -> Reference {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
 }
 
 fn load_model() -> Option<(SileroVad<CpuRuntime>, CpuClient)> {
@@ -191,7 +186,7 @@ fn silero_vad_segments_match_silero_get_speech_timestamps() {
         return;
     };
 
-    let reference = load_reference(&path);
+    let reference = load_json::<Reference>(&path);
     assert_eq!(
         audio.len(),
         reference.num_samples,
@@ -208,8 +203,7 @@ fn silero_vad_segments_match_silero_get_speech_timestamps() {
 
     for (name, case) in &reference.cases {
         let opts = case.params.to_options();
-        let ours = vad
-            .speech_timestamps(&client, &audio, &opts)
+        let ours = speech_timestamps(&vad, &client, &audio, &opts)
             .unwrap_or_else(|e| panic!("[{name}] segmentation failed: {e}"));
         compare(name, &ours, &case.segments);
     }

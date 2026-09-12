@@ -84,3 +84,41 @@ impl VadConfig {
         ]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sixteen_khz_geometry_matches_the_onnx_graph() {
+        let config = VadConfig::silero_16k();
+        assert_eq!(config.chunk_samples, 512);
+        assert_eq!(config.context_samples, 64);
+        assert_eq!(config.freq_bins(), 129);
+        assert_eq!(config.hop(), 128);
+        // 64 context + 512 chunk + a 64-sample reflection pad.
+        assert_eq!(config.window_samples(), 640);
+        // The STFT convolution must produce exactly 4 frames.
+        assert_eq!(
+            (config.window_samples() - config.n_fft) / config.hop() + 1,
+            STFT_FRAMES
+        );
+        assert_eq!(
+            config.encoder_channels(),
+            [(129, 128), (128, 64), (64, 64), (64, 128)]
+        );
+    }
+
+    #[test]
+    fn eight_khz_geometry_matches_its_checkpoint() {
+        let config = VadConfig::silero_8k();
+        assert_eq!(config.freq_bins(), 65);
+        assert_eq!(config.window_samples(), 320);
+        assert_eq!(
+            (config.window_samples() - config.n_fft) / config.hop() + 1,
+            STFT_FRAMES
+        );
+        // The 8 kHz first encoder conv is [128, 65, 3] in the checkpoint.
+        assert_eq!(config.encoder_channels()[0], (65, 128));
+    }
+}

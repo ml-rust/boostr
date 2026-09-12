@@ -1,17 +1,11 @@
-//! Segmentation: speech probabilities in, utterance boundaries out.
-//!
-//! [`super::model::SileroVad`] scores one 512-sample chunk at a time. That
-//! per-chunk probability is not a usable answer on its own — a single dip below
-//! the threshold in the middle of a word would end an utterance. This layer is
-//! the port of Silero's `get_speech_timestamps`: hysteresis (a separate,
-//! lower threshold to LEAVE speech), a minimum silence before a segment closes,
-//! a minimum duration before a segment counts, an optional hard cap on segment
-//! length, and a symmetric pad grown around every surviving segment.
+//! The rule engine: per-chunk probabilities in, padded utterance boundaries out.
 //!
 //! [`segments_from_probabilities`] is the whole algorithm and takes no model,
 //! no client and no tensors, so it is testable against hand-written probability
-//! arrays. [`super::model::SileroVad::speech_timestamps`] is the convenience
-//! wrapper that runs the network first.
+//! arrays. Hysteresis (a separate, lower threshold to LEAVE speech), a minimum
+//! silence before a segment closes, a minimum duration before a segment counts,
+//! an optional hard cap on segment length, and a symmetric pad grown around
+//! every surviving segment.
 //!
 //! # The rules interact, and the order is Silero's
 //!
@@ -23,105 +17,18 @@
 //! written and called out in comments where they occur.
 
 use crate::error::{Error, Result};
-#[cfg(feature = "silero-vad")]
-use crate::model::audio::vad::model::SileroVad;
-#[cfg(feature = "silero-vad")]
-use numr::dtype::DType;
-#[cfg(feature = "silero-vad")]
-use numr::ops::{ConvOps, TensorOps};
-#[cfg(feature = "silero-vad")]
-use numr::runtime::{Runtime, RuntimeClient};
-
-/// Tuning for [`segments_from_probabilities`].
-///
-/// [`Default`] is Silero's own default set, which is what the published
-/// Silero examples run: threshold 0.5, 250 ms minimum speech, 100 ms minimum
-/// silence, 30 ms pad, no cap on segment length.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct VadSegmentOptions {
-    /// Probability at or above which a chunk ENTERS speech.
-    pub threshold: f32,
-    /// Probability below which a chunk starts counting as silence. `None`
-    /// derives it as `(threshold - 0.15).max(0.01)`. Keeping it below
-    /// `threshold` is the hysteresis that stops a single noisy chunk from
-    /// chopping a word in half.
-    pub neg_threshold: Option<f32>,
-    /// Segments shorter than this are discarded.
-    pub min_speech_duration_ms: u32,
-    /// Hard cap on a segment's length. `f32::INFINITY` disables the cap, and
-    /// is the default — with it disabled the max-speech branches never run.
-    pub max_speech_duration_s: f32,
-    /// Silence shorter than this does not close a segment.
-    pub min_silence_duration_ms: u32,
-    /// Padding grown on both sides of every surviving segment, clamped to the
-    /// signal and shared with a neighbour when the gap is too small to hold
-    /// two full pads.
-    pub speech_pad_ms: u32,
-    /// When a segment hits `max_speech_duration_s`, only silences longer than
-    /// this are candidate split points.
-    pub min_silence_at_max_speech_ms: u32,
-    /// `true` splits an over-long segment at its LONGEST candidate silence.
-    /// `false` is Silero's older behaviour: split at the most recent
-    /// candidate silence instead.
-    pub use_max_possible_silence_at_max_speech: bool,
-}
-
-impl Default for VadSegmentOptions {
-    fn default() -> Self {
-        Self {
-            threshold: 0.5,
-            neg_threshold: None,
-            min_speech_duration_ms: 250,
-            max_speech_duration_s: f32::INFINITY,
-            min_silence_duration_ms: 100,
-            speech_pad_ms: 30,
-            min_silence_at_max_speech_ms: 98,
-            use_max_possible_silence_at_max_speech: true,
-        }
-    }
-}
-
-/// One detected utterance, as a half-open sample range `[start, end)` into the
-/// ORIGINAL signal — not into the chunk grid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SpeechSegment {
-    /// First sample of the segment.
-    pub start: usize,
-    /// One past the last sample of the segment.
-    pub end: usize,
-}
-
-impl SpeechSegment {
-    /// Length in samples.
-    pub fn len(&self) -> usize {
-        self.end.saturating_sub(self.start)
-    }
-
-    /// Whether the segment covers no samples.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Duration in seconds at `sample_rate`. Zero for a zero sample rate
-    /// rather than a division by zero.
-    pub fn duration_secs(&self, sample_rate: usize) -> f64 {
-        if sample_rate == 0 {
-            return 0.0;
-        }
-        self.len() as f64 / sample_rate as f64
-    }
-}
+use crate::vad::options::{SpeechSegment, VadSegmentOptions};
 
 /// Turn per-chunk speech probabilities into utterance boundaries.
 ///
 /// `probs[i]` is the probability for the chunk starting at sample
 /// `i * window_size`, so exactly `ceil(num_samples / window_size)` values are
 /// expected — Silero evaluates a ZERO-PADDED final partial chunk rather than
-/// dropping it. Note that [`SileroVad::probabilities`] deliberately drops that
+/// dropping it. Note that `SileroVad::probabilities` deliberately drops that
 /// trailing partial chunk instead (its own doc comment says so, and a test
 /// pins it), so its output is one value short for any signal whose length is
 /// not a multiple of the chunk size. Use
-/// [`SileroVad::speech_timestamps`], which does the padding.
+/// [`speech_timestamps`](crate::vad::speech_timestamps), which does the padding.
 ///
 /// Returns segments in ascending order, already padded by
 /// [`VadSegmentOptions::speech_pad_ms`].
@@ -144,37 +51,7 @@ pub fn segments_from_probabilities(
             reason: "must be non-zero".to_string(),
         });
     }
-    if !opts.threshold.is_finite() || opts.threshold <= 0.0 || opts.threshold > 1.0 {
-        return Err(Error::InvalidArgument {
-            arg: "opts.threshold",
-            reason: format!("must be finite and in (0, 1], got {}", opts.threshold),
-        });
-    }
-    if let Some(neg) = opts.neg_threshold
-        && (!neg.is_finite() || neg <= 0.0 || neg >= opts.threshold)
-    {
-        // A NaN here does NOT panic: every `speech_prob < neg_threshold`
-        // comparison silently returns false, so silence never closes a segment
-        // and the whole recording comes back as one utterance.
-        return Err(Error::InvalidArgument {
-            arg: "opts.neg_threshold",
-            reason: format!(
-                "must be finite and in (0, threshold), got {neg} against a threshold of {}",
-                opts.threshold
-            ),
-        });
-    }
-    // Infinity is the documented default and means "no cap"; NaN and negatives
-    // are not. A negative cap makes the max-speech split fire on every chunk.
-    if opts.max_speech_duration_s.is_nan() || opts.max_speech_duration_s <= 0.0 {
-        return Err(Error::InvalidArgument {
-            arg: "opts.max_speech_duration_s",
-            reason: format!(
-                "must be positive (or infinite for no cap), got {}",
-                opts.max_speech_duration_s
-            ),
-        });
-    }
+    opts.validate()?;
     let expected = num_samples.div_ceil(window_size);
     if probs.len() != expected {
         return Err(Error::InvalidArgument {
@@ -400,59 +277,171 @@ fn pad_segments(speeches: &mut [SpeechSegment], num_samples: usize, pad: usize) 
     }
 }
 
-#[cfg(feature = "silero-vad")]
-impl<R: Runtime<DType = DType>> SileroVad<R> {
-    /// Run the network over `samples` from a fresh state, then segment the
-    /// probabilities with [`segments_from_probabilities`].
+/// Unit tests for the segmentation rules, driven by hand-written probability
+/// arrays — no checkpoint, no client, no tensors.
+///
+/// Parity with Silero's `get_speech_timestamps` over real audio lives in
+/// `tests/silero_vad_segment_parity.rs`, which needs the weights and the
+/// reference JSON. These tests pin the individual rules instead, one per case,
+/// so a regression names which rule broke.
+///
+/// Geometry throughout: 16 kHz, 512-sample chunks. With the default options
+/// that makes `min_speech` 4000 samples (7.8 chunks), `min_silence` 1600
+/// samples (3.1 chunks) and the pad 480 samples. A silence closes a segment
+/// only on a silent chunk where the elapsed silence has ALREADY reached
+/// `min_silence`, which is why the multi-chunk gaps below are sized as they
+/// are.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RATE: usize = 16000;
+    const WINDOW: usize = 512;
+
+    /// `len` chunks of silence, with every listed half-open chunk range set to a
+    /// confident speech probability.
+    fn probs(len: usize, speech: &[(usize, usize)]) -> Vec<f32> {
+        let mut out = vec![0.0f32; len];
+        for &(from, to) in speech {
+            for p in &mut out[from..to] {
+                *p = 0.9;
+            }
+        }
+        out
+    }
+
+    fn segment(probs: &[f32], opts: &VadSegmentOptions) -> Vec<SpeechSegment> {
+        segments_from_probabilities(probs, probs.len() * WINDOW, RATE, WINDOW, opts)
+            .expect("valid segmentation inputs")
+    }
+
+    fn pairs(segments: &[SpeechSegment]) -> Vec<(usize, usize)> {
+        segments.iter().map(|s| (s.start, s.end)).collect()
+    }
+
+    #[test]
+    fn one_speech_run_becomes_one_padded_segment() {
+        let p = probs(60, &[(10, 30)]);
+        let got = segment(&p, &VadSegmentOptions::default());
+        // Speech spans samples [5120, 15360); the pad adds 480 on each side.
+        assert_eq!(pairs(&got), vec![(4640, 15840)]);
+    }
+
+    #[test]
+    fn a_silence_longer_than_min_silence_splits_the_run() {
+        let p = probs(70, &[(10, 30), (40, 60)]);
+        let got = segment(&p, &VadSegmentOptions::default());
+        assert_eq!(pairs(&got), vec![(4640, 15840), (20000, 31200)]);
+    }
+
+    #[test]
+    fn a_silence_shorter_than_min_silence_does_not_split() {
+        // Two chunks of silence is 1024 samples of elapsed gap at the last silent
+        // chunk, under the 1600-sample minimum, so the segment stays open.
+        let p = probs(60, &[(10, 30), (32, 50)]);
+        let got = segment(&p, &VadSegmentOptions::default());
+        assert_eq!(pairs(&got), vec![(4640, 26080)]);
+    }
+
+    #[test]
+    fn a_run_shorter_than_min_speech_is_dropped() {
+        // 5 chunks is 2560 samples, under the 4000-sample minimum.
+        let p = probs(40, &[(10, 15)]);
+        let got = segment(&p, &VadSegmentOptions::default());
+        assert!(got.is_empty(), "expected no segments, got {got:?}");
+    }
+
+    #[test]
+    fn speech_running_to_the_end_of_the_signal_is_closed_at_the_last_sample() {
+        let p = probs(30, &[(10, 30)]);
+        let got = segment(&p, &VadSegmentOptions::default());
+        // The trailing pad clamps to the signal rather than running past it.
+        assert_eq!(pairs(&got), vec![(4640, 15360)]);
+    }
+
+    #[test]
+    fn all_silence_yields_no_segments() {
+        let p = probs(50, &[]);
+        let got = segment(&p, &VadSegmentOptions::default());
+        assert!(got.is_empty(), "expected no segments, got {got:?}");
+    }
+
+    #[test]
+    fn a_gap_under_two_pads_is_split_between_the_neighbours() {
+        // A 100 ms pad is 1600 samples, so two pads need a 3200-sample gap. The
+        // gap here is 2560, so each side takes half and the segments meet.
+        let opts = VadSegmentOptions {
+            speech_pad_ms: 100,
+            ..VadSegmentOptions::default()
+        };
+        let p = probs(65, &[(10, 30), (35, 55)]);
+        let got = segment(&p, &opts);
+        assert_eq!(pairs(&got), vec![(3520, 16640), (16640, 29760)]);
+        assert_eq!(got[0].end, got[1].start, "the padded segments must meet");
+    }
+
+    #[test]
+    fn a_probability_count_that_does_not_match_the_signal_is_rejected() {
+        let opts = VadSegmentOptions::default();
+        // 1000 samples at a 512-sample window is 2 chunks, not 1: Silero scores
+        // a zero-padded final partial chunk.
+        let err = segments_from_probabilities(&[0.9], 1000, RATE, WINDOW, &opts)
+            .expect_err("one probability cannot cover 1000 samples");
+        let message = err.to_string();
+        assert!(message.contains("1000"), "{message}");
+        assert!(message.contains("512"), "{message}");
+    }
+
+    #[test]
+    fn degenerate_geometry_is_rejected() {
+        let opts = VadSegmentOptions::default();
+        assert!(segments_from_probabilities(&[], 0, 0, WINDOW, &opts).is_err());
+        assert!(segments_from_probabilities(&[], 0, RATE, 0, &opts).is_err());
+        // Option validation runs here too, not only on `validate()`.
+        let bad = VadSegmentOptions {
+            threshold: f32::NAN,
+            ..VadSegmentOptions::default()
+        };
+        assert!(segments_from_probabilities(&[], 0, RATE, WINDOW, &bad).is_err());
+    }
+
+    /// Pins the `possible_ends` tie-break, which the checkpoint-backed parity cases
+    /// do NOT exercise — verified by sabotage: swapping the strict-`>` reduce for
+    /// `max_by_key` (which keeps the LAST maximum instead of Python's first) leaves
+    /// every case in `silero_vad_timestamps.json` passing.
     ///
-    /// The final partial chunk is ZERO-PADDED to a full chunk and evaluated,
-    /// because Silero's `get_speech_timestamps` scores `ceil(n / chunk)`
-    /// chunks and every boundary is measured off that grid. This is the one
-    /// deliberate difference from [`SileroVad::probabilities`], which DROPS a
-    /// trailing partial chunk to stay bit-comparable with the ONNX reference
-    /// run; dropping it here would shift boundaries on any signal whose length
-    /// is not a multiple of the chunk size.
-    pub fn speech_timestamps<C>(
-        &self,
-        client: &C,
-        samples: &[f32],
-        opts: &VadSegmentOptions,
-    ) -> Result<Vec<SpeechSegment>>
-    where
-        C: RuntimeClient<R> + TensorOps<R> + ConvOps<R>,
-    {
-        let config = *self.config();
-        let window = config.chunk_samples;
-        if window == 0 {
-            return Err(Error::InvalidArgument {
-                arg: "config.chunk_samples",
-                reason: "must be non-zero".to_string(),
-            });
-        }
+    /// Two silences of IDENTICAL duration sit inside one over-long speech run, so
+    /// the max-speech cut lands on whichever one the tie-break picks:
+    ///   first maximum  -> cut at 2560, resume at 5120
+    ///   last maximum   -> cut at 7680, resume at 10240
+    ///
+    /// Chunks (512 samples each): 0-4 speech, 5-9 silence, 10-14 speech,
+    /// 15-19 silence, 20-29 speech. `min_silence_duration_ms` is set far above the
+    /// gaps so a silence never CLOSES a segment — it only accumulates a candidate —
+    /// and `max_speech_samples` works out to 12288, first exceeded at chunk 25.
+    #[test]
+    fn the_max_speech_cut_keeps_the_first_of_two_equal_silences() {
+        let mut probs = vec![0.9f32; 30];
+        probs[5..10].fill(0.1);
+        probs[15..20].fill(0.1);
+        let num_samples = 30 * WINDOW;
 
-        let mut state = self.new_state(client.device())?;
-        let chunks = samples.len().div_ceil(window);
-        let mut probs = Vec::with_capacity(chunks);
-        let mut padded = vec![0.0f32; window];
-        for i in 0..chunks {
-            let start = i * window;
-            let end = (start + window).min(samples.len());
-            let chunk = &samples[start..end];
-            let prob = if chunk.len() == window {
-                self.chunk_probability(client, &mut state, chunk)?
-            } else {
-                padded[..chunk.len()].copy_from_slice(chunk);
-                for sample in &mut padded[chunk.len()..] {
-                    *sample = 0.0;
-                }
-                self.chunk_probability(client, &mut state, &padded)?
-            };
-            probs.push(prob);
-        }
+        let opts = VadSegmentOptions {
+            // 16000 * 0.8 - 512 - 0 = 12288 samples.
+            max_speech_duration_s: 0.8,
+            // Far larger than either 2560-sample gap, so neither closes a segment.
+            min_silence_duration_ms: 10_000,
+            min_speech_duration_ms: 0,
+            speech_pad_ms: 0,
+            ..VadSegmentOptions::default()
+        };
 
-        segments_from_probabilities(&probs, samples.len(), config.sample_rate, window, opts)
+        let got =
+            segments_from_probabilities(&probs, num_samples, RATE, WINDOW, &opts).expect("segment");
+        assert_eq!(
+            pairs(&got),
+            vec![(0, 2560), (5120, 15360)],
+            "tie-break picked the later silence"
+        );
     }
 }
-
-#[cfg(test)]
-mod tests;

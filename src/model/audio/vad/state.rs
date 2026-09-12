@@ -76,3 +76,42 @@ impl<R: Runtime<DType = DType>> VadState<R> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::CpuRuntime;
+
+    #[test]
+    fn fresh_state_is_all_zeros() {
+        let (_client, device) = cpu_setup();
+        let config = VadConfig::silero_16k();
+        let state = VadState::<CpuRuntime>::new(&config, &device).expect("state");
+        assert_eq!(state.context().len(), config.context_samples);
+        assert!(state.context().iter().all(|&v| v == 0.0));
+        assert_eq!(state.hidden().shape(), &[1, HIDDEN_SIZE]);
+        assert_eq!(state.cell().shape(), &[1, HIDDEN_SIZE]);
+        assert!(state.hidden().to_vec::<f32>().iter().all(|&v| v == 0.0));
+        assert!(state.cell().to_vec::<f32>().iter().all(|&v| v == 0.0));
+    }
+
+    /// A context of the wrong length is refused: a short or long context
+    /// silently shifts every STFT frame.
+    #[test]
+    fn set_context_rejects_the_wrong_length() {
+        let (_client, device) = cpu_setup();
+        let config = VadConfig::silero_16k();
+        let mut state = VadState::<CpuRuntime>::new(&config, &device).expect("state");
+        let err = state
+            .set_context(&vec![0.5; config.context_samples + 1])
+            .expect_err("one sample too many must be rejected");
+        assert!(matches!(err, Error::InvalidArgument { arg: "samples", .. }));
+
+        let primed = vec![0.25; config.context_samples];
+        state
+            .set_context(&primed)
+            .expect("exact length is accepted");
+        assert_eq!(state.context(), &primed[..]);
+    }
+}

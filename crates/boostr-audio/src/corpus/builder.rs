@@ -6,11 +6,11 @@ use splintr::{AnyTokenizer, Tokenize};
 use crate::corpus::options::{CorpusOptions, TextTokenizer, check_max_speech_duration};
 use crate::corpus::utterance::{Utterance, pack_utterances_with_layout};
 use crate::error::{Error, Result};
+use crate::vad::{SpeechSegment, speech_timestamps};
+use crate::whisper::{TranscribeOptions, WhisperBundle};
 use boostr::model::audio::neucodec::NeuCodecEncoder;
 use boostr::model::audio::neucodec::client::NeuCodecClient;
-use boostr::model::audio::vad::{SileroVad, SpeechSegment};
-use boostr::model::audio::whisper_loader::WhisperBundle;
-use boostr::model::audio::whisper_transcribe::TranscribeOptions;
+use boostr::model::audio::vad::SileroVad;
 use boostr::model::speech_lm::codec::CodecVocab;
 use boostr::model::speech_lm::layout::SpeechLayout;
 use boostr::model::speech_lm::layout::expressive_tts::{CODEBOOK_SIZE, ExpressiveTtsLayout};
@@ -318,7 +318,7 @@ impl<R: Runtime<DType = DType>> SpeechCorpusBuilder<R> {
                      use `scripted_utterance` with the known transcript"
                 .to_string(),
         })?;
-        let segments = vad.speech_timestamps(client, samples, &opts.vad)?;
+        let segments = speech_timestamps(vad, client, samples, &opts.vad)?;
 
         let min_samples = if opts.min_utterance_secs > 0.0 {
             (f64::from(opts.min_utterance_secs) * opts.sample_rate as f64).ceil() as usize

@@ -48,8 +48,9 @@
 //! no output row, so one unreadable wav never costs the other sixty-nine.
 use std::path::{Path, PathBuf};
 
-use boostr::model::audio::{TranscribeOptions, WhisperBundle};
-use boostr_audio::{decode_audio, extension_hint, to_mono_at_rate};
+use boostr_audio::{
+    TranscribeOptions, WhisperBundle, decode_audio, extension_hint, to_mono_at_rate,
+};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, ConditionalOps, ConvOps, IndexingOps, MatmulOps, NormalizationOps,

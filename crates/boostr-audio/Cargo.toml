@@ -15,6 +15,11 @@ boostr = { path = "../..", features = ["audio"] }
 numr = "0.7"
 thiserror = "2"
 tracing = "0.1"
+# `whisper` reads `generation_config.json`; the VoxCPM2 examples read eval
+# manifests and write reports. boostr already links both, so nothing new
+# enters the graph.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # `corpus` and `voxcpm` load `tokenizer.json` files through splintr.
 splintr = { version = "0.20", features = ["vocab-whisper"] }
 
@@ -34,9 +39,6 @@ espeakng = { version = "0.2", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
-# The VoxCPM2 examples read eval manifests and write reports as JSON.
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 # `voxcpm_sensitivity` reinterprets raw weight bytes per quant format.
 bytemuck = { version = "1.25", features = ["derive"] }
 # Tests tokenize with cl100k_base. A dev-dependency feature unifies only when
@@ -61,15 +63,31 @@ tts = []
 kokoro = ["boostr/kokoro", "tts"]
 # VoxCPM2 voice cloning: model from boostr, reference decode and tokenizer here.
 voxcpm = ["boostr/voxcpm", "tts", "decode"]
-# Whisper transcription examples.
+# Whisper transcription: the weights from boostr, the tokenizer, generation
+# config and one-call `transcribe` here. Does NOT imply `vad`;
+# `WhisperBundle::transcribe_segments` needs both.
 whisper = ["boostr/whisper", "decode"]
+# Silero VAD segmentation: the network from boostr, the `get_speech_timestamps`
+# port here.
+vad = ["boostr/silero-vad"]
 # NeuCodec probing examples.
 neucodec = ["boostr/neucodec"]
 # Speech-corpus preparation: VAD, Whisper, NeuCodec, enhancement.
-corpus = ["boostr/whisper", "boostr/silero-vad", "boostr/neucodec", "decode"]
+corpus = ["whisper", "vad", "boostr/neucodec", "decode"]
 # Backend pass-through for the examples that pick a device at run time.
 cuda = ["boostr/cuda"]
 f16 = ["boostr/f16"]
+
+# Fixture-gated integration tests that need a model gate. Without these
+# entries a featureless `cargo check --all-targets` fails on the import
+# rather than skipping the target.
+[[test]]
+name = "whisper_integration"
+required-features = ["whisper", "vad"]
+
+[[test]]
+name = "silero_vad_segment_parity"
+required-features = ["vad"]
 
 [[example]]
 name = "audio_stats"

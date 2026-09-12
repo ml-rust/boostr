@@ -12,6 +12,7 @@ pub mod neucodec;
 pub mod phoneme_vocab;
 pub mod reflection_pad;
 pub mod stft;
+#[cfg(feature = "silero-vad")]
 pub mod vad;
 #[cfg(feature = "voxcpm")]
 pub mod voxcpm;
@@ -23,8 +24,6 @@ pub mod whisper_decoder;
 pub mod whisper_loader;
 #[cfg(feature = "whisper")]
 pub mod whisper_model;
-#[cfg(feature = "whisper")]
-pub mod whisper_transcribe;
 
 pub use mel::{
     LogSpec, MelNorm, MelOptions, MelScale, compute_mel_spectrogram, compute_mel_spectrogram_with,
@@ -36,14 +35,11 @@ pub use stft::{
 };
 #[cfg(feature = "silero-vad")]
 pub use vad::{SileroVad, SileroVadWeights, VadConfig, VadState};
-pub use vad::{SpeechSegment, VadSegmentOptions, segments_from_probabilities};
 #[cfg(feature = "whisper")]
 pub use whisper::WhisperEncoder;
 #[cfg(feature = "whisper")]
 pub use whisper_decoder::{DecoderCache, DecoderLayerCache, WhisperDecoder, WhisperDecoderLayer};
 #[cfg(feature = "whisper")]
-pub use whisper_loader::{WhisperBundle, WhisperGenerationConfig};
+pub use whisper_loader::WhisperCheckpoint;
 #[cfg(feature = "whisper")]
 pub use whisper_model::{GenerateOptions, WhisperModel};
-#[cfg(feature = "whisper")]
-pub use whisper_transcribe::{TranscribeOptions, Transcription};

@@ -3,7 +3,7 @@
 //!
 //! Lives with the models rather than the G2P pipeline: `boostr-audio`'s
 //! phonemizer produces the strings, a model's vocabulary (see
-//! [`KokoroPhonemeVocab`](super::kokoro::KokoroPhonemeVocab)) owns the ids.
+//! `KokoroPhonemeVocab`) owns the ids.
 
 /// Trait implemented by Kokoro-specific phoneme vocabularies.
 pub trait PhonemeVocab {

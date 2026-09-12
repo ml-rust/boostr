@@ -4,7 +4,7 @@
 //! spectrograms `[B, F, T_spec]` where `F = n_fft/2 + 1`. Exact inverse:
 //! [`crate::model::audio::stft::istft`].
 //!
-//! **Runs on every backend.** Framing is an [`IndexingOps::index_select`] with
+//! **Runs on every backend.** Framing is an [`numr::ops::IndexingOps::index_select`] with
 //! a strided position table — the mirror image of the `scatter_reduce` that
 //! `istft` uses for overlap-add — so the whole transform stays on device.
 //!

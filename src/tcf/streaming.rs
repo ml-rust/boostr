@@ -11,7 +11,7 @@
 //! `TensorRecord`, which the writer emits last.
 //!
 //! So a caller registers every record first — with
-//! [`TcfWriter::register_quantized_tensor`] or
+//! [`TcfWriter::register_block_tensor`] or
 //! [`TcfWriter::register_raw_tensor`] — and hands over a callback the writer
 //! pulls from once per tensor in directory order. The producer decides when
 //! to read and quantize each tensor; the writer digests it, packs it, writes
@@ -40,11 +40,11 @@ impl TcfWriter {
     /// The writer calls `produce` once for every tensor registered without
     /// a payload, in directory order, passing that tensor's index in the
     /// tensor array — the value
-    /// [`TcfWriter::register_quantized_tensor`] returned. The payload is
+    /// [`TcfWriter::register_block_tensor`] returned. The payload is
     /// digested, packed, written at its precomputed `data_offset`, and
     /// dropped before the next call, so at most one payload is resident.
     ///
-    /// A tensor added with [`TcfWriter::add_quantized_tensor`] or
+    /// A tensor added with [`TcfWriter::add_block_tensor`] or
     /// [`TcfWriter::add_raw_tensor`] already holds its payload, and
     /// `produce` is not called for it. Mixing the two is allowed and
     /// changes nothing about the bytes; it only changes how much is

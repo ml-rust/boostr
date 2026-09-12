@@ -17,7 +17,7 @@ pub struct SpeechRecord<'a> {
     /// Already-tokenised text to be spoken.
     pub text: &'a [u32],
     /// Per-frame codec codes; one inner `Vec` per frame, each of length
-    /// [`CodecVocab::codes_per_frame`](super::codec::CodecVocab::codes_per_frame).
+    /// [`CodecVocab::codes_per_frame`](super::super::codec::CodecVocab::codes_per_frame).
     pub frames: &'a [Vec<usize>],
 }
 

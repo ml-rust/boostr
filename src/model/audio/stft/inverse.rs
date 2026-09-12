@@ -8,7 +8,7 @@
 //!
 //! **Runs on every backend.** Overlap-add is an accumulating scatter along
 //! strided output positions, expressed here as
-//! [`IndexingOps::scatter_reduce`] with [`ScatterReduceOp::Sum`], which numr
+//! [`numr::ops::IndexingOps::scatter_reduce`] with [`ScatterReduceOp::Sum`], which numr
 //! implements on CPU, CUDA and WebGPU. An earlier version of this file was
 //! `CpuRuntime`-only on the grounds that "numr does not yet expose
 //! `scatter_add`" and that "numr's `irfft` rejects non-power-of-2" sizes;

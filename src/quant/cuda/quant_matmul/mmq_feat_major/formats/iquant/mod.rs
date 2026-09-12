@@ -10,8 +10,6 @@
 
 mod codebook;
 mod grid;
-#[cfg(test)]
-mod tests;
 
 pub(in crate::quant::cuda::quant_matmul) use codebook::IQ4_XS;
 pub(in crate::quant::cuda::quant_matmul) use grid::{

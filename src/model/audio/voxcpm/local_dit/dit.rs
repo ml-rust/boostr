@@ -43,7 +43,7 @@
 //!   zero — so `delta_time_mlp` contributes a real constant bias. The `dt`
 //!   branch must NOT be optimized away.
 //! - The backbone is BIDIRECTIONAL: no causal mask, no mask at all. That is
-//!   what [`BidirectionalLayer`] provides.
+//!   what [`crate::model::audio::voxcpm::bidirectional::BidirectionalLayer`] provides.
 //! - The final `norm` (RMSNorm) runs after the layer stack and BEFORE the
 //!   slice and `out_proj` — it is `MiniCPMModel.norm`, applied inside
 //!   `self.decoder` (`voxcpm/modules/minicpm4/model.py:385`).
@@ -313,4 +313,172 @@ fn check_timestep<R: Runtime<DType = DType>>(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for [`LocalDit::forward`] — the estimator forward pass.
+    //!
+    //! Weights are tiny and synthetic; these pin SHAPE and the output SLICE
+    //! WINDOW, which are the two things the reference makes easy to get wrong.
+
+    use super::super::loader::tests::{FEAT_DIM, HIDDEN_DIM, MU_TOKENS, PATCH_SIZE, model, t};
+    use super::*;
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+    use numr::tensor::Tensor;
+
+    struct Inputs {
+        x: Var<CpuRuntime>,
+        mu: Var<CpuRuntime>,
+        t: Var<CpuRuntime>,
+        cond: Var<CpuRuntime>,
+        dt: Var<CpuRuntime>,
+    }
+
+    fn inputs(batch: usize, x_seed: f32, cond_seed: f32, device: &CpuDevice) -> Inputs {
+        Inputs {
+            x: Var::new(t(&[batch, FEAT_DIM, PATCH_SIZE], x_seed, device), false),
+            mu: Var::new(t(&[batch, MU_TOKENS * HIDDEN_DIM], 1.3, device), false),
+            t: Var::new(t(&[batch], 2.1, device), false),
+            cond: Var::new(t(&[batch, FEAT_DIM, PATCH_SIZE], cond_seed, device), false),
+            // `dt = 0` is the inference value, and it is NOT a no-op branch.
+            dt: Var::new(
+                Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; batch], &[batch], device).unwrap(),
+                false,
+            ),
+        }
+    }
+
+    fn run(client: &CpuClient, model: &LocalDit<CpuRuntime>, i: &Inputs) -> Vec<f32> {
+        let out = model
+            .forward(client, &i.x, &i.mu, &i.t, &i.cond, &i.dt)
+            .unwrap();
+        assert_eq!(out.shape(), &[i.x.shape()[0], FEAT_DIM, PATCH_SIZE]);
+        out.tensor().contiguous().unwrap().to_vec()
+    }
+
+    #[test]
+    fn output_shape_is_batch_feat_dim_patch_size() {
+        let (client, device) = cpu_setup();
+        let m = model(2, &device);
+        let out = run(&client, &m, &inputs(3, 0.9, 1.7, &device));
+        assert_eq!(out.len(), 3 * FEAT_DIM * PATCH_SIZE);
+    }
+
+    /// The slice window is `prefix + mu_tokens + 1 ..`, i.e. exactly the trailing
+    /// `x` positions. With NO transformer layers nothing mixes across positions,
+    /// so the returned window must depend on `x` alone: change `x` and the output
+    /// moves, change `cond` and it does not. A wrong window (e.g. starting at the
+    /// `cond` block, or including `mu`/`t`) flips both assertions.
+    #[test]
+    fn slice_window_keeps_only_the_trailing_x_positions() {
+        let (client, device) = cpu_setup();
+        let m = model(0, &device);
+
+        let base = run(&client, &m, &inputs(2, 0.9, 1.7, &device));
+        let other_x = run(&client, &m, &inputs(2, 4.5, 1.7, &device));
+        let other_cond = run(&client, &m, &inputs(2, 0.9, 6.2, &device));
+
+        let max_delta = |a: &[f32], b: &[f32]| {
+            a.iter()
+                .zip(b.iter())
+                .map(|(p, q)| (p - q).abs())
+                .fold(0.0f32, f32::max)
+        };
+        assert!(
+            max_delta(&base, &other_x) > 1e-4,
+            "output must respond to x: base={base:?} other={other_x:?}"
+        );
+        assert!(
+            max_delta(&base, &other_cond) < 1e-6,
+            "with no layers the x window cannot see cond: base={base:?} other={other_cond:?}"
+        );
+    }
+
+    /// With the bidirectional stack in place every position attends every other,
+    /// so `cond` DOES reach the `x` window. Guards against a "fix" that drops
+    /// `cond` (or `mu`/`t`) from the assembled sequence entirely.
+    #[test]
+    fn cond_reaches_the_x_window_through_the_bidirectional_stack() {
+        let (client, device) = cpu_setup();
+        let m = model(2, &device);
+
+        let base = run(&client, &m, &inputs(2, 0.9, 1.7, &device));
+        let other_cond = run(&client, &m, &inputs(2, 0.9, 6.2, &device));
+        let max_delta = base
+            .iter()
+            .zip(other_cond.iter())
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_delta > 1e-5,
+            "cond must influence the x window: base={base:?} other={other_cond:?}"
+        );
+    }
+
+    /// `dt = 0` is not a dead branch: `SinusoidalPosEmb(0) = [0..0, 1..1]`, so
+    /// `delta_time_mlp` adds a real constant. Changing `dt` must change the
+    /// output.
+    #[test]
+    fn dt_branch_contributes() {
+        let (client, device) = cpu_setup();
+        let m = model(1, &device);
+
+        let mut i = inputs(2, 0.9, 1.7, &device);
+        let base = run(&client, &m, &i);
+        i.dt = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&[0.25f32, 0.5], &[2], &device).unwrap(),
+            false,
+        );
+        let shifted = run(&client, &m, &i);
+        let max_delta = base
+            .iter()
+            .zip(shifted.iter())
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_delta > 1e-5, "dt must change the output");
+    }
+
+    #[test]
+    fn rejects_wrong_shapes() {
+        let (client, device) = cpu_setup();
+        let m = model(1, &device);
+        let good = inputs(2, 0.9, 1.7, &device);
+
+        // x is 2D, not [batch, feat_dim, patch_size].
+        let bad_x = Var::new(t(&[2, FEAT_DIM], 0.9, &device), false);
+        assert!(
+            m.forward(&client, &bad_x, &good.mu, &good.t, &good.cond, &good.dt)
+                .is_err()
+        );
+
+        // cond's patch axis is wrong.
+        let bad_cond = Var::new(t(&[2, FEAT_DIM, PATCH_SIZE + 1], 1.7, &device), false);
+        assert!(
+            m.forward(&client, &good.x, &good.mu, &good.t, &bad_cond, &good.dt)
+                .is_err()
+        );
+
+        // mu's width is not a multiple of hidden_dim.
+        let bad_mu = Var::new(t(&[2, MU_TOKENS * HIDDEN_DIM + 1], 1.3, &device), false);
+        assert!(
+            m.forward(&client, &good.x, &bad_mu, &good.t, &good.cond, &good.dt)
+                .is_err()
+        );
+
+        // t has the wrong batch.
+        let bad_t = Var::new(t(&[3], 2.1, &device), false);
+        assert!(
+            m.forward(&client, &good.x, &good.mu, &bad_t, &good.cond, &good.dt)
+                .is_err()
+        );
+
+        // dt is 2D, not [batch].
+        let bad_dt = Var::new(t(&[2, 1], 0.0, &device), false);
+        assert!(
+            m.forward(&client, &good.x, &good.mu, &good.t, &good.cond, &bad_dt)
+                .is_err()
+        );
+    }
 }

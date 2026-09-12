@@ -1,17 +1,8 @@
-//! The stop-classifier training term and the combined `loss/diff` +
-//! `loss/stop` entry point — a sibling of [`super`]'s CFM (`loss/diff`)
-//! loss, split into its own file to keep `train.rs` under the 500-line
-//! model-file limit.
+//! The stop-classifier training term (`loss/stop`).
 //!
-//! The reference VoxCPM fine-tuning guide trains BOTH terms (`lambdas: {loss/diff:
-//! 1.0, loss/stop: 1.0}`) and its own FAQ names runaway generation
-//! ("generation doesn't stop") as a top failure mode, recommending a higher
-//! `loss/stop` weight when it happens. Training on [`super::PatchGenerator::cfm_loss`]
-//! alone — this crate's previous state — never trains the stop head at all:
-//! `stop_proj`/`stop_head` sit OUTSIDE that loss's graph (see
-//! `fsq/layer.rs`'s straight-through-estimator doc comment for the measured
-//! "zero gradient" finding), so a model fine-tuned that way keeps whatever
-//! stop behavior it started with.
+//! See the sibling `losses` module for why the reference VoxCPM fine-tuning
+//! guide trains this term alongside `loss/diff`, and for the entry points
+//! that combine the two.
 //!
 //! # Why the stop-head input is `TeacherForcedConditioning::lm_hidden`, not
 //! a fresh `base_lm` forward
@@ -21,37 +12,27 @@
 //! state from BEFORE that iteration's steps 6-7 overwrite it for the next
 //! one. That is the SAME shifted value step 1 feeds `lm_to_dit_proj` to
 //! build `mu`'s LM half (`teacher_forced.rs`'s own "The shift" section).
-//! Since [`super::teacher_forced_conditioning`] already computes that
+//! Since [`PatchGenerator::teacher_forced_conditioning`] already computes that
 //! shifted value once (as `lm_shifted`) to build `mu`, it is exposed on
 //! [`TeacherForcedConditioning::lm_hidden`] and consumed here rather than
 //! re-running `base_lm`/`residual_lm`'s full-sequence forward a second
 //! time.
 
-use super::{
-    Error, ModelClient, PatchGenerator, PrefillState, Result, TeacherForcedConditioning,
-    apply_cond_dropout, check_training_cfg_rate, draw_drop_cond,
+use crate::error::{Error, Result};
+use crate::model::audio::voxcpm::model::generate::{
+    PatchGenerator, STOP_CLASS, TeacherForcedConditioning,
 };
-use crate::model::audio::voxcpm::model::generate::STOP_CLASS;
+use crate::model::traits::ModelClient;
 use crate::nn::cross_entropy_loss;
 use crate::quant::traits::DequantOps;
-use numr::autograd::{Var, var_add, var_mul_scalar};
+use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{
-    ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, RandomOps, ReduceOps,
-    ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
+    ActivationOps, BinaryOps, IndexingOps, ReduceOps, ScalarOps, TensorOps, TypeConversionOps,
+    UnaryOps,
 };
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
-
-/// The diffusion loss (`loss/diff`) and stop loss (`loss/stop`) from one
-/// training step, plus their weighted sum — mirrors the reference VoxCPM
-/// implementation's own TensorBoard scalars so a caller can log all three the same way. See
-/// [`PatchGenerator::train_losses_with_noise`].
-pub struct TrainLosses<R: Runtime> {
-    pub diff: Var<R>,
-    pub stop: Var<R>,
-    pub total: Var<R>,
-}
 
 /// Per-patch stop-classifier target: class 0 ("continue") for every patch
 /// except the LAST, class 1 ([`STOP_CLASS`], "stop") for the final one.
@@ -128,155 +109,88 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         let logits = self.aux.stop(client, &cond.lm_hidden)?;
         stop_loss_from_logits(client, &logits)
     }
+}
 
-    /// [`Self::cfm_loss_with_noise`] and [`Self::stop_loss`] from ONE shared
-    /// [`Self::teacher_forced_conditioning`] call, combined as `lambda_diff *
-    /// diff + lambda_stop * stop` — the two terms the reference VoxCPM
-    /// fine-tuning guide logs separately as `loss/diff` and `loss/stop`. Passing
-    /// `lambda_diff = 1.0, lambda_stop = 1.0` reproduces the reference VoxCPM
-    /// implementation's own default `lambdas:` block; its FAQ recommends raising
-    /// `lambda_stop` specifically when generation runs away (the model never
-    /// emits a stop token), which is why both weights are caller-supplied
-    /// rather than baked in.
-    ///
-    /// `lambda_stop = 0.0` makes `total` numerically equal
-    /// `lambda_diff * diff` (`stop` is still computed and returned, just
-    /// weighted out of `total`) — see `train/tests.rs` for the check that
-    /// pins this against [`Self::cfm_loss_with_noise`] directly.
-    ///
-    /// `drop_cond` (the reference VoxCPM implementation's `training_cfg_rate` draw) is applied to
-    /// `cond` ONCE, right after [`Self::teacher_forced_conditioning`]
-    /// returns, so BOTH `diff` and `stop` see the same conditioning object
-    /// — see [`super::apply_cond_dropout`] and
-    /// [`Self::cfm_loss_with_noise`]'s `drop_cond` doc for why only `mu` is
-    /// zeroed. `stop` reads `cond.lm_hidden`, not `cond.mu`, so it is
-    /// numerically UNAFFECTED by `drop_cond` either way — the dropout is
-    /// deliberately scoped to the diffusion term alone, matching the
-    /// reference VoxCPM implementation.
-    #[allow(clippy::too_many_arguments)]
-    pub fn train_losses_with_noise<C>(
-        &self,
-        client: &C,
-        prefill: &PrefillState<R>,
-        target_patches: &Tensor<R>,
-        t: &Tensor<R>,
-        noise: &Tensor<R>,
-        lambda_diff: f64,
-        lambda_stop: f64,
-        drop_cond: bool,
-    ) -> Result<TrainLosses<R>>
-    where
-        C: ModelClient<R> + TypeConversionOps<R> + 'static,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ReduceOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + TypeConversionOps<R>
-            + DequantOps<R>,
-    {
-        let shape = target_patches.shape().to_vec();
-        if shape.len() != 3 || shape[0] == 0 {
-            return Err(Error::InvalidArgument {
-                arg: "target_patches",
-                reason: format!("expected rank-3 [T >= 1, patch_size, feat_dim], got {shape:?}"),
-            });
-        }
-        let tcount = shape[0];
-        if t.shape() != [tcount] {
-            return Err(Error::InvalidArgument {
-                arg: "t",
-                reason: format!("expected [{tcount}], got {:?}", t.shape()),
-            });
-        }
-        if noise.shape() != shape.as_slice() {
-            return Err(Error::InvalidArgument {
-                arg: "noise",
-                reason: format!("expected {shape:?}, got {:?}", noise.shape()),
-            });
-        }
+#[cfg(test)]
+mod tests {
+    use super::super::cfm::tests::{T, target_patches};
+    use super::*;
+    use crate::model::audio::voxcpm::model::generate::tests::support::{fixture, state};
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::CpuRuntime;
 
-        // ONE forward through `teacher_forced_conditioning` — shared by
-        // both terms, so this pays for `base_lm`/`residual_lm`'s
-        // full-sequence forward exactly once, the same as
-        // `cfm_loss_with_noise` alone would.
-        let cond = self.teacher_forced_conditioning(client, prefill, target_patches)?;
-        let cond = apply_cond_dropout(cond, drop_cond)?;
+    #[test]
+    fn stop_loss_is_finite_and_positive() {
+        let (client, device) = cpu_setup();
+        let fx = fixture(false, &device);
+        let generator = fx.generator();
+        let st = state(&fx, &device);
 
-        let diff =
-            self.cfm_loss_from_conditioning(client, &cond, target_patches, t, noise, tcount)?;
-        let stop = self.stop_loss(client, &cond)?;
-
-        let diff_scaled = var_mul_scalar(&diff, lambda_diff, client)?;
-        let stop_scaled = var_mul_scalar(&stop, lambda_stop, client)?;
-        let total = var_add(&diff_scaled, &stop_scaled, client)?;
-
-        Ok(TrainLosses { diff, stop, total })
+        let target = target_patches(0.4, &device);
+        let cond = generator
+            .teacher_forced_conditioning(&client, &st.prefill, &target)
+            .expect("teacher_forced_conditioning");
+        let loss = generator.stop_loss(&client, &cond).expect("stop_loss");
+        let val = loss.tensor().to_vec::<f32>()[0];
+        assert!(val.is_finite(), "stop loss must be finite, got {val}");
+        assert!(val > 0.0, "stop loss must be positive, got {val}");
     }
 
-    /// [`Self::train_losses_with_noise`], drawing `t` and `noise` itself —
-    /// the combined-loss counterpart of [`Self::cfm_loss`], same seeded-draw
-    /// convention (`t` from `seed`, `noise` from `seed + 1`).
-    ///
-    /// `training_cfg_rate` is the reference VoxCPM implementation's per-step
-    /// conditioning-dropout probability, drawn from `seed.wrapping_add(2)` — see
-    /// [`super::PatchGenerator::cfm_loss`]'s doc for the default (0.1) and
-    /// why 0 is discouraged. Must be in `[0.0, 1.0]`, else
-    /// [`Error::InvalidArgument`].
-    #[allow(clippy::too_many_arguments)]
-    pub fn train_losses<C>(
-        &self,
-        client: &C,
-        prefill: &PrefillState<R>,
-        target_patches: &Tensor<R>,
-        seed: u64,
-        lambda_diff: f64,
-        lambda_stop: f64,
-        training_cfg_rate: f64,
-    ) -> Result<TrainLosses<R>>
-    where
-        C: ModelClient<R> + TypeConversionOps<R> + RandomOps<R> + 'static,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ReduceOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + TypeConversionOps<R>
-            + DequantOps<R>,
-    {
-        check_training_cfg_rate(training_cfg_rate)?;
-        let shape = target_patches.shape();
-        if shape.len() != 3 || shape[0] == 0 {
-            return Err(Error::InvalidArgument {
-                arg: "target_patches",
-                reason: format!("expected rank-3 [T >= 1, patch_size, feat_dim], got {shape:?}"),
-            });
-        }
-        let tcount = shape[0];
-        let dtype = target_patches.dtype();
+    /// Pins the target construction itself, not the model: `logits` are built
+    /// by hand, so this catches a wrong-position stop target (e.g. class 1 on
+    /// EVERY patch, or on patch 0) even if the model side of `stop_loss` is
+    /// correct.
+    #[test]
+    fn stop_target_is_the_last_patch_only() {
+        let (client, device) = cpu_setup();
 
-        let t = client.rand_seeded(&[tcount], dtype, seed)?;
-        let noise = client.randn_seeded(shape, dtype, seed.wrapping_add(1))?;
-        let drop_cond = draw_drop_cond::<C, R>(client, seed, training_cfg_rate)?;
-        self.train_losses_with_noise(
-            client,
-            prefill,
-            target_patches,
-            &t,
-            &noise,
-            lambda_diff,
-            lambda_stop,
-            drop_cond,
-        )
+        // Confidently "continue" (class 0) on every one of the T = 3 patches,
+        // including the last — the runaway-generation failure mode this loss
+        // exists to penalise.
+        #[rustfmt::skip]
+        let all_continue = Var::new(
+            Tensor::<CpuRuntime>::from_slice(
+                &[5.0f32, -5.0,
+                  5.0, -5.0,
+                  5.0, -5.0],
+                &[T, 2],
+                &device,
+            )
+            .expect("logits"),
+            false,
+        );
+        // Confidently "continue" for every patch except the last, "stop" on the
+        // last — exactly the target `stop_targets` builds.
+        #[rustfmt::skip]
+        let stop_on_last = Var::new(
+            Tensor::<CpuRuntime>::from_slice(
+                &[5.0f32, -5.0,
+                  5.0, -5.0,
+                  -5.0, 5.0],
+                &[T, 2],
+                &device,
+            )
+            .expect("logits"),
+            false,
+        );
+
+        let loss_all_continue =
+            stop_loss_from_logits(&client, &all_continue).expect("stop_loss_from_logits");
+        let loss_stop_on_last =
+            stop_loss_from_logits(&client, &stop_on_last).expect("stop_loss_from_logits");
+        let val_all_continue = loss_all_continue.tensor().to_vec::<f32>()[0];
+        let val_stop_on_last = loss_stop_on_last.tensor().to_vec::<f32>()[0];
+
+        assert!(
+            val_all_continue > val_stop_on_last,
+            "predicting \"continue\" on the LAST patch too must score worse than \
+             predicting \"stop\" only there: all_continue={val_all_continue} \
+             stop_on_last={val_stop_on_last}"
+        );
+        assert!(
+            val_stop_on_last < 0.1,
+            "a confident, correctly-placed stop prediction should be near zero, \
+             got {val_stop_on_last}"
+        );
     }
 }

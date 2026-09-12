@@ -1,6 +1,4 @@
-//! [`VoxCpm2Model::set_activation_checkpointing`] — split out of `loader.rs`
-//! to keep it under the crate's 500-line hard limit for model-architecture
-//! files.
+//! [`VoxCpm2Model::set_activation_checkpointing`]: the whole-model toggle.
 
 use super::VoxCpm2Model;
 use numr::dtype::DType;

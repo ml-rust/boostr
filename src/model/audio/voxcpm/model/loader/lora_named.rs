@@ -1,5 +1,4 @@
-//! [`VoxCpm2Model::load_lora_named`] — split out of `loader.rs` to keep it
-//! under the crate's 500-line hard limit for model-architecture files.
+//! [`VoxCpm2Model::load_lora_named`]: apply a NAME-keyed adapter map.
 
 use super::VoxCpm2Model;
 use crate::error::Result;

@@ -1,8 +1,7 @@
 //! Preconditions for [`MiniCpm4Attention::forward_cached`](super::MiniCpm4Attention::forward_cached).
 //!
-//! Split out of `attention.rs` to keep that file under the crate's 500-line
-//! limit for model files. Each function here turns an invariant the cached
-//! path depends on into a loud error rather than a silently wrong tensor.
+//! Each function here turns an invariant the cached path depends on into a
+//! loud error rather than a silently wrong tensor.
 
 use numr::dtype::DType;
 use numr::ops::IndexingOps;

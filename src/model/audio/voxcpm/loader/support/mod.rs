@@ -11,8 +11,6 @@
 //! path.
 
 mod tensor_loader;
-#[cfg(test)]
-mod tests;
 mod torch_pth;
 
 pub use crate::format::weight_source::{DenseWeightSource, TcfSource, WeightSource};

@@ -39,11 +39,7 @@ use crate::model::audio::voxcpm::bidirectional::{
 use crate::model::audio::voxcpm::loader::support::{TensorLoader, WeightSource};
 use crate::model::audio::voxcpm::local_dit::config::LocalDitConfig;
 use crate::model::config::RopeScalingConfig;
-use crate::nn::{
-    MaybeLoraLinear, Module, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding, child_params,
-    extend_named,
-};
-use numr::autograd::Var;
+use crate::nn::{MaybeLoraLinear, RmsNorm, RoPE, SinusoidalPosEmb, TimestepEmbedding};
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
@@ -289,77 +285,124 @@ where
     Ok(TimestepEmbedding::new(linear_1, linear_2))
 }
 
-/// Names mirror `feat_decoder.estimator.*` (checkpoint prefix `feat_decoder`
-/// added by [`VoxCpm2Model`](crate::model::audio::voxcpm::model::VoxCpm2Model)).
-/// `estimator.decoder.layers.{i}`/`estimator.decoder.norm` hardcode a
-/// `decoder.` segment this struct's own field names (`layers`, `norm`) do
-/// not carry — the checkpoint nests the transformer block stack under
-/// `feat_decoder.estimator.decoder.*` (see the module doc's key layout).
-/// `rope` and `time_embeddings` carry no `Var<R>` (`time_embeddings`'s
-/// frequency table is a fixed, non-learned constant — see
-/// [`SinusoidalPosEmb`]) and are correctly absent from every collection
-/// below.
-impl<R: Runtime<DType = DType>> Module<R> for LocalDit<R> {
-    fn parameters(&self) -> Vec<&Var<R>> {
-        let mut params = child_params(&self.in_proj);
-        params.extend(child_params(&self.cond_proj));
-        params.extend(child_params(&self.out_proj));
-        params.extend(child_params(&self.time_mlp));
-        params.extend(child_params(&self.delta_time_mlp));
-        for layer in &self.layers {
-            params.extend(child_params(layer));
-        }
-        params.extend(child_params(&self.norm));
-        params
-    }
-
-    fn named_parameters(&self) -> Vec<(String, &Var<R>)> {
-        let mut params = Vec::new();
-        extend_named(
-            &mut params,
-            "estimator.in_proj",
-            self.in_proj.named_parameters(),
-        );
-        extend_named(
-            &mut params,
-            "estimator.cond_proj",
-            self.cond_proj.named_parameters(),
-        );
-        extend_named(
-            &mut params,
-            "estimator.out_proj",
-            self.out_proj.named_parameters(),
-        );
-        extend_named(
-            &mut params,
-            "estimator.time_mlp",
-            self.time_mlp.named_parameters(),
-        );
-        extend_named(
-            &mut params,
-            "estimator.delta_time_mlp",
-            self.delta_time_mlp.named_parameters(),
-        );
-        for (i, layer) in self.layers.iter().enumerate() {
-            extend_named(
-                &mut params,
-                &format!("estimator.decoder.layers.{i}"),
-                layer.named_parameters(),
-            );
-        }
-        extend_named(
-            &mut params,
-            "estimator.decoder.norm",
-            self.norm.named_parameters(),
-        );
-        params
-    }
-}
-
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
+    //! The tiny synthetic estimator. [`model`], [`t`] and the dimension
+    //! constants are `pub(crate)` so the sampler's tests — and the
+    //! orchestrator's generation-loop tests — integrate this same tiny
+    //! estimator instead of rebuilding one.
+
     use super::*;
-    use numr::runtime::cpu::CpuRuntime;
+    use crate::model::audio::voxcpm::bidirectional::attention::BidirectionalAttention;
+    use crate::model::audio::voxcpm::bidirectional::mlp::BidirectionalMlp;
+    use crate::nn::{MaybeQuantLinear, Weight};
+    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+    use numr::tensor::Tensor;
+
+    pub(crate) const FEAT_DIM: usize = 3;
+    pub(crate) const PATCH_SIZE: usize = 2;
+    pub(crate) const HIDDEN_DIM: usize = 8;
+    const FFN_DIM: usize = 8;
+    pub(crate) const NUM_HEADS: usize = 2;
+    pub(crate) const NUM_KV_HEADS: usize = 1;
+    pub(crate) const HEAD_DIM: usize = 4;
+    /// `mu(2) + t(1) + cond(2) + x(2)` — the same derivation as
+    /// `LocalDitConfig::sequence_len`, at `PATCH_SIZE = 2`.
+    const SEQUENCE_LEN: usize = 2 + 1 + PATCH_SIZE + PATCH_SIZE;
+    pub(crate) const MU_TOKENS: usize = 2;
+
+    /// Deterministic non-degenerate values: a constant fill would make every
+    /// position identical and hide a wrong slice window.
+    pub(crate) fn t(shape: &[usize], seed: f32, device: &CpuDevice) -> Tensor<CpuRuntime> {
+        let n: usize = shape.iter().product();
+        let data: Vec<f32> = (0..n)
+            .map(|i| 0.4 * ((i as f32) * 0.37 + seed).sin())
+            .collect();
+        Tensor::<CpuRuntime>::from_slice(&data, shape, device).unwrap()
+    }
+
+    /// Always the `Standard` variant: a safetensors checkpoint yields exactly
+    /// this, and it is the arm every assertion is written against.
+    pub(crate) fn linear(
+        out: usize,
+        inp: usize,
+        seed: f32,
+        bias: bool,
+        device: &CpuDevice,
+    ) -> MaybeLoraLinear<CpuRuntime> {
+        let b = bias.then(|| t(&[out], seed + 5.0, device));
+        MaybeQuantLinear::from_weight(Weight::Standard(t(&[out, inp], seed, device)), b).into()
+    }
+
+    pub(crate) fn norm(device: &CpuDevice) -> RmsNorm<CpuRuntime> {
+        let ones =
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; HIDDEN_DIM], &[HIDDEN_DIM], device).unwrap();
+        RmsNorm::new(ones, 1e-5, false)
+    }
+
+    pub(crate) fn layer(seed: f32, device: &CpuDevice) -> BidirectionalLayer<CpuRuntime> {
+        BidirectionalLayer {
+            input_layernorm: norm(device),
+            self_attn: BidirectionalAttention {
+                q_proj: linear(NUM_HEADS * HEAD_DIM, HIDDEN_DIM, seed + 1.0, false, device),
+                k_proj: linear(
+                    NUM_KV_HEADS * HEAD_DIM,
+                    HIDDEN_DIM,
+                    seed + 2.0,
+                    false,
+                    device,
+                ),
+                v_proj: linear(
+                    NUM_KV_HEADS * HEAD_DIM,
+                    HIDDEN_DIM,
+                    seed + 3.0,
+                    false,
+                    device,
+                ),
+                o_proj: linear(HIDDEN_DIM, NUM_HEADS * HEAD_DIM, seed + 4.0, false, device),
+                num_heads: NUM_HEADS,
+                num_kv_heads: NUM_KV_HEADS,
+                head_dim: HEAD_DIM,
+            },
+            post_attention_layernorm: norm(device),
+            mlp: BidirectionalMlp {
+                gate_proj: linear(FFN_DIM, HIDDEN_DIM, seed + 6.0, false, device),
+                up_proj: linear(FFN_DIM, HIDDEN_DIM, seed + 7.0, false, device),
+                down_proj: linear(HIDDEN_DIM, FFN_DIM, seed + 8.0, false, device),
+            },
+        }
+    }
+
+    /// `num_layers = 0` builds the same model minus the transformer stack — the
+    /// only way to observe the slice window in isolation (see
+    /// `slice_window_keeps_only_the_trailing_x_positions`).
+    pub(crate) fn model(num_layers: usize, device: &CpuDevice) -> LocalDit<CpuRuntime> {
+        let rope = RoPE::<CpuRuntime>::precompute_freqs(32, HEAD_DIM, 10000.0, None, device)
+            .unwrap()
+            .narrow_positions(SEQUENCE_LEN)
+            .unwrap();
+        LocalDit {
+            in_proj: linear(HIDDEN_DIM, FEAT_DIM, 0.1, true, device),
+            cond_proj: linear(HIDDEN_DIM, FEAT_DIM, 0.2, true, device),
+            out_proj: linear(FEAT_DIM, HIDDEN_DIM, 0.3, true, device),
+            time_mlp: TimestepEmbedding::new(
+                linear(HIDDEN_DIM, HIDDEN_DIM, 0.4, true, device),
+                linear(HIDDEN_DIM, HIDDEN_DIM, 0.5, true, device),
+            ),
+            delta_time_mlp: TimestepEmbedding::new(
+                linear(HIDDEN_DIM, HIDDEN_DIM, 0.6, true, device),
+                linear(HIDDEN_DIM, HIDDEN_DIM, 0.7, true, device),
+            ),
+            layers: (0..num_layers).map(|i| layer(i as f32, device)).collect(),
+            norm: norm(device),
+            rope,
+            time_embeddings: SinusoidalPosEmb::<CpuRuntime>::new(HIDDEN_DIM, device).unwrap(),
+            hidden_dim: HIDDEN_DIM,
+            feat_dim: FEAT_DIM,
+            patch_size: PATCH_SIZE,
+            activation_checkpointing: false,
+        }
+    }
 
     #[test]
     fn rejects_missing_file() {

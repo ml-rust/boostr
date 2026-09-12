@@ -248,7 +248,9 @@ impl<R: Runtime<DType = DType>> Module<R> for BidirectionalLayer<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::audio::voxcpm::local_dit::tests::{HEAD_DIM, HIDDEN_DIM, layer, t};
+    use crate::model::audio::voxcpm::local_dit::tests::{
+        HEAD_DIM, HIDDEN_DIM, NUM_HEADS, NUM_KV_HEADS, layer, norm, t,
+    };
     use crate::test_utils::cpu_setup;
     use numr::autograd::{backward, var_sum};
     use numr::runtime::cpu::CpuRuntime;
@@ -372,6 +374,76 @@ mod tests {
         assert_eq!(
             gx_plain, gx_ckpt,
             "input gradient must match between forward and forward_checkpointed"
+        );
+    }
+
+    /// A block-quantized projection contributes NO `Var<R>` (block-quantized
+    /// storage has no gradient — see `MaybeLoraLinear::parameters`), while
+    /// dense parameters (the layer's `RmsNorm` weights) still appear.
+    #[test]
+    fn quantized_projections_contribute_nothing_dense_norms_still_appear() {
+        use crate::nn::{MaybeLoraLinear, MaybeQuantLinear};
+        use crate::quant::format::QuantFormat;
+        use crate::quant::traits::QuantizeOps;
+
+        let (client, device) = cpu_setup();
+        const DIM: usize = 32; // Q4_0 block_size, so a single block quantizes cleanly.
+
+        let quantized_linear = |seed: f32| {
+            let data: Vec<f32> = (0..DIM * DIM)
+                .map(|i| (i as f32 * 0.01 + seed).sin())
+                .collect();
+            let w = Tensor::<CpuRuntime>::from_slice(&data, &[DIM, DIM], &device).unwrap();
+            let qt = client.quantize(&w, QuantFormat::Q4_0).unwrap();
+            let linear: MaybeLoraLinear<CpuRuntime> =
+                MaybeQuantLinear::Quantized(crate::nn::QuantLinear::new(qt, None)).into();
+            linear
+        };
+
+        let layer = BidirectionalLayer {
+            input_layernorm: norm(&device),
+            self_attn: BidirectionalAttention {
+                q_proj: quantized_linear(1.0),
+                k_proj: quantized_linear(2.0),
+                v_proj: quantized_linear(3.0),
+                o_proj: quantized_linear(4.0),
+                num_heads: NUM_HEADS,
+                num_kv_heads: NUM_KV_HEADS,
+                head_dim: HEAD_DIM,
+            },
+            post_attention_layernorm: norm(&device),
+            mlp: BidirectionalMlp {
+                gate_proj: quantized_linear(5.0),
+                up_proj: quantized_linear(6.0),
+                down_proj: quantized_linear(7.0),
+            },
+        };
+
+        let named = layer.named_parameters();
+        let names: Vec<&str> = named.iter().map(|(n, _)| n.as_str()).collect();
+
+        // Every quantized projection is absent...
+        for proj in [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.o_proj",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+        ] {
+            assert!(
+                !names.iter().any(|n| n.starts_with(proj)),
+                "quantized projection {proj} must contribute no Var<R>, found in {names:?}"
+            );
+        }
+        // ...while the dense norms still appear.
+        assert!(names.contains(&"input_layernorm.weight"));
+        assert!(names.contains(&"post_attention_layernorm.weight"));
+        assert_eq!(
+            named.len(),
+            2,
+            "only the two RmsNorm weights should survive: {names:?}"
         );
     }
 }

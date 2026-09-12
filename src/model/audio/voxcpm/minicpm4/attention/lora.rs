@@ -1,5 +1,5 @@
-//! LoRA adaptation for [`MiniCpm4Attention`] — split out of `attention.rs`
-//! to stay under the crate's 500-line model-architecture file limit.
+//! LoRA adaptation for [`MiniCpm4Attention`]: adapter attachment, projection
+//! path enumeration, optimizer write-back, and the trainable toggle.
 
 use super::MiniCpm4Attention;
 use crate::error::Result;
@@ -127,5 +127,47 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             }
         }
         touched
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::block::tests::tiny_attention;
+    use super::*;
+    use crate::test_utils::cpu_setup;
+
+    /// `apply_lora` on a leaf attention block: matched targets get wrapped,
+    /// unmatched fields stay `Plain`, and the count reflects exactly the
+    /// matched set.
+    #[test]
+    fn apply_lora_wraps_only_targeted_projections() {
+        let (_client, device) = cpu_setup();
+        let mut attn = tiny_attention(false, &device);
+        let targets = LoraTargets::new(["q_proj", "v_proj"]);
+
+        let adapted = attn
+            .apply_lora(&targets, 2, 4.0, &device, "self_attn")
+            .expect("apply_lora");
+        assert_eq!(adapted, 2);
+        assert!(attn.q_proj.is_adapted());
+        assert!(attn.v_proj.is_adapted());
+        assert!(!attn.k_proj.is_adapted());
+        assert!(!attn.o_proj.is_adapted());
+    }
+
+    /// Adapting an already-adapted projection errors rather than silently
+    /// discarding the existing adapter.
+    #[test]
+    fn apply_lora_rejects_double_adapt() {
+        let (_client, device) = cpu_setup();
+        let mut attn = tiny_attention(false, &device);
+        let targets = LoraTargets::new(["q_proj"]);
+
+        attn.apply_lora(&targets, 2, 4.0, &device, "self_attn")
+            .expect("first apply_lora");
+        let err = attn
+            .apply_lora(&targets, 2, 4.0, &device, "self_attn")
+            .unwrap_err();
+        assert!(err.to_string().contains("already carries"), "got {err}");
     }
 }

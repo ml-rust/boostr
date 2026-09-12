@@ -5,8 +5,6 @@
 
 mod names;
 mod source;
-#[cfg(test)]
-mod tests;
 
 pub use names::{GGML_SENTINEL, hf_to_ggml_name};
 pub(crate) use names::{GgufNaming, probe_naming};

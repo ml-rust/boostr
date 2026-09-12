@@ -1,9 +1,7 @@
 //! [`VoxCpm2Model::load_lora_adapter`] — apply a saved LoRA adapter file
 //! using ITS OWN rank/alpha/targets, read from the file's `__metadata__`,
 //! rather than a caller-supplied `--rank`/`--alpha`/`--targets` that can
-//! drift out of sync with what was actually trained. Split out of
-//! `loader.rs` to keep it under the crate's 500-line hard limit for
-//! model-architecture files, same as `lora_named.rs`.
+//! drift out of sync with what was actually trained.
 
 use super::VoxCpm2Model;
 use crate::error::{Error, Result};

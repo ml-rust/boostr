@@ -1,0 +1,16 @@
+[package]
+name = "boostr-audio"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Sample-level audio DSP, file codecs, voices, and pipelines for boostr"
+license = "Apache-2.0"
+
+[lib]
+bench = false
+
+[dependencies]
+boostr = { path = "../.." }
+
+[dev-dependencies]
+tempfile = "3"

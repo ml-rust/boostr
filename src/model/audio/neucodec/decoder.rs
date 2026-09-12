@@ -29,12 +29,12 @@
 //! unit.
 
 use crate::error::{Error, Result};
-use crate::model::audio::kokoro::{IStftClient, IStftOptions, IStftPadding, hann_window, istft};
 use crate::model::audio::neucodec::client::NeuCodecClient;
 use crate::model::audio::neucodec::config::NeuCodecDecoderConfig;
 use crate::model::audio::neucodec::istft_head::IstftHead;
 use crate::model::audio::neucodec::resnet_block::ResnetBlock;
 use crate::model::audio::neucodec::transformer_block::TransformerBlock;
+use crate::model::audio::stft::{IStftClient, IStftOptions, IStftPadding, hann_window, istft};
 use crate::nn::{Conv1d, LayerNorm, Linear, TrainMode, var_contiguous};
 use numr::autograd::{Var, var_permute};
 use numr::dtype::DType;
@@ -429,7 +429,7 @@ mod tests {
     /// Full decoder: input `[batch, frames, fc_in_dim]` -> waveform
     /// `[batch, samples]`.
     ///
-    /// Derivation (see `crate::model::audio::kokoro::istft`): overlap-add
+    /// Derivation (see `crate::model::audio::stft::istft`): overlap-add
     /// builds `raw_len = (frames-1)*hop + n_fft`, then Vocos `padding="same"`
     /// trims `(n_fft - hop)/2` from each end, leaving
     /// `raw_len - (n_fft - hop) = frames * hop` samples.

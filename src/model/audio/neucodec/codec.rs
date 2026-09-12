@@ -21,10 +21,10 @@
 //! duplicated here.
 
 use crate::error::Result;
-use crate::model::audio::kokoro::IStftClient;
 use crate::model::audio::neucodec::client::NeuCodecClient;
 use crate::model::audio::neucodec::config::NeuCodecDecoderConfig;
 use crate::model::audio::neucodec::decoder::NeuCodecDecoder;
+use crate::model::audio::stft::IStftClient;
 use crate::nn::fsq::Fsq;
 use numr::autograd::Var;
 use numr::dtype::DType;

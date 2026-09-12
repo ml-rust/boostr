@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/boostr-audio"]
+
 [package]
 name = "boostr"
 version = "0.3.0"
@@ -97,6 +100,18 @@ audio = ["dep:symphonia"]
 # audio path already.
 tts-g2p = ["audio", "dep:espeakng"]
 
+# Per-architecture model gates. Each implies `audio`: the tensor-level signal
+# ops (`stft`/`istft`, `mel`, `reflection_pad`) that every one of these models
+# builds its forward pass on.
+whisper = ["audio"]
+kokoro = ["audio"]
+# Does NOT imply `kokoro` — `istft`/`hann_window` live in `audio::stft`, not
+# `audio::kokoro`, so NeuCodec's vocoder tail depends on neither the model nor
+# the weights of Kokoro.
+neucodec = ["audio"]
+voxcpm = ["audio", "f16"]
+silero-vad = ["audio"]
+
 # Backend features (passed through to numr)
 cpu = []
 cuda = ["numr/cuda", "dep:cudarc"]
@@ -157,7 +172,7 @@ required-features = ["audio"]
 
 [[example]]
 name = "codec_hnr_ceiling"
-required-features = ["audio"]
+required-features = ["neucodec"]
 
 [[example]]
 name = "enhance_reference"
@@ -165,15 +180,15 @@ required-features = ["audio"]
 
 [[example]]
 name = "load_kokoro"
-required-features = ["audio"]
+required-features = ["kokoro"]
 
 [[example]]
 name = "neucodec_tokenize_bench"
-required-features = ["audio"]
+required-features = ["neucodec"]
 
 [[example]]
 name = "noise_probe_decode"
-required-features = ["audio"]
+required-features = ["neucodec"]
 
 [[example]]
 name = "score_asr"
@@ -181,7 +196,7 @@ required-features = ["audio"]
 
 [[example]]
 name = "synth_kokoro"
-required-features = ["audio"]
+required-features = ["kokoro"]
 
 [[test]]
 name = "istft_backend_parity"
@@ -189,27 +204,27 @@ required-features = ["audio"]
 
 [[test]]
 name = "neucodec_encoder_cuda"
-required-features = ["audio"]
+required-features = ["neucodec"]
 
 [[test]]
 name = "neucodec_encoder_parity"
-required-features = ["audio"]
+required-features = ["neucodec"]
 
 [[test]]
 name = "neucodec_parity"
-required-features = ["audio"]
+required-features = ["neucodec"]
 
 [[test]]
 name = "silero_vad_parity"
-required-features = ["audio"]
+required-features = ["silero-vad"]
 
 [[test]]
 name = "silero_vad_segment_parity"
-required-features = ["audio"]
+required-features = ["silero-vad"]
 
 [[test]]
 name = "whisper_integration"
-required-features = ["audio"]
+required-features = ["whisper"]
 
 [[test]]
 name = "whisper_mel_parity"
@@ -218,84 +233,84 @@ required-features = ["audio"]
 [[example]]
 name = "voxcpm_vae_check"
 path = "examples/voxcpm/vae_check.rs"
-required-features = ["audio"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "voxcpm_locenc_check"
 path = "examples/voxcpm/locenc_check.rs"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "voxcpm_baselm_check"
 path = "examples/voxcpm/baselm_check.rs"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "voxcpm_residual_lm_check"
 path = "examples/voxcpm/residual_lm_check.rs"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "voxcpm_dit_check"
 path = "examples/voxcpm/dit_check.rs"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "voxcpm_cfm_check"
 path = "examples/voxcpm/cfm_check.rs"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "voxcpm_fsq_check"
 path = "examples/voxcpm/fsq_check.rs"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "voxcpm_prefill_check"
 path = "examples/voxcpm/prefill_check.rs"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "voxcpm_step_check"
 path = "examples/voxcpm/step_check.rs"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "voxcpm_tokenizer_check"
 path = "examples/voxcpm/tokenizer_check.rs"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "voxcpm_quant_error_check"
 path = "examples/voxcpm/quant_error_check.rs"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "gguf_diff"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "transcribe"
-required-features = ["audio"]
+required-features = ["whisper"]
 
 [[example]]
 name = "voxcpm_clone"
 path = "examples/voxcpm/clone.rs"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "voxcpm_finetune"
 path = "examples/voxcpm/finetune.rs"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
 [[example]]
 name = "voxcpm_sensitivity"
 path = "examples/voxcpm/sensitivity.rs"
-required-features = ["audio", "f16"]
+required-features = ["voxcpm"]
 
+# Reads the raw state dict only; needs no model feature.
 [[example]]
 name = "inspect_kokoro"
-required-features = ["audio"]
 
 # TCF vs GGUF quantized throughput. Custom harness: it drives `perf stat` over
 # one child process per case to report retired instructions, which no

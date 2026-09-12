@@ -37,9 +37,10 @@
 
 use crate::error::{Error, Result};
 use crate::model::audio::kokoro::{
-    BertEncoder, Decoder, IStftOptions, IStftPadding, KokoroConfig, ProsodyPredictor, TextEncoder,
-    decode_prosody_durations, istft, length_regulator, split_voice_style,
+    BertEncoder, Decoder, KokoroConfig, ProsodyPredictor, TextEncoder, decode_prosody_durations,
+    length_regulator, split_voice_style,
 };
+use crate::model::audio::stft::{IStftOptions, IStftPadding, hann_window, istft};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConvOps, IndexingOps, MatmulOps, NormalizationOps,
@@ -203,7 +204,7 @@ impl KokoroModelV2<CpuRuntime> {
     ) -> Result<Tensor<CpuRuntime>> {
         let (mag, phase, _durations) =
             self.forward_to_spectrogram_cpu(client, token_ids, voice_row, min_frames_per_phoneme)?;
-        let window = super::window::hann_window(self.config.n_fft, voice_row.device())?;
+        let window = hann_window(self.config.n_fft, voice_row.device())?;
         let opts = IStftOptions {
             hop_length: self.config.hop_length,
             padding: IStftPadding::Center,

@@ -19,7 +19,7 @@
 
 #![cfg(any(feature = "cuda", feature = "wgpu"))]
 
-use boostr::model::audio::kokoro::{IStftOptions, IStftPadding, hann_window, istft};
+use boostr::model::audio::{IStftOptions, IStftPadding, hann_window, istft};
 use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;

@@ -16,9 +16,10 @@
 //!   cargo run --example noise_probe_decode --release -- probe.json NEUCODEC_DIR [OUT_DIR]
 
 use boostr::Runtime;
-use boostr::model::audio::kokoro::IStftClient;
 use boostr::model::audio::neucodec::{NeuCodec, NeuCodecClient};
-use boostr::model::audio::{PitchOptions, encode_wav_pcm16, estimate_pitch, measure_quality};
+use boostr::model::audio::{
+    IStftClient, PitchOptions, encode_wav_pcm16, estimate_pitch, measure_quality,
+};
 use boostr::runtime::cpu::{CpuDevice, CpuRuntime};
 use boostr::tensor::Tensor;
 use numr::dtype::DType;

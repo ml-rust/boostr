@@ -23,9 +23,13 @@
 //! written and called out in comments where they occur.
 
 use crate::error::{Error, Result};
+#[cfg(feature = "silero-vad")]
 use crate::model::audio::vad::model::SileroVad;
+#[cfg(feature = "silero-vad")]
 use numr::dtype::DType;
+#[cfg(feature = "silero-vad")]
 use numr::ops::{ConvOps, TensorOps};
+#[cfg(feature = "silero-vad")]
 use numr::runtime::{Runtime, RuntimeClient};
 
 /// Tuning for [`segments_from_probabilities`].
@@ -396,6 +400,7 @@ fn pad_segments(speeches: &mut [SpeechSegment], num_samples: usize, pad: usize) 
     }
 }
 
+#[cfg(feature = "silero-vad")]
 impl<R: Runtime<DType = DType>> SileroVad<R> {
     /// Run the network over `samples` from a fresh state, then segment the
     /// probabilities with [`segments_from_probabilities`].

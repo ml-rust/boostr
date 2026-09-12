@@ -8,7 +8,7 @@
 //!
 //! Not two separate heads, not a `softplus` on magnitude. This module holds
 //! the single conv and does the split + activation at forward time, returning
-//! `(mag, phase)` ready for [`crate::model::audio::kokoro::istft`].
+//! `(mag, phase)` ready for [`crate::model::audio::stft::istft`].
 
 use crate::error::{Error, Result};
 use crate::nn::Conv1d;

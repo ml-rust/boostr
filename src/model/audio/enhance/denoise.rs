@@ -27,8 +27,7 @@
 //! across *frequency* is available but off by default; see
 //! [`DenoiseOptions::freq_smooth_bins`] for the measurement that decided it.
 
-use super::super::kokoro::{IStftOptions, IStftPadding, istft};
-use super::super::stft::{StftOptions, stft};
+use super::super::stft::{IStftOptions, IStftPadding, StftOptions, istft, stft};
 use crate::error::{Error, Result};
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;

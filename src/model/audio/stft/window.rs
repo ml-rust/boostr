@@ -1,4 +1,4 @@
-//! Analysis/synthesis windows for Kokoro's STFT/iSTFT vocoder paths.
+//! Analysis/synthesis windows for STFT/iSTFT vocoder paths.
 
 use crate::error::Result;
 use numr::runtime::Runtime;

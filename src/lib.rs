@@ -175,7 +175,7 @@ pub(crate) mod test_utils {
     /// Resolve the NeuCodec checkpoint fixture: `$NEUCODEC_CHECKPOINT`, else
     /// `$BOOSTR_MODELS_DIR/neucodec/model.safetensors`. `None` when neither is
     /// set or the resolved path is absent, so callers skip.
-    #[cfg(feature = "audio")]
+    #[cfg(feature = "neucodec")]
     pub(crate) fn neucodec_checkpoint() -> Option<PathBuf> {
         let path = match std::env::var("NEUCODEC_CHECKPOINT") {
             Ok(p) => PathBuf::from(p),
@@ -187,7 +187,8 @@ pub(crate) mod test_utils {
 
     /// Resolve a real-audio fixture: `$AUDIO_CORPUS_FLAC`, else the first
     /// `.flac` in `$AUDIO_CORPUS_DIR` by sorted name. `None` when neither is
-    /// set or the resolved path is absent, so callers skip.
+    /// set or the resolved path is absent, so callers skip. Decode and
+    /// quality tests use it too, so it stays under the bare `audio` gate.
     #[cfg(feature = "audio")]
     pub(crate) fn corpus_flac() -> Option<PathBuf> {
         if let Ok(p) = std::env::var("AUDIO_CORPUS_FLAC") {

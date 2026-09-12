@@ -22,7 +22,7 @@
 //!   Kokoro's `MagPhaseHead`, whose conv-based head bakes `sin()` into the
 //!   phase channel). The complex spectrum is
 //!   `magnitude * (cos(phase) + i*sin(phase))`, which
-//!   [`crate::model::audio::kokoro::istft`] already computes internally from
+//!   [`crate::model::audio::stft::istft`] already computes internally from
 //!   a raw phase angle, so no extra activation is applied here.
 //!
 //! Output layout is permuted to `[B, F, T]` (channels-first) to match

@@ -8,7 +8,7 @@
 //!     [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] [--alpha 32] \
 //!     [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors] \
 //!     [--lambda-stop 1.0] [--training-cfg-rate 0.1] [--eval-rows 4] \
-//!     [--eval-only] [--dequant-weights]
+//!     [--eval-only] [--lora ADAPTER.safetensors] [--dequant-weights]
 //! ```
 //!
 //! `CKPT_DIR` holds `config.json`, `model.safetensors` and `tokenizer.json`,
@@ -169,13 +169,18 @@
 //! (`--epochs must be at least 1`), and even accepted it would still build
 //! the optimizer and take the save path. So the mode is its own flag.
 //!
-//! `--eval-only` skips, in order: `apply_lora` (no adapters are allocated, so
-//! the artifact is scored exactly as it sits on disk), the trainable-parameter
-//! collection, `SimpleTrainer`, the epoch loop, `backward_wrt`,
-//! `load_lora_parameters`, and every checkpoint write. `--out` is rejected
-//! rather than ignored, since an eval-only run has nothing to save. `--lr`,
-//! `--epochs`, `--rank`, `--alpha`, `--targets` and `--training-cfg-rate`
-//! reach nothing in this mode.
+//! `--eval-only` skips, in order: the trainable-parameter collection,
+//! `SimpleTrainer`, the epoch loop, `backward_wrt`, and every checkpoint
+//! write. `--out` is rejected rather than ignored, since an eval-only run has
+//! nothing to save. `--lr`, `--epochs` and `--training-cfg-rate` reach
+//! nothing in this mode.
+//!
+//! Without `--lora`, `apply_lora` is ALSO skipped — no adapters are
+//! allocated, so the artifact is scored exactly as it sits on disk, matching
+//! this flag's behavior before `--lora` existed. With `--lora
+//! ADAPTER.safetensors`, `apply_lora` DOES run, with the dot-segment targets
+//! `--targets` names, and the eval batch scores base + adapter instead — see
+//! "`--lora`: warm-starting or scoring a trained adapter" below.
 //!
 //! The eval-row selection differs in one deliberate way. Training must leave
 //! rows to train on, so `--eval-rows N` carves N off the END of the kept rows
@@ -184,6 +189,29 @@
 //! A nonzero `--eval-rows N` still takes the last N kept rows, by index, so a
 //! training run and an eval-only run over the same manifest with the same
 //! `--eval-rows` score the same rows in the same order.
+//!
+//! # `--lora`: warm-starting or scoring a trained adapter
+//!
+//! `--lora ADAPTER.safetensors` runs the same sequence in both modes —
+//! `apply_lora` (allocates fresh `lora_a`/`lora_b` `Var`s for the dot-segment
+//! targets `--targets` names), then `check_lora_metadata` against the file's
+//! own `__metadata__`, then `SafeTensors::open`/`load_all` and
+//! `load_lora_named` to write the file's tensors into those `Var`s — the
+//! exact functions and order `voxcpm_clone`'s `--lora` arm uses, so a file
+//! either binary can load loads identically in both. `--rank`, `--alpha` and
+//! `--targets` govern the adapter's shape and must match the file; a
+//! mismatch is a hard error naming the file, the flag values given, and the
+//! fix (match the flags to the file, or retrain to match the flags).
+//!
+//! Under `--eval-only` this scores base + adapter, forward-only, in place of
+//! scoring the base artifact alone — the flag a comparison between a base
+//! model and a candidate adapter uses. Under training (no `--eval-only`) it
+//! runs BEFORE `SimpleTrainer` is built, so the loaded tensors become the
+//! `Var`s the optimizer then updates: a resume/warm-start, not a merge.
+//! Everything else about the training loop — the loss, the eval batch, the
+//! epoch/save logic — is unchanged. Omitting `--lora` behaves exactly as
+//! before it existed: `--eval-only` skips `apply_lora` outright, and training
+//! initializes fresh adapters from `device`'s RNG.
 //!
 //! # Comparing two artifacts: `--dequant-weights`
 //!
@@ -241,7 +269,10 @@
 //! weights. `epoch` is the 1-based epoch under training and `null` under
 //! `--eval-only`. `mode` is `"train"` or `"eval-only"`. `weights_dense` is
 //! `--dequant-weights`: two objects that disagree on it were scored under
-//! different activation contracts and must not be compared.
+//! different activation contracts and must not be compared. `lora` is the
+//! `--lora` adapter path (a string), or `null` when `--lora` was not given —
+//! two objects that disagree on it scored different weights and are not
+//! comparable either.
 //!
 //! # What "deterministic" means here, exactly
 //!
@@ -393,6 +424,12 @@ use eval_common::{
     score_eval_batch,
 };
 
+// Sibling module: the LoRA adapter load sequence, shared with
+// `voxcpm_clone` so both binaries load one adapter file identically — see
+// `lora_load.rs`'s module docs.
+mod lora_load;
+use lora_load::load_lora_adapter;
+
 const DEFAULT_TARGETS: &str = "q_proj,v_proj";
 const DEFAULT_RANK: usize = 16;
 const DEFAULT_ALPHA: f32 = 32.0;
@@ -492,9 +529,16 @@ struct Args {
     /// disables eval entirely while training, and means "every kept row" under
     /// [`Args::eval_only`].
     eval_rows: usize,
-    /// Score the artifact once and exit: no LoRA, no optimizer, no weight
-    /// update, no checkpoint — see the module docs' "`--eval-only`" section.
+    /// Score the artifact once and exit: no optimizer, no weight update, no
+    /// checkpoint; with `--lora`, scores base + adapter — see the module
+    /// docs' "`--eval-only`" section.
     eval_only: bool,
+    /// LoRA adapter file. Under `--eval-only`, scores base + this adapter
+    /// instead of the base artifact alone. Under training, warm-starts the
+    /// adapters from it instead of a fresh random init. `None` behaves
+    /// exactly as before this flag existed, in both modes — see the module
+    /// docs' "`--lora`: warm-starting or scoring a trained adapter" section.
+    lora: Option<PathBuf>,
     /// Run every transformer layer with activation checkpointing: drop the
     /// intermediates during the forward pass and recompute them during
     /// backward. Cuts the activation memory that dominates training peak
@@ -522,8 +566,11 @@ dropped, over-cap ref_wav clips are truncated to the cap instead — see the \
 module docs)] \
 [--eval-rows 4 (rows held out for the fixed eval batch; 0 disables eval while \
 training, and means every kept row under --eval-only)] \
-[--eval-only (score the artifact once and exit: no LoRA, no optimizer, no \
-weight update, no checkpoint; prints one JSON metric line on stdout)] \
+[--eval-only (score the artifact once and exit: no optimizer, no weight \
+update, no checkpoint; with --lora, scores base + adapter; prints one JSON \
+metric line on stdout)] \
+[--lora ADAPTER.safetensors (eval-only: score base + adapter; training: \
+warm-start the adapters from it)] \
 [--checkpoint (activation checkpointing: recompute each layer's intermediates \
 during backward instead of holding them, ~33% slower, much less VRAM)] \
 [--dequant-weights (dequantize EVERY packed weight to dense F32 at load, for \
@@ -561,6 +608,7 @@ fn parse_args() -> Result<Args, String> {
     let mut max_patches = DEFAULT_MAX_PATCHES;
     let mut eval_rows = DEFAULT_EVAL_ROWS;
     let mut eval_only = false;
+    let mut lora: Option<PathBuf> = None;
     let mut activation_checkpointing = false;
     let mut dequant_weights = false;
 
@@ -623,6 +671,7 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--eval-rows: {e}"))?
             }
             "--eval-only" => eval_only = true,
+            "--lora" => lora = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
             "--checkpoint" => activation_checkpointing = true,
             "--dequant-weights" => dequant_weights = true,
             "-h" | "--help" => return Err(USAGE.to_string()),
@@ -698,6 +747,7 @@ fn parse_args() -> Result<Args, String> {
         max_patches,
         eval_rows,
         eval_only,
+        lora,
         activation_checkpointing,
         dequant_weights,
     })
@@ -797,7 +847,7 @@ fn collect_adapter_tensors<R: Runtime<DType = DType>>(
 /// three metrics, so the pairing between two artifacts' numbers is auditable
 /// from the output alone rather than assumed: two lines are comparable only
 /// when `eval_rows`, `eval_seed`, `manifest`, `max_patches`, `lambda_diff`,
-/// `lambda_stop` and `device` all match. Serialization is `serde_json`,
+/// `lambda_stop`, `device` and `lora` all match. Serialization is `serde_json`,
 /// already a boostr dependency, and its float formatting is the shortest
 /// round-trip form, so identical `f64` values print identically.
 fn print_eval_record(
@@ -826,6 +876,7 @@ fn print_eval_record(
         // contracts and are NOT comparable — see the module docs'
         // "Comparing two artifacts" section.
         "weights_dense": args.dequant_weights,
+        "lora": args.lora.as_ref().map(|p| p.display().to_string()),
         "eval_rows": eval_rows,
         "eval_seed": EVAL_NOISE_SEED,
         "max_patches": args.max_patches,
@@ -1021,13 +1072,41 @@ where
 
     let tokenizer = load_tokenizer(tokenizer_path(&args.weights, args.config.as_deref())?)?;
 
-    // `--eval-only` returns HERE, before `apply_lora` — the artifact is
-    // scored exactly as it sits on disk, with no adapters allocated, no
-    // optimizer built, no backward pass and no checkpoint written. See the
-    // module docs' "`--eval-only`" section.
+    // Built here, before the `--eval-only` branch, since both `--eval-only
+    // --lora` and training need the same dot-segment target list.
+    let target_names: Vec<String> = args
+        .targets
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // `--eval-only` returns HERE. Without `--lora`, `apply_lora` never runs —
+    // the artifact is scored exactly as it sits on disk, no adapters
+    // allocated, no optimizer built, no backward pass and no checkpoint
+    // written. With `--lora`, `apply_lora` + the adapter file ARE loaded
+    // first, so the eval batch scores base + adapter — see the module docs'
+    // "`--eval-only`" and "`--lora`" sections.
     if args.eval_only {
         if eval_source_rows.is_empty() {
             return Err("--eval-only: no eval rows survived the --max-patches filter".into());
+        }
+        if let Some(lora_path) = &args.lora {
+            let (adapted, loaded) = load_lora_adapter(
+                &mut model,
+                lora_path,
+                args.rank,
+                args.alpha,
+                &target_names,
+                device,
+            )?;
+            eprintln!(
+                "LoRA: targets={target_names:?} rank={} alpha={} -> {adapted} projection(s) \
+                 adapted, {loaded} tensor(s) loaded from {}",
+                args.rank,
+                args.alpha,
+                lora_path.display()
+            );
         }
         eprintln!(
             "building eval batch ({} row(s)) ...",
@@ -1067,18 +1146,35 @@ where
         return Ok(());
     }
 
-    let target_names: Vec<String> = args
-        .targets
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let lora_targets = LoraTargets::new(target_names.clone());
-    let adapted = model.apply_lora(&lora_targets, args.rank, args.alpha, device)?;
-    eprintln!(
-        "LoRA: targets={target_names:?} rank={} alpha={} -> {adapted} projection(s) adapted",
-        args.rank, args.alpha
-    );
+    // `--lora` warm-starts the adapters from a prior run's file instead of a
+    // fresh random init — same `load_lora_adapter` sequence as the
+    // `--eval-only --lora` arm above, run BEFORE `SimpleTrainer` is built so
+    // the loaded tensors become the `Var`s the optimizer then updates. See
+    // the module docs' "`--lora`" section.
+    if let Some(lora_path) = &args.lora {
+        let (adapted, loaded) = load_lora_adapter(
+            &mut model,
+            lora_path,
+            args.rank,
+            args.alpha,
+            &target_names,
+            device,
+        )?;
+        eprintln!(
+            "LoRA: targets={target_names:?} rank={} alpha={} -> {adapted} projection(s) \
+             adapted, {loaded} tensor(s) loaded from {} (warm start)",
+            args.rank,
+            args.alpha,
+            lora_path.display()
+        );
+    } else {
+        let lora_targets = LoraTargets::new(target_names.clone());
+        let adapted = model.apply_lora(&lora_targets, args.rank, args.alpha, device)?;
+        eprintln!(
+            "LoRA: targets={target_names:?} rank={} alpha={} -> {adapted} projection(s) adapted",
+            args.rank, args.alpha
+        );
+    }
 
     let mut params: HashMap<TensorId, Tensor<R>> = Module::trainable_parameter_tensors(&model);
     eprintln!("trainable adapter tensors: {}", params.len());
@@ -1087,15 +1183,12 @@ where
     // `backward` also stores a full-size gradient under every id nothing can
     // read back.
     //
-    // MEASURED: this prunes almost NOTHING here, and is not why the trainer is
-    // capped at batch 1. Peak VRAM 11819 MiB with it vs 11808 without, runtime
-    // unchanged, losses bit-identical. The reason is that ~120 LoRA adapters
-    // sit throughout the network, so nearly every node is an ancestor of some
-    // wanted id and survives pruning. The real cost is forward ACTIVATION
-    // LIFETIME: training state measured 6266 MiB at a 24-patch cap and 8831
-    // MiB at 31, so it scales with sequence length. Activation checkpointing
-    // is the fix, and `--checkpoint` turns it on; do not expect this call to
-    // deliver memory.
+    // This prunes almost nothing here, and is not why the trainer is capped
+    // at batch 1. ~120 LoRA adapters sit throughout the network, so nearly
+    // every node is an ancestor of some wanted id and survives pruning.
+    // Peak memory instead scales with forward ACTIVATION LIFETIME, which
+    // grows with sequence length. Activation checkpointing is the fix;
+    // `--checkpoint` turns it on. Do not expect this call to save memory.
     //
     // Collected once — the adapter set never changes after `apply_lora`.
     let wanted: Vec<TensorId> = params.keys().copied().collect();

@@ -169,7 +169,6 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use boostr::format::SafeTensors;
 use boostr::model::audio::voxcpm::model::config::AUDIO_START_ID;
 use boostr::model::audio::voxcpm::model::{
     GenerateOptions, GenerateOutcome, GenerateState, StepOutcome, VoxCpm2Model,
@@ -179,7 +178,6 @@ use boostr::model::audio::voxcpm::{VoxCpmClient, load_tokenizer, normalize_white
 use boostr::model::audio::{
     PitchOptions, decode_audio, encode_wav_pcm16, estimate_pitch, extension_hint, to_mono_at_rate,
 };
-use boostr::nn::{LoraTargets, check_lora_metadata};
 use boostr::quant::traits::DequantOps;
 use numr::dtype::DType;
 use numr::ops::{
@@ -190,6 +188,11 @@ use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 #[cfg(feature = "cuda")]
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
+
+// Sibling module: the LoRA adapter load sequence, shared with
+// `voxcpm_finetune` so both binaries load one adapter file identically —
+// see `lora_load.rs`'s module docs.
+mod lora_load;
 
 /// Rate the reference wav is resampled to before the AudioVAE encoder. Fixed
 /// by the encoder, not a choice: `AudioVaeEncoder` hops 640 samples at
@@ -969,11 +972,8 @@ where
     };
 
     // --- LoRA adapter -------------------------------------------------------
-    // `apply_lora` must run before `load_lora_named`: it allocates the
-    // `lora_a`/`lora_b` Vars that name lookup then resolves against.
-    // `check_lora_metadata` runs first, against the file's own
-    // `__metadata__`, so a rank/alpha/targets mismatch aborts before the
-    // model is mutated at all.
+    // Same load sequence `voxcpm_finetune` uses to warm-start or re-score an
+    // adapter — see `lora_load.rs`'s module docs.
     if let Some(lora_path) = &args.lora {
         let lora_target_names: Vec<String> = args
             .lora_targets
@@ -981,18 +981,14 @@ where
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        eprintln!("loading LoRA adapter {} ...", lora_path.display());
-        let mut adapter = SafeTensors::open(lora_path)?;
-        check_lora_metadata(
-            adapter.metadata(),
+        let (adapted, loaded) = lora_load::load_lora_adapter(
+            &mut model,
+            lora_path,
             args.lora_rank,
             args.lora_alpha,
             &lora_target_names,
+            device,
         )?;
-        let lora_targets = LoraTargets::new(lora_target_names.clone());
-        let adapted = model.apply_lora(&lora_targets, args.lora_rank, args.lora_alpha, device)?;
-        let lora_tensors = adapter.load_all::<R>(device)?;
-        let loaded = model.load_lora_named(&lora_tensors)?;
         eprintln!(
             "LoRA: targets={lora_target_names:?} rank={} alpha={} -> {adapted} projection(s) \
              adapted, {loaded} tensor(s) loaded",

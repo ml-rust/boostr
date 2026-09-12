@@ -1,9 +1,9 @@
-//! LLaMA GQA attention block.
+//! Incremental forward against a contiguous `KvCache` (flash path, ALiBi path).
 
-use super::helpers::{repeat_kv, var_contiguous};
+use super::super::helpers::{repeat_kv, var_contiguous};
+use super::LlamaAttention;
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
-use crate::model::attention_core::{AttentionCoreSpec, AttentionKernel, attention_core_masked};
 use crate::model::traits::ModelClient;
 use crate::nn::{MaybeQuantLinear, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
@@ -17,137 +17,7 @@ use numr::ops::{
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
-/// GQA attention with Q/K/V projections
-pub struct LlamaAttention<R: Runtime> {
-    pub(crate) q_proj: MaybeQuantLinear<R>,
-    pub(crate) k_proj: MaybeQuantLinear<R>,
-    pub(crate) v_proj: MaybeQuantLinear<R>,
-    pub(crate) o_proj: MaybeQuantLinear<R>,
-    pub(crate) num_heads: usize,
-    pub(crate) num_kv_heads: usize,
-    pub(crate) head_dim: usize,
-    /// Optional Q/K layer norms (Command-R, Cohere)
-    pub(crate) q_norm: Option<crate::nn::RmsNorm<R>>,
-    pub(crate) k_norm: Option<crate::nn::RmsNorm<R>>,
-    /// Use ALiBi instead of RoPE (Falcon v1, BLOOM, MPT)
-    pub(crate) use_alibi: bool,
-    /// Sliding-window attention span. `0` disables windowing (unlimited context).
-    ///
-    /// The window is INCLUSIVE of the current token: query `i` may attend keys
-    /// `j` with `i - sliding_window < j <= i`, i.e. exactly `sliding_window`
-    /// keys. This matches the flash-attention kernel contract in
-    /// `ops/impl_generic/attention/flash_standard.rs`.
-    ///
-    /// IGNORED when `use_alibi` is set. ALiBi's bias kernel writes the causal
-    /// structure together with the distance bias; the two mechanisms do not
-    /// compose here, so ALiBi models always attend the full context.
-    pub(crate) sliding_window: usize,
-}
-
 impl<R: Runtime<DType = DType>> LlamaAttention<R> {
-    /// Borrowed view of this block's attention parameters, for
-    /// [`attention_core_masked`].
-    fn core_spec(&self) -> AttentionCoreSpec<'_, R> {
-        AttentionCoreSpec {
-            num_heads: self.num_heads,
-            num_kv_heads: self.num_kv_heads,
-            head_dim: self.head_dim,
-            q_norm: self.q_norm.as_ref(),
-            k_norm: self.k_norm.as_ref(),
-            use_alibi: self.use_alibi,
-            // LLaMA-lineage blocks always rotate (or use ALiBi); NoPE is a
-            // VoxCPM2 `residual_lm` property, never one of theirs.
-            skip_rope: false,
-            sliding_window: self.sliding_window,
-            // This block runs the materialized-mask kernel. Its ALiBi variants
-            // require it, and `tests/qwen3_parity.rs` pins its numbers.
-            kernel: AttentionKernel::Masked,
-        }
-    }
-
-    /// Apply optional Q/K layer norms (Command-R, Cohere).
-    /// Input shape: [B, H, S, D] — norm is applied over the last dimension (head_dim).
-    fn apply_qk_norms<C>(&self, client: &C, q: &Var<R>, k: &Var<R>) -> Result<(Var<R>, Var<R>)>
-    where
-        C: ModelClient<R>,
-        R::Client: TensorOps<R> + ScalarOps<R>,
-    {
-        let q = match &self.q_norm {
-            Some(norm) => norm.forward(client, q)?,
-            None => q.clone(),
-        };
-        let k = match &self.k_norm {
-            Some(norm) => norm.forward(client, k)?,
-            None => k.clone(),
-        };
-        Ok((q, k))
-    }
-
-    /// Apply RoPE to Q/K or skip for ALiBi models.
-    fn apply_rotary_if_needed<C>(
-        &self,
-        client: &C,
-        q: Var<R>,
-        k: Var<R>,
-        cos: &Var<R>,
-        sin: &Var<R>,
-    ) -> Result<(Var<R>, Var<R>)>
-    where
-        C: ModelClient<R>,
-    {
-        if self.use_alibi {
-            Ok((q, k))
-        } else {
-            let q = client.apply_rope(&q, cos, sin)?;
-            let k = client.apply_rope(&k, cos, sin)?;
-            Ok((q, k))
-        }
-    }
-
-    pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
-    where
-        C: ModelClient<R>,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ReduceOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + DequantOps<R>,
-    {
-        // Q/K/V projections (batched: quantize activation once for all 3)
-        let qkv = MaybeQuantLinear::forward_batch(
-            &[&self.q_proj, &self.k_proj, &self.v_proj],
-            client,
-            x,
-        )?;
-        let (q, k, v) = (&qkv[0], &qkv[1], &qkv[2]);
-
-        // Everything between the projections and `o_proj` — reshape/permute,
-        // Q/K norm, RoPE, GQA, causal(+window)/ALiBi mask, attention — lives in
-        // `attention_core_masked` so this block and a trainer's block cannot
-        // drift on the step order (notably: norm BEFORE rope). It is the same
-        // sequence and the same math `attention_core`'s `Masked` arm runs; the
-        // separate entry point only drops the flash kernel's `R::Client` bound,
-        // which the `Model` trait's fixed bound list cannot carry.
-        let attn_out = attention_core_masked(
-            client,
-            q,
-            k,
-            v,
-            Some(rope.cos_cache()),
-            Some(rope.sin_cache()),
-            &self.core_spec(),
-        )?;
-
-        // Output projection
-        self.o_proj.forward(client, &attn_out)
-    }
-
     pub fn forward_with_kv_cache<C>(
         &self,
         client: &C,
@@ -285,12 +155,3 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         self.o_proj.forward(client, &attn_out)
     }
 }
-
-// ── Paged-attention forward, graph-mode forward (CUDA only) ──────────
-//
-// Split out to sibling files under `attention/` to keep this file readable.
-mod graph_mode;
-mod paged;
-
-#[cfg(test)]
-mod tests;

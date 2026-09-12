@@ -1,161 +1,16 @@
-//! Gradient bucket manager for overlapping allreduce with backward pass
-//!
-//! Groups model parameters into fixed-size buckets and fires allreduce
-//! on each bucket as soon as all its gradients are ready, enabling
-//! communication/computation overlap during the backward pass.
-
-use std::collections::HashMap;
-use std::sync::Arc;
+//! Gradient readiness tracking, flatten + allreduce launch, and unflatten after backward.
 
 use crate::distributed::comm_utils::all_reduce_tensor;
 use crate::error::{Error, Result};
-use numr::autograd::{GradStore, Var};
+use numr::autograd::GradStore;
 use numr::dtype::DType;
 use numr::ops::{ScalarOps, TensorOps};
-use numr::runtime::{Communicator, ReduceOp, Runtime, RuntimeClient};
+use numr::runtime::{ReduceOp, Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
-/// A bucket of parameters whose gradients are allreduced together.
-struct Bucket<R: Runtime> {
-    /// Parameter IDs in this bucket
-    param_ids: Vec<TensorId>,
-    /// Number of elements per parameter
-    param_numels: Vec<usize>,
-    /// Original shapes for each parameter's gradient
-    param_shapes: Vec<Vec<usize>>,
-    /// DType for the flat buffer (used to validate dtype consistency)
-    dtype: DType,
-    /// Received gradients (stored as we get hook notifications)
-    received_grads: HashMap<TensorId, Tensor<R>>,
-    /// Flat contiguous buffer for allreduce
-    flat_buffer: Option<Tensor<R>>,
-    /// Whether allreduce has been launched for this bucket
-    allreduce_launched: bool,
-    /// Completion event handle (set when using overlapped mode)
-    completion_event: Option<u64>,
-}
-
-/// Manages gradient buckets and fires allreduce during backward.
-///
-/// Parameters are grouped into buckets of approximately `bucket_size_bytes`.
-/// When all gradients in a bucket are ready, they are flattened into a
-/// contiguous buffer and allreduced. After backward completes, call
-/// [`GradientBucketManager::wait_and_unflatten`] to sync pending allreduce ops and scatter
-/// the averaged gradients back into the grad store.
-///
-/// # Event-Based Compute-Communication Overlap
-///
-/// When `compute_stream_handle` is provided and the communicator supports
-/// [`StreamSyncOps`](numr::runtime::StreamSyncOps), allreduce operations are
-/// issued on a dedicated communication stream using CUDA event synchronization.
-/// This allows gradient communication to overlap with continued backward
-/// computation on the compute stream, yielding 30-40% throughput improvement
-/// (the same technique used by PyTorch DDP).
-///
-/// On CPU or when the communicator lacks stream support, the manager falls
-/// back to blocking allreduce during the backward pass.
-pub struct GradientBucketManager<R: Runtime> {
-    buckets: Vec<Bucket<R>>,
-    /// Maps parameter ID → bucket index
-    param_to_bucket: HashMap<TensorId, usize>,
-    comm: Arc<dyn Communicator>,
-    /// Compute stream handle for event-based overlap (None = fallback to blocking sync)
-    compute_stream_handle: Option<u64>,
-}
+use super::bucket::GradientBucketManager;
 
 impl<R: Runtime<DType = DType>> GradientBucketManager<R> {
-    /// Create a new bucket manager.
-    ///
-    /// # Arguments
-    ///
-    /// * `param_info` - Parameter (id, numel, dtype) in reverse-backward order
-    ///   (last gradients computed first). This ordering maximizes overlap.
-    /// * `comm` - The communicator for allreduce operations.
-    /// * `bucket_size_bytes` - Target bucket size in bytes (default: 25 MiB).
-    /// * `compute_stream_handle` - Optional compute stream handle from
-    ///   `RuntimeClient::compute_stream_handle()`. When both this and
-    ///   `comm.as_stream_sync()` are available, enables event-based
-    ///   compute-communication overlap for 30-40% throughput improvement.
-    pub fn new(
-        param_info: &[(TensorId, usize, DType)],
-        comm: Arc<dyn Communicator>,
-        bucket_size_bytes: usize,
-        compute_stream_handle: Option<u64>,
-    ) -> Self {
-        let mut buckets = Vec::new();
-        let mut param_to_bucket = HashMap::new();
-        let mut current_ids = Vec::new();
-        let mut current_numels = Vec::new();
-        let mut current_bytes = 0usize;
-        let mut current_dtype = DType::F32;
-
-        for &(id, numel, dtype) in param_info {
-            let elem_bytes = dtype.size_in_bytes();
-            let param_bytes = numel * elem_bytes;
-
-            // Start a new bucket if adding this param would exceed the limit
-            // or if dtype changes (all params in a bucket must share dtype)
-            if !current_ids.is_empty()
-                && (current_bytes + param_bytes > bucket_size_bytes || dtype != current_dtype)
-            {
-                let n = current_ids.len();
-                for &cid in &current_ids {
-                    param_to_bucket.insert(cid, buckets.len());
-                }
-                buckets.push(Bucket {
-                    param_ids: std::mem::take(&mut current_ids),
-                    param_numels: std::mem::take(&mut current_numels),
-                    param_shapes: Vec::with_capacity(n),
-                    dtype: current_dtype,
-                    received_grads: HashMap::new(),
-                    flat_buffer: None,
-                    allreduce_launched: false,
-                    completion_event: None,
-                });
-                current_bytes = 0;
-            }
-
-            current_ids.push(id);
-            current_numels.push(numel);
-            current_bytes += param_bytes;
-            current_dtype = dtype;
-        }
-
-        // Flush remaining params into a final bucket
-        if !current_ids.is_empty() {
-            let n = current_ids.len();
-            for &cid in &current_ids {
-                param_to_bucket.insert(cid, buckets.len());
-            }
-            buckets.push(Bucket {
-                param_ids: current_ids,
-                param_numels: current_numels,
-                param_shapes: Vec::with_capacity(n),
-                dtype: current_dtype,
-                received_grads: HashMap::new(),
-                flat_buffer: None,
-                allreduce_launched: false,
-                completion_event: None,
-            });
-        }
-
-        // Enable overlapped mode only if both stream sync and compute stream are available.
-        // When the communicator lacks stream support, silently fall back to blocking allreduce.
-        let overlap_handle = if comm.as_stream_sync().is_some() {
-            compute_stream_handle
-        } else {
-            // Communicator does not support StreamSyncOps; event-based overlap unavailable.
-            None
-        };
-
-        Self {
-            buckets,
-            param_to_bucket,
-            comm,
-            compute_stream_handle: overlap_handle,
-        }
-    }
-
     /// Mark a gradient as ready. When all grads in a bucket are ready,
     /// flatten them into a contiguous buffer and launch allreduce.
     pub fn mark_grad_ready<C>(&mut self, id: TensorId, grad: &Tensor<R>, client: &C) -> Result<()>
@@ -374,79 +229,86 @@ impl<R: Runtime<DType = DType>> GradientBucketManager<R> {
 
         Ok(())
     }
-
-    /// Reset all buckets for a new backward pass.
-    pub fn reset(&mut self) {
-        let sync = self.comm.as_stream_sync();
-        for bucket in &mut self.buckets {
-            bucket.received_grads.clear();
-            bucket.allreduce_launched = false;
-            bucket.flat_buffer = None;
-            bucket.param_shapes.clear();
-            // Clean up any leaked completion events
-            if let Some(event) = bucket.completion_event.take()
-                && let Some(s) = sync
-            {
-                let _ = s.destroy_event(event);
-            }
-        }
-    }
-
-    /// Number of buckets.
-    pub fn num_buckets(&self) -> usize {
-        self.buckets.len()
-    }
-}
-
-/// Extract leaf parameter IDs from a computation graph in backward traversal order.
-///
-/// Performs a topological sort of the graph (same as backward), collects
-/// leaf node IDs (those with no `grad_fn`), and returns them in the order
-/// they are encountered during backward (reverse topological order).
-///
-/// This ordering is optimal for bucket construction: gradients computed
-/// first during backward should be in the same bucket so the bucket fills
-/// quickly and allreduce can start early.
-pub fn param_order_from_graph<R: Runtime>(loss: &Var<R>) -> Vec<TensorId> {
-    use std::collections::HashSet;
-
-    let mut topo = Vec::new();
-    let mut visited = HashSet::new();
-
-    fn dfs<R: Runtime>(
-        id: TensorId,
-        grad_fn: Option<Arc<dyn numr::autograd::GradFn<R>>>,
-        visited: &mut HashSet<TensorId>,
-        topo: &mut Vec<(TensorId, bool)>, // (id, is_leaf)
-    ) {
-        if visited.contains(&id) {
-            return;
-        }
-        visited.insert(id);
-
-        let input_ids: Vec<TensorId> = grad_fn
-            .as_ref()
-            .map(|gf| gf.inputs().to_vec())
-            .unwrap_or_default();
-
-        if let Some(gf) = &grad_fn {
-            for (input_id, input_grad_fn) in input_ids.iter().zip(gf.input_grad_fns()) {
-                dfs(*input_id, input_grad_fn, visited, topo);
-            }
-        }
-
-        topo.push((id, grad_fn.is_none()));
-    }
-
-    dfs(loss.id(), loss.grad_fn().cloned(), &mut visited, &mut topo);
-
-    // Reverse topological order, keep only leaves
-    topo.into_iter()
-        .rev()
-        .filter(|(_, is_leaf)| *is_leaf)
-        .map(|(id, _)| id)
-        .collect()
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::NoOpCommunicator;
+    use numr::runtime::cpu::CpuRuntime;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_flatten_unflatten_roundtrip() {
+        let (client, device) = cpu_setup();
+        let comm = Arc::new(NoOpCommunicator);
+
+        let id1 = TensorId::new();
+        let id2 = TensorId::new();
+
+        let params = vec![(id1, 3, DType::F32), (id2, 2, DType::F32)];
+        let mut mgr =
+            GradientBucketManager::<CpuRuntime>::new(&params, comm, 25 * 1024 * 1024, None);
+
+        let g1 = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap();
+        let g2 = Tensor::<CpuRuntime>::from_slice(&[4.0f32, 5.0], &[2], &device).unwrap();
+
+        // Mark both ready — should flatten and launch allreduce
+        mgr.mark_grad_ready(id1, &g1, &client).unwrap();
+        mgr.mark_grad_ready(id2, &g2, &client).unwrap();
+
+        // Wait and unflatten — with NoOp comm (world_size=1), values unchanged
+        let mut grads = GradStore::new();
+        mgr.wait_and_unflatten(&client, &mut grads).unwrap();
+
+        let r1: Vec<f32> = grads.get(id1).expect("grad for id1 should exist").to_vec();
+        let r2: Vec<f32> = grads.get(id2).expect("grad for id2 should exist").to_vec();
+        assert_eq!(r1, vec![1.0, 2.0, 3.0]);
+        assert_eq!(r2, vec![4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_untracked_param_ignored() {
+        let (client, device) = cpu_setup();
+        let comm = Arc::new(NoOpCommunicator);
+
+        let id1 = TensorId::new();
+        let untracked = TensorId::new();
+
+        let params = vec![(id1, 2, DType::F32)];
+        let mut mgr =
+            GradientBucketManager::<CpuRuntime>::new(&params, comm, 25 * 1024 * 1024, None);
+
+        let g = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device).unwrap();
+
+        // Marking an untracked param should be a no-op
+        mgr.mark_grad_ready(untracked, &g, &client).unwrap();
+    }
+
+    #[test]
+    fn test_multidim_gradient_shape_preserved() {
+        let (client, device) = cpu_setup();
+        let comm = Arc::new(NoOpCommunicator);
+
+        let id1 = TensorId::new();
+        let params = vec![(id1, 6, DType::F32)];
+        let mut mgr =
+            GradientBucketManager::<CpuRuntime>::new(&params, comm, 25 * 1024 * 1024, None);
+
+        // 2x3 gradient
+        let g1 =
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], &device)
+                .unwrap();
+
+        mgr.mark_grad_ready(id1, &g1, &client).unwrap();
+
+        let mut grads = GradStore::new();
+        mgr.wait_and_unflatten(&client, &mut grads).unwrap();
+
+        let result = grads.get(id1).expect("grad for id1 should exist");
+        assert_eq!(result.shape(), &[2, 3]);
+        let data: Vec<f32> = result.to_vec();
+        assert_eq!(data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+}

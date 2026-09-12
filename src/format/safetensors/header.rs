@@ -1,28 +1,11 @@
-//! SafeTensors file format parser and loader
-//!
-//! SafeTensors is a simple, safe format for storing tensors developed by HuggingFace.
-//!
-//! # Format
-//!
-//! ```text
-//! [8 bytes] header_size (little-endian u64)
-//! [header_size bytes] JSON header containing:
-//!   - "__metadata__": optional dict of string key-value pairs
-//!   - "<tensor_name>": { "dtype": str, "shape": [int], "data_offsets": [start, end] }
-//! [remaining bytes] raw tensor data
-//! ```
+//! SafeTensors header parsing, tensor metadata, and raw byte reads.
 
 use crate::error::{Error, Result};
 use numr::dtype::DType;
-use numr::runtime::Runtime;
-use numr::tensor::Tensor;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-
-mod save;
-pub use save::save_safetensors;
 
 /// Information about a tensor in a SafeTensors file
 #[derive(Debug, Clone)]
@@ -48,7 +31,7 @@ impl TensorInfo {
 pub struct SafeTensors {
     file: File,
     data_offset: u64,
-    tensors: HashMap<String, TensorInfo>,
+    pub(super) tensors: HashMap<String, TensorInfo>,
     metadata: HashMap<String, String>,
 }
 
@@ -225,112 +208,9 @@ impl SafeTensors {
 
         Ok(buf)
     }
-
-    /// Load a tensor in its native dtype on the given device
-    ///
-    /// Preserves the original dtype from the SafeTensors file (F32, F16, BF16, etc.)
-    /// without converting to F32. This halves memory for BF16/F16 models.
-    pub fn load_tensor<R: Runtime<DType = DType>>(
-        &mut self,
-        name: &str,
-        device: &R::Device,
-    ) -> Result<Tensor<R>> {
-        let info = self
-            .tensors
-            .get(name)
-            .ok_or_else(|| Error::ModelError {
-                reason: format!("tensor not found: {name}"),
-            })?
-            .clone();
-
-        let bytes = self.read_tensor_bytes(name)?;
-
-        match info.dtype {
-            DType::F32 | DType::F16 | DType::BF16 => {
-                // Load raw bytes directly in native dtype
-                let storage = numr::tensor::Storage::<R>::from_bytes(&bytes, info.dtype, device)
-                    .map_err(Error::Numr)?;
-                Ok(Tensor::<R>::from_storage_contiguous(storage, &info.shape))
-            }
-            DType::F64 => {
-                // Downcast F64 to F32 (F64 weights are rare and wasteful)
-                let data: Vec<f32> = bytes
-                    .as_chunks::<8>()
-                    .0
-                    .iter()
-                    .map(|b| {
-                        f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
-                    })
-                    .collect();
-                Tensor::<R>::from_slice(&data, &info.shape, device).map_err(Error::Numr)
-            }
-            DType::I64 => {
-                // SafeTensors stores integers little-endian; decode explicitly
-                // rather than reinterpreting raw bytes, so this is correct on
-                // both little- and big-endian hosts.
-                let data: Vec<i64> = bytes
-                    .as_chunks::<8>()
-                    .0
-                    .iter()
-                    .map(|b| i64::from_le_bytes(*b))
-                    .collect();
-                Tensor::<R>::from_slice(&data, &info.shape, device).map_err(Error::Numr)
-            }
-            DType::I32 => {
-                // Little-endian decode, see the I64 arm above.
-                let data: Vec<i32> = bytes
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|b| i32::from_le_bytes(*b))
-                    .collect();
-                Tensor::<R>::from_slice(&data, &info.shape, device).map_err(Error::Numr)
-            }
-            DType::U32 => {
-                // Little-endian decode, see the I64 arm above.
-                let data: Vec<u32> = bytes
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|b| u32::from_le_bytes(*b))
-                    .collect();
-                Tensor::<R>::from_slice(&data, &info.shape, device).map_err(Error::Numr)
-            }
-            DType::I8 | DType::Bool => {
-                // Single-byte types have no endianness to decode; load the
-                // raw bytes directly, same as the float arm above.
-                let storage = numr::tensor::Storage::<R>::from_bytes(&bytes, info.dtype, device)
-                    .map_err(Error::Numr)?;
-                Ok(Tensor::<R>::from_storage_contiguous(storage, &info.shape))
-            }
-            // Reached only if `parse_dtype` is ever extended to accept a
-            // SafeTensors dtype string this arm doesn't yet decode (e.g.
-            // I16/U16/U64/U8, which numr's DType supports but this loader
-            // does not yet handle) or DType gains a variant `parse_dtype`
-            // can never produce (Complex64/128, FP8). Names the dtype so
-            // the caller sees what to add rather than silently coercing it.
-            other => Err(Error::ModelError {
-                reason: format!("unsupported SafeTensors dtype: {other:?}"),
-            }),
-        }
-    }
-
-    /// Load all tensors to the given device
-    pub fn load_all<R: Runtime<DType = DType>>(
-        &mut self,
-        device: &R::Device,
-    ) -> Result<HashMap<String, Tensor<R>>> {
-        let names: Vec<String> = self.tensors.keys().cloned().collect();
-        let mut result = HashMap::with_capacity(names.len());
-        for name in names {
-            let tensor = self.load_tensor::<R>(&name, device)?;
-            result.insert(name, tensor);
-        }
-        Ok(result)
-    }
 }
 
-fn parse_dtype(s: &str) -> Result<DType> {
+pub(super) fn parse_dtype(s: &str) -> Result<DType> {
     match s {
         "F32" | "f32" | "float32" => Ok(DType::F32),
         "F16" | "f16" | "float16" => Ok(DType::F16),
@@ -348,4 +228,87 @@ fn parse_dtype(s: &str) -> Result<DType> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    pub(in super::super) fn create_test_file() -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+
+        let header = serde_json::json!({
+            "__metadata__": { "format": "pt" },
+            "weight": {
+                "dtype": "F32",
+                "shape": [2, 3],
+                "data_offsets": [0, 24]
+            }
+        });
+        let header_str = header.to_string();
+        let header_bytes = header_str.as_bytes();
+
+        file.write_all(&(header_bytes.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(header_bytes).unwrap();
+
+        for f in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0] {
+            file.write_all(&f.to_le_bytes()).unwrap();
+        }
+        file.flush().unwrap();
+        file
+    }
+
+    #[test]
+    fn test_open_and_metadata() {
+        let f = create_test_file();
+        let st = SafeTensors::open(f.path()).unwrap();
+        assert_eq!(st.len(), 1);
+        assert_eq!(st.metadata().get("format"), Some(&"pt".to_string()));
+    }
+
+    #[test]
+    fn test_tensor_info() {
+        let f = create_test_file();
+        let st = SafeTensors::open(f.path()).unwrap();
+        let info = st.tensor_info("weight").unwrap();
+        assert_eq!(info.dtype, DType::F32);
+        assert_eq!(info.shape, vec![2, 3]);
+        assert_eq!(info.numel(), 6);
+        assert_eq!(info.size_bytes(), 24);
+    }
+
+    #[test]
+    fn test_tensor_not_found() {
+        let f = create_test_file();
+        let st = SafeTensors::open(f.path()).unwrap();
+        assert!(st.tensor_info("nonexistent").is_err());
+    }
+
+    /// An unsupported dtype string must fail with an `Err` naming the dtype,
+    /// never a panic — checked at `SafeTensors::open`, where `parse_dtype` runs.
+    #[test]
+    fn test_load_tensor_unsupported_dtype_names_it() {
+        let mut file = NamedTempFile::new().unwrap();
+        let header = serde_json::json!({
+            "w": { "dtype": "F8_E4M3", "shape": [1], "data_offsets": [0, 1] }
+        });
+        let header_str = header.to_string();
+        let header_bytes = header_str.as_bytes();
+        file.write_all(&(header_bytes.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(header_bytes).unwrap();
+        file.write_all(&[0u8]).unwrap();
+        file.flush().unwrap();
+
+        // `unwrap_err` would require `SafeTensors: Debug`; match instead of
+        // widening the public type's derives just to satisfy a test.
+        let msg = match SafeTensors::open(file.path()) {
+            Ok(_) => panic!("expected an error naming the unsupported dtype"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            msg.contains("F8_E4M3"),
+            "error should name the dtype: {msg}"
+        );
+    }
+}

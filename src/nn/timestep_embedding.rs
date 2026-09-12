@@ -230,6 +230,23 @@ impl<R: Runtime<DType = DType>> TimestepEmbedding<R> {
         written += load_lora_child(&mut self.linear_2, params, "linear_2")?;
         Ok(written)
     }
+
+    /// Set every attached adapter's `lora_a`/`lora_b` to `trainable`,
+    /// returning how many of `linear_1`/`linear_2` carry an adapter. See
+    /// [`crate::nn::LoraLinear::set_trainable`] for why inference must
+    /// freeze a file-loaded adapter. Unlike [`Self::apply_lora`], this
+    /// touches only ALREADY-adapted linears and needs no `targets`/`prefix`
+    /// — it is a blanket toggle, not a name match.
+    pub fn set_lora_trainable(&mut self, trainable: bool) -> usize {
+        let mut touched = 0;
+        for linear in [&mut self.linear_1, &mut self.linear_2] {
+            if linear.is_adapted() {
+                linear.set_trainable(trainable);
+                touched += 1;
+            }
+        }
+        touched
+    }
 }
 
 /// Names ARE the field names (`linear_1`, `linear_2`) — the owning

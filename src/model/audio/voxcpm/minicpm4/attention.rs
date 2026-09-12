@@ -31,10 +31,7 @@ use crate::inference::KvCache;
 use crate::model::attention_core::{AttentionCoreSpec, AttentionKernel, attention_core_masked};
 use crate::model::traits::ModelClient;
 use crate::nn::var_ops::var_contiguous;
-use crate::nn::{
-    LoraTargets, MaybeLoraLinear, MaybeQuantLinear, Module, RoPE, adapt_if_targeted, child_params,
-    extend_named, load_lora_child, push_projection_name,
-};
+use crate::nn::{MaybeLoraLinear, MaybeQuantLinear, Module, RoPE, child_params, extend_named};
 use crate::quant::traits::DequantOps;
 use guards::{missing_rope, require_preallocated_cache};
 use numr::autograd::{Var, var_narrow, var_permute, var_reshape};
@@ -44,7 +41,6 @@ use numr::ops::{
     ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
-use numr::tensor::{Tensor, TensorId};
 
 /// `q_proj`: 2048 -> 2048 (16 heads x 128), `k_proj`/`v_proj`: 2048 -> 256
 /// (2 heads x 128, GQA group size 8), `o_proj`: 2048 -> 2048. All bias-free.
@@ -348,105 +344,6 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
         self.o_proj.forward(client, &attn_out)
     }
 
-    /// Wrap `q_proj`/`k_proj`/`v_proj`/`o_proj` that `targets` names with a
-    /// fresh LoRA adapter each, returning how many were adapted.
-    ///
-    /// `prefix` is the dotted path the OWNING [`MiniCpm4Layer`] would pass
-    /// to [`crate::nn::extend_named`] for this block — `"self_attn"` under
-    /// `MiniCpm4Layer::named_parameters`'s own convention — so each
-    /// projection's full path here (via [`LoraTargets::join`]) matches
-    /// `named_parameters()`'s path for that same projection exactly.
-    ///
-    /// This is a LEAF step in the bottom-up composition: it does NOT call
-    /// [`LoraTargets::ensure_all_match`] itself, only the model-level entry
-    /// points do (see their doc comments) — a target this block has no
-    /// projection for (e.g. `gate_proj`) is not an error here, only if it
-    /// matches nothing ANYWHERE in the tree the caller actually entered on.
-    pub fn apply_lora(
-        &mut self,
-        targets: &LoraTargets,
-        rank: usize,
-        alpha: f32,
-        device: &R::Device,
-        prefix: &str,
-    ) -> Result<usize> {
-        let mut adapted = adapt_if_targeted(
-            &mut self.q_proj,
-            targets,
-            rank,
-            alpha,
-            device,
-            prefix,
-            "q_proj",
-        )?;
-        adapted += adapt_if_targeted(
-            &mut self.k_proj,
-            targets,
-            rank,
-            alpha,
-            device,
-            prefix,
-            "k_proj",
-        )?;
-        adapted += adapt_if_targeted(
-            &mut self.v_proj,
-            targets,
-            rank,
-            alpha,
-            device,
-            prefix,
-            "v_proj",
-        )?;
-        adapted += adapt_if_targeted(
-            &mut self.o_proj,
-            targets,
-            rank,
-            alpha,
-            device,
-            prefix,
-            "o_proj",
-        )?;
-        Ok(adapted)
-    }
-
-    /// Every dotted projection path [`Self::apply_lora`] would adapt under
-    /// `prefix` — `q_proj`, `k_proj`, `v_proj`, `o_proj` — INDEPENDENT of
-    /// whether a projection is dense, block-quantized, or
-    /// decomposed-quantized. This is what fixes the QLoRA validation bug: a
-    /// GGUF-loaded `MiniCpm4Attention` has `named_parameters()` return
-    /// EMPTY for every projection here (block-quantized storage has no
-    /// `Var<R>`), so validating against `named_parameters()` rejects a
-    /// perfectly valid `q_proj`/`v_proj` target on a quantized checkpoint.
-    /// Which projections exist is a STRUCTURAL property of this type, not a
-    /// function of whether its weights happen to be dense. Built with the
-    /// same [`crate::nn::push_projection_name`] helper `apply_lora`'s
-    /// [`adapt_if_targeted`] calls use, so a path here is never hand-written
-    /// separately from the one `apply_lora` matches.
-    pub fn lora_projection_names(&self, prefix: &str) -> Vec<String> {
-        let mut names = Vec::new();
-        push_projection_name(&mut names, prefix, "q_proj");
-        push_projection_name(&mut names, prefix, "k_proj");
-        push_projection_name(&mut names, prefix, "v_proj");
-        push_projection_name(&mut names, prefix, "o_proj");
-        names
-    }
-
-    /// Write back updated `q_proj`/`k_proj`/`v_proj`/`o_proj` adapter values
-    /// from an optimizer's `params` map, keeping their [`TensorId`]s. See
-    /// [`crate::nn::MaybeLoraLinear::load_lora_parameters`] for the
-    /// per-projection semantics. No prefix needed — unlike
-    /// [`Self::apply_lora`], lookup is by ID.
-    pub fn load_lora_parameters(
-        &mut self,
-        params: &std::collections::HashMap<TensorId, Tensor<R>>,
-    ) -> Result<usize> {
-        let mut written = load_lora_child(&mut self.q_proj, params, "q_proj")?;
-        written += load_lora_child(&mut self.k_proj, params, "k_proj")?;
-        written += load_lora_child(&mut self.v_proj, params, "v_proj")?;
-        written += load_lora_child(&mut self.o_proj, params, "o_proj")?;
-        Ok(written)
-    }
-
     /// Cheap duplicate that preserves every projection's `Var<R>`
     /// `TensorId`s, for capturing this block by owned value in a `'static`
     /// activation-checkpointing closure — `numr::autograd::checkpoint`'s
@@ -493,6 +390,7 @@ impl<R: Runtime<DType = DType>> Module<R> for MiniCpm4Attention<R> {
 }
 
 mod guards;
+mod lora;
 
 #[cfg(test)]
 mod tests;

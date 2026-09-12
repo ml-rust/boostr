@@ -20,6 +20,6 @@ pub mod tokenizer;
 pub mod vae;
 
 pub use client::VoxCpmClient;
-pub use engine::{VoxCpm2Engine, VoxCpm2SynthOptions, VoxCpm2Weights};
-pub use model::{PrefillState, VoxCpm2Config, VoxCpm2Model};
+pub use engine::{VoxCpm2Engine, VoxCpm2LoadOptions, VoxCpm2SynthOptions, VoxCpm2Weights};
+pub use model::{LoraAdapterReport, PrefillState, VoxCpm2Config, VoxCpm2Model};
 pub use tokenizer::{load_tokenizer, normalize_whitespace, tokenize};

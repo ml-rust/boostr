@@ -159,4 +159,25 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
         }
         Ok(written)
     }
+
+    /// Set every attached adapter's `lora_a`/`lora_b` to `trainable` across
+    /// `in_proj`/`cond_proj`/`out_proj`, `time_mlp`/`delta_time_mlp`, and
+    /// every layer, returning how many projections carry an adapter. No
+    /// `targets`/`prefix` needed — unlike [`Self::apply_lora`], this is a
+    /// blanket toggle over whatever is already adapted.
+    pub fn set_lora_trainable(&mut self, trainable: bool) -> usize {
+        let mut touched = 0;
+        for proj in [&mut self.in_proj, &mut self.cond_proj, &mut self.out_proj] {
+            if proj.is_adapted() {
+                proj.set_trainable(trainable);
+                touched += 1;
+            }
+        }
+        touched += self.time_mlp.set_lora_trainable(trainable);
+        touched += self.delta_time_mlp.set_lora_trainable(trainable);
+        for layer in self.layers.iter_mut() {
+            touched += layer.set_lora_trainable(trainable);
+        }
+        touched
+    }
 }

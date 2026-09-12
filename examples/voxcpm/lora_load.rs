@@ -10,26 +10,26 @@ use std::path::Path;
 
 use boostr::format::SafeTensors;
 use boostr::model::audio::voxcpm::model::VoxCpm2Model;
-use boostr::nn::{LoraTargets, check_lora_metadata};
+use boostr::nn::check_lora_metadata;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 
-/// Apply LoRA to `model` and load a saved adapter's tensors into it — the
-/// exact sequence and functions `voxcpm_clone`'s `--lora` arm uses
-/// (`check_lora_metadata`, `SafeTensors::open`/`load_all`,
-/// `load_lora_named`), reused here so both binaries load one file
-/// identically. Shared by `--eval-only` (score base + adapter) and training
-/// (warm-start the adapters from the file) — see `voxcpm_finetune`'s module
-/// docs' "`--lora`" section.
+/// Check `lora_path`'s metadata against the flags given, then apply it via
+/// [`VoxCpm2Model::load_lora_adapter`] (the src-level entry point, which
+/// applies the adapter using ITS OWN metadata) — the exact sequence
+/// `voxcpm_clone`'s `--lora` arm uses. Shared by `--eval-only` (score base +
+/// adapter) and training (warm-start the adapters from the file) — see
+/// `voxcpm_finetune`'s module docs' "`--lora`" section.
 ///
-/// `check_lora_metadata` runs BEFORE `apply_lora`: a rank/alpha/targets
-/// mismatch must abort before any `Var` is allocated, not after. Its error
-/// already names the disagreeing field and both values; this wraps it with
-/// the file path, the flag values given, and the fix, since the bare
-/// mismatch names neither.
+/// `check_lora_metadata` runs BEFORE `load_lora_adapter`: a
+/// rank/alpha/targets mismatch against the flags given here must abort
+/// before any `Var` is allocated, not after. Its error already names the
+/// disagreeing field and both values; this wraps it with the file path, the
+/// flag values given, and the fix, since the bare mismatch names neither.
 ///
-/// Returns `(projections_adapted, tensors_loaded)`, both from the same calls
-/// `voxcpm_clone` logs.
+/// Returns `(projections_adapted, tensors_loaded)`, both from
+/// [`boostr::model::audio::voxcpm::model::LoraAdapterReport`], the same
+/// counts `voxcpm_clone` logs.
 pub fn load_lora_adapter<R: Runtime<DType = DType>>(
     model: &mut VoxCpm2Model<R>,
     lora_path: &Path,
@@ -39,7 +39,7 @@ pub fn load_lora_adapter<R: Runtime<DType = DType>>(
     device: &R::Device,
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
     eprintln!("loading LoRA adapter {} ...", lora_path.display());
-    let mut adapter = SafeTensors::open(lora_path)?;
+    let adapter = SafeTensors::open(lora_path)?;
     check_lora_metadata(adapter.metadata(), rank, alpha, target_names).map_err(|e| {
         format!(
             "--lora {}: adapter does not match --rank {rank} --alpha {alpha} --targets \
@@ -48,12 +48,6 @@ pub fn load_lora_adapter<R: Runtime<DType = DType>>(
             lora_path.display()
         )
     })?;
-    let lora_targets = LoraTargets::new(target_names.to_vec());
-    // `apply_lora` must run before `load_lora_named`: it allocates the
-    // `lora_a`/`lora_b` Vars that name lookup then resolves against — same
-    // order `voxcpm_clone`'s --lora arm uses.
-    let adapted = model.apply_lora(&lora_targets, rank, alpha, device)?;
-    let lora_tensors = adapter.load_all::<R>(device)?;
-    let loaded = model.load_lora_named(&lora_tensors)?;
-    Ok((adapted, loaded))
+    let report = model.load_lora_adapter(lora_path, device)?;
+    Ok((report.projections_adapted, report.tensors_loaded))
 }

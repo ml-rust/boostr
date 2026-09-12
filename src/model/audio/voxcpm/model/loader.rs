@@ -425,6 +425,12 @@ mod lora_named;
 // the same 500-line reason as `lora_named` above.
 mod checkpointing;
 
+// `load_lora_adapter` lives in `loader/lora_adapter.rs`, in its own
+// `impl<R: Runtime<DType = DType>> VoxCpm2Model<R>` block — split out for the
+// same 500-line reason as `lora_named` above.
+mod lora_adapter;
+pub use lora_adapter::LoraAdapterReport;
+
 /// Whole-model parameter enumeration for fine-tuning (e.g. LoRA target
 /// matching, [`SimpleTrainer`](crate::trainer::simple::SimpleTrainer)'s
 /// `HashMap<TensorId, Tensor<R>>` build). Names are checkpoint keys

@@ -1160,9 +1160,15 @@ where
             &target_names,
             device,
         )?;
+        // `VoxCpm2Model::load_lora_adapter` freezes every adapter it loads
+        // (inference posture: no autograd graph). This IS a warm start, not
+        // inference — the training loop below needs `backward`/optimizer
+        // steps to reach `lora_a`/`lora_b`, so re-enable tracking here.
+        let unfrozen = model.set_lora_trainable(true);
         eprintln!(
             "LoRA: targets={target_names:?} rank={} alpha={} -> {adapted} projection(s) \
-             adapted, {loaded} tensor(s) loaded from {} (warm start)",
+             adapted, {loaded} tensor(s) loaded from {} (warm start, {unfrozen} adapter(s) \
+             unfrozen for training)",
             args.rank,
             args.alpha,
             lora_path.display()

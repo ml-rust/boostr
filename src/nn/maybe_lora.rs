@@ -117,6 +117,26 @@ impl<R: Runtime<DType = DType>> MaybeLoraLinear<R> {
         matches!(self, Self::Lora(_))
     }
 
+    /// Set an attached adapter's `lora_a`/`lora_b` to `trainable`. See
+    /// [`LoraLinear::set_trainable`] for WHY inference must freeze a
+    /// file-loaded adapter. No-op on `Self::Plain` — there is nothing to
+    /// (un)freeze on an unadapted projection.
+    pub fn set_trainable(&mut self, trainable: bool) {
+        if let Self::Lora(lora) = self {
+            lora.set_trainable(trainable);
+        }
+    }
+
+    /// `true` when this is an adapted projection whose factors currently
+    /// require grad. `Self::Plain` is always `false` — there is no adapter
+    /// to be trainable.
+    pub fn is_trainable(&self) -> bool {
+        match self {
+            Self::Plain(_) => false,
+            Self::Lora(lora) => lora.is_trainable(),
+        }
+    }
+
     /// Overwrite an attached adapter's `lora_a`/`lora_b` in place, keeping
     /// their stable [`TensorId`]s. See
     /// [`LoraLinear::set_adapters_with_ids`] for why a training loop needs
@@ -385,5 +405,31 @@ mod tests {
         let (alias_a, alias_b) = aliased.adapters().expect("aliased is Lora");
         assert_eq!(orig_a.id(), alias_a.id(), "lora_a id must survive alias()");
         assert_eq!(orig_b.id(), alias_b.id(), "lora_b id must survive alias()");
+    }
+
+    /// `set_trainable`/`is_trainable` must pass straight through on `Lora`,
+    /// and `set_trainable` must be a no-op — never a panic — on `Plain`.
+    #[test]
+    fn set_trainable_passes_through_lora_and_is_a_noop_on_plain() {
+        let device = <CpuRuntime as Runtime>::default_device();
+        let weight: Tensor<CpuRuntime> = Tensor::zeros(&[8, 4], DType::F32, &device).unwrap();
+        let base = Linear::new(weight, None, false);
+        let lora = LoraLinear::new(base, 2, 4.0, &device).expect("lora new must succeed on CPU");
+        let mut adapted: MaybeLoraLinear<CpuRuntime> = lora.into();
+
+        assert!(adapted.is_trainable(), "LoraLinear::new starts trainable");
+        adapted.set_trainable(false);
+        assert!(!adapted.is_trainable());
+        adapted.set_trainable(true);
+        assert!(adapted.is_trainable());
+
+        let plain_weight: Tensor<CpuRuntime> = Tensor::zeros(&[8, 4], DType::F32, &device).unwrap();
+        let mut plain: MaybeLoraLinear<CpuRuntime> = Linear::new(plain_weight, None, false).into();
+        assert!(!plain.is_trainable());
+        plain.set_trainable(true); // must not panic
+        assert!(
+            !plain.is_trainable(),
+            "Plain has no adapter to make trainable"
+        );
     }
 }

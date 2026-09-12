@@ -40,7 +40,9 @@ pub use groupnorm::GroupNorm;
 pub use layernorm::LayerNorm;
 pub use linear::{Linear, MaybeQuantLinear, QuantLinear};
 pub use lora::LoraLinear;
-pub use lora_metadata::{build_lora_metadata, check_lora_metadata};
+pub use lora_metadata::{
+    LoraMetadata, build_lora_metadata, check_lora_metadata, parse_lora_metadata,
+};
 pub use lora_targets::{
     LoraTargets, adapt_if_targeted, load_lora_child, named_tensors_to_id_map, push_projection_name,
 };

@@ -30,7 +30,7 @@ pub use generate::{
     StepOutcome, TeacherForcedConditioning,
 };
 pub use gguf_loader::GGUF_CONFIG_JSON_KEY;
-pub use loader::{DEFAULT_CONFIG_FILE, DEFAULT_WEIGHTS_FILE, VoxCpm2Model};
+pub use loader::{DEFAULT_CONFIG_FILE, DEFAULT_WEIGHTS_FILE, LoraAdapterReport, VoxCpm2Model};
 pub use patches::{fold_patches, pad_to_multiple};
 pub use prefill::{PrefillIntermediates, PrefillState};
 pub use sequence::{SequenceLayout, check_mask_complementarity};

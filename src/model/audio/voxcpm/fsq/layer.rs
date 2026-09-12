@@ -199,6 +199,23 @@ impl<R: Runtime<DType = DType>> ScalarQuantization<R> {
         written += load_lora_child(&mut self.out_proj, params, "out_proj")?;
         Ok(written)
     }
+
+    /// Set every attached adapter's `lora_a`/`lora_b` to `trainable`,
+    /// returning how many of `in_proj`/`out_proj` carry an adapter. See
+    /// [`crate::nn::LoraLinear::set_trainable`] for why inference must
+    /// freeze a file-loaded adapter. Unlike [`Self::apply_lora`], this
+    /// touches only ALREADY-adapted projections and needs no
+    /// `targets`/`prefix` — it is a blanket toggle, not a name match.
+    pub fn set_lora_trainable(&mut self, trainable: bool) -> usize {
+        let mut touched = 0;
+        for proj in [&mut self.in_proj, &mut self.out_proj] {
+            if proj.is_adapted() {
+                proj.set_trainable(trainable);
+                touched += 1;
+            }
+        }
+        touched
+    }
 }
 
 /// Names mirror `fsq_layer.{in_proj,out_proj}.*` — the checkpoint prefix
@@ -377,6 +394,30 @@ impl<R: Runtime<DType = DType>> AuxProjections<R> {
         written += load_lora_child(&mut self.stop_proj, params, "stop_proj")?;
         written += load_lora_child(&mut self.stop_head, params, "stop_head")?;
         Ok(written)
+    }
+
+    /// Set every attached adapter's `lora_a`/`lora_b` to `trainable` across
+    /// all six projections, returning how many carry an adapter. See
+    /// [`crate::nn::LoraLinear::set_trainable`] for why inference must
+    /// freeze a file-loaded adapter. Unlike [`Self::apply_lora`], this
+    /// touches only ALREADY-adapted projections and needs no `prefix` — it
+    /// is a blanket toggle, not a name match.
+    pub fn set_lora_trainable(&mut self, trainable: bool) -> usize {
+        let mut touched = 0;
+        for proj in [
+            &mut self.enc_to_lm_proj,
+            &mut self.lm_to_dit_proj,
+            &mut self.res_to_dit_proj,
+            &mut self.fusion_concat_proj,
+            &mut self.stop_proj,
+            &mut self.stop_head,
+        ] {
+            if proj.is_adapted() {
+                proj.set_trainable(trainable);
+                touched += 1;
+            }
+        }
+        touched
     }
 }
 

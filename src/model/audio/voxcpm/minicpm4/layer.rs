@@ -250,6 +250,14 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
             mlp: self.mlp.alias(),
         }
     }
+
+    /// Delegate to `MiniCpm4Attention::set_lora_trainable` and
+    /// `MiniCpm4Mlp::set_lora_trainable`, summing their counts. No
+    /// `targets`/`prefix` needed — unlike [`Self::apply_lora`], this is a
+    /// blanket toggle over whatever is already adapted.
+    pub fn set_lora_trainable(&mut self, trainable: bool) -> usize {
+        self.self_attn.set_lora_trainable(trainable) + self.mlp.set_lora_trainable(trainable)
+    }
 }
 
 /// Names ARE the field names (`input_layernorm`, `self_attn.*`,

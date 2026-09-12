@@ -259,6 +259,22 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
         }
         Ok(written)
     }
+
+    /// Set every attached adapter's `lora_a`/`lora_b` to `trainable` across
+    /// `in_proj` and every layer, returning how many projections carry an
+    /// adapter. No `targets`/`prefix` needed — unlike [`Self::apply_lora`],
+    /// this is a blanket toggle over whatever is already adapted.
+    pub fn set_lora_trainable(&mut self, trainable: bool) -> usize {
+        let mut touched = 0;
+        if self.in_proj.is_adapted() {
+            self.in_proj.set_trainable(trainable);
+            touched += 1;
+        }
+        for layer in self.layers.iter_mut() {
+            touched += layer.set_lora_trainable(trainable);
+        }
+        touched
+    }
 }
 
 /// Names mirror `feat_encoder.{in_proj,special_token,encoder.layers.{i},

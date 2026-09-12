@@ -243,6 +243,29 @@ impl<R: Runtime<DType = DType>> LoraLinear<R> {
         self.scaling
     }
 
+    /// Set `lora_a`/`lora_b`'s `requires_grad` to `trainable`, in place.
+    ///
+    /// A LoRA adapter LOADED FROM A FILE for inference must NOT record an
+    /// autograd graph on every forward: `requires_grad = true` on either
+    /// factor makes every op downstream of it tracked
+    /// (`numr::autograd::var_ops`), and dropping that graph after inference
+    /// (nothing ever calls `backward`) recurses over every recorded node —
+    /// deep enough to overflow a bounded worker stack (2 MB tokio workers,
+    /// observed in blazr). Call `set_trainable(false)` right after loading a
+    /// frozen adapter; a caller that resumes fine-tuning it calls
+    /// `set_trainable(true)` instead.
+    pub fn set_trainable(&mut self, trainable: bool) {
+        self.lora_a.set_requires_grad(trainable);
+        self.lora_b.set_requires_grad(trainable);
+    }
+
+    /// `true` when `lora_a`/`lora_b` currently require grad. `LoraLinear::new`
+    /// and `from_weights`/`with_ids` always set both factors to the SAME
+    /// flag, so reading `lora_a` alone reflects both.
+    pub fn is_trainable(&self) -> bool {
+        self.lora_a.requires_grad()
+    }
+
     /// Merge the adapter into the base weight, producing a plain `Linear`.
     ///
     /// Computes `W + scaling * (B @ A)`, matching the base weight layout

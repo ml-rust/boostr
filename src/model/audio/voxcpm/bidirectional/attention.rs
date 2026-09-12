@@ -245,6 +245,28 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
             head_dim: self.head_dim,
         }
     }
+
+    /// Set every attached adapter's `lora_a`/`lora_b` to `trainable`,
+    /// returning how many of the four projections carry an adapter. See
+    /// [`crate::nn::LoraLinear::set_trainable`] for why inference must
+    /// freeze a file-loaded adapter. Unlike [`Self::apply_lora`], this
+    /// touches only ALREADY-adapted projections and needs no
+    /// `targets`/`prefix` — it is a blanket toggle, not a name match.
+    pub fn set_lora_trainable(&mut self, trainable: bool) -> usize {
+        let mut touched = 0;
+        for proj in [
+            &mut self.q_proj,
+            &mut self.k_proj,
+            &mut self.v_proj,
+            &mut self.o_proj,
+        ] {
+            if proj.is_adapted() {
+                proj.set_trainable(trainable);
+                touched += 1;
+            }
+        }
+        touched
+    }
 }
 
 /// Names ARE the field names (`q_proj`, `k_proj`, `v_proj`, `o_proj`) —

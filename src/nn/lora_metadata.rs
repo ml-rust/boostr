@@ -32,28 +32,32 @@ pub fn build_lora_metadata(rank: usize, alpha: f32, targets: &[String]) -> HashM
     meta
 }
 
-/// Check a loaded adapter file's `__metadata__` (from
-/// [`SafeTensors::metadata`](crate::format::safetensors::SafeTensors::metadata))
-/// against the rank/alpha/targets the caller is about to load it into.
+/// Rank, alpha and target names parsed out of an adapter file's
+/// `__metadata__` — [`parse_lora_metadata`]'s result, and what
+/// `VoxCpm2Model::load_lora_adapter` applies without a caller-supplied
+/// `--rank`/`--alpha`/`--targets` to get wrong.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoraMetadata {
+    pub rank: usize,
+    pub alpha: f32,
+    pub targets: Vec<String>,
+}
+
+/// Parse rank/alpha/targets out of a loaded adapter file's `__metadata__`
+/// (from
+/// [`SafeTensors::metadata`](crate::format::safetensors::SafeTensors::metadata)).
+/// The ONE parser: [`check_lora_metadata`] calls this then compares the
+/// result against a caller's expected values, and
+/// `VoxCpm2Model::load_lora_adapter` calls this to get the values it
+/// applies with — neither hand-rolls its own parse.
 ///
 /// Errors when `metadata` is EMPTY: an adapter saved before this crate
-/// wrote LoRA config metadata carries no proof it matches the model, and a
-/// rank/alpha mismatch between training and inference is a top real-world
-/// LoRA failure mode — so this refuses to pass an unproven file rather than
-/// allow a silent bypass. Re-save the adapter through
-/// [`build_lora_metadata`] to attach metadata, or verify rank/alpha/targets
-/// by hand before loading it.
-///
-/// Each disagreeing field is named individually, with both the expected
-/// and the found value — never one generic "config mismatch" message.
-/// `targets` is compared as a set: `--targets v_proj,q_proj` and
-/// `--targets q_proj,v_proj` name the same adapted projections.
-pub fn check_lora_metadata(
-    metadata: &HashMap<String, String>,
-    expected_rank: usize,
-    expected_alpha: f32,
-    expected_targets: &[String],
-) -> Result<()> {
+/// wrote LoRA config metadata carries no proof of its rank/alpha/targets.
+/// Re-save the adapter through [`build_lora_metadata`] to attach metadata,
+/// or verify rank/alpha/targets by hand before loading it. Also errors when
+/// `lora_rank`/`lora_alpha`/`lora_targets` is missing or malformed, naming
+/// every such field at once.
+pub fn parse_lora_metadata(metadata: &HashMap<String, String>) -> Result<LoraMetadata> {
     if metadata.is_empty() {
         return Err(Error::InvalidArgument {
             arg: "metadata",
@@ -65,51 +69,115 @@ pub fn check_lora_metadata(
         });
     }
 
-    let mut mismatches = Vec::new();
+    let mut problems = Vec::new();
 
-    match metadata.get(LORA_METADATA_RANK_KEY) {
+    let rank = match metadata.get(LORA_METADATA_RANK_KEY) {
         Some(found) => match found.parse::<usize>() {
-            Ok(found_rank) if found_rank != expected_rank => mismatches.push(format!(
-                "{LORA_METADATA_RANK_KEY}: expected {expected_rank}, found {found_rank}"
-            )),
-            Ok(_) => {}
-            Err(_) => mismatches.push(format!(
-                "{LORA_METADATA_RANK_KEY}: not a valid integer: '{found}'"
-            )),
-        },
-        None => mismatches.push(format!("{LORA_METADATA_RANK_KEY}: missing from metadata")),
-    }
-
-    match metadata.get(LORA_METADATA_ALPHA_KEY) {
-        Some(found) => match found.parse::<f32>() {
-            Ok(found_alpha) if found_alpha != expected_alpha => mismatches.push(format!(
-                "{LORA_METADATA_ALPHA_KEY}: expected {expected_alpha}, found {found_alpha}"
-            )),
-            Ok(_) => {}
-            Err(_) => mismatches.push(format!(
-                "{LORA_METADATA_ALPHA_KEY}: not a valid number: '{found}'"
-            )),
-        },
-        None => mismatches.push(format!("{LORA_METADATA_ALPHA_KEY}: missing from metadata")),
-    }
-
-    match metadata.get(LORA_METADATA_TARGETS_KEY) {
-        Some(found) => {
-            let mut found_sorted: Vec<&str> = found.split(',').filter(|s| !s.is_empty()).collect();
-            found_sorted.sort_unstable();
-            let mut expected_sorted: Vec<&str> =
-                expected_targets.iter().map(String::as_str).collect();
-            expected_sorted.sort_unstable();
-            if found_sorted != expected_sorted {
-                mismatches.push(format!(
-                    "{LORA_METADATA_TARGETS_KEY}: expected {expected_sorted:?}, found \
-                     {found_sorted:?}"
+            Ok(v) => Some(v),
+            Err(_) => {
+                problems.push(format!(
+                    "{LORA_METADATA_RANK_KEY}: not a valid integer: '{found}'"
                 ));
+                None
+            }
+        },
+        None => {
+            problems.push(format!("{LORA_METADATA_RANK_KEY}: missing from metadata"));
+            None
+        }
+    };
+
+    let alpha = match metadata.get(LORA_METADATA_ALPHA_KEY) {
+        Some(found) => match found.parse::<f32>() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                problems.push(format!(
+                    "{LORA_METADATA_ALPHA_KEY}: not a valid number: '{found}'"
+                ));
+                None
+            }
+        },
+        None => {
+            problems.push(format!("{LORA_METADATA_ALPHA_KEY}: missing from metadata"));
+            None
+        }
+    };
+
+    let targets = match metadata.get(LORA_METADATA_TARGETS_KEY) {
+        Some(found) => {
+            let names: Vec<String> = found
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+            if names.is_empty() {
+                problems.push(format!("{LORA_METADATA_TARGETS_KEY}: empty target list"));
+                None
+            } else {
+                Some(names)
             }
         }
-        None => mismatches.push(format!(
-            "{LORA_METADATA_TARGETS_KEY}: missing from metadata"
-        )),
+        None => {
+            problems.push(format!(
+                "{LORA_METADATA_TARGETS_KEY}: missing from metadata"
+            ));
+            None
+        }
+    };
+
+    match (rank, alpha, targets) {
+        (Some(rank), Some(alpha), Some(targets)) => Ok(LoraMetadata {
+            rank,
+            alpha,
+            targets,
+        }),
+        _ => Err(Error::InvalidArgument {
+            arg: "metadata",
+            reason: format!("LoRA adapter metadata invalid: {}", problems.join("; ")),
+        }),
+    }
+}
+
+/// Check a loaded adapter file's `__metadata__` against the rank/alpha/
+/// targets the caller is about to load it into. Parses via
+/// [`parse_lora_metadata`], then compares.
+///
+/// Each disagreeing field is named individually, with both the expected
+/// and the found value — never one generic "config mismatch" message.
+/// `targets` is compared as a set: `--targets v_proj,q_proj` and
+/// `--targets q_proj,v_proj` name the same adapted projections.
+pub fn check_lora_metadata(
+    metadata: &HashMap<String, String>,
+    expected_rank: usize,
+    expected_alpha: f32,
+    expected_targets: &[String],
+) -> Result<()> {
+    let found = parse_lora_metadata(metadata)?;
+
+    let mut mismatches = Vec::new();
+
+    if found.rank != expected_rank {
+        mismatches.push(format!(
+            "{LORA_METADATA_RANK_KEY}: expected {expected_rank}, found {}",
+            found.rank
+        ));
+    }
+
+    if found.alpha != expected_alpha {
+        mismatches.push(format!(
+            "{LORA_METADATA_ALPHA_KEY}: expected {expected_alpha}, found {}",
+            found.alpha
+        ));
+    }
+
+    let mut found_sorted: Vec<&str> = found.targets.iter().map(String::as_str).collect();
+    found_sorted.sort_unstable();
+    let mut expected_sorted: Vec<&str> = expected_targets.iter().map(String::as_str).collect();
+    expected_sorted.sort_unstable();
+    if found_sorted != expected_sorted {
+        mismatches.push(format!(
+            "{LORA_METADATA_TARGETS_KEY}: expected {expected_sorted:?}, found {found_sorted:?}"
+        ));
     }
 
     if mismatches.is_empty() {

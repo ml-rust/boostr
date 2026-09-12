@@ -398,6 +398,45 @@ fn test_merge_matches_forward_and_preserves_bias() {
     assert_eq!(merged_bias, bias_v);
 }
 
+/// `set_trainable(false)` must stop `forward` from recording an autograd
+/// graph — this is the actual fix: a file-loaded adapter used for inference
+/// must not build a graph nobody ever calls `backward` on, since dropping
+/// that graph is what overflowed a bounded worker stack in blazr.
+/// `set_trainable(true)` must restore tracking.
+#[test]
+fn test_set_trainable_toggles_graph_recording() {
+    use crate::test_utils::cpu_setup;
+
+    let (client, device) = cpu_setup();
+    let weight = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 12], &[4, 3], &device).unwrap();
+    let base = Linear::new(weight, None, false);
+    let mut lora = LoraLinear::new(base, 2, 4.0, &device).expect("lora new must succeed on CPU");
+
+    // Input itself does not require grad — isolates the adapter's own flag.
+    let x = Var::new(
+        Tensor::<CpuRuntime>::from_slice(&[0.1f32; 6], &[2, 3], &device).unwrap(),
+        false,
+    );
+
+    lora.set_trainable(false);
+    assert!(!lora.is_trainable());
+    let out_frozen = lora.forward(&client, &x).expect("forward while frozen");
+    assert!(
+        out_frozen.grad_fn().is_none(),
+        "a frozen adapter forward must not record a graph"
+    );
+    assert!(!out_frozen.requires_grad());
+
+    lora.set_trainable(true);
+    assert!(lora.is_trainable());
+    let out_tracked = lora.forward(&client, &x).expect("forward while trainable");
+    assert!(
+        out_tracked.grad_fn().is_some(),
+        "a re-trainable adapter forward must record a graph"
+    );
+    assert!(out_tracked.requires_grad());
+}
+
 // --- QLoRA: adapter over a quantized base -----------------------------
 
 /// Build a `LoraLinear` whose frozen base is a Q6_K block-quantized weight

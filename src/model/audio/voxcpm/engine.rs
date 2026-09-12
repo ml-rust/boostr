@@ -29,7 +29,9 @@ use crate::model::audio::resample::to_mono_at_rate;
 use crate::model::audio::tts_bundle::Voice;
 use crate::model::audio::tts_engine::TtsEngine;
 use crate::model::audio::voxcpm::model::config::AUDIO_START_ID;
-use crate::model::audio::voxcpm::model::{GenerateOptions, GenerateState, VoxCpm2Model};
+use crate::model::audio::voxcpm::model::{
+    GenerateOptions, GenerateState, LoraAdapterReport, VoxCpm2Model,
+};
 use crate::model::audio::voxcpm::vae::decoder::SAMPLE_RATE;
 use crate::model::audio::voxcpm::{VoxCpmClient, load_tokenizer, normalize_whitespace, tokenize};
 use crate::quant::traits::DequantOps;
@@ -111,6 +113,29 @@ impl Default for VoxCpm2SynthOptions {
     }
 }
 
+/// Everything [`VoxCpm2Engine::load`] needs beyond the checkpoint location:
+/// the dtype to cast to, per-request generation defaults, and an optional
+/// LoRA adapter to fold into the weights. Bundled into one struct because
+/// `load` already takes five positional arguments (weights, audiovae,
+/// voices_dir, device, client) — three more flat parameters would trip
+/// clippy's too-many-arguments limit.
+#[derive(Debug, Clone, Default)]
+pub struct VoxCpm2LoadOptions {
+    /// Casts every transformer-stack tensor; `None` keeps the checkpoint's
+    /// own dtype (BF16).
+    pub dtype: Option<DType>,
+    /// Per-request generation settings — see [`VoxCpm2SynthOptions`].
+    pub synth: VoxCpm2SynthOptions,
+    /// A LoRA adapter safetensors file, folded into the model's weights
+    /// once, at load time. `None` loads the base model, unchanged.
+    ///
+    /// The adapter is folded in ONCE: an engine serves ONE adapted model for
+    /// its lifetime. Per-request adapter switching is not offered — serving
+    /// several adapters means loading several engines (a `--tts-model
+    /// NAME=DIR` bundle per adapter, in blazr's terms), one adapter each.
+    pub adapter: Option<PathBuf>,
+}
+
 /// A reference voice, encoded once.
 struct EncodedVoice<R: Runtime> {
     /// `[T_ref, feat_dim]` reference patches from `encode_reference`.
@@ -124,6 +149,11 @@ pub struct VoxCpm2Engine<R: Runtime<DType = DType>> {
     tokenizer: AnyTokenizer,
     voices: BTreeMap<String, EncodedVoice<R>>,
     options: VoxCpm2SynthOptions,
+    /// The adapter this engine was loaded with, if
+    /// [`VoxCpm2LoadOptions::adapter`] was `Some`. Kept so a caller (e.g.
+    /// blazr) can log rank/alpha/targets/counts via [`Self::adapter`]
+    /// without reaching into the model.
+    adapter: Option<LoraAdapterReport>,
     /// Serialises renders. Holds no data; see the module docs.
     render: Mutex<()>,
 }
@@ -147,21 +177,33 @@ where
         + DequantOps<R>
         + 'static,
 {
-    /// Load the model, the tokenizer and every voice under `voices_dir`.
+    /// Load the model, the tokenizer and every voice under `voices_dir`,
+    /// optionally folding a LoRA adapter into the weights first.
     ///
     /// A voice is any wav, flac, mp3 or ogg file in `voices_dir`; its id is
     /// the file stem. An empty or missing directory is an
     /// error: an engine with no voice can render nothing.
+    ///
+    /// `options.adapter` is applied to the model BEFORE it is wrapped as an
+    /// engine — see [`VoxCpm2LoadOptions::adapter`] for the one-adapter-per-
+    /// bundle model. `None` loads the base model, unchanged. Either way, the
+    /// applied adapter's report (if any) is readable back via
+    /// [`Self::adapter`].
     pub fn load(
         weights: &VoxCpm2Weights,
         audiovae: &Path,
         voices_dir: &Path,
         device: &R::Device,
         client: Arc<R::Client>,
-        dtype: Option<DType>,
-        options: VoxCpm2SynthOptions,
+        options: VoxCpm2LoadOptions,
     ) -> Result<Self> {
-        let model = match weights {
+        let VoxCpm2LoadOptions {
+            dtype,
+            synth,
+            adapter,
+        } = options;
+
+        let mut model = match weights {
             VoxCpm2Weights::Checkpoint(dir) => {
                 VoxCpm2Model::<R>::from_checkpoint(dir, audiovae, device, dtype)?
             }
@@ -172,6 +214,10 @@ where
                 VoxCpm2Model::<R>::from_tcf(path, config, audiovae, device, dtype)?
             }
         };
+        let adapter_report = adapter
+            .as_deref()
+            .map(|path| model.load_lora_adapter(path, device))
+            .transpose()?;
         let tokenizer = load_tokenizer(weights.tokenizer_path()?)?;
 
         let mut voices = BTreeMap::new();
@@ -195,9 +241,18 @@ where
             client,
             tokenizer,
             voices,
-            options,
+            options: synth,
+            adapter: adapter_report,
             render: Mutex::new(()),
         })
+    }
+
+    /// The adapter this engine was loaded with, if
+    /// [`VoxCpm2LoadOptions::adapter`] was `Some` — rank, alpha, targets and
+    /// tensor counts, for a caller to log without reaching into the model.
+    /// `None` when the engine is serving the base (unadapted) model.
+    pub fn adapter(&self) -> Option<&LoraAdapterReport> {
+        self.adapter.as_ref()
     }
 
     fn render(&self, text: &str, voice_id: &str) -> Result<Vec<f32>> {

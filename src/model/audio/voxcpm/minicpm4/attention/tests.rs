@@ -4,7 +4,7 @@
 //! imported, exactly as if this module were still inline.
 
 use super::*;
-use crate::nn::Weight;
+use crate::nn::{LoraTargets, Weight};
 use crate::test_utils::cpu_setup;
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;

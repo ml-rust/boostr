@@ -77,3 +77,60 @@ impl EncoderConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::dispatch::tests::meta;
+    use super::*;
+
+    /// The metadata actually present in `jina-embeddings-v2-base-code-Q8_0.gguf`.
+    /// Note the absent `rope.freq_base`: this file has no rotary key at all.
+    fn jina_v2_metadata() -> GgufMetadata {
+        meta(&[
+            (
+                "general.architecture",
+                GgufValue::String("jina-bert-v2".into()),
+            ),
+            ("jina-bert-v2.embedding_length", GgufValue::Uint32(768)),
+            ("jina-bert-v2.feed_forward_length", GgufValue::Uint32(3072)),
+            ("jina-bert-v2.attention.head_count", GgufValue::Uint32(12)),
+            ("jina-bert-v2.block_count", GgufValue::Uint32(12)),
+            ("jina-bert-v2.context_length", GgufValue::Uint32(8192)),
+            (
+                "jina-bert-v2.attention.layer_norm_epsilon",
+                GgufValue::Float32(1e-12),
+            ),
+            ("jina-bert-v2.attention.causal", GgufValue::Bool(false)),
+            ("jina-bert-v2.pooling_type", GgufValue::Uint32(1)),
+        ])
+    }
+
+    /// jina-bert-v2 carries neither a rotary key nor a position table, so ALiBi is
+    /// its only source of position. A config that silently left `alibi_max_bias`
+    /// unset would load and run as a bag-of-words encoder.
+    #[test]
+    fn jina_v2_config_enables_alibi_and_no_rope() {
+        let config = EncoderConfig::from_gguf_metadata(&jina_v2_metadata()).unwrap();
+
+        assert_eq!(config.arch_family, ArchFamily::JinaBertV2);
+        assert!(!config.arch_family.uses_rope());
+        assert!(config.arch_family.uses_alibi());
+        assert!(!config.arch_family.uses_learned_positions());
+        assert_eq!(config.alibi_max_bias, Some(8.0));
+        assert_eq!(config.hidden_size, 768);
+        assert_eq!(config.num_attention_heads, 12);
+        assert_eq!(config.ffn_variant, FfnVariant::GatedGelu);
+        assert_eq!(config.norm_scheme, NormScheme::PostNorm);
+        assert!(!config.causal);
+        assert_eq!(config.sliding_window, None);
+    }
+
+    /// The packed path cannot apply an additive per-head bias, so an ALiBi model
+    /// must be refused there rather than silently returning position-free vectors.
+    #[test]
+    fn alibi_forces_the_padded_path() {
+        let config = EncoderConfig::from_gguf_metadata(&jina_v2_metadata()).unwrap();
+        assert!(!config.varlen_span_is_unconstrained(8));
+        assert!(!config.varlen_span_is_unconstrained(1));
+    }
+}

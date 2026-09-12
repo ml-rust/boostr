@@ -47,3 +47,36 @@ impl LayerAttention {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_windowed_block_attends_symmetrically_in_both_directions() {
+        let a = LayerAttention {
+            rope_freq_base: 10_000.0,
+            window: Some(8),
+            causal: false,
+        };
+
+        assert!(a.attends(10, 10));
+        assert!(a.attends(10, 14), "forward within the half-window");
+        assert!(a.attends(10, 6), "backward within the half-window");
+        assert!(!a.attends(10, 15), "one past the half-window");
+        assert!(!a.attends(10, 5), "one before the half-window");
+    }
+
+    #[test]
+    fn a_causal_block_never_attends_forward() {
+        let a = LayerAttention {
+            rope_freq_base: 1_000_000.0,
+            window: None,
+            causal: true,
+        };
+
+        assert!(a.attends(10, 10));
+        assert!(a.attends(10, 0));
+        assert!(!a.attends(10, 11));
+    }
+}

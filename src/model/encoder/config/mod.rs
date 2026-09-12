@@ -16,6 +16,3 @@ pub use encoder_config::{DEFAULT_MAX_TOKENS_PER_FORWARD, EncoderConfig};
 pub use ffn_variant::{FfnVariant, HiddenAct};
 pub use norm_scheme::NormScheme;
 pub use qk_norm_scope::QkNormScope;
-
-#[cfg(test)]
-mod tests;

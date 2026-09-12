@@ -151,3 +151,59 @@ pub(super) fn quantize_q6k_absmax(x: &[f32], out: &mut [u8]) {
     }
     quantize_q6k_with(x, out, absmax_fit, None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::simple::tests::{relative_rms, round_trip, synthetic_weights};
+    use super::*;
+    use crate::quant::cpu::kernels::dequant_k_quants::dequant_q6k;
+
+    #[test]
+    fn q6k_round_trip() {
+        let x = synthetic_weights();
+        round_trip(&x, 210, 256, quantize_q6k, dequant_q6k, 0.02);
+    }
+
+    /// A single hand-built super-block pins the Q6_K field order.
+    ///
+    /// Writing GGML's fields in declaration order (`d` first) instead of
+    /// `ql`/`qh`/`scales`/`d` makes every dequantized value NaN — the f16 read at
+    /// byte 208 lands in the middle of the level data. Reading a constant back
+    /// exactly is enough to catch it.
+    #[test]
+    fn q6k_field_order_matches_the_reader() {
+        let x = vec![0.25f32; 256];
+        let mut packed = vec![0u8; 210];
+        quantize_q6k(&x, &mut packed);
+
+        let mut decoded = vec![0.0f32; 256];
+        dequant_q6k(&packed, &mut decoded);
+        for (i, &v) in decoded.iter().enumerate() {
+            assert!((v - 0.25).abs() < 0.01, "elem {i}: expected 0.25, got {v}");
+        }
+    }
+
+    /// Same claim for Q6_K, whose search is the symmetric routine instead.
+    #[test]
+    fn q6k_search_beats_absmax() {
+        let x = synthetic_weights();
+        let blocks = x.len() / 256;
+
+        let mut searched = vec![0u8; blocks * 210];
+        let mut absmax = vec![0u8; blocks * 210];
+        quantize_q6k(&x, &mut searched);
+        quantize_q6k_absmax(&x, &mut absmax);
+
+        let mut ds = vec![0.0f32; x.len()];
+        let mut da = vec![0.0f32; x.len()];
+        dequant_q6k(&searched, &mut ds);
+        dequant_q6k(&absmax, &mut da);
+
+        let searched_rms = relative_rms(&x, &ds);
+        let absmax_rms = relative_rms(&x, &da);
+        assert!(
+            searched_rms < absmax_rms,
+            "q6_k: search {searched_rms} must beat absmax {absmax_rms}"
+        );
+    }
+}

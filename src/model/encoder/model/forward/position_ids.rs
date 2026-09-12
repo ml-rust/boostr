@@ -75,3 +75,91 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Error;
+    use crate::model::encoder::config::{EncoderConfig, FfnVariant};
+    use crate::model::encoder::model::Pooling;
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::CpuRuntime;
+
+    #[test]
+    fn test_xlm_roberta_position_ids() {
+        let (client, device) = cpu_setup();
+
+        let config = EncoderConfig {
+            vocab_size: 10,
+            hidden_size: 8,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 16,
+            max_position_embeddings: 32,
+            ffn_variant: FfnVariant::Standard,
+            arch_family: ArchFamily::XlmRoberta,
+            padding_token_id: 1,
+            ..Default::default()
+        };
+
+        let device_ref = &device;
+        let encoder =
+            Encoder::<CpuRuntime>::from_weights(config, Pooling::Mean, |name| match name {
+                "embeddings.word_embeddings.weight" => {
+                    Ok(Tensor::from_slice(&vec![0.1f32; 10 * 8], &[10, 8], device_ref).unwrap())
+                }
+                "embeddings.position_embeddings.weight" => {
+                    Ok(Tensor::from_slice(&vec![0.01f32; 32 * 8], &[32, 8], device_ref).unwrap())
+                }
+                "embeddings.layer_norm.weight" => {
+                    Ok(Tensor::from_slice(&[1.0f32; 8], &[8], device_ref).unwrap())
+                }
+                "embeddings.layer_norm.bias" => {
+                    Ok(Tensor::from_slice(&[0.0f32; 8], &[8], device_ref).unwrap())
+                }
+                n if n.ends_with("query.weight")
+                    || n.ends_with("key.weight")
+                    || n.ends_with("value.weight")
+                    || n.ends_with("attention.output.dense.weight") =>
+                {
+                    Ok(Tensor::from_slice(&vec![0.02f32; 8 * 8], &[8, 8], device_ref).unwrap())
+                }
+                n if n.ends_with("query.bias")
+                    || n.ends_with("key.bias")
+                    || n.ends_with("value.bias")
+                    || n.ends_with("attention.output.dense.bias")
+                    || n.ends_with("output.dense.bias") =>
+                {
+                    Ok(Tensor::from_slice(&[0.0f32; 8], &[8], device_ref).unwrap())
+                }
+                n if n.ends_with("LayerNorm.weight") => {
+                    Ok(Tensor::from_slice(&[1.0f32; 8], &[8], device_ref).unwrap())
+                }
+                n if n.ends_with("LayerNorm.bias") => {
+                    Ok(Tensor::from_slice(&[0.0f32; 8], &[8], device_ref).unwrap())
+                }
+                n if n.ends_with("intermediate.dense.weight") => {
+                    Ok(Tensor::from_slice(&vec![0.02f32; 16 * 8], &[16, 8], device_ref).unwrap())
+                }
+                n if n.ends_with("intermediate.dense.bias") => {
+                    Ok(Tensor::from_slice(&[0.0f32; 16], &[16], device_ref).unwrap())
+                }
+                n if n.ends_with("output.dense.weight") => {
+                    Ok(Tensor::from_slice(&vec![0.02f32; 8 * 16], &[8, 16], device_ref).unwrap())
+                }
+                _ => Err(Error::ModelError {
+                    reason: format!("unknown weight: {name}"),
+                }),
+            })
+            .unwrap();
+
+        let input_ids =
+            Tensor::<CpuRuntime>::from_slice(&[0i64, 4, 7, 1, 1], &[1, 5], &device).unwrap();
+        let result = encoder.embed(&client, &input_ids, None);
+        assert!(
+            result.is_ok(),
+            "xlm-roberta forward should succeed: {result:?}"
+        );
+        assert_eq!(result.unwrap().shape(), &[1, 8]);
+    }
+}

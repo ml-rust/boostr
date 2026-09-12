@@ -1,28 +1,32 @@
 //! Reader tests: fixture files built with the writer and mutated byte by
 //! byte, so every Section 17 code is reached by its own trigger.
 
-use super::checks::check_payload_length;
-use super::*;
-use crate::tcf::consts::{
-    CONTRACT_RECORD_BYTES, MAGIC, MAJOR, MODULE_RECORD_BYTES, RELATION_RECORD_BYTES,
-    TENSOR_RECORD_BYTES,
+mod common;
+
+use boostr::tcf::consts::{
+    CONTRACT_RECORD_BYTES, HEADER_BYTES, MAGIC, MAJOR, MODULE_RECORD_BYTES, PROOF_COUNT,
+    RELATION_RECORD_BYTES, ROOT_PARENT_ID, SCHEMA_ID, TENSOR_RECORD_BYTES, UNUSED_INPUT_ID,
 };
-use crate::tcf::digest::{
+use boostr::tcf::digest::{
     contract_digest, hash_128, payload_digest, policy_digest, relation_digest,
 };
-use crate::tcf::encoding::block::BlockEncoding;
-use crate::tcf::encoding::registry::Encoding;
-use crate::tcf::enums::RelationType;
-use crate::tcf::enums::{
+use boostr::tcf::encoding::block::BlockEncoding;
+use boostr::tcf::encoding::registry::Encoding;
+use boostr::tcf::enums::RelationType;
+use boostr::tcf::enums::{
     DotAccumulator, ExecutionRole, FallbackReason, InputRepresentation, LayoutId, MathMode,
     ModuleRole, OutputDtype, ProofFormat, QuantAxis, ResidencyClass, Role, RoundingMode,
     ScaleComputeDtype, StateDtype,
 };
-use crate::tcf::flags::{ContractFlags, PolicyFlags, RelationFlags, StateFlags};
-use crate::tcf::flags::{HeaderFlags, RequiredFeatures, TensorFlags};
-use crate::tcf::proof::PROOF_BYTES;
-use crate::tcf::record::Record;
-use crate::tcf::test_blocks::{Q8_0Decoder, q8_0_proof, q8_0_stream};
+use boostr::tcf::flags::{ContractFlags, PolicyFlags, RelationFlags, StateFlags};
+use boostr::tcf::flags::{HeaderFlags, RequiredFeatures, TensorFlags};
+use boostr::tcf::proof::PROOF_BYTES;
+use boostr::tcf::record::Record;
+use boostr::tcf::{
+    ContractRecord, Header, ModuleRecord, RelationRecord, StringRef, TcfError, TcfFile,
+    TensorRecord, f32_to_bits,
+};
+use common::{Q8_0Decoder, q8_0_proof, q8_0_stream};
 
 const MODULE_OFF: u64 = 192;
 const TENSOR_OFF: u64 = 320;
@@ -118,7 +122,7 @@ fn build_file_with(contracts: &[ContractRecord], relations: &[RelationRecord]) -
 
     let module = ModuleRecord {
         module_id: 1,
-        parent_id: crate::tcf::consts::ROOT_PARENT_ID,
+        parent_id: ROOT_PARENT_ID,
         name: StringRef::new(0, 7),
         module_role: ModuleRole::Ffn,
         fallback_encoding: None,
@@ -168,7 +172,7 @@ fn build_file_with(contracts: &[ContractRecord], relations: &[RelationRecord]) -
         semantic_digest: *payload_digest(&packed).as_bytes(),
         payload_digest: *payload_digest(&packed).as_bytes(),
         proof_rel_off: 0,
-        proof_count: crate::tcf::consts::PROOF_COUNT,
+        proof_count: PROOF_COUNT,
         proof_format: ProofFormat::DequantF16,
     };
 
@@ -193,7 +197,7 @@ fn build_file_with(contracts: &[ContractRecord], relations: &[RelationRecord]) -
 
     let proofs: Vec<u8> = q8_0_proof(&packed, &DIMS, 42)
         .iter()
-        .flat_map(|v| crate::tcf::binary16::f32_to_bits(*v).to_le_bytes())
+        .flat_map(|v| f32_to_bits(*v).to_le_bytes())
         .collect();
     let proofs_at = proof_off as usize;
     file[proofs_at..proofs_at + proofs.len()].copy_from_slice(&proofs);
@@ -280,7 +284,7 @@ fn sample_relation(output_tensor_id: u32) -> RelationRecord {
         relation_type: RelationType::LowRankResidual,
         flags: RelationFlags::NONE,
         output_tensor_id,
-        input_tensor_id: [42, 1, 2, crate::tcf::consts::UNUSED_INPUT_ID],
+        input_tensor_id: [42, 1, 2, UNUSED_INPUT_ID],
         rank_or_parameter: 16,
         activation_contract_id: 0,
         relation_digest: [0u8; 16],
@@ -795,53 +799,6 @@ fn rewired_relation_operands_are_rejected() {
             output_tensor_id: 42
         }
     );
-}
-
-/// A raw `TensorRecord` shaped like the one `good_file` carries, in the
-/// F16 encoding: 2 x 128 elements of 2 bytes each.
-fn raw_tensor() -> TensorRecord {
-    let bytes = good_file();
-    let at = TENSOR_OFF as usize;
-    let mut t = TensorRecord::decode(&bytes[at..at + TENSOR_RECORD_BYTES]).expect("decodes");
-    t.encoding = crate::tcf::encoding::Encoding::Raw(crate::tcf::encoding::RawEncoding::F16);
-    t.logical_payload_bytes = 2 * 128 * 2;
-    t.proof_rel_off = 0;
-    t.proof_count = 0;
-    t.proof_format = crate::tcf::enums::ProofFormat::None;
-    t
-}
-
-/// Section 8.0.1: a raw tensor's length is `product(dims) * width`, and
-/// a stored value that disagrees is `E_INVALID_QUANT_SHAPE`. Nothing
-/// else in the file constrains it.
-#[test]
-fn raw_payload_length_must_be_product_of_dims_times_width() {
-    assert_eq!(check_payload_length(&raw_tensor()), Ok(()));
-
-    let mut truncated = raw_tensor();
-    truncated.logical_payload_bytes -= 2;
-    assert_eq!(
-        check_payload_length(&truncated),
-        Err(TcfError::InvalidQuantShape { tensor_id: 42 })
-    );
-
-    let mut padded = raw_tensor();
-    padded.logical_payload_bytes += 2;
-    assert_eq!(
-        check_payload_length(&padded),
-        Err(TcfError::InvalidQuantShape { tensor_id: 42 })
-    );
-
-    // The element width is the encoding's, never the shape's: the same
-    // 256 elements are 1024 bytes in F32 and 256 in I8.
-    let mut wide = raw_tensor();
-    wide.encoding = crate::tcf::encoding::Encoding::Raw(crate::tcf::encoding::RawEncoding::F32);
-    assert_eq!(
-        check_payload_length(&wide),
-        Err(TcfError::InvalidQuantShape { tensor_id: 42 })
-    );
-    wide.logical_payload_bytes = 2 * 128 * 4;
-    assert_eq!(check_payload_length(&wide), Ok(()));
 }
 
 #[test]

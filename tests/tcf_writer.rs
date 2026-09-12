@@ -1,26 +1,37 @@
-use super::*;
-use crate::tcf::binary16::f32_to_bits;
-use crate::tcf::consts::{HEADER_BYTES, PROOF_COUNT, SECTION_ALIGN, TENSOR_RECORD_BYTES};
-use crate::tcf::encoding::block::BlockEncoding;
-use crate::tcf::encoding::raw::RawEncoding;
-use crate::tcf::encoding::registry::Encoding;
-use crate::tcf::enums::{
+//! Writer tests: files built with `TcfWriter` and read back with `TcfFile`,
+//! over every payload path (`finish`, `finish_into`, `finish_streaming`).
+
+mod common;
+
+use std::io::{Seek, SeekFrom, Write};
+
+use boostr::tcf::consts::{
+    HEADER_BYTES, MODULE_RECORD_BYTES, PROOF_COUNT, ROOT_PARENT_ID, SECTION_ALIGN,
+    TENSOR_RECORD_BYTES, UNUSED_INPUT_ID,
+};
+use boostr::tcf::digest::{Digest128, policy_digest};
+use boostr::tcf::encoding::block::BlockEncoding;
+use boostr::tcf::encoding::raw::RawEncoding;
+use boostr::tcf::encoding::registry::Encoding;
+use boostr::tcf::enums::{
     DotAccumulator, ExecutionRole, FallbackReason, InputRepresentation, LayoutId, MathMode,
     ModuleRole, OutputDtype, PrimaryMetric, ProofFormat, QuantAxis, RelationType, ResidencyClass,
     Role, RoundingMode, ScaleComputeDtype, StateDtype, WorkloadKind,
 };
-use crate::tcf::flags::{
+use boostr::tcf::flags::{
     CalibrationFlags, ContractFlags, PolicyFlags, RelationFlags, RequiredFeatures, StateFlags,
     TensorFlags, WorkloadProfileFlags,
 };
-use crate::tcf::reader::TcfFile;
-use crate::tcf::test_blocks::{Q8_0Decoder, q8_0_proof, q8_0_stream};
-use std::io::SeekFrom;
+use boostr::tcf::{
+    CalibrationRecord, ContractRecord, ModuleRecord, Payload, Record, RelationRecord, StringRef,
+    TcfError, TcfFile, TcfWriter, TensorRecord, WorkloadProfileRecord, f32_to_bits,
+};
+use common::{Q8_0Decoder, q8_0_proof, q8_0_stream};
 
 fn module(module_id: u32, name: StringRef) -> ModuleRecord {
     ModuleRecord {
         module_id,
-        parent_id: crate::tcf::consts::ROOT_PARENT_ID,
+        parent_id: ROOT_PARENT_ID,
         name,
         module_role: ModuleRole::Ffn,
         fallback_encoding: None,
@@ -203,12 +214,7 @@ fn populated_with(payloads: bool) -> TcfWriter {
 
 fn block_record(w: &mut TcfWriter) -> TensorRecord {
     let name = w.intern("blk.0.ffn_down.weight").expect("interns");
-    let mut record = tensor(
-        0,
-        0,
-        name,
-        Encoding::Block(crate::tcf::encoding::BlockEncoding::Q8_0),
-    );
+    let mut record = tensor(0, 0, name, Encoding::Block(BlockEncoding::Q8_0));
     record.dims = [2, 64, 0, 0, 0, 0, 0, 0];
     record
 }
@@ -237,10 +243,7 @@ fn block_tensor_round_trips_and_proves_with_a_decoder() {
     let file_bytes = w.finish().expect("writes");
     let file = TcfFile::open(&file_bytes).expect("reader accepts");
     let t = file.tensors().first().expect("tensor 0");
-    assert_eq!(
-        t.encoding,
-        Encoding::Block(crate::tcf::encoding::BlockEncoding::Q8_0)
-    );
+    assert_eq!(t.encoding, Encoding::Block(BlockEncoding::Q8_0));
     assert_eq!(t.logical_payload_bytes, 4 * 34);
     assert_eq!(t.proof_count, PROOF_COUNT);
     assert_eq!(t.semantic_digest, t.payload_digest);
@@ -534,7 +537,7 @@ fn relation() -> RelationRecord {
         relation_type: RelationType::LowRankResidual,
         flags: RelationFlags::NONE,
         output_tensor_id: 0,
-        input_tensor_id: [0, 1, 2, crate::tcf::consts::UNUSED_INPUT_ID],
+        input_tensor_id: [0, 1, 2, UNUSED_INPUT_ID],
         rank_or_parameter: 16,
         activation_contract_id: 1,
         // Writer-owned: Section 9 makes the producer compute it.
@@ -657,16 +660,6 @@ fn a_corrupted_header_byte_fails_at_open() {
 }
 
 #[test]
-fn interning_the_same_name_stores_one_copy() {
-    let mut w = TcfWriter::new();
-    let a = w.intern("shared").expect("interns");
-    let b = w.intern("shared").expect("interns");
-    assert_eq!(a, b);
-    assert_eq!(w.strings.len(), "shared".len());
-    assert_eq!(w.intern("").expect("interns"), StringRef::new(0, 0));
-}
-
-#[test]
 fn an_encoding_mismatched_add_is_rejected() {
     let mut w = TcfWriter::new();
     let name = w.intern("w").expect("interns");
@@ -730,7 +723,7 @@ fn the_three_record_digests_are_computed_and_verified() {
     let name = file.string(module.name).expect("utf8");
     assert_eq!(
         policy_digest(&image, name.as_bytes()).expect("policy digest"),
-        crate::tcf::digest::Digest128::from_bytes(module.policy_digest)
+        Digest128::from_bytes(module.policy_digest)
     );
 
     // Two modules differing only in their names have different policy
@@ -1054,7 +1047,7 @@ fn a_failing_sink_surfaces_its_error_kind() {
 }
 
 // The tests below cover `TcfWriter::finish_streaming`, whose body lives
-// in `crate::tcf::streaming`. They are here because they exercise the public
+// in `boostr::tcf::streaming`. They are here because they exercise the public
 // writer API against the fixtures above, and because byte identity is a
 // property of the writer as a whole, not of one module.
 

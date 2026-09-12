@@ -1,8 +1,9 @@
-//! Tests for CPU QuantMatmulOps implementation.
+//! CPU `QuantMatmulOps`: block-quantized weight matmul against boostr's own
+//! dequantize-then-matmul path, and the narrowed-view read offset.
 
-use crate::quant::QuantTensor;
-use crate::quant::format::QuantFormat;
-use crate::quant::traits::{DequantOps, QuantMatmulOps};
+use boostr::quant::QuantTensor;
+use boostr::quant::format::QuantFormat;
+use boostr::quant::traits::{DequantOps, QuantMatmulOps};
 use half::f16;
 use numr::dtype::DType;
 use numr::ops::MatmulOps;

@@ -78,3 +78,32 @@ pub(super) fn require_pooling_type(
     }
     Ok(())
 }
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use crate::format::GgufValue;
+    use std::collections::HashMap;
+
+    /// Build metadata from `(key, value)` pairs.
+    pub(in super::super) fn meta(pairs: &[(&str, GgufValue)]) -> GgufMetadata {
+        let mut kv = HashMap::new();
+        for (k, v) in pairs {
+            kv.insert((*k).to_string(), v.clone());
+        }
+        GgufMetadata { kv }
+    }
+
+    #[test]
+    fn an_unsupported_architecture_is_named_in_the_error() {
+        let m = meta(&[("general.architecture", GgufValue::String("mamba".into()))]);
+        let err = EncoderConfig::from_gguf_metadata(&m)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("mamba"),
+            "the error must name the architecture: {err}"
+        );
+        assert!(err.contains("qwen3"), "and list what is supported: {err}");
+    }
+}

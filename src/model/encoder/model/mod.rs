@@ -21,6 +21,3 @@ pub(crate) mod graph_cache;
 pub use encoder::{Encoder, EncoderClient};
 pub use layer::SpanMasks;
 pub use pooling::Pooling;
-
-#[cfg(test)]
-mod tests;

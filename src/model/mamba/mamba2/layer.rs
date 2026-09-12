@@ -1,11 +1,12 @@
-//! Mamba2 layer: weights, struct definition, construction, and conv helpers.
+//! Mamba2 layer: weights, struct definition, and construction. The conv
+//! helpers are in `conv`.
 
 use super::config::Mamba2Config;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::nn::{Conv1d, Init, Linear, Module, RmsNorm, VarBuilder};
 use numr::autograd::Var;
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, CompareOps, ConvOps, PaddingMode, RandomOps, ScalarOps, TensorOps};
+use numr::ops::{BinaryOps, CompareOps, PaddingMode, RandomOps, ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
@@ -291,113 +292,6 @@ impl<R: Runtime> Mamba2<R> {
             .filter(|param| param.1.requires_grad())
             .collect()
     }
-
-    /// Prefill: full conv1d with causal padding, saves conv state.
-    pub(in crate::model::mamba::mamba2) fn prefill_conv<C>(
-        &self,
-        client: &C,
-        xbc_ncl: &Tensor<R>,
-        seq_len: usize,
-        batch: usize,
-        x: &Tensor<R>,
-        state: &mut crate::inference::SsmState<R>,
-    ) -> Result<Tensor<R>>
-    where
-        R: Runtime<DType = DType>,
-        C: RuntimeClient<R> + ConvOps<R>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ConvOps<R>,
-    {
-        let conv_out = self.conv1d.forward_inference(client, xbc_ncl)?;
-        let conv_out = conv_out
-            .narrow(2, 0, seq_len)
-            .map_err(Error::Numr)?
-            .contiguous()?;
-
-        let conv_window = self.config.d_conv - 1;
-        if seq_len >= conv_window {
-            let tail = xbc_ncl
-                .narrow(2, seq_len - conv_window, conv_window)
-                .map_err(Error::Numr)?
-                .contiguous()?;
-            state.update_conv_state(tail);
-        } else {
-            let conv_channels = self.config.conv_channels();
-            let mut new_conv =
-                Tensor::<R>::zeros(&[batch, conv_channels, conv_window], x.dtype(), x.device())?;
-            let offset = conv_window - seq_len;
-            if state.is_initialized() && offset > 0 {
-                let old_tail = state
-                    .conv_state()
-                    .narrow(2, conv_window - offset, offset)
-                    .map_err(Error::Numr)?
-                    .contiguous()?;
-                new_conv = new_conv
-                    .slice_assign(&old_tail, 2, 0)
-                    .map_err(Error::Numr)?;
-            }
-            new_conv = new_conv
-                .slice_assign(xbc_ncl, 2, offset)
-                .map_err(Error::Numr)?;
-            state.update_conv_state(new_conv);
-        }
-
-        Ok(conv_out)
-    }
-
-    /// Decode (seq_len=1): manual conv step using cached state.
-    pub(in crate::model::mamba::mamba2) fn decode_conv(
-        &self,
-        xbc_ncl: &Tensor<R>,
-        batch: usize,
-        x: &Tensor<R>,
-        state: &mut crate::inference::SsmState<R>,
-    ) -> Result<Tensor<R>>
-    where
-        R: Runtime<DType = DType>,
-        R::Client: TensorOps<R> + ScalarOps<R> + ConvOps<R>,
-    {
-        let conv_window = self.config.d_conv - 1;
-        let conv_channels = self.config.conv_channels();
-
-        let old_state = if conv_window > 1 {
-            state
-                .conv_state()
-                .narrow(2, 1, conv_window - 1)
-                .map_err(Error::Numr)?
-                .contiguous()?
-        } else {
-            Tensor::<R>::zeros(&[batch, conv_channels, 0], x.dtype(), x.device())?
-        };
-
-        let mut new_state =
-            Tensor::<R>::zeros(&[batch, conv_channels, conv_window], x.dtype(), x.device())?;
-        if conv_window > 1 {
-            new_state = new_state
-                .slice_assign(&old_state, 2, 0)
-                .map_err(Error::Numr)?;
-        }
-        new_state = new_state
-            .slice_assign(xbc_ncl, 2, conv_window - 1)
-            .map_err(Error::Numr)?;
-        state.update_conv_state(new_state.clone());
-
-        let conv_input_refs = [&new_state, xbc_ncl];
-        let conv_input = Tensor::cat(&conv_input_refs, 2).map_err(Error::Numr)?;
-
-        let conv_weight = self.conv1d.weight().tensor();
-        let conv_bias = self.conv1d.bias().map(|b| b.tensor());
-        // The full conv input is [B, C, d_conv], which with valid padding gives [B, C, 1]
-        conv_input
-            .conv1d(
-                conv_weight,
-                conv_bias,
-                1,
-                PaddingMode::Valid,
-                1,
-                self.config.conv_channels(),
-            )
-            .map_err(Error::Numr)
-    }
 }
 
 impl<R: Runtime> Module<R> for Mamba2<R> {
@@ -475,4 +369,85 @@ where
         None
     };
     Ok(Linear::new(weight, bias, trainable))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nn::VarMap;
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::CpuRuntime;
+
+    fn assert_named_shape<R: Runtime>(params: &[(String, &Var<R>)], name: &str, shape: &[usize]) {
+        let actual = params
+            .iter()
+            .find(|(param_name, _)| param_name == name)
+            .map(|(_, param)| param.shape().to_vec())
+            .unwrap_or_else(|| panic!("missing parameter {name}"));
+        assert_eq!(actual, shape, "shape mismatch for {name}");
+    }
+
+    #[test]
+    fn test_mamba2_init_from_empty_varmap_shapes_and_ssm_defaults() {
+        let (client, device) = cpu_setup();
+        let config = Mamba2Config::new(8)
+            .with_nheads(1)
+            .with_d_state(4)
+            .with_expand(2)
+            .with_dt_softplus(false)
+            .with_use_dt_bias(true)
+            .with_use_d(true);
+        let mut varmap = VarMap::<CpuRuntime>::new();
+        let mut vb = VarBuilder::new(&mut varmap, &device);
+
+        let mamba = Mamba2::init(&config, &mut vb, DType::F32, &client, true).unwrap();
+        let params = mamba.named_parameters();
+        let mut names: Vec<&str> = params.iter().map(|(name, _)| name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "a_log",
+                "conv1d.weight",
+                "d_param",
+                "dt_bias",
+                "in_proj.weight",
+                "out_proj.weight",
+            ]
+        );
+        assert_named_shape(
+            &params,
+            "in_proj.weight",
+            &[config.proj_dim(), config.d_model],
+        );
+        assert_named_shape(
+            &params,
+            "conv1d.weight",
+            &[config.conv_channels(), 1, config.d_conv],
+        );
+        assert_named_shape(
+            &params,
+            "out_proj.weight",
+            &[config.d_model, config.d_inner()],
+        );
+        assert_named_shape(&params, "a_log", &[config.nheads]);
+        assert_named_shape(&params, "dt_bias", &[config.nheads]);
+        assert_named_shape(&params, "d_param", &[config.nheads]);
+
+        let a_log: Vec<f32> = mamba.a_log.tensor().contiguous().unwrap().to_vec();
+        assert!(a_log.iter().all(|&value| value == 0.0));
+        let d_param: Vec<f32> = mamba
+            .d_param
+            .as_ref()
+            .unwrap()
+            .tensor()
+            .contiguous()
+            .unwrap()
+            .to_vec();
+        assert!(d_param.iter().all(|&value| value == 1.0));
+
+        let mut strict_varmap = VarMap::<CpuRuntime>::new();
+        let mut strict_vb = VarBuilder::new(&mut strict_varmap, &device);
+        assert!(Mamba2::from_varbuilder(&config, &mut strict_vb, false).is_err());
+    }
 }

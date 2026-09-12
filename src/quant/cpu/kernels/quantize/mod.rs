@@ -13,8 +13,6 @@ pub mod q6k;
 pub mod search;
 pub mod search_imatrix;
 pub mod simple;
-#[cfg(test)]
-mod tests;
 
 pub use iq4_nl::{quantize_iq4_nl, quantize_iq4_nl_imatrix};
 pub use iq4_xs::{quantize_iq4_xs, quantize_iq4_xs_imatrix};

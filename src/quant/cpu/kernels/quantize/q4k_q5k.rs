@@ -267,3 +267,61 @@ pub(super) fn requantize(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::simple::tests::{decode_pair, round_trip, synthetic_weights};
+    use super::*;
+    use crate::quant::cpu::kernels::dequant_k_quants::{dequant_q4k, dequant_q5k};
+
+    #[test]
+    fn q4k_round_trip() {
+        let x = synthetic_weights();
+        round_trip(&x, 144, 256, quantize_q4k, dequant_q4k, 0.072);
+    }
+
+    #[test]
+    fn q5k_round_trip() {
+        let x = synthetic_weights();
+        round_trip(&x, 176, 256, quantize_q5k, dequant_q5k, 0.04);
+    }
+
+    /// Beating absmax is the whole point of the unit, so it is asserted, not assumed.
+    ///
+    /// The baseline is the same pipeline with the sweep disabled (`nstep = 0`),
+    /// which is exactly the plain min/max fit compressr shipped. Any regression in
+    /// the search shows up here before it shows up in a converted checkpoint.
+    #[test]
+    fn q4k_search_beats_absmax() {
+        let x = synthetic_weights();
+        let no_sweep = KSearch {
+            nstep: 0,
+            ..Q4K_SEARCH
+        };
+
+        let mut searched = vec![0u8; (x.len() / 256) * 144];
+        let mut absmax = vec![0u8; searched.len()];
+        quantize_q4k_with(&x, &mut searched, &Q4K_SEARCH);
+        quantize_q4k_with(&x, &mut absmax, &no_sweep);
+
+        let (a, b) = decode_pair(&x, &searched, &absmax, dequant_q4k);
+        assert!(a < b, "q4_k: search {a} must beat absmax {b}");
+    }
+
+    #[test]
+    fn q5k_search_beats_absmax() {
+        let x = synthetic_weights();
+        let no_sweep = KSearch {
+            nstep: 0,
+            ..Q5K_SEARCH
+        };
+
+        let mut searched = vec![0u8; (x.len() / 256) * 176];
+        let mut absmax = vec![0u8; searched.len()];
+        quantize_q5k_with(&x, &mut searched, &Q5K_SEARCH);
+        quantize_q5k_with(&x, &mut absmax, &no_sweep);
+
+        let (a, b) = decode_pair(&x, &searched, &absmax, dequant_q5k);
+        assert!(a < b, "q5_k: search {a} must beat absmax {b}");
+    }
+}

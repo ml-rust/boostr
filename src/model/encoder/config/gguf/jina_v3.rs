@@ -75,3 +75,53 @@ impl EncoderConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::dispatch::tests::meta;
+    use super::*;
+
+    /// The metadata actually present in `jina-embeddings-v3-Q4_0.gguf`.
+    fn jina_v3_metadata() -> GgufMetadata {
+        meta(&[
+            (
+                "general.architecture",
+                GgufValue::String("jina-bert-v3".into()),
+            ),
+            ("jina-bert-v3.embedding_length", GgufValue::Uint32(1024)),
+            ("jina-bert-v3.feed_forward_length", GgufValue::Uint32(4096)),
+            ("jina-bert-v3.attention.head_count", GgufValue::Uint32(16)),
+            ("jina-bert-v3.block_count", GgufValue::Uint32(24)),
+            ("jina-bert-v3.context_length", GgufValue::Uint32(8192)),
+            (
+                "jina-bert-v3.attention.layer_norm_epsilon",
+                GgufValue::Float32(1e-5),
+            ),
+            ("jina-bert-v3.attention.causal", GgufValue::Bool(false)),
+            ("jina-bert-v3.pooling_type", GgufValue::Uint32(1)),
+            ("jina-bert-v3.rope.freq_base", GgufValue::Float32(20000.0)),
+        ])
+    }
+
+    /// jina-bert-v3 must route to its own family, not to the BERT fallback: it
+    /// reports `XLMRobertaModel` in its HuggingFace config but has no `position_embd` tensor, and
+    /// its rotary base is 20 000 rather than the usual 10 000.
+    #[test]
+    fn jina_v3_config_uses_rope_at_its_own_base() {
+        let config = EncoderConfig::from_gguf_metadata(&jina_v3_metadata()).unwrap();
+
+        assert_eq!(config.arch_family, ArchFamily::JinaBertV3);
+        assert!(config.arch_family.uses_rope());
+        assert!(!config.arch_family.uses_learned_positions());
+        assert_eq!(config.rope_freq_base, 20000.0);
+        assert_eq!(config.hidden_size, 1024);
+        assert_eq!(config.num_attention_heads, 16);
+        assert_eq!(config.head_dim(), 64);
+        assert_eq!(config.num_hidden_layers, 24);
+        assert_eq!(config.ffn_variant, FfnVariant::Standard);
+        assert_eq!(config.norm_scheme, NormScheme::PostNorm);
+        assert!(!config.causal);
+        assert!(config.alibi_max_bias.is_none());
+        assert!((config.layer_norm_eps - 1e-5).abs() < 1e-12);
+    }
+}

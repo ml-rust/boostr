@@ -1,8 +1,6 @@
 pub mod consolidate;
 pub mod load;
 pub mod save;
-#[cfg(test)]
-mod tests;
 pub mod types;
 
 pub use consolidate::consolidate_checkpoint;

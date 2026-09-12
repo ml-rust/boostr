@@ -190,3 +190,55 @@ pub(super) fn pack_q3k(levels: &[u8; SUPER_BLOCK], block: &mut [u8]) {
 pub(super) fn quantize_q3k_absmax(x: &[f32], out: &mut [u8]) {
     quantize_q3k_with(x, out, make_qx_absmax)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::simple::tests::{decode_pair, round_trip, synthetic_weights};
+    use super::*;
+    use crate::quant::cpu::kernels::dequant_k_quants::dequant_q3k;
+
+    /// Three bits per element, per-16 signed scales, no min. See `q2k_round_trip`
+    /// for why this test alone cannot pin the layout.
+    #[test]
+    fn q3k_round_trip() {
+        let x = synthetic_weights();
+        round_trip(&x, 110, 256, quantize_q3k, dequant_q3k, 0.20);
+    }
+
+    /// The same claim for Q3_K, whose f16 `d` sits last at byte 108.
+    ///
+    /// This also pins the `hmask` polarity: the reader subtracts 4 when the high
+    /// bit is CLEAR. A constant block of 0.25 encodes to level 0 with the bit
+    /// clear, so an inverted mask decodes to 0 instead of 0.25.
+    #[test]
+    fn q3k_field_order_matches_the_reader() {
+        let x = vec![0.25f32; 256];
+        let mut packed = vec![0u8; 110];
+        quantize_q3k(&x, &mut packed);
+
+        let mut decoded = vec![0.0f32; 256];
+        dequant_q3k(&packed, &mut decoded);
+        for (i, &v) in decoded.iter().enumerate() {
+            assert!((v - 0.25).abs() < 0.01, "elem {i}: expected 0.25, got {v}");
+        }
+    }
+
+    /// Q3_K's descent minimises the same weighted SQUARED error relative RMS
+    /// measures, so unlike Q2_K it is gated on the number, not just on running.
+    ///
+    /// The baseline is `make_q3_quants` with `do_rmse = false` — the plain absmax
+    /// scale with neither the least-squares correction nor the descent.
+    #[test]
+    fn q3k_search_beats_absmax() {
+        let x = synthetic_weights();
+        let blocks = x.len() / 256;
+
+        let mut searched = vec![0u8; blocks * 110];
+        let mut absmax = vec![0u8; blocks * 110];
+        quantize_q3k(&x, &mut searched);
+        quantize_q3k_absmax(&x, &mut absmax);
+
+        let (a, b) = decode_pair(&x, &searched, &absmax, dequant_q3k);
+        assert!(a < b, "q3_k: search {a} must beat absmax {b}");
+    }
+}

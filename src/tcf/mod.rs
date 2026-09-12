@@ -37,8 +37,6 @@ pub mod proof;
 pub mod reader;
 pub mod record;
 pub mod streaming;
-#[cfg(test)]
-pub(crate) mod test_blocks;
 pub mod writer;
 
 pub use binary16::{bits_to_f32, f32_to_bits};

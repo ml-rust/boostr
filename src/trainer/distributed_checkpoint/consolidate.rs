@@ -188,3 +188,177 @@ fn consolidate_tensor_parallel(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trainer::distributed_checkpoint::save::save_distributed_checkpoint;
+    use crate::trainer::distributed_checkpoint::types::ShardingConfig;
+    use crate::trainer::test_helpers::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_consolidate_zero_partitioned() {
+        let dir = TempDir::new().unwrap();
+        let output_dir = TempDir::new().unwrap();
+        let device = make_device();
+
+        // Rank 0 owns embed.weight
+        let mut model_r0 = HashMap::new();
+        model_r0.insert(
+            "embed.weight".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0], &[2], &device).unwrap(),
+        );
+
+        // Rank 1 owns head.weight
+        let mut model_r1 = HashMap::new();
+        model_r1.insert(
+            "head.weight".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2], &device).unwrap(),
+        );
+
+        let state = make_training_state(200);
+
+        save_distributed_checkpoint(
+            dir.path(),
+            0,
+            2,
+            &model_r0,
+            None,
+            &state,
+            ShardingConfig {
+                strategy: ShardingStrategy::ZeroPartitioned { stage: 3 },
+                split_dims: HashMap::new(),
+            },
+        )
+        .unwrap();
+
+        save_distributed_checkpoint(
+            dir.path(),
+            1,
+            2,
+            &model_r1,
+            None,
+            &state,
+            ShardingConfig {
+                strategy: ShardingStrategy::ZeroPartitioned { stage: 3 },
+                split_dims: HashMap::new(),
+            },
+        )
+        .unwrap();
+
+        // Consolidate
+        consolidate_checkpoint(dir.path(), output_dir.path()).unwrap();
+
+        // Verify merged checkpoint has both params
+        let (merged, _, merged_state) =
+            load_checkpoint::<CpuRuntime, _>(output_dir.path(), &device).unwrap();
+        assert_eq!(merged.len(), 2);
+        assert!(merged.contains_key("embed.weight"));
+        assert!(merged.contains_key("head.weight"));
+        assert_eq!(merged_state.step, 200);
+
+        let embed: Vec<f32> = merged["embed.weight"].to_vec();
+        assert!((embed[0] - 1.0).abs() < 1e-6);
+        let head: Vec<f32> = merged["head.weight"].to_vec();
+        assert!((head[0] - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_consolidate_tensor_parallel() {
+        let dir = TempDir::new().unwrap();
+        let output_dir = TempDir::new().unwrap();
+        let device = make_device();
+
+        // Rank 0: first half of wq weight [2, 4]
+        let mut model_r0 = HashMap::new();
+        model_r0.insert(
+            "attn.wq".to_string(),
+            Tensor::<CpuRuntime>::from_slice(
+                &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                &[2, 4],
+                &device,
+            )
+            .unwrap(),
+        );
+        model_r0.insert(
+            "norm.weight".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[2], &device).unwrap(),
+        );
+
+        // Rank 1: second half of wq weight [2, 4]
+        let mut model_r1 = HashMap::new();
+        model_r1.insert(
+            "attn.wq".to_string(),
+            Tensor::<CpuRuntime>::from_slice(
+                &[9.0f32, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+                &[2, 4],
+                &device,
+            )
+            .unwrap(),
+        );
+        model_r1.insert(
+            "norm.weight".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0], &[2], &device).unwrap(),
+        );
+
+        let state = make_training_state(300);
+
+        let mut split_dims = HashMap::new();
+        split_dims.insert("attn.wq".to_string(), 0usize);
+
+        save_distributed_checkpoint(
+            dir.path(),
+            0,
+            2,
+            &model_r0,
+            None,
+            &state,
+            ShardingConfig {
+                strategy: ShardingStrategy::TensorParallel,
+                split_dims: split_dims.clone(),
+            },
+        )
+        .unwrap();
+
+        save_distributed_checkpoint(
+            dir.path(),
+            1,
+            2,
+            &model_r1,
+            None,
+            &state,
+            ShardingConfig {
+                strategy: ShardingStrategy::TensorParallel,
+                split_dims: split_dims.clone(),
+            },
+        )
+        .unwrap();
+
+        // Consolidate
+        consolidate_checkpoint(dir.path(), output_dir.path()).unwrap();
+
+        let (merged, _, merged_state) =
+            load_checkpoint::<CpuRuntime, _>(output_dir.path(), &device).unwrap();
+
+        // attn.wq should be [4, 4] (concatenated along dim 0)
+        let wq = &merged["attn.wq"];
+        assert_eq!(wq.shape(), &[4, 4]);
+        let wq_data: Vec<f32> = wq.to_vec();
+        // First row from rank 0 should be [1, 2, 3, 4]
+        assert!((wq_data[0] - 1.0).abs() < 1e-6);
+        assert!((wq_data[1] - 2.0).abs() < 1e-6);
+        // First row from rank 1 (at index 8) should be [9, 10, 11, 12]
+        assert!((wq_data[8] - 9.0).abs() < 1e-6);
+        assert!((wq_data[9] - 10.0).abs() < 1e-6);
+
+        // norm.weight should be [2] (replicated, taken from rank 0)
+        let norm = &merged["norm.weight"];
+        assert_eq!(norm.shape(), &[2]);
+        let norm_data: Vec<f32> = norm.to_vec();
+        assert!((norm_data[0] - 1.0).abs() < 1e-6);
+
+        // Training state should be preserved
+        assert_eq!(merged_state.step, 300);
+    }
+}

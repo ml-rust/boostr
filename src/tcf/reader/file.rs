@@ -1,21 +1,6 @@
-//! `TcfFile`: the TCF reader. `FORMAT.md` Section 4, Section 4.1,
-//! Section 5, Section 6, Section 15, Section 16, Section 17.
-//!
-//! # The directory-only guarantee, by construction
-//!
-//! Section 16 requires a placement planner to produce a complete plan
-//! without touching a tensor payload page. [`TcfFile::open`] therefore never
-//! reads a byte at or past `data_off`.
-//!
-//! That is structural here, not a convention: `open` splits the caller's
-//! slice once, at `data_off`, and every later step of `open` reads the
-//! `directory` half. The `data` half is reachable only from
-//! [`TcfFile::payload`] and [`TcfFile::verify_tensor`]. A payload page is
-//! mapped in when a caller asks for that tensor's bytes, never before.
-//!
-//! Splitting a slice reads nothing, so this holds for a memory-mapped file
-//! as well as an in-memory one. Mapping is the host's job: this reader
-//! borrows a slice and owns none of it.
+//! The [`TcfFile`] type: [`TcfFile::open`] and the directory accessors.
+//! See the module documentation for the Section 16 guarantee `open` makes
+//! true by construction.
 
 use std::collections::{HashMap, HashSet};
 
@@ -27,27 +12,20 @@ use crate::tcf::record::{
     WorkloadProfileRecord,
 };
 
-use self::checks::{
+use super::checks::{
     check_contract_digests, check_contract_record_digests, check_policy_digests,
     check_relation_digests, check_tensor,
 };
-use self::header_checks::{
+use super::header_checks::{
     check_directory_digest, check_header_digest, check_header_flags, check_magic, check_major,
     check_required_feature_bits, check_required_feature_counts, check_two_level_feature_bit,
 };
-use self::sections::{bounds, decode_all, string_bytes, validate_sections};
-
-mod checks;
-mod header_checks;
-mod sections;
-#[cfg(test)]
-mod tests;
-mod verify;
+use super::sections::{bounds, decode_all, string_bytes, validate_sections};
 
 /// A tensor's `data_offset`, relative to `Header.data_off`. Shared by
 /// [`TcfFile::payload`] and `TcfFile::padding`, which both start from this
 /// offset into `self.data`. Section 8.
-fn rel_data_offset(t: &TensorRecord, header: &Header) -> Result<u64, TcfError> {
+pub(super) fn rel_data_offset(t: &TensorRecord, header: &Header) -> Result<u64, TcfError> {
     t.data_offset
         .checked_sub(header.data_off)
         .ok_or(bounds("tensor payload"))
@@ -65,11 +43,11 @@ fn rel_data_offset(t: &TensorRecord, header: &Header) -> Result<u64, TcfError> {
 /// reinterpreting mapped bytes as a struct).
 #[derive(Debug, Clone)]
 pub struct TcfFile<'a> {
-    header: Header,
+    pub(super) header: Header,
     /// Bytes `[0, data_off)`: everything `open` is allowed to read. Section 4.1.
-    directory: &'a [u8],
+    pub(super) directory: &'a [u8],
     /// Bytes `[data_off, file_len)`: tensor payloads, untouched by `open`.
-    data: &'a [u8],
+    pub(super) data: &'a [u8],
     modules: Vec<ModuleRecord>,
     tensors: Vec<TensorRecord>,
     contracts: Vec<ContractRecord>,

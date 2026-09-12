@@ -168,3 +168,77 @@ pub(super) fn pack_q2k(levels: &[u8; SUPER_BLOCK], qs: &mut [u8]) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::search::KSearch;
+    use super::super::simple::tests::{decode_pair, round_trip, synthetic_weights};
+    use super::*;
+    use crate::quant::cpu::kernels::dequant_k_quants::dequant_q2k;
+
+    /// A round trip is NECESSARY but NOT SUFFICIENT for either K-quant below.
+    ///
+    /// The reader here is boostr's own. A writer and a reader that share a wrong
+    /// field order or a wrong interleave agree with each other and land inside any
+    /// error band. Only `tests/gguf_writer_conformance_llama_cpp.rs`, which
+    /// compares against bytes an external quantizer produced, settles the layout.
+    /// Everything in this file is the cheap gate that runs first.
+    ///
+    /// The band is wide because two bits per element is wide: a 16-element
+    /// sub-block carries four levels, and this input spans six orders of magnitude.
+    #[test]
+    fn q2k_round_trip() {
+        let x = synthetic_weights();
+        round_trip(&x, 84, 256, quantize_q2k, dequant_q2k, 0.45);
+    }
+
+    /// A single hand-built super-block pins the Q2_K field order.
+    ///
+    /// Q2_K puts the 16 scale bytes FIRST and the two f16 factors LAST, the
+    /// opposite of Q4_K. Writing `d` at byte 0 leaves the reader taking its scale
+    /// out of level data and its levels out of the scale bytes. Reading a constant
+    /// back is enough to catch it.
+    #[test]
+    fn q2k_field_order_matches_the_reader() {
+        let x = vec![0.25f32; 256];
+        let mut packed = vec![0u8; 84];
+        quantize_q2k(&x, &mut packed);
+
+        let mut decoded = vec![0.0f32; 256];
+        dequant_q2k(&packed, &mut decoded);
+        for (i, &v) in decoded.iter().enumerate() {
+            assert!((v - 0.25).abs() < 0.01, "elem {i}: expected 0.25, got {v}");
+        }
+    }
+
+    /// Q2_K's sweep is gated on RUNNING, not on relative RMS.
+    ///
+    /// Q2_K is the one format llama.cpp scores with `use_mad`: the sweep minimises
+    /// weighted ABSOLUTE error, so it can and sometimes does pick a packing with a
+    /// higher squared error than the plain min/max fit. Asserting a lower relative
+    /// RMS would be asserting the wrong objective. What must hold is that the sweep
+    /// still changes the stored fields — identical bytes mean it stopped running.
+    /// The baseline is the same pipeline with `nstep = 0`, so the sweep is the only
+    /// difference between the two packings.
+    #[test]
+    fn q2k_search_moves_the_stored_fields() {
+        let x = synthetic_weights();
+        let no_sweep = KSearch {
+            nstep: 0,
+            ..Q2K_SEARCH
+        };
+
+        let mut searched = vec![0u8; (x.len() / 256) * 84];
+        let mut min_max = vec![0u8; searched.len()];
+        quantize_q2k_with(&x, &mut searched, &Q2K_SEARCH);
+        quantize_q2k_with(&x, &mut min_max, &no_sweep);
+
+        assert_ne!(
+            searched, min_max,
+            "q2_k: the swept packing is byte-identical to the plain min/max fit, so \
+             the sweep is not running"
+        );
+        let (a, b) = decode_pair(&x, &searched, &min_max, dequant_q2k);
+        assert!(a.is_finite() && b.is_finite(), "q2_k: {a} / {b}");
+    }
+}

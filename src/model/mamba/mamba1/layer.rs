@@ -387,3 +387,92 @@ where
     };
     vb.take_or_init_tensor(name, shape, dtype, init, client)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nn::VarMap;
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::CpuRuntime;
+
+    fn assert_named_shape<R: Runtime>(params: &[(String, &Var<R>)], name: &str, shape: &[usize]) {
+        let actual = params
+            .iter()
+            .find(|(param_name, _)| param_name == name)
+            .map(|(_, param)| param.shape().to_vec())
+            .unwrap_or_else(|| panic!("missing parameter {name}"));
+        assert_eq!(actual, shape, "shape mismatch for {name}");
+    }
+
+    #[test]
+    fn test_mamba1_init_from_empty_varmap_shapes_and_ssm_defaults() {
+        let (client, device) = cpu_setup();
+        let config = Mamba1Config::new(4)
+            .with_expand(1)
+            .with_d_state(2)
+            .with_dt_softplus(false)
+            .with_use_d(true);
+        let mut varmap = VarMap::<CpuRuntime>::new();
+        let mut vb = VarBuilder::new(&mut varmap, &device);
+
+        let mamba = Mamba1::init(&config, &mut vb, DType::F32, &client, true).unwrap();
+        let params = mamba.named_parameters();
+        let mut names: Vec<&str> = params.iter().map(|(name, _)| name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "a_log",
+                "conv1d.weight",
+                "d_param",
+                "dt_proj.weight",
+                "in_proj.weight",
+                "out_proj.weight",
+                "x_proj.weight",
+            ]
+        );
+        assert_named_shape(
+            &params,
+            "in_proj.weight",
+            &[config.in_proj_dim(), config.d_model],
+        );
+        assert_named_shape(
+            &params,
+            "conv1d.weight",
+            &[config.conv_channels(), 1, config.d_conv],
+        );
+        assert_named_shape(
+            &params,
+            "x_proj.weight",
+            &[config.x_proj_dim(), config.d_inner()],
+        );
+        assert_named_shape(
+            &params,
+            "dt_proj.weight",
+            &[config.d_inner(), config.d_inner()],
+        );
+        assert_named_shape(
+            &params,
+            "out_proj.weight",
+            &[config.d_model, config.d_inner()],
+        );
+        assert_named_shape(&params, "a_log", &[config.d_inner(), config.d_state]);
+        assert_named_shape(&params, "d_param", &[config.d_inner()]);
+
+        let a_log: Vec<f32> = mamba.a_log.tensor().contiguous().unwrap().to_vec();
+        assert!(a_log.iter().all(|&value| value == 0.0));
+        let d_param: Vec<f32> = mamba
+            .d_param
+            .as_ref()
+            .unwrap()
+            .tensor()
+            .contiguous()
+            .unwrap()
+            .to_vec();
+        assert!(d_param.iter().all(|&value| value == 1.0));
+
+        let mut strict_varmap = VarMap::<CpuRuntime>::new();
+        let mut strict_vb = VarBuilder::new(&mut strict_varmap, &device);
+        assert!(Mamba1::from_varbuilder(&config, &mut strict_vb, false).is_err());
+    }
+}

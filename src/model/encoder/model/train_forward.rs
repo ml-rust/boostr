@@ -119,3 +119,214 @@ impl<R: Runtime<DType = DType>> Encoder<R> {
         Ok(Var::new(pooled, false))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::encoder::config::{EncoderConfig, FfnVariant};
+    use crate::model::encoder::model::Pooling;
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::CpuRuntime;
+
+    fn make_test_encoder() -> (
+        Encoder<CpuRuntime>,
+        numr::runtime::cpu::CpuClient,
+        numr::runtime::cpu::CpuDevice,
+    ) {
+        let (client, device) = cpu_setup();
+
+        let config = EncoderConfig {
+            vocab_size: 10,
+            hidden_size: 8,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 16,
+            max_position_embeddings: 32,
+            ffn_variant: FfnVariant::Standard,
+            ..Default::default()
+        };
+
+        let encoder = Encoder::from_weights(config, Pooling::Mean, |name| match name {
+            "embeddings.word_embeddings.weight" => {
+                Ok(Tensor::from_slice(&vec![0.1f32; 10 * 8], &[10, 8], &device).unwrap())
+            }
+            "embeddings.position_embeddings.weight" => {
+                Ok(Tensor::from_slice(&vec![0.01f32; 32 * 8], &[32, 8], &device).unwrap())
+            }
+            "embeddings.layer_norm.weight" => {
+                Ok(Tensor::from_slice(&[1.0f32; 8], &[8], &device).unwrap())
+            }
+            "embeddings.layer_norm.bias" => {
+                Ok(Tensor::from_slice(&[0.0f32; 8], &[8], &device).unwrap())
+            }
+            n if n.ends_with("query.weight")
+                || n.ends_with("key.weight")
+                || n.ends_with("value.weight") =>
+            {
+                Ok(Tensor::from_slice(&vec![0.02f32; 8 * 8], &[8, 8], &device).unwrap())
+            }
+            n if n.ends_with("query.bias")
+                || n.ends_with("key.bias")
+                || n.ends_with("value.bias") =>
+            {
+                Ok(Tensor::from_slice(&[0.0f32; 8], &[8], &device).unwrap())
+            }
+            n if n.ends_with("attention.output.dense.weight") => {
+                Ok(Tensor::from_slice(&vec![0.02f32; 8 * 8], &[8, 8], &device).unwrap())
+            }
+            n if n.ends_with("attention.output.dense.bias") => {
+                Ok(Tensor::from_slice(&[0.0f32; 8], &[8], &device).unwrap())
+            }
+            n if n.ends_with("output.dense.weight") => {
+                Ok(Tensor::from_slice(&vec![0.02f32; 8 * 16], &[8, 16], &device).unwrap())
+            }
+            n if n.ends_with("output.dense.bias") => {
+                Ok(Tensor::from_slice(&[0.0f32; 8], &[8], &device).unwrap())
+            }
+            n if n.ends_with("LayerNorm.weight") => {
+                Ok(Tensor::from_slice(&[1.0f32; 8], &[8], &device).unwrap())
+            }
+            n if n.ends_with("LayerNorm.bias") => {
+                Ok(Tensor::from_slice(&[0.0f32; 8], &[8], &device).unwrap())
+            }
+            n if n.ends_with("intermediate.dense.weight") => {
+                Ok(Tensor::from_slice(&vec![0.02f32; 16 * 8], &[16, 8], &device).unwrap())
+            }
+            n if n.ends_with("intermediate.dense.bias") => {
+                Ok(Tensor::from_slice(&[0.0f32; 16], &[16], &device).unwrap())
+            }
+            _ => Err(Error::ModelError {
+                reason: format!("unknown weight: {name}"),
+            }),
+        })
+        .unwrap();
+
+        (encoder, client, device)
+    }
+
+    fn make_test_encoder_cls() -> (
+        Encoder<CpuRuntime>,
+        numr::runtime::cpu::CpuClient,
+        numr::runtime::cpu::CpuDevice,
+    ) {
+        let (client, device) = cpu_setup();
+
+        let config = EncoderConfig {
+            vocab_size: 10,
+            hidden_size: 8,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 16,
+            max_position_embeddings: 32,
+            ffn_variant: FfnVariant::Standard,
+            ..Default::default()
+        };
+
+        let device_ref = &device;
+        let encoder = Encoder::from_weights(config, Pooling::Cls, |name| match name {
+            "embeddings.word_embeddings.weight" => {
+                Ok(Tensor::from_slice(&vec![0.1f32; 10 * 8], &[10, 8], device_ref).unwrap())
+            }
+            "embeddings.position_embeddings.weight" => {
+                Ok(Tensor::from_slice(&vec![0.01f32; 32 * 8], &[32, 8], device_ref).unwrap())
+            }
+            "embeddings.layer_norm.weight" => {
+                Ok(Tensor::from_slice(&[1.0f32; 8], &[8], device_ref).unwrap())
+            }
+            "embeddings.layer_norm.bias" => {
+                Ok(Tensor::from_slice(&[0.0f32; 8], &[8], device_ref).unwrap())
+            }
+            n if n.ends_with("query.weight")
+                || n.ends_with("key.weight")
+                || n.ends_with("value.weight")
+                || n.ends_with("attention.output.dense.weight") =>
+            {
+                Ok(Tensor::from_slice(&vec![0.02f32; 8 * 8], &[8, 8], device_ref).unwrap())
+            }
+            n if n.ends_with("query.bias")
+                || n.ends_with("key.bias")
+                || n.ends_with("value.bias")
+                || n.ends_with("attention.output.dense.bias")
+                || n.ends_with("output.dense.bias") =>
+            {
+                Ok(Tensor::from_slice(&[0.0f32; 8], &[8], device_ref).unwrap())
+            }
+            n if n.ends_with("LayerNorm.weight") => {
+                Ok(Tensor::from_slice(&[1.0f32; 8], &[8], device_ref).unwrap())
+            }
+            n if n.ends_with("LayerNorm.bias") => {
+                Ok(Tensor::from_slice(&[0.0f32; 8], &[8], device_ref).unwrap())
+            }
+            n if n.ends_with("intermediate.dense.weight") => {
+                Ok(Tensor::from_slice(&vec![0.02f32; 16 * 8], &[16, 8], device_ref).unwrap())
+            }
+            n if n.ends_with("intermediate.dense.bias") => {
+                Ok(Tensor::from_slice(&[0.0f32; 16], &[16], device_ref).unwrap())
+            }
+            n if n.ends_with("output.dense.weight") => {
+                Ok(Tensor::from_slice(&vec![0.02f32; 8 * 16], &[8, 16], device_ref).unwrap())
+            }
+            _ => Err(Error::ModelError {
+                reason: format!("unknown weight: {name}"),
+            }),
+        })
+        .unwrap();
+
+        (encoder, client, device)
+    }
+
+    #[test]
+    fn test_encode_output_shape() {
+        let (encoder, client, device) = make_test_encoder();
+        let input_ids = Tensor::<CpuRuntime>::from_slice(&[1i64, 2, 3], &[1, 3], &device).unwrap();
+        let hidden = encoder.encode(&client, &input_ids, None).unwrap();
+        assert_eq!(hidden.shape(), &[1, 3, 8]);
+    }
+
+    #[test]
+    fn test_embed_mean_pool() {
+        let (encoder, client, device) = make_test_encoder();
+        let input_ids =
+            Tensor::<CpuRuntime>::from_slice(&[1i64, 2, 3, 4], &[1, 4], &device).unwrap();
+        let emb = encoder.embed(&client, &input_ids, None).unwrap();
+        assert_eq!(emb.shape(), &[1, 8]);
+    }
+
+    #[test]
+    fn test_embed_batched() {
+        let (encoder, client, device) = make_test_encoder();
+        let input_ids =
+            Tensor::<CpuRuntime>::from_slice(&[1i64, 2, 3, 4, 5, 6], &[2, 3], &device).unwrap();
+        let emb = encoder.embed(&client, &input_ids, None).unwrap();
+        assert_eq!(emb.shape(), &[2, 8]);
+    }
+
+    #[test]
+    fn test_encode_with_none_mask_matches_no_mask() {
+        let (encoder, client, device) = make_test_encoder();
+        let input_ids = Tensor::<CpuRuntime>::from_slice(&[1i64, 2, 3], &[1, 3], &device).unwrap();
+        let h1 = encoder.encode(&client, &input_ids, None).unwrap();
+        let h2 = encoder.encode(&client, &input_ids, None).unwrap();
+        let v1: Vec<f32> = h1.tensor().to_vec();
+        let v2: Vec<f32> = h2.tensor().to_vec();
+        assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn test_mask_wrong_shape_returns_error() {
+        let (encoder, client, device) = make_test_encoder();
+        let input_ids = Tensor::<CpuRuntime>::from_slice(&[1i64, 2, 3], &[1, 3], &device).unwrap();
+        let bad_mask = Tensor::<CpuRuntime>::from_slice(&[1.0f32; 4], &[1, 4], &device).unwrap();
+        let result = encoder.encode(&client, &input_ids, Some(&bad_mask));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cls_pooling_batched_produces_correct_shape() {
+        let (encoder, client, device) = make_test_encoder_cls();
+        let input_ids =
+            Tensor::<CpuRuntime>::from_slice(&[1i64, 2, 3, 4, 5, 6], &[2, 3], &device).unwrap();
+        let emb = encoder.embed(&client, &input_ids, None).unwrap();
+        assert_eq!(emb.shape(), &[2, 8]);
+    }
+}

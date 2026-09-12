@@ -177,3 +177,235 @@ pub(super) fn quantize_q8_0_absmax(x: &[f32], out: &mut [u8]) {
 pub(super) fn quantize_q4_1_minmax(x: &[f32], out: &mut [u8]) {
     quantize_q4_1_with(x, out, minmax_block_affine)
 }
+
+/// Round-trip and accuracy fixtures for the quantization writers, shared by
+/// every writer's tests in this module.
+///
+/// Every test dequantizes with boostr's OWN reader kernel rather than a private
+/// decoder. A writer paired with its own reader can agree with itself while
+/// disagreeing with the format — that is exactly how three layout bugs (Q6_K
+/// field order, Q4_0/Q4_1 nibble pairing) shipped elsewhere in this codebase.
+///
+/// The input is several super-blocks long with genuinely varying magnitude
+/// across sub-blocks. A constant or single-block input passes with a wrong
+/// interleave, because a within-block permutation preserves shape, block count
+/// and tensor RMS.
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use crate::quant::cpu::kernels::dequant_simple::{dequant_q4_0, dequant_q4_1, dequant_q8_0};
+
+    /// Number of 256-element super-blocks in the test input
+    const SUPER_BLOCKS: usize = 8;
+    const N: usize = SUPER_BLOCKS * 256;
+
+    /// Seeded LCG (Numerical Recipes constants) — deterministic, no `rand` dep
+    struct Lcg(u32);
+
+    impl Lcg {
+        fn next_unit(&mut self) -> f32 {
+            self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            // Top 24 bits into [-1, 1).
+            ((self.0 >> 8) as f32 / 8_388_608.0) - 1.0
+        }
+    }
+
+    /// Weight-like input: roughly normal, with per-sub-block magnitude varying over
+    /// three orders of magnitude and occasional outliers
+    ///
+    /// The magnitude spread is what makes a shared-scale bug visible: with uniform
+    /// magnitudes a wrong sub-block-to-scale mapping costs almost nothing.
+    pub(in super::super) fn synthetic_weights() -> Vec<f32> {
+        let mut rng = Lcg(0x5EED_1234);
+        let mut out = Vec::with_capacity(N);
+        for i in 0..N {
+            // Sum of three uniforms approximates a normal.
+            let g = rng.next_unit() + rng.next_unit() + rng.next_unit();
+            let sub = i / 32;
+            let magnitude = 10.0f32.powi((sub % 7) as i32 - 3);
+            let outlier = if i % 211 == 0 { 6.0 } else { 1.0 };
+            out.push(g * magnitude * outlier);
+        }
+        out
+    }
+
+    /// Relative RMS of the reconstruction error: `‖x̂ − x‖ / ‖x‖`
+    pub(in super::super) fn relative_rms(reference: &[f32], decoded: &[f32]) -> f32 {
+        let mut num = 0.0f64;
+        let mut den = 0.0f64;
+        for (&r, &d) in reference.iter().zip(decoded) {
+            num += ((d - r) as f64).powi(2);
+            den += (r as f64).powi(2);
+        }
+        (num / den).sqrt() as f32
+    }
+
+    /// Quantize, dequantize with the matching reader, and check the shared
+    /// invariants: exact packed size, all-finite output, error inside the band.
+    pub(in super::super) fn round_trip(
+        values: &[f32],
+        block_bytes: usize,
+        block_size: usize,
+        quantize: impl Fn(&[f32], &mut [u8]),
+        dequantize: fn(&[u8], &mut [f32]),
+        max_rel_rms: f32,
+    ) -> f32 {
+        let num_blocks = values.len() / block_size;
+        let mut packed = vec![0u8; num_blocks * block_bytes];
+        quantize(values, &mut packed);
+        assert_eq!(packed.len(), num_blocks * block_bytes, "packed size");
+
+        let mut decoded = vec![0.0f32; values.len()];
+        dequantize(&packed, &mut decoded);
+        assert!(decoded.iter().all(|v| v.is_finite()), "non-finite output");
+
+        let rms = relative_rms(values, &decoded);
+        assert!(
+            rms < max_rel_rms,
+            "relative RMS {rms} exceeds the {max_rel_rms} band"
+        );
+        rms
+    }
+
+    /// Dequantize two packings of the same input, returning both relative RMS values
+    pub(in super::super) fn decode_pair(
+        x: &[f32],
+        left: &[u8],
+        right: &[u8],
+        dequantize: fn(&[u8], &mut [f32]),
+    ) -> (f32, f32) {
+        let mut dl = vec![0.0f32; x.len()];
+        let mut dr = vec![0.0f32; x.len()];
+        dequantize(left, &mut dl);
+        dequantize(right, &mut dr);
+        (relative_rms(x, &dl), relative_rms(x, &dr))
+    }
+
+    #[test]
+    fn q4_0_round_trip() {
+        let x = synthetic_weights();
+        round_trip(&x, 18, 32, quantize_q4_0, dequant_q4_0, 0.11);
+    }
+
+    #[test]
+    fn q4_1_round_trip() {
+        let x = synthetic_weights();
+        round_trip(&x, 20, 32, quantize_q4_1, dequant_q4_1, 0.10);
+    }
+
+    #[test]
+    fn q8_0_round_trip() {
+        let x = synthetic_weights();
+        round_trip(&x, 34, 32, quantize_q8_0, dequant_q8_0, 0.01);
+    }
+
+    /// The same claim for the single-scale formats, whose search is
+    /// [`super::super::block_scale`].
+    ///
+    /// The baseline is the identical encoder with the sweep replaced by the plain
+    /// absmax scale, so the sweep is the only difference between the two packings.
+    /// A regression in the search shows up here before it shows up in a converted
+    /// checkpoint.
+    #[test]
+    fn q4_0_search_beats_absmax() {
+        let x = synthetic_weights();
+        let mut searched = vec![0u8; (x.len() / 32) * 18];
+        let mut absmax = vec![0u8; searched.len()];
+        quantize_q4_0(&x, &mut searched);
+        quantize_q4_0_absmax(&x, &mut absmax);
+
+        let (a, b) = decode_pair(&x, &searched, &absmax, dequant_q4_0);
+        assert!(a < b, "q4_0: search {a} must beat absmax {b}");
+    }
+
+    /// Q4_1's search is [`super::super::block_affine`], which sweeps the scale AND the
+    /// added offset. Its baseline is the plain min/max fit through the identical
+    /// encoder, so the sweep is the only difference between the two packings.
+    #[test]
+    fn q4_1_search_beats_minmax() {
+        let x = synthetic_weights();
+        let mut searched = vec![0u8; (x.len() / 32) * 20];
+        let mut minmax = vec![0u8; searched.len()];
+        quantize_q4_1(&x, &mut searched);
+        quantize_q4_1_minmax(&x, &mut minmax);
+
+        let (a, b) = decode_pair(&x, &searched, &minmax, dequant_q4_1);
+        assert!(a < b, "q4_1: search {a} must beat min/max {b}");
+    }
+
+    /// The search moves the stored fields, never the format.
+    ///
+    /// Q4_1's min/max fit could only ever store a scale and offset drawn from the
+    /// block itself. The search stores a LEAST-SQUARES pair instead, which can leave
+    /// binary16's range on an extreme block. Both fields must still be values a
+    /// reader can multiply and add, so both are checked on every block.
+    #[test]
+    fn q4_1_stored_fields_stay_finite() {
+        let x = synthetic_weights();
+        let mut packed = vec![0u8; (x.len() / 32) * 20];
+        quantize_q4_1(&x, &mut packed);
+
+        for (b, block) in packed.as_chunks::<20>().0.iter().enumerate() {
+            let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
+            let m = f16::from_le_bytes([block[2], block[3]]).to_f32();
+            assert!(
+                d.is_finite() && m.is_finite(),
+                "block {b} stores a non-finite field, which no reader can use"
+            );
+        }
+    }
+
+    #[test]
+    fn q8_0_search_beats_absmax() {
+        let x = synthetic_weights();
+        let mut searched = vec![0u8; (x.len() / 32) * 34];
+        let mut absmax = vec![0u8; searched.len()];
+        quantize_q8_0(&x, &mut searched);
+        quantize_q8_0_absmax(&x, &mut absmax);
+
+        let (a, b) = decode_pair(&x, &searched, &absmax, dequant_q8_0);
+        assert!(a < b, "q8_0: search {a} must beat absmax {b}");
+    }
+
+    /// The search moves the scale, never the format.
+    ///
+    /// Q8_0 codes are clamped to `[-127, 127]`, one short of the signed-byte range.
+    /// A refit that widened the range to -128 would still decode, and would still
+    /// round-trip inside the error band, but the block would no longer be
+    /// symmetric and kernels that negate a code would overflow.
+    #[test]
+    fn q8_0_codes_stay_in_the_symmetric_range() {
+        let x = synthetic_weights();
+        let mut packed = vec![0u8; (x.len() / 32) * 34];
+        quantize_q8_0(&x, &mut packed);
+
+        for (b, block) in packed.as_chunks::<34>().0.iter().enumerate() {
+            for (i, &byte) in block[2..].iter().enumerate() {
+                let code = byte as i8;
+                assert!(
+                    code != -128,
+                    "block {b} elem {i}: code -128 is out of range"
+                );
+            }
+        }
+    }
+
+    /// A constant block must come back exactly, which pins Q4_0's sign convention.
+    ///
+    /// The scale takes the opposite sign to the largest-magnitude element, so a
+    /// block of -0.75 gets a POSITIVE scale and lands on level -8. Getting that
+    /// sign backwards still produces valid nibbles and a plausible tensor RMS, and
+    /// only shows up as a reconstruction that misses by a factor near two.
+    #[test]
+    fn q4_0_round_trips_a_constant_block() {
+        let x = vec![-0.75f32; 32];
+        let mut packed = vec![0u8; 18];
+        quantize_q4_0(&x, &mut packed);
+
+        let mut decoded = vec![0.0f32; 32];
+        dequant_q4_0(&packed, &mut decoded);
+        for (i, &v) in decoded.iter().enumerate() {
+            assert!((v + 0.75).abs() < 0.01, "elem {i}: expected -0.75, got {v}");
+        }
+    }
+}

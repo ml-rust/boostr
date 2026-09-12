@@ -372,3 +372,43 @@ impl EncoderConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn architectures_without_a_sliding_window_never_report_local_blocks() {
+        let cfg = EncoderConfig {
+            num_hidden_layers: 12,
+            sliding_window: None,
+            sliding_window_pattern: 6,
+            ..Default::default()
+        };
+
+        assert!(!cfg.interleaves_attention());
+        for il in 0..cfg.num_hidden_layers {
+            assert!(!cfg.is_local_layer(il), "block {il} must be global");
+            assert_eq!(cfg.layer_attention(il).window, None);
+            assert_eq!(cfg.layer_attention(il).rope_freq_base, cfg.rope_freq_base);
+        }
+        assert_eq!(cfg.distinct_rope_bases().len(), 1);
+    }
+
+    #[test]
+    fn a_zero_or_unit_pattern_disables_interleaving() {
+        for pattern in [0usize, 1] {
+            let cfg = EncoderConfig {
+                num_hidden_layers: 12,
+                sliding_window: Some(512),
+                sliding_window_pattern: pattern,
+                ..Default::default()
+            };
+            assert!(
+                !cfg.interleaves_attention(),
+                "pattern {pattern} must not interleave"
+            );
+            assert!((0..12).all(|il| !cfg.is_local_layer(il)));
+        }
+    }
+}

@@ -207,3 +207,85 @@ pub(super) fn check_payload_length(t: &TensorRecord) -> Result<(), TcfError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tcf::encoding::{Encoding, RawEncoding};
+    use crate::tcf::enums::{
+        ExecutionRole, FallbackReason, LayoutId, ProofFormat, ResidencyClass, Role,
+    };
+    use crate::tcf::record::field::StringRef;
+
+    /// A raw `TensorRecord` shaped like the one the reader fixture file
+    /// carries, in the F16 encoding: 2 x 128 elements of 2 bytes each.
+    fn raw_tensor() -> TensorRecord {
+        TensorRecord {
+            tensor_id: 42,
+            module_id: 1,
+            name: StringRef::new(7, 1),
+            role: Role::LinearWeight,
+            encoding: Encoding::Raw(RawEncoding::F16),
+            fallback_reason: FallbackReason::None,
+            residency_class: ResidencyClass::Hot,
+            flags: TensorFlags::NONE,
+            rank: 2,
+            calibration_id: 0,
+            dims: [2, 128, 0, 0, 0, 0, 0, 0],
+            activation_contract_id: 1,
+            layout_id: LayoutId::RowMajorDense,
+            data_offset: 0,
+            logical_payload_bytes: 2 * 128 * 2,
+            physical_span_bytes: 0,
+            resident_bytes: 0,
+            transfer_bytes: 0,
+            sensitivity_delta: 0.0,
+            sensitivity_ci95: 0.0,
+            accesses_per_generation: 0.0,
+            bytes_read_per_generation: 0.0,
+            sensitivity_samples: 0,
+            sensitivity_seed_count: 0,
+            access_profile_samples: 0,
+            execution_role: ExecutionRole::Matmul,
+            workload_profile_id: 0,
+            semantic_digest: [0u8; 16],
+            payload_digest: [0u8; 16],
+            proof_rel_off: 0,
+            proof_count: 0,
+            proof_format: ProofFormat::None,
+        }
+    }
+
+    /// Section 8.0.1: a raw tensor's length is `product(dims) * width`, and
+    /// a stored value that disagrees is `E_INVALID_QUANT_SHAPE`. Nothing
+    /// else in the file constrains it.
+    #[test]
+    fn raw_payload_length_must_be_product_of_dims_times_width() {
+        assert_eq!(check_payload_length(&raw_tensor()), Ok(()));
+
+        let mut truncated = raw_tensor();
+        truncated.logical_payload_bytes -= 2;
+        assert_eq!(
+            check_payload_length(&truncated),
+            Err(TcfError::InvalidQuantShape { tensor_id: 42 })
+        );
+
+        let mut padded = raw_tensor();
+        padded.logical_payload_bytes += 2;
+        assert_eq!(
+            check_payload_length(&padded),
+            Err(TcfError::InvalidQuantShape { tensor_id: 42 })
+        );
+
+        // The element width is the encoding's, never the shape's: the same
+        // 256 elements are 1024 bytes in F32 and 256 in I8.
+        let mut wide = raw_tensor();
+        wide.encoding = Encoding::Raw(RawEncoding::F32);
+        assert_eq!(
+            check_payload_length(&wide),
+            Err(TcfError::InvalidQuantShape { tensor_id: 42 })
+        );
+        wide.logical_payload_bytes = 2 * 128 * 4;
+        assert_eq!(check_payload_length(&wide), Ok(()));
+    }
+}

@@ -6,8 +6,6 @@ mod entry;
 mod mask;
 mod spec;
 mod stages;
-#[cfg(test)]
-mod tests;
 
 pub use entry::{attention_core, attention_core_flash, attention_core_masked};
 pub use mask::prefill_attention_mask;

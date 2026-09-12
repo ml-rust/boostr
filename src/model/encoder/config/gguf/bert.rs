@@ -59,3 +59,79 @@ impl EncoderConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::dispatch::tests::meta;
+    use super::*;
+    use crate::format::GgufValue;
+
+    /// `bge-m3` ships a `bert`-namespace GGUF that declares CLS pooling. The
+    /// namespace serves both mean- and CLS-pooled encoders, so the architecture
+    /// default is not the answer and the file has to be read.
+    #[test]
+    fn bert_namespace_carries_the_declared_pooling_type() {
+        let cls = meta(&[
+            ("general.architecture", GgufValue::String("bert".into())),
+            ("bert.embedding_length", GgufValue::Uint32(1024)),
+            ("bert.feed_forward_length", GgufValue::Uint32(4096)),
+            ("bert.attention.head_count", GgufValue::Uint32(16)),
+            ("bert.block_count", GgufValue::Uint32(24)),
+            ("bert.context_length", GgufValue::Uint32(8192)),
+            ("bert.pooling_type", GgufValue::Uint32(2)),
+            ("tokenizer.ggml.model", GgufValue::String("t5".into())),
+        ]);
+        let config = EncoderConfig::from_gguf_metadata(&cls).unwrap();
+        assert_eq!(config.declared_pooling_type, Some(2));
+
+        let mean = meta(&[
+            ("general.architecture", GgufValue::String("bert".into())),
+            ("bert.embedding_length", GgufValue::Uint32(384)),
+            ("bert.feed_forward_length", GgufValue::Uint32(1536)),
+            ("bert.attention.head_count", GgufValue::Uint32(12)),
+            ("bert.block_count", GgufValue::Uint32(6)),
+            ("bert.pooling_type", GgufValue::Uint32(1)),
+        ]);
+        let config = EncoderConfig::from_gguf_metadata(&mean).unwrap();
+        assert_eq!(config.declared_pooling_type, Some(1));
+    }
+
+    /// A converted XLM-RoBERTa GGUF has its dead leading position rows chopped off,
+    /// so the first real token must read row 0 — not row `pad_id + 1`. A config
+    /// built from HuggingFace weights keeps the offset, because that table is
+    /// intact.
+    #[test]
+    fn xlm_roberta_position_rows_are_rebased_for_gguf_only() {
+        let gguf = meta(&[
+            ("general.architecture", GgufValue::String("bert".into())),
+            ("bert.embedding_length", GgufValue::Uint32(1024)),
+            ("bert.feed_forward_length", GgufValue::Uint32(4096)),
+            ("bert.attention.head_count", GgufValue::Uint32(16)),
+            ("bert.block_count", GgufValue::Uint32(24)),
+            ("tokenizer.ggml.model", GgufValue::String("t5".into())),
+        ]);
+        let config = EncoderConfig::from_gguf_metadata(&gguf).unwrap();
+        assert_eq!(config.arch_family, ArchFamily::XlmRoberta);
+        assert_eq!(config.padding_token_id, 1);
+        assert_eq!(config.position_embd_offset, 2);
+        assert_eq!(config.position_row(0), 0);
+        assert_eq!(config.position_row(5), 5);
+        assert_eq!(config.padding_position_row(), 0);
+
+        // Same family, weights straight from HuggingFace: nothing was chopped.
+        let hf = EncoderConfig {
+            arch_family: ArchFamily::XlmRoberta,
+            padding_token_id: 1,
+            position_embd_offset: 0,
+            ..Default::default()
+        };
+        assert_eq!(hf.position_row(0), 2);
+        assert_eq!(hf.position_row(5), 7);
+        assert_eq!(hf.padding_position_row(), 1);
+
+        // A plain BERT config is 0-based and unaffected by either knob.
+        let bert = EncoderConfig::default();
+        assert_eq!(bert.position_row(0), 0);
+        assert_eq!(bert.position_row(9), 9);
+    }
+}

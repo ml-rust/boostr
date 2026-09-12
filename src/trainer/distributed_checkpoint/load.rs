@@ -57,3 +57,112 @@ pub fn load_distributed_checkpoint<R: Runtime<DType = DType>, P: AsRef<Path>>(
 
     load_checkpoint::<R, _>(&rank_dir, device)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trainer::distributed_checkpoint::save::save_distributed_checkpoint;
+    use crate::trainer::distributed_checkpoint::types::{ShardingConfig, ShardingStrategy};
+    use crate::trainer::test_helpers::*;
+    use numr::runtime::cpu::CpuRuntime;
+    use numr::tensor::Tensor;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_distributed_save_and_load() {
+        let dir = TempDir::new().unwrap();
+        let device = make_device();
+
+        // Rank 0 state
+        let mut model_r0 = HashMap::new();
+        model_r0.insert(
+            "embed.weight".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 2.0, 3.0], &[3], &device).unwrap(),
+        );
+
+        // Rank 1 state
+        let mut model_r1 = HashMap::new();
+        model_r1.insert(
+            "head.weight".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[4.0f32, 5.0], &[2], &device).unwrap(),
+        );
+
+        let state = make_training_state(100);
+
+        // Save both ranks
+        save_distributed_checkpoint(
+            dir.path(),
+            0,
+            2,
+            &model_r0,
+            None,
+            &state,
+            ShardingConfig {
+                strategy: ShardingStrategy::ZeroPartitioned { stage: 3 },
+                split_dims: HashMap::new(),
+            },
+        )
+        .unwrap();
+
+        save_distributed_checkpoint(
+            dir.path(),
+            1,
+            2,
+            &model_r1,
+            None,
+            &state,
+            ShardingConfig {
+                strategy: ShardingStrategy::ZeroPartitioned { stage: 3 },
+                split_dims: HashMap::new(),
+            },
+        )
+        .unwrap();
+
+        // Verify directory structure
+        assert!(dir.path().join("rank_0/model.safetensors").exists());
+        assert!(dir.path().join("rank_1/model.safetensors").exists());
+        assert!(dir.path().join("sharding_meta.json").exists());
+
+        // Load each rank
+        let (loaded_r0, _, _) =
+            load_distributed_checkpoint::<CpuRuntime, _>(dir.path(), 0, &device).unwrap();
+        assert!(loaded_r0.contains_key("embed.weight"));
+
+        let (loaded_r1, _, _) =
+            load_distributed_checkpoint::<CpuRuntime, _>(dir.path(), 1, &device).unwrap();
+        assert!(loaded_r1.contains_key("head.weight"));
+    }
+
+    #[test]
+    fn test_distributed_topology_mismatch() {
+        let dir = TempDir::new().unwrap();
+        let device = make_device();
+
+        let mut model = HashMap::new();
+        model.insert(
+            "w".to_string(),
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device).unwrap(),
+        );
+        let state = make_training_state(1);
+
+        save_distributed_checkpoint(
+            dir.path(),
+            0,
+            2,
+            &model,
+            None,
+            &state,
+            ShardingConfig {
+                strategy: ShardingStrategy::Replicated,
+                split_dims: HashMap::new(),
+            },
+        )
+        .unwrap();
+
+        // Try loading as rank 3 (out of range for world_size=2)
+        let err = load_distributed_checkpoint::<CpuRuntime, _>(dir.path(), 3, &device).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("out of range"), "unexpected error: {msg}");
+    }
+}

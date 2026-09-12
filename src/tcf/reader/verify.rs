@@ -8,8 +8,8 @@ use crate::tcf::proof::{BlockDecoder, PROOF_BYTES, block_proof_values};
 use crate::tcf::record::TensorRecord;
 use crate::tcf::record::field::RecordField;
 
+use super::file::{TcfFile, rel_data_offset};
 use super::sections::bounds;
-use super::{TcfFile, rel_data_offset};
 
 impl<'a> TcfFile<'a> {
     /// Verify one tensor, in the Section 15 order: `payload_digest` over the

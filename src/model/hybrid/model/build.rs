@@ -1,31 +1,25 @@
-//! Hybrid model mixing Llama attention and Mamba2 SSM blocks.
+//! The [`HybridModel`] type and its builder: walks `hybrid_layers` and
+//! constructs an attention or Mamba2 block for each layer index.
 
-use super::blocks::{AttentionBlock, SsmBlock};
+use super::super::blocks::{AttentionBlock, SsmBlock};
 use crate::error::{Error, Result};
-use crate::inference::kv_cache::layered::LayeredKvCacheConfig;
-use crate::inference::{LayeredKvCache, LayeredSsmState};
 use crate::model::config::{HybridConfig, UniversalConfig};
 use crate::model::mamba::mamba2::{Mamba2, Mamba2Config};
-use crate::model::traits::ModelClient;
 use crate::nn::{Embedding, Linear, RmsNorm, RoPE, VarBuilder};
 use numr::dtype::DType;
-use numr::ops::{
-    ActivationOps, BinaryOps, CompareOps, ConditionalOps, ConvOps, IndexingOps, NormalizationOps,
-    ReduceOps, ScalarOps, ShapeOps, TensorOps, UnaryOps,
-};
+use numr::ops::IndexingOps;
 use numr::runtime::Runtime;
-use numr::tensor::Tensor;
 
 /// Hybrid model mixing attention (LLaMA-style) and SSM (Mamba2) blocks.
 pub struct HybridModel<R: Runtime> {
-    config: UniversalConfig,
-    hybrid_config: HybridConfig,
-    mamba_config: Mamba2Config,
-    embed_tokens: Embedding<R>,
+    pub(super) config: UniversalConfig,
+    pub(super) hybrid_config: HybridConfig,
+    pub(super) mamba_config: Mamba2Config,
+    pub(super) embed_tokens: Embedding<R>,
     pub(super) blocks: Vec<HybridBlock<R>>,
-    norm: RmsNorm<R>,
-    lm_head: Linear<R>,
-    rope: RoPE<R>,
+    pub(super) norm: RmsNorm<R>,
+    pub(super) lm_head: Linear<R>,
+    pub(super) rope: RoPE<R>,
 }
 
 /// A hybrid block is either an attention block or an SSM block.
@@ -166,187 +160,16 @@ where
             rope,
         })
     }
-
-    /// Forward pass for hybrid model with both KV cache and SSM state.
-    pub fn forward_hybrid<C>(
-        &self,
-        client: &C,
-        input_ids: &Tensor<R>,
-        kv_cache: &mut LayeredKvCache<R>,
-        ssm_state: &mut LayeredSsmState<R>,
-        position: usize,
-    ) -> Result<Tensor<R>>
-    where
-        C: ModelClient<R> + ConvOps<R> + NormalizationOps<R> + UnaryOps<R> + ActivationOps<R>,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ActivationOps<R>
-            + ConvOps<R>
-            + ReduceOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>,
-    {
-        // Embed tokens
-        let mut hidden = self.embed_tokens.forward(client, input_ids)?;
-
-        let mut attn_idx = 0usize;
-        let mut ssm_idx = 0usize;
-
-        for (i, block) in self.blocks.iter().enumerate() {
-            match block {
-                HybridBlock::Attention(attn_block) => {
-                    let cache = kv_cache
-                        .layer_mut(attn_idx)
-                        .ok_or_else(|| Error::ModelError {
-                            reason: format!(
-                                "KV cache missing for attention layer {i} (attn_idx={attn_idx})"
-                            ),
-                        })?;
-                    hidden = attn_block
-                        .forward_with_kv_cache(client, &hidden, &self.rope, cache, position)?;
-                    attn_idx += 1;
-                }
-                HybridBlock::Ssm(ssm_block) => {
-                    let state = ssm_state
-                        .layer_mut(ssm_idx)
-                        .ok_or_else(|| Error::ModelError {
-                            reason: format!("SSM state missing for layer {i} (ssm_idx={ssm_idx})"),
-                        })?;
-                    hidden = ssm_block.forward_inference(client, &hidden, state)?;
-                    ssm_idx += 1;
-                }
-            }
-        }
-
-        // Final norm
-        hidden = self.norm.forward(client, &hidden)?;
-
-        // LM head
-        let logits = self.lm_head.forward(client, &hidden)?;
-        Ok(logits.tensor().clone())
-    }
-
-    /// Contextualized hidden states for embedding extraction.
-    ///
-    /// Runs embed + all attention/SSM blocks + final norm (no `lm_head`) with
-    /// fresh throwaway KV cache and SSM state. Returns shape `[B, S, hidden]`.
-    pub fn forward_hidden<C>(
-        &self,
-        client: &C,
-        input_ids: &Tensor<R>,
-    ) -> Result<numr::autograd::Var<R>>
-    where
-        C: ModelClient<R> + ConvOps<R> + NormalizationOps<R> + UnaryOps<R> + ActivationOps<R>,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ActivationOps<R>
-            + ConvOps<R>
-            + ReduceOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>,
-    {
-        let shape = input_ids.shape();
-        let batch = shape[0];
-        let seq_len = shape[1];
-        let device = input_ids.device();
-        let dtype = self.embed_tokens.weight().tensor().dtype();
-
-        let num_attn_layers = self
-            .blocks
-            .iter()
-            .filter(|b| matches!(b, HybridBlock::Attention(_)))
-            .count();
-        let num_ssm_layers = self.blocks.len() - num_attn_layers;
-
-        let attn_cfg = self
-            .config
-            .attention
-            .as_ref()
-            .ok_or_else(|| Error::ModelError {
-                reason: "Hybrid forward_hidden requires attention config".into(),
-            })?;
-        let head_dim = attn_cfg.head_dim(self.config.hidden_size);
-        let kv_config = LayeredKvCacheConfig {
-            batch_size: batch,
-            num_kv_heads: attn_cfg.kv_heads(),
-            initial_capacity: seq_len,
-            max_seq_len: self.config.max_seq_len,
-            head_dim,
-            dtype,
-        };
-        let mut kv_cache = LayeredKvCache::<R>::new(num_attn_layers, &kv_config, device)?;
-        let mut ssm_state =
-            LayeredSsmState::<R>::new(num_ssm_layers, batch, &self.mamba_config, dtype, device)?;
-
-        let mut hidden = self.embed_tokens.forward(client, input_ids)?;
-        let mut attn_idx = 0usize;
-        let mut ssm_idx = 0usize;
-        for (i, block) in self.blocks.iter().enumerate() {
-            match block {
-                HybridBlock::Attention(attn_block) => {
-                    let cache = kv_cache
-                        .layer_mut(attn_idx)
-                        .ok_or_else(|| Error::ModelError {
-                            reason: format!("KV cache missing for attention layer {i}"),
-                        })?;
-                    hidden =
-                        attn_block.forward_with_kv_cache(client, &hidden, &self.rope, cache, 0)?;
-                    attn_idx += 1;
-                }
-                HybridBlock::Ssm(ssm_block) => {
-                    let state = ssm_state
-                        .layer_mut(ssm_idx)
-                        .ok_or_else(|| Error::ModelError {
-                            reason: format!("SSM state missing for layer {i}"),
-                        })?;
-                    hidden = ssm_block.forward_inference(client, &hidden, state)?;
-                    ssm_idx += 1;
-                }
-            }
-        }
-        hidden = self.norm.forward(client, &hidden)?;
-        Ok(hidden)
-    }
-
-    pub fn config(&self) -> &UniversalConfig {
-        &self.config
-    }
-
-    pub fn hybrid_config(&self) -> &HybridConfig {
-        &self.hybrid_config
-    }
-
-    pub fn mamba_config(&self) -> &Mamba2Config {
-        &self.mamba_config
-    }
-
-    /// Number of attention layers (for KV cache allocation).
-    pub fn num_attention_layers(&self) -> usize {
-        self.hybrid_config.attention_layers.len()
-    }
-
-    /// Number of SSM layers (for SSM state allocation).
-    pub fn num_ssm_layers(&self) -> usize {
-        self.hybrid_config.ssm_layers.len()
-    }
-
-    /// RoPE module (for cos/sin cache access in CUDA graph setup).
-    pub fn rope(&self) -> &crate::nn::RoPE<R> {
-        &self.rope
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::config::{AttentionConfig, SsmConfig};
+    use crate::nn::VarMap;
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::CpuRuntime;
+    use numr::tensor::Tensor;
 
     #[test]
     fn test_hybrid_config_parse() {
@@ -405,5 +228,128 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    fn hybrid_config(sliding_window: Option<usize>, use_alibi: bool) -> UniversalConfig {
+        UniversalConfig {
+            model_type: "hybrid".into(),
+            vocab_size: 16,
+            hidden_size: 8,
+            num_layers: 2,
+            max_seq_len: 16,
+            intermediate_size: Some(16),
+            rms_norm_eps: 1e-5,
+            attention: Some(AttentionConfig {
+                num_heads: 2,
+                num_kv_heads: None,
+                head_dim: None,
+                kv_latent_dim: None,
+                q_latent_dim: None,
+                d_rope: None,
+                rope_theta: 10000.0,
+                rope_scaling: None,
+                sliding_window,
+                use_alibi,
+            }),
+            ssm: Some(SsmConfig {
+                variant: "mamba2".into(),
+                state_size: 4,
+                num_heads: 2,
+                head_dim: 8,
+                expand: 2,
+                conv_kernel: 4,
+                chunk_size: 4,
+                n_groups: 1,
+                complex_rope: None,
+                mimo_rank: None,
+                use_conv: None,
+            }),
+            moe: None,
+            hybrid_layers: Some(HybridConfig {
+                ssm_layers: vec![0],
+                attention_layers: vec![1],
+            }),
+            tie_word_embeddings: true,
+            grow_vocab: false,
+            vision: None,
+            audio: None,
+        }
+    }
+
+    /// Weight names and shapes matching [`hybrid_config`]: layer 0 is Mamba2,
+    /// layer 1 is attention.
+    fn weight_shapes() -> Vec<(&'static str, Vec<usize>)> {
+        vec![
+            ("model.embed_tokens.weight", vec![16, 8]),
+            ("model.layers.0.input_layernorm.weight", vec![8]),
+            ("model.layers.0.mixer.in_proj.weight", vec![42, 8]),
+            ("model.layers.0.mixer.conv1d.weight", vec![24, 1, 4]),
+            ("model.layers.0.mixer.out_proj.weight", vec![8, 16]),
+            ("model.layers.0.mixer.A_log", vec![2]),
+            ("model.layers.0.mixer.dt_bias", vec![2]),
+            ("model.layers.0.mixer.D", vec![2]),
+            ("model.layers.1.input_layernorm.weight", vec![8]),
+            ("model.layers.1.self_attn.q_proj.weight", vec![8, 8]),
+            ("model.layers.1.self_attn.k_proj.weight", vec![8, 8]),
+            ("model.layers.1.self_attn.v_proj.weight", vec![8, 8]),
+            ("model.layers.1.self_attn.o_proj.weight", vec![8, 8]),
+            ("model.layers.1.post_attention_layernorm.weight", vec![8]),
+            ("model.layers.1.mlp.gate_proj.weight", vec![16, 8]),
+            ("model.layers.1.mlp.up_proj.weight", vec![16, 8]),
+            ("model.layers.1.mlp.down_proj.weight", vec![8, 16]),
+            ("model.norm.weight", vec![8]),
+        ]
+    }
+
+    /// `(sliding_window, use_alibi)` as carried by the model's attention layers.
+    fn attention_flags(sliding_window: Option<usize>, use_alibi: bool) -> (usize, bool) {
+        let (_, device) = cpu_setup();
+        let config = hybrid_config(sliding_window, use_alibi);
+        let mut varmap = VarMap::<CpuRuntime>::new();
+        for (name, shape) in weight_shapes() {
+            varmap.insert(
+                name.into(),
+                Tensor::<CpuRuntime>::zeros(&shape, DType::F32, &device).unwrap(),
+            );
+        }
+        let mut vb = VarBuilder::new(&mut varmap, &device);
+        let model = HybridModel::<CpuRuntime>::from_varbuilder(&mut vb, &config).unwrap();
+        let attn = model
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                HybridBlock::Attention(a) => Some(a),
+                HybridBlock::Ssm(_) => None,
+            })
+            .expect("the config places an attention layer at index 1");
+        (attn.sliding_window, attn.use_alibi)
+    }
+
+    #[test]
+    fn builder_reads_sliding_window_from_config() {
+        assert_eq!(attention_flags(Some(64), false).0, 64);
+        assert_eq!(attention_flags(Some(1), false).0, 1);
+    }
+
+    #[test]
+    fn absent_sliding_window_is_disabled() {
+        assert_eq!(attention_flags(None, false).0, 0);
+    }
+
+    #[test]
+    fn explicit_zero_sliding_window_is_disabled() {
+        // `Some(0)` is not a zero-width window — it maps to the disabled sentinel.
+        assert_eq!(attention_flags(Some(0), false).0, 0);
+    }
+
+    #[test]
+    fn builder_reads_use_alibi_from_config() {
+        assert!(attention_flags(None, true).1);
+        assert!(!attention_flags(None, false).1);
+    }
+
+    #[test]
+    fn default_config_leaves_both_features_off() {
+        assert_eq!(attention_flags(None, false), (0, false));
     }
 }

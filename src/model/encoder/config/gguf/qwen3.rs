@@ -67,3 +67,71 @@ impl EncoderConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::dispatch::tests::meta;
+    use super::*;
+    use crate::format::GgufValue;
+
+    fn qwen3_metadata() -> GgufMetadata {
+        meta(&[
+            ("general.architecture", GgufValue::String("qwen3".into())),
+            ("qwen3.embedding_length", GgufValue::Uint32(1024)),
+            ("qwen3.feed_forward_length", GgufValue::Uint32(3072)),
+            ("qwen3.attention.head_count", GgufValue::Uint32(16)),
+            ("qwen3.attention.head_count_kv", GgufValue::Uint32(8)),
+            ("qwen3.attention.key_length", GgufValue::Uint32(128)),
+            ("qwen3.attention.value_length", GgufValue::Uint32(128)),
+            ("qwen3.block_count", GgufValue::Uint32(28)),
+            ("qwen3.context_length", GgufValue::Uint32(32768)),
+            ("qwen3.rope.freq_base", GgufValue::Float32(1_000_000.0)),
+            ("qwen3.pooling_type", GgufValue::Uint32(3)),
+        ])
+    }
+
+    #[test]
+    fn qwen3_reads_the_explicit_head_dim_rather_than_deriving_it() {
+        let cfg = EncoderConfig::from_gguf_metadata(&qwen3_metadata()).unwrap();
+
+        assert_eq!(cfg.resolved_head_dim(), 128, "from attention.key_length");
+        assert_eq!(
+            cfg.head_dim(),
+            64,
+            "the derived formula gives a different answer, which is why it must not be used"
+        );
+        assert_ne!(cfg.resolved_head_dim(), cfg.head_dim());
+    }
+
+    #[test]
+    fn qwen3_is_causal_prenorm_gqa() {
+        let cfg = EncoderConfig::from_gguf_metadata(&qwen3_metadata()).unwrap();
+
+        assert_eq!(cfg.arch_family, ArchFamily::Qwen3);
+        assert!(cfg.causal, "Qwen3-Embedding is a decoder backbone");
+        assert_eq!(cfg.norm_scheme, NormScheme::PreNorm);
+        assert_eq!(cfg.ffn_variant, FfnVariant::GatedSilu);
+        assert_eq!(cfg.resolved_num_kv_heads(), 8);
+        assert_eq!(cfg.num_attention_heads, 16);
+        assert!(!cfg.embed_scale, "Qwen3 does not scale token embeddings");
+        assert!(!cfg.interleaves_attention());
+    }
+
+    #[test]
+    fn qwen3_causal_blocks_carry_causality_into_the_layer_spec() {
+        let cfg = EncoderConfig::from_gguf_metadata(&qwen3_metadata()).unwrap();
+        let a = cfg.layer_attention(0);
+        assert!(a.causal);
+        assert_eq!(a.window, None);
+    }
+
+    #[test]
+    fn qwen3_rejects_a_pooling_type_it_was_not_trained_for() {
+        let mut m = qwen3_metadata();
+        m.kv.insert("qwen3.pooling_type".into(), GgufValue::Uint32(1));
+        let err = EncoderConfig::from_gguf_metadata(&m)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pooling_type"), "got: {err}");
+    }
+}

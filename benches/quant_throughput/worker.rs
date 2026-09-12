@@ -87,7 +87,7 @@ where
     C: RuntimeClient<R> + DequantOps<R> + QuantMatmulOps<R>,
 {
     let (n, k) = (case.n(), case.k());
-    let weight = QuantTensor::<R>::from_bytes(bytes, case.scheme(), &[n, k], device)
+    let weight = QuantTensor::<R>::from_bytes(bytes, case.format(), &[n, k], device)
         .map_err(|e| format!("weight upload: {e}"))?;
 
     let activation = match case.op {

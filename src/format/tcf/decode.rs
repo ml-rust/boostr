@@ -1,28 +1,15 @@
 //! One tensor's payload bytes to dense row-major f32 values.
 //!
-//! Native quantized encodings decode through `tcf-core`'s reference codec:
-//! `unpack` rebuilds the logical tiles, and
-//! [`crate::quant::cpu::kernels::tcf::dequantize_tiles_into`] applies
-//! Section 13.0 or Section 13.0.1 with a vector element loop that is
-//! bit-identical to `tcf_core::dequantize`. Nothing here holds a bit
-//! position or a plane order — a second copy of a block layout is exactly
-//! what this format exists to prevent (MIGRATION.md Section 4.5.3).
-//!
-//! Raw encodings convert element by element through numr's dtype
-//! conversions. Section 12: a raw encoding stores literal values with no
-//! scale of any kind.
-//!
 //! Block encodings are GGML block streams and decode through the CPU dequant
-//! kernels, via [`super::block`].
+//! kernels, via [`super::block`]. Raw encodings convert element by element
+//! through numr's dtype conversions: a raw encoding stores literal values
+//! with no scale of any kind.
 
 use crate::error::{Error, Result};
+use crate::tcf::{Encoding, RawEncoding, TensorRecord};
 use numr::dtype::{FP8E4M3, FP8E5M2};
-use tcf_core::{Encoding, RawEncoding, TensorRecord, tile_count, unpack};
-
-use crate::quant::cpu::kernels::tcf::dequantize_tiles_into;
 
 use super::block::decode_block_f32;
-use super::error::tcf_tensor_error;
 use super::metadata::encoding_name;
 
 /// Element count of a record's logical shape. Section 8.
@@ -59,19 +46,6 @@ pub fn element_count(record: &TensorRecord, name: &str) -> Result<usize> {
 pub fn decode_tensor_f32(record: &TensorRecord, payload: &[u8], name: &str) -> Result<Vec<f32>> {
     let expected = element_count(record, name)?;
     let values = match record.encoding {
-        Encoding::Native(native) => {
-            // The layout, never the bare geometry: a `QuantGeometry` converts
-            // to a flat scale form, which sizes a two-level payload wrong.
-            let layout = native.layout();
-            let tiles = tile_count(record.shape(), record.rank, layout.geometry.tile)
-                .map_err(|e| tcf_tensor_error(name, "tile count", e))?;
-            let logical =
-                unpack(payload, tiles, layout).map_err(|e| tcf_tensor_error(name, "unpack", e))?;
-            let mut decoded = Vec::new();
-            dequantize_tiles_into(&logical, layout, &mut decoded)
-                .map_err(|e| tcf_tensor_error(name, "dequantize", e))?;
-            decoded
-        }
         Encoding::Block(block) => decode_block_f32(block, record, payload, name)?,
         Encoding::Raw(raw) => decode_raw(raw, payload, name)?,
     };
@@ -164,32 +138,21 @@ fn decode_raw(raw: RawEncoding, payload: &[u8], name: &str) -> Result<Vec<f32>> 
 mod tests {
     use super::super::fixtures;
     use super::*;
-    use tcf_core::TcfFile;
+    use crate::tcf::TcfFile;
 
-    /// Section 13.0: `x_hat_i = f32(d) * f32(q_i)`, computed here from the
-    /// codes and scales the fixture chose, never from what the reader
-    /// returns.
+    /// `d * q` per `ggml-common.h`, computed by hand in the fixture, never
+    /// from what the reader returns.
     #[test]
-    fn q4_native_dequantizes_to_the_section_13_0_formula() {
+    fn q8_0_block_dequantizes_to_the_hand_computed_values() {
         let bytes = fixtures::good_file();
         let file = TcfFile::open(&bytes).expect("fixture opens");
-        let record = file.tensors()[fixtures::T_Q4];
+        let record = file.tensors()[fixtures::T_Q8];
         let payload = file.payload(&record).expect("payload");
 
-        let values = decode_tensor_f32(&record, payload, "q4").expect("decodes");
-        assert_eq!(values, fixtures::expected_q4_values());
-    }
-
-    /// CONFORMANCE.md Section 0.1: the packed bytes are checked against a
-    /// packer written here, from Section 14.1, so a shared writer/reader
-    /// packing bug cannot pass.
-    #[test]
-    fn q4_payload_bytes_match_the_section_14_1_packing_rule() {
-        let bytes = fixtures::good_file();
-        let file = TcfFile::open(&bytes).expect("fixture opens");
-        let record = file.tensors()[fixtures::T_Q4];
-        let payload = file.payload(&record).expect("payload");
-        assert_eq!(payload, fixtures::expected_q4_payload().as_slice());
+        let values = decode_tensor_f32(&record, payload, "q8").expect("decodes");
+        assert_eq!(values, fixtures::expected_q8_0_values());
+        // The payload is the block stream, byte for byte.
+        assert_eq!(payload, fixtures::q8_0_stream().as_slice());
     }
 
     #[test]

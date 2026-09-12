@@ -112,7 +112,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
     n: usize,
 ) -> Result<Option<()>> {
     let device_index = act_contig.device().id();
-    let format = weight.format()?;
+    let format = weight.format();
     let m_u32 = m as u32;
     let k_u32 = k as u32;
     let n_u32 = n as u32;

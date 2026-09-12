@@ -1,6 +1,6 @@
 //! Two-level super-scale probe, asymmetric variant: mirrors
 //! [`super::two_level`]'s super-scale-storage probe on `Q4AS32D_T64`'s
-//! geometry instead of `Q6S16D_T64`'s (SPECIFICATION.md Section 13.4) — 4-bit
+//! geometry instead of `Q6S16D_T64`'s (both retired TCF native encodings) — 4-bit
 //! UNSIGNED codes `0..=15`, 32-element groups, 8 groups per 256-element
 //! super-block, a 6-bit sub-scale AND a 6-bit signed sub-minimum per group,
 //! and ONE super-scale plus ONE super-minimum per super-block.
@@ -19,19 +19,14 @@
 //! UNSIGNED with no reserved pattern. [`two_level_asymmetric_round_trip`]
 //! refuses it outright rather than silently mapping it onto [`Bf16`].
 //!
-//! Mirrors `hats/tcf/tcf-core`'s
-//! `super_block.rs::quantize_asymmetric_super_block` and
-//! `asymmetric.rs::fit_group_pair` / `refine_asymmetric_sub_levels`: same
-//! three-pass shape (fit every group's `f32` pair, derive the super pair,
-//! round and refine each group's sub-levels against it), same weighted
-//! least-squares refit closing each candidate, same `±2 x ±2` sub-level
-//! search. It differs from `tcf-core` only where `two_level.rs` already
-//! differs from it: no binary16 rounding of the per-group intermediate
-//! (kept exact `f32`, as `tcf-core` itself now does for its own two-level
-//! intermediate), and a distinct local candidate-multiplier sweep in place
-//! of `tcf-core`'s `SearchEffort::asymmetric_scale_candidates`, since this
-//! probe has no `SearchEffort` type of its own — see
-//! [`asymmetric_candidate_multipliers`].
+//! Mirrors the retired TCF native quantizer's asymmetric super-block
+//! search: same three-pass shape (fit every group's `f32` pair, derive the
+//! super pair, round and refine each group's sub-levels against it), same
+//! weighted least-squares refit closing each candidate, same `±2 x ±2`
+//! sub-level search. It differs only where `two_level.rs` already differs:
+//! no binary16 rounding of the per-group intermediate (kept exact `f32`),
+//! and a local candidate-multiplier sweep in place of that quantizer's
+//! search-effort ladder — see [`asymmetric_candidate_multipliers`].
 //!
 //! [`Bf16`]: SuperPrecision::Bf16
 
@@ -63,11 +58,10 @@ struct GroupFit {
 }
 
 /// The asymmetric pair search's candidate multipliers, mirroring the SHAPE
-/// of `tcf-core`'s `SearchEffort::Standard.asymmetric_scale_candidates()`:
-/// one-sided, `0.1 * i` for `i` in `0..=20` (21 candidates), on top of the
-/// unconditional candidate-0 min/max fit tried separately. `tcf-core` has no
-/// counterpart constant to reuse here — its version lives behind a
-/// `SearchEffort` enum this crate does not depend on — so this is a new
+/// of the retired TCF native quantizer's standard effort: one-sided,
+/// `0.1 * i` for `i` in `0..=20` (21 candidates), on top of the
+/// unconditional candidate-0 min/max fit tried separately. That quantizer
+/// kept the list behind a search-effort enum, so this is a new
 /// local sweep, not a duplicate of this module's own (differently shaped,
 /// two-sided) [`super::quantize::candidate_multipliers`].
 fn asymmetric_candidate_multipliers() -> impl Iterator<Item = f32> {
@@ -92,8 +86,8 @@ fn asymmetric_reconstruction_error(values: &[f32], weights: &[f32], d: f32, m: f
     err
 }
 
-/// Fits one group's ideal `f32` pair `(d_g, m_g)`, mirroring `tcf-core`'s
-/// `fit_asymmetric_group`: candidate 0 is always the plain min/max fit
+/// Fits one group's ideal `f32` pair `(d_g, m_g)`, mirroring the retired
+/// native quantizer's group fit: candidate 0 is always the plain min/max fit
 /// (`d = (hi - lo) / UMAX`, `m = lo`); every remaining candidate takes
 /// `inv = (-1 + multiplier + UMAX) / (hi - lo)` from
 /// [`asymmetric_candidate_multipliers`], rounds provisional codes, and
@@ -191,8 +185,8 @@ fn effective_pair(
 }
 
 /// Refines a group's rounded `(sub_d, sub_m)` guess over the `±2 x ±2`
-/// integer neighborhood (25 pairs), mirroring `tcf-core`'s
-/// `refine_asymmetric_sub_levels`: each candidate is scored by its OWN
+/// integer neighborhood (25 pairs), mirroring the retired native
+/// quantizer's sub-level refinement: each candidate is scored by its OWN
 /// effective pair via [`effective_pair`], first-on-tie, with the rounded
 /// pair always among the candidates so the search never scores worse than
 /// plain rounding.
@@ -203,7 +197,7 @@ fn effective_pair(
 /// every level would decode to the same zero minimum, so searching around a
 /// nonzero `rounded_m` would explore a difference the wire cannot carry.
 /// Duplicate neighbors produced by clamping at either end of a range are
-/// skipped, matching `tcf-core`'s own dedup.
+/// skipped, matching that quantizer's own dedup.
 fn refine_sub_levels(
     values: &[f32],
     weights: &[f32],

@@ -21,7 +21,7 @@ use super::super::kernels::{
     self, GEMV_Q2_K_MODULE, GEMV_Q3_K_MODULE, GEMV_Q5_K_MODULE, QUANT_GEMV_MODULE,
 };
 use super::format_dispatch::{feat_major_format, gemv_max_m};
-use super::helpers::quantize_activation_q8_1;
+use super::helpers::{BLOCK_CONTRACT, quantize_activation_q8_1};
 use super::mmq_feat_major;
 
 /// Batched quantized matmul: dp4a GEMV when every weight is in its GEMV
@@ -34,6 +34,9 @@ pub(super) fn quant_matmul_batch_impl(
 ) -> Result<Vec<Tensor<CudaRuntime>>> {
     if weights.is_empty() {
         return Ok(vec![]);
+    }
+    for weight in weights {
+        weight.check_activation_contract(&BLOCK_CONTRACT)?;
     }
 
     if activation.dtype() != DType::F32 {
@@ -57,17 +60,15 @@ pub(super) fn quant_matmul_batch_impl(
 
     // Check if all weights support dp4a (Q4_K, Q6_K, Q8_0, Q5_K, Q3_K, Q2_K)
     let all_dp4a = weights.iter().all(|w| {
-        w.format().is_ok_and(|f| {
-            matches!(
-                f,
-                QuantFormat::Q4K
-                    | QuantFormat::Q6K
-                    | QuantFormat::Q8_0
-                    | QuantFormat::Q5K
-                    | QuantFormat::Q3K
-                    | QuantFormat::Q2K
-            )
-        })
+        matches!(
+            w.format(),
+            QuantFormat::Q4K
+                | QuantFormat::Q6K
+                | QuantFormat::Q8_0
+                | QuantFormat::Q5K
+                | QuantFormat::Q3K
+                | QuantFormat::Q2K
+        )
     });
     let device_index = activation.device().id();
     // The batch takes the GEMV kernels only where the single-weight dispatch
@@ -75,7 +76,7 @@ pub(super) fn quant_matmul_batch_impl(
     // no reason to hand it a slower kernel.
     let all_gemv_regime = weights
         .iter()
-        .all(|w| w.format().is_ok_and(|f| m <= gemv_max_m(f, device_index)));
+        .all(|w| m <= gemv_max_m(w.format(), device_index));
     let use_dp4a = all_dp4a && all_gemv_regime && m <= 4 && k.is_multiple_of(32);
 
     if !use_dp4a && let Some(outputs) = mmq_batch(client, activation, &act_contig, weights, m, k)? {
@@ -98,15 +99,9 @@ pub(super) fn quant_matmul_batch_impl(
         let func_q8_0 = kernels::get_kernel_function(&module_main, "quant_gemv_q8_0_q8_1_mwr")?;
 
         // Lazily load per-format modules only if needed
-        let has_q5k = weights
-            .iter()
-            .any(|w| w.format().is_ok_and(|f| f == QuantFormat::Q5K));
-        let has_q3k = weights
-            .iter()
-            .any(|w| w.format().is_ok_and(|f| f == QuantFormat::Q3K));
-        let has_q2k = weights
-            .iter()
-            .any(|w| w.format().is_ok_and(|f| f == QuantFormat::Q2K));
+        let has_q5k = weights.iter().any(|w| w.format() == QuantFormat::Q5K);
+        let has_q3k = weights.iter().any(|w| w.format() == QuantFormat::Q3K);
+        let has_q2k = weights.iter().any(|w| w.format() == QuantFormat::Q2K);
 
         let func_q5k = if has_q5k {
             let m = kernels::get_or_load_module(client.context(), device_index, GEMV_Q5_K_MODULE)?;
@@ -150,7 +145,7 @@ pub(super) fn quant_matmul_batch_impl(
             let n = w_shape[0];
             let n_u32 = n as u32;
 
-            let func = match w.format()? {
+            let func = match w.format() {
                 QuantFormat::Q4K => &func_q4k,
                 QuantFormat::Q6K => &func_q6k,
                 QuantFormat::Q8_0 => &func_q8_0,
@@ -232,10 +227,7 @@ fn mmq_batch(
                 ),
             });
         }
-        let Ok(format) = w.format() else {
-            return Ok(None);
-        };
-        let Some(fm) = feat_major_format(format, k, device_index) else {
+        let Some(fm) = feat_major_format(w.format(), k, device_index) else {
             return Ok(None);
         };
         if !mmq_feat_major::variant_fits(fm, m, device_index) {

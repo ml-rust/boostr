@@ -1,6 +1,5 @@
 //! One group's scale search and codebook assignment. Same candidate-scale
-//! SHAPE `tcf-core`'s symmetric search uses
-//! (`hats/tcf/tcf-core/src/encoding/quantize.rs::fit_symmetric_scale`), with
+//! SHAPE the retired TCF native quantizer's symmetric search used, with
 //! no least-squares refit step — the levels here are not equally spaced, so
 //! the refit's linear normal equation does not apply. Every candidate is
 //! scored by direct weighted squared error instead.
@@ -13,7 +12,7 @@ use super::levels::Codebook;
 const QMAX: f32 = 1.0;
 
 /// The candidate multiplier sweep: `-9..=9` in steps of `0.1`, the same
-/// shape `tcf-core`'s `SearchEffort::Standard` uses. Each yields a candidate
+/// shape that quantizer's standard effort used. Each yields a candidate
 /// scale `d = max_abs / (QMAX + multiplier)`.
 pub(super) fn candidate_multipliers() -> impl Iterator<Item = f32> {
     (-9..=9).map(|is| 0.1 * is as f32)

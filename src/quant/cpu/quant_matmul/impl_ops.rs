@@ -1,14 +1,14 @@
 //! CPU implementation of QuantMatmulOps for CpuClient.
 
 use crate::error::{Error, Result};
+use crate::quant::QuantTensor;
 use crate::quant::traits::QuantMatmulOps;
-use crate::quant::{QuantScheme, QuantTensor};
 use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
 
-use super::super::kernels::{int4_gemm, int4_gemm_gptq, marlin_gemm, quant_matmul, tcf};
-use super::helpers::{activation_window, output_shape, validate_input};
+use super::super::kernels::{int4_gemm, int4_gemm_gptq, marlin_gemm, quant_matmul};
+use super::helpers::{BLOCK_CONTRACT, activation_window, output_shape, validate_input};
 
 impl QuantMatmulOps<CpuRuntime> for CpuClient {
     fn int4_gemm(
@@ -194,16 +194,11 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         let total_elements: usize = a_shape.iter().product();
         let m = total_elements / k;
 
-        // The batch kernel amortizes activation preprocessing across one GGUF
-        // block format. A TCF weight has no place in it, so a batch holding one
-        // goes through the per-weight fused path instead of erroring.
-        let Some(format) = weights[0].scheme().gguf() else {
-            return weights
-                .iter()
-                .map(|w| self.quant_matmul(activation, w))
-                .collect();
-        };
+        // The batch kernel amortizes activation preprocessing across one
+        // block format.
+        let format = weights[0].format();
         for (i, w) in weights.iter().enumerate() {
+            w.check_activation_contract(&BLOCK_CONTRACT)?;
             let ws = w.shape();
             if ws.len() != 2 {
                 return Err(Error::QuantError {
@@ -215,8 +210,8 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
                     reason: format!("weight[{}] K={} != activation K={}", i, ws[1], k),
                 });
             }
-            if w.scheme().gguf() != Some(format) {
-                // Fall back to sequential if mixed formats or mixed codecs
+            if w.format() != format {
+                // Fall back to sequential if mixed formats
                 return weights
                     .iter()
                     .map(|w| self.quant_matmul(activation, w))
@@ -280,6 +275,10 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         activation: &Tensor<CpuRuntime>,
         weight: &QuantTensor<CpuRuntime>,
     ) -> Result<Tensor<CpuRuntime>> {
+        // Section 9: the weight's declared contract gates the kernel before
+        // any shape check, so a refusal names the contract and not a shape.
+        weight.check_activation_contract(&BLOCK_CONTRACT)?;
+
         // Validate activation dtype
         if activation.dtype() != DType::F32 {
             return Err(Error::QuantError {
@@ -336,35 +335,17 @@ impl QuantMatmulOps<CpuRuntime> for CpuClient {
         // SAFETY: CpuRuntime stores data as host pointers.
         let weight_bytes = unsafe { weight.storage().as_host_slice::<u8>() };
 
-        // Run kernel. Both codecs are fused: the weight stays packed, and no
-        // f32 copy of it is ever built. They need different kernels because
-        // GGUF finds a block's codes and its scale adjacent while TCF spreads
-        // them over whole-tensor planes.
+        // Run kernel. The weight stays packed; no f32 copy of it is built.
         let mut output = vec![0.0f32; m * n];
-        match weight.scheme() {
-            QuantScheme::Gguf(format) => {
-                quant_matmul::quant_matmul_f32(
-                    act_data,
-                    weight_bytes,
-                    &mut output,
-                    m,
-                    k,
-                    n,
-                    format,
-                );
-            }
-            QuantScheme::Tcf(encoding) => {
-                // Resolution, on a backend with one candidate: the CPU
-                // offers exactly one TCF matmul kernel, so a declared
-                // contract resolves either to it or to no kernel at all.
-                // There is no second kernel to choose between, so this check
-                // IS the resolution rather than a veto over one — a weight
-                // declaring anything but exact f32 activations has nothing
-                // here that computes it, and Section 9 makes that a refusal.
-                weight.check_activation_contract(&tcf::MATMUL_CONTRACT)?;
-                tcf::tcf_matmul_f32(act_data, weight_bytes, &mut output, m, k, n, encoding)?;
-            }
-        }
+        quant_matmul::quant_matmul_f32(
+            act_data,
+            weight_bytes,
+            &mut output,
+            m,
+            k,
+            n,
+            weight.format(),
+        );
 
         // Build output shape: [..., M, N] (replace last dim K with N)
         let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();

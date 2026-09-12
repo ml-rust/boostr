@@ -1,14 +1,14 @@
 //! GGML block encodings inside a TCF file, read with boostr's own kernels.
 //!
 //! A block-encoded TCF tensor stores the same byte stream a GGUF file stores
-//! for the same `ggml_type` (tcf-core `BlockEncoding`). TCF never restates
+//! for the same `ggml_type` ([`BlockEncoding`]). TCF never restates
 //! the block layout, so the layout knowledge stays where it already lives:
 //! [`QuantFormat`] names it and the CPU dequant kernels decode it. This
 //! module is the bridge — encoding to format, stream to values — and holds no
 //! bit position of its own.
 //!
 //! The proof vector of a block tensor is checked with [`BoostrBlockDecoder`],
-//! the reader-side decoder tcf-core asks for. A file written by a producer
+//! the reader-side decoder [`crate::tcf`] asks for. A file written by a producer
 //! whose decoder disagrees with these kernels fails verification here, which
 //! is the point: the proof binds the bytes to the values this runtime will
 //! compute from them.
@@ -16,7 +16,7 @@
 use crate::error::{Error, Result};
 use crate::quant::QuantFormat;
 use crate::quant::cpu::kernels::quant_matmul::dequant_row_f32;
-use tcf_core::{BlockDecoder, BlockEncoding, TcfError, TensorRecord};
+use crate::tcf::{BlockDecoder, BlockEncoding, TcfError, TensorRecord};
 
 /// The runtime format for a block encoding.
 ///
@@ -89,7 +89,7 @@ pub fn decode_block_f32(
     Ok(out)
 }
 
-/// tcf-core's reader-side decoder, backed by the CPU dequant kernels.
+/// The reader-side [`BlockDecoder`], backed by the CPU dequant kernels.
 ///
 /// The proof indices are a fixed handful per tensor, so this decodes only the
 /// rows they land in, each row once.
@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn sampled_values_match_the_full_decode() {
         let bytes = q8_0_stream();
-        let indices = tcf_core::proof_indices(&[2, 64], 2, 3).expect("indices");
+        let indices = crate::tcf::proof_indices(&[2, 64], 2, 3).expect("indices");
         let sampled = BoostrBlockDecoder
             .values_at(BlockEncoding::Q8_0, &bytes, &[2, 64], 2, 3, &indices)
             .expect("decodes");

@@ -12,6 +12,12 @@
 //!   format has no field for one, so a GGUF weight carries none and
 //!   dispatches exactly as it did before this check existed. Absence is "the
 //!   format cannot say", never "any kernel will do".
+//!
+//! A block-encoded TCF weight declares `InputRepresentation::GgmlReference`:
+//! the kernel family `ggml-quants.c` defines for its block type, whose
+//! activation path differs per backend. Every block matmul entry point checks
+//! that at entry with its backend's `BLOCK_CONTRACT`, so a file that pins a
+//! more specific representation is refused rather than run with another.
 
 use numr::dtype::DType;
 use numr::runtime::Runtime;
@@ -64,7 +70,7 @@ impl<R: Runtime<DType = DType>> QuantTensor<R> {
         Err(Error::ActivationContractMismatch(Box::new(
             ActivationContractMismatchDetail {
                 tensor: declared.tensor.clone(),
-                encoding: self.scheme().name(),
+                encoding: self.format().name().to_string(),
                 declared: declared.clone(),
                 kernel: *kernel,
             },
@@ -75,27 +81,31 @@ impl<R: Runtime<DType = DType>> QuantTensor<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quant::{QuantFormat, TcfEncoding};
-    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
-    use tcf_core::{
+    use crate::quant::QuantFormat;
+    use crate::tcf::{
         ContractFlags, ContractRecord, DotAccumulator, ExecutionRole, InputRepresentation,
-        MathMode, NativeEncoding, OutputDtype, QuantAxis, RoundingMode, ScaleComputeDtype,
+        MathMode, OutputDtype, QuantAxis, RoundingMode, ScaleComputeDtype,
     };
+    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
-    fn exact_f32_contract(tensor: &str) -> ActivationContract {
+    fn contract(
+        tensor: &str,
+        input: InputRepresentation,
+        dot: DotAccumulator,
+    ) -> ActivationContract {
         ActivationContract::from_record(
             tensor,
             ExecutionRole::Matmul,
             &ContractRecord {
                 contract_id: 1,
-                input_representation: InputRepresentation::F32,
+                input_representation: input,
                 quant_group: 0,
                 quant_axis: QuantAxis::Last,
                 rounding_mode: RoundingMode::RnEven,
                 qmin: 0,
                 qmax: 0,
                 scale_compute_dtype: ScaleComputeDtype::F32,
-                dot_accumulator: DotAccumulator::F32,
+                dot_accumulator: dot,
                 output_dtype: OutputDtype::F32,
                 math_mode: MathMode::ReassociationAllowed,
                 calibration_id: 0,
@@ -105,21 +115,29 @@ mod tests {
         )
     }
 
-    fn tcf_weight() -> QuantTensor<CpuRuntime> {
+    fn exact_f32_contract(tensor: &str) -> ActivationContract {
+        contract(tensor, InputRepresentation::F32, DotAccumulator::F32)
+    }
+
+    fn ggml_reference_contract(tensor: &str) -> ActivationContract {
+        contract(
+            tensor,
+            InputRepresentation::GgmlReference,
+            DotAccumulator::GgmlReference,
+        )
+    }
+
+    fn q4_0_weight() -> QuantTensor<CpuRuntime> {
         let device = CpuDevice::new();
-        let encoding = TcfEncoding::new(NativeEncoding::Q4S32T64);
-        QuantTensor::<CpuRuntime>::from_bytes(&[0u8; 36], encoding, &[1, 64], &device)
-            .expect("one tile")
+        QuantTensor::<CpuRuntime>::from_bytes(&[0u8; 18], QuantFormat::Q4_0, &[1, 32], &device)
+            .expect("one block")
     }
 
     /// A GGUF weight has no contract to check, and the check must not invent
     /// one: its dispatch is unchanged by this feature.
     #[test]
     fn a_gguf_weight_carries_no_contract_and_passes_every_kernel() {
-        let device = CpuDevice::new();
-        let weight =
-            QuantTensor::<CpuRuntime>::from_bytes(&[0u8; 18], QuantFormat::Q4_0, &[32], &device)
-                .expect("one block");
+        let weight = q4_0_weight();
         assert!(weight.activation_contract().is_none());
         weight
             .check_activation_contract(&KernelContract::f32_activation("cpu_quant_matmul_f32"))
@@ -129,13 +147,43 @@ mod tests {
                 "quant_gemv_q4_k_q8_1_mwr",
             ))
             .expect("no contract, no check");
+        weight
+            .check_activation_contract(&KernelContract::ggml_reference("cpu ggml block matmul"))
+            .expect("no contract, no check");
+    }
+
+    /// The contract a block-encoded TCF file declares: the kernel family
+    /// `ggml-quants.c` defines for the block type. Every backend's block
+    /// kernel satisfies it, and nothing more specific does.
+    #[test]
+    fn a_ggml_reference_contract_admits_only_the_ggml_family() {
+        let weight = q4_0_weight().with_activation_contract(ggml_reference_contract("layer.w"));
+        weight
+            .check_activation_contract(&KernelContract::ggml_reference("cuda ggml block matmul"))
+            .expect("the family the file named");
+        weight
+            .check_activation_contract(&KernelContract::f32_activation("cpu_quant_matmul_f32"))
+            .expect_err("an f32 kernel promises a representation the file never asked for");
+        weight
+            .check_activation_contract(&KernelContract::dynamic_int8_activation("tcf_mmq"))
+            .expect_err("a group-32 kernel promises a representation the file never asked for");
+    }
+
+    /// The converse: a file that pins exact f32 activations is not served by
+    /// the ggml family, whose activation path depends on the backend.
+    #[test]
+    fn the_ggml_family_is_refused_for_a_weight_declaring_f32_activations() {
+        let weight = q4_0_weight().with_activation_contract(exact_f32_contract("layer.w"));
+        weight
+            .check_activation_contract(&KernelContract::ggml_reference("cpu ggml block matmul"))
+            .expect_err("the family does not promise f32 activations");
     }
 
     #[test]
     fn an_f32_kernel_runs_a_weight_declaring_f32_activations() {
-        let weight = tcf_weight().with_activation_contract(exact_f32_contract("layer.w"));
+        let weight = q4_0_weight().with_activation_contract(exact_f32_contract("layer.w"));
         weight
-            .check_activation_contract(&KernelContract::f32_activation("tcf_gemv_f32"))
+            .check_activation_contract(&KernelContract::f32_activation("cpu_quant_matmul_f32"))
             .expect("the kernel computes what the contract declares");
     }
 
@@ -144,7 +192,7 @@ mod tests {
     /// what the selected kernel would have computed instead.
     #[test]
     fn an_int8_kernel_is_refused_for_a_weight_declaring_f32_activations() {
-        let weight = tcf_weight().with_activation_contract(exact_f32_contract("layer.w"));
+        let weight = q4_0_weight().with_activation_contract(exact_f32_contract("layer.w"));
         let kernel = KernelContract::dynamic_int8_activation("tcf_mmq_feat_major");
         let err = weight
             .check_activation_contract(&kernel)
@@ -170,7 +218,7 @@ mod tests {
 
     #[test]
     fn a_cloned_weight_keeps_its_contract() {
-        let weight = tcf_weight().with_activation_contract(exact_f32_contract("layer.w"));
+        let weight = q4_0_weight().with_activation_contract(exact_f32_contract("layer.w"));
         let cloned = weight.clone();
         assert_eq!(
             cloned.activation_contract().map(|c| c.digest),

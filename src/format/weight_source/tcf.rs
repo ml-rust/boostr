@@ -5,28 +5,26 @@
 //! Everything this module does is decided by the file's directory:
 //! [`TcfLoader`] resolves it, [`crate::format::tcf::decode`] turns a payload
 //! into f32 values, and `QuantTensor::from_bytes` places a packed payload on
-//! a device unchanged. Plane offsets, bit positions and the Section 14.2
-//! sub-plane split live in `tcf-core` and in the kernels, and
-//! MIGRATION.md Section 4.5.3 forbids a second copy of them. There is none
-//! below — this file only chooses BETWEEN those two paths.
+//! a device unchanged. The block layouts live in the kernels; there is no
+//! copy of them below — this file only chooses BETWEEN those two paths.
 //!
 //! # The choice, per tensor
 //!
-//! Section 12 splits encodings into native quantized ones, which carry
-//! codes plus scales, and raw ones, which carry literal values and no scale
-//! at all. A native encoding therefore has a packed form worth keeping and
-//! becomes [`Weight::Quantized`]; a raw one has none and becomes
+//! Section 12 splits encodings into block encodings, which carry codes plus
+//! scales, and raw ones, which carry literal values and no scale at all. A
+//! block encoding therefore has a packed form worth keeping and becomes
+//! [`Weight::Quantized`]; a raw one has none and becomes
 //! [`Weight::Standard`].
 //!
 //! BOTH occur in a real file, and by a wide margin. A VoxCPM2 TCF written by
-//! compressr holds 577 tensors of which 139 sit at a BF16 FALLBACK encoding
-//! with reason `RankLt2` — Section 8.6 records why: a rank-1 tensor cannot be
-//! tiled, so no native encoding applies to it. Assuming every tensor is
-//! quantized would fail on every one of those 139.
+//! compressr holds 577 tensors of which 139 sit at a raw FALLBACK encoding
+//! with reason `RankLt2` — Section 8.6 records why: a rank-1 tensor has no
+//! row to pack blocks along. Assuming every tensor is quantized would fail
+//! on every one of those 139.
 //!
 //! # Names repeat, and that is not an error in the FILE
 //!
-//! SPECIFICATION.md Section 6 makes a tensor name PROVENANCE, never
+//! FORMAT.md Section 6 makes a tensor name PROVENANCE, never
 //! identity: a conforming file MAY carry the same name twice, and
 //! [`TcfLoader::tensor_info`] resolves such a name to its FIRST occurrence.
 //! A `WeightSource` looks tensors up by name and by nothing else, so on such
@@ -35,10 +33,10 @@
 
 use std::collections::HashSet;
 
+use crate::tcf::Encoding;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
-use tcf_core::Encoding;
 
 use super::source::WeightSource;
 use crate::error::{Error, Result};
@@ -71,7 +69,7 @@ impl<'a> TcfSource<'a> {
             return Err(Error::ModelError {
                 reason: format!(
                     "TCF file {} declares the tensor name '{name}' more than once; \
-                     a name is provenance, not identity (SPECIFICATION.md Section 6), \
+                     a name is provenance, not identity (FORMAT.md Section 6), \
                      so loading by name would silently pick the first occurrence",
                     loader.path().display()
                 ),
@@ -111,19 +109,18 @@ impl<R: Runtime<DType = DType>> WeightSource<R> for TcfSource<'_> {
         self.session.tensor::<R>(name, device)
     }
 
-    /// Keeps a quantized tensor PACKED: its payload reaches the device
-    /// verbatim as a `QuantTensor` — `QuantScheme::Tcf` for a native encoding,
-    /// `QuantScheme::Gguf` for a GGML block encoding — which `quant_matmul`
-    /// consumes directly. A 1.2 GB Q4 file costs 1.2 GB, not the 10 GB its
-    /// f32 expansion would.
+    /// Keeps a block-encoded tensor PACKED: its payload reaches the device
+    /// verbatim as the `QuantTensor` a GGUF file would give, which
+    /// `quant_matmul` consumes directly. A 1.2 GB Q4 file costs 1.2 GB, not
+    /// the 10 GB its f32 expansion would.
     ///
     /// The ENCODING decides, never the name: a raw encoding has no packed
     /// form to hold (Section 12), so it takes the dense path. That is the
-    /// BF16 `RankLt2` fallback the module docs describe, and the caller's
+    /// `RankLt2` fallback the module docs describe, and the caller's
     /// `MaybeLoraLinear` runs its dense branch there unchanged.
     fn load_named_weight(&mut self, name: &str, device: &R::Device) -> Result<Weight<R>> {
         match self.session.loader().tensor_info(name)?.encoding() {
-            Encoding::Native(_) | Encoding::Block(_) => Ok(Weight::Quantized(
+            Encoding::Block(_) => Ok(Weight::Quantized(
                 self.session.quant_tensor::<R>(name, device)?,
             )),
             Encoding::Raw(_) => Ok(Weight::Standard(self.session.tensor::<R>(name, device)?)),
@@ -135,10 +132,9 @@ impl<R: Runtime<DType = DType>> WeightSource<R> for TcfSource<'_> {
 mod tests {
     use super::*;
     use crate::format::tcf::fixtures;
-    use crate::quant::{QuantScheme, TcfEncoding};
+    use crate::quant::QuantFormat;
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;
-    use tcf_core::NativeEncoding;
 
     #[test]
     fn a_repeated_name_is_reported_by_name() {
@@ -150,10 +146,10 @@ mod tests {
         assert_eq!(first_repeated_name(std::iter::empty()), None);
     }
 
-    /// The split the whole module exists for: a native encoding stays
+    /// The split the whole module exists for: a block encoding stays
     /// packed, a raw one arrives dense, and neither is decided by the name.
     #[test]
-    fn native_stays_packed_and_raw_arrives_dense() {
+    fn block_stays_packed_and_raw_arrives_dense() {
         let file = fixtures::write_temp(&fixtures::good_file());
         let loader = TcfLoader::open(file.path()).expect("opens");
         let mut source = TcfSource::new(&loader).expect("binds");
@@ -163,15 +159,12 @@ mod tests {
             .expect("loads");
         match packed {
             Weight::Quantized(qt) => {
-                assert_eq!(qt.shape(), &[1, 64]);
-                assert_eq!(
-                    qt.scheme(),
-                    QuantScheme::Tcf(TcfEncoding::new(NativeEncoding::Q4S32T64))
-                );
-                // One Q4S32_T64 tile: 32 code bytes plus two binary16 scales.
-                assert_eq!(qt.storage_bytes(), 36);
+                assert_eq!(qt.shape(), &[2, 64]);
+                assert_eq!(qt.format(), QuantFormat::Q8_0);
+                // Four Q8_0 blocks of 34 bytes.
+                assert_eq!(qt.storage_bytes(), 4 * 34);
             }
-            _ => panic!("layer.w is natively encoded, so it must arrive packed"),
+            _ => panic!("layer.w is block encoded, so it must arrive packed"),
         }
 
         let dense =
@@ -186,10 +179,10 @@ mod tests {
         }
     }
 
-    /// A GGML block encoding stays packed too, under the GGUF scheme: the
-    /// weight is indistinguishable from one a GGUF file produced.
+    /// A block tensor carries the file's activation contract, which a GGUF
+    /// weight cannot; the bytes are otherwise the GGUF's.
     #[test]
-    fn a_block_encoding_stays_packed_under_the_gguf_scheme() {
+    fn a_block_tensor_carries_its_contract() {
         let file = fixtures::write_temp(&fixtures::block_file(0.0));
         let loader = TcfLoader::open(file.path()).expect("opens");
         let mut source = TcfSource::new(&loader).expect("binds");
@@ -201,10 +194,7 @@ mod tests {
         match packed {
             Weight::Quantized(qt) => {
                 assert_eq!(qt.shape(), &[2, 64]);
-                assert_eq!(
-                    qt.scheme(),
-                    QuantScheme::Gguf(crate::quant::QuantFormat::Q8_0)
-                );
+                assert_eq!(qt.format(), QuantFormat::Q8_0);
                 assert_eq!(qt.storage_bytes(), 4 * 34);
                 assert!(qt.activation_contract().is_some());
             }
@@ -225,8 +215,8 @@ mod tests {
         let (_client, device) = cpu_setup();
 
         let dense: Tensor<CpuRuntime> = source.load_named("layer.w", &device).expect("loads");
-        assert_eq!(dense.shape(), &[1, 64]);
-        assert_eq!(dense.to_vec::<f32>(), fixtures::expected_q4_values());
+        assert_eq!(dense.shape(), &[2, 64]);
+        assert_eq!(dense.to_vec::<f32>(), fixtures::expected_q8_0_values());
     }
 
     /// THE equivalence gate: a TCF written from a checkpoint must present

@@ -18,7 +18,7 @@
 
 use core::fmt;
 
-use tcf_core::{
+use crate::tcf::{
     DotAccumulator, ExecutionRole, InputRepresentation, MathMode, OutputDtype, QuantAxis,
     RoundingMode, ScaleComputeDtype,
 };
@@ -85,10 +85,10 @@ impl KernelContract {
     ///
     /// `reassociates` is always `true` here. Every kernel built on this
     /// constructor blocks or lane-splits the reduction (CPU: 8-lane AVX2 FMA
-    /// plus a horizontal reduction, `cpu/kernels/tcf/matmul.rs`. CUDA GEMM:
-    /// register-tile blocking with a split-K fixup. WGPU: unverified from
-    /// source, so it takes the value that REFUSES rather than the one that
-    /// permits), so none reproduces a fixed left-to-right sum.
+    /// plus a horizontal reduction. CUDA GEMM: register-tile blocking with a
+    /// split-K fixup. WGPU: unverified from source, so it takes the value
+    /// that REFUSES rather than the one that permits), so none reproduces a
+    /// fixed left-to-right sum.
     ///
     /// `quant_axis`, `rounding_mode`, and `scale_compute_dtype` are nominal:
     /// this path never quantizes the activation, so no axis, rounding, or
@@ -142,6 +142,38 @@ impl KernelContract {
             scale_compute_dtype: ScaleComputeDtype::F32,
             quant_group: Some(DYNAMIC_INT8_GROUP),
             quant_range: Some(DYNAMIC_INT8_RANGE),
+        }
+    }
+
+    /// A matmul kernel for a GGML block type that follows `ggml-quants.c`'s
+    /// activation path for that type on its own backend.
+    ///
+    /// This is the contract of every kernel that consumes a GGUF payload:
+    /// Q8_K activations for K-quants on the CPU, Q8_1 activations for the
+    /// CUDA dp4a and MMA families, f32 on a backend that dequantizes first.
+    /// The file cannot pin one of those, so it pins the family, and a kernel
+    /// outside the family (`f32_activation`, `dynamic_int8_activation`) does
+    /// not satisfy it: those promise a representation this contract never
+    /// asked for, and the check stays exact rather than "close enough".
+    ///
+    /// `reassociates` is always `true`: every member blocks or lane-splits
+    /// the reduction. The group and range are `None` because the family does
+    /// not share one, and the axis, rounding, and scale dtype take v1's
+    /// single legal value each.
+    #[must_use]
+    pub const fn ggml_reference(kernel: &'static str) -> Self {
+        Self {
+            kernel,
+            input_representation: InputRepresentation::GgmlReference,
+            dot_accumulator: DotAccumulator::GgmlReference,
+            output_dtype: OutputDtype::F32,
+            role: ExecutionRole::Matmul,
+            reassociates: true,
+            quant_axis: QuantAxis::Last,
+            rounding_mode: RoundingMode::RnEven,
+            scale_compute_dtype: ScaleComputeDtype::F32,
+            quant_group: None,
+            quant_range: None,
         }
     }
 
@@ -201,7 +233,7 @@ impl fmt::Display for KernelContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tcf_core::{
+    use crate::tcf::{
         ContractFlags, ContractRecord, MathMode, QuantAxis, RoundingMode, ScaleComputeDtype,
     };
 

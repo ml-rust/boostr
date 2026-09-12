@@ -14,11 +14,11 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+use crate::tcf::{Encoding, TcfFile};
 use memmap2::Mmap;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
-use tcf_core::{Encoding, TcfFile};
 
 use super::block::{BoostrBlockDecoder, block_format};
 use super::decode::decode_tensor_f32;
@@ -26,7 +26,7 @@ use super::error::{tcf_error, tcf_tensor_error};
 use super::metadata::{TcfHeaderInfo, TcfModuleInfo, TcfTensorInfo, encoding_name};
 use crate::error::{Error, Result};
 use crate::quant::contract::ActivationContract;
-use crate::quant::{QuantScheme, QuantTensor, TcfEncoding};
+use crate::quant::{QuantFormat, QuantTensor};
 
 /// A memory-mapped TCF file with its directory decoded.
 ///
@@ -234,12 +234,10 @@ impl TcfLoader {
     /// happens per use, through `DequantOps`, or not at all once a fused
     /// quantized matmul consumes the [`QuantTensor`] directly.
     ///
-    /// Quantized encodings only: a native encoding becomes a
-    /// [`QuantScheme::Tcf`] tensor and a GGML block encoding a
-    /// [`QuantScheme::Gguf`] one, decoded by the same kernels a GGUF file
-    /// reaches. A raw encoding stores literal values with no scale (Section
-    /// 12), so it has no quantized form to hold — load it with
-    /// [`TcfLoader::load_tensor`].
+    /// Block encodings only: the tensor is the same `QuantTensor` a GGUF
+    /// file yields, decoded by the same kernels. A raw encoding stores
+    /// literal values with no scale (Section 12), so it has no quantized
+    /// form to hold — load it with [`TcfLoader::load_tensor`].
     ///
     /// # Errors
     /// [`Error::ModelError`] for an unknown name, a failed digest or proof
@@ -277,16 +275,16 @@ impl TcfLoader {
         Ok(out)
     }
 
-    /// The runtime scheme for `name`, or an error naming the encoding when
-    /// it is raw.
+    /// The block format of `name`, or an error naming the encoding when it
+    /// is raw.
     ///
     /// A placement planner calls this to size a tensor before deciding where
     /// it lives, without reading a payload page.
     ///
     /// # Errors
     /// [`Error::ModelError`] for an unknown name or a raw encoding.
-    pub fn quant_scheme(&self, name: &str) -> Result<QuantScheme> {
-        quant_scheme(self.tensor_info(name)?.encoding(), name)
+    pub fn quant_format(&self, name: &str) -> Result<QuantFormat> {
+        quant_format(self.tensor_info(name)?.encoding(), name)
     }
 
     /// Verify every tensor's digests and proof vector without decoding.
@@ -338,7 +336,7 @@ impl TcfLoader {
             reason: format!("TCF tensor index {index} is out of range"),
         })?;
         verify_at(file, record, name)?;
-        let scheme = quant_scheme(record.encoding, name)?;
+        let format = quant_format(record.encoding, name)?;
         let payload = file
             .payload(record)
             .map_err(|e| tcf_tensor_error(name, "payload", e))?;
@@ -355,7 +353,7 @@ impl TcfLoader {
         let contract = ActivationContract::from_record(name, record.execution_role, contract);
 
         Ok(
-            QuantTensor::<R>::from_bytes(payload, scheme, &shape, device)?
+            QuantTensor::<R>::from_bytes(payload, format, &shape, device)?
                 .with_activation_contract(contract),
         )
     }
@@ -452,20 +450,19 @@ impl<'a> TcfSession<'a> {
 /// A block tensor's proof is checked with boostr's own decoder, so a stream
 /// these kernels would read differently from the producer fails here rather
 /// than at first use.
-fn verify_at(file: &TcfFile<'_>, record: &tcf_core::TensorRecord, name: &str) -> Result<()> {
+fn verify_at(file: &TcfFile<'_>, record: &crate::tcf::TensorRecord, name: &str) -> Result<()> {
     file.verify_tensor_with(record, Some(&BoostrBlockDecoder))
         .map_err(|e| tcf_tensor_error(name, "verify", e))
 }
 
-/// The runtime scheme for a quantized encoding.
+/// The runtime format for a quantized encoding.
 ///
 /// # Errors
 /// [`Error::ModelError`] naming the encoding and the tensor, when the
 /// encoding is raw or a block layout this build has no kernel for.
-fn quant_scheme(encoding: Encoding, name: &str) -> Result<QuantScheme> {
+fn quant_format(encoding: Encoding, name: &str) -> Result<QuantFormat> {
     match encoding {
-        Encoding::Native(native) => Ok(QuantScheme::Tcf(TcfEncoding::new(native))),
-        Encoding::Block(block) => Ok(QuantScheme::Gguf(block_format(block, name)?)),
+        Encoding::Block(block) => block_format(block, name),
         raw @ Encoding::Raw(_) => Err(Error::ModelError {
             reason: format!(
                 "TCF tensor '{name}': encoding {} is not quantized, so it has no packed form; load it as a dense tensor",
@@ -479,9 +476,9 @@ fn quant_scheme(encoding: Encoding, name: &str) -> Result<QuantScheme> {
 mod tests {
     use super::super::fixtures;
     use super::*;
+    use crate::tcf::{BlockEncoding, Encoding, FallbackReason, RawEncoding};
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;
-    use tcf_core::{Encoding, FallbackReason, NativeEncoding, RawEncoding};
 
     fn open_fixture(bytes: &[u8]) -> Result<(tempfile::NamedTempFile, TcfLoader)> {
         let file = fixtures::write_temp(bytes);
@@ -509,14 +506,11 @@ mod tests {
         let (_file, loader) = open_fixture(&fixtures::good_file()).expect("opens");
 
         let weight = loader.tensor_info("layer.w").expect("known name");
-        assert_eq!(
-            weight.encoding(),
-            Encoding::Native(NativeEncoding::Q4S32T64)
-        );
+        assert_eq!(weight.encoding(), Encoding::Block(BlockEncoding::Q8_0));
         assert_eq!(weight.fallback_reason(), FallbackReason::None);
         assert!(!weight.is_fallback());
-        assert_eq!(weight.bits_per_weight(), Some(4.5));
-        assert_eq!(weight.shape(), vec![1, 64]);
+        assert_eq!(weight.bits_per_weight(), Some(8.5));
+        assert_eq!(weight.shape(), vec![2, 64]);
 
         assert_eq!(loader.tensors()[fixtures::T_FALLBACK].name, "layer.pinned");
         let pinned = loader.tensor_info("layer.pinned").expect("known name");
@@ -534,7 +528,7 @@ mod tests {
             .expect("module resolves");
         assert_eq!(
             module.top_preferred_encoding(),
-            Some(Encoding::Native(NativeEncoding::Q4S32T64))
+            Some(Encoding::Block(BlockEncoding::Q8_0))
         );
     }
 
@@ -545,8 +539,8 @@ mod tests {
         let tensor = loader
             .load_tensor::<CpuRuntime>("layer.w", &device)
             .expect("loads");
-        assert_eq!(tensor.shape(), &[1, 64]);
-        assert_eq!(tensor.to_vec::<f32>(), fixtures::expected_q4_values());
+        assert_eq!(tensor.shape(), &[2, 64]);
+        assert_eq!(tensor.to_vec::<f32>(), fixtures::expected_q8_0_values());
     }
 
     /// The point of the packed path: the device holds the payload at its
@@ -562,35 +556,33 @@ mod tests {
             .load_quant_tensor::<CpuRuntime>("layer.w", &device)
             .expect("loads packed");
 
-        assert_eq!(qt.shape(), &[1, 64]);
-        // One tile of Q4S32_T64: 32 code bytes plus two binary16 scales.
-        assert_eq!(qt.storage_bytes(), 36);
-        assert_eq!(
-            qt.scheme(),
-            crate::quant::QuantScheme::Tcf(crate::quant::TcfEncoding::new(
-                NativeEncoding::Q4S32T64
-            ))
-        );
+        assert_eq!(qt.shape(), &[2, 64]);
+        // Four Q8_0 blocks of 34 bytes.
+        assert_eq!(qt.storage_bytes(), 4 * 34);
+        assert_eq!(qt.format(), QuantFormat::Q8_0);
 
         let dense = client
             .dequantize(&qt, numr::dtype::DType::F32)
             .expect("dequantizes");
-        assert_eq!(dense.shape(), &[1, 64]);
-        assert_eq!(dense.to_vec::<f32>(), fixtures::expected_q4_values());
+        assert_eq!(dense.shape(), &[2, 64]);
+        assert_eq!(dense.to_vec::<f32>(), fixtures::expected_q8_0_values());
     }
 
     /// Section 9: the contract rides out of the file on the weight, because
     /// a kernel router sees a `QuantTensor` and never the file behind it.
-    /// The fixture declares 8-bit dynamic activations, so the f32 CPU matmul
-    /// kernel must refuse it rather than run arithmetic the file never asked
-    /// for.
+    /// The fixture declares the ggml kernel family, so a kernel promising
+    /// exact f32 activations must refuse it rather than run arithmetic the
+    /// file never asked for, while the block kernels run it.
     #[test]
     fn a_quantized_tensor_carries_its_activation_contract_and_gates_dispatch() {
-        use crate::quant::cpu::kernels::tcf::MATMUL_CONTRACT;
-        use tcf_core::{DotAccumulator, ExecutionRole, InputRepresentation};
+        use crate::quant::KernelContract;
+        use crate::quant::traits::QuantMatmulOps;
+        use crate::tcf::{DotAccumulator, ExecutionRole, InputRepresentation};
+
+        const F32_KERNEL: KernelContract = KernelContract::f32_activation("test f32 matmul");
 
         let (_file, loader) = open_fixture(&fixtures::good_file()).expect("opens");
-        let (_client, device) = cpu_setup();
+        let (client, device) = cpu_setup();
         let qt = loader
             .load_quant_tensor::<CpuRuntime>("layer.w", &device)
             .expect("loads packed");
@@ -600,17 +592,25 @@ mod tests {
         assert_eq!(declared.role, ExecutionRole::Matmul);
         assert_eq!(
             declared.input_representation,
-            InputRepresentation::A8S32Dynamic
+            InputRepresentation::GgmlReference
         );
-        assert_eq!(declared.dot_accumulator, DotAccumulator::I32ThenF32Scale);
-        assert_eq!(declared.quant_group, 32);
+        assert_eq!(declared.dot_accumulator, DotAccumulator::GgmlReference);
+        assert_eq!(declared.quant_group, 0);
 
         let err = qt
-            .check_activation_contract(&MATMUL_CONTRACT)
-            .expect_err("an f32 kernel does not satisfy an 8-bit activation contract");
+            .check_activation_contract(&F32_KERNEL)
+            .expect_err("an f32 kernel does not satisfy the ggml family contract");
         let text = err.to_string();
         assert!(text.contains("E_ACTIVATION_CONTRACT_MISMATCH"), "{text}");
         assert!(text.contains("layer.w"), "{text}");
+
+        // The CPU block kernel is in the family, so the weight runs.
+        let activation =
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 64], &[1, 64], &device).expect("activation");
+        let out = client
+            .quant_matmul(&activation, &qt)
+            .expect("the block kernel satisfies the declared contract");
+        assert_eq!(out.shape(), &[1, 2]);
     }
 
     /// A raw encoding has no packed form, and the error says so rather than
@@ -623,30 +623,27 @@ mod tests {
             .load_quant_tensor::<CpuRuntime>("layer.bias", &device)
             .expect_err("rejects");
         assert!(err.to_string().contains("not quantized"), "{err}");
-        assert!(loader.quant_scheme("layer.bias").is_err());
+        assert!(loader.quant_format("layer.bias").is_err());
     }
 
     #[test]
     fn the_encoding_descriptor_is_reachable_without_reading_a_payload() {
         let (_file, loader) = open_fixture(&fixtures::good_file()).expect("opens");
-        let scheme = loader.quant_scheme("layer.w").expect("native");
-        assert_eq!(
-            scheme.tcf().map(|e| e.native()),
-            Some(NativeEncoding::Q4S32T64)
-        );
-        assert_eq!(scheme.payload_bytes(&[1, 64]).expect("bytes"), 36);
+        let format = loader.quant_format("layer.w").expect("block");
+        assert_eq!(format, QuantFormat::Q8_0);
+        assert_eq!(format.storage_bytes(2 * 64).expect("bytes"), 4 * 34);
     }
 
-    /// A GGML block tensor loads as a GGUF-scheme `QuantTensor` — the same
+    /// A GGML block tensor loads as the `QuantTensor` a GGUF gives — the same
     /// kernels a GGUF file reaches — carrying the file's activation contract,
     /// and decodes to the hand-computed values.
     #[test]
-    fn a_block_tensor_loads_as_a_gguf_scheme_quant_tensor() {
+    fn a_block_tensor_loads_as_a_gguf_quant_tensor() {
         let (_file, loader) = open_fixture(&fixtures::block_file(0.0)).expect("opens");
         let (client, device) = cpu_setup();
         assert_eq!(
-            loader.quant_scheme("layer.q8").expect("scheme"),
-            crate::quant::QuantScheme::Gguf(crate::quant::QuantFormat::Q8_0)
+            loader.quant_format("layer.q8").expect("format"),
+            QuantFormat::Q8_0
         );
         loader
             .verify_all()
@@ -656,7 +653,7 @@ mod tests {
             .load_quant_tensor::<CpuRuntime>("layer.q8", &device)
             .expect("loads");
         assert_eq!(qt.shape(), &[2, 64]);
-        assert_eq!(qt.scheme().gguf(), Some(crate::quant::QuantFormat::Q8_0));
+        assert_eq!(qt.format(), QuantFormat::Q8_0);
         assert!(qt.activation_contract().is_some());
         let dense =
             crate::quant::DequantOps::dequantize(&client, &qt, DType::F32).expect("dequantizes");
@@ -701,7 +698,7 @@ mod tests {
             .load_tensors::<CpuRuntime>(&["layer.bias", "layer.w"], &device)
             .expect("loads");
         assert_eq!(loaded[0].shape(), &[4]);
-        assert_eq!(loaded[1].shape(), &[1, 64]);
+        assert_eq!(loaded[1].shape(), &[2, 64]);
     }
 
     #[test]
@@ -715,7 +712,7 @@ mod tests {
     #[test]
     fn a_corrupted_payload_is_rejected_on_load() {
         let mut bytes = fixtures::good_file();
-        fixtures::corrupt_payload(&mut bytes, fixtures::T_Q4);
+        fixtures::corrupt_payload(&mut bytes, fixtures::T_Q8);
         let (_file, loader) = open_fixture(&bytes).expect("the directory is untouched");
 
         let err = loader
@@ -734,7 +731,7 @@ mod tests {
     #[test]
     fn a_corrupted_directory_is_rejected_on_open() {
         let mut bytes = fixtures::good_file();
-        let off = tcf_core::HEADER_BYTES as usize;
+        let off = crate::tcf::HEADER_BYTES as usize;
         bytes[off] ^= 0x01;
 
         let file = fixtures::write_temp(&bytes);
@@ -750,8 +747,8 @@ mod tests {
     #[test]
     fn an_unassigned_encoding_is_rejected_by_identifier() {
         let mut bytes = fixtures::good_file();
-        // 0x0109 is a deliberate gap in the native quantized range.
-        fixtures::set_encoding(&mut bytes, fixtures::T_Q4, 0x0109);
+        // 0x0109 sits in the retired tile-encoding range.
+        fixtures::set_encoding(&mut bytes, fixtures::T_Q8, 0x0109);
 
         let file = fixtures::write_temp(&bytes);
         let err = TcfLoader::open(file.path()).expect_err("an unknown encoding is rejected");

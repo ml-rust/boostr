@@ -24,13 +24,12 @@
 //!
 //! Pass `--dequant-weights` on BOTH runs.
 //!
-//! `CONFORMANCE.md` Section 7.1 requires the ACTIVATION CONTRACT to be matched
-//! across two artifacts being compared, and it is not matched by default: a
-//! TCF declares an exact F32 contract, so its matmul runs F32 activations,
-//! while a GGUF declares none and its feature-major MMQ path quantizes the
-//! activations to int8 before the tensor-core MMA. The GGUF side then absorbs
-//! activation-quantization error the TCF side never pays, and the gap reads as
-//! a weight-format difference that it is not.
+//! A comparison is valid only when both artifacts run the SAME activation
+//! path, and the packed path does not promise that: a block kernel quantizes
+//! the activation the way `ggml-quants.c` does for its block type and backend
+//! (Q8_K on the CPU for K-quants, Q8_1 on CUDA), so two block formats absorb
+//! different activation-quantization error, and the gap reads as a
+//! weight-format difference that it is not.
 //!
 //! `--dequant-weights` removes that confound: every packed weight becomes a
 //! dense F32 tensor at load, both artifacts run the same dense F32 matmul, and
@@ -125,6 +124,7 @@ use boostr::model::llama::Llama;
 use boostr::model::traits::{Model, ModelClient};
 use boostr::nn::VarBuilder;
 use boostr::quant::ImportanceMatrix;
+use boostr::quant::QuantFormat;
 use boostr::quant::traits::DequantOps;
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
@@ -132,7 +132,6 @@ use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 #[cfg(feature = "cuda")]
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
-use tcf_core::NativeEncoding;
 
 // Which artifact the weights come from, and how one open artifact becomes a
 // `VarMap`. Lives in `examples/shared/` because the `imatrix` example loads
@@ -157,11 +156,11 @@ mod probe;
 // The AWQ-style per-input-channel smoothing PROBE: `--smooth-encoding` and
 // friends transform the loaded `VarMap`'s dense weights before the model is
 // built, so the rest of this file's scoring path runs unchanged. See the
-// module's own docs for what "probe" means here — TCF stores no scale plane,
-// so this scores the dense weight the format WOULD reconstruct, exactly.
+// module's own docs for what "probe" means here — a block format stores no
+// scale plane, so this scores the dense weight it WOULD reconstruct, exactly.
 mod smooth;
 use smooth::{
-    SmoothObjective, SmoothSource, apply_smoothing, parse_native_encoding, parse_smooth_objective,
+    SmoothObjective, SmoothSource, apply_smoothing, parse_block_format, parse_smooth_objective,
     parse_smooth_source,
 };
 
@@ -234,7 +233,7 @@ struct Args {
 /// `--smooth-*` flags, gathered once presence is confirmed by
 /// `--smooth-encoding` being set.
 struct SmoothingArgs {
-    encoding: NativeEncoding,
+    encoding: QuantFormat,
     alpha: f32,
     imatrix: PathBuf,
     objective: SmoothObjective,
@@ -262,8 +261,8 @@ single-file artifact)] \
 artifacts of a comparison run the same dense F32 activation contract and differ only in \
 weight values; costs what an unquantized checkpoint costs, and is required for a valid \
 cross-format comparison)] \
-[--smooth-encoding ENCODING (turns on the AWQ-style per-input-channel smoothing PROBE; a \
-TCF NativeEncoding name, e.g. Q4AS32DT64; requires --ckpt and --smooth-imatrix)] \
+[--smooth-encoding FORMAT (turns on the AWQ-style per-input-channel smoothing PROBE; a \
+GGML block format name, e.g. Q4_K; requires --ckpt and --smooth-imatrix)] \
 [--smooth-alpha 0.5 (in [0, 1]; trades activation RMS against weight magnitude in the \
 smoothing scale; 0 is the exact no-op control)] \
 [--smooth-imatrix FILE.bstrimtx (required with --smooth-encoding: the activation \
@@ -309,7 +308,7 @@ fn parse_args() -> Result<Args, String> {
     let mut windows = DEFAULT_WINDOWS;
     let mut stride: Option<usize> = None;
     let mut dequant_weights = false;
-    let mut smooth_encoding: Option<NativeEncoding> = None;
+    let mut smooth_encoding: Option<QuantFormat> = None;
     let mut smooth_alpha = 0.5f32;
     let mut smooth_imatrix: Option<PathBuf> = None;
     let mut smooth_objective = SmoothObjective::Imatrix;
@@ -347,7 +346,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--dequant-weights" => dequant_weights = true,
             "--smooth-encoding" => {
-                smooth_encoding = Some(parse_native_encoding(&take_value(&argv, &mut i, flag)?)?)
+                smooth_encoding = Some(parse_block_format(&take_value(&argv, &mut i, flag)?)?)
             }
             "--smooth-alpha" => {
                 smooth_alpha = take_value(&argv, &mut i, flag)?

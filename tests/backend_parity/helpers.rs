@@ -4,7 +4,6 @@ use numr::ops::{ActivationOps, BinaryOps, MatmulOps, ReduceOps, ScalarOps, Unary
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 use std::sync::{Mutex, OnceLock};
-use tcf_core::NativeEncoding;
 
 #[cfg(feature = "cuda")]
 static CUDA_BACKEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -53,62 +52,6 @@ pub fn assert_parity_f32_tol(a: &[f32], b: &[f32], op: &str, rtol: f32, atol: f3
             );
         }
     }
-}
-
-/// Cosine floor for a CUDA path that quantizes its activation to Q8_1 while
-/// the CPU reference keeps the activation in f32. `tests/gguf_dequant_cpu_cuda_parity.rs`
-/// establishes this same floor for the GGUF formats that share the pattern.
-pub const COSINE_FLOOR: f64 = 0.999;
-
-/// Gate for a CUDA `quant_matmul` path that quantizes the activation to Q8_1
-/// (e.g. the TCF `Q8S32T64` MMQ kernel) against a CPU reference that keeps the
-/// activation in f32.
-///
-/// An element-wise tolerance cannot bound this comparison: the activation's
-/// per-element quantization error is scaled by the row's weight magnitudes
-/// during the reduction, but the output itself can be much smaller than that
-/// through cancellation between terms, so no fixed ratio between the two
-/// holds for arbitrary weight bytes. Cosine similarity sidesteps this because
-/// it compares direction rather than a per-element bound: a correct-but-lossy
-/// result stays within a hair of 1.0, while a decode or accumulation defect
-/// (e.g. a wrong plane offset or scale index) scrambles the output direction
-/// and drives the score toward 0. `COSINE_FLOOR` sits in the gap between the
-/// two.
-pub fn assert_cosine_parity(a: &[f32], b: &[f32], label: &str) {
-    assert_eq!(
-        a.len(),
-        b.len(),
-        "{label}: length mismatch: {} vs {}",
-        a.len(),
-        b.len()
-    );
-
-    let mut dot = 0.0f64;
-    let mut norm_a = 0.0f64;
-    let mut norm_b = 0.0f64;
-    for (i, (&x, &y)) in a.iter().zip(b.iter()).enumerate() {
-        assert!(
-            x.is_finite(),
-            "{label}: index {i} is not finite in the CUDA output: {x}"
-        );
-        assert!(
-            y.is_finite(),
-            "{label}: index {i} is not finite in the CPU output: {y}"
-        );
-        dot += f64::from(x) * f64::from(y);
-        norm_a += f64::from(x) * f64::from(x);
-        norm_b += f64::from(y) * f64::from(y);
-    }
-    let cosine = dot / (norm_a.sqrt() * norm_b.sqrt());
-
-    println!("{label}: cosine={cosine:.6}");
-
-    assert!(
-        cosine >= COSINE_FLOOR,
-        "{label}: cosine {cosine:.6} is below the {COSINE_FLOOR} floor. Correct-but-lossy \
-         results sit near 1.0; a decode or accumulation defect collapses the score toward 0. \
-         Raising the floor is never the fix."
-    );
 }
 
 pub fn assert_parity_f32(a: &[f32], b: &[f32], op: &str) {
@@ -223,51 +166,4 @@ pub fn max_abs_diff(client: &CpuClient, a: &Tensor<CpuRuntime>, b: &Tensor<CpuRu
     let abs_diff = client.abs(&diff).unwrap();
     let max = client.max(&abs_diff, &[], false).unwrap();
     max.to_vec::<f32>()[0]
-}
-
-/// Whether `native` at `m` tokens takes the feature-major MMQ path rather
-/// than the f32 GEMV/GEMM tile.
-///
-/// True when the encoding has a `FeatMajorFormat` AND `m` is at or above
-/// `TCF_FEAT_MAJOR_MIN_M` (`quant/cuda/quant_matmul/tcf_route.rs`). The
-/// encodings listed here must mirror `feat_major_format` in
-/// `quant/cuda/quant_matmul/mmq_feat_major/formats/tcf.rs`, the single
-/// mapping site in the library — that function is crate-visible only, so
-/// this test cannot call it directly. A missing entry here shows up
-/// immediately as a parity failure rather than as a silent wrong gate, so
-/// the duplication is self-correcting.
-///
-/// This does not model the K-multiple or device-capability gates: on a
-/// device without `int8_mma_m16n8k32`, or at a K the format's `k_multiple`
-/// does not divide, the case actually stays on the f32 path and the cosine
-/// gate is merely looser, never wrong.
-pub fn takes_mmq_path(native: NativeEncoding, m: usize) -> bool {
-    const TCF_FEAT_MAJOR_MIN_M: usize = 2;
-    matches!(
-        native,
-        NativeEncoding::Q8S32T64 | NativeEncoding::Q4AS32DT64
-    ) && m >= TCF_FEAT_MAJOR_MIN_M
-}
-
-/// Whether `native` at `m` tokens takes the token-batched dp4a GEMV rather
-/// than `tcf_gemv_f32`.
-///
-/// That kernel quantizes the activation to Q8_1 where the f32 GEMV keeps it
-/// in f32, so a case it selects has no element-wise bound against the CPU
-/// reference — the same reason `takes_mmq_path` exists, and the same
-/// discipline: this mirrors the dispatch condition in
-/// `quant/cuda/quant_matmul/tcf_route.rs` and `supports_dp4a_gemv` in
-/// `quant/cuda/tcf/gemv_dp4a.rs`, neither of which a test can call. A missing
-/// entry shows up as a parity failure rather than a silent mis-gate, so the
-/// duplication is self-correcting.
-///
-/// The dp4a branch is checked BEFORE the MMQ branch in dispatch, so at an `m`
-/// both would accept, this one wins. `K` is modelled here because the
-/// condition is only `K % 32 == 0` — the kernel resolves a super-block by the
-/// global flattened tile number, so it needs no `K % 256` gate.
-pub fn takes_tcf_dp4a_gemv_path(native: NativeEncoding, m: usize, k: usize) -> bool {
-    const TCF_DP4A_GEMV_MAX_M: Option<usize> = None;
-    matches!(native, NativeEncoding::Q4AS32DT64)
-        && TCF_DP4A_GEMV_MAX_M.is_some_and(|max| m <= max)
-        && k.is_multiple_of(32)
 }

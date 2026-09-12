@@ -3,13 +3,13 @@
 //!
 //! # Why the mode exists
 //!
-//! CONFORMANCE.md Section 7.1 requires the ACTIVATION CONTRACT to be matched
-//! across two artifacts being compared. It is not matched by default. A TCF
-//! declares an exact F32 contract, so its matmul runs f32 activations; a GGUF
-//! declares no contract at all, so on CUDA at `m >= 2` the feature-major MMQ
-//! path quantizes the activations to int8 before the tensor-core MMA. The
-//! GGUF side then absorbs activation-quantization error the TCF side never
-//! pays, and the gap is easy to misread as a weight-format difference.
+//! A quality comparison between two artifacts is valid only when both run
+//! the SAME activation path. The packed path does not promise that: a block
+//! kernel quantizes the activation the way `ggml-quants.c` does for its
+//! block type and backend (Q8_K on the CPU for K-quants, Q8_1 on CUDA), so
+//! two artifacts with different block formats absorb different
+//! activation-quantization error, and the gap is easy to misread as a
+//! weight-format difference.
 //!
 //! Loading through this decorator removes that confound: every packed weight
 //! becomes a dense F32 tensor, both formats run the same dense F32 matmul,

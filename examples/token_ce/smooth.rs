@@ -3,14 +3,14 @@
 //!
 //! # Why this is a PROBE, not a format change
 //!
-//! TCF has no plane to store a per-channel scale vector in, so nothing is
-//! written to a file here. Instead this computes the dense weight the format
-//! WOULD reconstruct if it stored one, and scores that directly — numerically
-//! exact, not an approximation, because every byte the real codec would touch
-//! is touched the same way:
+//! A GGML block format has no plane to store a per-channel scale vector in,
+//! so nothing is written to a file here. Instead this computes the dense
+//! weight the format WOULD reconstruct if it stored one, and scores that
+//! directly — numerically exact, not an approximation, because every byte
+//! the real codec would touch is touched the same way:
 //!
 //! 1. `W * s`, broadcasting `s` along the INPUT (last) dimension.
-//! 2. Quantize `W * s` through `tcf-core`, then dequantize it.
+//! 2. Quantize `W * s` through boostr's CPU block writer, then dequantize it.
 //! 3. Divide the result by `s`, elementwise along the same axis.
 //!
 //! Step 3 is what keeps this weight-only: no activation is touched and no
@@ -20,9 +20,10 @@
 //! # Objective
 //!
 //! The quantize call in step 2 can score against the SAME imatrix used to
-//! derive `s` (`--smooth-objective imatrix`, the default) or against the
-//! codec's plain unweighted error (`--smooth-objective uniform`), so a run
-//! can separate the smoothing effect from the objective effect.
+//! derive `s` (`--smooth-objective imatrix`, the default, through
+//! `QuantizeOps::quantize_with_importance`) or against the writer's plain
+//! unweighted error (`--smooth-objective uniform`), so a run can separate
+//! the smoothing effect from the objective effect.
 //!
 //! # Source: activation-derived, or calibration-free
 //!
@@ -85,24 +86,23 @@
 //! The cast, candidate selection, importance-entry gating, accounting, and
 //! write-back are [`super::probe::run_probe`], shared with
 //! `codebook.rs`'s codebook probe. This file supplies only the `transform`
-//! closure: scale by `s`, round-trip through `tcf-core`, unscale by `s`.
+//! closure: scale by `s`, round-trip through the block writer, unscale by `s`.
 
 use boostr::nn::VarMap;
-use boostr::quant::{ImportanceMatrix, smoothing_scale, weight_only_smoothing_scale};
+use boostr::quant::traits::{DequantOps, QuantizeOps};
+use boostr::quant::{ImportanceMatrix, QuantFormat, smoothing_scale, weight_only_smoothing_scale};
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
-use tcf_core::{
-    NativeEncoding, QuantizeParams, SearchEffort, WeightSource, column_weights, dequantize_into,
-    quantize_with,
-};
+use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+use numr::tensor::Tensor;
 
 use super::probe::{ProbeSummary, run_probe};
 
 /// Which error objective the quantize call in the round trip scores against.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SmoothObjective {
-    /// `tcf-core`'s plain unweighted reconstruction error.
+    /// The block writer's plain unweighted reconstruction error.
     Uniform,
     /// The same per-column importance the smoothing scale itself was derived
     /// from, expanded to every element — what a real imatrix-guided
@@ -143,24 +143,29 @@ pub fn parse_smooth_source(value: &str) -> Result<SmoothSource, String> {
     }
 }
 
-/// Parse a TCF `NativeEncoding` identifier, spelled exactly as the enum's own
-/// variant names (`Q4AS32DT64`, not `Q4AS32D_T64`).
-pub fn parse_native_encoding(value: &str) -> Result<NativeEncoding, String> {
-    const NAMES: &[(&str, NativeEncoding)] = &[
-        ("Q4S32T64", NativeEncoding::Q4S32T64),
-        ("Q4AS32T64", NativeEncoding::Q4AS32T64),
-        ("Q4AS32DT64", NativeEncoding::Q4AS32DT64),
-        ("Q4AS64T64", NativeEncoding::Q4AS64T64),
-        ("Q6S32T64", NativeEncoding::Q6S32T64),
-        ("Q6S16DT64", NativeEncoding::Q6S16DT64),
-        ("Q8S32T64", NativeEncoding::Q8S32T64),
+/// Parse a GGML block format by its `QuantFormat::name`, case-insensitive
+/// (`q4_k` and `Q4_K` both name Q4_K).
+pub fn parse_block_format(value: &str) -> Result<QuantFormat, String> {
+    const FORMATS: &[QuantFormat] = &[
+        QuantFormat::Q4_0,
+        QuantFormat::Q4_1,
+        QuantFormat::Q5_0,
+        QuantFormat::Q5_1,
+        QuantFormat::Q8_0,
+        QuantFormat::Q2K,
+        QuantFormat::Q3K,
+        QuantFormat::Q4K,
+        QuantFormat::Q5K,
+        QuantFormat::Q6K,
+        QuantFormat::IQ4NL,
+        QuantFormat::IQ4XS,
     ];
-    NAMES
+    FORMATS
         .iter()
-        .find(|(name, _)| *name == value)
-        .map(|(_, encoding)| *encoding)
+        .copied()
+        .find(|format| format.name().eq_ignore_ascii_case(value))
         .ok_or_else(|| {
-            let known: Vec<&str> = NAMES.iter().map(|(name, _)| *name).collect();
+            let known: Vec<&str> = FORMATS.iter().map(|format| format.name()).collect();
             format!(
                 "--smooth-encoding: expected one of {}, got {value:?}",
                 known.join(", ")
@@ -170,7 +175,7 @@ pub fn parse_native_encoding(value: &str) -> Result<NativeEncoding, String> {
 
 /// Runs [`super::probe::run_probe`] with the AWQ-style smoothing transform:
 /// derive a per-input-channel scale `s` (via `source`), compute
-/// `W * s`, round-trip it through `tcf-core` under `encoding` and
+/// `W * s`, round-trip it through the CPU block writer under `format` and
 /// `objective`, then divide by `s` — see the module docs' numbered steps.
 ///
 /// Returns an error if it transforms zero tensors: see the module docs'
@@ -178,7 +183,7 @@ pub fn parse_native_encoding(value: &str) -> Result<NativeEncoding, String> {
 pub fn apply_smoothing<R>(
     var_map: &mut VarMap<R>,
     imatrix: &ImportanceMatrix,
-    encoding: NativeEncoding,
+    format: QuantFormat,
     alpha: f32,
     objective: SmoothObjective,
     source: SmoothSource,
@@ -187,7 +192,11 @@ where
     R: Runtime<DType = DType>,
     R::Client: TypeConversionOps<R>,
 {
-    let layout = encoding.layout();
+    // The round trip runs on the CPU writer whatever device scores the
+    // model: it is the writer a conversion would use, and the probe scores
+    // its bytes, not a device's.
+    let device = CpuDevice::new();
+    let client = CpuClient::new(device.clone());
 
     run_probe(
         var_map,
@@ -214,34 +223,25 @@ where
                 }
             }
 
-            // Step 2: quantize -> dequantize through tcf-core, under the
-            // selected error objective.
-            let dims: Vec<u64> = vec![out_features as u64, in_features as u64];
-            let rank = dims.len() as u32;
-            let expanded_weights: Option<Vec<f32>> = match objective {
-                SmoothObjective::Uniform => None,
-                SmoothObjective::Imatrix => Some(
-                    column_weights(mean_square, in_features, 0, scaled.len())
-                        .map_err(|e| format!("{name}: expanding importance weights: {e}"))?,
-                ),
-            };
-            let weights = match &expanded_weights {
-                Some(w) => WeightSource::Explicit(w),
-                None => WeightSource::Uniform,
-            };
-            let params = QuantizeParams {
-                weights,
-                effort: SearchEffort::Standard,
-            };
-            let tiles = quantize_with(&scaled, &dims, rank, layout, params)
-                .map_err(|e| format!("{name}: quantizing the smoothed weight: {e}"))?;
+            // Step 2: quantize -> dequantize through the block writer, under
+            // the selected error objective.
+            let input =
+                Tensor::<CpuRuntime>::from_slice(&scaled, &[out_features, in_features], &device)
+                    .map_err(|e| format!("{name}: staging the smoothed weight: {e}"))?;
             drop(scaled);
-            drop(expanded_weights);
-
-            let mut reconstructed: Vec<f32> = Vec::new();
-            dequantize_into(&tiles, layout, &mut reconstructed)
-                .map_err(|e| format!("{name}: dequantizing the smoothed weight: {e}"))?;
-            drop(tiles);
+            let importance = match objective {
+                SmoothObjective::Uniform => None,
+                SmoothObjective::Imatrix => Some(mean_square),
+            };
+            let packed = client
+                .quantize_with_importance(&input, format, importance)
+                .map_err(|e| format!("{name}: quantizing the smoothed weight: {e}"))?;
+            drop(input);
+            let mut reconstructed = client
+                .dequantize(&packed, DType::F32)
+                .map_err(|e| format!("{name}: dequantizing the smoothed weight: {e}"))?
+                .to_vec::<f32>();
+            drop(packed);
 
             // Step 3: divide by s, elementwise along the same axis — the
             // reconstructed weight the probe scores.

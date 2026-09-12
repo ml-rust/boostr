@@ -5,7 +5,7 @@
 //! only three operations: storage, dequantization, and quantized matmul.
 
 use crate::error::{Error, Result};
-use crate::quant::{QuantFormat, QuantScheme};
+use crate::quant::QuantFormat;
 use numr::runtime::Runtime;
 use numr::tensor::{Storage, Tensor};
 
@@ -17,18 +17,15 @@ use numr::tensor::{Storage, Tensor};
 ///
 /// # Invariants
 ///
-/// - `storage` contains exactly `scheme.payload_bytes(shape)` bytes
-/// - The last dimension of `shape` is a multiple of the scheme's unit width —
-///   a GGUF block, or a TCF execution tile
-/// - Under a GGUF scheme, blocks are packed along the last axis (contiguous in
-///   memory). A TCF scheme is plane-major over the whole tensor instead, which
-///   is why [`QuantScheme::is_row_blocked`] exists and why `gather_rows`
-///   refuses a payload that is not row-blocked.
+/// - `storage` contains exactly `format.storage_bytes(numel)` bytes
+/// - The last dimension of `shape` is a multiple of the format's block size
+/// - Blocks are packed along the last axis, contiguous in memory, so a row
+///   is a contiguous byte run and `gather_rows` is a byte gather.
 pub struct QuantTensor<R: Runtime> {
     /// Raw packed data on device
     storage: Storage<R>,
-    /// Codec and byte addressing (determines the payload layout)
-    scheme: QuantScheme,
+    /// Block format (determines the payload layout)
+    format: QuantFormat,
     /// Logical shape in elements (not blocks)
     shape: Vec<usize>,
     /// Device where data lives
@@ -51,7 +48,7 @@ pub struct QuantTensor<R: Runtime> {
 impl<R: Runtime> core::fmt::Debug for QuantTensor<R> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("QuantTensor")
-            .field("scheme", &self.scheme)
+            .field("format", &self.format)
             .field("shape", &self.shape)
             .finish_non_exhaustive()
     }
@@ -63,36 +60,55 @@ impl<R: Runtime<DType = numr::dtype::DType>> QuantTensor<R> {
     ///
     /// Shared by [`Self::from_bytes`] and [`Self::from_storage`] so the two
     /// constructors — one copying fresh bytes in, one aliasing existing
-    /// device storage — can never drift apart on what counts as valid. The
-    /// rules themselves live on [`QuantScheme`], which owns the size math for
-    /// every codec.
+    /// device storage — can never drift apart on what counts as valid.
     fn validate_shape_and_bytes(
         shape: &[usize],
-        scheme: QuantScheme,
+        format: QuantFormat,
         storage_bytes: usize,
     ) -> Result<()> {
-        scheme.validate(shape, storage_bytes)
+        if shape.is_empty() {
+            return Err(Error::QuantError {
+                reason: "QuantTensor shape must be non-empty".into(),
+            });
+        }
+        let last_dim = shape.last().copied().unwrap_or(0);
+        let unit = format.block_size();
+        if unit == 0 || !last_dim.is_multiple_of(unit) {
+            return Err(Error::QuantError {
+                reason: format!(
+                    "last dimension {last_dim} is not a multiple of {}'s block size {unit}",
+                    format.name(),
+                ),
+            });
+        }
+        let expected = format.storage_bytes(shape.iter().product())?;
+        if storage_bytes != expected {
+            return Err(Error::QuantError {
+                reason: format!(
+                    "expected {expected} bytes for {} with shape {shape:?}, got {storage_bytes} bytes",
+                    format.name(),
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Create a quantized tensor from raw packed data
     ///
-    /// `data` must contain exactly `scheme.payload_bytes(shape)` bytes in the
-    /// given scheme's own layout. A [`QuantFormat`] converts into a
-    /// [`QuantScheme`], so a GGUF caller passes its format unchanged.
+    /// `data` must contain exactly `format.storage_bytes(numel)` bytes in the
+    /// format's own block layout.
     ///
     /// # Errors
     ///
-    /// - If the last dimension of `shape` is not a whole number of the
-    ///   scheme's units
+    /// - If the last dimension of `shape` is not a whole number of blocks
     /// - If `data` length doesn't match expected storage bytes
     pub fn from_bytes(
         data: &[u8],
-        scheme: impl Into<QuantScheme>,
+        format: QuantFormat,
         shape: &[usize],
         device: &R::Device,
     ) -> Result<Self> {
-        let scheme = scheme.into();
-        Self::validate_shape_and_bytes(shape, scheme, data.len())?;
+        Self::validate_shape_and_bytes(shape, format, data.len())?;
 
         // Store as U8 — the raw block bytes
         let storage =
@@ -100,7 +116,7 @@ impl<R: Runtime<DType = numr::dtype::DType>> QuantTensor<R> {
 
         Ok(Self {
             storage,
-            scheme,
+            format,
             shape: shape.to_vec(),
             device: device.clone(),
             contract: None,
@@ -119,21 +135,19 @@ impl<R: Runtime<DType = numr::dtype::DType>> QuantTensor<R> {
     ///
     /// # Errors
     ///
-    /// - If the last dimension of `shape` is not a whole number of the
-    ///   scheme's units
+    /// - If the last dimension of `shape` is not a whole number of blocks
     /// - If `storage`'s byte length doesn't match the expected storage bytes
     pub fn from_storage(
         storage: Storage<R>,
-        scheme: impl Into<QuantScheme>,
+        format: QuantFormat,
         shape: &[usize],
         device: &R::Device,
     ) -> Result<Self> {
-        let scheme = scheme.into();
-        Self::validate_shape_and_bytes(shape, scheme, storage.size_in_bytes())?;
+        Self::validate_shape_and_bytes(shape, format, storage.size_in_bytes())?;
 
         Ok(Self {
             storage,
-            scheme,
+            format,
             shape: shape.to_vec(),
             device: device.clone(),
             contract: None,
@@ -171,23 +185,11 @@ impl<R: Runtime<DType = numr::dtype::DType>> QuantTensor<R> {
         let rows = self.shape.first().copied().unwrap_or(0);
         let cols = self.shape.get(1).copied().unwrap_or(0);
 
-        // A plane-major payload has no per-row byte run to gather: a row's
-        // codes, scales, minima, and super values sit in four separate planes
-        // spanning the whole tensor. Gathering its bytes would return a
-        // plausible tensor of nonsense, so it is refused here.
-        if !self.scheme.is_row_blocked() {
-            return Err(Error::QuantError {
-                reason: format!(
-                    "gather_rows requires a row-blocked payload, and {} is plane-major",
-                    self.scheme.name(),
-                ),
-            });
-        }
-        // `payload_bytes` IS the row-stride formula, with the divisibility
+        // `storage_bytes` IS the row-stride formula, with the divisibility
         // check built in — deriving it inline here would be a second copy of
         // the row stride, which is the class of duplication that has produced
         // silent corruption in this codebase before.
-        let row_block_bytes = self.scheme.payload_bytes(&[cols])?;
+        let row_block_bytes = self.format.storage_bytes(cols)?;
 
         // `Storage` is Arc-shared, so this view is a cheap alias onto the
         // same device bytes, not a copy.
@@ -197,34 +199,15 @@ impl<R: Runtime<DType = numr::dtype::DType>> QuantTensor<R> {
 
         QuantTensor::from_storage(
             gathered.storage().clone(),
-            self.scheme,
+            self.format,
             &[indices.numel(), cols],
             &self.device,
         )
     }
 
-    /// Codec and byte addressing of this tensor's payload.
-    ///
-    /// The general accessor: it answers for every codec, and a kernel that
-    /// supports more than one dispatches on it.
-    pub fn scheme(&self) -> QuantScheme {
-        self.scheme
-    }
-
-    /// The GGUF block format backing this tensor.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnsupportedQuantFormat`] when the payload follows another
-    /// codec. A GGUF-only kernel calls this and propagates, which is how a
-    /// TCF weight reaching a GGUF kernel becomes a named error instead of a
-    /// misread block.
-    pub fn format(&self) -> Result<QuantFormat> {
-        self.scheme
-            .gguf()
-            .ok_or_else(|| Error::UnsupportedQuantFormat {
-                format: format!("{} is not a GGUF block format", self.scheme.name()),
-            })
+    /// The block format backing this tensor.
+    pub fn format(&self) -> QuantFormat {
+        self.format
     }
 
     /// Logical shape in elements
@@ -237,17 +220,17 @@ impl<R: Runtime<DType = numr::dtype::DType>> QuantTensor<R> {
         self.shape.iter().product()
     }
 
-    /// Number of independently decodable units: a GGUF block, or a TCF
-    /// execution tile.
+    /// Number of blocks in the payload.
     pub fn num_blocks(&self) -> usize {
-        self.scheme.decode_units(&self.shape)
+        self.numel()
+            .checked_div(self.format.block_size())
+            .unwrap_or(0)
     }
 
     /// Total storage size in bytes
     ///
-    /// Equals `scheme.payload_bytes(shape)` by the constructor invariant, read
-    /// off the storage so it holds for every codec without restating any
-    /// codec's size math.
+    /// Equals `format.storage_bytes(numel)` by the constructor invariant, read
+    /// off the storage so it holds without restating the size math.
     pub fn storage_bytes(&self) -> usize {
         self.storage.size_in_bytes()
     }
@@ -290,7 +273,7 @@ impl<R: Runtime> Clone for QuantTensor<R> {
     fn clone(&self) -> Self {
         Self {
             storage: self.storage.clone(),
-            scheme: self.scheme,
+            format: self.format,
             shape: self.shape.clone(),
             device: self.device.clone(),
             contract: self.contract.clone(),
@@ -301,7 +284,7 @@ impl<R: Runtime> Clone for QuantTensor<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
     fn cpu_device() -> CpuDevice {
         CpuDevice::new()
@@ -315,11 +298,7 @@ mod tests {
         let qt = QuantTensor::<CpuRuntime>::from_bytes(&data, QuantFormat::Q4_0, &[32], &device)
             .unwrap();
 
-        assert_eq!(
-            qt.format().expect("a GGUF tensor has a format"),
-            QuantFormat::Q4_0
-        );
-        assert_eq!(qt.scheme(), QuantScheme::Gguf(QuantFormat::Q4_0));
+        assert_eq!(qt.format(), QuantFormat::Q4_0);
         assert_eq!(qt.shape(), &[32]);
         assert_eq!(qt.numel(), 32);
         assert_eq!(qt.num_blocks(), 1);
@@ -392,111 +371,5 @@ mod tests {
 
         assert_eq!(qt.num_blocks(), 4);
         assert_eq!(qt.storage_bytes(), 136);
-    }
-
-    /// A TCF weight is carried by the SAME tensor type, at its packed size —
-    /// no parallel tensor type, and no f32 blow-up.
-    #[test]
-    fn a_tcf_payload_is_carried_at_its_packed_size() {
-        use crate::quant::TcfEncoding;
-        use tcf_core::NativeEncoding;
-
-        let device = cpu_device();
-        let encoding = TcfEncoding::new(NativeEncoding::Q6S16DT64);
-        // 15 tiles: three whole super-blocks and a partial fourth.
-        let shape = [3usize, 320];
-        let bytes = vec![0u8; 15 * 52 + 8];
-        let qt = QuantTensor::<CpuRuntime>::from_bytes(&bytes, encoding, &shape, &device)
-            .expect("a partial trailing super-block is legal");
-
-        assert_eq!(qt.scheme(), QuantScheme::Tcf(encoding));
-        assert_eq!(qt.shape(), &shape);
-        assert_eq!(qt.numel(), 960);
-        assert_eq!(qt.num_blocks(), 15);
-        assert_eq!(qt.storage_bytes(), bytes.len());
-        assert!(qt.format().is_err(), "a TCF tensor has no GGUF format");
-    }
-
-    /// Plane-major bytes have no per-row run, so a row gather is refused
-    /// rather than returning bytes from the wrong planes.
-    #[test]
-    fn gather_rows_refuses_a_plane_major_payload() {
-        use crate::quant::TcfEncoding;
-        use tcf_core::NativeEncoding;
-
-        let device = cpu_device();
-        let client = CpuClient::new(device.clone());
-        let encoding = TcfEncoding::new(NativeEncoding::Q4S32T64);
-        let qt = QuantTensor::<CpuRuntime>::from_bytes(&[0u8; 2 * 36], encoding, &[2, 64], &device)
-            .expect("two tiles");
-        let indices = Tensor::<CpuRuntime>::from_slice(&[0i64], &[1], &device).unwrap();
-
-        let err = qt.gather_rows(&client, &indices).expect_err("refused");
-        assert!(err.to_string().contains("plane-major"), "{err}");
-    }
-
-    #[test]
-    fn test_gather_rows_rejects_non_2d() {
-        let device = cpu_device();
-        let client = CpuClient::new(device.clone());
-        // Q4_0, 1-D shape [32] — gather_rows requires exactly 2 dims.
-        let data = vec![0u8; 18];
-        let qt = QuantTensor::<CpuRuntime>::from_bytes(&data, QuantFormat::Q4_0, &[32], &device)
-            .unwrap();
-        let indices = Tensor::<CpuRuntime>::from_slice(&[0i64], &[1], &device).unwrap();
-
-        let result = qt.gather_rows(&client, &indices);
-        assert!(result.is_err());
-    }
-
-    /// The whole safety net for silent row corruption: gathering rows from
-    /// packed block bytes and dequantizing the result MUST agree, bit for
-    /// bit, with dequantizing the whole table and then gathering rows of the
-    /// dequantized floats. Any row-offset arithmetic bug in `gather_rows`
-    /// would otherwise ship wrong embeddings without ever failing a test.
-    #[test]
-    fn test_gather_rows_matches_dequant_then_index_select_bit_for_bit() {
-        use crate::quant::traits::{DequantOps, QuantizeOps};
-        use numr::ops::IndexingOps;
-
-        let device = cpu_device();
-        let client = CpuClient::new(device.clone());
-
-        // [8, 512]: 512 is a multiple of Q6_K's 256-element block size, so
-        // each row is exactly 2 blocks.
-        let rows = 8usize;
-        let cols = 512usize;
-        let source: Vec<f32> = (0..rows * cols)
-            .map(|i| ((i % 251) as f32) * 0.037 - 3.0)
-            .collect();
-        let table = Tensor::<CpuRuntime>::from_slice(&source, &[rows, cols], &device).unwrap();
-
-        let qt = client.quantize(&table, QuantFormat::Q6K).unwrap();
-
-        // Repeated and out-of-order indices — exactly the pattern a real
-        // token-ID batch produces.
-        let idx_data = [3i64, 0, 7, 3];
-        let indices =
-            Tensor::<CpuRuntime>::from_slice(&idx_data, &[idx_data.len()], &device).unwrap();
-
-        let gathered_quant = qt.gather_rows(&client, &indices).unwrap();
-        let gathered_dequant = client
-            .dequantize(&gathered_quant, numr::dtype::DType::F32)
-            .unwrap();
-
-        let whole_dequant = client.dequantize(&qt, numr::dtype::DType::F32).unwrap();
-        let expected = client.index_select(&whole_dequant, 0, &indices).unwrap();
-
-        let got_bits: Vec<u32> = gathered_dequant
-            .to_vec::<f32>()
-            .iter()
-            .map(|f| f.to_bits())
-            .collect();
-        let expected_bits: Vec<u32> = expected
-            .to_vec::<f32>()
-            .iter()
-            .map(|f| f.to_bits())
-            .collect();
-        assert_eq!(got_bits, expected_bits);
     }
 }

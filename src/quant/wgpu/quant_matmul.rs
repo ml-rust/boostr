@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::quant::traits::QuantMatmulOps;
-use crate::quant::{QuantFormat, QuantScheme, QuantTensor};
+use crate::quant::{KernelContract, QuantFormat, QuantTensor};
 use numr::dtype::DType;
 use numr::runtime::wgpu::{WgpuClient, WgpuRuntime, get_buffer};
 use numr::tensor::Tensor;
@@ -10,7 +10,10 @@ use wgpu::BufferUsages;
 
 use super::int4_gemm as int4_dispatch;
 use super::shaders::quant_matmul as shader_gen;
-use super::tcf::{self as tcf_dispatch, MatmulShape};
+
+/// The contract the WebGPU block-format shaders satisfy: dequantize a block
+/// and dot it in f32, the simplest of `ggml-quants.c`'s activation paths.
+const BLOCK_CONTRACT: KernelContract = KernelContract::ggml_reference("wgpu ggml block matmul");
 
 /// Params struct matching WGSL MatmulParams
 #[repr(C)]
@@ -139,6 +142,10 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
         activation: &Tensor<WgpuRuntime>,
         weight: &QuantTensor<WgpuRuntime>,
     ) -> Result<Tensor<WgpuRuntime>> {
+        // Section 9: the weight's declared contract gates the shader before
+        // any shape check, so a refusal names the contract and not a shape.
+        weight.check_activation_contract(&BLOCK_CONTRACT)?;
+
         // Validate activation dtype
         if activation.dtype() != DType::F32 {
             return Err(Error::QuantError {
@@ -176,35 +183,7 @@ impl QuantMatmulOps<WgpuRuntime> for WgpuClient {
             });
         }
 
-        // TCF weights take their own shader: a GGUF kernel finds a block's
-        // codes and its scale adjacent, while TCF spreads them over
-        // whole-tensor planes.
-        if let QuantScheme::Tcf(encoding) = weight.scheme() {
-            // Resolution, on a backend with one candidate: this shader
-            // family is the only TCF matmul the WebGPU backend offers, and
-            // both its arms satisfy the same f32 contract. A declared
-            // contract resolves either to it or to no kernel at all, so this
-            // check IS the resolution rather than a veto over one — a weight
-            // declaring anything but exact f32 activations has nothing here
-            // that computes it, and Section 9 makes that a refusal.
-            weight.check_activation_contract(&tcf_dispatch::MATMUL_CONTRACT)?;
-            let m = a_shape.iter().product::<usize>() / k;
-            let act_contig = activation.contiguous()?;
-            let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
-            out_shape.push(n);
-            let output = Tensor::<WgpuRuntime>::empty(&out_shape, DType::F32, activation.device())?;
-            tcf_dispatch::dispatch_matmul(
-                self,
-                act_contig.storage().ptr(),
-                weight.storage().ptr(),
-                output.storage().ptr(),
-                encoding,
-                MatmulShape { m, k, n },
-            )?;
-            return Ok(output);
-        }
-
-        let (shader_source, entry_point) = match weight.format()? {
+        let (shader_source, entry_point) = match weight.format() {
             QuantFormat::Q4_0 => (
                 shader_gen::generate_quant_matmul_q4_0_shader(),
                 "quant_matmul_q4_0",

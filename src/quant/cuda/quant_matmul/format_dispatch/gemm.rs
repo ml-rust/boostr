@@ -73,7 +73,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_matmul(
     n: usize,
 ) -> Result<Option<()>> {
     let device_index = act_contig.device().id();
-    let format = weight.format()?;
+    let format = weight.format();
 
     let (kernel_name, module_name) = match format {
         QuantFormat::Q4_0 => ("quant_matmul_q4_0_f32", QUANT_MATMUL_MODULE),

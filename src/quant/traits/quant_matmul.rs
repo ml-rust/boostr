@@ -17,11 +17,10 @@ use numr::tensor::Tensor;
 /// - `weight` shape: `[N, K]` (2D quantized weight — N output rows, K input cols)
 /// - Output shape: `[..., M, N]` with same dtype as `activation`
 ///
-/// The weight's [`crate::quant::QuantScheme`] decides how those bytes are
-/// addressed, and an implementation dispatches on it: a GGUF scheme packs
-/// blocks contiguously along K, while a TCF scheme stores whole planes over the
-/// whole tensor and needs its own kernel. Both stay packed — an implementation
-/// that dequantizes the weight first has not implemented this trait.
+/// The weight's [`crate::quant::QuantFormat`] decides how those bytes are
+/// addressed: blocks packed contiguously along K. The weight stays packed —
+/// an implementation that dequantizes the weight first has not implemented
+/// this trait.
 ///
 /// A weight whose source format declares an activation contract
 /// ([`crate::quant::ActivationContract`], carried on the `QuantTensor`) may

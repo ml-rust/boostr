@@ -1,34 +1,25 @@
 //! Test fixtures: known-good TCF files, and the values they must decode to.
 //!
-//! The expected values and the expected packed bytes are computed here, from
-//! SPECIFICATION.md Section 13.0 and Section 14.1, and never from what the
-//! reader returns. CONFORMANCE.md Section 0.1 forbids a checker sharing
-//! packing code with the producer it checks: nothing in this file calls
-//! `tcf_core::pack` or `tcf_core::unpack`.
+//! The expected values are computed here by hand from the block layout in
+//! `ggml-common.h`, never from what the reader returns.
 
-use std::io::Write;
-use tcf_core::{
-    Code64, ContractFlags, ContractRecord, DotAccumulator, Encoding, ExecutionRole, FallbackReason,
-    GroupParams, HEADER_BYTES, HEADER_DIGEST_RANGE, Header, InputRepresentation, LayoutId,
-    LogicalTile, MathMode, ModuleRecord, ModuleRole, NativeEncoding, OutputDtype, PolicyFlags,
-    ProofFormat, QuantAxis, RawEncoding, Record, ResidencyClass, Role, RoundingMode,
-    ScaleComputeDtype, StateDtype, StateFlags, StringRef, TcfWriter, TensorFlags, TensorRecord,
-    hash_128,
+use crate::tcf::{
+    BlockEncoding, ContractFlags, ContractRecord, DotAccumulator, Encoding, ExecutionRole,
+    FallbackReason, HEADER_BYTES, HEADER_DIGEST_RANGE, Header, InputRepresentation, LayoutId,
+    MathMode, ModuleRecord, ModuleRole, OutputDtype, PolicyFlags, ProofFormat, QuantAxis,
+    RawEncoding, Record, ResidencyClass, Role, RoundingMode, ScaleComputeDtype, StateDtype,
+    StateFlags, StringRef, TcfWriter, TensorFlags, TensorRecord, hash_128,
 };
+use std::io::Write;
 use tempfile::NamedTempFile;
 
-/// binary16 `1.0`.
-pub const F16_ONE: u16 = 0x3c00;
-/// binary16 `0.5`.
-pub const F16_HALF: u16 = 0x3800;
-
-/// `Q4S32_T64`, one tile, shape `[1, 64]`.
-pub const T_Q4: usize = 0;
+/// `Q8_0`, four blocks, shape `[2, 64]`.
+pub const T_Q8: usize = 0;
 /// Raw `F32`, shape `[4]`.
 pub const T_RAW_F32: usize = 1;
 /// Raw `F16`, shape `[4]`.
 pub const T_RAW_F16: usize = 2;
-/// Raw `F16` in a module preferring `Q4S32_T64`, so it carries a
+/// Raw `F16` in a module preferring `Q8_0`, so it carries a
 /// `fallback_reason`. Section 8.6.
 pub const T_FALLBACK: usize = 3;
 
@@ -39,51 +30,10 @@ pub const RAW_F32_VALUES: [f32; 4] = [1.0, -2.5, 0.0, 3.25];
 /// `0.5`, `0.0`.
 pub const RAW_F16_BITS: [u16; 4] = [0x3c00, 0xc000, 0x3800, 0x0000];
 
-/// The 64 signed codes the `Q4S32_T64` tensor stores.
-///
-/// Every value stays inside `-7..=7`, the `(i % 15) - 7` formula's own range.
-/// `-8` is a legal code too (Section 13.2 reserves no CODE-plane value); this
-/// fixture simply never emits it.
-pub fn q4_codes() -> [i8; 64] {
-    let mut codes = [0i8; 64];
-    for (i, slot) in codes.iter_mut().enumerate() {
-        *slot = (i % 15) as i8 - 7;
-    }
-    codes
-}
-
-/// Section 13.0 applied by hand: `x_hat_i = f32(d) * f32(q_i)`, with group 0
-/// scaled by `1.0` and group 1 by `0.5`.
-pub fn expected_q4_values() -> Vec<f32> {
-    q4_codes()
-        .iter()
-        .enumerate()
-        .map(|(i, q)| {
-            let scale = if i < 32 { 1.0f32 } else { 0.5f32 };
-            scale * f32::from(*q)
-        })
-        .collect()
-}
-
-/// Section 14.1 applied by hand: a 32-byte code plane pairing adjacent
-/// elements, then the scale plane as two little-endian binary16 values.
-pub fn expected_q4_payload() -> Vec<u8> {
-    let codes = q4_codes();
-    let mut out = Vec::with_capacity(36);
-    for k in 0..32 {
-        let low = (codes[2 * k] as u8) & 0x0f;
-        let high = (codes[2 * k + 1] as u8) & 0x0f;
-        out.push(low | (high << 4));
-    }
-    out.extend_from_slice(&F16_ONE.to_le_bytes());
-    out.extend_from_slice(&F16_HALF.to_le_bytes());
-    out
-}
-
 fn module(module_id: u32, name: StringRef, preferred: Option<Encoding>) -> ModuleRecord {
     ModuleRecord {
         module_id,
-        parent_id: tcf_core::ROOT_PARENT_ID,
+        parent_id: crate::tcf::ROOT_PARENT_ID,
         name,
         module_role: ModuleRole::Ffn,
         fallback_encoding: None,
@@ -101,14 +51,14 @@ fn module(module_id: u32, name: StringRef, preferred: Option<Encoding>) -> Modul
 fn contract() -> ContractRecord {
     ContractRecord {
         contract_id: 1,
-        input_representation: InputRepresentation::A8S32Dynamic,
-        quant_group: 32,
+        input_representation: InputRepresentation::GgmlReference,
+        quant_group: 0,
         quant_axis: QuantAxis::Last,
         rounding_mode: RoundingMode::RnEven,
-        qmin: -127,
-        qmax: 127,
+        qmin: 0,
+        qmax: 0,
         scale_compute_dtype: ScaleComputeDtype::F32,
-        dot_accumulator: DotAccumulator::I32ThenF32Scale,
+        dot_accumulator: DotAccumulator::GgmlReference,
         output_dtype: OutputDtype::F32,
         math_mode: MathMode::ReassociationAllowed,
         calibration_id: 0,
@@ -177,44 +127,33 @@ fn raw_tensor(
     record
 }
 
-/// One known-good TCF file: a `Q4S32_T64` weight, a raw F32 bias, a raw F16
-/// vector, and a raw F16 tensor whose module prefers `Q4S32_T64`.
+/// One known-good TCF file: a `Q8_0` block weight, a raw F32 bias, a raw F16
+/// vector, and a raw F16 tensor whose module prefers `Q8_0`.
 pub fn good_file() -> Vec<u8> {
     let mut w = TcfWriter::new();
     let plain = w.intern("model.layers.0.ffn").expect("interns");
     let picky = w.intern("model.layers.0.attn").expect("interns");
     w.add_module(module(0, plain, None)).expect("adds");
-    w.add_module(module(
-        1,
-        picky,
-        Some(Encoding::Native(NativeEncoding::Q4S32T64)),
-    ))
-    .expect("adds");
+    w.add_module(module(1, picky, Some(Encoding::Block(BlockEncoding::Q8_0))))
+        .expect("adds");
     w.add_contract(contract()).expect("adds");
 
     let weight = w.intern("layer.w").expect("interns");
-    let tile = LogicalTile::new(
-        &[
-            GroupParams {
-                scale: F16_ONE,
-                min: None,
-            },
-            GroupParams {
-                scale: F16_HALF,
-                min: None,
-            },
-        ],
-        Code64::Signed(q4_codes()),
-    )
-    .expect("two groups fit a 64-element tile");
-    w.add_quantized_tensor(
+    let values = expected_q8_0_values();
+    let proof: Vec<f32> = crate::tcf::proof_indices(&[2, 64], 2, 0)
+        .expect("indices")
+        .iter()
+        .map(|i| values[*i as usize])
+        .collect();
+    w.add_block_tensor(
         tensor(
             0,
             weight,
-            Encoding::Native(NativeEncoding::Q4S32T64),
-            [1, 64, 0, 0, 0, 0, 0, 0],
+            Encoding::Block(BlockEncoding::Q8_0),
+            [2, 64, 0, 0, 0, 0, 0, 0],
         ),
-        vec![tile],
+        q8_0_stream(),
+        &proof,
     )
     .expect("adds");
 
@@ -285,7 +224,8 @@ pub fn expected_q8_0_values() -> Vec<f32> {
 /// A file whose only weight is the `Q8_0` block tensor `layer.q8`. The proof
 /// values are the hand-computed [`expected_q8_0_values`] at the proof
 /// indices, offset by `proof_bias` — `0.0` for a valid file, anything else
-/// for one whose proof disagrees with the bytes.
+/// for one whose proof disagrees with the bytes. Distinct from `good_file`
+/// so a proof-mismatch test can name the tensor it corrupted.
 pub fn block_file(proof_bias: f32) -> Vec<u8> {
     let mut w = TcfWriter::new();
     let plain = w.intern("model.layers.0.ffn").expect("interns");
@@ -296,11 +236,11 @@ pub fn block_file(proof_bias: f32) -> Vec<u8> {
     let record = tensor(
         0,
         weight,
-        Encoding::Block(tcf_core::BlockEncoding::Q8_0),
+        Encoding::Block(crate::tcf::BlockEncoding::Q8_0),
         [2, 64, 0, 0, 0, 0, 0, 0],
     );
     let values = expected_q8_0_values();
-    let proof: Vec<f32> = tcf_core::proof_indices(&[2, 64], 2, 0)
+    let proof: Vec<f32> = crate::tcf::proof_indices(&[2, 64], 2, 0)
         .expect("indices")
         .iter()
         .map(|i| values[*i as usize] + proof_bias)

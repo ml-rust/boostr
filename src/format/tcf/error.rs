@@ -5,7 +5,7 @@
 //! panics: a malformed file is a value, never an abort.
 
 use crate::error::Error;
-use tcf_core::TcfError;
+use crate::tcf::TcfError;
 
 /// Wrap a `TcfError` raised while doing `context`.
 ///

@@ -24,27 +24,24 @@
 //!
 //! # What TCF adds
 //!
-//! TCF makes the contract part of the dispatch key (SPECIFICATION.md Section 9):
-//! every tensor carries a `ContractRecord`, the loader attaches it to the
-//! weight, and the contract RESOLVES the kernel rather than vetoing one already
-//! picked on shape. A backend offering several TCF kernels walks them in its
-//! shape order and takes the first the declared contract accepts, so a weight
-//! prepared for exact f32 activations lands on an f32 kernel and runs. Only
-//! when no kernel the shape offers satisfies the contract is the answer
-//! `Error::ActivationContractMismatch` and the operation stops. Section 9
-//! defines no float fallback, so that refusal is never quietly rerouted onto
-//! whatever kernel happens to be nearby.
-//!
-//! The CPU backend this file exercises offers exactly one TCF matmul kernel, so
-//! resolution there has a single candidate and the refusal is immediate.
+//! TCF makes the contract part of the dispatch key (`src/tcf/FORMAT.md`
+//! Section 9): every tensor carries a `ContractRecord`, the loader attaches
+//! it to the weight, and every block matmul entry point checks it against the
+//! kernel family it is about to run. A block tensor written by compressr
+//! declares `GgmlReference` — the family `ggml-quants.c` defines for its
+//! block type — and every backend's block kernels satisfy that. A file that
+//! pins a more specific representation is refused with
+//! `Error::ActivationContractMismatch` on a backend whose kernels do not
+//! promise it. Section 9 defines no float fallback, so that refusal is never
+//! quietly rerouted onto whatever kernel happens to be nearby.
 //!
 //! # Reading this file
 //!
 //! Half 1 (`gguf_*`) runs one weight under both contracts and measures the gap.
-//! Half 2 (`tcf_*`) offers a contracted weight to a kernel that does not
-//! satisfy it and shows the refusal. The last test states the difference in one
-//! assertion: only the TCF weight can answer "which contract were you prepared
-//! for?".
+//! Half 2 (`tcf_*`) runs the same bytes with a declared contract and shows the
+//! family contract running and the pinned contracts refused. The last test
+//! states the difference in one assertion: only the TCF weight can answer
+//! "which contract were you prepared for?".
 //!
 //! Everything here is CPU-only and runs on any machine.
 
@@ -54,13 +51,13 @@ use boostr::quant::cpu::kernels::quantize::quantize_q6k;
 use boostr::quant::cpu::kernels::simd::fused_q6k_dot::fused_dot_q6k;
 use boostr::quant::cpu::kernels::simd::fused_q6k_q8k_dot::fused_dot_q6k_q8k;
 use boostr::quant::cpu::kernels::simd::quantize_act_q8k::{Q8K_BLOCK_BYTES, quantize_f32_to_q8k};
-use boostr::quant::{ActivationContract, KernelContract, QuantFormat, QuantTensor, TcfEncoding};
+use boostr::quant::{ActivationContract, KernelContract, QuantFormat, QuantTensor};
+use boostr::tcf::{
+    ContractFlags, ContractRecord, DotAccumulator, ExecutionRole, InputRepresentation, MathMode,
+    OutputDtype, QuantAxis, RoundingMode, ScaleComputeDtype,
+};
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
-use tcf_core::{
-    ContractFlags, ContractRecord, DotAccumulator, ExecutionRole, InputRepresentation, MathMode,
-    NativeEncoding, OutputDtype, QuantAxis, RoundingMode, ScaleComputeDtype, pack, quantize,
-};
 
 /// Rows of the weight matrix — the output width.
 const N: usize = 8;
@@ -351,63 +348,70 @@ fn declares_dynamic_int8(tensor: &str) -> ActivationContract {
     )
 }
 
-/// A TCF-encoded weight, packed by `tcf-core`'s own writer, with no contract
-/// attached yet.
-fn tcf_weight(device: &CpuDevice) -> QuantTensor<CpuRuntime> {
-    let source = values(N * K, 1);
-    let dims: Vec<u64> = [N as u64, K as u64].to_vec();
-    let tiles = quantize(&source, &dims, 2, NativeEncoding::Q8S32T64.layout()).expect("quantizes");
-    let payload = pack(&tiles, NativeEncoding::Q8S32T64.layout()).expect("packs");
-    QuantTensor::<CpuRuntime>::from_bytes(
-        &payload,
-        TcfEncoding::new(NativeEncoding::Q8S32T64),
-        &[N, K],
-        device,
+/// The contract a block-encoded TCF tensor declares: the kernel family
+/// `ggml-quants.c` defines for the block type on the executing backend.
+fn declares_ggml_reference(tensor: &str) -> ActivationContract {
+    ActivationContract::from_record(
+        tensor,
+        ExecutionRole::Matmul,
+        &contract_record(
+            InputRepresentation::GgmlReference,
+            DotAccumulator::GgmlReference,
+            0,
+            (0, 0),
+            0x33,
+        ),
     )
-    .expect("TCF weight")
+}
+
+/// The same Q6_K bytes as Half 1, as a TCF loader would hand them over: the
+/// GGUF payload with no contract attached yet.
+fn tcf_weight(device: &CpuDevice) -> QuantTensor<CpuRuntime> {
+    QuantTensor::<CpuRuntime>::from_bytes(&q6k_weight_bytes(), QuantFormat::Q6K, &[N, K], device)
+        .expect("Q6_K weight")
 }
 
 /// The refusal, taken through the real dispatch rather than through the check
 /// in isolation.
 ///
-/// The CPU backend's only TCF matmul kernel reads exact f32 activations. A
-/// weight declaring the 8-bit dynamic contract is arithmetic that kernel does
-/// not compute, so `quant_matmul` returns an error instead of a number. The
-/// error names the tensor, its encoding, what the file declared, and what the
-/// selected kernel would have computed — everything needed to act on it.
+/// The CPU K-quant kernel quantizes the activation to Q8_K, as `ggml-quants.c`
+/// does. A weight declaring exact f32 activations was rounded against
+/// arithmetic that kernel does not compute, so `quant_matmul` returns an error
+/// instead of a number. The error names the tensor, its encoding, what the
+/// file declared, and what the selected kernel family computes — everything
+/// needed to act on it.
 #[test]
 fn tcf_refuses_a_weight_whose_contract_the_selected_kernel_does_not_satisfy() {
     let (client, device) = cpu_setup();
     let activation = values(K, 977);
     let act = Tensor::<CpuRuntime>::from_slice(&activation, &[1, K], &device).expect("activation");
     let weight =
-        tcf_weight(&device).with_activation_contract(declares_dynamic_int8("blk.0.attn_q.weight"));
+        tcf_weight(&device).with_activation_contract(declares_exact_f32("blk.0.attn_q.weight"));
 
     let err = client
         .quant_matmul(&act, &weight)
-        .expect_err("an f32-activation kernel must not run a weight declaring 8-bit activations");
+        .expect_err("the ggml family must not run a weight declaring exact f32 activations");
 
     match &err {
         Error::ActivationContractMismatch(detail) => {
             assert_eq!(detail.tensor, "blk.0.attn_q.weight");
-            assert_eq!(detail.encoding, "Q8S32_T64");
+            assert_eq!(detail.encoding, "Q6_K");
             // What the file declared.
             assert_eq!(
                 detail.declared.input_representation,
-                InputRepresentation::A8S32Dynamic
+                InputRepresentation::F32
             );
-            assert_eq!(
-                detail.declared.dot_accumulator,
-                DotAccumulator::I32ThenF32Scale
-            );
-            assert_eq!(detail.declared.quant_group, 32);
+            assert_eq!(detail.declared.dot_accumulator, DotAccumulator::F32);
             assert_eq!(detail.declared.role, ExecutionRole::Matmul);
-            // What the kernel that would have run actually computes.
-            assert_eq!(detail.kernel.input_representation, InputRepresentation::F32);
-            assert_eq!(detail.kernel.dot_accumulator, DotAccumulator::F32);
+            // What the kernel family that would have run computes.
+            assert_eq!(
+                detail.kernel.input_representation,
+                InputRepresentation::GgmlReference
+            );
+            assert_eq!(detail.kernel.dot_accumulator, DotAccumulator::GgmlReference);
             assert!(
                 detail.kernel.quant_group.is_none(),
-                "an f32-activation kernel quantizes nothing"
+                "the family shares no single activation group"
             );
         }
         other => panic!("expected E_ACTIVATION_CONTRACT_MISMATCH, got {other:?}"),
@@ -417,7 +421,16 @@ fn tcf_refuses_a_weight_whose_contract_the_selected_kernel_does_not_satisfy() {
     println!("TCF refusal: {text}");
     assert!(text.contains("E_ACTIVATION_CONTRACT_MISMATCH"), "{text}");
     assert!(text.contains("blk.0.attn_q.weight"), "{text}");
-    assert!(text.contains("A8S32_DYNAMIC"), "{text}");
+    assert!(text.contains("GGML_REFERENCE"), "{text}");
+
+    // A contract pinning the CUDA family's group-32 record is refused here
+    // too: the CPU kernel groups by 256, and the check never rounds that off.
+    let pinned =
+        tcf_weight(&device).with_activation_contract(declares_dynamic_int8("blk.0.attn_q.weight"));
+    let err = client
+        .quant_matmul(&act, &pinned)
+        .expect_err("a group-32 contract is not what the CPU K-quant kernel computes");
+    assert!(matches!(err, Error::ActivationContractMismatch(_)), "{err}");
 }
 
 /// The mirror, which is what makes the refusal above meaningful.
@@ -432,11 +445,11 @@ fn tcf_runs_the_same_weight_when_the_declared_contract_matches_the_kernel() {
     let activation = values(K, 977);
     let act = Tensor::<CpuRuntime>::from_slice(&activation, &[1, K], &device).expect("activation");
 
-    let matching =
-        tcf_weight(&device).with_activation_contract(declares_exact_f32("blk.0.attn_q.weight"));
+    let matching = tcf_weight(&device)
+        .with_activation_contract(declares_ggml_reference("blk.0.attn_q.weight"));
     let with_contract = client
         .quant_matmul(&act, &matching)
-        .expect("the CPU kernel computes exactly what this contract declares")
+        .expect("the CPU block kernel is in the family this contract declares")
         .to_vec::<f32>();
 
     let uncontracted = client
@@ -529,22 +542,25 @@ fn only_the_tcf_weight_can_say_which_contract_it_was_prepared_for() {
     ))
     .expect("a GGUF weight has no contract to check");
 
-    let tcf =
-        tcf_weight(&device).with_activation_contract(declares_exact_f32("blk.0.attn_q.weight"));
+    let tcf = tcf_weight(&device)
+        .with_activation_contract(declares_ggml_reference("blk.0.attn_q.weight"));
     let declared = tcf
         .activation_contract()
         .expect("a TCF weight declares a contract for every tensor");
-    assert_eq!(declared.input_representation, InputRepresentation::F32);
-    assert_eq!(declared.dot_accumulator, DotAccumulator::F32);
-    assert_eq!(declared.digest_hex(), "11".repeat(16));
+    assert_eq!(
+        declared.input_representation,
+        InputRepresentation::GgmlReference
+    );
+    assert_eq!(declared.dot_accumulator, DotAccumulator::GgmlReference);
+    assert_eq!(declared.digest_hex(), "33".repeat(16));
 
     // The same weight, offered to the same pair of kernels, answers differently.
-    tcf.check_activation_contract(&KernelContract::f32_activation("cpu tcf_matmul_f32"))
-        .expect("the f32 kernel computes what this contract declares");
+    tcf.check_activation_contract(&KernelContract::ggml_reference("cpu ggml block matmul"))
+        .expect("the block family is what this contract declares");
     let err = tcf
         .check_activation_contract(&KernelContract::dynamic_int8_activation(
             "tcf_mmq_feat_major",
         ))
-        .expect_err("the int8 kernel does not");
+        .expect_err("a kernel pinning one representation does not");
     assert!(matches!(err, Error::ActivationContractMismatch(_)), "{err}");
 }

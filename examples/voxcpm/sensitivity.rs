@@ -20,14 +20,13 @@
 //! it. Placing each tensor on the cheapest encoding it tolerates needs its
 //! damage AT each candidate, which is the grid this sweep fills in.
 //!
-//! TCF's `PROFILES.md` Section 4 solves a profile in six steps. Step 1 is a
-//! cheap screen — relative RMS of a dequantized tensor against its source is
-//! one — and Section 4 states outright that the screen "never decides final
-//! precision". Step 2 is the measurement that does: for each candidate, the
-//! task-metric delta from encoding THAT tensor and nothing else. This example
-//! is step 2.
+//! A measured mix is solved in two steps. Step 1 is a cheap screen —
+//! relative RMS of a dequantized tensor against its source is one — and the
+//! screen never decides final precision. Step 2 is the measurement that does:
+//! for each candidate, the task-metric delta from encoding THAT tensor and
+//! nothing else. This example is step 2.
 //!
-//! The distinction is not academic. Relative RMS is the objective TCF's own
+//! The distinction is not academic. Relative RMS is the objective a block
 //! quantizer minimizes, so ranking by it scores the encoder under its own
 //! loss function and predicts nothing about downstream quality. A task metric
 //! is a different measurement entirely.
@@ -66,22 +65,12 @@
 //! every selected tensor. One entry behaves exactly as the single-encoding
 //! flag always did.
 //!
-//! Two families are accepted, because the two are different codecs and a
-//! delta under one is not a delta under the other:
+//! The accepted encodings are the GGUF block formats an allocator plans a
+//! mix out of — `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q4_0`, `Q4_1`,
+//! `Q8_0`. The default is `Q4_K`, the base format of a measured mix.
 //!
-//! - `SPECIFICATION.md` Section 12 TCF native identifiers — `Q4S32_T64`,
-//!   `Q4AS32_T64`, `Q4AS32D_T64`, `Q4AS64_T64`, `Q6S32_T64`, `Q6S16D_T64`,
-//!   `Q8S32_T64`.
-//! - GGUF block formats — `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q4_0`,
-//!   `Q4_1`, `Q8_0`.
-//!
-//! The default is `Q4AS32D_T64`, `TCF-COMPACT`'s and `TCF-BALANCED`'s base
-//! encoding, so a command line that does not name `--encoding` produces the
-//! ranking it always produced.
-//!
-//! GGUF formats are accepted because an allocator planning a GGUF mix must
-//! rank its tensors by damage under the format it will actually WRITE. A TCF
-//! encoding of the same nominal width rounds differently and tiles
+//! An allocator must rank its tensors by damage under the format it will
+//! actually WRITE. Another format of the same nominal width rounds
 //! differently, so substituting it — or substituting a bit-width model of it
 //! — ranks a codec that never ran.
 //!
@@ -90,10 +79,9 @@
 //! like, or compares one tensor's own deltas ACROSS encodings, which is the
 //! comparison a demotion decision needs.
 //!
-//! No codec is re-implemented here. TCF uses `tcf-core`'s reference
-//! `quantize` and `dequantize_into`; GGUF uses boostr's own block writers and
-//! readers. `sweep_encoding.rs` holds both, and its docs record which GGUF
-//! formats have a writer and what happens to the ones that do not.
+//! No codec is re-implemented here. Every round trip uses boostr's own block
+//! writers and readers. `sweep_encoding.rs` holds them, and its docs record
+//! which formats have a writer and what happens to the ones that do not.
 //!
 //! # Which tensors are candidates
 //!
@@ -102,10 +90,9 @@
 //! already aliases.
 //!
 //! Whether an encoding can legally HOLD a given shape is asked per (tensor,
-//! encoding) instead, because the answer differs between them — a GGUF
-//! K-quant needs a row that is a whole number of 256-element super-blocks, a
-//! simple GGUF format needs 32, a TCF native encoding needs rank at least 2
-//! and a row that is a whole number of 64-element tiles. A tensor one
+//! encoding) instead, because the answer differs between them — a K-quant
+//! needs a row that is a whole number of 256-element super-blocks, a simple
+//! format needs 32. A tensor one
 //! encoding refuses is still measured at every other one; only that pair is
 //! skipped. Everything rejected is REPORTED with its reason, never silently
 //! dropped, so the grid is auditable from the output.
@@ -212,7 +199,7 @@
 //!   included: it is still the nominal `elements * (reference_bpw -
 //!   encoded_bpw) / 8`. `payload_bytes` is the one an allocator should spend
 //!   against, because a nominal width misses what a GGUF block spends on its
-//!   scales and what a TCF partial super-block is charged in full.
+//!   scales.
 //! - `"skipped"`, one per rejected parameter, with the reason. A rejection
 //!   that belongs to one encoding rather than to the parameter itself also
 //!   carries an `encoding` field naming it; the parameter-level ones do not.
@@ -256,11 +243,11 @@ use eval_common::{
     build_eval_batch, filter_rows_by_patch_cap, load_manifest, score_eval_batch,
 };
 
-/// `TCF-COMPACT`'s and `TCF-BALANCED`'s base encoding (`PROFILES.md`
-/// Section 2), so a command line that names no `--encoding` produces the
-/// ranking those profiles are solved against. Spelled as the identifier the
-/// flag accepts, so the default and a hand-typed value take the same path.
-const DEFAULT_ENCODING: &str = "Q4AS32D_T64";
+/// The base format of a measured mix, so a command line that names no
+/// `--encoding` produces the ranking a mix is solved against. Spelled as the
+/// identifier the flag accepts, so the default and a hand-typed value take
+/// the same path.
+const DEFAULT_ENCODING: &str = "Q4_K";
 /// Bits per weight the saving is measured AGAINST: the checkpoint's own
 /// stored width. A safetensors VoxCPM2 checkpoint is BF16, so a byte saving
 /// quoted against 16 bpw is the saving a producer actually realizes.
@@ -314,9 +301,9 @@ struct Args {
 const USAGE: &str = "usage: voxcpm_sensitivity --ckpt DIR --audiovae audiovae.safetensors \
 --manifest FILE.tsv (header-named TSV: wav, text, optional ref_wav) \
 [--device cpu|cuda] \
-[--encoding Q4AS32D_T64 (comma-separated list, measured in the order given, \
-one record per tensor per entry; TCF native identifiers and GGUF block formats \
-are both accepted, and an unknown name is refused with the full list)] \
+[--encoding Q4_K (comma-separated list, measured in the order given, \
+one record per tensor per entry; GGUF block formats are accepted, and an \
+unknown name is refused with the full list)] \
 [--eval-rows 4 (rows scored per measurement, taken from the END of the kept \
 rows; 0 means every kept row — this is the cost dial)] \
 [--max-patches 38 (caps the target wav's patch count; over-cap targets are \
@@ -461,11 +448,9 @@ struct Measurement {
     /// The encoding this tensor was measured at, as the codec spells it. One
     /// tensor contributes one `Measurement` per encoding on `--encoding`.
     encoding: String,
-    /// The tensor's ACTUAL packed size at this encoding, from the codec's own
-    /// layout: the GGUF block table, or `tcf-core`'s span arithmetic. This is
-    /// the cost an allocator spends, and it is NOT `elements * bpw / 8` — a
-    /// GGUF block charges for its scales and a partial TCF super-block is
-    /// charged in full.
+    /// The tensor's ACTUAL packed size at this encoding, from the GGUF block
+    /// table. This is the cost an allocator spends, and it is NOT
+    /// `elements * bpw / 8` — a block charges for its scales.
     payload_bytes: usize,
     /// `perturbed_total - baseline_total`, in the loss's own units.
     delta: f64,

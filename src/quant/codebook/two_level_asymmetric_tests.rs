@@ -1,7 +1,5 @@
 //! Tests for [`super::two_level_asymmetric`], split into its own file so
-//! the logic file stays under this repo's 500-line file limit — the same
-//! reason `hats/tcf/tcf-core`'s `asymmetric.rs` keeps
-//! `asymmetric_precision_tests.rs` separate.
+//! the logic file stays under this repo's 500-line file limit.
 
 use super::*;
 use half::{bf16, f16};

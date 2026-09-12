@@ -36,6 +36,7 @@ pub mod ops;
 pub mod optimizer;
 pub mod quant;
 pub mod readback;
+pub mod tcf;
 pub mod trainer;
 
 // Re-export primary boostr traits
@@ -47,7 +48,7 @@ pub use ops::{
 };
 pub use quant::{
     DecomposedQuantLinear, DecomposedQuantMethod, DecomposedQuantTensor, DequantOps, FusedQuantOps,
-    QuantFormat, QuantMatmulOps, QuantScheme, QuantTensor, QuantizeOps, TcfEncoding,
+    QuantFormat, QuantMatmulOps, QuantTensor, QuantizeOps,
 };
 pub use readback::scalar_f32;
 

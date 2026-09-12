@@ -245,6 +245,7 @@ name = "boostr"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "bytemuck",
  "cudarc",
  "espeakng",
@@ -261,7 +262,6 @@ dependencies = [
  "serde_json",
  "splintr",
  "symphonia",
- "tcf-core",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2675,13 +2675,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "tcf-core"
-version = "0.1.0"
-dependencies = [
- "blake3",
 ]
 
 [[package]]

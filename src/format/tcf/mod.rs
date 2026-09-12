@@ -1,6 +1,7 @@
-//! TCF (Tensor Contract Format) reader.
+//! TCF (Tensor Contract Format) model loader.
 //!
-//! See `hats/tcf/SPECIFICATION.md` for the normative format definition.
+//! The container itself lives in [`crate::tcf`]; `src/tcf/FORMAT.md` is the
+//! layout reference. This module turns its records into `QuantTensor`s.
 
 pub mod block;
 pub mod decode;

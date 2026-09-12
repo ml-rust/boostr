@@ -37,7 +37,6 @@ use boostr::quant::{
 use numr::dtype::DType;
 use numr::ops::TypeConversionOps;
 use numr::runtime::Runtime;
-use tcf_core::column_weights;
 
 use super::probe::{ProbeSummary, run_probe};
 
@@ -119,10 +118,7 @@ where
         |name, original, in_features, mean_square| {
             let weights: Vec<f32> = match objective {
                 CodebookObjective::Uniform => vec![1.0f32; original.len()],
-                CodebookObjective::Imatrix => {
-                    column_weights(mean_square, in_features, 0, original.len())
-                        .map_err(|e| format!("{name}: expanding importance weights: {e}"))?
-                }
+                CodebookObjective::Imatrix => column_weights(mean_square, original.len()),
             };
             Ok(match codebook {
                 CodebookChoice::Symmetric(codebook) => {
@@ -141,4 +137,10 @@ where
             })
         },
     )
+}
+
+/// One weight per element from a per-column importance vector: row-major, so
+/// every row reads the same `mean_square` entry for its column.
+fn column_weights(mean_square: &[f32], count: usize) -> Vec<f32> {
+    mean_square.iter().copied().cycle().take(count).collect()
 }

@@ -4,9 +4,9 @@
 //! values, so a caller answers "why is this tensor at this precision" without
 //! reopening the file.
 
-use tcf_core::{
-    Encoding, FallbackReason, Header, ModuleRecord, ModuleRole, NativeEncoding, PolicyFlags,
-    ResidencyClass, Role, TensorFlags, TensorRecord,
+use crate::tcf::{
+    Encoding, FallbackReason, Header, ModuleRecord, ModuleRole, PolicyFlags, ResidencyClass, Role,
+    TensorFlags, TensorRecord,
 };
 
 /// The spec's name for an encoding identifier. Section 12.
@@ -15,13 +15,6 @@ use tcf_core::{
 /// compile error, never a runtime "unknown encoding" value.
 pub fn encoding_name(encoding: Encoding) -> String {
     match encoding {
-        Encoding::Native(NativeEncoding::Q4S32T64) => "Q4S32_T64".to_string(),
-        Encoding::Native(NativeEncoding::Q4AS32T64) => "Q4AS32_T64".to_string(),
-        Encoding::Native(NativeEncoding::Q4AS64T64) => "Q4AS64_T64".to_string(),
-        Encoding::Native(NativeEncoding::Q6S32T64) => "Q6S32_T64".to_string(),
-        Encoding::Native(NativeEncoding::Q6S16DT64) => "Q6S16D_T64".to_string(),
-        Encoding::Native(NativeEncoding::Q4AS32DT64) => "Q4AS32D_T64".to_string(),
-        Encoding::Native(NativeEncoding::Q8S32T64) => "Q8S32_T64".to_string(),
         Encoding::Block(block) => block.name().to_string(),
         Encoding::Raw(raw) => format!("{raw:?}").to_uppercase(),
     }
@@ -77,7 +70,7 @@ impl From<&Header> for TcfHeaderInfo {
 pub struct TcfModuleInfo {
     /// Module identifier, unique within the file.
     pub module_id: u32,
-    /// Parent module, or `tcf_core::ROOT_PARENT_ID` for a root.
+    /// Parent module, or `crate::tcf::ROOT_PARENT_ID` for a root.
     pub parent_id: u32,
     /// Resolved UTF-8 name. Empty when the record carries none.
     pub name: String,
@@ -148,10 +141,16 @@ impl TcfTensorInfo {
         self.record.fallback_reason != FallbackReason::None
     }
 
-    /// Honest bits per weight, scales and minima included. `None` for a raw
-    /// encoding, whose width is fixed by its element size. Section 12.2.
+    /// Honest bits per weight, scales and minima included: the block's bytes
+    /// over its elements. `None` for a raw encoding, whose width is fixed by
+    /// its element size.
     pub fn bits_per_weight(&self) -> Option<f64> {
-        self.record.encoding.geometry().map(|g| g.bits_per_weight())
+        match self.record.encoding {
+            Encoding::Block(block) => {
+                Some(block.block_bytes() as f64 * 8.0 / block.block_elems() as f64)
+            }
+            Encoding::Raw(_) => None,
+        }
     }
 
     /// Row-major logical shape, trailing zero dimensions excluded. Section 8.
@@ -199,14 +198,11 @@ impl TcfTensorInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tcf_core::RawEncoding;
+    use crate::tcf::{BlockEncoding, RawEncoding};
 
     #[test]
     fn encoding_names_match_section_12() {
-        assert_eq!(
-            encoding_name(Encoding::Native(NativeEncoding::Q4AS64T64)),
-            "Q4AS64_T64"
-        );
+        assert_eq!(encoding_name(Encoding::Block(BlockEncoding::Q4K)), "Q4_K");
         assert_eq!(encoding_name(Encoding::Raw(RawEncoding::Bf16)), "BF16");
         assert_eq!(encoding_name(Encoding::Raw(RawEncoding::F8E4M3)), "F8E4M3");
     }

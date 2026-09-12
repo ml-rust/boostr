@@ -1,9 +1,18 @@
 //! Shared helper functions for CPU quant_matmul implementations.
 
 use crate::error::{Error, Result};
+use crate::quant::KernelContract;
 use numr::dtype::DType;
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
+
+/// The contract every CPU block-format matmul kernel satisfies.
+///
+/// The kernels follow `ggml-quants.c` for each block type: K-quants run
+/// against Q8_K activations, the rest dequantize a row and dot it in f32.
+/// A TCF weight declaring anything more specific is refused at entry.
+pub(super) const BLOCK_CONTRACT: KernelContract =
+    KernelContract::ggml_reference("cpu ggml block matmul");
 
 /// Validate input is F32 and extract (M, K) from shape.
 pub(super) fn validate_input(input: &Tensor<CpuRuntime>) -> Result<(usize, usize)> {

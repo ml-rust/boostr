@@ -205,14 +205,9 @@ where
     /// F32), so a non-F32 `self.dtype` request is an error, named, at load
     /// time rather than a silent downgrade of what the caller asked for.
     ///
-    /// PACKED only when the rows are separately addressable. A GGML block
-    /// tensor is row-blocked, so `QuantTensor::gather_rows` can slice the
-    /// bytes a row occupies; a TCF payload is PLANE-MAJOR — codes, scales and
-    /// minima each live in their own plane spanning the whole tensor — so a
-    /// row is not a byte range and no gather over it exists. That table is
-    /// re-read DENSE instead. It costs the table's full f32 size, which is
-    /// what any unquantized checkpoint costs, and it is the only alternative
-    /// to a gather kernel that would need the plane layout copied into it.
+    /// A GGML block tensor is row-blocked, so `QuantTensor::gather_rows`
+    /// slices the bytes a row occupies and the table never needs a dense
+    /// copy.
     pub(crate) fn embedding(
         &mut self,
         name: &str,
@@ -221,20 +216,8 @@ where
     ) -> Result<MaybeQuantEmbedding<R>> {
         let weight_key = format!("{name}.weight");
         let shape = [vocab_size, hidden_size];
-        let mut weight =
+        let weight =
             checked_weight::<R, S>(self.loader, self.device, &self.prefix, &weight_key, &shape)?;
-
-        if let Weight::Quantized(packed) = &weight
-            && !packed.scheme().is_row_blocked()
-        {
-            weight = Weight::Standard(checked_tensor::<R, S>(
-                self.loader,
-                self.device,
-                &self.prefix,
-                &weight_key,
-                &shape,
-            )?);
-        }
 
         let weight = match weight {
             Weight::Standard(t) => Weight::Standard(match self.dtype {

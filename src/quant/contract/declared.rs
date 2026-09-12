@@ -17,7 +17,7 @@
 use core::fmt;
 use core::fmt::Write as _;
 
-use tcf_core::{
+use crate::tcf::{
     ContractRecord, DotAccumulator, ExecutionRole, InputRepresentation, MathMode, OutputDtype,
     QuantAxis, RoundingMode, ScaleComputeDtype,
 };
@@ -141,6 +141,7 @@ pub fn input_representation_name(value: InputRepresentation) -> &'static str {
         InputRepresentation::F16 => "F16",
         InputRepresentation::Bf16 => "BF16",
         InputRepresentation::A8S32Dynamic => "A8S32_DYNAMIC",
+        InputRepresentation::GgmlReference => "GGML_REFERENCE",
     }
 }
 
@@ -150,6 +151,7 @@ pub fn dot_accumulator_name(value: DotAccumulator) -> &'static str {
     match value {
         DotAccumulator::F32 => "F32",
         DotAccumulator::I32ThenF32Scale => "I32_THEN_F32_SCALE",
+        DotAccumulator::GgmlReference => "GGML_REFERENCE",
     }
 }
 
@@ -212,7 +214,7 @@ pub fn role_name(value: ExecutionRole) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tcf_core::{ContractFlags, MathMode, QuantAxis, RoundingMode, ScaleComputeDtype};
+    use crate::tcf::{ContractFlags, MathMode, QuantAxis, RoundingMode, ScaleComputeDtype};
 
     fn f32_record() -> ContractRecord {
         ContractRecord {

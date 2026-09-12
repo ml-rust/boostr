@@ -1,41 +1,36 @@
-//! The case matrix: matched TCF/GGUF pairs, VoxCPM2 projection shapes, and the
-//! two operations that dominate quantized inference.
+//! The case matrix: three GGUF size classes, VoxCPM2 projection shapes, and
+//! the two operations that dominate quantized inference.
 //!
 //! Enumeration is deterministic and depends only on which backends are compiled
 //! in, so the parent process and a worker child agree on what index `n` names
 //! without passing the case description over the command line.
 
-use boostr::quant::{QuantFormat, QuantScheme, TcfEncoding};
-use tcf_core::NativeEncoding;
+use boostr::quant::QuantFormat;
 
-/// A TCF encoding and the GGUF format it must be compared against.
+/// A GGUF block format and the file size it spends.
 ///
-/// The pairing is by BITS PER WEIGHT, not by bit width: `Q4AS32D_T64` and
-/// `Q4_K` both spend 4.50 bpw, so a win on either side is a win at equal file
-/// size. Comparing `Q4S32_T64` (4.00 bpw) against `Q4_K` would not be.
-pub struct Pair {
-    /// Bits per weight, both sides. Section 12.2 for TCF, block bytes for GGUF.
+/// Classes are keyed by BITS PER WEIGHT, not by bit width: a new encoding
+/// competing in a class is compared at equal file size, or the comparison
+/// measures the size and not the kernel.
+pub struct SizeClass {
+    /// Bits per weight: block bytes times 8 over block elements.
     pub bpw: f64,
-    pub tcf: NativeEncoding,
-    pub gguf: QuantFormat,
+    pub format: QuantFormat,
 }
 
-/// The three matched size classes. Section 8.4's target classes.
-pub static PAIRS: [Pair; 3] = [
-    Pair {
+/// The three size classes a shipped model is quantized to.
+pub static CLASSES: [SizeClass; 3] = [
+    SizeClass {
         bpw: 4.5,
-        tcf: NativeEncoding::Q4AS32DT64,
-        gguf: QuantFormat::Q4K,
+        format: QuantFormat::Q4K,
     },
-    Pair {
+    SizeClass {
         bpw: 6.5625,
-        tcf: NativeEncoding::Q6S16DT64,
-        gguf: QuantFormat::Q6K,
+        format: QuantFormat::Q6K,
     },
-    Pair {
+    SizeClass {
         bpw: 8.5,
-        tcf: NativeEncoding::Q8S32T64,
-        gguf: QuantFormat::Q8_0,
+        format: QuantFormat::Q8_0,
     },
 ];
 
@@ -48,8 +43,7 @@ pub struct WeightShape {
 
 /// VoxCPM2's `base_lm` (MiniCPM4): hidden 2048, FFN 6144, 16 heads of 128, 2 KV
 /// heads. These are the real projection widths, not round numbers, so K is a
-/// multiple of both the GGUF 256-element super-block and the TCF 64-element
-/// tile without any padding fiction.
+/// multiple of the GGUF 256-element super-block without any padding fiction.
 pub static SHAPES: [WeightShape; 4] = [
     WeightShape {
         label: "q_proj",
@@ -81,36 +75,18 @@ const DEQUANT_SHAPES: [&str; 2] = ["q_proj", "down_proj"];
 const DECODE_M: [usize; 1] = [1];
 
 /// Prefill batch sizes. 2 sits at or below every CUDA GEMV crossover (1 for
-/// GGUF Q3_K/Q2_K, 2 for GGUF Q4_K/Q5_K, 4 for every other GGUF format, and
-/// 2 for TCF `Q8S32T64`'s own GEMV/MMQ split), pinning the small-batch side.
-/// 4 and 8 bracket TCF's separate GEMV/GEMM crossover (the split every other
-/// TCF encoding uses, and the one `Q8S32T64` falls back to when the MMQ
-/// dispatch declines), so a kernel change that moves it shows up here rather
-/// than silently costing small-batch prefill. 32 and 256 are the
-/// continuous-batching and full-prefill points; both exceed every crossover
-/// on CUDA and land on the tiled GEMM/MMQ path, so that path stays covered
-/// too.
+/// Q3_K/Q2_K, 2 for Q4_K/Q5_K, 4 for every other format), pinning the
+/// small-batch side. 4 and 8 bracket the GEMV/MMQ crossover, so a kernel
+/// change that moves it shows up here rather than silently costing
+/// small-batch prefill. 32 and 256 are the continuous-batching and
+/// full-prefill points; both exceed every crossover on CUDA and land on the
+/// MMQ path, so that path stays covered too.
 const PREFILL_M: [usize; 5] = [2, 4, 8, 32, 256];
 
 /// Shapes the prefill sizes run on. Restricted to two, because a `M = 256`
 /// GEMM does 256 times the arithmetic a GEMV does, which is minutes of work
 /// per extra shape.
 const PREFILL_SHAPES: [&str; 2] = ["q_proj", "down_proj"];
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Codec {
-    Tcf,
-    Gguf,
-}
-
-impl Codec {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Tcf => "tcf",
-            Self::Gguf => "gguf",
-        }
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
@@ -167,20 +143,19 @@ impl Op {
     }
 }
 
-/// One measurable point: an encoding, on a backend, running an operation at a
-/// shape.
+/// One measurable point: a size class, on a backend, running an operation at
+/// a shape.
 pub struct Case {
     pub backend: Backend,
-    pub codec: Codec,
-    pub pair: usize,
+    pub class: usize,
     pub shape: usize,
     pub op: Op,
 }
 
 impl Case {
-    fn pair(&self) -> &'static Pair {
-        // `pair` only ever comes from `enumerate`, which indexes `PAIRS`.
-        &PAIRS[self.pair % PAIRS.len()]
+    fn size_class(&self) -> &'static SizeClass {
+        // `class` only ever comes from `enumerate`, which indexes `CLASSES`.
+        &CLASSES[self.class % CLASSES.len()]
     }
 
     fn weight_shape(&self) -> &'static WeightShape {
@@ -200,19 +175,16 @@ impl Case {
     }
 
     pub fn bpw(&self) -> f64 {
-        self.pair().bpw
+        self.size_class().bpw
     }
 
-    /// The payload layout this case's weight is packed in.
-    pub fn scheme(&self) -> QuantScheme {
-        match self.codec {
-            Codec::Tcf => QuantScheme::Tcf(TcfEncoding::new(self.pair().tcf)),
-            Codec::Gguf => QuantScheme::Gguf(self.pair().gguf),
-        }
+    /// The block format this case's weight is packed in.
+    pub fn format(&self) -> QuantFormat {
+        self.size_class().format
     }
 
-    pub fn encoding_name(&self) -> String {
-        self.scheme().name()
+    pub fn encoding_name(&self) -> &'static str {
+        self.format().name()
     }
 
     /// The work one iteration does, and the unit it is counted in.
@@ -254,32 +226,28 @@ impl Case {
 pub fn enumerate() -> Vec<Case> {
     let mut out = Vec::new();
     for backend in Backend::compiled() {
-        for pair in 0..PAIRS.len() {
-            for codec in [Codec::Tcf, Codec::Gguf] {
-                for (shape, weight) in SHAPES.iter().enumerate() {
-                    if DEQUANT_SHAPES.contains(&weight.label) {
-                        out.push(Case {
-                            backend,
-                            codec,
-                            pair,
-                            shape,
-                            op: Op::Dequant,
-                        });
-                    }
-                    let ms: Vec<usize> = if PREFILL_SHAPES.contains(&weight.label) {
-                        DECODE_M.iter().chain(PREFILL_M.iter()).copied().collect()
-                    } else {
-                        DECODE_M.to_vec()
-                    };
-                    for &m in &ms {
-                        out.push(Case {
-                            backend,
-                            codec,
-                            pair,
-                            shape,
-                            op: Op::Matmul { m },
-                        });
-                    }
+        for class in 0..CLASSES.len() {
+            for (shape, weight) in SHAPES.iter().enumerate() {
+                if DEQUANT_SHAPES.contains(&weight.label) {
+                    out.push(Case {
+                        backend,
+                        class,
+                        shape,
+                        op: Op::Dequant,
+                    });
+                }
+                let ms: Vec<usize> = if PREFILL_SHAPES.contains(&weight.label) {
+                    DECODE_M.iter().chain(PREFILL_M.iter()).copied().collect()
+                } else {
+                    DECODE_M.to_vec()
+                };
+                for &m in &ms {
+                    out.push(Case {
+                        backend,
+                        class,
+                        shape,
+                        op: Op::Matmul { m },
+                    });
                 }
             }
         }

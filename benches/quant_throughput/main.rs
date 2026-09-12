@@ -1,9 +1,9 @@
-//! TCF vs GGUF throughput at matched size classes.
+//! GGUF block throughput at three size classes.
 //!
-//! CONFORMANCE.md Section 8.4 gates a v1 encoding on winning its size class on
-//! effective cost. This target produces the cost half of that gate: how fast
-//! each encoding dequantizes and how fast it runs a fused quantized matmul, on
-//! CPU, CUDA and WebGPU.
+//! A new encoding earns its place by winning its size class on effective
+//! cost. This target produces the cost half of that gate for the shipped
+//! formats: how fast each dequantizes and how fast it runs a fused quantized
+//! matmul, on CPU, CUDA and WebGPU.
 //!
 //! # Metric, and why it is not wall-clock
 //!

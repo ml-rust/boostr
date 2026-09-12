@@ -163,7 +163,7 @@ fn run_worker(index: usize, iters: usize) -> Result<(), String> {
     let case = all
         .get(index)
         .ok_or_else(|| format!("case index {index} is outside the matrix"))?;
-    let outcome = payload::packed(case.scheme(), case.n(), case.k())
+    let outcome = payload::packed(case.format(), case.n(), case.k())
         .and_then(|bytes| worker::run_on_backend(case, &bytes, iters));
     match outcome {
         Ok(sample) => println!(
@@ -244,8 +244,7 @@ fn measure_case(exe: &str, index: usize, case: &Case, options: &Options, perf: b
 
     Row {
         id: case.id(),
-        pair: case.pair,
-        codec: case.codec.label(),
+        class: case.class,
         encoding: case.encoding_name(),
         bpw: case.bpw(),
         backend: case.backend.label(),

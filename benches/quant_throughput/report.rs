@@ -1,16 +1,14 @@
-//! The comparison table, and the caveats a fair reading of it needs.
+//! The results table, and the caveats a fair reading of it needs.
 //!
-//! Rows are ordered so a matched pair sits together: same backend, same size
-//! class, same shape, same operation, TCF above GGUF. The `tcf/gguf` column on
-//! the TCF row is the ratio of instructions per work unit — below 1.00 means
-//! TCF costs less.
+//! Rows are grouped by backend, size class, and shape, so one kernel's rows
+//! across batch sizes sit together and two runs of the table diff line by
+//! line.
 
 /// One measured case.
 pub struct Row {
     pub id: String,
-    pub pair: usize,
-    pub codec: &'static str,
-    pub encoding: String,
+    pub class: usize,
+    pub encoding: &'static str,
     pub bpw: f64,
     pub backend: &'static str,
     pub op: &'static str,
@@ -43,16 +41,9 @@ pub struct Context {
     pub csv: bool,
 }
 
-/// The sort key that puts a matched pair on adjacent lines.
-fn key(row: &Row) -> (&'static str, usize, &'static str, usize, &'static str, u8) {
-    (
-        row.backend,
-        row.pair,
-        row.shape_label,
-        row.m,
-        row.op,
-        u8::from(row.codec == "gguf"),
-    )
+/// The sort key that groups one kernel's rows.
+fn key(row: &Row) -> (&'static str, usize, &'static str, usize, &'static str) {
+    (row.backend, row.class, row.shape_label, row.m, row.op)
 }
 
 pub fn print(rows: &[Row], context: &Context) {
@@ -68,15 +59,13 @@ pub fn print(rows: &[Row], context: &Context) {
 
 fn print_csv(rows: &[&Row]) {
     println!(
-        "id,codec,encoding,bpw,backend,op,shape,m,iters,unit,units,instructions_per_iter,\
-instructions_per_unit,ratio_tcf_over_gguf,cycles_min,ns_min,alloc_count_per_iter,\
-alloc_bytes_per_iter,error"
+        "id,encoding,bpw,backend,op,shape,m,iters,unit,units,instructions_per_iter,\
+instructions_per_unit,cycles_min,ns_min,alloc_count_per_iter,alloc_bytes_per_iter,error"
     );
-    for (index, row) in rows.iter().enumerate() {
+    for row in rows {
         println!(
-            "{},{},{},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             row.id,
-            row.codec,
             row.encoding,
             row.bpw,
             row.backend,
@@ -88,7 +77,6 @@ alloc_bytes_per_iter,error"
             row.units,
             opt(row.instructions),
             opt(row.per_unit),
-            opt(ratio(rows, index)),
             opt(row.cycles),
             opt(row.ns),
             opt(row.alloc_count),
@@ -101,7 +89,7 @@ alloc_bytes_per_iter,error"
 fn print_table(rows: &[&Row], context: &Context) {
     println!();
     println!(
-        "TCF vs GGUF quantized throughput — {} threads, perf {}, {} reps per phase",
+        "GGUF block quantized throughput — {} threads, perf {}, {} reps per phase",
         context.threads,
         if context.perf { "on" } else { "OFF" },
         context.reps,
@@ -113,8 +101,7 @@ fn print_table(rows: &[&Row], context: &Context) {
     );
     println!();
     let header = format!(
-        "{:<5} {:<12} {:>5} {:<5} {:<8} {:<10} {:>10} {:>4} {:>6} {:>12} {:>12} {:>6} {:>9} {:>12} {:>12} {:>6} {:>10}",
-        "codec",
+        "{:<12} {:>5} {:<5} {:<8} {:<10} {:>10} {:>4} {:>6} {:>12} {:>12} {:>6} {:>12} {:>12} {:>6} {:>10}",
         "encoding",
         "bpw",
         "back",
@@ -126,7 +113,6 @@ fn print_table(rows: &[&Row], context: &Context) {
         "instr/iter",
         "instr/unit",
         "unit",
-        "tcf/gguf",
         "cycles*",
         "ns*",
         "alloc",
@@ -136,8 +122,8 @@ fn print_table(rows: &[&Row], context: &Context) {
     println!("{}", "-".repeat(header.chars().count()));
 
     let mut previous: Option<(&str, usize, &str)> = None;
-    for (index, row) in rows.iter().enumerate() {
-        let group = (row.backend, row.pair, row.shape_label);
+    for row in rows {
+        let group = (row.backend, row.class, row.shape_label);
         if previous.is_some_and(|p| p != group) {
             println!();
         }
@@ -145,8 +131,7 @@ fn print_table(rows: &[&Row], context: &Context) {
 
         if let Some(error) = row.error.as_deref() {
             println!(
-                "{:<5} {:<12} {:>5.2} {:<5} {:<8} {:<10} {:>10} {:>4} {:>6}  {error}",
-                row.codec,
+                "{:<12} {:>5.2} {:<5} {:<8} {:<10} {:>10} {:>4} {:>6}  {error}",
                 row.encoding,
                 row.bpw,
                 row.backend,
@@ -159,8 +144,7 @@ fn print_table(rows: &[&Row], context: &Context) {
             continue;
         }
         println!(
-            "{:<5} {:<12} {:>5.2} {:<5} {:<8} {:<10} {:>10} {:>4} {:>6} {:>12} {:>12} {:>6} {:>9} {:>12} {:>12} {:>6} {:>10}",
-            row.codec,
+            "{:<12} {:>5.2} {:<5} {:<8} {:<10} {:>10} {:>4} {:>6} {:>12} {:>12} {:>6} {:>12} {:>12} {:>6} {:>10}",
             row.encoding,
             row.bpw,
             row.backend,
@@ -172,7 +156,6 @@ fn print_table(rows: &[&Row], context: &Context) {
             si(row.instructions),
             fine(row.per_unit),
             row.unit,
-            fine(ratio(rows, index)),
             si(row.cycles),
             si(row.ns),
             si(row.alloc_count),
@@ -181,38 +164,14 @@ fn print_table(rows: &[&Row], context: &Context) {
     }
 }
 
-/// TCF instructions per unit over the matched GGUF row's, on the TCF row only.
-fn ratio(rows: &[&Row], index: usize) -> Option<f64> {
-    let row = rows.get(index)?;
-    if row.codec != "tcf" {
-        return None;
-    }
-    let partner = rows.get(index + 1)?;
-    if partner.codec != "gguf"
-        || partner.pair != row.pair
-        || partner.backend != row.backend
-        || partner.shape_label != row.shape_label
-        || partner.m != row.m
-        || partner.op != row.op
-    {
-        return None;
-    }
-    let (mine, theirs) = (row.per_unit?, partner.per_unit?);
-    if theirs <= 0.0 {
-        return None;
-    }
-    Some(mine / theirs)
-}
-
 fn print_caveats(context: &Context) {
     println!();
     println!("How to read this");
     println!("  instr/iter  retired user-space instructions per iteration, with a zero-iteration");
     println!("              run of the same case subtracted, so setup and warm-up are removed.");
-    println!("              Deterministic. This is the metric the comparison rests on.");
+    println!("              Deterministic. This is the metric a kernel change is judged on.");
     println!("  instr/unit  the same figure per element (dequant) or per multiply-accumulate");
     println!("              (matmul), so shapes and batch sizes share one scale.");
-    println!("  tcf/gguf    instr/unit ratio against the GGUF row below. Under 1.00 favours TCF.");
     println!("  alloc/bytes heap allocations per iteration. Deterministic.");
     println!("  cycles*/ns* MINIMUM over iterations. WALL-CLOCK FAMILY, load-sensitive.");
     println!("              Read them only when the load average above is near zero.");
@@ -223,18 +182,17 @@ fn print_caveats(context: &Context) {
     }
     println!();
     println!("What this does NOT measure");
-    println!("  - Quality. Section 8.4's gate is cost AND quality; this is the cost half.");
-    println!("  - A layout comparison on CPU. boostr's TCF fused matmul reconstructs each");
-    println!("    tile to f32 with AVX2 and dots it with AVX2/FMA, like the Q8_0 row, while");
-    println!("    Q4_K and Q6_K run an AVX2 INTEGER dp4a-style path over Q8_K-quantized");
-    println!("    activations. Those two rows compare float arithmetic against integer");
-    println!("    arithmetic, not a layout against a layout.");
+    println!("  - Quality. A format is judged on cost AND quality; this is the cost half.");
+    println!("  - A layout comparison on CPU. The Q8_0 row dequantizes each row to f32 and");
+    println!("    dots it with AVX2/FMA, while Q4_K and Q6_K run an AVX2 INTEGER path over");
+    println!("    Q8_K-quantized activations. Those rows compare float arithmetic against");
+    println!("    integer arithmetic, not a layout against a layout.");
     println!("  - Kernel time on CUDA or WebGPU. Instructions there count host-side LAUNCH");
     println!("    work. Judge those rows by ns*, and only on a verified quiet machine.");
     println!("  - End-to-end model throughput, memory bandwidth, or load time.");
     println!("  - An allocator-free baseline. The counting global allocator adds two atomic");
     println!("    increments per allocation, to every row equally.");
-    println!("  - Any encoding outside the three matched size classes.");
+    println!("  - Any format outside the three size classes.");
 }
 
 fn opt(value: Option<f64>) -> String {

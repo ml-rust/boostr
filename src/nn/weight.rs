@@ -97,12 +97,11 @@ impl<R: Runtime<DType = numr::dtype::DType>> Weight<R> {
         }
     }
 
-    /// The GGUF block format, or `None` for any other weight — a dense
-    /// tensor, a decomposed quantization, or a plane-major codec such as TCF.
-    /// Read [`QuantTensor::scheme`] when the codec itself matters.
+    /// The block format, or `None` for any other weight — a dense tensor
+    /// or a decomposed quantization.
     pub fn quant_format(&self) -> Option<QuantFormat> {
         match self {
-            Self::Quantized(q) => q.format().ok(),
+            Self::Quantized(q) => Some(q.format()),
             _ => None,
         }
     }

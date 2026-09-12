@@ -36,7 +36,7 @@ const GROUPS_PER_SUPER: usize = 16;
 const SUPER_BLOCK: usize = GROUP_SIZE * GROUPS_PER_SUPER;
 
 /// The signed 6-bit code grid an arm quantizes onto. Two grids exist because
-/// TCF's SPECIFICATION.md Section 13.2 USED TO reserve the most-negative
+/// TCF's retired native `Q6S16D_T64` USED TO reserve the most-negative
 /// code as a rejection point (retired: no CODE plane reserves a value now,
 /// full two's-complement range like ggml's Q6_K); the two differ by one
 /// level in 64, and isolating that cost is what motivated the retirement —
@@ -97,8 +97,8 @@ pub enum SuperPrecision {
     /// super-precision scheme can beat this — it is the two-level geometry
     /// with zero rounding above the per-group float fit.
     F32,
-    /// TCF's `Q6S16D_T64` as originally specified, before SPECIFICATION.md
-    /// Section 13.2's reservation was retired: the `Bf16` arm minus its
+    /// TCF's `Q6S16D_T64` as originally specified, before its code
+    /// reservation was retired: the `Bf16` arm minus its
     /// most-negative code, so 63 levels not 64. The only arm on
     /// [`RESERVED_63`]; against `Bf16` it isolates the retired reservation's
     /// cost with the super-scale held fixed.
@@ -196,9 +196,8 @@ fn fit_group_scale(values: &[f32], weights: &[f32], grid: CodeGrid) -> GroupFit 
     }
 }
 
-/// Refines an initial `u8` sub-scale guess over `±2` (the same radius
-/// `Q6S16D_T64` applies — see `hats/tcf/tcf-core`'s
-/// `refine_symmetric_sub_scale`), scoring each neighbor by weighted squared
+/// Refines an initial `u8` sub-scale guess over `±2` (the same radius the
+/// retired `Q6S16D_T64` quantizer applied), scoring each neighbor by weighted squared
 /// error against ITS OWN effective scale (`effective(sub)`), keeping the
 /// strictly-lower-error candidate so the search never moves off the
 /// rounded start without cause.

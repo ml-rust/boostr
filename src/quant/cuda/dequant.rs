@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::quant::traits::DequantOps;
-use crate::quant::{QuantFormat, QuantScheme, QuantTensor};
+use crate::quant::{QuantFormat, QuantTensor};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
@@ -13,7 +13,6 @@ use numr::tensor::Tensor;
 
 use super::kernels::{self, DEQUANT_GENERIC_MODULE, DEQUANT_MODULE};
 use super::nf4 as nf4_dispatch;
-use super::tcf as tcf_dispatch;
 
 /// Threads one dequantization CUDA block runs, for every kernel in
 /// `kernels/dequant.cu`.
@@ -146,14 +145,7 @@ impl DequantOps<CudaRuntime> for CudaClient {
             });
         }
 
-        // TCF is plane-major and its two-level encodings carry a second scale
-        // level, so it has its own kernel rather than a `QuantFormat` arm.
-        let format = match qt.scheme() {
-            QuantScheme::Gguf(format) => format,
-            QuantScheme::Tcf(encoding) => {
-                return dequant_tcf(self, qt, encoding, target_dtype);
-            }
-        };
+        let format = qt.format();
 
         let (kernel_name, mapping) = match format {
             QuantFormat::Q4_0 => ("dequant_q4_0_f32", BLOCK32_MAPPING),
@@ -217,34 +209,6 @@ impl DequantOps<CudaRuntime> for CudaClient {
     }
 }
 
-/// Dequantize a TCF native quantized payload on the GPU.
-///
-/// The device decoder in `kernels/tcf.cuh` reproduces `tcf_core::unpack`
-/// followed by `tcf_core::dequantize`, and `tests/backend_parity/quant_tcf.rs`
-/// is the gate that says so for every encoding.
-fn dequant_tcf(
-    client: &CudaClient,
-    qt: &QuantTensor<CudaRuntime>,
-    encoding: crate::quant::TcfEncoding,
-    target_dtype: DType,
-) -> Result<Tensor<CudaRuntime>> {
-    let f32_out = Tensor::<CudaRuntime>::empty(qt.shape(), DType::F32, qt.device())?;
-    tcf_dispatch::launch_dequant(
-        client,
-        qt.device().id(),
-        qt.storage().ptr(),
-        f32_out.ptr(),
-        encoding,
-        qt.shape(),
-    )?;
-
-    if target_dtype == DType::F32 {
-        Ok(f32_out)
-    } else {
-        client.cast(&f32_out, target_dtype).map_err(Error::Numr)
-    }
-}
-
 /// Dequantize using the generic CUDA kernel that handles all 23 formats
 /// via format_id dispatch. Slower than dedicated kernels but universally correct.
 fn dequant_via_generic_kernel(
@@ -268,7 +232,7 @@ fn dequant_via_generic_kernel(
         reason: format!("dequant_generic_f32: {num_blocks} blocks exceed u32"),
     })?;
     let grid_size = num_blocks_u32.div_ceil(threads);
-    let format = qt.format()?;
+    let format = qt.format();
     let format_id = format.format_id();
 
     let cfg = LaunchConfig {

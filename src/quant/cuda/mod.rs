@@ -4,4 +4,3 @@ pub mod int4_gemm;
 pub mod kernels;
 pub mod nf4;
 pub mod quant_matmul;
-mod tcf;

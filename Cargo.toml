@@ -61,9 +61,8 @@ symphonia = { version = "0.5", optional = true, default-features = false, featur
   "wav",
 ] }
 memmap2 = "0.9"
-# TCF (Tensor Contract Format) container and reference codec, read by
-# `format::tcf`. One dependency (blake3), no default features.
-tcf-core = "0.1"
+# BLAKE3: the digests the TCF container (`boostr::tcf`) stores.
+blake3 = "1.8"
 splintr = { version = "0.20", features = ["vocab-whisper"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
@@ -306,13 +305,10 @@ name = "quant_throughput"
 path = "benches/quant_throughput/main.rs"
 harness = false
 
-# A shipped inference build links boostr against `tcf-core`, `numr`, and the
-# format crates, and the hot quantized paths cross those boundaries per group:
-# `QuantLayout`'s scale and minimum accessors are a few instructions each and
-# are called once per quantization group. Without cross-crate inlining they are
-# real calls, and measurement puts that at 9-14% of TCF dequantization —
-# `Q6S16D_T64` moves 24.76 -> 21.31 retired instructions per element, while
-# GGUF, whose kernels are all in-crate, does not move at all.
+# A shipped inference build links boostr against `numr` and the format
+# crates, and the hot quantized paths cross those boundaries per group.
+# Without cross-crate inlining a per-group accessor is a real call, which
+# measurement put at a noticeable share of dequantization time.
 [profile.release]
 lto = "fat"
 codegen-units = 1

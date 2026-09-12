@@ -77,7 +77,7 @@ fn cuda_quant_matmul_batch_matches_single_calls_bit_for_bit() {
                 assert!(
                     a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
                     "m={m} {:?} n={}: batched and single results differ",
-                    w.format().expect("format"),
+                    w.format(),
                     w.shape()[0]
                 );
             }

@@ -1,6 +1,7 @@
 //! Shared helpers for CUDA quantized matmul operations.
 
 use crate::error::{Error, Result};
+use crate::quant::KernelContract;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
@@ -9,6 +10,15 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::super::kernels::{self, QUANT_ACT_MODULE};
+
+/// The contract every CUDA block-format matmul kernel satisfies.
+///
+/// The dp4a GEMV and the MMA families quantize the activation to Q8_1
+/// groups of 32 along K and accumulate on integers, as `ggml-cuda` does;
+/// the dequantize-then-matmul fallback reads it as f32. A TCF weight
+/// declaring anything more specific is refused at entry.
+pub(super) const BLOCK_CONTRACT: KernelContract =
+    KernelContract::ggml_reference("cuda ggml block matmul");
 
 /// Validate input is F32 and extract (M, K).
 pub(super) fn validate_input_cuda(input: &Tensor<CudaRuntime>) -> Result<(usize, usize)> {

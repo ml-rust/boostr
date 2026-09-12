@@ -68,9 +68,6 @@ fn compile_cuda_kernels() {
         ),
         k!("src/quant/cuda/kernels", "fused_int4_qkv.cu", "sm_75", true),
         k!("src/quant/cuda/kernels", "quant_act.cu", "sm_75", true),
-        // TCF native quantized kernels: dequant, GEMV, GEMM in one module,
-        // sharing the device decoder in tcf.cuh.
-        k!("src/quant/cuda/kernels", "tcf.cu", "sm_75", true),
         // sm_80, not sm_75: `mma.sync.aligned.m16n8k32...s8.s8.s32` is an
         // Ampere+ instruction, unavailable at sm_75.
         k!("src/quant/cuda/kernels", "mma_int8_probe.cu", "sm_80", true),
@@ -109,17 +106,6 @@ fn compile_cuda_kernels() {
             Some(format!("gemm_{}.fatbin", fmt)),
         ));
     }
-
-    // TCF's dp4a GEMV is outside the loop above: a TCF encoding has a GEMV
-    // here but no gemm/ sibling — its large-batch path is the feature-major
-    // MMQ kernel in quant_mmq_mma.cu, or the f32 tile in tcf.cu.
-    kernel_sets.push((
-        gemv_dir,
-        "tcf_q4as32dt64.cu".to_string(),
-        "sm_75".to_string(),
-        true,
-        Some("gemv_tcf_q4as32dt64.fatbin".to_string()),
-    ));
 
     kernel_sets.extend([
         // Attention kernels

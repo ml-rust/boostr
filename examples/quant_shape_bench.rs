@@ -6,9 +6,8 @@
 //!     --format q8_0 --n 4096 --k 14336 --m 1,2,4,8,512
 //! ```
 //!
-//! `--format` takes a GGUF name (`q8_0`, `q6_k`, `q4_k`) or a TCF encoding
-//! (`tcf_q8`, `tcf_q6`, `tcf_q4`), so one invocation shape can be compared
-//! across both codecs and against an external runtime.
+//! `--format` takes a GGUF block name (`q8_0`, `q6_k`, `q4_k`), so one
+//! invocation shape can be compared against an external runtime.
 //!
 //! Reports microseconds per call, the same unit `test-backend-ops perf` prints,
 //! so the two can be read side by side at MATCHED shapes. A comparison at
@@ -28,17 +27,13 @@ fn main() {
 #[cfg(feature = "cuda")]
 use boostr::QuantMatmulOps;
 #[cfg(feature = "cuda")]
-use boostr::quant::{QuantFormat, QuantScheme, QuantTensor, TcfEncoding};
+use boostr::quant::{QuantFormat, QuantTensor};
 #[cfg(feature = "cuda")]
 use numr::runtime::RuntimeClient;
 #[cfg(feature = "cuda")]
 use numr::runtime::cuda::{CudaClient, CudaDevice};
 #[cfg(feature = "cuda")]
 use numr::tensor::Tensor;
-#[cfg(feature = "cuda")]
-use tcf_core::NativeEncoding;
-#[cfg(feature = "cuda")]
-use tcf_core::encoding::{pack, quantize};
 
 /// Calls timed per measurement, after warmup.
 #[cfg(feature = "cuda")]
@@ -48,58 +43,39 @@ const ITERS: usize = 100;
 const WARMUP: usize = 20;
 
 #[cfg(feature = "cuda")]
-fn parse_format(name: &str) -> QuantScheme {
+fn parse_format(name: &str) -> QuantFormat {
     match name {
-        "q8_0" => QuantScheme::Gguf(QuantFormat::Q8_0),
-        "q6_k" => QuantScheme::Gguf(QuantFormat::Q6K),
-        "q4_k" => QuantScheme::Gguf(QuantFormat::Q4K),
-        "tcf_q8" => QuantScheme::Tcf(TcfEncoding::new(NativeEncoding::Q8S32T64)),
-        "tcf_q6" => QuantScheme::Tcf(TcfEncoding::new(NativeEncoding::Q6S16DT64)),
-        "tcf_q4" => QuantScheme::Tcf(TcfEncoding::new(NativeEncoding::Q4AS32DT64)),
-        other => {
-            panic!("unknown --format {other}, expected q8_0, q6_k, q4_k, tcf_q8, tcf_q6, or tcf_q4")
-        }
+        "q8_0" => QuantFormat::Q8_0,
+        "q6_k" => QuantFormat::Q6K,
+        "q4_k" => QuantFormat::Q4K,
+        other => panic!("unknown --format {other}, expected q8_0, q6_k, or q4_k"),
     }
 }
 
-/// Packed weight bytes for `scheme` at `[n, k]`.
-///
-/// GGUF goes through the CPU quantizer and TCF through `tcf-core`'s own writer,
-/// so each codec is measured on the bytes its own encoder produces rather than
-/// on a second encoder written here.
+/// Packed weight bytes for `format` at `[n, k]`, through the CPU quantizer,
+/// so the kernel is measured on the bytes the real encoder produces.
 #[cfg(feature = "cuda")]
-fn packed_weight(scheme: QuantScheme, n: usize, k: usize) -> Result<Vec<u8>, String> {
+fn packed_weight(format: QuantFormat, n: usize, k: usize) -> Result<Vec<u8>, String> {
+    use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
     // Deterministic source values; a matmul's cost is set by the layout, not
     // the bits, but a real encode keeps the block statistics realistic.
     let values: Vec<f32> = (0..n * k)
         .map(|i| ((i % 977) as f32 * 0.031).sin())
         .collect();
-    match scheme {
-        QuantScheme::Tcf(encoding) => {
-            let dims = [n as u64, k as u64];
-            let layout = encoding.native().layout();
-            let tiles = quantize(&values, &dims, 2, layout)
-                .map_err(|e| format!("tcf quantize {}: {e:?}", encoding.name()))?;
-            pack(&tiles, layout).map_err(|e| format!("tcf pack {}: {e:?}", encoding.name()))
-        }
-        QuantScheme::Gguf(format) => {
-            use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
-            let device = CpuDevice::new();
-            let client = CpuClient::new(device.clone());
-            let input = Tensor::<CpuRuntime>::from_slice(&values, &[n, k], &device)
-                .map_err(|e| format!("weight tensor: {e}"))?;
-            boostr::quant::QuantizeOps::quantize(&client, &input, format)
-                .map_err(|e| format!("quantize {}: {e}", format.name()))?
-                .to_bytes()
-                .map_err(|e| format!("read back {}: {e}", format.name()))
-        }
-    }
+    let device = CpuDevice::new();
+    let client = CpuClient::new(device.clone());
+    let input = Tensor::<CpuRuntime>::from_slice(&values, &[n, k], &device)
+        .map_err(|e| format!("weight tensor: {e}"))?;
+    boostr::quant::QuantizeOps::quantize(&client, &input, format)
+        .map_err(|e| format!("quantize {}: {e}", format.name()))?
+        .to_bytes()
+        .map_err(|e| format!("read back {}: {e}", format.name()))
 }
 
 #[cfg(feature = "cuda")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let mut format = QuantScheme::Gguf(QuantFormat::Q8_0);
+    let mut format = QuantFormat::Q8_0;
     let (mut n, mut k) = (4096usize, 14336usize);
     let mut ms = vec![1usize, 2, 4, 8, 512];
 

@@ -7,7 +7,7 @@
 //! the same case: the format has no metadata map to embed one in. Its
 //! directory is a fixed set of record arrays — header, modules, tensors,
 //! contracts, calibrations, relations, workload profiles — plus a string
-//! table that exists to name those records (SPECIFICATION.md Sections 5-11).
+//! table that exists to name those records (`src/tcf/FORMAT.md` Sections 5-11).
 //! There is no free-form key/value section anywhere in v1, so no writer can
 //! put a `config.json` in one.
 //!

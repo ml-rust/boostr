@@ -138,12 +138,12 @@ where
     ///
     /// This is the weight-encoding-only measurement mode, and it exists for
     /// one reason: a cross-format quality comparison is valid only when both
-    /// artifacts run the SAME activation contract (CONFORMANCE.md Section
-    /// 7.1). A GGUF declares none, so its packed path may quantize
-    /// activations before the matmul, while a TCF's exact-F32 contract does
-    /// not — read
+    /// artifacts run the SAME activation path. A packed block kernel
+    /// quantizes activations the way `ggml-quants.c` does for its block type
+    /// and backend, so two block formats pay different activation error —
+    /// read
     /// [`DenseWeightSource`](crate::model::audio::voxcpm::loader::support::DenseWeightSource)
-    /// for the whole argument. Loaded through here, both formats run dense
+    /// for the whole argument. Loaded through here, both artifacts run dense
     /// F32 end to end and differ only in weight VALUES.
     ///
     /// There is no `dtype` argument: the mode fixes F32, the dtype

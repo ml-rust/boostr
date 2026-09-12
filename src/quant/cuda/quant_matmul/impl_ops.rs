@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::quant::traits::QuantMatmulOps;
-use crate::quant::{QuantFormat, QuantScheme, QuantTensor};
+use crate::quant::{QuantFormat, QuantTensor};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
@@ -14,12 +14,10 @@ use super::super::int4_gemm as int4_dispatch;
 use super::super::kernels::{
     self, GEMV_Q2_K_MODULE, GEMV_Q3_K_MODULE, GEMV_Q5_K_MODULE, QUANT_GEMV_MODULE,
 };
-use super::super::tcf::MatmulShape;
 use super::batched_gemv::quant_matmul_batch_impl;
 use super::fallback::{quant_matmul_via_dequant, quant_swiglu_via_dequant};
 use super::format_dispatch::{dispatch_gemv, dispatch_matmul, gemv_max_m};
-use super::helpers::{quantize_activation_q8_1, validate_input_cuda};
-use super::tcf_route;
+use super::helpers::{BLOCK_CONTRACT, quantize_activation_q8_1, validate_input_cuda};
 
 impl QuantMatmulOps<CudaRuntime> for CudaClient {
     fn int4_gemm(
@@ -117,6 +115,10 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         activation: &Tensor<CudaRuntime>,
         weight: &QuantTensor<CudaRuntime>,
     ) -> Result<Tensor<CudaRuntime>> {
+        // Section 9: the weight's declared contract gates the kernel before
+        // any shape check, so a refusal names the contract and not a shape.
+        weight.check_activation_contract(&BLOCK_CONTRACT)?;
+
         if activation.dtype() != DType::F32 {
             return Err(Error::QuantError {
                 reason: format!(
@@ -159,25 +161,9 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, activation.device())?;
         let output_ptr = output.ptr();
 
-        // TCF weights take their own kernels: a GGUF kernel finds a block's
-        // codes and its scale adjacent, while TCF spreads them over
-        // whole-tensor planes. `tcf_route` owns that choice and its three
-        // crossovers, none of which is the `M <= 64` the GGUF path below uses.
-        if let QuantScheme::Tcf(encoding) = weight.scheme() {
-            tcf_route::route_tcf(
-                self,
-                encoding,
-                &act_contig,
-                weight,
-                output_ptr,
-                MatmulShape { m, k, n },
-            )?;
-            return Ok(output);
-        }
-
         // The GEMV/GEMM crossover is measured per format: a faster GEMM moves
         // it down. `gemv_max_m` holds the current value for each format.
-        let format = weight.format()?;
+        let format = weight.format();
         let device_index = activation.device().id();
         if m <= gemv_max_m(format, device_index) {
             match dispatch_gemv(self, &act_contig, weight, output_ptr, m, k, n)? {
@@ -208,6 +194,8 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         gate_weight: &QuantTensor<CudaRuntime>,
         up_weight: &QuantTensor<CudaRuntime>,
     ) -> Result<Tensor<CudaRuntime>> {
+        gate_weight.check_activation_contract(&BLOCK_CONTRACT)?;
+        up_weight.check_activation_contract(&BLOCK_CONTRACT)?;
         let (m, k) = validate_input_cuda(activation)?;
         let n = gate_weight.shape()[0];
         let device_index = activation.device().id();
@@ -221,17 +209,8 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 ),
             });
         }
-        // The fused SwiGLU kernels read a GGUF block layout. A TCF weight goes
-        // through two fused matmuls and numr's `silu_mul` instead, which is
-        // what the CPU backend does for every codec.
-        if !gate_weight.scheme().is_row_blocked() || !up_weight.scheme().is_row_blocked() {
-            let gate = self.quant_matmul(activation, gate_weight)?;
-            let up = self.quant_matmul(activation, up_weight)?;
-            use numr::ops::ActivationOps;
-            return self.silu_mul(&gate, &up).map_err(Error::Numr);
-        }
-        let gate_format = gate_weight.format()?;
-        let up_format = up_weight.format()?;
+        let gate_format = gate_weight.format();
+        let up_format = up_weight.format();
         if gate_format != up_format {
             return Err(Error::QuantError {
                 reason: format!("gate format {gate_format:?} != up format {up_format:?}"),

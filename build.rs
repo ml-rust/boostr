@@ -623,7 +623,6 @@ fn compile_cuda_kernels() {
 }
 
 #[cfg(feature = "cuda")]
-#[cfg(feature = "cuda")]
 /// Whether `fatbin` was built from the current sources with the current
 /// nvcc arguments.
 ///

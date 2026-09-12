@@ -50,6 +50,39 @@ impl<R: Runtime<DType = DType>> MaybeLoraLinear<R> {
         }
     }
 
+    /// Forward several projections that share one input.
+    ///
+    /// Unadapted layers go through [`MaybeQuantLinear::forward_batch`], which
+    /// quantizes the activation once for every block-quantized weight in the
+    /// batch. An adapted layer anywhere in the batch sends every layer down
+    /// its own forward: the adapter path has no batched form, and a batch
+    /// half on one path and half on another would not be one operation.
+    pub fn forward_batch<C>(layers: &[&Self], client: &C, input: &Var<R>) -> Result<Vec<Var<R>>>
+    where
+        C: RuntimeClient<R>
+            + TensorOps<R>
+            + BinaryOps<R>
+            + ScalarOps<R>
+            + QuantMatmulOps<R>
+            + TypeConversionOps<R>,
+        R::Client: TensorOps<R> + BinaryOps<R> + ScalarOps<R> + DequantOps<R>,
+    {
+        let plain: Option<Vec<&MaybeQuantLinear<R>>> = layers
+            .iter()
+            .map(|layer| match layer {
+                Self::Plain(base) => Some(base),
+                Self::Lora(_) => None,
+            })
+            .collect();
+        match plain {
+            Some(bases) => MaybeQuantLinear::forward_batch(&bases, client, input),
+            None => layers
+                .iter()
+                .map(|layer| layer.forward(client, input))
+                .collect(),
+        }
+    }
+
     /// The underlying base linear layer, adapter aside.
     pub fn base(&self) -> &MaybeQuantLinear<R> {
         match self {

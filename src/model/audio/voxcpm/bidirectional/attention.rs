@@ -87,9 +87,16 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
         let shape = x.shape().to_vec();
         let (batch, seq_len) = (shape[0], shape[1]);
 
-        let q = self.q_proj.forward(client, x)?;
-        let k = self.k_proj.forward(client, x)?;
-        let v = self.v_proj.forward(client, x)?;
+        // One activation pass for the three projections: a quantized weight
+        // set quantizes `x` once and reuses it.
+        let mut qkv =
+            MaybeLoraLinear::forward_batch(&[&self.q_proj, &self.k_proj, &self.v_proj], client, x)?
+                .into_iter();
+        let (Some(q), Some(k), Some(v)) = (qkv.next(), qkv.next(), qkv.next()) else {
+            return Err(Error::ModelError {
+                reason: "forward_batch returned fewer outputs than layers".into(),
+            });
+        };
 
         // [N, S, H*D] -> [N, S, H, D] -> [N, H, S, D]
         let q = var_reshape(&q, &[batch, seq_len, self.num_heads, self.head_dim])

@@ -18,6 +18,47 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
+/// The feature-major MMQ descriptor a weight of `format` takes at this `k` on
+/// this device, or `None` when the format has no such kernel, `k` is not a
+/// whole number of its staging groups, or the device lacks int8 MMA.
+///
+/// One decision shared by the single-weight GEMM dispatch and the batched
+/// path, so the two cannot route the same weight differently. A new format
+/// joins by adding a `FeatMajorFormat` and a match arm here.
+pub(in crate::quant::cuda::quant_matmul) fn feat_major_format(
+    format: QuantFormat,
+    k: usize,
+    device_index: usize,
+) -> Option<&'static mmq_feat_major::FeatMajorFormat> {
+    let fm = match format {
+        QuantFormat::Q8_0 => &mmq_feat_major::Q8_0,
+        QuantFormat::Q4_0 => &mmq_feat_major::Q4_0,
+        QuantFormat::Q4_1 => &mmq_feat_major::Q4_1,
+        QuantFormat::Q5_0 => &mmq_feat_major::Q5_0,
+        QuantFormat::Q5_1 => &mmq_feat_major::Q5_1,
+        QuantFormat::Q4K => &mmq_feat_major::Q4_K,
+        QuantFormat::Q5K => &mmq_feat_major::Q5_K,
+        QuantFormat::Q6K => &mmq_feat_major::Q6_K,
+        QuantFormat::Q3K => &mmq_feat_major::Q3_K,
+        QuantFormat::Q2K => &mmq_feat_major::Q2_K,
+        QuantFormat::IQ4NL => &mmq_feat_major::IQ4_NL,
+        QuantFormat::IQ4XS => &mmq_feat_major::IQ4_XS,
+        QuantFormat::IQ2XXS => &mmq_feat_major::IQ2_XXS,
+        QuantFormat::IQ2XS => &mmq_feat_major::IQ2_XS,
+        QuantFormat::IQ2S => &mmq_feat_major::IQ2_S,
+        QuantFormat::IQ3XXS => &mmq_feat_major::IQ3_XXS,
+        QuantFormat::IQ3S => &mmq_feat_major::IQ3_S,
+        QuantFormat::IQ1S => &mmq_feat_major::IQ1_S,
+        _ => return None,
+    };
+    let eligible = k.is_multiple_of(fm.k_multiple as usize)
+        && numr::runtime::cuda::CudaDevice::new(device_index)
+            .profile()
+            .caps
+            .int8_mma_m16n8k32;
+    eligible.then_some(fm)
+}
+
 /// Tiled matmul dispatch for M > 64.
 ///
 /// Returns `Ok(None)` when the format has no dedicated kernel (callers fall
@@ -85,33 +126,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_matmul(
     // IQ3_S and IQ1_S the dequantize-then-f32 GEMM named by `kernel_name`
     // above, which is the only other GEMM path any of them has. A new format
     // joins by adding a `FeatMajorFormat` and a match arm here.
-    let feat_major = match format {
-        QuantFormat::Q8_0 => Some(&mmq_feat_major::Q8_0),
-        QuantFormat::Q4_0 => Some(&mmq_feat_major::Q4_0),
-        QuantFormat::Q4_1 => Some(&mmq_feat_major::Q4_1),
-        QuantFormat::Q5_0 => Some(&mmq_feat_major::Q5_0),
-        QuantFormat::Q5_1 => Some(&mmq_feat_major::Q5_1),
-        QuantFormat::Q4K => Some(&mmq_feat_major::Q4_K),
-        QuantFormat::Q5K => Some(&mmq_feat_major::Q5_K),
-        QuantFormat::Q6K => Some(&mmq_feat_major::Q6_K),
-        QuantFormat::Q3K => Some(&mmq_feat_major::Q3_K),
-        QuantFormat::Q2K => Some(&mmq_feat_major::Q2_K),
-        QuantFormat::IQ4NL => Some(&mmq_feat_major::IQ4_NL),
-        QuantFormat::IQ4XS => Some(&mmq_feat_major::IQ4_XS),
-        QuantFormat::IQ2XXS => Some(&mmq_feat_major::IQ2_XXS),
-        QuantFormat::IQ2XS => Some(&mmq_feat_major::IQ2_XS),
-        QuantFormat::IQ2S => Some(&mmq_feat_major::IQ2_S),
-        QuantFormat::IQ3XXS => Some(&mmq_feat_major::IQ3_XXS),
-        QuantFormat::IQ3S => Some(&mmq_feat_major::IQ3_S),
-        QuantFormat::IQ1S => Some(&mmq_feat_major::IQ1_S),
-        _ => None,
-    };
-    if let Some(fm) = feat_major
-        && k.is_multiple_of(fm.k_multiple as usize)
-        && numr::runtime::cuda::CudaDevice::new(device_index)
-            .profile()
-            .caps
-            .int8_mma_m16n8k32
+    if let Some(fm) = feat_major_format(format, k, device_index)
         && mmq_feat_major::dispatch(fm, client, act_contig, weight, output_ptr, m, k, n)?.is_some()
     {
         return Ok(Some(()));

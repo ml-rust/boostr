@@ -78,6 +78,22 @@ fn select_variant(m: u32, smem_limit: u32, format: &FeatMajorFormat) -> Option<u
     best.map(|(mmq_x, _)| mmq_x)
 }
 
+/// Whether some compiled variant serves `m` tokens of `format` on this
+/// device — the same test [`dispatch`] applies before it quantizes.
+pub(in crate::quant::cuda::quant_matmul) fn variant_fits(
+    format: &FeatMajorFormat,
+    m: usize,
+    device_index: usize,
+) -> bool {
+    let profile = CudaDevice::new(device_index).profile();
+    select_variant(
+        m as u32,
+        smem_opt_in_limit(profile.shared_mem_per_unit),
+        format,
+    )
+    .is_some()
+}
+
 /// Opts a function in to more than the static shared-memory limit. Required
 /// before the first launch of every variant; the limit is per function.
 fn opt_in_shared(func: &CudaFunction, bytes: u32, name: &str) -> Result<()> {
@@ -88,6 +104,26 @@ fn opt_in_shared(func: &CudaFunction, bytes: u32, name: &str) -> Result<()> {
     .map_err(|e| Error::QuantError {
         reason: format!("CUDA {name} shared-memory opt-in failed: {e:?}"),
     })
+}
+
+/// The activation record every variant can read: token slots padded to the
+/// widest token tile.
+///
+/// A variant's staging copies `mmq_x` records per tile from `tok0`, so a
+/// buffer padded to a multiple of any larger tile holds every tile's copy.
+/// One activation quantized this way serves several weights whose variants
+/// differ, which is what `quant_matmul_batch` needs: the record is 9/8 of
+/// the f32 row, so the padding costs at most one widest tile of tokens.
+///
+/// Returns the buffer and its token stride, the `ntok` the kernels take.
+pub(in crate::quant::cuda::quant_matmul) fn quantize_shared_activation(
+    client: &CudaClient,
+    act_contig: &Tensor<CudaRuntime>,
+    m: usize,
+    k: usize,
+) -> Result<(Tensor<CudaRuntime>, u32)> {
+    let widest = *VARIANTS.last().unwrap_or(&FEAT_TILE) as usize;
+    quantize_activation_q8_1_mmq(client, act_contig, m, k, widest)
 }
 
 /// Runs one quantized weight x F32 activation through the feature-major MMQ
@@ -104,7 +140,50 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch(
     k: usize,
     n: usize,
 ) -> Result<Option<()>> {
-    let device = act_contig.device();
+    let device_index = act_contig.device().id();
+    let profile = CudaDevice::new(device_index).profile();
+    let Some(mmq_x) = select_variant(
+        m as u32,
+        smem_opt_in_limit(profile.shared_mem_per_unit),
+        format,
+    ) else {
+        return Ok(None);
+    };
+
+    // This path reads its own activation layout, k-group-major and
+    // token-minor, so the tile copy is flat. The per-token producer stays
+    // untouched for `quant_mmq_q8_0_q8_1_mma`, dp4a and the K-quants.
+    let (q8_buf, ntok) = quantize_activation_q8_1_mmq(client, act_contig, m, k, mmq_x as usize)?;
+    dispatch_quantized(
+        format,
+        client,
+        act_contig.device(),
+        q8_buf.ptr(),
+        ntok,
+        weight,
+        output_ptr,
+        m,
+        k,
+        n,
+    )
+}
+
+/// [`dispatch`] with the activation already in the MMQ record layout at
+/// `q8_ptr` with token stride `ntok` — from [`quantize_shared_activation`],
+/// or from a producer sized for this call's own variant.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::quant::cuda::quant_matmul) fn dispatch_quantized(
+    format: &FeatMajorFormat,
+    client: &CudaClient,
+    device: &CudaDevice,
+    q8_ptr: u64,
+    ntok: u32,
+    weight: &QuantTensor<CudaRuntime>,
+    output_ptr: u64,
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Result<Option<()>> {
     let device_index = device.id();
     let profile = CudaDevice::new(device_index).profile();
 
@@ -126,11 +205,15 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch(
     let tiles = token_tiles * feat_tiles;
     let sms = profile.compute_units;
 
-    // This path reads its own activation layout, k-group-major and
-    // token-minor, so the tile copy is flat. The per-token producer stays
-    // untouched for `quant_mmq_q8_0_q8_1_mma`, dp4a and the K-quants.
-    let (q8_buf, ntok) = quantize_activation_q8_1_mmq(client, act_contig, m, k, mmq_x as usize)?;
-    let q8_ptr = q8_buf.ptr();
+    // The record's token stride must cover this variant's last tile copy.
+    if ntok < token_tiles * mmq_x {
+        return Err(Error::QuantError {
+            reason: format!(
+                "MMQ activation record has {ntok} token slots, variant x{mmq_x} over {m} tokens needs {}",
+                token_tiles * mmq_x
+            ),
+        });
+    }
     let weight_ptr = weight.storage().ptr();
 
     let module = kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE)?;

@@ -1,8 +1,11 @@
-//! Batched dp4a GEMV path for `quant_matmul_batch`.
+//! Batched paths for `quant_matmul_batch`: one activation, several weights.
 //!
 //! Split out of `impl_ops.rs` to stay under the `cuda/*.rs` 400-line limit.
-//! Quantizes the shared activation to Q8_1 once, then reuses it across every
-//! weight in the batch instead of re-quantizing per weight.
+//! Quantizes the shared activation once, then reuses it across every weight
+//! in the batch instead of re-quantizing per weight: the dp4a GEMV record
+//! when every weight is in its GEMV regime, the feature-major MMQ record
+//! otherwise. A projection trio (q, k, v) or pair (gate, up) then costs one
+//! activation pass, not one per weight.
 
 use crate::error::{Error, Result};
 use crate::quant::traits::QuantMatmulOps;
@@ -17,10 +20,13 @@ use numr::tensor::Tensor;
 use super::super::kernels::{
     self, GEMV_Q2_K_MODULE, GEMV_Q3_K_MODULE, GEMV_Q5_K_MODULE, QUANT_GEMV_MODULE,
 };
+use super::format_dispatch::{feat_major_format, gemv_max_m};
 use super::helpers::quantize_activation_q8_1;
+use super::mmq_feat_major;
 
-/// Batched quantized matmul: dp4a GEMV when every weight qualifies, else
-/// falls back to calling `quant_matmul` per weight.
+/// Batched quantized matmul: dp4a GEMV when every weight is in its GEMV
+/// regime, the feature-major MMQ kernels over one shared activation record
+/// when every weight has one, else `quant_matmul` per weight.
 pub(super) fn quant_matmul_batch_impl(
     client: &CudaClient,
     activation: &Tensor<CudaRuntime>,
@@ -63,13 +69,23 @@ pub(super) fn quant_matmul_batch_impl(
             )
         })
     });
-    let use_dp4a = all_dp4a && m <= 4 && k.is_multiple_of(32);
+    let device_index = activation.device().id();
+    // The batch takes the GEMV kernels only where the single-weight dispatch
+    // would: past a format's crossover the MMQ kernels win, and a batch is
+    // no reason to hand it a slower kernel.
+    let all_gemv_regime = weights
+        .iter()
+        .all(|w| w.format().is_ok_and(|f| m <= gemv_max_m(f, device_index)));
+    let use_dp4a = all_dp4a && all_gemv_regime && m <= 4 && k.is_multiple_of(32);
+
+    if !use_dp4a && let Some(outputs) = mmq_batch(client, activation, &act_contig, weights, m, k)? {
+        return Ok(outputs);
+    }
 
     if use_dp4a {
         // Quantize activation to Q8_1 ONCE, reuse for all weights
         let q8_buf = quantize_activation_q8_1(client, &act_contig, m, k)?;
         let q8_ptr = q8_buf.ptr();
-        let device_index = activation.device().id();
 
         let m_u32 = m as u32;
         let k_u32 = k as u32;
@@ -186,4 +202,76 @@ pub(super) fn quant_matmul_batch_impl(
             .map(|w| client.quant_matmul(activation, w))
             .collect()
     }
+}
+
+/// The feature-major MMQ kernels over ONE activation record shared by every
+/// weight. `Ok(None)` when some weight has no such kernel at this `k` on
+/// this device, or no variant fits it; the caller then runs each weight on
+/// its own.
+///
+/// Every weight is checked before anything is quantized or launched, so a
+/// batch never runs half on one path and half on another.
+fn mmq_batch(
+    client: &CudaClient,
+    activation: &Tensor<CudaRuntime>,
+    act_contig: &Tensor<CudaRuntime>,
+    weights: &[&QuantTensor<CudaRuntime>],
+    m: usize,
+    k: usize,
+) -> Result<Option<Vec<Tensor<CudaRuntime>>>> {
+    let device = activation.device();
+    let device_index = device.id();
+    let mut formats = Vec::with_capacity(weights.len());
+    for w in weights {
+        let w_shape = w.shape();
+        if w_shape.len() != 2 || w_shape[1] != k {
+            return Err(Error::QuantError {
+                reason: format!(
+                    "quant_matmul_batch weight shape mismatch: {:?}, expected [N, {}]",
+                    w_shape, k
+                ),
+            });
+        }
+        let Ok(format) = w.format() else {
+            return Ok(None);
+        };
+        let Some(fm) = feat_major_format(format, k, device_index) else {
+            return Ok(None);
+        };
+        if !mmq_feat_major::variant_fits(fm, m, device_index) {
+            return Ok(None);
+        }
+        formats.push(fm);
+    }
+
+    let (q8_buf, ntok) = mmq_feat_major::quantize_shared_activation(client, act_contig, m, k)?;
+    let q8_ptr = q8_buf.ptr();
+
+    let a_shape = activation.shape();
+    let mut results = Vec::with_capacity(weights.len());
+    for (w, fm) in weights.iter().zip(formats) {
+        let n = w.shape()[0];
+        let mut out_shape = a_shape[..a_shape.len() - 1].to_vec();
+        out_shape.push(n);
+        let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, device)?;
+        let launched = mmq_feat_major::dispatch_quantized(
+            fm,
+            client,
+            device,
+            q8_ptr,
+            ntok,
+            w,
+            output.ptr(),
+            m,
+            k,
+            n,
+        )?;
+        if launched.is_none() {
+            return Err(Error::QuantError {
+                reason: "MMQ batch: a variant that fit at planning time did not launch".into(),
+            });
+        }
+        results.push(output);
+    }
+    Ok(Some(results))
 }

@@ -16,6 +16,7 @@ pub mod paged_attention;
 pub mod paged_decode_split;
 pub mod quant_fused;
 pub mod quant_int4_gemm;
+pub mod quant_matmul_batch;
 pub mod quant_matmul_gguf_gemm;
 pub mod quant_matmul_q4k;
 pub mod quant_matmul_q8_0;

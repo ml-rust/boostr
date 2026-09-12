@@ -6,5 +6,5 @@
 mod gemm;
 mod gemv;
 
-pub(in crate::quant::cuda::quant_matmul) use gemm::dispatch_matmul;
+pub(in crate::quant::cuda::quant_matmul) use gemm::{dispatch_matmul, feat_major_format};
 pub(in crate::quant::cuda::quant_matmul) use gemv::{dispatch_gemv, gemv_max_m};

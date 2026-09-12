@@ -151,9 +151,16 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
-        let q = self.q_proj.forward(client, x)?;
-        let k = self.k_proj.forward(client, x)?;
-        let v = self.v_proj.forward(client, x)?;
+        // One activation pass for the three projections: a quantized weight
+        // set quantizes `x` once and reuses it.
+        let mut qkv =
+            MaybeLoraLinear::forward_batch(&[&self.q_proj, &self.k_proj, &self.v_proj], client, x)?
+                .into_iter();
+        let (Some(q), Some(k), Some(v)) = (qkv.next(), qkv.next(), qkv.next()) else {
+            return Err(Error::ModelError {
+                reason: "forward_batch returned fewer outputs than layers".into(),
+            });
+        };
 
         let (cos, sin) = match (self.no_rope, rope) {
             (true, _) => (None, None),
@@ -236,9 +243,16 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
         }
         let (batch, seq) = (shape[0], shape[1]);
 
-        let q = self.q_proj.forward(client, x)?;
-        let k = self.k_proj.forward(client, x)?;
-        let v = self.v_proj.forward(client, x)?;
+        // One activation pass for the three projections: a quantized weight
+        // set quantizes `x` once and reuses it.
+        let mut qkv =
+            MaybeLoraLinear::forward_batch(&[&self.q_proj, &self.k_proj, &self.v_proj], client, x)?
+                .into_iter();
+        let (Some(q), Some(k), Some(v)) = (qkv.next(), qkv.next(), qkv.next()) else {
+            return Err(Error::ModelError {
+                reason: "forward_batch returned fewer outputs than layers".into(),
+            });
+        };
 
         // [B, S, H*D] -> [B, S, H, D] -> [B, H, S, D]
         let q =

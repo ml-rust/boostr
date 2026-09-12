@@ -51,8 +51,15 @@ impl<R: Runtime<DType = DType>> MiniCpm4Mlp<R> {
             + UnaryOps<R>
             + DequantOps<R>,
     {
-        let gate = self.gate_proj.forward(client, x)?;
-        let up = self.up_proj.forward(client, x)?;
+        // One activation pass for gate and up: a quantized weight pair
+        // quantizes `x` once and reuses it.
+        let mut gu = MaybeLoraLinear::forward_batch(&[&self.gate_proj, &self.up_proj], client, x)?
+            .into_iter();
+        let (Some(gate), Some(up)) = (gu.next(), gu.next()) else {
+            return Err(Error::ModelError {
+                reason: "forward_batch returned fewer outputs than layers".into(),
+            });
+        };
         let hidden = var_silu_mul(&gate, &up, client).map_err(Error::Numr)?;
         self.down_proj.forward(client, &hidden)
     }

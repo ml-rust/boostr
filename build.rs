@@ -658,6 +658,7 @@ fn collect_headers(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
+#[cfg(feature = "cuda")]
 fn find_nvcc() -> Option<String> {
     use std::env;
     use std::path::PathBuf;

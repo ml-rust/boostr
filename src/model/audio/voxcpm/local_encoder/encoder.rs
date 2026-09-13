@@ -137,15 +137,35 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
         let flat = var_reshape(&with_cls, &[batch * seq_t, seq_len, self.hidden_dim])
             .map_err(Error::Numr)?;
 
-        let mut h = flat;
-        for layer in &self.layers {
-            h = if self.activation_checkpointing {
-                layer.forward_checkpointed(client, &h, &self.rope)?
-            } else {
-                layer.forward(client, &h, &self.rope)?
-            };
-        }
-        let h = self.norm.forward(client, &h)?;
+        let h = if self.activation_checkpointing {
+            let mut h = flat;
+            for layer in &self.layers {
+                h = layer.forward_checkpointed(client, &h, &self.rope)?;
+            }
+            self.norm.forward(client, &h)?
+        } else {
+            // Deferred-residual fusion across layers: each layer folds the
+            // PREVIOUS layer's MLP output into its own input norm instead of
+            // a separate add, and hands its own MLP output on unadded. See
+            // `BidirectionalLayer::forward_with_pending_residual`.
+            let mut h = flat;
+            let mut pending: Option<Var<R>> = None;
+            for layer in &self.layers {
+                let (new_h, mlp_out) = layer.forward_with_pending_residual(
+                    client,
+                    &h,
+                    pending.as_ref(),
+                    &self.rope,
+                )?;
+                h = new_h;
+                pending = Some(mlp_out);
+            }
+            match pending {
+                Some(last_mlp) => self.norm.residual_norm(client, &h, &last_mlp)?.0,
+                // `self.layers` is empty: nothing was deferred.
+                None => self.norm.forward(client, &h)?,
+            }
+        };
 
         // CLS-pool: position 0 only, reshape [(B*T), 1, H] -> [B, T, H].
         // `narrow` yields a view over a strided slice; `reshape` needs it

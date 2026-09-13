@@ -6,8 +6,8 @@
 
 use crate::error::{Error, Result};
 use crate::nn::module::Module;
-use numr::autograd::{Var, var_rms_norm};
-use numr::ops::{NormalizationOps, ScalarOps, TensorOps};
+use numr::autograd::{Var, var_add, var_rms_norm};
+use numr::ops::{BinaryOps, NormalizationOps, ScalarOps, TensorOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::{Tensor, TensorId};
 
@@ -78,6 +78,34 @@ impl<R: Runtime> RmsNorm<R> {
             )
             .map_err(Error::Numr)?;
         Ok((Var::new(normed, false), Var::new(pre_norm, false)))
+    }
+
+    /// Residual add + this norm, taking the fused single-kernel path only
+    /// when safe. `fused_add_forward` bypasses autograd, so fusing while
+    /// `x` or `delta` still needs a gradient would drop backprop to that
+    /// operand (e.g. a LoRA adapter or an earlier layer).
+    ///
+    /// Returns `(normed, added)`: `normed` is `norm(x + delta)`; `added` is
+    /// the un-normed `x + delta`, which the caller threads on as the next
+    /// residual (or as `pending` into the next deferred-residual call).
+    pub fn residual_norm<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        delta: &Var<R>,
+    ) -> Result<(Var<R>, Var<R>)>
+    where
+        R: Runtime,
+        C: RuntimeClient<R> + NormalizationOps<R> + BinaryOps<R> + TensorOps<R> + ScalarOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R>,
+    {
+        if x.requires_grad() || delta.requires_grad() {
+            let added = var_add(x, delta, client).map_err(Error::Numr)?;
+            let normed = self.forward(client, &added)?;
+            Ok((normed, added))
+        } else {
+            self.fused_add_forward(client, x, delta)
+        }
     }
 
     /// Get the weight parameter

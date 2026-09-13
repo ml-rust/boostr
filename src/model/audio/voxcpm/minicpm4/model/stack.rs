@@ -156,15 +156,35 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
 
         // `alias`, never `clone`: `Var::clone` mints a fresh `TensorId`,
         // which orphans a caller's gradient when `inputs_embeds` is a leaf.
-        let mut h = inputs_embeds.alias();
-        for layer in &self.layers {
-            h = if self.activation_checkpointing {
-                layer.forward_checkpointed(client, &h, self.rope.as_ref())?
-            } else {
-                layer.forward(client, &h, self.rope.as_ref())?
-            };
+        if self.activation_checkpointing {
+            let mut h = inputs_embeds.alias();
+            for layer in &self.layers {
+                h = layer.forward_checkpointed(client, &h, self.rope.as_ref())?;
+            }
+            return self.norm.forward(client, &h);
         }
-        self.norm.forward(client, &h)
+
+        // Deferred-residual fusion across layers: each layer folds the
+        // PREVIOUS layer's MLP output into its own input norm instead of a
+        // separate add, and hands its own MLP output on unadded. See
+        // `MiniCpm4Layer::forward_with_pending_residual`.
+        let mut h = inputs_embeds.alias();
+        let mut pending: Option<Var<R>> = None;
+        for layer in &self.layers {
+            let (new_h, mlp_out) = layer.forward_with_pending_residual(
+                client,
+                &h,
+                pending.as_ref(),
+                self.rope.as_ref(),
+            )?;
+            h = new_h;
+            pending = Some(mlp_out);
+        }
+        match pending {
+            Some(last_mlp) => Ok(self.norm.residual_norm(client, &h, &last_mlp)?.0),
+            // `self.layers` is empty: nothing was deferred.
+            None => self.norm.forward(client, &h),
+        }
     }
 }
 

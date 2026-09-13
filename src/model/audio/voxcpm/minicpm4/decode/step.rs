@@ -168,14 +168,32 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
+        // Deferred-residual fusion across layers: each layer folds the
+        // PREVIOUS layer's MLP output into its own input norm instead of a
+        // separate add, and hands its own MLP output on unadded. See
+        // `MiniCpm4Layer::forward_with_pending_residual`.
         let mut h = x.clone();
+        let mut pending: Option<Var<R>> = None;
         for (i, layer) in self.layers.iter().enumerate() {
             let cache = kv_cache.layer_mut(i).ok_or_else(|| Error::ModelError {
                 reason: format!("KV cache missing for layer {i}"),
             })?;
-            h = layer.forward_cached(client, &h, self.rope.as_ref(), cache, position)?;
+            let (new_h, mlp_out) = layer.forward_cached_with_pending_residual(
+                client,
+                &h,
+                pending.as_ref(),
+                self.rope.as_ref(),
+                cache,
+                position,
+            )?;
+            h = new_h;
+            pending = Some(mlp_out);
         }
-        self.norm.forward(client, &h)
+        match pending {
+            Some(last_mlp) => Ok(self.norm.residual_norm(client, &h, &last_mlp)?.0),
+            // `self.layers` is empty: nothing was deferred.
+            None => self.norm.forward(client, &h),
+        }
     }
 }
 

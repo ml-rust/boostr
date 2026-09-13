@@ -51,13 +51,66 @@ impl<R: Runtime<DType = DType>> BidirectionalLayer<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
-        let normed = self.input_layernorm.forward(client, x)?;
-        let attn_out = self.self_attn.forward(client, &normed, rope)?;
-        let h = var_add(x, &attn_out, client).map_err(Error::Numr)?;
-
-        let normed = self.post_attention_layernorm.forward(client, &h)?;
-        let mlp_out = self.mlp.forward(client, &normed)?;
+        let (h, mlp_out) = self.forward_with_pending_residual(client, x, None, rope)?;
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
+    }
+
+    /// Same computation as [`forward`](Self::forward), but accepts the
+    /// PREVIOUS layer's deferred MLP output (`pending`) and defers this
+    /// layer's OWN MLP output to the caller instead of finishing the final
+    /// residual add here — one fewer kernel launch per layer boundary.
+    /// Mirrors the deferred-residual pattern `LlamaBlock::forward_with_kv_cache`
+    /// uses (`src/model/llama/model/blocks/block.rs`), which is `pub(super)`
+    /// and so out of reach for an intra-doc link from here.
+    ///
+    /// Returns `(h, mlp_out)`: `h` is `(x + pending) + attn_out` (the
+    /// residual after attention, with `pending` already folded in), and
+    /// `mlp_out` is this layer's UNADDED MLP output — the caller passes it as
+    /// `pending` to the NEXT layer, or folds it into the model's final norm
+    /// after the last layer (same fold [`forward`] does for its own output).
+    ///
+    /// Each of the two fuse points (`pending` into `input_layernorm`, and the
+    /// attention residual into `post_attention_layernorm`) is taken only when
+    /// neither operand needs a gradient: `fused_add_forward` bypasses
+    /// autograd, so fusing under a live graph would drop backprop to a LoRA
+    /// adapter or an earlier layer.
+    pub fn forward_with_pending_residual<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        pending: Option<&Var<R>>,
+        rope: &RoPE<R>,
+    ) -> Result<(Var<R>, Var<R>)>
+    where
+        C: ModelClient<R> + TypeConversionOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + DequantOps<R>,
+    {
+        let (normed, x) = match pending {
+            Some(prev_mlp) => self.input_layernorm.residual_norm(client, x, prev_mlp)?,
+            None => {
+                let normed = self.input_layernorm.forward(client, x)?;
+                (normed, x.clone())
+            }
+        };
+
+        let attn_out = self.self_attn.forward(client, &normed, rope)?;
+
+        let (normed, h) = self
+            .post_attention_layernorm
+            .residual_norm(client, &x, &attn_out)?;
+
+        let mlp_out = self.mlp.forward(client, &normed)?;
+        Ok((h, mlp_out))
     }
 
     /// Same result as [`forward`](Self::forward), computed with activation
@@ -260,6 +313,96 @@ mod tests {
 
     fn values(tensor: &Tensor<CpuRuntime>) -> Vec<f32> {
         tensor.contiguous().expect("contiguous").to_vec::<f32>()
+    }
+
+    /// The fused residual-add + RMSNorm path (`x.requires_grad() == false`)
+    /// must compute the SAME numbers as the unfused path (`true`), on
+    /// otherwise-identical weights and input. Only `requires_grad` differs
+    /// between the two calls, so any drift here means the fused branch in
+    /// `forward` picked the wrong kernel or the wrong operands.
+    #[test]
+    fn fused_add_forward_matches_unfused_residual_path() {
+        let (client, device) = cpu_setup();
+        let layer = layer(1.0, &device);
+        let rope = RoPE::<CpuRuntime>::precompute_freqs(32, HEAD_DIM, 10000.0, None, &device)
+            .expect("rope")
+            .narrow_positions(SEQ)
+            .expect("narrow");
+        let x_data = t(&[1, SEQ, HIDDEN_DIM], 0.3, &device);
+
+        let x_fused = Var::new(x_data.clone(), false);
+        let out_fused = layer
+            .forward(&client, &x_fused, &rope)
+            .expect("fused forward");
+
+        // `requires_grad(true)` on a leaf with no `grad_fn` forces the
+        // unfused branch without changing a single computed value.
+        let x_unfused = Var::new(x_data, true);
+        let out_unfused = layer
+            .forward(&client, &x_unfused, &rope)
+            .expect("unfused forward");
+
+        let fused = values(out_fused.tensor());
+        let unfused = values(out_unfused.tensor());
+        assert_eq!(fused.len(), unfused.len());
+        for (a, b) in fused.iter().zip(&unfused) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "fused vs unfused residual+norm diverged: {a} vs {b}"
+            );
+        }
+    }
+
+    /// Cross-layer deferred-residual fusion (a 2-layer stack, mirroring
+    /// `LocalEncoder`/`LocalDit`'s loop) must compute the SAME numbers as
+    /// running each layer's own `forward` in sequence and applying the
+    /// final norm separately — that sequential form is exactly what the
+    /// model-level loop did before cross-layer threading existed.
+    #[test]
+    fn cross_layer_pending_residual_matches_sequential_two_layer_stack() {
+        let (client, device) = cpu_setup();
+        let layer_a = layer(1.0, &device);
+        let layer_b = layer(2.0, &device);
+        let final_norm = norm(&device);
+        let rope = RoPE::<CpuRuntime>::precompute_freqs(32, HEAD_DIM, 10000.0, None, &device)
+            .expect("rope")
+            .narrow_positions(SEQ)
+            .expect("narrow");
+        let x_data = t(&[1, SEQ, HIDDEN_DIM], 0.3, &device);
+
+        // Reference: sequential single-layer `forward` calls, final norm
+        // applied separately afterward.
+        let x_ref = Var::new(x_data.clone(), false);
+        let h1 = layer_a
+            .forward(&client, &x_ref, &rope)
+            .expect("layer a forward");
+        let h2 = layer_b
+            .forward(&client, &h1, &rope)
+            .expect("layer b forward");
+        let reference = final_norm.forward(&client, &h2).expect("final norm");
+
+        // Cross-layer deferred-residual path: layer b's input norm fuses
+        // with layer a's mlp_out, and the final norm fuses with layer b's.
+        let x_fused = Var::new(x_data, false);
+        let (h1p, mlp1) = layer_a
+            .forward_with_pending_residual(&client, &x_fused, None, &rope)
+            .expect("layer a pending");
+        let (h2p, mlp2) = layer_b
+            .forward_with_pending_residual(&client, &h1p, Some(&mlp1), &rope)
+            .expect("layer b pending");
+        let (fused_out, _) = final_norm
+            .fused_add_forward(&client, &h2p, &mlp2)
+            .expect("final fused add+norm");
+
+        let reference = values(reference.tensor());
+        let fused = values(fused_out.tensor());
+        assert_eq!(reference.len(), fused.len());
+        for (a, b) in reference.iter().zip(&fused) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "cross-layer fused vs sequential diverged: {a} vs {b}"
+            );
+        }
     }
 
     /// The load-bearing test for activation checkpointing.

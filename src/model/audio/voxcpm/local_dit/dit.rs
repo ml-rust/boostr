@@ -128,10 +128,67 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
             + DequantOps<R>,
     {
         let batch = self.check_patch_input("x", x, None)?;
-        self.check_patch_input("cond", cond, Some(batch))?;
         let mu_tokens = self.check_mu(mu, batch)?;
+
+        // `mu.view(b, -1, hidden)`: mu_tokens sequence positions. Callers
+        // that evaluate the estimator many times over one FIXED `mu` (the
+        // Euler integrator: see `sampler::euler::solve_euler`) should tokenize
+        // it ONCE and call `forward_with_mu_tokens` directly instead of
+        // paying this reshape on every step.
+        let mu_contig = var_contiguous(mu)?;
+        let mu_tok =
+            var_reshape(&mu_contig, &[batch, mu_tokens, self.hidden_dim]).map_err(Error::Numr)?;
+
+        self.forward_with_mu_tokens(client, x, &mu_tok, t, cond, dt)
+    }
+
+    /// Same estimator evaluation as [`forward`](Self::forward), but `mu`
+    /// arrives ALREADY reshaped to `[batch, mu_tokens, hidden_dim]` sequence
+    /// tokens instead of the flat `[batch, mu_tokens * hidden_dim]` the
+    /// reference passes.
+    ///
+    /// `mu` is IDENTICAL across every step of one Euler solve
+    /// ([`solve_euler`](Self::solve_euler) builds `mu_in` once outside the
+    /// step loop), so re-deriving `mu_tok` from it on every estimator call
+    /// wastes a reshape + contiguous. This is the entry point that lets a
+    /// multi-step caller tokenize once and pass the same `mu_tok` to every
+    /// step; [`forward`] itself does the one-shot tokenization and delegates
+    /// here so single-call sites (training, tests, `boostr-audio`) keep the
+    /// original signature.
+    ///
+    /// `mu_tok`'s middle dimension IS `mu_tokens` — read from its shape, never
+    /// re-derived from a flat width, since there is no flat `mu` here to
+    /// derive it from.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_with_mu_tokens<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        mu_tok: &Var<R>,
+        t: &Var<R>,
+        cond: &Var<R>,
+        dt: &Var<R>,
+    ) -> Result<Var<R>>
+    where
+        C: ModelClient<R> + TypeConversionOps<R> + 'static,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + TypeConversionOps<R>
+            + DequantOps<R>,
+    {
+        let batch = self.check_patch_input("x", x, None)?;
+        self.check_patch_input("cond", cond, Some(batch))?;
         check_timestep("t", t, batch)?;
         check_timestep("dt", dt, batch)?;
+        let mu_tokens = self.check_mu_tokens(mu_tok, batch)?;
 
         // [b, feat_dim, P] -> [b, P, feat_dim] -> [b, P, hidden].
         // `var_transpose` swaps the last two dims and yields a strided view;
@@ -158,24 +215,39 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
         // `t.unsqueeze(1)`: one sequence position.
         let t_tok = var_reshape(&t_sum, &[batch, 1, self.hidden_dim]).map_err(Error::Numr)?;
 
-        // `mu.view(b, -1, hidden)`: mu_tokens sequence positions.
-        let mu_contig = var_contiguous(mu)?;
-        let mu_tok =
-            var_reshape(&mu_contig, &[batch, mu_tokens, self.hidden_dim]).map_err(Error::Numr)?;
-
         // [mu, t, cond, x] along the sequence axis.
-        let seq = var_cat(&[&mu_tok, &t_tok, &cond_h, &x_h], 1, client).map_err(Error::Numr)?;
+        let seq = var_cat(&[mu_tok, &t_tok, &cond_h, &x_h], 1, client).map_err(Error::Numr)?;
 
-        let mut h = seq;
-        for layer in &self.layers {
-            h = if self.activation_checkpointing {
-                layer.forward_checkpointed(client, &h, &self.rope)?
-            } else {
-                layer.forward(client, &h, &self.rope)?
-            };
-        }
         // Final norm BEFORE the slice — it is part of `self.decoder`.
-        let h = self.norm.forward(client, &h)?;
+        let h = if self.activation_checkpointing {
+            let mut h = seq;
+            for layer in &self.layers {
+                h = layer.forward_checkpointed(client, &h, &self.rope)?;
+            }
+            self.norm.forward(client, &h)?
+        } else {
+            // Deferred-residual fusion across layers: each layer folds the
+            // PREVIOUS layer's MLP output into its own input norm instead of
+            // a separate add, and hands its own MLP output on unadded. See
+            // `BidirectionalLayer::forward_with_pending_residual`.
+            let mut h = seq;
+            let mut pending: Option<Var<R>> = None;
+            for layer in &self.layers {
+                let (new_h, mlp_out) = layer.forward_with_pending_residual(
+                    client,
+                    &h,
+                    pending.as_ref(),
+                    &self.rope,
+                )?;
+                h = new_h;
+                pending = Some(mlp_out);
+            }
+            match pending {
+                Some(last_mlp) => self.norm.residual_norm(client, &h, &last_mlp)?.0,
+                // `self.layers` is empty: nothing was deferred.
+                None => self.norm.forward(client, &h)?,
+            }
+        };
 
         // Keep only the trailing `x` window: `prefix + mu_tokens + 1 ..`.
         let seq_len = h.shape()[1];
@@ -297,6 +369,31 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
         }
         Ok(shape[1] / self.hidden_dim)
     }
+
+    /// Validate a pre-tokenized `mu_tok: [batch, mu_tokens, hidden_dim]` and
+    /// return `mu_tokens` — read from the shape, never hardcoded. Counterpart
+    /// to [`Self::check_mu`] for [`Self::forward_with_mu_tokens`], whose `mu`
+    /// argument already carries the sequence-position axis [`Self::check_mu`]
+    /// derives from a flat width.
+    fn check_mu_tokens(&self, mu_tok: &Var<R>, batch: usize) -> Result<usize> {
+        let shape = mu_tok.shape();
+        if shape.len() != 3 || shape[0] != batch || shape[2] != self.hidden_dim {
+            return Err(Error::InvalidArgument {
+                arg: "mu_tok",
+                reason: format!(
+                    "expected 3D [{batch}, mu_tokens, {}], got {shape:?}",
+                    self.hidden_dim
+                ),
+            });
+        }
+        if shape[1] == 0 {
+            return Err(Error::InvalidArgument {
+                arg: "mu_tok",
+                reason: format!("expected at least one mu token, got {shape:?}"),
+            });
+        }
+        Ok(shape[1])
+    }
 }
 
 /// Validate a `[batch]` scalar-per-sample timestep (`t` or `dt`).
@@ -364,6 +461,63 @@ mod tests {
         let m = model(2, &device);
         let out = run(&client, &m, &inputs(3, 0.9, 1.7, &device));
         assert_eq!(out.len(), 3 * FEAT_DIM * PATCH_SIZE);
+    }
+
+    /// [`LocalDit::forward_with_mu_tokens`] fed the SAME reshape `forward`
+    /// derives internally must return the identical output — this is the
+    /// contract `solve_euler` relies on to tokenize `mu` once outside the
+    /// step loop instead of once per step.
+    #[test]
+    fn forward_with_mu_tokens_matches_forward() {
+        let (client, device) = cpu_setup();
+        let m = model(2, &device);
+        let i = inputs(2, 0.9, 1.7, &device);
+
+        let via_forward = run(&client, &m, &i);
+
+        let mu_tok =
+            var_reshape(&var_contiguous(&i.mu).unwrap(), &[2, MU_TOKENS, HIDDEN_DIM]).unwrap();
+        let out = m
+            .forward_with_mu_tokens(&client, &i.x, &mu_tok, &i.t, &i.cond, &i.dt)
+            .unwrap();
+        let via_pre_tokenized = out.tensor().contiguous().unwrap().to_vec::<f32>();
+
+        assert_eq!(
+            via_forward, via_pre_tokenized,
+            "pre-tokenized mu must produce the exact same output as forward's own reshape"
+        );
+    }
+
+    /// Cross-layer deferred-residual fusion in the 2-layer backbone
+    /// `model(2, ...)` builds must produce the SAME numbers whether or not
+    /// it takes the fused path. `x.requires_grad() == true` propagates
+    /// through the assembled `[mu, t, cond, x]` sequence into every layer's
+    /// `forward_with_pending_residual`, forcing the whole 2-layer stack AND
+    /// the final norm fold down the unfused branch.
+    #[test]
+    fn cross_layer_fusion_matches_unfused_across_two_layers() {
+        let (client, device) = cpu_setup();
+        let m = model(2, &device);
+        let base = inputs(2, 0.9, 1.7, &device);
+
+        let fused = run(&client, &m, &base);
+
+        let unfused_inputs = Inputs {
+            x: Var::new(base.x.tensor().clone(), true),
+            mu: base.mu,
+            t: base.t,
+            cond: base.cond,
+            dt: base.dt,
+        };
+        let unfused = run(&client, &m, &unfused_inputs);
+
+        assert_eq!(fused.len(), unfused.len());
+        for (a, b) in fused.iter().zip(&unfused) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "cross-layer fused vs unfused diverged: {a} vs {b}"
+            );
+        }
     }
 
     /// The slice window is `prefix + mu_tokens + 1 ..`, i.e. exactly the trailing

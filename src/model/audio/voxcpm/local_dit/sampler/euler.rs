@@ -7,7 +7,7 @@ use crate::model::audio::voxcpm::local_dit::loader::LocalDit;
 use crate::model::traits::ModelClient;
 use crate::nn::var_contiguous;
 use crate::quant::traits::DequantOps;
-use numr::autograd::{Var, var_cat, var_mul_scalar, var_narrow, var_sub};
+use numr::autograd::{Var, var_cat, var_mul_scalar, var_narrow, var_reshape, var_sub};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, RandomOps, ReduceOps,
@@ -86,6 +86,15 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
         );
         let mu_in = var_cat(&[mu, &mu_zero], 0, client).map_err(Error::Numr)?;
         let cond_in = var_cat(&[cond, cond], 0, client).map_err(Error::Numr)?;
+        // `mu_in` does not change across steps: tokenize it ONCE here rather
+        // than paying `LocalDit::forward`'s reshape + contiguous on every
+        // one of `t_span.len() - 1` estimator calls below.
+        let mu_tokens = self.check_mu(&mu_in, 2 * batch)?;
+        let mu_tok = var_reshape(
+            &var_contiguous(&mu_in)?,
+            &[2 * batch, mu_tokens, self.hidden_dim()],
+        )
+        .map_err(Error::Numr)?;
         // The estimator's `dt` is the mean-velocity delta, not the Euler step:
         // `mean_mode` is false on this checkpoint, so it is zero throughout.
         let dt_in = Var::new(
@@ -108,7 +117,8 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
                         .map_err(Error::Numr)?,
                     false,
                 );
-                let out = self.forward(client, &x_in, &mu_in, &t_in, &cond_in, &dt_in)?;
+                let out =
+                    self.forward_with_mu_tokens(client, &x_in, &mu_tok, &t_in, &cond_in, &dt_in)?;
 
                 // First half = real `mu` = conditional. Second half = zero
                 // `mu` = unconditional. The reference calls the second one

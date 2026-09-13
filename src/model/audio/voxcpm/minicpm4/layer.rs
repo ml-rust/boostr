@@ -54,13 +54,66 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
-        let normed = self.input_layernorm.forward(client, x)?;
-        let attn_out = self.self_attn.forward(client, &normed, rope)?;
-        let h = var_add(x, &attn_out, client).map_err(Error::Numr)?;
-
-        let normed = self.post_attention_layernorm.forward(client, &h)?;
-        let mlp_out = self.mlp.forward(client, &normed)?;
+        let (h, mlp_out) = self.forward_with_pending_residual(client, x, None, rope)?;
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
+    }
+
+    /// Same computation as [`forward`](Self::forward), but accepts the
+    /// PREVIOUS layer's deferred MLP output (`pending`) and defers this
+    /// layer's OWN MLP output to the caller instead of finishing the final
+    /// residual add here — one fewer kernel launch per layer boundary.
+    /// Mirrors the deferred-residual pattern `LlamaBlock::forward_with_kv_cache`
+    /// uses (`src/model/llama/model/blocks/block.rs`), which is `pub(super)`
+    /// and so out of reach for an intra-doc link from here.
+    ///
+    /// Returns `(h, mlp_out)`: `h` is `(x + pending) + attn_out` (the
+    /// residual after attention, with `pending` already folded in), and
+    /// `mlp_out` is this layer's UNADDED MLP output — the caller passes it as
+    /// `pending` to the NEXT layer, or folds it into the model's final norm
+    /// after the last layer (same fold [`forward`] does for its own output).
+    ///
+    /// Each of the two fuse points (`pending` into `input_layernorm`, and the
+    /// attention residual into `post_attention_layernorm`) is taken only when
+    /// neither operand needs a gradient: `fused_add_forward` bypasses
+    /// autograd, so fusing under a live graph would drop backprop to a LoRA
+    /// adapter or an earlier layer.
+    pub fn forward_with_pending_residual<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        pending: Option<&Var<R>>,
+        rope: Option<&RoPE<R>>,
+    ) -> Result<(Var<R>, Var<R>)>
+    where
+        C: ModelClient<R> + TypeConversionOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + DequantOps<R>,
+    {
+        let (normed, x) = match pending {
+            Some(prev_mlp) => self.input_layernorm.residual_norm(client, x, prev_mlp)?,
+            None => {
+                let normed = self.input_layernorm.forward(client, x)?;
+                (normed, x.clone())
+            }
+        };
+
+        let attn_out = self.self_attn.forward(client, &normed, rope)?;
+
+        let (normed, h) = self
+            .post_attention_layernorm
+            .residual_norm(client, &x, &attn_out)?;
+
+        let mlp_out = self.mlp.forward(client, &normed)?;
+        Ok((h, mlp_out))
     }
 
     /// Same result as [`forward`](Self::forward), computed with activation
@@ -163,15 +216,56 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
-        let normed = self.input_layernorm.forward(client, x)?;
+        let (h, mlp_out) =
+            self.forward_cached_with_pending_residual(client, x, None, rope, kv_cache, position)?;
+        var_add(&h, &mlp_out, client).map_err(Error::Numr)
+    }
+
+    /// Cross-layer counterpart to [`forward_with_pending_residual`](Self::forward_with_pending_residual),
+    /// for the KV-cached attention path: same `pending`-in / `(h, mlp_out)`-out
+    /// contract, only attention reads and extends `kv_cache` instead of
+    /// recomputing the whole prefix.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_cached_with_pending_residual<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        pending: Option<&Var<R>>,
+        rope: Option<&RoPE<R>>,
+        kv_cache: &mut KvCache<R>,
+        position: usize,
+    ) -> Result<(Var<R>, Var<R>)>
+    where
+        C: ModelClient<R> + TypeConversionOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + DequantOps<R>,
+    {
+        let (normed, x) = match pending {
+            Some(prev_mlp) => self.input_layernorm.residual_norm(client, x, prev_mlp)?,
+            None => {
+                let normed = self.input_layernorm.forward(client, x)?;
+                (normed, x.clone())
+            }
+        };
         let attn_out = self
             .self_attn
             .forward_cached(client, &normed, rope, kv_cache, position)?;
-        let h = var_add(x, &attn_out, client).map_err(Error::Numr)?;
 
-        let normed = self.post_attention_layernorm.forward(client, &h)?;
+        let (normed, h) = self
+            .post_attention_layernorm
+            .residual_norm(client, &x, &attn_out)?;
+
         let mlp_out = self.mlp.forward(client, &normed)?;
-        var_add(&h, &mlp_out, client).map_err(Error::Numr)
+        Ok((h, mlp_out))
     }
 
     /// Delegate to [`MiniCpm4Attention::apply_lora`](super::attention::MiniCpm4Attention::apply_lora)
@@ -347,6 +441,40 @@ mod alias_tests {
 
     fn values(tensor: &Tensor<CpuRuntime>) -> Vec<f32> {
         tensor.contiguous().expect("contiguous").to_vec::<f32>()
+    }
+
+    /// The fused residual-add + RMSNorm path (`x.requires_grad() == false`)
+    /// must compute the SAME numbers as the unfused path (`true`), across the
+    /// WHOLE 2-layer stack `tiny_model` builds — not just one layer.
+    /// `x.requires_grad() == true` on the model input propagates through
+    /// every deferred-residual add (`var_add` sets `requires_grad` when
+    /// either operand does), forcing EVERY layer's `forward_with_pending_residual`
+    /// down the unfused branch, and the model's own final fold too — this is
+    /// what makes a single top-level flag exercise the cross-layer fusion in
+    /// `MiniCpm4Model::forward`'s layer loop, not just one layer's.
+    #[test]
+    fn fused_add_forward_matches_unfused_residual_path() {
+        let (client, device) = cpu_setup();
+        let model = tiny_model(&device);
+        let x_data = filled(&[1, 4, HIDDEN], 99, &device);
+
+        let x_fused = Var::new(x_data.clone(), false);
+        let out_fused = model.forward(&client, &x_fused).expect("fused forward");
+
+        // `requires_grad(true)` on a leaf with no `grad_fn` forces the
+        // unfused branch without changing a single computed value.
+        let x_unfused = Var::new(x_data, true);
+        let out_unfused = model.forward(&client, &x_unfused).expect("unfused forward");
+
+        let fused = values(out_fused.tensor());
+        let unfused = values(out_unfused.tensor());
+        assert_eq!(fused.len(), unfused.len());
+        for (a, b) in fused.iter().zip(&unfused) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "fused vs unfused residual+norm diverged across the 2-layer stack: {a} vs {b}"
+            );
+        }
     }
 
     /// [`MiniCpm4Layer::forward_checkpointed`] must be

@@ -86,6 +86,8 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
         device: &R::Device,
         prefix: &str,
     ) -> Result<usize> {
+        // Before the first swap, so a mid-way error leaves no stale graph.
+        self.invalidate_euler_graphs();
         let mut adapted = adapt_if_targeted(
             &mut self.in_proj,
             targets,
@@ -149,6 +151,9 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
         &mut self,
         params: &std::collections::HashMap<TensorId, Tensor<R>>,
     ) -> Result<usize> {
+        // Adapter tensors are replaced, not written in place: any captured
+        // graph would keep reading the previous allocations.
+        self.invalidate_euler_graphs();
         let mut written = load_lora_child(&mut self.in_proj, params, "estimator.in_proj")?;
         written += load_lora_child(&mut self.cond_proj, params, "estimator.cond_proj")?;
         written += load_lora_child(&mut self.out_proj, params, "estimator.out_proj")?;

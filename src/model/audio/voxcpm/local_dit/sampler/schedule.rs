@@ -79,6 +79,41 @@ pub(super) fn zero_init_steps(span_len: usize) -> usize {
     ((span_len as f64 * 0.04) as usize).max(1)
 }
 
+/// The `(t, dt)` an estimator step is evaluated at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct EulerStep {
+    /// The running `t` fed to the estimator.
+    pub t: f32,
+    /// The Euler step the velocity is scaled by.
+    pub dt: f32,
+}
+
+/// The host-side step plan for `t_span`: one slot per loop step, `None` on a
+/// warmup step (zero velocity, no estimator call), `Some` otherwise.
+///
+/// Both integrators read this ONE plan so they agree bit for bit: the
+/// eager loop consumes it step by step, the captured loop bakes every
+/// `Some` into its graph. `dt` is the running recurrence from the module
+/// doc, never `t_span[k] - t_span[k + 1]`, and `t` and `dt` advance on
+/// warmup steps too.
+///
+/// Requires `t_span.len() >= 2`; the callers check that first.
+pub(super) fn euler_steps(t_span: &[f32], use_cfg_zero_star: bool) -> Vec<Option<EulerStep>> {
+    let warmup = zero_init_steps(t_span.len());
+    let mut plan = Vec::with_capacity(t_span.len().saturating_sub(1));
+    let mut t = t_span[0];
+    let mut dt = t_span[0] - t_span[1];
+    for step in 1..t_span.len() {
+        let active = !(use_cfg_zero_star && step <= warmup);
+        plan.push(active.then_some(EulerStep { t, dt }));
+        t -= dt;
+        if step < t_span.len() - 1 {
+            dt = t - t_span[step + 1];
+        }
+    }
+    plan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +166,31 @@ mod tests {
     #[test]
     fn time_span_rejects_zero_timesteps() {
         assert!(cfm_time_span(0, 1.0).is_err());
+    }
+
+    /// One `None` slot for the single warmup step, then the recurrence: the
+    /// second step's `t` is the RUNNING value, not `t_span[1]` read back.
+    #[test]
+    fn step_plan_skips_the_warmup_and_runs_the_recurrence() {
+        let span = cfm_time_span(10, 1.0).unwrap();
+        let plan = euler_steps(&span, true);
+        assert_eq!(plan.len(), 10);
+        assert!(plan[0].is_none());
+        assert!(plan[1..].iter().all(Option::is_some));
+
+        let dt0 = span[0] - span[1];
+        let t1 = span[0] - dt0;
+        let second = plan[1].unwrap();
+        assert_eq!(second.t.to_bits(), t1.to_bits());
+        assert_eq!(second.dt.to_bits(), (t1 - span[2]).to_bits());
+
+        let no_warmup = euler_steps(&span, false);
+        assert_eq!(
+            no_warmup[0],
+            Some(EulerStep {
+                t: span[0],
+                dt: dt0
+            })
+        );
     }
 }

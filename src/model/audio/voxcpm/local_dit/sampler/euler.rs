@@ -1,7 +1,7 @@
 //! The Euler integration loop and the noise-drawing `sample` wrapper.
 
 use super::guidance::{cfg_combine, optimized_scale};
-use super::schedule::{CfmOptions, cfm_time_span, zero_init_steps};
+use super::schedule::{CfmOptions, EulerStep, cfm_time_span, euler_steps};
 use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::local_dit::loader::LocalDit;
 use crate::model::traits::ModelClient;
@@ -102,15 +102,12 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
             false,
         );
 
-        let warmup = zero_init_steps(t_span.len());
         let mut x = z.clone();
-        let mut t = t_span[0];
-        // Seeded from the schedule once; every later value comes from the
-        // running `t` instead.
-        let mut dt = t_span[0] - t_span[1];
 
-        for step in 1..t_span.len() {
-            if !(use_cfg_zero_star && step <= warmup) {
+        // `t`/`dt` per step come from the shared host plan, which the
+        // graph-captured integrator bakes in verbatim (see `graph::capture`).
+        for slot in euler_steps(t_span, use_cfg_zero_star) {
+            if let Some(EulerStep { t, dt }) = slot {
                 let x_in = var_cat(&[&x, &x], 0, client).map_err(Error::Numr)?;
                 let t_in = Var::new(
                     Tensor::<R>::full_scalar(&[2 * batch], dtype, t as f64, device)
@@ -133,11 +130,7 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
                 x = var_sub(&x, &move_by, client).map_err(Error::Numr)?;
             }
 
-            // Bookkeeping advances even on a warmup step.
-            t -= dt;
-            if step < t_span.len() - 1 {
-                dt = t - t_span[step + 1];
-            }
+            // Recorded on a warmup step too: `x` is unchanged there.
             if let Some(trace) = trajectory.as_deref_mut() {
                 trace.push(x.clone());
             }
@@ -150,8 +143,11 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
     ///
     /// `z` is `randn_seeded(seed) * temperature` over
     /// `[batch, feat_dim, patch_size]`, taking `batch`, dtype and device from
-    /// `cond`. Everything after the draw is [`solve_euler`](Self::solve_euler),
-    /// which is where the per-step trajectory can be captured.
+    /// `cond`. Everything after the draw is
+    /// [`solve_euler_graphed`](Self::solve_euler_graphed): CUDA graph replay
+    /// where available, the eager [`solve_euler`](Self::solve_euler) loop
+    /// elsewhere. Callers that need the per-step trajectory call
+    /// `solve_euler` directly.
     ///
     /// `randn_seeded` is reproducible per backend, so a CPU run and a CUDA run
     /// of one seed start from different noise.
@@ -194,7 +190,7 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
         let z = var_mul_scalar(&Var::new(noise, false), options.temperature as f64, client)
             .map_err(Error::Numr)?;
 
-        self.solve_euler(
+        self.solve_euler_graphed(
             client,
             &z,
             &t_span,

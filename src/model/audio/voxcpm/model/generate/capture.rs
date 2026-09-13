@@ -142,7 +142,10 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         // every consumer here reshapes, so materialize both.
         let cond = var_contiguous(&var_transpose(&state.prefix_feat_cond).map_err(Error::Numr)?)?;
         let t_span = cfm_time_span(options.cfm.n_timesteps, options.cfm.sway_sampling_coef)?;
-        let solved = self.feat_decoder.solve_euler(
+        // Inference-only entry: one CUDA graph launch per patch on CUDA, the
+        // eager loop elsewhere. Fine-tuning never comes through here (see
+        // `train/cfm.rs`), so no autograd tape is lost.
+        let solved = self.feat_decoder.solve_euler_graphed(
             client,
             z,
             &t_span,

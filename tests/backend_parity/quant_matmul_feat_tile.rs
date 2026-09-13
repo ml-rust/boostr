@@ -8,6 +8,9 @@
 //! quantizes the activation the same way. The bound is activation
 //! quantization noise, far tighter than a wrong stage map or warp grid.
 //!
+//! The narrow tile's full-group cadence is forced too, at the shape whose
+//! token tile compiles it, so both of its activation cadences are covered.
+//!
 //! The automatic path is checked too, at a shape starved on any device with
 //! more than a handful of SMs, so the production rule reaches the kernel.
 //!
@@ -108,6 +111,25 @@ fn cuda_both_feature_tiles_match_the_gemv_path() {
                 assert_rows_match_gemv(&client, &device, &weight, &act, &out, (m, n, k), &label);
             }
         }
+    });
+}
+
+#[test]
+fn cuda_the_narrow_group_cadence_matches_the_gemv_path() {
+    with_cuda_backend(|client, device| {
+        // m=44 selects x48 at the narrow tile, which compiles both cadences.
+        let (format, m, n, k) = SHAPES[1];
+        let bytes = weight_bytes(format, n, k);
+        let weight =
+            QuantTensor::from_bytes(&bytes, format, &[n, k], &device).expect("CUDA QuantTensor");
+        let act = activation(m, k);
+        let act_t = Tensor::from_slice(&act, &[m, k], &device).expect("activation");
+        let label = format!("{} m={m} n={n} k={k} feat-tile=64g", format.name());
+        let out =
+            quant_matmul_forced_feat_tile(&client, &act_t, &weight, FeatTile::ForceNarrowGroup)
+                .unwrap_or_else(|e| panic!("{label}: {e}"))
+                .to_vec::<f32>();
+        assert_rows_match_gemv(&client, &device, &weight, &act, &out, (m, n, k), &label);
     });
 }
 

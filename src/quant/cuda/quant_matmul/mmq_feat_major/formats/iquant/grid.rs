@@ -160,7 +160,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ1_S: FeatMajorFormat = FeatMajo
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::super::tiling::{FEAT_TILE_DEFAULT, VARIANTS, smem_bytes};
+    use super::super::super::super::tiling::{Cadence, FEAT_TILE_DEFAULT, VARIANTS, smem_bytes};
     use super::super::super::kquant::{Q4_K, Q6_K};
     use super::super::super::legacy::{Q4_1, Q8_0};
     use super::super::codebook::IQ4_XS;
@@ -204,12 +204,17 @@ mod tests {
         );
         assert_eq!(IQ2_XXS.k_multiple, 256);
         assert_eq!(IQ2_XXS.x_stride, Q8_0.x_stride);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&IQ2_XXS, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(|&x| smem_bytes(
+            &IQ2_XXS,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        ) == smem_bytes(
+            &Q8_0,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        )));
     }
 
     /// IQ2_XS expands the same 8-component grid as IQ2_XXS, so its quant words
@@ -235,12 +240,17 @@ mod tests {
         assert_eq!(IQ2_XS.k_multiple, 256);
         assert_eq!(IQ2_XS.x_stride, Q6_K.x_stride);
         assert_eq!(IQ2_XS.x_stride, IQ2_XXS.x_stride + 8);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&IQ2_XS, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q6_K, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(|&x| smem_bytes(
+            &IQ2_XS,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        ) == smem_bytes(
+            &Q6_K,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        )));
     }
 
     /// IQ2_S packs its scales exactly as IQ2_XS does, so it stages the same
@@ -264,12 +274,17 @@ mod tests {
         assert_eq!(IQ2_S.k_multiple, 256);
         assert_eq!(IQ2_S.x_stride, Q6_K.x_stride);
         assert_eq!(IQ2_S.x_stride, IQ2_XS.x_stride);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&IQ2_S, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q6_K, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(|&x| smem_bytes(
+            &IQ2_S,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        ) == smem_bytes(
+            &Q6_K,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        )));
     }
 
     /// IQ3_XXS expands a 4-component grid, so a sign sub-group costs two grid
@@ -296,12 +311,17 @@ mod tests {
         assert_eq!(IQ3_XXS.k_multiple, 256);
         assert_eq!(IQ3_XXS.x_stride, Q8_0.x_stride);
         const { assert!(IQ3_XXS.prefers_tile_parallel) };
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&IQ3_XXS, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(|&x| smem_bytes(
+            &IQ3_XXS,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        ) == smem_bytes(
+            &Q8_0,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        )));
     }
 
     /// IQ3_S shares IQ3_XXS's grid width and its 32-element scale granularity,
@@ -327,12 +347,17 @@ mod tests {
         assert_eq!(IQ3_S.x_stride, Q8_0.x_stride);
         assert_eq!(IQ3_S.x_stride, IQ3_XXS.x_stride);
         const { assert!(!IQ3_S.prefers_tile_parallel) };
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&IQ3_S, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(|&x| smem_bytes(
+            &IQ3_S,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        ) == smem_bytes(
+            &Q8_0,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        )));
     }
 
     /// IQ1_S is the family's only AFFINE format: its value is
@@ -359,11 +384,16 @@ mod tests {
         assert_eq!(IQ1_S.k_multiple, 256);
         assert_eq!(IQ1_S.x_stride, Q4_K.x_stride);
         assert_eq!(IQ1_S.x_stride, Q4_1.x_stride);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&IQ1_S, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(|&x| smem_bytes(
+            &IQ1_S,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        ) == smem_bytes(
+            &Q4_K,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        )));
     }
 }

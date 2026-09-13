@@ -229,10 +229,15 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS) void quant_mmq_q8_0_q8_1_mm
 // small-N product needs: at the default tile such a product launches fewer
 // blocks than the device has SMs, and most of the device sits idle for the
 // whole K walk. The narrow tile stages the same activation tile for half the
-// features, so it trades activation reuse and per-block barrier cost for that
-// lost parallelism. It is compiled only for the formats whose small-N shapes
-// reach the starved regime, and the host picks it only there. Output across feature tiles is a reassociation class of its own,
-// like stream-k against tile-parallel: bit-stable per variant, not across.
+// features, so it trades activation reuse for that lost parallelism. At its
+// wider token tiles it also compiles a second cadence, `_y64g`
+// (`mmqf_accumulate_group`, selected by the `GROUP` template axis). Its
+// blocks hold a whole 256-k activation group in the shared memory the
+// halved weight tile frees. That halves the barriers per group. It is
+// compiled only for the formats whose small-N shapes reach the starved
+// regime, and the host picks it only there.
+// Output across feature tiles is a reassociation class of its own, like
+// stream-k against tile-parallel: bit-stable per variant, not across.
 //
 // Each `MMQ_X` compiles three entry points: `_x<N>` is tile-parallel (one block
 // per output tile), and `_sk_x<N>` plus `_fixup_x<N>` are the stream-k pair,
@@ -245,13 +250,29 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS) void quant_mmq_q8_0_q8_1_mm
 // Shared memory is DYNAMIC. The largest variants exceed the 48 KB static
 // limit, so the launcher must opt in with
 // `CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES` before the launch and
-// request `4 * (MMQ_Y * FMT::X_STRIDE + MMQ_X * MMQF_Y_STRIDE)` bytes.
+// request `4 * (MMQ_Y * FMT::X_STRIDE + H * MMQ_X * (MMQF_Y_STRIDE +
+// FMT::Y_SCRATCH))` bytes, where `H` is the number of 128-k halves the
+// activation tile holds: two for a `GROUP` cadence entry point, else one.
 // ---------------------------------------------------------------------------
 
 // Feature tile the plain `MMQ_FM_KERNEL` list compiles: output features per
 // block (MMA "rows", operand A). Bodies take the tile as `MMQ_Y`; nothing
 // below reads this define except that entry-point list.
 #define MMQF_Y_DEFAULT 128
+// The narrow feature tile. Besides the halved weight tile it offers a second
+// activation cadence at its wider token tiles: a `GROUP` entry point stages
+// a whole 256-k activation group at once (see `mmqf_accumulate_group`). Its
+// activation tile is twice the default tile's, and the host's
+// shared-memory request must say so.
+#define MMQF_Y_NARROW 64
+// Narrowest token tile that compiles the full-group cadence. The doubled
+// activation tile costs block co-residency, which repays itself only where
+// per-group activation staging dominates the group: the wide token tiles.
+// Below this the narrow tile compiles the halves cadence alone. Which of the
+// two a wide token tile runs is the host's call, by grid size. Under one
+// block per SM nothing co-resides and the halved barriers win. At or above
+// it the halves cadence keeps the overlap the group cadence would lose.
+#define MMQF_GROUP_CADENCE_X 40
 // One warp per 16-feature MMA minitile row of the weight tile, so the warp
 // count is fixed by the feature tile and every per-warp row count in the
 // staging loops is the same at every `MMQ_Y`. Threads follow the warps; the
@@ -292,9 +313,9 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS) void quant_mmq_q8_0_q8_1_mm
 #define MMQF_Y_QS 4
 #define MMQF_Y_STRIDE 36
 // Per-token ints in the optional activation scratch region, which sits
-// straight after the activation tile. One int per 32-value sub-block of the
-// staged 128-k half. Only a format whose minimum term changes every 16
-// elements requests it — see `mmqf_stage_y_sums` and `MmqfQ2K`.
+// straight after each staged 128-k half's activation tile. One int per
+// 32-value sub-block of that half. Only a format whose minimum term changes
+// every 16 elements requests it — see `mmqf_stage_y_sums` and `MmqfQ2K`.
 #define MMQF_Y_SCRATCH 4
 
 static_assert(MMQF_Y_QS + 32 == MMQF_Y_STRIDE, "Wrong activation row stride.");
@@ -3776,16 +3797,24 @@ struct MmqfIQ1S {
 //
 // `b0` is always a multiple of 4, so `b0 / 4` is the k-group index.
 //
+// `HALVES` is how many consecutive k-groups one call stages: one for the
+// two-half cadence, two for the full-group cadence. Consecutive k-groups
+// are `ntok` records apart in the repacked layout, and `HALF_STRIDE` ints
+// apart in shared. Each half is its own flat copy. Both halves' loads
+// are issued before either half's stores, so the second half's global
+// latency overlaps the first's rather than following it.
+//
 // The copy is spread over the block's threads, so a narrower feature tile,
 // with fewer warps, takes more copy iterations per thread for the same
 // activation tile: the tile is per token, not per feature.
-template <int MMQ_Y, int MMQ_X>
+template <int MMQ_Y, int MMQ_X, int HALVES, int HALF_STRIDE>
 static __device__ __forceinline__ void mmqf_stage_y(
     const int* __restrict__ y_packed, int* __restrict__ s_y, unsigned int ntok,
     unsigned int tok0, unsigned int b0
 ) {
     const int* src =
         y_packed + ((unsigned long long)(b0 / 4) * ntok + tok0) * MMQF_Y_STRIDE;
+    const unsigned long long src_half = (unsigned long long)ntok * MMQF_Y_STRIDE;
 
     constexpr int THREADS = MMQF_THREADS_OF(MMQ_Y);
     constexpr int TOTAL = MMQ_X * MMQF_Y_STRIDE;
@@ -3795,29 +3824,35 @@ static __device__ __forceinline__ void mmqf_stage_y(
 
 #pragma unroll
     for (int g = 0; g < CGROUPS; ++g) {
-        int v[CBATCH];
-        // `g` and `u` are compile-time here, so both range tests fold away when
-        // the copy divides evenly.
+        int v[HALVES][CBATCH];
+        // `g`, `h` and `u` are compile-time here, so both range tests fold
+        // away when the copy divides evenly.
 #pragma unroll
-        for (int u = 0; u < CBATCH; ++u) {
-            const int e = g * CBATCH + u;
-            if (e >= CITER) {
-                continue;
-            }
-            const unsigned int l = (unsigned int)(e * THREADS) + threadIdx.x;
-            if (TOTAL % THREADS == 0 || l < (unsigned int)TOTAL) {
-                v[u] = src[l];
+        for (int h = 0; h < HALVES; ++h) {
+#pragma unroll
+            for (int u = 0; u < CBATCH; ++u) {
+                const int e = g * CBATCH + u;
+                if (e >= CITER) {
+                    continue;
+                }
+                const unsigned int l = (unsigned int)(e * THREADS) + threadIdx.x;
+                if (TOTAL % THREADS == 0 || l < (unsigned int)TOTAL) {
+                    v[h][u] = src[h * src_half + l];
+                }
             }
         }
 #pragma unroll
-        for (int u = 0; u < CBATCH; ++u) {
-            const int e = g * CBATCH + u;
-            if (e >= CITER) {
-                continue;
-            }
-            const unsigned int l = (unsigned int)(e * THREADS) + threadIdx.x;
-            if (TOTAL % THREADS == 0 || l < (unsigned int)TOTAL) {
-                s_y[l] = v[u];
+        for (int h = 0; h < HALVES; ++h) {
+#pragma unroll
+            for (int u = 0; u < CBATCH; ++u) {
+                const int e = g * CBATCH + u;
+                if (e >= CITER) {
+                    continue;
+                }
+                const unsigned int l = (unsigned int)(e * THREADS) + threadIdx.x;
+                if (TOTAL % THREADS == 0 || l < (unsigned int)TOTAL) {
+                    s_y[h * HALF_STRIDE + l] = v[h][u];
+                }
             }
         }
     }
@@ -3888,6 +3923,137 @@ static __device__ __forceinline__ void mmqf_stage_y_sums_if(int* __restrict__ s_
     }
 }
 
+// Two-half cadence: the default feature tile's, and the narrow tile's
+// non-`GROUP` entry points. The activation tile holds one 128-k half at a
+// time. Each 256-k group is two stage/sync/vec_dot rounds sharing one
+// staged weight group: four barriers per group, and the second half's
+// activation load waits for the first half's consumers.
+//
+// `[kb0_start, full_stop)` is whole groups; `[full_stop, kb0_stop)` is the
+// ragged tail, non-empty only for `RAGGED_K` formats.
+template <class FMT, int MMQ_Y, int MMQ_X>
+static __device__ __forceinline__ void mmqf_accumulate_halves(
+    const int* __restrict__ y_packed,
+    const unsigned char* __restrict__ weight, int* __restrict__ s_x,
+    int* __restrict__ s_y, float (&acc)[MMQF_NJ(MMQ_X)][MMQF_NTX(MMQ_X)][4], unsigned int ntok,
+    unsigned int N, unsigned int bpr, unsigned int tok0, unsigned int feat0,
+    unsigned int i0, unsigned int jb, unsigned int kb0_start, unsigned int kb0_stop,
+    unsigned int full_stop
+) {
+    for (unsigned int b0 = kb0_start; b0 < full_stop; b0 += MMQF_ITER_B) {
+        FMT::template stage<MMQ_Y, MMQ_X, false>(weight, s_x, N, bpr, feat0, b0);
+        mmqf_stage_y<MMQ_Y, MMQ_X, 1, 0>(y_packed, s_y, ntok, tok0, b0);
+        __syncthreads();
+        mmqf_stage_y_sums_if<FMT, MMQ_Y, MMQ_X>(s_y);
+
+        FMT::template vec_dot<MMQ_X, true>(s_x, s_y, acc, i0, jb, 0, 4);
+        __syncthreads();
+
+        mmqf_stage_y<MMQ_Y, MMQ_X, 1, 0>(y_packed, s_y, ntok, tok0, b0 + 4);
+        __syncthreads();
+        mmqf_stage_y_sums_if<FMT, MMQ_Y, MMQ_X>(s_y);
+
+        FMT::template vec_dot<MMQ_X, true>(s_x, s_y, acc, i0, jb, MMQF_HALF_W, 4);
+        __syncthreads();
+    }
+
+    // `bpr` and the range bounds are uniform across the block, so every barrier
+    // below is still reached by all threads.
+    if constexpr (FMT::RAGGED_K) {
+        if (full_stop < kb0_stop) {
+            const unsigned int nb = kb0_stop - full_stop;
+            FMT::template stage<MMQ_Y, MMQ_X, true>(weight, s_x, N, bpr, feat0, full_stop);
+            mmqf_stage_y<MMQ_Y, MMQ_X, 1, 0>(y_packed, s_y, ntok, tok0, full_stop);
+            __syncthreads();
+            mmqf_stage_y_sums_if<FMT, MMQ_Y, MMQ_X>(s_y);
+
+            FMT::template vec_dot<MMQ_X, false>(s_x, s_y, acc, i0, jb, 0, nb < 4 ? nb : 4);
+
+            if (nb > 4) {
+                __syncthreads();
+                mmqf_stage_y<MMQ_Y, MMQ_X, 1, 0>(y_packed, s_y, ntok, tok0, full_stop + 4);
+                __syncthreads();
+                mmqf_stage_y_sums_if<FMT, MMQ_Y, MMQ_X>(s_y);
+                FMT::template vec_dot<MMQ_X, false>(s_x, s_y, acc, i0, jb, MMQF_HALF_W, nb - 4);
+            }
+        }
+    }
+}
+
+// Full-group cadence, the narrow feature tile's `GROUP` entry points at its
+// wide token tiles. The activation tile holds both 128-k halves of a
+// 256-k group. Each half is a complete record slice plus its own scratch
+// region, `MMQF_Y_GROUP_INTS` ints apart. `vec_dot` and `mmqf_stage_y_sums`
+// see the same per-half layout as the two-half cadence, through a shifted
+// base pointer. One stage, one barrier, both halves' `vec_dot`, one
+// barrier: two barriers per group and one exposed round trip. That is
+// against the halves cadence's four barriers and three round trips. The
+// narrow tile's halved weight tile pays for the doubled activation tile.
+// The host's `smem_bytes` doubles the activation term for this tile and
+// must stay in step.
+//
+// The ragged tail stages only the halves it will consume: the k-group after
+// the last one is not guaranteed to exist in the repacked buffer.
+#define MMQF_Y_GROUP_INTS(X, SCRATCH) ((X) * (MMQF_Y_STRIDE + (SCRATCH)))
+
+template <class FMT, int MMQ_Y, int MMQ_X>
+static __device__ __forceinline__ void mmqf_accumulate_group(
+    const int* __restrict__ y_packed,
+    const unsigned char* __restrict__ weight, int* __restrict__ s_x,
+    int* __restrict__ s_y, float (&acc)[MMQF_NJ(MMQ_X)][MMQF_NTX(MMQ_X)][4], unsigned int ntok,
+    unsigned int N, unsigned int bpr, unsigned int tok0, unsigned int feat0,
+    unsigned int i0, unsigned int jb, unsigned int kb0_start, unsigned int kb0_stop,
+    unsigned int full_stop
+) {
+    static_assert(
+        FMT::Y_SCRATCH == 0 || FMT::Y_SCRATCH == MMQF_Y_SCRATCH, "Unexpected scratch width."
+    );
+    constexpr int HALF = MMQF_Y_GROUP_INTS(MMQ_X, FMT::Y_SCRATCH);
+    int* s_y1 = s_y + HALF;
+
+    for (unsigned int b0 = kb0_start; b0 < full_stop; b0 += MMQF_ITER_B) {
+        FMT::template stage<MMQ_Y, MMQ_X, false>(weight, s_x, N, bpr, feat0, b0);
+        mmqf_stage_y<MMQ_Y, MMQ_X, 2, HALF>(y_packed, s_y, ntok, tok0, b0);
+        __syncthreads();
+        if constexpr (FMT::Y_SCRATCH > 0) {
+            mmqf_stage_y_sums<MMQ_Y, MMQ_X>(s_y, s_y + MMQ_X * MMQF_Y_STRIDE);
+            mmqf_stage_y_sums<MMQ_Y, MMQ_X>(s_y1, s_y1 + MMQ_X * MMQF_Y_STRIDE);
+            __syncthreads();
+        }
+
+        FMT::template vec_dot<MMQ_X, true>(s_x, s_y, acc, i0, jb, 0, 4);
+        FMT::template vec_dot<MMQ_X, true>(s_x, s_y1, acc, i0, jb, MMQF_HALF_W, 4);
+        __syncthreads();
+    }
+
+    // `bpr` and the range bounds are uniform across the block, so every barrier
+    // below is still reached by all threads.
+    if constexpr (FMT::RAGGED_K) {
+        if (full_stop < kb0_stop) {
+            const unsigned int nb = kb0_stop - full_stop;
+            FMT::template stage<MMQ_Y, MMQ_X, true>(weight, s_x, N, bpr, feat0, full_stop);
+            if (nb > 4) {
+                mmqf_stage_y<MMQ_Y, MMQ_X, 2, HALF>(y_packed, s_y, ntok, tok0, full_stop);
+            } else {
+                mmqf_stage_y<MMQ_Y, MMQ_X, 1, 0>(y_packed, s_y, ntok, tok0, full_stop);
+            }
+            __syncthreads();
+            if constexpr (FMT::Y_SCRATCH > 0) {
+                mmqf_stage_y_sums<MMQ_Y, MMQ_X>(s_y, s_y + MMQ_X * MMQF_Y_STRIDE);
+                if (nb > 4) {
+                    mmqf_stage_y_sums<MMQ_Y, MMQ_X>(s_y1, s_y1 + MMQ_X * MMQF_Y_STRIDE);
+                }
+                __syncthreads();
+            }
+
+            FMT::template vec_dot<MMQ_X, false>(s_x, s_y, acc, i0, jb, 0, nb < 4 ? nb : 4);
+            if (nb > 4) {
+                FMT::template vec_dot<MMQ_X, false>(s_x, s_y1, acc, i0, jb, MMQF_HALF_W, nb - 4);
+            }
+        }
+    }
+}
+
 // Runs the k-block range `[kb0_start, kb0_stop)` of one output tile into `acc`,
 // which it also zeroes. `kb0_start` is always a multiple of MMQF_ITER_B;
 // `kb0_stop` is too, unless it is `bpr`, whose last partial 256-k group takes
@@ -3895,8 +4061,9 @@ static __device__ __forceinline__ void mmqf_stage_y_sums_if(int* __restrict__ s_
 //
 // The leading barrier makes the function self-contained: a caller may run
 // several tiles back to back without draining the previous tile's shared reads
-// itself.
-template <class FMT, int MMQ_Y, int MMQ_X>
+// itself. `GROUP` picks the cadence over the group: see
+// `mmqf_accumulate_halves` and `mmqf_accumulate_group`.
+template <class FMT, int MMQ_Y, int MMQ_X, bool GROUP>
 static __device__ __forceinline__ void mmqf_accumulate(
     const int* __restrict__ y_packed,
     const unsigned char* __restrict__ weight, int* __restrict__ s_x,
@@ -3910,6 +4077,10 @@ static __device__ __forceinline__ void mmqf_accumulate(
     // Holds for every format: any multiple of 8 puts consecutive weight rows in
     // the same 128-bit segment and serializes the strided fragment gathers.
     static_assert(FMT::X_STRIDE % 8 == 4, "Wrong weight row padding.");
+    static_assert(
+        !GROUP || (MMQ_Y == MMQF_Y_NARROW && MMQ_X >= MMQF_GROUP_CADENCE_X),
+        "The group cadence is compiled only at the narrow tile's wide token tiles."
+    );
 
 #pragma unroll
     for (int jj = 0; jj < NJ; ++jj) {
@@ -3932,43 +4103,16 @@ static __device__ __forceinline__ void mmqf_accumulate(
     const unsigned int full_stop =
         (FMT::RAGGED_K && kb0_stop == bpr) ? (bpr & ~(MMQF_ITER_B - 1u)) : kb0_stop;
 
-    for (unsigned int b0 = kb0_start; b0 < full_stop; b0 += MMQF_ITER_B) {
-        FMT::template stage<MMQ_Y, MMQ_X, false>(weight, s_x, N, bpr, feat0, b0);
-        mmqf_stage_y<MMQ_Y, MMQ_X>(y_packed, s_y, ntok, tok0, b0);
-        __syncthreads();
-        mmqf_stage_y_sums_if<FMT, MMQ_Y, MMQ_X>(s_y);
-
-        FMT::template vec_dot<MMQ_X, true>(s_x, s_y, acc, i0, jb, 0, 4);
-        __syncthreads();
-
-        mmqf_stage_y<MMQ_Y, MMQ_X>(y_packed, s_y, ntok, tok0, b0 + 4);
-        __syncthreads();
-        mmqf_stage_y_sums_if<FMT, MMQ_Y, MMQ_X>(s_y);
-
-        FMT::template vec_dot<MMQ_X, true>(s_x, s_y, acc, i0, jb, MMQF_HALF_W, 4);
-        __syncthreads();
-    }
-
-    // `bpr` and the range bounds are uniform across the block, so every barrier
-    // below is still reached by all threads.
-    if constexpr (FMT::RAGGED_K) {
-        if (full_stop < kb0_stop) {
-            const unsigned int nb = kb0_stop - full_stop;
-            FMT::template stage<MMQ_Y, MMQ_X, true>(weight, s_x, N, bpr, feat0, full_stop);
-            mmqf_stage_y<MMQ_Y, MMQ_X>(y_packed, s_y, ntok, tok0, full_stop);
-            __syncthreads();
-            mmqf_stage_y_sums_if<FMT, MMQ_Y, MMQ_X>(s_y);
-
-            FMT::template vec_dot<MMQ_X, false>(s_x, s_y, acc, i0, jb, 0, nb < 4 ? nb : 4);
-
-            if (nb > 4) {
-                __syncthreads();
-                mmqf_stage_y<MMQ_Y, MMQ_X>(y_packed, s_y, ntok, tok0, full_stop + 4);
-                __syncthreads();
-                mmqf_stage_y_sums_if<FMT, MMQ_Y, MMQ_X>(s_y);
-                FMT::template vec_dot<MMQ_X, false>(s_x, s_y, acc, i0, jb, MMQF_HALF_W, nb - 4);
-            }
-        }
+    if constexpr (GROUP) {
+        mmqf_accumulate_group<FMT, MMQ_Y, MMQ_X>(
+            y_packed, weight, s_x, s_y, acc, ntok, N, bpr, tok0, feat0, i0, jb, kb0_start,
+            kb0_stop, full_stop
+        );
+    } else {
+        mmqf_accumulate_halves<FMT, MMQ_Y, MMQ_X>(
+            y_packed, weight, s_x, s_y, acc, ntok, N, bpr, tok0, feat0, i0, jb, kb0_start,
+            kb0_stop, full_stop
+        );
     }
 }
 
@@ -4021,7 +4165,7 @@ static __device__ __forceinline__ void mmqf_write_fixup(
 }
 
 // Tile-parallel path: one block per output tile, whole K.
-template <class FMT, int MMQ_Y, int MMQ_X>
+template <class FMT, int MMQ_Y, int MMQ_X, bool GROUP>
 static __device__ __forceinline__ void mmqf_body(
     const int* __restrict__ y_packed,
     const unsigned char* __restrict__ weight,
@@ -4054,8 +4198,8 @@ static __device__ __forceinline__ void mmqf_body(
     const unsigned int feat0 = blockIdx.y * MMQ_Y;
 
     float acc[NJ][NTX][4];
-    mmqf_accumulate<FMT, MMQ_Y, MMQ_X>(y_packed, weight, s_x, s_y, acc, ntok, N, bpr, tok0, feat0,
-                                       i0, jb, 0, bpr);
+    mmqf_accumulate<FMT, MMQ_Y, MMQ_X, GROUP>(y_packed, weight, s_x, s_y, acc, ntok, N, bpr,
+                                              tok0, feat0, i0, jb, 0, bpr);
     mmqf_write_dst<MMQ_X>(output, acc, M, N, tok0, feat0, i0, jb);
 }
 
@@ -4070,7 +4214,7 @@ static __device__ __forceinline__ void mmqf_body(
 // slot. The fixup pass then folds every predecessor's partial into the tile the
 // storing block wrote. This splits the K reduction across blocks, so the sum is
 // reassociated relative to the tile-parallel path.
-template <class FMT, int MMQ_Y, int MMQ_X>
+template <class FMT, int MMQ_Y, int MMQ_X, bool GROUP>
 static __device__ __forceinline__ void mmqf_sk_body(
     const int* __restrict__ y_packed,
     const unsigned char* __restrict__ weight,
@@ -4121,9 +4265,10 @@ static __device__ __forceinline__ void mmqf_sk_body(
         const unsigned int feat0 = (unsigned int)(tile / ntt) * MMQ_Y;
         const unsigned int tok0 = (unsigned int)(tile % ntt) * MMQ_X;
 
-        mmqf_accumulate<FMT, MMQ_Y, MMQ_X>(y_packed, weight, s_x, s_y, acc, ntok, N, bpr, tok0,
-                                           feat0, i0, jb, (unsigned int)kb0_start,
-                                           (unsigned int)kb0_stop);
+        mmqf_accumulate<FMT, MMQ_Y, MMQ_X, GROUP>(
+            y_packed, weight, s_x, s_y, acc, ntok, N, bpr, tok0, feat0, i0, jb,
+            (unsigned int)kb0_start, (unsigned int)kb0_stop
+        );
         mmqf_write_dst<MMQ_X>(output, acc, M, N, tok0, feat0, i0, jb);
 
         kbc += nbk;
@@ -4144,8 +4289,10 @@ static __device__ __forceinline__ void mmqf_sk_body(
     const unsigned int feat0 = (unsigned int)(tile / ntt) * MMQ_Y;
     const unsigned int tok0 = (unsigned int)(tile % ntt) * MMQ_X;
 
-    mmqf_accumulate<FMT, MMQ_Y, MMQ_X>(y_packed, weight, s_x, s_y, acc, ntok, N, bpr, tok0, feat0,
-                                       i0, jb, (unsigned int)kb0_start, (unsigned int)kb0_stop);
+    mmqf_accumulate<FMT, MMQ_Y, MMQ_X, GROUP>(
+        y_packed, weight, s_x, s_y, acc, ntok, N, bpr, tok0, feat0, i0, jb,
+        (unsigned int)kb0_start, (unsigned int)kb0_stop
+    );
     mmqf_write_fixup<MMQ_Y, MMQ_X>(workspace + (long long)blockIdx.x * (MMQ_X * MMQ_Y), acc, i0,
                                    jb);
 }
@@ -4240,20 +4387,23 @@ static __device__ __forceinline__ void mmqf_fixup_body(
 
 // One entry point per (weight format, feature tile, token tile), for each of
 // the three roles. `NAME` is the format's name in the symbol, which the host
-// looks up by string; `TAG` is the feature-tile infix, empty for the default
-// tile and `_y<Y>` otherwise, placed just before `_x<X>`. The host picks the
+// looks up by string. `TAG` is the tiling infix, placed just before `_x<X>`.
+// It is empty for the default tile, `_y<Y>` for the narrow tile's halves
+// cadence, and `_y<Y>g` for its group cadence (`GROUP`). The host picks the
 // variant; the rule it must follow is fixed by the `MMQ_X % granularity`
 // assert in `mmqf_body`. The launch bounds follow the feature tile: fewer
 // warps per block at the narrow tile, so the compiler may spend more
-// registers per thread there without losing residency.
-#define MMQ_FM_KERNEL_AT(FMT, NAME, Y, TAG, X)                                        \
+// registers per thread there without losing residency. The fixup pass reads
+// no activation tile, so both cadences' fixup entry points are the same
+// body. The host still names the one matching its stream-k launch.
+#define MMQ_FM_KERNEL_AT(FMT, NAME, Y, GROUP, TAG, X)                                 \
     extern "C" __global__ __launch_bounds__(MMQF_THREADS_OF(Y))                       \
         void quant_mmq_##NAME##_q8_1_mma##TAG##_x##X(                                 \
             const int* __restrict__ y_packed,                                         \
             const unsigned char* __restrict__ weight, float* __restrict__ output,     \
             unsigned int M, unsigned int K, unsigned int N, unsigned int ntok         \
         ) {                                                                           \
-        mmqf_body<FMT, Y, X>(y_packed, weight, output, M, K, N, ntok);                \
+        mmqf_body<FMT, Y, X, GROUP>(y_packed, weight, output, M, K, N, ntok);         \
     }                                                                                 \
     extern "C" __global__ __launch_bounds__(MMQF_THREADS_OF(Y))                       \
         void quant_mmq_##NAME##_q8_1_mma_sk##TAG##_x##X(                              \
@@ -4262,7 +4412,9 @@ static __device__ __forceinline__ void mmqf_fixup_body(
             float* __restrict__ workspace, unsigned int M, unsigned int K,            \
             unsigned int N, unsigned int ntok                                         \
         ) {                                                                           \
-        mmqf_sk_body<FMT, Y, X>(y_packed, weight, output, workspace, M, K, N, ntok);  \
+        mmqf_sk_body<FMT, Y, X, GROUP>(                                               \
+            y_packed, weight, output, workspace, M, K, N, ntok                        \
+        );                                                                            \
     }                                                                                 \
     extern "C" __global__ __launch_bounds__(MMQF_THREADS_OF(Y))                       \
         void quant_mmq_##NAME##_q8_1_mma_fixup##TAG##_x##X(                           \
@@ -4274,13 +4426,19 @@ static __device__ __forceinline__ void mmqf_fixup_body(
 
 // The default feature tile, compiled for every format at every token tile.
 // The empty `TAG` keeps these symbols' names unchanged.
-#define MMQ_FM_KERNEL(FMT, NAME, X) MMQ_FM_KERNEL_AT(FMT, NAME, MMQF_Y_DEFAULT, , X)
+#define MMQ_FM_KERNEL(FMT, NAME, X) MMQ_FM_KERNEL_AT(FMT, NAME, MMQF_Y_DEFAULT, false, , X)
 
 // The narrow feature tile for the CTA-starved small-M, small-N regime. Only
 // the formats whose small-N shapes reach that regime compile it, and only at
 // the token tiles a small M selects, to bound compile time; the host never
-// asks for a (format, token tile) pair outside this list.
-#define MMQ_FM_KERNEL_Y64(FMT, NAME, X) MMQ_FM_KERNEL_AT(FMT, NAME, 64, _y64, X)
+// asks for a (format, token tile) pair outside this list. From
+// `MMQF_GROUP_CADENCE_X` up each token tile compiles both cadences; the grid
+// size decides between them on the host.
+#define MMQ_FM_KERNEL_Y64(FMT, NAME, X) \
+    MMQ_FM_KERNEL_AT(FMT, NAME, MMQF_Y_NARROW, false, _y64, X)
+#define MMQ_FM_KERNEL_Y64_BOTH(FMT, NAME, X) \
+    MMQ_FM_KERNEL_Y64(FMT, NAME, X)          \
+    MMQ_FM_KERNEL_AT(FMT, NAME, MMQF_Y_NARROW, true, _y64g, X)
 
 MMQ_FM_KERNEL(MmqfQ80, q8_0, 8)
 MMQ_FM_KERNEL(MmqfQ80, q8_0, 16)
@@ -4507,25 +4665,25 @@ MMQ_FM_KERNEL_Y64(MmqfQ4K, q4_k, 8)
 MMQ_FM_KERNEL_Y64(MmqfQ4K, q4_k, 16)
 MMQ_FM_KERNEL_Y64(MmqfQ4K, q4_k, 24)
 MMQ_FM_KERNEL_Y64(MmqfQ4K, q4_k, 32)
-MMQ_FM_KERNEL_Y64(MmqfQ4K, q4_k, 40)
-MMQ_FM_KERNEL_Y64(MmqfQ4K, q4_k, 48)
-MMQ_FM_KERNEL_Y64(MmqfQ4K, q4_k, 64)
+MMQ_FM_KERNEL_Y64_BOTH(MmqfQ4K, q4_k, 40)
+MMQ_FM_KERNEL_Y64_BOTH(MmqfQ4K, q4_k, 48)
+MMQ_FM_KERNEL_Y64_BOTH(MmqfQ4K, q4_k, 64)
 
 MMQ_FM_KERNEL_Y64(MmqfQ5K, q5_k, 8)
 MMQ_FM_KERNEL_Y64(MmqfQ5K, q5_k, 16)
 MMQ_FM_KERNEL_Y64(MmqfQ5K, q5_k, 24)
 MMQ_FM_KERNEL_Y64(MmqfQ5K, q5_k, 32)
-MMQ_FM_KERNEL_Y64(MmqfQ5K, q5_k, 40)
-MMQ_FM_KERNEL_Y64(MmqfQ5K, q5_k, 48)
-MMQ_FM_KERNEL_Y64(MmqfQ5K, q5_k, 64)
+MMQ_FM_KERNEL_Y64_BOTH(MmqfQ5K, q5_k, 40)
+MMQ_FM_KERNEL_Y64_BOTH(MmqfQ5K, q5_k, 48)
+MMQ_FM_KERNEL_Y64_BOTH(MmqfQ5K, q5_k, 64)
 
 MMQ_FM_KERNEL_Y64(MmqfQ6K, q6_k, 8)
 MMQ_FM_KERNEL_Y64(MmqfQ6K, q6_k, 16)
 MMQ_FM_KERNEL_Y64(MmqfQ6K, q6_k, 24)
 MMQ_FM_KERNEL_Y64(MmqfQ6K, q6_k, 32)
-MMQ_FM_KERNEL_Y64(MmqfQ6K, q6_k, 40)
-MMQ_FM_KERNEL_Y64(MmqfQ6K, q6_k, 48)
-MMQ_FM_KERNEL_Y64(MmqfQ6K, q6_k, 64)
+MMQ_FM_KERNEL_Y64_BOTH(MmqfQ6K, q6_k, 40)
+MMQ_FM_KERNEL_Y64_BOTH(MmqfQ6K, q6_k, 48)
+MMQ_FM_KERNEL_Y64_BOTH(MmqfQ6K, q6_k, 64)
 
 // Reads Q8_1 sub-block `b` of both operands into registers, one iteration
 // ahead, same reason as `mmq_q8_0_stage_load`.

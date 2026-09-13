@@ -92,7 +92,9 @@ pub(in crate::quant::cuda::quant_matmul) const Q2_K: FeatMajorFormat = FeatMajor
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::tiling::{FEAT_TILE_DEFAULT, VARIANTS, smem_bytes, smem_opt_in_limit};
+    use super::super::super::tiling::{
+        Cadence, FEAT_TILE_DEFAULT, VARIANTS, smem_bytes, smem_opt_in_limit,
+    };
     use super::super::legacy::{Q4_0, Q4_1, Q5_0, Q5_1, Q8_0};
     use super::*;
 
@@ -148,12 +150,10 @@ mod tests {
     #[test]
     fn q5_k_shares_the_q4_k_row_stride() {
         assert_eq!(Q5_K.x_stride, Q4_K.x_stride);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&Q5_K, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(
+            |&x| smem_bytes(&Q5_K, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+                == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+        ));
     }
 
     #[test]
@@ -179,12 +179,10 @@ mod tests {
     #[test]
     fn q6_k_shares_the_q4_k_row_stride() {
         assert_eq!(Q6_K.x_stride, Q4_K.x_stride);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&Q6_K, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(
+            |&x| smem_bytes(&Q6_K, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+                == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+        ));
     }
 
     #[test]
@@ -210,12 +208,10 @@ mod tests {
     #[test]
     fn q3_k_shares_the_q6_k_row_stride() {
         assert_eq!(Q3_K.x_stride, Q6_K.x_stride);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&Q3_K, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q6_K, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(
+            |&x| smem_bytes(&Q3_K, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+                == smem_bytes(&Q6_K, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+        ));
     }
 
     /// Q4_K's weight row is 8 ints wider than Q8_0's: it stages the scale/min
@@ -229,13 +225,16 @@ mod tests {
         const EXTRA: u32 = 4 * FEAT_TILE_DEFAULT * 8;
         assert_eq!(Q4_K.x_stride, Q8_0.x_stride + 8);
         assert!(VARIANTS.iter().all(|&x| {
-            smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x)
-                == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x) + EXTRA
+            smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+                == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x, Cadence::Halves) + EXTRA
         }));
         // The widest variant must still fit what a device grants on opt-in.
         // 96KB per unit is the smallest sm_80-or-later figure the family runs
         // on, and the launcher subtracts the driver's reservation from it.
-        assert!(smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, 128) <= smem_opt_in_limit(96 * 1024));
+        assert!(
+            smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, 128, Cadence::Halves)
+                <= smem_opt_in_limit(96 * 1024)
+        );
     }
 
     #[test]
@@ -276,10 +275,13 @@ mod tests {
         // Weight row cost over Q4_K, plus the scratch, at every token tile.
         const EXTRA_ROW: u32 = 4 * FEAT_TILE_DEFAULT * 16;
         assert!(VARIANTS.iter().all(|&x| {
-            smem_bytes(&Q2_K, FEAT_TILE_DEFAULT, x)
-                == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x) + EXTRA_ROW + 4 * x * 4
+            smem_bytes(&Q2_K, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+                == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x, Cadence::Halves) + EXTRA_ROW + 4 * x * 4
         }));
         // The widest variant must still fit what a device grants on opt-in.
-        assert!(smem_bytes(&Q2_K, FEAT_TILE_DEFAULT, 128) <= smem_opt_in_limit(96 * 1024));
+        assert!(
+            smem_bytes(&Q2_K, FEAT_TILE_DEFAULT, 128, Cadence::Halves)
+                <= smem_opt_in_limit(96 * 1024)
+        );
     }
 }

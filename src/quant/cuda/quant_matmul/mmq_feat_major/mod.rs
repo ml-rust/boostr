@@ -4,10 +4,11 @@
 //! 128 tile would starve the device, and the weight is the MMA operand A.
 //! `quant_mmq_q8_0_q8_1_mma` fixes the token tile instead and makes the
 //! activation operand A; this path swaps those roles. One entry point is
-//! compiled per (weight format, feature tile, token tile), in three roles:
-//! tile-parallel, stream-k, and the stream-k fixup. This module owns the rules
-//! that choose among them (`tiling`) and the launches (`dispatch`). The
-//! kernels themselves live in `src/quant/cuda/kernels/quant_mmq_mma.cu`.
+//! compiled per (weight format, feature tile, token tile, activation cadence),
+//! in three roles: tile-parallel, stream-k, and the stream-k fixup. This
+//! module owns the rules that choose among them (`tiling`) and the launches
+//! (`dispatch`). The kernels themselves live in
+//! `src/quant/cuda/kernels/quant_mmq_mma.cu`.
 //!
 //! The kernel family is parameterized over the weight format; everything that
 //! differs per format is a field of `FeatMajorFormat`. Q8_0, Q4_0, Q4_1,

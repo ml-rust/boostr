@@ -99,7 +99,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ4_NL: FeatMajorFormat = FeatMaj
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::tiling::{FEAT_TILE_DEFAULT, VARIANTS, smem_bytes};
+    use super::super::super::tiling::{Cadence, FEAT_TILE_DEFAULT, VARIANTS, smem_bytes};
     use super::super::kquant::Q4_K;
     use super::*;
 
@@ -133,12 +133,10 @@ mod tests {
         );
         assert_eq!(Q4_0.k_multiple, 32);
         assert_eq!(Q4_0.x_stride, Q8_0.x_stride);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&Q4_0, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(
+            |&x| smem_bytes(&Q4_0, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+                == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+        ));
         // One of the measured tile-parallel opt-outs.
         const { assert!(Q4_0.prefers_tile_parallel) };
     }
@@ -162,12 +160,10 @@ mod tests {
         );
         assert_eq!(Q4_1.k_multiple, 32);
         assert_eq!(Q4_1.x_stride, Q4_K.x_stride);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&Q4_1, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(
+            |&x| smem_bytes(&Q4_1, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+                == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+        ));
     }
 
     /// Q5_0 stages into the Q8_0 row, so the two strides must stay equal and
@@ -189,12 +185,10 @@ mod tests {
         );
         assert_eq!(Q5_0.k_multiple, 32);
         assert_eq!(Q5_0.x_stride, Q8_0.x_stride);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&Q5_0, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(
+            |&x| smem_bytes(&Q5_0, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+                == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+        ));
     }
 
     /// Q5_1 stages the Q4_1 row verbatim — same quant words, same eight
@@ -216,12 +210,10 @@ mod tests {
         );
         assert_eq!(Q5_1.k_multiple, 32);
         assert_eq!(Q5_1.x_stride, Q4_1.x_stride);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&Q5_1, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q4_1, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(
+            |&x| smem_bytes(&Q5_1, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+                == smem_bytes(&Q4_1, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+        ));
         const { assert!(!Q5_1.prefers_tile_parallel) };
     }
 
@@ -246,12 +238,17 @@ mod tests {
         );
         assert_eq!(IQ4_NL.k_multiple, 32);
         assert_eq!(IQ4_NL.x_stride, Q8_0.x_stride);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&IQ4_NL, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(|&x| smem_bytes(
+            &IQ4_NL,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        ) == smem_bytes(
+            &Q8_0,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        )));
         // One of the measured tile-parallel opt-outs.
         const { assert!(IQ4_NL.prefers_tile_parallel) };
     }

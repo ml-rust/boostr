@@ -24,10 +24,12 @@ pub(super) const VARIANTS: &[u32] = &[8, 16, 24, 32, 40, 48, 64, 80, 96, 112, 12
 /// `src/quant/cuda/kernels/quant_mmq_mma.cu`.
 pub(super) const NARROW_VARIANTS: &[u32] = &[8, 16, 24, 32, 40, 48, 64];
 
-/// Widest narrow-tile token tile whose activation staging chain is short
-/// enough to win without the doubled grid co-residing — see [`select_tiling`].
-/// Measured across the K-quant formats at the small-N shapes.
-const NARROW_SHORT_CHAIN_X: u32 = 32;
+/// Narrowest token tile the narrow tile compiles both cadences at. Below it
+/// only [`Cadence::Halves`] exists: the narrow tile keeps the default tile's
+/// activation footprint and wins on block count alone. From it up the grid
+/// picks the cadence — see [`Cadence`] and [`select_tiling`]. Must match the
+/// kernel's `MMQF_GROUP_CADENCE_X`.
+const GROUP_CADENCE_MIN_X: u32 = 40;
 
 /// Activation row stride in the shared tile, in ints: 4 half2 scale pairs plus
 /// 32 quant words. The same for every weight format.
@@ -42,13 +44,34 @@ const WARP_SIZE: u32 = 32;
 
 /// The caller's say over the feature tile.
 ///
-/// `Auto` is the production rule in [`select_tiling`]. `Force` exists for the
-/// kernel A/B in `examples/quant_shape_bench.rs`, which needs both tiles at
-/// one shape; no production caller passes it.
+/// `Auto` is the production rule in [`select_tiling`]. The forced variants
+/// exist for the kernel A/B in `examples/quant_shape_bench.rs`, which needs
+/// every tiling at one shape; no production caller passes them. `Force`
+/// names a feature tile on the two-half cadence. `ForceNarrowGroup` is the
+/// narrow tile on the full-group cadence, which only its wide token tiles
+/// compile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeatTile {
     Auto,
     Force(u32),
+    ForceNarrowGroup,
+}
+
+/// How a block walks the two 128-k halves of each 256-k activation group.
+///
+/// `Halves` stages one half at a time into one activation tile: four
+/// barriers per group, and the second half's global load waits on the first
+/// half's consumers. `Group` stages both halves into a doubled activation
+/// tile: two barriers per group and one exposed round trip. The doubled tile
+/// costs block co-residency, so `Group` wins only where nothing co-resides
+/// anyway: a grid under one block per SM. The default feature tile has no
+/// room for the doubled tile and is always `Halves`. The narrow tile
+/// compiles `Group` from [`GROUP_CADENCE_MIN_X`] up, where per-group
+/// activation staging is long enough to dominate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Cadence {
+    Halves,
+    Group,
 }
 
 /// One launch's tile geometry.
@@ -56,6 +79,7 @@ pub enum FeatTile {
 pub(super) struct Tiling {
     pub feat_tile: u32,
     pub mmq_x: u32,
+    pub cadence: Cadence,
 }
 
 impl Tiling {
@@ -65,7 +89,7 @@ impl Tiling {
     }
 
     pub const fn smem_bytes(self, format: &FeatMajorFormat) -> u32 {
-        smem_bytes(format, self.feat_tile, self.mmq_x)
+        smem_bytes(format, self.feat_tile, self.mmq_x, self.cadence)
     }
 
     pub const fn feat_tiles(self, n: u32) -> u32 {
@@ -81,19 +105,20 @@ impl Tiling {
         self.token_tiles(m) * self.feat_tiles(n)
     }
 
-    /// Kernel symbol for `role`, as the `MMQ_FM_KERNEL_AT` macro spells it:
-    /// the feature-tile infix is empty at the default tile and `_y<Y>`
-    /// otherwise, placed just before `_x<X>`.
+    /// Kernel symbol for `role`, as the `MMQ_FM_KERNEL_AT` macro spells it.
+    /// The tiling infix is placed just before `_x<X>`. It is empty at the
+    /// default tile. At the narrow tile it is `_y<Y>` on the two-half
+    /// cadence and `_y<Y>g` on the full-group cadence.
     pub fn kernel_name(self, format: &FeatMajorFormat, role: Role) -> String {
         let role = match role {
             Role::TileParallel => "",
             Role::StreamK => "_sk",
             Role::Fixup => "_fixup",
         };
-        let tag = if self.feat_tile == FEAT_TILE_DEFAULT {
-            String::new()
-        } else {
-            format!("_y{}", self.feat_tile)
+        let tag = match (self.feat_tile == FEAT_TILE_DEFAULT, self.cadence) {
+            (true, _) => String::new(),
+            (false, Cadence::Halves) => format!("_y{}", self.feat_tile),
+            (false, Cadence::Group) => format!("_y{}g", self.feat_tile),
         };
         format!(
             "quant_mmq_{}_q8_1_mma{role}{tag}_x{}",
@@ -113,15 +138,39 @@ pub(super) enum Role {
     Fixup,
 }
 
+/// 128-k halves of a 256-k group the activation tile holds at once: two on
+/// [`Cadence::Group`] (`mmqf_accumulate_group` in the kernel file), each a
+/// full record slice plus its scratch, else one. Must match the kernel's
+/// `GROUP` template axis.
+const fn act_halves(cadence: Cadence) -> u32 {
+    match cadence {
+        Cadence::Halves => 1,
+        Cadence::Group => 2,
+    }
+}
+
+/// Whether the narrow tile compiles [`Cadence::Group`] at `mmq_x`.
+const fn group_compiled(feat_tile: u32, mmq_x: u32) -> bool {
+    feat_tile == FEAT_TILE_NARROW && mmq_x >= GROUP_CADENCE_MIN_X
+}
+
 /// Dynamic shared memory one tiling needs: a `feat_tile`-row weight tile at
-/// the format's stride, an `mmq_x`-row activation tile at `ACT_STRIDE`, and the
-/// format's per-token activation scratch, which is zero for every format whose
-/// minimum term is no finer than the record's 32-value sub-block.
+/// the format's stride, plus one term per staged 128-k half. Each term is an
+/// `mmq_x`-row activation tile at `ACT_STRIDE` plus the format's per-token
+/// activation scratch. Scratch is zero for every format whose minimum term
+/// is no finer than the record's 32-value sub-block. The half count follows
+/// the cadence.
 ///
 /// Takes the whole descriptor rather than a stride so a format cannot be
 /// launched with less shared memory than its kernel indexes.
-pub(super) const fn smem_bytes(format: &FeatMajorFormat, feat_tile: u32, mmq_x: u32) -> u32 {
-    4 * (feat_tile * format.x_stride + mmq_x * (ACT_STRIDE + format.act_scratch_ints_per_token))
+pub(super) const fn smem_bytes(
+    format: &FeatMajorFormat,
+    feat_tile: u32,
+    mmq_x: u32,
+    cadence: Cadence,
+) -> u32 {
+    4 * (feat_tile * format.x_stride
+        + act_halves(cadence) * mmq_x * (ACT_STRIDE + format.act_scratch_ints_per_token))
 }
 
 /// Per-block dynamic shared-memory ceiling this device grants on opt-in.
@@ -145,15 +194,20 @@ const fn variants_at(feat_tile: u32) -> &'static [u32] {
 /// Picks the token tile at `feat_tile` that launches the fewest token tiles
 /// for `m`, breaking ties toward the smaller tile because it costs fewer
 /// registers and less shared memory. `None` means no variant fits the device.
+///
+/// The fit test uses `cadence`'s shared-memory request. The caller that wants
+/// the group cadence must ask with it: its doubled activation tile can push
+/// a token tile over the limit that the halves cadence keeps.
 pub(super) fn select_variant(
     m: u32,
     smem_limit: u32,
     format: &FeatMajorFormat,
     feat_tile: u32,
+    cadence: Cadence,
 ) -> Option<u32> {
     let mut best: Option<(u32, u32)> = None;
     for &mmq_x in variants_at(feat_tile) {
-        if smem_bytes(format, feat_tile, mmq_x) > smem_limit {
+        if smem_bytes(format, feat_tile, mmq_x, cadence) > smem_limit {
             continue;
         }
         let tiles = m.div_ceil(mmq_x);
@@ -169,31 +223,32 @@ pub(super) fn select_variant(
 
 /// The tiling rule. `Ok(None)` means no compiled variant fits the device.
 ///
-/// The default feature tile is tried first. The narrow tile replaces it only
-/// when the format compiles it AND the default tiling is starved: fewer
-/// output tiles than two waves of SMs, the same bound `use_stream_k` draws.
-/// Below it the tile-parallel grid leaves SMs idle for the whole K walk, and
-/// stream-k can only split what few tiles there are.
+/// The default feature tile is tried first and is the answer for every
+/// format without the narrow tile. Otherwise the narrow tile's own token
+/// tile for `m` decides which lever is in play:
 ///
-/// Starvation alone is not enough. Every block stages the whole `mmq_x` x
-/// 256-k activation slice, whatever its feature tile, so at the narrow tile
-/// half the threads copy the same slice and each block's per-group latency
-/// chain grows with `mmq_x`. That is repaid only when the doubled block
-/// count actually runs alongside: the narrow tile's smaller shared-memory
-/// request lets more blocks co-reside per SM, so once the narrow grid
-/// reaches one block per SM the extra blocks overlap each other's staging
-/// stalls. So the narrow tile is taken when its token tile is small enough
-/// for the longer staging chain not to matter, or when its own grid covers
-/// the SMs. A wide token tile on a grid that still leaves SMs empty pays the
-/// longer chain and gets nothing back.
+/// - Short token tile (below [`GROUP_CADENCE_MIN_X`]): only the two-half
+///   cadence exists, with the default tile's activation footprint, so the
+///   narrow tile is pure block count. It is taken exactly when the default
+///   tiling is starved: fewer output tiles than two waves of SMs, the bound
+///   `use_stream_k` draws. Below it the tile-parallel grid leaves SMs idle
+///   for the whole K walk, and stream-k can only split what few tiles there
+///   are.
+/// - Wide token tile: per-group activation staging dominates, and the grid
+///   picks the cadence. Under one block per SM nothing co-resides, so the
+///   full-group cadence's halved barriers are pure gain. At or above it the
+///   two-half cadence keeps the smaller activation tile and the
+///   co-residency the group cadence would spend. It is taken while the
+///   default tiling is still starved; past starvation the default tile
+///   stays.
 ///
 /// The starvation test runs on the default tiling's own token tile; the
-/// narrow tiling re-selects its token tile for `m`. Both run before the
+/// narrow tiling re-selects its token tile for `m`. All of it runs before the
 /// stream-k decision, which then applies to whichever tiling was chosen.
 ///
-/// A forced tile bypasses the rule; a forced tile the format does not compile
-/// is an error, not a silent fallback, because a caller forcing a tile is
-/// measuring that tile.
+/// A forced tiling bypasses the rule. A forced tiling the format does not
+/// compile is an error, not a silent fallback: a caller forcing a tiling is
+/// measuring that tiling.
 pub(super) fn select_tiling(
     m: u32,
     n: u32,
@@ -202,43 +257,75 @@ pub(super) fn select_tiling(
     format: &FeatMajorFormat,
     feat_tile: FeatTile,
 ) -> Result<Option<Tiling>> {
-    let at = |tile: u32| {
-        select_variant(m, smem_limit, format, tile).map(|mmq_x| Tiling {
+    let at = |tile: u32, cadence: Cadence| {
+        select_variant(m, smem_limit, format, tile, cadence).map(|mmq_x| Tiling {
             feat_tile: tile,
             mmq_x,
+            cadence,
         })
+    };
+    let not_compiled = |what: String, hint: &str| Error::QuantError {
+        reason: format!(
+            "MMQ {what} is not compiled for {}; {hint}",
+            format.kernel_infix
+        ),
     };
     match feat_tile {
         FeatTile::Force(tile) if tile != FEAT_TILE_DEFAULT && tile != FEAT_TILE_NARROW => {
-            Err(Error::QuantError {
-                reason: format!(
-                    "MMQ feature tile {tile} is not compiled for {}; force {FEAT_TILE_DEFAULT} or {FEAT_TILE_NARROW}",
-                    format.kernel_infix
-                ),
-            })
+            Err(not_compiled(
+                format!("feature tile {tile}"),
+                &format!("force {FEAT_TILE_DEFAULT} or {FEAT_TILE_NARROW}"),
+            ))
         }
         FeatTile::Force(tile) if tile == FEAT_TILE_NARROW && !format.narrow_tile => {
-            Err(Error::QuantError {
-                reason: format!(
-                    "MMQ feature tile {tile} is not compiled for {}; force {FEAT_TILE_DEFAULT} or use the automatic tile",
-                    format.kernel_infix
-                ),
-            })
+            Err(not_compiled(
+                format!("feature tile {tile}"),
+                &format!("force {FEAT_TILE_DEFAULT} or use the automatic tile"),
+            ))
         }
-        FeatTile::Force(tile) => Ok(at(tile)),
-        FeatTile::Auto => {
-            let Some(wide) = at(FEAT_TILE_DEFAULT) else {
+        FeatTile::Force(tile) => Ok(at(tile, Cadence::Halves)),
+        FeatTile::ForceNarrowGroup if !format.narrow_tile => Err(not_compiled(
+            format!("feature tile {FEAT_TILE_NARROW}"),
+            &format!("force {FEAT_TILE_DEFAULT} or use the automatic tile"),
+        )),
+        FeatTile::ForceNarrowGroup => {
+            let Some(narrow) = at(FEAT_TILE_NARROW, Cadence::Group) else {
                 return Ok(None);
             };
-            let starved = wide.tiles(m, n) < 2 * sms;
-            if format.narrow_tile
-                && starved
-                && let Some(narrow) = at(FEAT_TILE_NARROW)
-                && (narrow.mmq_x <= NARROW_SHORT_CHAIN_X || narrow.tiles(m, n) >= sms)
-            {
-                return Ok(Some(narrow));
+            if !group_compiled(narrow.feat_tile, narrow.mmq_x) {
+                return Err(not_compiled(
+                    format!(
+                        "group cadence at feature tile {FEAT_TILE_NARROW} token tile {}",
+                        narrow.mmq_x
+                    ),
+                    &format!("it exists from token tile {GROUP_CADENCE_MIN_X} up; raise m"),
+                ));
             }
-            Ok(Some(wide))
+            Ok(Some(narrow))
+        }
+        FeatTile::Auto => {
+            let Some(wide) = at(FEAT_TILE_DEFAULT, Cadence::Halves) else {
+                return Ok(None);
+            };
+            if !format.narrow_tile {
+                return Ok(Some(wide));
+            }
+            let Some(narrow) = at(FEAT_TILE_NARROW, Cadence::Halves) else {
+                return Ok(Some(wide));
+            };
+            let starved = wide.tiles(m, n) < 2 * sms;
+            if group_compiled(narrow.feat_tile, narrow.mmq_x) {
+                // Same token tile on the group cadence, if its doubled
+                // activation tile still fits the device.
+                let group = Tiling {
+                    cadence: Cadence::Group,
+                    ..narrow
+                };
+                if narrow.tiles(m, n) < sms && group.smem_bytes(format) <= smem_limit {
+                    return Ok(Some(group));
+                }
+            }
+            Ok(Some(if starved { narrow } else { wide }))
         }
     }
 }

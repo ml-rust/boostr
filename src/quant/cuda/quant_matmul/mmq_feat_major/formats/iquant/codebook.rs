@@ -22,7 +22,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ4_XS: FeatMajorFormat = FeatMaj
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::super::tiling::{FEAT_TILE_DEFAULT, VARIANTS, smem_bytes};
+    use super::super::super::super::tiling::{Cadence, FEAT_TILE_DEFAULT, VARIANTS, smem_bytes};
     use super::super::super::legacy::Q8_0;
     use super::*;
 
@@ -49,11 +49,16 @@ mod tests {
         assert_eq!(IQ4_XS.k_multiple, 256);
         assert_eq!(IQ4_XS.x_stride, Q8_0.x_stride);
         const { assert!(!IQ4_XS.prefers_tile_parallel) };
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| smem_bytes(&IQ4_XS, FEAT_TILE_DEFAULT, x)
-                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
-        );
+        assert!(VARIANTS.iter().all(|&x| smem_bytes(
+            &IQ4_XS,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        ) == smem_bytes(
+            &Q8_0,
+            FEAT_TILE_DEFAULT,
+            x,
+            Cadence::Halves
+        )));
     }
 }

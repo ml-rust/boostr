@@ -11,7 +11,7 @@ use super::super::super::kernels::{self, QUANT_MMQ_MMA_MODULE};
 use super::super::helpers::quantize_activation_q8_1_mmq;
 use super::formats::FeatMajorFormat;
 use super::tiling::{
-    FEAT_TILE_DEFAULT, FeatTile, Role, Tiling, VARIANTS, select_tiling, select_variant,
+    Cadence, FEAT_TILE_DEFAULT, FeatTile, Role, Tiling, VARIANTS, select_tiling, select_variant,
     smem_opt_in_limit, use_stream_k,
 };
 
@@ -32,6 +32,7 @@ pub(in crate::quant::cuda::quant_matmul) fn variant_fits(
         smem_opt_in_limit(profile.shared_mem_per_unit),
         format,
         FEAT_TILE_DEFAULT,
+        Cadence::Halves,
     )
     .is_some()
 }
@@ -188,6 +189,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_quantized(
         n,
         feat_tile = tiling.feat_tile,
         mmq_x = tiling.mmq_x,
+        cadence = ?tiling.cadence,
         tiles,
         stream_k,
         weight_format = format.kernel_infix,

@@ -52,8 +52,11 @@
 //! them — `load_named_weight` returns `Weight::Standard` for whatever the
 //! file did not quantize, and `MaybeLoraLinear` runs the dense path there.
 //!
-//! The AudioVAE is untouched by all of this: it is a separate F32-native
-//! file, verified against PyTorch fixtures, and is never cast or packed.
+//! The AudioVAE decoder is untouched by all of this: it is a separate file,
+//! never packed, cast by its own `vae_decoder_dtype` argument independently
+//! of the GGUF's quantization tier (`None` keeps its F32, verified against
+//! PyTorch fixtures at that dtype). The encoder has no dtype option at all —
+//! always F32, see [`super::loader`]'s module docs.
 
 use crate::error::{Error, Result};
 use crate::format::gguf::Gguf;
@@ -99,12 +102,17 @@ where
     /// projections are quantized: `quant_matmul` requires F32 activations,
     /// so honouring the request would mean dequantizing the very weights
     /// this path keeps packed. The error names the tensor.
+    ///
+    /// `vae_decoder_dtype` casts every AudioVAE DECODER tensor independently
+    /// of `dtype` — see [`super::loader`]'s module docs. The encoder always
+    /// loads at F32.
     pub fn from_gguf<P: AsRef<Path>, Q: AsRef<Path>>(
         gguf_path: P,
         config_json: Option<&Path>,
         audiovae_path: Q,
         device: &R::Device,
         dtype: Option<DType>,
+        vae_decoder_dtype: Option<DType>,
     ) -> Result<Self> {
         // Opened ONCE for all five transformer-stack sub-models, like
         // `from_checkpoint`'s safetensors source.
@@ -120,15 +128,21 @@ where
         // and the arms below need `source` by `&mut` and by value.
         let naming = probe_naming(&source)?;
         match naming {
-            GgufNaming::Verbatim => {
-                Self::from_source(&mut source, cfgs, audiovae_path.as_ref(), device, dtype)
-            }
+            GgufNaming::Verbatim => Self::from_source(
+                &mut source,
+                cfgs,
+                audiovae_path.as_ref(),
+                device,
+                dtype,
+                vae_decoder_dtype,
+            ),
             GgufNaming::Ggml => Self::from_source(
                 &mut GgmlNamedGguf::new(source),
                 cfgs,
                 audiovae_path.as_ref(),
                 device,
                 dtype,
+                vae_decoder_dtype,
             ),
         }
     }
@@ -148,6 +162,9 @@ where
     ///
     /// There is no `dtype` argument: the mode fixes F32, the dtype
     /// `quant_matmul` would have run the packed weight at.
+    /// `vae_decoder_dtype` still casts the AudioVAE decoder independently —
+    /// that codec is not part of the encoding-only measurement this mode
+    /// exists for. The encoder always loads at F32.
     ///
     /// A dense stack costs what an unquantized checkpoint costs. Use
     /// [`from_gguf`](Self::from_gguf) for anything but a measurement.
@@ -157,6 +174,7 @@ where
         audiovae_path: Q,
         device: &R::Device,
         client: &C,
+        vae_decoder_dtype: Option<DType>,
     ) -> Result<Self> {
         let mut source = Gguf::open(gguf_path.as_ref())?;
         let embedded = source.metadata().get_string(GGUF_CONFIG_JSON_KEY);
@@ -173,6 +191,7 @@ where
                 audiovae_path.as_ref(),
                 device,
                 Some(DType::F32),
+                vae_decoder_dtype,
             ),
             GgufNaming::Ggml => {
                 let mut named = GgmlNamedGguf::new(source);
@@ -182,6 +201,7 @@ where
                     audiovae_path.as_ref(),
                     device,
                     Some(DType::F32),
+                    vae_decoder_dtype,
                 )
             }
         }
@@ -262,6 +282,7 @@ mod tests {
                 "/nonexistent/audiovae.safetensors",
                 &device,
                 Some(DType::F32),
+                None,
             )
             .is_err()
         );

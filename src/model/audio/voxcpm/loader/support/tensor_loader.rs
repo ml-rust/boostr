@@ -89,9 +89,11 @@ pub(crate) struct TensorLoader<'a, R: Runtime<DType = DType>, S: WeightSource<R>
     pub(crate) device: &'a R::Device,
     pub(crate) prefix: String,
     /// Cast every tensor this loader reads to this dtype. `None` keeps the
-    /// checkpoint's own (the AudioVAE encoder/decoder construction sites
-    /// pass `None`: that model is F32-native, verified to 5e-07 / 2.4e-05
-    /// against PyTorch fixtures, and must not be cast).
+    /// checkpoint's own. For the transformer stack this is BF16-native; for
+    /// the AudioVAE decoder loader this is the `vae_decoder_dtype` load
+    /// option (`None` keeps the checkpoint's own F32, verified to 5e-07 /
+    /// 2.4e-05 against PyTorch fixtures at that dtype). The AudioVAE
+    /// encoder loader always passes `None` here — it has no dtype option.
     pub(crate) dtype: Option<DType>,
 }
 

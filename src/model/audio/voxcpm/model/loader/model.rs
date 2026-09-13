@@ -59,12 +59,16 @@ where
     /// directory) — see the module docs.
     ///
     /// `dtype` casts every transformer-stack tensor (`None` keeps the
-    /// checkpoint's BF16). The AudioVAE is never cast — see the module docs.
+    /// checkpoint's BF16). `vae_decoder_dtype` casts every AudioVAE DECODER
+    /// tensor independently — see the module docs. The encoder always loads
+    /// at F32; there is no encoder dtype option (see
+    /// [`AudioVaeEncoder::from_checkpoint`]'s docs for why).
     pub fn from_checkpoint<P: AsRef<Path>, Q: AsRef<Path>>(
         checkpoint_dir: P,
         audiovae_path: Q,
         device: &R::Device,
         dtype: Option<DType>,
+        vae_decoder_dtype: Option<DType>,
     ) -> Result<Self> {
         let dir = checkpoint_dir.as_ref();
         let cfgs = StackConfigs::from_config_json(&dir.join(DEFAULT_CONFIG_FILE))?;
@@ -72,7 +76,14 @@ where
         // sub-loader's own `from_safetensors*` would reopen and re-parse this
         // 4.3 GB file's header, five times over.
         let mut source = SafeTensorsLoader::open(dir.join(DEFAULT_WEIGHTS_FILE))?;
-        Self::from_source(&mut source, cfgs, audiovae_path.as_ref(), device, dtype)
+        Self::from_source(
+            &mut source,
+            cfgs,
+            audiovae_path.as_ref(),
+            device,
+            dtype,
+            vae_decoder_dtype,
+        )
     }
 
     /// Assemble every sub-model from one already-open weight source.
@@ -82,18 +93,24 @@ where
     /// same in both containers, so the walk is written once.
     ///
     /// The two AudioVAE loaders deliberately do NOT go through `source`: the
-    /// VAE lives in its own separate file (see the module docs), and it is
-    /// never cast, so it takes neither `source` nor `dtype`.
+    /// VAE lives in its own separate file (see the module docs). The decoder
+    /// takes its own `vae_decoder_dtype` rather than `source`'s `dtype`; the
+    /// encoder takes no dtype at all (always F32).
     pub(crate) fn from_source<S: WeightSource<R>>(
         source: &mut S,
         cfgs: StackConfigs,
         audiovae_path: &Path,
         device: &R::Device,
         dtype: Option<DType>,
+        vae_decoder_dtype: Option<DType>,
     ) -> Result<Self> {
         Ok(Self {
             vae_encoder: AudioVaeEncoder::from_checkpoint(audiovae_path, device)?,
-            vae_decoder: AudioVaeDecoder::from_checkpoint(audiovae_path, device)?,
+            vae_decoder: AudioVaeDecoder::from_checkpoint(
+                audiovae_path,
+                device,
+                vae_decoder_dtype,
+            )?,
             feat_encoder: LocalEncoder::from_source(
                 source,
                 DEFAULT_LOCAL_ENCODER_PREFIX,
@@ -186,6 +203,7 @@ mod tests {
                 "/nonexistent/audiovae.safetensors",
                 &device,
                 Some(DType::F32),
+                None,
             )
             .is_err()
         );

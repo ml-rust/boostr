@@ -220,6 +220,6 @@ mod tests {
         // And the assemblies themselves come up off the `.pth`, so the shape
         // gates in the encoder/decoder loaders see the folded weights too.
         AudioVaeEncoder::<CpuRuntime>::from_checkpoint(&pth, &device).expect("encoder");
-        AudioVaeDecoder::<CpuRuntime>::from_checkpoint(&pth, &device).expect("decoder");
+        AudioVaeDecoder::<CpuRuntime>::from_checkpoint(&pth, &device, None).expect("decoder");
     }
 }

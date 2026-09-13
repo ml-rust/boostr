@@ -67,6 +67,13 @@ impl<R: Runtime<DType = DType>> AudioVaeEncoder<R> {
         }
     }
 
+    /// Dtype every encoder weight was loaded at. Always F32: the encoder
+    /// loader takes no dtype option — see [`Self::from_checkpoint`]'s docs
+    /// for why.
+    pub fn dtype(&self) -> DType {
+        self.front.dtype()
+    }
+
     /// Right-pads `wave [B, 1, T]` with zeros so `T` becomes a multiple of
     /// [`HOP_LENGTH`]. A no-op if `T` is already a multiple.
     fn preprocess<C>(client: &C, wave: &Tensor<R>) -> Result<Tensor<R>>

@@ -102,6 +102,9 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         }
         let padded = pad_to_multiple(ref_wav_16k, self.config.ref_pad_multiple())?;
         let wave = Tensor::<R>::from_slice(padded.as_ref(), &[1, 1, padded.len()], self.device()?)?;
+        // No dtype cast here: the encoder always loads and runs at F32 (see
+        // `AudioVaeEncoder::from_checkpoint`'s docs for why it has no dtype
+        // option), matching `ref_wav_16k`'s own F32 samples exactly.
         let latent = self.vae_encoder.forward(client, &wave)?;
         fold_patches(&latent, self.config.patch_size, self.config.feat_dim)
     }

@@ -94,6 +94,17 @@ pub struct VoxCpm2LoadOptions {
     /// Casts every transformer-stack tensor; `None` keeps the checkpoint's
     /// own dtype (BF16).
     pub dtype: Option<DType>,
+    /// Casts every AudioVAE DECODER tensor (conv weights/biases, `Snake`
+    /// alphas, sr-cond embeds), independently of `dtype`. `None` keeps the
+    /// checkpoint's own F32, verified against PyTorch fixtures at that
+    /// dtype.
+    ///
+    /// The encoder is NOT affected: it always loads and runs at F32. It
+    /// runs once per render, on a short reference clip, so its cost is
+    /// negligible — but casting it changes the latent handed to the
+    /// transformer stack, shifting the stack's own conditioning and
+    /// therefore the whole generation, including where it stops.
+    pub vae_decoder_dtype: Option<DType>,
     /// Per-request generation settings — see [`VoxCpm2SynthOptions`].
     pub synth: VoxCpm2SynthOptions,
     /// A LoRA adapter safetensors file, folded into the model's weights
@@ -172,20 +183,31 @@ where
     ) -> Result<Self> {
         let VoxCpm2LoadOptions {
             dtype,
+            vae_decoder_dtype,
             synth,
             adapter,
         } = options;
 
         let mut model = match weights {
             VoxCpm2Weights::Checkpoint(dir) => {
-                VoxCpm2Model::<R>::from_checkpoint(dir, audiovae, device, dtype)?
+                VoxCpm2Model::<R>::from_checkpoint(dir, audiovae, device, dtype, vae_decoder_dtype)?
             }
-            VoxCpm2Weights::Gguf { path, config } => {
-                VoxCpm2Model::<R>::from_gguf(path, Some(config.as_path()), audiovae, device, dtype)?
-            }
-            VoxCpm2Weights::Tcf { path, config } => {
-                VoxCpm2Model::<R>::from_tcf(path, config, audiovae, device, dtype)?
-            }
+            VoxCpm2Weights::Gguf { path, config } => VoxCpm2Model::<R>::from_gguf(
+                path,
+                Some(config.as_path()),
+                audiovae,
+                device,
+                dtype,
+                vae_decoder_dtype,
+            )?,
+            VoxCpm2Weights::Tcf { path, config } => VoxCpm2Model::<R>::from_tcf(
+                path,
+                config,
+                audiovae,
+                device,
+                dtype,
+                vae_decoder_dtype,
+            )?,
         };
         let adapter_report = adapter
             .as_deref()

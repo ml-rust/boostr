@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ok = true;
 
     println!("decoder:");
-    let dec = AudioVaeDecoder::<CpuRuntime>::from_checkpoint(&vae, &device)?;
+    let dec = AudioVaeDecoder::<CpuRuntime>::from_checkpoint(&vae, &device, None)?;
     let mut fd = SafeTensorsLoader::open(dir.join("vae_decoder_fixture.safetensors"))?;
     for c in 0..2 {
         let latent = fd.load_tensor::<CpuRuntime>(&format!("case{c}_latent"), &device)?;

@@ -161,22 +161,35 @@ where
     /// `path` is either the published `audiovae.pth`, an `audiovae.safetensors`
     /// converted from it, or a directory holding one of the two —
     /// [`VaeCheckpoint`] decides which from the file's own bytes.
-    pub fn from_checkpoint<P: AsRef<Path>>(path: P, device: &R::Device) -> Result<Self> {
-        Self::from_checkpoint_with(path, DEFAULT_DECODER_PREFIX, device)
+    ///
+    /// `vae_decoder_dtype` casts every decoder weight (conv weights/biases,
+    /// `Snake` alphas, sr-cond embeds) to that dtype; `None` keeps the
+    /// checkpoint's own F32, byte-identical to the pre-cast behavior
+    /// verified against PyTorch fixtures. The encoder has no such option —
+    /// see [`super::encoder::AudioVaeEncoder::from_checkpoint`]'s docs for
+    /// why the two are not symmetric.
+    pub fn from_checkpoint<P: AsRef<Path>>(
+        path: P,
+        device: &R::Device,
+        vae_decoder_dtype: Option<DType>,
+    ) -> Result<Self> {
+        Self::from_checkpoint_with(path, DEFAULT_DECODER_PREFIX, device, vae_decoder_dtype)
     }
 
-    /// Load with an explicit checkpoint prefix.
+    /// Load with an explicit checkpoint prefix. See [`Self::from_checkpoint`]
+    /// for `vae_decoder_dtype`.
     pub fn from_checkpoint_with<P: AsRef<Path>>(
         path: P,
         prefix: &str,
         device: &R::Device,
+        vae_decoder_dtype: Option<DType>,
     ) -> Result<Self> {
         let mut checkpoint = VaeCheckpoint::open(path)?;
         let weights = DecoderLoader::<R, VaeCheckpoint> {
             loader: &mut checkpoint,
             device,
             prefix: prefix.to_string(),
-            dtype: None,
+            dtype: vae_decoder_dtype,
         }
         .build_decoder()?;
         Ok(Self::new(weights))
@@ -194,7 +207,8 @@ mod tests {
         assert!(
             AudioVaeDecoder::<CpuRuntime>::from_checkpoint(
                 "/nonexistent/audiovae.safetensors",
-                &device
+                &device,
+                None,
             )
             .is_err()
         );

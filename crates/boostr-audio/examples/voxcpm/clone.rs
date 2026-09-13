@@ -10,8 +10,23 @@
 //!     [--ref REF.wav] (--text "..." --out OUT.wav \
 //!                    | --prompts PROMPTS.tsv --out-dir DIR) [--jsonl LOG.jsonl] \
 //!     [--n-timesteps 10] [--cfg 2.0] [--min-len 2] [--max-len N] \
-//!     [--seed 0] [--best-of N] [--dtype f32] [--device cpu]
+//!     [--seed 0] [--best-of N] [--dtype f32] [--vae-decoder-dtype f32] [--device cpu]
 //! ```
+//!
+//! `--vae-decoder-dtype` (default `f32`) casts every AudioVAE DECODER weight
+//! independently of `--dtype`: `f16`/`bf16` roughly halves its resident
+//! footprint and runs the decoder forward pass in that dtype end to end
+//! (every conv, `Snake`'s `sin`/`recip`, and the final `tanh` have CUDA
+//! F16/BF16 kernels). `f32` is byte-identical to the checkpoint's own
+//! precision, verified against PyTorch fixtures.
+//!
+//! The AudioVAE ENCODER has no dtype flag: it always loads and runs at F32.
+//! It runs once per render, over a short reference clip, so its cost is
+//! negligible — but casting it changes the latent handed to the transformer
+//! stack, shifting the stack's own conditioning and therefore the whole
+//! generation: a lower-precision encoder changes the patch sequence itself,
+//! including where it stops, so `--vae-decoder-dtype` alone would no longer
+//! measure the decoder.
 //!
 //! `--ref` is optional: without it, generation is zero-shot, from the text
 //! alone, with no speaker conditioning. `--best-of N` for `N > 1` requires
@@ -277,8 +292,15 @@ struct Args {
     seed: u64,
     best_of: usize,
     /// Transformer-stack dtype. `None` keeps every weight at the dtype it has
-    /// in the checkpoint (BF16 for VoxCPM2). The `AudioVAE` is never cast.
+    /// in the checkpoint (BF16 for VoxCPM2). The `AudioVAE` decoder has its
+    /// own, independent `vae_decoder_dtype`; the encoder always runs at F32.
     dtype: Option<DType>,
+    /// `AudioVAE` DECODER dtype, independent of `dtype`. `None` (the
+    /// default) keeps the checkpoint's own F32, verified against PyTorch
+    /// fixtures at that dtype; `Some(F16)`/`Some(BF16)` casts every decoder
+    /// weight and runs its forward pass in that dtype. The encoder has no
+    /// dtype option — always F32 (see the module docs for why).
+    vae_decoder_dtype: Option<DType>,
     /// Runtime to build the model and run generation on.
     device: Device,
     /// LoRA adapter safetensors file, saved by `voxcpm_finetune`. `None`
@@ -312,12 +334,29 @@ fn parse_dtype(value: &str) -> Result<Option<DType>, String> {
     }
 }
 
+/// Parse a `--vae-decoder-dtype` value into the `AudioVAE` decoder cast the
+/// loader takes. There is no encoder equivalent — it always runs at F32.
+///
+/// Unlike `--dtype`, there is no `native` spelling: the checkpoint's own
+/// dtype is always F32, so `f32` already says "no cast" plainly.
+fn parse_vae_decoder_dtype(value: &str) -> Result<Option<DType>, String> {
+    match value {
+        "f32" => Ok(Some(DType::F32)),
+        "bf16" => Ok(Some(DType::BF16)),
+        "f16" => Ok(Some(DType::F16)),
+        other => Err(format!(
+            "--vae-decoder-dtype: expected one of f32, bf16, f16, got {other:?}"
+        )),
+    }
+}
+
 const USAGE: &str = "usage: voxcpm_clone (--ckpt DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
 [--config config.json] \
 --audiovae PATH [--ref REF.wav] \
 (--text \"...\" --out OUT.wav | --prompts FILE.tsv --out-dir DIR) [--jsonl FILE] \
 [--n-timesteps 10] [--cfg 2.0] [--min-len 2] \
 [--max-len N] [--seed 0] [--best-of 1] [--dtype f32|bf16|f16|native] \
+[--vae-decoder-dtype f32|bf16|f16] \
 [--device cpu|cuda] [--lora ADAPTER.safetensors] [--lora-rank 16] \
 [--lora-alpha 32.0] [--lora-targets q_proj,v_proj]\n\
 no --ref generates zero-shot from text alone; --best-of > 1 requires --ref \
@@ -355,6 +394,7 @@ fn parse_args() -> Result<Args, String> {
     let mut seed = 0u64;
     let mut best_of = 1usize;
     let mut dtype = Some(DType::F32);
+    let mut vae_decoder_dtype = Some(DType::F32);
     let mut device = Device::Cpu;
     let mut lora: Option<PathBuf> = None;
     let mut lora_rank = DEFAULT_LORA_RANK;
@@ -409,6 +449,9 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--best-of: {e}"))?
             }
             "--dtype" => dtype = parse_dtype(&take_value(&argv, &mut i, flag)?)?,
+            "--vae-decoder-dtype" => {
+                vae_decoder_dtype = parse_vae_decoder_dtype(&take_value(&argv, &mut i, flag)?)?
+            }
             "--device" => device = parse_device(&take_value(&argv, &mut i, flag)?)?,
             "--lora" => lora = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
             "--lora-rank" => {
@@ -521,6 +564,7 @@ fn parse_args() -> Result<Args, String> {
         seed,
         best_of,
         dtype,
+        vae_decoder_dtype,
         device,
         lora,
         lora_rank,
@@ -948,7 +992,13 @@ where
     let mut model = match &args.weights {
         Weights::Checkpoint(dir) => {
             eprintln!("loading {} ...", dir.display());
-            VoxCpm2Model::<R>::from_checkpoint(dir, &args.audiovae, device, args.dtype)?
+            VoxCpm2Model::<R>::from_checkpoint(
+                dir,
+                &args.audiovae,
+                device,
+                args.dtype,
+                args.vae_decoder_dtype,
+            )?
         }
         Weights::Gguf(path) => {
             eprintln!("loading {} ...", path.display());
@@ -958,6 +1008,7 @@ where
                 &args.audiovae,
                 device,
                 args.dtype,
+                args.vae_decoder_dtype,
             )?
         }
         Weights::Tcf(path) => {
@@ -968,7 +1019,14 @@ where
                 .config
                 .as_deref()
                 .ok_or("--config is required with --tcf")?;
-            VoxCpm2Model::<R>::from_tcf(path, config, &args.audiovae, device, args.dtype)?
+            VoxCpm2Model::<R>::from_tcf(
+                path,
+                config,
+                &args.audiovae,
+                device,
+                args.dtype,
+                args.vae_decoder_dtype,
+            )?
         }
     };
 
@@ -1051,6 +1109,10 @@ where
                 Device::Cuda => "cuda",
             },
             "dtype": match args.dtype {
+                Some(dtype) => format!("{dtype:?}"),
+                None => "native".to_string(),
+            },
+            "vae_decoder_dtype": match args.vae_decoder_dtype {
                 Some(dtype) => format!("{dtype:?}"),
                 None => "native".to_string(),
             },

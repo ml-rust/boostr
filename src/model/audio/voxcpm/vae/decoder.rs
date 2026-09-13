@@ -90,9 +90,10 @@ impl<R: Runtime<DType = DType>> AudioVaeDecoder<R> {
 
     /// Dtype every decoder weight was loaded at.
     ///
-    /// The `AudioVAE` is never cast at load time (it is verified against F32
-    /// PyTorch fixtures), so a transformer stack running at another dtype must
-    /// convert its latent to THIS dtype before decoding.
+    /// `None` at load time keeps this at the checkpoint's own F32 (verified
+    /// against PyTorch fixtures); `Some(vae_decoder_dtype)` casts every
+    /// weight, so a caller feeding this decoder a latent from another dtype
+    /// must convert to THIS dtype first — see [`super::super::model::decode::VoxCpm2Model::decode_patches`].
     pub fn dtype(&self) -> DType {
         self.front_dw.dtype()
     }

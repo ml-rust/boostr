@@ -147,11 +147,22 @@ where
     /// `path` is either the published `audiovae.pth`, an `audiovae.safetensors`
     /// converted from it, or a directory holding one of the two —
     /// [`VaeCheckpoint`] decides which from the file's own bytes.
+    ///
+    /// Always loads at the checkpoint's own F32 — there is no dtype option
+    /// here, unlike [`AudioVaeDecoder::from_checkpoint`](super::super::decoder::AudioVaeDecoder::from_checkpoint).
+    /// The encoder runs once per render, over a short reference clip (and
+    /// during training), so its cost is negligible; casting it independently
+    /// changes the LATENT it hands the transformer stack, which shifts the
+    /// stack's own conditioning and therefore the whole generation — a
+    /// confound that swamps whatever a decoder-only dtype change is meant to
+    /// measure. Byte-identical to the pre-cast behavior verified against
+    /// PyTorch fixtures.
     pub fn from_checkpoint<P: AsRef<Path>>(path: P, device: &R::Device) -> Result<Self> {
         Self::from_checkpoint_with(path, DEFAULT_ENCODER_PREFIX, device)
     }
 
-    /// Load with an explicit checkpoint prefix.
+    /// Load with an explicit checkpoint prefix. See [`Self::from_checkpoint`]
+    /// for why there is no dtype option.
     pub fn from_checkpoint_with<P: AsRef<Path>>(
         path: P,
         prefix: &str,
@@ -180,7 +191,7 @@ mod tests {
         assert!(
             AudioVaeEncoder::<CpuRuntime>::from_checkpoint(
                 "/nonexistent/audiovae.safetensors",
-                &device
+                &device,
             )
             .is_err()
         );

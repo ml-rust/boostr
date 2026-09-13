@@ -59,6 +59,10 @@ where
     /// honouring the request would mean dequantizing the very weights this
     /// path keeps packed. The error names the tensor.
     ///
+    /// `vae_decoder_dtype` casts every AudioVAE DECODER tensor independently
+    /// of `dtype` — see [`super::loader`]'s module docs. The encoder always
+    /// loads at F32.
+    ///
     /// # Errors
     /// [`crate::error::Error::ModelError`] for a file that fails any
     /// Section 15 check, one that repeats a tensor name (see [`TcfSource`]),
@@ -69,6 +73,7 @@ where
         audiovae_path: Q,
         device: &R::Device,
         dtype: Option<DType>,
+        vae_decoder_dtype: Option<DType>,
     ) -> Result<Self> {
         let cfgs = StackConfigs::from_config_json(config_json)?;
         // Opened ONCE for all five transformer-stack sub-models, and its
@@ -76,7 +81,14 @@ where
         // reparse would be quadratic over 577 names.
         let loader = TcfLoader::open(tcf_path.as_ref())?;
         let mut source = TcfSource::new(&loader)?;
-        Self::from_source(&mut source, cfgs, audiovae_path.as_ref(), device, dtype)
+        Self::from_source(
+            &mut source,
+            cfgs,
+            audiovae_path.as_ref(),
+            device,
+            dtype,
+            vae_decoder_dtype,
+        )
     }
 
     /// Load the whole model from a TCF, materializing EVERY natively encoded
@@ -90,6 +102,9 @@ where
     /// through the dense entry point or neither does.
     ///
     /// There is no `dtype` argument: the mode fixes F32.
+    /// `vae_decoder_dtype` still casts the AudioVAE decoder independently —
+    /// that codec is not part of the encoding-only measurement this mode
+    /// exists for. The encoder always loads at F32.
     ///
     /// # Errors
     /// Every error [`from_tcf`](Self::from_tcf) raises.
@@ -99,6 +114,7 @@ where
         audiovae_path: Q,
         device: &R::Device,
         client: &C,
+        vae_decoder_dtype: Option<DType>,
     ) -> Result<Self> {
         let cfgs = StackConfigs::from_config_json(config_json)?;
         let loader = TcfLoader::open(tcf_path.as_ref())?;
@@ -109,6 +125,7 @@ where
             audiovae_path.as_ref(),
             device,
             Some(DType::F32),
+            vae_decoder_dtype,
         )
     }
 }
@@ -128,6 +145,7 @@ mod tests {
                 "/nonexistent/audiovae.safetensors",
                 &device,
                 Some(DType::F32),
+                None,
             )
             .is_err()
         );

@@ -542,8 +542,13 @@ where
     // reads and writes f32 directly, so a cast here would add a rounding the
     // measurement does not intend.
     eprintln!("loading {} ...", args.ckpt.display());
-    let model =
-        VoxCpm2Model::<R>::from_checkpoint(&args.ckpt, &args.audiovae, device, Some(DType::F32))?;
+    let model = VoxCpm2Model::<R>::from_checkpoint(
+        &args.ckpt,
+        &args.audiovae,
+        device,
+        Some(DType::F32),
+        None,
+    )?;
 
     let rows = filter_rows_by_patch_cap(rows, &model.config, args.max_patches)?;
     // The whole manifest is the held-out set here, exactly as it is under

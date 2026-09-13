@@ -958,7 +958,7 @@ where
                     "--dequant-weights: --ckpt already loads dense F32, nothing to dequantize"
                 );
             }
-            VoxCpm2Model::<R>::from_checkpoint(dir, &args.audiovae, device, Some(DType::F32))?
+            VoxCpm2Model::<R>::from_checkpoint(dir, &args.audiovae, device, Some(DType::F32), None)?
         }
         Weights::Gguf(path) if args.dequant_weights => {
             eprintln!("loading {} (dequantized to dense F32) ...", path.display());
@@ -968,6 +968,7 @@ where
                 &args.audiovae,
                 device,
                 client,
+                None,
             )?
         }
         Weights::Gguf(path) => {
@@ -977,6 +978,7 @@ where
                 args.config.as_deref(),
                 &args.audiovae,
                 device,
+                None,
                 None,
             )?
         }
@@ -988,20 +990,24 @@ where
                 .config
                 .as_deref()
                 .ok_or("--config is required with --tcf")?;
-            VoxCpm2Model::<R>::from_tcf_dense(path, config, &args.audiovae, device, client)?
+            VoxCpm2Model::<R>::from_tcf_dense(path, config, &args.audiovae, device, client, None)?
         }
         // Same loader `voxcpm_clone`'s `--tcf` arm calls, on the same
         // auxiliary inputs, with the `None` dtype the `--gguf` arm above
         // explains: a natively encoded projection stays PACKED, dense
         // tensors arrive F32, and `Some(BF16)`/`Some(F16)` would be rejected
-        // by the loader anyway.
+        // by the loader anyway. `vae_decoder_dtype` is `None` too: this
+        // binary has no `--vae-decoder-dtype` flag, so the AudioVAE decoder
+        // always loads at its checkpoint F32, same as `voxcpm_clone`'s
+        // default (the encoder always loads at F32 regardless, it has no
+        // dtype option at all).
         Weights::Tcf(path) => {
             eprintln!("loading {} (base stays packed) ...", path.display());
             let config = args
                 .config
                 .as_deref()
                 .ok_or("--config is required with --tcf")?;
-            VoxCpm2Model::<R>::from_tcf(path, config, &args.audiovae, device, None)?
+            VoxCpm2Model::<R>::from_tcf(path, config, &args.audiovae, device, None, None)?
         }
     };
 

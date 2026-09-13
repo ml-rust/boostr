@@ -111,11 +111,18 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     {
         let latent = unfold_patches(patches, self.config.patch_size, self.config.feat_dim)?;
         // The transformer stack runs at whatever dtype it was loaded at; the
-        // AudioVAE is always left at its own (F32). This is the boundary
-        // between them, mirroring `prefill`'s cast of the encoder's F32
-        // reference features up into the stack's dtype.
+        // decoder runs at its own, independently chosen `vae_decoder_dtype`
+        // (the encoder has no such option — always F32, see
+        // `AudioVaeEncoder::from_checkpoint`'s docs). This is the boundary
+        // between the stack and the decoder, mirroring `prefill_inner`'s cast
+        // of the encoder's reference features up into the stack's dtype.
         let latent = latent.to_dtype(self.vae_decoder.dtype())?;
-        decode_latent_windowed(client, &self.vae_decoder, &latent)
+        let decoded = decode_latent_windowed(client, &self.vae_decoder, &latent)?;
+        // Cast back to F32 at the exit: every caller of `decode_patches`
+        // (wav encoding, structural checks, `.to_vec::<f32>()`) expects a
+        // stable F32 waveform contract, whatever dtype the decoder ran its
+        // activations at internally.
+        Ok(decoded.to_dtype(DType::F32)?)
     }
 }
 

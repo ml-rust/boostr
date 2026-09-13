@@ -3,13 +3,16 @@
 //! `x + (alpha + 1e-9).recip() * sin(alpha * x)^2`, with `alpha` shaped
 //! `[1, C, 1]` in LINEAR scale.
 //!
-//! This is NOT the same activation as
-//! [`crate::model::audio::neucodec::alias_free::SnakeBeta`]: that one has TWO
-//! per-channel params (`alpha`, `beta`) stored in LOG scale
-//! (`exp(alpha)`/`exp(beta)` at use). VoxCPM2's checkpoint has a single
-//! `alpha` tensor per `Snake` module, used directly with no `exp`. Do not
-//! unify the two — they are different activations with different checkpoint
-//! layouts, only the name rhymes.
+//! One fused numr op: [`numr::ops::ActivationOps::snake_beta`] with `beta == alpha`,
+//! so the whole activation is a single kernel pass instead of a chain of
+//! elementwise launches.
+//!
+//! [`crate::model::audio::neucodec::alias_free::SnakeBeta`] is the
+//! two-parameter cousin. It shares this kernel but has its own checkpoint
+//! layout: TWO per-channel params (`alpha`, `beta`) stored in LOG scale and
+//! exponentiated once at load. VoxCPM2's checkpoint has a single `alpha`
+//! tensor per `Snake` module, used directly with no `exp`. Do not unify the
+//! two modules — same kernel, different parameters.
 //!
 //! Inference-only: operates on plain [`Tensor<R>`], no autograd tracking.
 
@@ -25,8 +28,11 @@ const SNAKE_EPS: f64 = 1e-9;
 /// Snake activation with a single LINEAR-scale `alpha` per channel.
 pub struct Snake<R: Runtime> {
     /// `[1, C, 1]`, LINEAR scale (checkpoint stores it pre-exponentiated,
-    /// unlike NeuCodec's `SnakeBeta`).
+    /// unlike NeuCodec's `SnakeBeta`). Kept in checkpoint shape for
+    /// round-tripping.
     alpha: Tensor<R>,
+    /// The same storage viewed as `[C]`, the shape the fused kernel takes.
+    alpha_1d: Tensor<R>,
     channels: usize,
 }
 
@@ -41,11 +47,21 @@ impl<R: Runtime<DType = DType>> Snake<R> {
             });
         }
         let channels = shape[1];
-        Ok(Self { alpha, channels })
+        let alpha_1d = alpha.contiguous()?.reshape(&[channels])?;
+        Ok(Self {
+            alpha,
+            alpha_1d,
+            channels,
+        })
     }
 
     pub fn channels(&self) -> usize {
         self.channels
+    }
+
+    /// `[1, C, 1]` LINEAR-scale `alpha`, as stored in the checkpoint.
+    pub fn alpha(&self) -> &Tensor<R> {
+        &self.alpha
     }
 
     /// `x [B, C, T] -> [B, C, T]`.
@@ -60,17 +76,9 @@ impl<R: Runtime<DType = DType>> Snake<R> {
                 reason: format!("expected [B, {}, T], got {shape:?}", self.channels),
             });
         }
-
-        let scaled = client.mul(x, &self.alpha).map_err(Error::Numr)?;
-        let s = client.sin(&scaled).map_err(Error::Numr)?;
-        let s2 = client.mul(&s, &s).map_err(Error::Numr)?;
-
-        let alpha_eps = client
-            .add_scalar(&self.alpha, SNAKE_EPS)
-            .map_err(Error::Numr)?;
-        let recip = client.recip(&alpha_eps).map_err(Error::Numr)?;
-        let term = client.mul(&s2, &recip).map_err(Error::Numr)?;
-        client.add(x, &term).map_err(Error::Numr)
+        client
+            .snake_beta(x, &self.alpha_1d, &self.alpha_1d, 1, SNAKE_EPS)
+            .map_err(Error::Numr)
     }
 }
 

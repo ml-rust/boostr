@@ -9,6 +9,7 @@ use crate::model::audio::neucodec::acoustic_encoder::{
     ResidualUnitWeights, downsample_padding, same_padding,
 };
 use crate::model::audio::neucodec::alias_free::{Activation1d, SnakeBeta};
+use crate::model::audio::neucodec::client::NeuCodecClient;
 use crate::nn::Conv1d;
 use numr::dtype::DType;
 use numr::ops::PaddingMode;
@@ -29,7 +30,10 @@ struct AcousticEncoderLoader<'a, R: Runtime<DType = DType>> {
     prefix: String,
 }
 
-impl<R: Runtime<DType = DType>> AcousticEncoderLoader<'_, R> {
+impl<R: Runtime<DType = DType>> AcousticEncoderLoader<'_, R>
+where
+    R::Client: NeuCodecClient<R>,
+{
     fn tensor(&mut self, name: &str, expected: &[usize]) -> Result<Tensor<R>> {
         checked_tensor::<R>(self.loader, self.device, &self.prefix, name, expected)
     }
@@ -142,7 +146,10 @@ impl<R: Runtime<DType = DType>> AcousticEncoderLoader<'_, R> {
 pub fn load_acoustic_encoder<R: Runtime<DType = DType>, P: AsRef<Path>>(
     path: P,
     device: &R::Device,
-) -> Result<AcousticEncoder<R>> {
+) -> Result<AcousticEncoder<R>>
+where
+    R::Client: NeuCodecClient<R>,
+{
     let mut loader = SafeTensorsLoader::open(path)?;
     let weights = AcousticEncoderLoader::<R> {
         loader: &mut loader,

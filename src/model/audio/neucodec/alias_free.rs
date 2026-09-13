@@ -22,9 +22,7 @@
 use crate::error::{Error, Result};
 use crate::model::audio::neucodec::client::NeuCodecClient;
 use crate::nn::var_contiguous;
-use numr::autograd::{
-    Var, var_add, var_broadcast_to, var_cat, var_mul, var_mul_scalar, var_narrow, var_reshape,
-};
+use numr::autograd::{Var, var_broadcast_to, var_cat, var_mul_scalar, var_narrow, var_snake_beta};
 use numr::dtype::DType;
 use numr::ops::PaddingMode;
 use numr::runtime::Runtime;
@@ -178,16 +176,25 @@ where
 /// SnakeBeta: `x + (1 / (exp(beta) + 1e-9)) * sin(x * exp(alpha))^2`.
 ///
 /// `alpha`/`beta` are per-channel `[C]` and stored in LOG scale in this
-/// checkpoint (`alpha_logscale=True`), so both are exponentiated first. Using
-/// them directly would be a silent, plausible-looking error.
+/// checkpoint (`alpha_logscale=True`). Both are exponentiated ONCE here, at
+/// construction, and the LINEAR-scale tensors are what the module holds and
+/// what the fused [`numr::autograd::var_snake_beta`] kernel consumes. Using
+/// the log-scale values directly would be a silent, plausible-looking error.
+///
+/// With `trainable`, the gradient lands on the LINEAR-scale parameters.
 pub struct SnakeBeta<R: Runtime> {
+    /// `[C]`, LINEAR scale.
     alpha: Var<R>,
+    /// `[C]`, LINEAR scale.
     beta: Var<R>,
 }
 
 impl<R: Runtime<DType = DType>> SnakeBeta<R> {
-    /// `alpha`/`beta`: `[channels]`, log-scale.
-    pub fn new(alpha: Tensor<R>, beta: Tensor<R>, trainable: bool) -> Result<Self> {
+    /// `alpha`/`beta`: `[channels]`, log-scale as stored in the checkpoint.
+    pub fn new(alpha: Tensor<R>, beta: Tensor<R>, trainable: bool) -> Result<Self>
+    where
+        R::Client: NeuCodecClient<R>,
+    {
         if alpha.shape().len() != 1 || alpha.shape() != beta.shape() {
             return Err(Error::InvalidArgument {
                 arg: "alpha/beta",
@@ -198,6 +205,8 @@ impl<R: Runtime<DType = DType>> SnakeBeta<R> {
                 ),
             });
         }
+        let alpha = alpha.exp().map_err(Error::Numr)?;
+        let beta = beta.exp().map_err(Error::Numr)?;
         Ok(Self {
             alpha: Var::new(alpha, trainable),
             beta: Var::new(beta, trainable),
@@ -221,20 +230,7 @@ impl<R: Runtime<DType = DType>> SnakeBeta<R> {
                 reason: format!("expected [B, {}, T], got {shape:?}", self.channels()),
             });
         }
-
-        // [C] -> [1, C, 1] so it broadcasts across batch and time.
-        let a = var_reshape(&self.alpha, &[1, self.channels(), 1]).map_err(Error::Numr)?;
-        let b = var_reshape(&self.beta, &[1, self.channels(), 1]).map_err(Error::Numr)?;
-        let a = numr::autograd::var_exp(&a, client).map_err(Error::Numr)?;
-        let b = numr::autograd::var_exp(&b, client).map_err(Error::Numr)?;
-
-        let scaled = var_mul(x, &a, client).map_err(Error::Numr)?;
-        let s = numr::autograd::var_sin(&scaled, client).map_err(Error::Numr)?;
-        let s2 = var_mul(&s, &s, client).map_err(Error::Numr)?;
-
-        let b_eps = numr::autograd::var_add_scalar(&b, SNAKE_EPS, client).map_err(Error::Numr)?;
-        let recip = numr::autograd::var_div(&s2, &b_eps, client).map_err(Error::Numr)?;
-        var_add(x, &recip, client).map_err(Error::Numr)
+        var_snake_beta(x, &self.alpha, &self.beta, 1, SNAKE_EPS, client).map_err(Error::Numr)
     }
 }
 

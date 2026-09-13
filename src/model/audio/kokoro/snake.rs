@@ -13,11 +13,12 @@
 //! keeps the reciprocal bounded when α is near zero — we follow the
 //! reference `SnakeBeta` implementation in using `1e-9`.
 //!
-//! Composite op: no new kernel needed. Uses mul / sin / div / add from numr.
+//! One fused numr launch (`ActivationOps::snake_beta` with `beta = alpha`);
+//! the `[1, C, 1]` parameter is passed as its `[C]` view.
 
 use crate::error::{Error, Result};
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ScalarOps, UnaryOps};
+use numr::ops::ActivationOps;
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -32,7 +33,7 @@ use numr::tensor::Tensor;
 pub fn snake<R, C>(client: &C, x: &Tensor<R>, alpha: &Tensor<R>, eps: f64) -> Result<Tensor<R>>
 where
     R: Runtime<DType = DType>,
-    C: RuntimeClient<R> + BinaryOps<R> + UnaryOps<R> + ScalarOps<R>,
+    C: RuntimeClient<R> + ActivationOps<R>,
 {
     let x_shape = x.shape();
     if x_shape.len() != 3 {
@@ -50,17 +51,10 @@ where
         });
     }
 
-    // α · x (broadcast across B and T).
-    let ax = client.mul(alpha, x).map_err(Error::Numr)?;
-    // sin²(α · x)
-    let s = client.sin(&ax).map_err(Error::Numr)?;
-    let s_sq = client.mul(&s, &s).map_err(Error::Numr)?;
-    // 1 / (α + ε) — add scalar ε then reciprocate.
-    let alpha_eps = client.add_scalar(alpha, eps).map_err(Error::Numr)?;
-    let inv = client.recip(&alpha_eps).map_err(Error::Numr)?;
-    // x + (1 / (α + ε)) · sin²(α · x)
-    let scaled = client.mul(&inv, &s_sq).map_err(Error::Numr)?;
-    client.add(x, &scaled).map_err(Error::Numr)
+    let alpha_1d = alpha.reshape(&[channels]).map_err(Error::Numr)?;
+    client
+        .snake_beta(x, &alpha_1d, &alpha_1d, 1, eps)
+        .map_err(Error::Numr)
 }
 
 #[cfg(test)]

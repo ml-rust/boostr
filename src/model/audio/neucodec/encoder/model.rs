@@ -3,6 +3,7 @@
 
 use crate::error::{Error, Result};
 use crate::model::audio::neucodec::acoustic_encoder::AcousticEncoder;
+use crate::model::audio::neucodec::client::NeuCodecClient;
 use crate::model::audio::neucodec::loader;
 use crate::model::audio::neucodec::semantic_adapter::{SEMANTIC_ADAPTER_CHANNELS, SemanticAdapter};
 use crate::model::audio::neucodec::semantic_encoder::SemanticEncoder;
@@ -61,7 +62,10 @@ impl<R: Runtime<DType = DType>> NeuCodecEncoder<R> {
 
     /// Load every part from a `neuphonic/neucodec` checkpoint (file, or the
     /// directory containing `model.safetensors`).
-    pub fn from_safetensors<P: AsRef<Path>>(path: P, device: &R::Device) -> Result<Self> {
+    pub fn from_safetensors<P: AsRef<Path>>(path: P, device: &R::Device) -> Result<Self>
+    where
+        R::Client: NeuCodecClient<R>,
+    {
         let path = path.as_ref();
         Self::new(NeuCodecEncoderWeights {
             acoustic_encoder: loader::load_acoustic_encoder::<R, _>(path, device)?,

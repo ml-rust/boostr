@@ -5,9 +5,10 @@
 //! samples, files, directories, voices, or text pipelines belongs here.
 //!
 //! Always compiled: RIFF/WAVE in and out ([`wav`]), the polyphase
-//! [`resample`]r, the reference-take [`enhance`] chain, [`pitch`], [`quality`]
-//! and ASR [`eval`] metrics, and the backend-free half of [`g2p`]. Feature
-//! gates add the compressed-audio [`decode`]rs, the espeak-ng G2P backend, the
+//! [`resample`]r, the reference-take [`enhance`] chain, [`pitch`], [`quality`],
+//! two-signal [`spectral`] distance, and ASR [`eval`] metrics, and the
+//! backend-free half of [`g2p`]. Feature gates add the compressed-audio
+//! [`decode`]rs, the espeak-ng G2P backend, the
 //! [`tts`] surface, the [`kokoro`] and [`voxcpm`] engines, the [`whisper`]
 //! bundle, the [`vad`] segmenter, and [`corpus`] preparation.
 
@@ -18,6 +19,7 @@ pub mod g2p;
 pub mod pitch;
 pub mod quality;
 pub mod resample;
+pub mod spectral;
 pub mod wav;
 
 #[cfg(feature = "corpus")]
@@ -55,6 +57,7 @@ pub use quality::{TakeQuality, measure_quality};
 pub use resample::{
     DEFAULT_TAPS_PER_PHASE, MAX_FILTER_TAPS, resample, resample_with_taps, to_mono_at_rate,
 };
+pub use spectral::{SpectralDistance, multi_resolution_stft_distance, snr_db};
 #[cfg(feature = "tts")]
 pub use tts::{SynthesizeOptions, TtsBundle, TtsEngine, TtsError, Voice, default_kokoro_voices};
 #[cfg(feature = "vad")]

@@ -93,6 +93,9 @@ required-features = ["vad"]
 name = "audio_stats"
 
 [[example]]
+name = "wav_compare"
+
+[[example]]
 name = "enhance_reference"
 
 [[example]]

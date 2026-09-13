@@ -11,6 +11,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q8_0: FeatMajorFormat = FeatMajor
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: true,
+    narrow_tile: false,
 };
 
 /// Q4_0: 18-byte blocks of 32 elements, staged as Q8_0's row byte for byte —
@@ -28,6 +29,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q4_0: FeatMajorFormat = FeatMajor
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: true,
+    narrow_tile: false,
 };
 
 /// Q4_1: 20-byte blocks of 32 elements, staged as Q4_K's row int for int — 64
@@ -44,6 +46,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q4_1: FeatMajorFormat = FeatMajor
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: false,
+    narrow_tile: false,
 };
 
 /// Q5_0: 22-byte blocks of 32 elements, staged as Q8_0's row byte for byte —
@@ -58,6 +61,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_0: FeatMajorFormat = FeatMajor
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: false,
+    narrow_tile: false,
 };
 
 /// Q5_1: 24-byte blocks of 32 elements, staged as Q4_1's row int for int. Q5_1
@@ -71,6 +75,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_1: FeatMajorFormat = FeatMajor
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: false,
+    narrow_tile: false,
 };
 
 /// IQ4_NL: 18-byte blocks of 32 elements, staged as Q8_0's row byte for byte —
@@ -89,11 +94,12 @@ pub(in crate::quant::cuda::quant_matmul) const IQ4_NL: FeatMajorFormat = FeatMaj
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: true,
+    narrow_tile: false,
 };
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::dispatch::{VARIANTS, smem_bytes};
+    use super::super::super::tiling::{FEAT_TILE_DEFAULT, VARIANTS, smem_bytes};
     use super::super::kquant::Q4_K;
     use super::*;
 
@@ -130,7 +136,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&Q4_0, x) == smem_bytes(&Q8_0, x))
+                .all(|&x| smem_bytes(&Q4_0, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
         );
         // One of the measured tile-parallel opt-outs.
         const { assert!(Q4_0.prefers_tile_parallel) };
@@ -158,7 +165,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&Q4_1, x) == smem_bytes(&Q4_K, x))
+                .all(|&x| smem_bytes(&Q4_1, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x))
         );
     }
 
@@ -184,7 +192,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&Q5_0, x) == smem_bytes(&Q8_0, x))
+                .all(|&x| smem_bytes(&Q5_0, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
         );
     }
 
@@ -210,7 +219,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&Q5_1, x) == smem_bytes(&Q4_1, x))
+                .all(|&x| smem_bytes(&Q5_1, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q4_1, FEAT_TILE_DEFAULT, x))
         );
         const { assert!(!Q5_1.prefers_tile_parallel) };
     }
@@ -239,7 +249,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&IQ4_NL, x) == smem_bytes(&Q8_0, x))
+                .all(|&x| smem_bytes(&IQ4_NL, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
         );
         // One of the measured tile-parallel opt-outs.
         const { assert!(IQ4_NL.prefers_tile_parallel) };

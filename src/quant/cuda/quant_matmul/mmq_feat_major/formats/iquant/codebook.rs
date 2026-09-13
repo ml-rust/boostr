@@ -17,11 +17,12 @@ pub(in crate::quant::cuda::quant_matmul) const IQ4_XS: FeatMajorFormat = FeatMaj
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: false,
+    narrow_tile: false,
 };
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::super::dispatch::{VARIANTS, smem_bytes};
+    use super::super::super::super::tiling::{FEAT_TILE_DEFAULT, VARIANTS, smem_bytes};
     use super::super::super::legacy::Q8_0;
     use super::*;
 
@@ -51,7 +52,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&IQ4_XS, x) == smem_bytes(&Q8_0, x))
+                .all(|&x| smem_bytes(&IQ4_XS, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
         );
     }
 }

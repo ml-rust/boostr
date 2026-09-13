@@ -24,6 +24,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ2_XXS: FeatMajorFormat = FeatMa
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: false,
+    narrow_tile: false,
 };
 
 /// IQ2_XS: 74-byte blocks of 256 elements, staged as Q6_K's row int for int —
@@ -45,6 +46,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ2_XS: FeatMajorFormat = FeatMaj
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: false,
+    narrow_tile: false,
 };
 
 /// IQ2_S: 82-byte blocks of 256 elements, staged as Q6_K's row int for int —
@@ -66,6 +68,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ2_S: FeatMajorFormat = FeatMajo
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: false,
+    narrow_tile: false,
 };
 
 /// IQ3_XXS: 98-byte blocks of 256 elements, staged as Q8_0's row byte for byte
@@ -93,6 +96,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ3_XXS: FeatMajorFormat = FeatMa
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: true,
+    narrow_tile: false,
 };
 
 /// IQ3_S: 110-byte blocks of 256 elements, staged as Q8_0's row byte for byte —
@@ -115,6 +119,7 @@ pub(in crate::quant::cuda::quant_matmul) const IQ3_S: FeatMajorFormat = FeatMajo
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: false,
+    narrow_tile: false,
 };
 
 /// IQ1_S: 50-byte blocks of 256 elements, staged as Q4_K's row int for int —
@@ -150,11 +155,12 @@ pub(in crate::quant::cuda::quant_matmul) const IQ1_S: FeatMajorFormat = FeatMajo
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: false,
+    narrow_tile: false,
 };
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::super::dispatch::{VARIANTS, smem_bytes};
+    use super::super::super::super::tiling::{FEAT_TILE_DEFAULT, VARIANTS, smem_bytes};
     use super::super::super::kquant::{Q4_K, Q6_K};
     use super::super::super::legacy::{Q4_1, Q8_0};
     use super::super::codebook::IQ4_XS;
@@ -201,7 +207,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&IQ2_XXS, x) == smem_bytes(&Q8_0, x))
+                .all(|&x| smem_bytes(&IQ2_XXS, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
         );
     }
 
@@ -231,7 +238,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&IQ2_XS, x) == smem_bytes(&Q6_K, x))
+                .all(|&x| smem_bytes(&IQ2_XS, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q6_K, FEAT_TILE_DEFAULT, x))
         );
     }
 
@@ -259,7 +267,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&IQ2_S, x) == smem_bytes(&Q6_K, x))
+                .all(|&x| smem_bytes(&IQ2_S, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q6_K, FEAT_TILE_DEFAULT, x))
         );
     }
 
@@ -290,7 +299,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&IQ3_XXS, x) == smem_bytes(&Q8_0, x))
+                .all(|&x| smem_bytes(&IQ3_XXS, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
         );
     }
 
@@ -320,7 +330,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&IQ3_S, x) == smem_bytes(&Q8_0, x))
+                .all(|&x| smem_bytes(&IQ3_S, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x))
         );
     }
 
@@ -351,7 +362,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&IQ1_S, x) == smem_bytes(&Q4_K, x))
+                .all(|&x| smem_bytes(&IQ1_S, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x))
         );
     }
 }

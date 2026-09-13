@@ -9,6 +9,12 @@
 //! `--format` takes a GGUF block name (`q8_0`, `q6_k`, `q4_k`), so one
 //! invocation shape can be compared against an external runtime.
 //!
+//! `--feat-tile {auto,128,64}` picks the feature-major MMQ feature tile.
+//! `auto` (the default) times `quant_matmul` as production runs it, GEMV
+//! crossover included. A number forces that tile through the MMQ path at
+//! every `m`, for an A/B of the two tiles at one shape; it errors for a
+//! format that does not compile the tile.
+//!
 //! Reports microseconds per call, the same unit `test-backend-ops perf` prints,
 //! so the two can be read side by side at MATCHED shapes. A comparison at
 //! different shapes measures the shapes, not the kernels.
@@ -26,6 +32,10 @@ fn main() {
 
 #[cfg(feature = "cuda")]
 use boostr::QuantMatmulOps;
+#[cfg(feature = "cuda")]
+use boostr::quant::cuda::quant_matmul::forced_tile::quant_matmul_forced_feat_tile;
+#[cfg(feature = "cuda")]
+use boostr::quant::cuda::quant_matmul::mmq_feat_major::FeatTile;
 #[cfg(feature = "cuda")]
 use boostr::quant::{QuantFormat, QuantTensor};
 #[cfg(feature = "cuda")]
@@ -49,6 +59,16 @@ fn parse_format(name: &str) -> QuantFormat {
         "q6_k" => QuantFormat::Q6K,
         "q4_k" => QuantFormat::Q4K,
         other => panic!("unknown --format {other}, expected q8_0, q6_k, or q4_k"),
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn parse_feat_tile(value: &str) -> FeatTile {
+    match value {
+        "auto" => FeatTile::Auto,
+        "128" => FeatTile::Force(128),
+        "64" => FeatTile::Force(64),
+        other => panic!("unknown --feat-tile {other}, expected auto, 128, or 64"),
     }
 }
 
@@ -78,6 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut format = QuantFormat::Q8_0;
     let (mut n, mut k) = (4096usize, 14336usize);
     let mut ms = vec![1usize, 2, 4, 8, 512];
+    let mut feat_tile = FeatTile::Auto;
 
     let mut i = 0;
     while i < argv.len() {
@@ -87,6 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--n" => n = value().parse()?,
             "--k" => k = value().parse()?,
             "--m" => ms = value().split(',').map(|s| s.parse().unwrap()).collect(),
+            "--feat-tile" => feat_tile = parse_feat_tile(&value()),
             other => panic!("unknown flag {other}"),
         }
         i += 2;
@@ -98,19 +120,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weight_bytes = packed_weight(format, n, k)?;
     let weight = QuantTensor::from_bytes(&weight_bytes, format, &[n, k], &device)?;
 
-    println!("{} N={n} K={k}", format.name());
+    // A forced tile goes straight to the MMQ path; `auto` is the production
+    // call, so the two are not the same code path at small `m`.
+    let run = |act: &Tensor<_>| match feat_tile {
+        FeatTile::Auto => client.quant_matmul(act, &weight),
+        forced => quant_matmul_forced_feat_tile(&client, act, &weight, forced),
+    };
+
+    println!("{} N={n} K={k} feat-tile={feat_tile:?}", format.name());
     for &m in &ms {
         let act_data: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.013).sin() * 0.4).collect();
         let act = Tensor::from_slice(&act_data, &[m, k], &device)?;
 
         for _ in 0..WARMUP {
-            let _ = client.quant_matmul(&act, &weight)?;
+            let _ = run(&act)?;
         }
         client.synchronize();
 
         let started = std::time::Instant::now();
         for _ in 0..ITERS {
-            let _ = client.quant_matmul(&act, &weight)?;
+            let _ = run(&act)?;
         }
         client.synchronize();
         let per_call = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;

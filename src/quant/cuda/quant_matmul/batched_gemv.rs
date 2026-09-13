@@ -257,6 +257,7 @@ fn mmq_batch(
             m,
             k,
             n,
+            mmq_feat_major::FeatTile::Auto,
         )?;
         if launched.is_none() {
             return Err(Error::QuantError {

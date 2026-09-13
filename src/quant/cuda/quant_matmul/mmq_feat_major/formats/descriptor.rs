@@ -40,4 +40,14 @@ pub(in crate::quant::cuda::quant_matmul) struct FeatMajorFormat {
     /// small `m`, compare both kernels per format, flip any format whose
     /// tile-parallel run wins outside noise.
     pub prefers_tile_parallel: bool,
+    /// `true` when the kernel file compiles this format's `_y64_` entry
+    /// points, the narrow feature tile for the CTA-starved small-M, small-N
+    /// regime — see `MMQ_FM_KERNEL_Y64` in `quant_mmq_mma.cu`.
+    ///
+    /// Only the formats a K-quant mix places on the small-N projections
+    /// compile it; every other format has one feature tile, and the dispatch
+    /// never asks it for the narrow one. A format joins by adding its
+    /// `MMQ_FM_KERNEL_Y64` list to the kernel file AND flipping this flag;
+    /// the flag alone would launch a symbol the module does not hold.
+    pub narrow_tile: bool,
 }

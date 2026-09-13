@@ -12,6 +12,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q4_K: FeatMajorFormat = FeatMajor
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: false,
+    narrow_tile: true,
 };
 
 /// Q5_K: 176-byte super-blocks of 256 elements, staged exactly as Q4_K — 64
@@ -25,6 +26,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_K: FeatMajorFormat = FeatMajor
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: false,
+    narrow_tile: true,
 };
 
 /// Q6_K: 210-byte super-blocks of 256 elements, staged as 64 quant words plus
@@ -40,6 +42,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q6_K: FeatMajorFormat = FeatMajor
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: false,
+    narrow_tile: true,
 };
 
 /// Q3_K: 110-byte super-blocks of 256 elements, staged as Q6_K's row int for
@@ -54,6 +57,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q3_K: FeatMajorFormat = FeatMajor
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
     prefers_tile_parallel: false,
+    narrow_tile: false,
 };
 
 /// Q2_K: 84-byte super-blocks of 256 elements, staged as 64 quant words plus
@@ -83,11 +87,12 @@ pub(in crate::quant::cuda::quant_matmul) const Q2_K: FeatMajorFormat = FeatMajor
     k_multiple: 256,
     act_scratch_ints_per_token: 4,
     prefers_tile_parallel: true,
+    narrow_tile: false,
 };
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::dispatch::{FEAT_TILE, VARIANTS, smem_bytes, smem_opt_in_limit};
+    use super::super::super::tiling::{FEAT_TILE_DEFAULT, VARIANTS, smem_bytes, smem_opt_in_limit};
     use super::super::legacy::{Q4_0, Q4_1, Q5_0, Q5_1, Q8_0};
     use super::*;
 
@@ -107,6 +112,17 @@ mod tests {
         );
         assert_eq!(Q4_K.k_multiple, 256);
         const { assert!(!Q4_K.prefers_tile_parallel) };
+    }
+
+    /// The narrow tile is compiled for the three formats a K-quant mix puts
+    /// on the small-N projections, and for no other K-quant.
+    #[test]
+    fn only_the_mix_formats_compile_the_narrow_tile() {
+        const { assert!(Q4_K.narrow_tile) };
+        const { assert!(Q5_K.narrow_tile) };
+        const { assert!(Q6_K.narrow_tile) };
+        const { assert!(!Q3_K.narrow_tile) };
+        const { assert!(!Q2_K.narrow_tile) };
     }
 
     #[test]
@@ -135,7 +151,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&Q5_K, x) == smem_bytes(&Q4_K, x))
+                .all(|&x| smem_bytes(&Q5_K, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x))
         );
     }
 
@@ -165,7 +182,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&Q6_K, x) == smem_bytes(&Q4_K, x))
+                .all(|&x| smem_bytes(&Q6_K, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x))
         );
     }
 
@@ -195,7 +213,8 @@ mod tests {
         assert!(
             VARIANTS
                 .iter()
-                .all(|&x| smem_bytes(&Q3_K, x) == smem_bytes(&Q6_K, x))
+                .all(|&x| smem_bytes(&Q3_K, FEAT_TILE_DEFAULT, x)
+                    == smem_bytes(&Q6_K, FEAT_TILE_DEFAULT, x))
         );
     }
 
@@ -207,17 +226,16 @@ mod tests {
     /// scales with `mmq_x`.
     #[test]
     fn q4_k_costs_one_extra_scale_word_per_row_over_q8_0() {
-        const EXTRA: u32 = 4 * FEAT_TILE * 8;
+        const EXTRA: u32 = 4 * FEAT_TILE_DEFAULT * 8;
         assert_eq!(Q4_K.x_stride, Q8_0.x_stride + 8);
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| { smem_bytes(&Q4_K, x) == smem_bytes(&Q8_0, x) + EXTRA })
-        );
+        assert!(VARIANTS.iter().all(|&x| {
+            smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x)
+                == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x) + EXTRA
+        }));
         // The widest variant must still fit what a device grants on opt-in.
         // 96KB per unit is the smallest sm_80-or-later figure the family runs
         // on, and the launcher subtracts the driver's reservation from it.
-        assert!(smem_bytes(&Q4_K, 128) <= smem_opt_in_limit(96 * 1024));
+        assert!(smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, 128) <= smem_opt_in_limit(96 * 1024));
     }
 
     #[test]
@@ -256,13 +274,12 @@ mod tests {
         // The family's bank-padding rule, asserted in the kernel as well.
         assert_eq!(Q2_K.x_stride % 8, 4);
         // Weight row cost over Q4_K, plus the scratch, at every token tile.
-        const EXTRA_ROW: u32 = 4 * FEAT_TILE * 16;
-        assert!(
-            VARIANTS
-                .iter()
-                .all(|&x| { smem_bytes(&Q2_K, x) == smem_bytes(&Q4_K, x) + EXTRA_ROW + 4 * x * 4 })
-        );
+        const EXTRA_ROW: u32 = 4 * FEAT_TILE_DEFAULT * 16;
+        assert!(VARIANTS.iter().all(|&x| {
+            smem_bytes(&Q2_K, FEAT_TILE_DEFAULT, x)
+                == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x) + EXTRA_ROW + 4 * x * 4
+        }));
         // The widest variant must still fit what a device grants on opt-in.
-        assert!(smem_bytes(&Q2_K, 128) <= smem_opt_in_limit(96 * 1024));
+        assert!(smem_bytes(&Q2_K, FEAT_TILE_DEFAULT, 128) <= smem_opt_in_limit(96 * 1024));
     }
 }

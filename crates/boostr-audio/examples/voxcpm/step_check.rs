@@ -237,8 +237,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = CpuClient::new(device.clone());
 
     let vae = fx_dir.join("audiovae.safetensors");
-    let model =
-        VoxCpm2Model::<CpuRuntime>::from_checkpoint(&ck, &vae, &device, Some(DType::F32), None)?;
+    let model = VoxCpm2Model::<CpuRuntime>::from_checkpoint(
+        &ck,
+        Some(&vae),
+        &device,
+        Some(DType::F32),
+        None,
+    )?;
 
     let mut ok = true;
 

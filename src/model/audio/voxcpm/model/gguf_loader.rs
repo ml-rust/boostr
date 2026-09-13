@@ -19,17 +19,23 @@
 //! `general.architecture` — both files set that key to `voxcpm2`. See
 //! `loader::cstr::probe_naming`.
 //!
-//! # What a VoxCPM2 GGUF does NOT hold
+//! # The AudioVAE: embedded when the converter wrote it
 //!
-//! The AudioVAE, on either convention. Our own converter never sees it (it is
-//! a separate file, not part of the checkpoint compressr converts), and
-//! cstr's `vae.*` tensors use a third naming scheme with `weight_norm` still
-//! unfolded into `weight_g`/`weight_v` pairs, which needs a second map (the
-//! fold itself is [`crate::nn::fuse_weight_norm`], already shared with the
-//! `.pth` reader). `from_gguf` therefore takes the VAE path as
-//! its own argument on both paths, exactly like
-//! [`from_checkpoint`](VoxCpm2Model::from_checkpoint). It holds no
-//! `tokenizer.json` either.
+//! A verbatim GGUF written by compressr from a directory holding
+//! `audiovae.pth` carries the VAE too, folded and dense, as
+//! `vae.decoder.*`/`vae.encoder.*` with the `voxcpm2.config_json` key beside
+//! it. `from_gguf` probes for
+//! [`VAE_GGUF_PROBE_TENSOR`](crate::model::audio::voxcpm::vae::VAE_GGUF_PROBE_TENSOR)
+//! and reads the VAE from the same file when it is there; the
+//! `audiovae_path` argument is then optional, and ignored when given. A
+//! file without it — an older conversion, or cstr's, whose `vae.*` tensors
+//! use a third naming scheme with `weight_norm` still unfolded — still needs
+//! the path. Neither convention holds a `tokenizer.json`.
+//!
+//! An embedded VAE must be stored DENSE. `load_named` dequantizes silently,
+//! and the decoder is verified against F32 fixtures, so a block-quantized
+//! `vae.*` tensor is refused by name before anything is read: it is a
+//! converter defect, not something to decode around.
 //!
 //! # What stays quantized in memory, and what does not
 //!
@@ -52,17 +58,18 @@
 //! them — `load_named_weight` returns `Weight::Standard` for whatever the
 //! file did not quantize, and `MaybeLoraLinear` runs the dense path there.
 //!
-//! The AudioVAE decoder is untouched by all of this: it is a separate file,
-//! never packed, cast by its own `vae_decoder_dtype` argument independently
-//! of the GGUF's quantization tier (`None` keeps its F32, verified against
-//! PyTorch fixtures at that dtype). The encoder has no dtype option at all —
-//! always F32, see [`super::loader`]'s module docs.
+//! The AudioVAE decoder is untouched by all of this: embedded or separate,
+//! it is never packed, and it is cast by its own `vae_decoder_dtype`
+//! argument independently of the GGUF's quantization tier (`None` keeps its
+//! F32, verified against PyTorch fixtures at that dtype). The encoder has no
+//! dtype option at all — always F32, see [`super::loader`]'s module docs.
 
 use crate::error::{Error, Result};
 use crate::format::gguf::Gguf;
 use crate::model::audio::voxcpm::loader::cstr::{GgmlNamedGguf, GgufNaming, probe_naming};
 use crate::model::audio::voxcpm::loader::support::DenseWeightSource;
-use crate::model::audio::voxcpm::model::loader::{StackConfigs, VoxCpm2Model};
+use crate::model::audio::voxcpm::model::loader::{StackConfigs, VoxCpm2Model, packed_vae_tensor};
+use crate::model::audio::voxcpm::vae::{VAE_GGUF_PROBE_TENSOR, VAE_GGUF_ROOT};
 use crate::quant::traits::DequantOps;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, TensorOps, TypeConversionOps, UnaryOps};
@@ -72,9 +79,9 @@ use std::path::Path;
 /// GGUF metadata string key holding the verbatim contents of the
 /// checkpoint's `config.json`.
 ///
-/// compressr does not write this key yet; a later unit adds it. Reading it
-/// now means that unit lands with no boostr change, and a GGUF written today
-/// still loads through the `config_json` path argument.
+/// compressr writes it for a VoxCPM2 conversion whose input directory holds
+/// a `config.json`. A GGUF written without it still loads through the
+/// `config_json` path argument.
 ///
 /// cstr's ggml-conventional file embeds no `config.json` either, so it too
 /// needs the path argument. Its `voxcpm2.*` metadata keys do carry every
@@ -85,13 +92,18 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R>
 where
     R::Client: TypeConversionOps<R> + ReduceOps<R> + UnaryOps<R> + BinaryOps<R> + TensorOps<R>,
 {
-    /// Load the whole model from a GGUF plus the separate AudioVAE file.
+    /// Load the whole model from a GGUF, and the separate AudioVAE file
+    /// when the GGUF does not embed one.
     ///
     /// The architecture config is resolved in this order:
     ///
     /// 1. the GGUF's own [`GGUF_CONFIG_JSON_KEY`] metadata string, when present;
     /// 2. the `config_json` path argument;
     /// 3. neither — an error naming both options.
+    ///
+    /// The AudioVAE follows the same shape: the GGUF's own `vae.*` tensors
+    /// when present, else `audiovae_path`, else an error naming both — see
+    /// the module docs. A block-quantized `vae.*` tensor is refused by name.
     ///
     /// `dtype` casts every transformer-stack tensor that arrives dense, same
     /// as [`from_checkpoint`](Self::from_checkpoint). Dequantized tensors
@@ -106,10 +118,10 @@ where
     /// `vae_decoder_dtype` casts every AudioVAE DECODER tensor independently
     /// of `dtype` — see [`super::loader`]'s module docs. The encoder always
     /// loads at F32.
-    pub fn from_gguf<P: AsRef<Path>, Q: AsRef<Path>>(
+    pub fn from_gguf<P: AsRef<Path>>(
         gguf_path: P,
         config_json: Option<&Path>,
-        audiovae_path: Q,
+        audiovae_path: Option<&Path>,
         device: &R::Device,
         dtype: Option<DType>,
         vae_decoder_dtype: Option<DType>,
@@ -120,6 +132,7 @@ where
         let embedded = source.metadata().get_string(GGUF_CONFIG_JSON_KEY);
         let content = resolve_config_text(embedded, config_json)?;
         let cfgs = StackConfigs::from_config_str(&content)?;
+        check_embedded_vae_dense(&source)?;
         // Two conventions, one walk: `from_source` is generic over the
         // source, so the only difference is whether the names are rewritten
         // on the way in.
@@ -131,7 +144,7 @@ where
             GgufNaming::Verbatim => Self::from_source(
                 &mut source,
                 cfgs,
-                audiovae_path.as_ref(),
+                audiovae_path,
                 device,
                 dtype,
                 vae_decoder_dtype,
@@ -139,7 +152,7 @@ where
             GgufNaming::Ggml => Self::from_source(
                 &mut GgmlNamedGguf::new(source),
                 cfgs,
-                audiovae_path.as_ref(),
+                audiovae_path,
                 device,
                 dtype,
                 vae_decoder_dtype,
@@ -164,14 +177,15 @@ where
     /// `quant_matmul` would have run the packed weight at.
     /// `vae_decoder_dtype` still casts the AudioVAE decoder independently —
     /// that codec is not part of the encoding-only measurement this mode
-    /// exists for. The encoder always loads at F32.
+    /// exists for. The encoder always loads at F32. The AudioVAE itself is
+    /// resolved exactly as [`from_gguf`](Self::from_gguf) resolves it.
     ///
     /// A dense stack costs what an unquantized checkpoint costs. Use
     /// [`from_gguf`](Self::from_gguf) for anything but a measurement.
-    pub fn from_gguf_dense<P: AsRef<Path>, Q: AsRef<Path>, C: DequantOps<R>>(
+    pub fn from_gguf_dense<P: AsRef<Path>, C: DequantOps<R>>(
         gguf_path: P,
         config_json: Option<&Path>,
-        audiovae_path: Q,
+        audiovae_path: Option<&Path>,
         device: &R::Device,
         client: &C,
         vae_decoder_dtype: Option<DType>,
@@ -180,6 +194,7 @@ where
         let embedded = source.metadata().get_string(GGUF_CONFIG_JSON_KEY);
         let content = resolve_config_text(embedded, config_json)?;
         let cfgs = StackConfigs::from_config_str(&content)?;
+        check_embedded_vae_dense(&source)?;
         // Same two-convention dispatch [`from_gguf`] makes, on the same
         // probe: the decorator changes what a weight arrives AS, never which
         // name it is read under.
@@ -188,7 +203,7 @@ where
             GgufNaming::Verbatim => Self::from_source(
                 &mut DenseWeightSource::new(&mut source, client),
                 cfgs,
-                audiovae_path.as_ref(),
+                audiovae_path,
                 device,
                 Some(DType::F32),
                 vae_decoder_dtype,
@@ -198,7 +213,7 @@ where
                 Self::from_source(
                     &mut DenseWeightSource::new(&mut named, client),
                     cfgs,
-                    audiovae_path.as_ref(),
+                    audiovae_path,
                     device,
                     Some(DType::F32),
                     vae_decoder_dtype,
@@ -206,6 +221,29 @@ where
             }
         }
     }
+}
+
+/// Refuse a GGUF whose embedded AudioVAE holds a block-quantized tensor.
+///
+/// Runs over the directory, before any read: `Gguf::load_named` would
+/// dequantize such a tensor without complaint, and the VAE loaders are
+/// verified against dense fixtures only. Integer tensors pass — the
+/// `sr_bin_boundaries` I32 vector is stored verbatim and never read.
+///
+/// Only a file that carries OUR embedded VAE (the probe tensor is present)
+/// is checked: cstr's `vae.*` tensors are never read through this path, so
+/// how that file stores them is not this loader's concern.
+fn check_embedded_vae_dense(gguf: &Gguf) -> Result<()> {
+    if gguf.tensor_info(VAE_GGUF_PROBE_TENSOR).is_err() {
+        return Ok(());
+    }
+    for name in gguf.tensor_names().filter(|n| n.starts_with(VAE_GGUF_ROOT)) {
+        let ggml_type = gguf.tensor_info(name)?.ggml_type;
+        if ggml_type.to_quant_format().is_some() {
+            return Err(packed_vae_tensor(name, &format!("{ggml_type:?}")));
+        }
+    }
+    Ok(())
 }
 
 /// Pick the `config.json` body: the GGUF's embedded copy first, the path
@@ -279,12 +317,112 @@ mod tests {
             VoxCpm2Model::<CpuRuntime>::from_gguf(
                 "/nonexistent/voxcpm2.gguf",
                 None,
-                "/nonexistent/audiovae.safetensors",
+                Some(Path::new("/nonexistent/audiovae.safetensors")),
                 &device,
                 Some(DType::F32),
                 None,
             )
             .is_err()
         );
+    }
+
+    /// A minimal GGUF v3 image: no metadata, the named tensors each with
+    /// the given GGML type, one 32-element row of zero bytes behind each.
+    /// Enough for the directory-level checks under test, which never read
+    /// element data.
+    fn gguf_with_typed_tensors(tensors: &[(&str, GgmlType)]) -> Gguf {
+        use crate::format::gguf::types::GgmlType as T;
+        fn put_str(out: &mut Vec<u8>, s: &str) {
+            out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
+        let row_bytes = |t: T| match t {
+            T::F32 => 128u64,
+            T::F16 | T::BF16 => 64,
+            T::I32 => 128,
+            T::Q4K | T::Q8_0 => 256,
+            other => panic!("fixture has no row size for {other:?}"),
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(b"GGUF");
+        out.extend_from_slice(&3u32.to_le_bytes());
+        out.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
+        let mut offset = 0u64;
+        for (name, ty) in tensors {
+            put_str(&mut out, name);
+            out.extend_from_slice(&1u32.to_le_bytes());
+            out.extend_from_slice(&256u64.to_le_bytes());
+            out.extend_from_slice(&(*ty as u32).to_le_bytes());
+            out.extend_from_slice(&offset.to_le_bytes());
+            offset += row_bytes(*ty);
+        }
+        let aligned = out.len().div_ceil(32) * 32;
+        out.resize(aligned + offset as usize, 0);
+        Gguf::from_bytes(out).expect("parse synthetic GGUF")
+    }
+
+    use crate::format::gguf::types::GgmlType;
+    use crate::format::weight_source::WeightSource;
+
+    #[test]
+    fn a_dense_embedded_vae_passes_the_guard() {
+        let gguf = gguf_with_typed_tensors(&[
+            ("vae.decoder.model.0.weight", GgmlType::F32),
+            ("vae.decoder.model.1.weight", GgmlType::F16),
+            ("vae.encoder.block.0.weight", GgmlType::BF16),
+            ("vae.decoder.sr_bin_boundaries", GgmlType::I32),
+            ("base_lm.layers.0.self_attn.q_proj.weight", GgmlType::Q4K),
+        ]);
+        check_embedded_vae_dense(&gguf).expect("dense VAE beside a packed stack");
+        assert!(WeightSource::<CpuRuntime>::has_named(
+            &gguf,
+            VAE_GGUF_PROBE_TENSOR
+        ));
+    }
+
+    /// A packed `vae.*` tensor is refused by name and type, whatever else
+    /// the file holds.
+    #[test]
+    fn a_quantized_embedded_vae_tensor_is_refused_by_name() {
+        let gguf = gguf_with_typed_tensors(&[
+            ("vae.decoder.model.0.weight", GgmlType::F32),
+            (
+                "vae.decoder.sr_cond_model.2.scale_embed.weight",
+                GgmlType::Q4K,
+            ),
+        ]);
+        let err = check_embedded_vae_dense(&gguf)
+            .expect_err("packed VAE tensor")
+            .to_string();
+        assert!(
+            err.contains("vae.decoder.sr_cond_model.2.scale_embed.weight"),
+            "{err}"
+        );
+        assert!(err.contains("Q4K"), "{err}");
+    }
+
+    /// No `vae.*` at all: nothing to guard, and the probe says "not
+    /// embedded", which is what sends `from_source` to the path argument.
+    #[test]
+    fn a_gguf_without_a_vae_passes_the_guard_and_fails_the_probe() {
+        let gguf =
+            gguf_with_typed_tensors(&[("base_lm.layers.0.self_attn.q_proj.weight", GgmlType::Q4K)]);
+        check_embedded_vae_dense(&gguf).expect("no VAE to check");
+        assert!(!WeightSource::<CpuRuntime>::has_named(
+            &gguf,
+            VAE_GGUF_PROBE_TENSOR
+        ));
+    }
+
+    /// A file that is not ours (no probe tensor) is not checked, whatever
+    /// its own `vae.*` tensors look like: this loader never reads them.
+    #[test]
+    fn a_foreign_vae_scheme_is_not_checked() {
+        let gguf = gguf_with_typed_tensors(&[
+            ("vae.enc.conv0.weight", GgmlType::Q8_0),
+            ("tslm.blk.0.attn_q.weight", GgmlType::Q4K),
+        ]);
+        check_embedded_vae_dense(&gguf).expect("not our VAE");
     }
 }

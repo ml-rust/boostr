@@ -126,6 +126,10 @@ impl<R: Runtime<DType = DType>> WeightSource<R> for TcfSource<'_> {
             Encoding::Raw(_) => Ok(Weight::Standard(self.session.tensor::<R>(name, device)?)),
         }
     }
+
+    fn has_named(&self, name: &str) -> bool {
+        self.session.loader().tensor_info(name).is_ok()
+    }
 }
 
 #[cfg(test)]
@@ -295,6 +299,16 @@ mod tests {
              walk {walk_secs:.3}s",
             names.len()
         );
+    }
+
+    #[test]
+    fn has_named_answers_from_the_directory() {
+        let file = fixtures::write_temp(&fixtures::good_file());
+        let loader = TcfLoader::open(file.path()).expect("opens");
+        let source = TcfSource::new(&loader).expect("binds");
+        assert!(WeightSource::<CpuRuntime>::has_named(&source, "layer.w"));
+        assert!(WeightSource::<CpuRuntime>::has_named(&source, "layer.bias"));
+        assert!(!WeightSource::<CpuRuntime>::has_named(&source, "nope"));
     }
 
     #[test]

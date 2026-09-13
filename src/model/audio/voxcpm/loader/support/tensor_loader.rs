@@ -368,6 +368,10 @@ mod tests {
                 device,
             )?))
         }
+
+        fn has_named(&self, _name: &str) -> bool {
+            true
+        }
     }
 
     /// The shape gate is not something a packed weight gets to skip:

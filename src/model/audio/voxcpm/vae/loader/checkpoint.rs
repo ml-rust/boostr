@@ -72,6 +72,13 @@ where
             Self::TorchPth(source) => source.load_named(name, device),
         }
     }
+
+    fn has_named(&self, name: &str) -> bool {
+        match self {
+            Self::SafeTensors(loader) => WeightSource::<R>::has_named(loader, name),
+            Self::TorchPth(source) => WeightSource::<R>::has_named(source, name),
+        }
+    }
 }
 
 /// Does `dir` hold any `.safetensors` file? Mirrors the extension filter
@@ -154,10 +161,10 @@ mod tests {
         file.write_all(&1.0f32.to_le_bytes()).expect("data");
         file.flush().expect("flush");
         assert!(!is_zip(file.path()).expect("sniff"));
-        assert!(matches!(
-            VaeCheckpoint::open(file.path()).expect("open"),
-            VaeCheckpoint::SafeTensors(_)
-        ));
+        let checkpoint = VaeCheckpoint::open(file.path()).expect("open");
+        assert!(matches!(checkpoint, VaeCheckpoint::SafeTensors(_)));
+        assert!(WeightSource::<CpuRuntime>::has_named(&checkpoint, "weight"));
+        assert!(!WeightSource::<CpuRuntime>::has_named(&checkpoint, "bias"));
     }
 
     /// THE equivalence gate: reading the published `audiovae.pth` must give

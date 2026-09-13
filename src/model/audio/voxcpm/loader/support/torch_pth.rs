@@ -28,6 +28,7 @@ use crate::nn::fuse_weight_norm;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, TensorOps, UnaryOps};
 use numr::runtime::Runtime;
+use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 use std::path::Path;
 
@@ -115,14 +116,64 @@ where
             });
         }
 
-        let g = self.state.load_tensor::<R>(&g_key, device)?;
-        let v = self.state.load_tensor::<R>(&v_key, device)?;
+        // Folded on the HOST, whatever device the model loads on. The fold
+        // is a reduction, and a reduction's rounding follows its backend's
+        // summation order; folding on the inference device would make the
+        // weights a function of that device. The host fold is the one the
+        // reference-safetensors gate checks, and the one compressr runs when
+        // it embeds this same checkpoint in a GGUF/TCF, so a `.pth` and an
+        // embedded VAE load bit-identical weights on every device.
+        let host = CpuDevice::new();
+        let g = self.state.load_tensor::<CpuRuntime>(&g_key, &host)?;
+        let v = self.state.load_tensor::<CpuRuntime>(&v_key, &host)?;
         // Axis 0 unconditionally: `weight_norm`'s default `dim=0` is what
         // wrote these pairs, for the transposed convolutions too — there the
         // normalized axis is the INPUT-channel axis, and reinterpreting it as
         // the output one would rescale the wrong slices.
-        let client = R::default_client(device);
-        fuse_weight_norm(&client, &v, &g, 0)
+        let client = CpuClient::new(host);
+        let folded = fuse_weight_norm(&client, &v, &g, 0)?;
+        host_to_device::<R>(&folded, device, name)
+    }
+
+    /// True for a key stored as spelled, or for a `.weight` the state dict
+    /// holds as a complete `weight_g`/`weight_v` pair — the same two ways
+    /// `load_named` can succeed.
+    fn has_named(&self, name: &str) -> bool {
+        let key = format!("{}{name}", self.root);
+        if self.state.has(&key) {
+            return true;
+        }
+        key.strip_suffix(".weight").is_some_and(|stem| {
+            self.state.has(&format!("{stem}{G_SUFFIX}"))
+                && self.state.has(&format!("{stem}{V_SUFFIX}"))
+        })
+    }
+}
+
+/// Copy a host tensor onto `device`, element for element.
+///
+/// A `.pth` weight-norm pair is F32 (or F64) by construction; anything
+/// else is named rather than reinterpreted.
+fn host_to_device<R: Runtime<DType = DType>>(
+    tensor: &Tensor<CpuRuntime>,
+    device: &R::Device,
+    name: &str,
+) -> Result<Tensor<R>> {
+    let tensor = tensor.contiguous()?;
+    match tensor.dtype() {
+        DType::F32 => Ok(Tensor::<R>::from_slice(
+            &tensor.to_vec::<f32>(),
+            tensor.shape(),
+            device,
+        )?),
+        DType::F64 => Ok(Tensor::<R>::from_slice(
+            &tensor.to_vec::<f64>(),
+            tensor.shape(),
+            device,
+        )?),
+        other => Err(Error::ModelError {
+            reason: format!("{name}: a folded weight_norm pair is {other:?}, expected F32 or F64"),
+        }),
     }
 }
 

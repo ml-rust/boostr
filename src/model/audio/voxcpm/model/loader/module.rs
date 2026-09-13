@@ -29,12 +29,12 @@ use numr::runtime::Runtime;
 ///   unprefixed here, unlike every other sub-model.
 ///
 /// `vae_encoder`/`vae_decoder` are DELIBERATELY EXCLUDED: the AudioVAE is a
-/// frozen audio codec loaded from a SEPARATE checkpoint
-/// (`audiovae.pth`, see the module docs) that is never a
-/// fine-tuning target, and neither `AudioVaeEncoder` nor `AudioVaeDecoder`
-/// implements `Module<R>` — their `CausalConv1d`/`EncoderBlock` internals
-/// were not audited for this unit. A caller needing to enumerate them
-/// would need that follow-up unit first.
+/// frozen audio codec — read from the separate `audiovae.pth` or from the
+/// `vae.*` tensors a compressr GGUF/TCF embeds, see the module docs — that
+/// is never a fine-tuning target, and neither `AudioVaeEncoder` nor
+/// `AudioVaeDecoder` implements `Module<R>` — their
+/// `CausalConv1d`/`EncoderBlock` internals were not audited for this unit.
+/// A caller needing to enumerate them would need that follow-up unit first.
 impl<R: Runtime<DType = DType>> Module<R> for VoxCpm2Model<R> {
     fn parameters(&self) -> Vec<&Var<R>> {
         let mut params = self.feat_encoder.parameters();

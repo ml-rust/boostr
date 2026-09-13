@@ -65,6 +65,10 @@ where
         self.inner.load_named(name, device)
     }
 
+    fn has_named(&self, name: &str) -> bool {
+        self.inner.has_named(name)
+    }
+
     /// Dense, always. F32 is not a choice here: it is the dtype
     /// `quant_matmul` would have run the packed weight at, so a dense run
     /// that means to differ from the packed one in weight VALUES ONLY has to

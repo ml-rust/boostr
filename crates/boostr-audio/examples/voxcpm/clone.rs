@@ -6,7 +6,7 @@
 //! cargo run --release --features audio,f16 --example voxcpm_clone -- \
 //!     (--ckpt CKPT_DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
 //!     [--config config.json] \
-//!     --audiovae audiovae.pth \
+//!     [--audiovae audiovae.pth] \
 //!     [--ref REF.wav] (--text "..." --out OUT.wav \
 //!                    | --prompts PROMPTS.tsv --out-dir DIR) [--jsonl LOG.jsonl] \
 //!     [--n-timesteps 10] [--cfg 2.0] [--min-len 2] [--max-len N] \
@@ -35,22 +35,24 @@
 //! `CKPT_DIR` holds `config.json`, `model.safetensors` and `tokenizer.json`.
 //! `--audiovae` is the separately shipped `audiovae.pth`; an
 //! `audiovae.safetensors` converted from it is accepted too, and which one a
-//! path holds is read off the file's bytes, not its name.
+//! path holds is read off the file's bytes, not its name. It is REQUIRED
+//! with `--ckpt`: a checkpoint directory never embeds the VAE.
 //!
 //! `--gguf` is the single-file alternative, written by `compressr convert
 //! CKPT_DIR --format gguf --quantization q4_k`. It is mutually exclusive with
-//! `--ckpt`. A GGUF carries the transformer stack ONLY, so `--audiovae` is
-//! still required, `--config` supplies the `config.json` the file has no
-//! embedded copy of, and `tokenizer.json` is looked for beside the `.gguf`
-//! and then beside `--config`.
+//! `--ckpt`. A GGUF written from a directory holding `audiovae.pth` EMBEDS
+//! the VAE and the `config.json`, so neither `--audiovae` nor `--config` is
+//! needed for it (an `--audiovae` given anyway is ignored — the embedded
+//! copy wins). An older GGUF, or a third-party one, carries the transformer
+//! stack only and still needs both. `tokenizer.json` is looked for beside
+//! the `.gguf` and then beside `--config`.
 //!
 //! `--tcf` is the third single-file form, written by `compressr convert
 //! CKPT_DIR --format tcf`, and is mutually exclusive with both of the above.
-//! It carries the transformer stack only, on the same terms as `--gguf`,
-//! except that `--config` is REQUIRED rather than optional: the format has no
-//! metadata map a `config.json` could ever be embedded in. Every tensor at a
-//! native encoding stays PACKED in memory, so a 1.2 GB file costs about 1.2
-//! GB rather than its f32 expansion.
+//! It embeds the VAE on the same terms as `--gguf`, but `--config` is
+//! REQUIRED: the format has no metadata map a `config.json` could ever be
+//! embedded in. Every tensor at a native encoding stays PACKED in memory,
+//! so a 1.2 GB file costs about 1.2 GB rather than its f32 expansion.
 //!
 //! # Reference mode, never continuation
 //!
@@ -269,7 +271,10 @@ struct Args {
     /// reads the one in the checkpoint directory. Optional for `--gguf`,
     /// required for `--tcf`.
     config: Option<PathBuf>,
-    audiovae: PathBuf,
+    /// The separate AudioVAE. Required with `--ckpt`; optional with
+    /// `--gguf`/`--tcf`, where the loader reads the embedded VAE when the
+    /// file has one and falls back to this path otherwise.
+    audiovae: Option<PathBuf>,
     /// `None` selects zero-shot generation: no speaker conditioning, no
     /// AudioVAE reference encode. `--best-of > 1` requires `Some` here.
     reference: Option<PathBuf>,
@@ -352,7 +357,7 @@ fn parse_vae_decoder_dtype(value: &str) -> Result<Option<DType>, String> {
 
 const USAGE: &str = "usage: voxcpm_clone (--ckpt DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
 [--config config.json] \
---audiovae PATH [--ref REF.wav] \
+[--audiovae PATH] [--ref REF.wav] \
 (--text \"...\" --out OUT.wav | --prompts FILE.tsv --out-dir DIR) [--jsonl FILE] \
 [--n-timesteps 10] [--cfg 2.0] [--min-len 2] \
 [--max-len N] [--seed 0] [--best-of 1] [--dtype f32|bf16|f16|native] \
@@ -360,7 +365,8 @@ const USAGE: &str = "usage: voxcpm_clone (--ckpt DIR | --gguf MODEL.gguf | --tcf
 [--device cpu|cuda] [--lora ADAPTER.safetensors] [--lora-rank 16] \
 [--lora-alpha 32.0] [--lora-targets q_proj,v_proj]\n\
 no --ref generates zero-shot from text alone; --best-of > 1 requires --ref \
-(it picks the take whose F0 best matches the reference)";
+(it picks the take whose F0 best matches the reference)\n\
+--audiovae is required with --ckpt; a --gguf/--tcf that embeds the VAE needs none";
 
 /// Hard cap on emitted patches when `--max-len` is not given.
 ///
@@ -517,6 +523,11 @@ fn parse_args() -> Result<Args, String> {
     if matches!(weights, Weights::Tcf(_)) && config.is_none() {
         return Err(format!("--config is required with --tcf\n{USAGE}"));
     }
+    // A checkpoint directory never embeds the AudioVAE. Caught here rather
+    // than after the safetensors header has been parsed.
+    if matches!(weights, Weights::Checkpoint(_)) && audiovae.is_none() {
+        return Err(format!("--audiovae is required with --ckpt\n{USAGE}"));
+    }
 
     // One render or a sweep, never both, and each takes its own output flag.
     // Accepting `--text` with `--out-dir` would silently ignore one of them.
@@ -550,7 +561,7 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         weights,
         config,
-        audiovae: audiovae.ok_or_else(|| format!("--audiovae is required\n{USAGE}"))?,
+        audiovae,
         reference,
         text,
         out,
@@ -994,7 +1005,7 @@ where
             eprintln!("loading {} ...", dir.display());
             VoxCpm2Model::<R>::from_checkpoint(
                 dir,
-                &args.audiovae,
+                args.audiovae.as_deref(),
                 device,
                 args.dtype,
                 args.vae_decoder_dtype,
@@ -1005,7 +1016,7 @@ where
             VoxCpm2Model::<R>::from_gguf(
                 path,
                 args.config.as_deref(),
-                &args.audiovae,
+                args.audiovae.as_deref(),
                 device,
                 args.dtype,
                 args.vae_decoder_dtype,
@@ -1022,7 +1033,7 @@ where
             VoxCpm2Model::<R>::from_tcf(
                 path,
                 config,
-                &args.audiovae,
+                args.audiovae.as_deref(),
                 device,
                 args.dtype,
                 args.vae_decoder_dtype,
@@ -1101,7 +1112,7 @@ where
             "encoding": dominant_encoding(&args.weights),
             "config": args.config.as_ref().map(|p| p.display().to_string()),
             "lora": args.lora.as_ref().map(|p| p.display().to_string()),
-            "audiovae": args.audiovae.display().to_string(),
+            "audiovae": args.audiovae.as_ref().map(|p| p.display().to_string()),
             "reference": args.reference.as_ref().map(|p| p.display().to_string()),
             "prompts": args.prompts.as_ref().map(|p| p.display().to_string()),
             "device": match args.device {

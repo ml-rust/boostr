@@ -168,6 +168,12 @@ where
     /// voice file stemmed `zero-shot` is refused at load: it would silently
     /// shadow the reserved id.
     ///
+    /// `audiovae` is the separate `audiovae.pth`/`audiovae.safetensors`. A
+    /// GGUF or TCF that embeds the VAE (compressr writes it under `vae.`)
+    /// needs none, and ignores one when given; a checkpoint directory, or a
+    /// single-file model written without it, needs `Some` — the loader's
+    /// error names both ways to supply it.
+    ///
     /// `options.adapter` is applied to the model BEFORE it is wrapped as an
     /// engine — see [`VoxCpm2LoadOptions::adapter`] for the one-adapter-per-
     /// bundle model. `None` loads the base model, unchanged. Either way, the
@@ -175,7 +181,7 @@ where
     /// [`Self::adapter`].
     pub fn load(
         weights: &VoxCpm2Weights,
-        audiovae: &Path,
+        audiovae: Option<&Path>,
         voices_dir: Option<&Path>,
         device: &R::Device,
         client: Arc<R::Client>,

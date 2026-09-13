@@ -4,7 +4,7 @@
 //! cargo run --release --features audio,f16 --example voxcpm_finetune -- \
 //!     (--ckpt CKPT_DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
 //!     [--config config.json] \
-//!     --audiovae audiovae.safetensors --manifest FILE.tsv \
+//!     [--audiovae audiovae.pth] --manifest FILE.tsv \
 //!     [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] [--alpha 32] \
 //!     [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors] \
 //!     [--lambda-stop 1.0] [--training-cfg-rate 0.1] [--eval-rows 4] \
@@ -13,12 +13,15 @@
 //!
 //! `CKPT_DIR` holds `config.json`, `model.safetensors` and `tokenizer.json`,
 //! same layout `voxcpm_clone`'s `--ckpt` reads. `--audiovae` is the
-//! separately converted `audiovae.safetensors` (`convert_audiovae.py`).
+//! separately shipped `audiovae.pth` (or an `audiovae.safetensors` converted
+//! from it); it is REQUIRED with `--ckpt`, which never embeds the VAE.
 //!
 //! `--gguf` is the single-file alternative, mutually exclusive with `--ckpt`,
-//! same as `voxcpm_clone`. `--config` supplies the `config.json` the file has
-//! no embedded copy of, and `tokenizer.json` is looked for beside the
-//! `.gguf` and then beside `--config`.
+//! same as `voxcpm_clone`. A GGUF compressr wrote from a directory holding
+//! `audiovae.pth` embeds the VAE and the `config.json`, so it needs neither
+//! `--audiovae` nor `--config` (an `--audiovae` given anyway is ignored);
+//! an older or third-party GGUF still needs both. `tokenizer.json` is looked
+//! for beside the `.gguf` and then beside `--config`.
 //!
 //! `--tcf` is the third single-file form, mutually exclusive with both of the
 //! above, loaded through
@@ -502,7 +505,10 @@ struct Args {
     /// reads the one in the checkpoint directory. Optional for `--gguf`,
     /// required for `--tcf`.
     config: Option<PathBuf>,
-    audiovae: PathBuf,
+    /// The separate AudioVAE. Required with `--ckpt`; optional with
+    /// `--gguf`/`--tcf`, where the loader reads the embedded VAE when the
+    /// file has one and falls back to this path otherwise.
+    audiovae: Option<PathBuf>,
     manifest: PathBuf,
     device: Device,
     targets: String,
@@ -556,7 +562,7 @@ struct Args {
 
 const USAGE: &str = "usage: voxcpm_finetune (--ckpt DIR | --gguf MODEL.gguf | --tcf MODEL.tcf) \
 [--config config.json (required with --tcf)] \
---audiovae audiovae.safetensors \
+[--audiovae audiovae.pth (required with --ckpt)] \
 --manifest FILE.tsv (header-named TSV: wav, text, optional ref_wav) \
 [--device cpu|cuda] [--targets q_proj,v_proj] [--rank 16] \
 [--alpha 32] [--lr 1e-4] [--epochs 3] [--seed 0] [--out adapters.safetensors] \
@@ -721,6 +727,10 @@ fn parse_args() -> Result<Args, String> {
     if matches!(weights, Weights::Tcf(_)) && config.is_none() {
         return Err(format!("--config is required with --tcf\n{USAGE}"));
     }
+    // A checkpoint directory never embeds the AudioVAE.
+    if matches!(weights, Weights::Checkpoint(_)) && audiovae.is_none() {
+        return Err(format!("--audiovae is required with --ckpt\n{USAGE}"));
+    }
 
     // An eval-only run writes nothing, so accepting `--out` would promise a
     // file that never appears.
@@ -733,7 +743,7 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         weights,
         config,
-        audiovae: audiovae.ok_or_else(|| format!("--audiovae is required\n{USAGE}"))?,
+        audiovae,
         manifest: manifest.ok_or_else(|| format!("--manifest is required\n{USAGE}"))?,
         device,
         targets,
@@ -866,7 +876,7 @@ fn print_eval_record(
         "source_format": source_format(&args.weights),
         "model_path": source_path(&args.weights).display().to_string(),
         "config": args.config.as_ref().map(|p| p.display().to_string()),
-        "audiovae": args.audiovae.display().to_string(),
+        "audiovae": args.audiovae.as_ref().map(|p| p.display().to_string()),
         "manifest": args.manifest.display().to_string(),
         "device": match args.device {
             Device::Cpu => "cpu",
@@ -958,14 +968,20 @@ where
                     "--dequant-weights: --ckpt already loads dense F32, nothing to dequantize"
                 );
             }
-            VoxCpm2Model::<R>::from_checkpoint(dir, &args.audiovae, device, Some(DType::F32), None)?
+            VoxCpm2Model::<R>::from_checkpoint(
+                dir,
+                args.audiovae.as_deref(),
+                device,
+                Some(DType::F32),
+                None,
+            )?
         }
         Weights::Gguf(path) if args.dequant_weights => {
             eprintln!("loading {} (dequantized to dense F32) ...", path.display());
             VoxCpm2Model::<R>::from_gguf_dense(
                 path,
                 args.config.as_deref(),
-                &args.audiovae,
+                args.audiovae.as_deref(),
                 device,
                 client,
                 None,
@@ -976,7 +992,7 @@ where
             VoxCpm2Model::<R>::from_gguf(
                 path,
                 args.config.as_deref(),
-                &args.audiovae,
+                args.audiovae.as_deref(),
                 device,
                 None,
                 None,
@@ -990,7 +1006,14 @@ where
                 .config
                 .as_deref()
                 .ok_or("--config is required with --tcf")?;
-            VoxCpm2Model::<R>::from_tcf_dense(path, config, &args.audiovae, device, client, None)?
+            VoxCpm2Model::<R>::from_tcf_dense(
+                path,
+                config,
+                args.audiovae.as_deref(),
+                device,
+                client,
+                None,
+            )?
         }
         // Same loader `voxcpm_clone`'s `--tcf` arm calls, on the same
         // auxiliary inputs, with the `None` dtype the `--gguf` arm above
@@ -1007,7 +1030,7 @@ where
                 .config
                 .as_deref()
                 .ok_or("--config is required with --tcf")?;
-            VoxCpm2Model::<R>::from_tcf(path, config, &args.audiovae, device, None, None)?
+            VoxCpm2Model::<R>::from_tcf(path, config, args.audiovae.as_deref(), device, None, None)?
         }
     };
 

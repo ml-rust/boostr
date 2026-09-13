@@ -542,9 +542,11 @@ where
     // reads and writes f32 directly, so a cast here would add a rounding the
     // measurement does not intend.
     eprintln!("loading {} ...", args.ckpt.display());
+    // `--audiovae` stays required here: this binary reads a checkpoint
+    // directory only, and a checkpoint directory never embeds the VAE.
     let model = VoxCpm2Model::<R>::from_checkpoint(
         &args.ckpt,
-        &args.audiovae,
+        Some(&args.audiovae),
         device,
         Some(DType::F32),
         None,

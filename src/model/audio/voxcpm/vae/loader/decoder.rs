@@ -2,7 +2,8 @@
 //!
 //! Verified key layout, as it stands AFTER the weight-norm fold
 //! ([`VaeCheckpoint`] folds `weight_g`/`weight_v` pairs while reading the
-//! published `audiovae.pth`, and a converted `audiovae.safetensors` arrives
+//! published `audiovae.pth`; a converted `audiovae.safetensors` and the
+//! `vae.decoder.*` tensors compressr embeds in a VoxCPM2 GGUF/TCF arrive
 //! folded already), so every conv here is a plain `.weight`/`.bias`:
 //!
 //! ```text
@@ -43,6 +44,23 @@ use std::path::Path;
 /// Default top-level prefix for the `AudioVAE` decoder's tensors in the
 /// checkpoint.
 pub const DEFAULT_DECODER_PREFIX: &str = "decoder";
+
+/// Prefix the decoder's tensors carry when compressr embeds the `AudioVAE`
+/// in a VoxCPM2 GGUF/TCF: the checkpoint's own keys under `vae.`.
+pub const VAE_GGUF_DECODER_PREFIX: &str = "vae.decoder";
+
+/// One decoder tensor every VoxCPM2 `AudioVAE` has, spelled the way an
+/// embedded VAE stores it. A source that has it carries the embedded VAE;
+/// the whole-model loader probes this name before deciding where to read
+/// the VAE from.
+pub const VAE_GGUF_PROBE_TENSOR: &str = "vae.decoder.model.0.weight";
+
+/// Root every tensor of an embedded `AudioVAE` sits under in a VoxCPM2
+/// GGUF/TCF. [`VAE_GGUF_DECODER_PREFIX`] and
+/// [`VAE_GGUF_ENCODER_PREFIX`](super::encoder::VAE_GGUF_ENCODER_PREFIX) are
+/// the two halves below it; the dense-only guard in the single-file loaders
+/// filters on this.
+pub const VAE_GGUF_ROOT: &str = "vae.";
 
 /// Per-stage channel widths, `(input_dim, output_dim)`, outermost first —
 /// `2048 -> 1024 -> 512 -> 256 -> 128 -> 64 -> 32`.
@@ -185,8 +203,26 @@ where
         vae_decoder_dtype: Option<DType>,
     ) -> Result<Self> {
         let mut checkpoint = VaeCheckpoint::open(path)?;
-        let weights = DecoderLoader::<R, VaeCheckpoint> {
-            loader: &mut checkpoint,
+        Self::from_source(&mut checkpoint, prefix, device, vae_decoder_dtype)
+    }
+
+    /// Assemble the decoder from an already-open weight source, reading
+    /// every tensor under `prefix` ([`DEFAULT_DECODER_PREFIX`] for a
+    /// separate `AudioVAE` checkpoint, [`VAE_GGUF_DECODER_PREFIX`] for one
+    /// embedded in a VoxCPM2 GGUF/TCF).
+    ///
+    /// The source must hand every tensor over DENSE and folded: the layout
+    /// in the module docs is what is checked, and a block-quantized source
+    /// is the caller's to refuse before reaching here. See
+    /// [`Self::from_checkpoint`] for `vae_decoder_dtype`.
+    pub fn from_source<S: WeightSource<R>>(
+        source: &mut S,
+        prefix: &str,
+        device: &R::Device,
+        vae_decoder_dtype: Option<DType>,
+    ) -> Result<Self> {
+        let weights = DecoderLoader::<R, S> {
+            loader: source,
             device,
             prefix: prefix.to_string(),
             dtype: vae_decoder_dtype,
@@ -212,5 +248,57 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn the_probe_tensor_is_the_front_conv_under_the_gguf_prefix() {
+        assert_eq!(
+            VAE_GGUF_PROBE_TENSOR,
+            format!("{VAE_GGUF_DECODER_PREFIX}.model.0.weight")
+        );
+        assert_eq!(
+            VAE_GGUF_DECODER_PREFIX,
+            format!("vae.{DEFAULT_DECODER_PREFIX}")
+        );
+    }
+
+    #[test]
+    fn both_gguf_prefixes_sit_under_the_root() {
+        use super::super::encoder::VAE_GGUF_ENCODER_PREFIX;
+        assert!(VAE_GGUF_DECODER_PREFIX.starts_with(VAE_GGUF_ROOT));
+        assert!(VAE_GGUF_ENCODER_PREFIX.starts_with(VAE_GGUF_ROOT));
+        assert!(VAE_GGUF_PROBE_TENSOR.starts_with(VAE_GGUF_ROOT));
+    }
+
+    /// `from_source` reads names under the prefix it is given, so a source
+    /// with nothing under it fails on the first read and names that key.
+    #[test]
+    fn from_source_names_the_first_missing_key() {
+        struct Empty;
+        impl WeightSource<CpuRuntime> for Empty {
+            fn load_named(
+                &mut self,
+                name: &str,
+                _device: &<CpuRuntime as Runtime>::Device,
+            ) -> Result<numr::tensor::Tensor<CpuRuntime>> {
+                Err(Error::ModelError {
+                    reason: format!("{name}: not here"),
+                })
+            }
+            fn has_named(&self, _name: &str) -> bool {
+                false
+            }
+        }
+        let device = <CpuRuntime as Runtime>::default_device();
+        let err = match AudioVaeDecoder::<CpuRuntime>::from_source(
+            &mut Empty,
+            VAE_GGUF_DECODER_PREFIX,
+            &device,
+            None,
+        ) {
+            Ok(_) => panic!("nothing to read"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains(VAE_GGUF_PROBE_TENSOR), "{err}");
     }
 }

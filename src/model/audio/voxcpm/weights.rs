@@ -9,17 +9,24 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
-/// Where the transformer stack's weights come from. The AudioVAE is always a
-/// separate file.
+/// Where the transformer stack's weights come from.
+///
+/// The AudioVAE rides along only in a single-file model: compressr embeds
+/// it (folded, dense, under `vae.`) when the directory it converts holds
+/// `audiovae.pth`. A loader reads the embedded copy when present and the
+/// separate `audiovae.pth`/`audiovae.safetensors` otherwise; the embedded
+/// copy wins when both are offered. A checkpoint directory never embeds one.
 #[derive(Debug, Clone)]
 pub enum VoxCpm2Weights {
     /// A checkpoint directory: `config.json`, `model.safetensors`,
-    /// `tokenizer.json`.
+    /// `tokenizer.json`. The AudioVAE is a separate file.
     Checkpoint(PathBuf),
-    /// A single GGUF written by compressr. Carries no `config.json` and no
-    /// tokenizer, so `config` points at the checkpoint's.
+    /// A single GGUF written by compressr. Carries no tokenizer, so
+    /// `config` points at the checkpoint's `config.json`; the loader prefers
+    /// the copy embedded as `voxcpm2.config_json` when the file has one.
     Gguf { path: PathBuf, config: PathBuf },
-    /// A single TCF written by compressr, on the same terms as GGUF.
+    /// A single TCF written by compressr, on the same terms as GGUF except
+    /// that a TCF has no metadata map, so `config` is always read.
     Tcf { path: PathBuf, config: PathBuf },
 }
 

@@ -2,7 +2,8 @@
 //!
 //! Verified key layout, as it stands AFTER the weight-norm fold
 //! ([`VaeCheckpoint`] folds `weight_g`/`weight_v` pairs while reading the
-//! published `audiovae.pth`, and a converted `audiovae.safetensors` arrives
+//! published `audiovae.pth`; a converted `audiovae.safetensors` and the
+//! `vae.encoder.*` tensors compressr embeds in a VoxCPM2 GGUF/TCF arrive
 //! folded already), so every conv here is a plain `.weight`/`.bias`:
 //!
 //! ```text
@@ -37,6 +38,10 @@ use std::path::Path;
 /// Default top-level prefix for the `AudioVAE` encoder's tensors in the
 /// checkpoint.
 pub const DEFAULT_ENCODER_PREFIX: &str = "encoder";
+
+/// Prefix the encoder's tensors carry when compressr embeds the `AudioVAE`
+/// in a VoxCPM2 GGUF/TCF: the checkpoint's own keys under `vae.`.
+pub const VAE_GGUF_ENCODER_PREFIX: &str = "vae.encoder";
 
 /// Per-stage channel widths, `(input_dim, output_dim)`, in forward order —
 /// `128 -> 256 -> 512 -> 1024 -> 2048`.
@@ -169,8 +174,25 @@ where
         device: &R::Device,
     ) -> Result<Self> {
         let mut checkpoint = VaeCheckpoint::open(path)?;
-        let weights = EncoderLoader::<R, VaeCheckpoint> {
-            loader: &mut checkpoint,
+        Self::from_source(&mut checkpoint, prefix, device)
+    }
+
+    /// Assemble the encoder from an already-open weight source, reading
+    /// every tensor under `prefix` ([`DEFAULT_ENCODER_PREFIX`] for a
+    /// separate `AudioVAE` checkpoint, [`VAE_GGUF_ENCODER_PREFIX`] for one
+    /// embedded in a VoxCPM2 GGUF/TCF).
+    ///
+    /// The source must hand every tensor over DENSE and folded: the layout
+    /// in the module docs is what is checked, and a block-quantized source
+    /// is the caller's to refuse before reaching here. Always F32 — see
+    /// [`Self::from_checkpoint`].
+    pub fn from_source<S: WeightSource<R>>(
+        source: &mut S,
+        prefix: &str,
+        device: &R::Device,
+    ) -> Result<Self> {
+        let weights = EncoderLoader::<R, S> {
+            loader: source,
             device,
             prefix: prefix.to_string(),
             dtype: None,
@@ -194,6 +216,14 @@ mod tests {
                 &device,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn the_gguf_prefix_nests_the_default_under_vae() {
+        assert_eq!(
+            VAE_GGUF_ENCODER_PREFIX,
+            format!("vae.{DEFAULT_ENCODER_PREFIX}")
         );
     }
 }

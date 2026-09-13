@@ -20,7 +20,7 @@ use numr::tensor::Tensor;
 /// [`probe_naming`](super::names::probe_naming) says the file needs it.
 /// Neither path can drift into the other's naming that way.
 ///
-/// # The AudioVAE is NOT covered
+/// # cstr's AudioVAE is NOT covered
 ///
 /// cstr's file also carries 312 `vae.*` tensors, and this type maps none of
 /// them. Their VAE uses a different scheme again (`vae.enc.conv0.*`,
@@ -28,9 +28,10 @@ use numr::tensor::Tensor;
 /// `weight_g`/`weight_v` pairs, which is where the extra 76 tensors over our
 /// 236 come from. Reading it needs a second name map — the `weight_norm`
 /// fold itself is [`crate::nn::fuse_weight_norm`], already used by the
-/// `.pth` reader and callable from here — so
-/// [`from_gguf`](crate::model::audio::voxcpm::model::VoxCpm2Model::from_gguf)
-/// still takes `audiovae_path` separately for BOTH conventions.
+/// `.pth` reader and callable from here. The whole-model loader probes for
+/// OUR embedded spelling (`vae.decoder.model.0.weight`), finds nothing in
+/// cstr's file, and falls back to the `audiovae_path` argument, which stays
+/// required for this convention.
 ///
 /// cstr's file also embeds no `config.json`, so the `config_json` path
 /// argument is still required for it. Its `voxcpm2.*` metadata keys do carry
@@ -47,18 +48,35 @@ impl GgmlNamedGguf {
 
     /// Rewrite `name`, or fail naming it.
     ///
-    /// An unmapped name is an ERROR rather than a pass-through: passing it
-    /// through would look up a HuggingFace key in a file that has none, and
-    /// the resulting "tensor not found" would blame the file instead of this
-    /// map, which is the thing that is actually incomplete.
+    /// An unmapped name is an ERROR rather than a pass-through, with one
+    /// exception: a name the file holds VERBATIM is read as spelled. That
+    /// is what keeps [`has_named`](WeightSource::has_named) and
+    /// `load_named` in agreement for a tensor outside the map — an embedded
+    /// `vae.*` tensor written under our own names, for instance. Passing
+    /// every unmapped name through would instead look up a HuggingFace key
+    /// in a file that has none, and the resulting "tensor not found" would
+    /// blame the file instead of this map, which is the thing that is
+    /// actually incomplete.
     fn translate(&self, name: &str) -> Result<String> {
-        hf_to_ggml_name(name).ok_or_else(|| Error::ModelError {
+        if let Some(mapped) = hf_to_ggml_name(name) {
+            return Ok(mapped);
+        }
+        if self.inner.tensor_info(name).is_ok() {
+            return Ok(name.to_string());
+        }
+        Err(Error::ModelError {
             reason: format!(
                 "{name}: no ggml-conventional counterpart is mapped for this VoxCPM2 \
                  tensor; this GGUF uses llama.cpp-style names and the name map does \
                  not cover this key"
             ),
         })
+    }
+
+    /// The key `name` reads from: its mapped spelling when the map covers
+    /// it, else the name itself.
+    fn key_for(&self, name: &str) -> String {
+        hf_to_ggml_name(name).unwrap_or_else(|| name.to_string())
     }
 }
 
@@ -98,5 +116,15 @@ impl<R: Runtime<DType = DType>> WeightSource<R> for GgmlNamedGguf {
         Ok(Weight::Standard(WeightSource::<R>::load_named(
             self, name, device,
         )?))
+    }
+
+    /// Answers for the key `load_named` would read: the mapped spelling for
+    /// a transformer-stack name, the verbatim one for anything the map does
+    /// not cover. cstr's own `vae.*` tensors use a third scheme that is
+    /// neither, so a probe for an embedded AudioVAE under OUR names comes
+    /// back `false` on that file and the loader falls back to the separate
+    /// checkpoint.
+    fn has_named(&self, name: &str) -> bool {
+        self.inner.tensor_info(&self.key_for(name)).is_ok()
     }
 }

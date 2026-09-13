@@ -1,26 +1,29 @@
 //! [`VoxCpm2Model`]: the end-to-end VoxCPM2 orchestrator, owning every ported
 //! sub-model, plus the loader that builds it from a checkpoint directory.
 //!
-//! # Two checkpoints, not one
+//! # Where the AudioVAE comes from
 //!
 //! The transformer stack (`base_lm`, `residual_lm`, `feat_encoder`,
 //! `feat_decoder`, `fsq_layer` and the six auxiliary projections) lives in the
 //! checkpoint directory's `model.safetensors`. The AudioVAE ships SEPARATELY
-//! as `audiovae.pth`, so its path is a second argument — see
-//! [`VoxCpm2Model::from_checkpoint`]. That `.pth` is read as published,
-//! `weight_norm` folded at load time
+//! as `audiovae.pth`, so [`VoxCpm2Model::from_checkpoint`] takes its path as
+//! a second argument. That `.pth` is read as published, `weight_norm` folded
+//! at load time
 //! ([`VaeCheckpoint`](crate::model::audio::voxcpm::vae::VaeCheckpoint)); an
 //! `audiovae.safetensors` converted by the reference repo's
 //! `convert_audiovae.py` is still accepted, so a tree that already holds one
 //! keeps loading.
 //!
-//! The same split holds for the GGUF entry point
-//! ([`from_gguf`](crate::model::audio::voxcpm::model::gguf_loader)): a
-//! VoxCPM2 GGUF written by `compressr convert --format gguf` carries the
-//! TRANSFORMER STACK ONLY. The AudioVAE is not in it, because it is not part
-//! of the checkpoint compressr converts — it arrives as its own
-//! `audiovae.pth` — so `from_gguf` takes the VAE path as its own argument
-//! exactly like `from_checkpoint`.
+//! A GGUF or TCF written by `compressr convert` from a directory that holds
+//! `audiovae.pth` beside `model.safetensors` EMBEDS the VAE: folded, dense,
+//! under `vae.decoder.*`/`vae.encoder.*`. The single-file entry points
+//! ([`from_gguf`](crate::model::audio::voxcpm::model::gguf_loader),
+//! [`from_tcf`](crate::model::audio::voxcpm::model::tcf_loader)) probe for
+//! it and read it from the same file when present; the separate path is
+//! then optional and, when given, ignored — the embedded copy wins. A file
+//! written without it (an older conversion, or a third-party GGUF such as
+//! `cstr/voxcpm2-GGUF`, whose `vae.*` tensors use another scheme) still
+//! needs the path. The rule is one function, `model::vae_origin`.
 //!
 //! # Dtype
 //!
@@ -65,3 +68,4 @@ pub(crate) use configs::StackConfigs;
 pub use configs::{DEFAULT_CONFIG_FILE, DEFAULT_WEIGHTS_FILE};
 pub use lora_adapter::LoraAdapterReport;
 pub use model::VoxCpm2Model;
+pub(crate) use model::packed_vae_tensor;

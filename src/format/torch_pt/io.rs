@@ -68,6 +68,27 @@ pub(super) fn build_tensor_from_bytes<R: Runtime<DType = DType>>(
                 .collect();
             Ok(Tensor::<R>::from_slice(&data, shape, device)?)
         }
+        // Integer buffers: VoxCPM2's `audiovae.pth` carries an I32
+        // `sr_bin_boundaries` vector beside its F32 weights, and a converter
+        // that copies the whole file has to read it.
+        DType::I32 => {
+            let data: Vec<i32> = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| i32::from_le_bytes(*c))
+                .collect();
+            Ok(Tensor::<R>::from_slice(&data, shape, device)?)
+        }
+        DType::I64 => {
+            let data: Vec<i64> = bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| i64::from_le_bytes(*c))
+                .collect();
+            Ok(Tensor::<R>::from_slice(&data, shape, device)?)
+        }
         other => Err(Error::ModelError {
             reason: format!(
                 "reading {other:?} tensors from .pt is not yet supported — convert to .safetensors"

@@ -12,7 +12,10 @@ use crate::model::audio::voxcpm::minicpm4::{
     DEFAULT_MINICPM4_PREFIX, DEFAULT_RESIDUAL_LM_PREFIX, MiniCpm4Model,
 };
 use crate::model::audio::voxcpm::model::config::VoxCpm2Config;
-use crate::model::audio::voxcpm::vae::{AudioVaeDecoder, AudioVaeEncoder};
+use crate::model::audio::voxcpm::vae::{
+    AudioVaeDecoder, AudioVaeEncoder, VAE_GGUF_DECODER_PREFIX, VAE_GGUF_ENCODER_PREFIX,
+    VAE_GGUF_PROBE_TENSOR,
+};
 use crate::nn::MaybeQuantLinear;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, TensorOps, TypeConversionOps, UnaryOps};
@@ -56,16 +59,19 @@ where
     /// `checkpoint_dir` must contain `config.json` and `model.safetensors`.
     /// `audiovae_path` is the separately shipped `audiovae.pth`, or an
     /// `audiovae.safetensors` converted from it (file or containing
-    /// directory) — see the module docs.
+    /// directory) — see the module docs. A safetensors checkpoint never
+    /// embeds the AudioVAE, so `None` here is an error naming the fix; the
+    /// parameter is an `Option` only so every entry point shares one rule
+    /// ([`vae_origin`]).
     ///
     /// `dtype` casts every transformer-stack tensor (`None` keeps the
     /// checkpoint's BF16). `vae_decoder_dtype` casts every AudioVAE DECODER
     /// tensor independently — see the module docs. The encoder always loads
     /// at F32; there is no encoder dtype option (see
     /// [`AudioVaeEncoder::from_checkpoint`]'s docs for why).
-    pub fn from_checkpoint<P: AsRef<Path>, Q: AsRef<Path>>(
+    pub fn from_checkpoint<P: AsRef<Path>>(
         checkpoint_dir: P,
-        audiovae_path: Q,
+        audiovae_path: Option<&Path>,
         device: &R::Device,
         dtype: Option<DType>,
         vae_decoder_dtype: Option<DType>,
@@ -79,7 +85,7 @@ where
         Self::from_source(
             &mut source,
             cfgs,
-            audiovae_path.as_ref(),
+            audiovae_path,
             device,
             dtype,
             vae_decoder_dtype,
@@ -88,29 +94,45 @@ where
 
     /// Assemble every sub-model from one already-open weight source.
     ///
-    /// Shared by [`from_checkpoint`](Self::from_checkpoint) and
-    /// [`from_gguf`](Self::from_gguf) — the tensor names and shapes are the
-    /// same in both containers, so the walk is written once.
+    /// Shared by [`from_checkpoint`](Self::from_checkpoint),
+    /// [`from_gguf`](Self::from_gguf) and [`from_tcf`](Self::from_tcf) —
+    /// the tensor names and shapes are the same in every container, so the
+    /// walk is written once.
     ///
-    /// The two AudioVAE loaders deliberately do NOT go through `source`: the
-    /// VAE lives in its own separate file (see the module docs). The decoder
+    /// The AudioVAE comes from `source` when `source` carries it (compressr
+    /// embeds it under `vae.` — probed by [`VAE_GGUF_PROBE_TENSOR`]) and from
+    /// `audiovae_path` otherwise; [`vae_origin`] is the rule. The decoder
     /// takes its own `vae_decoder_dtype` rather than `source`'s `dtype`; the
-    /// encoder takes no dtype at all (always F32).
+    /// encoder takes no dtype at all (always F32). A source that stores a
+    /// `vae.*` tensor block-quantized must be refused by the caller before
+    /// reaching here — `load_named` would dequantize it silently.
     pub(crate) fn from_source<S: WeightSource<R>>(
         source: &mut S,
         cfgs: StackConfigs,
-        audiovae_path: &Path,
+        audiovae_path: Option<&Path>,
         device: &R::Device,
         dtype: Option<DType>,
         vae_decoder_dtype: Option<DType>,
     ) -> Result<Self> {
+        let (vae_encoder, vae_decoder) =
+            match vae_origin(source.has_named(VAE_GGUF_PROBE_TENSOR), audiovae_path)? {
+                VaeOrigin::Embedded => (
+                    AudioVaeEncoder::from_source(source, VAE_GGUF_ENCODER_PREFIX, device)?,
+                    AudioVaeDecoder::from_source(
+                        source,
+                        VAE_GGUF_DECODER_PREFIX,
+                        device,
+                        vae_decoder_dtype,
+                    )?,
+                ),
+                VaeOrigin::Separate(path) => (
+                    AudioVaeEncoder::from_checkpoint(path, device)?,
+                    AudioVaeDecoder::from_checkpoint(path, device, vae_decoder_dtype)?,
+                ),
+            };
         Ok(Self {
-            vae_encoder: AudioVaeEncoder::from_checkpoint(audiovae_path, device)?,
-            vae_decoder: AudioVaeDecoder::from_checkpoint(
-                audiovae_path,
-                device,
-                vae_decoder_dtype,
-            )?,
+            vae_encoder,
+            vae_decoder,
             feat_encoder: LocalEncoder::from_source(
                 source,
                 DEFAULT_LOCAL_ENCODER_PREFIX,
@@ -143,6 +165,50 @@ where
             aux: AuxProjections::from_source(source, cfgs.fsq, device, dtype)?,
             config: cfgs.model,
         })
+    }
+}
+
+/// Where the AudioVAE is read from.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum VaeOrigin<'a> {
+    /// The `vae.*` tensors of the weight source itself.
+    Embedded,
+    /// A separate `audiovae.pth` / `audiovae.safetensors`.
+    Separate(&'a Path),
+}
+
+/// Decide where the AudioVAE comes from.
+///
+/// An embedded VAE WINS over a path: the converter wrote it from the same
+/// checkpoint, and loading a different file beside it would silently pair
+/// the stack with a VAE it was not converted with. No VAE anywhere is an
+/// error that names both ways to supply one.
+pub(crate) fn vae_origin(embedded: bool, audiovae_path: Option<&Path>) -> Result<VaeOrigin<'_>> {
+    if embedded {
+        return Ok(VaeOrigin::Embedded);
+    }
+    audiovae_path
+        .map(VaeOrigin::Separate)
+        .ok_or_else(|| Error::ModelError {
+            reason: format!(
+                "the weight source carries no AudioVAE (no `{VAE_GGUF_PROBE_TENSOR}` \
+                 tensor) and no audiovae path was given; pass the checkpoint's \
+                 audiovae.pth, or convert with a compressr that embeds the VAE"
+            ),
+        })
+}
+
+/// The error for an embedded `vae.*` tensor stored block-quantized.
+///
+/// Shared by the GGUF and TCF entry points, which each run the check over
+/// their own directory before handing the source to [`VoxCpm2Model::from_source`].
+pub(crate) fn packed_vae_tensor(name: &str, stored_as: &str) -> Error {
+    Error::ModelError {
+        reason: format!(
+            "{name}: an embedded AudioVAE tensor is stored as {stored_as}, a block-quantized \
+             type; the AudioVAE must be stored dense (F32/F16/BF16), so this file was \
+             written by a converter that quantized it — reconvert"
+        ),
     }
 }
 
@@ -200,12 +266,44 @@ mod tests {
         assert!(
             VoxCpm2Model::<CpuRuntime>::from_checkpoint(
                 "/nonexistent/voxcpm2",
-                "/nonexistent/audiovae.safetensors",
+                Some(Path::new("/nonexistent/audiovae.safetensors")),
                 &device,
                 Some(DType::F32),
                 None,
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn embedded_vae_wins_over_a_path() {
+        let path = Path::new("/somewhere/audiovae.pth");
+        assert_eq!(vae_origin(true, Some(path)).unwrap(), VaeOrigin::Embedded);
+        assert_eq!(vae_origin(true, None).unwrap(), VaeOrigin::Embedded);
+    }
+
+    #[test]
+    fn a_path_is_used_when_nothing_is_embedded() {
+        let path = Path::new("/somewhere/audiovae.pth");
+        assert_eq!(
+            vae_origin(false, Some(path)).unwrap(),
+            VaeOrigin::Separate(path)
+        );
+    }
+
+    /// Neither: the error names the probe tensor and the path option, so
+    /// the operator knows both ways to supply a VAE.
+    #[test]
+    fn no_vae_anywhere_names_both_options() {
+        let err = vae_origin(false, None).unwrap_err().to_string();
+        assert!(err.contains(VAE_GGUF_PROBE_TENSOR), "{err}");
+        assert!(err.contains("audiovae"), "{err}");
+    }
+
+    #[test]
+    fn packed_vae_error_names_tensor_and_type() {
+        let err = packed_vae_tensor("vae.decoder.model.1.weight", "Q4K").to_string();
+        assert!(err.contains("vae.decoder.model.1.weight"), "{err}");
+        assert!(err.contains("Q4K"), "{err}");
     }
 }

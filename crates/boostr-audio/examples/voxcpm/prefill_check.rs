@@ -139,8 +139,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vae = fx_dir.join("audiovae.safetensors");
     // f32 ground truth, same rationale as the other VoxCPM2 gates: the
     // checkpoint is BF16 and internal ops upcast anyway.
-    let model =
-        VoxCpm2Model::<CpuRuntime>::from_checkpoint(&ck, &vae, &device, Some(DType::F32), None)?;
+    let model = VoxCpm2Model::<CpuRuntime>::from_checkpoint(
+        &ck,
+        Some(&vae),
+        &device,
+        Some(DType::F32),
+        None,
+    )?;
 
     let fx_path = fx_dir.join(&fixture_name);
     let mut fx = SafeTensorsLoader::open(&fx_path)?;

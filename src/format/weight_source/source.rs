@@ -46,11 +46,27 @@ pub trait WeightSource<R: Runtime<DType = DType>> {
     fn load_named_weight(&mut self, name: &str, device: &R::Device) -> Result<Weight<R>> {
         Ok(Weight::Standard(self.load_named(name, device)?))
     }
+
+    /// Does the source hold a tensor `load_named(name)` can return?
+    ///
+    /// A probe, not a read: no bytes move. A loader uses it to decide
+    /// WHETHER a sub-model is in this file before walking it — the VoxCPM2
+    /// loader probes for an embedded AudioVAE this way and falls back to
+    /// the separate checkpoint when the answer is `false`.
+    ///
+    /// No default: a source that folds or renames on read (a `.pth` with
+    /// `weight_norm` pairs, a ggml-named GGUF) answers for the name the
+    /// CALLER spells, so every implementor states its own rule.
+    fn has_named(&self, name: &str) -> bool;
 }
 
 impl<R: Runtime<DType = DType>> WeightSource<R> for SafeTensorsLoader {
     fn load_named(&mut self, name: &str, device: &R::Device) -> Result<Tensor<R>> {
         self.load_tensor::<R>(name, device)
+    }
+
+    fn has_named(&self, name: &str) -> bool {
+        self.tensor_info(name).is_ok()
     }
 }
 
@@ -94,5 +110,9 @@ impl<R: Runtime<DType = DType>> WeightSource<R> for Gguf {
         } else {
             Ok(Weight::Standard(self.load_tensor_f32::<R>(name, device)?))
         }
+    }
+
+    fn has_named(&self, name: &str) -> bool {
+        self.tensor_info(name).is_ok()
     }
 }

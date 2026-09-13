@@ -66,6 +66,13 @@ pub const DEFAULT_LOCAL_DIT_PREFIX: &str = "feat_decoder";
 /// did. `MaybeLoraLinear` additionally lets any of the three carry a LoRA
 /// adapter.
 pub struct LocalDit<R: Runtime> {
+    /// Captured Euler loops, one per shape/schedule/guidance configuration.
+    /// Lives on the model because each graph bakes THIS model's weight
+    /// addresses in; see `sampler::graph`. Declared FIRST so it drops before
+    /// the weights: a graph handle must never outlive the memory it encodes.
+    /// Compiled only with `cuda`.
+    #[cfg(feature = "cuda")]
+    pub(crate) euler_graphs: super::sampler::graph::EulerGraphCache,
     pub(crate) in_proj: MaybeLoraLinear<R>,
     pub(crate) cond_proj: MaybeLoraLinear<R>,
     pub(crate) out_proj: MaybeLoraLinear<R>,
@@ -128,6 +135,27 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
 
     pub fn patch_size(&self) -> usize {
         self.patch_size
+    }
+
+    /// Euler loops captured into CUDA graphs since construction. Always
+    /// zero without the `cuda` feature.
+    pub fn euler_graph_capture_count(&self) -> usize {
+        #[cfg(feature = "cuda")]
+        {
+            self.euler_graphs.capture_count()
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            0
+        }
+    }
+
+    /// Forget every captured Euler graph. Every mutator that swaps a weight
+    /// tensor calls this: a graph holds the old device addresses, not the
+    /// tensors, so it must not outlive them.
+    pub(crate) fn invalidate_euler_graphs(&self) {
+        #[cfg(feature = "cuda")]
+        self.euler_graphs.clear();
     }
 }
 
@@ -265,6 +293,8 @@ where
             feat_dim: cfg.feat_dim,
             patch_size: cfg.patch_size,
             activation_checkpointing: false,
+            #[cfg(feature = "cuda")]
+            euler_graphs: Default::default(),
         })
     }
 }

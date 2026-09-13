@@ -37,22 +37,18 @@ pub(super) fn sum_gqa_grads_fp8(
 mod tests {
     use super::*;
     use crate::ops::cuda::kernels::{self, FLASH_V2_BWD_FP8_MODULE};
+    use crate::test_utils::{CudaTest, cuda_setup};
     use cudarc::driver::PushKernelArg;
     use cudarc::driver::safe::LaunchConfig;
     use numr::runtime::Device;
-    use numr::runtime::Runtime;
-    use numr::runtime::cuda::{CudaDevice, is_cuda_available};
+    use numr::runtime::cuda::CudaDevice;
 
-    /// Same gate the CUDA integration tests use: the `cuda` feature can be on
-    /// while no device is present, and the suite must skip, not fail.
-    fn cuda_client() -> Option<(CudaClient, CudaDevice)> {
-        if !is_cuda_available() {
-            eprintln!("CUDA feature enabled but runtime unavailable, skipping");
-            return None;
-        }
-        let device = CudaDevice::new(0);
-        let client = CudaRuntime::default_client(&device);
-        Some((client, device))
+    /// Skips without a device, and serializes against every other in-process
+    /// CUDA test: see `test_utils::cuda_setup` for why the guard must live
+    /// for the whole test body.
+    fn cuda_client() -> Option<(CudaClient, CudaDevice, CudaTest)> {
+        let cuda = cuda_setup()?;
+        Some((cuda.client.clone(), cuda.device.clone(), cuda))
     }
 
     /// Run `input` through the FP8 encoder compiled into `flash_v2_bwd_fp8.cu`.
@@ -129,7 +125,7 @@ mod tests {
     /// fault behind the parity failure and the wrong value is reaching it.
     #[test]
     fn fp8_e4m3_encodes_the_failing_parity_value_to_nearest() {
-        let Some((client, device)) = cuda_client() else {
+        let Some((client, device, _serial)) = cuda_client() else {
             return;
         };
         let input = [0.59765625f32, -0.59765625];
@@ -164,7 +160,7 @@ mod tests {
     /// whole disagreement table instead of only its first row.
     #[test]
     fn fp8_e4m3_roundtrip_matches_round_to_nearest_even() {
-        let Some((client, device)) = cuda_client() else {
+        let Some((client, device, _serial)) = cuda_client() else {
             return;
         };
         // (input, IEEE round-to-nearest-even E4M3 value)
@@ -252,7 +248,7 @@ mod tests {
     /// finite `57344`.
     #[test]
     fn fp8_e5m2_roundtrip_matches_round_to_nearest_even() {
-        let Some((client, device)) = cuda_client() else {
+        let Some((client, device, _serial)) = cuda_client() else {
             return;
         };
         // (input, IEEE round-to-nearest-even E5M2 value). E5M2 keeps 2 mantissa
@@ -306,7 +302,7 @@ mod tests {
     /// pass here puts the fault upstream, in the per-head dK the kernel writes.
     #[test]
     fn sum_gqa_grads_fp8_requantizes_the_group_sum_once() {
-        let Some((client, device)) = cuda_client() else {
+        let Some((client, device, _serial)) = cuda_client() else {
             return;
         };
         // Layout [b=1, heads=4, s=1, d=2]. Column 0 sums to 0.59765625;

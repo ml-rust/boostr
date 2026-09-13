@@ -419,7 +419,7 @@ mod tests {
     //! Weights are tiny and synthetic; these pin SHAPE and the output SLICE
     //! WINDOW, which are the two things the reference makes easy to get wrong.
 
-    use super::super::loader::tests::{FEAT_DIM, HIDDEN_DIM, MU_TOKENS, PATCH_SIZE, model, t};
+    use super::super::tests::{FEAT_DIM, HIDDEN_DIM, MU_TOKENS, PATCH_SIZE, model, t};
     use super::*;
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};

@@ -76,7 +76,7 @@ impl<R: Runtime<DType = DType>> Module<R> for LocalDit<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::loader::tests::model;
+    use super::super::tests::model;
     use super::*;
     use crate::test_utils::cpu_setup;
     use std::collections::HashSet;

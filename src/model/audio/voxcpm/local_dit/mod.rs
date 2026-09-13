@@ -7,6 +7,8 @@
 
 pub mod config;
 pub mod dit;
+#[cfg(test)]
+mod fixture;
 pub mod loader;
 pub mod lora;
 mod module;
@@ -20,8 +22,8 @@ pub use sampler::{CfmOptions, cfm_time_span};
 /// from the sampler, bidirectional-layer, generate and train tests.
 #[cfg(test)]
 pub(crate) mod tests {
-    pub(crate) use super::loader::tests::{
+    pub(crate) use super::fixture::{
         FEAT_DIM, HEAD_DIM, HIDDEN_DIM, MU_TOKENS, NUM_HEADS, NUM_KV_HEADS, PATCH_SIZE, layer,
-        linear, model, norm, t,
+        linear, model, model_on, norm, t, t_on,
     };
 }

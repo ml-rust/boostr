@@ -30,7 +30,9 @@
 //! `audiovae_path` argument is then optional, and ignored when given. A
 //! file without it — an older conversion, or cstr's, whose `vae.*` tensors
 //! use a third naming scheme with `weight_norm` still unfolded — still needs
-//! the path. Neither convention holds a `tokenizer.json`.
+//! the path. A compressr GGUF also carries `tokenizer.json` under
+//! [`GGUF_TOKENIZER_JSON_KEY`](crate::model::audio::voxcpm::gguf_keys::GGUF_TOKENIZER_JSON_KEY);
+//! `VoxCpm2Weights::tokenizer_source` reads it. cstr's file holds none.
 //!
 //! An embedded VAE must be stored DENSE. `load_named` dequantizes silently,
 //! and the decoder is verified against F32 fixtures, so a block-quantized
@@ -66,6 +68,7 @@
 
 use crate::error::{Error, Result};
 use crate::format::gguf::Gguf;
+pub use crate::model::audio::voxcpm::gguf_keys::GGUF_CONFIG_JSON_KEY;
 use crate::model::audio::voxcpm::loader::cstr::{GgmlNamedGguf, GgufNaming, probe_naming};
 use crate::model::audio::voxcpm::loader::support::DenseWeightSource;
 use crate::model::audio::voxcpm::model::loader::{StackConfigs, VoxCpm2Model, packed_vae_tensor};
@@ -75,18 +78,6 @@ use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, TensorOps, TypeConversionOps, UnaryOps};
 use numr::runtime::Runtime;
 use std::path::Path;
-
-/// GGUF metadata string key holding the verbatim contents of the
-/// checkpoint's `config.json`.
-///
-/// compressr writes it for a VoxCPM2 conversion whose input directory holds
-/// a `config.json`. A GGUF written without it still loads through the
-/// `config_json` path argument.
-///
-/// cstr's ggml-conventional file embeds no `config.json` either, so it too
-/// needs the path argument. Its `voxcpm2.*` metadata keys do carry every
-/// config value, but reading config out of GGUF metadata is its own unit.
-pub const GGUF_CONFIG_JSON_KEY: &str = "voxcpm2.config_json";
 
 impl<R: Runtime<DType = DType>> VoxCpm2Model<R>
 where

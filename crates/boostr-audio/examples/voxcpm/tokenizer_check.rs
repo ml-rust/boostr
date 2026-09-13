@@ -33,6 +33,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use boostr::format::safetensors_loader::SafeTensorsLoader;
+use boostr::model::audio::voxcpm::TokenizerSource;
 use boostr_audio::voxcpm::load_tokenizer;
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 use serde::Deserialize;
@@ -72,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fx_dir = PathBuf::from(std::env::args().nth(2).expect("fixture dir"));
     let device = CpuDevice::default();
 
-    let tokenizer = load_tokenizer(ck.join("tokenizer.json"))?;
+    let tokenizer = load_tokenizer(&TokenizerSource::File(ck.join("tokenizer.json")))?;
 
     let json_text = std::fs::read_to_string(fx_dir.join("tokenizer_fixture.json"))?;
     let records: BTreeMap<String, FixtureRecord> = serde_json::from_str(&json_text)?;

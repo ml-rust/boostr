@@ -1,12 +1,13 @@
 //! Load VoxCPM2's `tokenizer.json` through splintr.
 //!
 //! This is the same split as `format::gguf_vocab`: splintr owns tokenization,
-//! boostr only hands it a file. Unlike the GGUF path there is no container to
-//! extract here, `tokenizer.json` is already the format splintr's generic
-//! HuggingFace loader (`splintr::from_json_path`) reads directly, so
-//! [`load_tokenizer`] is a one-line call. It exists at all only to fold
-//! splintr's `HfJsonError` into `crate::error::Error` the way every other
-//! boostr loader does.
+//! boostr only hands it the bytes. A [`TokenizerSource`] is either the
+//! `tokenizer.json` text a compressr GGUF embeds or a path to the file, and
+//! both are already the format splintr's generic HuggingFace loader
+//! (`splintr::from_json_bytes`, `splintr::from_json_path`) reads directly,
+//! so [`load_tokenizer`] is one match. It exists at all to pick the splintr
+//! entry point and fold splintr's `HfJsonError` into `crate::error::Error`
+//! the way every other boostr loader does.
 //!
 //! # No-BOS is the caller's contract, not this function's
 //!
@@ -43,6 +44,7 @@
 //! frontend: leading, trailing, and repeated whitespace carry no speech
 //! meaning.
 
+use boostr::model::audio::voxcpm::TokenizerSource;
 use splintr::AnyTokenizer;
 
 use crate::error::{Error, Result};
@@ -50,12 +52,19 @@ use crate::error::{Error, Result};
 /// Load a VoxCPM2 `tokenizer.json` into a splintr [`AnyTokenizer`], with no
 /// normalization applied to input text.
 ///
+/// `source` is what `VoxCpm2Weights::tokenizer_source` hands back: the
+/// text embedded in a GGUF, or a file on disk.
+///
 /// Kept for callers that want raw control over what text reaches splintr.
 /// Most VoxCPM2 text-path code should call [`tokenize`] instead, which
 /// normalizes first and always uses `encode_raw`. See the module docs for
 /// why both of those matter here.
-pub fn load_tokenizer(path: impl AsRef<std::path::Path>) -> Result<AnyTokenizer> {
-    splintr::from_json_path(path).map_err(|e| Error::ModelError {
+pub fn load_tokenizer(source: &TokenizerSource) -> Result<AnyTokenizer> {
+    let loaded = match source {
+        TokenizerSource::Embedded(text) => splintr::from_json_bytes(text.as_bytes()),
+        TokenizerSource::File(path) => splintr::from_json_path(path),
+    };
+    loaded.map_err(|e| Error::ModelError {
         reason: format!("VoxCPM2 tokenizer.json: {e}"),
     })
 }
@@ -98,7 +107,8 @@ pub fn tokenize(tokenizer: &AnyTokenizer, text: &str) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_whitespace, tokenize};
+    use super::{load_tokenizer, normalize_whitespace, tokenize};
+    use boostr::model::audio::voxcpm::TokenizerSource;
     use splintr::from_json_bytes;
 
     /// Miniature Llama-2-shaped tokenizer.json: metaspace normalizer
@@ -144,6 +154,19 @@ mod tests {
         assert_eq!(tokenize(&tokenizer, "   \t\n  "), Vec::<u32>::new());
         // Sanity: a real word still tokenizes once normalized.
         assert_eq!(tokenize(&tokenizer, "  the  "), vec![35]);
+    }
+
+    #[test]
+    fn embedded_and_file_sources_load_the_same_tokenizer() {
+        let embedded = load_tokenizer(&TokenizerSource::Embedded(MINI_TOKENIZER_JSON.to_string()))
+            .expect("embedded source loads");
+        let path = std::env::temp_dir().join("boostr_audio_voxcpm2_tok_source.json");
+        std::fs::write(&path, MINI_TOKENIZER_JSON).unwrap();
+        let from_file = load_tokenizer(&TokenizerSource::File(path.clone())).expect("file loads");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(tokenize(&embedded, "the"), vec![35]);
+        assert_eq!(tokenize(&from_file, "the"), vec![35]);
+        assert!(load_tokenizer(&TokenizerSource::Embedded("not json".to_string())).is_err());
     }
 
     #[test]

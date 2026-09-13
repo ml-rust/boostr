@@ -35,6 +35,7 @@ use crate::error::{Error, Result};
 use crate::g2p::Lang;
 use crate::resample::to_mono_at_rate;
 use crate::tts::{TtsEngine, Voice};
+use crate::voxcpm::options::{VoxCpm2LoadOptions, VoxCpm2SynthOptions};
 use crate::voxcpm::tokenizer::{load_tokenizer, normalize_whitespace, tokenize};
 
 /// Sample rate the reference encoder expects.
@@ -56,66 +57,6 @@ const VOICE_EXTENSIONS: [&str; 4] = ["wav", "flac", "mp3", "ogg"];
 /// caller has to infer. A literal also can't collide with a voice file by
 /// accident: [`VoxCpm2Engine::load`] refuses any file stemmed `zero-shot`.
 pub const ZERO_SHOT_VOICE_ID: &str = "zero-shot";
-
-/// Generation settings applied to every request. Defaults are the clone
-/// pipeline's verified values.
-#[derive(Debug, Clone)]
-pub struct VoxCpm2SynthOptions {
-    /// Flow-matching solver steps per patch.
-    pub n_timesteps: usize,
-    /// Classifier-free guidance scale.
-    pub cfg_value: f32,
-    /// Patches during which the stop token is ignored.
-    pub min_len: usize,
-    /// Base seed; every request draws from it, so equal requests render
-    /// equal audio on one backend.
-    pub seed: u64,
-}
-
-impl Default for VoxCpm2SynthOptions {
-    fn default() -> Self {
-        Self {
-            n_timesteps: 10,
-            cfg_value: 2.0,
-            min_len: 2,
-            seed: 0,
-        }
-    }
-}
-
-/// Everything [`VoxCpm2Engine::load`] needs beyond the checkpoint location:
-/// the dtype to cast to, per-request generation defaults, and an optional
-/// LoRA adapter to fold into the weights. Bundled into one struct because
-/// `load` already takes five positional arguments (weights, audiovae,
-/// voices_dir, device, client) — three more flat parameters would trip
-/// clippy's too-many-arguments limit.
-#[derive(Debug, Clone, Default)]
-pub struct VoxCpm2LoadOptions {
-    /// Casts every transformer-stack tensor; `None` keeps the checkpoint's
-    /// own dtype (BF16).
-    pub dtype: Option<DType>,
-    /// Casts every AudioVAE DECODER tensor (conv weights/biases, `Snake`
-    /// alphas, sr-cond embeds), independently of `dtype`. `None` keeps the
-    /// checkpoint's own F32, verified against PyTorch fixtures at that
-    /// dtype.
-    ///
-    /// The encoder is NOT affected: it always loads and runs at F32. It
-    /// runs once per render, on a short reference clip, so its cost is
-    /// negligible — but casting it changes the latent handed to the
-    /// transformer stack, shifting the stack's own conditioning and
-    /// therefore the whole generation, including where it stops.
-    pub vae_decoder_dtype: Option<DType>,
-    /// Per-request generation settings — see [`VoxCpm2SynthOptions`].
-    pub synth: VoxCpm2SynthOptions,
-    /// A LoRA adapter safetensors file, folded into the model's weights
-    /// once, at load time. `None` loads the base model, unchanged.
-    ///
-    /// The adapter is folded in ONCE: an engine serves ONE adapted model for
-    /// its lifetime. Per-request adapter switching is not offered — serving
-    /// several adapters means loading several engines (a `--tts-model
-    /// NAME=DIR` bundle per adapter, in blazr's terms), one adapter each.
-    pub adapter: Option<PathBuf>,
-}
 
 /// A reference voice, encoded once.
 struct EncodedVoice<R: Runtime> {
@@ -172,7 +113,9 @@ where
     /// GGUF or TCF that embeds the VAE (compressr writes it under `vae.`)
     /// needs none, and ignores one when given; a checkpoint directory, or a
     /// single-file model written without it, needs `Some` — the loader's
-    /// error names both ways to supply it.
+    /// error names both ways to supply it. The tokenizer follows
+    /// [`VoxCpm2Weights::tokenizer_source`]: embedded in a compressr GGUF,
+    /// else `tokenizer.json` inside the checkpoint or beside the file.
     ///
     /// `options.adapter` is applied to the model BEFORE it is wrapped as an
     /// engine — see [`VoxCpm2LoadOptions::adapter`] for the one-adapter-per-
@@ -200,7 +143,7 @@ where
             }
             VoxCpm2Weights::Gguf { path, config } => VoxCpm2Model::<R>::from_gguf(
                 path,
-                Some(config.as_path()),
+                config.as_deref(),
                 audiovae,
                 device,
                 dtype,
@@ -219,7 +162,7 @@ where
             .as_deref()
             .map(|path| model.load_lora_adapter(path, device))
             .transpose()?;
-        let tokenizer = load_tokenizer(weights.tokenizer_path()?)?;
+        let tokenizer = load_tokenizer(&weights.tokenizer_source()?)?;
 
         let mut voices = BTreeMap::new();
         if let Some(dir) = voices_dir {

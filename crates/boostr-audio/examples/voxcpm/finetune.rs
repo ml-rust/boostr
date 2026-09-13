@@ -20,8 +20,9 @@
 //! same as `voxcpm_clone`. A GGUF compressr wrote from a directory holding
 //! `audiovae.pth` embeds the VAE and the `config.json`, so it needs neither
 //! `--audiovae` nor `--config` (an `--audiovae` given anyway is ignored);
-//! an older or third-party GGUF still needs both. `tokenizer.json` is looked
-//! for beside the `.gguf` and then beside `--config`.
+//! it embeds `tokenizer.json` too. An older or third-party GGUF still needs
+//! both, and its `tokenizer.json` is looked for beside the `.gguf` and then
+//! beside `--config`.
 //!
 //! `--tcf` is the third single-file form, mutually exclusive with both of the
 //! above, loaded through
@@ -398,8 +399,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use boostr::format::safetensors::save_safetensors;
-use boostr::model::audio::voxcpm::VoxCpmClient;
 use boostr::model::audio::voxcpm::model::VoxCpm2Model;
+use boostr::model::audio::voxcpm::{TokenizerSource, VoxCpm2Weights, VoxCpmClient};
 use boostr::nn::{LoraTargets, Module, build_lora_metadata};
 use boostr::ops::FusedOptimizerOps;
 use boostr::quant::traits::DequantOps;
@@ -764,35 +765,27 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-/// Locate `tokenizer.json`.
+/// Locate the tokenizer, by the same rule `VoxCpm2Weights` applies.
 ///
-/// A checkpoint directory holds it outright. Neither a GGUF nor a TCF carries
-/// a tokenizer at all, so it is looked for beside the model file first and
-/// beside `--config` second — both of those normally sit in, or are copied
-/// from, the same checkpoint directory. Neither: an error, rather than a
-/// tokenizer guess that would silently produce the wrong token ids. Same
-/// resolution order `voxcpm_clone` uses.
-fn tokenizer_path(weights: &Weights, config: Option<&Path>) -> Result<PathBuf, String> {
-    match weights {
-        Weights::Checkpoint(dir) => Ok(dir.join("tokenizer.json")),
-        Weights::Gguf(path) | Weights::Tcf(path) => {
-            let beside = |p: &Path| {
-                p.parent()
-                    .map(|dir| dir.join("tokenizer.json"))
-                    .filter(|candidate| candidate.is_file())
-            };
-            beside(path)
-                .or_else(|| config.and_then(beside))
-                .ok_or_else(|| {
-                    format!(
-                        "no tokenizer.json beside {} (a single-file model carries none); \
-                     put it there or pass --config pointing into the checkpoint \
-                     directory",
-                        path.display()
-                    )
-                })
-        }
-    }
+/// A checkpoint directory holds `tokenizer.json` outright. A compressr GGUF
+/// embeds it; an older GGUF, or any TCF, has it looked for beside the model
+/// file first and beside `--config` second. Neither: an error, rather than
+/// a tokenizer guess that would silently produce the wrong token ids.
+fn tokenizer_source(weights: &Weights, config: Option<&Path>) -> Result<TokenizerSource, String> {
+    let weights = match weights {
+        Weights::Checkpoint(dir) => VoxCpm2Weights::Checkpoint(dir.clone()),
+        Weights::Gguf(path) => VoxCpm2Weights::Gguf {
+            path: path.clone(),
+            config: config.map(Path::to_path_buf),
+        },
+        Weights::Tcf(path) => VoxCpm2Weights::Tcf {
+            path: path.clone(),
+            config: config
+                .ok_or("--config is required with --tcf")?
+                .to_path_buf(),
+        },
+    };
+    weights.tokenizer_source().map_err(|e| e.to_string())
 }
 
 /// Copy any-runtime tensor data to host and rebuild it as a CPU tensor, the
@@ -1100,7 +1093,7 @@ where
         );
     }
 
-    let tokenizer = load_tokenizer(tokenizer_path(&args.weights, args.config.as_deref())?)?;
+    let tokenizer = load_tokenizer(&tokenizer_source(&args.weights, args.config.as_deref())?)?;
 
     // Built here, before the `--eval-only` branch, since both `--eval-only
     // --lora` and training need the same dot-segment target list.

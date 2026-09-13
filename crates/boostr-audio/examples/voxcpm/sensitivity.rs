@@ -213,8 +213,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use boostr::model::audio::voxcpm::VoxCpmClient;
 use boostr::model::audio::voxcpm::model::VoxCpm2Model;
+use boostr::model::audio::voxcpm::{TokenizerSource, VoxCpmClient};
 use boostr::nn::Module;
 use boostr::quant::traits::DequantOps;
 use boostr_audio::voxcpm::load_tokenizer;
@@ -566,7 +566,7 @@ where
     };
     eprintln!("eval batch: {} row(s)", eval_source_rows.len());
 
-    let tokenizer = load_tokenizer(args.ckpt.join("tokenizer.json"))?;
+    let tokenizer = load_tokenizer(&TokenizerSource::File(args.ckpt.join("tokenizer.json")))?;
     // Drawn ONCE, before the first perturbation, and reused for every
     // measurement — see the module docs' "Determinism" section.
     let eval_batch = build_eval_batch(

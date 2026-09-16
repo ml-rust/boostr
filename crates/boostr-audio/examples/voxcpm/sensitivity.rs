@@ -216,6 +216,7 @@ use std::time::Instant;
 use boostr::model::audio::voxcpm::model::VoxCpm2Model;
 use boostr::model::audio::voxcpm::{TokenizerSource, VoxCpmClient};
 use boostr::nn::Module;
+use boostr::ops::FlashAttentionOps;
 use boostr::quant::traits::DequantOps;
 use boostr_audio::voxcpm::load_tokenizer;
 use numr::dtype::DType;
@@ -536,7 +537,8 @@ where
         + CompareOps<R>
         + ConditionalOps<R>
         + TypeConversionOps<R>
-        + DequantOps<R>,
+        + DequantOps<R>
+        + FlashAttentionOps<R>,
 {
     // Dense F32, matching `finetune.rs`'s own `--ckpt` arm. The perturbation
     // reads and writes f32 directly, so a cast here would add a rounding the

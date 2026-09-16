@@ -27,6 +27,7 @@ use crate::nn::{
     LoraTargets, MaybeLoraLinear, Module, RmsNorm, RoPE, adapt_if_targeted, child_params,
     extend_named, load_lora_child, push_projection_name, var_contiguous,
 };
+use crate::ops::FlashAttentionOps;
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_broadcast_to, var_cat, var_narrow, var_reshape};
 use numr::dtype::DType;
@@ -103,7 +104,8 @@ impl<R: Runtime<DType = DType>> LocalEncoder<R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let shape = x.shape().to_vec();
         if shape.len() != 4 {

@@ -402,6 +402,7 @@ use boostr::format::safetensors::save_safetensors;
 use boostr::model::audio::voxcpm::model::VoxCpm2Model;
 use boostr::model::audio::voxcpm::{TokenizerSource, VoxCpm2Weights, VoxCpmClient};
 use boostr::nn::{LoraTargets, Module, build_lora_metadata};
+use boostr::ops::FlashAttentionOps;
 use boostr::ops::FusedOptimizerOps;
 use boostr::quant::traits::DequantOps;
 use boostr::trainer::{SimpleTrainer, TrainingConfig};
@@ -920,7 +921,8 @@ where
         + TypeConversionOps<R>
         // A quantized projection's backward dequantizes the frozen weight to
         // carry the gradient through — the QLoRA path.
-        + DequantOps<R>,
+        + DequantOps<R>
+        + FlashAttentionOps<R>,
 {
     // F32, not the checkpoint's native BF16: AdamW's running moments and the
     // CFM loss's backward pass are far more numerically stable in F32, and

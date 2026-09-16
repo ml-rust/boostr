@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::nn::var_contiguous;
+use crate::ops::FlashAttentionOps;
 use numr::autograd::var_transpose;
 
 impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
@@ -40,7 +41,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + TypeConversionOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         self.step_with_noise_inner(client, state, z, options, false)
             .map(|(outcome, _)| outcome)
@@ -77,7 +79,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + TypeConversionOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let hidden = state.prefill.lm_hidden.tensor();
         let noise = client
@@ -126,7 +129,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + TypeConversionOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         if options.max_len == 0 {
             return Err(Error::InvalidArgument {

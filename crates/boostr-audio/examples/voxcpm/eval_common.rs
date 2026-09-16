@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use boostr::model::audio::voxcpm::model::config::{AUDIO_START_ID, VoxCpm2Config};
 use boostr::model::audio::voxcpm::model::{PatchGenerator, VoxCpm2Model};
 use boostr::model::audio::voxcpm::{PrefillState, VoxCpmClient};
+use boostr::ops::FlashAttentionOps;
 use boostr::quant::traits::DequantOps;
 use boostr_audio::voxcpm::{normalize_whitespace, tokenize};
 use boostr_audio::{decode_audio, extension_hint, to_mono_at_rate};
@@ -309,7 +310,8 @@ where
         + CompareOps<R>
         + ConditionalOps<R>
         + TypeConversionOps<R>
-        + DequantOps<R>,
+        + DequantOps<R>
+        + FlashAttentionOps<R>,
 {
     let wav = load_wav_16k(&row.wav).map_err(|e| format!("{}: {e}", row.wav.display()))?;
     // The training target: what the loss is computed against.
@@ -391,7 +393,8 @@ where
         + CompareOps<R>
         + ConditionalOps<R>
         + TypeConversionOps<R>
-        + DequantOps<R>,
+        + DequantOps<R>
+        + FlashAttentionOps<R>,
 {
     let mut eval_batch = Vec::with_capacity(eval_source_rows.len());
     for (eval_index, row) in eval_source_rows.iter().enumerate() {
@@ -454,7 +457,8 @@ where
         + CompareOps<R>
         + ConditionalOps<R>
         + TypeConversionOps<R>
-        + DequantOps<R>,
+        + DequantOps<R>
+        + FlashAttentionOps<R>,
 {
     let mut diff_sum = 0.0f64;
     let mut stop_sum = 0.0f64;

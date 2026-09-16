@@ -2,6 +2,7 @@ use super::BidirectionalLayer;
 use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
 use crate::nn::RoPE;
+use crate::ops::FlashAttentionOps;
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, checkpoint_with_client, var_add};
 use numr::dtype::DType;
@@ -28,7 +29,8 @@ impl<R: Runtime<DType = DType>> BidirectionalLayer<R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let (h, mlp_out) = self.forward_with_pending_residual(client, x, None, rope)?;
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
@@ -72,7 +74,8 @@ impl<R: Runtime<DType = DType>> BidirectionalLayer<R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let (normed, x) = match pending {
             Some(prev_mlp) => self.input_layernorm.residual_norm(client, x, prev_mlp)?,
@@ -128,7 +131,8 @@ impl<R: Runtime<DType = DType>> BidirectionalLayer<R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let layer = self.alias();
         let rope = rope.alias();

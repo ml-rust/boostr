@@ -3,17 +3,32 @@
 //! DiT (`feat_decoder`).
 //!
 //! Every other transformer block in this crate runs through
-//! `crate::model::attention_core`, which hardcodes causal(+window) masking —
-//! this is the one bidirectional transformer stack in VoxCPM2, attending its
-//! sequence with no mask at all (`feat_encoder`'s fixed 5-position
-//! `[CLS, p0, p1, p2, p3]`; `feat_decoder`'s own assembled sequence). This
-//! differs from `minicpm4`'s causal blocks, which mask via
-//! `attention_core` and cannot be reused here. That orchestration is written
-//! by hand here; every primitive it calls (`Linear`, `RoPE`/`apply_rope`,
-//! `multi_head_attention_impl`, `repeat_kv`, `var_contiguous`) is reused
-//! as-is. `LlamaAttention` itself is `pub(super)` to `model::llama::model`
-//! and not reachable from here, and its `forward` methods are
-//! unconditionally causal regardless.
+//! `crate::model::attention_core`, whose flash entry hardcodes
+//! `causal = true`. This is the one bidirectional stack in VoxCPM2: it
+//! attends its sequence with no mask at all (`feat_encoder`'s fixed
+//! 5-position `[CLS, p0, p1, p2, p3]`; `feat_decoder`'s own assembled
+//! sequence). The orchestration is written by hand here, and the attention
+//! itself goes through `var_flash_attention` with `causal = false`: one
+//! fused kernel per layer that broadcasts the 2 KV heads to 16 in-kernel,
+//! so no `repeat_kv` materialization, no `K^T` copy, no separate
+//! scale/softmax launches. It carries autograd (`flash_attention_bwd`), so
+//! LoRA training runs through the same node.
+//!
+//! Backends: CUDA runs this geometry (non-causal, short sequence, head_dim
+//! 128, F32/F16/BF16) as the decode kernel with the query axis folded into
+//! the head axis — one block per query row, one warp per key — and the
+//! tiled MQA/GQA kernel past the fold's length bound (see
+//! `ops/cuda/attention/flash/impl_ops.rs`). CPU has no fused kernel:
+//! `flash_attention_fwd` there IS the composed `expand_kv` + matmul +
+//! softmax + matmul path, so the composed fallback lives behind the same
+//! call and this file never branches on the backend.
+//!
+//! Precision: every CUDA kernel behind this call reads Q/K/V in the tensor
+//! dtype and keeps the scores, the running max/sum and the output
+//! accumulator in F32, rounding to the tensor dtype once at the store. The
+//! composed path it replaces rounded the scores, the scaled scores and the
+//! softmax weights to the activation dtype between launches, so BF16
+//! activations lose less here.
 //!
 //! `head_dim` (128) is independent of `hidden_size / num_heads` (1024/16 =
 //! 64) here — read from config (`kv_channels`), never derived, and passed
@@ -25,9 +40,9 @@ use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
 use crate::nn::{
     LoraTargets, MaybeLoraLinear, Module, RoPE, adapt_if_targeted, child_params, extend_named,
-    load_lora_child, push_projection_name, repeat_kv, var_contiguous,
+    load_lora_child, push_projection_name, var_contiguous,
 };
-use crate::ops::impl_generic::attention::multi_head_attention_impl;
+use crate::ops::{FlashAttentionOps, var_flash_attention};
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_permute, var_reshape};
 use numr::dtype::DType;
@@ -64,8 +79,7 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
     /// `S = num_positions` — fixed at 5 for `feat_encoder`; caller-defined
     /// for `feat_decoder`). No mask: every position is valid and attends
     /// every other, including itself. Softmax scale is
-    /// `1/sqrt(head_dim)`, derived from `q`'s actual last dimension by
-    /// `multi_head_attention_impl`.
+    /// `1/sqrt(head_dim)`, derived by the flash kernel from `head_dim`.
     pub fn forward<C>(&self, client: &C, x: &Var<R>, rope: &RoPE<R>) -> Result<Var<R>>
     where
         // `TypeConversionOps` is what `MaybeLoraLinear::forward` adds over a
@@ -82,7 +96,8 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let shape = x.shape().to_vec();
         let (batch, seq_len) = (shape[0], shape[1]);
@@ -113,19 +128,25 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
         // Q/K go into `apply_rope` as the permuted views: every backend
         // reads a `[N, S, H, D]`-contiguous tensor viewed as `[N, H, S, D]`
         // and writes a dense `[N, H, S, D]`, so the rotation is also the
-        // layout change. V: `repeat_kv` requires contiguous input.
+        // layout change. V: the flash kernel reads a dense `[N, H_kv, S, D]`.
         let v = var_contiguous(&v)?;
 
         let q = client.apply_rope(&q, rope.cos_cache(), rope.sin_cache())?;
         let k = client.apply_rope(&k, rope.cos_cache(), rope.sin_cache())?;
 
-        // GQA: repeat the 2 KV heads to 16 before the dense attention kernel.
-        let repeat = self.num_heads / self.num_kv_heads;
-        let k = repeat_kv(&k, repeat).map_err(Error::Numr)?;
-        let v = repeat_kv(&v, repeat).map_err(Error::Numr)?;
-
-        // No mask: bidirectional, all 5 positions always valid.
-        let attn_out = multi_head_attention_impl(client, &q, &k, &v, None, self.num_heads)?;
+        // No mask: bidirectional, every position attends every other. GQA
+        // broadcast happens inside the kernel; `repeat_kv` here would
+        // materialize the tensor this call exists to avoid.
+        let attn_out = var_flash_attention(
+            &q,
+            &k,
+            &v,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            false,
+            0,
+        )?;
 
         // [N, H, S, D] -> [N, S, H, D] -> [N, S, H*D]
         let attn_out = var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;

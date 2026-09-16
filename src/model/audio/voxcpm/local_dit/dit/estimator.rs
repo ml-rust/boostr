@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::local_dit::loader::LocalDit;
 use crate::model::traits::ModelClient;
 use crate::nn::{SinusoidalPosEmb, var_contiguous};
+use crate::ops::FlashAttentionOps;
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_add, var_cast, var_cat, var_narrow, var_reshape};
 use numr::dtype::DType;
@@ -46,7 +47,8 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + TypeConversionOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let batch = self.check_patch_input("x", x, None)?;
         self.check_cond_hidden(cond_h, batch)?;

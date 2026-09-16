@@ -5,6 +5,7 @@ use crate::error::Result;
 use crate::model::audio::voxcpm::model::generate::{PatchGenerator, TeacherForcedConditioning};
 use crate::model::traits::ModelClient;
 use crate::nn::{flow_matching_interpolate, flow_matching_loss};
+use crate::ops::FlashAttentionOps;
 use crate::quant::traits::DequantOps;
 use numr::autograd::Var;
 use numr::dtype::DType;
@@ -46,7 +47,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + TypeConversionOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let dtype = cond.mu.tensor().dtype();
         let device = cond.mu.tensor().device();

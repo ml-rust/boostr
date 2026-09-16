@@ -11,6 +11,7 @@
 
 use super::*;
 use crate::model::audio::voxcpm::local_dit::cfm_time_span;
+use crate::ops::FlashAttentionOps;
 use crate::quant::traits::DequantOps;
 use numr::autograd::{var_cat, var_reshape};
 
@@ -59,7 +60,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + TypeConversionOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let (outcome, intermediates) =
             self.step_with_noise_inner(client, state, z, options, true)?;
@@ -107,7 +109,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + TypeConversionOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let (patch_size, feat_dim) = (self.config.patch_size, self.config.feat_dim);
         check_patch("z", z, &[1, patch_size, feat_dim])?;

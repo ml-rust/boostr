@@ -193,6 +193,7 @@ use boostr::model::audio::voxcpm::model::{
 };
 use boostr::model::audio::voxcpm::vae::decoder::{HOP_LENGTH, SAMPLE_RATE};
 use boostr::model::audio::voxcpm::{TokenizerSource, VoxCpm2Weights, VoxCpmClient};
+use boostr::ops::FlashAttentionOps;
 use boostr::quant::traits::DequantOps;
 use boostr_audio::voxcpm::{load_tokenizer, normalize_whitespace, tokenize};
 use boostr_audio::{
@@ -991,7 +992,8 @@ where
         + CompareOps<R>
         + ConditionalOps<R>
         + TypeConversionOps<R>
-        + DequantOps<R>,
+        + DequantOps<R>
+        + FlashAttentionOps<R>,
 {
     // --- model --------------------------------------------------------------
     let mut model = match &args.weights {

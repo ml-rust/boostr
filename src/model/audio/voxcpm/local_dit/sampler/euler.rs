@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::local_dit::loader::LocalDit;
 use crate::model::traits::ModelClient;
 use crate::nn::var_contiguous;
+use crate::ops::FlashAttentionOps;
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_cat, var_mul_scalar, var_narrow, var_reshape, var_sub};
 use numr::dtype::DType;
@@ -62,7 +63,8 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + TypeConversionOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let batch = self.check_patch_input("z", z, None)?;
         self.check_patch_input("cond", cond, Some(batch))?;
@@ -176,7 +178,8 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + TypeConversionOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let batch = self.check_patch_input("cond", cond, None)?;
         self.check_mu(mu, batch)?;

@@ -35,6 +35,7 @@ use crate::model::audio::voxcpm::model::patches::{fold_patches, pad_to_multiple}
 use crate::model::audio::voxcpm::model::sequence::SequenceLayout;
 use crate::model::traits::ModelClient;
 use crate::nn::var_contiguous;
+use crate::ops::FlashAttentionOps;
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_add, var_cat, var_mul, var_narrow, var_reshape};
 use numr::dtype::DType;
@@ -146,7 +147,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         self.prefill_inner(client, ref_feat, text_token_ids, max_length, false)
     }
@@ -175,7 +177,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         self.prefill_inner(client, ref_feat, text_token_ids, max_length, true)
     }
@@ -200,7 +203,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             + UnaryOps<R>
             + CompareOps<R>
             + ConditionalOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let (patch_size, feat_dim) = (self.config.patch_size, self.config.feat_dim);
         let t_ref = match ref_feat {

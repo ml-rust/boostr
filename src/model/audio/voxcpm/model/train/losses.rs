@@ -15,6 +15,7 @@ use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::model::generate::PatchGenerator;
 use crate::model::audio::voxcpm::model::prefill::PrefillState;
 use crate::model::traits::ModelClient;
+use crate::ops::FlashAttentionOps;
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_add, var_mul_scalar};
 use numr::dtype::DType;
@@ -85,7 +86,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + TypeConversionOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         let shape = target_patches.shape().to_vec();
         if shape.len() != 3 || shape[0] == 0 {
@@ -159,7 +161,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + TypeConversionOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         check_training_cfg_rate(training_cfg_rate)?;
         let shape = target_patches.shape();

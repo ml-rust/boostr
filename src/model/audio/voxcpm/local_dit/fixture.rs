@@ -25,7 +25,9 @@ pub(crate) const HIDDEN_DIM: usize = 8;
 const FFN_DIM: usize = 8;
 pub(crate) const NUM_HEADS: usize = 2;
 pub(crate) const NUM_KV_HEADS: usize = 1;
-pub(crate) const HEAD_DIM: usize = 4;
+/// The smallest head size the CUDA flash kernels instantiate, so the CUDA
+/// graph tests run the same attention entry the production block runs.
+pub(crate) const HEAD_DIM: usize = 32;
 /// `mu(2) + t(1) + cond(2) + x(2)` — the same derivation as
 /// `LocalDitConfig::sequence_len`, at `PATCH_SIZE = 2`.
 const SEQUENCE_LEN: usize = 2 + 1 + PATCH_SIZE + PATCH_SIZE;
@@ -47,6 +49,25 @@ pub(crate) fn t_on<R: Runtime<DType = DType>>(
 
 pub(crate) fn t(shape: &[usize], seed: f32, device: &CpuDevice) -> Tensor<CpuRuntime> {
     t_on::<CpuRuntime>(shape, seed, device)
+}
+
+/// `q_proj`/`k_proj` for the fixture's attention: [`linear_on`] values
+/// scaled by `1/sqrt(HEAD_DIM)`. At `HEAD_DIM` 32 the unscaled `0.4 * sin`
+/// weights push every logit past the softmax's flat region, each token
+/// attends only itself, and the gradient tests see no signal through
+/// attention.
+fn qk_proj_on<R: Runtime<DType = DType>>(
+    out: usize,
+    seed: f32,
+    device: &R::Device,
+) -> MaybeLoraLinear<R> {
+    let scale = (HEAD_DIM as f32).sqrt().recip();
+    let n = out * HIDDEN_DIM;
+    let data: Vec<f32> = (0..n)
+        .map(|i| scale * 0.4 * ((i as f32) * 0.37 + seed).sin())
+        .collect();
+    let w = Tensor::<R>::from_slice(&data, &[out, HIDDEN_DIM], device).unwrap();
+    MaybeQuantLinear::from_weight(Weight::Standard(w), None).into()
 }
 
 /// Always the `Standard` variant: a safetensors checkpoint yields exactly
@@ -88,14 +109,8 @@ pub(crate) fn layer_on<R: Runtime<DType = DType>>(
     BidirectionalLayer {
         input_layernorm: norm_on::<R>(device),
         self_attn: BidirectionalAttention {
-            q_proj: linear_on::<R>(NUM_HEADS * HEAD_DIM, HIDDEN_DIM, seed + 1.0, false, device),
-            k_proj: linear_on::<R>(
-                NUM_KV_HEADS * HEAD_DIM,
-                HIDDEN_DIM,
-                seed + 2.0,
-                false,
-                device,
-            ),
+            q_proj: qk_proj_on::<R>(NUM_HEADS * HEAD_DIM, seed + 1.0, device),
+            k_proj: qk_proj_on::<R>(NUM_KV_HEADS * HEAD_DIM, seed + 2.0, device),
             v_proj: linear_on::<R>(
                 NUM_KV_HEADS * HEAD_DIM,
                 HIDDEN_DIM,

@@ -14,6 +14,7 @@ use super::schedule::euler_steps;
 use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::local_dit::loader::LocalDit;
 use crate::model::traits::ModelClient;
+use crate::ops::FlashAttentionOps;
 use crate::quant::traits::DequantOps;
 use numr::autograd::Var;
 use numr::dtype::DType;
@@ -56,7 +57,8 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
             + CompareOps<R>
             + ConditionalOps<R>
             + TypeConversionOps<R>
-            + DequantOps<R>,
+            + DequantOps<R>
+            + FlashAttentionOps<R>,
     {
         // Validated here so a bad input errors the same way on both paths.
         let batch = self.check_patch_input("z", z, None)?;

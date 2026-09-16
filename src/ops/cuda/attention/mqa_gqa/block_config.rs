@@ -1,13 +1,14 @@
 //! Runtime block-size selection for the MQA/GQA CUDA kernels.
 //!
 //! `mqa_gqa.cu` and `mqa_gqa_bwd.cu` each emit two block-size variants per
-//! (head_dim, dtype): the unsuffixed large-block symbol and a `_sm`-suffixed
-//! small-block symbol. The pickers here choose between them from the device's
-//! opt-in shared-memory limit, so a GPU with a small limit still launches.
+//! (head_dim, dtype): the unsuffixed symbol and a `_sm`-suffixed one.
+//! The forward picks by device fill (`mqa_fwd_tile`); the backward picks by
+//! the device's opt-in shared-memory limit (`mqa_bwd_block_config`), so a GPU
+//! with a small limit still launches.
 
 use crate::error::{Error, Result};
 
-use super::super::flash::flash_utils::{compute_bwd_smem, compute_smem, device_max_smem};
+use super::super::flash::flash_utils::{compute_bwd_smem, device_max_smem};
 
 /// Shared memory element size of the MQA/GQA backward kernels.
 ///
@@ -16,115 +17,92 @@ use super::super::flash::flash_utils::{compute_bwd_smem, compute_smem, device_ma
 /// on load, so the requirement is independent of the tensor dtype.
 pub(super) const BWD_SMEM_ELEM_BYTES: usize = 4;
 
-/// Block config of the unsuffixed `mqa_gqa_fwd_{head_dim}_{dtype}` kernels.
-/// Must stay in sync with the "Large blocks" instantiations in `mqa_gqa.cu`.
-fn mqa_fwd_block_config_large(head_dim: usize) -> Option<(usize, usize)> {
+/// Forward launch geometry: one entry of the instantiation table in
+/// `mqa_gqa.cu`, plus which of the two symbols it names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct MqaFwdTile {
+    /// Query rows one block owns: `WARPS * R * 32 / G` in the kernel.
+    pub rows: usize,
+    /// `block_dim.x`: `WARPS * 32`.
+    pub threads: usize,
+    /// Keys staged per shared-memory tile.
+    pub block_n: usize,
+    /// Selects the `_sm` symbol (two warps per block) over the four-warp one.
+    pub small: bool,
+}
+
+/// Lanes per query row (`G`) at each head_dim. Must stay in sync with the
+/// `MQA_GQA_FWD_DTYPE` table in `mqa_gqa.cu`.
+fn mqa_fwd_lanes_per_row(head_dim: usize) -> Option<usize> {
     match head_dim {
-        32 => Some((128, 128)),
-        64 => Some((128, 128)),
-        128 => Some((128, 64)),
+        32 | 64 => Some(4),
+        128 => Some(8),
         _ => None,
     }
 }
 
-/// Block config of the `mqa_gqa_fwd_{head_dim}_{dtype}_sm` kernels.
-/// Must stay in sync with the "Small blocks" instantiations in `mqa_gqa.cu`.
-///
-/// Same block sizes the backward half uses at each head_dim, so the two read
-/// alike. Sized so the f32 forward fits 99KB: 25344 / 33280 / 66048 bytes for
-/// head_dim 32 / 64 / 128.
-fn mqa_fwd_block_config_small(head_dim: usize) -> Option<(usize, usize)> {
-    match head_dim {
-        32 => Some((64, 64)),
-        64 => Some((64, 32)),
-        128 => Some((64, 32)),
-        _ => None,
-    }
-}
+/// Rows per lane group (`R`) in every forward instantiation.
+const MQA_FWD_ROWS_PER_GROUP: usize = 4;
+/// Keys per staged K/V tile (`BLOCK_N`) in every forward instantiation.
+const MQA_FWD_BLOCK_N: usize = 16; // mirrors `MQA_GQA_FWD_BLOCK_N` in mqa_gqa.cu
+/// Warps per block of the unsuffixed and `_sm` symbols.
+const MQA_FWD_WARPS_LARGE: usize = 4;
+const MQA_FWD_WARPS_SMALL: usize = 2;
 
-/// Pick the MQA/GQA forward block config that fits this device's opt-in shared
-/// memory. Returns `(block_m, block_n, use_sm_kernel)`; `use_sm_kernel` selects
-/// the `_sm`-suffixed kernel symbol, and `block_m` is the launcher's `block_dim.x`.
-///
-/// `elem_bytes` is the shared-memory ELEMENT size, not always the tensor dtype
-/// size: `mqa_gqa_fwd_impl` stages its tiles in the tensor dtype for F32/F16/
-/// BF16, but dequantizes FP8 into `float`, so FP8 needs 4 bytes per element,
-/// not 1.
-///
-/// Two independent gates, in order:
-///
-/// 1. Shared-memory CAPABILITY (hard): the large config is only a candidate when
-///    it fits `device_max_smem()`. Unchanged from before `seq_len_q` was a
-///    factor — if the large config does not fit, the small one is tried, and if
-///    neither fits this errors.
-/// 2. A `seq_len_q` PERFORMANCE rule (soft, measured): the grid launches
-///    `seq_len_q.div_ceil(block_m)` row tiles per (batch, head); the kernel does
-///    a full `block_m`-row tile of work regardless of how many rows are real.
-///    When the large config fits but `seq_len_q` is small, most of its rows go
-///    to waste; the small config wastes fewer. Measured on this forward path
-///    (head_dim 64, F32, causal, a fixed long `seq_len_k`, sweeping `seq_len_q`
-///    and batch): wherever this boundary fires, the small tile wins at both
-///    batch 1 and batch 8, never loses, by a wide margin at the shortest
-///    queries narrowing toward the boundary. The cause is row waste, not
-///    device fill — the win persists at batch 8, where the large tile's grid
-///    already fills the device on its own. Widening the boundary to
-///    `2 * small_block_m` was measured and rejected: it wins at batch 1 but
-///    loses at batch 8, because at that width the trade stops being about row
-///    waste and starts depending on device fill — batch 1 underfills the
-///    device with the large tile, so more/smaller blocks help, while batch 8
-///    already fills it and the small tile's extra K-loop iterations dominate.
-///    So the boundary stays at `small_block_m`, which wins or ties at every
-///    batch measured. A wider rule would need to consult the device, e.g.
-///    comparing `batch * num_heads * seq_len_q.div_ceil(large_block_m)`
-///    against `compute_units` the way `decode_split.rs` does — that is the
-///    next step for the batch-1 win still on the table, not a larger constant.
-///    This step only ever downgrades large -> small, only when a small config
-///    exists for this head_dim and it also fits, and never overrides gate 1.
-pub(super) fn mqa_fwd_block_config(
-    head_dim: usize,
-    elem_bytes: usize,
-    seq_len_q: usize,
-) -> Result<(usize, usize, bool)> {
-    let max_smem = device_max_smem();
-
-    if let Some((bm, bn)) = mqa_fwd_block_config_large(head_dim)
-        && compute_smem(bm, bn, head_dim, elem_bytes) <= max_smem
-    {
-        if let Some((small_bm, small_bn)) = mqa_fwd_block_config_small(head_dim)
-            && seq_len_q <= small_bm
-            && compute_smem(small_bm, small_bn, head_dim, elem_bytes) <= max_smem
-        {
-            return Ok((small_bm, small_bn, true));
-        }
-        return Ok((bm, bn, false));
-    }
-    if let Some((bm, bn)) = mqa_fwd_block_config_small(head_dim)
-        && compute_smem(bm, bn, head_dim, elem_bytes) <= max_smem
-    {
-        return Ok((bm, bn, true));
-    }
-
-    let reason = match mqa_fwd_block_config_small(head_dim) {
-        Some((bm, bn)) => format!(
-            "MQA/GQA forward for head_dim={} needs {} bytes of shared memory \
-             (smallest block config BLOCK_M={}, BLOCK_N={}, {}-byte elements) but this GPU \
-             allows at most {} bytes per block",
-            head_dim,
-            compute_smem(bm, bn, head_dim, elem_bytes),
-            bm,
-            bn,
-            elem_bytes,
-            max_smem
-        ),
-        None => format!(
-            "MQA/GQA kernels support head_dim 32/64/128, got {}",
-            head_dim
-        ),
-    };
-    Err(Error::InvalidArgument {
-        arg: "head_dim",
-        reason,
+fn mqa_fwd_tile_for(head_dim: usize, warps: usize, small: bool) -> Option<MqaFwdTile> {
+    let lanes = mqa_fwd_lanes_per_row(head_dim)?;
+    Some(MqaFwdTile {
+        rows: warps * (32 / lanes) * MQA_FWD_ROWS_PER_GROUP,
+        threads: warps * 32,
+        block_n: MQA_FWD_BLOCK_N,
+        small,
     })
+}
+
+/// Dynamic shared memory of the forward kernel: K and V tiles staged as f32,
+/// whatever the tensor dtype.
+pub(super) fn mqa_fwd_smem_bytes(tile: MqaFwdTile, head_dim: usize) -> usize {
+    2 * tile.block_n * head_dim * 4
+}
+
+/// Four-warp blocks per compute unit below which the two-warp tile is used.
+///
+/// Both symbols run the same kernel; they differ only in warps per block, so
+/// in rows per block. The kernel keeps Q and O in registers and stages only
+/// K/V, so shared memory never decides this. Two things trade: the four-warp
+/// tile amortizes each staged K/V tile over twice the rows, while the
+/// two-warp tile doubles the block count, which balances the last wave of
+/// the grid (causal blocks differ in work) and fills an underfilled device.
+/// `examples/cuda_short_query_profile.rs --prefill` measured the crossover
+/// between these two effects: below this many four-warp blocks per unit the
+/// two-warp tile wins or ties, above it the four-warp tile does.
+const MQA_FWD_SMALL_TILE_MAX_BLOCKS_PER_UNIT: usize = 8;
+
+/// Pick the forward tile for this shape. The grid has
+/// `batch_heads * seq_len_q.div_ceil(rows)` blocks; see
+/// [`MQA_FWD_SMALL_TILE_MAX_BLOCKS_PER_UNIT`] for the rule.
+pub(super) fn mqa_fwd_tile(
+    head_dim: usize,
+    seq_len_q: usize,
+    batch_heads: usize,
+    compute_units: usize,
+) -> Result<MqaFwdTile> {
+    let large = mqa_fwd_tile_for(head_dim, MQA_FWD_WARPS_LARGE, false);
+    let small = mqa_fwd_tile_for(head_dim, MQA_FWD_WARPS_SMALL, true);
+    let (Some(large), Some(small)) = (large, small) else {
+        return Err(Error::InvalidArgument {
+            arg: "head_dim",
+            reason: format!(
+                "MQA/GQA kernels support head_dim 32/64/128, got {}",
+                head_dim
+            ),
+        });
+    };
+    let large_blocks = batch_heads * seq_len_q.div_ceil(large.rows);
+    if large_blocks < compute_units * MQA_FWD_SMALL_TILE_MAX_BLOCKS_PER_UNIT {
+        return Ok(small);
+    }
+    Ok(large)
 }
 
 /// Block config of the unsuffixed `mqa_gqa_bwd_{head_dim}_{dtype}` kernels.
@@ -153,9 +131,9 @@ fn mqa_bwd_block_config_small(head_dim: usize) -> Option<(usize, usize)> {
 /// memory. Returns `(block_m, block_n, use_sm_kernel)`; `use_sm_kernel` selects
 /// the `_sm`-suffixed kernel symbol.
 ///
-/// [`mqa_fwd_block_config`] is NOT usable here: the forward stages in the tensor
-/// dtype with `head_dim + 1` padding, while the backward always stages 4 tiles of
-/// f32 with no padding, which is larger at every supported head_dim.
+/// [`mqa_fwd_tile`] is NOT usable here: the forward stages only K/V and keeps
+/// Q/O in registers, while the backward stages 4 tiles of f32, which can
+/// exceed a small opt-in limit.
 pub(super) fn mqa_bwd_block_config(head_dim: usize) -> Result<(usize, usize, bool)> {
     let max_smem = device_max_smem();
 
@@ -198,9 +176,8 @@ pub(super) fn mqa_bwd_block_config(head_dim: usize) -> Result<(usize, usize, boo
 /// or completely handle this shape" — not a performance judgment call:
 ///
 /// - `head_dim ∈ {32, 64, 128}`: the exact template set `.cu` instantiates.
-///   See `mqa_fwd_block_config_large` / `mqa_fwd_block_config_small` in
-///   this file, which mirror those instantiations. Any other head_dim has no
-///   kernel symbol to call.
+///   See `mqa_fwd_lanes_per_row` in this file, which mirrors those
+///   instantiations. Any other head_dim has no kernel symbol to call.
 /// - `num_heads.is_multiple_of(num_kv_heads)`: the kernel maps
 ///   `kv_head_idx = q_head_idx / (num_heads / num_kv_heads)`. When that
 ///   division isn't exact, the mapping reads past the end of the KV heads.
@@ -239,94 +216,43 @@ pub fn should_use_mqa_gqa(num_heads: usize, num_kv_heads: usize, head_dim: usize
 }
 
 #[cfg(test)]
-mod mqa_fwd_block_config_tests {
+mod mqa_fwd_tile_tests {
     use super::*;
-    use numr::runtime::cuda::is_cuda_available;
 
-    // elem_bytes=4 (F32) for all cases below. Every supported head_dim (32,
-    // 64, 128) has both a large and a small config here, unlike the flash
-    // path, so there is no "no small config" case for this kernel family.
-
-    /// Same gate the CUDA integration tests use: the `cuda` feature can be on
-    /// while no device is present, and the suite must skip, not fail.
-    fn require_cuda() -> bool {
-        if !is_cuda_available() {
-            eprintln!("CUDA feature enabled but runtime unavailable, skipping");
-            return false;
-        }
-        true
+    #[test]
+    fn underfilled_grid_takes_the_two_warp_tile() {
+        // 16 heads, 100 rows: 32 four-warp blocks over 40 units.
+        let tile = mqa_fwd_tile(128, 100, 16, 40).unwrap();
+        assert!(tile.small);
+        assert_eq!(tile.threads, 64);
+        assert_eq!(tile.rows, 32);
     }
 
     #[test]
-    fn short_seq_len_q_prefers_small_config_when_both_fit() {
-        if !require_cuda() {
-            return;
-        }
-        let (large_bm, large_bn) =
-            mqa_fwd_block_config_large(32).expect("head_dim 32 has a large config");
-        let (small_bm, small_bn) =
-            mqa_fwd_block_config_small(32).expect("head_dim 32 has a small config");
-        let max_smem = device_max_smem();
-        if compute_smem(large_bm, large_bn, 32, 4) > max_smem
-            || compute_smem(small_bm, small_bn, 32, 4) > max_smem
-        {
-            eprintln!("device shared memory too small for this precondition, skipping");
-            return;
-        }
-        let (block_m, _block_n, use_sm_kernel) = mqa_fwd_block_config(32, 4, 2).unwrap();
-        assert!(use_sm_kernel);
-        assert_eq!(block_m, small_bm);
+    fn filled_grid_keeps_the_four_warp_tile() {
+        // 16 heads, 4096 rows: 1024 four-warp blocks over 40 units.
+        let tile = mqa_fwd_tile(128, 4096, 16, 40).unwrap();
+        assert!(!tile.small);
+        assert_eq!(tile.threads, 128);
+        assert_eq!(tile.rows, 64);
     }
 
     #[test]
-    fn long_seq_len_q_keeps_large_config() {
-        if !require_cuda() {
-            return;
-        }
-        let (large_bm, large_bn) =
-            mqa_fwd_block_config_large(32).expect("head_dim 32 has a large config");
-        if compute_smem(large_bm, large_bn, 32, 4) > device_max_smem() {
-            eprintln!("device shared memory too small for this precondition, skipping");
-            return;
-        }
-        let (block_m, _block_n, use_sm_kernel) = mqa_fwd_block_config(32, 4, 4096).unwrap();
-        assert!(!use_sm_kernel);
-        assert_eq!(block_m, large_bm);
+    fn rows_follow_lanes_per_row() {
+        // G = 4 at head_dim 64: 8 groups of 4 rows per warp.
+        assert_eq!(mqa_fwd_tile(64, 4096, 64, 1).unwrap().rows, 128);
+        assert_eq!(mqa_fwd_tile(32, 4096, 64, 1).unwrap().rows, 128);
+        assert_eq!(mqa_fwd_tile(128, 4096, 64, 1).unwrap().rows, 64);
     }
 
     #[test]
-    fn smem_forcing_to_small_config_is_unchanged_by_seq_len_q() {
-        if !require_cuda() {
-            return;
-        }
-        // head_dim=128 large needs ~129KB, over the opt-in limit on many GPUs
-        // (e.g. consumer Ampere's ~100KB) even where it fits on others — so
-        // this precondition, not the seq_len_q heuristic, is what is under
-        // test: capability forcing must win regardless of seq_len_q.
-        let (large_bm, large_bn) =
-            mqa_fwd_block_config_large(128).expect("head_dim 128 has a large config");
-        let (small_bm, small_bn) =
-            mqa_fwd_block_config_small(128).expect("head_dim 128 has a small config");
-        let max_smem = device_max_smem();
-        if compute_smem(large_bm, large_bn, 128, 4) <= max_smem {
-            eprintln!("device shared memory fits the large config here, skipping");
-            return;
-        }
-        if compute_smem(small_bm, small_bn, 128, 4) > max_smem {
-            eprintln!("device shared memory too small for the small config too, skipping");
-            return;
-        }
-        // A long seq_len_q would normally keep the large config, but it does
-        // not fit here, so the small config is forced either way.
-        let (block_m, _block_n, use_sm_kernel) = mqa_fwd_block_config(128, 4, 4096).unwrap();
-        assert!(use_sm_kernel);
-        assert_eq!(block_m, small_bm);
+    fn smem_is_two_f32_tiles() {
+        let tile = mqa_fwd_tile(128, 4096, 64, 1).unwrap();
+        assert_eq!(mqa_fwd_smem_bytes(tile, 128), 2 * 16 * 128 * 4);
     }
 
     #[test]
-    fn unsupported_head_dim_still_errors() {
-        // No config exists for head_dim=999 at any seq_len_q, so this must
-        // error regardless of the device's shared-memory limit.
-        assert!(mqa_fwd_block_config(999, 4, 4096).is_err());
+    fn unsupported_head_dim_errors() {
+        assert!(mqa_fwd_tile(999, 4096, 1, 1).is_err());
     }
 }

@@ -28,11 +28,13 @@ pub(crate) use super::flash_utils::set_smem_attribute;
 
 /// Longest non-causal query sequence routed through
 /// [`flash_decode::decode_attention_fwd_folded`]. The fold re-reads K/V once
-/// per query row, so its cost grows with `S_q * S_k` while the tiled kernels
-/// reuse a staged K/V tile across `block_m` rows. This is the top of the range
-/// `examples/cuda_short_query_profile.rs` swept, where the fold still led;
-/// past it the tiled kernels run unmeasured, so they keep the shape.
-const SHORT_QUERY_FOLD_MAX: usize = 2048;
+/// per query row, so its cost grows with `S_q * S_k`, while the MQA/GQA
+/// kernel reuses a staged K/V tile across every row of a block and pays for
+/// the block's full row count even when most rows are past `S_q`. The fold
+/// leads only while that row waste dominates; `examples/cuda_short_query_profile.rs`
+/// measures the crossover, and past this length the dedicated kernel leads
+/// at both F32 and BF16.
+const SHORT_QUERY_FOLD_MAX: usize = 16;
 
 impl FlashAttentionOps<CudaRuntime> for CudaClient {
     fn flash_attention_fwd(
@@ -67,8 +69,8 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         }
 
         // Short non-causal query sequence: run as decode with the query axis
-        // folded into the head axis. The tiled kernels below give one thread
-        // per query row and leave the rest of each block idle at this length;
+        // folded into the head axis. The tiled kernels below pay for a whole
+        // block of rows, most of them empty at this length;
         // `examples/cuda_short_query_profile.rs` measures the fold ahead at
         // every length up to the bound. It reads K/V with the stride the
         // decode path already takes, so it goes before the narrowing copy.

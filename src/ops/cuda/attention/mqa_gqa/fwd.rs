@@ -15,9 +15,10 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::super::flash::flash_utils::{compute_smem, set_smem_attribute};
-use super::block_config::mqa_fwd_block_config;
+use super::super::flash::flash_utils::set_smem_attribute;
+use super::block_config::{mqa_fwd_smem_bytes, mqa_fwd_tile};
 use crate::ops::cuda::kernels::{self, MQA_GQA_MODULE};
+use numr::runtime::cuda::CudaDevice;
 
 /// MQA/GQA forward pass — dedicated kernel, used at every capable ratio.
 #[allow(clippy::too_many_arguments)]
@@ -61,25 +62,37 @@ pub fn mqa_gqa_fwd(
         }
     };
 
-    // `mqa_gqa_fwd_impl` stages the Q/K/V tiles in the TENSOR dtype for
-    // F32/F16/BF16 and converts to float on read, so the shared-memory element
-    // size is the dtype size. (FP8 stages in f32 instead — 4 bytes, not 1 — but
-    // this launcher rejects FP8 above.)
-    let elem_bytes = dtype.size_in_bytes();
-    let (block_m, block_n, use_sm_kernel) = mqa_fwd_block_config(head_dim, elem_bytes, seq_len_q)?;
+    let device = q.device();
+    let device_index = device.id();
 
-    let variant = if use_sm_kernel { "_sm" } else { "" };
+    // The kernel reads Q and writes O as float4 when T is f32. A contiguous
+    // [B, H, S, D] tensor at a supported head_dim keeps every row 16-byte
+    // aligned as long as its base is; `validate_qkv` already required
+    // contiguity, so this only guards the base pointer.
+    if dtype == DType::F32 {
+        for (name, ptr) in [("q", q.ptr()), ("k", k.ptr()), ("v", v.ptr())] {
+            if !ptr.is_multiple_of(16) {
+                return Err(Error::InvalidArgument {
+                    arg: name,
+                    reason: "MQA/GQA f32 forward needs 16-byte aligned tensors".into(),
+                });
+            }
+        }
+    }
+
+    let compute_units = CudaDevice::new(device_index).profile().compute_units as usize;
+    let tile = mqa_fwd_tile(head_dim, seq_len_q, batch_size * num_heads, compute_units)?;
+
+    let variant = if tile.small { "_sm" } else { "" };
     let kernel_name = format!("mqa_gqa_fwd_{}_{}{}", head_dim, dtype_suffix, variant);
 
-    let device = q.device();
     let output =
         Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q, head_dim], dtype, device)?;
     let lse =
         Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
 
-    let smem_size = compute_smem(block_m, block_n, head_dim, elem_bytes);
+    let smem_size = mqa_fwd_smem_bytes(tile, head_dim);
 
-    let device_index = device.id();
     let module = kernels::get_or_load_module(client.context(), device_index, MQA_GQA_MODULE)?;
     let func = kernels::get_kernel_function(&module, &kernel_name)?;
     set_smem_attribute(&func, smem_size)?;
@@ -87,10 +100,10 @@ pub fn mqa_gqa_fwd(
     let cfg = LaunchConfig {
         grid_dim: (
             (batch_size * num_heads) as u32,
-            seq_len_q.div_ceil(block_m) as u32,
+            seq_len_q.div_ceil(tile.rows) as u32,
             1,
         ),
-        block_dim: (block_m as u32, 1, 1),
+        block_dim: (tile.threads as u32, 1, 1),
         shared_mem_bytes: smem_size as u32,
     };
 

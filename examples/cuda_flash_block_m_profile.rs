@@ -35,7 +35,7 @@
 //!
 //! `seq_len_q == 1` is excluded from both sweeps: `flash.rs`'s
 //! `flash_attention_fwd` routes `seq_len_q == 1` to the single-token decode
-//! kernel (`flash_decode::decode_attention_fwd`) for `head_dim` 64/128,
+//! kernel (`flash_decode::decode_attention_fwd`) at every `head_dim`,
 //! which is a different kernel than either sweep measures. Both sweeps start
 //! at 2 so every shape is unambiguously prefill.
 //!
@@ -44,7 +44,7 @@
 //! `flash_attention_fwd` (`src/ops/cuda/attention/flash.rs`) has three
 //! dispatch gates ahead of the general kernel:
 //!
-//! - Decode: only `head_dim` 64/128 and `seq_len_q == 1`. Avoided above.
+//! - Decode: only `seq_len_q == 1`. Avoided above.
 //! - Flash-v3 (Hopper): only when `num_kv_heads == num_heads`.
 //! - MQA/GQA dedicated kernels (`mqa_gqa::should_use_mqa_gqa`): admits ANY
 //!   `head_dim ∈ {32, 64, 128}` with `num_heads` divisible by `num_kv_heads`

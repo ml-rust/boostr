@@ -16,7 +16,7 @@
 //!
 //! Default mode sweeps `S_q = S_k` through both entries and prints host wall
 //! time per call, bracketed by a device sync, so the fold's upper bound on
-//! `S_q` (`SHORT_QUERY_FOLD_MAX`) is a measurement, not a guess.
+//! `S_q` (`short_query_fold_max`) is a measurement, not a guess.
 //!
 //! `--prefill [--causal]` runs only `mqa_gqa_fwd` over the LM-prefill shapes
 //! (H=16, H_kv=2, D=128, B in {1, 2}, S in {64, 256, 1024, 2048}, F32 and
@@ -42,6 +42,19 @@
 //!     --csv ./target/release/examples/cuda_short_query_profile --flash --causal
 //! ```
 //!
+//! `--decode [--d N] [--window N] [--sq N]` runs `flash_attention_fwd` over
+//! the decode shape (B=1, H=32, H_kv=8, `S_q = 1`, S_k in {512, 2048, 8192},
+//! F32 and BF16) at one head_dim (`--d`, default 128) and one window
+//! (`--window`, default 0). `--sq N` widens the query for the short-query
+//! fold. Which kernel runs is the dispatch under test, so the ncu filter
+//! takes both families and the rows per shape are summed:
+//!
+//! ```text
+//! ncu --kernel-name regex:"flash_attention_fwd|decode_attention" \
+//!     --metrics gpu__time_duration.sum --csv \
+//!     ./target/release/examples/cuda_short_query_profile --decode --d 96
+//! ```
+//!
 //! Each shape's launches are preceded by a print of the shape, so the ncu
 //! rows can be matched to shapes by order.
 
@@ -63,6 +76,12 @@ fn main() {
     let causal = args.iter().any(|a| a == "--causal");
     let prefill = args.iter().any(|a| a == "--prefill");
     let flash = args.iter().any(|a| a == "--flash");
+    let decode = args.iter().any(|a| a == "--decode");
+    let head_dim_override = args
+        .iter()
+        .position(|a| a == "--d")
+        .and_then(|i| args.get(i + 1))
+        .map(|w| w.parse::<usize>().expect("--d takes a head dimension"));
     let seq_len_q_override = args
         .iter()
         .position(|a| a == "--sq")
@@ -81,6 +100,45 @@ fn main() {
     let num_heads = 16usize;
     let num_kv_heads = 2usize;
     let head_dim = 128usize;
+
+    if decode {
+        let heads = 32usize;
+        let kv_heads = 8usize;
+        let head_dim = head_dim_override.unwrap_or(128);
+        let seq_len_q = seq_len_q_override.unwrap_or(1);
+        for &dtype in &[DType::F32, DType::BF16] {
+            for &seq_len in &[512usize, 2048, 8192] {
+                let q = client
+                    .rand(&[1, heads, seq_len_q, head_dim], dtype)
+                    .unwrap();
+                let k = client
+                    .rand(&[1, kv_heads, seq_len, head_dim], dtype)
+                    .unwrap();
+                let v = client
+                    .rand(&[1, kv_heads, seq_len, head_dim], dtype)
+                    .unwrap();
+                client.synchronize();
+                println!(
+                    "shape {dtype:?} D={head_dim} H={heads} Hkv={kv_heads} Sq={seq_len_q} S={seq_len} causal={causal} window={window}"
+                );
+                let start = std::time::Instant::now();
+                for _ in 0..ITERS {
+                    let out = client
+                        .flash_attention_fwd(
+                            &q, &k, &v, heads, kv_heads, head_dim, causal, window, None,
+                        )
+                        .unwrap();
+                    std::hint::black_box(&out);
+                }
+                client.synchronize();
+                println!(
+                    "  host {:>8.1} us/iter",
+                    start.elapsed().as_secs_f64() * 1e6 / ITERS as f64
+                );
+            }
+        }
+        return;
+    }
 
     if flash {
         let run = |dtype: DType,

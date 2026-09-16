@@ -9,15 +9,20 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::super::decode_split::{decode_dtype_suffix, decode_split_count};
+use super::super::decode_split::{
+    DECODE_HEAD_DIMS, decode_dtype_suffix, decode_kv_span, decode_split_count,
+    decode_supports_head_dim,
+};
 use super::flash_utils::AttentionParams;
 
 /// Kernel name stem for a supported decode `(head_dim, dtype)`.
 fn decode_kernel_stem(head_dim: usize, dtype: DType) -> Result<String> {
-    if head_dim != 64 && head_dim != 128 {
+    if !decode_supports_head_dim(head_dim) {
         return Err(Error::InvalidArgument {
             arg: "head_dim",
-            reason: format!("decode attention supports head_dim 64/128, got {head_dim}"),
+            reason: format!(
+                "decode attention supports head_dim {DECODE_HEAD_DIMS:?}, got {head_dim}"
+            ),
         });
     }
     Ok(format!(
@@ -33,6 +38,12 @@ fn decode_kernel_stem(head_dim: usize, dtype: DType) -> Result<String> {
 /// into slices and a combine pass merges their partial softmax statistics —
 /// see [`decode_split_count`].
 ///
+/// `window_size` follows the flash contract (`0` = unlimited). The single
+/// query sits at position `seq_len_k - 1`, so a window keeps the last
+/// `min(window_size, seq_len_k)` keys; the kernel starts its key loop there
+/// and the split count is sized to that span, not the full sequence. The
+/// causal flag has no effect at `seq_len_q == 1` and is not passed.
+///
 /// Non-graph path: seq_len_k passed as plain i32 kernel arg (zero overhead).
 pub(super) fn decode_attention_fwd(
     client: &CudaClient,
@@ -41,6 +52,7 @@ pub(super) fn decode_attention_fwd(
     v: &Tensor<CudaRuntime>,
     p: &AttentionParams,
     kv_seq_stride: usize,
+    window_size: usize,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let device = q.device();
     let device_index = device.id();
@@ -60,7 +72,12 @@ pub(super) fn decode_attention_fwd(
     let lse = Tensor::<CudaRuntime>::empty(&[p.batch_size, p.num_heads, 1], DType::F32, device)?;
 
     let base_blocks = p.batch_size * p.num_heads;
-    let splits = decode_split_count(device_index, base_blocks, p.seq_len_k);
+    let splits = decode_split_count(
+        device_index,
+        base_blocks,
+        decode_kv_span(p.seq_len_k, window_size),
+        p.head_dim,
+    );
 
     let q_ptr = q.ptr();
     let k_ptr = k.ptr();
@@ -71,6 +88,7 @@ pub(super) fn decode_attention_fwd(
     let nkv_i32 = p.num_kv_heads as i32;
     let sk_i32 = p.seq_len_k as i32;
     let stride_i32 = kv_seq_stride as i32;
+    let window_i32 = window_size as i32;
     let scale = (p.head_dim as f32).sqrt().recip();
 
     if splits > 1 {
@@ -101,6 +119,7 @@ pub(super) fn decode_attention_fwd(
             builder.arg(&sk_i32);
             builder.arg(&stride_i32);
             builder.arg(&scale);
+            builder.arg(&window_i32);
             builder.arg(&splits_i32);
             builder.launch(split_cfg).map_err(|e| Error::KernelError {
                 reason: format!("decode_attention split kernel launch failed: {:?}", e),
@@ -149,6 +168,7 @@ pub(super) fn decode_attention_fwd(
         builder.arg(&sk_i32);
         builder.arg(&stride_i32);
         builder.arg(&scale);
+        builder.arg(&window_i32);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("decode_attention kernel launch failed: {:?}", e),
         })?;
@@ -195,7 +215,7 @@ pub(super) fn decode_attention_fwd_folded(
         block_n: p.block_n,
         use_sm_kernel: p.use_sm_kernel,
     };
-    let (output, lse) = decode_attention_fwd(client, &q_folded, k, v, &folded, kv_seq_stride)?;
+    let (output, lse) = decode_attention_fwd(client, &q_folded, k, v, &folded, kv_seq_stride, 0)?;
     let output = output.reshape(&[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim])?;
     let lse = lse.reshape(&[p.batch_size, p.num_heads, p.seq_len_q])?;
     Ok((output, lse))
@@ -262,8 +282,14 @@ pub fn decode_attention_graph_fwd(
     // `begin < end` guard and the combine kernel's `l <= 0` guard both skip them
     // for free. Consequence: at early decode steps, with the cache nearly empty,
     // most slices do no work — correct, but the grid stays sized for a full cache
-    // every step, not just the steps that need it.
-    let splits = decode_split_count(device_index, base_blocks, kv_capacity);
+    // every step, not just the steps that need it. A window caps the span the
+    // kernel walks at any step, so it caps the grid too.
+    let splits = decode_split_count(
+        device_index,
+        base_blocks,
+        decode_kv_span(kv_capacity, window_size),
+        head_dim,
+    );
 
     if splits > 1 {
         // Unnormalized per-slice accumulators plus their (m, l) statistics.
@@ -385,6 +411,48 @@ mod tests {
             .zip(&b)
             .map(|(x, y)| (x - y).abs())
             .fold(0.0, f32::max)
+    }
+
+    /// Single-query decode at every head_dim the kernel instantiates, with and
+    /// without a window, on both grid shapes, against the composed Tensor
+    /// path. `causal` is run both ways: at `S_q == 1` the query is the newest
+    /// position, so the flag must not change the answer.
+    #[test]
+    fn decode_matches_standard_attention() {
+        let Some(cuda) = cuda_setup() else { return };
+        let (client, device) = (&cuda.client, &cuda.device);
+        for &head_dim in &[32usize, 64, 96, 128, 192, 256] {
+            for &(seq_k, window) in &[(40usize, 0usize), (40, 12), (700, 0), (700, 450)] {
+                for &causal in &[false, true] {
+                    let q = filled(&[2, 8, 1, head_dim], 0.1, device);
+                    let k = filled(&[2, 2, seq_k, head_dim], 0.2, device);
+                    let v = filled(&[2, 2, seq_k, head_dim], 0.3, device);
+
+                    let (out, lse) = client
+                        .flash_attention_fwd(&q, &k, &v, 8, 2, head_dim, causal, window, None)
+                        .expect("flash_attention_fwd");
+                    let cfg = StandardAttnConfig {
+                        num_heads: 8,
+                        num_kv_heads: 2,
+                        causal,
+                        window_size: window,
+                    };
+                    let (ref_out, ref_lse) = standard_attention_fwd(client, &q, &k, &v, cfg)
+                        .expect("standard_attention_fwd");
+
+                    let out_diff = max_abs_diff(&out, &ref_out);
+                    let lse_diff = max_abs_diff(&lse, &ref_lse);
+                    assert!(
+                        out_diff < 1e-4,
+                        "output diverges at D={head_dim} Sk={seq_k} window={window} causal={causal}: {out_diff}"
+                    );
+                    assert!(
+                        lse_diff < 1e-4,
+                        "lse diverges at D={head_dim} Sk={seq_k} window={window} causal={causal}: {lse_diff}"
+                    );
+                }
+            }
+        }
     }
 
     /// Every geometry the fold admits: GQA, several query rows per head, and

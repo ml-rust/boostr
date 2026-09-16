@@ -29,8 +29,19 @@
 // when `j + window_size <= i`, where `i` is the query's absolute position. Decode
 // is single-token, so `i == seq_len_k - 1` and the surviving keys are exactly
 // `j >= seq_len_k - window_size` — a contiguous suffix, so the loop just starts
-// later. Matches the kernel contract in
-// ops/impl_generic/attention/flash_standard.rs.
+// later. The split kernel cuts that suffix, not the whole sequence, so every
+// slice does work. The LSE is the log-sum-exp over the surviving keys, which is
+// what a masked softmax yields too (a masked key contributes `exp(-inf) = 0`).
+// Matches the kernel contract in ops/impl_generic/attention/flash_standard.rs.
+//
+// Causal is not an argument: the single query is the newest position and sees
+// every key up to itself, so the causal mask admits the same keys as no mask.
+//
+// Head dims: every multiple of DECODE_LANES the flash family serves (32 through
+// 256). A block is `D` threads, one warp per DECODE_LANES dimensions, so the
+// block is a single warp at 32 and eight warps at 256; shared memory is
+// `D * D / DECODE_LANES` floats for the warp merge and stays under the default
+// limit at every D.
 
 #include "../dtype_traits.cuh"
 #include "decode_warp_merge.cuh"
@@ -264,16 +275,17 @@ __device__ __forceinline__ void decode_attention_combine_impl(
 // Entry points, one set per (head_dim, dtype)
 // ============================================================================
 
-// The non-graph variants are only dispatched for window_size == 0 (see
-// ops/cuda/attention/flash.rs); windowed non-graph decode goes to flash_v2.
+// Non-graph and graph variants take the same arguments apart from
+// `seq_len_k`: a plain int here, a device pointer in the `_graph` entries.
 #define DECODE_ATTENTION_KERNELS(D, SUFFIX, T)                                     \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX(                        \
     const T* __restrict__ Q, const T* __restrict__ K, const T* __restrict__ V,     \
     T* __restrict__ O, float* __restrict__ LSE,                                    \
-    int num_heads, int num_kv_heads, int seq_len_k, int kv_seq_stride, float scale  \
+    int num_heads, int num_kv_heads, int seq_len_k, int kv_seq_stride,             \
+    float scale, int window_size                                                   \
 ) {                                                                                \
     decode_attention_impl<T, D>(Q, K, V, O, LSE, num_heads, num_kv_heads,          \
-                                seq_len_k, kv_seq_stride, scale, 0);               \
+                                seq_len_k, kv_seq_stride, scale, window_size);     \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_graph(                \
@@ -290,11 +302,11 @@ extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split(             
     const T* __restrict__ Q, const T* __restrict__ K, const T* __restrict__ V,     \
     float* __restrict__ partial_o, float* __restrict__ partial_ml,                 \
     int num_heads, int num_kv_heads, int seq_len_k, int kv_seq_stride,             \
-    float scale, int num_splits                                                    \
+    float scale, int window_size, int num_splits                                   \
 ) {                                                                                \
     decode_attention_split_impl<T, D>(Q, K, V, partial_o, partial_ml, num_heads,   \
                                       num_kv_heads, seq_len_k, kv_seq_stride,      \
-                                      scale, 0, num_splits);                       \
+                                      scale, window_size, num_splits);             \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split_graph(          \
@@ -315,9 +327,16 @@ extern "C" __global__ void decode_attention_##D##_##SUFFIX##_combine(           
     decode_attention_combine_impl<T, D>(partial_o, partial_ml, O, LSE, num_splits);\
 }
 
-DECODE_ATTENTION_KERNELS(64, fp32, float)
-DECODE_ATTENTION_KERNELS(128, fp32, float)
-DECODE_ATTENTION_KERNELS(64, fp16, __half)
-DECODE_ATTENTION_KERNELS(128, fp16, __half)
-DECODE_ATTENTION_KERNELS(64, bf16, __nv_bfloat16)
-DECODE_ATTENTION_KERNELS(128, bf16, __nv_bfloat16)
+// One set per head_dim the flash family validates; the host side lists the
+// same set in ops/cuda/attention/decode_split.rs (`DECODE_HEAD_DIMS`).
+#define DECODE_ATTENTION_DTYPE(SUFFIX, T)      \
+    DECODE_ATTENTION_KERNELS(32, SUFFIX, T)    \
+    DECODE_ATTENTION_KERNELS(64, SUFFIX, T)    \
+    DECODE_ATTENTION_KERNELS(96, SUFFIX, T)    \
+    DECODE_ATTENTION_KERNELS(128, SUFFIX, T)   \
+    DECODE_ATTENTION_KERNELS(192, SUFFIX, T)   \
+    DECODE_ATTENTION_KERNELS(256, SUFFIX, T)
+
+DECODE_ATTENTION_DTYPE(fp32, float)
+DECODE_ATTENTION_DTYPE(fp16, __half)
+DECODE_ATTENTION_DTYPE(bf16, __nv_bfloat16)

@@ -5,15 +5,24 @@
 //! Head dimensions: 32, 64, 96, 128, 192, 256.
 //!
 //! `flash_attention_fwd` tries the specialised paths in order and falls
-//! through to the general `flash_v2.cu` kernel. What reaches that kernel:
+//! through to the general `flash_v2.cu` kernel.
 //!
-//! - head_dim 96, 192 or 256, at every dtype, query length, causal setting,
-//!   window and head ratio (no dedicated kernel instantiates them),
-//! - `window_size > 0` at every head_dim, including `seq_len_q == 1`
-//!   (the decode kernels have no window path),
+//! `seq_len_q == 1` in F32/F16/BF16 always takes the decode kernel
+//! (`decode_attention.cu`): every head_dim `validate_qkv` admits, any window,
+//! either causal setting. The single query is the newest position, so the
+//! causal mask admits every key and the flag is dropped; a window keeps the
+//! last `min(window_size, seq_len_k)` keys, which the kernel walks as a key
+//! range. FP8 decode has no such kernel and falls through.
+//!
+//! What reaches the general kernel:
+//!
+//! - head_dim 96, 192 or 256 at `seq_len_q > 1`, at every dtype, causal
+//!   setting, window and head ratio (no dedicated prefill kernel instantiates
+//!   them),
+//! - `window_size > 0` at every head_dim and `seq_len_q > 1` (the prefill
+//!   kernels have no window path),
 //! - head_dim 32, 64 or 128 with `window_size == 0` on a device below sm_80
-//!   (the MQA/GQA family is gated on `caps.bf16`),
-//! - head_dim 32 at `seq_len_q == 1` (the decode kernel takes 64 and 128 only).
+//!   (the MQA/GQA family is gated on `caps.bf16`).
 //!
 //! `validate_qkv` rejects `num_heads` not divisible by `num_kv_heads` before
 //! any kernel is chosen, so that case reaches nothing.
@@ -41,14 +50,25 @@ pub use super::flash_decode::decode_attention_graph_fwd;
 pub(crate) use super::flash_utils::set_smem_attribute;
 
 /// Longest non-causal query sequence routed through
-/// [`flash_decode::decode_attention_fwd_folded`]. The fold re-reads K/V once
-/// per query row, so its cost grows with `S_q * S_k`, while the MQA/GQA
-/// kernel reuses a staged K/V tile across every row of a block and pays for
-/// the block's full row count even when most rows are past `S_q`. The fold
-/// leads only while that row waste dominates; `examples/cuda_short_query_profile.rs`
-/// measures the crossover, and past this length the dedicated kernel leads
-/// at both F32 and BF16.
-const SHORT_QUERY_FOLD_MAX: usize = 16;
+/// [`flash_decode::decode_attention_fwd_folded`] at a head dimension. The
+/// fold re-reads K/V once per query row, so its cost grows with `S_q * S_k`,
+/// while the tiled kernels reuse a staged K/V tile across every row of a
+/// block and pay for the block's full row count even when most rows are past
+/// `S_q`. The fold leads only while that row waste dominates.
+///
+/// The bound depends on which tiled kernel is the alternative: the MQA/GQA
+/// kernel at 64 and 128, the general `flash_v2.cu` kernel at 96, 192 and 256,
+/// and either at 32 depending on the head ratio. `examples/cuda_short_query_profile.rs`
+/// (`--decode --d N --sq N` against the same shape at `S_q == 1`, or the
+/// default sweep for 128) measures the crossover per head dimension; past
+/// each bound the tiled kernel leads at both F32 and BF16.
+fn short_query_fold_max(head_dim: usize) -> usize {
+    match head_dim {
+        64 | 128 => 16,
+        96 => 8,
+        _ => 4,
+    }
+}
 
 impl FlashAttentionOps<CudaRuntime> for CudaClient {
     fn flash_attention_fwd(
@@ -71,15 +91,24 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             p.seq_len_k = seq_len;
         }
 
-        // Decode path: S_q=1, use lightweight vec kernel (supports separate stride).
-        // Instantiated for F32/F16/BF16; anything else falls through to the
-        // general kernel, which tiles a one-row query and is far slower here.
+        // Decode path: S_q=1, use lightweight vec kernel (supports separate stride,
+        // window and every validated head_dim). Instantiated for F32/F16/BF16;
+        // anything else falls through to the general kernel, which tiles a
+        // one-row query and is far slower here. `causal` is not forwarded: the
+        // one query is the newest position and sees every key either way.
         if p.seq_len_q == 1
             && decode_split::decode_supports_dtype(q.dtype())
-            && (head_dim == 64 || head_dim == 128)
-            && window_size == 0
+            && decode_split::decode_supports_head_dim(head_dim)
         {
-            return flash_decode::decode_attention_fwd(self, q, k, v, &p, kv_seq_stride);
+            return flash_decode::decode_attention_fwd(
+                self,
+                q,
+                k,
+                v,
+                &p,
+                kv_seq_stride,
+                window_size,
+            );
         }
 
         // Short non-causal query sequence: run as decode with the query axis
@@ -90,9 +119,9 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         // decode path already takes, so it goes before the narrowing copy.
         if !causal
             && window_size == 0
-            && p.seq_len_q <= SHORT_QUERY_FOLD_MAX
+            && p.seq_len_q <= short_query_fold_max(head_dim)
             && decode_split::decode_supports_dtype(q.dtype())
-            && (head_dim == 64 || head_dim == 128)
+            && decode_split::decode_supports_head_dim(head_dim)
         {
             return flash_decode::decode_attention_fwd_folded(self, q, k, v, &p, kv_seq_stride);
         }

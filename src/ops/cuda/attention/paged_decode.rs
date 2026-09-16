@@ -53,7 +53,8 @@ pub(super) fn paged_decode_attention_fwd(
     // A slice boundary lands on a KV block boundary, so the sequence cannot be
     // cut into more slices than it has blocks.
     let num_kv_blocks = seq_len_k.div_ceil(block_size);
-    let splits = decode_split_count(device_index, base_blocks, seq_len_k).min(num_kv_blocks.max(1));
+    let splits = decode_split_count(device_index, base_blocks, seq_len_k, head_dim)
+        .min(num_kv_blocks.max(1));
 
     let q_ptr = q.ptr();
     let kb_ptr = k_blocks.ptr();
@@ -228,7 +229,7 @@ pub fn paged_decode_attention_fwd_graph(
     // slices do no work — correct, but the grid stays sized for a full cache
     // every step, not just the steps that need it.
     let kv_capacity = max_num_blocks * block_size;
-    let splits = decode_split_count(device_index, base_blocks, kv_capacity);
+    let splits = decode_split_count(device_index, base_blocks, kv_capacity, head_dim);
 
     if splits > 1 {
         // Unnormalized per-slice accumulators plus their (m, l) statistics, in

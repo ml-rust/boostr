@@ -38,9 +38,10 @@
 //!
 //! # Reaching `flash_v2.cu` deliberately
 //!
-//! `CudaClient::flash_attention_fwd` (`src/ops/cuda/attention/flash.rs`) gates
-//! the decode kernel, Flash v3, and the dedicated MQA/GQA kernel all on
-//! `window_size == 0`. A nonzero window therefore always falls through to
+//! `CudaClient::flash_attention_fwd` (`src/ops/cuda/attention/flash/impl_ops.rs`)
+//! takes the decode kernel only at `seq_len_q == 1`, and gates Flash v3 and
+//! the dedicated MQA/GQA kernel on `window_size == 0`. A nonzero window at
+//! `seq_len_q > 1` therefore always falls through to
 //! `flash_fwd::flash_attention_fwd_impl` — this file's target — on every GPU.
 //!
 //! # Reference

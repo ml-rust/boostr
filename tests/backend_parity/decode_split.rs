@@ -10,6 +10,13 @@
 //! Both the output and the log-sum-exp are compared: the combine pass is the
 //! only producer of a decode LSE, and a rescaling error there shows up in the
 //! LSE before it shows up in the normalized output.
+//!
+//! `seq_len_q == 1` takes the decode kernel at every head_dim the flash family
+//! validates and at any window, so the shapes below also cover 32, 96, 192 and
+//! 256 and a sliding window on both grid shapes. The CPU reference masks per
+//! key; the kernel starts its key loop at the window edge instead. Agreement on
+//! the LSE checks that the two conventions produce the same softmax statistics,
+//! which the backward consumes.
 
 use super::helpers::*;
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
@@ -18,7 +25,8 @@ use boostr::ops::traits::attention::flash::FlashAttentionOps;
 ///
 /// `kv_capacity` is the allocated KV extent; `seq_len_k` is how much of it the
 /// kernel reads. Passing a larger capacity exercises the separate KV stride,
-/// which is what a real paged-free cache uses.
+/// which is what a real paged-free cache uses. `window` follows the flash
+/// contract (`0` = unlimited).
 #[allow(clippy::too_many_arguments)]
 fn assert_decode_parity(
     label: &str,
@@ -29,6 +37,7 @@ fn assert_decode_parity(
     seq_len_k: usize,
     kv_capacity: usize,
     q_gain: f32,
+    window: usize,
 ) {
     let (cpu_client, cpu_device) = setup_cpu();
 
@@ -53,7 +62,7 @@ fn assert_decode_parity(
             num_kv_heads,
             head_dim,
             false,
-            0,
+            window,
             None,
         )
         .unwrap_or_else(|e| panic!("CPU decode failed for {label}: {e}"));
@@ -91,7 +100,7 @@ fn assert_decode_parity(
                 num_kv_heads,
                 head_dim,
                 false,
-                0,
+                window,
                 Some(seq_len_k),
             )
             .unwrap_or_else(|e| panic!("CUDA decode failed for {label}: {e}"));
@@ -133,7 +142,7 @@ fn assert_decode_parity(
                 num_kv_heads,
                 head_dim,
                 false,
-                0,
+                window,
                 None,
             )
             .unwrap_or_else(|e| panic!("WebGPU decode failed for {label}: {e}"));
@@ -159,49 +168,126 @@ fn assert_decode_parity(
 /// `(batch, head)`. This is the path that must not change.
 #[test]
 fn decode_short_sequence_takes_whole_sequence_path() {
-    assert_decode_parity("decode_short", 1, 4, 4, 64, 64, 64, 1.0);
+    assert_decode_parity("decode_short", 1, 4, 4, 64, 64, 64, 1.0, 0);
 }
 
 /// Long enough to split, with the KV length an exact multiple of the slice
 /// count, so every slice is full.
 #[test]
 fn decode_split_with_even_slices_parity() {
-    assert_decode_parity("decode_even_slices", 1, 2, 2, 128, 640, 640, 1.0);
+    assert_decode_parity("decode_even_slices", 1, 2, 2, 128, 640, 640, 1.0, 0);
 }
 
 /// KV length not divisible by the slice count, so the last slice is short. This
 /// is the bound the split kernel computes rather than reads.
 #[test]
 fn decode_split_with_ragged_last_slice_parity() {
-    assert_decode_parity("decode_ragged", 1, 3, 3, 64, 1000, 1000, 1.0);
+    assert_decode_parity("decode_ragged", 1, 3, 3, 64, 1000, 1000, 1.0, 0);
 }
 
 /// Grouped-query decode: several query heads share one KV head, so the split
 /// kernel's `kv_h` mapping is exercised alongside the slicing.
 #[test]
 fn decode_split_grouped_query_parity() {
-    assert_decode_parity("decode_gqa", 1, 8, 2, 128, 768, 768, 1.0);
+    assert_decode_parity("decode_gqa", 1, 8, 2, 128, 768, 768, 1.0, 0);
 }
 
 /// Reads a prefix of a larger allocation, so the KV stride differs from the KV
 /// length. Every slice offset is computed against the stride, not the length.
 #[test]
 fn decode_split_with_capacity_beyond_length_parity() {
-    assert_decode_parity("decode_capacity", 1, 4, 4, 64, 700, 1024, 1.0);
+    assert_decode_parity("decode_capacity", 1, 4, 4, 64, 700, 1024, 1.0, 0);
 }
 
 /// Amplified queries spread the scores across a wide range, so slices see very
 /// different running maxima and the combine pass must rescale rather than sum.
 #[test]
 fn decode_split_wide_score_range_parity() {
-    assert_decode_parity("decode_wide_scores", 1, 2, 2, 128, 896, 896, 40.0);
+    assert_decode_parity("decode_wide_scores", 1, 2, 2, 128, 896, 896, 40.0, 0);
 }
 
 /// Batch above one widens the base grid, which lowers the slice count without
 /// removing the split. Both the batch and the slice index address the partials.
 #[test]
 fn decode_split_batched_parity() {
-    assert_decode_parity("decode_batched", 3, 4, 4, 64, 512, 512, 1.0);
+    assert_decode_parity("decode_batched", 3, 4, 4, 64, 512, 512, 1.0, 0);
+}
+
+/// Window shorter than the sequence on the whole-sequence grid: the kernel
+/// starts its key loop at `seq_len_k - window` and the CPU masks the same keys.
+#[test]
+fn decode_window_whole_sequence_parity() {
+    assert_decode_parity("decode_window_short", 1, 4, 2, 64, 48, 48, 1.0, 20);
+}
+
+/// Window on the split grid: the slices cut the window suffix, not the whole
+/// sequence, and the KV stride differs from the length.
+#[test]
+fn decode_window_split_parity() {
+    assert_decode_parity("decode_window_split", 1, 4, 4, 128, 1000, 1024, 1.0, 600);
+}
+
+/// Window wider than the sequence: nothing is masked, so the windowed and
+/// unwindowed results agree with the same reference.
+#[test]
+fn decode_window_wider_than_sequence_parity() {
+    assert_decode_parity("decode_window_wide", 1, 2, 2, 64, 300, 300, 1.0, 4096);
+}
+
+/// Window on amplified scores: the surviving slices carry very different maxima
+/// and an empty leading slice must not enter the combine.
+#[test]
+fn decode_window_wide_score_range_parity() {
+    assert_decode_parity(
+        "decode_window_wide_scores",
+        2,
+        2,
+        2,
+        128,
+        896,
+        896,
+        40.0,
+        128,
+    );
+}
+
+/// Head dimensions beyond 64/128 on the whole-sequence grid, F32 against CPU.
+/// 32 is a single-warp block; 96 and 192 are non-power-of-two warp counts.
+#[test]
+fn decode_other_head_dims_whole_sequence_parity() {
+    for &head_dim in &[32usize, 96, 192, 256] {
+        assert_decode_parity(
+            &format!("decode_short_d{head_dim}"),
+            1,
+            4,
+            2,
+            head_dim,
+            60,
+            64,
+            1.0,
+            0,
+        );
+    }
+}
+
+/// Head dimensions beyond 64/128 on the split grid with a window, F32 against
+/// CPU. The split count depends on the head dimension, so each width picks a
+/// different slice count.
+#[test]
+fn decode_other_head_dims_windowed_split_parity() {
+    for &head_dim in &[32usize, 96, 192, 256] {
+        assert_decode_parity(
+            &format!("decode_window_split_d{head_dim}"),
+            1,
+            8,
+            2,
+            head_dim,
+            1000,
+            1000,
+            1.0,
+            700,
+        );
+    }
 }
 
 /// Runs one decode shape in a half dtype and compares against the F32 CUDA
@@ -221,6 +307,7 @@ fn assert_decode_half_parity(
     num_kv_heads: usize,
     head_dim: usize,
     seq_len_k: usize,
+    window: usize,
 ) {
     use numr::ops::TypeConversionOps;
     use numr::tensor::Tensor;
@@ -255,7 +342,7 @@ fn assert_decode_half_parity(
                 num_kv_heads,
                 head_dim,
                 false,
-                0,
+                window,
                 Some(seq_len_k),
             )
             .unwrap_or_else(|e| panic!("F32 reference failed for {label}: {e}"));
@@ -269,7 +356,7 @@ fn assert_decode_half_parity(
                 num_kv_heads,
                 head_dim,
                 false,
-                0,
+                window,
                 Some(seq_len_k),
             )
             .unwrap_or_else(|e| panic!("half decode failed for {label}: {e}"));
@@ -303,7 +390,16 @@ fn assert_decode_half_parity(
 #[cfg(all(feature = "cuda", feature = "f16"))]
 #[test]
 fn decode_f16_whole_sequence_parity() {
-    assert_decode_half_parity("decode_f16_short", numr::dtype::DType::F16, 1, 4, 4, 64, 64);
+    assert_decode_half_parity(
+        "decode_f16_short",
+        numr::dtype::DType::F16,
+        1,
+        4,
+        4,
+        64,
+        64,
+        0,
+    );
 }
 
 /// F16 on the split path, with a KV head group so both index maps run.
@@ -318,6 +414,7 @@ fn decode_f16_split_parity() {
         2,
         128,
         1024,
+        0,
     );
 }
 
@@ -333,6 +430,7 @@ fn decode_bf16_whole_sequence_parity() {
         4,
         64,
         64,
+        0,
     );
 }
 
@@ -348,5 +446,43 @@ fn decode_bf16_split_parity() {
         2,
         128,
         896,
+        0,
     );
+}
+
+/// BF16 with a window on the split grid, at the head dimensions serving uses
+/// for sliding-window models and the widest one.
+#[cfg(all(feature = "cuda", feature = "f16"))]
+#[test]
+fn decode_bf16_windowed_split_parity() {
+    for &head_dim in &[96usize, 128, 256] {
+        assert_decode_half_parity(
+            &format!("decode_bf16_window_d{head_dim}"),
+            numr::dtype::DType::BF16,
+            1,
+            8,
+            2,
+            head_dim,
+            1024,
+            512,
+        );
+    }
+}
+
+/// F16 at the head dimensions added beyond 64/128, whole-sequence grid.
+#[cfg(all(feature = "cuda", feature = "f16"))]
+#[test]
+fn decode_f16_other_head_dims_parity() {
+    for &head_dim in &[32usize, 96, 192, 256] {
+        assert_decode_half_parity(
+            &format!("decode_f16_d{head_dim}"),
+            numr::dtype::DType::F16,
+            1,
+            4,
+            2,
+            head_dim,
+            48,
+            0,
+        );
+    }
 }

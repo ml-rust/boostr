@@ -39,6 +39,8 @@
 //    and each lane accumulates O for its own dims: one V float4 read feeds
 //    4*R FMAs. Every dot product is a sum of G partial sums, each over
 //    HEAD_DIM/G dims, so the accumulation order differs from a serial sum.
+// The group reductions, gathers and per-key FMA blocks are the helpers in
+// `group_tile.cuh`, shared with `flash_v2.cu`.
 //
 // Causal tiles past the block's last query position are skipped as a whole;
 // the skip is block-uniform, so it may `break` across the barriers.
@@ -48,90 +50,9 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "dtype_traits.cuh"
+#include "group_tile.cuh"
 
 extern __shared__ __align__(16) float mqa_gqa_fwd_smem[];
-
-// ============================================================================
-// Group-wide helpers. A group is G consecutive lanes aligned to G.
-// ============================================================================
-
-template<int G>
-__device__ __forceinline__ float group_max(float v) {
-    #pragma unroll
-    for (int d = 1; d < G; d <<= 1) {
-        v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, d));
-    }
-    return v;
-}
-
-template<int G>
-__device__ __forceinline__ float group_sum(float v) {
-    #pragma unroll
-    for (int d = 1; d < G; d <<= 1) {
-        v += __shfl_xor_sync(0xffffffffu, v, d);
-    }
-    return v;
-}
-
-// One reduce-scatter step over the key axis: of the N keys per row a lane
-// holds, it keeps the half selected by `upper` (compacted to the front) and
-// adds the partner's copy of that half. Partner = lane ^ DIST.
-template<int R, int BN, int N, int DIST>
-__device__ __forceinline__ void reduce_scatter_step(float (&s)[R][BN], bool upper) {
-    #pragma unroll
-    for (int t = 0; t < R; ++t) {
-        #pragma unroll
-        for (int i = 0; i < N / 2; ++i) {
-            const float lo = s[t][i];
-            const float hi = s[t][i + N / 2];
-            const float send = upper ? lo : hi;
-            const float keep = upper ? hi : lo;
-            s[t][i] = keep + __shfl_xor_sync(0xffffffffu, send, DIST);
-        }
-    }
-}
-
-// Steps DIST = G/2, G/4, ..., 1. Afterwards lane `g` holds keys
-// [g*BN/G, (g+1)*BN/G) of every row in s[t][0 .. BN/G).
-template<int R, int BN, int N, int DIST>
-__device__ __forceinline__ void reduce_scatter_keys(float (&s)[R][BN], int g) {
-    if constexpr (DIST >= 1) {
-        reduce_scatter_step<R, BN, N, DIST>(s, (g & DIST) != 0);
-        reduce_scatter_keys<R, BN, N / 2, DIST / 2>(s, g);
-    }
-}
-
-// One all-gather step: N keys per row become 2N, the lane's own keys landing
-// in the upper or lower half according to `upper`.
-template<int R, int BN, int N, int DIST>
-__device__ __forceinline__ void all_gather_step(float (&s)[R][BN], bool upper) {
-    #pragma unroll
-    for (int t = 0; t < R; ++t) {
-        #pragma unroll
-        for (int i = 0; i < N; ++i) {
-            const float mine = s[t][i];
-            const float other = __shfl_xor_sync(0xffffffffu, mine, DIST);
-            s[t][i] = upper ? other : mine;
-            s[t][i + N] = upper ? mine : other;
-        }
-    }
-}
-
-// Steps DIST = 1, 2, ..., G/2: the inverse of `reduce_scatter_keys`.
-template<int R, int BN, int N, int DIST, int G>
-__device__ __forceinline__ void all_gather_keys(float (&s)[R][BN], int g) {
-    if constexpr (DIST < G) {
-        all_gather_step<R, BN, N, DIST>(s, (g & DIST) != 0);
-        all_gather_keys<R, BN, N * 2, DIST * 2, G>(s, g);
-    }
-}
-
-__device__ __forceinline__ void fma4(float (&acc)[4], const float (&a)[4], const float4 b) {
-    acc[0] = fmaf(a[0], b.x, acc[0]);
-    acc[1] = fmaf(a[1], b.y, acc[1]);
-    acc[2] = fmaf(a[2], b.z, acc[2]);
-    acc[3] = fmaf(a[3], b.w, acc[3]);
-}
 
 // ============================================================================
 // MQA/GQA Forward - templated implementation
@@ -260,18 +181,7 @@ __device__ void mqa_gqa_fwd_impl(
         }
         #pragma unroll
         for (int j = 0; j < BLOCK_N; ++j) {
-            #pragma unroll
-            for (int c = 0; c < CL; ++c) {
-                const float4 kv = *reinterpret_cast<const float4*>(
-                    K_smem + j * HEAD_DIM + 4 * (g + G * c));
-                #pragma unroll
-                for (int t = 0; t < R; ++t) {
-                    s[t][j] = fmaf(q[t][c][0], kv.x, s[t][j]);
-                    s[t][j] = fmaf(q[t][c][1], kv.y, s[t][j]);
-                    s[t][j] = fmaf(q[t][c][2], kv.z, s[t][j]);
-                    s[t][j] = fmaf(q[t][c][3], kv.w, s[t][j]);
-                }
-            }
+            group_qk_partial<HEAD_DIM, G, R, CL, BLOCK_N>(s, q, K_smem, j, g);
         }
 
         reduce_scatter_keys<R, BLOCK_N, BLOCK_N, G / 2>(s, g);
@@ -315,18 +225,7 @@ __device__ void mqa_gqa_fwd_impl(
         // O += P V over this lane's dims.
         #pragma unroll
         for (int j = 0; j < BLOCK_N; ++j) {
-            #pragma unroll
-            for (int c = 0; c < CL; ++c) {
-                const float4 vv = *reinterpret_cast<const float4*>(
-                    V_smem + j * HEAD_DIM + 4 * (g + G * c));
-                #pragma unroll
-                for (int t = 0; t < R; ++t) {
-                    o[t][c][0] = fmaf(s[t][j], vv.x, o[t][c][0]);
-                    o[t][c][1] = fmaf(s[t][j], vv.y, o[t][c][1]);
-                    o[t][c][2] = fmaf(s[t][j], vv.z, o[t][c][2]);
-                    o[t][c][3] = fmaf(s[t][j], vv.w, o[t][c][3]);
-                }
-            }
+            group_pv_accumulate<HEAD_DIM, G, R, CL, BLOCK_N>(o, s, V_smem, j, g);
         }
         __syncthreads();
     }

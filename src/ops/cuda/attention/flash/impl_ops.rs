@@ -3,6 +3,20 @@
 //! Fused kernel — this is a PRIMITIVE op (kernel IS the algorithm).
 //! Supports: F32, F16, BF16, FP8E4M3 with GQA and sliding window.
 //! Head dimensions: 32, 64, 96, 128, 192, 256.
+//!
+//! `flash_attention_fwd` tries the specialised paths in order and falls
+//! through to the general `flash_v2.cu` kernel. What reaches that kernel:
+//!
+//! - head_dim 96, 192 or 256, at every dtype, query length, causal setting,
+//!   window and head ratio (no dedicated kernel instantiates them),
+//! - `window_size > 0` at every head_dim, including `seq_len_q == 1`
+//!   (the decode kernels have no window path),
+//! - head_dim 32, 64 or 128 with `window_size == 0` on a device below sm_80
+//!   (the MQA/GQA family is gated on `caps.bf16`),
+//! - head_dim 32 at `seq_len_q == 1` (the decode kernel takes 64 and 128 only).
+//!
+//! `validate_qkv` rejects `num_heads` not divisible by `num_kv_heads` before
+//! any kernel is chosen, so that case reaches nothing.
 
 use crate::error::{Error, Result};
 use crate::ops::traits::FlashAttentionOps;

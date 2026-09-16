@@ -15,8 +15,9 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
+use super::super::flash::flash_block_config::register_tile_smem_bytes;
 use super::super::flash::flash_utils::set_smem_attribute;
-use super::block_config::{mqa_fwd_smem_bytes, mqa_fwd_tile};
+use super::block_config::mqa_fwd_tile;
 use crate::ops::cuda::kernels::{self, MQA_GQA_MODULE};
 use numr::runtime::cuda::CudaDevice;
 
@@ -65,18 +66,17 @@ pub fn mqa_gqa_fwd(
     let device = q.device();
     let device_index = device.id();
 
-    // The kernel reads Q and writes O as float4 when T is f32. A contiguous
-    // [B, H, S, D] tensor at a supported head_dim keeps every row 16-byte
-    // aligned as long as its base is; `validate_qkv` already required
-    // contiguity, so this only guards the base pointer.
-    if dtype == DType::F32 {
-        for (name, ptr) in [("q", q.ptr()), ("k", k.ptr()), ("v", v.ptr())] {
-            if !ptr.is_multiple_of(16) {
-                return Err(Error::InvalidArgument {
-                    arg: name,
-                    reason: "MQA/GQA f32 forward needs 16-byte aligned tensors".into(),
-                });
-            }
+    // The kernel reads Q and K/V and writes O four elements at a time: float4
+    // for f32, 8-byte vectors for f16/bf16. A contiguous [B, H, S, D] tensor at
+    // a supported head_dim keeps every row aligned as long as its base is;
+    // `validate_qkv` already required contiguity, so this only guards the base
+    // pointer.
+    for (name, ptr) in [("q", q.ptr()), ("k", k.ptr()), ("v", v.ptr())] {
+        if !ptr.is_multiple_of(16) {
+            return Err(Error::InvalidArgument {
+                arg: name,
+                reason: "MQA/GQA forward needs 16-byte aligned tensors".into(),
+            });
         }
     }
 
@@ -91,7 +91,7 @@ pub fn mqa_gqa_fwd(
     let lse =
         Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
 
-    let smem_size = mqa_fwd_smem_bytes(tile, head_dim);
+    let smem_size = register_tile_smem_bytes(tile, head_dim);
 
     let module = kernels::get_or_load_module(client.context(), device_index, MQA_GQA_MODULE)?;
     let func = kernels::get_kernel_function(&module, &kernel_name)?;

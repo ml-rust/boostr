@@ -1187,7 +1187,7 @@ fn test_swap_blocks_out_of_range_block_is_error() {
 ///
 /// Fixtures are built in F32 and cast to `dtype` with `Tensor::to_dtype` —
 /// host-side `half::f16`/`half::bf16` values are not numr `Element`s (see
-/// `flash_v2_fwd_sm_halfprec_parity_cuda.rs`), and `to_dtype`'s cast kernel
+/// `flash_v2_fwd_parity_cuda.rs`), and `to_dtype`'s cast kernel
 /// has a working fallback with or without numr's `f16` feature, so this does
 /// NOT need to be gated on it — only on `cuda`, to reach a CUDA device at all.
 /// copy_blocks only moves data (no arithmetic), so casting back to F32 for

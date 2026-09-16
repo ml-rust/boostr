@@ -18,6 +18,8 @@ pub(super) struct AttentionParams {
     pub seq_len_q: usize,
     pub seq_len_k: usize,
     pub head_dim: usize,
+    /// One-thread-per-row tile of the FP8 forward (`flash_v2_fp8.cu`). The
+    /// F32/F16/BF16 forward picks its own register tile in `flash_fwd.rs`.
     pub block_m: usize,
     pub block_n: usize,
     /// Whether to use the small-memory kernel variant (_sm suffix)

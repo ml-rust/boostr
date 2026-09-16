@@ -21,13 +21,12 @@
 //! (`seq_len_q == 1`), so all of them were single-tile and none could observe
 //! it.
 //!
-//! `SEQ_MULTI = 260` and `SEQ_MULTI_WIDE = 384` both exceed the largest
-//! `BLOCK_M` the forward path can select (128, at head_dim 32/64/128 — see
-//! `block_config_large`/`block_config_small` in
-//! `src/ops/cuda/attention/flash_utils.rs`), so at least three Q tiles exist
-//! and tiles after the first exercise the skip decision. 260 is deliberately
-//! not a multiple of 128/64/32/16, so the tail Q tile and tail K tile are
-//! partial as well.
+//! `SEQ_MULTI = 260` and `SEQ_MULTI_WIDE = 384` both exceed the most query
+//! rows one forward block can own (128, at head_dim 32/64 — see
+//! `flash_fwd_group` in `src/ops/cuda/attention/flash/flash_block_config.rs`),
+//! so at least three Q blocks exist and blocks after the first exercise the
+//! skip decision. 260 is deliberately not a multiple of 128/64/32/16, so the
+//! tail Q block and tail K tile are partial as well.
 //!
 //! The windows (48, 96) are small relative to those sequence lengths on
 //! purpose: the skip only engages when whole K blocks fall before the

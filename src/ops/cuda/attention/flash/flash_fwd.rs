@@ -9,9 +9,14 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
+use super::flash_block_config::{flash_fwd_tile, register_tile_smem_bytes};
 use super::flash_utils::{AttentionParams, device_max_smem, set_smem_attribute};
+use numr::runtime::cuda::CudaDevice;
 
-/// Forward pass for F32/F16/BF16 — main tiled Flash Attention v2 kernel.
+/// Forward pass for F32/F16/BF16 — the register-tiled Flash Attention v2
+/// kernel. `p.block_m` / `p.block_n` / `p.use_sm_kernel` describe the
+/// one-thread-per-row tiling and are not used here; the launch geometry comes
+/// from [`flash_fwd_tile`].
 pub(super) fn flash_attention_fwd_impl(
     client: &CudaClient,
     q: &Tensor<CudaRuntime>,
@@ -37,13 +42,37 @@ pub(super) fn flash_attention_fwd_impl(
             });
         }
     };
-    let sm_suffix = if p.use_sm_kernel { "_sm" } else { "" };
+    let device = q.device();
+    let device_index = device.id();
+
+    // The kernel reads Q and K/V and writes O four elements at a time: float4
+    // for f32, 8-byte vectors for f16/bf16. A contiguous [B, H, S, D] tensor at
+    // a supported head_dim keeps every row aligned as long as its base is;
+    // `validate_qkv` already required contiguity, so this only guards the base
+    // pointer.
+    for (name, ptr) in [("q", q.ptr()), ("k", k.ptr()), ("v", v.ptr())] {
+        if !ptr.is_multiple_of(16) {
+            return Err(Error::InvalidArgument {
+                arg: name,
+                reason: "flash attention forward needs 16-byte aligned tensors".into(),
+            });
+        }
+    }
+
+    let compute_units = CudaDevice::new(device_index).profile().compute_units as usize;
+    let tile = flash_fwd_tile(
+        p.head_dim,
+        dtype.size_in_bytes(),
+        p.seq_len_q,
+        p.batch_size * p.num_heads,
+        compute_units,
+    )?;
+    let sm_suffix = if tile.small { "_sm" } else { "" };
     let kernel_name = format!(
         "flash_attention_fwd_{}{}_{}",
         p.head_dim, sm_suffix, dtype_suffix
     );
 
-    let device = q.device();
     let output = Tensor::<CudaRuntime>::empty(
         &[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim],
         dtype,
@@ -55,11 +84,8 @@ pub(super) fn flash_attention_fwd_impl(
         device,
     )?;
 
-    let head_stride = p.head_dim + 1;
-    let dtype_size = dtype.size_in_bytes();
-    let smem_size = (p.block_m * head_stride + 2 * p.block_n * head_stride) * dtype_size;
+    let smem_size = register_tile_smem_bytes(tile, p.head_dim);
 
-    let device_index = device.id();
     let module = kernels::get_or_load_module(client.context(), device_index, FLASH_V2_MODULE)?;
     let func = kernels::get_kernel_function(&module, &kernel_name)?;
     set_smem_attribute(&func, smem_size)?;
@@ -67,10 +93,10 @@ pub(super) fn flash_attention_fwd_impl(
     let cfg = LaunchConfig {
         grid_dim: (
             (p.batch_size * p.num_heads) as u32,
-            p.seq_len_q.div_ceil(p.block_m) as u32,
+            p.seq_len_q.div_ceil(tile.rows) as u32,
             1,
         ),
-        block_dim: (p.block_m as u32, 1, 1),
+        block_dim: (tile.threads as u32, 1, 1),
         shared_mem_bytes: smem_size as u32,
     };
 

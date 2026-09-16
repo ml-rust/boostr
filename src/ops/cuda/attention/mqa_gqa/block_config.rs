@@ -8,6 +8,7 @@
 
 use crate::error::{Error, Result};
 
+use super::super::flash::flash_block_config::{RegisterTile, pick_register_tile};
 use super::super::flash::flash_utils::{compute_bwd_smem, device_max_smem};
 
 /// Shared memory element size of the MQA/GQA backward kernels.
@@ -16,20 +17,6 @@ use super::super::flash::flash_utils::{compute_bwd_smem, device_max_smem};
 /// `extern __shared__ float smem[]` and stages K/V/Q/dO as f32 there, converting
 /// on load, so the requirement is independent of the tensor dtype.
 pub(super) const BWD_SMEM_ELEM_BYTES: usize = 4;
-
-/// Forward launch geometry: one entry of the instantiation table in
-/// `mqa_gqa.cu`, plus which of the two symbols it names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct MqaFwdTile {
-    /// Query rows one block owns: `WARPS * R * 32 / G` in the kernel.
-    pub rows: usize,
-    /// `block_dim.x`: `WARPS * 32`.
-    pub threads: usize,
-    /// Keys staged per shared-memory tile.
-    pub block_n: usize,
-    /// Selects the `_sm` symbol (two warps per block) over the four-warp one.
-    pub small: bool,
-}
 
 /// Lanes per query row (`G`) at each head_dim. Must stay in sync with the
 /// `MQA_GQA_FWD_DTYPE` table in `mqa_gqa.cu`.
@@ -45,37 +32,10 @@ fn mqa_fwd_lanes_per_row(head_dim: usize) -> Option<usize> {
 const MQA_FWD_ROWS_PER_GROUP: usize = 4;
 /// Keys per staged K/V tile (`BLOCK_N`) in every forward instantiation.
 const MQA_FWD_BLOCK_N: usize = 16; // mirrors `MQA_GQA_FWD_BLOCK_N` in mqa_gqa.cu
-/// Warps per block of the unsuffixed and `_sm` symbols.
-const MQA_FWD_WARPS_LARGE: usize = 4;
-const MQA_FWD_WARPS_SMALL: usize = 2;
-
-fn mqa_fwd_tile_for(head_dim: usize, warps: usize, small: bool) -> Option<MqaFwdTile> {
-    let lanes = mqa_fwd_lanes_per_row(head_dim)?;
-    Some(MqaFwdTile {
-        rows: warps * (32 / lanes) * MQA_FWD_ROWS_PER_GROUP,
-        threads: warps * 32,
-        block_n: MQA_FWD_BLOCK_N,
-        small,
-    })
-}
-
-/// Dynamic shared memory of the forward kernel: K and V tiles staged as f32,
-/// whatever the tensor dtype.
-pub(super) fn mqa_fwd_smem_bytes(tile: MqaFwdTile, head_dim: usize) -> usize {
-    2 * tile.block_n * head_dim * 4
-}
 
 /// Four-warp blocks per compute unit below which the two-warp tile is used.
-///
-/// Both symbols run the same kernel; they differ only in warps per block, so
-/// in rows per block. The kernel keeps Q and O in registers and stages only
-/// K/V, so shared memory never decides this. Two things trade: the four-warp
-/// tile amortizes each staged K/V tile over twice the rows, while the
-/// two-warp tile doubles the block count, which balances the last wave of
-/// the grid (causal blocks differ in work) and fills an underfilled device.
 /// `examples/cuda_short_query_profile.rs --prefill` measured the crossover
-/// between these two effects: below this many four-warp blocks per unit the
-/// two-warp tile wins or ties, above it the four-warp tile does.
+/// for this kernel; [`pick_register_tile`] explains what trades.
 const MQA_FWD_SMALL_TILE_MAX_BLOCKS_PER_UNIT: usize = 8;
 
 /// Pick the forward tile for this shape. The grid has
@@ -86,10 +46,8 @@ pub(super) fn mqa_fwd_tile(
     seq_len_q: usize,
     batch_heads: usize,
     compute_units: usize,
-) -> Result<MqaFwdTile> {
-    let large = mqa_fwd_tile_for(head_dim, MQA_FWD_WARPS_LARGE, false);
-    let small = mqa_fwd_tile_for(head_dim, MQA_FWD_WARPS_SMALL, true);
-    let (Some(large), Some(small)) = (large, small) else {
+) -> Result<RegisterTile> {
+    let Some(lanes) = mqa_fwd_lanes_per_row(head_dim) else {
         return Err(Error::InvalidArgument {
             arg: "head_dim",
             reason: format!(
@@ -98,11 +56,15 @@ pub(super) fn mqa_fwd_tile(
             ),
         });
     };
-    let large_blocks = batch_heads * seq_len_q.div_ceil(large.rows);
-    if large_blocks < compute_units * MQA_FWD_SMALL_TILE_MAX_BLOCKS_PER_UNIT {
-        return Ok(small);
-    }
-    Ok(large)
+    Ok(pick_register_tile(
+        lanes,
+        MQA_FWD_ROWS_PER_GROUP,
+        MQA_FWD_BLOCK_N,
+        seq_len_q,
+        batch_heads,
+        compute_units,
+        MQA_FWD_SMALL_TILE_MAX_BLOCKS_PER_UNIT,
+    ))
 }
 
 /// Block config of the unsuffixed `mqa_gqa_bwd_{head_dim}_{dtype}` kernels.
@@ -247,8 +209,9 @@ mod mqa_fwd_tile_tests {
 
     #[test]
     fn smem_is_two_f32_tiles() {
+        use super::super::super::flash::flash_block_config::register_tile_smem_bytes;
         let tile = mqa_fwd_tile(128, 4096, 64, 1).unwrap();
-        assert_eq!(mqa_fwd_smem_bytes(tile, 128), 2 * 16 * 128 * 4);
+        assert_eq!(register_tile_smem_bytes(tile, 128), 2 * 16 * 128 * 4);
     }
 
     #[test]

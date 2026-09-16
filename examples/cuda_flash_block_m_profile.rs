@@ -1,5 +1,12 @@
 //! Profiling target for `seq_len_q`-aware `BLOCK_M` selection.
 //!
+//! Historical: this measured the one-thread-per-row kernels. Both paths it
+//! sweeps are now register-tiled (`flash_v2.cu`, `mqa_gqa.cu`) and pick a
+//! four-warp or two-warp block by device fill (`flash_fwd_tile`,
+//! `mqa_fwd_tile`); `examples/cuda_short_query_profile.rs --flash` and
+//! `--prefill` are the sweeps behind those rules. The description below is
+//! the setup of the older measurement, kept so it can be re-run.
+//!
 //! Two sweeps, each isolating one side of the change:
 //!
 //! - **Control** (`head_dim = 96`): routes to the general tiled kernel

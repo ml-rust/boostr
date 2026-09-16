@@ -1080,6 +1080,53 @@ void store4_dtype<float>(float* ptr, int idx, float4 value, float scale) {
     *reinterpret_cast<float4*>(ptr + idx) = value;
 }
 
+// F16 / BF16: one 8-byte load or store for the four elements, converted one
+// at a time through the same intrinsics the scalar path uses, so the values
+// are bit-identical to four scalar calls. `ptr + idx` must be 8-byte aligned:
+// `idx` a multiple of 4 on a 16-byte-aligned base. Scale is ignored, as in
+// the scalar path for these dtypes.
+template<>
+__device__ __forceinline__
+float4 load4_dtype<__half>(const __half* ptr, int idx, float) {
+    const uint2 raw = *reinterpret_cast<const uint2*>(ptr + idx);
+    const __half* h = reinterpret_cast<const __half*>(&raw);
+    return make_float4(__half2float(h[0]), __half2float(h[1]),
+                       __half2float(h[2]), __half2float(h[3]));
+}
+
+template<>
+__device__ __forceinline__
+float4 load4_dtype<__nv_bfloat16>(const __nv_bfloat16* ptr, int idx, float) {
+    const uint2 raw = *reinterpret_cast<const uint2*>(ptr + idx);
+    const __nv_bfloat16* h = reinterpret_cast<const __nv_bfloat16*>(&raw);
+    return make_float4(__bfloat162float(h[0]), __bfloat162float(h[1]),
+                       __bfloat162float(h[2]), __bfloat162float(h[3]));
+}
+
+template<>
+__device__ __forceinline__
+void store4_dtype<__half>(__half* ptr, int idx, float4 value, float) {
+    uint2 raw;
+    __half* h = reinterpret_cast<__half*>(&raw);
+    h[0] = __float2half_rn(value.x);
+    h[1] = __float2half_rn(value.y);
+    h[2] = __float2half_rn(value.z);
+    h[3] = __float2half_rn(value.w);
+    *reinterpret_cast<uint2*>(ptr + idx) = raw;
+}
+
+template<>
+__device__ __forceinline__
+void store4_dtype<__nv_bfloat16>(__nv_bfloat16* ptr, int idx, float4 value, float) {
+    uint2 raw;
+    __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(&raw);
+    h[0] = __float2bfloat16_rn(value.x);
+    h[1] = __float2bfloat16_rn(value.y);
+    h[2] = __float2bfloat16_rn(value.z);
+    h[3] = __float2bfloat16_rn(value.w);
+    *reinterpret_cast<uint2*>(ptr + idx) = raw;
+}
+
 // ============================================================================
 // Safe Math Operations (NaN/Inf prevention)
 // ============================================================================

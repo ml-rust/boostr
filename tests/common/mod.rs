@@ -11,7 +11,7 @@ use boostr::nn::{Conv1d, Linear, MaybeQuantLinear, Mla, MlaConfig, MlaWeights, R
 use boostr::tcf::encoding::BlockEncoding;
 use boostr::tcf::proof::{BlockDecoder, proof_indices};
 use boostr::tcf::{TcfError, bits_to_f32, f32_to_bits};
-use numr::autograd::Var;
+use numr::autograd::{GradStore, Var};
 use numr::ops::PaddingMode;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::{Tensor, TensorId};
@@ -54,6 +54,64 @@ pub fn cpu_setup() -> (CpuClient, CpuDevice) {
     let device = CpuDevice::new();
     let client = CpuClient::new(device.clone());
     (client, device)
+}
+
+/// A gradient store shaped like a real backward pass, for gradient-clipping
+/// tests: two trainable parameters, the loss node's `1.0` seed, and one
+/// activation gradient. Only the parameter ids are ever meant to be touched
+/// by a clip.
+///
+/// - parameters: `[3, 0]` and `[0, 4]` → param norm² = 9 + 16 = 25, norm 5.
+/// - loss seed: `[1.0]` → contributes exactly 1.0, as it does on every real
+///   run.
+/// - activation: `[0, 0, 5, 5]` → contributes 50.
+///
+/// Whole-graph norm would be sqrt(25 + 1 + 50) = sqrt(76) = 8.7178, so the
+/// two answers are 3.7 apart and cannot be confused.
+pub struct GradClipGraphStore {
+    pub client: CpuClient,
+    pub grads: GradStore<CpuRuntime>,
+    pub params: [TensorId; 2],
+    pub loss_node: TensorId,
+    pub activation: TensorId,
+}
+
+pub const GRAD_CLIP_GRAPH_PARAM_NORM: f64 = 5.0; // sqrt(9 + 16)
+pub const GRAD_CLIP_GRAPH_WHOLE_NORM: f64 = 8.717_797_887_081_348; // sqrt(9 + 16 + 1 + 50)
+
+pub fn grad_clip_graph_store() -> GradClipGraphStore {
+    let (client, device) = cpu_setup();
+
+    let p1 = TensorId::new();
+    let p2 = TensorId::new();
+    let loss_node = TensorId::new();
+    let activation = TensorId::new();
+
+    let mut grads = GradStore::new();
+    grads.insert(
+        p1,
+        Tensor::<CpuRuntime>::from_slice(&[3.0f32, 0.0], &[2], &device).unwrap(),
+    );
+    grads.insert(
+        p2,
+        Tensor::<CpuRuntime>::from_slice(&[0.0f32, 4.0], &[2], &device).unwrap(),
+    );
+    grads.insert(
+        loss_node,
+        Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1], &device).unwrap(),
+    );
+    grads.insert(
+        activation,
+        Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0, 5.0, 5.0], &[4], &device).unwrap(),
+    );
+
+    GradClipGraphStore {
+        client,
+        grads,
+        params: [p1, p2],
+        loss_node,
+        activation,
+    }
 }
 
 pub fn patterned_tensor(

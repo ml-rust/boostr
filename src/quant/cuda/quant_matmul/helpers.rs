@@ -86,6 +86,10 @@ pub(in crate::quant::cuda) fn quantize_activation_q8_1(
     Ok(q8_buf)
 }
 
+/// Warps per launch block of `quantize_f32_q8_1_mmq`. Must match
+/// `QACT_MMQ_WARPS` in `kernels/quant_act.cu`.
+const QACT_MMQ_WARPS: usize = 4;
+
 /// Quantize F32 activation into the repacked Q8_1 layout the feature-major MMQ
 /// kernels read.
 ///
@@ -126,10 +130,13 @@ pub(super) fn quantize_activation_q8_1_mmq(
     let k_u32 = k as u32;
     let ntok_u32 = ntok as u32;
 
-    // One warp per 32-value block, one grid row per token slot.
+    // One warp per 32-value block, `QACT_MMQ_WARPS` warps per launch block,
+    // one grid row per token slot. The kernel guards the tail bundle, so the
+    // grid rounds up.
+    let blocks_per_row = (kgroups * 4).div_ceil(QACT_MMQ_WARPS);
     let cfg = LaunchConfig {
-        grid_dim: ((kgroups * 4) as u32, ntok_u32, 1),
-        block_dim: (32, 1, 1),
+        grid_dim: (blocks_per_row as u32, ntok_u32, 1),
+        block_dim: ((32 * QACT_MMQ_WARPS) as u32, 1, 1),
         shared_mem_bytes: 0,
     };
 

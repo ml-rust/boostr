@@ -107,7 +107,19 @@ extern "C" __global__ void quantize_f32_q8_1(
 // warp-reduced sum of the clamped int8 `q` values, not of the input floats, and
 // the reduction runs in `int` so no intermediate rounds.
 //
-// Grid:  (kgroups * 4, ntok, 1)   Block: (32, 1, 1) — one warp per 32-value block
+// Each warp owns one 32-value block and never talks to another warp, so a
+// thread block is a bundle of independent warps: `QACT_MMQ_WARPS` consecutive
+// blocks of one token per launch block. Bundling exists because the per-token
+// work at small M is a few tens of KB, and one-warp blocks make the launch
+// count, not the arithmetic, set the kernel time. Four warps per block keeps
+// the tail waste at small K low and leaves the large-M grid wide enough to
+// fill the machine. A warp past the row's last 32-value block returns before
+// touching memory, so `kgroups * 4` need not be a multiple of the bundle.
+//
+// Grid:  (ceil(kgroups * 4 / QACT_MMQ_WARPS), ntok, 1)
+// Block: (32 * QACT_MMQ_WARPS, 1, 1) — one warp per 32-value block
+#define QACT_MMQ_WARPS 4
+
 extern "C" __global__ void quantize_f32_q8_1_mmq(
     const float* __restrict__ input,  // [M, K]
     int* __restrict__ output,         // kgroups * ntok * 36 ints
@@ -115,9 +127,16 @@ extern "C" __global__ void quantize_f32_q8_1_mmq(
     unsigned int K,
     unsigned int ntok                 // token slots per k-group; a multiple of the token tile
 ) {
-    const unsigned int b = blockIdx.x;  // 32-value block within the row
+    const unsigned int lane = threadIdx.x % 32;
+    // 32-value block within the row: bundle-major, warp-minor.
+    const unsigned int b = blockIdx.x * QACT_MMQ_WARPS + threadIdx.x / 32;
     const unsigned int j = blockIdx.y;  // token slot
-    const unsigned int lane = threadIdx.x;
+
+    // Padded k-blocks live inside the last k-group and are zeroed below; a
+    // block past the last k-group has no record at all, so the whole warp
+    // leaves before its shuffles (full-warp masks stay valid: the exit is
+    // warp-uniform). The bound is the launcher's `kgroups * 4`.
+    if (b >= ((K + 127) / 128) * 4) return;
 
     const unsigned int g = b / 4;    // k-group of 128 values
     const unsigned int sub = b % 4;  // 32-value block within that group

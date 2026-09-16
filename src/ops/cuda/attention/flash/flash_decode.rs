@@ -157,6 +157,50 @@ pub(super) fn decode_attention_fwd(
     Ok((output, lse))
 }
 
+/// Non-causal attention over a short query sequence, run as decode with the
+/// query axis folded into the head axis.
+///
+/// `[B, H, S_q, D]` contiguous is the same bytes as `[B, H * S_q, 1, D]`, so
+/// the fold is a reshape, not a copy. The decode kernel maps folded head
+/// `h * S_q + s` to KV head `(h * S_q + s) / ((H * S_q) / H_kv)`; `H_kv`
+/// divides `H`, so that quotient is `h / (H / H_kv)`, the same KV head the
+/// unfolded row used. Output and LSE reshape back the same way.
+///
+/// Why: the tiled kernels give one thread per query row and stage K/V per
+/// block of `block_m` rows, so a short sequence leaves most of each block
+/// idle. The decode kernel spends one block per row and one warp per key.
+/// `examples/cuda_short_query_profile.rs` is the measurement; the caller
+/// owns the bound on `S_q`.
+///
+/// Non-causal only: decode has no query position to mask against. The
+/// caller also excludes a sliding window.
+pub(super) fn decode_attention_fwd_folded(
+    client: &CudaClient,
+    q: &Tensor<CudaRuntime>,
+    k: &Tensor<CudaRuntime>,
+    v: &Tensor<CudaRuntime>,
+    p: &AttentionParams,
+    kv_seq_stride: usize,
+) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
+    let folded_heads = p.num_heads * p.seq_len_q;
+    let q_folded = q.reshape(&[p.batch_size, folded_heads, 1, p.head_dim])?;
+    let folded = AttentionParams {
+        batch_size: p.batch_size,
+        num_heads: folded_heads,
+        num_kv_heads: p.num_kv_heads,
+        seq_len_q: 1,
+        seq_len_k: p.seq_len_k,
+        head_dim: p.head_dim,
+        block_m: p.block_m,
+        block_n: p.block_n,
+        use_sm_kernel: p.use_sm_kernel,
+    };
+    let (output, lse) = decode_attention_fwd(client, &q_folded, k, v, &folded, kv_seq_stride)?;
+    let output = output.reshape(&[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim])?;
+    let lse = lse.reshape(&[p.batch_size, p.num_heads, p.seq_len_q])?;
+    Ok((output, lse))
+}
+
 /// Graph-mode decode attention: uses `_graph` kernel variants with device-pointer
 /// seq_len_k and separate kv_seq_stride for full-capacity raw KV buffers.
 ///
@@ -313,4 +357,77 @@ pub fn decode_attention_graph_fwd(
     }
 
     Ok((output, lse))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::impl_generic::attention::{StandardAttnConfig, standard_attention_fwd};
+    use crate::ops::traits::FlashAttentionOps;
+    use crate::test_utils::cuda_setup;
+    use numr::runtime::cuda::CudaDevice;
+
+    /// Deterministic values with no repeated rows, so a wrong KV-head mapping
+    /// or a mis-strided query row changes the answer.
+    fn filled(shape: &[usize], seed: f32, device: &CudaDevice) -> Tensor<CudaRuntime> {
+        let n: usize = shape.iter().product();
+        let data: Vec<f32> = (0..n)
+            .map(|i| 0.5 * ((i as f32) * 0.731 + seed).sin())
+            .collect();
+        Tensor::<CudaRuntime>::from_slice(&data, shape, device).expect("tensor")
+    }
+
+    fn max_abs_diff(a: &Tensor<CudaRuntime>, b: &Tensor<CudaRuntime>) -> f32 {
+        let a = a.contiguous().expect("contiguous").to_vec::<f32>();
+        let b = b.contiguous().expect("contiguous").to_vec::<f32>();
+        assert_eq!(a.len(), b.len());
+        a.iter()
+            .zip(&b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f32::max)
+    }
+
+    /// Every geometry the fold admits: GQA, several query rows per head, and
+    /// a KV sequence longer than the query one. The reference is the
+    /// composed Tensor path, which expands KV heads explicitly.
+    #[test]
+    fn folded_decode_matches_standard_attention() {
+        let Some(cuda) = cuda_setup() else { return };
+        let (client, device) = (&cuda.client, &cuda.device);
+        for &(heads, kv_heads, head_dim, seq_q, seq_k) in &[
+            (16usize, 2usize, 128usize, 11usize, 11usize),
+            (16, 2, 128, 5, 5),
+            (4, 4, 64, 7, 7),
+            (8, 1, 64, 3, 40),
+        ] {
+            let q = filled(&[2, heads, seq_q, head_dim], 0.1, device);
+            let k = filled(&[2, kv_heads, seq_k, head_dim], 0.2, device);
+            let v = filled(&[2, kv_heads, seq_k, head_dim], 0.3, device);
+
+            let (out, lse) = client
+                .flash_attention_fwd(&q, &k, &v, heads, kv_heads, head_dim, false, 0, None)
+                .expect("flash_attention_fwd");
+            let cfg = StandardAttnConfig {
+                num_heads: heads,
+                num_kv_heads: kv_heads,
+                causal: false,
+                window_size: 0,
+            };
+            let (ref_out, ref_lse) =
+                standard_attention_fwd(client, &q, &k, &v, cfg).expect("standard_attention_fwd");
+
+            assert_eq!(out.shape(), &[2, heads, seq_q, head_dim]);
+            assert_eq!(lse.shape(), &[2, heads, seq_q]);
+            let out_diff = max_abs_diff(&out, &ref_out);
+            let lse_diff = max_abs_diff(&lse, &ref_lse);
+            assert!(
+                out_diff < 1e-4,
+                "output diverges at H={heads} Hkv={kv_heads} D={head_dim} Sq={seq_q} Sk={seq_k}: {out_diff}"
+            );
+            assert!(
+                lse_diff < 1e-4,
+                "lse diverges at H={heads} Hkv={kv_heads} D={head_dim} Sq={seq_q} Sk={seq_k}: {lse_diff}"
+            );
+        }
+    }
 }

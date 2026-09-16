@@ -26,6 +26,14 @@ use crate::ops::traits::cache::kv_cache_quant::Int4GroupSize;
 pub use super::flash_decode::decode_attention_graph_fwd;
 pub(crate) use super::flash_utils::set_smem_attribute;
 
+/// Longest non-causal query sequence routed through
+/// [`flash_decode::decode_attention_fwd_folded`]. The fold re-reads K/V once
+/// per query row, so its cost grows with `S_q * S_k` while the tiled kernels
+/// reuse a staged K/V tile across `block_m` rows. This is the top of the range
+/// `examples/cuda_short_query_profile.rs` swept, where the fold still led;
+/// past it the tiled kernels run unmeasured, so they keep the shape.
+const SHORT_QUERY_FOLD_MAX: usize = 2048;
+
 impl FlashAttentionOps<CudaRuntime> for CudaClient {
     fn flash_attention_fwd(
         &self,
@@ -56,6 +64,21 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             && window_size == 0
         {
             return flash_decode::decode_attention_fwd(self, q, k, v, &p, kv_seq_stride);
+        }
+
+        // Short non-causal query sequence: run as decode with the query axis
+        // folded into the head axis. The tiled kernels below give one thread
+        // per query row and leave the rest of each block idle at this length;
+        // `examples/cuda_short_query_profile.rs` measures the fold ahead at
+        // every length up to the bound. It reads K/V with the stride the
+        // decode path already takes, so it goes before the narrowing copy.
+        if !causal
+            && window_size == 0
+            && p.seq_len_q <= SHORT_QUERY_FOLD_MAX
+            && decode_split::decode_supports_dtype(q.dtype())
+            && (head_dim == 64 || head_dim == 128)
+        {
+            return flash_decode::decode_attention_fwd_folded(self, q, k, v, &p, kv_seq_stride);
         }
 
         // Flash v2/v3 don't support separate kv_seq_stride — narrow if needed

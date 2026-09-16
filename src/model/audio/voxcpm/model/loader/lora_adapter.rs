@@ -122,14 +122,14 @@ mod tests {
     //! loaded, same forward output — while reading rank/alpha/targets from the
     //! file's own `__metadata__` instead of a caller-supplied config.
     //!
-    //! Uses the tiny full [`VoxCpm2Model`] fixture from `generate::tests`
+    //! Uses the tiny full [`VoxCpm2Model`] fixture from `generate::test_support`
     //! (`fixture`/`model`), the same one `prefill.rs`'s inline tests use for
     //! the no-reference prefill path — real enough to run `prefill`, cheap
     //! enough to build twice per test.
 
     use super::*;
     use crate::model::audio::voxcpm::model::config::AUDIO_START_ID;
-    use crate::model::audio::voxcpm::model::generate::tests::support::{fixture, model};
+    use crate::model::audio::voxcpm::model::generate::test_support::{fixture, model};
     use crate::nn::{LoraTargets, Module, build_lora_metadata};
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;

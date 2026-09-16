@@ -185,14 +185,14 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
 
 #[cfg(test)]
 pub(super) mod tests {
-    //! Reuses `generate/tests/support.rs`'s `Fixture` — the exact same tiny
+    //! Reuses `generate/test_support.rs`'s `Fixture` — the exact same tiny
     //! sub-models the teacher-forced tests exercise — rather than building a
     //! second fixture. That module's items are `pub(crate)` specifically so
     //! this sibling of `generate` can reach them directly.
 
     use super::*;
     use crate::model::audio::voxcpm::local_dit::tests::{FEAT_DIM, PATCH_SIZE, t};
-    use crate::model::audio::voxcpm::model::generate::tests::support::{fixture, state};
+    use crate::model::audio::voxcpm::model::generate::test_support::{fixture, state};
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 

@@ -391,7 +391,7 @@ mod tests {
     //! `build_prefill_and_target`).
 
     use crate::model::audio::voxcpm::model::config::AUDIO_START_ID;
-    use crate::model::audio::voxcpm::model::generate::tests::support::{fixture, model};
+    use crate::model::audio::voxcpm::model::generate::test_support::{fixture, model};
     use crate::test_utils::cpu_setup;
 
     /// `prefill_capturing(client, None, ...)` must succeed, land `position`

@@ -253,3 +253,89 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         Ok((StepOutcome::Continued, intermediates))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::*;
+    use super::*;
+    use crate::test_utils::cpu_setup;
+
+    /// Capturing must not perturb step 1-8 arithmetic. Guard OPEN (`i >
+    /// min_len`), so `aux.stop` runs on both paths here — the closed-guard
+    /// asymmetry is covered separately below.
+    #[test]
+    fn capturing_and_non_capturing_paths_agree() {
+        let (client, device) = cpu_setup();
+        let fx = fixture(false, &device);
+        let generator = fx.generator();
+        let opts = options(0, 8);
+
+        let mut plain = state(&fx, &device);
+        let outcome = generator
+            .step_with_noise(&client, &mut plain, &noise(0.2, &device), &opts)
+            .expect("plain step");
+
+        let mut captured = state(&fx, &device);
+        let (captured_outcome, intermediates) = generator
+            .step_with_noise_capturing(&client, &mut captured, &noise(0.2, &device), &opts)
+            .expect("capturing step");
+
+        assert_eq!(outcome, captured_outcome);
+        assert_eq!(values(&plain.patches[0]), values(&captured.patches[0]));
+        assert_eq!(
+            values(&plain.prefill.lm_hidden),
+            values(&captured.prefill.lm_hidden)
+        );
+        assert_eq!(
+            values(&plain.prefill.residual_hidden),
+            values(&captured.prefill.residual_hidden)
+        );
+        assert_eq!(plain.prefill.position, captured.prefill.position);
+
+        // Non-degenerate: this must not pass by both sides silently zeroing out.
+        assert!(values(&intermediates.mu).iter().any(|v| v.abs() > 1e-6));
+        assert!(
+            values(&intermediates.curr_embed)
+                .iter()
+                .any(|v| v.abs() > 1e-6)
+        );
+        assert!(
+            intermediates.lm_hidden_pre_fsq.is_some(),
+            "the guard was open, so steps 6-8 ran and lm_hidden_pre_fsq must be captured"
+        );
+        assert_eq!(intermediates.stop_logits.shape(), &[1, 2]);
+    }
+
+    /// Guard CLOSED (`i <= min_len`): the non-capturing path skips `aux.stop`
+    /// entirely, but capturing must still populate `stop_logits`, without
+    /// changing any other output.
+    #[test]
+    fn capturing_computes_stop_logits_even_when_the_guard_is_closed() {
+        let (client, device) = cpu_setup();
+        let fx = fixture(false, &device);
+        let generator = fx.generator();
+        let opts = options(2, 8);
+
+        let mut plain = state(&fx, &device);
+        generator
+            .step_with_noise(&client, &mut plain, &noise(0.2, &device), &opts)
+            .expect("plain step");
+
+        let mut captured = state(&fx, &device);
+        let (outcome, intermediates) = generator
+            .step_with_noise_capturing(&client, &mut captured, &noise(0.2, &device), &opts)
+            .expect("capturing step");
+
+        assert_eq!(
+            outcome,
+            StepOutcome::Continued,
+            "i = 0 is below min_len = 2"
+        );
+        assert_eq!(intermediates.stop_logits.shape(), &[1, 2]);
+        assert_eq!(values(&plain.patches[0]), values(&captured.patches[0]));
+        assert_eq!(
+            values(&plain.prefill.lm_hidden),
+            values(&captured.prefill.lm_hidden)
+        );
+    }
+}

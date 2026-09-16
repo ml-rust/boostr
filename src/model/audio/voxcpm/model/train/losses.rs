@@ -198,7 +198,7 @@ mod tests {
 
     use super::super::cfm::tests::{T, target_patches};
     use super::*;
-    use crate::model::audio::voxcpm::model::generate::tests::support::{fixture, state};
+    use crate::model::audio::voxcpm::model::generate::test_support::{fixture, state};
     use crate::nn::{LoraTargets, Module};
     use crate::test_utils::cpu_setup;
     use numr::autograd::backward;

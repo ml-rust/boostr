@@ -84,7 +84,7 @@ pub(super) fn check_training_cfg_rate(rate: f64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::super::cfm::tests::{T, target_patches};
-    use crate::model::audio::voxcpm::model::generate::tests::support::{fixture, state};
+    use crate::model::audio::voxcpm::model::generate::test_support::{fixture, state};
     use crate::test_utils::cpu_setup;
     use numr::ops::RandomOps;
     use numr::runtime::cpu::CpuRuntime;

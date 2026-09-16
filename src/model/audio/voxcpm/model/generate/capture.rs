@@ -11,9 +11,8 @@
 
 use super::*;
 use crate::model::audio::voxcpm::local_dit::cfm_time_span;
-use crate::nn::var_contiguous;
 use crate::quant::traits::DequantOps;
-use numr::autograd::{var_cat, var_reshape, var_transpose};
+use numr::autograd::{var_cat, var_reshape};
 
 /// Per-step intermediates for a gate to compare against the reference,
 /// mirroring [`PrefillIntermediates`](super::super::prefill::PrefillIntermediates)
@@ -111,7 +110,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + DequantOps<R>,
     {
         let (patch_size, feat_dim) = (self.config.patch_size, self.config.feat_dim);
-        check_patch("z", z, &[1, feat_dim, patch_size])?;
+        check_patch("z", z, &[1, patch_size, feat_dim])?;
         check_patch(
             "state.prefix_feat_cond",
             &state.prefix_feat_cond,
@@ -135,27 +134,23 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             .forward(client, &state.prefill.residual_hidden)?;
         let mu = var_cat(&[&from_lm, &from_res], 1, client).map_err(Error::Numr)?;
 
-        // 2. The DiT takes its condition as [1, feat_dim, patch_size] and
-        // returns the same layout; `prefix_feat_cond` and the emitted patches
-        // are stored [1, patch_size, feat_dim], so transpose on the way in
-        // and back on the way out. `var_transpose` yields a strided view and
-        // every consumer here reshapes, so materialize both.
-        let cond = var_contiguous(&var_transpose(&state.prefix_feat_cond).map_err(Error::Numr)?)?;
+        // 2. The DiT takes `z` and its condition as [1, patch_size, feat_dim]
+        // and returns the same layout — the layout `prefix_feat_cond` and the
+        // emitted patches are stored in, so nothing is transposed here.
         let t_span = cfm_time_span(options.cfm.n_timesteps, options.cfm.sway_sampling_coef)?;
         // Inference-only entry: one CUDA graph launch per patch on CUDA, the
         // eager loop elsewhere. Fine-tuning never comes through here (see
         // `train/cfm.rs`), so no autograd tape is lost.
-        let solved = self.feat_decoder.solve_euler_graphed(
+        let pred_feat = self.feat_decoder.solve_euler_graphed(
             client,
             z,
             &t_span,
             &mu,
-            &cond,
+            &state.prefix_feat_cond,
             options.cfm.cfg_value,
             options.cfm.use_cfg_zero_star,
             None,
         )?;
-        let pred_feat = var_contiguous(&var_transpose(&solved).map_err(Error::Numr)?)?;
 
         // 3. The encoder runs on ONE patch: [1, 1, patch_size, feat_dim].
         let single = var_reshape(&pred_feat, &[1, 1, patch_size, feat_dim]).map_err(Error::Numr)?;

@@ -604,13 +604,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::process::exit(if ok { 0 } else { 1 });
 }
 
-/// Load fixture tensor `step{i}_z`, `[1, feat_dim, patch_size]`, as an
-/// untracked [`Var`] ready for [`PatchGenerator::step_with_noise`].
+/// Load fixture tensor `step{i}_z`, stored in the reference's `[1, feat_dim,
+/// patch_size]` noise layout, and transpose it to the `[1, patch_size,
+/// feat_dim]` patch layout [`PatchGenerator::step_with_noise`] takes, as an
+/// untracked [`Var`].
 fn generator_z(
     fx: &mut SafeTensorsLoader,
     device: &CpuDevice,
     i: usize,
 ) -> Result<Var<CpuRuntime>, Box<dyn std::error::Error>> {
     let tensor = fx.load_tensor::<CpuRuntime>(&format!("step{i}_z"), device)?;
-    Ok(Var::new(tensor, false))
+    Ok(Var::new(tensor.transpose(1, 2)?.contiguous()?, false))
 }

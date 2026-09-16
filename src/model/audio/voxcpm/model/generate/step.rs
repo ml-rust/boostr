@@ -3,6 +3,8 @@
 //! variant and its shared inner body live in `super::capture`.
 
 use super::*;
+use crate::nn::var_contiguous;
+use numr::autograd::var_transpose;
 
 impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// One iteration, with the CFM noise supplied by the caller.
@@ -10,8 +12,11 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// This is the primitive: it draws nothing, so a caller (the CFM gate)
     /// can pin `z` per step and reproduce a run exactly.
     /// [`step`](Self::step) is the thin drawing wrapper over it. `z` is `[1,
-    /// feat_dim, patch_size]` and is used AS GIVEN —
+    /// patch_size, feat_dim]` — the patch layout, same as
+    /// `state.prefix_feat_cond` — and is used AS GIVEN;
     /// `options.cfm.temperature` is not applied here; see the module docs.
+    /// A caller holding the reference's `[1, feat_dim, patch_size]` noise
+    /// transposes it first, as [`step`](Self::step) does.
     /// Runs steps 1-8 in order. Returns [`StepOutcome::Stopped`] when the
     /// stop guard fires, in which case steps 6-8 did not run and the caches
     /// and `position` are unchanged.
@@ -43,10 +48,13 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
 
     /// One iteration, drawing the CFM noise itself.
     ///
-    /// `z` is `randn_seeded(options.seed + i) * options.cfm.temperature` over
-    /// `[1, feat_dim, patch_size]`, where `i` is the index of the patch about
-    /// to be emitted — so consecutive patches never share noise and the run
-    /// is reproducible from `options.seed`. Everything after the draw is
+    /// `z` is `randn_seeded(options.seed + i) * options.cfm.temperature`
+    /// drawn over `[1, feat_dim, patch_size]` — the reference's element order,
+    /// so a seed keeps placing the same draw on the same (feature, position)
+    /// — then transposed to the `[1, patch_size, feat_dim]` patch layout.
+    /// `i` is the index of the patch about to be emitted, so consecutive
+    /// patches never share noise and the run is reproducible from
+    /// `options.seed`. Everything after the draw is
     /// [`step_with_noise`](Self::step_with_noise). `randn_seeded` is
     /// reproducible per backend, so one seed draws differently on CPU and
     /// CUDA.
@@ -85,6 +93,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             client,
         )
         .map_err(Error::Numr)?;
+        let z = var_contiguous(&var_transpose(&z).map_err(Error::Numr)?)?;
         self.step_with_noise(client, state, &z, options)
     }
 
@@ -337,8 +346,9 @@ mod tests {
         let mut st = state(&fx, &device);
         let opts = options(2, 8);
 
-        // `z` is [1, feat_dim, patch_size], NOT the patch layout.
-        let transposed = Var::new(t(&[1, PATCH_SIZE, FEAT_DIM], 0.5, &device), false);
+        // `z` is the [1, patch_size, feat_dim] patch layout, NOT the
+        // reference's noise layout.
+        let transposed = Var::new(t(&[1, FEAT_DIM, PATCH_SIZE], 0.5, &device), false);
         assert!(
             generator
                 .step_with_noise(&client, &mut st, &transposed, &opts)

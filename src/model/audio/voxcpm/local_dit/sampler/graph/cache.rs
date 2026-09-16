@@ -62,7 +62,7 @@ impl CapturedEuler {
         self.captured.launch()
     }
 
-    /// Stable `[batch, feat_dim, patch_size]` buffer the loop starts from.
+    /// Stable `[batch, patch_size, feat_dim]` buffer the loop starts from.
     pub fn z_buf(&self) -> &Tensor<CudaRuntime> {
         &self.captured.inputs()[0]
     }
@@ -72,12 +72,12 @@ impl CapturedEuler {
         &self.captured.inputs()[1]
     }
 
-    /// Stable `[batch, feat_dim, patch_size]` prefix-condition buffer.
+    /// Stable `[batch, patch_size, feat_dim]` prefix-condition buffer.
     pub fn cond_buf(&self) -> &Tensor<CudaRuntime> {
         &self.captured.inputs()[2]
     }
 
-    /// Stable `[batch, feat_dim, patch_size]` buffer the graph's final D2D
+    /// Stable `[batch, patch_size, feat_dim]` buffer the graph's final D2D
     /// copy writes. Overwritten by every launch: callers copy out of it.
     pub fn x_out_buf(&self) -> &Tensor<CudaRuntime> {
         &self.captured.outputs()[0]

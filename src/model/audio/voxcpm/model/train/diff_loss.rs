@@ -4,9 +4,9 @@
 use crate::error::Result;
 use crate::model::audio::voxcpm::model::generate::{PatchGenerator, TeacherForcedConditioning};
 use crate::model::traits::ModelClient;
-use crate::nn::{flow_matching_interpolate, flow_matching_loss, var_contiguous};
+use crate::nn::{flow_matching_interpolate, flow_matching_loss};
 use crate::quant::traits::DequantOps;
-use numr::autograd::{Var, var_transpose};
+use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
@@ -54,26 +54,18 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         let noise_var = Var::new(noise.to_dtype(dtype)?, false);
         let t_var = Var::new(t.to_dtype(dtype)?, false);
 
-        // The CFM probability path, still in [T, patch_size, feat_dim] —
-        // the layout `target_patches`/`noise` arrived in.
+        // The CFM probability path, in [T, patch_size, feat_dim] — the
+        // layout `target_patches`/`noise` arrived in and the layout the DiT
+        // takes and returns, so nothing is transposed on either side.
         let x_t = flow_matching_interpolate(client, &noise_var, &target_var, &t_var)?;
-
-        // Into the DiT's [T, feat_dim, patch_size] layout — see the module
-        // docs for why both `x_t` and `cond.cond` are transposed here and
-        // the estimator's output is transposed back below.
-        let x_t_dit = var_contiguous(&var_transpose(&x_t)?)?;
-        let cond_dit = var_contiguous(&var_transpose(&cond.cond)?)?;
 
         // `dt` is the mean-velocity delta, always zero on this checkpoint
         // (`mean_mode` is false) — see the module docs.
         let dt_zero = Var::new(Tensor::<R>::zeros(&[tcount], dtype, device)?, false);
 
-        let v_pred_dit = self
+        let v_pred = self
             .feat_decoder
-            .forward(client, &x_t_dit, &cond.mu, &t_var, &cond_dit, &dt_zero)?;
-        // Back to [T, patch_size, feat_dim] to compare against
-        // `noise`/`target_patches` in their native layout.
-        let v_pred = var_contiguous(&var_transpose(&v_pred_dit)?)?;
+            .forward(client, &x_t, &cond.mu, &t_var, &cond.cond, &dt_zero)?;
 
         flow_matching_loss(client, &v_pred, &noise_var, &target_var)
     }

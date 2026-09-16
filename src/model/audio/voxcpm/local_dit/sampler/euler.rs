@@ -24,11 +24,11 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
     /// pin the noise and reproduce a run bit for bit. Use
     /// [`sample`](Self::sample) for the noise-drawing wrapper.
     ///
-    /// - `z`: `[batch, feat_dim, patch_size]` — the starting sample.
+    /// - `z`: `[batch, patch_size, feat_dim]` — the starting sample.
     /// - `t_span`: the schedule from [`cfm_time_span`], at least 2 entries.
     /// - `mu`: `[batch, mu_tokens * hidden_dim]` — the global condition. It is
     ///   the ONLY input zeroed on the unconditional half of the doubled batch.
-    /// - `cond`: `[batch, feat_dim, patch_size]` — the prefix condition.
+    /// - `cond`: `[batch, patch_size, feat_dim]` — the prefix condition.
     /// - `cfg_value`: guidance weight; `1.0` means no guidance.
     /// - `use_cfg_zero_star`: enables the zero-velocity warmup steps.
     /// - `trajectory`: when `Some`, receives `x` AFTER every step, including
@@ -36,7 +36,7 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
     ///   state after step `k + 1`, and its length is `t_span.len() - 1`. When
     ///   `None` nothing is recorded and the hot path allocates nothing extra.
     ///
-    /// Returns `[batch, feat_dim, patch_size]`.
+    /// Returns `[batch, patch_size, feat_dim]`.
     #[allow(clippy::too_many_arguments)]
     pub fn solve_euler<C>(
         &self,
@@ -95,6 +95,8 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
             &[2 * batch, mu_tokens, self.hidden_dim()],
         )
         .map_err(Error::Numr)?;
+        // `cond_in` is constant across the steps too: project it ONCE.
+        let cond_h = self.project_cond(client, &cond_in)?;
         // The estimator's `dt` is the mean-velocity delta, not the Euler step:
         // `mean_mode` is false on this checkpoint, so it is zero throughout.
         let dt_in = Var::new(
@@ -114,15 +116,15 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
                         .map_err(Error::Numr)?,
                     false,
                 );
-                let out =
-                    self.forward_with_mu_tokens(client, &x_in, &mu_tok, &t_in, &cond_in, &dt_in)?;
+                let out = self.forward_prepared(client, &x_in, &mu_tok, &t_in, &cond_h, &dt_in)?;
 
                 // First half = real `mu` = conditional. Second half = zero
                 // `mu` = unconditional. The reference calls the second one
                 // `cfg_dphi_dt`, which is the opposite of what it holds.
-                let v_cond = var_contiguous(&var_narrow(&out, 0, 0, batch).map_err(Error::Numr)?)?;
-                let v_uncond =
-                    var_contiguous(&var_narrow(&out, 0, batch, batch).map_err(Error::Numr)?)?;
+                // Leading-axis halves of a dense tensor are dense views, so
+                // no copy happens here.
+                let v_cond = var_narrow(&out, 0, 0, batch).map_err(Error::Numr)?;
+                let v_uncond = var_narrow(&out, 0, batch, batch).map_err(Error::Numr)?;
 
                 let st_star = optimized_scale(client, &v_cond, &v_uncond)?;
                 let velocity = cfg_combine(client, &v_cond, &v_uncond, &st_star, cfg_value)?;
@@ -142,7 +144,7 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
     /// Draw noise and integrate: the full CFM sample.
     ///
     /// `z` is `randn_seeded(seed) * temperature` over
-    /// `[batch, feat_dim, patch_size]`, taking `batch`, dtype and device from
+    /// `[batch, patch_size, feat_dim]`, taking `batch`, dtype and device from
     /// `cond`. Everything after the draw is
     /// [`solve_euler_graphed`](Self::solve_euler_graphed): CUDA graph replay
     /// where available, the eager [`solve_euler`](Self::solve_euler) loop
@@ -152,7 +154,7 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
     /// `randn_seeded` is reproducible per backend, so a CPU run and a CUDA run
     /// of one seed start from different noise.
     ///
-    /// Returns `[batch, feat_dim, patch_size]`.
+    /// Returns `[batch, patch_size, feat_dim]`.
     pub fn sample<C>(
         &self,
         client: &C,
@@ -182,7 +184,7 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
 
         let noise = client
             .randn_seeded(
-                &[batch, self.feat_dim, self.patch_size],
+                &[batch, self.patch_size, self.feat_dim],
                 cond.tensor().dtype(),
                 seed,
             )
@@ -225,7 +227,7 @@ mod tests {
         Setup {
             z: Var::new(
                 fixture::t(
-                    &[batch, fixture::FEAT_DIM, fixture::PATCH_SIZE],
+                    &[batch, fixture::PATCH_SIZE, fixture::FEAT_DIM],
                     0.9,
                     device,
                 ),
@@ -241,7 +243,7 @@ mod tests {
             ),
             cond: Var::new(
                 fixture::t(
-                    &[batch, fixture::FEAT_DIM, fixture::PATCH_SIZE],
+                    &[batch, fixture::PATCH_SIZE, fixture::FEAT_DIM],
                     1.7,
                     device,
                 ),

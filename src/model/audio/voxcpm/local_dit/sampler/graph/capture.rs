@@ -1,7 +1,7 @@
 //! Capture and replay of the post-warmup Euler loop on `CudaRuntime`.
 //!
-//! Capture region: from `mu_in`/`cond_in`/`mu_tok` assembly through every
-//! non-warmup step to one D2D copy of the final `x` into `x_out_buf`. The
+//! Capture region: from `mu_in`/`cond_in`/`mu_tok`/`cond_h` assembly through
+//! every non-warmup step to one D2D copy of the final `x` into `x_out_buf`. The
 //! warmup steps touch nothing on the device (`x == z`), so the graph starts
 //! straight from `z_buf`. Every op inside the region is the SAME numr op the
 //! eager loop issues, in the same order, so replay is bit-identical to
@@ -27,7 +27,7 @@ use crate::nn::var_contiguous;
 ///
 /// `z`, `mu` and `cond` are the caller's tensors; their shapes and dtype
 /// already match `key` (the generic entry derived the key from them).
-/// Returns a FRESH `[batch, feat_dim, patch_size]` tensor: the graph's own
+/// Returns a FRESH `[batch, patch_size, feat_dim]` tensor: the graph's own
 /// output buffer is overwritten by the next launch, so it never escapes.
 pub(in crate::model::audio::voxcpm::local_dit::sampler) fn solve_euler_cuda(
     dit: &LocalDit<CudaRuntime>,
@@ -118,7 +118,7 @@ fn capture(
     let device = client.device();
     let dtype = key.dtype;
     let batch = key.batch;
-    let patch_shape = [batch, dit.feat_dim(), dit.patch_size()];
+    let patch_shape = [batch, dit.patch_size(), dit.feat_dim()];
     let mu_shape = [batch, key.mu_tokens * dit.hidden_dim()];
 
     let steps: Vec<EulerStep> = euler_steps(t_span, key.use_cfg_zero_star)
@@ -170,25 +170,26 @@ fn capture(
         let dt_in = Var::new(dt_in.clone(), false);
 
         // Same assembly as the eager loop: conditional `mu` on top of zero
-        // `mu`, `cond` duplicated, `mu` tokenized once for every step.
+        // `mu`, `cond` duplicated, `mu` tokenized and `cond` projected once
+        // for every step.
         let mu_in = var_cat(&[&mu, &mu_zero], 0, cc)?;
         let cond_in = var_cat(&[&cond, &cond], 0, cc)?;
         let mu_tok = var_reshape(
             &var_contiguous(&mu_in).map_err(into_numr)?,
             &[2 * batch, key.mu_tokens, dit.hidden_dim()],
         )?;
+        let cond_h = dit.project_cond(cc, &cond_in).map_err(into_numr)?;
 
         let mut x = z;
         for (step, t_in) in steps.iter().zip(&t_ins) {
             let x_in = var_cat(&[&x, &x], 0, cc)?;
             let t_in = Var::new(t_in.clone(), false);
             let out = dit
-                .forward_with_mu_tokens(cc, &x_in, &mu_tok, &t_in, &cond_in, &dt_in)
+                .forward_prepared(cc, &x_in, &mu_tok, &t_in, &cond_h, &dt_in)
                 .map_err(into_numr)?;
 
-            let v_cond = var_contiguous(&var_narrow(&out, 0, 0, batch)?).map_err(into_numr)?;
-            let v_uncond =
-                var_contiguous(&var_narrow(&out, 0, batch, batch)?).map_err(into_numr)?;
+            let v_cond = var_narrow(&out, 0, 0, batch)?;
+            let v_uncond = var_narrow(&out, 0, batch, batch)?;
             let st_star = optimized_scale(cc, &v_cond, &v_uncond).map_err(into_numr)?;
             let velocity =
                 cfg_combine(cc, &v_cond, &v_uncond, &st_star, cfg_value).map_err(into_numr)?;
@@ -243,7 +244,7 @@ mod tests {
     fn inputs(batch: usize, z_seed: f32, cond_seed: f32, device: &CudaDevice) -> Inputs {
         Inputs {
             z: var(
-                &[batch, fixture::FEAT_DIM, fixture::PATCH_SIZE],
+                &[batch, fixture::PATCH_SIZE, fixture::FEAT_DIM],
                 z_seed,
                 device,
             ),
@@ -253,7 +254,7 @@ mod tests {
                 device,
             ),
             cond: var(
-                &[batch, fixture::FEAT_DIM, fixture::PATCH_SIZE],
+                &[batch, fixture::PATCH_SIZE, fixture::FEAT_DIM],
                 cond_seed,
                 device,
             ),

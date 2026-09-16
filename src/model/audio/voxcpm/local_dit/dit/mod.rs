@@ -22,10 +22,13 @@
 //!
 //! Traps this implementation is pinned against:
 //!
-//! - `x` and `cond` arrive as `[b, feat_dim, patch_size]` and are TRANSPOSED
-//!   to `[b, patch_size, feat_dim]` before their projections; the result is
-//!   transposed BACK at the end. Skipping either transpose silently projects
-//!   the wrong axis.
+//! - The reference's `[b, feat_dim, patch_size]` I/O is a convention, not a
+//!   kernel requirement: it transposes to `[b, patch_size, feat_dim]` before
+//!   its projections and back after `out_proj`. This port takes and returns
+//!   `[b, patch_size, feat_dim]` directly — the layout every caller (the
+//!   Euler loop, the per-patch generator, the CFM loss) already holds — so
+//!   neither transpose exists here. A caller holding the reference layout
+//!   (the fixture gates) transposes at its own boundary.
 //! - `mu` is `[b, 2 * hidden_dim]` and reshapes to **two** tokens of
 //!   `hidden_dim`, not one. The token count is derived
 //!   (`mu_dim / hidden_dim`), never hardcoded.
@@ -52,5 +55,6 @@
 //! loaded with the checkpoint; it is built once from `hidden_dim` at load
 //! time in `local_dit/loader.rs` and reused here on every call.
 
+mod estimator;
 mod forward;
 mod validate;

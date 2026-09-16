@@ -273,7 +273,11 @@ where
         )?;
         // `sequence_len()` derives `2 (mu) + 1 (t) + patch_size (cond) +
         // patch_size (x)` — never hardcoded 11.
-        let rope = rope.narrow_positions(cfg.sequence_len())?;
+        let mut rope = rope.narrow_positions(cfg.sequence_len())?;
+        // `precompute_freqs` builds F32 tables. Cast once here to the dtype
+        // the stack runs at (`norm.weight` is the witness, as in
+        // `minicpm4/loader.rs`) so `apply_rope` never casts per call.
+        rope.cast_caches(norm.weight().tensor().dtype())?;
 
         // No learned weights (see the module doc); built once here, like
         // `rope` above, so `forward` never re-uploads its frequency table.

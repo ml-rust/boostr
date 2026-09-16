@@ -1,9 +1,12 @@
+//! The public `forward*` entry points of the estimator: input preparation
+//! (`mu` tokenization, `cond` projection) around the core in `estimator.rs`.
+
 use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::local_dit::loader::LocalDit;
 use crate::model::traits::ModelClient;
-use crate::nn::{SinusoidalPosEmb, var_contiguous};
+use crate::nn::var_contiguous;
 use crate::quant::traits::DequantOps;
-use numr::autograd::{Var, var_add, var_cast, var_cat, var_narrow, var_reshape, var_transpose};
+use numr::autograd::{Var, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
@@ -31,16 +34,17 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
 
     /// One estimator evaluation.
     ///
-    /// - `x`: `[batch, feat_dim, patch_size]` — the current CFM sample.
+    /// - `x`: `[batch, patch_size, feat_dim]` — the current CFM sample.
     /// - `mu`: `[batch, mu_tokens * hidden_dim]` — the global-encoder
     ///   condition, reshaped to `mu_tokens` sequence positions (2 on this
     ///   checkpoint).
     /// - `t`: `[batch]` — the flow timestep, one scalar per sample.
-    /// - `cond`: `[batch, feat_dim, patch_size]` — the prefix condition.
+    /// - `cond`: `[batch, patch_size, feat_dim]` — the prefix condition.
     /// - `dt`: `[batch]` — the mean-velocity delta. Zero at inference, but
     ///   still a live input: see the module docs.
     ///
-    /// Returns `[batch, feat_dim, patch_size]`.
+    /// Returns `[batch, patch_size, feat_dim]` — the patch layout every
+    /// caller holds (see the module docs for the reference's transposes).
     ///
     /// When
     /// [`set_activation_checkpointing`](Self::set_activation_checkpointing)
@@ -130,105 +134,19 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
             + TypeConversionOps<R>
             + DequantOps<R>,
     {
-        let batch = self.check_patch_input("x", x, None)?;
-        self.check_patch_input("cond", cond, Some(batch))?;
-        super::validate::check_timestep("t", t, batch)?;
-        super::validate::check_timestep("dt", dt, batch)?;
-        let mu_tokens = self.check_mu_tokens(mu_tok, batch)?;
-
-        // [b, feat_dim, P] -> [b, P, feat_dim] -> [b, P, hidden].
-        // `var_transpose` swaps the last two dims and yields a strided view;
-        // `Linear` reshapes its input, so materialize first.
-        let x_h = self.in_proj.forward(
-            client,
-            &var_contiguous(&var_transpose(x).map_err(Error::Numr)?)?,
-        )?;
-        let cond_h = self.cond_proj.forward(
-            client,
-            &var_contiguous(&var_transpose(cond).map_err(Error::Numr)?)?,
-        )?;
-        // `prefix` in the reference: the number of `cond` positions.
-        let prefix = cond_h.shape()[1];
-        let hidden_dtype = x_h.tensor().dtype();
-
-        // One shared SinusoidalPosEmb, two separate MLPs, summed. The `dt`
-        // branch is NOT dead: SinusoidalPosEmb(0) = [0..0, 1..1]. The
-        // embedding is built once at load time (see `local_dit/loader.rs`),
-        // not reconstructed per call.
-        let t_emb = self.embed_time(client, &self.time_embeddings, t, hidden_dtype, true)?;
-        let dt_emb = self.embed_time(client, &self.time_embeddings, dt, hidden_dtype, false)?;
-        let t_sum = var_add(&t_emb, &dt_emb, client).map_err(Error::Numr)?;
-        // `t.unsqueeze(1)`: one sequence position.
-        let t_tok = var_reshape(&t_sum, &[batch, 1, self.hidden_dim]).map_err(Error::Numr)?;
-
-        // [mu, t, cond, x] along the sequence axis.
-        let seq = var_cat(&[mu_tok, &t_tok, &cond_h, &x_h], 1, client).map_err(Error::Numr)?;
-
-        // Final norm BEFORE the slice — it is part of `self.decoder`.
-        let h = if self.activation_checkpointing {
-            let mut h = seq;
-            for layer in &self.layers {
-                h = layer.forward_checkpointed(client, &h, &self.rope)?;
-            }
-            self.norm.forward(client, &h)?
-        } else {
-            // Deferred-residual fusion across layers: each layer folds the
-            // PREVIOUS layer's MLP output into its own input norm instead of
-            // a separate add, and hands its own MLP output on unadded. See
-            // `BidirectionalLayer::forward_with_pending_residual`.
-            let mut h = seq;
-            let mut pending: Option<Var<R>> = None;
-            for layer in &self.layers {
-                let (new_h, mlp_out) = layer.forward_with_pending_residual(
-                    client,
-                    &h,
-                    pending.as_ref(),
-                    &self.rope,
-                )?;
-                h = new_h;
-                pending = Some(mlp_out);
-            }
-            match pending {
-                Some(last_mlp) => self.norm.residual_norm(client, &h, &last_mlp)?.0,
-                // `self.layers` is empty: nothing was deferred.
-                None => self.norm.forward(client, &h)?,
-            }
-        };
-
-        // Keep only the trailing `x` window: `prefix + mu_tokens + 1 ..`.
-        let seq_len = h.shape()[1];
-        let start = prefix + mu_tokens + 1;
-        if start >= seq_len {
-            return Err(Error::InvalidArgument {
-                arg: "x",
-                reason: format!(
-                    "assembled sequence of {seq_len} positions has no room for the \
-                     trailing x window starting at {start}"
-                ),
-            });
-        }
-        let window = var_narrow(&h, 1, start, seq_len - start).map_err(Error::Numr)?;
-        let tail = var_contiguous(&window)?;
-
-        // [b, P, hidden] -> [b, P, feat_dim] -> [b, feat_dim, P].
-        let out = self.out_proj.forward(client, &tail)?;
-        var_contiguous(&var_transpose(&out).map_err(Error::Numr)?)
+        let cond_h = self.project_cond(client, cond)?;
+        self.forward_prepared(client, x, mu_tok, t, &cond_h, dt)
     }
 
-    /// `SinusoidalPosEmb` -> the matching MLP, mirroring the reference's
-    /// `time_embeddings(t).to(x.dtype)`. The embedding's frequency table is
-    /// `f32`, so the timestep is cast to `f32` going in and the embedding is
-    /// cast to the hidden dtype coming out; both casts are no-ops for an
-    /// `f32` model. `use_time_mlp` selects `time_mlp` (`t`) over
-    /// `delta_time_mlp` (`dt`).
-    fn embed_time<C>(
-        &self,
-        client: &C,
-        time_embeddings: &SinusoidalPosEmb<R>,
-        step: &Var<R>,
-        hidden_dtype: DType,
-        use_time_mlp: bool,
-    ) -> Result<Var<R>>
+    /// `cond_proj(cond)`: the prefix condition as `[batch, patch_size,
+    /// hidden_dim]` sequence tokens.
+    ///
+    /// `cond` is IDENTICAL across every step of one Euler solve, so the
+    /// integrators project it ONCE and hand the result to
+    /// [`forward_prepared`](Self::forward_prepared) on every step — the same
+    /// hoist `mu_tok` gets. [`forward_with_mu_tokens`](Self::forward_with_mu_tokens)
+    /// does this projection per call for single-shot callers.
+    pub fn project_cond<C>(&self, client: &C, cond: &Var<R>) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
         R::Client: TensorOps<R>
@@ -239,14 +157,10 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
             + TypeConversionOps<R>
             + DequantOps<R>,
     {
-        let step = var_cast(step, DType::F32, client).map_err(Error::Numr)?;
-        let emb = time_embeddings.forward(client, &step)?;
-        let emb = var_cast(&emb, hidden_dtype, client).map_err(Error::Numr)?;
-        if use_time_mlp {
-            self.time_mlp.forward(client, &emb)
-        } else {
-            self.delta_time_mlp.forward(client, &emb)
-        }
+        self.check_patch_input("cond", cond, None)?;
+        // `Linear` reshapes its input: a no-op for the dense tensors every
+        // caller holds, a copy only for a strided view.
+        self.cond_proj.forward(client, &var_contiguous(cond)?)
     }
 }
 
@@ -273,10 +187,10 @@ mod tests {
 
     fn inputs(batch: usize, x_seed: f32, cond_seed: f32, device: &CpuDevice) -> Inputs {
         Inputs {
-            x: Var::new(t(&[batch, FEAT_DIM, PATCH_SIZE], x_seed, device), false),
+            x: Var::new(t(&[batch, PATCH_SIZE, FEAT_DIM], x_seed, device), false),
             mu: Var::new(t(&[batch, MU_TOKENS * HIDDEN_DIM], 1.3, device), false),
             t: Var::new(t(&[batch], 2.1, device), false),
-            cond: Var::new(t(&[batch, FEAT_DIM, PATCH_SIZE], cond_seed, device), false),
+            cond: Var::new(t(&[batch, PATCH_SIZE, FEAT_DIM], cond_seed, device), false),
             // `dt = 0` is the inference value, and it is NOT a no-op branch.
             dt: Var::new(
                 Tensor::<CpuRuntime>::from_slice(&vec![0.0f32; batch], &[batch], device).unwrap(),
@@ -289,12 +203,12 @@ mod tests {
         let out = model
             .forward(client, &i.x, &i.mu, &i.t, &i.cond, &i.dt)
             .unwrap();
-        assert_eq!(out.shape(), &[i.x.shape()[0], FEAT_DIM, PATCH_SIZE]);
+        assert_eq!(out.shape(), &[i.x.shape()[0], PATCH_SIZE, FEAT_DIM]);
         out.tensor().contiguous().unwrap().to_vec()
     }
 
     #[test]
-    fn output_shape_is_batch_feat_dim_patch_size() {
+    fn output_shape_is_batch_patch_size_feat_dim() {
         let (client, device) = cpu_setup();
         let m = model(2, &device);
         let out = run(&client, &m, &inputs(3, 0.9, 1.7, &device));
@@ -438,15 +352,15 @@ mod tests {
         let m = model(1, &device);
         let good = inputs(2, 0.9, 1.7, &device);
 
-        // x is 2D, not [batch, feat_dim, patch_size].
+        // x is 2D, not [batch, patch_size, feat_dim].
         let bad_x = Var::new(t(&[2, FEAT_DIM], 0.9, &device), false);
         assert!(
             m.forward(&client, &bad_x, &good.mu, &good.t, &good.cond, &good.dt)
                 .is_err()
         );
 
-        // cond's patch axis is wrong.
-        let bad_cond = Var::new(t(&[2, FEAT_DIM, PATCH_SIZE + 1], 1.7, &device), false);
+        // cond's feature axis is wrong.
+        let bad_cond = Var::new(t(&[2, PATCH_SIZE, FEAT_DIM + 1], 1.7, &device), false);
         assert!(
             m.forward(&client, &good.x, &good.mu, &good.t, &bad_cond, &good.dt)
                 .is_err()

@@ -2,9 +2,10 @@
 
 use crate::error::{Error, Result};
 use crate::model::traits::ModelClient;
+use crate::nn::var_contiguous;
 use numr::autograd::{
     Var, var_add, var_add_scalar, var_div, var_mul, var_mul_scalar, var_reshape, var_square,
-    var_sub, var_sum,
+    var_sub, var_sum, var_transpose,
 };
 use numr::dtype::DType;
 use numr::ops::{ScalarOps, TensorOps};
@@ -17,10 +18,16 @@ use numr::runtime::Runtime;
 /// ```
 ///
 /// `pos` is the CONDITIONAL velocity and `neg` the UNCONDITIONAL one, both
-/// `[batch, feat_dim, patch_size]`. The reduction is per batch row over the
-/// flattened `feat_dim * patch_size`, and `1e-8` is added INSIDE the
-/// denominator sum, before the divide — not to the quotient. The result is
-/// `[batch, 1, 1]`, shaped to broadcast back over the velocities.
+/// `[batch, patch_size, feat_dim]`. The reduction is per batch row over the
+/// flattened patch, and `1e-8` is added INSIDE the denominator sum, before
+/// the divide — not to the quotient. The result is `[batch, 1, 1]`, shaped
+/// to broadcast back over the velocities.
+///
+/// Reduction order: the reference sums its `[batch, feat_dim, patch_size]`
+/// velocities flattened feature-major, and a float sum is only reproducible
+/// bit for bit in the order it was taken. So the per-element products are
+/// laid out feature-major before the sum — one small transpose copy each —
+/// even though the velocities themselves arrive in the patch layout.
 pub(super) fn optimized_scale<R, C>(client: &C, pos: &Var<R>, neg: &Var<R>) -> Result<Var<R>>
 where
     R: Runtime<DType = DType>,
@@ -39,23 +46,17 @@ where
     }
     let batch = shape[0];
     let flat: usize = shape[1..].iter().product();
-    let pos_flat = var_reshape(pos, &[batch, flat]).map_err(Error::Numr)?;
-    let neg_flat = var_reshape(neg, &[batch, flat]).map_err(Error::Numr)?;
+    // `[batch, patch_size, feat_dim]` products -> `[batch, feat_dim,
+    // patch_size]` dense -> `[batch, feat_dim * patch_size]`.
+    let feature_major = |v: &Var<R>| -> Result<Var<R>> {
+        let t = var_contiguous(&var_transpose(v).map_err(Error::Numr)?)?;
+        var_reshape(&t, &[batch, flat]).map_err(Error::Numr)
+    };
+    let prod = feature_major(&var_mul(pos, neg, client).map_err(Error::Numr)?)?;
+    let sq_el = feature_major(&var_square(neg, client).map_err(Error::Numr)?)?;
 
-    let dot = var_sum(
-        &var_mul(&pos_flat, &neg_flat, client).map_err(Error::Numr)?,
-        &[1],
-        true,
-        client,
-    )
-    .map_err(Error::Numr)?;
-    let sq = var_sum(
-        &var_square(&neg_flat, client).map_err(Error::Numr)?,
-        &[1],
-        true,
-        client,
-    )
-    .map_err(Error::Numr)?;
+    let dot = var_sum(&prod, &[1], true, client).map_err(Error::Numr)?;
+    let sq = var_sum(&sq_el, &[1], true, client).map_err(Error::Numr)?;
     let sq = var_add_scalar(&sq, 1e-8, client).map_err(Error::Numr)?;
 
     let scale = var_div(&dot, &sq, client).map_err(Error::Numr)?;

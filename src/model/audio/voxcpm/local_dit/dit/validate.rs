@@ -5,7 +5,7 @@ use numr::dtype::DType;
 use numr::runtime::Runtime;
 
 impl<R: Runtime<DType = DType>> LocalDit<R> {
-    /// Validate an `[batch, feat_dim, patch_size]` input, returning its batch.
+    /// Validate a `[batch, patch_size, feat_dim]` input, returning its batch.
     /// `expected_batch` pins the batch against an earlier input.
     ///
     /// `pub(super)` so the sibling CFM sampler validates `z`/`cond` up front
@@ -21,17 +21,17 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
             return Err(Error::InvalidArgument {
                 arg,
                 reason: format!(
-                    "expected 3D [batch, feat_dim, patch_size], got {}D {shape:?}",
+                    "expected 3D [batch, patch_size, feat_dim], got {}D {shape:?}",
                     shape.len()
                 ),
             });
         }
-        if shape[1] != self.feat_dim || shape[2] != self.patch_size {
+        if shape[1] != self.patch_size || shape[2] != self.feat_dim {
             return Err(Error::InvalidArgument {
                 arg,
                 reason: format!(
                     "expected [batch, {}, {}], got {shape:?}",
-                    self.feat_dim, self.patch_size
+                    self.patch_size, self.feat_dim
                 ),
             });
         }
@@ -74,6 +74,26 @@ impl<R: Runtime<DType = DType>> LocalDit<R> {
             });
         }
         Ok(shape[1] / self.hidden_dim)
+    }
+
+    /// Validate a pre-projected `cond_h: [batch, patch_size, hidden_dim]`
+    /// (the output of `LocalDit::project_cond`) against `x`'s batch.
+    pub(super) fn check_cond_hidden(&self, cond_h: &Var<R>, batch: usize) -> Result<()> {
+        let shape = cond_h.shape();
+        if shape.len() != 3
+            || shape[0] != batch
+            || shape[1] != self.patch_size
+            || shape[2] != self.hidden_dim
+        {
+            return Err(Error::InvalidArgument {
+                arg: "cond_h",
+                reason: format!(
+                    "expected 3D [{batch}, {}, {}], got {shape:?}",
+                    self.patch_size, self.hidden_dim
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Validate a pre-tokenized `mu_tok: [batch, mu_tokens, hidden_dim]` and

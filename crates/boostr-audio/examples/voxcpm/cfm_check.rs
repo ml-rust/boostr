@@ -16,7 +16,9 @@
 //! Unlike the estimator gate, this one cannot stop at a final-output
 //! comparison. The sampler's failure mode is plausible-but-wrong output: a
 //! wrong guidance branch, a wrong schedule, or a missed warmup step all still
-//! produce a `[batch, feat_dim, patch_size]` tensor of a plausible magnitude.
+//! produce a `[batch, patch_size, feat_dim]` tensor of a plausible magnitude.
+//! (The fixture stores every patch tensor in the reference's `[batch,
+//! feat_dim, patch_size]` layout; this gate transposes at its boundary.)
 //! A final-output-only check cannot tell those apart, and a mismatch there
 //! gives no lead on which of the ten steps introduced it. So this gate checks
 //! three things in order, each isolating one failure class from the next:
@@ -108,13 +110,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cond = fx.load_tensor::<CpuRuntime>("cond", &device)?;
     let want_out = fx.load_tensor::<CpuRuntime>("out", &device)?;
 
+    // Reference layout in, patch layout through the sampler, reference
+    // layout back out for the comparisons.
+    let to_patch = |t: &numr::tensor::Tensor<CpuRuntime>| -> Result<_, Box<dyn std::error::Error>> {
+        Ok(t.transpose(1, 2)?.contiguous()?)
+    };
     let mut trajectory: Vec<Var<CpuRuntime>> = Vec::new();
     let got_out = model.solve_euler(
         &client,
-        &Var::new(z.clone(), false),
+        &Var::new(to_patch(&z)?, false),
         &want_t_span,
         &Var::new(mu, false),
-        &Var::new(cond, false),
+        &Var::new(to_patch(&cond)?, false),
         2.0,
         true,
         Some(&mut trajectory),
@@ -124,8 +131,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(trajectory.len(), 10);
     for (k, step) in trajectory.iter().enumerate() {
         let want_step = fx.load_tensor::<CpuRuntime>(&format!("step{k}_x"), &device)?;
-        assert_eq!(step.tensor().shape(), want_step.shape());
-        let g: Vec<f32> = step.tensor().contiguous()?.to_vec();
+        let step = to_patch(step.tensor())?;
+        assert_eq!(step.shape(), want_step.shape());
+        let g: Vec<f32> = step.to_vec();
         let w: Vec<f32> = want_step.contiguous()?.to_vec();
         ok &= report(&format!("step{k}"), max_abs_err(&g, &w));
         if k == 0 {
@@ -138,8 +146,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("final output:");
-    assert_eq!(got_out.tensor().shape(), want_out.shape());
-    let g: Vec<f32> = got_out.tensor().contiguous()?.to_vec();
+    let got_out = to_patch(got_out.tensor())?;
+    assert_eq!(got_out.shape(), want_out.shape());
+    let g: Vec<f32> = got_out.to_vec();
     let w: Vec<f32> = want_out.contiguous()?.to_vec();
     ok &= report("out", max_abs_err(&g, &w));
 

@@ -208,9 +208,9 @@ mod tests {
         let (client, device) = cpu_setup();
         let m = fixture::model(1, &device);
         let span = cfm_time_span(4, 1.0).unwrap();
-        let z = var(&[2, fixture::FEAT_DIM, fixture::PATCH_SIZE], 0.9, &device);
+        let z = var(&[2, fixture::PATCH_SIZE, fixture::FEAT_DIM], 0.9, &device);
         let mu = var(&[2, fixture::MU_TOKENS * fixture::HIDDEN_DIM], 1.3, &device);
-        let cond = var(&[2, fixture::FEAT_DIM, fixture::PATCH_SIZE], 1.7, &device);
+        let cond = var(&[2, fixture::PATCH_SIZE, fixture::FEAT_DIM], 1.7, &device);
 
         let eager = m
             .solve_euler(&client, &z, &span, &mu, &cond, 2.0, true, None)
@@ -230,9 +230,9 @@ mod tests {
         let (client, device) = cpu_setup();
         let m = fixture::model(1, &device);
         let span = cfm_time_span(4, 1.0).unwrap();
-        let z = var(&[1, fixture::FEAT_DIM, fixture::PATCH_SIZE], 0.9, &device);
+        let z = var(&[1, fixture::PATCH_SIZE, fixture::FEAT_DIM], 0.9, &device);
         let mu = var(&[1, fixture::MU_TOKENS * fixture::HIDDEN_DIM], 1.3, &device);
-        let cond = var(&[1, fixture::FEAT_DIM, fixture::PATCH_SIZE], 1.7, &device);
+        let cond = var(&[1, fixture::PATCH_SIZE, fixture::FEAT_DIM], 1.7, &device);
 
         let mut trace = Vec::new();
         let out = m
@@ -246,9 +246,9 @@ mod tests {
     fn graphed_rejects_a_one_entry_schedule() {
         let (client, device) = cpu_setup();
         let m = fixture::model(1, &device);
-        let z = var(&[1, fixture::FEAT_DIM, fixture::PATCH_SIZE], 0.9, &device);
+        let z = var(&[1, fixture::PATCH_SIZE, fixture::FEAT_DIM], 0.9, &device);
         let mu = var(&[1, fixture::MU_TOKENS * fixture::HIDDEN_DIM], 1.3, &device);
-        let cond = var(&[1, fixture::FEAT_DIM, fixture::PATCH_SIZE], 1.7, &device);
+        let cond = var(&[1, fixture::PATCH_SIZE, fixture::FEAT_DIM], 1.7, &device);
         assert!(
             m.solve_euler_graphed(&client, &z, &[1.0], &mu, &cond, 2.0, true, None)
                 .is_err()

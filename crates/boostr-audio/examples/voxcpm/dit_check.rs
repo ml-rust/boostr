@@ -8,6 +8,9 @@
 //! `CKPT_DIR` is the VoxCPM2 checkpoint (`config.json` + `model.safetensors`).
 //! `FIXTURE_DIR` holds `dit_fixture.safetensors`, written by
 //! `audio/pipeline/make_dit_fixture.py` from the reference implementation.
+//! The fixture keeps the reference's `[b, feat_dim, patch_size]` layout for
+//! `x`, `cond` and `out`; the port takes and returns `[b, patch_size,
+//! feat_dim]`, so this gate transposes at its own boundary.
 //!
 //! This is the gate for the port, same posture as `voxcpm_baselm_check` and
 //! `voxcpm_locenc_check`: running and producing plausible numbers proves
@@ -62,13 +65,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let got = model.forward(
             &client,
-            &Var::new(x.clone(), false),
+            &Var::new(x.transpose(1, 2)?.contiguous()?, false),
             &Var::new(mu.clone(), false),
             &Var::new(t.clone(), false),
-            &Var::new(cond.clone(), false),
+            &Var::new(cond.transpose(1, 2)?.contiguous()?, false),
             &Var::new(dt.clone(), false),
         )?;
-        let got = got.tensor();
+        let got = got.tensor().transpose(1, 2)?.contiguous()?;
+        let got = &got;
         println!(
             "case{c}: t={t_vals:?} x={:?} -> got {:?} want {:?}",
             x.shape(),

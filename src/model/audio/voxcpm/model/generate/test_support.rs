@@ -183,7 +183,7 @@ pub(crate) fn values(v: &Var<CpuRuntime>) -> Vec<f32> {
 }
 
 pub(crate) fn noise(seed: f32, device: &CpuDevice) -> Var<CpuRuntime> {
-    Var::new(t(&[1, FEAT_DIM, PATCH_SIZE], seed, device), false)
+    Var::new(t(&[1, PATCH_SIZE, FEAT_DIM], seed, device), false)
 }
 
 /// Steps the loop `n` times via the capturing path with distinct noise per

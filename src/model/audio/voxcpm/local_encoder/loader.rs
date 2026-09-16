@@ -164,7 +164,11 @@ where
         // the right longrope scaling regime; `feat_encoder` only ever rotates
         // `cfg.num_positions` (5) positions per (batch, frame), so the rest is
         // dead memory once the scaling has been baked in.
-        let rope = rope.narrow_positions(cfg.num_positions)?;
+        let mut rope = rope.narrow_positions(cfg.num_positions)?;
+        // `precompute_freqs` builds F32 tables. Cast once here to the dtype
+        // the stack runs at (`norm.weight` is the witness, as in
+        // `minicpm4/loader.rs`) so `apply_rope` never casts per call.
+        rope.cast_caches(norm.weight().tensor().dtype())?;
 
         Ok(Self {
             in_proj,

@@ -6,8 +6,8 @@
 //! ```text
 //! cond      = teacher_forced_conditioning(prefill, target_patches)   [T, ...]
 //! x_t       = flow_matching_interpolate(noise, target_patches, t)    [T, patch_size, feat_dim]
-//! v_pred    = feat_decoder.forward(x_t^T, cond.mu, t, cond.cond^T, 0) [T, feat_dim, patch_size]
-//! loss      = flow_matching_loss(v_pred^T, noise, target_patches)    scalar
+//! v_pred    = feat_decoder.forward(x_t, cond.mu, t, cond.cond, 0)    [T, patch_size, feat_dim]
+//! loss      = flow_matching_loss(v_pred, noise, target_patches)      scalar
 //! ```
 //!
 //! The optimizer step itself (building a `HashMap<TensorId, Tensor<R>>` from
@@ -21,25 +21,17 @@
 //! [`PatchGenerator::train_losses`] combine it with the `loss/diff` term
 //! from ONE shared [`PatchGenerator::teacher_forced_conditioning`] call.
 //!
-//! # Why the DiT's `x`/`cond` need a transpose and `target_patches`/`noise`
-//! do not
+//! # One layout end to end
 //!
 //! [`LocalDit::forward`](crate::model::audio::voxcpm::local_dit::LocalDit::forward)
-//! is pinned to `[batch, feat_dim, patch_size]` for both `x` and `cond`
-//! (`local_dit/dit.rs`'s own doc comment: `in_proj` transposes to `[batch,
-//! patch_size, feat_dim]` internally and transposes the output back). Every
-//! OTHER tensor in this module — [`TeacherForcedConditioning::cond`](super::TeacherForcedConditioning::cond),
+//! takes and returns `[batch, patch_size, feat_dim]` — the same layout as
+//! [`TeacherForcedConditioning::cond`](super::TeacherForcedConditioning::cond),
 //! `target_patches`, `noise`, and therefore `flow_matching_interpolate`'s
-//! output `x_t` — lives in the opposite layout, `[T, patch_size, feat_dim]`,
-//! because that is what [`PatchGenerator::teacher_forced_conditioning`]
-//! and the per-patch loop's own `prefix_feat_cond`/emitted patches both use.
-//! So `x_t` and `cond.cond` are transposed going INTO the estimator, and its
-//! output is transposed back before `flow_matching_loss` compares it against
-//! `noise`/`target_patches` in THEIR native layout. Skipping either
-//! transpose is shape-valid (both axes are frequently the same order of
-//! magnitude in a small fixture) and silently trains against the wrong
-//! axis — see `local_dit/dit.rs`'s own module docs for why this exact trap
-//! is called out there too.
+//! output `x_t`. The reference's `[batch, feat_dim, patch_size]` estimator
+//! I/O is a convention it transposes away internally (see
+//! `local_dit/dit/mod.rs`); this port drops both transposes, so `x_t` and
+//! `cond.cond` go straight in and `v_pred` compares against
+//! `noise`/`target_patches` as returned.
 //!
 //! # Why `dt` is zero
 //!

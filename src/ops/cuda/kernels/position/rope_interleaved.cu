@@ -8,8 +8,9 @@
 //   out[2d]   = x[2d] * cos[s,d] - x[2d+1] * sin[s,d]
 //   out[2d+1] = x[2d] * sin[s,d] + x[2d+1] * cos[s,d]
 //
-// Layout: x is [B, H, S, D] where D is even
-//         cos_cache, sin_cache are [S, D/2]
+// Layout: x is any [B, H, S, D] view with unit stride along D, read through
+//         (x_stride_b, x_stride_h, x_stride_s) in elements; out is dense
+//         [B, H, S, D]; D is even; cos_cache, sin_cache are dense [S, D/2]
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -31,7 +32,10 @@ extern "C" __global__ void rope_interleaved_f32(
     const int batch_size,
     const int num_heads,
     const int seq_len,
-    const int head_dim
+    const int head_dim,
+    const int x_stride_b,
+    const int x_stride_h,
+    const int x_stride_s
 ) {
     const int pair_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int half_d = head_dim / 2;
@@ -58,9 +62,10 @@ extern "C" __global__ void rope_interleaved_f32(
 
     const int idx_even = base + d_pair * 2;
     const int idx_odd = base + d_pair * 2 + 1;
+    const int src = b * x_stride_b + h * x_stride_h + s * x_stride_s + d_pair * 2;
 
-    const float x_even = x[idx_even];
-    const float x_odd = x[idx_odd];
+    const float x_even = x[src];
+    const float x_odd = x[src + 1];
 
     out[idx_even] = x_even * cos_val - x_odd * sin_val;
     out[idx_odd]  = x_even * sin_val + x_odd * cos_val;
@@ -78,7 +83,10 @@ extern "C" __global__ void rope_interleaved_f16(
     const int batch_size,
     const int num_heads,
     const int seq_len,
-    const int head_dim
+    const int head_dim,
+    const int x_stride_b,
+    const int x_stride_h,
+    const int x_stride_s
 ) {
     const int pair_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int half_d = head_dim / 2;
@@ -102,9 +110,10 @@ extern "C" __global__ void rope_interleaved_f16(
 
     const int idx_even = base + d_pair * 2;
     const int idx_odd = base + d_pair * 2 + 1;
+    const int src = b * x_stride_b + h * x_stride_h + s * x_stride_s + d_pair * 2;
 
-    const float x_even = __half2float(x[idx_even]);
-    const float x_odd = __half2float(x[idx_odd]);
+    const float x_even = __half2float(x[src]);
+    const float x_odd = __half2float(x[src + 1]);
 
     out[idx_even] = __float2half(x_even * cos_val - x_odd * sin_val);
     out[idx_odd]  = __float2half(x_even * sin_val + x_odd * cos_val);
@@ -122,7 +131,10 @@ extern "C" __global__ void rope_interleaved_bf16(
     const int batch_size,
     const int num_heads,
     const int seq_len,
-    const int head_dim
+    const int head_dim,
+    const int x_stride_b,
+    const int x_stride_h,
+    const int x_stride_s
 ) {
     const int pair_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int half_d = head_dim / 2;
@@ -146,9 +158,10 @@ extern "C" __global__ void rope_interleaved_bf16(
 
     const int idx_even = base + d_pair * 2;
     const int idx_odd = base + d_pair * 2 + 1;
+    const int src = b * x_stride_b + h * x_stride_h + s * x_stride_s + d_pair * 2;
 
-    const float x_even = __bfloat162float(x[idx_even]);
-    const float x_odd = __bfloat162float(x[idx_odd]);
+    const float x_even = __bfloat162float(x[src]);
+    const float x_odd = __bfloat162float(x[src + 1]);
 
     out[idx_even] = __float2bfloat16(x_even * cos_val - x_odd * sin_val);
     out[idx_odd]  = __float2bfloat16(x_even * sin_val + x_odd * cos_val);

@@ -7,8 +7,9 @@
 //   out_first[i]  = x_first[i] * cos[s, i] - x_second[i] * sin[s, i]
 //   out_second[i] = x_first[i] * sin[s, i] + x_second[i] * cos[s, i]
 //
-// Layout: x is [B, H, S, D] where D is even
-//         cos_cache, sin_cache are [S, D/2]
+// Layout: x is any [B, H, S, D] view with unit stride along D, read through
+//         (x_stride_b, x_stride_h, x_stride_s) in elements; out is dense
+//         [B, H, S, D]; D is even; cos_cache, sin_cache are dense [S, D/2]
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -31,7 +32,10 @@ extern "C" __global__ void rope_apply_f32(
     const int batch_size,
     const int num_heads,
     const int seq_len,
-    const int head_dim
+    const int head_dim,
+    const int x_stride_b,
+    const int x_stride_h,
+    const int x_stride_s
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int total = batch_size * num_heads * seq_len * head_dim;
@@ -57,11 +61,14 @@ extern "C" __global__ void rope_apply_f32(
 
     // Positions in the x tensor
     const int head_offset = b * (num_heads * seq_len * head_dim) + h * (seq_len * head_dim) + s * head_dim;
-    const int pos_first = head_offset + pair_idx;           // x[..., pair_idx]
-    const int pos_second = head_offset + half_d + pair_idx; // x[..., half_d + pair_idx]
+    const int pos_first = head_offset + pair_idx;           // out[..., pair_idx]
+    const int pos_second = head_offset + half_d + pair_idx; // out[..., half_d + pair_idx]
+    // `x` is read through its own strides (unit stride along D); `out` is
+    // always written dense [B, H, S, D].
+    const int src_offset = b * x_stride_b + h * x_stride_h + s * x_stride_s;
 
-    const float x_first = x[pos_first];
-    const float x_second = x[pos_second];
+    const float x_first = x[src_offset + pair_idx];
+    const float x_second = x[src_offset + half_d + pair_idx];
 
     // Apply rotation formula:
     // out_first = x_first * cos - x_second * sin
@@ -87,7 +94,10 @@ extern "C" __global__ void rope_apply_f16(
     const int batch_size,
     const int num_heads,
     const int seq_len,
-    const int head_dim
+    const int head_dim,
+    const int x_stride_b,
+    const int x_stride_h,
+    const int x_stride_s
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int total = batch_size * num_heads * seq_len * head_dim;
@@ -115,10 +125,11 @@ extern "C" __global__ void rope_apply_f16(
     const int head_offset = b * (num_heads * seq_len * head_dim) + h * (seq_len * head_dim) + s * head_dim;
     const int pos_first = head_offset + pair_idx;
     const int pos_second = head_offset + half_d + pair_idx;
+    const int src_offset = b * x_stride_b + h * x_stride_h + s * x_stride_s;
 
     // Load and convert to float for computation
-    float x_first = __half2float(x[pos_first]);
-    float x_second = __half2float(x[pos_second]);
+    float x_first = __half2float(x[src_offset + pair_idx]);
+    float x_second = __half2float(x[src_offset + half_d + pair_idx]);
     float cos_f = __half2float(cos_val);
     float sin_f = __half2float(sin_val);
 
@@ -144,7 +155,10 @@ extern "C" __global__ void rope_apply_bf16(
     const int batch_size,
     const int num_heads,
     const int seq_len,
-    const int head_dim
+    const int head_dim,
+    const int x_stride_b,
+    const int x_stride_h,
+    const int x_stride_s
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int total = batch_size * num_heads * seq_len * head_dim;
@@ -172,10 +186,11 @@ extern "C" __global__ void rope_apply_bf16(
     const int head_offset = b * (num_heads * seq_len * head_dim) + h * (seq_len * head_dim) + s * head_dim;
     const int pos_first = head_offset + pair_idx;
     const int pos_second = head_offset + half_d + pair_idx;
+    const int src_offset = b * x_stride_b + h * x_stride_h + s * x_stride_s;
 
     // Load and convert to float
-    float x_first = __bfloat162float(x[pos_first]);
-    float x_second = __bfloat162float(x[pos_second]);
+    float x_first = __bfloat162float(x[src_offset + pair_idx]);
+    float x_second = __bfloat162float(x[src_offset + half_d + pair_idx]);
     float cos_f = __bfloat162float(cos_val);
     float sin_f = __bfloat162float(sin_val);
 

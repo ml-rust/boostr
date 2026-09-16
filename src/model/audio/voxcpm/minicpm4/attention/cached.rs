@@ -110,9 +110,9 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
         let k = var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
         let v = var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
 
-        // The fused RoPE kernel assumes contiguous layout.
-        let q = var_contiguous(&q)?;
-        let k = var_contiguous(&k)?;
+        // The permuted views go straight into `apply_rope`, which reads the
+        // `[B, S, H, D]`-contiguous projection through its strides and writes
+        // dense `[B, H, S, D]`; only the NoPE arm below copies them itself.
 
         // Same precomputed cos/sin tables the full-sequence path uses, sliced
         // at the absolute positions this call covers. Building a second table
@@ -123,7 +123,9 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
         // `attention_core_masked`), and honouring `no_rope` in only one of
         // them would leave the two paths computing different models.
         let (q, k) = match (self.no_rope, rope) {
-            (true, _) => (q, k),
+            // No rotation to fold the layout change into: the cache write and
+            // the attention kernel need dense `[B, H, S, D]`.
+            (true, _) => (var_contiguous(&q)?, var_contiguous(&k)?),
             (false, Some(rope)) => {
                 // `position` rotates the query; `kv_cache` stores it at its own
                 // `seq_len`. They MUST agree, or the query is rotated for one

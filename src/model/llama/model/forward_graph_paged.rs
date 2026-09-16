@@ -101,8 +101,8 @@ impl Llama<numr::runtime::cuda::CudaRuntime> {
             let k = numr::autograd::var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
             let v = numr::autograd::var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
 
-            let q = var_contiguous(&q)?;
-            let k = var_contiguous(&k)?;
+            // Q/K stay permuted views: `apply_rope` reads them through their
+            // strides and writes dense `[B, H, S, D]`.
             let v = var_contiguous(&v)?;
 
             // Apply RoPE using stable cos/sin slices

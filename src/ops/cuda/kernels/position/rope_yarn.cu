@@ -12,8 +12,9 @@
 //   rotated_second = x_first[d] * sin[s,d] + x_second[d] * cos[s,d]
 //   out = rotated * attn_scale
 //
-// Layout: x is [B, H, S, D] where D is even
-//         cos_cache, sin_cache are [S, D/2]
+// Layout: x is any [B, H, S, D] view with unit stride along D, read through
+//         (x_stride_b, x_stride_h, x_stride_s) in elements; out is dense
+//         [B, H, S, D]; D is even; cos_cache, sin_cache are dense [S, D/2]
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -36,6 +37,9 @@ extern "C" __global__ void rope_yarn_f32(
     const int num_heads,
     const int seq_len,
     const int head_dim,
+    const int x_stride_b,
+    const int x_stride_h,
+    const int x_stride_s,
     const float attn_scale
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -61,9 +65,10 @@ extern "C" __global__ void rope_yarn_f32(
                           + s * head_dim;
     const int pos_first = head_offset + pair_idx;
     const int pos_second = head_offset + half_d + pair_idx;
+    const int src_offset = b * x_stride_b + h * x_stride_h + s * x_stride_s;
 
-    const float x_first = x[pos_first];
-    const float x_second = x[pos_second];
+    const float x_first = x[src_offset + pair_idx];
+    const float x_second = x[src_offset + half_d + pair_idx];
 
     if (d < half_d) {
         out[pos_first] = (x_first * cos_val - x_second * sin_val) * attn_scale;
@@ -85,6 +90,9 @@ extern "C" __global__ void rope_yarn_f16(
     const int num_heads,
     const int seq_len,
     const int head_dim,
+    const int x_stride_b,
+    const int x_stride_h,
+    const int x_stride_s,
     const float attn_scale
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -110,9 +118,10 @@ extern "C" __global__ void rope_yarn_f16(
                           + s * head_dim;
     const int pos_first = head_offset + pair_idx;
     const int pos_second = head_offset + half_d + pair_idx;
+    const int src_offset = b * x_stride_b + h * x_stride_h + s * x_stride_s;
 
-    const float x_first = __half2float(x[pos_first]);
-    const float x_second = __half2float(x[pos_second]);
+    const float x_first = __half2float(x[src_offset + pair_idx]);
+    const float x_second = __half2float(x[src_offset + half_d + pair_idx]);
 
     if (d < half_d) {
         out[pos_first] = __float2half((x_first * cos_val - x_second * sin_val) * attn_scale);
@@ -134,6 +143,9 @@ extern "C" __global__ void rope_yarn_bf16(
     const int num_heads,
     const int seq_len,
     const int head_dim,
+    const int x_stride_b,
+    const int x_stride_h,
+    const int x_stride_s,
     const float attn_scale
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -159,9 +171,10 @@ extern "C" __global__ void rope_yarn_bf16(
                           + s * head_dim;
     const int pos_first = head_offset + pair_idx;
     const int pos_second = head_offset + half_d + pair_idx;
+    const int src_offset = b * x_stride_b + h * x_stride_h + s * x_stride_s;
 
-    const float x_first = __bfloat162float(x[pos_first]);
-    const float x_second = __bfloat162float(x[pos_second]);
+    const float x_first = __bfloat162float(x[src_offset + pair_idx]);
+    const float x_second = __bfloat162float(x[src_offset + half_d + pair_idx]);
 
     if (d < half_d) {
         out[pos_first] = __float2bfloat16((x_first * cos_val - x_second * sin_val) * attn_scale);

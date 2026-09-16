@@ -110,10 +110,10 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
         let k = var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?;
         let v = var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?;
 
-        // Contiguous Q/K: the fused RoPE kernel assumes contiguous layout.
-        // V: `repeat_kv` requires contiguous input too.
-        let q = var_contiguous(&q)?;
-        let k = var_contiguous(&k)?;
+        // Q/K go into `apply_rope` as the permuted views: every backend
+        // reads a `[N, S, H, D]`-contiguous tensor viewed as `[N, H, S, D]`
+        // and writes a dense `[N, H, S, D]`, so the rotation is also the
+        // layout change. V: `repeat_kv` requires contiguous input.
         let v = var_contiguous(&v)?;
 
         let q = client.apply_rope(&q, rope.cos_cache(), rope.sin_cache())?;

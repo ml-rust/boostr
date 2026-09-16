@@ -149,7 +149,10 @@ impl RoPEOps<WgpuRuntime> for WgpuClient {
         cos_cache: &Var<WgpuRuntime>,
         sin_cache: &Var<WgpuRuntime>,
     ) -> Result<Var<WgpuRuntime>> {
-        let x_t = x.tensor();
+        // The shader reads a dense `[B, H, S, D]` buffer; a permuted view
+        // is copied here rather than rotated wrong. No-op when already dense.
+        let x_dense = x.tensor().contiguous()?;
+        let x_t = &x_dense;
         let cos_t = cos_cache.tensor();
         let sin_t = sin_cache.tensor();
 
@@ -224,7 +227,10 @@ impl RoPEOps<WgpuRuntime> for WgpuClient {
         cos_cache: &Var<WgpuRuntime>,
         sin_cache: &Var<WgpuRuntime>,
     ) -> Result<Var<WgpuRuntime>> {
-        let x_t = x.tensor();
+        // The shader reads a dense `[B, H, S, D]` buffer; a permuted view
+        // is copied here rather than rotated wrong. No-op when already dense.
+        let x_dense = x.tensor().contiguous()?;
+        let x_t = &x_dense;
         let cos_t = cos_cache.tensor();
         let sin_t = sin_cache.tensor();
 
@@ -300,7 +306,10 @@ impl RoPEOps<WgpuRuntime> for WgpuClient {
         sin_cache: &Var<WgpuRuntime>,
         attn_scale: f32,
     ) -> Result<Var<WgpuRuntime>> {
-        let x_t = x.tensor();
+        // The shader reads a dense `[B, H, S, D]` buffer; a permuted view
+        // is copied here rather than rotated wrong. No-op when already dense.
+        let x_dense = x.tensor().contiguous()?;
+        let x_t = &x_dense;
         let cos_t = cos_cache.tensor();
         let sin_t = sin_cache.tensor();
 

@@ -70,6 +70,7 @@ fn main() {
                                 false,
                                 window_size,
                                 Some(seq_len_k),
+                                None,
                                 AttnOutLayout::HeadMajor,
                             )
                             .unwrap();

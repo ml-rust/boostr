@@ -83,6 +83,7 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
             causal,
             0,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
     }

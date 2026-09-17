@@ -97,6 +97,7 @@ fn main() {
                         num_kv_heads,
                         head_dim,
                         true,
+                        0,
                         AttnOutLayout::HeadMajor,
                     )
                     .unwrap();
@@ -119,6 +120,7 @@ fn main() {
                             true,
                             seq_len,
                             Some(seq_len),
+                            None,
                             AttnOutLayout::HeadMajor,
                         )
                         .unwrap();

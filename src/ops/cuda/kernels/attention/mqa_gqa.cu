@@ -44,6 +44,16 @@
 //
 // Causal tiles past the block's last query position are skipped as a whole;
 // the skip is block-uniform, so it may `break` across the barriers.
+//
+// Left padding: `kv_start` is a `[B]` I32 device array or null. Keys below
+// `kv_start[b]` are invalid for every row of batch `b`. The block reads its
+// start once, clamps it to `[0, seq_len_k]`, and begins the tile loop at the
+// tile holding it. Inside a tile every key index is RELATIVE to the start,
+// so the tail check `key_rel >= seq_len_k - start` as an unsigned compare
+// also rejects the padded keys of the first tile (they wrap negative), and
+// the causal bound shifts by the same amount. A null pointer gives start 0
+// and the unpadded expressions, instruction for instruction. A row with no
+// valid key keeps `l == 0` and stores zeros with `LSE = -inf`.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -83,6 +93,7 @@ __device__ void mqa_gqa_fwd_impl(
     const float k_scale,
     const float v_scale,
     const float o_scale,
+    const int* __restrict__ kv_start,
     const int out_token_major
 ) {
     static_assert(HEAD_DIM % (4 * G) == 0, "each lane owns whole float4 chunks");
@@ -133,6 +144,9 @@ __device__ void mqa_gqa_fwd_impl(
     const int q_start = blockIdx.y * ROWS;
     const int row0 = q_start + warp * ROWS_PER_WARP + rg * R;
     const int key_offset = max(0, seq_len_k - seq_len_q);
+    // Left-padding start of this batch row (see the header); 0 when unpadded.
+    const int pad_start = kv_start ? min(max(kv_start[batch_idx], 0), seq_len_k) : 0;
+    const int seq_len_k_rel = seq_len_k - pad_start;
 
     // Q rows in registers. Rows past seq_len_q read as zero and are never stored.
     float q[R][CL][4];
@@ -157,11 +171,12 @@ __device__ void mqa_gqa_fwd_impl(
     }
 
     // Last absolute query position any row of this block can hold; causal
-    // tiles that start past it are masked for the whole block.
+    // tiles that start past it are masked for the whole block. Tiles that
+    // end before the padding start are skipped the same way.
     const int last_q_pos = key_offset + min(q_start + ROWS, seq_len_q) - 1;
     const int num_k_tiles = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
 
-    for (int kt = 0; kt < num_k_tiles; ++kt) {
+    for (int kt = pad_start / BLOCK_N; kt < num_k_tiles; ++kt) {
         const int k_start = kt * BLOCK_N;
         if (causal && k_start > last_q_pos) break;
 
@@ -200,14 +215,18 @@ __device__ void mqa_gqa_fwd_impl(
         // and advance the online softmax. A tile fully masked for a row keeps
         // m at -inf, and then alpha = 1 and every p = 0 make it an exact no-op
         // instead of exp(-inf - -inf) = NaN.
+        // Key indices are relative to the padding start: the unsigned tail
+        // compare then also rejects keys below it (see the header).
+        const int k_start_rel = k_start - pad_start;
         #pragma unroll
         for (int t = 0; t < R; ++t) {
-            const int q_pos = key_offset + row0 + t;
+            const int q_pos = key_offset + row0 + t - pad_start;
             float m_tile = -INFINITY;
             #pragma unroll
             for (int i = 0; i < KPL; ++i) {
-                const int key = k_start + g * KPL + i;
-                const bool masked = key >= seq_len_k || (causal && key > q_pos);
+                const int key = k_start_rel + g * KPL + i;
+                const bool masked = (unsigned)key >= (unsigned)seq_len_k_rel
+                                 || (causal && key > q_pos);
                 s[t][i] = masked ? -INFINITY : s[t][i] * scale;
                 m_tile = fmaxf(m_tile, s[t][i]);
             }
@@ -274,6 +293,7 @@ __device__ void mqa_gqa_fwd_impl(
 //
 // ONE signature for every dtype, including the four trailing quantization
 // scales. Only the FP8 entries read them; the launcher passes 1.0f otherwise.
+// `kv_start` is the per-batch left-padding start array, or null.
 // `out_token_major` selects the output layout (see the impl).
 // ============================================================================
 
@@ -287,12 +307,12 @@ __device__ void mqa_gqa_fwd_impl(
         const float scale, const int causal,                                   \
         const float q_scale, const float k_scale,                              \
         const float v_scale, const float o_scale,                              \
-        const int out_token_major                                              \
+        const int* kv_start, const int out_token_major                         \
     ) {                                                                        \
         mqa_gqa_fwd_impl<T, HEAD_DIM, G, R, WARPS, BLOCK_N>(                   \
             Q, K, V, O, L, batch_size, num_q_heads, num_kv_heads,              \
             seq_len_q, seq_len_k, scale, causal,                               \
-            q_scale, k_scale, v_scale, o_scale, out_token_major                \
+            q_scale, k_scale, v_scale, o_scale, kv_start, out_token_major      \
         );                                                                     \
     }
 

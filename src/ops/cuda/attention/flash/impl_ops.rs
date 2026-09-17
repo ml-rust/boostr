@@ -27,6 +27,10 @@
 //! `validate_qkv` rejects `num_heads` not divisible by `num_kv_heads` before
 //! any kernel is chosen, so that case reaches nothing.
 //!
+//! Left padding (`kv_start`): every tier above takes the `[B]` start vector
+//! as a device pointer (null for `None`) and reads it once per block; the
+//! v3 launcher has no such argument, so a padded batch never reaches it.
+//!
 //! Output layout (`AttnOutLayout`): every kernel above takes it as a store
 //! flag, so token-major output costs no extra launch. The decode kernel at
 //! `seq_len_q == 1` stores the same bytes under either layout; the folded
@@ -35,6 +39,7 @@
 //! which only matters once `flash_v3::dispatch_enabled` is true.
 
 use crate::error::{Error, Result};
+use crate::ops::impl_generic::attention::validate_kv_start;
 use crate::ops::traits::{AttnOutLayout, FlashAttentionOps};
 use numr::dtype::DType;
 use numr::runtime::Device;
@@ -89,6 +94,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         causal: bool,
         window_size: usize,
         kv_seq_len: Option<usize>,
+        kv_start: Option<&Tensor<CudaRuntime>>,
         out_layout: AttnOutLayout,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
         let mut p = validate_qkv(q, k, v, num_heads, num_kv_heads, head_dim)?;
@@ -98,6 +104,16 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         if let Some(seq_len) = kv_seq_len {
             p.seq_len_k = seq_len;
         }
+
+        // Per-row left padding reaches every kernel as a device pointer;
+        // null means no padding and skips the per-row lookup.
+        let kv_start_ptr = match kv_start {
+            Some(t) => {
+                validate_kv_start(t, p.batch_size)?;
+                t.ptr()
+            }
+            None => 0,
+        };
 
         // Decode path: S_q=1, use lightweight vec kernel (supports separate stride,
         // window and every validated head_dim). Instantiated for F32/F16/BF16;
@@ -116,6 +132,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                 &p,
                 kv_seq_stride,
                 window_size,
+                kv_start_ptr,
                 out_layout,
             );
         }
@@ -139,6 +156,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                 v,
                 &p,
                 kv_seq_stride,
+                kv_start_ptr,
                 out_layout,
             );
         }
@@ -157,14 +175,17 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                 causal,
                 window_size,
                 None,
+                kv_start,
                 out_layout,
             );
         }
 
         // Flash v3 on SM 90+ for supported configs, when v3 is dispatchable
         // at all. `flash_v3::dispatch_enabled` is the single decision point and
-        // is currently false — see its doc comment.
-        if num_kv_heads == num_heads
+        // is currently false — see its doc comment. The v3 launcher takes no
+        // per-row key start, so a padded batch stays on the v2 family.
+        if kv_start.is_none()
+            && num_kv_heads == num_heads
             && window_size == 0
             && flash_v3::dispatch_enabled(self, q.device())
             && let Some(result) = flash_v3::flash_v3_fwd(
@@ -214,11 +235,22 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                 num_kv_heads,
                 head_dim,
                 causal,
+                kv_start_ptr,
                 out_layout,
             );
         }
 
-        flash_fwd::flash_attention_fwd_impl(self, q, k, v, &p, causal, window_size, out_layout)
+        flash_fwd::flash_attention_fwd_impl(
+            self,
+            q,
+            k,
+            v,
+            &p,
+            causal,
+            window_size,
+            kv_start_ptr,
+            out_layout,
+        )
     }
 
     fn flash_attention_fwd_fp8(

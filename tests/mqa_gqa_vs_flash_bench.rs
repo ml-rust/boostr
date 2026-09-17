@@ -271,6 +271,7 @@ fn run_shape(client: &CudaClient, device: &CudaDevice, shape: &Shape) {
             shape.num_kv_heads,
             shape.head_dim,
             true,
+            0,
             AttnOutLayout::HeadMajor,
         )
         .expect("mqa_gqa_fwd failed during benchmark");
@@ -286,6 +287,7 @@ fn run_shape(client: &CudaClient, device: &CudaDevice, shape: &Shape) {
                 shape.head_dim,
                 true,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -305,6 +307,7 @@ fn run_shape(client: &CudaClient, device: &CudaDevice, shape: &Shape) {
         shape.num_kv_heads,
         shape.head_dim,
         true,
+        0,
         AttnOutLayout::HeadMajor,
     )
     .expect("mqa_gqa_fwd (feeding backward) failed during benchmark");
@@ -335,6 +338,7 @@ fn run_shape(client: &CudaClient, device: &CudaDevice, shape: &Shape) {
             shape.head_dim,
             true,
             0,
+            None,
             None,
             AttnOutLayout::HeadMajor,
         )

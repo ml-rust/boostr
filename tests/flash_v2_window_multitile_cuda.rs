@@ -295,6 +295,7 @@ fn assert_window_fwd_parity(
             causal,
             window_size,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .expect("CPU reference flash_attention_fwd failed");
@@ -315,6 +316,7 @@ fn assert_window_fwd_parity(
             head_dim,
             causal,
             window_size,
+            None,
             None,
             AttnOutLayout::HeadMajor,
         )
@@ -494,6 +496,7 @@ fn flash_v2_window_multitile_bwd_f32_hd64_causal() {
             causal,
             window_size,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .expect("CPU reference flash_attention_fwd failed");
@@ -531,6 +534,7 @@ fn flash_v2_window_multitile_bwd_f32_hd64_causal() {
             head_dim,
             causal,
             window_size,
+            None,
             None,
             AttnOutLayout::HeadMajor,
         )

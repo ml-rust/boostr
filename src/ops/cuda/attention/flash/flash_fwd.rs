@@ -19,6 +19,9 @@ use numr::runtime::cuda::CudaDevice;
 /// one-thread-per-row tiling and are not used here; the launch geometry comes
 /// from [`flash_fwd_tile`].
 ///
+/// `kv_start` is the device pointer of the `[B]` I32 left-padding starts,
+/// or `0` for none; the kernel reads it once per block.
+///
 /// `out_layout` reaches the kernel as a store-address flag; the arithmetic
 /// is the same either way.
 #[allow(clippy::too_many_arguments)]
@@ -30,6 +33,7 @@ pub(super) fn flash_attention_fwd_impl(
     p: &AttentionParams,
     causal: bool,
     window_size: usize,
+    kv_start: u64,
     out_layout: AttnOutLayout,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let dtype = q.dtype();
@@ -136,6 +140,7 @@ pub(super) fn flash_attention_fwd_impl(
         builder.arg(&scale);
         builder.arg(&causal_i32);
         builder.arg(&ws_i32);
+        builder.arg(&kv_start);
         builder.arg(&token_major_i32);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("Flash Attention fwd kernel launch failed: {:?}", e),

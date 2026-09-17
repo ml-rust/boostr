@@ -271,6 +271,7 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
             is_prefill,
             self.sliding_window,
             Some(kv_seq_len),
+            None,
             AttnOutLayout::TokenMajor,
         )?;
 

@@ -24,6 +24,9 @@ use numr::runtime::cuda::CudaDevice;
 
 /// MQA/GQA forward pass — dedicated kernel, used at every capable ratio.
 ///
+/// `kv_start` is the device pointer of the `[B]` I32 left-padding starts,
+/// or `0` for none; the kernel reads it once per block.
+///
 /// `out_layout` reaches the kernel as a store-address flag; the arithmetic
 /// is the same either way.
 #[allow(clippy::too_many_arguments)]
@@ -36,6 +39,7 @@ pub fn mqa_gqa_fwd(
     num_kv_heads: usize,
     head_dim: usize,
     causal: bool,
+    kv_start: u64,
     out_layout: AttnOutLayout,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let q_shape = q.shape();
@@ -151,6 +155,7 @@ pub fn mqa_gqa_fwd(
         for _ in 0..4 {
             builder.arg(&one);
         }
+        builder.arg(&kv_start);
         builder.arg(&token_major_i32);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("MQA/GQA fwd kernel launch failed: {:?}", e),

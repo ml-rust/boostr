@@ -155,6 +155,7 @@ fn reference_decode(
             false,
             0,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .expect("reference flash_attention_fwd failed");
@@ -394,6 +395,7 @@ fn split_reference_decode(
             HEAD_DIM,
             false,
             0,
+            None,
             None,
             AttnOutLayout::HeadMajor,
         )

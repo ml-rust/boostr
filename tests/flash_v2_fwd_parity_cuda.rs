@@ -392,6 +392,7 @@ fn assert_fwd_parity(
             causal,
             0,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .expect("CPU reference flash_attention_fwd failed");
@@ -416,6 +417,7 @@ fn assert_fwd_parity(
             head_dim,
             causal,
             0,
+            None,
             None,
             AttnOutLayout::HeadMajor,
         )

@@ -150,6 +150,7 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
             self.head_dim,
             false,
             0,
+            None,
             AttnOutLayout::TokenMajor,
         )?;
 

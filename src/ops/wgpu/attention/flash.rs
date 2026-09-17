@@ -7,7 +7,7 @@
 
 use crate::error::{Error, Result};
 use crate::ops::impl_generic::attention::{
-    StandardAttnConfig, multi_head_attention_impl, standard_attention_bwd,
+    StandardAttnConfig, multi_head_attention_impl, standard_attention_bwd, validate_kv_start,
 };
 use crate::ops::traits::cache::kv_cache_quant::Int4GroupSize;
 use crate::ops::traits::{AttentionOps, AttnOutLayout, FlashAttentionOps};
@@ -32,6 +32,10 @@ struct FlashParams {
     causal: u32,
     window_size: u32,
     token_major: u32,
+    /// `1` when the `kv_start` binding holds `[B]` starts, `0` when it is a
+    /// one-element placeholder the shader must not read.
+    has_kv_start: u32,
+    _pad: [u32; 1],
 }
 
 fn validate_f32(t: &Tensor<WgpuRuntime>, op: &str) -> Result<()> {
@@ -70,6 +74,7 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
         causal: bool,
         window_size: usize,
         kv_seq_len: Option<usize>,
+        kv_start: Option<&Tensor<WgpuRuntime>>,
         out_layout: AttnOutLayout,
     ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
         // kv_seq_len override not optimized for WGPU — narrow if needed
@@ -86,6 +91,7 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
                 causal,
                 window_size,
                 None,
+                kv_start,
                 out_layout,
             );
         }
@@ -97,6 +103,16 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
         let batch_size = q_shape[0];
         let seq_len_q = q_shape[2];
         let seq_len_k = k.shape()[2];
+
+        // The start binding is always present; without padding it is a
+        // one-element placeholder and `has_kv_start` tells the shader so.
+        let kv_start_tensor = match kv_start {
+            Some(t) => {
+                validate_kv_start(t, batch_size)?;
+                t.clone()
+            }
+            None => Tensor::<WgpuRuntime>::zeros(&[1], DType::I32, q.device())?,
+        };
 
         // Create output tensors
         let out_shape = out_layout.shape(batch_size, num_heads, seq_len_q, head_dim);
@@ -120,6 +136,10 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
         let lse_buf = get_buffer(lse.storage().ptr()).ok_or_else(|| Error::KernelError {
             reason: "lse buffer not found".into(),
         })?;
+        let kv_start_buf =
+            get_buffer(kv_start_tensor.storage().ptr()).ok_or_else(|| Error::KernelError {
+                reason: "kv_start buffer not found".into(),
+            })?;
 
         // Create params
         let scale = 1.0f32 / (head_dim as f32).sqrt();
@@ -134,6 +154,8 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
             causal: if causal { 1 } else { 0 },
             window_size: window_size as u32,
             token_major: u32::from(out_layout == AttnOutLayout::TokenMajor),
+            has_kv_start: u32::from(kv_start.is_some()),
+            _pad: [0],
         };
 
         let params_buf = self.wgpu_device().create_buffer(&wgpu::BufferDescriptor {
@@ -150,9 +172,9 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
         let module = cache.get_or_create_module("flash_attention_fwd_f32", FLASH_SHADER_SOURCE);
 
         let layout = cache.get_or_create_layout(numr::runtime::wgpu::shaders::LayoutKey {
-            num_storage_buffers: 5,
+            num_storage_buffers: 6,
             num_uniform_buffers: 1,
-            num_readonly_storage: 3,
+            num_readonly_storage: 4,
         });
         let pipeline = cache.get_or_create_pipeline(
             "flash_attention_fwd_f32",
@@ -163,7 +185,15 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
 
         let bind_group = cache.create_bind_group(
             &layout,
-            &[&q_buf, &k_buf, &v_buf, &out_buf, &lse_buf, &params_buf],
+            &[
+                &q_buf,
+                &k_buf,
+                &v_buf,
+                &kv_start_buf,
+                &out_buf,
+                &lse_buf,
+                &params_buf,
+            ],
         );
 
         // Dispatch

@@ -23,6 +23,7 @@ fn test_flash_attention_fwd_non_causal_parity() {
             false,
             0,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .unwrap();
@@ -45,6 +46,7 @@ fn test_flash_attention_fwd_non_causal_parity() {
                 d,
                 false,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -74,6 +76,7 @@ fn test_flash_attention_fwd_non_causal_parity() {
                 false,
                 0,
                 None,
+                None,
                 AttnOutLayout::HeadMajor,
             )
             .unwrap();
@@ -94,7 +97,19 @@ fn test_flash_attention_fwd_causal_parity() {
     let v = det_tensor(&[b, h, s, d], &cpu_device);
 
     let (cpu_out, _) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None, AttnOutLayout::HeadMajor)
+        .flash_attention_fwd(
+            &q,
+            &k,
+            &v,
+            h,
+            h,
+            d,
+            true,
+            0,
+            None,
+            None,
+            AttnOutLayout::HeadMajor,
+        )
         .unwrap();
     let cpu_out_vec = cpu_out.to_vec::<f32>();
 
@@ -115,6 +130,7 @@ fn test_flash_attention_fwd_causal_parity() {
                 d,
                 true,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -143,6 +159,7 @@ fn test_flash_attention_fwd_causal_parity() {
                 d,
                 true,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -176,6 +193,7 @@ fn test_flash_attention_fwd_gqa_parity() {
             false,
             0,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .unwrap();
@@ -201,6 +219,7 @@ fn test_flash_attention_fwd_gqa_parity() {
                 d,
                 false,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -232,6 +251,7 @@ fn test_flash_attention_fwd_gqa_parity() {
                 d,
                 false,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -269,6 +289,7 @@ fn test_flash_attention_fwd_windowed_decode_parity() {
             false,
             window,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .unwrap();
@@ -294,6 +315,7 @@ fn test_flash_attention_fwd_windowed_decode_parity() {
                 d,
                 false,
                 window,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -326,6 +348,7 @@ fn test_flash_attention_fwd_windowed_decode_parity() {
                 false,
                 window,
                 None,
+                None,
                 AttnOutLayout::HeadMajor,
             )
             .unwrap();
@@ -356,6 +379,7 @@ fn test_flash_attention_bwd_parity() {
             false,
             0,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .unwrap();
@@ -384,6 +408,7 @@ fn test_flash_attention_bwd_parity() {
                 d,
                 false,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -427,6 +452,7 @@ fn test_flash_attention_bwd_parity() {
                 d,
                 false,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -483,6 +509,7 @@ fn test_flash_v2_fwd_matches_reference() {
             false,
             0,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .unwrap();
@@ -509,6 +536,7 @@ fn test_flash_v2_fwd_matches_reference() {
                 d,
                 false,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -538,6 +566,7 @@ fn test_flash_v2_fwd_matches_reference() {
                 false,
                 0,
                 None,
+                None,
                 AttnOutLayout::HeadMajor,
             )
             .unwrap();
@@ -564,7 +593,19 @@ fn test_flash_v2_fwd_causal_matches_reference() {
 
     // CPU flash vs naive causal reference
     let (cpu_flash_out, _) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None, AttnOutLayout::HeadMajor)
+        .flash_attention_fwd(
+            &q,
+            &k,
+            &v,
+            h,
+            h,
+            d,
+            true,
+            0,
+            None,
+            None,
+            AttnOutLayout::HeadMajor,
+        )
         .unwrap();
     assert_parity_f32(
         &cpu_flash_out.to_vec::<f32>(),
@@ -589,6 +630,7 @@ fn test_flash_v2_fwd_causal_matches_reference() {
                 d,
                 true,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -617,6 +659,7 @@ fn test_flash_v2_fwd_causal_matches_reference() {
                 d,
                 true,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -651,6 +694,7 @@ fn test_flash_v2_bwd_gradients_nonzero() {
             d,
             false,
             0,
+            None,
             None,
             AttnOutLayout::HeadMajor,
         )
@@ -688,6 +732,7 @@ fn test_flash_v2_bwd_gradients_nonzero() {
                 false,
                 0,
                 None,
+                None,
                 AttnOutLayout::HeadMajor,
             )
             .unwrap();
@@ -724,6 +769,7 @@ fn test_flash_v2_bwd_gradients_nonzero() {
                 d,
                 false,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -770,6 +816,7 @@ fn test_gqa_correctness_various_ratios() {
                 d,
                 false,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -826,6 +873,7 @@ fn test_gqa_correctness_various_ratios() {
                     false,
                     0,
                     None,
+                    None,
                     AttnOutLayout::HeadMajor,
                 )
                 .unwrap();
@@ -858,6 +906,7 @@ fn test_gqa_correctness_various_ratios() {
                     d,
                     false,
                     0,
+                    None,
                     None,
                     AttnOutLayout::HeadMajor,
                 )
@@ -895,6 +944,7 @@ fn test_sliding_window_correctness() {
             false,
             window_size,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .unwrap();
@@ -908,6 +958,7 @@ fn test_sliding_window_correctness() {
             d,
             false,
             0,
+            None,
             None,
             AttnOutLayout::HeadMajor,
         )
@@ -943,6 +994,7 @@ fn test_sliding_window_correctness() {
                 false,
                 window_size,
                 None,
+                None,
                 AttnOutLayout::HeadMajor,
             )
             .unwrap();
@@ -956,6 +1008,7 @@ fn test_sliding_window_correctness() {
                 d,
                 false,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -999,6 +1052,7 @@ fn test_sliding_window_correctness() {
                 false,
                 window_size,
                 None,
+                None,
                 AttnOutLayout::HeadMajor,
             )
             .unwrap();
@@ -1012,6 +1066,7 @@ fn test_sliding_window_correctness() {
                 d,
                 false,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -1062,6 +1117,7 @@ fn test_flash_attention_bwd_windowed_parity() {
             true,
             window,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .unwrap();
@@ -1078,7 +1134,19 @@ fn test_flash_attention_bwd_windowed_parity() {
 
     // The window must actually change the CPU gradients.
     let (out_full, lse_full) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None, AttnOutLayout::HeadMajor)
+        .flash_attention_fwd(
+            &q,
+            &k,
+            &v,
+            h,
+            h,
+            d,
+            true,
+            0,
+            None,
+            None,
+            AttnOutLayout::HeadMajor,
+        )
         .unwrap();
     let (_, cpu_dk_full, _) = cpu_client
         .flash_attention_bwd(&dout, &q, &k, &v, &out_full, &lse_full, h, h, d, true, 0)
@@ -1110,6 +1178,7 @@ fn test_flash_attention_bwd_windowed_parity() {
                 true,
                 window,
                 None,
+                None,
                 AttnOutLayout::HeadMajor,
             )
             .unwrap();
@@ -1134,6 +1203,7 @@ fn test_flash_attention_bwd_windowed_parity() {
                 d,
                 true,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -1178,6 +1248,7 @@ fn test_flash_attention_bwd_window_zero_unchanged() {
                 causal,
                 0,
                 None,
+                None,
                 AttnOutLayout::HeadMajor,
             )
             .unwrap();
@@ -1207,6 +1278,7 @@ fn test_flash_attention_bwd_window_zero_unchanged() {
                     d,
                     causal,
                     0,
+                    None,
                     None,
                     AttnOutLayout::HeadMajor,
                 )
@@ -1252,6 +1324,7 @@ fn test_flash_attention_bwd_excluded_key_has_zero_grad() {
             false,
             window,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .unwrap();
@@ -1280,6 +1353,7 @@ fn test_flash_attention_bwd_excluded_key_has_zero_grad() {
                 d,
                 false,
                 window,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -1343,7 +1417,19 @@ fn test_flash_attention_bwd_causal_head_dim_128_parity() {
     let dout = det_tensor(&[b, h, s, d], &cpu_device);
 
     let (out, lse) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None, AttnOutLayout::HeadMajor)
+        .flash_attention_fwd(
+            &q,
+            &k,
+            &v,
+            h,
+            h,
+            d,
+            true,
+            0,
+            None,
+            None,
+            AttnOutLayout::HeadMajor,
+        )
         .unwrap();
     let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
         .flash_attention_bwd(&dout, &q, &k, &v, &out, &lse, h, h, d, true, 0)
@@ -1371,6 +1457,7 @@ fn test_flash_attention_bwd_causal_head_dim_128_parity() {
                 d,
                 true,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -1414,7 +1501,19 @@ fn test_flash_attention_bwd_causal_small_head_dim_parity() {
         let dout = det_tensor(&[b, h, s, d], &cpu_device);
 
         let (out, lse) = cpu_client
-            .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None, AttnOutLayout::HeadMajor)
+            .flash_attention_fwd(
+                &q,
+                &k,
+                &v,
+                h,
+                h,
+                d,
+                true,
+                0,
+                None,
+                None,
+                AttnOutLayout::HeadMajor,
+            )
             .unwrap();
         let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
             .flash_attention_bwd(&dout, &q, &k, &v, &out, &lse, h, h, d, true, 0)
@@ -1442,6 +1541,7 @@ fn test_flash_attention_bwd_causal_small_head_dim_parity() {
                     d,
                     true,
                     0,
+                    None,
                     None,
                     AttnOutLayout::HeadMajor,
                 )
@@ -1480,7 +1580,19 @@ fn test_flash_attention_bwd_causal_key_offset_parity() {
     let dout = det_tensor(&[b, h, sq, d], &cpu_device);
 
     let (out, lse) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, h, h, d, true, 0, None, AttnOutLayout::HeadMajor)
+        .flash_attention_fwd(
+            &q,
+            &k,
+            &v,
+            h,
+            h,
+            d,
+            true,
+            0,
+            None,
+            None,
+            AttnOutLayout::HeadMajor,
+        )
         .unwrap();
     let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
         .flash_attention_bwd(&dout, &q, &k, &v, &out, &lse, h, h, d, true, 0)
@@ -1509,6 +1621,7 @@ fn test_flash_attention_bwd_causal_key_offset_parity() {
                 d,
                 true,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -1562,6 +1675,7 @@ fn assert_flash_bwd_kv_parity(
             causal,
             0,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .unwrap();
@@ -1612,6 +1726,7 @@ fn assert_flash_bwd_kv_parity(
                 d,
                 causal,
                 0,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -2059,6 +2174,7 @@ fn test_flash_attention_bwd_head_dim_sweep_parity() {
                     causal,
                     0,
                     None,
+                    None,
                     AttnOutLayout::HeadMajor,
                 )
                 .unwrap();
@@ -2091,6 +2207,7 @@ fn test_flash_attention_bwd_head_dim_sweep_parity() {
                         d,
                         causal,
                         0,
+                        None,
                         None,
                         AttnOutLayout::HeadMajor,
                     )

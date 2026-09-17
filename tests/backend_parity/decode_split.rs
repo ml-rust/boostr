@@ -65,6 +65,7 @@ fn assert_decode_parity(
             false,
             window,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .unwrap_or_else(|e| panic!("CPU decode failed for {label}: {e}"));
@@ -104,6 +105,7 @@ fn assert_decode_parity(
                 false,
                 window,
                 Some(seq_len_k),
+                None,
                 AttnOutLayout::HeadMajor,
             )
             .unwrap_or_else(|e| panic!("CUDA decode failed for {label}: {e}"));
@@ -146,6 +148,7 @@ fn assert_decode_parity(
                 head_dim,
                 false,
                 window,
+                None,
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -348,6 +351,7 @@ fn assert_decode_half_parity(
                 false,
                 window,
                 Some(seq_len_k),
+                None,
                 AttnOutLayout::HeadMajor,
             )
             .unwrap_or_else(|e| panic!("F32 reference failed for {label}: {e}"));
@@ -363,6 +367,7 @@ fn assert_decode_half_parity(
                 false,
                 window,
                 Some(seq_len_k),
+                None,
                 AttnOutLayout::HeadMajor,
             )
             .unwrap_or_else(|e| panic!("half decode failed for {label}: {e}"));

@@ -409,6 +409,7 @@ fn assert_flash_v3_bwd_parity_shaped(
             causal,
             0,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .unwrap();

@@ -50,6 +50,9 @@ pub(super) fn decode_kernel_stem(head_dim: usize, dtype: DType) -> Result<String
 /// `out_layout`: at one query row `[B, H, 1, D]` and `[B, 1, H, D]` are the
 /// same bytes, so the kernel stores head-major and the result is reshaped.
 ///
+/// `kv_start`: device pointer to the `[B]` I32 left-padding starts, or null.
+/// The kernel raises each row's key-loop start to it, after the window.
+///
 /// Non-graph path: seq_len_k passed as plain i32 kernel arg (zero overhead).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn decode_attention_fwd(
@@ -60,6 +63,7 @@ pub(super) fn decode_attention_fwd(
     p: &AttentionParams,
     kv_seq_stride: usize,
     window_size: usize,
+    kv_start: u64,
     out_layout: AttnOutLayout,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     if p.seq_len_q != 1 {
@@ -68,7 +72,7 @@ pub(super) fn decode_attention_fwd(
             reason: format!("decode attention serves one query row, got {}", p.seq_len_q),
         });
     }
-    let (output, lse) = launch_decode(client, q, k, v, p, kv_seq_stride, window_size, 1)?;
+    let (output, lse) = launch_decode(client, q, k, v, p, kv_seq_stride, window_size, kv_start, 1)?;
     let output = output.reshape(&out_layout.shape(p.batch_size, p.num_heads, 1, p.head_dim))?;
     Ok((output, lse))
 }
@@ -90,6 +94,7 @@ fn launch_decode(
     p: &AttentionParams,
     kv_seq_stride: usize,
     window_size: usize,
+    kv_start: u64,
     out_seq_fold: usize,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let device = q.device();
@@ -159,6 +164,7 @@ fn launch_decode(
             builder.arg(&stride_i32);
             builder.arg(&scale);
             builder.arg(&window_i32);
+            builder.arg(&kv_start);
             builder.arg(&splits_i32);
             builder.launch(split_cfg).map_err(|e| Error::KernelError {
                 reason: format!("decode_attention split kernel launch failed: {:?}", e),
@@ -210,6 +216,7 @@ fn launch_decode(
         builder.arg(&stride_i32);
         builder.arg(&scale);
         builder.arg(&window_i32);
+        builder.arg(&kv_start);
         builder.arg(&fold_i32);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("decode_attention kernel launch failed: {:?}", e),
@@ -239,6 +246,10 @@ fn launch_decode(
 ///
 /// Token-major output: the kernel unfolds row `h * S_q + s` back to
 /// `o[b, s, h, :]` itself (`out_seq_fold = S_q`), so no copy follows.
+///
+/// `kv_start` (device pointer or null) is indexed by the batch row, which
+/// the kernel recovers as `bh / (H * S_q)`; the fold leaves it untouched.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn decode_attention_fwd_folded(
     client: &CudaClient,
     q: &Tensor<CudaRuntime>,
@@ -246,6 +257,7 @@ pub(super) fn decode_attention_fwd_folded(
     v: &Tensor<CudaRuntime>,
     p: &AttentionParams,
     kv_seq_stride: usize,
+    kv_start: u64,
     out_layout: AttnOutLayout,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let folded_heads = p.num_heads * p.seq_len_q;
@@ -273,6 +285,7 @@ pub(super) fn decode_attention_fwd_folded(
         &folded,
         kv_seq_stride,
         0,
+        kv_start,
         out_seq_fold,
     )?;
     let output =
@@ -335,6 +348,7 @@ mod tests {
                             causal,
                             window,
                             None,
+                            None,
                             AttnOutLayout::HeadMajor,
                         )
                         .expect("flash_attention_fwd");
@@ -389,6 +403,7 @@ mod tests {
                     head_dim,
                     false,
                     0,
+                    None,
                     None,
                     AttnOutLayout::HeadMajor,
                 )

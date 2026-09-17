@@ -175,6 +175,8 @@ where
         // Same sentinel as `Masked`: `0` disables, and the window is
         // inclusive of the current token.
         spec.sliding_window,
+        // No left padding: this entry serves one sequence per row.
+        None,
         // The kernel stores `[B, S_q, H, D]`; the epilogue is then a reshape.
         AttnOutLayout::TokenMajor,
     )?;

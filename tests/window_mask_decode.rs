@@ -81,6 +81,7 @@ fn attend(
             causal,
             window_size,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .expect("flash_attention_fwd failed");

@@ -999,6 +999,7 @@ fn run_fwd_case(case: Case, dtype: TestDType) {
             case.causal,
             0,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .expect("CPU reference flash_attention_fwd failed");
@@ -1023,6 +1024,7 @@ fn run_fwd_case(case: Case, dtype: TestDType) {
             case.num_kv_heads,
             case.head_dim,
             case.causal,
+            0,
             AttnOutLayout::HeadMajor,
         )
         .expect("mqa_gqa_fwd returned an error");
@@ -1101,6 +1103,7 @@ fn run_bwd_case(case: Case, dtype: TestDType) {
             case.causal,
             0,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .expect("CPU reference flash_attention_fwd failed");
@@ -1145,6 +1148,7 @@ fn run_bwd_case(case: Case, dtype: TestDType) {
             case.num_kv_heads,
             case.head_dim,
             case.causal,
+            0,
             AttnOutLayout::HeadMajor,
         )
         .expect("mqa_gqa_fwd (feeding backward) returned an error");
@@ -1251,6 +1255,7 @@ fn run_causal_first_row_case() {
             case.num_kv_heads,
             case.head_dim,
             case.causal,
+            0,
             AttnOutLayout::HeadMajor,
         )
         .expect("mqa_gqa_fwd returned an error");
@@ -1427,6 +1432,7 @@ fn run_bwd_defect_case(case: Case, dtype: TestDType, dq_roundings: usize, dkv_ro
             case.num_kv_heads,
             case.head_dim,
             case.causal,
+            0,
             AttnOutLayout::HeadMajor,
         )
         .expect("mqa_gqa_fwd (low-precision) returned an error");
@@ -1461,6 +1467,7 @@ fn run_bwd_defect_case(case: Case, dtype: TestDType, dq_roundings: usize, dkv_ro
             case.num_kv_heads,
             case.head_dim,
             case.causal,
+            0,
             AttnOutLayout::HeadMajor,
         )
         .expect("mqa_gqa_fwd (f32 reference on rounded inputs) returned an error");

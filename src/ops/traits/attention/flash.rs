@@ -105,6 +105,17 @@ pub trait FlashAttentionOps<R: Runtime> {
     /// passing a full-capacity KV cache buffer without copying/narrowing.
     /// When `None`, `k.shape()[2]` is used for both loop bound and stride.
     ///
+    /// # `kv_start`
+    ///
+    /// Per-row left padding: a `[B]` I32 tensor on the same device as `q`.
+    /// Key `j` of batch row `b` is valid only when `j >= kv_start[b]`, on top
+    /// of the causal, window and `kv_seq_len` rules. `None` means no padding
+    /// and costs nothing; an all-zero tensor gives the same bytes as `None`.
+    /// Query positions stay absolute (`kv_seq_len - seq_len_q + i`), so a
+    /// shared `position` counter stays valid across a left-padded batch. A
+    /// query row left with no valid key stores zeros and an LSE of `-inf`,
+    /// never NaN.
+    ///
     /// # `out_layout`
     ///
     /// Where each output element is stored — see [`AttnOutLayout`]. The
@@ -121,6 +132,7 @@ pub trait FlashAttentionOps<R: Runtime> {
         causal: bool,
         window_size: usize,
         kv_seq_len: Option<usize>,
+        kv_start: Option<&Tensor<R>>,
         out_layout: AttnOutLayout,
     ) -> Result<(Tensor<R>, Tensor<R>)>;
 

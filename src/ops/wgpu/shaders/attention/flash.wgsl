@@ -7,6 +7,10 @@
 //! LSE [B, num_heads, S_q] (logsumexp for backward)
 //!
 //! O(N²) GPU implementation. Handles GQA internally.
+//!
+//! Left padding: `kv_start` holds one I32 start per batch row when
+//! `has_kv_start != 0`; keys below it are skipped by raising the row's key
+//! range start. A row left with no key stores zeros and `lse = -1e30`.
 
 struct FlashParams {
     batch_size: u32,
@@ -19,14 +23,17 @@ struct FlashParams {
     causal: u32,
     window_size: u32,
     token_major: u32,
+    has_kv_start: u32,
+    _pad: u32,
 }
 
 @group(0) @binding(0) var<storage, read> q: array<f32>;
 @group(0) @binding(1) var<storage, read> k: array<f32>;
 @group(0) @binding(2) var<storage, read> v: array<f32>;
-@group(0) @binding(3) var<storage, read_write> out: array<f32>;
-@group(0) @binding(4) var<storage, read_write> lse: array<f32>;
-@group(0) @binding(5) var<uniform> params: FlashParams;
+@group(0) @binding(3) var<storage, read> kv_start: array<i32>;
+@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+@group(0) @binding(5) var<storage, read_write> lse: array<f32>;
+@group(0) @binding(6) var<uniform> params: FlashParams;
 
 @compute @workgroup_size(256)
 fn flash_attention_fwd_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -73,6 +80,10 @@ fn flash_attention_fwd_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
         if q_pos >= params.window_size {
             start_k = max(start_k, q_pos - params.window_size + 1u);
         }
+    }
+    if params.has_kv_start != 0u {
+        let pad = u32(max(kv_start[b], 0));
+        start_k = max(start_k, min(pad, params.seq_len_k));
     }
 
     // First pass: find max for stability

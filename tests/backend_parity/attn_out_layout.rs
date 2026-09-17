@@ -160,6 +160,7 @@ where
                 geom.causal,
                 geom.window,
                 geom.kv_seq_len,
+                None,
                 layout,
             )
             .unwrap_or_else(|e| panic!("{backend} {}: {layout:?} failed: {e}", geom.label))
@@ -279,6 +280,7 @@ fn token_major_is_permuted_head_major_cuda_bf16() {
                         geom.causal,
                         geom.window,
                         geom.kv_seq_len,
+                        None,
                         layout,
                     )
                     .unwrap_or_else(|e| panic!("cuda bf16 {}: {layout:?} failed: {e}", geom.label))
@@ -360,6 +362,7 @@ where
         geom.d,
         geom.causal,
         geom.window,
+        None,
         layout,
     )
     .unwrap_or_else(|e| panic!("{}: {layout:?} forward failed: {e}", geom.label));

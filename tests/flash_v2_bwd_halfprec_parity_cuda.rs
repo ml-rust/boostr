@@ -363,6 +363,7 @@ fn assert_flash_v2_bwd_halfprec_parity(
             true,
             window_size,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .expect("CPU reference flash_attention_fwd failed");
@@ -406,6 +407,7 @@ fn assert_flash_v2_bwd_halfprec_parity(
             head_dim,
             true,
             window_size,
+            None,
             None,
             AttnOutLayout::HeadMajor,
         )

@@ -135,6 +135,7 @@ fn main() {
                             causal,
                             window,
                             None,
+                            None,
                             AttnOutLayout::HeadMajor,
                         )
                         .unwrap();
@@ -183,6 +184,7 @@ fn main() {
                         head_dim,
                         causal,
                         window,
+                        None,
                         None,
                         AttnOutLayout::HeadMajor,
                     )
@@ -240,6 +242,7 @@ fn main() {
                             num_kv_heads,
                             head_dim,
                             causal,
+                            0,
                             AttnOutLayout::HeadMajor,
                         )
                         .unwrap();
@@ -281,6 +284,7 @@ fn main() {
                     num_kv_heads,
                     head_dim,
                     causal,
+                    0,
                     AttnOutLayout::HeadMajor,
                 )
                 .unwrap();
@@ -307,6 +311,7 @@ fn main() {
                         head_dim,
                         false,
                         0,
+                        None,
                         None,
                         AttnOutLayout::HeadMajor,
                     )

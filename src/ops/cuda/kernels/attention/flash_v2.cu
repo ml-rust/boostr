@@ -47,6 +47,17 @@
 // A tile a block keeps can still be fully masked for one of its rows; the
 // online softmax treats that as an exact no-op (see the loop body).
 //
+// Left padding: `kv_start` is a `[B]` I32 device array or null. Keys below
+// `kv_start[b]` are invalid for every row of batch `b`. The block reads its
+// start once, clamps it to `[0, seq_len_k]`, and skips the whole tiles below
+// it before the loop. Inside a tile every key index is taken RELATIVE to the
+// start (`key_rel = key - start`), so the tail check `key_rel >= seq_len_k -
+// start` as an unsigned compare also rejects the padded keys in the first
+// tile (they wrap negative), and the causal and window bounds shift by the
+// same amount. With a null pointer the start is 0 and every expression is
+// the unpadded one, so that path runs the same instructions as before. A
+// row with no valid key keeps `l == 0` and stores zeros with `LSE = -inf`.
+//
 // LSE is [B, H, S_q], one value m + log(l) per row, in F32. `flash_v2_bwd.cu`
 // consumes it unchanged.
 //
@@ -85,6 +96,7 @@ __device__ void flash_attention_fwd_impl(
     const float scale,
     const int causal,
     const int window_size,   // Sliding window: 0 or -1 = full attention, >0 = local window
+    const int* __restrict__ kv_start,
     const int out_token_major
 ) {
     static_assert(HEAD_DIM % (4 * G) == 0, "each lane owns whole float4 chunks");
@@ -136,6 +148,9 @@ __device__ void flash_attention_fwd_impl(
     const int q_start = blockIdx.y * ROWS;
     const int row0 = q_start + warp * ROWS_PER_WARP + rg * R;
     const int key_offset = max(0, seq_len_k - seq_len_q);
+    // Left-padding start of this batch row (see the header); 0 when unpadded.
+    const int pad_start = kv_start ? min(max(kv_start[batch_idx], 0), seq_len_k) : 0;
+    const int seq_len_k_rel = seq_len_k - pad_start;
 
     // Q rows in registers. Rows past seq_len_q read as zero and are never stored.
     float q[R][CL][4];
@@ -160,10 +175,12 @@ __device__ void flash_attention_fwd_impl(
     }
 
     // First and last absolute query positions of this block: the window skip
-    // is governed by the first row, the causal stop by the last.
+    // is governed by the first row, the causal stop by the last. Tiles that
+    // end before the padding start are skipped the same way.
     const int first_q_pos = key_offset + q_start;
     const int last_q_pos = key_offset + min(q_start + ROWS, seq_len_q) - 1;
-    const int min_key = window_size > 0 ? max(0, first_q_pos - window_size + 1) : 0;
+    const int min_key_win = window_size > 0 ? max(0, first_q_pos - window_size + 1) : 0;
+    const int min_key = max(min_key_win, pad_start);
     const int num_k_tiles = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
 
     for (int kt = min_key / BLOCK_N; kt < num_k_tiles; ++kt) {
@@ -206,15 +223,18 @@ __device__ void flash_attention_fwd_impl(
         // m at -inf, and then alpha = 1 and every p = 0 make it an exact no-op
         // instead of exp(-inf - -inf) = NaN. This must stay a computation, not
         // a `continue`: the barrier below is reached by every thread.
+        // Key indices are relative to the padding start: the unsigned tail
+        // compare then also rejects keys below it (see the header).
+        const int k_start_rel = k_start - pad_start;
         #pragma unroll
         for (int t = 0; t < R; ++t) {
-            const int q_pos = key_offset + row0 + t;
+            const int q_pos = key_offset + row0 + t - pad_start;
             const int win_lo = q_pos - window_size + 1;
             float m_tile = -INFINITY;
             #pragma unroll
             for (int i = 0; i < KPL; ++i) {
-                const int key = k_start + g * KPL + i;
-                const bool masked = key >= seq_len_k
+                const int key = k_start_rel + g * KPL + i;
+                const bool masked = (unsigned)key >= (unsigned)seq_len_k_rel
                                  || (causal && key > q_pos)
                                  || (window_size > 0 && key < win_lo);
                 s[t][i] = masked ? -INFINITY : s[t][i] * scale;
@@ -299,11 +319,12 @@ __device__ void flash_attention_fwd_impl(
         const int batch_size, const int num_heads, const int num_kv_heads,     \
         const int seq_len_q, const int seq_len_k,                              \
         const float scale, const int causal, const int window_size,            \
-        const int out_token_major                                              \
+        const int* kv_start, const int out_token_major                         \
     ) {                                                                        \
         flash_attention_fwd_impl<T, HEAD_DIM, G, R, WARPS, BLOCK_N>(           \
             Q, K, V, O, L, batch_size, num_heads, num_kv_heads,                \
-            seq_len_q, seq_len_k, scale, causal, window_size, out_token_major  \
+            seq_len_q, seq_len_k, scale, causal, window_size, kv_start,        \
+            out_token_major                                                    \
         );                                                                     \
     }
 

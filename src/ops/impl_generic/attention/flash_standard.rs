@@ -73,6 +73,29 @@ where
     R: Runtime<DType = DType>,
     C: StandardAttentionClient<R>,
 {
+    standard_attention_fwd_kv_start(client, q, k, v, cfg, None)
+}
+
+/// [`standard_attention_fwd`] with the per-row left-padding start of
+/// `FlashAttentionOps::flash_attention_fwd`.
+///
+/// `kv_start` holds one start per batch row, already read to the host; key
+/// `j` of row `b` is valid iff `j >= kv_start[b]` on top of `cfg`'s rules.
+/// `None` runs the exact path of [`standard_attention_fwd`], so the two are
+/// bit-identical then. A query row left with no valid key stores zeros and
+/// an LSE of `-inf`; see [`super::kv_start::build_kv_start_masks`].
+pub fn standard_attention_fwd_kv_start<R, C>(
+    client: &C,
+    q: &Tensor<R>,
+    k: &Tensor<R>,
+    v: &Tensor<R>,
+    cfg: StandardAttnConfig,
+    kv_start: Option<&[i32]>,
+) -> Result<(Tensor<R>, Tensor<R>)>
+where
+    R: Runtime<DType = DType>,
+    C: StandardAttentionClient<R>,
+{
     let q_shape = q.shape();
     let head_dim = q_shape[3];
     let seq_len_q = q_shape[2];
@@ -87,15 +110,33 @@ where
     let scores = client.matmul(q, &k_t).map_err(Error::Numr)?;
     let scores = client.mul_scalar(&scores, scale).map_err(Error::Numr)?;
 
-    let scores = apply_mask(
-        client,
-        scores,
-        seq_len_q,
-        seq_len_k,
-        cfg.causal,
-        cfg.window_size,
-        q.device(),
-    )?;
+    let (scores, dead_rows) = match kv_start {
+        None => (
+            apply_mask(
+                client,
+                scores,
+                seq_len_q,
+                seq_len_k,
+                cfg.causal,
+                cfg.window_size,
+                q.device(),
+            )?,
+            None,
+        ),
+        Some(starts) => {
+            let (mask, alive, lse_mask) = super::kv_start::build_kv_start_masks::<R>(
+                starts,
+                seq_len_q,
+                seq_len_k,
+                cfg.causal,
+                cfg.window_size,
+                q.device(),
+            )?;
+            let mask = cast_like(client, mask, scores.dtype())?;
+            let scores = client.add(&scores, &mask).map_err(Error::Numr)?;
+            (scores, Some((alive, lse_mask)))
+        }
+    };
 
     // Logsumexp for the backward pass: [B, H, S_q]
     let lse = client
@@ -111,7 +152,32 @@ where
         lse
     };
 
+    // A row with no valid key ran a uniform softmax above; zero its output
+    // and pin its LSE to -inf.
+    let (output, lse) = match dead_rows {
+        None => (output, lse),
+        Some((alive, lse_mask)) => {
+            let alive = cast_like(client, alive, output.dtype())?;
+            let output = client.mul(&output, &alive).map_err(Error::Numr)?;
+            let lse = client.add(&lse, &lse_mask).map_err(Error::Numr)?;
+            (output, lse)
+        }
+    };
+
     Ok((output, lse))
+}
+
+/// `t` cast to `dtype`, or `t` itself when it already is.
+fn cast_like<R, C>(client: &C, t: Tensor<R>, dtype: DType) -> Result<Tensor<R>>
+where
+    R: Runtime<DType = DType>,
+    C: StandardAttentionClient<R>,
+{
+    if t.dtype() == dtype {
+        Ok(t)
+    } else {
+        client.cast(&t, dtype).map_err(Error::Numr)
+    }
 }
 
 /// Standard attention backward. Recomputes weights from `q, k`, then returns

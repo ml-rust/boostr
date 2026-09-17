@@ -624,6 +624,7 @@ fn assert_paged_bwd_kv_parity(
             true,
             0,
             None,
+            None,
             AttnOutLayout::HeadMajor,
         )
         .unwrap();

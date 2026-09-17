@@ -3,7 +3,7 @@
 //! Wraps FlashAttentionOps (Tensor-level) into Var-level operations
 //! for seamless integration with numr's autograd graph.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::ops::traits::{AttnOutLayout, FlashAttentionOps};
 use numr::autograd::{GradFn, TensorId, Var};
 use numr::runtime::Runtime;
@@ -138,6 +138,12 @@ where
 /// that reshapes to `[B, S_q, H * D]` next passes `TokenMajor` and skips the
 /// `permute + contiguous` copy; the backward node permutes back itself.
 ///
+/// `kv_start` is the per-row left-padding start of
+/// [`FlashAttentionOps::flash_attention_fwd`]. The fused backward kernels
+/// take no such mask, so it is inference-only: a call with `kv_start` set
+/// and any input that requires grad is refused with `InvalidArgument`
+/// before the forward runs.
+///
 /// Returns `Var<R>` (output only — LSE is internal to the backward).
 #[allow(clippy::too_many_arguments)]
 pub fn var_flash_attention<R>(
@@ -149,6 +155,7 @@ pub fn var_flash_attention<R>(
     head_dim: usize,
     causal: bool,
     window_size: usize,
+    kv_start: Option<&Tensor<R>>,
     out_layout: AttnOutLayout,
 ) -> Result<Var<R>>
 where
@@ -156,6 +163,16 @@ where
     R::Client: FlashAttentionOps<R>,
 {
     let client = R::default_client(q.tensor().device());
+    let needs_grad = q.requires_grad() || k.requires_grad() || v.requires_grad();
+
+    if kv_start.is_some() && needs_grad {
+        return Err(Error::InvalidArgument {
+            arg: "kv_start",
+            reason: "var_flash_attention: kv_start is inference-only; flash_attention_bwd has no \
+                     per-row key mask, so an input that requires grad cannot be combined with it"
+                .into(),
+        });
+    }
 
     let (output, lse) = client.flash_attention_fwd(
         q.tensor(),
@@ -167,10 +184,11 @@ where
         causal,
         window_size,
         None,
+        kv_start,
         out_layout,
     )?;
 
-    if q.requires_grad() || k.requires_grad() || v.requires_grad() {
+    if needs_grad {
         let grad_fn = FlashAttentionBackward {
             input_ids: [q.id(), k.id(), v.id()],
             saved_tensors: vec![

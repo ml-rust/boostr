@@ -21,6 +21,10 @@ use numr::tensor::Tensor;
 
 /// Fused decode attention: Q [B, H, 1, D] × K [B, H_kv, S_k, D] → output [B, H, 1, D]
 ///
+/// `kv_start`, when given, holds one key-loop start per batch row: keys
+/// before it are left-padding and skipped. A row whose start reaches the
+/// end of the key axis stores zeros and an LSE of `-inf`.
+///
 /// Returns (output, lse) where lse is a dummy [B, H, 1] tensor (needed for trait compat).
 pub fn fused_decode_attention(
     q: &Tensor<CpuRuntime>,
@@ -29,6 +33,7 @@ pub fn fused_decode_attention(
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
+    kv_start: Option<&[i32]>,
 ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
     let q_shape = q.shape();
     let k_shape = k.shape();
@@ -64,18 +69,31 @@ pub fn fused_decode_attention(
     let mut scores = vec![0.0f32; seq_len_k];
 
     for b in 0..batch {
+        // Keys before the row's start are left-padding. A start past the end
+        // leaves the row with no key at all.
+        let start = kv_start
+            .map(|s| usize::try_from(s[b].max(0)).unwrap_or(0).min(seq_len_k))
+            .unwrap_or(0);
         for h in 0..num_heads {
             let kv_h = h / kv_group_size;
             let q_offset = b * q_stride_b + h * head_dim;
             let k_base = b * k_stride_b + kv_h * k_stride_h;
             let v_base = b * v_stride_b + kv_h * v_stride_h;
+            let out_offset = b * num_heads * head_dim + h * head_dim;
+            let out_row = &mut output[out_offset..out_offset + head_dim];
+            out_row.fill(0.0);
+
+            if start >= seq_len_k {
+                lse_data[b * num_heads + h] = f32::NEG_INFINITY;
+                continue;
+            }
 
             let q_row = &q_data[q_offset..q_offset + head_dim];
 
             // Phase 1: Compute QK scores with SIMD dot products
             // Use f64 scale to match standard attention path (mul_scalar with f64)
             let mut max_score = f32::NEG_INFINITY;
-            for j in 0..seq_len_k {
+            for j in start..seq_len_k {
                 let k_row = &k_data[k_base + j * head_dim..k_base + j * head_dim + head_dim];
                 let score = (dot_f32_simd(q_row, k_row) as f64 * scale) as f32;
                 scores[j] = score;
@@ -86,19 +104,15 @@ pub fn fused_decode_attention(
 
             // Phase 2: Softmax with f64 accumulation for numerical stability
             let mut sum_exp = 0.0f64;
-            for s in scores[..seq_len_k].iter_mut() {
+            for s in scores[start..seq_len_k].iter_mut() {
                 let w = (*s - max_score).exp();
                 *s = w;
                 sum_exp += w as f64;
             }
 
             // Phase 3: Accumulate weighted V into output
-            let out_offset = b * num_heads * head_dim + h * head_dim;
-            let out_row = &mut output[out_offset..out_offset + head_dim];
-            out_row.fill(0.0);
-
             let inv_sum = (1.0f64 / sum_exp) as f32;
-            for j in 0..seq_len_k {
+            for j in start..seq_len_k {
                 let w = scores[j] * inv_sum;
                 let v_row = &v_data[v_base + j * head_dim..v_base + j * head_dim + head_dim];
                 accumulate_weighted_simd(out_row, v_row, w);
@@ -215,7 +229,7 @@ mod tests {
         let k = make_tensor(&k_data, &[1, 2, 3, 4]);
         let v = make_tensor(&v_data, &[1, 2, 3, 4]);
 
-        let (out, _lse) = fused_decode_attention(&q, &k, &v, 2, 2, 4).unwrap();
+        let (out, _lse) = fused_decode_attention(&q, &k, &v, 2, 2, 4, None).unwrap();
         assert_eq!(out.shape(), &[1, 2, 1, 4]);
 
         // Verify against reference: standard attention
@@ -236,7 +250,7 @@ mod tests {
         let k = make_tensor(&k_data, &[1, 2, 3, 4]);
         let v = make_tensor(&v_data, &[1, 2, 3, 4]);
 
-        let (out, _lse) = fused_decode_attention(&q, &k, &v, 4, 2, 4).unwrap();
+        let (out, _lse) = fused_decode_attention(&q, &k, &v, 4, 2, 4, None).unwrap();
         assert_eq!(out.shape(), &[1, 4, 1, 4]);
 
         // Heads 0,1 should share KV head 0; heads 2,3 should share KV head 1
@@ -289,7 +303,7 @@ mod tests {
 
         // Fused kernel
         let (fused_out, _) =
-            fused_decode_attention(&q, &k, &v, num_heads, num_kv_heads, head_dim).unwrap();
+            fused_decode_attention(&q, &k, &v, num_heads, num_kv_heads, head_dim, None).unwrap();
 
         // Reference: standard matmul path
         let k_t = k.transpose(-2isize, -1isize).unwrap().contiguous().unwrap();
@@ -361,7 +375,7 @@ mod tests {
 
         // Fused kernel
         let (fused_out, _) =
-            fused_decode_attention(&q, &k, &v, num_heads, num_kv_heads, head_dim).unwrap();
+            fused_decode_attention(&q, &k, &v, num_heads, num_kv_heads, head_dim, None).unwrap();
 
         // Reference: standard matmul path with GQA expansion
         let repeats = num_heads / num_kv_heads;

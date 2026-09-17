@@ -3,6 +3,8 @@
 // there. The helpers ARE used — just not all of them by every crate.
 #![allow(dead_code)]
 
+pub mod kv_start;
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 

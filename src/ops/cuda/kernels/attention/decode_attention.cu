@@ -45,6 +45,14 @@
 // Causal is not an argument: the single query is the newest position and sees
 // every key up to itself, so the causal mask admits the same keys as no mask.
 //
+// Left padding: `kv_start` is a `[B]` I32 device array or null. Row `b`'s
+// key loop starts at `max(window start, kv_start[b])`, read once per block.
+// A start at or past `seq_len_k` leaves the range empty: the whole-sequence
+// kernel then stores zeros with `LSE = -inf`, and every split slice reports
+// `m = -inf, l = 0`, which the combine drops the same way. The batch row is
+// `bh / num_heads` in both grids; under the host's short-query fold
+// `num_heads` is `H * S_q`, and that quotient is still the batch row.
+//
 // Head dims: every multiple of DECODE_LANES the flash family serves (32 through
 // 256). A block is `D` threads, one warp per DECODE_LANES dimensions, so the
 // block is a single warp at 32 and eight warps at 256; shared memory is
@@ -165,6 +173,16 @@ __device__ __forceinline__ size_t decode_out_row(int bh, int num_heads, int out_
     return ((size_t)b * out_seq_fold + s) * true_heads + h;
 }
 
+// First key of row `b`: the window start, raised to the row's left-padding
+// start when one is given.
+__device__ __forceinline__ int decode_pos_start(
+    const int* __restrict__ kv_start, int b, int seq_len_k, int window_size
+) {
+    int start = (window_size > 0) ? max(0, seq_len_k - window_size) : 0;
+    if (kv_start != nullptr) start = max(start, kv_start[b]);
+    return start;
+}
+
 // ============================================================================
 // Whole-sequence kernel: one block per (batch, head)
 // ============================================================================
@@ -178,7 +196,8 @@ __device__ __forceinline__ void decode_attention_impl(
     float* __restrict__ LSE,
     int num_heads, int num_kv_heads,
     int seq_len_k, int kv_seq_stride,
-    float scale, int window_size, int out_seq_fold
+    float scale, int window_size,
+    const int* __restrict__ kv_start, int out_seq_fold
 ) {
     const int bh = blockIdx.x;
     const int b = bh / num_heads;
@@ -191,10 +210,14 @@ __device__ __forceinline__ void decode_attention_impl(
     const T* v_base = V + (size_t)(b * num_kv_heads + kv_h) * kv_seq_stride * D;
 
     // Sliding window keeps the last `window_size` keys; `0` disables it.
-    const int pos_start = (window_size > 0) ? max(0, seq_len_k - window_size) : 0;
+    const int pos_start = decode_pos_start(kv_start, b, seq_len_k, window_size);
 
-    float acc, m, l;
-    decode_attention_core<T, D>(q_row, k_base, v_base, pos_start, seq_len_k, scale, acc, m, l);
+    float acc = 0.0f;
+    float m = -INFINITY;
+    float l = 0.0f;
+    // Block-uniform: an empty range skips the core and its barriers together.
+    if (pos_start < seq_len_k)
+        decode_attention_core<T, D>(q_row, k_base, v_base, pos_start, seq_len_k, scale, acc, m, l);
 
     O[decode_out_row(bh, num_heads, out_seq_fold) * D + tid] =
         convert_dtype<T>((l > 0.0f) ? acc / l : 0.0f);
@@ -219,7 +242,8 @@ __device__ __forceinline__ void decode_attention_split_impl(
     float* __restrict__ partial_ml,
     int num_heads, int num_kv_heads,
     int seq_len_k, int kv_seq_stride,
-    float scale, int window_size, int num_splits
+    float scale, int window_size,
+    const int* __restrict__ kv_start, int num_splits
 ) {
     const int bh = blockIdx.x;
     const int split = blockIdx.y;
@@ -232,8 +256,9 @@ __device__ __forceinline__ void decode_attention_split_impl(
     const T* k_base = K + (size_t)(b * num_kv_heads + kv_h) * kv_seq_stride * D;
     const T* v_base = V + (size_t)(b * num_kv_heads + kv_h) * kv_seq_stride * D;
 
-    const int pos_start = (window_size > 0) ? max(0, seq_len_k - window_size) : 0;
-    const int span = seq_len_k - pos_start;
+    // A start past the end gives a non-positive span, so every slice is empty.
+    const int pos_start = decode_pos_start(kv_start, b, seq_len_k, window_size);
+    const int span = max(0, seq_len_k - pos_start);
     const int chunk = (span + num_splits - 1) / num_splits;
     const int begin = pos_start + split * chunk;
     const int end = min(begin + chunk, seq_len_k);
@@ -298,17 +323,19 @@ __device__ __forceinline__ void decode_attention_combine_impl(
 // Non-graph and graph variants take the same arguments apart from
 // `seq_len_k`: a plain int here, a device pointer in the `_graph` entries.
 // The graph entries serve a true single-query decode only, so they take no
-// `out_seq_fold` and store row `bh` at `bh * D`.
+// `out_seq_fold` and store row `bh` at `bh * D`; they take no `kv_start`
+// either and run unpadded.
 #define DECODE_ATTENTION_KERNELS(D, SUFFIX, T)                                     \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX(                        \
     const T* __restrict__ Q, const T* __restrict__ K, const T* __restrict__ V,     \
     T* __restrict__ O, float* __restrict__ LSE,                                    \
     int num_heads, int num_kv_heads, int seq_len_k, int kv_seq_stride,             \
-    float scale, int window_size, int out_seq_fold                                 \
+    float scale, int window_size, const int* __restrict__ kv_start,                \
+    int out_seq_fold                                                               \
 ) {                                                                                \
     decode_attention_impl<T, D>(Q, K, V, O, LSE, num_heads, num_kv_heads,          \
                                 seq_len_k, kv_seq_stride, scale, window_size,      \
-                                out_seq_fold);                                     \
+                                kv_start, out_seq_fold);                           \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_graph(                \
@@ -319,18 +346,19 @@ extern "C" __global__ void decode_attention_##D##_##SUFFIX##_graph(             
 ) {                                                                                \
     decode_attention_impl<T, D>(Q, K, V, O, LSE, num_heads, num_kv_heads,          \
                                 *seq_len_k_ptr, kv_seq_stride, scale, window_size, \
-                                1);                                                \
+                                nullptr, 1);                                       \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split(                \
     const T* __restrict__ Q, const T* __restrict__ K, const T* __restrict__ V,     \
     float* __restrict__ partial_o, float* __restrict__ partial_ml,                 \
     int num_heads, int num_kv_heads, int seq_len_k, int kv_seq_stride,             \
-    float scale, int window_size, int num_splits                                   \
+    float scale, int window_size, const int* __restrict__ kv_start,                \
+    int num_splits                                                                 \
 ) {                                                                                \
     decode_attention_split_impl<T, D>(Q, K, V, partial_o, partial_ml, num_heads,   \
                                       num_kv_heads, seq_len_k, kv_seq_stride,      \
-                                      scale, window_size, num_splits);             \
+                                      scale, window_size, kv_start, num_splits);   \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split_graph(          \
@@ -341,7 +369,7 @@ extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split_graph(       
 ) {                                                                                \
     decode_attention_split_impl<T, D>(Q, K, V, partial_o, partial_ml, num_heads,   \
                                       num_kv_heads, *seq_len_k_ptr, kv_seq_stride, \
-                                      scale, window_size, num_splits);             \
+                                      scale, window_size, nullptr, num_splits);    \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_combine(              \

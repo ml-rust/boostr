@@ -185,6 +185,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             // The disabled-window sentinel `core_spec` declares.
             self.core_spec().sliding_window,
             Some(kv_cache.seq_len()),
+            None,
             AttnOutLayout::TokenMajor,
         )?;
         let attn_out = Var::new(out, false);

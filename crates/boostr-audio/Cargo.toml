@@ -186,3 +186,8 @@ required-features = ["voxcpm"]
 name = "voxcpm_sensitivity"
 path = "examples/voxcpm/sensitivity.rs"
 required-features = ["voxcpm"]
+
+[[example]]
+name = "voxcpm_quality_gate"
+path = "examples/voxcpm/quality_gate.rs"
+required-features = ["voxcpm", "whisper", "vad"]

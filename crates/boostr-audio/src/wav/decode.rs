@@ -89,6 +89,9 @@ pub fn decode_wav(bytes: &[u8]) -> Result<WavData> {
     let end = bytes.len();
     let mut format: Option<Format> = None;
     let mut data_range: Option<(usize, usize)> = None;
+    // Whether the `data` size came from the header (exact) or from the buffer
+    // length (streamed, clamped). Only the latter tolerates a partial frame.
+    let mut declared_data = false;
     let mut pos = 12usize;
 
     // Walk the chunk list: every chunk is a 4-byte id, a little-endian u32 size,
@@ -108,6 +111,18 @@ pub fn decode_wav(bytes: &[u8]) -> Result<WavData> {
                 tag_name(&id)
             ))
         })?;
+        // A writer that streams to a pipe cannot seek back to patch the size,
+        // so it leaves `data` at 0xFFFFFFFF (or the pre-write placeholder) and
+        // the chunk runs to end of file. `data` is the last chunk of such a
+        // file, so its declared size is clamped to the bytes present and any
+        // trailing partial frame is dropped. Every other chunk keeps the strict
+        // check: a `fmt ` that overruns is corruption, not streaming.
+        if body_end > end && &id == b"data" {
+            if data_range.is_none() {
+                data_range = Some((body, end));
+            }
+            break;
+        }
         if body_end > end {
             return Err(bad(format!(
                 "chunk '{}' at offset {pos} declares size {size}, which overruns the {end}-byte buffer",
@@ -119,6 +134,7 @@ pub fn decode_wav(bytes: &[u8]) -> Result<WavData> {
             b"fmt " => format = Some(parse_fmt(bytes, body, size)?),
             b"data" if data_range.is_none() => {
                 data_range = Some((body, body_end));
+                declared_data = true;
             }
             _ => {}
         }
@@ -147,7 +163,8 @@ pub fn decode_wav(bytes: &[u8]) -> Result<WavData> {
     if frame_size == 0 {
         return Err(bad("frame size is zero".to_string()));
     }
-    if !data.len().is_multiple_of(frame_size) {
+    let whole_frames = data.len() - data.len() % frame_size;
+    if whole_frames != data.len() && declared_data {
         return Err(bad(format!(
             "'data' chunk is {} bytes, not a whole number of {frame_size}-byte frames \
              ({} channels x {} bits)",
@@ -156,6 +173,7 @@ pub fn decode_wav(bytes: &[u8]) -> Result<WavData> {
             format.bits_per_sample
         )));
     }
+    let data = &data[..whole_frames];
 
     let samples = decode_samples(data, &format, bytes_per_sample);
     Ok(WavData {
@@ -336,4 +354,60 @@ pub fn to_mono(samples: &[f32], channels: u16) -> Result<Vec<f32>> {
         .chunks_exact(channels)
         .map(|frame| frame.iter().sum::<f32>() * scale)
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wav::encode::encode_wav_pcm16;
+
+    /// Offsets of the two size fields `encode_wav_pcm16` writes: RIFF size at
+    /// 4, `data` size at 40 (12-byte header + 24-byte `fmt ` chunk + 4-byte id).
+    const RIFF_SIZE_OFF: usize = 4;
+    const DATA_SIZE_OFF: usize = 40;
+
+    fn pcm16_with_sizes(samples: &[f32], riff: u32, data: u32) -> Vec<u8> {
+        let mut bytes = encode_wav_pcm16(samples, 16_000).expect("encode");
+        assert_eq!(&bytes[36..40], b"data");
+        bytes[RIFF_SIZE_OFF..RIFF_SIZE_OFF + 4].copy_from_slice(&riff.to_le_bytes());
+        bytes[DATA_SIZE_OFF..DATA_SIZE_OFF + 4].copy_from_slice(&data.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn streamed_sizes_clamp_data_to_the_buffer() {
+        let samples = [0.0f32, 0.25, -0.5, 0.75, -1.0, 0.5];
+        let exact = decode_wav(&encode_wav_pcm16(&samples, 16_000).expect("encode"))
+            .expect("exact header decodes");
+        let streamed = decode_wav(&pcm16_with_sizes(&samples, u32::MAX, u32::MAX))
+            .expect("0xFFFFFFFF sizes decode");
+        assert_eq!(streamed, exact);
+        assert_eq!(streamed.frames(), samples.len());
+    }
+
+    #[test]
+    fn streamed_data_drops_a_trailing_partial_frame() {
+        let samples = [0.0f32, 0.25, -0.5, 0.75];
+        let mut bytes = pcm16_with_sizes(&samples, u32::MAX, u32::MAX);
+        bytes.push(0x7f);
+        let decoded = decode_wav(&bytes).expect("odd trailing byte is dropped");
+        assert_eq!(decoded.frames(), samples.len());
+    }
+
+    #[test]
+    fn declared_data_size_must_be_whole_frames() {
+        let samples = [0.0f32, 0.25, -0.5, 0.75];
+        let mut bytes = pcm16_with_sizes(&samples, 0, 7);
+        bytes.truncate(44 + 7);
+        let err = decode_wav(&bytes).expect_err("7 bytes of 2-byte frames");
+        assert!(err.to_string().contains("not a whole number"), "{err}");
+    }
+
+    #[test]
+    fn fmt_overrun_is_still_an_error() {
+        let mut bytes = encode_wav_pcm16(&[0.0f32; 4], 16_000).expect("encode");
+        bytes[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        let err = decode_wav(&bytes).expect_err("fmt chunk overruns");
+        assert!(err.to_string().contains("overruns"), "{err}");
+    }
 }

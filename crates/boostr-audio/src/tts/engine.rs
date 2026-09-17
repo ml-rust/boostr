@@ -20,6 +20,25 @@ pub trait TtsEngine: Send + Sync {
     /// ignoring it.
     fn synthesize(&self, text: &str, voice: &str, speed: f32) -> Result<Vec<f32>>;
 
+    /// Render `text` in `voice` at `speed`, handing the waveform to `sink`
+    /// in order, chunk by chunk, as it becomes available.
+    ///
+    /// The concatenation of every chunk equals [`TtsEngine::synthesize`]'s
+    /// output for the same request. A `sink` error aborts the render and is
+    /// returned as-is, so a caller whose client went away can stop the
+    /// engine mid-utterance. The default renders whole and hands over one
+    /// chunk; an engine that can decode incrementally overrides it.
+    fn synthesize_stream(
+        &self,
+        text: &str,
+        voice: &str,
+        speed: f32,
+        sink: &mut dyn FnMut(&[f32]) -> Result<()>,
+    ) -> Result<()> {
+        let samples = self.synthesize(text, voice, speed)?;
+        sink(&samples)
+    }
+
     /// Sample rate of the returned waveform.
     fn sample_rate(&self) -> u32;
 

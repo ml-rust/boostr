@@ -30,8 +30,11 @@
 
 use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::client::VoxCpmClient;
-use crate::model::audio::voxcpm::model::chunked_decode::decode_latent_windowed;
+use crate::model::audio::voxcpm::model::chunked_decode::{
+    CONTEXT_FRAMES, WINDOW_FRAMES, decode_latent_windowed, decode_latent_windowed_from,
+};
 use crate::model::audio::voxcpm::model::loader::VoxCpm2Model;
+use crate::model::audio::voxcpm::vae::decoder::HOP_LENGTH;
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{ShapeOps, TypeConversionOps};
@@ -124,6 +127,68 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         // activations at internally.
         Ok(decoded.to_dtype(DType::F32)?)
     }
+
+    /// Decode the waveform for `patches[from..]` only.
+    ///
+    /// `patches` is every patch generated so far, in order; the result is
+    /// `[1, 1, (patches.len() - from) * patch_size * HOP_LENGTH]` at F32 and
+    /// equals the corresponding tail of [`Self::decode_patches`] over the
+    /// same slice. A streaming caller calls this once per emitted chunk with
+    /// `from` at the previous chunk's end and concatenates the results.
+    ///
+    /// Mechanism: the decode runs on the same window grid
+    /// [`Self::decode_patches`] uses, anchored at patch 0, so it unfolds from
+    /// [`first_patch_for_frame`] — the start of the left context of the
+    /// window containing `from` — rather than from `from` itself, decodes
+    /// that suffix windowed, and drops everything before `from`. Every
+    /// window complete at call time is therefore the identical decoder call
+    /// the whole decode issues.
+    ///
+    /// Errors when `from >= patches.len()`.
+    pub fn decode_patches_from<C>(
+        &self,
+        client: &C,
+        patches: &[Var<R>],
+        from: usize,
+    ) -> Result<Tensor<R>>
+    where
+        C: VoxCpmClient<R>,
+        R::Client: ShapeOps<R> + TypeConversionOps<R>,
+    {
+        if from >= patches.len() {
+            return Err(Error::InvalidArgument {
+                arg: "from",
+                reason: format!("expected a patch index below {}, got {from}", patches.len()),
+            });
+        }
+        let patch_size = self.config.patch_size;
+        let from_frame = from * patch_size;
+        let start_patch = first_patch_for_frame(from_frame, patch_size);
+        let latent = unfold_patches(&patches[start_patch..], patch_size, self.config.feat_dim)?;
+        let latent = latent.to_dtype(self.vae_decoder.dtype())?;
+        let decoded = decode_latent_windowed_from(
+            client,
+            &self.vae_decoder,
+            &latent,
+            start_patch * patch_size,
+            from_frame,
+        )?;
+        Ok(decoded.to_dtype(DType::F32)?)
+    }
+
+    /// Waveform samples one generated patch decodes to.
+    pub const fn samples_per_patch(&self) -> usize {
+        self.config.patch_size * HOP_LENGTH
+    }
+}
+
+/// The first patch a suffix decode from latent frame `from_frame` must
+/// unfold: the patch holding the context start of the window that contains
+/// `from_frame`, on the grid anchored at frame 0. Rounds down to a whole
+/// patch, so the unfolded latent starts at or before that context start.
+pub(crate) fn first_patch_for_frame(from_frame: usize, patch_size: usize) -> usize {
+    let window_start = (from_frame / WINDOW_FRAMES) * WINDOW_FRAMES;
+    window_start.saturating_sub(CONTEXT_FRAMES) / patch_size
 }
 
 #[cfg(test)]
@@ -172,6 +237,28 @@ mod tests {
         let want: Vec<f32> = latent.contiguous().expect("contig").to_vec();
         let got: Vec<f32> = unfolded.contiguous().expect("contig").to_vec();
         assert_eq!(got, want);
+    }
+
+    /// The unfold start never passes the containing window's context start,
+    /// and never fetches a whole window more than needed.
+    #[test]
+    fn first_patch_for_frame_covers_the_window_context() {
+        let patch_size = 4;
+        for from_frame in (0..3 * WINDOW_FRAMES).step_by(patch_size) {
+            let window_start = (from_frame / WINDOW_FRAMES) * WINDOW_FRAMES;
+            let context_start = window_start.saturating_sub(CONTEXT_FRAMES);
+            let origin = first_patch_for_frame(from_frame, patch_size) * patch_size;
+            assert!(
+                origin <= context_start,
+                "from {from_frame}: origin {origin}"
+            );
+            assert!(origin + patch_size > context_start, "from {from_frame}");
+        }
+        assert_eq!(first_patch_for_frame(0, 4), 0);
+        assert_eq!(first_patch_for_frame(60, 4), 0);
+        assert_eq!(first_patch_for_frame(64, 4), 8);
+        assert_eq!(first_patch_for_frame(3, 5), 0);
+        assert_eq!(first_patch_for_frame(130, 5), 19);
     }
 
     #[test]

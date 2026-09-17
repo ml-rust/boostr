@@ -152,25 +152,51 @@ impl TtsBundle {
         match &self.engine {
             Some(engine) => engine
                 .synthesize(text, voice_id, options.speed)
-                .map_err(|e| match e {
-                    // An engine refuses a request with `InvalidArgument` whether it
-                    // raises it here or inside a boostr model call.
-                    crate::error::Error::InvalidArgument { .. }
-                    | crate::error::Error::Boostr(boostr::error::Error::InvalidArgument {
-                        ..
-                    }) => TtsError::InvalidRequest(e.to_string()),
-                    other => TtsError::Engine(other.to_string()),
-                }),
-            None => {
-                // Scaffolding path: validate voice + run G2P eagerly, then fail
-                // with `NotImplemented`. Exercises the plumbing end-to-end so
-                // misconfigured endpoints surface before synthesis is even
-                // attempted.
-                let _phonemes = self.phonemize(text, voice_id)?;
-                let _ = options.speed;
-                Err(TtsError::NotImplemented)
-            }
+                .map_err(engine_error),
+            None => self.scaffolding_failure(text, voice_id),
         }
+    }
+
+    /// Synthesize a waveform chunk by chunk.
+    ///
+    /// Same request contract as [`TtsBundle::synthesize`]; the chunks handed
+    /// to `sink`, concatenated, equal that call's output. A `sink` error
+    /// aborts the render. Engine errors map exactly as in `synthesize`, so a
+    /// server's status mapping is shared between the two paths.
+    pub fn synthesize_stream(
+        &self,
+        text: &str,
+        voice_id: &str,
+        options: &SynthesizeOptions,
+        sink: &mut dyn FnMut(&[f32]) -> crate::error::Result<()>,
+    ) -> Result<(), TtsError> {
+        match &self.engine {
+            Some(engine) => engine
+                .synthesize_stream(text, voice_id, options.speed, sink)
+                .map_err(engine_error),
+            None => self.scaffolding_failure(text, voice_id).map(|_| ()),
+        }
+    }
+
+    /// Scaffolding path: validate voice + run G2P eagerly, then fail with
+    /// `NotImplemented`. Exercises the plumbing end-to-end so misconfigured
+    /// endpoints surface before synthesis is even attempted.
+    fn scaffolding_failure(&self, text: &str, voice_id: &str) -> Result<Vec<f32>, TtsError> {
+        let _phonemes = self.phonemize(text, voice_id)?;
+        Err(TtsError::NotImplemented)
+    }
+}
+
+/// An engine refuses a request with `InvalidArgument` whether it raises it
+/// here or inside a boostr model call; everything else failed while
+/// rendering.
+fn engine_error(e: crate::error::Error) -> TtsError {
+    match e {
+        crate::error::Error::InvalidArgument { .. }
+        | crate::error::Error::Boostr(boostr::error::Error::InvalidArgument { .. }) => {
+            TtsError::InvalidRequest(e.to_string())
+        }
+        other => TtsError::Engine(other.to_string()),
     }
 }
 

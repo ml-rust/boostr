@@ -75,7 +75,10 @@ pub use tts_eval::{
 pub use tts_eval::{Pace, pace, pace_from_segments};
 #[cfg(feature = "vad")]
 pub use vad::{SpeechSegment, VadSegmentOptions, segments_from_probabilities, speech_timestamps};
-pub use wav::{WavData, decode_wav, encode_pcm16_raw, encode_wav_f32, encode_wav_pcm16, to_mono};
+pub use wav::{
+    WavData, decode_wav, encode_f32_raw, encode_pcm16_raw, encode_wav_f32, encode_wav_pcm16,
+    to_mono, wav_stream_header_f32, wav_stream_header_pcm16,
+};
 #[cfg(feature = "whisper")]
 pub use whisper::{TranscribeOptions, Transcription, WhisperBundle, WhisperGenerationConfig};
 

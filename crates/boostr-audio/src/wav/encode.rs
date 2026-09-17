@@ -45,32 +45,76 @@ pub fn encode_wav_pcm16_multichannel(
         ));
     }
 
-    let bits_per_sample = 16u16;
-    let (byte_rate, block_align) = checked_wave_rates(sample_rate, channels, bits_per_sample)?;
     let data_size = checked_data_size(samples.len(), 2)?; // 2 bytes per i16 sample
     let riff_size = checked_riff_size(samples.len(), data_size)?;
 
-    let mut out = Vec::with_capacity(44 + data_size as usize);
+    let mut out = Vec::with_capacity(HEADER_LEN + data_size as usize);
+    write_header(
+        &mut out,
+        WavHeader {
+            format_tag: FORMAT_PCM,
+            channels,
+            sample_rate,
+            bits_per_sample: 16,
+            riff_size,
+            data_size,
+        },
+    )?;
+    write_pcm16(&mut out, samples);
+    Ok(out)
+}
+
+/// Byte length of the 44-byte canonical header every encoder here writes.
+pub const HEADER_LEN: usize = 44;
+
+/// The fields of a canonical 44-byte RIFF/WAVE header. The rate fields are
+/// derived in [`write_header`], so a header can never disagree with itself.
+pub(super) struct WavHeader {
+    pub(super) format_tag: u16,
+    pub(super) channels: u16,
+    pub(super) sample_rate: u32,
+    pub(super) bits_per_sample: u16,
+    /// `36 + data_size` for a finished file, `u32::MAX` for a stream.
+    pub(super) riff_size: u32,
+    /// Bytes in the `data` chunk, `u32::MAX` for a stream.
+    pub(super) data_size: u32,
+}
+
+/// Append the 44-byte header to `out`. Errors when the rate fields overflow
+/// the widths the header stores them in.
+pub(super) fn write_header(out: &mut Vec<u8>, header: WavHeader) -> Result<()> {
+    let (byte_rate, block_align) =
+        checked_wave_rates(header.sample_rate, header.channels, header.bits_per_sample)?;
     out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&riff_size.to_le_bytes());
+    out.extend_from_slice(&header.riff_size.to_le_bytes());
     out.extend_from_slice(b"WAVE");
     out.extend_from_slice(b"fmt ");
     out.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
-    out.extend_from_slice(&FORMAT_PCM.to_le_bytes());
-    out.extend_from_slice(&channels.to_le_bytes());
-    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&header.format_tag.to_le_bytes());
+    out.extend_from_slice(&header.channels.to_le_bytes());
+    out.extend_from_slice(&header.sample_rate.to_le_bytes());
     out.extend_from_slice(&byte_rate.to_le_bytes());
     out.extend_from_slice(&block_align.to_le_bytes());
-    out.extend_from_slice(&bits_per_sample.to_le_bytes());
+    out.extend_from_slice(&header.bits_per_sample.to_le_bytes());
     out.extend_from_slice(b"data");
-    out.extend_from_slice(&data_size.to_le_bytes());
+    out.extend_from_slice(&header.data_size.to_le_bytes());
+    Ok(())
+}
 
+/// Append `samples` as clipped little-endian signed 16-bit PCM.
+pub(super) fn write_pcm16(out: &mut Vec<u8>, samples: &[f32]) {
     for &s in samples {
         let clipped = s.clamp(-1.0, 1.0);
         let i = (clipped * i16::MAX as f32).round() as i16;
         out.extend_from_slice(&i.to_le_bytes());
     }
-    Ok(out)
+}
+
+/// Append `samples` as little-endian IEEE f32.
+pub(super) fn write_f32(out: &mut Vec<u8>, samples: &[f32]) {
+    for &s in samples {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
 }
 
 /// Encode mono f32 samples as `audio/wav` with 32-bit float PCM (no clipping).
@@ -78,42 +122,40 @@ pub fn encode_wav_pcm16_multichannel(
 /// Returns [`Error::InvalidArgument`] when the sample count is too large for the
 /// WAV container's 32-bit size fields.
 pub fn encode_wav_f32(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
-    let channels = 1u16;
-    let bits_per_sample = 32u16;
-    let (byte_rate, block_align) = checked_wave_rates(sample_rate, channels, bits_per_sample)?;
     let data_size = checked_data_size(samples.len(), 4)?;
     let riff_size = checked_riff_size(samples.len(), data_size)?;
 
-    let mut out = Vec::with_capacity(44 + data_size as usize);
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&riff_size.to_le_bytes());
-    out.extend_from_slice(b"WAVE");
-    out.extend_from_slice(b"fmt ");
-    out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&FORMAT_IEEE_FLOAT.to_le_bytes());
-    out.extend_from_slice(&channels.to_le_bytes());
-    out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&byte_rate.to_le_bytes());
-    out.extend_from_slice(&block_align.to_le_bytes());
-    out.extend_from_slice(&bits_per_sample.to_le_bytes());
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data_size.to_le_bytes());
-
-    for &s in samples {
-        out.extend_from_slice(&s.to_le_bytes());
-    }
+    let mut out = Vec::with_capacity(HEADER_LEN + data_size as usize);
+    write_header(
+        &mut out,
+        WavHeader {
+            format_tag: FORMAT_IEEE_FLOAT,
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 32,
+            riff_size,
+            data_size,
+        },
+    )?;
+    write_f32(&mut out, samples);
     Ok(out)
 }
 
 /// Encode mono f32 samples as raw little-endian PCM16 (no WAV header).
 ///
-/// Returned bytes are suitable for `response_format=pcm` streaming.
+/// Returned bytes are suitable for `response_format=pcm` streaming, and as
+/// the chunks after a [`super::stream::wav_stream_header_pcm16`].
 pub fn encode_pcm16_raw(samples: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(samples.len() * 2);
-    for &s in samples {
-        let i = (s.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-        out.extend_from_slice(&i.to_le_bytes());
-    }
+    write_pcm16(&mut out, samples);
+    out
+}
+
+/// Encode mono f32 samples as raw little-endian IEEE f32 (no WAV header),
+/// the chunks after a [`super::stream::wav_stream_header_f32`].
+pub fn encode_f32_raw(samples: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(samples.len() * 4);
+    write_f32(&mut out, samples);
     out
 }
 
@@ -243,6 +285,14 @@ mod tests {
         assert_eq!(raw.len(), 4);
         let s1 = i16::from_le_bytes(raw[2..4].try_into().unwrap());
         assert_eq!(s1, i16::MAX);
+    }
+
+    #[test]
+    fn raw_f32_is_the_wav_body_without_its_header() {
+        let samples = [0.25f32, -1.5, 3.0e-3];
+        let raw = encode_f32_raw(&samples);
+        let wav = encode_wav_f32(&samples, 48_000).unwrap();
+        assert_eq!(raw, wav[HEADER_LEN..]);
     }
 
     #[test]

@@ -89,6 +89,10 @@ required-features = ["whisper", "vad"]
 name = "silero_vad_segment_parity"
 required-features = ["vad"]
 
+[[test]]
+name = "voxcpm_stream_parity"
+required-features = ["voxcpm"]
+
 [[example]]
 name = "audio_stats"
 

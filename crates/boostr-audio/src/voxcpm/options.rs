@@ -16,6 +16,12 @@ pub struct VoxCpm2SynthOptions {
     /// Base seed; every request draws from it, so equal requests render
     /// equal audio on one backend.
     pub seed: u64,
+    /// Patches generated between two chunks handed to a streaming sink.
+    /// Each chunk costs one suffix decode, which re-decodes the containing
+    /// window's left context, so a smaller value lowers latency to the first
+    /// sample and raises decoder work per utterance. Applies to
+    /// `synthesize_stream` only; `0` is rejected at render time.
+    pub stream_chunk_patches: usize,
 }
 
 impl Default for VoxCpm2SynthOptions {
@@ -25,6 +31,7 @@ impl Default for VoxCpm2SynthOptions {
             cfg_value: 2.0,
             min_len: 2,
             seed: 0,
+            stream_chunk_patches: 4,
         }
     }
 }

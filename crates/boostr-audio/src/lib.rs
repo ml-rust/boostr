@@ -6,11 +6,13 @@
 //!
 //! Always compiled: RIFF/WAVE in and out ([`wav`]), the polyphase
 //! [`resample`]r, the reference-take [`enhance`] chain, [`pitch`], [`quality`],
-//! two-signal [`spectral`] distance, and ASR [`eval`] metrics, and the
-//! backend-free half of [`g2p`]. Feature gates add the compressed-audio
-//! [`decode`]rs, the espeak-ng G2P backend, the
-//! [`tts`] surface, the [`kokoro`] and [`voxcpm`] engines, the [`whisper`]
-//! bundle, the [`vad`] segmenter, and [`corpus`] preparation.
+//! two-signal [`spectral`] distance, ASR [`eval`] metrics, the signal and
+//! summary halves of the [`tts_eval`] quality gate, and the backend-free half
+//! of [`g2p`]. Feature gates add the compressed-audio [`decode`]rs, the
+//! espeak-ng G2P backend, the [`tts`] surface, the [`kokoro`] and [`voxcpm`]
+//! engines, the [`whisper`] bundle, the [`vad`] segmenter, [`corpus`]
+//! preparation, and the pace, intelligibility and timbre legs of
+//! [`tts_eval`].
 
 pub mod enhance;
 pub mod error;
@@ -20,6 +22,7 @@ pub mod pitch;
 pub mod quality;
 pub mod resample;
 pub mod spectral;
+pub mod tts_eval;
 pub mod wav;
 
 #[cfg(feature = "corpus")]
@@ -60,6 +63,16 @@ pub use resample::{
 pub use spectral::{SpectralDistance, multi_resolution_stft_distance, snr_db};
 #[cfg(feature = "tts")]
 pub use tts::{SynthesizeOptions, TtsBundle, TtsEngine, TtsError, Voice, default_kokoro_voices};
+#[cfg(feature = "voxcpm")]
+pub use tts_eval::{F0Stats, TimbreProxy, TimbreScorer, timbre_proxy};
+#[cfg(feature = "whisper")]
+pub use tts_eval::{Intelligibility, IntelligibilityClient, IntelligibilityScorer};
+pub use tts_eval::{
+    MetricStat, RowScore, SignalStats, Summary, Thresholds, UNLABELLED_AXIS, signal_stats,
+    violations,
+};
+#[cfg(feature = "vad")]
+pub use tts_eval::{Pace, pace, pace_from_segments};
 #[cfg(feature = "vad")]
 pub use vad::{SpeechSegment, VadSegmentOptions, segments_from_probabilities, speech_timestamps};
 pub use wav::{WavData, decode_wav, encode_pcm16_raw, encode_wav_f32, encode_wav_pcm16, to_mono};

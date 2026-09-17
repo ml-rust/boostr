@@ -102,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for p in 0..steps {
             let step_in = var_narrow(&decode_in, 1, p, 1)?;
             let step_in = var_reshape(&step_in, &[batch, hidden])?;
-            let step_out = model.decode_step(&client, &step_in, &mut cache, p)?;
+            let step_out = model.decode_step(&client, &step_in, &mut cache, p, None)?;
             outs.push(var_reshape(&step_out, &[batch, 1, hidden])?);
         }
         let out_refs: Vec<&Var<CpuRuntime>> = outs.iter().collect();

@@ -1,6 +1,7 @@
-//! The per-patch loop itself: [`PatchGenerator::step_with_noise`],
-//! [`PatchGenerator::step`] and [`PatchGenerator::generate`]. The capturing
-//! variant and its shared inner body live in `super::capture`.
+//! One iteration of the per-patch loop: [`PatchGenerator::step_with_noise`]
+//! and the drawing [`PatchGenerator::step`]. The whole-run driver is
+//! `super::run`, the capturing variant and the shared inner body
+//! `super::capture`.
 
 use super::*;
 use crate::nn::var_contiguous;
@@ -12,15 +13,16 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     ///
     /// This is the primitive: it draws nothing, so a caller (the CFM gate)
     /// can pin `z` per step and reproduce a run exactly.
-    /// [`step`](Self::step) is the thin drawing wrapper over it. `z` is `[1,
-    /// patch_size, feat_dim]` — the patch layout, same as
+    /// [`step`](Self::step) is the thin drawing wrapper over it. `z` is
+    /// `[batch, patch_size, feat_dim]` — the patch layout, same as
     /// `state.prefix_feat_cond` — and is used AS GIVEN;
     /// `options.cfm.temperature` is not applied here; see the module docs.
-    /// A caller holding the reference's `[1, feat_dim, patch_size]` noise
-    /// transposes it first, as [`step`](Self::step) does.
-    /// Runs steps 1-8 in order. Returns [`StepOutcome::Stopped`] when the
-    /// stop guard fires, in which case steps 6-8 did not run and the caches
-    /// and `position` are unchanged.
+    /// A caller holding the reference's `[batch, feat_dim, patch_size]`
+    /// noise transposes it first, as [`step`](Self::step) does.
+    /// Runs steps 1-8 in order. Returns [`StepOutcome::Stopped`] when a stop
+    /// token fires and every row is then finished, in which case steps 6-8
+    /// did not run and the caches and `position` are unchanged. Errors when
+    /// every row was already finished on entry.
     pub fn step_with_noise<C>(
         &self,
         client: &C,
@@ -50,13 +52,14 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
 
     /// One iteration, drawing the CFM noise itself.
     ///
-    /// `z` is `randn_seeded(options.seed + i) * options.cfm.temperature`
-    /// drawn over `[1, feat_dim, patch_size]` — the reference's element order,
-    /// so a seed keeps placing the same draw on the same (feature, position)
-    /// — then transposed to the `[1, patch_size, feat_dim]` patch layout.
-    /// `i` is the index of the patch about to be emitted, so consecutive
-    /// patches never share noise and the run is reproducible from
-    /// `options.seed`. Everything after the draw is
+    /// Row `b`'s `z` is `randn_seeded(options.row(b).seed + i) *
+    /// options.cfm.temperature` drawn over `[1, feat_dim, patch_size]` —
+    /// the reference's element order, so a seed keeps placing the same draw
+    /// on the same (feature, position) — stacked over rows, then transposed
+    /// to the `[batch, patch_size, feat_dim]` patch layout. `i` is the index
+    /// of the patch about to be emitted, so consecutive patches never share
+    /// noise and each row is reproducible from its own seed whatever else is
+    /// in the batch. Everything after the draw is
     /// [`step_with_noise`](Self::step_with_noise). `randn_seeded` is
     /// reproducible per backend, so one seed draws differently on CPU and
     /// CUDA.
@@ -82,14 +85,25 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + DequantOps<R>
             + FlashAttentionOps<R>,
     {
+        options.check(state.batch)?;
         let hidden = state.prefill.lm_hidden.tensor();
-        let noise = client
-            .randn_seeded(
-                &[1, self.config.feat_dim, self.config.patch_size],
-                hidden.dtype(),
-                options.seed.wrapping_add(state.patches.len() as u64),
-            )
-            .map_err(Error::Numr)?;
+        let i = state.patches.len() as u64;
+        let shape = [1, self.config.feat_dim, self.config.patch_size];
+        let mut rows = Vec::with_capacity(state.batch);
+        for b in 0..state.batch {
+            let seed = options.row(b).seed.wrapping_add(i);
+            rows.push(
+                client
+                    .randn_seeded(&shape, hidden.dtype(), seed)
+                    .map_err(Error::Numr)?,
+            );
+        }
+        let noise = if state.batch == 1 {
+            rows.swap_remove(0)
+        } else {
+            let refs: Vec<&Tensor<R>> = rows.iter().collect();
+            Tensor::cat(&refs, 0).map_err(Error::Numr)?
+        };
         let z = var_mul_scalar(
             &Var::new(noise, false),
             options.cfm.temperature as f64,
@@ -98,52 +112,6 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         .map_err(Error::Numr)?;
         let z = var_contiguous(&var_transpose(&z).map_err(Error::Numr)?)?;
         self.step_with_noise(client, state, &z, options)
-    }
-
-    /// Run the loop to a stop token or `max_len`.
-    ///
-    /// Steps with [`step`](Self::step), so the noise comes from
-    /// `options.seed`. The emitted patches stay in `state.patches`, each `[1,
-    /// patch_size, feat_dim]`; this returns only WHY the loop ended, so the
-    /// caller can tell a finished utterance ([`GenerateOutcome::StopToken`])
-    /// from a truncated one ([`GenerateOutcome::MaxLen`]). Does NOT
-    /// VAE-decode and does NOT write audio — that is a later unit. Errors
-    /// when `max_len` is 0, and propagates the first step error (a
-    /// `position`/cache drift included) rather than continuing.
-    pub fn generate<C>(
-        &self,
-        client: &C,
-        state: &mut GenerateState<R>,
-        options: &GenerateOptions,
-    ) -> Result<GenerateOutcome>
-    where
-        C: ModelClient<R> + TypeConversionOps<R> + RandomOps<R> + 'static,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ReduceOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + TypeConversionOps<R>
-            + DequantOps<R>
-            + FlashAttentionOps<R>,
-    {
-        if options.max_len == 0 {
-            return Err(Error::InvalidArgument {
-                arg: "options.max_len",
-                reason: "expected at least 1, got 0".to_string(),
-            });
-        }
-        while state.patches.len() < options.max_len {
-            if self.step(client, state, options)? == StepOutcome::Stopped {
-                return Ok(GenerateOutcome::StopToken);
-            }
-        }
-        Ok(GenerateOutcome::MaxLen)
     }
 }
 

@@ -11,6 +11,7 @@ use numr::ops::{
     ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
+use numr::tensor::Tensor;
 
 impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
     /// `x: [batch, seq, hidden]` -> `[batch, seq, hidden]`.
@@ -179,6 +180,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
         rope: Option<&RoPE<R>>,
         kv_cache: &mut KvCache<R>,
         position: usize,
+        kv_start: Option<&Tensor<R>>,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -194,8 +196,9 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
-        let (h, mlp_out) =
-            self.forward_cached_with_pending_residual(client, x, None, rope, kv_cache, position)?;
+        let (h, mlp_out) = self.forward_cached_with_pending_residual(
+            client, x, None, rope, kv_cache, position, kv_start,
+        )?;
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
     }
 
@@ -212,6 +215,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
         rope: Option<&RoPE<R>>,
         kv_cache: &mut KvCache<R>,
         position: usize,
+        kv_start: Option<&Tensor<R>>,
     ) -> Result<(Var<R>, Var<R>)>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -236,7 +240,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
         };
         let attn_out = self
             .self_attn
-            .forward_cached(client, &normed, rope, kv_cache, position)?;
+            .forward_cached(client, &normed, rope, kv_cache, position, kv_start)?;
 
         let (normed, h) = self
             .post_attention_layernorm
@@ -271,7 +275,7 @@ mod alias_tests {
     use crate::test_utils::cpu_setup;
     use numr::autograd::{backward, var_sum};
     use numr::runtime::cpu::CpuRuntime;
-    use numr::tensor::{Tensor, TensorId};
+    use numr::tensor::TensorId;
     use std::collections::HashMap;
 
     /// The whole point of a layer's `alias()`: prove it preserves every

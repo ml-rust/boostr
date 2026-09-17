@@ -154,6 +154,8 @@ pub(crate) fn state(fx: &Fixture, device: &CpuDevice) -> GenerateState<CpuRuntim
             .new_kv_cache(1, MAX_LENGTH)
             .expect("residual cache"),
         position: 0,
+        batch: 1,
+        kv_start: None,
         intermediates: None,
     };
     GenerateState::start(
@@ -175,6 +177,7 @@ pub(crate) fn options(min_len: usize, max_len: usize) -> GenerateOptions {
         min_len,
         max_len,
         seed: 7,
+        rows: Vec::new(),
     }
 }
 

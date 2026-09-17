@@ -16,6 +16,7 @@ use numr::ops::{
     ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
+use numr::tensor::Tensor;
 
 impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
     /// KV-cached causal GQA attention over `x: [batch, seq, hidden]` covering
@@ -57,6 +58,10 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
     /// `rope` may be `None` only when `no_rope` is set; otherwise it is an
     /// [`Error::InvalidArgument`]. The decode path never dereferences an
     /// absent table.
+    ///
+    /// `kv_start` is the per-row left-padding start, `[batch]` I32, handed
+    /// straight to the flash kernel: row `b` attends no key below
+    /// `kv_start[b]`. `None` is the unpadded call and costs nothing.
     pub fn forward_cached<C>(
         &self,
         client: &C,
@@ -64,6 +69,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
         rope: Option<&RoPE<R>>,
         kv_cache: &mut KvCache<R>,
         position: usize,
+        kv_start: Option<&Tensor<R>>,
     ) -> Result<Var<R>>
     where
         // `TypeConversionOps` for the same reason `forward` needs it.
@@ -185,7 +191,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             // The disabled-window sentinel `core_spec` declares.
             self.core_spec().sliding_window,
             Some(kv_cache.seq_len()),
-            None,
+            kv_start,
             AttnOutLayout::TokenMajor,
         )?;
         let attn_out = Var::new(out, false);
@@ -227,10 +233,17 @@ mod tests {
             let mut cache =
                 KvCache::<CpuRuntime>::new(1, NUM_KV_HEADS, 4, 4, HEAD_DIM, DType::F32, &device)
                     .expect("cache");
-            attn.forward_cached(&client, &embed(1, &device), table, &mut cache, 0)
+            attn.forward_cached(&client, &embed(1, &device), table, &mut cache, 0, None)
                 .expect("prior position");
             let out = attn
-                .forward_cached(&client, &embed(2, &device), table, &mut cache, position)
+                .forward_cached(
+                    &client,
+                    &embed(2, &device),
+                    table,
+                    &mut cache,
+                    position,
+                    None,
+                )
                 .expect("query position");
             out.tensor()
                 .contiguous()
@@ -287,12 +300,26 @@ mod tests {
             KvCache::<CpuRuntime>::new(1, NUM_KV_HEADS, 4, 4, HEAD_DIM, DType::F32, &device)
                 .expect("cache");
 
-        attn.forward_cached(&client, &embed(1, &device), Some(&rope), &mut cache, 0)
-            .expect("position 0 matches an empty cache");
+        attn.forward_cached(
+            &client,
+            &embed(1, &device),
+            Some(&rope),
+            &mut cache,
+            0,
+            None,
+        )
+        .expect("position 0 matches an empty cache");
         assert_eq!(cache.seq_len(), 1, "one slot written");
 
         let err = attn
-            .forward_cached(&client, &embed(2, &device), Some(&rope), &mut cache, 9)
+            .forward_cached(
+                &client,
+                &embed(2, &device),
+                Some(&rope),
+                &mut cache,
+                9,
+                None,
+            )
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains('9'), "error must name the position: {msg}");
@@ -303,9 +330,9 @@ mod tests {
         let mut nope_cache =
             KvCache::<CpuRuntime>::new(1, NUM_KV_HEADS, 4, 4, HEAD_DIM, DType::F32, &device)
                 .expect("cache");
-        nope.forward_cached(&client, &embed(1, &device), None, &mut nope_cache, 0)
+        nope.forward_cached(&client, &embed(1, &device), None, &mut nope_cache, 0, None)
             .expect("prior");
-        nope.forward_cached(&client, &embed(2, &device), None, &mut nope_cache, 9)
+        nope.forward_cached(&client, &embed(2, &device), None, &mut nope_cache, 9, None)
             .expect("NoPE ignores position, so a mismatch is not an error");
     }
 
@@ -323,7 +350,7 @@ mod tests {
             KvCache::<CpuRuntime>::new(1, NUM_KV_HEADS, 4, 4, HEAD_DIM, DType::F32, &device)
                 .expect("cache");
         let err = attn
-            .forward_cached(&client, &embed(1, &device), None, &mut cache, 0)
+            .forward_cached(&client, &embed(1, &device), None, &mut cache, 0, None)
             .unwrap_err();
         assert!(err.to_string().contains("no_rope"), "got {err}");
         assert_eq!(cache.seq_len(), 0, "cache was written on the error path");

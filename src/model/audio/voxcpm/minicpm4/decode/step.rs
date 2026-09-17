@@ -1,4 +1,4 @@
-//! `prefill`, `decode_step`, and the cached layer stack they share.
+//! `prefill` and `decode_step`, over the cached layer stack in `super::stack`.
 
 use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;
@@ -12,6 +12,7 @@ use numr::ops::{
     ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
+use numr::tensor::Tensor;
 
 impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// Run the full prefix and populate `kv_cache` with its K/V.
@@ -24,11 +25,17 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// zeroes the buffers before copying the primed length in. Call this ONCE
     /// per sequence, then [`decode_step`](Self::decode_step) from
     /// `position == seq`.
+    ///
+    /// `kv_start` is the per-row left-padding start, `[batch]` I32: row `b`
+    /// attends no key below `kv_start[b]`, on every layer, here and on every
+    /// later [`decode_step`](Self::decode_step) with the same tensor. `None`
+    /// is the unpadded call.
     pub fn prefill<C>(
         &self,
         client: &C,
         inputs_embeds: &Var<R>,
         kv_cache: &mut LayeredKvCache<R>,
+        kv_start: Option<&Tensor<R>>,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -57,7 +64,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         self.check_cache(kv_cache, shape[0], shape[2], shape[1], 0)?;
 
         kv_cache.reset();
-        self.forward_cached(client, inputs_embeds, kv_cache, 0)
+        self.forward_cached(client, inputs_embeds, kv_cache, 0, kv_start)
     }
 
     /// Advance one position.
@@ -75,6 +82,10 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// at another, which stays shape-valid and silently computes a different
     /// model.
     ///
+    /// `kv_start` is the same per-row left-padding start the cache was
+    /// prefilled with (see [`prefill`](Self::prefill)); `None` when it was
+    /// prefilled unpadded.
+    ///
     /// Errors (never panics, never writes out of range) when `position`
     /// reaches the cache's `max_length`, when it disagrees with the cache
     /// length, or when the shape or batch does not match.
@@ -84,6 +95,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         embed: &Var<R>,
         kv_cache: &mut LayeredKvCache<R>,
         position: usize,
+        kv_start: Option<&Tensor<R>>,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -135,65 +147,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         }
 
         let x = var_reshape(embed, &[batch, 1, hidden]).map_err(Error::Numr)?;
-        let out = self.forward_cached(client, &x, kv_cache, position)?;
+        let out = self.forward_cached(client, &x, kv_cache, position, kv_start)?;
         var_reshape(&out, &[batch, hidden]).map_err(Error::Numr)
-    }
-
-    /// The cached layer stack: `[batch, seq, hidden]` covering absolute
-    /// positions `position..position + seq` -> `[batch, seq, hidden]` after the
-    /// final `norm`.
-    ///
-    /// Same layer order and same final norm as
-    /// [`forward`](MiniCpm4Model::forward); only attention differs. Prefill
-    /// (`seq == prefix`, `position == 0`) and a decode step (`seq == 1`) both
-    /// run through here, so the two cached shapes cannot drift apart.
-    fn forward_cached<C>(
-        &self,
-        client: &C,
-        x: &Var<R>,
-        kv_cache: &mut LayeredKvCache<R>,
-        position: usize,
-    ) -> Result<Var<R>>
-    where
-        C: ModelClient<R> + TypeConversionOps<R>,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ReduceOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + DequantOps<R>,
-    {
-        // Deferred-residual fusion across layers: each layer folds the
-        // PREVIOUS layer's MLP output into its own input norm instead of a
-        // separate add, and hands its own MLP output on unadded. See
-        // `MiniCpm4Layer::forward_with_pending_residual`.
-        let mut h = x.clone();
-        let mut pending: Option<Var<R>> = None;
-        for (i, layer) in self.layers.iter().enumerate() {
-            let cache = kv_cache.layer_mut(i).ok_or_else(|| Error::ModelError {
-                reason: format!("KV cache missing for layer {i}"),
-            })?;
-            let (new_h, mlp_out) = layer.forward_cached_with_pending_residual(
-                client,
-                &h,
-                pending.as_ref(),
-                self.rope.as_ref(),
-                cache,
-                position,
-            )?;
-            h = new_h;
-            pending = Some(mlp_out);
-        }
-        match pending {
-            Some(last_mlp) => Ok(self.norm.residual_norm(client, &h, &last_mlp)?.0),
-            // `self.layers` is empty: nothing was deferred.
-            None => self.norm.forward(client, &h),
-        }
     }
 }
 
@@ -207,7 +162,6 @@ mod tests {
     };
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;
-    use numr::tensor::Tensor;
 
     fn values(v: &Var<CpuRuntime>) -> Vec<f32> {
         v.tensor().contiguous().expect("contiguous").to_vec::<f32>()
@@ -256,7 +210,7 @@ mod tests {
             let row = row_at(&x, position);
             let step = values(
                 &model
-                    .decode_step(&client, &row, &mut cache, position)
+                    .decode_step(&client, &row, &mut cache, position, None)
                     .expect("decode_step"),
             );
             assert_eq!(step.len(), HIDDEN);
@@ -296,7 +250,7 @@ mod tests {
         );
         let primed = values(
             &model
-                .prefill(&client, &prefix_x, &mut cache)
+                .prefill(&client, &prefix_x, &mut cache, None)
                 .expect("prefill"),
         );
         assert_eq!(cache.seq_len(), prefix);
@@ -308,7 +262,7 @@ mod tests {
             let row = row_at(&x, position);
             let step = values(
                 &model
-                    .decode_step(&client, &row, &mut cache, position)
+                    .decode_step(&client, &row, &mut cache, position, None)
                     .expect("decode_step"),
             );
             let expected = &full[position * HIDDEN..(position + 1) * HIDDEN];
@@ -333,11 +287,11 @@ mod tests {
         let row = Var::new(filled(&[1, HIDDEN], 3, &device), false);
         for position in 0..max_length {
             model
-                .decode_step(&client, &row, &mut cache, position)
+                .decode_step(&client, &row, &mut cache, position, None)
                 .expect("in-range step");
         }
         let err = model
-            .decode_step(&client, &row, &mut cache, max_length)
+            .decode_step(&client, &row, &mut cache, max_length, None)
             .unwrap_err();
         assert!(err.to_string().contains("max_length"), "got {err}");
         assert_eq!(
@@ -355,7 +309,9 @@ mod tests {
         let row = Var::new(filled(&[1, HIDDEN], 3, &device), false);
 
         // Cache is empty, so only position 0 is writable.
-        let err = model.decode_step(&client, &row, &mut cache, 3).unwrap_err();
+        let err = model
+            .decode_step(&client, &row, &mut cache, 3, None)
+            .unwrap_err();
         assert!(
             err.to_string().contains("next free cache slot"),
             "got {err}"
@@ -368,7 +324,9 @@ mod tests {
         let model = tiny_model(&device);
         let mut cache = model.new_kv_cache(1, 8).expect("cache");
         let x = Var::new(filled(&[1, 1, HIDDEN], 3, &device), false);
-        let err = model.decode_step(&client, &x, &mut cache, 0).unwrap_err();
+        let err = model
+            .decode_step(&client, &x, &mut cache, 0, None)
+            .unwrap_err();
         assert!(err.to_string().contains("2D"), "got {err}");
     }
 
@@ -378,7 +336,7 @@ mod tests {
         let model = tiny_model(&device);
         let mut cache = model.new_kv_cache(2, 8).expect("cache");
         let x = embeds(3, &device);
-        let err = model.prefill(&client, &x, &mut cache).unwrap_err();
+        let err = model.prefill(&client, &x, &mut cache, None).unwrap_err();
         assert!(err.to_string().contains("batch"), "got {err}");
     }
 
@@ -401,7 +359,7 @@ mod tests {
             let row = row_at(&x, position);
             let step = values(
                 &model
-                    .decode_step(&client, &row, &mut cache, position)
+                    .decode_step(&client, &row, &mut cache, position, None)
                     .expect("decode_step"),
             );
             let expected = &full[position * HIDDEN..(position + 1) * HIDDEN];
@@ -414,5 +372,82 @@ mod tests {
             assert!(step.iter().any(|v| v.abs() > 1e-6), "degenerate output");
         }
         assert_eq!(cache.seq_len(), seq);
+    }
+
+    /// Left padding under `kv_start`: a short row padded in front and stacked
+    /// under a longer one, prefilled then stepped, reproduces its own
+    /// unpadded batch-1 run at every real position. Without the start the
+    /// zero pad rows are attended and the values move, which the final
+    /// assertion checks so the test cannot pass vacuously.
+    #[test]
+    fn left_padded_batch_matches_unpadded_rows() {
+        let (client, device) = cpu_setup();
+        for model in [tiny_model(&device), tiny_nope_model(&device)] {
+            let (long, short) = (5usize, 3usize);
+            let pad = long - short;
+            let x_long = embeds(long, &device);
+            let x_short = embeds(short, &device);
+            let zeros =
+                Tensor::<CpuRuntime>::zeros(&[1, pad, HIDDEN], DType::F32, &device).expect("zeros");
+            let padded = Tensor::cat(&[&zeros, x_short.tensor()], 1).expect("pad");
+            let batch = Var::new(
+                Tensor::cat(&[x_long.tensor(), &padded], 0).expect("stack"),
+                false,
+            );
+            let kv_start = Tensor::<CpuRuntime>::from_slice(&[0i32, pad as i32], &[2], &device)
+                .expect("start");
+
+            // The same step row for every batch row, so row 1 of the batch
+            // and the single-row run see identical inputs.
+            let step_row = filled(&[1, HIDDEN], 3, &device);
+            let step_pair = Var::new(
+                Tensor::cat(&[&step_row, &step_row], 0).expect("stack"),
+                false,
+            );
+            let run = |start: Option<&Tensor<CpuRuntime>>| {
+                let mut cache = model.new_kv_cache(2, 8).expect("cache");
+                let out = model
+                    .prefill(&client, &batch, &mut cache, start)
+                    .expect("prefill");
+                let mut rows = values(&out);
+                let stepped = model
+                    .decode_step(&client, &step_pair, &mut cache, long, start)
+                    .expect("step");
+                rows.extend(values(&stepped));
+                rows
+            };
+            let masked = run(Some(&kv_start));
+
+            let mut cache = model.new_kv_cache(1, 8).expect("cache");
+            let mut want = values(
+                &model
+                    .prefill(&client, &x_short, &mut cache, None)
+                    .expect("prefill"),
+            );
+            let step_in = Var::new(step_row, false);
+            want.extend(values(
+                &model
+                    .decode_step(&client, &step_in, &mut cache, short, None)
+                    .expect("step"),
+            ));
+
+            // Row 1 of the batch: prefill rows `pad..long`, then its step row.
+            let row1_prefill = &masked[(long + pad) * HIDDEN..2 * long * HIDDEN];
+            let row1_step = &masked[(2 * long + 1) * HIDDEN..(2 * long + 2) * HIDDEN];
+            let got: Vec<f32> = row1_prefill.iter().chain(row1_step).copied().collect();
+            assert_eq!(got.len(), want.len());
+            for (g, w) in got.iter().zip(&want) {
+                assert!((g - w).abs() < 1e-5, "padded {g} vs unpadded {w}");
+            }
+
+            let unmasked = run(None);
+            assert!(
+                unmasked
+                    .iter()
+                    .zip(&masked)
+                    .any(|(a, b)| (a - b).abs() > 1e-4),
+                "kv_start changed nothing, so the pad rows were never attended"
+            );
+        }
     }
 }

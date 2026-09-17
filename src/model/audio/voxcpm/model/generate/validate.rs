@@ -4,37 +4,47 @@
 
 use super::*;
 
-/// Did the stop classifier pick class 1? `logits` is `[1, 2]`. `argmax` runs
-/// ON DEVICE and yields a single I64 index;
-/// [`Tensor::item`](numr::tensor::Tensor::item) then copies THAT ONE value
-/// back — 8 bytes per patch. The read is unavoidable (the answer drives
-/// control flow) and deliberately the narrowest form: the logits never leave
-/// the device, and nothing here calls `to_vec`.
-pub(super) fn stop_predicted<R, C>(client: &C, logits: &Var<R>) -> Result<bool>
+/// Which rows' stop classifier picked class 1. `logits` is `[batch, 2]`.
+/// `argmax` runs ON DEVICE and yields `[batch]` I64 indices; ONE `to_vec`
+/// then copies those `batch` values back — eight bytes per row per patch.
+/// The read is unavoidable (the answer drives control flow) and
+/// deliberately the narrowest form: the logits never leave the device.
+pub(super) fn stop_predicted<R, C>(client: &C, logits: &Var<R>, batch: usize) -> Result<Vec<bool>>
 where
     R: Runtime<DType = DType>,
     C: ModelClient<R>,
 {
     let shape = logits.shape();
-    if shape.len() != 2 || shape[0] != 1 || shape[1] != 2 {
+    if shape.len() != 2 || shape[0] != batch || shape[1] != 2 {
         return Err(Error::InvalidArgument {
             arg: "logits",
-            reason: format!("expected stop logits [1, 2], got {shape:?}"),
+            reason: format!("expected stop logits [{batch}, 2], got {shape:?}"),
         });
     }
     let index = client
         .argmax(logits.tensor(), 1, false)
         .map_err(Error::Numr)?;
-    Ok(index.item::<i64>().map_err(Error::Numr)? == STOP_CLASS)
+    let classes: Vec<i64> = index.to_vec();
+    if classes.len() != batch {
+        return Err(Error::InvalidArgument {
+            arg: "logits",
+            reason: format!("argmax returned {} classes for {batch} rows", classes.len()),
+        });
+    }
+    Ok(classes.into_iter().map(|c| c == STOP_CLASS).collect())
 }
 
-/// Validate a `[1, hidden]` per-step hidden state, returning `hidden`.
-pub(super) fn check_row<R: Runtime<DType = DType>>(arg: &'static str, v: &Var<R>) -> Result<usize> {
+/// Validate a `[batch, hidden]` per-step hidden state, returning `hidden`.
+pub(super) fn check_row<R: Runtime<DType = DType>>(
+    arg: &'static str,
+    v: &Var<R>,
+    batch: usize,
+) -> Result<usize> {
     let shape = v.shape();
-    if shape.len() != 2 || shape[0] != 1 {
+    if shape.len() != 2 || shape[0] != batch {
         return Err(Error::InvalidArgument {
             arg,
-            reason: format!("expected [1, hidden] (batch 1, one position), got {shape:?}"),
+            reason: format!("expected [{batch}, hidden] (one position per row), got {shape:?}"),
         });
     }
     Ok(shape[1])
@@ -74,10 +84,26 @@ mod tests {
             let hidden = Var::new(t(&[1, HIDDEN], 0.4, &device), false);
             let logits = fx.aux.stop(&client, &hidden).expect("stop");
             assert_eq!(
-                stop_predicted(&client, &logits).expect("argmax"),
-                stop,
+                stop_predicted(&client, &logits, 1).expect("argmax"),
+                [stop],
                 "stop chain built for {stop} answered the other way"
             );
         }
+    }
+
+    /// One read answers every row: a two-row logit tensor with one row per
+    /// class comes back as two distinct answers.
+    #[test]
+    fn stop_predicted_answers_per_row() {
+        let (client, device) = cpu_setup();
+        let logits = Var::new(
+            Tensor::from_slice(&[0.0f32, 1.0, 1.0, 0.0], &[2, 2], &device).expect("logits"),
+            false,
+        );
+        assert_eq!(
+            stop_predicted(&client, &logits, 2).expect("argmax"),
+            [true, false]
+        );
+        assert!(stop_predicted(&client, &logits, 1).is_err());
     }
 }

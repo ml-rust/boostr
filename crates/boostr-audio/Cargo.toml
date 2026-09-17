@@ -93,6 +93,10 @@ required-features = ["vad"]
 name = "voxcpm_stream_parity"
 required-features = ["voxcpm"]
 
+[[test]]
+name = "voxcpm_batch_cuda"
+required-features = ["voxcpm", "cuda"]
+
 [[example]]
 name = "audio_stats"
 

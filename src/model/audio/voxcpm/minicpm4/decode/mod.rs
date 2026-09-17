@@ -38,11 +38,13 @@
 //! The reference's own two paths differ by `9.9e-5` for the same reason.
 //!
 //! - `cache`: `new_kv_cache` sizing and the shared cache validation
-//! - `step`: `prefill`, `decode_step`, and the cached layer stack
+//! - `stack`: the cached layer stack both entry points share
+//! - `step`: `prefill` and `decode_step`
 //!
 //! [`MiniCpm4Model::forward`]: crate::model::audio::voxcpm::minicpm4::MiniCpm4Model::forward
 //! [`MiniCpm4Model::decode_step`]: crate::model::audio::voxcpm::minicpm4::MiniCpm4Model::decode_step
 //! [`MiniCpm4Attention::forward_cached`]: crate::model::audio::voxcpm::minicpm4::MiniCpm4Attention::forward_cached
 
 mod cache;
+mod stack;
 mod step;

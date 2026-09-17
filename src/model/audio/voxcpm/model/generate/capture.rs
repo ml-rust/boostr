@@ -6,8 +6,6 @@
 //!
 //! `step_with_noise_inner` is `generate`-module-private (default visibility),
 //! reachable here because this file is a descendant module of `generate`.
-//! Tests live in `generate/tests.rs`, which already owns the loop's shared
-//! fixtures — not here.
 
 use super::*;
 use crate::model::audio::voxcpm::local_dit::cfm_time_span;
@@ -19,17 +17,17 @@ use numr::autograd::{var_cat, var_reshape};
 /// mirroring [`PrefillIntermediates`](super::super::prefill::PrefillIntermediates)
 /// but for ONE iteration of the per-patch loop rather than the whole prefill.
 pub struct StepIntermediates<R: Runtime> {
-    /// Step 1's output, `[1, 2 * hidden]` — two DiT tokens wide.
+    /// Step 1's output, `[batch, 2 * hidden]` — two DiT tokens wide.
     pub mu: Var<R>,
-    /// Step 3's output, `[1, hidden]`.
+    /// Step 3's output, `[batch, hidden]`.
     pub curr_embed: Var<R>,
-    /// `base_lm.decode_step`'s output BEFORE `fsq`, `[1, hidden]`. `None`
+    /// `base_lm.decode_step`'s output BEFORE `fsq`, `[batch, hidden]`. `None`
     /// when the stop guard fired first (steps 6-8 did not run — see
     /// [`StepOutcome::Stopped`]).
     pub lm_hidden_pre_fsq: Option<Var<R>>,
-    /// The raw `aux.stop(...)` output, `[1, 2]`, ALWAYS present — captured
-    /// unconditionally even on iterations the guard would otherwise skip.
-    /// See `step_with_noise_inner`'s doc comment for why.
+    /// The raw `aux.stop(...)` output, `[batch, 2]`, ALWAYS present —
+    /// captured unconditionally even on iterations the guard would
+    /// otherwise skip. See `step_with_noise_inner`'s doc comment for why.
     pub stop_logits: Var<R>,
 }
 
@@ -79,13 +77,19 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// always `None` and nothing extra is allocated or recomputed relative
     /// to the pre-capturing code.
     ///
+    /// Every row of the batch runs every sub-step; a finished row's patch is
+    /// computed like any other and only its bookkeeping (`patch_len`,
+    /// `outcomes`) stands still. Steps 6-8 are skipped exactly when a stop
+    /// token fires on this step and no row is left unfinished, which for
+    /// one row is the reference's `break`.
+    ///
     /// **Deliberate asymmetry**: step 5's stop check is normally SKIPPED
     /// entirely on iterations where `i <= options.min_len` (`aux.stop` is
     /// not even called, matching the reference and the non-capturing path
     /// exactly). When `capture` is `true`, `aux.stop` is called
     /// UNCONDITIONALLY so [`StepIntermediates::stop_logits`] is populated on
-    /// every iteration, including ones the guard would otherwise skip — so a
-    /// gate can compare every step. Do NOT "fix" this into a shared
+    /// every iteration, including ones the guard would otherwise skip — so
+    /// a gate can compare every step. Do NOT "fix" this into a shared
     /// unconditional call: that would make the non-capturing path do work
     /// (and allocate) it does today, on every real generation call.
     pub(super) fn step_with_noise_inner<C>(
@@ -113,16 +117,25 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + FlashAttentionOps<R>,
     {
         let (patch_size, feat_dim) = (self.config.patch_size, self.config.feat_dim);
-        check_patch("z", z, &[1, patch_size, feat_dim])?;
+        let batch = state.batch;
+        options.check(batch)?;
+        if state.all_finished() {
+            return Err(Error::InvalidArgument {
+                arg: "state",
+                reason: "every row is finished; nothing left to step".to_string(),
+            });
+        }
+        check_patch("z", z, &[batch, patch_size, feat_dim])?;
         check_patch(
             "state.prefix_feat_cond",
             &state.prefix_feat_cond,
-            &[1, patch_size, feat_dim],
+            &[batch, patch_size, feat_dim],
         )?;
-        let lm_width = check_row("state.prefill.lm_hidden", &state.prefill.lm_hidden)?;
+        let lm_width = check_row("state.prefill.lm_hidden", &state.prefill.lm_hidden, batch)?;
         check_row(
             "state.prefill.residual_hidden",
             &state.prefill.residual_hidden,
+            batch,
         )?;
 
         // 1. mu = cat(lm_to_dit_proj(lm_hidden), res_to_dit_proj(residual_hidden)),
@@ -137,9 +150,10 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             .forward(client, &state.prefill.residual_hidden)?;
         let mu = var_cat(&[&from_lm, &from_res], 1, client).map_err(Error::Numr)?;
 
-        // 2. The DiT takes `z` and its condition as [1, patch_size, feat_dim]
-        // and returns the same layout — the layout `prefix_feat_cond` and the
-        // emitted patches are stored in, so nothing is transposed here.
+        // 2. The DiT takes `z` and its condition as [batch, patch_size,
+        // feat_dim] and returns the same layout — the layout
+        // `prefix_feat_cond` and the emitted patches are stored in, so
+        // nothing is transposed here.
         let t_span = cfm_time_span(options.cfm.n_timesteps, options.cfm.sway_sampling_coef)?;
         // Inference-only entry: one CUDA graph launch per patch on CUDA, the
         // eager loop elsewhere. Fine-tuning never comes through here (see
@@ -155,15 +169,23 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             None,
         )?;
 
-        // 3. The encoder runs on ONE patch: [1, 1, patch_size, feat_dim].
-        let single = var_reshape(&pred_feat, &[1, 1, patch_size, feat_dim]).map_err(Error::Numr)?;
+        // 3. The encoder runs on ONE patch per row: [batch, 1, patch_size,
+        // feat_dim].
+        let single =
+            var_reshape(&pred_feat, &[batch, 1, patch_size, feat_dim]).map_err(Error::Numr)?;
         let encoded = self.feat_encoder.forward(client, &single)?;
         let projected = self.aux.enc_to_lm_proj.forward(client, &encoded)?;
-        let curr_embed = var_reshape(&projected, &[1, lm_width]).map_err(Error::Numr)?;
+        let curr_embed = var_reshape(&projected, &[batch, lm_width]).map_err(Error::Numr)?;
 
-        // 4. Emit, and condition the NEXT patch on this one.
+        // 4. Emit, and condition the NEXT patch on this one. Only a row still
+        // generating counts the patch as its own.
         state.patches.push(pred_feat.clone());
         state.prefix_feat_cond = pred_feat;
+        for b in 0..batch {
+            if !state.finished(b) {
+                state.patch_len[b] += 1;
+            }
+        }
 
         // 5. Stop check on the CURRENT `lm_hidden` — the hidden state that
         // produced the patch just emitted, BEFORE step 6 replaces it. The
@@ -184,38 +206,54 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         } else {
             None
         };
+        let mut stopped_now = false;
         if guard_open {
             // `stop_logits` is always `Some` here: `guard_open` is one of the
             // two disjuncts above.
-            let should_stop = match &stop_logits {
-                Some(logits) => stop_predicted(client, logits)?,
-                None => false,
+            let stops = match &stop_logits {
+                Some(logits) => stop_predicted(client, logits, batch)?,
+                None => vec![false; batch],
             };
-            if should_stop {
-                // `capture` implies `stop_logits` is `Some` (the disjunction
-                // above), so the `(true, None)` arm is unreachable, not a
-                // silent data loss.
-                let intermediates = match (capture, stop_logits) {
-                    (true, Some(logits)) => Some(StepIntermediates {
-                        mu: mu.clone(),
-                        curr_embed: curr_embed.clone(),
-                        lm_hidden_pre_fsq: None,
-                        stop_logits: logits,
-                    }),
-                    _ => None,
-                };
-                return Ok((StepOutcome::Stopped, intermediates));
+            for (b, &stop) in stops.iter().enumerate() {
+                if stop && !state.finished(b) {
+                    state.outcomes[b] = Some(GenerateOutcome::StopToken);
+                    stopped_now = true;
+                }
             }
+        }
+        // A row still open after the stop check finishes on its cap; a stop
+        // on the same step wins, as it does in the reference's loop order.
+        for b in 0..batch {
+            if !state.finished(b) && state.patch_len[b] >= options.row(b).max_len {
+                state.outcomes[b] = Some(GenerateOutcome::MaxLen);
+            }
+        }
+        if stopped_now && state.all_finished() {
+            // `capture` implies `stop_logits` is `Some` (the disjunction
+            // above), so the `(true, None)` arm is unreachable, not a
+            // silent data loss.
+            let intermediates = match (capture, stop_logits) {
+                (true, Some(logits)) => Some(StepIntermediates {
+                    mu: mu.clone(),
+                    curr_embed: curr_embed.clone(),
+                    lm_hidden_pre_fsq: None,
+                    stop_logits: logits,
+                }),
+                _ => None,
+            };
+            return Ok((StepOutcome::Stopped, intermediates));
         }
 
         // 6. Step `base_lm`, then fsq. Unlike the prefill's last row, every
         // hidden state from here on IS fsq'd.
         let position = state.prefill.position;
+        let kv_start = state.prefill.kv_start.as_ref();
         let stepped = self.base_lm.decode_step(
             client,
             &curr_embed,
             &mut state.prefill.base_cache,
             position,
+            kv_start,
         )?;
         let captured_lm_hidden_pre_fsq = capture.then(|| stepped.clone());
         state.prefill.lm_hidden = self.fsq.forward(client, &stepped)?;
@@ -230,6 +268,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             &residual_in,
             &mut state.prefill.residual_cache,
             position,
+            kv_start,
         )?;
         state.prefill.residual_hidden = residual;
 

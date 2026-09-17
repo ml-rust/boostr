@@ -2,8 +2,8 @@
 //! [`super::generate::GenerateState`] collected into a waveform.
 //!
 //! ```text
-//! patches: Vec<Var<R>>, each [1, patch_size, feat_dim]
-//!   -> unfold_patches -> latent [1, feat_dim, n_patches * patch_size]
+//! patches: Vec<Var<R>>, each [batch, patch_size, feat_dim], one row picked
+//!   -> unfold_patches_row -> latent [1, feat_dim, n_patches * patch_size]
 //!   -> chunked_decode::decode_latent_windowed (sr bucket 3, 48 kHz) -> waveform [1, 1, samples]
 //! ```
 //!
@@ -33,6 +33,7 @@ use crate::model::audio::voxcpm::client::VoxCpmClient;
 use crate::model::audio::voxcpm::model::chunked_decode::{
     CONTEXT_FRAMES, WINDOW_FRAMES, decode_latent_windowed, decode_latent_windowed_from,
 };
+use crate::model::audio::voxcpm::model::generate::GenerateState;
 use crate::model::audio::voxcpm::model::loader::VoxCpm2Model;
 use crate::model::audio::voxcpm::vae::decoder::HOP_LENGTH;
 use numr::autograd::Var;
@@ -50,7 +51,7 @@ use numr::tensor::Tensor;
 /// `view(64, -1, 4).permute(1, 2, 0)`.
 ///
 /// Errors on an empty slice, or when any patch is not `[1, patch_size,
-/// feat_dim]`.
+/// feat_dim]`. [`unfold_patches_row`] is the batched form.
 pub fn unfold_patches<R: Runtime<DType = DType>>(
     patches: &[Var<R>],
     patch_size: usize,
@@ -59,15 +60,52 @@ pub fn unfold_patches<R: Runtime<DType = DType>>(
 where
     R::Client: ShapeOps<R>,
 {
-    if patches.is_empty() {
+    if let Some(first) = patches.first()
+        && first.shape().first() != Some(&1)
+    {
+        return Err(Error::InvalidArgument {
+            arg: "patches",
+            reason: format!(
+                "expected batch-1 patches [1, {patch_size}, {feat_dim}], got {:?}; \
+                 use unfold_patches_row for a batch",
+                first.shape()
+            ),
+        });
+    }
+    unfold_patches_row(patches, 0, patch_size, feat_dim)
+}
+
+/// [`unfold_patches`] for row `row` of `[batch, patch_size, feat_dim]`
+/// patches: the same `[1, feat_dim, patches.len() * patch_size]` latent,
+/// read off that row alone.
+///
+/// Errors on an empty slice, on a `row` outside the batch, or when any patch
+/// is not `[batch, patch_size, feat_dim]`.
+pub fn unfold_patches_row<R: Runtime<DType = DType>>(
+    patches: &[Var<R>],
+    row: usize,
+    patch_size: usize,
+    feat_dim: usize,
+) -> Result<Tensor<R>>
+where
+    R::Client: ShapeOps<R>,
+{
+    let Some(first) = patches.first() else {
         return Err(Error::InvalidArgument {
             arg: "patches",
             reason: "expected at least 1 patch, got 0".to_string(),
         });
+    };
+    let batch = first.shape().first().copied().unwrap_or(0);
+    if row >= batch {
+        return Err(Error::InvalidArgument {
+            arg: "row",
+            reason: format!("expected a row below the batch {batch}, got {row}"),
+        });
     }
 
-    let expected = [1, patch_size, feat_dim];
-    let mut refs = Vec::with_capacity(patches.len());
+    let expected = [batch, patch_size, feat_dim];
+    let mut rows = Vec::with_capacity(patches.len());
     for (i, patch) in patches.iter().enumerate() {
         let shape = patch.shape();
         if shape != expected.as_slice() {
@@ -76,8 +114,9 @@ where
                 reason: format!("patch {i}: expected {expected:?}, got {shape:?}"),
             });
         }
-        refs.push(patch.tensor());
+        rows.push(patch.tensor().narrow(0, row, 1)?);
     }
+    let refs: Vec<&Tensor<R>> = rows.iter().collect();
 
     // [n_patches, patch_size, feat_dim], patches[t][p][c] preserved exactly
     // as fold_patches's own output would be.
@@ -113,6 +152,37 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         R::Client: ShapeOps<R> + TypeConversionOps<R>,
     {
         let latent = unfold_patches(patches, self.config.patch_size, self.config.feat_dim)?;
+        self.decode_latent(client, &latent)
+    }
+
+    /// [`decode_patches`](Self::decode_patches) for row `row` of a
+    /// [`GenerateState`]: decodes that row's own patches
+    /// ([`GenerateState::row_patches`]), read off row `row` of each
+    /// `[batch, patch_size, feat_dim]` patch. For a one-row state this is
+    /// `decode_patches(client, &state.patches)`.
+    pub fn decode_row<C>(
+        &self,
+        client: &C,
+        state: &GenerateState<R>,
+        row: usize,
+    ) -> Result<Tensor<R>>
+    where
+        C: VoxCpmClient<R>,
+        R::Client: ShapeOps<R> + TypeConversionOps<R>,
+    {
+        let patches = state.row_patches(row)?;
+        let latent =
+            unfold_patches_row(patches, row, self.config.patch_size, self.config.feat_dim)?;
+        self.decode_latent(client, &latent)
+    }
+
+    /// Decode an unfolded latent `[1, feat_dim, frames]` to `[1, 1, samples]`
+    /// at F32.
+    fn decode_latent<C>(&self, client: &C, latent: &Tensor<R>) -> Result<Tensor<R>>
+    where
+        C: VoxCpmClient<R>,
+        R::Client: ShapeOps<R> + TypeConversionOps<R>,
+    {
         // The transformer stack runs at whatever dtype it was loaded at; the
         // decoder runs at its own, independently chosen `vae_decoder_dtype`
         // (the encoder has no such option — always F32, see
@@ -155,6 +225,48 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         C: VoxCpmClient<R>,
         R::Client: ShapeOps<R> + TypeConversionOps<R>,
     {
+        if let Some(first) = patches.first()
+            && first.shape().first() != Some(&1)
+        {
+            return Err(Error::InvalidArgument {
+                arg: "patches",
+                reason: format!(
+                    "expected batch-1 patches, got {:?}; use decode_row_from for a batch",
+                    first.shape()
+                ),
+            });
+        }
+        self.decode_row_patches_from(client, patches, 0, from)
+    }
+
+    /// [`decode_patches_from`](Self::decode_patches_from) for row `row` of
+    /// a [`GenerateState`]: the waveform for that row's patches `from..`.
+    /// Errors when `from` is not below the row's own patch count.
+    pub fn decode_row_from<C>(
+        &self,
+        client: &C,
+        state: &GenerateState<R>,
+        row: usize,
+        from: usize,
+    ) -> Result<Tensor<R>>
+    where
+        C: VoxCpmClient<R>,
+        R::Client: ShapeOps<R> + TypeConversionOps<R>,
+    {
+        self.decode_row_patches_from(client, state.row_patches(row)?, row, from)
+    }
+
+    fn decode_row_patches_from<C>(
+        &self,
+        client: &C,
+        patches: &[Var<R>],
+        row: usize,
+        from: usize,
+    ) -> Result<Tensor<R>>
+    where
+        C: VoxCpmClient<R>,
+        R::Client: ShapeOps<R> + TypeConversionOps<R>,
+    {
         if from >= patches.len() {
             return Err(Error::InvalidArgument {
                 arg: "from",
@@ -164,7 +276,12 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         let patch_size = self.config.patch_size;
         let from_frame = from * patch_size;
         let start_patch = first_patch_for_frame(from_frame, patch_size);
-        let latent = unfold_patches(&patches[start_patch..], patch_size, self.config.feat_dim)?;
+        let latent = unfold_patches_row(
+            &patches[start_patch..],
+            row,
+            patch_size,
+            self.config.feat_dim,
+        )?;
         let latent = latent.to_dtype(self.vae_decoder.dtype())?;
         let decoded = decode_latent_windowed_from(
             client,
@@ -196,6 +313,7 @@ mod tests {
     use super::*;
     use crate::model::audio::voxcpm::model::patches::fold_patches;
     use crate::test_utils::cpu_setup;
+    use numr::ops::ScalarOps;
     use numr::runtime::cpu::CpuRuntime;
 
     /// Split a `fold_patches`-shaped tensor `[t_ref, patch_size, feat_dim]`
@@ -237,6 +355,42 @@ mod tests {
         let want: Vec<f32> = latent.contiguous().expect("contig").to_vec();
         let got: Vec<f32> = unfolded.contiguous().expect("contig").to_vec();
         assert_eq!(got, want);
+    }
+
+    /// Row selection: two rows stacked per patch, the second a scaled copy of
+    /// the first, unfold to the first latent and its scaled twin.
+    #[test]
+    fn unfold_row_picks_one_row_of_a_batch() {
+        let (client, device) = cpu_setup();
+        let (feat_dim, patch_size, t_ref) = (3usize, 2usize, 4usize);
+        let frames = patch_size * t_ref;
+        let data: Vec<f32> = (0..feat_dim * frames).map(|i| i as f32 + 1.0).collect();
+        let latent =
+            Tensor::<CpuRuntime>::from_slice(&data, &[1, feat_dim, frames], &device).expect("in");
+        let folded = fold_patches(&latent, patch_size, feat_dim).expect("fold");
+        let doubled = client.mul_scalar(&folded, 2.0).expect("scale");
+        let patches: Vec<Var<CpuRuntime>> = (0..t_ref)
+            .map(|t| {
+                let a = folded.narrow(0, t, 1).expect("narrow");
+                let b = doubled.narrow(0, t, 1).expect("narrow");
+                Var::new(Tensor::cat(&[&a, &b], 0).expect("stack"), false)
+            })
+            .collect();
+
+        let want: Vec<f32> = latent.contiguous().expect("contig").to_vec();
+        let row0: Vec<f32> = unfold_patches_row(&patches, 0, patch_size, feat_dim)
+            .expect("row 0")
+            .to_vec();
+        let row1: Vec<f32> = unfold_patches_row(&patches, 1, patch_size, feat_dim)
+            .expect("row 1")
+            .to_vec();
+        assert_eq!(row0, want);
+        assert_eq!(row1, want.iter().map(|v| v * 2.0).collect::<Vec<_>>());
+        assert!(unfold_patches_row(&patches, 2, patch_size, feat_dim).is_err());
+        assert!(
+            unfold_patches(&patches, patch_size, feat_dim).is_err(),
+            "the one-row entry point must refuse a batch"
+        );
     }
 
     /// The unfold start never passes the containing window's context start,

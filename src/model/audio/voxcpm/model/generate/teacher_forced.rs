@@ -140,8 +140,10 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             });
         }
         let t = shape[0];
-        let lm_width = check_row("prefill.lm_hidden", &prefill.lm_hidden)?;
-        check_row("prefill.residual_hidden", &prefill.residual_hidden)?;
+        // Teacher forcing is a one-row path: the prefix embeddings it re-runs
+        // are unpadded, so a padded batch has no meaning here.
+        let lm_width = check_row("prefill.lm_hidden", &prefill.lm_hidden, 1)?;
+        check_row("prefill.residual_hidden", &prefill.residual_hidden, 1)?;
 
         let hidden = prefill.lm_hidden.tensor();
         let (dtype, device) = (hidden.dtype(), hidden.device());

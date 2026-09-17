@@ -182,8 +182,6 @@
 //! the end. A sweep must not lose 400 good renders to one bad one.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -213,6 +211,11 @@ use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
 // `voxcpm_finetune` so both binaries load one adapter file identically —
 // see `lora_load.rs`'s module docs.
 mod lora_load;
+// Sibling module: the append-only JSONL sink, shared with
+// `voxcpm_quality_gate` so both binaries write one line per record the
+// same way.
+mod jsonl_sink;
+use jsonl_sink::JsonlSink;
 
 /// Rate the reference wav is resampled to before the AudioVAE encoder. Fixed
 /// by the encoder, not a choice: `AudioVaeEncoder` hops 640 samples at
@@ -784,40 +787,6 @@ fn build_jobs(args: &Args) -> Result<Vec<Job>, String> {
         }
         // `parse_args` already rejected both-or-neither.
         _ => Err("exactly one of --text and --prompts is required".to_string()),
-    }
-}
-
-/// Append-only JSONL sink, flushed after every line.
-///
-/// Buffering to the end would lose the whole log when a sweep dies partway,
-/// which is exactly the case the log exists for.
-struct JsonlSink {
-    file: File,
-    path: PathBuf,
-}
-
-impl JsonlSink {
-    fn create(path: &Path) -> Result<Self, String> {
-        let file = File::create(path).map_err(|e| format!("--jsonl {}: {e}", path.display()))?;
-        Ok(Self {
-            file,
-            path: path.to_path_buf(),
-        })
-    }
-
-    /// Write one object and flush it to the OS.
-    ///
-    /// Serialization is `serde_json`, already a boostr dependency, so the
-    /// escaping of a prompt containing a quote or a tab is the library's
-    /// problem rather than this file's.
-    fn write(&mut self, value: &serde_json::Value) -> Result<(), String> {
-        let line = serde_json::to_string(value)
-            .map_err(|e| format!("--jsonl {}: serializing record: {e}", self.path.display()))?;
-        writeln!(self.file, "{line}")
-            .map_err(|e| format!("--jsonl {}: {e}", self.path.display()))?;
-        self.file
-            .flush()
-            .map_err(|e| format!("--jsonl {}: {e}", self.path.display()))
     }
 }
 
@@ -1513,7 +1482,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sink = match args.jsonl.as_deref().map(JsonlSink::create).transpose() {
         Ok(sink) => sink,
         Err(message) => {
-            eprintln!("{message}");
+            eprintln!("--jsonl {message}");
             std::process::exit(2);
         }
     };

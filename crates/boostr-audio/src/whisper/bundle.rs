@@ -185,6 +185,19 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
         }
     }
 
+    /// Language token ids in the variant's language order: `sot + 1` onwards,
+    /// one per entry of [`WhisperVariant::languages`]. Empty for an
+    /// english-only checkpoint, whose decoder was never trained to emit one.
+    pub fn language_token_ids(&self) -> Vec<u32> {
+        language_token_ids(self.variant)
+    }
+
+    /// The language code a language token id spells, or `None` for any id
+    /// outside the language block.
+    pub fn language_code(&self, token_id: u32) -> Option<&'static str> {
+        language_code(self.variant, token_id)
+    }
+
     /// Build the "start-of-transcript" prompt for greedy decoding.
     ///
     /// Layout (multilingual): `[<|sot|>, <|lang|>, <|task|>, <|notimestamps|>]`.
@@ -281,6 +294,25 @@ fn load_generation_config(dir: &Path, variant: WhisperVariant) -> Result<Whisper
     })
 }
 
+/// Language token ids of `variant` in language order, empty for english-only.
+fn language_token_ids(variant: WhisperVariant) -> Vec<u32> {
+    if variant == WhisperVariant::EnglishOnly {
+        return Vec::new();
+    }
+    let first = variant.sot_token_id() + 1;
+    (0..variant.languages().len() as u32)
+        .map(|i| first + i)
+        .collect()
+}
+
+/// The language code `token_id` spells under `variant`, or `None` outside the
+/// language block.
+fn language_code(variant: WhisperVariant, token_id: u32) -> Option<&'static str> {
+    let first = variant.sot_token_id() + 1;
+    let index = token_id.checked_sub(first)? as usize;
+    variant.languages().get(index).copied()
+}
+
 /// Map a [`WhisperVariant`] to splintr's bundled pretrained vocab, if one
 /// exists. Multilingual v1/v2/v3 are bundled; English-only (and any future
 /// variant without bundled support) returns `None` and loads from
@@ -307,6 +339,27 @@ mod tests {
         assert!(defaults.begin_suppress_tokens.is_empty());
         assert_eq!(defaults.eos_token_ids, vec![50257]);
         assert_eq!(defaults.max_length, 448);
+    }
+
+    #[test]
+    fn language_block_round_trips_through_ids() {
+        for variant in [
+            WhisperVariant::V1Multilingual,
+            WhisperVariant::V2Multilingual,
+            WhisperVariant::V3Multilingual,
+        ] {
+            let ids = language_token_ids(variant);
+            assert_eq!(ids.len(), variant.languages().len());
+            assert_eq!(ids[0], variant.sot_token_id() + 1);
+            assert_eq!(ids.last().copied(), Some(variant.translate_token_id() - 1));
+            for (id, code) in ids.iter().zip(variant.languages()) {
+                assert_eq!(language_code(variant, *id), Some(*code));
+                assert_eq!(variant.language_token_id(code), Some(*id));
+            }
+            assert_eq!(language_code(variant, variant.sot_token_id()), None);
+            assert_eq!(language_code(variant, variant.translate_token_id()), None);
+        }
+        assert!(language_token_ids(WhisperVariant::EnglishOnly).is_empty());
     }
 
     #[test]

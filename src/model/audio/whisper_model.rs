@@ -205,6 +205,84 @@ impl<R: Runtime<DType = DType>> WhisperModel<R> {
 
         Ok(generated)
     }
+
+    /// Pick the most likely token among `candidates` after a `[<|sot|>]`-only
+    /// prefill, which is how Whisper detects the spoken language: the decoder
+    /// is asked for the token that follows start-of-transcript and every id
+    /// outside the language block is masked out of the argmax.
+    ///
+    /// Returns the winning candidate id. `candidates` must be non-empty and
+    /// every id must lie inside the vocabulary.
+    pub fn detect_language<C>(
+        &self,
+        client: &C,
+        encoder_out: &Tensor<R>,
+        sot_token: u32,
+        candidates: &[u32],
+    ) -> Result<u32>
+    where
+        C: RuntimeClient<R>
+            + TensorOps<R>
+            + ScalarOps<R>
+            + MatmulOps<R>
+            + BinaryOps<R>
+            + ActivationOps<R>
+            + NormalizationOps<R>
+            + ReduceOps<R>
+            + ShapeOps<R>
+            + UnaryOps<R>
+            + ConditionalOps<R>
+            + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R>,
+    {
+        let batch = encoder_out.shape()[0];
+        if batch != 1 {
+            return Err(Error::ModelError {
+                reason: format!("detect_language currently supports batch=1, got batch={batch}"),
+            });
+        }
+        let vocab_size = self.decoder.vocab_size();
+        let mask = allow_only_mask::<R>(candidates, vocab_size, encoder_out.device())?;
+
+        let mut cache = self.decoder.new_cache();
+        let prefix = Tensor::<R>::from_slice(&[sot_token as i64], &[1, 1], encoder_out.device())?;
+        let logits =
+            self.decoder
+                .forward_with_cache(client, &prefix, encoder_out, 0, &mut cache)?;
+        greedy_pick_last(client, &logits, Some(&mask))
+    }
+}
+
+/// Build an additive `[1, 1, vocab]` mask holding `0` at every id in `ids` and
+/// `-inf` elsewhere, so an argmax over the masked logits can only land on one
+/// of `ids`. The inverse of [`suppression_mask`].
+fn allow_only_mask<R>(ids: &[u32], vocab_size: usize, device: &R::Device) -> Result<Tensor<R>>
+where
+    R: Runtime<DType = DType>,
+{
+    if ids.is_empty() {
+        return Err(Error::ModelError {
+            reason: "allow_only_mask needs at least one candidate id".into(),
+        });
+    }
+    let mut mask = vec![f32::NEG_INFINITY; vocab_size];
+    let mut allowed = 0usize;
+    for &id in ids {
+        if let Some(slot) = mask.get_mut(id as usize) {
+            *slot = 0.0;
+            allowed += 1;
+        }
+    }
+    if allowed == 0 {
+        return Err(Error::ModelError {
+            reason: format!(
+                "none of the {} candidate ids fall inside the {vocab_size}-entry vocabulary",
+                ids.len()
+            ),
+        });
+    }
+    let tensor = Tensor::<R>::from_slice(&mask, &[1, 1, vocab_size], device)?;
+    Ok(tensor)
 }
 
 /// Build an additive `[1, 1, vocab]` suppression mask holding `-inf` at every
@@ -274,4 +352,31 @@ where
     u32::try_from(picked).map_err(|_| Error::ModelError {
         reason: format!("argmax returned an out-of-range token index {picked}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+
+    #[test]
+    fn allow_only_mask_zeroes_candidates_and_blocks_the_rest() {
+        let device = CpuDevice::new();
+        let mask = allow_only_mask::<CpuRuntime>(&[1, 3, 99], 5, &device)
+            .expect("in-range candidates build a mask");
+        assert_eq!(mask.shape(), &[1, 1, 5]);
+        let host: Vec<f32> = mask.try_to_vec().expect("host copy");
+        assert_eq!(host[1], 0.0);
+        assert_eq!(host[3], 0.0);
+        for &i in &[0usize, 2, 4] {
+            assert_eq!(host[i], f32::NEG_INFINITY);
+        }
+    }
+
+    #[test]
+    fn allow_only_mask_rejects_empty_and_out_of_range_candidates() {
+        let device = CpuDevice::new();
+        assert!(allow_only_mask::<CpuRuntime>(&[], 5, &device).is_err());
+        assert!(allow_only_mask::<CpuRuntime>(&[7, 8], 5, &device).is_err());
+    }
 }

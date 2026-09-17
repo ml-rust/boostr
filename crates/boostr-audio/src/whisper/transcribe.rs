@@ -21,17 +21,19 @@ use numr::ops::{
 };
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
+use splintr::WhisperVariant;
 
 /// Whisper's encoder window, in seconds. `MelOptions::whisper` pads or trims
 /// every input to exactly this, so longer audio is data loss, not a long decode.
 const WHISPER_WINDOW_SECS: usize = 30;
 
-/// What a transcription run may vary. [`Default`] transcribes with no language
-/// token and the checkpoint's own token budget.
+/// What a transcription run may vary. [`Default`] detects the language and
+/// uses the checkpoint's own token budget.
 #[derive(Debug, Clone, Default)]
 pub struct TranscribeOptions<'a> {
-    /// BCP-47-ish code, e.g. `Some("ms")`. `None` skips the language token,
-    /// which is what an english-only checkpoint wants.
+    /// BCP-47-ish code, e.g. `Some("ms")`. `None` runs
+    /// [`WhisperBundle::detect_language`] on a multilingual checkpoint and
+    /// skips the token on an english-only one.
     pub language: Option<&'a str>,
     /// Translate to English instead of transcribing in the source language.
     pub translate: bool,
@@ -51,6 +53,9 @@ pub struct Transcription {
     pub text: String,
     /// The generated ids only: no SOT prefix, no trailing end-of-text.
     pub tokens: Vec<u32>,
+    /// The language token the decode ran under: the caller's, or the detected
+    /// one. `None` only for an english-only checkpoint.
+    pub language: Option<&'static str>,
 }
 
 impl<R: Runtime<DType = DType>> WhisperBundle<R> {
@@ -123,7 +128,18 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
         let mel_t = Tensor::<R>::from_slice(&mel, &shape, client.device())?;
         let encoded = self.model.encode(client, &mel_t)?;
 
-        let prompt = self.sot_prompt(opts.language, opts.translate);
+        // A multilingual decoder was trained with a language token right after
+        // SOT. Prompting it without one leaves the language slot to be filled by
+        // the argmax stream, and the transcript that follows is byte noise. An
+        // english-only decoder was trained with no language slot at all, so a
+        // code passed for it is dropped rather than inserted.
+        let language = match (self.variant, opts.language) {
+            (WhisperVariant::EnglishOnly, _) => None,
+            (_, Some(code)) => Some(self.resolve_language(code)?),
+            (_, None) => Some(self.detect_language(client, &encoded)?),
+        };
+
+        let prompt = self.sot_prompt(language, opts.translate);
         let mut gen_opts = self.generate_options();
         if let Some(budget) = opts.max_new_tokens {
             gen_opts.max_new_tokens = budget;
@@ -139,7 +155,68 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
                 reason: format!("decoding {} whisper token ids: {e}", tokens.len()),
             })?;
 
-        Ok(Transcription { text, tokens })
+        Ok(Transcription {
+            text,
+            tokens,
+            language,
+        })
+    }
+
+    /// Detect the spoken language from an already-encoded window.
+    ///
+    /// Runs the decoder one step from `<|sot|>` with every non-language id
+    /// masked out and maps the winning id back to its code. Errors on an
+    /// english-only checkpoint, which carries no language block to pick from.
+    pub fn detect_language<C>(&self, client: &C, encoded: &Tensor<R>) -> Result<&'static str>
+    where
+        C: RuntimeClient<R>
+            + TensorOps<R>
+            + ScalarOps<R>
+            + MatmulOps<R>
+            + BinaryOps<R>
+            + ActivationOps<R>
+            + NormalizationOps<R>
+            + ReduceOps<R>
+            + ShapeOps<R>
+            + UnaryOps<R>
+            + ConditionalOps<R>
+            + IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R>,
+    {
+        let candidates = self.language_token_ids();
+        if candidates.is_empty() {
+            return Err(Error::InvalidArgument {
+                arg: "language",
+                reason: format!(
+                    "{:?} carries no language tokens, so there is nothing to detect",
+                    self.variant
+                ),
+            });
+        }
+        let picked = self.model.detect_language(
+            client,
+            encoded,
+            self.variant.sot_token_id(),
+            &candidates,
+        )?;
+        self.language_code(picked).ok_or_else(|| Error::ModelError {
+            reason: format!("language detection picked id {picked}, outside the language block"),
+        })
+    }
+
+    /// Map a caller's language code onto the variant's own spelling, or error
+    /// naming the code so a typo is not silently decoded language-free.
+    fn resolve_language(&self, code: &str) -> Result<&'static str> {
+        let id = self
+            .variant
+            .language_token_id(code)
+            .ok_or_else(|| Error::InvalidArgument {
+                arg: "language",
+                reason: format!("{code:?} is not a language {:?} knows", self.variant),
+            })?;
+        self.language_code(id).ok_or_else(|| Error::ModelError {
+            reason: format!("language token {id} for {code:?} is outside the language block"),
+        })
     }
 
     /// Transcribe each segment of `samples`. Segments come from

@@ -19,6 +19,7 @@
 
 #[cfg(feature = "cuda")]
 use super::helpers::{setup_cpu, with_cuda_backend};
+use boostr::ops::AttnOutLayout;
 
 /// One parity case. Plain data so the non-CUDA stubs can still name it.
 #[derive(Clone, Copy)]
@@ -998,6 +999,7 @@ fn run_fwd_case(case: Case, dtype: TestDType) {
             case.causal,
             0,
             None,
+            AttnOutLayout::HeadMajor,
         )
         .expect("CPU reference flash_attention_fwd failed");
     let expected = cpu_out.to_vec::<f32>();
@@ -1021,6 +1023,7 @@ fn run_fwd_case(case: Case, dtype: TestDType) {
             case.num_kv_heads,
             case.head_dim,
             case.causal,
+            AttnOutLayout::HeadMajor,
         )
         .expect("mqa_gqa_fwd returned an error");
 
@@ -1098,6 +1101,7 @@ fn run_bwd_case(case: Case, dtype: TestDType) {
             case.causal,
             0,
             None,
+            AttnOutLayout::HeadMajor,
         )
         .expect("CPU reference flash_attention_fwd failed");
     let (ref_dq, ref_dk, ref_dv) = cpu_client
@@ -1141,6 +1145,7 @@ fn run_bwd_case(case: Case, dtype: TestDType) {
             case.num_kv_heads,
             case.head_dim,
             case.causal,
+            AttnOutLayout::HeadMajor,
         )
         .expect("mqa_gqa_fwd (feeding backward) returned an error");
 
@@ -1246,6 +1251,7 @@ fn run_causal_first_row_case() {
             case.num_kv_heads,
             case.head_dim,
             case.causal,
+            AttnOutLayout::HeadMajor,
         )
         .expect("mqa_gqa_fwd returned an error");
         let host = read_f32(&out);
@@ -1421,6 +1427,7 @@ fn run_bwd_defect_case(case: Case, dtype: TestDType, dq_roundings: usize, dkv_ro
             case.num_kv_heads,
             case.head_dim,
             case.causal,
+            AttnOutLayout::HeadMajor,
         )
         .expect("mqa_gqa_fwd (low-precision) returned an error");
         let (dq_low, dk_low, dv_low) = mqa_gqa_bwd(
@@ -1454,6 +1461,7 @@ fn run_bwd_defect_case(case: Case, dtype: TestDType, dq_roundings: usize, dkv_ro
             case.num_kv_heads,
             case.head_dim,
             case.causal,
+            AttnOutLayout::HeadMajor,
         )
         .expect("mqa_gqa_fwd (f32 reference on rounded inputs) returned an error");
         let (dq_f32, dk_f32, dv_f32) = mqa_gqa_bwd(

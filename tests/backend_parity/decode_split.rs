@@ -19,6 +19,7 @@
 //! which the backward consumes.
 
 use super::helpers::*;
+use boostr::ops::AttnOutLayout;
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
 
 /// Runs one decode shape on CPU and CUDA and asserts output and LSE agree.
@@ -64,6 +65,7 @@ fn assert_decode_parity(
             false,
             window,
             None,
+            AttnOutLayout::HeadMajor,
         )
         .unwrap_or_else(|e| panic!("CPU decode failed for {label}: {e}"));
     let cpu_out_vec = cpu_out.to_vec::<f32>();
@@ -102,6 +104,7 @@ fn assert_decode_parity(
                 false,
                 window,
                 Some(seq_len_k),
+                AttnOutLayout::HeadMajor,
             )
             .unwrap_or_else(|e| panic!("CUDA decode failed for {label}: {e}"));
 
@@ -144,6 +147,7 @@ fn assert_decode_parity(
                 false,
                 window,
                 None,
+                AttnOutLayout::HeadMajor,
             )
             .unwrap_or_else(|e| panic!("WebGPU decode failed for {label}: {e}"));
 
@@ -344,6 +348,7 @@ fn assert_decode_half_parity(
                 false,
                 window,
                 Some(seq_len_k),
+                AttnOutLayout::HeadMajor,
             )
             .unwrap_or_else(|e| panic!("F32 reference failed for {label}: {e}"));
 
@@ -358,6 +363,7 @@ fn assert_decode_half_parity(
                 false,
                 window,
                 Some(seq_len_k),
+                AttnOutLayout::HeadMajor,
             )
             .unwrap_or_else(|e| panic!("half decode failed for {label}: {e}"));
 

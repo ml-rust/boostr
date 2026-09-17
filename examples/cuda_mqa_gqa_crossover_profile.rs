@@ -52,6 +52,7 @@ fn main() {
 
 #[cfg(feature = "cuda")]
 fn main() {
+    use boostr::ops::AttnOutLayout;
     use boostr::ops::FlashAttentionOps;
     use boostr::ops::cuda::attention::mqa_gqa::mqa_gqa_fwd;
     use boostr::{CudaDevice, CudaRuntime, DType, Runtime, RuntimeClient};
@@ -87,9 +88,18 @@ fn main() {
                 for _ in 0..ITERS {
                     // Side 1: dedicated MQA/GQA kernel, unconditionally — it
                     // does not check the ratio itself.
-                    let out_dedicated =
-                        mqa_gqa_fwd(&client, &q, &k, &v, num_heads, num_kv_heads, head_dim, true)
-                            .unwrap();
+                    let out_dedicated = mqa_gqa_fwd(
+                        &client,
+                        &q,
+                        &k,
+                        &v,
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                        true,
+                        AttnOutLayout::HeadMajor,
+                    )
+                    .unwrap();
                     std::hint::black_box(&out_dedicated);
                 }
 
@@ -109,6 +119,7 @@ fn main() {
                             true,
                             seq_len,
                             Some(seq_len),
+                            AttnOutLayout::HeadMajor,
                         )
                         .unwrap();
                     std::hint::black_box(&out_general);

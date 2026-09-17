@@ -24,6 +24,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
+use boostr::ops::AttnOutLayout;
 use boostr::ops::cuda::attention::flash::impl_ops::decode_attention_graph_fwd;
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
 use numr::runtime::Runtime;
@@ -154,6 +155,7 @@ fn reference_decode(
             false,
             0,
             None,
+            AttnOutLayout::HeadMajor,
         )
         .expect("reference flash_attention_fwd failed");
     out.to_vec::<f32>()
@@ -393,6 +395,7 @@ fn split_reference_decode(
             false,
             0,
             None,
+            AttnOutLayout::HeadMajor,
         )
         .expect("reference flash_attention_fwd failed");
     (out.to_vec::<f32>(), lse.to_vec::<f32>())

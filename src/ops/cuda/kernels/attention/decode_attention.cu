@@ -6,6 +6,14 @@
 // Layout: Q [B, num_heads, 1, D], K/V [B, num_kv_heads, seq_k, D]
 // Output: O [B, num_heads, 1, D], LSE [B, num_heads, 1] (always F32)
 //
+// Output row: `out_seq_fold` serves the host's short-query fold, which runs
+// `[B, H, S_q, D]` as `[B, H * S_q, 1, D]`. With `out_seq_fold == 1` row `bh`
+// is stored at `bh * D`, which is head-major and, at a true `S_q == 1`, also
+// token-major. With `out_seq_fold == S_q > 1` the folded head `h * S_q + s` is
+// stored token-major at `o[b, s, h, :]`. Only the store address changes.
+// The `_combine` entry takes the same pair; `paged_decode_attention.cu`'s host
+// launcher (`ops/cuda/attention/paged_decode.rs`) shares it and passes fold 1.
+//
 // Q/K/V/O carry the tensor dtype; the softmax state and the accumulator are
 // always F32. Serving runs in F16/BF16, so a decode kernel that existed only in
 // F32 sent every real request to the tiled prefill kernel instead.
@@ -146,6 +154,17 @@ __device__ __forceinline__ void decode_attention_core(
     decode_merge_warps<D>(&smem_acc[0][0], smem_m, smem_l, acc, m, l);
 }
 
+// Output row index for block `bh` (see the header on `out_seq_fold`).
+__device__ __forceinline__ size_t decode_out_row(int bh, int num_heads, int out_seq_fold) {
+    if (out_seq_fold == 1) return (size_t)bh;
+    const int b = bh / num_heads;
+    const int folded = bh % num_heads;
+    const int h = folded / out_seq_fold;
+    const int s = folded % out_seq_fold;
+    const int true_heads = num_heads / out_seq_fold;
+    return ((size_t)b * out_seq_fold + s) * true_heads + h;
+}
+
 // ============================================================================
 // Whole-sequence kernel: one block per (batch, head)
 // ============================================================================
@@ -159,7 +178,7 @@ __device__ __forceinline__ void decode_attention_impl(
     float* __restrict__ LSE,
     int num_heads, int num_kv_heads,
     int seq_len_k, int kv_seq_stride,
-    float scale, int window_size
+    float scale, int window_size, int out_seq_fold
 ) {
     const int bh = blockIdx.x;
     const int b = bh / num_heads;
@@ -177,7 +196,7 @@ __device__ __forceinline__ void decode_attention_impl(
     float acc, m, l;
     decode_attention_core<T, D>(q_row, k_base, v_base, pos_start, seq_len_k, scale, acc, m, l);
 
-    O[(size_t)(b * num_heads + h) * D + tid] =
+    O[decode_out_row(bh, num_heads, out_seq_fold) * D + tid] =
         convert_dtype<T>((l > 0.0f) ? acc / l : 0.0f);
     if (tid == 0)
         LSE[b * num_heads + h] = (l > 0.0f) ? (m + logf(l)) : -INFINITY;
@@ -244,7 +263,7 @@ __device__ __forceinline__ void decode_attention_combine_impl(
     const float* __restrict__ partial_ml,
     T* __restrict__ O,
     float* __restrict__ LSE,
-    int num_splits
+    int num_splits, int num_heads, int out_seq_fold
 ) {
     const int bh = blockIdx.x;
     const int tid = threadIdx.x;
@@ -266,7 +285,8 @@ __device__ __forceinline__ void decode_attention_combine_impl(
         l_total += l_s * w;
     }
 
-    O[(size_t)bh * D + tid] = convert_dtype<T>((l_total > 0.0f) ? acc / l_total : 0.0f);
+    O[decode_out_row(bh, num_heads, out_seq_fold) * D + tid] =
+        convert_dtype<T>((l_total > 0.0f) ? acc / l_total : 0.0f);
     if (tid == 0)
         LSE[bh] = (l_total > 0.0f) ? (m_max + logf(l_total)) : -INFINITY;
 }
@@ -277,15 +297,18 @@ __device__ __forceinline__ void decode_attention_combine_impl(
 
 // Non-graph and graph variants take the same arguments apart from
 // `seq_len_k`: a plain int here, a device pointer in the `_graph` entries.
+// The graph entries serve a true single-query decode only, so they take no
+// `out_seq_fold` and store row `bh` at `bh * D`.
 #define DECODE_ATTENTION_KERNELS(D, SUFFIX, T)                                     \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX(                        \
     const T* __restrict__ Q, const T* __restrict__ K, const T* __restrict__ V,     \
     T* __restrict__ O, float* __restrict__ LSE,                                    \
     int num_heads, int num_kv_heads, int seq_len_k, int kv_seq_stride,             \
-    float scale, int window_size                                                   \
+    float scale, int window_size, int out_seq_fold                                 \
 ) {                                                                                \
     decode_attention_impl<T, D>(Q, K, V, O, LSE, num_heads, num_kv_heads,          \
-                                seq_len_k, kv_seq_stride, scale, window_size);     \
+                                seq_len_k, kv_seq_stride, scale, window_size,      \
+                                out_seq_fold);                                     \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_graph(                \
@@ -295,7 +318,8 @@ extern "C" __global__ void decode_attention_##D##_##SUFFIX##_graph(             
     int kv_seq_stride, float scale, int window_size                                \
 ) {                                                                                \
     decode_attention_impl<T, D>(Q, K, V, O, LSE, num_heads, num_kv_heads,          \
-                                *seq_len_k_ptr, kv_seq_stride, scale, window_size);\
+                                *seq_len_k_ptr, kv_seq_stride, scale, window_size, \
+                                1);                                                \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split(                \
@@ -322,9 +346,11 @@ extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split_graph(       
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_combine(              \
     const float* __restrict__ partial_o, const float* __restrict__ partial_ml,     \
-    T* __restrict__ O, float* __restrict__ LSE, int num_splits                     \
+    T* __restrict__ O, float* __restrict__ LSE, int num_splits,                    \
+    int num_heads, int out_seq_fold                                                \
 ) {                                                                                \
-    decode_attention_combine_impl<T, D>(partial_o, partial_ml, O, LSE, num_splits);\
+    decode_attention_combine_impl<T, D>(partial_o, partial_ml, O, LSE, num_splits, \
+                                        num_heads, out_seq_fold);                  \
 }
 
 // One set per head_dim the flash family validates; the host side lists the

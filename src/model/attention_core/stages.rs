@@ -84,6 +84,24 @@ where
     Ok((q, k, v))
 }
 
+/// Step 6 for a token-major kernel output: `[B, S_q, H, D]` -> `[B, S_q, H*D]`.
+/// A reshape, no copy: the flash kernel already stored the rows in this order.
+pub(super) fn attention_epilogue_token_major<R>(
+    attn_out: &Var<R>,
+    batch: usize,
+    spec: &AttentionCoreSpec<'_, R>,
+) -> Result<Var<R>>
+where
+    R: Runtime,
+{
+    let seq_len_q = attn_out.shape()[1];
+    var_reshape(
+        attn_out,
+        &[batch, seq_len_q, spec.num_heads * spec.head_dim],
+    )
+    .map_err(Error::Numr)
+}
+
 /// Step 6: `[B, H, S_q, D]` -> `[B, S_q, H, D]` -> `[B, S_q, H*D]`.
 pub(super) fn attention_epilogue<R>(
     attn_out: &Var<R>,

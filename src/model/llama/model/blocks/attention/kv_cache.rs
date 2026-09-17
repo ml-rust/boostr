@@ -7,6 +7,7 @@ use crate::inference::KvCache;
 use crate::model::traits::ModelClient;
 use crate::nn::{MaybeQuantLinear, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
+use crate::ops::traits::AttnOutLayout;
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_narrow, var_reshape};
 use numr::dtype::DType;
@@ -120,16 +121,21 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             )?;
             client.alibi_add_bias_causal(&mask, batch, self.num_heads, sq, sk, position)?;
             let mask_var = Var::new(mask, false);
-            multi_head_attention_impl(
+            let attn_out = multi_head_attention_impl(
                 client,
                 &q,
                 &k_full,
                 &v_full,
                 Some(&mask_var),
                 self.num_heads,
-            )?
+            )?;
+            // [B, H, S, D] -> [B, S, H, D]
+            let attn_out =
+                numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
+            var_contiguous(&attn_out)?
         } else {
             let is_prefill = seq_len > 1;
+            // Token-major store: `[B, S, H, D]` straight from the kernel.
             let (out, _lse) = client.flash_attention_fwd(
                 q.tensor(),
                 kv_cache.k_cache_raw(),
@@ -140,14 +146,12 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
                 is_prefill,
                 self.sliding_window,
                 Some(kv_seq_len),
+                AttnOutLayout::TokenMajor,
             )?;
             Var::new(out, false)
         };
 
-        // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
-        let attn_out =
-            numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out)?;
+        // [B, S, H, D] -> [B, S, H*D]
         let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 

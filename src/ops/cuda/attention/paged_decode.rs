@@ -106,7 +106,9 @@ pub(super) fn paged_decode_attention_fwd(
         }
 
         // The partials carry no paging structure, so the contiguous decode
-        // path's combine kernel merges them unchanged.
+        // path's combine kernel merges them unchanged. One query row per
+        // block: the combine stores row `bh` at `bh * D` (fold 1).
+        let fold_i32 = 1i32;
         let combine_module =
             kernels::get_or_load_module(client.context(), device_index, DECODE_ATTENTION_MODULE)?;
         let combine_func = kernels::get_kernel_function(
@@ -125,6 +127,8 @@ pub(super) fn paged_decode_attention_fwd(
             builder.arg(&o_ptr);
             builder.arg(&lse_ptr);
             builder.arg(&splits_i32);
+            builder.arg(&nh_i32);
+            builder.arg(&fold_i32);
             builder
                 .launch(combine_cfg)
                 .map_err(|e| Error::KernelError {
@@ -271,7 +275,8 @@ pub fn paged_decode_attention_fwd_graph(
         // The partials carry no paging structure, so the contiguous decode
         // path's combine kernel merges them unchanged — same entry point the
         // non-graph split path uses, and capture-safe since num_splits is a
-        // static plain int.
+        // static plain int. One query row per block: fold 1.
+        let fold_i32 = 1i32;
         let combine_module =
             kernels::get_or_load_module(client.context(), device_index, DECODE_ATTENTION_MODULE)?;
         let combine_func = kernels::get_kernel_function(
@@ -290,6 +295,8 @@ pub fn paged_decode_attention_fwd_graph(
             builder.arg(&o_ptr);
             builder.arg(&lse_ptr);
             builder.arg(&splits_i32);
+            builder.arg(&nh_i32);
+            builder.arg(&fold_i32);
             builder
                 .launch(combine_cfg)
                 .map_err(|e| Error::KernelError {

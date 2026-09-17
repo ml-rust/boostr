@@ -2,6 +2,7 @@ pub mod helpers;
 
 pub mod alibi;
 pub mod attention;
+pub mod attn_out_layout;
 pub mod calibration;
 pub mod decode_split;
 pub mod fused_fp8;

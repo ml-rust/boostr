@@ -5,7 +5,7 @@ pub mod mla;
 pub mod paged_attention;
 pub mod varlen_attention;
 
-pub use flash::{AttentionOps, FlashAttentionOps};
+pub use flash::{AttentionOps, AttnOutLayout, FlashAttentionOps};
 pub use flash_alibi::FlashAlibiOps;
 pub use fused_qkv::FusedQkvOps;
 pub use mla::MlaOps;

@@ -2,7 +2,8 @@
 //! Q [B, num_heads, S_q, head_dim]
 //! K [B, num_kv_heads, S_k, head_dim]
 //! V [B, num_kv_heads, S_k, head_dim]
-//! Output [B, num_heads, S_q, head_dim]
+//! Output [B, num_heads, S_q, head_dim], or [B, S_q, num_heads, head_dim]
+//! when `token_major != 0` (same values, different store address)
 //! LSE [B, num_heads, S_q] (logsumexp for backward)
 //!
 //! O(N²) GPU implementation. Handles GQA internally.
@@ -17,7 +18,7 @@ struct FlashParams {
     scale: f32,
     causal: u32,
     window_size: u32,
-    _pad: u32,
+    token_major: u32,
 }
 
 @group(0) @binding(0) var<storage, read> q: array<f32>;
@@ -109,8 +110,11 @@ fn flash_attention_fwd_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // Normalize
-    let out_base = ((b * params.num_heads + h_q) * params.seq_len_q + i) * params.head_dim;
+    // Normalize. Only the store address depends on the layout.
+    var out_base = ((b * params.num_heads + h_q) * params.seq_len_q + i) * params.head_dim;
+    if params.token_major != 0u {
+        out_base = ((b * params.seq_len_q + i) * params.num_heads + h_q) * params.head_dim;
+    }
     for (var d = 0u; d < params.head_dim; d = d + 1u) {
         out[out_base + d] = accum[d] / max(sum_exp, 1e-10f);
     }

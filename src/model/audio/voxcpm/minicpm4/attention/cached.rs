@@ -7,6 +7,7 @@ use crate::inference::KvCache;
 use crate::model::traits::ModelClient;
 use crate::nn::var_ops::var_contiguous;
 use crate::nn::{MaybeLoraLinear, RoPE};
+use crate::ops::traits::AttnOutLayout;
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_narrow, var_permute, var_reshape};
 use numr::dtype::DType;
@@ -170,7 +171,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
         kv_cache.update_fused(k.tensor(), v.tensor(), client)?;
 
         // The kernel broadcasts the GQA heads itself, so the raw cache buffers
-        // go in untouched, bounded to the written slots by `kv_seq_len`.
+        // go in untouched, bounded to the written slots by `kv_seq_len`. It
+        // stores `[B, S, H, D]`, so `o_proj`'s input is a reshape.
         let (out, _lse) = client.flash_attention_fwd(
             q.tensor(),
             kv_cache.k_cache_raw(),
@@ -183,12 +185,11 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             // The disabled-window sentinel `core_spec` declares.
             self.core_spec().sliding_window,
             Some(kv_cache.seq_len()),
+            AttnOutLayout::TokenMajor,
         )?;
         let attn_out = Var::new(out, false);
 
-        // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
-        let attn_out = var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out)?;
+        // [B, S, H, D] -> [B, S, H*D]
         let attn_out = var_reshape(&attn_out, &[batch, seq, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 

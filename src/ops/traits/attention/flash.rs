@@ -23,14 +23,67 @@ pub trait AttentionOps<R: Runtime> {
     ) -> Result<Var<R>>;
 }
 
+/// Memory layout of the attention output.
+///
+/// Both layouts hold the same values in the same dtype: the kernels change
+/// only the address each element is stored to, so `TokenMajor` is bitwise
+/// `HeadMajor.permute([0, 2, 1, 3])`. `TokenMajor` reshapes to
+/// `[B, S_q, H * D]` for free, which is what an output projection reads,
+/// so a consumer picks it to drop the `permute + contiguous` copy after
+/// attention. At `S_q == 1` the two layouts are the same bytes.
+///
+/// The logsumexp is `[B, H, S_q]` under either layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AttnOutLayout {
+    /// `[B, H, S_q, D]`: the layout of `q`.
+    #[default]
+    HeadMajor,
+    /// `[B, S_q, H, D]`.
+    TokenMajor,
+}
+
+impl AttnOutLayout {
+    /// Output shape for `batch`, `num_heads`, `seq_len_q`, `head_dim`.
+    pub fn shape(
+        self,
+        batch: usize,
+        num_heads: usize,
+        seq_len_q: usize,
+        head_dim: usize,
+    ) -> [usize; 4] {
+        match self {
+            Self::HeadMajor => [batch, num_heads, seq_len_q, head_dim],
+            Self::TokenMajor => [batch, seq_len_q, num_heads, head_dim],
+        }
+    }
+
+    /// A head-major tensor re-laid into `self`. Copies only for `TokenMajor`
+    /// at `S_q > 1`; the head-major bytes already are the token-major bytes
+    /// at `S_q == 1`, so that case is a reshape.
+    pub fn from_head_major<R: Runtime>(self, out: Tensor<R>) -> Result<Tensor<R>> {
+        match self {
+            Self::HeadMajor => Ok(out),
+            Self::TokenMajor => {
+                let shape = out.shape();
+                let [b, h, s, d] = [shape[0], shape[1], shape[2], shape[3]];
+                if s == 1 {
+                    return Ok(out.reshape(&[b, 1, h, d])?);
+                }
+                Ok(out.permute(&[0, 2, 1, 3])?.contiguous()?)
+            }
+        }
+    }
+}
+
 /// Flash Attention v2 — fused O(N) memory attention kernel. PRIMITIVE op
 /// (the fused kernel IS the algorithm); each backend has its own
 /// implementation, CPU falls back to impl_generic standard attention.
 ///
 /// Layout: `q` is `[B, num_heads, S_q, head_dim]`, `k`/`v` are
 /// `[B, num_kv_heads, S_k, head_dim]` (contiguous). Output is
-/// `[B, num_heads, S_q, head_dim]`, logsumexp is `[B, num_heads, S_q]` F32
-/// (needed for backward).
+/// `[B, num_heads, S_q, head_dim]` or `[B, S_q, num_heads, head_dim]` per
+/// [`AttnOutLayout`]; logsumexp is `[B, num_heads, S_q]` F32 (needed for
+/// backward).
 ///
 /// GQA: when `num_kv_heads < num_heads` (must divide evenly), query heads
 /// share KV heads — the kernel broadcasts internally, no `repeat_kv` needed.
@@ -51,6 +104,12 @@ pub trait FlashAttentionOps<R: Runtime> {
     /// of K/V while using the tensor's dim-2 as the memory stride. This allows
     /// passing a full-capacity KV cache buffer without copying/narrowing.
     /// When `None`, `k.shape()[2]` is used for both loop bound and stride.
+    ///
+    /// # `out_layout`
+    ///
+    /// Where each output element is stored — see [`AttnOutLayout`]. The
+    /// arithmetic is the same under both, so the two outputs are bitwise
+    /// permutations of each other.
     fn flash_attention_fwd(
         &self,
         q: &Tensor<R>,
@@ -62,6 +121,7 @@ pub trait FlashAttentionOps<R: Runtime> {
         causal: bool,
         window_size: usize,
         kv_seq_len: Option<usize>,
+        out_layout: AttnOutLayout,
     ) -> Result<(Tensor<R>, Tensor<R>)>;
 
     /// Flash Attention forward pass for FP8 tensors. Requires per-tensor

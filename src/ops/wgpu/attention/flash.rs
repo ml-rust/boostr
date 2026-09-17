@@ -10,7 +10,7 @@ use crate::ops::impl_generic::attention::{
     StandardAttnConfig, multi_head_attention_impl, standard_attention_bwd,
 };
 use crate::ops::traits::cache::kv_cache_quant::Int4GroupSize;
-use crate::ops::traits::{AttentionOps, FlashAttentionOps};
+use crate::ops::traits::{AttentionOps, AttnOutLayout, FlashAttentionOps};
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::runtime::wgpu::{WgpuClient, WgpuRuntime, get_buffer};
@@ -31,7 +31,7 @@ struct FlashParams {
     scale: f32,
     causal: u32,
     window_size: u32,
-    _pad: u32,
+    token_major: u32,
 }
 
 fn validate_f32(t: &Tensor<WgpuRuntime>, op: &str) -> Result<()> {
@@ -70,6 +70,7 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
         causal: bool,
         window_size: usize,
         kv_seq_len: Option<usize>,
+        out_layout: AttnOutLayout,
     ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
         // kv_seq_len override not optimized for WGPU — narrow if needed
         if let Some(seq_len) = kv_seq_len {
@@ -85,6 +86,7 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
                 causal,
                 window_size,
                 None,
+                out_layout,
             );
         }
         validate_f32(q, "flash_attention_fwd")?;
@@ -97,7 +99,8 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
         let seq_len_k = k.shape()[2];
 
         // Create output tensors
-        let output = Tensor::<WgpuRuntime>::zeros(q_shape, DType::F32, q.device())?;
+        let out_shape = out_layout.shape(batch_size, num_heads, seq_len_q, head_dim);
+        let output = Tensor::<WgpuRuntime>::zeros(&out_shape, DType::F32, q.device())?;
         let lse_shape = vec![batch_size, num_heads, seq_len_q];
         let lse = Tensor::<WgpuRuntime>::zeros(&lse_shape, DType::F32, q.device())?;
 
@@ -130,7 +133,7 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
             scale,
             causal: if causal { 1 } else { 0 },
             window_size: window_size as u32,
-            _pad: 0,
+            token_major: u32::from(out_layout == AttnOutLayout::TokenMajor),
         };
 
         let params_buf = self.wgpu_device().create_buffer(&wgpu::BufferDescriptor {

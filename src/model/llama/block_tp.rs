@@ -8,6 +8,7 @@ use crate::nn::var_ops::{repeat_kv, var_contiguous};
 use crate::nn::{RmsNorm, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use crate::ops::impl_generic::attention::rope::apply_rope_impl;
+use crate::ops::traits::AttnOutLayout;
 use numr::autograd::{Var, var_add, var_mul, var_narrow, var_reshape, var_silu};
 use numr::dtype::DType;
 use numr::ops::{
@@ -259,6 +260,7 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
         // Attention using full KV cache
         let kv_seq_len = kv_cache.seq_len();
         let is_prefill = seq_len > 1;
+        // Token-major store: `[B, S, H, D]` straight from the kernel.
         let (attn_out, _lse) = client.flash_attention_fwd(
             q.tensor(),
             kv_cache.k_cache_raw(),
@@ -269,13 +271,11 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
             is_prefill,
             self.sliding_window,
             Some(kv_seq_len),
+            AttnOutLayout::TokenMajor,
         )?;
 
-        // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]
+        // [B, S, H, D] -> [B, S, H*D]
         let attn_out = Var::new(attn_out, false);
-        let attn_out =
-            numr::autograd::var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out)?;
         let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 

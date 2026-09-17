@@ -12,7 +12,10 @@
 //! fused kernel per layer that broadcasts the 2 KV heads to 16 in-kernel,
 //! so no `repeat_kv` materialization, no `K^T` copy, no separate
 //! scale/softmax launches. It carries autograd (`flash_attention_bwd`), so
-//! LoRA training runs through the same node.
+//! LoRA training runs through the same node. The kernel stores its output
+//! token-major (`AttnOutLayout::TokenMajor`, `[N, S, H, D]`), so the
+//! `o_proj` input is a reshape and no `permute + contiguous` copy follows
+//! attention; the backward node permutes `dO`/`O` back itself.
 //!
 //! Backends: CUDA runs this geometry (non-causal, short sequence, head_dim
 //! 128, F32/F16/BF16) as the decode kernel with the query axis folded into
@@ -42,7 +45,7 @@ use crate::nn::{
     LoraTargets, MaybeLoraLinear, Module, RoPE, adapt_if_targeted, child_params, extend_named,
     load_lora_child, push_projection_name, var_contiguous,
 };
-use crate::ops::{FlashAttentionOps, var_flash_attention};
+use crate::ops::{AttnOutLayout, FlashAttentionOps, var_flash_attention};
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_permute, var_reshape};
 use numr::dtype::DType;
@@ -136,7 +139,8 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
 
         // No mask: bidirectional, every position attends every other. GQA
         // broadcast happens inside the kernel; `repeat_kv` here would
-        // materialize the tensor this call exists to avoid.
+        // materialize the tensor this call exists to avoid. The kernel
+        // stores `[N, S, H, D]` directly, so `o_proj`'s input is a reshape.
         let attn_out = var_flash_attention(
             &q,
             &k,
@@ -146,11 +150,10 @@ impl<R: Runtime<DType = DType>> BidirectionalAttention<R> {
             self.head_dim,
             false,
             0,
+            AttnOutLayout::TokenMajor,
         )?;
 
-        // [N, H, S, D] -> [N, S, H, D] -> [N, S, H*D]
-        let attn_out = var_permute(&attn_out, &[0, 2, 1, 3]).map_err(Error::Numr)?;
-        let attn_out = var_contiguous(&attn_out)?;
+        // [N, S, H, D] -> [N, S, H*D]
         let attn_out = var_reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim])
             .map_err(Error::Numr)?;
 

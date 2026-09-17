@@ -26,12 +26,12 @@
 
 use super::mask::prefill_attention_mask;
 use super::spec::{AttentionCoreSpec, AttentionKernel};
-use super::stages::{attention_epilogue, attention_prologue};
+use super::stages::{attention_epilogue, attention_epilogue_token_major, attention_prologue};
 use crate::error::{Error, Result};
 use crate::nn::var_ops::{repeat_kv, var_contiguous};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use crate::ops::traits::position::alibi::AlibiOps;
-use crate::ops::traits::{FlashAttentionOps, RoPEOps};
+use crate::ops::traits::{AttnOutLayout, FlashAttentionOps, RoPEOps};
 use crate::ops::var_flash_attention;
 use numr::autograd::Var;
 use numr::dtype::DType;
@@ -175,8 +175,10 @@ where
         // Same sentinel as `Masked`: `0` disables, and the window is
         // inclusive of the current token.
         spec.sliding_window,
+        // The kernel stores `[B, S_q, H, D]`; the epilogue is then a reshape.
+        AttnOutLayout::TokenMajor,
     )?;
-    attention_epilogue(&attn_out, batch, spec)
+    attention_epilogue_token_major(&attn_out, batch, spec)
 }
 
 /// [`attention_core`] restricted to [`AttentionKernel::Masked`].

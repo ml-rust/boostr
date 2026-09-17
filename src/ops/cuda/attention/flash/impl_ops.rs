@@ -26,9 +26,16 @@
 //!
 //! `validate_qkv` rejects `num_heads` not divisible by `num_kv_heads` before
 //! any kernel is chosen, so that case reaches nothing.
+//!
+//! Output layout (`AttnOutLayout`): every kernel above takes it as a store
+//! flag, so token-major output costs no extra launch. The decode kernel at
+//! `seq_len_q == 1` stores the same bytes under either layout; the folded
+//! short-query path passes `S_q` so the kernel unfolds the head axis at the
+//! store. The v3 launcher predates the flag and is re-laid after the fact,
+//! which only matters once `flash_v3::dispatch_enabled` is true.
 
 use crate::error::{Error, Result};
-use crate::ops::traits::FlashAttentionOps;
+use crate::ops::traits::{AttnOutLayout, FlashAttentionOps};
 use numr::dtype::DType;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
@@ -46,7 +53,7 @@ use super::flash_utils::validate_qkv;
 use super::flash_v3;
 use crate::ops::traits::cache::kv_cache_quant::Int4GroupSize;
 
-pub use super::flash_decode::decode_attention_graph_fwd;
+pub use super::flash_decode_graph::decode_attention_graph_fwd;
 pub(crate) use super::flash_utils::set_smem_attribute;
 
 /// Longest non-causal query sequence routed through
@@ -82,6 +89,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         causal: bool,
         window_size: usize,
         kv_seq_len: Option<usize>,
+        out_layout: AttnOutLayout,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
         let mut p = validate_qkv(q, k, v, num_heads, num_kv_heads, head_dim)?;
 
@@ -108,6 +116,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                 &p,
                 kv_seq_stride,
                 window_size,
+                out_layout,
             );
         }
 
@@ -123,7 +132,15 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
             && decode_split::decode_supports_dtype(q.dtype())
             && decode_split::decode_supports_head_dim(head_dim)
         {
-            return flash_decode::decode_attention_fwd_folded(self, q, k, v, &p, kv_seq_stride);
+            return flash_decode::decode_attention_fwd_folded(
+                self,
+                q,
+                k,
+                v,
+                &p,
+                kv_seq_stride,
+                out_layout,
+            );
         }
 
         // Flash v2/v3 don't support separate kv_seq_stride — narrow if needed
@@ -140,6 +157,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                 causal,
                 window_size,
                 None,
+                out_layout,
             );
         }
 
@@ -162,7 +180,8 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                 causal,
             )?
         {
-            return Ok(result);
+            let (out, lse) = result;
+            return Ok((out_layout.from_head_major(out)?, lse));
         }
 
         // Dedicated MQA/GQA kernels, for the shapes they're capable of.
@@ -186,10 +205,20 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
                 .bf16
             && mqa_gqa::should_use_mqa_gqa(num_heads, num_kv_heads, head_dim)
         {
-            return mqa_gqa::mqa_gqa_fwd(self, q, k, v, num_heads, num_kv_heads, head_dim, causal);
+            return mqa_gqa::mqa_gqa_fwd(
+                self,
+                q,
+                k,
+                v,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                causal,
+                out_layout,
+            );
         }
 
-        flash_fwd::flash_attention_fwd_impl(self, q, k, v, &p, causal, window_size)
+        flash_fwd::flash_attention_fwd_impl(self, q, k, v, &p, causal, window_size, out_layout)
     }
 
     fn flash_attention_fwd_fp8(

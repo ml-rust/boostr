@@ -14,6 +14,7 @@ pub use autograd_biased_attention::{AttentionCausality, var_attention_with_bias}
 pub use autograd_rope::{RopeVariant, attach_rope_backward};
 pub use traits::AlibiOps;
 pub use traits::AttentionOps;
+pub use traits::AttnOutLayout;
 pub use traits::CalibrationOps;
 pub use traits::DeviceGrammarDfa;
 pub use traits::FlashAttentionOps;

@@ -72,7 +72,7 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
         let v_expanded = expand_kv_heads(self, &v_cont, num_heads, num_kv_heads)?;
 
         // Delegate to existing FlashAttentionOps
-        use crate::ops::traits::FlashAttentionOps;
+        use crate::ops::traits::{AttnOutLayout, FlashAttentionOps};
         self.flash_attention_fwd(
             q,
             &k_expanded,
@@ -83,6 +83,7 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
             causal,
             0,
             None,
+            AttnOutLayout::HeadMajor,
         )
     }
 

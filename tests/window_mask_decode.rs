@@ -15,6 +15,7 @@
 //! key slice is mathematically the windowed result, and it goes through no
 //! masking at all.
 
+use boostr::ops::AttnOutLayout;
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
@@ -80,6 +81,7 @@ fn attend(
             causal,
             window_size,
             None,
+            AttnOutLayout::HeadMajor,
         )
         .expect("flash_attention_fwd failed");
     out.to_vec::<f32>()

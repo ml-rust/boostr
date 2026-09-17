@@ -1,6 +1,7 @@
 //! Backend parity tests for PagedAttentionOps.
 
 use super::helpers::*;
+use boostr::ops::AttnOutLayout;
 use boostr::ops::traits::attention::paged_attention::PagedAttentionOps;
 
 #[test]
@@ -613,7 +614,18 @@ fn assert_paged_bwd_kv_parity(
     let dout = det_tensor(&[b, num_heads, s, d], &cpu_device);
 
     let (out, lse) = cpu_client
-        .flash_attention_fwd(&q, &k, &v, num_heads, num_kv_heads, d, true, 0, None)
+        .flash_attention_fwd(
+            &q,
+            &k,
+            &v,
+            num_heads,
+            num_kv_heads,
+            d,
+            true,
+            0,
+            None,
+            AttnOutLayout::HeadMajor,
+        )
         .unwrap();
     let (cpu_dq, cpu_dk, cpu_dv) = cpu_client
         .flash_attention_bwd(

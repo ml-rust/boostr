@@ -4,7 +4,7 @@
 //! for seamless integration with numr's autograd graph.
 
 use crate::error::Result;
-use crate::ops::traits::FlashAttentionOps;
+use crate::ops::traits::{AttnOutLayout, FlashAttentionOps};
 use numr::autograd::{GradFn, TensorId, Var};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -17,12 +17,20 @@ struct FlashAttentionConfig {
     head_dim: usize,
     causal: bool,
     window_size: usize,
+    out_layout: AttnOutLayout,
 }
 
 /// Backward function for Flash Attention.
 ///
 /// Saved state: Q, K, V, output, LSE from forward pass.
 /// Computes dQ, dK, dV via `FlashAttentionOps::flash_attention_bwd`.
+///
+/// Layout: the forward stored `output` in `config.out_layout`, and the
+/// engine hands `grad_output` down in that same layout. The backward kernels
+/// read both head-major, so a token-major pair is permuted back here, inside
+/// the node. Inference pays one forward copy for a head-major store; training
+/// pays it here instead. Same count, moved. dQ/dK/dV stay in their inputs'
+/// layout. No backward kernel knows about the flag.
 struct FlashAttentionBackward<R: Runtime> {
     input_ids: [TensorId; 3],      // q, k, v
     saved_tensors: Vec<Tensor<R>>, // [q, k, v, output, lse]
@@ -57,13 +65,21 @@ where
         // `var_flash_attention`. `Tensor::contiguous` is a refcount clone when
         // the tensor is already contiguous, so the copy happens only for the
         // layouts that would otherwise be rejected.
-        let grad_output = grad_output.contiguous()?;
+        let cfg = &self.config;
+        let (grad_output, output) = match cfg.out_layout {
+            AttnOutLayout::HeadMajor => (
+                grad_output.contiguous()?,
+                self.saved_tensors[3].contiguous()?,
+            ),
+            AttnOutLayout::TokenMajor => (
+                grad_output.permute(&[0, 2, 1, 3])?.contiguous()?,
+                self.saved_tensors[3].permute(&[0, 2, 1, 3])?.contiguous()?,
+            ),
+        };
         let q = self.saved_tensors[0].contiguous()?;
         let k = self.saved_tensors[1].contiguous()?;
         let v = self.saved_tensors[2].contiguous()?;
-        let output = self.saved_tensors[3].contiguous()?;
         let lse = self.saved_tensors[4].contiguous()?;
-        let cfg = &self.config;
 
         let (dq, dk, dv) = client
             .flash_attention_bwd(
@@ -118,6 +134,10 @@ where
 /// Wraps `FlashAttentionOps::flash_attention_fwd` into a `Var`-level operation.
 /// When any of Q, K, V requires grad, the backward pass is registered.
 ///
+/// `out_layout` picks the output layout (see [`AttnOutLayout`]). A consumer
+/// that reshapes to `[B, S_q, H * D]` next passes `TokenMajor` and skips the
+/// `permute + contiguous` copy; the backward node permutes back itself.
+///
 /// Returns `Var<R>` (output only — LSE is internal to the backward).
 #[allow(clippy::too_many_arguments)]
 pub fn var_flash_attention<R>(
@@ -129,6 +149,7 @@ pub fn var_flash_attention<R>(
     head_dim: usize,
     causal: bool,
     window_size: usize,
+    out_layout: AttnOutLayout,
 ) -> Result<Var<R>>
 where
     R: Runtime,
@@ -146,6 +167,7 @@ where
         causal,
         window_size,
         None,
+        out_layout,
     )?;
 
     if q.requires_grad() || k.requires_grad() || v.requires_grad() {
@@ -169,6 +191,7 @@ where
                 head_dim,
                 causal,
                 window_size,
+                out_layout,
             },
         };
         Ok(Var::from_op(output, Arc::new(grad_fn)))

@@ -8,6 +8,7 @@
 //! Kernel: mqa_gqa.cu
 
 use crate::error::{Error, Result};
+use crate::ops::traits::AttnOutLayout;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
@@ -22,6 +23,9 @@ use crate::ops::cuda::kernels::{self, MQA_GQA_MODULE};
 use numr::runtime::cuda::CudaDevice;
 
 /// MQA/GQA forward pass — dedicated kernel, used at every capable ratio.
+///
+/// `out_layout` reaches the kernel as a store-address flag; the arithmetic
+/// is the same either way.
 #[allow(clippy::too_many_arguments)]
 pub fn mqa_gqa_fwd(
     client: &CudaClient,
@@ -32,6 +36,7 @@ pub fn mqa_gqa_fwd(
     num_kv_heads: usize,
     head_dim: usize,
     causal: bool,
+    out_layout: AttnOutLayout,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let q_shape = q.shape();
     let k_shape = k.shape();
@@ -86,8 +91,11 @@ pub fn mqa_gqa_fwd(
     let variant = if tile.small { "_sm" } else { "" };
     let kernel_name = format!("mqa_gqa_fwd_{}_{}{}", head_dim, dtype_suffix, variant);
 
-    let output =
-        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q, head_dim], dtype, device)?;
+    let output = Tensor::<CudaRuntime>::empty(
+        &out_layout.shape(batch_size, num_heads, seq_len_q, head_dim),
+        dtype,
+        device,
+    )?;
     let lse =
         Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, seq_len_q], DType::F32, device)?;
 
@@ -123,6 +131,7 @@ pub fn mqa_gqa_fwd(
     // Only the FP8 entries read them, and this launcher rejects FP8 above, so
     // 1.0f is the identity here.
     let one = 1.0f32;
+    let token_major_i32 = i32::from(out_layout == AttnOutLayout::TokenMajor);
 
     unsafe {
         let mut builder = client.stream().launch_builder(&func);
@@ -142,6 +151,7 @@ pub fn mqa_gqa_fwd(
         for _ in 0..4 {
             builder.arg(&one);
         }
+        builder.arg(&token_major_i32);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("MQA/GQA fwd kernel launch failed: {:?}", e),
         })?;

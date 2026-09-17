@@ -65,6 +65,7 @@ fn main() {
 
 #[cfg(feature = "cuda")]
 fn main() {
+    use boostr::ops::AttnOutLayout;
     use boostr::ops::FlashAttentionOps;
     use boostr::ops::cuda::attention::mqa_gqa::mqa_gqa_fwd;
     use boostr::{CudaDevice, CudaRuntime, DType, Runtime, RuntimeClient};
@@ -125,7 +126,16 @@ fn main() {
                 for _ in 0..ITERS {
                     let out = client
                         .flash_attention_fwd(
-                            &q, &k, &v, heads, kv_heads, head_dim, causal, window, None,
+                            &q,
+                            &k,
+                            &v,
+                            heads,
+                            kv_heads,
+                            head_dim,
+                            causal,
+                            window,
+                            None,
+                            AttnOutLayout::HeadMajor,
                         )
                         .unwrap();
                     std::hint::black_box(&out);
@@ -165,7 +175,16 @@ fn main() {
             for _ in 0..ITERS {
                 let out = client
                     .flash_attention_fwd(
-                        &q, &k, &v, heads, kv_heads, head_dim, causal, window, None,
+                        &q,
+                        &k,
+                        &v,
+                        heads,
+                        kv_heads,
+                        head_dim,
+                        causal,
+                        window,
+                        None,
+                        AttnOutLayout::HeadMajor,
                     )
                     .unwrap();
                 std::hint::black_box(&out);
@@ -221,6 +240,7 @@ fn main() {
                             num_kv_heads,
                             head_dim,
                             causal,
+                            AttnOutLayout::HeadMajor,
                         )
                         .unwrap();
                         std::hint::black_box(&out);
@@ -261,6 +281,7 @@ fn main() {
                     num_kv_heads,
                     head_dim,
                     causal,
+                    AttnOutLayout::HeadMajor,
                 )
                 .unwrap();
                 std::hint::black_box(&out);
@@ -287,6 +308,7 @@ fn main() {
                         false,
                         0,
                         None,
+                        AttnOutLayout::HeadMajor,
                     )
                     .unwrap();
                 std::hint::black_box(&out);

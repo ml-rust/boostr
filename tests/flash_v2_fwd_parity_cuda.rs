@@ -54,6 +54,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
+use boostr::ops::AttnOutLayout;
 use boostr::ops::cuda::attention::flash::flash_block_config::flash_fwd_tile_for_test;
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
 use numr::dtype::DType;
@@ -391,6 +392,7 @@ fn assert_fwd_parity(
             causal,
             0,
             None,
+            AttnOutLayout::HeadMajor,
         )
         .expect("CPU reference flash_attention_fwd failed");
     let out_cpu_vec = out_cpu.to_vec::<f32>();
@@ -415,6 +417,7 @@ fn assert_fwd_parity(
             causal,
             0,
             None,
+            AttnOutLayout::HeadMajor,
         )
         .unwrap_or_else(|e| panic!("{label}: CUDA flash_attention_fwd failed: {e}"));
 

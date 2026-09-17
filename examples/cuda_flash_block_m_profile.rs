@@ -81,6 +81,7 @@ fn main() {
 
 #[cfg(feature = "cuda")]
 fn main() {
+    use boostr::ops::AttnOutLayout;
     use boostr::ops::FlashAttentionOps;
     use boostr::{CudaDevice, CudaRuntime, DType, Runtime, RuntimeClient};
     use numr::ops::RandomOps;
@@ -132,6 +133,7 @@ fn main() {
                             causal,
                             0,
                             None,
+                            AttnOutLayout::HeadMajor,
                         )
                         .unwrap();
                     std::hint::black_box(&out);
@@ -171,6 +173,7 @@ fn main() {
                             causal,
                             0,
                             None,
+                            AttnOutLayout::HeadMajor,
                         )
                         .unwrap();
                     std::hint::black_box(&out);

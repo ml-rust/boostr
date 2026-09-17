@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::ops::cuda::kernels::{self, FLASH_V2_FP8_MODULE, FLASH_V2_MODULE};
+use crate::ops::traits::AttnOutLayout;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
@@ -17,6 +18,10 @@ use numr::runtime::cuda::CudaDevice;
 /// kernel. `p.block_m` / `p.block_n` / `p.use_sm_kernel` describe the
 /// one-thread-per-row tiling and are not used here; the launch geometry comes
 /// from [`flash_fwd_tile`].
+///
+/// `out_layout` reaches the kernel as a store-address flag; the arithmetic
+/// is the same either way.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn flash_attention_fwd_impl(
     client: &CudaClient,
     q: &Tensor<CudaRuntime>,
@@ -25,6 +30,7 @@ pub(super) fn flash_attention_fwd_impl(
     p: &AttentionParams,
     causal: bool,
     window_size: usize,
+    out_layout: AttnOutLayout,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let dtype = q.dtype();
 
@@ -74,7 +80,7 @@ pub(super) fn flash_attention_fwd_impl(
     );
 
     let output = Tensor::<CudaRuntime>::empty(
-        &[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim],
+        &out_layout.shape(p.batch_size, p.num_heads, p.seq_len_q, p.head_dim),
         dtype,
         device,
     )?;
@@ -113,6 +119,7 @@ pub(super) fn flash_attention_fwd_impl(
     let sk_i32 = p.seq_len_k as i32;
     let causal_i32 = if causal { 1i32 } else { 0i32 };
     let ws_i32 = window_size as i32;
+    let token_major_i32 = i32::from(out_layout == AttnOutLayout::TokenMajor);
 
     unsafe {
         let mut builder = client.stream().launch_builder(&func);
@@ -129,6 +136,7 @@ pub(super) fn flash_attention_fwd_impl(
         builder.arg(&scale);
         builder.arg(&causal_i32);
         builder.arg(&ws_i32);
+        builder.arg(&token_major_i32);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("Flash Attention fwd kernel launch failed: {:?}", e),
         })?;

@@ -49,6 +49,9 @@
 //
 // LSE is [B, H, S_q], one value m + log(l) per row, in F32. `flash_v2_bwd.cu`
 // consumes it unchanged.
+//
+// O is [B, H, S_q, D] by default; `out_token_major != 0` stores the same
+// values at [B, S_q, H, D] addresses instead.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -81,7 +84,8 @@ __device__ void flash_attention_fwd_impl(
     const int seq_len_k,
     const float scale,
     const int causal,
-    const int window_size    // Sliding window: 0 or -1 = full attention, >0 = local window
+    const int window_size,   // Sliding window: 0 or -1 = full attention, >0 = local window
+    const int out_token_major
 ) {
     static_assert(HEAD_DIM % (4 * G) == 0, "each lane owns whole float4 chunks");
     static_assert(BLOCK_N % G == 0, "keys split evenly across the group");
@@ -117,8 +121,17 @@ __device__ void flash_attention_fwd_impl(
     const T* Q_base = Q + q_offset;
     const T* K_base = K + kv_offset;
     const T* V_base = V + kv_offset;
-    T* O_base = O + q_offset;
     float* L_base = L + lse_offset;
+
+    // Output rows: head-major is Q's layout, one head's rows contiguous.
+    // Token-major stores row `r` at `o[b, r, h, :]`, so consecutive rows of a
+    // head are `num_heads * HEAD_DIM` apart. Only the store address differs.
+    T* O_base = O + q_offset;
+    size_t o_row_stride = HEAD_DIM;
+    if (out_token_major) {
+        O_base = O + ((size_t)batch_idx * seq_len_q * num_heads + head_idx) * HEAD_DIM;
+        o_row_stride = (size_t)num_heads * HEAD_DIM;
+    }
 
     const int q_start = blockIdx.y * ROWS;
     const int row0 = q_start + warp * ROWS_PER_WARP + rg * R;
@@ -241,11 +254,12 @@ __device__ void flash_attention_fwd_impl(
         const int row = row0 + t;
         if (row >= seq_len_q) continue;
         const float inv_l = (l[t] == 0.0f) ? 1.0f : 1.0f / l[t];
+        T* O_row = O_base + (size_t)row * o_row_stride;
         #pragma unroll
         for (int c = 0; c < CL; ++c) {
             const float4 ov = make_float4(o[t][c][0] * inv_l, o[t][c][1] * inv_l,
                                           o[t][c][2] * inv_l, o[t][c][3] * inv_l);
-            store4_dtype(O_base, row * HEAD_DIM + 4 * (g + G * c), ov);
+            store4_dtype(O_row, 4 * (g + G * c), ov);
         }
         if (g == 0) {
             L_base[row] = m[t] + __logf(l[t]);
@@ -284,11 +298,12 @@ __device__ void flash_attention_fwd_impl(
         T* O, float* L,                                                        \
         const int batch_size, const int num_heads, const int num_kv_heads,     \
         const int seq_len_q, const int seq_len_k,                              \
-        const float scale, const int causal, const int window_size             \
+        const float scale, const int causal, const int window_size,            \
+        const int out_token_major                                              \
     ) {                                                                        \
         flash_attention_fwd_impl<T, HEAD_DIM, G, R, WARPS, BLOCK_N>(           \
             Q, K, V, O, L, batch_size, num_heads, num_kv_heads,                \
-            seq_len_q, seq_len_k, scale, causal, window_size                   \
+            seq_len_q, seq_len_k, scale, causal, window_size, out_token_major  \
         );                                                                     \
     }
 

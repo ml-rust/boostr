@@ -57,6 +57,7 @@ use numr::runtime::RuntimeClient;
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
 use numr::tensor::Tensor;
 
+use boostr::ops::AttnOutLayout;
 use boostr::ops::cuda::attention::mqa_gqa::{mqa_gqa_bwd, mqa_gqa_fwd, should_use_mqa_gqa};
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
 
@@ -270,6 +271,7 @@ fn run_shape(client: &CudaClient, device: &CudaDevice, shape: &Shape) {
             shape.num_kv_heads,
             shape.head_dim,
             true,
+            AttnOutLayout::HeadMajor,
         )
         .expect("mqa_gqa_fwd failed during benchmark");
     });
@@ -285,6 +287,7 @@ fn run_shape(client: &CudaClient, device: &CudaDevice, shape: &Shape) {
                 true,
                 0,
                 None,
+                AttnOutLayout::HeadMajor,
             )
             .expect("flash_attention_fwd failed during benchmark");
     });
@@ -302,6 +305,7 @@ fn run_shape(client: &CudaClient, device: &CudaDevice, shape: &Shape) {
         shape.num_kv_heads,
         shape.head_dim,
         true,
+        AttnOutLayout::HeadMajor,
     )
     .expect("mqa_gqa_fwd (feeding backward) failed during benchmark");
     let mqa_bwd = time_calls_ms(client, || {
@@ -332,6 +336,7 @@ fn run_shape(client: &CudaClient, device: &CudaDevice, shape: &Shape) {
             true,
             0,
             None,
+            AttnOutLayout::HeadMajor,
         )
         .expect("flash_attention_fwd (feeding backward) failed during benchmark");
     let flash_bwd = time_calls_ms(client, || {

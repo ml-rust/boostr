@@ -86,6 +86,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
+use boostr::ops::AttnOutLayout;
 use boostr::ops::cuda::attention::flash::flash_v3;
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
 use numr::dtype::DType;
@@ -399,7 +400,16 @@ fn assert_flash_v3_bwd_parity_shaped(
 
     let (out_cpu, lse_cpu) = cpu_client
         .flash_attention_fwd(
-            &q_cpu, &k_cpu, &v_cpu, NUM_HEADS, NUM_HEADS, head_dim, causal, 0, None,
+            &q_cpu,
+            &k_cpu,
+            &v_cpu,
+            NUM_HEADS,
+            NUM_HEADS,
+            head_dim,
+            causal,
+            0,
+            None,
+            AttnOutLayout::HeadMajor,
         )
         .unwrap();
     let (dq_cpu, dk_cpu, dv_cpu) = cpu_client

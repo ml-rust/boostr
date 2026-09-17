@@ -1,7 +1,10 @@
 //! Flash Attention decode path: lightweight vec kernels for S_q=1.
+//!
+//! The graph-capturable variant lives in `flash_decode_graph.rs`.
 
 use crate::error::{Error, Result};
 use crate::ops::cuda::kernels;
+use crate::ops::traits::AttnOutLayout;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
@@ -16,7 +19,7 @@ use super::super::decode_split::{
 use super::flash_utils::AttentionParams;
 
 /// Kernel name stem for a supported decode `(head_dim, dtype)`.
-fn decode_kernel_stem(head_dim: usize, dtype: DType) -> Result<String> {
+pub(super) fn decode_kernel_stem(head_dim: usize, dtype: DType) -> Result<String> {
     if !decode_supports_head_dim(head_dim) {
         return Err(Error::InvalidArgument {
             arg: "head_dim",
@@ -44,7 +47,11 @@ fn decode_kernel_stem(head_dim: usize, dtype: DType) -> Result<String> {
 /// and the split count is sized to that span, not the full sequence. The
 /// causal flag has no effect at `seq_len_q == 1` and is not passed.
 ///
+/// `out_layout`: at one query row `[B, H, 1, D]` and `[B, 1, H, D]` are the
+/// same bytes, so the kernel stores head-major and the result is reshaped.
+///
 /// Non-graph path: seq_len_k passed as plain i32 kernel arg (zero overhead).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn decode_attention_fwd(
     client: &CudaClient,
     q: &Tensor<CudaRuntime>,
@@ -53,6 +60,37 @@ pub(super) fn decode_attention_fwd(
     p: &AttentionParams,
     kv_seq_stride: usize,
     window_size: usize,
+    out_layout: AttnOutLayout,
+) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
+    if p.seq_len_q != 1 {
+        return Err(Error::InvalidArgument {
+            arg: "seq_len_q",
+            reason: format!("decode attention serves one query row, got {}", p.seq_len_q),
+        });
+    }
+    let (output, lse) = launch_decode(client, q, k, v, p, kv_seq_stride, window_size, 1)?;
+    let output = output.reshape(&out_layout.shape(p.batch_size, p.num_heads, 1, p.head_dim))?;
+    Ok((output, lse))
+}
+
+/// Launches the decode kernels for `p.num_heads` rows per batch and returns
+/// the output as `[B, num_heads, 1, D]` plus the LSE `[B, num_heads, 1]`.
+///
+/// `out_seq_fold` is the kernel's output-row rule: `1` stores row `bh` at
+/// `bh * D`; `S_q > 1` means `num_heads` is a fold `H * S_q` and the kernel
+/// stores row `h * S_q + s` at token-major `o[b, s, h, :]`. The returned
+/// tensor's shape describes the bytes only in the `1` case; the folded
+/// caller reshapes.
+#[allow(clippy::too_many_arguments)]
+fn launch_decode(
+    client: &CudaClient,
+    q: &Tensor<CudaRuntime>,
+    k: &Tensor<CudaRuntime>,
+    v: &Tensor<CudaRuntime>,
+    p: &AttentionParams,
+    kv_seq_stride: usize,
+    window_size: usize,
+    out_seq_fold: usize,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let device = q.device();
     let device_index = device.id();
@@ -89,6 +127,7 @@ pub(super) fn decode_attention_fwd(
     let sk_i32 = p.seq_len_k as i32;
     let stride_i32 = kv_seq_stride as i32;
     let window_i32 = window_size as i32;
+    let fold_i32 = out_seq_fold as i32;
     let scale = (p.head_dim as f32).sqrt().recip();
 
     if splits > 1 {
@@ -139,6 +178,8 @@ pub(super) fn decode_attention_fwd(
             builder.arg(&o_ptr);
             builder.arg(&lse_ptr);
             builder.arg(&splits_i32);
+            builder.arg(&nh_i32);
+            builder.arg(&fold_i32);
             builder
                 .launch(combine_cfg)
                 .map_err(|e| Error::KernelError {
@@ -169,6 +210,7 @@ pub(super) fn decode_attention_fwd(
         builder.arg(&stride_i32);
         builder.arg(&scale);
         builder.arg(&window_i32);
+        builder.arg(&fold_i32);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("decode_attention kernel launch failed: {:?}", e),
         })?;
@@ -194,6 +236,9 @@ pub(super) fn decode_attention_fwd(
 ///
 /// Non-causal only: decode has no query position to mask against. The
 /// caller also excludes a sliding window.
+///
+/// Token-major output: the kernel unfolds row `h * S_q + s` back to
+/// `o[b, s, h, :]` itself (`out_seq_fold = S_q`), so no copy follows.
 pub(super) fn decode_attention_fwd_folded(
     client: &CudaClient,
     q: &Tensor<CudaRuntime>,
@@ -201,6 +246,7 @@ pub(super) fn decode_attention_fwd_folded(
     v: &Tensor<CudaRuntime>,
     p: &AttentionParams,
     kv_seq_stride: usize,
+    out_layout: AttnOutLayout,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let folded_heads = p.num_heads * p.seq_len_q;
     let q_folded = q.reshape(&[p.batch_size, folded_heads, 1, p.head_dim])?;
@@ -215,173 +261,23 @@ pub(super) fn decode_attention_fwd_folded(
         block_n: p.block_n,
         use_sm_kernel: p.use_sm_kernel,
     };
-    let (output, lse) = decode_attention_fwd(client, &q_folded, k, v, &folded, kv_seq_stride, 0)?;
-    let output = output.reshape(&[p.batch_size, p.num_heads, p.seq_len_q, p.head_dim])?;
-    let lse = lse.reshape(&[p.batch_size, p.num_heads, p.seq_len_q])?;
-    Ok((output, lse))
-}
-
-/// Graph-mode decode attention: uses `_graph` kernel variants with device-pointer
-/// seq_len_k and separate kv_seq_stride for full-capacity raw KV buffers.
-///
-/// `window_size` is the sliding-window span; `0` disables it, matching every
-/// other call path. Decode is single-token, so the query sits at absolute
-/// position `seq_len_k - 1` and the kernel keeps keys `j >= seq_len_k -
-/// window_size`. It is a static config value, not a per-step one, so passing it
-/// as a plain scalar is safe under CUDA graph capture — unlike `seq_len_k`,
-/// which changes every replay and therefore stays a device pointer.
-#[cfg(feature = "cuda")]
-#[allow(clippy::too_many_arguments)]
-pub fn decode_attention_graph_fwd(
-    client: &CudaClient,
-    q: &Tensor<CudaRuntime>,
-    k_cache: &Tensor<CudaRuntime>,
-    v_cache: &Tensor<CudaRuntime>,
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    seq_len_k_ptr: u64,
-    kv_capacity: usize,
-    window_size: usize,
-) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
-    let device = q.device();
-    let device_index = device.id();
-    let batch_size = q.shape()[0];
-
-    // Unlike the non-graph path, nothing upstream of graph mode filters head_dim,
-    // so an unsupported one is an error, not an unreachable case.
-    let stem = decode_kernel_stem(head_dim, q.dtype())?;
-
-    let module = kernels::get_or_load_module(
-        client.context(),
-        device_index,
-        kernels::DECODE_ATTENTION_MODULE,
-    )?;
-
-    let output =
-        Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, 1, head_dim], q.dtype(), device)?;
-    let lse = Tensor::<CudaRuntime>::empty(&[batch_size, num_heads, 1], DType::F32, device)?;
-
-    let q_ptr = q.ptr();
-    let k_ptr = k_cache.ptr();
-    let v_ptr = v_cache.ptr();
-    let o_ptr = output.ptr();
-    let lse_ptr = lse.ptr();
-    let nh_i32 = num_heads as i32;
-    let nkv_i32 = num_kv_heads as i32;
-    let stride_i32 = kv_capacity as i32;
-    let window_i32 = window_size as i32;
-    let scale = (head_dim as f32).sqrt().recip();
-
-    let base_blocks = batch_size * num_heads;
-
-    // The grid is baked in at capture time, so the split count cannot come from
-    // the device-resident seq_len_k (only known per-replay, not at capture) — it
-    // comes from kv_capacity, the static upper bound. At replay, slices whose
-    // `[begin, end)` falls past the real seq_len_k are empty; the split kernel's
-    // `begin < end` guard and the combine kernel's `l <= 0` guard both skip them
-    // for free. Consequence: at early decode steps, with the cache nearly empty,
-    // most slices do no work — correct, but the grid stays sized for a full cache
-    // every step, not just the steps that need it. A window caps the span the
-    // kernel walks at any step, so it caps the grid too.
-    let splits = decode_split_count(
-        device_index,
-        base_blocks,
-        decode_kv_span(kv_capacity, window_size),
-        head_dim,
-    );
-
-    if splits > 1 {
-        // Unnormalized per-slice accumulators plus their (m, l) statistics.
-        // Allocated inside the capture closure: numr's allocator is frozen during
-        // capture, so this becomes a graph alloc/free node pair replayed every
-        // launch, exactly like the non-graph split path's scratch.
-        let partial_o =
-            Tensor::<CudaRuntime>::empty(&[base_blocks, splits, head_dim], DType::F32, device)?;
-        let partial_ml =
-            Tensor::<CudaRuntime>::empty(&[base_blocks, splits, 2], DType::F32, device)?;
-        let po_ptr = partial_o.ptr();
-        let pml_ptr = partial_ml.ptr();
-        let splits_i32 = splits as i32;
-
-        let split_func = kernels::get_kernel_function(&module, &format!("{stem}_split_graph"))?;
-        let split_cfg = LaunchConfig {
-            grid_dim: (base_blocks as u32, splits as u32, 1),
-            block_dim: (head_dim as u32, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        unsafe {
-            let mut builder = client.stream().launch_builder(&split_func);
-            builder.arg(&q_ptr);
-            builder.arg(&k_ptr);
-            builder.arg(&v_ptr);
-            builder.arg(&po_ptr);
-            builder.arg(&pml_ptr);
-            builder.arg(&nh_i32);
-            builder.arg(&nkv_i32);
-            builder.arg(&seq_len_k_ptr);
-            builder.arg(&stride_i32);
-            builder.arg(&scale);
-            builder.arg(&window_i32);
-            builder.arg(&splits_i32);
-            builder.launch(split_cfg).map_err(|e| Error::KernelError {
-                reason: format!("decode_attention_graph split kernel launch failed: {:?}", e),
-            })?;
-        }
-
-        // Static num_splits, so the combine kernel is capture-safe unchanged —
-        // the same entry point the non-graph split path already uses.
-        let combine_func = kernels::get_kernel_function(&module, &format!("{stem}_combine"))?;
-        let combine_cfg = LaunchConfig {
-            grid_dim: (base_blocks as u32, 1, 1),
-            block_dim: (head_dim as u32, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        unsafe {
-            let mut builder = client.stream().launch_builder(&combine_func);
-            builder.arg(&po_ptr);
-            builder.arg(&pml_ptr);
-            builder.arg(&o_ptr);
-            builder.arg(&lse_ptr);
-            builder.arg(&splits_i32);
-            builder
-                .launch(combine_cfg)
-                .map_err(|e| Error::KernelError {
-                    reason: format!(
-                        "decode_attention_graph combine kernel launch failed: {:?}",
-                        e
-                    ),
-                })?;
-        }
-
-        return Ok((output, lse));
-    }
-
-    let func = kernels::get_kernel_function(&module, &format!("{stem}_graph"))?;
-    let cfg = LaunchConfig {
-        grid_dim: (base_blocks as u32, 1, 1),
-        block_dim: (head_dim as u32, 1, 1),
-        shared_mem_bytes: 0,
+    let out_seq_fold = match out_layout {
+        AttnOutLayout::HeadMajor => 1,
+        AttnOutLayout::TokenMajor => p.seq_len_q,
     };
-
-    unsafe {
-        let mut builder = client.stream().launch_builder(&func);
-        builder.arg(&q_ptr);
-        builder.arg(&k_ptr);
-        builder.arg(&v_ptr);
-        builder.arg(&o_ptr);
-        builder.arg(&lse_ptr);
-        builder.arg(&nh_i32);
-        builder.arg(&nkv_i32);
-        builder.arg(&seq_len_k_ptr);
-        builder.arg(&stride_i32);
-        builder.arg(&scale);
-        builder.arg(&window_i32);
-        builder.launch(cfg).map_err(|e| Error::KernelError {
-            reason: format!("decode_attention_graph kernel launch failed: {:?}", e),
-        })?;
-    }
-
+    let (output, lse) = launch_decode(
+        client,
+        &q_folded,
+        k,
+        v,
+        &folded,
+        kv_seq_stride,
+        0,
+        out_seq_fold,
+    )?;
+    let output =
+        output.reshape(&out_layout.shape(p.batch_size, p.num_heads, p.seq_len_q, p.head_dim))?;
+    let lse = lse.reshape(&[p.batch_size, p.num_heads, p.seq_len_q])?;
     Ok((output, lse))
 }
 
@@ -429,7 +325,18 @@ mod tests {
                     let v = filled(&[2, 2, seq_k, head_dim], 0.3, device);
 
                     let (out, lse) = client
-                        .flash_attention_fwd(&q, &k, &v, 8, 2, head_dim, causal, window, None)
+                        .flash_attention_fwd(
+                            &q,
+                            &k,
+                            &v,
+                            8,
+                            2,
+                            head_dim,
+                            causal,
+                            window,
+                            None,
+                            AttnOutLayout::HeadMajor,
+                        )
                         .expect("flash_attention_fwd");
                     let cfg = StandardAttnConfig {
                         num_heads: 8,
@@ -473,7 +380,18 @@ mod tests {
             let v = filled(&[2, kv_heads, seq_k, head_dim], 0.3, device);
 
             let (out, lse) = client
-                .flash_attention_fwd(&q, &k, &v, heads, kv_heads, head_dim, false, 0, None)
+                .flash_attention_fwd(
+                    &q,
+                    &k,
+                    &v,
+                    heads,
+                    kv_heads,
+                    head_dim,
+                    false,
+                    0,
+                    None,
+                    AttnOutLayout::HeadMajor,
+                )
                 .expect("flash_attention_fwd");
             let cfg = StandardAttnConfig {
                 num_heads: heads,

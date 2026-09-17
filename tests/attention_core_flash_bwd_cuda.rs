@@ -5,14 +5,16 @@
 //! Run with:
 //!   cd boostr && cargo test --features cuda,f16 --test attention_core_flash_bwd_cuda
 //!
-//! `attention_epilogue` ends the forward with
-//! `permute([0,2,1,3]) -> contiguous -> reshape`. Its backward chain runs in
-//! reverse: `ReshapeBackward` (which contiguizes), `ContiguousBackward`
-//! (identity), then `PermuteBackward` — and `PermuteBackward` returns a
-//! strided view. That view is `dout` for the flash backward node.
+//! The flash path now asks the kernel for a token-major output
+//! (`AttnOutLayout::TokenMajor`) and ends with a reshape alone, so `dout`
+//! reaches `FlashAttentionBackward` as a dense `[B, S, H, D]` tensor that the
+//! node itself permutes back to `[B, H, S, D]` before the kernel. A
+//! head-major caller still ends with `permute([0,2,1,3]) -> contiguous ->
+//! reshape`, whose backward chain hands the node a strided view from
+//! `PermuteBackward`; the node's `contiguous()` covers that case.
 //!
-//! Without the normalization in `FlashAttentionBackward::backward`, every case
-//! here fails with
+//! Without either normalization in `FlashAttentionBackward::backward`, every
+//! case here fails with
 //! `flash_attention_bwd failed: invalid argument 'contiguity': backward
 //! requires contiguous dout, output, lse`, raised by
 //! `ops/cuda/attention/flash_bwd.rs`. `output` and `lse` are freshly allocated

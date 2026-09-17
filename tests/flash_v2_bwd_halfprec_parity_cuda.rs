@@ -71,6 +71,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
+use boostr::ops::AttnOutLayout;
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
@@ -362,6 +363,7 @@ fn assert_flash_v2_bwd_halfprec_parity(
             true,
             window_size,
             None,
+            AttnOutLayout::HeadMajor,
         )
         .expect("CPU reference flash_attention_fwd failed");
     let (dq_cpu, dk_cpu, dv_cpu) = cpu_client
@@ -405,6 +407,7 @@ fn assert_flash_v2_bwd_halfprec_parity(
             true,
             window_size,
             None,
+            AttnOutLayout::HeadMajor,
         )
         .unwrap_or_else(|e| panic!("{label}: CUDA flash_attention_fwd failed: {e}"));
 

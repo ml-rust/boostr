@@ -63,9 +63,9 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_pq2_0_f32(
 // One block covers NTOK consecutive token columns and decodes each weight
 // chunk once for all of them, instead of re-reading the whole weight matrix
 // per token as the F32 kernel above does. The body lives in
-// `legacy_ntok.cuh` and the decode in `prism_ntok.cuh`; see those headers
-// for the lane map, the chunk-per-block rule, the ragged-tail rule and the
-// alignment constraint.
+// `legacy_ntok_body.cuh` and the decode in `prism_ntok.cuh`; see those
+// headers for the lane map, the chunk-per-block rule, the ragged-tail rules
+// and the alignment constraint.
 //
 // Three tile widths exist and `dispatch_gemv` picks the narrowest one that
 // covers M. The unsuffixed kernel is the NTOK = 1 instance of the same
@@ -74,6 +74,18 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_pq2_0_f32(
 // end. That is the geometry of `quant_gemv_q8_0_q8_1_mwr`, and it serves
 // m = 1 with int8 dot products and one `d * d8` FMA per 32-element chunk
 // where the F32 kernel above spends one FMA per element.
+//
+// `_r4` and `_r8` are the same NTOK = 1 body with ROWS = 4 and 8 output
+// columns per block. One block per column re-reads the whole Q8_1
+// activation row N times per launch, ~30 MB at K = N = 5120, against a
+// 7 MB weight; a block that owns ROWS columns divides that by ROWS. The
+// dispatcher picks one via `PRISM_GEMV_ROWS` in
+// `quant_matmul/format_dispatch/gemv_rows.rs`
+// and launches grid x as `ceil(N / ROWS)`. Same warp count and
+// `__launch_bounds__` as the unsuffixed kernel: ROWS accumulators and
+// decoded words per lane raise register use, and the min-blocks-per-SM
+// bound of 1 leaves the compiler free to spend them. A row's bits are the
+// same at every ROWS (see the body header).
 // ============================================================================
 
 extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(1) * WARP_SIZE, 1) void quant_gemv_pq2_0_q8_1_mwr(
@@ -83,6 +95,24 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(1) * WARP_SIZE, 1) void 
     unsigned int M, unsigned int K, unsigned int N
 ) {
     quant_gemv_legacy_q8_1_mwr_ntok<PrismPQ20, 1>(q8_act, weight, output, M, K, N);
+}
+
+extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(1) * WARP_SIZE, 1) void quant_gemv_pq2_0_q8_1_mwr_r4(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    quant_gemv_legacy_q8_1_mwr_ntok<PrismPQ20, 1, 4>(q8_act, weight, output, M, K, N);
+}
+
+extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(1) * WARP_SIZE, 1) void quant_gemv_pq2_0_q8_1_mwr_r8(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    quant_gemv_legacy_q8_1_mwr_ntok<PrismPQ20, 1, 8>(q8_act, weight, output, M, K, N);
 }
 
 extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(2) * WARP_SIZE, 1) void quant_gemv_pq2_0_q8_1_mwr_n2(

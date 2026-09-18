@@ -10,6 +10,9 @@ use crate::quant::cuda::kernels::{
     GEMV_Q3_K_MODULE, GEMV_Q4_1_MODULE, GEMV_Q5_0_MODULE, GEMV_Q5_1_MODULE, GEMV_Q5_K_MODULE,
     GEMV_Q8_1_MODULE, GEMV_Q8_K_MODULE, GEMV_TQ1_0_MODULE, GEMV_TQ2_0_MODULE, QUANT_GEMV_MODULE,
 };
+use crate::quant::cuda::quant_matmul::format_dispatch::gemv_rows::{
+    PRISM_GEMV_ROWS, prism_mwr_kernel,
+};
 use crate::quant::cuda::quant_matmul::helpers::quantize_activation_q8_1;
 use crate::quant::{QuantFormat, QuantTensor};
 use cudarc::driver::PushKernelArg;
@@ -163,20 +166,24 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
         // so a weight block is loaded and decoded once and dot-producted
         // against all of them. The per-token kernel re-reads the whole weight
         // matrix for every token, which is what makes its cost scale with M.
-        // Pick the narrowest tile that covers M in one block — a wider tile
-        // would idle its spare columns, a narrower one would need two passes.
-        // Which widths exist is per format: Q8_0, Q6_K, the four legacy
-        // 32-element formats, the two IQ4 codebook formats, the six
-        // grid-indexed IQ formats and the three PrismML-fork formats have
-        // both `_n2` and `_n4`; Q4_K and Q5_K have only `_n2`; Q3_K's and
+        // Pick the narrowest tile that covers M in one grid launch — a wider
+        // tile would idle its spare columns; a narrower one is still one
+        // launch, covered by more blocks along the grid's M axis (the
+        // `div_ceil` below). Which widths exist is per format: Q8_0, Q6_K,
+        // the four legacy 32-element formats, the two IQ4 codebook formats,
+        // the six grid-indexed IQ formats and the three PrismML-fork formats
+        // have both `_n2` and `_n4`; Q4_K and Q5_K have only `_n2`; Q3_K's and
         // Q2_K's batched read never wins, so they have neither and always use
-        // the per-token kernel.
+        // the per-token kernel. The prism three's widest instantiated tile is
+        // `_n4`; there is no `_n8`, so past m = 4 more grid blocks — not a
+        // narrower tile — is the whole path.
         //
         // The legacy four, the two IQ4 formats and the six grid-indexed IQ
         // formats have no per-token dp4a kernel at all, so the m = 1 row
         // below never applies to them: the branch guard above already routed
         // m = 1 to the F32 path. The prism three have one, the NTOK = 1
-        // instance of their batched body.
+        // instance of their batched body, at `PRISM_GEMV_ROWS` output columns
+        // per block.
         let tokens_per_block: u32 = match (format, m) {
             (QuantFormat::Q3K | QuantFormat::Q2K, _) => 1,
             (_, 0..=1) => 1,
@@ -191,9 +198,21 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
             (QuantFormat::Q6K, 1) => "quant_gemv_q6_k_q8_1_mwr",
             (QuantFormat::Q8_0, 1) => "quant_gemv_q8_0_q8_1_mwr",
             (QuantFormat::Q5K, 1) => "quant_gemv_q5_k_q8_1_mwr",
-            (QuantFormat::PQ2_0, 1) => "quant_gemv_pq2_0_q8_1_mwr",
-            (QuantFormat::Q2_0, 1) => "quant_gemv_q2_0_q8_1_mwr",
-            (QuantFormat::Q1_0, 1) => "quant_gemv_q1_0_q8_1_mwr",
+            (QuantFormat::PQ2_0, 1) => prism_mwr_kernel(
+                "quant_gemv_pq2_0_q8_1_mwr",
+                "quant_gemv_pq2_0_q8_1_mwr_r4",
+                "quant_gemv_pq2_0_q8_1_mwr_r8",
+            ),
+            (QuantFormat::Q2_0, 1) => prism_mwr_kernel(
+                "quant_gemv_q2_0_q8_1_mwr",
+                "quant_gemv_q2_0_q8_1_mwr_r4",
+                "quant_gemv_q2_0_q8_1_mwr_r8",
+            ),
+            (QuantFormat::Q1_0, 1) => prism_mwr_kernel(
+                "quant_gemv_q1_0_q8_1_mwr",
+                "quant_gemv_q1_0_q8_1_mwr_r4",
+                "quant_gemv_q1_0_q8_1_mwr_r8",
+            ),
             (QuantFormat::Q4K, _) => "quant_gemv_q4_k_q8_1_mwr_n2",
             (QuantFormat::Q5K, _) => "quant_gemv_q5_k_q8_1_mwr_n2",
             (QuantFormat::Q6K, 2) => "quant_gemv_q6_k_q8_1_mwr_n2",
@@ -262,9 +281,14 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
         // extent is `ceil(N / 2)`. Mirrors `mwr_rows_ntok` in gemv/common.cuh;
         // the two must agree or the grid and the kernel disagree on which
         // output columns a block owns. Q8_0 at `tokens_per_block == 1` is the
-        // single-token kernel, which keeps one column per block.
+        // single-token kernel, which keeps one column per block. The prism
+        // three at `tokens_per_block == 1` cover `PRISM_GEMV_ROWS`, the ROWS
+        // the kernel picked above was compiled with.
         let rows_per_block: u32 = match format {
             QuantFormat::Q8_0 if tokens_per_block >= 2 => 2,
+            QuantFormat::PQ2_0 | QuantFormat::Q2_0 | QuantFormat::Q1_0 if tokens_per_block == 1 => {
+                PRISM_GEMV_ROWS
+            }
             _ => 1,
         };
         let cfg = LaunchConfig {

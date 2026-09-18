@@ -2,7 +2,7 @@
 //! on identical inputs, so a profiler attributes instruction counts to each
 //! kernel without an A/B rebuild. Covers Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K,
 //! Q5_K, Q6_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS,
-//! IQ3_S and IQ1_S via `--format`.
+//! IQ3_S, IQ1_S, PQ2_0, Q2_0 and Q1_0 via `--format`.
 //!
 //! Q4_0, Q4_1, Q5_0, Q5_1, Q5_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS, IQ2_XS,
 //! IQ2_S, IQ3_XXS, IQ3_S and IQ1_S have no token-major kernel of either kind —
@@ -11,17 +11,29 @@
 //! the token-major comparison rather than resolving a symbol that is not
 //! compiled.
 //!
+//! PQ2_0, Q2_0 and Q1_0 have neither a token-major kernel of either kind NOR
+//! a feature-major one — `feat_major_format` in
+//! `src/quant/cuda/quant_matmul/format_dispatch/gemm.rs` does not name them —
+//! so for these three the tool times their dequantize-then-tiled-f32 GEMM
+//! kernel (`quant_matmul_{fmt}_f32`, module `gemm_{fmt}`) as the "GEMM" line
+//! instead, unconditionally like the other formats' MMQ line.
+//!
 //! `--gemv` additionally launches and times the format's GEMV kernel(s) — the
 //! path `dispatch_gemv` takes for `m <= gemv_max_m` — at the same shape, so
 //! the GEMV/MMQ crossover for a format can be read off one run: Q4_K, Q6_K,
 //! Q8_0, Q5_K, Q3_K and Q2_K print both a `..._q8_1_mwr` line and a `..._f32`
-//! line, every other format only the `..._f32` line.
+//! line, PQ2_0, Q2_0 and Q1_0 print `..._q8_1_mwr`, `..._mwr_r4`, `..._mwr_r8`
+//! and `..._f32` at `--m 1` (their single-token kernels; `dispatch_gemv`
+//! itself only ever launches one of the three, chosen by `PRISM_GEMV_ROWS`,
+//! but this tool times all three so the ROWS choice can be measured), every
+//! other format and every format at `--m` above 1 only the `..._f32` line.
 //!
 //! For every dp4a format that has one, `--gemv` also runs the token-batched
-//! MWR kernel checked against the same f64 reference: Q8_0 and Q6_K have
-//! `..._mwr_n2` and `_n4` (Q8_0 also an unwired `_n8`), Q4_K/Q5_K, the four
-//! legacy 32-element formats Q4_0/Q5_0/Q4_1/Q5_1, the two IQ4 codebook
-//! formats IQ4_NL/IQ4_XS and the six grid-indexed IQ formats
+//! MWR kernel checked against the same f64 reference: Q8_0, Q6_K and the
+//! three PrismML-fork formats PQ2_0/Q2_0/Q1_0 have `..._mwr_n2` and `_n4`
+//! (Q8_0 also an unwired `_n8`), Q4_K/Q5_K, the four legacy 32-element
+//! formats Q4_0/Q5_0/Q4_1/Q5_1, the two IQ4 codebook formats IQ4_NL/IQ4_XS
+//! and the six grid-indexed IQ formats
 //! IQ2_XXS/IQ2_XS/IQ2_S/IQ3_XXS/IQ3_S/IQ1_S have only `..._mwr_n2`, and
 //! Q3_K/Q2_K have neither — their batched read never beat the MMQ tile. The tile is the narrowest one that covers `--m` in a single
 //! block, which is the rule `dispatch_gemv` applies — a wider tile idles its
@@ -66,7 +78,19 @@
 //! cargo run --release --features cuda --example mmq_kernel_compare -- \
 //!     --format iq1_s --n 4096 --k 14336 --m 512
 //! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format pq2_0 --n 4096 --k 14336 --m 512
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format q2_0 --n 4096 --k 14336 --m 512
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format q1_0 --n 4096 --k 14336 --m 512
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
 //!     --format q8_0 --n 4096 --k 14336 --m 8 --gemv
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format pq2_0 --n 4096 --k 14336 --m 1 --gemv
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format q2_0 --n 4096 --k 14336 --m 4 --gemv
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format q1_0 --n 4096 --k 14336 --m 4 --gemv
 //! ```
 
 #[cfg(not(feature = "cuda"))]
@@ -76,10 +100,11 @@ fn main() {
 
 #[cfg(feature = "cuda")]
 use boostr::quant::cuda::kernels::{
-    self, GEMV_IQ1_S_MODULE, GEMV_IQ2_S_MODULE, GEMV_IQ2_XS_MODULE, GEMV_IQ2_XXS_MODULE,
-    GEMV_IQ3_S_MODULE, GEMV_IQ3_XXS_MODULE, GEMV_IQ4_NL_MODULE, GEMV_IQ4_XS_MODULE,
-    GEMV_Q2_K_MODULE, GEMV_Q3_K_MODULE, GEMV_Q4_1_MODULE, GEMV_Q5_0_MODULE, GEMV_Q5_1_MODULE,
-    GEMV_Q5_K_MODULE, QUANT_GEMV_MODULE, QUANT_MMQ_MMA_MODULE,
+    self, GEMM_PQ2_0_MODULE, GEMM_Q1_0_MODULE, GEMM_Q2_0_MODULE, GEMV_IQ1_S_MODULE,
+    GEMV_IQ2_S_MODULE, GEMV_IQ2_XS_MODULE, GEMV_IQ2_XXS_MODULE, GEMV_IQ3_S_MODULE,
+    GEMV_IQ3_XXS_MODULE, GEMV_IQ4_NL_MODULE, GEMV_IQ4_XS_MODULE, GEMV_PQ2_0_MODULE,
+    GEMV_Q1_0_MODULE, GEMV_Q2_0_MODULE, GEMV_Q2_K_MODULE, GEMV_Q3_K_MODULE, GEMV_Q4_1_MODULE,
+    GEMV_Q5_0_MODULE, GEMV_Q5_1_MODULE, GEMV_Q5_K_MODULE, QUANT_GEMV_MODULE, QUANT_MMQ_MMA_MODULE,
 };
 // The ONE set of grids and the ONE sign table, shared with the CPU
 // dequantizers the IQ1, IQ2 and IQ3 references mirror.
@@ -1099,6 +1124,102 @@ fn iq1_s_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usiz
     (sum, magnitude)
 }
 
+/// Shared sweep for [`pq2_0_reference`], [`q2_0_reference`] and
+/// [`q1_0_reference`]: same block layout (`d`@0 f16, packed codes@2) and the
+/// same per-32-element sub-block pairing with the Q8_1 activation record,
+/// differing only in block width, block byte count and how a code resolves
+/// to a signed multiplier — which `decode` supplies. `decode(qs, e)` reads
+/// element `e`'s code out of the block's quant bytes and returns its
+/// multiplier (`code - 1` for the 2-bit formats, `+-1` for Q1_0's sign bits).
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn prism_dot_reference(
+    weight: &[u8],
+    act: &[u8],
+    token: usize,
+    feat: usize,
+    k: usize,
+    block: usize,
+    bytes: usize,
+    decode: impl Fn(&[u8], usize) -> f64,
+) -> (f64, f64) {
+    let bpr = k / block;
+    let abpr = k / 32;
+    let mut sum = 0.0f64;
+    let mut magnitude = 0.0f64;
+    for blk in 0..bpr {
+        let wb = (feat * bpr + blk) * bytes;
+        let wd = f64::from(half::f16::from_le_bytes([weight[wb], weight[wb + 1]]).to_f32());
+        let qs = &weight[wb + 2..wb + bytes];
+        for e in 0..block {
+            let code = decode(qs, e);
+            let elem = blk * block + e;
+            let ab = (token * abpr + elem / 32) * 36;
+            let ad = f64::from(half::f16::from_le_bytes([act[ab], act[ab + 1]]).to_f32());
+            let aq = f64::from(act[ab + 4 + elem % 32] as i8);
+            let contribution = wd * code * ad * aq;
+            sum += contribution;
+            magnitude += contribution.abs();
+        }
+    }
+    (sum, magnitude)
+}
+
+/// Exact reference for one output element, in f64, for a PQ2_0 weight against
+/// a Q8_1 activation, plus the accumulated magnitude of the sum.
+///
+/// Dequant math and byte offsets are ground-truthed against
+/// `pq2_0_dequant_block` in `src/quant/cuda/kernels/prism_dequant.cuh` (the
+/// CPU mirror is `src/quant/cpu/kernels/dequant_prism.rs`): per 128-element
+/// block of 34 bytes, `d`@0 (f16) then 32 bytes of 2-bit codes@2, low bits
+/// first. Element `e` reads bits `2 * (e % 4)` of `qs[e / 4]`; the 2-bit
+/// field is unsigned 0..3 and the value is `d * (code - 1)`, so {-1, 0, 1, 2}
+/// scaled by `d`. Every 32-element quarter of the block has its own
+/// activation record, so the sum is taken sub-block by sub-block like
+/// [`iq4_xs_reference`], not as one 128-wide dot product.
+#[cfg(feature = "cuda")]
+fn pq2_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
+    prism_dot_reference(weight, act, token, feat, k, 128, 34, |qs, e| {
+        i64::from((qs[e / 4] >> (2 * (e % 4))) & 0x03) as f64 - 1.0
+    })
+}
+
+/// Exact reference for one output element, in f64, for a Q2_0 weight against
+/// a Q8_1 activation, plus the accumulated magnitude of the sum.
+///
+/// Dequant math and byte offsets are ground-truthed against
+/// `q2_0_dequant_block` in `src/quant/cuda/kernels/prism_dequant.cuh`: per
+/// 64-element block of 18 bytes, `d`@0 (f16) then 16 bytes of 2-bit
+/// codes@2, low bits first, same `code - 1` mapping as PQ2_0. The block is
+/// two Q8_1 sub-blocks wide, so the sum is taken sub-block by sub-block like
+/// [`pq2_0_reference`].
+#[cfg(feature = "cuda")]
+fn q2_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
+    prism_dot_reference(weight, act, token, feat, k, 64, 18, |qs, e| {
+        i64::from((qs[e / 4] >> (2 * (e % 4))) & 0x03) as f64 - 1.0
+    })
+}
+
+/// Exact reference for one output element, in f64, for a Q1_0 weight against
+/// a Q8_1 activation, plus the accumulated magnitude of the sum.
+///
+/// Dequant math and byte offsets are ground-truthed against
+/// `q1_0_dequant_block` and `gguf_sign_bit` in
+/// `src/quant/cuda/kernels/prism_dequant.cuh`: per 128-element block of 18
+/// bytes, `d`@0 (f16) then 16 bytes of packed sign bits@2, low bit first.
+/// Element `e` reads bit `e % 8` of `qs[e / 8]`: a set bit is `+d`, a clear
+/// bit `-d`, with no separate magnitude field.
+#[cfg(feature = "cuda")]
+fn q1_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
+    prism_dot_reference(weight, act, token, feat, k, 128, 18, |qs, e| {
+        if (qs[e / 8] >> (e % 8)) & 1 != 0 {
+            1.0
+        } else {
+            -1.0
+        }
+    })
+}
+
 /// The quantized operands and the shape one reference sweep runs over. Bundled
 /// because every reference reads the same five values.
 #[cfg(feature = "cuda")]
@@ -1116,7 +1237,8 @@ struct RefCase<'a> {
 /// [`q5_k_reference`], [`q6_k_reference`], [`q3_k_reference`],
 /// [`q2_k_reference`], [`iq4_nl_reference`], [`iq4_xs_reference`],
 /// [`iq2_xxs_reference`], [`iq2_xs_reference`], [`iq2_s_reference`],
-/// [`iq3_xxs_reference`], [`iq3_s_reference`] or [`iq1_s_reference`]),
+/// [`iq3_xxs_reference`], [`iq3_s_reference`], [`iq1_s_reference`],
+/// [`pq2_0_reference`], [`q2_0_reference`] or [`q1_0_reference`]),
 /// panicking with the position and both values on the first breach.
 #[cfg(feature = "cuda")]
 fn check_against_reference(label: &str, format: MmqFormat, got: &[f32], case: &RefCase) {
@@ -1140,6 +1262,9 @@ fn check_against_reference(label: &str, format: MmqFormat, got: &[f32], case: &R
         MmqFormat::IQ3XXS => iq3_xxs_reference,
         MmqFormat::IQ3S => iq3_s_reference,
         MmqFormat::IQ1S => iq1_s_reference,
+        MmqFormat::PQ20 => pq2_0_reference,
+        MmqFormat::Q20 => q2_0_reference,
+        MmqFormat::Q10 => q1_0_reference,
     };
     let RefCase {
         weight,
@@ -1227,6 +1352,9 @@ enum MmqFormat {
     IQ3XXS,
     IQ3S,
     IQ1S,
+    PQ20,
+    Q20,
+    Q10,
 }
 
 #[cfg(feature = "cuda")]
@@ -1251,10 +1379,13 @@ impl MmqFormat {
             "iq3_xxs" => MmqFormat::IQ3XXS,
             "iq3_s" => MmqFormat::IQ3S,
             "iq1_s" => MmqFormat::IQ1S,
+            "pq2_0" => MmqFormat::PQ20,
+            "q2_0" => MmqFormat::Q20,
+            "q1_0" => MmqFormat::Q10,
             other => panic!(
                 "unknown --format {other}, expected one of: \
                  q8_0, q4_0, q4_1, q5_0, q5_1, q4_k, q5_k, q6_k, q3_k, q2_k, iq4_nl, iq4_xs, \
-                 iq2_xxs, iq2_xs, iq2_s, iq3_xxs, iq3_s, iq1_s"
+                 iq2_xxs, iq2_xs, iq2_s, iq3_xxs, iq3_s, iq1_s, pq2_0, q2_0, q1_0"
             ),
         }
     }
@@ -1279,12 +1410,17 @@ impl MmqFormat {
             MmqFormat::IQ3XXS => "iq3_xxs",
             MmqFormat::IQ3S => "iq3_s",
             MmqFormat::IQ1S => "iq1_s",
+            MmqFormat::PQ20 => "pq2_0",
+            MmqFormat::Q20 => "q2_0",
+            MmqFormat::Q10 => "q1_0",
         }
     }
 
     /// Elements per weight block: 32 for the legacy formats Q8_0, Q4_0, Q4_1,
     /// Q5_0, Q5_1 and IQ4_NL, 256 for the K-quant super-blocks, IQ4_XS and the
-    /// IQ1, IQ2 and IQ3 formats.
+    /// IQ1, IQ2 and IQ3 formats, 64 for Q2_0, 128 for PQ2_0 and Q1_0 — the
+    /// three PrismML-fork formats' `QuantFormat::block_size()`, not the
+    /// K-quant 256.
     /// `k` must be a whole number of these, which
     /// mirrors the `k.is_multiple_of(...)` guards in `dispatch_matmul` and the
     /// `k_multiple` field of each `FeatMajorFormat`.
@@ -1308,14 +1444,19 @@ impl MmqFormat {
             | MmqFormat::IQ3XXS
             | MmqFormat::IQ3S
             | MmqFormat::IQ1S => 256,
+            MmqFormat::Q20 => 64,
+            MmqFormat::PQ20 | MmqFormat::Q10 => 128,
         }
     }
 
     /// Token-major dp4a MMQ kernel, or `None` for a format that has none.
     /// Q4_0, Q4_1, Q5_0, Q5_1, Q5_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS,
-    /// IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S have no `quant_mmq_*_q8_1`
-    /// twin: their only pre-feature-major GEMM path is the dequantize-then-f32
-    /// kernel, which this tool does not time.
+    /// IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S, PQ2_0, Q2_0 and Q1_0 have no
+    /// `quant_mmq_*_q8_1` twin: their only pre-feature-major GEMM path is the
+    /// dequantize-then-f32 kernel, which this tool does not time here (the
+    /// three PrismML-fork formats have no feature-major path at all, so
+    /// their dequantize-then-f32 kernel IS the GEMM comparison; see
+    /// [`MmqFormat::gemm_f32_kernel`]).
     fn dp4a_kernel(&self) -> Option<&'static str> {
         match self {
             MmqFormat::Q8_0 => Some("quant_mmq_q8_0_q8_1"),
@@ -1335,14 +1476,19 @@ impl MmqFormat {
             | MmqFormat::IQ2S
             | MmqFormat::IQ3XXS
             | MmqFormat::IQ3S
-            | MmqFormat::IQ1S => None,
+            | MmqFormat::IQ1S
+            | MmqFormat::PQ20
+            | MmqFormat::Q20
+            | MmqFormat::Q10 => None,
         }
     }
 
     /// Token-major tensor-core MMQ kernel, or `None` for a format that has
     /// none. Q4_0, Q4_1, Q5_0, Q5_1, Q5_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS,
     /// IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S have no `_mma` twin;
-    /// all fifteen went straight to the feature-major family.
+    /// all fifteen went straight to the feature-major family. PQ2_0, Q2_0
+    /// and Q1_0 have no `_mma` twin either, and no feature-major kernel to
+    /// fall back to — see [`MmqFormat::gemm_f32_kernel`].
     fn mma_kernel(&self) -> Option<&'static str> {
         match self {
             MmqFormat::Q8_0 => Some("quant_mmq_q8_0_q8_1_mma"),
@@ -1362,7 +1508,27 @@ impl MmqFormat {
             | MmqFormat::IQ2S
             | MmqFormat::IQ3XXS
             | MmqFormat::IQ3S
-            | MmqFormat::IQ1S => None,
+            | MmqFormat::IQ1S
+            | MmqFormat::PQ20
+            | MmqFormat::Q20
+            | MmqFormat::Q10 => None,
+        }
+    }
+
+    /// The dequantize-then-tiled-f32 GEMM kernel PQ2_0, Q2_0 and Q1_0 fall
+    /// back to, or `None` for every other format (which instead takes the
+    /// token-major or feature-major path above). Mirrors the fallback arm of
+    /// `dispatch_matmul` in
+    /// `src/quant/cuda/quant_matmul/format_dispatch/gemm.rs`: these three
+    /// never reach `feat_major_format` (it returns `None` for them), so this
+    /// generic tiled kernel is their only GEMM path and is what this tool
+    /// prints as the "GEMM" line for them.
+    fn gemm_f32_kernel(&self) -> Option<(&'static str, &'static str)> {
+        match self {
+            MmqFormat::PQ20 => Some(("quant_matmul_pq2_0_f32", GEMM_PQ2_0_MODULE)),
+            MmqFormat::Q20 => Some(("quant_matmul_q2_0_f32", GEMM_Q2_0_MODULE)),
+            MmqFormat::Q10 => Some(("quant_matmul_q1_0_f32", GEMM_Q1_0_MODULE)),
+            _ => None,
         }
     }
 
@@ -1390,13 +1556,21 @@ impl MmqFormat {
             MmqFormat::IQ3XXS => ("quant_gemv_iq3_xxs_f32", GEMV_IQ3_XXS_MODULE),
             MmqFormat::IQ3S => ("quant_gemv_iq3_s_f32", GEMV_IQ3_S_MODULE),
             MmqFormat::IQ1S => ("quant_gemv_iq1_s_f32", GEMV_IQ1_S_MODULE),
+            MmqFormat::PQ20 => ("quant_gemv_pq2_0_f32", GEMV_PQ2_0_MODULE),
+            MmqFormat::Q20 => ("quant_gemv_q2_0_f32", GEMV_Q2_0_MODULE),
+            MmqFormat::Q10 => ("quant_gemv_q1_0_f32", GEMV_Q1_0_MODULE),
         }
     }
 
     /// GEMV kernel taken by `m <= gemv_max_m`, dp4a MWR branch, or `None` for a
     /// format that only has the F32 kernel. Mirrors the first `match` in
     /// `dispatch_gemv`: only Q4_K, Q6_K, Q8_0, Q5_K, Q3_K and Q2_K have a
-    /// Q8_1-activation MWR kernel.
+    /// Q8_1-activation MWR kernel that runs at every `m`. PQ2_0, Q2_0 and
+    /// Q1_0 also have one, but only at `m == 1` and with two extra ROWS
+    /// variants alongside it — see
+    /// [`MmqFormat::prism_single_token_gemv_kernels`] instead, which this
+    /// method leaves at `None` for those three so the generic single-kernel
+    /// path above does not launch just one of the three arbitrarily.
     fn mwr_gemv_kernel(&self) -> Option<(&'static str, &'static str)> {
         match self {
             MmqFormat::Q4K => Some(("quant_gemv_q4_k_q8_1_mwr", QUANT_GEMV_MODULE)),
@@ -1416,7 +1590,55 @@ impl MmqFormat {
             | MmqFormat::IQ2S
             | MmqFormat::IQ3XXS
             | MmqFormat::IQ3S
-            | MmqFormat::IQ1S => None,
+            | MmqFormat::IQ1S
+            | MmqFormat::PQ20
+            | MmqFormat::Q20
+            | MmqFormat::Q10 => None,
+        }
+    }
+
+    /// The three single-token dp4a GEMV kernels PQ2_0, Q2_0 and Q1_0 compile
+    /// — `_mwr` (ROWS = 1), `_mwr_r4` (ROWS = 4) and `_mwr_r8` (ROWS = 8) —
+    /// or `None` for every other format. `dispatch_gemv` launches exactly one
+    /// of the three at `m <= 1`, chosen at compile time by `PRISM_GEMV_ROWS`
+    /// in `src/quant/cuda/quant_matmul/format_dispatch/gemv_rows.rs`; this
+    /// tool times and checks all three so the ROWS choice itself can be
+    /// measured. Each entry is `(kernel, ROWS)`; all three share one module
+    /// (`gemv_{fmt}`), fetched separately via
+    /// [`MmqFormat::prism_gemv_module`].
+    fn prism_single_token_gemv_kernels(&self) -> Option<[(&'static str, u32); 3]> {
+        match self {
+            MmqFormat::PQ20 => Some([
+                ("quant_gemv_pq2_0_q8_1_mwr", 1),
+                ("quant_gemv_pq2_0_q8_1_mwr_r4", 4),
+                ("quant_gemv_pq2_0_q8_1_mwr_r8", 8),
+            ]),
+            MmqFormat::Q20 => Some([
+                ("quant_gemv_q2_0_q8_1_mwr", 1),
+                ("quant_gemv_q2_0_q8_1_mwr_r4", 4),
+                ("quant_gemv_q2_0_q8_1_mwr_r8", 8),
+            ]),
+            MmqFormat::Q10 => Some([
+                ("quant_gemv_q1_0_q8_1_mwr", 1),
+                ("quant_gemv_q1_0_q8_1_mwr_r4", 4),
+                ("quant_gemv_q1_0_q8_1_mwr_r8", 8),
+            ]),
+            _ => None,
+        }
+    }
+
+    /// Module holding every GEMV kernel (F32, single-token dp4a and
+    /// token-batched dp4a alike) for PQ2_0, Q2_0 or Q1_0, or `None` for a
+    /// format that is not one of the three. A separate accessor from
+    /// [`MmqFormat::f32_gemv_kernel`] because
+    /// [`MmqFormat::prism_single_token_gemv_kernels`] needs the module without
+    /// a kernel name attached.
+    fn prism_gemv_module(&self) -> Option<&'static str> {
+        match self {
+            MmqFormat::PQ20 => Some(GEMV_PQ2_0_MODULE),
+            MmqFormat::Q20 => Some(GEMV_Q2_0_MODULE),
+            MmqFormat::Q10 => Some(GEMV_Q1_0_MODULE),
+            _ => None,
         }
     }
 
@@ -1434,8 +1656,9 @@ impl MmqFormat {
     /// Which tiles are compiled is per format, matching `dispatch_gemv`:
     /// Q8_0 and Q6_K have `_n2` and `_n4` (Q8_0 also an unwired `_n8`), and so
     /// do the four legacy 32-element formats Q4_0, Q5_0, Q4_1 and Q5_1, the two
-    /// IQ4 codebook formats IQ4_NL and IQ4_XS, and the six grid-indexed IQ
-    /// formats IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S; Q4_K and Q5_K
+    /// IQ4 codebook formats IQ4_NL and IQ4_XS, the six grid-indexed IQ
+    /// formats IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S, and the three
+    /// PrismML-fork formats PQ2_0, Q2_0 and Q1_0; Q4_K and Q5_K
     /// have only `_n2`, so `m` outside 2 returns `None` for them; Q3_K and Q2_K
     /// have neither — their batched read never beat the MMQ tile — so they
     /// always return `None`.
@@ -1523,6 +1746,21 @@ impl MmqFormat {
                 3..=4 => Some(("quant_gemv_q8_0_q8_1_mwr_n4", QUANT_GEMV_MODULE, 4)),
                 _ => Some(("quant_gemv_q8_0_q8_1_mwr_n8", QUANT_GEMV_MODULE, 8)),
             },
+            MmqFormat::PQ20 => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_pq2_0_q8_1_mwr_n2", GEMV_PQ2_0_MODULE, 2)),
+                _ => Some(("quant_gemv_pq2_0_q8_1_mwr_n4", GEMV_PQ2_0_MODULE, 4)),
+            },
+            MmqFormat::Q20 => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_q2_0_q8_1_mwr_n2", GEMV_Q2_0_MODULE, 2)),
+                _ => Some(("quant_gemv_q2_0_q8_1_mwr_n4", GEMV_Q2_0_MODULE, 4)),
+            },
+            MmqFormat::Q10 => match m {
+                0..=1 => None,
+                2 => Some(("quant_gemv_q1_0_q8_1_mwr_n2", GEMV_Q1_0_MODULE, 2)),
+                _ => Some(("quant_gemv_q1_0_q8_1_mwr_n4", GEMV_Q1_0_MODULE, 4)),
+            },
         }
     }
 
@@ -1553,13 +1791,19 @@ impl MmqFormat {
             | MmqFormat::IQ2S
             | MmqFormat::IQ3XXS
             | MmqFormat::IQ3S
-            | MmqFormat::IQ1S => 1,
+            | MmqFormat::IQ1S
+            | MmqFormat::PQ20
+            | MmqFormat::Q20
+            | MmqFormat::Q10 => 1,
         }
     }
 
     /// Format name inside the feature-major kernel symbols. `None` marks a
-    /// format the family does not compile; every format this tool knows is
-    /// compiled today. Mirrors the `FeatMajorFormat`
+    /// format the family does not compile: PQ2_0, Q2_0 and Q1_0 have no
+    /// entry in `feat_major_format`
+    /// (`src/quant/cuda/quant_matmul/format_dispatch/gemm.rs`), so they never
+    /// reach this family; every other format this tool knows is compiled
+    /// today. Mirrors the `FeatMajorFormat`
     /// constants in `src/quant/cuda/quant_matmul/mmq_feat_major.rs` and the
     /// `MMQ_FM_KERNEL` instantiations in `quant_mmq_mma.cu`.
     fn feat_major_infix(&self) -> Option<&'static str> {
@@ -1582,6 +1826,7 @@ impl MmqFormat {
             MmqFormat::IQ3XXS => Some("iq3_xxs"),
             MmqFormat::IQ3S => Some("iq3_s"),
             MmqFormat::IQ1S => Some("iq1_s"),
+            MmqFormat::PQ20 | MmqFormat::Q20 | MmqFormat::Q10 => None,
         }
     }
 
@@ -1619,6 +1864,12 @@ impl MmqFormat {
     /// `dl * (grid + delta)`, which splits per 32-element group into
     /// `dl * dot(a, g) + dl * delta * sum(a)` — a scale/min pair, not a bare
     /// scale — and its delta term is additive like Q4_1's minimum.
+    ///
+    /// PQ2_0, Q2_0 and Q1_0 have no feature-major kernel at all (see
+    /// [`MmqFormat::feat_major_infix`]), so this value is never read for
+    /// them; `main` still calls this unconditionally to size the activation
+    /// repack, so the three return an arbitrary compiled width (76, Q8_0's)
+    /// rather than making this method partial.
     fn feat_major_x_stride(&self) -> u32 {
         match self {
             MmqFormat::Q8_0
@@ -1628,7 +1879,10 @@ impl MmqFormat {
             | MmqFormat::IQ4XS
             | MmqFormat::IQ2XXS
             | MmqFormat::IQ3XXS
-            | MmqFormat::IQ3S => 76,
+            | MmqFormat::IQ3S
+            | MmqFormat::PQ20
+            | MmqFormat::Q20
+            | MmqFormat::Q10 => 76,
             MmqFormat::Q4K
             | MmqFormat::Q5K
             | MmqFormat::Q6K
@@ -1674,6 +1928,9 @@ impl MmqFormat {
             MmqFormat::IQ3XXS => build_iq3_xxs_weight(n, k),
             MmqFormat::IQ3S => build_iq3_s_weight(n, k),
             MmqFormat::IQ1S => build_iq1_s_weight(n, k),
+            MmqFormat::PQ20 => build_pq2_0_weight(n, k),
+            MmqFormat::Q20 => build_q2_0_weight(n, k),
+            MmqFormat::Q10 => build_q1_0_weight(n, k),
         }
     }
 }
@@ -2103,6 +2360,56 @@ fn build_iq1_s_weight(n: usize, k: usize) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Shared builder for the three PrismML-fork weight buffers below: half
+/// scale at byte 0, `qs_len` packed-code bytes at byte 2. Every bit pattern
+/// in `qs` is a valid code for all three (2-bit codes or sign bits alike), so
+/// they are filled with the tool's ordinary deterministic byte stream rather
+/// than a masked one. `block_elems` is elements per block (for `bpr`);
+/// `block_bytes` is `2 + qs_len`.
+#[cfg(feature = "cuda")]
+fn build_prism_weight(
+    n: usize,
+    k: usize,
+    block_elems: usize,
+    block_bytes: usize,
+    qs_len: usize,
+) -> Vec<u8> {
+    let bpr = k / block_elems;
+    let mut out = vec![0u8; n * bpr * block_bytes];
+    for row in 0..n {
+        for b in 0..bpr {
+            let block = row * bpr + b;
+            let base = block * block_bytes;
+            out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
+            for pos in 0..qs_len {
+                out[base + 2 + pos] = quant_byte(block, pos) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Builds a PQ2_0 weight buffer: `n * (k / 128)` blocks of 34 bytes, 32 bytes
+/// of packed 2-bit codes at byte 2.
+#[cfg(feature = "cuda")]
+fn build_pq2_0_weight(n: usize, k: usize) -> Vec<u8> {
+    build_prism_weight(n, k, 128, 34, 32)
+}
+
+/// Builds a Q2_0 weight buffer: `n * (k / 64)` blocks of 18 bytes, 16 bytes
+/// of packed 2-bit codes at byte 2.
+#[cfg(feature = "cuda")]
+fn build_q2_0_weight(n: usize, k: usize) -> Vec<u8> {
+    build_prism_weight(n, k, 64, 18, 16)
+}
+
+/// Builds a Q1_0 weight buffer: `n * (k / 128)` blocks of 18 bytes, 16 bytes
+/// of packed sign bits at byte 2.
+#[cfg(feature = "cuda")]
+fn build_q1_0_weight(n: usize, k: usize) -> Vec<u8> {
+    build_prism_weight(n, k, 128, 18, 16)
 }
 
 /// Builds a Q8_1 activation buffer: `m * (k / 32)` blocks of 36 bytes, half
@@ -2687,6 +2994,54 @@ fn main() {
         (dp4a_us, mma_us)
     });
 
+    // GEMM fallback for PQ2_0, Q2_0 and Q1_0: neither has a token-major or a
+    // feature-major kernel (both `token_major` and `feat_major` are `None`
+    // for them), so their dequantize-then-tiled-f32 kernel
+    // (`quant_matmul_{fmt}_f32`) is the only GEMM path they have, and this
+    // runs it unconditionally — like `token_major_us` and `feat_major_us`
+    // above — rather than under `--gemv`, so the "GEMM" line these three
+    // print is comparable to every other format's.
+    let prism_gemm = format.gemm_f32_kernel().map(|(kernel_name, module_name)| {
+        let f32_act_bytes = build_f32_activation(&act_bytes, m, k);
+        let act_f32 = Tensor::<CudaRuntime>::from_slice(&f32_act_bytes, &[m, k], &device).unwrap();
+        let act_f32_ptr = act_f32.ptr();
+        let module = kernels::get_or_load_module(client.context(), device_index, module_name)
+            .expect("load gemm module");
+        let func = kernels::get_kernel_function(&module, kernel_name)
+            .unwrap_or_else(|_| panic!("resolve {kernel_name}"));
+        let out = Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device).unwrap();
+        let out_ptr = out.ptr();
+        // Mirrors `dispatch_matmul`'s generic fallback tile — the one every
+        // format outside the Q8_0/Q4_K/Q6_K trio takes: grid
+        // (n.div_ceil(16), m.div_ceil(16)), block (16, 16, 1).
+        let cfg_gemm = LaunchConfig {
+            grid_dim: (n_u32.div_ceil(16), m_u32.div_ceil(16), 1),
+            block_dim: (16, 16, 1),
+            shared_mem_bytes: 0,
+        };
+        let launch = || unsafe {
+            let mut builder = client.stream().launch_builder(&func);
+            builder.arg(&act_f32_ptr);
+            builder.arg(&weight_ptr);
+            builder.arg(&out_ptr);
+            builder.arg(&m_u32);
+            builder.arg(&k_u32);
+            builder.arg(&n_u32);
+            builder.launch(cfg_gemm).expect("launch gemm kernel");
+        };
+        for _ in 0..WARMUP {
+            launch();
+        }
+        client.synchronize();
+        let started = std::time::Instant::now();
+        for _ in 0..ITERS {
+            launch();
+        }
+        client.synchronize();
+        let us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+        (kernel_name, us, out)
+    });
+
     // GEMV: the path `dispatch_gemv` takes for `m <= gemv_max_m`. The
     // F32-activation kernel is compiled for every format; the dp4a MWR kernel
     // only for Q4_K, Q6_K, Q8_0, Q5_K, Q3_K and Q2_K. The MWR kernel reads the
@@ -2778,6 +3133,68 @@ fn main() {
                 (mwr_kernel, mwr_us, out_mwr)
             });
 
+        // PQ2_0, Q2_0 and Q1_0's three single-token dp4a kernels — `_mwr`
+        // (ROWS = 1), `_mwr_r4` (ROWS = 4) and `_mwr_r8` (ROWS = 8) — are the
+        // NTOK = 1 instance of the same token-batched body the block below
+        // times at NTOK = 2 and 4. `dispatch_gemv` launches exactly one of
+        // the three, chosen at compile time by `PRISM_GEMV_ROWS`, and only at
+        // `m <= 1`, so this times and checks all three, and only at `m == 1`
+        // (they are single-token kernels; a wider `m` is what the
+        // `batched_mwr_gemv_kernel` `_n2`/`_n4` tiles below exist for).
+        // Geometry mirrors `dispatch_gemv`'s dp4a branch for these formats:
+        // grid (n.div_ceil(ROWS), m.div_ceil(1), 1), block
+        // (mwr_nwarps_ntok(1) * 32, 1, 1) = (128, 1, 1).
+        let prism_single = if m == 1 {
+            format
+                .prism_single_token_gemv_kernels()
+                .map(|kernels_rows| {
+                    let module_name = format
+                        .prism_gemv_module()
+                        .expect("prism_single_token_gemv_kernels implies prism_gemv_module");
+                    let module =
+                        kernels::get_or_load_module(client.context(), device_index, module_name)
+                            .expect("load prism gemv module");
+                    kernels_rows.map(|(kernel_name, rows)| {
+                        let func = kernels::get_kernel_function(&module, kernel_name)
+                            .unwrap_or_else(|_| panic!("resolve {kernel_name}"));
+                        let out =
+                            Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device)
+                                .unwrap();
+                        let out_ptr = out.ptr();
+                        let cfg_single = LaunchConfig {
+                            grid_dim: (n_u32.div_ceil(rows), m_u32, 1),
+                            block_dim: (128, 1, 1),
+                            shared_mem_bytes: 0,
+                        };
+                        let launch = || unsafe {
+                            let mut builder = client.stream().launch_builder(&func);
+                            builder.arg(&act_ptr);
+                            builder.arg(&weight_ptr);
+                            builder.arg(&out_ptr);
+                            builder.arg(&m_u32);
+                            builder.arg(&k_u32);
+                            builder.arg(&n_u32);
+                            builder
+                                .launch(cfg_single)
+                                .expect("launch prism single-token gemv kernel");
+                        };
+                        for _ in 0..WARMUP {
+                            launch();
+                        }
+                        client.synchronize();
+                        let started = std::time::Instant::now();
+                        for _ in 0..ITERS {
+                            launch();
+                        }
+                        client.synchronize();
+                        let us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+                        (kernel_name, us, out)
+                    })
+                })
+        } else {
+            None
+        };
+
         // Token-batched MWR: same activation buffer and same block shape, but
         // one block covers NTOK token columns, so the grid's token axis is
         // `m.div_ceil(NTOK)` and each weight block is decoded once for all
@@ -2838,7 +3255,7 @@ fn main() {
                     (bat_kernel, bat_us, out_bat, ntok)
                 });
 
-        (f32_kernel, f32_us, out_f32, mwr, batched)
+        (f32_kernel, f32_us, out_f32, mwr, batched, prism_single)
     });
 
     // The feature-major kernels are the llama.cpp-geometry port: feature-major
@@ -3024,16 +3441,26 @@ fn main() {
                 std::process::exit(1);
             }
         }
-    } else {
+    } else if feat_major.is_some() {
         println!(
             "{}: no token-major dp4a or mma kernel is compiled, so only the \
              feature-major kernels run",
+            format.label()
+        );
+    } else {
+        println!(
+            "{}: no token-major, feature-major or MMQ kernel is compiled; \
+             only the dequantize-then-f32 GEMM runs",
             format.label()
         );
     }
     if let Some((_, out, _, name)) = feat_major.as_ref() {
         let feat_major_host = out.to_vec::<f32>();
         check_against_reference(name, format, &feat_major_host, &case);
+    }
+    if let Some((kernel_name, _, out)) = prism_gemm.as_ref() {
+        let host = out.to_vec::<f32>();
+        check_against_reference(kernel_name, format, &host, &case);
     }
     if let (Some((_, _, out, _, _, _, name)), Some((_, fm_out, _, fm_name))) =
         (sk.as_ref(), feat_major.as_ref())
@@ -3055,7 +3482,7 @@ fn main() {
             m * n
         );
     }
-    if let Some((f32_kernel, _, out_f32, mwr, batched)) = gemv_case.as_ref() {
+    if let Some((f32_kernel, _, out_f32, mwr, batched, prism_single)) = gemv_case.as_ref() {
         let f32_host = out_f32.to_vec::<f32>();
         check_against_reference(f32_kernel, format, &f32_host, &case);
         if let Some((mwr_kernel, _, out_mwr)) = mwr {
@@ -3065,6 +3492,12 @@ fn main() {
         if let Some((bat_kernel, _, out_bat, _)) = batched {
             let bat_host = out_bat.to_vec::<f32>();
             check_against_reference(bat_kernel, format, &bat_host, &case);
+        }
+        if let Some(triple) = prism_single {
+            for (kernel_name, _, out) in triple {
+                let host = out.to_vec::<f32>();
+                check_against_reference(kernel_name, format, &host, &case);
+            }
         }
     }
 
@@ -3090,10 +3523,18 @@ fn main() {
             println!("ratio mma/feature-major: {:.3}", mma_us / us);
         }
     }
-    if let Some((f32_kernel, f32_us, _, mwr, batched)) = gemv_case.as_ref() {
+    if let Some((kernel_name, us, _)) = prism_gemm.as_ref() {
+        println!("{kernel_name} {us:9.2} us/call");
+    }
+    if let Some((f32_kernel, f32_us, _, mwr, batched, prism_single)) = gemv_case.as_ref() {
         println!("{f32_kernel} {f32_us:9.2} us/call");
         if let Some((mwr_kernel, mwr_us, _)) = mwr {
             println!("{mwr_kernel} {mwr_us:9.2} us/call");
+        }
+        if let Some(triple) = prism_single {
+            for (kernel_name, us, _) in triple {
+                println!("{kernel_name} {us:9.2} us/call");
+            }
         }
         if let Some((bat_kernel, bat_us, _, ntok)) = batched {
             println!("{bat_kernel} (ntok {ntok}) {bat_us:9.2} us/call");

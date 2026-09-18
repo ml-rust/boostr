@@ -1672,10 +1672,13 @@ fn pq2_0_quant_matmul_matches_cpu() {
         }
     }
     // m = 1 routes to the single-token dp4a kernel
-    // `quant_gemv_pq2_0_q8_1_mwr`, the NTOK = 1 instance of the batched body
-    // (see `dispatch_gemv`). No kernel-name probe exists in this file, so the
-    // cosine gate is the check: an F32-path result would also pass it, but a
-    // wrong NTOK = 1 lane map or reduction collapses the score.
+    // `quant_gemv_pq2_0_q8_1_mwr_r4` (`_r8` when `PRISM_GEMV_ROWS` is 8), the
+    // NTOK = 1 instance of the batched body at several output columns per
+    // block (see `dispatch_gemv`). No kernel-name probe exists in this file,
+    // so the cosine gate is the check: an F32-path result would also pass it,
+    // but a wrong NTOK = 1 lane map, row tiling or reduction collapses the
+    // score. N = 64 fills the 4- and 8-column tiles exactly; the ragged case
+    // is `prism_quant_matmul_m1_ragged_rows_matches_cpu`.
     assert_matmul_parity_q8_1_activation(
         "pq2_0_quant_matmul_matches_cpu_m1",
         QuantFormat::PQ2_0,
@@ -1730,10 +1733,13 @@ fn q2_0_quant_matmul_matches_cpu() {
         }
     }
     // m = 1 routes to the single-token dp4a kernel
-    // `quant_gemv_q2_0_q8_1_mwr`, the NTOK = 1 instance of the batched body
-    // (see `dispatch_gemv`). No kernel-name probe exists in this file, so the
-    // cosine gate is the check: an F32-path result would also pass it, but a
-    // wrong NTOK = 1 lane map or reduction collapses the score.
+    // `quant_gemv_q2_0_q8_1_mwr_r4` (`_r8` when `PRISM_GEMV_ROWS` is 8), the
+    // NTOK = 1 instance of the batched body at several output columns per
+    // block (see `dispatch_gemv`). No kernel-name probe exists in this file,
+    // so the cosine gate is the check: an F32-path result would also pass it,
+    // but a wrong NTOK = 1 lane map, row tiling or reduction collapses the
+    // score. N = 64 fills the 4- and 8-column tiles exactly; the ragged case
+    // is `prism_quant_matmul_m1_ragged_rows_matches_cpu`.
     assert_matmul_parity_q8_1_activation(
         "q2_0_quant_matmul_matches_cpu_m1",
         QuantFormat::Q2_0,
@@ -1790,10 +1796,13 @@ fn q1_0_quant_matmul_matches_cpu() {
         }
     }
     // m = 1 routes to the single-token dp4a kernel
-    // `quant_gemv_q1_0_q8_1_mwr`, the NTOK = 1 instance of the batched body
-    // (see `dispatch_gemv`). No kernel-name probe exists in this file, so the
-    // cosine gate is the check: an F32-path result would also pass it, but a
-    // wrong NTOK = 1 lane map or reduction collapses the score.
+    // `quant_gemv_q1_0_q8_1_mwr_r4` (`_r8` when `PRISM_GEMV_ROWS` is 8), the
+    // NTOK = 1 instance of the batched body at several output columns per
+    // block (see `dispatch_gemv`). No kernel-name probe exists in this file,
+    // so the cosine gate is the check: an F32-path result would also pass it,
+    // but a wrong NTOK = 1 lane map, row tiling or reduction collapses the
+    // score. N = 64 fills the 4- and 8-column tiles exactly; the ragged case
+    // is `prism_quant_matmul_m1_ragged_rows_matches_cpu`.
     assert_matmul_parity_q8_1_activation(
         "q1_0_quant_matmul_matches_cpu_m1",
         QuantFormat::Q1_0,
@@ -1832,6 +1841,62 @@ fn q1_0_quant_matmul_matches_cpu() {
     );
 }
 
+/// Prism weight bytes at `[n, k]`: `d` (f16) at byte 0, then
+/// `block_bytes - 2` index-varying payload bytes, for a block of
+/// `block_elems` elements. Same layout the three fixtures above build inline.
+fn prism_weight(n: usize, k: usize, block_elems: usize, block_bytes: usize) -> Vec<u8> {
+    let blocks = n * k / block_elems;
+    let mut data = vec![0u8; blocks * block_bytes];
+    for b in 0..blocks {
+        let blk = &mut data[b * block_bytes..(b + 1) * block_bytes];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..block_bytes - 2 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    data
+}
+
+/// `m = 1` on the prism three at `N = 70`, which is a multiple of neither 4
+/// nor 8. `dispatch_gemv` sends `m = 1` to the `_r4` (or `_r8`, per
+/// `PRISM_GEMV_ROWS`) kernel, whose block owns several output columns and
+/// launches grid x as `ceil(N / ROWS)`: the last block clamps its weight-row
+/// index to `N - 1` and skips the writes past it. A missing guard writes past
+/// the output or reads past the weight; a wrong clamp shifts the tail
+/// columns, which the cosine gate catches.
+///
+/// Bit-identity between the `_mwr` (ROWS = 1) kernel and `_r4`/`_r8` is
+/// argued in `kernels/gemv/legacy_ntok_body.cuh` and NOT checked here: no
+/// test hook selects the ROWS variant, so only the dispatcher's choice runs.
+#[test]
+fn prism_quant_matmul_m1_ragged_rows_matches_cpu() {
+    let (n, k) = (70usize, 256usize);
+    assert_matmul_parity_q8_1_activation(
+        "pq2_0_quant_matmul_m1_n70",
+        QuantFormat::PQ2_0,
+        &prism_weight(n, k, 128, 34),
+        1,
+        n,
+        k,
+    );
+    assert_matmul_parity_q8_1_activation(
+        "q2_0_quant_matmul_m1_n70",
+        QuantFormat::Q2_0,
+        &prism_weight(n, k, 64, 18),
+        1,
+        n,
+        k,
+    );
+    assert_matmul_parity_q8_1_activation(
+        "q1_0_quant_matmul_m1_n70",
+        QuantFormat::Q1_0,
+        &prism_weight(n, k, 128, 18),
+        1,
+        n,
+        k,
+    );
+}
+
 // ── GEMM path (m = 32) ────────────────────────────────────────────────
 //
 // `m = 32` sits above every format's `gemv_max_m` in
@@ -1841,7 +1906,9 @@ fn q1_0_quant_matmul_matches_cpu() {
 // `assert_matmul_parity_q8_1_activation`'s comment), but the GEMM kernels in
 // `src/quant/cuda/kernels/gemm/` still need their own coverage at a batch
 // size GEMV never reaches. These cases repeat each fixture with `m = 32` to
-// force GEMM.
+// force GEMM. The three PrismML-fork formats are the exception: their
+// `gemv_max_m` is unbounded (measured, see `gemv_crossover.rs`), so their
+// `m = 32` cases exercise the `_n4` kernel over eight grid-y passes instead.
 
 /// Q4_0 weight `[3, 64]` — 2 blocks per row, 6 blocks total.
 ///
@@ -2321,9 +2388,9 @@ fn iq4_xs_quant_matmul_gemm_matches_cpu() {
     );
 }
 
-/// PQ2_0 weight `[64, 256]` at `m = 32`: above `gemv_max_m`, so the
-/// per-element f32 GEMM `quant_matmul_pq2_0_f32` in
-/// `src/quant/cuda/kernels/gemm/pq2_0.cu` serves it.
+/// PQ2_0 weight `[64, 256]` at `m = 32`: `gemv_max_m` is unbounded for this
+/// format, so `quant_gemv_pq2_0_q8_1_mwr_n4` serves it over eight grid-y
+/// passes; `quant_matmul_pq2_0_f32` stays as the `dispatch_matmul` fallback.
 #[test]
 fn pq2_0_quant_matmul_gemm_matches_cpu() {
     let (n, k) = (64usize, 256usize);
@@ -2346,9 +2413,9 @@ fn pq2_0_quant_matmul_gemm_matches_cpu() {
     );
 }
 
-/// Q2_0 weight `[64, 256]` at `m = 32`: above `gemv_max_m`, so the
-/// per-element f32 GEMM `quant_matmul_q2_0_f32` in
-/// `src/quant/cuda/kernels/gemm/q2_0.cu` serves it.
+/// Q2_0 weight `[64, 256]` at `m = 32`: `gemv_max_m` is unbounded for this
+/// format, so `quant_gemv_q2_0_q8_1_mwr_n4` serves it over eight grid-y
+/// passes; `quant_matmul_q2_0_f32` stays as the `dispatch_matmul` fallback.
 #[test]
 fn q2_0_quant_matmul_gemm_matches_cpu() {
     let (n, k) = (64usize, 256usize);
@@ -2371,9 +2438,9 @@ fn q2_0_quant_matmul_gemm_matches_cpu() {
     );
 }
 
-/// Q1_0 weight `[64, 256]` at `m = 32`: above `gemv_max_m`, so the
-/// per-element f32 GEMM `quant_matmul_q1_0_f32` in
-/// `src/quant/cuda/kernels/gemm/q1_0.cu` serves it.
+/// Q1_0 weight `[64, 256]` at `m = 32`: `gemv_max_m` is unbounded for this
+/// format, so `quant_gemv_q1_0_q8_1_mwr_n4` serves it over eight grid-y
+/// passes; `quant_matmul_q1_0_f32` stays as the `dispatch_matmul` fallback.
 #[test]
 fn q1_0_quant_matmul_gemm_matches_cpu() {
     let (n, k) = (64usize, 256usize);

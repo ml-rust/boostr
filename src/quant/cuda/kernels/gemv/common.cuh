@@ -133,11 +133,14 @@ static constexpr __host__ __device__ int mwr_nwarps_ntok(int ntok) {
 // activation word a thread loads is already paid for; dot-producting it
 // against two weight rows instead of one halves the activation traffic per
 // unit of output, at the cost of one more weight word and one more
-// accumulator per token in registers. At a single token column there is no
-// activation word to amortize, so the tile stays one row wide.
+// accumulator per token in registers. This rule keeps a single token column
+// one row wide, which ggml-cuda's `calc_rows_per_block` (`ggml-cuda/mmvq.cu`)
+// also does off `ncols_dst`: one row at one column, two from two columns up.
 //
-// ggml-cuda's `calc_rows_per_block` (`ggml-cuda/mmvq.cu`) makes the same split
-// off `ncols_dst`: one row at one column, two from two columns up.
+// It is a default, not a bound. At one token column every block re-reads the
+// whole activation row, so the prism formats instantiate their NTOK = 1 body
+// with an explicit ROWS of 4 or 8 (`_r4`, `_r8`) and let `dispatch_gemv`
+// pick. The tile width to use there is a measurement, not a rule.
 //
 // A kernel that reads this must launch grid x as `ceil(N / ROWS)` and guard
 // its writes against `N` — N need not be a multiple of ROWS. Kernels that keep

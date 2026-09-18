@@ -2,9 +2,10 @@
 //
 // Q4_0, Q5_0, Q4_1 and Q5_1 share one block geometry — 32 elements, an f16
 // scale at byte 0, and 16 nibble-packed quant bytes at the end — so they also
-// share one batched MWR body. Only the per-block decode differs, and that is
-// what the four policy structs below carry. The alternative is four copies of
-// the same ~90-line kernel differing in a dozen lines of bit twiddling.
+// share one batched MWR body (`legacy_ntok_body.cuh`). Only the per-block
+// decode differs, and that is what the four policy structs below carry. The
+// alternative is four copies of the same ~90-line kernel differing in a dozen
+// lines of bit twiddling.
 //
 // The body also serves the PrismML-fork formats in `prism_ntok.cuh`, whose
 // blocks span 64 or 128 elements under one scale. It walks K in 32-element
@@ -16,7 +17,9 @@
 // batching pays at m = 2, while m = 1 is served by the F32-activation kernel
 // beside them. `dispatch_gemv` reflects that by entering the dp4a branch for
 // these formats only from m = 2 up. The prism three also instantiate the
-// body at NTOK = 1, so they take dp4a at every m.
+// body at NTOK = 1, so they take dp4a at every m; there they tile the
+// output-row axis too (`ROWS` = 4 or 8), so one activation load serves
+// several output columns.
 //
 // Weight decode is lifted from the MMQ staging structs `MmqfQ40`, `MmqfQ50`,
 // `MmqfQ41` and `MmqfQ51` in `../quant_mmq_mma.cu`, which are in turn
@@ -177,123 +180,10 @@ struct LegacyQ51 {
 
 // ── Shared token-batched MWR body ───────────────────────────────────────
 //
-// Grid: (N, ceil(M / NTOK), 1) — one output column per block, NTOK token
-// columns per block. Block: `mwr_nwarps_ntok(NTOK) * WARP_SIZE` threads; the
-// launch side must size the block from the same function, because the
-// reduction's shared array and `__launch_bounds__` both read it. NTOK = 1
-// is a valid instance: one accumulator, one activation row, a
-// `[NWARPS - 1][1][WARP_SIZE]` reduction array.
-//
-// Lane map. A 32-element chunk holds 4 source words, so a warp's 32 lanes
-// cover 8 whole chunks per step: lane maps to (chunk `lane / 4` inside an
-// 8-chunk group, source word `lane % 4`). Four consecutive lanes read 16
-// contiguous bytes of the same chunk, and the 8-chunk group is contiguous in
-// the row, so the group's loads coalesce. For a legacy format a chunk is a
-// block; for a prism format `CHUNKS_PER_BLOCK` chunks share one block base
-// and scale, and the policy receives the source word index widened over the
-// whole block.
-//
-// The weight load and its decode sit OUTSIDE the token loop — that is the
-// whole point of the tile. Only the activation load and the dp4a repeat per
-// token, so a weight block is read and unpacked once for all NTOK columns
-// instead of once per column.
-//
-// Minimum term (Q4_1, Q5_1). The value is `d * q + m` with unsigned `q`, so
-// the block's contribution is `d * sum(q_e * a_e) + m * sum(a_e)`. The second
-// sum is rank-1 over the block: it depends on the activation alone. It is
-// formed here as an EXACT integer with `dp4a(0x01010101, a, ...)` and scaled
-// by the activation's own `d`, which is what `mmqf_vec_dot_dm` does with the
-// int16 sum the MMQ activation record carries — the two paths therefore agree
-// bit-pattern for bit-pattern on that term. The per-token Q8_1 record's `s`
-// field is NOT used: its producer stores `d * sum(x)` over the ORIGINAL
-// floats, not `d * sum(q)` over the quants, so it would not match MMQ.
-//
-// Ragged tail. M need not be a multiple of NTOK. Each token slot clamps its
-// activation row index to M - 1, so every load stays inside the activation
-// buffer, and the write is skipped for slots past M - 1. A clamped slot
-// recomputes the last token's dot product and discards it, costing at most
-// NTOK - 1 wasted columns in one block of the grid. Both early exits are
-// block-uniform, so every thread reaches the barrier inside the reduction.
-//
-// Ragged K. K is gated on `k % (32 * CHUNKS_PER_BLOCK) == 0`, so the last
-// 8-chunk group can be partial; the chunk index is bounds-checked rather than
-// read past the row.
+// `quant_gemv_legacy_q8_1_mwr_ntok<FMT, NTOK, ROWS = 1>` lives in
+// `legacy_ntok_body.cuh`, split out to keep this header under the line cap.
+// It takes any policy that meets the contract above: the four here, and the
+// prism three in `prism_ntok.cuh`. That header states the grid, the lane map,
+// the output-row tiling and the ragged-tail rules.
 
-template <typename FMT, int NTOK>
-static __device__ __forceinline__ void quant_gemv_legacy_q8_1_mwr_ntok(
-    const unsigned char* __restrict__ q8_act,
-    const unsigned char* __restrict__ weight,
-    float* __restrict__ output,
-    unsigned int M, unsigned int K, unsigned int N
-) {
-    constexpr int NWARPS = mwr_nwarps_ntok(NTOK);
-
-    const int warp_id = threadIdx.x / WARP_SIZE;
-    const int lane_id = threadIdx.x % WARP_SIZE;
-    const int col = blockIdx.x;
-    const unsigned int m0 = blockIdx.y * NTOK;
-    if (col >= (int)N || m0 >= M) return;
-
-    // A weight chunk and a Q8_1 activation block are both 32 elements, so
-    // one count serves both and their indices coincide. The weight row holds
-    // `bpr / CHUNKS_PER_BLOCK` blocks.
-    const int bpr = K / 32;
-    const int gpr = (bpr + 7) / 8; // 8-chunk groups, rounded up
-
-    const unsigned char* w_row =
-        weight + (unsigned long long)col * (bpr / FMT::CHUNKS_PER_BLOCK) * FMT::BLOCK_BYTES;
-
-    const unsigned char* q8_rows[NTOK];
-    #pragma unroll
-    for (int j = 0; j < NTOK; j++) {
-        const unsigned int mj = (m0 + j < M) ? (m0 + j) : (M - 1);
-        q8_rows[j] = q8_act + (unsigned long long)mj * bpr * 36;
-    }
-
-    const int kbx = lane_id / 4;      // chunk within the 8-chunk group
-    const int w4 = lane_id % 4;       // 4-element source word within that chunk
-    const int pos_lo = 4 + w4 * 4;    // activation byte offset of elements 4w..4w+3
-    const int pos_hi = 20 + w4 * 4;   // and of elements 4w+16..4w+19
-
-    float acc[NTOK];
-    #pragma unroll
-    for (int j = 0; j < NTOK; j++) acc[j] = 0.0f;
-
-    for (int g = warp_id; g < gpr; g += NWARPS) {
-        const int b = g * 8 + kbx;
-        if (b >= bpr) continue;
-
-        const unsigned char* blk =
-            w_row + (unsigned long long)(b / FMT::CHUNKS_PER_BLOCK) * FMT::BLOCK_BYTES;
-        const int w = (b % FMT::CHUNKS_PER_BLOCK) * 4 + w4;
-
-        float dw, mw;
-        int v_lo, v_hi;
-        FMT::decode(blk, w, &dw, &mw, &v_lo, &v_hi);
-
-        #pragma unroll
-        for (int j = 0; j < NTOK; j++) {
-            const unsigned char* ablk = q8_rows[j] + (unsigned long long)b * 36;
-            const float da = __half2float(*(const __half*)ablk);
-            const int a_lo = *(const int*)(ablk + pos_lo);
-            const int a_hi = *(const int*)(ablk + pos_hi);
-
-            acc[j] += dw * da * (float)dp4a(v_lo, a_lo, dp4a(v_hi, a_hi, 0));
-            if constexpr (FMT::HAS_MIN) {
-                const int sumi = dp4a(0x01010101, a_lo, dp4a(0x01010101, a_hi, 0));
-                acc[j] += mw * da * (float)sumi;
-            }
-        }
-    }
-
-    __shared__ float smem[NWARPS - 1][NTOK][WARP_SIZE];
-    float sums[NTOK];
-    mwr_reduce_ntok<NTOK, NWARPS>(acc, warp_id, lane_id, smem, sums);
-
-    if (warp_id != 0 || lane_id != 0) return;
-    #pragma unroll
-    for (int j = 0; j < NTOK; j++) {
-        const unsigned int mj = m0 + j;
-        if (mj < M) output[(unsigned long long)mj * N + col] = sums[j];
-    }
-}
+#include "legacy_ntok_body.cuh"

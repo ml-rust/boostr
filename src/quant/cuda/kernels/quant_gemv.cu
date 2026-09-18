@@ -1332,8 +1332,11 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr(
 // columns of the weight matrix, and each activation word a thread loads is
 // dot-producted against the weight word of every one of them. The activation
 // load is then paid once per ROWS outputs instead of once per output, which is
-// where the traffic goes at wide tiles. ROWS comes from `mwr_rows_ntok` in
-// gemv/common.cuh, the counterpart of ggml-cuda's `calc_rows_per_block`.
+// where the traffic goes at wide tiles. ROWS defaults to `mwr_rows_ntok` in
+// gemv/common.cuh, the counterpart of ggml-cuda's `calc_rows_per_block`; the
+// `_r4` instance below overrides it to 4 at NTOK = 1, where the activation
+// row is otherwise re-read once per output column, for measurement against
+// `quant_gemv_q8_0_q8_1_mwr`. `dispatch_gemv` does not select it yet.
 //
 // Grid: (ceil(N / ROWS), ceil(M / NTOK), 1) — ROWS output columns, NTOK tokens
 // per block.
@@ -1358,7 +1361,7 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr(
 // shares its shape.
 // ============================================================================
 
-template <int NTOK>
+template <int NTOK, int ROWS = mwr_rows_ntok(NTOK)>
 static __device__ __forceinline__ void quant_gemv_q8_0_q8_1_mwr_ntok(
     const unsigned char* __restrict__ q8_act,
     const unsigned char* __restrict__ weight,
@@ -1366,7 +1369,6 @@ static __device__ __forceinline__ void quant_gemv_q8_0_q8_1_mwr_ntok(
     unsigned int M, unsigned int K, unsigned int N
 ) {
     constexpr int NWARPS = mwr_nwarps_ntok(NTOK);
-    constexpr int ROWS = mwr_rows_ntok(NTOK);
 
     const int warp_id = threadIdx.x / WARP_SIZE;
     const int lane_id = threadIdx.x % WARP_SIZE;
@@ -1484,6 +1486,15 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(8) * WARP_SIZE, 1) void 
     unsigned int M, unsigned int K, unsigned int N
 ) {
     quant_gemv_q8_0_q8_1_mwr_ntok<8>(q8_act, weight, output, M, K, N);
+}
+
+extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(1) * WARP_SIZE, 1) void quant_gemv_q8_0_q8_1_mwr_r4(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    quant_gemv_q8_0_q8_1_mwr_ntok<1, 4>(q8_act, weight, output, M, K, N);
 }
 
 // ============================================================================

@@ -112,6 +112,10 @@ impl DequantOps<CpuRuntime> for CpuClient {
                 QuantFormat::IQ1M => dequant::dequant_iq1_m(block_bytes, &mut out),
                 QuantFormat::TQ1_0 => dequant::dequant_tq1_0(block_bytes, &mut out),
                 QuantFormat::TQ2_0 => dequant::dequant_tq2_0(block_bytes, &mut out),
+                QuantFormat::Q1_0 => dequant::dequant_q1_0(block_bytes, &mut out),
+                QuantFormat::Q2_0 => dequant::dequant_q2_0(block_bytes, &mut out),
+                QuantFormat::PQ2_0 => dequant::dequant_pq2_0(block_bytes, &mut out),
+                QuantFormat::PTQ1_0 => dequant::dequant_ptq1_0(block_bytes, &mut out),
             }
             out
         };

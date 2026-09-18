@@ -234,12 +234,21 @@ static __device__ __forceinline__ void gguf_iq4_table_lookup(
 #define GGUF_TQ1_0_D_OFFSET 52
 #define GGUF_TQ2_0_D_OFFSET 64
 
+// Returns trit `level` (0..5) of a base-3 packed byte as {-1, 0, 1}.
+// Shared by TQ1_0 and PTQ1_0.
+static __device__ __forceinline__ int gguf_base3_trit(
+    unsigned char byte, int level
+) {
+    const unsigned char pow3[5] = { 1, 3, 9, 27, 81 };
+    const unsigned char q = (unsigned char)(byte * pow3[level]);
+    return (int)(((unsigned short)q * 3) >> 8) - 1;
+}
+
 // Returns the ternary value {-1, 0, 1} of element `elem` (0..256) of a TQ1_0
 // block. `block` points at the start of the 54-byte block.
 static __device__ __forceinline__ int gguf_tq1_0_trit(
     const unsigned char* block, int elem
 ) {
-    const unsigned char pow3[5] = { 1, 3, 9, 27, 81 };
     unsigned char byte;
     int level;
     if (elem < 160) {
@@ -254,8 +263,7 @@ static __device__ __forceinline__ int gguf_tq1_0_trit(
         level = r >> 2;
         byte = block[48 + (r & 3)];
     }
-    const unsigned char q = (unsigned char)(byte * pow3[level]);
-    return (int)(((unsigned short)q * 3) >> 8) - 1;
+    return gguf_base3_trit(byte, level);
 }
 
 // Returns the ternary value {-1, 0, 1} of element `elem` (0..256) of a TQ2_0

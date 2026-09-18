@@ -74,6 +74,16 @@ pub enum QuantFormat {
     TQ1_0,
     /// Tied-scale 2-bit. block_size=256, block_bytes=66
     TQ2_0,
+
+    // Prism quants (PrismML llama.cpp fork)
+    /// 1-bit sign, one f16 scale. block_size=128, block_bytes=18
+    Q1_0,
+    /// 2-bit codes 0..3 map to -1..+2, one f16 scale. block_size=64, block_bytes=18
+    Q2_0,
+    /// Q2_0 codec at group 128. block_size=128, block_bytes=34
+    PQ2_0,
+    /// TQ1_0 trit packing at group 128. block_size=128, block_bytes=28
+    PTQ1_0,
 }
 
 impl QuantFormat {
@@ -103,6 +113,8 @@ impl QuantFormat {
             | Self::IQ4XS
             | Self::TQ1_0
             | Self::TQ2_0 => 256,
+            Self::Q2_0 => 64,
+            Self::Q1_0 | Self::PQ2_0 | Self::PTQ1_0 => 128,
         }
     }
 
@@ -132,6 +144,10 @@ impl QuantFormat {
             Self::IQ4XS => 136,
             Self::TQ1_0 => 54,
             Self::TQ2_0 => 66,
+            Self::Q1_0 => 18,
+            Self::Q2_0 => 18,
+            Self::PQ2_0 => 34,
+            Self::PTQ1_0 => 28,
         }
     }
 
@@ -197,6 +213,11 @@ impl QuantFormat {
             Self::IQ1M => 29,
             Self::TQ1_0 => 34,
             Self::TQ2_0 => 35,
+            // PrismML fork ids; upstream ggml.h has no types at these values.
+            Self::Q1_0 => 41,
+            Self::Q2_0 => 42,
+            Self::PQ2_0 => 142,
+            Self::PTQ1_0 => 143,
         }
     }
 
@@ -227,6 +248,10 @@ impl QuantFormat {
             Self::IQ4XS => 20,
             Self::TQ1_0 => 21,
             Self::TQ2_0 => 22,
+            Self::PQ2_0 => 23,
+            Self::PTQ1_0 => 24,
+            Self::Q1_0 => 25,
+            Self::Q2_0 => 26,
         }
     }
 
@@ -256,6 +281,10 @@ impl QuantFormat {
             29 => Ok(Self::IQ1M),
             34 => Ok(Self::TQ1_0),
             35 => Ok(Self::TQ2_0),
+            41 => Ok(Self::Q1_0),
+            42 => Ok(Self::Q2_0),
+            142 => Ok(Self::PQ2_0),
+            143 => Ok(Self::PTQ1_0),
             _ => Err(Error::UnsupportedQuantFormat {
                 format: format!("GGML type ID {}", id),
             }),
@@ -288,6 +317,10 @@ impl QuantFormat {
             Self::IQ4XS => "IQ4_XS",
             Self::TQ1_0 => "TQ1_0",
             Self::TQ2_0 => "TQ2_0",
+            Self::PQ2_0 => "PQ2_0",
+            Self::PTQ1_0 => "PTQ1_0",
+            Self::Q1_0 => "Q1_0",
+            Self::Q2_0 => "Q2_0",
         }
     }
 }
@@ -308,6 +341,10 @@ mod tests {
         assert_eq!(QuantFormat::Q4K.block_size(), 256);
         assert_eq!(QuantFormat::IQ4NL.block_size(), 32);
         assert_eq!(QuantFormat::TQ1_0.block_size(), 256);
+        assert_eq!(QuantFormat::PQ2_0.block_size(), 128);
+        assert_eq!(QuantFormat::PTQ1_0.block_size(), 128);
+        assert_eq!(QuantFormat::Q1_0.block_size(), 128);
+        assert_eq!(QuantFormat::Q2_0.block_size(), 64);
     }
 
     #[test]
@@ -317,6 +354,10 @@ mod tests {
         assert_eq!(QuantFormat::Q6K.block_bytes(), 210);
         assert_eq!(QuantFormat::Q8K.block_bytes(), 292);
         assert_eq!(QuantFormat::IQ4NL.block_bytes(), 18);
+        assert_eq!(QuantFormat::PQ2_0.block_bytes(), 34);
+        assert_eq!(QuantFormat::PTQ1_0.block_bytes(), 28);
+        assert_eq!(QuantFormat::Q1_0.block_bytes(), 18);
+        assert_eq!(QuantFormat::Q2_0.block_bytes(), 18);
     }
 
     #[test]
@@ -363,6 +404,10 @@ mod tests {
             QuantFormat::IQ4XS,
             QuantFormat::TQ1_0,
             QuantFormat::TQ2_0,
+            QuantFormat::PQ2_0,
+            QuantFormat::PTQ1_0,
+            QuantFormat::Q1_0,
+            QuantFormat::Q2_0,
         ];
         for fmt in &formats {
             let id = fmt.ggml_type_id();
@@ -401,11 +446,96 @@ mod tests {
         assert_eq!(QuantFormat::Q4_0.num_blocks(32).unwrap(), 1);
         assert_eq!(QuantFormat::Q4_0.num_blocks(1024).unwrap(), 32);
         assert_eq!(QuantFormat::Q4K.num_blocks(4096).unwrap(), 16);
+        assert_eq!(QuantFormat::PQ2_0.num_blocks(4096).unwrap(), 32);
+        assert_eq!(QuantFormat::PTQ1_0.num_blocks(128).unwrap(), 1);
+        assert!(QuantFormat::PTQ1_0.num_blocks(64).is_err());
+        assert_eq!(QuantFormat::Q1_0.num_blocks(256).unwrap(), 2);
+        assert_eq!(QuantFormat::Q2_0.num_blocks(256).unwrap(), 4);
     }
 
     #[test]
     fn test_display() {
         assert_eq!(format!("{}", QuantFormat::Q4K), "Q4_K");
         assert_eq!(format!("{}", QuantFormat::IQ2XXS), "IQ2_XXS");
+        assert_eq!(format!("{}", QuantFormat::PQ2_0), "PQ2_0");
+        assert_eq!(format!("{}", QuantFormat::PTQ1_0), "PTQ1_0");
+        assert_eq!(format!("{}", QuantFormat::Q1_0), "Q1_0");
+        assert_eq!(format!("{}", QuantFormat::Q2_0), "Q2_0");
+    }
+
+    /// `#define FMT_<NAME>` spelling in the CUDA kernels, for the variants
+    /// where it drops the `_` that `name()` keeps (K-quants, I-quants).
+    /// All other variants use `name()` unchanged.
+    fn cuda_define_name(fmt: QuantFormat) -> String {
+        match fmt {
+            QuantFormat::Q2K
+            | QuantFormat::Q3K
+            | QuantFormat::Q4K
+            | QuantFormat::Q5K
+            | QuantFormat::Q6K
+            | QuantFormat::Q8K
+            | QuantFormat::IQ1S
+            | QuantFormat::IQ1M
+            | QuantFormat::IQ2XXS
+            | QuantFormat::IQ2XS
+            | QuantFormat::IQ2S
+            | QuantFormat::IQ3XXS
+            | QuantFormat::IQ3S
+            | QuantFormat::IQ4NL
+            | QuantFormat::IQ4XS => fmt.name().replace('_', ""),
+            other => other.name().to_string(),
+        }
+    }
+
+    /// Guards against Rust/CUDA drift: a format added in Rust without a
+    /// matching `FMT_*` id in `format_ids.cuh` leaves CUDA output
+    /// uninitialized. Both `.cu` files include the same header, so checking
+    /// it once covers both.
+    #[test]
+    fn test_format_ids_match_cuda_kernels() {
+        let format_ids = include_str!("cuda/kernels/format_ids.cuh");
+        let formats = [
+            QuantFormat::Q4_0,
+            QuantFormat::Q4_1,
+            QuantFormat::Q5_0,
+            QuantFormat::Q5_1,
+            QuantFormat::Q8_0,
+            QuantFormat::Q8_1,
+            QuantFormat::Q2K,
+            QuantFormat::Q3K,
+            QuantFormat::Q4K,
+            QuantFormat::Q5K,
+            QuantFormat::Q6K,
+            QuantFormat::Q8K,
+            QuantFormat::IQ1S,
+            QuantFormat::IQ1M,
+            QuantFormat::IQ2XXS,
+            QuantFormat::IQ2XS,
+            QuantFormat::IQ2S,
+            QuantFormat::IQ3XXS,
+            QuantFormat::IQ3S,
+            QuantFormat::IQ4NL,
+            QuantFormat::IQ4XS,
+            QuantFormat::TQ1_0,
+            QuantFormat::TQ2_0,
+            QuantFormat::PQ2_0,
+            QuantFormat::PTQ1_0,
+            QuantFormat::Q1_0,
+            QuantFormat::Q2_0,
+        ];
+        for fmt in formats {
+            let needle = format!("#define FMT_{} {}", cuda_define_name(fmt), fmt.format_id());
+            let found = format_ids.lines().any(|line| {
+                let mut parts = line.split_whitespace();
+                parts.next() == Some("#define")
+                    && parts.next() == Some(&format!("FMT_{}", cuda_define_name(fmt)))
+                    && parts.next() == Some(&fmt.format_id().to_string())
+            });
+            assert!(
+                found,
+                "{} missing or mismatched in format_ids.cuh: {:?}",
+                needle, fmt
+            );
+        }
     }
 }

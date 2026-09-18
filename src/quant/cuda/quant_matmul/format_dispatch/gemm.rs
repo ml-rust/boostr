@@ -101,6 +101,10 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_matmul(
         QuantFormat::IQ3XXS => ("quant_matmul_iq3_xxs_f32", GEMM_IQ3_XXS_MODULE),
         QuantFormat::TQ1_0 => ("quant_matmul_tq1_0_f32", GEMM_TQ1_0_MODULE),
         QuantFormat::TQ2_0 => ("quant_matmul_tq2_0_f32", GEMM_TQ2_0_MODULE),
+        // No dedicated GEMM kernel: the caller takes the generic fused path.
+        QuantFormat::Q1_0 | QuantFormat::Q2_0 | QuantFormat::PQ2_0 | QuantFormat::PTQ1_0 => {
+            return Ok(None);
+        }
     };
 
     tracing::debug!(

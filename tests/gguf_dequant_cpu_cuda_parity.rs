@@ -140,6 +140,15 @@ fn payload(i: usize, b: usize) -> u8 {
         & 0xFF) as u8
 }
 
+/// Deterministic payload byte like `payload`, scaled into `0..=max`.
+///
+/// PTQ1_0's packer (`dequant_prism.rs::pack5`/`pack4`) never emits `qs`
+/// above 242 or `qh` above 80, so a fixture using the full `0..=255` range
+/// covers byte values the real format cannot produce.
+fn bounded_payload(i: usize, b: usize, max: u8) -> u8 {
+    (u16::from(payload(i, b)) * (u16::from(max) + 1) / 256) as u8
+}
+
 /// A byte whose LOW nibble is `(j + b) % 16` and whose HIGH nibble is
 /// `(15 - j + b) % 16`. The two nibbles are never equal (they differ by an odd
 /// residue), and both vary with `j`, so the 32 decoded elements are all
@@ -954,6 +963,79 @@ fn tq2_0_dequant_matches_cpu() {
         }
     }
     assert_dequant_parity("tq2_0_dequant_matches_cpu", QuantFormat::TQ2_0, &data);
+}
+
+/// Q1_0: `d` (f16) + 16 bytes of 1-bit signs, byte-major low-bit-first, 128
+/// elements.
+///
+/// Every bit pattern is a valid sign code, so index-varying payload bytes
+/// exercise the unpacking order directly with no range to respect.
+#[test]
+fn q1_0_dequant_matches_cpu() {
+    let mut data = vec![0u8; BLOCKS * 18];
+    for b in 0..BLOCKS {
+        let blk = &mut data[b * 18..(b + 1) * 18];
+        blk[0..2].copy_from_slice(&D_BITS[b].to_le_bytes());
+        for i in 0..16 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_dequant_parity("q1_0_dequant_matches_cpu", QuantFormat::Q1_0, &data);
+}
+
+/// Q2_0: `d` (f16) + 16 bytes of 2-bit codes, byte-major low-bit-first, 64
+/// elements.
+///
+/// Every 2-bit code (00/01/10/11) is a valid `{-1, 0, 1, 2}` mapping, so
+/// index-varying payload bytes need no range restriction.
+#[test]
+fn q2_0_dequant_matches_cpu() {
+    let mut data = vec![0u8; BLOCKS * 18];
+    for b in 0..BLOCKS {
+        let blk = &mut data[b * 18..(b + 1) * 18];
+        blk[0..2].copy_from_slice(&D_BITS[b].to_le_bytes());
+        for i in 0..16 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_dequant_parity("q2_0_dequant_matches_cpu", QuantFormat::Q2_0, &data);
+}
+
+/// PQ2_0: `d` (f16) + 32 bytes of 2-bit codes, byte-major low-bit-first, 128
+/// elements. Same code space as Q2_0 at double the block size.
+#[test]
+fn pq2_0_dequant_matches_cpu() {
+    let mut data = vec![0u8; BLOCKS * 34];
+    for b in 0..BLOCKS {
+        let blk = &mut data[b * 34..(b + 1) * 34];
+        blk[0..2].copy_from_slice(&D_BITS[b].to_le_bytes());
+        for i in 0..32 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_dequant_parity("pq2_0_dequant_matches_cpu", QuantFormat::PQ2_0, &data);
+}
+
+/// PTQ1_0: 24 `qs` bytes + 2 `qh` bytes (base-3 packed trits) + `d` (f16) at
+/// the END, 128 elements.
+///
+/// `qs` bytes must stay `0..=242` and `qh` bytes `0..=80` — the fork's
+/// packer never emits above those bounds — so this uses `bounded_payload`
+/// instead of the full-range `payload`.
+#[test]
+fn ptq1_0_dequant_matches_cpu() {
+    let mut data = vec![0u8; BLOCKS * 28];
+    for b in 0..BLOCKS {
+        let blk = &mut data[b * 28..(b + 1) * 28];
+        for (i, byte) in blk[..24].iter_mut().enumerate() {
+            *byte = bounded_payload(i, b, 242);
+        }
+        for (i, byte) in blk[24..26].iter_mut().enumerate() {
+            *byte = bounded_payload(24 + i, b, 80);
+        }
+        blk[26..28].copy_from_slice(&D_BITS[b].to_le_bytes());
+    }
+    assert_dequant_parity("ptq1_0_dequant_matches_cpu", QuantFormat::PTQ1_0, &data);
 }
 
 // ── The user-visible consequence: quantized matmul ───────────────────

@@ -3,7 +3,9 @@
 pub mod dense;
 pub mod maybe_quant_linear;
 pub mod quant_linear;
+pub mod rotated_linear;
 
 pub use dense::Linear;
 pub use maybe_quant_linear::MaybeQuantLinear;
 pub use quant_linear::QuantLinear;
+pub use rotated_linear::{MaybeRotatedLinear, RotatedLinear};

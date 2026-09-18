@@ -6,6 +6,7 @@ pub mod dropout;
 pub mod embedding;
 pub mod fsq;
 pub mod groupnorm;
+pub mod hadamard;
 pub mod layernorm;
 pub mod linear;
 pub mod lora;
@@ -20,6 +21,7 @@ pub mod moe;
 pub mod quant_embedding;
 pub mod rmsnorm;
 pub mod rope;
+pub mod rotated_embedding;
 pub mod stochastic_depth;
 pub mod timestep_embedding;
 pub mod var_builder;
@@ -37,8 +39,9 @@ pub use dropout::Dropout;
 pub use embedding::Embedding;
 pub use fsq::{Fsq, FsqConfig, ResidualFsq, ResidualFsqConfig, ResidualFsqWeights};
 pub use groupnorm::GroupNorm;
+pub use hadamard::HadamardRotation;
 pub use layernorm::LayerNorm;
-pub use linear::{Linear, MaybeQuantLinear, QuantLinear};
+pub use linear::{Linear, MaybeQuantLinear, MaybeRotatedLinear, QuantLinear, RotatedLinear};
 pub use lora::LoraLinear;
 pub use lora_metadata::{
     LoraMetadata, build_lora_metadata, check_lora_metadata, parse_lora_metadata,
@@ -62,6 +65,7 @@ pub use moe::{
 pub use quant_embedding::{MaybeQuantEmbedding, QuantEmbedding};
 pub use rmsnorm::RmsNorm;
 pub use rope::RoPE;
+pub use rotated_embedding::RotatedEmbedding;
 pub use stochastic_depth::StochasticDepth;
 pub use timestep_embedding::{SinusoidalPosEmb, TimestepEmbedding};
 pub use var_builder::VarBuilder;

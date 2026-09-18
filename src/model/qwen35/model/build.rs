@@ -254,6 +254,7 @@ pub(crate) mod tests {
                 rope_theta: 10_000.0,
                 rms_eps: 1e-6,
             }),
+            hadamard: None,
         }
     }
 

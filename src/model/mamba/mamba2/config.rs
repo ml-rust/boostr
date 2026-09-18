@@ -244,6 +244,7 @@ mod tests {
             audio: None,
             gdn: None,
             qwen35_attention: None,
+            hadamard: None,
         };
         let mamba_config = Mamba2Config::from_universal(&config).unwrap();
         assert_eq!(mamba_config.d_model, 64);

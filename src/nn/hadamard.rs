@@ -13,9 +13,21 @@ use numr::tensor::Tensor;
 
 /// One rotation basis: block width and an optional +/-1 sign vector in the
 /// activation dtype.
+///
+/// `Clone` is cheap: `Tensor::clone` shares storage, it does not copy device
+/// memory.
 pub struct HadamardRotation<R: Runtime> {
     block_size: usize,
     signs: Option<Tensor<R>>,
+}
+
+impl<R: Runtime> Clone for HadamardRotation<R> {
+    fn clone(&self) -> Self {
+        Self {
+            block_size: self.block_size,
+            signs: self.signs.clone(),
+        }
+    }
 }
 
 impl<R: Runtime<DType = DType>> HadamardRotation<R> {

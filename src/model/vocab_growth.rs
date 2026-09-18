@@ -89,6 +89,7 @@ mod tests {
             audio: None,
             gdn: None,
             qwen35_attention: None,
+            hadamard: None,
         }
     }
 

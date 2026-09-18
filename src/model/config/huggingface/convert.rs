@@ -135,6 +135,7 @@ impl HuggingFaceConfig {
             audio,
             gdn: None,
             qwen35_attention: None,
+            hadamard: None,
         }
     }
 }

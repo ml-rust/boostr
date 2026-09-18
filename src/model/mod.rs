@@ -35,7 +35,7 @@ pub use mamba::{
     Mamba2Weights, Mamba3, Mamba3Config, Mamba3Model, Mamba3Weights,
 };
 pub use multimodal::{ModelInput, MultimodalModel};
-pub use qwen35::Qwen35Model;
+pub use qwen35::{Qwen35Model, qwen35_config_from_gguf};
 pub use registry::LoadedModel;
 pub use speech_lm::{
     ALL_SPECIAL_TOKENS, CodecVocab, DEFAULT_CONTROL_REGION, ExpressiveTtsLayout, OwnedSpeechRecord,

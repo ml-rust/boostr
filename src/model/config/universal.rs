@@ -9,6 +9,7 @@ use super::qwen35::Qwen35AttentionConfig;
 use super::ssm::SsmConfig;
 use super::vision::VisionConfig;
 use crate::error::{Error, Result};
+use crate::format::gguf::PrismHadamardConfig;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -83,6 +84,11 @@ pub struct UniversalConfig {
     /// `qwen35` gated full-attention layer configuration
     #[serde(default)]
     pub qwen35_attention: Option<Qwen35AttentionConfig>,
+
+    /// PrismML activation-rotation contract (`prism.hadamard.*` GGUF keys).
+    /// `None` when the checkpoint stores no rotated weights.
+    #[serde(default)]
+    pub hadamard: Option<PrismHadamardConfig>,
 }
 
 /// RMSNorm epsilon used when a config omits it.

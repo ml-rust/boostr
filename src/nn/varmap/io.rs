@@ -104,18 +104,25 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
     ///
     /// Unquantized tensors (F32, F16, BF16) are loaded as `Weight::Standard`.
     /// Quantized tensors (Q4_0, Q4K, etc.) are loaded as `Weight::Quantized`.
+    ///
+    /// Names are mapped with
+    /// [`gguf_to_hf_name_for_arch`](crate::format::gguf::gguf_to_hf_name_for_arch)
+    /// keyed on `general.architecture`, so an architecture with its own
+    /// layer table (`qwen35`) gets it and every other file keeps the global
+    /// mapping.
     pub fn from_gguf<P: AsRef<Path>>(path: P, device: &R::Device) -> Result<Self>
     where
         R::Client: numr::ops::ShapeOps<R>,
     {
-        use crate::format::gguf::gguf_to_hf_name;
+        use crate::format::gguf::gguf_to_hf_name_for_arch;
 
         let mut gguf = Gguf::open(path)?;
+        let arch = gguf.metadata().architecture().map(str::to_string);
         let names: Vec<String> = gguf.tensor_names().map(|s| s.to_string()).collect();
         let mut map = Self::new();
 
         for name in &names {
-            let hf_name = gguf_to_hf_name(name);
+            let hf_name = gguf_to_hf_name_for_arch(arch.as_deref(), name);
             let info = gguf.tensor_info(name)?.clone();
             if info.ggml_type.is_quantized() {
                 let qt = gguf.load_tensor_quantized::<R>(name, device)?;

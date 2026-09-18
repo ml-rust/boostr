@@ -7,6 +7,70 @@
 //!
 //! Covers: standard transformer (LLaMA), MLA (DeepSeek-V2/V3), MoE,
 //! and Mamba2/3 SSM architectures.
+//!
+//! [`gguf_to_hf_name_for_arch`] adds an architecture-keyed layer table in
+//! front of the global one. `qwen35` needs it: the fork reuses `ssm_*`
+//! names for Gated DeltaNet tensors whose meaning differs from Mamba2
+//! (`ssm_a` holds `-exp(A_log)`, not `A_log`), and adds names the global
+//! table has no entry for (`attn_qkv`, `attn_gate`, `ssm_alpha`,
+//! `ssm_beta`, `attn_q_norm`, `attn_k_norm`, `post_attention_norm`).
+
+/// Map a GGUF tensor name to its HuggingFace equivalent for `arch`
+/// (`general.architecture`).
+///
+/// `Some("qwen35")` routes `blk.N.*` names through [`map_qwen35_layer_suffix`]
+/// first. Every other `arch`, and `None`, is [`gguf_to_hf_name`] unchanged.
+pub fn gguf_to_hf_name_for_arch(arch: Option<&str>, name: &str) -> String {
+    if arch == Some("qwen35")
+        && let Some((layer_num, suffix)) = split_layer_name(name)
+        && let Some(hf_suffix) = map_qwen35_layer_suffix(suffix)
+    {
+        return format!("model.layers.{layer_num}.{hf_suffix}");
+    }
+    gguf_to_hf_name(name)
+}
+
+/// `blk.N.suffix` -> `(N, suffix)`. `None` for any other shape.
+fn split_layer_name(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix("blk.")?;
+    let dot_pos = rest.find('.')?;
+    Some((&rest[..dot_pos], &rest[dot_pos + 1..]))
+}
+
+/// `qwen35` layer suffixes. GDN mixer tensors live under `linear_attn.`,
+/// full-attention tensors under `self_attn.`, matching the HF
+/// `Qwen3_5` module names the loader reads.
+fn map_qwen35_layer_suffix(suffix: &str) -> Option<&'static str> {
+    Some(match suffix {
+        // Gated DeltaNet mixer
+        "attn_qkv.weight" => "linear_attn.in_proj_qkv.weight",
+        "attn_gate.weight" => "linear_attn.in_proj_z.weight",
+        "ssm_conv1d.weight" => "linear_attn.conv1d.weight",
+        "ssm_alpha.weight" => "linear_attn.alpha_proj.weight",
+        "ssm_beta.weight" => "linear_attn.beta_proj.weight",
+        "ssm_a" => "linear_attn.a_neg_exp",
+        "ssm_dt.bias" => "linear_attn.dt_bias",
+        "ssm_norm.weight" => "linear_attn.norm.weight",
+        "ssm_out.weight" => "linear_attn.out_proj.weight",
+
+        // Gated full attention
+        "attn_q.weight" => "self_attn.q_proj.weight",
+        "attn_k.weight" => "self_attn.k_proj.weight",
+        "attn_v.weight" => "self_attn.v_proj.weight",
+        "attn_output.weight" => "self_attn.o_proj.weight",
+        "attn_q_norm.weight" => "self_attn.q_norm.weight",
+        "attn_k_norm.weight" => "self_attn.k_norm.weight",
+
+        // Norms and FFN
+        "attn_norm.weight" => "input_layernorm.weight",
+        "post_attention_norm.weight" => "post_attention_layernorm.weight",
+        "ffn_gate.weight" => "mlp.gate_proj.weight",
+        "ffn_up.weight" => "mlp.up_proj.weight",
+        "ffn_down.weight" => "mlp.down_proj.weight",
+
+        _ => return None,
+    })
+}
 
 /// Map a GGUF tensor name to its HuggingFace equivalent.
 ///
@@ -21,12 +85,7 @@ pub fn gguf_to_hf_name(name: &str) -> String {
     }
 
     // Layer tensors: blk.N.suffix -> model.layers.N.hf_suffix
-    if let Some(rest) = name.strip_prefix("blk.")
-        && let Some(dot_pos) = rest.find('.')
-    {
-        let layer_num = &rest[..dot_pos];
-        let suffix = &rest[dot_pos + 1..];
-
+    if let Some((layer_num, suffix)) = split_layer_name(name) {
         if let Some(hf_suffix) = map_layer_suffix(suffix) {
             return format!("model.layers.{layer_num}.{hf_suffix}");
         }
@@ -283,6 +342,115 @@ mod tests {
             gguf_to_hf_name("blk.0.ssm_norm.weight"),
             "model.layers.0.mamba2.mixer.norm.weight"
         );
+    }
+
+    #[test]
+    fn qwen35_maps_gdn_layer_names() {
+        let arch = Some("qwen35");
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.0.attn_qkv.weight"),
+            "model.layers.0.linear_attn.in_proj_qkv.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.0.attn_gate.weight"),
+            "model.layers.0.linear_attn.in_proj_z.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.0.ssm_conv1d.weight"),
+            "model.layers.0.linear_attn.conv1d.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.0.ssm_alpha.weight"),
+            "model.layers.0.linear_attn.alpha_proj.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.0.ssm_beta.weight"),
+            "model.layers.0.linear_attn.beta_proj.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.0.ssm_a"),
+            "model.layers.0.linear_attn.a_neg_exp"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.0.ssm_dt.bias"),
+            "model.layers.0.linear_attn.dt_bias"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.0.ssm_norm.weight"),
+            "model.layers.0.linear_attn.norm.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.62.ssm_out.weight"),
+            "model.layers.62.linear_attn.out_proj.weight"
+        );
+    }
+
+    #[test]
+    fn qwen35_maps_attention_norm_and_ffn_names() {
+        let arch = Some("qwen35");
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.3.attn_q.weight"),
+            "model.layers.3.self_attn.q_proj.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.3.attn_q_norm.weight"),
+            "model.layers.3.self_attn.q_norm.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.3.attn_k_norm.weight"),
+            "model.layers.3.self_attn.k_norm.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.3.attn_output.weight"),
+            "model.layers.3.self_attn.o_proj.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.3.attn_norm.weight"),
+            "model.layers.3.input_layernorm.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.3.post_attention_norm.weight"),
+            "model.layers.3.post_attention_layernorm.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.3.ffn_down.weight"),
+            "model.layers.3.mlp.down_proj.weight"
+        );
+    }
+
+    #[test]
+    fn qwen35_keeps_globals_and_passes_unknown_through() {
+        let arch = Some("qwen35");
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "token_embd.weight"),
+            "model.embed_tokens.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "output_norm.weight"),
+            "model.norm.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "output.weight"),
+            "lm_head.weight"
+        );
+        assert_eq!(
+            gguf_to_hf_name_for_arch(arch, "blk.0.unknown_suffix.weight"),
+            "blk.0.unknown_suffix.weight"
+        );
+    }
+
+    #[test]
+    fn other_archs_use_the_global_table() {
+        for arch in [None, Some("llama"), Some("mamba2")] {
+            assert_eq!(
+                gguf_to_hf_name_for_arch(arch, "blk.0.ssm_a"),
+                "model.layers.0.mamba2.mixer.A_log"
+            );
+            assert_eq!(
+                gguf_to_hf_name_for_arch(arch, "blk.0.attn_qkv.weight"),
+                "blk.0.attn_qkv.weight"
+            );
+        }
     }
 
     #[test]

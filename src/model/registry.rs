@@ -87,6 +87,10 @@ where
                 let model = super::hybrid::HybridModel::from_varbuilder(vb, config)?;
                 Ok(LoadedModel::Hybrid(Box::new(model)))
             }
+            "qwen35" => {
+                let model = super::qwen35::Qwen35Model::from_varbuilder(vb, config)?;
+                Ok(LoadedModel::Qwen35(Box::new(model)))
+            }
             // Multimodal: vision/audio encoders + LLM backbone
             _ if config.vision.is_some() || config.audio.is_some() => {
                 let model = super::multimodal::MultimodalModel::from_varbuilder(vb, config)?;
@@ -394,6 +398,35 @@ where
             | LoadedModel::Hybrid(_) => None,
         }
     }
+
+    /// Layers that read the `LayeredKvCache`. `Some` for `qwen35`, whose
+    /// cache is sized per attention layer rather than per model layer.
+    pub fn num_attention_layers(&self) -> Option<usize> {
+        match self {
+            LoadedModel::Qwen35(m) => Some(m.num_attention_layers()),
+            LoadedModel::Multimodal(m) => m.llm().num_attention_layers(),
+            LoadedModel::Llama(_)
+            | LoadedModel::LlamaTp(_)
+            | LoadedModel::Mamba1(_)
+            | LoadedModel::Mamba2(_)
+            | LoadedModel::Mamba3(_)
+            | LoadedModel::Hybrid(_) => None,
+        }
+    }
+
+    /// Layers that read the `LayeredGdnState`. `Some` for `qwen35`.
+    pub fn num_gdn_layers(&self) -> Option<usize> {
+        match self {
+            LoadedModel::Qwen35(m) => Some(m.num_gdn_layers()),
+            LoadedModel::Multimodal(m) => m.llm().num_gdn_layers(),
+            LoadedModel::Llama(_)
+            | LoadedModel::LlamaTp(_)
+            | LoadedModel::Mamba1(_)
+            | LoadedModel::Mamba2(_)
+            | LoadedModel::Mamba3(_)
+            | LoadedModel::Hybrid(_) => None,
+        }
+    }
 }
 
 impl<R: Runtime> std::fmt::Debug for LoadedModel<R> {
@@ -437,6 +470,8 @@ mod tests {
         assert_eq!(model.vocab_size(), 16);
         assert_eq!(model.max_seq_len(), 32);
         assert_eq!(model.gdn_config().map(|g| g.value_heads), Some(4));
+        assert_eq!(model.num_attention_layers(), Some(1));
+        assert_eq!(model.num_gdn_layers(), Some(1));
         assert!(model.rope_caches().is_some());
         assert_eq!(format!("{model:?}"), "Qwen35");
     }

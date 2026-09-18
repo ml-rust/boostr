@@ -217,6 +217,7 @@ mod tests {
             audio: None,
             gdn: None,
             qwen35_attention: None,
+            hadamard: None,
         };
 
         config.validate().unwrap();
@@ -277,6 +278,7 @@ mod tests {
             audio: None,
             gdn: None,
             qwen35_attention: None,
+            hadamard: None,
         }
     }
 

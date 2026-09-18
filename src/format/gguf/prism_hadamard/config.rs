@@ -11,6 +11,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
+
 use super::block::parse_block_size;
 use super::signs::parse_signs;
 use super::weights::{
@@ -42,7 +44,7 @@ pub(super) fn missing_key(key: &str) -> Error {
 }
 
 /// Sign-vector source for the activation-rotation contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignMode {
     /// No sign flip; the block transform alone rotates the activation.
     Identity,
@@ -56,7 +58,10 @@ pub enum SignMode {
 /// matmul, the activation is sign-flipped then transformed per `block_size`
 /// segment. `inverse_weight_names` store rotated rows: after lookup,
 /// transform then sign-flip.
-#[derive(Debug, Clone)]
+///
+/// Serializes as part of `UniversalConfig` so a config written to disk
+/// carries the rotation contract with it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrismHadamardConfig {
     pub block_size: usize,
     pub sign_mode: SignMode,
@@ -336,6 +341,23 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("token_embd.weight"));
+    }
+
+    #[test]
+    fn serde_round_trip_keeps_names_and_signs() {
+        let cfg = PrismHadamardConfig::from_metadata(&meta(valid_pairs()))
+            .unwrap()
+            .unwrap();
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: PrismHadamardConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.block_size, 4);
+        assert_eq!(back.sign_mode, SignMode::Explicit);
+        assert!(back.rotates("output.weight"));
+        assert!(back.rotates("blk.0.attn_q.weight"));
+        assert_eq!(
+            back.signs_for_width(8).unwrap(),
+            cfg.signs_for_width(8).unwrap()
+        );
     }
 
     #[test]

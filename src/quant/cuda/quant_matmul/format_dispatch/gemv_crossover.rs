@@ -75,8 +75,9 @@ pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
         // deep reduction reverses into a much larger loss at a shallow one,
         // so a single crossover cannot hold for it across shapes.
         QuantFormat::Q3K | QuantFormat::Q2K => 1,
-        // The three PrismML-fork formats have the `_n2` and `_n4` tiles and a
-        // byte-permute decode lighter than any legacy format's. Their 4 is
+        // The three PrismML-fork formats have the single-token, `_n2` and
+        // `_n4` dp4a kernels and a byte-permute decode lighter than any
+        // legacy format's, so they take dp4a at every m here. Their 4 is
         // the widest tile they serve, NOT a measured crossover: none has a
         // feature-major kernel, so past 4 they take the per-element f32 GEMM,
         // and the GEMV/GEMM crossover on this GPU is unmeasured.

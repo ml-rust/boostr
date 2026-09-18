@@ -15,7 +15,8 @@
 // These four have no single-token dp4a GEMV: their `_n2` tile exists because
 // batching pays at m = 2, while m = 1 is served by the F32-activation kernel
 // beside them. `dispatch_gemv` reflects that by entering the dp4a branch for
-// these formats only from m = 2 up.
+// these formats only from m = 2 up. The prism three also instantiate the
+// body at NTOK = 1, so they take dp4a at every m.
 //
 // Weight decode is lifted from the MMQ staging structs `MmqfQ40`, `MmqfQ50`,
 // `MmqfQ41` and `MmqfQ51` in `../quant_mmq_mma.cu`, which are in turn
@@ -179,7 +180,9 @@ struct LegacyQ51 {
 // Grid: (N, ceil(M / NTOK), 1) — one output column per block, NTOK token
 // columns per block. Block: `mwr_nwarps_ntok(NTOK) * WARP_SIZE` threads; the
 // launch side must size the block from the same function, because the
-// reduction's shared array and `__launch_bounds__` both read it.
+// reduction's shared array and `__launch_bounds__` both read it. NTOK = 1
+// is a valid instance: one accumulator, one activation row, a
+// `[NWARPS - 1][1][WARP_SIZE]` reduction array.
 //
 // Lane map. A 32-element chunk holds 4 source words, so a warp's 32 lanes
 // cover 8 whole chunks per step: lane maps to (chunk `lane / 4` inside an

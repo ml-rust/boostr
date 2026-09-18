@@ -21,12 +21,14 @@ use numr::tensor::Tensor;
 /// GEMV dispatch for M <= 64 (decode + short prefill).
 ///
 /// Chooses the dp4a MWR path for the formats that have such a kernel and the
-/// F32 activation path for the rest. Q4_0, Q5_0, Q4_1, Q5_1, IQ4_NL, IQ4_XS,
-/// the six grid-indexed IQ formats IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S
-/// and IQ1_S, and the three PrismML-fork formats PQ2_0, Q2_0 and Q1_0 have
-/// only the token-batched dp4a kernel, so they take the dp4a path from
-/// `m = 2` up and the F32 path at `m = 1`. Returns `Ok(None)` if the format
-/// has no dedicated kernel; callers fall back to `quant_matmul_via_dequant`.
+/// F32 activation path for the rest. Q4_0, Q5_0, Q4_1, Q5_1, IQ4_NL, IQ4_XS
+/// and the six grid-indexed IQ formats IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS,
+/// IQ3_S and IQ1_S have only the token-batched dp4a kernel, so they take the
+/// dp4a path from `m = 2` up and the F32 path at `m = 1`. The three
+/// PrismML-fork formats PQ2_0, Q2_0 and Q1_0 have a single-token dp4a kernel
+/// as well and take dp4a at every `m`, like Q8_0. Returns `Ok(None)` if the
+/// format has no dedicated kernel; callers fall back to
+/// `quant_matmul_via_dequant`.
 pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
     client: &CudaClient,
     act_contig: &Tensor<CudaRuntime>,
@@ -42,17 +44,14 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
     let k_u32 = k as u32;
     let n_u32 = n as u32;
 
-    // The four legacy 32-element formats, the two IQ4 codebook formats, the
-    // six grid-indexed IQ formats and the three PrismML-fork formats have a
-    // token-batched dp4a kernel but no single-token one: at m = 1 the batched
-    // tile's spare column is pure overhead, and the F32 path below already
-    // serves that shape. So they join the dp4a branch only from m = 2 up.
+    // The four legacy 32-element formats, the two IQ4 codebook formats and
+    // the six grid-indexed IQ formats have a token-batched dp4a kernel but no
+    // single-token one: at m = 1 the batched tile's spare column is pure
+    // overhead, and the F32 path below already serves that shape. So they
+    // join the dp4a branch only from m = 2 up.
     let dp4a_batched_only = matches!(
         format,
-        QuantFormat::PQ2_0
-            | QuantFormat::Q2_0
-            | QuantFormat::Q1_0
-            | QuantFormat::Q4_0
+        QuantFormat::Q4_0
             | QuantFormat::Q5_0
             | QuantFormat::Q4_1
             | QuantFormat::Q5_1
@@ -95,7 +94,9 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
     };
 
     // dp4a path: formats with Q8_1 activation + dp4a MWR kernels, aligned K.
-    // `k_aligned` above carries the per-format K multiple.
+    // `k_aligned` above carries the per-format K multiple. The prism three
+    // sit in the every-m set: their unsuffixed kernel is the NTOK = 1
+    // instance of the batched body.
     if (matches!(
         format,
         QuantFormat::Q4K
@@ -104,6 +105,9 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
             | QuantFormat::Q5K
             | QuantFormat::Q3K
             | QuantFormat::Q2K
+            | QuantFormat::PQ2_0
+            | QuantFormat::Q2_0
+            | QuantFormat::Q1_0
     ) || (dp4a_batched_only && m >= 2))
         && k_aligned
     {
@@ -168,10 +172,11 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
         // Q2_K's batched read never wins, so they have neither and always use
         // the per-token kernel.
         //
-        // The legacy four, the two IQ4 formats, the six grid-indexed IQ
-        // formats and the prism three have no per-token dp4a kernel at all,
-        // so the m = 1 row below never applies to them: the branch guard
-        // above already routed m = 1 to the F32 path.
+        // The legacy four, the two IQ4 formats and the six grid-indexed IQ
+        // formats have no per-token dp4a kernel at all, so the m = 1 row
+        // below never applies to them: the branch guard above already routed
+        // m = 1 to the F32 path. The prism three have one, the NTOK = 1
+        // instance of their batched body.
         let tokens_per_block: u32 = match (format, m) {
             (QuantFormat::Q3K | QuantFormat::Q2K, _) => 1,
             (_, 0..=1) => 1,
@@ -186,6 +191,9 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
             (QuantFormat::Q6K, 1) => "quant_gemv_q6_k_q8_1_mwr",
             (QuantFormat::Q8_0, 1) => "quant_gemv_q8_0_q8_1_mwr",
             (QuantFormat::Q5K, 1) => "quant_gemv_q5_k_q8_1_mwr",
+            (QuantFormat::PQ2_0, 1) => "quant_gemv_pq2_0_q8_1_mwr",
+            (QuantFormat::Q2_0, 1) => "quant_gemv_q2_0_q8_1_mwr",
+            (QuantFormat::Q1_0, 1) => "quant_gemv_q1_0_q8_1_mwr",
             (QuantFormat::Q4K, _) => "quant_gemv_q4_k_q8_1_mwr_n2",
             (QuantFormat::Q5K, _) => "quant_gemv_q5_k_q8_1_mwr_n2",
             (QuantFormat::Q6K, 2) => "quant_gemv_q6_k_q8_1_mwr_n2",
@@ -287,7 +295,9 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
         return Ok(Some(()));
     }
 
-    // F32 activation path for formats with dedicated F32 GEMV kernels
+    // F32 activation path for formats with dedicated F32 GEMV kernels. For a
+    // format with a dp4a kernel at every m (Q8_0, the K-quants, the prism
+    // three) this is reached only when K fails `k_aligned`.
     tracing::debug!(
         ?format,
         m,

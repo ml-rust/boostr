@@ -390,11 +390,13 @@ const COSINE_FLOOR: f64 = 0.999;
 /// is per-format: at least 2 for every dp4a format except `Q3K` and `Q2K`,
 /// and 0 for the rest. `Q4_0`, `Q5_0`, `Q4_1`, `Q5_1`, `IQ4NL`, `IQ4XS`, the
 /// six grid-indexed IQ formats `IQ2XXS`, `IQ2XS`, `IQ2S`, `IQ3XXS`, `IQ3S` and
-/// `IQ1S`, and the PrismML-fork `PQ2_0`, `Q2_0` and `Q1_0` reach it through
-/// the token-batched dp4a GEMV, which has no single-token sibling. So `m = 2`
-/// stays on the dp4a GEMV for most of these and lands on the MMQ/GEMM path
-/// for the others. Both quantize the activation to Q8_1, so this gate covers
-/// either one and no threshold change moves a test between gates. Only
+/// `IQ1S` reach it through the token-batched dp4a GEMV, which has no
+/// single-token sibling. The PrismML-fork `PQ2_0`, `Q2_0` and `Q1_0` have a
+/// single-token dp4a kernel as well, so their `m = 1` case is on this gate
+/// too. So `m = 2` stays on the dp4a GEMV for most of these and lands on the
+/// MMQ/GEMM path for the others. Both quantize the activation to Q8_1, so
+/// this gate covers either one and no threshold change moves a test between
+/// gates. Only
 /// `IQ1M` has no MMQ or feature-major kernel at all: every path it takes
 /// dequantizes the weight and keeps the activation in f32, so its `m = 2` and
 /// `m = 32` cases both stay on the element-wise gate instead of this one.
@@ -1669,13 +1671,25 @@ fn pq2_0_quant_matmul_matches_cpu() {
             blk[2 + i] = payload(i, b);
         }
     }
-    // m = 1 is the F32-activation warp-per-column kernel: the batched dp4a
-    // tile has no single-token sibling (see `dispatch_gemv`).
+    // m = 1 routes to the single-token dp4a kernel
+    // `quant_gemv_pq2_0_q8_1_mwr`, the NTOK = 1 instance of the batched body
+    // (see `dispatch_gemv`). No kernel-name probe exists in this file, so the
+    // cosine gate is the check: an F32-path result would also pass it, but a
+    // wrong NTOK = 1 lane map or reduction collapses the score.
     assert_matmul_parity_q8_1_activation(
         "pq2_0_quant_matmul_matches_cpu_m1",
         QuantFormat::PQ2_0,
         &data,
         1,
+        n,
+        k,
+    );
+    // m = 2 fills the `_n2` tile exactly.
+    assert_matmul_parity_q8_1_activation(
+        "pq2_0_quant_matmul_matches_cpu_m2",
+        QuantFormat::PQ2_0,
+        &data,
+        2,
         n,
         k,
     );
@@ -1715,13 +1729,25 @@ fn q2_0_quant_matmul_matches_cpu() {
             blk[2 + i] = payload(i, b);
         }
     }
-    // m = 1 is the F32-activation warp-per-column kernel: the batched dp4a
-    // tile has no single-token sibling (see `dispatch_gemv`).
+    // m = 1 routes to the single-token dp4a kernel
+    // `quant_gemv_q2_0_q8_1_mwr`, the NTOK = 1 instance of the batched body
+    // (see `dispatch_gemv`). No kernel-name probe exists in this file, so the
+    // cosine gate is the check: an F32-path result would also pass it, but a
+    // wrong NTOK = 1 lane map or reduction collapses the score.
     assert_matmul_parity_q8_1_activation(
         "q2_0_quant_matmul_matches_cpu_m1",
         QuantFormat::Q2_0,
         &data,
         1,
+        n,
+        k,
+    );
+    // m = 2 fills the `_n2` tile exactly.
+    assert_matmul_parity_q8_1_activation(
+        "q2_0_quant_matmul_matches_cpu_m2",
+        QuantFormat::Q2_0,
+        &data,
+        2,
         n,
         k,
     );
@@ -1763,13 +1789,25 @@ fn q1_0_quant_matmul_matches_cpu() {
             blk[2 + i] = payload(i, b);
         }
     }
-    // m = 1 is the F32-activation warp-per-column kernel: the batched dp4a
-    // tile has no single-token sibling (see `dispatch_gemv`).
+    // m = 1 routes to the single-token dp4a kernel
+    // `quant_gemv_q1_0_q8_1_mwr`, the NTOK = 1 instance of the batched body
+    // (see `dispatch_gemv`). No kernel-name probe exists in this file, so the
+    // cosine gate is the check: an F32-path result would also pass it, but a
+    // wrong NTOK = 1 lane map or reduction collapses the score.
     assert_matmul_parity_q8_1_activation(
         "q1_0_quant_matmul_matches_cpu_m1",
         QuantFormat::Q1_0,
         &data,
         1,
+        n,
+        k,
+    );
+    // m = 2 fills the `_n2` tile exactly.
+    assert_matmul_parity_q8_1_activation(
+        "q1_0_quant_matmul_matches_cpu_m2",
+        QuantFormat::Q1_0,
+        &data,
+        2,
         n,
         k,
     );

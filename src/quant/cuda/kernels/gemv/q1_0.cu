@@ -1,4 +1,4 @@
-// Q1_0 GEMV kernels — F32 activation (m = 1) and token-batched dp4a
+// Q1_0 GEMV kernels — F32 activation fallback, single-token and token-batched dp4a
 //
 // Q1_0 block: 128 elements, 18 bytes
 // Layout: [d:f16(2), qs:16B] — one sign bit per element, low bit first
@@ -12,6 +12,10 @@
 // ============================================================================
 // Q1_0 GEMV (F32 activation) — warp-per-column
 // ============================================================================
+//
+// Fallback for a K that is not a multiple of the block size, the same
+// role `quant_gemv_q8_0_f32` keeps beside its dp4a kernel. `dispatch_gemv`
+// routes every aligned K, m = 1 included, to the dp4a kernels below.
 //
 // One warp per output column, one block of 128 elements per loop step.
 // Lane `l` decodes elements `l + 32 * c` for each of the block's 4
@@ -54,19 +58,32 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q1_0_f32(
 }
 
 // ============================================================================
-// Token-batched Q1_0 GEMV with dp4a (Q1_0 weight × Q8_1 activation)
+// Q1_0 GEMV with dp4a (Q1_0 weight × Q8_1 activation)
 //
 // One block covers NTOK consecutive token columns and decodes each weight
 // chunk once for all of them, instead of re-reading the whole weight matrix
-// per token as the F32 kernel above does. Both the `_n2` and `_n4` tile
-// widths exist; `dispatch_gemv` picks the narrowest one that covers M. The
-// body lives in `legacy_ntok.cuh` and the decode in `prism_ntok.cuh`; see
-// those headers for the lane map, the chunk-per-block rule, the ragged-tail
-// rule and the alignment constraint.
+// per token as the F32 kernel above does. The body lives in
+// `legacy_ntok.cuh` and the decode in `prism_ntok.cuh`; see those headers
+// for the lane map, the chunk-per-block rule, the ragged-tail rule and the
+// alignment constraint.
 //
-// There is no single-token sibling: at m = 1 the tile's spare column is pure
-// overhead and the F32 kernel above serves that shape.
+// Three tile widths exist and `dispatch_gemv` picks the narrowest one that
+// covers M. The unsuffixed kernel is the NTOK = 1 instance of the same
+// body: four warps per block, one output column per block, each warp
+// striding over 8-chunk groups of K with a shared-memory reduction at the
+// end. That is the geometry of `quant_gemv_q8_0_q8_1_mwr`, and it serves
+// m = 1 with int8 dot products and one `d * d8` FMA per 32-element chunk
+// where the F32 kernel above spends one FMA per element.
 // ============================================================================
+
+extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(1) * WARP_SIZE, 1) void quant_gemv_q1_0_q8_1_mwr(
+    const unsigned char* __restrict__ q8_act,
+    const unsigned char* __restrict__ weight,
+    float* __restrict__ output,
+    unsigned int M, unsigned int K, unsigned int N
+) {
+    quant_gemv_legacy_q8_1_mwr_ntok<PrismQ10, 1>(q8_act, weight, output, M, K, N);
+}
 
 extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(2) * WARP_SIZE, 1) void quant_gemv_q1_0_q8_1_mwr_n2(
     const unsigned char* __restrict__ q8_act,

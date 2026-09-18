@@ -2,10 +2,11 @@
 //!
 //! Split out of `impl_ops.rs` to stay under the `cuda/*.rs` 400-line limit.
 //! Quantizes the shared activation once, then reuses it across every weight
-//! in the batch instead of re-quantizing per weight: the dp4a GEMV record
-//! when every weight is in its GEMV regime, the feature-major MMQ record
-//! otherwise. A projection trio (q, k, v) or pair (gate, up) then costs one
-//! activation pass, not one per weight.
+//! in the batch instead of re-quantizing per weight: the feature-major MMQ
+//! record when every weight has such a kernel, at every M, so a row's bits
+//! never depend on the batch; the dp4a GEMV record on the devices and
+//! formats without one. A projection trio (q, k, v) or pair (gate, up) then
+//! costs one activation pass, not one per weight.
 
 use crate::error::{Error, Result};
 use crate::quant::traits::QuantMatmulOps;
@@ -24,9 +25,9 @@ use super::format_dispatch::{feat_major_format, gemv_max_m};
 use super::helpers::{BLOCK_CONTRACT, quantize_activation_q8_1};
 use super::mmq_feat_major;
 
-/// Batched quantized matmul: dp4a GEMV when every weight is in its GEMV
-/// regime, the feature-major MMQ kernels over one shared activation record
-/// when every weight has one, else `quant_matmul` per weight.
+/// Batched quantized matmul: the feature-major MMQ kernels over one shared
+/// activation record when every weight has one, else dp4a GEMV when every
+/// weight is in its GEMV regime, else `quant_matmul` per weight.
 pub(super) fn quant_matmul_batch_impl(
     client: &CudaClient,
     activation: &Tensor<CudaRuntime>,
@@ -71,6 +72,9 @@ pub(super) fn quant_matmul_batch_impl(
         )
     });
     let device_index = activation.device().id();
+    if let Some(outputs) = mmq_batch(client, activation, &act_contig, weights, m, k)? {
+        return Ok(outputs);
+    }
     // The batch takes the GEMV kernels only where the single-weight dispatch
     // would: past a format's crossover the MMQ kernels win, and a batch is
     // no reason to hand it a slower kernel.
@@ -78,10 +82,6 @@ pub(super) fn quant_matmul_batch_impl(
         .iter()
         .all(|w| m <= gemv_max_m(w.format(), device_index));
     let use_dp4a = all_dp4a && all_gemv_regime && m <= 4 && k.is_multiple_of(32);
-
-    if !use_dp4a && let Some(outputs) = mmq_batch(client, activation, &act_contig, weights, m, k)? {
-        return Ok(outputs);
-    }
 
     if use_dp4a {
         // Quantize activation to Q8_1 ONCE, reuse for all weights
@@ -236,7 +236,8 @@ fn mmq_batch(
         formats.push(fm);
     }
 
-    let (q8_buf, ntok) = mmq_feat_major::quantize_shared_activation(client, act_contig, m, k)?;
+    let (q8_buf, ntok) =
+        mmq_feat_major::quantize_shared_activation(client, act_contig, &formats, m, k)?;
     let q8_ptr = q8_buf.ptr();
 
     let a_shape = activation.shape();

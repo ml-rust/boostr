@@ -78,9 +78,9 @@ pub(in crate::quant::cuda::quant_matmul) const Q3_K: FeatMajorFormat = FeatMajor
 /// token tiles where the 84-stride formats hold two. That is accepted for this
 /// format rather than paid for by rounding `d * sc` through `half`, which is
 /// what the GEMM/GEMV parity bound rejects. One of the measured tile-parallel
-/// opt-outs: holding one resident block halves the stream-k grid width the
-/// 84-stride formats get, so the split stops paying once the tile count nears
-/// the veto threshold.
+/// opt-outs: holding one resident block halves the split-K blocks in flight
+/// the 84-stride formats get, so the split stops paying once the tile count
+/// nears the veto threshold.
 pub(in crate::quant::cuda::quant_matmul) const Q2_K: FeatMajorFormat = FeatMajorFormat {
     kernel_infix: "q2_k",
     x_stride: 100,
@@ -93,7 +93,7 @@ pub(in crate::quant::cuda::quant_matmul) const Q2_K: FeatMajorFormat = FeatMajor
 #[cfg(test)]
 mod tests {
     use super::super::super::tiling::{
-        Cadence, FEAT_TILE_DEFAULT, VARIANTS, smem_bytes, smem_opt_in_limit,
+        Cadence, FEAT_TILE_DEFAULT, SMALL_X, VARIANTS, smem_bytes, smem_opt_in_limit,
     };
     use super::super::legacy::{Q4_0, Q4_1, Q5_0, Q5_1, Q8_0};
     use super::*;
@@ -272,11 +272,15 @@ mod tests {
         assert_eq!(Q2_K.x_stride, 100);
         // The family's bank-padding rule, asserted in the kernel as well.
         assert_eq!(Q2_K.x_stride % 8, 4);
-        // Weight row cost over Q4_K, plus the scratch, at every token tile.
+        // Weight row cost over Q4_K, plus the scratch, at every token tile;
+        // the scratch doubles with the activation tile up to `SMALL_X`.
         const EXTRA_ROW: u32 = 4 * FEAT_TILE_DEFAULT * 16;
         assert!(VARIANTS.iter().all(|&x| {
+            let halves = if x <= SMALL_X { 2 } else { 1 };
             smem_bytes(&Q2_K, FEAT_TILE_DEFAULT, x, Cadence::Halves)
-                == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x, Cadence::Halves) + EXTRA_ROW + 4 * x * 4
+                == smem_bytes(&Q4_K, FEAT_TILE_DEFAULT, x, Cadence::Halves)
+                    + EXTRA_ROW
+                    + halves * 4 * x * 4
         }));
         // The widest variant must still fit what a device grants on opt-in.
         assert!(

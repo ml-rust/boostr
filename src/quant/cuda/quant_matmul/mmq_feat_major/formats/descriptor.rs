@@ -1,7 +1,7 @@
 //! The per-format descriptor the feature-major dispatch reads.
 
 /// One weight format's share of the feature-major family. Everything else in
-/// this module — variant choice, stream-k decision, launch, fixup — is shared.
+/// this module — variant choice, split count, launch, fixup — is shared.
 pub(in crate::quant::cuda::quant_matmul) struct FeatMajorFormat {
     /// Format name inside the kernel symbol, as `MMQ_FM_KERNEL`'s `NAME`.
     pub kernel_infix: &'static str,
@@ -18,12 +18,13 @@ pub(in crate::quant::cuda::quant_matmul) struct FeatMajorFormat {
     /// per-16 split of each stored sum into this region once per staged
     /// activation tile.
     pub act_scratch_ints_per_token: u32,
-    /// `true` when tile-parallel outruns stream-k at a geometry where
-    /// `dispatch.rs` picks stream-k.
+    /// `true` when the fused tile-parallel grid outruns the split-K pair at
+    /// a geometry where `dispatch.rs` picks the pair. Both form the same
+    /// bits; this is a schedule choice.
     ///
     /// Both grids hold the same blocks per SM, so residency does not separate
-    /// them. The split does: stream-k divides every tile across blocks and
-    /// pays a fixup pass to rejoin the partials. The finer the split, the more
+    /// them. The pair divides every tile across blocks and pays partial
+    /// stores plus a fixup pass to rejoin them. The finer the split, the more
     /// that pass costs relative to the wave it saves. A format flagged here
     /// gains too little from the split to cover the pass once the
     /// tile-parallel grid nearly fills the device.
@@ -36,18 +37,20 @@ pub(in crate::quant::cuda::quant_matmul) struct FeatMajorFormat {
     /// At small `m`, `token_tiles` is 1 for every `mmq_x`. Variant selection
     /// cannot change this trade-off.
     ///
-    /// Re-measure: run the kernel-comparison example with `--stream-k` at
+    /// Re-measure: run the kernel-comparison example with `--split-k` at
     /// small `m`, compare both kernels per format, flip any format whose
     /// tile-parallel run wins outside noise.
     pub prefers_tile_parallel: bool,
-    /// `true` when the kernel file compiles this format's `_y64_` entry
-    /// points, the narrow feature tile for the CTA-starved small-M, small-N
-    /// regime — see `MMQ_FM_KERNEL_Y64` in `quant_mmq_mma.cu`.
+    /// `true` when the kernel file compiles this format's `_y64_` and `_y16_`
+    /// entry points: the narrow feature tile for the CTA-starved small-M,
+    /// small-N regime and the single-warp tile for the decode regime — see
+    /// `MMQ_FM_KERNEL_Y64` and `MMQ_FM_KERNEL_Y16` in `quant_mmq_mma.cu`.
     ///
     /// Only the formats a K-quant mix places on the small-N projections
-    /// compile it; every other format has one feature tile, and the dispatch
-    /// never asks it for the narrow one. A format joins by adding its
-    /// `MMQ_FM_KERNEL_Y64` list to the kernel file AND flipping this flag;
-    /// the flag alone would launch a symbol the module does not hold.
+    /// compile them; every other format has one feature tile, and the
+    /// dispatch never asks it for another. A format joins by adding its
+    /// `MMQ_FM_KERNEL_Y64` and `MMQ_FM_KERNEL_Y16` lists to the kernel file
+    /// AND flipping this flag; the flag alone would launch a symbol the
+    /// module does not hold.
     pub narrow_tile: bool,
 }

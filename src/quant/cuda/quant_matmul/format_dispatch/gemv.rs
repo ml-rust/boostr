@@ -1,4 +1,6 @@
-//! GEMV dispatch for CUDA quantized matmul, taken when `m <= gemv_max_m`.
+//! GEMV dispatch for CUDA quantized matmul, taken when `m <= gemv_max_m` for
+//! a weight without a feature-major MMQ kernel on this device. A weight with
+//! one takes it at every `m` (see `impl_ops.rs`).
 
 use crate::error::{Error, Result};
 use crate::quant::cuda::kernels::{
@@ -17,6 +19,11 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 /// Largest `m` for which the GEMV path beats the feature-major MMQ path.
+///
+/// Consulted only for the formats without a feature-major kernel and on
+/// devices without int8 MMA: a weight with that kernel takes it at every
+/// `m`, so a row's bits never depend on the batch (`impl_ops.rs`). The
+/// measurements below are kept for the day the crossover is needed again.
 ///
 /// A per-token GEMV re-reads the whole weight matrix once per token, so its
 /// cost scales linearly with `m`. MMQ stages a weight tile once per token

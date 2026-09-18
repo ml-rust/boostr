@@ -6,6 +6,7 @@ use crate::quant::{QuantFormat, QuantTensor};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
+use numr::ops::ActivationOps;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
@@ -16,8 +17,9 @@ use super::super::kernels::{
 };
 use super::batched_gemv::quant_matmul_batch_impl;
 use super::fallback::{quant_matmul_via_dequant, quant_swiglu_via_dequant};
-use super::format_dispatch::{dispatch_gemv, dispatch_matmul, gemv_max_m};
+use super::format_dispatch::{dispatch_gemv, dispatch_matmul, feat_major_format, gemv_max_m};
 use super::helpers::{BLOCK_CONTRACT, quantize_activation_q8_1, validate_input_cuda};
+use super::mmq_feat_major;
 
 impl QuantMatmulOps<CudaRuntime> for CudaClient {
     fn int4_gemm(
@@ -161,10 +163,29 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         let output = Tensor::<CudaRuntime>::empty(&out_shape, DType::F32, activation.device())?;
         let output_ptr = output.ptr();
 
-        // The GEMV/GEMM crossover is measured per format: a faster GEMM moves
-        // it down. `gemv_max_m` holds the current value for each format.
+        // Every M of a weight with a feature-major MMQ kernel takes it: the
+        // tiling follows M, the float sequence each output element receives
+        // does not, so a row's result is the same bits at every batch size.
+        // The GEMV/GEMM crossover below is only for the formats and devices
+        // without one.
         let format = weight.format();
         let device_index = activation.device().id();
+        if let Some(fm) = feat_major_format(format, k, device_index)
+            && mmq_feat_major::dispatch(
+                fm,
+                self,
+                &act_contig,
+                weight,
+                output_ptr,
+                m,
+                k,
+                n,
+                mmq_feat_major::FeatTile::Auto,
+            )?
+            .is_some()
+        {
+            return Ok(output);
+        }
         if m <= gemv_max_m(format, device_index) {
             match dispatch_gemv(self, &act_contig, weight, output_ptr, m, k, n)? {
                 Some(()) => {}
@@ -227,6 +248,23 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         let k_u32 = k as u32;
         let n_u32 = n as u32;
 
+        // The two projections run as one batched MMQ call over a shared
+        // activation record wherever the format has a feature-major kernel:
+        // the same bits per row at every M as `quant_matmul` gives, and
+        // `silu_mul` sums gate and up in one fixed order. The fused dp4a
+        // kernel below re-reads both weights once per token and is kept only
+        // for the formats and devices without that kernel.
+        if feat_major_format(gate_format, k, device_index).is_some() {
+            let mut outputs = self.quant_matmul_batch(activation, &[gate_weight, up_weight])?;
+            let up = outputs.pop().ok_or_else(|| Error::QuantError {
+                reason: "quant_swiglu: batched matmul returned no up projection".into(),
+            })?;
+            let gate = outputs.pop().ok_or_else(|| Error::QuantError {
+                reason: "quant_swiglu: batched matmul returned no gate projection".into(),
+            })?;
+            return self.silu_mul(&gate, &up).map_err(Error::Numr);
+        }
+
         // Use fused kernel for GEMV path (decode + short prefill)
         let use_fused = m <= 64
             && matches!(
@@ -288,7 +326,6 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
             // Large batch: separate matmuls + fused silu_mul
             let gate = self.quant_matmul(activation, gate_weight)?;
             let up = self.quant_matmul(activation, up_weight)?;
-            use numr::ops::ActivationOps;
             self.silu_mul(&gate, &up).map_err(Error::Numr)
         }
     }

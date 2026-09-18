@@ -11,6 +11,24 @@ pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const FEAT_TILE_DEFAULT
 /// formats whose `narrow_tile` flag is set, and only at [`NARROW_VARIANTS`].
 pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const FEAT_TILE_NARROW: u32 = 64;
 
+/// Single-warp feature tile for the decode regime: one 16-feature minitile
+/// per block, four times the blocks of the narrow tile at the same per-warp
+/// work. Compiled only for the formats whose `narrow_tile` flag is set, and
+/// only at [`SMALL_VARIANTS`]. Must match `MMQF_Y_SMALL` in
+/// `src/quant/cuda/kernels/quant_mmq_mma.cu`.
+pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const FEAT_TILE_SMALL: u32 = 16;
+
+/// Token tiles compiled at the single-warp feature tile. Must match the
+/// `MMQ_FM_KERNEL_Y16` list in the kernel file. A batch wider than the last
+/// one takes the narrow or default tile.
+pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const SMALL_VARIANTS: &[u32] = &[8, 16];
+
+/// Widest token tile the kernel stages both 128-k halves of an activation
+/// group at once on every feature tile and cadence, prefetching the next
+/// group where the format allows; the shared-memory request doubles its
+/// activation term up to here. Must match `MMQF_SMALL_X` in the kernel file.
+pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const SMALL_X: u32 = 32;
+
 /// Compiled token-tile variants at the default feature tile, ascending. Below
 /// 48 the tile steps by 8, at and above it by 16; the kernel's warp blocking
 /// rejects every other value.
@@ -47,9 +65,9 @@ pub(super) const WARP_SIZE: u32 = 32;
 /// `Auto` is the production rule in `select::select_tiling`. The forced
 /// variants exist for the kernel A/B in `examples/quant_shape_bench.rs`,
 /// which needs every tiling at one shape; no production caller passes them.
-/// `Force` names a feature tile on the two-half cadence. `ForceNarrowGroup`
-/// is the narrow tile on the full-group cadence, which only its wide token
-/// tiles compile.
+/// `Force` names a feature tile (128, 64 or 16) on the two-half cadence.
+/// `ForceNarrowGroup` is the narrow tile on the full-group cadence, which
+/// only its wide token tiles compile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeatTile {
     Auto,
@@ -77,22 +95,25 @@ pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) enum Cadence {
 /// The three entry points each (format, tiling) compiles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) enum Role {
-    /// One block per output tile, whole K.
+    /// One block per output tile, whole K in one range.
     TileParallel,
-    /// The stream-k walk over (feature tile, token tile, k-block).
-    StreamK,
-    /// Folds stream-k partials into the output.
+    /// One block per output tile, the split ranges back to back.
+    Fused,
+    /// One block per (output tile, split range).
+    SplitK,
+    /// Adds the split-K partials into the output, in range order.
     Fixup,
 }
 
 /// 128-k halves of a 256-k group the activation tile holds at once: two on
-/// [`Cadence::Group`] (`mmqf_accumulate_group` in the kernel file), each a
-/// full record slice plus its scratch, else one. Must match the kernel's
-/// `GROUP` template axis.
-const fn act_halves(cadence: Cadence) -> u32 {
+/// [`Cadence::Group`] (`mmqf_accumulate_group` in the kernel file) and at
+/// every token tile up to [`SMALL_X`], each a full record slice plus its
+/// scratch, else one. Must match the kernel's `GROUP` template axis and its
+/// `MMQF_SMALL_X` rule.
+const fn act_halves(cadence: Cadence, mmq_x: u32) -> u32 {
     match cadence {
-        Cadence::Halves => 1,
-        Cadence::Group => 2,
+        Cadence::Halves if mmq_x > SMALL_X => 1,
+        _ => 2,
     }
 }
 
@@ -106,7 +127,7 @@ pub(super) const fn group_compiled(feat_tile: u32, mmq_x: u32) -> bool {
 /// `mmq_x`-row activation tile at `ACT_STRIDE` plus the format's per-token
 /// activation scratch. Scratch is zero for every format whose minimum term
 /// is no finer than the record's 32-value sub-block. The half count follows
-/// the cadence.
+/// the cadence and the token tile ([`act_halves`]).
 ///
 /// Takes the whole descriptor rather than a stride so a format cannot be
 /// launched with less shared memory than its kernel indexes.
@@ -117,7 +138,7 @@ pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const fn smem_bytes(
     cadence: Cadence,
 ) -> u32 {
     4 * (feat_tile * format.x_stride
-        + act_halves(cadence) * mmq_x * (ACT_STRIDE + format.act_scratch_ints_per_token))
+        + act_halves(cadence, mmq_x) * mmq_x * (ACT_STRIDE + format.act_scratch_ints_per_token))
 }
 
 /// Per-block dynamic shared-memory ceiling this device grants on opt-in.
@@ -133,7 +154,9 @@ pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) fn smem_opt_in_limit(
 
 /// Token tiles compiled at `feat_tile`.
 pub(super) const fn variants_at(feat_tile: u32) -> &'static [u32] {
-    if feat_tile == FEAT_TILE_NARROW {
+    if feat_tile == FEAT_TILE_SMALL {
+        SMALL_VARIANTS
+    } else if feat_tile == FEAT_TILE_NARROW {
         NARROW_VARIANTS
     } else {
         VARIANTS

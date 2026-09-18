@@ -11,8 +11,8 @@ use super::super::super::kernels::{self, QUANT_MMQ_MMA_MODULE};
 use super::super::helpers::quantize_activation_q8_1_mmq;
 use super::formats::FeatMajorFormat;
 use super::tiling::{
-    Cadence, FEAT_TILE_DEFAULT, FeatTile, Role, Tiling, VARIANTS, select_tiling, select_variant,
-    smem_opt_in_limit, use_stream_k,
+    Cadence, FEAT_TILE_DEFAULT, FeatTile, Role, Tiling, record_token_slots, select_tiling,
+    select_variant, smem_opt_in_limit, split_count, use_split_launch,
 };
 
 /// Whether some compiled variant serves `m` tokens of `format` on this
@@ -49,24 +49,34 @@ fn opt_in_shared(func: &CudaFunction, bytes: u32, name: &str) -> Result<()> {
     })
 }
 
-/// The activation record every variant can read: token slots padded to the
-/// widest token tile.
+/// The activation record every variant of every format in `formats` can
+/// read for `m` tokens: token slots padded to the most any of their compiled
+/// tilings' token tiles cover.
 ///
 /// A variant's staging copies `mmq_x` records per tile from `tok0`, so a
-/// buffer padded to a multiple of any larger tile holds every tile's copy.
-/// One activation quantized this way serves several weights whose variants
-/// differ, which is what `quant_matmul_batch` needs: the record is 9/8 of
-/// the f32 row, so the padding costs at most one widest tile of tokens.
+/// buffer padded to that many slots holds every tile's copy. One activation
+/// quantized this way serves several weights whose variants differ, which is
+/// what `quant_matmul_batch` needs.
 ///
 /// Returns the buffer and its token stride, the `ntok` the kernels take.
 pub(in crate::quant::cuda::quant_matmul) fn quantize_shared_activation(
     client: &CudaClient,
     act_contig: &Tensor<CudaRuntime>,
+    formats: &[&FeatMajorFormat],
     m: usize,
     k: usize,
 ) -> Result<(Tensor<CudaRuntime>, u32)> {
-    let widest = *VARIANTS.last().unwrap_or(&FEAT_TILE_DEFAULT) as usize;
-    quantize_activation_q8_1_mmq(client, act_contig, m, k, widest)
+    let profile = CudaDevice::new(act_contig.device().id()).profile();
+    let limit = smem_opt_in_limit(profile.shared_mem_per_unit);
+    let slots = formats
+        .iter()
+        .map(|format| record_token_slots(m as u32, limit, format))
+        .max()
+        .unwrap_or(0)
+        .max(m as u32);
+    // `quantize_activation_q8_1_mmq` pads to a multiple of its tile argument;
+    // the slot count is already that multiple of every tile it covers.
+    quantize_activation_q8_1_mmq(client, act_contig, m, k, slots as usize)
 }
 
 /// The tiling [`dispatch`] and [`dispatch_quantized`] agree on for one call.
@@ -77,12 +87,14 @@ fn tiling_for(
     profile_index: usize,
     m: usize,
     n: usize,
+    k: usize,
     feat_tile: FeatTile,
 ) -> Result<Option<Tiling>> {
     let profile = CudaDevice::new(profile_index).profile();
     select_tiling(
         m as u32,
         n as u32,
+        k as u32,
         smem_opt_in_limit(profile.shared_mem_per_unit),
         profile.compute_units,
         format,
@@ -109,7 +121,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch(
     feat_tile: FeatTile,
 ) -> Result<Option<()>> {
     let device_index = act_contig.device().id();
-    let Some(tiling) = tiling_for(format, device_index, m, n, feat_tile)? else {
+    let Some(tiling) = tiling_for(format, device_index, m, n, k, feat_tile)? else {
         return Ok(None);
     };
 
@@ -157,7 +169,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_quantized(
     let k_u32 = k as u32;
     let n_u32 = n as u32;
 
-    let Some(tiling) = tiling_for(format, device_index, m, n, feat_tile)? else {
+    let Some(tiling) = tiling_for(format, device_index, m, n, k, feat_tile)? else {
         return Ok(None);
     };
     let smem = tiling.smem_bytes(format);
@@ -181,7 +193,10 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_quantized(
 
     let module = kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE)?;
 
-    let stream_k = use_stream_k(tiles, sms, k_u32, format);
+    // The split count reads K, N and the device only, so the float sequence
+    // each output element receives is fixed before M or the tiling is known.
+    let splits = split_count(k_u32, n_u32, sms);
+    let split_launch = use_split_launch(splits, tiles, tiling.feat_tile, sms, format);
 
     tracing::debug!(
         m,
@@ -191,148 +206,153 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_quantized(
         mmq_x = tiling.mmq_x,
         cadence = ?tiling.cadence,
         tiles,
-        stream_k,
+        splits,
+        split_launch,
         weight_format = format.kernel_infix,
         path = "mmq_feat_major",
         "CUDA quant kernel: tensor-core MMQ (feature-major)"
     );
 
-    if stream_k {
-        launch_stream_k(
-            format, client, device, &module, output_ptr, q8_ptr, weight_ptr, m_u32, k_u32, n_u32,
-            ntok, tiling, smem, sms, tiles,
-        )?;
+    let launch = Launch {
+        format,
+        client,
+        module: &module,
+        output_ptr,
+        q8_ptr,
+        weight_ptr,
+        m: m_u32,
+        k: k_u32,
+        n: n_u32,
+        ntok,
+        tiling,
+        smem,
+        grid: (token_tiles, feat_tiles),
+        splits,
+    };
+    if split_launch {
+        launch.split_k(device)
     } else {
-        let name = tiling.kernel_name(format, Role::TileParallel);
-        let func = kernels::get_kernel_function(&module, &name)?;
-        opt_in_shared(&func, smem, &name)?;
-
-        let cfg = LaunchConfig {
-            grid_dim: (token_tiles, feat_tiles, 1),
-            block_dim: (tiling.threads(), 1, 1),
-            shared_mem_bytes: smem,
-        };
-        unsafe {
-            let mut builder = client.stream().launch_builder(&func);
-            builder.arg(&q8_ptr);
-            builder.arg(&weight_ptr);
-            builder.arg(&output_ptr);
-            builder.arg(&m_u32);
-            builder.arg(&k_u32);
-            builder.arg(&n_u32);
-            builder.arg(&ntok);
-            builder.launch(cfg).map_err(|e| Error::QuantError {
-                reason: format!("CUDA {name} launch failed: {e:?}"),
-            })?;
-        }
-    }
+        launch.tile_parallel()
+    }?;
 
     Ok(Some(()))
 }
 
-/// Activation k-blocks per token, the kernel's own work-unit divisor.
-///
-/// `mmqf_sk_body` in `src/quant/cuda/kernels/quant_mmq_mma.cu` slices
-/// `total = ntf * ntt * nbk` across `gridDim.x`, where `nbk` is `K / 32`.
-/// The grid clamp here mirrors that count so no block is launched with no
-/// work, which means the two must agree on this divisor.
-const SK_K_STEP: u32 = 32;
-
-/// Launches the stream-k pair. Both grids are the driver's occupancy-derived
-/// block count: the fixup rebuilds every other block's slice bounds from its
-/// own index and `gridDim.x`, so the two launches must agree on the grid.
-#[allow(clippy::too_many_arguments)]
-fn launch_stream_k(
-    format: &FeatMajorFormat,
-    client: &CudaClient,
-    device: &CudaDevice,
-    module: &std::sync::Arc<CudaModule>,
+/// One feature-major launch, on either schedule.
+struct Launch<'a> {
+    format: &'a FeatMajorFormat,
+    client: &'a CudaClient,
+    module: &'a std::sync::Arc<CudaModule>,
     output_ptr: u64,
     q8_ptr: u64,
     weight_ptr: u64,
-    m_u32: u32,
-    k_u32: u32,
-    n_u32: u32,
+    m: u32,
+    k: u32,
+    n: u32,
     ntok: u32,
     tiling: Tiling,
     smem: u32,
-    sms: u32,
-    tiles: u32,
-) -> Result<()> {
-    let threads = tiling.threads();
-    let sk_name = tiling.kernel_name(format, Role::StreamK);
-    let sk_func = kernels::get_kernel_function(module, &sk_name)?;
-    opt_in_shared(&sk_func, smem, &sk_name)?;
+    /// (token tiles, feature tiles).
+    grid: (u32, u32),
+    splits: u32,
+}
 
-    // The opt-in must run first: occupancy at the default shared-memory
-    // limit undercounts blocks for every variant above the smallest.
-    let blocks_per_sm = sk_func
-        .occupancy_max_active_blocks_per_multiprocessor(threads, smem as usize, None)
-        .unwrap_or(1)
-        .max(1);
-
-    let k_blocks = k_u32.div_ceil(SK_K_STEP);
-    let blocks = (sms * blocks_per_sm).min(tiles * k_blocks).max(1);
-
-    // A block's slice starts on a tile boundary exactly when the tile count
-    // divides the grid, and then no block is left holding a partial tile.
-    let fixup_needed = !tiles.is_multiple_of(blocks);
-
-    // Never zeroed: the fixup reads only slots whose block provably wrote a
-    // partial, so a memset would be pure cost. When no partial can exist the
-    // buffer is a placeholder that keeps the argument a valid allocation.
-    let ws_len = if fixup_needed {
-        blocks as usize * tiling.mmq_x as usize * tiling.feat_tile as usize
-    } else {
-        1
-    };
-    let ws = Tensor::<CudaRuntime>::empty(&[ws_len], DType::F32, device)?;
-    let ws_ptr = ws.ptr();
-
-    let cfg_sk = LaunchConfig {
-        grid_dim: (blocks, 1, 1),
-        block_dim: (threads, 1, 1),
-        shared_mem_bytes: smem,
-    };
-    unsafe {
-        let mut builder = client.stream().launch_builder(&sk_func);
-        builder.arg(&q8_ptr);
-        builder.arg(&weight_ptr);
-        builder.arg(&output_ptr);
-        builder.arg(&ws_ptr);
-        builder.arg(&m_u32);
-        builder.arg(&k_u32);
-        builder.arg(&n_u32);
-        builder.arg(&ntok);
-        builder.launch(cfg_sk).map_err(|e| Error::QuantError {
-            reason: format!("CUDA {sk_name} launch failed: {e:?}"),
-        })?;
+impl Launch<'_> {
+    fn function(&self, role: Role, smem: u32) -> Result<(CudaFunction, String)> {
+        let name = self.tiling.kernel_name(self.format, role);
+        let func = kernels::get_kernel_function(self.module, &name)?;
+        if smem > 0 {
+            opt_in_shared(&func, smem, &name)?;
+        }
+        Ok((func, name))
     }
 
-    if !fixup_needed {
-        return Ok(());
+    /// One block per output tile. One range takes the plain kernel; more
+    /// take the multi-range kernel, which runs them back to back.
+    fn tile_parallel(&self) -> Result<()> {
+        let role = if self.splits > 1 {
+            Role::Fused
+        } else {
+            Role::TileParallel
+        };
+        let (func, name) = self.function(role, self.smem)?;
+        let cfg = LaunchConfig {
+            grid_dim: (self.grid.0, self.grid.1, 1),
+            block_dim: (self.tiling.threads(), 1, 1),
+            shared_mem_bytes: self.smem,
+        };
+        unsafe {
+            let mut builder = self.client.stream().launch_builder(&func);
+            builder.arg(&self.q8_ptr);
+            builder.arg(&self.weight_ptr);
+            builder.arg(&self.output_ptr);
+            builder.arg(&self.m);
+            builder.arg(&self.k);
+            builder.arg(&self.n);
+            builder.arg(&self.ntok);
+            if self.splits > 1 {
+                builder.arg(&self.splits);
+            }
+            builder.launch(cfg).map_err(|e| Error::QuantError {
+                reason: format!("CUDA {name} launch failed: {e:?}"),
+            })?;
+        }
+        Ok(())
     }
 
-    // A separate launch on the same stream: the fixup reads what the main
-    // kernel wrote, so the two must not be fused.
-    let fx_name = tiling.kernel_name(format, Role::Fixup);
-    let fx_func = kernels::get_kernel_function(module, &fx_name)?;
-    let cfg_fx = LaunchConfig {
-        grid_dim: (blocks, 1, 1),
-        block_dim: (threads, 1, 1),
-        shared_mem_bytes: 0,
-    };
-    unsafe {
-        let mut builder = client.stream().launch_builder(&fx_func);
-        builder.arg(&output_ptr);
-        builder.arg(&ws_ptr);
-        builder.arg(&m_u32);
-        builder.arg(&k_u32);
-        builder.arg(&n_u32);
-        builder.launch(cfg_fx).map_err(|e| Error::QuantError {
-            reason: format!("CUDA {fx_name} launch failed: {e:?}"),
-        })?;
-    }
+    /// One block per (output tile, split range), then the fixup pass that
+    /// adds ranges 1.. onto the range-0 store, in order. The fixup is a
+    /// separate launch on the same stream: it reads what the first wrote.
+    fn split_k(&self, device: &CudaDevice) -> Result<()> {
+        let threads = self.tiling.threads();
+        let (sk_func, sk_name) = self.function(Role::SplitK, self.smem)?;
 
-    Ok(())
+        // `workspace[tile][s - 1]`: one dense tile per split past the first.
+        let tiles = self.grid.0 as usize * self.grid.1 as usize;
+        let ws_len = tiles
+            * (self.splits as usize - 1)
+            * self.tiling.mmq_x as usize
+            * self.tiling.feat_tile as usize;
+        let ws = Tensor::<CudaRuntime>::empty(&[ws_len], DType::F32, device)?;
+        let ws_ptr = ws.ptr();
+
+        let cfg_sk = LaunchConfig {
+            grid_dim: (self.grid.0, self.grid.1, self.splits),
+            block_dim: (threads, 1, 1),
+            shared_mem_bytes: self.smem,
+        };
+        unsafe {
+            let mut builder = self.client.stream().launch_builder(&sk_func);
+            builder.arg(&self.q8_ptr);
+            builder.arg(&self.weight_ptr);
+            builder.arg(&self.output_ptr);
+            builder.arg(&ws_ptr);
+            builder.arg(&self.m);
+            builder.arg(&self.k);
+            builder.arg(&self.n);
+            builder.arg(&self.ntok);
+            builder.launch(cfg_sk).map_err(|e| Error::QuantError {
+                reason: format!("CUDA {sk_name} launch failed: {e:?}"),
+            })?;
+        }
+
+        let (fx_func, fx_name) = self.function(Role::Fixup, 0)?;
+        let cfg_fx = LaunchConfig {
+            grid_dim: (self.grid.0, self.grid.1, 1),
+            block_dim: (threads, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            let mut builder = self.client.stream().launch_builder(&fx_func);
+            builder.arg(&self.output_ptr);
+            builder.arg(&ws_ptr);
+            builder.arg(&self.m);
+            builder.arg(&self.n);
+            builder.arg(&self.splits);
+            builder.launch(cfg_fx).map_err(|e| Error::QuantError {
+                reason: format!("CUDA {fx_name} launch failed: {e:?}"),
+            })?;
+        }
+        Ok(())
+    }
 }

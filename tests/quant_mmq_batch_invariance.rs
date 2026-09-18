@@ -1,0 +1,204 @@
+//! A row's CUDA quantized matmul result does not depend on how many rows
+//! share the launch or on which token tile it lands in.
+//!
+//! Every weight with a feature-major MMQ kernel takes it at every M. The
+//! split count is fixed by K, N and the device, and every schedule — the
+//! split-K pair, the fused tile-parallel grid, at the 16-, 64- and 128-row
+//! feature tiles — sums the same K-range partials in the same order. So row
+//! `r` of an M-row product must be the same bits as the M=1 product of row
+//! `r` alone, at every M the dispatch serves with a different tiling or
+//! schedule, through `quant_matmul`, `quant_matmul_batch` and `quant_swiglu`.
+//!
+//! Run with:
+//!   cd boostr && cargo test --features cuda --test quant_mmq_batch_invariance
+
+#![cfg(feature = "cuda")]
+
+use boostr::quant::traits::QuantMatmulOps;
+use boostr::quant::{QuantFormat, QuantTensor, QuantizeOps};
+use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
+use numr::tensor::Tensor;
+
+/// Row counts to check: the LM decode batches, the edges of the single-warp
+/// tile, the DiT CFG pairs (22 per item), and enough rows to reach the wide
+/// token tiles and the second and third token tile.
+const ROW_COUNTS: [usize; 11] = [1, 2, 3, 4, 8, 16, 17, 22, 44, 88, 176];
+
+/// Output widths: one feature tile, a DiT projection, and a wide LM one.
+const WIDTHS: [usize; 3] = [64, 1536, 4096];
+
+/// K walks: a DiT projection under the split gate, the gate itself, and the
+/// 256-multiples above it.
+const DEPTHS: [usize; 4] = [1024, 2048, 4096, 6144];
+
+/// A K the 32-block formats accept that is not a whole number of 256-k
+/// groups, so the last split takes a ragged tail.
+const RAGGED_DEPTH: usize = 6176;
+
+fn cuda() -> Option<(CudaClient, CudaDevice)> {
+    let device = CudaDevice::new(0);
+    let client = CudaClient::new(device.clone()).ok()?;
+    Some((client, device))
+}
+
+/// Packed weight bytes for `format` at `[n, k]`, through the CPU quantizer.
+fn packed_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> {
+    let values: Vec<f32> = (0..n * k)
+        .map(|i| ((i % 977) as f32 * 0.031 + salt).sin() + ((i / 977) as f32 * 0.17).cos() * 0.25)
+        .collect();
+    let device = CpuDevice::new();
+    let client = CpuClient::new(device.clone());
+    let input = Tensor::<CpuRuntime>::from_slice(&values, &[n, k], &device).expect("weight");
+    client
+        .quantize(&input, format)
+        .expect("quantize")
+        .to_bytes()
+        .expect("weight bytes")
+}
+
+/// Activation rows with no two alike, so a row landing in the wrong slot
+/// changes the answer.
+fn activation_rows(rows: usize, k: usize) -> Vec<f32> {
+    (0..rows * k)
+        .map(|i| {
+            let r = (i / k) as f32;
+            ((i % k) as f32 * 0.013 + r * 0.7).sin() * 0.4 + (r * 0.31).cos() * 0.05
+        })
+        .collect()
+}
+
+fn act(device: &CudaDevice, rows: &[f32], m: usize, k: usize) -> Tensor<CudaRuntime> {
+    Tensor::<CudaRuntime>::from_slice(&rows[..m * k], &[m, k], device).expect("act")
+}
+
+/// The three entry points a model reaches, each as `[m, n]` outputs.
+fn run_all(
+    client: &CudaClient,
+    device: &CudaDevice,
+    rows: &[f32],
+    m: usize,
+    k: usize,
+    weight: &QuantTensor<CudaRuntime>,
+    up: &QuantTensor<CudaRuntime>,
+) -> [Vec<f32>; 3] {
+    let a = act(device, rows, m, k);
+    let single = client
+        .quant_matmul(&a, weight)
+        .expect("quant_matmul")
+        .to_vec::<f32>();
+    let batched = client
+        .quant_matmul_batch(&a, &[weight, up])
+        .expect("quant_matmul_batch")
+        .swap_remove(0)
+        .to_vec::<f32>();
+    let swiglu = client
+        .quant_swiglu(&a, weight, up)
+        .expect("quant_swiglu")
+        .to_vec::<f32>();
+    [single, batched, swiglu]
+}
+
+fn check_rows(
+    what: &str,
+    format: QuantFormat,
+    n: usize,
+    k: usize,
+    m: usize,
+    out: &[f32],
+    alone: &[f32],
+) {
+    for r in 0..m {
+        for c in 0..n {
+            let got = out[r * n + c];
+            let want = alone[r * n + c];
+            assert!(
+                got.to_bits() == want.to_bits(),
+                "{} {what} N={n} K={k}: row {r} col {c} at M={m} is {got:e} ({:#010x}), \
+                 alone it is {want:e} ({:#010x})",
+                format.name(),
+                got.to_bits(),
+                want.to_bits()
+            );
+        }
+    }
+}
+
+fn check_shape(client: &CudaClient, device: &CudaDevice, format: QuantFormat, n: usize, k: usize) {
+    let max_m = *ROW_COUNTS.iter().max().expect("row counts");
+    let weight =
+        QuantTensor::from_bytes(&packed_weight(format, n, k, 0.0), format, &[n, k], device)
+            .expect("weight");
+    let up = QuantTensor::from_bytes(&packed_weight(format, n, k, 1.3), format, &[n, k], device)
+        .expect("up weight");
+    let rows = activation_rows(max_m, k);
+
+    // Every row on its own: the reference each batched row must reproduce.
+    let mut alone: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for r in 0..max_m {
+        let one = run_all(client, device, &rows[r * k..], 1, k, &weight, &up);
+        for (dst, src) in alone.iter_mut().zip(one) {
+            dst.extend(src);
+        }
+    }
+    // The batched call and the single call agree at M=1 too: one row through
+    // either entry is the same row.
+    check_rows("batch vs single", format, n, k, max_m, &alone[1], &alone[0]);
+
+    for &m in &ROW_COUNTS {
+        let out = run_all(client, device, &rows, m, k, &weight, &up);
+        for (what, got, want) in [
+            ("quant_matmul", &out[0], &alone[0]),
+            ("quant_matmul_batch", &out[1], &alone[1]),
+            ("quant_swiglu", &out[2], &alone[2]),
+        ] {
+            check_rows(what, format, n, k, m, got, want);
+        }
+    }
+}
+
+fn check_format(format: QuantFormat, ragged: bool) {
+    let Some((client, device)) = cuda() else {
+        eprintln!("CUDA not available, skipping");
+        return;
+    };
+    let mut depths = DEPTHS.to_vec();
+    if ragged {
+        depths.push(RAGGED_DEPTH);
+    }
+    for &k in &depths {
+        for &n in &WIDTHS {
+            check_shape(&client, &device, format, n, k);
+        }
+    }
+}
+
+#[test]
+fn q4_k_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::Q4K, false);
+}
+
+#[test]
+fn q5_k_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::Q5K, false);
+}
+
+#[test]
+fn q6_k_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::Q6K, false);
+}
+
+#[test]
+fn q8_0_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::Q8_0, true);
+}
+
+#[test]
+fn q4_0_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::Q4_0, true);
+}
+
+#[test]
+fn q2_k_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::Q2K, false);
+}

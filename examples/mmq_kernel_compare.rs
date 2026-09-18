@@ -124,9 +124,13 @@ const MMQ_X_VARIANTS: &[u32] = &[8, 16, 24, 32, 40, 48, 64, 80, 96, 112, 128];
 /// through the stride: this mirror has desynced from
 /// `mmq_feat_major::dispatch::smem_bytes` before, and a kernel opted in to less
 /// shared memory than it indexes fails in a way that reads as a kernel bug.
+///
+/// Token tiles up to 32 stage both 128-k halves of an activation group, so
+/// their activation term is doubled (`SMALL_X` in `tiling/geometry.rs`).
 #[cfg(feature = "cuda")]
 const fn mmq_x_smem_bytes(x_stride: u32, act_scratch: u32, mmq_x: u32) -> u32 {
-    4 * (128 * x_stride + mmq_x * (36 + act_scratch))
+    let halves = if mmq_x <= 32 { 2 } else { 1 };
+    4 * (128 * x_stride + halves * mmq_x * (36 + act_scratch))
 }
 
 /// Picks the feature-major variant that launches the fewest token tiles for
@@ -158,8 +162,8 @@ fn select_mmq_x(m: u32, smem_limit: u32, x_stride: u32, act_scratch: u32) -> Opt
 /// GPU kernel: the per-block int32 dot product is exact in integer arithmetic,
 /// so the only inexact step anywhere is the accumulation across blocks, and
 /// doing that in f64 bounds every f32 kernel's error regardless of the order it
-/// sums in. That is what lets stream-k — which reassociates the k sum across
-/// blocks by construction — be checked at all. The magnitude is what f32
+/// sums in. That is what lets the split-K pair — which reassociates the k sum
+/// across blocks by construction — be checked at all. The magnitude is what f32
 /// accumulation error is actually proportional to; see
 /// [`check_against_reference`].
 #[cfg(feature = "cuda")]
@@ -2500,9 +2504,8 @@ fn main() {
     let (mut n, mut k, mut m) = (4096usize, 14336usize, 512usize);
     let mut format = MmqFormat::Q8_0;
     let mut force_mmq_x: Option<u32> = None;
-    let mut stream_k = false;
+    let mut split_k: Option<u32> = None;
     let mut gemv = false;
-    let mut sk_waves: Option<u32> = None;
 
     let mut i = 0;
     while i < argv.len() {
@@ -2517,17 +2520,11 @@ fn main() {
             // the two pull opposite ways; this pins one so the trade can be
             // measured directly instead of inferred.
             "--mmq-x" => force_mmq_x = Some(value().parse().expect("--mmq-x must be a u32")),
-            // Runs the stream-k pair alongside the tile-parallel kernel so the
-            // two decompositions can be compared on one shape.
-            "--stream-k" => {
-                stream_k = true;
-                i -= 1;
-            }
-            // Overrides the stream-k grid with `compute_units * N`. Unset, the
-            // grid matches `dispatch.rs`: the SM count times the driver's
-            // occupancy query, which reports how many blocks actually fit
-            // resident per SM.
-            "--sk-waves" => sk_waves = Some(value().parse().expect("--sk-waves must be a u32")),
+            // Runs the split-K pair at this split count alongside the
+            // tile-parallel kernel, which runs the same ranges fused, so the
+            // two schedules can be compared on one shape and checked
+            // bit-for-bit against each other.
+            "--split-k" => split_k = Some(value().parse().expect("--split-k must be a u32")),
             // Also launches and times the format's GEMV kernel(s) — the path
             // `dispatch_gemv` takes for `m <= gemv_max_m` — at the same shape,
             // so the GEMV/MMQ crossover can be read off one run instead of two.
@@ -2538,7 +2535,7 @@ fn main() {
             other => {
                 panic!(
                     "unknown flag {other}, expected --n, --k, --m, --format, --mmq-x, \
-                     --stream-k, --sk-waves, or --gemv"
+                     --split-k, or --gemv"
                 )
             }
         }
@@ -2598,6 +2595,8 @@ fn main() {
         .expect("a feature-major variant fits")
     });
     let fm_ntok = (m as u32).div_ceil(fm_mmq_x) * fm_mmq_x;
+    // K ranges both feature-major schedules walk; 1 is one range over all of K.
+    let fm_splits: u32 = split_k.unwrap_or(1).max(1);
     let packed_bytes = repack_q8_1_mmq(&act_bytes, m, k, fm_ntok as usize);
     let packed =
         Tensor::<CudaRuntime>::from_slice(&packed_bytes, &[packed_bytes.len()], &device).unwrap();
@@ -2855,7 +2854,11 @@ fn main() {
                 MMQ_X_VARIANTS.contains(&mmq_x),
                 "--mmq-x {mmq_x} is not a compiled variant; compiled: {MMQ_X_VARIANTS:?}"
             );
-            let name = format!("quant_mmq_{infix}_q8_1_mma_x{mmq_x}");
+            // One K range takes the plain kernel; several take the
+            // multi-range kernel, so the bit check against the split-K pair
+            // below compares like with like.
+            let role = if fm_splits > 1 { "_ms" } else { "" };
+            let name = format!("quant_mmq_{infix}_q8_1_mma{role}_x{mmq_x}");
             let func = kernels::get_kernel_function(&mma_module, &name)
                 .unwrap_or_else(|_| panic!("resolve {name}"));
             func.set_attribute(
@@ -2886,6 +2889,9 @@ fn main() {
             builder.arg(&k_u32);
             builder.arg(&n_u32);
             builder.arg(&fm_ntok);
+            if fm_splits > 1 {
+                builder.arg(&fm_splits);
+            }
             builder
                 .launch(cfg_fm)
                 .expect("launch mma feature-major kernel");
@@ -2902,13 +2908,14 @@ fn main() {
         started.elapsed().as_secs_f64() * 1e6 / ITERS as f64
     });
 
-    // Stream-k: one block per SM walking a contiguous slice of the flattened
-    // (feature-tile, token-tile, k-block) space, then a fixup pass folding the
-    // partial tiles. It exists for the case where the tile count alone does not
-    // fill the device. It reassociates the k sum across blocks, so it is checked
-    // against the f64 reference, never against another kernel bit-for-bit.
+    // Split-K: grid (token tiles, feature tiles, splits), one block per
+    // (tile, K range), then a fixup pass adding the range partials onto the
+    // range-0 store in order. It exists for the case where the tile count
+    // alone does not fill the device. The tile-parallel kernel above runs the
+    // same ranges back to back with the same split count, so the two are
+    // checked bit-for-bit against each other below.
     let sk = match format.feat_major_infix() {
-        Some(infix) if stream_k => {
+        Some(infix) if fm_splits > 1 => {
             let mmq_x = fm_mmq_x;
             let sk_name = format!("quant_mmq_{infix}_q8_1_mma_sk_x{mmq_x}");
             let fx_name = format!("quant_mmq_{infix}_q8_1_mma_fixup_x{mmq_x}");
@@ -2921,25 +2928,12 @@ fn main() {
                     cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                     mmq_x_smem_bytes(fm_x_stride, fm_scratch, mmq_x) as i32,
                 )
-                .expect("opt in to dynamic shared memory for the stream-k kernel");
-            let compute_units = device.profile().compute_units;
-            let grid = match sk_waves {
-                Some(waves) => compute_units * waves,
-                None => {
-                    let blocks_per_sm = sk_func
-                        .occupancy_max_active_blocks_per_multiprocessor(
-                            256,
-                            mmq_x_smem_bytes(fm_x_stride, fm_scratch, mmq_x) as usize,
-                            None,
-                        )
-                        .expect("query stream-k occupancy");
-                    compute_units * blocks_per_sm
-                }
-            };
-            // Zeroed here only because `from_slice` needs a host buffer. The
-            // fixup reads only slots whose block provably wrote a partial, so
-            // the contents of the rest never reach an output.
-            let ws_len = grid as usize * mmq_x as usize * 128;
+                .expect("opt in to dynamic shared memory for the split-k kernel");
+            let grid = (m_u32.div_ceil(mmq_x), n_u32.div_ceil(128));
+            // Zeroed here only because `from_slice` needs a host buffer:
+            // every slot is written before the fixup reads it.
+            let ws_len =
+                grid.0 as usize * grid.1 as usize * (fm_splits as usize - 1) * mmq_x as usize * 128;
             let ws =
                 Tensor::<CudaRuntime>::from_slice(&vec![0f32; ws_len], &[ws_len], &device).unwrap();
             let out =
@@ -2955,12 +2949,12 @@ fn main() {
             let out_ptr = out.ptr();
             let ws_ptr = ws.ptr();
             let cfg_sk = LaunchConfig {
-                grid_dim: (*grid, 1, 1),
+                grid_dim: (grid.0, grid.1, fm_splits),
                 block_dim: (256, 1, 1),
                 shared_mem_bytes: mmq_x_smem_bytes(fm_x_stride, fm_scratch, *mmq_x),
             };
             let cfg_fx = LaunchConfig {
-                grid_dim: (*grid, 1, 1),
+                grid_dim: (grid.0, grid.1, 1),
                 block_dim: (256, 1, 1),
                 shared_mem_bytes: 0,
             };
@@ -2974,16 +2968,16 @@ fn main() {
                 b.arg(&k_u32);
                 b.arg(&n_u32);
                 b.arg(&fm_ntok);
-                b.launch(cfg_sk).expect("launch stream-k kernel");
+                b.launch(cfg_sk).expect("launch split-k kernel");
                 // Separate launch on the same stream: the fixup reads what the
                 // main kernel wrote, so it must not be fused.
                 let mut f = client.stream().launch_builder(fx_func);
                 f.arg(&out_ptr);
                 f.arg(&ws_ptr);
                 f.arg(&m_u32);
-                f.arg(&k_u32);
                 f.arg(&n_u32);
-                f.launch(cfg_fx).expect("launch stream-k fixup");
+                f.arg(&fm_splits);
+                f.launch(cfg_fx).expect("launch split-k fixup");
             };
             for _ in 0..WARMUP {
                 launch();
@@ -3041,9 +3035,25 @@ fn main() {
         let feat_major_host = out.to_vec::<f32>();
         check_against_reference(name, format, &feat_major_host, &case);
     }
-    if let Some((_, _, out, _, _, _, name)) = sk.as_ref() {
+    if let (Some((_, _, out, _, _, _, name)), Some((_, fm_out, _, fm_name))) =
+        (sk.as_ref(), feat_major.as_ref())
+    {
         let sk_host = out.to_vec::<f32>();
         check_against_reference(name, format, &sk_host, &case);
+        // Same split count, same ranges, same fold order: the pair and the
+        // fused grid must agree to the bit.
+        let fm_host = fm_out.to_vec::<f32>();
+        if let Some(idx) = (0..m * n).find(|&i| sk_host[i].to_bits() != fm_host[i].to_bits()) {
+            eprintln!(
+                "outputs MISMATCH at index {idx}: {name}={} {fm_name}={}",
+                sk_host[idx], fm_host[idx]
+            );
+            std::process::exit(1);
+        }
+        println!(
+            "outputs match: {name} and {fm_name} agree bit-for-bit at all {} elements",
+            m * n
+        );
     }
     if let Some((f32_kernel, _, out_f32, mwr, batched)) = gemv_case.as_ref() {
         let f32_host = out_f32.to_vec::<f32>();
@@ -3066,9 +3076,12 @@ fn main() {
         println!("ratio dp4a/mma: {:.3}", dp4a_us / mma_us);
     }
     if let (Some(us), Some((_, _, _, _, mmq_x, grid, name))) = (sk_us, sk.as_ref()) {
-        println!("{name} (grid {grid}, mmq_x {mmq_x}) {us:9.2} us/call");
+        println!(
+            "{name} (grid {}x{}x{fm_splits}, mmq_x {mmq_x}) {us:9.2} us/call",
+            grid.0, grid.1
+        );
         if let Some((_, mma_us)) = token_major_us {
-            println!("ratio mma/stream-k: {:.3}", mma_us / us);
+            println!("ratio mma/split-k: {:.3}", mma_us / us);
         }
     }
     if let (Some(us), Some((_, _, _, name))) = (feat_major_us, feat_major.as_ref()) {

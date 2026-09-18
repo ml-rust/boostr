@@ -88,8 +88,8 @@ pub(in crate::quant::cuda::quant_matmul) const IQ2_S: FeatMajorFormat = FeatMajo
 /// `d * (0.5 + s) * 0.5`, staged as f32 already multiplied by `d`, for the same
 /// parity reason as Q4_K. K must be a whole number of blocks.
 ///
-/// Measured faster on its tile-parallel kernel than on stream-k even where the
-/// geometric rule would pick stream-k — see `prefers_tile_parallel`'s doc.
+/// Measured faster on its tile-parallel kernel than on the split-K pair even
+/// where the geometric rule would pick the pair — see `prefers_tile_parallel`.
 pub(in crate::quant::cuda::quant_matmul) const IQ3_XXS: FeatMajorFormat = FeatMajorFormat {
     kernel_infix: "iq3_xxs",
     x_stride: 76,

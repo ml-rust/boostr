@@ -3,8 +3,8 @@ use super::FeatMajorFormat;
 /// Q8_0: 34-byte blocks of 32 elements, staged as 64 quant words plus 8 f32
 /// scales plus 4 ints of bank padding.
 ///
-/// Measured faster on its tile-parallel kernel than on stream-k even where the
-/// geometric rule would pick stream-k — see `prefers_tile_parallel`'s doc.
+/// Measured faster on its tile-parallel kernel than on the split-K pair even
+/// where the geometric rule would pick the pair — see `prefers_tile_parallel`.
 pub(in crate::quant::cuda::quant_matmul) const Q8_0: FeatMajorFormat = FeatMajorFormat {
     kernel_infix: "q8_0",
     x_stride: 76,
@@ -21,8 +21,8 @@ pub(in crate::quant::cuda::quant_matmul) const Q8_0: FeatMajorFormat = FeatMajor
 /// a whole 32-element block, so a row's last 256-k staging group can be
 /// partial.
 ///
-/// Measured faster on its tile-parallel kernel than on stream-k even where the
-/// geometric rule would pick stream-k — see `prefers_tile_parallel`'s doc.
+/// Measured faster on its tile-parallel kernel than on the split-K pair even
+/// where the geometric rule would pick the pair — see `prefers_tile_parallel`.
 pub(in crate::quant::cuda::quant_matmul) const Q4_0: FeatMajorFormat = FeatMajorFormat {
     kernel_infix: "q4_0",
     x_stride: 76,
@@ -86,8 +86,8 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_1: FeatMajorFormat = FeatMajor
 /// a whole 32-element block, so a row's last 256-k staging group can be
 /// partial.
 ///
-/// Measured faster on its tile-parallel kernel than on stream-k even where the
-/// geometric rule would pick stream-k — see `prefers_tile_parallel`'s doc.
+/// Measured faster on its tile-parallel kernel than on the split-K pair even
+/// where the geometric rule would pick the pair — see `prefers_tile_parallel`.
 pub(in crate::quant::cuda::quant_matmul) const IQ4_NL: FeatMajorFormat = FeatMajorFormat {
     kernel_infix: "iq4_nl",
     x_stride: 76,

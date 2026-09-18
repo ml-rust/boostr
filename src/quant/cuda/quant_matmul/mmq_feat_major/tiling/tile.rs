@@ -38,12 +38,14 @@ impl Tiling {
 
     /// Kernel symbol for `role`, as the `MMQ_FM_KERNEL_AT` macro spells it.
     /// The tiling infix is placed just before `_x<X>`. It is empty at the
-    /// default tile. At the narrow tile it is `_y<Y>` on the two-half
-    /// cadence and `_y<Y>g` on the full-group cadence.
+    /// default tile. At the narrow and single-warp tiles it is `_y<Y>` on the
+    /// two-half cadence, and at the narrow tile `_y<Y>g` on the full-group
+    /// cadence.
     pub fn kernel_name(self, format: &FeatMajorFormat, role: Role) -> String {
         let role = match role {
             Role::TileParallel => "",
-            Role::StreamK => "_sk",
+            Role::Fused => "_ms",
+            Role::SplitK => "_sk",
             Role::Fixup => "_fixup",
         };
         let tag = match (self.feat_tile == FEAT_TILE_DEFAULT, self.cadence) {
@@ -55,5 +57,96 @@ impl Tiling {
             "quant_mmq_{}_q8_1_mma{role}{tag}_x{}",
             format.kernel_infix, self.mmq_x
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::formats::{Q4_K, Q6_K};
+    use super::super::geometry::{FEAT_TILE_DEFAULT, FEAT_TILE_NARROW, FEAT_TILE_SMALL};
+    use super::*;
+
+    fn wide(mmq_x: u32) -> Tiling {
+        Tiling {
+            feat_tile: FEAT_TILE_DEFAULT,
+            mmq_x,
+            cadence: Cadence::Halves,
+        }
+    }
+
+    fn narrow(mmq_x: u32) -> Tiling {
+        Tiling {
+            feat_tile: FEAT_TILE_NARROW,
+            mmq_x,
+            cadence: Cadence::Halves,
+        }
+    }
+
+    fn group(mmq_x: u32) -> Tiling {
+        Tiling {
+            feat_tile: FEAT_TILE_NARROW,
+            mmq_x,
+            cadence: Cadence::Group,
+        }
+    }
+
+    fn small(mmq_x: u32) -> Tiling {
+        Tiling {
+            feat_tile: FEAT_TILE_SMALL,
+            mmq_x,
+            cadence: Cadence::Halves,
+        }
+    }
+
+    #[test]
+    fn threads_follow_the_feature_tile() {
+        let wide = wide(24);
+        let narrow = narrow(24);
+        assert_eq!(wide.threads(), 256);
+        assert_eq!(narrow.threads(), 128);
+        assert_eq!(small(8).threads(), 32);
+    }
+
+    #[test]
+    fn kernel_names_follow_the_macro_spelling() {
+        let wide = wide(24);
+        let narrow = narrow(24);
+        assert_eq!(
+            wide.kernel_name(&Q4_K, Role::TileParallel),
+            "quant_mmq_q4_k_q8_1_mma_x24"
+        );
+        assert_eq!(
+            wide.kernel_name(&Q4_K, Role::SplitK),
+            "quant_mmq_q4_k_q8_1_mma_sk_x24"
+        );
+        assert_eq!(
+            narrow.kernel_name(&Q6_K, Role::TileParallel),
+            "quant_mmq_q6_k_q8_1_mma_y64_x24"
+        );
+        assert_eq!(
+            narrow.kernel_name(&Q6_K, Role::SplitK),
+            "quant_mmq_q6_k_q8_1_mma_sk_y64_x24"
+        );
+        assert_eq!(
+            narrow.kernel_name(&Q6_K, Role::Fixup),
+            "quant_mmq_q6_k_q8_1_mma_fixup_y64_x24"
+        );
+        assert_eq!(
+            small(8).kernel_name(&Q4_K, Role::SplitK),
+            "quant_mmq_q4_k_q8_1_mma_sk_y16_x8"
+        );
+        let group = group(48);
+        assert_eq!(
+            group.kernel_name(&Q6_K, Role::TileParallel),
+            "quant_mmq_q6_k_q8_1_mma_y64g_x48"
+        );
+        assert_eq!(
+            group.kernel_name(&Q6_K, Role::SplitK),
+            "quant_mmq_q6_k_q8_1_mma_sk_y64g_x48"
+        );
+        assert_eq!(
+            group.kernel_name(&Q6_K, Role::Fixup),
+            "quant_mmq_q6_k_q8_1_mma_fixup_y64g_x48"
+        );
     }
 }

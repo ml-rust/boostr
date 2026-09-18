@@ -1,13 +1,17 @@
 //! Tensor-core MMQ dispatch, feature-major tiling.
 //!
-//! The output-feature dimension gets a 128 tile, or a 64 tile where the
-//! 128 tile would starve the device, and the weight is the MMA operand A.
+//! The output-feature dimension gets a 128 tile, a 64 tile where the 128
+//! tile would starve the device, or a single-warp 16 tile for a batch of at
+//! most 16 tokens, and the weight is the MMA operand A.
 //! `quant_mmq_q8_0_q8_1_mma` fixes the token tile instead and makes the
 //! activation operand A; this path swaps those roles. One entry point is
 //! compiled per (weight format, feature tile, token tile, activation cadence),
-//! in three roles: tile-parallel, stream-k, and the stream-k fixup. This
-//! module owns the rules that choose among them (`tiling`) and the launches
-//! (`dispatch`). The kernels themselves live in
+//! in four roles: tile-parallel over one K range, tile-parallel over several
+//! ranges, split-K, and the split-K fixup. This module owns the rules that
+//! choose among them (`tiling`) and the launches (`dispatch`). The split
+//! count is fixed by K, N and the device, and every schedule sums the same
+//! range partials in the same order, so a row's result never depends on M or
+//! on its tile position. The kernels themselves live in
 //! `src/quant/cuda/kernels/quant_mmq_mma.cu`.
 //!
 //! The kernel family is parameterized over the weight format; everything that

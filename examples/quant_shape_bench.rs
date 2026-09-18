@@ -9,13 +9,13 @@
 //! `--format` takes a GGUF block name (`q8_0`, `q6_k`, `q4_k`), so one
 //! invocation shape can be compared against an external runtime.
 //!
-//! `--feat-tile {auto,128,64,64g}` picks the feature-major MMQ tiling: `64g`
-//! is the narrow tile on the full-group cadence, compiled only at its wide
-//! token tiles.
-//! `auto` (the default) times `quant_matmul` as production runs it, GEMV
-//! crossover included. A number forces that tile through the MMQ path at
-//! every `m`, for an A/B of the two tiles at one shape; it errors for a
-//! format that does not compile the tile.
+//! `--feat-tile {auto,128,64,64g,16}` picks the feature-major MMQ tiling:
+//! `64g` is the narrow tile on the full-group cadence, compiled only at its
+//! wide token tiles, and `16` the single-warp tile, compiled up to 16 tokens.
+//! `auto` (the default) times `quant_matmul` as production runs it, which
+//! takes the MMQ path at every M. A number forces that tile through the MMQ
+//! path at every `m`, for an A/B of the two tiles at one shape; it errors
+//! for a format that does not compile the tile.
 //!
 //! Reports microseconds per call, the same unit `test-backend-ops perf` prints,
 //! so the two can be read side by side at MATCHED shapes. A comparison at
@@ -71,7 +71,8 @@ fn parse_feat_tile(value: &str) -> FeatTile {
         "128" => FeatTile::Force(128),
         "64" => FeatTile::Force(64),
         "64g" => FeatTile::ForceNarrowGroup,
-        other => panic!("unknown --feat-tile {other}, expected auto, 128, 64, or 64g"),
+        "16" => FeatTile::Force(16),
+        other => panic!("unknown --feat-tile {other}, expected auto, 128, 64, 64g, or 16"),
     }
 }
 

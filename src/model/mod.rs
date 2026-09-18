@@ -21,8 +21,8 @@ pub use attention_core::{
     attention_core_masked, prefill_attention_mask,
 };
 pub use config::{
-    AttentionConfig, AudioConfig, HuggingFaceConfig, HybridConfig, ModelConfig, MoeConfig,
-    RopeScalingConfig, SsmConfig, UniversalConfig, VisionConfig, load_config_auto,
+    AttentionConfig, AudioConfig, GdnConfig, HuggingFaceConfig, HybridConfig, ModelConfig,
+    MoeConfig, RopeScalingConfig, SsmConfig, UniversalConfig, VisionConfig, load_config_auto,
     load_huggingface_config,
 };
 pub use encoder::{EmbeddingPipeline, Encoder, EncoderClient, EncoderConfig, Pooling};

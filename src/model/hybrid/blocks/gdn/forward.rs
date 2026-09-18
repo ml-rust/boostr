@@ -1,0 +1,375 @@
+//! Gated DeltaNet inference forward, driven by a per-layer
+//! [`GdnState`](crate::inference::GdnState).
+//!
+//! Ports `build_layer_attn_linear` (`src/models/qwen35.cpp`) of the PrismML
+//! llama.cpp fork step for step:
+//!
+//! 1. `qkv = attn_qkv(x)`, `z = attn_gate(x)`
+//! 2. `beta = sigmoid(ssm_beta(x))`, `g = ssm_a * softplus(ssm_alpha(x) + ssm_dt_bias)`
+//! 3. causal depthwise conv over `qkv` with the carried window, then SiLU
+//! 4. split q `[H_k, S]`, k `[H_k, S]`, v `[H_v, S]`
+//! 5. L2-normalize q and k with `eps = rms_eps`
+//! 6. tile q and k to `H_v` heads (`ggml_repeat_4d`)
+//! 7. `gdn_chunk_prefill` for `seq > 1`, `gdn_step` for `seq == 1`
+//! 8. `silu(z) * rms_norm(o)` with `ssm_norm`
+//! 9. optional `group_heads`, then `ssm_out`
+
+use super::layer::{GdnBlock, group_heads};
+use crate::error::{Error, Result};
+use crate::inference::GdnState;
+use crate::model::traits::ModelClient;
+use crate::nn::causal_conv1d;
+use crate::quant::traits::DequantOps;
+use numr::autograd::Var;
+use numr::dtype::DType;
+use numr::ops::{
+    ActivationOps, BinaryOps, CompareOps, ConditionalOps, ConvOps, FwhtOps, IndexingOps, ReduceOps,
+    ScalarOps, ShapeOps, TensorOps, UnaryOps,
+};
+use numr::runtime::Runtime;
+use numr::tensor::Tensor;
+
+impl<R: Runtime<DType = DType>> GdnBlock<R> {
+    /// Inference forward. `x` is the `attn_norm`-ed hidden state
+    /// `[batch, seq, hidden_size]`; the result is the `ssm_out` projection,
+    /// `[batch, seq, hidden_size]`, without the residual.
+    ///
+    /// `seq > 1` runs the chunked prefill, `seq == 1` one decode step. Both
+    /// read `state` as the left context and write it back in place. The
+    /// output is a detached `Var`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ModelError`] when `x` is not `[batch, seq, hidden_size]` or
+    /// `state` was built for another batch size.
+    pub fn forward<C>(&self, client: &C, x: &Var<R>, state: &mut GdnState<R>) -> Result<Var<R>>
+    where
+        C: ModelClient<R> + ConvOps<R> + FwhtOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + ConvOps<R>
+            + DequantOps<R>,
+    {
+        let cfg = &self.cfg;
+        let shape = x.shape();
+        if shape.len() != 3 || shape[2] != cfg.hidden_size {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "gdn: expected [batch, seq, {}], got {shape:?}",
+                    cfg.hidden_size
+                ),
+            });
+        }
+        let (batch, seq) = (shape[0], shape[1]);
+        if state.batch() != batch {
+            return Err(Error::ModelError {
+                reason: format!("gdn: state batch {} != input batch {batch}", state.batch()),
+            });
+        }
+        let (h_k, h_v, s) = (cfg.key_heads, cfg.value_heads, cfg.state_size);
+        let key_dim = cfg.key_dim();
+        let value_dim = cfg.value_dim();
+
+        // 1. Projections.
+        let qkv = self.attn_qkv.forward(client, x)?;
+        let z = self.attn_gate.forward(client, x)?;
+
+        // 2. Gates. `ssm_a` already holds `-exp(A_log)`.
+        let beta = self.ssm_beta.forward(client, x)?;
+        let beta = client.sigmoid(beta.tensor()).map_err(Error::Numr)?;
+        let alpha = self.ssm_alpha.forward(client, x)?;
+        let g = client
+            .add(alpha.tensor(), &self.ssm_dt_bias)
+            .map_err(Error::Numr)?;
+        let g = client.softplus(&g).map_err(Error::Numr)?;
+        let g = client.mul(&g, &self.ssm_a).map_err(Error::Numr)?;
+
+        // 3. Causal conv with the carried window, then SiLU.
+        let qkv_ncl = qkv
+            .tensor()
+            .transpose(1, 2)
+            .map_err(Error::Numr)?
+            .contiguous()?;
+        let (conv_out, window) =
+            causal_conv1d(client, &qkv_ncl, &self.conv_weight, None, state.conv())?;
+        let conv_out = client.silu(&conv_out).map_err(Error::Numr)?;
+        let qkv = conv_out
+            .transpose(1, 2)
+            .map_err(Error::Numr)?
+            .contiguous()?;
+
+        // 4. Split.
+        let q = slice_heads(&qkv, 0, key_dim, &[batch, seq, h_k, s])?;
+        let k = slice_heads(&qkv, key_dim, key_dim, &[batch, seq, h_k, s])?;
+        let v = slice_heads(&qkv, 2 * key_dim, value_dim, &[batch, seq, h_v, s])?;
+
+        // 5. L2 norm over the head dim.
+        let q = client
+            .l2_normalize(&q, -1, cfg.rms_eps)
+            .map_err(Error::Numr)?;
+        let k = client
+            .l2_normalize(&k, -1, cfg.rms_eps)
+            .map_err(Error::Numr)?;
+
+        // 6. Tiled repeat: value head h_v reads key head h_v % H_k.
+        let rep = cfg.head_repeat();
+        let (q, k) = if rep > 1 {
+            let tile = [1, 1, rep, 1];
+            (
+                client.repeat(&q, &tile).map_err(Error::Numr)?,
+                client.repeat(&k, &tile).map_err(Error::Numr)?,
+            )
+        } else {
+            (q, k)
+        };
+
+        // 7. Recurrence.
+        let (o, ssm) = if seq == 1 {
+            client.gdn_step(&q, &k, &v, &g, &beta, state.ssm())?
+        } else {
+            client.gdn_chunk_prefill(&q, &k, &v, &g, &beta, state.ssm(), cfg.chunk_size)?
+        };
+        state.update(window, ssm);
+
+        // 8. silu(z) * rms_norm(o), per head.
+        let z = z
+            .tensor()
+            .contiguous()?
+            .reshape(&[batch, seq, h_v, s])
+            .map_err(Error::Numr)?;
+        let o = self
+            .norm
+            .forward(client, &Var::new(o, false), &Var::new(z, false))?;
+
+        // 9. Flatten heads, reorder for a grouped `ssm_out`, project.
+        let o = o
+            .tensor()
+            .contiguous()?
+            .reshape(&[batch, seq, value_dim])
+            .map_err(Error::Numr)?;
+        let o = if cfg.v_grouped {
+            group_heads(&o, h_k, rep, s)?
+        } else {
+            o
+        };
+        self.ssm_out.forward(client, &Var::new(o, false))
+    }
+}
+
+/// `qkv[.., start .. start + len]` reshaped to `shape`.
+fn slice_heads<R: Runtime>(
+    qkv: &Tensor<R>,
+    start: usize,
+    len: usize,
+    shape: &[usize],
+) -> Result<Tensor<R>> {
+    qkv.narrow(2, start, len)
+        .map_err(Error::Numr)?
+        .contiguous()?
+        .reshape(shape)
+        .map_err(Error::Numr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::layer::GdnWeights;
+    use super::*;
+    use crate::model::config::GdnConfig;
+    use crate::nn::{Linear, MaybeQuantLinear, MaybeRotatedLinear};
+    use crate::test_utils::cpu_setup;
+    use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+
+    const HIDDEN: usize = 8;
+    const H_K: usize = 2;
+    const H_V: usize = 4;
+    const S: usize = 4;
+    const KERNEL: usize = 4;
+    const SEQ: usize = 9;
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next_f32(&mut self) -> f32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 40) as f32) / ((1u64 << 24) as f32)
+        }
+
+        fn uniform(&mut self, lo: f32, hi: f32) -> f32 {
+            lo + (hi - lo) * self.next_f32()
+        }
+
+        fn tensor(
+            &mut self,
+            device: &CpuDevice,
+            shape: &[usize],
+            scale: f32,
+        ) -> Tensor<CpuRuntime> {
+            let n: usize = shape.iter().product();
+            let data: Vec<f32> = (0..n).map(|_| self.uniform(-scale, scale)).collect();
+            Tensor::<CpuRuntime>::from_slice(&data, shape, device).unwrap()
+        }
+    }
+
+    fn cfg(v_grouped: bool) -> GdnConfig {
+        GdnConfig {
+            hidden_size: HIDDEN,
+            conv_kernel: KERNEL,
+            state_size: S,
+            key_heads: H_K,
+            value_heads: H_V,
+            inner_size: H_V * S,
+            rms_eps: 1e-6,
+            chunk_size: 64,
+            v_grouped,
+        }
+    }
+
+    fn plain(w: Tensor<CpuRuntime>) -> MaybeQuantLinear<CpuRuntime> {
+        MaybeQuantLinear::Standard(Linear::new(w, None, false))
+    }
+
+    fn rotated_plain(w: Tensor<CpuRuntime>) -> MaybeRotatedLinear<CpuRuntime> {
+        MaybeRotatedLinear::Plain(plain(w))
+    }
+
+    fn block(device: &CpuDevice, seed: u64, v_grouped: bool) -> GdnBlock<CpuRuntime> {
+        let cfg = cfg(v_grouped);
+        let mut rng = Lcg(seed);
+        let in_scale = 0.5 / (HIDDEN as f32).sqrt();
+        let a: Vec<f32> = (0..H_V).map(|_| -rng.uniform(0.5, 1.5).exp()).collect();
+        let weights = GdnWeights {
+            attn_qkv: rotated_plain(rng.tensor(device, &[cfg.qkv_dim(), HIDDEN], in_scale)),
+            attn_gate: rotated_plain(rng.tensor(device, &[cfg.value_dim(), HIDDEN], in_scale)),
+            ssm_alpha: plain(rng.tensor(device, &[H_V, HIDDEN], in_scale)),
+            ssm_beta: plain(rng.tensor(device, &[H_V, HIDDEN], in_scale)),
+            ssm_out: rotated_plain(rng.tensor(
+                device,
+                &[HIDDEN, cfg.value_dim()],
+                0.5 / (cfg.value_dim() as f32).sqrt(),
+            )),
+            ssm_conv1d: rng.tensor(device, &[cfg.qkv_dim(), KERNEL], 0.5),
+            ssm_a: Tensor::<CpuRuntime>::from_slice(&a, &[H_V], device).unwrap(),
+            ssm_dt_bias: rng.tensor(device, &[H_V], 0.5),
+            ssm_norm: rng.tensor(device, &[S], 1.0),
+        };
+        GdnBlock::new(cfg, weights).unwrap()
+    }
+
+    fn run(
+        client: &CpuClient,
+        block: &GdnBlock<CpuRuntime>,
+        x: &Tensor<CpuRuntime>,
+        state: &mut GdnState<CpuRuntime>,
+    ) -> Tensor<CpuRuntime> {
+        block
+            .forward(client, &Var::new(x.clone(), false), state)
+            .unwrap()
+            .tensor()
+            .clone()
+    }
+
+    fn max_abs_diff(a: &Tensor<CpuRuntime>, b: &Tensor<CpuRuntime>) -> f32 {
+        let a = a.to_vec::<f32>();
+        let b = b.to_vec::<f32>();
+        assert_eq!(a.len(), b.len());
+        a.iter()
+            .zip(&b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn prefill_shapes() {
+        let (client, device) = cpu_setup();
+        let block = block(&device, 0x6d4e_0001, false);
+        let cfg = block.config().clone();
+        let x = Lcg(7).tensor(&device, &[1, SEQ, HIDDEN], 1.0);
+        let mut state = GdnState::<CpuRuntime>::zeros(&cfg, 1, DType::F32, &device).unwrap();
+
+        let y = run(&client, &block, &x, &mut state);
+        assert_eq!(y.shape(), &[1, SEQ, HIDDEN]);
+        assert_eq!(state.conv().shape(), &[1, cfg.qkv_dim(), KERNEL - 1]);
+        assert_eq!(state.ssm().shape(), &[1, H_V, S, S]);
+        assert!(state.is_initialized());
+        assert!(y.to_vec::<f32>().iter().all(|v| v.is_finite()));
+    }
+
+    /// Prefill of 9 tokens equals prefill of 5 then 4 carried decode steps.
+    fn check_state_carry(v_grouped: bool) {
+        let (client, device) = cpu_setup();
+        let block = block(&device, 0x6d4e_0002, v_grouped);
+        let cfg = block.config().clone();
+        let x = Lcg(11).tensor(&device, &[1, SEQ, HIDDEN], 1.0);
+
+        let mut full_state = GdnState::<CpuRuntime>::zeros(&cfg, 1, DType::F32, &device).unwrap();
+        let full = run(&client, &block, &x, &mut full_state);
+
+        let mut state = GdnState::<CpuRuntime>::zeros(&cfg, 1, DType::F32, &device).unwrap();
+        let head = x.narrow(1, 0, 5).unwrap().contiguous().unwrap();
+        let mut parts = vec![run(&client, &block, &head, &mut state)];
+        for t in 5..SEQ {
+            let xt = x.narrow(1, t, 1).unwrap().contiguous().unwrap();
+            parts.push(run(&client, &block, &xt, &mut state));
+        }
+        let refs: Vec<&Tensor<CpuRuntime>> = parts.iter().collect();
+        let stepped = client.cat(&refs, 1).unwrap();
+
+        let y_diff = max_abs_diff(&full, &stepped);
+        assert!(y_diff < 1e-4, "v_grouped={v_grouped}: output diff {y_diff}");
+        let conv_diff = max_abs_diff(full_state.conv(), state.conv());
+        assert!(conv_diff < 1e-4, "conv state diff {conv_diff}");
+        let ssm_diff = max_abs_diff(full_state.ssm(), state.ssm());
+        assert!(ssm_diff < 1e-4, "ssm state diff {ssm_diff}");
+    }
+
+    #[test]
+    fn prefill_matches_prefill_then_decode() {
+        check_state_carry(false);
+    }
+
+    #[test]
+    fn prefill_matches_prefill_then_decode_grouped() {
+        check_state_carry(true);
+    }
+
+    #[test]
+    fn grouped_and_tiled_differ_only_by_head_order() {
+        let (client, device) = cpu_setup();
+        let tiled = block(&device, 0x6d4e_0003, false);
+        let grouped = block(&device, 0x6d4e_0003, true);
+        let cfg = tiled.config().clone();
+        let x = Lcg(13).tensor(&device, &[1, 3, HIDDEN], 1.0);
+        let mut s1 = GdnState::<CpuRuntime>::zeros(&cfg, 1, DType::F32, &device).unwrap();
+        let mut s2 = GdnState::<CpuRuntime>::zeros(&cfg, 1, DType::F32, &device).unwrap();
+        let a = run(&client, &tiled, &x, &mut s1);
+        let b = run(&client, &grouped, &x, &mut s2);
+        // Same weights, permuted `ssm_out` input: outputs differ, states agree.
+        assert!(max_abs_diff(&a, &b) > 1e-6);
+        assert!(max_abs_diff(s1.ssm(), s2.ssm()) < 1e-7);
+    }
+
+    #[test]
+    fn rejects_state_batch_mismatch() {
+        let (client, device) = cpu_setup();
+        let block = block(&device, 0x6d4e_0004, false);
+        let cfg = block.config().clone();
+        let x = Lcg(3).tensor(&device, &[2, 2, HIDDEN], 1.0);
+        let mut state = GdnState::<CpuRuntime>::zeros(&cfg, 1, DType::F32, &device).unwrap();
+        assert!(
+            block
+                .forward(&client, &Var::new(x, false), &mut state)
+                .is_err()
+        );
+    }
+}

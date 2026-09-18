@@ -75,6 +75,32 @@ impl GgufValue {
             _ => None,
         }
     }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            GgufValue::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// Widening accessor for any signed or unsigned integer payload.
+    ///
+    /// Used for GGUF arrays (`prism.hadamard.sign_widths`/`sign_values`) that
+    /// the writer stores as `INT32`, so callers do not have to special-case
+    /// the exact stored width.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            GgufValue::Uint8(v) => Some(*v as i64),
+            GgufValue::Int8(v) => Some(*v as i64),
+            GgufValue::Uint16(v) => Some(*v as i64),
+            GgufValue::Int16(v) => Some(*v as i64),
+            GgufValue::Uint32(v) => Some(*v as i64),
+            GgufValue::Int32(v) => Some(*v as i64),
+            GgufValue::Uint64(v) => Some(*v as i64),
+            GgufValue::Int64(v) => Some(*v),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

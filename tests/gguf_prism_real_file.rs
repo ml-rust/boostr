@@ -33,7 +33,7 @@
 
 use std::path::{Path, PathBuf};
 
-use boostr::format::gguf::{GgmlType, Gguf};
+use boostr::format::gguf::{GgmlType, Gguf, PrismHadamardConfig, SignMode};
 use boostr::quant::DequantOps;
 use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -209,6 +209,55 @@ fn reader_reports_prism_types() {
         Some(1),
         "prism.hadamard.version in {}: expected u32 1",
         ptq1_0_path.display()
+    );
+}
+
+/// Parses the full `prism.hadamard.*` contract out of the real PQ2_0 file
+/// and checks it against the fixture's known-good values.
+#[test]
+fn prism_hadamard_config_parses_real_file() {
+    let Some((_, pq2_0_path, _)) = require_files() else {
+        return;
+    };
+
+    let pq2_0 =
+        Gguf::open(&pq2_0_path).unwrap_or_else(|e| panic!("open {}: {e}", pq2_0_path.display()));
+    let cfg = PrismHadamardConfig::from_metadata(pq2_0.metadata())
+        .unwrap_or_else(|e| {
+            panic!(
+                "parse prism.hadamard metadata in {}: {e}",
+                pq2_0_path.display()
+            )
+        })
+        .unwrap_or_else(|| panic!("prism.hadamard.version missing in {}", pq2_0_path.display()));
+
+    assert_eq!(cfg.block_size, 1024, "block_size");
+    assert_eq!(cfg.sign_mode, SignMode::Explicit, "sign_mode");
+    assert_eq!(cfg.weight_names().count(), 401, "weight_names count");
+    assert!(
+        cfg.rotates("blk.0.ssm_out.weight"),
+        "blk.0.ssm_out.weight should rotate"
+    );
+    assert!(
+        cfg.inverts("token_embd.weight"),
+        "token_embd.weight should invert"
+    );
+    assert!(cfg.gdn_v_grouped, "gdn_v_grouped");
+
+    for width in [5120usize, 6144, 17408] {
+        cfg.signs_for_width(width)
+            .unwrap_or_else(|e| panic!("signs_for_width({width}): {e}"))
+            .unwrap_or_else(|| panic!("signs_for_width({width}) returned None"));
+    }
+
+    let signs_5120 = cfg
+        .signs_for_width(5120)
+        .unwrap_or_else(|e| panic!("signs_for_width(5120): {e}"))
+        .unwrap_or_else(|| panic!("signs_for_width(5120) returned None"));
+    assert_eq!(signs_5120.len(), 5120, "signs_for_width(5120) length");
+    assert!(
+        signs_5120.iter().all(|&s| s == 1 || s == -1),
+        "signs_for_width(5120) entries must all be +1 or -1"
     );
 }
 

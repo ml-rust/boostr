@@ -9,7 +9,10 @@ pub mod torch_pt;
 pub mod weight_source;
 
 pub use device_map::{DevicePlacement, LayerDeviceMap};
-pub use gguf::{GgmlType, Gguf, GgufMetadata, GgufTensorInfo, GgufValue, GgufValueType};
+pub use gguf::{
+    GgmlType, Gguf, GgufMetadata, GgufTensorInfo, GgufValue, GgufValueType, PrismHadamardConfig,
+    SignMode,
+};
 pub use gguf_vocab::extract_gguf_vocab;
 pub use safetensors::{SafeTensors, TensorInfo};
 pub use safetensors_loader::SafeTensorsLoader;

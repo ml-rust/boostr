@@ -100,7 +100,8 @@ mod tests {
         let v = Tensor::<CpuRuntime>::from_slice(&[1.0f32, 0.0, -1.0, 2.0], &[1, 1, 1, 4], &device)
             .unwrap();
         // g = ln(0.5): decay on a zero state changes nothing.
-        let g = Tensor::<CpuRuntime>::from_slice(&[-std::f32::consts::LN_2], &[1, 1, 1], &device).unwrap();
+        let g = Tensor::<CpuRuntime>::from_slice(&[-std::f32::consts::LN_2], &[1, 1, 1], &device)
+            .unwrap();
         let beta = Tensor::<CpuRuntime>::from_slice(&[0.5f32], &[1, 1, 1], &device).unwrap();
         let state = Tensor::<CpuRuntime>::zeros(&[1, 1, 4, 4], DType::F32, &device).unwrap();
 

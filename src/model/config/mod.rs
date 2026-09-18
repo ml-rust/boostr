@@ -1,5 +1,6 @@
 pub mod attention;
 pub mod audio;
+pub mod gdn;
 pub mod huggingface;
 pub mod hybrid;
 pub mod moe;
@@ -10,6 +11,7 @@ pub mod vision;
 
 pub use attention::{AttentionConfig, RopeScalingConfig};
 pub use audio::AudioConfig;
+pub use gdn::{GdnConfig, default_gdn_chunk_size, default_gdn_conv_kernel, default_gdn_rms_eps};
 pub use huggingface::{
     HuggingFaceConfig, HuggingFaceRopeScaling, load_config_auto, load_huggingface_config,
 };

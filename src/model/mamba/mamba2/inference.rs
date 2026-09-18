@@ -16,8 +16,9 @@ impl<R: Runtime> Mamba2<R> {
     /// Inference forward pass on raw tensors (no autograd overhead).
     ///
     /// Takes and updates per-layer SSM state (hidden + conv buffer).
-    /// For prefill (seq_len > 1): processes full sequence via conv1d + sequential scan.
-    /// For decode (seq_len = 1): uses cached conv state for conv step + single SSM step.
+    /// The conv reads the cached window as left context for every call
+    /// (prefill, continuation prefill, decode) and advances it; the SSM
+    /// scan starts from the cached hidden state.
     ///
     /// x: `[batch, seq_len, d_model]` → `[batch, seq_len, d_model]`
     pub fn forward_inference<C>(
@@ -81,11 +82,7 @@ impl<R: Runtime> Mamba2<R> {
         // 3. Causal conv1d on xBC — transpose NLC -> NCL
         let xbc_ncl = xbc.transpose(-1, -2).map_err(Error::Numr)?.contiguous()?;
 
-        let xbc_conv = if seq_len > 1 {
-            self.prefill_conv(client, &xbc_ncl, seq_len, batch, x, state)?
-        } else {
-            self.decode_conv(&xbc_ncl, batch, x, state)?
-        };
+        let xbc_conv = self.cached_conv(client, &xbc_ncl, state)?;
 
         // Back to NLC
         let xbc = xbc_conv
@@ -137,13 +134,12 @@ impl<R: Runtime> Mamba2<R> {
         }
 
         // 9. SSM forward
-        let d_tensor = self.d_param.as_ref().map(|d| d.tensor().clone());
         let ssm_input = crate::model::mamba::ssm::SsmInferenceInput {
             x: &x_ssm,
             a: &a,
             b: &b_proj,
             c: &c_proj,
-            d_param: d_tensor.as_ref(),
+            d_param: self.d_param.as_ref().map(|d| d.tensor()),
             dt: &dt,
             config: &self.config,
         };

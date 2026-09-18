@@ -1,5 +1,6 @@
 pub mod activation;
 pub mod adain;
+pub mod causal_conv1d;
 pub mod conv1d;
 pub mod conv2d;
 pub mod dropout;
@@ -34,6 +35,7 @@ pub mod weight_norm;
 
 pub use activation::Activation;
 pub use adain::AdaIn1d;
+pub use causal_conv1d::causal_conv1d;
 pub use conv1d::Conv1d;
 pub use conv2d::Conv2d;
 pub use dropout::Dropout;

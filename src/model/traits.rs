@@ -6,7 +6,7 @@ use crate::nn::VarBuilder;
 use crate::ops::traits::architecture::gated_delta_net::GatedDeltaNetOps;
 use crate::ops::traits::architecture::moe::MoEOps;
 use crate::ops::traits::position::alibi::AlibiOps;
-use crate::ops::traits::{FlashAttentionOps, KvCacheOps, PagedAttentionOps, RoPEOps};
+use crate::ops::traits::{FlashAttentionOps, KvCacheOps, MRopeOps, PagedAttentionOps, RoPEOps};
 use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::Var;
 use numr::ops::{
@@ -29,6 +29,7 @@ pub trait ModelClient<R: Runtime>:
     + CompareOps<R>
     + ConditionalOps<R>
     + RoPEOps<R>
+    + MRopeOps<R>
     + FlashAttentionOps<R>
     + PagedAttentionOps<R>
     + KvCacheOps<R>
@@ -55,6 +56,7 @@ where
         + CompareOps<R>
         + ConditionalOps<R>
         + RoPEOps<R>
+        + MRopeOps<R>
         + FlashAttentionOps<R>
         + PagedAttentionOps<R>
         + KvCacheOps<R>

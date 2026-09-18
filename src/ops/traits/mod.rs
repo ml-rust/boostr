@@ -13,6 +13,6 @@ pub use attention::{
 };
 pub use cache::{Int4GroupSize, KvCacheOps, KvCacheQuantOps, KvQuantMode};
 pub use inference::{DeviceGrammarDfa, GrammarDfaOps, SamplingOps, SpeculativeOps};
-pub use position::{AlibiOps, RoPEOps, RoPEPackedOps};
+pub use position::{AlibiOps, MRopeOps, RoPEOps, RoPEPackedOps, mrope_stream_selector};
 pub use quantization::CalibrationOps;
 pub use training::{FusedFp8TrainingOps, FusedOptimizerOps};

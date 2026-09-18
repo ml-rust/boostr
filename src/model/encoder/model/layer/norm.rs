@@ -1,7 +1,7 @@
 //! Norm layer variant: LayerNorm (BERT/NomicBert) or RmsNorm (Gemma/Qwen3).
 
 use crate::error::Result;
-use crate::nn::{LayerNorm, RmsNorm};
+use crate::nn::{LastAxisNorm, LayerNorm, RmsNorm};
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{NormalizationOps, ScalarOps, TensorOps};
@@ -23,5 +23,15 @@ impl<R: Runtime<DType = DType>> NormLayer<R> {
             Self::LayerNorm(ln) => ln.forward(client, x),
             Self::RmsNorm(rn) => rn.forward(client, x),
         }
+    }
+}
+
+impl<R: Runtime<DType = DType>> LastAxisNorm<R> for NormLayer<R> {
+    fn forward_last_axis<C>(&self, client: &C, x: &Var<R>) -> Result<Var<R>>
+    where
+        C: RuntimeClient<R> + NormalizationOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R>,
+    {
+        self.forward(client, x)
     }
 }

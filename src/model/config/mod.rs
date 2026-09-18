@@ -4,6 +4,7 @@ pub mod gdn;
 pub mod huggingface;
 pub mod hybrid;
 pub mod moe;
+pub mod qwen35;
 pub mod ssm;
 pub mod tts;
 pub mod universal;
@@ -17,6 +18,7 @@ pub use huggingface::{
 };
 pub use hybrid::HybridConfig;
 pub use moe::{MoeConfig, default_load_balance_alpha, default_z_loss_alpha};
+pub use qwen35::{Qwen35AttentionConfig, default_qwen35_rms_eps};
 pub use ssm::{SsmConfig, default_conv_kernel, default_expand, default_n_groups};
 pub use tts::KokoroConfig;
 pub use universal::{ModelConfig, UniversalConfig, default_rms_norm_eps};

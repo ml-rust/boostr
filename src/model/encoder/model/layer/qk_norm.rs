@@ -3,11 +3,14 @@
 //! Two families normalise Q and K, over different axes, with different norm
 //! types. Both hooks are called unconditionally from the attention paths and
 //! each is a no-op for the scope it does not own, so adding an architecture
-//! cannot leave one of the two attention paths behind.
+//! cannot leave one of the two attention paths behind. The pair application
+//! itself is [`nn::apply_qk_norm`](crate::nn::apply_qk_norm), shared with
+//! the decoder attention blocks.
 
 use super::encoder_layer::EncoderLayer;
 use crate::error::Result;
 use crate::model::encoder::config::QkNormScope;
+use crate::nn::apply_qk_norm;
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::ops::{NormalizationOps, ScalarOps, TensorOps};
@@ -60,14 +63,6 @@ impl<R: Runtime<DType = DType>> EncoderLayer<R> {
         C: RuntimeClient<R> + NormalizationOps<R>,
         R::Client: TensorOps<R> + ScalarOps<R>,
     {
-        let q = match &self.q_norm {
-            Some(n) => n.forward(client, &q)?,
-            None => q,
-        };
-        let k = match &self.k_norm {
-            Some(n) => n.forward(client, &k)?,
-            None => k,
-        };
-        Ok((q, k))
+        apply_qk_norm(client, q, k, self.q_norm.as_ref(), self.k_norm.as_ref())
     }
 }

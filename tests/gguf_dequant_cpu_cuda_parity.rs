@@ -282,9 +282,9 @@ fn assert_matmul_parity(label: &str, format: QuantFormat, weight_bytes: &[u8], n
 /// selects the CUDA kernel family in
 /// `src/quant/cuda/quant_matmul/impl_ops.rs`: `m <= gemv_max_m(format, ..)`
 /// dispatches GEMV, anything larger dispatches GEMM/MMQ. `gemv_max_m`
-/// (`src/quant/cuda/quant_matmul/format_dispatch/gemv.rs`) is per format, so
-/// `m = 2` and `m = 32` callers can exercise different CUDA kernels even
-/// across two different formats at the same `m`.
+/// (`src/quant/cuda/quant_matmul/format_dispatch/gemv_crossover.rs`) is per
+/// format, so `m = 2` and `m = 32` callers can exercise different CUDA
+/// kernels even across two different formats at the same `m`.
 fn assert_matmul_parity_m(
     label: &str,
     format: QuantFormat,
@@ -384,14 +384,14 @@ const COSINE_FLOOR: f64 = 0.999;
 /// Cosine gate for formats whose CUDA `quant_matmul` quantizes the activation
 /// to Q8_1 while CPU uses f32: `Q8_0`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q4K`,
 /// `Q5K`, `Q6K`, `Q2K`, `Q3K`, `IQ4NL`, `IQ4XS`, `IQ2XXS`, `IQ2XS`, `IQ2S`,
-/// `IQ3XXS`, `IQ3S`, `IQ1S`.
+/// `IQ3XXS`, `IQ3S`, `IQ1S`, `PQ2_0`, `Q2_0`, `Q1_0`.
 ///
-/// `gemv_max_m` (`src/quant/cuda/quant_matmul/format_dispatch/gemv.rs`) is
-/// per-format: at least 2 for every dp4a format except `Q3K` and `Q2K`, and 0
-/// for the rest. `Q4_0`, `Q5_0`, `Q4_1`, `Q5_1`, `IQ4NL`, `IQ4XS` and the six
-/// grid-indexed IQ formats `IQ2XXS`, `IQ2XS`, `IQ2S`, `IQ3XXS`, `IQ3S` and
-/// `IQ1S` reach it through the token-batched dp4a GEMV, which has no
-/// single-token sibling. So `m = 2`
+/// `gemv_max_m` (`src/quant/cuda/quant_matmul/format_dispatch/gemv_crossover.rs`)
+/// is per-format: at least 2 for every dp4a format except `Q3K` and `Q2K`,
+/// and 0 for the rest. `Q4_0`, `Q5_0`, `Q4_1`, `Q5_1`, `IQ4NL`, `IQ4XS`, the
+/// six grid-indexed IQ formats `IQ2XXS`, `IQ2XS`, `IQ2S`, `IQ3XXS`, `IQ3S` and
+/// `IQ1S`, and the PrismML-fork `PQ2_0`, `Q2_0` and `Q1_0` reach it through
+/// the token-batched dp4a GEMV, which has no single-token sibling. So `m = 2`
 /// stays on the dp4a GEMV for most of these and lands on the MMQ/GEMM path
 /// for the others. Both quantize the activation to Q8_1, so this gate covers
 /// either one and no threshold change moves a test between gates. Only
@@ -1069,10 +1069,11 @@ fn q4_0_quant_matmul_matches_cpu() {
         k,
     );
     // m = 3 routes to the `_n4` token-batched dp4a GEMV tile (see
-    // `gemv_max_m` / `dispatch_gemv` in
-    // `src/quant/cuda/quant_matmul/format_dispatch/gemv.rs`), untested by
-    // the m = 2 (`_n2`) and m = 32 (MMQ) cases. Odd m also exercises the
-    // ragged tail: one live token slot, three clamped.
+    // `gemv_max_m` in `format_dispatch/gemv_crossover.rs` and
+    // `dispatch_gemv` in `format_dispatch/gemv.rs`, both under
+    // `src/quant/cuda/quant_matmul/`), untested by the m = 2 (`_n2`) and
+    // m = 32 (MMQ) cases. Odd m also exercises the ragged tail: one live
+    // token slot, three clamped.
     assert_matmul_parity_q8_1_activation(
         "q4_0_quant_matmul_matches_cpu_m3",
         QuantFormat::Q4_0,
@@ -1649,15 +1650,160 @@ fn iq4_xs_quant_matmul_matches_cpu() {
     );
 }
 
+/// PQ2_0 weight `[64, 256]` — 2 blocks per row, 128 blocks total: `d` (f16) +
+/// 32 bytes of 2-bit codes, byte-major low-bit-first, 128 elements.
+///
+/// Every 2-bit code is a valid `{-1, 0, 1, 2}` mapping, so index-varying
+/// payload bytes need no range restriction. `n >= 64` and `k` a multiple of
+/// 128 so the `_n4` tile, the 8-chunk warp step and the 4-chunk block
+/// arithmetic all run over more than one unit.
+#[test]
+fn pq2_0_quant_matmul_matches_cpu() {
+    let (n, k) = (64usize, 256usize);
+    let blocks = n * k / 128;
+    let mut data = vec![0u8; blocks * 34];
+    for b in 0..blocks {
+        let blk = &mut data[b * 34..(b + 1) * 34];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..32 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    // m = 1 is the F32-activation warp-per-column kernel: the batched dp4a
+    // tile has no single-token sibling (see `dispatch_gemv`).
+    assert_matmul_parity_q8_1_activation(
+        "pq2_0_quant_matmul_matches_cpu_m1",
+        QuantFormat::PQ2_0,
+        &data,
+        1,
+        n,
+        k,
+    );
+    // m = 3 routes to the `_n4` token-batched dp4a GEMV tile with a ragged
+    // tail: three live token slots, one clamped.
+    assert_matmul_parity_q8_1_activation(
+        "pq2_0_quant_matmul_matches_cpu_m3",
+        QuantFormat::PQ2_0,
+        &data,
+        3,
+        n,
+        k,
+    );
+    // m = 4 fills the `_n4` tile exactly, the widest `gemv_max_m` allows.
+    assert_matmul_parity_q8_1_activation(
+        "pq2_0_quant_matmul_matches_cpu_m4",
+        QuantFormat::PQ2_0,
+        &data,
+        4,
+        n,
+        k,
+    );
+}
+
+/// Q2_0 weight `[64, 256]` — 4 blocks per row, 256 blocks total: `d` (f16) +
+/// 16 bytes of 2-bit codes, byte-major low-bit-first, 64 elements (two
+/// 32-element chunks under one scale).
+#[test]
+fn q2_0_quant_matmul_matches_cpu() {
+    let (n, k) = (64usize, 256usize);
+    let blocks = n * k / 64;
+    let mut data = vec![0u8; blocks * 18];
+    for b in 0..blocks {
+        let blk = &mut data[b * 18..(b + 1) * 18];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..16 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    // m = 1 is the F32-activation warp-per-column kernel: the batched dp4a
+    // tile has no single-token sibling (see `dispatch_gemv`).
+    assert_matmul_parity_q8_1_activation(
+        "q2_0_quant_matmul_matches_cpu_m1",
+        QuantFormat::Q2_0,
+        &data,
+        1,
+        n,
+        k,
+    );
+    // m = 3 routes to the `_n4` token-batched dp4a GEMV tile with a ragged
+    // tail: three live token slots, one clamped.
+    assert_matmul_parity_q8_1_activation(
+        "q2_0_quant_matmul_matches_cpu_m3",
+        QuantFormat::Q2_0,
+        &data,
+        3,
+        n,
+        k,
+    );
+    // m = 4 fills the `_n4` tile exactly, the widest `gemv_max_m` allows.
+    assert_matmul_parity_q8_1_activation(
+        "q2_0_quant_matmul_matches_cpu_m4",
+        QuantFormat::Q2_0,
+        &data,
+        4,
+        n,
+        k,
+    );
+}
+
+/// Q1_0 weight `[64, 256]` — 2 blocks per row, 128 blocks total: `d` (f16) +
+/// 16 bytes of sign bits, byte-major low-bit-first, 128 elements.
+///
+/// Every bit pattern is a valid sign code, so index-varying payload bytes
+/// exercise the byte-permute expansion order directly.
+#[test]
+fn q1_0_quant_matmul_matches_cpu() {
+    let (n, k) = (64usize, 256usize);
+    let blocks = n * k / 128;
+    let mut data = vec![0u8; blocks * 18];
+    for b in 0..blocks {
+        let blk = &mut data[b * 18..(b + 1) * 18];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..16 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    // m = 1 is the F32-activation warp-per-column kernel: the batched dp4a
+    // tile has no single-token sibling (see `dispatch_gemv`).
+    assert_matmul_parity_q8_1_activation(
+        "q1_0_quant_matmul_matches_cpu_m1",
+        QuantFormat::Q1_0,
+        &data,
+        1,
+        n,
+        k,
+    );
+    // m = 3 routes to the `_n4` token-batched dp4a GEMV tile with a ragged
+    // tail: three live token slots, one clamped.
+    assert_matmul_parity_q8_1_activation(
+        "q1_0_quant_matmul_matches_cpu_m3",
+        QuantFormat::Q1_0,
+        &data,
+        3,
+        n,
+        k,
+    );
+    // m = 4 fills the `_n4` tile exactly, the widest `gemv_max_m` allows.
+    assert_matmul_parity_q8_1_activation(
+        "q1_0_quant_matmul_matches_cpu_m4",
+        QuantFormat::Q1_0,
+        &data,
+        4,
+        n,
+        k,
+    );
+}
+
 // ── GEMM path (m = 32) ────────────────────────────────────────────────
 //
 // `m = 32` sits above every format's `gemv_max_m` in
-// `src/quant/cuda/quant_matmul/format_dispatch/gemv.rs`, so every case below
-// dispatches GEMM/MMQ regardless of format. Some cases above already reach
-// that path at `m = 2` too (see `assert_matmul_parity_q8_1_activation`'s
-// comment), but the GEMM kernels in `src/quant/cuda/kernels/gemm/` still need
-// their own coverage at a batch size GEMV never reaches. These cases repeat
-// each fixture with `m = 32` to force GEMM.
+// `src/quant/cuda/quant_matmul/format_dispatch/gemv_crossover.rs`, so every
+// case below dispatches GEMM/MMQ regardless of format. Some cases above
+// already reach that path at `m = 2` too (see
+// `assert_matmul_parity_q8_1_activation`'s comment), but the GEMM kernels in
+// `src/quant/cuda/kernels/gemm/` still need their own coverage at a batch
+// size GEMV never reaches. These cases repeat each fixture with `m = 32` to
+// force GEMM.
 
 /// Q4_0 weight `[3, 64]` — 2 blocks per row, 6 blocks total.
 ///
@@ -2130,6 +2276,81 @@ fn iq4_xs_quant_matmul_gemm_matches_cpu() {
     assert_matmul_parity_q8_1_activation(
         "iq4_xs_quant_matmul_gemm_matches_cpu",
         QuantFormat::IQ4XS,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// PQ2_0 weight `[64, 256]` at `m = 32`: above `gemv_max_m`, so the
+/// per-element f32 GEMM `quant_matmul_pq2_0_f32` in
+/// `src/quant/cuda/kernels/gemm/pq2_0.cu` serves it.
+#[test]
+fn pq2_0_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (64usize, 256usize);
+    let blocks = n * k / 128;
+    let mut data = vec![0u8; blocks * 34];
+    for b in 0..blocks {
+        let blk = &mut data[b * 34..(b + 1) * 34];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..32 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity_q8_1_activation(
+        "pq2_0_quant_matmul_gemm_matches_cpu",
+        QuantFormat::PQ2_0,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// Q2_0 weight `[64, 256]` at `m = 32`: above `gemv_max_m`, so the
+/// per-element f32 GEMM `quant_matmul_q2_0_f32` in
+/// `src/quant/cuda/kernels/gemm/q2_0.cu` serves it.
+#[test]
+fn q2_0_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (64usize, 256usize);
+    let blocks = n * k / 64;
+    let mut data = vec![0u8; blocks * 18];
+    for b in 0..blocks {
+        let blk = &mut data[b * 18..(b + 1) * 18];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..16 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity_q8_1_activation(
+        "q2_0_quant_matmul_gemm_matches_cpu",
+        QuantFormat::Q2_0,
+        &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// Q1_0 weight `[64, 256]` at `m = 32`: above `gemv_max_m`, so the
+/// per-element f32 GEMM `quant_matmul_q1_0_f32` in
+/// `src/quant/cuda/kernels/gemm/q1_0.cu` serves it.
+#[test]
+fn q1_0_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (64usize, 256usize);
+    let blocks = n * k / 128;
+    let mut data = vec![0u8; blocks * 18];
+    for b in 0..blocks {
+        let blk = &mut data[b * 18..(b + 1) * 18];
+        blk[0..2].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+        for i in 0..16 {
+            blk[2 + i] = payload(i, b);
+        }
+    }
+    assert_matmul_parity_q8_1_activation(
+        "q1_0_quant_matmul_gemm_matches_cpu",
+        QuantFormat::Q1_0,
         &data,
         32,
         n,

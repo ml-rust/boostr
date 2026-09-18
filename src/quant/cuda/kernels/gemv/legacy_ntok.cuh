@@ -6,6 +6,12 @@
 // what the four policy structs below carry. The alternative is four copies of
 // the same ~90-line kernel differing in a dozen lines of bit twiddling.
 //
+// The body also serves the PrismML-fork formats in `prism_ntok.cuh`, whose
+// blocks span 64 or 128 elements under one scale. It walks K in 32-element
+// CHUNKS (one Q8_1 activation block each) and asks the policy how many chunks
+// share a block base via `CHUNKS_PER_BLOCK`; the four here declare 1, so
+// chunk and block coincide and the arithmetic folds away.
+//
 // These four have no single-token dp4a GEMV: their `_n2` tile exists because
 // batching pays at m = 2, while m = 1 is served by the F32-activation kernel
 // beside them. `dispatch_gemv` reflects that by entering the dp4a branch for
@@ -35,20 +41,23 @@
 
 // ── Per-format decode policies ──────────────────────────────────────────
 //
-// Contract. `decode` reads block `blk` and 4-element source word `w` (0..3)
-// and produces:
+// Contract. `decode` reads block `blk` and 4-element source word `w`
+// (0..4*CHUNKS_PER_BLOCK-1; 0..3 for the four here) and produces:
 //   *d     — the block scale
 //   *m     — the block minimum, 0 for a format without one
 //   *v_lo  — elements 4w..4w+3 as int8x4, ready for dp4a
 //   *v_hi  — elements 4w+16..4w+19 as int8x4, ready for dp4a
 // `HAS_MIN` says whether the minimum term is part of the format's value, and
 // gates the block-sum correction in the kernel body at compile time.
+// `CHUNKS_PER_BLOCK` is the number of 32-element chunks one block holds;
+// the body derives the block base and the widened `w` from it.
 
 // Q4_0: 18 bytes / 32 elements. `d` f16@0, 16 nibble bytes@2.
 // Value `d * (q - 8)`, so the 8 bias is folded per byte here and the dot
 // product below needs no correction term.
 struct LegacyQ40 {
     static constexpr int BLOCK_BYTES = 18;
+    static constexpr int CHUNKS_PER_BLOCK = 1;
     static constexpr bool HAS_MIN = false;
 
     static __device__ __forceinline__ void decode(
@@ -79,6 +88,7 @@ struct LegacyQ40 {
 // single `(qh >> sh) & 0x01010101` trick does not apply here.
 struct LegacyQ50 {
     static constexpr int BLOCK_BYTES = 22;
+    static constexpr int CHUNKS_PER_BLOCK = 1;
     static constexpr bool HAS_MIN = false;
 
     static __device__ __forceinline__ void decode(
@@ -114,6 +124,7 @@ struct LegacyQ50 {
 // kernel body.
 struct LegacyQ41 {
     static constexpr int BLOCK_BYTES = 20;
+    static constexpr int CHUNKS_PER_BLOCK = 1;
     static constexpr bool HAS_MIN = true;
 
     static __device__ __forceinline__ void decode(
@@ -135,6 +146,7 @@ struct LegacyQ41 {
 // assembly, and no bias for the same reason as Q4_1.
 struct LegacyQ51 {
     static constexpr int BLOCK_BYTES = 24;
+    static constexpr int CHUNKS_PER_BLOCK = 1;
     static constexpr bool HAS_MIN = true;
 
     static __device__ __forceinline__ void decode(
@@ -169,11 +181,14 @@ struct LegacyQ51 {
 // launch side must size the block from the same function, because the
 // reduction's shared array and `__launch_bounds__` both read it.
 //
-// Lane map. A 32-element block holds 4 source words, so a warp's 32 lanes
-// cover 8 whole blocks per step: lane maps to (block `lane / 4` inside an
-// 8-block group, source word `lane % 4`). Four consecutive lanes read 16
-// contiguous bytes of the same block, and the 8-block group is contiguous in
-// the row, so the group's loads coalesce.
+// Lane map. A 32-element chunk holds 4 source words, so a warp's 32 lanes
+// cover 8 whole chunks per step: lane maps to (chunk `lane / 4` inside an
+// 8-chunk group, source word `lane % 4`). Four consecutive lanes read 16
+// contiguous bytes of the same chunk, and the 8-chunk group is contiguous in
+// the row, so the group's loads coalesce. For a legacy format a chunk is a
+// block; for a prism format `CHUNKS_PER_BLOCK` chunks share one block base
+// and scale, and the policy receives the source word index widened over the
+// whole block.
 //
 // The weight load and its decode sit OUTSIDE the token loop — that is the
 // whole point of the tile. Only the activation load and the dp4a repeat per
@@ -197,8 +212,9 @@ struct LegacyQ51 {
 // NTOK - 1 wasted columns in one block of the grid. Both early exits are
 // block-uniform, so every thread reaches the barrier inside the reduction.
 //
-// Ragged K. K is gated only on `k % 32 == 0`, so the last 8-block group can
-// be partial; the block index is bounds-checked rather than read past the row.
+// Ragged K. K is gated on `k % (32 * CHUNKS_PER_BLOCK) == 0`, so the last
+// 8-chunk group can be partial; the chunk index is bounds-checked rather than
+// read past the row.
 
 template <typename FMT, int NTOK>
 static __device__ __forceinline__ void quant_gemv_legacy_q8_1_mwr_ntok(
@@ -215,13 +231,14 @@ static __device__ __forceinline__ void quant_gemv_legacy_q8_1_mwr_ntok(
     const unsigned int m0 = blockIdx.y * NTOK;
     if (col >= (int)N || m0 >= M) return;
 
-    // The weight block and the Q8_1 activation block are both 32 elements, so
-    // one count serves both and the block indices coincide.
+    // A weight chunk and a Q8_1 activation block are both 32 elements, so
+    // one count serves both and their indices coincide. The weight row holds
+    // `bpr / CHUNKS_PER_BLOCK` blocks.
     const int bpr = K / 32;
-    const int gpr = (bpr + 7) / 8; // 8-block groups, rounded up
+    const int gpr = (bpr + 7) / 8; // 8-chunk groups, rounded up
 
     const unsigned char* w_row =
-        weight + (unsigned long long)col * bpr * FMT::BLOCK_BYTES;
+        weight + (unsigned long long)col * (bpr / FMT::CHUNKS_PER_BLOCK) * FMT::BLOCK_BYTES;
 
     const unsigned char* q8_rows[NTOK];
     #pragma unroll
@@ -230,8 +247,8 @@ static __device__ __forceinline__ void quant_gemv_legacy_q8_1_mwr_ntok(
         q8_rows[j] = q8_act + (unsigned long long)mj * bpr * 36;
     }
 
-    const int kbx = lane_id / 4;      // block within the 8-block group
-    const int w4 = lane_id % 4;       // 4-element source word within that block
+    const int kbx = lane_id / 4;      // chunk within the 8-chunk group
+    const int w4 = lane_id % 4;       // 4-element source word within that chunk
     const int pos_lo = 4 + w4 * 4;    // activation byte offset of elements 4w..4w+3
     const int pos_hi = 20 + w4 * 4;   // and of elements 4w+16..4w+19
 
@@ -243,10 +260,13 @@ static __device__ __forceinline__ void quant_gemv_legacy_q8_1_mwr_ntok(
         const int b = g * 8 + kbx;
         if (b >= bpr) continue;
 
+        const unsigned char* blk =
+            w_row + (unsigned long long)(b / FMT::CHUNKS_PER_BLOCK) * FMT::BLOCK_BYTES;
+        const int w = (b % FMT::CHUNKS_PER_BLOCK) * 4 + w4;
+
         float dw, mw;
         int v_lo, v_hi;
-        FMT::decode(w_row + (unsigned long long)b * FMT::BLOCK_BYTES, w4,
-                    &dw, &mw, &v_lo, &v_hi);
+        FMT::decode(blk, w, &dw, &mw, &v_lo, &v_hi);
 
         #pragma unroll
         for (int j = 0; j < NTOK; j++) {

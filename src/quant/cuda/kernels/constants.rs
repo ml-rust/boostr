@@ -67,6 +67,7 @@ pub const GEMV_TQ2_0_MODULE: &str = "gemv_tq2_0";
 pub const GEMV_PQ2_0_MODULE: &str = "gemv_pq2_0";
 pub const GEMV_Q2_0_MODULE: &str = "gemv_q2_0";
 pub const GEMV_Q1_0_MODULE: &str = "gemv_q1_0";
+pub const GEMV_PTQ1_0_MODULE: &str = "gemv_ptq1_0";
 
 // Low-priority GEMM kernels
 pub const GEMM_Q4_1_MODULE: &str = "gemm_q4_1";
@@ -85,3 +86,4 @@ pub const GEMM_TQ2_0_MODULE: &str = "gemm_tq2_0";
 pub const GEMM_PQ2_0_MODULE: &str = "gemm_pq2_0";
 pub const GEMM_Q2_0_MODULE: &str = "gemm_q2_0";
 pub const GEMM_Q1_0_MODULE: &str = "gemm_q1_0";
+pub const GEMM_PTQ1_0_MODULE: &str = "gemm_ptq1_0";

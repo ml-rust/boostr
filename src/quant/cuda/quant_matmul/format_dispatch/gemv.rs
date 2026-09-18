@@ -6,9 +6,10 @@ use crate::error::{Error, Result};
 use crate::quant::cuda::kernels::{
     self, GEMV_IQ1_M_MODULE, GEMV_IQ1_S_MODULE, GEMV_IQ2_S_MODULE, GEMV_IQ2_XS_MODULE,
     GEMV_IQ2_XXS_MODULE, GEMV_IQ3_S_MODULE, GEMV_IQ3_XXS_MODULE, GEMV_IQ4_NL_MODULE,
-    GEMV_IQ4_XS_MODULE, GEMV_PQ2_0_MODULE, GEMV_Q1_0_MODULE, GEMV_Q2_0_MODULE, GEMV_Q2_K_MODULE,
-    GEMV_Q3_K_MODULE, GEMV_Q4_1_MODULE, GEMV_Q5_0_MODULE, GEMV_Q5_1_MODULE, GEMV_Q5_K_MODULE,
-    GEMV_Q8_1_MODULE, GEMV_Q8_K_MODULE, GEMV_TQ1_0_MODULE, GEMV_TQ2_0_MODULE, QUANT_GEMV_MODULE,
+    GEMV_IQ4_XS_MODULE, GEMV_PQ2_0_MODULE, GEMV_PTQ1_0_MODULE, GEMV_Q1_0_MODULE, GEMV_Q2_0_MODULE,
+    GEMV_Q2_K_MODULE, GEMV_Q3_K_MODULE, GEMV_Q4_1_MODULE, GEMV_Q5_0_MODULE, GEMV_Q5_1_MODULE,
+    GEMV_Q5_K_MODULE, GEMV_Q8_1_MODULE, GEMV_Q8_K_MODULE, GEMV_TQ1_0_MODULE, GEMV_TQ2_0_MODULE,
+    QUANT_GEMV_MODULE,
 };
 use crate::quant::cuda::quant_matmul::format_dispatch::gemv_rows::{
     PRISM_GEMV_ROWS, prism_mwr_kernel,
@@ -360,8 +361,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
         QuantFormat::PQ2_0 => ("quant_gemv_pq2_0_f32", GEMV_PQ2_0_MODULE),
         QuantFormat::Q2_0 => ("quant_gemv_q2_0_f32", GEMV_Q2_0_MODULE),
         QuantFormat::Q1_0 => ("quant_gemv_q1_0_f32", GEMV_Q1_0_MODULE),
-        // No dedicated GEMV kernel: the caller takes the generic fused path.
-        QuantFormat::PTQ1_0 => return Ok(None),
+        QuantFormat::PTQ1_0 => ("quant_gemv_ptq1_0_f32", GEMV_PTQ1_0_MODULE),
     };
 
     let warps_per_block = 8u32;

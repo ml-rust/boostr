@@ -84,9 +84,11 @@ pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
         // 82 vs 457 us, m=8: 159 vs 482 us, m=64: 1280 vs 3172 us — and
         // scales linearly, so the GEMV is the right path at every m.
         QuantFormat::PQ2_0 | QuantFormat::Q2_0 | QuantFormat::Q1_0 => usize::MAX,
-        // PTQ1_0 has no dedicated kernel yet and stays on the generic path,
-        // as does every format without a dp4a GEMV.
-        QuantFormat::PTQ1_0 => 0,
+        // PTQ1_0 has only the F32 GEMV/GEMM pair. Measured with
+        // `mmq_kernel_compare --format ptq1_0 --n 5120 --k 5120` on an RTX
+        // 3060: the GEMV wins at m=1 only (887 vs 985 us) and the tiled GEMM
+        // from m=2 up (1061 vs 1722 us at m=2, 1612 vs 3415 us at m=4).
+        QuantFormat::PTQ1_0 => 1,
         _ => 0,
     };
     let caps = numr::runtime::cuda::CudaDevice::new(device_index)

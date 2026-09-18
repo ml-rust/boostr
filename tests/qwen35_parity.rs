@@ -1,12 +1,14 @@
 //! Numerical parity between our `qwen35` CPU forward and the PrismML
-//! llama.cpp fork's oracle, on the real Ternary-Bonsai-2-27B `PQ2_0`
-//! checkpoint.
+//! llama.cpp fork's oracle, on the real Ternary-Bonsai-2-27B `PQ2_0` and
+//! `PTQ1_0` checkpoints. The two files hold the same trits, so one fixture
+//! serves both.
 //!
 //! # Fixture file
 //!
-//! `BOOSTR_BONSAI2_DIR` must hold `Ternary-Bonsai-2-27B-PQ2_0.gguf` and
+//! `BOOSTR_BONSAI2_DIR` must hold `Ternary-Bonsai-2-27B-PQ2_0.gguf`,
+//! `Ternary-Bonsai-2-27B-PTQ1_0.gguf` and
 //! `fixtures/fork_logits_capital_of_france_pq2_0.bin`. Unset dir, missing
-//! model, or missing fixture: every test prints one `skip:` line and passes.
+//! model, or missing fixture: the test prints one `skip:` line and passes.
 //!
 //! The fixture was generated with `tests/tools/prism_dump_logits`:
 //!
@@ -36,6 +38,9 @@ use numr::tensor::Tensor;
 
 const ENV_DIR: &str = "BOOSTR_BONSAI2_DIR";
 const PQ2_0_FILE: &str = "Ternary-Bonsai-2-27B-PQ2_0.gguf";
+/// Same trits as the PQ2_0 file in the base-3 packing; both dequantize
+/// bit-exact to the F16 file, so one fork fixture serves both.
+const PTQ1_0_FILE: &str = "Ternary-Bonsai-2-27B-PTQ1_0.gguf";
 const FIXTURE_FILE: &str = "fixtures/fork_logits_capital_of_france_pq2_0.bin";
 
 const VOCAB: usize = 248_320;
@@ -94,13 +99,13 @@ impl Fixture {
     }
 }
 
-/// The PQ2_0 model and fixture paths, or `None` after one `skip:` line.
-fn require_files() -> Option<(PathBuf, PathBuf)> {
+/// The model and fixture paths, or `None` after one `skip:` line.
+fn require_files(model_file: &str) -> Option<(PathBuf, PathBuf)> {
     let Some(dir) = std::env::var(ENV_DIR).ok().map(PathBuf::from) else {
         println!("skip: {ENV_DIR} not set");
         return None;
     };
-    let model_path = dir.join(PQ2_0_FILE);
+    let model_path = dir.join(model_file);
     if !model_path.is_file() {
         println!("skip: {} not found", model_path.display());
         return None;
@@ -235,8 +240,17 @@ fn load_model(
 }
 
 #[test]
-fn prefill_logits_match_fork() {
-    let Some((model_path, fixture_path)) = require_files() else {
+fn prefill_logits_match_fork_pq2_0() {
+    prefill_logits_match_fork(PQ2_0_FILE);
+}
+
+#[test]
+fn prefill_logits_match_fork_ptq1_0() {
+    prefill_logits_match_fork(PTQ1_0_FILE);
+}
+
+fn prefill_logits_match_fork(model_file: &str) {
+    let Some((model_path, fixture_path)) = require_files(model_file) else {
         return;
     };
     let fixture = Fixture::load(&fixture_path);
@@ -289,8 +303,17 @@ fn prefill_logits_match_fork() {
 }
 
 #[test]
-fn greedy_decode_matches_fork() {
-    let Some((model_path, fixture_path)) = require_files() else {
+fn greedy_decode_matches_fork_pq2_0() {
+    greedy_decode_matches_fork(PQ2_0_FILE);
+}
+
+#[test]
+fn greedy_decode_matches_fork_ptq1_0() {
+    greedy_decode_matches_fork(PTQ1_0_FILE);
+}
+
+fn greedy_decode_matches_fork(model_file: &str) {
+    let Some((model_path, fixture_path)) = require_files(model_file) else {
         return;
     };
     let fixture = Fixture::load(&fixture_path);

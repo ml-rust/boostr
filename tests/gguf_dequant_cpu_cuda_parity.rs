@@ -1841,6 +1841,92 @@ fn q1_0_quant_matmul_matches_cpu() {
     );
 }
 
+/// PTQ1_0 weight bytes at `[n, k]`: 24 `qs` bytes bounded to `0..=242`, 2
+/// `qh` bytes bounded to `0..=80` (the fork's packer's actual output range,
+/// see `ptq1_0_dequant_matches_cpu`), then `d` (f16) at the END, for a
+/// 128-element, 28-byte block. Unlike `prism_weight`, `d` is not at byte 0,
+/// so this format needs its own builder.
+fn ptq1_0_weight(n: usize, k: usize) -> Vec<u8> {
+    let blocks = n * k / 128;
+    let mut data = vec![0u8; blocks * 28];
+    for b in 0..blocks {
+        let blk = &mut data[b * 28..(b + 1) * 28];
+        for (i, byte) in blk[..24].iter_mut().enumerate() {
+            *byte = bounded_payload(i, b, 242);
+        }
+        for (i, byte) in blk[24..26].iter_mut().enumerate() {
+            *byte = bounded_payload(24 + i, b, 80);
+        }
+        blk[26..28].copy_from_slice(&D_BITS[b % BLOCKS].to_le_bytes());
+    }
+    data
+}
+
+/// PTQ1_0 weight `[64, 256]` — 2 blocks per row, 128 blocks total. PTQ1_0 has
+/// only the F32 GEMV/GEMM pair (`quant_gemv_ptq1_0_f32`,
+/// `quant_matmul_ptq1_0_f32`), no dp4a or feature-major kernel, so this uses
+/// the plain `assert_matmul_parity_m` (element-wise, exact activation on both
+/// backends) instead of `assert_matmul_parity_q8_1_activation`. Which CUDA
+/// kernel runs at a given `m` is device-dependent: `gemv_max_m` for PTQ1_0 is
+/// 0 on a device with int8 MMA (so every `m` here dispatches
+/// `quant_matmul_ptq1_0_f32`) and 16 without it (so every `m` here dispatches
+/// `quant_gemv_ptq1_0_f32`) — see `gemv_crossover.rs`. Both must be correct,
+/// so this covers whichever the running device picks.
+#[test]
+fn ptq1_0_quant_matmul_matches_cpu() {
+    let (n, k) = (64usize, 256usize);
+    let data = ptq1_0_weight(n, k);
+    assert_matmul_parity_m(
+        "ptq1_0_quant_matmul_matches_cpu_m1",
+        QuantFormat::PTQ1_0,
+        &data,
+        1,
+        n,
+        k,
+    );
+    assert_matmul_parity_m(
+        "ptq1_0_quant_matmul_matches_cpu_m2",
+        QuantFormat::PTQ1_0,
+        &data,
+        2,
+        n,
+        k,
+    );
+    assert_matmul_parity_m(
+        "ptq1_0_quant_matmul_matches_cpu_m3",
+        QuantFormat::PTQ1_0,
+        &data,
+        3,
+        n,
+        k,
+    );
+    assert_matmul_parity_m(
+        "ptq1_0_quant_matmul_matches_cpu_m4",
+        QuantFormat::PTQ1_0,
+        &data,
+        4,
+        n,
+        k,
+    );
+}
+
+/// PTQ1_0 weight `[70, 256]` — `N = 70` is a multiple of neither 4 nor 8, the
+/// tile widths the prism three's dp4a kernels key off. PTQ1_0 has no dp4a
+/// kernel, so this is a plain ragged-`N` GEMV/GEMM check, not a tile-clamp
+/// check like `prism_quant_matmul_m1_ragged_rows_matches_cpu`.
+#[test]
+fn ptq1_0_quant_matmul_m1_n70_matches_cpu() {
+    let (n, k) = (70usize, 256usize);
+    assert_matmul_parity_m(
+        "ptq1_0_quant_matmul_m1_n70",
+        QuantFormat::PTQ1_0,
+        &ptq1_0_weight(n, k),
+        1,
+        n,
+        k,
+    );
+}
+
 /// Prism weight bytes at `[n, k]`: `d` (f16) at byte 0, then
 /// `block_bytes - 2` index-varying payload bytes, for a block of
 /// `block_elems` elements. Same layout the three fixtures above build inline.
@@ -2457,6 +2543,24 @@ fn q1_0_quant_matmul_gemm_matches_cpu() {
         "q1_0_quant_matmul_gemm_matches_cpu",
         QuantFormat::Q1_0,
         &data,
+        32,
+        n,
+        k,
+    );
+}
+
+/// PTQ1_0 weight `[64, 256]` at `m = 32`: `gemv_max_m` for PTQ1_0 is 0 or 16
+/// depending on the running device's int8 MMA support (see
+/// `gemv_crossover.rs`), so `m = 32` always exceeds it and dispatches
+/// `quant_matmul_ptq1_0_f32` — unlike the prism three, PTQ1_0 has no
+/// feature-major fallback to sit behind.
+#[test]
+fn ptq1_0_quant_matmul_gemm_matches_cpu() {
+    let (n, k) = (64usize, 256usize);
+    assert_matmul_parity_m(
+        "ptq1_0_quant_matmul_gemm_matches_cpu",
+        QuantFormat::PTQ1_0,
+        &ptq1_0_weight(n, k),
         32,
         n,
         k,

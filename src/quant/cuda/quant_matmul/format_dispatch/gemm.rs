@@ -7,10 +7,10 @@ use crate::error::{Error, Result};
 use crate::quant::cuda::kernels::{
     self, GEMM_IQ1_M_MODULE, GEMM_IQ1_S_MODULE, GEMM_IQ2_S_MODULE, GEMM_IQ2_XS_MODULE,
     GEMM_IQ2_XXS_MODULE, GEMM_IQ3_S_MODULE, GEMM_IQ3_XXS_MODULE, GEMM_IQ4_NL_MODULE,
-    GEMM_IQ4_XS_MODULE, GEMM_PQ2_0_MODULE, GEMM_Q1_0_MODULE, GEMM_Q2_0_MODULE, GEMM_Q2_K_MODULE,
-    GEMM_Q3_K_MODULE, GEMM_Q4_1_MODULE, GEMM_Q5_0_MODULE, GEMM_Q5_1_MODULE, GEMM_Q5_K_MODULE,
-    GEMM_Q8_1_MODULE, GEMM_Q8_K_MODULE, GEMM_TQ1_0_MODULE, GEMM_TQ2_0_MODULE, QUANT_GEMV_MODULE,
-    QUANT_MATMUL_MODULE, QUANT_MMQ_MMA_MODULE,
+    GEMM_IQ4_XS_MODULE, GEMM_PQ2_0_MODULE, GEMM_PTQ1_0_MODULE, GEMM_Q1_0_MODULE, GEMM_Q2_0_MODULE,
+    GEMM_Q2_K_MODULE, GEMM_Q3_K_MODULE, GEMM_Q4_1_MODULE, GEMM_Q5_0_MODULE, GEMM_Q5_1_MODULE,
+    GEMM_Q5_K_MODULE, GEMM_Q8_1_MODULE, GEMM_Q8_K_MODULE, GEMM_TQ1_0_MODULE, GEMM_TQ2_0_MODULE,
+    QUANT_GEMV_MODULE, QUANT_MATMUL_MODULE, QUANT_MMQ_MMA_MODULE,
 };
 use crate::quant::cuda::quant_matmul::helpers::quantize_activation_q8_1;
 use crate::quant::cuda::quant_matmul::mmq_feat_major;
@@ -108,8 +108,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_matmul(
         QuantFormat::PQ2_0 => ("quant_matmul_pq2_0_f32", GEMM_PQ2_0_MODULE),
         QuantFormat::Q2_0 => ("quant_matmul_q2_0_f32", GEMM_Q2_0_MODULE),
         QuantFormat::Q1_0 => ("quant_matmul_q1_0_f32", GEMM_Q1_0_MODULE),
-        // No dedicated GEMM kernel: the caller takes the generic fused path.
-        QuantFormat::PTQ1_0 => return Ok(None),
+        QuantFormat::PTQ1_0 => ("quant_matmul_ptq1_0_f32", GEMM_PTQ1_0_MODULE),
     };
 
     tracing::debug!(

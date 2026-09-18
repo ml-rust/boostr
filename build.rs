@@ -85,7 +85,7 @@ fn compile_cuda_kernels() {
         "iq4_nl", "iq4_xs", "iq3_s", "iq2_xs", "iq1_s", "iq1_m", "iq2_xxs", "iq2_s", "iq3_xxs",
         // Ternary quants
         "tq1_0", "tq2_0", // PrismML-fork quants
-        "pq2_0", "q2_0", "q1_0",
+        "pq2_0", "q2_0", "q1_0", "ptq1_0",
     ];
 
     let gemv_dir = PathBuf::from("src/quant/cuda/kernels/gemv");

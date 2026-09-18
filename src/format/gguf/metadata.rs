@@ -22,6 +22,10 @@ impl GgufMetadata {
         self.kv.get(key).and_then(|v| v.as_f32())
     }
 
+    pub fn get_bool(&self, key: &str) -> Option<bool> {
+        self.kv.get(key).and_then(|v| v.as_bool())
+    }
+
     pub fn get(&self, key: &str) -> Option<&GgufValue> {
         self.kv.get(key)
     }
@@ -48,6 +52,25 @@ impl GgufMetadata {
             .iter()
             .map(GgufValue::as_u8)
             .collect::<Option<Vec<u8>>>()
+    }
+
+    /// Get a `STRING` array by key. All-or-nothing, like [`get_u8_array`](Self::get_u8_array).
+    pub fn get_string_array(&self, key: &str) -> Option<Vec<String>> {
+        self.get_array(key)?
+            .iter()
+            .map(|v| v.as_string().map(str::to_string))
+            .collect::<Option<Vec<String>>>()
+    }
+
+    /// Get an integer array by key, widened to `i64`. All-or-nothing.
+    ///
+    /// Accepts any stored integer width (GGUF writers commonly use `INT32`
+    /// for signed metadata arrays); see [`GgufValue::as_i64`].
+    pub fn get_i64_array(&self, key: &str) -> Option<Vec<i64>> {
+        self.get_array(key)?
+            .iter()
+            .map(GgufValue::as_i64)
+            .collect::<Option<Vec<i64>>>()
     }
 
     /// Model architecture (e.g., "llama")

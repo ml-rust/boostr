@@ -4,19 +4,19 @@ use super::block::MiniCpm4Attention;
 use super::guards::{missing_rope, require_preallocated_cache};
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
+use crate::model::audio::voxcpm::minicpm4::left_pad::LeftPad;
 use crate::model::traits::ModelClient;
 use crate::nn::var_ops::var_contiguous;
 use crate::nn::{MaybeLoraLinear, RoPE};
 use crate::ops::traits::AttnOutLayout;
 use crate::quant::traits::DequantOps;
-use numr::autograd::{Var, var_narrow, var_permute, var_reshape};
+use numr::autograd::{Var, var_cat, var_narrow, var_permute, var_reshape};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, ReduceOps, ScalarOps,
     ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
-use numr::tensor::Tensor;
 
 impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
     /// KV-cached causal GQA attention over `x: [batch, seq, hidden]` covering
@@ -59,9 +59,11 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
     /// [`Error::InvalidArgument`]. The decode path never dereferences an
     /// absent table.
     ///
-    /// `kv_start` is the per-row left-padding start, `[batch]` I32, handed
-    /// straight to the flash kernel: row `b` attends no key below
-    /// `kv_start[b]`. `None` is the unpadded call and costs nothing.
+    /// `pad` is the batch's per-row left padding: row `b` attends no key
+    /// below `pad.starts[b]` (the flash kernel's `kv_start`) and is rotated
+    /// at positions counted from there (`rope_rows`), so its floats are the
+    /// ones its own unpadded run forms. `None`, or a pad with no padded
+    /// row, is the unpadded call and costs nothing.
     pub fn forward_cached<C>(
         &self,
         client: &C,
@@ -69,7 +71,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
         rope: Option<&RoPE<R>>,
         kv_cache: &mut KvCache<R>,
         position: usize,
-        kv_start: Option<&Tensor<R>>,
+        pad: Option<&LeftPad<R>>,
     ) -> Result<Var<R>>
     where
         // `TypeConversionOps` for the same reason `forward` needs it.
@@ -157,11 +159,22 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
                         ),
                     });
                 }
-                let cos = var_narrow(rope.cos_cache(), 0, position, seq).map_err(Error::Numr)?;
-                let sin = var_narrow(rope.sin_cache(), 0, position, seq).map_err(Error::Numr)?;
-                let q = client.apply_rope(&q, &cos, &sin)?;
-                let k = client.apply_rope(&k, &cos, &sin)?;
-                (q, k)
+                match pad {
+                    Some(pad) if pad.is_padded() => (
+                        rope_rows(client, rope, &q, position, seq, pad)?,
+                        rope_rows(client, rope, &k, position, seq, pad)?,
+                    ),
+                    _ => {
+                        let cos =
+                            var_narrow(rope.cos_cache(), 0, position, seq).map_err(Error::Numr)?;
+                        let sin =
+                            var_narrow(rope.sin_cache(), 0, position, seq).map_err(Error::Numr)?;
+                        (
+                            client.apply_rope(&q, &cos, &sin)?,
+                            client.apply_rope(&k, &cos, &sin)?,
+                        )
+                    }
+                }
             }
             (false, None) => return Err(missing_rope()),
         };
@@ -191,7 +204,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             // The disabled-window sentinel `core_spec` declares.
             self.core_spec().sliding_window,
             Some(kv_cache.seq_len()),
-            kv_start,
+            pad.map(|p| &p.starts),
             AttnOutLayout::TokenMajor,
         )?;
         let attn_out = Var::new(out, false);
@@ -202,6 +215,67 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
 
         self.o_proj.forward(client, &attn_out)
     }
+}
+
+/// RoPE over a left-padded batch, one row at a time, each at its own
+/// positions: row `b`'s position `s` of this call is `position + s -
+/// pad.start(b)`. The rows are rotated through the same `apply_rope` the
+/// unpadded call uses, over the same table rows, so a row's values are the
+/// unpadded run's bit for bit. Pad positions of a prefill (`position + s <
+/// start`) have no position of their own; they are rotated at the table's
+/// first rows, and nothing real reads them: the keys are masked and the
+/// outputs stay on pad positions. Returns dense `[B, H, S, D]`.
+fn rope_rows<R, C>(
+    client: &C,
+    rope: &RoPE<R>,
+    x: &Var<R>,
+    position: usize,
+    seq: usize,
+    pad: &LeftPad<R>,
+) -> Result<Var<R>>
+where
+    R: Runtime<DType = DType>,
+    R::Client: TensorOps<R> + ShapeOps<R>,
+    C: ModelClient<R>,
+{
+    let table = |start: usize, len: usize| -> Result<(Var<R>, Var<R>)> {
+        Ok((
+            var_narrow(rope.cos_cache(), 0, start, len).map_err(Error::Numr)?,
+            var_narrow(rope.sin_cache(), 0, start, len).map_err(Error::Numr)?,
+        ))
+    };
+    let mut rows = Vec::with_capacity(pad.batch());
+    for b in 0..pad.batch() {
+        let x_b = var_narrow(x, 0, b, 1).map_err(Error::Numr)?;
+        let start = pad.start(b);
+        // Positions of this call below the row's start: only a prefill has
+        // them (`position == 0`), and only in front of the real ones.
+        let s0 = start.saturating_sub(position).min(seq);
+        let real = seq - s0;
+        let mut parts = Vec::with_capacity(2);
+        if s0 > 0 {
+            let (cos, sin) = table(0, s0)?;
+            let head = var_narrow(&x_b, 2, 0, s0).map_err(Error::Numr)?;
+            parts.push(client.apply_rope(&head, &cos, &sin)?);
+        }
+        if real > 0 {
+            let (cos, sin) = table(position + s0 - start, real)?;
+            let tail = var_narrow(&x_b, 2, s0, real).map_err(Error::Numr)?;
+            parts.push(client.apply_rope(&tail, &cos, &sin)?);
+        }
+        let row = if parts.len() == 1 {
+            parts.swap_remove(0)
+        } else {
+            let refs: Vec<&Var<R>> = parts.iter().collect();
+            var_cat(&refs, 2, client).map_err(Error::Numr)?
+        };
+        rows.push(row);
+    }
+    if rows.len() == 1 {
+        return Ok(rows.swap_remove(0));
+    }
+    let refs: Vec<&Var<R>> = rows.iter().collect();
+    var_cat(&refs, 0, client).map_err(Error::Numr)
 }
 
 #[cfg(test)]

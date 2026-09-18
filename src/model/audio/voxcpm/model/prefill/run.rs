@@ -5,6 +5,7 @@ use super::rows::PaddedBatch;
 use super::state::{PrefillIntermediates, PrefillRow, PrefillState};
 use super::tensors::{last_row, mask_var, row_audio_feat};
 use crate::error::{Error, Result};
+use crate::model::audio::voxcpm::minicpm4::LeftPad;
 use crate::model::audio::voxcpm::model::loader::VoxCpm2Model;
 use crate::model::traits::ModelClient;
 use crate::ops::FlashAttentionOps;
@@ -250,7 +251,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
 
         let kv_start = padded
             .is_padded()
-            .then(|| Tensor::<R>::from_slice(&padded.kv_start, &[batch], device))
+            .then(|| LeftPad::<R>::new(padded.kv_start.clone(), device))
             .transpose()?;
 
         let mut base_cache = self.base_lm.new_kv_cache(batch, max_length)?;
@@ -402,7 +403,7 @@ mod tests {
             .expect("batch");
         assert_eq!(batch.batch, 2);
         assert_eq!(batch.position, 3 + 2 + LONG.len());
-        let starts: Vec<i32> = batch.kv_start.as_ref().expect("padded").to_vec();
+        let starts: Vec<i32> = batch.kv_start.as_ref().expect("padded").host.clone();
         assert_eq!(starts, [0, (batch.position - SHORT.len()) as i32]);
 
         let lm = values(&batch.lm_hidden);

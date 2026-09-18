@@ -12,10 +12,13 @@
 //! `VOXCPM2_EXPECTED_ROW0_WAV`, optional, is a wav the single render of row 0
 //! must equal byte for byte — the clone recipe's known-good output.
 //!
-//! Quantized matmul tiles are chosen by `M`, so a row's values under `B = 2`
-//! are not bit-identical to its `B = 1` render; the test requires the same
-//! patch count per row and reports the per-row max abs latent difference and
-//! the audio SNR.
+//! Every kernel on the path forms a row's floats in an order that does not
+//! depend on the batch (feature-major MMQ at every `M`, the tiled dense
+//! GEMM, per-row anchored flash tiles and RoPE positions under left
+//! padding), so a row's `B = 2` render is its `B = 1` render bit for bit:
+//! the same patch count, the same latent bits, the same samples. The test
+//! asserts that and still prints the max abs latent difference and the audio
+//! SNR, so a regression reports its size.
 
 #![cfg(all(feature = "voxcpm", feature = "cuda"))]
 
@@ -72,6 +75,26 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
         .zip(b)
         .map(|(x, y)| (x - y).abs())
         .fold(0.0f32, f32::max)
+}
+
+/// The first index where the two runs' bits differ, with both values.
+fn first_bit_mismatch(got: &[f32], want: &[f32]) -> Option<(usize, f32, f32)> {
+    got.iter()
+        .zip(want)
+        .enumerate()
+        .find(|(_, (g, w))| g.to_bits() != w.to_bits())
+        .map(|(i, (g, w))| (i, *g, *w))
+}
+
+fn assert_bits(what: &str, got: &[f32], want: &[f32]) {
+    assert_eq!(got.len(), want.len(), "{what}: length mismatch");
+    if let Some((i, g, w)) = first_bit_mismatch(got, want) {
+        panic!(
+            "{what}: element {i} is {g:e} ({:#010x}) batched, {w:e} ({:#010x}) alone",
+            g.to_bits(),
+            w.to_bits()
+        );
+    }
 }
 
 fn snr_db(reference: &[f32], test: &[f32]) -> f64 {
@@ -295,18 +318,19 @@ fn batch_of_two_matches_single_renders() {
             &format!("batch1_row{b}.wav"),
             &single.samples,
         );
+        assert_bits(&format!("row {b} latent"), &latent, &single.latent);
+        assert_bits(&format!("row {b} samples"), &samples, &single.samples);
     }
 }
 
-/// The same request twice in one batch, unpadded: the control that puts the
-/// padded rows' drift in context. Identical rows do NOT come out bit-identical
-/// on CUDA — the stream-k MMQ tiling splits a tile's K walk by its position in
-/// the launch, so two rows of one batch sum in different orders, and the
-/// Q8 activation quantization plus the sampler amplify that last-bit
-/// difference to a visible one. This test reports the divergence between the
-/// two rows and against the single render, and checks nothing bitwise.
+/// The same request twice in one batch, unpadded: the control with no
+/// padding in play. The split-K MMQ tiles split every row's K walk at the
+/// same points whatever the row's position in the launch, so the two rows
+/// come out bit-identical to each other and to the single render, at the
+/// prefill handoff and in every patch. The test asserts that and prints the
+/// differences it measured.
 #[test]
-fn duplicate_rows_report_kernel_drift() {
+fn duplicate_rows_match_each_other_and_the_single() {
     let (Some(gguf), Some(ref_wav)) = (env_path("VOXCPM2_GGUF"), env_path("VOXCPM2_REF_WAV"))
     else {
         eprintln!("VOXCPM2_GGUF or VOXCPM2_REF_WAV unset or absent; skipping");
@@ -353,6 +377,7 @@ fn duplicate_rows_report_kernel_drift() {
         "duplicate rows after prefill: lm_hidden row diff {:.3e}",
         max_abs_diff(&lm[..half], &lm[half..])
     );
+    assert_bits("prefill lm_hidden row 1 vs row 0", &lm[half..], &lm[..half]);
     let mut state = GenerateState::start(prefill, model.config).expect("start");
     let options = GenerateOptions::new(max_len, SEEDS[0]);
     let outcome = model
@@ -398,5 +423,7 @@ fn duplicate_rows_report_kernel_drift() {
             latent.iter().all(|v| v.is_finite()),
             "row {b} has non-finite latent values"
         );
+        assert_eq!(state.patch_len[b], single.patches, "row {b} patch count");
+        assert_bits(&format!("row {b} latent"), latent, &single.latent);
     }
 }

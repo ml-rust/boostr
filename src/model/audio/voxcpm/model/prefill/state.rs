@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;
+use crate::model::audio::voxcpm::minicpm4::LeftPad;
 use numr::autograd::Var;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -77,10 +78,11 @@ pub struct PrefillState<R: Runtime> {
     pub position: usize,
     /// Rows in the batch, `B >= 1`.
     pub batch: usize,
-    /// Per-row left-padding start, `[B]` I32, `kv_start[b] = S_max - S_b`.
-    /// `None` when no row is padded (every `B == 1` prefill), in which case
-    /// every attention call is the unpadded one.
-    pub kv_start: Option<Tensor<R>>,
+    /// Per-row left padding, `kv_start.starts[b] = S_max - S_b`, on the
+    /// device for the attention kernels and on the host for the per-row RoPE
+    /// positions. `None` when no row is padded (every `B == 1` prefill), in
+    /// which case every attention call is the unpadded one.
+    pub kv_start: Option<LeftPad<R>>,
     /// Present only when the prefill ran via a `_capturing` entry point;
     /// always `None` on the plain paths, which allocate nothing extra.
     pub intermediates: Option<PrefillIntermediates<R>>,

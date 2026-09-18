@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;
+use crate::model::audio::voxcpm::minicpm4::left_pad::LeftPad;
 use crate::model::audio::voxcpm::minicpm4::model::MiniCpm4Model;
 use crate::model::traits::ModelClient;
 use crate::quant::traits::DequantOps;
@@ -12,7 +13,6 @@ use numr::ops::{
     ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
-use numr::tensor::Tensor;
 
 impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// The cached layer stack: `[batch, seq, hidden]` covering absolute
@@ -29,7 +29,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         x: &Var<R>,
         kv_cache: &mut LayeredKvCache<R>,
         position: usize,
-        kv_start: Option<&Tensor<R>>,
+        pad: Option<&LeftPad<R>>,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -62,7 +62,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
                 self.rope.as_ref(),
                 cache,
                 position,
-                kv_start,
+                pad,
             )?;
             h = new_h;
             pending = Some(mlp_out);

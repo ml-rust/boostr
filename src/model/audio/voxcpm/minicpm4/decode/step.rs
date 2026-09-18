@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;
+use crate::model::audio::voxcpm::minicpm4::left_pad::LeftPad;
 use crate::model::audio::voxcpm::minicpm4::model::MiniCpm4Model;
 use crate::model::traits::ModelClient;
 use crate::quant::traits::DequantOps;
@@ -12,7 +13,6 @@ use numr::ops::{
     ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
-use numr::tensor::Tensor;
 
 impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// Run the full prefix and populate `kv_cache` with its K/V.
@@ -26,16 +26,16 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// per sequence, then [`decode_step`](Self::decode_step) from
     /// `position == seq`.
     ///
-    /// `kv_start` is the per-row left-padding start, `[batch]` I32: row `b`
-    /// attends no key below `kv_start[b]`, on every layer, here and on every
-    /// later [`decode_step`](Self::decode_step) with the same tensor. `None`
-    /// is the unpadded call.
+    /// `pad` is the batch's per-row left padding: row `b` attends no key
+    /// below `pad.starts[b]` and rotates from that position, on every layer,
+    /// here and on every later [`decode_step`](Self::decode_step) with the
+    /// same pad. `None` is the unpadded call.
     pub fn prefill<C>(
         &self,
         client: &C,
         inputs_embeds: &Var<R>,
         kv_cache: &mut LayeredKvCache<R>,
-        kv_start: Option<&Tensor<R>>,
+        pad: Option<&LeftPad<R>>,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -64,7 +64,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         self.check_cache(kv_cache, shape[0], shape[2], shape[1], 0)?;
 
         kv_cache.reset();
-        self.forward_cached(client, inputs_embeds, kv_cache, 0, kv_start)
+        self.forward_cached(client, inputs_embeds, kv_cache, 0, pad)
     }
 
     /// Advance one position.
@@ -82,9 +82,9 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// at another, which stays shape-valid and silently computes a different
     /// model.
     ///
-    /// `kv_start` is the same per-row left-padding start the cache was
-    /// prefilled with (see [`prefill`](Self::prefill)); `None` when it was
-    /// prefilled unpadded.
+    /// `pad` is the same per-row left padding the cache was prefilled with
+    /// (see [`prefill`](Self::prefill)); `None` when it was prefilled
+    /// unpadded.
     ///
     /// Errors (never panics, never writes out of range) when `position`
     /// reaches the cache's `max_length`, when it disagrees with the cache
@@ -95,7 +95,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         embed: &Var<R>,
         kv_cache: &mut LayeredKvCache<R>,
         position: usize,
-        kv_start: Option<&Tensor<R>>,
+        pad: Option<&LeftPad<R>>,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -147,7 +147,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         }
 
         let x = var_reshape(embed, &[batch, 1, hidden]).map_err(Error::Numr)?;
-        let out = self.forward_cached(client, &x, kv_cache, position, kv_start)?;
+        let out = self.forward_cached(client, &x, kv_cache, position, pad)?;
         var_reshape(&out, &[batch, hidden]).map_err(Error::Numr)
     }
 }
@@ -162,6 +162,7 @@ mod tests {
     };
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;
+    use numr::tensor::Tensor;
 
     fn values(v: &Var<CpuRuntime>) -> Vec<f32> {
         v.tensor().contiguous().expect("contiguous").to_vec::<f32>()
@@ -374,11 +375,15 @@ mod tests {
         assert_eq!(cache.seq_len(), seq);
     }
 
-    /// Left padding under `kv_start`: a short row padded in front and stacked
-    /// under a longer one, prefilled then stepped, reproduces its own
-    /// unpadded batch-1 run at every real position. Without the start the
-    /// zero pad rows are attended and the values move, which the final
-    /// assertion checks so the test cannot pass vacuously.
+    /// Left padding: a short row padded in front and stacked under a longer
+    /// one, prefilled then stepped, reproduces its own unpadded batch-1 run
+    /// at every real position: the row attends its own keys and rotates at
+    /// its own positions. The bound is a tolerance, not bit identity: the
+    /// CPU dense matmul's remainder-row kernels form a different float
+    /// sequence at M=2 than at M=1. Bit identity is the CUDA property, and
+    /// `tests/voxcpm_batch_cuda.rs` asserts it on the real model. Without
+    /// the pad the zero pad rows are attended and the values move, which the
+    /// final assertion checks so the test cannot pass vacuously.
     #[test]
     fn left_padded_batch_matches_unpadded_rows() {
         let (client, device) = cpu_setup();
@@ -394,8 +399,7 @@ mod tests {
                 Tensor::cat(&[x_long.tensor(), &padded], 0).expect("stack"),
                 false,
             );
-            let kv_start = Tensor::<CpuRuntime>::from_slice(&[0i32, pad as i32], &[2], &device)
-                .expect("start");
+            let left_pad = LeftPad::<CpuRuntime>::new(vec![0, pad as i32], &device).expect("pad");
 
             // The same step row for every batch row, so row 1 of the batch
             // and the single-row run see identical inputs.
@@ -404,7 +408,7 @@ mod tests {
                 Tensor::cat(&[&step_row, &step_row], 0).expect("stack"),
                 false,
             );
-            let run = |start: Option<&Tensor<CpuRuntime>>| {
+            let run = |start: Option<&LeftPad<CpuRuntime>>| {
                 let mut cache = model.new_kv_cache(2, 8).expect("cache");
                 let out = model
                     .prefill(&client, &batch, &mut cache, start)
@@ -416,7 +420,7 @@ mod tests {
                 rows.extend(values(&stepped));
                 rows
             };
-            let masked = run(Some(&kv_start));
+            let masked = run(Some(&left_pad));
 
             let mut cache = model.new_kv_cache(1, 8).expect("cache");
             let mut want = values(
@@ -436,8 +440,11 @@ mod tests {
             let row1_step = &masked[(2 * long + 1) * HIDDEN..(2 * long + 2) * HIDDEN];
             let got: Vec<f32> = row1_prefill.iter().chain(row1_step).copied().collect();
             assert_eq!(got.len(), want.len());
-            for (g, w) in got.iter().zip(&want) {
-                assert!((g - w).abs() < 1e-5, "padded {g} vs unpadded {w}");
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert!(
+                    (g - w).abs() < 1e-5,
+                    "element {i}: padded {g:e} vs unpadded {w:e}"
+                );
             }
 
             let unmasked = run(None);

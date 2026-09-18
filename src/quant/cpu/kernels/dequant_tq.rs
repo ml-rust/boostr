@@ -17,19 +17,27 @@
 //! `tests/gguf_conformance_llama_cpp.rs` gates both against llama.cpp.
 use half::f16;
 
-/// Ternary value {-1, 0, 1} of element `elem` of a TQ1_0 block.
+/// Trit `level` (0..5) of a base-3 packed byte, as {-1, 0, 1}.
 ///
 /// TQ1_0 packs FIVE trits per byte in base 3 and does not decode them by
 /// repeated division. llama.cpp stores each byte pre-scaled so a trit is
 /// recovered by a WRAPPING 8-bit multiply against a power of three followed by
 /// a multiply-shift. The wrap is load-bearing: widening it changes the result.
+/// PTQ1_0 (`dequant_prism`) shares this packing.
+#[inline]
+pub(super) fn base3_trit(byte: u8, level: usize) -> i32 {
+    const POW3: [u8; 5] = [1, 3, 9, 27, 81];
+    let q = byte.wrapping_mul(POW3[level]);
+    ((u16::from(q) * 3) >> 8) as i32 - 1
+}
+
+/// Ternary value {-1, 0, 1} of element `elem` of a TQ1_0 block.
 ///
 /// The 256 elements come from three differently shaped runs, in this order:
 /// `[0, 160)` is `qs[0..32]` over 5 levels, `[160, 240)` is `qs[32..48]` over
 /// 5 levels, and `[240, 256)` is `qh[0..4]` over 4 levels.
 #[inline]
 fn tq1_0_trit(block: &[u8], elem: usize) -> i32 {
-    const POW3: [u8; 5] = [1, 3, 9, 27, 81];
     let (byte, level) = if elem < 160 {
         (block[elem % 32], elem / 32)
     } else if elem < 240 {
@@ -39,8 +47,7 @@ fn tq1_0_trit(block: &[u8], elem: usize) -> i32 {
         let r = elem - 240;
         (block[48 + r % 4], r / 4)
     };
-    let q = byte.wrapping_mul(POW3[level]);
-    ((u16::from(q) * 3) >> 8) as i32 - 1
+    base3_trit(byte, level)
 }
 
 /// Ternary value {-1, 0, 1} of element `elem` of a TQ2_0 block.

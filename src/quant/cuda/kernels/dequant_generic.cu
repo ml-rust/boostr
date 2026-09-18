@@ -2,7 +2,7 @@
 // that lack dedicated optimized kernels.
 //
 // One thread per quant block. The format_id parameter selects the decode path
-// via a switch statement. Not optimal, but correct for all 23 formats.
+// via a switch statement. Not optimal, but correct for every `QuantFormat`.
 //
 // Callers must prefer the optimized kernels in dequant.cu (Q4_0, Q8_0,
 // Q4_K, Q6_K) when available; this is the catch-all fallback.
@@ -14,32 +14,9 @@
 #include <cuda_fp16.h>
 
 #include "decode.cuh"
+#include "format_ids.cuh"
 #include "iq_dequant.cuh"
-
-// Format IDs (must match QuantFormat::format_id() in Rust)
-#define FMT_Q4_0    0
-#define FMT_Q4_1    1
-#define FMT_Q5_0    2
-#define FMT_Q5_1    3
-#define FMT_Q8_0    4
-#define FMT_Q8_1    5
-#define FMT_Q2K     6
-#define FMT_Q3K     7
-#define FMT_Q4K     8
-#define FMT_Q5K     9
-#define FMT_Q6K     10
-#define FMT_Q8K     11
-#define FMT_IQ1S    12
-#define FMT_IQ1M    13
-#define FMT_IQ2XXS  14
-#define FMT_IQ2XS   15
-#define FMT_IQ2S    16
-#define FMT_IQ3XXS  17
-#define FMT_IQ3S    18
-#define FMT_IQ4NL   19
-#define FMT_IQ4XS   20
-#define FMT_TQ1_0   21
-#define FMT_TQ2_0   22
+#include "prism_dequant.cuh"
 
 // ── Safe unaligned load helpers ─────────────────────────────────────
 // Quant blocks are packed contiguously; internal fields are not always
@@ -383,6 +360,14 @@ __device__ void dequant_tq1_0_block(const unsigned char* block, float* out) {
     }
 }
 
+// The four PrismML formats share their layouts with the quant-matmul path
+// through prism_dequant.cuh.
+
+__device__ void dequant_q1_0_block  (const unsigned char* b, float* o) { q1_0_dequant_block(b, o);   }
+__device__ void dequant_q2_0_block  (const unsigned char* b, float* o) { q2_0_dequant_block(b, o);   }
+__device__ void dequant_pq2_0_block (const unsigned char* b, float* o) { pq2_0_dequant_block(b, o);  }
+__device__ void dequant_ptq1_0_block(const unsigned char* b, float* o) { ptq1_0_dequant_block(b, o); }
+
 // The seven IQ formats are codebook quantizations; their block layouts live
 // once in iq_dequant.cuh, shared with the quant-matmul and GEMV/GEMM paths.
 
@@ -398,47 +383,7 @@ __device__ void dequant_iq1_m_block  (const unsigned char* b, float* o) { iq1_m_
 
 extern "C" {
 
-// Block sizes per format
-__device__ int get_block_size(unsigned int fmt) {
-    switch (fmt) {
-        case FMT_Q4_0: case FMT_Q4_1: case FMT_Q5_0: case FMT_Q5_1:
-        case FMT_Q8_0: case FMT_Q8_1: case FMT_IQ4NL:
-            return 32;
-        default: // All k-quants, IQ (except IQ4NL), TQ
-            return 256;
-    }
-}
-
-__device__ int get_block_bytes(unsigned int fmt) {
-    switch (fmt) {
-        case FMT_Q4_0:   return 18;
-        case FMT_Q4_1:   return 20;
-        case FMT_Q5_0:   return 22;
-        case FMT_Q5_1:   return 24;
-        case FMT_Q8_0:   return 34;
-        case FMT_Q8_1:   return 36;
-        case FMT_Q2K:    return 84;
-        case FMT_Q3K:    return 110;
-        case FMT_Q4K:    return 144;
-        case FMT_Q5K:    return 176;
-        case FMT_Q6K:    return 210;
-        case FMT_Q8K:    return 292;
-        case FMT_IQ1S:   return 50;
-        case FMT_IQ1M:   return 56;
-        case FMT_IQ2XXS: return 66;
-        case FMT_IQ2XS:  return 74;
-        case FMT_IQ2S:   return 82;
-        case FMT_IQ3XXS: return 98;
-        case FMT_IQ3S:   return 110;
-        case FMT_IQ4NL:  return 18;
-        case FMT_IQ4XS:  return 136;
-        case FMT_TQ1_0:  return 54;
-        case FMT_TQ2_0:  return 66;
-        default:         return 0;
-    }
-}
-
-/// Generic dequantization kernel — handles all 23 GGUF formats.
+/// Generic dequantization kernel — handles every `QuantFormat`.
 /// One thread per quant block. format_id selects the decode path.
 __global__ void dequant_generic_f32(
     const unsigned char* __restrict__ input,
@@ -480,6 +425,10 @@ __global__ void dequant_generic_f32(
         case FMT_IQ1M:   dequant_iq1_m_block(block, out); break;
         case FMT_TQ1_0:  dequant_tq1_0_block(block, out); break;
         case FMT_TQ2_0:  dequant_tq2_0_block(block, out); break;
+        case FMT_PQ2_0:  dequant_pq2_0_block(block, out); break;
+        case FMT_PTQ1_0: dequant_ptq1_0_block(block, out); break;
+        case FMT_Q1_0:   dequant_q1_0_block(block, out); break;
+        case FMT_Q2_0:   dequant_q2_0_block(block, out); break;
     }
 }
 

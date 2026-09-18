@@ -107,5 +107,10 @@ pub fn dequant_row_f32(row_bytes: &[u8], output: &mut [f32], format: QuantFormat
         QuantFormat::IQ1M => dequant::dequant_iq1_m(row_bytes, output),
         QuantFormat::TQ1_0 => dequant::dequant_tq1_0(row_bytes, output),
         QuantFormat::TQ2_0 => dequant::dequant_tq2_0(row_bytes, output),
+        // Prism formats
+        QuantFormat::Q1_0 => dequant::dequant_q1_0(row_bytes, output),
+        QuantFormat::Q2_0 => dequant::dequant_q2_0(row_bytes, output),
+        QuantFormat::PQ2_0 => dequant::dequant_pq2_0(row_bytes, output),
+        QuantFormat::PTQ1_0 => dequant::dequant_ptq1_0(row_bytes, output),
     }
 }

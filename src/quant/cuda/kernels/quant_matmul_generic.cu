@@ -4,8 +4,8 @@
 // weight), then accumulates dot product with f32 activation. One warp per output
 // element, cooperating on the K-dimension reduction via warp shuffle.
 //
-// Not optimized (no dp4a, no shared memory tiling), but correct for all 23 formats
-// and memory-efficient. Callers must prefer the dedicated kernels in
+// Not optimized (no dp4a, no shared memory tiling), but correct for every
+// `QuantFormat` and memory-efficient. Callers must prefer the dedicated kernels in
 // quant_gemv.cu / quant_matmul.cu for formats that have them.
 //
 // IMPORTANT: All multi-byte loads from quant block data use memcpy to avoid
@@ -15,34 +15,11 @@
 #include <cuda_fp16.h>
 
 #include "decode.cuh"
+#include "format_ids.cuh"
 #include "iq_dequant.cuh"
+#include "prism_dequant.cuh"
 
 #define WARP_SIZE 32
-
-// Format IDs — must match QuantFormat::format_id() and dequant_generic.cu
-#define FMT_Q4_0    0
-#define FMT_Q4_1    1
-#define FMT_Q5_0    2
-#define FMT_Q5_1    3
-#define FMT_Q8_0    4
-#define FMT_Q8_1    5
-#define FMT_Q2K     6
-#define FMT_Q3K     7
-#define FMT_Q4K     8
-#define FMT_Q5K     9
-#define FMT_Q6K     10
-#define FMT_Q8K     11
-#define FMT_IQ1S    12
-#define FMT_IQ1M    13
-#define FMT_IQ2XXS  14
-#define FMT_IQ2XS   15
-#define FMT_IQ2S    16
-#define FMT_IQ3XXS  17
-#define FMT_IQ3S    18
-#define FMT_IQ4NL   19
-#define FMT_IQ4XS   20
-#define FMT_TQ1_0   21
-#define FMT_TQ2_0   22
 
 // ── Safe unaligned load helpers ─────────────────────────────────────
 
@@ -332,6 +309,14 @@ __device__ void dq_tq1_0(const unsigned char* b, float* out) {
         out[i] = d * (float)gguf_tq1_0_trit(b, i);
 }
 
+// The four PrismML formats share their layouts with the dequant path
+// through prism_dequant.cuh.
+
+__device__ void dq_q1_0  (const unsigned char* b, float* o) { q1_0_dequant_block(b, o);   }
+__device__ void dq_q2_0  (const unsigned char* b, float* o) { q2_0_dequant_block(b, o);   }
+__device__ void dq_pq2_0 (const unsigned char* b, float* o) { pq2_0_dequant_block(b, o);  }
+__device__ void dq_ptq1_0(const unsigned char* b, float* o) { ptq1_0_dequant_block(b, o); }
+
 // The seven IQ formats are codebook quantizations; their block layouts live
 // once in iq_dequant.cuh, shared with the dequant and GEMV/GEMM paths.
 
@@ -344,32 +329,6 @@ __device__ void dq_iq1_s  (const unsigned char* b, float* o) { iq1_s_dequant_blo
 __device__ void dq_iq1_m  (const unsigned char* b, float* o) { iq1_m_dequant_block(b, o);   }
 
 // ── Dequant one block into buffer, dispatching by format ─────────────
-
-__device__ int get_bs(unsigned int fmt) {
-    switch (fmt) {
-        case FMT_Q4_0: case FMT_Q4_1: case FMT_Q5_0: case FMT_Q5_1:
-        case FMT_Q8_0: case FMT_Q8_1: case FMT_IQ4NL:
-            return 32;
-        default: return 256;
-    }
-}
-
-__device__ int get_bb(unsigned int fmt) {
-    switch (fmt) {
-        case FMT_Q4_0:   return 18;  case FMT_Q4_1:   return 20;
-        case FMT_Q5_0:   return 22;  case FMT_Q5_1:   return 24;
-        case FMT_Q8_0:   return 34;  case FMT_Q8_1:   return 36;
-        case FMT_Q2K:    return 84;  case FMT_Q3K:    return 110;
-        case FMT_Q4K:    return 144; case FMT_Q5K:    return 176;
-        case FMT_Q6K:    return 210; case FMT_Q8K:    return 292;
-        case FMT_IQ1S:   return 50;  case FMT_IQ1M:   return 56;
-        case FMT_IQ2XXS: return 66;  case FMT_IQ2XS:  return 74;
-        case FMT_IQ2S:   return 82;  case FMT_IQ3XXS: return 98;
-        case FMT_IQ3S:   return 110; case FMT_IQ4NL:  return 18;
-        case FMT_IQ4XS:  return 136; case FMT_TQ1_0:  return 54;
-        case FMT_TQ2_0:  return 66;  default:         return 0;
-    }
-}
 
 __device__ void dequant_block(const unsigned char* b, float* out, unsigned int fmt) {
     switch (fmt) {
@@ -396,6 +355,10 @@ __device__ void dequant_block(const unsigned char* b, float* out, unsigned int f
         case FMT_IQ1M:   dq_iq1_m(b, out); break;
         case FMT_TQ1_0:  dq_tq1_0(b, out); break;
         case FMT_TQ2_0:  dq_tq2_0(b, out); break;
+        case FMT_PQ2_0:  dq_pq2_0(b, out); break;
+        case FMT_PTQ1_0: dq_ptq1_0(b, out); break;
+        case FMT_Q1_0:   dq_q1_0(b, out); break;
+        case FMT_Q2_0:   dq_q2_0(b, out); break;
     }
 }
 
@@ -519,8 +482,8 @@ extern "C" __global__ void quant_matmul_generic_f32(
     const unsigned int lane = threadIdx.x;
     if (col >= N || row >= M) return;
 
-    const int block_size = get_bs(format_id);
-    const int block_bytes = get_bb(format_id);
+    const int block_size = get_block_size(format_id);
+    const int block_bytes = get_block_bytes(format_id);
     if (block_bytes == 0) return;
 
     const unsigned int blocks_per_row = K / block_size;
@@ -573,8 +536,8 @@ extern "C" __global__ void quant_swiglu_generic_f32(
     const unsigned int lane = threadIdx.x;
     if (col >= N || row >= M) return;
 
-    const int block_size = get_bs(format_id);
-    const int block_bytes = get_bb(format_id);
+    const int block_size = get_block_size(format_id);
+    const int block_bytes = get_block_bytes(format_id);
     if (block_bytes == 0) return;
 
     const unsigned int blocks_per_row = K / block_size;

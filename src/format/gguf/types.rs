@@ -35,6 +35,14 @@ pub enum GgmlType {
     F64 = 28,
     IQ1M = 29,
     BF16 = 30,
+    /// PrismML fork, unassigned upstream: 1-bit sign at group 128.
+    Q1_0 = 41,
+    /// PrismML fork, unassigned upstream: 2-bit at group 64.
+    Q2_0 = 42,
+    /// PrismML fork, unassigned upstream: 2-bit at group 128.
+    PQ2_0 = 142,
+    /// PrismML fork, unassigned upstream: ternary at group 128.
+    PTQ1_0 = 143,
 }
 
 impl GgmlType {
@@ -69,6 +77,10 @@ impl GgmlType {
             28 => Some(Self::F64),
             29 => Some(Self::IQ1M),
             30 => Some(Self::BF16),
+            41 => Some(Self::Q1_0),
+            42 => Some(Self::Q2_0),
+            142 => Some(Self::PQ2_0),
+            143 => Some(Self::PTQ1_0),
             _ => None,
         }
     }
@@ -117,7 +129,11 @@ impl GgmlType {
             | Self::IQ3S
             | Self::IQ2S
             | Self::IQ4XS
-            | Self::IQ1M => self
+            | Self::IQ1M
+            | Self::Q1_0
+            | Self::Q2_0
+            | Self::PQ2_0
+            | Self::PTQ1_0 => self
                 .to_quant_format()
                 .map(|fmt| fmt.block_bytes())
                 .unwrap_or(0), // Unreachable: every arm here has a QuantFormat (see to_quant_format).
@@ -152,6 +168,10 @@ impl GgmlType {
             Self::IQ2S => Some(QuantFormat::IQ2S),
             Self::IQ4XS => Some(QuantFormat::IQ4XS),
             Self::IQ1M => Some(QuantFormat::IQ1M),
+            Self::Q1_0 => Some(QuantFormat::Q1_0),
+            Self::Q2_0 => Some(QuantFormat::Q2_0),
+            Self::PQ2_0 => Some(QuantFormat::PQ2_0),
+            Self::PTQ1_0 => Some(QuantFormat::PTQ1_0),
             Self::F32
             | Self::F16
             | Self::BF16
@@ -257,6 +277,10 @@ mod tests {
             GgmlType::F64,
             GgmlType::IQ1M,
             GgmlType::BF16,
+            GgmlType::Q1_0,
+            GgmlType::Q2_0,
+            GgmlType::PQ2_0,
+            GgmlType::PTQ1_0,
         ];
         for ty in types {
             let id = ty as u32;
@@ -293,6 +317,10 @@ mod tests {
             (GgmlType::IQ2S, QuantFormat::IQ2S),
             (GgmlType::IQ4XS, QuantFormat::IQ4XS),
             (GgmlType::IQ1M, QuantFormat::IQ1M),
+            (GgmlType::Q1_0, QuantFormat::Q1_0),
+            (GgmlType::Q2_0, QuantFormat::Q2_0),
+            (GgmlType::PQ2_0, QuantFormat::PQ2_0),
+            (GgmlType::PTQ1_0, QuantFormat::PTQ1_0),
         ];
         for (gt, qf) in pairs {
             assert_eq!(gt.to_quant_format(), Some(qf));
@@ -326,6 +354,10 @@ mod tests {
             GgmlType::IQ2S,
             GgmlType::IQ4XS,
             GgmlType::IQ1M,
+            GgmlType::Q1_0,
+            GgmlType::Q2_0,
+            GgmlType::PQ2_0,
+            GgmlType::PTQ1_0,
         ];
         for ty in types {
             let fmt = ty.to_quant_format().expect("quantized type must map");

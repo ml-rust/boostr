@@ -209,7 +209,7 @@ impl DequantOps<CudaRuntime> for CudaClient {
     }
 }
 
-/// Dequantize using the generic CUDA kernel that handles all 23 formats
+/// Dequantize using the generic CUDA kernel that handles every `QuantFormat`
 /// via format_id dispatch. Slower than dedicated kernels but universally correct.
 fn dequant_via_generic_kernel(
     client: &CudaClient,

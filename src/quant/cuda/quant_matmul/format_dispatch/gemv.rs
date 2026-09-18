@@ -360,6 +360,10 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
         QuantFormat::IQ3XXS => ("quant_gemv_iq3_xxs_f32", GEMV_IQ3_XXS_MODULE),
         QuantFormat::TQ1_0 => ("quant_gemv_tq1_0_f32", GEMV_TQ1_0_MODULE),
         QuantFormat::TQ2_0 => ("quant_gemv_tq2_0_f32", GEMV_TQ2_0_MODULE),
+        // No dedicated GEMV kernel: the caller takes the generic fused path.
+        QuantFormat::Q1_0 | QuantFormat::Q2_0 | QuantFormat::PQ2_0 | QuantFormat::PTQ1_0 => {
+            return Ok(None);
+        }
     };
 
     let warps_per_block = 8u32;

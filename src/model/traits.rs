@@ -3,6 +3,7 @@
 use crate::error::Result;
 use crate::model::config::ModelConfig;
 use crate::nn::VarBuilder;
+use crate::ops::traits::architecture::gated_delta_net::GatedDeltaNetOps;
 use crate::ops::traits::architecture::moe::MoEOps;
 use crate::ops::traits::position::alibi::AlibiOps;
 use crate::ops::traits::{FlashAttentionOps, KvCacheOps, PagedAttentionOps, RoPEOps};
@@ -34,6 +35,7 @@ pub trait ModelClient<R: Runtime>:
     + QuantMatmulOps<R>
     + NormalizationOps<R>
     + MoEOps<R>
+    + GatedDeltaNetOps<R>
     + AlibiOps<R>
 {
 }
@@ -59,6 +61,7 @@ where
         + QuantMatmulOps<R>
         + NormalizationOps<R>
         + MoEOps<R>
+        + GatedDeltaNetOps<R>
         + AlibiOps<R>,
 {
 }

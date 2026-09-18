@@ -21,6 +21,7 @@ pub use traits::FlashAttentionOps;
 pub use traits::FusedFp8TrainingOps;
 pub use traits::FusedOptimizerOps;
 pub use traits::FusedQkvOps;
+pub use traits::GatedDeltaNetOps;
 pub use traits::GrammarDfaOps;
 pub use traits::KvCacheOps;
 pub use traits::MlaOps;

@@ -43,8 +43,8 @@ pub mod trainer;
 pub use nn::{Init, VarBuilder, VarMap, Weight, router_z_loss};
 pub use ops::{
     AttentionOps, AttnOutLayout, DeviceGrammarDfa, FlashAttentionOps, FusedFp8TrainingOps,
-    FusedOptimizerOps, FusedQkvOps, GrammarDfaOps, KvCacheOps, MlaOps, PagedAttentionOps, RoPEOps,
-    RoPEPackedOps, SamplingOps, var_flash_attention,
+    FusedOptimizerOps, FusedQkvOps, GatedDeltaNetOps, GrammarDfaOps, KvCacheOps, MlaOps,
+    PagedAttentionOps, RoPEOps, RoPEPackedOps, SamplingOps, var_flash_attention,
 };
 pub use quant::{
     DecomposedQuantLinear, DecomposedQuantMethod, DecomposedQuantTensor, DequantOps, FusedQuantOps,

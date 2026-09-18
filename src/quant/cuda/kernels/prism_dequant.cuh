@@ -71,6 +71,56 @@ static __device__ __forceinline__ int gguf_ptq1_0_trit(
     return gguf_base3_trit(byte, level);
 }
 
+// ── int8x4 expansions ───────────────────────────────────────────────────
+//
+// Ports of `vec_dot_q1_0_q8_1` and `vec_dot_q2_0_q8_1` from the fork's
+// `ggml-cuda/vecdotq.cuh` — same LUT words, same `__byte_perm` selectors.
+// Shared by the token-batched dp4a GEMV (`gemv/prism_ntok.cuh`) and the
+// feature-major MMQ staging (`mmq/prism_tiles.cuh`), which both want a
+// code run as signed int8 lanes.
+//
+// `__byte_perm` reads three bits per selector nibble; bit 3 of each nibble
+// is ignored, which is what lets a raw code word act as the selector.
+
+// Eight 2-bit codes -> two int8x4 words of {-1, 0, 1, 2}. `lo` and `hi` are
+// one code byte each: the four codes of `lo` land in `*v_lo`, those of `hi`
+// in `*v_hi`, low code first.
+//
+// `qe` takes the even codes of the 16-bit word (bits 4i..4i+1 as selector
+// nibble i), `qo` the odd ones (`>> 2`). LUT `0x020100FF` is the byte table
+// {-1, 0, 1, 2} indexed by the code. The two final permutes re-interleave
+// even and odd: `0x5140` gathers codes 0..3 (the `lo` byte), `0x7362`
+// codes 4..7 (the `hi` byte).
+static __device__ __forceinline__ void prism_expand_code2x8(
+    int lo, int hi, int* v_lo, int* v_hi
+) {
+    const int q = lo | (hi << 8);
+    const int qe = __byte_perm(0x020100FF, 0x020100FF, q >> 0);
+    const int qo = __byte_perm(0x020100FF, 0x020100FF, q >> 2);
+    *v_lo = __byte_perm(qe, qo, 0x5140);
+    *v_hi = __byte_perm(qe, qo, 0x7362);
+}
+
+// Eight sign bits -> two int8x4 words of {-1, +1}. Bits 0..3 of `bits8`
+// land in `*v_lo`, bits 4..7 in `*v_hi`, low bit first.
+//
+// First permute pair spreads bit pairs into nibble indices: LUT
+// `0x11100100` maps the 2-bit selector `(b1 b0)` to the byte `b1:b0` as two
+// nibbles, so `n0` holds bits (0,1) in byte 0 and (4,5) in byte 1, `n1`
+// bits (2,3) and (6,7). Second pair turns each nibble into a signed byte via
+// LUT `0x01FF` ({-1, +1}). Final pair unshuffles: `0x5410` = bits 0..3,
+// `0x7632` = bits 4..7.
+static __device__ __forceinline__ void prism_expand_sign8(
+    int bits8, int* v_lo, int* v_hi
+) {
+    const int n0 = __byte_perm(0x11100100, 0x11100100, bits8 >> 0);
+    const int n1 = __byte_perm(0x11100100, 0x11100100, bits8 >> 2);
+    const int s0 = __byte_perm(0x01FF, 0x01FF, n0);
+    const int s1 = __byte_perm(0x01FF, 0x01FF, n1);
+    *v_lo = __byte_perm(s0, s1, 0x5410);
+    *v_hi = __byte_perm(s0, s1, 0x7632);
+}
+
 // ── Whole-block decoders ────────────────────────────────────────────────
 
 static __device__ __forceinline__ void q1_0_dequant_block(

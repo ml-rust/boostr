@@ -11,12 +11,12 @@
 //! the token-major comparison rather than resolving a symbol that is not
 //! compiled.
 //!
-//! PQ2_0, Q2_0 and Q1_0 have neither a token-major kernel of either kind NOR
-//! a feature-major one — `feat_major_format` in
-//! `src/quant/cuda/quant_matmul/format_dispatch/gemm.rs` does not name them —
-//! so for these three the tool times their dequantize-then-tiled-f32 GEMM
-//! kernel (`quant_matmul_{fmt}_f32`, module `gemm_{fmt}`) as the "GEMM" line
-//! instead, unconditionally like the other formats' MMQ line.
+//! PQ2_0, Q2_0 and Q1_0 have no token-major kernel of either kind and take
+//! the feature-major family like the fifteen above. For these three the tool
+//! also times their dequantize-then-tiled-f32 GEMM kernel
+//! (`quant_matmul_{fmt}_f32`, module `gemm_{fmt}`), the path a device
+//! without int8 MMA or a K that is not a whole number of their blocks falls
+//! to, as an extra "GEMM" line, unconditionally like the MMQ lines.
 //!
 //! `--gemv` additionally launches and times the format's GEMV kernel(s) — the
 //! path `dispatch_gemv` takes for `m <= gemv_max_m` — at the same shape, so
@@ -1165,6 +1165,14 @@ fn prism_dot_reference(
     (sum, magnitude)
 }
 
+/// Shared 2-bit code decode for [`pq2_0_reference`] and [`q2_0_reference`]:
+/// element `e` reads bits `2 * (e % 4)` of `qs[e / 4]` and maps the unsigned
+/// 0..3 code to `code - 1`, so {-1, 0, 1, 2}.
+#[cfg(feature = "cuda")]
+fn prism_code2(qs: &[u8], e: usize) -> f64 {
+    i64::from((qs[e / 4] >> (2 * (e % 4))) & 0x03) as f64 - 1.0
+}
+
 /// Exact reference for one output element, in f64, for a PQ2_0 weight against
 /// a Q8_1 activation, plus the accumulated magnitude of the sum.
 ///
@@ -1179,9 +1187,7 @@ fn prism_dot_reference(
 /// [`iq4_xs_reference`], not as one 128-wide dot product.
 #[cfg(feature = "cuda")]
 fn pq2_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
-    prism_dot_reference(weight, act, token, feat, k, 128, 34, |qs, e| {
-        i64::from((qs[e / 4] >> (2 * (e % 4))) & 0x03) as f64 - 1.0
-    })
+    prism_dot_reference(weight, act, token, feat, k, 128, 34, prism_code2)
 }
 
 /// Exact reference for one output element, in f64, for a Q2_0 weight against
@@ -1195,9 +1201,7 @@ fn pq2_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usiz
 /// [`pq2_0_reference`].
 #[cfg(feature = "cuda")]
 fn q2_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
-    prism_dot_reference(weight, act, token, feat, k, 64, 18, |qs, e| {
-        i64::from((qs[e / 4] >> (2 * (e % 4))) & 0x03) as f64 - 1.0
-    })
+    prism_dot_reference(weight, act, token, feat, k, 64, 18, prism_code2)
 }
 
 /// Exact reference for one output element, in f64, for a Q1_0 weight against
@@ -1454,9 +1458,8 @@ impl MmqFormat {
     /// IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S, PQ2_0, Q2_0 and Q1_0 have no
     /// `quant_mmq_*_q8_1` twin: their only pre-feature-major GEMM path is the
     /// dequantize-then-f32 kernel, which this tool does not time here (the
-    /// three PrismML-fork formats have no feature-major path at all, so
-    /// their dequantize-then-f32 kernel IS the GEMM comparison; see
-    /// [`MmqFormat::gemm_f32_kernel`]).
+    /// three PrismML-fork formats' dequantize-then-f32 kernel is timed as
+    /// an extra line; see [`MmqFormat::gemm_f32_kernel`]).
     fn dp4a_kernel(&self) -> Option<&'static str> {
         match self {
             MmqFormat::Q8_0 => Some("quant_mmq_q8_0_q8_1"),
@@ -1485,10 +1488,9 @@ impl MmqFormat {
 
     /// Token-major tensor-core MMQ kernel, or `None` for a format that has
     /// none. Q4_0, Q4_1, Q5_0, Q5_1, Q5_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS,
-    /// IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S have no `_mma` twin;
-    /// all fifteen went straight to the feature-major family. PQ2_0, Q2_0
-    /// and Q1_0 have no `_mma` twin either, and no feature-major kernel to
-    /// fall back to — see [`MmqFormat::gemm_f32_kernel`].
+    /// IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S, PQ2_0, Q2_0 and Q1_0
+    /// have no `_mma` twin; all eighteen went straight to the feature-major
+    /// family.
     fn mma_kernel(&self) -> Option<&'static str> {
         match self {
             MmqFormat::Q8_0 => Some("quant_mmq_q8_0_q8_1_mma"),
@@ -1516,13 +1518,12 @@ impl MmqFormat {
     }
 
     /// The dequantize-then-tiled-f32 GEMM kernel PQ2_0, Q2_0 and Q1_0 fall
-    /// back to, or `None` for every other format (which instead takes the
-    /// token-major or feature-major path above). Mirrors the fallback arm of
-    /// `dispatch_matmul` in
-    /// `src/quant/cuda/quant_matmul/format_dispatch/gemm.rs`: these three
-    /// never reach `feat_major_format` (it returns `None` for them), so this
-    /// generic tiled kernel is their only GEMM path and is what this tool
-    /// prints as the "GEMM" line for them.
+    /// back to on a device without int8 MMA or at a K that is not a whole
+    /// number of their blocks, or `None` for every other format. Mirrors the
+    /// fallback arm of `dispatch_matmul` in
+    /// `src/quant/cuda/quant_matmul/format_dispatch/gemm.rs`. This tool
+    /// times it as an extra "GEMM" line beside the feature-major one, so the
+    /// tensor-core gain over the fallback can be read off one run.
     fn gemm_f32_kernel(&self) -> Option<(&'static str, &'static str)> {
         match self {
             MmqFormat::PQ20 => Some(("quant_matmul_pq2_0_f32", GEMM_PQ2_0_MODULE)),
@@ -1799,12 +1800,9 @@ impl MmqFormat {
     }
 
     /// Format name inside the feature-major kernel symbols. `None` marks a
-    /// format the family does not compile: PQ2_0, Q2_0 and Q1_0 have no
-    /// entry in `feat_major_format`
-    /// (`src/quant/cuda/quant_matmul/format_dispatch/gemm.rs`), so they never
-    /// reach this family; every other format this tool knows is compiled
-    /// today. Mirrors the `FeatMajorFormat`
-    /// constants in `src/quant/cuda/quant_matmul/mmq_feat_major.rs` and the
+    /// format the family does not compile; every format this tool knows is
+    /// compiled today. Mirrors the `FeatMajorFormat` constants in
+    /// `src/quant/cuda/quant_matmul/mmq_feat_major/formats/` and the
     /// `MMQ_FM_KERNEL` instantiations in `quant_mmq_mma.cu`.
     fn feat_major_infix(&self) -> Option<&'static str> {
         match self {
@@ -1826,7 +1824,9 @@ impl MmqFormat {
             MmqFormat::IQ3XXS => Some("iq3_xxs"),
             MmqFormat::IQ3S => Some("iq3_s"),
             MmqFormat::IQ1S => Some("iq1_s"),
-            MmqFormat::PQ20 | MmqFormat::Q20 | MmqFormat::Q10 => None,
+            MmqFormat::PQ20 => Some("pq2_0"),
+            MmqFormat::Q20 => Some("q2_0"),
+            MmqFormat::Q10 => Some("q1_0"),
         }
     }
 
@@ -1863,13 +1863,10 @@ impl MmqFormat {
     /// the Q8_0 row. IQ1_S stages Q4_K's row instead: its value is the AFFINE
     /// `dl * (grid + delta)`, which splits per 32-element group into
     /// `dl * dot(a, g) + dl * delta * sum(a)` — a scale/min pair, not a bare
-    /// scale — and its delta term is additive like Q4_1's minimum.
-    ///
-    /// PQ2_0, Q2_0 and Q1_0 have no feature-major kernel at all (see
-    /// [`MmqFormat::feat_major_infix`]), so this value is never read for
-    /// them; `main` still calls this unconditionally to size the activation
-    /// repack, so the three return an arbitrary compiled width (76, Q8_0's)
-    /// rather than making this method partial.
+    /// scale — and its delta term is additive like Q4_1's minimum. PQ2_0,
+    /// Q2_0 and Q1_0 stage the Q8_0 row: their codes expand to signed int8
+    /// and their one block scale is written into every 32-element slot the
+    /// block covers, so the row carries eight f32 scales like Q8_0's.
     fn feat_major_x_stride(&self) -> u32 {
         match self {
             MmqFormat::Q8_0
@@ -2994,13 +2991,11 @@ fn main() {
         (dp4a_us, mma_us)
     });
 
-    // GEMM fallback for PQ2_0, Q2_0 and Q1_0: neither has a token-major or a
-    // feature-major kernel (both `token_major` and `feat_major` are `None`
-    // for them), so their dequantize-then-tiled-f32 kernel
-    // (`quant_matmul_{fmt}_f32`) is the only GEMM path they have, and this
-    // runs it unconditionally — like `token_major_us` and `feat_major_us`
-    // above — rather than under `--gemv`, so the "GEMM" line these three
-    // print is comparable to every other format's.
+    // GEMM fallback for PQ2_0, Q2_0 and Q1_0: their dequantize-then-tiled-f32
+    // kernel (`quant_matmul_{fmt}_f32`) is the path a device without int8
+    // MMA falls to, and this runs it unconditionally — like `token_major_us`
+    // and `feat_major_us` — rather than under `--gemv`, so the extra "GEMM"
+    // line these three print is comparable to their feature-major line.
     let prism_gemm = format.gemm_f32_kernel().map(|(kernel_name, module_name)| {
         let f32_act_bytes = build_f32_activation(&act_bytes, m, k);
         let act_f32 = Tensor::<CudaRuntime>::from_slice(&f32_act_bytes, &[m, k], &device).unwrap();
@@ -3262,8 +3257,8 @@ fn main() {
     // tiles, weights as MMA operand A, 256 k staged per step. Their grid axes
     // are transposed against the token-major `_mma` kernel, their token tile is
     // chosen per batch size, and their shared memory is dynamic, so they need
-    // their own config and an opt-in. Compiled for Q8_0, Q4_0, Q4_K, Q5_K,
-    // Q6_K and Q3_K.
+    // their own config and an opt-in. Compiled for every format this tool
+    // knows; see `feat_major_infix`.
     let feat_major = match format.feat_major_infix() {
         Some(infix) => {
             let mmq_x = fm_mmq_x;

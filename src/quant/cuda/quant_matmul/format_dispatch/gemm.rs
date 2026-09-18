@@ -52,6 +52,9 @@ pub(in crate::quant::cuda::quant_matmul) fn feat_major_format(
         QuantFormat::IQ3XXS => &mmq_feat_major::IQ3_XXS,
         QuantFormat::IQ3S => &mmq_feat_major::IQ3_S,
         QuantFormat::IQ1S => &mmq_feat_major::IQ1_S,
+        QuantFormat::PQ2_0 => &mmq_feat_major::PQ2_0,
+        QuantFormat::Q2_0 => &mmq_feat_major::Q2_0,
+        QuantFormat::Q1_0 => &mmq_feat_major::Q1_0,
         _ => return None,
     };
     let eligible = k.is_multiple_of(fm.k_multiple as usize)
@@ -123,15 +126,16 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_matmul(
     let n_u32 = n as u32;
 
     // Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K, Q5_K, Q6_K, Q3_K, Q2_K, IQ4_NL,
-    // IQ4_XS, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S on sm_80+ take
-    // the feature-major tensor-core kernels: a feature tile and a token tile
-    // chosen per shape, with the weight as MMA operand A and a repacked
-    // activation layout of its own. It picks between a tile-parallel grid and
-    // a split-K pair internally; both give the same bits. `Ok(None)` means no
-    // compiled variant fits the device, and the fallback below still serves
-    // the shape: the per-format `quant_mmq_*_q8_1_mma` kernel where one
-    // exists, and for Q4_0, Q4_1, Q5_0, Q5_1, Q5_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS,
-    // IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S the dequantize-then-f32
+    // IQ4_XS, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S, PQ2_0, Q2_0 and
+    // Q1_0 on sm_80+ take the feature-major tensor-core kernels: a feature
+    // tile and a token tile chosen per shape, with the weight as MMA operand
+    // A and a repacked activation layout of its own. It picks between a
+    // tile-parallel grid and a split-K pair internally; both give the same
+    // bits. `Ok(None)` means no compiled variant fits the device, and the
+    // fallback below still serves the shape: the per-format
+    // `quant_mmq_*_q8_1_mma` kernel where one exists, and for Q4_0, Q4_1,
+    // Q5_0, Q5_1, Q5_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS, IQ2_XS, IQ2_S,
+    // IQ3_XXS, IQ3_S, IQ1_S, PQ2_0, Q2_0 and Q1_0 the dequantize-then-f32
     // GEMM named by `kernel_name` above, which is the only other GEMM path
     // any of them has. A new format joins by adding a `FeatMajorFormat` and a
     // match arm here.

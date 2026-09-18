@@ -75,13 +75,14 @@ pub(in crate::quant::cuda::quant_matmul) fn gemv_max_m(
         // deep reduction reverses into a much larger loss at a shallow one,
         // so a single crossover cannot hold for it across shapes.
         QuantFormat::Q3K | QuantFormat::Q2K => 1,
-        // The three PrismML-fork formats have no feature-major kernel; the
-        // alternative past the GEMV is the dequantize-then-f32 tiled GEMM.
-        // Measured with `mmq_kernel_compare --format pq2_0 --n 5120 --k 5120
-        // --gemv` on an RTX 3060: `_n4` (one grid-y pass per 4 tokens) beats
-        // that GEMM at every m tried — m=4: 82 vs 457 us, m=8: 159 vs 482 us,
-        // m=64: 1280 vs 3172 us — and scales linearly, so the GEMV is the
-        // right path at every m until an int8-MMA tile exists for them.
+        // The three PrismML-fork formats now have a feature-major kernel, so
+        // this arm is reached only when K is not a whole number of their
+        // blocks. There the alternative past the GEMV is the
+        // dequantize-then-f32 tiled GEMM. Measured with `mmq_kernel_compare
+        // --format pq2_0 --n 5120 --k 5120 --gemv` on an RTX 3060: `_n4` (one
+        // grid-y pass per 4 tokens) beats that GEMM at every m tried — m=4:
+        // 82 vs 457 us, m=8: 159 vs 482 us, m=64: 1280 vs 3172 us — and
+        // scales linearly, so the GEMV is the right path at every m.
         QuantFormat::PQ2_0 | QuantFormat::Q2_0 | QuantFormat::Q1_0 => usize::MAX,
         // PTQ1_0 has no dedicated kernel yet and stays on the generic path,
         // as does every format without a dp4a GEMV.

@@ -371,12 +371,14 @@ extern __shared__ int mmqf_smem[];
 // serialize on the load.
 
 // Shared `vec_dot` for the formats whose weight term is a scale alone. Q8_0,
-// Q4_0, Q5_0, IQ4_NL, IQ4_XS and IQ2_XXS differ ONLY in how `stage` unpacks
-// quants; once staged, their weight row is the same shape — signed quants in
-// the int8 lanes plus eight f32 scales, one per 32 elements — and their
-// arithmetic is identical, so all six formats' `vec_dot` forward here. IQ4_XS
-// and IQ2_XXS are the 256-element blocks among them: their scale granularity
-// is still 32 elements, so a staged 256-k group takes the same eight scales.
+// Q4_0, Q5_0, IQ4_NL, IQ4_XS, IQ2_XXS, PQ2_0, Q2_0 and Q1_0 differ ONLY in how
+// `stage` unpacks quants; once staged, their weight row is the same shape —
+// signed quants in the int8 lanes plus eight f32 scales, one per 32 elements
+// — and their arithmetic is identical, so all nine formats' `vec_dot` forward
+// here. IQ4_XS and IQ2_XXS are the 256-element blocks among them: their scale
+// granularity is still 32 elements, so a staged 256-k group takes the same
+// eight scales. The three prism formats hold one scale per 64 or 128
+// elements, and `stage` writes it into each 32-element slot it covers.
 // The three offsets are template parameters rather than hard constants so a
 // format that shifts its row layout still reuses this body.
 //
@@ -475,7 +477,8 @@ static __device__ __forceinline__ void mmqf_vec_dot_d(
 // tile only through one of these: the on-disk block geometry, the staged
 // weight-row layout, and the two functions that touch weight data. Q8_0, Q4_0,
 // Q4_1, Q5_0, Q5_1, Q4_K, Q5_K, Q6_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS,
-// IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S are the instantiations.
+// IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S, PQ2_0, Q2_0 and Q1_0 are the
+// instantiations.
 struct MmqfQ80 {
     // On-disk block: one f16 scale then 32 int8 quants.
     static constexpr int BLOCK_BYTES = 34;
@@ -584,6 +587,10 @@ struct MmqfQ80 {
         mmqf_vec_dot_d<MMQ_X, FULL, X_QS, X_DS, X_STRIDE>(s_x, s_y, acc, i0, jb, k00, nks);
     }
 };
+
+// The PrismML-fork policies PQ2_0, Q2_0 and Q1_0 (`MmqfPQ20`, `MmqfQ20`,
+// `MmqfQ10`): same contract as `MmqfQ80`, staged into its row. See the header.
+#include "mmq/prism_tiles.cuh"
 
 // Q4_0 weight format policy, same contract as `MmqfQ80`.
 //
@@ -4801,6 +4808,42 @@ MMQ_FM_KERNEL(MmqfIQ1S, iq1_s, 80)
 MMQ_FM_KERNEL(MmqfIQ1S, iq1_s, 96)
 MMQ_FM_KERNEL(MmqfIQ1S, iq1_s, 112)
 MMQ_FM_KERNEL(MmqfIQ1S, iq1_s, 128)
+
+MMQ_FM_KERNEL(MmqfPQ20, pq2_0, 8)
+MMQ_FM_KERNEL(MmqfPQ20, pq2_0, 16)
+MMQ_FM_KERNEL(MmqfPQ20, pq2_0, 24)
+MMQ_FM_KERNEL(MmqfPQ20, pq2_0, 32)
+MMQ_FM_KERNEL(MmqfPQ20, pq2_0, 40)
+MMQ_FM_KERNEL(MmqfPQ20, pq2_0, 48)
+MMQ_FM_KERNEL(MmqfPQ20, pq2_0, 64)
+MMQ_FM_KERNEL(MmqfPQ20, pq2_0, 80)
+MMQ_FM_KERNEL(MmqfPQ20, pq2_0, 96)
+MMQ_FM_KERNEL(MmqfPQ20, pq2_0, 112)
+MMQ_FM_KERNEL(MmqfPQ20, pq2_0, 128)
+
+MMQ_FM_KERNEL(MmqfQ20, q2_0, 8)
+MMQ_FM_KERNEL(MmqfQ20, q2_0, 16)
+MMQ_FM_KERNEL(MmqfQ20, q2_0, 24)
+MMQ_FM_KERNEL(MmqfQ20, q2_0, 32)
+MMQ_FM_KERNEL(MmqfQ20, q2_0, 40)
+MMQ_FM_KERNEL(MmqfQ20, q2_0, 48)
+MMQ_FM_KERNEL(MmqfQ20, q2_0, 64)
+MMQ_FM_KERNEL(MmqfQ20, q2_0, 80)
+MMQ_FM_KERNEL(MmqfQ20, q2_0, 96)
+MMQ_FM_KERNEL(MmqfQ20, q2_0, 112)
+MMQ_FM_KERNEL(MmqfQ20, q2_0, 128)
+
+MMQ_FM_KERNEL(MmqfQ10, q1_0, 8)
+MMQ_FM_KERNEL(MmqfQ10, q1_0, 16)
+MMQ_FM_KERNEL(MmqfQ10, q1_0, 24)
+MMQ_FM_KERNEL(MmqfQ10, q1_0, 32)
+MMQ_FM_KERNEL(MmqfQ10, q1_0, 40)
+MMQ_FM_KERNEL(MmqfQ10, q1_0, 48)
+MMQ_FM_KERNEL(MmqfQ10, q1_0, 64)
+MMQ_FM_KERNEL(MmqfQ10, q1_0, 80)
+MMQ_FM_KERNEL(MmqfQ10, q1_0, 96)
+MMQ_FM_KERNEL(MmqfQ10, q1_0, 112)
+MMQ_FM_KERNEL(MmqfQ10, q1_0, 128)
 
 // Narrow feature tile. Q4_K, Q5_K and Q6_K are the formats a K-quant mix
 // puts on the small-N projections that starve the default tile; the token

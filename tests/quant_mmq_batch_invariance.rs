@@ -32,9 +32,13 @@ const WIDTHS: [usize; 3] = [64, 1536, 4096];
 /// 256-multiples above it.
 const DEPTHS: [usize; 4] = [1024, 2048, 4096, 6144];
 
-/// A K the 32-block formats accept that is not a whole number of 256-k
-/// groups, so the last split takes a ragged tail.
-const RAGGED_DEPTH: usize = 6176;
+/// A K one block past the deepest whole-group walk, so it is not a whole
+/// number of 256-k groups and the last split takes a ragged tail. One block
+/// is the format's own: 32 for Q8_0 and Q4_0, 64 for Q2_0, 128 for PQ2_0
+/// and Q1_0.
+fn ragged_depth(format: QuantFormat) -> usize {
+    6144 + format.block_size()
+}
 
 fn cuda() -> Option<(CudaClient, CudaDevice)> {
     let device = CudaDevice::new(0);
@@ -43,7 +47,15 @@ fn cuda() -> Option<(CudaClient, CudaDevice)> {
 }
 
 /// Packed weight bytes for `format` at `[n, k]`, through the CPU quantizer.
+/// PQ2_0, Q2_0 and Q1_0 have no CPU quantize kernel, so their blocks are
+/// built directly: every bit pattern of their code run is a valid block.
 fn packed_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> {
+    if matches!(
+        format,
+        QuantFormat::PQ2_0 | QuantFormat::Q2_0 | QuantFormat::Q1_0
+    ) {
+        return prism_weight(format, n, k, salt);
+    }
     let values: Vec<f32> = (0..n * k)
         .map(|i| ((i % 977) as f32 * 0.031 + salt).sin() + ((i / 977) as f32 * 0.17).cos() * 0.25)
         .collect();
@@ -55,6 +67,23 @@ fn packed_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> 
         .expect("quantize")
         .to_bytes()
         .expect("weight bytes")
+}
+
+/// A prism weight built byte by byte: f16 `d` at byte 0 then the code run,
+/// both varied by block index and `salt` so no two blocks or weights match.
+fn prism_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> {
+    let block_bytes = format.block_bytes();
+    let bpr = k / format.block_size();
+    let mut out = vec![0u8; n * bpr * block_bytes];
+    for block in 0..n * bpr {
+        let base = block * block_bytes;
+        let d = half::f16::from_f32(0.01 + ((block as f32 * 0.003) + salt * 0.1) % 0.5);
+        out[base..base + 2].copy_from_slice(&d.to_le_bytes());
+        for pos in 0..block_bytes - 2 {
+            out[base + 2 + pos] = ((block * 131 + pos * 17 + (salt * 100.0) as usize) % 251) as u8;
+        }
+    }
+    out
 }
 
 /// Activation rows with no two alike, so a row landing in the wrong slot
@@ -164,7 +193,7 @@ fn check_format(format: QuantFormat, ragged: bool) {
     };
     let mut depths = DEPTHS.to_vec();
     if ragged {
-        depths.push(RAGGED_DEPTH);
+        depths.push(ragged_depth(format));
     }
     for &k in &depths {
         for &n in &WIDTHS {
@@ -201,4 +230,19 @@ fn q4_0_rows_do_not_depend_on_the_batch() {
 #[test]
 fn q2_k_rows_do_not_depend_on_the_batch() {
     check_format(QuantFormat::Q2K, false);
+}
+
+#[test]
+fn pq2_0_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::PQ2_0, true);
+}
+
+#[test]
+fn q2_0_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::Q2_0, true);
+}
+
+#[test]
+fn q1_0_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::Q1_0, true);
 }

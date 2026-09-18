@@ -9,6 +9,7 @@ pub mod hybrid;
 pub mod llama;
 pub mod mamba;
 pub mod multimodal;
+pub mod qwen35;
 pub mod registry;
 pub mod registry_inference;
 pub mod speech_lm;
@@ -22,8 +23,8 @@ pub use attention_core::{
 };
 pub use config::{
     AttentionConfig, AudioConfig, GdnConfig, HuggingFaceConfig, HybridConfig, ModelConfig,
-    MoeConfig, RopeScalingConfig, SsmConfig, UniversalConfig, VisionConfig, load_config_auto,
-    load_huggingface_config,
+    MoeConfig, Qwen35AttentionConfig, RopeScalingConfig, SsmConfig, UniversalConfig, VisionConfig,
+    load_config_auto, load_huggingface_config,
 };
 pub use encoder::{EmbeddingPipeline, Encoder, EncoderClient, EncoderConfig, Pooling};
 pub use hybrid::HybridModel;
@@ -34,6 +35,7 @@ pub use mamba::{
     Mamba2Weights, Mamba3, Mamba3Config, Mamba3Model, Mamba3Weights,
 };
 pub use multimodal::{ModelInput, MultimodalModel};
+pub use qwen35::Qwen35Model;
 pub use registry::LoadedModel;
 pub use speech_lm::{
     ALL_SPECIAL_TOKENS, CodecVocab, DEFAULT_CONTROL_REGION, ExpressiveTtsLayout, OwnedSpeechRecord,

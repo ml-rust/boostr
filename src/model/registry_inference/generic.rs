@@ -1,19 +1,17 @@
 //! Runtime-generic forward passes, expert weight access, and multimodal
-//! embedding splicing for [`LoadedModel`].
+//! embedding splicing for [`LoadedModel`]. The recurrent-state forwards
+//! (`forward_with_ssm_state`, `forward_hybrid`, `forward_qwen35`) live in
+//! `recurrent`.
 
 use crate::error::{Error, Result};
+use crate::inference::LayeredKvCache;
 use crate::inference::kv_cache::LayeredPagedKvCache;
-use crate::inference::{LayeredKvCache, LayeredSsmState};
 use crate::model::llama::model::blocks::ExpertWeights;
 use crate::model::multimodal::ModelInput;
 use crate::model::registry::LoadedModel;
 use crate::model::traits::ModelClient;
-use crate::quant::traits::DequantOps;
 use numr::dtype::DType;
-use numr::ops::{
-    ActivationOps, BinaryOps, ConvOps, IndexingOps, NormalizationOps, ScalarOps, ShapeOps,
-    TensorOps, UnaryOps,
-};
+use numr::ops::{BinaryOps, IndexingOps, ShapeOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -37,7 +35,7 @@ where
         position: usize,
     ) -> Result<Tensor<R>>
     where
-        R::Client: ModelClient<R> + DequantOps<R>,
+        R::Client: ModelClient<R>,
     {
         let device = input_ids.device();
         let client = R::default_client(device);
@@ -58,6 +56,10 @@ where
                 reason: "Hybrid model does not support forward_with_kv_cache — use forward_hybrid() instead"
                     .into(),
             }),
+            LoadedModel::Qwen35(_) => Err(Error::ModelError {
+                reason: "qwen35 model does not support forward_with_kv_cache — use forward_qwen35() instead"
+                    .into(),
+            }),
             LoadedModel::Multimodal(m) => {
                 m.llm().forward_with_kv_cache(input_ids, kv_cache, position)
             }
@@ -76,7 +78,7 @@ where
         position: usize,
     ) -> Result<Tensor<R>>
     where
-        R::Client: ModelClient<R> + DequantOps<R>,
+        R::Client: ModelClient<R>,
     {
         let device = input_ids.device();
         let client = R::default_client(device);
@@ -103,6 +105,9 @@ where
             LoadedModel::Hybrid(_) => Err(Error::ModelError {
                 reason: "Hybrid model does not yet support paged KV cache".into(),
             }),
+            LoadedModel::Qwen35(_) => Err(Error::ModelError {
+                reason: "qwen35 model does not yet support paged KV cache".into(),
+            }),
             LoadedModel::Multimodal(m) => m.llm().forward_with_paged_kv_cache(
                 input_ids,
                 paged_cache,
@@ -111,77 +116,6 @@ where
                 seq_len_k,
                 position,
             ),
-        }
-    }
-
-    /// Forward pass with SSM state for Mamba2 inference
-    pub fn forward_with_ssm_state(
-        &self,
-        input_ids: &Tensor<R>,
-        ssm_state: &mut LayeredSsmState<R>,
-    ) -> Result<Tensor<R>>
-    where
-        R::Client:
-            ModelClient<R> + ConvOps<R> + NormalizationOps<R> + UnaryOps<R> + ActivationOps<R>,
-    {
-        let device = input_ids.device();
-        let client = R::default_client(device);
-        match self {
-            LoadedModel::Mamba1(_) => Err(Error::ModelError {
-                reason: "Mamba1 needs a Mamba1-specific recurrent cache (per-channel/per-state A and depthwise-conv state); LayeredSsmState is Mamba2-shaped".into(),
-            }),
-            LoadedModel::Mamba2(m) => m.forward_with_ssm_state(&client, input_ids, ssm_state),
-            LoadedModel::Mamba3(_) => Err(Error::ModelError {
-                reason: "Mamba3 needs a Mamba3-specific recurrent cache (trapezoidal prev x/B plus optional MIMO state); LayeredSsmState is Mamba2-shaped".into(),
-            }),
-            LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) => Err(Error::ModelError {
-                reason: "Llama does not use SSM state — use forward_with_kv_cache() instead".into(),
-            }),
-            LoadedModel::Hybrid(_) => Err(Error::ModelError {
-                reason: "Hybrid model does not support forward_with_ssm_state — use forward_hybrid() instead"
-                    .into(),
-            }),
-            LoadedModel::Multimodal(m) => m.llm().forward_with_ssm_state(input_ids, ssm_state),
-        }
-    }
-
-    /// Forward pass for hybrid model with both KV cache and SSM state
-    pub fn forward_hybrid(
-        &self,
-        input_ids: &Tensor<R>,
-        kv_cache: &mut LayeredKvCache<R>,
-        ssm_state: &mut LayeredSsmState<R>,
-        position: usize,
-    ) -> Result<Tensor<R>>
-    where
-        R::Client: ModelClient<R>
-            + ConvOps<R>
-            + NormalizationOps<R>
-            + UnaryOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + ShapeOps<R>
-            + TensorOps<R>
-            + ScalarOps<R>,
-    {
-        let device = input_ids.device();
-        let client = R::default_client(device);
-        match self {
-            LoadedModel::Hybrid(m) => {
-                m.forward_hybrid(&client, input_ids, kv_cache, ssm_state, position)
-            }
-            LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) => Err(Error::ModelError {
-                reason: "Llama model does not support forward_hybrid — use forward_with_kv_cache()"
-                    .into(),
-            }),
-            LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => {
-                Err(Error::ModelError {
-                    reason: "SSM-only model does not support forward_hybrid".into(),
-                })
-            }
-            LoadedModel::Multimodal(m) => m
-                .llm()
-                .forward_hybrid(input_ids, kv_cache, ssm_state, position),
         }
     }
 
@@ -207,6 +141,9 @@ where
             LoadedModel::Hybrid(_) => Err(Error::ModelError {
                 reason: "Hybrid does not support forward_embed in pipeline mode".into(),
             }),
+            LoadedModel::Qwen35(_) => Err(Error::ModelError {
+                reason: "qwen35 does not support forward_embed in pipeline mode".into(),
+            }),
             LoadedModel::Multimodal(m) => m.llm().forward_embed(input_ids),
         }
     }
@@ -218,7 +155,7 @@ where
     /// Only supported for Llama-family models.
     pub fn forward_hidden(&self, input_ids: &Tensor<R>) -> Result<numr::autograd::Var<R>>
     where
-        R::Client: ModelClient<R> + numr::ops::ConvOps<R> + DequantOps<R>,
+        R::Client: ModelClient<R>,
     {
         let device = input_ids.device();
         let client = R::default_client(device);
@@ -232,6 +169,7 @@ where
             LoadedModel::Mamba3(m) => m.forward_hidden(&client, input_ids),
             LoadedModel::Hybrid(m) => m.forward_hidden(&client, input_ids),
             LoadedModel::Multimodal(m) => m.llm().forward_hidden(input_ids),
+            LoadedModel::Qwen35(m) => m.forward_hidden(&client, input_ids),
         }
     }
 
@@ -249,7 +187,7 @@ where
         position: usize,
     ) -> Result<(numr::autograd::Var<R>, Option<numr::autograd::Var<R>>)>
     where
-        R::Client: ModelClient<R> + DequantOps<R>,
+        R::Client: ModelClient<R>,
     {
         let device = hidden.tensor().device();
         let client = R::default_client(device);
@@ -274,6 +212,9 @@ where
             LoadedModel::Hybrid(_) => Err(Error::ModelError {
                 reason: "Hybrid does not support forward_layers_range in pipeline mode".into(),
             }),
+            LoadedModel::Qwen35(_) => Err(Error::ModelError {
+                reason: "qwen35 does not support forward_layers_range in pipeline mode".into(),
+            }),
             LoadedModel::Multimodal(m) => m.llm().forward_layers_range(
                 hidden,
                 prev_mlp_out,
@@ -294,7 +235,7 @@ where
         prev_mlp_out: Option<numr::autograd::Var<R>>,
     ) -> Result<Tensor<R>>
     where
-        R::Client: ModelClient<R> + DequantOps<R>,
+        R::Client: ModelClient<R>,
     {
         let device = hidden.tensor().device();
         let client = R::default_client(device);
@@ -310,6 +251,9 @@ where
             }
             LoadedModel::Hybrid(_) => Err(Error::ModelError {
                 reason: "Hybrid does not support forward_head in pipeline mode".into(),
+            }),
+            LoadedModel::Qwen35(_) => Err(Error::ModelError {
+                reason: "qwen35 does not support forward_head in pipeline mode".into(),
             }),
             LoadedModel::Multimodal(m) => m.llm().forward_head(hidden, prev_mlp_out),
         }
@@ -368,7 +312,7 @@ where
         position: usize,
     ) -> Result<Tensor<R>>
     where
-        R::Client: ModelClient<R> + BinaryOps<R> + ShapeOps<R> + DequantOps<R>,
+        R::Client: ModelClient<R> + BinaryOps<R> + ShapeOps<R>,
     {
         match input {
             ModelInput::TextOnly(input_ids) => {

@@ -87,6 +87,8 @@ mod tests {
             grow_vocab,
             vision: None,
             audio: None,
+            gdn: None,
+            qwen35_attention: None,
         }
     }
 

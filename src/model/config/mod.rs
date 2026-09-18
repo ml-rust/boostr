@@ -3,6 +3,7 @@ pub mod audio;
 pub mod gdn;
 pub mod huggingface;
 pub mod hybrid;
+pub mod layer_roles;
 pub mod moe;
 pub mod qwen35;
 pub mod ssm;

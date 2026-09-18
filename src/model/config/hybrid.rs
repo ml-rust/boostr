@@ -16,6 +16,27 @@ pub struct HybridConfig {
 }
 
 impl HybridConfig {
+    /// Layer roles from the `qwen35` rule: layer `i` is attention when
+    /// `(i + 1) % interval == 0` (`hparams.is_recurrent(il)` in the fork's
+    /// `full_attention_interval` handling), else ssm.
+    ///
+    /// `interval == 0` makes every layer ssm.
+    pub fn from_full_attention_interval(num_layers: usize, interval: usize) -> Self {
+        let mut ssm_layers = Vec::new();
+        let mut attention_layers = Vec::new();
+        for i in 0..num_layers {
+            if interval != 0 && (i + 1).is_multiple_of(interval) {
+                attention_layers.push(i);
+            } else {
+                ssm_layers.push(i);
+            }
+        }
+        Self {
+            ssm_layers,
+            attention_layers,
+        }
+    }
+
     pub fn validate(&self, num_layers: usize) -> Result<()> {
         let mut assigned = vec![false; num_layers];
 
@@ -74,5 +95,26 @@ impl HybridConfig {
 
     pub fn is_attention_layer(&self, layer_idx: usize) -> bool {
         self.attention_layers.contains(&layer_idx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_attention_interval_marks_every_nth_layer() {
+        let cfg = HybridConfig::from_full_attention_interval(8, 4);
+        assert_eq!(cfg.attention_layers, vec![3, 7]);
+        assert_eq!(cfg.ssm_layers, vec![0, 1, 2, 4, 5, 6]);
+        cfg.validate(8).unwrap();
+    }
+
+    #[test]
+    fn full_attention_interval_zero_is_all_ssm() {
+        let cfg = HybridConfig::from_full_attention_interval(3, 0);
+        assert!(cfg.attention_layers.is_empty());
+        assert_eq!(cfg.ssm_layers, vec![0, 1, 2]);
+        cfg.validate(3).unwrap();
     }
 }

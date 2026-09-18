@@ -215,6 +215,8 @@ mod tests {
             grow_vocab: false,
             vision: None,
             audio: None,
+            gdn: None,
+            qwen35_attention: None,
         };
 
         config.validate().unwrap();
@@ -273,6 +275,8 @@ mod tests {
             grow_vocab: false,
             vision: None,
             audio: None,
+            gdn: None,
+            qwen35_attention: None,
         }
     }
 

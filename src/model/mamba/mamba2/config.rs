@@ -242,6 +242,8 @@ mod tests {
             grow_vocab: false,
             vision: None,
             audio: None,
+            gdn: None,
+            qwen35_attention: None,
         };
         let mamba_config = Mamba2Config::from_universal(&config).unwrap();
         assert_eq!(mamba_config.d_model, 64);

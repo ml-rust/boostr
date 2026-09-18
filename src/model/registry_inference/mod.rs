@@ -2,3 +2,4 @@
 
 mod cuda_graph;
 mod generic;
+mod recurrent;

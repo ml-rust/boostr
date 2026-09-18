@@ -11,7 +11,7 @@ pub(super) mod attention;
 pub(super) mod block;
 pub(super) mod builders;
 pub(super) mod helpers;
-pub(super) mod mlp;
+pub(crate) mod mlp;
 pub(super) mod moe;
 
 pub(super) use block::LlamaBlock;

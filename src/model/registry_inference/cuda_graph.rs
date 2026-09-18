@@ -40,6 +40,9 @@ impl LoadedModel<numr::runtime::cuda::CudaRuntime> {
             LoadedModel::Hybrid(_) => Err(Error::ModelError {
                 reason: "Hybrid model does not yet support CUDA graph mode".into(),
             }),
+            LoadedModel::Qwen35(_) => Err(Error::ModelError {
+                reason: "qwen35 model does not yet support CUDA graph mode".into(),
+            }),
             LoadedModel::Multimodal(m) => m.llm().forward_graph_mode(
                 input_ids,
                 kv_cache,

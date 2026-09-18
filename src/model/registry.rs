@@ -4,7 +4,7 @@
 //! with a unified inference API.
 
 use crate::error::{Error, Result};
-use crate::model::config::UniversalConfig;
+use crate::model::config::{GdnConfig, UniversalConfig};
 use crate::model::mamba::mamba1::Mamba1Config;
 use crate::model::mamba::mamba2::Mamba2Config;
 use crate::model::mamba::mamba3::Mamba3Config;
@@ -50,6 +50,9 @@ pub enum LoadedModel<R: Runtime> {
     Hybrid(Box<super::hybrid::HybridModel<R>>),
     /// Multimodal model with vision/audio encoders + LLM backbone
     Multimodal(Box<super::multimodal::MultimodalModel<R>>),
+    /// `qwen35`: Gated DeltaNet + gated full-attention hybrid (Bonsai).
+    /// KV cache for the attention layers, GDN state for the rest.
+    Qwen35(Box<super::qwen35::Qwen35Model<R>>),
 }
 
 impl<R: Runtime<DType = DType>> LoadedModel<R>
@@ -140,7 +143,10 @@ where
     /// Whether this model uses KV cache (transformer) or SSM state.
     pub fn needs_kv_cache(&self) -> bool {
         match self {
-            LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) | LoadedModel::Hybrid(_) => true,
+            LoadedModel::Llama(_)
+            | LoadedModel::LlamaTp(_)
+            | LoadedModel::Hybrid(_)
+            | LoadedModel::Qwen35(_) => true,
             LoadedModel::Multimodal(m) => m.llm().needs_kv_cache(),
             LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => false,
         }
@@ -154,7 +160,23 @@ where
             | LoadedModel::Mamba3(_)
             | LoadedModel::Hybrid(_) => true,
             LoadedModel::Multimodal(m) => m.llm().needs_ssm_state(),
-            _ => false,
+            LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) | LoadedModel::Qwen35(_) => false,
+        }
+    }
+
+    /// Whether this model carries Gated DeltaNet state (`LayeredGdnState`).
+    /// Distinct from `needs_ssm_state`: that one is `LayeredSsmState`,
+    /// Mamba2-shaped.
+    pub fn needs_gdn_state(&self) -> bool {
+        match self {
+            LoadedModel::Qwen35(_) => true,
+            LoadedModel::Multimodal(m) => m.llm().needs_gdn_state(),
+            LoadedModel::Llama(_)
+            | LoadedModel::LlamaTp(_)
+            | LoadedModel::Mamba1(_)
+            | LoadedModel::Mamba2(_)
+            | LoadedModel::Mamba3(_)
+            | LoadedModel::Hybrid(_) => false,
         }
     }
 
@@ -167,6 +189,7 @@ where
             LoadedModel::Mamba3(_) => "mamba3",
             LoadedModel::Hybrid(_) => "hybrid",
             LoadedModel::Multimodal(m) => m.config().model_type.as_str(),
+            LoadedModel::Qwen35(_) => "qwen35",
         }
     }
 
@@ -180,6 +203,7 @@ where
             LoadedModel::Mamba3(m) => m.config().vocab_size,
             LoadedModel::Hybrid(m) => m.config().vocab_size,
             LoadedModel::Multimodal(m) => m.config().vocab_size,
+            LoadedModel::Qwen35(m) => m.config().vocab_size,
         }
     }
 
@@ -193,6 +217,7 @@ where
             LoadedModel::Mamba3(m) => m.config().num_layers,
             LoadedModel::Hybrid(m) => m.config().num_layers,
             LoadedModel::Multimodal(m) => m.config().num_layers,
+            LoadedModel::Qwen35(m) => m.config().num_layers,
         }
     }
 
@@ -206,6 +231,7 @@ where
             LoadedModel::Mamba3(m) => m.config().hidden_size,
             LoadedModel::Hybrid(m) => m.config().hidden_size,
             LoadedModel::Multimodal(m) => m.config().hidden_size,
+            LoadedModel::Qwen35(m) => m.config().hidden_size,
         }
     }
 
@@ -224,6 +250,7 @@ where
             LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => None,
             LoadedModel::Hybrid(m) => m.config().attention.as_ref().map(|a| a.kv_heads()),
             LoadedModel::Multimodal(m) => m.llm().num_kv_heads(),
+            LoadedModel::Qwen35(m) => Some(m.attention_config().num_kv_heads),
         }
     }
 
@@ -255,6 +282,7 @@ where
                     .map(|a| a.head_dim(config.hidden_size))
             }
             LoadedModel::Multimodal(m) => m.llm().head_dim(),
+            LoadedModel::Qwen35(m) => Some(m.attention_config().head_dim),
         }
     }
 
@@ -268,6 +296,7 @@ where
             LoadedModel::Mamba3(m) => m.config().max_seq_len,
             LoadedModel::Hybrid(m) => m.config().max_seq_len,
             LoadedModel::Multimodal(m) => m.config().max_seq_len,
+            LoadedModel::Qwen35(m) => m.config().max_seq_len,
         }
     }
 
@@ -281,6 +310,7 @@ where
             LoadedModel::Mamba3(m) => m.config().moe.is_some(),
             LoadedModel::Hybrid(m) => m.config().moe.is_some(),
             LoadedModel::Multimodal(m) => m.llm().is_moe(),
+            LoadedModel::Qwen35(_) => false,
         }
     }
 
@@ -294,6 +324,7 @@ where
             LoadedModel::Mamba3(m) => m.config().moe.as_ref(),
             LoadedModel::Hybrid(m) => m.config().moe.as_ref(),
             LoadedModel::Multimodal(m) => m.llm().moe_config(),
+            LoadedModel::Qwen35(_) => None,
         }
     }
 
@@ -307,6 +338,7 @@ where
             LoadedModel::Mamba1(_) | LoadedModel::Mamba2(_) | LoadedModel::Mamba3(_) => None,
             LoadedModel::Hybrid(m) => Some((m.rope().cos_cache(), m.rope().sin_cache())),
             LoadedModel::Multimodal(m) => m.llm().rope_caches(),
+            LoadedModel::Qwen35(m) => Some((m.rope().cos_cache(), m.rope().sin_cache())),
         }
     }
 
@@ -314,7 +346,13 @@ where
     pub fn mamba1_config(&self) -> Option<&Mamba1Config> {
         match self {
             LoadedModel::Mamba1(m) => Some(m.mamba_config()),
-            _ => None,
+            LoadedModel::Multimodal(m) => m.llm().mamba1_config(),
+            LoadedModel::LlamaTp(_)
+            | LoadedModel::Llama(_)
+            | LoadedModel::Mamba2(_)
+            | LoadedModel::Mamba3(_)
+            | LoadedModel::Hybrid(_)
+            | LoadedModel::Qwen35(_) => None,
         }
     }
 
@@ -325,7 +363,7 @@ where
             LoadedModel::Mamba1(_) | LoadedModel::Mamba3(_) => None,
             LoadedModel::Hybrid(m) => Some(m.mamba_config()),
             LoadedModel::Multimodal(m) => m.llm().mamba_config(),
-            _ => None,
+            LoadedModel::Llama(_) | LoadedModel::LlamaTp(_) | LoadedModel::Qwen35(_) => None,
         }
     }
 
@@ -334,7 +372,26 @@ where
         match self {
             LoadedModel::Mamba3(m) => Some(m.mamba_config()),
             LoadedModel::Multimodal(m) => m.llm().mamba3_config(),
-            _ => None,
+            LoadedModel::Llama(_)
+            | LoadedModel::LlamaTp(_)
+            | LoadedModel::Mamba1(_)
+            | LoadedModel::Mamba2(_)
+            | LoadedModel::Hybrid(_)
+            | LoadedModel::Qwen35(_) => None,
+        }
+    }
+
+    /// Get the Gated DeltaNet config (for `LayeredGdnState` allocation).
+    pub fn gdn_config(&self) -> Option<&GdnConfig> {
+        match self {
+            LoadedModel::Qwen35(m) => Some(m.gdn_config()),
+            LoadedModel::Multimodal(m) => m.llm().gdn_config(),
+            LoadedModel::Llama(_)
+            | LoadedModel::LlamaTp(_)
+            | LoadedModel::Mamba1(_)
+            | LoadedModel::Mamba2(_)
+            | LoadedModel::Mamba3(_)
+            | LoadedModel::Hybrid(_) => None,
         }
     }
 }
@@ -349,6 +406,38 @@ impl<R: Runtime> std::fmt::Debug for LoadedModel<R> {
             LoadedModel::Mamba3(_) => f.debug_tuple("Mamba3").finish(),
             LoadedModel::Hybrid(_) => f.debug_tuple("Hybrid").finish(),
             LoadedModel::Multimodal(_) => f.debug_tuple("Multimodal").finish(),
+            LoadedModel::Qwen35(_) => f.debug_tuple("Qwen35").finish(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::qwen35::model::tiny_model;
+    use crate::test_utils::cpu_setup;
+
+    #[test]
+    fn qwen35_variant_reports_its_state_needs() {
+        let (_client, device) = cpu_setup();
+        let model = LoadedModel::Qwen35(Box::new(tiny_model(&device, 0x3535_0100)));
+        assert_eq!(model.model_type(), "qwen35");
+        assert!(model.needs_kv_cache());
+        assert!(model.needs_gdn_state());
+        assert!(!model.needs_ssm_state());
+        assert!(!model.is_moe());
+        assert!(model.moe_config().is_none());
+        assert!(model.mamba_config().is_none());
+        assert!(model.mamba1_config().is_none());
+        assert!(model.mamba3_config().is_none());
+        assert_eq!(model.num_kv_heads(), Some(1));
+        assert_eq!(model.head_dim(), Some(8));
+        assert_eq!(model.num_layers(), 2);
+        assert_eq!(model.hidden_size(), 8);
+        assert_eq!(model.vocab_size(), 16);
+        assert_eq!(model.max_seq_len(), 32);
+        assert_eq!(model.gdn_config().map(|g| g.value_heads), Some(4));
+        assert!(model.rope_caches().is_some());
+        assert_eq!(format!("{model:?}"), "Qwen35");
     }
 }

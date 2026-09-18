@@ -133,6 +133,8 @@ impl HuggingFaceConfig {
             grow_vocab: false,
             vision,
             audio,
+            gdn: None,
+            qwen35_attention: None,
         }
     }
 }

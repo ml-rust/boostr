@@ -2,8 +2,10 @@
 
 use super::attention::AttentionConfig;
 use super::audio::AudioConfig;
+use super::gdn::GdnConfig;
 use super::hybrid::HybridConfig;
 use super::moe::MoeConfig;
+use super::qwen35::Qwen35AttentionConfig;
 use super::ssm::SsmConfig;
 use super::vision::VisionConfig;
 use crate::error::{Error, Result};
@@ -73,6 +75,14 @@ pub struct UniversalConfig {
     /// Audio encoder configuration (for multimodal models)
     #[serde(default)]
     pub audio: Option<AudioConfig>,
+
+    /// Gated DeltaNet layer configuration (`qwen35` ssm layers)
+    #[serde(default)]
+    pub gdn: Option<GdnConfig>,
+
+    /// `qwen35` gated full-attention layer configuration
+    #[serde(default)]
+    pub qwen35_attention: Option<Qwen35AttentionConfig>,
 }
 
 /// RMSNorm epsilon used when a config omits it.
@@ -113,6 +123,28 @@ impl UniversalConfig {
         if let Some(hybrid) = &self.hybrid_layers {
             hybrid.validate(self.num_layers)?;
         }
+        if let Some(gdn) = &self.gdn {
+            gdn.validate()?;
+            if gdn.hidden_size != self.hidden_size {
+                return Err(Error::ModelError {
+                    reason: format!(
+                        "gdn.hidden_size ({}) != hidden_size ({})",
+                        gdn.hidden_size, self.hidden_size
+                    ),
+                });
+            }
+        }
+        if let Some(attn) = &self.qwen35_attention {
+            attn.validate()?;
+            if attn.hidden_size != self.hidden_size {
+                return Err(Error::ModelError {
+                    reason: format!(
+                        "qwen35_attention.hidden_size ({}) != hidden_size ({})",
+                        attn.hidden_size, self.hidden_size
+                    ),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -142,35 +174,6 @@ impl UniversalConfig {
     pub fn intermediate_size(&self) -> usize {
         self.intermediate_size.unwrap_or(4 * self.hidden_size)
     }
-
-    /// Whether layer `layer_idx` is an SSM (Mamba) layer.
-    ///
-    /// Consult this rather than reading `hybrid_layers` directly. A config
-    /// describes layer roles in three different shapes, and only one of them
-    /// populates `hybrid_layers`:
-    ///
-    /// - **Mixed**: `hybrid_layers` is `Some` and lists the split explicitly.
-    /// - **All SSM**: `ssm` is `Some`, `attention` is `None`, and
-    ///   `hybrid_layers` is `None` — there is no mix to describe, so every
-    ///   layer is an SSM layer.
-    /// - **No SSM**: `ssm` is `None`, so no layer is.
-    ///
-    /// The trap this exists to close is the second shape: reading
-    /// `hybrid_layers` alone reports `false` for every layer of a pure-Mamba
-    /// model, which builds an all-attention model that trains and looks
-    /// plausible while being the wrong architecture entirely.
-    pub fn is_ssm_layer(&self, layer_idx: usize) -> bool {
-        match self.hybrid_layers.as_ref() {
-            Some(hybrid) => hybrid.is_ssm_layer(layer_idx),
-            None => self.ssm.is_some() && self.attention.is_none(),
-        }
-    }
-
-    /// Whether layer `layer_idx` is an attention layer — the complement of
-    /// [`is_ssm_layer`](Self::is_ssm_layer) over `0..num_layers`.
-    pub fn is_attention_layer(&self, layer_idx: usize) -> bool {
-        !self.is_ssm_layer(layer_idx)
-    }
 }
 
 /// Type alias for backward compatibility within boostr
@@ -180,76 +183,44 @@ pub type ModelConfig = UniversalConfig;
 mod tests {
     use super::*;
 
-    /// A pure-SSM config carries no `hybrid_layers` — there is no mix to
-    /// describe — so reading that field alone would report every layer as
-    /// attention and silently build the wrong architecture.
     #[test]
-    fn every_layer_of_a_pure_ssm_config_is_an_ssm_layer() {
+    fn qwen35_sections_validate_against_hidden_size() {
         let yaml = r#"
-model_type: mamba2
-vocab_size: 1000
-hidden_size: 256
-num_layers: 4
-max_seq_len: 128
-ssm:
-  variant: mamba2
-  num_heads: 8
-  head_dim: 64
-  state_size: 16
-  chunk_size: 32
-"#;
-        let config: UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
-        config.validate().unwrap();
-        assert!(config.hybrid_layers.is_none(), "precondition for this test");
-        for layer in 0..config.num_layers {
-            assert!(config.is_ssm_layer(layer), "layer {layer}");
-            assert!(!config.is_attention_layer(layer), "layer {layer}");
-        }
-    }
-
-    #[test]
-    fn no_layer_of_an_attention_only_config_is_an_ssm_layer() {
-        let yaml = r#"
-model_type: llama
-vocab_size: 1000
-hidden_size: 256
-num_layers: 4
-max_seq_len: 128
-attention:
-  num_heads: 4
-"#;
-        let config: UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
-        for layer in 0..config.num_layers {
-            assert!(!config.is_ssm_layer(layer), "layer {layer}");
-        }
-    }
-
-    #[test]
-    fn a_hybrid_config_splits_layers_exactly_as_listed() {
-        let yaml = r#"
-model_type: hybrid
-vocab_size: 1000
-hidden_size: 256
-num_layers: 4
-max_seq_len: 128
-attention:
-  num_heads: 4
-ssm:
-  variant: mamba2
-  num_heads: 8
-  head_dim: 64
-  state_size: 16
-  chunk_size: 32
+model_type: qwen35
+vocab_size: 16
+hidden_size: 8
+num_layers: 2
+max_seq_len: 32
+gdn:
+  hidden_size: 8
+  state_size: 4
+  key_heads: 2
+  value_heads: 4
+  inner_size: 16
+qwen35_attention:
+  hidden_size: 8
+  num_heads: 2
+  num_kv_heads: 1
+  head_dim: 8
+  rope_dim: 4
+  rope_sections: [1, 1, 0, 0]
+  rope_theta: 10000.0
 hybrid_layers:
-  ssm_layers: [0, 2]
-  attention_layers: [1, 3]
+  ssm_layers: [0]
+  attention_layers: [1]
 "#;
         let config: UniversalConfig = serde_saphyr::from_str(yaml).unwrap();
         config.validate().unwrap();
-        assert!(config.is_ssm_layer(0));
-        assert!(!config.is_ssm_layer(1));
-        assert!(config.is_ssm_layer(2));
-        assert!(!config.is_ssm_layer(3));
+        assert!(config.gdn.is_some());
+        assert!(config.qwen35_attention.is_some());
+
+        let mut bad = config.clone();
+        bad.gdn.as_mut().unwrap().hidden_size = 16;
+        assert!(bad.validate().is_err());
+
+        let mut bad = config;
+        bad.qwen35_attention.as_mut().unwrap().hidden_size = 16;
+        assert!(bad.validate().is_err());
     }
 
     #[test]

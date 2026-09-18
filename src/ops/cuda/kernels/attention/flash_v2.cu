@@ -49,13 +49,15 @@
 //
 // Left padding: `kv_start` is a `[B]` I32 device array or null. Keys below
 // `kv_start[b]` are invalid for every row of batch `b`. The block reads its
-// start once, clamps it to `[0, seq_len_k]`, and skips the whole tiles below
-// it before the loop. Inside a tile every key index is taken RELATIVE to the
+// start once, clamps it to `[0, seq_len_k]`, and anchors the tile grid at
+// it: tile `kt` holds keys `start + kt * BLOCK_N ..`, the loop runs to the
+// last tile of the `seq_len_k - start` valid keys, and the window skip counts
+// tiles on that grid. Every key index in the mask is taken RELATIVE to the
 // start (`key_rel = key - start`), so the tail check `key_rel >= seq_len_k -
-// start` as an unsigned compare also rejects the padded keys in the first
-// tile (they wrap negative), and the causal and window bounds shift by the
-// same amount. With a null pointer the start is 0 and every expression is
-// the unpadded one, so that path runs the same instructions as before. A
+// start` as an unsigned compare, the causal and window bounds and the
+// online-softmax sequence are the ones an unpadded run over the same keys
+// forms: a padded row's output is that run's output bit for bit. With a
+// null pointer the start is 0 and every expression is the unpadded one. A
 // row with no valid key keeps `l == 0` and stores zeros with `LSE = -inf`.
 //
 // LSE is [B, H, S_q], one value m + log(l) per row, in F32. `flash_v2_bwd.cu`
@@ -175,16 +177,18 @@ __device__ void flash_attention_fwd_impl(
     }
 
     // First and last absolute query positions of this block: the window skip
-    // is governed by the first row, the causal stop by the last. Tiles that
-    // end before the padding start are skipped the same way.
+    // is governed by the first row, the causal stop by the last. The tile
+    // grid starts at the padding start, so the skip counts tiles from there
+    // and no tile holds a padded key.
     const int first_q_pos = key_offset + q_start;
     const int last_q_pos = key_offset + min(q_start + ROWS, seq_len_q) - 1;
     const int min_key_win = window_size > 0 ? max(0, first_q_pos - window_size + 1) : 0;
-    const int min_key = max(min_key_win, pad_start);
-    const int num_k_tiles = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
+    const int min_key_rel = max(min_key_win - pad_start, 0);
+    const int num_k_tiles = (seq_len_k_rel + BLOCK_N - 1) / BLOCK_N;
 
-    for (int kt = min_key / BLOCK_N; kt < num_k_tiles; ++kt) {
-        const int k_start = kt * BLOCK_N;
+    for (int kt = min_key_rel / BLOCK_N; kt < num_k_tiles; ++kt) {
+        const int k_start_rel = kt * BLOCK_N;
+        const int k_start = pad_start + k_start_rel;
         if (causal && k_start > last_q_pos) break;
 
         // Stage K and V as float. Keys past seq_len_k stage as zero and are
@@ -223,9 +227,7 @@ __device__ void flash_attention_fwd_impl(
         // m at -inf, and then alpha = 1 and every p = 0 make it an exact no-op
         // instead of exp(-inf - -inf) = NaN. This must stay a computation, not
         // a `continue`: the barrier below is reached by every thread.
-        // Key indices are relative to the padding start: the unsigned tail
-        // compare then also rejects keys below it (see the header).
-        const int k_start_rel = k_start - pad_start;
+        // Key indices are relative to the padding start (see the header).
         #pragma unroll
         for (int t = 0; t < R; ++t) {
             const int q_pos = key_offset + row0 + t - pad_start;

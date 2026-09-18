@@ -13,8 +13,7 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::super::decode_split::{
-    DECODE_HEAD_DIMS, decode_dtype_suffix, decode_kv_span, decode_split_count,
-    decode_supports_head_dim,
+    DECODE_HEAD_DIMS, decode_dtype_suffix, decode_kv_span, decode_slices, decode_supports_head_dim,
 };
 use super::flash_utils::AttentionParams;
 
@@ -37,9 +36,11 @@ pub(super) fn decode_kernel_stem(head_dim: usize, dtype: DType) -> Result<String
 /// Decode attention for S_q=1: lightweight vec kernel, no tiling.
 ///
 /// The grid is one block per `(batch, head)` pair, which does not grow with
-/// `seq_len_k`. When that leaves the device underfilled, the KV sequence is cut
-/// into slices and a combine pass merges their partial softmax statistics —
-/// see [`decode_split_count`].
+/// `seq_len_k`. When the span is longer than one slice, the KV sequence is
+/// cut into slices at fixed absolute positions and a combine pass merges
+/// their partial softmax statistics in slice order — see [`decode_slices`].
+/// The cut never reads the batch size, so each row's output is the same
+/// bits as its own single-row decode.
 ///
 /// `window_size` follows the flash contract (`0` = unlimited). The single
 /// query sits at position `seq_len_k - 1`, so a window keeps the last
@@ -115,12 +116,13 @@ fn launch_decode(
     let lse = Tensor::<CudaRuntime>::empty(&[p.batch_size, p.num_heads, 1], DType::F32, device)?;
 
     let base_blocks = p.batch_size * p.num_heads;
-    let splits = decode_split_count(
+    let slices = decode_slices(
         device_index,
-        base_blocks,
+        p.num_heads,
         decode_kv_span(p.seq_len_k, window_size),
         p.head_dim,
     );
+    let splits = slices.splits;
 
     let q_ptr = q.ptr();
     let k_ptr = k.ptr();
@@ -144,6 +146,7 @@ fn launch_decode(
         let po_ptr = partial_o.ptr();
         let pml_ptr = partial_ml.ptr();
         let splits_i32 = splits as i32;
+        let fill_i32 = slices.fill as i32;
 
         let split_func = kernels::get_kernel_function(&module, &format!("{stem}_split"))?;
         let split_cfg = LaunchConfig {
@@ -165,7 +168,7 @@ fn launch_decode(
             builder.arg(&scale);
             builder.arg(&window_i32);
             builder.arg(&kv_start);
-            builder.arg(&splits_i32);
+            builder.arg(&fill_i32);
             builder.launch(split_cfg).map_err(|e| Error::KernelError {
                 reason: format!("decode_attention split kernel launch failed: {:?}", e),
             })?;

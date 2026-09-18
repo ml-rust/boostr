@@ -78,12 +78,18 @@ fn run(
         .expect("flash_attention_fwd")
 }
 
-fn tol(dtype: DType) -> f32 {
-    match dtype {
-        DType::F32 => 1e-5,
-        DType::F16 => 4e-3,
-        DType::BF16 => 2e-2,
-        other => unimplemented!("tol: {other:?}"),
+/// Bit identity, element by element, naming the first mismatch: a padded row
+/// runs alone over its own keys, so it forms the bits its unpadded run does.
+fn assert_bits(got: &[f32], want: &[f32], tag: &str) {
+    assert_eq!(got.len(), want.len(), "{tag}: length");
+    if let Some(i) = (0..got.len()).find(|&i| got[i].to_bits() != want[i].to_bits()) {
+        panic!(
+            "{tag}: element {i} is {:e} ({:#010x}), reference {:e} ({:#010x})",
+            got[i],
+            got[i].to_bits(),
+            want[i],
+            want[i].to_bits()
+        );
     }
 }
 
@@ -107,8 +113,16 @@ fn check_case(g: KvStartGeom, starts: &[i32], dtype: DType, label: &str) {
         let tag = format!("{label} {dtype:?} {layout:?}");
         let d_out = max_abs_diff(&got, &want_out, &format!("{tag} out"));
         let d_lse = max_abs_diff(&read_f32(&lse), &want_lse, &format!("{tag} lse"));
-        assert!(d_out <= tol(dtype), "{tag}: output diff {d_out:.3e}");
-        assert!(d_lse <= tol(dtype), "{tag}: lse diff {d_lse:.3e}");
+        assert_bits(
+            &got,
+            &want_out,
+            &format!("{tag} out (max abs diff {d_out:.3e})"),
+        );
+        assert_bits(
+            &read_f32(&lse),
+            &want_lse,
+            &format!("{tag} lse (max abs diff {d_lse:.3e})"),
+        );
         for (i, e) in want_lse.iter().enumerate() {
             if e.is_infinite() {
                 let row = &got[i * g.head_dim..(i + 1) * g.head_dim];

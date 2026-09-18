@@ -13,7 +13,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::super::decode_split::{decode_kv_span, decode_split_count};
+use super::super::decode_split::{decode_kv_span, decode_slices};
 use super::flash_decode::decode_kernel_stem;
 
 /// Graph-mode decode attention: uses `_graph` kernel variants with device-pointer
@@ -78,12 +78,13 @@ pub fn decode_attention_graph_fwd(
     // most slices do no work — correct, but the grid stays sized for a full cache
     // every step, not just the steps that need it. A window caps the span the
     // kernel walks at any step, so it caps the grid too.
-    let splits = decode_split_count(
+    let slices = decode_slices(
         device_index,
-        base_blocks,
+        num_heads,
         decode_kv_span(kv_capacity, window_size),
         head_dim,
     );
+    let splits = slices.splits;
 
     if splits > 1 {
         // Unnormalized per-slice accumulators plus their (m, l) statistics.
@@ -97,6 +98,9 @@ pub fn decode_attention_graph_fwd(
         let po_ptr = partial_o.ptr();
         let pml_ptr = partial_ml.ptr();
         let splits_i32 = splits as i32;
+        // The grid is sized for the capacity; at replay each row cuts its live
+        // span by the same rule, and the slices past it are empty.
+        let fill_i32 = slices.fill as i32;
 
         let split_func = kernels::get_kernel_function(&module, &format!("{stem}_split_graph"))?;
         let split_cfg = LaunchConfig {
@@ -117,7 +121,7 @@ pub fn decode_attention_graph_fwd(
             builder.arg(&stride_i32);
             builder.arg(&scale);
             builder.arg(&window_i32);
-            builder.arg(&splits_i32);
+            builder.arg(&fill_i32);
             builder.launch(split_cfg).map_err(|e| Error::KernelError {
                 reason: format!("decode_attention_graph split kernel launch failed: {:?}", e),
             })?;

@@ -40,7 +40,22 @@ fn wgpu_setup() -> Option<(WgpuClient, WgpuDevice)> {
 }
 
 const STARTS: [i32; 3] = [0, 5, 17];
-const TOL: f32 = 1e-5;
+
+/// Bit identity, element by element, naming the first mismatch: the shader
+/// walks each query's keys from its row's start in order, so a padded row
+/// forms the bits its unpadded run does.
+fn assert_bits(got: &[f32], want: &[f32], tag: &str) {
+    assert_eq!(got.len(), want.len(), "{tag}: length");
+    if let Some(i) = (0..got.len()).find(|&i| got[i].to_bits() != want[i].to_bits()) {
+        panic!(
+            "{tag}: element {i} is {:e} ({:#010x}), reference {:e} ({:#010x})",
+            got[i],
+            got[i].to_bits(),
+            want[i],
+            want[i].to_bits()
+        );
+    }
+}
 
 fn geom(seq_q: usize, seq_k: usize, head_dim: usize, causal: bool, window: usize) -> KvStartGeom {
     KvStartGeom {
@@ -125,8 +140,16 @@ fn check_case(g: KvStartGeom, starts: &[i32], label: &str) {
         let tag = format!("{label} {layout:?}");
         let d_out = max_abs_diff(&got, &want_out, &format!("{tag} out"));
         let d_lse = max_abs_diff(&lse, &want_lse, &format!("{tag} lse"));
-        assert!(d_out <= TOL, "{tag}: output diff {d_out:.3e}");
-        assert!(d_lse <= TOL, "{tag}: lse diff {d_lse:.3e}");
+        assert_bits(
+            &got,
+            &want_out,
+            &format!("{tag} out (max abs diff {d_out:.3e})"),
+        );
+        assert_bits(
+            &lse,
+            &want_lse,
+            &format!("{tag} lse (max abs diff {d_lse:.3e})"),
+        );
         for (i, e) in want_lse.iter().enumerate() {
             if e.is_infinite() {
                 let row = &got[i * g.head_dim..(i + 1) * g.head_dim];

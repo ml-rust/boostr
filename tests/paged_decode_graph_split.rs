@@ -14,12 +14,11 @@
 //! path, and `tests/backend_parity/paged_decode_split.rs` covers the
 //! *non-graph* paged split path, which serves as the trusted reference here.
 //!
-//! `decode_split_count(device_index, base_blocks, kv_len)` in
-//! `src/ops/cuda/attention/decode_split.rs` returns more than one once BOTH:
-//!   - `base_blocks < compute_units * DECODE_BLOCKS_PER_UNIT (8)` — the
-//!     whole-sequence grid underfills the device, and
-//!   - `kv_len / DECODE_MIN_CHUNK (32) >= 2` — the sequence has at least two
-//!     minimum-sized chunks to cut.
+//! `decode_slices(device_index, num_heads, kv_len, head_dim)` in
+//! `src/ops/cuda/attention/decode_split.rs` returns more than one slice once
+//! `kv_len` exceeds the slice length, which a single row's device fill at
+//! 4096 positions fixes from `num_heads`, `head_dim` and the compute-unit
+//! count alone; the batch size never enters.
 //!
 //! The graph path sizes `kv_len` from `max_num_blocks * block_size` (the
 //! static capacity), not the live `seq_len_k` — see the comment on
@@ -62,13 +61,11 @@ const HEAD_DIM: usize = 64;
 const BLOCK_SIZE: usize = 16;
 /// Blocks in the static, capture-time paged cache.
 ///
-/// `base_blocks = BATCH * NUM_HEADS = 4`. Any real CUDA device profile
-/// reports `compute_units >= 1`, so `target_blocks = compute_units * 8 >= 8 >
-/// 4` and the whole-sequence grid is always underfilled. `CAPACITY / 32 =
-/// 2048 / 32 = 64 >= 2`, so the minimum-chunk floor is cleared with a wide
-/// margin — comfortably enough that the split path fires even on a device
-/// with very few compute units, while the resulting split count still lands
-/// inside `DECODE_MAX_SPLITS (32)`.
+/// `NUM_HEADS = 4` at `HEAD_DIM = 64` asks for `4 * compute_units` slices of
+/// 4096 positions, capped at 32, so the slice length is at most 1024 on any
+/// real device (`compute_units >= 1`). `CAPACITY = 2048` is then at least two
+/// slices, so the split path fires even on a device with very few compute
+/// units, while the split count still lands inside `DECODE_MAX_SPLITS (32)`.
 const MAX_NUM_BLOCKS: usize = 128;
 const CAPACITY: usize = MAX_NUM_BLOCKS * BLOCK_SIZE;
 /// Live length for the full-cache split test: equal to `CAPACITY`, so every
@@ -233,8 +230,8 @@ fn assert_close(a: &[f32], b: &[f32], label: &str, tol: f32) {
 
 /// Exercises `paged_decode_attention_fwd_graph`'s split-KV path with a fully
 /// live cache (`live_len == CAPACITY`): every slice the split kernel walks
-/// is entirely populated. Fires because `CAPACITY` clears both conditions in
-/// `decode_split_count` (see the comment on `MAX_NUM_BLOCKS` above). Checks
+/// is entirely populated. Fires because `CAPACITY` exceeds the slice length
+/// `decode_slices` fixes (see the comment on `MAX_NUM_BLOCKS` above). Checks
 /// both the combined output and the combined log-sum-exp against the
 /// non-graph reference.
 #[test]

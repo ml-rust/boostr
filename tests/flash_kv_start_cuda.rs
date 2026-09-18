@@ -15,6 +15,10 @@
 //! leave a row with no valid key, and checks that an all-zero `kv_start`
 //! gives the same bytes as `None`.
 //!
+//! Every tier is held to BIT identity with the sliced reference: a padded
+//! row's tile grid (or decode slice grid) is anchored at its own start, so
+//! it forms the same float sequence as the unpadded run over the same keys.
+//!
 //! Run with:
 //!   cd boostr && cargo test --features cuda,f16 --test flash_kv_start_cuda
 
@@ -54,14 +58,17 @@ const NUM_HEADS: usize = 16;
 const NUM_KV_HEADS: usize = 2;
 const STARTS: [i32; 3] = [0, 5, 17];
 
-/// Absolute tolerance against the same kernel run per row: only the
-/// accumulation order across tiles or splits differs.
-fn tol(dtype: DType) -> f32 {
-    match dtype {
-        DType::F32 => 1e-5,
-        DType::F16 => 4e-3,
-        DType::BF16 => 2e-2,
-        other => unimplemented!("tol: {other:?}"),
+/// Bit identity, element by element, naming the first mismatch.
+fn assert_bits(got: &[f32], want: &[f32], tag: &str) {
+    assert_eq!(got.len(), want.len(), "{tag}: length");
+    if let Some(i) = (0..got.len()).find(|&i| got[i].to_bits() != want[i].to_bits()) {
+        panic!(
+            "{tag}: element {i} is {:e} ({:#010x}), reference {:e} ({:#010x})",
+            got[i],
+            got[i].to_bits(),
+            want[i],
+            want[i].to_bits()
+        );
     }
 }
 
@@ -143,8 +150,16 @@ fn check_case(g: KvStartGeom, starts: &[i32], dtype: DType, label: &str) {
         let tag = format!("{label} {dtype:?} {layout:?}");
         let d_out = max_abs_diff(&got, &want_out, &format!("{tag} out"));
         let d_lse = max_abs_diff(&read_f32(&lse), &want_lse, &format!("{tag} lse"));
-        assert!(d_out <= tol(dtype), "{tag}: output diff {d_out:.3e}");
-        assert!(d_lse <= tol(dtype), "{tag}: lse diff {d_lse:.3e}");
+        assert_bits(
+            &got,
+            &want_out,
+            &format!("{tag} out (max abs diff {d_out:.3e})"),
+        );
+        assert_bits(
+            &read_f32(&lse),
+            &want_lse,
+            &format!("{tag} lse (max abs diff {d_lse:.3e})"),
+        );
         // Dead rows are exactly zero, not merely close.
         for (i, e) in want_lse.iter().enumerate() {
             if e.is_infinite() {

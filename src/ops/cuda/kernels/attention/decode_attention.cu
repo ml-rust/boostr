@@ -25,8 +25,12 @@
 //   - Split-KV: grid (batch * num_heads, num_splits). Each block owns a
 //     contiguous slice of the KV sequence and writes an unnormalized partial
 //     accumulator with its own `(m, l)` softmax statistics; a combine pass
-//     merges the slices. The host picks `num_splits` from the device's compute
-//     unit count, so the grid grows with the sequence until the device is full.
+//     merges the slices in slice order. Each row cuts its own span from its
+//     first key by `decode_row_slice`, a rule of the host's `fill` count
+//     (the device fill target over the head count, `decode_split.rs`) and
+//     the row's span alone, never of the batch size. A row is therefore cut
+//     the same way at every batch size and under any left padding, and its
+//     output is the same bits as its own single-row decode.
 //
 // Two variants of each:
 //   - Non-graph: seq_len_k passed as plain int kernel arg (zero overhead)
@@ -38,8 +42,9 @@
 // is single-token, so `i == seq_len_k - 1` and the surviving keys are exactly
 // `j >= seq_len_k - window_size` — a contiguous suffix, so the loop just starts
 // later. The split kernel cuts that suffix, not the whole sequence, so every
-// slice does work. The LSE is the log-sum-exp over the surviving keys, which is
-// what a masked softmax yields too (a masked key contributes `exp(-inf) = 0`).
+// slice does work; slices are counted from the suffix's start. The LSE is
+// the log-sum-exp over the surviving keys, which is what a masked softmax
+// yields too (a masked key contributes `exp(-inf) = 0`).
 // Matches the kernel contract in ops/impl_generic/attention/flash_standard.rs.
 //
 // Causal is not an argument: the single query is the newest position and sees
@@ -49,7 +54,8 @@
 // key loop starts at `max(window start, kv_start[b])`, read once per block.
 // A start at or past `seq_len_k` leaves the range empty: the whole-sequence
 // kernel then stores zeros with `LSE = -inf`, and every split slice reports
-// `m = -inf, l = 0`, which the combine drops the same way. The batch row is
+// `m = -inf, l = 0`, which the combine drops the same way. Slices are counted
+// from that start, so padding shifts every boundary with the row's keys. The batch row is
 // `bh / num_heads` in both grids; under the host's short-query fold
 // `num_heads` is `H * S_q`, and that quotient is still the batch row.
 //
@@ -183,6 +189,32 @@ __device__ __forceinline__ int decode_pos_start(
     return start;
 }
 
+// Slice `split` of a row whose keys are `[row_start, seq_len_k)`. The row
+// wants `fill` slices, clamped to what its span allows: at least
+// DECODE_SLICE_CHUNK keys each and at most DECODE_MAX_SLICES, one slice when
+// fewer than two chunks exist. Each slice is `ceil(span / want)` keys
+// rounded up to the chunk, counted from the row's first key. Mirrors
+// `row_splits` in `ops/cuda/attention/decode_split.rs`, which sizes the
+// grid from the longest span; a shorter row's trailing slices are empty.
+#define DECODE_SLICE_CHUNK 32
+#define DECODE_MAX_SLICES 32
+__device__ __forceinline__ void decode_row_slice(
+    int row_start, int seq_len_k, int fill, int split, int& begin, int& end
+) {
+    const int span = seq_len_k - row_start;
+    if (span <= 0) {
+        begin = 0;
+        end = 0;
+        return;
+    }
+    const int max_splits = min(span / DECODE_SLICE_CHUNK, DECODE_MAX_SLICES);
+    const int want = (max_splits < 2) ? 1 : min(max(fill, 1), max_splits);
+    const int per = (span + want - 1) / want;
+    const int len = (per + DECODE_SLICE_CHUNK - 1) / DECODE_SLICE_CHUNK * DECODE_SLICE_CHUNK;
+    begin = row_start + split * len;
+    end = min(begin + len, seq_len_k);
+}
+
 // ============================================================================
 // Whole-sequence kernel: one block per (batch, head)
 // ============================================================================
@@ -230,9 +262,13 @@ __device__ __forceinline__ void decode_attention_impl(
 // ============================================================================
 
 // `partial_o` is [B * num_heads, num_splits, D] and `partial_ml` is
-// [B * num_heads, num_splits, 2] holding `(m, l)` per slice, both always F32.
-// An empty slice writes `m = -inf, l = 0`, which the combine pass drops without
-// contributing to the global maximum.
+// [B * num_heads, num_splits, 2] holding `(m, l)` per slice, both always F32,
+// with `num_splits = gridDim.y`. Slice `split` is `decode_row_slice`'s
+// range for this row; a slice past the row's end writes `m = -inf, l = 0`,
+// which the combine pass drops without contributing to the global maximum.
+// A row whose span allows one slice only meets the combine as one slice,
+// whose weight `exp(m - m) = 1` and `l` pass through unchanged, so its
+// result is the whole-sequence kernel's to the bit.
 template<typename T, int D>
 __device__ __forceinline__ void decode_attention_split_impl(
     const T* __restrict__ Q,
@@ -243,10 +279,11 @@ __device__ __forceinline__ void decode_attention_split_impl(
     int num_heads, int num_kv_heads,
     int seq_len_k, int kv_seq_stride,
     float scale, int window_size,
-    const int* __restrict__ kv_start, int num_splits
+    const int* __restrict__ kv_start, int fill
 ) {
     const int bh = blockIdx.x;
     const int split = blockIdx.y;
+    const int num_splits = gridDim.y;
     const int b = bh / num_heads;
     const int h = bh % num_heads;
     const int kv_h = h / (num_heads / num_kv_heads);
@@ -256,12 +293,14 @@ __device__ __forceinline__ void decode_attention_split_impl(
     const T* k_base = K + (size_t)(b * num_kv_heads + kv_h) * kv_seq_stride * D;
     const T* v_base = V + (size_t)(b * num_kv_heads + kv_h) * kv_seq_stride * D;
 
-    // A start past the end gives a non-positive span, so every slice is empty.
-    const int pos_start = decode_pos_start(kv_start, b, seq_len_k, window_size);
-    const int span = max(0, seq_len_k - pos_start);
-    const int chunk = (span + num_splits - 1) / num_splits;
-    const int begin = pos_start + split * chunk;
-    const int end = min(begin + chunk, seq_len_k);
+    // The row cuts its own span from its own first key, so a left-padded
+    // row is cut exactly as its unpadded single-row decode is: the same keys
+    // land in the same slices.
+    int begin;
+    int end;
+    decode_row_slice(
+        decode_pos_start(kv_start, b, seq_len_k, window_size), seq_len_k, fill, split, begin, end
+    );
 
     float acc = 0.0f;
     float m = -INFINITY;
@@ -281,7 +320,8 @@ __device__ __forceinline__ void decode_attention_split_impl(
 
 // Merges the per-slice partials into the final output and log-sum-exp.
 // One block per (batch, head); `num_splits` is small, so each thread walks the
-// slices directly rather than reducing through shared memory.
+// slices directly rather than reducing through shared memory, in slice order,
+// so the fold is the same sequence for a row at every batch size.
 template<typename T, int D>
 __device__ __forceinline__ void decode_attention_combine_impl(
     const float* __restrict__ partial_o,
@@ -354,22 +394,22 @@ extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split(             
     float* __restrict__ partial_o, float* __restrict__ partial_ml,                 \
     int num_heads, int num_kv_heads, int seq_len_k, int kv_seq_stride,             \
     float scale, int window_size, const int* __restrict__ kv_start,                \
-    int num_splits                                                                 \
+    int fill                                                                       \
 ) {                                                                                \
     decode_attention_split_impl<T, D>(Q, K, V, partial_o, partial_ml, num_heads,   \
                                       num_kv_heads, seq_len_k, kv_seq_stride,      \
-                                      scale, window_size, kv_start, num_splits);   \
+                                      scale, window_size, kv_start, fill);         \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split_graph(          \
     const T* __restrict__ Q, const T* __restrict__ K, const T* __restrict__ V,     \
     float* __restrict__ partial_o, float* __restrict__ partial_ml,                 \
     int num_heads, int num_kv_heads, const int* seq_len_k_ptr, int kv_seq_stride,  \
-    float scale, int window_size, int num_splits                                   \
+    float scale, int window_size, int fill                                         \
 ) {                                                                                \
     decode_attention_split_impl<T, D>(Q, K, V, partial_o, partial_ml, num_heads,   \
                                       num_kv_heads, *seq_len_k_ptr, kv_seq_stride, \
-                                      scale, window_size, nullptr, num_splits);    \
+                                      scale, window_size, nullptr, fill);          \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_combine(              \

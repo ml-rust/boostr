@@ -47,13 +47,15 @@
 //
 // Left padding: `kv_start` is a `[B]` I32 device array or null. Keys below
 // `kv_start[b]` are invalid for every row of batch `b`. The block reads its
-// start once, clamps it to `[0, seq_len_k]`, and begins the tile loop at the
-// tile holding it. Inside a tile every key index is RELATIVE to the start,
-// so the tail check `key_rel >= seq_len_k - start` as an unsigned compare
-// also rejects the padded keys of the first tile (they wrap negative), and
-// the causal bound shifts by the same amount. A null pointer gives start 0
-// and the unpadded expressions, instruction for instruction. A row with no
-// valid key keeps `l == 0` and stores zeros with `LSE = -inf`.
+// start once, clamps it to `[0, seq_len_k]`, and anchors the tile grid at
+// it: tile `kt` holds keys `start + kt * BLOCK_N ..`, and the loop runs to
+// the last tile of the `seq_len_k - start` valid keys. Every key index in
+// the mask is RELATIVE to the start, so the tail check `key_rel >= seq_len_k
+// - start` as an unsigned compare, the causal bound and the online-softmax
+// sequence are the ones an unpadded run over the same keys forms: a padded
+// row's output is that run's output bit for bit. A null pointer gives start
+// 0 and the unpadded expressions. A row with no valid key keeps `l == 0` and
+// stores zeros with `LSE = -inf`.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -171,13 +173,14 @@ __device__ void mqa_gqa_fwd_impl(
     }
 
     // Last absolute query position any row of this block can hold; causal
-    // tiles that start past it are masked for the whole block. Tiles that
-    // end before the padding start are skipped the same way.
+    // tiles that start past it are masked for the whole block. The tile grid
+    // starts at the padding start, so no tile holds a padded key.
     const int last_q_pos = key_offset + min(q_start + ROWS, seq_len_q) - 1;
-    const int num_k_tiles = (seq_len_k + BLOCK_N - 1) / BLOCK_N;
+    const int num_k_tiles = (seq_len_k_rel + BLOCK_N - 1) / BLOCK_N;
 
-    for (int kt = pad_start / BLOCK_N; kt < num_k_tiles; ++kt) {
-        const int k_start = kt * BLOCK_N;
+    for (int kt = 0; kt < num_k_tiles; ++kt) {
+        const int k_start_rel = kt * BLOCK_N;
+        const int k_start = pad_start + k_start_rel;
         if (causal && k_start > last_q_pos) break;
 
         // Stage K and V as float. Keys past seq_len_k stage as zero and are
@@ -215,9 +218,7 @@ __device__ void mqa_gqa_fwd_impl(
         // and advance the online softmax. A tile fully masked for a row keeps
         // m at -inf, and then alpha = 1 and every p = 0 make it an exact no-op
         // instead of exp(-inf - -inf) = NaN.
-        // Key indices are relative to the padding start: the unsigned tail
-        // compare then also rejects keys below it (see the header).
-        const int k_start_rel = k_start - pad_start;
+        // Key indices are relative to the padding start (see the header).
         #pragma unroll
         for (int t = 0; t < R; ++t) {
             const int q_pos = key_offset + row0 + t - pad_start;

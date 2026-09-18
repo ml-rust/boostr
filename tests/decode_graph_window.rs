@@ -260,16 +260,15 @@ fn graph_decode_window_wider_than_cache_equals_zero_window() {
 // ---------------------------------------------------------------------------
 // Split-KV graph path (`decode_attention_graph_fwd` with `splits > 1`).
 //
-// `decode_split_count(device_index, base_blocks, kv_len)` in
-// `src/ops/cuda/attention/decode_split.rs` returns more than one once BOTH:
-//   - `base_blocks < compute_units * DECODE_BLOCKS_PER_UNIT (8)` — the
-//     whole-sequence grid underfills the device, and
-//   - `kv_len / DECODE_MIN_CHUNK (32) >= 2` — the sequence has at least two
-//     minimum-sized chunks to cut.
-// The tests above all use `CAPACITY = 48`, so `48 / 32 = 1 < 2` and they never
-// leave the whole-sequence kernel. The tests below use a larger capacity, big
-// enough to split, without touching `CAPACITY`, `SEQ_LEN_K`, or `WINDOW` above
-// so the whole-sequence coverage stays intact.
+// `decode_slices(device_index, num_heads, kv_len, head_dim)` in
+// `src/ops/cuda/attention/decode_split.rs` returns more than one slice once
+// `kv_len` exceeds the slice length, which a single row's device fill at
+// 4096 positions fixes from `num_heads`, `head_dim` and the compute-unit
+// count alone; the batch size never enters. The slice length is a multiple
+// of 32, so the tests above, at `CAPACITY = 48`, never leave the
+// whole-sequence kernel. The tests below use a larger capacity, big enough
+// to split, without touching `CAPACITY`, `SEQ_LEN_K`, or `WINDOW` above so
+// the whole-sequence coverage stays intact.
 // ---------------------------------------------------------------------------
 
 /// KV-cache capacity for the split-KV graph tests.
@@ -278,12 +277,11 @@ fn graph_decode_window_wider_than_cache_equals_zero_window() {
 /// live `seq_len_k` (see the comment on `decode_attention_graph_fwd`), so
 /// every test below shares it and only varies the live length.
 ///
-/// `base_blocks = BATCH * NUM_HEADS = 4`. Any real CUDA device profile
-/// reports `compute_units >= 1`, so `target_blocks = compute_units * 8 >= 8 >
-/// 4` and the whole-sequence grid is always underfilled. `SPLIT_CAPACITY / 32
-/// = 64 >= 2`, so the minimum-chunk floor is cleared with a wide margin —
-/// comfortably enough that the split path fires even on a device with very
-/// few compute units, while the resulting split count still lands inside
+/// `NUM_HEADS = 4` at `HEAD_DIM = 64` asks for `4 * compute_units` slices of
+/// 4096 positions, capped at 32, so the slice length is at most 1024 on any
+/// real device (`compute_units >= 1`). `SPLIT_CAPACITY = 2048` is then at
+/// least two slices, so the split path fires even on a device with very few
+/// compute units, while the split count still lands inside
 /// `DECODE_MAX_SPLITS (32)`.
 const SPLIT_CAPACITY: usize = 2048;
 /// Live length for the full-cache split test: equal to `SPLIT_CAPACITY`, so
@@ -303,8 +301,8 @@ const SPLIT_WINDOW: usize = 40;
 /// Q `[B, NUM_HEADS, 1, D]`, plus K/V caches `[B, KVH, capacity, D]`
 /// whose slots at or beyond `live_len` hold large garbage. Mirrors `inputs()`
 /// above but takes `capacity`/`live_len` as parameters so the split tests can
-/// use a capacity large enough to make `decode_split_count` return more than
-/// one, without disturbing the whole-sequence tests' fixed constants.
+/// use a capacity large enough to make `decode_slices` return more than one
+/// slice, without disturbing the whole-sequence tests' fixed constants.
 fn split_inputs(
     device: &CudaDevice,
     capacity: usize,
@@ -406,8 +404,8 @@ fn split_reference_decode(
 /// Exercises `decode_attention_graph_fwd`'s split-KV path with a fully live
 /// cache (`live_len == SPLIT_CAPACITY`): every slice the split kernel walks
 /// is entirely populated, so this is the "every slice does real work" case.
-/// Fires because `SPLIT_CAPACITY` clears both conditions in
-/// `decode_split_count` (see the comment on `SPLIT_CAPACITY` above). Checks
+/// Fires because `SPLIT_CAPACITY` exceeds the slice length `decode_slices`
+/// fixes (see the comment on `SPLIT_CAPACITY` above). Checks
 /// both the combined output and the combined log-sum-exp against the
 /// non-graph whole-sequence reference.
 #[test]

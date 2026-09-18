@@ -9,14 +9,15 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::decode_split::{decode_dtype_suffix, decode_split_count};
+use super::decode_split::{decode_dtype_suffix, decode_slices};
 
 /// Paged decode attention — S_q=1 specialized fast path.
 ///
 /// The grid is one block per `(batch, Q head)` pair, which does not grow with
-/// `seq_len_k`. When that leaves the device underfilled, the KV blocks are cut
-/// into slices and the shared combine pass merges their partial softmax
-/// statistics — see [`decode_split_count`].
+/// `seq_len_k`. When the sequence is longer than one slice, the KV blocks are
+/// cut into slices and the shared combine pass merges their partial softmax
+/// statistics — see [`decode_slices`]. The slice count never reads the batch
+/// size, so a row's cut is the same whatever it is batched with.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn paged_decode_attention_fwd(
     client: &CudaClient,
@@ -53,7 +54,8 @@ pub(super) fn paged_decode_attention_fwd(
     // A slice boundary lands on a KV block boundary, so the sequence cannot be
     // cut into more slices than it has blocks.
     let num_kv_blocks = seq_len_k.div_ceil(block_size);
-    let splits = decode_split_count(device_index, base_blocks, seq_len_k, head_dim)
+    let splits = decode_slices(device_index, num_heads, seq_len_k, head_dim)
+        .splits
         .min(num_kv_blocks.max(1));
 
     let q_ptr = q.ptr();
@@ -233,7 +235,7 @@ pub fn paged_decode_attention_fwd_graph(
     // slices do no work — correct, but the grid stays sized for a full cache
     // every step, not just the steps that need it.
     let kv_capacity = max_num_blocks * block_size;
-    let splits = decode_split_count(device_index, base_blocks, kv_capacity, head_dim);
+    let splits = decode_slices(device_index, num_heads, kv_capacity, head_dim).splits;
 
     if splits > 1 {
         // Unnormalized per-slice accumulators plus their (m, l) statistics, in

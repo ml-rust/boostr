@@ -1,158 +1,15 @@
-//! Model registry for loading models by name
-//!
-//! Provides `LoadedModel<R>`, an enum dispatching to concrete model types
-//! with a unified inference API.
+//! Accessor methods on [`LoadedModel`]: capability flags and per-variant
+//! config lookups.
 
-use crate::error::{Error, Result};
-use crate::model::config::{GdnConfig, UniversalConfig};
+use super::model::LoadedModel;
+use crate::model::config::GdnConfig;
 use crate::model::mamba::mamba1::Mamba1Config;
 use crate::model::mamba::mamba2::Mamba2Config;
 use crate::model::mamba::mamba3::Mamba3Config;
 use crate::model::traits::Model;
-use crate::nn::VarBuilder;
 use numr::dtype::DType;
-use numr::ops::{IndexingOps, ReduceOps, ShapeOps};
+use numr::ops::IndexingOps;
 use numr::runtime::Runtime;
-
-/// Enum of all supported model architectures
-///
-/// Provides dynamic dispatch at the model level without
-/// sacrificing type safety. The runtime type parameter `R` is preserved
-/// across all variants.
-pub enum LoadedModel<R: Runtime> {
-    /// Standard GQA transformer model
-    ///
-    /// Covers all architectures that share the LLaMA structure:
-    /// token embedding → transformer blocks (GQA + FFN) → RMSNorm → LM head.
-    ///
-    /// | HF `model_type`  | Example models                          |
-    /// |------------------|-----------------------------------------|
-    /// | `llama`          | Llama 2/3, CodeLlama, Yi, Solar         |
-    /// | `mistral`        | Mistral 7B, Mixtral (dense path)        |
-    /// | `qwen2`          | Qwen2-7B, Qwen2-72B                    |
-    /// | `qwen2_moe`      | Qwen2-57B-A14B (MoE variant)           |
-    /// | `phi3`           | Phi-3-mini, Phi-3-medium                |
-    /// | `phi`            | Phi-2                                   |
-    /// | `gemma`          | Gemma 7B                                |
-    /// | `gemma2`         | Gemma 2 9B/27B                          |
-    /// | `starcoder2`     | StarCoder2 3B/7B/15B                    |
-    /// | `internlm2`      | InternLM2 7B/20B                        |
-    Llama(Box<super::llama::Llama<R>>),
-    /// Tensor-parallel LLaMA model (sharded across multiple GPUs via NCCL)
-    LlamaTp(Box<super::llama::LlamaTp<R>>),
-    /// Mamba1 SSM model (original selective SSM + depthwise convolution)
-    Mamba1(Box<super::mamba::Mamba1Model<R>>),
-    /// Mamba2 SSM model (full model with embedding + layers + lm_head)
-    Mamba2(Box<super::mamba::Mamba2Model<R>>),
-    /// Mamba3 SSM model (trapezoidal discretization + optional complex RoPE/MIMO)
-    Mamba3(Box<super::mamba::Mamba3Model<R>>),
-    /// Hybrid model mixing attention and SSM layers
-    Hybrid(Box<super::hybrid::HybridModel<R>>),
-    /// Multimodal model with vision/audio encoders + LLM backbone
-    Multimodal(Box<super::multimodal::MultimodalModel<R>>),
-    /// `qwen35`: Gated DeltaNet + gated full-attention hybrid (Bonsai).
-    /// KV cache for the attention layers, GDN state for the rest.
-    Qwen35(Box<super::qwen35::Qwen35Model<R>>),
-}
-
-impl<R: Runtime<DType = DType>> LoadedModel<R>
-where
-    R::Client: IndexingOps<R>
-        + crate::quant::DequantOps<R>
-        + numr::ops::TypeConversionOps<R>
-        + ReduceOps<R>
-        + ShapeOps<R>,
-{
-    /// Load a model from universal config and weights.
-    ///
-    /// Uses capability-based dispatch: any model with an attention config
-    /// is loaded as a Llama (universal transformer). This means new HF
-    /// model types work automatically without code changes as long as they
-    /// share the standard transformer structure.
-    pub fn load(config: &UniversalConfig, vb: &mut VarBuilder<R>) -> Result<Self> {
-        // GGUF weights carry their tensors' `GgmlType`s into `vb`'s `VarMap`
-        // at load time (`VarMap::from_gguf`); a SafeTensors-backed `vb`
-        // reports none. Fold the distinct formats into the config so every
-        // model variant's `quant_formats()` sees them through `m.config()`,
-        // with no per-arch `from_varbuilder` change needed.
-        let formats = vb.quant_formats();
-        let owned_config = if formats.is_empty() {
-            None
-        } else {
-            let mut c = config.clone();
-            c.quant_formats = formats.to_vec();
-            Some(c)
-        };
-        let config = owned_config.as_ref().unwrap_or(config);
-        match config.model_type.as_str() {
-            "mamba1" => {
-                let model = super::mamba::Mamba1Model::from_varbuilder(vb, config)?;
-                Ok(LoadedModel::Mamba1(Box::new(model)))
-            }
-            "mamba2" => {
-                let model = super::mamba::Mamba2Model::from_varbuilder(vb, config)?;
-                Ok(LoadedModel::Mamba2(Box::new(model)))
-            }
-            "mamba3" => {
-                let model = super::mamba::Mamba3Model::from_varbuilder(vb, config)?;
-                Ok(LoadedModel::Mamba3(Box::new(model)))
-            }
-            "hybrid" => {
-                let model = super::hybrid::HybridModel::from_varbuilder(vb, config)?;
-                Ok(LoadedModel::Hybrid(Box::new(model)))
-            }
-            "qwen35" => {
-                let model = super::qwen35::Qwen35Model::from_varbuilder(vb, config)?;
-                Ok(LoadedModel::Qwen35(Box::new(model)))
-            }
-            // Multimodal: vision/audio encoders + LLM backbone
-            _ if config.vision.is_some() || config.audio.is_some() => {
-                let model = super::multimodal::MultimodalModel::from_varbuilder(vb, config)?;
-                Ok(LoadedModel::Multimodal(Box::new(model)))
-            }
-            // Everything else with attention config → Llama (the universal transformer)
-            _ if config.attention.is_some() => {
-                let model = super::llama::Llama::from_varbuilder(vb, config)?;
-                Ok(LoadedModel::Llama(Box::new(model)))
-            }
-            other => Err(Error::ModelError {
-                reason: format!(
-                    "Unknown model type '{other}' without attention config. \
-                     Only pure SSM models (mamba1/mamba2/mamba3) and hybrid models are \
-                     supported without attention configuration."
-                ),
-            }),
-        }
-    }
-
-    /// Load a tensor-parallel model. Requires a NCCL communicator.
-    ///
-    /// Tensor parallelism is supported for any model with an attention config
-    /// (i.e., transformer architectures loaded via the Llama struct).
-    pub fn load_tp(
-        config: &UniversalConfig,
-        vb: &mut VarBuilder<R>,
-        comm: std::sync::Arc<dyn numr::runtime::Communicator>,
-    ) -> Result<Self> {
-        if config.attention.is_some() {
-            let model = super::llama::LlamaTp::from_varbuilder(vb, config, comm)?;
-            Ok(LoadedModel::LlamaTp(Box::new(model)))
-        } else {
-            Err(Error::ModelError {
-                reason: format!(
-                    "Tensor parallelism not supported for model type '{}' \
-                     (requires attention config)",
-                    config.model_type
-                ),
-            })
-        }
-    }
-
-    /// Load a model from GGUF format
-    pub fn load_gguf(config: &UniversalConfig, vb: &mut VarBuilder<R>) -> Result<Self> {
-        Self::load(config, vb)
-    }
-}
 
 impl<R: Runtime<DType = DType>> LoadedModel<R>
 where
@@ -457,21 +314,6 @@ where
             | LoadedModel::Mamba2(_)
             | LoadedModel::Mamba3(_)
             | LoadedModel::Hybrid(_) => None,
-        }
-    }
-}
-
-impl<R: Runtime> std::fmt::Debug for LoadedModel<R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LoadedModel::Llama(_) => f.debug_tuple("Llama").finish(),
-            LoadedModel::LlamaTp(_) => f.debug_tuple("LlamaTp").finish(),
-            LoadedModel::Mamba1(_) => f.debug_tuple("Mamba1").finish(),
-            LoadedModel::Mamba2(_) => f.debug_tuple("Mamba2").finish(),
-            LoadedModel::Mamba3(_) => f.debug_tuple("Mamba3").finish(),
-            LoadedModel::Hybrid(_) => f.debug_tuple("Hybrid").finish(),
-            LoadedModel::Multimodal(_) => f.debug_tuple("Multimodal").finish(),
-            LoadedModel::Qwen35(_) => f.debug_tuple("Qwen35").finish(),
         }
     }
 }

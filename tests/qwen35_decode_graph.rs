@@ -20,19 +20,16 @@ mod common;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-/// One decode step records on the order of a thousand intermediate
-/// allocations; the arena serves them from one buffer instead of one graph
-/// memory node each.
-const ARENA_BYTES: usize = 512 << 20;
-
 use boostr::inference::decode_graph::{
     DeviceScalars, MropeScalars, argmax_to_buf, copy_into_stable,
 };
-use boostr::inference::{LayeredGdnState, LayeredKvCache, LayeredKvCacheConfig};
+use boostr::inference::{LayeredGdnState, LayeredKvCache};
 use boostr::model::qwen35::Qwen35Model;
+use common::qwen35_cuda::{
+    ARENA_BYTES, caches, cuda_available, cuda_setup, eager_decode, gdn_flat, max_abs_diff, prefill,
+};
 use common::qwen35_tiny::{MAX_POS, VOCAB, tiny_model};
 use numr::dtype::DType;
-use numr::runtime::Runtime;
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
 use numr::tensor::Tensor;
 
@@ -45,108 +42,8 @@ fn cuda_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|p| p.into_inner())
 }
 
-fn cuda_available() -> bool {
-    numr::runtime::cuda::is_cuda_available()
-}
-
-fn cuda_setup() -> (CudaClient, CudaDevice) {
-    let device = CudaDevice::new(0);
-    let client = CudaRuntime::default_client(&device);
-    (client, device)
-}
-
 const PREFILL: usize = 5;
 const DECODE_STEPS: usize = 6;
-
-// ── Shared harness ──────────────────────────────────────────────────────
-
-/// Full-capacity KV cache (graph mode needs stable k/v addresses) plus zero
-/// GDN state.
-fn caches(
-    device: &CudaDevice,
-    model: &Qwen35Model<CudaRuntime>,
-    capacity: usize,
-) -> (LayeredKvCache<CudaRuntime>, LayeredGdnState<CudaRuntime>) {
-    let attn = model.attention_config();
-    let kv_config = LayeredKvCacheConfig {
-        batch_size: 1,
-        num_kv_heads: attn.num_kv_heads,
-        initial_capacity: capacity,
-        max_seq_len: capacity,
-        head_dim: attn.head_dim,
-        dtype: DType::F32,
-    };
-    let kv = LayeredKvCache::<CudaRuntime>::new(model.num_attention_layers(), &kv_config, device)
-        .unwrap();
-    let gdn = LayeredGdnState::<CudaRuntime>::zeros(
-        model.num_gdn_layers(),
-        model.gdn_config(),
-        1,
-        DType::F32,
-        device,
-    )
-    .unwrap();
-    (kv, gdn)
-}
-
-fn argmax(row: &[f32]) -> i64 {
-    let mut best = 0usize;
-    for (i, &v) in row.iter().enumerate().skip(1) {
-        if v > row[best] {
-            best = i;
-        }
-    }
-    best as i64
-}
-
-fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len());
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0, f32::max)
-}
-
-/// Eager prefill of `prompt`; returns the argmax of the last row.
-fn prefill(
-    client: &CudaClient,
-    device: &CudaDevice,
-    model: &Qwen35Model<CudaRuntime>,
-    prompt: &[i64],
-    kv: &mut LayeredKvCache<CudaRuntime>,
-    gdn: &mut LayeredGdnState<CudaRuntime>,
-) -> i64 {
-    let ids = Tensor::<CudaRuntime>::from_slice(prompt, &[1, prompt.len()], device).unwrap();
-    let logits = model.forward_qwen35(client, &ids, kv, gdn, 0).unwrap();
-    let vocab = logits.shape()[2];
-    let flat = logits.to_vec::<f32>();
-    argmax(&flat[(prompt.len() - 1) * vocab..])
-}
-
-/// Eager greedy decode: `steps` rows of logits and the ids they produce.
-fn eager_decode(
-    client: &CudaClient,
-    device: &CudaDevice,
-    model: &Qwen35Model<CudaRuntime>,
-    first: i64,
-    steps: usize,
-    kv: &mut LayeredKvCache<CudaRuntime>,
-    gdn: &mut LayeredGdnState<CudaRuntime>,
-) -> (Vec<Vec<f32>>, Vec<i64>) {
-    let mut token = first;
-    let mut rows = Vec::with_capacity(steps);
-    let mut ids = Vec::with_capacity(steps);
-    for _ in 0..steps {
-        let position = kv.seq_len();
-        let x = Tensor::<CudaRuntime>::from_slice(&[token], &[1, 1], device).unwrap();
-        let logits = model.forward_qwen35(client, &x, kv, gdn, position).unwrap();
-        let row = logits.to_vec::<f32>();
-        token = argmax(&row);
-        rows.push(row);
-        ids.push(token);
-    }
-    (rows, ids)
-}
 
 /// Graph greedy decode: warm up on throwaway state, re-prefill, capture one
 /// step, replay `steps` times. Returns logits rows and ids, and leaves the
@@ -217,17 +114,6 @@ fn graph_decode(
         ids.push(next_token_buf.to_vec::<i64>()[0]);
     }
     (rows, ids)
-}
-
-fn gdn_flat(state: &LayeredGdnState<CudaRuntime>) -> (Vec<f32>, Vec<f32>) {
-    let mut conv = Vec::new();
-    let mut ssm = Vec::new();
-    for i in 0..state.num_layers() {
-        let layer = state.layer(i).unwrap();
-        conv.extend(layer.conv().to_vec::<f32>());
-        ssm.extend(layer.ssm().to_vec::<f32>());
-    }
-    (conv, ssm)
 }
 
 #[test]

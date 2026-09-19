@@ -4,6 +4,8 @@
 #![allow(dead_code)]
 
 pub mod kv_start;
+#[cfg(feature = "cuda")]
+pub mod qwen35_cuda;
 pub mod qwen35_tiny;
 
 use std::collections::{HashMap, HashSet};

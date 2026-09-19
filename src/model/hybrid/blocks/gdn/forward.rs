@@ -60,16 +60,16 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             + DequantOps<R>,
     {
         let (out, window, ssm) = self.forward_core(client, x, state.conv(), state.ssm())?;
-        state.update(window, ssm);
+        state.update(client, &window, &ssm)?;
         Ok(out)
     }
 
     /// The block math over an explicit left context: `conv_state`
     /// `[batch, qkv_dim, conv_kernel - 1]` and `ssm_state`
     /// `[batch, value_heads, S, S]`. Returns the output plus the new conv
-    /// window and delta-rule state, each a fresh tensor; the caller decides
-    /// how the state carries (`GdnState::update` replaces the fields,
-    /// `GdnState::copy_from_captured` copies in place for graph replay).
+    /// window and delta-rule state, each a fresh tensor; the caller copies
+    /// them into the state in place (`GdnState::update` for the eager
+    /// path, `GdnState::update_shared` for graph replay).
     pub(super) fn forward_core<C>(
         &self,
         client: &C,

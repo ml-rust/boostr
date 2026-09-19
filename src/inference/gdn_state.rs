@@ -6,10 +6,16 @@
 //!   the depthwise causal conv (see `nn::causal_conv1d`)
 //! - Recurrence state: `[batch, value_heads, S, S]` in the
 //!   `GatedDeltaNetOps` orientation (row = key index, column = value index)
+//!
+//! Both buffers are allocated once and written in place: `update`,
+//! `update_shared` and `reset` copy into them and never reassign them. A
+//! graph captured against their addresses stays valid across `reset` and a
+//! new eager prefill.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::config::GdnConfig;
 use numr::dtype::DType;
+use numr::ops::BinaryOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -59,54 +65,47 @@ impl<R: Runtime<DType = DType>> GdnState<R> {
         self.initialized
     }
 
-    /// Replace both tensors after a forward pass.
-    pub fn update(&mut self, conv: Tensor<R>, ssm: Tensor<R>) {
-        self.conv = conv;
-        self.ssm = ssm;
-        self.initialized = true;
-    }
-
-    /// Zero both tensors and clear `initialized`.
-    pub fn reset(&mut self) -> Result<()> {
-        let device = self.ssm.device().clone();
-        let dtype = self.ssm.dtype();
-        self.conv = Tensor::<R>::zeros(self.conv.shape(), dtype, &device)?;
-        self.ssm = Tensor::<R>::zeros(self.ssm.shape(), dtype, &device)?;
-        self.initialized = false;
-        Ok(())
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl GdnState<numr::runtime::cuda::CudaRuntime> {
-    /// Copy a decode step's fresh `conv` window and `ssm` state into the
-    /// buffers this state owns, in place, on the client's compute stream.
+    /// Write a forward pass's fresh `conv` window and `ssm` state into the
+    /// buffers this state owns, in place, and mark the state initialized.
     ///
-    /// The graph-mode forward uses this in place of [`update`](Self::update):
-    /// `conv` and `ssm` keep the addresses the captured graph read, so the
-    /// next replay sees this step's state. Both copies are captured memcpy
-    /// nodes when called inside `capture_graph_into`.
-    ///
-    /// `initialized` is left as the prefill set it: this method takes `&self`
-    /// so a whole [`LayeredGdnState`] can be shared with a captured closure.
-    /// [`update`](Self::update) and [`reset`](Self::reset) replace the
-    /// buffers, so a graph captured before either call holds stale
-    /// addresses: capture again after them.
+    /// The buffers keep their addresses for the lifetime of the state, so a
+    /// graph captured against them stays valid across this call.
     ///
     /// # Errors
     ///
-    /// [`Error`](crate::error::Error) when a shape or dtype differs from the
-    /// stored buffer, or the copy fails.
-    pub fn copy_from_captured(
-        &self,
-        client: &numr::runtime::cuda::CudaClient,
-        conv_new: &Tensor<numr::runtime::cuda::CudaRuntime>,
-        ssm_new: &Tensor<numr::runtime::cuda::CudaRuntime>,
+    /// [`Error`](crate::error::Error) when a shape differs from the stored
+    /// buffer, or the copy fails.
+    pub fn update<C: BinaryOps<R>>(
+        &mut self,
+        client: &C,
+        conv: &Tensor<R>,
+        ssm: &Tensor<R>,
     ) -> Result<()> {
-        use crate::error::Error;
-        use crate::inference::decode_graph::copy_into_stable;
+        self.update_shared(client, conv, ssm)?;
+        self.initialized = true;
+        Ok(())
+    }
 
-        for (name, new, stored) in [("conv", conv_new, &self.conv), ("ssm", ssm_new, &self.ssm)] {
+    /// Write a decode step's fresh `conv` window and `ssm` state into the
+    /// buffers this state owns, in place, on the client's compute stream.
+    ///
+    /// The graph-mode forward uses this in place of [`update`](Self::update):
+    /// `initialized` is left as the prefill set it, and the method takes
+    /// `&self` so a whole [`LayeredGdnState`] can be shared with a captured
+    /// closure. Both copies are captured memcpy nodes when called inside
+    /// `capture_graph_into`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`](crate::error::Error) when a shape differs from the stored
+    /// buffer, or the copy fails.
+    pub fn update_shared<C: BinaryOps<R>>(
+        &self,
+        client: &C,
+        conv: &Tensor<R>,
+        ssm: &Tensor<R>,
+    ) -> Result<()> {
+        for (name, new, stored) in [("conv", conv, &self.conv), ("ssm", ssm, &self.ssm)] {
             if new.shape() != stored.shape() {
                 return Err(Error::InferenceError {
                     reason: format!(
@@ -116,8 +115,27 @@ impl GdnState<numr::runtime::cuda::CudaRuntime> {
                     ),
                 });
             }
-            copy_into_stable(client, new, stored).map_err(Error::Numr)?;
+            client.copy_into(stored, new).map_err(Error::Numr)?;
         }
+        Ok(())
+    }
+
+    /// Zero both buffers in place and clear `initialized`.
+    ///
+    /// The buffers keep their addresses, so a graph captured against them
+    /// stays valid across a reset followed by a new prefill.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`](crate::error::Error) when the zero fill fails.
+    pub fn reset<C: BinaryOps<R>>(&mut self, client: &C) -> Result<()> {
+        let device = self.ssm.device().clone();
+        let dtype = self.ssm.dtype();
+        for stored in [&self.conv, &self.ssm] {
+            let zeros = Tensor::<R>::zeros(stored.shape(), dtype, &device)?;
+            client.copy_into(stored, &zeros).map_err(Error::Numr)?;
+        }
+        self.initialized = false;
         Ok(())
     }
 }
@@ -158,10 +176,10 @@ impl<R: Runtime<DType = DType>> LayeredGdnState<R> {
         self.layers.len()
     }
 
-    /// Reset every layer.
-    pub fn reset(&mut self) -> Result<()> {
+    /// Reset every layer in place; every buffer keeps its address.
+    pub fn reset<C: BinaryOps<R>>(&mut self, client: &C) -> Result<()> {
         for layer in &mut self.layers {
-            layer.reset()?;
+            layer.reset(client)?;
         }
         Ok(())
     }
@@ -197,19 +215,40 @@ mod tests {
     }
 
     #[test]
-    fn update_then_reset() {
+    fn update_then_reset_keep_addresses() {
         let device = CpuDevice::new();
+        let client = CpuRuntime::default_client(&device);
         let mut state = GdnState::<CpuRuntime>::zeros(&cfg(), 1, DType::F32, &device).unwrap();
+        let (conv_ptr, ssm_ptr) = (state.conv().ptr(), state.ssm().ptr());
         let conv = Tensor::<CpuRuntime>::ones(&[1, 32, 3], DType::F32, &device).unwrap();
         let ssm = Tensor::<CpuRuntime>::ones(&[1, 4, 4, 4], DType::F32, &device).unwrap();
-        state.update(conv, ssm);
+        state.update(&client, &conv, &ssm).unwrap();
         assert!(state.is_initialized());
         assert_eq!(state.ssm().to_vec::<f32>()[0], 1.0);
+        assert_eq!(state.conv().to_vec::<f32>()[0], 1.0);
 
-        state.reset().unwrap();
+        state.reset(&client).unwrap();
         assert!(!state.is_initialized());
         assert_eq!(state.ssm().to_vec::<f32>()[0], 0.0);
+        assert_eq!(state.conv().to_vec::<f32>()[0], 0.0);
         assert_eq!(state.conv().shape(), &[1, 32, 3]);
+        assert_eq!(state.conv().ptr(), conv_ptr);
+        assert_eq!(state.ssm().ptr(), ssm_ptr);
+    }
+
+    #[test]
+    fn update_shared_leaves_initialized_alone() {
+        let device = CpuDevice::new();
+        let client = CpuRuntime::default_client(&device);
+        let state = GdnState::<CpuRuntime>::zeros(&cfg(), 1, DType::F32, &device).unwrap();
+        let conv = Tensor::<CpuRuntime>::ones(&[1, 32, 3], DType::F32, &device).unwrap();
+        let ssm = Tensor::<CpuRuntime>::ones(&[1, 4, 4, 4], DType::F32, &device).unwrap();
+        state.update_shared(&client, &conv, &ssm).unwrap();
+        assert!(!state.is_initialized());
+        assert_eq!(state.ssm().to_vec::<f32>()[0], 1.0);
+
+        let wrong = Tensor::<CpuRuntime>::ones(&[1, 32, 2], DType::F32, &device).unwrap();
+        assert!(state.update_shared(&client, &wrong, &ssm).is_err());
     }
 
     #[test]

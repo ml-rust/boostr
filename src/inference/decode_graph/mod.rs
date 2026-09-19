@@ -55,7 +55,7 @@
 //! | Tensor             | Allocated   | Updated how                          |
 //! |--------------------|-------------|--------------------------------------|
 //! | `MropeScalars`     | pre-capture | `cuMemsetD32Async` from CPU          |
-//! | `GdnState` buffers | pre-capture | written by graph (`copy_into_stable`)|
+//! | `GdnState` buffers | pre-capture | written by graph (`copy_into`)       |
 
 #[cfg(feature = "cuda")]
 pub use cuda_impl::*;

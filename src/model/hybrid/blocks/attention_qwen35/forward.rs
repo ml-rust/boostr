@@ -160,7 +160,7 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
         let k = var_contiguous(&var_permute(&k, &[0, 2, 1, 3]).map_err(Error::Numr)?)?;
         let v = var_contiguous(&var_permute(&v, &[0, 2, 1, 3]).map_err(Error::Numr)?)?;
 
-        kv_cache.update(k.tensor(), v.tensor())?;
+        kv_cache.update_fused(k.tensor(), v.tensor(), client)?;
         let (cached_k, cached_v) = kv_cache.get_kv()?;
         let cached_k = Var::new(cached_k.contiguous()?, false);
         let cached_v = Var::new(cached_v.contiguous()?, false);

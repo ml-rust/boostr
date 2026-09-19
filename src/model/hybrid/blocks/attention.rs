@@ -133,8 +133,9 @@ impl<R: Runtime<DType = DType>> AttentionBlock<R> {
             (q, k)
         };
 
-        // Update KV cache with new K/V tensors [B, H_kv, S, D]
-        kv_cache.update(k.tensor(), v.tensor())?;
+        // Append K/V [B, H_kv, S, D] in place; the cache buffers keep their
+        // addresses.
+        kv_cache.update_fused(k.tensor(), v.tensor(), client)?;
 
         // Get full cached K/V for attention
         let (cached_k, cached_v) = kv_cache.get_kv()?;

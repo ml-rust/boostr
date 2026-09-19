@@ -9,7 +9,7 @@
 //! | `DeviceScalars`           | caller, `DeviceScalars::update(seq_len)`        |
 //! | `MropeScalars` positions  | caller, `MropeScalars::update(seq_len)`         |
 //! | KV cache k/v buffers      | graph, `kv_insert` at `write_pos`               |
-//! | GDN conv/ssm buffers      | graph, `GdnState::copy_from_captured`           |
+//! | GDN conv/ssm buffers      | graph, `GdnState::update_shared`                |
 //!
 //! The layer walk keeps the same `attn_idx` / `gdn_idx` counters as
 //! `forward_layers`.

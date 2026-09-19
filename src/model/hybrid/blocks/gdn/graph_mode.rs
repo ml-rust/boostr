@@ -17,7 +17,7 @@ impl GdnBlock<numr::runtime::cuda::CudaRuntime> {
     /// Same math as [`forward`](Self::forward) with `seq == 1`. It reads
     /// `state.conv()` and `state.ssm()`, whose addresses are stable, and
     /// writes the new window and delta-rule state back into those same
-    /// buffers through [`GdnState::copy_from_captured`], so the next replay
+    /// buffers through [`GdnState::update_shared`], so the next replay
     /// reads this step's state. Every intermediate is graph-managed. Nothing
     /// is read on the host.
     ///
@@ -38,7 +38,7 @@ impl GdnBlock<numr::runtime::cuda::CudaRuntime> {
             });
         }
         let (out, window, ssm) = self.forward_core(client, x, state.conv(), state.ssm())?;
-        state.copy_from_captured(client, &window, &ssm)?;
+        state.update_shared(client, &window, &ssm)?;
         Ok(out)
     }
 }

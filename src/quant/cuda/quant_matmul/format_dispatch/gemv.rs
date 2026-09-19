@@ -197,19 +197,24 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
             (QuantFormat::Q2K, _) => "quant_gemv_q2_k_q8_1_mwr",
             (QuantFormat::Q4K, 1) => "quant_gemv_q4_k_q8_1_mwr",
             (QuantFormat::Q6K, 1) => "quant_gemv_q6_k_q8_1_mwr",
-            (QuantFormat::Q8_0, 1) => "quant_gemv_q8_0_q8_1_mwr",
+            // Four columns per block: each activation word is loaded once for
+            // all four. Measured with `mmq_kernel_compare --format q8_0 --m 1
+            // --gemv` at n = k = 5120, k = 17408, and n = k = 2048: the
+            // four-column layout wins at every shape tried, so it is the
+            // default `_r4` kernel.
+            (QuantFormat::Q8_0, 1) => "quant_gemv_q8_0_q8_1_mwr_r4",
             (QuantFormat::Q5K, 1) => "quant_gemv_q5_k_q8_1_mwr",
-            (QuantFormat::PQ2_0, 1) => prism_mwr_kernel(
+            (QuantFormat::PQ2_0, 1) => lowbit_mwr_kernel(
                 "quant_gemv_pq2_0_q8_1_mwr",
                 "quant_gemv_pq2_0_q8_1_mwr_r4",
                 "quant_gemv_pq2_0_q8_1_mwr_r8",
             ),
-            (QuantFormat::Q2_0, 1) => prism_mwr_kernel(
+            (QuantFormat::Q2_0, 1) => lowbit_mwr_kernel(
                 "quant_gemv_q2_0_q8_1_mwr",
                 "quant_gemv_q2_0_q8_1_mwr_r4",
                 "quant_gemv_q2_0_q8_1_mwr_r8",
             ),
-            (QuantFormat::Q1_0, 1) => prism_mwr_kernel(
+            (QuantFormat::Q1_0, 1) => lowbit_mwr_kernel(
                 "quant_gemv_q1_0_q8_1_mwr",
                 "quant_gemv_q1_0_q8_1_mwr_r4",
                 "quant_gemv_q1_0_q8_1_mwr_r8",
@@ -282,13 +287,14 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
         // extent is `ceil(N / 2)`. Mirrors `mwr_rows_ntok` in gemv/common.cuh;
         // the two must agree or the grid and the kernel disagree on which
         // output columns a block owns. Q8_0 at `tokens_per_block == 1` is the
-        // single-token kernel, which keeps one column per block. The prism
-        // three at `tokens_per_block == 1` cover `PRISM_GEMV_ROWS`, the ROWS
+        // `_r4` single-token kernel, four columns per block. The three
+        // lowbit formats at `tokens_per_block == 1` cover `LOWBIT_GEMV_ROWS`, the ROWS
         // the kernel picked above was compiled with.
         let rows_per_block: u32 = match format {
             QuantFormat::Q8_0 if tokens_per_block >= 2 => 2,
+            QuantFormat::Q8_0 => 4,
             QuantFormat::PQ2_0 | QuantFormat::Q2_0 | QuantFormat::Q1_0 if tokens_per_block == 1 => {
-                PRISM_GEMV_ROWS
+                LOWBIT_GEMV_ROWS
             }
             _ => 1,
         };

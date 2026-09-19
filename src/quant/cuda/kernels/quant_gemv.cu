@@ -1335,8 +1335,8 @@ extern "C" __global__ __launch_bounds__(128, 1) void quant_gemv_q8_0_q8_1_mwr(
 // where the traffic goes at wide tiles. ROWS defaults to `mwr_rows_ntok` in
 // gemv/common.cuh, the counterpart of ggml-cuda's `calc_rows_per_block`; the
 // `_r4` instance below overrides it to 4 at NTOK = 1, where the activation
-// row is otherwise re-read once per output column, for measurement against
-// `quant_gemv_q8_0_q8_1_mwr`. `dispatch_gemv` does not select it yet.
+// row is otherwise re-read once per output column; `dispatch_gemv` selects
+// it at m = 1, measured against `quant_gemv_q8_0_q8_1_mwr`.
 //
 // Grid: (ceil(N / ROWS), ceil(M / NTOK), 1) — ROWS output columns, NTOK tokens
 // per block.
@@ -1553,9 +1553,9 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(4) * WARP_SIZE, 1) void 
 // enough that the barrier cost stops mattering.
 //
 // Measured against the f32-staged form at N = 4096, K = 14336, M = 512, on the
-// same card and the same payload. The f32 form sat at ~35 GB/s effective: it
-// was never bandwidth-bound, it was bound by shared traffic and by a barrier
-// every 32 elements of K.
+// same card and the same payload: the f32 form never reached bandwidth
+// bound, it was bound by shared traffic and by a barrier every 32 elements
+// of K.
 //
 // # Scales
 //

@@ -72,7 +72,7 @@ pub(in crate::quant::cuda::quant_matmul) fn prefers_tile_parallel(
     fm: &FeatMajorFormat,
 ) -> bool {
     tuned(
-        client.device().id(),
+        client,
         fm.tile_parallel_key,
         fm.prefers_tile_parallel_fallback,
         || probe(client, fm).map_err(|e| numr::error::Error::Internal(e.to_string())),

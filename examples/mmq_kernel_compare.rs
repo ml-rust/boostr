@@ -26,13 +26,13 @@
 //! Q8_0, Q5_K, Q3_K and Q2_K print both a `..._q8_1_mwr` line and a `..._f32`
 //! line, PQ2_0, Q2_0 and Q1_0 print `..._q8_1_mwr`, `..._mwr_r4`, `..._mwr_r8`
 //! and `..._f32` at `--m 1` (their single-token kernels; `dispatch_gemv`
-//! itself only ever launches one of the three, chosen by `PRISM_GEMV_ROWS`,
+//! itself only ever launches one of the three, chosen by `LOWBIT_GEMV_ROWS`,
 //! but this tool times all three so the ROWS choice can be measured), every
 //! other format and every format at `--m` above 1 only the `..._f32` line.
 //!
 //! For every dp4a format that has one, `--gemv` also runs the token-batched
 //! MWR kernel checked against the same f64 reference: Q8_0, Q6_K and the
-//! three PrismML-fork formats PQ2_0/Q2_0/Q1_0 have `..._mwr_n2` and `_n4`
+//! three lowbit formats PQ2_0/Q2_0/Q1_0 have `..._mwr_n2` and `_n4`
 //! (Q8_0 also an unwired `_n8`), Q4_K/Q5_K, the four legacy 32-element
 //! formats Q4_0/Q5_0/Q4_1/Q5_1, the two IQ4 codebook formats IQ4_NL/IQ4_XS
 //! and the six grid-indexed IQ formats
@@ -1140,7 +1140,7 @@ fn iq1_s_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usiz
 /// multiplier (`code - 1` for the 2-bit formats, `+-1` for Q1_0's sign bits).
 #[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
-fn prism_dot_reference(
+fn lowbit_dot_reference(
     weight: &[u8],
     act: &[u8],
     token: usize,
@@ -1176,7 +1176,7 @@ fn prism_dot_reference(
 /// element `e` reads bits `2 * (e % 4)` of `qs[e / 4]` and maps the unsigned
 /// 0..3 code to `code - 1`, so {-1, 0, 1, 2}.
 #[cfg(feature = "cuda")]
-fn prism_code2(qs: &[u8], e: usize) -> f64 {
+fn lowbit_code2(qs: &[u8], e: usize) -> f64 {
     i64::from((qs[e / 4] >> (2 * (e % 4))) & 0x03) as f64 - 1.0
 }
 
@@ -1184,8 +1184,8 @@ fn prism_code2(qs: &[u8], e: usize) -> f64 {
 /// a Q8_1 activation, plus the accumulated magnitude of the sum.
 ///
 /// Dequant math and byte offsets are ground-truthed against
-/// `pq2_0_dequant_block` in `src/quant/cuda/kernels/prism_dequant.cuh` (the
-/// CPU mirror is `src/quant/cpu/kernels/dequant_prism.rs`): per 128-element
+/// `pq2_0_dequant_block` in `src/quant/cuda/kernels/lowbit_dequant.cuh` (the
+/// CPU mirror is `src/quant/cpu/kernels/dequant_lowbit.rs`): per 128-element
 /// block of 34 bytes, `d`@0 (f16) then 32 bytes of 2-bit codes@2, low bits
 /// first. Element `e` reads bits `2 * (e % 4)` of `qs[e / 4]`; the 2-bit
 /// field is unsigned 0..3 and the value is `d * (code - 1)`, so {-1, 0, 1, 2}
@@ -1194,21 +1194,21 @@ fn prism_code2(qs: &[u8], e: usize) -> f64 {
 /// [`iq4_xs_reference`], not as one 128-wide dot product.
 #[cfg(feature = "cuda")]
 fn pq2_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
-    prism_dot_reference(weight, act, token, feat, k, 128, 34, prism_code2)
+    lowbit_dot_reference(weight, act, token, feat, k, 128, 34, lowbit_code2)
 }
 
 /// Exact reference for one output element, in f64, for a Q2_0 weight against
 /// a Q8_1 activation, plus the accumulated magnitude of the sum.
 ///
 /// Dequant math and byte offsets are ground-truthed against
-/// `q2_0_dequant_block` in `src/quant/cuda/kernels/prism_dequant.cuh`: per
+/// `q2_0_dequant_block` in `src/quant/cuda/kernels/lowbit_dequant.cuh`: per
 /// 64-element block of 18 bytes, `d`@0 (f16) then 16 bytes of 2-bit
 /// codes@2, low bits first, same `code - 1` mapping as PQ2_0. The block is
 /// two Q8_1 sub-blocks wide, so the sum is taken sub-block by sub-block like
 /// [`pq2_0_reference`].
 #[cfg(feature = "cuda")]
 fn q2_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
-    prism_dot_reference(weight, act, token, feat, k, 64, 18, prism_code2)
+    lowbit_dot_reference(weight, act, token, feat, k, 64, 18, lowbit_code2)
 }
 
 /// Exact reference for one output element, in f64, for a Q1_0 weight against
@@ -1216,13 +1216,13 @@ fn q2_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize
 ///
 /// Dequant math and byte offsets are ground-truthed against
 /// `q1_0_dequant_block` and `gguf_sign_bit` in
-/// `src/quant/cuda/kernels/prism_dequant.cuh`: per 128-element block of 18
+/// `src/quant/cuda/kernels/lowbit_dequant.cuh`: per 128-element block of 18
 /// bytes, `d`@0 (f16) then 16 bytes of packed sign bits@2, low bit first.
 /// Element `e` reads bit `e % 8` of `qs[e / 8]`: a set bit is `+d`, a clear
 /// bit `-d`, with no separate magnitude field.
 #[cfg(feature = "cuda")]
 fn q1_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
-    prism_dot_reference(weight, act, token, feat, k, 128, 18, |qs, e| {
+    lowbit_dot_reference(weight, act, token, feat, k, 128, 18, |qs, e| {
         if (qs[e / 8] >> (e % 8)) & 1 != 0 {
             1.0
         } else {
@@ -1233,9 +1233,9 @@ fn q1_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize
 
 /// Base-3 trit `{-1, 0, 1}` of element `elem` (0..128) of a PTQ1_0 block
 /// (`qs[0..24]`, `qh[24..26]`; `d` at 26 is not read). Walks the same three
-/// runs as `gguf_ptq1_0_trit` in `src/quant/cuda/kernels/prism_dequant.cuh`
+/// runs as `gguf_ptq1_0_trit` in `src/quant/cuda/kernels/lowbit_dequant.cuh`
 /// and the CPU dequant kernel's element-to-(byte, level) mapping in
-/// `src/quant/cpu/kernels/dequant_prism.rs`: `[0, 80)` reads `qs[0..16]` at 5
+/// `src/quant/cpu/kernels/dequant_lowbit.rs`: `[0, 80)` reads `qs[0..16]` at 5
 /// levels each, `[80, 120)` reads `qs[16..24]` at 5 levels each, and
 /// `[120, 128)` reads `qh[0..2]` at 4 levels each. `gguf_base3_trit`'s wrapping
 /// 8-bit multiply against a power of three is the same in both languages: a
@@ -1260,10 +1260,10 @@ fn ptq1_0_trit(qs_qh: &[u8], elem: usize) -> f64 {
 /// against a Q8_1 activation, plus the accumulated magnitude of the sum.
 ///
 /// Dequant math and byte offsets are ground-truthed against
-/// `ptq1_0_dequant_block` in `src/quant/cuda/kernels/prism_dequant.cuh`: per
+/// `ptq1_0_dequant_block` in `src/quant/cuda/kernels/lowbit_dequant.cuh`: per
 /// 128-element block of 28 bytes, `qs[0..24]` + `qh[24..26]` (base-3 packed
 /// trits, see [`ptq1_0_trit`]) then `d` (f16) at the END, byte 26. `d` is
-/// not at byte 0, so this does not go through [`prism_dot_reference`]; the
+/// not at byte 0, so this does not go through [`lowbit_dot_reference`]; the
 /// activation read is the same Q8_1 record lookup.
 #[cfg(feature = "cuda")]
 fn ptq1_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
@@ -1443,7 +1443,7 @@ enum MmqFormat {
     Q20,
     Q10,
     /// PTQ1_0: 128-element, 28-byte trit blocks with `d` at the END. Takes
-    /// the feature-major family like the other prism formats; has no dp4a
+    /// the feature-major family like the other lowbit formats; has no dp4a
     /// kernel of any kind, only the F32 GEMV/GEMM pair beside it.
     PTQ10,
 }
@@ -1512,7 +1512,7 @@ impl MmqFormat {
     /// Elements per weight block: 32 for the legacy formats Q8_0, Q4_0, Q4_1,
     /// Q5_0, Q5_1 and IQ4_NL, 256 for the K-quant super-blocks, IQ4_XS and the
     /// IQ1, IQ2 and IQ3 formats, 64 for Q2_0, 128 for PQ2_0 and Q1_0 — the
-    /// three PrismML-fork formats' `QuantFormat::block_size()`, not the
+    /// three lowbit formats' `QuantFormat::block_size()`, not the
     /// K-quant 256.
     /// `k` must be a whole number of these, which
     /// mirrors the `k.is_multiple_of(...)` guards in `dispatch_matmul` and the
@@ -1547,7 +1547,7 @@ impl MmqFormat {
     /// IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S, PQ2_0, Q2_0 and Q1_0 have no
     /// `quant_mmq_*_q8_1` twin: their only pre-feature-major GEMM path is the
     /// dequantize-then-f32 kernel, which this tool does not time here (the
-    /// three PrismML-fork formats' dequantize-then-f32 kernel is timed as
+    /// three lowbit formats' dequantize-then-f32 kernel is timed as
     /// an extra line; see [`MmqFormat::gemm_f32_kernel`]).
     fn dp4a_kernel(&self) -> Option<&'static str> {
         match self {
@@ -1662,7 +1662,7 @@ impl MmqFormat {
     /// Q8_1-activation MWR kernel that runs at every `m`. PQ2_0, Q2_0 and
     /// Q1_0 also have one, but only at `m == 1` and with two extra ROWS
     /// variants alongside it — see
-    /// [`MmqFormat::prism_single_token_gemv_kernels`] instead, which this
+    /// [`MmqFormat::lowbit_single_token_gemv_kernels`] instead, which this
     /// method leaves at `None` for those three so the generic single-kernel
     /// path above does not launch just one of the three arbitrarily.
     fn mwr_gemv_kernel(&self) -> Option<(&'static str, &'static str)> {
@@ -1692,31 +1692,35 @@ impl MmqFormat {
         }
     }
 
-    /// The three single-token dp4a GEMV kernels PQ2_0, Q2_0 and Q1_0 compile
-    /// — `_mwr` (ROWS = 1), `_mwr_r4` (ROWS = 4) and `_mwr_r8` (ROWS = 8) —
-    /// or `None` for every other format. `dispatch_gemv` launches exactly one
-    /// of the three at `m <= 1`, chosen at compile time by `PRISM_GEMV_ROWS`
-    /// in `src/quant/cuda/quant_matmul/format_dispatch/gemv_rows.rs`; this
-    /// tool times and checks all three so the ROWS choice itself can be
-    /// measured. Each entry is `(kernel, ROWS)`; all three share one module
-    /// (`gemv_{fmt}`), fetched separately via
-    /// [`MmqFormat::prism_gemv_module`].
-    fn prism_single_token_gemv_kernels(&self) -> Option<[(&'static str, u32); 3]> {
+    /// The single-token dp4a GEMV kernels a format compiles at more than one
+    /// ROWS: `_mwr` (ROWS = 1), `_mwr_r4` (ROWS = 4) and, for the lowbit
+    /// three, `_mwr_r8` (ROWS = 8); `None` for every other format.
+    /// `dispatch_gemv` launches exactly one of them at `m <= 1`, chosen at
+    /// compile time by `LOWBIT_GEMV_ROWS` in
+    /// `src/quant/cuda/quant_matmul/format_dispatch/gemv_rows.rs`; this tool
+    /// times and checks every one so the ROWS choice itself can be measured.
+    /// Each entry is `(kernel, ROWS)`; a format's entries share one module,
+    /// fetched via [`MmqFormat::lowbit_gemv_module`].
+    fn lowbit_single_token_gemv_kernels(&self) -> Option<&'static [(&'static str, u32)]> {
         match self {
-            MmqFormat::PQ20 => Some([
+            MmqFormat::PQ20 => Some(&[
                 ("quant_gemv_pq2_0_q8_1_mwr", 1),
                 ("quant_gemv_pq2_0_q8_1_mwr_r4", 4),
                 ("quant_gemv_pq2_0_q8_1_mwr_r8", 8),
             ]),
-            MmqFormat::Q20 => Some([
+            MmqFormat::Q20 => Some(&[
                 ("quant_gemv_q2_0_q8_1_mwr", 1),
                 ("quant_gemv_q2_0_q8_1_mwr_r4", 4),
                 ("quant_gemv_q2_0_q8_1_mwr_r8", 8),
             ]),
-            MmqFormat::Q10 => Some([
+            MmqFormat::Q10 => Some(&[
                 ("quant_gemv_q1_0_q8_1_mwr", 1),
                 ("quant_gemv_q1_0_q8_1_mwr_r4", 4),
                 ("quant_gemv_q1_0_q8_1_mwr_r8", 8),
+            ]),
+            MmqFormat::Q8_0 => Some(&[
+                ("quant_gemv_q8_0_q8_1_mwr", 1),
+                ("quant_gemv_q8_0_q8_1_mwr_r4", 4),
             ]),
             _ => None,
         }
@@ -1726,13 +1730,14 @@ impl MmqFormat {
     /// token-batched dp4a alike) for PQ2_0, Q2_0 or Q1_0, or `None` for a
     /// format that is not one of the three. A separate accessor from
     /// [`MmqFormat::f32_gemv_kernel`] because
-    /// [`MmqFormat::prism_single_token_gemv_kernels`] needs the module without
+    /// [`MmqFormat::lowbit_single_token_gemv_kernels`] needs the module without
     /// a kernel name attached.
-    fn prism_gemv_module(&self) -> Option<&'static str> {
+    fn lowbit_gemv_module(&self) -> Option<&'static str> {
         match self {
             MmqFormat::PQ20 => Some(GEMV_PQ2_0_MODULE),
             MmqFormat::Q20 => Some(GEMV_Q2_0_MODULE),
             MmqFormat::Q10 => Some(GEMV_Q1_0_MODULE),
+            MmqFormat::Q8_0 => Some(QUANT_GEMV_MODULE),
             _ => None,
         }
     }
@@ -1753,7 +1758,7 @@ impl MmqFormat {
     /// do the four legacy 32-element formats Q4_0, Q5_0, Q4_1 and Q5_1, the two
     /// IQ4 codebook formats IQ4_NL and IQ4_XS, the six grid-indexed IQ
     /// formats IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ1_S, and the three
-    /// PrismML-fork formats PQ2_0, Q2_0 and Q1_0; Q4_K and Q5_K
+    /// lowbit formats PQ2_0, Q2_0 and Q1_0; Q4_K and Q5_K
     /// have only `_n2`, so `m` outside 2 returns `None` for them; Q3_K and Q2_K
     /// have neither — their batched read never beat the MMQ tile — so they
     /// always return `None`.
@@ -2460,14 +2465,14 @@ fn build_iq1_s_weight(n: usize, k: usize) -> Vec<u8> {
     out
 }
 
-/// Shared builder for the three PrismML-fork weight buffers below: half
+/// Shared builder for the three lowbit weight buffers below: half
 /// scale at byte 0, `qs_len` packed-code bytes at byte 2. Every bit pattern
 /// in `qs` is a valid code for all three (2-bit codes or sign bits alike), so
 /// they are filled with the tool's ordinary deterministic byte stream rather
 /// than a masked one. `block_elems` is elements per block (for `bpr`);
 /// `block_bytes` is `2 + qs_len`.
 #[cfg(feature = "cuda")]
-fn build_prism_weight(
+fn build_lowbit_weight(
     n: usize,
     k: usize,
     block_elems: usize,
@@ -2493,25 +2498,25 @@ fn build_prism_weight(
 /// of packed 2-bit codes at byte 2.
 #[cfg(feature = "cuda")]
 fn build_pq2_0_weight(n: usize, k: usize) -> Vec<u8> {
-    build_prism_weight(n, k, 128, 34, 32)
+    build_lowbit_weight(n, k, 128, 34, 32)
 }
 
 /// Builds a Q2_0 weight buffer: `n * (k / 64)` blocks of 18 bytes, 16 bytes
 /// of packed 2-bit codes at byte 2.
 #[cfg(feature = "cuda")]
 fn build_q2_0_weight(n: usize, k: usize) -> Vec<u8> {
-    build_prism_weight(n, k, 64, 18, 16)
+    build_lowbit_weight(n, k, 64, 18, 16)
 }
 
 /// Builds a Q1_0 weight buffer: `n * (k / 128)` blocks of 18 bytes, 16 bytes
 /// of packed sign bits at byte 2.
 #[cfg(feature = "cuda")]
 fn build_q1_0_weight(n: usize, k: usize) -> Vec<u8> {
-    build_prism_weight(n, k, 128, 18, 16)
+    build_lowbit_weight(n, k, 128, 18, 16)
 }
 
 /// Builds a PTQ1_0 weight buffer: `n * (k / 128)` blocks of 28 bytes.
-/// Unlike the three `build_prism_weight` callers above, `d` is at the END
+/// Unlike the three `build_lowbit_weight` callers above, `d` is at the END
 /// (byte 26), so this does not go through that shared builder: `qs[0..24]`
 /// and `qh[24..26]` come first, at bytes 0 and 24.
 #[cfg(feature = "cuda")]
@@ -3119,7 +3124,7 @@ fn main() {
     // unconditionally — like `token_major_us` and `feat_major_us` — rather
     // than under `--gemv`, so the extra "GEMM" line these four print is
     // comparable to their feature-major line.
-    let prism_gemm = format.gemm_f32_kernel().map(|(kernel_name, module_name)| {
+    let lowbit_gemm = format.gemm_f32_kernel().map(|(kernel_name, module_name)| {
         let f32_act_bytes = build_f32_activation(&act_bytes, m, k);
         let act_f32 = Tensor::<CudaRuntime>::from_slice(&f32_act_bytes, &[m, k], &device).unwrap();
         let act_f32_ptr = act_f32.ptr();
@@ -3255,59 +3260,65 @@ fn main() {
         // (ROWS = 1), `_mwr_r4` (ROWS = 4) and `_mwr_r8` (ROWS = 8) — are the
         // NTOK = 1 instance of the same token-batched body the block below
         // times at NTOK = 2 and 4. `dispatch_gemv` launches exactly one of
-        // the three, chosen at compile time by `PRISM_GEMV_ROWS`, and only at
+        // the three, chosen at compile time by `LOWBIT_GEMV_ROWS`, and only at
         // `m <= 1`, so this times and checks all three, and only at `m == 1`
         // (they are single-token kernels; a wider `m` is what the
         // `batched_mwr_gemv_kernel` `_n2`/`_n4` tiles below exist for).
         // Geometry mirrors `dispatch_gemv`'s dp4a branch for these formats:
         // grid (n.div_ceil(ROWS), m.div_ceil(1), 1), block
         // (mwr_nwarps_ntok(1) * 32, 1, 1) = (128, 1, 1).
-        let prism_single = if m == 1 {
+        let lowbit_single = if m == 1 {
             format
-                .prism_single_token_gemv_kernels()
+                .lowbit_single_token_gemv_kernels()
                 .map(|kernels_rows| {
                     let module_name = format
-                        .prism_gemv_module()
-                        .expect("prism_single_token_gemv_kernels implies prism_gemv_module");
+                        .lowbit_gemv_module()
+                        .expect("lowbit_single_token_gemv_kernels implies lowbit_gemv_module");
                     let module =
                         kernels::get_or_load_module(client.context(), device_index, module_name)
-                            .expect("load prism gemv module");
-                    kernels_rows.map(|(kernel_name, rows)| {
-                        let func = kernels::get_kernel_function(&module, kernel_name)
-                            .unwrap_or_else(|_| panic!("resolve {kernel_name}"));
-                        let out =
-                            Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device)
-                                .unwrap();
-                        let out_ptr = out.ptr();
-                        let cfg_single = LaunchConfig {
-                            grid_dim: (n_u32.div_ceil(rows), m_u32, 1),
-                            block_dim: (128, 1, 1),
-                            shared_mem_bytes: 0,
-                        };
-                        let launch = || unsafe {
-                            let mut builder = client.stream().launch_builder(&func);
-                            builder.arg(&act_ptr);
-                            builder.arg(&weight_ptr);
-                            builder.arg(&out_ptr);
-                            builder.arg(&m_u32);
-                            builder.arg(&k_u32);
-                            builder.arg(&n_u32);
-                            builder
-                                .launch(cfg_single)
-                                .expect("launch prism single-token gemv kernel");
-                        };
-                        for _ in 0..WARMUP {
-                            launch();
-                        }
-                        client.synchronize();
-                        let started = std::time::Instant::now();
-                        for _ in 0..ITERS {
-                            launch();
-                        }
-                        client.synchronize();
-                        let us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
-                        (kernel_name, us, out)
-                    })
+                            .expect("load lowbit gemv module");
+                    kernels_rows
+                        .iter()
+                        .map(|&(kernel_name, rows)| {
+                            let func = kernels::get_kernel_function(&module, kernel_name)
+                                .unwrap_or_else(|_| panic!("resolve {kernel_name}"));
+                            let out = Tensor::<CudaRuntime>::from_slice(
+                                &vec![0f32; m * n],
+                                &[m, n],
+                                &device,
+                            )
+                            .unwrap();
+                            let out_ptr = out.ptr();
+                            let cfg_single = LaunchConfig {
+                                grid_dim: (n_u32.div_ceil(rows), m_u32, 1),
+                                block_dim: (128, 1, 1),
+                                shared_mem_bytes: 0,
+                            };
+                            let launch = || unsafe {
+                                let mut builder = client.stream().launch_builder(&func);
+                                builder.arg(&act_ptr);
+                                builder.arg(&weight_ptr);
+                                builder.arg(&out_ptr);
+                                builder.arg(&m_u32);
+                                builder.arg(&k_u32);
+                                builder.arg(&n_u32);
+                                builder
+                                    .launch(cfg_single)
+                                    .expect("launch lowbit single-token gemv kernel");
+                            };
+                            for _ in 0..WARMUP {
+                                launch();
+                            }
+                            client.synchronize();
+                            let started = std::time::Instant::now();
+                            for _ in 0..ITERS {
+                                launch();
+                            }
+                            client.synchronize();
+                            let us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+                            (kernel_name, us, out)
+                        })
+                        .collect::<Vec<_>>()
                 })
         } else {
             None
@@ -3373,7 +3384,7 @@ fn main() {
                     (bat_kernel, bat_us, out_bat, ntok)
                 });
 
-        (f32_kernel, f32_us, out_f32, mwr, batched, prism_single)
+        (f32_kernel, f32_us, out_f32, mwr, batched, lowbit_single)
     });
 
     // The feature-major kernels are the llama.cpp-geometry port: feature-major
@@ -3576,7 +3587,7 @@ fn main() {
         let feat_major_host = out.to_vec::<f32>();
         check_against_reference(name, format, &feat_major_host, &case);
     }
-    if let Some((kernel_name, _, out)) = prism_gemm.as_ref() {
+    if let Some((kernel_name, _, out)) = lowbit_gemm.as_ref() {
         let host = out.to_vec::<f32>();
         check_against_reference(kernel_name, format, &host, &case);
     }
@@ -3600,7 +3611,7 @@ fn main() {
             m * n
         );
     }
-    if let Some((f32_kernel, _, out_f32, mwr, batched, prism_single)) = gemv_case.as_ref() {
+    if let Some((f32_kernel, _, out_f32, mwr, batched, lowbit_single)) = gemv_case.as_ref() {
         let f32_host = out_f32.to_vec::<f32>();
         check_against_reference(f32_kernel, format, &f32_host, &case);
         if let Some((mwr_kernel, _, out_mwr)) = mwr {
@@ -3611,7 +3622,7 @@ fn main() {
             let bat_host = out_bat.to_vec::<f32>();
             check_against_reference(bat_kernel, format, &bat_host, &case);
         }
-        if let Some(triple) = prism_single {
+        if let Some(triple) = lowbit_single {
             for (kernel_name, _, out) in triple {
                 let host = out.to_vec::<f32>();
                 check_against_reference(kernel_name, format, &host, &case);
@@ -3641,15 +3652,15 @@ fn main() {
             println!("ratio mma/feature-major: {:.3}", mma_us / us);
         }
     }
-    if let Some((kernel_name, us, _)) = prism_gemm.as_ref() {
+    if let Some((kernel_name, us, _)) = lowbit_gemm.as_ref() {
         println!("{kernel_name} {us:9.2} us/call");
     }
-    if let Some((f32_kernel, f32_us, _, mwr, batched, prism_single)) = gemv_case.as_ref() {
+    if let Some((f32_kernel, f32_us, _, mwr, batched, lowbit_single)) = gemv_case.as_ref() {
         println!("{f32_kernel} {f32_us:9.2} us/call");
         if let Some((mwr_kernel, mwr_us, _)) = mwr {
             println!("{mwr_kernel} {mwr_us:9.2} us/call");
         }
-        if let Some(triple) = prism_single {
+        if let Some(triple) = lowbit_single {
             for (kernel_name, us, _) in triple {
                 println!("{kernel_name} {us:9.2} us/call");
             }

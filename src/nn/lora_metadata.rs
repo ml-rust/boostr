@@ -2,9 +2,7 @@
 //! safetensors file's `__metadata__`, so a load can catch a
 //! `--rank`/`--targets` mismatch against the model it's applied to instead
 //! of failing downstream as an opaque shape error or — worse — silently
-//! applying an adapter at the wrong strength. Split out of
-//! [`crate::nn::lora_targets`] to keep that file under this crate's
-//! soft line-count limit for `nn/*.rs`.
+//! applying an adapter at the wrong strength.
 
 use crate::error::{Error, Result};
 use std::collections::HashMap;

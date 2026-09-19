@@ -1,6 +1,5 @@
 //! `copy_blocks` / `swap_blocks` CUDA dispatch.
 //!
-//! Split out of `kv_cache.rs` to stay under the `cuda/*.rs` 400-line limit.
 //! Both kernels live in the same `reshape_and_cache` PTX unit as
 //! `reshape_and_cache_*` and share its module cache entry.
 

@@ -1,8 +1,9 @@
 //! CPU reference for per-tensor FP8 KV cache quantize/dequantize.
 //!
-//! Split out of `kv_cache_quant.rs` to keep that file under the `cpu/*.rs`
-//! line limit. Mirrors the CUDA `f32_to_fp8_e4m3_raw`/`fp8_e4m3_to_f32`
-//! convention: a stored scale is `448/max_abs`.
+//! Per-tensor FP8 is a distinct scheme from the per-group INT4/INT8
+//! quantizers beside it. Mirrors the CUDA
+//! `f32_to_fp8_e4m3_raw`/`fp8_e4m3_to_f32` convention: a stored scale is
+//! `448/max_abs`.
 
 use crate::error::{Error, Result};
 use numr::dtype::DType;

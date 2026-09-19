@@ -21,9 +21,9 @@
 //! shape (uniform 6-bit integers, not a 16-entry table) and in adding a
 //! second scale tier.
 //!
-//! Split into `fit` (per-group scale fitting) and `block` (super-block
-//! quantization, the public entry point, and its tests) to stay under this
-//! repo's 500-line file limit.
+//! `fit` holds per-group scale fitting. `block` holds super-block
+//! quantization, the public entry point, and its tests. Two distinct
+//! concerns: scale search versus the quantize/round-trip driver.
 
 mod block;
 mod fit;

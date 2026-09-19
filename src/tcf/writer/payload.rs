@@ -63,7 +63,6 @@ impl TcfWriter {
     }
 
     /// Pass 2: one tensor at a time, in directory order.
-    /// MIGRATION.md Section 4.5.1.
     ///
     /// Each payload is moved out of the writer, digested, packed, written at
     /// its precomputed `data_offset`, zero-filled to `physical_span_bytes`
@@ -180,8 +179,7 @@ impl TcfWriter {
 
         // The tensor record was written in pass 1 with every field but
         // its two digests; rewrite it now that they are known. This is
-        // the in-memory form of the seek-back MIGRATION.md Section 4.5.1
-        // describes.
+        // the in-memory form of a file writer's seek-back.
         let finished = *record;
         emit_record(buf, layout.tensor_off, index, &finished)
     }

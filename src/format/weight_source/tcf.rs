@@ -88,8 +88,8 @@ impl<'a> TcfSource<'a> {
 
 /// The first name `names` yields twice, if any.
 ///
-/// Split out because it is the whole of the collision rule and is worth
-/// testing without a hand-built file that repeats a string reference.
+/// This is the whole of the collision rule. Testable without a hand-built
+/// file that repeats a string reference.
 fn first_repeated_name<'n>(names: impl Iterator<Item = &'n str>) -> Option<String> {
     let mut seen = HashSet::new();
     for name in names {

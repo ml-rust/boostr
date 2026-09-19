@@ -42,7 +42,7 @@ pub struct Pace {
 
 /// Fold already-computed `segments` over a clip of `total_samples` at
 /// `sample_rate` against `prompt`. Pure: this is what [`pace`] returns once
-/// the network has run, split out so it can be tested without weights.
+/// the network has run. Testable without weights.
 pub fn pace_from_segments(
     segments: &[SpeechSegment],
     total_samples: usize,

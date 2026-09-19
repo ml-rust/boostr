@@ -1,6 +1,6 @@
 //! [`TcfWriter::finish_streaming`]: the write path that holds one tensor's
 //! payload at a time. FORMAT.md Section 4.1, Section 8.0.1,
-//! Section 12.3, Section 15.2; MIGRATION.md Section 4.5.1.
+//! Section 12.3, Section 15.2.
 //!
 //! # Why a callback
 //!
@@ -34,8 +34,7 @@ use crate::tcf::writer::{LAYOUT_BOUNDS, Payload, TcfWriter};
 
 impl TcfWriter {
     /// Emit the complete file into `sink`, pulling each tensor's payload
-    /// from `produce` as it is needed. Section 4.1,
-    /// MIGRATION.md Section 4.5.1.
+    /// from `produce` as it is needed. Section 4.1.
     ///
     /// The writer calls `produce` once for every tensor registered without
     /// a payload, in directory order, passing that tensor's index in the

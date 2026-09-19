@@ -1,10 +1,8 @@
 // VarLen (packed) flash-attention forward — FP16 path.
 //
-// Split from varlen_attention.cu (which now holds the FP32 path) to keep each
-// kernel translation unit within the file-size budget, mirroring the
-// varlen_attention_bwd.cu / varlen_attention_bwd_fp16.cu split. Compiled as
-// its own module (VARLEN_ATTENTION_FWD_FP16_MODULE); the FP16 kernel symbols
-// are unchanged so the Rust dispatcher loads them by the same names.
+// `varlen_attention.cu` holds the FP32 path. Compiled as its own module
+// (VARLEN_ATTENTION_FWD_FP16_MODULE); the FP16 kernel symbols are
+// unchanged so the Rust dispatcher loads them by the same names.
 //
 // Causal convention: ABSOLUTE (bottom-right) alignment, per sequence.
 // Within sequence s, seq_len_q = cu_seqlens_q[s+1] - cu_seqlens_q[s] and

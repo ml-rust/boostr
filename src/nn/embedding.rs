@@ -2,8 +2,7 @@
 //!
 //! The block-quantized sibling ([`crate::nn::quant_embedding::QuantEmbedding`]
 //! and [`crate::nn::quant_embedding::MaybeQuantEmbedding`]) lives in
-//! `quant_embedding.rs`, split out purely to stay under this crate's
-//! `nn/*.rs` file-size limit.
+//! `quant_embedding.rs`.
 
 use crate::error::{Error, Result};
 use crate::nn::module::Module;

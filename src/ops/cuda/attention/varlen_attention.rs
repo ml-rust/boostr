@@ -6,8 +6,7 @@
 //!
 //! Kernel launch logic lives in `varlen_attention_fwd.rs` /
 //! `varlen_attention_bwd.rs`; tile selection lives in
-//! `varlen_attention_block_config.rs`. This file is wiring only, mirroring
-//! `paged_attention.rs`'s split from `paged_attention_fwd.rs`/`paged_attention_bwd.rs`.
+//! `varlen_attention_block_config.rs`. This file is wiring only.
 
 use crate::error::Result;
 use crate::ops::traits::VarLenAttentionOps;

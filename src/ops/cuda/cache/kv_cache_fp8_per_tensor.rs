@@ -1,7 +1,8 @@
 //! CUDA launcher for per-tensor FP8 KV cache quantize/dequantize.
 //!
-//! Split out of `kv_cache_quant.rs` to keep that file under the `cuda/*.rs`
-//! line limit. Kernels: `kv_cache_fp8.cu`.
+//! Per-tensor FP8 needs its own find-max/finalize-scale launch sequence,
+//! unlike the per-group INT4/INT8 kernels beside it. Kernels:
+//! `kv_cache_fp8.cu`.
 //!
 //! Quantize is a three-launch pipeline (`_find_max`, `_finalize_scale`, then
 //! the quantize kernel itself) because a max-abs reduced over the whole

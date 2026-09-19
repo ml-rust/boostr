@@ -1,8 +1,6 @@
 //! VarLen (ragged) attention backward CUDA launcher.
 //!
-//! Split out of `varlen_attention.rs` to keep that file's `VarLenAttentionOps`
-//! trait impl as wiring only — mirrors `paged_attention_bwd.rs`'s split from
-//! `paged_attention.rs`.
+//! `varlen_attention.rs` holds the `VarLenAttentionOps` trait wiring.
 
 use crate::error::{Error, Result};
 use cudarc::driver::PushKernelArg;
@@ -155,8 +153,8 @@ fn varlen_attention_bwd_impl_inner(
         }
     };
 
-    // FP16 backward kernels live in their own compiled module (split out to
-    // keep each .cu within the file-size budget); FP32 stays in the base module.
+    // FP16 backward kernels compile into their own module; FP32 stays in
+    // the base module.
     let bwd_module = match dtype {
         DType::F16 => VARLEN_ATTENTION_BWD_FP16_MODULE,
         _ => VARLEN_ATTENTION_BWD_MODULE,

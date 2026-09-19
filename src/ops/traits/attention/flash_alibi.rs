@@ -1,8 +1,7 @@
 //! Fused ALiBi Flash Attention forward.
 //!
 //! Separate trait from `FlashAttentionOps` (not a new method on it) because
-//! `flash.rs` is already at its 200-line hard limit and a Rust trait cannot
-//! span files.
+//! a Rust trait cannot span files, and `flash.rs` holds the base trait.
 
 use crate::error::Result;
 use numr::runtime::Runtime;

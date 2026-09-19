@@ -89,10 +89,9 @@ impl LocalDitConfig {
         Self::from_config_str(&content)
     }
 
-    /// Parse the same sections out of the VERBATIM CONTENTS of a
-    /// `config.json`. Split from [`from_config_json`](Self::from_config_json)
-    /// so a GGUF's `voxcpm2.config_json` metadata key runs through exactly
-    /// this parse and these validations.
+    /// Parses the same sections out of the VERBATIM CONTENTS of a
+    /// `config.json`, so a GGUF's `voxcpm2.config_json` metadata key runs
+    /// through exactly this parse and these validations.
     pub fn from_config_str(content: &str) -> Result<Self> {
         let raw: RawConfig = serde_json::from_str(content).map_err(|e| Error::ModelError {
             reason: format!("invalid VoxCPM2 config.json: {e}"),

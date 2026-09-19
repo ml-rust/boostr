@@ -19,9 +19,9 @@ pub const MAX_ENCODE_SAMPLES: usize = 60 * SAMPLE_RATE;
 /// Check a waveform length against the encode limit before anything is
 /// allocated or uploaded.
 ///
-/// Split out as a free function so the refusal can be tested without a
-/// checkpoint: it is the whole point of [`MAX_ENCODE_SAMPLES`], and a guard
-/// whose only test skips when no model is present is not a tested guard.
+/// A free function so the refusal is testable without a checkpoint: it is
+/// the whole point of [`MAX_ENCODE_SAMPLES`], and a guard whose only test
+/// skips when no model is present is not a tested guard.
 pub fn check_encode_len(len: usize, max_samples: usize) -> Result<()> {
     if len == 0 {
         return Err(Error::InvalidArgument {

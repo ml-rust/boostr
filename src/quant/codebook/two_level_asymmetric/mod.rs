@@ -28,10 +28,10 @@
 //! and a local candidate-multiplier sweep in place of that quantizer's
 //! search-effort ladder — see `fit::asymmetric_candidate_multipliers`.
 //!
-//! Split into `fit` (per-group pair fitting), `refine` (sub-level
-//! refinement and reconstruction) and `block` (super-block quantization,
-//! the public entry point, and its tests) to stay under this repo's
-//! 500-line file limit.
+//! `fit` holds per-group pair fitting. `refine` holds sub-level
+//! refinement and reconstruction. `block` holds super-block quantization,
+//! the public entry point, and its tests. Three distinct passes of the
+//! same search.
 //!
 //! [`Bf16`]: super::two_level::SuperPrecision::Bf16
 

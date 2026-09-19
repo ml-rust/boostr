@@ -1,8 +1,7 @@
 //! Step 1-2 of [`Qwen35AttentionBlock::forward`]: `attn_q`/`attn_k`/`attn_v`
 //! projections (fused via [`MaybeRotatedLinear::forward_batch`]), the joint
-//! query/gate split, and per-head q/k RMS norm. Split out of `forward` so
-//! the rotation-batching behavior has its own home and its own inline
-//! tests, next to `forward`'s own file-size cap.
+//! query/gate split, and per-head q/k RMS norm. Covered by its own inline
+//! tests for the rotation-batching behavior.
 
 use super::layer::Qwen35AttentionBlock;
 use crate::error::{Error, Result};

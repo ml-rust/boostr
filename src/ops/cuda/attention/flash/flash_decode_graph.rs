@@ -1,8 +1,8 @@
 //! Graph-capturable decode attention for a single query row.
 //!
-//! Split from `flash_decode.rs`: same kernels, but `seq_len_k` is a device
-//! pointer and the grid is sized from the cache capacity, so the launch can
-//! be captured into a CUDA graph and replayed as the cache grows.
+//! Same kernels as `flash_decode.rs`, but `seq_len_k` is a device pointer
+//! and the grid is sized from the cache capacity, so the launch can be
+//! captured into a CUDA graph and replayed as the cache grows.
 
 use crate::error::{Error, Result};
 use crate::ops::cuda::kernels;

@@ -1,6 +1,6 @@
 //! Pass 1 and pass 3 of the writer: the layout arithmetic, the directory, and
 //! the two header digests. FORMAT.md Section 4.1, Section 5,
-//! Section 5.2, Section 5.3; MIGRATION.md Section 4.5.1.
+//! Section 5.2, Section 5.3.
 //!
 //! Pass 1 is `plan` then `emit_directory`: every `physical_span_bytes`,
 //! `data_offset`, and `proof_rel_off`, then the header, the six record
@@ -31,7 +31,7 @@ use crate::tcf::record::{HEADER_DIGEST_RANGE, Header, Record};
 use super::{LAYOUT_BOUNDS, Payload, TcfWriter};
 
 /// Every section offset and length, computed in pass 1 from headers alone.
-/// Section 4.1, MIGRATION.md Section 4.5.1.
+/// Section 4.1.
 pub(crate) struct Layout {
     module_off: u64,
     pub(super) tensor_off: u64,
@@ -175,7 +175,7 @@ pub(super) fn finalize(buf: &mut [u8], layout: &Layout) -> Result<(), TcfError> 
 
 impl TcfWriter {
     /// Pass 1: every section offset, and every writer-owned size and proof
-    /// field on every tensor. MIGRATION.md Section 4.5.1.
+    /// field on every tensor.
     ///
     /// Reads no tensor data. `physical_span_bytes` is a function of shape and
     /// encoding; `data_offset` is a running 64-aligned sum.

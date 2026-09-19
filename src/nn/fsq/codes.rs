@@ -1,10 +1,9 @@
 //! Mixed-radix index packing/unpacking and straight-through/identity helpers
 //! for [`Fsq`].
 //!
-//! Split out of `quantizer.rs` to keep that file readable — these are the
-//! mechanically separable pieces (index codec + STE/passthrough), not part
-//! of the `bound`/`quantize_codes` core
-//! that stays in `quantizer.rs`. See that module's docs for the math.
+//! These are the mechanically separable pieces (index codec +
+//! STE/passthrough), not part of the `bound`/`quantize_codes` core in
+//! `quantizer.rs`. See that module's docs for the math.
 
 use super::quantizer::Fsq;
 use crate::error::{Error, Result};

@@ -1,8 +1,7 @@
 //! Per-frame conversion between codec codes and flat vocabulary ids.
 //!
-//! Split out of [`vocab`](super::vocab) because it is the only part that reasons
-//! about a frame's INTERNAL structure — position-to-codebook order — rather than
-//! about the id layout itself.
+//! Reasons about a frame's INTERNAL structure — position-to-codebook order
+//! — rather than about the id layout itself, unlike [`vocab`](super::vocab).
 
 use crate::error::{Error, Result};
 

@@ -1,9 +1,9 @@
 // Flash Attention v2 Forward - FP8 Kernels (separate translation unit)
 //
-// Split out of flash_v2.cu, which holds the general Turing-capable flash
-// kernels and compiles at sm_75. These FP8 kernels need Ampere or newer, so
-// this unit compiles at sm_80 (see build.rs) — no `__CUDA_ARCH__` guard, so a
-// future arch mistake fails to build instead of silently dropping symbols.
+// `flash_v2.cu` holds the general Turing-capable flash kernels and
+// compiles at sm_75. These FP8 kernels need Ampere or newer, so this unit
+// compiles at sm_80 (see build.rs) — no `__CUDA_ARCH__` guard, so a future
+// arch mistake fails to build instead of silently dropping symbols.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

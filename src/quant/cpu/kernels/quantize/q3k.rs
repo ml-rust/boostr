@@ -140,7 +140,7 @@ fn pack_q3k_scales(iscale: f32, scales: &[f32; SUB_BLOCKS], sc: &mut [u8]) {
 
 /// Pack 16 ALREADY-BIASED 6-bit sub-block scales into 12 bytes
 ///
-/// Split out because the importance path gets its biased levels straight from
+/// The importance path gets its biased levels straight from
 /// [`super::search_imatrix::make_qx_quants_weighted`], which fits the 16 scales
 /// against a weighted objective instead of dividing them by their maximum. The
 /// bit layout is the same either way, and there is only one copy of it.

@@ -95,8 +95,7 @@ impl Default for MiniCpm4Config {
 impl MiniCpm4Config {
     /// Apply `residual_lm`'s three overrides to a parsed `lm_config`.
     ///
-    /// Split out from [`residual_lm_from_config_json`](Self::residual_lm_from_config_json)
-    /// so the override rule is testable without a file, and so a caller that
+    /// The override rule is testable without a file, and a caller that
     /// already holds the `base_lm` config does not re-read the JSON.
     ///
     /// `vocab_size` drops to `0` — `residual_lm` is fed pre-computed

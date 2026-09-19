@@ -89,7 +89,7 @@ impl TcfWriter {
 
     /// Pass 1 in full: the record digests, the layout, and the directory
     /// buffer with the header, the six record arrays, and the string table
-    /// already in it. MIGRATION.md Section 4.5.1.
+    /// already in it.
     ///
     /// The buffer is `[0, data_off)` only — a function of record count, not
     /// of payload size. Pass 3 hashes it, and it is written to the sink

@@ -1,8 +1,8 @@
 //! `kv_cache_update_batched` CUDA launcher.
 //!
-//! Split out of `kv_cache.rs` to keep it under the `cuda/*.rs` 400-line
-//! limit. Updates every layer's K and V cache in one 2D-grid launch instead
-//! of one `kv_cache_update` launch per layer.
+//! The batched, multi-layer launch is a distinct kernel from `kv_cache.rs`'s
+//! single-layer update. Updates every layer's K and V cache in one 2D-grid
+//! launch instead of one `kv_cache_update` launch per layer.
 
 use crate::error::{Error, Result};
 use crate::ops::cuda::kernels::{self, KV_CACHE_UPDATE_MODULE};

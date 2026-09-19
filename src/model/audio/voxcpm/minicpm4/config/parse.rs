@@ -27,12 +27,11 @@ impl MiniCpm4Config {
         Self::from_root(&read_config_root(path)?, section)
     }
 
-    /// Parse `lm_config` out of the VERBATIM CONTENTS of a `config.json`.
-    ///
-    /// Split from [`from_config_json`](Self::from_config_json) so a container
-    /// that carries the config as a string rather than a file — a GGUF's
-    /// `voxcpm2.config_json` metadata key — runs through exactly this parse
-    /// and every validation the file path applies, `use_mup` included.
+    /// Parses `lm_config` out of the VERBATIM CONTENTS of a `config.json`,
+    /// so a container that carries the config as a string rather than a
+    /// file — a GGUF's `voxcpm2.config_json` metadata key — runs through
+    /// exactly this parse and every validation [`from_config_json`](Self::from_config_json)
+    /// applies, `use_mup` included.
     pub fn from_config_str(content: &str) -> Result<Self> {
         Self::from_root(&parse_config_root(content)?, DEFAULT_CONFIG_SECTION)
     }

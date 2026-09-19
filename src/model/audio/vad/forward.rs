@@ -1,10 +1,9 @@
 //! The per-chunk forward pass of [`SileroVad`]: window assembly, the STFT and
 //! encoder stack, the LSTM step, and the sigmoid head.
 //!
-//! Split from [`super::model`] so the public surface (construction, streaming
-//! entry points) reads separately from the graph transcription below. Every
-//! function here is crate-private; callers reach it through
-//! [`SileroVad::chunk_probability`].
+//! The public surface (construction, streaming entry points) lives in
+//! [`super::model`]. Every function here is crate-private; callers reach it
+//! through [`SileroVad::chunk_probability`].
 
 use crate::error::{Error, Result};
 use crate::model::audio::vad::config::HIDDEN_SIZE;

@@ -1,9 +1,9 @@
 //! FP8 gradient reduction for GQA groups, and the FP8 quantization-convention
 //! tests that back it.
 //!
-//! Split out of `flash_bwd_fp8.rs`, which holds the kernel launcher. The tests
-//! here isolate the `f32 <-> FP8` converters compiled into `flash_v2_bwd_fp8.cu`
-//! from the backward kernel itself, and check that the group sum requantizes
+//! `flash_bwd_fp8.rs` holds the kernel launcher. The tests here isolate
+//! the `f32 <-> FP8` converters compiled into `flash_v2_bwd_fp8.cu` from
+//! the backward kernel itself, and check that the group sum requantizes
 //! exactly once.
 
 use crate::error::Result;

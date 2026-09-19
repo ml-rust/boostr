@@ -1,6 +1,7 @@
 //! `append_kv_int4` CPU reference implementation.
 //!
-//! Split out of `kv_cache.rs` to keep it under the `cpu/*.rs` 400-line limit.
+//! INT4 append packs two values per byte, a distinct kernel from
+//! `kv_cache.rs`'s unquantized update paths.
 
 use crate::error::{Error, Result};
 use crate::ops::traits::Int4GroupSize;

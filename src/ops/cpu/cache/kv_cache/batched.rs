@@ -1,9 +1,10 @@
 //! `kv_cache_update_batched` CPU reference implementation.
 //!
-//! Split out of `kv_cache.rs` to keep it under the `cpu/*.rs` 400-line limit.
-//! Plain per-layer loop calling the same byte-copy logic as
-//! `kv_cache_update`, kept separate for clarity over speed — this is the
-//! oracle the CUDA batched kernel is checked against, not a hot path.
+//! This is the CPU oracle for the CUDA batched kernel, a distinct role
+//! from the single-layer update beside it. Plain per-layer loop calling
+//! the same byte-copy logic as `kv_cache_update`, kept separate for
+//! clarity over speed — the oracle the CUDA batched kernel is checked
+//! against, not a hot path.
 
 use crate::error::{Error, Result};
 use crate::ops::traits::KvCacheOps;

@@ -1,9 +1,6 @@
 //! MLA SDPA tile/block-size selection and shared-memory sizing.
 //!
-//! Split out of `mla.rs` to keep that file's `MlaOps` trait impl as wiring
-//! only — mirrors `varlen_attention_block_config.rs`'s split from
-//! `varlen_attention.rs` and `paged_attention_fwd_block_config.rs`'s from
-//! `paged_attention_fwd.rs`.
+//! `mla.rs` holds the `MlaOps` trait wiring.
 //!
 //! `sdpa.cu` instantiates one templated `sdpa_impl<T, BLOCK_M, BLOCK_N>` at
 //! two tiles per dtype; this module is what decides which of the two a shape

@@ -1,9 +1,8 @@
 //! `copy_blocks` / `swap_blocks` CPU reference implementation.
 //!
-//! Split out of `kv_cache.rs` to keep concerns separated (that file is
-//! already at the `cpu/*.rs` line-count ceiling). Plain nested loops with
-//! per-dtype byte-size copies — clarity over speed, since this is the
-//! cross-backend parity reference, not a hot path.
+//! Plain nested loops with per-dtype byte-size copies — clarity over
+//! speed, since this is the cross-backend parity reference, not a hot
+//! path.
 
 use crate::error::{Error, Result};
 use numr::dtype::DType;

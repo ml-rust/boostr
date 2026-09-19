@@ -12,8 +12,8 @@ use numr::tensor::Tensor;
 
 /// The prefill/training additive mask: ALiBi bias or causal(+window).
 ///
-/// Split out so the masking rule is directly testable — a non-causal mask here
-/// is invisible to shape checks and still produces fluent text.
+/// Directly testable: a non-causal mask here is invisible to shape checks
+/// and still produces fluent text.
 ///
 /// `dtype` is the dtype the mask is returned in; it MUST match the attention
 /// scores it will be added to. See [`causal_window_mask`] for why the build

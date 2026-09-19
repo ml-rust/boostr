@@ -1,6 +1,6 @@
-//! Output-row tile for the single-token prism GEMV. Split out of `gemv.rs`
-//! to stay under the `cuda/*.rs` 400-line limit; `PRISM_GEMV_ROWS` is the
-//! one const to flip.
+//! Output-row tile for the single-token prism GEMV. The one tunable
+//! constant for this kernel family; `PRISM_GEMV_ROWS` is the one const to
+//! flip.
 
 /// Output columns per block for the three PrismML-fork formats at `m = 1`.
 ///

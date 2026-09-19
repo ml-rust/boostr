@@ -1,9 +1,6 @@
 //! VarLen attention tile/block-size selection and shared-memory sizing.
 //!
-//! Split out of `varlen_attention.rs` to keep that file's `VarLenAttentionOps`
-//! trait impl as wiring only and this file under the crate's `cuda/*.rs` size
-//! limit — mirrors `paged_attention_bwd_block_config.rs`'s split from
-//! `paged_attention_bwd.rs`.
+//! `varlen_attention.rs` holds the `VarLenAttentionOps` trait wiring.
 
 use crate::error::{Error, Result};
 use numr::dtype::DType;

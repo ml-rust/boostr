@@ -1,7 +1,7 @@
 //! CUDA launchers for INT8 KV cache quantize/dequantize.
 //!
-//! Split out of `kv_cache_quant.rs` to keep that file under the `cuda/*.rs`
-//! line limit. Kernels: `kv_cache_quant.cu`.
+//! INT8 is its own quantization scheme with its own kernel launch shape.
+//! Kernels: `kv_cache_quant.cu`.
 
 use crate::error::{Error, Result};
 use crate::ops::cuda::kernels::{self, KV_CACHE_QUANT_MODULE};

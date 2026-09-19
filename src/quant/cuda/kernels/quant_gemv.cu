@@ -1511,10 +1511,10 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(1) * WARP_SIZE, 1) void 
 // There is no single-token sibling: at m = 1 the tile's spare column is pure
 // overhead and the F32 kernel already serves that shape.
 //
-// Q4_0 lives in this translation unit rather than under `gemv/` because its
-// F32 GEMV does, and `build.rs` compiles one PTX module per format file. The
-// other three legacy formats already have their own file, so their batched
-// kernels go there.
+// `build.rs` compiles one PTX module per format file, and Q4_0's F32 GEMV
+// lives in this translation unit, so its batched kernel does too. The other
+// three legacy formats keep their F32 GEMV, and so their batched kernels,
+// under `gemv/`.
 // ============================================================================
 
 extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(2) * WARP_SIZE, 1) void quant_gemv_q4_0_q8_1_mwr_n2(

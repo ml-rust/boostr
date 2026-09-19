@@ -9,8 +9,13 @@
 //! `r` alone, at every M the dispatch serves with a different tiling or
 //! schedule, through `quant_matmul`, `quant_matmul_batch` and `quant_swiglu`.
 //!
+//! The pair-vs-grid pick is measured per device at first use, so the run
+//! below covers whichever schedule this device picks; the second run pins
+//! every format to its fallback pick.
+//!
 //! Run with:
 //!   cd boostr && cargo test --features cuda --test quant_mmq_batch_invariance
+//!   cd boostr && NUMR_CUDA_TUNE=0 cargo test --features cuda --test quant_mmq_batch_invariance
 
 #![cfg(feature = "cuda")]
 

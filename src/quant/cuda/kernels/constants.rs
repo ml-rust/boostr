@@ -20,10 +20,10 @@ pub const QUANT_MMQ_MMA_MODULE: &str = "quant_mmq_mma";
 /// `tcf.cuh`, and a second copy of that decoder is what the format forbids.
 pub const TCF_MODULE: &str = "tcf";
 
-/// TCF `Q4AS32DT64`'s token-batched dp4a GEMV, in its own module rather than
-/// in [`TCF_MODULE`]. It reads a Q8_1 activation and shares the GEMV family's
-/// `gemv/common.cuh` reduction, so it belongs with the per-format GEMV
-/// modules below; `TCF_MODULE` stays the three f32-activation kernels.
+/// TCF `Q4AS32DT64`'s token-batched dp4a GEMV. It reads a Q8_1 activation
+/// and shares the GEMV family's `gemv/common.cuh` reduction, so it belongs
+/// with the per-format GEMV modules below; `TCF_MODULE` stays the three
+/// f32-activation kernels.
 pub const GEMV_TCF_Q4AS32DT64_MODULE: &str = "gemv_tcf_q4as32dt64";
 
 // Per-format GEMV kernels

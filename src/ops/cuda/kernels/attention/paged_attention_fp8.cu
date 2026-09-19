@@ -1,6 +1,6 @@
-// FP8 paged flash attention forward kernels, split out of paged_attention.cu.
-// FP8 E4M3/E5M2 dequantization needs sm_80. Splitting keeps the F32/F16/BF16
-// kernels in paged_attention.cu on sm_75 so they still load on Turing.
+// FP8 paged flash attention forward kernels. FP8 E4M3/E5M2 dequantization
+// needs sm_80; the F32/F16/BF16 kernels stay in paged_attention.cu on
+// sm_75 so they still load on Turing.
 //
 // This unit compiles at sm_80 (build.rs), so the `__CUDA_ARCH__ >= 800` guard
 // that used to wrap this code in paged_attention.cu is redundant here and has

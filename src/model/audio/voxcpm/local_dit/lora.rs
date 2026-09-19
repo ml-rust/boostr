@@ -1,5 +1,4 @@
-//! LoRA adaptation for [`LocalDit`] — split out of `loader.rs` to stay under
-//! the crate's 500-line model-architecture file limit.
+//! LoRA adaptation for [`LocalDit`].
 
 use crate::error::Result;
 use crate::model::audio::voxcpm::local_dit::loader::LocalDit;

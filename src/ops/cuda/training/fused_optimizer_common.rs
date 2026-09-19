@@ -1,8 +1,7 @@
 //! Launch geometry and dtype suffix shared by every fused optimizer kernel.
 //!
-//! Split out of `fused_optimizer.rs`, which keeps the `FusedOptimizerOps`
-//! trait wiring; one launcher per optimizer lives in the `fused_optimizer_*`
-//! siblings.
+//! `fused_optimizer.rs` keeps the `FusedOptimizerOps` trait wiring. One
+//! launcher per optimizer lives in the `fused_optimizer_*` siblings.
 
 use crate::error::{Error, Result};
 use cudarc::driver::safe::LaunchConfig;

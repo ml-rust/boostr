@@ -1,7 +1,7 @@
 //! Shared utilities for Flash Attention v2: parameter validation, block config,
 //! shared memory helpers.
 //!
-//! Wiring only. The implementations live in three siblings, split by concern:
+//! Wiring only. The implementations live in three siblings:
 //! - `flash_params.rs`: `AttentionParams` and `validate_qkv`
 //! - `flash_smem.rs`: device shared-memory query, sizing formulas, opt-in attribute
 //! - `flash_block_config.rs`: forward/backward tile tables and selection

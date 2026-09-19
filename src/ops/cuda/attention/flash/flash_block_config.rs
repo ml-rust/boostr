@@ -1,7 +1,7 @@
 //! Flash Attention v2 block (tile) configuration tables and selection.
 //!
-//! Split out of `flash_utils.rs`; the shared-memory helpers these tables are
-//! measured against live in `flash_smem.rs`.
+//! The shared-memory helpers these tables are measured against live in
+//! `flash_smem.rs`.
 
 use crate::error::{Error, Result};
 

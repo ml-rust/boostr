@@ -1,7 +1,7 @@
 //! CUDA launchers for INT4 KV cache quantize/dequantize.
 //!
-//! Split out of `kv_cache_quant.rs` to keep that file under the `cuda/*.rs`
-//! line limit. Kernels: `kv_cache_int4.cu`.
+//! INT4 groups pack two values per byte, a distinct layout from INT8's
+//! one-value-per-byte kernel. Kernels: `kv_cache_int4.cu`.
 
 use crate::error::{Error, Result};
 use crate::ops::cuda::kernels::{self, KV_CACHE_INT4_MODULE};

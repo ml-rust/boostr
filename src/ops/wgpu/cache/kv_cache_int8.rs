@@ -1,7 +1,6 @@
 //! WebGPU launchers for INT8 KV cache quantize/dequantize.
 //!
-//! Split out of `kv_cache_quant.rs` to keep that file under the `wgpu/*.rs`
-//! line limit.
+//! INT8 is its own quantization scheme with its own dispatch shape.
 
 use super::kv_cache_quant::{QuantParams, create_params_buf, dispatch, validate_f32};
 use crate::error::{Error, Result};

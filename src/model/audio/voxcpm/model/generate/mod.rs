@@ -65,12 +65,11 @@
 //!
 //! # Layout
 //!
-//! Split to stay under this repo's 500-line file limit: `types` (the public
-//! types and their construction), `validate` (shape checks and the stop
-//! decision, shared by every entry point), `step` (one iteration and the
-//! noise draw), `run` (the whole-run driver), `capture` (the capturing
-//! variant and its shared inner body) and `teacher_forced` (the batched
-//! training-time counterpart).
+//! `types` holds the public types and their construction. `validate` holds
+//! shape checks and the stop decision, shared by every entry point. `step`
+//! holds one iteration and the noise draw. `run` holds the whole-run
+//! driver. `capture` holds the capturing variant and its shared inner body.
+//! `teacher_forced` holds the batched training-time counterpart.
 
 use crate::error::{Error, Result};
 use crate::model::audio::voxcpm::fsq::{AuxProjections, ScalarQuantization};

@@ -2,9 +2,9 @@
 //! the device's opt-in limit, the forward/backward shared-memory formulas, and
 //! the opt-in attribute call.
 //!
-//! Split out of `flash_utils.rs`; block-config selection lives in
-//! `flash_block_config.rs` and parameter validation in `flash_params.rs`.
-//! `flash_utils` re-exports all three, so existing import paths still resolve.
+//! Block-config selection lives in `flash_block_config.rs` and parameter
+//! validation in `flash_params.rs`. `flash_utils` re-exports all three, so
+//! existing import paths still resolve.
 
 use crate::error::{Error, Result};
 use cudarc::driver::safe::CudaFunction;

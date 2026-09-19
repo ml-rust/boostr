@@ -181,7 +181,8 @@ struct LegacyQ51 {
 // ── Shared token-batched MWR body ───────────────────────────────────────
 //
 // `quant_gemv_legacy_q8_1_mwr_ntok<FMT, NTOK, ROWS = 1>` lives in
-// `legacy_ntok_body.cuh`, split out to keep this header under the line cap.
+// `legacy_ntok_body.cuh`: the shared body every policy below instantiates,
+// not policy-specific code.
 // It takes any policy that meets the contract above: the four here, and the
 // prism three in `prism_ntok.cuh`. That header states the grid, the lane map,
 // the output-row tiling and the ragged-tail rules.

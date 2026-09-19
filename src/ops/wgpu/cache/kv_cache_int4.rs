@@ -1,7 +1,8 @@
 //! WebGPU launchers for INT4 KV cache quantize/dequantize.
 //!
-//! Split out of `kv_cache_quant.rs` to keep that file under the `wgpu/*.rs`
-//! line limit. Shaders: kv_cache_quant_int4.wgsl, kv_cache_dequant_int4.wgsl.
+//! INT4 groups pack two values per byte, a distinct layout from INT8's
+//! one-value-per-byte shader. Shaders: kv_cache_quant_int4.wgsl,
+//! kv_cache_dequant_int4.wgsl.
 
 use super::kv_cache_quant::{
     DEQUANT_INT4_SRC, QUANT_INT4_SRC, QuantParams, create_params_buf, dispatch, validate_f32,

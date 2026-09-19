@@ -1,8 +1,8 @@
 // Shared token-batched MWR body for the 32-element-chunk dp4a formats
 //
-// Split out of `legacy_ntok.cuh`, which holds the four legacy decode policies
-// and includes this header. `prism_ntok.cuh` supplies the PrismML-fork
-// policies. The policy contract is stated in `legacy_ntok.cuh`.
+// `legacy_ntok.cuh` includes this header and holds the four legacy decode
+// policies. `prism_ntok.cuh` supplies the PrismML-fork policies. The policy
+// contract is stated in `legacy_ntok.cuh`.
 //
 // Grid: (ceil(N / ROWS), ceil(M / NTOK), 1) — ROWS output columns, NTOK token
 // columns per block. Block: `mwr_nwarps_ntok(NTOK) * WARP_SIZE` threads; the

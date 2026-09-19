@@ -1,13 +1,9 @@
 //! Paged attention PREFILL FORWARD tile/block-size selection and
 //! shared-memory sizing.
 //!
-//! Split out of `paged_attention.rs` to keep that file's `PagedAttentionOps`
-//! trait impl as wiring only and this file under the crate's `cuda/*.rs` size
-//! limit — mirrors `mqa_gqa/block_config.rs`'s split from
-//! `mqa_gqa/fwd.rs`/`mqa_gqa/bwd.rs`. The backward counterpart is
-//! `paged_attention_bwd_block_config.rs`, split out separately once the
-//! combined fwd+bwd file itself exceeded the limit. Consumed by
-//! `paged_attention_fwd.rs`'s kernel launcher.
+//! `paged_attention.rs` holds the `PagedAttentionOps` trait wiring.
+//! `paged_attention_bwd_block_config.rs` holds the backward counterpart.
+//! Consumed by `paged_attention_fwd.rs`'s kernel launcher.
 
 use crate::error::{Error, Result};
 use numr::dtype::DType;

@@ -1,5 +1,5 @@
 //! Layer-role queries on [`UniversalConfig`]: which layers are SSM and
-//! which are attention. Split from `universal` for file size only.
+//! which are attention.
 
 use super::universal::UniversalConfig;
 

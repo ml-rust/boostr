@@ -1,8 +1,6 @@
 //! VarLen (ragged) attention forward CUDA launcher.
 //!
-//! Split out of `varlen_attention.rs` to keep that file's `VarLenAttentionOps`
-//! trait impl as wiring only — mirrors `paged_attention_fwd.rs`'s split from
-//! `paged_attention.rs`.
+//! `varlen_attention.rs` holds the `VarLenAttentionOps` trait wiring.
 
 use crate::error::{Error, Result};
 use cudarc::driver::PushKernelArg;
@@ -126,8 +124,8 @@ fn varlen_attention_fwd_impl_inner(
         }
     };
 
-    // FP16 forward kernels live in their own compiled module (split out to
-    // keep each .cu within the file-size budget); FP32 stays in the base module.
+    // FP16 forward kernels compile into their own module; FP32 stays in
+    // the base module.
     let module_name = match dtype {
         DType::F16 => VARLEN_ATTENTION_FWD_FP16_MODULE,
         _ => VARLEN_ATTENTION_MODULE,

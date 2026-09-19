@@ -1,6 +1,6 @@
 //! Per-format GEMV/MMQ crossover for CUDA quantized matmul: the largest `m`
-//! at which `dispatch_gemv` is taken over `dispatch_matmul`. Split out of
-//! `gemv.rs` to stay under the `cuda/*.rs` 400-line limit.
+//! at which `dispatch_gemv` is taken over `dispatch_matmul`. The crossover
+//! table is data, not dispatch logic.
 
 use crate::quant::QuantFormat;
 use numr::runtime::Device;

@@ -215,7 +215,8 @@ static __device__ __forceinline__ void gguf_iq4_table_lookup(
 // the start, and both order elements level-major rather than byte-major.
 // Reading `d` from offset 0 yields a scale built from packed trits — a small
 // denormal-ish number that keeps the tensor finite while every weight is
-// wrong, which is exactly the error class CLAUDE.md warns about.
+// wrong. This is a wrong-but-finite dequant: no NaN or Inf check catches it,
+// so the model runs and produces plausible-looking garbage.
 //
 //   TQ1_0 (54B): qs[0..48], qh[48..52], d[52..54]
 //   TQ2_0 (66B): qs[0..64],             d[64..66]

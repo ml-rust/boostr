@@ -1,8 +1,5 @@
 //! [`StepIntermediates`] and the capturing variant of
-//! [`PatchGenerator::step_with_noise`](super::PatchGenerator::step_with_noise),
-//! split out of `generate.rs` to stay inside the architecture-file size
-//! limit — the same split `prefill.rs` uses for
-//! `prefill`/`prefill_capturing` over a shared `prefill_inner`.
+//! [`PatchGenerator::step_with_noise`](super::PatchGenerator::step_with_noise).
 //!
 //! `step_with_noise_inner` is `generate`-module-private (default visibility),
 //! reachable here because this file is a descendant module of `generate`.

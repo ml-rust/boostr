@@ -1,8 +1,7 @@
 //! Block-quantized embedding — keeps `embed_tokens.weight` PACKED on device
 //! and dequantizes only the rows a forward pass gathers.
 //!
-//! Split out of `embedding.rs` (which owns the dense [`Embedding`]) purely to
-//! stay under this crate's `nn/*.rs` file-size limit; the two are one logical
+//! `embedding.rs` owns the dense [`Embedding`]; the two are one logical
 //! unit and [`MaybeQuantEmbedding`] dispatches between them.
 
 use crate::error::{Error, Result};

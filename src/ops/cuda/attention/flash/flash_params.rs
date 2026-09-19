@@ -1,8 +1,7 @@
 //! Flash Attention v2 parameter validation: Q/K/V shape and dtype checks, and
 //! the resulting `AttentionParams` every launcher consumes.
 //!
-//! Split out of `flash_utils.rs`; the block config it resolves comes from
-//! `flash_block_config.rs`.
+//! The block config it resolves comes from `flash_block_config.rs`.
 
 use crate::error::{Error, Result};
 use numr::runtime::cuda::CudaRuntime;

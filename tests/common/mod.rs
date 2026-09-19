@@ -5,6 +5,10 @@
 
 pub mod kv_start;
 #[cfg(feature = "cuda")]
+pub mod llama_graph;
+#[cfg(feature = "cuda")]
+pub mod llama_tiny;
+#[cfg(feature = "cuda")]
 pub mod qwen35_cuda;
 pub mod qwen35_tiny;
 

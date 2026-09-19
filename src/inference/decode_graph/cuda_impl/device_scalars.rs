@@ -120,8 +120,11 @@ impl DeviceScalars {
     }
 }
 
-/// Stream-ordered D2D async copy of `head_dim` f32 elements from `src` at element
+/// Stream-ordered D2D async copy of `head_dim` elements from `src` at element
 /// offset `src_elem_off` into `dst` starting at element 0.
+///
+/// `src` and `dst` share one dtype: a RoPE table is cast to the model dtype
+/// at load, so the slice buffer must be allocated at the table's dtype.
 ///
 /// Uses `cuMemcpyDtoDAsync_v2` so the copy is serialized on `stream` before any
 /// subsequent stream operation (including `cuGraphLaunch`).
@@ -132,8 +135,18 @@ pub(super) fn copy_rope_slice_async(
     head_dim: usize,
     stream: sys::CUstream,
 ) -> Result<()> {
-    let bytes = head_dim * std::mem::size_of::<f32>();
-    let src_ptr = src.ptr() + (src_elem_off * std::mem::size_of::<f32>()) as u64;
+    if src.dtype() != dst.dtype() {
+        return Err(Error::InferenceError {
+            reason: format!(
+                "RoPE slice dtype {:?} != table dtype {:?}",
+                dst.dtype(),
+                src.dtype()
+            ),
+        });
+    }
+    let elem = src.dtype().size_in_bytes();
+    let bytes = head_dim * elem;
+    let src_ptr = src.ptr() + (src_elem_off * elem) as u64;
     let dst_ptr = dst.ptr();
     unsafe {
         let result = sys::cuMemcpyDtoDAsync_v2(dst_ptr, src_ptr, bytes, stream);

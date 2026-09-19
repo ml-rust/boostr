@@ -55,13 +55,27 @@ pub fn kv_insert(
     let capacity = cache_shape[2];
 
     let dtype = k_new.dtype();
+    for (name, t) in [("v_new", v_new), ("k_cache", k_cache), ("v_cache", v_cache)] {
+        if t.dtype() != dtype {
+            return Err(Error::InvalidArgument {
+                arg: name,
+                reason: format!(
+                    "kv_insert: dtype {:?} != k_new dtype {:?}",
+                    t.dtype(),
+                    dtype
+                ),
+            });
+        }
+    }
+    // The 16-bit kernel copies elements without arithmetic, so F16 and BF16
+    // share it.
     let kernel_name = match dtype {
         DType::F32 => "kv_insert_f32",
-        DType::F16 => "kv_insert_f16",
+        DType::F16 | DType::BF16 => "kv_insert_f16",
         _ => {
             return Err(Error::InvalidArgument {
                 arg: "dtype",
-                reason: format!("kv_insert only supports F32/F16, got {:?}", dtype),
+                reason: format!("kv_insert only supports F32/F16/BF16, got {:?}", dtype),
             });
         }
     };

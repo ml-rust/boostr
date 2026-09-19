@@ -479,13 +479,13 @@ fn test_kv_cache_update_batched_f32_parity() {
     assert_kv_cache_update_batched_parity(numr::dtype::DType::F32, "kv_cache_update_batched f32");
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "f16"))]
 #[test]
 fn test_kv_cache_update_batched_f16_parity() {
     assert_kv_cache_update_batched_parity(numr::dtype::DType::F16, "kv_cache_update_batched f16");
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "f16"))]
 #[test]
 fn test_kv_cache_update_batched_bf16_parity() {
     assert_kv_cache_update_batched_parity(numr::dtype::DType::BF16, "kv_cache_update_batched bf16");
@@ -1187,12 +1187,11 @@ fn test_swap_blocks_out_of_range_block_is_error() {
 ///
 /// Fixtures are built in F32 and cast to `dtype` with `Tensor::to_dtype` —
 /// host-side `half::f16`/`half::bf16` values are not numr `Element`s (see
-/// `flash_v2_fwd_parity_cuda.rs`), and `to_dtype`'s cast kernel
-/// has a working fallback with or without numr's `f16` feature, so this does
-/// NOT need to be gated on it — only on `cuda`, to reach a CUDA device at all.
-/// copy_blocks only moves data (no arithmetic), so casting back to F32 for
-/// comparison loses nothing and the check is exact, not toleranced.
-#[cfg(feature = "cuda")]
+/// `flash_v2_fwd_parity_cuda.rs`). The cast needs numr's `f16` feature, so
+/// the half-dtype tests are gated on it. copy_blocks only moves data (no
+/// arithmetic), so casting back to F32 for comparison loses nothing and the
+/// check is exact, not toleranced.
+#[cfg(all(feature = "cuda", feature = "f16"))]
 fn assert_copy_blocks_half_parity(dtype: numr::dtype::DType, label: &str) {
     use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
     use numr::tensor::Tensor;
@@ -1267,9 +1266,9 @@ fn assert_copy_blocks_half_parity(dtype: numr::dtype::DType, label: &str) {
 }
 
 /// CPU-vs-CUDA parity for `swap_blocks` in a half dtype. See
-/// `assert_copy_blocks_half_parity` for why this needs no `f16` feature gate
-/// and why the comparison is exact.
-#[cfg(feature = "cuda")]
+/// `assert_copy_blocks_half_parity` for the `f16` gate and why the
+/// comparison is exact.
+#[cfg(all(feature = "cuda", feature = "f16"))]
 fn assert_swap_blocks_half_parity(dtype: numr::dtype::DType, label: &str) {
     use boostr::ops::traits::cache::kv_cache::KvCacheOps as _;
     use numr::tensor::Tensor;
@@ -1334,25 +1333,25 @@ fn assert_swap_blocks_half_parity(dtype: numr::dtype::DType, label: &str) {
     });
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "f16"))]
 #[test]
 fn test_copy_blocks_f16_parity() {
     assert_copy_blocks_half_parity(numr::dtype::DType::F16, "copy_blocks f16");
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "f16"))]
 #[test]
 fn test_copy_blocks_bf16_parity() {
     assert_copy_blocks_half_parity(numr::dtype::DType::BF16, "copy_blocks bf16");
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "f16"))]
 #[test]
 fn test_swap_blocks_f16_parity() {
     assert_swap_blocks_half_parity(numr::dtype::DType::F16, "swap_blocks f16");
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "f16"))]
 #[test]
 fn test_swap_blocks_bf16_parity() {
     assert_swap_blocks_half_parity(numr::dtype::DType::BF16, "swap_blocks bf16");

@@ -256,6 +256,7 @@ pub(crate) mod tests {
                 rms_eps: 1e-6,
             }),
             hadamard: None,
+            quant_formats: Vec::new(),
         }
     }
 

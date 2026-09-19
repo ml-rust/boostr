@@ -29,3 +29,4 @@ pub use traits::DequantOps;
 pub use traits::FusedQuantOps;
 pub use traits::QuantMatmulOps;
 pub use traits::QuantizeOps;
+pub use traits::ScheduleTuning;

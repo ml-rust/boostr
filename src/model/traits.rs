@@ -7,7 +7,7 @@ use crate::ops::traits::architecture::gated_delta_net::GatedDeltaNetOps;
 use crate::ops::traits::architecture::moe::MoEOps;
 use crate::ops::traits::position::alibi::AlibiOps;
 use crate::ops::traits::{FlashAttentionOps, KvCacheOps, MRopeOps, PagedAttentionOps, RoPEOps};
-use crate::quant::traits::{DequantOps, QuantMatmulOps};
+use crate::quant::traits::{DequantOps, QuantMatmulOps, ScheduleTuning};
 use numr::autograd::Var;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, ConvOps, FwhtOps, IndexingOps, MatmulOps,
@@ -42,6 +42,7 @@ pub trait ModelClient<R: Runtime>:
     + MatmulOps<R>
     + ConvOps<R>
     + DequantOps<R>
+    + ScheduleTuning<R>
 {
 }
 
@@ -72,7 +73,8 @@ where
         + FwhtOps<R>
         + MatmulOps<R>
         + ConvOps<R>
-        + DequantOps<R>,
+        + DequantOps<R>
+        + ScheduleTuning<R>,
 {
 }
 

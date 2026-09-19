@@ -120,10 +120,14 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
         let arch = gguf.metadata().architecture().map(str::to_string);
         let names: Vec<String> = gguf.tensor_names().map(|s| s.to_string()).collect();
         let mut map = Self::new();
+        let mut quant_formats = std::collections::HashSet::new();
 
         for name in &names {
             let hf_name = gguf_to_hf_name_for_arch(arch.as_deref(), name);
             let info = gguf.tensor_info(name)?.clone();
+            if let Some(fmt) = info.ggml_type.to_quant_format() {
+                quant_formats.insert(fmt);
+            }
             if info.ggml_type.is_quantized() {
                 let qt = gguf.load_tensor_quantized::<R>(name, device)?;
                 map.insert_quant(hf_name, qt);
@@ -132,6 +136,7 @@ impl<R: Runtime<DType = DType>> VarMap<R> {
                 map.insert(hf_name, t);
             }
         }
+        map.set_quant_formats(quant_formats.into_iter().collect());
 
         // Stack per-expert MoE tensors into single stacked tensors.
         // GGUF stores experts individually (experts.0.gate_proj.weight, experts.1.gate_proj.weight, ...)
@@ -320,6 +325,8 @@ mod tests {
         let qt = q4_w.as_quant_tensor().unwrap();
         assert_eq!(qt.shape(), &[32]);
         assert_eq!(qt.format(), QuantFormat::Q4_0);
+
+        assert_eq!(map.quant_formats(), &[QuantFormat::Q4_0]);
     }
 
     #[test]

@@ -89,6 +89,16 @@ pub struct UniversalConfig {
     /// `None` when the checkpoint stores no rotated weights.
     #[serde(default)]
     pub hadamard: Option<HadamardContract>,
+
+    /// Distinct quantized weight formats the checkpoint's tensors use.
+    ///
+    /// `LoadedModel::load` fills this from the loading `VarBuilder`'s GGUF
+    /// tensor infos; not part of the on-disk config schema, so it is never
+    /// serialized and a config literal always sets it to `Vec::new()`.
+    /// SafeTensors checkpoints carry no quantized GGML types, so this stays
+    /// empty for them.
+    #[serde(skip)]
+    pub quant_formats: Vec<crate::quant::QuantFormat>,
 }
 
 /// RMSNorm epsilon used when a config omits it.

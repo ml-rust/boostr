@@ -136,6 +136,7 @@ impl HuggingFaceConfig {
             gdn: None,
             qwen35_attention: None,
             hadamard: None,
+            quant_formats: Vec::new(),
         }
     }
 }

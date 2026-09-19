@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::nn::weight::Weight;
+use crate::quant::QuantFormat;
 use crate::quant::decomposed::DecomposedQuantTensor;
 use crate::quant::tensor::QuantTensor;
 use numr::runtime::Runtime;
@@ -11,13 +12,29 @@ use std::collections::HashMap;
 /// Named collection of model weights (standard and quantized).
 pub struct VarMap<R: Runtime> {
     data: HashMap<String, Weight<R>>,
+    /// Distinct quantized formats among `data`'s tensors. Empty except after
+    /// `from_gguf`, which fills it from the file's tensor infos.
+    quant_formats: Vec<QuantFormat>,
 }
 
 impl<R: Runtime> VarMap<R> {
     pub fn new() -> Self {
         Self {
             data: HashMap::new(),
+            quant_formats: Vec::new(),
         }
+    }
+
+    /// Distinct quantized formats this map's tensors use, in no particular
+    /// order. Empty for a map built from SafeTensors or by hand.
+    pub fn quant_formats(&self) -> &[QuantFormat] {
+        &self.quant_formats
+    }
+
+    /// Set the distinct quantized formats this map's tensors use. Called by
+    /// `from_gguf` once, after the tensor-loading loop.
+    pub(super) fn set_quant_formats(&mut self, formats: Vec<QuantFormat>) {
+        self.quant_formats = formats;
     }
 
     /// Insert a standard tensor.

@@ -245,6 +245,7 @@ mod tests {
             gdn: None,
             qwen35_attention: None,
             hadamard: None,
+            quant_formats: Vec::new(),
         };
         let mamba_config = Mamba2Config::from_universal(&config).unwrap();
         assert_eq!(mamba_config.d_model, 64);

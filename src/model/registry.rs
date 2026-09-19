@@ -70,6 +70,20 @@ where
     /// model types work automatically without code changes as long as they
     /// share the standard transformer structure.
     pub fn load(config: &UniversalConfig, vb: &mut VarBuilder<R>) -> Result<Self> {
+        // GGUF weights carry their tensors' `GgmlType`s into `vb`'s `VarMap`
+        // at load time (`VarMap::from_gguf`); a SafeTensors-backed `vb`
+        // reports none. Fold the distinct formats into the config so every
+        // model variant's `quant_formats()` sees them through `m.config()`,
+        // with no per-arch `from_varbuilder` change needed.
+        let formats = vb.quant_formats();
+        let owned_config = if formats.is_empty() {
+            None
+        } else {
+            let mut c = config.clone();
+            c.quant_formats = formats.to_vec();
+            Some(c)
+        };
+        let config = owned_config.as_ref().unwrap_or(config);
         match config.model_type.as_str() {
             "mamba1" => {
                 let model = super::mamba::Mamba1Model::from_varbuilder(vb, config)?;
@@ -194,6 +208,24 @@ where
             LoadedModel::Hybrid(_) => "hybrid",
             LoadedModel::Multimodal(m) => m.config().model_type.as_str(),
             LoadedModel::Qwen35(_) => "qwen35",
+        }
+    }
+
+    /// Distinct quantized formats the loaded checkpoint's tensors use.
+    ///
+    /// Non-empty only for a GGUF checkpoint whose tensors carry a quantized
+    /// `GgmlType` (`LoadedModel::load` reads them from the loading
+    /// `VarBuilder`'s tensor infos). Empty for SafeTensors.
+    pub fn quant_formats(&self) -> &[crate::quant::QuantFormat] {
+        match self {
+            LoadedModel::Llama(m) => &m.config().quant_formats,
+            LoadedModel::LlamaTp(m) => &m.config().quant_formats,
+            LoadedModel::Mamba1(m) => &m.config().quant_formats,
+            LoadedModel::Mamba2(m) => &m.config().quant_formats,
+            LoadedModel::Mamba3(m) => &m.config().quant_formats,
+            LoadedModel::Hybrid(m) => &m.config().quant_formats,
+            LoadedModel::Multimodal(m) => &m.config().quant_formats,
+            LoadedModel::Qwen35(m) => &m.config().quant_formats,
         }
     }
 

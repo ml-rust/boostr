@@ -48,7 +48,7 @@ pub use ops::{
 };
 pub use quant::{
     DecomposedQuantLinear, DecomposedQuantMethod, DecomposedQuantTensor, DequantOps, FusedQuantOps,
-    QuantFormat, QuantMatmulOps, QuantTensor, QuantizeOps,
+    QuantFormat, QuantMatmulOps, QuantTensor, QuantizeOps, ScheduleTuning,
 };
 pub use readback::scalar_f32;
 

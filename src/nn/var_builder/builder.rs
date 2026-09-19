@@ -132,6 +132,12 @@ impl<'a, R: Runtime> VarBuilder<'a, R> {
         self.varmap.contains(&full)
     }
 
+    /// Distinct quantized formats among the weights this builder's
+    /// underlying `VarMap` holds. Empty for a SafeTensors-backed map.
+    pub fn quant_formats(&self) -> &[crate::quant::QuantFormat] {
+        self.varmap.quant_formats()
+    }
+
     /// Current prefix.
     pub fn prefix(&self) -> &str {
         &self.prefix

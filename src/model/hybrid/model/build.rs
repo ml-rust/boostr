@@ -218,6 +218,7 @@ mod tests {
             gdn: None,
             qwen35_attention: None,
             hadamard: None,
+            quant_formats: Vec::new(),
         };
 
         config.validate().unwrap();
@@ -279,6 +280,7 @@ mod tests {
             gdn: None,
             qwen35_attention: None,
             hadamard: None,
+            quant_formats: Vec::new(),
         }
     }
 

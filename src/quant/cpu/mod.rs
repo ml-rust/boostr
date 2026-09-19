@@ -3,3 +3,4 @@ pub mod fused_quant;
 pub mod kernels;
 pub mod quant_matmul;
 pub mod quantize;
+pub mod schedule_tuning;

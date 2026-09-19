@@ -152,6 +152,11 @@ fn loads_and_runs_prefill_then_decode() {
     let num_gdn = loaded.num_gdn_layers().expect("qwen35 gdn layers");
     assert_eq!(num_attention, 16);
     assert_eq!(num_gdn, 48);
+    assert_eq!(
+        loaded.quant_formats(),
+        &[boostr::quant::QuantFormat::PQ2_0],
+        "Bonsai-2 is single-format PQ2_0; quant_formats must report only that"
+    );
     let model = match loaded {
         LoadedModel::Qwen35(model) => model,
         other => panic!("LoadedModel::load returned {other:?}, expected Qwen35"),

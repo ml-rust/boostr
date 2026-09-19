@@ -1,7 +1,6 @@
 //! [`UniversalConfig`] from the `qwen35.*` GGUF namespace.
 //!
-//! Key table, as the PrismML llama.cpp fork reads it in
-//! `llama_model_base::load_hparams`:
+//! Key table, matching `llama_model_base::load_hparams`:
 //!
 //! | GGUF key                                  | Field                          |
 //! | ----------------------------------------- | ------------------------------ |
@@ -26,7 +25,7 @@
 //! | `prism.hadamard.*`                        | `hadamard`, `gdn.v_grouped`    |
 
 use crate::error::{Error, Result};
-use crate::format::gguf::{GgufMetadata, PrismHadamardConfig};
+use crate::format::gguf::{GgufMetadata, HadamardContract};
 use crate::model::config::{
     GdnConfig, HybridConfig, Qwen35AttentionConfig, UniversalConfig, default_gdn_chunk_size,
 };
@@ -108,7 +107,7 @@ pub fn qwen35_config_from_gguf(meta: &GgufMetadata) -> Result<UniversalConfig> {
         });
     }
 
-    let hadamard = PrismHadamardConfig::from_metadata(meta)?;
+    let hadamard = HadamardContract::from_metadata(meta)?;
 
     let gdn = GdnConfig {
         hidden_size,

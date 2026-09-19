@@ -1,5 +1,5 @@
-//! Numerical parity between our `qwen35` CPU forward and the PrismML
-//! llama.cpp fork's oracle, on the real Ternary-Bonsai-2-27B `PQ2_0` and
+//! Numerical parity between our `qwen35` CPU forward and the llama.cpp
+//! oracle, on the real Ternary-Bonsai-2-27B `PQ2_0` and
 //! `PTQ1_0` checkpoints. The two files hold the same trits, so one fixture
 //! serves both.
 //!
@@ -10,14 +10,14 @@
 //! `fixtures/fork_logits_capital_of_france_pq2_0.bin`. Unset dir, missing
 //! model, or missing fixture: the test prints one `skip:` line and passes.
 //!
-//! The fixture was generated with `tests/tools/prism_dump_logits`:
+//! The fixture was generated with `tests/tools/dump_logits_oracle`:
 //!
 //! ```bash
 //! ./dump_logits Ternary-Bonsai-2-27B-PQ2_0.gguf \
 //!   fork_logits_capital_of_france_pq2_0.bin 99 760 6511 314 9338 369
 //! ```
 //!
-//! See `tests/tools/prism_dump_logits/README.md` for the build and the
+//! See `tests/tools/dump_logits_oracle/README.md` for the build and the
 //! binary layout.
 //!
 //! ```bash

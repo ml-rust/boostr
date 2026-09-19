@@ -1,8 +1,8 @@
-//! CPU dequantization kernels for the PrismML llama.cpp fork formats
+//! CPU dequantization kernels for the lowbit formats
 //!
 //! Q1_0, Q2_0, PQ2_0, PTQ1_0
 //!
-//! Ported from the fork's `ggml-quants.c` (`dequantize_row_q1_0`,
+//! Ported from llama.cpp's `ggml-quants.c` (`dequantize_row_q1_0`,
 //! `dequantize_row_q2_0`, `dequantize_row_pq2_0`, `dequantize_row_ptq1_0`).
 //! Q1_0, Q2_0 and PQ2_0 store the f16 scale `d` at the START of the block
 //! and order elements byte-major, low bits first. PTQ1_0 is TQ1_0's base-3
@@ -36,7 +36,7 @@ fn sign_bit(qs: &[u8], elem: usize) -> i32 {
 
 /// Value {-1, 0, 1, 2} of element `elem` of a Q2_0 or PQ2_0 `qs` run.
 ///
-/// Four 2-bit codes per byte, low bits first. The fork maps code `q` to
+/// Four 2-bit codes per byte, low bits first. llama.cpp maps code `q` to
 /// `q - 1`: `00=-1, 01=0, 10=+1, 11=+2`.
 #[inline]
 fn code2_minus_1(qs: &[u8], elem: usize) -> i32 {
@@ -48,7 +48,7 @@ fn code2_minus_1(qs: &[u8], elem: usize) -> i32 {
 /// The 128 elements come from three differently shaped runs, in this order:
 /// `[0, 80)` is `qs[0..16]` over 5 levels, `[80, 120)` is `qs[16..24]` over
 /// 5 levels, and `[120, 128)` is `qh[0..2]` over 4 levels. These are the
-/// 16-byte and 8-byte stages of the fork's `ptq1_0_stages = {32, 16, 8}`
+/// 16-byte and 8-byte stages of llama.cpp's `ptq1_0_stages = {32, 16, 8}`
 /// applied to a 24-byte `qs`.
 #[inline]
 fn ptq1_0_trit(block: &[u8], elem: usize) -> i32 {
@@ -153,7 +153,7 @@ mod tests {
         pack5([trits[0], trits[1], trits[2], trits[3], -1])
     }
 
-    /// Builds one PTQ1_0 block from 128 trits by the fork's packing rule.
+    /// Builds one PTQ1_0 block from 128 trits by llama.cpp's packing rule.
     fn pack_ptq1_0(trits: &[i32; 128], d: f32) -> [u8; 28] {
         let mut block = [0u8; 28];
         for (m, byte) in block[0..16].iter_mut().enumerate() {

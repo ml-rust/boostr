@@ -35,13 +35,17 @@ pub enum GgmlType {
     F64 = 28,
     IQ1M = 29,
     BF16 = 30,
-    /// PrismML fork, unassigned upstream: 1-bit sign at group 128.
+    /// Not assigned by upstream ggml; the value is the one the files carry.
+    /// 1-bit sign at group 128.
     Q1_0 = 41,
-    /// PrismML fork, unassigned upstream: 2-bit at group 64.
+    /// Not assigned by upstream ggml; the value is the one the files carry.
+    /// 2-bit at group 64.
     Q2_0 = 42,
-    /// PrismML fork, unassigned upstream: 2-bit at group 128.
+    /// Not assigned by upstream ggml; the value is the one the files carry.
+    /// 2-bit at group 128.
     PQ2_0 = 142,
-    /// PrismML fork, unassigned upstream: ternary at group 128.
+    /// Not assigned by upstream ggml; the value is the one the files carry.
+    /// Ternary at group 128.
     PTQ1_0 = 143,
 }
 

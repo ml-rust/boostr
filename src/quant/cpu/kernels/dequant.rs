@@ -8,7 +8,7 @@
 //! - `dequant_iq3` — IQ3_XXS, IQ3_S
 //! - `dequant_iq4` — IQ4_NL, IQ4_XS
 //! - `dequant_tq` — TQ1_0, TQ2_0
-//! - `dequant_prism` — Q1_0, Q2_0, PQ2_0, PTQ1_0
+//! - `dequant_lowbit` — Q1_0, Q2_0, PQ2_0, PTQ1_0
 
 pub use super::dequant_iq1::{dequant_iq1_m, dequant_iq1_s};
 pub use super::dequant_iq2::{dequant_iq2_s, dequant_iq2_xs, dequant_iq2_xxs};
@@ -17,7 +17,7 @@ pub use super::dequant_iq4::{dequant_iq4_nl, dequant_iq4_xs};
 pub use super::dequant_k_quants::{
     dequant_q2k, dequant_q3k, dequant_q4k, dequant_q5k, dequant_q6k, dequant_q8k,
 };
-pub use super::dequant_prism::{dequant_pq2_0, dequant_ptq1_0, dequant_q1_0, dequant_q2_0};
+pub use super::dequant_lowbit::{dequant_pq2_0, dequant_ptq1_0, dequant_q1_0, dequant_q2_0};
 pub use super::dequant_simple::{
     dequant_q4_0, dequant_q4_1, dequant_q5_0, dequant_q5_1, dequant_q8_0, dequant_q8_1,
 };

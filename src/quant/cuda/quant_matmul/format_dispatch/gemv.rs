@@ -12,7 +12,7 @@ use crate::quant::cuda::kernels::{
     QUANT_GEMV_MODULE,
 };
 use crate::quant::cuda::quant_matmul::format_dispatch::gemv_rows::{
-    PRISM_GEMV_ROWS, prism_mwr_kernel,
+    LOWBIT_GEMV_ROWS, lowbit_mwr_kernel,
 };
 use crate::quant::cuda::quant_matmul::helpers::quantize_activation_q8_1;
 use crate::quant::{QuantFormat, QuantTensor};
@@ -29,7 +29,7 @@ use numr::tensor::Tensor;
 /// and the six grid-indexed IQ formats IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS,
 /// IQ3_S and IQ1_S have only the token-batched dp4a kernel, so they take the
 /// dp4a path from `m = 2` up and the F32 path at `m = 1`. The three
-/// PrismML-fork formats PQ2_0, Q2_0 and Q1_0 have a single-token dp4a kernel
+/// lowbit formats PQ2_0, Q2_0 and Q1_0 have a single-token dp4a kernel
 /// as well and take dp4a at every `m`, like Q8_0. Returns `Ok(None)` if the
 /// format has no dedicated kernel; callers fall back to
 /// `quant_matmul_via_dequant`.
@@ -74,7 +74,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
     // sub-group's byte offset through a 256-element super-block, so a row whose
     // last super-block were partial is unaddressable — and has no on-disk
     // representation either. They therefore need the stricter gate. The three
-    // PrismML-fork formats hold 2 or 4 runs under one block scale, so their
+    // lowbit formats PQ2_0, Q2_0 and Q1_0 hold 2 or 4 runs under one block scale, so their
     // gate is the block size. Every other format on this path has a
     // 32-element block and needs only the floor.
     let k_aligned = if matches!(
@@ -98,8 +98,8 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
     };
 
     // dp4a path: formats with Q8_1 activation + dp4a MWR kernels, aligned K.
-    // `k_aligned` above carries the per-format K multiple. The prism three
-    // sit in the every-m set: their unsuffixed kernel is the NTOK = 1
+    // `k_aligned` above carries the per-format K multiple. The three lowbit
+    // formats sit in the every-m set: their unsuffixed kernel is the NTOK = 1
     // instance of the batched body.
     if (matches!(
         format,
@@ -172,18 +172,18 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
         // launch, covered by more blocks along the grid's M axis (the
         // `div_ceil` below). Which widths exist is per format: Q8_0, Q6_K,
         // the four legacy 32-element formats, the two IQ4 codebook formats,
-        // the six grid-indexed IQ formats and the three PrismML-fork formats
+        // the six grid-indexed IQ formats and the three lowbit formats
         // have both `_n2` and `_n4`; Q4_K and Q5_K have only `_n2`; Q3_K's and
         // Q2_K's batched read never wins, so they have neither and always use
-        // the per-token kernel. The prism three's widest instantiated tile is
+        // the per-token kernel. The three lowbit formats' widest instantiated tile is
         // `_n4`; there is no `_n8`, so past m = 4 more grid blocks — not a
         // narrower tile — is the whole path.
         //
         // The legacy four, the two IQ4 formats and the six grid-indexed IQ
         // formats have no per-token dp4a kernel at all, so the m = 1 row
         // below never applies to them: the branch guard above already routed
-        // m = 1 to the F32 path. The prism three have one, the NTOK = 1
-        // instance of their batched body, at `PRISM_GEMV_ROWS` output columns
+        // m = 1 to the F32 path. The three lowbit formats have one, the NTOK = 1
+        // instance of their batched body, at `LOWBIT_GEMV_ROWS` output columns
         // per block.
         let tokens_per_block: u32 = match (format, m) {
             (QuantFormat::Q3K | QuantFormat::Q2K, _) => 1,
@@ -321,8 +321,8 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
     }
 
     // F32 activation path for formats with dedicated F32 GEMV kernels. For a
-    // format with a dp4a kernel at every m (Q8_0, the K-quants, the prism
-    // three) this is reached only when K fails `k_aligned`. PTQ1_0 has no
+    // format with a dp4a kernel at every m (Q8_0, the K-quants, the three
+    // lowbit formats) this is reached only when K fails `k_aligned`. PTQ1_0 has no
     // dp4a kernel; on a device with int8 MMA its feature-major kernel takes
     // every m, so it reaches here only when K is not a whole number of its
     // 128-element blocks.

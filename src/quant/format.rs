@@ -75,7 +75,7 @@ pub enum QuantFormat {
     /// Tied-scale 2-bit. block_size=256, block_bytes=66
     TQ2_0,
 
-    // Prism quants (PrismML llama.cpp fork)
+    // Lowbit quants: wide-block, sub-2-bit formats not defined by upstream ggml
     /// 1-bit sign, one f16 scale. block_size=128, block_bytes=18
     Q1_0,
     /// 2-bit codes 0..3 map to -1..+2, one f16 scale. block_size=64, block_bytes=18
@@ -213,7 +213,7 @@ impl QuantFormat {
             Self::IQ1M => 29,
             Self::TQ1_0 => 34,
             Self::TQ2_0 => 35,
-            // PrismML fork ids; upstream ggml.h has no types at these values.
+            // Not assigned by upstream ggml; the value is the one the files carry.
             Self::Q1_0 => 41,
             Self::Q2_0 => 42,
             Self::PQ2_0 => 142,

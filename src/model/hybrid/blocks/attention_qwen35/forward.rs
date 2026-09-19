@@ -1,7 +1,7 @@
 //! `qwen35` gated attention inference forward over a [`KvCache`].
 //!
-//! Ports `build_layer_attn` (`src/models/qwen35.cpp`) of the PrismML
-//! llama.cpp fork step for step:
+//! Ports `build_layer_attn` (`src/models/qwen35.cpp`) of llama.cpp
+//! step for step:
 //!
 //! 1. `q_full = attn_q(x)`, split per head into query and gate
 //! 2. `q = rms_norm(q, attn_q_norm)`, `k = rms_norm(attn_k(x), attn_k_norm)`, `v = attn_v(x)`

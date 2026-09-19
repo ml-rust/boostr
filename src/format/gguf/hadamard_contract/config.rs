@@ -1,12 +1,12 @@
-//! `PrismHadamardConfig`: a typed, validated parse of the PrismML
-//! activation-rotation contract.
+//! `HadamardContract`: a typed, validated parse of the
+//! activation-rotation contract stored under the `prism.hadamard.*` keys.
 //!
 //! Weights in `weight_names` were quantized in a rotated basis: before the
 //! matmul, the activation is sign-flipped then transformed per `block_size`
 //! segment. `inverse_weight_names` store rotated rows: after lookup,
 //! transform then sign-flip.
 //!
-//! Ports the checks in the PrismML llama.cpp fork's
+//! Ports the checks in llama.cpp's
 //! `llama_model_base::load_hparams` (`llama-model.cpp` lines ~1194-1330).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -52,7 +52,7 @@ pub enum SignMode {
     Explicit,
 }
 
-/// Activation rotation contract stored by the PrismML llama.cpp fork.
+/// The verified Hadamard-aware activation-rotation contract.
 ///
 /// Weights in `weight_names` were quantized in a rotated basis. Before the
 /// matmul, the activation is sign-flipped then transformed per `block_size`
@@ -62,7 +62,7 @@ pub enum SignMode {
 /// Serializes as part of `UniversalConfig` so a config written to disk
 /// carries the rotation contract with it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrismHadamardConfig {
+pub struct HadamardContract {
     pub block_size: usize,
     pub sign_mode: SignMode,
     /// Sign vector per input width. Empty when `sign_mode` is `Identity`.
@@ -72,7 +72,7 @@ pub struct PrismHadamardConfig {
     pub gdn_v_grouped: bool,
 }
 
-impl PrismHadamardConfig {
+impl HadamardContract {
     /// `Ok(None)` when `prism.hadamard.version` is absent.
     pub fn from_metadata(meta: &GgufMetadata) -> Result<Option<Self>> {
         let Some(version) = meta.get_u32(KEY_VERSION) else {
@@ -160,7 +160,7 @@ impl PrismHadamardConfig {
 
     /// Sign vector for an input width. `Identity` mode returns `Ok(None)`.
     ///
-    /// Explicit mode errors when the width has no entry — the fork silently
+    /// Explicit mode errors when the width has no entry — llama.cpp silently
     /// falls back to identity there; boostr treats it as a broken file.
     pub fn signs_for_width(&self, width: usize) -> Result<Option<&[i8]>> {
         match self.sign_mode {
@@ -236,13 +236,13 @@ mod tests {
     #[test]
     fn absent_version_returns_none() {
         let m = meta(vec![]);
-        assert!(PrismHadamardConfig::from_metadata(&m).unwrap().is_none());
+        assert!(HadamardContract::from_metadata(&m).unwrap().is_none());
     }
 
     #[test]
     fn minimal_valid_explicit_config() {
         let m = meta(valid_pairs());
-        let cfg = PrismHadamardConfig::from_metadata(&m).unwrap().unwrap();
+        let cfg = HadamardContract::from_metadata(&m).unwrap().unwrap();
         assert_eq!(cfg.block_size, 4);
         assert_eq!(cfg.sign_mode, SignMode::Explicit);
         assert!(cfg.rotates("output.weight"));
@@ -260,7 +260,7 @@ mod tests {
         pairs
             .retain(|(k, _)| *k != KEY_SIGN_MODE && *k != KEY_SIGN_WIDTHS && *k != KEY_SIGN_VALUES);
         pairs.push((KEY_SIGN_MODE, GgufValue::String("identity".to_string())));
-        let cfg = PrismHadamardConfig::from_metadata(&meta(pairs))
+        let cfg = HadamardContract::from_metadata(&meta(pairs))
             .unwrap()
             .unwrap();
         assert_eq!(cfg.sign_mode, SignMode::Identity);
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn signs_for_width_unknown_width_errors() {
-        let cfg = PrismHadamardConfig::from_metadata(&meta(valid_pairs()))
+        let cfg = HadamardContract::from_metadata(&meta(valid_pairs()))
             .unwrap()
             .unwrap();
         let err = cfg.signs_for_width(99).unwrap_err().to_string();
@@ -280,7 +280,7 @@ mod tests {
     fn version_mismatch_errors() {
         let mut pairs = valid_pairs();
         replace(&mut pairs, KEY_VERSION, GgufValue::Uint32(2));
-        let err = PrismHadamardConfig::from_metadata(&meta(pairs))
+        let err = HadamardContract::from_metadata(&meta(pairs))
             .unwrap_err()
             .to_string();
         assert!(err.contains(KEY_VERSION));
@@ -294,7 +294,7 @@ mod tests {
             KEY_TRANSFORM,
             GgufValue::String("something-else".to_string()),
         );
-        let err = PrismHadamardConfig::from_metadata(&meta(pairs))
+        let err = HadamardContract::from_metadata(&meta(pairs))
             .unwrap_err()
             .to_string();
         assert!(err.contains(KEY_TRANSFORM));
@@ -308,7 +308,7 @@ mod tests {
             KEY_AXIS,
             GgufValue::String("wrong-axis".to_string()),
         );
-        let err = PrismHadamardConfig::from_metadata(&meta(pairs))
+        let err = HadamardContract::from_metadata(&meta(pairs))
             .unwrap_err()
             .to_string();
         assert!(err.contains(KEY_AXIS));
@@ -322,7 +322,7 @@ mod tests {
             KEY_SIGN_MODE,
             GgufValue::String("bogus".to_string()),
         );
-        let err = PrismHadamardConfig::from_metadata(&meta(pairs))
+        let err = HadamardContract::from_metadata(&meta(pairs))
             .unwrap_err()
             .to_string();
         assert!(err.contains(KEY_SIGN_MODE));
@@ -337,7 +337,7 @@ mod tests {
             strings(&["token_embd.weight"]),
         );
         pairs.push((KEY_INVERSE_WEIGHT_NAMES, strings(&["token_embd.weight"])));
-        let err = PrismHadamardConfig::from_metadata(&meta(pairs))
+        let err = HadamardContract::from_metadata(&meta(pairs))
             .unwrap_err()
             .to_string();
         assert!(err.contains("token_embd.weight"));
@@ -345,11 +345,11 @@ mod tests {
 
     #[test]
     fn serde_round_trip_keeps_names_and_signs() {
-        let cfg = PrismHadamardConfig::from_metadata(&meta(valid_pairs()))
+        let cfg = HadamardContract::from_metadata(&meta(valid_pairs()))
             .unwrap()
             .unwrap();
         let json = serde_json::to_string(&cfg).unwrap();
-        let back: PrismHadamardConfig = serde_json::from_str(&json).unwrap();
+        let back: HadamardContract = serde_json::from_str(&json).unwrap();
         assert_eq!(back.block_size, 4);
         assert_eq!(back.sign_mode, SignMode::Explicit);
         assert!(back.rotates("output.weight"));
@@ -364,7 +364,7 @@ mod tests {
     fn gdn_v_grouped_true_is_read() {
         let mut pairs = valid_pairs();
         pairs.push((KEY_GDN_V_GROUPED, GgufValue::Bool(true)));
-        let cfg = PrismHadamardConfig::from_metadata(&meta(pairs))
+        let cfg = HadamardContract::from_metadata(&meta(pairs))
             .unwrap()
             .unwrap();
         assert!(cfg.gdn_v_grouped);

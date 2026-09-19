@@ -1,9 +1,9 @@
 //! Gated DeltaNet configuration: the linear-attention layer of `qwen35`.
 //!
-//! Field names follow the GGUF keys the PrismML llama.cpp fork reads in
+//! Field names follow the GGUF keys llama.cpp reads in
 //! `build_layer_attn_linear` (`src/models/qwen35.cpp`):
 //!
-//! | Field         | Fork hparam       | Bonsai |
+//! | Field         | llama.cpp hparam  | Bonsai |
 //! | ------------- | ----------------- | ------ |
 //! | `state_size`  | `ssm_d_state`     | 128    |
 //! | `key_heads`   | `ssm_n_group`     | 16     |

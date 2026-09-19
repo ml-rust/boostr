@@ -23,7 +23,7 @@ use half::f16;
 /// repeated division. llama.cpp stores each byte pre-scaled so a trit is
 /// recovered by a WRAPPING 8-bit multiply against a power of three followed by
 /// a multiply-shift. The wrap is load-bearing: widening it changes the result.
-/// PTQ1_0 (`dequant_prism`) shares this packing.
+/// PTQ1_0 (`dequant_lowbit`) shares this packing.
 #[inline]
 pub(super) fn base3_trit(byte: u8, level: usize) -> i32 {
     const POW3: [u8; 5] = [1, 3, 9, 27, 81];

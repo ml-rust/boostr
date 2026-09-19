@@ -2,11 +2,11 @@
 // Q1_0 block: 128 elements, 18 bytes
 // Layout: [d:f16(2), qs:16B] — one sign bit per element, low bit first
 // Value: bit set -> +d, clear -> -d
-// The decode helpers and offsets come from `../prism_dequant.cuh`; this
+// The decode helpers and offsets come from `../lowbit_dequant.cuh`; this
 // file restates neither.
 
 #include "common.cuh"
-#include "../prism_dequant.cuh"
+#include "../lowbit_dequant.cuh"
 
 #define Q1_0_BLOCK_ELEMS 128
 #define Q1_0_BLOCK_BYTES 18
@@ -29,8 +29,8 @@ extern "C" __global__ void quant_matmul_q1_0_f32(
     float sum = 0.0f;
     for (unsigned int b = 0; b < blocks_per_row; b++) {
         const unsigned char* block = w_row + b * Q1_0_BLOCK_BYTES;
-        const float d = prism_load_d(block);
-        const unsigned char* qs = block + GGUF_PRISM_QS_OFFSET;
+        const float d = lowbit_load_d(block);
+        const unsigned char* qs = block + GGUF_LOWBIT_QS_OFFSET;
         const float* act_blk = act_row + b * Q1_0_BLOCK_ELEMS;
 
         for (int e = 0; e < Q1_0_BLOCK_ELEMS; e++) {

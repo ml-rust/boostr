@@ -6,7 +6,7 @@ pub mod dequant_iq2;
 pub mod dequant_iq3;
 pub mod dequant_iq4;
 pub mod dequant_k_quants;
-pub mod dequant_prism;
+pub mod dequant_lowbit;
 pub mod dequant_simple;
 pub mod dequant_tq;
 pub mod fused_dot;

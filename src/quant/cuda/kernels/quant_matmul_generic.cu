@@ -17,7 +17,7 @@
 #include "decode.cuh"
 #include "format_ids.cuh"
 #include "iq_dequant.cuh"
-#include "prism_dequant.cuh"
+#include "lowbit_dequant.cuh"
 
 #define WARP_SIZE 32
 
@@ -309,8 +309,8 @@ __device__ void dq_tq1_0(const unsigned char* b, float* out) {
         out[i] = d * (float)gguf_tq1_0_trit(b, i);
 }
 
-// The four PrismML formats share their layouts with the dequant path
-// through prism_dequant.cuh.
+// The four lowbit formats share their layouts with the dequant path
+// through lowbit_dequant.cuh.
 
 __device__ void dq_q1_0  (const unsigned char* b, float* o) { q1_0_dequant_block(b, o);   }
 __device__ void dq_q2_0  (const unsigned char* b, float* o) { q2_0_dequant_block(b, o);   }

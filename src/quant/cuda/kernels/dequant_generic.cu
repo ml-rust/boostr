@@ -16,7 +16,7 @@
 #include "decode.cuh"
 #include "format_ids.cuh"
 #include "iq_dequant.cuh"
-#include "prism_dequant.cuh"
+#include "lowbit_dequant.cuh"
 
 // ── Safe unaligned load helpers ─────────────────────────────────────
 // Quant blocks are packed contiguously; internal fields are not always
@@ -360,8 +360,8 @@ __device__ void dequant_tq1_0_block(const unsigned char* block, float* out) {
     }
 }
 
-// The four PrismML formats share their layouts with the quant-matmul path
-// through prism_dequant.cuh.
+// The four lowbit formats share their layouts with the quant-matmul path
+// through lowbit_dequant.cuh.
 
 __device__ void dequant_q1_0_block  (const unsigned char* b, float* o) { q1_0_dequant_block(b, o);   }
 __device__ void dequant_q2_0_block  (const unsigned char* b, float* o) { q2_0_dequant_block(b, o);   }

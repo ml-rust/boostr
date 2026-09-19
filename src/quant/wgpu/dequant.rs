@@ -114,7 +114,7 @@ impl DequantOps<WgpuRuntime> for WgpuClient {
             | QuantFormat::PTQ1_0 => {
                 return Err(Error::UnsupportedQuantFormat {
                     format: format!(
-                        "{}: no WebGPU shader available. Use CPU runtime for IQ/TQ/Prism formats.",
+                        "{}: no WebGPU shader available. Use CPU runtime for IQ/TQ/lowbit formats.",
                         qt.format()
                     ),
                 });

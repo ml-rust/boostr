@@ -1,6 +1,6 @@
 //! An embedding whose stored table needs an inverse Hadamard rotation
-//! after lookup — the PrismML llama.cpp fork's `inverse_weight_names`
-//! contract (see `crate::format::gguf::prism_hadamard`), e.g. a GGUF
+//! after lookup — llama.cpp's `inverse_weight_names`
+//! contract (see `crate::format::gguf::hadamard_contract`), e.g. a GGUF
 //! `token_embd.weight` stored in the rotated basis.
 //!
 //! The inner table is a [`MaybeQuantEmbedding`]: Bonsai ships

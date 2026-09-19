@@ -1,6 +1,6 @@
 //! A linear layer whose stored weight was quantized in a Hadamard-rotated
-//! basis (the PrismML llama.cpp fork's activation-rotation contract — see
-//! `crate::format::gguf::prism_hadamard`). See
+//! basis (llama.cpp's activation-rotation contract — see
+//! `crate::format::gguf::hadamard_contract`). See
 //! [`crate::nn::linear::MaybeRotatedLinear`] for the `Plain`/`Rotated`
 //! dispatch enum mirroring [`crate::nn::maybe_lora::MaybeLoraLinear`].
 

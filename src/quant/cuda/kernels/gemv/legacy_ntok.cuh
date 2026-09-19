@@ -7,7 +7,7 @@
 // alternative is four copies of the same ~90-line kernel differing in a dozen
 // lines of bit twiddling.
 //
-// The body also serves the PrismML-fork formats in `prism_ntok.cuh`, whose
+// The body also serves the lowbit formats in `lowbit_ntok.cuh`, whose
 // blocks span 64 or 128 elements under one scale. It walks K in 32-element
 // CHUNKS (one Q8_1 activation block each) and asks the policy how many chunks
 // share a block base via `CHUNKS_PER_BLOCK`; the four here declare 1, so
@@ -16,7 +16,7 @@
 // These four have no single-token dp4a GEMV: their `_n2` tile exists because
 // batching pays at m = 2, while m = 1 is served by the F32-activation kernel
 // beside them. `dispatch_gemv` reflects that by entering the dp4a branch for
-// these formats only from m = 2 up. The prism three also instantiate the
+// these formats only from m = 2 up. The four lowbit formats also instantiate the
 // body at NTOK = 1, so they take dp4a at every m; there they tile the
 // output-row axis too (`ROWS` = 4 or 8), so one activation load serves
 // several output columns.
@@ -184,7 +184,7 @@ struct LegacyQ51 {
 // `legacy_ntok_body.cuh`: the shared body every policy below instantiates,
 // not policy-specific code.
 // It takes any policy that meets the contract above: the four here, and the
-// prism three in `prism_ntok.cuh`. That header states the grid, the lane map,
+// three lowbit formats in `lowbit_ntok.cuh`. That header states the grid, the lane map,
 // the output-row tiling and the ragged-tail rules.
 
 #include "legacy_ntok_body.cuh"

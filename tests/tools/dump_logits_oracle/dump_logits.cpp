@@ -1,6 +1,6 @@
 // dump_logits.cpp
 //
-// Pure model oracle: loads a GGUF model via the PrismML llama.cpp fork,
+// Pure model oracle: loads a GGUF model via llama.cpp,
 // prefills a fixed sequence of already-tokenized ids, greedily decodes 3
 // more tokens, and dumps every position's full logit row to a binary file.
 //

@@ -63,7 +63,7 @@ pub const GEMV_IQ3_XXS_MODULE: &str = "gemv_iq3_xxs";
 pub const GEMV_TQ1_0_MODULE: &str = "gemv_tq1_0";
 pub const GEMV_TQ2_0_MODULE: &str = "gemv_tq2_0";
 
-// PrismML-fork GEMV kernels
+// Lowbit GEMV kernels
 pub const GEMV_PQ2_0_MODULE: &str = "gemv_pq2_0";
 pub const GEMV_Q2_0_MODULE: &str = "gemv_q2_0";
 pub const GEMV_Q1_0_MODULE: &str = "gemv_q1_0";
@@ -82,7 +82,7 @@ pub const GEMM_IQ3_XXS_MODULE: &str = "gemm_iq3_xxs";
 pub const GEMM_TQ1_0_MODULE: &str = "gemm_tq1_0";
 pub const GEMM_TQ2_0_MODULE: &str = "gemm_tq2_0";
 
-// PrismML-fork GEMM kernels
+// Lowbit GEMM kernels
 pub const GEMM_PQ2_0_MODULE: &str = "gemm_pq2_0";
 pub const GEMM_Q2_0_MODULE: &str = "gemm_q2_0";
 pub const GEMM_Q1_0_MODULE: &str = "gemm_q1_0";

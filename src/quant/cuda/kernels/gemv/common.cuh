@@ -138,7 +138,7 @@ static constexpr __host__ __device__ int mwr_nwarps_ntok(int ntok) {
 // also does off `ncols_dst`: one row at one column, two from two columns up.
 //
 // It is a default, not a bound. At one token column every block re-reads the
-// whole activation row, so the prism formats instantiate their NTOK = 1 body
+// whole activation row, so the lowbit formats instantiate their NTOK = 1 body
 // with an explicit ROWS of 4 or 8 (`_r4`, `_r8`) and let `dispatch_gemv`
 // pick. The tile width to use there is a measurement, not a rule.
 //

@@ -60,7 +60,7 @@ fn packed_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> 
         format,
         QuantFormat::PQ2_0 | QuantFormat::Q2_0 | QuantFormat::Q1_0 | QuantFormat::PTQ1_0
     ) {
-        return prism_weight(format, n, k, salt);
+        return lowbit_weight(format, n, k, salt);
     }
     let values: Vec<f32> = (0..n * k)
         .map(|i| ((i % 977) as f32 * 0.031 + salt).sin() + ((i / 977) as f32 * 0.17).cos() * 0.25)
@@ -75,11 +75,11 @@ fn packed_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> 
         .expect("weight bytes")
 }
 
-/// A prism weight built byte by byte: f16 `d` and the code run, both varied
+/// A lowbit weight built byte by byte: f16 `d` and the code run, both varied
 /// by block index and `salt` so no two blocks or weights match. `d` sits at
 /// byte 0 for PQ2_0, Q2_0 and Q1_0 and at the END of the block (byte 26) for
 /// PTQ1_0; the code run fills the other `block_bytes - 2` bytes.
-fn prism_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> {
+fn lowbit_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> {
     let block_bytes = format.block_bytes();
     let bpr = k / format.block_size();
     let (d_off, qs_off) = if format == QuantFormat::PTQ1_0 {

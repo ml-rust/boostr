@@ -3,11 +3,11 @@
 // Q1_0 block: 128 elements, 18 bytes
 // Layout: [d:f16(2), qs:16B] — one sign bit per element, low bit first
 // Value: bit set -> +d, clear -> -d
-// The decode helpers and offsets come from `../prism_dequant.cuh`; this
+// The decode helpers and offsets come from `../lowbit_dequant.cuh`; this
 // file restates neither.
 
 #include "legacy_ntok.cuh"
-#include "prism_ntok.cuh"
+#include "lowbit_ntok.cuh"
 
 // ============================================================================
 // Q1_0 GEMV (F32 activation) — warp-per-column
@@ -35,19 +35,19 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q1_0_f32(
     if (col >= N) return;
 
     const unsigned int blocks_per_row = K / 128;
-    const unsigned int row_bytes = blocks_per_row * PrismQ10::BLOCK_BYTES;
+    const unsigned int row_bytes = blocks_per_row * LowbitQ10::BLOCK_BYTES;
     const float* act_row = activation + m * K;
     const unsigned char* w_row = weight + col * row_bytes;
 
     float acc = 0.0f;
     for (unsigned int b = 0; b < blocks_per_row; b++) {
-        const unsigned char* block = w_row + b * PrismQ10::BLOCK_BYTES;
-        const float d = prism_load_d(block);
-        const unsigned char* qs = block + GGUF_PRISM_QS_OFFSET;
+        const unsigned char* block = w_row + b * LowbitQ10::BLOCK_BYTES;
+        const float d = lowbit_load_d(block);
+        const unsigned char* qs = block + GGUF_LOWBIT_QS_OFFSET;
         const float* act_blk = act_row + b * 128;
 
         #pragma unroll
-        for (int c = 0; c < PrismQ10::CHUNKS_PER_BLOCK; c++) {
+        for (int c = 0; c < LowbitQ10::CHUNKS_PER_BLOCK; c++) {
             const int e = c * 32 + (int)lane_id;
             acc += act_blk[e] * ((float)gguf_sign_bit(qs, e) * d);
         }
@@ -63,7 +63,7 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q1_0_f32(
 // One block covers NTOK consecutive token columns and decodes each weight
 // chunk once for all of them, instead of re-reading the whole weight matrix
 // per token as the F32 kernel above does. The body lives in
-// `legacy_ntok_body.cuh` and the decode in `prism_ntok.cuh`; see those
+// `legacy_ntok_body.cuh` and the decode in `lowbit_ntok.cuh`; see those
 // headers for the lane map, the chunk-per-block rule, the ragged-tail rules
 // and the alignment constraint.
 //
@@ -79,7 +79,7 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_q1_0_f32(
 // columns per block. One block per column re-reads the whole Q8_1
 // activation row N times per launch, ~30 MB at K = N = 5120, against a
 // 7 MB weight; a block that owns ROWS columns divides that by ROWS. The
-// dispatcher picks one via `PRISM_GEMV_ROWS` in
+// dispatcher picks one via `LOWBIT_GEMV_ROWS` in
 // `quant_matmul/format_dispatch/gemv_rows.rs`
 // and launches grid x as `ceil(N / ROWS)`. Same warp count and
 // `__launch_bounds__` as the unsuffixed kernel: ROWS accumulators and
@@ -94,7 +94,7 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(1) * WARP_SIZE, 1) void 
     float* __restrict__ output,
     unsigned int M, unsigned int K, unsigned int N
 ) {
-    quant_gemv_legacy_q8_1_mwr_ntok<PrismQ10, 1>(q8_act, weight, output, M, K, N);
+    quant_gemv_legacy_q8_1_mwr_ntok<LowbitQ10, 1>(q8_act, weight, output, M, K, N);
 }
 
 extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(1) * WARP_SIZE, 1) void quant_gemv_q1_0_q8_1_mwr_r4(
@@ -103,7 +103,7 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(1) * WARP_SIZE, 1) void 
     float* __restrict__ output,
     unsigned int M, unsigned int K, unsigned int N
 ) {
-    quant_gemv_legacy_q8_1_mwr_ntok<PrismQ10, 1, 4>(q8_act, weight, output, M, K, N);
+    quant_gemv_legacy_q8_1_mwr_ntok<LowbitQ10, 1, 4>(q8_act, weight, output, M, K, N);
 }
 
 extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(1) * WARP_SIZE, 1) void quant_gemv_q1_0_q8_1_mwr_r8(
@@ -112,7 +112,7 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(1) * WARP_SIZE, 1) void 
     float* __restrict__ output,
     unsigned int M, unsigned int K, unsigned int N
 ) {
-    quant_gemv_legacy_q8_1_mwr_ntok<PrismQ10, 1, 8>(q8_act, weight, output, M, K, N);
+    quant_gemv_legacy_q8_1_mwr_ntok<LowbitQ10, 1, 8>(q8_act, weight, output, M, K, N);
 }
 
 extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(2) * WARP_SIZE, 1) void quant_gemv_q1_0_q8_1_mwr_n2(
@@ -121,7 +121,7 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(2) * WARP_SIZE, 1) void 
     float* __restrict__ output,
     unsigned int M, unsigned int K, unsigned int N
 ) {
-    quant_gemv_legacy_q8_1_mwr_ntok<PrismQ10, 2>(q8_act, weight, output, M, K, N);
+    quant_gemv_legacy_q8_1_mwr_ntok<LowbitQ10, 2>(q8_act, weight, output, M, K, N);
 }
 
 extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(4) * WARP_SIZE, 1) void quant_gemv_q1_0_q8_1_mwr_n4(
@@ -130,5 +130,5 @@ extern "C" __global__ __launch_bounds__(mwr_nwarps_ntok(4) * WARP_SIZE, 1) void 
     float* __restrict__ output,
     unsigned int M, unsigned int K, unsigned int N
 ) {
-    quant_gemv_legacy_q8_1_mwr_ntok<PrismQ10, 4>(q8_act, weight, output, M, K, N);
+    quant_gemv_legacy_q8_1_mwr_ntok<LowbitQ10, 4>(q8_act, weight, output, M, K, N);
 }

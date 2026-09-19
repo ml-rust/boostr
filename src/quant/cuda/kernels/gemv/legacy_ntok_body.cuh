@@ -1,7 +1,7 @@
 // Shared token-batched MWR body for the 32-element-chunk dp4a formats
 //
 // `legacy_ntok.cuh` includes this header and holds the four legacy decode
-// policies. `prism_ntok.cuh` supplies the PrismML-fork policies. The policy
+// policies. `lowbit_ntok.cuh` supplies the lowbit policies. The policy
 // contract is stated in `legacy_ntok.cuh`.
 //
 // Grid: (ceil(N / ROWS), ceil(M / NTOK), 1) — ROWS output columns, NTOK token
@@ -16,7 +16,7 @@
 // 8-chunk group, source word `lane % 4`). Four consecutive lanes read 16
 // contiguous bytes of the same chunk, and the 8-chunk group is contiguous in
 // the row, so the group's loads coalesce. For a legacy format a chunk is a
-// block; for a prism format `CHUNKS_PER_BLOCK` chunks share one block base
+// block; for a lowbit format `CHUNKS_PER_BLOCK` chunks share one block base
 // and scale, and the policy receives the source word index widened over the
 // whole block.
 //

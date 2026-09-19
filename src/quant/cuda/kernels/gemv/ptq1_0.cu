@@ -4,13 +4,13 @@
 // Layout: qs[0..24], qh[24..26], d:f16[26..28] — the scale is at the END.
 // Base-3 encoding: TQ1_0's trit packing at group 128. `gguf_ptq1_0_trit` is
 // TQ1_0's `gguf_base3_trit` applied to this block's three qs/qh runs — see
-// `prism_dequant.cuh` for the run boundaries. That header, not this file,
+// `lowbit_dequant.cuh` for the run boundaries. That header, not this file,
 // owns the layout and the unpack; `common.cuh` includes `decode.cuh` only,
 // which does not have `gguf_ptq1_0_trit`, so this file includes
-// `prism_dequant.cuh` directly.
+// `lowbit_dequant.cuh` directly.
 
 #include "common.cuh"
-#include "../prism_dequant.cuh"
+#include "../lowbit_dequant.cuh"
 
 #define PTQ1_0_BLOCK_BYTES 28
 #define PTQ1_0_BLOCK_SIZE 128
@@ -35,7 +35,7 @@ extern "C" __global__ __launch_bounds__(256, 1) void quant_gemv_ptq1_0_f32(
     float sum = 0.0f;
     for (unsigned int b = lane; b < blocks_per_row; b += WARP_SIZE) {
         const unsigned char* block = w_row + b * PTQ1_0_BLOCK_BYTES;
-        const float d = prism_load_d(block + GGUF_PTQ1_0_D_OFFSET);
+        const float d = lowbit_load_d(block + GGUF_PTQ1_0_D_OFFSET);
         unsigned int base = b * PTQ1_0_BLOCK_SIZE;
 
         for (int i = 0; i < PTQ1_0_BLOCK_SIZE; i++) {

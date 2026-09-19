@@ -1,6 +1,6 @@
 //! Single-token GDN recurrence.
 //!
-//! Port of `build_delta_net_autoregressive` (PrismML llama.cpp fork,
+//! Port of `build_delta_net_autoregressive` (llama.cpp,
 //! `src/models/delta-net-base.cpp`), rewritten for the `[batch, H, S_k, S_v]`
 //! state orientation documented on the trait.
 

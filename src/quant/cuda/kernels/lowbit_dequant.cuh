@@ -1,8 +1,8 @@
-// GGUF PrismML-fork block decoders — the ONE place these layouts are written
+// GGUF lowbit block decoders — the ONE place these layouts are written
 // for CUDA.
 //
 // Every CUDA kernel that decodes a Q1_0, Q2_0, PQ2_0 or PTQ1_0 block includes
-// this instead of restating the layout. `src/quant/cpu/kernels/dequant_prism.rs`
+// this instead of restating the layout. `src/quant/cpu/kernels/dequant_lowbit.rs`
 // is the CPU mirror; keep the two in step.
 //
 // Q1_0, Q2_0 and PQ2_0 keep `d` at the START and order elements byte-major,
@@ -25,10 +25,10 @@
 
 #include "decode.cuh"
 
-#define GGUF_PRISM_QS_OFFSET   2
+#define GGUF_LOWBIT_QS_OFFSET   2
 #define GGUF_PTQ1_0_D_OFFSET   26
 
-static __device__ __forceinline__ float prism_load_d(const unsigned char* p) {
+static __device__ __forceinline__ float lowbit_load_d(const unsigned char* p) {
     __half tmp;
     memcpy(&tmp, p, sizeof(__half));
     return __half2float(tmp);
@@ -73,10 +73,10 @@ static __device__ __forceinline__ int gguf_ptq1_0_trit(
 
 // ── int8x4 expansions ───────────────────────────────────────────────────
 //
-// Ports of `vec_dot_q1_0_q8_1` and `vec_dot_q2_0_q8_1` from the fork's
-// `ggml-cuda/vecdotq.cuh` — same LUT words, same `__byte_perm` selectors.
-// Shared by the token-batched dp4a GEMV (`gemv/prism_ntok.cuh`) and the
-// feature-major MMQ staging (`mmq/prism_tiles.cuh`), which both want a
+// Ports of `vec_dot_q1_0_q8_1` and `vec_dot_q2_0_q8_1` from `ggml-cuda`'s
+// `vecdotq.cuh` — same LUT words, same `__byte_perm` selectors.
+// Shared by the token-batched dp4a GEMV (`gemv/lowbit_ntok.cuh`) and the
+// feature-major MMQ staging (`mmq/lowbit_tiles.cuh`), which both want a
 // code run as signed int8 lanes.
 //
 // `__byte_perm` reads three bits per selector nibble; bit 3 of each nibble
@@ -91,7 +91,7 @@ static __device__ __forceinline__ int gguf_ptq1_0_trit(
 // {-1, 0, 1, 2} indexed by the code. The two final permutes re-interleave
 // even and odd: `0x5140` gathers codes 0..3 (the `lo` byte), `0x7362`
 // codes 4..7 (the `hi` byte).
-static __device__ __forceinline__ void prism_expand_code2x8(
+static __device__ __forceinline__ void lowbit_expand_code2x8(
     int lo, int hi, int* v_lo, int* v_hi
 ) {
     const int q = lo | (hi << 8);
@@ -110,7 +110,7 @@ static __device__ __forceinline__ void prism_expand_code2x8(
 // bits (2,3) and (6,7). Second pair turns each nibble into a signed byte via
 // LUT `0x01FF` ({-1, +1}). Final pair unshuffles: `0x5410` = bits 0..3,
 // `0x7632` = bits 4..7.
-static __device__ __forceinline__ void prism_expand_sign8(
+static __device__ __forceinline__ void lowbit_expand_sign8(
     int bits8, int* v_lo, int* v_hi
 ) {
     const int n0 = __byte_perm(0x11100100, 0x11100100, bits8 >> 0);
@@ -123,7 +123,7 @@ static __device__ __forceinline__ void prism_expand_sign8(
 
 // ── PTQ1_0 int8x4 expansions ────────────────────────────────────────────
 //
-// Used by the feature-major MMQ staging (`mmq/prism_tiles.cuh`), which gives
+// Used by the feature-major MMQ staging (`mmq/lowbit_tiles.cuh`), which gives
 // one lane 8 consecutive elements of a block. In the two `qs` runs those 8
 // elements read 8 CONSECUTIVE bytes at ONE trit level (the run's per-level
 // width, 16 or 8, is a multiple of 8 and `e0 % 8 == 0`); in the `qh` tail
@@ -155,7 +155,7 @@ static __device__ __forceinline__ unsigned int ptq1_0_pow3(int level) {
 // The even codes sit in bytes 0 and 2, the odd ones move up to bytes 1 and
 // 3, so element `r` lands in byte `r`; `__vsub4` then subtracts 1 per byte
 // (0 -> 0xFF = -1). Element 0 in the low byte, the order
-// `prism_expand_code2x8` produces and Q8_0's staged row stores.
+// `lowbit_expand_code2x8` produces and Q8_0's staged row stores.
 static __device__ __forceinline__ int ptq1_0_codes_to_int8(
     unsigned int prod_even, unsigned int prod_odd
 ) {
@@ -198,30 +198,30 @@ static __device__ __forceinline__ int ptq1_0_expand4(
 static __device__ __forceinline__ void q1_0_dequant_block(
     const unsigned char* block, float* out
 ) {
-    const float d = prism_load_d(block);
-    const unsigned char* qs = block + GGUF_PRISM_QS_OFFSET;
+    const float d = lowbit_load_d(block);
+    const unsigned char* qs = block + GGUF_LOWBIT_QS_OFFSET;
     for (int i = 0; i < 128; i++) out[i] = d * (float)gguf_sign_bit(qs, i);
 }
 
 static __device__ __forceinline__ void q2_0_dequant_block(
     const unsigned char* block, float* out
 ) {
-    const float d = prism_load_d(block);
-    const unsigned char* qs = block + GGUF_PRISM_QS_OFFSET;
+    const float d = lowbit_load_d(block);
+    const unsigned char* qs = block + GGUF_LOWBIT_QS_OFFSET;
     for (int i = 0; i < 64; i++) out[i] = d * (float)gguf_code2_minus_1(qs, i);
 }
 
 static __device__ __forceinline__ void pq2_0_dequant_block(
     const unsigned char* block, float* out
 ) {
-    const float d = prism_load_d(block);
-    const unsigned char* qs = block + GGUF_PRISM_QS_OFFSET;
+    const float d = lowbit_load_d(block);
+    const unsigned char* qs = block + GGUF_LOWBIT_QS_OFFSET;
     for (int i = 0; i < 128; i++) out[i] = d * (float)gguf_code2_minus_1(qs, i);
 }
 
 static __device__ __forceinline__ void ptq1_0_dequant_block(
     const unsigned char* block, float* out
 ) {
-    const float d = prism_load_d(block + GGUF_PTQ1_0_D_OFFSET);
+    const float d = lowbit_load_d(block + GGUF_PTQ1_0_D_OFFSET);
     for (int i = 0; i < 128; i++) out[i] = d * (float)gguf_ptq1_0_trit(block, i);
 }

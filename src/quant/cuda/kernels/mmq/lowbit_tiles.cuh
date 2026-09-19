@@ -1,11 +1,11 @@
-// PrismML-fork weight format policies for the feature-major MMQ family:
+// Lowbit weight format policies for the feature-major MMQ family:
 // PQ2_0, Q2_0, Q1_0 and PTQ1_0. Included by `quant_mmq_mma.cu` after
 // `MmqfQ80` and `mmqf_vec_dot_d` are defined; it is not a compilation unit
 // of its own.
 //
 // PQ2_0, Q2_0 and Q1_0 keep an f16 `d` at byte 0 and a dense bit-packed `qs`
 // run at byte 2, element order byte-major, low bits first
-// (`../prism_dequant.cuh` is the layout's one home). One block spans 64
+// (`../lowbit_dequant.cuh` is the layout's one home). One block spans 64
 // (Q2_0) or 128 (PQ2_0, Q1_0) elements under ONE scale, where the legacy
 // 32-element formats carry one scale per block. The MMA loop reads signed
 // int8 lanes at `X_QS` and one f32 scale per 32 elements at `X_DS`, so
@@ -19,10 +19,10 @@
 //   Q2_0/PQ2_0  code `j` (2 bits, low first) -> (code - 1) * d, {-1, 0, 1, 2}
 //   PTQ1_0      base-3 trit (`gguf_ptq1_0_trit`) -> trit * d, {-1, 0, 1}
 //
-// One `stage` body serves the first three through `MmqfPrism`; the three
+// One `stage` body serves the first three through `MmqfLowbit`; the three
 // aliases below fix its block geometry and its expansion. PTQ1_0 keeps `d` at
 // the END of its 28-byte block and packs its 128 elements level-major over
-// three runs, so `MmqfPrism`'s one-contiguous-run-per-chunk addressing does
+// three runs, so `MmqfLowbit`'s one-contiguous-run-per-chunk addressing does
 // not fit it; `MmqfPTQ10` below is a separate policy with the same thread
 // map and the same staged row.
 //
@@ -48,13 +48,13 @@
 
 #pragma once
 
-#include "../prism_dequant.cuh"
+#include "../lowbit_dequant.cuh"
 
 // The shared body. `CHUNK_BYTES` is a 32-element chunk of the code run: 8
 // bytes at 2 bits per element, 4 at 1 bit. `SIGN` picks the sign-bit
 // expansion over the code-2 one.
 template <int BLOCK_BYTES_, int BLOCK_ELEMS_, bool SIGN>
-struct MmqfPrism {
+struct MmqfLowbit {
     // On-disk block: one f16 scale then the packed code run.
     static constexpr int BLOCK_BYTES = BLOCK_BYTES_;
     static constexpr int BLOCK_ELEMS = BLOCK_ELEMS_;
@@ -80,7 +80,7 @@ struct MmqfPrism {
     static_assert(X_DS + 8 <= X_STRIDE, "Weight row too short: 8 chunk scales.");
     static_assert(
         X_QS == MmqfQ80::X_QS && X_DS == MmqfQ80::X_DS && X_STRIDE == MmqfQ80::X_STRIDE,
-        "The prism formats must stage into the Q8_0 row; they share `mmqf_vec_dot_d`."
+        "The lowbit formats must stage into the Q8_0 row; they share `mmqf_vec_dot_d`."
     );
 
     // Stages 256 k-values (8 chunks) of the weight tile. `b0` and `bpr`
@@ -108,7 +108,7 @@ struct MmqfPrism {
         // clamped chunk is staged but never consumed.
         const unsigned int chunk = CLAMP_K ? min(b0 + kbx, bpr - 1) : b0 + kbx;
         const unsigned long long off_qs = (unsigned long long)(chunk / CHUNKS) * BLOCK_BYTES +
-                                          GGUF_PRISM_QS_OFFSET + (chunk % CHUNKS) * CHUNK_BYTES +
+                                          GGUF_LOWBIT_QS_OFFSET + (chunk % CHUNKS) * CHUNK_BYTES +
                                           kqsx * (CHUNK_BYTES / 4);
         const unsigned int w_lo = kbx * 8 + kqsx * 2;
 
@@ -139,9 +139,9 @@ struct MmqfPrism {
                 int q_lo;
                 int q_hi;
                 if constexpr (SIGN) {
-                    prism_expand_sign8(v[u], &q_lo, &q_hi);
+                    lowbit_expand_sign8(v[u], &q_lo, &q_hi);
                 } else {
-                    prism_expand_code2x8(v[u] & 0xFF, v[u] >> 8, &q_lo, &q_hi);
+                    lowbit_expand_code2x8(v[u] & 0xFF, v[u] >> 8, &q_lo, &q_hi);
                 }
                 s_x[i * X_STRIDE + X_QS + w_lo] = q_lo;
                 s_x[i * X_STRIDE + X_QS + w_lo + 1] = q_hi;
@@ -185,11 +185,11 @@ struct MmqfPrism {
 };
 
 // PQ2_0: 34 bytes / 128 elements, 2-bit codes; one scale over 4 chunks.
-using MmqfPQ20 = MmqfPrism<34, 128, false>;
+using MmqfPQ20 = MmqfLowbit<34, 128, false>;
 // Q2_0: 18 bytes / 64 elements, 2-bit codes; one scale over 2 chunks.
-using MmqfQ20 = MmqfPrism<18, 64, false>;
+using MmqfQ20 = MmqfLowbit<18, 64, false>;
 // Q1_0: 18 bytes / 128 elements, sign bits; one scale over 4 chunks.
-using MmqfQ10 = MmqfPrism<18, 128, true>;
+using MmqfQ10 = MmqfLowbit<18, 128, true>;
 
 static_assert(MmqfPQ20::CHUNKS == 4 && MmqfQ20::CHUNKS == 2 && MmqfQ10::CHUNKS == 4,
               "Chunk counts follow the block geometry.");
@@ -198,12 +198,12 @@ static_assert(MmqfPQ20::CHUNKS == 4 && MmqfQ20::CHUNKS == 2 && MmqfQ10::CHUNKS =
 //
 // Block: `qs[24]` at 0, `qh[2]` at 24, f16 `d` at 26. Element `e` reads one
 // byte at one trit level, level-major over three runs
-// (`gguf_ptq1_0_trit` in `../prism_dequant.cuh`):
+// (`gguf_ptq1_0_trit` in `../lowbit_dequant.cuh`):
 //   e in [0, 80)     byte qs[e % 16],           level e / 16
 //   e in [80, 120)   byte qs[16 + (e - 80) % 8], level (e - 80) / 8
 //   e in [120, 128)  byte qh[(e - 120) % 2],    level (e - 120) / 2
 //
-// Same thread map as `MmqfPrism::stage`, so a lane owns 8 consecutive
+// Same thread map as `MmqfLowbit::stage`, so a lane owns 8 consecutive
 // elements `e0 .. e0 + 8` of one block, `e0 = 32 * (chunk % 4) + 8 * kqsx`,
 // `e0` in {0, 8, ..., 120}. Under the runs above that is:
 //   e0 < 80          8 consecutive bytes qs[e0 % 16 ..], ONE level e0 / 16:
@@ -216,7 +216,7 @@ static_assert(MmqfPQ20::CHUNKS == 4 && MmqfQ20::CHUNKS == 2 && MmqfQ10::CHUNKS =
 // So 15 of the 16 lane groups are "8 consecutive bytes at a group offset,
 // one level", and the `qh` tail — the lane with `chunk % 4 == 3 && kqsx ==
 // 3` — is the one bespoke case. Both go through `ptq1_0_expand4`
-// (`../prism_dequant.cuh`), one call per staged word, with a per-lane
+// (`../lowbit_dequant.cuh`), one call per staged word, with a per-lane
 // `(mask, mul)` pair that is the ONLY difference between them: a run lane
 // scales its four bytes by `pow3[level]`, the tail lane scales `qh0` and
 // `qh1` by two powers at once. Offset, mask and multipliers depend on the
@@ -241,7 +241,7 @@ struct MmqfPTQ10 {
     // No per-16 minimum, so no activation scratch.
     static constexpr int Y_SCRATCH = 0;
 
-    // Staged weight row: Q8_0's, byte for byte (see `MmqfPrism`).
+    // Staged weight row: Q8_0's, byte for byte (see `MmqfLowbit`).
     static constexpr int X_QS = 0;
     static constexpr int X_DS = 64;
     static constexpr int X_STRIDE = 76;
@@ -279,7 +279,7 @@ struct MmqfPTQ10 {
         // Byte offset of the group's source bytes inside the block, the trit
         // level of a run lane, and the `(mask, mul)` pair `ptq1_0_expand4`
         // takes for each staged word; see the run table above and the tail
-        // derivation in `../prism_dequant.cuh`.
+        // derivation in `../lowbit_dequant.cuh`.
         unsigned int group_off;
         int level;
         if (e0 < 80) {
@@ -350,7 +350,7 @@ struct MmqfPTQ10 {
 #pragma unroll
         for (int u = 0; u < SROWS; ++u) {
             const unsigned int i = (unsigned int)(u * WARPS * 4) + warp * 4 + rsub;
-            d[u] = prism_load_d(weight + (feat0 + min(i, i_max)) * rstride + off_d);
+            d[u] = lowbit_load_d(weight + (feat0 + min(i, i_max)) * rstride + off_d);
         }
 #pragma unroll
         for (int u = 0; u < SROWS; ++u) {

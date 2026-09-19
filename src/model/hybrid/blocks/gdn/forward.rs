@@ -1,8 +1,8 @@
 //! Gated DeltaNet inference forward, driven by a per-layer
 //! [`GdnState`](crate::inference::GdnState).
 //!
-//! Ports `build_layer_attn_linear` (`src/models/qwen35.cpp`) of the PrismML
-//! llama.cpp fork step for step:
+//! Ports `build_layer_attn_linear` (`src/models/qwen35.cpp`) of llama.cpp
+//! step for step:
 //!
 //! 1. `qkv = attn_qkv(x)`, `z = attn_gate(x)`
 //! 2. `beta = sigmoid(ssm_beta(x))`, `g = ssm_a * softplus(ssm_alpha(x) + ssm_dt_bias)`

@@ -1,4 +1,4 @@
-//! The four PrismML-fork descriptors — `PQ2_0`, `Q2_0`, `Q1_0`, `PTQ1_0` —
+//! The four lowbit descriptors — `PQ2_0`, `Q2_0`, `Q1_0`, `PTQ1_0` —
 //! all ternary/binary formats staged as Q8_0's row byte for byte.
 
 use super::FeatMajorFormat;
@@ -13,8 +13,8 @@ use crate::quant::QuantFormat;
 /// last 256-k staging group can be partial.
 ///
 /// `prefers_tile_parallel_fallback` is measured: `mmq_kernel_compare --format
-/// pq2_0 --n 5120 --k 5120 --m 8 --split-k 2` on an Ampere-class part gives
-/// tile-parallel 51 us vs split-K 57 us, twice, so the grid keeps the flag.
+/// pq2_0 --n 5120 --k 5120 --m 8 --split-k 2` has tile-parallel beat split-K
+/// at this geometry, so the grid keeps the flag.
 pub(in crate::quant::cuda::quant_matmul) const PQ2_0: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::PQ2_0,
     kernel_infix: "pq2_0",
@@ -32,8 +32,8 @@ pub(in crate::quant::cuda::quant_matmul) const PQ2_0: FeatMajorFormat = FeatMajo
 /// scale into both 32-element slots it covers. K needs only a whole
 /// 64-element block, so a row's last 256-k staging group can be partial.
 ///
-/// `prefers_tile_parallel_fallback` is measured as the PQ2_0 descriptor says:
-/// tile-parallel 55 us vs split-K 58 us with `--format q2_0`.
+/// `prefers_tile_parallel_fallback` is measured as the PQ2_0 descriptor says,
+/// with `--format q2_0`: tile-parallel beats split-K, so the flag stays set.
 pub(in crate::quant::cuda::quant_matmul) const Q2_0: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q2_0,
     kernel_infix: "q2_0",
@@ -51,8 +51,8 @@ pub(in crate::quant::cuda::quant_matmul) const Q2_0: FeatMajorFormat = FeatMajor
 /// into all four 32-element slots it covers. K needs only a whole 128-element
 /// block, so a row's last 256-k staging group can be partial.
 ///
-/// `prefers_tile_parallel_fallback` is measured as the PQ2_0 descriptor says:
-/// tile-parallel 53 us vs split-K 59 us with `--format q1_0`.
+/// `prefers_tile_parallel_fallback` is measured as the PQ2_0 descriptor says,
+/// with `--format q1_0`: tile-parallel beats split-K, so the flag stays set.
 pub(in crate::quant::cuda::quant_matmul) const Q1_0: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::Q1_0,
     kernel_infix: "q1_0",
@@ -72,12 +72,12 @@ pub(in crate::quant::cuda::quant_matmul) const Q1_0: FeatMajorFormat = FeatMajor
 /// covers. K needs only a whole 128-element block, so a row's last 256-k
 /// staging group can be partial.
 ///
-/// `prefers_tile_parallel_fallback` is the tuner's pick on an Ampere-class
-/// part at the geometry where the flag decides (two token tiles, `n` at
-/// the veto threshold). A forced `--split-k 2` at m = 8 (`mmq_kernel_compare
-/// --format ptq1_0 --n 5120 --k 5120`) has the pair ahead, 61 vs 79 us,
-/// but the production rule never emits the pair at that geometry, so that
-/// figure does not set the flag.
+/// `prefers_tile_parallel_fallback` is the tuner's pick at the geometry
+/// where the flag decides (two token tiles, `n` at the veto threshold). A
+/// forced `--split-k 2` at m = 8 (`mmq_kernel_compare --format ptq1_0 --n
+/// 5120 --k 5120`) has the split-K pair ahead at that one forced geometry,
+/// but the production rule never emits the pair there, so that comparison
+/// does not set the flag.
 pub(in crate::quant::cuda::quant_matmul) const PTQ1_0: FeatMajorFormat = FeatMajorFormat {
     quant_format: QuantFormat::PTQ1_0,
     kernel_infix: "ptq1_0",
@@ -95,19 +95,19 @@ mod tests {
     use super::super::legacy::Q8_0;
     use super::*;
 
-    /// The four prism formats stage into the Q8_0 row, so their strides must
+    /// The four lowbit formats stage into the Q8_0 row, so their strides must
     /// stay equal to it and with them the family's shared-memory request at
     /// every token tile. Their K multiple is one weight block — 128, 64, 128,
     /// 128 — which is finer than a 256-k group, so each takes the ragged tail.
     #[test]
-    fn the_prism_descriptors_name_the_compiled_symbols() {
-        let prism: [(&FeatMajorFormat, &str, u32); 4] = [
+    fn the_lowbit_descriptors_name_the_compiled_symbols() {
+        let lowbit: [(&FeatMajorFormat, &str, u32); 4] = [
             (&PQ2_0, "pq2_0", 128),
             (&Q2_0, "q2_0", 64),
             (&Q1_0, "q1_0", 128),
             (&PTQ1_0, "ptq1_0", 128),
         ];
-        for (fm, infix, k_multiple) in prism {
+        for (fm, infix, k_multiple) in lowbit {
             assert_eq!(fm.kernel_infix, infix);
             assert_eq!(
                 format!("quant_mmq_{}_q8_1_mma_x{}", fm.kernel_infix, 8),
@@ -138,8 +138,8 @@ mod tests {
                 Cadence::Halves
             )));
         }
-        // The tuner's pick on an Ampere-class part at the deciding geometry:
-        // tile-parallel for all four.
+        // The tuner's pick at the deciding geometry: tile-parallel for all
+        // four.
         const { assert!(PQ2_0.prefers_tile_parallel_fallback) };
         const { assert!(Q2_0.prefers_tile_parallel_fallback) };
         const { assert!(Q1_0.prefers_tile_parallel_fallback) };

@@ -1,4 +1,4 @@
-//! Weight-name validation for the PrismML Hadamard contract: which tensors
+//! Weight-name validation for the Hadamard contract: which tensors
 //! are foldable into a Hadamard-aware matmul, and the single verified
 //! inverse-after-lookup table.
 

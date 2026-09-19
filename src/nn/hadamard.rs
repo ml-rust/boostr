@@ -1,5 +1,5 @@
-//! Hadamard activation-rotation basis, matching the PrismML llama.cpp fork's
-//! forward/inverse contract (see `crate::format::gguf::prism_hadamard`).
+//! Hadamard activation-rotation basis, matching llama.cpp's
+//! forward/inverse contract (see `crate::format::gguf::hadamard_contract`).
 //!
 //! Forward (before a rotated matmul): sign-flip the activation, then
 //! transform. Inverse (after a rotated lookup): transform, then sign-flip.

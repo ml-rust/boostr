@@ -1,9 +1,9 @@
 //! Chunked GDN prefill.
 //!
-//! Port of `build_delta_net_chunking` (PrismML llama.cpp fork,
+//! Port of `build_delta_net_chunking` (llama.cpp,
 //! `src/models/delta-net-base.cpp`), rewritten for the `[batch, H, S_k, S_v]`
 //! state orientation documented on the trait. Every tensor below is
-//! row-major; the fork's `ne[0]` is the last axis here.
+//! row-major; llama.cpp's `ne[0]` is the last axis here.
 
 use super::common::check_gdn_shapes;
 use crate::error::{Error, Result};

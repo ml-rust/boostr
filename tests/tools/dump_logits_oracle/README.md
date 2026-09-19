@@ -1,7 +1,7 @@
-# prism_dump_logits
+# dump_logits_oracle
 
-Oracle for `tests/qwen35_parity.rs`: loads a GGUF model via the PrismML
-llama.cpp fork, prefills fixed ids, greedily decodes 3 more, dumps every
+Oracle for `tests/qwen35_parity.rs`: loads a GGUF model via llama.cpp,
+prefills fixed ids, greedily decodes 3 more, dumps every
 position's logit row to a binary file.
 
 Build (`<fork>` = a checkout of `PrismML-Eng/llama.cpp`, branch `prism`, built with `-DGGML_CUDA=ON`):

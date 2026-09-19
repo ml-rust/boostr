@@ -5,7 +5,7 @@
 //!
 //! - Mamba2: `norm(x * silu(z))` — gate first, then normalize.
 //! - Gated DeltaNet (Qwen3-Next): `silu(z) * norm(x)` — normalize first,
-//!   then gate. Matches `build_norm_gated` in the PrismML llama.cpp fork.
+//!   then gate. Matches `build_norm_gated` in llama.cpp.
 //!
 //! Mamba2 still gates inline in `model/mamba/mamba2/forward.rs` (step 11)
 //! and `model/mamba/mamba2/inference.rs` (step 11); a later unit switches

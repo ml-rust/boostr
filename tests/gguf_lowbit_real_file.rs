@@ -1,5 +1,5 @@
 //! GGUF reader + dequant kernels against a real Ternary-Bonsai-2-27B checkpoint,
-//! for the two PrismML fork formats `PQ2_0` and `PTQ1_0`.
+//! for the two lowbit formats `PQ2_0` and `PTQ1_0`.
 //!
 //! # Why this file exists
 //!
@@ -18,9 +18,9 @@
 //! - `Ternary-Bonsai-2-27B-PTQ1_0.gguf`
 //!
 //! ```bash
-//! cargo nextest run -p boostr --test gguf_prism_real_file
+//! cargo nextest run -p boostr --test gguf_lowbit_real_file
 //! BOOSTR_BONSAI2_DIR=/path/to/dir cargo nextest run --features cuda \
-//!   -p boostr --test gguf_prism_real_file
+//!   -p boostr --test gguf_lowbit_real_file
 //! ```
 //!
 //! # Memory
@@ -33,7 +33,7 @@
 
 use std::path::{Path, PathBuf};
 
-use boostr::format::gguf::{GgmlType, Gguf, PrismHadamardConfig, SignMode};
+use boostr::format::gguf::{GgmlType, Gguf, HadamardContract, SignMode};
 use boostr::quant::DequantOps;
 use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -56,7 +56,7 @@ const PTQ1_0_FILE: &str = "Ternary-Bonsai-2-27B-PTQ1_0.gguf";
 const TENSOR: &str = "blk.0.attn_gate.weight";
 const EXPECTED_NUMEL: usize = 5120 * 6144;
 
-/// Tensors checked in `reader_reports_prism_types` — one per major role
+/// Tensors checked in `reader_reports_lowbit_types` — one per major role
 /// (attention, embedding, output head), so a format assignment that only
 /// covers one role cannot pass by accident.
 const TYPE_CHECK_TENSORS: &[&str] = &[TENSOR, "token_embd.weight", "output.weight"];
@@ -164,7 +164,7 @@ fn ptq1_0_matches_f16_oracle() {
 }
 
 #[test]
-fn reader_reports_prism_types() {
+fn reader_reports_lowbit_types() {
     let Some((_, pq2_0_path, ptq1_0_path)) = require_files() else {
         return;
     };
@@ -215,14 +215,14 @@ fn reader_reports_prism_types() {
 /// Parses the full `prism.hadamard.*` contract out of the real PQ2_0 file
 /// and checks it against the fixture's known-good values.
 #[test]
-fn prism_hadamard_config_parses_real_file() {
+fn hadamard_contract_parses_real_file() {
     let Some((_, pq2_0_path, _)) = require_files() else {
         return;
     };
 
     let pq2_0 =
         Gguf::open(&pq2_0_path).unwrap_or_else(|e| panic!("open {}: {e}", pq2_0_path.display()));
-    let cfg = PrismHadamardConfig::from_metadata(pq2_0.metadata())
+    let cfg = HadamardContract::from_metadata(pq2_0.metadata())
         .unwrap_or_else(|e| {
             panic!(
                 "parse prism.hadamard metadata in {}: {e}",

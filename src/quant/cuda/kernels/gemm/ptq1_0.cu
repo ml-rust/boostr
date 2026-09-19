@@ -1,10 +1,10 @@
 // PTQ1_0 tiled GEMM — activation [M,K] × weight [N,K]^T → output [M,N]
 // PTQ1_0 block: 128 elements, 28 bytes.
 // Layout: qs[0..24], qh[24..26], d:f16[26..28] — the scale is at the END.
-// The decode helpers and offsets come from `../prism_dequant.cuh`; this
+// The decode helpers and offsets come from `../lowbit_dequant.cuh`; this
 // file restates neither.
 
-#include "../prism_dequant.cuh"
+#include "../lowbit_dequant.cuh"
 
 #define PTQ1_0_BLOCK_ELEMS 128
 #define PTQ1_0_BLOCK_BYTES 28
@@ -27,7 +27,7 @@ extern "C" __global__ void quant_matmul_ptq1_0_f32(
     float sum = 0.0f;
     for (unsigned int b = 0; b < blocks_per_row; b++) {
         const unsigned char* block = w_row + b * PTQ1_0_BLOCK_BYTES;
-        const float d = prism_load_d(block + GGUF_PTQ1_0_D_OFFSET);
+        const float d = lowbit_load_d(block + GGUF_PTQ1_0_D_OFFSET);
         unsigned int base = b * PTQ1_0_BLOCK_ELEMS;
 
         for (int i = 0; i < PTQ1_0_BLOCK_ELEMS; i++) {

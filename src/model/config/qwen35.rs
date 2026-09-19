@@ -1,9 +1,9 @@
 //! Full-attention layer configuration for `qwen35`.
 //!
-//! Field names follow the GGUF keys the PrismML llama.cpp fork reads in
+//! Field names follow the GGUF keys llama.cpp reads in
 //! `build_layer_attn` (`src/models/qwen35.cpp`):
 //!
-//! | Field           | Fork hparam                 | Bonsai          |
+//! | Field           | llama.cpp hparam            | Bonsai          |
 //! | --------------- | --------------------------- | --------------- |
 //! | `hidden_size`   | `n_embd`                    | 5120            |
 //! | `num_heads`     | `n_head`                    | 24              |

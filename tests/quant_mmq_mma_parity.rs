@@ -10,7 +10,7 @@
 //! The PQ2_0, Q2_0 and Q1_0 tests at the bottom check the feature-major
 //! tensor-core kernel against the token-batched dp4a GEMV on one Q8_1
 //! activation. Those two do NOT share a float order, so they are held to a
-//! magnitude-relative tolerance; see [`prism_mma_matches_gemv`]. PTQ1_0 has
+//! magnitude-relative tolerance; see [`lowbit_mma_matches_gemv`]. PTQ1_0 has
 //! no dp4a GEMV, so its feature-major kernel is checked against the F32 GEMV
 //! `quant_gemv_ptq1_0_f32` on the Q8_1 activation dequantized back to f32;
 //! see [`ptq1_0_mma_matches_f32_gemv`].
@@ -484,11 +484,11 @@ fn mma_kernel_matches_dp4a_kernel() {
     }
 }
 
-/// Builds a PrismML-fork weight buffer: `n * (k / block_elems)` blocks of
+/// Builds a lowbit weight buffer: `n * (k / block_elems)` blocks of
 /// `block_bytes`, f16 `d` at byte 0 then `block_bytes - 2` bytes of packed
 /// codes. Every bit pattern of the code run is a valid block, so the quant
 /// stream is used as raw bytes.
-fn build_prism_weight(n: usize, k: usize, block_elems: usize, block_bytes: usize) -> Vec<u8> {
+fn build_lowbit_weight(n: usize, k: usize, block_elems: usize, block_bytes: usize) -> Vec<u8> {
     let bpr = k / block_elems;
     let mut out = vec![0u8; n * bpr * block_bytes];
     for row in 0..n {
@@ -506,26 +506,26 @@ fn build_prism_weight(n: usize, k: usize, block_elems: usize, block_bytes: usize
 
 /// PQ2_0: 34-byte blocks of 128 elements, 32 bytes of 2-bit codes at byte 2.
 fn build_pq2_0_weight(n: usize, k: usize) -> Vec<u8> {
-    build_prism_weight(n, k, 128, 34)
+    build_lowbit_weight(n, k, 128, 34)
 }
 
 /// Q2_0: 18-byte blocks of 64 elements, 16 bytes of 2-bit codes at byte 2.
 fn build_q2_0_weight(n: usize, k: usize) -> Vec<u8> {
-    build_prism_weight(n, k, 64, 18)
+    build_lowbit_weight(n, k, 64, 18)
 }
 
 /// Q1_0: 18-byte blocks of 128 elements, 16 bytes of sign bits at byte 2.
 fn build_q1_0_weight(n: usize, k: usize) -> Vec<u8> {
-    build_prism_weight(n, k, 128, 18)
+    build_lowbit_weight(n, k, 128, 18)
 }
 
-/// The prism value maps, on the code run of one block. `code2` is
+/// The lowbit value maps, on the code run of one block. `code2` is
 /// `(code - 1)`, low bits first; `sign` is `+1` for a set bit, `-1` clear.
-fn prism_code2(qs: &[u8], elem: usize) -> i32 {
+fn lowbit_code2(qs: &[u8], elem: usize) -> i32 {
     i32::from((qs[elem >> 2] >> ((elem & 3) * 2)) & 0x03) - 1
 }
 
-fn prism_sign(qs: &[u8], elem: usize) -> i32 {
+fn lowbit_sign(qs: &[u8], elem: usize) -> i32 {
     if (qs[elem >> 3] >> (elem & 7)) & 1 == 1 {
         1
     } else {
@@ -533,8 +533,8 @@ fn prism_sign(qs: &[u8], elem: usize) -> i32 {
     }
 }
 
-/// The geometry of one prism format, as the tests below need it.
-struct PrismCase {
+/// The geometry of one lowbit format, as the tests below need it.
+struct LowbitCase {
     gemv_kernel: &'static str,
     gemv_module: &'static str,
     mma_kernel: &'static str,
@@ -547,8 +547,8 @@ struct PrismCase {
 /// sum of the magnitudes of its 32-element block terms. Each block term is
 /// exact — an integer dot times two f16 scales — so the magnitude bounds the
 /// float error of any accumulation order.
-fn prism_reference(
-    case: &PrismCase,
+fn lowbit_reference(
+    case: &LowbitCase,
     weight: &[u8],
     act: &[u8],
     token: usize,
@@ -608,7 +608,7 @@ fn repack_q8_1_mmq(act: &[u8], m: usize, k: usize, ntok: usize) -> Vec<u8> {
     out
 }
 
-/// Magnitude-relative bound both prism paths are held to, against each other
+/// Magnitude-relative bound both lowbit paths are held to, against each other
 /// and against the f64 reference.
 ///
 /// The two kernels do NOT share a float order, so a bitwise check is the
@@ -623,18 +623,18 @@ fn repack_q8_1_mmq(act: &[u8], m: usize, k: usize, ntok: usize) -> Vec<u8> {
 /// rounding, so the error of either order is a few ulps of the magnitude
 /// sum; `1e-5` is the bound `examples/mmq_kernel_compare.rs` holds every
 /// kernel to against the same reference.
-const PRISM_RTOL: f64 = 1e-5;
+const LOWBIT_RTOL: f64 = 1e-5;
 
 /// Token tile of the feature-major variant launched below. 64 tokens takes
 /// the two-half cadence, one token tile, and dynamic shared memory below the
 /// opt-in threshold.
-const PRISM_MMQ_X: u32 = 64;
+const LOWBIT_MMQ_X: u32 = 64;
 
-/// `false` when the prism tests cannot run here: no CUDA, or a GPU before
+/// `false` when the lowbit tests cannot run here: no CUDA, or a GPU before
 /// sm_80, which `mma.sync.aligned.m16n8k32` requires (`caps.bf16` marks
 /// that floor, so a pre-Ampere device skips instead of failing to load the
 /// module). Prints the loud skip either way.
-fn prism_device_ready(name: &str) -> bool {
+fn lowbit_device_ready(name: &str) -> bool {
     if !numr::runtime::cuda::is_cuda_available() {
         println!("!! {name} SKIPPED: CUDA is not available on this machine. NOTHING WAS VERIFIED.");
         eprintln!(
@@ -657,12 +657,12 @@ fn prism_device_ready(name: &str) -> bool {
 }
 
 /// Launches the feature-major kernel `mma_kernel` at token tile
-/// [`PRISM_MMQ_X`] on the repacked activation `packed_ptr`: grid (token
+/// [`LOWBIT_MMQ_X`] on the repacked activation `packed_ptr`: grid (token
 /// tiles, feature tiles), 256 threads, dynamic shared memory of one 76-int
 /// weight row per feature plus one 36-int activation record per token
 /// (`smem_bytes` in `tiling/`). Does not synchronize.
 #[allow(clippy::too_many_arguments)]
-fn launch_prism_mma(
+fn launch_lowbit_mma(
     client: &CudaClient,
     device_index: usize,
     mma_kernel: &str,
@@ -676,11 +676,11 @@ fn launch_prism_mma(
     let m_u32 = m as u32;
     let k_u32 = k as u32;
     let n_u32 = n as u32;
-    let ntok = PRISM_MMQ_X;
+    let ntok = LOWBIT_MMQ_X;
     let mma_module =
         kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE).unwrap();
     let mma_func = kernels::get_kernel_function(&mma_module, mma_kernel).unwrap();
-    let smem = 4 * (128 * 76 + PRISM_MMQ_X * 36);
+    let smem = 4 * (128 * 76 + LOWBIT_MMQ_X * 36);
     mma_func
         .set_attribute(
             cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
@@ -688,7 +688,7 @@ fn launch_prism_mma(
         )
         .unwrap();
     let cfg_mma = LaunchConfig {
-        grid_dim: (m_u32.div_ceil(PRISM_MMQ_X), n_u32.div_ceil(128), 1),
+        grid_dim: (m_u32.div_ceil(LOWBIT_MMQ_X), n_u32.div_ceil(128), 1),
         block_dim: (256, 1, 1),
         shared_mem_bytes: smem,
     };
@@ -707,16 +707,16 @@ fn launch_prism_mma(
 
 /// Launches the feature-major MMA kernel and the `_n4` token-batched GEMV on
 /// the same Q8_1 activation, checks both against the f64 reference and
-/// against each other within [`PRISM_RTOL`]. `k` is chosen by the caller so
+/// against each other within [`LOWBIT_RTOL`]. `k` is chosen by the caller so
 /// the last 256-k staging group is partial and the ragged tail runs.
-fn prism_mma_matches_gemv(name: &str, case: &PrismCase, weight_bytes: &[u8], k: usize) {
-    if !prism_device_ready(name) {
+fn lowbit_mma_matches_gemv(name: &str, case: &LowbitCase, weight_bytes: &[u8], k: usize) {
+    if !lowbit_device_ready(name) {
         return;
     }
     let _lock = cuda_lock();
 
     // N does not divide the 128-feature tile, so the row clamp runs.
-    let m: usize = PRISM_MMQ_X as usize;
+    let m: usize = LOWBIT_MMQ_X as usize;
     let n: usize = 96;
     assert!(
         k.is_multiple_of(case.block_elems),
@@ -771,7 +771,7 @@ fn prism_mma_matches_gemv(name: &str, case: &PrismCase, weight_bytes: &[u8], k: 
         builder.launch(cfg_gemv).unwrap();
     }
 
-    launch_prism_mma(
+    launch_lowbit_mma(
         &client,
         device_index,
         case.mma_kernel,
@@ -792,7 +792,8 @@ fn prism_mma_matches_gemv(name: &str, case: &PrismCase, weight_bytes: &[u8], k: 
     for token in 0..m {
         for feat in 0..n {
             let idx = token * n + feat;
-            let (want, magnitude) = prism_reference(case, weight_bytes, &act_bytes, token, feat, k);
+            let (want, magnitude) =
+                lowbit_reference(case, weight_bytes, &act_bytes, token, feat, k);
             let scale = magnitude.max(f64::MIN_POSITIVE);
             let g = f64::from(gemv_host[idx]);
             let a = f64::from(mma_host[idx]);
@@ -800,17 +801,17 @@ fn prism_mma_matches_gemv(name: &str, case: &PrismCase, weight_bytes: &[u8], k: 
             let err_mma = (a - want).abs() / scale;
             let err_pair = (a - g).abs() / scale;
             assert!(
-                err_gemv <= PRISM_RTOL,
+                err_gemv <= LOWBIT_RTOL,
                 "{name}: GEMV disagrees with the f64 reference at (token={token}, feat={feat}): \
                  got {g}, want {want}, magnitude-relative error {err_gemv:.3e}"
             );
             assert!(
-                err_mma <= PRISM_RTOL,
+                err_mma <= LOWBIT_RTOL,
                 "{name}: MMA disagrees with the f64 reference at (token={token}, feat={feat}): \
                  got {a}, want {want}, magnitude-relative error {err_mma:.3e}"
             );
             assert!(
-                err_pair <= PRISM_RTOL,
+                err_pair <= LOWBIT_RTOL,
                 "{name}: MMA and GEMV disagree at (token={token}, feat={feat}): mma={a}, \
                  gemv={g}, magnitude-relative error {err_pair:.3e}"
             );
@@ -818,7 +819,7 @@ fn prism_mma_matches_gemv(name: &str, case: &PrismCase, weight_bytes: &[u8], k: 
         }
     }
     println!(
-        "{name}: {} outputs within {PRISM_RTOL:.0e} (worst {worst:.2e})",
+        "{name}: {} outputs within {LOWBIT_RTOL:.0e} (worst {worst:.2e})",
         m * n
     );
 }
@@ -828,15 +829,15 @@ fn prism_mma_matches_gemv(name: &str, case: &PrismCase, weight_bytes: &[u8], k: 
 #[test]
 fn pq2_0_mma_kernel_matches_gemv_kernel() {
     let k = 640;
-    prism_mma_matches_gemv(
+    lowbit_mma_matches_gemv(
         "pq2_0_mma_kernel_matches_gemv_kernel",
-        &PrismCase {
+        &LowbitCase {
             gemv_kernel: "quant_gemv_pq2_0_q8_1_mwr_n4",
             gemv_module: GEMV_PQ2_0_MODULE,
             mma_kernel: "quant_mmq_pq2_0_q8_1_mma_x64",
             block_elems: 128,
             block_bytes: 34,
-            decode: prism_code2,
+            decode: lowbit_code2,
         },
         &build_pq2_0_weight(96, k),
         k,
@@ -848,15 +849,15 @@ fn pq2_0_mma_kernel_matches_gemv_kernel() {
 #[test]
 fn q2_0_mma_kernel_matches_gemv_kernel() {
     let k = 576;
-    prism_mma_matches_gemv(
+    lowbit_mma_matches_gemv(
         "q2_0_mma_kernel_matches_gemv_kernel",
-        &PrismCase {
+        &LowbitCase {
             gemv_kernel: "quant_gemv_q2_0_q8_1_mwr_n4",
             gemv_module: GEMV_Q2_0_MODULE,
             mma_kernel: "quant_mmq_q2_0_q8_1_mma_x64",
             block_elems: 64,
             block_bytes: 18,
-            decode: prism_code2,
+            decode: lowbit_code2,
         },
         &build_q2_0_weight(96, k),
         k,
@@ -868,15 +869,15 @@ fn q2_0_mma_kernel_matches_gemv_kernel() {
 #[test]
 fn q1_0_mma_kernel_matches_gemv_kernel() {
     let k = 640;
-    prism_mma_matches_gemv(
+    lowbit_mma_matches_gemv(
         "q1_0_mma_kernel_matches_gemv_kernel",
-        &PrismCase {
+        &LowbitCase {
             gemv_kernel: "quant_gemv_q1_0_q8_1_mwr_n4",
             gemv_module: GEMV_Q1_0_MODULE,
             mma_kernel: "quant_mmq_q1_0_q8_1_mma_x64",
             block_elems: 128,
             block_bytes: 18,
-            decode: prism_sign,
+            decode: lowbit_sign,
         },
         &build_q1_0_weight(96, k),
         k,
@@ -885,8 +886,8 @@ fn q1_0_mma_kernel_matches_gemv_kernel() {
 
 // ── PTQ1_0 ─────────────────────────────────────────────────────────────
 
-/// Packs five trits the way the fork's `quantize_row_ptq1_0_ref` does, and
-/// as `pack5` in the test module of `src/quant/cpu/kernels/dequant_prism.rs`:
+/// Packs five trits the way llama.cpp's `quantize_row_ptq1_0_ref` does, and
+/// as `pack5` in the test module of `src/quant/cpu/kernels/dequant_lowbit.rs`:
 /// base 3 with the FIRST trit most significant, then a ceiling scale by
 /// 256/243. `gguf_base3_trit` recovers trit `level` by a wrapping 8-bit
 /// multiply with `pow3[level]` followed by `(q * 3) >> 8`, so level 0 is the
@@ -987,7 +988,7 @@ fn ptq1_0_trit(block: &[u8], elem: usize) -> i64 {
 
 /// f64 reference for one PTQ1_0 output element over the Q8_1 activation,
 /// and the sum of the magnitudes of its 32-element block terms, as
-/// [`prism_reference`] computes them. Each term is exact — an integer trit
+/// [`lowbit_reference`] computes them. Each term is exact — an integer trit
 /// dot times two f16 scales — so the magnitude bounds the float error of
 /// any accumulation order.
 fn ptq1_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
@@ -1035,24 +1036,24 @@ fn dequant_q8_1_activation(act: &[u8], m: usize, k: usize) -> Vec<f32> {
 /// Launches `quant_mmq_ptq1_0_q8_1_mma_x64` on the repacked Q8_1 activation
 /// and `quant_gemv_ptq1_0_f32` on that activation dequantized to f32, and
 /// checks both against the f64 reference and against each other within
-/// [`PRISM_RTOL`].
+/// [`LOWBIT_RTOL`].
 ///
 /// PTQ1_0 has no dp4a GEMV, so the F32 GEMV is the reference kernel. The MMA
 /// path quantizes its activation to Q8_1 and the F32 GEMV does not, so the
 /// two paths are given the SAME activation by dequantizing the Q8_1 record
 /// ([`dequant_q8_1_activation`]): every term of the f64 reference is then
-/// exact for both, and [`PRISM_RTOL`] — the bound the prism tests above
+/// exact for both, and [`LOWBIT_RTOL`] — the bound the lowbit tests above
 /// and `examples/mmq_kernel_compare.rs` already use — holds the F32 GEMV's
 /// f32 sum and the MMA kernel's per-chunk f32 folds alike. `k` is chosen
 /// so the last 256-k staging group is partial and the ragged tail runs.
 fn ptq1_0_mma_matches_f32_gemv(name: &str, weight_bytes: &[u8], k: usize) {
-    if !prism_device_ready(name) {
+    if !lowbit_device_ready(name) {
         return;
     }
     let _lock = cuda_lock();
 
     // N does not divide the 128-feature tile, so the row clamp runs.
-    let m: usize = PRISM_MMQ_X as usize;
+    let m: usize = LOWBIT_MMQ_X as usize;
     let n: usize = 96;
     assert!(k.is_multiple_of(128), "{name}: K must be whole blocks");
     assert!(
@@ -1105,7 +1106,7 @@ fn ptq1_0_mma_matches_f32_gemv(name: &str, weight_bytes: &[u8], k: usize) {
         builder.launch(cfg_gemv).unwrap();
     }
 
-    launch_prism_mma(
+    launch_lowbit_mma(
         &client,
         device_index,
         "quant_mmq_ptq1_0_q8_1_mma_x64",
@@ -1134,17 +1135,17 @@ fn ptq1_0_mma_matches_f32_gemv(name: &str, weight_bytes: &[u8], k: usize) {
             let err_mma = (a - want).abs() / scale;
             let err_pair = (a - g).abs() / scale;
             assert!(
-                err_gemv <= PRISM_RTOL,
+                err_gemv <= LOWBIT_RTOL,
                 "{name}: F32 GEMV disagrees with the f64 reference at (token={token}, \
                  feat={feat}): got {g}, want {want}, magnitude-relative error {err_gemv:.3e}"
             );
             assert!(
-                err_mma <= PRISM_RTOL,
+                err_mma <= LOWBIT_RTOL,
                 "{name}: MMA disagrees with the f64 reference at (token={token}, feat={feat}): \
                  got {a}, want {want}, magnitude-relative error {err_mma:.3e}"
             );
             assert!(
-                err_pair <= PRISM_RTOL,
+                err_pair <= LOWBIT_RTOL,
                 "{name}: MMA and F32 GEMV disagree at (token={token}, feat={feat}): mma={a}, \
                  gemv={g}, magnitude-relative error {err_pair:.3e}"
             );
@@ -1152,7 +1153,7 @@ fn ptq1_0_mma_matches_f32_gemv(name: &str, weight_bytes: &[u8], k: usize) {
         }
     }
     println!(
-        "{name}: {} outputs within {PRISM_RTOL:.0e} (worst {worst:.2e})",
+        "{name}: {} outputs within {LOWBIT_RTOL:.0e} (worst {worst:.2e})",
         m * n
     );
 }

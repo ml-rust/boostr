@@ -1,6 +1,6 @@
 //! The [`Qwen35Model`] type, its layer structs, and [`Qwen35Model::new`].
 //!
-//! Layer structure, from the fork's `qwen35.cpp` graph:
+//! Layer structure, matching the `qwen35.cpp` graph:
 //!
 //! ```text
 //! h   = x + mixer(attn_norm(x))            // mixer: GDN or gated attention

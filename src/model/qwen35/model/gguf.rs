@@ -5,7 +5,7 @@
 //! Names are the HF-style ones `gguf_to_hf_name_for_arch(Some("qwen35"), _)`
 //! produces. The Hadamard contract is keyed on the ORIGINAL GGUF names
 //! (`blk.N.attn_q.weight`), so [`Attach`] rebuilds those from the layer
-//! index and suffix before asking `PrismHadamardConfig::rotates`.
+//! index and suffix before asking `HadamardContract::rotates`.
 //!
 //! # Activation dtype
 //!
@@ -19,7 +19,7 @@
 use super::build::{Qwen35Block, Qwen35Model};
 use super::gguf_layers::{attention_layer, gdn_layer, rms_norm};
 use crate::error::{Error, Result};
-use crate::format::gguf::PrismHadamardConfig;
+use crate::format::gguf::HadamardContract;
 use crate::model::config::UniversalConfig;
 use crate::nn::{
     HadamardRotation, MaybeQuantEmbedding, MaybeQuantLinear, MaybeRotatedEmbedding,
@@ -39,13 +39,13 @@ use std::collections::HashMap;
 /// shares the width — `Tensor::clone` shares storage rather than copying
 /// device memory.
 pub(super) struct Attach<'a, R: Runtime> {
-    hadamard: Option<&'a PrismHadamardConfig>,
+    hadamard: Option<&'a HadamardContract>,
     device: &'a R::Device,
     by_width: RefCell<HashMap<usize, HadamardRotation<R>>>,
 }
 
 impl<'a, R: Runtime<DType = DType>> Attach<'a, R> {
-    pub(super) fn new(hadamard: Option<&'a PrismHadamardConfig>, device: &'a R::Device) -> Self {
+    pub(super) fn new(hadamard: Option<&'a HadamardContract>, device: &'a R::Device) -> Self {
         Self {
             hadamard,
             device,
@@ -57,11 +57,7 @@ impl<'a, R: Runtime<DType = DType>> Attach<'a, R> {
     /// when `self.hadamard` is `Some`; the caller checks `rotates` /
     /// `inverts` first, which fail closed on `None`. Cached per `width` in
     /// `self.by_width`.
-    fn rotation(
-        &self,
-        hadamard: &PrismHadamardConfig,
-        width: usize,
-    ) -> Result<HadamardRotation<R>> {
+    fn rotation(&self, hadamard: &HadamardContract, width: usize) -> Result<HadamardRotation<R>> {
         if let Some(cached) = self.by_width.borrow().get(&width) {
             return Ok(cached.clone());
         }
@@ -341,7 +337,7 @@ mod tests {
     /// A `prism.hadamard.*` block naming `output.weight`, layer 0's
     /// `ffn_down` and layer 1's `attn_q` as rotated, and `token_embd.weight`
     /// as inverse. Sign widths 8 (`HIDDEN`) and 16 (`INTER`), block 4.
-    fn hadamard_contract() -> PrismHadamardConfig {
+    fn hadamard_contract() -> HadamardContract {
         use crate::format::gguf::{GgufMetadata, GgufValue};
         let strings = |names: &[&str]| {
             GgufValue::Array(
@@ -387,7 +383,7 @@ mod tests {
         ] {
             m.kv.insert(k.into(), v);
         }
-        PrismHadamardConfig::from_metadata(&m).unwrap().unwrap()
+        HadamardContract::from_metadata(&m).unwrap().unwrap()
     }
 
     #[test]

@@ -142,7 +142,7 @@ fn payload(i: usize, b: usize) -> u8 {
 
 /// Deterministic payload byte like `payload`, scaled into `0..=max`.
 ///
-/// PTQ1_0's packer (`dequant_prism.rs::pack5`/`pack4`) forms a base-3 sum
+/// PTQ1_0's packer (`dequant_lowbit.rs::pack5`/`pack4`) forms a base-3 sum
 /// of at most 242 for `qs` and 80 for `qh` before its 256/243 ceiling scale
 /// spreads those 243 (81) values over `0..=255`. `gguf_base3_trit` decodes
 /// every byte, so a bounded index-varying fixture is valid without being the
@@ -394,7 +394,7 @@ const COSINE_FLOOR: f64 = 0.999;
 /// and 0 for the rest. `Q4_0`, `Q5_0`, `Q4_1`, `Q5_1`, `IQ4NL`, `IQ4XS`, the
 /// six grid-indexed IQ formats `IQ2XXS`, `IQ2XS`, `IQ2S`, `IQ3XXS`, `IQ3S` and
 /// `IQ1S` reach it through the token-batched dp4a GEMV, which has no
-/// single-token sibling. The PrismML-fork `PQ2_0`, `Q2_0` and `Q1_0` have a
+/// single-token sibling. The lowbit `PQ2_0`, `Q2_0` and `Q1_0` have a
 /// single-token dp4a kernel as well, so their `m = 1` case is on this gate
 /// too. So `m = 2` stays on the dp4a GEMV for most of these and lands on the
 /// MMQ/GEMM path for the others. Both quantize the activation to Q8_1, so
@@ -1675,13 +1675,13 @@ fn pq2_0_quant_matmul_matches_cpu() {
         }
     }
     // m = 1 routes to the single-token dp4a kernel
-    // `quant_gemv_pq2_0_q8_1_mwr_r4` (`_r8` when `PRISM_GEMV_ROWS` is 8), the
+    // `quant_gemv_pq2_0_q8_1_mwr_r4` (`_r8` when `LOWBIT_GEMV_ROWS` is 8), the
     // NTOK = 1 instance of the batched body at several output columns per
     // block (see `dispatch_gemv`). No kernel-name probe exists in this file,
     // so the cosine gate is the check: an F32-path result would also pass it,
     // but a wrong NTOK = 1 lane map, row tiling or reduction collapses the
     // score. N = 64 fills the 4- and 8-column tiles exactly; the ragged case
-    // is `prism_quant_matmul_m1_ragged_rows_matches_cpu`.
+    // is `lowbit_quant_matmul_m1_ragged_rows_matches_cpu`.
     assert_matmul_parity_q8_1_activation(
         "pq2_0_quant_matmul_matches_cpu_m1",
         QuantFormat::PQ2_0,
@@ -1736,13 +1736,13 @@ fn q2_0_quant_matmul_matches_cpu() {
         }
     }
     // m = 1 routes to the single-token dp4a kernel
-    // `quant_gemv_q2_0_q8_1_mwr_r4` (`_r8` when `PRISM_GEMV_ROWS` is 8), the
+    // `quant_gemv_q2_0_q8_1_mwr_r4` (`_r8` when `LOWBIT_GEMV_ROWS` is 8), the
     // NTOK = 1 instance of the batched body at several output columns per
     // block (see `dispatch_gemv`). No kernel-name probe exists in this file,
     // so the cosine gate is the check: an F32-path result would also pass it,
     // but a wrong NTOK = 1 lane map, row tiling or reduction collapses the
     // score. N = 64 fills the 4- and 8-column tiles exactly; the ragged case
-    // is `prism_quant_matmul_m1_ragged_rows_matches_cpu`.
+    // is `lowbit_quant_matmul_m1_ragged_rows_matches_cpu`.
     assert_matmul_parity_q8_1_activation(
         "q2_0_quant_matmul_matches_cpu_m1",
         QuantFormat::Q2_0,
@@ -1799,13 +1799,13 @@ fn q1_0_quant_matmul_matches_cpu() {
         }
     }
     // m = 1 routes to the single-token dp4a kernel
-    // `quant_gemv_q1_0_q8_1_mwr_r4` (`_r8` when `PRISM_GEMV_ROWS` is 8), the
+    // `quant_gemv_q1_0_q8_1_mwr_r4` (`_r8` when `LOWBIT_GEMV_ROWS` is 8), the
     // NTOK = 1 instance of the batched body at several output columns per
     // block (see `dispatch_gemv`). No kernel-name probe exists in this file,
     // so the cosine gate is the check: an F32-path result would also pass it,
     // but a wrong NTOK = 1 lane map, row tiling or reduction collapses the
     // score. N = 64 fills the 4- and 8-column tiles exactly; the ragged case
-    // is `prism_quant_matmul_m1_ragged_rows_matches_cpu`.
+    // is `lowbit_quant_matmul_m1_ragged_rows_matches_cpu`.
     assert_matmul_parity_q8_1_activation(
         "q1_0_quant_matmul_matches_cpu_m1",
         QuantFormat::Q1_0,
@@ -1847,7 +1847,7 @@ fn q1_0_quant_matmul_matches_cpu() {
 /// PTQ1_0 weight bytes at `[n, k]`: 24 `qs` bytes bounded to `0..=242`, 2
 /// `qh` bytes bounded to `0..=80` (the packer's unscaled base-3 sum ranges,
 /// see `bounded_payload`), then `d` (f16) at the END, for a 128-element,
-/// 28-byte block. Unlike `prism_weight`, `d` is not at byte 0, so this
+/// 28-byte block. Unlike `lowbit_weight`, `d` is not at byte 0, so this
 /// format needs its own builder.
 fn ptq1_0_weight(n: usize, k: usize) -> Vec<u8> {
     let blocks = n * k / 128;
@@ -1918,7 +1918,7 @@ fn ptq1_0_quant_matmul_matches_cpu() {
 /// of the feature-major kernel, so its row clamp runs; without int8 MMA it
 /// is a ragged-`N` F32 GEMV check. PTQ1_0 has no dp4a kernel, so this is not
 /// a 4/8-column tile-clamp check like
-/// `prism_quant_matmul_m1_ragged_rows_matches_cpu`.
+/// `lowbit_quant_matmul_m1_ragged_rows_matches_cpu`.
 #[test]
 fn ptq1_0_quant_matmul_m1_n70_matches_cpu() {
     let (n, k) = (70usize, 256usize);
@@ -1932,10 +1932,10 @@ fn ptq1_0_quant_matmul_m1_n70_matches_cpu() {
     );
 }
 
-/// Prism weight bytes at `[n, k]`: `d` (f16) at byte 0, then
+/// Lowbit weight bytes at `[n, k]`: `d` (f16) at byte 0, then
 /// `block_bytes - 2` index-varying payload bytes, for a block of
 /// `block_elems` elements. Same layout the three fixtures above build inline.
-fn prism_weight(n: usize, k: usize, block_elems: usize, block_bytes: usize) -> Vec<u8> {
+fn lowbit_weight(n: usize, k: usize, block_elems: usize, block_bytes: usize) -> Vec<u8> {
     let blocks = n * k / block_elems;
     let mut data = vec![0u8; blocks * block_bytes];
     for b in 0..blocks {
@@ -1948,9 +1948,9 @@ fn prism_weight(n: usize, k: usize, block_elems: usize, block_bytes: usize) -> V
     data
 }
 
-/// `m = 1` on the prism three at `N = 70`, which is a multiple of neither 4
+/// `m = 1` on the three lowbit formats at `N = 70`, which is a multiple of neither 4
 /// nor 8. `dispatch_gemv` sends `m = 1` to the `_r4` (or `_r8`, per
-/// `PRISM_GEMV_ROWS`) kernel, whose block owns several output columns and
+/// `LOWBIT_GEMV_ROWS`) kernel, whose block owns several output columns and
 /// launches grid x as `ceil(N / ROWS)`: the last block clamps its weight-row
 /// index to `N - 1` and skips the writes past it. A missing guard writes past
 /// the output or reads past the weight; a wrong clamp shifts the tail
@@ -1960,12 +1960,12 @@ fn prism_weight(n: usize, k: usize, block_elems: usize, block_bytes: usize) -> V
 /// argued in `kernels/gemv/legacy_ntok_body.cuh` and NOT checked here: no
 /// test hook selects the ROWS variant, so only the dispatcher's choice runs.
 #[test]
-fn prism_quant_matmul_m1_ragged_rows_matches_cpu() {
+fn lowbit_quant_matmul_m1_ragged_rows_matches_cpu() {
     let (n, k) = (70usize, 256usize);
     assert_matmul_parity_q8_1_activation(
         "pq2_0_quant_matmul_m1_n70",
         QuantFormat::PQ2_0,
-        &prism_weight(n, k, 128, 34),
+        &lowbit_weight(n, k, 128, 34),
         1,
         n,
         k,
@@ -1973,7 +1973,7 @@ fn prism_quant_matmul_m1_ragged_rows_matches_cpu() {
     assert_matmul_parity_q8_1_activation(
         "q2_0_quant_matmul_m1_n70",
         QuantFormat::Q2_0,
-        &prism_weight(n, k, 64, 18),
+        &lowbit_weight(n, k, 64, 18),
         1,
         n,
         k,
@@ -1981,7 +1981,7 @@ fn prism_quant_matmul_m1_ragged_rows_matches_cpu() {
     assert_matmul_parity_q8_1_activation(
         "q1_0_quant_matmul_m1_n70",
         QuantFormat::Q1_0,
-        &prism_weight(n, k, 128, 18),
+        &lowbit_weight(n, k, 128, 18),
         1,
         n,
         k,
@@ -1997,7 +1997,7 @@ fn prism_quant_matmul_m1_ragged_rows_matches_cpu() {
 // `assert_matmul_parity_q8_1_activation`'s comment), but the GEMM kernels in
 // `src/quant/cuda/kernels/gemm/` still need their own coverage at a batch
 // size GEMV never reaches. These cases repeat each fixture with `m = 32` to
-// force GEMM. The three PrismML-fork formats are the exception: their
+// force GEMM. The three lowbit formats are the exception: their
 // `gemv_max_m` is unbounded (measured, see `gemv_crossover.rs`), so their
 // `m = 32` cases exercise the `_n4` kernel over eight grid-y passes instead.
 

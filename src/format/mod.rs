@@ -10,7 +10,7 @@ pub mod weight_source;
 
 pub use device_map::{DevicePlacement, LayerDeviceMap};
 pub use gguf::{
-    GgmlType, Gguf, GgufMetadata, GgufTensorInfo, GgufValue, GgufValueType, PrismHadamardConfig,
+    GgmlType, Gguf, GgufMetadata, GgufTensorInfo, GgufValue, GgufValueType, HadamardContract,
     SignMode,
 };
 pub use gguf_vocab::extract_gguf_vocab;

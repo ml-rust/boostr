@@ -7,7 +7,7 @@
 //! backend without device transfers.
 //!
 //! The math ports `build_delta_net_autoregressive` and
-//! `build_delta_net_chunking` from the PrismML llama.cpp fork
+//! `build_delta_net_chunking` from llama.cpp
 //! (`src/models/delta-net-base.cpp`) one to one.
 //!
 //! # State orientation

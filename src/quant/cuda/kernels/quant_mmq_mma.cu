@@ -377,7 +377,7 @@ extern __shared__ int mmqf_smem[];
 // per 32 elements — and their arithmetic is identical, so all ten formats'
 // `vec_dot` forward here. IQ4_XS and IQ2_XXS are the 256-element blocks among them: their scale
 // granularity is still 32 elements, so a staged 256-k group takes the same
-// eight scales. The four prism formats hold one scale per 64 or 128
+// eight scales. The four lowbit formats hold one scale per 64 or 128
 // elements, and `stage` writes it into each 32-element slot it covers.
 // The three offsets are template parameters rather than hard constants so a
 // format that shifts its row layout still reuses this body.
@@ -588,10 +588,10 @@ struct MmqfQ80 {
     }
 };
 
-// The PrismML-fork policies PQ2_0, Q2_0, Q1_0 and PTQ1_0 (`MmqfPQ20`,
+// The lowbit policies PQ2_0, Q2_0, Q1_0 and PTQ1_0 (`MmqfPQ20`,
 // `MmqfQ20`, `MmqfQ10`, `MmqfPTQ10`): same contract as `MmqfQ80`, staged into
 // its row. See the header.
-#include "mmq/prism_tiles.cuh"
+#include "mmq/lowbit_tiles.cuh"
 
 // Q4_0 weight format policy, same contract as `MmqfQ80`.
 //

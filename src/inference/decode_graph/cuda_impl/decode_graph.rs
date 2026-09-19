@@ -6,6 +6,7 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::device_scalars::{DeviceScalars, copy_rope_slice_async};
+use super::seed_token::seed_i64;
 use crate::error::{Error, Result};
 
 /// Captured CUDA decode graph + all per-replay mutable state.
@@ -62,24 +63,7 @@ impl DecodeGraph {
     /// Uses two `cuMemsetD32Async` calls (low/high 32-bit words of the i64) — no host
     /// pointer, no stack-lifetime hazard.  Little-endian: low word at ptr+0, high at ptr+4.
     pub fn seed_next_token(&self, client: &CudaClient, token: i64) -> Result<()> {
-        let lo = (token as u64 & 0xFFFF_FFFF) as u32; // low 32 bits
-        let hi = ((token as u64) >> 32) as u32; // high 32 bits
-        let stream = client.stream().cu_stream();
-        unsafe {
-            let result = sys::cuMemsetD32Async(self.next_token_buf.ptr(), lo, 1, stream);
-            if result != sys::CUresult::CUDA_SUCCESS {
-                return Err(Error::InferenceError {
-                    reason: format!("seed_next_token cuMemsetD32Async lo failed: {:?}", result),
-                });
-            }
-            let result = sys::cuMemsetD32Async(self.next_token_buf.ptr() + 4, hi, 1, stream);
-            if result != sys::CUresult::CUDA_SUCCESS {
-                return Err(Error::InferenceError {
-                    reason: format!("seed_next_token cuMemsetD32Async hi failed: {:?}", result),
-                });
-            }
-        }
-        Ok(())
+        seed_i64(client, &self.next_token_buf, token)
     }
 
     /// Prepare per-step inputs and replay the graph.

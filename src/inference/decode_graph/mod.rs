@@ -48,8 +48,9 @@
 //! | `sin_slice`        | pre-capture | D2D async (DtoDAsync) from rope cache|
 //! | `next_token_buf`   | pre-capture | written by graph (argmax→memcpy node)|
 //!
-//! The `qwen35` graph adds two more stable inputs, both written before each
-//! replay or by the graph itself:
+//! The `qwen35` graph (`Qwen35DecodeGraph`) has no RoPE slices; it adds two
+//! more stable inputs, both written before each replay or by the graph
+//! itself:
 //!
 //! | Tensor             | Allocated   | Updated how                          |
 //! |--------------------|-------------|--------------------------------------|

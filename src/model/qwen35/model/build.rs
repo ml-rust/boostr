@@ -173,6 +173,7 @@ pub(crate) mod tests {
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
     use numr::tensor::Tensor;
+    use std::collections::HashMap;
 
     pub(crate) const HIDDEN: usize = 8;
     pub(crate) const VOCAB: usize = 16;
@@ -272,16 +273,16 @@ pub(crate) mod tests {
         device: &'a CpuDevice,
         rng: Lcg,
         rotated: bool,
+        /// One rotation per input width, handed out as clones, as
+        /// `Attach::rotation` does for a real file: layers that share an
+        /// input share the signs storage, which `forward_batch` checks.
+        rotations: HashMap<usize, HadamardRotation<CpuRuntime>>,
     }
 
     impl Builder<'_> {
-        fn linear(&mut self, out: usize, inp: usize) -> MaybeRotatedLinear<CpuRuntime> {
-            let w = self
-                .rng
-                .tensor(self.device, &[out, inp], 0.5 / (inp as f32).sqrt());
-            let base = MaybeQuantLinear::Standard(Linear::new(w, None, false));
-            if !self.rotated {
-                return MaybeRotatedLinear::Plain(base);
+        fn rotation(&mut self, inp: usize) -> HadamardRotation<CpuRuntime> {
+            if let Some(r) = self.rotations.get(&inp) {
+                return r.clone();
             }
             let signs: Vec<i8> = (0..inp).map(|i| if i % 2 == 0 { 1 } else { -1 }).collect();
             let rotation = HadamardRotation::<CpuRuntime>::new(
@@ -291,6 +292,19 @@ pub(crate) mod tests {
                 self.device,
             )
             .unwrap();
+            self.rotations.insert(inp, rotation.clone());
+            rotation
+        }
+
+        fn linear(&mut self, out: usize, inp: usize) -> MaybeRotatedLinear<CpuRuntime> {
+            let w = self
+                .rng
+                .tensor(self.device, &[out, inp], 0.5 / (inp as f32).sqrt());
+            let base = MaybeQuantLinear::Standard(Linear::new(w, None, false));
+            if !self.rotated {
+                return MaybeRotatedLinear::Plain(base);
+            }
+            let rotation = self.rotation(inp);
             MaybeRotatedLinear::Rotated(Box::new(RotatedLinear::new(base, rotation).unwrap()))
         }
 
@@ -354,6 +368,7 @@ pub(crate) mod tests {
             device,
             rng: Lcg(seed),
             rotated,
+            rotations: HashMap::new(),
         };
         let table = b.rng.tensor(device, &[VOCAB, HIDDEN], 1.0);
         let embed = MaybeRotatedEmbedding::Plain(MaybeQuantEmbedding::Standard(Embedding::new(

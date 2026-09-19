@@ -10,6 +10,7 @@
 //! 5. `attn ⊙ sigmoid(gate)`, then `attn_output`
 
 use super::layer::Qwen35AttentionBlock;
+use super::projections::Projections;
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
 use crate::model::attention_mask::causal_window_mask;
@@ -18,7 +19,7 @@ use crate::nn::RoPE;
 use crate::nn::var_ops::{repeat_kv, var_contiguous};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use crate::quant::traits::DequantOps;
-use numr::autograd::{Var, var_narrow, var_permute, var_reshape, var_sigmoid_mul};
+use numr::autograd::{Var, var_permute, var_reshape, var_sigmoid_mul};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, CompareOps, ConditionalOps, FwhtOps, IndexingOps, ReduceOps,
@@ -129,7 +130,7 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
             });
         }
         let (batch, seq) = (shape[0], shape[1]);
-        let (h, h_kv, hd) = (cfg.num_heads, cfg.num_kv_heads, cfg.head_dim);
+        let (h, hd) = (cfg.num_heads, cfg.head_dim);
         let half_rot = cfg.rope_dim / 2;
         if rope.cos_cache().shape().get(1) != Some(&half_rot) {
             return Err(Error::ModelError {
@@ -140,20 +141,10 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
             });
         }
 
-        // 1. Joint query/gate projection, split per head.
-        let q_full = self.attn_q.forward(client, x)?;
-        let q_full = var_reshape(&q_full, &[batch, seq, h, 2 * hd]).map_err(Error::Numr)?;
-        let q = var_narrow(&q_full, -1, 0, hd).map_err(Error::Numr)?;
-        let q = var_contiguous(&q)?;
-        let gate = var_narrow(&q_full, -1, hd, hd).map_err(Error::Numr)?;
-        let gate = var_contiguous(&gate)?;
-
-        // 2. K, V projections; per-head q/k RMS norm.
-        let k = self.attn_k.forward(client, x)?;
-        let k = var_reshape(&k, &[batch, seq, h_kv, hd]).map_err(Error::Numr)?;
-        let v = self.attn_v.forward(client, x)?;
-        let v = var_reshape(&v, &[batch, seq, h_kv, hd]).map_err(Error::Numr)?;
-        let (q, k) = self.qk_norm.forward(client, &q, &k)?;
+        // 1-2. `attn_q`/`attn_k`/`attn_v` projections (fused via
+        // `forward_batch` — any shared Hadamard rotation runs once), joint
+        // query/gate split, per-head q/k RMS norm. See `super::projections`.
+        let Projections { q, gate, k, v } = self.project(client, x, batch, seq)?;
 
         // 3. IMROPE on [batch, seq, heads, head_dim]. `mrope_selector` is
         // built once in `new()` and reused for both q and k.

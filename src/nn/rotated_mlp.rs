@@ -3,11 +3,13 @@
 //! `forward(x) = down(silu(gate(x)) * up(x))`, the same shape as
 //! [`crate::model::llama::model::blocks::mlp::LlamaMlp`].
 //!
-//! The fused `quant_swiglu` kernel `LlamaMlp` reaches for is NOT used here:
-//! a `Rotated` projection rotates its input before the matmul, and the
-//! fused kernel reads the raw activation. `gate` and `up` run as two
-//! [`MaybeRotatedLinear::forward`] calls (each may carry its own rotation),
-//! then numr's fused `var_silu_mul`, then `down`.
+//! The fused `quant_swiglu` kernel `LlamaMlp` reaches for still is not used
+//! here: `gate` and `up` may be Hadamard-rotated, and that kernel reads the
+//! raw activation, not a rotated one. `gate` and `up` instead go through one
+//! [`MaybeRotatedLinear::forward_batch`] call, which runs any rotation they
+//! share ONCE and each fused `quant_matmul_batch` (rotated and plain
+//! members split into one call each) instead of one `forward` per
+//! projection, then numr's fused `var_silu_mul`, then `down`.
 
 use crate::error::{Error, Result};
 use crate::nn::linear::MaybeRotatedLinear;
@@ -84,8 +86,14 @@ impl<R: Runtime<DType = DType>> RotatedMlp<R> {
             + DequantOps<R>
             + MatmulOps<R>,
     {
-        let gate = self.gate.forward(client, x)?;
-        let up = self.up.forward(client, x)?;
+        let mut projected =
+            MaybeRotatedLinear::forward_batch(&[&self.gate, &self.up], client, x)?.into_iter();
+        let gate = projected.next().ok_or_else(|| Error::ModelError {
+            reason: "rotated_mlp: forward_batch returned no gate output".to_string(),
+        })?;
+        let up = projected.next().ok_or_else(|| Error::ModelError {
+            reason: "rotated_mlp: forward_batch returned no up output".to_string(),
+        })?;
         let hidden = var_silu_mul(&gate, &up, client).map_err(Error::Numr)?;
         self.down.forward(client, &hidden)
     }
@@ -162,6 +170,8 @@ impl<R: Runtime<DType = DType>> Module<R> for RotatedMlp<R> {
 mod tests {
     use super::*;
     use crate::model::llama::model::blocks::mlp::LlamaMlp;
+    use crate::nn::hadamard::HadamardRotation;
+    use crate::nn::linear::RotatedLinear;
     use crate::nn::{Linear, MaybeQuantLinear};
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
@@ -213,6 +223,53 @@ mod tests {
         for (p, q) in a.iter().zip(&b) {
             assert!((p - q).abs() < 1e-6, "{p} vs {q}");
         }
+    }
+
+    /// `gate` and `up` both `Rotated`, sharing one `HadamardRotation`, must
+    /// match rotating `x` once by hand and running the same weights through
+    /// [`LlamaMlp`] — proving `forward_batch`'s one-rotation, two-fused-call
+    /// path computes the same thing as rotate-then-per-projection-forward.
+    #[test]
+    fn gate_and_up_both_rotated_sharing_one_rotation_matches_manual_rotate_then_forward() {
+        let (client, device) = cpu_setup();
+        let gate_w = tensor(&device, &[INTER, HIDDEN], 1);
+        let up_w = tensor(&device, &[INTER, HIDDEN], 2);
+        let down_w = tensor(&device, &[HIDDEN, INTER], 3);
+
+        let signs: Vec<i8> = (0..HIDDEN)
+            .map(|i| if i % 2 == 0 { -1 } else { 1 })
+            .collect();
+        let rotation =
+            HadamardRotation::<CpuRuntime>::new(HIDDEN, Some(&signs), DType::F32, &device).unwrap();
+
+        let mlp = RotatedMlp::new(
+            RotatedLinear::new(plain(gate_w.clone()), rotation.clone())
+                .unwrap()
+                .into(),
+            RotatedLinear::new(plain(up_w.clone()), rotation.clone())
+                .unwrap()
+                .into(),
+            MaybeRotatedLinear::Plain(plain(down_w.clone())),
+        )
+        .unwrap();
+
+        let x = Var::new(tensor(&device, &[1, 5, HIDDEN], 9), false);
+        let out = mlp.forward(&client, &x).unwrap();
+
+        let x_rotated = Var::new(rotation.forward(&client, x.tensor()).unwrap(), false);
+        let llama = LlamaMlp {
+            gate_proj: plain(gate_w),
+            up_proj: plain(up_w),
+            down_proj: plain(down_w),
+        };
+        let manual = llama.forward(&client, &x_rotated).unwrap();
+
+        let a: Vec<f32> = out.tensor().to_vec();
+        let b: Vec<f32> = manual.tensor().to_vec();
+        assert_eq!(
+            a, b,
+            "batched rotate-once must match manual rotate-then-forward bit-for-bit"
+        );
     }
 
     #[test]

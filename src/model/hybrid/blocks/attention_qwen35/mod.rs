@@ -3,5 +3,6 @@
 
 mod forward;
 mod layer;
+mod projections;
 
 pub use layer::{Qwen35AttentionBlock, Qwen35AttentionWeights};

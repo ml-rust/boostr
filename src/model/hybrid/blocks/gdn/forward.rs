@@ -18,6 +18,7 @@ use super::layer::{GdnBlock, group_heads};
 use crate::error::{Error, Result};
 use crate::inference::GdnState;
 use crate::model::traits::ModelClient;
+use crate::nn::MaybeRotatedLinear;
 use crate::nn::causal_conv1d;
 use crate::quant::traits::DequantOps;
 use numr::autograd::Var;
@@ -78,9 +79,18 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
         let key_dim = cfg.key_dim();
         let value_dim = cfg.value_dim();
 
-        // 1. Projections.
-        let qkv = self.attn_qkv.forward(client, x)?;
-        let z = self.attn_gate.forward(client, x)?;
+        // 1. Projections. `attn_qkv` and `attn_gate` share `x`, so they run
+        // through one `forward_batch` call: any Hadamard rotation the two
+        // share runs once, and each fuses into one `quant_matmul_batch`.
+        let mut projected =
+            MaybeRotatedLinear::forward_batch(&[&self.attn_qkv, &self.attn_gate], client, x)?
+                .into_iter();
+        let qkv = projected.next().ok_or_else(|| Error::ModelError {
+            reason: "gdn: forward_batch returned no attn_qkv output".to_string(),
+        })?;
+        let z = projected.next().ok_or_else(|| Error::ModelError {
+            reason: "gdn: forward_batch returned no attn_gate output".to_string(),
+        })?;
 
         // 2. Gates. `ssm_a` already holds `-exp(A_log)`.
         let beta = self.ssm_beta.forward(client, x)?;
@@ -183,6 +193,8 @@ mod tests {
     use super::super::layer::GdnWeights;
     use super::*;
     use crate::model::config::GdnConfig;
+    use crate::nn::hadamard::HadamardRotation;
+    use crate::nn::linear::RotatedLinear;
     use crate::nn::{Linear, MaybeQuantLinear, MaybeRotatedLinear};
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -243,6 +255,13 @@ mod tests {
         MaybeRotatedLinear::Plain(plain(w))
     }
 
+    fn rotated(
+        w: Tensor<CpuRuntime>,
+        rotation: HadamardRotation<CpuRuntime>,
+    ) -> MaybeRotatedLinear<CpuRuntime> {
+        RotatedLinear::new(plain(w), rotation).unwrap().into()
+    }
+
     fn block(device: &CpuDevice, seed: u64, v_grouped: bool) -> GdnBlock<CpuRuntime> {
         let cfg = cfg(v_grouped);
         let mut rng = Lcg(seed);
@@ -264,6 +283,81 @@ mod tests {
             ssm_norm: rng.tensor(device, &[S], 1.0),
         };
         GdnBlock::new(cfg, weights).unwrap()
+    }
+
+    /// Same layout as [`block`], but `attn_qkv` and `attn_gate` are
+    /// `Rotated`, sharing one `HadamardRotation`.
+    fn block_with_rotated_qkv_gate(device: &CpuDevice, seed: u64) -> GdnBlock<CpuRuntime> {
+        let cfg = cfg(false);
+        let mut rng = Lcg(seed);
+        let in_scale = 0.5 / (HIDDEN as f32).sqrt();
+        let a: Vec<f32> = (0..H_V).map(|_| -rng.uniform(0.5, 1.5).exp()).collect();
+        let signs: Vec<i8> = (0..HIDDEN)
+            .map(|i| if i % 2 == 0 { -1 } else { 1 })
+            .collect();
+        let rotation =
+            HadamardRotation::<CpuRuntime>::new(HIDDEN, Some(&signs), DType::F32, device).unwrap();
+        let weights = GdnWeights {
+            attn_qkv: rotated(
+                rng.tensor(device, &[cfg.qkv_dim(), HIDDEN], in_scale),
+                rotation.clone(),
+            ),
+            attn_gate: rotated(
+                rng.tensor(device, &[cfg.value_dim(), HIDDEN], in_scale),
+                rotation,
+            ),
+            ssm_alpha: plain(rng.tensor(device, &[H_V, HIDDEN], in_scale)),
+            ssm_beta: plain(rng.tensor(device, &[H_V, HIDDEN], in_scale)),
+            ssm_out: rotated_plain(rng.tensor(
+                device,
+                &[HIDDEN, cfg.value_dim()],
+                0.5 / (cfg.value_dim() as f32).sqrt(),
+            )),
+            ssm_conv1d: rng.tensor(device, &[cfg.qkv_dim(), KERNEL], 0.5),
+            ssm_a: Tensor::<CpuRuntime>::from_slice(&a, &[H_V], device).unwrap(),
+            ssm_dt_bias: rng.tensor(device, &[H_V], 0.5),
+            ssm_norm: rng.tensor(device, &[S], 1.0),
+        };
+        GdnBlock::new(cfg, weights).unwrap()
+    }
+
+    /// `block`'s `attn_qkv`/`attn_gate` (`Rotated`, sharing one rotation) run
+    /// through [`MaybeRotatedLinear::forward_batch`] — the same call
+    /// [`GdnBlock::forward`] step 1 makes — and through two individual
+    /// [`MaybeRotatedLinear::forward`] calls, the pre-batching behavior.
+    /// Bit-for-bit agreement here is what makes swapping step 1 to a single
+    /// batched call safe.
+    #[test]
+    fn grouped_qkv_gate_rotated_matches_per_projection_forward() {
+        let (client, device) = cpu_setup();
+        let block = block_with_rotated_qkv_gate(&device, 0x6d4e_0005);
+        let x = Var::new(Lcg(17).tensor(&device, &[1, SEQ, HIDDEN], 1.0), false);
+
+        let mut batched =
+            MaybeRotatedLinear::forward_batch(&[&block.attn_qkv, &block.attn_gate], &client, &x)
+                .unwrap()
+                .into_iter();
+        let qkv_batched = batched.next().unwrap();
+        let z_batched = batched.next().unwrap();
+
+        let qkv_solo = block.attn_qkv.forward(&client, &x).unwrap();
+        let z_solo = block.attn_gate.forward(&client, &x).unwrap();
+
+        assert_eq!(
+            qkv_batched.tensor().to_vec::<f32>(),
+            qkv_solo.tensor().to_vec::<f32>()
+        );
+        assert_eq!(
+            z_batched.tensor().to_vec::<f32>(),
+            z_solo.tensor().to_vec::<f32>()
+        );
+
+        // End-to-end sanity: the block's own `forward` (which now calls
+        // `forward_batch` for step 1) still runs to a finite result.
+        let cfg = block.config().clone();
+        let mut state = GdnState::<CpuRuntime>::zeros(&cfg, 1, DType::F32, &device).unwrap();
+        let out = run(&client, &block, x.tensor(), &mut state);
+        assert!(out.to_vec::<f32>().iter().all(|v| v.is_finite()));
     }
 
     fn run(

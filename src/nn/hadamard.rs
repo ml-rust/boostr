@@ -62,6 +62,25 @@ impl<R: Runtime<DType = DType>> HadamardRotation<R> {
         self.signs.as_ref().map(|s| s.shape()[0])
     }
 
+    /// Identity for "is this the same rotation" checks: the signs tensor's
+    /// storage pointer, `None` in identity mode (no signs).
+    ///
+    /// Not `Tensor::id()`: `Attach::rotation`
+    /// (`crate::model::qwen35::model::gguf`) caches one materialized signs
+    /// tensor per width and hands out `Tensor::clone`s of it — a clone
+    /// shares storage but gets a fresh `TensorId`, so `Tensor::id()` would
+    /// call two clones of the same rotation "different".
+    pub fn signs_ptr(&self) -> Option<u64> {
+        self.signs.as_ref().map(|s| s.storage().ptr())
+    }
+
+    /// `true` when `self` and `other` transform with the same block width
+    /// over the same underlying sign storage (both `None` counts as equal:
+    /// two identity rotations of the same width behave identically).
+    pub fn same_rotation_as(&self, other: &Self) -> bool {
+        self.block_size == other.block_size && self.signs_ptr() == other.signs_ptr()
+    }
+
     /// Forward rotation: sign-multiply then transform. Used before a
     /// rotated matmul. `fwht` multiplies `signs` in before the transform in
     /// one call, so this is a single kernel launch.
@@ -257,6 +276,28 @@ mod tests {
                 "forward(inverse(x)) got {g}, expected {e}"
             );
         }
+    }
+
+    #[test]
+    fn same_rotation_as_matches_clones_and_rejects_different_signs() {
+        let (_client, device) = cpu_setup();
+        let signs_a: Vec<i8> = vec![1, -1, 1, -1, 1, -1, 1, -1];
+        let signs_b: Vec<i8> = vec![-1, 1, -1, 1, -1, 1, -1, 1];
+
+        let rotation_a =
+            HadamardRotation::<CpuRuntime>::new(8, Some(&signs_a), DType::F32, &device).unwrap();
+        let rotation_a_clone = rotation_a.clone();
+        let rotation_b =
+            HadamardRotation::<CpuRuntime>::new(8, Some(&signs_b), DType::F32, &device).unwrap();
+        let identity_a = HadamardRotation::<CpuRuntime>::new(8, None, DType::F32, &device).unwrap();
+        let identity_b = HadamardRotation::<CpuRuntime>::new(8, None, DType::F32, &device).unwrap();
+
+        assert!(rotation_a.same_rotation_as(&rotation_a_clone));
+        assert!(!rotation_a.same_rotation_as(&rotation_b));
+        assert!(identity_a.same_rotation_as(&identity_b));
+        assert!(!rotation_a.same_rotation_as(&identity_a));
+        assert_eq!(rotation_a.signs_ptr(), rotation_a_clone.signs_ptr());
+        assert!(identity_a.signs_ptr().is_none());
     }
 
     #[test]

@@ -58,8 +58,8 @@ impl GenerateOptions {
     ///
     /// `n_timesteps` is [`CfmOptions::default`]'s 10, NOT the reference clone
     /// script's 32. This deviates from the reference deliberately, on measured
-    /// evidence: 32 costs 4x the compute of 10 (RTF 4.00 vs 1.30 on an RTX
-    /// 3060) and sounds WORSE — flatter, less prosodic variation. Whisper
+    /// evidence: 32 costs 4x the compute of 10 (RTF 4.00 vs 1.30 on an
+    /// Ampere-class GPU) and sounds WORSE — flatter, less prosodic variation. Whisper
     /// transcribes 10, 16, 24 and 32 word-perfect, so intelligibility does not
     /// separate them; the difference is naturalness, judged by ear.
     ///
@@ -278,7 +278,7 @@ mod tests {
     /// The options constructor's real settings, not the test's cheap ones.
     ///
     /// `n_timesteps` is 10, DELIBERATELY not the reference clone script's 32.
-    /// Measured on an RTX 3060: 32 costs 4x the compute of 10 (RTF 4.00 vs 1.30)
+    /// Measured on an Ampere-class GPU: 32 costs 4x the compute of 10 (RTF 4.00 vs 1.30)
     /// and sounds flatter — more solver steps converge harder toward the mode of
     /// the flow and smooth away prosodic variation. Whisper transcribes 10, 16,
     /// 24 and 32 word-perfect, so this was decided by listening, not by WER.

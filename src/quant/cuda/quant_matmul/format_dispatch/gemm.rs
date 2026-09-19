@@ -150,6 +150,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_matmul(
             k,
             n,
             mmq_feat_major::FeatTile::Auto,
+            mmq_feat_major::Schedule::Auto,
         )?
         .is_some()
     {

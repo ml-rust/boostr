@@ -1,6 +1,5 @@
 //! Batched paths for `quant_matmul_batch`: one activation, several weights.
 //!
-//! Split out of `impl_ops.rs` to stay under the `cuda/*.rs` 400-line limit.
 //! Quantizes the shared activation once, then reuses it across every weight
 //! in the batch instead of re-quantizing per weight: the feature-major MMQ
 //! record when every weight has such a kernel, at every M, so a row's bits
@@ -259,6 +258,7 @@ fn mmq_batch(
             k,
             n,
             mmq_feat_major::FeatTile::Auto,
+            mmq_feat_major::Schedule::Auto,
         )?;
         if launched.is_none() {
             return Err(Error::QuantError {

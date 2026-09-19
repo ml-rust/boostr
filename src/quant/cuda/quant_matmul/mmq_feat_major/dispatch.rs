@@ -11,8 +11,9 @@ use super::super::super::kernels::{self, QUANT_MMQ_MMA_MODULE};
 use super::super::helpers::quantize_activation_q8_1_mmq;
 use super::formats::FeatMajorFormat;
 use super::tiling::{
-    Cadence, FEAT_TILE_DEFAULT, FeatTile, Role, Tiling, record_token_slots, select_tiling,
-    select_variant, smem_opt_in_limit, split_count, use_split_launch,
+    Cadence, FEAT_TILE_DEFAULT, FeatTile, Role, Schedule, Tiling, prefers_tile_parallel,
+    record_token_slots, select_tiling, select_variant, smem_opt_in_limit, split_count,
+    use_split_launch,
 };
 
 /// Whether some compiled variant serves `m` tokens of `format` on this
@@ -81,7 +82,8 @@ pub(in crate::quant::cuda::quant_matmul) fn quantize_shared_activation(
 
 /// The tiling [`dispatch`] and [`dispatch_quantized`] agree on for one call.
 /// Both compute it from the same inputs, so the record the first quantizes
-/// covers the tile the second launches.
+/// covers the tile the second launches. `prefers_tile_parallel` is the
+/// format's measured pick on this device.
 fn tiling_for(
     format: &FeatMajorFormat,
     profile_index: usize,
@@ -89,6 +91,7 @@ fn tiling_for(
     n: usize,
     k: usize,
     feat_tile: FeatTile,
+    prefers_tile_parallel: bool,
 ) -> Result<Option<Tiling>> {
     let profile = CudaDevice::new(profile_index).profile();
     select_tiling(
@@ -99,6 +102,7 @@ fn tiling_for(
         profile.compute_units,
         format,
         feat_tile,
+        prefers_tile_parallel,
     )
 }
 
@@ -106,8 +110,9 @@ fn tiling_for(
 /// kernels. `Ok(None)` means no variant fits, and the caller should keep its
 /// existing path.
 ///
-/// `feat_tile` is [`FeatTile::Auto`] for every production caller; a forced
-/// tile is the kernel A/B's hook and errors when the format lacks that tile.
+/// `feat_tile` is [`FeatTile::Auto`] and `schedule` is [`Schedule::Auto`]
+/// for every production caller; a forced tile or schedule is a measurement
+/// hook and errors when the format or shape lacks it.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::quant::cuda::quant_matmul) fn dispatch(
     format: &FeatMajorFormat,
@@ -119,9 +124,11 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch(
     k: usize,
     n: usize,
     feat_tile: FeatTile,
+    schedule: Schedule,
 ) -> Result<Option<()>> {
     let device_index = act_contig.device().id();
-    let Some(tiling) = tiling_for(format, device_index, m, n, k, feat_tile)? else {
+    let prefers = prefers_tile_parallel(client, format);
+    let Some(tiling) = tiling_for(format, device_index, m, n, k, feat_tile, prefers)? else {
         return Ok(None);
     };
 
@@ -142,6 +149,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch(
         k,
         n,
         feat_tile,
+        schedule,
     )
 }
 
@@ -161,6 +169,7 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_quantized(
     k: usize,
     n: usize,
     feat_tile: FeatTile,
+    schedule: Schedule,
 ) -> Result<Option<()>> {
     let device_index = device.id();
     let profile = CudaDevice::new(device_index).profile();
@@ -169,7 +178,10 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_quantized(
     let k_u32 = k as u32;
     let n_u32 = n as u32;
 
-    let Some(tiling) = tiling_for(format, device_index, m, n, k, feat_tile)? else {
+    // Measured once per (device, format) and cached; the first call on a
+    // device runs the probe in `tiling::tile_parallel_tune`.
+    let prefers = prefers_tile_parallel(client, format);
+    let Some(tiling) = tiling_for(format, device_index, m, n, k, feat_tile, prefers)? else {
         return Ok(None);
     };
     let smem = tiling.smem_bytes(format);
@@ -196,7 +208,19 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_quantized(
     // The split count reads K, N and the device only, so the float sequence
     // each output element receives is fixed before M or the tiling is known.
     let splits = split_count(k_u32, n_u32, sms);
-    let split_launch = use_split_launch(splits, tiles, tiling.feat_tile, sms, format);
+    let split_launch = match schedule {
+        Schedule::Auto => use_split_launch(splits, tiles, tiling.feat_tile, sms, prefers),
+        Schedule::SplitK if splits > 1 => true,
+        Schedule::SplitK => {
+            return Err(Error::QuantError {
+                reason: format!(
+                    "MMQ split-K schedule forced at K={k} N={n}, where the split count is 1; \
+                     the pair exists from K=2048 up with fewer feature tiles than SMs"
+                ),
+            });
+        }
+        Schedule::TileParallel => false,
+    };
 
     tracing::debug!(
         m,
@@ -238,23 +262,25 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_quantized(
     Ok(Some(()))
 }
 
-/// One feature-major launch, on either schedule.
-struct Launch<'a> {
-    format: &'a FeatMajorFormat,
-    client: &'a CudaClient,
-    module: &'a std::sync::Arc<CudaModule>,
-    output_ptr: u64,
-    q8_ptr: u64,
-    weight_ptr: u64,
-    m: u32,
-    k: u32,
-    n: u32,
-    ntok: u32,
-    tiling: Tiling,
-    smem: u32,
+/// One feature-major launch, on either schedule. `tiling::tile_parallel_tune`
+/// builds one to time both schedules, so the probe issues exactly the
+/// launches the dispatch does.
+pub(super) struct Launch<'a> {
+    pub format: &'a FeatMajorFormat,
+    pub client: &'a CudaClient,
+    pub module: &'a std::sync::Arc<CudaModule>,
+    pub output_ptr: u64,
+    pub q8_ptr: u64,
+    pub weight_ptr: u64,
+    pub m: u32,
+    pub k: u32,
+    pub n: u32,
+    pub ntok: u32,
+    pub tiling: Tiling,
+    pub smem: u32,
     /// (token tiles, feature tiles).
-    grid: (u32, u32),
-    splits: u32,
+    pub grid: (u32, u32),
+    pub splits: u32,
 }
 
 impl Launch<'_> {
@@ -269,7 +295,7 @@ impl Launch<'_> {
 
     /// One block per output tile. One range takes the plain kernel; more
     /// take the multi-range kernel, which runs them back to back.
-    fn tile_parallel(&self) -> Result<()> {
+    pub fn tile_parallel(&self) -> Result<()> {
         let role = if self.splits > 1 {
             Role::Fused
         } else {
@@ -303,7 +329,7 @@ impl Launch<'_> {
     /// One block per (output tile, split range), then the fixup pass that
     /// adds ranges 1.. onto the range-0 store, in order. The fixup is a
     /// separate launch on the same stream: it reads what the first wrote.
-    fn split_k(&self, device: &CudaDevice) -> Result<()> {
+    pub fn split_k(&self, device: &CudaDevice) -> Result<()> {
         let threads = self.tiling.threads();
         let (sk_func, sk_name) = self.function(Role::SplitK, self.smem)?;
 

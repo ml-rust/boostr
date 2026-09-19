@@ -1,6 +1,7 @@
 //! I-quants that resolve through a flat 16-entry codebook via `__byte_perm`.
 
 use super::super::FeatMajorFormat;
+use crate::quant::QuantFormat;
 
 /// IQ4_XS: 136-byte super-blocks of 256 elements, staged as Q8_0's row byte for
 /// byte — 64 quant words plus 8 f32 sub-block scales plus 4 ints of bank
@@ -12,11 +13,13 @@ use super::super::FeatMajorFormat;
 /// is f32 and already multiplied by `d`, for the same parity reason as Q4_K. K
 /// must be a whole number of super-blocks.
 pub(in crate::quant::cuda::quant_matmul) const IQ4_XS: FeatMajorFormat = FeatMajorFormat {
+    quant_format: QuantFormat::IQ4XS,
     kernel_infix: "iq4_xs",
     x_stride: 76,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: false,
+    prefers_tile_parallel_fallback: false,
+    tile_parallel_key: "mmq_feat_major.iq4_xs.prefers_tile_parallel",
     narrow_tile: false,
 };
 
@@ -48,7 +51,7 @@ mod tests {
         );
         assert_eq!(IQ4_XS.k_multiple, 256);
         assert_eq!(IQ4_XS.x_stride, Q8_0.x_stride);
-        const { assert!(!IQ4_XS.prefers_tile_parallel) };
+        const { assert!(!IQ4_XS.prefers_tile_parallel_fallback) };
         assert!(VARIANTS.iter().all(|&x| smem_bytes(
             &IQ4_XS,
             FEAT_TILE_DEFAULT,

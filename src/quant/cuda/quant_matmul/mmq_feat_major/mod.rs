@@ -11,8 +11,10 @@
 //! choose among them (`tiling`) and the launches (`dispatch`). The split
 //! count is fixed by K, N and the device, and every schedule sums the same
 //! range partials in the same order, so a row's result never depends on M or
-//! on its tile position. The kernels themselves live in
-//! `src/quant/cuda/kernels/quant_mmq_mma.cu`.
+//! on its tile position. Whether the ranges run as the split-K pair or inside
+//! the tile-parallel grid is a per-(device, format) pick measured on the
+//! device at first use (`tiling::prefers_tile_parallel`). The kernels
+//! themselves live in `src/quant/cuda/kernels/quant_mmq_mma.cu`.
 //!
 //! The kernel family is parameterized over the weight format; everything that
 //! differs per format is a field of `FeatMajorFormat`. Q8_0, Q4_0, Q4_1,
@@ -33,4 +35,5 @@ pub(super) use formats::{
     FeatMajorFormat, IQ1_S, IQ2_S, IQ2_XS, IQ2_XXS, IQ3_S, IQ3_XXS, IQ4_NL, IQ4_XS, PQ2_0, PTQ1_0,
     Q1_0, Q2_0, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0,
 };
-pub use tiling::FeatTile;
+pub use tiling::{FeatTile, Schedule};
+pub(super) use tiling::{prefers_tile_parallel, tile_parallel_probe_shape};

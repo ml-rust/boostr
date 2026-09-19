@@ -1,4 +1,5 @@
 use super::FeatMajorFormat;
+use crate::quant::QuantFormat;
 
 /// Q4_K: 144-byte super-blocks of 256 elements, staged as 64 quant words plus
 /// 8 `float2` scale/min pairs (16 ints) plus 4 ints of bank padding. The row is
@@ -7,11 +8,13 @@ use super::FeatMajorFormat;
 /// outside the GEMV parity bound. K must be a whole number of super-blocks,
 /// which also makes every 256-k staging group whole.
 pub(in crate::quant::cuda::quant_matmul) const Q4_K: FeatMajorFormat = FeatMajorFormat {
+    quant_format: QuantFormat::Q4K,
     kernel_infix: "q4_k",
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: false,
+    prefers_tile_parallel_fallback: false,
+    tile_parallel_key: "mmq_feat_major.q4_k.prefers_tile_parallel",
     narrow_tile: true,
 };
 
@@ -21,11 +24,13 @@ pub(in crate::quant::cuda::quant_matmul) const Q4_K: FeatMajorFormat = FeatMajor
 /// only the kernel's staging step differs; the staged row and the two-term
 /// arithmetic are shared. K must be a whole number of super-blocks.
 pub(in crate::quant::cuda::quant_matmul) const Q5_K: FeatMajorFormat = FeatMajorFormat {
+    quant_format: QuantFormat::Q5K,
     kernel_infix: "q5_k",
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: false,
+    prefers_tile_parallel_fallback: false,
+    tile_parallel_key: "mmq_feat_major.q5_k.prefers_tile_parallel",
     narrow_tile: true,
 };
 
@@ -37,11 +42,13 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_K: FeatMajorFormat = FeatMajor
 /// already multiplied by `d`, for the same parity reason as Q4_K. K must be a
 /// whole number of super-blocks.
 pub(in crate::quant::cuda::quant_matmul) const Q6_K: FeatMajorFormat = FeatMajorFormat {
+    quant_format: QuantFormat::Q6K,
     kernel_infix: "q6_k",
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: false,
+    prefers_tile_parallel_fallback: false,
+    tile_parallel_key: "mmq_feat_major.q6_k.prefers_tile_parallel",
     narrow_tile: true,
 };
 
@@ -52,11 +59,13 @@ pub(in crate::quant::cuda::quant_matmul) const Q6_K: FeatMajorFormat = FeatMajor
 /// low bits from `qs` plus one INVERTED high bit from `hmask`, biased during
 /// staging to a signed [-4, 3] lane. K must be a whole number of super-blocks.
 pub(in crate::quant::cuda::quant_matmul) const Q3_K: FeatMajorFormat = FeatMajorFormat {
+    quant_format: QuantFormat::Q3K,
     kernel_infix: "q3_k",
     x_stride: 84,
     k_multiple: 256,
     act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: false,
+    prefers_tile_parallel_fallback: false,
+    tile_parallel_key: "mmq_feat_major.q3_k.prefers_tile_parallel",
     narrow_tile: false,
 };
 
@@ -82,11 +91,13 @@ pub(in crate::quant::cuda::quant_matmul) const Q3_K: FeatMajorFormat = FeatMajor
 /// the 84-stride formats get, so the split stops paying once the tile count
 /// nears the veto threshold.
 pub(in crate::quant::cuda::quant_matmul) const Q2_K: FeatMajorFormat = FeatMajorFormat {
+    quant_format: QuantFormat::Q2K,
     kernel_infix: "q2_k",
     x_stride: 100,
     k_multiple: 256,
     act_scratch_ints_per_token: 4,
-    prefers_tile_parallel: true,
+    prefers_tile_parallel_fallback: true,
+    tile_parallel_key: "mmq_feat_major.q2_k.prefers_tile_parallel",
     narrow_tile: false,
 };
 
@@ -113,7 +124,7 @@ mod tests {
             "quant_mmq_q4_k_q8_1_mma_fixup_x128"
         );
         assert_eq!(Q4_K.k_multiple, 256);
-        const { assert!(!Q4_K.prefers_tile_parallel) };
+        const { assert!(!Q4_K.prefers_tile_parallel_fallback) };
     }
 
     /// The narrow tile is compiled for the three formats a K-quant mix puts
@@ -267,7 +278,7 @@ mod tests {
         }
         assert_eq!(Q2_K.act_scratch_ints_per_token, 4);
         // One of the measured tile-parallel opt-outs.
-        const { assert!(Q2_K.prefers_tile_parallel) };
+        const { assert!(Q2_K.prefers_tile_parallel_fallback) };
         // 64 quant words + 32 ints of scale/min pairs + 4 ints of padding.
         assert_eq!(Q2_K.x_stride, 100);
         // The family's bank-padding rule, asserted in the kernel as well.

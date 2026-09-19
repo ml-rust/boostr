@@ -1,16 +1,24 @@
+//! The ggml legacy descriptors — `Q8_0`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`,
+//! `IQ4_NL` — plus their shared test helpers; the four PrismML-fork
+//! descriptors live in [`super::prism`].
+
 use super::FeatMajorFormat;
+use crate::quant::QuantFormat;
 
 /// Q8_0: 34-byte blocks of 32 elements, staged as 64 quant words plus 8 f32
 /// scales plus 4 ints of bank padding.
 ///
 /// Measured faster on its tile-parallel kernel than on the split-K pair even
-/// where the geometric rule would pick the pair — see `prefers_tile_parallel`.
+/// where the geometric rule would pick the pair — see
+/// `prefers_tile_parallel_fallback`.
 pub(in crate::quant::cuda::quant_matmul) const Q8_0: FeatMajorFormat = FeatMajorFormat {
+    quant_format: QuantFormat::Q8_0,
     kernel_infix: "q8_0",
     x_stride: 76,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: true,
+    prefers_tile_parallel_fallback: true,
+    tile_parallel_key: "mmq_feat_major.q8_0.prefers_tile_parallel",
     narrow_tile: false,
 };
 
@@ -22,13 +30,16 @@ pub(in crate::quant::cuda::quant_matmul) const Q8_0: FeatMajorFormat = FeatMajor
 /// partial.
 ///
 /// Measured faster on its tile-parallel kernel than on the split-K pair even
-/// where the geometric rule would pick the pair — see `prefers_tile_parallel`.
+/// where the geometric rule would pick the pair — see
+/// `prefers_tile_parallel_fallback`.
 pub(in crate::quant::cuda::quant_matmul) const Q4_0: FeatMajorFormat = FeatMajorFormat {
+    quant_format: QuantFormat::Q4_0,
     kernel_infix: "q4_0",
     x_stride: 76,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: true,
+    prefers_tile_parallel_fallback: true,
+    tile_parallel_key: "mmq_feat_major.q4_0.prefers_tile_parallel",
     narrow_tile: false,
 };
 
@@ -41,11 +52,13 @@ pub(in crate::quant::cuda::quant_matmul) const Q4_0: FeatMajorFormat = FeatMajor
 /// `vec_dot` already indexes at. K needs only a whole 32-element block, so a
 /// row's last 256-k staging group can be partial.
 pub(in crate::quant::cuda::quant_matmul) const Q4_1: FeatMajorFormat = FeatMajorFormat {
+    quant_format: QuantFormat::Q4_1,
     kernel_infix: "q4_1",
     x_stride: 84,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: false,
+    prefers_tile_parallel_fallback: false,
+    tile_parallel_key: "mmq_feat_major.q4_1.prefers_tile_parallel",
     narrow_tile: false,
 };
 
@@ -56,11 +69,13 @@ pub(in crate::quant::cuda::quant_matmul) const Q4_1: FeatMajorFormat = FeatMajor
 /// only a whole 32-element block, so a row's last 256-k staging group can be
 /// partial.
 pub(in crate::quant::cuda::quant_matmul) const Q5_0: FeatMajorFormat = FeatMajorFormat {
+    quant_format: QuantFormat::Q5_0,
     kernel_infix: "q5_0",
     x_stride: 76,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: false,
+    prefers_tile_parallel_fallback: false,
+    tile_parallel_key: "mmq_feat_major.q5_0.prefers_tile_parallel",
     narrow_tile: false,
 };
 
@@ -70,11 +85,13 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_0: FeatMajorFormat = FeatMajor
 /// arithmetic are shared. K needs only a whole 32-element block, so a row's
 /// last 256-k staging group can be partial.
 pub(in crate::quant::cuda::quant_matmul) const Q5_1: FeatMajorFormat = FeatMajorFormat {
+    quant_format: QuantFormat::Q5_1,
     kernel_infix: "q5_1",
     x_stride: 84,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: false,
+    prefers_tile_parallel_fallback: false,
+    tile_parallel_key: "mmq_feat_major.q5_1.prefers_tile_parallel",
     narrow_tile: false,
 };
 
@@ -87,89 +104,16 @@ pub(in crate::quant::cuda::quant_matmul) const Q5_1: FeatMajorFormat = FeatMajor
 /// partial.
 ///
 /// Measured faster on its tile-parallel kernel than on the split-K pair even
-/// where the geometric rule would pick the pair — see `prefers_tile_parallel`.
+/// where the geometric rule would pick the pair — see
+/// `prefers_tile_parallel_fallback`.
 pub(in crate::quant::cuda::quant_matmul) const IQ4_NL: FeatMajorFormat = FeatMajorFormat {
+    quant_format: QuantFormat::IQ4NL,
     kernel_infix: "iq4_nl",
     x_stride: 76,
     k_multiple: 32,
     act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: true,
-    narrow_tile: false,
-};
-
-/// PQ2_0: 34-byte blocks of 128 elements, 2-bit codes under ONE f16 scale,
-/// staged as Q8_0's row byte for byte — 64 quant words plus 8 f32 scales plus
-/// 4 ints of bank padding. The kernel expands each code to the signed int8
-/// `code - 1` while staging and writes the block's scale into all four of the
-/// 32-element slots the block covers, so the staged row and the whole
-/// `vec_dot` are Q8_0's. K needs only a whole 128-element block, so a row's
-/// last 256-k staging group can be partial.
-///
-/// `prefers_tile_parallel` is measured: `mmq_kernel_compare --format pq2_0
-/// --n 5120 --k 5120 --m 8 --split-k 2` on an Ampere-class GPU gives tile-parallel
-/// 51 us vs split-K 57 us, twice, so the grid keeps the flag.
-pub(in crate::quant::cuda::quant_matmul) const PQ2_0: FeatMajorFormat = FeatMajorFormat {
-    kernel_infix: "pq2_0",
-    x_stride: 76,
-    k_multiple: 128,
-    act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: true,
-    narrow_tile: false,
-};
-
-/// Q2_0: 18-byte blocks of 64 elements, 2-bit codes under ONE f16 scale,
-/// staged as Q8_0's row byte for byte. PQ2_0's code space at half the run
-/// length: the kernel expands the codes the same way and writes the block's
-/// scale into both 32-element slots it covers. K needs only a whole
-/// 64-element block, so a row's last 256-k staging group can be partial.
-///
-/// `prefers_tile_parallel` is measured as the PQ2_0 descriptor says:
-/// tile-parallel 55 us vs split-K 58 us with `--format q2_0`.
-pub(in crate::quant::cuda::quant_matmul) const Q2_0: FeatMajorFormat = FeatMajorFormat {
-    kernel_infix: "q2_0",
-    x_stride: 76,
-    k_multiple: 64,
-    act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: true,
-    narrow_tile: false,
-};
-
-/// Q1_0: 18-byte blocks of 128 elements, one sign bit per element under ONE
-/// f16 scale, staged as Q8_0's row byte for byte. The kernel expands each bit
-/// to the signed int8 `+1`/`-1` while staging and writes the block's scale
-/// into all four 32-element slots it covers. K needs only a whole 128-element
-/// block, so a row's last 256-k staging group can be partial.
-///
-/// `prefers_tile_parallel` is measured as the PQ2_0 descriptor says:
-/// tile-parallel 53 us vs split-K 59 us with `--format q1_0`.
-pub(in crate::quant::cuda::quant_matmul) const Q1_0: FeatMajorFormat = FeatMajorFormat {
-    kernel_infix: "q1_0",
-    x_stride: 76,
-    k_multiple: 128,
-    act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: true,
-    narrow_tile: false,
-};
-
-/// PTQ1_0: 28-byte blocks of 128 elements, base-3 packed trits under ONE f16
-/// scale at the END of the block, staged as Q8_0's row byte for byte. The
-/// kernel expands each trit to the signed int8 `-1`/`0`/`+1` while staging
-/// (`gguf_base3_trit`, one level per 8-element lane group, the `qh` tail
-/// apart) and writes the block's scale into all four 32-element slots it
-/// covers. K needs only a whole 128-element block, so a row's last 256-k
-/// staging group can be partial.
-///
-/// `prefers_tile_parallel` is measured, and differs from PQ2_0's: the trit
-/// expansion makes the staging heavier, so the split-K pair's extra wave
-/// covers its fixup pass. `mmq_kernel_compare --format ptq1_0 --n 5120 --k
-/// 5120 --m 8 --split-k 2` on an Ampere-class GPU: split-K 61 us vs tile-parallel
-/// 79 us; at `--k 17408` 194 vs 264 us.
-pub(in crate::quant::cuda::quant_matmul) const PTQ1_0: FeatMajorFormat = FeatMajorFormat {
-    kernel_infix: "ptq1_0",
-    x_stride: 76,
-    k_multiple: 128,
-    act_scratch_ints_per_token: 0,
-    prefers_tile_parallel: false,
+    prefers_tile_parallel_fallback: true,
+    tile_parallel_key: "mmq_feat_major.iq4_nl.prefers_tile_parallel",
     narrow_tile: false,
 };
 
@@ -187,7 +131,7 @@ mod tests {
         );
         assert_eq!(Q8_0.k_multiple, 32);
         // One of the measured tile-parallel opt-outs.
-        const { assert!(Q8_0.prefers_tile_parallel) };
+        const { assert!(Q8_0.prefers_tile_parallel_fallback) };
     }
 
     /// Q4_0 stages into the Q8_0 row, so the two strides must stay equal and
@@ -214,7 +158,7 @@ mod tests {
                 == smem_bytes(&Q8_0, FEAT_TILE_DEFAULT, x, Cadence::Halves)
         ));
         // One of the measured tile-parallel opt-outs.
-        const { assert!(Q4_0.prefers_tile_parallel) };
+        const { assert!(Q4_0.prefers_tile_parallel_fallback) };
     }
 
     /// Q4_1 stages into the Q4_K row, so the two strides must stay equal and
@@ -290,7 +234,7 @@ mod tests {
             |&x| smem_bytes(&Q5_1, FEAT_TILE_DEFAULT, x, Cadence::Halves)
                 == smem_bytes(&Q4_1, FEAT_TILE_DEFAULT, x, Cadence::Halves)
         ));
-        const { assert!(!Q5_1.prefers_tile_parallel) };
+        const { assert!(!Q5_1.prefers_tile_parallel_fallback) };
     }
 
     /// IQ4_NL stages into the Q8_0 row — the codebook values are signed int8,
@@ -326,57 +270,6 @@ mod tests {
             Cadence::Halves
         )));
         // One of the measured tile-parallel opt-outs.
-        const { assert!(IQ4_NL.prefers_tile_parallel) };
-    }
-
-    /// The four prism formats stage into the Q8_0 row, so their strides must
-    /// stay equal to it and with them the family's shared-memory request at
-    /// every token tile. Their K multiple is one weight block — 128, 64, 128,
-    /// 128 — which is finer than a 256-k group, so each takes the ragged tail.
-    #[test]
-    fn the_prism_descriptors_name_the_compiled_symbols() {
-        let prism: [(&FeatMajorFormat, &str, u32); 4] = [
-            (&PQ2_0, "pq2_0", 128),
-            (&Q2_0, "q2_0", 64),
-            (&Q1_0, "q1_0", 128),
-            (&PTQ1_0, "ptq1_0", 128),
-        ];
-        for (fm, infix, k_multiple) in prism {
-            assert_eq!(fm.kernel_infix, infix);
-            assert_eq!(
-                format!("quant_mmq_{}_q8_1_mma_x{}", fm.kernel_infix, 8),
-                format!("quant_mmq_{infix}_q8_1_mma_x8")
-            );
-            assert_eq!(
-                format!("quant_mmq_{}_q8_1_mma_sk_x{}", fm.kernel_infix, 128),
-                format!("quant_mmq_{infix}_q8_1_mma_sk_x128")
-            );
-            assert_eq!(
-                format!("quant_mmq_{}_q8_1_mma_fixup_x{}", fm.kernel_infix, 128),
-                format!("quant_mmq_{infix}_q8_1_mma_fixup_x128")
-            );
-            assert_eq!(fm.k_multiple, k_multiple);
-            assert!(256u32.is_multiple_of(fm.k_multiple));
-            assert_eq!(fm.x_stride, Q8_0.x_stride);
-            assert_eq!(fm.act_scratch_ints_per_token, 0);
-            assert!(!fm.narrow_tile);
-            assert!(VARIANTS.iter().all(|&x| smem_bytes(
-                fm,
-                FEAT_TILE_DEFAULT,
-                x,
-                Cadence::Halves
-            ) == smem_bytes(
-                &Q8_0,
-                FEAT_TILE_DEFAULT,
-                x,
-                Cadence::Halves
-            )));
-        }
-        // Measured at n = k = 5120, m = 8 on an Ampere-class GPU: tile-parallel wins
-        // for the three code formats, the split-K pair for PTQ1_0.
-        const { assert!(PQ2_0.prefers_tile_parallel) };
-        const { assert!(Q2_0.prefers_tile_parallel) };
-        const { assert!(Q1_0.prefers_tile_parallel) };
-        const { assert!(!PTQ1_0.prefers_tile_parallel) };
+        const { assert!(IQ4_NL.prefers_tile_parallel_fallback) };
     }
 }

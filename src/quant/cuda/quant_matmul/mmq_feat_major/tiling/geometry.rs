@@ -75,6 +75,21 @@ pub enum FeatTile {
     ForceNarrowGroup,
 }
 
+/// The caller's say over the launch schedule once the split count is fixed.
+///
+/// `Auto` is the production rule in `split_k::use_split_launch`, read with
+/// the format's measured `prefers_tile_parallel`. The forced variants exist
+/// for `tests/quant_mmq_tile_parallel_tune.rs`, which runs both schedules on
+/// one input and compares the bits; no production caller passes them.
+/// `SplitK` errors when the split count is 1, since the pair does not exist
+/// there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Schedule {
+    Auto,
+    SplitK,
+    TileParallel,
+}
+
 /// How a block walks the two 128-k halves of each 256-k activation group.
 ///
 /// `Halves` stages one half at a time into one activation tile: four

@@ -181,6 +181,7 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
                 k,
                 n,
                 mmq_feat_major::FeatTile::Auto,
+                mmq_feat_major::Schedule::Auto,
             )?
             .is_some()
         {

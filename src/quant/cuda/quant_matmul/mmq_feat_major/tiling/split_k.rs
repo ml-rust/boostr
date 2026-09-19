@@ -9,7 +9,6 @@
 //! at every batch size and at every tile position. Only the launch choice
 //! ([`use_split_launch`]) reads the tile count, and it is bit-neutral.
 
-use super::super::formats::FeatMajorFormat;
 use super::geometry::{FEAT_TILE_DEFAULT, FEAT_TILE_NARROW};
 
 /// Shortest K the split is worth. The partial stores and the fixup pass are
@@ -83,36 +82,40 @@ pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const fn split_count(
 /// four tiles as one, so the same shape takes the same schedule at every
 /// feature tile.
 ///
-/// A format vetoes the pair through `prefers_tile_parallel`, but only once
-/// the tile count passes about four thirds of the SM count: past that point
-/// the split saves too little to cover the fixup pass. Below that threshold
-/// the tile-parallel grid cannot fill the device, and the pair wins for every
-/// format, veto or not.
+/// `prefers_tile_parallel` is the format's measured pick on this device
+/// (`super::tile_parallel_tune::prefers_tile_parallel`, never the
+/// descriptor's fallback constant read directly). A format that prefers the
+/// grid vetoes the pair, but only once the tile count passes about four
+/// thirds of the SM count: past that point the split saves too little to
+/// cover the fixup pass. Below that threshold the tile-parallel grid cannot
+/// fill the device, and the pair wins for every format, veto or not.
 pub(in crate::quant::cuda::quant_matmul::mmq_feat_major) const fn use_split_launch(
     splits: u32,
     tiles: u32,
     feat_tile: u32,
     sms: u32,
-    format: &FeatMajorFormat,
+    prefers_tile_parallel: bool,
 ) -> bool {
     let tiles = if feat_tile < FEAT_TILE_NARROW {
         tiles * feat_tile / FEAT_TILE_NARROW
     } else {
         tiles
     };
-    splits > 1
-        && sms > 0
-        && tiles < 2 * sms
-        && !(format.prefers_tile_parallel && 3 * tiles >= 4 * sms)
+    splits > 1 && sms > 0 && tiles < 2 * sms && !(prefers_tile_parallel && 3 * tiles >= 4 * sms)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::formats::{IQ3_XXS, Q4_1, Q8_0};
     use super::*;
 
     /// SM count the geometry cases below are written against.
     const SMS: u32 = 28;
+
+    /// A format whose measured pick is the tile-parallel grid.
+    const GRID: bool = true;
+
+    /// A format whose measured pick is the split-K pair.
+    const PAIR: bool = false;
 
     #[test]
     fn a_short_k_is_one_range() {
@@ -157,47 +160,47 @@ mod tests {
 
     #[test]
     fn a_single_range_never_takes_the_pair() {
-        assert!(!use_split_launch(1, 8, FEAT_TILE_NARROW, SMS, &Q4_1));
+        assert!(!use_split_launch(1, 8, FEAT_TILE_NARROW, SMS, PAIR));
     }
 
     #[test]
     fn the_pair_only_when_the_tiles_leave_the_device_short() {
         // 32 tiles is under two waves of SMS, leaving the second wave nearly
-        // empty. Q8_0's veto does not fire yet: 3 * tiles < 4 * SMS.
-        assert!(use_split_launch(8, 32, FEAT_TILE_NARROW, SMS, &Q8_0));
+        // empty. The veto does not fire yet: 3 * tiles < 4 * SMS.
+        assert!(use_split_launch(8, 32, FEAT_TILE_NARROW, SMS, GRID));
         // Two full waves already fill it, so the tile-parallel grid wins.
-        assert!(!use_split_launch(8, 56, FEAT_TILE_NARROW, SMS, &Q8_0));
+        assert!(!use_split_launch(8, 56, FEAT_TILE_NARROW, SMS, GRID));
         // No SM count reported: fall back to the tile-parallel grid.
-        assert!(!use_split_launch(8, 32, FEAT_TILE_NARROW, 0, &Q8_0));
+        assert!(!use_split_launch(8, 32, FEAT_TILE_NARROW, 0, GRID));
     }
 
     #[test]
     fn a_flagged_format_vetoes_the_pair_past_the_threshold() {
         // 3 * tiles >= 4 * SMS: a flagged format takes the tile-parallel grid.
-        assert!(!use_split_launch(8, 40, FEAT_TILE_NARROW, SMS, &Q8_0));
+        assert!(!use_split_launch(8, 40, FEAT_TILE_NARROW, SMS, GRID));
         // An unflagged format is unaffected by the veto term at the same
         // geometry where a flagged format is vetoed.
-        assert!(use_split_launch(8, 40, FEAT_TILE_NARROW, SMS, &Q4_1));
+        assert!(use_split_launch(8, 40, FEAT_TILE_NARROW, SMS, PAIR));
     }
 
     #[test]
     fn a_single_warp_tile_counts_four_tiles_as_one() {
         // 128 single-warp tiles are 32 narrow-tile equivalents: under two
         // waves, so the pair.
-        assert!(use_split_launch(2, 128, 16, SMS, &Q8_0));
+        assert!(use_split_launch(2, 128, 16, SMS, GRID));
         // 256 are 64 equivalents: two full waves, tile-parallel.
-        assert!(!use_split_launch(2, 256, 16, SMS, &Q8_0));
+        assert!(!use_split_launch(2, 256, 16, SMS, GRID));
         // The default tile counts its tiles as they are.
-        assert!(!use_split_launch(2, 64, 128, SMS, &Q8_0));
+        assert!(!use_split_launch(2, 64, 128, SMS, GRID));
     }
 
     #[test]
     fn the_veto_lifts_below_four_thirds_of_the_sm_count() {
         // 16 tiles leaves most of SMS with no tile at all, so the pair wins
         // even for a format that vetoes it past the threshold.
-        assert!(use_split_launch(8, 16, FEAT_TILE_NARROW, SMS, &IQ3_XXS));
-        assert!(use_split_launch(8, 37, FEAT_TILE_NARROW, SMS, &IQ3_XXS));
+        assert!(use_split_launch(8, 16, FEAT_TILE_NARROW, SMS, GRID));
+        assert!(use_split_launch(8, 37, FEAT_TILE_NARROW, SMS, GRID));
         // 3 * tiles just clears 4 * SMS: the veto fires just past the threshold.
-        assert!(!use_split_launch(8, 38, FEAT_TILE_NARROW, SMS, &IQ3_XXS));
+        assert!(!use_split_launch(8, 38, FEAT_TILE_NARROW, SMS, GRID));
     }
 }

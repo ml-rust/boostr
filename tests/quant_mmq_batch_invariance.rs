@@ -9,6 +9,14 @@
 //! `r` alone, at every M the dispatch serves with a different tiling or
 //! schedule, through `quant_matmul`, `quant_matmul_batch` and `quant_swiglu`.
 //!
+//! At M=1, Q8_0, PQ2_0, Q2_0, Q1_0 and PTQ1_0 take the single-token kernel
+//! `quant_mmq_<fmt>_q8_1_gemv1` (`mmq_feat_major::gemv1`), a third schedule
+//! that forms the same bits as the tensor-core kernels, so the "alone"
+//! reference every batched row is held to below IS that kernel's output for
+//! those five formats, and every batched M runs the tensor-core kernels
+//! against it. The comparison is on the bit pattern (`to_bits`), never a
+//! tolerance.
+//!
 //! The pair-vs-grid pick is measured per device at first use, so the run
 //! below covers whichever schedule this device picks; the second run pins
 //! every format to its fallback pick.
@@ -177,6 +185,9 @@ fn check_shape(client: &CudaClient, device: &CudaDevice, format: QuantFormat, n:
     let rows = activation_rows(max_m, k);
 
     // Every row on its own: the reference each batched row must reproduce.
+    // For the five formats with a single-token kernel this is that kernel's
+    // output; `ROW_COUNTS` starts at 1, so the M=1 pass below also checks
+    // that entry against itself through each public op.
     let mut alone: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     for r in 0..max_m {
         let one = run_all(client, device, &rows[r * k..], 1, k, &weight, &up);

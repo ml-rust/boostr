@@ -26,8 +26,8 @@ use crate::error::{Error, Result};
 use crate::quant::cuda::kernels::{self, QUANT_MMQ_MMA_MODULE};
 use crate::quant::cuda::quant_matmul::helpers::quantize_activation_q8_1_mmq;
 
-use super::super::dispatch::Launch;
 use super::super::formats::FeatMajorFormat;
+use super::super::launch::Launch;
 use super::geometry::{FEAT_TILE_DEFAULT, FEAT_TILE_NARROW, FeatTile, VARIANTS, smem_opt_in_limit};
 use super::select::select_tiling;
 use super::split_k::{split_count, use_split_launch};

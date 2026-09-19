@@ -14,7 +14,10 @@
 //! on its tile position. Whether the ranges run as the split-K pair or inside
 //! the tile-parallel grid is a per-(device, format) pick measured on the
 //! device at first use (`tiling::prefers_tile_parallel`). The kernels
-//! themselves live in `src/quant/cuda/kernels/quant_mmq_mma.cu`.
+//! themselves live in `src/quant/cuda/kernels/quant_mmq_mma.cu`. At one
+//! token, Q8_0, PQ2_0, Q2_0, Q1_0 and PTQ1_0 take a third schedule, the
+//! `M = 1` kernel in `quant_mmq_gemv1.cu` (`gemv1`), which forms the same
+//! bits without the tensor-core tile's padding.
 //!
 //! The kernel family is parameterized over the weight format; everything that
 //! differs per format is a field of `FeatMajorFormat`. Q8_0, Q4_0, Q4_1,
@@ -28,6 +31,8 @@
 
 mod dispatch;
 mod formats;
+mod gemv1;
+mod launch;
 mod tiling;
 
 pub(super) use dispatch::{dispatch, dispatch_quantized, quantize_shared_activation, variant_fits};

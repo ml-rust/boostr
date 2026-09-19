@@ -15,6 +15,14 @@
 //! `quant_gemv_ptq1_0_f32` on the Q8_1 activation dequantized back to f32;
 //! see [`ptq1_0_mma_matches_f32_gemv`].
 //!
+//! The `*_gemv1_matches_mma_at_one_token` tests at the bottom check the
+//! single-token kernel `quant_mmq_<fmt>_q8_1_gemv1`, which the public
+//! `quant_matmul` takes at M = 1, against the feature-major tensor-core
+//! kernel forced through `quant_matmul_forced_schedule` on the same input.
+//! Those two DO share a float order — same int8 lanes, same scales, same
+//! expression, same chunk order, same K ranges — so they are held to bit
+//! equality; see [`gemv1_matches_mma`].
+//!
 //! Run with:
 //!   cd boostr && cargo test --features cuda --test quant_mmq_mma_parity
 
@@ -26,6 +34,10 @@ use boostr::quant::cuda::kernels::{
     self, GEMV_PQ2_0_MODULE, GEMV_PTQ1_0_MODULE, GEMV_Q1_0_MODULE, GEMV_Q2_0_MODULE,
     QUANT_GEMV_MODULE, QUANT_MMQ_MMA_MODULE,
 };
+use boostr::quant::cuda::quant_matmul::forced_tile::quant_matmul_forced_schedule;
+use boostr::quant::cuda::quant_matmul::mmq_feat_major::Schedule;
+use boostr::quant::traits::QuantMatmulOps;
+use boostr::quant::{QuantFormat, QuantTensor};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::runtime::Device;
@@ -1168,5 +1180,119 @@ fn ptq1_0_mma_kernel_matches_gemv_kernel() {
         "ptq1_0_mma_kernel_matches_gemv_kernel",
         &build_ptq1_0_weight(96, k),
         k,
+    );
+}
+
+// ── Single-token kernel vs the tensor-core kernel ───────────────────────
+
+/// K walks the single-token check covers: a five-block walk with a ragged
+/// tail, and two deep walks. With `n = 96` (one feature tile) the deep walks
+/// cut K into several ranges on a device with more SMs than feature tiles
+/// (`split_count`), and 17408 is 68 groups, which no count from 16 down
+/// divides, so the ranges are ragged. At `n = 5120` the walk is one range.
+const GEMV1_DEPTHS: [usize; 3] = [640, 5120, 17408];
+
+/// Output widths: one partial feature tile, and a wide projection.
+const GEMV1_WIDTHS: [usize; 2] = [96, 5120];
+
+/// An activation row with a spread of magnitudes, so the per-block scales
+/// vary and every chunk's term is a different float.
+fn gemv1_activation(k: usize) -> Vec<f32> {
+    (0..k)
+        .map(|i| {
+            let x = i as f32;
+            ((x * 0.013).sin() * 0.4 + (x * 0.31).cos() * 0.05) * (1.0 + (i % 7) as f32)
+        })
+        .collect()
+}
+
+/// Runs `[1, k] x weight^T` through the public `quant_matmul`, which takes
+/// `quant_mmq_<fmt>_q8_1_gemv1` at one token, and through the tensor-core
+/// kernel forced by `Schedule::TileParallel` (the `_x8` variant at one
+/// token, or `_ms_x8` when the split count is above one), and asserts the
+/// two are the same bits at every output.
+fn gemv1_matches_mma(name: &str, format: QuantFormat, weight_bytes: &[u8], n: usize, k: usize) {
+    if !lowbit_device_ready(name) {
+        return;
+    }
+    let _lock = cuda_lock();
+
+    let device = CudaDevice::new(0);
+    let client = CudaRuntime::default_client(&device);
+    let weight = QuantTensor::from_bytes(weight_bytes, format, &[n, k], &device).unwrap();
+    let act = Tensor::<CudaRuntime>::from_slice(&gemv1_activation(k), &[1, k], &device).unwrap();
+
+    let mma = quant_matmul_forced_schedule(&client, &act, &weight, Schedule::TileParallel)
+        .unwrap()
+        .to_vec::<f32>();
+    let gemv1 = client.quant_matmul(&act, &weight).unwrap().to_vec::<f32>();
+
+    assert_eq!(mma.len(), n);
+    assert_eq!(gemv1.len(), n);
+    for f in 0..n {
+        assert!(
+            mma[f].to_bits() == gemv1[f].to_bits(),
+            "{name} N={n} K={k}: feature {f} is {:e} ({:#010x}) on the tensor-core kernel and \
+             {:e} ({:#010x}) on the single-token kernel; the two must agree bitwise: same \
+             int8 lanes, same scales, same `acc += (float)D * da * dw` per chunk in ascending \
+             chunk order, same K ranges summed in range order",
+            mma[f],
+            mma[f].to_bits(),
+            gemv1[f],
+            gemv1[f].to_bits()
+        );
+    }
+}
+
+fn gemv1_check_format(name: &str, format: QuantFormat, build: fn(usize, usize) -> Vec<u8>) {
+    for &k in &GEMV1_DEPTHS {
+        for &n in &GEMV1_WIDTHS {
+            gemv1_matches_mma(name, format, &build(n, k), n, k);
+        }
+    }
+}
+
+#[test]
+fn q8_0_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "q8_0_gemv1_matches_mma_at_one_token",
+        QuantFormat::Q8_0,
+        build_q8_0_weight,
+    );
+}
+
+#[test]
+fn pq2_0_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "pq2_0_gemv1_matches_mma_at_one_token",
+        QuantFormat::PQ2_0,
+        build_pq2_0_weight,
+    );
+}
+
+#[test]
+fn q2_0_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "q2_0_gemv1_matches_mma_at_one_token",
+        QuantFormat::Q2_0,
+        build_q2_0_weight,
+    );
+}
+
+#[test]
+fn q1_0_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "q1_0_gemv1_matches_mma_at_one_token",
+        QuantFormat::Q1_0,
+        build_q1_0_weight,
+    );
+}
+
+#[test]
+fn ptq1_0_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "ptq1_0_gemv1_matches_mma_at_one_token",
+        QuantFormat::PTQ1_0,
+        build_ptq1_0_weight,
     );
 }

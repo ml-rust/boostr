@@ -14,6 +14,9 @@ pub const FUSED_INT4_QKV_MODULE: &str = "fused_int4_qkv";
 pub const QUANT_ACT_MODULE: &str = "quant_act";
 pub const MMA_INT8_PROBE_MODULE: &str = "mma_int8_probe";
 pub const QUANT_MMQ_MMA_MODULE: &str = "quant_mmq_mma";
+/// The M = 1 kernels of the feature-major MMQ family
+/// (`quant_mmq_<fmt>_q8_1_gemv1`) and their split-range fixup.
+pub const QUANT_MMQ_GEMV1_MODULE: &str = "quant_mmq_gemv1";
 
 /// TCF native quantized kernels: dequantization, GEMV, and GEMM in one module.
 /// One translation unit because all three share the device decoder in

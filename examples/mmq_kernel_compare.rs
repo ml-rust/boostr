@@ -20,6 +20,13 @@
 //! has no dp4a kernel of any kind, so under `--gemv` it prints only the
 //! `..._f32` line — the F32 GEMV `dispatch_gemv` takes for it.
 //!
+//! At `--m 1`, Q8_0, PQ2_0, Q2_0, Q1_0 and PTQ1_0 also run the single-token
+//! kernel of the feature-major family, `quant_mmq_<fmt>_q8_1_gemv1`, the
+//! kernel the production dispatch takes at one token. It walks the same
+//! `--split-k` ranges as the feature-major line and must agree with it bit
+//! for bit; the tool checks that and prints it beside the feature-major
+//! line.
+//!
 //! `--gemv` additionally launches and times the format's GEMV kernel(s) — the
 //! path `dispatch_gemv` takes for `m <= gemv_max_m` — at the same shape, so
 //! the GEMV/MMQ crossover for a format can be read off one run: Q4_K, Q6_K,
@@ -111,7 +118,7 @@ use boostr::quant::cuda::kernels::{
     GEMV_IQ3_S_MODULE, GEMV_IQ3_XXS_MODULE, GEMV_IQ4_NL_MODULE, GEMV_IQ4_XS_MODULE,
     GEMV_PQ2_0_MODULE, GEMV_PTQ1_0_MODULE, GEMV_Q1_0_MODULE, GEMV_Q2_0_MODULE, GEMV_Q2_K_MODULE,
     GEMV_Q3_K_MODULE, GEMV_Q4_1_MODULE, GEMV_Q5_0_MODULE, GEMV_Q5_1_MODULE, GEMV_Q5_K_MODULE,
-    QUANT_GEMV_MODULE, QUANT_MMQ_MMA_MODULE,
+    QUANT_GEMV_MODULE, QUANT_MMQ_GEMV1_MODULE, QUANT_MMQ_MMA_MODULE,
 };
 // The ONE set of grids and the ONE sign table, shared with the CPU
 // dequantizers the IQ1, IQ2 and IQ3 references mirror.
@@ -1901,6 +1908,24 @@ impl MmqFormat {
         }
     }
 
+    /// The single-token kernel of the feature-major family
+    /// (`quant_mmq_<fmt>_q8_1_gemv1`, module `quant_mmq_gemv1`), which the
+    /// production dispatch takes at M = 1 for the formats `mmqf_vec_dot_d`
+    /// serves as a Q8_0 row. Built from `feat_major_infix`, the same rule
+    /// `feat_major` below applies for the tensor-core name.
+    fn gemv1_kernel(&self) -> Option<String> {
+        match self {
+            MmqFormat::Q8_0
+            | MmqFormat::PQ20
+            | MmqFormat::Q20
+            | MmqFormat::Q10
+            | MmqFormat::PTQ10 => self
+                .feat_major_infix()
+                .map(|infix| format!("quant_mmq_{infix}_q8_1_gemv1")),
+            _ => None,
+        }
+    }
+
     /// Format name inside the feature-major kernel symbols. `None` marks a
     /// format the family does not compile; every format this tool knows is
     /// compiled today. Mirrors the `FeatMajorFormat` constants in
@@ -3537,6 +3562,74 @@ fn main() {
             started.elapsed().as_secs_f64() * 1e6 / ITERS as f64
         });
 
+    // Single-token kernel: one warp per 8 features, one lane per (feature,
+    // 32-chunk), the exact int dot on dp4a, and the tensor-core kernel's
+    // float expression per chunk in the same order over the same
+    // `fm_splits` ranges. Grid (features / 32, splits), 128 threads, no
+    // shared memory; a workspace of `(splits - 1) * n` floats and the fixup
+    // pass when the walk is cut.
+    let gemv1 = match format.gemv1_kernel() {
+        Some(name) if m == 1 => {
+            let module =
+                kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_GEMV1_MODULE)
+                    .expect("load gemv1 module");
+            let func = kernels::get_kernel_function(&module, &name)
+                .unwrap_or_else(|_| panic!("resolve {name}"));
+            let fx_func = kernels::get_kernel_function(&module, "quant_mmq_q8_1_gemv1_fixup")
+                .expect("resolve quant_mmq_q8_1_gemv1_fixup");
+            let out = Tensor::<CudaRuntime>::from_slice(&vec![0f32; n], &[1, n], &device).unwrap();
+            let ws_len = ((fm_splits as usize - 1) * n).max(1);
+            let ws =
+                Tensor::<CudaRuntime>::from_slice(&vec![0f32; ws_len], &[ws_len], &device).unwrap();
+            Some((func, fx_func, out, ws, name))
+        }
+        _ => None,
+    };
+
+    let gemv1_us = gemv1.as_ref().map(|(func, fx_func, out, ws, _)| {
+        let out_ptr = out.ptr();
+        let ws_ptr = ws.ptr();
+        let cfg_g = LaunchConfig {
+            grid_dim: (n_u32.div_ceil(32), fm_splits, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let cfg_fx = LaunchConfig {
+            grid_dim: (n_u32.div_ceil(256), 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let launch = || unsafe {
+            let mut b = client.stream().launch_builder(func);
+            b.arg(&packed_ptr);
+            b.arg(&weight_ptr);
+            b.arg(&out_ptr);
+            b.arg(&ws_ptr);
+            b.arg(&k_u32);
+            b.arg(&n_u32);
+            b.arg(&fm_ntok);
+            b.launch(cfg_g).expect("launch gemv1 kernel");
+            if fm_splits > 1 {
+                let mut f = client.stream().launch_builder(fx_func);
+                f.arg(&out_ptr);
+                f.arg(&ws_ptr);
+                f.arg(&n_u32);
+                f.arg(&fm_splits);
+                f.launch(cfg_fx).expect("launch gemv1 fixup");
+            }
+        };
+        for _ in 0..WARMUP {
+            launch();
+        }
+        client.synchronize();
+        let started = std::time::Instant::now();
+        for _ in 0..ITERS {
+            launch();
+        }
+        client.synchronize();
+        started.elapsed().as_secs_f64() * 1e6 / ITERS as f64
+    });
+
     let case = RefCase {
         weight: &weight_bytes,
         act: &act_bytes,
@@ -3611,6 +3704,24 @@ fn main() {
             m * n
         );
     }
+    if let (Some((_, _, out, _, name)), Some((_, fm_out, _, fm_name))) =
+        (gemv1.as_ref(), feat_major.as_ref())
+    {
+        let g_host = out.to_vec::<f32>();
+        check_against_reference(name, format, &g_host, &case);
+        // Same int8 lanes, same scales, same float expression per chunk,
+        // same chunk order, same ranges: the single-token kernel and the
+        // feature-major kernel must agree to the bit.
+        let fm_host = fm_out.to_vec::<f32>();
+        if let Some(idx) = (0..n).find(|&i| g_host[i].to_bits() != fm_host[i].to_bits()) {
+            eprintln!(
+                "outputs MISMATCH at index {idx}: {name}={} {fm_name}={}",
+                g_host[idx], fm_host[idx]
+            );
+            std::process::exit(1);
+        }
+        println!("outputs match: {name} and {fm_name} agree bit-for-bit at all {n} elements");
+    }
     if let Some((f32_kernel, _, out_f32, mwr, batched, lowbit_single)) = gemv_case.as_ref() {
         let f32_host = out_f32.to_vec::<f32>();
         check_against_reference(f32_kernel, format, &f32_host, &case);
@@ -3650,6 +3761,15 @@ fn main() {
         println!("{name} {us:9.2} us/call");
         if let Some((_, mma_us)) = token_major_us {
             println!("ratio mma/feature-major: {:.3}", mma_us / us);
+        }
+    }
+    if let (Some(us), Some((_, _, _, _, name))) = (gemv1_us, gemv1.as_ref()) {
+        println!(
+            "{name} (grid {}x{fm_splits}) {us:9.2} us/call",
+            n_u32.div_ceil(32)
+        );
+        if let Some(fm_us) = feat_major_us {
+            println!("ratio feature-major/gemv1: {:.3}", fm_us / us);
         }
     }
     if let Some((kernel_name, us, _)) = lowbit_gemm.as_ref() {

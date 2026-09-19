@@ -298,8 +298,9 @@ extern "C" __global__ __launch_bounds__(MMQ_THREADS) void quant_mmq_q8_0_q8_1_mm
 
 // Word offset of the second 128-k half within a staged weight row.
 #define MMQF_HALF_W 32
-// Weight blocks consumed per staging iteration: 256 k-values.
-#define MMQF_ITER_B 8
+// `MMQF_ITER_B` (blocks per 256-k staging group) and `mmqf_split_range`,
+// shared with the single-token kernel in `quant_mmq_gemv1.cu`.
+#include "mmq/split_range.cuh"
 // Independent global loads a staging thread issues before the first shared
 // store. Trades registers for memory-level parallelism; the staging loops stall
 // on global latency, so this is the knob that moves that stall.

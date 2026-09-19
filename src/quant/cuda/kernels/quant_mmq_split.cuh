@@ -11,23 +11,9 @@
 // at any M and any tile position.
 #pragma once
 
-// K range of split `s` of `splits`, in activation blocks. Both the fused
-// tile-parallel walk and the split-K launch cut K on 256-k group boundaries
-// with this one rule, so the partial sums they form are the same floats:
-// `kb_s = MMQF_ITER_B * floor(s * groups / splits)`, and the last split runs
-// to `bpr`, which takes the ragged tail with it. The host sizes `splits` so
-// no range is empty (`splits <= groups`); an empty range would still be
-// safe, contributing a zero partial.
-static __device__ __forceinline__ void mmqf_split_range(
-    unsigned int bpr, unsigned int splits, unsigned int s, unsigned int& kb0,
-    unsigned int& kb1
-) {
-    const unsigned long long groups = (bpr + MMQF_ITER_B - 1) / MMQF_ITER_B;
-    kb0 = (unsigned int)(MMQF_ITER_B * ((unsigned long long)s * groups / splits));
-    kb1 = (s + 1 == splits)
-              ? bpr
-              : (unsigned int)(MMQF_ITER_B * ((unsigned long long)(s + 1) * groups / splits));
-}
+// `mmqf_split_range`, the one K-range rule; the single-token kernel in
+// `quant_mmq_gemv1.cu` reads the same header.
+#include "mmq/split_range.cuh"
 
 // Adds a partial tile into the output. The same lane owns the same element
 // on every split, so the read-modify-write needs no atomics; the sum for

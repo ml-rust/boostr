@@ -2,14 +2,7 @@
 //! on identical inputs, so a profiler attributes instruction counts to each
 //! kernel without an A/B rebuild. Covers Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K,
 //! Q5_K, Q6_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS,
-//! IQ3_S, IQ1_S, PQ2_0, Q2_0 and Q1_0 via `--format`.
-//!
-//! `--format ptq1_0` is a separate, much smaller mode (`run_ptq1_0`): PTQ1_0
-//! has neither a token-major dp4a/MMA kernel nor a feature-major one, only
-//! the F32 GEMV and GEMM pair, so it skips the Q8_1-activation machinery
-//! every format above shares and times and checks those two. `--mmq-x`
-//! and `--split-k` do not apply to it and are refused with an error; `--gemv`
-//! is accepted but a no-op, since its one GEMV kernel always runs.
+//! IQ3_S, IQ1_S, PQ2_0, Q2_0, Q1_0 and PTQ1_0 via `--format`.
 //!
 //! Q4_0, Q4_1, Q5_0, Q5_1, Q5_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS, IQ2_XXS, IQ2_XS,
 //! IQ2_S, IQ3_XXS, IQ3_S and IQ1_S have no token-major kernel of either kind —
@@ -18,12 +11,14 @@
 //! the token-major comparison rather than resolving a symbol that is not
 //! compiled.
 //!
-//! PQ2_0, Q2_0 and Q1_0 have no token-major kernel of either kind and take
-//! the feature-major family like the fifteen above. For these three the tool
-//! also times their dequantize-then-tiled-f32 GEMM kernel
+//! PQ2_0, Q2_0, Q1_0 and PTQ1_0 have no token-major kernel of either kind
+//! and take the feature-major family like the fifteen above. For these four
+//! the tool also times their dequantize-then-tiled-f32 GEMM kernel
 //! (`quant_matmul_{fmt}_f32`, module `gemm_{fmt}`), the path a device
 //! without int8 MMA or a K that is not a whole number of their blocks falls
-//! to, as an extra "GEMM" line, unconditionally like the MMQ lines.
+//! to, as an extra "GEMM" line, unconditionally like the MMQ lines. PTQ1_0
+//! has no dp4a kernel of any kind, so under `--gemv` it prints only the
+//! `..._f32` line — the F32 GEMV `dispatch_gemv` takes for it.
 //!
 //! `--gemv` additionally launches and times the format's GEMV kernel(s) — the
 //! path `dispatch_gemv` takes for `m <= gemv_max_m` — at the same shape, so
@@ -100,6 +95,8 @@
 //!     --format q1_0 --n 4096 --k 14336 --m 4 --gemv
 //! cargo run --release --features cuda --example mmq_kernel_compare -- \
 //!     --format ptq1_0 --n 4096 --k 14336 --m 512
+//! cargo run --release --features cuda --example mmq_kernel_compare -- \
+//!     --format ptq1_0 --n 4096 --k 14336 --m 8 --gemv
 //! ```
 
 #[cfg(not(feature = "cuda"))]
@@ -1234,8 +1231,8 @@ fn q1_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize
     })
 }
 
-/// Base-3 trit `{-1, 0, 1}` of element `elem` (0..128) of a PTQ1_0 block's
-/// `qs`+`qh` bytes (26 bytes: `qs[0..24]`, `qh[24..26]`). Walks the same three
+/// Base-3 trit `{-1, 0, 1}` of element `elem` (0..128) of a PTQ1_0 block
+/// (`qs[0..24]`, `qh[24..26]`; `d` at 26 is not read). Walks the same three
 /// runs as `gguf_ptq1_0_trit` in `src/quant/cuda/kernels/prism_dequant.cuh`
 /// and the CPU dequant kernel's element-to-(byte, level) mapping in
 /// `src/quant/cpu/kernels/dequant_prism.rs`: `[0, 80)` reads `qs[0..16]` at 5
@@ -1260,29 +1257,31 @@ fn ptq1_0_trit(qs_qh: &[u8], elem: usize) -> f64 {
 }
 
 /// Exact reference for one output element, in f64, for a PTQ1_0 weight
-/// against a plain F32 activation, plus the accumulated magnitude of the sum.
+/// against a Q8_1 activation, plus the accumulated magnitude of the sum.
 ///
 /// Dequant math and byte offsets are ground-truthed against
 /// `ptq1_0_dequant_block` in `src/quant/cuda/kernels/prism_dequant.cuh`: per
 /// 128-element block of 28 bytes, `qs[0..24]` + `qh[24..26]` (base-3 packed
-/// trits, see [`ptq1_0_trit`]) then `d` (f16) at the END, byte 26. Unlike
-/// every other reference in this file, the activation is plain F32 — PTQ1_0
-/// has no dp4a kernel — so the element read is a direct index, not the Q8_1
-/// record lookup [`prism_dot_reference`] does.
+/// trits, see [`ptq1_0_trit`]) then `d` (f16) at the END, byte 26. `d` is
+/// not at byte 0, so this does not go through [`prism_dot_reference`]; the
+/// activation read is the same Q8_1 record lookup.
 #[cfg(feature = "cuda")]
-fn ptq1_0_reference(weight: &[u8], act: &[f32], token: usize, feat: usize, k: usize) -> (f64, f64) {
+fn ptq1_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
     let bpr = k / 128;
+    let abpr = k / 32;
     let mut sum = 0.0f64;
     let mut magnitude = 0.0f64;
     for blk in 0..bpr {
         let wb = (feat * bpr + blk) * 28;
         let block = &weight[wb..wb + 28];
-        let d = f64::from(half::f16::from_le_bytes([block[26], block[27]]).to_f32());
+        let wd = f64::from(half::f16::from_le_bytes([block[26], block[27]]).to_f32());
         for e in 0..128 {
-            let trit = ptq1_0_trit(&block[..26], e);
+            let trit = ptq1_0_trit(block, e);
             let elem = blk * 128 + e;
-            let a = f64::from(act[token * k + elem]);
-            let contribution = d * trit * a;
+            let ab = (token * abpr + elem / 32) * 36;
+            let ad = f64::from(half::f16::from_le_bytes([act[ab], act[ab + 1]]).to_f32());
+            let aq = f64::from(act[ab + 4 + elem % 32] as i8);
+            let contribution = wd * trit * ad * aq;
             sum += contribution;
             magnitude += contribution.abs();
         }
@@ -1308,10 +1307,9 @@ struct RefCase<'a> {
 /// [`q2_k_reference`], [`iq4_nl_reference`], [`iq4_xs_reference`],
 /// [`iq2_xxs_reference`], [`iq2_xs_reference`], [`iq2_s_reference`],
 /// [`iq3_xxs_reference`], [`iq3_s_reference`], [`iq1_s_reference`],
-/// [`pq2_0_reference`], [`q2_0_reference`] or [`q1_0_reference`]),
-/// panicking with the position and both values on the first breach. PTQ1_0 is
-/// checked by [`check_ptq1_0_reference`] instead — its activation is plain
-/// F32, not the Q8_1 bytes every reference here reads.
+/// [`pq2_0_reference`], [`q2_0_reference`], [`q1_0_reference`] or
+/// [`ptq1_0_reference`]), panicking with the position and both values on the
+/// first breach.
 #[cfg(feature = "cuda")]
 fn check_against_reference(label: &str, format: MmqFormat, got: &[f32], case: &RefCase) {
     let reference: ReferenceFn = match format {
@@ -1336,13 +1334,7 @@ fn check_against_reference(label: &str, format: MmqFormat, got: &[f32], case: &R
         MmqFormat::PQ20 => pq2_0_reference,
         MmqFormat::Q20 => q2_0_reference,
         MmqFormat::Q10 => q1_0_reference,
-        // PTQ1_0's activation is plain F32, not the Q8_1 bytes `ReferenceFn`
-        // reads, so it never reaches this function; `run_ptq1_0` checks it
-        // against `ptq1_0_reference` through `check_ptq1_0_reference`
-        // instead.
-        MmqFormat::PTQ10 => unreachable!(
-            "ptq1_0 takes the dedicated run_ptq1_0 path and never calls check_against_reference"
-        ),
+        MmqFormat::PTQ10 => ptq1_0_reference,
     };
     let RefCase {
         weight,
@@ -1356,29 +1348,9 @@ fn check_against_reference(label: &str, format: MmqFormat, got: &[f32], case: &R
     });
 }
 
-/// Checks sampled outputs of a PTQ1_0 kernel against [`ptq1_0_reference`],
-/// panicking with the position and both values on the first breach. Separate
-/// from [`check_against_reference`] because PTQ1_0's activation is plain F32,
-/// not the Q8_1 bytes every other reference in this file reads.
-#[cfg(feature = "cuda")]
-fn check_ptq1_0_reference(
-    label: &str,
-    weight: &[u8],
-    act: &[f32],
-    m: usize,
-    n: usize,
-    k: usize,
-    got: &[f32],
-) {
-    check_sampled_reference(label, m, n, got, |token, feat| {
-        ptq1_0_reference(weight, act, token, feat, k)
-    });
-}
-
-/// Shared sampling core for [`check_against_reference`] and
-/// [`check_ptq1_0_reference`]: strides `m * n` outputs, calls `reference_at`
-/// for each sampled `(token, feat)`, and panics with the position and both
-/// values on the first breach past [`REFERENCE_RTOL`].
+/// Sampling core of [`check_against_reference`]: strides `m * n` outputs,
+/// calls `reference_at` for each sampled `(token, feat)`, and panics with the
+/// position and both values on the first breach past [`REFERENCE_RTOL`].
 #[cfg(feature = "cuda")]
 fn check_sampled_reference(
     label: &str,
@@ -1470,10 +1442,9 @@ enum MmqFormat {
     PQ20,
     Q20,
     Q10,
-    /// PTQ1_0: 128-element, 28-byte trit blocks with `d` at the END. Has only
-    /// the F32 GEMV/GEMM pair — no dp4a, no MMA, no feature-major kernel —
-    /// so `main` gives it a dedicated path (`run_ptq1_0`) instead of the
-    /// Q8_1-activation machinery every other variant here shares.
+    /// PTQ1_0: 128-element, 28-byte trit blocks with `d` at the END. Takes
+    /// the feature-major family like the other prism formats; has no dp4a
+    /// kernel of any kind, only the F32 GEMV/GEMM pair beside it.
     PTQ10,
 }
 
@@ -1608,8 +1579,8 @@ impl MmqFormat {
     /// Token-major tensor-core MMQ kernel, or `None` for a format that has
     /// none. Q4_0, Q4_1, Q5_0, Q5_1, Q5_K, Q3_K, Q2_K, IQ4_NL, IQ4_XS,
     /// IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S, PQ2_0, Q2_0, Q1_0 and
-    /// PTQ1_0 have no `_mma` twin; the first eighteen went straight to the
-    /// feature-major family, and PTQ1_0 has neither that nor this yet.
+    /// PTQ1_0 have no `_mma` twin; all nineteen went straight to the
+    /// feature-major family.
     fn mma_kernel(&self) -> Option<&'static str> {
         match self {
             MmqFormat::Q8_0 => Some("quant_mmq_q8_0_q8_1_mma"),
@@ -1637,18 +1608,13 @@ impl MmqFormat {
         }
     }
 
-    /// The dequantize-then-tiled-f32 GEMM kernel PQ2_0, Q2_0 and Q1_0 fall
-    /// back to on a device without int8 MMA or at a K that is not a whole
-    /// number of their blocks, or `None` for every other format. Mirrors the
-    /// fallback arm of `dispatch_matmul` in
+    /// The dequantize-then-tiled-f32 GEMM kernel PQ2_0, Q2_0, Q1_0 and
+    /// PTQ1_0 fall back to on a device without int8 MMA or at a K that is
+    /// not a whole number of their blocks, or `None` for every other format.
+    /// Mirrors the fallback arm of `dispatch_matmul` in
     /// `src/quant/cuda/quant_matmul/format_dispatch/gemm.rs`. This tool
     /// times it as an extra "GEMM" line beside the feature-major one, so the
     /// tensor-core gain over the fallback can be read off one run.
-    ///
-    /// PTQ1_0 has no feature-major kernel to fall back FROM, so this is its
-    /// only GEMM path rather than a fallback; `run_ptq1_0` times it
-    /// unconditionally instead of as an extra line beside a feature-major
-    /// one.
     fn gemm_f32_kernel(&self) -> Option<(&'static str, &'static str)> {
         match self {
             MmqFormat::PQ20 => Some(("quant_matmul_pq2_0_f32", GEMM_PQ2_0_MODULE)),
@@ -1890,9 +1856,7 @@ impl MmqFormat {
                 2 => Some(("quant_gemv_q1_0_q8_1_mwr_n2", GEMV_Q1_0_MODULE, 2)),
                 _ => Some(("quant_gemv_q1_0_q8_1_mwr_n4", GEMV_Q1_0_MODULE, 4)),
             },
-            // PTQ1_0 has no dp4a kernel of any width; it never reaches this
-            // branch (`run_ptq1_0` takes over `main` before the batched dp4a
-            // machinery is built).
+            // PTQ1_0 has no dp4a kernel of any width.
             MmqFormat::PTQ10 => None,
         }
     }
@@ -1934,9 +1898,7 @@ impl MmqFormat {
 
     /// Format name inside the feature-major kernel symbols. `None` marks a
     /// format the family does not compile; every format this tool knows is
-    /// compiled today except PTQ1_0, which has no `FeatMajorFormat` yet — its
-    /// `None` here routes `main` to `run_ptq1_0` instead of the feature-major
-    /// setup below. Mirrors the `FeatMajorFormat` constants in
+    /// compiled today. Mirrors the `FeatMajorFormat` constants in
     /// `src/quant/cuda/quant_matmul/mmq_feat_major/formats/` and the
     /// `MMQ_FM_KERNEL` instantiations in `quant_mmq_mma.cu`.
     fn feat_major_infix(&self) -> Option<&'static str> {
@@ -1962,7 +1924,7 @@ impl MmqFormat {
             MmqFormat::PQ20 => Some("pq2_0"),
             MmqFormat::Q20 => Some("q2_0"),
             MmqFormat::Q10 => Some("q1_0"),
-            MmqFormat::PTQ10 => None,
+            MmqFormat::PTQ10 => Some("ptq1_0"),
         }
     }
 
@@ -2000,9 +1962,10 @@ impl MmqFormat {
     /// `dl * (grid + delta)`, which splits per 32-element group into
     /// `dl * dot(a, g) + dl * delta * sum(a)` — a scale/min pair, not a bare
     /// scale — and its delta term is additive like Q4_1's minimum. PQ2_0,
-    /// Q2_0 and Q1_0 stage the Q8_0 row: their codes expand to signed int8
-    /// and their one block scale is written into every 32-element slot the
-    /// block covers, so the row carries eight f32 scales like Q8_0's.
+    /// Q2_0, Q1_0 and PTQ1_0 stage the Q8_0 row: their codes expand to
+    /// signed int8 and their one block scale is written into every
+    /// 32-element slot the block covers, so the row carries eight f32 scales
+    /// like Q8_0's.
     fn feat_major_x_stride(&self) -> u32 {
         match self {
             MmqFormat::Q8_0
@@ -2015,7 +1978,8 @@ impl MmqFormat {
             | MmqFormat::IQ3S
             | MmqFormat::PQ20
             | MmqFormat::Q20
-            | MmqFormat::Q10 => 76,
+            | MmqFormat::Q10
+            | MmqFormat::PTQ10 => 76,
             MmqFormat::Q4K
             | MmqFormat::Q5K
             | MmqFormat::Q6K
@@ -2026,10 +1990,6 @@ impl MmqFormat {
             | MmqFormat::IQ2S
             | MmqFormat::IQ1S => 84,
             MmqFormat::Q2K => 100,
-            // PTQ1_0 has no feature-major kernel (`feat_major_infix` returns
-            // `None` for it), so its stride is never read; this arm exists
-            // only to keep the match exhaustive.
-            MmqFormat::PTQ10 => 0,
         }
     }
 
@@ -2571,20 +2531,6 @@ fn build_ptq1_0_weight(n: usize, k: usize) -> Vec<u8> {
     out
 }
 
-/// Builds a plain F32 activation buffer: `m * k` `f32` values, deterministic
-/// and index-varying so no permutation of them coincides with another. PTQ1_0
-/// has no dp4a kernel, so `run_ptq1_0` reads the activation directly instead
-/// of the Q8_1 bytes `build_q8_1_activation` produces for every other format.
-#[cfg(feature = "cuda")]
-fn build_plain_f32_activation(m: usize, k: usize) -> Vec<f32> {
-    (0..m * k)
-        .map(|i| {
-            let x = i as f32 * 0.017 + 0.31;
-            x.sin() * 0.9 + (x * 2.3).cos() * 0.4
-        })
-        .collect()
-}
-
 /// Builds a Q8_1 activation buffer: `m * (k / 32)` blocks of 36 bytes, half
 /// scale at byte 0, block sum at byte 2 (unused by the kernel), 32 `i8`
 /// quants at byte 4.
@@ -2973,119 +2919,6 @@ fn build_q2_k_weight(n: usize, k: usize) -> Vec<u8> {
     out
 }
 
-/// Runs `--format ptq1_0`'s F32 GEMV and GEMM kernels and checks each
-/// against [`ptq1_0_reference`]. PTQ1_0 has neither a token-major dp4a/MMA
-/// kernel nor a feature-major one yet, so this skips the Q8_1-activation
-/// machinery `main` builds for every other format and drives the two
-/// F32-activation kernels directly. `gemv_requested` is `--gemv`; it is a
-/// no-op here since this always runs the GEMV kernel.
-#[cfg(feature = "cuda")]
-fn run_ptq1_0(device: &CudaDevice, n: usize, k: usize, m: usize, gemv_requested: bool) {
-    if gemv_requested {
-        println!("--gemv is a no-op for --format ptq1_0: its only GEMV kernel always runs.");
-    }
-
-    let client = CudaRuntime::default_client(device);
-    client.synchronize();
-    let device_index = device.id();
-
-    let weight_bytes = build_ptq1_0_weight(n, k);
-    let act = build_plain_f32_activation(m, k);
-
-    let weight =
-        Tensor::<CudaRuntime>::from_slice(&weight_bytes, &[weight_bytes.len()], device).unwrap();
-    let act_tensor = Tensor::<CudaRuntime>::from_slice(&act, &[m, k], device).unwrap();
-    let weight_ptr = weight.ptr();
-    let act_ptr = act_tensor.ptr();
-    let m_u32 = m as u32;
-    let k_u32 = k as u32;
-    let n_u32 = n as u32;
-
-    // F32 GEMV: mirrors the F32 activation path's launch config in
-    // `dispatch_gemv` (`src/quant/cuda/quant_matmul/format_dispatch/gemv.rs`)
-    // — 8 warps per block, one output column per warp.
-    let (gemv_kernel, gemv_module) = MmqFormat::PTQ10.f32_gemv_kernel();
-    let gemv_mod = kernels::get_or_load_module(client.context(), device_index, gemv_module)
-        .expect("load ptq1_0 GEMV module");
-    let gemv_func = kernels::get_kernel_function(&gemv_mod, gemv_kernel)
-        .unwrap_or_else(|_| panic!("resolve {gemv_kernel}"));
-    let out_gemv = Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], device).unwrap();
-    let out_gemv_ptr = out_gemv.ptr();
-    let gemv_cfg = LaunchConfig {
-        grid_dim: (n_u32.div_ceil(8), m_u32, 1),
-        block_dim: (256, 1, 1),
-        shared_mem_bytes: 0,
-    };
-    let launch_gemv = || unsafe {
-        let mut builder = client.stream().launch_builder(&gemv_func);
-        builder.arg(&act_ptr);
-        builder.arg(&weight_ptr);
-        builder.arg(&out_gemv_ptr);
-        builder.arg(&m_u32);
-        builder.arg(&k_u32);
-        builder.arg(&n_u32);
-        builder
-            .launch(gemv_cfg)
-            .expect("launch quant_gemv_ptq1_0_f32");
-    };
-    for _ in 0..WARMUP {
-        launch_gemv();
-    }
-    client.synchronize();
-    let started = std::time::Instant::now();
-    for _ in 0..ITERS {
-        launch_gemv();
-    }
-    client.synchronize();
-    let gemv_us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
-    let out_gemv_host = out_gemv.to_vec::<f32>();
-    check_ptq1_0_reference(gemv_kernel, &weight_bytes, &act, m, n, k, &out_gemv_host);
-    println!("{gemv_kernel}: {gemv_us:.2} us");
-
-    // F32 GEMM: mirrors `dispatch_matmul`'s classic per-element 16x16 tile
-    // (`src/quant/cuda/quant_matmul/format_dispatch/gemm.rs`) — PTQ1_0 has no
-    // feature-major or MMQ kernel to prefer over it.
-    let (gemm_kernel, gemm_module) = MmqFormat::PTQ10
-        .gemm_f32_kernel()
-        .expect("ptq1_0 has a gemm_f32_kernel entry");
-    let gemm_mod = kernels::get_or_load_module(client.context(), device_index, gemm_module)
-        .expect("load ptq1_0 GEMM module");
-    let gemm_func = kernels::get_kernel_function(&gemm_mod, gemm_kernel)
-        .unwrap_or_else(|_| panic!("resolve {gemm_kernel}"));
-    let out_gemm = Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], device).unwrap();
-    let out_gemm_ptr = out_gemm.ptr();
-    let gemm_cfg = LaunchConfig {
-        grid_dim: (n_u32.div_ceil(16), m_u32.div_ceil(16), 1),
-        block_dim: (16, 16, 1),
-        shared_mem_bytes: 0,
-    };
-    let launch_gemm = || unsafe {
-        let mut builder = client.stream().launch_builder(&gemm_func);
-        builder.arg(&act_ptr);
-        builder.arg(&weight_ptr);
-        builder.arg(&out_gemm_ptr);
-        builder.arg(&m_u32);
-        builder.arg(&k_u32);
-        builder.arg(&n_u32);
-        builder
-            .launch(gemm_cfg)
-            .expect("launch quant_matmul_ptq1_0_f32");
-    };
-    for _ in 0..WARMUP {
-        launch_gemm();
-    }
-    client.synchronize();
-    let started = std::time::Instant::now();
-    for _ in 0..ITERS {
-        launch_gemm();
-    }
-    client.synchronize();
-    let gemm_us = started.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
-    let out_gemm_host = out_gemm.to_vec::<f32>();
-    check_ptq1_0_reference(gemm_kernel, &weight_bytes, &act, m, n, k, &out_gemm_host);
-    println!("{gemm_kernel}: {gemm_us:.2} us");
-}
-
 #[cfg(feature = "cuda")]
 fn main() {
     if !numr::runtime::cuda::is_cuda_available() {
@@ -3145,25 +2978,6 @@ fn main() {
     }
 
     let device = CudaDevice::new(0);
-
-    // PTQ1_0 has neither a feature-major nor an MMA kernel: `--mmq-x` and
-    // `--split-k` pick between feature-major tile/split-K variants, so
-    // neither applies. `run_ptq1_0` also needs no sm_80 floor — its kernels
-    // are plain F32, not `mma.sync.aligned.m16n8k32` — so it takes over
-    // before the sm_80 gate below.
-    if matches!(format, MmqFormat::PTQ10) {
-        if force_mmq_x.is_some() || split_k.is_some() {
-            eprintln!(
-                "--format ptq1_0 has no feature-major or MMA kernel yet: --mmq-x and \
-                 --split-k select between feature-major variants and do not apply. Drop \
-                 them; ptq1_0 only runs its F32 GEMV and GEMM kernels."
-            );
-            std::process::exit(1);
-        }
-        println!("mmq_kernel_compare: format=ptq1_0 n={n} k={k} m={m}");
-        run_ptq1_0(&device, n, k, m, gemv);
-        return;
-    }
 
     // `m16n8k32` needs sm_80. `caps.bf16` marks that floor, so a pre-Ampere
     // device skips here instead of failing to load the module.
@@ -3299,11 +3113,12 @@ fn main() {
         (dp4a_us, mma_us)
     });
 
-    // GEMM fallback for PQ2_0, Q2_0 and Q1_0: their dequantize-then-tiled-f32
-    // kernel (`quant_matmul_{fmt}_f32`) is the path a device without int8
-    // MMA falls to, and this runs it unconditionally — like `token_major_us`
-    // and `feat_major_us` — rather than under `--gemv`, so the extra "GEMM"
-    // line these three print is comparable to their feature-major line.
+    // GEMM fallback for PQ2_0, Q2_0, Q1_0 and PTQ1_0: their
+    // dequantize-then-tiled-f32 kernel (`quant_matmul_{fmt}_f32`) is the
+    // path a device without int8 MMA falls to, and this runs it
+    // unconditionally — like `token_major_us` and `feat_major_us` — rather
+    // than under `--gemv`, so the extra "GEMM" line these four print is
+    // comparable to their feature-major line.
     let prism_gemm = format.gemm_f32_kernel().map(|(kernel_name, module_name)| {
         let f32_act_bytes = build_f32_activation(&act_bytes, m, k);
         let act_f32 = Tensor::<CudaRuntime>::from_slice(&f32_act_bytes, &[m, k], &device).unwrap();

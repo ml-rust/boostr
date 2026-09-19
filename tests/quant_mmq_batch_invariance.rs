@@ -34,8 +34,8 @@ const DEPTHS: [usize; 4] = [1024, 2048, 4096, 6144];
 
 /// A K one block past the deepest whole-group walk, so it is not a whole
 /// number of 256-k groups and the last split takes a ragged tail. One block
-/// is the format's own: 32 for Q8_0 and Q4_0, 64 for Q2_0, 128 for PQ2_0
-/// and Q1_0.
+/// is the format's own: 32 for Q8_0 and Q4_0, 64 for Q2_0, 128 for PQ2_0,
+/// Q1_0 and PTQ1_0.
 fn ragged_depth(format: QuantFormat) -> usize {
     6144 + format.block_size()
 }
@@ -47,12 +47,13 @@ fn cuda() -> Option<(CudaClient, CudaDevice)> {
 }
 
 /// Packed weight bytes for `format` at `[n, k]`, through the CPU quantizer.
-/// PQ2_0, Q2_0 and Q1_0 have no CPU quantize kernel, so their blocks are
-/// built directly: every bit pattern of their code run is a valid block.
+/// PQ2_0, Q2_0, Q1_0 and PTQ1_0 have no CPU quantize kernel, so their blocks
+/// are built directly: every bit pattern of their code run is a valid block
+/// (`gguf_base3_trit` maps every byte to a trit at every level).
 fn packed_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> {
     if matches!(
         format,
-        QuantFormat::PQ2_0 | QuantFormat::Q2_0 | QuantFormat::Q1_0
+        QuantFormat::PQ2_0 | QuantFormat::Q2_0 | QuantFormat::Q1_0 | QuantFormat::PTQ1_0
     ) {
         return prism_weight(format, n, k, salt);
     }
@@ -69,18 +70,26 @@ fn packed_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> 
         .expect("weight bytes")
 }
 
-/// A prism weight built byte by byte: f16 `d` at byte 0 then the code run,
-/// both varied by block index and `salt` so no two blocks or weights match.
+/// A prism weight built byte by byte: f16 `d` and the code run, both varied
+/// by block index and `salt` so no two blocks or weights match. `d` sits at
+/// byte 0 for PQ2_0, Q2_0 and Q1_0 and at the END of the block (byte 26) for
+/// PTQ1_0; the code run fills the other `block_bytes - 2` bytes.
 fn prism_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> {
     let block_bytes = format.block_bytes();
     let bpr = k / format.block_size();
+    let (d_off, qs_off) = if format == QuantFormat::PTQ1_0 {
+        (block_bytes - 2, 0)
+    } else {
+        (0, 2)
+    };
     let mut out = vec![0u8; n * bpr * block_bytes];
     for block in 0..n * bpr {
         let base = block * block_bytes;
         let d = half::f16::from_f32(0.01 + ((block as f32 * 0.003) + salt * 0.1) % 0.5);
-        out[base..base + 2].copy_from_slice(&d.to_le_bytes());
+        out[base + d_off..base + d_off + 2].copy_from_slice(&d.to_le_bytes());
         for pos in 0..block_bytes - 2 {
-            out[base + 2 + pos] = ((block * 131 + pos * 17 + (salt * 100.0) as usize) % 251) as u8;
+            out[base + qs_off + pos] =
+                ((block * 131 + pos * 17 + (salt * 100.0) as usize) % 251) as u8;
         }
     }
     out
@@ -245,4 +254,9 @@ fn q2_0_rows_do_not_depend_on_the_batch() {
 #[test]
 fn q1_0_rows_do_not_depend_on_the_batch() {
     check_format(QuantFormat::Q1_0, true);
+}
+
+#[test]
+fn ptq1_0_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::PTQ1_0, true);
 }

@@ -154,7 +154,7 @@ fn perf_varlen_throughput() {
     // Pre-fix nomic-768 throughput was 23-40 docs/s (F16/WMMA). The F32 matmul
     // regression dropped it to ~0.5. Assert we stay well above that floor — a
     // conservative bar that catches the ~50x regression class without flaking on
-    // debug-build / GPU-load variance. (Measured ~29 docs/s on a 3060.)
+    // debug-build / GPU-load variance. (Measured ~29 docs/s on an Ampere-class GPU.)
     const MIN_DOCS_PER_SEC: f64 = 10.0;
     const MAX_DRIFT_MIB: f64 = 512.0;
 

@@ -322,7 +322,10 @@ pub(in crate::quant::cuda::quant_matmul) fn dispatch_gemv(
 
     // F32 activation path for formats with dedicated F32 GEMV kernels. For a
     // format with a dp4a kernel at every m (Q8_0, the K-quants, the prism
-    // three) this is reached only when K fails `k_aligned`.
+    // three) this is reached only when K fails `k_aligned`. PTQ1_0 has no
+    // dp4a kernel; on a device with int8 MMA its feature-major kernel takes
+    // every m, so it reaches here only when K is not a whole number of its
+    // 128-element blocks.
     tracing::debug!(
         ?format,
         m,

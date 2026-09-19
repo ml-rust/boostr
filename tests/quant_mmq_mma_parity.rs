@@ -10,7 +10,10 @@
 //! The PQ2_0, Q2_0 and Q1_0 tests at the bottom check the feature-major
 //! tensor-core kernel against the token-batched dp4a GEMV on one Q8_1
 //! activation. Those two do NOT share a float order, so they are held to a
-//! magnitude-relative tolerance; see [`prism_mma_matches_gemv`].
+//! magnitude-relative tolerance; see [`prism_mma_matches_gemv`]. PTQ1_0 has
+//! no dp4a GEMV, so its feature-major kernel is checked against the F32 GEMV
+//! `quant_gemv_ptq1_0_f32` on the Q8_1 activation dequantized back to f32;
+//! see [`ptq1_0_mma_matches_f32_gemv`].
 //!
 //! Run with:
 //!   cd boostr && cargo test --features cuda --test quant_mmq_mma_parity
@@ -20,13 +23,13 @@
 use std::sync::{Mutex, OnceLock};
 
 use boostr::quant::cuda::kernels::{
-    self, GEMV_PQ2_0_MODULE, GEMV_Q1_0_MODULE, GEMV_Q2_0_MODULE, QUANT_GEMV_MODULE,
-    QUANT_MMQ_MMA_MODULE,
+    self, GEMV_PQ2_0_MODULE, GEMV_PTQ1_0_MODULE, GEMV_Q1_0_MODULE, GEMV_Q2_0_MODULE,
+    QUANT_GEMV_MODULE, QUANT_MMQ_MMA_MODULE,
 };
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::runtime::Device;
-use numr::runtime::cuda::{CudaDevice, CudaRuntime};
+use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -627,22 +630,18 @@ const PRISM_RTOL: f64 = 1e-5;
 /// opt-in threshold.
 const PRISM_MMQ_X: u32 = 64;
 
-/// Launches the feature-major MMA kernel and the `_n4` token-batched GEMV on
-/// the same Q8_1 activation, checks both against the f64 reference and
-/// against each other within [`PRISM_RTOL`]. `k` is chosen by the caller so
-/// the last 256-k staging group is partial and the ragged tail runs.
-fn prism_mma_matches_gemv(name: &str, case: &PrismCase, weight_bytes: &[u8], k: usize) {
+/// `false` when the prism tests cannot run here: no CUDA, or a GPU before
+/// sm_80, which `mma.sync.aligned.m16n8k32` requires (`caps.bf16` marks
+/// that floor, so a pre-Ampere device skips instead of failing to load the
+/// module). Prints the loud skip either way.
+fn prism_device_ready(name: &str) -> bool {
     if !numr::runtime::cuda::is_cuda_available() {
         println!("!! {name} SKIPPED: CUDA is not available on this machine. NOTHING WAS VERIFIED.");
         eprintln!(
             "!! {name} SKIPPED: CUDA is not available on this machine. NOTHING WAS VERIFIED."
         );
-        return;
+        return false;
     }
-    let _lock = cuda_lock();
-
-    // `m16n8k32` needs sm_80. `caps.bf16` marks that floor, so a pre-Ampere
-    // device skips here instead of failing to load the module.
     if !CudaDevice::new(0).profile().caps.bf16 {
         println!(
             "!! {name} SKIPPED: this GPU predates sm_80, which `mma.sync.aligned.m16n8k32` \
@@ -652,8 +651,69 @@ fn prism_mma_matches_gemv(name: &str, case: &PrismCase, weight_bytes: &[u8], k: 
             "!! {name} SKIPPED: this GPU predates sm_80, which `mma.sync.aligned.m16n8k32` \
              requires. NOTHING WAS VERIFIED."
         );
+        return false;
+    }
+    true
+}
+
+/// Launches the feature-major kernel `mma_kernel` at token tile
+/// [`PRISM_MMQ_X`] on the repacked activation `packed_ptr`: grid (token
+/// tiles, feature tiles), 256 threads, dynamic shared memory of one 76-int
+/// weight row per feature plus one 36-int activation record per token
+/// (`smem_bytes` in `tiling/`). Does not synchronize.
+#[allow(clippy::too_many_arguments)]
+fn launch_prism_mma(
+    client: &CudaClient,
+    device_index: usize,
+    mma_kernel: &str,
+    packed_ptr: u64,
+    weight_ptr: u64,
+    out_ptr: u64,
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    let m_u32 = m as u32;
+    let k_u32 = k as u32;
+    let n_u32 = n as u32;
+    let ntok = PRISM_MMQ_X;
+    let mma_module =
+        kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE).unwrap();
+    let mma_func = kernels::get_kernel_function(&mma_module, mma_kernel).unwrap();
+    let smem = 4 * (128 * 76 + PRISM_MMQ_X * 36);
+    mma_func
+        .set_attribute(
+            cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+            smem as i32,
+        )
+        .unwrap();
+    let cfg_mma = LaunchConfig {
+        grid_dim: (m_u32.div_ceil(PRISM_MMQ_X), n_u32.div_ceil(128), 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: smem,
+    };
+    unsafe {
+        let mut builder = client.stream().launch_builder(&mma_func);
+        builder.arg(&packed_ptr);
+        builder.arg(&weight_ptr);
+        builder.arg(&out_ptr);
+        builder.arg(&m_u32);
+        builder.arg(&k_u32);
+        builder.arg(&n_u32);
+        builder.arg(&ntok);
+        builder.launch(cfg_mma).unwrap();
+    }
+}
+
+/// Launches the feature-major MMA kernel and the `_n4` token-batched GEMV on
+/// the same Q8_1 activation, checks both against the f64 reference and
+/// against each other within [`PRISM_RTOL`]. `k` is chosen by the caller so
+/// the last 256-k staging group is partial and the ragged tail runs.
+fn prism_mma_matches_gemv(name: &str, case: &PrismCase, weight_bytes: &[u8], k: usize) {
+    if !prism_device_ready(name) {
         return;
     }
+    let _lock = cuda_lock();
 
     // N does not divide the 128-feature tile, so the row clamp runs.
     let m: usize = PRISM_MMQ_X as usize;
@@ -685,13 +745,10 @@ fn prism_mma_matches_gemv(name: &str, case: &PrismCase, weight_bytes: &[u8], k: 
 
     let weight_ptr = weight.ptr();
     let act_ptr = act.ptr();
-    let packed_ptr = packed.ptr();
     let out_gemv_ptr = out_gemv.ptr();
-    let out_mma_ptr = out_mma.ptr();
     let m_u32 = m as u32;
     let k_u32 = k as u32;
     let n_u32 = n as u32;
-    let ntok = PRISM_MMQ_X;
 
     // `_n4`: one output column and four token columns per block, 128 threads
     // (`mwr_nwarps_ntok(4)` warps), as `dispatch_gemv` launches it.
@@ -714,35 +771,17 @@ fn prism_mma_matches_gemv(name: &str, case: &PrismCase, weight_bytes: &[u8], k: 
         builder.launch(cfg_gemv).unwrap();
     }
 
-    // Feature-major: grid (token tiles, feature tiles), 256 threads, dynamic
-    // shared memory of one 76-int weight row per feature plus one 36-int
-    // activation record per token (`smem_bytes` in `tiling/`).
-    let mma_module =
-        kernels::get_or_load_module(client.context(), device_index, QUANT_MMQ_MMA_MODULE).unwrap();
-    let mma_func = kernels::get_kernel_function(&mma_module, case.mma_kernel).unwrap();
-    let smem = 4 * (128 * 76 + PRISM_MMQ_X * 36);
-    mma_func
-        .set_attribute(
-            cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-            smem as i32,
-        )
-        .unwrap();
-    let cfg_mma = LaunchConfig {
-        grid_dim: (m_u32.div_ceil(PRISM_MMQ_X), n_u32.div_ceil(128), 1),
-        block_dim: (256, 1, 1),
-        shared_mem_bytes: smem,
-    };
-    unsafe {
-        let mut builder = client.stream().launch_builder(&mma_func);
-        builder.arg(&packed_ptr);
-        builder.arg(&weight_ptr);
-        builder.arg(&out_mma_ptr);
-        builder.arg(&m_u32);
-        builder.arg(&k_u32);
-        builder.arg(&n_u32);
-        builder.arg(&ntok);
-        builder.launch(cfg_mma).unwrap();
-    }
+    launch_prism_mma(
+        &client,
+        device_index,
+        case.mma_kernel,
+        packed.ptr(),
+        weight_ptr,
+        out_mma.ptr(),
+        m,
+        k,
+        n,
+    );
 
     client.synchronize();
 
@@ -840,6 +879,293 @@ fn q1_0_mma_kernel_matches_gemv_kernel() {
             decode: prism_sign,
         },
         &build_q1_0_weight(96, k),
+        k,
+    );
+}
+
+// ── PTQ1_0 ─────────────────────────────────────────────────────────────
+
+/// Packs five trits the way the fork's `quantize_row_ptq1_0_ref` does, and
+/// as `pack5` in the test module of `src/quant/cpu/kernels/dequant_prism.rs`:
+/// base 3 with the FIRST trit most significant, then a ceiling scale by
+/// 256/243. `gguf_base3_trit` recovers trit `level` by a wrapping 8-bit
+/// multiply with `pow3[level]` followed by `(q * 3) >> 8`, so level 0 is the
+/// first, most significant digit and level 4 the last.
+fn ptq1_0_pack5(trits: [i32; 5]) -> u8 {
+    let q = trits.iter().fold(0u16, |q, &t| q * 3 + (t + 1) as u16);
+    (q * 256).div_ceil(243) as u8
+}
+
+/// Packs four trits for `qh`: the first trit lands in the most significant
+/// position of a five-trit byte, the fifth slot is zero (trit `-1`).
+fn ptq1_0_pack4(trits: [i32; 4]) -> u8 {
+    ptq1_0_pack5([trits[0], trits[1], trits[2], trits[3], -1])
+}
+
+/// Deterministic trit {-1, 0, 1} of element `elem` of block `block`: a
+/// hashed LCG step per (block, element), so no two blocks share a pattern
+/// and every one of the packer's 243 `qs` byte values and 81 `qh` byte
+/// values appears in the weight below (asserted by `build_ptq1_0_weight`).
+fn ptq1_0_trit_at(block: usize, elem: usize) -> i32 {
+    let mut x = (block as u32)
+        .wrapping_mul(2_654_435_761)
+        .wrapping_add((elem as u32).wrapping_mul(40_503).wrapping_add(1));
+    x ^= x >> 13;
+    x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    x ^= x >> 16;
+    (x % 3) as i32 - 1
+}
+
+/// Builds a PTQ1_0 weight buffer: `n * (k / 128)` blocks of 28 bytes —
+/// `qs[0..24]`, `qh[24..26]`, f16 `d` at byte 26, the END. Element to
+/// (byte, level) follows `gguf_ptq1_0_trit`: `qs[m]` for `m < 16` holds
+/// elements `m + 16 * level`, `qs[16 + m]` for `m < 8` holds
+/// `80 + m + 8 * level`, and `qh[h]` holds `120 + h + 2 * level`, level 0
+/// most significant in each byte.
+///
+/// Asserts that the packed `qs` bytes cover all 243 values the packer can
+/// emit and the `qh` bytes all 81, so every base-3 byte the kernel can meet
+/// is decoded at least once.
+fn build_ptq1_0_weight(n: usize, k: usize) -> Vec<u8> {
+    let bpr = k / 128;
+    let mut out = vec![0u8; n * bpr * 28];
+    let mut seen_qs = [false; 256];
+    let mut seen_qh = [false; 256];
+    for row in 0..n {
+        for b in 0..bpr {
+            let block = row * bpr + b;
+            let base = block * 28;
+            let trit = |e: usize| ptq1_0_trit_at(block, e);
+            for m in 0..16 {
+                let byte = ptq1_0_pack5(std::array::from_fn(|l| trit(m + 16 * l)));
+                out[base + m] = byte;
+                seen_qs[usize::from(byte)] = true;
+            }
+            for m in 0..8 {
+                let byte = ptq1_0_pack5(std::array::from_fn(|l| trit(80 + m + 8 * l)));
+                out[base + 16 + m] = byte;
+                seen_qs[usize::from(byte)] = true;
+            }
+            for h in 0..2 {
+                let byte = ptq1_0_pack4(std::array::from_fn(|l| trit(120 + h + 2 * l)));
+                out[base + 24 + h] = byte;
+                seen_qh[usize::from(byte)] = true;
+            }
+            out[base + 26..base + 28].copy_from_slice(&block_scale(block).to_le_bytes());
+        }
+    }
+    let qs_values = seen_qs.iter().filter(|&&s| s).count();
+    let qh_values = seen_qh.iter().filter(|&&s| s).count();
+    assert_eq!(
+        qs_values, 243,
+        "PTQ1_0 fixture must cover every packed qs byte"
+    );
+    assert_eq!(
+        qh_values, 81,
+        "PTQ1_0 fixture must cover every packed qh byte"
+    );
+    out
+}
+
+/// Trit {-1, 0, 1} of element `elem` of a PTQ1_0 block, as `gguf_base3_trit`
+/// and `gguf_ptq1_0_trit` read it: the wrapping 8-bit multiply is the same
+/// in both languages.
+fn ptq1_0_trit(block: &[u8], elem: usize) -> i64 {
+    const POW3: [u8; 5] = [1, 3, 9, 27, 81];
+    let (byte, level) = if elem < 80 {
+        (block[elem % 16], elem / 16)
+    } else if elem < 120 {
+        let r = elem - 80;
+        (block[16 + r % 8], r / 8)
+    } else {
+        let r = elem - 120;
+        (block[24 + r % 2], r / 2)
+    };
+    let q = byte.wrapping_mul(POW3[level]);
+    i64::from((u16::from(q) * 3) >> 8) - 1
+}
+
+/// f64 reference for one PTQ1_0 output element over the Q8_1 activation,
+/// and the sum of the magnitudes of its 32-element block terms, as
+/// [`prism_reference`] computes them. Each term is exact — an integer trit
+/// dot times two f16 scales — so the magnitude bounds the float error of
+/// any accumulation order.
+fn ptq1_0_reference(weight: &[u8], act: &[u8], token: usize, feat: usize, k: usize) -> (f64, f64) {
+    let bpr = k / 32;
+    let wpr = k / 128;
+    let mut sum = 0.0f64;
+    let mut magnitude = 0.0f64;
+    for b in 0..bpr {
+        let wb = (feat * wpr + b / 4) * 28;
+        let block = &weight[wb..wb + 28];
+        let dw = f64::from(half::f16::from_le_bytes([block[26], block[27]]).to_f32());
+        let ab = (token * bpr + b) * 36;
+        let da = f64::from(half::f16::from_le_bytes([act[ab], act[ab + 1]]).to_f32());
+        let mut dot = 0i64;
+        for pos in 0..32 {
+            let wq = ptq1_0_trit(block, (b % 4) * 32 + pos);
+            let aq = i64::from(act[ab + 4 + pos] as i8);
+            dot += wq * aq;
+        }
+        let term = dw * da * dot as f64;
+        sum += term;
+        magnitude += term.abs();
+    }
+    (sum, magnitude)
+}
+
+/// The Q8_1 activation dequantized back to f32, `d * q` per element. `d` is
+/// f16 and `q` an int8, so the product is exact in f32 and the F32 GEMV sees
+/// the same activation values the MMA kernel sees through its Q8_1 record.
+fn dequant_q8_1_activation(act: &[u8], m: usize, k: usize) -> Vec<f32> {
+    let bpr = k / 32;
+    let mut out = vec![0f32; m * k];
+    for token in 0..m {
+        for b in 0..bpr {
+            let base = (token * bpr + b) * 36;
+            let d = half::f16::from_le_bytes([act[base], act[base + 1]]).to_f32();
+            for pos in 0..32 {
+                out[token * k + b * 32 + pos] = d * f32::from(act[base + 4 + pos] as i8);
+            }
+        }
+    }
+    out
+}
+
+/// Launches `quant_mmq_ptq1_0_q8_1_mma_x64` on the repacked Q8_1 activation
+/// and `quant_gemv_ptq1_0_f32` on that activation dequantized to f32, and
+/// checks both against the f64 reference and against each other within
+/// [`PRISM_RTOL`].
+///
+/// PTQ1_0 has no dp4a GEMV, so the F32 GEMV is the reference kernel. The MMA
+/// path quantizes its activation to Q8_1 and the F32 GEMV does not, so the
+/// two paths are given the SAME activation by dequantizing the Q8_1 record
+/// ([`dequant_q8_1_activation`]): every term of the f64 reference is then
+/// exact for both, and [`PRISM_RTOL`] — the bound the prism tests above
+/// and `examples/mmq_kernel_compare.rs` already use — holds the F32 GEMV's
+/// f32 sum and the MMA kernel's per-chunk f32 folds alike. `k` is chosen
+/// so the last 256-k staging group is partial and the ragged tail runs.
+fn ptq1_0_mma_matches_f32_gemv(name: &str, weight_bytes: &[u8], k: usize) {
+    if !prism_device_ready(name) {
+        return;
+    }
+    let _lock = cuda_lock();
+
+    // N does not divide the 128-feature tile, so the row clamp runs.
+    let m: usize = PRISM_MMQ_X as usize;
+    let n: usize = 96;
+    assert!(k.is_multiple_of(128), "{name}: K must be whole blocks");
+    assert!(
+        !k.is_multiple_of(256),
+        "{name}: K is chosen to leave a ragged 256-k tail"
+    );
+
+    let act_bytes = build_q8_1_activation(m, k);
+    let packed_bytes = repack_q8_1_mmq(&act_bytes, m, k, m);
+    let act_f32 = dequant_q8_1_activation(&act_bytes, m, k);
+
+    let device = CudaDevice::new(0);
+    let client = CudaRuntime::default_client(&device);
+    client.synchronize();
+    let device_index = device.id();
+
+    let weight =
+        Tensor::<CudaRuntime>::from_slice(weight_bytes, &[weight_bytes.len()], &device).unwrap();
+    let act = Tensor::<CudaRuntime>::from_slice(&act_f32, &[m, k], &device).unwrap();
+    let packed =
+        Tensor::<CudaRuntime>::from_slice(&packed_bytes, &[packed_bytes.len()], &device).unwrap();
+    let out_gemv = Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device).unwrap();
+    let out_mma = Tensor::<CudaRuntime>::from_slice(&vec![0f32; m * n], &[m, n], &device).unwrap();
+
+    let weight_ptr = weight.ptr();
+    let act_ptr = act.ptr();
+    let out_gemv_ptr = out_gemv.ptr();
+    let m_u32 = m as u32;
+    let k_u32 = k as u32;
+    let n_u32 = n as u32;
+
+    // F32 GEMV: 8 warps per block, one output column per warp, one token
+    // per grid row, as `dispatch_gemv`'s F32 branch launches it.
+    let gemv_module =
+        kernels::get_or_load_module(client.context(), device_index, GEMV_PTQ1_0_MODULE).unwrap();
+    let gemv_func = kernels::get_kernel_function(&gemv_module, "quant_gemv_ptq1_0_f32").unwrap();
+    let cfg_gemv = LaunchConfig {
+        grid_dim: (n_u32.div_ceil(8), m_u32, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    unsafe {
+        let mut builder = client.stream().launch_builder(&gemv_func);
+        builder.arg(&act_ptr);
+        builder.arg(&weight_ptr);
+        builder.arg(&out_gemv_ptr);
+        builder.arg(&m_u32);
+        builder.arg(&k_u32);
+        builder.arg(&n_u32);
+        builder.launch(cfg_gemv).unwrap();
+    }
+
+    launch_prism_mma(
+        &client,
+        device_index,
+        "quant_mmq_ptq1_0_q8_1_mma_x64",
+        packed.ptr(),
+        weight_ptr,
+        out_mma.ptr(),
+        m,
+        k,
+        n,
+    );
+
+    client.synchronize();
+
+    let gemv_host = out_gemv.to_vec::<f32>();
+    let mma_host = out_mma.to_vec::<f32>();
+
+    let mut worst = 0.0f64;
+    for token in 0..m {
+        for feat in 0..n {
+            let idx = token * n + feat;
+            let (want, magnitude) = ptq1_0_reference(weight_bytes, &act_bytes, token, feat, k);
+            let scale = magnitude.max(f64::MIN_POSITIVE);
+            let g = f64::from(gemv_host[idx]);
+            let a = f64::from(mma_host[idx]);
+            let err_gemv = (g - want).abs() / scale;
+            let err_mma = (a - want).abs() / scale;
+            let err_pair = (a - g).abs() / scale;
+            assert!(
+                err_gemv <= PRISM_RTOL,
+                "{name}: F32 GEMV disagrees with the f64 reference at (token={token}, \
+                 feat={feat}): got {g}, want {want}, magnitude-relative error {err_gemv:.3e}"
+            );
+            assert!(
+                err_mma <= PRISM_RTOL,
+                "{name}: MMA disagrees with the f64 reference at (token={token}, feat={feat}): \
+                 got {a}, want {want}, magnitude-relative error {err_mma:.3e}"
+            );
+            assert!(
+                err_pair <= PRISM_RTOL,
+                "{name}: MMA and F32 GEMV disagree at (token={token}, feat={feat}): mma={a}, \
+                 gemv={g}, magnitude-relative error {err_pair:.3e}"
+            );
+            worst = worst.max(err_pair);
+        }
+    }
+    println!(
+        "{name}: {} outputs within {PRISM_RTOL:.0e} (worst {worst:.2e})",
+        m * n
+    );
+}
+
+/// K = 640: five 128-element blocks, so two whole 256-k groups and a
+/// four-chunk tail. Every lane group of the block — the two `qs` runs at
+/// every level and the `qh` tail — is staged in every block.
+#[test]
+fn ptq1_0_mma_kernel_matches_gemv_kernel() {
+    let k = 640;
+    ptq1_0_mma_matches_f32_gemv(
+        "ptq1_0_mma_kernel_matches_gemv_kernel",
+        &build_ptq1_0_weight(96, k),
         k,
     );
 }

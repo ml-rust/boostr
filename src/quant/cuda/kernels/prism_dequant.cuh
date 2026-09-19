@@ -121,6 +121,78 @@ static __device__ __forceinline__ void prism_expand_sign8(
     *v_hi = __byte_perm(s0, s1, 0x7632);
 }
 
+// ── PTQ1_0 int8x4 expansions ────────────────────────────────────────────
+//
+// Used by the feature-major MMQ staging (`mmq/prism_tiles.cuh`), which gives
+// one lane 8 consecutive elements of a block. In the two `qs` runs those 8
+// elements read 8 CONSECUTIVE bytes at ONE trit level (the run's per-level
+// width, 16 or 8, is a multiple of 8 and `e0 % 8 == 0`); in the `qh` tail
+// they read the two `qh` bytes at four levels. `gguf_base3_trit` is the
+// per-element decode; the staging cannot afford it 8x per row, so the same
+// arithmetic — wrapping 8-bit multiply by `pow3[level]`, then
+// `(q * 3) >> 8`, minus 1 — runs here on four bytes at once.
+
+// `pow3[level]` for `level` in 0..5 as a select chain. `gguf_base3_trit`
+// keeps `pow3` in a local array, which a runtime `level` turns into local
+// memory; a lane whose level is fixed evaluates this once.
+static __device__ __forceinline__ unsigned int ptq1_0_pow3(int level) {
+    return level == 0 ? 1u : level == 1 ? 3u : level == 2 ? 9u : level == 3 ? 27u : 81u;
+}
+
+// SWAR core: two product words -> one int8x4 word of trits {-1, 0, 1}.
+//
+// `prod_even` holds the products of source bytes 0 and 2 in its two 16-bit
+// lanes (byte 0 in the low lane), `prod_odd` those of bytes 1 and 3; each
+// product is `byte * pow3` for that byte's level. Per lane:
+//   q = prod & 0xFF                  the wrapping 8-bit product
+//   t = (q * 3) >> 8                 the trit code, {0, 1, 2}
+// Lane invariants, which keep the lanes from carrying into each other:
+//   byte * pow3 <= 255 * 81 = 20655 < 2^16, so `& 0x00FF00FF` after the
+//   multiply is the 8-bit wrap of each lane's own product;
+//   q * 3 <= 765 < 2^16, so the shift moves only that lane's bits 8..9
+//   down, and `& 0x00FF00FF` drops the other lane's low bits that the shift
+//   pulled into bits 8..15.
+// The even codes sit in bytes 0 and 2, the odd ones move up to bytes 1 and
+// 3, so element `r` lands in byte `r`; `__vsub4` then subtracts 1 per byte
+// (0 -> 0xFF = -1). Element 0 in the low byte, the order
+// `prism_expand_code2x8` produces and Q8_0's staged row stores.
+static __device__ __forceinline__ int ptq1_0_codes_to_int8(
+    unsigned int prod_even, unsigned int prod_odd
+) {
+    const unsigned int q_e = prod_even & 0x00FF00FFu;
+    const unsigned int q_o = prod_odd & 0x00FF00FFu;
+    const unsigned int t_e = ((q_e * 3u) >> 8) & 0x00FF00FFu;
+    const unsigned int t_o = ((q_o * 3u) >> 8) & 0x00FF00FFu;
+    return (int)__vsub4(t_e | (t_o << 8), 0x01010101u);
+}
+
+// Four source bytes `w` (byte 0 low) -> one int8x4 word of trits, through
+// [`ptq1_0_codes_to_int8`]. `mask` and `mul` select the two lane shapes the
+// staging needs, and are loop-invariant per lane there:
+//
+//   Run lane (8 consecutive bytes at one level `L`, two calls, `w` = bytes
+//   0..3 then 4..7): `mask = 0x00FF00FF`, `mul = pow3[L]`. Each 16-bit lane
+//   holds one byte and the scalar multiply scales both lanes by the same
+//   power, so byte `r` of the result is `gguf_base3_trit(byte r, L)`.
+//
+//   Tail lane (`qh[0]` and `qh[1]` at levels `L0`, `L0 + 1`; `w` = the word
+//   at block offset 24, bytes `qh0, qh1, d_lo, d_hi`): `mask = 0x000000FF`,
+//   `mul = pow3[L0] | (pow3[L0 + 1] << 16)`. `w & mask` is the scalar `qh0`,
+//   and `qh0 * mul = qh0 * pow3[L0] + (qh0 * pow3[L0 + 1]) << 16` puts the
+//   two levels of `qh0` in the even lanes with no cross term because the
+//   multiplicand is a scalar; `(w >> 8) & mask` does the same for `qh1` in
+//   the odd lanes. The result is then bytes `(qh0, L0), (qh1, L0),
+//   (qh0, L0 + 1), (qh1, L0 + 1)`, which is elements `120 + 2 * L0 ..` of
+//   the block as `gguf_ptq1_0_trit` orders them: `mul = 0x00030001` gives
+//   elements 120..124 and `mul = 0x001B0009` (9, 27) elements 124..128.
+//   Both lane products stay under 2^16 (the `ptq1_0_codes_to_int8`
+//   invariant) since each is one byte times one power of three.
+static __device__ __forceinline__ int ptq1_0_expand4(
+    unsigned int w, unsigned int mask, unsigned int mul
+) {
+    return ptq1_0_codes_to_int8((w & mask) * mul, ((w >> 8) & mask) * mul);
+}
+
 // ── Whole-block decoders ────────────────────────────────────────────────
 
 static __device__ __forceinline__ void q1_0_dequant_block(

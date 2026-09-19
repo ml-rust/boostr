@@ -9,5 +9,5 @@ pub(in crate::quant::cuda::quant_matmul) use iquant::{
 };
 pub(in crate::quant::cuda::quant_matmul) use kquant::{Q2_K, Q3_K, Q4_K, Q5_K, Q6_K};
 pub(in crate::quant::cuda::quant_matmul) use legacy::{
-    IQ4_NL, PQ2_0, Q1_0, Q2_0, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0,
+    IQ4_NL, PQ2_0, PTQ1_0, Q1_0, Q2_0, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0,
 };

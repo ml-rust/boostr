@@ -273,8 +273,9 @@ mod tests {
     fn a_single_warp_format_is_probed_at_the_decode_batch() {
         // Q4_K at m=8 takes the single-warp tile: 2 narrow-tile equivalents
         // per default feature tile, so 23 columns put 46 equivalents in the
-        // veto band on 28 SMs. 23 feature tiles are under the SM count, so
-        // the pair is admitted with 2 ranges of K=4096.
+        // veto band against the fixture's `SMS` (28). 23 feature tiles are
+        // under the fixture's SM count, so the pair is admitted with 2
+        // ranges of K=4096.
         let shape = probe_shape(&Q4_K, WIDE, SMS).expect("probe shape");
         assert_eq!((shape.m, shape.n, shape.k), (8, 2944, 4096));
         assert_eq!(shape.tiling.feat_tile, FEAT_TILE_SMALL);

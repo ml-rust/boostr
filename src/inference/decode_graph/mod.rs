@@ -3,8 +3,9 @@
 //! # Overview
 //!
 //! The decode loop for autoregressive generation makes ~930 individual kernel
-//! launches per token. CUDA graphs replace them with a single `cuGraphLaunch`
-//! (~5µs overhead instead of ~13ms).
+//! launches per token. CUDA graphs replace them with a single `cuGraphLaunch`,
+//! cutting per-token launch overhead from per-kernel dispatch to one graph
+//! replay.
 //!
 //! ## Constraints
 //!

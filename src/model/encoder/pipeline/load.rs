@@ -40,9 +40,9 @@ impl<R: Runtime<DType = DType>> EmbeddingPipeline<R> {
     ///
     /// Compute dtype defaults to F16 on CUDA (when built with the `f16` feature)
     /// so the forward uses WMMA tensor-core matmul — the F32 matmul kernel has no
-    /// tensor cores and runs ~50–100× slower for these shapes (profiled: 0.5 vs
-    /// ~29 docs/s for nomic-768 on an Ampere-class GPU). CPU/WGPU keep F32. GGUF weights are
-    /// loaded dequantized to F32 then cast to the compute dtype by the builders.
+    /// tensor cores and is profiled far slower for these shapes (nomic-768).
+    /// CPU/WGPU keep F32. GGUF weights are loaded dequantized to F32 then cast
+    /// to the compute dtype by the builders.
     pub fn from_gguf(gguf: &mut Gguf, device: R::Device) -> Result<Self>
     where
         R::Client: Clone + TypeConversionOps<R> + DequantOps<R>,

@@ -1219,15 +1219,15 @@ where
             generate_seconds += take_started.elapsed().as_secs_f64();
 
             // The AudioVAE decode answers to a different optimization story
-            // than the loop above. A CUDA profile of this model put
-            // `tcf_gemm_f32` (the loop) at 74.7% of GPU time and
-            // `conv1d_oc4_f32` (this) at 10.7%, mean 15.2 ms and max 117 ms
-            // per call. Those SHARES predate the register-blocked GEMM, which
-            // cut the loop four to six times over; the VAE's absolute cost is
-            // what the shares were measuring and it has not moved. The VAE
-            // is loaded from `.pth` at full precision whatever tier the
-            // language model came from, so its cost is a CONSTANT across the
-            // matrix and dilutes any tier comparison it is folded into.
+            // than the loop above. A CUDA profile of this model showed
+            // `tcf_gemm_f32` (the loop) dominating GPU time over
+            // `conv1d_oc4_f32` (this). Those SHARES predate the
+            // register-blocked GEMM, which cut the loop's cost several
+            // times over; the VAE's absolute cost is what the shares were
+            // measuring and it has not moved. The VAE is loaded from
+            // `.pth` at full precision whatever tier the language model
+            // came from, so its cost is a CONSTANT across the matrix and
+            // dilutes any tier comparison it is folded into.
             let vocode_started = Instant::now();
             let patches = state.patches.len();
             let decoded = model.decode_patches(client, &state.patches)?;

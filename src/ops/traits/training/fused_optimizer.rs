@@ -123,8 +123,7 @@ pub trait FusedOptimizerOps<R: Runtime> {
     ///
     /// Instead of launching one kernel per parameter, this batches all param groups
     /// into a single dispatch. On GPU this eliminates per-parameter kernel launch
-    /// overhead (~5-10μs each), which adds up significantly for models with hundreds
-    /// of parameters.
+    /// overhead, which adds up for models with hundreds of parameters.
     ///
     /// Each entry in `groups` is `(param, grad, m, v)` — all same shape per group.
     /// Returns `Vec<(new_param, new_m, new_v)>` in the same order.

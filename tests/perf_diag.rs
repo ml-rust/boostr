@@ -146,15 +146,15 @@ fn perf_varlen_throughput() {
 
     let cap = std::env::var("NUMR_CUDA_FREE_LIST_CAP_MB").unwrap_or_else(|_| "default".into());
     // UNALIGNED total_tokens (15*500 = 7500, not a multiple of 16) — the real
-    // varlen case. M-padding must route this to WMMA, else it falls to the 57
-    // GFLOP/s generic kernel (the ma8e regression).
+    // varlen case. M-padding must route this to WMMA, else it falls to the
+    // slower generic kernel (the ma8e regression).
     const SEQ: usize = 500;
     const DOCS_PER_BATCH: usize = 15; // 7500 tokens/forward (unaligned)
     const BATCHES: usize = 8;
-    // Pre-fix nomic-768 throughput was 23-40 docs/s (F16/WMMA). The F32 matmul
-    // regression dropped it to ~0.5. Assert we stay well above that floor — a
-    // conservative bar that catches the ~50x regression class without flaking on
-    // debug-build / GPU-load variance. (Measured ~29 docs/s on an Ampere-class GPU.)
+    // Regression gate: the F32 matmul path (no WMMA) is far slower than the
+    // F16/WMMA path on this shape. This floor catches a fall-back to that
+    // path without flaking on debug-build / GPU-load variance; it is a gate
+    // threshold, not a measured throughput figure.
     const MIN_DOCS_PER_SEC: f64 = 10.0;
     const MAX_DRIFT_MIB: f64 = 512.0;
 

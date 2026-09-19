@@ -104,7 +104,7 @@ pub use numr::ops::PaddingMode;
 /// Pre-load all CUDA PTX modules needed for LLaMA inference.
 ///
 /// This front-loads all PTX→SASS JIT compilation during warmup,
-/// eliminating ~300ms latency on the first decode token.
+/// eliminating the first-decode-token JIT latency spike.
 /// Call this once after creating the CudaClient, before any real inference.
 #[cfg(feature = "cuda")]
 pub fn preload_inference_modules(client: &CudaClient) -> Result<(), error::Error> {

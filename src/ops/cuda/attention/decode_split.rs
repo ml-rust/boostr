@@ -213,8 +213,8 @@ mod tests {
 
     #[test]
     fn a_single_row_fills_the_device() {
-        // 28 * 8 = 224 target blocks over 16 heads: 14 slices, at any span
-        // long enough to hold them.
+        // Fixture `CU` (28) * 8 = 224 target blocks over 16 heads: 14
+        // slices, at any span long enough to hold them.
         let s = decode_slices_for_units(CU, 16, 4096, 128);
         assert_eq!(
             s,

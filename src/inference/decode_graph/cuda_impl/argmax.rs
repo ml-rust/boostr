@@ -1,9 +1,10 @@
 //! Graph-capturable argmax: writes into a pre-allocated stable buffer so the
 //! result survives outside the CUDA graph that produced it.
 
-use cudarc::driver::sys;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
+
+use super::stable_copy::copy_into_stable;
 
 /// Argmax on `logits` (graph-internal tensor) and write result into `out` (stable).
 ///
@@ -26,25 +27,8 @@ pub fn argmax_to_buf(
     let last_dim = logits.shape().len() - 1;
     let token_ids = client.argmax(logits, last_dim, false)?;
 
-    // cuMemcpyAsync: from graph-internal token_ids to pre-allocated `out`.
-    // CUDA records a MemCpy node; on each graph replay it patches the source
-    // address to the actual execution-time allocation of `token_ids`.
-    let bytes = std::mem::size_of::<i64>();
-    unsafe {
-        let result = sys::cuMemcpyAsync(
-            out.ptr(),
-            token_ids.ptr(),
-            bytes,
-            client.stream().cu_stream(),
-        );
-        if result != sys::CUresult::CUDA_SUCCESS {
-            return Err(numr::error::Error::Backend(format!(
-                "argmax_to_buf cuMemcpyAsync failed: {:?}",
-                result
-            )));
-        }
-    }
-    Ok(())
+    // Captured memcpy node from graph-internal `token_ids` to pre-allocated `out`.
+    copy_into_stable(client, &token_ids, out)
 }
 
 /// Argmax per row of `logits` and write the `batch_size` results into `out`.
@@ -67,24 +51,14 @@ pub fn batch_argmax_to_buf(
     // Argmax along vocab dim: [B, 1, vocab] → [B, 1] → [B]
     let last_dim = logits.shape().len() - 1;
     let token_ids = client.argmax(logits, last_dim, false)?;
-    // token_ids: [batch_size, 1] i64
-
-    // Copy all B argmax results to the pre-allocated stable output buffer.
-    // CUDA records a MemCpy node; on replay it patches the source address.
-    let bytes = batch_size * std::mem::size_of::<i64>();
-    unsafe {
-        let result = sys::cuMemcpyAsync(
-            out.ptr(),
-            token_ids.ptr(),
-            bytes,
-            client.stream().cu_stream(),
-        );
-        if result != sys::CUresult::CUDA_SUCCESS {
-            return Err(numr::error::Error::Backend(format!(
-                "batch_argmax_to_buf cuMemcpyAsync failed: {:?}",
-                result
-            )));
-        }
+    if token_ids.numel() != batch_size {
+        return Err(numr::error::Error::InvalidArgument {
+            arg: "batch_size",
+            reason: format!(
+                "batch_argmax_to_buf: argmax produced {} rows, batch_size is {batch_size}",
+                token_ids.numel()
+            ),
+        });
     }
-    Ok(())
+    copy_into_stable(client, &token_ids, out)
 }

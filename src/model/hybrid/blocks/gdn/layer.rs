@@ -137,6 +137,20 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
     }
 }
 
+/// `qkv[.., start .. start + len]` reshaped to `shape`.
+pub(super) fn slice_heads<R: Runtime>(
+    qkv: &Tensor<R>,
+    start: usize,
+    len: usize,
+    shape: &[usize],
+) -> Result<Tensor<R>> {
+    qkv.narrow(2, start, len)
+        .map_err(Error::Numr)?
+        .contiguous()?
+        .reshape(shape)
+        .map_err(Error::Numr)
+}
+
 /// Reorder `o` `[.., value_dim]` from tiled to grouped value-head order,
 /// the input order a Hadamard-folded `ssm_out` expects.
 ///

@@ -47,6 +47,14 @@
 //! | `cos_slice`        | pre-capture | D2D async (DtoDAsync) from rope cache|
 //! | `sin_slice`        | pre-capture | D2D async (DtoDAsync) from rope cache|
 //! | `next_token_buf`   | pre-capture | written by graph (argmax→memcpy node)|
+//!
+//! The `qwen35` graph adds two more stable inputs, both written before each
+//! replay or by the graph itself:
+//!
+//! | Tensor             | Allocated   | Updated how                          |
+//! |--------------------|-------------|--------------------------------------|
+//! | `MropeScalars`     | pre-capture | `cuMemsetD32Async` from CPU          |
+//! | `GdnState` buffers | pre-capture | written by graph (`copy_into_stable`)|
 
 #[cfg(feature = "cuda")]
 pub use cuda_impl::*;

@@ -77,6 +77,51 @@ impl<R: Runtime<DType = DType>> GdnState<R> {
     }
 }
 
+#[cfg(feature = "cuda")]
+impl GdnState<numr::runtime::cuda::CudaRuntime> {
+    /// Copy a decode step's fresh `conv` window and `ssm` state into the
+    /// buffers this state owns, in place, on the client's compute stream.
+    ///
+    /// The graph-mode forward uses this in place of [`update`](Self::update):
+    /// `conv` and `ssm` keep the addresses the captured graph read, so the
+    /// next replay sees this step's state. Both copies are captured memcpy
+    /// nodes when called inside `capture_graph_into`.
+    ///
+    /// `initialized` is left as the prefill set it: this method takes `&self`
+    /// so a whole [`LayeredGdnState`] can be shared with a captured closure.
+    /// [`update`](Self::update) and [`reset`](Self::reset) replace the
+    /// buffers, so a graph captured before either call holds stale
+    /// addresses: capture again after them.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`](crate::error::Error) when a shape or dtype differs from the
+    /// stored buffer, or the copy fails.
+    pub fn copy_from_captured(
+        &self,
+        client: &numr::runtime::cuda::CudaClient,
+        conv_new: &Tensor<numr::runtime::cuda::CudaRuntime>,
+        ssm_new: &Tensor<numr::runtime::cuda::CudaRuntime>,
+    ) -> Result<()> {
+        use crate::error::Error;
+        use crate::inference::decode_graph::copy_into_stable;
+
+        for (name, new, stored) in [("conv", conv_new, &self.conv), ("ssm", ssm_new, &self.ssm)] {
+            if new.shape() != stored.shape() {
+                return Err(Error::InferenceError {
+                    reason: format!(
+                        "gdn state {name}: got {:?}, stored buffer is {:?}",
+                        new.shape(),
+                        stored.shape()
+                    ),
+                });
+            }
+            copy_into_stable(client, new, stored).map_err(Error::Numr)?;
+        }
+        Ok(())
+    }
+}
+
 /// Per-layer GDN states for a whole model, indexed by GDN layer index
 /// (the position among the model's GDN layers, not the absolute layer index).
 pub struct LayeredGdnState<R: Runtime> {

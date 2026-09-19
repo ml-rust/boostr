@@ -241,7 +241,7 @@ where
 }
 
 /// `h = x + mixed; h + mlp(post_norm(h))`.
-fn ffn_residual<R, C>(
+pub(super) fn ffn_residual<R, C>(
     client: &C,
     x: &Var<R>,
     mixed: &Var<R>,

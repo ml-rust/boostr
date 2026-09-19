@@ -41,7 +41,7 @@ impl LoadedModel<numr::runtime::cuda::CudaRuntime> {
                 reason: "Hybrid model does not yet support CUDA graph mode".into(),
             }),
             LoadedModel::Qwen35(_) => Err(Error::ModelError {
-                reason: "qwen35 model does not yet support CUDA graph mode".into(),
+                reason: "qwen35 carries GDN state — use forward_qwen35_graph_mode()".into(),
             }),
             LoadedModel::Multimodal(m) => m.llm().forward_graph_mode(
                 input_ids,
@@ -50,6 +50,56 @@ impl LoadedModel<numr::runtime::cuda::CudaRuntime> {
                 cos_slice,
                 sin_slice,
             ),
+        }
+    }
+
+    /// True when [`forward_qwen35_graph_mode`](Self::forward_qwen35_graph_mode)
+    /// serves this model: a `qwen35` hybrid whose GDN state and KV cache both
+    /// carry across graph replays in place.
+    pub fn supports_gdn_graph_mode(&self) -> bool {
+        match self {
+            LoadedModel::Qwen35(_) => true,
+            LoadedModel::Multimodal(m) => m.llm().supports_gdn_graph_mode(),
+            _ => false,
+        }
+    }
+
+    /// Graph-mode decode forward for the `qwen35` hybrid: full-attention
+    /// layers over a full-capacity `kv_cache`, GDN layers over `gdn_state`
+    /// buffers written in place. See `Qwen35Model::forward_qwen35_graph_mode`
+    /// for the per-replay contract.
+    pub fn forward_qwen35_graph_mode(
+        &self,
+        client: &numr::runtime::cuda::CudaClient,
+        input_ids: &numr::tensor::Tensor<numr::runtime::cuda::CudaRuntime>,
+        kv_cache: &crate::inference::LayeredKvCache<numr::runtime::cuda::CudaRuntime>,
+        gdn_state: &crate::inference::LayeredGdnState<numr::runtime::cuda::CudaRuntime>,
+        device_scalars: &crate::inference::decode_graph::DeviceScalars,
+        mrope: &crate::inference::decode_graph::MropeScalars,
+    ) -> Result<numr::tensor::Tensor<numr::runtime::cuda::CudaRuntime>> {
+        match self {
+            LoadedModel::Qwen35(m) => m.forward_qwen35_graph_mode(
+                client,
+                input_ids,
+                kv_cache,
+                gdn_state,
+                device_scalars,
+                mrope,
+            ),
+            LoadedModel::Multimodal(m) => m.llm().forward_qwen35_graph_mode(
+                client,
+                input_ids,
+                kv_cache,
+                gdn_state,
+                device_scalars,
+                mrope,
+            ),
+            _ => Err(Error::ModelError {
+                reason: format!(
+                    "{} does not carry GDN state — use forward_graph_mode()",
+                    self.model_type()
+                ),
+            }),
         }
     }
 

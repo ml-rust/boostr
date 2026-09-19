@@ -8,7 +8,7 @@ pub mod speculative;
 pub mod ssm_state;
 
 #[cfg(feature = "cuda")]
-pub use decode_graph::{DecodeGraph, DeviceScalars, PagedDecodeGraph};
+pub use decode_graph::{DecodeGraph, DeviceScalars, MropeScalars, PagedDecodeGraph};
 pub use gdn_state::{GdnState, LayeredGdnState};
 pub use kv_cache::{
     KvCache, LayeredKvCache, LayeredKvCacheConfig, LayeredPagedKvCache, PagedKvCache,

@@ -4,11 +4,13 @@
 //!   [`Qwen35Model::new`]
 //! - `forward`: the KV-cache + GDN-state forward, the hidden-state forward,
 //!   and accessors
+//! - `forward_graph`: the CUDA graph-mode decode forward
 //! - `gguf` + `gguf_layers`: [`Qwen35Model::from_varbuilder`] over a
 //!   GGUF-filled `VarMap`
 
 mod build;
 mod forward;
+mod forward_graph;
 mod gguf;
 mod gguf_layers;
 

@@ -39,8 +39,7 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
             + numr::ops::CompareOps<numr::runtime::cuda::CudaRuntime>
             + numr::ops::ConditionalOps<numr::runtime::cuda::CudaRuntime>,
     {
-        use crate::ops::cuda::attention::flash::impl_ops::decode_attention_graph_fwd;
-        use crate::ops::cuda::attention::kv_insert::kv_insert;
+        use crate::inference::decode_graph::insert_and_decode_attention;
 
         let shape = x.shape().to_vec();
         let batch = shape[0];
@@ -76,30 +75,20 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
         // Apply RoPE or skip for ALiBi models
         let (q, k) = self.apply_rotary_if_needed(client, q, k, cos_slice, sin_slice)?;
 
-        // Insert K/V into the full-capacity cache at the device-side write_pos
-        kv_insert(
-            client,
-            k.tensor(),
-            v.tensor(),
-            kv_cache.k_cache_raw(),
-            kv_cache.v_cache_raw(),
-            device_scalars.write_pos_ptr(),
-        )?;
-
-        // Decode attention against the full-capacity cache with device-side seq_len_k.
+        // Insert K/V into the full-capacity cache at the device-side write_pos,
+        // then decode attention against it with device-side seq_len_k.
         // `sliding_window` is a static config value, safe to bake into the captured
         // graph; `seq_len_k` changes per replay and stays a device pointer.
-        let kv_capacity = kv_cache.capacity();
-        let (attn_out, _lse) = decode_attention_graph_fwd(
+        let attn_out = insert_and_decode_attention(
             client,
             q.tensor(),
-            kv_cache.k_cache_raw(),
-            kv_cache.v_cache_raw(),
+            k.tensor(),
+            v.tensor(),
+            kv_cache,
+            device_scalars,
             self.num_heads,
             self.num_kv_heads,
             self.head_dim,
-            device_scalars.seq_len_k_ptr(),
-            kv_capacity,
             self.sliding_window,
         )?;
 

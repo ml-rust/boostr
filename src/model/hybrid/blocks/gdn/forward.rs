@@ -14,7 +14,7 @@
 //! 8. `silu(z) * rms_norm(o)` with `ssm_norm`
 //! 9. optional `group_heads`, then `ssm_out`
 
-use super::layer::{GdnBlock, group_heads};
+use super::layer::{GdnBlock, group_heads, slice_heads};
 use crate::error::{Error, Result};
 use crate::inference::GdnState;
 use crate::model::traits::ModelClient;
@@ -59,6 +59,39 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             + ConvOps<R>
             + DequantOps<R>,
     {
+        let (out, window, ssm) = self.forward_core(client, x, state.conv(), state.ssm())?;
+        state.update(window, ssm);
+        Ok(out)
+    }
+
+    /// The block math over an explicit left context: `conv_state`
+    /// `[batch, qkv_dim, conv_kernel - 1]` and `ssm_state`
+    /// `[batch, value_heads, S, S]`. Returns the output plus the new conv
+    /// window and delta-rule state, each a fresh tensor; the caller decides
+    /// how the state carries (`GdnState::update` replaces the fields,
+    /// `GdnState::copy_from_captured` copies in place for graph replay).
+    pub(super) fn forward_core<C>(
+        &self,
+        client: &C,
+        x: &Var<R>,
+        conv_state: &Tensor<R>,
+        ssm_state: &Tensor<R>,
+    ) -> Result<(Var<R>, Tensor<R>, Tensor<R>)>
+    where
+        C: ModelClient<R> + ConvOps<R> + FwhtOps<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + ConvOps<R>
+            + DequantOps<R>,
+    {
         let cfg = &self.cfg;
         let shape = x.shape();
         if shape.len() != 3 || shape[2] != cfg.hidden_size {
@@ -70,9 +103,10 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             });
         }
         let (batch, seq) = (shape[0], shape[1]);
-        if state.batch() != batch {
+        let state_batch = conv_state.shape().first().copied().unwrap_or(0);
+        if state_batch != batch {
             return Err(Error::ModelError {
-                reason: format!("gdn: state batch {} != input batch {batch}", state.batch()),
+                reason: format!("gdn: state batch {state_batch} != input batch {batch}"),
             });
         }
         let (h_k, h_v, s) = (cfg.key_heads, cfg.value_heads, cfg.state_size);
@@ -109,7 +143,7 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             .map_err(Error::Numr)?
             .contiguous()?;
         let (conv_out, window) =
-            causal_conv1d(client, &qkv_ncl, &self.conv_weight, None, state.conv())?;
+            causal_conv1d(client, &qkv_ncl, &self.conv_weight, None, conv_state)?;
         let conv_out = client.silu(&conv_out).map_err(Error::Numr)?;
         let qkv = conv_out
             .transpose(1, 2)
@@ -143,11 +177,10 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
 
         // 7. Recurrence.
         let (o, ssm) = if seq == 1 {
-            client.gdn_step(&q, &k, &v, &g, &beta, state.ssm())?
+            client.gdn_step(&q, &k, &v, &g, &beta, ssm_state)?
         } else {
-            client.gdn_chunk_prefill(&q, &k, &v, &g, &beta, state.ssm(), cfg.chunk_size)?
+            client.gdn_chunk_prefill(&q, &k, &v, &g, &beta, ssm_state, cfg.chunk_size)?
         };
-        state.update(window, ssm);
 
         // 8. silu(z) * rms_norm(o), per head.
         let z = z
@@ -170,22 +203,9 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
         } else {
             o
         };
-        self.ssm_out.forward(client, &Var::new(o, false))
+        let out = self.ssm_out.forward(client, &Var::new(o, false))?;
+        Ok((out, window, ssm))
     }
-}
-
-/// `qkv[.., start .. start + len]` reshaped to `shape`.
-fn slice_heads<R: Runtime>(
-    qkv: &Tensor<R>,
-    start: usize,
-    len: usize,
-    shape: &[usize],
-) -> Result<Tensor<R>> {
-    qkv.narrow(2, start, len)
-        .map_err(Error::Numr)?
-        .contiguous()?
-        .reshape(shape)
-        .map_err(Error::Numr)
 }
 
 #[cfg(test)]

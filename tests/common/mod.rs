@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod kv_start;
+pub mod qwen35_tiny;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

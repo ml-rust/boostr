@@ -366,6 +366,12 @@ fn compile_cuda_kernels() {
             "sm_75",
             true
         ),
+        k!(
+            "src/ops/cuda/kernels/architecture",
+            "gdn_step.cu",
+            "sm_75",
+            true
+        ),
         // Inference kernels (speculative decoding, sampling, prefix cache)
         k!(
             "src/ops/cuda/kernels/inference",

@@ -40,6 +40,7 @@ pub const MOE_ROUTING_MODULE: &str = "moe_routing";
 pub const MOE_PERMUTE_MODULE: &str = "moe_permute";
 pub const MOE_GROUPED_GEMM_MODULE: &str = "moe_grouped_gemm";
 pub const SSD_STATE_PASSING_MODULE: &str = "ssd_state_passing";
+pub const GDN_STEP_MODULE: &str = "gdn_step";
 pub const FUSED_GRAD_UNSCALE_CLIP_MODULE: &str = "fused_grad_unscale_clip";
 pub const SPECULATIVE_VERIFY_MODULE: &str = "speculative_verify";
 pub const SAMPLING_PENALTIES_MODULE: &str = "sampling_penalties";

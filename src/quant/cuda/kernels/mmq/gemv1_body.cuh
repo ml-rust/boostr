@@ -31,7 +31,12 @@
 // so word `i` of a chunk holds elements `4i .. 4i + 3` as signed bytes.
 // Every step is an exact int, so the order of the `dp4a` steps and the
 // pairing of the lanes do not matter, only that each product is formed
-// once.
+// once. A reader with `PAIRED_WORDS` returns its words out of element
+// order and names, per word pair, the activation pair that goes with it; a
+// reader with `CODES_PLUS_ONE` (PTQ1_0, through the level chain in
+// `../lowbit_dequant.cuh`) returns `value + 1` as unsigned bytes, and the
+// dot subtracts the chunk's exact activation sum from the record header,
+// which is the same integer `D`.
 //
 // Lane map. One warp owns 8 output features; lane `l` is (feature slot
 // `l / 4`, chunk slot `c = l % 4`). A step is one 256-k group, 8 chunks per
@@ -109,6 +114,20 @@
 #include "../gemv/common.cuh"
 #include "gemv1_formats.cuh"
 
+// `dp4a` with `a` read as unsigned bytes and `b` as signed bytes.
+static __device__ __forceinline__ int gemv1_dp4a_us(unsigned int a, int b, int c) {
+    int d;
+    asm("dp4a.u32.s32 %0, %1, %2, %3;" : "=r"(d) : "r"(a), "r"(b), "r"(c));
+    return d;
+}
+
+// `c + a.lo16 * b.byte0 + a.hi16 * b.byte1`, all signed.
+static __device__ __forceinline__ int gemv1_dp2a_lo(int a, int b, int c) {
+    int d;
+    asm("dp2a.lo.s32.s32 %0, %1, %2, %3;" : "=r"(d) : "r"(a), "r"(b), "r"(c));
+    return d;
+}
+
 // Threads per block: four warps, 8 features each.
 #define GEMV1_WARPS 4
 #define GEMV1_THREADS (GEMV1_WARPS * WARP_SIZE)
@@ -146,17 +165,46 @@ struct Gemv1Windows {
     unsigned int mask;
 };
 
-// Issues the loads of the group starting at chunk `b0`: the windows of the
-// block's 32 rows (thread `t` takes windows `t, t + 128, ...` of the
-// row-major (row, window) index) and the group's records. Rows past N read
-// row `N - 1`; windows past a row's end and records past the last are
-// skipped and left stale, which the guards below never read.
+// Where one thread loads from, fixed for the K walk: thread `t` takes
+// windows `t, t + 128, ...` of the row-major (row, window) index of the
+// block's 32 rows. Per window `u`: the row's global pointer (rows past N
+// read row `N - 1`) and the window's byte offset inside the span's first
+// window; a window past the 32 rows gets an offset no span reaches, so its
+// load never issues. Built once by `gemv1_load_map`.
+template <int UW>
+struct Gemv1LoadMap {
+    const unsigned char* row[UW];
+    unsigned int win[UW];
+};
+
+template <int W, int UW>
+static __device__ __forceinline__ Gemv1LoadMap<UW> gemv1_load_map(
+    const unsigned char* __restrict__ weight, unsigned long long rstride, unsigned int N,
+    unsigned int feat0
+) {
+    Gemv1LoadMap<UW> m;
+    const unsigned int t = threadIdx.x;
+#pragma unroll
+    for (int u = 0; u < UW; ++u) {
+        const unsigned int i = t + u * GEMV1_THREADS;
+        const unsigned int r = i / W;
+        const unsigned int wi = i % W;
+        const unsigned int f = min(feat0 + min(r, GEMV1_FEATS_PER_BLOCK - 1u), N - 1);
+        m.row[u] = weight + (unsigned long long)f * rstride;
+        m.win[u] = r < GEMV1_FEATS_PER_BLOCK ? 16 * wi : 0x80000000u;
+    }
+    return m;
+}
+
+// Issues the loads of the group starting at chunk `b0`: the block's row
+// windows per `Gemv1LoadMap` and the group's records. Windows past a row's
+// end and records past the last are skipped and left stale, which the
+// guards below never read.
 template <class FMT, int W, int UW>
 static __device__ __forceinline__ void gemv1_load(
-    const unsigned char* __restrict__ weight, const int* __restrict__ y_packed,
-    unsigned long long rstride, unsigned long long row_len, unsigned long long group_stride,
-    unsigned int kgroups, unsigned int N, unsigned int feat0, unsigned int b0,
-    Gemv1Windows<UW>& win
+    const Gemv1LoadMap<UW>& m, const int* __restrict__ y_packed,
+    unsigned long long row_len, unsigned long long group_stride,
+    unsigned int kgroups, unsigned int b0, Gemv1Windows<UW>& win
 ) {
     const unsigned int t = threadIdx.x;
     const unsigned long long start = (unsigned long long)(b0 / FMT::CHUNKS) * FMT::BLOCK_BYTES;
@@ -164,20 +212,14 @@ static __device__ __forceinline__ void gemv1_load(
     win.mask = 0;
 #pragma unroll
     for (int u = 0; u < UW; ++u) {
-        const unsigned int i = t + u * GEMV1_THREADS;
-        const unsigned int r = i / W;
-        const unsigned int wi = i % W;
-        if (r < GEMV1_FEATS_PER_BLOCK) {
-            const unsigned char* row = weight + (unsigned long long)min(feat0 + r, N - 1) * rstride;
-            const unsigned char* span = row + start;
-            // Pointer arithmetic throughout, so the load stays a global
-            // (`LDG`) load rather than a generic one.
-            const unsigned int o = (unsigned int)((unsigned long long)span & 15ull);
-            const unsigned char* at = span - o + 16 * wi;
-            if (at < row + stop) {
-                win.w[u] = __ldg(reinterpret_cast<const uint4*>(at));
-                win.mask |= 1u << u;
-            }
+        const unsigned char* span = m.row[u] + start;
+        // Pointer arithmetic throughout, so the load stays a global
+        // (`LDG`) load rather than a generic one.
+        const unsigned int o = (unsigned int)((unsigned long long)span & 15ull);
+        const unsigned char* at = span - o + m.win[u];
+        if (at < m.row[u] + stop) {
+            win.w[u] = __ldg(reinterpret_cast<const uint4*>(at));
+            win.mask |= 1u << u;
         }
     }
     if (t < GEMV1_Y_WINDOWS) {
@@ -262,10 +304,11 @@ static __device__ __forceinline__ void gemv1_body(
     const int* my_row0 = s_w[0] + gemv1_row_base<ROW_WORDS>(r);
     const int* my_row1 = s_w[1] + gemv1_row_base<ROW_WORDS>(r);
     const unsigned int base = lane & ~3u;
+    const typename FMT::Lane ln = FMT::setup(c);
 
+    const Gemv1LoadMap<UW> lmap = gemv1_load_map<W, UW>(weight, rstride, N, feat0);
     Gemv1Windows<UW> win;
-    gemv1_load<FMT, W, UW>(weight, y_packed, rstride, row_len, group_stride, kgroups, N, feat0,
-                           kb0, win);
+    gemv1_load<FMT, W, UW>(lmap, y_packed, row_len, group_stride, kgroups, kb0, win);
     gemv1_store<W, UW, ROW_WORDS>(win, s_w[0], s_y[0]);
     __syncthreads();
 
@@ -276,8 +319,8 @@ static __device__ __forceinline__ void gemv1_body(
     for (unsigned int b0 = kb0; b0 < kb1; b0 += GEMV1_STEP_CHUNKS, buf ^= 1) {
         const bool has_next = b0 + GEMV1_STEP_CHUNKS < kb1;
         if (has_next) {
-            gemv1_load<FMT, W, UW>(weight, y_packed, rstride, row_len, group_stride, kgroups, N,
-                                   feat0, b0 + GEMV1_STEP_CHUNKS, win);
+            gemv1_load<FMT, W, UW>(lmap, y_packed, row_len, group_stride, kgroups,
+                                   b0 + GEMV1_STEP_CHUNKS, win);
         }
 
         const int* my_row = buf ? my_row1 : my_row0;
@@ -291,21 +334,46 @@ static __device__ __forceinline__ void gemv1_body(
         for (unsigned int h = 0; h < 2; ++h) {
             const unsigned int j = 4 * h + c;
             int w[8];
-            FMT::read(my_row, o, j, w);
+            FMT::read(my_row, o, j, ln, w);
             const int* rec = y + h * GEMV1_Y_STRIDE;
             int dot = 0;
-            // The chunk's 32 activation bytes: two 16-byte loads.
-            const int4* q4 = reinterpret_cast<const int4*>(rec + GEMV1_Y_QS + c * 8);
-            const int4 q0 = q4[0];
-            const int4 q1 = q4[1];
-            dot = dp4a(w[0], q0.x, dot);
-            dot = dp4a(w[1], q0.y, dot);
-            dot = dp4a(w[2], q0.z, dot);
-            dot = dp4a(w[3], q0.w, dot);
-            dot = dp4a(w[4], q1.x, dot);
-            dot = dp4a(w[5], q1.y, dot);
-            dot = dp4a(w[6], q1.z, dot);
-            dot = dp4a(w[7], q1.w, dot);
+            if constexpr (FMT::PAIRED_WORDS) {
+                static_assert(FMT::CODES_PLUS_ONE, "Paired words are the code form.");
+                // `sum((code - 1) * a) = sum(code * a) - sum(a)`: the chunk's
+                // exact activation sum is the int16 high half of its header
+                // word, and `dp2a` with `(0, -1)` seeds the dot with its
+                // negation. Every term is an int, so the dot is the same
+                // integer as the signed-byte form's.
+                dot = gemv1_dp2a_lo(rec[c], 0x0000FF00, 0);
+                // The chunk's 32 activation bytes as four 8-byte loads, each
+                // at the pair the reader's word order names.
+                const int2* q2 = reinterpret_cast<const int2*>(rec + GEMV1_Y_QS + c * 8);
+                const int2 q0 = q2[FMT::act_pair(ln, 0)];
+                const int2 q1 = q2[FMT::act_pair(ln, 1)];
+                const int2 q2v = q2[FMT::act_pair(ln, 2)];
+                const int2 q3 = q2[FMT::act_pair(ln, 3)];
+                dot = gemv1_dp4a_us((unsigned int)w[0], q0.x, dot);
+                dot = gemv1_dp4a_us((unsigned int)w[1], q0.y, dot);
+                dot = gemv1_dp4a_us((unsigned int)w[2], q1.x, dot);
+                dot = gemv1_dp4a_us((unsigned int)w[3], q1.y, dot);
+                dot = gemv1_dp4a_us((unsigned int)w[4], q2v.x, dot);
+                dot = gemv1_dp4a_us((unsigned int)w[5], q2v.y, dot);
+                dot = gemv1_dp4a_us((unsigned int)w[6], q3.x, dot);
+                dot = gemv1_dp4a_us((unsigned int)w[7], q3.y, dot);
+            } else {
+                // The chunk's 32 activation bytes: two 16-byte loads.
+                const int4* q4 = reinterpret_cast<const int4*>(rec + GEMV1_Y_QS + c * 8);
+                const int4 q0 = q4[0];
+                const int4 q1 = q4[1];
+                dot = dp4a(w[0], q0.x, dot);
+                dot = dp4a(w[1], q0.y, dot);
+                dot = dp4a(w[2], q0.z, dot);
+                dot = dp4a(w[3], q0.w, dot);
+                dot = dp4a(w[4], q1.x, dot);
+                dot = dp4a(w[5], q1.y, dot);
+                dot = dp4a(w[6], q1.z, dot);
+                dot = dp4a(w[7], q1.w, dot);
+            }
 
             // The owner gathers the dots of slots 1..3. Every lane issues
             // the shuffles; only the owner reads the results.

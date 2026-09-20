@@ -34,6 +34,7 @@ pub const FUSED_MULTI_TENSOR_MODULE: &str = "fused_multi_tensor";
 pub const ROPE_MODULE: &str = "rope";
 pub const ROPE_INTERLEAVED_MODULE: &str = "rope_interleaved";
 pub const ROPE_YARN_MODULE: &str = "rope_yarn";
+pub const MROPE_INTERLEAVED_MODULE: &str = "mrope_interleaved";
 pub const SDPA_MODULE: &str = "sdpa";
 pub const FUSED_QKV_MODULE: &str = "fused_qkv";
 pub const MOE_ROUTING_MODULE: &str = "moe_routing";

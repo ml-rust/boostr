@@ -310,6 +310,12 @@ fn compile_cuda_kernels() {
             "sm_75",
             true
         ),
+        k!(
+            "src/ops/cuda/kernels/position",
+            "mrope_interleaved.cu",
+            "sm_75",
+            true
+        ),
         // Fused optimizer kernels
         k!(
             "src/ops/cuda/kernels/training",

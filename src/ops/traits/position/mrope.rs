@@ -86,4 +86,27 @@ pub trait MRopeOps<R: Runtime> {
         selector: &Tensor<R>,
         n_rot: usize,
     ) -> Result<Var<R>>;
+
+    /// [`Self::apply_mrope_interleaved`] as one kernel launch where a
+    /// backend has one; otherwise the composed op.
+    ///
+    /// Same arguments and layout contract. A backend that fuses must return
+    /// the composed op's values bit for bit, so callers can pick this
+    /// method without a numeric change. The default forwards to
+    /// [`Self::apply_mrope_interleaved`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::apply_mrope_interleaved`].
+    fn mrope_interleaved_fused(
+        &self,
+        x: &Var<R>,
+        cos_cache: &Var<R>,
+        sin_cache: &Var<R>,
+        positions: &Tensor<R>,
+        selector: &Tensor<R>,
+        n_rot: usize,
+    ) -> Result<Var<R>> {
+        self.apply_mrope_interleaved(x, cos_cache, sin_cache, positions, selector, n_rot)
+    }
 }

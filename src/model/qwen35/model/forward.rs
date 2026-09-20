@@ -28,23 +28,28 @@ where
 {
     /// Inference forward: logits `[batch, seq, vocab_size]`.
     ///
-    /// `position` is the absolute index of `input_ids[.., 0]`. The
-    /// attention layers derive their positions from `kv_cache.seq_len()`,
-    /// so `position` must equal it; a mismatch is an error rather than a
-    /// silent drift between the two position sources.
+    /// `rope_pos` is the IMROPE position of `input_ids[.., 0]`; token `i`
+    /// sits at `rope_pos + i` on the `t`, `h` and `w` streams and `0` on
+    /// `e`. The KV slot comes from `kv_cache.seq_len()`, so after an image
+    /// the two counters differ and the caller passes its own rope counter.
+    /// Text-only callers pass `kv_cache.seq_len()`.
+    ///
+    /// The token path is [`embed_tokens`](Self::embed_tokens) followed by
+    /// [`forward_qwen35_embeds`](Self::forward_qwen35_embeds).
     ///
     /// # Errors
     ///
-    /// [`Error::ModelError`] when `position != kv_cache.seq_len()`, or when
-    /// `kv_cache` / `gdn_state` hold fewer layers than the model has of
-    /// that kind. Block errors propagate.
+    /// [`Error::ModelError`] when `input_ids` is not `[batch, seq]`, when
+    /// `rope_pos + seq` exceeds the rope table, or when `kv_cache` /
+    /// `gdn_state` hold fewer layers than the model has of that kind. Block
+    /// errors propagate.
     pub fn forward_qwen35<C>(
         &self,
         client: &C,
         input_ids: &Tensor<R>,
         kv_cache: &mut LayeredKvCache<R>,
         gdn_state: &mut LayeredGdnState<R>,
-        position: usize,
+        rope_pos: usize,
     ) -> Result<Tensor<R>>
     where
         C: ModelClient<R>,
@@ -62,22 +67,15 @@ where
             + DequantOps<R>
             + MatmulOps<R>,
     {
-        if self.num_attention_layers() > 0 {
-            let first = kv_cache.layer(0).ok_or_else(|| Error::ModelError {
-                reason: "qwen35: KV cache has no layers".into(),
-            })?;
-            if first.seq_len() != position {
-                return Err(Error::ModelError {
-                    reason: format!(
-                        "qwen35: position {position} != kv_cache.seq_len() {}",
-                        first.seq_len()
-                    ),
-                });
-            }
+        let shape = input_ids.shape();
+        if shape.len() != 2 {
+            return Err(Error::ModelError {
+                reason: format!("qwen35: input_ids must be [batch, seq], got {shape:?}"),
+            });
         }
-        let hidden = self.forward_layers(client, input_ids, kv_cache, gdn_state)?;
-        let logits = self.lm_head.forward(client, &hidden)?;
-        Ok(logits.tensor().clone())
+        let positions = self.text_positions(shape[1], rope_pos, input_ids.device())?;
+        let embeds = self.embed_tokens(client, input_ids)?;
+        self.forward_qwen35_embeds(client, &embeds, &positions, kv_cache, gdn_state)
     }
 
     /// Contextualized hidden states for embedding extraction.
@@ -128,14 +126,19 @@ where
             dtype,
             device,
         )?;
-        self.forward_layers(client, input_ids, &mut kv_cache, &mut gdn_state)
+        let positions = self.text_positions(seq_len, 0, device)?;
+        let hidden = self.embed_tokens.forward(client, input_ids)?;
+        self.forward_layers(client, hidden, &positions, &mut kv_cache, &mut gdn_state)
     }
 
-    /// Embed, walk every block, apply `output_norm`.
-    fn forward_layers<C>(
+    /// Walk every block over `hidden` `[batch, seq, hidden]`, then apply
+    /// `output_norm`. `positions` is the `[4, seq]` i32 IMROPE tensor every
+    /// attention layer reads.
+    pub(super) fn forward_layers<C>(
         &self,
         client: &C,
-        input_ids: &Tensor<R>,
+        hidden: Var<R>,
+        positions: &Tensor<R>,
         kv_cache: &mut LayeredKvCache<R>,
         gdn_state: &mut LayeredGdnState<R>,
     ) -> Result<Var<R>>
@@ -155,7 +158,7 @@ where
             + DequantOps<R>
             + MatmulOps<R>,
     {
-        let mut hidden = self.embed_tokens.forward(client, input_ids)?;
+        let mut hidden = hidden;
         let mut attn_idx = 0usize;
         let mut gdn_idx = 0usize;
 
@@ -172,7 +175,7 @@ where
                     let normed = layer.attn_norm.forward(client, &hidden)?;
                     let mixed = layer
                         .mixer
-                        .forward_text(client, &normed, &self.rope, cache)?;
+                        .forward(client, &normed, &self.rope, positions, cache)?;
                     hidden = ffn_residual(
                         client,
                         &hidden,
@@ -367,15 +370,40 @@ mod tests {
     }
 
     #[test]
-    fn position_mismatch_is_an_error() {
+    fn rope_pos_beyond_table_is_an_error() {
         let (client, device) = cpu_setup();
         let model = tiny_model(&device, 0x3535_0012);
         let (mut kv, mut gdn) = caches(&device, &model);
+        let ids = tokens(&device);
         assert!(
             model
-                .forward_qwen35(&client, &tokens(&device), &mut kv, &mut gdn, 3)
+                .forward_qwen35(&client, &ids, &mut kv, &mut gdn, MAX_POS - SEQ + 1)
                 .is_err()
         );
+    }
+
+    /// The rope position is independent of the KV slot: decoding at a rope
+    /// position ahead of the cache length runs and differs from the aligned
+    /// decode.
+    #[test]
+    fn rope_pos_decoupled_from_kv_slot() {
+        let (client, device) = cpu_setup();
+        let model = tiny_model(&device, 0x3535_0015);
+        let ids = tokens(&device);
+        let head = ids.narrow(1, 0, 4).unwrap().contiguous().unwrap();
+        let step = ids.narrow(1, 4, 1).unwrap().contiguous().unwrap();
+
+        let (mut kv_a, mut gdn_a) = caches(&device, &model);
+        run(&client, &model, &head, &mut kv_a, &mut gdn_a, 0);
+        let aligned = run(&client, &model, &step, &mut kv_a, &mut gdn_a, 4);
+
+        let (mut kv_b, mut gdn_b) = caches(&device, &model);
+        run(&client, &model, &head, &mut kv_b, &mut gdn_b, 0);
+        let shifted = run(&client, &model, &step, &mut kv_b, &mut gdn_b, 7);
+
+        assert_eq!(kv_a.seq_len(), 5);
+        assert_eq!(kv_b.seq_len(), 5);
+        assert!(max_abs_diff(&aligned, &shifted) > 1e-6);
     }
 
     /// Same weights wrapped as `Rotated` linears run, and the output differs

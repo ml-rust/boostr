@@ -29,56 +29,6 @@ use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
 impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
-    /// Text forward: every token at position `kv_cache.seq_len() + i` on the
-    /// `t`, `h` and `w` streams, `0` on `e`, as `llm_graph_input_pos::set_input`
-    /// fills them:
-    ///
-    /// ```text
-    /// pos_data[               i] = ubatch->pos[i];
-    /// pos_data[    n_tokens + i] = ubatch->pos[i];
-    /// pos_data[2 * n_tokens + i] = ubatch->pos[i];
-    /// pos_data[3 * n_tokens + i] = 0; // 4th dim is 0
-    /// ```
-    ///
-    /// See [`forward`](Self::forward) for the rest of the contract.
-    pub fn forward_text<C>(
-        &self,
-        client: &C,
-        x: &Var<R>,
-        rope: &RoPE<R>,
-        kv_cache: &mut KvCache<R>,
-    ) -> Result<Var<R>>
-    where
-        C: ModelClient<R> + FwhtOps<R>,
-        R::Client: TensorOps<R>
-            + ScalarOps<R>
-            + ReduceOps<R>
-            + IndexingOps<R>
-            + ShapeOps<R>
-            + ActivationOps<R>
-            + BinaryOps<R>
-            + UnaryOps<R>
-            + CompareOps<R>
-            + ConditionalOps<R>
-            + DequantOps<R>,
-    {
-        let shape = x.shape();
-        if shape.len() != 3 {
-            return Err(Error::ModelError {
-                reason: format!("qwen35_attention: expected [batch, seq, hidden], got {shape:?}"),
-            });
-        }
-        let seq = shape[1];
-        let start = kv_cache.seq_len();
-        let mut data = Vec::with_capacity(4 * seq);
-        for _ in 0..3 {
-            data.extend((0..seq).map(|i| (start + i) as i32));
-        }
-        data.resize(4 * seq, 0);
-        let positions = Tensor::<R>::from_slice(&data, &[4, seq], x.tensor().device())?;
-        self.forward(client, x, rope, &positions, kv_cache)
-    }
-
     /// Inference forward. `x` is the `attn_norm`-ed hidden state
     /// `[batch, seq, hidden_size]`; the result is the `attn_output`
     /// projection, `[batch, seq, hidden_size]`, without the residual.
@@ -302,6 +252,22 @@ mod tests {
             .unwrap()
     }
 
+    /// `[4, seq]` i32 text positions: every token at `kv_cache.seq_len() + i`
+    /// on `t`, `h`, `w`; `0` on `e`.
+    fn text_positions(
+        seq: usize,
+        cache: &KvCache<CpuRuntime>,
+        device: &CpuDevice,
+    ) -> Tensor<CpuRuntime> {
+        let start = cache.seq_len();
+        let mut data = Vec::with_capacity(4 * seq);
+        for _ in 0..3 {
+            data.extend((0..seq).map(|i| (start + i) as i32));
+        }
+        data.resize(4 * seq, 0);
+        Tensor::<CpuRuntime>::from_slice(&data, &[4, seq], device).unwrap()
+    }
+
     fn run(
         client: &CpuClient,
         block: &Qwen35AttentionBlock<CpuRuntime>,
@@ -309,8 +275,9 @@ mod tests {
         x: &Tensor<CpuRuntime>,
         cache: &mut KvCache<CpuRuntime>,
     ) -> Tensor<CpuRuntime> {
+        let positions = text_positions(x.shape()[1], cache, x.device());
         block
-            .forward_text(client, &Var::new(x.clone(), false), rope, cache)
+            .forward(client, &Var::new(x.clone(), false), rope, &positions, cache)
             .unwrap()
             .tensor()
             .clone()
@@ -454,9 +421,10 @@ mod tests {
             RoPE::<CpuRuntime>::precompute_freqs(MAX_POS, HD, 10_000.0, None, &device).unwrap();
         let x = Lcg(1).tensor(&device, &[1, 2, HIDDEN], 1.0);
         let mut c = cache(&device);
+        let positions = text_positions(2, &c, &device);
         assert!(
             block
-                .forward_text(&client, &Var::new(x, false), &wide, &mut c)
+                .forward(&client, &Var::new(x, false), &wide, &positions, &mut c)
                 .is_err()
         );
     }
@@ -468,9 +436,10 @@ mod tests {
         let rope = rope(&device);
         let x = Lcg(1).tensor(&device, &[1, 2, HIDDEN + 1], 1.0);
         let mut c = cache(&device);
+        let positions = text_positions(2, &c, &device);
         assert!(
             block
-                .forward_text(&client, &Var::new(x, false), &rope, &mut c)
+                .forward(&client, &Var::new(x, false), &rope, &positions, &mut c)
                 .is_err()
         );
     }

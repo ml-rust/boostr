@@ -40,28 +40,30 @@ impl MropeScalars {
         self.positions.ptr()
     }
 
-    /// Stream-ordered write of `t = h = w = seq_len`, `e = 0` for the token
-    /// this replay decodes.
+    /// Stream-ordered write of `t = h = w = rope_pos`, `e = 0` for the
+    /// token this replay decodes.
     ///
-    /// `seq_len` is the token count in the KV cache before this step's
-    /// insert, the same value [`DeviceScalars::update`](super::DeviceScalars::update)
-    /// takes. Uses `cuMemsetD32Async`: the value travels inside the driver
-    /// call, so no host pointer outlives this function.
-    pub fn update(&self, client: &CudaClient, seq_len: usize) -> Result<()> {
+    /// `rope_pos` is the IMROPE position, not the KV slot: the slot comes
+    /// from [`DeviceScalars::update`](super::DeviceScalars::update). In a
+    /// text-only context both equal the token count; after an image the
+    /// rope position lags the slot by `n_tokens - max(nx, ny)` per image.
+    /// Uses `cuMemsetD32Async`: the value travels inside the driver call,
+    /// so no host pointer outlives this function.
+    pub fn update(&self, client: &CudaClient, rope_pos: usize) -> Result<()> {
         let stream = client.stream().cu_stream();
         let base = self.positions.ptr();
         let word = std::mem::size_of::<i32>() as u64;
         unsafe {
-            let result = sys::cuMemsetD32Async(base, seq_len as u32, 3, stream);
+            let result = sys::cuMemsetD32Async(base, rope_pos as u32, 3, stream);
             if result != sys::CUresult::CUDA_SUCCESS {
                 return Err(Error::InferenceError {
-                    reason: format!("cuMemsetD32Async for mrope t/h/w failed: {:?}", result),
+                    reason: format!("cuMemsetD32Async for mrope t/h/w failed: {result:?}"),
                 });
             }
             let result = sys::cuMemsetD32Async(base + 3 * word, 0, 1, stream);
             if result != sys::CUresult::CUDA_SUCCESS {
                 return Err(Error::InferenceError {
-                    reason: format!("cuMemsetD32Async for mrope e failed: {:?}", result),
+                    reason: format!("cuMemsetD32Async for mrope e failed: {result:?}"),
                 });
             }
         }

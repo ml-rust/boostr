@@ -37,8 +37,14 @@ pub struct Qwen35DecodeGraph {
     /// copy. Read by the caller after `graph.launch()` completes.
     pub next_token_buf: Tensor<CudaRuntime>,
 
-    /// CPU-side token count, advanced after every launch.
+    /// CPU-side token count (the KV slot of the next token), advanced after
+    /// every launch.
     pub seq_len: usize,
+
+    /// IMROPE position of the next token, advanced after every launch.
+    /// Equal to `seq_len` for a text-only context; behind it once the
+    /// prefill held an image.
+    pub rope_pos: usize,
 }
 
 impl Qwen35DecodeGraph {
@@ -55,8 +61,8 @@ impl Qwen35DecodeGraph {
     /// Per token, all stream-ordered on the compute stream:
     /// 1. D2D async: `next_token_buf` -> `token_buf`.
     /// 2. Write `device_scalars` for `seq_len`.
-    /// 3. Write `mrope` positions for `seq_len`.
-    /// 4. Launch the graph.
+    /// 3. Write `mrope` positions for `rope_pos`.
+    /// 4. Launch the graph, then advance both counters.
     ///
     /// After this call `next_token_buf` holds this step's argmax. The caller
     /// waits on the stream (event or sync) before reading it.
@@ -67,9 +73,10 @@ impl Qwen35DecodeGraph {
             }
         })?;
         self.device_scalars.update(client, self.seq_len)?;
-        self.mrope.update(client, self.seq_len)?;
+        self.mrope.update(client, self.rope_pos)?;
         self.graph.launch()?;
         self.seq_len += 1;
+        self.rope_pos += 1;
         Ok(())
     }
 }

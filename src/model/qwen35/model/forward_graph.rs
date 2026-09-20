@@ -7,7 +7,7 @@
 //! |---------------------------|------------------------------------------------|
 //! | `input_ids` `[1, 1]` i64  | caller, D2D async from the previous output      |
 //! | `DeviceScalars`           | caller, `DeviceScalars::update(seq_len)`        |
-//! | `MropeScalars` positions  | caller, `MropeScalars::update(seq_len)`         |
+//! | `MropeScalars` positions  | caller, `MropeScalars::update(rope_pos)`        |
 //! | KV cache k/v buffers      | graph, `kv_insert` at `write_pos`               |
 //! | GDN conv/ssm buffers      | graph, `GdnState::update_shared`                |
 //!
@@ -35,10 +35,11 @@ impl Qwen35Model<numr::runtime::cuda::CudaRuntime> {
     ///
     /// 1. Pre-allocate `kv_cache` at full capacity and prefill it eagerly.
     /// 2. Prefill `gdn_state` eagerly with the same tokens.
-    /// 3. Write `device_scalars` and `mrope` for the current `seq_len`
-    ///    before every replay.
-    /// 4. Keep `position == seq_len` outside the graph: this forward does
-    ///    not read the CPU-side cache length, and does not advance it.
+    /// 3. Write `device_scalars` for the KV slot (`seq_len`) and `mrope`
+    ///    for the rope position before every replay. The two agree for a
+    ///    text-only context and drift apart after an image.
+    /// 4. Advance both counters outside the graph: this forward does not
+    ///    read the CPU-side cache length, and does not advance it.
     ///
     /// # Errors
     ///

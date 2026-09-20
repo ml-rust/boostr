@@ -22,10 +22,12 @@
 //! and sets `prism.hadamard.gdn_v_grouped`; `group_heads` is the runtime
 //! side of that contract.
 
+use super::gate_proj::GateProjections;
 use crate::error::{Error, Result};
 use crate::model::config::GdnConfig;
 use crate::nn::{GateOrder, GatedRmsNorm, MaybeQuantLinear, MaybeRotatedLinear};
 use numr::dtype::DType;
+use numr::ops::ShapeOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -38,8 +40,8 @@ pub struct GdnBlock<R: Runtime> {
     pub(super) cfg: GdnConfig,
     pub(super) attn_qkv: MaybeRotatedLinear<R>,
     pub(super) attn_gate: MaybeRotatedLinear<R>,
-    pub(super) ssm_alpha: MaybeQuantLinear<R>,
-    pub(super) ssm_beta: MaybeQuantLinear<R>,
+    /// `ssm_alpha` and `ssm_beta`, one dense linear when both arrive dense.
+    pub(super) gates: GateProjections<R>,
     pub(super) ssm_out: MaybeRotatedLinear<R>,
     /// Depthwise conv kernel `[qkv_dim, 1, conv_kernel]`, the layout
     /// `nn::causal_conv1d` takes. No bias: the fork's `ggml_ssm_conv` has none.
@@ -80,11 +82,17 @@ pub struct GdnWeights<R: Runtime> {
 impl<R: Runtime<DType = DType>> GdnBlock<R> {
     /// Build from a validated config and built modules.
     ///
+    /// Dense `ssm_alpha` and `ssm_beta` are concatenated into one
+    /// `[2 * value_heads, hidden_size]` linear here; see `gate_proj`.
+    ///
     /// # Errors
     ///
     /// [`Error::ModelError`] when `cfg.validate()` fails or a tensor shape
     /// disagrees with `cfg`.
-    pub fn new(cfg: GdnConfig, weights: GdnWeights<R>) -> Result<Self> {
+    pub fn new(cfg: GdnConfig, weights: GdnWeights<R>) -> Result<Self>
+    where
+        R::Client: ShapeOps<R>,
+    {
         cfg.validate()?;
         let qkv_dim = cfg.qkv_dim();
         let value_dim = cfg.value_dim();
@@ -116,13 +124,13 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
         check_shape(&weights.ssm_dt_bias, "ssm_dt_bias", &[heads])?;
         check_shape(&weights.ssm_norm, "ssm_norm", &[cfg.state_size])?;
         let norm = GatedRmsNorm::new(weights.ssm_norm, cfg.rms_eps, GateOrder::NormThenMul, false);
+        let gates = GateProjections::new(weights.ssm_alpha, weights.ssm_beta)?;
 
         Ok(Self {
             cfg,
             attn_qkv: weights.attn_qkv,
             attn_gate: weights.attn_gate,
-            ssm_alpha: weights.ssm_alpha,
-            ssm_beta: weights.ssm_beta,
+            gates,
             ssm_out: weights.ssm_out,
             conv_weight,
             ssm_a: weights.ssm_a,

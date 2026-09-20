@@ -129,9 +129,10 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             reason: "gdn: forward_batch returned no attn_gate output".to_string(),
         })?;
 
-        // 2. Raw gate projections. `ssm_a` already holds `-exp(A_log)`.
-        let alpha = self.ssm_alpha.forward(client, x)?;
-        let beta_raw = self.ssm_beta.forward(client, x)?;
+        // 2. Raw gate projections, one launch when both are dense; `alpha`
+        // and `beta_raw` are views into its output. `ssm_a` already holds
+        // `-exp(A_log)`.
+        let (alpha, beta_raw) = self.gates.forward(client, x)?;
 
         // 3. Causal conv with the carried window, then SiLU.
         let qkv_ncl = qkv
@@ -151,8 +152,8 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             // 4-8. One call: split, L2 norm, tiled repeat, gates, step.
             client.gdn_step_from_conv(
                 &qkv,
-                alpha.tensor(),
-                beta_raw.tensor(),
+                &alpha,
+                &beta_raw,
                 &self.ssm_dt_bias,
                 &self.ssm_a,
                 ssm_state,
@@ -163,7 +164,7 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             )?
         } else {
             // 4-8. The same chain as primitives, then the chunked recurrence.
-            self.prefill_recurrence(client, &qkv, alpha.tensor(), beta_raw.tensor(), ssm_state)?
+            self.prefill_recurrence(client, &qkv, &alpha, &beta_raw, ssm_state)?
         };
 
         // 9. silu(z) * rms_norm(o), per head.

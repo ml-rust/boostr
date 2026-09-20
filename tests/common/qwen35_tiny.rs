@@ -15,6 +15,7 @@ use boostr::nn::{
     MaybeRotatedEmbedding, MaybeRotatedLinear, RmsNorm, RotatedLinear, RotatedMlp,
 };
 use numr::dtype::DType;
+use numr::ops::ShapeOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -110,7 +111,10 @@ struct Builder<'a, R: Runtime<DType = DType>> {
     rotations: HashMap<usize, HadamardRotation<R>>,
 }
 
-impl<R: Runtime<DType = DType>> Builder<'_, R> {
+impl<R: Runtime<DType = DType>> Builder<'_, R>
+where
+    R::Client: ShapeOps<R>,
+{
     fn rotation(&mut self, inp: usize) -> HadamardRotation<R> {
         if let Some(r) = self.rotations.get(&inp) {
             return r.clone();
@@ -183,7 +187,10 @@ impl<R: Runtime<DType = DType>> Builder<'_, R> {
 }
 
 /// Build the tiny model with weights drawn from `seed`.
-pub fn tiny_model<R: Runtime<DType = DType>>(device: &R::Device, seed: u64) -> Qwen35Model<R> {
+pub fn tiny_model<R: Runtime<DType = DType>>(device: &R::Device, seed: u64) -> Qwen35Model<R>
+where
+    R::Client: ShapeOps<R>,
+{
     let config = tiny_config();
     let gdn_cfg = config.gdn.clone().unwrap();
     let attn_cfg = config.qwen35_attention.clone().unwrap();

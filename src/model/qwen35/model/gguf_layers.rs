@@ -15,6 +15,7 @@ use crate::model::config::{GdnConfig, Qwen35AttentionConfig};
 use crate::model::hybrid::{GdnBlock, GdnWeights, Qwen35AttentionBlock, Qwen35AttentionWeights};
 use crate::nn::{MaybeRotatedLinear, RmsNorm, RotatedMlp, VarBuilder};
 use numr::dtype::DType;
+use numr::ops::ShapeOps;
 use numr::runtime::Runtime;
 
 /// `RmsNorm` from a `[hidden]` weight at `name`, not trainable.
@@ -71,7 +72,10 @@ pub(super) fn gdn_layer<R: Runtime<DType = DType>>(
     layer: usize,
     cfg: &GdnConfig,
     eps: f32,
-) -> Result<Qwen35GdnLayer<R>> {
+) -> Result<Qwen35GdnLayer<R>>
+where
+    R::Client: ShapeOps<R>,
+{
     let attn_norm = rms_norm(layer_vb, "input_layernorm.weight", eps)?;
     let post_attention_norm = rms_norm(layer_vb, "post_attention_layernorm.weight", eps)?;
     let mlp = build_mlp(layer_vb, attach, layer)?;

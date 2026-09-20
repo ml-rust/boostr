@@ -26,6 +26,7 @@ use crate::nn::{
     MaybeRotatedLinear, RotatedEmbedding, RotatedLinear, VarBuilder,
 };
 use numr::dtype::DType;
+use numr::ops::ShapeOps;
 use numr::runtime::Runtime;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -125,7 +126,10 @@ impl<R: Runtime<DType = DType>> Qwen35Model<R> {
     /// `qwen35_attention` or `hybrid_layers`, a tensor is missing or has
     /// the wrong shape, or a rotation's sign vector is missing for a
     /// width. `Qwen35Model::new` errors propagate.
-    pub fn from_varbuilder(vb: &mut VarBuilder<R>, config: &UniversalConfig) -> Result<Self> {
+    pub fn from_varbuilder(vb: &mut VarBuilder<R>, config: &UniversalConfig) -> Result<Self>
+    where
+        R::Client: ShapeOps<R>,
+    {
         config.validate()?;
         let gdn_config = config.gdn.as_ref().ok_or_else(|| Error::ModelError {
             reason: "qwen35 requires a gdn config".into(),

@@ -32,6 +32,16 @@ fn kernel_name(s_k: usize) -> Option<&'static str> {
     }
 }
 
+/// `t` itself when its elements are contiguous (`Tensor::ptr` folds in the
+/// offset), else a contiguous copy.
+fn dense(t: &Tensor<CudaRuntime>) -> Result<Tensor<CudaRuntime>> {
+    if t.is_contiguous() {
+        Ok(t.clone())
+    } else {
+        Ok(t.contiguous()?)
+    }
+}
+
 /// Whether the fused kernel covers this call: F32, one token, `S_k` in
 /// {32, 64, 128}.
 pub fn supports_from_conv(dims: &GdnConvDims, dtype: DType) -> bool {
@@ -40,7 +50,9 @@ pub fn supports_from_conv(dims: &GdnConvDims, dtype: DType) -> bool {
 
 /// Run the fused chain. Shapes follow
 /// `GatedDeltaNetOps::gdn_step_from_conv`. Non-contiguous operands are
-/// copied contiguous first.
+/// copied contiguous first; a contiguous view at an offset is read in
+/// place, which is how a gate projection sliced out of a wider result
+/// arrives at `batch == 1`.
 ///
 /// Returns `(o: [batch, 1, H_v, S_v], state: [batch, H_v, S_k, S_v])`; the
 /// state is a new tensor.
@@ -109,12 +121,12 @@ pub fn gdn_step_from_conv_fused(
         });
     }
 
-    let qkv = qkv.contiguous()?;
-    let alpha_raw = alpha_raw.contiguous()?;
-    let beta_raw = beta_raw.contiguous()?;
-    let dt_bias = dt_bias.contiguous()?;
-    let ssm_a = ssm_a.contiguous()?;
-    let state = state.contiguous()?;
+    let qkv = dense(qkv)?;
+    let alpha_raw = dense(alpha_raw)?;
+    let beta_raw = dense(beta_raw)?;
+    let dt_bias = dense(dt_bias)?;
+    let ssm_a = dense(ssm_a)?;
+    let state = dense(state)?;
 
     let device = state.device();
     let o = Tensor::<CudaRuntime>::empty(&[batch, 1, h_v, s_v], DType::F32, device)?;

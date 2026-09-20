@@ -1195,6 +1195,19 @@ const GEMV1_DEPTHS: [usize; 3] = [640, 5120, 17408];
 /// Output widths: one partial feature tile, and a wide projection.
 const GEMV1_WIDTHS: [usize; 2] = [96, 5120];
 
+/// A K per format whose row byte stride is 2 (mod 4), so a lane's chunk
+/// words straddle the staged 32-bit words at a shift the kernel cannot
+/// fold: an odd block count of a 34- or 18-byte block. 640 (5 blocks) does
+/// this for PQ2_0 and Q1_0 already; Q2_0 needs 9 blocks, Q8_0 21. PTQ1_0's
+/// 28-byte block keeps every stride a multiple of 4.
+fn gemv1_odd_stride_depth(format: QuantFormat) -> Option<usize> {
+    match format {
+        QuantFormat::Q2_0 => Some(576),
+        QuantFormat::Q8_0 => Some(672),
+        _ => None,
+    }
+}
+
 /// An activation row with a spread of magnitudes, so the per-block scales
 /// vary and every chunk's term is a different float.
 fn gemv1_activation(k: usize) -> Vec<f32> {
@@ -1245,7 +1258,11 @@ fn gemv1_matches_mma(name: &str, format: QuantFormat, weight_bytes: &[u8], n: us
 }
 
 fn gemv1_check_format(name: &str, format: QuantFormat, build: fn(usize, usize) -> Vec<u8>) {
-    for &k in &GEMV1_DEPTHS {
+    let depths = GEMV1_DEPTHS
+        .iter()
+        .copied()
+        .chain(gemv1_odd_stride_depth(format));
+    for k in depths {
         for &n in &GEMV1_WIDTHS {
             gemv1_matches_mma(name, format, &build(n, k), n, k);
         }

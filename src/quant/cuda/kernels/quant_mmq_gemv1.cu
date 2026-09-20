@@ -2,9 +2,10 @@
 // `quant_mmq_<fmt>_q8_1_gemv1` for Q8_0, PQ2_0, Q2_0, Q1_0 and PTQ1_0, and
 // the shared split-range fixup `quant_mmq_q8_1_gemv1_fixup`. The body and
 // the contract it keeps with `quant_mmq_mma.cu` are in
-// `mmq/gemv1_body.cuh`: same int8 lanes, same scales, same float expression,
-// same chunk order, same K ranges, so a decode step here is the same bits as
-// row 0 of any batch through the tensor-core kernels.
+// `mmq/gemv1_body.cuh`: same int8 lanes, same exact int dot per chunk, same
+// scales, same float expression, same chunk order, same K ranges, so a
+// decode step here is the same bits as row 0 of any batch through the
+// tensor-core kernels.
 //
 // Launch: grid `(ceil(N / 32), splits)`, block `GEMV1_THREADS`; the
 // staging buffers are static shared memory, so the launch requests none.

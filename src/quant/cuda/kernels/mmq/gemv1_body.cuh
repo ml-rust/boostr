@@ -1,7 +1,7 @@
 // Single-token (M = 1) body of the feature-major MMQ family, for the
 // formats `mmqf_vec_dot_d` serves as a Q8_0 row: Q8_0, PQ2_0, Q2_0, Q1_0 and
 // PTQ1_0. Included by `quant_mmq_gemv1.cu`; it is not a compilation unit of
-// its own.
+// its own. The per-format readers are in `gemv1_formats.cuh`.
 //
 // CONTRACT: every output element receives the SAME float sequence the
 // tensor-core kernels `quant_mmq_<fmt>_q8_1_mma*` form for it, so a decode
@@ -23,21 +23,27 @@
 // hand. Both scales reach f32 through `__half2float` of the stored bits, as
 // the staging and `mmqf_vec_dot_d` convert them.
 //
-// What the int8 lanes are: exactly the words `MmqfQ80::stage`, `MmqfLowbit::
-// stage` and `MmqfPTQ10::stage` write into the shared row. Q8_0 is the raw
-// quant bytes; the lowbit formats go through the same
-// `lowbit_expand_code2x8` / `lowbit_expand_sign8` / `ptq1_0_expand4` calls
-// (`../lowbit_dequant.cuh`), so word `i` of a chunk holds elements `4i ..
-// 4i + 3` as signed bytes in both kernels. The int dot is exact, so how the
-// eight `dp4a` steps are ordered does not matter.
+// What `D` is: the exact int32 dot of the chunk's 32 signed elements with
+// its 32 int8 activation values, formed from the same words `MmqfQ80::stage`,
+// `MmqfLowbit::stage` and `MmqfPTQ10::stage` write into the shared row
+// (Q8_0 the raw quant bytes, the others through `lowbit_expand_code2x8`,
+// `lowbit_expand_sign8` and `ptq1_0_expand4` in `../lowbit_dequant.cuh`),
+// so word `i` of a chunk holds elements `4i .. 4i + 3` as signed bytes.
+// Every step is an exact int, so the order of the `dp4a` steps and the
+// pairing of the lanes do not matter, only that each product is formed
+// once.
 //
 // Lane map. One warp owns 8 output features; lane `l` is (feature slot
 // `l / 4`, chunk slot `c = l % 4`). A step is one 256-k group, 8 chunks per
 // feature, walked as two 4-chunk halves: in half `h` lane `c` forms the
-// int32 dot of chunk `4h + c`. Slot 0 of a feature is the OWNER: it gathers
-// slots 1..3 by warp shuffle (the int dot and the two scales, all bit-exact
-// moves) and applies the four chunks' terms in ascending chunk order, half
-// 0 then half 1. The other three lanes hold no float state.
+// int32 dot of chunk `4h + c` from the chunk's 32 activation bytes, read as
+// two `int4` loads. Slot 0 of a feature is the OWNER: it gathers the int
+// dots of slots 1..3 by warp shuffle (bit-exact moves), reads the four `da`
+// of the half from the record header itself (one 16-byte load) and the four
+// `dw` from the staged row, and applies the four chunks' terms in ascending
+// chunk order, half 0 then half 1. When a block spans 4 chunks the half's
+// four `dw` are one scale, read once. The other three lanes hold no float
+// state.
 //
 // STAGING. The weight stream per lane is 4 to 32 bytes per chunk at a
 // 2-byte alignment inside rows 18 to 34 bytes apart, so lane-wise loads
@@ -78,8 +84,9 @@
 // 34-byte chunks are 8.5 words apart, which no base pattern separates
 // fully: 2-way at worst, on the format that is bandwidth bound anyway. The
 // odd word base rules out 128-bit shared stores, so a window is stored as
-// four 32-bit words. Activation reads are one chunk per chunk slot, 8 words
-// apart, the same words for all 8 features: broadcast, conflict free.
+// four 32-bit words. Activation reads are two 16-byte loads per chunk slot,
+// 32 bytes apart, the same addresses for all 8 features: broadcast,
+// conflict free.
 //
 // Ragged K. K is a whole number of the format's blocks, which is finer than
 // a 256-k group, so the last range can end mid-group. The chunk count is
@@ -100,8 +107,7 @@
 #include <cuda_fp16.h>
 
 #include "../gemv/common.cuh"
-#include "../lowbit_dequant.cuh"
-#include "split_range.cuh"
+#include "gemv1_formats.cuh"
 
 // Threads per block: four warps, 8 features each.
 #define GEMV1_WARPS 4
@@ -110,8 +116,6 @@
 #define GEMV1_FEATS_PER_BLOCK (GEMV1_WARPS * GEMV1_FEATS_PER_WARP)
 // Threads per block of the fixup pass.
 #define GEMV1_FIXUP_THREADS 256
-// Chunks per step: one 256-k group.
-#define GEMV1_STEP_CHUNKS MMQF_ITER_B
 
 // Activation record: 4 header words, then 32 quant words (128 k-values);
 // `MMQF_Y_DS`, `MMQF_Y_QS` and `MMQF_Y_STRIDE` in `quant_mmq_mma.cu`. A
@@ -126,143 +130,6 @@
 // Row stride in the staged tile: the smallest `8 (mod 32)` word count
 // holding `W` windows plus the one-word bank offset.
 #define GEMV1_ROW_WORDS_OF(W) ((((4 * (W) + 1) - 8 + 31) / 32) * 32 + 8)
-
-// The stored `half` bits to f32, the one conversion every scale takes.
-static __device__ __forceinline__ float gemv1_half_bits_to_float(unsigned short bits) {
-    return __half2float(__ushort_as_half(bits));
-}
-
-// `NW` consecutive 32-bit words from byte offset `p` (2-byte aligned) of a
-// staged row. Reads `NW + 1` aligned words and funnel-shifts each pair;
-// the extra word is inside the row's slot.
-template <int NW>
-static __device__ __forceinline__ void gemv1_row_words(
-    const int* __restrict__ row, unsigned int p, int (&out)[NW]
-) {
-    const unsigned int* q = reinterpret_cast<const unsigned int*>(row) + p / 4;
-    const unsigned int sh = (p & 3) * 8;
-    unsigned int prev = q[0];
-#pragma unroll
-    for (int k = 0; k < NW; ++k) {
-        const unsigned int next = q[k + 1];
-        out[k] = (int)__funnelshift_r(prev, next, sh);
-        prev = next;
-    }
-}
-
-// The 16 scale bits at byte offset `p` (2-byte aligned) of a staged row.
-static __device__ __forceinline__ unsigned short gemv1_row_half(
-    const int* __restrict__ row, unsigned int p
-) {
-    return reinterpret_cast<const unsigned short*>(row)[p / 2];
-}
-
-// Weight readers. `SPAN` is the bytes of one row that hold a 256-k group;
-// `read(row, o, j, w, d)` produces chunk `j` (0..7) of the staged group as
-// 8 int8x4 words — word `i` holds elements `4i .. 4i + 3` — and the block
-// scale as f32, `o` being the span start's byte offset inside the row's
-// first window.
-
-// Q8_0: one f16 scale then 32 int8 quants per 32-element block.
-struct Gemv1Q80 {
-    static constexpr unsigned int BLOCK_BYTES = 34;
-    static constexpr unsigned int CHUNKS = 1;
-    static constexpr unsigned int SPAN = (GEMV1_STEP_CHUNKS / CHUNKS) * BLOCK_BYTES;
-
-    static __device__ __forceinline__ void read(
-        const int* __restrict__ row, unsigned int o, unsigned int j, int (&w)[8], float& d
-    ) {
-        const unsigned int blk = o + j * BLOCK_BYTES;
-        d = gemv1_half_bits_to_float(gemv1_row_half(row, blk));
-        gemv1_row_words<8>(row, blk + 2, w);
-    }
-};
-
-// PQ2_0, Q2_0 and Q1_0: f16 `d` at byte 0, a dense code run at byte 2, one
-// scale over `BLOCK_ELEMS / 32` chunks. `CHUNK_BYTES` is a chunk's share of
-// the run: 8 bytes at 2 bits per element, 4 at 1 bit. `SIGN` picks the
-// sign-bit expansion over the code-2 one, as `MmqfLowbit` does.
-template <int BLOCK_BYTES_, int BLOCK_ELEMS_, bool SIGN>
-struct Gemv1Lowbit {
-    static constexpr unsigned int BLOCK_BYTES = BLOCK_BYTES_;
-    static constexpr unsigned int CHUNKS = BLOCK_ELEMS_ / 32;
-    static constexpr unsigned int CHUNK_BYTES = SIGN ? 4 : 8;
-    static constexpr int WORDS = CHUNK_BYTES / 4;
-    static_assert(2 + CHUNKS * CHUNK_BYTES == BLOCK_BYTES, "Block bytes do not cover the run.");
-    static constexpr unsigned int SPAN = (GEMV1_STEP_CHUNKS / CHUNKS) * BLOCK_BYTES;
-
-    static __device__ __forceinline__ void read(
-        const int* __restrict__ row, unsigned int o, unsigned int j, int (&w)[8], float& d
-    ) {
-        const unsigned int blk = o + (j / CHUNKS) * BLOCK_BYTES;
-        d = gemv1_half_bits_to_float(gemv1_row_half(row, blk));
-        int v[WORDS];
-        gemv1_row_words<WORDS>(row, blk + GGUF_LOWBIT_QS_OFFSET + (j % CHUNKS) * CHUNK_BYTES, v);
-#pragma unroll
-        for (int kqsx = 0; kqsx < 4; ++kqsx) {
-            if constexpr (SIGN) {
-                const int byte = (v[0] >> (8 * kqsx)) & 0xFF;
-                lowbit_expand_sign8(byte, &w[2 * kqsx], &w[2 * kqsx + 1]);
-            } else {
-                const int v16 = (v[kqsx / 2] >> (16 * (kqsx % 2))) & 0xFFFF;
-                lowbit_expand_code2x8(v16 & 0xFF, v16 >> 8, &w[2 * kqsx], &w[2 * kqsx + 1]);
-            }
-        }
-    }
-};
-
-// PTQ1_0: `qs[24]` at 0, `qh[2]` at 24, f16 `d` at 26; 128 elements packed
-// level-major over three runs (`gguf_ptq1_0_trit`). The 8 elements `e0 ..
-// e0 + 8` of one staged word pair read 8 consecutive bytes at one trit
-// level, except the `qh` tail (`e0 == 120`), which reads the two `qh` bytes
-// at four levels; `ptq1_0_expand4` takes a `(mask, mul)` pair for each
-// shape. The offsets and multipliers are `MmqfPTQ10::stage`'s. The tail's
-// second word repeats its first: 4 bytes at offset 24 close the block.
-// Blocks are 28 bytes and the row stride a multiple of 28, so `o` is a
-// multiple of 4 and every group word is read whole.
-struct Gemv1PTQ10 {
-    static constexpr unsigned int BLOCK_BYTES = 28;
-    static constexpr unsigned int CHUNKS = 4;
-    static constexpr unsigned int SPAN = (GEMV1_STEP_CHUNKS / CHUNKS) * BLOCK_BYTES;
-    static_assert(BLOCK_BYTES % 4 == 0, "Whole-word group reads need a 4-byte block stride.");
-
-    static __device__ __forceinline__ void read(
-        const int* __restrict__ row, unsigned int o, unsigned int j, int (&w)[8], float& d
-    ) {
-        const unsigned int blk = o + (j / CHUNKS) * BLOCK_BYTES;
-        d = gemv1_half_bits_to_float(gemv1_row_half(row, blk + GGUF_PTQ1_0_D_OFFSET));
-        const unsigned int* words = reinterpret_cast<const unsigned int*>(row);
-#pragma unroll
-        for (int kqsx = 0; kqsx < 4; ++kqsx) {
-            const unsigned int e0 = 32 * (j % CHUNKS) + 8 * kqsx;
-            const bool tail = e0 == 120;
-            unsigned int group_off;
-            int level;
-            if (e0 < 80) {
-                group_off = e0 % 16;
-                level = (int)(e0 / 16);
-            } else if (e0 < 120) {
-                group_off = 16;
-                level = (int)((e0 - 80) / 8);
-            } else {
-                group_off = 24;
-                level = 0;  // unused: the tail's multipliers are fixed below
-            }
-            const unsigned int p = ptq1_0_pow3(level);
-            const unsigned int mask = tail ? 0x000000FFu : 0x00FF00FFu;
-            const unsigned int mul_lo = tail ? 0x00030001u : p;  // levels 0, 1 of qh
-            const unsigned int mul_hi = tail ? 0x001B0009u : p;  // levels 2, 3 of qh
-            const unsigned int v0 = words[(blk + group_off) / 4];
-            const unsigned int v1 = words[(blk + (tail ? group_off : group_off + 4)) / 4];
-            w[2 * kqsx] = ptq1_0_expand4(v0, mask, mul_lo);
-            w[2 * kqsx + 1] = ptq1_0_expand4(v1, mask, mul_hi);
-        }
-    }
-};
-
-using Gemv1PQ20 = Gemv1Lowbit<34, 128, false>;
-using Gemv1Q20 = Gemv1Lowbit<18, 64, false>;
-using Gemv1Q10 = Gemv1Lowbit<18, 128, true>;
 
 // Word offset of staged row `r` (0..31): see BANKS in the header.
 template <int ROW_WORDS>
@@ -424,40 +291,52 @@ static __device__ __forceinline__ void gemv1_body(
         for (unsigned int h = 0; h < 2; ++h) {
             const unsigned int j = 4 * h + c;
             int w[8];
-            float dw;
-            FMT::read(my_row, o, j, w, dw);
+            FMT::read(my_row, o, j, w);
             const int* rec = y + h * GEMV1_Y_STRIDE;
-            // The scale is the LOW half of the header word; the high half
-            // is the int16 quant sum, which these formats never touch.
-            const float da = gemv1_half_bits_to_float((unsigned short)(rec[c] & 0xFFFF));
-            const int* q = rec + GEMV1_Y_QS + c * 8;
             int dot = 0;
-#pragma unroll
-            for (int i = 0; i < 8; ++i) {
-                dot = dp4a(w[i], q[i], dot);
-            }
+            // The chunk's 32 activation bytes: two 16-byte loads.
+            const int4* q4 = reinterpret_cast<const int4*>(rec + GEMV1_Y_QS + c * 8);
+            const int4 q0 = q4[0];
+            const int4 q1 = q4[1];
+            dot = dp4a(w[0], q0.x, dot);
+            dot = dp4a(w[1], q0.y, dot);
+            dot = dp4a(w[2], q0.z, dot);
+            dot = dp4a(w[3], q0.w, dot);
+            dot = dp4a(w[4], q1.x, dot);
+            dot = dp4a(w[5], q1.y, dot);
+            dot = dp4a(w[6], q1.z, dot);
+            dot = dp4a(w[7], q1.w, dot);
 
-            // The owner gathers slots 1..3. Every lane issues the shuffles;
-            // only the owner reads the results.
+            // The owner gathers the dots of slots 1..3. Every lane issues
+            // the shuffles; only the owner reads the results.
             int dots[4];
-            float das[4];
-            float dws[4];
             dots[0] = dot;
-            das[0] = da;
-            dws[0] = dw;
 #pragma unroll
             for (int jj = 1; jj < 4; ++jj) {
                 dots[jj] = __shfl_sync(0xFFFFFFFFu, dot, base + jj);
-                das[jj] = __shfl_sync(0xFFFFFFFFu, da, base + jj);
-                dws[jj] = __shfl_sync(0xFFFFFFFFu, dw, base + jj);
             }
             if (c == 0) {
+                // The four `da` of the half: the low halves of the record's
+                // four header words, one 16-byte load. The four `dw` are one
+                // block's scale when a block spans 4 chunks. Both are read
+                // before the range guard; a chunk past the range end reads
+                // a stale word its guard then drops.
+                const int4 hdr = *reinterpret_cast<const int4*>(rec);
+                const int hdrs[4] = {hdr.x, hdr.y, hdr.z, hdr.w};
+                float dws[4];
+#pragma unroll
+                for (int jj = 0; jj < 4; ++jj) {
+                    dws[jj] = (FMT::CHUNKS == 4 && jj > 0) ? dws[0]
+                                                           : FMT::scale(my_row, o, 4 * h + jj);
+                }
 #pragma unroll
                 for (int jj = 0; jj < 4; ++jj) {
                     if (b0 + 4 * h + jj < kb1) {
+                        const float da =
+                            gemv1_half_bits_to_float((unsigned short)(hdrs[jj] & 0xFFFF));
                         // `mmqf_vec_dot_d`'s term, character for character:
                         // see the header.
-                        acc += (float)dots[jj] * das[jj] * dws[jj];
+                        acc += (float)dots[jj] * da * dws[jj];
                     }
                 }
             }

@@ -75,9 +75,10 @@ static __device__ __forceinline__ int gguf_ptq1_0_trit(
 //
 // Ports of `vec_dot_q1_0_q8_1` and `vec_dot_q2_0_q8_1` from `ggml-cuda`'s
 // `vecdotq.cuh` — same LUT words, same `__byte_perm` selectors.
-// Shared by the token-batched dp4a GEMV (`gemv/lowbit_ntok.cuh`) and the
-// feature-major MMQ staging (`mmq/lowbit_tiles.cuh`), which both want a
-// code run as signed int8 lanes.
+// Shared by the token-batched dp4a GEMV (`gemv/lowbit_ntok.cuh`), the
+// feature-major MMQ staging (`mmq/lowbit_tiles.cuh`) and the single-token
+// body's readers (`mmq/gemv1_formats.cuh`), which all want a code run as
+// signed int8 lanes.
 //
 // `__byte_perm` reads three bits per selector nibble; bit 3 of each nibble
 // is ignored, which is what lets a raw code word act as the selector.

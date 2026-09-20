@@ -30,6 +30,21 @@ impl GgufMetadata {
         self.kv.get(key)
     }
 
+    /// Every key-value pair, in no fixed order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &GgufValue)> {
+        self.kv.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Number of key-value pairs.
+    pub fn len(&self) -> usize {
+        self.kv.len()
+    }
+
+    /// Whether the header holds no key-value pair.
+    pub fn is_empty(&self) -> bool {
+        self.kv.is_empty()
+    }
+
     /// Get an array value by key.
     ///
     /// Returns the array elements if the value at `key` is a `GgufValue::Array`.

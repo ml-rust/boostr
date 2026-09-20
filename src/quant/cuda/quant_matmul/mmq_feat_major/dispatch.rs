@@ -54,17 +54,29 @@ pub(in crate::quant::cuda::quant_matmul) fn quantize_shared_activation(
     m: usize,
     k: usize,
 ) -> Result<(Tensor<CudaRuntime>, u32)> {
-    let profile = CudaDevice::new(act_contig.device().id()).profile();
+    let slots = shared_record_slots(formats, m, act_contig.device().id());
+    // `quantize_activation_q8_1_mmq` pads to a multiple of its tile argument;
+    // the slot count is already that multiple of every tile it covers.
+    quantize_activation_q8_1_mmq(client, act_contig, m, k, slots as usize)
+}
+
+/// The token slot count [`quantize_shared_activation`] sizes its record
+/// with: the most any compiled tiling of any format in `formats` covers
+/// for `m` tokens, and at least `m`. A producer that builds the shared
+/// record another way pads to this same count.
+pub(in crate::quant::cuda::quant_matmul) fn shared_record_slots(
+    formats: &[&FeatMajorFormat],
+    m: usize,
+    device_index: usize,
+) -> u32 {
+    let profile = CudaDevice::new(device_index).profile();
     let limit = smem_opt_in_limit(profile.shared_mem_per_unit);
-    let slots = formats
+    formats
         .iter()
         .map(|format| record_token_slots(m as u32, limit, format))
         .max()
         .unwrap_or(0)
-        .max(m as u32);
-    // `quantize_activation_q8_1_mmq` pads to a multiple of its tile argument;
-    // the slot count is already that multiple of every tile it covers.
-    quantize_activation_q8_1_mmq(client, act_contig, m, k, slots as usize)
+        .max(m as u32)
 }
 
 /// The tiling [`dispatch`] and [`dispatch_quantized`] agree on for one call.

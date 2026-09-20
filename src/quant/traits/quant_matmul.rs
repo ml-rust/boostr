@@ -1,7 +1,9 @@
 //! Quantized matmul operations trait
 
+use super::rotation::Rotation;
 use crate::error::Result;
 use crate::quant::QuantTensor;
+use numr::ops::FwhtOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -49,6 +51,27 @@ pub trait QuantMatmulOps<R: Runtime> {
             .iter()
             .map(|w| self.quant_matmul(activation, w))
             .collect()
+    }
+
+    /// [`Self::quant_matmul_batch`] over the Hadamard-rotated activation:
+    /// `quant_matmul_batch(fwht(activation, rotation), weights)`.
+    ///
+    /// The default runs those two steps. A backend overrides it to fold
+    /// the rotation into its activation quantization where it can, and
+    /// must then form the same bits the two steps form.
+    fn quant_matmul_batch_rotated(
+        &self,
+        activation: &Tensor<R>,
+        rotation: &Rotation<'_, R>,
+        weights: &[&QuantTensor<R>],
+    ) -> Result<Vec<Tensor<R>>>
+    where
+        Self: FwhtOps<R>,
+    {
+        let rotated = self
+            .fwht(activation, rotation.block_size, rotation.signs)
+            .map_err(crate::error::Error::Numr)?;
+        self.quant_matmul_batch(&rotated, weights)
     }
 
     /// AWQ W4A16 GEMM: input × dequantized INT4 weight

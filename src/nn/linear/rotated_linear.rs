@@ -7,6 +7,7 @@
 use super::maybe_quant_linear::MaybeQuantLinear;
 use crate::error::{Error, Result};
 use crate::nn::hadamard::HadamardRotation;
+use crate::quant::QuantTensor;
 use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::Var;
 use numr::dtype::DType;
@@ -58,6 +59,11 @@ impl<R: Runtime<DType = DType>> RotatedLinear<R> {
     }
 
     /// Rotates `input`, then runs the base linear layer.
+    ///
+    /// A block-quantized base without a bias hands the rotation to
+    /// `quant_matmul_batch_rotated`, which folds it into the activation
+    /// quantization where the backend has that kernel; the result is the
+    /// same bits as rotating first. Every other base rotates first.
     pub fn forward<C>(&self, client: &C, input: &Var<R>) -> Result<Var<R>>
     where
         C: RuntimeClient<R>
@@ -68,9 +74,31 @@ impl<R: Runtime<DType = DType>> RotatedLinear<R> {
             + FwhtOps<R>,
         R::Client: TensorOps<R> + DequantOps<R> + MatmulOps<R>,
     {
+        if let Some(weight) = self.quant_weight_without_bias() {
+            let rotation = self.rotation.rotation_for(input.tensor())?;
+            let out = client
+                .quant_matmul_batch_rotated(input.tensor(), &rotation, &[weight])?
+                .pop()
+                .ok_or_else(|| Error::ModelError {
+                    reason: "RotatedLinear::forward: quant_matmul_batch_rotated returned no output"
+                        .to_string(),
+                })?;
+            return Ok(Var::new(out, false));
+        }
         let rotated = self.rotation.forward(client, input.tensor())?;
         let rotated = Var::new(rotated, false);
         self.inner.forward(client, &rotated)
+    }
+
+    /// The base weight when it is block-quantized and carries no bias: the
+    /// case `quant_matmul_batch_rotated` serves whole. `None` otherwise.
+    pub fn quant_weight_without_bias(&self) -> Option<&QuantTensor<R>> {
+        match &self.inner {
+            MaybeQuantLinear::Quantized(qlinear) if qlinear.bias().is_none() => {
+                Some(qlinear.weight())
+            }
+            _ => None,
+        }
     }
 
     /// The Hadamard rotation this layer's input is expected to carry.

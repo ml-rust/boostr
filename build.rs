@@ -68,6 +68,9 @@ fn compile_cuda_kernels() {
         ),
         k!("src/quant/cuda/kernels", "fused_int4_qkv.cu", "sm_75", true),
         k!("src/quant/cuda/kernels", "quant_act.cu", "sm_75", true),
+        // The Hadamard-fused activation producer feeds the feature-major
+        // MMQ family only, so it shares that family's sm_80 floor.
+        k!("src/quant/cuda/kernels", "fwht_quant_act.cu", "sm_80", true),
         // sm_80, not sm_75: `mma.sync.aligned.m16n8k32...s8.s8.s32` is an
         // Ampere+ instruction, unavailable at sm_75.
         k!("src/quant/cuda/kernels", "mma_int8_probe.cu", "sm_80", true),

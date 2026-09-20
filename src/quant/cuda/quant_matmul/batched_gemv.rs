@@ -202,9 +202,6 @@ pub(super) fn quant_matmul_batch_impl(
 /// weight. `Ok(None)` when some weight has no such kernel at this `k` on
 /// this device, or no variant fits it; the caller then runs each weight on
 /// its own.
-///
-/// Every weight is checked before anything is quantized or launched, so a
-/// batch never runs half on one path and half on another.
 fn mmq_batch(
     client: &CudaClient,
     activation: &Tensor<CudaRuntime>,
@@ -213,8 +210,35 @@ fn mmq_batch(
     m: usize,
     k: usize,
 ) -> Result<Option<Vec<Tensor<CudaRuntime>>>> {
-    let device = activation.device();
-    let device_index = device.id();
+    let Some(formats) = mmq_plan(weights, m, k, activation.device().id())? else {
+        return Ok(None);
+    };
+    let (q8_buf, ntok) =
+        mmq_feat_major::quantize_shared_activation(client, act_contig, &formats, m, k)?;
+    mmq_run(
+        client,
+        activation,
+        weights,
+        &formats,
+        q8_buf.ptr(),
+        ntok,
+        m,
+        k,
+    )
+    .map(Some)
+}
+
+/// The feature-major format of every weight, or `None` when some weight
+/// has no such kernel at this `k` on this device or no variant fits `m`.
+///
+/// Every weight is checked before anything is quantized or launched, so a
+/// batch never runs half on one path and half on another.
+pub(super) fn mmq_plan(
+    weights: &[&QuantTensor<CudaRuntime>],
+    m: usize,
+    k: usize,
+    device_index: usize,
+) -> Result<Option<Vec<&'static mmq_feat_major::FeatMajorFormat>>> {
     let mut formats = Vec::with_capacity(weights.len());
     for w in weights {
         let w_shape = w.shape();
@@ -234,11 +258,23 @@ fn mmq_batch(
         }
         formats.push(fm);
     }
+    Ok(Some(formats))
+}
 
-    let (q8_buf, ntok) =
-        mmq_feat_major::quantize_shared_activation(client, act_contig, &formats, m, k)?;
-    let q8_ptr = q8_buf.ptr();
-
+/// Every weight of a [`mmq_plan`] over the activation record at `q8_ptr`
+/// with token stride `ntok`; one output per weight, in order.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn mmq_run(
+    client: &CudaClient,
+    activation: &Tensor<CudaRuntime>,
+    weights: &[&QuantTensor<CudaRuntime>],
+    formats: &[&'static mmq_feat_major::FeatMajorFormat],
+    q8_ptr: u64,
+    ntok: u32,
+    m: usize,
+    k: usize,
+) -> Result<Vec<Tensor<CudaRuntime>>> {
+    let device = activation.device();
     let a_shape = activation.shape();
     let mut results = Vec::with_capacity(weights.len());
     for (w, fm) in weights.iter().zip(formats) {
@@ -267,5 +303,5 @@ fn mmq_batch(
         }
         results.push(output);
     }
-    Ok(Some(results))
+    Ok(results)
 }

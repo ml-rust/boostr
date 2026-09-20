@@ -35,7 +35,9 @@ mod gemv1;
 mod launch;
 mod tiling;
 
-pub(super) use dispatch::{dispatch, dispatch_quantized, quantize_shared_activation, variant_fits};
+pub(super) use dispatch::{
+    dispatch, dispatch_quantized, quantize_shared_activation, shared_record_slots, variant_fits,
+};
 pub(super) use formats::{
     FeatMajorFormat, IQ1_S, IQ2_S, IQ2_XS, IQ2_XXS, IQ3_S, IQ3_XXS, IQ4_NL, IQ4_XS, PQ2_0, PTQ1_0,
     Q1_0, Q2_0, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0,

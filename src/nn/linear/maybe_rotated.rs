@@ -8,6 +8,7 @@ use super::rotated_linear::RotatedLinear;
 use crate::error::{Error, Result};
 use crate::nn::hadamard::HadamardRotation;
 use crate::nn::module::Module;
+use crate::quant::QuantTensor;
 use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::Var;
 use numr::dtype::DType;
@@ -50,13 +51,15 @@ impl<R: Runtime<DType = DType>> MaybeRotatedLinear<R> {
     /// through one [`MaybeQuantLinear::forward_batch`] call over `input`.
     /// Every `Rotated` member must carry the same rotation as the first one
     /// ([`HadamardRotation::same_rotation_as`]) — the rotation then runs
-    /// ONCE ([`HadamardRotation::forward`]) and the `Rotated` subset's bases
-    /// run through a second [`MaybeQuantLinear::forward_batch`] call over
-    /// the rotated activation. So a batch mixing `Plain` and `Rotated`
-    /// members costs one rotation plus two fused batched matmuls, not one
-    /// `forward` per layer. An all-`Plain` batch behaves exactly as before
-    /// (one fused call, no rotation); a single-member batch works either
-    /// way.
+    /// ONCE. When every `Rotated` base is block-quantized without a bias
+    /// the rotation goes to `quant_matmul_batch_rotated`, which folds it
+    /// into the activation quantization where the backend has that kernel;
+    /// otherwise it runs as [`HadamardRotation::forward`] and the bases run
+    /// through a second [`MaybeQuantLinear::forward_batch`] call over the
+    /// rotated activation. So a batch mixing `Plain` and `Rotated` members
+    /// costs one rotation plus two fused batched matmuls, not one `forward`
+    /// per layer. An all-`Plain` batch behaves exactly as before (one fused
+    /// call, no rotation); a single-member batch works either way.
     ///
     /// # Errors
     ///
@@ -113,11 +116,27 @@ impl<R: Runtime<DType = DType>> MaybeRotatedLinear<R> {
                     });
                 }
             }
-            let rotated_input = first_rotation.forward(client, input.tensor())?;
-            let rotated_input = Var::new(rotated_input, false);
-            let bases: Vec<&MaybeQuantLinear<R>> =
-                rotated.iter().map(|(_, member)| member.base()).collect();
-            MaybeQuantLinear::forward_batch(&bases, client, &rotated_input)?
+            let quant_weights: Vec<&QuantTensor<R>> = rotated
+                .iter()
+                .filter_map(|(_, member)| member.quant_weight_without_bias())
+                .collect();
+            if quant_weights.len() == rotated.len() {
+                // Every base is block-quantized without a bias: the rotation
+                // goes with the batch, folded into the activation
+                // quantization where the backend has that kernel.
+                let rotation = first_rotation.rotation_for(input.tensor())?;
+                client
+                    .quant_matmul_batch_rotated(input.tensor(), &rotation, &quant_weights)?
+                    .into_iter()
+                    .map(|t| Var::new(t, false))
+                    .collect::<Vec<Var<R>>>()
+            } else {
+                let rotated_input = first_rotation.forward(client, input.tensor())?;
+                let rotated_input = Var::new(rotated_input, false);
+                let bases: Vec<&MaybeQuantLinear<R>> =
+                    rotated.iter().map(|(_, member)| member.base()).collect();
+                MaybeQuantLinear::forward_batch(&bases, client, &rotated_input)?
+            }
         } else {
             Vec::new()
         }

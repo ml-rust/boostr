@@ -13,6 +13,7 @@
 // Block: (32, 1, 1)          one warp per block
 
 #include <cuda_fp16.h>
+#include "quant_act_q8_1_mmq.cuh"
 
 extern "C" __global__ void quantize_f32_q8_1(
     const float* __restrict__ input,     // [M, K]
@@ -102,10 +103,9 @@ extern "C" __global__ void quantize_f32_q8_1(
 // past the parity bound the backend tests hold both to. The consumer rebuilds
 // the correction as `(-dmin * m) * d * (float)sum`, and `d` is exact here too.
 //
-// `d` is rounded through `__half` before being widened, so the value the matmul
-// consumes is exactly the `half` scale the per-token layout stores. `sum` is the
-// warp-reduced sum of the clamped int8 `q` values, not of the input floats, and
-// the reduction runs in `int` so no intermediate rounds.
+// The per-block quantization is `q8_1_mmq_write_block` in
+// quant_act_q8_1_mmq.cuh, shared with the Hadamard-fused producer in
+// fwht_quant_act.cu so the two form identical records.
 //
 // Each warp owns one 32-value block and never talks to another warp, so a
 // thread block is a bundle of independent warps: `QACT_MMQ_WARPS` consecutive
@@ -142,49 +142,10 @@ extern "C" __global__ void quantize_f32_q8_1_mmq(
     const unsigned int sub = b % 4;  // 32-value block within that group
     const unsigned int rec = (g * ntok + j) * 36;
 
-    // Padded token slots and padded k-blocks are zeroed here rather than left
+    // Padded token slots and padded k-blocks are zeroed rather than left
     // undefined. The matmul stages them, but the k-step count keeps the padded
     // blocks out of the sum and the masked write-back drops the padded tokens.
     const bool live = j < M && b < K / 32;
-    float d = 0.0f;
-    signed char q = 0;
-    if (live) {
-        const float xi = input[(unsigned long long)j * K + b * 32 + lane];
-
-        float amax = fabsf(xi);
-#pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset));
-        }
-
-        d = __half2float(__float2half(amax / 127.0f));
-        const float id = (amax != 0.0f) ? (127.0f / amax) : 0.0f;
-        const int qi = (int)roundf(xi * id);
-        q = (signed char)min(max(qi, -128), 127);
-    }
-
-    // Sum of the clamped int8 values, not of the input floats. The reduction is
-    // INTEGER: |sum| <= 32 * 128 = 4096, so it is exact in `int` and then exact
-    // in the int16 it is stored as. A float reduction would round once the
-    // partial sums left the exactly-representable range for the widths the
-    // consumer cares about, and the min correction needs the exact value.
-    int sum = (int)q;
-#pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        sum += __shfl_xor_sync(0xFFFFFFFF, sum, offset);
-    }
-
-    ((signed char*)(output + rec + 4))[sub * 32 + lane] = q;
-    if (lane == 0) {
-        // Header word assembled explicitly from its two 16-bit fields rather
-        // than through a struct, because the high half is an integer and the
-        // low half is a `half`:
-        //   bits  0..15  __half d
-        //   bits 16..31  int16  sum
-        // `live` false zeros both `q` (above) and `d`/`sum` here, so a padded
-        // or dead slot's word is (d = 0, sum = 0).
-        const unsigned int lo = (unsigned int)__half_as_ushort(__float2half(d));
-        const unsigned int hi = (unsigned int)(unsigned short)(short)sum;
-        output[rec + sub] = (int)(lo | (hi << 16));
-    }
+    const float xi = live ? input[(unsigned long long)j * K + b * 32 + lane] : 0.0f;
+    q8_1_mmq_write_block(xi, live, output + rec, sub, lane);
 }

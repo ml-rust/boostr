@@ -1,7 +1,7 @@
 //! impl `QuantMatmulOps<CudaRuntime>` for CudaClient
 
 use crate::error::{Error, Result};
-use crate::quant::traits::QuantMatmulOps;
+use crate::quant::traits::{QuantMatmulOps, Rotation};
 use crate::quant::{QuantFormat, QuantTensor};
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
@@ -20,6 +20,7 @@ use super::fallback::{quant_matmul_via_dequant, quant_swiglu_via_dequant};
 use super::format_dispatch::{dispatch_gemv, dispatch_matmul, feat_major_format, gemv_max_m};
 use super::helpers::{BLOCK_CONTRACT, quantize_activation_q8_1, validate_input_cuda};
 use super::mmq_feat_major;
+use super::rotated::quant_matmul_batch_rotated_impl;
 
 impl QuantMatmulOps<CudaRuntime> for CudaClient {
     fn int4_gemm(
@@ -208,6 +209,15 @@ impl QuantMatmulOps<CudaRuntime> for CudaClient {
         weights: &[&QuantTensor<CudaRuntime>],
     ) -> Result<Vec<Tensor<CudaRuntime>>> {
         quant_matmul_batch_impl(self, activation, weights)
+    }
+
+    fn quant_matmul_batch_rotated(
+        &self,
+        activation: &Tensor<CudaRuntime>,
+        rotation: &Rotation<'_, CudaRuntime>,
+        weights: &[&QuantTensor<CudaRuntime>],
+    ) -> Result<Vec<Tensor<CudaRuntime>>> {
+        quant_matmul_batch_rotated_impl(self, activation, rotation, weights)
     }
 
     fn quant_swiglu(

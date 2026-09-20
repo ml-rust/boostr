@@ -6,6 +6,7 @@
 //! The two orders are NOT interchangeable, so each gets its own method.
 
 use crate::error::{Error, Result};
+use crate::quant::traits::Rotation;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, FwhtOps};
 use numr::runtime::Runtime;
@@ -79,6 +80,20 @@ impl<R: Runtime<DType = DType>> HadamardRotation<R> {
     /// two identity rotations of the same width behave identically).
     pub fn same_rotation_as(&self, other: &Self) -> bool {
         self.block_size == other.block_size && self.signs_ptr() == other.signs_ptr()
+    }
+
+    /// This rotation as the argument a quantized matmul folds into its
+    /// activation quantization (`QuantMatmulOps::quant_matmul_batch_rotated`)
+    /// for the activation `x`: the same operation as [`Self::forward`] on
+    /// `x`, with the same dtype check.
+    pub fn rotation_for(&self, x: &Tensor<R>) -> Result<Rotation<'_, R>> {
+        if let Some(signs) = &self.signs {
+            check_dtype_match(x, signs)?;
+        }
+        Ok(Rotation {
+            block_size: self.block_size,
+            signs: self.signs.as_ref(),
+        })
     }
 
     /// Forward rotation: sign-multiply then transform. Used before a

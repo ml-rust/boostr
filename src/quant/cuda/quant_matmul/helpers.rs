@@ -105,7 +105,11 @@ const QACT_MMQ_WARPS: usize = 4;
 ///
 /// Format-neutral: every MMQ path quantizes activations to Q8_1, so a future
 /// format (Q4_K, Q6_K) reuses this producer rather than adding its own.
-pub(super) fn quantize_activation_q8_1_mmq(
+///
+/// Public so a test can hold the Hadamard-fused producer
+/// (`rotated::fwht_quantize_activation_q8_1_mmq`) to this record byte for
+/// byte.
+pub fn quantize_activation_q8_1_mmq(
     client: &CudaClient,
     activation: &Tensor<CudaRuntime>,
     m: usize,

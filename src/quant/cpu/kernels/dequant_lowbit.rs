@@ -17,8 +17,13 @@
 //! ```
 //!
 //! The CUDA side keeps the same layouts in `cuda/kernels/decode.cuh`; the
-//! two must stay in agreement.
+//! two must stay in agreement. `lowbit_codec` holds the PQ2_0 and PTQ1_0
+//! offsets and the code-level encoders.
 use super::dequant_tq::base3_trit;
+use super::lowbit_codec::{
+    LOWBIT_BLOCK_SIZE, PQ2_0_BLOCK_BYTES, PQ2_0_D_OFFSET, PQ2_0_QS_OFFSET, PTQ1_0_BLOCK_BYTES,
+    PTQ1_0_D_OFFSET,
+};
 use half::f16;
 
 /// Sign value {-1, 1} of element `elem` of a Q1_0 `qs` run.
@@ -34,16 +39,24 @@ fn sign_bit(qs: &[u8], elem: usize) -> i32 {
     }
 }
 
-/// Value {-1, 0, 1, 2} of element `elem` of a Q2_0 or PQ2_0 `qs` run.
+/// Code 0..4 of element `elem` of a Q2_0 or PQ2_0 `qs` run.
 ///
-/// Four 2-bit codes per byte, low bits first. llama.cpp maps code `q` to
-/// `q - 1`: `00=-1, 01=0, 10=+1, 11=+2`.
+/// Four 2-bit codes per byte, low bits first.
 #[inline]
-fn code2_minus_1(qs: &[u8], elem: usize) -> i32 {
-    i32::from((qs[elem / 4] >> ((elem % 4) * 2)) & 0x03) - 1
+pub(super) fn code2(qs: &[u8], elem: usize) -> u8 {
+    (qs[elem / 4] >> ((elem % 4) * 2)) & 0x03
 }
 
-/// Ternary value {-1, 0, 1} of element `elem` of a PTQ1_0 block.
+/// Value {-1, 0, 1, 2} of element `elem` of a Q2_0 or PQ2_0 `qs` run.
+///
+/// llama.cpp maps code `q` to `q - 1`: `00=-1, 01=0, 10=+1, 11=+2`.
+#[inline]
+fn code2_minus_1(qs: &[u8], elem: usize) -> i32 {
+    i32::from(code2(qs, elem)) - 1
+}
+
+/// The packed byte index and trit level holding element `elem` of a PTQ1_0
+/// block.
 ///
 /// The 128 elements come from three differently shaped runs, in this order:
 /// `[0, 80)` is `qs[0..16]` over 5 levels, `[80, 120)` is `qs[16..24]` over
@@ -51,17 +64,23 @@ fn code2_minus_1(qs: &[u8], elem: usize) -> i32 {
 /// 16-byte and 8-byte stages of llama.cpp's `ptq1_0_stages = {32, 16, 8}`
 /// applied to a 24-byte `qs`.
 #[inline]
-fn ptq1_0_trit(block: &[u8], elem: usize) -> i32 {
-    let (byte, level) = if elem < 80 {
-        (block[elem % 16], elem / 16)
+pub(super) fn ptq1_0_slot(elem: usize) -> (usize, usize) {
+    if elem < 80 {
+        (elem % 16, elem / 16)
     } else if elem < 120 {
         let r = elem - 80;
-        (block[16 + r % 8], r / 8)
+        (16 + r % 8, r / 8)
     } else {
         let r = elem - 120;
-        (block[24 + r % 2], r / 2)
-    };
-    base3_trit(byte, level)
+        (24 + r % 2, r / 2)
+    }
+}
+
+/// Ternary value {-1, 0, 1} of element `elem` of a PTQ1_0 block.
+#[inline]
+fn ptq1_0_trit(block: &[u8], elem: usize) -> i32 {
+    let (byte, level) = ptq1_0_slot(elem);
+    base3_trit(block[byte], level)
 }
 
 /// Scales each block's integer codes by its f16 `d`.
@@ -111,21 +130,34 @@ pub fn dequant_q2_0(blocks: &[u8], output: &mut [f32]) {
 ///
 /// PQ2_0: 128 elements, 34 bytes/block. Layout `d:f16 + qs[32]`.
 pub fn dequant_pq2_0(blocks: &[u8], output: &mut [f32]) {
-    dequant_blocks(blocks, output, 128, 34, 0, |block, elem| {
-        code2_minus_1(&block[2..], elem)
-    });
+    dequant_blocks(
+        blocks,
+        output,
+        LOWBIT_BLOCK_SIZE,
+        PQ2_0_BLOCK_BYTES,
+        PQ2_0_D_OFFSET,
+        |block, elem| code2_minus_1(&block[PQ2_0_QS_OFFSET..], elem),
+    );
 }
 
 /// Dequantizes PTQ1_0 blocks to f32
 ///
 /// PTQ1_0: 128 elements, 28 bytes/block. Layout `qs[24] + qh[2] + d:f16`.
 pub fn dequant_ptq1_0(blocks: &[u8], output: &mut [f32]) {
-    dequant_blocks(blocks, output, 128, 28, 26, ptq1_0_trit);
+    dequant_blocks(
+        blocks,
+        output,
+        LOWBIT_BLOCK_SIZE,
+        PTQ1_0_BLOCK_BYTES,
+        PTQ1_0_D_OFFSET,
+        ptq1_0_trit,
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quant::cpu::kernels::lowbit_codec::{base3_pack5, encode_ptq1_0_block};
 
     /// `0b00_01_10_11` — 2-bit fields 0..4 are 3, 2, 1, 0, i.e. values
     /// 2, 1, 0, -1 at four adjacent elements.
@@ -140,33 +172,17 @@ mod tests {
         f16::from_f32(d).to_le_bytes()
     }
 
-    /// Packs five trits the way `quantize_row_ptq1_0_ref` does: base 3,
-    /// first trit most significant, then a ceiling scale by 256/243.
-    fn pack5(trits: [i32; 5]) -> u8 {
-        let q = trits.iter().fold(0u16, |q, &t| q * 3 + (t + 1) as u16);
-        (q * 256).div_ceil(243) as u8
-    }
-
     /// Packs four trits for `qh`: the first trit lands in the most
     /// significant position of a five-trit byte, the fifth slot is zero.
     fn pack4(trits: [i32; 4]) -> u8 {
-        pack5([trits[0], trits[1], trits[2], trits[3], -1])
+        let [a, b, c, d] = trits.map(|t| (t + 1) as u8);
+        base3_pack5([a, b, c, d, 0])
     }
 
     /// Builds one PTQ1_0 block from 128 trits by llama.cpp's packing rule.
     fn pack_ptq1_0(trits: &[i32; 128], d: f32) -> [u8; 28] {
-        let mut block = [0u8; 28];
-        for (m, byte) in block[0..16].iter_mut().enumerate() {
-            *byte = pack5(std::array::from_fn(|n| trits[m + n * 16]));
-        }
-        for (m, byte) in block[16..24].iter_mut().enumerate() {
-            *byte = pack5(std::array::from_fn(|n| trits[80 + m + n * 8]));
-        }
-        for (h, byte) in block[24..26].iter_mut().enumerate() {
-            *byte = pack4(std::array::from_fn(|n| trits[120 + h + n * 2]));
-        }
-        block[26..28].copy_from_slice(&d_bytes(d));
-        block
+        let codes: [u8; 128] = std::array::from_fn(|i| (trits[i] + 1) as u8);
+        encode_ptq1_0_block(&codes, d_bytes(d)).expect("trits are ternary")
     }
 
     #[test]

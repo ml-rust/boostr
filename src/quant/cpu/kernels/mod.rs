@@ -15,6 +15,7 @@ pub mod fused_int4_swiglu;
 pub mod int4_gemm;
 pub mod int4_gemm_gptq;
 pub mod iq_grid;
+pub mod lowbit_codec;
 pub mod marlin_gemm;
 pub mod nf4;
 pub mod quant_matmul;

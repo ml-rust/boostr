@@ -7,6 +7,7 @@ pub mod cuda;
 pub mod decomposed;
 pub mod format;
 pub mod imatrix;
+pub mod regroup_rows;
 pub mod smoothing;
 pub mod tables;
 pub mod tensor;

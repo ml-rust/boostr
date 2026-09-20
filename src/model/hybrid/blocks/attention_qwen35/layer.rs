@@ -23,8 +23,13 @@
 //!     ggml_element_size(Qcur_full) * n_embd_head);
 //! ```
 //!
-//! Head `h` of `attn_q`'s output owns columns `[2·h·hd, 2·h·hd + hd)` as the
-//! query and `[2·h·hd + hd, 2·h·hd + 2·hd)` as the gate.
+//! Head `h` of the stored `attn_q` output owns columns `[2·h·hd, 2·h·hd + hd)`
+//! as the query and `[2·h·hd + hd, 2·h·hd + 2·hd)` as the gate. [`Qwen35AttentionBlock::new`]
+//! regroups the weight's rows once, at construction, to
+//! `[query: num_heads·hd | gate: num_heads·hd]`, so the forward splits the
+//! projection with a `narrow` at column `num_heads·hd` instead of two
+//! strided copies. The block's own `attn_q` is in the regrouped order; the
+//! [`Qwen35AttentionWeights`] contract stays the stored, interleaved one.
 
 use crate::error::{Error, Result};
 use crate::model::config::Qwen35AttentionConfig;
@@ -41,6 +46,7 @@ use numr::tensor::Tensor;
 /// attention → `attn ⊙ sigmoid(gate)` → `attn_output`.
 pub struct Qwen35AttentionBlock<R: Runtime> {
     pub(super) cfg: Qwen35AttentionConfig,
+    /// Rows regrouped to `[query rows | gate rows]`; see the module doc.
     pub(super) attn_q: MaybeRotatedLinear<R>,
     pub(super) attn_k: MaybeRotatedLinear<R>,
     pub(super) attn_v: MaybeRotatedLinear<R>,
@@ -112,10 +118,13 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
         )?;
         let mrope_selector =
             mrope_stream_selector::<R>(cfg.rope_sections, cfg.rope_dim / 2, &device)?;
+        // Stored order is `[head][query | gate]`; the forward wants
+        // `[query][head] | [gate][head]`.
+        let attn_q = weights.attn_q.regroup_rows(cfg.num_heads, 2)?;
 
         Ok(Self {
             cfg,
-            attn_q: weights.attn_q,
+            attn_q,
             attn_k: weights.attn_k,
             attn_v: weights.attn_v,
             attn_output: weights.attn_output,

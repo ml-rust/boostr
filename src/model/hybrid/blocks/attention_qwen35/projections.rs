@@ -1,7 +1,14 @@
 //! Step 1-2 of [`Qwen35AttentionBlock::forward`]: `attn_q`/`attn_k`/`attn_v`
 //! projections (fused via [`MaybeRotatedLinear::forward_batch`]), the joint
 //! query/gate split, and per-head q/k RMS norm. Covered by its own inline
-//! tests for the rotation-batching behavior.
+//! tests for the rotation-batching behavior and the query/gate split.
+//!
+//! `attn_q` is stored regrouped (see `layer`), so its output is
+//! `[query: num_heads * head_dim | gate: num_heads * head_dim]` and each
+//! half is a `narrow` at a column boundary. For one token that view is
+//! already dense — the query at offset 0, the gate at offset
+//! `num_heads * head_dim` — and goes on without a copy; a multi-token
+//! projection is strided along `seq` and each half is copied dense once.
 
 use super::layer::Qwen35AttentionBlock;
 use crate::error::{Error, Result};
@@ -71,9 +78,10 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
             reason: "qwen35_attention: forward_batch returned no attn_v output".to_string(),
         })?;
 
-        let q_full = var_reshape(&q_full, &[batch, seq, h, 2 * hd]).map_err(Error::Numr)?;
-        let q = var_contiguous(&var_narrow(&q_full, -1, 0, hd).map_err(Error::Numr)?)?;
-        let gate = var_contiguous(&var_narrow(&q_full, -1, hd, hd).map_err(Error::Numr)?)?;
+        let q_dim = h * hd;
+        let q_full = var_reshape(&q_full, &[batch, seq, 2 * q_dim]).map_err(Error::Numr)?;
+        let q = split_heads(&q_full, 0, batch, seq, h, hd)?;
+        let gate = split_heads(&q_full, q_dim, batch, seq, h, hd)?;
 
         let k = var_reshape(&k, &[batch, seq, h_kv, hd]).map_err(Error::Numr)?;
         let v = var_reshape(&v, &[batch, seq, h_kv, hd]).map_err(Error::Numr)?;
@@ -81,6 +89,26 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
 
         Ok(Projections { q, gate, k, v })
     }
+}
+
+/// Columns `[start, start + heads * head_dim)` of `x` (`[batch, seq, 2 *
+/// heads * head_dim]`) as `[batch, seq, heads, head_dim]`. A view that is
+/// already dense in its stride pattern is reshaped in place, offset and
+/// all; any other is copied dense first.
+fn split_heads<R: Runtime<DType = DType>>(
+    x: &Var<R>,
+    start: usize,
+    batch: usize,
+    seq: usize,
+    heads: usize,
+    head_dim: usize,
+) -> Result<Var<R>>
+where
+    R::Client: TensorOps<R> + ShapeOps<R>,
+{
+    let half = var_narrow(x, -1, start, heads * head_dim).map_err(Error::Numr)?;
+    let half = var_contiguous(&half)?;
+    var_reshape(&half, &[batch, seq, heads, head_dim]).map_err(Error::Numr)
 }
 
 #[cfg(test)]
@@ -125,12 +153,23 @@ mod tests {
             .into()
     }
 
-    fn block_with_rotated_projections(device: &CpuDevice) -> Qwen35AttentionBlock<CpuRuntime> {
+    fn rotation(device: &CpuDevice) -> HadamardRotation<CpuRuntime> {
         let signs: Vec<i8> = (0..HIDDEN)
             .map(|i| if i % 2 == 0 { -1 } else { 1 })
             .collect();
-        let rot =
-            HadamardRotation::<CpuRuntime>::new(HIDDEN, Some(&signs), DType::F32, device).unwrap();
+        HadamardRotation::<CpuRuntime>::new(HIDDEN, Some(&signs), DType::F32, device).unwrap()
+    }
+
+    /// `attn_q` as stored: `[head][query | gate]`, rotated.
+    fn stored_attn_q(device: &CpuDevice) -> MaybeRotatedLinear<CpuRuntime> {
+        rotated(
+            tensor(device, &[H * 2 * HD, HIDDEN], 0.1, 1),
+            rotation(device),
+        )
+    }
+
+    fn block_with_rotated_projections(device: &CpuDevice) -> Qwen35AttentionBlock<CpuRuntime> {
+        let rot = rotation(device);
         let weights = Qwen35AttentionWeights {
             attn_q: rotated(tensor(device, &[H * 2 * HD, HIDDEN], 0.1, 1), rot.clone()),
             attn_k: rotated(tensor(device, &[H_KV * HD, HIDDEN], 0.1, 2), rot.clone()),
@@ -154,7 +193,9 @@ mod tests {
 
     /// `attn_q`/`attn_k`/`attn_v` (`Rotated`, sharing one rotation) via
     /// `project` (`forward_batch` internally) must match three individual
-    /// `forward` calls — the pre-batching behavior — bit-for-bit.
+    /// `forward` calls — the pre-batching behavior — bit-for-bit. The
+    /// query and gate references come from the STORED interleaved `attn_q`
+    /// split per head, so the constructor's row regrouping is checked too.
     #[test]
     fn project_over_shared_rotation_matches_per_projection_forward() {
         let (client, device) = cpu_setup();
@@ -163,10 +204,11 @@ mod tests {
 
         let via_project = block.project(&client, &x, 1, 5).unwrap();
 
-        let q_solo = block.attn_q.forward(&client, &x).unwrap();
+        let q_solo = stored_attn_q(&device).forward(&client, &x).unwrap();
         let k_solo = block.attn_k.forward(&client, &x).unwrap();
         let v_solo = block.attn_v.forward(&client, &x).unwrap();
         let q_solo = var_reshape(&q_solo, &[1, 5, H, 2 * HD]).unwrap();
+        let gate_solo = var_contiguous(&var_narrow(&q_solo, -1, HD, HD).unwrap()).unwrap();
         let q_solo = var_contiguous(&var_narrow(&q_solo, -1, 0, HD).unwrap()).unwrap();
         let k_solo = var_reshape(&k_solo, &[1, 5, H_KV, HD]).unwrap();
         let v_solo = var_reshape(&v_solo, &[1, 5, H_KV, HD]).unwrap();
@@ -176,6 +218,16 @@ mod tests {
             via_project.q.tensor().to_vec::<f32>(),
             q_solo.tensor().to_vec::<f32>()
         );
+        assert_eq!(via_project.gate.shape(), &[1, 5, H, HD]);
+        assert_eq!(
+            via_project
+                .gate
+                .tensor()
+                .contiguous()
+                .unwrap()
+                .to_vec::<f32>(),
+            gate_solo.tensor().to_vec::<f32>()
+        );
         assert_eq!(
             via_project.k.tensor().to_vec::<f32>(),
             k_solo.tensor().to_vec::<f32>()
@@ -184,6 +236,19 @@ mod tests {
             via_project.v.tensor().to_vec::<f32>(),
             v_solo.tensor().to_vec::<f32>()
         );
+    }
+
+    /// One token: the gate is the projection's own storage at column
+    /// offset `H * HD`, not a copy.
+    #[test]
+    fn single_token_gate_is_an_offset_view() {
+        let (client, device) = cpu_setup();
+        let block = block_with_rotated_projections(&device);
+        let x = Var::new(tensor(&device, &[1, 1, HIDDEN], 1.0, 9), false);
+        let Projections { gate, .. } = block.project(&client, &x, 1, 1).unwrap();
+        assert_eq!(gate.shape(), &[1, 1, H, HD]);
+        assert_eq!(gate.tensor().offset(), H * HD);
+        assert!(gate.tensor().is_contiguous());
     }
 
     #[test]

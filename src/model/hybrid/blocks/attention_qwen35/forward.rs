@@ -151,9 +151,9 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
         let (cos, sin) = (rope.cos_cache(), rope.sin_cache());
         let n_rot = cfg.rope_dim;
         let q =
-            client.apply_mrope_interleaved(&q, cos, sin, positions, &self.mrope_selector, n_rot)?;
+            client.mrope_interleaved_fused(&q, cos, sin, positions, &self.mrope_selector, n_rot)?;
         let k =
-            client.apply_mrope_interleaved(&k, cos, sin, positions, &self.mrope_selector, n_rot)?;
+            client.mrope_interleaved_fused(&k, cos, sin, positions, &self.mrope_selector, n_rot)?;
 
         // 4. [B, S, H, D] -> [B, H, S, D]; append; causal GQA attention.
         let q = var_contiguous(&var_permute(&q, &[0, 2, 1, 3]).map_err(Error::Numr)?)?;

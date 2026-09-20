@@ -5,16 +5,19 @@
 //! step for step:
 //!
 //! 1. `qkv = attn_qkv(x)`, `z = attn_gate(x)`
-//! 2. `beta = sigmoid(ssm_beta(x))`, `g = ssm_a * softplus(ssm_alpha(x) + ssm_dt_bias)`
+//! 2. `alpha = ssm_alpha(x)`, `beta_raw = ssm_beta(x)`
 //! 3. causal depthwise conv over `qkv` with the carried window, then SiLU
 //! 4. split q `[H_k, S]`, k `[H_k, S]`, v `[H_v, S]`
 //! 5. L2-normalize q and k with `eps = rms_eps`
 //! 6. tile q and k to `H_v` heads (`ggml_repeat_4d`)
-//! 7. `gdn_chunk_prefill` for `seq > 1`, `gdn_step` for `seq == 1`
-//! 8. `silu(z) * rms_norm(o)` with `ssm_norm`
-//! 9. optional `group_heads`, then `ssm_out`
+//! 7. `beta = sigmoid(beta_raw)`, `g = ssm_a * softplus(alpha + ssm_dt_bias)`
+//! 8. `gdn_chunk_prefill` for `seq > 1`; for `seq == 1` steps 4 to 8 are one
+//!    `gdn_step_from_conv` call, fused into a single kernel where the backend
+//!    has one
+//! 9. `silu(z) * rms_norm(o)` with `ssm_norm`
+//! 10. optional `group_heads`, then `ssm_out`
 
-use super::layer::{GdnBlock, group_heads, slice_heads};
+use super::layer::{GdnBlock, group_heads};
 use crate::error::{Error, Result};
 use crate::inference::GdnState;
 use crate::model::traits::ModelClient;
@@ -126,15 +129,9 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             reason: "gdn: forward_batch returned no attn_gate output".to_string(),
         })?;
 
-        // 2. Gates. `ssm_a` already holds `-exp(A_log)`.
-        let beta = self.ssm_beta.forward(client, x)?;
-        let beta = client.sigmoid(beta.tensor()).map_err(Error::Numr)?;
+        // 2. Raw gate projections. `ssm_a` already holds `-exp(A_log)`.
         let alpha = self.ssm_alpha.forward(client, x)?;
-        let g = client
-            .add(alpha.tensor(), &self.ssm_dt_bias)
-            .map_err(Error::Numr)?;
-        let g = client.softplus(&g).map_err(Error::Numr)?;
-        let g = client.mul(&g, &self.ssm_a).map_err(Error::Numr)?;
+        let beta_raw = self.ssm_beta.forward(client, x)?;
 
         // 3. Causal conv with the carried window, then SiLU.
         let qkv_ncl = qkv
@@ -150,39 +147,26 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             .map_err(Error::Numr)?
             .contiguous()?;
 
-        // 4. Split.
-        let q = slice_heads(&qkv, 0, key_dim, &[batch, seq, h_k, s])?;
-        let k = slice_heads(&qkv, key_dim, key_dim, &[batch, seq, h_k, s])?;
-        let v = slice_heads(&qkv, 2 * key_dim, value_dim, &[batch, seq, h_v, s])?;
-
-        // 5. L2 norm over the head dim.
-        let q = client
-            .l2_normalize(&q, -1, cfg.rms_eps)
-            .map_err(Error::Numr)?;
-        let k = client
-            .l2_normalize(&k, -1, cfg.rms_eps)
-            .map_err(Error::Numr)?;
-
-        // 6. Tiled repeat: value head h_v reads key head h_v % H_k.
-        let rep = cfg.head_repeat();
-        let (q, k) = if rep > 1 {
-            let tile = [1, 1, rep, 1];
-            (
-                client.repeat(&q, &tile).map_err(Error::Numr)?,
-                client.repeat(&k, &tile).map_err(Error::Numr)?,
-            )
-        } else {
-            (q, k)
-        };
-
-        // 7. Recurrence.
         let (o, ssm) = if seq == 1 {
-            client.gdn_step(&q, &k, &v, &g, &beta, ssm_state)?
+            // 4-8. One call: split, L2 norm, tiled repeat, gates, step.
+            client.gdn_step_from_conv(
+                &qkv,
+                alpha.tensor(),
+                beta_raw.tensor(),
+                &self.ssm_dt_bias,
+                &self.ssm_a,
+                ssm_state,
+                h_k,
+                key_dim,
+                value_dim,
+                cfg.rms_eps,
+            )?
         } else {
-            client.gdn_chunk_prefill(&q, &k, &v, &g, &beta, ssm_state, cfg.chunk_size)?
+            // 4-8. The same chain as primitives, then the chunked recurrence.
+            self.prefill_recurrence(client, &qkv, alpha.tensor(), beta_raw.tensor(), ssm_state)?
         };
 
-        // 8. silu(z) * rms_norm(o), per head.
+        // 9. silu(z) * rms_norm(o), per head.
         let z = z
             .tensor()
             .contiguous()?
@@ -192,14 +176,14 @@ impl<R: Runtime<DType = DType>> GdnBlock<R> {
             .norm
             .forward(client, &Var::new(o, false), &Var::new(z, false))?;
 
-        // 9. Flatten heads, reorder for a grouped `ssm_out`, project.
+        // 10. Flatten heads, reorder for a grouped `ssm_out`, project.
         let o = o
             .tensor()
             .contiguous()?
             .reshape(&[batch, seq, value_dim])
             .map_err(Error::Numr)?;
         let o = if cfg.v_grouped {
-            group_heads(&o, h_k, rep, s)?
+            group_heads(&o, h_k, cfg.head_repeat(), s)?
         } else {
             o
         };

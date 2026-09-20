@@ -100,4 +100,43 @@ pub trait GatedDeltaNetOps<R: Runtime> {
         state: &Tensor<R>,
         chunk_size: usize,
     ) -> Result<(Tensor<R>, Tensor<R>)>;
+
+    /// Single-token recurrence from the post-SiLU conv output and the raw
+    /// gate projections. `seq` must be 1.
+    ///
+    /// Runs the whole per-token chain in front of [`gdn_step`](Self::gdn_step):
+    ///
+    /// ```text
+    /// q    = l2_normalize(qkv[.., 0 .. key_dim]         as [B, 1, H_k, S_k], eps)
+    /// k    = l2_normalize(qkv[.., key_dim .. 2 key_dim] as [B, 1, H_k, S_k], eps)
+    /// v    = qkv[.., 2 key_dim ..]                      as [B, 1, H_v, S_v]
+    /// q, k = tiled to H_v heads: value head h_v reads key head h_v % H_k
+    /// beta = sigmoid(beta_raw)
+    /// g    = ssm_a * softplus(alpha_raw + dt_bias)
+    /// ```
+    ///
+    /// # Layout
+    ///
+    /// - `qkv`: `[batch, 1, 2 * key_dim + value_dim]`
+    /// - `alpha_raw`, `beta_raw`: `[batch, 1, H_v]`
+    /// - `dt_bias`, `ssm_a`: `[H_v]`; `ssm_a` holds `-exp(A_log)`
+    /// - `state`: `[batch, H_v, S_k, S_v]` with `S_k = key_dim / h_k`,
+    ///   `S_v = value_dim / H_v`
+    ///
+    /// Returns `(o: [batch, 1, H_v, S_v], state: [batch, H_v, S_k, S_v])`.
+    /// A backend's fused path returns the same bits as the primitive chain.
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_step_from_conv(
+        &self,
+        qkv: &Tensor<R>,
+        alpha_raw: &Tensor<R>,
+        beta_raw: &Tensor<R>,
+        dt_bias: &Tensor<R>,
+        ssm_a: &Tensor<R>,
+        state: &Tensor<R>,
+        h_k: usize,
+        key_dim: usize,
+        value_dim: usize,
+        eps: f32,
+    ) -> Result<(Tensor<R>, Tensor<R>)>;
 }

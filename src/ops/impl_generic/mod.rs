@@ -6,8 +6,9 @@ pub mod quantization;
 pub mod training;
 
 pub use architecture::{
-    gdn_chunk_prefill_impl, gdn_step_impl, moe_grouped_gemm_fused_impl, moe_grouped_gemm_impl,
-    moe_permute_tokens_impl, moe_top_k_routing_impl, moe_unpermute_tokens_impl,
+    gdn_chunk_prefill_impl, gdn_step_from_conv_impl, gdn_step_impl, moe_grouped_gemm_fused_impl,
+    moe_grouped_gemm_impl, moe_permute_tokens_impl, moe_top_k_routing_impl,
+    moe_unpermute_tokens_impl,
 };
 pub use attention::{
     apply_rope_impl, apply_rope_interleaved_impl, apply_rope_yarn_impl, multi_head_attention_impl,

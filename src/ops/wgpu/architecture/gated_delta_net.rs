@@ -5,7 +5,7 @@
 
 use crate::error::Result;
 use crate::ops::impl_generic::architecture::gated_delta_net::{
-    gdn_chunk_prefill_impl, gdn_step_impl,
+    gdn_chunk_prefill_impl, gdn_step_from_conv_impl, gdn_step_impl,
 };
 use crate::ops::traits::architecture::gated_delta_net::GatedDeltaNetOps;
 use numr::runtime::wgpu::{WgpuClient, WgpuRuntime};
@@ -35,5 +35,23 @@ impl GatedDeltaNetOps<WgpuRuntime> for WgpuClient {
         chunk_size: usize,
     ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
         gdn_chunk_prefill_impl(self, q, k, v, g, beta, state, chunk_size)
+    }
+
+    fn gdn_step_from_conv(
+        &self,
+        qkv: &Tensor<WgpuRuntime>,
+        alpha_raw: &Tensor<WgpuRuntime>,
+        beta_raw: &Tensor<WgpuRuntime>,
+        dt_bias: &Tensor<WgpuRuntime>,
+        ssm_a: &Tensor<WgpuRuntime>,
+        state: &Tensor<WgpuRuntime>,
+        h_k: usize,
+        key_dim: usize,
+        value_dim: usize,
+        eps: f32,
+    ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
+        gdn_step_from_conv_impl(
+            self, qkv, alpha_raw, beta_raw, dt_bias, ssm_a, state, h_k, key_dim, value_dim, eps,
+        )
     }
 }

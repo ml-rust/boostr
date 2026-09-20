@@ -1,6 +1,8 @@
 //! Parity of the fused CUDA Gated DeltaNet decode step against the generic
 //! `gdn_step_impl` run on the same CUDA client, plus the `S_k = 96` fallback
-//! that the fused kernel does not cover.
+//! that the fused kernel does not cover. The `from_conv` cases hold the
+//! fused chain kernel to bit equality with the primitive chain
+//! `gdn_step_from_conv_impl` on the same client.
 //!
 //! Run with:
 //!   cd boostr && cargo test --features cuda --test gdn_step_fused_cuda
@@ -9,8 +11,10 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use boostr::ops::cuda::architecture::gdn_step_fused;
-use boostr::ops::impl_generic::architecture::gated_delta_net::gdn_step_impl;
+use boostr::ops::cuda::architecture::{gdn_step_from_conv_fused, gdn_step_fused};
+use boostr::ops::impl_generic::architecture::gated_delta_net::{
+    gdn_step_from_conv_impl, gdn_step_impl,
+};
 use boostr::ops::traits::architecture::gated_delta_net::GatedDeltaNetOps;
 use numr::runtime::Runtime;
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
@@ -184,4 +188,142 @@ fn fused_accepts_strided_inputs() {
         .expect("fused gdn_step on strided state");
     assert_parity("strided o", &o, &o_ref);
     assert_parity("strided state", &s, &s_ref);
+}
+
+struct ConvInputs {
+    qkv: Tensor<CudaRuntime>,
+    alpha: Tensor<CudaRuntime>,
+    beta: Tensor<CudaRuntime>,
+    dt_bias: Tensor<CudaRuntime>,
+    ssm_a: Tensor<CudaRuntime>,
+    state: Tensor<CudaRuntime>,
+}
+
+/// Raw conv output and gate projections. `alpha` and `beta` take both
+/// signs; `ssm_a` is `-exp(A_log)`, so `g` stays non-positive.
+fn conv_inputs(
+    b: usize,
+    h_v: usize,
+    h_k: usize,
+    s_k: usize,
+    s_v: usize,
+    device: &CudaDevice,
+) -> ConvInputs {
+    let t = |data: &[f32], shape: &[usize]| {
+        Tensor::<CudaRuntime>::from_slice(data, shape, device).expect("fixture tensor")
+    };
+    let (key_dim, value_dim) = (h_k * s_k, h_v * s_v);
+    let ssm_a: Vec<f32> = values(h_v, 1.3, 1.0)
+        .into_iter()
+        .map(|x| -(0.5 + x.abs()).exp())
+        .collect();
+    ConvInputs {
+        qkv: t(
+            &values(b * (2 * key_dim + value_dim), 0.1, 1.5),
+            &[b, 1, 2 * key_dim + value_dim],
+        ),
+        alpha: t(&values(b * h_v, 0.3, 3.0), &[b, 1, h_v]),
+        beta: t(&values(b * h_v, 0.9, 3.0), &[b, 1, h_v]),
+        dt_bias: t(&values(h_v, 1.1, 1.0), &[h_v]),
+        ssm_a: t(&ssm_a, &[h_v]),
+        state: t(&values(b * h_v * s_k * s_v, 0.7, 0.5), &[b, h_v, s_k, s_v]),
+    }
+}
+
+/// Asserts bit equality, naming the first differing element.
+fn assert_bits(name: &str, got: &Tensor<CudaRuntime>, want: &Tensor<CudaRuntime>) {
+    assert_eq!(got.shape(), want.shape(), "{name}: shape");
+    let got = got.to_vec::<f32>();
+    let want = want.to_vec::<f32>();
+    for (i, (a, b)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            a.to_bits() == b.to_bits(),
+            "{name}: element {i} differs: got {a} ({:#010x}), want {b} ({:#010x})",
+            a.to_bits(),
+            b.to_bits()
+        );
+    }
+}
+
+fn run_conv_case(b: usize, h_v: usize, h_k: usize, s_k: usize, s_v: usize) {
+    let _guard = cuda_lock();
+    let (client, device) = cuda_setup();
+    let x = conv_inputs(b, h_v, h_k, s_k, s_v, &device);
+    let (key_dim, value_dim) = (h_k * s_k, h_v * s_v);
+    let eps = 1e-6f32;
+
+    let (o_ref, s_ref) = gdn_step_from_conv_impl(
+        &client, &x.qkv, &x.alpha, &x.beta, &x.dt_bias, &x.ssm_a, &x.state, h_k, key_dim,
+        value_dim, eps,
+    )
+    .expect("generic gdn_step_from_conv_impl");
+    let (o_fused, s_fused) = gdn_step_from_conv_fused(
+        &client, &x.qkv, &x.alpha, &x.beta, &x.dt_bias, &x.ssm_a, &x.state, h_k, key_dim,
+        value_dim, eps,
+    )
+    .expect("fused gdn_step_from_conv");
+    let case = format!("({b},{h_v},{h_k},{s_k},{s_v})");
+    assert!(
+        o_fused.to_vec::<f32>().iter().all(|v| v.is_finite()),
+        "{case}: non-finite o"
+    );
+    assert_bits(&format!("{case} fused o"), &o_fused, &o_ref);
+    assert_bits(&format!("{case} fused state"), &s_fused, &s_ref);
+
+    // The trait entry point routes to the same kernel.
+    let (o_trait, s_trait) = client
+        .gdn_step_from_conv(
+            &x.qkv, &x.alpha, &x.beta, &x.dt_bias, &x.ssm_a, &x.state, h_k, key_dim, value_dim, eps,
+        )
+        .expect("trait gdn_step_from_conv");
+    assert_bits(&format!("{case} trait o"), &o_trait, &o_ref);
+    assert_bits(&format!("{case} trait state"), &s_trait, &s_ref);
+}
+
+#[test]
+fn from_conv_matches_chain_b1_hv48_hk16_sk128_sv128() {
+    run_conv_case(1, 48, 16, 128, 128);
+}
+
+#[test]
+fn from_conv_matches_chain_b2_hv6_hk2_sk64_sv32() {
+    run_conv_case(2, 6, 2, 64, 32);
+}
+
+#[test]
+fn from_conv_matches_chain_b1_hv3_hk3_sk32_sv256() {
+    run_conv_case(1, 3, 3, 32, 256);
+}
+
+/// `S_k = 96` has no fused instantiation: the fused entry refuses it and
+/// the trait entry falls back to the primitive chain.
+#[test]
+fn from_conv_sk96_falls_back_to_chain() {
+    let _guard = cuda_lock();
+    let (client, device) = cuda_setup();
+    let (h_v, h_k, s_k, s_v) = (4, 2, 96, 64);
+    let x = conv_inputs(2, h_v, h_k, s_k, s_v, &device);
+    let (key_dim, value_dim) = (h_k * s_k, h_v * s_v);
+    let eps = 1e-6f32;
+
+    assert!(
+        gdn_step_from_conv_fused(
+            &client, &x.qkv, &x.alpha, &x.beta, &x.dt_bias, &x.ssm_a, &x.state, h_k, key_dim,
+            value_dim, eps,
+        )
+        .is_err()
+    );
+
+    let (o_ref, s_ref) = gdn_step_from_conv_impl(
+        &client, &x.qkv, &x.alpha, &x.beta, &x.dt_bias, &x.ssm_a, &x.state, h_k, key_dim,
+        value_dim, eps,
+    )
+    .expect("generic gdn_step_from_conv_impl");
+    let (o, s) = client
+        .gdn_step_from_conv(
+            &x.qkv, &x.alpha, &x.beta, &x.dt_bias, &x.ssm_a, &x.state, h_k, key_dim, value_dim, eps,
+        )
+        .expect("trait gdn_step_from_conv fallback");
+    assert_bits("sk96 o", &o, &o_ref);
+    assert_bits("sk96 state", &s, &s_ref);
 }

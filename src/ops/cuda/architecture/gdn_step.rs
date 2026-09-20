@@ -10,17 +10,14 @@
 //! whether a call fits; the caller falls back to `gdn_step_impl` otherwise.
 
 use crate::error::{Error, Result};
+use crate::ops::cuda::architecture::gdn_step_support::{launch_config, launch_error, require_f32};
 use crate::ops::cuda::kernels::{self, GDN_STEP_MODULE};
 use crate::ops::impl_generic::architecture::gated_delta_net::{GdnDims, check_gdn_shapes};
 use cudarc::driver::PushKernelArg;
-use cudarc::driver::safe::LaunchConfig;
 use numr::dtype::DType;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
-
-/// Threads per block; matches `GDN_STEP_BLOCK` in the kernel.
-const BLOCK: u32 = 256;
 
 /// Kernel entry point for a supported `S_k`, `None` for any other.
 fn kernel_name(s_k: usize) -> Option<&'static str> {
@@ -58,25 +55,17 @@ pub fn gdn_step_fused(
             reason: format!("gdn_step_fused takes seq = 1, got shape {:?}", q.shape()),
         });
     }
-    for (name, t) in [
-        ("q", q),
-        ("k", k),
-        ("v", v),
-        ("g", g),
-        ("beta", beta),
-        ("state", state),
-    ] {
-        if t.dtype() != DType::F32 {
-            return Err(Error::InvalidArgument {
-                arg: name,
-                reason: format!(
-                    "gdn_step_fused takes F32, got {:?} for shape {:?}",
-                    t.dtype(),
-                    t.shape()
-                ),
-            });
-        }
-    }
+    require_f32(
+        "gdn_step_fused",
+        &[
+            ("q", q),
+            ("k", k),
+            ("v", v),
+            ("g", g),
+            ("beta", beta),
+            ("state", state),
+        ],
+    )?;
     let name = kernel_name(dims.s_k).ok_or_else(|| Error::InvalidArgument {
         arg: "state",
         reason: format!(
@@ -115,11 +104,7 @@ pub fn gdn_step_fused(
     let module = kernels::get_or_load_module(client.context(), device.id(), GDN_STEP_MODULE)?;
     let func = kernels::get_kernel_function(&module, name)?;
 
-    let cfg = LaunchConfig {
-        grid_dim: ((s_v as u32).div_ceil(BLOCK), (batch * heads) as u32, 1),
-        block_dim: (BLOCK, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = launch_config(s_v, batch * heads);
 
     let q_ptr = q.ptr();
     let k_ptr = k.ptr();
@@ -145,12 +130,9 @@ pub fn gdn_step_fused(
         builder.arg(&state_out_ptr);
         builder.arg(&s_v_i32);
         builder.arg(&q_scale);
-        builder.launch(cfg).map_err(|e| Error::KernelError {
-            reason: format!(
-                "{name} launch failed for state shape {:?}: {e:?}",
-                state.shape()
-            ),
-        })?;
+        builder
+            .launch(cfg)
+            .map_err(|e| launch_error(name, state.shape(), e))?;
     }
 
     Ok((o, state_out))

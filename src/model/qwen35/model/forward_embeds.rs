@@ -46,6 +46,12 @@ where
             .clone())
     }
 
+    /// Rope positions the model's IMROPE table holds, so a decode may sit
+    /// at any position in `0..rope_table_len`.
+    pub fn rope_table_len(&self) -> usize {
+        self.rope.cos_cache().shape()[0]
+    }
+
     /// `[4, seq]` i32 text positions: `t = h = w = rope_pos + i`, `e = 0`.
     ///
     /// # Errors
@@ -57,7 +63,7 @@ where
         rope_pos: usize,
         device: &R::Device,
     ) -> Result<Tensor<R>> {
-        let max_pos = self.rope.cos_cache().shape()[0];
+        let max_pos = self.rope_table_len();
         if rope_pos + seq > max_pos {
             return Err(Error::ModelError {
                 reason: format!(

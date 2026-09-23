@@ -1,6 +1,7 @@
 pub mod decode_graph;
 pub mod gdn_state;
 pub mod kv_cache;
+pub mod lanes;
 pub mod memory;
 pub mod prefix_cache;
 pub mod scheduler;
@@ -13,6 +14,7 @@ pub use gdn_state::{GdnState, LayeredGdnState};
 pub use kv_cache::{
     KvCache, LayeredKvCache, LayeredKvCacheConfig, LayeredPagedKvCache, PagedKvCache,
 };
+pub use lanes::{LaneAdmission, LaneKvStep, LaneTable};
 #[cfg(feature = "cuda")]
 pub use memory::GpuBlockAllocator;
 pub use memory::{BlockAllocator, BlockAllocatorStats, BlockId, BlockTable, CpuBlockAllocator};

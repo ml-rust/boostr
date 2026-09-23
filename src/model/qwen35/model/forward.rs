@@ -8,7 +8,7 @@
 use super::build::{Qwen35Block, Qwen35Model};
 use crate::error::{Error, Result};
 use crate::inference::kv_cache::layered::LayeredKvCacheConfig;
-use crate::inference::{LayeredGdnState, LayeredKvCache};
+use crate::inference::{LaneKvStep, LayeredGdnState, LayeredKvCache};
 use crate::model::config::{GdnConfig, HybridConfig, Qwen35AttentionConfig, UniversalConfig};
 use crate::model::traits::ModelClient;
 use crate::nn::{RmsNorm, RoPE, RotatedMlp};
@@ -28,9 +28,9 @@ pub(super) enum AttentionStep<'a, R: Runtime> {
     /// One `[4, seq]` position set shared by the whole batch; the mixer's
     /// ordinary KV-cached forward.
     Shared,
-    /// One lane per sequence: `[4, batch, 1]` positions and each lane's own
-    /// first cache position.
-    PerLane { kv_start: &'a Tensor<R> },
+    /// One lane per sequence: `[4, batch, 1]` positions and each lane's
+    /// own key range and write position.
+    PerLane { lanes: &'a LaneKvStep<'a, R> },
 }
 
 impl<R: Runtime<DType = DType>> Qwen35Model<R>
@@ -153,6 +153,13 @@ where
     /// `output_norm`. `positions` is the `[4, seq]` i32 IMROPE tensor every
     /// attention layer reads for [`AttentionStep::Shared`], or the
     /// `[4, batch, 1]` per-lane tensor for [`AttentionStep::PerLane`].
+    ///
+    /// Under [`AttentionStep::PerLane`], a GDN block's recurrence runs over
+    /// every row, occupied or not: there is no per-lane mask. A free row's
+    /// step is harmless — its `kv_start == kv_end` keeps attention from ever
+    /// reading it, and the next sequence admitted into that lane overwrites
+    /// the GDN state and the KV rows below its own end, so nothing a free
+    /// row computed survives to be read.
     pub(super) fn forward_layers<C>(
         &self,
         client: &C,
@@ -197,8 +204,8 @@ where
                         AttentionStep::Shared => layer
                             .mixer
                             .forward(client, &normed, &self.rope, positions, cache)?,
-                        AttentionStep::PerLane { kv_start } => layer.mixer.forward_batched_decode(
-                            client, &normed, &self.rope, positions, cache, kv_start,
+                        AttentionStep::PerLane { lanes } => layer.mixer.forward_batched_decode(
+                            client, &normed, &self.rope, positions, cache, lanes,
                         )?,
                     };
                     hidden = ffn_residual(

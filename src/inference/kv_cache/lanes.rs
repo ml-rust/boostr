@@ -1,10 +1,10 @@
 //! Per-lane writes into a batched KV cache.
 //!
-//! A batched cache holds one sequence per lane. Prefill fills the lanes one
-//! sequence at a time, each left-padded so every sequence's tokens end at
-//! the shared cursor; decode then advances all lanes together. A lane's own
-//! first position is what `kv_start` carries into attention, so the padding
-//! is never read.
+//! A batched cache holds one sequence per lane, each starting at cache
+//! position 0 with its own end. Prefill fills the lanes one sequence at a
+//! time; decode then writes each lane's token at that lane's own next
+//! position. A lane's own range is what `kv_start` and `kv_end` carry into
+//! attention, so nothing outside it is ever read.
 
 use crate::error::{Error, Result};
 use crate::inference::kv_cache::{KvCache, LayeredKvCache};
@@ -20,11 +20,9 @@ where
 {
     /// Write one sequence's K and V into lane `lane`, starting at `offset`.
     ///
-    /// Fills a batched cache one sequence at a time. Each lane is
-    /// left-padded so every sequence's tokens end at the shared cursor;
-    /// decode then advances all lanes together through
-    /// [`KvCache::update_fused`], and a lane's own start is what
-    /// `kv_start` carries into attention.
+    /// Fills a batched cache one sequence at a time.
+    /// [`KvCache::update_lanes`] then appends a decode step to every lane,
+    /// each at its own position.
     ///
     /// # Arguments
     /// * `k` - New K values [1, num_kv_heads, new_tokens, head_dim]
@@ -75,30 +73,91 @@ where
 
         Ok(())
     }
+
+    /// Write one step's K and V into every lane, each at its own position.
+    ///
+    /// Lanes hold sequences of different lengths, so a shared write
+    /// position would put a lane's token where another lane's tokens are.
+    /// Each row of `k` and `v` goes through the same lane write path as
+    /// [`KvCache::update_lane`], at the position `positions` gives it.
+    ///
+    /// # Arguments
+    /// * `k` - New K values [batch, num_kv_heads, new_tokens, head_dim]
+    /// * `v` - New V values [batch, num_kv_heads, new_tokens, head_dim]
+    /// * `positions` - First cache position each lane's row lands on
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InferenceError`] when `k` carries a different number of
+    /// rows than the cache has lanes, when `positions` carries a different
+    /// number of entries, or when a lane's write runs past `max_seq_len`.
+    pub fn update_lanes<C: KvCacheOps<R>>(
+        &mut self,
+        k: &Tensor<R>,
+        v: &Tensor<R>,
+        positions: &[usize],
+        client: &C,
+    ) -> Result<()> {
+        let (rows, _, new_tokens, _) = k.dims4()?;
+        if rows != self.batch_size || positions.len() != self.batch_size {
+            return Err(Error::InferenceError {
+                reason: format!(
+                    "update_lanes wants one row and one position per lane: cache holds {} \
+                     lanes, k holds {rows} rows, positions holds {}",
+                    self.batch_size,
+                    positions.len()
+                ),
+            });
+        }
+        if !k.is_contiguous() || !v.is_contiguous() {
+            return Err(Error::InferenceError {
+                reason: "update_lanes reads k and v row by row and needs both contiguous; \
+                         call contiguous() on them first"
+                    .into(),
+            });
+        }
+        let furthest = positions.iter().copied().max().unwrap_or(0) + new_tokens;
+        if furthest > self.max_seq_len {
+            return Err(Error::InferenceError {
+                reason: format!(
+                    "cache overflow: a lane writes {new_tokens} tokens at {} > max_seq_len {}",
+                    furthest - new_tokens,
+                    self.max_seq_len
+                ),
+            });
+        }
+        self.ensure_capacity(furthest)?;
+
+        for (lane, &offset) in positions.iter().enumerate() {
+            let k_lane = k.narrow(0, lane, 1)?;
+            let v_lane = v.narrow(0, lane, 1)?;
+            self.update_lane(&k_lane, &v_lane, lane, offset, client)?;
+        }
+        Ok(())
+    }
 }
 
 impl<R: Runtime<DType = DType>> LayeredKvCache<R>
 where
     R::Client: IndexingOps<R>,
 {
-    /// Copy a one-sequence cache into lane `lane` of every layer, ending at
-    /// the shared cursor.
+    /// Copy a one-sequence cache into lane `lane` of every layer, at
+    /// position 0.
     ///
-    /// The source holds `src.seq_len()` tokens from position 0; they land at
-    /// `end - src.seq_len() .. end`, so the sequence's last token sits at
-    /// the cursor every lane decodes from. The padding in front of it is
-    /// what `kv_start` masks off.
+    /// The source holds `src.seq_len()` tokens from position 0 and they
+    /// land at the same positions in the lane, so the lane's length is its
+    /// own sequence's length and no other lane constrains it. Whatever a
+    /// previous occupant left past that length sits outside the lane's
+    /// `[kv_start, kv_end)` range and is never read.
     ///
     /// # Errors
     ///
     /// [`Error::InferenceError`] when the two caches hold a different
-    /// number of layers, the source holds more tokens than `end`, or a
-    /// layer refuses the write.
+    /// number of layers, or a layer refuses the write.
     pub fn install_lane<C: KvCacheOps<R>>(
         &mut self,
         src: &LayeredKvCache<R>,
         lane: usize,
-        end: usize,
         client: &C,
     ) -> Result<()> {
         if src.num_layers() != self.num_layers() {
@@ -111,12 +170,6 @@ where
             });
         }
         let tokens = src.seq_len();
-        if tokens > end {
-            return Err(Error::InferenceError {
-                reason: format!("a {tokens}-token sequence cannot end at {end}"),
-            });
-        }
-        let offset = end - tokens;
         for idx in 0..self.num_layers() {
             let from = src.layer(idx).ok_or_else(|| Error::InferenceError {
                 reason: format!("source kv cache missing layer {idx}"),
@@ -126,7 +179,7 @@ where
             let cache = self.layer_mut(idx).ok_or_else(|| Error::InferenceError {
                 reason: format!("kv cache missing layer {idx}"),
             })?;
-            cache.update_lane(&k, &v, lane, offset, client)?;
+            cache.update_lane(&k, &v, lane, 0, client)?;
         }
         Ok(())
     }
@@ -211,6 +264,49 @@ mod tests {
             .contiguous()
             .expect("contiguous");
         assert_eq!(lane.to_vec::<f32>(), solo.k_cache_raw().to_vec::<f32>());
+    }
+
+    /// Every lane's row lands at its own position, so lanes of different
+    /// lengths each append where their own sequence ends.
+    #[test]
+    fn test_update_lanes_writes_each_lane_at_its_own_position() {
+        let device = CpuDevice::new();
+        let client = CpuClient::new(device.clone());
+        let mut c = cache(2, &device);
+        let (k, v) = kv(2, 1000.0, &device);
+        let two_rows = Tensor::<CpuRuntime>::cat(&[&k, &k], 0).expect("rows");
+        let two_v = Tensor::<CpuRuntime>::cat(&[&v, &v], 0).expect("rows");
+
+        c.update_lanes(&two_rows, &two_v, &[0, 3], &client)
+            .expect("lanes");
+
+        let k_all = c.k_cache_raw().to_vec::<f32>();
+        let row = HEADS * c.capacity() * HEAD_DIM;
+        let k = k.to_vec::<f32>();
+        assert_eq!(k_all[..2 * HEAD_DIM], k[..2 * HEAD_DIM]);
+        assert_eq!(
+            k_all[row + 3 * HEAD_DIM..row + 5 * HEAD_DIM],
+            k[..2 * HEAD_DIM]
+        );
+        assert_eq!(c.seq_len(), 5);
+    }
+
+    /// One position per lane and one row per lane are both required.
+    #[test]
+    fn test_update_lanes_refuses_a_count_mismatch() {
+        let device = CpuDevice::new();
+        let client = CpuClient::new(device.clone());
+        let mut c = cache(2, &device);
+        let (k, v) = kv(1, 2.0, &device);
+        let two_rows = Tensor::<CpuRuntime>::cat(&[&k, &k], 0).expect("rows");
+        let two_v = Tensor::<CpuRuntime>::cat(&[&v, &v], 0).expect("rows");
+
+        assert!(c.update_lanes(&two_rows, &two_v, &[0], &client).is_err());
+        assert!(c.update_lanes(&k, &v, &[0, 1], &client).is_err());
+        assert!(
+            c.update_lanes(&two_rows, &two_v, &[0, 64], &client)
+                .is_err()
+        );
     }
 
     /// A lane outside the batch, more than one row, and a write past the

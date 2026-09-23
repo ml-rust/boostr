@@ -1,19 +1,24 @@
 //! `qwen35` gated attention over a batch of sequences, one decode step each.
 //!
-//! Every lane of the cache holds one sequence, left-padded so all lanes end
-//! at the shared cursor, and `kv_start` names each lane's own first
-//! position. A lane therefore attends over exactly its own tokens, whatever
-//! the other lanes hold, and the step it takes is the step it would take
+//! Every lane of the cache holds one sequence with its own start and its
+//! own end, so a lane's length is its sequence's length. Each lane's token
+//! is written at that lane's own next position and attention reads exactly
+//! `[kv_start, kv_end)`, so the step a lane takes is the step it would take
 //! alone.
 //!
 //! The decode kernel reads the cache buffer in place through `kv_seq_len`
 //! and broadcasts the KV heads itself, so no lane's keys are copied or
 //! repeated per step.
+//!
+//! A free lane still takes this step: it writes at cache position 0 like
+//! any lane at the start of its own sequence. That write is harmless —
+//! `kv_start == kv_end` for a free lane, so attention never reads it, and
+//! the next sequence admitted into the lane overwrites position 0 again.
 
 use super::layer::Qwen35AttentionBlock;
 use super::projections::Projections;
 use crate::error::{Error, Result};
-use crate::inference::KvCache;
+use crate::inference::{KvCache, LaneKvStep};
 use crate::model::traits::ModelClient;
 use crate::nn::RoPE;
 use crate::ops::traits::attention::{AttnOutLayout, KvSeqLen};
@@ -32,9 +37,9 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
     ///
     /// - `x`: the `attn_norm`-ed hidden state `[batch, 1, hidden_size]`
     /// - `positions`: `[4, batch, 1]` IMROPE streams, a position per lane
-    /// - `kv_cache`: `[batch, ...]`, every lane already prefilled to the
-    ///   shared cursor; this step appends one token to each
-    /// - `kv_start`: `[batch]` I32, each lane's first real cache position
+    /// - `kv_cache`: `[batch, ...]`, every lane already prefilled from its
+    ///   own start; this step appends one token to each
+    /// - `lanes`: each lane's key range and its own write position
     ///
     /// The result is the `attn_output` projection `[batch, 1, hidden_size]`,
     /// without the residual, as a detached `Var`.
@@ -51,7 +56,7 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
         rope: &RoPE<R>,
         positions: &Tensor<R>,
         kv_cache: &mut KvCache<R>,
-        kv_start: &Tensor<R>,
+        lanes: &LaneKvStep<'_, R>,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + FwhtOps<R>,
@@ -118,7 +123,7 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
         let k = head_major(&k)?;
         let v = head_major(&v)?;
 
-        kv_cache.update_fused(&k, &v, client)?;
+        kv_cache.update_lanes(&k, &v, lanes.write_pos, client)?;
 
         let (attn, _lse) = client.flash_attention_fwd(
             &q,
@@ -129,8 +134,8 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
             hd,
             true,
             0,
-            Some(KvSeqLen::Shared(kv_cache.seq_len())),
-            Some(kv_start),
+            Some(KvSeqLen::PerRow(lanes.kv_end)),
+            Some(lanes.kv_start),
             AttnOutLayout::TokenMajor,
         )?;
 

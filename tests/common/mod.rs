@@ -10,6 +10,7 @@ pub mod llama_graph;
 pub mod llama_tiny;
 #[cfg(feature = "cuda")]
 pub mod qwen35_cuda;
+pub mod qwen35_lanes;
 pub mod qwen35_tiny;
 
 use std::collections::{HashMap, HashSet};

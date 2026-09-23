@@ -1,16 +1,15 @@
 //! [`Qwen35Model`] decode step over a batch of sequences.
 //!
-//! One lane per sequence, all lanes stepping together. The KV lanes are
-//! left-padded so every sequence ends at the shared cursor, and `kv_start`
-//! names each lane's own first position, so a lane reads only its own
-//! tokens. The GDN state carries a row per lane and each row evolves on its
-//! own. A lane therefore produces the tokens it would produce alone,
-//! whatever else is in flight.
+//! One lane per sequence, all lanes stepping together. Each KV lane holds
+//! its own sequence with its own start and end, so a lane reads only its
+//! own tokens and writes at its own next position. The GDN state carries a
+//! row per lane and each row evolves on its own. A lane therefore produces
+//! the tokens it would produce alone, whatever else is in flight.
 
 use super::build::Qwen35Model;
 use super::forward::AttentionStep;
 use crate::error::{Error, Result};
-use crate::inference::{LayeredGdnState, LayeredKvCache};
+use crate::inference::{LaneKvStep, LayeredGdnState, LayeredKvCache};
 use crate::model::traits::ModelClient;
 use crate::quant::traits::DequantOps;
 use numr::autograd::Var;
@@ -26,40 +25,15 @@ impl<R: Runtime<DType = DType>> Qwen35Model<R>
 where
     R::Client: IndexingOps<R>,
 {
-    /// `[4, batch, 1]` i32 text positions: lane `b` sits at `rope_pos[b]`,
-    /// with `t = h = w = rope_pos[b]` and `e = 0`.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::ModelError`] when a position is past the rope table.
-    pub fn text_positions_batched(
-        &self,
-        rope_pos: &[usize],
-        device: &R::Device,
-    ) -> Result<Tensor<R>> {
-        let max_pos = self.rope.cos_cache().shape()[0];
-        if let Some(pos) = rope_pos.iter().find(|p| **p >= max_pos) {
-            return Err(Error::ModelError {
-                reason: format!("qwen35: rope position {pos} is past the table of {max_pos}"),
-            });
-        }
-        let batch = rope_pos.len();
-        let mut data = Vec::with_capacity(4 * batch);
-        for _ in 0..3 {
-            data.extend(rope_pos.iter().map(|p| *p as i32));
-        }
-        data.resize(4 * batch, 0);
-        Ok(Tensor::<R>::from_slice(&data, &[4, batch, 1], device)?)
-    }
-
     /// One decode step for `batch` sequences: logits `[batch, 1, vocab]`.
     ///
     /// - `input_ids`: `[batch, 1]`, the token each lane decodes from
     /// - `positions`: `[4, batch, 1]` i32, from
-    ///   [`text_positions_batched`](Self::text_positions_batched)
+    ///   [`LaneTable::positions`](crate::inference::LaneTable::positions)
     /// - `kv_cache`, `gdn_state`: allocated with `batch` lanes, every lane
-    ///   already prefilled and left-padded to the shared cursor
-    /// - `kv_start`: `[batch]` i32, lane `b`'s first real cache position
+    ///   already prefilled from its own start
+    /// - `lanes`: each lane's key range and write position, as a
+    ///   [`LaneTable`](crate::inference::LaneTable) hands them out
     ///
     /// # Errors
     ///
@@ -73,7 +47,7 @@ where
         positions: &Tensor<R>,
         kv_cache: &mut LayeredKvCache<R>,
         gdn_state: &mut LayeredGdnState<R>,
-        kv_start: &Tensor<R>,
+        lanes: &LaneKvStep<'_, R>,
     ) -> Result<Tensor<R>>
     where
         C: ModelClient<R>,
@@ -107,12 +81,22 @@ where
                 ),
             });
         }
-        if kv_start.shape() != [batch].as_slice() || kv_start.dtype() != DType::I32 {
+        for (name, bound) in [("kv_start", lanes.kv_start), ("kv_end", lanes.kv_end)] {
+            if bound.shape() != [batch].as_slice() || bound.dtype() != DType::I32 {
+                return Err(Error::ModelError {
+                    reason: format!(
+                        "qwen35: {name} must be [{batch}] i32, got {:?} {:?}",
+                        bound.shape(),
+                        bound.dtype()
+                    ),
+                });
+            }
+        }
+        if lanes.write_pos.len() != batch {
             return Err(Error::ModelError {
                 reason: format!(
-                    "qwen35: kv_start must be [{batch}] i32, got {:?} {:?}",
-                    kv_start.shape(),
-                    kv_start.dtype()
+                    "qwen35: write_pos must carry one position per lane, got {} for {batch} lanes",
+                    lanes.write_pos.len()
                 ),
             });
         }
@@ -125,7 +109,7 @@ where
             positions,
             kv_cache,
             gdn_state,
-            &AttentionStep::PerLane { kv_start },
+            &AttentionStep::PerLane { lanes },
         )?;
         self.logits_from_hidden(client, &hidden)
     }

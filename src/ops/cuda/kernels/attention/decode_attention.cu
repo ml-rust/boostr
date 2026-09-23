@@ -34,8 +34,10 @@
 //
 // Two variants of each:
 //   - Non-graph: seq_len_k passed as plain int kernel arg (zero overhead)
-//   - Graph-mode (_graph suffix): seq_len_k_ptr is a device pointer to i32,
-//     kv_seq_stride is the memory stride (capacity >= seq_len_k)
+//   - Graph-mode (_graph suffix): seq_len_k_ptr is a device pointer to one i32
+//     dereferenced once as the row-independent capacity clamp in
+//     `row_end = min(kv_end[b], seq_len_k)`, and kv_seq_stride is the memory
+//     stride (capacity >= seq_len_k)
 //
 // Sliding window: `window_size == 0` disables it. Otherwise a key `j` is masked
 // when `j + window_size <= i`, where `i` is the query's absolute position. Decode
@@ -50,8 +52,8 @@
 // Causal is not an argument: the single query is the newest position and sees
 // every key up to itself, so the causal mask admits the same keys as no mask.
 //
-// Per-row key end: `kv_end` is a `[B]` I32 device array or null, taken by the
-// non-graph entries only. Row `b`'s key loop stops at
+// Per-row key end: `kv_end` is a `[B]` I32 device array or null, taken by every
+// entry. Row `b`'s key loop stops at
 // `min(kv_end[b], seq_len_k)`, read once per block, so rows of different
 // lengths share one buffer. Null leaves the bound at `seq_len_k`, which is the
 // exact arithmetic of a call that passes no per-row end. `seq_len_k` stays the
@@ -380,8 +382,9 @@ __device__ __forceinline__ void decode_attention_combine_impl(
 // Non-graph and graph variants take the same arguments apart from
 // `seq_len_k`: a plain int here, a device pointer in the `_graph` entries.
 // The graph entries serve a true single-query decode only, so they take no
-// `out_seq_fold` and store row `bh` at `bh * D`; they take neither `kv_start`
-// nor `kv_end` and run unpadded over one length for the whole batch.
+// `out_seq_fold` and store row `bh` at `bh * D`. They take the same `kv_start`
+// and `kv_end` device arrays, so one captured grid serves rows of different
+// lengths; null in both gives the arithmetic of a call without per-row bounds.
 #define DECODE_ATTENTION_KERNELS(D, SUFFIX, T)                                     \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX(                        \
     const T* __restrict__ Q, const T* __restrict__ K, const T* __restrict__ V,     \
@@ -399,11 +402,12 @@ extern "C" __global__ void decode_attention_##D##_##SUFFIX##_graph(             
     const T* __restrict__ Q, const T* __restrict__ K, const T* __restrict__ V,     \
     T* __restrict__ O, float* __restrict__ LSE,                                    \
     int num_heads, int num_kv_heads, const int* seq_len_k_ptr,                     \
-    int kv_seq_stride, float scale, int window_size                                \
+    int kv_seq_stride, float scale, int window_size,                               \
+    const int* __restrict__ kv_start, const int* __restrict__ kv_end               \
 ) {                                                                                \
     decode_attention_impl<T, D>(Q, K, V, O, LSE, num_heads, num_kv_heads,          \
                                 *seq_len_k_ptr, kv_seq_stride, scale, window_size, \
-                                nullptr, nullptr, 1);                              \
+                                kv_start, kv_end, 1);                              \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split(                \
@@ -422,11 +426,12 @@ extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split_graph(       
     const T* __restrict__ Q, const T* __restrict__ K, const T* __restrict__ V,     \
     float* __restrict__ partial_o, float* __restrict__ partial_ml,                 \
     int num_heads, int num_kv_heads, const int* seq_len_k_ptr, int kv_seq_stride,  \
-    float scale, int window_size, int fill                                         \
+    float scale, int window_size, const int* __restrict__ kv_start,                \
+    const int* __restrict__ kv_end, int fill                                       \
 ) {                                                                                \
     decode_attention_split_impl<T, D>(Q, K, V, partial_o, partial_ml, num_heads,   \
                                       num_kv_heads, *seq_len_k_ptr, kv_seq_stride, \
-                                      scale, window_size, nullptr, nullptr, fill); \
+                                      scale, window_size, kv_start, kv_end, fill); \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_combine(              \

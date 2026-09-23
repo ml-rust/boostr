@@ -51,6 +51,9 @@ pub fn insert_and_decode_attention(
         num_kv_heads,
         head_dim,
         device_scalars.seq_len_k_ptr(),
+        // No per-row start or end: every row of this launch shares one length.
+        0,
+        0,
         kv_cache.capacity(),
         sliding_window,
     )?;

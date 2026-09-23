@@ -126,6 +126,9 @@ fn graph_decode(
         NUM_KV_HEADS,
         HEAD_DIM,
         seq_len_k.ptr(),
+        // No per-row start or end: this file's rows share one length.
+        0,
+        0,
         CAPACITY,
         window_size,
     )
@@ -363,6 +366,9 @@ fn split_graph_decode(
         NUM_KV_HEADS,
         HEAD_DIM,
         seq_len_k.ptr(),
+        // No per-row start or end: this file's rows share one length.
+        0,
+        0,
         capacity,
         window_size,
     )

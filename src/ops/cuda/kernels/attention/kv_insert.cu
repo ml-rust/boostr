@@ -8,9 +8,10 @@
 // Layout:
 //   K_new / V_new : [B, H_kv, 1, D]   — one token per batch, per head
 //   K_cache / V_cache : [B, H_kv, capacity, D]  — full-capacity cache (stable address)
-//   write_pos : device i32 — index in the sequence dimension to insert at
+//   write_pos : device i32 [B] — row `b` inserts at `write_pos[b]`, so lanes at
+//               different lengths share one launch
 //
-// Each thread writes one element (b, h, write_pos, d) for both K and V.
+// Each thread writes one element (b, h, write_pos[b], d) for both K and V.
 // Grid: (B * H_kv * D, 1, 1), Block: (1, 1, 1) would work but is wasteful.
 // Better: Grid: (ceil(B * H_kv * D / BLOCK), 1, 1), Block: (BLOCK, 1, 1).
 
@@ -22,10 +23,8 @@ extern "C" __global__ void kv_insert_f32(
     float* __restrict__ K_cache,       // [B, H_kv, capacity, D]  (stable address)
     float* __restrict__ V_cache,
     int B, int H_kv, int D, int capacity,
-    const int* write_pos               // device ptr: sequence index to write
+    const int* write_pos               // device ptr: [B] sequence index to write
 ) {
-    const int wpos = *write_pos;
-
     // Total elements to copy: B * H_kv * D (one element per thread)
     const int total = B * H_kv * D;
     const int idx = blockIdx.x * BLOCK + threadIdx.x;
@@ -36,6 +35,9 @@ extern "C" __global__ void kv_insert_f32(
     const int bh = idx / D;  // b * H_kv + h
     const int h = bh % H_kv;
     const int b = bh / H_kv;
+
+    // Row `b`'s own next slot, so each lane writes where its sequence ended.
+    const int wpos = write_pos[b];
 
     // Source: K_new[b, h, 0, d] = K_new + (b * H_kv + h) * D + d
     const size_t src_off = (size_t)(b * H_kv + h) * D + d;
@@ -58,7 +60,6 @@ extern "C" __global__ void kv_insert_f16(
     int B, int H_kv, int D, int capacity,
     const int* write_pos
 ) {
-    const int wpos = *write_pos;
     const int total = B * H_kv * D;
     const int idx = blockIdx.x * BLOCK + threadIdx.x;
     if (idx >= total) return;
@@ -67,6 +68,8 @@ extern "C" __global__ void kv_insert_f16(
     const int bh = idx / D;
     const int h = bh % H_kv;
     const int b = bh / H_kv;
+
+    const int wpos = write_pos[b];
 
     const size_t src_off = (size_t)(b * H_kv + h) * D + d;
     const size_t dst_off = ((size_t)(b * H_kv + h) * capacity + wpos) * D + d;

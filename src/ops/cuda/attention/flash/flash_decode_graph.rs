@@ -25,6 +25,13 @@ use super::flash_decode::decode_kernel_stem;
 /// window_size`. It is a static config value, not a per-step one, so passing it
 /// as a plain scalar is safe under CUDA graph capture — unlike `seq_len_k`,
 /// which changes every replay and therefore stays a device pointer.
+///
+/// `kv_start_ptr` and `kv_end_ptr` are device pointers to `[B]` i32 buffers, or
+/// `0` for none. Batch row `b` then attends over `[kv_start[b], min(kv_end[b],
+/// *seq_len_k_ptr))`, so one captured launch serves lanes of different lengths;
+/// `*seq_len_k_ptr` is the row-independent capacity clamp. Passing `0` for both
+/// gives the same bytes as a call with no per-row bounds. A row whose start
+/// equals its end sees no key: it stores zeros and an LSE of `-inf`, never NaN.
 #[allow(clippy::too_many_arguments)]
 pub fn decode_attention_graph_fwd(
     client: &CudaClient,
@@ -35,6 +42,8 @@ pub fn decode_attention_graph_fwd(
     num_kv_heads: usize,
     head_dim: usize,
     seq_len_k_ptr: u64,
+    kv_start_ptr: u64,
+    kv_end_ptr: u64,
     kv_capacity: usize,
     window_size: usize,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
@@ -121,6 +130,8 @@ pub fn decode_attention_graph_fwd(
             builder.arg(&stride_i32);
             builder.arg(&scale);
             builder.arg(&window_i32);
+            builder.arg(&kv_start_ptr);
+            builder.arg(&kv_end_ptr);
             builder.arg(&fill_i32);
             builder.launch(split_cfg).map_err(|e| Error::KernelError {
                 reason: format!("decode_attention_graph split kernel launch failed: {:?}", e),
@@ -180,6 +191,8 @@ pub fn decode_attention_graph_fwd(
         builder.arg(&stride_i32);
         builder.arg(&scale);
         builder.arg(&window_i32);
+        builder.arg(&kv_start_ptr);
+        builder.arg(&kv_end_ptr);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("decode_attention_graph kernel launch failed: {:?}", e),
         })?;

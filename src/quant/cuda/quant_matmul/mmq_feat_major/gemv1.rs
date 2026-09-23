@@ -1,11 +1,12 @@
 //! The single-token schedule of the feature-major family: `M = 1` on the
-//! formats `quant_mmq_gemv1.cu` compiles, which are the formats
-//! `mmqf_vec_dot_d` serves as a Q8_0 row. Same activation record, same K
-//! ranges (`split_count`), same float sequence per output element as the
-//! tensor-core kernels, so a decode step is the same bits as row 0 of any
-//! batch. A third schedule beside the tile-parallel grid and the split-K
-//! pair; the dispatch takes it under [`Schedule::Auto`] alone, so the forced
-//! schedules still reach the tensor-core kernels for comparison.
+//! formats `quant_mmq_gemv1.cu` compiles — the formats `mmqf_vec_dot_d`
+//! serves as a Q8_0 row, plus the 256-element K-quants Q4_K, Q5_K and Q6_K.
+//! Same activation record, same K ranges (`split_count`), same float
+//! sequence per output element as the tensor-core kernels, so a decode step
+//! is the same bits as row 0 of any batch. A third schedule beside the
+//! tile-parallel grid and the split-K pair; the dispatch takes it under
+//! [`Schedule::Auto`] alone, so the forced schedules still reach the
+//! tensor-core kernels for comparison.
 
 use crate::error::{Error, Result};
 use crate::quant::QuantFormat;
@@ -29,8 +30,8 @@ const FIXUP_THREADS: u32 = 256;
 /// The split-range fixup, shared by every format.
 const FIXUP_KERNEL: &str = "quant_mmq_q8_1_gemv1_fixup";
 
-/// The `M = 1` kernel of `format`, `None` for a format without one. The
-/// K-quants, the 4- and 5-bit legacy formats and the IQ formats stay on the
+/// The `M = 1` kernel of `format`, `None` for a format without one. Q2_K and
+/// Q3_K, the 4- and 5-bit legacy formats and the IQ formats stay on the
 /// tensor-core kernels at every M. The name follows `format.kernel_infix`,
 /// the same field `Tiling::kernel_name` reads for the tensor-core variants.
 pub(super) fn kernel_name(format: &FeatMajorFormat) -> Option<String> {
@@ -39,7 +40,10 @@ pub(super) fn kernel_name(format: &FeatMajorFormat) -> Option<String> {
         | QuantFormat::PQ2_0
         | QuantFormat::Q2_0
         | QuantFormat::Q1_0
-        | QuantFormat::PTQ1_0 => Some(format!("quant_mmq_{}_q8_1_gemv1", format.kernel_infix)),
+        | QuantFormat::PTQ1_0
+        | QuantFormat::Q4K
+        | QuantFormat::Q5K
+        | QuantFormat::Q6K => Some(format!("quant_mmq_{}_q8_1_gemv1", format.kernel_infix)),
         _ => None,
     }
 }
@@ -142,20 +146,25 @@ pub(super) fn launch(
 
 #[cfg(test)]
 mod tests {
-    use super::super::formats::{IQ4_NL, PQ2_0, PTQ1_0, Q1_0, Q2_0, Q4_0, Q4_K, Q8_0};
+    use super::super::formats::{
+        IQ4_NL, PQ2_0, PTQ1_0, Q1_0, Q2_0, Q2_K, Q3_K, Q4_0, Q4_K, Q5_K, Q6_K, Q8_0,
+    };
     use super::*;
 
-    /// The five formats `mmqf_vec_dot_d` serves as a Q8_0 row have the
-    /// kernel and are named by the `MMQ_GEMV1_KERNEL` spelling; the rest
-    /// stay on the tensor-core kernels.
+    /// The five formats `mmqf_vec_dot_d` serves as a Q8_0 row and the three
+    /// 256-element K-quants have the kernel and are named by the
+    /// `MMQ_GEMV1_KERNEL` spelling; the rest stay on the tensor-core kernels.
     #[test]
-    fn the_kernel_exists_for_the_q8_0_row_formats_alone() {
+    fn the_kernel_exists_for_the_compiled_formats_alone() {
         for (fm, infix) in [
             (&Q8_0, "q8_0"),
             (&PQ2_0, "pq2_0"),
             (&Q2_0, "q2_0"),
             (&Q1_0, "q1_0"),
             (&PTQ1_0, "ptq1_0"),
+            (&Q4_K, "q4_k"),
+            (&Q5_K, "q5_k"),
+            (&Q6_K, "q6_k"),
         ] {
             assert_eq!(
                 kernel_name(fm),
@@ -163,7 +172,8 @@ mod tests {
             );
         }
         assert_eq!(kernel_name(&Q4_0), None);
-        assert_eq!(kernel_name(&Q4_K), None);
+        assert_eq!(kernel_name(&Q2_K), None);
+        assert_eq!(kernel_name(&Q3_K), None);
         assert_eq!(kernel_name(&IQ4_NL), None);
     }
 
@@ -175,6 +185,8 @@ mod tests {
         assert!(serves(&Q8_0, 1, FeatTile::Force(16), Schedule::Auto).is_none());
         assert!(serves(&Q8_0, 1, FeatTile::Auto, Schedule::TileParallel).is_none());
         assert!(serves(&Q8_0, 1, FeatTile::Auto, Schedule::SplitK).is_none());
-        assert!(serves(&Q4_K, 1, FeatTile::Auto, Schedule::Auto).is_none());
+        assert!(serves(&Q4_K, 1, FeatTile::Auto, Schedule::Auto).is_some());
+        assert!(serves(&Q4_K, 1, FeatTile::Auto, Schedule::TileParallel).is_none());
+        assert!(serves(&Q2_K, 1, FeatTile::Auto, Schedule::Auto).is_none());
     }
 }

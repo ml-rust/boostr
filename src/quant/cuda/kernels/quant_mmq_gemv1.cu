@@ -1,11 +1,11 @@
 // Single-token (M = 1) entry points of the feature-major MMQ family:
-// `quant_mmq_<fmt>_q8_1_gemv1` for Q8_0, PQ2_0, Q2_0, Q1_0 and PTQ1_0, and
-// the shared split-range fixup `quant_mmq_q8_1_gemv1_fixup`. The body and
-// the contract it keeps with `quant_mmq_mma.cu` are in
-// `mmq/gemv1_body.cuh`: same int8 lanes, same exact int dot per chunk, same
-// scales, same float expression, same chunk order, same K ranges, so a
-// decode step here is the same bits as row 0 of any batch through the
-// tensor-core kernels.
+// `quant_mmq_<fmt>_q8_1_gemv1` for Q8_0, PQ2_0, Q2_0, Q1_0, PTQ1_0, Q4_K,
+// Q5_K and Q6_K, and the shared split-range fixup
+// `quant_mmq_q8_1_gemv1_fixup`. The body and the contract it keeps with
+// `quant_mmq_mma.cu` are in `mmq/gemv1_body.cuh`: same int8 lanes, same
+// exact int dot per chunk, same scales, same float expression, same chunk
+// order, same K ranges, so a decode step here is the same bits as row 0 of
+// any batch through the tensor-core kernels.
 //
 // Launch: grid `(ceil(N / 32), splits)`, block `GEMV1_THREADS`; the
 // staging buffers are static shared memory, so the launch requests none.
@@ -24,7 +24,8 @@
 // resident per SM: the walk is latency bound, so residency is what hides
 // the load round trips. The lowbit formats fit the 64-register cap eight
 // blocks imply without spilling (a 48-register cap spills). Q8_0's 27 KB
-// of staging bounds it at three blocks per SM, so its cap is set there.
+// of staging bounds it at three blocks per SM, so its cap is set there, and
+// the K-quants' 19 KB bounds them at five.
 #define MMQ_GEMV1_KERNEL(FMT, NAME, MIN_BLOCKS)                                      \
     extern "C" __global__ __launch_bounds__(GEMV1_THREADS, MIN_BLOCKS)               \
         void quant_mmq_##NAME##_q8_1_gemv1(                                          \
@@ -41,6 +42,9 @@ MMQ_GEMV1_KERNEL(Gemv1PQ20, pq2_0, 8)
 MMQ_GEMV1_KERNEL(Gemv1Q20, q2_0, 8)
 MMQ_GEMV1_KERNEL(Gemv1Q10, q1_0, 8)
 MMQ_GEMV1_KERNEL(Gemv1PTQ10, ptq1_0, 8)
+MMQ_GEMV1_KERNEL(Gemv1Q4K, q4_k, 5)
+MMQ_GEMV1_KERNEL(Gemv1Q5K, q5_k, 5)
+MMQ_GEMV1_KERNEL(Gemv1Q6K, q6_k, 5)
 
 // Format-neutral: it reads only the partials.
 extern "C" __global__ __launch_bounds__(GEMV1_FIXUP_THREADS) void quant_mmq_q8_1_gemv1_fixup(

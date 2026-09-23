@@ -1911,15 +1911,19 @@ impl MmqFormat {
     /// The single-token kernel of the feature-major family
     /// (`quant_mmq_<fmt>_q8_1_gemv1`, module `quant_mmq_gemv1`), which the
     /// production dispatch takes at M = 1 for the formats `mmqf_vec_dot_d`
-    /// serves as a Q8_0 row. Built from `feat_major_infix`, the same rule
-    /// `feat_major` below applies for the tensor-core name.
+    /// serves as a Q8_0 row and for the three 256-element K-quants. Mirrors
+    /// `mmq_feat_major::gemv1::kernel_name`; built from `feat_major_infix`,
+    /// the same rule `feat_major` below applies for the tensor-core name.
     fn gemv1_kernel(&self) -> Option<String> {
         match self {
             MmqFormat::Q8_0
             | MmqFormat::PQ20
             | MmqFormat::Q20
             | MmqFormat::Q10
-            | MmqFormat::PTQ10 => self
+            | MmqFormat::PTQ10
+            | MmqFormat::Q4K
+            | MmqFormat::Q5K
+            | MmqFormat::Q6K => self
                 .feat_major_infix()
                 .map(|infix| format!("quant_mmq_{infix}_q8_1_gemv1")),
             _ => None,

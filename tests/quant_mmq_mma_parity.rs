@@ -130,6 +130,37 @@ fn build_q4_k_weight(n: usize, k: usize) -> Vec<u8> {
     out
 }
 
+/// Builds a Q5_K weight buffer: `n * (k / 256)` super-blocks of 176 bytes —
+/// f16 `d` at byte 0, f16 `dmin` at byte 2, 12 bytes of packed 6-bit
+/// scales/minimums at byte 4, 32 bytes of fifth bits at byte 16, 128 bytes of
+/// nibble-packed quants at byte 48. Every bit pattern of the quant and scale
+/// fields is a valid block, so the bytes are built directly, as Q4_K's and
+/// Q6_K's are.
+fn build_q5_k_weight(n: usize, k: usize) -> Vec<u8> {
+    let supers = k / 256;
+    let mut out = vec![0u8; n * supers * 176];
+    for row in 0..n {
+        for s in 0..supers {
+            let block = row * supers + s;
+            let base = block * 176;
+            out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
+            out[base + 2..base + 4].copy_from_slice(
+                &half::f16::from_f32(0.03 + (block as f32 * 0.007) % 0.4).to_le_bytes(),
+            );
+            for i in 0..12 {
+                out[base + 4 + i] = (((block * 83 + i * 19) % 256) as i32 - 128) as u8;
+            }
+            for i in 0..32 {
+                out[base + 16 + i] = (((block * 149 + i * 37) % 256) as i32 - 128) as u8;
+            }
+            for i in 0..128 {
+                out[base + 48 + i] = (((block * 211 + i * 23) % 256) as i32 - 128) as u8;
+            }
+        }
+    }
+    out
+}
+
 /// Builds a Q6_K weight buffer: `n * (k / 256)` super-blocks of 210 bytes —
 /// `ql` at byte 0 (128 bytes), `qh` at byte 128 (64 bytes), 16 signed `sc`
 /// bytes at byte 192, f16 `d` at byte 208.
@@ -1192,8 +1223,22 @@ fn ptq1_0_mma_kernel_matches_gemv_kernel() {
 /// divides, so the ranges are ragged. At `n = 5120` the walk is one range.
 const GEMV1_DEPTHS: [usize; 3] = [640, 5120, 17408];
 
+/// K walks of the 256-element K-quants, whose dispatch gate is
+/// `k % 256 == 0`: 768 is three super-blocks, an odd count, which puts
+/// Q6_K's 210-byte row stride at 2 (mod 4) and walks its funnel shift through
+/// every offset a window start can take.
+const GEMV1_KQUANT_DEPTHS: [usize; 3] = [768, 5120, 17408];
+
 /// Output widths: one partial feature tile, and a wide projection.
 const GEMV1_WIDTHS: [usize; 2] = [96, 5120];
+
+/// The K walks `format` accepts.
+fn gemv1_depths(format: QuantFormat) -> &'static [usize] {
+    match format {
+        QuantFormat::Q4K | QuantFormat::Q5K | QuantFormat::Q6K => &GEMV1_KQUANT_DEPTHS,
+        _ => &GEMV1_DEPTHS,
+    }
+}
 
 /// A K per format whose row byte stride is 2 (mod 4), so a lane's chunk
 /// words straddle the staged 32-bit words at a shift the kernel cannot
@@ -1247,8 +1292,8 @@ fn gemv1_matches_mma(name: &str, format: QuantFormat, weight_bytes: &[u8], n: us
             mma[f].to_bits() == gemv1[f].to_bits(),
             "{name} N={n} K={k}: feature {f} is {:e} ({:#010x}) on the tensor-core kernel and \
              {:e} ({:#010x}) on the single-token kernel; the two must agree bitwise: same \
-             int8 lanes, same scales, same `acc += (float)D * da * dw` per chunk in ascending \
-             chunk order, same K ranges summed in range order",
+             int8 lanes, same scales, the same `mmqf_vec_dot_*` float expression per chunk in \
+             ascending chunk order, same K ranges summed in range order",
             mma[f],
             mma[f].to_bits(),
             gemv1[f],
@@ -1258,7 +1303,7 @@ fn gemv1_matches_mma(name: &str, format: QuantFormat, weight_bytes: &[u8], n: us
 }
 
 fn gemv1_check_format(name: &str, format: QuantFormat, build: fn(usize, usize) -> Vec<u8>) {
-    let depths = GEMV1_DEPTHS
+    let depths = gemv1_depths(format)
         .iter()
         .copied()
         .chain(gemv1_odd_stride_depth(format));
@@ -1311,5 +1356,32 @@ fn ptq1_0_gemv1_matches_mma_at_one_token() {
         "ptq1_0_gemv1_matches_mma_at_one_token",
         QuantFormat::PTQ1_0,
         build_ptq1_0_weight,
+    );
+}
+
+#[test]
+fn q4_k_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "q4_k_gemv1_matches_mma_at_one_token",
+        QuantFormat::Q4K,
+        build_q4_k_weight,
+    );
+}
+
+#[test]
+fn q5_k_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "q5_k_gemv1_matches_mma_at_one_token",
+        QuantFormat::Q5K,
+        build_q5_k_weight,
+    );
+}
+
+#[test]
+fn q6_k_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "q6_k_gemv1_matches_mma_at_one_token",
+        QuantFormat::Q6K,
+        build_q6_k_weight,
     );
 }

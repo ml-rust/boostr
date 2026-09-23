@@ -15,7 +15,10 @@
 // `CODES_PLUS_ONE` says the words hold `value + 1` as UNSIGNED bytes rather
 // than the value as signed bytes; the body then subtracts the chunk's
 // activation sum, which the record header carries exactly, so the chunk's
-// int dot is the same integer either way.
+// int dot is the same integer either way. `EPILOGUE` names the float form
+// the owner lane applies per chunk; every reader here carries one weight
+// scale per chunk and nothing else, which is `GEMV1_EPI_D`. The K-quant
+// readers in `gemv1_kquant.cuh` carry the other two forms.
 #pragma once
 
 #include <cuda_fp16.h>
@@ -25,6 +28,18 @@
 
 // Chunks per step: one 256-k group.
 #define GEMV1_STEP_CHUNKS MMQF_ITER_B
+
+// The float form the owner lane applies per 32-element chunk, one per
+// `mmqf_vec_dot_*` the tensor-core kernels share. `gemv1_chunks.cuh`
+// documents what each one gathers and applies.
+enum Gemv1Epilogue {
+    // `acc += (float)D * da * dw;`
+    GEMV1_EPI_D,
+    // `acc += dmw.x * da * (float)D; acc += dmw.y * da * sum_i;`
+    GEMV1_EPI_DM,
+    // `acc += (sc_lo * (float)D_lo + sc_hi * (float)D_hi) * da;`
+    GEMV1_EPI_SC16,
+};
 
 // Returns `v` through a lane's own shuffle slot, which the compiler cannot
 // rebuild from `v`'s inputs, so a per-lane constant built from a select
@@ -76,6 +91,7 @@ struct Gemv1Q80 {
     // `read` returns the chunk's words in element order, as signed bytes.
     static constexpr bool PAIRED_WORDS = false;
     static constexpr bool CODES_PLUS_ONE = false;
+    static constexpr Gemv1Epilogue EPILOGUE = GEMV1_EPI_D;
     using Lane = Gemv1NoLane;
     static __device__ __forceinline__ Lane setup(unsigned int) { return Lane{}; }
 
@@ -111,6 +127,7 @@ struct Gemv1Lowbit {
     // `read` returns the chunk's words in element order, as signed bytes.
     static constexpr bool PAIRED_WORDS = false;
     static constexpr bool CODES_PLUS_ONE = false;
+    static constexpr Gemv1Epilogue EPILOGUE = GEMV1_EPI_D;
     using Lane = Gemv1NoLane;
     static __device__ __forceinline__ Lane setup(unsigned int) { return Lane{}; }
 
@@ -188,6 +205,7 @@ struct Gemv1PTQ10 {
     // 1` as unsigned bytes.
     static constexpr bool PAIRED_WORDS = true;
     static constexpr bool CODES_PLUS_ONE = true;
+    static constexpr Gemv1Epilogue EPILOGUE = GEMV1_EPI_D;
 
     // Per-lane constants of the table above, fixed by the chunk slot.
     struct Lane {

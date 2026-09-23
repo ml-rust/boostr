@@ -141,12 +141,12 @@ pub fn graph_decode(
         Tensor::<CudaRuntime>::zeros(&[1, half_dim], rope_sin_cache.dtype(), device).unwrap(),
         false,
     );
-    let device_scalars = DeviceScalars::new(kv.seq_len(), device).unwrap();
+    let mut device_scalars = DeviceScalars::new(&[kv.seq_len()], device).unwrap();
     let next_token_buf = Tensor::<CudaRuntime>::zeros(&[1], DType::I64, device).unwrap();
     let logits_buf = Tensor::<CudaRuntime>::zeros(&[1, 1, dims.vocab], dtype, device).unwrap();
 
     // Warmup pass: every kernel loads, nothing captured.
-    device_scalars.update(client, kv.seq_len()).unwrap();
+    device_scalars.update(client, &[kv.seq_len()]).unwrap();
     let warmup_logits = model
         .forward_graph_mode(&token_buf, &mut kv, &device_scalars, &cos_slice, &sin_slice)
         .unwrap();
@@ -159,7 +159,7 @@ pub fn graph_decode(
     let first = super::qwen35_cuda::argmax(&prefill_row);
 
     let capture_seq_len = kv.seq_len();
-    device_scalars.update(client, capture_seq_len).unwrap();
+    device_scalars.update(client, &[capture_seq_len]).unwrap();
     device_scalars
         .update_rope_slices(
             client,

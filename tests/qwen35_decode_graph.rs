@@ -20,10 +20,8 @@ mod common;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use boostr::inference::decode_graph::{
-    DeviceScalars, MropeScalars, argmax_to_buf, copy_into_stable,
-};
-use boostr::inference::{LayeredGdnState, LayeredKvCache};
+use boostr::inference::decode_graph::{DeviceScalars, argmax_to_buf, copy_into_stable};
+use boostr::inference::{LaneTable, LayeredGdnState, LayeredKvCache};
 use boostr::model::qwen35::Qwen35Model;
 use common::qwen35_cuda::{
     ARENA_BYTES, caches, cuda_available, cuda_setup, eager_decode, gdn_flat, max_abs_diff, prefill,
@@ -67,15 +65,15 @@ fn graph_decode(
     let token_buf = Tensor::<CudaRuntime>::from_slice(&[first], &[1, 1], device).unwrap();
     let next_token_buf = Tensor::<CudaRuntime>::zeros(&[1], DType::I64, device).unwrap();
     let logits_buf = Tensor::<CudaRuntime>::zeros(&[1, 1, vocab], DType::F32, device).unwrap();
-    let scalars = DeviceScalars::new(seq_len, device).unwrap();
-    let mrope = MropeScalars::new(seq_len, device).unwrap();
+    let mut scalars = DeviceScalars::new(&[seq_len], device).unwrap();
+    let mut lanes = LaneTable::<CudaRuntime>::new(1, MAX_POS, device).unwrap();
 
     // Warm-up outside capture: kernels JIT and the tuner probes here. This
     // run writes the KV cache and the GDN buffers, so prefill again after.
-    scalars.update(client, seq_len).unwrap();
-    mrope.update(client, seq_len).unwrap();
+    scalars.update(client, &[seq_len]).unwrap();
+    lanes.set_rope_pos(client, 0, seq_len).unwrap();
     let warm = model
-        .forward_qwen35_graph_mode(client, &token_buf, &*kv, &*gdn, &scalars, &mrope)
+        .forward_qwen35_graph_mode(client, &token_buf, &*kv, &*gdn, &scalars, lanes.positions())
         .unwrap();
     argmax_to_buf(client, &warm, &next_token_buf).unwrap();
     let _ = next_token_buf.to_vec::<i64>();
@@ -93,7 +91,7 @@ fn graph_decode(
         ARENA_BYTES,
         |c| {
             let logits = model
-                .forward_qwen35_graph_mode(c, &token_buf, &*kv, &*gdn, &scalars, &mrope)
+                .forward_qwen35_graph_mode(c, &token_buf, &*kv, &*gdn, &scalars, lanes.positions())
                 .map_err(|e| numr::error::Error::Backend(format!("capture forward: {e}")))?;
             copy_into_stable(c, &logits, &logits_buf)?;
             argmax_to_buf(c, &logits, &next_token_buf)
@@ -107,8 +105,8 @@ fn graph_decode(
         if step > 0 {
             copy_into_stable(client, &next_token_buf, &token_buf).unwrap();
         }
-        scalars.update(client, position).unwrap();
-        mrope.update(client, position).unwrap();
+        scalars.update(client, &[position]).unwrap();
+        lanes.set_rope_pos(client, 0, position).unwrap();
         graph.launch().unwrap();
         rows.push(logits_buf.to_vec::<f32>());
         ids.push(next_token_buf.to_vec::<i64>()[0]);

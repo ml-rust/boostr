@@ -2,7 +2,7 @@
 //! full-capacity cache at the device-side write position, then attend over
 //! the device-side `seq_len_k` span.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::inference::KvCache;
 use crate::inference::decode_graph::DeviceScalars;
 use crate::ops::cuda::attention::flash::impl_ops::decode_attention_graph_fwd;
@@ -14,12 +14,18 @@ use numr::tensor::Tensor;
 /// decode attention for `q` over the first `*device_scalars.seq_len_k_ptr()`
 /// slots of the cache.
 ///
+/// `device_scalars` carries one position per lane, so `k` must hold exactly
+/// as many rows as it has lanes: `kv_insert` reads `write_pos[b]` for row
+/// `b`, and a shorter buffer would be read past its end.
+///
 /// `sliding_window` is a static config value baked into the captured graph;
 /// pass `0` for full attention.
 ///
 /// # Errors
 ///
-/// Propagates errors from `kv_insert` and `decode_attention_graph_fwd`.
+/// [`Error::InferenceError`] when `k`'s batch is not the scalars' lane
+/// count; errors from `kv_insert` and `decode_attention_graph_fwd`
+/// propagate.
 #[allow(clippy::too_many_arguments)]
 pub fn insert_and_decode_attention(
     client: &CudaClient,
@@ -33,6 +39,17 @@ pub fn insert_and_decode_attention(
     head_dim: usize,
     sliding_window: usize,
 ) -> Result<Tensor<CudaRuntime>> {
+    let batch = k.shape().first().copied().unwrap_or(0);
+    if batch != device_scalars.batch() {
+        return Err(Error::InferenceError {
+            reason: format!(
+                "decode step has {batch} rows but the decode scalars hold {} lanes; allocate \
+                 the scalars with one lane per row of this launch",
+                device_scalars.batch()
+            ),
+        });
+    }
+
     kv_insert(
         client,
         k,

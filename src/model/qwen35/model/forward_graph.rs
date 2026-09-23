@@ -6,8 +6,8 @@
 //! | Input                     | Written how                                    |
 //! |---------------------------|------------------------------------------------|
 //! | `input_ids` `[1, 1]` i64  | caller, D2D async from the previous output      |
-//! | `DeviceScalars`           | caller, `DeviceScalars::update(seq_len)`        |
-//! | `MropeScalars` positions  | caller, `MropeScalars::update(rope_pos)`        |
+//! | `DeviceScalars`           | caller, `DeviceScalars::update(&[seq_len])`     |
+//! | IMROPE positions `[4,B,1]`| caller, `LaneTable::set_rope_pos(rope_pos)`     |
 //! | KV cache k/v buffers      | graph, `kv_insert` at `write_pos`               |
 //! | GDN conv/ssm buffers      | graph, `GdnState::update_shared`                |
 //!
@@ -21,7 +21,7 @@ use super::forward::ffn_residual;
 #[cfg(feature = "cuda")]
 use crate::error::{Error, Result};
 #[cfg(feature = "cuda")]
-use crate::inference::decode_graph::{DeviceScalars, MropeScalars};
+use crate::inference::decode_graph::DeviceScalars;
 #[cfg(feature = "cuda")]
 use crate::inference::{LayeredGdnState, LayeredKvCache};
 
@@ -35,9 +35,9 @@ impl Qwen35Model<numr::runtime::cuda::CudaRuntime> {
     ///
     /// 1. Pre-allocate `kv_cache` at full capacity and prefill it eagerly.
     /// 2. Prefill `gdn_state` eagerly with the same tokens.
-    /// 3. Write `device_scalars` for the KV slot (`seq_len`) and `mrope`
-    ///    for the rope position before every replay. The two agree for a
-    ///    text-only context and drift apart after an image.
+    /// 3. Write `device_scalars` for the KV slot (`seq_len`) and
+    ///    `mrope_positions` for the rope position before every replay. The
+    ///    two agree for a text-only context and drift apart after an image.
     /// 4. Advance both counters outside the graph: this forward does not
     ///    read the CPU-side cache length, and does not advance it.
     ///
@@ -52,7 +52,7 @@ impl Qwen35Model<numr::runtime::cuda::CudaRuntime> {
         kv_cache: &LayeredKvCache<numr::runtime::cuda::CudaRuntime>,
         gdn_state: &LayeredGdnState<numr::runtime::cuda::CudaRuntime>,
         device_scalars: &DeviceScalars,
-        mrope: &MropeScalars,
+        mrope_positions: &numr::tensor::Tensor<numr::runtime::cuda::CudaRuntime>,
     ) -> Result<numr::tensor::Tensor<numr::runtime::cuda::CudaRuntime>> {
         let mut hidden = self.embed_tokens.forward(client, input_ids)?;
         let mut attn_idx = 0usize;
@@ -73,7 +73,7 @@ impl Qwen35Model<numr::runtime::cuda::CudaRuntime> {
                         client,
                         &normed,
                         &self.rope,
-                        mrope.positions(),
+                        mrope_positions,
                         cache,
                         device_scalars,
                     )?;

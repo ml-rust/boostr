@@ -32,8 +32,8 @@ impl Qwen35AttentionBlock<numr::runtime::cuda::CudaRuntime> {
     /// `decode_attention_graph_fwd` attends over the first
     /// `*device_scalars.seq_len_k_ptr()` slots of the full-capacity cache.
     ///
-    /// - `positions`: `[4, 1]` i32 IMROPE streams with a stable address
-    ///   (`MropeScalars::positions`); the gather runs on the device.
+    /// - `positions`: `[4, batch, 1]` i32 IMROPE streams with a stable
+    ///   address (`LaneTable::positions`); the gather runs on the device.
     /// - `kv_cache`: pre-allocated at full capacity; `k_cache_raw()` and
     ///   `v_cache_raw()` are the addresses the graph holds. The CPU-side
     ///   `seq_len` is not advanced here.

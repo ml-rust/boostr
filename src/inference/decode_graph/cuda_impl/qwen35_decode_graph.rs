@@ -3,17 +3,17 @@
 //!
 //! Sibling of [`DecodeGraph`](super::DecodeGraph). The Llama graph copies a
 //! RoPE cos/sin row per replay; `qwen35` reads its IMROPE rows on the device
-//! from [`MropeScalars`], so the per-replay work is the token copy and the
-//! two scalar writes.
+//! from the lane table's positions tensor, so the per-replay work is the
+//! token copy, the scalar write and the position write.
 
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::device_scalars::DeviceScalars;
-use super::mrope_scalars::MropeScalars;
 use super::seed_token::seed_i64;
 use super::stable_copy::copy_into_stable;
 use crate::error::{Error, Result};
+use crate::inference::lanes::LaneTable;
 
 /// Captured CUDA decode graph for `qwen35` plus the buffers a replay reads.
 ///
@@ -27,8 +27,9 @@ pub struct Qwen35DecodeGraph {
     /// Device-side `seq_len_k` and `write_pos`.
     pub device_scalars: DeviceScalars,
 
-    /// Device-side IMROPE positions for the token this replay decodes.
-    pub mrope: MropeScalars,
+    /// Lane table holding the `[4, batch, 1]` IMROPE positions the graph
+    /// gathers its cos/sin rows from.
+    pub lanes: LaneTable<CudaRuntime>,
 
     /// Stable input tensor for the embedding lookup `[1, 1]` i64.
     pub token_buf: Tensor<CudaRuntime>,
@@ -61,7 +62,7 @@ impl Qwen35DecodeGraph {
     /// Per token, all stream-ordered on the compute stream:
     /// 1. D2D async: `next_token_buf` -> `token_buf`.
     /// 2. Write `device_scalars` for `seq_len`.
-    /// 3. Write `mrope` positions for `rope_pos`.
+    /// 3. Write lane 0's IMROPE positions for `rope_pos`.
     /// 4. Launch the graph, then advance both counters.
     ///
     /// After this call `next_token_buf` holds this step's argmax. The caller
@@ -72,8 +73,8 @@ impl Qwen35DecodeGraph {
                 reason: format!("Qwen35DecodeGraph token_buf copy failed: {e}"),
             }
         })?;
-        self.device_scalars.update(client, self.seq_len)?;
-        self.mrope.update(client, self.rope_pos)?;
+        self.device_scalars.update(client, &[self.seq_len])?;
+        self.lanes.set_rope_pos(client, 0, self.rope_pos)?;
         self.graph.launch()?;
         self.seq_len += 1;
         self.rope_pos += 1;

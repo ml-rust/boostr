@@ -101,7 +101,7 @@ impl DecodeGraph {
         }
 
         // 2. H2D async: update device scalars (stream-ordered)
-        self.device_scalars.update(client, self.seq_len)?;
+        self.device_scalars.update(client, &[self.seq_len])?;
 
         // 3. D2D async: update RoPE slices for this position (stream-ordered)
         let stream_handle = client.stream().cu_stream();

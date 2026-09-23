@@ -50,11 +50,11 @@
 //!
 //! The `qwen35` graph (`Qwen35DecodeGraph`) has no RoPE slices; it adds two
 //! more stable inputs, both written before each replay or by the graph
-//! itself:
+//! itself. Its IMROPE positions come from a `LaneTable`, one row per lane:
 //!
 //! | Tensor             | Allocated   | Updated how                          |
 //! |--------------------|-------------|--------------------------------------|
-//! | `MropeScalars`     | pre-capture | `cuMemsetD32Async` from CPU          |
+//! | lane `positions`   | pre-capture | H2D async (HtoDAsync) from CPU       |
 //! | `GdnState` buffers | pre-capture | written by graph (`copy_into`)       |
 
 #[cfg(feature = "cuda")]

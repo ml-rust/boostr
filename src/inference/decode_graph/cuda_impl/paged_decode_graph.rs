@@ -79,7 +79,7 @@ impl PagedDecodeGraph {
         }
 
         // 2. Update device scalars (seq_len_k, write_pos)
-        self.device_scalars.update(client, self.seq_len)?;
+        self.device_scalars.update(client, &[self.seq_len])?;
 
         // 3. Update slot_mapping[0] = seq_len (the paged cache slot for this token)
         unsafe {

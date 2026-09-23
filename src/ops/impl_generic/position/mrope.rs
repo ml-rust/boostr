@@ -78,7 +78,8 @@ pub fn mrope_stream_selector<R: Runtime<DType = DType>>(
 ///
 /// - `x`: `[batch, seq, heads, head_dim]`
 /// - `cos_cache`, `sin_cache`: `[max_pos, n_rot / 2]`
-/// - `positions`: `[4, seq]`, I32 or I64
+/// - `positions`: `[4, seq]` shared by every row, or `[4, batch, seq]` with
+///   a row of its own per sequence, I32 or I64
 /// - `selector`: `[4, 1, n_rot / 2]` one-hot stream selector from
 ///   [`mrope_stream_selector`], built once per layer
 ///
@@ -131,13 +132,20 @@ where
             });
         }
     }
+    let batch = x_shape[0];
     let pos_shape = positions.shape();
-    if pos_shape != [4, seq] {
-        return Err(Error::InvalidArgument {
-            arg: "positions",
-            reason: format!("expected [4, seq={seq}], got {pos_shape:?}"),
-        });
-    }
+    let pos_batch = match pos_shape {
+        [4, s] if *s == seq => 1,
+        [4, b, s] if *b == batch && *s == seq => batch,
+        _ => {
+            return Err(Error::InvalidArgument {
+                arg: "positions",
+                reason: format!(
+                    "expected [4, seq={seq}] or [4, batch={batch}, seq={seq}], got {pos_shape:?}"
+                ),
+            });
+        }
+    };
     let sel_shape = selector.shape();
     if sel_shape != [4, 1, half_rot] {
         return Err(Error::InvalidArgument {
@@ -147,10 +155,18 @@ where
     }
     let x_dtype = x.tensor().dtype();
 
-    // Gather every stream's row at once: `[4, seq, half_rot]`, then keep the
-    // selected stream per pair: `[seq, half_rot]`.
+    // Gather every stream's row at once: `[4, pos_batch * seq, half_rot]`,
+    // then keep the selected stream per pair. A shared `[4, seq]` position
+    // set broadcasts over the batch; a per-row set carries its own rows.
+    // The gather reads a `[4, rows]` index set; a per-row position tensor
+    // is the same values with the rows spelled out.
+    let flat_pos = if pos_shape.len() == 2 {
+        positions.clone()
+    } else {
+        positions.reshape(&[4, pos_batch * seq])?
+    };
     let select = |cache: &Var<R>| -> Result<Var<R>> {
-        let rows = client.embedding_lookup(cache.tensor(), positions)?;
+        let rows = client.embedding_lookup(cache.tensor(), &flat_pos)?;
         let sel = if selector.dtype() == rows.dtype() {
             selector.clone()
         } else {
@@ -163,7 +179,7 @@ where
         } else {
             client.cast(&picked, x_dtype)?
         };
-        let picked = picked.reshape(&[1, seq, 1, half_rot])?;
+        let picked = picked.reshape(&[pos_batch, seq, 1, half_rot])?;
         Ok(Var::new(picked, false))
     };
     let cos = select(cos_cache)?;

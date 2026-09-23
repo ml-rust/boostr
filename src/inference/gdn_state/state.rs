@@ -1,4 +1,4 @@
-//! Gated DeltaNet state: per-layer recurrent state for `qwen35` inference.
+//! One Gated DeltaNet layer's recurrent state.
 //!
 //! Analogous to [`SsmState`](crate::inference::SsmState) for Mamba2. Stores:
 //!
@@ -22,11 +22,11 @@ use numr::tensor::Tensor;
 /// One GDN layer's recurrent state.
 pub struct GdnState<R: Runtime> {
     /// Conv window: `[batch, qkv_dim, conv_kernel - 1]`.
-    conv: Tensor<R>,
+    pub(super) conv: Tensor<R>,
     /// Delta-rule state: `[batch, value_heads, S, S]`.
-    ssm: Tensor<R>,
+    pub(super) ssm: Tensor<R>,
     /// True once a forward pass wrote the state.
-    initialized: bool,
+    pub(super) initialized: bool,
 }
 
 impl<R: Runtime<DType = DType>> GdnState<R> {
@@ -140,51 +140,6 @@ impl<R: Runtime<DType = DType>> GdnState<R> {
     }
 }
 
-/// Per-layer GDN states for a whole model, indexed by GDN layer index
-/// (the position among the model's GDN layers, not the absolute layer index).
-pub struct LayeredGdnState<R: Runtime> {
-    layers: Vec<GdnState<R>>,
-}
-
-impl<R: Runtime<DType = DType>> LayeredGdnState<R> {
-    /// Zero states for `num_layers` GDN layers.
-    pub fn zeros(
-        num_layers: usize,
-        cfg: &GdnConfig,
-        batch: usize,
-        dtype: DType,
-        device: &R::Device,
-    ) -> Result<Self> {
-        let layers = (0..num_layers)
-            .map(|_| GdnState::zeros(cfg, batch, dtype, device))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self { layers })
-    }
-
-    /// Mutable state of GDN layer `idx`.
-    pub fn layer_mut(&mut self, idx: usize) -> Option<&mut GdnState<R>> {
-        self.layers.get_mut(idx)
-    }
-
-    /// State of GDN layer `idx`.
-    pub fn layer(&self, idx: usize) -> Option<&GdnState<R>> {
-        self.layers.get(idx)
-    }
-
-    /// GDN layer count.
-    pub fn num_layers(&self) -> usize {
-        self.layers.len()
-    }
-
-    /// Reset every layer in place; every buffer keeps its address.
-    pub fn reset<C: BinaryOps<R>>(&mut self, client: &C) -> Result<()> {
-        for layer in &mut self.layers {
-            layer.reset(client)?;
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,15 +204,5 @@ mod tests {
 
         let wrong = Tensor::<CpuRuntime>::ones(&[1, 32, 2], DType::F32, &device).unwrap();
         assert!(state.update_shared(&client, &wrong, &ssm).is_err());
-    }
-
-    #[test]
-    fn layered_indexing() {
-        let device = CpuDevice::new();
-        let layers =
-            LayeredGdnState::<CpuRuntime>::zeros(3, &cfg(), 1, DType::F32, &device).unwrap();
-        assert_eq!(layers.num_layers(), 3);
-        assert!(layers.layer(2).is_some());
-        assert!(layers.layer(3).is_none());
     }
 }

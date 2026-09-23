@@ -258,3 +258,85 @@ fn strided_input_view() {
     let (chain, fused) = both(&client, &device, BONSAI, &x, &pos);
     assert_bits_equal(&chain, &fused, "strided view");
 }
+
+/// `[4, batch, seq]` positions, one stream row per sequence.
+fn per_row_positions(device: &CudaDevice, rows: &[[&[i32]; 4]]) -> Tensor<CudaRuntime> {
+    let batch = rows.len();
+    let seq = rows[0][0].len();
+    let mut data = Vec::with_capacity(4 * batch * seq);
+    for stream in 0..4 {
+        for row in rows {
+            data.extend_from_slice(row[stream]);
+        }
+    }
+    Tensor::<CudaRuntime>::from_slice(&data, &[4, batch, seq], device).unwrap()
+}
+
+/// A batched decode gives each row its own position, and a row's output
+/// carries the same bits it does on its own. Both the composed op and the
+/// fused kernel have to hold that.
+#[test]
+fn per_row_positions_match_the_same_row_alone() {
+    let _guard = cuda_lock();
+    let Some((client, device)) = cuda_setup() else {
+        return;
+    };
+    let (heads, batch) = (24, 3);
+    let rows: [[&[i32]; 4]; 3] = [
+        [&[7], &[7], &[7], &[0]],
+        [&[301], &[19], &[4], &[1]],
+        [&[0], &[0], &[0], &[0]],
+    ];
+    let shape = [batch, 1, heads, BONSAI.head_dim];
+    let x = Tensor::<CudaRuntime>::from_slice(
+        &values(batch * heads * BONSAI.head_dim, 3),
+        &shape,
+        &device,
+    )
+    .unwrap();
+
+    let pos = per_row_positions(&device, &rows);
+    let (chain, fused) = both(&client, &device, BONSAI, &x, &pos);
+    assert_bits_equal(&chain, &fused, "per-row chain vs fused");
+
+    let row_len = heads * BONSAI.head_dim;
+    for (r, streams) in rows.iter().enumerate() {
+        let solo_x = x.narrow(0, r, 1).unwrap().contiguous().unwrap();
+        let solo_pos = positions(&device, *streams);
+        let (solo_chain, solo_fused) = both(&client, &device, BONSAI, &solo_x, &solo_pos);
+        let window = r * row_len..(r + 1) * row_len;
+        assert_bits_equal(
+            &chain[window.clone()],
+            &solo_chain,
+            &format!("row {r} chain"),
+        );
+        assert_bits_equal(&fused[window], &solo_fused, &format!("row {r} fused"));
+    }
+}
+
+/// Positions repeated per row give the bits the shared `[4, seq]` form
+/// gives, so reading them per row costs no numeric change.
+#[test]
+fn per_row_positions_equal_shared_positions_when_repeated() {
+    let _guard = cuda_lock();
+    let Some((client, device)) = cuda_setup() else {
+        return;
+    };
+    let (heads, batch) = (4, 2);
+    let streams: [&[i32]; 4] = [&[5, 6], &[5, 6], &[5, 6], &[0, 0]];
+    let shape = [batch, 2, heads, TINY.head_dim];
+    let x = Tensor::<CudaRuntime>::from_slice(
+        &values(batch * 2 * heads * TINY.head_dim, 4),
+        &shape,
+        &device,
+    )
+    .unwrap();
+
+    let shared = positions(&device, streams);
+    let (shared_chain, shared_fused) = both(&client, &device, TINY, &x, &shared);
+    let repeated = per_row_positions(&device, &[streams, streams]);
+    let (row_chain, row_fused) = both(&client, &device, TINY, &x, &repeated);
+
+    assert_bits_equal(&shared_chain, &row_chain, "shared vs per-row chain");
+    assert_bits_equal(&shared_fused, &row_fused, "shared vs per-row fused");
+}

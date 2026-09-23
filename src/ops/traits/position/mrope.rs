@@ -15,7 +15,9 @@ use numr::tensor::Tensor;
 /// - `cos_cache`, `sin_cache`: `[max_pos, n_rot / 2]`, the table
 ///   `RoPE::precompute_freqs(max_pos, n_rot, freq_base, ..)` builds
 /// - `positions`: `[4, seq]`, I32 or I64, one row per stream `t, h, w, e`,
-///   shared across the batch. ggml reads the same layout:
+///   shared across the batch, or `[4, batch, seq]` to give each sequence
+///   its own positions — what a batched decode needs, where every row sits
+///   at a position of its own. ggml reads the shared layout:
 ///   `p_t = pos[i2]; p_h = pos[i2 + ne2]; p_w = pos[i2 + ne2*2]; p_e = pos[i2 + ne2*3]`
 /// - `sections`: pair counts per stream `[t, h, w, e]`
 /// - `n_rot`: rotated width. Dims `n_rot..head_dim` pass through.

@@ -14,12 +14,12 @@ use numr::tensor::Tensor;
 ///
 /// Stores K and V tensors with shape [batch, num_kv_heads, capacity, head_dim].
 pub struct KvCache<R: Runtime> {
-    k_cache: Tensor<R>,
-    v_cache: Tensor<R>,
-    seq_len: usize,
+    pub(super) k_cache: Tensor<R>,
+    pub(super) v_cache: Tensor<R>,
+    pub(super) seq_len: usize,
     capacity: usize,
-    max_seq_len: usize,
-    batch_size: usize,
+    pub(super) max_seq_len: usize,
+    pub(super) batch_size: usize,
     num_kv_heads: usize,
     head_dim: usize,
     dtype: DType,
@@ -101,7 +101,7 @@ where
         Ok(())
     }
 
-    fn ensure_capacity(&mut self, required: usize) -> Result<()> {
+    pub(super) fn ensure_capacity(&mut self, required: usize) -> Result<()> {
         if required > self.capacity {
             self.grow(required)?;
         }

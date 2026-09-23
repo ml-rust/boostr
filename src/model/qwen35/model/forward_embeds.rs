@@ -7,6 +7,7 @@
 //! image.
 
 use super::build::Qwen35Model;
+use super::forward::AttentionStep;
 use crate::error::{Error, Result};
 use crate::inference::{LayeredGdnState, LayeredKvCache};
 use crate::model::traits::ModelClient;
@@ -134,9 +135,15 @@ where
             });
         }
         let hidden = Var::new(embeds.clone(), false);
-        let hidden = self.forward_layers(client, hidden, positions, kv_cache, gdn_state)?;
-        let logits = self.lm_head.forward(client, &hidden)?;
-        Ok(logits.tensor().clone())
+        let hidden = self.forward_layers(
+            client,
+            hidden,
+            positions,
+            kv_cache,
+            gdn_state,
+            &AttentionStep::Shared,
+        )?;
+        self.logits_from_hidden(client, &hidden)
     }
 }
 

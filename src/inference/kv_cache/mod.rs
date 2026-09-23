@@ -1,4 +1,5 @@
 pub mod basic;
+pub mod lanes;
 pub mod layered;
 pub mod paged;
 

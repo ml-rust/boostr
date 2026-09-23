@@ -22,6 +22,17 @@ use numr::ops::{
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
+/// How the attention layers of [`Qwen35Model::forward_layers`] take their
+/// KV step.
+pub(super) enum AttentionStep<'a, R: Runtime> {
+    /// One `[4, seq]` position set shared by the whole batch; the mixer's
+    /// ordinary KV-cached forward.
+    Shared,
+    /// One lane per sequence: `[4, batch, 1]` positions and each lane's own
+    /// first cache position.
+    PerLane { kv_start: &'a Tensor<R> },
+}
+
 impl<R: Runtime<DType = DType>> Qwen35Model<R>
 where
     R::Client: IndexingOps<R>,
@@ -128,12 +139,20 @@ where
         )?;
         let positions = self.text_positions(seq_len, 0, device)?;
         let hidden = self.embed_tokens.forward(client, input_ids)?;
-        self.forward_layers(client, hidden, &positions, &mut kv_cache, &mut gdn_state)
+        self.forward_layers(
+            client,
+            hidden,
+            &positions,
+            &mut kv_cache,
+            &mut gdn_state,
+            &AttentionStep::Shared,
+        )
     }
 
     /// Walk every block over `hidden` `[batch, seq, hidden]`, then apply
     /// `output_norm`. `positions` is the `[4, seq]` i32 IMROPE tensor every
-    /// attention layer reads.
+    /// attention layer reads for [`AttentionStep::Shared`], or the
+    /// `[4, batch, 1]` per-lane tensor for [`AttentionStep::PerLane`].
     pub(super) fn forward_layers<C>(
         &self,
         client: &C,
@@ -141,6 +160,7 @@ where
         positions: &Tensor<R>,
         kv_cache: &mut LayeredKvCache<R>,
         gdn_state: &mut LayeredGdnState<R>,
+        step: &AttentionStep<'_, R>,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R>,
@@ -173,9 +193,14 @@ where
                             ),
                         })?;
                     let normed = layer.attn_norm.forward(client, &hidden)?;
-                    let mixed = layer
-                        .mixer
-                        .forward(client, &normed, &self.rope, positions, cache)?;
+                    let mixed = match step {
+                        AttentionStep::Shared => layer
+                            .mixer
+                            .forward(client, &normed, &self.rope, positions, cache)?,
+                        AttentionStep::PerLane { kv_start } => layer.mixer.forward_batched_decode(
+                            client, &normed, &self.rope, positions, cache, kv_start,
+                        )?,
+                    };
                     hidden = ffn_residual(
                         client,
                         &hidden,
@@ -208,6 +233,30 @@ where
         }
 
         self.norm.forward(client, &hidden)
+    }
+
+    /// `lm_head` over an already-normed hidden state, flattened to a plain
+    /// tensor. Shared tail of [`forward_qwen35_embeds`](Self::forward_qwen35_embeds)
+    /// and the batched decode forward.
+    pub(super) fn logits_from_hidden<C>(&self, client: &C, hidden: &Var<R>) -> Result<Tensor<R>>
+    where
+        C: ModelClient<R>,
+        R::Client: TensorOps<R>
+            + ScalarOps<R>
+            + ReduceOps<R>
+            + IndexingOps<R>
+            + ShapeOps<R>
+            + ActivationOps<R>
+            + BinaryOps<R>
+            + UnaryOps<R>
+            + CompareOps<R>
+            + ConditionalOps<R>
+            + ConvOps<R>
+            + DequantOps<R>
+            + MatmulOps<R>,
+    {
+        let logits = self.lm_head.forward(client, hidden)?;
+        Ok(logits.tensor().clone())
     }
 
     pub fn config(&self) -> &UniversalConfig {

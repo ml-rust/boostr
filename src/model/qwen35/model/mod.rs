@@ -6,12 +6,15 @@
 //!   forward, and accessors
 //! - `forward_embeds`: the same forward over pre-built input embeddings
 //!   with explicit IMROPE positions, plus `embed_tokens`
+//! - `forward_batched`: one decode step for a batch of sequences, a lane
+//!   each, with per-lane positions and `kv_start`
 //! - `forward_graph`: the CUDA graph-mode decode forward
 //! - `gguf` + `gguf_layers`: [`Qwen35Model::from_varbuilder`] over a
 //!   GGUF-filled `VarMap`
 
 mod build;
 mod forward;
+mod forward_batched;
 mod forward_embeds;
 mod forward_graph;
 mod gguf;

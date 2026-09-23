@@ -121,12 +121,18 @@ pub(crate) fn mrope_interleaved_f32(
             ),
         });
     }
-    if positions.shape() != [4, seq] {
-        return Err(Error::InvalidArgument {
-            arg: "positions",
-            reason: format!("expected [4, seq={seq}], got {:?}", positions.shape()),
-        });
-    }
+    let pos_batch = match positions.shape() {
+        [4, s] if *s == seq => 1,
+        [4, b, s] if *b == batch && *s == seq => batch,
+        shape => {
+            return Err(Error::InvalidArgument {
+                arg: "positions",
+                reason: format!(
+                    "expected [4, seq={seq}] or [4, batch={batch}, seq={seq}], got {shape:?}"
+                ),
+            });
+        }
+    };
     if selector.shape() != [4, 1, half_rot] {
         return Err(Error::InvalidArgument {
             arg: "selector",
@@ -198,6 +204,7 @@ pub(crate) fn mrope_interleaved_f32(
     let head_dim_i32 = head_dim as i32;
     let n_rot_i32 = n_rot as i32;
     let max_pos_i32 = max_pos as i32;
+    let pos_batch_i32 = pos_batch as i32;
 
     unsafe {
         let mut builder = client.stream().launch_builder(&func);
@@ -216,6 +223,7 @@ pub(crate) fn mrope_interleaved_f32(
         builder.arg(&sb);
         builder.arg(&ss);
         builder.arg(&sh);
+        builder.arg(&pos_batch_i32);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("{KERNEL_NAME} launch failed for x {x_shape:?}: {e:?}"),
         })?;

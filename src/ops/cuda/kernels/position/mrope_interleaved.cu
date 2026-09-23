@@ -21,7 +21,8 @@
 //   (x_stride_b, x_stride_s, x_stride_h) in elements
 // - out: dense [B, S, H, D]
 // - cos_table, sin_table: dense [max_pos, n_rot / 2]
-// - positions: dense [4, S] i32
+// - positions: dense [4, S] i32 shared by every row, or dense
+//   [4, B, S] i32 with a row per sequence (pos_batch selects which)
 // - selector: dense [4, n_rot / 2] f32
 //
 // One thread per (b, s, h, i) with i < n_rot / 2 + (D - n_rot): the first
@@ -45,7 +46,8 @@ extern "C" __global__ void mrope_interleaved_f32(
     const int max_pos,
     const int x_stride_b,
     const int x_stride_s,
-    const int x_stride_h
+    const int x_stride_h,
+    const int pos_batch
 ) {
     const int half_rot = n_rot / 2;
     const int work = half_rot + (head_dim - n_rot);
@@ -73,7 +75,7 @@ extern "C" __global__ void mrope_interleaved_f32(
     float sn = 0.0f;
     #pragma unroll
     for (int stream = 0; stream < 4; ++stream) {
-        const int pos = positions[stream * seq + s];
+        const int pos = positions[(stream * pos_batch + (pos_batch > 1 ? b : 0)) * seq + s];
         const float sel = selector[stream * half_rot + i];
         float ct = 0.0f;
         float snt = 0.0f;

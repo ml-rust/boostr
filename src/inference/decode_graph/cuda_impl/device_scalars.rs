@@ -24,8 +24,7 @@ pub struct DeviceScalars {
     /// `[batch]` I32 attention loop bound, one per lane.
     ///
     /// Passed to `decode_attention_*` as `seq_len_k_ptr`; the kernels
-    /// dereference it at runtime, so the bound can differ between graph
-    /// replays.
+    /// dereference it at runtime, so the bound can differ between replays.
     pub seq_len_k: Tensor<CudaRuntime>,
 
     /// `[batch]` I32 KV insert position, one per lane.
@@ -172,6 +171,60 @@ impl DeviceScalars {
             .write_host_slice(&self.seq_len_k, &self.ends)
             .map_err(Error::Numr)
     }
+
+    /// Stream-ordered write for a lane-parallel replay: one insert position
+    /// per lane, and the shared key-axis clamp.
+    ///
+    /// `lens[b]` is the number of tokens lane `b` holds before this step's
+    /// insert, so `write_pos[b] = lens[b]`, exactly as [`Self::update`]
+    /// writes it. `seq_len_k` differs: the `_graph` kernels read it once per
+    /// launch, from element 0, as the row-independent clamp on the key axis,
+    /// while the lane table's `kv_end` carries the per-row bound. Every
+    /// element carries `capacity`, the KV cache's static capacity, so the
+    /// clamp never varies with a lane's live length.
+    ///
+    /// Both writes read the struct's own staging buffers, so the call
+    /// allocates nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InferenceError`] when `lens` does not hold one length per
+    /// lane, or a length or `capacity` is past what an I32 holds; a copy
+    /// error propagates.
+    pub fn update_lanes(
+        &mut self,
+        client: &CudaClient,
+        lens: &[usize],
+        capacity: usize,
+    ) -> Result<()> {
+        let batch = self.batch();
+        if lens.len() != batch {
+            return Err(Error::InferenceError {
+                reason: format!(
+                    "decode scalars hold {batch} lanes but {} lane lengths were given; pass one \
+                     length per lane, or allocate the scalars with {} lanes",
+                    lens.len(),
+                    lens.len()
+                ),
+            });
+        }
+
+        let bound = as_i32(capacity, "seq_len_k capacity", 0)?;
+
+        self.slots.clear();
+        for (lane, len) in lens.iter().enumerate() {
+            self.slots.push(as_i32(*len, "write_pos", lane)?);
+        }
+        self.ends.clear();
+        self.ends.resize(batch, bound);
+
+        client
+            .write_host_slice(&self.write_pos, &self.slots)
+            .map_err(Error::Numr)?;
+        client
+            .write_host_slice(&self.seq_len_k, &self.ends)
+            .map_err(Error::Numr)
+    }
 }
 
 /// `value` as the I32 a device tensor holds, or an error naming the lane.
@@ -284,6 +337,62 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains('2'), "{text}");
         assert!(text.contains('3'), "{text}");
+    }
+
+    /// A lane-parallel write keeps each lane's insert position and gives
+    /// every lane the static capacity as the shared clamp, not a value
+    /// derived from the lane lengths.
+    #[test]
+    fn a_lane_parallel_update_clamps_every_lane_at_the_capacity() {
+        let Some(cuda) = cuda_setup() else { return };
+        let mut scalars = DeviceScalars::new(&[0, 0, 0], &cuda.device).expect("scalars");
+
+        scalars
+            .update_lanes(&cuda.client, &[2, 7, 0], 64)
+            .expect("write");
+
+        assert_eq!(scalars.write_pos.to_vec::<i32>(), vec![2, 7, 0]);
+        assert_eq!(scalars.seq_len_k.to_vec::<i32>(), vec![64, 64, 64]);
+    }
+
+    /// The clamp is the capacity argument, not the longest lane: it does not
+    /// move when a lane's length changes between calls.
+    #[test]
+    fn the_clamp_does_not_move_when_a_lanes_length_changes() {
+        let Some(cuda) = cuda_setup() else { return };
+        let mut scalars = DeviceScalars::new(&[0, 0], &cuda.device).expect("scalars");
+
+        scalars
+            .update_lanes(&cuda.client, &[1, 1], 32)
+            .expect("first");
+        assert_eq!(scalars.seq_len_k.to_vec::<i32>(), vec![32, 32]);
+
+        scalars
+            .update_lanes(&cuda.client, &[30, 5], 32)
+            .expect("second");
+        assert_eq!(scalars.seq_len_k.to_vec::<i32>(), vec![32, 32]);
+    }
+
+    /// One lane writes exactly what `update` writes when the capacity equals
+    /// the length `update` would have bounded to.
+    #[test]
+    fn one_lane_reduces_to_the_single_lane_write() {
+        let Some(cuda) = cuda_setup() else { return };
+        let mut scalars = DeviceScalars::new(&[0], &cuda.device).expect("scalars");
+
+        scalars.update_lanes(&cuda.client, &[5], 6).expect("write");
+
+        assert_eq!(scalars.write_pos.to_vec::<i32>(), vec![5]);
+        assert_eq!(scalars.seq_len_k.to_vec::<i32>(), vec![6]);
+    }
+
+    /// A length count that disagrees with the batch is refused here too.
+    #[test]
+    fn a_lane_parallel_update_refuses_the_wrong_lane_count() {
+        let Some(cuda) = cuda_setup() else { return };
+        let mut scalars = DeviceScalars::new(&[0, 0], &cuda.device).expect("scalars");
+
+        assert!(scalars.update_lanes(&cuda.client, &[1], 32).is_err());
     }
 
     /// A table with no lane has nothing to write.

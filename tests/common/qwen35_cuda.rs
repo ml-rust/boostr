@@ -8,11 +8,6 @@ use numr::runtime::Runtime;
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
 use numr::tensor::Tensor;
 
-/// One decode step records on the order of a thousand intermediate
-/// allocations; the arena serves them from one buffer instead of one graph
-/// memory node each.
-pub const ARENA_BYTES: usize = 512 << 20;
-
 pub fn cuda_available() -> bool {
     numr::runtime::cuda::is_cuda_available()
 }
@@ -23,16 +18,26 @@ pub fn cuda_setup() -> (CudaClient, CudaDevice) {
     (client, device)
 }
 
-/// Full-capacity KV cache (graph mode needs stable k/v addresses) plus zero
-/// GDN state.
+/// Full-capacity one-lane KV cache (graph mode needs stable k/v addresses)
+/// plus zero GDN state.
 pub fn caches(
     device: &CudaDevice,
     model: &Qwen35Model<CudaRuntime>,
     capacity: usize,
 ) -> (LayeredKvCache<CudaRuntime>, LayeredGdnState<CudaRuntime>) {
+    caches_batched(device, model, capacity, 1)
+}
+
+/// The same containers with `batch` lanes, one per sequence in flight.
+pub fn caches_batched(
+    device: &CudaDevice,
+    model: &Qwen35Model<CudaRuntime>,
+    capacity: usize,
+    batch: usize,
+) -> (LayeredKvCache<CudaRuntime>, LayeredGdnState<CudaRuntime>) {
     let attn = model.attention_config();
     let kv_config = LayeredKvCacheConfig {
-        batch_size: 1,
+        batch_size: batch,
         num_kv_heads: attn.num_kv_heads,
         initial_capacity: capacity,
         max_seq_len: capacity,
@@ -44,7 +49,7 @@ pub fn caches(
     let gdn = LayeredGdnState::<CudaRuntime>::zeros(
         model.num_gdn_layers(),
         model.gdn_config(),
-        1,
+        batch,
         DType::F32,
         device,
     )

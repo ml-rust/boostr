@@ -3,8 +3,10 @@
 //! - `step`: the KV range and write position a lane-parallel forward reads
 //! - `table`: lane occupancy and the persistent device tensors
 //! - `admit`: taking a lane, giving it back, and stepping every occupant
+//! - `claim`: taking a lane already filled in place
 
 pub mod admit;
+pub mod claim;
 pub mod step;
 pub mod table;
 

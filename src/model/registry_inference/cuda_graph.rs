@@ -75,7 +75,7 @@ impl LoadedModel<numr::runtime::cuda::CudaRuntime> {
         kv_cache: &crate::inference::LayeredKvCache<numr::runtime::cuda::CudaRuntime>,
         gdn_state: &crate::inference::LayeredGdnState<numr::runtime::cuda::CudaRuntime>,
         device_scalars: &crate::inference::decode_graph::DeviceScalars,
-        mrope_positions: &numr::tensor::Tensor<numr::runtime::cuda::CudaRuntime>,
+        lanes: &crate::inference::LaneTable<numr::runtime::cuda::CudaRuntime>,
     ) -> Result<numr::tensor::Tensor<numr::runtime::cuda::CudaRuntime>> {
         match self {
             LoadedModel::Qwen35(m) => m.forward_qwen35_graph_mode(
@@ -84,7 +84,7 @@ impl LoadedModel<numr::runtime::cuda::CudaRuntime> {
                 kv_cache,
                 gdn_state,
                 device_scalars,
-                mrope_positions,
+                lanes,
             ),
             LoadedModel::Multimodal(m) => m.llm().forward_qwen35_graph_mode(
                 client,
@@ -92,7 +92,7 @@ impl LoadedModel<numr::runtime::cuda::CudaRuntime> {
                 kv_cache,
                 gdn_state,
                 device_scalars,
-                mrope_positions,
+                lanes,
             ),
             _ => Err(Error::ModelError {
                 reason: format!(

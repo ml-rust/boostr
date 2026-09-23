@@ -15,16 +15,13 @@
 mod common;
 
 use boostr::inference::LaneTable;
-use boostr::inference::decode_graph::{DeviceScalars, argmax_to_buf, copy_into_stable};
+use boostr::inference::decode_graph::Qwen35DecodeGraph;
 use common::qwen35_cuda::{
-    ARENA_BYTES, caches, cuda_available, cuda_setup, eager_decode, gdn_flat, max_abs_diff, prefill,
-    state_ptrs,
+    caches, cuda_available, cuda_setup, eager_decode, gdn_flat, max_abs_diff, prefill, state_ptrs,
 };
+use common::qwen35_graph::{GraphBufs, capture};
 use common::qwen35_tiny::{MAX_POS, VOCAB, tiny_model};
-use numr::dtype::DType;
-use numr::ops::BinaryOps;
 use numr::runtime::cuda::CudaRuntime;
-use numr::tensor::Tensor;
 
 const PREFILL: usize = 5;
 const DECODE_STEPS: usize = 6;
@@ -49,22 +46,14 @@ fn graph_survives_reset_and_reprefill() {
     let first_a = prefill(&client, &device, &model, &prompt_a, &mut kv, &mut gdn);
     let seq_len = kv.seq_len();
 
-    // Stable buffers, all allocated before capture.
-    let token_buf = Tensor::<CudaRuntime>::from_slice(&[first_a], &[1, 1], &device).unwrap();
-    let next_token_buf = Tensor::<CudaRuntime>::zeros(&[1], DType::I64, &device).unwrap();
-    let logits_buf = Tensor::<CudaRuntime>::zeros(&[1, 1, vocab], DType::F32, &device).unwrap();
-    let mut scalars = DeviceScalars::new(&[seq_len], &device).unwrap();
+    // Stable buffers and lane state, all set before capture.
+    let mut bufs = GraphBufs::new(&device, 1, vocab);
     let mut lanes = LaneTable::<CudaRuntime>::new(1, MAX_POS, &device).unwrap();
+    lanes.claim(&client, 0, 0, seq_len, seq_len).unwrap();
 
     // Warm-up outside capture writes the KV cache and the GDN buffers.
     // Reset both in place and prefill again: the addresses must hold.
-    scalars.update(&client, &[seq_len]).unwrap();
-    lanes.set_rope_pos(&client, 0, seq_len).unwrap();
-    let warm = model
-        .forward_qwen35_graph_mode(&client, &token_buf, &kv, &gdn, &scalars, lanes.positions())
-        .unwrap();
-    argmax_to_buf(&client, &warm, &next_token_buf).unwrap();
-    let _ = next_token_buf.to_vec::<i64>();
+    bufs.warmup(&client, &model, &kv, &gdn, &lanes, MAX_POS);
     let ptrs_before = state_ptrs(&kv, &gdn);
     kv.reset();
     gdn.reset(&client).unwrap();
@@ -74,20 +63,26 @@ fn graph_survives_reset_and_reprefill() {
     );
     assert_eq!(state_ptrs(&kv, &gdn), ptrs_before);
 
-    let graph = CudaRuntime::capture_graph_into_with_arena(
+    let mut captures = 0usize;
+    let (graph, _) = capture(
         &client,
-        &[&token_buf],
-        &[&next_token_buf],
-        ARENA_BYTES,
-        |c| {
-            let logits = model
-                .forward_qwen35_graph_mode(c, &token_buf, &kv, &gdn, &scalars, lanes.positions())
-                .map_err(|e| numr::error::Error::Backend(format!("capture forward: {e}")))?;
-            copy_into_stable(c, &logits, &logits_buf)?;
-            argmax_to_buf(c, &logits, &next_token_buf)
-        },
-    )
-    .unwrap();
+        &device,
+        &model,
+        &kv,
+        &gdn,
+        &lanes,
+        &bufs,
+        &mut captures,
+    );
+    assert_eq!(captures, 1, "one decode step, one capture");
+    let GraphBufs {
+        token_buf,
+        next_token_buf,
+        logits_buf,
+        scalars,
+    } = bufs;
+    let mut decode =
+        Qwen35DecodeGraph::new(graph, scalars, MAX_POS, lanes, token_buf, next_token_buf).unwrap();
 
     // Eager reference for prompt B on fresh caches.
     let (mut kv_ref, mut gdn_ref) = caches(&device, &model, MAX_POS);
@@ -119,20 +114,17 @@ fn graph_survives_reset_and_reprefill() {
     assert_eq!(state_ptrs(&kv, &gdn), ptrs_before);
     assert_eq!(kv.seq_len(), seq_len);
 
-    let first_b_tensor = Tensor::<CudaRuntime>::from_slice(&[first_b], &[1, 1], &device).unwrap();
-    client.copy_into(&token_buf, &first_b_tensor).unwrap();
+    // Prompt B sits at the same length, so the lane is claimed again at the
+    // position the second prefill left.
+    decode.lanes.claim(&client, 0, 0, seq_len, seq_len).unwrap();
+    decode.seed_next_token(&client, 0, first_b).unwrap();
 
     let mut rows = Vec::with_capacity(DECODE_STEPS);
     let mut ids = Vec::with_capacity(DECODE_STEPS);
-    for (step, position) in (seq_len..seq_len + DECODE_STEPS).enumerate() {
-        if step > 0 {
-            copy_into_stable(&client, &next_token_buf, &token_buf).unwrap();
-        }
-        scalars.update(&client, &[position]).unwrap();
-        lanes.set_rope_pos(&client, 0, position).unwrap();
-        graph.launch().unwrap();
+    for _ in 0..DECODE_STEPS {
+        decode.pre_replay_and_launch(&client).unwrap();
         rows.push(logits_buf.to_vec::<f32>());
-        ids.push(next_token_buf.to_vec::<i64>()[0]);
+        ids.push(decode.next_token_buf.to_vec::<i64>()[0]);
     }
 
     assert_eq!(

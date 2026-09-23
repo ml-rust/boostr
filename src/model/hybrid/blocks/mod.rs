@@ -14,6 +14,8 @@ mod mask;
 mod ssm;
 
 pub(super) use attention::AttentionBlock;
+#[cfg(feature = "cuda")]
+pub use attention_qwen35::Qwen35GraphStep;
 pub use attention_qwen35::{Qwen35AttentionBlock, Qwen35AttentionWeights};
 pub use gdn::{GdnBlock, GdnWeights};
 pub(super) use ssm::SsmBlock;

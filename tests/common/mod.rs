@@ -10,6 +10,8 @@ pub mod llama_graph;
 pub mod llama_tiny;
 #[cfg(feature = "cuda")]
 pub mod qwen35_cuda;
+#[cfg(feature = "cuda")]
+pub mod qwen35_graph;
 pub mod qwen35_lanes;
 pub mod qwen35_tiny;
 

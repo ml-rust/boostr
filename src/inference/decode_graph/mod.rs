@@ -48,12 +48,15 @@
 //! | `sin_slice`        | pre-capture | D2D async (DtoDAsync) from rope cache|
 //! | `next_token_buf`   | pre-capture | written by graph (argmax→memcpy node)|
 //!
-//! The `qwen35` graph (`Qwen35DecodeGraph`) has no RoPE slices; it adds two
-//! more stable inputs, both written before each replay or by the graph
-//! itself. Its IMROPE positions come from a `LaneTable`, one row per lane:
+//! The `qwen35` graph (`Qwen35DecodeGraph`) has no RoPE slices; it adds three
+//! more stable inputs, all written before each replay or by the graph
+//! itself. Its key range and its IMROPE positions come from a `LaneTable`,
+//! one entry per lane, so one capture serves lanes of different lengths:
 //!
 //! | Tensor             | Allocated   | Updated how                          |
 //! |--------------------|-------------|--------------------------------------|
+//! | lane `kv_start`    | pre-capture | H2D async (HtoDAsync) from CPU       |
+//! | lane `kv_end`      | pre-capture | H2D async (HtoDAsync) from CPU       |
 //! | lane `positions`   | pre-capture | H2D async (HtoDAsync) from CPU       |
 //! | `GdnState` buffers | pre-capture | written by graph (`copy_into`)       |
 

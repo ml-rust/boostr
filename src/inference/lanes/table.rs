@@ -188,37 +188,6 @@ impl<R: Runtime<DType = DType>> LaneTable<R> {
             .map_err(Error::Numr)
     }
 
-    /// Point lane `lane` at rope position `pos` and write the table's
-    /// device tensors.
-    ///
-    /// The lane's occupancy and length stay as they were, so a caller that
-    /// drives one lane's rope position itself — a captured single-lane
-    /// decode graph — writes the positions tensor without an `admit`.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InferenceError`] when `lane` is outside the batch or `pos`
-    /// is outside the rope table; a copy error propagates.
-    pub fn set_rope_pos<C: HostCopyOps<R>>(
-        &mut self,
-        client: &C,
-        lane: usize,
-        pos: usize,
-    ) -> Result<()> {
-        if lane >= self.batch() {
-            return Err(Error::InferenceError {
-                reason: format!(
-                    "lane {lane} is outside batch {}; write a rope position to a lane the \
-                     table holds",
-                    self.batch()
-                ),
-            });
-        }
-        self.check_rope_pos(lane, pos)?;
-        self.rope_pos[lane] = pos;
-        self.flush(client)
-    }
-
     /// Refuse a rope position the model's rope table does not hold.
     pub(super) fn check_rope_pos(&self, lane: usize, pos: usize) -> Result<()> {
         if pos >= self.rope_table_len {
@@ -248,7 +217,7 @@ fn as_i32(value: usize, field: &'static str, lane: usize) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
+    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
     #[test]
     fn new_allocates_every_tensor_and_leaves_lanes_free() {
@@ -302,40 +271,6 @@ mod tests {
         assert_eq!(table.rope_table_len(), 8);
         assert!(table.check_rope_pos(0, 7).is_ok());
         assert!(table.check_rope_pos(0, 8).is_err());
-    }
-
-    /// Writing one lane's rope position fills that lane's three position
-    /// streams and leaves the other lane where it was.
-    #[test]
-    fn set_rope_pos_writes_one_lanes_streams() {
-        let device = CpuDevice::new();
-        let client = CpuClient::new(device.clone());
-        let mut table = LaneTable::<CpuRuntime>::new(2, 32, &device).expect("table");
-        let before = table.positions().ptr();
-
-        table.set_rope_pos(&client, 1, 6).expect("set");
-
-        assert_eq!(table.lane_rope_pos(1), 6);
-        assert_eq!(table.lane_rope_pos(0), 0);
-        assert_eq!(
-            table.positions().to_vec::<i32>(),
-            vec![0, 6, 0, 6, 0, 6, 0, 0]
-        );
-        assert_eq!(table.positions().ptr(), before);
-    }
-
-    /// A lane outside the batch and a position outside the rope table are
-    /// both refused.
-    #[test]
-    fn set_rope_pos_refuses_a_lane_or_a_position_the_table_does_not_hold() {
-        let device = CpuDevice::new();
-        let client = CpuClient::new(device.clone());
-        let mut table = LaneTable::<CpuRuntime>::new(1, 8, &device).expect("table");
-
-        let err = table.set_rope_pos(&client, 1, 0).expect_err("lane 1");
-        assert!(err.to_string().contains("lane 1"), "{err}");
-        assert!(table.set_rope_pos(&client, 0, 8).is_err());
-        assert_eq!(table.lane_rope_pos(0), 0);
     }
 
     #[test]

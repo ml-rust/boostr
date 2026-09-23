@@ -86,6 +86,8 @@ impl LlamaAttention<numr::runtime::cuda::CudaRuntime> {
             v.tensor(),
             kv_cache,
             device_scalars,
+            // One sequence per launch, so every row shares the scalars' bound.
+            None,
             self.num_heads,
             self.num_kv_heads,
             self.head_dim,

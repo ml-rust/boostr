@@ -9,4 +9,6 @@ mod graph_mode;
 mod layer;
 mod projections;
 
+#[cfg(feature = "cuda")]
+pub use graph_mode::Qwen35GraphStep;
 pub use layer::{Qwen35AttentionBlock, Qwen35AttentionWeights};

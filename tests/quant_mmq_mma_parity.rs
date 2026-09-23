@@ -187,6 +187,190 @@ fn build_q6_k_weight(n: usize, k: usize) -> Vec<u8> {
     out
 }
 
+/// A quant byte of a block whose every bit pattern is valid, varied by block
+/// and position so no two blocks and no two offsets agree.
+fn spread_byte(block: usize, pos: usize, a: usize, b: usize) -> u8 {
+    (((block * a + pos * b) % 256) as i32 - 128) as u8
+}
+
+/// Builds a Q4_0 weight buffer: `n * (k / 32)` blocks of 18 bytes — f16 `d`
+/// at byte 0, 16 nibble-packed quant bytes at byte 2.
+fn build_q4_0_weight(n: usize, k: usize) -> Vec<u8> {
+    let bpr = k / 32;
+    let mut out = vec![0u8; n * bpr * 18];
+    for row in 0..n {
+        for b in 0..bpr {
+            let block = row * bpr + b;
+            let base = block * 18;
+            out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
+            for i in 0..16 {
+                out[base + 2 + i] = spread_byte(block, i, 197, 29);
+            }
+        }
+    }
+    out
+}
+
+/// Builds a Q5_0 weight buffer: `n * (k / 32)` blocks of 22 bytes — f16 `d`
+/// at byte 0, a 32-bit fifth-bit field at byte 2, 16 nibble bytes at byte 6.
+fn build_q5_0_weight(n: usize, k: usize) -> Vec<u8> {
+    let bpr = k / 32;
+    let mut out = vec![0u8; n * bpr * 22];
+    for row in 0..n {
+        for b in 0..bpr {
+            let block = row * bpr + b;
+            let base = block * 22;
+            out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
+            for i in 0..4 {
+                out[base + 2 + i] = spread_byte(block, i, 149, 37);
+            }
+            for i in 0..16 {
+                out[base + 6 + i] = spread_byte(block, i, 211, 23);
+            }
+        }
+    }
+    out
+}
+
+/// Builds a Q4_1 weight buffer: `n * (k / 32)` blocks of 20 bytes — f16 `d`
+/// at byte 0, f16 `m` at byte 2, 16 nibble bytes at byte 4.
+fn build_q4_1_weight(n: usize, k: usize) -> Vec<u8> {
+    let bpr = k / 32;
+    let mut out = vec![0u8; n * bpr * 20];
+    for row in 0..n {
+        for b in 0..bpr {
+            let block = row * bpr + b;
+            let base = block * 20;
+            out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
+            out[base + 2..base + 4].copy_from_slice(
+                &half::f16::from_f32(-0.4 + (block as f32 * 0.011) % 0.8).to_le_bytes(),
+            );
+            for i in 0..16 {
+                out[base + 4 + i] = spread_byte(block, i, 197, 29);
+            }
+        }
+    }
+    out
+}
+
+/// Builds a Q5_1 weight buffer: `n * (k / 32)` blocks of 24 bytes — f16 `d`
+/// at byte 0, f16 `m` at byte 2, a 32-bit fifth-bit field at byte 4, 16
+/// nibble bytes at byte 8.
+fn build_q5_1_weight(n: usize, k: usize) -> Vec<u8> {
+    let bpr = k / 32;
+    let mut out = vec![0u8; n * bpr * 24];
+    for row in 0..n {
+        for b in 0..bpr {
+            let block = row * bpr + b;
+            let base = block * 24;
+            out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
+            out[base + 2..base + 4].copy_from_slice(
+                &half::f16::from_f32(-0.3 + (block as f32 * 0.013) % 0.6).to_le_bytes(),
+            );
+            for i in 0..4 {
+                out[base + 4 + i] = spread_byte(block, i, 149, 37);
+            }
+            for i in 0..16 {
+                out[base + 8 + i] = spread_byte(block, i, 211, 23);
+            }
+        }
+    }
+    out
+}
+
+/// Builds an IQ4_NL weight buffer: `n * (k / 32)` blocks of 18 bytes — f16
+/// `d` at byte 0, 16 bytes of 4-bit codebook indices at byte 2. Every index
+/// is a valid table entry, so the bytes are built directly.
+fn build_iq4_nl_weight(n: usize, k: usize) -> Vec<u8> {
+    let bpr = k / 32;
+    let mut out = vec![0u8; n * bpr * 18];
+    for row in 0..n {
+        for b in 0..bpr {
+            let block = row * bpr + b;
+            let base = block * 18;
+            out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
+            for i in 0..16 {
+                out[base + 2 + i] = spread_byte(block, i, 89, 31);
+            }
+        }
+    }
+    out
+}
+
+/// Builds an IQ4_XS weight buffer: `n * (k / 256)` super-blocks of 136 bytes
+/// — f16 `d` at byte 0, `u16 scales_h` at byte 2, 4 `scales_l` bytes at byte
+/// 4, 128 bytes of 4-bit codebook indices at byte 8.
+fn build_iq4_xs_weight(n: usize, k: usize) -> Vec<u8> {
+    let supers = k / 256;
+    let mut out = vec![0u8; n * supers * 136];
+    for row in 0..n {
+        for s in 0..supers {
+            let block = row * supers + s;
+            let base = block * 136;
+            out[base..base + 2].copy_from_slice(&block_scale(block).to_le_bytes());
+            out[base + 2..base + 4]
+                .copy_from_slice(&(((block * 619 + 7) % 65536) as u16).to_le_bytes());
+            for i in 0..4 {
+                out[base + 4 + i] = spread_byte(block, i, 71, 13);
+            }
+            for i in 0..128 {
+                out[base + 8 + i] = spread_byte(block, i, 197, 29);
+            }
+        }
+    }
+    out
+}
+
+/// Builds a Q3_K weight buffer: `n * (k / 256)` super-blocks of 110 bytes —
+/// 32 `hmask` bytes at byte 0, 64 `qs` bytes at byte 32, 12 bytes of packed
+/// 6-bit scales at byte 96, f16 `d` at byte 108.
+fn build_q3_k_weight(n: usize, k: usize) -> Vec<u8> {
+    let supers = k / 256;
+    let mut out = vec![0u8; n * supers * 110];
+    for row in 0..n {
+        for s in 0..supers {
+            let block = row * supers + s;
+            let base = block * 110;
+            for i in 0..32 {
+                out[base + i] = spread_byte(block, i, 149, 37);
+            }
+            for i in 0..64 {
+                out[base + 32 + i] = spread_byte(block, i, 211, 23);
+            }
+            for i in 0..12 {
+                out[base + 96 + i] = spread_byte(block, i, 71, 13);
+            }
+            out[base + 108..base + 110].copy_from_slice(&block_scale(block * 3 + 1).to_le_bytes());
+        }
+    }
+    out
+}
+
+/// Builds a Q2_K weight buffer: `n * (k / 256)` super-blocks of 84 bytes —
+/// 16 packed scale/minimum bytes at byte 0, 64 `qs` bytes at byte 16, f16 `d`
+/// at byte 80, f16 `dmin` at byte 82.
+fn build_q2_k_weight(n: usize, k: usize) -> Vec<u8> {
+    let supers = k / 256;
+    let mut out = vec![0u8; n * supers * 84];
+    for row in 0..n {
+        for s in 0..supers {
+            let block = row * supers + s;
+            let base = block * 84;
+            for i in 0..16 {
+                out[base + i] = spread_byte(block, i, 71, 13);
+            }
+            for i in 0..64 {
+                out[base + 16 + i] = spread_byte(block, i, 211, 23);
+            }
+            out[base + 80..base + 82].copy_from_slice(&block_scale(block).to_le_bytes());
+            out[base + 82..base + 84].copy_from_slice(
+                &half::f16::from_f32(0.02 + (block as f32 * 0.005) % 0.3).to_le_bytes(),
+            );
+        }
+    }
+    out
+}
+
 #[test]
 fn q6_k_mma_kernel_matches_dp4a_kernel() {
     if !numr::runtime::cuda::is_cuda_available() {
@@ -202,8 +386,8 @@ fn q6_k_mma_kernel_matches_dp4a_kernel() {
     }
     let _lock = cuda_lock();
 
-    // `m16n8k16` needs sm_80. `caps.bf16` marks that floor, so a pre-Ampere
-    // device skips here instead of failing to load the module.
+    // `m16n8k16` needs sm_80. `caps.bf16` marks that floor, so a device
+    // below sm_80 skips here instead of failing to load the module.
     if !CudaDevice::new(0).profile().caps.bf16 {
         println!(
             "!! q6_k_mma_kernel_matches_dp4a_kernel SKIPPED: this GPU predates sm_80, which \
@@ -315,8 +499,8 @@ fn q4_k_mma_kernel_matches_dp4a_kernel() {
     }
     let _lock = cuda_lock();
 
-    // `m16n8k32` needs sm_80. `caps.bf16` marks that floor, so a pre-Ampere
-    // device skips here instead of failing to load the module.
+    // `m16n8k32` needs sm_80. `caps.bf16` marks that floor, so a device
+    // below sm_80 skips here instead of failing to load the module.
     if !CudaDevice::new(0).profile().caps.bf16 {
         println!(
             "!! q4_k_mma_kernel_matches_dp4a_kernel SKIPPED: this GPU predates sm_80, which \
@@ -428,8 +612,8 @@ fn mma_kernel_matches_dp4a_kernel() {
     }
     let _lock = cuda_lock();
 
-    // `m16n8k32` needs sm_80. `caps.bf16` marks that floor, so a pre-Ampere
-    // device skips here instead of failing to load the module.
+    // `m16n8k32` needs sm_80. `caps.bf16` marks that floor, so a device
+    // below sm_80 skips here instead of failing to load the module.
     if !CudaDevice::new(0).profile().caps.bf16 {
         println!(
             "!! mma_kernel_matches_dp4a_kernel SKIPPED: this GPU predates sm_80, which \
@@ -675,7 +859,7 @@ const LOWBIT_MMQ_X: u32 = 64;
 
 /// `false` when the lowbit tests cannot run here: no CUDA, or a GPU before
 /// sm_80, which `mma.sync.aligned.m16n8k32` requires (`caps.bf16` marks
-/// that floor, so a pre-Ampere device skips instead of failing to load the
+/// that floor, so a device below sm_80 skips instead of failing to load the
 /// module). Prints the loud skip either way.
 fn lowbit_device_ready(name: &str) -> bool {
     if !numr::runtime::cuda::is_cuda_available() {
@@ -1235,20 +1419,26 @@ const GEMV1_WIDTHS: [usize; 2] = [96, 5120];
 /// The K walks `format` accepts.
 fn gemv1_depths(format: QuantFormat) -> &'static [usize] {
     match format {
-        QuantFormat::Q4K | QuantFormat::Q5K | QuantFormat::Q6K => &GEMV1_KQUANT_DEPTHS,
+        QuantFormat::Q4K
+        | QuantFormat::Q5K
+        | QuantFormat::Q6K
+        | QuantFormat::Q3K
+        | QuantFormat::Q2K
+        | QuantFormat::IQ4XS => &GEMV1_KQUANT_DEPTHS,
         _ => &GEMV1_DEPTHS,
     }
 }
 
 /// A K per format whose row byte stride is 2 (mod 4), so a lane's chunk
 /// words straddle the staged 32-bit words at a shift the kernel cannot
-/// fold: an odd block count of a 34- or 18-byte block. 640 (5 blocks) does
-/// this for PQ2_0 and Q1_0 already; Q2_0 needs 9 blocks, Q8_0 21. PTQ1_0's
-/// 28-byte block keeps every stride a multiple of 4.
+/// fold: an odd block count of a 34-, 22- or 18-byte block. 640 (5 blocks)
+/// does this for PQ2_0 and Q1_0 already; Q2_0 needs 9 blocks, and 21 blocks
+/// serve Q8_0, Q4_0, Q5_0 and IQ4_NL. PTQ1_0's 28-byte block, Q4_1's 20 and
+/// Q5_1's 24 keep every stride a multiple of 4.
 fn gemv1_odd_stride_depth(format: QuantFormat) -> Option<usize> {
     match format {
         QuantFormat::Q2_0 => Some(576),
-        QuantFormat::Q8_0 => Some(672),
+        QuantFormat::Q8_0 | QuantFormat::Q4_0 | QuantFormat::Q5_0 | QuantFormat::IQ4NL => Some(672),
         _ => None,
     }
 }
@@ -1383,5 +1573,77 @@ fn q6_k_gemv1_matches_mma_at_one_token() {
         "q6_k_gemv1_matches_mma_at_one_token",
         QuantFormat::Q6K,
         build_q6_k_weight,
+    );
+}
+
+#[test]
+fn q4_0_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "q4_0_gemv1_matches_mma_at_one_token",
+        QuantFormat::Q4_0,
+        build_q4_0_weight,
+    );
+}
+
+#[test]
+fn q5_0_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "q5_0_gemv1_matches_mma_at_one_token",
+        QuantFormat::Q5_0,
+        build_q5_0_weight,
+    );
+}
+
+#[test]
+fn q4_1_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "q4_1_gemv1_matches_mma_at_one_token",
+        QuantFormat::Q4_1,
+        build_q4_1_weight,
+    );
+}
+
+#[test]
+fn q5_1_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "q5_1_gemv1_matches_mma_at_one_token",
+        QuantFormat::Q5_1,
+        build_q5_1_weight,
+    );
+}
+
+#[test]
+fn iq4_nl_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "iq4_nl_gemv1_matches_mma_at_one_token",
+        QuantFormat::IQ4NL,
+        build_iq4_nl_weight,
+    );
+}
+
+#[test]
+fn iq4_xs_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "iq4_xs_gemv1_matches_mma_at_one_token",
+        QuantFormat::IQ4XS,
+        build_iq4_xs_weight,
+    );
+}
+
+#[test]
+fn q3_k_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "q3_k_gemv1_matches_mma_at_one_token",
+        QuantFormat::Q3K,
+        build_q3_k_weight,
+    );
+}
+
+#[test]
+fn q2_k_gemv1_matches_mma_at_one_token() {
+    gemv1_check_format(
+        "q2_k_gemv1_matches_mma_at_one_token",
+        QuantFormat::Q2K,
+        build_q2_k_weight,
     );
 }

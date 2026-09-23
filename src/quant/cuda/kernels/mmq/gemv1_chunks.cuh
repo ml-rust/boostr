@@ -2,7 +2,8 @@
 // chunks a warp's four chunk slots hold for one feature, their int dots,
 // their scale constants and the owner lane's float epilogue. Included by
 // `gemv1_body.cuh` only; the staging and the K walk are there, the weight
-// readers are in `gemv1_formats.cuh` and `gemv1_kquant.cuh`.
+// readers are in `gemv1_formats.cuh`, `gemv1_legacy.cuh` and
+// `gemv1_kquant.cuh`.
 //
 // A reader's `EPILOGUE` tag picks the shape:
 //
@@ -17,6 +18,15 @@
 //                   `d * scale`, the form `mmqf_vec_dot_sc16` applies with
 //                   `MIN` false. Each lane forms both dots and both scales;
 //                   the owner gathers four values per chunk.
+//   GEMV1_EPI_SC16_MIN
+//                   The same at `MIN` true: each 16-element half also takes
+//                   a minimum term against the activation's int sum over ITS
+//                   OWN 16 elements. Each lane forms its own `(d * scale,
+//                   -dmin * minimum)` pair per half and the int sum of the
+//                   chunk's FIRST 16 activation quants; the owner gathers
+//                   seven values per chunk and recovers the second half's sum
+//                   as `s32 - s_a` from the record header's exact int16 sum
+//                   over the 32.
 //
 // Every gather is a warp shuffle, which moves bits and does not compute, so
 // the owner applies exactly what the lane formed. The owner then walks the
@@ -32,6 +42,7 @@
 #include "../gemv/common.cuh"
 #include "gemv1_formats.cuh"
 #include "gemv1_kquant.cuh"
+#include "gemv1_legacy.cuh"
 
 // Activation record: 4 header words, then 32 quant words (128 k-values);
 // `MMQF_Y_DS`, `MMQF_Y_QS` and `MMQF_Y_STRIDE` in `quant_mmq_mma.cu`. A
@@ -188,6 +199,97 @@ static __device__ __forceinline__ void gemv1_dot_step(
     }
 }
 
+// The 16-element-dot forms, `GEMV1_EPI_SC16` and `GEMV1_EPI_SC16_MIN`: two int
+// dots per chunk, each with its own weight scale, then the owner's epilogue.
+// `MIN` adds the rank-1 minimum term of each 16-element half.
+template <class FMT>
+static __device__ __forceinline__ void gemv1_sc16_step(
+    const int (&w)[8], const int* __restrict__ my_row, unsigned int o,
+    const int* __restrict__ rec, const typename FMT::Lane& ln, unsigned int j, unsigned int j0,
+    unsigned int c, unsigned int base, unsigned int b0, unsigned int kb1, float& acc
+) {
+    constexpr bool MIN = FMT::EPILOGUE == GEMV1_EPI_SC16_MIN;
+
+    // The scale changes every 16 elements, so the chunk is two dots:
+    // words 0..3 take scale `2j`, words 4..7 take `2j + 1`.
+    const int4* q4 = reinterpret_cast<const int4*>(rec + GEMV1_Y_QS + c * 8);
+    const int4 q0 = q4[0];
+    const int4 q1 = q4[1];
+    int d_lo = 0;
+    d_lo = dp4a(w[0], q0.x, d_lo);
+    d_lo = dp4a(w[1], q0.y, d_lo);
+    d_lo = dp4a(w[2], q0.z, d_lo);
+    d_lo = dp4a(w[3], q0.w, d_lo);
+    int d_hi = 0;
+    d_hi = dp4a(w[4], q1.x, d_hi);
+    d_hi = dp4a(w[5], q1.y, d_hi);
+    d_hi = dp4a(w[6], q1.z, d_hi);
+    d_hi = dp4a(w[7], q1.w, d_hi);
+
+    int los[4];
+    int his[4];
+    float scls[4];
+    float schs[4];
+    gemv1_gather(d_lo, base, los);
+    gemv1_gather(d_hi, base, his);
+    float mnls[4];
+    float mnhs[4];
+    int sas[4];
+    if constexpr (MIN) {
+        float sc_lo;
+        float mn_lo;
+        float sc_hi;
+        float mn_hi;
+        FMT::scales(my_row, o, j, ln, &sc_lo, &mn_lo, &sc_hi, &mn_hi);
+        // The int sum of the chunk's FIRST 16 activation quants, which is the
+        // integer `mmqf_stage_y_sums` stores for the tensor-core path. Both
+        // are exact int reductions over the same four words, so they are the
+        // same integer whatever order the adds take.
+        int s_a = 0;
+        s_a = dp4a(0x01010101, q0.x, s_a);
+        s_a = dp4a(0x01010101, q0.y, s_a);
+        s_a = dp4a(0x01010101, q0.z, s_a);
+        s_a = dp4a(0x01010101, q0.w, s_a);
+        gemv1_gather(sc_lo, base, scls);
+        gemv1_gather(sc_hi, base, schs);
+        gemv1_gather(mn_lo, base, mnls);
+        gemv1_gather(mn_hi, base, mnhs);
+        gemv1_gather(s_a, base, sas);
+    } else {
+        float sc_lo;
+        float sc_hi;
+        FMT::scales(my_row, o, j, ln, &sc_lo, &sc_hi);
+        gemv1_gather(sc_lo, base, scls);
+        gemv1_gather(sc_hi, base, schs);
+    }
+
+    if (c != 0) {
+        return;
+    }
+    // The four `da` of the half: the low halves of the record's four header
+    // words, one 16-byte load. They are read before the range guard; a chunk
+    // past the range end reads a stale word its guard then drops.
+    const int4 hdr = *reinterpret_cast<const int4*>(rec);
+    const int hdrs[4] = {hdr.x, hdr.y, hdr.z, hdr.w};
+#pragma unroll
+    for (int jj = 0; jj < 4; ++jj) {
+        if (b0 + j0 + (unsigned int)jj < kb1) {
+            const float da = gemv1_half_bits_to_float((unsigned short)(hdrs[jj] & 0xFFFF));
+            // `mmqf_vec_dot_sc16`'s terms, character for character.
+            acc += (scls[jj] * (float)los[jj] + schs[jj] * (float)his[jj]) * da;
+            if constexpr (MIN) {
+                // The header's high half is the exact int16 sum of the
+                // chunk's 32 activation quants, so `s32 - s_a` is the sum of
+                // the last 16 exactly — an integer identity.
+                const int s32 = hdrs[jj] >> 16;
+                const float dsum_lo = da * (float)sas[jj];
+                const float dsum_hi = da * (float)(s32 - sas[jj]);
+                acc += mnls[jj] * dsum_lo + mnhs[jj] * dsum_hi;
+            }
+        }
+    }
+}
+
 // One half step: chunks `j0 .. j0 + 3` of the staged 256-k group, this lane
 // holding chunk `j0 + c`. `rec` is the half's activation record, `my_row`
 // the lane's staged weight row and `o` the span start's offset inside its
@@ -203,52 +305,9 @@ static __device__ __forceinline__ void gemv1_half_step(
     int w[8];
     FMT::read(my_row, o, j, ln, w);
 
-    if constexpr (FMT::EPILOGUE == GEMV1_EPI_SC16) {
-        // The scale changes every 16 elements, so the chunk is two dots:
-        // words 0..3 take scale `2j`, words 4..7 take `2j + 1`.
-        const int4* q4 = reinterpret_cast<const int4*>(rec + GEMV1_Y_QS + c * 8);
-        const int4 q0 = q4[0];
-        const int4 q1 = q4[1];
-        int d_lo = 0;
-        d_lo = dp4a(w[0], q0.x, d_lo);
-        d_lo = dp4a(w[1], q0.y, d_lo);
-        d_lo = dp4a(w[2], q0.z, d_lo);
-        d_lo = dp4a(w[3], q0.w, d_lo);
-        int d_hi = 0;
-        d_hi = dp4a(w[4], q1.x, d_hi);
-        d_hi = dp4a(w[5], q1.y, d_hi);
-        d_hi = dp4a(w[6], q1.z, d_hi);
-        d_hi = dp4a(w[7], q1.w, d_hi);
-        float sc_lo;
-        float sc_hi;
-        FMT::scales(my_row, o, j, ln, &sc_lo, &sc_hi);
-
-        int los[4];
-        int his[4];
-        float scls[4];
-        float schs[4];
-        gemv1_gather(d_lo, base, los);
-        gemv1_gather(d_hi, base, his);
-        gemv1_gather(sc_lo, base, scls);
-        gemv1_gather(sc_hi, base, schs);
-        if (c == 0) {
-            // The four `da` of the half: the low halves of the record's four
-            // header words, one 16-byte load. They are read before the range
-            // guard; a chunk past the range end reads a stale word its guard
-            // then drops.
-            const int4 hdr = *reinterpret_cast<const int4*>(rec);
-            const int hdrs[4] = {hdr.x, hdr.y, hdr.z, hdr.w};
-#pragma unroll
-            for (int jj = 0; jj < 4; ++jj) {
-                if (b0 + j0 + (unsigned int)jj < kb1) {
-                    const float da =
-                        gemv1_half_bits_to_float((unsigned short)(hdrs[jj] & 0xFFFF));
-                    // `mmqf_vec_dot_sc16`'s term at `MIN` false, character
-                    // for character.
-                    acc += (scls[jj] * (float)los[jj] + schs[jj] * (float)his[jj]) * da;
-                }
-            }
-        }
+    if constexpr (FMT::EPILOGUE == GEMV1_EPI_SC16 ||
+                  FMT::EPILOGUE == GEMV1_EPI_SC16_MIN) {
+        gemv1_sc16_step<FMT>(w, my_row, o, rec, ln, j, j0, c, base, b0, kb1, acc);
     } else {
         gemv1_dot_step<FMT>(w, my_row, o, rec, ln, j, j0, c, base, b0, kb1, acc);
     }

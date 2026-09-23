@@ -17,8 +17,10 @@
 // activation sum, which the record header carries exactly, so the chunk's
 // int dot is the same integer either way. `EPILOGUE` names the float form
 // the owner lane applies per chunk; every reader here carries one weight
-// scale per chunk and nothing else, which is `GEMV1_EPI_D`. The K-quant
-// readers in `gemv1_kquant.cuh` carry the other two forms.
+// scale per chunk and nothing else, which is `GEMV1_EPI_D`. The legacy and
+// IQ4 readers in `gemv1_legacy.cuh` and the K-quant readers in
+// `gemv1_kquant.cuh` carry the other forms, and add `scales(row, o, j, ln,
+// ...)` for the float constants their epilogue multiplies.
 #pragma once
 
 #include <cuda_fp16.h>
@@ -39,6 +41,9 @@ enum Gemv1Epilogue {
     GEMV1_EPI_DM,
     // `acc += (sc_lo * (float)D_lo + sc_hi * (float)D_hi) * da;`
     GEMV1_EPI_SC16,
+    // The same, plus `acc += mn_lo * dsum_lo + mn_hi * dsum_hi;` over the
+    // activation's per-16 int sums.
+    GEMV1_EPI_SC16_MIN,
 };
 
 // Returns `v` through a lane's own shuffle slot, which the compiler cannot

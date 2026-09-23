@@ -15,9 +15,10 @@
 //! the tile-parallel grid is a per-(device, format) pick measured on the
 //! device at first use (`tiling::prefers_tile_parallel`). The kernels
 //! themselves live in `src/quant/cuda/kernels/quant_mmq_mma.cu`. At one
-//! token, Q8_0, PQ2_0, Q2_0, Q1_0, PTQ1_0, Q4_K, Q5_K and Q6_K take a third
-//! schedule, the `M = 1` kernel in `quant_mmq_gemv1.cu` (`gemv1`), which
-//! forms the same bits without the tensor-core tile's padding.
+//! token, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, IQ4_NL, IQ4_XS, PQ2_0, Q2_0, Q1_0,
+//! PTQ1_0, Q4_K, Q5_K, Q6_K, Q3_K and Q2_K take a third schedule, the
+//! `M = 1` kernel in `quant_mmq_gemv1.cu` (`gemv1`), which forms the same
+//! bits without the tensor-core tile's padding.
 //!
 //! The kernel family is parameterized over the weight format; everything that
 //! differs per format is a field of `FeatMajorFormat`. Q8_0, Q4_0, Q4_1,

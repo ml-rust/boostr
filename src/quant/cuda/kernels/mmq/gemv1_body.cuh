@@ -1,8 +1,9 @@
-// Single-token (M = 1) body of the feature-major MMQ family: Q8_0, PQ2_0,
-// Q2_0, Q1_0, PTQ1_0, Q4_K, Q5_K and Q6_K. Included by
-// `quant_mmq_gemv1.cu`; it is not a compilation unit of its own. The
-// per-format readers are in `gemv1_formats.cuh` and `gemv1_kquant.cuh`, and
-// the per-chunk int dots and float epilogues in `gemv1_chunks.cuh`.
+// Single-token (M = 1) body of the feature-major MMQ family: Q8_0, Q4_0,
+// Q4_1, Q5_0, Q5_1, IQ4_NL, IQ4_XS, PQ2_0, Q2_0, Q1_0, PTQ1_0, Q4_K, Q5_K,
+// Q6_K, Q3_K and Q2_K. Included by `quant_mmq_gemv1.cu`; it is not a
+// compilation unit of its own. The per-format readers are in
+// `gemv1_formats.cuh`, `gemv1_legacy.cuh` and `gemv1_kquant.cuh`, and the
+// per-chunk int dots and float epilogues in `gemv1_chunks.cuh`.
 //
 // CONTRACT: every output element receives the SAME float sequence the
 // tensor-core kernels `quant_mmq_<fmt>_q8_1_mma*` form for it, so a decode
@@ -15,8 +16,8 @@
 //     acc += (float)D * da * dw;
 //
 // `da` the activation record's `half` scale for the chunk, `dw` the weight
-// block's `half` scale as f32. The K-quants take the two other forms
-// `gemv1_chunks.cuh` lists. In every form: chunks in ascending k, one
+// block's scale as f32. The formats with a minimum term or a per-16 scale
+// take the three other forms `gemv1_chunks.cuh` lists. In every form: chunks in ascending k, one
 // accumulator per output element starting at `0.0f`, and the K walk cut into
 // the ranges `mmqf_split_range` gives, range partials summed in range order.
 // Each expression is written in `gemv1_chunks.cuh` character for character
@@ -56,8 +57,8 @@
 // 2-byte alignment inside rows 18 to 210 bytes apart, so lane-wise loads
 // touch many sectors per warp instruction. Instead the block stages one
 // 256-k group of its 32 rows through shared memory each step: the span of
-// each row that holds the group (`SPAN` bytes, 2-byte aligned for the 34-,
-// 18- and 210-byte formats) is covered by the aligned 16-byte windows that
+// each row that holds the group (`SPAN` bytes, only 2-byte aligned whenever
+// the block stride is odd in words) is covered by the aligned 16-byte windows that
 // contain it, `nwin = ceil((o + span) / 16)` of them where `o` is the span
 // start's offset inside its window, loaded as `uint4` with consecutive
 // lanes on consecutive windows of one row, so a warp instruction touches
@@ -74,16 +75,18 @@
 // never consumed, since every chunk past the row ends is excluded by the
 // range guard.
 //
-// Shared memory per block: `2 * 32 * ROW_WORDS * 4` bytes of weight
-// windows plus `2 * 288` bytes of activation records — 10,816 bytes for the
-// lowbit formats (ROW_WORDS 40), 19,008 for the K-quants (ROW_WORDS 72) and
-// 27,200 for Q8_0 (ROW_WORDS 104).
+// Shared memory per block: `2 * 32 * ROW_WORDS * 4` bytes of weight windows
+// plus `2 * 288` bytes of activation records. `ROW_WORDS` follows the span,
+// so three sizes cover the family: 10,816 bytes at ROW_WORDS 40 (the lowbit
+// formats, Q3_K and Q2_K), 19,008 at ROW_WORDS 72 (the legacy 32-element
+// formats, IQ4_XS and the 4-, 5- and 6-bit K-quants) and 27,200 at
+// ROW_WORDS 104 (Q8_0).
 //
 // BANKS. A lane reads its chunk as 32-bit words from the row's staged span,
 // so at one instruction the 4 lanes of a feature hit at most four of eight
 // consecutive banks — words `{0, 2, 4, 6} + k` for the 8-byte chunks, and
-// two addresses broadcast over four lanes for the K-quants, whose chunk
-// pairs share one packed run. Eight rows per warp must then land on the
+// two addresses broadcast over four lanes for the readers whose chunk pairs
+// share one packed run. Eight rows per warp must then land on the
 // eight offsets `{0, 8, 16, 24}` and `{1, 9, 17, 25}`: row `r` sits at word
 // `r * ROW_WORDS + ((r / 4) & 1)` with `ROW_WORDS = 8 (mod 32)`, which is
 // conflict free when every row's span starts at the same offset inside
@@ -97,10 +100,10 @@
 // 32 bytes apart, the same addresses for all 8 features: broadcast,
 // conflict free.
 //
-// Ragged K. K is a whole number of the format's blocks, which for the Q8_0
-// row formats is finer than a 256-k group, so the last range can end
-// mid-group. The K-quants' block IS the group, so their walk is never
-// ragged. The chunk count is
+// Ragged K. K is a whole number of the format's blocks, which for the
+// 32- and 64-element formats is finer than a 256-k group, so the last range
+// can end mid-group. A 256-element format's block IS the group, so its walk
+// is never ragged. The chunk count is
 // `K / 32`, the same `bpr` the tensor-core walk stops at. A ragged last
 // group loads only the windows inside the row's `bpr * BLOCK_BYTES /
 // CHUNKS` bytes and only the records that exist; chunks past the range end

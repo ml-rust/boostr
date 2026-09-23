@@ -1910,20 +1910,28 @@ impl MmqFormat {
 
     /// The single-token kernel of the feature-major family
     /// (`quant_mmq_<fmt>_q8_1_gemv1`, module `quant_mmq_gemv1`), which the
-    /// production dispatch takes at M = 1 for the formats `mmqf_vec_dot_d`
-    /// serves as a Q8_0 row and for the three 256-element K-quants. Mirrors
+    /// production dispatch takes at M = 1 for every format it compiles: all
+    /// but the grid-indexed i-quants and the TCF native encodings. Mirrors
     /// `mmq_feat_major::gemv1::kernel_name`; built from `feat_major_infix`,
     /// the same rule `feat_major` below applies for the tensor-core name.
     fn gemv1_kernel(&self) -> Option<String> {
         match self {
             MmqFormat::Q8_0
+            | MmqFormat::Q40
+            | MmqFormat::Q41
+            | MmqFormat::Q50
+            | MmqFormat::Q51
+            | MmqFormat::IQ4NL
+            | MmqFormat::IQ4XS
             | MmqFormat::PQ20
             | MmqFormat::Q20
             | MmqFormat::Q10
             | MmqFormat::PTQ10
             | MmqFormat::Q4K
             | MmqFormat::Q5K
-            | MmqFormat::Q6K => self
+            | MmqFormat::Q6K
+            | MmqFormat::Q3K
+            | MmqFormat::Q2K => self
                 .feat_major_infix()
                 .map(|infix| format!("quant_mmq_{infix}_q8_1_gemv1")),
             _ => None,
@@ -3013,8 +3021,8 @@ fn main() {
 
     let device = CudaDevice::new(0);
 
-    // `m16n8k32` needs sm_80. `caps.bf16` marks that floor, so a pre-Ampere
-    // device skips here instead of failing to load the module.
+    // `m16n8k32` needs sm_80. `caps.bf16` marks that floor, so a device
+    // below sm_80 skips here instead of failing to load the module.
     if !device.profile().caps.bf16 {
         println!(
             "mmq_kernel_compare SKIPPED: this GPU predates sm_80, which \

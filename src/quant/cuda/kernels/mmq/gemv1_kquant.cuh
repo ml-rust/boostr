@@ -1,14 +1,15 @@
-// K-quant weight readers of the single-token (M = 1) MMQ body: Q4_K, Q5_K
-// and Q6_K. Same contract as the readers in `gemv1_formats.cuh`, plus
-// `scales(row, o, j, ln, ...)`, which gives the float constants the chunk's
-// epilogue multiplies. The three formats hold 256 elements per super-block,
-// so `CHUNKS` is 8 and one step is exactly one super-block per feature.
+// K-quant weight readers of the single-token (M = 1) MMQ body: Q4_K, Q5_K,
+// Q6_K, Q3_K and Q2_K. Same contract as the readers in `gemv1_formats.cuh`,
+// plus `scales(row, o, j, ln, ...)`, which gives the float constants the
+// chunk's epilogue multiplies. All five hold 256 elements per super-block, so
+// `CHUNKS` is 8 and one step is exactly one super-block per feature.
 //
 // A reader returns RAW quant lanes and leaves every sub-scale to the float
 // epilogue, as the tensor-core staging does: Q4_K and Q5_K unsigned 4- and
 // 5-bit lanes with `(d * scale, -dmin * minimum)` per 32 elements
-// (`GEMV1_EPI_DM`), Q6_K signed 6-bit lanes with `d * scale` per 16
-// elements (`GEMV1_EPI_SC16`).
+// (`GEMV1_EPI_DM`), Q6_K signed 6-bit and Q3_K signed 3-bit lanes with
+// `d * scale` per 16 elements (`GEMV1_EPI_SC16`), Q2_K unsigned 2-bit lanes
+// with both a scale and a minimum per 16 elements (`GEMV1_EPI_SC16_MIN`).
 //
 // WORD MAPS. Chunk `j` of a super-block is staged words `8j .. 8j + 7`, and
 // staged word `w` holds elements `4w .. 4w + 3`, so word `i` of a chunk is
@@ -178,6 +179,130 @@ struct Gemv1Q6K {
         for (int i = 0; i < 8; ++i) {
             const int v = ((vl[i] >> nib) & 0x0F0F0F0F) | (((vh[i] >> sh) & 0x03030303) << 4);
             w[i] = __vsubss4(v, 0x20202020);
+        }
+    }
+};
+
+// Q3_K: 32 bytes `hmask`@0, 64 bytes `qs`@32, 12 packed 6-bit `scales`@96 and
+// the f16 `d`@108. Sixteen signed scales, one per 16 elements, and no minimum
+// term, so the epilogue is Q6_K's.
+//
+// Word map. Staged word `w` takes `qs` word `8 * (w / 32) + w % 8` with the
+// 2-bit field at shift `2 * ((w % 32) / 8)`, and `hmask` word `w % 8` at bit
+// `(w % 32) / 8 + 4 * (w / 32)`. For chunk `j` (words `8j .. 8j + 7`) that
+// collapses to: `qs` words `8 * (j / 4) + i`, one shift `2 * (j % 4)` for the
+// whole chunk, and `hmask` words `0 .. 7` at bit `j`. The eight `hmask` words
+// do not depend on `j`, so a step's two chunks per lane read the same ones.
+//
+// THE QUANT. Two low bits from `qs`, one high bit from `hmask`, and the high
+// bit is INVERTED: a SET bit means do NOT subtract 4. Moving it to bit 2
+// contributes `+4`, so the `-4` bias that follows cancels on a set bit and
+// leaves `-4` on a clear one, which is the signed value in [-4, 3].
+//
+// The 110-byte block stride is only 2-byte aligned, so `o` is even and every
+// word read goes through `gemv1_row_words`.
+struct Gemv1Q3K {
+    static constexpr unsigned int BLOCK_BYTES = 110;
+    static constexpr unsigned int CHUNKS = 8;
+    static constexpr unsigned int SPAN = (GEMV1_STEP_CHUNKS / CHUNKS) * BLOCK_BYTES;
+    static_assert(BLOCK_BYTES % 2 == 0, "Funnel reads need a 2-byte block stride.");
+    // `read` returns the chunk's words in element order, as signed values in
+    // [-4, 3].
+    static constexpr bool PAIRED_WORDS = false;
+    static constexpr bool CODES_PLUS_ONE = false;
+    static constexpr Gemv1Epilogue EPILOGUE = GEMV1_EPI_SC16;
+    using Lane = Gemv1NoLane;
+    static __device__ __forceinline__ Lane setup(unsigned int) { return Lane{}; }
+
+    // `d * scale` of the chunk's two 16-element groups, `2j` and `2j + 1`,
+    // the value `MmqfQ3K::stage` writes.
+    static __device__ __forceinline__ void scales(
+        const int* __restrict__ row, unsigned int o, unsigned int j, Lane, float* sc_lo,
+        float* sc_hi
+    ) {
+        const unsigned char* sc = reinterpret_cast<const unsigned char*>(row) + o + 96;
+        const float d_h = gemv1_half_bits_to_float(gemv1_row_half(row, o + 108));
+        const int g_lo = (int)(2 * j);
+        const int g_hi = g_lo + 1;
+        *sc_lo = d_h * (float)q3k_scale_bytes(
+                           sc[GGUF_Q3K_SC_LOW_BYTE(g_lo)], sc[GGUF_Q3K_SC_HIGH_BYTE(g_lo)], g_lo
+                       );
+        *sc_hi = d_h * (float)q3k_scale_bytes(
+                           sc[GGUF_Q3K_SC_LOW_BYTE(g_hi)], sc[GGUF_Q3K_SC_HIGH_BYTE(g_hi)], g_hi
+                       );
+    }
+
+    static __device__ __forceinline__ void read(
+        const int* __restrict__ row, unsigned int o, unsigned int j, Lane, int (&w)[8]
+    ) {
+        int vq[8];
+        int vh[8];
+        gemv1_row_words<8>(row, o + 32 + 32 * (j / 4), vq);
+        gemv1_row_words<8>(row, o, vh);
+        const unsigned int sh = 2 * (j % 4);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int v = ((vq[i] >> sh) & 0x03030303) | (((vh[i] >> j) << 2) & 0x04040404);
+            w[i] = __vsubss4(v, 0x04040404);
+        }
+    }
+};
+
+// Q2_K: 16 packed scale/min bytes@0, 64 bytes `qs`@16, f16 `d`@80 and f16
+// `dmin`@82. One scale byte per 16 elements carries both fields — low nibble
+// the scale, high nibble the minimum — so the epilogue is the only one in the
+// family with BOTH a per-16 scale and a minimum term.
+//
+// Word map. Q3_K's without the `hmask` term: staged word `w` takes `qs` word
+// `8 * (w / 32) + w % 8` at shift `2 * ((w % 32) / 8)`, so chunk `j` reads
+// `qs` words `8 * (j / 4) + i` at one shift `2 * (j % 4)`.
+//
+// THE QUANT. Two bits, UNSIGNED, in 0..3. No bias is folded in; the format's
+// asymmetry is carried entirely by the minimum term.
+//
+// The 84-byte block stride is a multiple of 4, so `o` is a multiple of 4,
+// every quant word is read whole and the adjacent `d`/`dmin` pair is one
+// aligned `half2` load.
+struct Gemv1Q2K {
+    static constexpr unsigned int BLOCK_BYTES = 84;
+    static constexpr unsigned int CHUNKS = 8;
+    static constexpr unsigned int SPAN = (GEMV1_STEP_CHUNKS / CHUNKS) * BLOCK_BYTES;
+    static_assert(BLOCK_BYTES % 4 == 0, "Whole-word group reads need a 4-byte block stride.");
+    // `read` returns the chunk's words in element order, as unsigned 2-bit
+    // values.
+    static constexpr bool PAIRED_WORDS = false;
+    static constexpr bool CODES_PLUS_ONE = false;
+    static constexpr Gemv1Epilogue EPILOGUE = GEMV1_EPI_SC16_MIN;
+    using Lane = Gemv1NoLane;
+    static __device__ __forceinline__ Lane setup(unsigned int) { return Lane{}; }
+
+    // `(d * scale, -dmin * minimum)` of the chunk's two 16-element groups,
+    // `2j` and `2j + 1`, the pairs `MmqfQ2K::stage` writes.
+    static __device__ __forceinline__ void scales(
+        const int* __restrict__ row, unsigned int o, unsigned int j, Lane, float* sc_lo,
+        float* mn_lo, float* sc_hi, float* mn_hi
+    ) {
+        const unsigned char* sc = reinterpret_cast<const unsigned char*>(row) + o;
+        const half2 dm =
+            *reinterpret_cast<const half2*>(reinterpret_cast<const char*>(row) + o + 80);
+        const float d = __low2float(dm);
+        const float dmin = __high2float(dm);
+        const unsigned int s_lo = sc[2 * j];
+        const unsigned int s_hi = sc[2 * j + 1];
+        *sc_lo = d * (float)(s_lo & 0x0Fu);
+        *mn_lo = -dmin * (float)(s_lo >> 4);
+        *sc_hi = d * (float)(s_hi & 0x0Fu);
+        *mn_hi = -dmin * (float)(s_hi >> 4);
+    }
+
+    static __device__ __forceinline__ void read(
+        const int* __restrict__ row, unsigned int o, unsigned int j, Lane, int (&w)[8]
+    ) {
+        const int* run = row + (o + 16 + 32 * (j / 4)) / 4;
+        const unsigned int sh = 2 * (j % 4);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            w[i] = (run[i] >> sh) & 0x03030303;
         }
     }
 };

@@ -9,14 +9,13 @@
 //! `r` alone, at every M the dispatch serves with a different tiling or
 //! schedule, through `quant_matmul`, `quant_matmul_batch` and `quant_swiglu`.
 //!
-//! At M=1, Q8_0, PQ2_0, Q2_0, Q1_0, PTQ1_0, Q4_K, Q5_K and Q6_K take the
-//! single-token kernel `quant_mmq_<fmt>_q8_1_gemv1`
-//! (`mmq_feat_major::gemv1`), a third schedule that forms the same bits as
-//! the tensor-core kernels, so the "alone" reference every batched row is
-//! held to below IS that kernel's output for those eight formats, and every
-//! batched M runs the tensor-core kernels against it. `ROW_COUNTS` starts at
-//! 1, so every shape here exercises that path. The comparison is on the bit
-//! pattern (`to_bits`), never a tolerance.
+//! At M=1 every format checked here takes the single-token kernel
+//! `quant_mmq_<fmt>_q8_1_gemv1` (`mmq_feat_major::gemv1`), a third schedule
+//! that forms the same bits as the tensor-core kernels, so the "alone"
+//! reference every batched row is held to below IS that kernel's output, and
+//! every batched M runs the tensor-core kernels against it. `ROW_COUNTS`
+//! starts at 1, so every shape here exercises that path. The comparison is on
+//! the bit pattern (`to_bits`), never a tolerance.
 //!
 //! The pair-vs-grid pick is measured per device at first use, so the run
 //! below covers whichever schedule this device picks; the second run pins
@@ -61,10 +60,14 @@ fn cuda() -> Option<(CudaClient, CudaDevice)> {
 }
 
 /// Packed weight bytes for `format` at `[n, k]`, through the CPU quantizer.
-/// PQ2_0, Q2_0, Q1_0 and PTQ1_0 have no CPU quantize kernel, so their blocks
-/// are built directly: every bit pattern of their code run is a valid block
-/// (`gguf_base3_trit` maps every byte to a trit at every level).
+/// PQ2_0, Q2_0, Q1_0, PTQ1_0, Q5_0 and Q5_1 have no CPU quantize kernel, so
+/// their blocks are built directly: every bit pattern of their quant run is a
+/// valid block (`gguf_base3_trit` maps every byte to a trit at every level,
+/// and the 5-bit formats read plain nibbles plus a bit field).
 fn packed_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> {
+    if matches!(format, QuantFormat::Q5_0 | QuantFormat::Q5_1) {
+        return legacy5_weight(format, n, k, salt);
+    }
     if matches!(
         format,
         QuantFormat::PQ2_0 | QuantFormat::Q2_0 | QuantFormat::Q1_0 | QuantFormat::PTQ1_0
@@ -103,6 +106,32 @@ fn lowbit_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> 
         out[base + d_off..base + d_off + 2].copy_from_slice(&d.to_le_bytes());
         for pos in 0..block_bytes - 2 {
             out[base + qs_off + pos] =
+                ((block * 131 + pos * 17 + (salt * 100.0) as usize) % 251) as u8;
+        }
+    }
+    out
+}
+
+/// A Q5_0 or Q5_1 weight built byte by byte: f16 `d` at byte 0, Q5_1's f16
+/// `m` at byte 2, then the 4-byte fifth-bit field and the 16 nibble bytes,
+/// all varied by block index and `salt` so no two blocks or weights match.
+fn legacy5_weight(format: QuantFormat, n: usize, k: usize, salt: f32) -> Vec<u8> {
+    let block_bytes = format.block_bytes();
+    let bpr = k / format.block_size();
+    // Bytes of `half` header: `d` alone for Q5_0, `d` and `m` for Q5_1. The
+    // fifth-bit field and the nibble run fill everything after it.
+    let header = if format == QuantFormat::Q5_1 { 4 } else { 2 };
+    let mut out = vec![0u8; n * bpr * block_bytes];
+    for block in 0..n * bpr {
+        let base = block * block_bytes;
+        let d = half::f16::from_f32(0.01 + ((block as f32 * 0.003) + salt * 0.1) % 0.5);
+        out[base..base + 2].copy_from_slice(&d.to_le_bytes());
+        if format == QuantFormat::Q5_1 {
+            let m = half::f16::from_f32(-0.4 + ((block as f32 * 0.011) + salt * 0.2) % 0.8);
+            out[base + 2..base + 4].copy_from_slice(&m.to_le_bytes());
+        }
+        for pos in 0..block_bytes - header {
+            out[base + header + pos] =
                 ((block * 131 + pos * 17 + (salt * 100.0) as usize) % 251) as u8;
         }
     }
@@ -276,4 +305,34 @@ fn q1_0_rows_do_not_depend_on_the_batch() {
 #[test]
 fn ptq1_0_rows_do_not_depend_on_the_batch() {
     check_format(QuantFormat::PTQ1_0, true);
+}
+
+#[test]
+fn q3_k_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::Q3K, false);
+}
+
+#[test]
+fn iq4_xs_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::IQ4XS, false);
+}
+
+#[test]
+fn q4_1_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::Q4_1, true);
+}
+
+#[test]
+fn q5_0_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::Q5_0, true);
+}
+
+#[test]
+fn q5_1_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::Q5_1, true);
+}
+
+#[test]
+fn iq4_nl_rows_do_not_depend_on_the_batch() {
+    check_format(QuantFormat::IQ4NL, true);
 }

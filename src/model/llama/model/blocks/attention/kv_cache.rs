@@ -7,7 +7,7 @@ use crate::inference::KvCache;
 use crate::model::traits::ModelClient;
 use crate::nn::{MaybeQuantLinear, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
-use crate::ops::traits::AttnOutLayout;
+use crate::ops::traits::{AttnOutLayout, KvSeqLen};
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_narrow, var_reshape};
 use numr::dtype::DType;
@@ -145,7 +145,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
                 self.head_dim,
                 is_prefill,
                 self.sliding_window,
-                Some(kv_seq_len),
+                Some(KvSeqLen::Shared(kv_seq_len)),
                 None,
                 AttnOutLayout::TokenMajor,
             )?;

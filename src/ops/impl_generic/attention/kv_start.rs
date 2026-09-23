@@ -9,33 +9,89 @@ use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
-/// Checks that `kv_start` is a contiguous `[batch]` I32 tensor.
+/// Checks that a per-row key bound is a contiguous `[batch]` I32 tensor.
 ///
-/// Values are not read here: a device backend consumes them in-kernel, and
-/// each kernel clamps a start past the key range to an empty range.
-pub fn validate_kv_start<R: Runtime<DType = DType>>(
-    kv_start: &Tensor<R>,
+/// `arg` names the argument in any error. Values are not read here: a device
+/// backend consumes them in-kernel, and each kernel clamps a start past the
+/// key range to an empty range.
+pub fn validate_row_bounds<R: Runtime<DType = DType>>(
+    bounds: &Tensor<R>,
     batch: usize,
+    arg: &'static str,
 ) -> Result<()> {
-    if kv_start.dtype() != DType::I32 {
+    if bounds.dtype() != DType::I32 {
         return Err(Error::InvalidArgument {
-            arg: "kv_start",
-            reason: format!("expected I32, got {:?}", kv_start.dtype()),
+            arg,
+            reason: format!("expected I32, got {:?}", bounds.dtype()),
         });
     }
-    if kv_start.shape() != [batch] {
+    if bounds.shape() != [batch] {
         return Err(Error::InvalidArgument {
-            arg: "kv_start",
-            reason: format!("expected shape [{batch}], got {:?}", kv_start.shape()),
+            arg,
+            reason: format!("expected shape [{batch}], got {:?}", bounds.shape()),
         });
     }
-    if !kv_start.is_contiguous() {
+    if !bounds.is_contiguous() {
         return Err(Error::InvalidArgument {
-            arg: "kv_start",
+            arg,
             reason: "must be contiguous".into(),
         });
     }
     Ok(())
+}
+
+/// Checks that `kv_start` is a contiguous `[batch]` I32 tensor.
+pub fn validate_kv_start<R: Runtime<DType = DType>>(
+    kv_start: &Tensor<R>,
+    batch: usize,
+) -> Result<()> {
+    validate_row_bounds(kv_start, batch, "kv_start")
+}
+
+/// Clamped per-row key ends, checked against each row's start and the key
+/// axis length `seq_len_k`.
+///
+/// Row `b` attends over `[kv_start[b], ends[b])`, so an end below its start
+/// or past the buffer is rejected rather than clamped. A missing `starts`
+/// means every row starts at `0`; a negative start is read as `0`, the way
+/// `kv_start_masked` reads it.
+pub fn clamped_kv_ends(
+    ends: &[i32],
+    starts: Option<&[i32]>,
+    seq_len_k: usize,
+) -> Result<Vec<usize>> {
+    ends.iter()
+        .enumerate()
+        .map(|(b, &end)| {
+            let start = starts.map_or(0, |s| s[b].max(0) as i64);
+            let end = i64::from(end);
+            if end < start || end > seq_len_k as i64 {
+                return Err(Error::InvalidArgument {
+                    arg: "kv_seq_len",
+                    reason: format!(
+                        "row {b}: end {end} is outside [start {start}, key axis {seq_len_k}]; \
+                         pass an end at or above the row's kv_start and at or below the key \
+                         tensor's dim-2"
+                    ),
+                });
+            }
+            Ok(end as usize)
+        })
+        .collect()
+}
+
+/// Error for a backend whose kernel does not accept `KvSeqLen::PerRow`.
+///
+/// `backend` names the flash path in the message (e.g. `"CUDA"`, `"WebGPU"`).
+pub fn per_row_kv_seq_len_unsupported(backend: &str) -> Error {
+    Error::InvalidArgument {
+        arg: "kv_seq_len",
+        reason: format!(
+            "the {backend} flash path does not yet take a per-row key length; pass \
+             KvSeqLen::Shared(n) with one length for the whole batch, or run this batch \
+             on the CPU client"
+        ),
+    }
 }
 
 /// Key mask for one batch row: key `j` is valid iff `j >= start`, on top
@@ -119,6 +175,38 @@ mod tests {
         let wrong_dtype =
             Tensor::<CpuRuntime>::from_slice(&[0f32, 3.0, 7.0], &[3], &device).expect("tensor");
         assert!(validate_kv_start(&wrong_dtype, 3).is_err());
+    }
+
+    #[test]
+    fn validate_row_bounds_rejects_non_contiguous() {
+        let device = CpuDevice::new();
+        // Every other element of a 4-element buffer: shape [2], stride 2.
+        let t = Tensor::<CpuRuntime>::from_slice(&[0i32, 1, 2, 3], &[2, 2], &device)
+            .expect("tensor")
+            .narrow(1, 0, 1)
+            .expect("narrow")
+            .squeeze(Some(1));
+        assert_eq!(t.shape(), &[2]);
+        assert!(!t.is_contiguous());
+        assert!(validate_row_bounds(&t, 2, "kv_seq_len").is_err());
+    }
+
+    #[test]
+    fn clamped_ends_accept_starts_and_buffer_bounds() {
+        let ends = clamped_kv_ends(&[0i32, 5, 8], Some(&[0i32, 5, 3]), 8).expect("valid");
+        assert_eq!(ends, vec![0, 5, 8]);
+    }
+
+    #[test]
+    fn clamped_ends_reject_end_below_start() {
+        let err = clamped_kv_ends(&[6i32, 2], Some(&[0i32, 4]), 8);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn clamped_ends_reject_end_past_buffer() {
+        assert!(clamped_kv_ends(&[9i32], None, 8).is_err());
+        assert!(clamped_kv_ends(&[-1i32], None, 8).is_err());
     }
 
     #[test]

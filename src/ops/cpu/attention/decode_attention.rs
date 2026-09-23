@@ -19,11 +19,25 @@ use crate::error::Result;
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
 
+/// The key range each batch row attends over: `[kv_start[b], kv_end[b])`.
+///
+/// Either bound left as `None` falls back to the key axis — start 0, end
+/// the axis length — which is what an unpadded, equal-length batch wants.
+#[derive(Clone, Copy, Default)]
+pub struct RowRange<'a> {
+    /// One key-loop start per row; keys before it are left-padding.
+    pub kv_start: Option<&'a [i32]>,
+    /// One key-loop end per row; keys at or past it are not in the cache.
+    pub kv_end: Option<&'a [usize]>,
+}
+
 /// Fused decode attention: Q [B, H, 1, D] × K [B, H_kv, S_k, D] → output [B, H, 1, D]
 ///
 /// `kv_start`, when given, holds one key-loop start per batch row: keys
-/// before it are left-padding and skipped. A row whose start reaches the
-/// end of the key axis stores zeros and an LSE of `-inf`.
+/// before it are left-padding and skipped. `kv_end` holds one key-loop end
+/// per batch row, defaulting to the key axis length; keys at or past it are
+/// not in the row's cache. A row whose start reaches its end stores zeros
+/// and an LSE of `-inf`.
 ///
 /// Returns (output, lse) where lse is a dummy [B, H, 1] tensor (needed for trait compat).
 pub fn fused_decode_attention(
@@ -33,8 +47,9 @@ pub fn fused_decode_attention(
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    kv_start: Option<&[i32]>,
+    rows: RowRange<'_>,
 ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
+    let RowRange { kv_start, kv_end } = rows;
     let q_shape = q.shape();
     let k_shape = k.shape();
     let batch = q_shape[0];
@@ -69,10 +84,12 @@ pub fn fused_decode_attention(
     let mut scores = vec![0.0f32; seq_len_k];
 
     for b in 0..batch {
-        // Keys before the row's start are left-padding. A start past the end
-        // leaves the row with no key at all.
+        // Keys before the row's start are left-padding, keys at or past its
+        // end are not in its cache. A start that reaches the end leaves the
+        // row with no key at all.
+        let end = kv_end.map_or(seq_len_k, |e| e[b]);
         let start = kv_start
-            .map(|s| usize::try_from(s[b].max(0)).unwrap_or(0).min(seq_len_k))
+            .map(|s| usize::try_from(s[b].max(0)).unwrap_or(0).min(end))
             .unwrap_or(0);
         for h in 0..num_heads {
             let kv_h = h / kv_group_size;
@@ -83,7 +100,7 @@ pub fn fused_decode_attention(
             let out_row = &mut output[out_offset..out_offset + head_dim];
             out_row.fill(0.0);
 
-            if start >= seq_len_k {
+            if start >= end {
                 lse_data[b * num_heads + h] = f32::NEG_INFINITY;
                 continue;
             }
@@ -93,7 +110,7 @@ pub fn fused_decode_attention(
             // Phase 1: Compute QK scores with SIMD dot products
             // Use f64 scale to match standard attention path (mul_scalar with f64)
             let mut max_score = f32::NEG_INFINITY;
-            for j in start..seq_len_k {
+            for j in start..end {
                 let k_row = &k_data[k_base + j * head_dim..k_base + j * head_dim + head_dim];
                 let score = (dot_f32_simd(q_row, k_row) as f64 * scale) as f32;
                 scores[j] = score;
@@ -104,7 +121,7 @@ pub fn fused_decode_attention(
 
             // Phase 2: Softmax with f64 accumulation for numerical stability
             let mut sum_exp = 0.0f64;
-            for s in scores[start..seq_len_k].iter_mut() {
+            for s in scores[start..end].iter_mut() {
                 let w = (*s - max_score).exp();
                 *s = w;
                 sum_exp += w as f64;
@@ -112,7 +129,7 @@ pub fn fused_decode_attention(
 
             // Phase 3: Accumulate weighted V into output
             let inv_sum = (1.0f64 / sum_exp) as f32;
-            for j in start..seq_len_k {
+            for j in start..end {
                 let w = scores[j] * inv_sum;
                 let v_row = &v_data[v_base + j * head_dim..v_base + j * head_dim + head_dim];
                 accumulate_weighted_simd(out_row, v_row, w);
@@ -229,7 +246,7 @@ mod tests {
         let k = make_tensor(&k_data, &[1, 2, 3, 4]);
         let v = make_tensor(&v_data, &[1, 2, 3, 4]);
 
-        let (out, _lse) = fused_decode_attention(&q, &k, &v, 2, 2, 4, None).unwrap();
+        let (out, _lse) = fused_decode_attention(&q, &k, &v, 2, 2, 4, RowRange::default()).unwrap();
         assert_eq!(out.shape(), &[1, 2, 1, 4]);
 
         // Verify against reference: standard attention
@@ -250,7 +267,7 @@ mod tests {
         let k = make_tensor(&k_data, &[1, 2, 3, 4]);
         let v = make_tensor(&v_data, &[1, 2, 3, 4]);
 
-        let (out, _lse) = fused_decode_attention(&q, &k, &v, 4, 2, 4, None).unwrap();
+        let (out, _lse) = fused_decode_attention(&q, &k, &v, 4, 2, 4, RowRange::default()).unwrap();
         assert_eq!(out.shape(), &[1, 4, 1, 4]);
 
         // Heads 0,1 should share KV head 0; heads 2,3 should share KV head 1
@@ -302,8 +319,16 @@ mod tests {
         .unwrap();
 
         // Fused kernel
-        let (fused_out, _) =
-            fused_decode_attention(&q, &k, &v, num_heads, num_kv_heads, head_dim, None).unwrap();
+        let (fused_out, _) = fused_decode_attention(
+            &q,
+            &k,
+            &v,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            RowRange::default(),
+        )
+        .unwrap();
 
         // Reference: standard matmul path
         let k_t = k.transpose(-2isize, -1isize).unwrap().contiguous().unwrap();
@@ -374,8 +399,16 @@ mod tests {
         .unwrap();
 
         // Fused kernel
-        let (fused_out, _) =
-            fused_decode_attention(&q, &k, &v, num_heads, num_kv_heads, head_dim, None).unwrap();
+        let (fused_out, _) = fused_decode_attention(
+            &q,
+            &k,
+            &v,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            RowRange::default(),
+        )
+        .unwrap();
 
         // Reference: standard matmul path with GQA expansion
         let repeats = num_heads / num_kv_heads;

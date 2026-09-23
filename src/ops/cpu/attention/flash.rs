@@ -11,7 +11,7 @@ use crate::ops::impl_generic::attention::{
     StandardAttnConfig, multi_head_attention_impl, standard_attention_bwd,
 };
 use crate::ops::traits::cache::kv_cache_quant::Int4GroupSize;
-use crate::ops::traits::{AttentionOps, AttnOutLayout, FlashAttentionOps};
+use crate::ops::traits::{AttentionOps, AttnOutLayout, FlashAttentionOps, KvSeqLen};
 use numr::autograd::Var;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
@@ -40,7 +40,7 @@ impl FlashAttentionOps<CpuRuntime> for CpuClient {
         head_dim: usize,
         causal: bool,
         window_size: usize,
-        kv_seq_len: Option<usize>,
+        kv_seq_len: Option<KvSeqLen<'_, CpuRuntime>>,
         kv_start: Option<&Tensor<CpuRuntime>>,
         out_layout: AttnOutLayout,
     ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {

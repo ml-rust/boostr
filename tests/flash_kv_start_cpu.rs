@@ -11,8 +11,8 @@
 
 mod common;
 
-use boostr::ops::AttnOutLayout;
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
+use boostr::ops::{AttnOutLayout, KvSeqLen};
 use common::cpu_setup;
 use common::kv_start::{
     KvStartGeom, max_abs_diff, read_f32, sliced_reference, token_major_to_head_major, values,
@@ -266,7 +266,7 @@ fn kv_seq_len_with_kv_start() {
             g.head_dim,
             false,
             0,
-            Some(30),
+            Some(KvSeqLen::Shared(30)),
             Some(&kv_start),
             AttnOutLayout::HeadMajor,
         )
@@ -323,5 +323,182 @@ fn rejects_malformed_kv_start() {
             AttnOutLayout::HeadMajor,
         );
         assert!(err.is_err(), "malformed kv_start was accepted");
+    }
+}
+
+/// One row of a per-row-end batch, decoded alone: the same start, and
+/// `KvSeqLen::Shared` at the row's own end.
+fn row_alone(
+    client: &CpuClient,
+    [q, k, v]: &[Tensor<CpuRuntime>; 3],
+    g: &KvStartGeom,
+    device: &CpuDevice,
+    b: usize,
+    start: i32,
+    end: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let row = |t: &Tensor<CpuRuntime>| {
+        t.narrow(0, b, 1)
+            .expect("narrow row")
+            .contiguous()
+            .expect("row contiguous")
+    };
+    let start_t = Tensor::<CpuRuntime>::from_slice(&[start], &[1], device).expect("row start");
+    let (out, lse) = client
+        .flash_attention_fwd(
+            &row(q),
+            &row(k),
+            &row(v),
+            g.num_heads,
+            g.num_kv_heads,
+            g.head_dim,
+            g.causal,
+            g.window,
+            Some(KvSeqLen::Shared(end)),
+            Some(&start_t),
+            AttnOutLayout::HeadMajor,
+        )
+        .expect("row alone");
+    (read_f32(&out), read_f32(&lse))
+}
+
+/// Rows with different ends in one call, each held to the bits its own
+/// single-row run forms. A row whose start equals its end sees no key.
+fn check_ends(g: KvStartGeom, starts: &[i32], ends: &[i32], label: &str) {
+    let (client, device) = cpu_setup();
+    let tensors = fixture(&g, DType::F32, &device);
+    let kv_start = Tensor::<CpuRuntime>::from_slice(starts, &[g.batch], &device).expect("starts");
+    let kv_end = Tensor::<CpuRuntime>::from_slice(ends, &[g.batch], &device).expect("ends");
+    let (out, lse) = client
+        .flash_attention_fwd(
+            &tensors[0],
+            &tensors[1],
+            &tensors[2],
+            g.num_heads,
+            g.num_kv_heads,
+            g.head_dim,
+            g.causal,
+            g.window,
+            Some(KvSeqLen::PerRow(&kv_end)),
+            Some(&kv_start),
+            AttnOutLayout::HeadMajor,
+        )
+        .expect("per-row ends");
+    let out = read_f32(&out);
+    let lse = read_f32(&lse);
+    let row_len = g.num_heads * g.seq_q * g.head_dim;
+    let lse_len = g.num_heads * g.seq_q;
+    for b in 0..g.batch {
+        let end = ends[b] as usize;
+        let (want_out, want_lse) = row_alone(&client, &tensors, &g, &device, b, starts[b], end);
+        let got_out = &out[b * row_len..(b + 1) * row_len];
+        let got_lse = &lse[b * lse_len..(b + 1) * lse_len];
+        assert_bits(got_out, &want_out, &format!("{label} row {b} out"));
+        assert_bits(got_lse, &want_lse, &format!("{label} row {b} lse"));
+        if starts[b].max(0) as usize == end {
+            assert!(
+                got_out.iter().all(|x| *x == 0.0),
+                "{label} row {b}: no valid key, output is not zero"
+            );
+            assert!(
+                got_lse.iter().all(|x| *x == f32::NEG_INFINITY),
+                "{label} row {b}: no valid key, LSE is not -inf"
+            );
+        }
+    }
+}
+
+/// Decode with ends that differ across rows: one at the buffer's dim-2, the
+/// others below it.
+#[test]
+fn decode_per_row_ends() {
+    check_ends(
+        geom(1, 40, 64, false, 0),
+        &STARTS,
+        &[40, 31, 22],
+        "cpu decode per-row ends",
+    );
+}
+
+/// The same axis through the composed path, causal and windowed.
+#[test]
+fn prefill_per_row_ends() {
+    check_ends(
+        geom(8, 40, 64, true, 0),
+        &STARTS,
+        &[40, 33, 25],
+        "cpu prefill causal per-row ends",
+    );
+    check_ends(
+        geom(8, 40, 64, true, 8),
+        &STARTS,
+        &[40, 33, 25],
+        "cpu prefill window=8 per-row ends",
+    );
+}
+
+/// Row 1's start equals its end: zeros and `-inf`, never NaN.
+#[test]
+fn per_row_end_equal_to_start() {
+    check_ends(
+        geom(1, 40, 64, false, 0),
+        &[0, 12, 17],
+        &[40, 12, 30],
+        "cpu per-row end equals start",
+    );
+}
+
+/// A zero start and a nonzero one in the same batch, each with its own end.
+#[test]
+fn per_row_ends_mixed_starts() {
+    check_ends(
+        geom(1, 40, 64, false, 0),
+        &[0, 9, 0],
+        &[40, 28, 17],
+        "cpu per-row ends mixed starts",
+    );
+    check_ends(
+        geom(4, 40, 64, true, 0),
+        &[0, 9, 0],
+        &[40, 28, 17],
+        "cpu per-row ends mixed starts causal",
+    );
+}
+
+/// Shape, dtype and value checks on the end vector.
+#[test]
+fn rejects_malformed_kv_seq_len_ends() {
+    let g = geom(1, 40, 64, false, 0);
+    let (client, device) = cpu_setup();
+    let tensors = fixture(&g, DType::F32, &device);
+    let kv_start = Tensor::<CpuRuntime>::from_slice(&STARTS, &[3], &device).expect("starts");
+    let i32s = |data: &[i32], shape: &[usize]| {
+        Tensor::<CpuRuntime>::from_slice(data, shape, &device).expect("ends")
+    };
+    let past_buffer = i32s(&[40, 41, 40], &[3]);
+    let below_start = i32s(&[40, 4, 40], &[3]);
+    let wrong_len = i32s(&[40, 40], &[2]);
+    let wrong_dtype =
+        Tensor::<CpuRuntime>::from_slice(&[40f32, 40.0, 40.0], &[3], &device).expect("ends");
+    for (bad, case) in [
+        (&past_buffer, "end past the buffer"),
+        (&below_start, "end below its row's start"),
+        (&wrong_len, "wrong shape"),
+        (&wrong_dtype, "wrong dtype"),
+    ] {
+        let err = client.flash_attention_fwd(
+            &tensors[0],
+            &tensors[1],
+            &tensors[2],
+            g.num_heads,
+            g.num_kv_heads,
+            g.head_dim,
+            false,
+            0,
+            Some(KvSeqLen::PerRow(bad)),
+            Some(&kv_start),
+            AttnOutLayout::HeadMajor,
+        );
+        assert!(err.is_err(), "{case} was accepted");
     }
 }

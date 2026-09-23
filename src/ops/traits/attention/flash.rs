@@ -1,79 +1,11 @@
-//! Attention operations traits
+//! Flash Attention operations trait
 
 use crate::error::Result;
 use crate::ops::traits::cache::kv_cache_quant::Int4GroupSize;
-use numr::autograd::Var;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
-/// Multi-head attention: composed from numr primitives (matmul, softmax),
-/// `Var<R>`-based for autograd — one code path for training and inference.
-///
-/// Layout: `q`/`k`/`v` are `[B, H, S(_kv), D]`, `mask` (optional) broadcasts
-/// to `[B, H, S, S_kv]` and is additive (e.g. -inf for masked positions).
-/// Output: `[B, H, S, D]`.
-pub trait AttentionOps<R: Runtime> {
-    fn multi_head_attention(
-        &self,
-        q: &Var<R>,
-        k: &Var<R>,
-        v: &Var<R>,
-        mask: Option<&Var<R>>,
-        num_heads: usize,
-    ) -> Result<Var<R>>;
-}
-
-/// Memory layout of the attention output.
-///
-/// Both layouts hold the same values in the same dtype: the kernels change
-/// only the address each element is stored to, so `TokenMajor` is bitwise
-/// `HeadMajor.permute([0, 2, 1, 3])`. `TokenMajor` reshapes to
-/// `[B, S_q, H * D]` for free, which is what an output projection reads,
-/// so a consumer picks it to drop the `permute + contiguous` copy after
-/// attention. At `S_q == 1` the two layouts are the same bytes.
-///
-/// The logsumexp is `[B, H, S_q]` under either layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AttnOutLayout {
-    /// `[B, H, S_q, D]`: the layout of `q`.
-    #[default]
-    HeadMajor,
-    /// `[B, S_q, H, D]`.
-    TokenMajor,
-}
-
-impl AttnOutLayout {
-    /// Output shape for `batch`, `num_heads`, `seq_len_q`, `head_dim`.
-    pub fn shape(
-        self,
-        batch: usize,
-        num_heads: usize,
-        seq_len_q: usize,
-        head_dim: usize,
-    ) -> [usize; 4] {
-        match self {
-            Self::HeadMajor => [batch, num_heads, seq_len_q, head_dim],
-            Self::TokenMajor => [batch, seq_len_q, num_heads, head_dim],
-        }
-    }
-
-    /// A head-major tensor re-laid into `self`. Copies only for `TokenMajor`
-    /// at `S_q > 1`; the head-major bytes already are the token-major bytes
-    /// at `S_q == 1`, so that case is a reshape.
-    pub fn from_head_major<R: Runtime>(self, out: Tensor<R>) -> Result<Tensor<R>> {
-        match self {
-            Self::HeadMajor => Ok(out),
-            Self::TokenMajor => {
-                let shape = out.shape();
-                let [b, h, s, d] = [shape[0], shape[1], shape[2], shape[3]];
-                if s == 1 {
-                    return Ok(out.reshape(&[b, 1, h, d])?);
-                }
-                Ok(out.permute(&[0, 2, 1, 3])?.contiguous()?)
-            }
-        }
-    }
-}
+use super::flash_layout::{AttnOutLayout, KvSeqLen};
 
 /// Flash Attention v2 — fused O(N) memory attention kernel. PRIMITIVE op
 /// (the fused kernel IS the algorithm); each backend has its own
@@ -100,10 +32,13 @@ pub trait FlashAttentionOps<R: Runtime> {
     ///
     /// # `kv_seq_len`
     ///
-    /// When `Some(n)`, the kernel iterates over only the first `n` positions
-    /// of K/V while using the tensor's dim-2 as the memory stride. This allows
+    /// Where each batch row's keys end — see [`KvSeqLen`]. With
+    /// `Shared(n)` the kernel iterates over only the first `n` positions of
+    /// K/V while using the tensor's dim-2 as the memory stride, which allows
     /// passing a full-capacity KV cache buffer without copying/narrowing.
-    /// When `None`, `k.shape()[2]` is used for both loop bound and stride.
+    /// With `PerRow(ends)` row `b` ends at `ends[b]`, so rows of different
+    /// lengths share one batched cache with no padding. `None` uses
+    /// `k.shape()[2]` for both loop bound and stride.
     ///
     /// # `kv_start`
     ///
@@ -111,10 +46,18 @@ pub trait FlashAttentionOps<R: Runtime> {
     /// Key `j` of batch row `b` is valid only when `j >= kv_start[b]`, on top
     /// of the causal, window and `kv_seq_len` rules. `None` means no padding
     /// and costs nothing; an all-zero tensor gives the same bytes as `None`.
-    /// Query positions stay absolute (`kv_seq_len - seq_len_q + i`), so a
-    /// shared `position` counter stays valid across a left-padded batch. A
-    /// query row left with no valid key stores zeros and an LSE of `-inf`,
-    /// never NaN.
+    /// Query positions stay absolute (`end_b - seq_len_q + i`), so a shared
+    /// `position` counter stays valid across a left-padded batch. A query row
+    /// left with no valid key stores zeros and an LSE of `-inf`, never NaN.
+    ///
+    /// # Row range
+    ///
+    /// Row `b` attends over `[kv_start[b], end_b)`, where `end_b` is the
+    /// row's [`KvSeqLen`] end and defaults to `k.shape()[2]`. Both bounds
+    /// apply on top of the causal, window and `S_q` rules. Every end must
+    /// satisfy `kv_start[b] <= end_b <= k.shape()[2]`; anything else is
+    /// refused with `InvalidArgument`. A row whose start equals its end sees
+    /// no key: it stores zeros and an LSE of `-inf`, never NaN.
     ///
     /// # `out_layout`
     ///
@@ -131,7 +74,7 @@ pub trait FlashAttentionOps<R: Runtime> {
         head_dim: usize,
         causal: bool,
         window_size: usize,
-        kv_seq_len: Option<usize>,
+        kv_seq_len: Option<KvSeqLen<'_, R>>,
         kv_start: Option<&Tensor<R>>,
         out_layout: AttnOutLayout,
     ) -> Result<(Tensor<R>, Tensor<R>)>;

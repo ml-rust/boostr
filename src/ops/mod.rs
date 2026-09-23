@@ -25,6 +25,7 @@ pub use traits::FusedQkvOps;
 pub use traits::GatedDeltaNetOps;
 pub use traits::GrammarDfaOps;
 pub use traits::KvCacheOps;
+pub use traits::KvSeqLen;
 pub use traits::MRopeOps;
 pub use traits::MlaOps;
 pub use traits::MoEOps;

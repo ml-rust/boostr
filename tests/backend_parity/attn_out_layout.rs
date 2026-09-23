@@ -13,7 +13,7 @@
 use super::helpers::*;
 use boostr::nn::var_contiguous;
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
-use boostr::ops::{AttnOutLayout, var_flash_attention};
+use boostr::ops::{AttnOutLayout, KvSeqLen, var_flash_attention};
 use numr::autograd::{Var, backward, var_mul, var_permute, var_reshape, var_sum};
 use numr::dtype::DType;
 use numr::runtime::Runtime;
@@ -159,7 +159,7 @@ where
                 geom.d,
                 geom.causal,
                 geom.window,
-                geom.kv_seq_len,
+                geom.kv_seq_len.map(KvSeqLen::Shared),
                 None,
                 layout,
             )
@@ -279,7 +279,7 @@ fn token_major_is_permuted_head_major_cuda_bf16() {
                         geom.d,
                         geom.causal,
                         geom.window,
-                        geom.kv_seq_len,
+                        geom.kv_seq_len.map(KvSeqLen::Shared),
                         None,
                         layout,
                     )

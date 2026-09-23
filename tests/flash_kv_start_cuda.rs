@@ -28,8 +28,8 @@ mod common;
 
 use std::sync::{Mutex, OnceLock};
 
-use boostr::ops::AttnOutLayout;
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
+use boostr::ops::{AttnOutLayout, KvSeqLen};
 use common::kv_start::{
     KvStartGeom, max_abs_diff, read_f32, sliced_reference, token_major_to_head_major, values,
 };
@@ -380,4 +380,36 @@ fn folded_short_query_dead_row() {
 #[test]
 fn folded_short_query_d64() {
     all_dtypes(geom(5, 40, 64, false, 0), &STARTS, "folded Sq=5 D=64 Sk=40");
+}
+
+/// The CUDA flash path takes no per-row key length yet, and says so rather
+/// than falling back to a shared length.
+#[test]
+fn per_row_kv_seq_len_is_refused() {
+    let _lock = cuda_lock();
+    let g = geom(1, 40, 64, false, 0);
+    let (client, device) = cuda_setup();
+    let tensors = fixture(&g, DType::F32, &device);
+    let ends =
+        Tensor::<CudaRuntime>::from_slice(&[40i32, 31, 22], &[g.batch], &device).expect("ends");
+    let err = client
+        .flash_attention_fwd(
+            &tensors[0],
+            &tensors[1],
+            &tensors[2],
+            g.num_heads,
+            g.num_kv_heads,
+            g.head_dim,
+            g.causal,
+            g.window,
+            Some(KvSeqLen::PerRow(&ends)),
+            None,
+            AttnOutLayout::HeadMajor,
+        )
+        .expect_err("per-row kv_seq_len was accepted on CUDA");
+    let message = err.to_string();
+    assert!(
+        message.contains("per-row key length"),
+        "refusal does not name the per-row key length: {message}"
+    );
 }

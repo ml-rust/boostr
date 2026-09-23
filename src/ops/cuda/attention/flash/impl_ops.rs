@@ -27,6 +27,11 @@
 //! `validate_qkv` rejects `num_heads` not divisible by `num_kv_heads` before
 //! any kernel is chosen, so that case reaches nothing.
 //!
+//! Key length (`kv_seq_len`): `KvSeqLen::Shared(n)` is the loop bound above,
+//! with the tensor's dim-2 as the stride. `KvSeqLen::PerRow` is refused —
+//! no kernel here reads a per-row end, and the CPU client is the path that
+//! takes one.
+//!
 //! Left padding (`kv_start`): every tier above takes the `[B]` start vector
 //! as a device pointer (null for `None`) and reads it once per block; the
 //! v3 launcher has no such argument, so a padded batch never reaches it.
@@ -39,8 +44,8 @@
 //! which only matters once `flash_v3::dispatch_enabled` is true.
 
 use crate::error::{Error, Result};
-use crate::ops::impl_generic::attention::validate_kv_start;
-use crate::ops::traits::{AttnOutLayout, FlashAttentionOps};
+use crate::ops::impl_generic::attention::{per_row_kv_seq_len_unsupported, validate_kv_start};
+use crate::ops::traits::{AttnOutLayout, FlashAttentionOps, KvSeqLen};
 use numr::dtype::DType;
 use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
@@ -93,7 +98,7 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
         head_dim: usize,
         causal: bool,
         window_size: usize,
-        kv_seq_len: Option<usize>,
+        kv_seq_len: Option<KvSeqLen<'_, CudaRuntime>>,
         kv_start: Option<&Tensor<CudaRuntime>>,
         out_layout: AttnOutLayout,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
@@ -101,8 +106,12 @@ impl FlashAttentionOps<CudaRuntime> for CudaClient {
 
         // kv_seq_len override: use actual seq len as loop bound, tensor dim-2 as stride
         let kv_seq_stride = p.seq_len_k; // memory stride = full capacity
-        if let Some(seq_len) = kv_seq_len {
-            p.seq_len_k = seq_len;
+        match kv_seq_len {
+            Some(KvSeqLen::Shared(seq_len)) => p.seq_len_k = seq_len,
+            Some(KvSeqLen::PerRow(_)) => {
+                return Err(per_row_kv_seq_len_unsupported("CUDA"));
+            }
+            None => {}
         }
 
         // Per-row left padding reaches every kernel as a device pointer;

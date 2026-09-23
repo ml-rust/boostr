@@ -19,8 +19,8 @@
 //! which the backward consumes.
 
 use super::helpers::*;
-use boostr::ops::AttnOutLayout;
 use boostr::ops::traits::attention::flash::FlashAttentionOps;
+use boostr::ops::{AttnOutLayout, KvSeqLen};
 
 /// Runs one decode shape on CPU and CUDA and asserts output and LSE agree.
 ///
@@ -104,7 +104,7 @@ fn assert_decode_parity(
                 head_dim,
                 false,
                 window,
-                Some(seq_len_k),
+                Some(KvSeqLen::Shared(seq_len_k)),
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -350,7 +350,7 @@ fn assert_decode_half_parity(
                 head_dim,
                 false,
                 window,
-                Some(seq_len_k),
+                Some(KvSeqLen::Shared(seq_len_k)),
                 None,
                 AttnOutLayout::HeadMajor,
             )
@@ -366,7 +366,7 @@ fn assert_decode_half_parity(
                 head_dim,
                 false,
                 window,
-                Some(seq_len_k),
+                Some(KvSeqLen::Shared(seq_len_k)),
                 None,
                 AttnOutLayout::HeadMajor,
             )

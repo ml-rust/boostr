@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::inference::KvCache;
 use crate::model::traits::ModelClient;
 use crate::nn::RoPE;
-use crate::ops::traits::attention::AttnOutLayout;
+use crate::ops::traits::attention::{AttnOutLayout, KvSeqLen};
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_permute, var_reshape, var_sigmoid_mul};
 use numr::dtype::DType;
@@ -129,7 +129,7 @@ impl<R: Runtime<DType = DType>> Qwen35AttentionBlock<R> {
             hd,
             true,
             0,
-            Some(kv_cache.seq_len()),
+            Some(KvSeqLen::Shared(kv_cache.seq_len())),
             Some(kv_start),
             AttnOutLayout::TokenMajor,
         )?;

@@ -8,7 +8,7 @@ use crate::nn::var_ops::{repeat_kv, var_contiguous};
 use crate::nn::{RmsNorm, RoPE};
 use crate::ops::impl_generic::attention::multi_head_attention_impl;
 use crate::ops::impl_generic::attention::rope::apply_rope_impl;
-use crate::ops::traits::AttnOutLayout;
+use crate::ops::traits::{AttnOutLayout, KvSeqLen};
 use numr::autograd::{Var, var_add, var_mul, var_narrow, var_reshape, var_silu};
 use numr::dtype::DType;
 use numr::ops::{
@@ -270,7 +270,7 @@ impl<R: Runtime<DType = DType>> LlamaAttentionTp<R> {
             self.head_dim,
             is_prefill,
             self.sliding_window,
-            Some(kv_seq_len),
+            Some(KvSeqLen::Shared(kv_seq_len)),
             None,
             AttnOutLayout::TokenMajor,
         )?;

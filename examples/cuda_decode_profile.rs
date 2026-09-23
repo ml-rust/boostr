@@ -24,8 +24,8 @@ fn main() {
 
 #[cfg(feature = "cuda")]
 fn main() {
-    use boostr::ops::AttnOutLayout;
     use boostr::ops::FlashAttentionOps;
+    use boostr::ops::{AttnOutLayout, KvSeqLen};
     use boostr::{CudaDevice, CudaRuntime, DType, Runtime, RuntimeClient};
     use numr::ops::RandomOps;
 
@@ -69,7 +69,7 @@ fn main() {
                                 head_dim,
                                 false,
                                 window_size,
-                                Some(seq_len_k),
+                                Some(KvSeqLen::Shared(seq_len_k)),
                                 None,
                                 AttnOutLayout::HeadMajor,
                             )

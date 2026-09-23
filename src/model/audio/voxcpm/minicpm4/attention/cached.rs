@@ -8,7 +8,7 @@ use crate::model::audio::voxcpm::minicpm4::left_pad::LeftPad;
 use crate::model::traits::ModelClient;
 use crate::nn::var_ops::var_contiguous;
 use crate::nn::{MaybeLoraLinear, RoPE};
-use crate::ops::traits::AttnOutLayout;
+use crate::ops::traits::{AttnOutLayout, KvSeqLen};
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_cat, var_narrow, var_permute, var_reshape};
 use numr::dtype::DType;
@@ -203,7 +203,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             seq > 1,
             // The disabled-window sentinel `core_spec` declares.
             self.core_spec().sliding_window,
-            Some(kv_cache.seq_len()),
+            Some(KvSeqLen::Shared(kv_cache.seq_len())),
             pad.map(|p| &p.starts),
             AttnOutLayout::TokenMajor,
         )?;

@@ -7,10 +7,11 @@
 
 use crate::error::{Error, Result};
 use crate::ops::impl_generic::attention::{
-    StandardAttnConfig, multi_head_attention_impl, standard_attention_bwd, validate_kv_start,
+    StandardAttnConfig, multi_head_attention_impl, per_row_kv_seq_len_unsupported,
+    standard_attention_bwd, validate_kv_start,
 };
 use crate::ops::traits::cache::kv_cache_quant::Int4GroupSize;
-use crate::ops::traits::{AttentionOps, AttnOutLayout, FlashAttentionOps};
+use crate::ops::traits::{AttentionOps, AttnOutLayout, FlashAttentionOps, KvSeqLen};
 use numr::autograd::Var;
 use numr::dtype::DType;
 use numr::runtime::wgpu::{WgpuClient, WgpuRuntime, get_buffer};
@@ -73,12 +74,15 @@ impl FlashAttentionOps<WgpuRuntime> for WgpuClient {
         head_dim: usize,
         causal: bool,
         window_size: usize,
-        kv_seq_len: Option<usize>,
+        kv_seq_len: Option<KvSeqLen<'_, WgpuRuntime>>,
         kv_start: Option<&Tensor<WgpuRuntime>>,
         out_layout: AttnOutLayout,
     ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
-        // kv_seq_len override not optimized for WGPU — narrow if needed
-        if let Some(seq_len) = kv_seq_len {
+        if let Some(KvSeqLen::PerRow(_)) = kv_seq_len {
+            return Err(per_row_kv_seq_len_unsupported("WebGPU"));
+        }
+        // A shared length is not optimized for WGPU — narrow if needed
+        if let Some(KvSeqLen::Shared(seq_len)) = kv_seq_len {
             let k_narrow = k.narrow(2, 0, seq_len)?.contiguous()?;
             let v_narrow = v.narrow(2, 0, seq_len)?.contiguous()?;
             return self.flash_attention_fwd(

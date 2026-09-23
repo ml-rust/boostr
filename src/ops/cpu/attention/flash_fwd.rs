@@ -1,19 +1,21 @@
 //! CPU `flash_attention_fwd`: the fused F32 decode loop for a single query
 //! row, and the composed standard attention for everything else.
 //!
-//! `kv_start` is read to the host once per call and applied by both paths:
-//! the decode loop starts each batch row at its start, and the standard path
-//! runs each padded row alone over its own keys (`rows_from_starts`), so a
-//! padded row's result is the bits its unpadded run forms. One corner keeps
-//! the per-row additive mask (`standard_attention_fwd_kv_start`): a window
-//! without a causal mask on a row whose valid keys are fewer than its
-//! queries, where narrowing the keys would move the window's anchor.
+//! `kv_start` and a per-row `KvSeqLen::PerRow` end are read to the host once
+//! per call and applied by both paths: the decode loop walks each batch row
+//! over `[start_b, end_b)`, and the standard path runs each such row alone
+//! over its own keys (`rows_from_starts`), so the row's result is the bits
+//! its unpadded run forms. One corner keeps the per-row additive mask
+//! (`standard_attention_fwd_kv_start`): a window without a causal mask on a
+//! row whose valid keys are fewer than its queries, where narrowing the keys
+//! would move the window's anchor.
 
 use crate::error::Result;
 use crate::ops::impl_generic::attention::{
-    StandardAttnConfig, standard_attention_fwd, standard_attention_fwd_kv_start, validate_kv_start,
+    StandardAttnConfig, clamped_kv_ends, standard_attention_fwd, standard_attention_fwd_kv_start,
+    validate_kv_start, validate_row_bounds,
 };
-use crate::ops::traits::AttnOutLayout;
+use crate::ops::traits::{AttnOutLayout, KvSeqLen};
 use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
@@ -30,12 +32,13 @@ pub(super) fn flash_attention_fwd_cpu(
     head_dim: usize,
     causal: bool,
     window_size: usize,
-    kv_seq_len: Option<usize>,
+    kv_seq_len: Option<KvSeqLen<'_, CpuRuntime>>,
     kv_start: Option<&Tensor<CpuRuntime>>,
     out_layout: AttnOutLayout,
 ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
-    // If kv_seq_len override provided, narrow K/V to actual seq len first
-    if let Some(seq_len) = kv_seq_len {
+    // A shared length narrows K/V once for the whole batch, then runs as if
+    // the buffer were that long.
+    if let Some(KvSeqLen::Shared(seq_len)) = kv_seq_len {
         let k_narrow = k.narrow(2, 0, seq_len)?;
         let v_narrow = v.narrow(2, 0, seq_len)?;
         let k_c = k_narrow.contiguous()?;
@@ -56,14 +59,29 @@ pub(super) fn flash_attention_fwd_cpu(
         );
     }
 
+    let batch = q.shape()[0];
     // The start vector is read to the host once; both paths below index
     // it per batch row.
     let starts: Option<Vec<i32>> = match kv_start {
         Some(t) => {
-            validate_kv_start(t, q.shape()[0])?;
+            validate_kv_start(t, batch)?;
             Some(t.to_vec::<i32>())
         }
         None => None,
+    };
+
+    // Per-row ends are read the same way and checked against each row's
+    // start and the key axis before any kernel runs.
+    let ends: Option<Vec<usize>> = match kv_seq_len {
+        Some(KvSeqLen::PerRow(t)) => {
+            validate_row_bounds(t, batch, "kv_seq_len")?;
+            Some(clamped_kv_ends(
+                &t.to_vec::<i32>(),
+                starts.as_deref(),
+                k.shape()[2],
+            )?)
+        }
+        _ => None,
     };
 
     // Fast path: fused decode attention for S_q=1 (single token generation)
@@ -84,7 +102,10 @@ pub(super) fn flash_attention_fwd_cpu(
             num_heads,
             num_kv_heads,
             head_dim,
-            starts.as_deref(),
+            super::decode_attention::RowRange {
+                kv_start: starts.as_deref(),
+                kv_end: ends.as_deref(),
+            },
         )?;
         return Ok((out_layout.from_head_major(out)?, lse));
     }
@@ -99,11 +120,11 @@ pub(super) fn flash_attention_fwd_cpu(
     // The composed path ends in a batched matmul, whose output is
     // head-major by construction; token-major is that result re-laid,
     // element for element.
-    let (out, lse) = match starts.as_deref() {
-        Some(starts) if starts.iter().any(|&s| s > 0) => {
-            rows_from_starts(client, q, k, v, cfg, starts)?
-        }
-        _ => standard_attention_fwd(client, q, k, v, cfg)?,
+    let per_row = ends.is_some() || starts.as_deref().is_some_and(|s| s.iter().any(|&x| x > 0));
+    let (out, lse) = if per_row {
+        rows_from_starts(client, q, k, v, cfg, starts.as_deref(), ends.as_deref())?
+    } else {
+        standard_attention_fwd(client, q, k, v, cfg)?
     };
     Ok((out_layout.from_head_major(out)?, lse))
 }
@@ -123,32 +144,51 @@ fn dead_rows(start: usize, seq_len_q: usize, seq_len_k: usize, causal: bool) -> 
     start.saturating_sub(key_offset).min(seq_len_q)
 }
 
+/// One row's keys cut to its own end. A row that ends at the buffer's end
+/// keeps the view it already has, so a call without per-row ends copies
+/// nothing.
+fn narrow_to_end(
+    kv: &Tensor<CpuRuntime>,
+    seq_len_k: usize,
+    buffer_len: usize,
+) -> Result<Tensor<CpuRuntime>> {
+    if seq_len_k == buffer_len {
+        return Ok(kv.clone());
+    }
+    Ok(kv.narrow(2, 0, seq_len_k)?.contiguous()?)
+}
+
 /// The composed attention, one batch row at a time, each over the keys
-/// from its own start and the query rows that see any key. With the dead
-/// rows dropped the narrowed call's key offset places every live query at
-/// the position the full call gives it, so the causal and window bounds are
-/// the same and the row's floats are the ones its unpadded run forms. Dead
-/// rows store zeros with an LSE of `-inf`.
+/// between its own start and its own end, and the query rows that see any
+/// key. With the dead rows dropped the narrowed call's key offset places
+/// every live query at the position the full call gives it, so the causal
+/// and window bounds are the same and the row's floats are the ones its
+/// unpadded run forms. Dead rows store zeros with an LSE of `-inf`.
 ///
 /// A window without a causal mask on a row with fewer valid keys than
 /// queries has no such offset: the key offset saturates at zero and the
-/// window would anchor elsewhere. That row keeps the additive-mask path.
+/// window would anchor elsewhere. That row keeps the additive-mask path,
+/// over its keys narrowed to its own end.
 fn rows_from_starts(
     client: &CpuClient,
     q: &Tensor<CpuRuntime>,
     k: &Tensor<CpuRuntime>,
     v: &Tensor<CpuRuntime>,
     cfg: StandardAttnConfig,
-    starts: &[i32],
+    starts: Option<&[i32]>,
+    ends: Option<&[usize]>,
 ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
     let (batch, num_heads, seq_len_q, head_dim) =
         (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
-    let seq_len_k = k.shape()[2];
+    let buffer_len = k.shape()[2];
     let device = q.device();
     let mut outs = Vec::with_capacity(batch);
     let mut lses = Vec::with_capacity(batch);
-    for (b, &start) in starts.iter().enumerate() {
-        let start = usize::try_from(start.max(0)).unwrap_or(0).min(seq_len_k);
+    for b in 0..batch {
+        let seq_len_k = ends.map_or(buffer_len, |e| e[b]);
+        let start = starts
+            .map_or(0, |s| usize::try_from(s[b].max(0)).unwrap_or(0))
+            .min(seq_len_k);
         let dead = dead_rows(start, seq_len_q, seq_len_k, cfg.causal);
         let live = seq_len_q - dead;
         let q_b = q.narrow(0, b, 1)?;
@@ -171,7 +211,10 @@ fn rows_from_starts(
                 )?,
             )
         } else if window_anchor_moves {
-            standard_attention_fwd_kv_start(client, &q_b, &k_b, &v_b, cfg, Some(&[start as i32]))?
+            let k_end = narrow_to_end(&k_b, seq_len_k, buffer_len)?;
+            let v_end = narrow_to_end(&v_b, seq_len_k, buffer_len)?;
+            let start = i32::try_from(start).unwrap_or(i32::MAX);
+            standard_attention_fwd_kv_start(client, &q_b, &k_end, &v_end, cfg, Some(&[start]))?
         } else {
             let q_live = q_b.narrow(2, dead, live)?.contiguous()?;
             let k_live = k_b.narrow(2, start, seq_len_k - start)?.contiguous()?;

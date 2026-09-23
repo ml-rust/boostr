@@ -50,6 +50,13 @@
 // Causal is not an argument: the single query is the newest position and sees
 // every key up to itself, so the causal mask admits the same keys as no mask.
 //
+// Per-row key end: `kv_end` is a `[B]` I32 device array or null, taken by the
+// non-graph entries only. Row `b`'s key loop stops at
+// `min(kv_end[b], seq_len_k)`, read once per block, so rows of different
+// lengths share one buffer. Null leaves the bound at `seq_len_k`, which is the
+// exact arithmetic of a call that passes no per-row end. `seq_len_k` stays the
+// clamp bound, and the window anchors at the row's own end.
+//
 // Left padding: `kv_start` is a `[B]` I32 device array or null. Row `b`'s
 // key loop starts at `max(window start, kv_start[b])`, read once per block.
 // A start at or past `seq_len_k` leaves the range empty: the whole-sequence
@@ -76,12 +83,12 @@
 // dimensions, so a position's dot product is a single warp reduction with no
 // shared memory and no barrier.
 //
-// The obvious alternative — the whole block cooperating on one position — was
-// measured and is much worse: every warp redundantly repeats the same scalar
-// reduction, the same `expf` pair and the same `m`/`l` update, then pays a
-// shared-memory round trip and two `__syncthreads()` per position. That
-// redundancy was over half of all executed instructions, and it made the
-// grouped-query case compute-bound at 83% SM throughput while DRAM sat at 54%.
+// The alternative — the whole block cooperating on one position — costs more:
+// every warp redundantly repeats the same scalar reduction, the same `expf`
+// pair and the same `m`/`l` update, then pays a shared-memory round trip and
+// two `__syncthreads()` per position. That redundancy dominates the
+// instruction mix and leaves the grouped-query case compute-bound with
+// bandwidth to spare.
 //
 // Each warp therefore accumulates over a strided subset of the range and ends
 // with its own `(acc, m, l)`. Merging those is the same rescaling the split-KV
@@ -180,16 +187,19 @@ __device__ __forceinline__ size_t decode_out_row(int bh, int num_heads, int out_
 }
 
 // First key of row `b`: the window start, raised to the row's left-padding
-// start when one is given.
+// start when one is given. The window anchors at `row_end`, the row's own
+// last key, so a row that ends early keeps the same last `window_size` keys
+// its single-row decode keeps. A null `kv_end` makes `row_end` equal
+// `seq_len_k`, the arithmetic of a call without per-row ends.
 __device__ __forceinline__ int decode_pos_start(
-    const int* __restrict__ kv_start, int b, int seq_len_k, int window_size
+    const int* __restrict__ kv_start, int b, int row_end, int window_size
 ) {
-    int start = (window_size > 0) ? max(0, seq_len_k - window_size) : 0;
+    int start = (window_size > 0) ? max(0, row_end - window_size) : 0;
     if (kv_start != nullptr) start = max(start, kv_start[b]);
     return start;
 }
 
-// Slice `split` of a row whose keys are `[row_start, seq_len_k)`. The row
+// Slice `split` of a row whose keys are `[row_start, row_end)`. The row
 // wants `fill` slices, clamped to what its span allows: at least
 // DECODE_SLICE_CHUNK keys each and at most DECODE_MAX_SLICES, one slice when
 // fewer than two chunks exist. Each slice is `ceil(span / want)` keys
@@ -199,9 +209,9 @@ __device__ __forceinline__ int decode_pos_start(
 #define DECODE_SLICE_CHUNK 32
 #define DECODE_MAX_SLICES 32
 __device__ __forceinline__ void decode_row_slice(
-    int row_start, int seq_len_k, int fill, int split, int& begin, int& end
+    int row_start, int row_end, int fill, int split, int& begin, int& end
 ) {
-    const int span = seq_len_k - row_start;
+    const int span = row_end - row_start;
     if (span <= 0) {
         begin = 0;
         end = 0;
@@ -212,7 +222,7 @@ __device__ __forceinline__ void decode_row_slice(
     const int per = (span + want - 1) / want;
     const int len = (per + DECODE_SLICE_CHUNK - 1) / DECODE_SLICE_CHUNK * DECODE_SLICE_CHUNK;
     begin = row_start + split * len;
-    end = min(begin + len, seq_len_k);
+    end = min(begin + len, row_end);
 }
 
 // ============================================================================
@@ -229,7 +239,8 @@ __device__ __forceinline__ void decode_attention_impl(
     int num_heads, int num_kv_heads,
     int seq_len_k, int kv_seq_stride,
     float scale, int window_size,
-    const int* __restrict__ kv_start, int out_seq_fold
+    const int* __restrict__ kv_start, const int* __restrict__ kv_end,
+    int out_seq_fold
 ) {
     const int bh = blockIdx.x;
     const int b = bh / num_heads;
@@ -241,15 +252,19 @@ __device__ __forceinline__ void decode_attention_impl(
     const T* k_base = K + (size_t)(b * num_kv_heads + kv_h) * kv_seq_stride * D;
     const T* v_base = V + (size_t)(b * num_kv_heads + kv_h) * kv_seq_stride * D;
 
-    // Sliding window keeps the last `window_size` keys; `0` disables it.
-    const int pos_start = decode_pos_start(kv_start, b, seq_len_k, window_size);
+    // Last key of this row, clamped to the key axis. Null `kv_end` leaves it
+    // at `seq_len_k`, the bound the row loop had without a per-row end.
+    const int row_end = (kv_end != nullptr) ? min(kv_end[b], seq_len_k) : seq_len_k;
+    // Sliding window keeps the last `window_size` keys of this row; `0`
+    // disables it.
+    const int pos_start = decode_pos_start(kv_start, b, row_end, window_size);
 
     float acc = 0.0f;
     float m = -INFINITY;
     float l = 0.0f;
     // Block-uniform: an empty range skips the core and its barriers together.
-    if (pos_start < seq_len_k)
-        decode_attention_core<T, D>(q_row, k_base, v_base, pos_start, seq_len_k, scale, acc, m, l);
+    if (pos_start < row_end)
+        decode_attention_core<T, D>(q_row, k_base, v_base, pos_start, row_end, scale, acc, m, l);
 
     O[decode_out_row(bh, num_heads, out_seq_fold) * D + tid] =
         convert_dtype<T>((l > 0.0f) ? acc / l : 0.0f);
@@ -279,7 +294,7 @@ __device__ __forceinline__ void decode_attention_split_impl(
     int num_heads, int num_kv_heads,
     int seq_len_k, int kv_seq_stride,
     float scale, int window_size,
-    const int* __restrict__ kv_start, int fill
+    const int* __restrict__ kv_start, const int* __restrict__ kv_end, int fill
 ) {
     const int bh = blockIdx.x;
     const int split = blockIdx.y;
@@ -293,13 +308,15 @@ __device__ __forceinline__ void decode_attention_split_impl(
     const T* k_base = K + (size_t)(b * num_kv_heads + kv_h) * kv_seq_stride * D;
     const T* v_base = V + (size_t)(b * num_kv_heads + kv_h) * kv_seq_stride * D;
 
-    // The row cuts its own span from its own first key, so a left-padded
-    // row is cut exactly as its unpadded single-row decode is: the same keys
-    // land in the same slices.
+    // The row cuts its own span between its own first and last key, so a
+    // left-padded or early-ending row is cut exactly as its unpadded
+    // single-row decode is: the same keys land in the same slices. Slices
+    // past the row's span come out empty and the combine drops them.
+    const int row_end = (kv_end != nullptr) ? min(kv_end[b], seq_len_k) : seq_len_k;
     int begin;
     int end;
     decode_row_slice(
-        decode_pos_start(kv_start, b, seq_len_k, window_size), seq_len_k, fill, split, begin, end
+        decode_pos_start(kv_start, b, row_end, window_size), row_end, fill, split, begin, end
     );
 
     float acc = 0.0f;
@@ -363,19 +380,19 @@ __device__ __forceinline__ void decode_attention_combine_impl(
 // Non-graph and graph variants take the same arguments apart from
 // `seq_len_k`: a plain int here, a device pointer in the `_graph` entries.
 // The graph entries serve a true single-query decode only, so they take no
-// `out_seq_fold` and store row `bh` at `bh * D`; they take no `kv_start`
-// either and run unpadded.
+// `out_seq_fold` and store row `bh` at `bh * D`; they take neither `kv_start`
+// nor `kv_end` and run unpadded over one length for the whole batch.
 #define DECODE_ATTENTION_KERNELS(D, SUFFIX, T)                                     \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX(                        \
     const T* __restrict__ Q, const T* __restrict__ K, const T* __restrict__ V,     \
     T* __restrict__ O, float* __restrict__ LSE,                                    \
     int num_heads, int num_kv_heads, int seq_len_k, int kv_seq_stride,             \
     float scale, int window_size, const int* __restrict__ kv_start,                \
-    int out_seq_fold                                                               \
+    const int* __restrict__ kv_end, int out_seq_fold                               \
 ) {                                                                                \
     decode_attention_impl<T, D>(Q, K, V, O, LSE, num_heads, num_kv_heads,          \
                                 seq_len_k, kv_seq_stride, scale, window_size,      \
-                                kv_start, out_seq_fold);                           \
+                                kv_start, kv_end, out_seq_fold);                   \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_graph(                \
@@ -386,7 +403,7 @@ extern "C" __global__ void decode_attention_##D##_##SUFFIX##_graph(             
 ) {                                                                                \
     decode_attention_impl<T, D>(Q, K, V, O, LSE, num_heads, num_kv_heads,          \
                                 *seq_len_k_ptr, kv_seq_stride, scale, window_size, \
-                                nullptr, 1);                                       \
+                                nullptr, nullptr, 1);                              \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split(                \
@@ -394,11 +411,11 @@ extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split(             
     float* __restrict__ partial_o, float* __restrict__ partial_ml,                 \
     int num_heads, int num_kv_heads, int seq_len_k, int kv_seq_stride,             \
     float scale, int window_size, const int* __restrict__ kv_start,                \
-    int fill                                                                       \
+    const int* __restrict__ kv_end, int fill                                       \
 ) {                                                                                \
     decode_attention_split_impl<T, D>(Q, K, V, partial_o, partial_ml, num_heads,   \
                                       num_kv_heads, seq_len_k, kv_seq_stride,      \
-                                      scale, window_size, kv_start, fill);         \
+                                      scale, window_size, kv_start, kv_end, fill); \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split_graph(          \
@@ -409,7 +426,7 @@ extern "C" __global__ void decode_attention_##D##_##SUFFIX##_split_graph(       
 ) {                                                                                \
     decode_attention_split_impl<T, D>(Q, K, V, partial_o, partial_ml, num_heads,   \
                                       num_kv_heads, *seq_len_k_ptr, kv_seq_stride, \
-                                      scale, window_size, nullptr, fill);          \
+                                      scale, window_size, nullptr, nullptr, fill); \
 }                                                                                  \
                                                                                    \
 extern "C" __global__ void decode_attention_##D##_##SUFFIX##_combine(              \

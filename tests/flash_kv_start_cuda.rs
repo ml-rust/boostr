@@ -382,12 +382,13 @@ fn folded_short_query_d64() {
     all_dtypes(geom(5, 40, 64, false, 0), &STARTS, "folded Sq=5 D=64 Sk=40");
 }
 
-/// The CUDA flash path takes no per-row key length yet, and says so rather
-/// than falling back to a shared length.
+/// The CUDA decode path serves a per-row key length at one query row. Any
+/// other shape has no such kernel, and says so rather than falling back to
+/// a shared length.
 #[test]
-fn per_row_kv_seq_len_is_refused() {
+fn per_row_kv_seq_len_is_refused_above_one_query_row() {
     let _lock = cuda_lock();
-    let g = geom(1, 40, 64, false, 0);
+    let g = geom(5, 40, 64, false, 0);
     let (client, device) = cuda_setup();
     let tensors = fixture(&g, DType::F32, &device);
     let ends =
@@ -406,10 +407,38 @@ fn per_row_kv_seq_len_is_refused() {
             None,
             AttnOutLayout::HeadMajor,
         )
-        .expect_err("per-row kv_seq_len was accepted on CUDA");
+        .expect_err("per-row kv_seq_len was accepted above one query row");
     let message = err.to_string();
     assert!(
         message.contains("per-row key length"),
         "refusal does not name the per-row key length: {message}"
     );
+}
+
+/// One query row is the decode shape, where the per-row length is served.
+#[test]
+fn per_row_kv_seq_len_is_served_at_one_query_row() {
+    let _lock = cuda_lock();
+    let g = geom(1, 40, 64, false, 0);
+    let (client, device) = cuda_setup();
+    let tensors = fixture(&g, DType::F32, &device);
+    let ends =
+        Tensor::<CudaRuntime>::from_slice(&[40i32, 31, 22], &[g.batch], &device).expect("ends");
+    let (out, lse) = client
+        .flash_attention_fwd(
+            &tensors[0],
+            &tensors[1],
+            &tensors[2],
+            g.num_heads,
+            g.num_kv_heads,
+            g.head_dim,
+            g.causal,
+            g.window,
+            Some(KvSeqLen::PerRow(&ends)),
+            None,
+            AttnOutLayout::HeadMajor,
+        )
+        .expect("per-row kv_seq_len at one query row");
+    assert_eq!(out.shape(), &[g.batch, g.num_heads, 1, g.head_dim]);
+    assert_eq!(lse.shape(), &[g.batch, g.num_heads, 1]);
 }

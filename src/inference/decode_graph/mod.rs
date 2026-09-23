@@ -59,6 +59,12 @@
 //! | lane `kv_end`      | pre-capture | H2D async (HtoDAsync) from CPU       |
 //! | lane `positions`   | pre-capture | H2D async (HtoDAsync) from CPU       |
 //! | `GdnState` buffers | pre-capture | written by graph (`copy_into`)       |
+//!
+//! The `qwen35` capture ends at the logits copy and picks no token. Its
+//! `token_buf` takes one H2D async write per step, carrying the tokens the
+//! caller sampled from the stable `[batch, 1, vocab]` `logits_buf`. Sampling
+//! policy therefore lives with the caller, per lane, and two lanes in one
+//! capture can sample differently in the same replay.
 
 #[cfg(feature = "cuda")]
 pub use cuda_impl::*;

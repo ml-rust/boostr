@@ -17,7 +17,8 @@ mod common;
 use boostr::inference::LaneTable;
 use boostr::inference::decode_graph::Qwen35DecodeGraph;
 use common::qwen35_cuda::{
-    caches, cuda_available, cuda_setup, eager_decode, gdn_flat, max_abs_diff, prefill, state_ptrs,
+    argmax, caches, cuda_available, cuda_setup, eager_decode, gdn_flat, max_abs_diff, prefill,
+    state_ptrs,
 };
 use common::qwen35_graph::{GraphBufs, capture};
 use common::qwen35_tiny::{MAX_POS, VOCAB, tiny_model};
@@ -77,12 +78,11 @@ fn graph_survives_reset_and_reprefill() {
     assert_eq!(captures, 1, "one decode step, one capture");
     let GraphBufs {
         token_buf,
-        next_token_buf,
         logits_buf,
         scalars,
     } = bufs;
     let mut decode =
-        Qwen35DecodeGraph::new(graph, scalars, MAX_POS, lanes, token_buf, next_token_buf).unwrap();
+        Qwen35DecodeGraph::new(graph, scalars, MAX_POS, lanes, token_buf, logits_buf).unwrap();
 
     // Eager reference for prompt B on fresh caches.
     let (mut kv_ref, mut gdn_ref) = caches(&device, &model, MAX_POS);
@@ -117,14 +117,17 @@ fn graph_survives_reset_and_reprefill() {
     // Prompt B sits at the same length, so the lane is claimed again at the
     // position the second prefill left.
     decode.lanes.claim(&client, 0, 0, seq_len, seq_len).unwrap();
-    decode.seed_next_token(&client, 0, first_b).unwrap();
+    decode.set_next_tokens(&client, &[first_b]).unwrap();
 
     let mut rows = Vec::with_capacity(DECODE_STEPS);
     let mut ids = Vec::with_capacity(DECODE_STEPS);
     for _ in 0..DECODE_STEPS {
         decode.pre_replay_and_launch(&client).unwrap();
-        rows.push(logits_buf.to_vec::<f32>());
-        ids.push(decode.next_token_buf.to_vec::<i64>()[0]);
+        let row = decode.logits().to_vec::<f32>();
+        let token = argmax(&row);
+        decode.set_next_tokens(&client, &[token]).unwrap();
+        rows.push(row);
+        ids.push(token);
     }
 
     assert_eq!(

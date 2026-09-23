@@ -91,6 +91,21 @@ pub fn prefill(
     argmax(&flat[(prompt.len() - 1) * vocab..])
 }
 
+/// The index of the second-largest value in `row`.
+///
+/// A deterministic non-greedy pick: it differs from `argmax` whenever the row
+/// has two distinct values.
+pub fn runner_up(row: &[f32]) -> i64 {
+    let best = argmax(row) as usize;
+    let mut second = usize::from(best == 0);
+    for (i, &v) in row.iter().enumerate() {
+        if i != best && v > row[second] {
+            second = i;
+        }
+    }
+    second as i64
+}
+
 /// Eager greedy decode: `steps` rows of logits and the ids they produce.
 pub fn eager_decode(
     client: &CudaClient,
@@ -101,6 +116,25 @@ pub fn eager_decode(
     kv: &mut LayeredKvCache<CudaRuntime>,
     gdn: &mut LayeredGdnState<CudaRuntime>,
 ) -> (Vec<Vec<f32>>, Vec<i64>) {
+    eager_decode_with(client, device, model, first, steps, kv, gdn, argmax)
+}
+
+/// Eager decode where `pick` turns each step's logits row into that step's
+/// next token.
+///
+/// `pick = argmax` reproduces `eager_decode`; any other rule gives the eager
+/// reference for a lane the graph path sampled the same way.
+#[allow(clippy::too_many_arguments)]
+pub fn eager_decode_with(
+    client: &CudaClient,
+    device: &CudaDevice,
+    model: &Qwen35Model<CudaRuntime>,
+    first: i64,
+    steps: usize,
+    kv: &mut LayeredKvCache<CudaRuntime>,
+    gdn: &mut LayeredGdnState<CudaRuntime>,
+    pick: fn(&[f32]) -> i64,
+) -> (Vec<Vec<f32>>, Vec<i64>) {
     let mut token = first;
     let mut rows = Vec::with_capacity(steps);
     let mut ids = Vec::with_capacity(steps);
@@ -109,7 +143,7 @@ pub fn eager_decode(
         let x = Tensor::<CudaRuntime>::from_slice(&[token], &[1, 1], device).unwrap();
         let logits = model.forward_qwen35(client, &x, kv, gdn, position).unwrap();
         let row = logits.to_vec::<f32>();
-        token = argmax(&row);
+        token = pick(&row);
         rows.push(row);
         ids.push(token);
     }

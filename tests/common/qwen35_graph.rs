@@ -3,7 +3,7 @@
 //! One capture serves a fixed lane count. The buffers every replay reads are
 //! allocated here, before capture, so their device addresses hold.
 
-use boostr::inference::decode_graph::{DeviceScalars, batch_argmax_to_buf, copy_into_stable};
+use boostr::inference::decode_graph::{DeviceScalars, copy_into_stable};
 use boostr::inference::{LaneTable, LayeredGdnState, LayeredKvCache};
 use boostr::model::qwen35::Qwen35Model;
 use numr::dtype::DType;
@@ -33,11 +33,10 @@ pub fn arena_bytes(device: &CudaDevice) -> usize {
 /// Stable-address buffers one captured `qwen35` decode step reads and
 /// writes.
 pub struct GraphBufs {
-    /// `[batch, 1]` i64 embedding input.
+    /// `[batch, 1]` i64 embedding input, one token per lane.
     pub token_buf: Tensor<CudaRuntime>,
-    /// `[batch]` i64 per-lane argmax, written by the captured copy.
-    pub next_token_buf: Tensor<CudaRuntime>,
-    /// `[batch, 1, vocab]` f32 copy of the step's logits.
+    /// `[batch, 1, vocab]` f32 copy of the step's logits, written by the
+    /// captured copy and sampled on the host.
     pub logits_buf: Tensor<CudaRuntime>,
     /// Per-lane `write_pos` and the shared key bound.
     pub scalars: DeviceScalars,
@@ -50,8 +49,6 @@ impl GraphBufs {
         Self {
             token_buf: Tensor::<CudaRuntime>::zeros(&[batch, 1], DType::I64, device)
                 .expect("token buf"),
-            next_token_buf: Tensor::<CudaRuntime>::zeros(&[batch], DType::I64, device)
-                .expect("next token buf"),
             logits_buf: Tensor::<CudaRuntime>::zeros(&[batch, 1, vocab], DType::F32, device)
                 .expect("logits buf"),
             scalars: DeviceScalars::new(&lens, device).expect("decode scalars"),
@@ -78,9 +75,8 @@ impl GraphBufs {
         let logits = model
             .forward_qwen35_graph_mode(client, &self.token_buf, kv, gdn, &self.scalars, lanes)
             .expect("warmup forward");
-        batch_argmax_to_buf(client, &logits, &self.next_token_buf, lanes.batch())
-            .expect("warmup argmax");
-        let _ = self.next_token_buf.to_vec::<i64>();
+        copy_into_stable(client, &logits, &self.logits_buf).expect("warmup logits copy");
+        let _ = self.logits_buf.to_vec::<f32>();
     }
 }
 
@@ -105,14 +101,13 @@ pub fn capture(
     let graph = CudaRuntime::capture_graph_into_with_arena(
         client,
         &[&bufs.token_buf],
-        &[&bufs.next_token_buf],
+        &[&bufs.logits_buf],
         arena,
         |c| {
             let logits = model
                 .forward_qwen35_graph_mode(c, &bufs.token_buf, kv, gdn, &bufs.scalars, lanes)
                 .map_err(|e| numr::error::Error::Backend(format!("capture forward: {e}")))?;
-            copy_into_stable(c, &logits, &bufs.logits_buf)?;
-            batch_argmax_to_buf(c, &logits, &bufs.next_token_buf, batch)
+            copy_into_stable(c, &logits, &bufs.logits_buf)
         },
     )
     .unwrap_or_else(|e| {
@@ -126,4 +121,12 @@ pub fn capture(
     let used = graph.arena_bytes_used().unwrap_or(0);
     println!("qwen35 decode graph: {batch} lanes, arena {arena}, used {used}");
     (graph, used)
+}
+
+/// Split a `[batch, 1, vocab]` logits readback into one row per lane.
+pub fn lane_rows(all: &[f32], batch: usize, vocab: usize) -> Vec<Vec<f32>> {
+    assert_eq!(all.len(), batch * vocab, "logits readback length");
+    (0..batch)
+        .map(|lane| all[lane * vocab..(lane + 1) * vocab].to_vec())
+        .collect()
 }

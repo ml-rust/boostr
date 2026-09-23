@@ -5,9 +5,10 @@
 //!
 //! `synthetic_graph_matches_eager`: a tiny hybrid model built from the public
 //! constructors. Prefill 5 tokens eagerly, then 6 greedy decode steps twice:
-//! eager `forward_qwen35`, and one captured graph replayed 6 times. Argmax
-//! ids must agree at every step, logits within `1e-4`, and the GDN buffers
-//! after the last step within `1e-5`.
+//! eager `forward_qwen35`, and one captured graph replayed 6 times, greedy on
+//! the host from the stable logits buffer. Argmax ids must agree at every
+//! step, logits within `1e-4`, and the GDN buffers after the last step within
+//! `1e-5`.
 //!
 //! `real_file_graph_matches_eager`: the same on the PQ2_0 checkpoint under
 //! `BOOSTR_BONSAI2_DIR` for 4 decode tokens, argmax against eager and
@@ -25,7 +26,7 @@ use boostr::inference::decode_graph::Qwen35DecodeGraph;
 use boostr::inference::{LayeredGdnState, LayeredKvCache};
 use boostr::model::qwen35::Qwen35Model;
 use common::qwen35_cuda::{
-    caches, cuda_available, cuda_setup, eager_decode, gdn_flat, max_abs_diff, prefill,
+    argmax, caches, cuda_available, cuda_setup, eager_decode, gdn_flat, max_abs_diff, prefill,
 };
 use common::qwen35_graph::{GraphBufs, capture};
 use common::qwen35_tiny::{MAX_POS, VOCAB, tiny_model};
@@ -86,20 +87,22 @@ fn graph_decode(
 
     let GraphBufs {
         token_buf,
-        next_token_buf,
         logits_buf,
         scalars,
     } = bufs;
     let mut decode =
-        Qwen35DecodeGraph::new(graph, scalars, capacity, lanes, token_buf, next_token_buf).unwrap();
-    decode.seed_next_token(client, 0, first).unwrap();
+        Qwen35DecodeGraph::new(graph, scalars, capacity, lanes, token_buf, logits_buf).unwrap();
+    decode.set_next_tokens(client, &[first]).unwrap();
 
     let mut rows = Vec::with_capacity(steps);
     let mut ids = Vec::with_capacity(steps);
     for _ in 0..steps {
         decode.pre_replay_and_launch(client).unwrap();
-        rows.push(logits_buf.to_vec::<f32>());
-        ids.push(decode.next_token_buf.to_vec::<i64>()[0]);
+        let row = decode.logits().to_vec::<f32>();
+        let token = argmax(&row);
+        decode.set_next_tokens(client, &[token]).unwrap();
+        rows.push(row);
+        ids.push(token);
     }
     (rows, ids)
 }

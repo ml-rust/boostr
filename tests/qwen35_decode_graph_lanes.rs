@@ -8,9 +8,14 @@
 //! shared length would truncate or over-read some lane and the comparison
 //! against that sequence decoded alone would fail.
 //!
+//! Sampling is on the host, per lane, from the stable logits buffer the
+//! capture ends at, so lanes in one replay can follow different rules.
+//!
 //! - `lanes_of_different_lengths_match_solo_eager`: three occupied lanes.
 //! - `a_free_lane_leaves_the_others_alone`: the middle lane released.
 //! - `one_capture_serves_every_replay`: capturing once, replaying many.
+//! - `lanes_take_different_sampling_policies`: lane 0 greedy, lane 1 forced to
+//!   its row's runner-up, in the same replay.
 
 #![cfg(feature = "cuda")]
 
@@ -20,13 +25,16 @@ use boostr::inference::decode_graph::Qwen35DecodeGraph;
 use boostr::inference::{LaneAdmission, LaneTable, LayeredGdnState, LayeredKvCache};
 use boostr::model::qwen35::Qwen35Model;
 use common::qwen35_cuda::{
-    argmax, caches, caches_batched, cuda_available, cuda_setup, eager_decode, max_abs_diff, prefill,
+    argmax, caches, caches_batched, cuda_available, cuda_setup, eager_decode_with, max_abs_diff,
+    prefill, runner_up,
 };
-use common::qwen35_graph::{GraphBufs, capture};
+use common::qwen35_graph::{GraphBufs, capture, lane_rows};
 use common::qwen35_tiny::{MAX_POS, VOCAB, tiny_model};
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
-use numr::tensor::Tensor;
 use std::sync::{Mutex, OnceLock};
+
+/// A lane's sampling rule: one logits row in, that lane's next token out.
+type Pick = fn(&[f32]) -> i64;
 
 /// Two captures must never overlap on the device, so every test in this
 /// binary holds this lock for its whole run.
@@ -104,7 +112,7 @@ fn admit_all(
     }
 }
 
-/// One lane's replayed logits rows and the ids the graph picked from them.
+/// One lane's replayed logits rows and the ids sampled from them.
 struct Lane {
     rows: Vec<Vec<f32>>,
     ids: Vec<i64>,
@@ -116,26 +124,44 @@ struct Lane {
 /// buffers its kernels address.
 struct Batched {
     decode: Qwen35DecodeGraph,
-    logits_buf: Tensor<CudaRuntime>,
     kv: LayeredKvCache<CudaRuntime>,
     gdn: LayeredGdnState<CudaRuntime>,
     captures: usize,
 }
 
 impl Batched {
-    /// One replay: each lane's logits row and the id the graph's own argmax
-    /// picked for it, in lane order.
-    fn step(&mut self, client: &CudaClient) -> (Vec<Vec<f32>>, Vec<i64>) {
+    /// One replay: each lane's logits row and the id `picks[lane]` chose from
+    /// it, in lane order. The chosen ids are written back as the next
+    /// replay's input tokens.
+    fn step(&mut self, client: &CudaClient, picks: &[Pick]) -> (Vec<Vec<f32>>, Vec<i64>) {
+        let batch = self.decode.batch();
+        assert_eq!(picks.len(), batch, "one sampling rule per lane");
         self.decode.pre_replay_and_launch(client).unwrap();
-        let all = self.logits_buf.to_vec::<f32>();
-        let rows = (0..self.decode.batch())
-            .map(|lane| all[lane * VOCAB..(lane + 1) * VOCAB].to_vec())
+        let all = self.decode.logits().to_vec::<f32>();
+        let rows = lane_rows(&all, batch, VOCAB);
+        let ids: Vec<i64> = rows
+            .iter()
+            .zip(picks)
+            .map(|(row, pick)| pick(row))
             .collect();
-        (rows, self.decode.next_token_buf.to_vec::<i64>())
+        self.decode.set_next_tokens(client, &ids).unwrap();
+        (rows, ids)
     }
 
-    /// Each lane's rows and ids over `steps` replays, in lane order.
+    /// Each lane's rows and greedy ids over `steps` replays, in lane order.
     fn decode_steps(&mut self, client: &CudaClient, steps: usize) -> Vec<Lane> {
+        let picks: Vec<Pick> = vec![argmax as Pick; self.decode.batch()];
+        self.decode_steps_with(client, steps, &picks)
+    }
+
+    /// Each lane's rows and ids over `steps` replays, every lane sampled by
+    /// its own rule.
+    fn decode_steps_with(
+        &mut self,
+        client: &CudaClient,
+        steps: usize,
+        picks: &[Pick],
+    ) -> Vec<Lane> {
         let mut per_lane: Vec<Lane> = (0..self.decode.batch())
             .map(|_| Lane {
                 rows: Vec::with_capacity(steps),
@@ -143,7 +169,7 @@ impl Batched {
             })
             .collect();
         for _ in 0..steps {
-            let (rows, ids) = self.step(client);
+            let (rows, ids) = self.step(client, picks);
             for (lane, (row, id)) in rows.into_iter().zip(ids).enumerate() {
                 per_lane[lane].rows.push(row);
                 per_lane[lane].ids.push(id);
@@ -194,19 +220,19 @@ fn build(
     );
     let GraphBufs {
         token_buf,
-        next_token_buf,
         logits_buf,
         scalars,
     } = bufs;
     let decode =
-        Qwen35DecodeGraph::new(graph, scalars, MAX_POS, lanes, token_buf, next_token_buf).unwrap();
-    for (lane, src) in solo.iter().enumerate() {
-        let token = if free.contains(&lane) { 0 } else { src.first };
-        decode.seed_next_token(client, lane, token).unwrap();
-    }
+        Qwen35DecodeGraph::new(graph, scalars, MAX_POS, lanes, token_buf, logits_buf).unwrap();
+    let first: Vec<i64> = solo
+        .iter()
+        .enumerate()
+        .map(|(lane, src)| if free.contains(&lane) { 0 } else { src.first })
+        .collect();
+    decode.set_next_tokens(client, &first).unwrap();
     Batched {
         decode,
-        logits_buf,
         kv,
         gdn,
         captures,
@@ -221,15 +247,35 @@ fn solo_rows(
     tokens: &[i64],
     steps: usize,
 ) -> (Vec<Vec<f32>>, Vec<i64>) {
-    let (mut kv, mut gdn) = caches(device, model, MAX_POS);
-    let first = prefill(client, device, model, tokens, &mut kv, &mut gdn);
-    eager_decode(client, device, model, first, steps, &mut kv, &mut gdn)
+    solo_rows_with(client, device, model, tokens, steps, argmax)
 }
 
-/// Every replayed row and id of `lane` against that sequence decoded alone.
-fn assert_lane_matches_solo(lane: usize, got: &Lane, want: &[Vec<f32>], want_ids: &[i64]) {
+/// `steps` logits rows for one sequence decoded alone, each step's token
+/// chosen by `pick`.
+fn solo_rows_with(
+    client: &CudaClient,
+    device: &CudaDevice,
+    model: &Qwen35Model<CudaRuntime>,
+    tokens: &[i64],
+    steps: usize,
+    pick: Pick,
+) -> (Vec<Vec<f32>>, Vec<i64>) {
+    let (mut kv, mut gdn) = caches(device, model, MAX_POS);
+    let first = prefill(client, device, model, tokens, &mut kv, &mut gdn);
+    eager_decode_with(client, device, model, first, steps, &mut kv, &mut gdn, pick)
+}
+
+/// Every replayed row and id of `lane` against that sequence decoded alone
+/// under the same rule.
+fn assert_lane_matches_solo(
+    lane: usize,
+    got: &Lane,
+    want: &[Vec<f32>],
+    want_ids: &[i64],
+    pick: Pick,
+) {
     assert_eq!(got.rows.len(), want.len(), "lane {lane}: step count");
-    assert_eq!(got.ids, want_ids, "lane {lane}: argmax ids");
+    assert_eq!(got.ids, want_ids, "lane {lane}: sampled ids");
     for (step, (a, b)) in got.rows.iter().zip(want).enumerate() {
         assert!(
             a.iter().all(|v| v.is_finite()),
@@ -241,9 +287,9 @@ fn assert_lane_matches_solo(lane: usize, got: &Lane, want: &[Vec<f32>], want_ids
             "lane {lane} step {step}: logits diff {diff}"
         );
         assert_eq!(
-            argmax(a),
+            pick(a),
             want_ids[step],
-            "lane {lane} step {step}: the row's own greedy pick"
+            "lane {lane} step {step}: the row's own pick"
         );
     }
 }
@@ -267,8 +313,9 @@ fn lanes_of_different_lengths_match_solo_eager() {
 
     for (lane, tokens) in prompts.iter().enumerate() {
         let (want, want_ids) = solo_rows(&client, &device, &model, tokens, STEPS);
-        assert_lane_matches_solo(lane, &rows[lane], &want, &want_ids);
+        assert_lane_matches_solo(lane, &rows[lane], &want, &want_ids, argmax);
     }
+    assert_eq!(batched.captures, 1, "one capture served every replay");
     assert_eq!(batched.kv.num_layers(), model.num_attention_layers());
     assert_eq!(batched.gdn.num_layers(), model.num_gdn_layers());
 }
@@ -298,8 +345,9 @@ fn a_free_lane_leaves_the_others_alone() {
             continue;
         }
         let (want, want_ids) = solo_rows(&client, &device, &model, tokens, STEPS);
-        assert_lane_matches_solo(lane, &rows[lane], &want, &want_ids);
+        assert_lane_matches_solo(lane, &rows[lane], &want, &want_ids, argmax);
     }
+    assert_eq!(batched.captures, 1, "one capture served every replay");
 }
 
 /// Capturing once and replaying many times records exactly one capture, and
@@ -324,4 +372,44 @@ fn one_capture_serves_every_replay() {
     assert_eq!(rows[0].rows.len(), REPLAYS);
     assert_eq!(batched.decode.lanes.lane_len(0), 4 + REPLAYS);
     assert_eq!(batched.decode.lanes.lane_len(1), 7 + REPLAYS);
+}
+
+/// Lane 0 greedy and lane 1 forced to its row's runner-up, sampled on the
+/// host in the same replay of one capture.
+///
+/// Each lane's whole trajectory must match that sequence decoded alone under
+/// the same rule, so every step of lane 1 followed from the non-greedy token
+/// lane 1 itself chose. A baked argmax cannot express this: it would hand
+/// lane 1 the greedy token and diverge from step 2 on.
+#[test]
+fn lanes_take_different_sampling_policies() {
+    if !cuda_available() {
+        println!("skip: no CUDA device");
+        return;
+    }
+    let _guard = cuda_lock();
+    let (client, device) = cuda_setup();
+    let model = tiny_model::<CudaRuntime>(&device, 0x3535_0905);
+    let prompts = vec![prompt(5, 4), prompt(7, 8)];
+    let picks: Vec<Pick> = vec![argmax as Pick, runner_up as Pick];
+
+    let solo = solos(&client, &device, &model, &prompts);
+    let mut batched = build(&client, &device, &model, &solo, &[]);
+    let rows = batched.decode_steps_with(&client, STEPS, &picks);
+
+    for (lane, tokens) in prompts.iter().enumerate() {
+        let (want, want_ids) = solo_rows_with(&client, &device, &model, tokens, STEPS, picks[lane]);
+        assert_lane_matches_solo(lane, &rows[lane], &want, &want_ids, picks[lane]);
+    }
+
+    // Lane 1's every id is its row's runner-up, so none of them is the greedy
+    // pick the baked argmax would have written.
+    for (step, row) in rows[1].rows.iter().enumerate() {
+        assert_ne!(
+            rows[1].ids[step],
+            argmax(row),
+            "lane 1 step {step}: the forced pick must not be the argmax"
+        );
+    }
+    assert_eq!(batched.captures, 1, "one capture served every replay");
 }

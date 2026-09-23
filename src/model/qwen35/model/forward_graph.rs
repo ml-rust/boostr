@@ -34,7 +34,7 @@ use crate::model::hybrid::Qwen35GraphStep;
 impl Qwen35Model<numr::runtime::cuda::CudaRuntime> {
     /// Graph-mode decode forward: logits `[batch, 1, vocab_size]` whose
     /// address is graph-managed. Read them through a captured copy into a
-    /// stable buffer (`batch_argmax_to_buf`, `copy_into_stable`).
+    /// stable buffer (`copy_into_stable`).
     ///
     /// One lane per sequence. Lane `b` holds its own tokens from cache
     /// position 0 with its own end, so a replay serves lanes of different

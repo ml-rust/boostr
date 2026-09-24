@@ -596,6 +596,62 @@ mod tests {
         }
     }
 
+    /// Feeds a prompt through `forward_with_paged_kv_cache` one token at a
+    /// time (`seq_len == 1` on every call, i.e. a chunk-of-1 prefill) and
+    /// requires the result to match a one-shot dense causal reference at
+    /// each position. A `seq_len == 1` call takes the paged decode kernel
+    /// path, not the tiled prefill kernel every `seq_len > 1` chunk takes,
+    /// and its `causal` flag (`is_prefill = seq_len > 1`) is always false.
+    /// This pins that a chunk-of-1 prefill still agrees with a causal
+    /// reference even though it never sets `causal`.
+    #[test]
+    fn prefill_one_token_at_a_time_matches_dense_causal_reference() {
+        let (client, device) = crate::test_utils::cpu_setup();
+        let attn = test_attention(&device);
+        let rope = test_rope(&device);
+        let seq_len = 5;
+        let x = prefill_input(seq_len, &device);
+
+        let dense_out = dense_reference_output(&client, &attn, &rope, &x, seq_len, &device);
+        let out_dim = dense_out.len() / seq_len;
+
+        let num_blocks = 2; // ceil(seq_len=5 / BLOCK_SIZE=4)
+        let cache = prefill_cache(num_blocks, &device);
+
+        for pos in 0..seq_len {
+            let x_tok = var_narrow(&x, 1, pos, 1).unwrap();
+            let (slot, bt) = prefill_slots(pos, 1, num_blocks, &device);
+            let tok_out = attn
+                .forward_with_paged_kv_cache(
+                    &client,
+                    &x_tok,
+                    &rope,
+                    &cache,
+                    0,
+                    &slot,
+                    &bt,
+                    pos + 1,
+                    pos,
+                    None,
+                    None,
+                )
+                .expect("single-token prefill step must succeed")
+                .tensor()
+                .contiguous()
+                .unwrap()
+                .to_vec::<f32>();
+
+            let expected = &dense_out[pos * out_dim..(pos + 1) * out_dim];
+            assert_eq!(tok_out.len(), expected.len());
+            for (i, (&a, &b)) in tok_out.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-4,
+                    "position {pos} dim {i} mismatch: one_token={a}, dense={b}"
+                );
+            }
+        }
+    }
+
     /// Two independent checks on a `P`-token prefill followed by an
     /// `S`-token chunk:
     ///

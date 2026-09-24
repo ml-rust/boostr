@@ -5,6 +5,7 @@
 //! the composed reference path applies.
 
 use crate::error::{Error, Result};
+use crate::ops::traits::KvSeqLen;
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -78,6 +79,21 @@ pub fn clamped_kv_ends(
             Ok(end as usize)
         })
         .collect()
+}
+
+/// Rejects a per-row `kv_seq_len` for a backend whose kernel still takes one
+/// shared bound (`seq_len_k`) for the whole batch. `None` and `Shared(_)`
+/// pass through unchanged, since `seq_len_k` already carries the shared case.
+///
+/// `backend` names the kernel in the error (e.g. `"CUDA"`, `"WebGPU"`).
+pub fn reject_per_row_kv_seq_len<R: Runtime>(
+    kv_seq_len: Option<KvSeqLen<'_, R>>,
+    backend: &str,
+) -> Result<()> {
+    match kv_seq_len {
+        Some(KvSeqLen::PerRow(_)) => Err(per_row_kv_seq_len_unsupported(backend)),
+        Some(KvSeqLen::Shared(_)) | None => Ok(()),
+    }
 }
 
 /// Error for a backend whose kernel does not accept `KvSeqLen::PerRow`.

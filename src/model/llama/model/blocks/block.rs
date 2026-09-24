@@ -7,7 +7,7 @@ use crate::inference::KvCache;
 use crate::inference::kv_cache::LayeredPagedKvCache;
 use crate::model::traits::ModelClient;
 use crate::nn::{RmsNorm, RoPE};
-use crate::ops::traits::{KvCacheOps, PagedAttentionOps};
+use crate::ops::traits::{KvCacheOps, KvSeqLen, PagedAttentionOps};
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_add};
 use numr::dtype::DType;
@@ -105,6 +105,10 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
         Ok((h, mlp_out))
     }
 
+    /// Forward with paged KV cache, accepting the previous layer's deferred
+    /// MLP output. `seq_len_k` sizes the gathered KV buffer; `kv_seq_len`
+    /// narrows which of those gathered keys each row attends over (`None`
+    /// keeps every row at `seq_len_k`). See [`LlamaAttention::forward_with_paged_kv_cache`].
     #[allow(clippy::too_many_arguments)]
     pub fn forward_with_paged_kv_cache<C>(
         &self,
@@ -118,6 +122,7 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
         block_table: &Tensor<R>,
         seq_len_k: usize,
         position: usize,
+        kv_seq_len: Option<KvSeqLen<'_, R>>,
     ) -> Result<(Var<R>, Var<R>)>
     where
         C: ModelClient<R>,
@@ -153,6 +158,7 @@ impl<R: Runtime<DType = DType>> LlamaBlock<R> {
             block_table,
             seq_len_k,
             position,
+            kv_seq_len,
         )?;
 
         let (normed, h) = self

@@ -4,8 +4,10 @@
 //! F32 only (WebGPU limitation).
 
 use crate::error::{Error, Result};
-use crate::ops::impl_generic::attention::{PagedAttnConfig, PagedKv, paged_attention_bwd_impl};
-use crate::ops::traits::PagedAttentionOps;
+use crate::ops::impl_generic::attention::{
+    PagedAttnConfig, PagedKv, paged_attention_bwd_impl, reject_per_row_kv_seq_len,
+};
+use crate::ops::traits::{KvSeqLen, PagedAttentionOps};
 use numr::dtype::DType;
 use numr::runtime::wgpu::{WgpuClient, WgpuRuntime, get_buffer};
 use numr::tensor::Tensor;
@@ -52,7 +54,9 @@ impl PagedAttentionOps<WgpuRuntime> for WgpuClient {
         head_dim: usize,
         block_size: usize,
         causal: bool,
+        kv_seq_len: Option<KvSeqLen<'_, WgpuRuntime>>,
     ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
+        reject_per_row_kv_seq_len(kv_seq_len, "WebGPU")?;
         validate_f32(q, "paged_attention_fwd")?;
         validate_f32(k_blocks, "paged_attention_fwd")?;
         validate_f32(v_blocks, "paged_attention_fwd")?;
@@ -177,6 +181,7 @@ impl PagedAttentionOps<WgpuRuntime> for WgpuClient {
         _k_scale: f32,
         _v_scale: f32,
         _o_scale: f32,
+        _kv_seq_len: Option<KvSeqLen<'_, WgpuRuntime>>,
     ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>)> {
         Err(Error::InvalidArgument {
             arg: "dtype",

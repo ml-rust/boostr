@@ -13,7 +13,8 @@
 //! - `paged_decode.rs`: S_q=1 decode fast path
 
 use crate::error::Result;
-use crate::ops::traits::PagedAttentionOps;
+use crate::ops::impl_generic::attention::reject_per_row_kv_seq_len;
+use crate::ops::traits::{KvSeqLen, PagedAttentionOps};
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
@@ -34,7 +35,9 @@ impl PagedAttentionOps<CudaRuntime> for CudaClient {
         head_dim: usize,
         block_size: usize,
         causal: bool,
+        kv_seq_len: Option<KvSeqLen<'_, CudaRuntime>>,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
+        reject_per_row_kv_seq_len(kv_seq_len, "CUDA")?;
         paged_attention_fwd_impl(
             self,
             q,
@@ -68,7 +71,9 @@ impl PagedAttentionOps<CudaRuntime> for CudaClient {
         k_scale: f32,
         v_scale: f32,
         o_scale: f32,
+        kv_seq_len: Option<KvSeqLen<'_, CudaRuntime>>,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
+        reject_per_row_kv_seq_len(kv_seq_len, "CUDA")?;
         paged_attention_fwd_fp8_impl(
             self,
             q,

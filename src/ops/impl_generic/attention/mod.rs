@@ -16,8 +16,8 @@ pub use fused_qkv::{
     fused_qkv_projection_bwd_impl, fused_qkv_projection_impl,
 };
 pub use kv_start::{
-    build_kv_start_masks, clamped_kv_ends, per_row_kv_seq_len_unsupported, validate_kv_start,
-    validate_row_bounds,
+    build_kv_start_masks, clamped_kv_ends, per_row_kv_seq_len_unsupported,
+    reject_per_row_kv_seq_len, validate_kv_start, validate_row_bounds,
 };
 pub use mla::scaled_dot_product_attention_impl;
 pub use paged::{PagedAttnConfig, PagedKv, paged_attention_bwd_impl};

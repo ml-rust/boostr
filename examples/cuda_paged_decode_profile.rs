@@ -69,6 +69,7 @@ fn main() {
                         head_dim,
                         block_size,
                         false,
+                        None,
                     )
                     .unwrap();
                 std::hint::black_box(&out);

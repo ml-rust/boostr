@@ -7,7 +7,7 @@
 //! attention itself.
 
 use crate::error::{Error, Result};
-use crate::ops::traits::PagedAttentionOps;
+use crate::ops::traits::{KvSeqLen, PagedAttentionOps};
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
 
@@ -44,11 +44,15 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
         head_dim: usize,
         block_size: usize,
         causal: bool,
+        kv_seq_len: Option<KvSeqLen<'_, CpuRuntime>>,
     ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
         validate_head_grouping(num_heads, num_kv_heads)?;
         let batch_size = q.shape()[0];
 
-        // Gather paged blocks into contiguous [B, num_kv_heads, S_k, D]
+        // Gather paged blocks into contiguous [B, num_kv_heads, S_k, D]. The
+        // gather always fills to `seq_len_k` (the batch's block-table walk
+        // bound); `kv_seq_len` only narrows which gathered keys each row's
+        // softmax sees, via the delegated flash call below.
         let k_cont = gather_paged_kv(
             k_blocks,
             block_table,
@@ -71,7 +75,9 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
         let k_expanded = expand_kv_heads(self, &k_cont, num_heads, num_kv_heads)?;
         let v_expanded = expand_kv_heads(self, &v_cont, num_heads, num_kv_heads)?;
 
-        // Delegate to existing FlashAttentionOps
+        // Delegate to existing FlashAttentionOps, passing the per-row end
+        // through so a row attends only over its own keys, never a shorter
+        // row reading into another row's gathered blocks.
         use crate::ops::traits::{AttnOutLayout, FlashAttentionOps};
         self.flash_attention_fwd(
             q,
@@ -82,7 +88,7 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
             head_dim,
             causal,
             0,
-            None,
+            kv_seq_len,
             None,
             AttnOutLayout::HeadMajor,
         )
@@ -105,6 +111,7 @@ impl PagedAttentionOps<CpuRuntime> for CpuClient {
         _k_scale: f32,
         _v_scale: f32,
         _o_scale: f32,
+        _kv_seq_len: Option<KvSeqLen<'_, CpuRuntime>>,
     ) -> Result<(Tensor<CpuRuntime>, Tensor<CpuRuntime>)> {
         Err(Error::InvalidArgument {
             arg: "dtype",
@@ -259,6 +266,7 @@ mod tests {
                 d,
                 bs,
                 false,
+                None,
             )
             .unwrap();
         assert_eq!(out.shape(), &[b, h, s, d]);
@@ -293,6 +301,7 @@ mod tests {
                 d,
                 bs,
                 true,
+                None,
             )
             .unwrap();
         let (out_full, _) = client
@@ -308,6 +317,7 @@ mod tests {
                 d,
                 bs,
                 false,
+                None,
             )
             .unwrap();
 
@@ -349,6 +359,7 @@ mod tests {
                 d,
                 bs,
                 false,
+                None,
             )
             .unwrap();
         let dout = rand_tensor(&[b, h, s, d], &device);

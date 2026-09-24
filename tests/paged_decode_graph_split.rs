@@ -211,6 +211,7 @@ fn paged_split_reference_decode(
             HEAD_DIM,
             BLOCK_SIZE,
             false,
+            None,
         )
         .expect("reference paged_attention_fwd failed");
     (out.to_vec::<f32>(), lse.to_vec::<f32>())

@@ -14,6 +14,8 @@ use crate::error::Result;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
+use super::flash_layout::KvSeqLen;
+
 /// Paged Flash Attention — fused attention with block-table KV cache indirection
 ///
 /// # Layout contract
@@ -30,6 +32,18 @@ use numr::tensor::Tensor;
 /// Each sequence has its own row in the block table. Entry `block_table[b][i]`
 /// gives the physical block index for the i-th logical block of sequence `b`.
 /// Token at logical position `t` is in block `t / block_size`, offset `t % block_size`.
+///
+/// # `kv_seq_len`
+///
+/// `seq_len_k` stays the shared bound used to size the gathered contiguous
+/// KV buffer and the block-table walk. `kv_seq_len` narrows which of those
+/// gathered keys each row actually attends over: `None` or
+/// `Some(KvSeqLen::Shared(_))` keeps every row ending at `seq_len_k`, exactly
+/// today's behavior. `Some(KvSeqLen::PerRow(ends))` makes row `b` end at
+/// `ends[b]` instead, so a batch of mixed-length sequences does not read
+/// past its own history into another row's blocks. A backend that cannot
+/// honor `PerRow` returns `per_row_kv_seq_len_unsupported` rather than
+/// silently using the shared bound.
 #[allow(clippy::too_many_arguments)]
 pub trait PagedAttentionOps<R: Runtime> {
     /// Paged attention forward pass (F32, F16, BF16)
@@ -46,6 +60,7 @@ pub trait PagedAttentionOps<R: Runtime> {
         head_dim: usize,
         block_size: usize,
         causal: bool,
+        kv_seq_len: Option<KvSeqLen<'_, R>>,
     ) -> Result<(Tensor<R>, Tensor<R>)>;
 
     /// Paged attention forward pass for FP8 tensors
@@ -66,6 +81,7 @@ pub trait PagedAttentionOps<R: Runtime> {
         k_scale: f32,
         v_scale: f32,
         o_scale: f32,
+        kv_seq_len: Option<KvSeqLen<'_, R>>,
     ) -> Result<(Tensor<R>, Tensor<R>)>;
 
     /// Paged attention backward pass

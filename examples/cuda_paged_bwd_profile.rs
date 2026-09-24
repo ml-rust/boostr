@@ -86,6 +86,7 @@ fn main() {
                             head_dim,
                             block_size,
                             true,
+                            None,
                         )
                         .unwrap();
 

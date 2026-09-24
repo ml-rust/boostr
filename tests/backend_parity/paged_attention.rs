@@ -30,6 +30,7 @@ fn test_paged_attention_fwd_parity() {
             d,
             block_size,
             false,
+            None,
         )
         .unwrap();
     let cpu_out_vec = cpu_out.to_vec::<f32>();
@@ -53,7 +54,7 @@ fn test_paged_attention_fwd_parity() {
         .unwrap();
         let bt = Tensor::from_slice(&bt_data, &[b, 1], &cuda_device).unwrap();
         let (out, _) = cuda_client
-            .paged_attention_fwd(&q_c, &kb, &vb, &bt, h, 1, s, s, d, block_size, false)
+            .paged_attention_fwd(&q_c, &kb, &vb, &bt, h, 1, s, s, d, block_size, false, None)
             .unwrap();
         assert_parity_f32(&out.to_vec::<f32>(), &cpu_out_vec, "paged_fwd CUDA vs CPU");
     });
@@ -77,7 +78,7 @@ fn test_paged_attention_fwd_parity() {
         .unwrap();
         let bt = Tensor::from_slice(&bt_data, &[b, 1], &wgpu_device).unwrap();
         let (out, _) = wgpu_client
-            .paged_attention_fwd(&q_w, &kb, &vb, &bt, h, 1, s, s, d, block_size, false)
+            .paged_attention_fwd(&q_w, &kb, &vb, &bt, h, 1, s, s, d, block_size, false, None)
             .unwrap();
         assert_parity_f32(&out.to_vec::<f32>(), &cpu_out_vec, "paged_fwd WGPU vs CPU");
     });
@@ -111,6 +112,7 @@ fn test_paged_attention_bwd_parity() {
             d,
             block_size,
             true,
+            None,
         )
         .unwrap();
     let dout = det_tensor(&[b, h, s, d], &cpu_device);
@@ -173,7 +175,7 @@ fn test_paged_attention_bwd_parity() {
         .unwrap();
         let bt = Tensor::from_slice(&bt_data, &[b, num_blocks], &wgpu_device).unwrap();
         let (out_w, lse_w) = wgpu_client
-            .paged_attention_fwd(&q_w, &kb, &vb, &bt, h, 1, s, s, d, block_size, true)
+            .paged_attention_fwd(&q_w, &kb, &vb, &bt, h, 1, s, s, d, block_size, true, None)
             .unwrap();
         let dout_w =
             Tensor::from_slice(&dout.to_vec::<f32>(), &[b, h, s, d], &wgpu_device).unwrap();
@@ -351,6 +353,7 @@ fn test_paged_causal_unequal_seqlens_uses_absolute_positions() {
             d,
             block_size,
             true,
+            None,
         )
         .unwrap();
     let cpu_out_vec = cpu_out.to_vec::<f32>();
@@ -372,7 +375,7 @@ fn test_paged_causal_unequal_seqlens_uses_absolute_positions() {
         let bt = Tensor::from_slice(&bt_data, &[b, max_num_blocks], &cuda_device).unwrap();
         let (out, _) = cuda_client
             .paged_attention_fwd(
-                &q_c, &kb, &vb, &bt, h, 1, seq_len_q, seq_len_k, d, block_size, true,
+                &q_c, &kb, &vb, &bt, h, 1, seq_len_q, seq_len_k, d, block_size, true, None,
             )
             .unwrap();
         assert_parity_f32(
@@ -394,7 +397,7 @@ fn test_paged_causal_unequal_seqlens_uses_absolute_positions() {
         let bt = Tensor::from_slice(&bt_data, &[b, max_num_blocks], &wgpu_device).unwrap();
         let (out, _) = wgpu_client
             .paged_attention_fwd(
-                &q_w, &kb, &vb, &bt, h, 1, seq_len_q, seq_len_k, d, block_size, true,
+                &q_w, &kb, &vb, &bt, h, 1, seq_len_q, seq_len_k, d, block_size, true, None,
             )
             .unwrap();
         assert_parity_f32(
@@ -452,6 +455,7 @@ fn test_paged_causal_equal_seqlens_matches_legacy_rule() {
             d,
             block_size,
             true,
+            None,
         )
         .unwrap();
     let cpu_out_vec = cpu_out.to_vec::<f32>();
@@ -480,7 +484,7 @@ fn test_paged_causal_equal_seqlens_matches_legacy_rule() {
         .unwrap();
         let bt = Tensor::from_slice(&bt_data, &[b, max_num_blocks], &cuda_device).unwrap();
         let (out, _) = cuda_client
-            .paged_attention_fwd(&q_c, &kb, &vb, &bt, h, 1, s, s, d, block_size, true)
+            .paged_attention_fwd(&q_c, &kb, &vb, &bt, h, 1, s, s, d, block_size, true, None)
             .unwrap();
         assert_parity_f32(
             &out.to_vec::<f32>(),
@@ -508,7 +512,7 @@ fn test_paged_causal_equal_seqlens_matches_legacy_rule() {
         .unwrap();
         let bt = Tensor::from_slice(&bt_data, &[b, max_num_blocks], &wgpu_device).unwrap();
         let (out, _) = wgpu_client
-            .paged_attention_fwd(&q_w, &kb, &vb, &bt, h, 1, s, s, d, block_size, true)
+            .paged_attention_fwd(&q_w, &kb, &vb, &bt, h, 1, s, s, d, block_size, true, None)
             .unwrap();
         assert_parity_f32(
             &out.to_vec::<f32>(),
@@ -698,6 +702,7 @@ fn assert_paged_bwd_kv_parity(
                 d,
                 block_size,
                 true,
+                None,
             )
             .unwrap();
         let (dq_c, dk_c, dv_c) = cuda_client
@@ -1235,6 +1240,7 @@ fn test_paged_attention_bwd_zero_kv_heads_rejected() {
             d,
             block_size,
             true,
+            None,
         )
         .unwrap();
 
@@ -1346,7 +1352,8 @@ fn test_paged_attention_fwd_fp8_cuda() {
 
         let (out, lse) = cuda_client
             .paged_attention_fwd_fp8(
-                &q_fp8, &kb_fp8, &vb_fp8, &bt, h, 1, s, s, d, block_size, false, 1.0, 1.0, 1.0, 1.0,
+                &q_fp8, &kb_fp8, &vb_fp8, &bt, h, 1, s, s, d, block_size, false, 1.0, 1.0, 1.0,
+                1.0, None,
             )
             .expect("FP8 paged_attention_fwd must succeed on an sm_80+ device");
 

@@ -65,6 +65,7 @@ fn assert_paged_decode_parity(
             head_dim,
             block_size,
             false,
+            None,
         )
         .unwrap_or_else(|e| panic!("CPU paged decode failed for {label}: {e}"));
     let cpu_out_vec = cpu_out.to_vec::<f32>();
@@ -92,6 +93,7 @@ fn assert_paged_decode_parity(
                 head_dim,
                 block_size,
                 false,
+                None,
             )
             .unwrap_or_else(|e| panic!("CUDA paged decode failed for {label}: {e}"));
 
@@ -135,6 +137,7 @@ fn assert_paged_decode_parity(
                 head_dim,
                 block_size,
                 false,
+                None,
             )
             .unwrap_or_else(|e| panic!("WebGPU paged decode failed for {label}: {e}"));
 
@@ -237,6 +240,7 @@ fn paged_prefill_scrambled_pages_parity() {
             head_dim,
             block_size,
             false,
+            None,
         )
         .unwrap();
     let cpu_out_vec = cpu_out.to_vec::<f32>();
@@ -261,6 +265,7 @@ fn paged_prefill_scrambled_pages_parity() {
                 head_dim,
                 block_size,
                 false,
+                None,
             )
             .unwrap();
         assert_parity_f32_tol(

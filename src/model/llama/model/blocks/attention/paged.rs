@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::inference::kv_cache::LayeredPagedKvCache;
 use crate::model::traits::ModelClient;
 use crate::nn::{MaybeQuantLinear, RoPE};
-use crate::ops::traits::{KvCacheOps, PagedAttentionOps};
+use crate::ops::traits::{KvCacheOps, KvSeqLen, PagedAttentionOps};
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_narrow, var_reshape};
 use numr::dtype::DType;
@@ -18,6 +18,12 @@ use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
 impl<R: Runtime<DType = DType>> LlamaAttention<R> {
+    /// `seq_len_k` is the batch-shared bound used to size the gathered KV
+    /// buffer. `kv_seq_len` narrows which of those gathered keys each row
+    /// attends over: `None` keeps every row at `seq_len_k`.
+    /// `Some(KvSeqLen::PerRow(ends))` lets the caller give a mixed-length
+    /// batch its own end per row, so a shorter row does not read into a
+    /// longer row's cached blocks.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_with_paged_kv_cache<C>(
         &self,
@@ -30,6 +36,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         block_table: &Tensor<R>,
         seq_len_k: usize,
         position: usize,
+        kv_seq_len: Option<KvSeqLen<'_, R>>,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R>,
@@ -115,6 +122,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             self.head_dim,
             block_size,
             false, // not causal for decode (Q sees all of KV cache)
+            kv_seq_len,
         )?;
 
         // [B, H, S, D] -> [B, S, H, D] -> [B, S, H*D]

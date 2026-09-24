@@ -10,10 +10,11 @@
 //! [`SamplingOps`]: super::sampling::SamplingOps
 
 use numr::dtype::DType;
+use numr::ops::RandomOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// The buffers one [`SamplingOps`](super::sampling::SamplingOps) call needs.
 ///
@@ -21,11 +22,15 @@ use crate::error::Result;
 ///   Used by the CUDA backend; the generic (CPU) backend filters on the
 ///   host and leaves this field untouched.
 /// - `output`: `[1]` I64 — the sampled token, overwritten by every call.
+/// - `random`: `[1]` F32 — destination for the sampling draw
+///   (`RandomOps::rand_into`/`rand_seeded_into`), fully overwritten by every call.
 pub struct SamplingScratch<R: Runtime> {
     /// `[vocab_size]` F32 probability working buffer.
     pub probs: Tensor<R>,
     /// `[1]` I64 sampled-token output.
     pub output: Tensor<R>,
+    /// `[1]` F32 destination for the sampling draw.
+    pub random: Tensor<R>,
 }
 
 impl<R: Runtime<DType = DType>> SamplingScratch<R> {
@@ -38,7 +43,23 @@ impl<R: Runtime<DType = DType>> SamplingScratch<R> {
         Ok(Self {
             probs: Tensor::zeros(&[vocab_size], DType::F32, device)?,
             output: Tensor::zeros(&[1], DType::I64, device)?,
+            random: Tensor::zeros(&[1], DType::F32, device)?,
         })
+    }
+
+    /// Draws one sampling value into `self.random`, seeded if `seed` is
+    /// `Some`, fully overwriting it. Shared by every `SamplingOps` backend
+    /// so the seeded/unseeded branch lives in one place.
+    ///
+    /// # Errors
+    ///
+    /// A random-generation error propagates.
+    pub fn draw_random<C: RandomOps<R>>(&self, client: &C, seed: Option<u64>) -> Result<()> {
+        match seed {
+            Some(seed) => client.rand_seeded_into(&self.random, seed),
+            None => client.rand_into(&self.random),
+        }
+        .map_err(Error::Numr)
     }
 }
 
@@ -56,5 +77,21 @@ mod tests {
         assert_eq!(scratch.probs.dtype(), DType::F32);
         assert_eq!(scratch.output.shape(), &[1]);
         assert_eq!(scratch.output.dtype(), DType::I64);
+        assert_eq!(scratch.random.shape(), &[1]);
+        assert_eq!(scratch.random.dtype(), DType::F32);
+    }
+
+    #[test]
+    fn draw_random_seeded_is_reproducible_and_unseeded_runs() {
+        let (client, device) = cpu_setup();
+        let scratch = SamplingScratch::<CpuRuntime>::new(4, &device).expect("scratch");
+
+        scratch.draw_random(&client, Some(7)).expect("seeded draw");
+        let first = scratch.random.item::<f32>().expect("read back");
+        scratch.draw_random(&client, Some(7)).expect("seeded draw");
+        let second = scratch.random.item::<f32>().expect("read back");
+        assert_eq!(first, second);
+
+        scratch.draw_random(&client, None).expect("unseeded draw");
     }
 }

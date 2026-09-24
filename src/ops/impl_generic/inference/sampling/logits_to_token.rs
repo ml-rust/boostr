@@ -8,7 +8,6 @@ use super::validate::{
 use crate::error::Result;
 use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use numr::dtype::DType;
-use numr::ops::RandomOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -163,17 +162,12 @@ where
     } else {
         let indexed = filter_distribution(&mut last_logits, temperature, top_k, top_p, min_p);
 
-        // Random value (seeded for reproducibility if seed is provided)
-        let rand_tensor = if let Some(s) = seed {
-            client
-                .rand_seeded(&[1], numr::dtype::DType::F32, s)
-                .map_err(crate::error::Error::Numr)?
-        } else {
-            client
-                .rand(&[1], numr::dtype::DType::F32)
-                .map_err(crate::error::Error::Numr)?
-        };
-        let random_val: f32 = rand_tensor
+        // Draw into scratch.random instead of allocating a fresh tensor
+        // (seeded for reproducibility if seed is provided), then read back
+        // the scalar it was just fully overwritten with.
+        scratch.draw_random(client, seed)?;
+        let random_val: f32 = scratch
+            .random
             .item::<f32>()
             .map_err(crate::error::Error::Numr)?;
 
@@ -380,5 +374,58 @@ mod tests {
             let reused_id: Vec<i64> = scratch.output.to_vec();
             assert_eq!(reused_id, fresh_id);
         }
+    }
+
+    /// Two successive calls with the same seed, through one reused scratch,
+    /// draw the same random value and produce the same token both times —
+    /// the first draw does not leak into or bias the second.
+    #[test]
+    fn same_seed_through_one_reused_scratch_repeats_the_token() {
+        let (client, device) = cpu_setup();
+        let data: Vec<f32> = vec![0.0, 1.0, 0.0, 2.0, 9.0, -1.0, 0.5, 3.0];
+        let logits = Tensor::<CpuRuntime>::from_slice(&data, &[1, 2, 4], &device).expect("logits");
+        let token_ids = Tensor::<CpuRuntime>::from_slice(&[0i64], &[1], &device).expect("ids");
+        let token_counts = Tensor::<CpuRuntime>::from_slice(&[1i32], &[1], &device).expect("cnt");
+        let scratch = SamplingScratch::<CpuRuntime>::new(4, &device).expect("scratch");
+
+        logits_to_token_into_impl::<CpuRuntime>(
+            &client,
+            &logits,
+            &token_ids,
+            &token_counts,
+            1,
+            1.1,
+            0.1,
+            0.1,
+            0.7,
+            0,
+            1.0,
+            0.0,
+            Some(7),
+            &scratch,
+        )
+        .expect("first scratch call");
+        let first_id: Vec<i64> = scratch.output.to_vec();
+
+        logits_to_token_into_impl::<CpuRuntime>(
+            &client,
+            &logits,
+            &token_ids,
+            &token_counts,
+            1,
+            1.1,
+            0.1,
+            0.1,
+            0.7,
+            0,
+            1.0,
+            0.0,
+            Some(7),
+            &scratch,
+        )
+        .expect("second scratch call");
+        let second_id: Vec<i64> = scratch.output.to_vec();
+
+        assert_eq!(first_id, second_id);
     }
 }

@@ -13,7 +13,7 @@ use numr::tensor::Tensor;
 /// Sample a token from logits — generic implementation.
 ///
 /// Performs temperature → softmax → top-k → top-p → min-p → multinomial.
-/// Randomness generated via `RandomOps::rand` (on-device for GPU backends).
+/// Randomness generated via `RandomOps::rand_into` (on-device for GPU backends).
 /// CUDA backend provides a fused kernel that keeps everything in a single launch.
 ///
 /// Allocates a one-off [`SamplingScratch`] and delegates to
@@ -63,11 +63,11 @@ where
 
     let indexed = filter_distribution(&mut logits_vec, temperature, top_k, top_p, min_p);
 
-    // Generate random value on-device via RandomOps, read back scalar
-    let rand_tensor = client
-        .rand(&[1], numr::dtype::DType::F32)
-        .map_err(crate::error::Error::Numr)?;
-    let random_val: f32 = rand_tensor
+    // Draw into scratch.random instead of allocating a fresh tensor, then
+    // read back the scalar it was just fully overwritten with.
+    scratch.draw_random(client, None)?;
+    let random_val: f32 = scratch
+        .random
         .item::<f32>()
         .map_err(crate::error::Error::Numr)?;
 

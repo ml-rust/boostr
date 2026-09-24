@@ -9,9 +9,10 @@ use crate::ops::cuda::kernels::{
     self, LOGITS_TO_TOKEN_MODULE, SAMPLING_MODULE, SAMPLING_PENALTIES_MODULE,
 };
 use crate::ops::impl_generic::inference::sampling::{
-    SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits,
+    SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits, validate_scratch_vocab,
 };
 use crate::ops::traits::inference::sampling::SamplingOps;
+use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
 use numr::ops::RandomOps;
@@ -89,6 +90,24 @@ impl SamplingOps<CudaRuntime> for CudaClient {
     ) -> Result<u32> {
         validate_sampling_logits("sample_token", logits, SamplingLogitsShape::Vocab)?;
         let vocab_size = logits.shape()[0];
+        let scratch = SamplingScratch::new(vocab_size, logits.device())?;
+        self.sample_token_into(logits, temperature, top_k, top_p, min_p, &scratch)?;
+        let result: Vec<i64> = scratch.output.to_vec();
+        Ok(result[0] as u32)
+    }
+
+    fn sample_token_into(
+        &self,
+        logits: &Tensor<CudaRuntime>,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        min_p: f32,
+        scratch: &SamplingScratch<CudaRuntime>,
+    ) -> Result<()> {
+        validate_sampling_logits("sample_token", logits, SamplingLogitsShape::Vocab)?;
+        let vocab_size = logits.shape()[0];
+        validate_scratch_vocab("sample_token", scratch, vocab_size)?;
 
         let device = logits.device();
         let device_index = device.id();
@@ -96,15 +115,12 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         let module = kernels::get_or_load_module(self.context(), device_index, SAMPLING_MODULE)?;
         let func = kernels::get_kernel_function(&module, "sample_token_kernel")?;
 
-        // Allocate scratch buffer for probabilities (global mem, not shared)
-        let probs_buf =
-            Tensor::<CudaRuntime>::zeros(&[vocab_size], numr::dtype::DType::F32, device)?;
-        // Generate random value on GPU via RandomOps
+        // Generate random value on GPU via RandomOps. numr has no
+        // `rand_into`, so this one-element tensor still allocates every
+        // call — the probs and output buffers below do not.
         let rand_tensor = self
             .rand(&[1], numr::dtype::DType::F32)
             .map_err(Error::Numr)?;
-        // Allocate output tensor for sampled token ID
-        let output = Tensor::<CudaRuntime>::zeros(&[1], numr::dtype::DType::I32, device)?;
 
         let block_size = 1024u32;
         // shared mem: only block_size floats for reductions
@@ -117,11 +133,11 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         };
 
         let logits_ptr = logits.ptr();
-        let probs_ptr = probs_buf.ptr();
+        let probs_ptr = scratch.probs.ptr();
         let vocab_size_i32 = vocab_size as i32;
         let top_k_i32 = top_k as i32;
         let rand_ptr = rand_tensor.ptr();
-        let output_ptr = output.ptr();
+        let output_ptr = scratch.output.ptr();
 
         unsafe {
             let mut builder = self.stream().launch_builder(&func);
@@ -139,9 +155,7 @@ impl SamplingOps<CudaRuntime> for CudaClient {
             })?;
         }
 
-        // Read back the single i32 result
-        let result: Vec<i32> = output.to_vec();
-        Ok(result[0] as u32)
+        Ok(())
     }
 
     fn logits_to_token(
@@ -164,27 +178,64 @@ impl SamplingOps<CudaRuntime> for CudaClient {
             logits,
             SamplingLogitsShape::BatchSeqVocab,
         )?;
+        let vocab_size = logits.shape()[2];
+        let scratch = SamplingScratch::new(vocab_size, logits.device())?;
+        self.logits_to_token_into(
+            logits,
+            token_ids,
+            token_counts,
+            num_unique,
+            repeat_penalty,
+            frequency_penalty,
+            presence_penalty,
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            seed,
+            &scratch,
+        )?;
+        Ok(scratch.output.clone())
+    }
+
+    fn logits_to_token_into(
+        &self,
+        logits: &Tensor<CudaRuntime>,
+        token_ids: &Tensor<CudaRuntime>,
+        token_counts: &Tensor<CudaRuntime>,
+        num_unique: usize,
+        repeat_penalty: f32,
+        frequency_penalty: f32,
+        presence_penalty: f32,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        min_p: f32,
+        seed: Option<u64>,
+        scratch: &SamplingScratch<CudaRuntime>,
+    ) -> Result<()> {
+        validate_sampling_logits(
+            "logits_to_token",
+            logits,
+            SamplingLogitsShape::BatchSeqVocab,
+        )?;
         validate_contiguous_arg("logits_to_token", "token_ids", token_ids)?;
         validate_contiguous_arg("logits_to_token", "token_counts", token_counts)?;
         let shape = logits.shape();
         let seq_len = shape[1];
         let vocab_size = shape[2];
+        validate_scratch_vocab("logits_to_token", scratch, vocab_size)?;
 
-        let device = logits.device();
-        let device_index = device.id();
+        let device_index = logits.device().id();
 
         let module =
             kernels::get_or_load_module(self.context(), device_index, LOGITS_TO_TOKEN_MODULE)?;
         let func = kernels::get_kernel_function(&module, "logits_to_token_kernel")?;
 
-        // Scratch buffer for probabilities
-        let probs_buf =
-            Tensor::<CudaRuntime>::zeros(&[vocab_size], numr::dtype::DType::F32, device)?;
-        // Output tensor [1] I64
-        let output = Tensor::<CudaRuntime>::zeros(&[1], numr::dtype::DType::I64, device)?;
-
         // Generate random value on-device (only used for non-greedy, but always generated
-        // to avoid branching on host — the kernel ignores it when temperature == 0)
+        // to avoid branching on host — the kernel ignores it when temperature == 0).
+        // numr has no `rand_into`, so this one-element tensor still allocates
+        // every call — the probs and output buffers below do not.
         let rand_tensor = if let Some(s) = seed {
             self.rand_seeded(&[1], numr::dtype::DType::F32, s)
                 .map_err(Error::Numr)?
@@ -219,10 +270,10 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         };
 
         let logits_ptr = logits.ptr();
-        let probs_ptr = probs_buf.ptr();
+        let probs_ptr = scratch.probs.ptr();
         let ids_ptr = token_ids.ptr();
         let counts_ptr = token_counts.ptr();
-        let output_ptr = output.ptr();
+        let output_ptr = scratch.output.ptr();
         let rand_ptr = rand_tensor.ptr();
         let seq_len_i32 = seq_len as i32;
         let vocab_size_i32 = vocab_size as i32;
@@ -253,7 +304,7 @@ impl SamplingOps<CudaRuntime> for CudaClient {
             })?;
         }
 
-        Ok(output)
+        Ok(())
     }
 }
 
@@ -448,5 +499,58 @@ mod tests {
             )
             .expect_err("non-contiguous logits must be rejected");
         assert!(format!("{err}").contains("logits_to_token"));
+    }
+
+    /// A scratch reused across calls (same seed, same inputs) produces the
+    /// same token as a fresh allocation per call — nothing leaks between
+    /// calls through the shared probs/output buffers.
+    #[test]
+    fn a_reused_scratch_matches_fresh_allocation_per_call() {
+        let Some(cuda) = cuda_setup() else { return };
+        let (client, device) = (&cuda.client, &cuda.device);
+        let data: Vec<f32> = vec![0.0, 1.0, 0.0, 2.0, 9.0, -1.0, 0.5, 3.0];
+        let logits = Tensor::<CudaRuntime>::from_slice(&data, &[1, 2, 4], device).expect("logits");
+        let token_ids = Tensor::<CudaRuntime>::from_slice(&[0i64], &[1], device).expect("ids");
+        let token_counts = Tensor::<CudaRuntime>::from_slice(&[1i32], &[1], device).expect("cnt");
+        let scratch = SamplingScratch::<CudaRuntime>::new(4, device).expect("scratch");
+
+        for seed in [1u64, 2u64, 3u64] {
+            let fresh = client
+                .logits_to_token(
+                    &logits,
+                    &token_ids,
+                    &token_counts,
+                    1,
+                    1.1,
+                    0.1,
+                    0.1,
+                    0.7,
+                    0,
+                    1.0,
+                    0.0,
+                    Some(seed),
+                )
+                .expect("fresh alloc path");
+            client
+                .logits_to_token_into(
+                    &logits,
+                    &token_ids,
+                    &token_counts,
+                    1,
+                    1.1,
+                    0.1,
+                    0.1,
+                    0.7,
+                    0,
+                    1.0,
+                    0.0,
+                    Some(seed),
+                    &scratch,
+                )
+                .expect("scratch path");
+            let fresh_id: Vec<i64> = fresh.to_vec();
+            let reused_id: Vec<i64> = scratch.output.to_vec();
+            assert_eq!(reused_id, fresh_id);
+        }
     }
 }

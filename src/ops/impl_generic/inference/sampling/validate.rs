@@ -1,6 +1,7 @@
 //! Shared logits validation for `SamplingOps` — every backend method.
 
 use crate::error::{Error, Result};
+use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -91,6 +92,35 @@ pub fn validate_contiguous_arg<R: Runtime>(
     Ok(())
 }
 
+/// Checks that `scratch.probs` is sized for `vocab_size`.
+///
+/// The `_into` sampling methods write into `scratch.probs` and
+/// `scratch.output` instead of allocating; a scratch built for a different
+/// vocab size would read or write past its buffer.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidArgument` naming `op`, `vocab_size`, and the
+/// scratch's actual shape, if they disagree.
+pub fn validate_scratch_vocab<R: Runtime>(
+    op: &'static str,
+    scratch: &SamplingScratch<R>,
+    vocab_size: usize,
+) -> Result<()> {
+    let got = scratch.probs.shape();
+    if got != [vocab_size] {
+        return Err(Error::InvalidArgument {
+            arg: "scratch",
+            reason: format!(
+                "{op}: scratch.probs is {got:?} but this call's logits carry vocab_size \
+                 {vocab_size} — allocate the scratch with SamplingScratch::new(vocab_size, \
+                 device) sized for this call's logits"
+            ),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,6 +152,22 @@ mod tests {
         assert!(!view.is_contiguous());
         let err = validate_sampling_logits("op", &view, SamplingLogitsShape::Vocab)
             .expect_err("non-contiguous logits must be rejected");
+        assert!(format!("{err}").contains("op"));
+    }
+
+    #[test]
+    fn accepts_a_scratch_sized_for_the_call() {
+        let (_client, device) = cpu_setup();
+        let scratch = SamplingScratch::<CpuRuntime>::new(4, &device).expect("scratch");
+        validate_scratch_vocab("op", &scratch, 4).expect("sized scratch must be accepted");
+    }
+
+    #[test]
+    fn rejects_a_scratch_sized_for_a_different_vocab() {
+        let (_client, device) = cpu_setup();
+        let scratch = SamplingScratch::<CpuRuntime>::new(4, &device).expect("scratch");
+        let err = validate_scratch_vocab("op", &scratch, 8)
+            .expect_err("a mismatched scratch must be rejected");
         assert!(format!("{err}").contains("op"));
     }
 }

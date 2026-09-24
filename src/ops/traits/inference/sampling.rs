@@ -4,6 +4,7 @@
 //! during autoregressive inference. Prevents degenerate repetition by penalizing
 //! tokens that have recently appeared.
 
+use super::sampling_scratch::SamplingScratch;
 use crate::error::Result;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -82,6 +83,32 @@ pub trait SamplingOps<R: Runtime> {
         min_p: f32,
     ) -> Result<u32>;
 
+    /// Like [`sample_token`](Self::sample_token), but writes the sampled
+    /// token into `scratch.output` instead of allocating, and (on backends
+    /// that use it) fills `scratch.probs` in place instead of allocating a
+    /// probability buffer. numr has no `rand_into`, so the per-call random
+    /// draw still allocates a fresh `[1]` tensor. Every buffer this call
+    /// does write is fully overwritten before it returns, so `scratch` is
+    /// safe to reuse on the next call, but not to share between two calls
+    /// that could run at once.
+    ///
+    /// `logits` must be contiguous, exactly as [`sample_token`](Self::sample_token)
+    /// requires.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `logits` is not a contiguous `[vocab_size]`
+    /// tensor, or if `scratch` was not sized for that vocab.
+    fn sample_token_into(
+        &self,
+        logits: &Tensor<R>,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        min_p: f32,
+        scratch: &SamplingScratch<R>,
+    ) -> Result<()>;
+
     /// Fused logits-to-token: narrow last position → cast F32 → apply penalties → argmax/sample.
     ///
     /// Returns `[1]` I64 tensor on device, enabling pipelined decode (the forward pass
@@ -121,4 +148,38 @@ pub trait SamplingOps<R: Runtime> {
         min_p: f32,
         seed: Option<u64>,
     ) -> Result<Tensor<R>>;
+
+    /// Like [`logits_to_token`](Self::logits_to_token), but writes the
+    /// sampled token into `scratch.output` instead of allocating, and (on
+    /// backends that use it) fills `scratch.probs` in place instead of
+    /// allocating a probability buffer. numr has no `rand_into`, so the
+    /// per-call random draw still allocates a fresh `[1]` tensor. Every
+    /// buffer this call does write is fully overwritten before it returns,
+    /// so `scratch` is safe to reuse on the next call, but not to share
+    /// between two calls that could run at once.
+    ///
+    /// `logits` must be contiguous, exactly as
+    /// [`logits_to_token`](Self::logits_to_token) requires.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `logits` is not a contiguous `[1, seq_len,
+    /// vocab_size]` tensor, or if `scratch` was not sized for that vocab.
+    #[allow(clippy::too_many_arguments)]
+    fn logits_to_token_into(
+        &self,
+        logits: &Tensor<R>,
+        token_ids: &Tensor<R>,
+        token_counts: &Tensor<R>,
+        num_unique: usize,
+        repeat_penalty: f32,
+        frequency_penalty: f32,
+        presence_penalty: f32,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        min_p: f32,
+        seed: Option<u64>,
+        scratch: &SamplingScratch<R>,
+    ) -> Result<()>;
 }

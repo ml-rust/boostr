@@ -1,8 +1,11 @@
 //! Sample a token from logits — generic implementation.
 
+use super::output::write_token_id;
 use super::stochastic::{filter_distribution, sample_from_distribution};
-use super::validate::{SamplingLogitsShape, validate_sampling_logits};
+use super::validate::{SamplingLogitsShape, validate_sampling_logits, validate_scratch_vocab};
 use crate::error::Result;
+use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
+use numr::dtype::DType;
 use numr::ops::RandomOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -12,7 +15,12 @@ use numr::tensor::Tensor;
 /// Performs temperature → softmax → top-k → top-p → min-p → multinomial.
 /// Randomness generated via `RandomOps::rand` (on-device for GPU backends).
 /// CUDA backend provides a fused kernel that keeps everything in a single launch.
-pub fn sample_token_impl<R: Runtime>(
+///
+/// Allocates a one-off [`SamplingScratch`] and delegates to
+/// [`sample_token_into_impl`]. A caller that samples every step should
+/// allocate its own scratch once and call [`sample_token_into_impl`]
+/// directly instead.
+pub fn sample_token_impl<R: Runtime<DType = DType>>(
     client: &R::Client,
     logits: &Tensor<R>,
     temperature: f32,
@@ -23,7 +31,34 @@ pub fn sample_token_impl<R: Runtime>(
 where
     R::Client: RandomOps<R>,
 {
+    let vocab_size = logits.shape().first().copied().unwrap_or(1);
+    let scratch = SamplingScratch::new(vocab_size, logits.device())?;
+    sample_token_into_impl(client, logits, temperature, top_k, top_p, min_p, &scratch)?;
+    let token_id: Vec<i64> = scratch.output.to_vec();
+    Ok(token_id[0] as u32)
+}
+
+/// Like [`sample_token_impl`], but writes the sampled token into
+/// `scratch.output` instead of allocating.
+///
+/// `scratch.probs` is unused on this path: the generic implementation
+/// filters the distribution on the host, in `logits_vec`, rather than in a
+/// device buffer. `scratch.output` is fully overwritten before this
+/// function returns, so it carries nothing from a previous call.
+pub fn sample_token_into_impl<R: Runtime<DType = DType>>(
+    client: &R::Client,
+    logits: &Tensor<R>,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    min_p: f32,
+    scratch: &SamplingScratch<R>,
+) -> Result<()>
+where
+    R::Client: RandomOps<R>,
+{
     validate_sampling_logits("sample_token", logits, SamplingLogitsShape::Vocab)?;
+    validate_scratch_vocab("sample_token", scratch, logits.shape()[0])?;
     let mut logits_vec: Vec<f32> = logits.to_vec();
 
     let indexed = filter_distribution(&mut logits_vec, temperature, top_k, top_p, min_p);
@@ -36,7 +71,8 @@ where
         .item::<f32>()
         .map_err(crate::error::Error::Numr)?;
 
-    Ok(sample_from_distribution(&indexed, random_val) as u32)
+    let token_id = sample_from_distribution(&indexed, random_val) as i64;
+    write_token_id("sample_token", token_id, &scratch.output)
 }
 
 #[cfg(test)]
@@ -75,5 +111,25 @@ mod tests {
         let token = sample_token_impl::<CpuRuntime>(&client, &logits, 1.0, 1, 1.0, 0.0)
             .expect("contiguous logits must be accepted");
         assert_eq!(token, 1);
+    }
+
+    /// A scratch reused across calls produces the same tokens as a fresh
+    /// allocation per call, given the same inputs and the same seed —
+    /// nothing leaks between calls through the shared buffers.
+    #[test]
+    fn a_reused_scratch_matches_fresh_allocation_per_call() {
+        let (client, device) = cpu_setup();
+        let logits = Tensor::<CpuRuntime>::from_slice(&[0.0f32, 5.0, 1.0, -1.0], &[4], &device)
+            .expect("logits");
+        let scratch = SamplingScratch::<CpuRuntime>::new(4, &device).expect("scratch");
+
+        for _ in 0..3 {
+            let fresh = sample_token_impl::<CpuRuntime>(&client, &logits, 1.0, 1, 1.0, 0.0)
+                .expect("fresh alloc path");
+            sample_token_into_impl::<CpuRuntime>(&client, &logits, 1.0, 1, 1.0, 0.0, &scratch)
+                .expect("scratch path");
+            let reused: Vec<i64> = scratch.output.to_vec();
+            assert_eq!(reused[0] as u32, fresh);
+        }
     }
 }

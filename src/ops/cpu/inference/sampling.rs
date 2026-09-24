@@ -2,9 +2,11 @@
 
 use crate::error::Result;
 use crate::ops::impl_generic::inference::sampling::{
-    apply_sampling_penalties_impl, logits_to_token_impl, sample_token_impl,
+    apply_sampling_penalties_impl, logits_to_token_impl, logits_to_token_into_impl,
+    sample_token_impl, sample_token_into_impl,
 };
 use crate::ops::traits::inference::sampling::SamplingOps;
+use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
 
@@ -40,6 +42,26 @@ impl SamplingOps<CpuRuntime> for CpuClient {
         sample_token_impl::<CpuRuntime>(self, logits, temperature, top_k, top_p, min_p)
     }
 
+    fn sample_token_into(
+        &self,
+        logits: &Tensor<CpuRuntime>,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        min_p: f32,
+        scratch: &SamplingScratch<CpuRuntime>,
+    ) -> Result<()> {
+        sample_token_into_impl::<CpuRuntime>(
+            self,
+            logits,
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            scratch,
+        )
+    }
+
     fn logits_to_token(
         &self,
         logits: &Tensor<CpuRuntime>,
@@ -69,6 +91,40 @@ impl SamplingOps<CpuRuntime> for CpuClient {
             top_p,
             min_p,
             seed,
+        )
+    }
+
+    fn logits_to_token_into(
+        &self,
+        logits: &Tensor<CpuRuntime>,
+        token_ids: &Tensor<CpuRuntime>,
+        token_counts: &Tensor<CpuRuntime>,
+        num_unique: usize,
+        repeat_penalty: f32,
+        frequency_penalty: f32,
+        presence_penalty: f32,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        min_p: f32,
+        seed: Option<u64>,
+        scratch: &SamplingScratch<CpuRuntime>,
+    ) -> Result<()> {
+        logits_to_token_into_impl::<CpuRuntime>(
+            self,
+            logits,
+            token_ids,
+            token_counts,
+            num_unique,
+            repeat_penalty,
+            frequency_penalty,
+            presence_penalty,
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            seed,
+            scratch,
         )
     }
 }

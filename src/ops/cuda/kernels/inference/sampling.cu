@@ -16,7 +16,7 @@ extern "C" __global__ void sample_token_kernel(
     float top_p,      // 1.0 = disabled
     float min_p,      // 0.0 = disabled
     const float* __restrict__ random_val_ptr, // [1] — uniform [0,1) generated on device
-    int32_t* __restrict__ output // [1] — sampled token ID
+    int64_t* __restrict__ output // [1] — sampled token ID
 ) {
     extern __shared__ float scratch[];  // [blockDim.x] for reductions
 

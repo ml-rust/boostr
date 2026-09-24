@@ -270,6 +270,11 @@ where
         &self.config
     }
 
+    /// The dtype every forward pass computes and returns logits in.
+    pub fn dtype(&self) -> DType {
+        self.norm.weight().tensor().dtype()
+    }
+
     pub fn gdn_config(&self) -> &GdnConfig {
         &self.gdn_config
     }

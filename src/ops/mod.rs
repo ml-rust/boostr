@@ -33,6 +33,7 @@ pub use traits::PagedAttentionOps;
 pub use traits::RoPEOps;
 pub use traits::RoPEPackedOps;
 pub use traits::SamplingOps;
+pub use traits::SamplingScratch;
 pub use traits::SpeculativeOps;
 pub use traits::VarLenAttentionOps;
 pub use traits::architecture::moe::MoEActivation;

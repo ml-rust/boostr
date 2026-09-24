@@ -1,8 +1,12 @@
 //! Fused logits-to-token — generic implementation.
 
+use super::output::write_token_id;
 use super::stochastic::{filter_distribution, sample_from_distribution};
-use super::validate::{SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits};
+use super::validate::{
+    SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits, validate_scratch_vocab,
+};
 use crate::error::Result;
+use crate::ops::traits::inference::sampling_scratch::SamplingScratch;
 use numr::dtype::DType;
 use numr::ops::RandomOps;
 use numr::runtime::Runtime;
@@ -12,6 +16,11 @@ use numr::tensor::Tensor;
 ///
 /// Narrows to last seq position, casts to F32, applies penalties, then either
 /// argmax (temperature == 0) or full stochastic sampling. Returns `[1]` I64 tensor.
+///
+/// Allocates a one-off [`SamplingScratch`] and delegates to
+/// [`logits_to_token_into_impl`]. A caller that samples every step should
+/// allocate its own scratch once and call [`logits_to_token_into_impl`]
+/// directly instead.
 #[allow(clippy::too_many_arguments)]
 pub fn logits_to_token_impl<R: Runtime<DType = numr::dtype::DType>>(
     client: &R::Client,
@@ -28,6 +37,54 @@ pub fn logits_to_token_impl<R: Runtime<DType = numr::dtype::DType>>(
     min_p: f32,
     seed: Option<u64>,
 ) -> Result<Tensor<R>>
+where
+    R::Client: numr::ops::RandomOps<R> + numr::ops::TypeConversionOps<R>,
+{
+    let vocab_size = logits.shape().last().copied().unwrap_or(1);
+    let scratch = SamplingScratch::new(vocab_size, logits.device())?;
+    logits_to_token_into_impl(
+        client,
+        logits,
+        token_ids,
+        token_counts,
+        num_unique,
+        repeat_penalty,
+        frequency_penalty,
+        presence_penalty,
+        temperature,
+        top_k,
+        top_p,
+        min_p,
+        seed,
+        &scratch,
+    )?;
+    Ok(scratch.output.clone())
+}
+
+/// Like [`logits_to_token_impl`], but writes the sampled token into
+/// `scratch.output` instead of allocating.
+///
+/// `scratch.probs` is unused on this path: the generic implementation
+/// filters the distribution on the host, in a `Vec<f32>`, rather than in a
+/// device buffer. `scratch.output` is fully overwritten before this
+/// function returns, so it carries nothing from a previous call.
+#[allow(clippy::too_many_arguments)]
+pub fn logits_to_token_into_impl<R: Runtime<DType = numr::dtype::DType>>(
+    client: &R::Client,
+    logits: &Tensor<R>,
+    token_ids: &Tensor<R>,
+    token_counts: &Tensor<R>,
+    num_unique: usize,
+    repeat_penalty: f32,
+    frequency_penalty: f32,
+    presence_penalty: f32,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    min_p: f32,
+    seed: Option<u64>,
+    scratch: &SamplingScratch<R>,
+) -> Result<()>
 where
     R::Client: numr::ops::RandomOps<R> + numr::ops::TypeConversionOps<R>,
 {
@@ -55,6 +112,7 @@ where
             reason: format!("seq_len and vocab_size must be > 0, got shape {:?}", shape),
         });
     }
+    validate_scratch_vocab("logits_to_token", scratch, vocab_size)?;
     let all_logits: Vec<f32> = logits.to_vec();
     let offset = (seq_len - 1) * vocab_size;
     let mut last_logits: Vec<f32> = all_logits[offset..offset + vocab_size].to_vec();
@@ -122,7 +180,7 @@ where
         sample_from_distribution(&indexed, random_val) as i64
     };
 
-    Ok(Tensor::from_slice(&[token_id], &[1], logits.device())?)
+    write_token_id("logits_to_token", token_id, &scratch.output)
 }
 
 #[cfg(test)]
@@ -270,5 +328,57 @@ mod tests {
         // Last seq position is [9.0, -1.0, 0.5, 3.0]; argmax is index 0.
         let token_id: Vec<i64> = token.to_vec();
         assert_eq!(token_id, vec![0]);
+    }
+
+    /// A scratch reused across calls produces the same tokens as a fresh
+    /// allocation per call, given the same inputs and the same seed —
+    /// nothing leaks between calls through the shared output buffer.
+    #[test]
+    fn a_reused_scratch_matches_fresh_allocation_per_call() {
+        let (client, device) = cpu_setup();
+        let data: Vec<f32> = vec![0.0, 1.0, 0.0, 2.0, 9.0, -1.0, 0.5, 3.0];
+        let logits = Tensor::<CpuRuntime>::from_slice(&data, &[1, 2, 4], &device).expect("logits");
+        let token_ids = Tensor::<CpuRuntime>::from_slice(&[0i64], &[1], &device).expect("ids");
+        let token_counts = Tensor::<CpuRuntime>::from_slice(&[1i32], &[1], &device).expect("cnt");
+        let scratch = SamplingScratch::<CpuRuntime>::new(4, &device).expect("scratch");
+
+        for seed in [1u64, 2u64, 3u64] {
+            let fresh = logits_to_token_impl::<CpuRuntime>(
+                &client,
+                &logits,
+                &token_ids,
+                &token_counts,
+                1,
+                1.1,
+                0.1,
+                0.1,
+                0.7,
+                0,
+                1.0,
+                0.0,
+                Some(seed),
+            )
+            .expect("fresh alloc path");
+            logits_to_token_into_impl::<CpuRuntime>(
+                &client,
+                &logits,
+                &token_ids,
+                &token_counts,
+                1,
+                1.1,
+                0.1,
+                0.1,
+                0.7,
+                0,
+                1.0,
+                0.0,
+                Some(seed),
+                &scratch,
+            )
+            .expect("scratch path");
+            let fresh_id: Vec<i64> = fresh.to_vec();
+            let reused_id: Vec<i64> = scratch.output.to_vec();
+            assert_eq!(reused_id, fresh_id);
+        }
     }
 }

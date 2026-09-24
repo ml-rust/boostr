@@ -83,6 +83,11 @@ pub use numr::ops::traits::IndexingOps;
 // Re-export ScalarOps for blazr's temperature scaling
 pub use numr::ops::ScalarOps;
 
+// Re-export HostCopyOps so a caller can write a pre-allocated device buffer in
+// place — the way the lane table and the decode graph's own buffers are
+// written — without a direct numr dependency.
+pub use numr::ops::HostCopyOps;
+
 // Re-export numr ops needed by blazr's Mamba2 inference path
 pub use numr::ops::{
     ActivationOps, BinaryOps, ConvOps, NormalizationOps, TypeConversionOps, UnaryOps,

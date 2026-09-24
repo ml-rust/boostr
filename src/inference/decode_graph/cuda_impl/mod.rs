@@ -1,6 +1,7 @@
 //! CUDA graph decode implementation, gated on `cfg(feature = "cuda")` by the
 //! parent module.
 
+mod arena;
 mod argmax;
 mod attention_step;
 mod decode_graph;
@@ -10,6 +11,7 @@ mod qwen35_decode_graph;
 mod seed_token;
 mod stable_copy;
 
+pub use arena::{arena_is_loose, first_arena_bytes, tight_arena_bytes};
 pub use argmax::{argmax_to_buf, batch_argmax_to_buf};
 pub use attention_step::insert_and_decode_attention;
 pub use decode_graph::DecodeGraph;

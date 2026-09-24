@@ -10,6 +10,8 @@ pub mod build;
 pub mod driver;
 pub mod session;
 
-pub use build::{LaneDriverBuild, LaneDriverSpec, build_lane_driver};
+pub use build::{
+    LaneDriverBuild, LaneDriverSpec, build_lane_driver, build_lane_driver_with_first_arena_for_test,
+};
 pub use driver::{EagerLanes, GraphLanes, LaneDecodeMode, LaneDriver};
 pub use session::LaneDecodeSession;

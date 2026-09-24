@@ -12,6 +12,13 @@
 //! with every lane free. The arena is sized generously first and tightened
 //! from the reported footprint when the first guess is more than twice too
 //! large.
+//!
+//! When the first guess is instead too small, capture fails with a typed
+//! arena-exhaustion error naming the request and the bytes already used.
+//! Capture only records without executing, so a failed attempt mutates
+//! nothing and the same caches serve a retry unchanged: the first capture is
+//! retried, up to a small attempt cap, against an arena sized from that
+//! error's own numbers.
 
 use numr::dtype::DType;
 use numr::runtime::cuda::{CudaClient, CudaDevice, CudaRuntime};
@@ -50,7 +57,9 @@ pub struct LaneDriverSpec<'a> {
 pub struct LaneDriverBuild {
     /// The driver, reset to an empty session.
     pub driver: LaneDriver,
-    /// Captures the build ran: 0 on the eager arm, 1 or 2 on the graph arm.
+    /// Captures the build ran: 0 on the eager arm, `>= 1` on the graph arm.
+    /// More than one when the first capture's arena was too small and was
+    /// retried, when the loose-arena tightening pass ran, or both.
     pub graph_captures: usize,
 }
 
@@ -103,6 +112,25 @@ fn build_eager(spec: LaneDriverSpec<'_>) -> Result<LaneDriverBuild> {
 
 /// Batched caches plus one decode graph captured at `spec.lanes` lanes.
 fn build_graph(spec: LaneDriverSpec<'_>) -> Result<LaneDriverBuild> {
+    build_graph_with_first_arena(spec, None)
+}
+
+/// Test-only entry point: build the graph arm with an explicit first-capture
+/// arena size instead of [`first_arena_bytes`], so a test can force the
+/// first capture too small and confirm the retry in [`build_graph`]
+/// recovers.
+#[doc(hidden)]
+pub fn build_lane_driver_with_first_arena_for_test(
+    spec: LaneDriverSpec<'_>,
+    first_arena_bytes_override: usize,
+) -> Result<LaneDriverBuild> {
+    build_graph_with_first_arena(spec, Some(first_arena_bytes_override))
+}
+
+fn build_graph_with_first_arena(
+    spec: LaneDriverSpec<'_>,
+    first_arena_override: Option<usize>,
+) -> Result<LaneDriverBuild> {
     let LaneDriverSpec {
         model,
         device,
@@ -145,23 +173,28 @@ fn build_graph(spec: LaneDriverSpec<'_>) -> Result<LaneDriverBuild> {
         kv: &kv,
         gdn: &gdn,
     };
-    let first_arena = first_arena_bytes(device)?;
-    let mut graph = capture_step(model, &client, &bufs, first_arena)?;
-    let used = graph.arena_bytes_used().unwrap_or(first_arena);
-    let mut graph_captures = 1;
+    let first_arena = match first_arena_override {
+        Some(bytes) => bytes,
+        None => first_arena_bytes(device)?,
+    };
+    let (mut graph, captured_arena, mut graph_captures) =
+        capture_first_step(model, &client, &bufs, device, first_arena, lanes)?;
+    let used = graph.arena_bytes_used().unwrap_or(captured_arena);
     tracing::info!(
-        "{}-lane CUDA graph captured (arena={} used={})",
+        "{}-lane CUDA graph captured (arena={} used={} attempts={})",
         lanes,
-        first_arena,
-        used
+        captured_arena,
+        used,
+        graph_captures
     );
 
     // Capture records without executing, so the caches still hold the same
     // state and serve a second capture unchanged.
-    if arena_is_loose(used, first_arena) {
+    if arena_is_loose(used, captured_arena) {
         let tight_arena = tight_arena_bytes(used);
         drop(graph);
-        graph = capture_step(model, &client, &bufs, tight_arena)?;
+        graph = capture_step(model, &client, &bufs, tight_arena)
+            .map_err(|e| wrap_capture_error(e, tight_arena, lanes))?;
         graph_captures += 1;
         tracing::info!(
             "{}-lane CUDA graph recaptured (arena={} used={:?})",
@@ -216,12 +249,16 @@ struct CaptureBuffers<'a> {
 /// The capture ends at the logits copy into `logits_buf` and picks no token:
 /// the caller samples each lane's row on the host and writes the results back
 /// for the next replay.
+///
+/// Returns numr's own error unwrapped, not boostr's, so a caller can react
+/// to the typed arena-exhaustion variant before deciding how to wrap it
+/// (see [`capture_first_step`] and [`wrap_capture_error`]).
 fn capture_step(
     model: &Qwen35Model<CudaRuntime>,
     client: &CudaClient,
     bufs: &CaptureBuffers<'_>,
     arena_bytes: usize,
-) -> Result<CapturedGraph<CudaRuntime>> {
+) -> numr::error::Result<CapturedGraph<CudaRuntime>> {
     CudaRuntime::capture_graph_into_with_arena(
         client,
         &[bufs.token_buf],
@@ -237,15 +274,102 @@ fn capture_step(
                     bufs.scalars,
                     bufs.table,
                 )
-                .map_err(|e| numr::error::Error::Backend(format!("capture forward failed: {e}")))?;
+                .map_err(|e| match e {
+                    // A numr error that carries arena exhaustion passes through
+                    // unchanged so the retry loop can still find it by type.
+                    Error::Numr(inner) if inner.as_arena_exhausted().is_some() => inner,
+                    other => {
+                        numr::error::Error::Backend(format!("capture forward failed: {other}"))
+                    }
+                })?;
             copy_into_stable(c, &logits, bufs.logits_buf)
         },
     )
-    .map_err(|e| Error::InferenceError {
+}
+
+/// Wrap a capture failure that is not (or is no longer) worth retrying,
+/// naming the lane count and the arena it was tried against.
+fn wrap_capture_error(e: numr::error::Error, arena_bytes: usize, lanes: usize) -> Error {
+    Error::InferenceError {
         reason: format!(
-            "CUDA graph capture of a {}-lane decode step (arena {arena_bytes} bytes) failed: {e}; \
-             retry with a larger arena when the failure names the arena",
-            bufs.table.batch()
+            "CUDA graph capture of a {lanes}-lane decode step (arena {arena_bytes} bytes) \
+             failed: {e}"
         ),
-    })
+    }
+}
+
+/// Attempts allowed for the first capture before giving up and reporting
+/// every arena size the build tried.
+const MAX_FIRST_CAPTURE_ATTEMPTS: usize = 3;
+
+/// Capture the first graph, retrying with a larger arena when the arena
+/// itself was the reason capture failed.
+///
+/// Reacts only to the typed [`numr::error::Error::ArenaExhausted`] (walked
+/// through one layer of `AllocFailed` wrapping by
+/// [`numr::error::Error::as_arena_exhausted`]) — never to message text. Any
+/// other capture failure stops immediately. A capture records without
+/// executing, so a failed attempt mutates none of `bufs`'s caches and the
+/// same state serves the next attempt unchanged.
+///
+/// Each retry sizes its arena from the failed request's own numbers
+/// (`used + requested`, padded the way [`tight_arena_bytes`] pads a loose
+/// arena) and re-checks free device memory before committing to it, so a
+/// device that cannot fit the capture fails fast instead of allocating
+/// toward an OOM. The loop is capped at [`MAX_FIRST_CAPTURE_ATTEMPTS`]; the
+/// final failure names every arena size tried.
+///
+/// Returns the graph, the arena size that captured it, and the number of
+/// attempts taken (1 when the first guess already worked).
+fn capture_first_step(
+    model: &Qwen35Model<CudaRuntime>,
+    client: &CudaClient,
+    bufs: &CaptureBuffers<'_>,
+    device: &CudaDevice,
+    first_arena: usize,
+    lanes: usize,
+) -> Result<(CapturedGraph<CudaRuntime>, usize, usize)> {
+    let mut arena_bytes = first_arena;
+    let mut tried = Vec::with_capacity(MAX_FIRST_CAPTURE_ATTEMPTS);
+    let mut attempt = 0usize;
+    loop {
+        attempt += 1;
+        tried.push(arena_bytes);
+        match capture_step(model, client, bufs, arena_bytes) {
+            Ok(graph) => return Ok((graph, arena_bytes, attempt)),
+            Err(e) => {
+                let Some((requested, used, capacity)) = e.as_arena_exhausted() else {
+                    return Err(wrap_capture_error(e, arena_bytes, lanes));
+                };
+                let (free, _total) = device.memory_info().map_err(|qe| Error::InferenceError {
+                    reason: format!(
+                        "querying device memory to retry a {lanes}-lane decode capture failed: \
+                         {qe}; check that the device the graph captures on is still available"
+                    ),
+                })?;
+                if attempt >= MAX_FIRST_CAPTURE_ATTEMPTS {
+                    return Err(Error::InferenceError {
+                        reason: format!(
+                            "CUDA graph capture of a {lanes}-lane decode step exhausted its \
+                             arena on every attempt (arenas tried in bytes: {tried:?}); the \
+                             last try had a {capacity}-byte arena with {used} bytes already \
+                             used and {requested} more requested, with {free} bytes free on the \
+                             device; run with fewer lanes or free device memory"
+                        ),
+                    });
+                }
+                let needed = tight_arena_bytes(used + requested);
+                if needed as u64 > free {
+                    return Err(Error::InferenceError {
+                        reason: format!(
+                            "CUDA graph capture of a {lanes}-lane decode step needs a \
+                             {needed}-byte arena but only {free} bytes are free on the device; \
+                             run with fewer lanes or free device memory before retrying"
+                        ),
+                    });
+                }
+                arena_bytes = needed;
+            }
+        }
+    }
 }

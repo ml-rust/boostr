@@ -147,7 +147,18 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
 
         // Paged attention: Q against full cached K/V
         let block_size = paged_cache.block_size();
-        let _max_num_blocks = block_table.shape()[block_table.shape().len() - 1];
+        let max_num_blocks = block_table.shape()[block_table.shape().len() - 1];
+        let required_blocks = seq_len_k.div_ceil(block_size);
+        if max_num_blocks < required_blocks {
+            return Err(Error::InvalidArgument {
+                arg: "block_table",
+                reason: format!(
+                    "block table width {max_num_blocks} cannot cover seq_len_k={seq_len_k} \
+                     with block_size={block_size}; pass a block table with at least \
+                     {required_blocks} blocks per row"
+                ),
+            });
+        }
         // Causal for a multi-token chunk: query i must not see key j when
         // j > (seq_len_k - seq_len) + i. A single-token decode step is
         // unaffected either way, since it has no future key to mask.
@@ -881,6 +892,42 @@ mod tests {
         assert!(
             result.is_err(),
             "a per-row rope_positions tensor with seq_len > 1 must be refused"
+        );
+    }
+
+    /// A block table with fewer columns than `seq_len_k` needs (given
+    /// `block_size`) must be refused before any gather runs, not silently
+    /// read past its row into another row's block-table entries.
+    #[test]
+    fn block_table_too_narrow_for_seq_len_k_is_rejected() {
+        let (client, device) = crate::test_utils::cpu_setup();
+        let attn = test_attention(&device);
+        let rope = test_rope(&device);
+        let batch = 1;
+        let cache = test_cache(batch, &device);
+        let (slot_mapping, block_table) = slot_mapping_and_block_table(batch, &device);
+        let x = decode_input(batch, &device);
+
+        // block_table has one column (one block per row); this seq_len_k
+        // needs three blocks at BLOCK_SIZE=4.
+        let seq_len_k = BLOCK_SIZE * 2 + 1;
+
+        let result = attn.forward_with_paged_kv_cache(
+            &client,
+            &x,
+            &rope,
+            &cache,
+            0,
+            &slot_mapping,
+            &block_table,
+            seq_len_k,
+            0,
+            None,
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "a block table narrower than seq_len_k / block_size must be refused"
         );
     }
 }

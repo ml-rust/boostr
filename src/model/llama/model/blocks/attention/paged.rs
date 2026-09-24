@@ -148,6 +148,10 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
         // Paged attention: Q against full cached K/V
         let block_size = paged_cache.block_size();
         let _max_num_blocks = block_table.shape()[block_table.shape().len() - 1];
+        // Causal for a multi-token chunk: query i must not see key j when
+        // j > (seq_len_k - seq_len) + i. A single-token decode step is
+        // unaffected either way, since it has no future key to mask.
+        let is_prefill = seq_len > 1;
         let (attn_out, _lse) = rc.paged_attention_fwd(
             q.tensor(),
             layer_cache.k_cache(),
@@ -159,7 +163,7 @@ impl<R: Runtime<DType = DType>> LlamaAttention<R> {
             seq_len_k,
             self.head_dim,
             block_size,
-            false, // not causal for decode (Q sees all of KV cache)
+            is_prefill,
             kv_seq_len,
         )?;
 
@@ -268,7 +272,7 @@ mod tests {
     use super::*;
     use crate::inference::kv_cache::LayeredPagedKvCache;
     use crate::nn::{Linear, MaybeQuantLinear, RoPE};
-    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+    use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
     const HIDDEN: usize = 8;
     const NUM_HEADS: usize = 2;
@@ -458,6 +462,330 @@ mod tests {
                     "row {row} dim {i} mismatch: singleton={a}, batched={b}"
                 );
             }
+        }
+    }
+
+    /// Deterministic prefill input `[1, seq_len, HIDDEN]`, distinct per
+    /// position so a masking or offset bug cannot hide behind repeated rows.
+    fn prefill_input(seq_len: usize, device: &CpuDevice) -> Var<CpuRuntime> {
+        let data: Vec<f32> = (0..seq_len * HIDDEN)
+            .map(|i| (i as f32 * 0.11).cos())
+            .collect();
+        Var::new(
+            Tensor::<CpuRuntime>::from_slice(&data, &[1, seq_len, HIDDEN], device).unwrap(),
+            false,
+        )
+    }
+
+    /// A fresh single-layer, single-row paged cache with `num_blocks`
+    /// physical blocks, for prefill tests that write more than one block
+    /// worth of tokens.
+    fn prefill_cache(num_blocks: usize, device: &CpuDevice) -> LayeredPagedKvCache<CpuRuntime> {
+        LayeredPagedKvCache::<CpuRuntime>::new(
+            1,
+            num_blocks,
+            BLOCK_SIZE,
+            NUM_KV_HEADS,
+            HEAD_DIM,
+            DType::F32,
+            device,
+        )
+        .expect("paged cache build must succeed")
+    }
+
+    /// Slot mapping for absolute token positions `start..start+count`, and
+    /// the fixed block table `[0, 1, ..., num_blocks-1]` (physical block id
+    /// equals logical block index). Row 0 only.
+    fn prefill_slots(
+        start: usize,
+        count: usize,
+        num_blocks: usize,
+        device: &CpuDevice,
+    ) -> (Tensor<CpuRuntime>, Tensor<CpuRuntime>) {
+        let slots: Vec<i32> = (start..start + count)
+            .map(|i| {
+                let block_idx = i / BLOCK_SIZE;
+                let offset = i % BLOCK_SIZE;
+                (block_idx * BLOCK_SIZE + offset) as i32
+            })
+            .collect();
+        let slot_mapping = Tensor::<CpuRuntime>::from_slice(&slots, &[count], device).unwrap();
+        let bt: Vec<i32> = (0..num_blocks as i32).collect();
+        let block_table = Tensor::<CpuRuntime>::from_slice(&bt, &[1, num_blocks], device).unwrap();
+        (slot_mapping, block_table)
+    }
+
+    /// Runs `x` through the dense, non-paged path (`forward_with_kv_cache`)
+    /// over a fresh contiguous KV cache sized for exactly `seq_len` tokens,
+    /// and returns the flat `f32` output. This is the causal-masking
+    /// reference the paged-prefill tests diff against: an unrelated kernel
+    /// and cache layout from `paged_attention_fwd`, so agreement does not
+    /// depend on the two paths sharing a masking bug.
+    fn dense_reference_output(
+        client: &CpuClient,
+        attn: &LlamaAttention<CpuRuntime>,
+        rope: &RoPE<CpuRuntime>,
+        x: &Var<CpuRuntime>,
+        seq_len: usize,
+        device: &CpuDevice,
+    ) -> Vec<f32> {
+        let mut dense_cache = crate::inference::KvCache::<CpuRuntime>::new(
+            1,
+            NUM_KV_HEADS,
+            seq_len,
+            seq_len,
+            HEAD_DIM,
+            DType::F32,
+            device,
+        )
+        .expect("dense kv cache build must succeed");
+        attn.forward_with_kv_cache(client, x, rope, &mut dense_cache, 0)
+            .expect("dense prefill must succeed")
+            .tensor()
+            .contiguous()
+            .unwrap()
+            .to_vec::<f32>()
+    }
+
+    /// A full-prompt paged prefill from an empty cache must match the dense
+    /// contiguous-cache path (`forward_with_kv_cache`) given the same
+    /// weights, RoPE cache, and input. The two paths use unrelated kernels
+    /// (`paged_attention_fwd` vs `flash_attention_fwd`) and cache layouts,
+    /// so agreement here pins down the causal masking rule itself, not a
+    /// shared implementation. Catches a non-causal (or wrongly-causal)
+    /// prefill mask.
+    #[test]
+    fn prefill_matches_dense_causal_reference() {
+        let (client, device) = crate::test_utils::cpu_setup();
+        let attn = test_attention(&device);
+        let rope = test_rope(&device);
+        let seq_len = 5;
+        let x = prefill_input(seq_len, &device);
+
+        let num_blocks = 2; // ceil(seq_len=5 / BLOCK_SIZE=4)
+        let cache = prefill_cache(num_blocks, &device);
+        let (slot_mapping, block_table) = prefill_slots(0, seq_len, num_blocks, &device);
+        let paged_out = attn
+            .forward_with_paged_kv_cache(
+                &client,
+                &x,
+                &rope,
+                &cache,
+                0,
+                &slot_mapping,
+                &block_table,
+                seq_len,
+                0,
+                None,
+                None,
+            )
+            .expect("paged prefill must succeed")
+            .tensor()
+            .contiguous()
+            .unwrap()
+            .to_vec::<f32>();
+
+        let dense_out = dense_reference_output(&client, &attn, &rope, &x, seq_len, &device);
+
+        assert_eq!(paged_out.len(), dense_out.len());
+        for (i, (&a, &b)) in paged_out.iter().zip(dense_out.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "prefill vs dense-reference mismatch at {i}: paged={a}, dense={b}"
+            );
+        }
+    }
+
+    /// Two independent checks on a `P`-token prefill followed by an
+    /// `S`-token chunk:
+    ///
+    /// 1. Chunked-vs-one-shot: the second chunk's output must match a
+    ///    single one-shot prefill of all `P + S` tokens, for the `S`
+    ///    positions the chunk covers. This pins the offset/continuation
+    ///    property (right key range, right slot/position arithmetic) but
+    ///    both sides run the same paged kernel, so a masking bug shared by
+    ///    both sides cancels out and this check alone cannot catch it.
+    /// 2. Chunked-vs-dense-reference: the second chunk's output must also
+    ///    match the dense contiguous-cache path (`forward_with_kv_cache`)
+    ///    run once over all `P + S` tokens. That path uses an unrelated
+    ///    kernel and cache layout and does not depend on the paged path's
+    ///    `is_prefill` flag, so this check does catch a non-causal (or
+    ///    wrongly-causal) paged chunk mask.
+    #[test]
+    fn chunked_prefill_matches_one_shot_prefill() {
+        let (client, device) = crate::test_utils::cpu_setup();
+        let attn = test_attention(&device);
+        let rope = test_rope(&device);
+        let p = 3usize;
+        let s = 2usize;
+        let total = p + s;
+        let num_blocks = 2; // ceil(total=5 / BLOCK_SIZE=4)
+        let x = prefill_input(total, &device);
+        let x_chunk1 = var_narrow(&x, 1, 0, p).unwrap();
+        let x_chunk2 = var_narrow(&x, 1, p, s).unwrap();
+
+        // Chunked: write P tokens, then S more tokens into the same cache.
+        let cache = prefill_cache(num_blocks, &device);
+        let (slot1, bt1) = prefill_slots(0, p, num_blocks, &device);
+        attn.forward_with_paged_kv_cache(
+            &client, &x_chunk1, &rope, &cache, 0, &slot1, &bt1, p, 0, None, None,
+        )
+        .expect("first prefill chunk must succeed");
+
+        let (slot2, bt2) = prefill_slots(p, s, num_blocks, &device);
+        let chunk2_out = attn
+            .forward_with_paged_kv_cache(
+                &client, &x_chunk2, &rope, &cache, 0, &slot2, &bt2, total, p, None, None,
+            )
+            .expect("second prefill chunk must succeed")
+            .tensor()
+            .contiguous()
+            .unwrap()
+            .to_vec::<f32>();
+
+        // One-shot: the same P + S tokens prefilled in a single call.
+        let one_shot_cache = prefill_cache(num_blocks, &device);
+        let (slot_all, bt_all) = prefill_slots(0, total, num_blocks, &device);
+        let one_shot_out = attn
+            .forward_with_paged_kv_cache(
+                &client,
+                &x,
+                &rope,
+                &one_shot_cache,
+                0,
+                &slot_all,
+                &bt_all,
+                total,
+                0,
+                None,
+                None,
+            )
+            .expect("one-shot prefill must succeed")
+            .tensor()
+            .contiguous()
+            .unwrap()
+            .to_vec::<f32>();
+
+        let out_dim = chunk2_out.len() / s;
+        let shared = &one_shot_out[p * out_dim..total * out_dim];
+        assert_eq!(chunk2_out.len(), shared.len());
+        for (i, (&a, &b)) in chunk2_out.iter().zip(shared.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "chunked vs one-shot prefill mismatch at {i}: chunked={a}, one_shot={b}"
+            );
+        }
+
+        // Independent reference: the same `P + S` tokens run through the
+        // dense contiguous-cache path (`forward_with_kv_cache`), a
+        // different kernel and cache layout from `paged_attention_fwd`
+        // that does not read `is_prefill`. Agreement here, unlike the
+        // chunked-vs-one-shot check above, cannot pass by both sides
+        // sharing the same masking bug.
+        let dense_out = dense_reference_output(&client, &attn, &rope, &x, total, &device);
+        let dense_shared = &dense_out[p * out_dim..total * out_dim];
+        assert_eq!(chunk2_out.len(), dense_shared.len());
+        for (i, (&a, &b)) in chunk2_out.iter().zip(dense_shared.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "chunked prefill vs dense-reference mismatch at {i}: chunked={a}, dense={b}"
+            );
+        }
+    }
+
+    /// Regression guard for the decode path: a decode step (`seq_len == 1`)
+    /// after a prefill must match a one-shot prefill's last row. This does
+    /// NOT detect a causal-masking defect — with one query row, causal
+    /// masking removes nothing either way, so `is_prefill` is true or false
+    /// for exactly the same output. Masking correctness is covered by
+    /// `prefill_matches_dense_causal_reference` and the dense-reference
+    /// check in `chunked_prefill_matches_one_shot_prefill`.
+    #[test]
+    fn decode_after_prefill_is_unaffected_by_causal_flag() {
+        let (client, device) = crate::test_utils::cpu_setup();
+        let attn = test_attention(&device);
+        let rope = test_rope(&device);
+        let p = 3usize;
+        let num_blocks = 2;
+        let x_prefill = prefill_input(p, &device);
+
+        let cache = prefill_cache(num_blocks, &device);
+        let (slot1, bt1) = prefill_slots(0, p, num_blocks, &device);
+        attn.forward_with_paged_kv_cache(
+            &client, &x_prefill, &rope, &cache, 0, &slot1, &bt1, p, 0, None, None,
+        )
+        .expect("prefill before decode must succeed");
+
+        let decode_data: Vec<f32> = (0..HIDDEN).map(|i| (i as f32 * 0.53).sin()).collect();
+        let x_decode = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&decode_data, &[1, 1, HIDDEN], &device).unwrap(),
+            false,
+        );
+        let (slot2, bt2) = prefill_slots(p, 1, num_blocks, &device);
+        let decode_out = attn
+            .forward_with_paged_kv_cache(
+                &client,
+                &x_decode,
+                &rope,
+                &cache,
+                0,
+                &slot2,
+                &bt2,
+                p + 1,
+                p,
+                None,
+                None,
+            )
+            .expect("decode step must succeed")
+            .tensor()
+            .contiguous()
+            .unwrap()
+            .to_vec::<f32>();
+
+        // Reference: decode is a `seq_len == 1` query against the same
+        // cached keys, which `paged_attention_fwd` masks identically
+        // whether `causal` is true or false (one row, no future key to
+        // drop). A one-shot prefill of all `p + 1` tokens gives the exact
+        // same last-row output, since query `p` sees the identical key
+        // range `[0, p]` either way.
+        let one_shot_cache = prefill_cache(num_blocks, &device);
+        let x_all_data: Vec<f32> = {
+            let mut d: Vec<f32> = (0..p * HIDDEN).map(|i| (i as f32 * 0.11).cos()).collect();
+            d.extend(decode_data.iter().copied());
+            d
+        };
+        let x_all = Var::new(
+            Tensor::<CpuRuntime>::from_slice(&x_all_data, &[1, p + 1, HIDDEN], &device).unwrap(),
+            false,
+        );
+        let (slot_all, bt_all) = prefill_slots(0, p + 1, num_blocks, &device);
+        let one_shot_out = attn
+            .forward_with_paged_kv_cache(
+                &client,
+                &x_all,
+                &rope,
+                &one_shot_cache,
+                0,
+                &slot_all,
+                &bt_all,
+                p + 1,
+                0,
+                None,
+                None,
+            )
+            .expect("one-shot reference prefill must succeed")
+            .tensor()
+            .contiguous()
+            .unwrap()
+            .to_vec::<f32>();
+
+        let out_dim = decode_out.len();
+        let last_row = &one_shot_out[p * out_dim..(p + 1) * out_dim];
+        for (i, (&a, &b)) in decode_out.iter().zip(last_row.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "decode-after-prefill mismatch at {i}: decode={a}, one_shot_last_row={b}"
+            );
         }
     }
 

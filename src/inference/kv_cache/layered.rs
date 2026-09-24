@@ -2,6 +2,7 @@
 
 use crate::error::Result;
 use crate::inference::kv_cache::basic::KvCache;
+use crate::inference::kv_cache::frozen::FrozenLayeredKvCache;
 use numr::dtype::DType;
 use numr::ops::IndexingOps;
 use numr::runtime::Runtime;
@@ -88,7 +89,18 @@ where
     }
 
     pub fn seq_len(&self) -> usize {
-        self.layers.first().map(|l| l.seq_len()).unwrap_or(0)
+        self.layers.first().map_or(0, KvCache::seq_len)
+    }
+
+    /// Consume this growable cache and hand back a frozen handle over the
+    /// same storage.
+    ///
+    /// After this call no growable handle to these layers exists anywhere:
+    /// [`FrozenLayeredKvCache`] has no `grow`, `ensure_capacity`, `update`
+    /// or `update_fused`, so nothing reachable through it can move a
+    /// layer's K or V tensor off the address it was allocated at.
+    pub fn freeze(self) -> FrozenLayeredKvCache<R> {
+        FrozenLayeredKvCache::from_growable(self)
     }
 }
 

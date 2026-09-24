@@ -172,6 +172,10 @@ fn build_graph(spec: LaneDriverSpec<'_>) -> Result<LaneDriverBuild> {
     }
 
     let decode = Qwen35DecodeGraph::new(graph, scalars, capacity, table, token_buf, logits_buf)?;
+    // The capture above baked every layer's device pointers into the graph,
+    // so nothing may grow this cache again: freeze it before it reaches the
+    // driver.
+    let kv = kv.freeze();
     let mut driver = LaneDriver::Graph(Box::new(GraphLanes { decode, kv, gdn }));
     driver.reset(&client)?;
     Ok(LaneDriverBuild {

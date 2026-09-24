@@ -15,8 +15,10 @@ use numr::tensor::Tensor;
 
 use crate::error::{Error, Result};
 use crate::inference::decode_graph::Qwen35DecodeGraph;
-use crate::inference::{LaneTable, LayeredGdnState, LayeredKvCache};
+use crate::inference::lanes::LaneKvSink;
+use crate::inference::{FrozenLayeredKvCache, LaneTable, LayeredGdnState, LayeredKvCache};
 use crate::model::qwen35::Qwen35Model;
+use crate::ops::traits::KvCacheOps;
 
 /// Lane table, caches and input buffer the eager batched decode reads.
 pub struct EagerLanes {
@@ -39,9 +41,46 @@ pub struct GraphLanes {
     /// The captured graph, its stable buffers and its lane table.
     pub decode: Qwen35DecodeGraph,
     /// Batched KV cache for the attention layers, one lane per sequence.
-    pub kv: LayeredKvCache<CudaRuntime>,
+    ///
+    /// Frozen: the capture baked in every layer's device pointers, so
+    /// nothing reachable through this field can move them.
+    pub kv: FrozenLayeredKvCache<CudaRuntime>,
     /// Batched GDN state for the GDN layers, one row per lane.
     pub gdn: LayeredGdnState<CudaRuntime>,
+}
+
+/// The batched KV container [`LaneDriver::parts`] hands out for an admit:
+/// growable on the eager arm, frozen on the graph arm.
+pub enum LaneKvHandle<'a> {
+    /// The eager arm's own growable cache.
+    Eager(&'a mut LayeredKvCache<CudaRuntime>),
+    /// The graph arm's frozen cache.
+    Graph(&'a mut FrozenLayeredKvCache<CudaRuntime>),
+}
+
+impl LaneKvHandle<'_> {
+    /// Clear the underlying cache's length. Capacity, and every device
+    /// address, is unchanged.
+    fn reset(&mut self) {
+        match self {
+            LaneKvHandle::Eager(kv) => LayeredKvCache::reset(kv),
+            LaneKvHandle::Graph(kv) => FrozenLayeredKvCache::reset(kv),
+        }
+    }
+}
+
+impl LaneKvSink<CudaRuntime> for LaneKvHandle<'_> {
+    fn install_lane<C: KvCacheOps<CudaRuntime>>(
+        &mut self,
+        src: &LayeredKvCache<CudaRuntime>,
+        lane: usize,
+        client: &C,
+    ) -> Result<()> {
+        match self {
+            LaneKvHandle::Eager(kv) => LayeredKvCache::install_lane(kv, src, lane, client),
+            LaneKvHandle::Graph(kv) => FrozenLayeredKvCache::install_lane(kv, src, lane, client),
+        }
+    }
 }
 
 /// Which decode path a lane session drives.
@@ -84,16 +123,23 @@ impl LaneDriver {
     }
 
     /// The lane table and both batched caches, together, for an admit.
+    ///
+    /// The KV handle is growable on the eager arm and frozen on the graph
+    /// arm; both implement [`LaneKvSink`] for [`LaneTable::admit`].
     pub fn parts(
         &mut self,
     ) -> (
         &mut LaneTable<CudaRuntime>,
-        &mut LayeredKvCache<CudaRuntime>,
+        LaneKvHandle<'_>,
         &mut LayeredGdnState<CudaRuntime>,
     ) {
         match self {
-            LaneDriver::Eager(e) => (&mut e.lanes, &mut e.kv, &mut e.gdn),
-            LaneDriver::Graph(g) => (&mut g.decode.lanes, &mut g.kv, &mut g.gdn),
+            LaneDriver::Eager(e) => (&mut e.lanes, LaneKvHandle::Eager(&mut e.kv), &mut e.gdn),
+            LaneDriver::Graph(g) => (
+                &mut g.decode.lanes,
+                LaneKvHandle::Graph(&mut g.kv),
+                &mut g.gdn,
+            ),
         }
     }
 
@@ -201,7 +247,7 @@ impl LaneDriver {
         for lane in 0..self.batch() {
             self.release(client, lane)?;
         }
-        let (_lanes, kv, gdn) = self.parts();
+        let (_lanes, mut kv, gdn) = self.parts();
         kv.reset();
         gdn.reset(client)?;
         Ok(())

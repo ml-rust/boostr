@@ -14,6 +14,11 @@ use numr::ops::IndexingOps;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
+/// One layer's lane write: [`KvCache::update_lane`] on the growing path,
+/// [`KvCache::update_lane_within_capacity`] on the frozen one. Both take a
+/// narrowed K and V, the lane, the offset inside it and the client.
+type LaneWrite<R, C> = fn(&mut KvCache<R>, &Tensor<R>, &Tensor<R>, usize, usize, &C) -> Result<()>;
+
 impl<R: Runtime<DType = DType>> KvCache<R>
 where
     R::Client: IndexingOps<R>,
@@ -42,6 +47,57 @@ where
         offset: usize,
         client: &C,
     ) -> Result<()> {
+        let new_tokens = self.check_lane_bounds(k, lane)?;
+        let end = offset + new_tokens;
+        if end > self.max_seq_len {
+            return Err(Error::InferenceError {
+                reason: format!(
+                    "cache overflow: {offset} + {new_tokens} > max_seq_len {}",
+                    self.max_seq_len
+                ),
+            });
+        }
+        self.ensure_capacity(end)?;
+        self.write_lane(k, v, lane, offset, new_tokens, client)
+    }
+
+    /// Write one sequence's K and V into lane `lane` at `offset`, refusing
+    /// rather than growing when the write would run past [`KvCache::capacity`].
+    ///
+    /// The frozen path over this cache calls this instead of
+    /// [`KvCache::update_lane`]: capacity never moves here, so nothing this
+    /// call does can invalidate a device pointer captured earlier.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InferenceError`] when `lane` is outside the batch, `k`
+    /// carries more than one row, or the write would run past `capacity()`.
+    pub(super) fn update_lane_within_capacity<C: KvCacheOps<R>>(
+        &mut self,
+        k: &Tensor<R>,
+        v: &Tensor<R>,
+        lane: usize,
+        offset: usize,
+        client: &C,
+    ) -> Result<()> {
+        let new_tokens = self.check_lane_bounds(k, lane)?;
+        let end = offset + new_tokens;
+        let capacity = self.capacity();
+        if end > capacity {
+            return Err(Error::InferenceError {
+                reason: format!(
+                    "lane {lane}: write end {end} ({offset} + {new_tokens}) is past the \
+                     frozen cache's capacity {capacity}; this cache no longer grows, so open \
+                     the session with enough capacity for every sequence it will admit"
+                ),
+            });
+        }
+        self.write_lane(k, v, lane, offset, new_tokens, client)
+    }
+
+    /// `lane` is inside the batch and `k` carries exactly one row; returns
+    /// the token count `k` carries.
+    fn check_lane_bounds(&self, k: &Tensor<R>, lane: usize) -> Result<usize> {
         let (rows, _, new_tokens, _) = k.dims4()?;
         if lane >= self.batch_size {
             return Err(Error::InferenceError {
@@ -53,24 +109,25 @@ where
                 reason: format!("update_lane writes one sequence, got {rows} rows"),
             });
         }
-        let end = offset + new_tokens;
-        if end > self.max_seq_len {
-            return Err(Error::InferenceError {
-                reason: format!(
-                    "cache overflow: {offset} + {new_tokens} > max_seq_len {}",
-                    self.max_seq_len
-                ),
-            });
-        }
+        Ok(new_tokens)
+    }
 
-        self.ensure_capacity(end)?;
-
+    /// The raw write behind both [`KvCache::update_lane`] and
+    /// [`KvCache::update_lane_within_capacity`]: narrow to `lane`'s row,
+    /// write `k`/`v` at `offset`, and record the new length.
+    fn write_lane<C: KvCacheOps<R>>(
+        &mut self,
+        k: &Tensor<R>,
+        v: &Tensor<R>,
+        lane: usize,
+        offset: usize,
+        new_tokens: usize,
+        client: &C,
+    ) -> Result<()> {
         let k_lane = self.k_cache.narrow(0, lane, 1)?;
         let v_lane = self.v_cache.narrow(0, lane, 1)?;
         client.kv_cache_update(&k_lane, &v_lane, k, v, offset)?;
-
-        self.seq_len = self.seq_len.max(end);
-
+        self.seq_len = self.seq_len.max(offset + new_tokens);
         Ok(())
     }
 
@@ -160,6 +217,43 @@ where
         lane: usize,
         client: &C,
     ) -> Result<()> {
+        self.install_lane_via(src, lane, client, KvCache::update_lane)
+    }
+
+    /// [`LayeredKvCache::install_lane`], but refusing rather than growing
+    /// when a layer's write would run past its own `capacity()`.
+    ///
+    /// [`FrozenLayeredKvCache`](crate::inference::kv_cache::FrozenLayeredKvCache)
+    /// calls this instead of [`LayeredKvCache::install_lane`], so nothing
+    /// it does can move a layer's K or V tensor off the address a captured
+    /// graph recorded.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InferenceError`] when the two caches hold a different
+    /// number of layers, or when a layer's write would run past its
+    /// `capacity()`.
+    pub(super) fn install_lane_within_capacity<C: KvCacheOps<R>>(
+        &mut self,
+        src: &LayeredKvCache<R>,
+        lane: usize,
+        client: &C,
+    ) -> Result<()> {
+        self.install_lane_via(src, lane, client, KvCache::update_lane_within_capacity)
+    }
+
+    /// The layer walk behind both [`LayeredKvCache::install_lane`] and
+    /// [`LayeredKvCache::install_lane_within_capacity`]: check the layer
+    /// counts match, then hand each layer's narrowed K/V to `write_lane`,
+    /// which is [`KvCache::update_lane`] on the growing path and
+    /// [`KvCache::update_lane_within_capacity`] on the frozen one.
+    fn install_lane_via<C: KvCacheOps<R>>(
+        &mut self,
+        src: &LayeredKvCache<R>,
+        lane: usize,
+        client: &C,
+        write_lane: LaneWrite<R, C>,
+    ) -> Result<()> {
         if src.num_layers() != self.num_layers() {
             return Err(Error::InferenceError {
                 reason: format!(
@@ -179,7 +273,7 @@ where
             let cache = self.layer_mut(idx).ok_or_else(|| Error::InferenceError {
                 reason: format!("kv cache missing layer {idx}"),
             })?;
-            cache.update_lane(&k, &v, lane, 0, client)?;
+            write_lane(cache, &k, &v, lane, 0, client)?;
         }
         Ok(())
     }

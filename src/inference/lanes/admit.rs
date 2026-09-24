@@ -4,6 +4,7 @@
 use crate::error::{Error, Result};
 use crate::inference::gdn_state::LayeredGdnState;
 use crate::inference::kv_cache::LayeredKvCache;
+use crate::inference::lanes::sink::LaneKvSink;
 use crate::inference::lanes::table::LaneTable;
 use crate::inference::scheduler::SequenceId;
 use crate::ops::traits::KvCacheOps;
@@ -36,21 +37,26 @@ where
     /// The sequence lands at cache position 0 of its lane, so its length is
     /// its own and no other lane constrains it. `kv` and `gdn` are the
     /// batched containers the decode steps read, one lane per sequence.
+    /// `kv` is anything implementing [`LaneKvSink`]: a growable
+    /// [`LayeredKvCache`] grows to fit the sequence, a
+    /// [`FrozenLayeredKvCache`](crate::inference::kv_cache::FrozenLayeredKvCache)
+    /// refuses instead.
     ///
     /// # Errors
     ///
     /// [`Error::InferenceError`] when every lane is taken, when
     /// `src.rope_pos` is outside the rope table the table was built with,
     /// or when the batched containers refuse the write.
-    pub fn admit<C>(
+    pub fn admit<C, S>(
         &mut self,
         client: &C,
-        kv: &mut LayeredKvCache<R>,
+        mut kv: S,
         gdn: &mut LayeredGdnState<R>,
         src: LaneAdmission<'_, R>,
     ) -> Result<usize>
     where
         C: KvCacheOps<R> + BinaryOps<R> + HostCopyOps<R>,
+        S: LaneKvSink<R>,
     {
         let lane = self
             .occupants

@@ -4,12 +4,15 @@
 //! - `table`: lane occupancy and the persistent device tensors
 //! - `admit`: taking a lane, giving it back, and stepping every occupant
 //! - `claim`: taking a lane already filled in place
+//! - `sink`: the batched KV container an admit installs a lane into
 
 pub mod admit;
 pub mod claim;
+pub mod sink;
 pub mod step;
 pub mod table;
 
 pub use admit::LaneAdmission;
+pub use sink::LaneKvSink;
 pub use step::LaneKvStep;
 pub use table::LaneTable;

@@ -13,9 +13,10 @@ pub mod ssm_state;
 pub use decode_graph::{DecodeGraph, DeviceScalars, PagedDecodeGraph};
 pub use gdn_state::{GdnState, LayeredGdnState};
 pub use kv_cache::{
-    KvCache, LayeredKvCache, LayeredKvCacheConfig, LayeredPagedKvCache, PagedKvCache,
+    FrozenLayeredKvCache, KvCache, LayeredKvCache, LayeredKvCacheConfig, LayeredPagedKvCache,
+    PagedKvCache,
 };
-pub use lanes::{LaneAdmission, LaneKvStep, LaneTable};
+pub use lanes::{LaneAdmission, LaneKvSink, LaneKvStep, LaneTable};
 #[cfg(feature = "cuda")]
 pub use memory::GpuBlockAllocator;
 pub use memory::{BlockAllocator, BlockAllocatorStats, BlockId, BlockTable, CpuBlockAllocator};

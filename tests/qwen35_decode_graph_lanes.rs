@@ -98,7 +98,7 @@ fn admit_all(
         let got = lanes
             .admit(
                 client,
-                kv,
+                &mut *kv,
                 gdn,
                 LaneAdmission {
                     seq: lane as u64,

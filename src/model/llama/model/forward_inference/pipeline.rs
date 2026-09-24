@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;
 use crate::inference::kv_cache::LayeredPagedKvCache;
 use crate::model::traits::ModelClient;
-use crate::ops::traits::{KvCacheOps, KvSeqLen, PagedAttentionOps};
+use crate::ops::traits::{KvCacheOps, KvSeqLen, PagedAttentionOps, RoPEPackedOps};
 use crate::quant::traits::DequantOps;
 use numr::autograd::var_add;
 use numr::ops::{
@@ -191,6 +191,9 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
     /// * `position` - RoPE position offset
     /// * `kv_seq_len` - Per-row key end, narrowing `seq_len_k` for a batch of
     ///   mixed-length sequences. `None` keeps every row at `seq_len_k`.
+    /// * `rope_positions` - Per-row RoPE position, replacing the shared
+    ///   `position` scalar for a batch of mixed cache lengths. `None` keeps
+    ///   every row at the shared `position..position+seq_len` window.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_with_paged_kv_cache<C>(
         &self,
@@ -202,9 +205,10 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
         seq_len_k: usize,
         position: usize,
         kv_seq_len: Option<KvSeqLen<'_, R>>,
+        rope_positions: Option<&Tensor<R>>,
     ) -> Result<Tensor<R>>
     where
-        C: ModelClient<R>,
+        C: ModelClient<R> + RoPEPackedOps<R>,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -237,6 +241,7 @@ impl<R: Runtime<DType = numr::dtype::DType>> Llama<R> {
                 seq_len_k,
                 position,
                 kv_seq_len,
+                rope_positions,
             )?;
             hidden = h;
             prev_mlp_out = Some(mlp_out);

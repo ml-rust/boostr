@@ -10,7 +10,7 @@ use crate::model::llama::model::blocks::ExpertWeights;
 use crate::model::multimodal::ModelInput;
 use crate::model::registry::LoadedModel;
 use crate::model::traits::ModelClient;
-use crate::ops::traits::KvSeqLen;
+use crate::ops::traits::{KvSeqLen, RoPEPackedOps};
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, IndexingOps, ShapeOps};
 use numr::runtime::Runtime;
@@ -71,7 +71,9 @@ where
     ///
     /// `seq_len_k` sizes the gathered KV buffer; `kv_seq_len` narrows which
     /// of those gathered keys each row attends over (`None` keeps every row
-    /// at `seq_len_k`).
+    /// at `seq_len_k`). `rope_positions` gives each row its own RoPE
+    /// position, replacing the shared `position` scalar (`None` keeps every
+    /// row at the shared `position..position+seq_len` window).
     #[allow(clippy::too_many_arguments)]
     pub fn forward_with_paged_kv_cache(
         &self,
@@ -82,9 +84,10 @@ where
         seq_len_k: usize,
         position: usize,
         kv_seq_len: Option<KvSeqLen<'_, R>>,
+        rope_positions: Option<&Tensor<R>>,
     ) -> Result<Tensor<R>>
     where
-        R::Client: ModelClient<R>,
+        R::Client: ModelClient<R> + RoPEPackedOps<R>,
     {
         let device = input_ids.device();
         let client = R::default_client(device);
@@ -98,6 +101,7 @@ where
                 seq_len_k,
                 position,
                 kv_seq_len,
+                rope_positions,
             ),
             LoadedModel::LlamaTp(_) => Err(Error::ModelError {
                 reason: "LlamaTp does not yet support paged KV cache".into(),
@@ -123,6 +127,7 @@ where
                 seq_len_k,
                 position,
                 kv_seq_len,
+                rope_positions,
             ),
         }
     }

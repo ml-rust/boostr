@@ -11,6 +11,7 @@ pub mod paged_attention_bwd;
 pub mod paged_attention_bwd_block_config;
 pub mod paged_attention_fwd;
 pub mod paged_attention_fwd_block_config;
+pub mod paged_attention_fwd_fp8;
 pub mod paged_decode;
 pub mod varlen_attention;
 pub mod varlen_attention_block_config;

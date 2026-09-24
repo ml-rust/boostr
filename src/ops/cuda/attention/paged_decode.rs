@@ -9,7 +9,7 @@ use numr::runtime::Device;
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
-use super::decode_split::{decode_dtype_suffix, decode_slices};
+use super::decode_split::{decode_dtype_suffix, decode_slices, paged_row_splits};
 
 /// Paged decode attention — S_q=1 specialized fast path.
 ///
@@ -18,6 +18,12 @@ use super::decode_split::{decode_dtype_suffix, decode_slices};
 /// cut into slices and the shared combine pass merges their partial softmax
 /// statistics — see [`decode_slices`]. The slice count never reads the batch
 /// size, so a row's cut is the same whatever it is batched with.
+///
+/// `kv_end_ptr` is a device pointer to a `[B]` i32 buffer of per-row last
+/// keys, or `0` for none. Row `b` then attends over
+/// `[0, min(kv_end[b], seq_len_k))`, so one block table serves rows of
+/// different lengths and a short row never reads the page its padding entries
+/// point at. With `0` every row runs to `seq_len_k`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn paged_decode_attention_fwd(
     client: &CudaClient,
@@ -31,6 +37,7 @@ pub(super) fn paged_decode_attention_fwd(
     seq_len_k: usize,
     head_dim: usize,
     block_size: usize,
+    kv_end_ptr: u64,
 ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
     let suffix = decode_dtype_suffix(q.dtype())?;
     let stem = format!("paged_decode_attention_{head_dim}_{suffix}");
@@ -54,9 +61,21 @@ pub(super) fn paged_decode_attention_fwd(
     // A slice boundary lands on a KV block boundary, so the sequence cannot be
     // cut into more slices than it has blocks.
     let num_kv_blocks = seq_len_k.div_ceil(block_size);
-    let splits = decode_slices(device_index, num_heads, seq_len_k, head_dim)
-        .splits
-        .min(num_kv_blocks.max(1));
+    // Per-row ends make each row cut its own page run in the kernel, so the
+    // grid is sized from the block-table capacity — the upper bound on any
+    // row's run — and a shorter row's trailing slices come out empty. Without
+    // them every row runs to `seq_len_k`, which is then the true span.
+    let span = if kv_end_ptr == 0 {
+        seq_len_k
+    } else {
+        max_num_blocks * block_size
+    };
+    let slices = decode_slices(device_index, num_heads, span, head_dim);
+    let splits = if kv_end_ptr == 0 {
+        slices.splits.min(num_kv_blocks.max(1))
+    } else {
+        paged_row_splits(max_num_blocks, slices.fill, block_size)
+    };
 
     let q_ptr = q.ptr();
     let kb_ptr = k_blocks.ptr();
@@ -80,6 +99,7 @@ pub(super) fn paged_decode_attention_fwd(
         let po_ptr = partial_o.ptr();
         let pml_ptr = partial_ml.ptr();
         let splits_i32 = splits as i32;
+        let fill_i32 = slices.fill as i32;
 
         let split_func = kernels::get_kernel_function(&module, &format!("{stem}_split"))?;
         let split_cfg = LaunchConfig {
@@ -102,6 +122,8 @@ pub(super) fn paged_decode_attention_fwd(
             builder.arg(&bs_i32);
             builder.arg(&scale);
             builder.arg(&splits_i32);
+            builder.arg(&kv_end_ptr);
+            builder.arg(&fill_i32);
             builder.launch(split_cfg).map_err(|e| Error::KernelError {
                 reason: format!("Paged decode split kernel launch failed: {:?}", e),
             })?;
@@ -162,6 +184,7 @@ pub(super) fn paged_decode_attention_fwd(
         builder.arg(&mnb_i32);
         builder.arg(&bs_i32);
         builder.arg(&scale);
+        builder.arg(&kv_end_ptr);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("Paged decode attention kernel launch failed: {:?}", e),
         })?;
@@ -174,6 +197,11 @@ pub(super) fn paged_decode_attention_fwd(
 ///
 /// `seq_len_k_ptr` is a device pointer to an i32. Updated before each graph replay
 /// via `cuMemsetD32Async`.
+///
+/// `kv_end_ptr` is a device pointer to a `[B]` i32 buffer of per-row last keys,
+/// or `0` for none. Row `b` then attends over
+/// `[0, min(kv_end[b], *seq_len_k_ptr))`, so one captured grid serves rows of
+/// different lengths; `0` gives the arithmetic of a call without per-row ends.
 ///
 /// `output` and `lse` are caller-owned so they outlive the capture; a tensor
 /// allocated here for them would be freed while the captured graph still
@@ -198,6 +226,7 @@ pub fn paged_decode_attention_fwd_graph(
     head_dim: usize,
     block_size: usize,
     max_num_blocks: usize,
+    kv_end_ptr: u64,
 ) -> Result<()> {
     let suffix = decode_dtype_suffix(q.dtype())?;
     let stem = format!("paged_decode_attention_{head_dim}_{suffix}");
@@ -234,8 +263,15 @@ pub fn paged_decode_attention_fwd_graph(
     // Consequence: at early decode steps, with the cache nearly empty, most
     // slices do no work — correct, but the grid stays sized for a full cache
     // every step, not just the steps that need it.
+    // Per-row ends make each row cut its own page run in the kernel, so the
+    // captured grid takes the page-unit count for the capacity instead.
     let kv_capacity = max_num_blocks * block_size;
-    let splits = decode_slices(device_index, num_heads, kv_capacity, head_dim).splits;
+    let slices = decode_slices(device_index, num_heads, kv_capacity, head_dim);
+    let splits = if kv_end_ptr == 0 {
+        slices.splits
+    } else {
+        paged_row_splits(max_num_blocks, slices.fill, block_size)
+    };
 
     if splits > 1 {
         // Unnormalized per-slice accumulators plus their (m, l) statistics, in
@@ -247,6 +283,7 @@ pub fn paged_decode_attention_fwd_graph(
         let po_ptr = partial_o.ptr();
         let pml_ptr = partial_ml.ptr();
         let splits_i32 = splits as i32;
+        let fill_i32 = slices.fill as i32;
 
         let split_func = kernels::get_kernel_function(&module, &format!("{stem}_split_graph"))?;
         let split_cfg = LaunchConfig {
@@ -269,6 +306,8 @@ pub fn paged_decode_attention_fwd_graph(
             builder.arg(&bs_i32);
             builder.arg(&scale);
             builder.arg(&splits_i32);
+            builder.arg(&kv_end_ptr);
+            builder.arg(&fill_i32);
             builder.launch(split_cfg).map_err(|e| Error::KernelError {
                 reason: format!("Paged decode graph split kernel launch failed: {:?}", e),
             })?;
@@ -330,6 +369,7 @@ pub fn paged_decode_attention_fwd_graph(
         builder.arg(&mnb_i32);
         builder.arg(&bs_i32);
         builder.arg(&scale);
+        builder.arg(&kv_end_ptr);
         builder.launch(cfg).map_err(|e| Error::KernelError {
             reason: format!("Paged decode attention graph kernel launch failed: {:?}", e),
         })?;

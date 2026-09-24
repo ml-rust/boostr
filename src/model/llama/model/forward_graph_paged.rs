@@ -154,6 +154,7 @@ impl Llama<numr::runtime::cuda::CudaRuntime> {
                 attn.head_dim,
                 block_size,
                 max_num_blocks,
+                0, // every row ends at the shared device-side seq_len_k
             )?;
 
             // Reshape: [B, H, 1, D] -> [B, 1, H*D]

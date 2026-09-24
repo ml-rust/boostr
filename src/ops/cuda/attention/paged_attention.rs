@@ -8,9 +8,14 @@
 //!   shared-memory sizing
 //! - `paged_attention_bwd_block_config.rs`: backward tile selection and
 //!   shared-memory sizing
-//! - `paged_attention_fwd.rs`: forward (standard + FP8)
+//! - `paged_attention_fwd.rs`: forward (standard)
+//! - `paged_attention_fwd_fp8.rs`: forward (FP8)
 //! - `paged_attention_bwd.rs`: backward
 //! - `paged_decode.rs`: S_q=1 decode fast path
+//!
+//! A per-row `KvSeqLen::PerRow` key end reaches the decode fast path only. The
+//! tiled prefill kernels and the FP8 kernel read one key length for the whole
+//! batch and refuse it.
 
 use crate::error::Result;
 use crate::ops::impl_generic::attention::reject_per_row_kv_seq_len;
@@ -19,7 +24,8 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 use numr::tensor::Tensor;
 
 use super::paged_attention_bwd::paged_attention_bwd_impl;
-use super::paged_attention_fwd::{paged_attention_fwd_fp8_impl, paged_attention_fwd_impl};
+use super::paged_attention_fwd::paged_attention_fwd_impl;
+use super::paged_attention_fwd_fp8::paged_attention_fwd_fp8_impl;
 
 impl PagedAttentionOps<CudaRuntime> for CudaClient {
     fn paged_attention_fwd(
@@ -37,7 +43,6 @@ impl PagedAttentionOps<CudaRuntime> for CudaClient {
         causal: bool,
         kv_seq_len: Option<KvSeqLen<'_, CudaRuntime>>,
     ) -> Result<(Tensor<CudaRuntime>, Tensor<CudaRuntime>)> {
-        reject_per_row_kv_seq_len(kv_seq_len, "CUDA")?;
         paged_attention_fwd_impl(
             self,
             q,
@@ -51,6 +56,7 @@ impl PagedAttentionOps<CudaRuntime> for CudaClient {
             head_dim,
             block_size,
             causal,
+            kv_seq_len,
         )
     }
 

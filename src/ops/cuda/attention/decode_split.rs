@@ -111,6 +111,64 @@ const fn row_splits(span: usize, fill: usize) -> usize {
     }
 }
 
+/// Fewest KV pages a paged slice may own: [`DECODE_MIN_CHUNK`] keys rounded
+/// up to whole pages. The paged decode path cuts in page units so a slice
+/// boundary lands on a block-table entry and never straddles a page, and the
+/// page-unit quantum is the token-unit one divided by the page length rather
+/// than a number of its own.
+pub(super) const fn paged_min_chunk_blocks(block_size: usize) -> usize {
+    let page = if block_size == 0 { 1 } else { block_size };
+    let chunk = DECODE_MIN_CHUNK.div_ceil(page);
+    if chunk == 0 { 1 } else { chunk }
+}
+
+/// Slices a row owning `blocks` KV pages cuts itself into when it wants
+/// `fill`: `fill` clamped to `[1, min(blocks / chunk, DECODE_MAX_SPLITS)]` for
+/// the `chunk` [`paged_min_chunk_blocks`] gives, and `1` when fewer than two
+/// chunks exist. [`row_splits`] in page units. `paged_decode_row_slice` in
+/// `kernels/attention/paged_decode_attention.cu` applies the same rule to each
+/// row's own page count, so the host sizes the grid from the block-table
+/// capacity and every shorter row's trailing slices come out empty.
+pub(super) const fn paged_row_splits(blocks: usize, fill: usize, block_size: usize) -> usize {
+    let chunk = paged_min_chunk_blocks(block_size);
+    let max_splits = blocks / chunk;
+    let max_splits = if max_splits > DECODE_MAX_SPLITS {
+        DECODE_MAX_SPLITS
+    } else {
+        max_splits
+    };
+    if max_splits < 2 {
+        return 1;
+    }
+    if fill < 1 {
+        1
+    } else if fill > max_splits {
+        max_splits
+    } else {
+        fill
+    }
+}
+
+/// Test-only accessor for the per-row-ends split count: composes
+/// [`decode_slices`] and [`paged_row_splits`] exactly as
+/// `paged_decode_attention_fwd` and `paged_decode_attention_fwd_graph` do
+/// when a per-row key end is present, so
+/// `tests/paged_attention_batch_invariance_cuda.rs` can assert which grid a
+/// fixture exercises without reaching into either launch site. `1` keeps the
+/// whole-sequence kernel, more than `1` takes the split grid.
+#[doc(hidden)]
+pub fn paged_decode_splits(
+    device_index: usize,
+    num_heads: usize,
+    max_num_blocks: usize,
+    block_size: usize,
+    head_dim: usize,
+) -> usize {
+    let span = max_num_blocks * block_size;
+    let fill = decode_slices(device_index, num_heads, span, head_dim).fill;
+    paged_row_splits(max_num_blocks, fill, block_size)
+}
+
 /// The slice rule itself, separated from the device query so it is testable
 /// without a device.
 ///
@@ -256,6 +314,47 @@ mod tests {
         assert_eq!(decode_kv_span(8192, 0), 8192);
         assert_eq!(decode_kv_span(8192, 1024), 1024);
         assert_eq!(decode_kv_span(512, 1024), 512);
+    }
+
+    /// The page-unit quantum is the token-unit one over the page length, and
+    /// never drops below a whole page.
+    #[test]
+    fn paged_chunk_is_the_token_chunk_in_pages() {
+        assert_eq!(paged_min_chunk_blocks(1), DECODE_MIN_CHUNK);
+        assert_eq!(paged_min_chunk_blocks(16), 2);
+        assert_eq!(paged_min_chunk_blocks(DECODE_MIN_CHUNK), 1);
+        assert_eq!(paged_min_chunk_blocks(256), 1);
+        assert_eq!(paged_min_chunk_blocks(0), DECODE_MIN_CHUNK);
+    }
+
+    #[test]
+    fn paged_row_splits_clamps_to_the_page_count() {
+        // Two chunks of two pages each: the row allows two slices at most.
+        assert_eq!(paged_row_splits(4, 32, 16), 2);
+        // One chunk only, so nothing to split.
+        assert_eq!(paged_row_splits(3, 32, 16), 1);
+        assert_eq!(paged_row_splits(0, 32, 16), 1);
+        // Fill below the cap passes through.
+        assert_eq!(paged_row_splits(64, 5, 16), 5);
+        // A page as long as the token chunk gives one page per chunk.
+        assert_eq!(paged_row_splits(7, 32, 32), 7);
+        assert!(paged_row_splits(1 << 20, 1 << 20, 16) <= DECODE_MAX_SPLITS);
+    }
+
+    /// A shorter row never asks for more slices than a longer one, so a grid
+    /// sized from the block-table capacity covers every row in the batch.
+    #[test]
+    fn paged_row_splits_grows_with_the_page_count() {
+        let fill = 14;
+        let mut previous = 0;
+        for blocks in 0..256usize {
+            let splits = paged_row_splits(blocks, fill, 16);
+            assert!(
+                splits >= previous,
+                "blocks={blocks} splits={splits} dropped below {previous}"
+            );
+            previous = splits;
+        }
     }
 
     #[test]

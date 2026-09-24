@@ -6,13 +6,11 @@
 //! The whole file is gated on the `cuda` feature so it compiles away on
 //! CPU-only builds.
 //!
-//! Before this file, `paged_decode_attention_fwd_graph` in
-//! `src/ops/cuda/attention/paged_decode.rs` had zero test coverage — no
-//! existing test file called it at all, split or not. `tests/decode_graph_window.rs`
-//! covers the equivalent *contiguous* graph decode path
-//! (`decode_attention_graph_fwd`); this file mirrors its style for the paged
-//! path, and `tests/backend_parity/paged_decode_split.rs` covers the
-//! *non-graph* paged split path, which serves as the trusted reference here.
+//! `tests/decode_graph_window.rs` covers the equivalent *contiguous* graph
+//! decode path (`decode_attention_graph_fwd`); this file mirrors its style
+//! for the paged path. `tests/backend_parity/paged_decode_split.rs` covers
+//! the *non-graph* paged split path, which serves as the trusted reference
+//! here.
 //!
 //! `decode_slices(device_index, num_heads, kv_len, head_dim)` in
 //! `src/ops/cuda/attention/decode_split.rs` returns more than one slice once
@@ -180,6 +178,7 @@ fn paged_split_graph_decode(
         HEAD_DIM,
         BLOCK_SIZE,
         MAX_NUM_BLOCKS,
+        0, // no per-row ends: every row runs to the device-side seq_len_k
     )
     .expect("paged split-KV graph decode attention failed");
 

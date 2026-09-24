@@ -7,8 +7,31 @@ use super::batched;
 use super::block_ops;
 use crate::error::{Error, Result};
 use crate::ops::traits::{Int4GroupSize, KvCacheOps};
+use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuRuntime};
 use numr::tensor::Tensor;
+
+/// Checks that every named tensor shares one dtype.
+///
+/// Returns the shared dtype on success, or an `InvalidArgument` naming the
+/// first mismatching tensor, its dtype, the reference tensor, and its dtype.
+fn check_shared_dtype(tensors: &[(&'static str, &Tensor<CpuRuntime>)]) -> Result<DType> {
+    let (first_name, first) = tensors[0];
+    let dtype = first.dtype();
+    for &(name, t) in &tensors[1..] {
+        if t.dtype() != dtype {
+            return Err(Error::InvalidArgument {
+                arg: "dtype",
+                reason: format!(
+                    "{name} has dtype {:?} but {first_name} has dtype {:?}; all tensors in this call must share one dtype",
+                    t.dtype(),
+                    dtype
+                ),
+            });
+        }
+    }
+    Ok(dtype)
+}
 
 impl KvCacheOps<CpuRuntime> for CpuClient {
     fn kv_cache_update(
@@ -63,13 +86,12 @@ impl KvCacheOps<CpuRuntime> for CpuClient {
             });
         }
 
-        let dtype = k_cache.dtype();
-        if v_cache.dtype() != dtype || new_k.dtype() != dtype || new_v.dtype() != dtype {
-            return Err(Error::InvalidArgument {
-                arg: "dtype",
-                reason: format!("all tensors must share one dtype, expected {:?}", dtype),
-            });
-        }
+        let dtype = check_shared_dtype(&[
+            ("k_cache", k_cache),
+            ("v_cache", v_cache),
+            ("new_k", new_k),
+            ("new_v", new_v),
+        ])?;
 
         // Copy using byte-level operations to support any dtype (F32, BF16, F16, etc.)
         // Use raw pointers directly since both source and dest are CPU memory.
@@ -152,8 +174,13 @@ impl KvCacheOps<CpuRuntime> for CpuClient {
         let num_heads = kv_shape[1];
         let head_dim = kv_shape[2];
 
-        let k_data = key.to_vec::<f32>();
-        let v_data = value.to_vec::<f32>();
+        let dtype = check_shared_dtype(&[
+            ("key", key),
+            ("value", value),
+            ("key_cache", key_cache),
+            ("value_cache", value_cache),
+        ])?;
+
         let slots = slot_mapping.to_vec::<i32>();
 
         let cache_shape = key_cache.shape();
@@ -165,11 +192,13 @@ impl KvCacheOps<CpuRuntime> for CpuClient {
         }
         let num_cache_blocks = cache_shape[0];
         let cache_total_elems: usize = cache_shape.iter().product();
-
-        let kc_ptr = key_cache.ptr() as *mut f32;
-        let vc_ptr = value_cache.ptr() as *mut f32;
         let cache_stride_block = block_size * num_heads * head_dim;
 
+        // Resolve every slot to a (src, dst) element-offset pair up front, with
+        // every bounds check the copy loop used to run inline. This keeps the
+        // dtype-dispatched copy below free of boostr errors, since its closure
+        // is typed `numr::error::Result` (see the comment on it).
+        let mut offsets = Vec::with_capacity(num_tokens * num_heads * head_dim);
         for (t, &slot_i32) in slots.iter().enumerate().take(num_tokens) {
             if slot_i32 < 0 {
                 return Err(Error::InvalidArgument {
@@ -207,13 +236,33 @@ impl KvCacheOps<CpuRuntime> for CpuClient {
                             ),
                         });
                     }
+                    offsets.push((src, dst));
+                }
+            }
+        }
+
+        // The dtype-erroring arms of `dispatch_dtype!` (unsupported/feature-gated
+        // dtype) return numr's own error type, so the copy runs inside a closure
+        // and gets mapped to boostr's `Error` at the boundary rather than trying
+        // to `return` numr's error type out of this function directly.
+        let copied = (|| -> numr::error::Result<()> {
+            numr::dispatch_dtype!(dtype, T => {
+                let k_data = key.to_vec::<T>();
+                let v_data = value.to_vec::<T>();
+                let kc_ptr = key_cache.ptr() as *mut T;
+                let vc_ptr = value_cache.ptr() as *mut T;
+
+                for &(src, dst) in &offsets {
                     unsafe {
                         *kc_ptr.add(dst) = k_data[src];
                         *vc_ptr.add(dst) = v_data[src];
                     }
                 }
-            }
-        }
+
+                Ok(())
+            }, "reshape_and_cache")
+        })();
+        copied.map_err(Error::Numr)?;
 
         Ok(())
     }
@@ -393,5 +442,118 @@ mod tests {
             result.is_err(),
             "head dimension mismatch should be rejected"
         );
+    }
+
+    #[test]
+    fn test_reshape_and_cache_dtype_mismatch_is_error() {
+        let (client, device) = cpu_setup();
+        let key = ones(&device, &[1, 1, 4]); // F32
+        let value = ones(&device, &[1, 1, 4]); // F32
+        let key_cache = zeros(&device, &[4, 2, 1, 4]); // F32
+        let value_cache = zeros(&device, &[4, 2, 1, 4]); // F32
+        let slot_mapping = Tensor::<CpuRuntime>::from_slice(&[1i32], &[1], &device).unwrap();
+
+        #[cfg(feature = "f16")]
+        let value_cache = {
+            let n: usize = value_cache.shape().iter().product();
+            Tensor::<CpuRuntime>::from_slice(
+                &vec![half::bf16::from_f32(0.0); n],
+                value_cache.shape(),
+                &device,
+            )
+            .unwrap()
+        };
+
+        #[cfg(not(feature = "f16"))]
+        let value_cache = {
+            let n: usize = value_cache.shape().iter().product();
+            Tensor::<CpuRuntime>::from_slice(&vec![0i32; n], value_cache.shape(), &device).unwrap()
+        };
+
+        let err = client
+            .reshape_and_cache(&key, &value, &key_cache, &value_cache, &slot_mapping, 2)
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("F32"), "expected F32 named in error: {msg}");
+        assert!(
+            msg.contains("key"),
+            "expected the reference tensor named in error: {msg}"
+        );
+        assert!(
+            msg.contains("value_cache"),
+            "expected the offending tensor named in error: {msg}"
+        );
+        #[cfg(feature = "f16")]
+        assert!(
+            msg.contains("BF16"),
+            "expected the offending dtype named in error: {msg}"
+        );
+        #[cfg(not(feature = "f16"))]
+        assert!(
+            msg.contains("I32"),
+            "expected the offending dtype named in error: {msg}"
+        );
+    }
+
+    #[cfg(feature = "f16")]
+    #[test]
+    fn test_reshape_and_cache_bf16_preserves_dtype() {
+        use half::bf16;
+        use numr::dtype::DType;
+
+        let (client, device) = cpu_setup();
+        let vals = [bf16::from_f32(1.0), bf16::from_f32(1.0)];
+        let key =
+            Tensor::<CpuRuntime>::from_slice(&[vals[0], vals[1]], &[2, 1, 1], &device).unwrap();
+        let value =
+            Tensor::<CpuRuntime>::from_slice(&[vals[0], vals[1]], &[2, 1, 1], &device).unwrap();
+        let key_cache =
+            Tensor::<CpuRuntime>::from_slice(&vec![bf16::from_f32(0.0); 8], &[4, 2, 1, 1], &device)
+                .unwrap();
+        let value_cache =
+            Tensor::<CpuRuntime>::from_slice(&vec![bf16::from_f32(0.0); 8], &[4, 2, 1, 1], &device)
+                .unwrap();
+        let slot_mapping = Tensor::<CpuRuntime>::from_slice(&[1i32, 5], &[2], &device).unwrap();
+
+        client
+            .reshape_and_cache(&key, &value, &key_cache, &value_cache, &slot_mapping, 2)
+            .unwrap();
+
+        assert_eq!(key_cache.dtype(), DType::BF16);
+        let kc = key_cache.to_vec::<bf16>();
+        // slot 1 = block 0, offset 1
+        assert_eq!(kc[1], bf16::from_f32(1.0));
+        // slot 5 = block 2, offset 1
+        assert_eq!(kc[2 * 2 + 1], bf16::from_f32(1.0));
+    }
+
+    #[cfg(feature = "f16")]
+    #[test]
+    fn test_reshape_and_cache_f16_preserves_dtype() {
+        use half::f16;
+        use numr::dtype::DType;
+
+        let (client, device) = cpu_setup();
+        let vals = [f16::from_f32(1.0), f16::from_f32(1.0)];
+        let key =
+            Tensor::<CpuRuntime>::from_slice(&[vals[0], vals[1]], &[2, 1, 1], &device).unwrap();
+        let value =
+            Tensor::<CpuRuntime>::from_slice(&[vals[0], vals[1]], &[2, 1, 1], &device).unwrap();
+        let key_cache =
+            Tensor::<CpuRuntime>::from_slice(&vec![f16::from_f32(0.0); 8], &[4, 2, 1, 1], &device)
+                .unwrap();
+        let value_cache =
+            Tensor::<CpuRuntime>::from_slice(&vec![f16::from_f32(0.0); 8], &[4, 2, 1, 1], &device)
+                .unwrap();
+        let slot_mapping = Tensor::<CpuRuntime>::from_slice(&[1i32, 5], &[2], &device).unwrap();
+
+        client
+            .reshape_and_cache(&key, &value, &key_cache, &value_cache, &slot_mapping, 2)
+            .unwrap();
+
+        assert_eq!(key_cache.dtype(), DType::F16);
+        let kc = key_cache.to_vec::<f16>();
+        assert_eq!(kc[1], f16::from_f32(1.0));
+        assert_eq!(kc[2 * 2 + 1], f16::from_f32(1.0));
     }
 }

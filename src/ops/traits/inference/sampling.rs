@@ -30,6 +30,15 @@ pub trait SamplingOps<R: Runtime> {
     /// Callers are responsible for:
     /// - Narrowing logits to the last sequence position before calling
     /// - Computing unique token IDs and counts from the penalty window
+    ///
+    /// `logits` must be contiguous: every backend reads it through a raw
+    /// pointer at an offset computed from its shape, not through its
+    /// strides.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `logits` is not a contiguous `[vocab_size]`
+    /// tensor.
     fn apply_sampling_penalties(
         &self,
         logits: &Tensor<R>,
@@ -55,6 +64,15 @@ pub trait SamplingOps<R: Runtime> {
     /// - `min_p`: minimum probability relative to max (0.0 = disabled)
     ///
     /// Returns the sampled token ID.
+    ///
+    /// `logits` must be contiguous: every backend reads it through a raw
+    /// pointer at an offset computed from its shape, not through its
+    /// strides.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `logits` is not a contiguous `[vocab_size]`
+    /// tensor.
     fn sample_token(
         &self,
         logits: &Tensor<R>,
@@ -78,6 +96,15 @@ pub trait SamplingOps<R: Runtime> {
     /// - `token_ids`: `[num_unique]` I64 — penalty token IDs
     /// - `token_counts`: `[num_unique]` I32 — penalty counts
     /// - `seed`: optional RNG seed for reproducible sampling (`None` = non-deterministic)
+    ///
+    /// `logits` must be contiguous: every backend computes the last
+    /// position's offset from `seq_len` and `vocab_size` and reads through
+    /// a raw pointer, not through strides.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `logits` is not a contiguous `[1, seq_len,
+    /// vocab_size]` tensor.
     #[allow(clippy::too_many_arguments)]
     fn logits_to_token(
         &self,

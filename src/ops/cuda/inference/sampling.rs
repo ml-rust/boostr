@@ -8,6 +8,9 @@ use crate::error::{Error, Result};
 use crate::ops::cuda::kernels::{
     self, LOGITS_TO_TOKEN_MODULE, SAMPLING_MODULE, SAMPLING_PENALTIES_MODULE,
 };
+use crate::ops::impl_generic::inference::sampling::{
+    SamplingLogitsShape, validate_contiguous_arg, validate_sampling_logits,
+};
 use crate::ops::traits::inference::sampling::SamplingOps;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::LaunchConfig;
@@ -26,6 +29,13 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         frequency_penalty: f32,
         presence_penalty: f32,
     ) -> Result<()> {
+        validate_sampling_logits(
+            "apply_sampling_penalties",
+            logits,
+            SamplingLogitsShape::Vocab,
+        )?;
+        validate_contiguous_arg("apply_sampling_penalties", "token_ids", token_ids)?;
+        validate_contiguous_arg("apply_sampling_penalties", "token_counts", token_counts)?;
         let num_unique = token_ids.shape()[0];
         if num_unique == 0 {
             return Ok(());
@@ -77,6 +87,7 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         top_p: f32,
         min_p: f32,
     ) -> Result<u32> {
+        validate_sampling_logits("sample_token", logits, SamplingLogitsShape::Vocab)?;
         let vocab_size = logits.shape()[0];
 
         let device = logits.device();
@@ -148,6 +159,13 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         min_p: f32,
         seed: Option<u64>,
     ) -> Result<Tensor<CudaRuntime>> {
+        validate_sampling_logits(
+            "logits_to_token",
+            logits,
+            SamplingLogitsShape::BatchSeqVocab,
+        )?;
+        validate_contiguous_arg("logits_to_token", "token_ids", token_ids)?;
+        validate_contiguous_arg("logits_to_token", "token_counts", token_counts)?;
         let shape = logits.shape();
         let seq_len = shape[1];
         let vocab_size = shape[2];
@@ -236,5 +254,199 @@ impl SamplingOps<CudaRuntime> for CudaClient {
         }
 
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::cuda_setup;
+
+    /// A `[vocab_size]` view with stride 2, mirroring the CPU fixture: every
+    /// other element of a `[vocab_size, 2]` buffer.
+    fn non_contiguous_vocab(device: &numr::runtime::cuda::CudaDevice) -> Tensor<CudaRuntime> {
+        let data: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        let base = Tensor::<CudaRuntime>::from_slice(&data, &[4, 2], device).expect("base");
+        let view = base.narrow(1, 0, 1).expect("narrow").squeeze(Some(1));
+        assert_eq!(view.shape(), &[4]);
+        assert!(!view.is_contiguous());
+        view
+    }
+
+    /// A `[1, seq_len, vocab_size]` view whose vocab axis is narrowed out of
+    /// a wider buffer, so it keeps the parent's stride instead of a
+    /// contiguous one.
+    fn non_contiguous_batch_seq_vocab(
+        device: &numr::runtime::cuda::CudaDevice,
+    ) -> Tensor<CudaRuntime> {
+        let data: Vec<f32> = (0..16).map(|i| i as f32).collect();
+        let base = Tensor::<CudaRuntime>::from_slice(&data, &[1, 2, 8], device).expect("base");
+        let view = base.narrow(2, 0, 4).expect("narrow");
+        assert_eq!(view.shape(), &[1, 2, 4]);
+        assert!(!view.is_contiguous());
+        view
+    }
+
+    /// A `[len]` i64 view with stride 2, mirroring the CPU fixture: every
+    /// other element of a `[len, 2]` buffer of token ids.
+    fn non_contiguous_ids(device: &numr::runtime::cuda::CudaDevice) -> Tensor<CudaRuntime> {
+        let data: Vec<i64> = vec![0, 9, 1, 9];
+        let base = Tensor::<CudaRuntime>::from_slice(&data, &[2, 2], device).expect("base");
+        let view = base.narrow(1, 0, 1).expect("narrow").squeeze(Some(1));
+        assert_eq!(view.shape(), &[2]);
+        assert!(!view.is_contiguous());
+        view
+    }
+
+    /// A `[len]` i32 view with stride 2, mirroring the CPU fixture: every
+    /// other element of a `[len, 2]` buffer of token counts.
+    fn non_contiguous_counts(device: &numr::runtime::cuda::CudaDevice) -> Tensor<CudaRuntime> {
+        let data: Vec<i32> = vec![1, 9, 2, 9];
+        let base = Tensor::<CudaRuntime>::from_slice(&data, &[2, 2], device).expect("base");
+        let view = base.narrow(1, 0, 1).expect("narrow").squeeze(Some(1));
+        assert_eq!(view.shape(), &[2]);
+        assert!(!view.is_contiguous());
+        view
+    }
+
+    #[test]
+    fn apply_sampling_penalties_rejects_non_contiguous_token_ids() {
+        let Some(cuda) = cuda_setup() else { return };
+        let (client, device) = (&cuda.client, &cuda.device);
+        let logits =
+            Tensor::<CudaRuntime>::from_slice(&[1.0f32, -2.0], &[2], device).expect("logits");
+        let token_ids = non_contiguous_ids(device);
+        let token_counts =
+            Tensor::<CudaRuntime>::from_slice(&[1i32, 1], &[2], device).expect("cnt");
+
+        let err = client
+            .apply_sampling_penalties(&logits, &token_ids, &token_counts, 1.1, 0.0, 0.0)
+            .expect_err("non-contiguous token_ids must be rejected");
+        assert!(format!("{err}").contains("token_ids"));
+    }
+
+    #[test]
+    fn apply_sampling_penalties_rejects_non_contiguous_token_counts() {
+        let Some(cuda) = cuda_setup() else { return };
+        let (client, device) = (&cuda.client, &cuda.device);
+        let logits =
+            Tensor::<CudaRuntime>::from_slice(&[1.0f32, -2.0], &[2], device).expect("logits");
+        let token_ids = Tensor::<CudaRuntime>::from_slice(&[0i64, 1], &[2], device).expect("ids");
+        let token_counts = non_contiguous_counts(device);
+
+        let err = client
+            .apply_sampling_penalties(&logits, &token_ids, &token_counts, 1.1, 0.0, 0.0)
+            .expect_err("non-contiguous token_counts must be rejected");
+        assert!(format!("{err}").contains("token_counts"));
+    }
+
+    #[test]
+    fn logits_to_token_rejects_non_contiguous_token_ids() {
+        let Some(cuda) = cuda_setup() else { return };
+        let (client, device) = (&cuda.client, &cuda.device);
+        let data: Vec<f32> = vec![0.0, 1.0, 0.0, 2.0];
+        let logits = Tensor::<CudaRuntime>::from_slice(&data, &[1, 1, 4], device).expect("logits");
+        let token_ids = non_contiguous_ids(device);
+        let token_counts =
+            Tensor::<CudaRuntime>::from_slice(&[1i32, 1], &[2], device).expect("cnt");
+
+        let err = client
+            .logits_to_token(
+                &logits,
+                &token_ids,
+                &token_counts,
+                1,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0,
+                1.0,
+                0.0,
+                None,
+            )
+            .expect_err("non-contiguous token_ids must be rejected");
+        assert!(format!("{err}").contains("token_ids"));
+    }
+
+    #[test]
+    fn logits_to_token_rejects_non_contiguous_token_counts() {
+        let Some(cuda) = cuda_setup() else { return };
+        let (client, device) = (&cuda.client, &cuda.device);
+        let data: Vec<f32> = vec![0.0, 1.0, 0.0, 2.0];
+        let logits = Tensor::<CudaRuntime>::from_slice(&data, &[1, 1, 4], device).expect("logits");
+        let token_ids = Tensor::<CudaRuntime>::from_slice(&[0i64, 1], &[2], device).expect("ids");
+        let token_counts = non_contiguous_counts(device);
+
+        let err = client
+            .logits_to_token(
+                &logits,
+                &token_ids,
+                &token_counts,
+                1,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0,
+                1.0,
+                0.0,
+                None,
+            )
+            .expect_err("non-contiguous token_counts must be rejected");
+        assert!(format!("{err}").contains("token_counts"));
+    }
+
+    #[test]
+    fn apply_sampling_penalties_rejects_non_contiguous_logits() {
+        let Some(cuda) = cuda_setup() else { return };
+        let (client, device) = (&cuda.client, &cuda.device);
+        let logits = non_contiguous_vocab(device);
+        let token_ids = Tensor::<CudaRuntime>::from_slice(&[0i64], &[1], device).expect("ids");
+        let token_counts = Tensor::<CudaRuntime>::from_slice(&[1i32], &[1], device).expect("cnt");
+
+        let err = client
+            .apply_sampling_penalties(&logits, &token_ids, &token_counts, 1.1, 0.0, 0.0)
+            .expect_err("non-contiguous logits must be rejected");
+        assert!(format!("{err}").contains("apply_sampling_penalties"));
+    }
+
+    #[test]
+    fn sample_token_rejects_non_contiguous_logits() {
+        let Some(cuda) = cuda_setup() else { return };
+        let (client, device) = (&cuda.client, &cuda.device);
+        let logits = non_contiguous_vocab(device);
+
+        let err = client
+            .sample_token(&logits, 1.0, 0, 1.0, 0.0)
+            .expect_err("non-contiguous logits must be rejected");
+        assert!(format!("{err}").contains("sample_token"));
+    }
+
+    #[test]
+    fn logits_to_token_rejects_non_contiguous_logits() {
+        let Some(cuda) = cuda_setup() else { return };
+        let (client, device) = (&cuda.client, &cuda.device);
+        let logits = non_contiguous_batch_seq_vocab(device);
+        let token_ids = Tensor::<CudaRuntime>::from_slice(&[0i64], &[1], device).expect("ids");
+        let token_counts = Tensor::<CudaRuntime>::from_slice(&[1i32], &[1], device).expect("cnt");
+
+        let err = client
+            .logits_to_token(
+                &logits,
+                &token_ids,
+                &token_counts,
+                0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0,
+                1.0,
+                0.0,
+                None,
+            )
+            .expect_err("non-contiguous logits must be rejected");
+        assert!(format!("{err}").contains("logits_to_token"));
     }
 }

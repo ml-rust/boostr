@@ -21,11 +21,12 @@ pub struct KvCache<R: Runtime> {
     /// sequence per row, each from position 0 with its own end, so the rows
     /// disagree and `seq_len` — their maximum — describes none of them.
     pub(super) lane_lens: Vec<usize>,
-    capacity: usize,
+    pub(super) capacity: usize,
     pub(super) max_seq_len: usize,
     /// Lanes ALLOCATED: the row count `k_cache` and `v_cache` were built at.
-    /// Fixed for the life of the cache, because every lane index is an index
-    /// into this width.
+    /// Every lane index is an index into this width. It moves only through
+    /// [`KvCache::grow_batch`], which adds rows above the ones already
+    /// there, so a lane keeps its index for the life of the cache.
     pub(super) batch_size: usize,
     /// Lanes STEPPED: the prefix `0..active_batch` a decode call reads and
     /// writes. Defaults to `batch_size` and is lowered by
@@ -39,10 +40,10 @@ pub struct KvCache<R: Runtime> {
     active_k: Option<Tensor<R>>,
     /// `v_cache` narrowed the same way.
     active_v: Option<Tensor<R>>,
-    num_kv_heads: usize,
-    head_dim: usize,
-    dtype: DType,
-    device: R::Device,
+    pub(super) num_kv_heads: usize,
+    pub(super) head_dim: usize,
+    pub(super) dtype: DType,
+    pub(super) device: R::Device,
 }
 
 impl<R: Runtime<DType = DType>> KvCache<R>
@@ -123,7 +124,7 @@ where
     /// Called whenever the active width moves AND whenever `k_cache` or
     /// `v_cache` is replaced by a new tensor, since a view of the old one
     /// would then describe storage nothing writes any more.
-    fn refresh_active_views(&mut self) -> Result<()> {
+    pub(super) fn refresh_active_views(&mut self) -> Result<()> {
         if self.active_batch == self.batch_size {
             self.active_k = None;
             self.active_v = None;
@@ -265,20 +266,26 @@ where
         Ok((k, v))
     }
 
-    /// K cache tensor `[active_batch, H_kv, capacity, D]` — stable device
-    /// address.
+    /// K cache tensor `[active_batch, H_kv, capacity, D]` — device address
+    /// stable until the cache is grown.
     ///
     /// Unlike `get_kv()`, this keeps the whole capacity on the key axis
     /// without narrowing or reallocation, so it is safe as a CUDA graph
-    /// argument. The lane axis is the STEPPED prefix: a dim-0 prefix of a
-    /// dense tensor is itself dense and starts at the same address, so a
-    /// kernel reading it reads the same bytes for the lanes it covers.
+    /// argument. Both growth paths — growing the key axis to hold more
+    /// tokens, and [`grow_batch`](Self::grow_batch) growing the lane axis —
+    /// replace this buffer, so a caller that has captured a graph against
+    /// it must not grow the cache afterwards.
+    ///
+    /// The lane axis is the STEPPED prefix: a dim-0 prefix of a dense
+    /// tensor is itself dense and starts at the same address, so a kernel
+    /// reading it reads the same bytes for the lanes it covers.
     pub fn k_cache_raw(&self) -> &Tensor<R> {
         self.active_k.as_ref().unwrap_or(&self.k_cache)
     }
 
-    /// V cache tensor `[active_batch, H_kv, capacity, D]` — stable device
-    /// address.
+    /// V cache tensor `[active_batch, H_kv, capacity, D]` — device address
+    /// stable until the cache is grown, exactly as
+    /// [`k_cache_raw`](Self::k_cache_raw).
     pub fn v_cache_raw(&self) -> &Tensor<R> {
         self.active_v.as_ref().unwrap_or(&self.v_cache)
     }
@@ -332,7 +339,8 @@ where
     }
 
     /// Lanes ALLOCATED. [`active_batch`](Self::active_batch) is the width a
-    /// decode call steps, which is this or less.
+    /// decode call steps, which is this or less, and
+    /// [`grow_batch`](Self::grow_batch) is the one thing that raises it.
     pub fn batch_size(&self) -> usize {
         self.batch_size
     }

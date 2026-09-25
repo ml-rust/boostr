@@ -231,21 +231,22 @@ mod tests {
         )
     }
 
-    /// Continuous batching is opt-in: by default the owner thread takes the
-    /// route below — build a batch, run it to completion, tear it down —
-    /// and never opens a persistent one.
+    /// The persistent batch is the default route: the owner thread keeps one
+    /// batch open and admits arrivals into its free slots. Opting out takes
+    /// the route below — build a batch, run it to completion, tear it down.
     ///
-    /// What keeps it opt-in is memory, not speed. A persistent batch steps
-    /// only its seated rows, so an idle slot costs no compute, but its two
-    /// caches are reserved for the engine's whole life and a host serving
-    /// several bundles pays that reservation once per bundle.
+    /// It is the default because neither of its costs is paid by a caller
+    /// who does not use it. A batch steps only its seated rows, so an idle
+    /// slot costs no compute, and the row allocation starts at one and grows
+    /// only as far as concurrency actually reaches, so an engine that never
+    /// sees two requests at once holds one row's worth of cache.
     #[test]
-    fn the_default_options_take_the_whole_batch_route() {
+    fn the_default_options_take_the_persistent_batch_route() {
         use crate::voxcpm::options::VoxCpm2SynthOptions;
-        assert!(!VoxCpm2SynthOptions::default().continuous_batching);
+        assert!(VoxCpm2SynthOptions::default().continuous_batching);
         assert!(
-            VoxCpm2SynthOptions {
-                continuous_batching: true,
+            !VoxCpm2SynthOptions {
+                continuous_batching: false,
                 ..VoxCpm2SynthOptions::default()
             }
             .continuous_batching

@@ -1,18 +1,22 @@
 //! [`GenerateState::refresh_active_width`]: the width one iteration steps,
 //! recomputed from the slots that hold a request.
 //!
-//! A state is opened at a fixed ALLOCATION width and never leaves it: every
-//! per-step tensor and both KV caches are sized by it, and a slot index
-//! addresses it. What moves is the STEPPED width — the prefix of slots one
-//! iteration runs over. Requests are seated lowest-free-first and no row
-//! ever migrates, so the occupied slots are a prefix and the stepped width
-//! is a cut through that prefix, never a gather.
+//! A state is opened at a fixed CEILING and a slot index addresses it. What
+//! moves is the STEPPED width — the prefix of slots one iteration runs over.
+//! Requests are seated lowest-free-first and no row ever migrates, so the
+//! occupied slots are a prefix and the stepped width is a cut through that
+//! prefix, never a gather.
+//!
+//! The ALLOCATION — the rows the device tensors hold — moves too, but only
+//! upward and only in `super::grow`, which widens it to cover a slot before
+//! that slot is seated. So the stepped width computed here always fits
+//! inside the allocation and this module never has to grow anything.
 //!
 //! The width is not the occupied count itself. It is that count rounded UP
 //! to an entry of the shared allowlist, because the DiT's Euler solver keys
 //! its captured graphs by batch size: a width per occupancy would put a
 //! fresh key in a bounded cache on every seat and release. The rounding is
-//! then capped at the allocation, and never falls below the occupied count.
+//! then capped at the ceiling, and never falls below the occupied count.
 
 use super::super::*;
 use crate::model::audio::voxcpm::model::widths::batch_width;
@@ -27,9 +31,10 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     ///
     /// # Errors
     ///
-    /// Propagates a narrowing or cache refusal. The computed width is
-    /// always in `1..=batch`, so neither can refuse it for being out of
-    /// range.
+    /// Propagates a narrowing or cache refusal. Seating widens the
+    /// allocation to the same rounded width before it claims a lane, so the
+    /// computed width is always in `1..=alloc_width` and neither the lane
+    /// table nor a cache can refuse it for being out of range.
     pub(super) fn refresh_active_width(&mut self) -> Result<()>
     where
         R::Client: IndexingOps<R>,
@@ -43,7 +48,7 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     }
 
     /// The width the currently occupied slots call for: the smallest
-    /// allowlist entry that holds them, capped at the allocation and never
+    /// allowlist entry that holds them, capped at the ceiling and never
     /// below the slots themselves.
     ///
     /// An empty state steps one row rather than none: the caches and the
@@ -56,7 +61,7 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
             .map_or(0, |row| row + 1);
         let needed = seated.max(1);
         // `batch_width` saturates at its largest entry, which can sit below
-        // an allocation wider than the list. Clamping to `needed` from below
+        // a ceiling wider than the list. Clamping to `needed` from below
         // keeps a seated row inside the prefix whatever the list holds.
         batch_width(needed).min(self.batch).max(needed)
     }
@@ -89,7 +94,7 @@ mod tests {
         state
     }
 
-    /// The allocation width never moves, and an empty state steps one row.
+    /// The ceiling never moves, and an empty state steps one row.
     #[test]
     fn an_empty_state_steps_one_row() {
         let (client, device) = cpu_setup();
@@ -97,6 +102,7 @@ mod tests {
         let state = seated(&client, &m, &device, 8, &[]);
         assert_eq!(state.batch, 8);
         assert_eq!(state.active_width(), 1);
+        assert_eq!(state.alloc_width(), 1, "nothing seated, nothing reserved");
     }
 
     /// The width rounds UP to an allowlist entry: three seated slots step at
@@ -109,11 +115,16 @@ mod tests {
             let slots: Vec<usize> = (0..seats).collect();
             let state = seated(&client, &m, &device, 8, &slots);
             assert_eq!(state.active_width(), want, "{seats} seated");
-            assert_eq!(state.batch, 8, "the allocation never moves");
+            assert_eq!(state.batch, 8, "the ceiling never moves");
+            assert_eq!(
+                state.alloc_width(),
+                want,
+                "the allocation follows the stepped width up"
+            );
         }
     }
 
-    /// The rounding is capped at the allocation: a state narrower than the
+    /// The rounding is capped at the ceiling: a state narrower than the
     /// next allowlist entry steps its own width and no more.
     #[test]
     fn the_width_never_exceeds_the_allocation() {

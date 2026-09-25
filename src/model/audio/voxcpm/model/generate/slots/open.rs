@@ -1,18 +1,26 @@
-//! [`GenerateState::open`]: an empty state at a fixed slot width.
+//! [`GenerateState::open`]: an empty state at a slot CEILING, allocated for
+//! one row.
 
 use super::super::*;
 use crate::model::audio::voxcpm::minicpm4::LanePositions;
 use crate::model::audio::voxcpm::model::prefill::PrefillState;
 
 impl<R: Runtime<DType = DType>> GenerateState<R> {
-    /// Open an empty state of `width` slots, every slot free.
+    /// Open an empty state that may hold up to `width` slots, every slot
+    /// free.
     ///
-    /// Both KV caches are allocated at `width` rows and `capacity` cache
-    /// positions, so `capacity` must cover the longest prefill this state
-    /// will host plus that request's patch budget. `lm_hidden`,
-    /// `residual_hidden` and `prefix_feat_cond` are allocated at the same
-    /// width and zeroed; a slot's own values arrive with
-    /// [`admit`](Self::admit).
+    /// `width` is the CEILING, not a reservation. Every DEVICE tensor —
+    /// both KV caches, `lm_hidden`, `residual_hidden`, `prefix_feat_cond`
+    /// and the lane table — is allocated for ONE row here and widened by
+    /// [`admit`](Self::admit) when a slot above the allocation is seated,
+    /// so a state that only ever hosts one request pays for one row. The
+    /// HOST per-row vectors are sized at the ceiling instead: they are
+    /// small, and a slot index is checked against the ceiling, so growing
+    /// them would only add a second row count to confuse.
+    ///
+    /// Both KV caches hold `capacity` cache positions, so `capacity` must
+    /// cover the longest prefill this state will host plus that request's
+    /// patch budget.
     ///
     /// # Errors
     ///
@@ -32,35 +40,40 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
         }
         let (dtype, device) = model.lm_dtype_device()?;
         let hidden = model.base_lm.hidden_size();
+        // ONE row, whatever the ceiling. `admit` widens the allocation to
+        // cover a slot before it seats anything into it.
+        let alloc = 1;
         let rows = || {
-            Tensor::<R>::zeros(&[width, hidden], dtype, device)
+            Tensor::<R>::zeros(&[alloc, hidden], dtype, device)
                 .map(|t| Var::new(t, false))
                 .map_err(Error::Numr)
         };
         let prefill = PrefillState {
             lm_hidden: rows()?,
             residual_hidden: rows()?,
-            base_cache: model.base_lm.new_kv_cache(width, capacity)?,
-            residual_cache: model.residual_lm.new_kv_cache(width, capacity)?,
-            lanes: LanePositions::empty(width, model.lane_rope_positions()?, device)?,
-            batch: width,
+            base_cache: model.base_lm.new_kv_cache(alloc, capacity)?,
+            residual_cache: model.residual_lm.new_kv_cache(alloc, capacity)?,
+            lanes: LanePositions::empty(alloc, model.lane_rope_positions()?, device)?,
+            batch: alloc,
             intermediates: None,
         };
         let mut state = Self {
             prefill,
             prefix_feat_cond: Var::new(
-                super::super::types::zero_patches(width, model.config, dtype, device)?,
+                super::super::types::zero_patches(alloc, model.config, dtype, device)?,
                 false,
             ),
             patches: (0..width).map(|_| Vec::new()).collect(),
             batch: width,
-            active_width: width,
+            alloc_width: alloc,
+            active_width: alloc,
             outcomes: vec![None; width],
             patch_len: vec![0; width],
             slot_options: vec![None; width],
         };
-        // Nothing is seated yet, so the stepped width collapses to its floor
-        // rather than staying at the allocation.
+        // Nothing is seated yet, so the stepped width is the floor, which
+        // is also what was just allocated. Running the one rule that decides
+        // the width keeps this constructor from having its own answer.
         state.refresh_active_width()?;
         Ok(state)
     }
@@ -163,7 +176,10 @@ mod tests {
         assert!(!wide.occupied(2) && !wide.occupied(3));
         assert!(wide.finished(2), "a free slot has nothing to generate");
         assert!(!wide.all_finished(), "two slots are still open");
-        assert_eq!(wide.prefill.lanes.kv_end().to_vec::<i32>()[2..], [0, 0]);
+        // Two seated slots, so two rows allocated: the ceiling's other two
+        // slots cost nothing until something is seated into them.
+        assert_eq!(wide.alloc_width(), 2);
+        assert_eq!(wide.prefill.lanes.kv_end().to_vec::<i32>().len(), 2);
 
         m.patch_generator()
             .generate(&client, &mut wide, &opts)

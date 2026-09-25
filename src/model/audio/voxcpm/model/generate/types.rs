@@ -155,13 +155,29 @@ pub enum StepOutcome {
 /// caches aligned without a compaction pass. [`patch_len`](Self::patch_len)
 /// is the per-row count that stops advancing at the finish.
 ///
-/// The state carries two widths and they mean different things. `batch` is
-/// the ALLOCATION: the rows every tensor and both caches were built at, and
-/// the width a slot index, a per-row vector and the options' `rows` list are
-/// checked against. `active_width` is what one iteration actually steps: the
-/// prefix of slots that hold a request, rounded up to a width the DiT's
-/// Euler graph cache already has a capture for. Rows at or above it are not
-/// touched by a step at all.
+/// The state carries three widths and they mean different things.
+///
+/// | Width | Counts | Moves |
+/// | --- | --- | --- |
+/// | `batch` | the CEILING: slots this state may ever hold | never |
+/// | `alloc_width` | the ALLOCATION: rows every device tensor and both caches hold | up only |
+/// | `active_width` | the STEPPED prefix one iteration runs | up and down |
+///
+/// `batch` is what a slot index and the options' `rows` list are checked
+/// against, and it is the length of every HOST per-row vector — `patches`,
+/// `outcomes`, `patch_len` and `slot_options`. Those are small and are
+/// sized at the ceiling once, so a slot index always addresses them.
+///
+/// `alloc_width` is what the DEVICE tensors hold: both KV caches,
+/// `lm_hidden`, `residual_hidden`, `prefix_feat_cond` and the lane table.
+/// It starts at one row and grows with the stepped width, never past the
+/// ceiling and never back down. Do not read a device tensor's row count off
+/// `batch`: past `alloc_width` there is no row there.
+///
+/// `active_width` is what one iteration actually steps: the prefix of slots
+/// that hold a request, rounded up to a width the DiT's Euler graph cache
+/// already has a capture for. Rows at or above it are not touched by a step
+/// at all.
 pub struct GenerateState<R: Runtime> {
     /// The prefill handoff, driven forward. `position` here is the ONE
     /// counter both caches follow.
@@ -177,11 +193,25 @@ pub struct GenerateState<R: Runtime> {
     /// `b` counts. Read a row's own patches with
     /// [`row_patches`](Self::row_patches).
     pub patches: Vec<Vec<Var<R>>>,
-    /// Slots ALLOCATED. Every per-step tensor and both KV caches were built
-    /// at this width and it never changes for the life of the state, so it
-    /// is what a slot index, a per-row vector and
-    /// [`GenerateOptions::rows`] are sized and checked against.
+    /// Slots this state may ever hold — the CEILING, fixed for its life.
+    ///
+    /// A slot index, [`GenerateOptions::rows`] and every HOST per-row
+    /// vector on this state are sized and checked against it. The DEVICE
+    /// tensors are NOT: they hold [`alloc_width`](Self::alloc_width()) rows,
+    /// which is this or less.
     pub batch: usize,
+    /// Rows ALLOCATED: what both KV caches, both handoff rows,
+    /// `prefix_feat_cond` and the lane table were built at.
+    ///
+    /// A state opens at one row whatever its ceiling, and grows to cover a
+    /// slot before anything is seated into it. Growth rounds up to the same
+    /// allowlist the stepped width uses and stops at the ceiling, so a state
+    /// grows at most a few times in its life. It NEVER shrinks: a batch that
+    /// has seen concurrency keeps the room rather than reallocating on the
+    /// next burst.
+    ///
+    /// Read it from outside this module through the `alloc_width` method.
+    pub(crate) alloc_width: usize,
     /// Slots STEPPED: the prefix `0..active_width` one iteration runs over.
     ///
     /// Slots are seated lowest-free-first, so the occupied slots are a
@@ -270,6 +300,7 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
             prefix_feat_cond: Var::new(zeros, false),
             patches: (0..batch).map(|_| Vec::new()).collect(),
             batch,
+            alloc_width: batch,
             active_width: batch,
             outcomes: vec![None; batch],
             patch_len: vec![0; batch],
@@ -278,10 +309,17 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     }
 
     /// Slots the loop STEPS: the prefix `0..active_width()` one iteration
-    /// runs over. [`batch`](Self::batch) is the allocated width instead, and
-    /// is what a slot index is checked against.
+    /// runs over. [`batch`](Self::batch) is the ceiling instead, and is what
+    /// a slot index is checked against.
     pub fn active_width(&self) -> usize {
         self.active_width
+    }
+
+    /// Rows the device tensors hold — see [`alloc_width`](Self::alloc_width()).
+    /// At least [`active_width`](Self::active_width()), at most
+    /// [`batch`](Self::batch).
+    pub fn alloc_width(&self) -> usize {
+        self.alloc_width
     }
 
     /// Whether slot `row` holds a request.
@@ -289,8 +327,12 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     /// The lane table is the one record of that: it is what decides the
     /// slot's key range, so nothing here can disagree with what the kernels
     /// read.
+    ///
+    /// A slot at or above the allocation holds nothing by construction:
+    /// seating one grows the allocation to cover it first, so there is no
+    /// lane up there to be occupied.
     pub fn occupied(&self, row: usize) -> bool {
-        row < self.batch && !self.prefill.lanes.is_free(row)
+        row < self.alloc_width && !self.prefill.lanes.is_free(row)
     }
 
     /// Whether row `row` has finished (stop token or cap). A free slot has

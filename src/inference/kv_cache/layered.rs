@@ -20,7 +20,7 @@ pub struct LayeredKvCacheConfig {
 
 /// Multi-layer KV cache for a full transformer model
 pub struct LayeredKvCache<R: Runtime> {
-    layers: Vec<KvCache<R>>,
+    pub(super) layers: Vec<KvCache<R>>,
 }
 
 impl<R: Runtime<DType = DType>> LayeredKvCache<R>
@@ -120,9 +120,10 @@ where
     /// same storage.
     ///
     /// After this call no growable handle to these layers exists anywhere:
-    /// [`FrozenLayeredKvCache`] has no `grow`, `ensure_capacity`, `update`
-    /// or `update_fused`, so nothing reachable through it can move a
-    /// layer's K or V tensor off the address it was allocated at.
+    /// [`FrozenLayeredKvCache`] has no `grow`, `grow_batch`,
+    /// `ensure_capacity`, `update` or `update_fused`, so nothing reachable
+    /// through it can move a layer's K or V tensor off the address it was
+    /// allocated at — on the key axis or the lane axis.
     pub fn freeze(self) -> FrozenLayeredKvCache<R> {
         FrozenLayeredKvCache::from_growable(self)
     }

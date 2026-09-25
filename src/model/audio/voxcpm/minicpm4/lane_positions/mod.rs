@@ -4,9 +4,10 @@
 //!
 //! `table` holds the table itself — construction, seating, advancing and the
 //! device mirror. `active` holds the stepped width and the decode view
-//! narrowed to it.
+//! narrowed to it. `grow` widens the allocated lane count.
 
 mod active;
+mod grow;
 mod table;
 
 pub use table::LanePositions;

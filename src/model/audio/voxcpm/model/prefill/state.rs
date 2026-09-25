@@ -80,7 +80,10 @@ pub struct PrefillState<R: Runtime> {
     /// loop writes both at the same position and advances the table once,
     /// after both have stepped.
     pub lanes: LanePositions<R>,
-    /// Rows in the batch, `B >= 1`.
+    /// Rows ALLOCATED, `B >= 1`: what the tensors and both caches here
+    /// hold. A prefill's own rows never move. A slotted generation state
+    /// drives this handoff forward in place and widens it as it seats more
+    /// slots, so it keeps this in step with the rows it allocated.
     pub batch: usize,
     /// Present only when the prefill ran via a `_capturing` entry point;
     /// always `None` on the plain paths, which allocate nothing extra.

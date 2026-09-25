@@ -113,13 +113,15 @@ where
 {
     /// Open an empty batch of `width` slots.
     ///
-    /// `width` is the ALLOCATION and is fixed for the batch's whole life:
-    /// every tensor and both caches are built at it. What one step runs over
-    /// is the prefix of slots that hold a request, which
-    /// [`GenerateState`] recomputes as slots are seated and released. That
-    /// stepped width is the shape key of the DiT's Euler graph cache, and it
-    /// only ever takes one of a short list of values, so the captures are
-    /// shared rather than churned.
+    /// `width` is the CEILING and is fixed for the batch's whole life: it
+    /// bounds the slots, and nothing is seated above it. The device tensors
+    /// start at one row and [`GenerateState`] widens them as slots above the
+    /// allocation are seated, so an idle batch holds one row rather than
+    /// `width` of them. What one step runs over is the prefix of slots that
+    /// hold a request, which [`GenerateState`] recomputes as slots are
+    /// seated and released. That stepped width is the shape key of the DiT's
+    /// Euler graph cache, and it only ever takes one of a short list of
+    /// values, so the captures are shared rather than churned.
     fn open(inner: &'a EngineInner<R>, width: usize, capacity: usize) -> Result<Self> {
         let mut options = GenerateOptions::new(MAX_LEN_CAP, inner.options.seed);
         options.cfm.n_timesteps = inner.options.n_timesteps;

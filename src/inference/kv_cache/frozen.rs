@@ -5,9 +5,9 @@
 //! tensors at new addresses, which the replay never sees: it keeps reading
 //! the addresses it captured. [`LayeredKvCache::freeze`] consumes the
 //! growable cache and returns [`FrozenLayeredKvCache`], whose type carries
-//! no `grow`, `ensure_capacity`, `update` or `update_fused` — calling one
-//! is a compile error, not a runtime check. The absence of the method is
-//! the guarantee.
+//! no `grow`, `grow_batch`, `ensure_capacity`, `update` or `update_fused` —
+//! calling one is a compile error, not a runtime check. The absence of the
+//! method is the guarantee.
 
 use crate::error::Result;
 use crate::inference::kv_cache::basic::KvCache;

@@ -114,13 +114,17 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + FlashAttentionOps<R>,
     {
         let (patch_size, feat_dim) = (self.config.patch_size, self.config.feat_dim);
-        // The ALLOCATION width: what every stored tensor, every per-row
-        // vector and the options' `rows` list are sized at.
-        let batch = state.batch;
+        // The CEILING: what the per-row host vectors and the options' `rows`
+        // list are sized at.
+        let ceiling = state.batch;
+        // The ALLOCATION width: the rows every stored device tensor holds.
+        // It grows with the stepped width and stops at the ceiling, so it is
+        // the width the shape checks below read, never the ceiling.
+        let batch = state.alloc_width;
         // The STEPPED width: the prefix of slots this iteration runs. The
         // slots at or above it hold no request and are not touched below.
         let rows = state.active_width;
-        options.check(batch)?;
+        options.check(ceiling)?;
         if state.all_finished() {
             return Err(Error::InvalidArgument {
                 arg: "state",
@@ -334,9 +338,9 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
 /// when the two are already the same width.
 ///
 /// The per-step tensors a state carries between iterations — both handoff
-/// rows and the prefix condition — stay allocated at the state's full width,
-/// while a step computes only the stepped rows. A slot seated above the
-/// stepped prefix needs a row of its own to be written into before the
+/// rows and the prefix condition — stay allocated at the state's allocation
+/// width, while a step computes only the stepped rows. A slot seated above
+/// the stepped prefix needs a row of its own to be written into before the
 /// prefix widens to cover it, so the width cannot follow the step. The
 /// stepped rows are the tensor's prefix, so this replaces exactly them and
 /// leaves every other row where seating put it.

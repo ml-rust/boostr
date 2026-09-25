@@ -18,10 +18,11 @@ use numr::tensor::Tensor;
 /// the same position and read over the same range, so they advance together
 /// through one [`advance`](Self::advance) after both have stepped.
 ///
-/// `kv_end` is allocated once and rewritten in place through
-/// [`HostCopyOps::write_host_slice`], so its device address holds for the
-/// life of the table. The host `lens` mirror backs every write, so no step
-/// reads a device tensor back.
+/// `kv_end` is rewritten in place through
+/// [`HostCopyOps::write_host_slice`], so its device address holds across
+/// every seat, free and advance. Only [`LanePositions::grow_batch`] moves
+/// it, by replacing it with a wider tensor. The host `lens` mirror backs
+/// every write, so no step reads a device tensor back.
 ///
 /// `rope_table_len` bounds every row: a position the model's rope table does
 /// not hold is refused here, not read out of bounds in a kernel. `None` for
@@ -32,7 +33,9 @@ use numr::tensor::Tensor;
 /// prefix still runs every sub-step of the batch, and its step writes K/V at
 /// its own position 0, which the empty range keeps out of every softmax.
 /// A lane can also be stepped or not: the table carries a STEPPED WIDTH, the
-/// prefix of lanes a decode call covers. `super::active` owns it.
+/// prefix of lanes a decode call covers. `super::active` owns it. The
+/// ALLOCATED width is not fixed either: `super::grow` widens it, adding
+/// free lanes above the ones already seated and never removing any.
 pub struct LanePositions<R: Runtime> {
     pub(super) pad: Option<LeftPad<R>>,
     pub(super) lens: Vec<usize>,
@@ -40,7 +43,7 @@ pub struct LanePositions<R: Runtime> {
     pub(super) occupied: Vec<bool>,
     pub(super) kv_end: Tensor<R>,
     /// Staging for `kv_end`, one entry per row.
-    ends: Vec<i32>,
+    pub(super) ends: Vec<i32>,
     rope_table_len: Option<usize>,
     /// Lanes a decode call steps: the prefix `0..active_width`. Starts at
     /// the full width and is lowered by
@@ -262,7 +265,7 @@ impl<R: Runtime<DType = DType>> LanePositions<R> {
     ///
     /// An occupied lane ends one past the position it is about to write; a
     /// free lane ends at 0, an empty range no kernel reads.
-    fn flush<C: HostCopyOps<R>>(&mut self, client: &C) -> Result<()> {
+    pub(super) fn flush<C: HostCopyOps<R>>(&mut self, client: &C) -> Result<()> {
         self.ends.clear();
         for (b, (len, held)) in self.lens.iter().zip(&self.occupied).enumerate() {
             self.ends.push(if *held { as_i32(len + 1, b)? } else { 0 });

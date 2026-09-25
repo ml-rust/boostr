@@ -43,27 +43,29 @@ pub struct VoxCpm2SynthOptions {
     /// Whether the owner thread keeps ONE batch open and admits queued
     /// requests into its free slots between steps.
     ///
-    /// Off (the default), a batch is built, run to completion and torn
-    /// down, so a request arriving while one runs waits for that batch to
-    /// drain — the whole of a long utterance, in the worst case. That wait
-    /// is what this option removes, and it is the only thing it removes.
+    /// Off, a batch is built, run to completion and torn down, so a request
+    /// arriving while one runs waits for that batch to drain — the whole of
+    /// a long utterance, in the worst case. That wait is what this option
+    /// removes, and it is the only thing it removes.
     ///
-    /// On, the batch is persistent: a request arriving mid-generation
-    /// prefills on the owner thread and joins on the NEXT step. The batch
-    /// steps only the rows actually seated, rounded up to a width the Euler
-    /// graph cache holds, so an idle slot costs no compute and a lone
-    /// request is stepped as a batch of one, exactly as the off route steps
-    /// it.
+    /// On (the default), the batch is persistent: a request arriving
+    /// mid-generation prefills on the owner thread and joins on the NEXT
+    /// step. The batch steps only the rows actually seated, rounded up to a
+    /// width the Euler graph cache holds, so an idle slot costs no compute
+    /// and a lone request is stepped as a batch of one, exactly as the off
+    /// route steps it.
     ///
-    /// What an idle slot does cost is MEMORY, and that is why this is off
-    /// by default. Both caches are sized once at
-    /// [`max_batch`](Self::max_batch) slots of
-    /// [`continuous_capacity`](Self::continuous_capacity) positions and held
-    /// for the engine's whole life, so `max_batch` is a standing
-    /// reservation rather than a peak one — and it is per ENGINE, so a host
-    /// serving several bundles pays it once per bundle. Turn this on where
-    /// requests genuinely overlap and the reservation fits, and set
-    /// `max_batch` to the concurrency actually served.
+    /// Nor does an unused slot cost memory. The row allocation opens at one
+    /// and grows only as far as concurrency actually reaches, so
+    /// [`max_batch`](Self::max_batch) is the ceiling a batch may grow to
+    /// rather than a reservation taken up front. It never shrinks again: a
+    /// batch that has seen concurrency keeps the room, because giving it
+    /// back would mean reallocating on the next burst.
+    ///
+    /// What each seated row does hold is
+    /// [`continuous_capacity`](Self::continuous_capacity) cache positions
+    /// for as long as the engine lives, in both caches. Turn this off where
+    /// that per-row reservation is worth more than mid-flight admission.
     ///
     /// A row renders the same samples either way: its noise draw follows its
     /// own emitted-patch count and its own seed, neither of which depends on
@@ -110,7 +112,7 @@ impl Default for VoxCpm2SynthOptions {
             stream_chunk_patches: 4,
             batch_window: Duration::from_millis(20),
             max_batch: 8,
-            continuous_batching: false,
+            continuous_batching: true,
             continuous_capacity: 1024,
         }
     }

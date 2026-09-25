@@ -32,15 +32,20 @@
 //! - **Step 7 consumes the POST-fsq `lm_hidden`**, and the concat order is
 //!   `(lm_hidden, curr_embed)`. That concat is `2 * lm_hidden` wide, so
 //!   swapping the halves is shape-valid and computes a different model.
-//! - **A state carries TWO widths and they are not interchangeable.**
-//!   [`GenerateState::batch`] is the ALLOCATION: the slots every tensor and
-//!   both caches were built at, and the width a slot index, a per-row vector
-//!   and [`GenerateOptions::rows`] are checked against. The stepped width,
-//!   `GenerateState::active_width`, is the prefix of slots one iteration
-//!   actually runs; the rows at or above it hold no request and are not
-//!   touched by a step at all. It is the occupied prefix rounded UP to an
-//!   entry of [`widths::BATCH_WIDTHS`](super::widths::BATCH_WIDTHS), because
-//!   the DiT's Euler solver keys its captured graphs by batch size.
+//! - **A state carries THREE widths and they are not interchangeable.**
+//!   [`GenerateState::batch`] is the CEILING: the slots the state may ever
+//!   hold, and the width a slot index, a per-row HOST vector and
+//!   [`GenerateOptions::rows`] are checked against. `GenerateState::alloc_width`
+//!   is the ALLOCATION: the rows every DEVICE tensor and both caches hold.
+//!   It opens at ONE row whatever the ceiling, is widened to cover a slot
+//!   before that slot is seated, and never shrinks — so a shape check on a
+//!   stored tensor reads it, never the ceiling. `GenerateState::active_width`
+//!   is the prefix of slots one iteration actually runs; the rows at or
+//!   above it hold no request and are not touched by a step at all. It is
+//!   the occupied prefix rounded UP to an entry of
+//!   [`widths::BATCH_WIDTHS`](super::widths::BATCH_WIDTHS), because the
+//!   DiT's Euler solver keys its captured graphs by batch size, and the
+//!   allocation rounds to the same list.
 //! - **ONE [`LanePositions`](crate::model::audio::voxcpm::minicpm4::LanePositions)
 //!   table drives BOTH caches and EVERY STEPPED row.** The prefill primes every row to
 //!   `S_max` and the table advances every row by exactly one per iteration, so

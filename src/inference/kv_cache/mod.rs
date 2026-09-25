@@ -1,5 +1,6 @@
 pub mod basic;
 pub mod frozen;
+mod grow_batch;
 pub mod lanes;
 pub mod layered;
 pub mod paged;

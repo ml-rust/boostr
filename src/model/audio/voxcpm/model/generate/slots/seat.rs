@@ -12,17 +12,24 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     /// own two caches holding its sequence from cache position 0, and its
     /// own `[1, hidden]` handoff rows.
     ///
+    /// `slot` is checked against the CEILING, and the device allocation is
+    /// widened to cover it before anything is written. Every check runs
+    /// first, so a handoff the slot cannot take leaves the allocation where
+    /// it was.
+    ///
     /// The lane is claimed LAST. Everything before it writes into slot
     /// `slot` alone, so a refusal part way through leaves the slot free and
     /// the table saying so — the slot can be seated again, and the batch
-    /// steps over it meanwhile with an empty key range.
+    /// steps over it meanwhile with an empty key range. A widened
+    /// allocation is not a seat: it adds free rows and nothing else, so a
+    /// refusal after it leaves the state usable.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] when `slot` is outside the width, when it
-    /// already holds a request, when `prefilled` carries more than one row
-    /// or carries left padding, when its two caches disagree on length, or
-    /// when its handoff rows are not `[1, hidden]`. A cache, copy or
+    /// [`Error::InvalidArgument`] when `slot` is outside the ceiling, when
+    /// it already holds a request, when `prefilled` carries more than one
+    /// row or carries left padding, when its two caches disagree on length,
+    /// or when its handoff rows are not `[1, hidden]`. A cache, copy or
     /// allocation error propagates.
     pub fn admit<C>(
         &mut self,
@@ -49,17 +56,24 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
                 ),
             });
         }
+        // The handoff rows are stored at the ALLOCATION, which is one row
+        // until a slot above it is seated, so that is the width they are
+        // checked at rather than the ceiling.
         let hidden = check_row(
             "state.prefill.lm_hidden",
             &self.prefill.lm_hidden,
-            self.batch,
+            self.alloc_width,
         )?;
         check_row(
             "state.prefill.residual_hidden",
             &self.prefill.residual_hidden,
-            self.batch,
+            self.alloc_width,
         )?;
         let len = check_prefilled(prefilled, hidden)?;
+        // Every check is done, so widening now cannot leave a grown
+        // allocation behind a refusal. This slot needs a row of its own
+        // before any of the writes below can address it.
+        self.ensure_alloc(client, slot + 1)?;
         let (dtype, device) = (
             self.prefix_feat_cond.tensor().dtype(),
             self.prefix_feat_cond.tensor().device().clone(),
@@ -114,7 +128,7 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] when `slot` is outside the width; a copy
+    /// [`Error::InvalidArgument`] when `slot` is outside the ceiling; a copy
     /// error propagates.
     pub fn release<C: HostCopyOps<R>>(&mut self, client: &C, slot: usize) -> Result<()>
     where
@@ -125,6 +139,13 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
                 arg: "slot",
                 reason: format!("expected a slot below {}, got {slot}", self.batch),
             });
+        }
+        if slot >= self.alloc_width {
+            // The allocation never reached this slot, so nothing was ever
+            // seated in it and there is no lane to give back. Releasing it
+            // is the no-op releasing any free slot is, and it must not
+            // widen the allocation to say so.
+            return Ok(());
         }
         // Dropped here rather than at the end of the batch: a finished
         // request's patches are the largest thing a slot holds.
@@ -209,8 +230,8 @@ where
             return Err(Error::InvalidArgument {
                 arg: "prefilled",
                 reason: format!(
-                    "expected a handoff {hidden} wide, the width this state was opened at, \
-                     got {width}"
+                    "expected a handoff {hidden} wide, the hidden size this state was \
+                     opened at, got {width}"
                 ),
             });
         }

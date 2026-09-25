@@ -137,8 +137,25 @@ impl<'a, R: Runtime<DType = DType>> CacheStep<'a, R> {
         }
         match &self.write {
             Write::Fused(position) => Some(*position),
-            Write::PerLane { pos, .. } => uniform(pos),
+            Write::PerLane { pos, .. } => self.uniform_occupied(pos),
         }
+    }
+
+    /// The one position every OCCUPIED lane sits at, or `None` when they
+    /// differ or none is occupied.
+    ///
+    /// A free lane sits at its own position 0 and holds nothing, so counting
+    /// it would call a batch ragged for a row that has no sequence to be
+    /// ragged about — and one live row beside free lanes is the commonest
+    /// batch there is.
+    fn uniform_occupied(&self, pos: &[usize]) -> Option<usize> {
+        let mut seated = pos
+            .iter()
+            .enumerate()
+            .filter(|(b, _)| self.is_occupied(*b))
+            .map(|(_, p)| *p);
+        let first = seated.next()?;
+        seated.all(|p| p == first).then_some(first)
     }
 
     /// The key bound the flash kernel takes: `Shared` while every row ends
@@ -151,11 +168,21 @@ impl<'a, R: Runtime<DType = DType>> CacheStep<'a, R> {
     /// reduction order. So `PerRow` is emitted only when the ends genuinely
     /// differ, which is the only case it describes something `Shared`
     /// cannot.
+    ///
+    /// `cache_seq_len` is the cache's own cursor and bounds a FUSED write
+    /// alone, where every row ends exactly there. It is the MAXIMUM over
+    /// lanes and only ever rises, so on the per-lane arm it is not any
+    /// row's key count: once a long sequence has run in a lane, a shorter
+    /// one seated in its place still leaves the cursor high, and bounding
+    /// the softmax by it would attend over the slots the previous occupant
+    /// wrote. A lane's keys run from cache position 0 to its own write
+    /// position, and this call adds the one position it writes, so the
+    /// shared bound is that position plus one.
     pub fn kv_seq_len(&self, cache_seq_len: usize) -> KvSeqLen<'a, R> {
         match &self.write {
             Write::Fused(_) => KvSeqLen::Shared(cache_seq_len),
-            Write::PerLane { pos, kv_end, .. } => match uniform(pos) {
-                Some(_) => KvSeqLen::Shared(cache_seq_len),
+            Write::PerLane { pos, kv_end, .. } => match self.uniform_occupied(pos) {
+                Some(position) => KvSeqLen::Shared(position + 1),
                 None => KvSeqLen::PerRow(*kv_end),
             },
         }
@@ -272,13 +299,6 @@ impl<'a, R: Runtime<DType = DType>> CacheStep<'a, R> {
             }
         }
     }
-}
-
-/// The one value every entry holds, or `None` when they differ or there are
-/// none.
-fn uniform(pos: &[usize]) -> Option<usize> {
-    let first = *pos.first()?;
-    pos.iter().all(|p| *p == first).then_some(first)
 }
 
 #[cfg(test)]
@@ -411,6 +431,50 @@ mod tests {
         CacheStep::<CpuRuntime>::lanes(None, &[0, 6], &kv_end, &occupied)
             .check_write_order(&level_fill(900, &[900, 6], 1024))
             .expect("a free lane's stale cache end is not its next slot");
+    }
+
+    /// The shared bound on the per-lane arm is the rows' OWN key end, never
+    /// the cache's cursor.
+    ///
+    /// This is the case a long request leaves behind: it drove the cursor
+    /// high, its lane was freed, and short rows now sit far below it. A
+    /// bound taken from the cursor would put the previous occupant's keys
+    /// in every row's softmax, which no shape check and no write-order
+    /// check can see.
+    #[test]
+    fn the_shared_bound_is_the_rows_own_end_not_the_cursor() {
+        let device = CpuDevice::new();
+        let kv_end = ends(&[4, 4], &device);
+        let pos = [3usize, 3];
+        let step = CacheStep::<CpuRuntime>::lanes(None, &pos, &kv_end, &HELD);
+
+        // The cache's cursor still stands where a previous, longer occupant
+        // of these lanes left it.
+        match step.kv_seq_len(900) {
+            KvSeqLen::Shared(len) => assert_eq!(
+                len, 4,
+                "rows holding 3 keys and writing a fourth must attend over 4"
+            ),
+            KvSeqLen::PerRow(_) => panic!("rows sitting at one position take the shared bound"),
+        }
+    }
+
+    /// A free lane sits at position 0 and holds nothing, so it must not make
+    /// an otherwise level batch ragged — one live row beside free lanes is
+    /// the commonest batch a continuous engine steps.
+    #[test]
+    fn a_free_lane_does_not_make_the_batch_ragged() {
+        let device = CpuDevice::new();
+        let kv_end = ends(&[7, 0], &device);
+        let occupied = [true, false];
+        let pos = [6usize, 0];
+        let step = CacheStep::<CpuRuntime>::lanes(None, &pos, &kv_end, &occupied);
+
+        assert_eq!(step.uniform_position(), Some(6));
+        match step.kv_seq_len(900) {
+            KvSeqLen::Shared(len) => assert_eq!(len, 7),
+            KvSeqLen::PerRow(_) => panic!("one occupied lane is uniform by itself"),
+        }
     }
 
     /// A fused write still names `kv_cache.seq_len()` and the slot it

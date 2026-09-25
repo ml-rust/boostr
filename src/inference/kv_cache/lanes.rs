@@ -115,6 +115,11 @@ where
     /// The raw write behind both [`KvCache::update_lane`] and
     /// [`KvCache::update_lane_within_capacity`]: narrow to `lane`'s row,
     /// write `k`/`v` at `offset`, and record the new length.
+    ///
+    /// `lane` indexes the ALLOCATED width, deliberately: a caller seats a
+    /// sequence into a lane before the stepped width has been widened to
+    /// cover it, so restricting this to the stepped prefix would refuse the
+    /// very write that makes the lane worth stepping.
     fn write_lane<C: KvCacheOps<R>>(
         &mut self,
         k: &Tensor<R>,
@@ -136,7 +141,8 @@ where
         Ok(())
     }
 
-    /// Write one step's K and V into every lane, each at its own position.
+    /// Write one step's K and V into every STEPPED lane, each at its own
+    /// position.
     ///
     /// Lanes hold sequences of different lengths, so a shared write
     /// position would put a lane's token where another lane's tokens are.
@@ -148,10 +154,15 @@ where
     /// * `v` - New V values [batch, num_kv_heads, new_tokens, head_dim]
     /// * `positions` - First cache position each lane's row lands on
     ///
+    /// The count is the cache's ACTIVE batch, not its allocated one: a
+    /// narrowed cache steps the lanes `0..active_batch` and the rows above
+    /// them are not written at all. Those lanes keep whatever they hold,
+    /// which their own key range keeps out of every softmax.
+    ///
     /// # Errors
     ///
     /// [`Error::InferenceError`] when `k` carries a different number of
-    /// rows than the cache has lanes, when `positions` carries a different
+    /// rows than the cache steps, when `positions` carries a different
     /// number of entries, or when a lane's write runs past `max_seq_len`.
     pub fn update_lanes<C: KvCacheOps<R>>(
         &mut self,
@@ -161,11 +172,12 @@ where
         client: &C,
     ) -> Result<()> {
         let (rows, _, new_tokens, _) = k.dims4()?;
-        if rows != self.batch_size || positions.len() != self.batch_size {
+        let stepped = self.active_batch();
+        if rows != stepped || positions.len() != stepped {
             return Err(Error::InferenceError {
                 reason: format!(
-                    "update_lanes wants one row and one position per lane: cache holds {} \
-                     lanes, k holds {rows} rows, positions holds {}",
+                    "update_lanes wants one row and one position per stepped lane: cache \
+                     steps {stepped} of its {} lanes, k holds {rows} rows, positions holds {}",
                     self.batch_size,
                     positions.len()
                 ),

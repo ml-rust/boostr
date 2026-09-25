@@ -1,8 +1,8 @@
-//! [`LanePositions`]: each row's write position across a batched decode, and
-//! the device tensor the attention kernels read its key range from.
+//! The lane table itself: construction, seating, advancing, and the device
+//! mirror of each row's key range. The stepped width and the decode view
+//! narrowed to it live in `super::active`.
 
 use crate::error::{Error, Result};
-use crate::model::audio::voxcpm::minicpm4::cache_step::CacheStep;
 use crate::model::audio::voxcpm::minicpm4::left_pad::LeftPad;
 use numr::dtype::DType;
 use numr::ops::HostCopyOps;
@@ -28,18 +28,31 @@ use numr::tensor::Tensor;
 /// a pair of stacks that rotate nothing.
 ///
 /// A lane can also be FREE: it holds no sequence, its length stays 0 and its
-/// `kv_end` entry is 0, an empty key range. A free lane still runs every
-/// sub-step of the batch — nothing skips a row — and its step writes K/V at
+/// `kv_end` entry is 0, an empty key range. A free lane inside the stepped
+/// prefix still runs every sub-step of the batch, and its step writes K/V at
 /// its own position 0, which the empty range keeps out of every softmax.
+/// A lane can also be stepped or not: the table carries a STEPPED WIDTH, the
+/// prefix of lanes a decode call covers. `super::active` owns it.
 pub struct LanePositions<R: Runtime> {
-    pad: Option<LeftPad<R>>,
-    lens: Vec<usize>,
+    pub(super) pad: Option<LeftPad<R>>,
+    pub(super) lens: Vec<usize>,
     /// Whether lane `b` holds a sequence.
-    occupied: Vec<bool>,
-    kv_end: Tensor<R>,
+    pub(super) occupied: Vec<bool>,
+    pub(super) kv_end: Tensor<R>,
     /// Staging for `kv_end`, one entry per row.
     ends: Vec<i32>,
     rope_table_len: Option<usize>,
+    /// Lanes a decode call steps: the prefix `0..active_width`. Starts at
+    /// the full width and is lowered by
+    /// [`set_active_width`](Self::set_active_width).
+    pub(super) active_width: usize,
+    /// `kv_end` narrowed to `0..active_width`, `None` while the two widths
+    /// agree. A dim-0 prefix views the same storage, so the in-place writes
+    /// `flush` makes show through it.
+    pub(super) kv_end_active: Option<Tensor<R>>,
+    /// `pad` narrowed the same way, `None` when there is no padding or the
+    /// two widths agree.
+    pub(super) pad_active: Option<LeftPad<R>>,
 }
 
 impl<R: Runtime<DType = DType>> LanePositions<R> {
@@ -82,6 +95,9 @@ impl<R: Runtime<DType = DType>> LanePositions<R> {
             kv_end,
             ends,
             rope_table_len,
+            active_width: batch,
+            kv_end_active: None,
+            pad_active: None,
         };
         for b in 0..batch {
             table.check_rope_pos(b, position)?;
@@ -115,6 +131,9 @@ impl<R: Runtime<DType = DType>> LanePositions<R> {
             kv_end,
             ends,
             rope_table_len,
+            active_width: batch,
+            kv_end_active: None,
+            pad_active: None,
         })
     }
 
@@ -208,11 +227,6 @@ impl<R: Runtime<DType = DType>> LanePositions<R> {
         &self.kv_end
     }
 
-    /// The view one decode step takes, borrowed from this table.
-    pub fn step(&self) -> CacheStep<'_, R> {
-        CacheStep::lanes(self.pad.as_ref(), &self.lens, &self.kv_end, &self.occupied)
-    }
-
     /// Count the position every occupied row just decoded.
     ///
     /// Call this ONCE per step, after every stack that shares the table has
@@ -288,10 +302,6 @@ fn as_i32(value: usize, row: usize) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::audio::voxcpm::minicpm4::cache_step::CacheFill;
-    use crate::model::audio::voxcpm::minicpm4::model::tests::{HIDDEN, filled, tiny_model};
-    use crate::test_utils::cpu_setup;
-    use numr::autograd::Var;
     use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
     /// A fresh table puts every row at the prefill's position and ends one
@@ -312,28 +322,6 @@ mod tests {
         assert_eq!(table.positions(), &[5, 5]);
         assert_eq!(table.kv_end().to_vec::<i32>(), vec![6, 6]);
         assert_eq!(table.kv_end().ptr(), address);
-    }
-
-    /// The table hands out a per-lane step whose write positions are its
-    /// own rows, and whose bound stays shared while they agree.
-    #[test]
-    fn the_step_carries_the_tables_own_rows() {
-        let device = CpuDevice::new();
-        let pad = LeftPad::<CpuRuntime>::new(vec![0, 2], &device).expect("pad");
-        let table =
-            LanePositions::<CpuRuntime>::new(Some(pad), 2, 5, None, &device).expect("table");
-        let step = table.step();
-
-        assert_eq!(step.row_write(0), 5);
-        assert_eq!(step.row_write(1), 5);
-        assert_eq!(step.row_start(1), 2);
-        assert_eq!(step.last_write(), 5);
-        step.check_write_order(&CacheFill {
-            filled: 5,
-            lanes: &[5, 5],
-            limit: 8,
-        })
-        .expect("both rows sit at their own end");
     }
 
     /// The rope table bounds a row: the last position it holds is accepted,
@@ -365,59 +353,6 @@ mod tests {
         let pad = LeftPad::<CpuRuntime>::new(vec![4, 4], &device).expect("pad");
         LanePositions::<CpuRuntime>::new(Some(pad), 2, 5, Some(2), &device)
             .expect("every row rotates at position 1");
-    }
-
-    /// The lane step the table hands out writes the same cache slots and
-    /// returns the same floats as the fused write, while every row sits at
-    /// one position.
-    ///
-    /// Bit equality, not a tolerance: the two differ only in how many
-    /// copies carry the K/V into the cache, and both keep the shared key
-    /// bound and the same rotation.
-    #[test]
-    fn a_lane_step_matches_the_fused_step_bit_for_bit() {
-        let (client, device) = cpu_setup();
-        let model = tiny_model(&device);
-        let (long, short) = (5usize, 3usize);
-        let prefix = Var::new(filled(&[2, long, HIDDEN], 2, &device), false);
-        let row = Var::new(filled(&[2, HIDDEN], 3, &device), false);
-        let starts = vec![0, (long - short) as i32];
-
-        let run = |lanes: bool| {
-            let pad = LeftPad::<CpuRuntime>::new(starts.clone(), &device).expect("pad");
-            let mut cache = model.new_kv_cache(2, 8).expect("cache");
-            model
-                .prefill(&client, &prefix, &mut cache, Some(&pad))
-                .expect("prefill");
-            let out = if lanes {
-                let table = LanePositions::<CpuRuntime>::new(Some(pad), 2, long, None, &device)
-                    .expect("table");
-                model
-                    .decode_step(&client, &row, &mut cache, &table.step())
-                    .expect("lane step")
-            } else {
-                let step = CacheStep::prefix(long, Some(&pad));
-                model
-                    .decode_step(&client, &row, &mut cache, &step)
-                    .expect("fused step")
-            };
-            let keys = cache.layer(0).expect("layer").k_cache_raw().to_vec::<f32>();
-            let values = out
-                .tensor()
-                .contiguous()
-                .expect("contiguous")
-                .to_vec::<f32>();
-            (values, keys)
-        };
-
-        let (fused_out, fused_keys) = run(false);
-        let (lane_out, lane_keys) = run(true);
-        assert!(
-            fused_out.iter().any(|v| v.abs() > 1e-6),
-            "degenerate output: the comparison below would pass vacuously"
-        );
-        assert_eq!(lane_out, fused_out);
-        assert_eq!(lane_keys, fused_keys);
     }
 
     /// An empty table starts every lane free at an empty key range; a claim

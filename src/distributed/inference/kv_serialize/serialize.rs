@@ -84,6 +84,21 @@ where
         buf.extend_from_slice(&num_kv_heads.to_le_bytes());
         buf.extend_from_slice(&head_dim.to_le_bytes());
 
+        // The header above names the ALLOCATED row count while the body below
+        // writes what `get_kv()` returns, which is the ACTIVE prefix. The two
+        // agree only on a cache that has not been narrowed, so a narrowed one
+        // is refused here rather than handing the peer a short body under a
+        // full-width header — a mismatch no length field on the wire records.
+        if layer.active_batch() != layer.batch_size() {
+            return Err(anyhow!(
+                "Layer {layer_idx} is stepping {} of its {} rows; a narrowed KV cache \
+                 cannot be serialized, because the wire format carries the allocated \
+                 row count and would describe rows this body does not hold",
+                layer.active_batch(),
+                layer.batch_size()
+            ));
+        }
+
         // Checked before the `seq_len == 0` shortcut: a cache the format cannot carry
         // is refused whether or not it currently holds tokens.
         check_wire_dtype(layer_idx, "K", layer.k_cache_raw().dtype(), wire_dtype)?;

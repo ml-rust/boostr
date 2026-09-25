@@ -96,7 +96,11 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
         self.outcomes[slot] = None;
         self.slot_options[slot] = Some(options);
 
-        self.prefill.lanes.claim(client, slot, len)
+        self.prefill.lanes.claim(client, slot, len)?;
+        // The lane is claimed, so this slot now counts toward the prefix the
+        // loop steps. A slot above the current stepped width widens it here,
+        // which is what puts the new request inside the rows a step runs.
+        self.refresh_active_width()
     }
 
     /// Give slot `slot` back: drop its patches, clear its bookkeeping and
@@ -112,7 +116,10 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     ///
     /// [`Error::InvalidArgument`] when `slot` is outside the width; a copy
     /// error propagates.
-    pub fn release<C: HostCopyOps<R>>(&mut self, client: &C, slot: usize) -> Result<()> {
+    pub fn release<C: HostCopyOps<R>>(&mut self, client: &C, slot: usize) -> Result<()>
+    where
+        R::Client: IndexingOps<R>,
+    {
         if slot >= self.batch {
             return Err(Error::InvalidArgument {
                 arg: "slot",
@@ -125,7 +132,11 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
         self.patch_len[slot] = 0;
         self.outcomes[slot] = None;
         self.slot_options[slot] = None;
-        self.prefill.lanes.free(client, slot)
+        self.prefill.lanes.free(client, slot)?;
+        // Releasing the HIGHEST occupied slot shortens the prefix, so the
+        // loop stops paying for it. Releasing one below it changes nothing:
+        // the prefix still has to reach the highest slot still seated.
+        self.refresh_active_width()
     }
 
     /// The patch geometry `prefix_feat_cond` was allocated at.

@@ -150,10 +150,18 @@ pub enum StepOutcome {
 /// is the one-shot handoff, mutated in place: `lm_hidden`,
 /// `residual_hidden`, both caches and `position` all advance per iteration.
 ///
-/// Every row steps on every iteration, a finished row included — its new
-/// patches are computed and discarded, which is what keeps the shared
+/// Every STEPPED row runs on every iteration, a finished one included — its
+/// new patches are computed and discarded, which is what keeps the shared
 /// caches aligned without a compaction pass. [`patch_len`](Self::patch_len)
 /// is the per-row count that stops advancing at the finish.
+///
+/// The state carries two widths and they mean different things. `batch` is
+/// the ALLOCATION: the rows every tensor and both caches were built at, and
+/// the width a slot index, a per-row vector and the options' `rows` list are
+/// checked against. `active_width` is what one iteration actually steps: the
+/// prefix of slots that hold a request, rounded up to a width the DiT's
+/// Euler graph cache already has a capture for. Rows at or above it are not
+/// touched by a step at all.
 pub struct GenerateState<R: Runtime> {
     /// The prefill handoff, driven forward. `position` here is the ONE
     /// counter both caches follow.
@@ -169,8 +177,23 @@ pub struct GenerateState<R: Runtime> {
     /// `b` counts. Read a row's own patches with
     /// [`row_patches`](Self::row_patches).
     pub patches: Vec<Vec<Var<R>>>,
-    /// Rows in the batch.
+    /// Slots ALLOCATED. Every per-step tensor and both KV caches were built
+    /// at this width and it never changes for the life of the state, so it
+    /// is what a slot index, a per-row vector and
+    /// [`GenerateOptions::rows`] are sized and checked against.
     pub batch: usize,
+    /// Slots STEPPED: the prefix `0..active_width` one iteration runs over.
+    ///
+    /// Slots are seated lowest-free-first, so the occupied slots are a
+    /// prefix and the rows at or above this width hold no request. Those
+    /// rows are not touched at all — not solved, not encoded, not decoded —
+    /// which is why the two widths differ: the allocation is what the state
+    /// COULD hold, this is what it currently holds, rounded up to a width
+    /// the DiT's Euler graph cache already has a capture for.
+    ///
+    /// Recomputed by [`admit`](Self::admit) and [`release`](Self::release).
+    /// Read it from outside this module through the `active_width` method.
+    pub(crate) active_width: usize,
     /// Per-row finish, `None` while the row is still generating.
     pub outcomes: Vec<Option<GenerateOutcome>>,
     /// Per-row emitted patch count; frozen once the row finishes.
@@ -237,15 +260,28 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
         check_row("prefill.residual_hidden", &prefill.residual_hidden, batch)?;
         let hidden = prefill.lm_hidden.tensor();
         let zeros = zero_patches(batch, config, hidden.dtype(), hidden.device())?;
+        // Every row of a prefilled batch holds a request, so the stepped
+        // width IS the allocation here and there is nothing to narrow: the
+        // lane table seats every lane and both caches were built at this
+        // width. The slot path, where the two genuinely differ, recomputes
+        // the width on every seat and release instead.
         Ok(Self {
             prefill,
             prefix_feat_cond: Var::new(zeros, false),
             patches: (0..batch).map(|_| Vec::new()).collect(),
             batch,
+            active_width: batch,
             outcomes: vec![None; batch],
             patch_len: vec![0; batch],
             slot_options: vec![None; batch],
         })
+    }
+
+    /// Slots the loop STEPS: the prefix `0..active_width()` one iteration
+    /// runs over. [`batch`](Self::batch) is the allocated width instead, and
+    /// is what a slot index is checked against.
+    pub fn active_width(&self) -> usize {
+        self.active_width
     }
 
     /// Whether slot `row` holds a request.

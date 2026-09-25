@@ -113,8 +113,13 @@ where
 {
     /// Open an empty batch of `width` slots.
     ///
-    /// The width is fixed for the batch's whole life: it is the shape key of
-    /// the DiT's Euler graph cache, so one capture serves every step.
+    /// `width` is the ALLOCATION and is fixed for the batch's whole life:
+    /// every tensor and both caches are built at it. What one step runs over
+    /// is the prefix of slots that hold a request, which
+    /// [`GenerateState`] recomputes as slots are seated and released. That
+    /// stepped width is the shape key of the DiT's Euler graph cache, and it
+    /// only ever takes one of a short list of values, so the captures are
+    /// shared rather than churned.
     fn open(inner: &'a EngineInner<R>, width: usize, capacity: usize) -> Result<Self> {
         let mut options = GenerateOptions::new(MAX_LEN_CAP, inner.options.seed);
         options.cfm.n_timesteps = inner.options.n_timesteps;
@@ -226,8 +231,13 @@ where
         self.refresh_options();
     }
 
-    /// Step every slot once, then reply for and release the slots that
+    /// Step the seated slots once, then reply for and release the slots that
     /// finished.
+    ///
+    /// The step covers the prefix of slots that hold a request, not the
+    /// whole allocation, so a lone request in a wide batch costs what one
+    /// row costs. The retire walk below still covers every slot: the slot
+    /// table and the per-row records are sized by the allocation.
     ///
     /// A released slot's row is DROPPED here, which drops its reply sender:
     /// that is how a streaming caller's drain loop ends, whether the row ran

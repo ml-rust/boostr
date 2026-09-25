@@ -92,6 +92,30 @@ where
         self.layers.first().map_or(0, KvCache::seq_len)
     }
 
+    /// Step the first `rows` lanes of every layer — see
+    /// [`KvCache::set_active_batch`].
+    ///
+    /// Every layer of a stack is written and read by the same decode call,
+    /// so they move together or a call would meet one width on one layer
+    /// and another on the next.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the first layer's refusal: `rows` is 0 or past the
+    /// allocated batch.
+    pub fn set_active_batch(&mut self, rows: usize) -> Result<()> {
+        for layer in &mut self.layers {
+            layer.set_active_batch(rows)?;
+        }
+        Ok(())
+    }
+
+    /// Lanes a decode call steps, from the first layer;
+    /// 0 when the stack holds no layer.
+    pub fn active_batch(&self) -> usize {
+        self.layers.first().map_or(0, KvCache::active_batch)
+    }
+
     /// Consume this growable cache and hand back a frozen handle over the
     /// same storage.
     ///

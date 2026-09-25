@@ -114,7 +114,12 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             + FlashAttentionOps<R>,
     {
         let (patch_size, feat_dim) = (self.config.patch_size, self.config.feat_dim);
+        // The ALLOCATION width: what every stored tensor, every per-row
+        // vector and the options' `rows` list are sized at.
         let batch = state.batch;
+        // The STEPPED width: the prefix of slots this iteration runs. The
+        // slots at or above it hold no request and are not touched below.
+        let rows = state.active_width;
         options.check(batch)?;
         if state.all_finished() {
             return Err(Error::InvalidArgument {
@@ -122,7 +127,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
                 reason: "every row is finished; nothing left to step".to_string(),
             });
         }
-        check_patch("z", z, &[batch, patch_size, feat_dim])?;
+        check_patch("z", z, &[rows, patch_size, feat_dim])?;
         check_patch(
             "state.prefix_feat_cond",
             &state.prefix_feat_cond,
@@ -135,19 +140,22 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             batch,
         )?;
 
+        // The three per-step inputs, narrowed to the stepped rows. Each is
+        // stored at the allocation width and the stepped rows are its
+        // prefix, so a dim-0 narrow is a layout change over the same
+        // storage: no kernel runs and no bytes move.
+        let lm_hidden = var_narrow(&state.prefill.lm_hidden, 0, 0, rows).map_err(Error::Numr)?;
+        let residual_hidden =
+            var_narrow(&state.prefill.residual_hidden, 0, 0, rows).map_err(Error::Numr)?;
+        let prefix_cond = var_narrow(&state.prefix_feat_cond, 0, 0, rows).map_err(Error::Numr)?;
+
         // 1. mu = cat(lm_to_dit_proj(lm_hidden), res_to_dit_proj(residual_hidden)),
         // two DiT tokens wide.
-        let from_lm = self
-            .aux
-            .lm_to_dit_proj
-            .forward(client, &state.prefill.lm_hidden)?;
-        let from_res = self
-            .aux
-            .res_to_dit_proj
-            .forward(client, &state.prefill.residual_hidden)?;
+        let from_lm = self.aux.lm_to_dit_proj.forward(client, &lm_hidden)?;
+        let from_res = self.aux.res_to_dit_proj.forward(client, &residual_hidden)?;
         let mu = var_cat(&[&from_lm, &from_res], 1, client).map_err(Error::Numr)?;
 
-        // 2. The DiT takes `z` and its condition as [batch, patch_size,
+        // 2. The DiT takes `z` and its condition as [rows, patch_size,
         // feat_dim] and returns the same layout — the layout
         // `prefix_feat_cond` and the emitted patches are stored in, so
         // nothing is transposed here.
@@ -160,19 +168,19 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             z,
             &t_span,
             &mu,
-            &state.prefix_feat_cond,
+            &prefix_cond,
             options.cfm.cfg_value,
             options.cfm.use_cfg_zero_star,
             None,
         )?;
 
-        // 3. The encoder runs on ONE patch per row: [batch, 1, patch_size,
-        // feat_dim].
+        // 3. The encoder runs on ONE patch per stepped row: [rows, 1,
+        // patch_size, feat_dim].
         let single =
-            var_reshape(&pred_feat, &[batch, 1, patch_size, feat_dim]).map_err(Error::Numr)?;
+            var_reshape(&pred_feat, &[rows, 1, patch_size, feat_dim]).map_err(Error::Numr)?;
         let encoded = self.feat_encoder.forward(client, &single)?;
         let projected = self.aux.enc_to_lm_proj.forward(client, &encoded)?;
-        let curr_embed = var_reshape(&projected, &[batch, lm_width]).map_err(Error::Numr)?;
+        let curr_embed = var_reshape(&projected, &[rows, lm_width]).map_err(Error::Numr)?;
 
         // 4. Emit, and condition the NEXT patch on this one. Each row stores
         // its OWN `[1, patch_size, feat_dim]` slice of `pred_feat`: a dim-0
@@ -183,7 +191,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         // computed like any other row's and then dropped rather than stored.
         // A state that outlives a request steps for as long as the engine
         // runs, and a free slot's stored patches would grow with it.
-        for b in 0..batch {
+        for b in 0..rows {
             if !state.occupied(b) {
                 continue;
             }
@@ -193,7 +201,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
                 state.patch_len[b] += 1;
             }
         }
-        state.prefix_feat_cond = pred_feat;
+        state.prefix_feat_cond = widen(client, &state.prefix_feat_cond, pred_feat, rows)?;
 
         // 5. Stop check on the CURRENT `lm_hidden` — the hidden state that
         // produced the patch just emitted, BEFORE step 6 replaces it. The
@@ -211,7 +219,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         // EVERY iteration so `StepIntermediates::stop_logits` is always
         // populated, even on iterations the guard would skip. The guard
         // decision itself (`i_b > options.min_len`) is unchanged either way.
-        let guard_open: Vec<bool> = (0..batch)
+        let guard_open: Vec<bool> = (0..rows)
             .map(|b| {
                 debug_assert!(
                     state.finished(b) || state.patch_len[b] == state.patches[b].len(),
@@ -226,7 +234,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         // open entry: this is exactly the open rows' shared guard.
         let any_guard_open = guard_open.contains(&true);
         let stop_logits = if any_guard_open || capture {
-            Some(self.aux.stop(client, &state.prefill.lm_hidden)?)
+            Some(self.aux.stop(client, &lm_hidden)?)
         } else {
             None
         };
@@ -235,8 +243,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             // `stop_logits` is always `Some` here: `any_guard_open` is one of
             // the two disjuncts above.
             let stops = match &stop_logits {
-                Some(logits) => stop_predicted(client, logits, batch)?,
-                None => vec![false; batch],
+                Some(logits) => stop_predicted(client, logits, rows)?,
+                None => vec![false; rows],
             };
             for (b, &stop) in stops.iter().enumerate() {
                 if stop && guard_open[b] && !state.finished(b) {
@@ -247,7 +255,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         }
         // A row still open after the stop check finishes on its cap; a stop
         // on the same step wins, as it does in the reference's loop order.
-        for b in 0..batch {
+        for b in 0..rows {
             if !state.finished(b) && state.patch_len[b] >= options.row(b).max_len {
                 state.outcomes[b] = Some(GenerateOutcome::MaxLen);
             }
@@ -280,12 +288,12 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             self.base_lm
                 .decode_step(client, &curr_embed, &mut state.prefill.base_cache, &step)?;
         let captured_lm_hidden_pre_fsq = capture.then(|| stepped.clone());
-        state.prefill.lm_hidden = self.fsq.forward(client, &stepped)?;
+        let lm_next = self.fsq.forward(client, &stepped)?;
 
         // 7. `residual_lm` consumes the POST-fsq hidden state, concatenated
-        // with `curr_embed` in THAT order.
-        let fused =
-            var_cat(&[&state.prefill.lm_hidden, &curr_embed], 1, client).map_err(Error::Numr)?;
+        // with `curr_embed` in THAT order. Both are the stepped rows, so the
+        // concat runs at the stepped width like everything above it.
+        let fused = var_cat(&[&lm_next, &curr_embed], 1, client).map_err(Error::Numr)?;
         let residual_in = self.aux.fusion_concat_proj.forward(client, &fused)?;
         let residual = self.residual_lm.decode_step(
             client,
@@ -293,12 +301,18 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             &mut state.prefill.residual_cache,
             &step,
         )?;
-        state.prefill.residual_hidden = residual;
 
         // 8. One table, both caches, in lockstep: ONE advance, here, after
         // both stacks have stepped. `step` borrows the table, so the borrow
         // checker refuses an advance placed between them.
         state.prefill.lanes.advance(client)?;
+
+        // Both handoff rows go back into the allocation-width tensors the
+        // state holds, so a slot seated above the stepped prefix still has a
+        // row of its own for `admit` to write into.
+        state.prefill.lm_hidden = widen(client, &state.prefill.lm_hidden, lm_next, rows)?;
+        state.prefill.residual_hidden =
+            widen(client, &state.prefill.residual_hidden, residual, rows)?;
 
         // `capture` implies `stop_logits` is `Some` (the disjunction at step
         // 5), so the `(true, None)` arm is unreachable, not a silent data
@@ -314,6 +328,32 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         };
         Ok((StepOutcome::Continued, intermediates))
     }
+}
+
+/// `full` with its first `rows` rows replaced by `part`, or `part` itself
+/// when the two are already the same width.
+///
+/// The per-step tensors a state carries between iterations — both handoff
+/// rows and the prefix condition — stay allocated at the state's full width,
+/// while a step computes only the stepped rows. A slot seated above the
+/// stepped prefix needs a row of its own to be written into before the
+/// prefix widens to cover it, so the width cannot follow the step. The
+/// stepped rows are the tensor's prefix, so this replaces exactly them and
+/// leaves every other row where seating put it.
+fn widen<R, C>(client: &C, full: &Var<R>, part: Var<R>, rows: usize) -> Result<Var<R>>
+where
+    R: Runtime<DType = DType>,
+    C: IndexingOps<R>,
+{
+    if full.shape()[0] == rows {
+        return Ok(part);
+    }
+    Ok(Var::new(
+        client
+            .slice_assign(full.tensor(), part.tensor(), 0, 0)
+            .map_err(Error::Numr)?,
+        false,
+    ))
 }
 
 #[cfg(test)]

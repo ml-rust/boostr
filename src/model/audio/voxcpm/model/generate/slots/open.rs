@@ -46,7 +46,7 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
             batch: width,
             intermediates: None,
         };
-        Ok(Self {
+        let mut state = Self {
             prefill,
             prefix_feat_cond: Var::new(
                 super::super::types::zero_patches(width, model.config, dtype, device)?,
@@ -54,10 +54,15 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
             ),
             patches: (0..width).map(|_| Vec::new()).collect(),
             batch: width,
+            active_width: width,
             outcomes: vec![None; width],
             patch_len: vec![0; width],
             slot_options: vec![None; width],
-        })
+        };
+        // Nothing is seated yet, so the stepped width collapses to its floor
+        // rather than staying at the allocation.
+        state.refresh_active_width()?;
+        Ok(state)
     }
 }
 

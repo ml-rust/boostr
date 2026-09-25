@@ -27,14 +27,11 @@ use boostr::model::audio::voxcpm::model::{RowOptions, VoxCpm2Model};
 use crate::error::{Error, Result};
 use crate::voxcpm::engine::types::{EngineInner, VoxCpm2RenderClient};
 
-/// Row counts the generation loop runs at, ascending.
-///
-/// A batch of `n` real rows runs at the smallest width that holds them, so
-/// the DiT Euler loop's per-shape graph cache sees at most these four keys
-/// and never evicts. Padding to a width costs a dead row a full solve on
-/// every step, which is why the list is short and stops at 8 rather than
-/// covering every count.
-pub(super) const BATCH_WIDTHS: [usize; 4] = [1, 2, 4, 8];
+// The allowed row counts and the two roundings over them live in boostr,
+// beside the generation state whose stepped width reads the same list. The
+// engine and the loop must agree on which shapes the DiT's graph cache
+// holds, so there is one definition and the engine imports it.
+pub(super) use boostr::model::audio::voxcpm::model::{batch_width, clamp_max_batch};
 
 /// One queued request. Holds no borrow, so it can sit in the queue while the
 /// caller blocks elsewhere.
@@ -103,30 +100,6 @@ impl Reply {
         };
         let _ = sender.send(Err(err));
     }
-}
-
-/// The width `rows` real rows run at: the smallest allowed width that holds
-/// them all. A caller never asks for more than the clamped cap, so the
-/// largest width is the ceiling.
-pub(super) fn batch_width(rows: usize) -> usize {
-    let largest = BATCH_WIDTHS[BATCH_WIDTHS.len() - 1];
-    BATCH_WIDTHS
-        .iter()
-        .copied()
-        .find(|width| *width >= rows)
-        .unwrap_or(largest)
-}
-
-/// [`VoxCpm2SynthOptions::max_batch`](crate::voxcpm::VoxCpm2SynthOptions::max_batch)
-/// rounded DOWN to an allowed width, at least 1. Rounding down keeps a batch
-/// from ever needing a width the cap forbids.
-pub(super) fn clamp_max_batch(max_batch: usize) -> usize {
-    BATCH_WIDTHS
-        .iter()
-        .copied()
-        .filter(|width| *width <= max_batch)
-        .max()
-        .unwrap_or(1)
 }
 
 /// Per-row caps and seeds for a batch of `width` rows whose first
@@ -261,6 +234,11 @@ mod tests {
     /// Continuous batching is opt-in: by default the owner thread takes the
     /// route below — build a batch, run it to completion, tear it down —
     /// and never opens a persistent one.
+    ///
+    /// What keeps it opt-in is memory, not speed. A persistent batch steps
+    /// only its seated rows, so an idle slot costs no compute, but its two
+    /// caches are reserved for the engine's whole life and a host serving
+    /// several bundles pays that reservation once per bundle.
     #[test]
     fn the_default_options_take_the_whole_batch_route() {
         use crate::voxcpm::options::VoxCpm2SynthOptions;
@@ -274,31 +252,11 @@ mod tests {
         );
     }
 
+    /// The cap the owner thread opens a batch at is one the loop can step
+    /// at. The roundings themselves are covered where they are defined.
     #[test]
-    fn batch_width_rounds_up_to_an_allowed_width() {
-        assert_eq!(batch_width(1), 1);
-        assert_eq!(batch_width(2), 2);
-        assert_eq!(batch_width(3), 4);
-        assert_eq!(batch_width(4), 4);
-        assert_eq!(batch_width(5), 8);
-        assert_eq!(batch_width(8), 8);
-    }
-
-    #[test]
-    fn max_batch_rounds_down_to_an_allowed_width() {
-        assert_eq!(clamp_max_batch(0), 1);
-        assert_eq!(clamp_max_batch(1), 1);
-        assert_eq!(clamp_max_batch(3), 2);
-        assert_eq!(clamp_max_batch(7), 4);
-        assert_eq!(clamp_max_batch(8), 8);
-        assert_eq!(clamp_max_batch(64), 8);
-    }
-
-    /// A clamped cap never lets a batch need a width above the largest
-    /// allowed one.
-    #[test]
-    fn a_clamped_cap_always_admits_its_own_width() {
-        for cap in 0..64 {
+    fn the_engine_cap_is_a_width_the_loop_can_run() {
+        for cap in [0usize, 1, 3, 7, 8, 64] {
             let clamped = clamp_max_batch(cap);
             assert_eq!(batch_width(clamped), clamped, "cap {cap}");
         }

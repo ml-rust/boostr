@@ -7,7 +7,8 @@
 //! loop and its stop logic), [`decode`]
 //! (unfolding patches back to a latent and VAE-decoding to a waveform), `chunked_decode`
 //! (windowed VAE decode so peak memory does not scale with utterance length), [`train`] (the
-//! CFM training loss, wiring teacher-forced conditioning into a differentiable `Var`).
+//! CFM training loss, wiring teacher-forced conditioning into a differentiable `Var`),
+//! [`widths`] (the row counts a generation loop is allowed to run at).
 //! The wav file wrapper is a separate, later unit and does not live here.
 
 pub(crate) mod chunked_decode;
@@ -21,6 +22,7 @@ pub mod prefill;
 pub mod sequence;
 pub mod tcf_loader;
 pub mod train;
+pub mod widths;
 
 pub use config::{
     AUDIO_START_ID, REF_AUDIO_END_ID, REF_AUDIO_FILLER_ID, REF_AUDIO_START_ID, VoxCpm2Config,
@@ -35,3 +37,4 @@ pub use loader::{DEFAULT_CONFIG_FILE, DEFAULT_WEIGHTS_FILE, LoraAdapterReport, V
 pub use patches::{fold_patches, pad_to_multiple};
 pub use prefill::{PaddedBatch, PrefillIntermediates, PrefillRow, PrefillState};
 pub use sequence::{SequenceLayout, check_mask_complementarity};
+pub use widths::{BATCH_WIDTHS, batch_width, clamp_max_batch};

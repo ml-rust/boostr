@@ -3,7 +3,7 @@
 //! batch — until every row has hit a stop token or its cap.
 //!
 //! ```text
-//! per iteration i, over every row of the batch at once:
+//! per iteration i, over every STEPPED row of the batch at once:
 //!   1. mu         = cat(lm_to_dit_proj(lm_hidden), res_to_dit_proj(residual_hidden))
 //!   2. pred_feat  = feat_decoder(mu, cond = prefix_feat_cond^T)
 //!   3. curr_embed = enc_to_lm_proj(feat_encoder(pred_feat.unsqueeze(1)))
@@ -32,8 +32,17 @@
 //! - **Step 7 consumes the POST-fsq `lm_hidden`**, and the concat order is
 //!   `(lm_hidden, curr_embed)`. That concat is `2 * lm_hidden` wide, so
 //!   swapping the halves is shape-valid and computes a different model.
+//! - **A state carries TWO widths and they are not interchangeable.**
+//!   [`GenerateState::batch`] is the ALLOCATION: the slots every tensor and
+//!   both caches were built at, and the width a slot index, a per-row vector
+//!   and [`GenerateOptions::rows`] are checked against. The stepped width,
+//!   `GenerateState::active_width`, is the prefix of slots one iteration
+//!   actually runs; the rows at or above it hold no request and are not
+//!   touched by a step at all. It is the occupied prefix rounded UP to an
+//!   entry of [`widths::BATCH_WIDTHS`](super::widths::BATCH_WIDTHS), because
+//!   the DiT's Euler solver keys its captured graphs by batch size.
 //! - **ONE [`LanePositions`](crate::model::audio::voxcpm::minicpm4::LanePositions)
-//!   table drives BOTH caches and EVERY row.** The prefill primes every row to
+//!   table drives BOTH caches and EVERY STEPPED row.** The prefill primes every row to
 //!   `S_max` and the table advances every row by exactly one per iteration, so
 //!   the rows stay at one shared position throughout this loop. A finished
 //!   row keeps stepping — its patches are computed and discarded — because

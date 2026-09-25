@@ -125,11 +125,15 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
             arg: "kv_cache",
             reason: "expected at least 1 layer, got an empty cache".to_string(),
         })?;
-        if layer.batch_size() != batch {
+        // The STEPPED width, not the allocated one: a cache narrowed to its
+        // occupied lanes is handed a call that carries exactly those rows,
+        // and the lanes above them are not touched on this call at all.
+        if layer.active_batch() != batch {
             return Err(Error::InvalidArgument {
                 arg: "kv_cache",
                 reason: format!(
-                    "expected a cache with batch {batch}, got {}",
+                    "expected a cache stepping batch {batch}, got {} (of {} lanes allocated)",
+                    layer.active_batch(),
                     layer.batch_size()
                 ),
             });

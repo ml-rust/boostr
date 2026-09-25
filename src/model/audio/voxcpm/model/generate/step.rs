@@ -14,8 +14,9 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// This is the primitive: it draws nothing, so a caller (the CFM gate)
     /// can pin `z` per step and reproduce a run exactly.
     /// [`step`](Self::step) is the thin drawing wrapper over it. `z` is
-    /// `[batch, patch_size, feat_dim]` — the patch layout, same as
-    /// `state.prefix_feat_cond` — and is used AS GIVEN;
+    /// `[state.active_width(), patch_size, feat_dim]` — the patch layout,
+    /// over the rows this iteration steps rather than every slot the state
+    /// was allocated with — and is used AS GIVEN;
     /// `options.cfm.temperature` is not applied here; see the module docs.
     /// A caller holding the reference's `[batch, feat_dim, patch_size]`
     /// noise transposes it first, as [`step`](Self::step) does.
@@ -55,8 +56,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// Row `b`'s `z` is `randn_seeded(options.row(b).seed + i_b) *
     /// options.cfm.temperature` drawn over `[1, feat_dim, patch_size]` —
     /// the reference's element order, so a seed keeps placing the same draw
-    /// on the same (feature, position) — stacked over rows, then transposed
-    /// to the `[batch, patch_size, feat_dim]` patch layout. `i_b` is
+    /// on the same (feature, position) — stacked over the STEPPED rows, then
+    /// transposed to the patch layout. `i_b` is
     /// `state.patch_len[b]`, THAT ROW's own emitted-patch count, so
     /// consecutive patches never share noise and each row is reproducible
     /// from its own seed whatever else is in the batch. Everything after the
@@ -89,8 +90,12 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         options.check(state.batch)?;
         let hidden = state.prefill.lm_hidden.tensor();
         let shape = [1, self.config.feat_dim, self.config.patch_size];
-        let mut rows = Vec::with_capacity(state.batch);
-        for b in 0..state.batch {
+        // One draw per STEPPED row. The slots above the stepped prefix hold
+        // no request and take no part in this iteration, so drawing for them
+        // would allocate noise nothing reads.
+        let stepped = state.active_width;
+        let mut rows = Vec::with_capacity(stepped);
+        for b in 0..stepped {
             // Row `b` advances its noise by its OWN emitted-patch count, not
             // by the loop's iteration index. A row still generating has
             // emitted one patch per iteration so far, so the two agree; a
@@ -108,7 +113,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
                     .map_err(Error::Numr)?,
             );
         }
-        let noise = if state.batch == 1 {
+        let noise = if stepped == 1 {
             rows.swap_remove(0)
         } else {
             let refs: Vec<&Tensor<R>> = rows.iter().collect();

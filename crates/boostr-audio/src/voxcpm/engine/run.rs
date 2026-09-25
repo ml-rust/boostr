@@ -1,6 +1,6 @@
 //! What the owner thread does with one batch: resolve each row's reference
-//! voice, prefill the group at once, drive the per-patch loop, and hand each
-//! row its audio.
+//! voice, prefill each request on its own and seat it into a slot, drive the
+//! per-patch loop, and hand each row its audio.
 //!
 //! Every row of a batch steps on every iteration; a finished row's patches
 //! are computed and its bookkeeping stands still. That is what lets a row be
@@ -16,7 +16,6 @@ use numr::dtype::DType;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
-use boostr::model::audio::voxcpm::model::config::AUDIO_START_ID;
 use boostr::model::audio::voxcpm::model::{
     GenerateOptions, GenerateOutcome, GenerateState, PrefillRow, StepOutcome, VoxCpm2Model,
 };
@@ -24,11 +23,6 @@ use boostr::model::audio::voxcpm::model::{
 use crate::error::{Error, Result};
 use crate::voxcpm::engine::batch::{Job, batch_width, row_options};
 use crate::voxcpm::engine::types::{EngineInner, VoxCpm2RenderClient};
-
-/// The prompt a pad row prefills: the audio-start token alone, zero-shot.
-/// The shortest sequence `prefill_batch` accepts, so a pad never widens
-/// `S_max`, and capped at one patch so it retires after the first step.
-const PAD_TOKENS: [u32; 1] = [AUDIO_START_ID];
 
 /// One row of a running batch: the request, its reference tensor, and
 /// whether the caller is still taking output.
@@ -96,29 +90,12 @@ where
     /// return.
     fn generate_batch(&self, rows: &mut [Row<'_, R>]) -> Result<()> {
         let width = batch_width(rows.len());
-        let mut prefill_rows: Vec<PrefillRow<'_, R>> = rows
-            .iter()
-            .map(|row| PrefillRow {
-                ref_feat: row.ref_feat,
-                text_token_ids: &row.job.text_token_ids,
-            })
-            .collect();
-        prefill_rows.resize(
-            width,
-            PrefillRow {
-                ref_feat: None,
-                text_token_ids: &PAD_TOKENS,
-            },
-        );
-
         let real_max_lens: Vec<usize> = rows.iter().map(|row| row.job.max_len).collect();
         let max_len = real_max_lens.iter().copied().max().unwrap_or(1);
-        let s_max = rows
-            .iter()
-            .map(|row| row.job.seq_len)
-            .chain(std::iter::once(PAD_TOKENS.len()))
-            .max()
-            .unwrap_or(PAD_TOKENS.len());
+        let s_max = rows.iter().map(|row| row.job.seq_len).max().unwrap_or(1);
+        // One capacity for every slot: the longest prefill in this batch plus
+        // the largest patch budget any of its rows asked for.
+        let capacity = s_max + max_len;
 
         let mut options = GenerateOptions::new(max_len, self.options.seed);
         options.cfm.n_timesteps = self.options.n_timesteps;
@@ -126,11 +103,22 @@ where
         options.min_len = self.options.min_len;
         options.rows = row_options(&real_max_lens, width, self.options.seed);
 
+        // Each request prefills on its own and is seated into its own slot.
+        // The slots past the last request stay free: they still run every
+        // sub-step, on an empty key range, and count no patch.
         let client = self.client.as_ref();
-        let prefill = self
-            .model
-            .prefill_batch(client, &prefill_rows, s_max + max_len)?;
-        let mut state = GenerateState::start(prefill, self.model.config)?;
+        let mut state = GenerateState::open(&self.model, width, capacity)?;
+        for (b, row) in rows.iter().enumerate() {
+            let prefilled = self.model.prefill_batch(
+                client,
+                &[PrefillRow {
+                    ref_feat: row.ref_feat,
+                    text_token_ids: &row.job.text_token_ids,
+                }],
+                capacity,
+            )?;
+            state.admit(client, b, &prefilled, options.row(b))?;
+        }
 
         self.drive(&mut state, &options, rows)?;
         self.deliver(&state, rows);

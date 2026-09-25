@@ -71,6 +71,7 @@
 //! shape checks and the stop decision, shared by every entry point. `step`
 //! holds one iteration and the noise draw. `run` holds the whole-run
 //! driver. `capture` holds the capturing variant and its shared inner body.
+//! `slots` holds the slot-seating entry points (`open`/`admit`/`release`).
 //! `teacher_forced` holds the batched training-time counterpart.
 
 use crate::error::{Error, Result};
@@ -94,6 +95,7 @@ use numr::tensor::Tensor;
 
 mod capture;
 mod run;
+mod slots;
 mod step;
 mod teacher_forced;
 mod types;

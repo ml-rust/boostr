@@ -279,6 +279,33 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             }),
         }
     }
+
+    /// Rope positions ONE lane table can bound for both stacks, or `None`
+    /// when neither rotates.
+    ///
+    /// Both stacks rotate against a rope table of the same length, or the
+    /// NoPE stack against none, so a row the table admits is a row both can
+    /// serve.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ModelError`] when the two stacks hold rope tables of
+    /// different lengths: one table cannot bound both, and the shorter
+    /// stack would rotate past its own.
+    pub(crate) fn lane_rope_positions(&self) -> Result<Option<usize>> {
+        match (
+            self.base_lm.rope_positions(),
+            self.residual_lm.rope_positions(),
+        ) {
+            (Some(base), Some(residual)) if base != residual => Err(Error::ModelError {
+                reason: format!(
+                    "base_lm holds {base} rope positions and residual_lm holds {residual}; \
+                     one table cannot bound both"
+                ),
+            }),
+            (base, residual) => Ok(base.or(residual)),
+        }
+    }
 }
 
 #[cfg(test)]

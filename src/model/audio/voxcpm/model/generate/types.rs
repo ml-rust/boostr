@@ -175,6 +175,9 @@ pub struct GenerateState<R: Runtime> {
     pub outcomes: Vec<Option<GenerateOutcome>>,
     /// Per-row emitted patch count; frozen once the row finishes.
     pub patch_len: Vec<usize>,
+    /// Row `b`'s cap and seed as [`admit`](Self::admit) seated them, `None`
+    /// for a slot no request has been seated into.
+    pub slot_options: Vec<Option<RowOptions>>,
 }
 
 /// The sub-models the per-patch loop touches, borrowed from a
@@ -233,12 +236,7 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
         check_row("prefill.lm_hidden", &prefill.lm_hidden, batch)?;
         check_row("prefill.residual_hidden", &prefill.residual_hidden, batch)?;
         let hidden = prefill.lm_hidden.tensor();
-        let zeros = Tensor::<R>::zeros(
-            &[batch, config.patch_size, config.feat_dim],
-            hidden.dtype(),
-            hidden.device(),
-        )
-        .map_err(Error::Numr)?;
+        let zeros = zero_patches(batch, config, hidden.dtype(), hidden.device())?;
         Ok(Self {
             prefill,
             prefix_feat_cond: Var::new(zeros, false),
@@ -246,17 +244,28 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
             batch,
             outcomes: vec![None; batch],
             patch_len: vec![0; batch],
+            slot_options: vec![None; batch],
         })
     }
 
-    /// Whether row `row` has finished (stop token or cap).
+    /// Whether slot `row` holds a request.
+    ///
+    /// The lane table is the one record of that: it is what decides the
+    /// slot's key range, so nothing here can disagree with what the kernels
+    /// read.
+    pub fn occupied(&self, row: usize) -> bool {
+        row < self.batch && !self.prefill.lanes.is_free(row)
+    }
+
+    /// Whether row `row` has finished (stop token or cap). A free slot has
+    /// nothing to generate and always counts as finished.
     pub fn finished(&self, row: usize) -> bool {
-        self.outcomes.get(row).is_some_and(Option::is_some)
+        !self.occupied(row) || self.outcomes.get(row).is_some_and(Option::is_some)
     }
 
     /// Whether every row has finished, so the loop has nothing left to do.
     pub fn all_finished(&self) -> bool {
-        self.outcomes.iter().all(Option::is_some)
+        (0..self.batch).all(|row| self.finished(row))
     }
 
     /// Row `row`'s own patches: the first `patch_len[row]` entries of
@@ -278,6 +287,22 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     pub fn emitted(&self) -> usize {
         self.patches.first().map_or(0, Vec::len)
     }
+}
+
+/// `[rows, patch_size, feat_dim]` of zeros: the text-pad patch iteration 0
+/// is conditioned on.
+///
+/// The ONE place that shape is built, so a slot seated by
+/// [`GenerateState::admit`] is conditioned on exactly what a row of
+/// [`GenerateState::start`] is.
+pub(super) fn zero_patches<R: Runtime<DType = DType>>(
+    rows: usize,
+    config: VoxCpm2Config,
+    dtype: DType,
+    device: &R::Device,
+) -> Result<Tensor<R>> {
+    Tensor::<R>::zeros(&[rows, config.patch_size, config.feat_dim], dtype, device)
+        .map_err(Error::Numr)
 }
 
 #[cfg(test)]

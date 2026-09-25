@@ -16,14 +16,15 @@ use crate::model::audio::voxcpm::local_dit::tests::{
 };
 use crate::model::audio::voxcpm::minicpm4::LanePositions;
 use crate::model::audio::voxcpm::minicpm4::model::tests::{HIDDEN, tiny_model, tiny_nope_model};
-use crate::model::audio::voxcpm::model::config::REF_AUDIO_END_ID;
+use crate::model::audio::voxcpm::model::config::{AUDIO_START_ID, REF_AUDIO_END_ID};
+use crate::model::audio::voxcpm::model::prefill::PrefillRow;
 use crate::model::audio::voxcpm::vae::{
     AudioVaeDecoder, AudioVaeDecoderWeights, AudioVaeEncoder, AudioVaeEncoderWeights, CausalConv1d,
     CausalTransposeConv1d, DecoderBlock, DecoderBlockWeights, EncoderBlock, EncoderBlockWeights,
     ResUnit, Snake,
 };
 use crate::nn::{MaybeLoraLinear, MaybeQuantEmbedding, MaybeQuantLinear, RoPE, Weight};
-use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
 /// `base_lm`/`residual_lm` hidden width and `feat_encoder`'s pooled width are
 /// both 8 in the tiny fixtures, so every auxiliary projection below is
@@ -166,6 +167,46 @@ pub(crate) fn state(fx: &Fixture, device: &CpuDevice) -> GenerateState<CpuRuntim
         },
     )
     .expect("start")
+}
+
+/// Cache capacity the slot fixtures open at: the longest prefill they build
+/// (8 positions) plus the largest row cap (4), inside the 16-position RoPE
+/// table `tiny_model` carries.
+pub(crate) const SLOT_CAPACITY: usize = 12;
+
+/// A three-token prompt behind a reference prefix, and a two-token
+/// zero-shot one, so the two rows differ in length.
+const LONG: [u32; 3] = [11, 22, AUDIO_START_ID];
+const SHORT: [u32; 2] = [7, AUDIO_START_ID];
+
+/// Two requests of different length: one conditioned on `ref_feat`, one
+/// zero-shot.
+pub(crate) fn slot_rows(ref_feat: &Tensor<CpuRuntime>) -> [PrefillRow<'_, CpuRuntime>; 2] {
+    [
+        PrefillRow {
+            ref_feat: Some(ref_feat),
+            text_token_ids: &LONG,
+        },
+        PrefillRow {
+            ref_feat: None,
+            text_token_ids: &SHORT,
+        },
+    ]
+}
+
+/// One request's own single-row prefill, the handoff
+/// [`GenerateState::admit`] takes.
+pub(crate) fn prefill_one(
+    client: &CpuClient,
+    m: &VoxCpm2Model<CpuRuntime>,
+    row: &PrefillRow<'_, CpuRuntime>,
+) -> PrefillState<CpuRuntime> {
+    m.prefill(client, row.ref_feat, row.text_token_ids, SLOT_CAPACITY)
+        .expect("prefill")
+}
+
+pub(crate) fn row_opts(max_len: usize, seed: u64) -> RowOptions {
+    RowOptions { max_len, seed }
 }
 
 pub(crate) fn options(min_len: usize, max_len: usize) -> GenerateOptions {

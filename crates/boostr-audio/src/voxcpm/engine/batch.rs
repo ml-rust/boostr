@@ -138,8 +138,8 @@ pub(super) fn clamp_max_batch(max_batch: usize) -> usize {
 /// its neighbours and a batched row renders bit for bit like its own render
 /// alone. A seed derived from arrival order or slot index would break that.
 ///
-/// A pad row caps at one patch: it cannot be skipped, but it can be retired
-/// after the first step so nothing downstream reads it.
+/// A slot past the last request holds none, so its entry is a placeholder:
+/// the loop needs one entry per slot, and a free slot counts no patch.
 pub(super) fn row_options(real_max_lens: &[usize], width: usize, seed: u64) -> Vec<RowOptions> {
     (0..width)
         .map(|b| RowOptions {

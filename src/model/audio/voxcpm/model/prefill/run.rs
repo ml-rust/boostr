@@ -291,23 +291,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             residual_enc_inputs,
         });
 
-        // ONE table for both caches. Both stacks rotate against a rope
-        // table of the same length, or the NoPE stack against none, so a row
-        // the table admits is a row both can serve; a disagreement here
-        // would let one stack rotate past its own table.
-        let rope_table_len = match (
-            self.base_lm.rope_positions(),
-            self.residual_lm.rope_positions(),
-        ) {
-            (Some(base), Some(residual)) if base != residual => {
-                return Err(Error::ModelError {
-                    reason: format!(
-                        "base_lm holds {base} rope positions and residual_lm holds                          {residual}; one table cannot bound both"
-                    ),
-                });
-            }
-            (base, residual) => base.or(residual),
-        };
+        // ONE table for both caches.
+        let rope_table_len = self.lane_rope_positions()?;
         let lanes = LanePositions::new(kv_start, batch, seq_len, rope_table_len, device)?;
 
         Ok(PrefillState {

@@ -3,48 +3,33 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use numr::dtype::DType;
-use numr::ops::{
-    ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, RandomOps, ReduceOps,
-    ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
-};
 use numr::runtime::Runtime;
+use numr::tensor::Tensor;
 
+use boostr::model::audio::voxcpm::VoxCpm2Weights;
 use boostr::model::audio::voxcpm::model::VoxCpm2Model;
-use boostr::model::audio::voxcpm::{VoxCpm2Weights, VoxCpmClient};
 use boostr::quant::ScheduleTuning;
-use boostr::quant::traits::DequantOps;
 
 use crate::decode::{decode_audio, extension_hint};
 use crate::error::{Error, Result};
 use crate::resample::to_mono_at_rate;
+use crate::voxcpm::engine::batch::spawn_worker;
 use crate::voxcpm::engine::types::{
-    EncodedVoice, REF_RATE, VOICE_EXTENSIONS, VoxCpm2Engine, ZERO_SHOT_VOICE_ID,
+    EncodedVoice, EngineInner, REF_RATE, VOICE_EXTENSIONS, VoxCpm2Engine, VoxCpm2RenderClient,
+    ZERO_SHOT_VOICE_ID,
 };
 use crate::voxcpm::options::VoxCpm2LoadOptions;
 use crate::voxcpm::tokenizer::load_tokenizer;
 
 impl<R> VoxCpm2Engine<R>
 where
-    R: Runtime<DType = DType>,
-    R::Client: VoxCpmClient<R>
-        + TensorOps<R>
-        + ScalarOps<R>
-        + ReduceOps<R>
-        + IndexingOps<R>
-        + ShapeOps<R>
-        + ActivationOps<R>
-        + BinaryOps<R>
-        + UnaryOps<R>
-        + CompareOps<R>
-        + ConditionalOps<R>
-        + TypeConversionOps<R>
-        + RandomOps<R>
-        + DequantOps<R>
-        + ScheduleTuning<R>
-        + 'static,
+    R: Runtime<DType = DType> + 'static,
+    R::Client: VoxCpm2RenderClient<R> + ScheduleTuning<R>,
+    VoxCpm2Model<R>: Send + Sync,
+    Tensor<R>: Send + Sync,
 {
     /// Load the model, the tokenizer and every voice under `voices_dir`,
     /// optionally folding a LoRA adapter into the weights first.
@@ -129,14 +114,22 @@ where
             }
         }
 
-        Ok(Self {
+        // The owner thread starts here and ends with the engine: every
+        // render goes through it, so the model is touched from exactly one
+        // thread for the engine's whole life.
+        let inner = Arc::new(EngineInner {
             model,
             client,
             tokenizer,
             voices,
             options: synth,
             adapter: adapter_report,
-            render: Mutex::new(()),
+        });
+        let (jobs, worker) = spawn_worker(Arc::clone(&inner))?;
+        Ok(Self {
+            inner,
+            jobs: Some(jobs),
+            worker: Some(worker),
         })
     }
 }

@@ -2,6 +2,7 @@
 
 use numr::dtype::DType;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Generation settings applied to every request. Defaults are the clone
 /// pipeline's verified values.
@@ -22,6 +23,23 @@ pub struct VoxCpm2SynthOptions {
     /// sample and raises decoder work per utterance. Applies to
     /// `synthesize_stream` only; `0` is rejected at render time.
     pub stream_chunk_patches: usize,
+    /// How long the engine's owner thread keeps taking newly queued requests
+    /// into the batch it is about to start, measured from the first request
+    /// of that batch.
+    ///
+    /// The thread blocks on an empty queue, so an idle engine pays this only
+    /// once a request has arrived, and the drain ends early when the batch
+    /// reaches [`max_batch`](Self::max_batch) or the queue closes. A request
+    /// that arrives alone and stays alone therefore starts at most this late
+    /// and renders as a batch of one.
+    pub batch_window: Duration,
+    /// Most requests one batch generates together.
+    ///
+    /// Rounded DOWN to a width the generation loop runs at (1, 2, 4 or 8) and
+    /// never below 1. Requests past the cap stay queued and open the next
+    /// batch. Every row of a batch steps on every iteration, a finished row
+    /// included, so a wider batch trades per-request latency for throughput.
+    pub max_batch: usize,
 }
 
 impl Default for VoxCpm2SynthOptions {
@@ -32,6 +50,8 @@ impl Default for VoxCpm2SynthOptions {
             min_len: 2,
             seed: 0,
             stream_chunk_patches: 4,
+            batch_window: Duration::from_millis(20),
+            max_batch: 8,
         }
     }
 }

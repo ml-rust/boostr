@@ -7,6 +7,6 @@ pub mod engine;
 pub mod options;
 pub mod tokenizer;
 
-pub use engine::{VoxCpm2Engine, ZERO_SHOT_VOICE_ID};
+pub use engine::{VoxCpm2Engine, VoxCpm2RenderClient, ZERO_SHOT_VOICE_ID};
 pub use options::{VoxCpm2LoadOptions, VoxCpm2SynthOptions};
 pub use tokenizer::{load_tokenizer, normalize_whitespace, tokenize};

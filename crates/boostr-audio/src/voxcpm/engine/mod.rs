@@ -7,15 +7,22 @@
 //! generation and decode. Text reaches the model as raw tokens, so a Malay
 //! and English code-switched sentence needs no language switch.
 //!
-//! One render runs at a time: `synthesize` and `synthesize_stream` hold a
-//! lock for their duration. The model's KV caches and generation state are
-//! per call, so the lock serialises device work, not correctness.
+//! Concurrent requests share one generation. Both entry points stay `&self`
+//! and blocking: they resolve their request, queue it and wait, while the
+//! engine's own thread runs whatever is queued at the same time as ONE
+//! batched generation. A row's noise draw is independent of the batch width
+//! and of its neighbours, so a batched render is bit for bit the render that
+//! row would have had alone.
 //!
-//! [`types`] holds the engine struct and its constants, [`load`] the loader
-//! and voice-directory handling, [`render`] the request path.
+//! [`types`] holds the engine struct, the shared state and the constants,
+//! [`load`] the loader and voice-directory handling, [`render`] the caller's
+//! half of a request, [`batch`] the queue and the owner thread, [`run`] the
+//! batched generation itself.
 
+mod batch;
 mod load;
 mod render;
+mod run;
 mod types;
 
-pub use types::{VoxCpm2Engine, ZERO_SHOT_VOICE_ID};
+pub use types::{VoxCpm2Engine, VoxCpm2RenderClient, ZERO_SHOT_VOICE_ID};

@@ -1,83 +1,58 @@
-//! The request path: voice lookup, tokenizing, prefill, the per-patch loop,
-//! and the VAE decode — whole in [`TtsEngine::synthesize`], chunk by chunk
-//! in [`TtsEngine::synthesize_stream`].
+//! The caller's half of a request: resolve the voice, tokenize, size the
+//! patch budget, queue the job, and block on the reply.
 //!
-//! Both entry points share [`VoxCpm2Engine::prepare`], so a streamed and a
-//! buffered render of the same request start from the same generation state
-//! and draw the same noise. The streamed path decodes each chunk with
-//! `decode_patches_from`, whose windows sit on the same grid as the whole
-//! decode, so the chunks concatenate to the buffered waveform.
+//! Everything here runs on the caller's thread. No device work happens on
+//! it, so a bad request — an unknown voice, empty text, a speed the model
+//! cannot serve — fails before it ever reaches a batch. The generation
+//! itself runs on the engine's owner thread (`super::batch`, `super::run`),
+//! which groups whatever is queued at the same time into ONE generation.
+//!
+//! A streaming caller keeps its sink here and drains decoded chunks off a
+//! channel: the sink is not `Send`, so it must not cross to the owner
+//! thread. A sink error sets the job's cancel flag, which retires that row
+//! of the running batch.
 
-use std::sync::MutexGuard;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::channel;
 
 use numr::dtype::DType;
-use numr::ops::{
-    ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, RandomOps, ReduceOps,
-    ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
-};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
-use boostr::model::audio::voxcpm::VoxCpmClient;
+use boostr::model::audio::voxcpm::model::VoxCpm2Model;
 use boostr::model::audio::voxcpm::model::config::AUDIO_START_ID;
-use boostr::model::audio::voxcpm::model::{
-    GenerateOptions, GenerateState, StepOutcome, VoxCpm2Model,
-};
 use boostr::model::audio::voxcpm::vae::decoder::SAMPLE_RATE;
-use boostr::quant::traits::DequantOps;
 
 use crate::error::{Error, Result};
 use crate::g2p::Lang;
 use crate::tts::{TtsEngine, Voice};
-use crate::voxcpm::engine::types::{MAX_LEN_CAP, VoxCpm2Engine, ZERO_SHOT_VOICE_ID};
+use crate::voxcpm::engine::batch::{Job, Reply};
+use crate::voxcpm::engine::types::{
+    MAX_LEN_CAP, VoxCpm2Engine, VoxCpm2RenderClient, ZERO_SHOT_VOICE_ID,
+};
 use crate::voxcpm::tokenizer::{normalize_whitespace, tokenize};
-
-/// A request resolved down to what `prefill` and the loop take.
-struct Plan<'a, R: Runtime> {
-    /// The voice's encoded reference; `None` for zero-shot.
-    ref_feat: Option<&'a Tensor<R>>,
-    /// Text tokens with `AUDIO_START_ID` appended.
-    text_token_ids: Vec<u32>,
-    /// KV-cache capacity: the prefix plus the patch budget.
-    max_length: usize,
-    options: GenerateOptions,
-}
 
 impl<R> VoxCpm2Engine<R>
 where
-    R: Runtime<DType = DType>,
-    R::Client: VoxCpmClient<R>
-        + TensorOps<R>
-        + ScalarOps<R>
-        + ReduceOps<R>
-        + IndexingOps<R>
-        + ShapeOps<R>
-        + ActivationOps<R>
-        + BinaryOps<R>
-        + UnaryOps<R>
-        + CompareOps<R>
-        + ConditionalOps<R>
-        + TypeConversionOps<R>
-        + RandomOps<R>
-        + DequantOps<R>
-        + 'static,
+    R: Runtime<DType = DType> + 'static,
+    R::Client: VoxCpm2RenderClient<R>,
+    VoxCpm2Model<R>: Send + Sync,
+    Tensor<R>: Send + Sync,
 {
-    /// Take the render lock. Held by the caller across prefill, generation
-    /// and decode, so device work from two requests never interleaves.
-    fn lock_render(&self) -> Result<MutexGuard<'_, ()>> {
-        self.render.lock().map_err(|_| Error::ModelError {
-            reason: "VoxCPM2 render lock poisoned by an earlier panic".into(),
-        })
-    }
-
     /// Everything before device work: resolve the voice, tokenize, size the
-    /// budget. Runs before the render lock is taken, so a bad request fails
-    /// without waiting on another render.
-    fn plan(&self, text: &str, voice_id: &str) -> Result<Plan<'_, R>> {
-        let ref_feat: Option<&Tensor<R>> = if voice_id == ZERO_SHOT_VOICE_ID {
+    /// budget. Runs on the caller's thread, so a bad request never joins a
+    /// batch.
+    ///
+    /// The job carries the voice ID, not the voice's tensor: a queued job
+    /// must borrow nothing from the engine, and the owner thread looks the
+    /// same ID up when it builds the batch.
+    fn plan(&self, text: &str, voice_id: &str, reply: Reply) -> Result<Job> {
+        let ref_len = if voice_id == ZERO_SHOT_VOICE_ID {
             None
         } else {
             let voice = self
+                .inner
                 .voices
                 .get(voice_id)
                 .ok_or_else(|| Error::InvalidArgument {
@@ -85,11 +60,16 @@ where
                     reason: format!(
                         "unknown voice {voice_id:?}; available voices: [{}], or {:?} for \
                          zero-shot rendering",
-                        self.voices.keys().cloned().collect::<Vec<_>>().join(", "),
+                        self.inner
+                            .voices
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", "),
                         ZERO_SHOT_VOICE_ID,
                     ),
                 })?;
-            Some(&voice.ref_feat)
+            Some(voice.ref_feat.shape()[0])
         };
         let normalized = normalize_whitespace(text);
         if normalized.is_empty() {
@@ -98,131 +78,92 @@ where
                 reason: "input text must not be empty".into(),
             });
         }
-        let mut text_token_ids = tokenize(&self.tokenizer, &normalized);
+        let mut text_token_ids = tokenize(&self.inner.tokenizer, &normalized);
         let text_len = text_token_ids.len();
         text_token_ids.push(AUDIO_START_ID);
 
         // The clone pipeline's budget: six patches per text token plus ten,
         // capped.
         let max_len = (text_len * 6 + 10).min(MAX_LEN_CAP);
-        let ref_len = ref_feat.map(|f| f.shape()[0]);
-        let max_length = seq_len_for(ref_len, text_token_ids.len()) + max_len;
+        let seq_len = seq_len_for(ref_len, text_token_ids.len());
 
-        let mut options = GenerateOptions::new(max_len, self.options.seed);
-        options.cfm.n_timesteps = self.options.n_timesteps;
-        options.cfm.cfg_value = self.options.cfg_value;
-        options.min_len = self.options.min_len;
-
-        Ok(Plan {
-            ref_feat,
+        Ok(Job {
+            voice: (voice_id != ZERO_SHOT_VOICE_ID).then(|| voice_id.to_string()),
             text_token_ids,
-            max_length,
-            options,
+            max_len,
+            seq_len,
+            reply,
         })
     }
 
-    /// Prefill and build the state the per-patch loop drives. The caller
-    /// holds the render lock.
-    fn start(&self, plan: &Plan<'_, R>) -> Result<GenerateState<R>> {
-        let prefill = self.model.prefill(
-            self.client.as_ref(),
-            plan.ref_feat,
-            &plan.text_token_ids,
-            plan.max_length,
-        )?;
-        Ok(GenerateState::start(prefill, self.model.config)?)
+    /// Queue a job for the owner thread.
+    fn submit(&self, job: Job) -> Result<()> {
+        let Some(jobs) = self.jobs.as_ref() else {
+            return Err(worker_gone());
+        };
+        jobs.send(job).map_err(|_| worker_gone())
     }
 
-    /// Whole-utterance render: generate to completion, decode once.
+    /// Whole-utterance render: queue the request, wait for its waveform.
     fn render(&self, text: &str, voice_id: &str) -> Result<Vec<f32>> {
-        let plan = self.plan(text, voice_id)?;
-        let _render = self.lock_render()?;
-        let mut state = self.start(&plan)?;
-        let options = plan.options;
-        let client = self.client.as_ref();
-        self.model
-            .patch_generator()
-            .generate(client, &mut state, &options)?;
-        let decoded = self.model.decode_patches(client, &state.patches)?;
-        Ok(decoded.contiguous()?.to_vec())
+        let (done, reply) = channel();
+        self.submit(self.plan(text, voice_id, Reply::Buffered(done))?)?;
+        reply.recv().map_err(|_| worker_gone())?
     }
 
-    /// Chunked render: after every `stream_chunk_patches` new patches, and
-    /// once more for the tail, decode the patches not yet handed over and
-    /// pass them to `sink`. A `sink` error ends generation at once.
+    /// Chunked render: queue the request, then drain the decoded chunks into
+    /// `sink` as the owner thread produces them. The sender drops when the
+    /// batch ends, which is how the last chunk is recognised.
+    ///
+    /// A `sink` error cancels this row and returns at once; the batch runs
+    /// on for the other rows.
     fn render_stream(
         &self,
         text: &str,
         voice_id: &str,
         sink: &mut dyn FnMut(&[f32]) -> Result<()>,
     ) -> Result<()> {
-        let chunk = self.options.stream_chunk_patches;
-        if chunk == 0 {
+        if self.inner.options.stream_chunk_patches == 0 {
             return Err(Error::InvalidArgument {
                 arg: "stream_chunk_patches",
                 reason: "expected at least 1 patch per chunk, got 0".into(),
             });
         }
-        let plan = self.plan(text, voice_id)?;
-        let _render = self.lock_render()?;
-        let mut state = self.start(&plan)?;
-        let options = plan.options;
-        let client = self.client.as_ref();
-        let generator = self.model.patch_generator();
+        let (chunks, reply) = channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let job = self.plan(
+            text,
+            voice_id,
+            Reply::Streaming {
+                chunks,
+                cancelled: Arc::clone(&cancelled),
+            },
+        )?;
+        self.submit(job)?;
 
-        let mut emitted = 0usize;
-        while state.patches.len() < options.max_len {
-            let outcome = generator.step(client, &mut state, &options)?;
-            if state.patches.len() - emitted >= chunk {
-                emitted = self.emit_from(&state, emitted, sink)?;
+        let mut delivered = false;
+        while let Ok(message) = reply.recv() {
+            let samples = message?;
+            if let Err(err) = sink(&samples) {
+                cancelled.store(true, Ordering::Relaxed);
+                return Err(err);
             }
-            if outcome == StepOutcome::Stopped {
-                break;
-            }
+            delivered = true;
         }
-        if emitted < state.patches.len() {
-            self.emit_from(&state, emitted, sink)?;
+        // Every render emits at least one patch, so an empty stream means
+        // the owner thread died without reporting anything.
+        if delivered {
+            Ok(())
+        } else {
+            Err(worker_gone())
         }
-        Ok(())
-    }
-
-    /// Decode `state.patches[from..]`, hand the samples to `sink`, and
-    /// return the new emitted count.
-    fn emit_from(
-        &self,
-        state: &GenerateState<R>,
-        from: usize,
-        sink: &mut dyn FnMut(&[f32]) -> Result<()>,
-    ) -> Result<usize> {
-        let decoded = self
-            .model
-            .decode_patches_from(self.client.as_ref(), &state.patches, from)?;
-        let samples: Vec<f32> = decoded.contiguous()?.to_vec();
-        sink(&samples)?;
-        Ok(state.patches.len())
     }
 }
 
 impl<R> TtsEngine for VoxCpm2Engine<R>
 where
-    R: Runtime<DType = DType>,
-    R::Client: VoxCpmClient<R>
-        + TensorOps<R>
-        + ScalarOps<R>
-        + ReduceOps<R>
-        + IndexingOps<R>
-        + ShapeOps<R>
-        + ActivationOps<R>
-        + BinaryOps<R>
-        + UnaryOps<R>
-        + CompareOps<R>
-        + ConditionalOps<R>
-        + TypeConversionOps<R>
-        + RandomOps<R>
-        + DequantOps<R>
-        + Send
-        + Sync
-        + 'static,
+    R: Runtime<DType = DType> + 'static,
+    R::Client: VoxCpm2RenderClient<R>,
     VoxCpm2Model<R>: Send + Sync,
     Tensor<R>: Send + Sync,
 {
@@ -252,11 +193,22 @@ where
     fn voices(&self) -> Vec<Voice> {
         std::iter::once(Voice::new(ZERO_SHOT_VOICE_ID, Lang::Ms, ZERO_SHOT_VOICE_ID))
             .chain(
-                self.voices
+                self.inner
+                    .voices
                     .keys()
                     .map(|id| Voice::new(id.clone(), Lang::Ms, id.clone())),
             )
             .collect()
+    }
+}
+
+/// The owner thread is gone: it panicked, or the engine is shutting down.
+/// Every waiting caller gets this instead of blocking forever.
+fn worker_gone() -> Error {
+    Error::ModelError {
+        reason: "VoxCPM2 render thread is not running; an earlier render panicked or the \
+                 engine is shutting down"
+            .into(),
     }
 }
 
@@ -303,5 +255,11 @@ mod tests {
         assert!(check_speed(1.0).is_ok());
         let err = check_speed(1.5).unwrap_err();
         assert!(err.to_string().contains("1.5"), "{err}");
+    }
+
+    #[test]
+    fn a_dead_worker_is_an_error_not_a_hang() {
+        let err = worker_gone();
+        assert!(err.to_string().contains("not running"), "{err}");
     }
 }

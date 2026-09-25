@@ -284,9 +284,34 @@ fn rejects_chunk_size_overrunning_buffer() {
         (b"data", vec![0, 0, 0, 0]),
     ]);
     // Overwrite the data chunk size (last 4 bytes before the body) with a lie.
+    //
+    // The lie is deliberately NOT `u32::MAX`: that value is the streaming
+    // sentinel a pipe writer leaves behind, and the decoder clamps it to the
+    // bytes present on purpose. Every other overrun is a truncated file.
     let size_off = wav.len() - 8;
-    wav[size_off..size_off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    wav[size_off..size_off + 4].copy_from_slice(&4096u32.to_le_bytes());
     assert!(decode_wav(&wav).is_err());
+}
+
+#[test]
+fn clamps_only_the_streaming_sentinel_not_any_overrun() {
+    let build_with = |size: u32| {
+        let mut wav = build(&[
+            (b"fmt ", fmt_body(FORMAT_PCM, 1, 16_000, 16)),
+            (b"data", vec![0, 0, 0, 0]),
+        ]);
+        let size_off = wav.len() - 8;
+        wav[size_off..size_off + 4].copy_from_slice(&size.to_le_bytes());
+        wav
+    };
+
+    // The sentinel means "runs to end of file" and decodes the two frames
+    // actually present.
+    let streamed = decode_wav(&build_with(u32::MAX)).expect("the sentinel clamps");
+    assert_eq!(streamed.samples.len(), 2);
+
+    // One byte past the buffer is corruption, however close to the truth.
+    assert!(decode_wav(&build_with(5)).is_err());
 }
 
 #[test]

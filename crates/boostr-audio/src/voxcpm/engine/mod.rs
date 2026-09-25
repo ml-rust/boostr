@@ -17,9 +17,11 @@
 //! [`types`] holds the engine struct, the shared state and the constants,
 //! [`load`] the loader and voice-directory handling, [`render`] the caller's
 //! half of a request, [`batch`] the queue and the owner thread, [`run`] the
-//! batched generation itself.
+//! batched generation itself, [`continuous`] the persistent batch behind
+//! [`VoxCpm2SynthOptions::continuous_batching`](crate::voxcpm::VoxCpm2SynthOptions::continuous_batching).
 
 mod batch;
+mod continuous;
 mod load;
 mod render;
 mod run;

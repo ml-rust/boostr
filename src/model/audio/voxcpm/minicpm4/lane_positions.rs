@@ -210,7 +210,7 @@ impl<R: Runtime<DType = DType>> LanePositions<R> {
 
     /// The view one decode step takes, borrowed from this table.
     pub fn step(&self) -> CacheStep<'_, R> {
-        CacheStep::lanes(self.pad.as_ref(), &self.lens, &self.kv_end)
+        CacheStep::lanes(self.pad.as_ref(), &self.lens, &self.kv_end, &self.occupied)
     }
 
     /// Count the position every occupied row just decoded.
@@ -288,6 +288,7 @@ fn as_i32(value: usize, row: usize) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::audio::voxcpm::minicpm4::cache_step::CacheFill;
     use crate::model::audio::voxcpm::minicpm4::model::tests::{HIDDEN, filled, tiny_model};
     use crate::test_utils::cpu_setup;
     use numr::autograd::Var;
@@ -327,7 +328,12 @@ mod tests {
         assert_eq!(step.row_write(1), 5);
         assert_eq!(step.row_start(1), 2);
         assert_eq!(step.last_write(), 5);
-        step.check_write_order(5).expect("both rows append");
+        step.check_write_order(&CacheFill {
+            filled: 5,
+            lanes: &[5, 5],
+            limit: 8,
+        })
+        .expect("both rows sit at their own end");
     }
 
     /// The rope table bounds a row: the last position it holds is accepted,

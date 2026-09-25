@@ -127,6 +127,11 @@ where
         let k_lane = self.k_cache.narrow(0, lane, 1)?;
         let v_lane = self.v_cache.narrow(0, lane, 1)?;
         client.kv_cache_update(&k_lane, &v_lane, k, v, offset)?;
+        // This lane's own end is ASSIGNED, not raised: a fresh sequence
+        // installed at offset 0 replaces whatever the lane held, so a
+        // previous occupant's longer run must not survive as this one's end.
+        // The cursor still only rises — it is the fused path's append slot.
+        self.lane_lens[lane] = offset + new_tokens;
         self.seq_len = self.seq_len.max(offset + new_tokens);
         Ok(())
     }

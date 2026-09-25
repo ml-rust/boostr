@@ -14,7 +14,7 @@ pub mod mlp;
 pub mod model;
 
 pub use attention::MiniCpm4Attention;
-pub use cache_step::CacheStep;
+pub use cache_step::{CacheFill, CacheStep};
 pub use config::{
     DEFAULT_CONFIG_SECTION, MiniCpm4Config, RESIDUAL_LM_NO_ROPE_KEY, RESIDUAL_LM_NUM_LAYERS_KEY,
 };

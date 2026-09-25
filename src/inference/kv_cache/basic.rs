@@ -17,6 +17,10 @@ pub struct KvCache<R: Runtime> {
     pub(super) k_cache: Tensor<R>,
     pub(super) v_cache: Tensor<R>,
     pub(super) seq_len: usize,
+    /// One past each lane's last key. A lane-at-a-time cache holds one
+    /// sequence per row, each from position 0 with its own end, so the rows
+    /// disagree and `seq_len` — their maximum — describes none of them.
+    pub(super) lane_lens: Vec<usize>,
     capacity: usize,
     pub(super) max_seq_len: usize,
     pub(super) batch_size: usize,
@@ -50,6 +54,7 @@ where
             k_cache,
             v_cache,
             seq_len: 0,
+            lane_lens: vec![0; batch_size],
             capacity,
             max_seq_len,
             batch_size,
@@ -132,6 +137,9 @@ where
         self.v_cache = self.v_cache.slice_assign(v, 2, self.seq_len)?;
 
         self.seq_len += new_tokens;
+        // Every row was written the same run of slots, so every lane now
+        // ends where the cursor does.
+        self.lane_lens.fill(self.seq_len);
 
         Ok(())
     }
@@ -162,6 +170,7 @@ where
 
         client.kv_cache_update(&self.k_cache, &self.v_cache, k, v, self.seq_len)?;
         self.seq_len += new_tokens;
+        self.lane_lens.fill(self.seq_len);
 
         Ok(())
     }
@@ -197,6 +206,16 @@ where
         self.seq_len
     }
 
+    /// One past each lane's last key, lane by lane.
+    ///
+    /// [`seq_len`](Self::seq_len) is the maximum of these and moves only up,
+    /// so it is the cursor a FUSED write appends at and says nothing about a
+    /// cache filled one lane at a time. A caller checking where a lane's next
+    /// token belongs reads this instead.
+    pub fn lane_lens(&self) -> &[usize] {
+        &self.lane_lens
+    }
+
     pub fn capacity(&self) -> usize {
         self.capacity
     }
@@ -220,10 +239,12 @@ where
             "KvCache overflow on increment"
         );
         self.seq_len += 1;
+        self.lane_lens.fill(self.seq_len);
     }
 
     pub fn reset(&mut self) {
         self.seq_len = 0;
+        self.lane_lens.fill(0);
     }
 
     pub fn batch_size(&self) -> usize {

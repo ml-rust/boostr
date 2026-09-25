@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;
-use crate::model::audio::voxcpm::minicpm4::cache_step::CacheStep;
+use crate::model::audio::voxcpm::minicpm4::cache_step::{CacheFill, CacheStep};
 use crate::model::audio::voxcpm::minicpm4::left_pad::LeftPad;
 use crate::model::audio::voxcpm::minicpm4::model::MiniCpm4Model;
 use crate::model::traits::ModelClient;
@@ -124,19 +124,20 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
 
         // The write-order rule that makes this cache equivalent to the
         // reference's preallocated one: a row's write position must be the
-        // slot its own lane will fill, and the furthest of them must be the
-        // slot the cache's cursor stands on. `prefill` is exempt because it
-        // resets first. `check_cache` above already required layer 0 to
-        // exist, so this cannot be `None` in practice; propagate rather than
-        // default to 0, which would silently mask that invariant if it were
-        // ever broken.
-        let filled = kv_cache
-            .layer(0)
-            .ok_or_else(|| Error::ModelError {
+        // slot its OWN lane will fill. `prefill` is exempt because it resets
+        // first. `check_cache` above already required layer 0 to exist, so
+        // this cannot be `None` in practice; propagate rather than default,
+        // which would silently mask that invariant if it were ever broken.
+        {
+            let layer = kv_cache.layer(0).ok_or_else(|| Error::ModelError {
                 reason: "KV cache missing layer 0 after validation".to_string(),
-            })?
-            .seq_len();
-        step.check_write_order(filled)?;
+            })?;
+            step.check_write_order(&CacheFill {
+                filled: layer.seq_len(),
+                lanes: layer.lane_lens(),
+                limit: layer.max_seq_len(),
+            })?;
+        }
 
         let x = var_reshape(embed, &[batch, 1, hidden]).map_err(Error::Numr)?;
         let out = self.forward_cached(client, &x, kv_cache, step)?;

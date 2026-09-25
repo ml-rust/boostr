@@ -40,6 +40,53 @@ pub struct VoxCpm2SynthOptions {
     /// batch. Every row of a batch steps on every iteration, a finished row
     /// included, so a wider batch trades per-request latency for throughput.
     pub max_batch: usize,
+    /// Whether the owner thread keeps ONE batch open and admits queued
+    /// requests into its free slots between steps.
+    ///
+    /// Off (the default), a batch is built, run to completion and torn down,
+    /// so a request arriving while one runs waits for that batch to drain —
+    /// the whole of a long utterance, in the worst case.
+    ///
+    /// On, the batch is persistent: a request arriving mid-generation
+    /// prefills on the owner thread and joins on the NEXT step. The slot
+    /// count is fixed at [`max_batch`](Self::max_batch) for the batch's
+    /// whole life, and every slot steps on every iteration whether or not it
+    /// holds a request, so `max_batch` becomes a standing cost rather than a
+    /// peak one. Set it to the concurrency actually served.
+    ///
+    /// A row renders the same samples either way: its noise draw follows its
+    /// own emitted-patch count and its own seed, neither of which depends on
+    /// when it joined or on what else shares the batch.
+    pub continuous_batching: bool,
+    /// Cache positions one slot of a persistent batch holds, when
+    /// [`continuous_batching`](Self::continuous_batching) is on. Ignored
+    /// otherwise.
+    ///
+    /// A batch that is torn down after every generation sizes its caches to
+    /// the rows it actually holds. A persistent one is sized ONCE, before it
+    /// knows what it will be asked for, so the budget is fixed here.
+    ///
+    /// One request spends `t_ref + 2 + text_len` positions on its prefill
+    /// (zero-shot spends `text_len`, with no reference prefix) plus
+    /// `text_len * 6 + 10` on its patches, and the lane table advances one
+    /// position past the last patch. The default covers a reference
+    /// recording of a few hundred patches together with a sentence of
+    /// roughly a hundred tokens — an ordinary clone request, not the
+    /// 4096-patch ceiling a single request is allowed to reach.
+    ///
+    /// Raising this is not free. Two caches — the base stack's and the
+    /// residual stack's — each hold a K and a V tensor per layer, every one
+    /// of them `max_batch` rows by this many positions, resident for the
+    /// batch's whole life. Doubling either this value or
+    /// [`max_batch`](Self::max_batch) doubles that.
+    ///
+    /// A request that needs more than a slot holds is REFUSED, with an error
+    /// naming the positions it needs and the positions a slot has. It is
+    /// never queued, never truncated, and never allowed to overrun the
+    /// cache. The model's rope table caps this in turn: a position the table
+    /// does not hold could be filled and never rotated, so a larger value is
+    /// clamped to what the table holds.
+    pub continuous_capacity: usize,
 }
 
 impl Default for VoxCpm2SynthOptions {
@@ -52,6 +99,8 @@ impl Default for VoxCpm2SynthOptions {
             stream_chunk_patches: 4,
             batch_window: Duration::from_millis(20),
             max_batch: 8,
+            continuous_batching: false,
+            continuous_capacity: 1024,
         }
     }
 }

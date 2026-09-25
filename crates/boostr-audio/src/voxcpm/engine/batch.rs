@@ -198,6 +198,11 @@ where
 
 /// Block for a job, batch it with whatever else is queued, run the batch,
 /// repeat. Returns when the queue closes, which is what [`Drop`] does.
+///
+/// With
+/// [`VoxCpm2SynthOptions::continuous_batching`](crate::voxcpm::VoxCpm2SynthOptions::continuous_batching)
+/// the thread runs `super::continuous` instead: one batch stays open and
+/// queued requests join its free slots between steps.
 fn worker_loop<R>(inner: &Arc<EngineInner<R>>, jobs: &Receiver<Job>)
 where
     R: Runtime<DType = DType> + 'static,
@@ -205,6 +210,10 @@ where
     VoxCpm2Model<R>: Send + Sync,
     Tensor<R>: Send + Sync,
 {
+    if inner.options.continuous_batching {
+        super::continuous::run_continuous(inner, jobs);
+        return;
+    }
     let window = inner.options.batch_window;
     let max_batch = clamp_max_batch(inner.options.max_batch);
     while let Ok(first) = jobs.recv() {
@@ -247,6 +256,22 @@ mod tests {
             rx,
             cancelled,
         )
+    }
+
+    /// Continuous batching is opt-in: by default the owner thread takes the
+    /// route below — build a batch, run it to completion, tear it down —
+    /// and never opens a persistent one.
+    #[test]
+    fn the_default_options_take_the_whole_batch_route() {
+        use crate::voxcpm::options::VoxCpm2SynthOptions;
+        assert!(!VoxCpm2SynthOptions::default().continuous_batching);
+        assert!(
+            VoxCpm2SynthOptions {
+                continuous_batching: true,
+                ..VoxCpm2SynthOptions::default()
+            }
+            .continuous_batching
+        );
     }
 
     #[test]

@@ -17,11 +17,29 @@ enum Write<'a, R: Runtime> {
     /// sit at one position.
     Fused(usize),
     /// Row `b` writes one position at `pos[b]`. `kv_end[b]` is one past its
-    /// last key, a `[B]` I32 tensor on the cache's device.
+    /// last key, a `[B]` I32 tensor on the cache's device. `occupied[b]`
+    /// says whether lane `b` holds a sequence at all.
     PerLane {
         pos: &'a [usize],
         kv_end: &'a Tensor<R>,
+        occupied: &'a [bool],
     },
+}
+
+/// What a KV cache already holds, as [`CacheStep::check_write_order`] reads
+/// it.
+///
+/// `filled` is the cache's own cursor — the slot a FUSED write appends at —
+/// and `lanes` is one past each lane's last key. The two agree only while
+/// every lane holds the same run; a cache filled one sequence per lane makes
+/// `filled` their maximum, which is no lane's next slot.
+pub struct CacheFill<'a> {
+    /// `KvCache::seq_len`: where a fused write lands.
+    pub filled: usize,
+    /// `KvCache::lane_lens`: one past each lane's last key.
+    pub lanes: &'a [usize],
+    /// Cache positions this cache can hold at all (`max_seq_len`).
+    pub limit: usize,
 }
 
 /// One cached attention call's per-row write position and key range.
@@ -48,11 +66,30 @@ impl<'a, R: Runtime<DType = DType>> CacheStep<'a, R> {
     }
 
     /// One position per row: row `b` writes at `pos[b]` and ends at
-    /// `kv_end[b]`, over a batch left-padded by `pad`.
-    pub fn lanes(pad: Option<&'a LeftPad<R>>, pos: &'a [usize], kv_end: &'a Tensor<R>) -> Self {
+    /// `kv_end[b]`, over a batch left-padded by `pad`. `occupied[b]` is
+    /// `false` for a lane holding no sequence.
+    pub fn lanes(
+        pad: Option<&'a LeftPad<R>>,
+        pos: &'a [usize],
+        kv_end: &'a Tensor<R>,
+        occupied: &'a [bool],
+    ) -> Self {
         Self {
             pad,
-            write: Write::PerLane { pos, kv_end },
+            write: Write::PerLane {
+                pos,
+                kv_end,
+                occupied,
+            },
+        }
+    }
+
+    /// Whether lane `b` holds a sequence. A fused write covers every row, so
+    /// there is no free lane on that arm.
+    fn is_occupied(&self, b: usize) -> bool {
+        match &self.write {
+            Write::Fused(_) => true,
+            Write::PerLane { occupied, .. } => occupied.get(b).copied().unwrap_or(true),
         }
     }
 
@@ -117,7 +154,7 @@ impl<'a, R: Runtime<DType = DType>> CacheStep<'a, R> {
     pub fn kv_seq_len(&self, cache_seq_len: usize) -> KvSeqLen<'a, R> {
         match &self.write {
             Write::Fused(_) => KvSeqLen::Shared(cache_seq_len),
-            Write::PerLane { pos, kv_end } => match uniform(pos) {
+            Write::PerLane { pos, kv_end, .. } => match uniform(pos) {
                 Some(_) => KvSeqLen::Shared(cache_seq_len),
                 None => KvSeqLen::PerRow(*kv_end),
             },
@@ -156,23 +193,38 @@ impl<'a, R: Runtime<DType = DType>> CacheStep<'a, R> {
     ///
     /// A query rotated for one absolute position and filed at another stays
     /// shape-valid and silently computes a different model, so this is
-    /// checked before any tensor is touched. Per lane: a row never writes
-    /// below its own first cache position, and never past the cache's
-    /// filled length. Across lanes: the furthest write is exactly that
-    /// filled length, so the longest row appends rather than overwrites.
+    /// checked before any tensor is touched.
+    ///
+    /// A fused write covers every row at once, so it must land on the
+    /// cache's own cursor. A per-lane write is checked LANE BY LANE against
+    /// that lane's own end: an occupied lane writes exactly where its keys
+    /// stop, never below its first cache position, and never past the
+    /// positions the cache holds. This is what catches the two stacks
+    /// drifting apart — they share one lane table and one advance, so a
+    /// stack stepped once more than the other writes a position past its own
+    /// keys and is refused here.
+    ///
+    /// The cache's cursor is NOT the per-lane rule. It is the maximum over
+    /// lanes and only ever rises, so once a long sequence has run, a shorter
+    /// one seated in its place would never reach it.
+    ///
+    /// A free lane is skipped: it holds no sequence, writes at its own
+    /// position 0, and its empty key range keeps that write out of every
+    /// softmax.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidArgument`] naming the row and both positions.
-    pub fn check_write_order(&self, filled: usize) -> Result<()> {
+    pub fn check_write_order(&self, fill: &CacheFill<'_>) -> Result<()> {
         match &self.write {
             Write::Fused(position) => {
-                if *position != filled {
+                if *position != fill.filled {
                     return Err(Error::InvalidArgument {
                         arg: "position",
                         reason: format!(
-                            "expected {filled} (the next free cache slot, kv_cache.seq_len()), \
-                             got {position}; positions must be written in order from 0"
+                            "expected {} (the next free cache slot, kv_cache.seq_len()), \
+                             got {position}; positions must be written in order from 0",
+                            fill.filled
                         ),
                     });
                 }
@@ -180,6 +232,9 @@ impl<'a, R: Runtime<DType = DType>> CacheStep<'a, R> {
             }
             Write::PerLane { pos, .. } => {
                 for (b, &p) in pos.iter().enumerate() {
+                    if !self.is_occupied(b) {
+                        continue;
+                    }
                     let start = self.row_start(b);
                     if p < start {
                         return Err(Error::InvalidArgument {
@@ -190,27 +245,28 @@ impl<'a, R: Runtime<DType = DType>> CacheStep<'a, R> {
                             ),
                         });
                     }
-                    if p > filled {
+                    let held = fill.lanes.get(b).copied().unwrap_or(fill.filled);
+                    if p != held {
                         return Err(Error::InvalidArgument {
                             arg: "position",
                             reason: format!(
-                                "row {b} writes at {p}, past the next free cache slot \
-                                 {filled} (kv_cache.seq_len()); a row's write position is \
-                                 its own filled length"
+                                "row {b} writes at {p} but its own keys end at {held} \
+                                 (kv_cache.lane_lens()); a row's write position is its own \
+                                 filled length, so the two stacks sharing this lane table \
+                                 have drifted apart"
                             ),
                         });
                     }
-                }
-                let furthest = self.last_write();
-                if furthest != filled {
-                    return Err(Error::InvalidArgument {
-                        arg: "position",
-                        reason: format!(
-                            "the furthest row writes at {furthest} but the next free cache \
-                             slot is {filled} (kv_cache.seq_len()); the longest row appends \
-                             on every step"
-                        ),
-                    });
+                    if p >= fill.limit {
+                        return Err(Error::InvalidArgument {
+                            arg: "position",
+                            reason: format!(
+                                "row {b} writes at {p}, past the {} cache positions this \
+                                 cache holds (kv_cache.max_seq_len())",
+                                fill.limit
+                            ),
+                        });
+                    }
                 }
                 Ok(())
             }
@@ -238,6 +294,18 @@ mod tests {
         matches!(len, KvSeqLen::Shared(_))
     }
 
+    /// A cache whose lanes all end at `filled`, with room for `limit`.
+    fn level_fill(filled: usize, lanes: &[usize], limit: usize) -> CacheFill<'_> {
+        CacheFill {
+            filled,
+            lanes,
+            limit,
+        }
+    }
+
+    /// Every lane of a `batch`-row step, occupied.
+    const HELD: [bool; 4] = [true; 4];
+
     /// Rows that all sit at one position take the shared bound; one row
     /// behind the others takes the per-row tensor.
     #[test]
@@ -246,11 +314,11 @@ mod tests {
         let kv_end = ends(&[5, 5], &device);
         let (level_pos, ragged_pos) = ([4usize, 4], [4usize, 2]);
 
-        let level = CacheStep::<CpuRuntime>::lanes(None, &level_pos, &kv_end);
+        let level = CacheStep::<CpuRuntime>::lanes(None, &level_pos, &kv_end, &HELD);
         assert!(is_shared(&level.kv_seq_len(4)));
         assert_eq!(level.uniform_position(), Some(4));
 
-        let ragged = CacheStep::<CpuRuntime>::lanes(None, &ragged_pos, &kv_end);
+        let ragged = CacheStep::<CpuRuntime>::lanes(None, &ragged_pos, &kv_end, &HELD);
         assert!(!is_shared(&ragged.kv_seq_len(4)));
         assert_eq!(ragged.uniform_position(), None);
     }
@@ -283,40 +351,66 @@ mod tests {
         let pad = LeftPad::<CpuRuntime>::new(vec![0, 2], &device).expect("pad");
         let kv_end = ends(&[6, 6], &device);
         let pos = [5usize, 5];
-        let step = CacheStep::lanes(Some(&pad), &pos, &kv_end);
+        let step = CacheStep::lanes(Some(&pad), &pos, &kv_end, &HELD);
 
         assert!(is_shared(&step.kv_seq_len(5)));
         assert_eq!(step.uniform_position(), None);
         assert_eq!(step.kv_start().map(Tensor::shape), Some(&[2][..]));
     }
 
-    /// The per-lane guard accepts a row sitting at its own filled length
-    /// and rejects one that writes below its start, past the cache, or
-    /// leaves the longest row short of it.
+    /// Each lane is checked against its OWN end: a ragged pair both sitting
+    /// where their keys stop is accepted, and a lane writing below its start,
+    /// off its own end, or past the cache is refused.
     #[test]
-    fn the_per_lane_guard_rejects_a_mismatched_write_position() {
+    fn the_per_lane_guard_checks_each_lane_against_its_own_end() {
         let device = CpuDevice::new();
         let pad = LeftPad::<CpuRuntime>::new(vec![0, 2], &device).expect("pad");
-        let kv_end = ends(&[6, 6], &device);
+        let kv_end = ends(&[6, 4], &device);
 
-        CacheStep::lanes(Some(&pad), &[5, 3], &kv_end)
-            .check_write_order(5)
-            .expect("row 1 is behind but inside its own range");
+        CacheStep::lanes(Some(&pad), &[5, 3], &kv_end, &HELD)
+            .check_write_order(&level_fill(5, &[5, 3], 8))
+            .expect("each lane sits at its own end");
 
-        let below = CacheStep::lanes(Some(&pad), &[5, 1], &kv_end)
-            .check_write_order(5)
+        let below = CacheStep::lanes(Some(&pad), &[5, 1], &kv_end, &HELD)
+            .check_write_order(&level_fill(5, &[5, 1], 8))
             .expect_err("row 1 writes below its own first cache position");
         assert!(below.to_string().contains("row 1"), "{below}");
 
-        let past = CacheStep::lanes(Some(&pad), &[7, 3], &kv_end)
-            .check_write_order(5)
+        let drifted = CacheStep::lanes(Some(&pad), &[5, 3], &kv_end, &HELD)
+            .check_write_order(&level_fill(5, &[5, 4], 8))
+            .expect_err("row 1 writes one behind its own keys");
+        assert!(drifted.to_string().contains("row 1"), "{drifted}");
+        assert!(drifted.to_string().contains("lane_lens"), "{drifted}");
+
+        let past = CacheStep::lanes(Some(&pad), &[8, 3], &kv_end, &HELD)
+            .check_write_order(&level_fill(8, &[8, 3], 8))
             .expect_err("row 0 writes past the cache");
         assert!(past.to_string().contains("row 0"), "{past}");
+    }
 
-        let short = CacheStep::lanes(Some(&pad), &[4, 3], &kv_end)
-            .check_write_order(5)
-            .expect_err("no row appends");
-        assert!(short.to_string().contains("furthest"), "{short}");
+    /// The cursor is the maximum over lanes and only rises, so a short lane
+    /// seated where a long one ran is accepted on its own end — the case a
+    /// cursor-relative rule refuses forever.
+    #[test]
+    fn a_reseated_short_lane_is_not_held_to_the_cursor() {
+        let device = CpuDevice::new();
+        let kv_end = ends(&[4, 901], &device);
+        let occupied = [true, true];
+        CacheStep::<CpuRuntime>::lanes(None, &[3, 900], &kv_end, &occupied)
+            .check_write_order(&level_fill(900, &[3, 900], 1024))
+            .expect("lane 0 was re-seated short and writes at its own end");
+    }
+
+    /// A free lane holds no sequence: it writes at its own position 0 and
+    /// the guard passes over it whatever the cache's lane still holds.
+    #[test]
+    fn a_free_lane_is_not_checked() {
+        let device = CpuDevice::new();
+        let kv_end = ends(&[0, 7], &device);
+        let occupied = [false, true];
+        CacheStep::<CpuRuntime>::lanes(None, &[0, 6], &kv_end, &occupied)
+            .check_write_order(&level_fill(900, &[900, 6], 1024))
+            .expect("a free lane's stale cache end is not its next slot");
     }
 
     /// A fused write still names `kv_cache.seq_len()` and the slot it
@@ -324,14 +418,14 @@ mod tests {
     #[test]
     fn the_fused_guard_names_the_slot_it_wanted() {
         let err = CacheStep::<CpuRuntime>::prefix(9, None)
-            .check_write_order(1)
+            .check_write_order(&level_fill(1, &[1], 8))
             .expect_err("9 is not the next free slot");
         let text = err.to_string();
         assert!(text.contains('9'), "{text}");
         assert!(text.contains("seq_len"), "{text}");
         assert!(text.contains("next free cache slot"), "{text}");
         CacheStep::<CpuRuntime>::prefix(1, None)
-            .check_write_order(1)
+            .check_write_order(&level_fill(1, &[1], 8))
             .expect("1 is the next free slot");
     }
 }

@@ -7,6 +7,10 @@
 //! bit for bit — a row's noise draw depends on neither the batch width nor
 //! its neighbours, so batching must not change a single sample.
 //!
+//! The same file covers continuous batching: one request starts, a second is
+//! queued once the first is certainly generating, and both must still come
+//! back bit for bit what each renders alone on a default engine.
+//!
 //! Gated on a real model: set `VOXCPM2_GGUF` to a compressr GGUF that embeds
 //! the VAE and the tokenizer (the test skips when it is unset or the path is
 //! absent). `VOXCPM2_VOICES_DIR`, optional, points at a directory of
@@ -39,6 +43,27 @@ const PROMPTS: [&str; 3] = [
 /// whatever the machine is doing.
 const WINDOW: Duration = Duration::from_millis(500);
 
+/// The cold-start drain window of the continuous engine. Short, so the first
+/// request is generating well before the second is queued.
+const JOIN_WINDOW: Duration = Duration::from_millis(20);
+
+/// How long the continuous-batching test waits before queuing its second
+/// request: past the cold-start window by a wide margin, so that request can
+/// only reach the batch mid-generation.
+const JOIN_DELAY: Duration = Duration::from_millis(400);
+
+/// Slots the continuous engine runs, and the cache positions each one holds.
+///
+/// Both are stated here rather than left to the defaults, because together
+/// they are what this test reserves on the device: two caches, each a K and
+/// a V per layer, every one of them `JOIN_WIDTH` rows by `JOIN_CAPACITY`
+/// positions, resident until the engine is dropped. The prompts below are a
+/// sentence each — a couple of hundred positions of prefill and patches —
+/// so a slot a few times that size leaves the refusal path well clear while
+/// keeping the reservation small enough to sit beside the model.
+const JOIN_WIDTH: usize = 4;
+const JOIN_CAPACITY: usize = 1024;
+
 fn gguf_fixture() -> Option<PathBuf> {
     let path = PathBuf::from(std::env::var("VOXCPM2_GGUF").ok()?);
     path.is_file().then_some(path)
@@ -50,14 +75,25 @@ fn voices_fixture() -> Option<PathBuf> {
 }
 
 fn load_engine(gguf: &Path, voices: Option<&Path>) -> Arc<dyn TtsEngine> {
+    load_engine_with(
+        gguf,
+        voices,
+        VoxCpm2SynthOptions {
+            batch_window: WINDOW,
+            max_batch: 8,
+            ..VoxCpm2SynthOptions::default()
+        },
+    )
+}
+
+fn load_engine_with(
+    gguf: &Path,
+    voices: Option<&Path>,
+    synth: VoxCpm2SynthOptions,
+) -> Arc<dyn TtsEngine> {
     let weights = VoxCpm2Weights::Gguf {
         path: gguf.to_path_buf(),
         config: None,
-    };
-    let synth = VoxCpm2SynthOptions {
-        batch_window: WINDOW,
-        max_batch: 8,
-        ..VoxCpm2SynthOptions::default()
     };
     #[cfg(feature = "cuda")]
     {
@@ -283,4 +319,135 @@ fn a_cancelled_streaming_row_does_not_disturb_the_batch() {
         .synthesize(PROMPTS[0], ZERO_SHOT_VOICE_ID, 1.0)
         .expect("synthesize");
     assert_bit_identical(&kept, &alone, "row beside a cancelled one");
+}
+
+/// A request queued while a batch is already generating joins it on the next
+/// step, and neither row moves a sample.
+///
+/// The two concurrent renders come off a continuous engine; the references
+/// come off a DEFAULT one, loaded after the first is dropped, so what is
+/// compared is continuous batching against the route the engine takes today
+/// — not against itself.
+#[test]
+fn a_late_request_joins_a_running_batch() {
+    let Some(gguf) = gguf_fixture() else {
+        eprintln!("VOXCPM2_GGUF unset or absent; skipping");
+        return;
+    };
+    let voices = voices_fixture();
+    // The long prompt first, so it is still generating when the short one is
+    // queued; the short one second, so it finishes and releases its slot
+    // while the long one runs on.
+    let (first, second) = (PROMPTS[1], PROMPTS[2]);
+
+    let (started, joined) = {
+        let engine = load_engine_with(
+            &gguf,
+            voices.as_deref(),
+            VoxCpm2SynthOptions {
+                batch_window: JOIN_WINDOW,
+                max_batch: JOIN_WIDTH,
+                continuous_batching: true,
+                continuous_capacity: JOIN_CAPACITY,
+                ..VoxCpm2SynthOptions::default()
+            },
+        );
+        std::thread::scope(|scope| {
+            let long = {
+                let engine = Arc::clone(&engine);
+                scope.spawn(move || {
+                    engine
+                        .synthesize(first, ZERO_SHOT_VOICE_ID, 1.0)
+                        .expect("the request that opened the batch")
+                })
+            };
+            std::thread::sleep(JOIN_DELAY);
+            let late = {
+                let engine = Arc::clone(&engine);
+                scope.spawn(move || {
+                    engine
+                        .synthesize(second, ZERO_SHOT_VOICE_ID, 1.0)
+                        .expect("the request that joined mid-generation")
+                })
+            };
+            (
+                long.join().expect("first thread"),
+                late.join().expect("late thread"),
+            )
+        })
+    };
+
+    let engine = load_engine(&gguf, voices.as_deref());
+    for (samples, text, label) in [
+        (started, first, "row admitted at the cold start"),
+        (joined, second, "row admitted mid-generation"),
+    ] {
+        let alone = engine
+            .synthesize(text, ZERO_SHOT_VOICE_ID, 1.0)
+            .expect("synthesize");
+        assert!(
+            alone.iter().all(|v| v.is_finite()),
+            "{label}: non-finite samples"
+        );
+        assert_bit_identical(&samples, &alone, label);
+    }
+}
+
+/// A streaming row admitted into a running batch still sees its stream end:
+/// the row's sender drops when its slot is released, which is what ends the
+/// caller's drain loop.
+#[test]
+fn a_late_streaming_request_joins_and_its_stream_ends() {
+    let Some(gguf) = gguf_fixture() else {
+        eprintln!("VOXCPM2_GGUF unset or absent; skipping");
+        return;
+    };
+    let voices = voices_fixture();
+    let (first, second) = (PROMPTS[1], PROMPTS[2]);
+
+    let joined = {
+        let engine = load_engine_with(
+            &gguf,
+            voices.as_deref(),
+            VoxCpm2SynthOptions {
+                batch_window: JOIN_WINDOW,
+                max_batch: JOIN_WIDTH,
+                continuous_batching: true,
+                continuous_capacity: JOIN_CAPACITY,
+                ..VoxCpm2SynthOptions::default()
+            },
+        );
+        std::thread::scope(|scope| {
+            let long = {
+                let engine = Arc::clone(&engine);
+                scope.spawn(move || {
+                    engine
+                        .synthesize(first, ZERO_SHOT_VOICE_ID, 1.0)
+                        .expect("the request that opened the batch")
+                })
+            };
+            std::thread::sleep(JOIN_DELAY);
+            let late = {
+                let engine = Arc::clone(&engine);
+                scope.spawn(move || {
+                    let mut chunks: Vec<Vec<f32>> = Vec::new();
+                    engine
+                        .synthesize_stream(second, ZERO_SHOT_VOICE_ID, 1.0, &mut |samples| {
+                            chunks.push(samples.to_vec());
+                            Ok(())
+                        })
+                        .expect("the stream must end, not hang");
+                    chunks.concat()
+                })
+            };
+            long.join().expect("first thread");
+            late.join().expect("late thread")
+        })
+    };
+
+    let engine = load_engine(&gguf, voices.as_deref());
+    let alone = engine
+        .synthesize(second, ZERO_SHOT_VOICE_ID, 1.0)
+        .expect("synthesize");
+    assert_bit_identical(&joined, &alone, "streaming row admitted mid-generation");
 }

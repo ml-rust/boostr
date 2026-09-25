@@ -26,14 +26,14 @@ use crate::voxcpm::engine::types::{EngineInner, VoxCpm2RenderClient};
 
 /// One row of a running batch: the request, its reference tensor, and
 /// whether the caller is still taking output.
-struct Row<'a, R: Runtime> {
-    job: Job,
-    ref_feat: Option<&'a Tensor<R>>,
+pub(super) struct Row<'a, R: Runtime> {
+    pub(super) job: Job,
+    pub(super) ref_feat: Option<&'a Tensor<R>>,
     /// Cleared once the row's caller went away or its own decode failed.
     /// A dead row keeps stepping; nothing is decoded or sent for it again.
-    live: bool,
+    pub(super) live: bool,
     /// Patches already handed to a streaming caller.
-    emitted: usize,
+    pub(super) emitted: usize,
 }
 
 impl<R> EngineInner<R>
@@ -71,7 +71,7 @@ where
     /// A voice ID's encoded reference. `None` in, `None` out: that is
     /// zero-shot. The voice table is fixed at load, so an unknown ID here
     /// means the caller's own check and this one disagree.
-    fn reference(&self, voice: Option<&str>) -> Result<Option<&Tensor<R>>> {
+    pub(super) fn reference(&self, voice: Option<&str>) -> Result<Option<&Tensor<R>>> {
         let Some(voice_id) = voice else {
             return Ok(None);
         };
@@ -139,30 +139,7 @@ where
         while !state.all_finished() {
             let outcome = generator.step(client, state, options)?;
             for (b, row) in rows.iter_mut().enumerate() {
-                if !row.live {
-                    continue;
-                }
-                let Some((_, cancelled)) = row.job.reply.stream() else {
-                    continue;
-                };
-                if cancelled.load(Ordering::Relaxed) {
-                    retire(state, b);
-                    row.live = false;
-                    continue;
-                }
-                if state.patch_len[b] - row.emitted < chunk {
-                    continue;
-                }
-                match host_samples(self.model.decode_row_from(client, state, b, row.emitted)) {
-                    Ok(samples) => {
-                        row.emitted = state.patch_len[b];
-                        if !row.job.reply.send_chunk(samples) {
-                            retire(state, b);
-                            row.live = false;
-                        }
-                    }
-                    Err(err) => fail_row(state, b, row, err),
-                }
+                self.pump_row(state, b, row, chunk);
             }
             if outcome == StepOutcome::Stopped {
                 break;
@@ -171,39 +148,87 @@ where
         Ok(())
     }
 
+    /// Hand a streaming row whatever it has ready, and retire it once its
+    /// caller has gone away. A buffered row emits nothing before the end, so
+    /// this leaves it alone.
+    ///
+    /// Called once per row per step by both the whole-batch driver and the
+    /// continuous one, so a row's chunk boundaries do not depend on which
+    /// loop is running it.
+    pub(super) fn pump_row(
+        &self,
+        state: &mut GenerateState<R>,
+        b: usize,
+        row: &mut Row<'_, R>,
+        chunk: usize,
+    ) {
+        if !row.live {
+            return;
+        }
+        let Some((_, cancelled)) = row.job.reply.stream() else {
+            return;
+        };
+        if cancelled.load(Ordering::Relaxed) {
+            retire(state, b);
+            row.live = false;
+            return;
+        }
+        if state.patch_len[b] - row.emitted < chunk {
+            return;
+        }
+        let client = self.client.as_ref();
+        match host_samples(self.model.decode_row_from(client, state, b, row.emitted)) {
+            Ok(samples) => {
+                row.emitted = state.patch_len[b];
+                if !row.job.reply.send_chunk(samples) {
+                    retire(state, b);
+                    row.live = false;
+                }
+            }
+            Err(err) => fail_row(state, b, row, err),
+        }
+    }
+
     /// Final reply per row: the whole waveform for a buffered caller, the
     /// tail chunk for a streaming one. A streaming caller sees the end when
     /// its sender drops with the batch.
     fn deliver(&self, state: &GenerateState<R>, rows: &mut [Row<'_, R>]) {
-        let client = self.client.as_ref();
         for (b, row) in rows.iter_mut().enumerate() {
-            if !row.live {
-                continue;
+            self.deliver_row(state, b, row);
+        }
+    }
+
+    /// Row `b`'s last message: the whole waveform for a buffered caller, the
+    /// patches a streaming one has not seen yet. The row is dead afterwards
+    /// either way; its caller sees the end when the row's sender drops.
+    pub(super) fn deliver_row(&self, state: &GenerateState<R>, b: usize, row: &mut Row<'_, R>) {
+        if !row.live {
+            return;
+        }
+        row.live = false;
+        let client = self.client.as_ref();
+        let streaming = row.job.reply.stream().is_some();
+        let decoded = if streaming {
+            if row.emitted >= state.patch_len[b] {
+                return;
             }
-            row.live = false;
-            let streaming = row.job.reply.stream().is_some();
-            let decoded = if streaming {
-                if row.emitted >= state.patch_len[b] {
-                    continue;
-                }
-                self.model.decode_row_from(client, state, b, row.emitted)
-            } else {
-                self.model.decode_row(client, state, b)
-            };
-            match host_samples(decoded) {
-                Ok(samples) if streaming => {
-                    row.emitted = state.patch_len[b];
-                    row.job.reply.send_chunk(samples);
-                }
-                Ok(samples) => row.job.reply.send_samples(samples),
-                Err(err) => row.job.reply.fail(err),
+            self.model.decode_row_from(client, state, b, row.emitted)
+        } else {
+            self.model.decode_row(client, state, b)
+        };
+        match host_samples(decoded) {
+            Ok(samples) if streaming => {
+                row.emitted = state.patch_len[b];
+                row.job.reply.send_chunk(samples);
             }
+            Ok(samples) => row.job.reply.send_samples(samples),
+            Err(err) => row.job.reply.fail(err),
         }
     }
 }
 
 /// A decoded `[1, 1, samples]` tensor as host floats.
-fn host_samples<R: Runtime<DType = DType>>(
+pub(super) fn host_samples<R: Runtime<DType = DType>>(
     decoded: std::result::Result<Tensor<R>, boostr::error::Error>,
 ) -> Result<Vec<f32>> {
     let decoded = decoded?;
@@ -213,7 +238,7 @@ fn host_samples<R: Runtime<DType = DType>>(
 /// Mark row `b` finished so the loop stops advancing its bookkeeping. The
 /// row's patches are still computed on every remaining step — nothing skips
 /// a row — but nothing reads them again.
-fn retire<R: Runtime>(state: &mut GenerateState<R>, b: usize) {
+pub(super) fn retire<R: Runtime>(state: &mut GenerateState<R>, b: usize) {
     if let Some(outcome) = state.outcomes.get_mut(b) {
         outcome.get_or_insert(GenerateOutcome::MaxLen);
     }
@@ -230,7 +255,7 @@ fn fail_row<R: Runtime>(state: &mut GenerateState<R>, b: usize, row: &mut Row<'_
 ///
 /// The error moves to the first live row unchanged, so a batch of one keeps
 /// the exact error a single render returns today; the rest carry its text.
-fn fail_all<R: Runtime>(rows: &[Row<'_, R>], err: Error) {
+pub(super) fn fail_all<R: Runtime>(rows: &[Row<'_, R>], err: Error) {
     let text = err.to_string();
     let mut original = Some(err);
     for row in rows.iter().filter(|row| row.live) {

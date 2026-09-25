@@ -292,7 +292,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
     /// [`Error::ModelError`] when the two stacks hold rope tables of
     /// different lengths: one table cannot bound both, and the shorter
     /// stack would rotate past its own.
-    pub(crate) fn lane_rope_positions(&self) -> Result<Option<usize>> {
+    pub fn lane_rope_positions(&self) -> Result<Option<usize>> {
         match (
             self.base_lm.rope_positions(),
             self.residual_lm.rope_positions(),

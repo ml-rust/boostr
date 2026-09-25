@@ -179,7 +179,14 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         // narrow is a layout change over the same storage, so no kernel runs
         // and no bytes are copied. Only a row still generating counts the
         // patch as its own.
+        // A FREE slot is skipped: it belongs to no request, so its patch is
+        // computed like any other row's and then dropped rather than stored.
+        // A state that outlives a request steps for as long as the engine
+        // runs, and a free slot's stored patches would grow with it.
         for b in 0..batch {
+            if !state.occupied(b) {
+                continue;
+            }
             let own = var_narrow(&pred_feat, 0, b, 1).map_err(Error::Numr)?;
             state.patches[b].push(own);
             if !state.finished(b) {

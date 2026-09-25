@@ -4,7 +4,7 @@ use super::block::MiniCpm4Attention;
 use super::guards::{missing_rope, require_preallocated_cache};
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
-use crate::model::audio::voxcpm::minicpm4::cache_step::CacheStep;
+use crate::model::audio::voxcpm::minicpm4::cache_step::{CacheFill, CacheStep};
 use crate::model::traits::ModelClient;
 use crate::nn::var_ops::var_contiguous;
 use crate::nn::{MaybeLoraLinear, RoPE};
@@ -149,7 +149,11 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
                 // — which is what
                 // `nope_output_is_independent_of_absolute_position` asserts by
                 // passing a position a cache-aligned call could not use.
-                step.check_write_order(kv_cache.seq_len())?;
+                step.check_write_order(&CacheFill {
+                    filled: kv_cache.seq_len(),
+                    lanes: kv_cache.lane_lens(),
+                    limit: kv_cache.max_seq_len(),
+                })?;
                 match step.uniform_position() {
                     // Every row rotates at the same absolute position: one
                     // `apply_rope` over the whole batch against one slice of

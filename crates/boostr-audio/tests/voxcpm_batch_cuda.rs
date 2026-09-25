@@ -28,7 +28,7 @@ use boostr::model::audio::voxcpm::VoxCpm2Weights;
 use boostr::model::audio::voxcpm::model::config::AUDIO_START_ID;
 use boostr::model::audio::voxcpm::model::{
     GenerateOptions, GenerateOutcome, GenerateState, PrefillRow, RowOptions, VoxCpm2Model,
-    unfold_patches, unfold_patches_row,
+    unfold_patches,
 };
 use boostr::model::audio::voxcpm::vae::decoder::SAMPLE_RATE;
 use boostr_audio::voxcpm::{load_tokenizer, normalize_whitespace, tokenize};
@@ -148,17 +148,12 @@ fn render_single(
         GenerateOutcome::StopToken,
         "single render truncated"
     );
-    let latent = unfold_patches(
-        &state.patches,
-        model.config.patch_size,
-        model.config.feat_dim,
-    )
-    .expect("unfold");
-    let decoded = model
-        .decode_patches(client, &state.patches)
-        .expect("decode");
+    let row = state.row_patches(0).expect("row 0");
+    let latent =
+        unfold_patches(row, model.config.patch_size, model.config.feat_dim).expect("unfold");
+    let decoded = model.decode_patches(client, row).expect("decode");
     SingleRender {
-        patches: state.patches.len(),
+        patches: state.patch_len[0],
         latent: to_host(&latent),
         samples: to_host(&decoded),
     }
@@ -270,9 +265,8 @@ fn batch_of_two_matches_single_renders() {
             "row {b} outcome"
         );
         assert_eq!(state.patch_len[b], single.patches, "row {b} patch count");
-        let latent = unfold_patches_row(
+        let latent = unfold_patches(
             state.row_patches(b).expect("row"),
-            b,
             model.config.patch_size,
             model.config.feat_dim,
         )
@@ -394,7 +388,7 @@ fn duplicate_rows_match_each_other_and_the_single() {
     let rows: Vec<Vec<f32>> = (0..2)
         .map(|b| {
             to_host(
-                &unfold_patches_row(state.row_patches(b).expect("row"), b, patch_size, feat_dim)
+                &unfold_patches(state.row_patches(b).expect("row"), patch_size, feat_dim)
                     .expect("unfold"),
             )
         })

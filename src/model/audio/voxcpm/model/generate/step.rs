@@ -52,14 +52,15 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
 
     /// One iteration, drawing the CFM noise itself.
     ///
-    /// Row `b`'s `z` is `randn_seeded(options.row(b).seed + i) *
+    /// Row `b`'s `z` is `randn_seeded(options.row(b).seed + i_b) *
     /// options.cfm.temperature` drawn over `[1, feat_dim, patch_size]` —
     /// the reference's element order, so a seed keeps placing the same draw
     /// on the same (feature, position) — stacked over rows, then transposed
-    /// to the `[batch, patch_size, feat_dim]` patch layout. `i` is the index
-    /// of the patch about to be emitted, so consecutive patches never share
-    /// noise and each row is reproducible from its own seed whatever else is
-    /// in the batch. Everything after the draw is
+    /// to the `[batch, patch_size, feat_dim]` patch layout. `i_b` is
+    /// `state.patch_len[b]`, THAT ROW's own emitted-patch count, so
+    /// consecutive patches never share noise and each row is reproducible
+    /// from its own seed whatever else is in the batch. Everything after the
+    /// draw is
     /// [`step_with_noise`](Self::step_with_noise). `randn_seeded` is
     /// reproducible per backend, so one seed draws differently on CPU and
     /// CUDA.
@@ -87,10 +88,19 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     {
         options.check(state.batch)?;
         let hidden = state.prefill.lm_hidden.tensor();
-        let i = state.patches.len() as u64;
         let shape = [1, self.config.feat_dim, self.config.patch_size];
         let mut rows = Vec::with_capacity(state.batch);
         for b in 0..state.batch {
+            // Row `b` advances its noise by its OWN emitted-patch count, not
+            // by the loop's iteration index. A row still generating has
+            // emitted one patch per iteration so far, so the two agree; a
+            // finished row's count is frozen and its further patches are
+            // discarded.
+            debug_assert!(
+                state.finished(b) || state.patch_len[b] == state.patches[b].len(),
+                "a live row's patch count must equal the loop's iteration index"
+            );
+            let i = state.patch_len[b] as u64;
             let seed = options.row(b).seed.wrapping_add(i);
             rows.push(
                 client
@@ -144,7 +154,7 @@ mod tests {
         generator
             .step_with_noise(&client, &mut st, &noise(0.2, &device), &opts)
             .expect("step 0");
-        let patch0 = values(&st.patches[0]);
+        let patch0 = values(&st.patches[0][0]);
         assert!(
             patch0.iter().any(|v| v.abs() > 1e-6),
             "degenerate patch would make the comparison below vacuous"
@@ -172,7 +182,7 @@ mod tests {
             .expect("generate");
         assert_eq!(outcome, GenerateOutcome::StopToken);
         assert_eq!(
-            st.patches.len(),
+            st.emitted(),
             opts.min_len + 2,
             "the guard is `i > min_len`, so i = min_len + 1 is the first break"
         );
@@ -197,7 +207,7 @@ mod tests {
             GenerateOutcome::MaxLen,
             "a stop token at i <= min_len must be ignored"
         );
-        assert_eq!(st.patches.len(), 3);
+        assert_eq!(st.emitted(), 3);
     }
 
     /// Trap 3: the cap exit is distinguishable from a stop-token exit.
@@ -213,7 +223,7 @@ mod tests {
             .generate(&client, &mut st, &opts)
             .expect("generate");
         assert_eq!(outcome, GenerateOutcome::MaxLen);
-        assert_eq!(st.patches.len(), 5);
+        assert_eq!(st.emitted(), 5);
         assert_eq!(st.prefill.position, 5);
     }
 
@@ -276,7 +286,7 @@ mod tests {
             GenerateOutcome::StopToken
         );
         // 4 patches emitted, but the last one broke before stepping the LMs.
-        assert_eq!(st.patches.len(), 4);
+        assert_eq!(st.emitted(), 4);
         assert_eq!(st.prefill.position, 3);
         assert_eq!(st.prefill.base_cache.seq_len(), 3);
         assert_eq!(st.prefill.residual_cache.seq_len(), 3);
@@ -297,7 +307,7 @@ mod tests {
             generator
                 .step_with_noise(&client, &mut st, z, &opts)
                 .expect("step");
-            values(&st.patches[0])
+            values(&st.patches[0][0])
         };
 
         let a = run(&noise(0.2, &device));

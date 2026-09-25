@@ -8,7 +8,7 @@ use super::*;
 use crate::model::audio::voxcpm::local_dit::cfm_time_span;
 use crate::ops::FlashAttentionOps;
 use crate::quant::traits::DequantOps;
-use numr::autograd::{var_cat, var_reshape};
+use numr::autograd::{var_cat, var_narrow, var_reshape};
 
 /// Per-step intermediates for a gate to compare against the reference,
 /// mirroring [`PrefillIntermediates`](super::super::prefill::PrefillIntermediates)
@@ -174,45 +174,65 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         let projected = self.aux.enc_to_lm_proj.forward(client, &encoded)?;
         let curr_embed = var_reshape(&projected, &[batch, lm_width]).map_err(Error::Numr)?;
 
-        // 4. Emit, and condition the NEXT patch on this one. Only a row still
-        // generating counts the patch as its own.
-        state.patches.push(pred_feat.clone());
-        state.prefix_feat_cond = pred_feat;
+        // 4. Emit, and condition the NEXT patch on this one. Each row stores
+        // its OWN `[1, patch_size, feat_dim]` slice of `pred_feat`: a dim-0
+        // narrow is a layout change over the same storage, so no kernel runs
+        // and no bytes are copied. Only a row still generating counts the
+        // patch as its own.
         for b in 0..batch {
+            let own = var_narrow(&pred_feat, 0, b, 1).map_err(Error::Numr)?;
+            state.patches[b].push(own);
             if !state.finished(b) {
                 state.patch_len[b] += 1;
             }
         }
+        state.prefix_feat_cond = pred_feat;
 
         // 5. Stop check on the CURRENT `lm_hidden` — the hidden state that
         // produced the patch just emitted, BEFORE step 6 replaces it. The
-        // guard is strictly greater than `min_len`, and `i` is the index of
-        // the patch just pushed.
+        // guard is strictly greater than `min_len`, and row `b`'s `i_b` is
+        // the index of the patch that row just counted —
+        // `state.patch_len[b] - 1`. Every row still generating counted the
+        // patch pushed above, so their `i_b` agree; a finished row's count
+        // is frozen, and its guard cannot fire because the stop loop below
+        // skips finished rows.
         //
         // `capture` asymmetry (deliberate, see this fn's doc comment): the
-        // non-capturing path only calls `aux.stop` when `i > options.min_len`
-        // and otherwise skips the work entirely, matching the reference and
-        // every generation call today. The capturing path calls it on EVERY
-        // iteration so `StepIntermediates::stop_logits` is always populated,
-        // even on iterations the guard would skip. The guard decision itself
-        // (`i > options.min_len`) is unchanged either way.
-        let i = state.patches.len() - 1;
-        let guard_open = i > options.min_len;
-        let stop_logits = if guard_open || capture {
+        // non-capturing path only calls `aux.stop` when some row's guard is
+        // open and otherwise skips the work entirely, matching the reference
+        // and every generation call today. The capturing path calls it on
+        // EVERY iteration so `StepIntermediates::stop_logits` is always
+        // populated, even on iterations the guard would skip. The guard
+        // decision itself (`i_b > options.min_len`) is unchanged either way.
+        let guard_open: Vec<bool> = (0..batch)
+            .map(|b| {
+                debug_assert!(
+                    state.finished(b) || state.patch_len[b] == state.patches[b].len(),
+                    "a live row's patch count must equal the loop's iteration index"
+                );
+                state.patch_len[b].saturating_sub(1) > options.min_len
+            })
+            .collect();
+        // At least one row was open on entry and none finishes before the
+        // loop below, so at least one entry is an open row's. A frozen count
+        // never exceeds a live one, so a finished row cannot be the only
+        // open entry: this is exactly the open rows' shared guard.
+        let any_guard_open = guard_open.contains(&true);
+        let stop_logits = if any_guard_open || capture {
             Some(self.aux.stop(client, &state.prefill.lm_hidden)?)
         } else {
             None
         };
         let mut stopped_now = false;
-        if guard_open {
-            // `stop_logits` is always `Some` here: `guard_open` is one of the
-            // two disjuncts above.
+        if any_guard_open {
+            // `stop_logits` is always `Some` here: `any_guard_open` is one of
+            // the two disjuncts above.
             let stops = match &stop_logits {
                 Some(logits) => stop_predicted(client, logits, batch)?,
                 None => vec![false; batch],
             };
             for (b, &stop) in stops.iter().enumerate() {
-                if stop && !state.finished(b) {
+                if stop && guard_open[b] && !state.finished(b) {
                     state.outcomes[b] = Some(GenerateOutcome::StopToken);
                     stopped_now = true;
                 }
@@ -315,7 +335,10 @@ mod tests {
             .expect("capturing step");
 
         assert_eq!(outcome, captured_outcome);
-        assert_eq!(values(&plain.patches[0]), values(&captured.patches[0]));
+        assert_eq!(
+            values(&plain.patches[0][0]),
+            values(&captured.patches[0][0])
+        );
         assert_eq!(
             values(&plain.prefill.lm_hidden),
             values(&captured.prefill.lm_hidden)
@@ -366,7 +389,10 @@ mod tests {
             "i = 0 is below min_len = 2"
         );
         assert_eq!(intermediates.stop_logits.shape(), &[1, 2]);
-        assert_eq!(values(&plain.patches[0]), values(&captured.patches[0]));
+        assert_eq!(
+            values(&plain.patches[0][0]),
+            values(&captured.patches[0][0])
+        );
         assert_eq!(
             values(&plain.prefill.lm_hidden),
             values(&captured.prefill.lm_hidden)

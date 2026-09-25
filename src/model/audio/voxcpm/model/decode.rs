@@ -2,8 +2,8 @@
 //! [`super::generate::GenerateState`] collected into a waveform.
 //!
 //! ```text
-//! patches: Vec<Var<R>>, each [batch, patch_size, feat_dim], one row picked
-//!   -> unfold_patches_row -> latent [1, feat_dim, n_patches * patch_size]
+//! patches: one row's Vec<Var<R>>, each [1, patch_size, feat_dim]
+//!   -> unfold_patches -> latent [1, feat_dim, n_patches * patch_size]
 //!   -> chunked_decode::decode_latent_windowed (sr bucket 3, 48 kHz) -> waveform [1, 1, samples]
 //! ```
 //!
@@ -157,9 +157,8 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
 
     /// [`decode_patches`](Self::decode_patches) for row `row` of a
     /// [`GenerateState`]: decodes that row's own patches
-    /// ([`GenerateState::row_patches`]), read off row `row` of each
-    /// `[batch, patch_size, feat_dim]` patch. For a one-row state this is
-    /// `decode_patches(client, &state.patches)`.
+    /// ([`GenerateState::row_patches`]), which the loop already stored as
+    /// `[1, patch_size, feat_dim]` slices of that row alone.
     pub fn decode_row<C>(
         &self,
         client: &C,
@@ -171,8 +170,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         R::Client: ShapeOps<R> + TypeConversionOps<R>,
     {
         let patches = state.row_patches(row)?;
-        let latent =
-            unfold_patches_row(patches, row, self.config.patch_size, self.config.feat_dim)?;
+        let latent = unfold_patches(patches, self.config.patch_size, self.config.feat_dim)?;
         self.decode_latent(client, &latent)
     }
 
@@ -236,7 +234,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
                 ),
             });
         }
-        self.decode_row_patches_from(client, patches, 0, from)
+        self.decode_row_patches_from(client, patches, from)
     }
 
     /// [`decode_patches_from`](Self::decode_patches_from) for row `row` of
@@ -253,14 +251,17 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         C: VoxCpmClient<R>,
         R::Client: ShapeOps<R> + TypeConversionOps<R>,
     {
-        self.decode_row_patches_from(client, state.row_patches(row)?, row, from)
+        self.decode_row_patches_from(client, state.row_patches(row)?, from)
     }
 
+    /// Shared body of [`decode_patches_from`](Self::decode_patches_from) and
+    /// [`decode_row_from`](Self::decode_row_from). `patches` is one row's
+    /// own `[1, patch_size, feat_dim]` patches, so the unfold takes them as
+    /// they are.
     fn decode_row_patches_from<C>(
         &self,
         client: &C,
         patches: &[Var<R>],
-        row: usize,
         from: usize,
     ) -> Result<Tensor<R>>
     where
@@ -276,12 +277,7 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
         let patch_size = self.config.patch_size;
         let from_frame = from * patch_size;
         let start_patch = first_patch_for_frame(from_frame, patch_size);
-        let latent = unfold_patches_row(
-            &patches[start_patch..],
-            row,
-            patch_size,
-            self.config.feat_dim,
-        )?;
+        let latent = unfold_patches(&patches[start_patch..], patch_size, self.config.feat_dim)?;
         let latent = latent.to_dtype(self.vae_decoder.dtype())?;
         let decoded = decode_latent_windowed_from(
             client,

@@ -1199,11 +1199,11 @@ where
             // with no callback.
             let take_started = Instant::now();
             let outcome = loop {
-                if state.patches.len() >= options.max_len {
+                if state.emitted() >= options.max_len {
                     break GenerateOutcome::MaxLen;
                 }
                 let step = generator.step(client, &mut state, &options)?;
-                let emitted = state.patches.len();
+                let emitted = state.emitted();
                 if emitted % PROGRESS_EVERY == 0 {
                     eprintln!(
                         "  {emitted}/{} patches ({:.1}s)",
@@ -1229,8 +1229,8 @@ where
             // came from, so its cost is a CONSTANT across the matrix and
             // dilutes any tier comparison it is folded into.
             let vocode_started = Instant::now();
-            let patches = state.patches.len();
-            let decoded = model.decode_patches(client, &state.patches)?;
+            let patches = state.emitted();
+            let decoded = model.decode_patches(client, state.row_patches(0)?)?;
             let samples: Vec<f32> = decoded.contiguous()?.to_vec();
             vocode_seconds += vocode_started.elapsed().as_secs_f64();
             eprintln!(

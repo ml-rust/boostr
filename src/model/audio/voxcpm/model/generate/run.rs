@@ -8,7 +8,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// Run the loop until every row has stopped or hit its cap.
     ///
     /// Steps with [`step`](Self::step), so the noise comes from the row
-    /// seeds. The emitted patches stay in `state.patches`, each `[batch,
+    /// seeds. The emitted patches stay in `state.patches[b]`, each `[1,
     /// patch_size, feat_dim]`, with `state.patch_len[b]` saying how many
     /// belong to row `b` and `state.outcomes[b]` how that row ended. The
     /// return value is the whole batch's: [`GenerateOutcome::StopToken`]
@@ -81,17 +81,6 @@ mod tests {
         ]
     }
 
-    /// Row `row` of a `[batch, P, D]` patch, flattened.
-    fn row_values(patch: &Var<CpuRuntime>, row: usize) -> Vec<f32> {
-        patch
-            .tensor()
-            .narrow(0, row, 1)
-            .expect("narrow")
-            .contiguous()
-            .expect("contiguous")
-            .to_vec::<f32>()
-    }
-
     /// Generate one row alone, from its own single-row prefill.
     fn single(
         client: &CpuClient,
@@ -141,7 +130,7 @@ mod tests {
             .generate(&client, &mut st, &opts)
             .expect("generate");
         assert_eq!(outcome, GenerateOutcome::MaxLen);
-        assert_eq!(st.patches.len(), 4, "the loop runs to the longest cap");
+        assert_eq!(st.emitted(), 4, "the loop runs to the longest cap");
         assert_eq!(st.patch_len, [3, 4]);
         assert_eq!(st.outcomes, [Some(GenerateOutcome::MaxLen); 2]);
         assert_eq!(st.prefill.position, 8 + 4);
@@ -151,10 +140,10 @@ mod tests {
             one.seed = opts.rows[b].seed;
             let (one_outcome, one_st) = single(&client, &m, row, &one);
             assert_eq!(one_outcome, GenerateOutcome::MaxLen);
-            assert_eq!(one_st.patches.len(), st.patch_len[b]);
-            for (k, want) in one_st.patches.iter().enumerate() {
+            assert_eq!(one_st.patch_len[0], st.patch_len[b]);
+            for (k, want) in one_st.row_patches(0).expect("row 0").iter().enumerate() {
                 let want = values(want);
-                let got = row_values(&st.patches[k], b);
+                let got = values(&st.patches[b][k]);
                 assert!(want.iter().any(|v| v.abs() > 1e-6), "degenerate patch");
                 for (g, w) in got.iter().zip(&want) {
                     assert!((g - w).abs() < 1e-4, "row {b} patch {k}: {g} vs {w}");
@@ -195,8 +184,72 @@ mod tests {
         for row in &rows {
             let (outcome, one) = single(&client, &m, row, &opts);
             assert_eq!(outcome, GenerateOutcome::StopToken);
-            assert_eq!(one.patches.len(), 4);
+            assert_eq!(one.patch_len[0], 4);
         }
+    }
+
+    /// The invariant both the noise index and the stop guard now read per
+    /// row: a row still generating has counted exactly one patch per
+    /// iteration, so `patch_len[b] == patches[b].len()`. Row 0 caps at 3 and
+    /// row 1 at 4, so row 0 is frozen for the last iteration and its count
+    /// falls behind while its storage keeps growing.
+    #[test]
+    fn a_live_rows_patch_count_is_the_loop_index() {
+        let (client, device) = cpu_setup();
+        let m = model(fixture(false, &device), &device);
+        let ref_feat = t(&[3, PATCH_SIZE, FEAT_DIM], 0.7, &device);
+        let rows = rows(&ref_feat);
+        let mut opts = options(1, 4);
+        opts.rows = vec![
+            RowOptions {
+                max_len: 3,
+                seed: 7,
+            },
+            RowOptions {
+                max_len: 4,
+                seed: 11,
+            },
+        ];
+
+        let prefill = m.prefill_batch(&client, &rows, MAX_LENGTH).expect("batch");
+        let mut st = GenerateState::start(prefill, m.config).expect("start");
+        let generator = m.patch_generator();
+        let mut steps = 0;
+        while !st.all_finished() {
+            if generator.step(&client, &mut st, &opts).expect("step") == StepOutcome::Stopped {
+                break;
+            }
+            steps += 1;
+            assert_eq!(st.emitted(), steps, "one patch per row per iteration");
+            for b in 0..st.batch {
+                assert_eq!(st.patches[b].len(), steps, "row {b} storage");
+                assert_eq!(
+                    st.patches[b][steps - 1].shape(),
+                    &[1, PATCH_SIZE, FEAT_DIM],
+                    "row {b} stores its own slice, not the batch"
+                );
+                assert!(
+                    st.patches[b][steps - 1].tensor().is_contiguous(),
+                    "row {b}'s dim-0 slice of a dense patch is itself dense, \
+                     so nothing downstream has to copy it"
+                );
+                if !st.finished(b) {
+                    assert_eq!(
+                        st.patch_len[b],
+                        st.patches[b].len(),
+                        "a live row's count is the loop index"
+                    );
+                }
+            }
+        }
+        assert_eq!(steps, 4);
+        assert_eq!(st.patch_len, [3, 4]);
+        assert_eq!(
+            st.row_patches(0).expect("row 0").len(),
+            3,
+            "a frozen row keeps only the patches it counted"
+        );
+        assert_eq!(st.patches[0].len(), 4, "its storage still grew");
     }
 
     /// A `rows` list that does not match the batch is rejected before any
@@ -215,6 +268,6 @@ mod tests {
             2
         ];
         assert!(fx.generator().generate(&client, &mut st, &opts).is_err());
-        assert!(st.patches.is_empty());
+        assert_eq!(st.emitted(), 0);
     }
 }

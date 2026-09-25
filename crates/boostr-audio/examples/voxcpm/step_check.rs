@@ -440,7 +440,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             step_fx.load_tensor::<CpuRuntime>(&format!("step{i}_pred_feat"), &device)?;
         let pred_feat = check(
             &format!("step{i}: pred_feat"),
-            state.patches[i].tensor(),
+            state.patches[0][i].tensor(),
             &pred_feat_want,
             Gate::Gated,
         )?;

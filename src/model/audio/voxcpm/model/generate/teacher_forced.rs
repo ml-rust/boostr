@@ -326,7 +326,7 @@ mod tests {
         let n = 4;
         let (mus, embeds) = run_steps(&client, &generator, &mut st_a, &opts, n, &device);
 
-        let patch_refs: Vec<&Var<CpuRuntime>> = st_a.patches.iter().collect();
+        let patch_refs: Vec<&Var<CpuRuntime>> = st_a.patches[0].iter().collect();
         let target = var_cat(&patch_refs, 0, &client).expect("stack patches into [T, P, D]");
 
         let out = generator
@@ -355,7 +355,7 @@ mod tests {
 
         let (mus, embeds) = run_steps(&client, &generator, &mut st_a, &opts, 1, &device);
 
-        let target = st_a.patches[0].tensor().clone();
+        let target = st_a.patches[0][0].tensor().clone();
         let out = generator
             .teacher_forced_conditioning(&client, &st_b.prefill, &target)
             .expect("teacher_forced_conditioning");
@@ -444,7 +444,7 @@ mod tests {
         let n = 4;
         let (mus, embeds) = run_steps(&client, &generator, &mut st_a, &opts, n, &device);
 
-        let patch_refs: Vec<&Var<CpuRuntime>> = st_a.patches.iter().collect();
+        let patch_refs: Vec<&Var<CpuRuntime>> = st_a.patches[0].iter().collect();
         let target = var_cat(&patch_refs, 0, &client).expect("stack patches into [T, P, D]");
 
         let out = generator

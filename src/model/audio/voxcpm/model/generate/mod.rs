@@ -7,7 +7,7 @@
 //!   1. mu         = cat(lm_to_dit_proj(lm_hidden), res_to_dit_proj(residual_hidden))
 //!   2. pred_feat  = feat_decoder(mu, cond = prefix_feat_cond^T)
 //!   3. curr_embed = enc_to_lm_proj(feat_encoder(pred_feat.unsqueeze(1)))
-//!   4. patches.push(pred_feat); prefix_feat_cond = pred_feat
+//!   4. patches[b].push(pred_feat[b]); prefix_feat_cond = pred_feat
 //!   5. stop?      = argmax(stop(lm_hidden)) == 1   <- the CURRENT lm_hidden
 //!   6. lm_hidden  = fsq(base_lm.decode_step(curr_embed, base_cache, position))
 //!   7. residual_hidden = residual_lm.decode_step(

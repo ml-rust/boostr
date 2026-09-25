@@ -162,10 +162,13 @@ pub struct GenerateState<R: Runtime> {
     /// NEXT iteration. Zeros on entry to iteration 0 (the text-pad patch);
     /// the previous `pred_feat` on entry to every later iteration.
     pub prefix_feat_cond: Var<R>,
-    /// Patches emitted so far, each `[batch, patch_size, feat_dim]`, in
-    /// order. Its length is the loop's iteration index `i`; row `b`'s own
-    /// patches are the first `patch_len[b]` of them.
-    pub patches: Vec<Var<R>>,
+    /// Patches emitted so far, per row: `patches[b]` holds row `b`'s own
+    /// patches in order, each `[1, patch_size, feat_dim]`. Every row is
+    /// pushed a patch on every iteration, so each inner vector is as long as
+    /// the loop has run; the first `patch_len[b]` of them are the ones row
+    /// `b` counts. Read a row's own patches with
+    /// [`row_patches`](Self::row_patches).
+    pub patches: Vec<Vec<Var<R>>>,
     /// Rows in the batch.
     pub batch: usize,
     /// Per-row finish, `None` while the row is still generating.
@@ -239,7 +242,7 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
         Ok(Self {
             prefill,
             prefix_feat_cond: Var::new(zeros, false),
-            patches: Vec::new(),
+            patches: (0..batch).map(|_| Vec::new()).collect(),
             batch,
             outcomes: vec![None; batch],
             patch_len: vec![0; batch],
@@ -257,17 +260,23 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     }
 
     /// Row `row`'s own patches: the first `patch_len[row]` entries of
-    /// [`patches`](Self::patches), each still `[batch, patch_size,
-    /// feat_dim]`. Errors on a row outside the batch.
+    /// `patches[row]`, each `[1, patch_size, feat_dim]`. Errors on a row
+    /// outside the batch.
     pub fn row_patches(&self, row: usize) -> Result<&[Var<R>]> {
-        let len = *self
-            .patch_len
-            .get(row)
-            .ok_or_else(|| Error::InvalidArgument {
-                arg: "row",
-                reason: format!("expected a row below {}, got {row}", self.batch),
-            })?;
-        Ok(&self.patches[..len])
+        let bad_row = || Error::InvalidArgument {
+            arg: "row",
+            reason: format!("expected a row below {}, got {row}", self.batch),
+        };
+        let len = *self.patch_len.get(row).ok_or_else(bad_row)?;
+        let own = self.patches.get(row).ok_or_else(bad_row)?;
+        Ok(&own[..len])
+    }
+
+    /// Iterations the loop has run. Every row is pushed a patch on every
+    /// iteration, finished rows included, so this is any row's stored patch
+    /// count and is at least every `patch_len` entry.
+    pub fn emitted(&self) -> usize {
+        self.patches.first().map_or(0, Vec::len)
     }
 }
 

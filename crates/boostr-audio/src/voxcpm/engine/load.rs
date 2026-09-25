@@ -14,6 +14,7 @@ use numr::runtime::Runtime;
 
 use boostr::model::audio::voxcpm::model::VoxCpm2Model;
 use boostr::model::audio::voxcpm::{VoxCpm2Weights, VoxCpmClient};
+use boostr::quant::ScheduleTuning;
 use boostr::quant::traits::DequantOps;
 
 use crate::decode::{decode_audio, extension_hint};
@@ -42,6 +43,7 @@ where
         + TypeConversionOps<R>
         + RandomOps<R>
         + DequantOps<R>
+        + ScheduleTuning<R>
         + 'static,
 {
     /// Load the model, the tokenizer and every voice under `voices_dir`,
@@ -107,6 +109,14 @@ where
             .as_deref()
             .map(|path| model.load_lora_adapter(path, device))
             .transpose()?;
+
+        // Fill the per-device schedule-tuning cache now, before the DiT
+        // Euler loop's CUDA graph is captured per shape: a capture cannot
+        // run a tuning probe, so an unwarmed key would keep the untuned
+        // fallback for the whole capture's lifetime. No-op on any backend
+        // but CUDA, and a no-op when tuning is unavailable.
+        client.warm_schedule_tuning(model.quant_formats());
+
         let tokenizer = load_tokenizer(&weights.tokenizer_source()?)?;
 
         let mut voices = BTreeMap::new();

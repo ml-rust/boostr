@@ -35,10 +35,11 @@
 //! nothing in this file special-cases a tensor by name.
 
 use crate::error::Result;
-use crate::format::tcf::{TcfLoader, encoding_name};
+use crate::format::tcf::{TcfLoader, block_format, encoding_name};
 use crate::model::audio::voxcpm::loader::support::{DenseWeightSource, TcfSource};
 use crate::model::audio::voxcpm::model::loader::{StackConfigs, VoxCpm2Model, packed_vae_tensor};
 use crate::model::audio::voxcpm::vae::{VAE_GGUF_PROBE_TENSOR, VAE_GGUF_ROOT};
+use crate::quant::QuantFormat;
 use crate::quant::traits::DequantOps;
 use crate::tcf::Encoding;
 use numr::dtype::DType;
@@ -89,15 +90,18 @@ where
         // reparse would be quadratic over 577 names.
         let loader = TcfLoader::open(tcf_path.as_ref())?;
         check_embedded_vae_dense(&loader)?;
+        let formats = tcf_quant_formats(&loader);
         let mut source = TcfSource::new(&loader)?;
-        Self::from_source(
+        let mut model = Self::from_source(
             &mut source,
             cfgs,
             audiovae_path,
             device,
             dtype,
             vae_decoder_dtype,
-        )
+        )?;
+        model.set_quant_formats(formats);
+        Ok(model)
     }
 
     /// Load the whole model from a TCF, materializing EVERY natively encoded
@@ -139,6 +143,23 @@ where
             vae_decoder_dtype,
         )
     }
+}
+
+/// Distinct quantized formats among a TCF's own tensors, from their block
+/// encoding. A tensor with no [`Encoding::Block`] (a raw F32/F16/BF16
+/// stream) contributes nothing, and a block encoding this build has no
+/// kernel for is skipped rather than failing the whole load — this never
+/// invents a format the reader cannot name.
+fn tcf_quant_formats(loader: &TcfLoader) -> Vec<QuantFormat> {
+    let mut formats = std::collections::HashSet::new();
+    for info in loader.tensors() {
+        if let Encoding::Block(block) = info.encoding()
+            && let Ok(fmt) = block_format(block, &info.name)
+        {
+            formats.insert(fmt);
+        }
+    }
+    formats.into_iter().collect()
 }
 
 /// Refuse a TCF whose embedded AudioVAE holds a block-encoded tensor.

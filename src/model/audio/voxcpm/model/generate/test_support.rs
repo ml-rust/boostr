@@ -348,5 +348,6 @@ pub(crate) fn model(fx: Fixture, device: &CpuDevice) -> VoxCpm2Model<CpuRuntime>
             patch_size: PATCH_SIZE,
             feat_dim: FEAT_DIM,
         },
+        quant_formats: Vec::new(),
     }
 }

@@ -17,6 +17,7 @@ use crate::model::audio::voxcpm::vae::{
     VAE_GGUF_PROBE_TENSOR,
 };
 use crate::nn::MaybeQuantLinear;
+use crate::quant::QuantFormat;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, TensorOps, TypeConversionOps, UnaryOps};
 use numr::runtime::Runtime;
@@ -48,6 +49,14 @@ pub struct VoxCpm2Model<R: Runtime> {
     pub aux: AuxProjections<R>,
     /// Patch geometry (`patch_size`, `feat_dim`).
     pub config: VoxCpm2Config,
+    /// Distinct quantized formats the transformer stack's matmul weights
+    /// use, in no particular order. Empty for [`from_checkpoint`](Self::from_checkpoint)
+    /// (safetensors never packs a weight) and for the `*_dense` entry
+    /// points (every weight is materialized to F32 before this struct is
+    /// built). [`from_gguf`](Self::from_gguf) and [`from_tcf`](Self::from_tcf)
+    /// fill it from the file's own tensor types; a file whose reader cannot
+    /// name a format reports none rather than guessing.
+    pub(crate) quant_formats: Vec<QuantFormat>,
 }
 
 impl<R: Runtime<DType = DType>> VoxCpm2Model<R>
@@ -164,6 +173,7 @@ where
             fsq: ScalarQuantization::from_source(source, cfgs.fsq, device, dtype)?,
             aux: AuxProjections::from_source(source, cfgs.fsq, device, dtype)?,
             config: cfgs.model,
+            quant_formats: Vec::new(),
         })
     }
 }
@@ -213,6 +223,22 @@ pub(crate) fn packed_vae_tensor(name: &str, stored_as: &str) -> Error {
 }
 
 impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
+    /// Distinct quantized formats this model's matmul weights use, in no
+    /// particular order. Empty from [`from_checkpoint`](Self::from_checkpoint)
+    /// and from `*_dense`; filled from the file's own tensor types by
+    /// [`from_gguf`](Self::from_gguf) and [`from_tcf`](Self::from_tcf).
+    pub fn quant_formats(&self) -> &[QuantFormat] {
+        &self.quant_formats
+    }
+
+    /// Set the distinct quantized formats this model's weights use. Called
+    /// once by [`from_gguf`](super::super::gguf_loader) and
+    /// [`from_tcf`](super::super::tcf_loader) after [`Self::from_source`]
+    /// returns.
+    pub(crate) fn set_quant_formats(&mut self, formats: Vec<QuantFormat>) {
+        self.quant_formats = formats;
+    }
+
     /// Dtype every transformer-stack tensor was loaded at.
     ///
     /// Read off `enc_to_lm_proj`, an always-present weight the prefill path

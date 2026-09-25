@@ -73,6 +73,7 @@ use crate::model::audio::voxcpm::loader::cstr::{GgmlNamedGguf, GgufNaming, probe
 use crate::model::audio::voxcpm::loader::support::DenseWeightSource;
 use crate::model::audio::voxcpm::model::loader::{StackConfigs, VoxCpm2Model, packed_vae_tensor};
 use crate::model::audio::voxcpm::vae::{VAE_GGUF_PROBE_TENSOR, VAE_GGUF_ROOT};
+use crate::quant::QuantFormat;
 use crate::quant::traits::DequantOps;
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ReduceOps, TensorOps, TypeConversionOps, UnaryOps};
@@ -131,7 +132,13 @@ where
         // here: a match scrutinee's temporaries live for the whole match,
         // and the arms below need `source` by `&mut` and by value.
         let naming = probe_naming(&source)?;
-        match naming {
+        // Read off the raw file before either match arm consumes or
+        // reborrows `source`: the Ggml arm moves it into `GgmlNamedGguf`,
+        // which only rewrites tensor NAMES, so the underlying GGML types
+        // (and therefore the formats a forward pass will quant_matmul
+        // against) are the same either way.
+        let formats = gguf_quant_formats(&source);
+        let mut model = match naming {
             GgufNaming::Verbatim => Self::from_source(
                 &mut source,
                 cfgs,
@@ -148,7 +155,9 @@ where
                 dtype,
                 vae_decoder_dtype,
             ),
-        }
+        }?;
+        model.set_quant_formats(formats);
+        Ok(model)
     }
 
     /// Load the whole model from a GGUF, materializing EVERY packed weight
@@ -212,6 +221,22 @@ where
             }
         }
     }
+}
+
+/// Distinct quantized formats among a GGUF's own tensors, from their
+/// `ggml_type`. A tensor type with no [`QuantFormat`] mapping (dense F32,
+/// F16, BF16, or an integer type such as `sr_bin_boundaries`) contributes
+/// nothing — this never invents a format the file does not carry.
+fn gguf_quant_formats(gguf: &Gguf) -> Vec<QuantFormat> {
+    let mut formats = std::collections::HashSet::new();
+    for name in gguf.tensor_names() {
+        if let Ok(info) = gguf.tensor_info(name)
+            && let Some(fmt) = info.ggml_type.to_quant_format()
+        {
+            formats.insert(fmt);
+        }
+    }
+    formats.into_iter().collect()
 }
 
 /// Refuse a GGUF whose embedded AudioVAE holds a block-quantized tensor.

@@ -240,7 +240,7 @@ fn batch_of_two_matches_single_renders() {
         .prefill_batch(&client, &rows, s_max + max_len)
         .expect("prefill_batch");
     assert_eq!(prefill.batch, 2);
-    assert!(prefill.kv_start.is_some(), "rows differ in length");
+    assert!(prefill.lanes.pad().is_some(), "rows differ in length");
     let mut state = GenerateState::start(prefill, model.config).expect("start");
     let mut options = GenerateOptions::new(max_len, SEEDS[0]);
     options.rows = max_lens
@@ -364,7 +364,7 @@ fn duplicate_rows_match_each_other_and_the_single() {
     let prefill = model
         .prefill_batch(&client, &[row, row], s + max_len)
         .expect("prefill_batch");
-    assert!(prefill.kv_start.is_none(), "equal rows carry no pad");
+    assert!(prefill.lanes.pad().is_none(), "equal rows carry no pad");
     let lm = to_host(prefill.lm_hidden.tensor());
     let half = lm.len() / 2;
     eprintln!(

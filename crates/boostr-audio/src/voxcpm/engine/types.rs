@@ -9,8 +9,8 @@ use std::thread::JoinHandle;
 
 use numr::dtype::DType;
 use numr::ops::{
-    ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, RandomOps, ReduceOps,
-    ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
+    ActivationOps, BinaryOps, CompareOps, ConditionalOps, HostCopyOps, IndexingOps, RandomOps,
+    ReduceOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -62,6 +62,7 @@ pub trait VoxCpm2RenderClient<R: Runtime<DType = DType>>:
     + ConditionalOps<R>
     + TypeConversionOps<R>
     + RandomOps<R>
+    + HostCopyOps<R>
     + DequantOps<R>
     + Send
     + Sync
@@ -85,6 +86,7 @@ where
         + ConditionalOps<R>
         + TypeConversionOps<R>
         + RandomOps<R>
+        + HostCopyOps<R>
         + DequantOps<R>
         + Send
         + Sync

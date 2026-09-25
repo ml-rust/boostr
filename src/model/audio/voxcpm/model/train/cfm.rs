@@ -28,8 +28,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// - `target_patches`: `[T >= 1, patch_size, feat_dim]` ground truth,
     ///   teacher-forced through [`Self::teacher_forced_conditioning`]. See
     ///   that method's own doc comment for `prefill`'s requirements
-    ///   (`prefill.intermediates` must be `Some` whenever `prefill.position
-    ///   > 0`).
+    ///   (`prefill.intermediates` must be `Some` whenever the prefix is
+    ///   non-empty).
     /// - `t`: `[T]`, one flow timestep per patch, expected in `[0, 1]` (not
     ///   validated — an out-of-range `t` is a caller bug, not a shape
     ///   error, and [`flow_matching_interpolate`]'s formula is well-defined

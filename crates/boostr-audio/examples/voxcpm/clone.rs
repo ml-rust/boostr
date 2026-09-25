@@ -199,8 +199,8 @@ use boostr_audio::{
 };
 use numr::dtype::DType;
 use numr::ops::{
-    ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, RandomOps, ReduceOps,
-    ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
+    ActivationOps, BinaryOps, CompareOps, ConditionalOps, HostCopyOps, IndexingOps, RandomOps,
+    ReduceOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -941,7 +941,7 @@ fn load_reference(path: &Path) -> Result<ReferenceAudio, Box<dyn std::error::Err
 fn run<R: Runtime<DType = DType>>(
     args: &Args,
     device: &R::Device,
-    client: &(impl VoxCpmClient<R> + TypeConversionOps<R> + RandomOps<R> + 'static),
+    client: &(impl VoxCpmClient<R> + TypeConversionOps<R> + RandomOps<R> + HostCopyOps<R> + 'static),
     // `None` selects zero-shot generation; `parse_args` has already refused
     // `--best-of > 1` without a reference.
     ref_wav: Option<&[f32]>,

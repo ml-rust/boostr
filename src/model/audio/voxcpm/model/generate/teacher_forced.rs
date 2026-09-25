@@ -39,7 +39,7 @@
 //! `base_lm`/`residual_lm` were prefilled with — so [`PrefillState`] must
 //! carry [`PrefillState::intermediates`] (i.e. come from
 //! [`VoxCpm2Model::prefill_capturing`]) whenever the prefix is non-empty
-//! (`prefill.position > 0`). A `position == 0` prefill has no prefix to
+//! (the row sits past position 0). A prefill at position 0 has no prefix to
 //! re-run and accepts `intermediates: None`.
 //!
 //! # The shift
@@ -100,11 +100,11 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// `target_patches` is `[T, patch_size, feat_dim]`, `T >= 1`, ground
     /// truth (no grad needed — it is a target, never trained). `prefill` is
     /// borrowed, not mutated: this recomputes everything the loop would
-    /// have produced from it without advancing it. When `prefill.position >
-    /// 0`, `prefill.intermediates` must be `Some` (built via
+    /// have produced from it without advancing it. When the row sits past
+    /// position 0, `prefill.intermediates` must be `Some` (built via
     /// [`VoxCpm2Model::prefill_capturing`]) — the prefix embeddings live
-    /// there, not in the KV caches `forward` cannot read. `position == 0`
-    /// needs no prefix and accepts `intermediates: None`.
+    /// there, not in the KV caches `forward` cannot read. A prefill at
+    /// position 0 needs no prefix and accepts `intermediates: None`.
     ///
     /// Errors on a shape-mismatched `target_patches`, on a malformed
     /// `prefill` row, or on a non-empty prefix with no captured
@@ -156,7 +156,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
 
         // The prefix `base_lm`/`residual_lm` saw before patch 0 — required
         // only when there IS one. See the module docs.
-        let s = prefill.position;
+        let s = prefill.lanes.position(0);
         let prefix = if s == 0 {
             None
         } else {
@@ -167,7 +167,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
                     .ok_or_else(|| Error::InvalidArgument {
                         arg: "prefill.intermediates",
                         reason: format!(
-                            "prefill.position is {s} (> 0) but prefill.intermediates is None; \
+                            "prefill holds {s} prefix positions (> 0) but \
+                             prefill.intermediates is None; \
                              teacher_forced_conditioning needs the prefix embeddings \
                              VoxCpm2Model::prefill_capturing captures — build the \
                              PrefillState with prefill_capturing, not prefill"
@@ -433,7 +434,7 @@ mod tests {
             .prefill_capturing(&client, None, &text_token_ids, max_length)
             .expect("no-reference prefill_capturing b");
         assert_eq!(
-            prefill_a.position,
+            prefill_a.lanes.position(0),
             text_token_ids.len(),
             "S == text_token_ids.len() with no reference prefix"
         );

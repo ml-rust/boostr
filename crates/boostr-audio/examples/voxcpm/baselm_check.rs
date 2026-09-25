@@ -28,7 +28,7 @@
 //! 25.4, i.e. 4e-6 relative - the same order as the 9.9e-5 by which the
 //! reference's own two paths disagree, which is the floor for this check.
 use boostr::format::safetensors_loader::SafeTensorsLoader;
-use boostr::model::audio::voxcpm::minicpm4::{MiniCpm4Config, MiniCpm4Model};
+use boostr::model::audio::voxcpm::minicpm4::{CacheStep, MiniCpm4Config, MiniCpm4Model};
 use numr::autograd::{Var, var_cat, var_narrow, var_reshape};
 use numr::dtype::DType;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -102,7 +102,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for p in 0..steps {
             let step_in = var_narrow(&decode_in, 1, p, 1)?;
             let step_in = var_reshape(&step_in, &[batch, hidden])?;
-            let step_out = model.decode_step(&client, &step_in, &mut cache, p, None)?;
+            let step_out =
+                model.decode_step(&client, &step_in, &mut cache, &CacheStep::prefix(p, None))?;
             outs.push(var_reshape(&step_out, &[batch, 1, hidden])?);
         }
         let out_refs: Vec<&Var<CpuRuntime>> = outs.iter().collect();

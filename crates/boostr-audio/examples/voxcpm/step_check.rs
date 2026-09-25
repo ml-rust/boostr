@@ -287,9 +287,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let init_position = init_position_tensor.item::<i64>()? as usize;
     println!(
         "starting state: position got {} want {init_position}",
-        prefill_state.position
+        prefill_state.lanes.position(0)
     );
-    let position_ok = prefill_state.position == init_position;
+    let position_ok = prefill_state.lanes.position(0) == init_position;
     println!("  {}", if position_ok { "OK" } else { "MISMATCH" });
     ok &= position_ok;
 

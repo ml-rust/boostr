@@ -23,7 +23,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         options: &GenerateOptions,
     ) -> Result<GenerateOutcome>
     where
-        C: ModelClient<R> + TypeConversionOps<R> + RandomOps<R> + 'static,
+        C: ModelClient<R> + TypeConversionOps<R> + RandomOps<R> + HostCopyOps<R> + 'static,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -123,7 +123,7 @@ mod tests {
         ];
 
         let prefill = m.prefill_batch(&client, &rows, MAX_LENGTH).expect("batch");
-        assert!(prefill.kv_start.is_some(), "rows differ in length");
+        assert!(prefill.lanes.pad().is_some(), "rows differ in length");
         let mut st = GenerateState::start(prefill, m.config).expect("start");
         let outcome = m
             .patch_generator()
@@ -133,7 +133,7 @@ mod tests {
         assert_eq!(st.emitted(), 4, "the loop runs to the longest cap");
         assert_eq!(st.patch_len, [3, 4]);
         assert_eq!(st.outcomes, [Some(GenerateOutcome::MaxLen); 2]);
-        assert_eq!(st.prefill.position, 8 + 4);
+        assert_eq!(st.prefill.lanes.position(0), 8 + 4);
 
         for (b, row) in rows.iter().enumerate() {
             let mut one = options(1, opts.rows[b].max_len);
@@ -174,7 +174,7 @@ mod tests {
         );
         assert_eq!(st.patch_len, [4, 4]);
         assert_eq!(st.outcomes, [Some(GenerateOutcome::StopToken); 2]);
-        assert_eq!(st.prefill.position, 8 + 3);
+        assert_eq!(st.prefill.lanes.position(0), 8 + 3);
         assert_eq!(st.prefill.base_cache.seq_len(), 8 + 3);
         assert!(
             generator.step(&client, &mut st, &opts).is_err(),

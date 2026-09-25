@@ -43,7 +43,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         options: &GenerateOptions,
     ) -> Result<(StepOutcome, StepIntermediates<R>)>
     where
-        C: ModelClient<R> + TypeConversionOps<R> + 'static,
+        C: ModelClient<R> + TypeConversionOps<R> + HostCopyOps<R> + 'static,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -98,7 +98,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         capture: bool,
     ) -> Result<(StepOutcome, Option<StepIntermediates<R>>)>
     where
-        C: ModelClient<R> + TypeConversionOps<R> + 'static,
+        C: ModelClient<R> + TypeConversionOps<R> + HostCopyOps<R> + 'static,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -263,15 +263,15 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
 
         // 6. Step `base_lm`, then fsq. Unlike the prefill's last row, every
         // hidden state from here on IS fsq'd.
-        let position = state.prefill.position;
-        let kv_start = state.prefill.kv_start.as_ref();
-        let stepped = self.base_lm.decode_step(
-            client,
-            &curr_embed,
-            &mut state.prefill.base_cache,
-            position,
-            kv_start,
-        )?;
+        //
+        // Both stacks read the SAME step off the lane table, so both write
+        // row `b` at `lanes.position(b)` and attend over the same range. The
+        // table is advanced once, after step 7 — advancing between them
+        // would rotate and file `residual_lm` a position ahead of `base_lm`.
+        let step = state.prefill.lanes.step();
+        let stepped =
+            self.base_lm
+                .decode_step(client, &curr_embed, &mut state.prefill.base_cache, &step)?;
         let captured_lm_hidden_pre_fsq = capture.then(|| stepped.clone());
         state.prefill.lm_hidden = self.fsq.forward(client, &stepped)?;
 
@@ -284,13 +284,14 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             client,
             &residual_in,
             &mut state.prefill.residual_cache,
-            position,
-            kv_start,
+            &step,
         )?;
         state.prefill.residual_hidden = residual;
 
-        // 8. One counter, both caches, in lockstep.
-        state.prefill.position = position + 1;
+        // 8. One table, both caches, in lockstep: ONE advance, here, after
+        // both stacks have stepped. `step` borrows the table, so the borrow
+        // checker refuses an advance placed between them.
+        state.prefill.lanes.advance(client)?;
 
         // `capture` implies `stop_logits` is `Some` (the disjunction at step
         // 5), so the `(true, None)` arm is unreachable, not a silent data
@@ -347,7 +348,10 @@ mod tests {
             values(&plain.prefill.residual_hidden),
             values(&captured.prefill.residual_hidden)
         );
-        assert_eq!(plain.prefill.position, captured.prefill.position);
+        assert_eq!(
+            plain.prefill.lanes.positions(),
+            captured.prefill.lanes.positions()
+        );
 
         // Non-degenerate: this must not pass by both sides silently zeroing out.
         assert!(values(&intermediates.mu).iter().any(|v| v.abs() > 1e-6));

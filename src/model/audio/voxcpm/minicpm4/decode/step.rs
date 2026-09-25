@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;
+use crate::model::audio::voxcpm::minicpm4::cache_step::CacheStep;
 use crate::model::audio::voxcpm::minicpm4::left_pad::LeftPad;
 use crate::model::audio::voxcpm::minicpm4::model::MiniCpm4Model;
 use crate::model::traits::ModelClient;
@@ -64,7 +65,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
         self.check_cache(kv_cache, shape[0], shape[2], shape[1], 0)?;
 
         kv_cache.reset();
-        self.forward_cached(client, inputs_embeds, kv_cache, 0, pad)
+        self.forward_cached(client, inputs_embeds, kv_cache, &CacheStep::prefix(0, pad))
     }
 
     /// Advance one position.
@@ -76,26 +77,23 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// unsqueeze on either side. The `[batch, 1, hidden]` view is rebuilt
     /// internally for the layer stack.
     ///
-    /// `position` is the ABSOLUTE index of this embedding and must equal
-    /// `kv_cache.seq_len()` — the slot the cache will write. Accepting any
-    /// other index would rotate the query at one position while filing its key
-    /// at another, which stays shape-valid and silently computes a different
+    /// `step` carries the ABSOLUTE index this embedding lands at in each
+    /// row, together with the same per-row left padding the cache was
+    /// prefilled with (see [`prefill`](Self::prefill)). A row's write
+    /// position must be the slot its own lane will fill. Accepting any other
+    /// index would rotate the query at one position while filing its key at
+    /// another, which stays shape-valid and silently computes a different
     /// model.
     ///
-    /// `pad` is the same per-row left padding the cache was prefilled with
-    /// (see [`prefill`](Self::prefill)); `None` when it was prefilled
-    /// unpadded.
-    ///
-    /// Errors (never panics, never writes out of range) when `position`
-    /// reaches the cache's `max_length`, when it disagrees with the cache
-    /// length, or when the shape or batch does not match.
+    /// Errors (never panics, never writes out of range) when a write
+    /// position reaches the cache's `max_length`, when one disagrees with
+    /// the cache length, or when the shape or batch does not match.
     pub fn decode_step<C>(
         &self,
         client: &C,
         embed: &Var<R>,
         kv_cache: &mut LayeredKvCache<R>,
-        position: usize,
-        pad: Option<&LeftPad<R>>,
+        step: &CacheStep<'_, R>,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -122,32 +120,26 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
             });
         }
         let (batch, hidden) = (shape[0], shape[1]);
-        self.check_cache(kv_cache, batch, hidden, 1, position)?;
+        self.check_cache(kv_cache, batch, hidden, 1, step.last_write())?;
 
         // The write-order rule that makes this cache equivalent to the
-        // reference's preallocated one: `position` must be the slot the cache
-        // will actually write. `prefill` is exempt because it resets first.
-        // `check_cache` above already required layer 0 to exist, so this
-        // cannot be `None` in practice; propagate rather than default to 0,
-        // which would silently mask that invariant if it were ever broken.
+        // reference's preallocated one: a row's write position must be the
+        // slot its own lane will fill, and the furthest of them must be the
+        // slot the cache's cursor stands on. `prefill` is exempt because it
+        // resets first. `check_cache` above already required layer 0 to
+        // exist, so this cannot be `None` in practice; propagate rather than
+        // default to 0, which would silently mask that invariant if it were
+        // ever broken.
         let filled = kv_cache
             .layer(0)
             .ok_or_else(|| Error::ModelError {
                 reason: "KV cache missing layer 0 after validation".to_string(),
             })?
             .seq_len();
-        if filled != position {
-            return Err(Error::InvalidArgument {
-                arg: "position",
-                reason: format!(
-                    "expected {filled} (the next free cache slot), got {position}; \
-                     positions must be written in order from 0"
-                ),
-            });
-        }
+        step.check_write_order(filled)?;
 
         let x = var_reshape(embed, &[batch, 1, hidden]).map_err(Error::Numr)?;
-        let out = self.forward_cached(client, &x, kv_cache, position, pad)?;
+        let out = self.forward_cached(client, &x, kv_cache, step)?;
         var_reshape(&out, &[batch, hidden]).map_err(Error::Numr)
     }
 }
@@ -211,7 +203,12 @@ mod tests {
             let row = row_at(&x, position);
             let step = values(
                 &model
-                    .decode_step(&client, &row, &mut cache, position, None)
+                    .decode_step(
+                        &client,
+                        &row,
+                        &mut cache,
+                        &CacheStep::prefix(position, None),
+                    )
                     .expect("decode_step"),
             );
             assert_eq!(step.len(), HIDDEN);
@@ -263,7 +260,12 @@ mod tests {
             let row = row_at(&x, position);
             let step = values(
                 &model
-                    .decode_step(&client, &row, &mut cache, position, None)
+                    .decode_step(
+                        &client,
+                        &row,
+                        &mut cache,
+                        &CacheStep::prefix(position, None),
+                    )
                     .expect("decode_step"),
             );
             let expected = &full[position * HIDDEN..(position + 1) * HIDDEN];
@@ -288,11 +290,21 @@ mod tests {
         let row = Var::new(filled(&[1, HIDDEN], 3, &device), false);
         for position in 0..max_length {
             model
-                .decode_step(&client, &row, &mut cache, position, None)
+                .decode_step(
+                    &client,
+                    &row,
+                    &mut cache,
+                    &CacheStep::prefix(position, None),
+                )
                 .expect("in-range step");
         }
         let err = model
-            .decode_step(&client, &row, &mut cache, max_length, None)
+            .decode_step(
+                &client,
+                &row,
+                &mut cache,
+                &CacheStep::prefix(max_length, None),
+            )
             .unwrap_err();
         assert!(err.to_string().contains("max_length"), "got {err}");
         assert_eq!(
@@ -311,7 +323,7 @@ mod tests {
 
         // Cache is empty, so only position 0 is writable.
         let err = model
-            .decode_step(&client, &row, &mut cache, 3, None)
+            .decode_step(&client, &row, &mut cache, &CacheStep::prefix(3, None))
             .unwrap_err();
         assert!(
             err.to_string().contains("next free cache slot"),
@@ -326,7 +338,7 @@ mod tests {
         let mut cache = model.new_kv_cache(1, 8).expect("cache");
         let x = Var::new(filled(&[1, 1, HIDDEN], 3, &device), false);
         let err = model
-            .decode_step(&client, &x, &mut cache, 0, None)
+            .decode_step(&client, &x, &mut cache, &CacheStep::prefix(0, None))
             .unwrap_err();
         assert!(err.to_string().contains("2D"), "got {err}");
     }
@@ -360,7 +372,12 @@ mod tests {
             let row = row_at(&x, position);
             let step = values(
                 &model
-                    .decode_step(&client, &row, &mut cache, position, None)
+                    .decode_step(
+                        &client,
+                        &row,
+                        &mut cache,
+                        &CacheStep::prefix(position, None),
+                    )
                     .expect("decode_step"),
             );
             let expected = &full[position * HIDDEN..(position + 1) * HIDDEN];
@@ -415,7 +432,12 @@ mod tests {
                     .expect("prefill");
                 let mut rows = values(&out);
                 let stepped = model
-                    .decode_step(&client, &step_pair, &mut cache, long, start)
+                    .decode_step(
+                        &client,
+                        &step_pair,
+                        &mut cache,
+                        &CacheStep::prefix(long, start),
+                    )
                     .expect("step");
                 rows.extend(values(&stepped));
                 rows
@@ -431,7 +453,12 @@ mod tests {
             let step_in = Var::new(step_row, false);
             want.extend(values(
                 &model
-                    .decode_step(&client, &step_in, &mut cache, short, None)
+                    .decode_step(
+                        &client,
+                        &step_in,
+                        &mut cache,
+                        &CacheStep::prefix(short, None),
+                    )
                     .expect("step"),
             ));
 

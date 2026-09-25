@@ -7,7 +7,7 @@
 //! ```text
 //! let mut cache = model.new_kv_cache(batch, max_length)?;   // preallocated
 //! let prefix_out = model.prefill(&client, &prefix_embeds, &mut cache)?;
-//! let step_out   = model.decode_step(&client, &embed, &mut cache, position)?;
+//! let step_out   = model.decode_step(&client, &embed, &mut cache, &step)?;
 //! ```
 //!
 //! # Cache-shape equivalence with the reference

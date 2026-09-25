@@ -5,7 +5,7 @@ use super::rows::PaddedBatch;
 use super::state::{PrefillIntermediates, PrefillRow, PrefillState};
 use super::tensors::{last_row, mask_var, row_audio_feat};
 use crate::error::{Error, Result};
-use crate::model::audio::voxcpm::minicpm4::LeftPad;
+use crate::model::audio::voxcpm::minicpm4::{LanePositions, LeftPad};
 use crate::model::audio::voxcpm::model::loader::VoxCpm2Model;
 use crate::model::traits::ModelClient;
 use crate::ops::FlashAttentionOps;
@@ -291,14 +291,32 @@ impl<R: Runtime<DType = DType>> VoxCpm2Model<R> {
             residual_enc_inputs,
         });
 
+        // ONE table for both caches. Both stacks rotate against a rope
+        // table of the same length, or the NoPE stack against none, so a row
+        // the table admits is a row both can serve; a disagreement here
+        // would let one stack rotate past its own table.
+        let rope_table_len = match (
+            self.base_lm.rope_positions(),
+            self.residual_lm.rope_positions(),
+        ) {
+            (Some(base), Some(residual)) if base != residual => {
+                return Err(Error::ModelError {
+                    reason: format!(
+                        "base_lm holds {base} rope positions and residual_lm holds                          {residual}; one table cannot bound both"
+                    ),
+                });
+            }
+            (base, residual) => base.or(residual),
+        };
+        let lanes = LanePositions::new(kv_start, batch, seq_len, rope_table_len, device)?;
+
         Ok(PrefillState {
             lm_hidden,
             residual_hidden,
             base_cache,
             residual_cache,
-            position: seq_len,
+            lanes,
             batch,
-            kv_start,
             intermediates,
         })
     }
@@ -337,10 +355,10 @@ mod tests {
         let prefill = m
             .prefill_capturing(&client, None, &LONG, LONG.len())
             .expect("no-reference prefill_capturing");
-        assert_eq!(prefill.position, LONG.len());
+        assert_eq!(prefill.lanes.position(0), LONG.len());
         assert!(prefill.intermediates.is_some());
         assert_eq!(prefill.batch, 1);
-        assert!(prefill.kv_start.is_none());
+        assert!(prefill.lanes.pad().is_none());
     }
 
     /// The plain (non-capturing) path must agree on `position` and leave
@@ -352,7 +370,7 @@ mod tests {
         let prefill = m
             .prefill(&client, None, &SHORT, SHORT.len())
             .expect("no-reference prefill");
-        assert_eq!(prefill.position, SHORT.len());
+        assert_eq!(prefill.lanes.position(0), SHORT.len());
         assert!(prefill.intermediates.is_none());
     }
 
@@ -371,8 +389,8 @@ mod tests {
             };
             let batch = m.prefill_batch(&client, &[row], 12).expect("batch");
             assert_eq!(batch.batch, 1);
-            assert!(batch.kv_start.is_none());
-            assert_eq!(batch.position, one.position);
+            assert!(batch.lanes.pad().is_none());
+            assert_eq!(batch.lanes.position(0), one.lanes.position(0));
             assert_eq!(values(&batch.lm_hidden), values(&one.lm_hidden));
             assert_eq!(values(&batch.residual_hidden), values(&one.residual_hidden));
             assert_eq!(batch.base_cache.seq_len(), one.base_cache.seq_len());
@@ -402,9 +420,9 @@ mod tests {
             .prefill_batch_capturing(&client, &rows, max_length)
             .expect("batch");
         assert_eq!(batch.batch, 2);
-        assert_eq!(batch.position, 3 + 2 + LONG.len());
-        let starts: Vec<i32> = batch.kv_start.as_ref().expect("padded").host.clone();
-        assert_eq!(starts, [0, (batch.position - SHORT.len()) as i32]);
+        assert_eq!(batch.lanes.position(0), 3 + 2 + LONG.len());
+        let starts: Vec<i32> = batch.lanes.pad().expect("padded").host.clone();
+        assert_eq!(starts, [0, (batch.lanes.position(1) - SHORT.len()) as i32]);
 
         let lm = values(&batch.lm_hidden);
         let res = values(&batch.residual_hidden);
@@ -434,7 +452,8 @@ mod tests {
             .base_lm
             .prefill(&client, &inter.combined_embed, &mut cache, None)
             .expect("unmasked prefill");
-        let unmasked_last = values(&last_row(&unmasked, batch.position).expect("last row"));
+        let unmasked_last =
+            values(&last_row(&unmasked, batch.lanes.position(0)).expect("last row"));
         assert!(
             unmasked_last[width..]
                 .iter()

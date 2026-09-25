@@ -320,8 +320,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // --- 9. position ---------------------------------------------------------
-    println!("position: {} (want {seq_len_want})", state.position);
-    ok &= state.position == seq_len_want;
+    println!(
+        "position: {} (want {seq_len_want})",
+        state.lanes.position(0)
+    );
+    ok &= state.lanes.position(0) == seq_len_want;
 
     println!("\n{}", if ok { "VERIFIED" } else { "FAILED" });
     std::process::exit(if ok { 0 } else { 1 });

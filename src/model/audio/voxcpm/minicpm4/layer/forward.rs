@@ -1,7 +1,7 @@
 use super::MiniCpm4Layer;
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
-use crate::model::audio::voxcpm::minicpm4::left_pad::LeftPad;
+use crate::model::audio::voxcpm::minicpm4::cache_step::CacheStep;
 use crate::model::traits::ModelClient;
 use crate::nn::RoPE;
 use crate::quant::traits::DequantOps;
@@ -168,7 +168,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
     }
 
     /// KV-cached variant of [`forward`](Self::forward): `x: [batch, seq,
-    /// hidden]` covering absolute positions `position..position + seq` ->
+    /// hidden]` covering the absolute positions `step` gives each row ->
     /// `[batch, seq, hidden]`.
     ///
     /// Identical residual/norm/MLP structure — only attention differs, reading
@@ -179,8 +179,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
         x: &Var<R>,
         rope: Option<&RoPE<R>>,
         kv_cache: &mut KvCache<R>,
-        position: usize,
-        pad: Option<&LeftPad<R>>,
+        step: &CacheStep<'_, R>,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -196,8 +195,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
             + ConditionalOps<R>
             + DequantOps<R>,
     {
-        let (h, mlp_out) = self
-            .forward_cached_with_pending_residual(client, x, None, rope, kv_cache, position, pad)?;
+        let (h, mlp_out) =
+            self.forward_cached_with_pending_residual(client, x, None, rope, kv_cache, step)?;
         var_add(&h, &mlp_out, client).map_err(Error::Numr)
     }
 
@@ -213,8 +212,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
         pending: Option<&Var<R>>,
         rope: Option<&RoPE<R>>,
         kv_cache: &mut KvCache<R>,
-        position: usize,
-        pad: Option<&LeftPad<R>>,
+        step: &CacheStep<'_, R>,
     ) -> Result<(Var<R>, Var<R>)>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -239,7 +237,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Layer<R> {
         };
         let attn_out = self
             .self_attn
-            .forward_cached(client, &normed, rope, kv_cache, position, pad)?;
+            .forward_cached(client, &normed, rope, kv_cache, step)?;
 
         let (normed, h) = self
             .post_attention_layernorm

@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;
-use crate::model::audio::voxcpm::minicpm4::left_pad::LeftPad;
+use crate::model::audio::voxcpm::minicpm4::cache_step::CacheStep;
 use crate::model::audio::voxcpm::minicpm4::model::MiniCpm4Model;
 use crate::model::traits::ModelClient;
 use crate::quant::traits::DequantOps;
@@ -15,21 +15,20 @@ use numr::ops::{
 use numr::runtime::Runtime;
 
 impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
-    /// The cached layer stack: `[batch, seq, hidden]` covering absolute
-    /// positions `position..position + seq` -> `[batch, seq, hidden]` after the
+    /// The cached layer stack: `[batch, seq, hidden]` covering the absolute
+    /// positions `step` gives each row -> `[batch, seq, hidden]` after the
     /// final `norm`.
     ///
     /// Same layer order and same final norm as
     /// [`forward`](MiniCpm4Model::forward); only attention differs. Prefill
-    /// (`seq == prefix`, `position == 0`) and a decode step (`seq == 1`) both
-    /// run through here, so the two cached shapes cannot drift apart.
+    /// (`seq == prefix`, position 0) and a decode step (`seq == 1`) both run
+    /// through here, so the two cached shapes cannot drift apart.
     pub(super) fn forward_cached<C>(
         &self,
         client: &C,
         x: &Var<R>,
         kv_cache: &mut LayeredKvCache<R>,
-        position: usize,
-        pad: Option<&LeftPad<R>>,
+        step: &CacheStep<'_, R>,
     ) -> Result<Var<R>>
     where
         C: ModelClient<R> + TypeConversionOps<R>,
@@ -61,8 +60,7 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
                 pending.as_ref(),
                 self.rope.as_ref(),
                 cache,
-                position,
-                pad,
+                step,
             )?;
             h = new_h;
             pending = Some(mlp_out);

@@ -31,7 +31,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         options: &GenerateOptions,
     ) -> Result<StepOutcome>
     where
-        C: ModelClient<R> + TypeConversionOps<R> + 'static,
+        C: ModelClient<R> + TypeConversionOps<R> + HostCopyOps<R> + 'static,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -71,7 +71,7 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         options: &GenerateOptions,
     ) -> Result<StepOutcome>
     where
-        C: ModelClient<R> + TypeConversionOps<R> + RandomOps<R> + 'static,
+        C: ModelClient<R> + TypeConversionOps<R> + RandomOps<R> + HostCopyOps<R> + 'static,
         R::Client: TensorOps<R>
             + ScalarOps<R>
             + ReduceOps<R>
@@ -224,11 +224,12 @@ mod tests {
             .expect("generate");
         assert_eq!(outcome, GenerateOutcome::MaxLen);
         assert_eq!(st.emitted(), 5);
-        assert_eq!(st.prefill.position, 5);
+        assert_eq!(st.prefill.lanes.position(0), 5);
     }
 
-    /// Trap 4: ONE counter, both caches. Each iteration advances `position`
-    /// and BOTH cache lengths by exactly one.
+    /// Trap 4: ONE table, both caches. Each iteration advances every row of
+    /// the lane table and BOTH cache lengths by exactly one, and the table's
+    /// device `kv_end` follows.
     #[test]
     fn position_advances_both_caches_in_lockstep() {
         let (client, device) = cpu_setup();
@@ -240,17 +241,26 @@ mod tests {
         for expected in 1..=4 {
             let outcome = generator.step(&client, &mut st, &opts).expect("step");
             assert_eq!(outcome, StepOutcome::Continued);
-            assert_eq!(st.prefill.position, expected);
+            assert_eq!(st.prefill.lanes.positions(), &[expected]);
             assert_eq!(st.prefill.base_cache.seq_len(), expected);
             assert_eq!(st.prefill.residual_cache.seq_len(), expected);
+            assert_eq!(
+                st.prefill.lanes.kv_end().to_vec::<i32>(),
+                vec![expected as i32 + 1]
+            );
         }
     }
 
-    /// Trap 4's guard rail: a `position` that no longer matches the caches is
-    /// rejected by `decode_step`, so a drift errors instead of rotating a
-    /// query at one position while filing its key at another.
+    /// Trap 4's guard rail: the lane table is advanced ONCE per iteration,
+    /// AFTER both LMs have stepped.
+    ///
+    /// A step that succeeds already proves the ordering: an advance between
+    /// the two would file `residual_lm` a position ahead of `base_lm`, and
+    /// `decode_step`'s write-order guard rejects that. The second half
+    /// injects exactly that extra advance and checks the guard fires rather
+    /// than the cache being corrupted.
     #[test]
-    fn desynced_position_errors() {
+    fn the_lane_table_advances_once_after_both_lms() {
         let (client, device) = cpu_setup();
         let fx = fixture(false, &device);
         let generator = fx.generator();
@@ -258,13 +268,15 @@ mod tests {
         let opts = options(2, 8);
 
         generator.step(&client, &mut st, &opts).expect("step 0");
-        assert_eq!(st.prefill.position, 1);
+        assert_eq!(st.prefill.lanes.positions(), &[1]);
+        assert_eq!(st.prefill.base_cache.seq_len(), 1);
+        assert_eq!(st.prefill.residual_cache.seq_len(), 1);
 
-        // Deliberate drift: the caches hold 1 position, the counter claims 2.
-        st.prefill.position += 1;
+        // Deliberate drift: the caches hold 1 position, the table claims 2.
+        st.prefill.lanes.advance(&client).expect("advance");
         assert!(
             generator.step(&client, &mut st, &opts).is_err(),
-            "a position/cache drift must error, not corrupt the cache"
+            "a table/cache drift must error, not corrupt the cache"
         );
     }
 
@@ -287,7 +299,7 @@ mod tests {
         );
         // 4 patches emitted, but the last one broke before stepping the LMs.
         assert_eq!(st.emitted(), 4);
-        assert_eq!(st.prefill.position, 3);
+        assert_eq!(st.prefill.lanes.position(0), 3);
         assert_eq!(st.prefill.base_cache.seq_len(), 3);
         assert_eq!(st.prefill.residual_cache.seq_len(), 3);
     }

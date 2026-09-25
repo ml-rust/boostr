@@ -334,11 +334,11 @@
 //! [`PatchGenerator::teacher_forced_conditioning`] (what
 //! [`PatchGenerator::train_losses`] calls internally, ONCE, sharing it
 //! between `loss/diff` and `loss/stop`) needs [`PrefillState::intermediates`] whenever
-//! `prefill.position > 0` — the prefix embeddings it re-runs through a
-//! batched forward pass live only there, not in the KV caches
+//! `prefill.lanes.position(0) > 0` — the prefix embeddings it re-runs
+//! through a batched forward pass live only there, not in the KV caches
 //! `MiniCpm4Model::forward` cannot read. Every row here has a non-empty
 //! prefix (at least the reference patches and `AUDIO_START_ID`), so
-//! `prefill.position` is always `> 0`, and this file therefore ALWAYS calls
+//! `prefill.lanes.position(0)` is always `> 0`, and this file therefore ALWAYS calls
 //! `prefill_capturing`, never the plain `prefill` `voxcpm_clone` uses for
 //! generation (which never needs the batched teacher-forced path).
 //!

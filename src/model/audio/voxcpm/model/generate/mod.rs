@@ -32,14 +32,16 @@
 //! - **Step 7 consumes the POST-fsq `lm_hidden`**, and the concat order is
 //!   `(lm_hidden, curr_embed)`. That concat is `2 * lm_hidden` wide, so
 //!   swapping the halves is shape-valid and computes a different model.
-//! - **ONE shared `position` counter drives BOTH caches and EVERY row.**
-//!   The prefill primed both to `S_max` and both advance by exactly one per
-//!   iteration. A finished row keeps stepping — its patches are computed and
-//!   discarded — because the caches have no per-row compaction; only its
-//!   `patch_len` and `outcomes` entries stand still.
-//!   [`MiniCpm4Model::decode_step`] rejects `position != cache.seq_len()`, so
-//!   a drift errors rather than corrupts — that check is why this counter is
-//!   not duplicated per cache.
+//! - **ONE [`LanePositions`](crate::model::audio::voxcpm::minicpm4::LanePositions)
+//!   table drives BOTH caches and EVERY row.** The prefill primes every row to
+//!   `S_max` and the table advances every row by exactly one per iteration, so
+//!   the rows stay at one shared position throughout this loop. A finished
+//!   row keeps stepping — its patches are computed and discarded — because
+//!   the caches have no per-row compaction; only its `patch_len` and
+//!   `outcomes` entries stand still.
+//!   [`MiniCpm4Model::decode_step`] rejects a write position the cache will
+//!   not fill, so a drift errors rather than corrupts — that check is why
+//!   the table is not duplicated per cache.
 //! - **The stop guard is STRICTLY greater**: `i > min_len`, so a stop token
 //!   at `i <= min_len` is ignored and at least `min_len + 2` patches are
 //!   always emitted (`i = 0..=min_len` push unconditionally, and `i = min_len
@@ -84,8 +86,8 @@ use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_mul_scalar};
 use numr::dtype::DType;
 use numr::ops::{
-    ActivationOps, BinaryOps, CompareOps, ConditionalOps, IndexingOps, RandomOps, ReduceOps,
-    ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
+    ActivationOps, BinaryOps, CompareOps, ConditionalOps, HostCopyOps, IndexingOps, RandomOps,
+    ReduceOps, ScalarOps, ShapeOps, TensorOps, TypeConversionOps, UnaryOps,
 };
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;

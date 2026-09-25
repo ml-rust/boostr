@@ -14,6 +14,7 @@ use super::*;
 use crate::model::audio::voxcpm::local_dit::tests::{
     FEAT_DIM, HEAD_DIM, HIDDEN_DIM, PATCH_SIZE, layer, linear, model as dit_model, norm, t,
 };
+use crate::model::audio::voxcpm::minicpm4::LanePositions;
 use crate::model::audio::voxcpm::minicpm4::model::tests::{HIDDEN, tiny_model, tiny_nope_model};
 use crate::model::audio::voxcpm::model::config::REF_AUDIO_END_ID;
 use crate::model::audio::voxcpm::vae::{
@@ -153,9 +154,8 @@ pub(crate) fn state(fx: &Fixture, device: &CpuDevice) -> GenerateState<CpuRuntim
             .residual_lm
             .new_kv_cache(1, MAX_LENGTH)
             .expect("residual cache"),
-        position: 0,
+        lanes: LanePositions::new(None, 1, 0, None, device).expect("lane table"),
         batch: 1,
-        kv_start: None,
         intermediates: None,
     };
     GenerateState::start(

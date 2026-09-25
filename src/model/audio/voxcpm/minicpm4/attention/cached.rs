@@ -4,11 +4,11 @@ use super::block::MiniCpm4Attention;
 use super::guards::{missing_rope, require_preallocated_cache};
 use crate::error::{Error, Result};
 use crate::inference::KvCache;
-use crate::model::audio::voxcpm::minicpm4::left_pad::LeftPad;
+use crate::model::audio::voxcpm::minicpm4::cache_step::CacheStep;
 use crate::model::traits::ModelClient;
 use crate::nn::var_ops::var_contiguous;
 use crate::nn::{MaybeLoraLinear, RoPE};
-use crate::ops::traits::{AttnOutLayout, KvSeqLen};
+use crate::ops::traits::AttnOutLayout;
 use crate::quant::traits::DequantOps;
 use numr::autograd::{Var, var_cat, var_narrow, var_permute, var_reshape};
 use numr::dtype::DType;
@@ -20,11 +20,12 @@ use numr::runtime::Runtime;
 
 impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
     /// KV-cached causal GQA attention over `x: [batch, seq, hidden]` covering
-    /// absolute positions `position..position + seq`, returning
+    /// the absolute positions `step` gives each row, returning
     /// `[batch, seq, hidden]`.
     ///
     /// Serves BOTH cached shapes: prefill passes the whole prefix at
-    /// `position == 0`, a decode step passes `seq == 1` at the next position.
+    /// position 0, a decode step passes `seq == 1` at each row's next
+    /// position.
     ///
     /// This does not call [`attention_core_masked`]: that entry point rotates
     /// the RAW K it is given, so handing it the cache would re-apply RoPE to
@@ -49,8 +50,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
     /// never-written slots that contribute nothing to the softmax either way,
     /// and `kv_seq_len` stops the kernel reading those slots at all. The
     /// equivalence holds ONLY because the caller writes positions in order from
-    /// 0, which [`MiniCpm4Model::decode_step`] enforces by requiring
-    /// `position == kv_cache.seq_len()`.
+    /// 0, which [`MiniCpm4Model::decode_step`] enforces through
+    /// [`CacheStep::check_write_order`].
     ///
     /// [`attention_core_masked`]: crate::model::attention_core::attention_core_masked
     /// [`MiniCpm4Model::decode_step`]:
@@ -59,19 +60,19 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
     /// [`Error::InvalidArgument`]. The decode path never dereferences an
     /// absent table.
     ///
-    /// `pad` is the batch's per-row left padding: row `b` attends no key
-    /// below `pad.starts[b]` (the flash kernel's `kv_start`) and is rotated
-    /// at positions counted from there (`rope_rows`), so its floats are the
-    /// ones its own unpadded run forms. `None`, or a pad with no padded
-    /// row, is the unpadded call and costs nothing.
+    /// `step` carries the batch's per-row left padding and write position:
+    /// row `b` attends no key below `step.row_start(b)` (the flash kernel's
+    /// `kv_start`), writes at `step.row_write(b)` and is rotated at the
+    /// difference (`rope_rows`), so its floats are the ones its own
+    /// unpadded run forms. A batch with no padding whose rows all sit at one
+    /// position takes the single-position call instead and costs nothing.
     pub fn forward_cached<C>(
         &self,
         client: &C,
         x: &Var<R>,
         rope: Option<&RoPE<R>>,
         kv_cache: &mut KvCache<R>,
-        position: usize,
-        pad: Option<&LeftPad<R>>,
+        step: &CacheStep<'_, R>,
     ) -> Result<Var<R>>
     where
         // `TypeConversionOps` for the same reason `forward` needs it.
@@ -136,35 +137,24 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             // the attention kernel need dense `[B, H, S, D]`.
             (true, _) => (var_contiguous(&q)?, var_contiguous(&k)?),
             (false, Some(rope)) => {
-                // `position` rotates the query; `kv_cache` stores it at its own
-                // `seq_len`. They MUST agree, or the query is rotated for one
-                // absolute position and attended at another — shapes stay
-                // valid and the output is silently wrong.
+                // A row's write position rotates its query; the cache stores
+                // it at the slot the cache will actually fill. They MUST
+                // agree, or the query is rotated for one absolute position
+                // and attended at another — shapes stay valid and the output
+                // is silently wrong.
                 //
                 // Checked here, not at the top, because this is the ONLY site
-                // that reads `position`. A NoPE stack never rotates, so its
-                // `position` is genuinely unused and stays unconstrained —
-                // which is what
+                // that reads the write position. A NoPE stack never rotates,
+                // so its position is genuinely unused and stays unconstrained
+                // — which is what
                 // `nope_output_is_independent_of_absolute_position` asserts by
-                // passing a `position` a cache-aligned call could not use.
-                let written = kv_cache.seq_len();
-                if position != written {
-                    return Err(Error::InferenceError {
-                        reason: format!(
-                            "RoPE position {position} disagrees with the KV cache's next \
-                             write index {written}: the query would be rotated for position \
-                             {position} but stored and attended at {written}. Pass \
-                             position == kv_cache.seq_len(), as MiniCpm4Model::decode_step \
-                             does."
-                        ),
-                    });
-                }
-                match pad {
-                    Some(pad) if pad.is_padded() => (
-                        rope_rows(client, rope, &q, position, seq, pad)?,
-                        rope_rows(client, rope, &k, position, seq, pad)?,
-                    ),
-                    _ => {
+                // passing a position a cache-aligned call could not use.
+                step.check_write_order(kv_cache.seq_len())?;
+                match step.uniform_position() {
+                    // Every row rotates at the same absolute position: one
+                    // `apply_rope` over the whole batch against one slice of
+                    // the table.
+                    Some(position) => {
                         let cos =
                             var_narrow(rope.cos_cache(), 0, position, seq).map_err(Error::Numr)?;
                         let sin =
@@ -174,6 +164,10 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
                             client.apply_rope(&k, &cos, &sin)?,
                         )
                     }
+                    None => (
+                        rope_rows(client, rope, &q, seq, step)?,
+                        rope_rows(client, rope, &k, seq, step)?,
+                    ),
                 }
             }
             (false, None) => return Err(missing_rope()),
@@ -182,12 +176,12 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
         let v = var_contiguous(&v)?;
 
         // Post-RoPE K/V land in the cache, as the reference writes rotated keys
-        // at index `position_id`. `update_fused` writes the new slots IN PLACE
-        // through `KvCacheOps::kv_cache_update`; `update` would `slice_assign`,
-        // which is functional — a second buffer of the whole preallocated
-        // cache, allocated and copied per layer per step.
+        // at index `position_id`. Both arms of `write_kv` write the new slots
+        // IN PLACE through `KvCacheOps::kv_cache_update`; `update` would
+        // `slice_assign`, which is functional — a second buffer of the whole
+        // preallocated cache, allocated and copied per layer per step.
         require_preallocated_cache(kv_cache, seq)?;
-        kv_cache.update_fused(k.tensor(), v.tensor(), client)?;
+        step.write_kv(kv_cache, k.tensor(), v.tensor(), client)?;
 
         // The kernel broadcasts the GQA heads itself, so the raw cache buffers
         // go in untouched, bounded to the written slots by `kv_seq_len`. It
@@ -203,8 +197,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
             seq > 1,
             // The disabled-window sentinel `core_spec` declares.
             self.core_spec().sliding_window,
-            Some(KvSeqLen::Shared(kv_cache.seq_len())),
-            pad.map(|p| &p.starts),
+            Some(step.kv_seq_len(kv_cache.seq_len())),
+            step.kv_start(),
             AttnOutLayout::TokenMajor,
         )?;
         let attn_out = Var::new(out, false);
@@ -217,21 +211,21 @@ impl<R: Runtime<DType = DType>> MiniCpm4Attention<R> {
     }
 }
 
-/// RoPE over a left-padded batch, one row at a time, each at its own
-/// positions: row `b`'s position `s` of this call is `position + s -
-/// pad.start(b)`. The rows are rotated through the same `apply_rope` the
-/// unpadded call uses, over the same table rows, so a row's values are the
-/// unpadded run's bit for bit. Pad positions of a prefill (`position + s <
-/// start`) have no position of their own; they are rotated at the table's
-/// first rows, and nothing real reads them: the keys are masked and the
-/// outputs stay on pad positions. Returns dense `[B, H, S, D]`.
+/// RoPE over a batch whose rows sit at different positions, one row at a
+/// time: row `b`'s position `s` of this call is `step.row_write(b) + s -
+/// step.row_start(b)`. The rows are rotated through the same `apply_rope`
+/// the single-position call uses, over the same table rows, so a row's
+/// values are its own unpadded run's bit for bit. Pad positions of a
+/// prefill (`row_write(b) + s < row_start(b)`) have no position of their
+/// own; they are rotated at the table's first rows, and nothing real reads
+/// them: the keys are masked and the outputs stay on pad positions. Returns
+/// dense `[B, H, S, D]`.
 fn rope_rows<R, C>(
     client: &C,
     rope: &RoPE<R>,
     x: &Var<R>,
-    position: usize,
     seq: usize,
-    pad: &LeftPad<R>,
+    step: &CacheStep<'_, R>,
 ) -> Result<Var<R>>
 where
     R: Runtime<DType = DType>,
@@ -244,10 +238,12 @@ where
             var_narrow(rope.sin_cache(), 0, start, len).map_err(Error::Numr)?,
         ))
     };
-    let mut rows = Vec::with_capacity(pad.batch());
-    for b in 0..pad.batch() {
+    let batch = x.shape()[0];
+    let mut rows = Vec::with_capacity(batch);
+    for b in 0..batch {
         let x_b = var_narrow(x, 0, b, 1).map_err(Error::Numr)?;
-        let start = pad.start(b);
+        let start = step.row_start(b);
+        let position = step.row_write(b);
         // Positions of this call below the row's start: only a prefill has
         // them (`position == 0`), and only in front of the real ones.
         let s0 = start.saturating_sub(position).min(seq);
@@ -307,16 +303,21 @@ mod tests {
             let mut cache =
                 KvCache::<CpuRuntime>::new(1, NUM_KV_HEADS, 4, 4, HEAD_DIM, DType::F32, &device)
                     .expect("cache");
-            attn.forward_cached(&client, &embed(1, &device), table, &mut cache, 0, None)
-                .expect("prior position");
+            attn.forward_cached(
+                &client,
+                &embed(1, &device),
+                table,
+                &mut cache,
+                &CacheStep::prefix(0, None),
+            )
+            .expect("prior position");
             let out = attn
                 .forward_cached(
                     &client,
                     &embed(2, &device),
                     table,
                     &mut cache,
-                    position,
-                    None,
+                    &CacheStep::prefix(position, None),
                 )
                 .expect("query position");
             out.tensor()
@@ -379,8 +380,7 @@ mod tests {
             &embed(1, &device),
             Some(&rope),
             &mut cache,
-            0,
-            None,
+            &CacheStep::prefix(0, None),
         )
         .expect("position 0 matches an empty cache");
         assert_eq!(cache.seq_len(), 1, "one slot written");
@@ -391,8 +391,7 @@ mod tests {
                 &embed(2, &device),
                 Some(&rope),
                 &mut cache,
-                9,
-                None,
+                &CacheStep::prefix(9, None),
             )
             .unwrap_err();
         let msg = err.to_string();
@@ -404,10 +403,22 @@ mod tests {
         let mut nope_cache =
             KvCache::<CpuRuntime>::new(1, NUM_KV_HEADS, 4, 4, HEAD_DIM, DType::F32, &device)
                 .expect("cache");
-        nope.forward_cached(&client, &embed(1, &device), None, &mut nope_cache, 0, None)
-            .expect("prior");
-        nope.forward_cached(&client, &embed(2, &device), None, &mut nope_cache, 9, None)
-            .expect("NoPE ignores position, so a mismatch is not an error");
+        nope.forward_cached(
+            &client,
+            &embed(1, &device),
+            None,
+            &mut nope_cache,
+            &CacheStep::prefix(0, None),
+        )
+        .expect("prior");
+        nope.forward_cached(
+            &client,
+            &embed(2, &device),
+            None,
+            &mut nope_cache,
+            &CacheStep::prefix(9, None),
+        )
+        .expect("NoPE ignores position, so a mismatch is not an error");
     }
 
     /// A block that rotates must not fall back to an unrotated forward when
@@ -424,7 +435,13 @@ mod tests {
             KvCache::<CpuRuntime>::new(1, NUM_KV_HEADS, 4, 4, HEAD_DIM, DType::F32, &device)
                 .expect("cache");
         let err = attn
-            .forward_cached(&client, &embed(1, &device), None, &mut cache, 0, None)
+            .forward_cached(
+                &client,
+                &embed(1, &device),
+                None,
+                &mut cache,
+                &CacheStep::prefix(0, None),
+            )
             .unwrap_err();
         assert!(err.to_string().contains("no_rope"), "got {err}");
         assert_eq!(cache.seq_len(), 0, "cache was written on the error path");

@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::inference::LayeredKvCache;
-use crate::model::audio::voxcpm::minicpm4::LeftPad;
+use crate::model::audio::voxcpm::minicpm4::LanePositions;
 use numr::autograd::Var;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
@@ -69,20 +69,19 @@ pub struct PrefillState<R: Runtime> {
     pub lm_hidden: Var<R>,
     /// `[B, lm_hidden]` — the LAST row of `residual_lm`'s output.
     pub residual_hidden: Var<R>,
-    /// `base_lm`'s cache, primed to `current_length == position`.
+    /// `base_lm`'s cache, primed to `current_length == S_max`.
     pub base_cache: LayeredKvCache<R>,
     /// `residual_lm`'s cache, primed to the SAME `current_length`.
     pub residual_cache: LayeredKvCache<R>,
-    /// `S_max`. The single shared position counter for the later decode
-    /// loop: both caches advance together from here.
-    pub position: usize,
+    /// Row `b`'s next write position, its key range, and the batch's left
+    /// padding (`lanes.pad().starts[b] = S_max - S_b`, on the device for the
+    /// attention kernels and on the host for the per-row RoPE positions).
+    /// Every row starts at `S_max`. ONE table serves both caches: the decode
+    /// loop writes both at the same position and advances the table once,
+    /// after both have stepped.
+    pub lanes: LanePositions<R>,
     /// Rows in the batch, `B >= 1`.
     pub batch: usize,
-    /// Per-row left padding, `kv_start.starts[b] = S_max - S_b`, on the
-    /// device for the attention kernels and on the host for the per-row RoPE
-    /// positions. `None` when no row is padded (every `B == 1` prefill), in
-    /// which case every attention call is the unpadded one.
-    pub kv_start: Option<LeftPad<R>>,
     /// Present only when the prefill ran via a `_capturing` entry point;
     /// always `None` on the plain paths, which allocate nothing extra.
     pub intermediates: Option<PrefillIntermediates<R>>,

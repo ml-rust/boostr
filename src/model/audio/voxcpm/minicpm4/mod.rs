@@ -3,8 +3,10 @@
 //! Instantiated twice — `base_lm` and the 8-layer NoPE `residual_lm`.
 
 pub mod attention;
+pub mod cache_step;
 pub mod config;
 pub mod decode;
+pub mod lane_positions;
 pub mod layer;
 pub mod left_pad;
 pub mod loader;
@@ -12,9 +14,11 @@ pub mod mlp;
 pub mod model;
 
 pub use attention::MiniCpm4Attention;
+pub use cache_step::CacheStep;
 pub use config::{
     DEFAULT_CONFIG_SECTION, MiniCpm4Config, RESIDUAL_LM_NO_ROPE_KEY, RESIDUAL_LM_NUM_LAYERS_KEY,
 };
+pub use lane_positions::LanePositions;
 pub use layer::MiniCpm4Layer;
 pub use left_pad::LeftPad;
 pub use loader::{DEFAULT_MINICPM4_PREFIX, DEFAULT_RESIDUAL_LM_PREFIX};

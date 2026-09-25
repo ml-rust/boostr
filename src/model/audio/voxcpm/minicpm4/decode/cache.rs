@@ -26,8 +26,9 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
 
     /// Number of RoPE positions the loader precomputed
     /// (`max_position_embeddings`), or `None` for a NoPE (`no_rope`) stack,
-    /// which has no table. A cache may not outrun a table that exists.
-    fn rope_positions(&self) -> Option<usize> {
+    /// which has no table. A cache may not outrun a table that exists, and
+    /// neither may a decode row.
+    pub fn rope_positions(&self) -> Option<usize> {
         self.rope.as_ref().map(|rope| rope.cos_cache().shape()[0])
     }
 

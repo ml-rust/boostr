@@ -508,10 +508,10 @@ mod tests {
         let value =
             Tensor::<CpuRuntime>::from_slice(&[vals[0], vals[1]], &[2, 1, 1], &device).unwrap();
         let key_cache =
-            Tensor::<CpuRuntime>::from_slice(&vec![bf16::from_f32(0.0); 8], &[4, 2, 1, 1], &device)
+            Tensor::<CpuRuntime>::from_slice(&[bf16::from_f32(0.0); 8], &[4, 2, 1, 1], &device)
                 .unwrap();
         let value_cache =
-            Tensor::<CpuRuntime>::from_slice(&vec![bf16::from_f32(0.0); 8], &[4, 2, 1, 1], &device)
+            Tensor::<CpuRuntime>::from_slice(&[bf16::from_f32(0.0); 8], &[4, 2, 1, 1], &device)
                 .unwrap();
         let slot_mapping = Tensor::<CpuRuntime>::from_slice(&[1i32, 5], &[2], &device).unwrap();
 
@@ -540,10 +540,10 @@ mod tests {
         let value =
             Tensor::<CpuRuntime>::from_slice(&[vals[0], vals[1]], &[2, 1, 1], &device).unwrap();
         let key_cache =
-            Tensor::<CpuRuntime>::from_slice(&vec![f16::from_f32(0.0); 8], &[4, 2, 1, 1], &device)
+            Tensor::<CpuRuntime>::from_slice(&[f16::from_f32(0.0); 8], &[4, 2, 1, 1], &device)
                 .unwrap();
         let value_cache =
-            Tensor::<CpuRuntime>::from_slice(&vec![f16::from_f32(0.0); 8], &[4, 2, 1, 1], &device)
+            Tensor::<CpuRuntime>::from_slice(&[f16::from_f32(0.0); 8], &[4, 2, 1, 1], &device)
                 .unwrap();
         let slot_mapping = Tensor::<CpuRuntime>::from_slice(&[1i32, 5], &[2], &device).unwrap();
 

@@ -82,21 +82,27 @@ impl DecodeGraph {
     /// The caller must wait for the GPU stream before reading it (e.g. stream sync
     /// or a pipelined D2H with a CUDA event).
     pub fn pre_replay_and_launch(&mut self, client: &CudaClient) -> Result<()> {
-        let stream = client.stream().cu_stream();
-
         // 1. D2D async: next_token_buf → token_buf (8 bytes, i64, stream-ordered)
         //    Feeds the previous step's output as this step's input token.
-        unsafe {
-            let result = sys::cuMemcpyDtoDAsync_v2(
-                self.token_buf.ptr(),
-                self.next_token_buf.ptr(),
-                std::mem::size_of::<i64>(),
-                stream,
-            );
-            if result != sys::CUresult::CUDA_SUCCESS {
-                return Err(Error::InferenceError {
-                    reason: format!("cuMemcpyDtoDAsync_v2 for token_buf failed: {:?}", result),
-                });
+        //    Driver enqueues made outside numr's launch path hold the capture
+        //    permit themselves, scoped to the enqueue alone: a permit held
+        //    across a call that takes its own would take the read side twice
+        //    on one thread, which a waiting capture turns into a deadlock.
+        {
+            let _permit = client.stream().enqueue_permit();
+            let stream = client.stream().raw().cu_stream();
+            unsafe {
+                let result = sys::cuMemcpyDtoDAsync_v2(
+                    self.token_buf.ptr(),
+                    self.next_token_buf.ptr(),
+                    std::mem::size_of::<i64>(),
+                    stream,
+                );
+                if result != sys::CUresult::CUDA_SUCCESS {
+                    return Err(Error::InferenceError {
+                        reason: format!("cuMemcpyDtoDAsync_v2 for token_buf failed: {:?}", result),
+                    });
+                }
             }
         }
 
@@ -104,21 +110,24 @@ impl DecodeGraph {
         self.device_scalars.update(client, &[self.seq_len])?;
 
         // 3. D2D async: update RoPE slices for this position (stream-ordered)
-        let stream_handle = client.stream().cu_stream();
-        copy_rope_slice_async(
-            &self.rope_cos_cache,
-            self.seq_len * self.head_dim,
-            &self.cos_slice,
-            self.head_dim,
-            stream_handle,
-        )?;
-        copy_rope_slice_async(
-            &self.rope_sin_cache,
-            self.seq_len * self.head_dim,
-            &self.sin_slice,
-            self.head_dim,
-            stream_handle,
-        )?;
+        {
+            let _permit = client.stream().enqueue_permit();
+            let stream_handle = client.stream().raw().cu_stream();
+            copy_rope_slice_async(
+                &self.rope_cos_cache,
+                self.seq_len * self.head_dim,
+                &self.cos_slice,
+                self.head_dim,
+                stream_handle,
+            )?;
+            copy_rope_slice_async(
+                &self.rope_sin_cache,
+                self.seq_len * self.head_dim,
+                &self.sin_slice,
+                self.head_dim,
+                stream_handle,
+            )?;
+        }
 
         // 4. Launch graph (stream serialization guarantees steps 1–3 are done)
         self.graph.launch()?;

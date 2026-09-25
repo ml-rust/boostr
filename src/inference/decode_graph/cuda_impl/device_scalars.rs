@@ -106,7 +106,10 @@ impl DeviceScalars {
         position: usize,
         half_dim: usize,
     ) -> Result<()> {
-        let stream = client.stream().cu_stream();
+        // Driver enqueues made outside numr's launch path hold the capture
+        // permit themselves, scoped to the pair of copies and nothing else.
+        let _permit = client.stream().enqueue_permit();
+        let stream = client.stream().raw().cu_stream();
         copy_rope_slice_async(
             rope_cos_cache,
             position * half_dim,

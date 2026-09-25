@@ -92,7 +92,11 @@ mod tests {
             builder.arg(&n_i32);
             builder.launch(cfg).expect("probe launch");
         }
-        client.stream().synchronize().expect("probe sync");
+        client
+            .stream()
+            .synchronize()
+            .map_err(|e| format!("probe sync: {e:?}"))
+            .expect("probe sync");
 
         let via_numr_decode = client
             .cast(&raw, DType::F32)

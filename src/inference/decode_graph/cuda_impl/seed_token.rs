@@ -40,7 +40,10 @@ pub(super) fn seed_i64_at(
     let base = buf.ptr() + (index * std::mem::size_of::<i64>()) as u64;
     let lo = (token as u64 & 0xFFFF_FFFF) as u32;
     let hi = ((token as u64) >> 32) as u32;
-    let stream = client.stream().cu_stream();
+    // Both memsets are driver enqueues made outside numr's launch path, so
+    // they hold the capture permit themselves for the pair.
+    let _permit = client.stream().enqueue_permit();
+    let stream = client.stream().raw().cu_stream();
     unsafe {
         let result = sys::cuMemsetD32Async(base, lo, 1, stream);
         if result != sys::CUresult::CUDA_SUCCESS {

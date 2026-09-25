@@ -153,16 +153,21 @@ pub fn launch_int4_gemm_gptq(
 
         // Zero output before atomicAdd accumulation
         let output_bytes = (m * n) as usize * std::mem::size_of::<f32>();
-        unsafe {
-            cudarc::driver::result::memset_d8_async(
-                output.ptr(),
-                0,
-                output_bytes,
-                client.stream().cu_stream(),
-            )
-            .map_err(|e| Error::QuantError {
-                reason: format!("CUDA memset failed: {:?}", e),
-            })?;
+        {
+            // A driver memset is an enqueue on the shared stream, so it holds
+            // the capture permit for itself; the launch below takes its own.
+            let _permit = client.stream().enqueue_permit();
+            unsafe {
+                cudarc::driver::result::memset_d8_async(
+                    output.ptr(),
+                    0,
+                    output_bytes,
+                    client.stream().raw().cu_stream(),
+                )
+                .map_err(|e| Error::QuantError {
+                    reason: format!("CUDA memset failed: {:?}", e),
+                })?;
+            }
         }
 
         unsafe {

@@ -61,20 +61,26 @@ impl PagedDecodeGraph {
     /// Additional step vs DecodeGraph: updates `slot_mapping[0] = seq_len` so the
     /// paged cache insert kernel writes K/V to the correct slot.
     pub fn pre_replay_and_launch(&mut self, client: &CudaClient) -> Result<()> {
-        let stream = client.stream().cu_stream();
-
         // 1. D2D async: next_token_buf → token_buf
-        unsafe {
-            let result = sys::cuMemcpyDtoDAsync_v2(
-                self.token_buf.ptr(),
-                self.next_token_buf.ptr(),
-                std::mem::size_of::<i64>(),
-                stream,
-            );
-            if result != sys::CUresult::CUDA_SUCCESS {
-                return Err(Error::InferenceError {
-                    reason: format!("PagedDecodeGraph token_buf copy failed: {:?}", result),
-                });
+        //    Driver enqueues made outside numr's launch path hold the capture
+        //    permit themselves, scoped to the enqueue alone: a permit held
+        //    across a call that takes its own would take the read side twice
+        //    on one thread, which a waiting capture turns into a deadlock.
+        {
+            let _permit = client.stream().enqueue_permit();
+            let stream = client.stream().raw().cu_stream();
+            unsafe {
+                let result = sys::cuMemcpyDtoDAsync_v2(
+                    self.token_buf.ptr(),
+                    self.next_token_buf.ptr(),
+                    std::mem::size_of::<i64>(),
+                    stream,
+                );
+                if result != sys::CUresult::CUDA_SUCCESS {
+                    return Err(Error::InferenceError {
+                        reason: format!("PagedDecodeGraph token_buf copy failed: {:?}", result),
+                    });
+                }
             }
         }
 
@@ -82,32 +88,42 @@ impl PagedDecodeGraph {
         self.device_scalars.update(client, &[self.seq_len])?;
 
         // 3. Update slot_mapping[0] = seq_len (the paged cache slot for this token)
-        unsafe {
-            let result =
-                sys::cuMemsetD32Async(self.slot_mapping.ptr(), self.seq_len as u32, 1, stream);
-            if result != sys::CUresult::CUDA_SUCCESS {
-                return Err(Error::InferenceError {
-                    reason: format!("PagedDecodeGraph slot_mapping update failed: {:?}", result),
-                });
+        {
+            let _permit = client.stream().enqueue_permit();
+            let stream = client.stream().raw().cu_stream();
+            unsafe {
+                let result =
+                    sys::cuMemsetD32Async(self.slot_mapping.ptr(), self.seq_len as u32, 1, stream);
+                if result != sys::CUresult::CUDA_SUCCESS {
+                    return Err(Error::InferenceError {
+                        reason: format!(
+                            "PagedDecodeGraph slot_mapping update failed: {:?}",
+                            result
+                        ),
+                    });
+                }
             }
         }
 
         // 4. D2D async: RoPE slices for this position
-        let stream_handle = client.stream().cu_stream();
-        copy_rope_slice_async(
-            &self.rope_cos_cache,
-            self.seq_len * self.head_dim,
-            &self.cos_slice,
-            self.head_dim,
-            stream_handle,
-        )?;
-        copy_rope_slice_async(
-            &self.rope_sin_cache,
-            self.seq_len * self.head_dim,
-            &self.sin_slice,
-            self.head_dim,
-            stream_handle,
-        )?;
+        {
+            let _permit = client.stream().enqueue_permit();
+            let stream_handle = client.stream().raw().cu_stream();
+            copy_rope_slice_async(
+                &self.rope_cos_cache,
+                self.seq_len * self.head_dim,
+                &self.cos_slice,
+                self.head_dim,
+                stream_handle,
+            )?;
+            copy_rope_slice_async(
+                &self.rope_sin_cache,
+                self.seq_len * self.head_dim,
+                &self.sin_slice,
+                self.head_dim,
+                stream_handle,
+            )?;
+        }
 
         // 5. Launch graph
         self.graph.launch()?;

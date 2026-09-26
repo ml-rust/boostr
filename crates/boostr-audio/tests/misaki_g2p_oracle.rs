@@ -11,8 +11,14 @@
 //! misaki's default `unk`, the string with Kokoro's empty `unk`, and the
 //! final tokens (text, whitespace, phonemes, rating). All mismatches print
 //! before the test fails.
+//!
+//! `matches_misaki_on_narration_corpus` feeds the fixture's tokens.
+//! `raw_text_through_spacy_tokenizer_matches_misaki` tokenizes the raw
+//! sentence with [`SpacyTokenizer`] and takes only the tags from the
+//! fixture, since the tagger is a separate component.
 
 use boostr_audio::g2p::misaki::{G2pOutput, KOKORO_UNK, MToken, MisakiG2p};
+use boostr_audio::g2p::spacy_tokenizer::SpacyTokenizer;
 use serde::Deserialize;
 
 mod common;
@@ -49,6 +55,39 @@ fn input(case: &Case) -> Vec<MToken> {
         .collect()
 }
 
+/// misaki `G2P.preprocess` on a sentence without markdown links:
+/// `str.lstrip`.
+fn preprocess(sentence: &str) -> &str {
+    sentence.trim_start_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+}
+
+/// The sentence tokenized by [`SpacyTokenizer`], tagged with the fixture's
+/// tags. `Err` reports a token text or whitespace that differs from the
+/// fixture.
+fn spacy_input(tokenizer: &SpacyTokenizer, case: &Case) -> Result<Vec<MToken>, String> {
+    let tokens = tokenizer.tokenize(preprocess(&case.sentence));
+    let got: Vec<(&str, &str)> = tokens
+        .iter()
+        .map(|t| (t.text.as_str(), t.whitespace()))
+        .collect();
+    let want: Vec<(&str, &str)> = case
+        .tokens
+        .iter()
+        .map(|(text, _, ws)| (text.as_str(), ws.as_str()))
+        .collect();
+    if got != want {
+        return Err(format!(
+            "[spacy] {:?}\n  rust:  {got:?}\n  spacy: {want:?}",
+            case.sentence
+        ));
+    }
+    Ok(tokens
+        .iter()
+        .zip(&case.tokens)
+        .map(|(t, (_, tag, _))| MToken::new(t.text.as_str(), tag.as_str(), t.whitespace()))
+        .collect())
+}
+
 fn token_rows(out: &G2pOutput) -> Vec<TokenRow> {
     out.tokens
         .iter()
@@ -63,8 +102,9 @@ fn token_rows(out: &G2pOutput) -> Vec<TokenRow> {
         .collect()
 }
 
-/// Runs one dialect over every case; returns the mismatch reports.
-fn check_dialect(name: &str, british: bool, cases: &[Case]) -> Vec<String> {
+/// Runs one dialect over every case with its input tokens; returns the
+/// mismatch reports.
+fn check_dialect(name: &str, british: bool, cases: &[(&Case, Vec<MToken>)]) -> Vec<String> {
     let g2p = MisakiG2p::new(british).unwrap_or_else(|e| panic!("MisakiG2p::new({british}): {e}"));
     let kokoro = MisakiG2p::new(british)
         .unwrap_or_else(|e| panic!("MisakiG2p::new({british}): {e}"))
@@ -72,10 +112,10 @@ fn check_dialect(name: &str, british: bool, cases: &[Case]) -> Vec<String> {
 
     let mut failures = Vec::new();
     let mut exact = 0usize;
-    for case in cases {
+    for (case, tokens) in cases {
         let want = if british { &case.gb } else { &case.us };
-        let got = g2p.phonemize(input(case));
-        let got_kokoro = kokoro.phonemize(input(case)).phonemes;
+        let got = g2p.phonemize(tokens.clone());
+        let got_kokoro = kokoro.phonemize(tokens.clone()).phonemes;
         let got_rows = token_rows(&got);
 
         let mut report = Vec::new();
@@ -120,8 +160,9 @@ fn matches_misaki_on_narration_corpus() {
     let fixture: Fixture = load_json(std::path::Path::new(path));
     assert!(!fixture.cases.is_empty(), "fixture must not be empty");
 
-    let mut failures = check_dialect("us", false, &fixture.cases);
-    failures.extend(check_dialect("gb", true, &fixture.cases));
+    let cases: Vec<(&Case, Vec<MToken>)> = fixture.cases.iter().map(|c| (c, input(c))).collect();
+    let mut failures = check_dialect("us", false, &cases);
+    failures.extend(check_dialect("gb", true, &cases));
     for f in &failures {
         println!("{f}");
     }
@@ -130,5 +171,42 @@ fn matches_misaki_on_narration_corpus() {
         "{} of {} sentence checks mismatched; see the output above",
         failures.len(),
         fixture.cases.len() * 2
+    );
+}
+
+#[test]
+fn raw_text_through_spacy_tokenizer_matches_misaki() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/misaki_g2p_oracle.json"
+    );
+    let fixture: Fixture = load_json(std::path::Path::new(path));
+    assert!(!fixture.cases.is_empty(), "fixture must not be empty");
+    let tokenizer =
+        SpacyTokenizer::en_core_web_sm().unwrap_or_else(|e| panic!("SpacyTokenizer: {e}"));
+
+    let mut failures = Vec::new();
+    let mut cases = Vec::new();
+    for case in &fixture.cases {
+        match spacy_input(&tokenizer, case) {
+            Ok(tokens) => cases.push((case, tokens)),
+            Err(report) => failures.push(report),
+        }
+    }
+    println!(
+        "spacy: {}/{} sentences tokenized exactly",
+        cases.len(),
+        fixture.cases.len()
+    );
+    failures.extend(check_dialect("us", false, &cases));
+    failures.extend(check_dialect("gb", true, &cases));
+    for f in &failures {
+        println!("{f}");
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} tokenization and sentence checks mismatched; see the output above",
+        failures.len(),
+        fixture.cases.len() * 3
     );
 }

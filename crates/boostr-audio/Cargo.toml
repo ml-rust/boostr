@@ -44,6 +44,10 @@ espeakng = { version = "0.2", optional = true }
 flate2 = { version = "1", optional = true }
 unicode-normalization = { version = "0.1", optional = true }
 unicode-general-category = { version = "1", optional = true }
+# spaCy tokenizer: its prefix, suffix, infix and URL patterns use lookbehind
+# and lookahead. splintr already links regexr, so nothing new enters the
+# graph.
+regexr = { version = "0.5", optional = true, default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
@@ -63,8 +67,18 @@ decode = ["dep:symphonia"]
 # backend and are always compiled.
 g2p = ["dep:espeakng"]
 # misaki English G2P over pre-tagged tokens, with the US and GB lexicons
-# embedded. No system dependencies.
-misaki = ["dep:flate2", "dep:unicode-normalization", "dep:unicode-general-category"]
+# embedded. No system dependencies. Implies `spacy-tokenizer`, the tokenizer
+# misaki's pipeline reads its tokens from.
+misaki = [
+  "dep:flate2",
+  "dep:unicode-normalization",
+  "dep:unicode-general-category",
+  "spacy-tokenizer",
+]
+# The spaCy `en_core_web_sm` 3.8.0 tokenizer with its patterns, special cases
+# and norm tables embedded. Separate from `misaki` so a consumer that needs
+# spaCy tokens and lexical attributes does not embed the misaki lexicons.
+spacy-tokenizer = ["dep:regexr", "dep:unicode-general-category"]
 # `TtsEngine`, `TtsBundle`, `Voice`: the engine-agnostic synthesis surface.
 tts = []
 # Kokoro synthesis pipeline: model from boostr, voice packs and the engine
@@ -119,6 +133,10 @@ required-features = ["voxcpm", "cuda"]
 [[test]]
 name = "misaki_g2p_oracle"
 required-features = ["misaki"]
+
+[[test]]
+name = "spacy_tokenizer_oracle"
+required-features = ["spacy-tokenizer"]
 
 [[test]]
 name = "vits_tokenizer_oracle"

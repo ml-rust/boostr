@@ -7,6 +7,8 @@
 
 use unicode_general_category::{GeneralCategory, get_general_category};
 
+pub(crate) use crate::g2p::pystr::{is_letter, is_py_space, is_upper_letter};
+
 /// Primary stress mark.
 pub(crate) const PRIMARY_STRESS: char = 'ˈ';
 /// Secondary stress mark.
@@ -34,23 +36,6 @@ pub(crate) fn is_vowel(c: char) -> bool {
     VOWELS.contains(c)
 }
 
-/// `str.isalpha` for one character: General Category L*.
-pub(crate) fn is_letter(c: char) -> bool {
-    matches!(
-        get_general_category(c),
-        GeneralCategory::UppercaseLetter
-            | GeneralCategory::LowercaseLetter
-            | GeneralCategory::TitlecaseLetter
-            | GeneralCategory::ModifierLetter
-            | GeneralCategory::OtherLetter
-    )
-}
-
-/// `regex` `\p{Lu}`.
-pub(crate) fn is_upper_letter(c: char) -> bool {
-    get_general_category(c) == GeneralCategory::UppercaseLetter
-}
-
 /// `regex` `\p{Ll}`.
 pub(crate) fn is_lower_letter(c: char) -> bool {
     get_general_category(c) == GeneralCategory::LowercaseLetter
@@ -64,11 +49,6 @@ pub(crate) fn is_decimal(c: char) -> bool {
 /// `str.isalpha`: non-empty and every character a letter.
 pub(crate) fn is_alpha(s: &str) -> bool {
     !s.is_empty() && s.chars().all(is_letter)
-}
-
-/// `str.isspace` for one character.
-pub(crate) fn is_py_space(c: char) -> bool {
-    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
 }
 
 /// misaki `is_digit` on one character: `re.match(r'^[0-9]+$', c)`.

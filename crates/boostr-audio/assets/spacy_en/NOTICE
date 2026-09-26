@@ -1,0 +1,28 @@
+spaCy en_core_web_sm tokenizer data and port
+============================================
+
+tokenizer.json holds the tokenizer settings of the spaCy pipeline
+en_core_web_sm 3.8.0, extracted by build_tokenizer.py from spaCy 3.8:
+
+  - the prefix, suffix, infix and URL patterns, rewritten from Python `re`
+    syntax into `regexr` syntax with the same matches;
+  - the tokenizer exceptions (special cases), unchanged;
+  - spacy.lang.norm_exceptions.BASE_NORMS, unchanged;
+  - the pipeline's `lexeme_norm` lookups table, unchanged, keyed by spaCy's
+    string hash as the pipeline stores it.
+
+src/g2p/spacy_tokenizer/ in this crate is a Rust port of spaCy 3.8's
+spacy/tokenizer.pyx (Tokenizer.__call__ and the special-case matcher pass)
+and of the English lexeme attribute getters in spacy/lang/lex_attrs.py. The
+port changes the language and the data encoding. It keeps the behavior.
+
+spaCy
+  Copyright (C) 2016-2024 ExplosionAI GmbH, 2016 spaCy GmbH,
+  2015 Matthew Honnibal
+  https://github.com/explosion/spaCy
+  Licensed under the MIT License (LICENSE in this directory).
+
+en_core_web_sm 3.8.0
+  Copyright 2021 ExplosionAI GmbH
+  https://github.com/explosion/spacy-models
+  Licensed under the MIT License (LICENSE-en_core_web_sm in this directory).

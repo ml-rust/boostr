@@ -193,7 +193,8 @@ impl<R: Runtime> SigLipEncoderLayer<R> {
         Ok(out.tensor().clone())
     }
 
-    /// MLP: fc1 -> GELU -> fc2 (SigLIP uses standard GELU, not QuickGELU)
+    /// MLP: fc1 -> GELU -> fc2 (SigLIP uses `gelu_pytorch_tanh`, the tanh
+    /// approximation, not QuickGELU and not exact/erf GELU)
     fn mlp<C>(&self, client: &C, x: &Tensor<R>) -> Result<Tensor<R>>
     where
         C: RuntimeClient<R> + TensorOps<R> + BinaryOps<R> + ActivationOps<R> + UnaryOps<R>,

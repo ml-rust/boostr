@@ -219,7 +219,7 @@ impl<R: Runtime<DType = DType>> Qwen3VlVision<R> {
         let n_tokens = n_patches / (merge * merge);
         let merged = h.tensor().reshape(&[n_tokens, self.cfg.merged_width()])?;
         let m0 = self.mm0.forward(client, &Var::new(merged, false))?;
-        let act = client.gelu(m0.tensor())?;
+        let act = client.gelu_erf(m0.tensor())?;
         let m2 = self.mm2.forward(client, &Var::new(act, false))?;
         Ok(m2.tensor().clone())
     }

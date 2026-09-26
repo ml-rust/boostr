@@ -187,7 +187,7 @@ impl<R: Runtime> WhisperEncoderLayer<R> {
         let normed2_var = Var::new(normed2.tensor().clone(), false);
 
         let fc1_out = self.fc1.forward(client, &normed2_var)?;
-        let activated = client.gelu(fc1_out.tensor()).map_err(Error::Numr)?;
+        let activated = client.gelu_erf(fc1_out.tensor()).map_err(Error::Numr)?;
         let activated_var = Var::new(activated, false);
         let fc2_out = self.fc2.forward(client, &activated_var)?;
 
@@ -297,9 +297,9 @@ impl<R: Runtime> WhisperEncoder<R> {
     {
         // Conv stem: [B, num_mel_bins, audio_len] -> [B, hidden, seq_len]
         let x = self.conv1.forward_inference(client, mel)?;
-        let x = client.gelu(&x).map_err(Error::Numr)?;
+        let x = client.gelu_erf(&x).map_err(Error::Numr)?;
         let x = self.conv2.forward_inference(client, &x)?;
-        let x = client.gelu(&x).map_err(Error::Numr)?;
+        let x = client.gelu_erf(&x).map_err(Error::Numr)?;
 
         // Transpose to [B, seq_len, hidden]
         let x = x.transpose(1, 2).map_err(Error::Numr)?.contiguous()?;

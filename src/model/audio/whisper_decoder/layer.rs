@@ -141,7 +141,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         let h = self
             .fc1
             .forward(client, &Var::new(normed3.tensor().clone(), false))?;
-        let h = client.gelu(h.tensor()).map_err(Error::Numr)?;
+        let h = client.gelu_erf(h.tensor()).map_err(Error::Numr)?;
         let h = self.fc2.forward(client, &Var::new(h, false))?;
 
         client.add(&x2, h.tensor()).map_err(Error::Numr)
@@ -233,7 +233,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         let h = self
             .fc1
             .forward(client, &Var::new(normed3.tensor().clone(), false))?;
-        let h = client.gelu(h.tensor()).map_err(Error::Numr)?;
+        let h = client.gelu_erf(h.tensor()).map_err(Error::Numr)?;
         let h = self.fc2.forward(client, &Var::new(h, false))?;
 
         client.add(&x2, h.tensor()).map_err(Error::Numr)

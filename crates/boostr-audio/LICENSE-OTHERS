@@ -14,7 +14,13 @@ and NOTICE travel beside the data it covers; this file is the index.
                         exceptions and norm tables, and     en_core_web_sm 3.8.0
                         the port in src/g2p/spacy_tokenizer/
                         (feature `spacy-tokenizer`)
+  assets/spacy_en/      en_core_web_sm tok2vec + tagger     spaCy 3.8, thinc 8.3,      MIT
+                        weights and metadata, and the       en_core_web_sm 3.8.0
+                        ports in src/g2p/spacy_tagger/ and
+                        boostr's model/text/spacy_tagger/
+                        (feature `spacy-tagger`)
 
 The lexicons are embedded in the binary only when the `misaki` feature is on.
 The spaCy tokenizer data is embedded only when the `spacy-tokenizer` feature
-is on; `misaki` turns it on.
+is on. The tagger weights (5.8 MB) are embedded only when the `spacy-tagger`
+feature is on. `misaki` turns both on.

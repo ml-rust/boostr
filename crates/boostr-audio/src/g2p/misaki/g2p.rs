@@ -1,10 +1,14 @@
 //! misaki `en.G2P.__call__` from tagged tokens onward.
 //!
-//! The caller supplies the tokens misaki builds from spaCy (text, Penn
-//! Treebank fine tag, trailing whitespace). Tokenization, tagging, and
-//! misaki's markdown-link preprocessing are outside this module.
+//! [`MisakiG2p::phonemize`] takes the tokens misaki builds from spaCy (text,
+//! Penn Treebank fine tag, trailing whitespace).
+//! [`MisakiG2p::phonemize_text`] builds them from raw text with the embedded
+//! spaCy tokenizer and tagger, as `G2P.__call__` does.
+
+use std::sync::OnceLock;
 
 use super::chars::SUBTOKEN_JUNKS;
+use super::front::TextFrontEnd;
 use super::lexicon::Lexicon;
 use super::resolve::{resolve_tokens, token_context};
 use super::retokenize::{Word, fold_left, retokenize};
@@ -45,6 +49,8 @@ pub struct MisakiG2p {
     lexicon: Lexicon,
     unk: String,
     fallback: Option<Box<dyn OovFallback + Send + Sync>>,
+    /// Tokenizer and tagger for [`Self::phonemize_text`], built on first use.
+    front: OnceLock<TextFrontEnd>,
 }
 
 impl std::fmt::Debug for MisakiG2p {
@@ -65,6 +71,7 @@ impl MisakiG2p {
             lexicon: Lexicon::new(british)?,
             unk: DEFAULT_UNK.to_string(),
             fallback: None,
+            front: OnceLock::new(),
         })
     }
 
@@ -88,6 +95,24 @@ impl MisakiG2p {
     /// The placeholder written for unresolved words.
     pub fn unk(&self) -> &str {
         &self.unk
+    }
+
+    /// misaki `G2P.__call__(text)`: markdown-link preprocessing, the spaCy
+    /// `en_core_web_sm` tokenizer and tagger, then [`Self::phonemize`].
+    ///
+    /// The first call builds the embedded tokenizer and tagger; later calls
+    /// reuse them.
+    pub fn phonemize_text(&self, text: &str) -> Result<G2pOutput> {
+        let tokens = self.front_end()?.tokens(text)?;
+        Ok(self.phonemize(tokens))
+    }
+
+    fn front_end(&self) -> Result<&TextFrontEnd> {
+        if let Some(front) = self.front.get() {
+            return Ok(front);
+        }
+        let built = TextFrontEnd::new()?;
+        Ok(self.front.get_or_init(|| built))
     }
 
     /// Converts tagged tokens to phonemes, exactly as misaki's `G2P.__call__`
@@ -198,5 +223,50 @@ impl MisakiG2p {
             _ => resolve_tokens(w),
         }
         ctx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phonemize_text_applies_link_features() {
+        // misaki 0.9.4 `en.G2P(trf=False, british=False)(text)[0]` with
+        // spaCy 3.8.14 and en_core_web_sm 3.8.0.
+        let g2p = MisakiG2p::new(false).unwrap_or_else(|e| panic!("MisakiG2p: {e}"));
+        let cases = [
+            ("  [Kokoro](/kˈOkəɹO/) is great.", "kˈOkəɹO ɪz ɡɹˈAt."),
+            (
+                "[Hello world](/həlˈO/) and [read](-1) [it](+2) [a](0.5) [b](-0.5) [c](#&#) [d](x)",
+                "həlˈO ænd ɹˌɛd ˈɪt ɐ bˌi sˈi dˈi",
+            ),
+            ("Say [don't](/dˈOnt/) now", "sˈA dˈOnt nˈW"),
+            ("[12](#a#)", "twˈɛlv"),
+            ("x [a]() y", "ˈɛks ɐ wˈI"),
+            ("[New York](/nuː jɔːk/) rocks", "nuː jɔːk ɹˈɑks"),
+            (
+                "Visit [U.S.](/juː ɛs/) today [5](//ab//)",
+                "vˈɪzət juː ɛs tədˈA ab",
+            ),
+        ];
+        for (text, want) in cases {
+            let got = g2p
+                .phonemize_text(text)
+                .unwrap_or_else(|e| panic!("phonemize_text({text:?}): {e}"));
+            assert_eq!(got.phonemes, want, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn phonemize_text_of_empty_text() {
+        let g2p = MisakiG2p::new(true).unwrap_or_else(|e| panic!("MisakiG2p: {e}"));
+        for text in ["", "   "] {
+            let got = g2p
+                .phonemize_text(text)
+                .unwrap_or_else(|e| panic!("phonemize_text({text:?}): {e}"));
+            assert_eq!(got.phonemes, "");
+            assert!(got.tokens.is_empty());
+        }
     }
 }

@@ -15,7 +15,8 @@
 //! `matches_misaki_on_narration_corpus` feeds the fixture's tokens.
 //! `raw_text_through_spacy_tokenizer_matches_misaki` tokenizes the raw
 //! sentence with [`SpacyTokenizer`] and takes only the tags from the
-//! fixture, since the tagger is a separate component.
+//! fixture. `raw_text_through_full_pipeline_matches_misaki` passes the raw
+//! sentence to [`MisakiG2p::phonemize_text`]: tokenizer, tagger and G2P.
 
 use boostr_audio::g2p::misaki::{G2pOutput, KOKORO_UNK, MToken, MisakiG2p};
 use boostr_audio::g2p::spacy_tokenizer::SpacyTokenizer;
@@ -113,42 +114,81 @@ fn check_dialect(name: &str, british: bool, cases: &[(&Case, Vec<MToken>)]) -> V
     let mut failures = Vec::new();
     let mut exact = 0usize;
     for (case, tokens) in cases {
-        let want = if british { &case.gb } else { &case.us };
         let got = g2p.phonemize(tokens.clone());
         let got_kokoro = kokoro.phonemize(tokens.clone()).phonemes;
-        let got_rows = token_rows(&got);
-
-        let mut report = Vec::new();
-        if got.phonemes != want.phonemes {
-            report.push(format!(
-                "  phonemes\n    rust:   {}\n    misaki: {}",
-                got.phonemes, want.phonemes
-            ));
-        }
-        if got_kokoro != want.phonemes_kokoro {
-            report.push(format!(
-                "  phonemes (unk='')\n    rust:   {}\n    misaki: {}",
-                got_kokoro, want.phonemes_kokoro
-            ));
-        }
-        if got_rows != want.token_phonemes {
-            report.push(format!(
-                "  tokens\n    rust:   {:?}\n    misaki: {:?}",
-                got_rows, want.token_phonemes
-            ));
-        }
-        if report.is_empty() {
-            exact += 1;
-        } else {
-            failures.push(format!(
-                "[{name}] {:?}\n{}",
-                case.sentence,
-                report.join("\n")
-            ));
+        match compare(name, british, case, &got, &got_kokoro) {
+            None => exact += 1,
+            Some(report) => failures.push(report),
         }
     }
     println!("{name}: {exact}/{} sentences exact", cases.len());
     failures
+}
+
+/// Runs one dialect over every raw sentence through
+/// [`MisakiG2p::phonemize_text`]; returns the mismatch reports.
+fn check_dialect_text(name: &str, british: bool, cases: &[Case]) -> Vec<String> {
+    let g2p = MisakiG2p::new(british).unwrap_or_else(|e| panic!("MisakiG2p::new({british}): {e}"));
+    let kokoro = MisakiG2p::new(british)
+        .unwrap_or_else(|e| panic!("MisakiG2p::new({british}): {e}"))
+        .with_unk(KOKORO_UNK);
+
+    let mut failures = Vec::new();
+    let mut exact = 0usize;
+    for case in cases {
+        let run = |g: &MisakiG2p| {
+            g.phonemize_text(&case.sentence)
+                .unwrap_or_else(|e| panic!("phonemize_text({:?}): {e}", case.sentence))
+        };
+        let got = run(&g2p);
+        let got_kokoro = run(&kokoro).phonemes;
+        match compare(name, british, case, &got, &got_kokoro) {
+            None => exact += 1,
+            Some(report) => failures.push(report),
+        }
+    }
+    println!("{name} (raw text): {exact}/{} sentences exact", cases.len());
+    failures
+}
+
+/// A mismatch report for one sentence, or `None` when all three outputs
+/// match the fixture.
+fn compare(
+    name: &str,
+    british: bool,
+    case: &Case,
+    got: &G2pOutput,
+    got_kokoro: &str,
+) -> Option<String> {
+    let want = if british { &case.gb } else { &case.us };
+    let got_rows = token_rows(got);
+    let mut report = Vec::new();
+    if got.phonemes != want.phonemes {
+        report.push(format!(
+            "  phonemes\n    rust:   {}\n    misaki: {}",
+            got.phonemes, want.phonemes
+        ));
+    }
+    if got_kokoro != want.phonemes_kokoro {
+        report.push(format!(
+            "  phonemes (unk='')\n    rust:   {}\n    misaki: {}",
+            got_kokoro, want.phonemes_kokoro
+        ));
+    }
+    if got_rows != want.token_phonemes {
+        report.push(format!(
+            "  tokens\n    rust:   {:?}\n    misaki: {:?}",
+            got_rows, want.token_phonemes
+        ));
+    }
+    if report.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[{name}] {:?}\n{}",
+        case.sentence,
+        report.join("\n")
+    ))
 }
 
 #[test]
@@ -208,5 +248,27 @@ fn raw_text_through_spacy_tokenizer_matches_misaki() {
         "{} of {} tokenization and sentence checks mismatched; see the output above",
         failures.len(),
         fixture.cases.len() * 3
+    );
+}
+
+#[test]
+fn raw_text_through_full_pipeline_matches_misaki() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/misaki_g2p_oracle.json"
+    );
+    let fixture: Fixture = load_json(std::path::Path::new(path));
+    assert!(!fixture.cases.is_empty(), "fixture must not be empty");
+
+    let mut failures = check_dialect_text("us", false, &fixture.cases);
+    failures.extend(check_dialect_text("gb", true, &fixture.cases));
+    for f in &failures {
+        println!("{f}");
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} sentence checks mismatched; see the output above",
+        failures.len(),
+        fixture.cases.len() * 2
     );
 }

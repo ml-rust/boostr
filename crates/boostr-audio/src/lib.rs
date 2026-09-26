@@ -9,8 +9,8 @@
 //! two-signal [`spectral`] distance, ASR [`eval`] metrics, the signal and
 //! summary halves of the [`tts_eval`] quality gate, and the backend-free half
 //! of [`g2p`]. Feature gates add the compressed-audio [`decode`]rs, the
-//! espeak-ng and misaki G2P backends, the spaCy `en_core_web_sm` tokenizer,
-//! the [`tts`] surface, the [`kokoro`] and [`voxcpm`]
+//! espeak-ng and misaki G2P backends, the spaCy `en_core_web_sm` tokenizer
+//! and tagger, the [`tts`] surface, the [`kokoro`] and [`voxcpm`]
 //! engines, the [`whisper`] bundle, the [`vad`] segmenter, [`corpus`]
 //! preparation, and the pace, intelligibility and timbre legs of
 //! [`tts_eval`].

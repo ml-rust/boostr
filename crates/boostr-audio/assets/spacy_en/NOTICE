@@ -1,5 +1,5 @@
-spaCy en_core_web_sm tokenizer data and port
-============================================
+spaCy en_core_web_sm tokenizer, tagger weights and ports
+========================================================
 
 tokenizer.json holds the tokenizer settings of the spaCy pipeline
 en_core_web_sm 3.8.0, extracted by build_tokenizer.py from spaCy 3.8:
@@ -16,6 +16,21 @@ spacy/tokenizer.pyx (Tokenizer.__call__ and the special-case matcher pass)
 and of the English lexeme attribute getters in spacy/lang/lex_attrs.py. The
 port changes the language and the data encoding. It keeps the behavior.
 
+tagger.safetensors.zlib holds the trained parameters of the `tok2vec` and
+`tagger` components of en_core_web_sm 3.8.0, unchanged in value, written by
+convert_tagger.py as a zlib-compressed SafeTensors file. tagger.json holds
+the network geometry, the HashEmbed seeds, the tag labels and the
+spacy.symbols.IDS table, from the same pipeline and spaCy 3.8.
+
+src/model/text/spacy_tagger/ in boostr is a Rust port of the forward pass
+of spaCy 3.8's spacy.Tok2Vec.v2, MultiHashEmbed.v2, MaxoutWindowEncoder.v2
+and spacy.Tagger.v2, and of the thinc 8.3 layers they build on (HashEmbed
+with MurmurHash3_x86_128_uint64, Maxout, LayerNorm, expand_window/seq2col,
+residual, with_array padding, Softmax_v2). src/g2p/spacy_tagger/ in this
+crate ports spaCy's FeatureExtractor and StringStore ID lookup, and
+src/g2p/misaki/preprocess.rs ports spaCy's Alignment.from_strings. The
+ports change the language. They keep the behavior.
+
 spaCy
   Copyright (C) 2016-2024 ExplosionAI GmbH, 2016 spaCy GmbH,
   2015 Matthew Honnibal
@@ -26,3 +41,8 @@ en_core_web_sm 3.8.0
   Copyright 2021 ExplosionAI GmbH
   https://github.com/explosion/spacy-models
   Licensed under the MIT License (LICENSE-en_core_web_sm in this directory).
+
+thinc 8.3
+  Copyright (C) 2016 ExplosionAI GmbH, 2016 spaCy GmbH, 2015 Matthew Honnibal
+  https://github.com/explosion/thinc
+  Licensed under the MIT License (LICENSE-thinc in this directory).

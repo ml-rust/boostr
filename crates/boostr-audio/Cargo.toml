@@ -66,19 +66,24 @@ decode = ["dep:symphonia"]
 # returns `G2pError::FeatureDisabled`; `Lang` and `tokenize_ipa` need no
 # backend and are always compiled.
 g2p = ["dep:espeakng"]
-# misaki English G2P over pre-tagged tokens, with the US and GB lexicons
-# embedded. No system dependencies. Implies `spacy-tokenizer`, the tokenizer
-# misaki's pipeline reads its tokens from.
+# misaki English G2P from raw text or pre-tagged tokens, with the US and GB
+# lexicons embedded. No system dependencies. Implies `spacy-tagger` (and so
+# `spacy-tokenizer`), the tokenizer and tagger misaki's pipeline reads its
+# tokens from.
 misaki = [
   "dep:flate2",
   "dep:unicode-normalization",
   "dep:unicode-general-category",
-  "spacy-tokenizer",
+  "spacy-tagger",
 ]
 # The spaCy `en_core_web_sm` 3.8.0 tokenizer with its patterns, special cases
 # and norm tables embedded. Separate from `misaki` so a consumer that needs
 # spaCy tokens and lexical attributes does not embed the misaki lexicons.
 spacy-tokenizer = ["dep:regexr", "dep:unicode-general-category"]
+# The spaCy `en_core_web_sm` 3.8.0 `tok2vec` + `tagger` (Penn Treebank tags),
+# the network from boostr, the attribute IDs and the zlib-compressed weights
+# (5.8 MB) here. Implies `spacy-tokenizer`, whose tokens it tags.
+spacy-tagger = ["boostr/spacy-tagger", "spacy-tokenizer", "dep:flate2"]
 # `TtsEngine`, `TtsBundle`, `Voice`: the engine-agnostic synthesis surface.
 tts = []
 # Kokoro synthesis pipeline: model from boostr, voice packs and the engine
@@ -137,6 +142,10 @@ required-features = ["misaki"]
 [[test]]
 name = "spacy_tokenizer_oracle"
 required-features = ["spacy-tokenizer"]
+
+[[test]]
+name = "spacy_tagger_oracle"
+required-features = ["spacy-tagger"]
 
 [[test]]
 name = "vits_tokenizer_oracle"

@@ -27,9 +27,17 @@ impl TensorInfo {
     }
 }
 
-/// SafeTensors file reader
+/// Where a [`SafeTensors`] reads tensor bytes from.
+enum Source {
+    /// An open file, read with seeks.
+    File(File),
+    /// A whole SafeTensors image held in memory.
+    Memory(Vec<u8>),
+}
+
+/// SafeTensors reader over a file or an in-memory image.
 pub struct SafeTensors {
-    file: File,
+    source: Source,
     data_offset: u64,
     pub(super) tensors: HashMap<String, TensorInfo>,
     metadata: HashMap<String, String>,
@@ -68,91 +76,52 @@ impl SafeTensors {
                 reason: format!("IO error reading header: {e}"),
             })?;
 
-        let header_str = std::str::from_utf8(&header_buf).map_err(|e| Error::ModelError {
-            reason: format!("invalid UTF-8 in header: {e}"),
-        })?;
-
-        let header: serde_json::Value =
-            serde_json::from_str(header_str).map_err(|e| Error::ModelError {
-                reason: format!("JSON parse error: {e}"),
-            })?;
-
-        let header_obj = header.as_object().ok_or_else(|| Error::ModelError {
-            reason: "header is not a JSON object".into(),
-        })?;
-
-        let mut tensors = HashMap::new();
-        let mut metadata = HashMap::new();
-
-        for (key, value) in header_obj {
-            if key == "__metadata__" {
-                if let Some(meta_obj) = value.as_object() {
-                    for (mk, mv) in meta_obj {
-                        if let Some(s) = mv.as_str() {
-                            metadata.insert(mk.clone(), s.to_string());
-                        }
-                    }
-                }
-            } else {
-                let obj = value.as_object().ok_or_else(|| Error::ModelError {
-                    reason: format!("tensor '{key}' is not an object"),
-                })?;
-
-                let dtype_str =
-                    obj.get("dtype")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| Error::ModelError {
-                            reason: format!("tensor '{key}' missing dtype"),
-                        })?;
-
-                let dtype = parse_dtype(dtype_str)?;
-
-                let shape: Vec<usize> = obj
-                    .get("shape")
-                    .and_then(|v| v.as_array())
-                    .ok_or_else(|| Error::ModelError {
-                        reason: format!("tensor '{key}' missing shape"),
-                    })?
-                    .iter()
-                    .filter_map(|v| v.as_u64().map(|n| n as usize))
-                    .collect();
-
-                let offsets = obj
-                    .get("data_offsets")
-                    .and_then(|v| v.as_array())
-                    .ok_or_else(|| Error::ModelError {
-                        reason: format!("tensor '{key}' missing data_offsets"),
-                    })?;
-
-                if offsets.len() != 2 {
-                    return Err(Error::ModelError {
-                        reason: format!("tensor '{key}' data_offsets must have 2 elements"),
-                    });
-                }
-
-                let data_start = offsets[0].as_u64().ok_or_else(|| Error::ModelError {
-                    reason: format!("tensor '{key}' invalid data_offsets[0]"),
-                })? as usize;
-
-                let data_end = offsets[1].as_u64().ok_or_else(|| Error::ModelError {
-                    reason: format!("tensor '{key}' invalid data_offsets[1]"),
-                })? as usize;
-
-                tensors.insert(
-                    key.clone(),
-                    TensorInfo {
-                        name: key.clone(),
-                        dtype,
-                        shape,
-                        data_start,
-                        data_end,
-                    },
-                );
-            }
-        }
-
+        let (tensors, metadata) = parse_header(&header_buf)?;
         Ok(SafeTensors {
-            file,
+            source: Source::File(file),
+            data_offset: 8 + header_size,
+            tensors,
+            metadata,
+        })
+    }
+
+    /// Parse a SafeTensors image held in memory. Tensor reads copy out of
+    /// `bytes`; the header's offsets are checked against its length.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        let size_field: [u8; 8] =
+            bytes
+                .get(..8)
+                .and_then(|b| b.try_into().ok())
+                .ok_or_else(|| Error::ModelError {
+                    reason: format!(
+                        "SafeTensors image of {} bytes has no header size",
+                        bytes.len()
+                    ),
+                })?;
+        let header_size = u64::from_le_bytes(size_field);
+        let header_end = usize::try_from(header_size)
+            .ok()
+            .and_then(|n| n.checked_add(8))
+            .filter(|&end| end <= bytes.len())
+            .ok_or_else(|| Error::ModelError {
+                reason: format!(
+                    "header size {header_size} exceeds image size {}",
+                    bytes.len()
+                ),
+            })?;
+        let (tensors, metadata) = parse_header(&bytes[8..header_end])?;
+        let data_len = bytes.len() - header_end;
+        let out_of_range = |t: &&TensorInfo| t.data_end > data_len || t.data_start > t.data_end;
+        if let Some(info) = tensors.values().find(out_of_range) {
+            return Err(Error::ModelError {
+                reason: format!(
+                    "tensor '{}' data_offsets [{}, {}] exceed the {data_len}-byte data section",
+                    info.name, info.data_start, info.data_end
+                ),
+            });
+        }
+        Ok(SafeTensors {
+            source: Source::Memory(bytes),
             data_offset: 8 + header_size,
             tensors,
             metadata,
@@ -193,21 +162,121 @@ impl SafeTensors {
 
         let abs_start = self.data_offset + info.data_start as u64;
         let size = info.size_bytes();
-        let mut buf = vec![0u8; size];
 
-        self.file
-            .seek(SeekFrom::Start(abs_start))
-            .map_err(|e| Error::ModelError {
-                reason: format!("IO seek error: {e}"),
-            })?;
-        self.file
-            .read_exact(&mut buf)
-            .map_err(|e| Error::ModelError {
-                reason: format!("IO read error: {e}"),
-            })?;
-
-        Ok(buf)
+        match &mut self.source {
+            Source::File(file) => {
+                let mut buf = vec![0u8; size];
+                file.seek(SeekFrom::Start(abs_start))
+                    .map_err(|e| Error::ModelError {
+                        reason: format!("IO seek error: {e}"),
+                    })?;
+                file.read_exact(&mut buf).map_err(|e| Error::ModelError {
+                    reason: format!("IO read error: {e}"),
+                })?;
+                Ok(buf)
+            }
+            Source::Memory(bytes) => {
+                let start = abs_start as usize;
+                bytes
+                    .get(start..start.saturating_add(size))
+                    .map(<[u8]>::to_vec)
+                    .ok_or_else(|| Error::ModelError {
+                        reason: format!("tensor '{name}' lies outside the SafeTensors image"),
+                    })
+            }
+        }
     }
+}
+
+/// Tensor table and `__metadata__` of a SafeTensors JSON header.
+type ParsedHeader = (HashMap<String, TensorInfo>, HashMap<String, String>);
+
+/// Parse the JSON header that follows the 8-byte size field.
+fn parse_header(header_buf: &[u8]) -> Result<ParsedHeader> {
+    let header_str = std::str::from_utf8(header_buf).map_err(|e| Error::ModelError {
+        reason: format!("invalid UTF-8 in header: {e}"),
+    })?;
+
+    let header: serde_json::Value =
+        serde_json::from_str(header_str).map_err(|e| Error::ModelError {
+            reason: format!("JSON parse error: {e}"),
+        })?;
+
+    let header_obj = header.as_object().ok_or_else(|| Error::ModelError {
+        reason: "header is not a JSON object".into(),
+    })?;
+
+    let mut tensors = HashMap::new();
+    let mut metadata = HashMap::new();
+
+    for (key, value) in header_obj {
+        if key == "__metadata__" {
+            if let Some(meta_obj) = value.as_object() {
+                for (mk, mv) in meta_obj {
+                    if let Some(s) = mv.as_str() {
+                        metadata.insert(mk.clone(), s.to_string());
+                    }
+                }
+            }
+        } else {
+            let obj = value.as_object().ok_or_else(|| Error::ModelError {
+                reason: format!("tensor '{key}' is not an object"),
+            })?;
+
+            let dtype_str =
+                obj.get("dtype")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| Error::ModelError {
+                        reason: format!("tensor '{key}' missing dtype"),
+                    })?;
+
+            let dtype = parse_dtype(dtype_str)?;
+
+            let shape: Vec<usize> = obj
+                .get("shape")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| Error::ModelError {
+                    reason: format!("tensor '{key}' missing shape"),
+                })?
+                .iter()
+                .filter_map(|v| v.as_u64().map(|n| n as usize))
+                .collect();
+
+            let offsets = obj
+                .get("data_offsets")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| Error::ModelError {
+                    reason: format!("tensor '{key}' missing data_offsets"),
+                })?;
+
+            if offsets.len() != 2 {
+                return Err(Error::ModelError {
+                    reason: format!("tensor '{key}' data_offsets must have 2 elements"),
+                });
+            }
+
+            let data_start = offsets[0].as_u64().ok_or_else(|| Error::ModelError {
+                reason: format!("tensor '{key}' invalid data_offsets[0]"),
+            })? as usize;
+
+            let data_end = offsets[1].as_u64().ok_or_else(|| Error::ModelError {
+                reason: format!("tensor '{key}' invalid data_offsets[1]"),
+            })? as usize;
+
+            tensors.insert(
+                key.clone(),
+                TensorInfo {
+                    name: key.clone(),
+                    dtype,
+                    shape,
+                    data_start,
+                    data_end,
+                },
+            );
+        }
+    }
+
+    Ok((tensors, metadata))
 }
 
 pub(super) fn parse_dtype(s: &str) -> Result<DType> {
@@ -275,6 +344,39 @@ pub(super) mod tests {
         assert_eq!(info.shape, vec![2, 3]);
         assert_eq!(info.numel(), 6);
         assert_eq!(info.size_bytes(), 24);
+    }
+
+    #[test]
+    fn test_from_bytes_matches_open() {
+        let f = create_test_file();
+        let bytes = std::fs::read(f.path()).unwrap();
+        let mut from_file = SafeTensors::open(f.path()).unwrap();
+        let mut from_memory = SafeTensors::from_bytes(bytes).unwrap();
+        assert_eq!(
+            from_memory.metadata().get("format"),
+            Some(&"pt".to_string())
+        );
+        assert_eq!(from_memory.tensor_info("weight").unwrap().shape, vec![2, 3]);
+        assert_eq!(
+            from_memory.read_tensor_bytes("weight").unwrap(),
+            from_file.read_tensor_bytes("weight").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_from_bytes_rejects_truncated_image() {
+        let f = create_test_file();
+        let mut bytes = std::fs::read(f.path()).unwrap();
+        bytes.truncate(bytes.len() - 4);
+        let msg = match SafeTensors::from_bytes(bytes) {
+            Ok(_) => panic!("a truncated data section must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            msg.contains("weight"),
+            "error should name the tensor: {msg}"
+        );
+        assert!(SafeTensors::from_bytes(vec![1, 2, 3]).is_err());
     }
 
     #[test]

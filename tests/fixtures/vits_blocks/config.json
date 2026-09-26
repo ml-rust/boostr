@@ -1,0 +1,12 @@
+{
+  "hidden_size": 8,
+  "num_heads": 2,
+  "window_size": 2,
+  "kernel_size": 3,
+  "dds_layers": 3,
+  "wavenet_layers": 3,
+  "dilation_rate": 2,
+  "speaker_dim": 4,
+  "batch": 2,
+  "seq": 5
+}

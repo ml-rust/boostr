@@ -25,17 +25,17 @@ pub struct WhisperDecoderLayer<R: Runtime> {
     self_out_proj: Linear<R>,
 
     cross_attn_ln: LayerNorm<R>,
-    cross_q_proj: Linear<R>,
-    cross_k_proj: Linear<R>,
-    cross_v_proj: Linear<R>,
-    cross_out_proj: Linear<R>,
+    pub(super) cross_q_proj: Linear<R>,
+    pub(super) cross_k_proj: Linear<R>,
+    pub(super) cross_v_proj: Linear<R>,
+    pub(super) cross_out_proj: Linear<R>,
 
     final_ln: LayerNorm<R>,
     fc1: Linear<R>,
     fc2: Linear<R>,
 
-    num_heads: usize,
-    head_dim: usize,
+    pub(super) num_heads: usize,
+    pub(super) head_dim: usize,
 }
 
 impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
@@ -151,12 +151,46 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
     /// `x` carries multiple tokens, causal mask applied) and incremental steps
     /// (`cache` primed, `x` carries one token, no mask needed — past positions
     /// already precede the current one in the concatenated K/V).
+    ///
+    /// Delegates to [`Self::forward_with_cache_capturing`] with no capture
+    /// sink, so a caller that never asks for cross-attention weights pays
+    /// nothing beyond the `None` check.
     pub fn forward_with_cache<C>(
         &self,
         client: &C,
         x: &Tensor<R>,
         encoder_out: &Tensor<R>,
         cache: &mut DecoderLayerCache<R>,
+    ) -> Result<Tensor<R>>
+    where
+        C: RuntimeClient<R>
+            + TensorOps<R>
+            + ScalarOps<R>
+            + MatmulOps<R>
+            + BinaryOps<R>
+            + ActivationOps<R>
+            + NormalizationOps<R>
+            + ReduceOps<R>
+            + ShapeOps<R>
+            + UnaryOps<R>
+            + ConditionalOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R>,
+    {
+        self.forward_with_cache_capturing(client, x, encoder_out, cache, None)
+    }
+
+    /// Same as [`Self::forward_with_cache`], with an optional sink for this
+    /// layer's cross-attention probabilities `[B, H, cur_len, S]`.
+    ///
+    /// `capture_cross_attn`: `Some` pushes one row-batch tensor for this call
+    /// onto the sink; `None` skips the push and the clone it needs.
+    pub(crate) fn forward_with_cache_capturing<C>(
+        &self,
+        client: &C,
+        x: &Tensor<R>,
+        encoder_out: &Tensor<R>,
+        cache: &mut DecoderLayerCache<R>,
+        capture_cross_attn: Option<&mut Vec<Tensor<R>>>,
     ) -> Result<Tensor<R>>
     where
         C: RuntimeClient<R>
@@ -183,7 +217,13 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         let normed2 = self
             .cross_attn_ln
             .forward(client, &Var::new(x1.clone(), false))?;
-        let ca_out = self.cross_attention_cached(client, normed2.tensor(), encoder_out, cache)?;
+        let ca_out = self.cross_attention_cached(
+            client,
+            normed2.tensor(),
+            encoder_out,
+            cache,
+            capture_cross_attn,
+        )?;
         let x2 = client.add(&x1, &ca_out).map_err(Error::Numr)?;
 
         // FFN.
@@ -283,76 +323,6 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         Ok(projected.tensor().clone())
     }
 
-    fn cross_attention_cached<C>(
-        &self,
-        client: &C,
-        x: &Tensor<R>,
-        encoder_out: &Tensor<R>,
-        cache: &mut DecoderLayerCache<R>,
-    ) -> Result<Tensor<R>>
-    where
-        C: RuntimeClient<R>
-            + TensorOps<R>
-            + ScalarOps<R>
-            + MatmulOps<R>
-            + BinaryOps<R>
-            + ActivationOps<R>
-            + ShapeOps<R>
-            + UnaryOps<R>,
-        R::Client: TensorOps<R>,
-    {
-        let x_shape = x.shape();
-        let batch = x_shape[0];
-        let tgt_len = x_shape[1];
-        let src_len = encoder_out.shape()[1];
-
-        // Lazily compute cross K/V on first call; reuse on every subsequent step.
-        if cache.cross_k.is_none() || cache.cross_v.is_none() {
-            let kv_in = Var::new(encoder_out.clone(), false);
-            let k = self.cross_k_proj.forward(client, &kv_in)?;
-            let v = self.cross_v_proj.forward(client, &kv_in)?;
-            cache.cross_k = Some(reshape_heads(
-                k.tensor(),
-                batch,
-                src_len,
-                self.num_heads,
-                self.head_dim,
-            )?);
-            cache.cross_v = Some(reshape_heads(
-                v.tensor(),
-                batch,
-                src_len,
-                self.num_heads,
-                self.head_dim,
-            )?);
-        }
-        let k = cache.cross_k.as_ref().expect("cross_k just populated");
-        let v = cache.cross_v.as_ref().expect("cross_v just populated");
-
-        let q_in = Var::new(x.clone(), false);
-        let q = self.cross_q_proj.forward(client, &q_in)?;
-        let q = reshape_heads(q.tensor(), batch, tgt_len, self.num_heads, self.head_dim)?;
-
-        let k_t = k.transpose(-2, -1).map_err(Error::Numr)?.contiguous()?;
-        let scale = (self.head_dim as f32).sqrt();
-        let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
-        let scores = client
-            .div_scalar(&scores, scale as f64)
-            .map_err(Error::Numr)?;
-        let attn = client.softmax(&scores, -1).map_err(Error::Numr)?;
-        let out = client.matmul(&attn, v).map_err(Error::Numr)?;
-
-        let out = out
-            .transpose(1, 2)
-            .map_err(Error::Numr)?
-            .contiguous()?
-            .reshape(&[batch, tgt_len, self.num_heads * self.head_dim])
-            .map_err(Error::Numr)?;
-
-        let projected = self.cross_out_proj.forward(client, &Var::new(out, false))?;
-        Ok(projected.tensor().clone())
-    }
-
     fn self_attention<C>(&self, client: &C, x: &Tensor<R>, causal: bool) -> Result<Tensor<R>>
     where
         C: RuntimeClient<R>
@@ -401,59 +371,6 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
             .map_err(Error::Numr)?;
 
         let projected = self.self_out_proj.forward(client, &Var::new(out, false))?;
-        Ok(projected.tensor().clone())
-    }
-
-    fn cross_attention<C>(
-        &self,
-        client: &C,
-        x: &Tensor<R>,
-        encoder_out: &Tensor<R>,
-    ) -> Result<Tensor<R>>
-    where
-        C: RuntimeClient<R>
-            + TensorOps<R>
-            + ScalarOps<R>
-            + MatmulOps<R>
-            + BinaryOps<R>
-            + ActivationOps<R>
-            + ShapeOps<R>
-            + UnaryOps<R>,
-        R::Client: TensorOps<R>,
-    {
-        let x_shape = x.shape();
-        let batch = x_shape[0];
-        let tgt_len = x_shape[1];
-        let src_len = encoder_out.shape()[1];
-
-        let q_in = Var::new(x.clone(), false);
-        let kv_in = Var::new(encoder_out.clone(), false);
-
-        let q = self.cross_q_proj.forward(client, &q_in)?;
-        let k = self.cross_k_proj.forward(client, &kv_in)?;
-        let v = self.cross_v_proj.forward(client, &kv_in)?;
-
-        let q = reshape_heads(q.tensor(), batch, tgt_len, self.num_heads, self.head_dim)?;
-        let k = reshape_heads(k.tensor(), batch, src_len, self.num_heads, self.head_dim)?;
-        let v = reshape_heads(v.tensor(), batch, src_len, self.num_heads, self.head_dim)?;
-
-        let k_t = k.transpose(-2, -1).map_err(Error::Numr)?.contiguous()?;
-        let scale = (self.head_dim as f32).sqrt();
-        let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
-        let scores = client
-            .div_scalar(&scores, scale as f64)
-            .map_err(Error::Numr)?;
-        let attn = client.softmax(&scores, -1).map_err(Error::Numr)?;
-        let out = client.matmul(&attn, &v).map_err(Error::Numr)?;
-
-        let out = out
-            .transpose(1, 2)
-            .map_err(Error::Numr)?
-            .contiguous()?
-            .reshape(&[batch, tgt_len, self.num_heads * self.head_dim])
-            .map_err(Error::Numr)?;
-
-        let projected = self.cross_out_proj.forward(client, &Var::new(out, false))?;
         Ok(projected.tensor().clone())
     }
 }

@@ -16,10 +16,13 @@
 //! has no mask (encoder outputs are fully visible).
 
 mod cache;
+mod capture;
+mod cross_attention;
 mod decoder;
 mod helpers;
 mod layer;
 
 pub use cache::{DecoderCache, DecoderLayerCache};
+pub use capture::CrossAttentionCapture;
 pub use decoder::WhisperDecoder;
 pub use layer::WhisperDecoderLayer;

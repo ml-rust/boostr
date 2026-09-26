@@ -1,6 +1,7 @@
 //! Full Whisper decoder: embeddings → N layers → final LN → tied logits head.
 
 use super::cache::{DecoderCache, DecoderLayerCache};
+use super::capture::CrossAttentionCapture;
 use super::helpers::load_layernorm;
 use super::layer::WhisperDecoderLayer;
 use crate::error::{Error, Result};
@@ -95,6 +96,9 @@ impl<R: Runtime<DType = DType>> WhisperDecoder<R> {
     /// `input_ids`) and incremental decoding (single-token `input_ids`).
     ///
     /// Returns logits for the **current** input window only: `[B, T, vocab]`.
+    ///
+    /// Delegates to [`Self::forward_with_cache_capturing`] with no capture
+    /// sink, so this path pays no extra cost for the capture feature.
     pub fn forward_with_cache<C>(
         &self,
         client: &C,
@@ -102,6 +106,43 @@ impl<R: Runtime<DType = DType>> WhisperDecoder<R> {
         encoder_out: &Tensor<R>,
         position_offset: usize,
         cache: &mut DecoderCache<R>,
+    ) -> Result<Tensor<R>>
+    where
+        C: RuntimeClient<R>
+            + TensorOps<R>
+            + ScalarOps<R>
+            + MatmulOps<R>
+            + BinaryOps<R>
+            + ActivationOps<R>
+            + NormalizationOps<R>
+            + ReduceOps<R>
+            + ShapeOps<R>
+            + UnaryOps<R>
+            + ConditionalOps<R>
+            + numr::ops::IndexingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R>,
+    {
+        self.forward_with_cache_capturing(
+            client,
+            input_ids,
+            encoder_out,
+            position_offset,
+            cache,
+            None,
+        )
+    }
+
+    /// Same as [`Self::forward_with_cache`], with an optional
+    /// [`CrossAttentionCapture`] that collects each requested layer's
+    /// cross-attention probabilities for this call.
+    pub(crate) fn forward_with_cache_capturing<C>(
+        &self,
+        client: &C,
+        input_ids: &Tensor<R>,
+        encoder_out: &Tensor<R>,
+        position_offset: usize,
+        cache: &mut DecoderCache<R>,
+        mut capture: Option<&mut CrossAttentionCapture<R>>,
     ) -> Result<Tensor<R>>
     where
         C: RuntimeClient<R>
@@ -142,8 +183,19 @@ impl<R: Runtime<DType = DType>> WhisperDecoder<R> {
 
         let mut hidden = client.add(tok.tensor(), &pos).map_err(Error::Numr)?;
 
-        for (layer, layer_cache) in self.layers.iter().zip(cache.layers.iter_mut()) {
-            hidden = layer.forward_with_cache(client, &hidden, encoder_out, layer_cache)?;
+        for (i, (layer, layer_cache)) in self.layers.iter().zip(cache.layers.iter_mut()).enumerate()
+        {
+            let sink = match capture.as_mut() {
+                Some(cap) => cap.slots.get_mut(i).and_then(|slot| slot.as_mut()),
+                None => None,
+            };
+            hidden = layer.forward_with_cache_capturing(
+                client,
+                &hidden,
+                encoder_out,
+                layer_cache,
+                sink,
+            )?;
         }
 
         let normed = self.layer_norm.forward(client, &Var::new(hidden, false))?;

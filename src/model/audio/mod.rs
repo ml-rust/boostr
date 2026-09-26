@@ -36,8 +36,10 @@ pub use vad::{SileroVad, SileroVadWeights, VadConfig, VadState};
 #[cfg(feature = "whisper")]
 pub use whisper::WhisperEncoder;
 #[cfg(feature = "whisper")]
-pub use whisper_decoder::{DecoderCache, DecoderLayerCache, WhisperDecoder, WhisperDecoderLayer};
+pub use whisper_decoder::{
+    CrossAttentionCapture, DecoderCache, DecoderLayerCache, WhisperDecoder, WhisperDecoderLayer,
+};
 #[cfg(feature = "whisper")]
 pub use whisper_loader::WhisperCheckpoint;
 #[cfg(feature = "whisper")]
-pub use whisper_model::{GenerateOptions, WhisperModel};
+pub use whisper_model::{CrossAttentionWeights, GenerateOptions, WhisperModel};

@@ -273,8 +273,9 @@ fn test_moe_grouped_gemm_parity() {
     });
 }
 
-#[test]
-fn test_moe_grouped_gemm_fused_parity() {
+/// Runs one fused grouped-GEMM activation on CPU, CUDA and WebGPU and asserts
+/// they agree. Fixed shape shared by all three activation variants below.
+fn assert_grouped_gemm_fused_parity(label: &str, activation: MoEActivation) {
     let (cpu_client, cpu_device) = setup_cpu();
     let num_experts = 2;
     let in_dim = 8;
@@ -288,7 +289,7 @@ fn test_moe_grouped_gemm_fused_parity() {
         Tensor::<CpuRuntime>::from_slice(&offsets_data, &[num_experts + 1], &cpu_device).unwrap();
 
     let cpu_result = cpu_client
-        .moe_grouped_gemm_fused(&tokens_data, &weights_data, &offsets, MoEActivation::SiLU)
+        .moe_grouped_gemm_fused(&tokens_data, &weights_data, &offsets, activation)
         .unwrap();
     let cpu_result_vec = cpu_result.to_vec::<f32>();
 
@@ -310,12 +311,12 @@ fn test_moe_grouped_gemm_fused_parity() {
         let offsets_c =
             Tensor::from_slice(&offsets_data, &[num_experts + 1], &cuda_device).unwrap();
         let result_c = cuda_client
-            .moe_grouped_gemm_fused(&tokens_c, &weights_c, &offsets_c, MoEActivation::SiLU)
+            .moe_grouped_gemm_fused(&tokens_c, &weights_c, &offsets_c, activation)
             .unwrap();
         assert_parity_f32_relaxed(
             &result_c.to_vec::<f32>(),
             &cpu_result_vec,
-            "moe_grouped_gemm_fused SiLU CUDA vs CPU",
+            &format!("moe_grouped_gemm_fused {label} CUDA vs CPU"),
         );
     });
 
@@ -337,88 +338,29 @@ fn test_moe_grouped_gemm_fused_parity() {
         let offsets_w =
             Tensor::from_slice(&offsets_data, &[num_experts + 1], &wgpu_device).unwrap();
         let result_w = wgpu_client
-            .moe_grouped_gemm_fused(&tokens_w, &weights_w, &offsets_w, MoEActivation::SiLU)
+            .moe_grouped_gemm_fused(&tokens_w, &weights_w, &offsets_w, activation)
             .unwrap();
         assert_parity_f32_relaxed(
             &result_w.to_vec::<f32>(),
             &cpu_result_vec,
-            "moe_grouped_gemm_fused SiLU WGPU vs CPU",
+            &format!("moe_grouped_gemm_fused {label} WGPU vs CPU"),
         );
     });
 }
 
 #[test]
-fn test_moe_grouped_gemm_fused_gelu_parity() {
-    let (cpu_client, cpu_device) = setup_cpu();
-    let num_experts = 2;
-    let in_dim = 8;
-    let out_dim = 4;
-    let total_tokens = 6;
+fn test_moe_grouped_gemm_fused_parity() {
+    assert_grouped_gemm_fused_parity("SiLU", MoEActivation::SiLU);
+}
 
-    let tokens_data = det_tensor(&[total_tokens, in_dim], &cpu_device);
-    let weights_data = det_tensor(&[num_experts, in_dim, out_dim], &cpu_device);
-    let offsets_data: Vec<i32> = vec![0, 3, 6];
-    let offsets =
-        Tensor::<CpuRuntime>::from_slice(&offsets_data, &[num_experts + 1], &cpu_device).unwrap();
+#[test]
+fn test_moe_grouped_gemm_fused_gelu_tanh_parity() {
+    assert_grouped_gemm_fused_parity("GeluTanh", MoEActivation::GeluTanh);
+}
 
-    let cpu_result = cpu_client
-        .moe_grouped_gemm_fused(&tokens_data, &weights_data, &offsets, MoEActivation::GeLU)
-        .unwrap();
-    let cpu_result_vec = cpu_result.to_vec::<f32>();
-
-    #[cfg(feature = "cuda")]
-    with_cuda_backend(|cuda_client, cuda_device| {
-        use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let tokens_c = Tensor::from_slice(
-            &tokens_data.to_vec::<f32>(),
-            &[total_tokens, in_dim],
-            &cuda_device,
-        )
-        .unwrap();
-        let weights_c = Tensor::from_slice(
-            &weights_data.to_vec::<f32>(),
-            &[num_experts, in_dim, out_dim],
-            &cuda_device,
-        )
-        .unwrap();
-        let offsets_c =
-            Tensor::from_slice(&offsets_data, &[num_experts + 1], &cuda_device).unwrap();
-        let result_c = cuda_client
-            .moe_grouped_gemm_fused(&tokens_c, &weights_c, &offsets_c, MoEActivation::GeLU)
-            .unwrap();
-        assert_parity_f32_relaxed(
-            &result_c.to_vec::<f32>(),
-            &cpu_result_vec,
-            "moe_grouped_gemm_fused GeLU CUDA vs CPU",
-        );
-    });
-
-    #[cfg(feature = "wgpu")]
-    with_wgpu_backend(|wgpu_client, wgpu_device| {
-        use boostr::ops::traits::architecture::moe::MoEOps as _;
-        let tokens_w = Tensor::from_slice(
-            &tokens_data.to_vec::<f32>(),
-            &[total_tokens, in_dim],
-            &wgpu_device,
-        )
-        .unwrap();
-        let weights_w = Tensor::from_slice(
-            &weights_data.to_vec::<f32>(),
-            &[num_experts, in_dim, out_dim],
-            &wgpu_device,
-        )
-        .unwrap();
-        let offsets_w =
-            Tensor::from_slice(&offsets_data, &[num_experts + 1], &wgpu_device).unwrap();
-        let result_w = wgpu_client
-            .moe_grouped_gemm_fused(&tokens_w, &weights_w, &offsets_w, MoEActivation::GeLU)
-            .unwrap();
-        assert_parity_f32_relaxed(
-            &result_w.to_vec::<f32>(),
-            &cpu_result_vec,
-            "moe_grouped_gemm_fused GeLU WGPU vs CPU",
-        );
-    });
+#[test]
+fn test_moe_grouped_gemm_fused_gelu_erf_parity() {
+    assert_grouped_gemm_fused_parity("Gelu(erf)", MoEActivation::Gelu);
 }
 
 #[test]

@@ -117,7 +117,7 @@ fn moe_grouped_gemm_silu_f32(@builtin(workgroup_id) wid: vec3<u32>,
 }
 
 @compute @workgroup_size(16, 16, 1)
-fn moe_grouped_gemm_gelu_f32(@builtin(workgroup_id) wid: vec3<u32>,
+fn moe_grouped_gemm_gelu_tanh_f32(@builtin(workgroup_id) wid: vec3<u32>,
                               @builtin(local_invocation_id) lid: vec3<u32>) {
     let expert_idx = wid.z;
     if (expert_idx >= params.num_experts) {
@@ -139,5 +139,54 @@ fn moe_grouped_gemm_gelu_f32(@builtin(workgroup_id) wid: vec3<u32>,
         let inner = 0.7978845608 * (acc + 0.044715 * x3);
         let global_row = start + row;
         output[global_row * params.out_dim + col] = 0.5 * acc * (1.0 + tanh(inner));
+    }
+}
+
+// Exact/erf GELU: 0.5 * x * (1 + erf(x / sqrt(2))). erf via the A&S 7.1.26
+// rational approximation (same formula numr's own erf kernel uses) — WGSL has
+// no built-in erf.
+fn erf_approx(x: f32) -> f32 {
+    let sgn = select(-1.0, 1.0, x >= 0.0);
+    let ax = abs(x);
+
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
+
+    let t = 1.0 / (1.0 + p * ax);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let t4 = t3 * t;
+    let t5 = t4 * t;
+    let poly = a1 * t + a2 * t2 + a3 * t3 + a4 * t4 + a5 * t5;
+    let y = 1.0 - poly * exp(-ax * ax);
+
+    return sgn * y;
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn moe_grouped_gemm_gelu_erf_f32(@builtin(workgroup_id) wid: vec3<u32>,
+                              @builtin(local_invocation_id) lid: vec3<u32>) {
+    let expert_idx = wid.z;
+    if (expert_idx >= params.num_experts) {
+        return;
+    }
+
+    let tile_row = wid.y * TILE;
+    let tile_col = wid.x * TILE;
+
+    let acc = gemm_core(expert_idx, lid.y, lid.x, tile_row, tile_col);
+
+    let row = tile_row + lid.y;
+    let col = tile_col + lid.x;
+    let start = u32(offsets[expert_idx]);
+    let count = u32(offsets[expert_idx + 1u]) - start;
+
+    if (row < count && col < params.out_dim) {
+        let global_row = start + row;
+        output[global_row * params.out_dim + col] = 0.5 * acc * (1.0 + erf_approx(acc * 0.7071067811865476));
     }
 }

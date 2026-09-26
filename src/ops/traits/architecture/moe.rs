@@ -13,8 +13,10 @@ use numr::tensor::Tensor;
 pub enum MoEActivation {
     /// SiLU (Swish): x * sigmoid(x)
     SiLU,
-    /// GELU: x * Φ(x)
-    GeLU,
+    /// Exact/erf GELU: `0.5 * x * (1 + erf(x / sqrt(2)))`.
+    Gelu,
+    /// Tanh-approximate GELU: `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`.
+    GeluTanh,
     /// No activation (identity)
     None,
 }
@@ -104,7 +106,8 @@ pub trait MoEOps<R: Runtime> {
     /// Fused grouped GEMM with activation.
     ///
     /// Same as `moe_grouped_gemm` but applies an activation function
-    /// (SiLU or GeLU) to each expert's output before concatenation.
+    /// (SiLU, erf GELU, or tanh GELU) to each expert's output before
+    /// concatenation.
     ///
     /// # Layout
     ///

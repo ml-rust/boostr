@@ -115,30 +115,41 @@ static __device__ __forceinline__ float epilogue_silu(float x) {
 }
 #define EPILOGUE_SILU(x) epilogue_silu(x)
 
-static __device__ __forceinline__ float epilogue_gelu(float x) {
+static __device__ __forceinline__ float epilogue_gelu_tanh(float x) {
     float x3 = x * x * x;
     float inner = 0.7978845608f * (x + 0.044715f * x3);
     return 0.5f * x * (1.0f + tanhf(inner));
 }
-#define EPILOGUE_GELU(x) epilogue_gelu(x)
+#define EPILOGUE_GELU_TANH(x) epilogue_gelu_tanh(x)
+
+// Exact/erf GELU: 0.5 * x * (1 + erf(x / sqrt(2))). Matches HF `hidden_act:
+// "gelu"` (Whisper, BERT, jina-v2 GeGLU) — NOT interchangeable with the tanh
+// approximation above.
+static __device__ __forceinline__ float epilogue_gelu_erf(float x) {
+    return 0.5f * x * (1.0f + erff(x * 0.7071067811865476f));
+}
+#define EPILOGUE_GELU_ERF(x) epilogue_gelu_erf(x)
 
 // ============================================================================
 // F32 variants (no conversion)
 // ============================================================================
 DEFINE_MOE_GROUPED_GEMM(_f32, float, LOAD_F32, STORE_F32, EPILOGUE_NONE)
 DEFINE_MOE_GROUPED_GEMM(_silu_f32, float, LOAD_F32, STORE_F32, EPILOGUE_SILU)
-DEFINE_MOE_GROUPED_GEMM(_gelu_f32, float, LOAD_F32, STORE_F32, EPILOGUE_GELU)
+DEFINE_MOE_GROUPED_GEMM(_gelu_tanh_f32, float, LOAD_F32, STORE_F32, EPILOGUE_GELU_TANH)
+DEFINE_MOE_GROUPED_GEMM(_gelu_erf_f32, float, LOAD_F32, STORE_F32, EPILOGUE_GELU_ERF)
 
 // ============================================================================
 // F16 variants (load/store as __half, accumulate in F32)
 // ============================================================================
 DEFINE_MOE_GROUPED_GEMM(_f16, __half, LOAD_F16, STORE_F16, EPILOGUE_NONE)
 DEFINE_MOE_GROUPED_GEMM(_silu_f16, __half, LOAD_F16, STORE_F16, EPILOGUE_SILU)
-DEFINE_MOE_GROUPED_GEMM(_gelu_f16, __half, LOAD_F16, STORE_F16, EPILOGUE_GELU)
+DEFINE_MOE_GROUPED_GEMM(_gelu_tanh_f16, __half, LOAD_F16, STORE_F16, EPILOGUE_GELU_TANH)
+DEFINE_MOE_GROUPED_GEMM(_gelu_erf_f16, __half, LOAD_F16, STORE_F16, EPILOGUE_GELU_ERF)
 
 // ============================================================================
 // BF16 variants (load/store as __nv_bfloat16, accumulate in F32)
 // ============================================================================
 DEFINE_MOE_GROUPED_GEMM(_bf16, __nv_bfloat16, LOAD_BF16, STORE_BF16, EPILOGUE_NONE)
 DEFINE_MOE_GROUPED_GEMM(_silu_bf16, __nv_bfloat16, LOAD_BF16, STORE_BF16, EPILOGUE_SILU)
-DEFINE_MOE_GROUPED_GEMM(_gelu_bf16, __nv_bfloat16, LOAD_BF16, STORE_BF16, EPILOGUE_GELU)
+DEFINE_MOE_GROUPED_GEMM(_gelu_tanh_bf16, __nv_bfloat16, LOAD_BF16, STORE_BF16, EPILOGUE_GELU_TANH)
+DEFINE_MOE_GROUPED_GEMM(_gelu_erf_bf16, __nv_bfloat16, LOAD_BF16, STORE_BF16, EPILOGUE_GELU_ERF)

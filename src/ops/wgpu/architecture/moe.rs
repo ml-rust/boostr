@@ -23,7 +23,8 @@ fn grouped_gemm_entry_point(activation: MoEActivation) -> &'static str {
     match activation {
         MoEActivation::None => "moe_grouped_gemm_f32",
         MoEActivation::SiLU => "moe_grouped_gemm_silu_f32",
-        MoEActivation::GeLU => "moe_grouped_gemm_gelu_f32",
+        MoEActivation::GeluTanh => "moe_grouped_gemm_gelu_tanh_f32",
+        MoEActivation::Gelu => "moe_grouped_gemm_gelu_erf_f32",
     }
 }
 

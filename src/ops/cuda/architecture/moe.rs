@@ -40,13 +40,16 @@ fn grouped_gemm_kernel_name(dtype: DType, activation: MoEActivation) -> Result<&
     match (dtype, activation) {
         (DType::F32, MoEActivation::None) => Ok("moe_grouped_gemm_f32"),
         (DType::F32, MoEActivation::SiLU) => Ok("moe_grouped_gemm_silu_f32"),
-        (DType::F32, MoEActivation::GeLU) => Ok("moe_grouped_gemm_gelu_f32"),
+        (DType::F32, MoEActivation::GeluTanh) => Ok("moe_grouped_gemm_gelu_tanh_f32"),
+        (DType::F32, MoEActivation::Gelu) => Ok("moe_grouped_gemm_gelu_erf_f32"),
         (DType::F16, MoEActivation::None) => Ok("moe_grouped_gemm_f16"),
         (DType::F16, MoEActivation::SiLU) => Ok("moe_grouped_gemm_silu_f16"),
-        (DType::F16, MoEActivation::GeLU) => Ok("moe_grouped_gemm_gelu_f16"),
+        (DType::F16, MoEActivation::GeluTanh) => Ok("moe_grouped_gemm_gelu_tanh_f16"),
+        (DType::F16, MoEActivation::Gelu) => Ok("moe_grouped_gemm_gelu_erf_f16"),
         (DType::BF16, MoEActivation::None) => Ok("moe_grouped_gemm_bf16"),
         (DType::BF16, MoEActivation::SiLU) => Ok("moe_grouped_gemm_silu_bf16"),
-        (DType::BF16, MoEActivation::GeLU) => Ok("moe_grouped_gemm_gelu_bf16"),
+        (DType::BF16, MoEActivation::GeluTanh) => Ok("moe_grouped_gemm_gelu_tanh_bf16"),
+        (DType::BF16, MoEActivation::Gelu) => Ok("moe_grouped_gemm_gelu_erf_bf16"),
         _ => Err(Error::InvalidArgument {
             arg: "dtype",
             reason: format!("MoE grouped GEMM: unsupported dtype {:?}", dtype),
@@ -248,13 +251,18 @@ fn launch_grouped_gemm(
     // numr's grouped matmul wraps the same compile-time tiled, register-blocked
     // GEMM core as the dense path, and accumulates in F32 for every storage
     // dtype. boostr's own kernel is a plain 32x32 tile with one accumulator per
-    // thread; nothing routed here should reach it.
-    if matches!(dtype, DType::F32 | DType::F16 | DType::BF16) {
-        let act = match activation {
-            MoEActivation::None => GemmActivation::None,
-            MoEActivation::SiLU => GemmActivation::SiLU,
-            MoEActivation::GeLU => GemmActivation::GELU,
-        };
+    // thread. numr's `GemmActivation` has no exact/erf GELU epilogue, so
+    // `MoEActivation::Gelu` falls through to boostr's own kernel below; every
+    // other activation on F32/F16/BF16 takes numr's fast path.
+    let numr_activation = match activation {
+        MoEActivation::None => Some(GemmActivation::None),
+        MoEActivation::SiLU => Some(GemmActivation::SiLU),
+        MoEActivation::GeluTanh => Some(GemmActivation::GELU),
+        MoEActivation::Gelu => None,
+    };
+    if let Some(act) = numr_activation
+        && matches!(dtype, DType::F32 | DType::F16 | DType::BF16)
+    {
         return client
             .grouped_matmul_activation(permuted_tokens, expert_weights, expert_offsets, act)
             .map_err(Error::Numr);

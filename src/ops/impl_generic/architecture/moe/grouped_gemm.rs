@@ -1,7 +1,7 @@
 //! MoE grouped GEMM: per-expert matmul on contiguous token groups.
 //!
 //! THE algorithm — same for all backends.
-//! Composes numr primitives: narrow, matmul, cat, silu, gelu.
+//! Composes numr primitives: narrow, matmul, cat, silu, gelu, gelu_erf.
 
 use crate::error::{Error, Result};
 use crate::ops::traits::architecture::moe::MoEActivation;
@@ -138,7 +138,8 @@ where
         // Apply activation
         let activated = match activation {
             MoEActivation::SiLU => client.silu(&result).map_err(Error::Numr)?,
-            MoEActivation::GeLU => client.gelu(&result).map_err(Error::Numr)?,
+            MoEActivation::Gelu => client.gelu_erf(&result).map_err(Error::Numr)?,
+            MoEActivation::GeluTanh => client.gelu(&result).map_err(Error::Numr)?,
             MoEActivation::None => result,
         };
 

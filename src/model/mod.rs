@@ -13,6 +13,7 @@ pub mod qwen35;
 pub mod registry;
 pub mod registry_inference;
 pub mod speech_lm;
+pub mod text;
 pub mod traits;
 pub mod vision;
 pub mod vocab_growth;

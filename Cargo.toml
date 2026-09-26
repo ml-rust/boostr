@@ -98,6 +98,12 @@ voxcpm = ["audio", "f16"]
 silero-vad = ["audio"]
 vits = ["audio"]
 
+# spaCy's CNN part-of-speech tagger (`model::text::spacy_tagger`): the
+# `tok2vec` + `tagger` network of `en_core_web_sm`. Text only; implies no
+# other gate. The tokenizer and attribute IDs that feed it live in
+# boostr-audio.
+spacy-tagger = []
+
 # Backend features (passed through to numr)
 cpu = []
 cuda = ["numr/cuda", "dep:cudarc"]

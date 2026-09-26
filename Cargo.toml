@@ -188,6 +188,10 @@ name = "vits_blocks_parity"
 required-features = ["vits"]
 
 [[test]]
+name = "vits_duration_parity"
+required-features = ["vits"]
+
+[[test]]
 name = "vits_text_encoder_parity"
 required-features = ["vits"]
 

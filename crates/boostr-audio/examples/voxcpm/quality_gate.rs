@@ -50,6 +50,17 @@
 //! Naturalness has no single number here. HNR, pace and timbre together
 //! carry it; WER does not.
 //!
+//! # Unscored axes
+//!
+//! `--unscored-axis NAME` renders, transcribes and reports that axis but
+//! keeps it out of the summary and the threshold checks. Repeat it per axis.
+//!
+//! Use it where the SCORER, not the model, decides the number. WER against a
+//! Kelantanese prompt is one: the ASR maps the dialect onto the nearest
+//! standard Malay word, so the row's error is the transcriber's and cannot be
+//! attributed to the speech. Left in, such an axis sets the corpus rate and
+//! forces every threshold to be loose enough to pass it.
+//!
 //! # Output
 //!
 //! One `"record":"score"` object per row on `--out` (every metric flattened
@@ -109,6 +120,7 @@ use jsonl_sink::JsonlSink;
 const USAGE: &str = "usage: voxcpm_quality_gate (--renders LOG.jsonl | --manifest ROWS.tsv) \
 --whisper DIR --vad FILE.safetensors [--audiovae PATH [--ref REF.wav]] \
 [--device cpu|cuda] [--language ms|en|auto-from-row] [--out scores.jsonl] \
+[--unscored-axis NAME]... \
 [--max-wer X] [--max-cer X] [--min-hnr-db X] [--min-lufs X] [--max-lufs X] \
 [--max-leading-silence-s X] [--max-trailing-silence-s X] \
 [--min-words-per-s X] [--max-words-per-s X] [--min-latent-cosine X]";
@@ -142,6 +154,16 @@ pub struct Args {
     pub language: String,
     out: Option<PathBuf>,
     thresholds: Thresholds,
+    /// Axes rendered and reported but left out of the summary and the
+    /// threshold checks.
+    unscored_axes: Vec<String>,
+}
+
+impl Args {
+    /// Whether `axis` was named by `--unscored-axis`.
+    fn is_unscored(&self, axis: &str) -> bool {
+        self.unscored_axes.iter().any(|a| a == axis)
+    }
 }
 
 fn take_value(argv: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -168,6 +190,7 @@ fn parse_args() -> Result<Args, String> {
     let mut device = Device::Cpu;
     let mut language = AUTO_LANGUAGE.to_string();
     let mut out = None;
+    let mut unscored_axes: Vec<String> = Vec::new();
     let mut t = Thresholds::default();
     let mut min_wps = None;
     let mut max_wps = None;
@@ -185,6 +208,7 @@ fn parse_args() -> Result<Args, String> {
             "--device" => device = parse_device(&take_value(&argv, &mut i, flag)?)?,
             "--language" => language = take_value(&argv, &mut i, flag)?,
             "--out" => out = Some(PathBuf::from(take_value(&argv, &mut i, flag)?)),
+            "--unscored-axis" => unscored_axes.push(take_value(&argv, &mut i, flag)?),
             "--max-wer" => t.max_wer = Some(take_f64(&argv, &mut i, flag)?),
             "--max-cer" => t.max_cer = Some(take_f64(&argv, &mut i, flag)?),
             "--min-hnr-db" => t.min_hnr_db = Some(take_f64(&argv, &mut i, flag)?),
@@ -230,6 +254,7 @@ fn parse_args() -> Result<Args, String> {
         language,
         out,
         thresholds: t,
+        unscored_axes,
     })
 }
 
@@ -359,7 +384,12 @@ where
         if !errors.is_empty() {
             row.error = Some(errors.join("; "));
         }
-        row.violations = violations(&row, &args.thresholds);
+        // An unscored axis still renders, transcribes and reports. It earns
+        // no violations, so a threshold set for the rest of the corpus is not
+        // decided by an axis the scorer cannot measure.
+        if !args.is_unscored(row.axis_key()) {
+            row.violations = violations(&row, &args.thresholds);
+        }
         report_row(&row);
         if let Some(sink) = sink.as_deref_mut() {
             sink.write(&row.to_json())?;
@@ -367,7 +397,12 @@ where
         scored.push(row);
     }
 
-    let summary = Summary::from_rows(&scored);
+    let measured: Vec<_> = scored
+        .iter()
+        .filter(|row| !args.is_unscored(row.axis_key()))
+        .cloned()
+        .collect();
+    let summary = Summary::from_rows(&measured);
     let mut summary_json = summary.to_json();
     if let Some(obj) = summary_json.as_object_mut() {
         obj.insert("source".into(), source_json(run, args));

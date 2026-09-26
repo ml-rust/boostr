@@ -42,4 +42,4 @@ pub use whisper_decoder::{
 #[cfg(feature = "whisper")]
 pub use whisper_loader::WhisperCheckpoint;
 #[cfg(feature = "whisper")]
-pub use whisper_model::{CrossAttentionWeights, GenerateOptions, WhisperModel};
+pub use whisper_model::{CrossAttentionWeights, GenerateOptions, WhisperModel, alignment_matrix};

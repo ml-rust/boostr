@@ -6,6 +6,7 @@
 //! - `proj_out.weight` is tied to `model.decoder.embed_tokens.weight`
 //!   (the decoder already takes care of this via its `tied_out_weight`).
 
+mod alignment;
 mod generate;
 mod language;
 mod mask;
@@ -13,5 +14,6 @@ mod model;
 #[cfg(test)]
 mod test_support;
 
+pub use alignment::alignment_matrix;
 pub use generate::{CrossAttentionWeights, GenerateOptions};
 pub use model::WhisperModel;

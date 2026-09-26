@@ -71,7 +71,22 @@ pub struct WhisperGenerationConfig {
     /// Maximum length of the **full** decoder sequence, prefix included (448 for
     /// every Whisper release).
     pub max_length: usize,
+    /// `(decoder_layer, head)` pairs whose cross-attention DTW-aligns best
+    /// with word boundaries (HF's `generation_config.json:alignment_heads`).
+    /// `None` when the checkpoint ships no such list — word timestamps are
+    /// then unavailable, matching HF's own refusal in
+    /// `_set_num_frames` when a model has no `alignment_heads`.
+    pub alignment_heads: Option<Vec<(usize, usize)>>,
+    /// Median filter width for the alignment matrix (HF's
+    /// `config.json:median_filter_width`, default 7 when the checkpoint
+    /// omits it — `WhisperConfig`'s own default).
+    pub median_filter_width: usize,
 }
+
+/// `WhisperConfig`'s default `median_filter_width` when a checkpoint's
+/// `config.json` omits the field (every `openai/whisper-*` release does,
+/// since none overrides it).
+const DEFAULT_MEDIAN_FILTER_WIDTH: usize = 7;
 
 /// Whisper's decoder position budget — `max_target_positions` in config.json and
 /// `max_length` in generation_config.json alike.
@@ -87,6 +102,8 @@ impl WhisperGenerationConfig {
             begin_suppress_tokens: Vec::new(),
             eos_token_ids: vec![variant.eos_token_id()],
             max_length: WHISPER_MAX_LENGTH,
+            alignment_heads: None,
+            median_filter_width: DEFAULT_MEDIAN_FILTER_WIDTH,
         }
     }
 }
@@ -241,6 +258,17 @@ struct HfGenerationConfig {
     eos_token_id: Option<TokenIdField>,
     #[serde(default)]
     max_length: Option<usize>,
+    #[serde(default)]
+    alignment_heads: Option<Vec<[usize; 2]>>,
+}
+
+/// The `config.json` fields this loader reads outside of boostr's own
+/// `AudioConfig` parse — just `median_filter_width`, which boostr's
+/// `WhisperModel::from_checkpoint` has no reason to carry.
+#[derive(Debug, Deserialize)]
+struct HfModelConfig {
+    #[serde(default)]
+    median_filter_width: Option<usize>,
 }
 
 /// `eos_token_id` is a bare integer on every `openai/whisper-*` release, but the
@@ -268,9 +296,14 @@ impl TokenIdField {
 /// read or parsed IS an error: silently decoding without the constraints it
 /// carries produces a subtly wrong transcript.
 fn load_generation_config(dir: &Path, variant: WhisperVariant) -> Result<WhisperGenerationConfig> {
+    let median_filter_width = read_median_filter_width(dir)?;
+
     let path = dir.join("generation_config.json");
     if !path.exists() {
-        return Ok(WhisperGenerationConfig::for_variant(variant));
+        return Ok(WhisperGenerationConfig {
+            median_filter_width,
+            ..WhisperGenerationConfig::for_variant(variant)
+        });
     }
 
     let bytes = std::fs::read(&path).map_err(|e| Error::ModelError {
@@ -285,13 +318,38 @@ fn load_generation_config(dir: &Path, variant: WhisperVariant) -> Result<Whisper
         .eos_token_id
         .map(TokenIdField::into_vec)
         .unwrap_or_else(|| vec![variant.eos_token_id()]);
+    let alignment_heads = raw
+        .alignment_heads
+        .map(|pairs| pairs.into_iter().map(|[l, h]| (l, h)).collect());
 
     Ok(WhisperGenerationConfig {
         suppress_tokens: raw.suppress_tokens.unwrap_or_default(),
         begin_suppress_tokens: raw.begin_suppress_tokens.unwrap_or_default(),
         eos_token_ids,
         max_length: raw.max_length.unwrap_or(WHISPER_MAX_LENGTH),
+        alignment_heads,
+        median_filter_width,
     })
+}
+
+/// Read `config.json:median_filter_width`, falling back to
+/// [`DEFAULT_MEDIAN_FILTER_WIDTH`] when the file is absent or omits the
+/// field — `WhisperConfig`'s own default, which every `openai/whisper-*`
+/// release relies on rather than serializing explicitly.
+fn read_median_filter_width(dir: &Path) -> Result<usize> {
+    let path = dir.join("config.json");
+    if !path.exists() {
+        return Ok(DEFAULT_MEDIAN_FILTER_WIDTH);
+    }
+    let bytes = std::fs::read(&path).map_err(|e| Error::ModelError {
+        reason: format!("reading {}: {e}", path.display()),
+    })?;
+    let raw: HfModelConfig = serde_json::from_slice(&bytes).map_err(|e| Error::ModelError {
+        reason: format!("parsing {}: {e}", path.display()),
+    })?;
+    Ok(raw
+        .median_filter_width
+        .unwrap_or(DEFAULT_MEDIAN_FILTER_WIDTH))
 }
 
 /// Language token ids of `variant` in language order, empty for english-only.
@@ -339,6 +397,8 @@ mod tests {
         assert!(defaults.begin_suppress_tokens.is_empty());
         assert_eq!(defaults.eos_token_ids, vec![50257]);
         assert_eq!(defaults.max_length, 448);
+        assert!(defaults.alignment_heads.is_none());
+        assert_eq!(defaults.median_filter_width, 7);
     }
 
     #[test]
@@ -384,5 +444,35 @@ mod tests {
             Some(vec![50257, 50362])
         );
         assert_eq!(list.max_length, None);
+    }
+
+    #[test]
+    fn generation_config_parses_alignment_heads() {
+        let raw: HfGenerationConfig =
+            serde_json::from_str(r#"{"alignment_heads":[[2,2],[3,0],[3,2],[3,3],[3,4],[3,5]]}"#)
+                .expect("alignment_heads");
+        assert_eq!(
+            raw.alignment_heads,
+            Some(vec![[2, 2], [3, 0], [3, 2], [3, 3], [3, 4], [3, 5]])
+        );
+    }
+
+    #[test]
+    fn model_config_median_filter_width_falls_back_to_hf_default() {
+        let raw: HfModelConfig = serde_json::from_str(r#"{"hidden_size": 384}"#)
+            .expect("config.json without median_filter_width");
+        assert_eq!(
+            raw.median_filter_width
+                .unwrap_or(DEFAULT_MEDIAN_FILTER_WIDTH),
+            7
+        );
+
+        let raw: HfModelConfig = serde_json::from_str(r#"{"median_filter_width": 9}"#)
+            .expect("config.json with median_filter_width");
+        assert_eq!(
+            raw.median_filter_width
+                .unwrap_or(DEFAULT_MEDIAN_FILTER_WIDTH),
+            9
+        );
     }
 }

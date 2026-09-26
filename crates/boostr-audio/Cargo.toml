@@ -86,6 +86,10 @@ name = "whisper_integration"
 required-features = ["whisper", "vad"]
 
 [[test]]
+name = "whisper_word_oracle"
+required-features = ["whisper"]
+
+[[test]]
 name = "silero_vad_segment_parity"
 required-features = ["vad"]
 

@@ -13,21 +13,31 @@ use crate::error::{Error, Result};
 #[cfg(feature = "vad")]
 use crate::vad::SpeechSegment;
 use crate::whisper::bundle::WhisperBundle;
+use crate::whisper::dtw;
+use crate::whisper::words::{self, WordTiming};
+use boostr::model::audio::alignment_matrix;
 use boostr::model::audio::mel::{MelOptions, compute_mel_spectrogram_with};
 use numr::dtype::DType;
 use numr::ops::{
     ActivationOps, BinaryOps, ConditionalOps, ConvOps, IndexingOps, MatmulOps, NormalizationOps,
-    ReduceOps, ScalarOps, ShapeOps, TensorOps, UnaryOps,
+    ReduceOps, ScalarOps, ShapeOps, SortingOps, StatisticalOps, TensorOps, UnaryOps,
 };
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 use splintr::WhisperVariant;
 
+/// HF's fixed `time_precision`: one decoder-side token step covers 2 encoder
+/// frames (the encoder's second conv has stride 2), and each encoder frame
+/// covers a 10 ms mel hop, so one token step covers `2 * 0.010 = 0.02` s.
+/// Not derived from any checkpoint config — every `openai/whisper-*` release
+/// uses this same constant.
+const TIME_PRECISION_SECS: f32 = 0.02;
+
 /// Whisper's encoder window, in seconds. `MelOptions::whisper` pads or trims
 /// every input to exactly this, so longer audio is data loss, not a long decode.
 const WHISPER_WINDOW_SECS: usize = 30;
 
-/// What a transcription run may vary. [`Default`] detects the language and
+/// What a transcription run can vary. [`Default`] detects the language and
 /// uses the checkpoint's own token budget.
 #[derive(Debug, Clone, Default)]
 pub struct TranscribeOptions<'a> {
@@ -62,9 +72,9 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
     /// Transcribe one utterance. `samples` must be mono at `sample_rate`.
     ///
     /// Audio longer than 30 s is **rejected**, not truncated: Whisper's encoder
-    /// takes a fixed 30 s window, so a 20-minute recording would otherwise
-    /// yield a plausible transcript of its first 30 seconds with nothing to
-    /// mark the rest as lost. Segment first — `speech_timestamps` in
+    /// takes a fixed 30 s window, so a 20-minute recording otherwise yields a
+    /// plausible transcript of its first 30 seconds with nothing to mark the
+    /// rest as lost. Segment first — `speech_timestamps` in
     /// `crate::vad` produces exactly the segments `transcribe_segments`
     /// consumes.
     pub fn transcribe<C>(
@@ -160,6 +170,172 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
             tokens,
             language,
         })
+    }
+
+    /// Transcribe one utterance, plus word-level timestamps via HuggingFace's
+    /// DTW alignment path (the notimestamps + DTW path
+    /// `transformers.js`'s `return_timestamps: 'word'` runs).
+    ///
+    /// Same 30 s rule and language handling as [`Self::transcribe`]; the two
+    /// differ only in that this one also runs a second decode pass that
+    /// captures cross-attention, DTW-aligns it to the mel frames, and
+    /// collates the result into per-word spans.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ModelError`] naming this bundle's checkpoint
+    /// directory when it ships no `alignment_heads` in
+    /// `generation_config.json` — word timestamps have no alignment heads to
+    /// average over without it, matching HF's own refusal in `_set_num_frames`.
+    pub fn transcribe_words<C>(
+        &self,
+        client: &C,
+        samples: &[f32],
+        sample_rate: usize,
+        opts: &TranscribeOptions<'_>,
+    ) -> Result<(Transcription, Vec<WordTiming>)>
+    where
+        C: RuntimeClient<R>
+            + TensorOps<R>
+            + ScalarOps<R>
+            + MatmulOps<R>
+            + BinaryOps<R>
+            + ActivationOps<R>
+            + NormalizationOps<R>
+            + ConvOps<R>
+            + ReduceOps<R>
+            + ShapeOps<R>
+            + UnaryOps<R>
+            + ConditionalOps<R>
+            + IndexingOps<R>
+            + StatisticalOps<R>
+            + SortingOps<R>,
+        R::Client: TensorOps<R> + ScalarOps<R> + ConvOps<R> + ReduceOps<R> + BinaryOps<R>,
+    {
+        let alignment_heads =
+            self.generation
+                .alignment_heads
+                .as_ref()
+                .ok_or_else(|| Error::ModelError {
+                    reason: format!(
+                        "{} ships no `alignment_heads` in generation_config.json; word \
+                         timestamps need it to know which cross-attention heads to average",
+                        self.checkpoint_dir.display()
+                    ),
+                })?;
+
+        if sample_rate == 0 {
+            return Err(Error::InvalidArgument {
+                arg: "sample_rate",
+                reason: "sample rate must be non-zero".into(),
+            });
+        }
+        let max_samples = WHISPER_WINDOW_SECS * sample_rate;
+        if samples.len() > max_samples {
+            let secs = samples.len() as f64 / sample_rate as f64;
+            return Err(Error::InvalidArgument {
+                arg: "samples",
+                reason: format!(
+                    "audio is {secs:.3} s ({} samples at {sample_rate} Hz), over Whisper's fixed \
+                     {WHISPER_WINDOW_SECS} s window ({max_samples} samples); segment the audio \
+                     first (see boostr_audio::vad::speech_timestamps) and transcribe each segment",
+                    samples.len()
+                ),
+            });
+        }
+
+        let mel_opts = MelOptions::whisper(self.num_mel_bins, sample_rate);
+        let mel = compute_mel_spectrogram_with(samples, sample_rate, &mel_opts)?;
+        if self.num_mel_bins == 0 || !mel.len().is_multiple_of(self.num_mel_bins) {
+            return Err(Error::InvalidArgument {
+                arg: "samples",
+                reason: format!(
+                    "mel of {} values is not a whole number of {}-bin frames",
+                    mel.len(),
+                    self.num_mel_bins
+                ),
+            });
+        }
+        let num_mel_frames = mel.len() / self.num_mel_bins;
+
+        let shape = [1, self.num_mel_bins, num_mel_frames];
+        let mel_t = Tensor::<R>::from_slice(&mel, &shape, client.device())?;
+        let encoded = self.model.encode(client, &mel_t)?;
+
+        let language = match (self.variant, opts.language) {
+            (WhisperVariant::EnglishOnly, _) => None,
+            (_, Some(code)) => Some(self.resolve_language(code)?),
+            (_, None) => Some(self.detect_language(client, &encoded)?),
+        };
+
+        let prompt = self.sot_prompt(language, opts.translate);
+        let mut gen_opts = self.generate_options();
+        if let Some(budget) = opts.max_new_tokens {
+            gen_opts.max_new_tokens = budget;
+        }
+
+        // Only the decoder layers named by an alignment head need capturing.
+        let mut layers: Vec<usize> = alignment_heads.iter().map(|&(l, _)| l).collect();
+        layers.sort_unstable();
+        layers.dedup();
+
+        let (tokens, weights) = self
+            .model
+            .generate_with_cross_attentions(client, &encoded, &prompt, &gen_opts, &layers)?;
+
+        let text = self
+            .tokenizer
+            .decode(&tokens)
+            .map_err(|e| Error::ModelError {
+                reason: format!("decoding {} whisper token ids: {e}", tokens.len()),
+            })?;
+        let transcription = Transcription {
+            text,
+            tokens: tokens.clone(),
+            language,
+        };
+
+        if tokens.is_empty() {
+            return Ok((transcription, Vec::new()));
+        }
+
+        // The real (unpadded) audio's raw mel-frame count, HF's own
+        // deprecated-fallback formula (`len(raw_speech) // hop_length`):
+        // `alignment_matrix` halves this itself to land on the encoder's
+        // downsampled frame count, so the raw count is passed through as-is.
+        let num_frames = samples.len() / mel_opts.hop_length;
+        let prefix_len = prompt.len();
+
+        let matrix = alignment_matrix(
+            client,
+            &weights,
+            alignment_heads,
+            num_frames,
+            self.generation.median_filter_width,
+            prefix_len,
+        )?;
+        let frames = num_frames / 2;
+        let matrix_host: Vec<f32> = matrix.try_to_vec()?;
+
+        let full_token_timestamps = dtw::token_timestamps(
+            &matrix_host,
+            tokens.len(),
+            frames,
+            TIME_PRECISION_SECS,
+            prefix_len,
+        );
+
+        let eos_token_id = self.variant.eos_token_id();
+        let (word_texts, token_indices) =
+            words::combine_tokens_into_words(&self.tokenizer, &tokens, language, eos_token_id);
+        let word_timings = words::collate_word_timestamps(
+            &word_texts,
+            &token_indices,
+            &full_token_timestamps,
+            prefix_len,
+        );
+
+        Ok((transcription, word_timings))
     }
 
     /// Detect the spoken language from an already-encoded window.

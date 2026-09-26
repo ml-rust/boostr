@@ -70,12 +70,17 @@ use boostr::model::audio::{GenerateOptions, alignment_matrix};
 use boostr::nn::VarMap;
 use boostr_audio::WhisperBundle;
 use boostr_audio::wav::{decode_wav, to_mono};
+use boostr_audio::whisper::dtw;
+use boostr_audio::whisper::words;
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 use serde::Deserialize;
 
 mod common;
-use common::{cpu_setup, load_json, model_fixture, skip_notice};
+use common::{
+    TensorStats, check_close_f32, check_exact_usize, check_word_timings, cpu_setup, diff_plane,
+    load_json, model_fixture, report_tensor_stats, skip_notice,
+};
 
 const SAMPLE_RATE: usize = 16_000;
 const MS_CLIP_SAMPLES: usize = 320_000;
@@ -102,36 +107,34 @@ struct Oracle {
     /// HF's `encoder_last_hidden_state` stats — same availability.
     #[serde(default)]
     encoder_last_hidden_state_stats: Option<TensorStats>,
+    /// The language code the oracle decode ran under (`"en"`, `"ms"`, ...),
+    /// fed straight to `words::combine_tokens_into_words` — it is already the
+    /// BCP-47-ish code this crate's word collation expects.
+    language: String,
+    /// HF's fixed `time_precision` (`0.02` on every release): seconds per
+    /// decoder-side token step.
+    time_precision: f32,
+    /// `_dynamic_time_warping`'s row (token) index per path step.
+    dtw_text_indices: Vec<usize>,
+    /// `_dynamic_time_warping`'s column (frame) index per path step.
+    dtw_time_indices: Vec<usize>,
+    /// `_extract_token_timestamps`'s full per-position timestamp array:
+    /// `prompt_ids.len()` zeros, one entry per generated token, then one
+    /// trailing duplicate.
+    token_timestamps: Vec<f32>,
+    /// HF's word-level output for the SAME notimestamps + DTW decode this
+    /// fixture's `generated_ids` comes from — the oracle for
+    /// `transcribe_words`. See this file's module doc for why `words`
+    /// (the timestamped-decode pipeline output) is a different fixture.
+    words_from_generate: Vec<WordFixture>,
 }
 
-/// Shape + summary statistics for a tensor, computed in f64. Comparable
-/// across HF (`whisper_word_oracle.py`) and this crate regardless of which
-/// side produced it.
-#[derive(Debug, Clone, Deserialize)]
-struct TensorStats {
-    shape: Vec<usize>,
-    mean: f64,
-    std: f64,
-    min: f64,
-    max: f64,
-}
-
-impl TensorStats {
-    fn from_data(shape: &[usize], data: &[f32]) -> Self {
-        let n = data.len().max(1) as f64;
-        let sum: f64 = data.iter().map(|&x| x as f64).sum();
-        let mean = sum / n;
-        let var: f64 = data.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n;
-        let min = data.iter().copied().fold(f32::INFINITY, f32::min) as f64;
-        let max = data.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
-        Self {
-            shape: shape.to_vec(),
-            mean,
-            std: var.sqrt(),
-            min,
-            max,
-        }
-    }
+/// One HF word timing, as saved to the fixture JSON.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct WordFixture {
+    text: String,
+    start: f32,
+    end: f32,
 }
 
 /// `layer{L}_head{H}` -> `(L, H)`.
@@ -225,61 +228,6 @@ fn clip_samples(clip: &str, device: &CpuDevice) -> Option<Vec<f32>> {
     }
 }
 
-/// Per-head raw-plane diagnostic: where the biggest divergence is and how it
-/// compares to the row's own scale, plus a per-row summary so a reviewer can
-/// tell "one bad row" from "drift spread evenly across all of them".
-struct PlaneDiag {
-    max_diff: f32,
-    max_row: usize,
-    max_frame: usize,
-    mean_diff: f32,
-    oracle_at_max: f32,
-    ours_at_max: f32,
-    row_max_value: f32,
-    per_row_max_diff: Vec<f32>,
-}
-
-fn diff_plane(ours: &[f32], oracle: &[f32], frames: usize) -> PlaneDiag {
-    let rows = ours.len() / frames;
-    let mut per_row_max_diff = vec![0.0f32; rows];
-    let mut max_diff = 0.0f32;
-    let mut max_row = 0;
-    let mut max_frame = 0;
-    let mut sum_diff = 0.0f64;
-
-    for (r, row_max) in per_row_max_diff.iter_mut().enumerate() {
-        for f in 0..frames {
-            let i = r * frames + f;
-            let d = (ours[i] - oracle[i]).abs();
-            sum_diff += d as f64;
-            if d > *row_max {
-                *row_max = d;
-            }
-            if d > max_diff {
-                max_diff = d;
-                max_row = r;
-                max_frame = f;
-            }
-        }
-    }
-
-    let row_max_value = ours[max_row * frames..(max_row + 1) * frames]
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max);
-
-    PlaneDiag {
-        max_diff,
-        max_row,
-        max_frame,
-        mean_diff: (sum_diff / ours.len().max(1) as f64) as f32,
-        oracle_at_max: oracle[max_row * frames + max_frame],
-        ours_at_max: ours[max_row * frames + max_frame],
-        row_max_value,
-        per_row_max_diff,
-    }
-}
-
 /// Print HF's mel/encoder stats next to ours, if the oracle carries them
 /// (i.e. `whisper_word_oracle.py` has been run against this fixture).
 /// Diagnostic only — this crate's mel/encoder implementation is not required
@@ -291,22 +239,11 @@ fn report_frontend_stats(
     ours: &TensorStats,
     theirs: Option<&TensorStats>,
 ) {
-    let Some(theirs) = theirs else {
-        eprintln!(
-            "{model}__{clip}: {label} stats: ours = {ours:?}; oracle carries none \
-             (run whisper_word_oracle.py to add it)"
-        );
-        return;
-    };
-    eprintln!(
-        "{model}__{clip}: {label} stats: ours = {ours:?}; oracle = {theirs:?}; \
-         shapes match = {}, mean diff = {:.6}, std diff = {:.6}, min diff = {:.6}, \
-         max diff = {:.6}",
-        ours.shape == theirs.shape,
-        (ours.mean - theirs.mean).abs(),
-        (ours.std - theirs.std).abs(),
-        (ours.min - theirs.min).abs(),
-        (ours.max - theirs.max).abs(),
+    report_tensor_stats(
+        &format!("{model}__{clip}: {label}"),
+        ours,
+        theirs,
+        "run whisper_word_oracle.py to add it",
     );
 }
 
@@ -557,6 +494,68 @@ fn run_case(model: &str, clip: &str) {
                 diag.max_diff, diag.max_row, diag.max_frame
             ));
         }
+    }
+
+    // DTW indices, token timestamps, and words — the actual `transcribe_words`
+    // product surface. Runs only when the matrix size matched the oracle's
+    // (`kept` above); a size mismatch already failed the run.
+    if kept.len() == expected_flat.len() {
+        let label = format!("{model}__{clip}");
+        let (text_indices, time_indices) = dtw::dynamic_time_warping(&kept, kept_rows, frames);
+        check_exact_usize(
+            &label,
+            "dtw_text_indices",
+            &text_indices,
+            &oracle.dtw_text_indices,
+            &mut failures,
+        );
+        check_exact_usize(
+            &label,
+            "dtw_time_indices",
+            &time_indices,
+            &oracle.dtw_time_indices,
+            &mut failures,
+        );
+
+        let full_token_timestamps =
+            dtw::token_timestamps(&kept, kept_rows, frames, oracle.time_precision, prefix_len);
+        check_close_f32(
+            &label,
+            "token_timestamps",
+            &full_token_timestamps,
+            &oracle.token_timestamps,
+            1e-5,
+            &mut failures,
+        );
+
+        let eos_token_id = bundle.variant.eos_token_id();
+        let (word_texts, word_token_indices) = words::combine_tokens_into_words(
+            &bundle.tokenizer,
+            &tokens,
+            Some(oracle.language.as_str()),
+            eos_token_id,
+        );
+        let word_timings = words::collate_word_timestamps(
+            &word_texts,
+            &word_token_indices,
+            &full_token_timestamps,
+            prefix_len,
+        );
+        let got_words: Vec<(String, f32, f32)> = word_timings
+            .into_iter()
+            .map(|w| (w.text, w.start, w.end))
+            .collect();
+        let want_words: Vec<(String, f32, f32)> = oracle
+            .words_from_generate
+            .iter()
+            .map(|w| (w.text.clone(), w.start, w.end))
+            .collect();
+        eprintln!(
+            "{label}: words = {} (oracle {})",
+            got_words.len(),
+            want_words.len()
+        );
+        check_word_timings(&label, &got_words, &want_words, 1e-4, &mut failures);
     }
 
     assert!(

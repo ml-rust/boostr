@@ -80,7 +80,9 @@ pub use wav::{
     to_mono, wav_stream_header_f32, wav_stream_header_pcm16,
 };
 #[cfg(feature = "whisper")]
-pub use whisper::{TranscribeOptions, Transcription, WhisperBundle, WhisperGenerationConfig};
+pub use whisper::{
+    TranscribeOptions, Transcription, WhisperBundle, WhisperGenerationConfig, WordTiming,
+};
 
 #[cfg(all(test, feature = "decode"))]
 pub(crate) mod test_utils {

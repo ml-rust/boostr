@@ -17,7 +17,7 @@
 //! [`WhisperModel::from_checkpoint`] returns a [`WhisperCheckpoint`], and this
 //! module adds the tokenizer and `generation_config.json` on top.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use splintr::{AnyTokenizer, PretrainedVocab, WhisperVariant, from_json_path, from_vocab};
@@ -43,6 +43,10 @@ pub struct WhisperBundle<R: Runtime> {
     /// Decoding constraints read from the checkpoint's `generation_config.json`,
     /// or the variant defaults when the checkpoint ships no such file.
     pub generation: WhisperGenerationConfig,
+    /// The directory this bundle was loaded from, kept only so an error that
+    /// needs the checkpoint (missing `alignment_heads`, for word timestamps)
+    /// can name it.
+    pub checkpoint_dir: PathBuf,
 }
 
 /// Decoding constraints from a Whisper checkpoint's `generation_config.json`.
@@ -65,8 +69,8 @@ pub struct WhisperGenerationConfig {
     pub suppress_tokens: Vec<u32>,
     /// Token IDs forbidden at the first generated position only.
     pub begin_suppress_tokens: Vec<u32>,
-    /// Token IDs that end generation. `eos_token_id` in the file, which may be
-    /// a single integer or a list.
+    /// Token IDs that end generation. `eos_token_id` in the file, a single
+    /// integer or a list.
     pub eos_token_ids: Vec<u32>,
     /// Maximum length of the **full** decoder sequence, prefix included (448 for
     /// every Whisper release).
@@ -173,6 +177,7 @@ impl<R: Runtime<DType = DType>> WhisperBundle<R> {
             config,
             num_mel_bins,
             generation,
+            checkpoint_dir: dir.to_path_buf(),
         })
     }
 

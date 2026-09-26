@@ -5,7 +5,10 @@
 //! encoder, greedy decode and detokenizer in one call.
 
 pub mod bundle;
+pub mod dtw;
 pub mod transcribe;
+pub mod words;
 
 pub use bundle::{WhisperBundle, WhisperGenerationConfig};
 pub use transcribe::{TranscribeOptions, Transcription};
+pub use words::WordTiming;

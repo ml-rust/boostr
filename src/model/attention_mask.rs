@@ -10,6 +10,27 @@ use numr::ops::{BinaryOps, LinalgOps, ScalarOps, TypeConversionOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
+/// The most-negative FINITE value of `dtype`, as the F32 fill the mask is built
+/// with.
+///
+/// `f32::MIN` overflows both half formats: `bf16::from_f32(f32::MIN)` and
+/// `f16::from_f32(f32::MIN)` are both `-inf`, not a saturated finite value
+/// (measured, not assumed). Filling in F32 and casting down would therefore
+/// undo exactly what the `f32::MIN` fill exists to guarantee — see
+/// [`causal_window_mask`]'s note on the `0 * -inf = NaN` hazard. Choosing the
+/// fill from the TARGET dtype up front keeps the cast exact: every value here
+/// is representable in F32 and in `dtype` alike.
+pub(crate) fn mask_fill(dtype: DType) -> f64 {
+    match dtype {
+        DType::F16 => f64::from(half::f16::MIN.to_f32()),
+        DType::BF16 => f64::from(half::bf16::MIN.to_f32()),
+        // F32, F64 and the integer dtypes all hold `f32::MIN` exactly. A mask
+        // is never built in an integer dtype (it is added to attention scores),
+        // so no narrower case is reachable.
+        _ => f64::from(f32::MIN),
+    }
+}
+
 /// Additive causal mask, shape `[1, 1, sq, sk]`: `0` where a query may attend,
 /// a large negative where it may not.
 ///
@@ -50,27 +71,6 @@ use numr::tensor::Tensor;
 /// No element is covered twice, so summing the two fill-valued tensors
 /// never evaluates `MIN + MIN` (which would overflow to `-inf` and reintroduce
 /// the `0 * -inf = NaN` hazard the finite fill exists to avoid).
-/// The most-negative FINITE value of `dtype`, as the F32 fill the mask is built
-/// with.
-///
-/// `f32::MIN` overflows both half formats: `bf16::from_f32(f32::MIN)` and
-/// `f16::from_f32(f32::MIN)` are both `-inf`, not a saturated finite value
-/// (measured, not assumed). Filling in F32 and casting down would therefore
-/// undo exactly what the `f32::MIN` fill exists to guarantee — see
-/// [`causal_window_mask`]'s note on the `0 * -inf = NaN` hazard. Choosing the
-/// fill from the TARGET dtype up front keeps the cast exact: every value here
-/// is representable in F32 and in `dtype` alike.
-fn mask_fill(dtype: DType) -> f64 {
-    match dtype {
-        DType::F16 => f64::from(half::f16::MIN.to_f32()),
-        DType::BF16 => f64::from(half::bf16::MIN.to_f32()),
-        // F32, F64 and the integer dtypes all hold `f32::MIN` exactly. A mask
-        // is never built in an integer dtype (it is added to attention scores),
-        // so no narrower case is reachable.
-        _ => f64::from(f32::MIN),
-    }
-}
-
 pub fn causal_window_mask<R, C>(
     client: &C,
     sq: usize,

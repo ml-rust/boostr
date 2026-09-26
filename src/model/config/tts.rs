@@ -6,8 +6,9 @@
 //! `boostr::model::audio::<model>/`; the loader for each uses the config type
 //! defined here.
 //!
-//! Currently only Kokoro is supported; new TTS families (e.g. a future XTTS
-//! or Dia port) add their own config struct in this file.
+//! Holds `KokoroConfig`. VITS (`facebook/mms-tts-*`) has its own config in
+//! `vits.rs` — split out rather than added here to stay under the file's
+//! line cap; a new TTS family gets its own file the same way.
 //!
 //! Kokoro defaults match the `hexgrad/Kokoro-82M` checkpoint shipped on
 //! HuggingFace (82M parameters, 24 kHz output, 178-symbol phoneme
@@ -62,8 +63,8 @@ pub struct KokoroConfig {
     /// Generator iSTFT hop length in samples (default 5).
     #[serde(default = "default_hop_length")]
     pub hop_length: usize,
-    /// Generator upsample ratios (default `[10, 6]`). Product × `hop_length`
-    /// × (n_fft/2+... actually simpler: total upsample = product of ratios).
+    /// Generator upsample ratios (default `[10, 6]`). [`Self::total_upsample`]
+    /// is the product of these ratios.
     #[serde(default = "default_upsample_ratios")]
     pub upsample_ratios: Vec<usize>,
     /// Generator upsample kernel sizes, one per stage (default `[20, 12]`).

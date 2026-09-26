@@ -10,6 +10,7 @@ pub mod ssm;
 pub mod tts;
 pub mod universal;
 pub mod vision;
+pub mod vits;
 
 pub use attention::{AttentionConfig, RopeScalingConfig};
 pub use audio::AudioConfig;
@@ -24,3 +25,4 @@ pub use ssm::{SsmConfig, default_conv_kernel, default_expand, default_n_groups};
 pub use tts::KokoroConfig;
 pub use universal::{ModelConfig, UniversalConfig, default_rms_norm_eps};
 pub use vision::VisionConfig;
+pub use vits::VitsConfig;

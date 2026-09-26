@@ -14,6 +14,10 @@ use numr::tensor::Tensor;
 ///
 /// For each expert e, computes:
 ///   `output[offsets[e]..offsets[e+1]]` = `tokens[offsets[e]..offsets[e+1]]` @ `weights[e]`
+///
+/// Delegates to [`moe_grouped_gemm_fused_impl`] with [`MoEActivation::None`],
+/// so the two share one loop body (narrow, contiguous, matmul, push) and can
+/// never drift apart.
 pub fn moe_grouped_gemm_impl<R, C>(
     client: &C,
     permuted_tokens: &Tensor<R>,
@@ -22,65 +26,15 @@ pub fn moe_grouped_gemm_impl<R, C>(
 ) -> Result<Tensor<R>>
 where
     R: Runtime<DType = DType>,
-    C: RuntimeClient<R> + MatmulOps<R> + ShapeOps<R> + TensorOps<R>,
+    C: RuntimeClient<R> + MatmulOps<R> + ShapeOps<R> + TensorOps<R> + ActivationOps<R>,
 {
-    validate_grouped_gemm_args(permuted_tokens, expert_weights, expert_offsets)?;
-
-    let ew_shape = expert_weights.shape();
-    let num_experts = ew_shape[0];
-    let out_dim = ew_shape[2];
-    let total_tokens = permuted_tokens.shape()[0];
-
-    // `to_vec()` here is called only by the CPU backend — the CUDA and WebGPU backends
-    // use fused kernels and never reach this function for grouped GEMM. On CPU there is
-    // no device memory, so this is not a GPU↔CPU transfer.
-    let offsets = expert_offsets.to_vec::<i32>();
-
-    let mut expert_outputs: Vec<Tensor<R>> = Vec::with_capacity(num_experts);
-
-    for e in 0..num_experts {
-        let start = offsets[e] as usize;
-        let end = offsets[e + 1] as usize;
-        let count = end - start;
-
-        if count == 0 {
-            continue;
-        }
-
-        let expert_tokens = permuted_tokens
-            .narrow(0, start, count)
-            .map_err(Error::Numr)?
-            .contiguous()?;
-
-        let weight = expert_weights
-            .narrow(0, e, 1)
-            .map_err(Error::Numr)?
-            .contiguous()?
-            .reshape(&[ew_shape[1], out_dim])
-            .map_err(Error::Numr)?;
-
-        // matmul: [count, in_dim] @ [in_dim, out_dim] → [count, out_dim]
-        let result = client
-            .matmul(&expert_tokens, &weight)
-            .map_err(Error::Numr)?;
-        expert_outputs.push(result);
-    }
-
-    if expert_outputs.is_empty() {
-        // All experts have zero tokens — return empty
-        let device = permuted_tokens.device();
-        return Ok(Tensor::<R>::empty(
-            &[total_tokens, out_dim],
-            permuted_tokens.dtype(),
-            device,
-        )?);
-    }
-
-    // Concatenate all expert outputs along dim 0
-    let refs: Vec<&Tensor<R>> = expert_outputs.iter().collect();
-    let output = client.cat(&refs, 0).map_err(Error::Numr)?;
-
-    Ok(output)
+    moe_grouped_gemm_fused_impl(
+        client,
+        permuted_tokens,
+        expert_weights,
+        expert_offsets,
+        MoEActivation::None,
+    )
 }
 
 /// Fused grouped GEMM with activation.
@@ -104,8 +58,9 @@ where
     let out_dim = ew_shape[2];
     let total_tokens = permuted_tokens.shape()[0];
 
-    // `to_vec()` here is called only by the CPU backend — see comment in
-    // `moe_grouped_gemm_impl`. Not a GPU↔CPU transfer.
+    // `to_vec()` here is called only by the CPU backend — the CUDA and WebGPU backends
+    // use fused kernels and never reach this function for grouped GEMM. On CPU there is
+    // no device memory, so this is not a GPU↔CPU transfer.
     let offsets = expert_offsets.to_vec::<i32>();
 
     let mut expert_outputs: Vec<Tensor<R>> = Vec::with_capacity(num_experts);

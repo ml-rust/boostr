@@ -13,6 +13,8 @@ pub mod phoneme_vocab;
 pub mod stft;
 #[cfg(feature = "silero-vad")]
 pub mod vad;
+#[cfg(feature = "vits")]
+pub mod vits;
 #[cfg(feature = "voxcpm")]
 pub mod voxcpm;
 #[cfg(feature = "whisper")]

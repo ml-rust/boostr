@@ -96,6 +96,7 @@ kokoro = ["audio"]
 neucodec = ["audio"]
 voxcpm = ["audio", "f16"]
 silero-vad = ["audio"]
+vits = ["audio"]
 
 # Backend features (passed through to numr)
 cpu = []

@@ -3,6 +3,10 @@
 
 pub mod bundle;
 pub mod engine;
+#[cfg(feature = "vits")]
+pub mod vits;
 
 pub use bundle::{SynthesizeOptions, TtsBundle, TtsError, Voice, default_kokoro_voices};
 pub use engine::TtsEngine;
+#[cfg(feature = "vits")]
+pub use vits::VitsTokenizer;

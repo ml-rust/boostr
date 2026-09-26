@@ -67,6 +67,10 @@ voxcpm = ["boostr/voxcpm", "tts", "decode"]
 # config and one-call `transcribe` here. Does NOT imply `vad`;
 # `WhisperBundle::transcribe_segments` needs both.
 whisper = ["boostr/whisper", "decode"]
+# VITS (MMS-TTS) synthesis: the model from boostr, the character tokenizer
+# here. Refuses at load any checkpoint needing phonemization or uroman
+# romanization (`VitsTokenizer::from_dir`).
+vits = ["boostr/vits", "tts"]
 # Silero VAD segmentation: the network from boostr, the `get_speech_timestamps`
 # port here.
 vad = ["boostr/silero-vad"]
@@ -100,6 +104,10 @@ required-features = ["voxcpm"]
 [[test]]
 name = "voxcpm_batch_cuda"
 required-features = ["voxcpm", "cuda"]
+
+[[test]]
+name = "vits_tokenizer_oracle"
+required-features = ["vits"]
 
 [[example]]
 name = "audio_stats"

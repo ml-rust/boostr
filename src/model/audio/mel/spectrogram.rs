@@ -5,9 +5,9 @@ use std::f32::consts::PI;
 use super::filterbank::mel_filterbank;
 use super::options::{LogSpec, MelOptions};
 use crate::error::{Error, Result};
-use crate::model::audio::reflection_pad::reflection_pad_1d;
 use numr::algorithm::fft::{FftAlgorithms, FftNormalization};
 use numr::dtype::Complex64;
+use numr::ops::{PadMode, ShapeOps};
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 use numr::tensor::Tensor;
 
@@ -112,8 +112,6 @@ pub fn compute_mel_spectrogram_with(
     };
 
     // 2. Reflect-pad both ends by n_fft / 2, PyTorch `center=True` semantics.
-    //    Reuses the crate's `reflection_pad_1d` rather than open-coding a
-    //    second mirror.
     let signal = if opts.center && n_fft / 2 > 0 {
         let pad = n_fft / 2;
         if signal.len() <= pad {
@@ -126,9 +124,13 @@ pub fn compute_mel_spectrogram_with(
             });
         }
         let device = CpuDevice::new();
+        let client = CpuClient::new(device.clone());
         let as_tensor = Tensor::<CpuRuntime>::from_slice(&signal, &[1, 1, signal.len()], &device)
             .map_err(Error::Numr)?;
-        reflection_pad_1d(&as_tensor, pad, pad)?.to_vec()
+        client
+            .pad_mode(&as_tensor, &[pad, pad], PadMode::Reflect)
+            .map_err(Error::Numr)?
+            .to_vec()
     } else {
         signal
     };

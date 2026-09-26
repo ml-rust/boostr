@@ -1,6 +1,6 @@
 use super::core::IStftNetGenerator;
 use crate::error::{Error, Result};
-use numr::ops::{ActivationOps, BinaryOps, ScalarOps, ShapeOps};
+use numr::ops::{ActivationOps, BinaryOps, PadMode, ScalarOps, ShapeOps};
 
 impl IStftNetGenerator<numr::runtime::cpu::CpuRuntime> {
     /// Whether this generator has the per-stage noise-conditioning modules
@@ -145,11 +145,13 @@ impl IStftNetGenerator<numr::runtime::cpu::CpuRuntime> {
             // reduces back to trunk length via same-padding.
             let is_last = stage == self.num_upsamples() - 1;
             if is_last && self.last_stage_reflect_pad > 0 {
-                x = crate::model::audio::reflection_pad::reflection_pad_1d(
-                    &x,
-                    self.last_stage_reflect_pad,
-                    self.last_stage_reflect_pad,
-                )?;
+                x = client
+                    .pad_mode(
+                        &x,
+                        &[self.last_stage_reflect_pad, self.last_stage_reflect_pad],
+                        PadMode::Reflect,
+                    )
+                    .map_err(Error::Numr)?;
             }
 
             // Average the K parallel resblocks for this stage.

@@ -10,7 +10,6 @@ pub mod mel;
 #[cfg(feature = "neucodec")]
 pub mod neucodec;
 pub mod phoneme_vocab;
-pub mod reflection_pad;
 pub mod stft;
 #[cfg(feature = "silero-vad")]
 pub mod vad;
@@ -29,7 +28,6 @@ pub use mel::{
     LogSpec, MelNorm, MelOptions, MelScale, compute_mel_spectrogram, compute_mel_spectrogram_with,
 };
 pub use phoneme_vocab::{PhonemeVocab, phonemes_to_ids};
-pub use reflection_pad::reflection_pad_1d;
 pub use stft::{
     IStftClient, IStftOptions, IStftPadding, StftClient, StftOptions, hann_window, istft, stft,
 };

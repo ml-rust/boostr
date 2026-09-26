@@ -15,6 +15,7 @@
 //! The decoder uses pre-norm everywhere. Self-attention is causal; cross-attention
 //! has no mask (encoder outputs are fully visible).
 
+mod attention_core;
 mod cache;
 mod capture;
 mod cross_attention;

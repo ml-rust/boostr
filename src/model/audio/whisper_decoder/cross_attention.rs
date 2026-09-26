@@ -3,6 +3,7 @@
 //! and full-recompute (used by `forward_inference`) — with an optional
 //! capture sink for the attention probabilities.
 
+use super::attention_core::attend;
 use super::cache::DecoderLayerCache;
 use super::helpers::reshape_heads;
 use super::layer::WhisperDecoderLayer;
@@ -74,24 +75,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         let q = self.cross_q_proj.forward(client, &q_in)?;
         let q = reshape_heads(q.tensor(), batch, tgt_len, self.num_heads, self.head_dim)?;
 
-        let k_t = k.transpose(-2, -1).map_err(Error::Numr)?.contiguous()?;
-        let scale = (self.head_dim as f32).sqrt();
-        let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
-        let scores = client
-            .div_scalar(&scores, scale as f64)
-            .map_err(Error::Numr)?;
-        let attn = client.softmax(&scores, -1).map_err(Error::Numr)?;
-        if let Some(sink) = capture {
-            sink.push(attn.clone());
-        }
-        let out = client.matmul(&attn, v).map_err(Error::Numr)?;
-
-        let out = out
-            .transpose(1, 2)
-            .map_err(Error::Numr)?
-            .contiguous()?
-            .reshape(&[batch, tgt_len, self.num_heads * self.head_dim])
-            .map_err(Error::Numr)?;
+        let out = attend(client, &q, k, v, None, self.head_dim, capture)?;
 
         let projected = self.cross_out_proj.forward(client, &Var::new(out, false))?;
         Ok(projected.tensor().clone())
@@ -133,21 +117,7 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         let k = reshape_heads(k.tensor(), batch, src_len, self.num_heads, self.head_dim)?;
         let v = reshape_heads(v.tensor(), batch, src_len, self.num_heads, self.head_dim)?;
 
-        let k_t = k.transpose(-2, -1).map_err(Error::Numr)?.contiguous()?;
-        let scale = (self.head_dim as f32).sqrt();
-        let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
-        let scores = client
-            .div_scalar(&scores, scale as f64)
-            .map_err(Error::Numr)?;
-        let attn = client.softmax(&scores, -1).map_err(Error::Numr)?;
-        let out = client.matmul(&attn, &v).map_err(Error::Numr)?;
-
-        let out = out
-            .transpose(1, 2)
-            .map_err(Error::Numr)?
-            .contiguous()?
-            .reshape(&[batch, tgt_len, self.num_heads * self.head_dim])
-            .map_err(Error::Numr)?;
+        let out = attend(client, &q, &k, &v, None, self.head_dim, None)?;
 
         let projected = self.cross_out_proj.forward(client, &Var::new(out, false))?;
         Ok(projected.tensor().clone())

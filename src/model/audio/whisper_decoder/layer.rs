@@ -1,7 +1,8 @@
 //! A single Whisper decoder block (self-attn → cross-attn → MLP).
 
+use super::attention_core::attend;
 use super::cache::DecoderLayerCache;
-use super::helpers::{apply_causal_mask, load_attn, load_layernorm, reshape_heads};
+use super::helpers::{causal_mask, load_attn, load_layernorm, reshape_heads};
 use crate::error::{Error, Result};
 use crate::nn::{LayerNorm, Linear, VarBuilder};
 use numr::autograd::Var;
@@ -292,32 +293,32 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
             None => v_new,
         };
 
-        let k_t = k_all.transpose(-2, -1).map_err(Error::Numr)?.contiguous()?;
-        let scale = (self.head_dim as f32).sqrt();
-        let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
-        let mut scores = client
-            .div_scalar(&scores, scale as f64)
-            .map_err(Error::Numr)?;
-
         // Apply causal mask only for prefill (cur_len > 1 AND cache was empty
         // before this call — in which case k_all's time dim equals cur_len).
-        if cur_len > 1 && k_all.shape()[2] == cur_len {
-            scores = apply_causal_mask(client, scores, batch, self.num_heads, cur_len)?;
-        }
+        let mask = if cur_len > 1 && k_all.shape()[2] == cur_len {
+            Some(causal_mask::<R>(
+                batch,
+                self.num_heads,
+                cur_len,
+                q.device(),
+            )?)
+        } else {
+            None
+        };
 
-        let attn = client.softmax(&scores, -1).map_err(Error::Numr)?;
-        let out = client.matmul(&attn, &v_all).map_err(Error::Numr)?;
+        let out = attend(
+            client,
+            &q,
+            &k_all,
+            &v_all,
+            mask.as_ref(),
+            self.head_dim,
+            None,
+        )?;
 
         // Write back updated K/V.
         cache.self_k = Some(k_all);
         cache.self_v = Some(v_all);
-
-        let out = out
-            .transpose(1, 2)
-            .map_err(Error::Numr)?
-            .contiguous()?
-            .reshape(&[batch, cur_len, self.num_heads * self.head_dim])
-            .map_err(Error::Numr)?;
 
         let projected = self.self_out_proj.forward(client, &Var::new(out, false))?;
         Ok(projected.tensor().clone())
@@ -349,26 +350,18 @@ impl<R: Runtime<DType = DType>> WhisperDecoderLayer<R> {
         let k = reshape_heads(k.tensor(), batch, seq_len, self.num_heads, self.head_dim)?;
         let v = reshape_heads(v.tensor(), batch, seq_len, self.num_heads, self.head_dim)?;
 
-        let k_t = k.transpose(-2, -1).map_err(Error::Numr)?.contiguous()?;
-        let scale = (self.head_dim as f32).sqrt();
-        let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
-        let mut scores = client
-            .div_scalar(&scores, scale as f64)
-            .map_err(Error::Numr)?;
+        let mask = if causal && seq_len > 1 {
+            Some(causal_mask::<R>(
+                batch,
+                self.num_heads,
+                seq_len,
+                q.device(),
+            )?)
+        } else {
+            None
+        };
 
-        if causal && seq_len > 1 {
-            scores = apply_causal_mask(client, scores, batch, self.num_heads, seq_len)?;
-        }
-
-        let attn = client.softmax(&scores, -1).map_err(Error::Numr)?;
-        let out = client.matmul(&attn, &v).map_err(Error::Numr)?;
-
-        let out = out
-            .transpose(1, 2)
-            .map_err(Error::Numr)?
-            .contiguous()?
-            .reshape(&[batch, seq_len, self.num_heads * self.head_dim])
-            .map_err(Error::Numr)?;
+        let out = attend(client, &q, &k, &v, mask.as_ref(), self.head_dim, None)?;
 
         let projected = self.self_out_proj.forward(client, &Var::new(out, false))?;
         Ok(projected.tensor().clone())

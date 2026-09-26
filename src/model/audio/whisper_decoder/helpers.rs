@@ -3,7 +3,6 @@
 use crate::error::{Error, Result};
 use crate::nn::{LayerNorm, Linear, VarBuilder};
 use numr::dtype::DType;
-use numr::ops::{BinaryOps, ScalarOps, TensorOps};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -61,25 +60,19 @@ pub(super) fn reshape_heads<R: Runtime>(
         .map_err(Error::Numr)
 }
 
-/// Add a causal (upper-triangular) mask of -inf to attention scores.
+/// A causal (upper-triangular) additive mask, broadcast and made contiguous
+/// to `[B, H, T, T]`: `f32::NEG_INFINITY` above the diagonal, 0 on/below it.
 ///
-/// `scores`: `[B, H, T, T]`. We build a broadcasted mask `[1, 1, T, T]` with
-/// `f32::NEG_INFINITY` above the diagonal and 0 on/below it, then add.
-pub(super) fn apply_causal_mask<R, C>(
-    client: &C,
-    scores: Tensor<R>,
+/// The caller adds this to attention scores before softmax (see
+/// `attention_core::attend`). Built on CPU then uploaded; runs once per
+/// decoder block per step but construction cost is O(T^2), tiny vs the
+/// attention matmul.
+pub(super) fn causal_mask<R: Runtime<DType = DType>>(
     batch: usize,
     num_heads: usize,
     seq_len: usize,
-) -> Result<Tensor<R>>
-where
-    R: Runtime<DType = DType>,
-    C: BinaryOps<R> + TensorOps<R> + ScalarOps<R>,
-    R::Client: TensorOps<R>,
-{
-    let device = scores.device();
-    // Build mask on CPU then upload; runs once per decoder block per step but
-    // construction cost is O(T^2) which is tiny vs attention matmul.
+    device: &R::Device,
+) -> Result<Tensor<R>> {
     let mut mask = vec![0.0f32; seq_len * seq_len];
     for i in 0..seq_len {
         for j in (i + 1)..seq_len {
@@ -88,9 +81,9 @@ where
     }
     // Upload as f32; cast to scores' dtype is handled by runtime on add-broadcast.
     let mask_tensor = Tensor::<R>::from_slice(&mask, &[1, 1, seq_len, seq_len], device)?;
-    let mask_b = mask_tensor
+    mask_tensor
         .broadcast_to(&[batch, num_heads, seq_len, seq_len])
         .map_err(Error::Numr)?
-        .contiguous()?;
-    client.add(&scores, &mask_b).map_err(Error::Numr)
+        .contiguous()
+        .map_err(Error::Numr)
 }

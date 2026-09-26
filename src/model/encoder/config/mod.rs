@@ -13,6 +13,6 @@ pub use alibi::alibi_slopes;
 pub use arch_family::ArchFamily;
 pub use attention_spec::LayerAttention;
 pub use encoder_config::{DEFAULT_MAX_TOKENS_PER_FORWARD, EncoderConfig};
-pub use ffn_variant::{FfnVariant, HiddenAct};
+pub use ffn_variant::FfnVariant;
 pub use norm_scheme::NormScheme;
 pub use qk_norm_scope::QkNormScope;

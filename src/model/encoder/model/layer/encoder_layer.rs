@@ -2,10 +2,8 @@
 
 use super::NormLayer;
 use crate::error::{Error, Result};
-use crate::model::encoder::config::{
-    FfnVariant, HiddenAct, LayerAttention, NormScheme, QkNormScope,
-};
-use crate::nn::{MaybeQuantLinear, RmsNorm, RoPE};
+use crate::model::encoder::config::{FfnVariant, LayerAttention, NormScheme, QkNormScope};
+use crate::nn::{Activation, MaybeQuantLinear, RmsNorm, RoPE};
 use crate::ops::{RoPEOps, RoPEPackedOps, VarLenAttentionOps};
 use crate::quant::traits::{DequantOps, QuantMatmulOps};
 use numr::autograd::{Var, var_add};
@@ -58,7 +56,7 @@ pub(in crate::model::encoder) struct EncoderLayer<R: Runtime> {
     /// Number of KV heads. Equal to `num_heads` for MHA.
     pub(in crate::model::encoder) num_kv_heads: usize,
     pub(in crate::model::encoder) head_dim: usize,
-    pub(in crate::model::encoder) hidden_act: HiddenAct,
+    pub(in crate::model::encoder) hidden_act: Activation,
     pub(in crate::model::encoder) ffn_variant: FfnVariant,
     /// Where normalisation sits relative to the residual add.
     pub(in crate::model::encoder) norm_scheme: NormScheme,

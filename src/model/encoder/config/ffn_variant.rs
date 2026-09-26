@@ -1,4 +1,4 @@
-//! FFN variant and hidden activation.
+//! FFN variant.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,16 +11,8 @@ pub enum FfnVariant {
     Standard,
     /// SwiGLU (NomicBert, Qwen3): ffn_down(silu(ffn_gate(x)) * ffn_up(x)).
     GatedSilu,
-    /// Gemma GeGLU: ffn_down(gelu(ffn_gate(x)) * ffn_up(x)).
-    /// Gate activation is GELU (not SiLU/SwiGLU).
+    /// Gemma/jina-v2 GeGLU: ffn_down(act(ffn_gate(x)) * ffn_up(x)).
+    /// Gate activation is GELU (erf or tanh, per [`crate::nn::Activation`]),
+    /// not SiLU/SwiGLU.
     GatedGelu,
-}
-
-/// Activation used by the `Standard` FFN variant.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum HiddenAct {
-    #[default]
-    Gelu,
-    Relu,
 }

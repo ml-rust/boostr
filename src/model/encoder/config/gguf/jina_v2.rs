@@ -3,7 +3,8 @@
 use super::dispatch::{require_pooling_type, required_u32, vocab_size};
 use crate::error::Result;
 use crate::format::{GgufMetadata, GgufValue};
-use crate::model::encoder::config::{ArchFamily, EncoderConfig, FfnVariant, HiddenAct, NormScheme};
+use crate::model::encoder::config::{ArchFamily, EncoderConfig, FfnVariant, NormScheme};
+use crate::nn::Activation;
 
 /// Maximum ALiBi bias for jina-bert-v2.
 ///
@@ -64,7 +65,7 @@ impl EncoderConfig {
             intermediate_size,
             max_position_embeddings,
             layer_norm_eps,
-            hidden_act: HiddenAct::Gelu,
+            hidden_act: Activation::Gelu,
             type_vocab_size: 2,
             token_type_embed_size: 2,
             arch_family: ArchFamily::JinaBertV2,
@@ -120,6 +121,11 @@ mod tests {
         assert_eq!(config.hidden_size, 768);
         assert_eq!(config.num_attention_heads, 12);
         assert_eq!(config.ffn_variant, FfnVariant::GatedGelu);
+        assert_eq!(
+            config.hidden_act,
+            Activation::Gelu,
+            "jina-v2 GeGLU gate uses exact/erf GELU, not the tanh approximation"
+        );
         assert_eq!(config.norm_scheme, NormScheme::PostNorm);
         assert!(!config.causal);
         assert_eq!(config.sliding_window, None);

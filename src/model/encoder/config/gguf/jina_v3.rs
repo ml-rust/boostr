@@ -3,7 +3,8 @@
 use super::dispatch::{require_pooling_type, required_u32, vocab_size};
 use crate::error::Result;
 use crate::format::{GgufMetadata, GgufValue};
-use crate::model::encoder::config::{ArchFamily, EncoderConfig, FfnVariant, HiddenAct, NormScheme};
+use crate::model::encoder::config::{ArchFamily, EncoderConfig, FfnVariant, NormScheme};
+use crate::nn::Activation;
 
 impl EncoderConfig {
     /// Build from the `jina-bert-v3.*` GGUF namespace.
@@ -61,7 +62,7 @@ impl EncoderConfig {
             intermediate_size,
             max_position_embeddings,
             layer_norm_eps,
-            hidden_act: HiddenAct::Gelu,
+            hidden_act: Activation::Gelu,
             // `token_types.weight` is one row wide in this file, so there is a
             // single segment type and row 0 is the whole tensor.
             type_vocab_size: 1,
@@ -119,6 +120,7 @@ mod tests {
         assert_eq!(config.head_dim(), 64);
         assert_eq!(config.num_hidden_layers, 24);
         assert_eq!(config.ffn_variant, FfnVariant::Standard);
+        assert_eq!(config.hidden_act, Activation::Gelu);
         assert_eq!(config.norm_scheme, NormScheme::PostNorm);
         assert!(!config.causal);
         assert!(config.alibi_max_bias.is_none());

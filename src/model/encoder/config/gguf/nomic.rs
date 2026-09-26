@@ -3,7 +3,8 @@
 use super::dispatch::{require_pooling_type, required_u32, vocab_size};
 use crate::error::Result;
 use crate::format::{GgufMetadata, GgufValue};
-use crate::model::encoder::config::{ArchFamily, EncoderConfig, FfnVariant, HiddenAct, NormScheme};
+use crate::model::encoder::config::{ArchFamily, EncoderConfig, FfnVariant, NormScheme};
+use crate::nn::Activation;
 
 impl EncoderConfig {
     /// Build from the `nomic-bert.*` GGUF namespace.
@@ -47,7 +48,7 @@ impl EncoderConfig {
             intermediate_size,
             max_position_embeddings,
             layer_norm_eps,
-            hidden_act: HiddenAct::Gelu,
+            hidden_act: Activation::Gelu,
             type_vocab_size: 2,
             arch_family: ArchFamily::NomicBert,
             rope_freq_base,

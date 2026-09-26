@@ -6,7 +6,8 @@ use crate::format::GgufMetadata;
 use crate::model::encoder::config::encoder_config::{
     DEFAULT_LOCAL_ROPE_FREQ_BASE, DEFAULT_SLIDING_WINDOW_PATTERN,
 };
-use crate::model::encoder::config::{ArchFamily, EncoderConfig, FfnVariant, HiddenAct, NormScheme};
+use crate::model::encoder::config::{ArchFamily, EncoderConfig, FfnVariant, NormScheme};
+use crate::nn::Activation;
 
 /// Metadata keys for the optional sentence-transformers Dense bottleneck
 /// modules. Present only when the file was converted with
@@ -78,7 +79,7 @@ impl EncoderConfig {
             intermediate_size,
             max_position_embeddings,
             layer_norm_eps: rms_eps,
-            hidden_act: HiddenAct::Gelu,
+            hidden_act: Activation::GeluTanh,
             arch_family: ArchFamily::GemmaEmbedding,
             rope_freq_base,
             rope_freq_base_local,
@@ -169,6 +170,17 @@ mod tests {
             ),
             ("gemma-embedding.pooling_type", GgufValue::Uint32(1)),
         ])
+    }
+
+    #[test]
+    fn gemma_geglu_gate_uses_the_tanh_approximation() {
+        let cfg = EncoderConfig::from_gguf_metadata(&embedding_gemma_metadata()).unwrap();
+        assert_eq!(cfg.ffn_variant, FfnVariant::GatedGelu);
+        assert_eq!(
+            cfg.hidden_act,
+            Activation::GeluTanh,
+            "gemma's HF config declares gelu_pytorch_tanh, not exact/erf GELU"
+        );
     }
 
     #[test]

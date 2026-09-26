@@ -3,7 +3,8 @@
 use super::dispatch::{require_pooling_type, required_u32, vocab_size};
 use crate::error::Result;
 use crate::format::GgufMetadata;
-use crate::model::encoder::config::{ArchFamily, EncoderConfig, FfnVariant, HiddenAct, NormScheme};
+use crate::model::encoder::config::{ArchFamily, EncoderConfig, FfnVariant, NormScheme};
+use crate::nn::Activation;
 
 impl EncoderConfig {
     /// Build from the `qwen3.*` GGUF namespace.
@@ -54,7 +55,7 @@ impl EncoderConfig {
             intermediate_size,
             max_position_embeddings,
             layer_norm_eps: rms_eps,
-            hidden_act: HiddenAct::Gelu,
+            hidden_act: Activation::Gelu,
             arch_family: ArchFamily::Qwen3,
             rope_freq_base,
             causal: true,

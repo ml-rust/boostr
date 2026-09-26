@@ -1,6 +1,7 @@
 //! [`EncoderConfig`] — the full configuration for a transformer encoder.
 
-use super::{ArchFamily, FfnVariant, HiddenAct, LayerAttention, NormScheme};
+use super::{ArchFamily, FfnVariant, LayerAttention, NormScheme};
+use crate::nn::Activation;
 use numr::dtype::DType;
 use serde::{Deserialize, Serialize};
 
@@ -46,8 +47,8 @@ pub struct EncoderConfig {
     pub max_position_embeddings: usize,
     #[serde(default = "default_eps")]
     pub layer_norm_eps: f64,
-    #[serde(default)]
-    pub hidden_act: HiddenAct,
+    #[serde(default = "default_hidden_act")]
+    pub hidden_act: Activation,
     #[serde(default)]
     pub type_vocab_size: usize,
     /// Architecture family — controls position-id generation strategy.
@@ -210,6 +211,10 @@ fn default_rms_eps() -> f64 {
     1e-6
 }
 
+fn default_hidden_act() -> Activation {
+    Activation::Gelu
+}
+
 impl Default for EncoderConfig {
     fn default() -> Self {
         Self {
@@ -220,7 +225,7 @@ impl Default for EncoderConfig {
             intermediate_size: 0,
             max_position_embeddings: 512,
             layer_norm_eps: default_eps(),
-            hidden_act: HiddenAct::default(),
+            hidden_act: default_hidden_act(),
             type_vocab_size: 0,
             arch_family: ArchFamily::default(),
             padding_token_id: 0,

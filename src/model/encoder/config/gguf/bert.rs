@@ -3,7 +3,8 @@
 use super::dispatch::{required_u32, vocab_size};
 use crate::error::Result;
 use crate::format::GgufMetadata;
-use crate::model::encoder::config::{ArchFamily, EncoderConfig, HiddenAct, NormScheme};
+use crate::model::encoder::config::{ArchFamily, EncoderConfig, NormScheme};
+use crate::nn::Activation;
 
 impl EncoderConfig {
     /// Build from the standard BERT GGUF namespace.
@@ -38,7 +39,7 @@ impl EncoderConfig {
             intermediate_size,
             max_position_embeddings,
             layer_norm_eps: 1e-12,
-            hidden_act: HiddenAct::Gelu,
+            hidden_act: Activation::Gelu,
             arch_family,
             padding_token_id,
             // llama.cpp's converter chops the dead leading rows off an

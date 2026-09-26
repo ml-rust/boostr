@@ -217,6 +217,16 @@ impl<R: Runtime<DType = DType>> Model<R> for Llama<R> {
     }
 }
 
+impl<R: Runtime<DType = DType>> Llama<R> {
+    /// The dtype every forward pass computes and returns logits in.
+    ///
+    /// Reads the final norm weight's dtype: an owned, never-quantized tensor
+    /// that matches the compute dtype the checkpoint loaded at.
+    pub fn dtype(&self) -> DType {
+        self.norm.weight().tensor().dtype()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::tiny_config;
@@ -225,6 +235,14 @@ mod tests {
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;
     use numr::tensor::Tensor;
+
+    #[test]
+    fn llama_dtype_matches_the_varmap_dtype_it_is_built_with() {
+        let (_, device) = cpu_setup();
+        let config = tiny_config();
+        let model = Llama::<CpuRuntime>::from_config(&config, &device).unwrap();
+        assert_eq!(model.dtype(), DType::F32);
+    }
 
     #[test]
     fn test_llama_from_config() {

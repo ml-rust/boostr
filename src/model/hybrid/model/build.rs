@@ -160,6 +160,12 @@ where
             rope,
         })
     }
+
+    /// Compute dtype, read from the final norm weight (owned, never
+    /// quantized).
+    pub fn dtype(&self) -> DType {
+        self.norm.weight().tensor().dtype()
+    }
 }
 
 #[cfg(test)]
@@ -331,6 +337,22 @@ mod tests {
             })
             .expect("the config places an attention layer at index 1");
         (attn.sliding_window, attn.use_alibi)
+    }
+
+    #[test]
+    fn hybrid_dtype_matches_the_varmap_dtype_it_is_built_with() {
+        let (_, device) = cpu_setup();
+        let config = hybrid_config(None, false);
+        let mut varmap = VarMap::<CpuRuntime>::new();
+        for (name, shape) in weight_shapes() {
+            varmap.insert(
+                name.into(),
+                Tensor::<CpuRuntime>::zeros(&shape, DType::F32, &device).unwrap(),
+            );
+        }
+        let mut vb = VarBuilder::new(&mut varmap, &device);
+        let model = HybridModel::<CpuRuntime>::from_varbuilder(&mut vb, &config).unwrap();
+        assert_eq!(model.dtype(), DType::F32);
     }
 
     #[test]

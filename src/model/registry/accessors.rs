@@ -68,6 +68,24 @@ where
         }
     }
 
+    /// Compute dtype: the dtype every forward pass returns logits in.
+    ///
+    /// Reads an owned, never-quantized weight (the final norm) so a
+    /// quantized checkpoint still reports its real activation dtype rather
+    /// than the quantized storage type of its projection weights.
+    pub fn dtype(&self) -> DType {
+        match self {
+            LoadedModel::Llama(m) => m.dtype(),
+            LoadedModel::LlamaTp(m) => m.dtype(),
+            LoadedModel::Mamba1(m) => m.dtype(),
+            LoadedModel::Mamba2(m) => m.dtype(),
+            LoadedModel::Mamba3(m) => m.dtype(),
+            LoadedModel::Hybrid(m) => m.dtype(),
+            LoadedModel::Multimodal(m) => m.llm().dtype(),
+            LoadedModel::Qwen35(m) => m.dtype(),
+        }
+    }
+
     /// Distinct quantized formats the loaded checkpoint's tensors use.
     ///
     /// Non-empty only for a GGUF checkpoint whose tensors carry a quantized
@@ -347,6 +365,7 @@ mod tests {
         assert_eq!(model.num_attention_layers(), Some(1));
         assert_eq!(model.num_gdn_layers(), Some(1));
         assert!(model.rope_caches().is_some());
+        assert_eq!(model.dtype(), numr::dtype::DType::F32);
         assert_eq!(format!("{model:?}"), "Qwen35");
     }
 }

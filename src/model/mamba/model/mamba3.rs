@@ -146,6 +146,13 @@ where
         &self.mamba_config
     }
 
+    /// The dtype every forward pass computes and returns logits in.
+    ///
+    /// Reads the final norm weight's dtype: an owned, never-quantized tensor
+    /// that matches the compute dtype the checkpoint loaded at.
+    pub fn dtype(&self) -> DType {
+        self.norm.weight().tensor().dtype()
+    }
 }
 
 impl<R: Runtime<DType = DType>> Mamba3Block<R> {
@@ -261,4 +268,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mamba3_dtype_matches_the_varmap_dtype_it_is_built_with() {
+        let (_client, device) = cpu_setup();
+        let config = tiny_config();
+        let mut varmap = VarMap::<CpuRuntime>::new();
+        insert_weights(&mut varmap, &config, &device);
+        let mut vb = VarBuilder::new(&mut varmap, &device);
+        let model = Mamba3Model::<CpuRuntime>::from_varbuilder(&mut vb, &config).unwrap();
+        assert_eq!(model.dtype(), DType::F32);
+    }
 }

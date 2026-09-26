@@ -399,6 +399,12 @@ impl<R: Runtime<DType = DType>> LlamaTp<R> {
         &self.config
     }
 
+    /// Compute dtype, read from the replicated final norm weight (owned,
+    /// never quantized).
+    pub fn dtype(&self) -> DType {
+        self.norm.weight().tensor().dtype()
+    }
+
     pub fn world_size(&self) -> usize {
         self.world_size
     }
@@ -444,6 +450,7 @@ attention:
         let model = LlamaTp::<CpuRuntime>::from_config(&config, &device, comm).unwrap();
         assert_eq!(model.layers.len(), 2);
         assert_eq!(model.world_size(), 1);
+        assert_eq!(model.dtype(), DType::F32);
     }
 
     #[test]

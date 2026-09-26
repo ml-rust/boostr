@@ -1,5 +1,6 @@
 pub mod decode_graph;
 pub mod gdn_state;
+pub mod generate;
 pub mod kv_cache;
 pub mod lane_decode;
 pub mod lanes;
@@ -12,6 +13,7 @@ pub mod ssm_state;
 #[cfg(feature = "cuda")]
 pub use decode_graph::{DecodeGraph, DeviceScalars, PagedDecodeGraph};
 pub use gdn_state::{GdnState, LayeredGdnState};
+pub use generate::{GenerateOptions, generate_greedy};
 pub use kv_cache::{
     FrozenLayeredKvCache, KvCache, LayeredKvCache, LayeredKvCacheConfig, LayeredPagedKvCache,
     PagedKvCache,

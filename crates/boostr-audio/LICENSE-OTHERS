@@ -1,0 +1,14 @@
+Third-party licences
+====================
+
+boostr-audio's own code is Apache-2.0 (see ../../LICENSE). This file covers
+what boostr-audio redistributes but did not write. Each entry's licence text
+and NOTICE travel beside the data it covers; this file is the index.
+
+  path                  what                               source                     licence
+  -------------------------------------------------------------------------------------------------
+  assets/misaki/        US and GB English G2P lexicons,     hexgrad/misaki 0.9.4       Apache-2.0
+                        and the port in src/g2p/misaki/
+                        (feature `misaki`)
+
+The lexicons are embedded in the binary only when the `misaki` feature is on.

@@ -275,6 +275,7 @@ dependencies = [
  "boostr",
  "bytemuck",
  "espeakng",
+ "flate2",
  "numr",
  "serde",
  "serde_json",
@@ -283,6 +284,8 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+ "unicode-general-category",
+ "unicode-normalization",
 ]
 
 [[package]]

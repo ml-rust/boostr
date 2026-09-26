@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn tokenize_ipa_attaches_length_mark() {
         let tokens = tokenize_ipa("aːb");
-        // The length mark should combine with the preceding vowel.
+        // The length mark combines with the preceding vowel.
         assert_eq!(tokens[0], "aː");
         assert_eq!(tokens[1], "b");
     }

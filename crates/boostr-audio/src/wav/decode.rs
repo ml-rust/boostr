@@ -112,17 +112,15 @@ pub fn decode_wav(bytes: &[u8]) -> Result<WavData> {
                 tag_name(&id)
             ))
         })?;
-        // A writer that streams to a pipe cannot seek back to patch the size,
-        // so it leaves `data` at [`STREAM_SIZE_UNKNOWN`] and the chunk runs to
-        // end of file. `data` is the last chunk of such a file, so that one
-        // declared size is clamped to the bytes present and any trailing
-        // partial frame is dropped.
+        // A writer streaming to a pipe cannot seek back to patch the size, so
+        // it leaves `data` at [`STREAM_SIZE_UNKNOWN`] and the chunk runs to
+        // end of file. `data` is the last chunk of such a file, so that size
+        // is clamped to the bytes present and a trailing partial frame is
+        // dropped.
         //
-        // The clamp is bound to the sentinel and nothing else. Any OTHER size
-        // that overruns is a truncated or corrupt file, and clamping it would
-        // decode a short buffer as if it were whole — the caller would get
-        // less audio than the header promised and no error saying so. A
-        // `fmt ` that overruns is corruption whatever its size.
+        // The clamp is bound to the sentinel and nothing else. Any OTHER
+        // overrunning size is a truncated or corrupt file, and clamping it
+        // decodes a short buffer as whole with no error.
         if body_end > end && &id == b"data" && size == STREAM_SIZE_UNKNOWN as usize {
             if data_range.is_none() {
                 data_range = Some((body, end));

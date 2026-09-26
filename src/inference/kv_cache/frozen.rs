@@ -2,12 +2,11 @@
 //!
 //! A CUDA graph capture bakes each layer's K/V device pointers into its
 //! recorded kernels. Growing the cache after capture reallocates those
-//! tensors at new addresses, which the replay never sees: it keeps reading
-//! the addresses it captured. [`LayeredKvCache::freeze`] consumes the
-//! growable cache and returns [`FrozenLayeredKvCache`], whose type carries
-//! no `grow`, `grow_batch`, `ensure_capacity`, `update` or `update_fused` —
-//! calling one is a compile error, not a runtime check. The absence of the
-//! method is the guarantee.
+//! tensors at new addresses, and the replay keeps reading the captured ones.
+//! [`LayeredKvCache::freeze`] consumes the growable cache and returns
+//! [`FrozenLayeredKvCache`], which carries no `grow`, `grow_batch`,
+//! `ensure_capacity`, `update` or `update_fused`. Calling one is a compile
+//! error, not a runtime check.
 
 use crate::error::Result;
 use crate::inference::kv_cache::basic::KvCache;
@@ -19,10 +18,9 @@ use numr::runtime::Runtime;
 
 /// A layered KV cache that can no longer reallocate.
 ///
-/// The only way to build one is [`LayeredKvCache::freeze`], which consumes
-/// the growable cache, so no grow-capable handle to the same layers
-/// survives the call. Every method here reads or writes the cache exactly
-/// as it was allocated.
+/// [`LayeredKvCache::freeze`] is the only constructor. It consumes the
+/// growable cache, so no grow-capable handle to the same layers survives.
+/// Every method here reads or writes the cache as allocated.
 pub struct FrozenLayeredKvCache<R: Runtime> {
     inner: LayeredKvCache<R>,
 }
@@ -43,8 +41,8 @@ where
     /// Layer `layer_idx`'s cache, read-only, or `None` outside the layer
     /// count.
     ///
-    /// This never hands out a mutable layer: the raw pointer accessors on
-    /// [`KvCache`] are reachable, growth is not.
+    /// Never hands out a mutable layer. [`KvCache`]'s raw pointer accessors
+    /// stay reachable; growth does not.
     pub fn layer(&self, layer_idx: usize) -> Option<&KvCache<R>> {
         self.inner.layer(layer_idx)
     }
@@ -58,9 +56,9 @@ where
     /// same capacity, fixed for the life of this cache.
     ///
     /// Reads 0 when there is no layer 0, the same convention
-    /// [`LayeredKvCache::seq_len`] uses; a caller must check
-    /// [`FrozenLayeredKvCache::num_layers`] before reading a 0 here as
-    /// "capacity is exhausted" rather than "there are no layers".
+    /// [`LayeredKvCache::seq_len`] uses. Check
+    /// [`FrozenLayeredKvCache::num_layers`] before reading a 0 as "capacity
+    /// exhausted" rather than "no layers".
     pub fn capacity(&self) -> usize {
         self.inner.layer(0).map_or(0, KvCache::capacity)
     }
@@ -80,7 +78,7 @@ where
     /// # Errors
     ///
     /// [`crate::error::Error::InferenceError`] when the two caches hold a different
-    /// number of layers, or when the write would run past `capacity()`.
+    /// number of layers, or when the write runs past `capacity()`.
     pub fn install_lane<C: KvCacheOps<R>>(
         &mut self,
         src: &LayeredKvCache<R>,

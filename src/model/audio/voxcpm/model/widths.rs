@@ -1,15 +1,14 @@
 //! The row counts a VoxCPM2 generation loop is allowed to run at.
 //!
 //! The DiT's Euler solver caches one captured graph per shape key, and the
-//! key carries the batch size. Running at an arbitrary row count would put a
-//! fresh key in that cache on every step and churn the captures, so every
-//! width the loop can take comes from ONE short list. Padding to a listed
-//! width costs a dead row a full solve per step, which is why the list is
-//! short and stops rather than covering every count.
+//! key carries the batch size. An arbitrary row count puts a fresh key in
+//! that cache every step, so every width the loop takes comes from ONE short
+//! list. Padding to a listed width costs a dead row a full solve per step, so
+//! the list stays short rather than covering every count.
 //!
 //! This is the single definition. The engine's batch builder and the
-//! generation state's stepped width both read it here; a second copy of the
-//! list would let the two disagree about which shapes the graph cache holds.
+//! generation state's stepped width both read it here. A second copy lets the
+//! two disagree about which shapes the graph cache holds.
 
 /// Row counts the generation loop runs at, ascending.
 pub const BATCH_WIDTHS: [usize; 4] = [1, 2, 4, 8];
@@ -54,9 +53,8 @@ mod tests {
         assert_eq!(batch_width(8), 8);
     }
 
-    /// Past the last entry the list has nothing to offer, so the largest
-    /// entry comes back and the caller must clamp it against its own row
-    /// count rather than trusting it to hold them.
+    /// Past the last entry the largest entry comes back. The caller must
+    /// clamp it against its own row count.
     #[test]
     fn batch_width_saturates_at_the_largest_entry() {
         assert_eq!(batch_width(9), 8);

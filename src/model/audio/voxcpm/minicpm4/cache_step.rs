@@ -29,10 +29,10 @@ enum Write<'a, R: Runtime> {
 /// What a KV cache already holds, as [`CacheStep::check_write_order`] reads
 /// it.
 ///
-/// `filled` is the cache's own cursor — the slot a FUSED write appends at —
-/// and `lanes` is one past each lane's last key. The two agree only while
-/// every lane holds the same run; a cache filled one sequence per lane makes
-/// `filled` their maximum, which is no lane's next slot.
+/// `filled` is the cache's cursor, the slot a FUSED write appends at.
+/// `lanes` is one past each lane's last key. The two agree only while every
+/// lane holds the same run. Otherwise `filled` is the maximum over lanes and
+/// is no lane's next slot.
 pub struct CacheFill<'a> {
     /// `KvCache::seq_len`: where a fused write lands.
     pub filled: usize,
@@ -46,10 +46,10 @@ pub struct CacheFill<'a> {
 ///
 /// Row `b` holds no key below `pad.starts[b]`, writes this call's K/V from
 /// [`row_write`](Self::row_write), and rotates at
-/// `row_write(b) - row_start(b)`. A batch whose rows all sit at one
-/// position and carry no padding collapses to the single-position call the
-/// unpadded path has always made — see [`uniform_position`](Self::uniform_position)
-/// and [`kv_seq_len`](Self::kv_seq_len).
+/// `row_write(b) - row_start(b)`. An unpadded batch whose rows share one
+/// position collapses to a single-position call — see
+/// [`uniform_position`](Self::uniform_position) and
+/// [`kv_seq_len`](Self::kv_seq_len).
 pub struct CacheStep<'a, R: Runtime> {
     pad: Option<&'a LeftPad<R>>,
     write: Write<'a, R>,
@@ -127,10 +127,9 @@ impl<'a, R: Runtime<DType = DType>> CacheStep<'a, R> {
     /// The one absolute position every row rotates and attends at, or
     /// `None` when the rows disagree.
     ///
-    /// `Some` is the batch-wide RoPE call: one `apply_rope` over every row
-    /// against one slice of the table. `None` splits the rotation row by
-    /// row, which forms a different float sequence, so this collapses to
-    /// `Some` whenever the rows genuinely agree.
+    /// `Some` rotates the whole batch in one `apply_rope`. `None` rotates row
+    /// by row, which forms a different float sequence, so this returns `Some`
+    /// whenever the rows agree.
     pub fn uniform_position(&self) -> Option<usize> {
         if self.pad.is_some_and(LeftPad::is_padded) {
             return None;
@@ -144,10 +143,8 @@ impl<'a, R: Runtime<DType = DType>> CacheStep<'a, R> {
     /// The one position every OCCUPIED lane sits at, or `None` when they
     /// differ or none is occupied.
     ///
-    /// A free lane sits at its own position 0 and holds nothing, so counting
-    /// it would call a batch ragged for a row that has no sequence to be
-    /// ragged about — and one live row beside free lanes is the commonest
-    /// batch there is.
+    /// A free lane sits at position 0 and holds nothing. Counting it calls a
+    /// batch ragged over a row with no sequence.
     fn uniform_occupied(&self, pos: &[usize]) -> Option<usize> {
         let mut seated = pos
             .iter()
@@ -161,23 +158,15 @@ impl<'a, R: Runtime<DType = DType>> CacheStep<'a, R> {
     /// The key bound the flash kernel takes: `Shared` while every row ends
     /// at the same key, `PerRow` once they differ.
     ///
-    /// The `Shared` arm is not an optimization. CUDA's flash dispatch
-    /// refuses `PerRow` at every shape but `S_q == 1`, and on CPU a
-    /// `PerRow` bound moves an unpadded call off `standard_attention_fwd`
-    /// onto the per-row composed path — the same math in a different
-    /// reduction order. So `PerRow` is emitted only when the ends genuinely
-    /// differ, which is the only case it describes something `Shared`
-    /// cannot.
+    /// `PerRow` is emitted only when the ends differ. CUDA's flash dispatch
+    /// refuses `PerRow` at every shape but `S_q == 1`, and on CPU it moves an
+    /// unpadded call off `standard_attention_fwd` onto the per-row composed
+    /// path — the same math in a different reduction order.
     ///
-    /// `cache_seq_len` is the cache's own cursor and bounds a FUSED write
-    /// alone, where every row ends exactly there. It is the MAXIMUM over
-    /// lanes and only ever rises, so on the per-lane arm it is not any
-    /// row's key count: once a long sequence has run in a lane, a shorter
-    /// one seated in its place still leaves the cursor high, and bounding
-    /// the softmax by it would attend over the slots the previous occupant
-    /// wrote. A lane's keys run from cache position 0 to its own write
-    /// position, and this call adds the one position it writes, so the
-    /// shared bound is that position plus one.
+    /// `cache_seq_len` bounds a FUSED write alone. It is the MAXIMUM over
+    /// lanes and only rises, so it is no row's key count on the per-lane arm:
+    /// bounding the softmax by it attends over a previous occupant's slots.
+    /// The per-lane shared bound is the rows' own write position plus one.
     pub fn kv_seq_len(&self, cache_seq_len: usize) -> KvSeqLen<'a, R> {
         match &self.write {
             Write::Fused(_) => KvSeqLen::Shared(cache_seq_len),
@@ -190,10 +179,8 @@ impl<'a, R: Runtime<DType = DType>> CacheStep<'a, R> {
 
     /// Write this call's post-RoPE K and V into `cache`.
     ///
-    /// A fused write puts every row at the cache's own cursor in one
-    /// launch. A per-lane write walks the rows and puts each one at its own
-    /// position, which is the same bytes in the same slots whenever the
-    /// positions agree.
+    /// A fused write puts every row at the cache's cursor in one launch. A
+    /// per-lane write puts each row at its own position.
     ///
     /// # Errors
     ///
@@ -219,25 +206,21 @@ impl<'a, R: Runtime<DType = DType>> CacheStep<'a, R> {
     /// Refuse a write that is not the slot the cache will actually fill.
     ///
     /// A query rotated for one absolute position and filed at another stays
-    /// shape-valid and silently computes a different model, so this is
-    /// checked before any tensor is touched.
+    /// shape-valid and computes a different model, so this runs before any
+    /// tensor is touched.
     ///
-    /// A fused write covers every row at once, so it must land on the
-    /// cache's own cursor. A per-lane write is checked LANE BY LANE against
-    /// that lane's own end: an occupied lane writes exactly where its keys
-    /// stop, never below its first cache position, and never past the
-    /// positions the cache holds. This is what catches the two stacks
-    /// drifting apart — they share one lane table and one advance, so a
-    /// stack stepped once more than the other writes a position past its own
-    /// keys and is refused here.
+    /// A fused write must land on the cache's cursor. A per-lane write is
+    /// checked LANE BY LANE against that lane's own end: an occupied lane
+    /// writes where its keys stop, never below its first cache position, and
+    /// never past the positions the cache holds. Two stacks sharing one lane
+    /// table that drift apart are refused here.
     ///
-    /// The cache's cursor is NOT the per-lane rule. It is the maximum over
-    /// lanes and only ever rises, so once a long sequence has run, a shorter
-    /// one seated in its place would never reach it.
+    /// The cursor is NOT the per-lane rule. It is the maximum over lanes and
+    /// only rises, so a short lane re-seated after a long one never reaches
+    /// it.
     ///
-    /// A free lane is skipped: it holds no sequence, writes at its own
-    /// position 0, and its empty key range keeps that write out of every
-    /// softmax.
+    /// A free lane is skipped. It writes at position 0 and its empty key
+    /// range keeps that write out of every softmax.
     ///
     /// # Errors
     ///
@@ -343,9 +326,8 @@ mod tests {
         assert_eq!(ragged.uniform_position(), None);
     }
 
-    /// A prefill always takes the shared bound, padded or not: every row
-    /// writes the same run of slots, and the padding moves each row's start
-    /// rather than its end.
+    /// A prefill takes the shared bound, padded or not: padding moves each
+    /// row's start, not its end.
     #[test]
     fn a_prefix_write_is_always_shared() {
         let device = CpuDevice::new();
@@ -408,9 +390,8 @@ mod tests {
         assert!(past.to_string().contains("row 0"), "{past}");
     }
 
-    /// The cursor is the maximum over lanes and only rises, so a short lane
-    /// seated where a long one ran is accepted on its own end — the case a
-    /// cursor-relative rule refuses forever.
+    /// A short lane seated where a long one ran is accepted on its own end,
+    /// not the cursor.
     #[test]
     fn a_reseated_short_lane_is_not_held_to_the_cursor() {
         let device = CpuDevice::new();
@@ -421,8 +402,8 @@ mod tests {
             .expect("lane 0 was re-seated short and writes at its own end");
     }
 
-    /// A free lane holds no sequence: it writes at its own position 0 and
-    /// the guard passes over it whatever the cache's lane still holds.
+    /// A free lane writes at position 0 and the guard skips it, whatever the
+    /// cache's lane still holds.
     #[test]
     fn a_free_lane_is_not_checked() {
         let device = CpuDevice::new();
@@ -436,11 +417,9 @@ mod tests {
     /// The shared bound on the per-lane arm is the rows' OWN key end, never
     /// the cache's cursor.
     ///
-    /// This is the case a long request leaves behind: it drove the cursor
-    /// high, its lane was freed, and short rows now sit far below it. A
-    /// bound taken from the cursor would put the previous occupant's keys
-    /// in every row's softmax, which no shape check and no write-order
-    /// check can see.
+    /// With the cursor left high by a longer occupant, a cursor bound puts
+    /// that occupant's keys in every row's softmax. No shape or write-order
+    /// check sees it.
     #[test]
     fn the_shared_bound_is_the_rows_own_end_not_the_cursor() {
         let device = CpuDevice::new();
@@ -448,8 +427,7 @@ mod tests {
         let pos = [3usize, 3];
         let step = CacheStep::<CpuRuntime>::lanes(None, &pos, &kv_end, &HELD);
 
-        // The cache's cursor still stands where a previous, longer occupant
-        // of these lanes left it.
+        // The cursor still stands where a longer occupant left it.
         match step.kv_seq_len(900) {
             KvSeqLen::Shared(len) => assert_eq!(
                 len, 4,
@@ -459,9 +437,7 @@ mod tests {
         }
     }
 
-    /// A free lane sits at position 0 and holds nothing, so it must not make
-    /// an otherwise level batch ragged — one live row beside free lanes is
-    /// the commonest batch a continuous engine steps.
+    /// A free lane must not make an otherwise level batch ragged.
     #[test]
     fn a_free_lane_does_not_make_the_batch_ragged() {
         let device = CpuDevice::new();

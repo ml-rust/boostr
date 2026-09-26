@@ -26,27 +26,28 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
 
     /// Number of RoPE positions the loader precomputed
     /// (`max_position_embeddings`), or `None` for a NoPE (`no_rope`) stack,
-    /// which has no table. A cache may not outrun a table that exists, and
-    /// neither may a decode row.
+    /// which has no table. Neither a cache nor a decode row outruns a table
+    /// that exists.
     pub fn rope_positions(&self) -> Option<usize> {
         self.rope.as_ref().map(|rope| rope.cos_cache().shape()[0])
     }
 
-    /// Allocate a KV cache for this model, sized by the caller.
+    /// Allocate a KV cache of `max_length` positions, all up front.
     ///
-    /// `max_length` slots are allocated UP FRONT (initial capacity ==
-    /// `max_length`), matching the reference's preallocated cache: the
-    /// generation loop then never triggers a reallocation mid-decode.
+    /// Nothing reallocates mid-decode. Allocate the whole length even when
+    /// it is a budget the run will not reach: a cache that starts short and
+    /// grows costs more per step than the positions it saves, because
+    /// attention reads the cache buffer at its ALLOCATED length.
     ///
-    /// Dtype and device come from the first layer's `k_proj` — see
-    /// [`MiniCpm4Attention::kv_dtype_device`], which reports the dtype of
-    /// that projection's OUTPUT (F32 for a quantized weight) rather than
-    /// reading a weight tensor that a packed weight does not have.
+    /// Dtype and device come from the first layer's `k_proj`. See
+    /// [`MiniCpm4Attention::kv_dtype_device`], which reports that
+    /// projection's OUTPUT dtype (F32 for a quantized weight).
     ///
-    /// Errors when `batch_size` or `max_length` is zero, or when `max_length`
-    /// exceeds the precomputed RoPE table (a longer cache could be filled but
-    /// never rotated). A NoPE (`no_rope`) stack has no table and rotates
-    /// nothing, so only the zero check applies there.
+    /// # Errors
+    /// [`Error::InvalidArgument`] when `batch_size` or `max_length` is zero,
+    /// or when `max_length` exceeds the precomputed RoPE table: a longer
+    /// cache can be filled and never rotated. A NoPE (`no_rope`) stack has
+    /// no table, so only the zero checks apply.
     pub fn new_kv_cache(&self, batch_size: usize, max_length: usize) -> Result<LayeredKvCache<R>>
     where
         R::Client: IndexingOps<R>,
@@ -92,8 +93,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
     /// Checks the hidden width, the cache's layer count and batch, and that
     /// `position + seq` fits inside `max_length`. The write-order rule
     /// (`position == kv_cache.seq_len()`) belongs to
-    /// [`decode_step`](Self::decode_step) alone — [`prefill`](Self::prefill)
-    /// resets the cache and so always starts at 0.
+    /// [`decode_step`](Self::decode_step) alone. [`prefill`](Self::prefill)
+    /// resets the cache, so it always starts at 0.
     pub(super) fn check_cache(
         &self,
         kv_cache: &LayeredKvCache<R>,
@@ -125,9 +126,8 @@ impl<R: Runtime<DType = DType>> MiniCpm4Model<R> {
             arg: "kv_cache",
             reason: "expected at least 1 layer, got an empty cache".to_string(),
         })?;
-        // The STEPPED width, not the allocated one: a cache narrowed to its
-        // occupied lanes is handed a call that carries exactly those rows,
-        // and the lanes above them are not touched on this call at all.
+        // The STEPPED width, not the allocated one. A cache narrowed to its
+        // occupied lanes takes a call carrying exactly those rows.
         if layer.active_batch() != batch {
             return Err(Error::InvalidArgument {
                 arg: "kv_cache",

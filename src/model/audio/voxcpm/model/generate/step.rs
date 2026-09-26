@@ -11,19 +11,18 @@ use numr::autograd::var_transpose;
 impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// One iteration, with the CFM noise supplied by the caller.
     ///
-    /// This is the primitive: it draws nothing, so a caller (the CFM gate)
-    /// can pin `z` per step and reproduce a run exactly.
-    /// [`step`](Self::step) is the thin drawing wrapper over it. `z` is
-    /// `[state.active_width(), patch_size, feat_dim]` — the patch layout,
-    /// over the rows this iteration steps rather than every slot the state
-    /// was allocated with — and is used AS GIVEN;
-    /// `options.cfm.temperature` is not applied here; see the module docs.
-    /// A caller holding the reference's `[batch, feat_dim, patch_size]`
-    /// noise transposes it first, as [`step`](Self::step) does.
+    /// The primitive. It draws nothing, so a caller pins `z` per step and
+    /// reproduces a run exactly. [`step`](Self::step) is the drawing wrapper.
+    ///
+    /// `z` is `[state.active_width(), patch_size, feat_dim]`, the patch layout
+    /// over the STEPPED rows, and is used AS GIVEN. `options.cfm.temperature`
+    /// is not applied here; see the module docs. A caller holding the
+    /// reference's `[batch, feat_dim, patch_size]` noise transposes it first.
+    ///
     /// Runs steps 1-8 in order. Returns [`StepOutcome::Stopped`] when a stop
-    /// token fires and every row is then finished, in which case steps 6-8
-    /// did not run and the caches and `position` are unchanged. Errors when
-    /// every row was already finished on entry.
+    /// token fires and every row is then finished. Steps 6-8 then did not
+    /// run, so the caches and `position` are unchanged. Errors when every row
+    /// was already finished on entry.
     pub fn step_with_noise<C>(
         &self,
         client: &C,
@@ -54,15 +53,15 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// One iteration, drawing the CFM noise itself.
     ///
     /// Row `b`'s `z` is `randn_seeded(options.row(b).seed + i_b) *
-    /// options.cfm.temperature` drawn over `[1, feat_dim, patch_size]` —
-    /// the reference's element order, so a seed keeps placing the same draw
-    /// on the same (feature, position) — stacked over the STEPPED rows, then
-    /// transposed to the patch layout. `i_b` is
-    /// `state.patch_len[b]`, THAT ROW's own emitted-patch count, so
+    /// options.cfm.temperature`, drawn over `[1, feat_dim, patch_size]` (the
+    /// reference's element order, so a seed places the same draw on the same
+    /// feature and position), stacked over the STEPPED rows, then transposed
+    /// to the patch layout.
+    ///
+    /// `i_b` is `state.patch_len[b]`, THAT ROW's own emitted-patch count, so
     /// consecutive patches never share noise and each row is reproducible
     /// from its own seed whatever else is in the batch. Everything after the
-    /// draw is
-    /// [`step_with_noise`](Self::step_with_noise). `randn_seeded` is
+    /// draw is [`step_with_noise`](Self::step_with_noise). `randn_seeded` is
     /// reproducible per backend, so one seed draws differently on CPU and
     /// CUDA.
     pub fn step<C>(
@@ -90,17 +89,15 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         options.check(state.batch)?;
         let hidden = state.prefill.lm_hidden.tensor();
         let shape = [1, self.config.feat_dim, self.config.patch_size];
-        // One draw per STEPPED row. The slots above the stepped prefix hold
-        // no request and take no part in this iteration, so drawing for them
-        // would allocate noise nothing reads.
+        // One draw per STEPPED row. Slots above the stepped prefix take no
+        // part in this iteration, so a draw for them allocates unread noise.
         let stepped = state.active_width;
         let mut rows = Vec::with_capacity(stepped);
         for b in 0..stepped {
             // Row `b` advances its noise by its OWN emitted-patch count, not
-            // by the loop's iteration index. A row still generating has
-            // emitted one patch per iteration so far, so the two agree; a
-            // finished row's count is frozen and its further patches are
-            // discarded.
+            // the loop's iteration index. A live row has emitted one patch
+            // per iteration, so the two agree. A finished row's count is
+            // frozen and its further patches are discarded.
             debug_assert!(
                 state.finished(b) || state.patch_len[b] == state.patches[b].len(),
                 "a live row's patch count must equal the loop's iteration index"
@@ -194,8 +191,8 @@ mod tests {
     }
 
     /// Trap 2, the half that must NOT fire: capped at `min_len + 1` patches, a
-    /// stop token on every iteration still cannot end the run, because `i`
-    /// never exceeds `min_len`. A `>=` guard would return `StopToken` here.
+    /// stop token on every iteration cannot end the run, because `i` never
+    /// exceeds `min_len`. A `>=` guard returns `StopToken` here.
     #[test]
     fn stop_guard_never_fires_at_min_len() {
         let (client, device) = cpu_setup();
@@ -256,14 +253,13 @@ mod tests {
         }
     }
 
-    /// Trap 4's guard rail: the lane table is advanced ONCE per iteration,
-    /// AFTER both LMs have stepped.
+    /// Trap 4's guard rail: the lane table advances ONCE per iteration, AFTER
+    /// both LMs have stepped.
     ///
-    /// A step that succeeds already proves the ordering: an advance between
-    /// the two would file `residual_lm` a position ahead of `base_lm`, and
-    /// `decode_step`'s write-order guard rejects that. The second half
-    /// injects exactly that extra advance and checks the guard fires rather
-    /// than the cache being corrupted.
+    /// A successful step proves the ordering, since an advance between the
+    /// two files `residual_lm` ahead of `base_lm` and `decode_step`'s
+    /// write-order guard rejects it. The second half injects that extra
+    /// advance and pins that the guard fires.
     #[test]
     fn the_lane_table_advances_once_after_both_lms() {
         let (client, device) = cpu_setup();
@@ -309,9 +305,8 @@ mod tests {
         assert_eq!(st.prefill.residual_cache.seq_len(), 3);
     }
 
-    /// The injected-noise path is the primitive: the same `z` against the
-    /// same state reproduces the same patch bit for bit, which is what makes
-    /// the CFM gate possible.
+    /// The same `z` against the same state reproduces the same patch bit for
+    /// bit, and a different `z` changes it.
     #[test]
     fn injected_noise_is_reproducible_and_load_bearing() {
         let (client, device) = cpu_setup();
@@ -360,8 +355,8 @@ mod tests {
         );
     }
 
-    /// A rank-2 client sanity check on the fixture wiring: the loop's mu is
-    /// two DiT tokens wide, which is what `check_mu` derives.
+    /// The loop's mu is two DiT tokens wide, which is what `check_mu`
+    /// derives.
     #[test]
     fn mu_is_two_dit_tokens_wide() {
         let (client, device) = cpu_setup();

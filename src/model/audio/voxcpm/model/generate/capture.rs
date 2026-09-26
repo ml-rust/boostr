@@ -23,17 +23,16 @@ pub struct StepIntermediates<R: Runtime> {
     /// [`StepOutcome::Stopped`]).
     pub lm_hidden_pre_fsq: Option<Var<R>>,
     /// The raw `aux.stop(...)` output, `[batch, 2]`, ALWAYS present —
-    /// captured unconditionally even on iterations the guard would
-    /// otherwise skip. See `step_with_noise_inner`'s doc comment for why.
+    /// captured unconditionally, including on iterations the guard otherwise
+    /// skips. See `step_with_noise_inner`'s doc comment for why.
     pub stop_logits: Var<R>,
 }
 
 impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// [`step_with_noise`](Self::step_with_noise), additionally returning the
     /// per-step [`StepIntermediates`] — `mu`, `curr_embed`,
-    /// `lm_hidden_pre_fsq` and `stop_logits` — so a gate can localize a
-    /// discontinuity to a specific sub-step instead of only comparing the
-    /// loop's end state. See `step_with_noise_inner`'s doc comment for the
+    /// `lm_hidden_pre_fsq` and `stop_logits` — so a gate localizes a
+    /// discontinuity to one sub-step. See `step_with_noise_inner` for the
     /// capture-only `stop_logits` asymmetry.
     pub fn step_with_noise_capturing<C>(
         &self,
@@ -70,25 +69,20 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
     /// Shared body of [`step_with_noise`](Self::step_with_noise) and
     /// [`step_with_noise_capturing`](Self::step_with_noise_capturing),
     /// mirroring `prefill.rs`'s `prefill`/`prefill_capturing` split over
-    /// `prefill_inner`. When `capture` is `false` the returned `Option` is
-    /// always `None` and nothing extra is allocated or recomputed relative
-    /// to the pre-capturing code.
+    /// `prefill_inner`. With `capture` `false` the returned `Option` is
+    /// always `None` and nothing extra is allocated.
     ///
-    /// Every row of the batch runs every sub-step; a finished row's patch is
-    /// computed like any other and only its bookkeeping (`patch_len`,
-    /// `outcomes`) stands still. Steps 6-8 are skipped exactly when a stop
-    /// token fires on this step and no row is left unfinished, which for
-    /// one row is the reference's `break`.
+    /// Every row runs every sub-step. A finished row's patch is computed like
+    /// any other and only its bookkeeping (`patch_len`, `outcomes`) stands
+    /// still. Steps 6-8 are skipped exactly when a stop token fires on this
+    /// step and no row is left unfinished.
     ///
-    /// **Deliberate asymmetry**: step 5's stop check is normally SKIPPED
-    /// entirely on iterations where `i <= options.min_len` (`aux.stop` is
-    /// not even called, matching the reference and the non-capturing path
-    /// exactly). When `capture` is `true`, `aux.stop` is called
-    /// UNCONDITIONALLY so [`StepIntermediates::stop_logits`] is populated on
-    /// every iteration, including ones the guard would otherwise skip — so
-    /// a gate can compare every step. Do NOT "fix" this into a shared
-    /// unconditional call: that would make the non-capturing path do work
-    /// (and allocate) it does today, on every real generation call.
+    /// **Deliberate asymmetry**: step 5's stop check is SKIPPED on iterations
+    /// where `i <= options.min_len`, so `aux.stop` is not called. With
+    /// `capture` `true`, `aux.stop` runs UNCONDITIONALLY so
+    /// [`StepIntermediates::stop_logits`] is populated on every iteration. Do
+    /// NOT merge the two into one unconditional call: that adds work and an
+    /// allocation to every real generation call.
     pub(super) fn step_with_noise_inner<C>(
         &self,
         client: &C,
@@ -118,11 +112,10 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         // list are sized at.
         let ceiling = state.batch;
         // The ALLOCATION width: the rows every stored device tensor holds.
-        // It grows with the stepped width and stops at the ceiling, so it is
-        // the width the shape checks below read, never the ceiling.
+        // The shape checks below read this, never the ceiling.
         let batch = state.alloc_width;
         // The STEPPED width: the prefix of slots this iteration runs. The
-        // slots at or above it hold no request and are not touched below.
+        // slots at or above it hold no request and are untouched below.
         let rows = state.active_width;
         options.check(ceiling)?;
         if state.all_finished() {
@@ -145,9 +138,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         )?;
 
         // The three per-step inputs, narrowed to the stepped rows. Each is
-        // stored at the allocation width and the stepped rows are its
-        // prefix, so a dim-0 narrow is a layout change over the same
-        // storage: no kernel runs and no bytes move.
+        // stored at the allocation width and the stepped rows are its prefix,
+        // so a dim-0 narrow moves no bytes.
         let lm_hidden = var_narrow(&state.prefill.lm_hidden, 0, 0, rows).map_err(Error::Numr)?;
         let residual_hidden =
             var_narrow(&state.prefill.residual_hidden, 0, 0, rows).map_err(Error::Numr)?;
@@ -187,14 +179,11 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         let curr_embed = var_reshape(&projected, &[rows, lm_width]).map_err(Error::Numr)?;
 
         // 4. Emit, and condition the NEXT patch on this one. Each row stores
-        // its OWN `[1, patch_size, feat_dim]` slice of `pred_feat`: a dim-0
-        // narrow is a layout change over the same storage, so no kernel runs
-        // and no bytes are copied. Only a row still generating counts the
+        // its OWN `[1, patch_size, feat_dim]` slice of `pred_feat`, a dim-0
+        // narrow that copies no bytes. Only a row still generating counts the
         // patch as its own.
-        // A FREE slot is skipped: it belongs to no request, so its patch is
-        // computed like any other row's and then dropped rather than stored.
-        // A state that outlives a request steps for as long as the engine
-        // runs, and a free slot's stored patches would grow with it.
+        // A FREE slot is skipped: its patch is computed and dropped. Storing
+        // it grows without bound for as long as the engine runs.
         for b in 0..rows {
             if !state.occupied(b) {
                 continue;
@@ -212,17 +201,13 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         // guard is strictly greater than `min_len`, and row `b`'s `i_b` is
         // the index of the patch that row just counted —
         // `state.patch_len[b] - 1`. Every row still generating counted the
-        // patch pushed above, so their `i_b` agree; a finished row's count
-        // is frozen, and its guard cannot fire because the stop loop below
-        // skips finished rows.
+        // patch pushed above, so their `i_b` agree. A finished row's count is
+        // frozen, and the stop loop below skips finished rows.
         //
-        // `capture` asymmetry (deliberate, see this fn's doc comment): the
-        // non-capturing path only calls `aux.stop` when some row's guard is
-        // open and otherwise skips the work entirely, matching the reference
-        // and every generation call today. The capturing path calls it on
-        // EVERY iteration so `StepIntermediates::stop_logits` is always
-        // populated, even on iterations the guard would skip. The guard
-        // decision itself (`i_b > options.min_len`) is unchanged either way.
+        // `capture` asymmetry (see this fn's doc comment): the non-capturing
+        // path calls `aux.stop` only when some row's guard is open. The
+        // capturing path calls it every iteration. The guard decision
+        // (`i_b > options.min_len`) is the same either way.
         let guard_open: Vec<bool> = (0..rows)
             .map(|b| {
                 debug_assert!(
@@ -233,9 +218,8 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
             })
             .collect();
         // At least one row was open on entry and none finishes before the
-        // loop below, so at least one entry is an open row's. A frozen count
-        // never exceeds a live one, so a finished row cannot be the only
-        // open entry: this is exactly the open rows' shared guard.
+        // loop below. A frozen count never exceeds a live one, so a finished
+        // row cannot be the only open entry.
         let any_guard_open = guard_open.contains(&true);
         let stop_logits = if any_guard_open || capture {
             Some(self.aux.stop(client, &lm_hidden)?)
@@ -284,9 +268,9 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
         // hidden state from here on IS fsq'd.
         //
         // Both stacks read the SAME step off the lane table, so both write
-        // row `b` at `lanes.position(b)` and attend over the same range. The
-        // table is advanced once, after step 7 — advancing between them
-        // would rotate and file `residual_lm` a position ahead of `base_lm`.
+        // row `b` at `lanes.position(b)` and attend over the same range. One
+        // advance follows step 7. An advance between them files `residual_lm`
+        // a position ahead of `base_lm`.
         let step = state.prefill.lanes.step();
         let stepped =
             self.base_lm
@@ -338,12 +322,11 @@ impl<R: Runtime<DType = DType>> PatchGenerator<'_, R> {
 /// when the two are already the same width.
 ///
 /// The per-step tensors a state carries between iterations — both handoff
-/// rows and the prefix condition — stay allocated at the state's allocation
-/// width, while a step computes only the stepped rows. A slot seated above
-/// the stepped prefix needs a row of its own to be written into before the
-/// prefix widens to cover it, so the width cannot follow the step. The
-/// stepped rows are the tensor's prefix, so this replaces exactly them and
-/// leaves every other row where seating put it.
+/// rows and the prefix condition — stay at the state's allocation width,
+/// while a step computes only the stepped rows. A slot seated above the
+/// stepped prefix needs its own row to be written into before the prefix
+/// widens to cover it, so the width cannot follow the step. The stepped rows
+/// are the tensor's prefix, so this replaces exactly them.
 fn widen<R, C>(client: &C, full: &Var<R>, part: Var<R>, rows: usize) -> Result<Var<R>>
 where
     R: Runtime<DType = DType>,
@@ -367,8 +350,7 @@ mod tests {
     use crate::test_utils::cpu_setup;
 
     /// Capturing must not perturb step 1-8 arithmetic. Guard OPEN (`i >
-    /// min_len`), so `aux.stop` runs on both paths here — the closed-guard
-    /// asymmetry is covered separately below.
+    /// min_len`), so `aux.stop` runs on both paths.
     #[test]
     fn capturing_and_non_capturing_paths_agree() {
         let (client, device) = cpu_setup();

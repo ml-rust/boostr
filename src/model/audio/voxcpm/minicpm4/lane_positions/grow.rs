@@ -1,14 +1,10 @@
 //! Growing the lane table's ALLOCATED width.
 //!
-//! A table is built at some number of lanes and every lane index addresses
-//! that width. Growth adds lanes ABOVE the ones already there: the rows the
-//! table holds are a prefix of the wider table, so each keeps its index,
-//! its length and its occupancy, and the lanes growth adds start free at an
-//! empty key range.
+//! Growth adds lanes ABOVE the ones already there. The rows the table holds
+//! are a prefix of the wider table, so each keeps its index, length and
+//! occupancy. Added lanes start free at an empty key range.
 //!
-//! The allocation never shrinks. A table that has seen concurrency keeps
-//! the lanes, because giving them back would only reallocate the device
-//! mirror again on the next burst.
+//! The allocation never shrinks.
 
 use super::table::LanePositions;
 use crate::error::{Error, Result};
@@ -20,24 +16,22 @@ use numr::tensor::Tensor;
 impl<R: Runtime<DType = DType>> LanePositions<R> {
     /// Widen the table to `new_batch` lanes, keeping every lane it holds.
     ///
-    /// The host per-lane vectors are extended with a free lane's values and
-    /// the `[B]` I32 `kv_end` mirror is reallocated at the new width and
-    /// rewritten from them, so a lane growth added reads as an empty key
-    /// range until something claims it.
+    /// The host per-lane vectors extend with a free lane's values. The `[B]`
+    /// I32 `kv_end` mirror is reallocated at the new width and rewritten from
+    /// them, so an added lane reads as an empty key range until claimed.
     ///
-    /// The STEPPED width is untouched: growth adds room, and
-    /// [`set_active_width`](LanePositions::set_active_width) decides
-    /// separately how many lanes a decode call covers. Its narrowed view is
-    /// rebuilt here, because the tensor it viewed is gone.
+    /// The STEPPED width is untouched;
+    /// [`set_active_width`](LanePositions::set_active_width) owns it. Its
+    /// narrowed view is rebuilt here against the new tensor.
     ///
     /// A no-op when `new_batch` is not larger than the current width.
     ///
     /// # Device addresses
     ///
-    /// This REPLACES `kv_end`, so the address
-    /// [`kv_end`](LanePositions::kv_end) handed out before the call no
-    /// longer describes the tensor a step reads. A caller that has captured
-    /// a graph against it must not grow the table.
+    /// This REPLACES `kv_end`. An address
+    /// [`kv_end`](LanePositions::kv_end) handed out earlier no longer
+    /// describes the tensor a step reads. A caller holding a captured graph
+    /// against it must not grow the table.
     ///
     /// # Errors
     ///
@@ -62,12 +56,11 @@ impl<R: Runtime<DType = DType>> LanePositions<R> {
         self.occupied.resize(new_batch, false);
         self.ends = vec![0i32; new_batch];
         self.kv_end = Tensor::<R>::from_slice(&self.ends, &[new_batch], &device)?;
-        // The narrowed decode view sat on the tensor just replaced, so it
-        // is rebuilt at the same stepped width against the new one.
+        // Rebuild the narrowed view at the same stepped width against the
+        // replacement tensor.
         let stepped = self.active_width();
         self.set_active_width(stepped)?;
-        // Occupied lanes keep their own ends; the lanes just added flush to
-        // 0, the empty range a free lane carries.
+        // Occupied lanes keep their own ends. Added lanes flush to 0.
         self.flush(client)
     }
 }
@@ -117,8 +110,7 @@ mod tests {
         );
     }
 
-    /// A request for the current width, or a narrower one, changes nothing:
-    /// the allocation never shrinks.
+    /// A request for the current width, or a narrower one, changes nothing.
     #[test]
     fn growth_to_a_width_that_is_not_larger_is_a_no_op() {
         let device = CpuDevice::new();

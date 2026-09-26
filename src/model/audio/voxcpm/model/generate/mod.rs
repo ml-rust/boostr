@@ -27,44 +27,41 @@
 //! - **The initial `lm_hidden` is UN-fsq'd.** It is the post-blend
 //!   `enc_outputs` row at a TEXT position, which the prefill's blend left
 //!   alone. From step 6 onward every `lm_hidden` IS fsq'd. Do not normalise
-//!   the two: re-fsq'ing the prefill's row, and dropping the fsq in step 6,
+//!   the two. Re-fsq'ing the prefill's row, and dropping the fsq in step 6,
 //!   both stay shape-valid.
 //! - **Step 7 consumes the POST-fsq `lm_hidden`**, and the concat order is
 //!   `(lm_hidden, curr_embed)`. That concat is `2 * lm_hidden` wide, so
 //!   swapping the halves is shape-valid and computes a different model.
-//! - **A state carries THREE widths and they are not interchangeable.**
-//!   [`GenerateState::batch`] is the CEILING: the slots the state may ever
-//!   hold, and the width a slot index, a per-row HOST vector and
-//!   [`GenerateOptions::rows`] are checked against. `GenerateState::alloc_width`
-//!   is the ALLOCATION: the rows every DEVICE tensor and both caches hold.
-//!   It opens at ONE row whatever the ceiling, is widened to cover a slot
-//!   before that slot is seated, and never shrinks — so a shape check on a
-//!   stored tensor reads it, never the ceiling. `GenerateState::active_width`
-//!   is the prefix of slots one iteration actually runs; the rows at or
-//!   above it hold no request and are not touched by a step at all. It is
-//!   the occupied prefix rounded UP to an entry of
-//!   [`widths::BATCH_WIDTHS`](super::widths::BATCH_WIDTHS), because the
-//!   DiT's Euler solver keys its captured graphs by batch size, and the
-//!   allocation rounds to the same list.
+//! - **A state carries THREE widths, none interchangeable.**
+//!
+//!   | Width | Meaning |
+//!   | --- | --- |
+//!   | [`GenerateState::batch`] | CEILING: slots the state can ever hold. A slot index, a per-row HOST vector and [`GenerateOptions::rows`] are checked against it. |
+//!   | `GenerateState::alloc_width` | ALLOCATION: rows every DEVICE tensor and both caches hold. Opens at ONE row whatever the ceiling, widens before a slot above it is seated, never shrinks. A shape check on a stored tensor reads this. |
+//!   | `GenerateState::active_width` | STEPPED: the slot prefix one iteration runs. Rows at or above it hold no request and no step touches them. |
+//!
+//!   The stepped width is the occupied prefix rounded UP to an entry of
+//!   [`widths::BATCH_WIDTHS`](super::widths::BATCH_WIDTHS). The DiT's Euler
+//!   solver keys captured graphs by batch size, and the allocation rounds to
+//!   the same list.
 //! - **ONE [`LanePositions`](crate::model::audio::voxcpm::minicpm4::LanePositions)
-//!   table drives BOTH caches and EVERY STEPPED row.** The prefill primes every row to
-//!   `S_max` and the table advances every row by exactly one per iteration, so
-//!   the rows stay at one shared position throughout this loop. A finished
-//!   row keeps stepping — its patches are computed and discarded — because
-//!   the caches have no per-row compaction; only its `patch_len` and
+//!   table drives BOTH caches and EVERY STEPPED row.** The prefill primes
+//!   every row to `S_max` and the table advances every row by one per
+//!   iteration, so the rows hold one shared position throughout this loop. A
+//!   finished row keeps stepping — its patches are computed and discarded —
+//!   because the caches have no per-row compaction. Only its `patch_len` and
 //!   `outcomes` entries stand still.
 //!   [`MiniCpm4Model::decode_step`] rejects a write position the cache will
-//!   not fill, so a drift errors rather than corrupts — that check is why
-//!   the table is not duplicated per cache.
+//!   not fill, so a drift errors rather than corrupts. That check is why the
+//!   table is not duplicated per cache.
 //! - **The stop guard is STRICTLY greater**: `i > min_len`, so a stop token
 //!   at `i <= min_len` is ignored and at least `min_len + 2` patches are
 //!   always emitted (`i = 0..=min_len` push unconditionally, and `i = min_len
 //!   + 1` pushes before its check can fire).
 //! - **The `max_len` exit is silent in the reference.** Here it is
 //!   [`GenerateOutcome::MaxLen`], distinct from
-//!   [`GenerateOutcome::StopToken`], so a caller can tell a finished
-//!   utterance from a truncated one — per row, in
-//!   [`GenerateState::outcomes`].
+//!   [`GenerateOutcome::StopToken`], so a caller tells a finished utterance
+//!   from a truncated one per row, in [`GenerateState::outcomes`].
 //! - **A stop that finishes the LAST open row skips steps 6-8**, exactly as
 //!   the reference's `break` does for one row. A stop that leaves other
 //!   rows open does not: the step runs through for everyone.
@@ -76,8 +73,8 @@
 //!
 //! Step 5 turns two logits per row into control flow, so it cannot stay on
 //! device. The read is `argmax` ON DEVICE plus ONE `to_vec` of the resulting
-//! `[batch]` index: eight bytes per row per patch, never the logits
-//! themselves. See `validate::stop_predicted`.
+//! `[batch]` index, never the logits themselves. See
+//! `validate::stop_predicted`.
 //!
 //! # Layout
 //!

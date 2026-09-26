@@ -1,16 +1,12 @@
 //! The lane table's STEPPED WIDTH and the decode view narrowed to it.
 //!
-//! A table is built at a fixed number of lanes and every lane index — a
-//! claim, a free, a position read — addresses that ALLOCATED width for the
-//! table's whole life. Separately it carries a STEPPED WIDTH: the prefix of
-//! lanes one decode call covers. The two differ whenever the lanes above the
-//! prefix hold nothing, and a call then runs over the prefix alone rather
-//! than paying for lanes with no sequence in them.
+//! Every lane index — a claim, a free, a position read — addresses the
+//! ALLOCATED width. The STEPPED WIDTH is the lane prefix one decode call
+//! covers. The two differ whenever the lanes above the prefix hold nothing.
 //!
-//! Narrowing is a view, never a move: the stepped lanes are a prefix, so the
-//! narrowed `kv_end` and the narrowed left pad share the storage their full
-//! tensors own and the in-place writes `flush` makes show through them. No
-//! lane ever changes index.
+//! Narrowing is a view, never a move. The stepped lanes are a prefix, so the
+//! narrowed `kv_end` and left pad share their full tensors' storage and the
+//! in-place writes `flush` makes show through them. No lane changes index.
 
 use super::table::LanePositions;
 use crate::error::{Error, Result};
@@ -34,9 +30,9 @@ impl<R: Runtime<DType = DType>> LanePositions<R> {
     /// `rows` occupancy flags and a `[rows]` key-range tensor, which is what
     /// a decode call over `rows` query rows needs.
     ///
-    /// Seating is unaffected: [`claim`](LanePositions::claim) and
-    /// [`free`](LanePositions::free) address the allocated width, so a
-    /// caller seats a lane above the prefix and widens afterwards.
+    /// [`claim`](LanePositions::claim) and [`free`](LanePositions::free)
+    /// address the allocated width, so a caller seats a lane above the
+    /// prefix and widens afterwards.
     ///
     /// # Errors
     ///
@@ -146,9 +142,8 @@ mod tests {
         }
     }
 
-    /// The narrowed key range is a VIEW: a later advance writes the full
-    /// tensor in place and the stepped view reports the new values without
-    /// being rebuilt.
+    /// The narrowed key range is a VIEW: an advance writes the full tensor in
+    /// place and the stepped view reports the new values unrebuilt.
     #[test]
     fn the_narrowed_key_range_follows_the_table() {
         let device = CpuDevice::new();
@@ -190,8 +185,7 @@ mod tests {
         assert_eq!(table.active_width(), 2, "a refusal changes nothing");
     }
 
-    /// Widening back to the allocation drops the narrowed views rather than
-    /// leaving a stale one behind.
+    /// Widening back to the allocation drops the narrowed views.
     #[test]
     fn widening_back_restores_the_whole_table() {
         let device = CpuDevice::new();
@@ -215,13 +209,11 @@ mod tests {
         }
     }
 
-    /// The lane step the table hands out writes the same cache slots and
-    /// returns the same floats as the fused write, while every row sits at
-    /// one position.
+    /// While every row sits at one position, the lane step writes the same
+    /// cache slots and returns the same floats as the fused write.
     ///
-    /// Bit equality, not a tolerance: the two differ only in how many
-    /// copies carry the K/V into the cache, and both keep the shared key
-    /// bound and the same rotation.
+    /// Bit equality, not a tolerance: both keep the shared key bound and the
+    /// same rotation.
     #[test]
     fn a_lane_step_matches_the_fused_step_bit_for_bit() {
         let (client, device) = cpu_setup();

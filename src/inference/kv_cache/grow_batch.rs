@@ -1,20 +1,15 @@
 //! Growing a KV cache along its LANE axis.
 //!
-//! A cache is allocated `[batch, num_kv_heads, capacity, head_dim]`, and the
-//! lane axis is the outermost one. A caller that opens a cache at one lane
-//! and later needs more of them would otherwise have to reserve every lane
-//! up front and hold it for the cache's whole life. Growing instead keeps
-//! the reservation at what the caller has actually seated.
+//! A cache is allocated `[batch, num_kv_heads, capacity, head_dim]`. Growth
+//! keeps the reservation at what the caller has seated, rather than every
+//! lane up front.
 //!
-//! Lanes are the OUTERMOST dimension, so the rows a cache already holds are
-//! a contiguous prefix of the larger allocation. Growth is therefore
-//! exactly: allocate the wider tensor, copy the old rows into its prefix,
-//! leave the rows above them zeroed, and swap. A lane keeps its index, its
-//! keys and its own length across the move.
+//! Lanes are the OUTERMOST dimension, so the rows a cache already holds are a
+//! contiguous prefix of the larger allocation. Growth allocates the wider
+//! tensor, copies the old rows into its prefix, leaves the rows above zeroed
+//! and swaps. A lane keeps its index, keys and length across the move.
 //!
-//! The allocation NEVER shrinks. A cache that has seen concurrency keeps
-//! the room, because dropping back to a narrow allocation would only
-//! reallocate and copy again on the next burst.
+//! The allocation NEVER shrinks.
 
 use crate::error::Result;
 use crate::inference::kv_cache::basic::KvCache;
@@ -37,21 +32,19 @@ where
     /// zeros, so a new lane reads as an empty key range until something
     /// seats a sequence in it.
     ///
-    /// The STEPPED width is untouched: growth adds room, and a caller
-    /// decides separately how many lanes a decode call covers through
-    /// [`set_active_batch`](KvCache::set_active_batch).
+    /// The STEPPED width is untouched;
+    /// [`set_active_batch`](KvCache::set_active_batch) owns it.
     ///
-    /// A no-op when `new_batch` is not larger than the current allocation:
-    /// the allocation never shrinks. Shrinking would only reallocate and
-    /// copy again the next time the lanes are wanted.
+    /// A no-op when `new_batch` is not larger than the current allocation.
+    /// The allocation never shrinks.
     ///
     /// # Device addresses
     ///
-    /// This REPLACES `k_cache` and `v_cache`, so the addresses
+    /// This REPLACES `k_cache` and `v_cache`. Addresses
     /// [`k_cache_raw`](KvCache::k_cache_raw) and
-    /// [`v_cache_raw`](KvCache::v_cache_raw) handed out before the call no
-    /// longer describe the buffers a step writes. A caller that has
-    /// captured a CUDA graph against those buffers must not grow the cache.
+    /// [`v_cache_raw`](KvCache::v_cache_raw) handed out earlier no longer
+    /// describe the buffers a step writes. A caller holding a CUDA graph
+    /// captured against them must not grow the cache.
     ///
     /// # Errors
     ///
@@ -65,8 +58,7 @@ where
         let mut v = Tensor::<R>::zeros(&shape, self.dtype, &self.device)?;
 
         // The rows already held are the prefix of the wider tensor, so one
-        // dim-0 assignment at offset 0 carries every one of them across
-        // byte for byte. Nothing re-zeroes a row that holds keys.
+        // dim-0 assignment at offset 0 carries them across byte for byte.
         k = k.slice_assign(&self.k_cache, 0, 0)?;
         v = v.slice_assign(&self.v_cache, 0, 0)?;
 
@@ -74,8 +66,8 @@ where
         self.v_cache = v;
         self.lane_lens.resize(new_batch, 0);
         self.batch_size = new_batch;
-        // Both buffers are new tensors, so a view of the old ones would
-        // describe storage nothing writes any more.
+        // Both buffers are new tensors, so a view of the old ones describes
+        // storage nothing writes.
         self.refresh_active_views()
     }
 }
@@ -87,14 +79,12 @@ where
     /// Widen every layer's lane axis to `new_batch` — see
     /// [`KvCache::grow_batch`].
     ///
-    /// Every layer of a stack is written and read by the same decode call,
-    /// so they grow together or a call would meet one width on one layer
-    /// and another on the next.
+    /// One decode call reads and writes every layer, so they grow together.
     ///
     /// A no-op when `new_batch` is not larger than the layers' current
     /// allocation. The same device-address caveat applies: every layer's K
-    /// and V buffer is replaced, so a caller holding a graph captured
-    /// against them must not grow the stack.
+    /// and V buffer is replaced, so a caller holding a graph captured against
+    /// them must not grow the stack.
     ///
     /// # Errors
     ///
@@ -204,8 +194,7 @@ mod tests {
         assert_eq!(grown.lane_lens, born.lane_lens);
     }
 
-    /// A request for the current width, or a narrower one, changes nothing:
-    /// the allocation never shrinks.
+    /// A request for the current width, or a narrower one, changes nothing.
     #[test]
     fn growth_to_a_width_that_is_not_larger_is_a_no_op() {
         let device = CpuDevice::new();

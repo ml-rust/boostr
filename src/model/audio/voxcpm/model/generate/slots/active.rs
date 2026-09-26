@@ -1,22 +1,20 @@
 //! [`GenerateState::refresh_active_width`]: the width one iteration steps,
 //! recomputed from the slots that hold a request.
 //!
-//! A state is opened at a fixed CEILING and a slot index addresses it. What
-//! moves is the STEPPED width — the prefix of slots one iteration runs over.
-//! Requests are seated lowest-free-first and no row ever migrates, so the
-//! occupied slots are a prefix and the stepped width is a cut through that
-//! prefix, never a gather.
+//! A state is opened at a fixed CEILING and a slot index addresses it. The
+//! STEPPED width is the prefix of slots one iteration runs over. Requests are
+//! seated lowest-free-first and no row migrates, so the occupied slots are a
+//! prefix and the stepped width is a cut through it, never a gather.
 //!
-//! The ALLOCATION — the rows the device tensors hold — moves too, but only
-//! upward and only in `super::grow`, which widens it to cover a slot before
-//! that slot is seated. So the stepped width computed here always fits
-//! inside the allocation and this module never has to grow anything.
+//! The ALLOCATION moves upward only, and only in `super::grow`, which widens
+//! it to cover a slot before that slot is seated. So the stepped width
+//! computed here always fits inside the allocation.
 //!
-//! The width is not the occupied count itself. It is that count rounded UP
-//! to an entry of the shared allowlist, because the DiT's Euler solver keys
-//! its captured graphs by batch size: a width per occupancy would put a
-//! fresh key in a bounded cache on every seat and release. The rounding is
-//! then capped at the ceiling, and never falls below the occupied count.
+//! The width is the occupied count rounded UP to an entry of the shared
+//! allowlist. The DiT's Euler solver keys its captured graphs by batch size,
+//! so a width per occupancy churns a bounded cache on every seat and release.
+//! The rounding is capped at the ceiling and never falls below the occupied
+//! count.
 
 use super::super::*;
 use crate::model::audio::voxcpm::model::widths::batch_width;
@@ -25,16 +23,15 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     /// Recompute the stepped width and push it into the lane table and both
     /// cache stacks.
     ///
-    /// Call this after any change to which slots hold a request — that is
-    /// [`admit`](Self::admit) and [`release`](Self::release), and the state
-    /// constructors so one rule decides the width whichever built it.
+    /// Call this after any change to which slots hold a request:
+    /// [`admit`](Self::admit), [`release`](Self::release) and both state
+    /// constructors.
     ///
     /// # Errors
     ///
-    /// Propagates a narrowing or cache refusal. Seating widens the
-    /// allocation to the same rounded width before it claims a lane, so the
-    /// computed width is always in `1..=alloc_width` and neither the lane
-    /// table nor a cache can refuse it for being out of range.
+    /// Propagates a narrowing or cache refusal. Seating widens the allocation
+    /// to the same rounded width before it claims a lane, so the computed
+    /// width is always in `1..=alloc_width`.
     pub(super) fn refresh_active_width(&mut self) -> Result<()>
     where
         R::Client: IndexingOps<R>,
@@ -51,18 +48,17 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     /// allowlist entry that holds them, capped at the ceiling and never
     /// below the slots themselves.
     ///
-    /// An empty state steps one row rather than none: the caches and the
-    /// tensors have no zero-row shape, and a state with nothing seated does
-    /// not step at all.
+    /// An empty state steps one row, not none. The caches and tensors have no
+    /// zero-row shape.
     fn occupied_width(&self) -> usize {
         let seated = (0..self.batch)
             .rev()
             .find(|row| self.occupied(*row))
             .map_or(0, |row| row + 1);
         let needed = seated.max(1);
-        // `batch_width` saturates at its largest entry, which can sit below
-        // a ceiling wider than the list. Clamping to `needed` from below
-        // keeps a seated row inside the prefix whatever the list holds.
+        // `batch_width` saturates at its largest entry, which can sit below a
+        // ceiling wider than the list. Clamping to `needed` from below keeps
+        // a seated row inside the prefix.
         batch_width(needed).min(self.batch).max(needed)
     }
 }
@@ -124,8 +120,8 @@ mod tests {
         }
     }
 
-    /// The rounding is capped at the ceiling: a state narrower than the
-    /// next allowlist entry steps its own width and no more.
+    /// The rounding is capped at the ceiling. A state narrower than the next
+    /// allowlist entry steps its own width and no more.
     #[test]
     fn the_width_never_exceeds_the_allocation() {
         let (client, device) = cpu_setup();

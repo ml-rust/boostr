@@ -6,17 +6,15 @@ use crate::model::audio::voxcpm::minicpm4::LanePositions;
 use crate::model::audio::voxcpm::model::prefill::PrefillState;
 
 impl<R: Runtime<DType = DType>> GenerateState<R> {
-    /// Open an empty state that may hold up to `width` slots, every slot
+    /// Open an empty state that can hold up to `width` slots, every slot
     /// free.
     ///
-    /// `width` is the CEILING, not a reservation. Every DEVICE tensor —
-    /// both KV caches, `lm_hidden`, `residual_hidden`, `prefix_feat_cond`
-    /// and the lane table — is allocated for ONE row here and widened by
-    /// [`admit`](Self::admit) when a slot above the allocation is seated,
-    /// so a state that only ever hosts one request pays for one row. The
-    /// HOST per-row vectors are sized at the ceiling instead: they are
-    /// small, and a slot index is checked against the ceiling, so growing
-    /// them would only add a second row count to confuse.
+    /// `width` is the CEILING, not a reservation. Every DEVICE tensor — both
+    /// KV caches, `lm_hidden`, `residual_hidden`, `prefix_feat_cond` and the
+    /// lane table — is allocated for ONE row here and widened by
+    /// [`admit`](Self::admit) when a slot above the allocation is seated. The
+    /// HOST per-row vectors are sized at the ceiling, which is what a slot
+    /// index is checked against.
     ///
     /// Both KV caches hold `capacity` cache positions, so `capacity` must
     /// cover the longest prefill this state will host plus that request's
@@ -71,9 +69,8 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
             patch_len: vec![0; width],
             slot_options: vec![None; width],
         };
-        // Nothing is seated yet, so the stepped width is the floor, which
-        // is also what was just allocated. Running the one rule that decides
-        // the width keeps this constructor from having its own answer.
+        // Nothing is seated yet, so the stepped width is the floor. Run the
+        // one rule that decides the width rather than repeating its answer.
         state.refresh_active_width()?;
         Ok(state)
     }
@@ -176,8 +173,8 @@ mod tests {
         assert!(!wide.occupied(2) && !wide.occupied(3));
         assert!(wide.finished(2), "a free slot has nothing to generate");
         assert!(!wide.all_finished(), "two slots are still open");
-        // Two seated slots, so two rows allocated: the ceiling's other two
-        // slots cost nothing until something is seated into them.
+        // Two seated slots, so two rows allocated. The ceiling's other two
+        // cost nothing until something is seated into them.
         assert_eq!(wide.alloc_width(), 2);
         assert_eq!(wide.prefill.lanes.kv_end().to_vec::<i32>().len(), 2);
 

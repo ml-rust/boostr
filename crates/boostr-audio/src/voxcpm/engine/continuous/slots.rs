@@ -2,7 +2,7 @@
 //! non-blocking queue drain that feeds it.
 //!
 //! Both are free of device work and of the runtime type, so what lands where
-//! is decided — and tested — without a model.
+//! is decided and tested without a model.
 
 use std::sync::mpsc::{Receiver, TryRecvError};
 
@@ -10,7 +10,7 @@ use crate::voxcpm::engine::batch::Job;
 
 /// A fixed-width table of slots, each free or holding one `T`.
 ///
-/// The width never changes while the table is in use: it is the batch width
+/// The width never changes while the table is in use. It is the batch width
 /// the generation loop runs at, and the DiT's per-shape graph cache is keyed
 /// on it.
 pub(super) struct Slots<T> {
@@ -32,9 +32,8 @@ impl<T> Slots<T> {
 
     /// The lowest free slot, or `None` when every slot holds a row.
     ///
-    /// Lowest rather than round-robin: a slot's index is nothing but a row of
-    /// the batch, and a stable choice keeps a quiet engine using the same few
-    /// slots.
+    /// Lowest rather than round-robin. A slot's index is only a row of the
+    /// batch, and a stable choice keeps a quiet engine on the same few slots.
     pub(super) fn free(&self) -> Option<usize> {
         self.entries.iter().position(Option::is_none)
     }
@@ -80,12 +79,10 @@ impl<T> Slots<T> {
 /// Take at most `free` queued jobs, blocking on nothing.
 ///
 /// The second value is `true` once the queue has closed, which is what
-/// [`Drop`] on the engine does; the jobs taken before that are still
-/// returned.
+/// [`Drop`] on the engine does. Jobs taken before that are still returned.
 ///
-/// This is the whole of the steady-state wait: a request that arrives after
-/// this returns is taken by the next call, one step later, rather than after
-/// the batch it missed has drained.
+/// This is the whole of the steady-state wait. A request arriving after this
+/// returns is taken by the next call, one step later.
 pub(super) fn drain(jobs: &Receiver<Job>, free: usize) -> (Vec<Job>, bool) {
     let mut taken = Vec::new();
     while taken.len() < free {
@@ -106,8 +103,8 @@ mod tests {
 
     fn job() -> Job {
         let (tx, rx) = channel();
-        // The receiver is kept alive by the job it belongs to in the engine;
-        // here nothing reads it, so it is dropped and the send simply fails.
+        // In the engine the job's owner keeps the receiver alive. Here
+        // nothing reads it, so it is dropped and the send fails.
         drop(rx);
         Job {
             voice: None,
@@ -170,8 +167,8 @@ mod tests {
         assert!(!slots.any_occupied());
     }
 
-    /// The drain never blocks and never takes more than the free slots hold;
-    /// the rest stays queued for the next step.
+    /// The drain never blocks and never takes more than the free slots hold.
+    /// The rest stays queued for the next step.
     #[test]
     fn drain_takes_what_fits_and_leaves_the_rest_queued() {
         let (tx, rx) = channel();
@@ -202,8 +199,7 @@ mod tests {
         assert!(!closed);
     }
 
-    /// A closed queue is reported, and whatever was still in it comes back
-    /// rather than being dropped on the floor.
+    /// A closed queue is reported, and whatever was still in it comes back.
     #[test]
     fn drain_reports_a_closed_queue_after_taking_what_was_left() {
         let (tx, rx) = channel();

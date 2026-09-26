@@ -84,11 +84,10 @@ where
         buf.extend_from_slice(&num_kv_heads.to_le_bytes());
         buf.extend_from_slice(&head_dim.to_le_bytes());
 
-        // The header above names the ALLOCATED row count while the body below
-        // writes what `get_kv()` returns, which is the ACTIVE prefix. The two
-        // agree only on a cache that has not been narrowed, so a narrowed one
-        // is refused here rather than handing the peer a short body under a
-        // full-width header — a mismatch no length field on the wire records.
+        // The header names the ALLOCATED row count. The body writes what
+        // `get_kv()` returns, the ACTIVE prefix. They agree only on an
+        // un-narrowed cache, so a narrowed one is refused here. No length
+        // field on the wire records the mismatch.
         if layer.active_batch() != layer.batch_size() {
             return Err(anyhow!(
                 "Layer {layer_idx} is stepping {} of its {} rows; a narrowed KV cache \
@@ -108,8 +107,8 @@ where
             continue;
         }
 
-        // A failure here used to be padded with zeros, which handed the peer a
-        // silently blank cache. Propagate instead.
+        // Propagate. Padding a failure with zeros hands the peer a silently
+        // blank cache.
         let (k, v) = layer
             .get_kv()
             .map_err(|e| anyhow!("Failed to read K/V from layer {layer_idx}: {e}"))?;

@@ -2,36 +2,31 @@
 //! has a row of its own.
 //!
 //! A state opens allocated for ONE row whatever its ceiling. Everything a
-//! step touches is stored with the slots as the OUTERMOST dimension — both
-//! KV caches, both handoff rows, `prefix_feat_cond` and the lane table — and
-//! slots are seated lowest-free-first, so the rows in use are a contiguous
-//! prefix of any wider allocation. Widening is therefore: allocate the
-//! larger tensor, copy the old rows into its prefix, zero the rest, swap.
-//! Every row keeps its index and its contents, so no row's audio depends on
-//! whether the allocation grew under it.
+//! step touches stores the slots as the OUTERMOST dimension — both KV caches,
+//! both handoff rows, `prefix_feat_cond` and the lane table — and slots are
+//! seated lowest-free-first, so the rows in use are a contiguous prefix of
+//! any wider allocation. Widening allocates the larger tensor, copies the old
+//! rows into its prefix, zeros the rest and swaps. Every row keeps its index
+//! and contents.
 //!
-//! The widths growth can take come from the same allowlist the stepped width
-//! rounds to, so a state grows only a handful of times before it reaches its
-//! ceiling.
+//! Growth widths come from the same allowlist the stepped width rounds to.
 //!
-//! The allocation NEVER shrinks. A batch that has seen concurrency keeps the
-//! room, because shrinking would only reallocate on the next burst.
+//! The allocation NEVER shrinks.
 //!
 //! Only DEVICE tensors grow. The HOST per-row vectors — `patches`,
 //! `outcomes`, `patch_len`, `slot_options` — are sized at the CEILING from
-//! `open` and stay there: they are small, and their length is what a slot
-//! index is checked against. The two row counts genuinely differ, so read a
-//! device tensor's rows off `alloc_width` and a slot index's bound off
-//! `batch`.
+//! `open` and stay there, and their length is what a slot index is checked
+//! against. Read a device tensor's rows off `alloc_width` and a slot index's
+//! bound off `batch`.
 //!
 //! # Why growing is safe for this caller
 //!
-//! Growing replaces the KV cache buffers and the lane table's `kv_end`, so
-//! it invalidates any CUDA graph captured against them. The only captured
-//! graph in this generation path is the DiT's Euler solve, which takes the
-//! noise, the DiT condition and the two projected hidden rows — it never
-//! touches a KV cache or the lane table. Nothing else here holds a device
-//! address across a call.
+//! Growing replaces the KV cache buffers and the lane table's `kv_end`, so it
+//! invalidates any CUDA graph captured against them. The only captured graph
+//! in this generation path is the DiT's Euler solve, which takes the noise,
+//! the DiT condition and the two projected hidden rows. It touches no KV
+//! cache and no lane table. Nothing else here holds a device address across a
+//! call.
 
 use super::super::*;
 use crate::model::audio::voxcpm::model::widths::batch_width;
@@ -39,11 +34,10 @@ use crate::model::audio::voxcpm::model::widths::batch_width;
 impl<R: Runtime<DType = DType>> GenerateState<R> {
     /// Widen the device allocation until it holds at least `rows` rows.
     ///
-    /// Call this BEFORE writing anything into a slot at or above the
-    /// current allocation. The target is `rows` rounded up to an allowed
-    /// width and capped at the ceiling, which is the same rule
-    /// `refresh_active_width` applies, so the stepped width that follows a
-    /// seat always fits inside what this reserved.
+    /// Call this BEFORE writing anything into a slot at or above the current
+    /// allocation. The target is `rows` rounded up to an allowed width and
+    /// capped at the ceiling, the same rule `refresh_active_width` applies.
+    /// So the stepped width following a seat fits inside what this reserved.
     ///
     /// A no-op when the allocation already holds `rows` rows.
     ///
@@ -78,8 +72,8 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
         self.prefix_feat_cond = grow_rows(client, &self.prefix_feat_cond, needed)?;
         self.prefill.lanes.grow_batch(needed, client)?;
         self.alloc_width = needed;
-        // The handoff's own row count is the allocation's, so a later shape
-        // check reads one number rather than two that can drift.
+        // The handoff's row count IS the allocation's, so a later shape check
+        // reads one number rather than two that can drift.
         self.prefill.batch = needed;
         Ok(())
     }
@@ -89,8 +83,7 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
 /// prefix and zeros above them.
 ///
 /// Rows are the outermost dimension, so the old tensor IS the prefix of the
-/// new one and one dim-0 assignment at offset 0 carries every row across
-/// unchanged.
+/// new one. One dim-0 assignment at offset 0 carries every row across.
 fn grow_rows<R, C>(client: &C, full: &Var<R>, new_rows: usize) -> Result<Var<R>>
 where
     R: Runtime<DType = DType>,

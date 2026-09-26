@@ -2,9 +2,9 @@
 //!
 //! A batched cache holds one sequence per lane, each starting at cache
 //! position 0 with its own end. Prefill fills the lanes one sequence at a
-//! time; decode then writes each lane's token at that lane's own next
-//! position. A lane's own range is what `kv_start` and `kv_end` carry into
-//! attention, so nothing outside it is ever read.
+//! time. Decode then writes each lane's token at that lane's own next
+//! position. `kv_start` and `kv_end` carry a lane's own range into attention,
+//! so nothing outside it is read.
 
 use crate::error::{Error, Result};
 use crate::inference::kv_cache::{KvCache, LayeredKvCache};
@@ -38,7 +38,7 @@ where
     /// # Errors
     ///
     /// `lane` is outside the cache's batch, `k` carries more than one row,
-    /// or the write would run past `max_seq_len`.
+    /// or the write runs past `max_seq_len`.
     pub fn update_lane<C: KvCacheOps<R>>(
         &mut self,
         k: &Tensor<R>,
@@ -62,16 +62,16 @@ where
     }
 
     /// Write one sequence's K and V into lane `lane` at `offset`, refusing
-    /// rather than growing when the write would run past [`KvCache::capacity`].
+    /// rather than growing when the write runs past [`KvCache::capacity`].
     ///
-    /// The frozen path over this cache calls this instead of
-    /// [`KvCache::update_lane`]: capacity never moves here, so nothing this
-    /// call does can invalidate a device pointer captured earlier.
+    /// The frozen path calls this instead of [`KvCache::update_lane`].
+    /// Capacity never moves, so nothing here invalidates a captured device
+    /// pointer.
     ///
     /// # Errors
     ///
     /// [`Error::InferenceError`] when `lane` is outside the batch, `k`
-    /// carries more than one row, or the write would run past `capacity()`.
+    /// carries more than one row, or the write runs past `capacity()`.
     pub(super) fn update_lane_within_capacity<C: KvCacheOps<R>>(
         &mut self,
         k: &Tensor<R>,
@@ -116,10 +116,9 @@ where
     /// [`KvCache::update_lane_within_capacity`]: narrow to `lane`'s row,
     /// write `k`/`v` at `offset`, and record the new length.
     ///
-    /// `lane` indexes the ALLOCATED width, deliberately: a caller seats a
-    /// sequence into a lane before the stepped width has been widened to
-    /// cover it, so restricting this to the stepped prefix would refuse the
-    /// very write that makes the lane worth stepping.
+    /// `lane` indexes the ALLOCATED width, deliberately. A caller seats a
+    /// sequence into a lane before the stepped width covers it, so the
+    /// stepped prefix refuses that write.
     fn write_lane<C: KvCacheOps<R>>(
         &mut self,
         k: &Tensor<R>,
@@ -132,10 +131,10 @@ where
         let k_lane = self.k_cache.narrow(0, lane, 1)?;
         let v_lane = self.v_cache.narrow(0, lane, 1)?;
         client.kv_cache_update(&k_lane, &v_lane, k, v, offset)?;
-        // This lane's own end is ASSIGNED, not raised: a fresh sequence
-        // installed at offset 0 replaces whatever the lane held, so a
-        // previous occupant's longer run must not survive as this one's end.
-        // The cursor still only rises — it is the fused path's append slot.
+        // This lane's end is ASSIGNED, not raised. A fresh sequence installed
+        // at offset 0 replaces whatever the lane held, so a previous
+        // occupant's longer run must not survive as this one's end. The
+        // cursor still only rises: it is the fused path's append slot.
         self.lane_lens[lane] = offset + new_tokens;
         self.seq_len = self.seq_len.max(offset + new_tokens);
         Ok(())
@@ -144,9 +143,9 @@ where
     /// Write one step's K and V into every STEPPED lane, each at its own
     /// position.
     ///
-    /// Lanes hold sequences of different lengths, so a shared write
-    /// position would put a lane's token where another lane's tokens are.
-    /// Each row of `k` and `v` goes through the same lane write path as
+    /// Lanes hold sequences of different lengths, so a shared write position
+    /// puts a lane's token where another lane's tokens are. Each row of `k`
+    /// and `v` takes the same lane write path as
     /// [`KvCache::update_lane`], at the position `positions` gives it.
     ///
     /// # Arguments
@@ -154,10 +153,10 @@ where
     /// * `v` - New V values [batch, num_kv_heads, new_tokens, head_dim]
     /// * `positions` - First cache position each lane's row lands on
     ///
-    /// The count is the cache's ACTIVE batch, not its allocated one: a
-    /// narrowed cache steps the lanes `0..active_batch` and the rows above
-    /// them are not written at all. Those lanes keep whatever they hold,
-    /// which their own key range keeps out of every softmax.
+    /// The count is the cache's ACTIVE batch, not its allocated one. A
+    /// narrowed cache steps the lanes `0..active_batch` and writes none
+    /// above. Those lanes keep what they hold, which their own key range
+    /// keeps out of every softmax.
     ///
     /// # Errors
     ///
@@ -218,11 +217,10 @@ where
     /// Copy a one-sequence cache into lane `lane` of every layer, at
     /// position 0.
     ///
-    /// The source holds `src.seq_len()` tokens from position 0 and they
-    /// land at the same positions in the lane, so the lane's length is its
-    /// own sequence's length and no other lane constrains it. Whatever a
-    /// previous occupant left past that length sits outside the lane's
-    /// `[kv_start, kv_end)` range and is never read.
+    /// The source holds `src.seq_len()` tokens from position 0 and they land
+    /// at the same positions in the lane, so the lane's length is its own
+    /// sequence's length. Whatever a previous occupant left past that length
+    /// sits outside the lane's `[kv_start, kv_end)` range and is never read.
     ///
     /// # Errors
     ///
@@ -238,18 +236,17 @@ where
     }
 
     /// [`LayeredKvCache::install_lane`], but refusing rather than growing
-    /// when a layer's write would run past its own `capacity()`.
+    /// when a layer's write runs past its own `capacity()`.
     ///
     /// [`FrozenLayeredKvCache`](crate::inference::kv_cache::FrozenLayeredKvCache)
     /// calls this instead of [`LayeredKvCache::install_lane`], so nothing
-    /// it does can move a layer's K or V tensor off the address a captured
-    /// graph recorded.
+    /// moves a layer's K or V tensor off the address a captured graph
+    /// recorded.
     ///
     /// # Errors
     ///
     /// [`Error::InferenceError`] when the two caches hold a different
-    /// number of layers, or when a layer's write would run past its
-    /// `capacity()`.
+    /// number of layers, or when a layer's write runs past its `capacity()`.
     pub(super) fn install_lane_within_capacity<C: KvCacheOps<R>>(
         &mut self,
         src: &LayeredKvCache<R>,

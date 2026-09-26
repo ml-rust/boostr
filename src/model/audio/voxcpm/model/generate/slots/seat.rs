@@ -17,12 +17,11 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
     /// first, so a handoff the slot cannot take leaves the allocation where
     /// it was.
     ///
-    /// The lane is claimed LAST. Everything before it writes into slot
-    /// `slot` alone, so a refusal part way through leaves the slot free and
-    /// the table saying so — the slot can be seated again, and the batch
-    /// steps over it meanwhile with an empty key range. A widened
-    /// allocation is not a seat: it adds free rows and nothing else, so a
-    /// refusal after it leaves the state usable.
+    /// The lane is claimed LAST. Everything before it writes into slot `slot`
+    /// alone, so a refusal part way through leaves the slot free and the
+    /// table saying so. The slot stays seatable, and the batch steps over it
+    /// with an empty key range. A widened allocation adds free rows and
+    /// nothing else, so a refusal after it leaves the state usable.
     ///
     /// # Errors
     ///
@@ -56,9 +55,8 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
                 ),
             });
         }
-        // The handoff rows are stored at the ALLOCATION, which is one row
-        // until a slot above it is seated, so that is the width they are
-        // checked at rather than the ceiling.
+        // The handoff rows are stored at the ALLOCATION, so that is the width
+        // they are checked at, not the ceiling.
         let hidden = check_row(
             "state.prefill.lm_hidden",
             &self.prefill.lm_hidden,
@@ -70,9 +68,8 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
             self.alloc_width,
         )?;
         let len = check_prefilled(prefilled, hidden)?;
-        // Every check is done, so widening now cannot leave a grown
-        // allocation behind a refusal. This slot needs a row of its own
-        // before any of the writes below can address it.
+        // Every check is done, so widening here leaves no grown allocation
+        // behind a refusal. The writes below need this slot's own row.
         self.ensure_alloc(client, slot + 1)?;
         let (dtype, device) = (
             self.prefix_feat_cond.tensor().dtype(),
@@ -111,20 +108,18 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
         self.slot_options[slot] = Some(options);
 
         self.prefill.lanes.claim(client, slot, len)?;
-        // The lane is claimed, so this slot now counts toward the prefix the
-        // loop steps. A slot above the current stepped width widens it here,
-        // which is what puts the new request inside the rows a step runs.
+        // This slot now counts toward the prefix the loop steps. A slot above
+        // the current stepped width widens it here.
         self.refresh_active_width()
     }
 
     /// Give slot `slot` back: drop its patches, clear its bookkeeping and
     /// mark its lane free.
     ///
-    /// Neither KV cache is cleared, and none is needed. The next occupant
+    /// Neither KV cache is cleared, and neither needs it. The next occupant
     /// is installed from cache position 0 and reads only `[0, kv_end)`, so
-    /// the keys left above its end are unreachable and the ones below it
-    /// are overwritten by the install. VoxCPM2 carries no recurrent state
-    /// between steps, so there is nothing else a slot can leak.
+    /// keys above its end are unreachable and keys below it are overwritten
+    /// by the install. VoxCPM2 carries no recurrent state between steps.
     ///
     /// # Errors
     ///
@@ -141,22 +136,20 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
             });
         }
         if slot >= self.alloc_width {
-            // The allocation never reached this slot, so nothing was ever
-            // seated in it and there is no lane to give back. Releasing it
-            // is the no-op releasing any free slot is, and it must not
-            // widen the allocation to say so.
+            // The allocation never reached this slot, so there is no lane to
+            // give back. A no-op, and it must not widen the allocation.
             return Ok(());
         }
-        // Dropped here rather than at the end of the batch: a finished
-        // request's patches are the largest thing a slot holds.
+        // Dropped here, not at the end of the batch. A finished request's
+        // patches are the largest thing a slot holds.
         self.patches[slot] = Vec::new();
         self.patch_len[slot] = 0;
         self.outcomes[slot] = None;
         self.slot_options[slot] = None;
         self.prefill.lanes.free(client, slot)?;
-        // Releasing the HIGHEST occupied slot shortens the prefix, so the
-        // loop stops paying for it. Releasing one below it changes nothing:
-        // the prefix still has to reach the highest slot still seated.
+        // Releasing the HIGHEST occupied slot shortens the prefix. Releasing
+        // one below it changes nothing: the prefix still reaches the highest
+        // slot still seated.
         self.refresh_active_width()
     }
 

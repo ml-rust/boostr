@@ -12,11 +12,10 @@ use numr::tensor::Tensor;
 /// Where every row of a batched decode writes next, and where its keys end.
 ///
 /// Row `b` holds its sequence from cache position `pad.starts[b]` to
-/// `lens[b]`, so `lens[b]` is both the slot its next step writes and, after
-/// subtracting its start, the rope position it rotates at. One table serves
-/// both the `base_lm` and the `residual_lm` cache: the two are written at
-/// the same position and read over the same range, so they advance together
-/// through one [`advance`](Self::advance) after both have stepped.
+/// `lens[b]`. So `lens[b]` is the slot its next step writes, and minus its
+/// start, the rope position it rotates at. One table serves both the
+/// `base_lm` and the `residual_lm` cache: they write the same position over
+/// the same range, so one [`advance`](Self::advance) follows both steps.
 ///
 /// `kv_end` is rewritten in place through
 /// [`HostCopyOps::write_host_slice`], so its device address holds across
@@ -24,18 +23,18 @@ use numr::tensor::Tensor;
 /// it, by replacing it with a wider tensor. The host `lens` mirror backs
 /// every write, so no step reads a device tensor back.
 ///
-/// `rope_table_len` bounds every row: a position the model's rope table does
-/// not hold is refused here, not read out of bounds in a kernel. `None` for
-/// a pair of stacks that rotate nothing.
+/// `rope_table_len` bounds every row. A position the rope table does not
+/// hold is refused here, not read out of bounds in a kernel. `None` for a
+/// pair of stacks that rotate nothing.
 ///
-/// A lane can also be FREE: it holds no sequence, its length stays 0 and its
-/// `kv_end` entry is 0, an empty key range. A free lane inside the stepped
-/// prefix still runs every sub-step of the batch, and its step writes K/V at
-/// its own position 0, which the empty range keeps out of every softmax.
-/// A lane can also be stepped or not: the table carries a STEPPED WIDTH, the
-/// prefix of lanes a decode call covers. `super::active` owns it. The
-/// ALLOCATED width is not fixed either: `super::grow` widens it, adding
-/// free lanes above the ones already seated and never removing any.
+/// A FREE lane holds no sequence: length 0 and `kv_end` 0, an empty key
+/// range. A free lane inside the stepped prefix still runs every sub-step
+/// and writes K/V at position 0, which the empty range keeps out of every
+/// softmax.
+///
+/// Two widths: the STEPPED width is the lane prefix a decode call covers,
+/// owned by `super::active`. The ALLOCATED width is widened by `super::grow`,
+/// which adds free lanes above the seated ones and removes none.
 pub struct LanePositions<R: Runtime> {
     pub(super) pad: Option<LeftPad<R>>,
     pub(super) lens: Vec<usize>,
@@ -232,14 +231,14 @@ impl<R: Runtime<DType = DType>> LanePositions<R> {
 
     /// Count the position every occupied row just decoded.
     ///
-    /// Call this ONCE per step, after every stack that shares the table has
-    /// stepped. Advancing between two of them would rotate and file the
-    /// later one a position ahead of the earlier.
+    /// Call this ONCE per step, after every stack sharing the table has
+    /// stepped. Advancing between two of them files the later one a position
+    /// ahead of the earlier.
     ///
-    /// A free lane holds no sequence, so it counts nothing and stays at 0.
+    /// A free lane counts nothing and stays at 0.
     ///
     /// Every row is checked against the rope table first, so a refusal
-    /// leaves the table exactly as it was.
+    /// leaves the table unchanged.
     ///
     /// # Errors
     ///
@@ -263,7 +262,7 @@ impl<R: Runtime<DType = DType>> LanePositions<R> {
 
     /// Write the host mirror into `kv_end`, in place.
     ///
-    /// An occupied lane ends one past the position it is about to write; a
+    /// An occupied lane ends one past the position it is about to write. A
     /// free lane ends at 0, an empty range no kernel reads.
     pub(super) fn flush<C: HostCopyOps<R>>(&mut self, client: &C) -> Result<()> {
         self.ends.clear();
@@ -344,7 +343,7 @@ mod tests {
     }
 
     /// A padded row counts its rope position from its own start, so the
-    /// bound follows the row rather than the shared slot.
+    /// bound follows the row, not the shared slot.
     #[test]
     fn a_padded_row_is_bounded_from_its_own_start() {
         let device = CpuDevice::new();
@@ -382,8 +381,8 @@ mod tests {
         assert_eq!(table.kv_end().to_vec::<i32>(), vec![0, 0, 0]);
     }
 
-    /// A free lane counts nothing: only the occupied lanes move, and the
-    /// free lane's key range stays empty however long the batch runs.
+    /// Only occupied lanes move. A free lane's key range stays empty however
+    /// long the batch runs.
     #[test]
     fn advance_leaves_a_free_lane_where_it_is() {
         let device = CpuDevice::new();

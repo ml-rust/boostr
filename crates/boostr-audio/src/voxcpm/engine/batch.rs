@@ -29,8 +29,8 @@ use crate::voxcpm::engine::types::{EngineInner, VoxCpm2RenderClient};
 
 // The allowed row counts and the two roundings over them live in boostr,
 // beside the generation state whose stepped width reads the same list. The
-// engine and the loop must agree on which shapes the DiT's graph cache
-// holds, so there is one definition and the engine imports it.
+// engine and the loop must agree on which shapes the DiT's graph cache holds,
+// so the engine imports the one definition.
 pub(super) use boostr::model::audio::voxcpm::model::{batch_width, clamp_max_batch};
 
 /// One queued request. Holds no borrow, so it can sit in the queue while the
@@ -105,14 +105,14 @@ impl Reply {
 /// Per-row caps and seeds for a batch of `width` rows whose first
 /// `real_max_lens.len()` rows are real.
 ///
-/// Every real row draws from the SAME engine seed: row `b` of a step draws
+/// Every real row draws from the SAME engine seed. Row `b` of a step draws
 /// `randn_seeded(seed + i)` over its own `[1, feat_dim, patch_size]` and the
 /// rows are stacked, so a row's noise depends on neither the batch width nor
-/// its neighbours and a batched row renders bit for bit like its own render
-/// alone. A seed derived from arrival order or slot index would break that.
+/// its neighbours. A seed derived from arrival order or slot index breaks
+/// that.
 ///
-/// A slot past the last request holds none, so its entry is a placeholder:
-/// the loop needs one entry per slot, and a free slot counts no patch.
+/// A slot past the last request gets a placeholder entry. The loop needs one
+/// entry per slot, and a free slot counts no patch.
 pub(super) fn row_options(real_max_lens: &[usize], width: usize, seed: u64) -> Vec<RowOptions> {
     (0..width)
         .map(|b| RowOptions {
@@ -125,10 +125,10 @@ pub(super) fn row_options(real_max_lens: &[usize], width: usize, seed: u64) -> V
 /// Take `first`, then keep taking queued jobs until the batch is full, the
 /// window expires, or the queue closes.
 ///
-/// The owner thread has already blocked on an empty queue to get `first`, so
-/// this is the only wait a request pays beyond its own generation. It ends
-/// early on a full batch and on a closed queue, so a lone request on an
-/// engine being dropped is not held for the window.
+/// The owner thread already blocked on an empty queue to get `first`, so this
+/// is the only wait a request pays beyond its own generation. It ends early
+/// on a full batch and on a closed queue, so a lone request on an engine
+/// being dropped is not held for the window.
 pub(super) fn collect_batch(
     jobs: &Receiver<Job>,
     first: Job,
@@ -232,14 +232,8 @@ mod tests {
     }
 
     /// The persistent batch is the default route: the owner thread keeps one
-    /// batch open and admits arrivals into its free slots. Opting out takes
-    /// the route below — build a batch, run it to completion, tear it down.
-    ///
-    /// It is the default because neither of its costs is paid by a caller
-    /// who does not use it. A batch steps only its seated rows, so an idle
-    /// slot costs no compute, and the row allocation starts at one and grows
-    /// only as far as concurrency actually reaches, so an engine that never
-    /// sees two requests at once holds one row's worth of cache.
+    /// batch open and admits arrivals into its free slots. Opting out builds
+    /// a batch, runs it to completion and tears it down.
     #[test]
     fn the_default_options_take_the_persistent_batch_route() {
         use crate::voxcpm::options::VoxCpm2SynthOptions;
@@ -305,9 +299,9 @@ mod tests {
         assert_eq!(caps, [5, 6, 7, 1]);
     }
 
-    /// Everything queued inside the window rides in one batch. An empty
-    /// queue does not end the drain early: the window exists so a request
-    /// that arrives a moment later still joins, so the drain runs it out.
+    /// Everything queued inside the window rides in one batch. An empty queue
+    /// does not end the drain early, because the window exists so a request
+    /// arriving a moment later still joins.
     #[test]
     fn queued_jobs_batch_together() {
         let (tx, rx) = channel();

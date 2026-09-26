@@ -9,10 +9,9 @@
 //!
 //! Concurrent requests share one generation. Both entry points stay `&self`
 //! and blocking: they resolve their request, queue it and wait, while the
-//! engine's own thread runs whatever is queued at the same time as ONE
-//! batched generation. A row's noise draw is independent of the batch width
-//! and of its neighbours, so a batched render is bit for bit the render that
-//! row would have had alone.
+//! engine's own thread runs whatever is queued as ONE batched generation. A
+//! row's noise draw is independent of the batch width and its neighbours, so
+//! a batched render is bit for bit the render that row has alone.
 //!
 //! [`types`] holds the engine struct, the shared state and the constants,
 //! [`load`] the loader and voice-directory handling, [`render`] the caller's

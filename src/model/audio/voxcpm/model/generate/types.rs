@@ -15,9 +15,8 @@ pub(crate) const STOP_CLASS: i64 = 1;
 /// Knobs for the per-patch loop.
 ///
 /// Everything the CFM sampler already names lives in [`CfmOptions`], never
-/// duplicated here. Build one with [`GenerateOptions::new`]; there is no
-/// `Default`, because `max_len` has no defensible default — the KV caches
-/// the prefill allocated bound it.
+/// duplicated here. Build one with [`GenerateOptions::new`]. There is no
+/// `Default`: the KV caches the prefill allocated bound `max_len`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenerateOptions {
     /// Sampler settings for every [`LocalDit`] call: `n_timesteps`,
@@ -57,19 +56,12 @@ impl GenerateOptions {
     /// 1.0, `use_cfg_zero_star` on, `min_len` 2.
     ///
     /// `n_timesteps` is [`CfmOptions::default`]'s 10, NOT the reference clone
-    /// script's 32. This deviates from the reference deliberately, on measured
-    /// evidence: 32 costs proportionally more compute than 10 and sounds
-    /// WORSE — flatter, less prosodic variation. Whisper transcribes 10, 16,
-    /// 24 and 32 word-perfect, so intelligibility does not separate them;
-    /// the difference is naturalness, judged by ear.
+    /// script's 32. The deviation is deliberate. More solver steps converge
+    /// harder toward the mode of the flow and smooth away prosodic variation,
+    /// so 32 costs more compute and sounds flatter.
     ///
-    /// The direction is the opposite of the usual intuition, and the reason is
-    /// that more solver steps converge harder toward the mode of the flow,
-    /// which smooths away exactly the prosodic variation that makes speech
-    /// sound alive. More steps is not more quality here.
-    ///
-    /// If generation variance ever becomes a problem at 10, `--best-of` is the
-    /// lever to reach for, not a higher step count.
+    /// For generation variance at 10, reach for `--best-of`, not a higher step
+    /// count.
     pub fn new(max_len: usize, seed: u64) -> Self {
         Self {
             cfm: CfmOptions::default(),
@@ -150,34 +142,32 @@ pub enum StepOutcome {
 /// is the one-shot handoff, mutated in place: `lm_hidden`,
 /// `residual_hidden`, both caches and `position` all advance per iteration.
 ///
-/// Every STEPPED row runs on every iteration, a finished one included — its
-/// new patches are computed and discarded, which is what keeps the shared
-/// caches aligned without a compaction pass. [`patch_len`](Self::patch_len)
-/// is the per-row count that stops advancing at the finish.
+/// Every STEPPED row runs on every iteration, a finished one included. Its
+/// new patches are computed and discarded, which keeps the shared caches
+/// aligned without a compaction pass. [`patch_len`](Self::patch_len) is the
+/// per-row count that stops advancing at the finish.
 ///
-/// The state carries three widths and they mean different things.
+/// Three widths, none interchangeable.
 ///
 /// | Width | Counts | Moves |
 /// | --- | --- | --- |
-/// | `batch` | the CEILING: slots this state may ever hold | never |
-/// | `alloc_width` | the ALLOCATION: rows every device tensor and both caches hold | up only |
-/// | `active_width` | the STEPPED prefix one iteration runs | up and down |
+/// | `batch` | CEILING: slots this state can ever hold | never |
+/// | `alloc_width` | ALLOCATION: rows every device tensor and both caches hold | up only |
+/// | `active_width` | STEPPED: the prefix one iteration runs | up and down |
 ///
 /// `batch` is what a slot index and the options' `rows` list are checked
-/// against, and it is the length of every HOST per-row vector — `patches`,
-/// `outcomes`, `patch_len` and `slot_options`. Those are small and are
-/// sized at the ceiling once, so a slot index always addresses them.
+/// against. It is the length of every HOST per-row vector: `patches`,
+/// `outcomes`, `patch_len` and `slot_options`. They are sized at the ceiling
+/// once, so a slot index always addresses them.
 ///
 /// `alloc_width` is what the DEVICE tensors hold: both KV caches,
-/// `lm_hidden`, `residual_hidden`, `prefix_feat_cond` and the lane table.
-/// It starts at one row and grows with the stepped width, never past the
-/// ceiling and never back down. Do not read a device tensor's row count off
-/// `batch`: past `alloc_width` there is no row there.
+/// `lm_hidden`, `residual_hidden`, `prefix_feat_cond` and the lane table. It
+/// starts at one row and grows with the stepped width, never past the ceiling
+/// and never back down. Never read a device tensor's row count off `batch`.
 ///
-/// `active_width` is what one iteration actually steps: the prefix of slots
-/// that hold a request, rounded up to a width the DiT's Euler graph cache
-/// already has a capture for. Rows at or above it are not touched by a step
-/// at all.
+/// `active_width` is the prefix of slots holding a request, rounded up to a
+/// width the DiT's Euler graph cache already has a capture for. No step
+/// touches the rows at or above it.
 pub struct GenerateState<R: Runtime> {
     /// The prefill handoff, driven forward. `position` here is the ONE
     /// counter both caches follow.
@@ -193,7 +183,7 @@ pub struct GenerateState<R: Runtime> {
     /// `b` counts. Read a row's own patches with
     /// [`row_patches`](Self::row_patches).
     pub patches: Vec<Vec<Var<R>>>,
-    /// Slots this state may ever hold — the CEILING, fixed for its life.
+    /// Slots this state can ever hold — the CEILING, fixed for its life.
     ///
     /// A slot index, [`GenerateOptions::rows`] and every HOST per-row
     /// vector on this state are sized and checked against it. The DEVICE
@@ -205,21 +195,18 @@ pub struct GenerateState<R: Runtime> {
     ///
     /// A state opens at one row whatever its ceiling, and grows to cover a
     /// slot before anything is seated into it. Growth rounds up to the same
-    /// allowlist the stepped width uses and stops at the ceiling, so a state
-    /// grows at most a few times in its life. It NEVER shrinks: a batch that
-    /// has seen concurrency keeps the room rather than reallocating on the
-    /// next burst.
+    /// allowlist the stepped width uses and stops at the ceiling. It NEVER
+    /// shrinks.
     ///
     /// Read it from outside this module through the `alloc_width` method.
     pub(crate) alloc_width: usize,
     /// Slots STEPPED: the prefix `0..active_width` one iteration runs over.
     ///
-    /// Slots are seated lowest-free-first, so the occupied slots are a
-    /// prefix and the rows at or above this width hold no request. Those
-    /// rows are not touched at all — not solved, not encoded, not decoded —
-    /// which is why the two widths differ: the allocation is what the state
-    /// COULD hold, this is what it currently holds, rounded up to a width
-    /// the DiT's Euler graph cache already has a capture for.
+    /// Slots are seated lowest-free-first, so the occupied slots are a prefix
+    /// and the rows at or above this width hold no request. Those rows are
+    /// not solved, encoded or decoded. The allocation is what the state COULD
+    /// hold; this is what it holds now, rounded up to a width the DiT's Euler
+    /// graph cache already has a capture for.
     ///
     /// Recomputed by [`admit`](Self::admit) and [`release`](Self::release).
     /// Read it from outside this module through the `active_width` method.
@@ -291,10 +278,8 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
         let hidden = prefill.lm_hidden.tensor();
         let zeros = zero_patches(batch, config, hidden.dtype(), hidden.device())?;
         // Every row of a prefilled batch holds a request, so the stepped
-        // width IS the allocation here and there is nothing to narrow: the
-        // lane table seats every lane and both caches were built at this
-        // width. The slot path, where the two genuinely differ, recomputes
-        // the width on every seat and release instead.
+        // width IS the allocation and there is nothing to narrow. The slot
+        // path recomputes the width on every seat and release.
         Ok(Self {
             prefill,
             prefix_feat_cond: Var::new(zeros, false),
@@ -324,13 +309,11 @@ impl<R: Runtime<DType = DType>> GenerateState<R> {
 
     /// Whether slot `row` holds a request.
     ///
-    /// The lane table is the one record of that: it is what decides the
-    /// slot's key range, so nothing here can disagree with what the kernels
-    /// read.
+    /// The lane table is the one record of that. It decides the slot's key
+    /// range, so nothing here disagrees with what the kernels read.
     ///
-    /// A slot at or above the allocation holds nothing by construction:
-    /// seating one grows the allocation to cover it first, so there is no
-    /// lane up there to be occupied.
+    /// A slot at or above the allocation holds nothing by construction.
+    /// Seating one grows the allocation to cover it first.
     pub fn occupied(&self, row: usize) -> bool {
         row < self.alloc_width && !self.prefill.lanes.is_free(row)
     }
@@ -390,16 +373,9 @@ mod tests {
     /// The options constructor's real settings, not the test's cheap ones.
     ///
     /// `n_timesteps` is 10, DELIBERATELY not the reference clone script's 32.
-    /// Measured: 32 costs proportionally more compute than 10 and sounds
-    /// flatter — more solver steps converge harder toward the mode of
-    /// the flow and smooth away prosodic variation. Whisper transcribes 10, 16,
-    /// 24 and 32 word-perfect, so this was decided by listening, not by WER.
-    ///
-    /// If this assertion ever fails because someone "restored" 32 to match the
-    /// reference, that is a regression in both speed and quality — see
-    /// `GenerateOptions::new`'s doc comment. The parity gate
-    /// `examples/voxcpm_step_check.rs` pins 32 separately and on purpose,
-    /// because its Python fixtures were generated at that step count.
+    /// See `GenerateOptions::new`. Restoring 32 here regresses both speed and
+    /// quality. The parity gate `examples/voxcpm_step_check.rs` pins 32 on
+    /// purpose, because its Python fixtures were generated at that count.
     #[test]
     fn default_options_carry_the_clone_scripts_values() {
         let opts = GenerateOptions::new(600, 0);

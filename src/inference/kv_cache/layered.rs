@@ -95,9 +95,7 @@ where
     /// Step the first `rows` lanes of every layer — see
     /// [`KvCache::set_active_batch`].
     ///
-    /// Every layer of a stack is written and read by the same decode call,
-    /// so they move together or a call would meet one width on one layer
-    /// and another on the next.
+    /// One decode call reads and writes every layer, so they move together.
     ///
     /// # Errors
     ///
@@ -119,11 +117,11 @@ where
     /// Consume this growable cache and hand back a frozen handle over the
     /// same storage.
     ///
-    /// After this call no growable handle to these layers exists anywhere:
+    /// After this call no growable handle to these layers exists.
     /// [`FrozenLayeredKvCache`] has no `grow`, `grow_batch`,
     /// `ensure_capacity`, `update` or `update_fused`, so nothing reachable
-    /// through it can move a layer's K or V tensor off the address it was
-    /// allocated at — on the key axis or the lane axis.
+    /// through it moves a layer's K or V tensor off its allocated address, on
+    /// either axis.
     pub fn freeze(self) -> FrozenLayeredKvCache<R> {
         FrozenLayeredKvCache::from_growable(self)
     }

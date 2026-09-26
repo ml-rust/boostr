@@ -19,15 +19,13 @@ use crate::voxcpm::engine::types::{EngineInner, MAX_LEN_CAP, VoxCpm2RenderClient
 
 /// Run one persistent batch until the queue closes.
 ///
-/// The cycle is: take whatever is queued into free slots, step the batch
-/// once, then reply for and release every slot that finished. Only the
-/// cold start blocks — when no slot holds a request there is nothing to
-/// step, so the thread waits for one.
+/// The cycle: take whatever is queued into free slots, step the batch once,
+/// then reply for and release every slot that finished. Only the cold start
+/// blocks, because an empty batch has nothing to step.
 ///
-/// A failure to open the batch at all, or a failed step, is not survivable:
-/// the state behind it is what every row reads. Every waiting caller is
-/// failed and every later request is refused, so no caller is left blocked
-/// on a thread that has stopped generating.
+/// A failure to open the batch, or a failed step, is not survivable. Every
+/// row reads the state behind it. Every waiting caller is failed and every
+/// later request refused, so no caller blocks on a stopped thread.
 pub(in crate::voxcpm::engine) fn run_continuous<R>(inner: &EngineInner<R>, jobs: &Receiver<Job>)
 where
     R: Runtime<DType = DType> + 'static,
@@ -58,9 +56,9 @@ where
                 Ok(first) => batch.cold_start(inner, jobs, first),
                 Err(_) => return,
             }
-            // Every job of the cold start can have been refused; going
-            // round again blocks for the next one rather than stepping an
-            // empty batch.
+            // Every job of the cold start can have been refused. Go round
+            // again to block for the next one rather than step an empty
+            // batch.
             continue;
         }
         if let Err(err) = batch.step(inner) {
@@ -76,14 +74,12 @@ where
 /// The budget is
 /// [`VoxCpm2SynthOptions::continuous_capacity`](crate::voxcpm::VoxCpm2SynthOptions::continuous_capacity),
 /// which a caller sizes to the requests it serves. The model's rope table
-/// caps it: a position the table does not hold cannot be rotated, so a
-/// longer cache could be filled and never read.
+/// caps it: a position the table does not hold cannot be rotated, so a longer
+/// cache can be filled and never read.
 ///
-/// This is deliberately NOT derived from [`MAX_LEN_CAP`]. That is the
-/// ceiling ONE request is allowed to reach, and a persistent batch holds
-/// `max_batch` slots of this size in two caches for its whole life, so
-/// sizing every slot for the longest request any of them could ever make
-/// reserves far more than a working engine uses.
+/// Deliberately NOT derived from [`MAX_LEN_CAP`]. That is the ceiling ONE
+/// request can reach, and a persistent batch holds `max_batch` slots of this
+/// size in two caches for its whole life.
 fn slot_capacity<R: Runtime<DType = DType>>(inner: &EngineInner<R>) -> Result<usize> {
     let want = inner.options.continuous_capacity;
     Ok(match inner.model.lane_rope_positions()? {
@@ -113,15 +109,15 @@ where
 {
     /// Open an empty batch of `width` slots.
     ///
-    /// `width` is the CEILING and is fixed for the batch's whole life: it
-    /// bounds the slots, and nothing is seated above it. The device tensors
-    /// start at one row and [`GenerateState`] widens them as slots above the
-    /// allocation are seated, so an idle batch holds one row rather than
-    /// `width` of them. What one step runs over is the prefix of slots that
-    /// hold a request, which [`GenerateState`] recomputes as slots are
-    /// seated and released. That stepped width is the shape key of the DiT's
-    /// Euler graph cache, and it only ever takes one of a short list of
-    /// values, so the captures are shared rather than churned.
+    /// `width` is the CEILING, fixed for the batch's whole life. Nothing is
+    /// seated above it. The device tensors start at one row and
+    /// [`GenerateState`] widens them as slots above the allocation are
+    /// seated, so an idle batch holds one row.
+    ///
+    /// One step runs over the prefix of slots holding a request, which
+    /// [`GenerateState`] recomputes on every seat and release. That stepped
+    /// width is the DiT Euler graph cache's shape key and takes one of a
+    /// short list of values, so the captures are shared.
     fn open(inner: &'a EngineInner<R>, width: usize, capacity: usize) -> Result<Self> {
         let mut options = GenerateOptions::new(MAX_LEN_CAP, inner.options.seed);
         options.cfm.n_timesteps = inner.options.n_timesteps;
@@ -152,10 +148,8 @@ where
     /// for.
     ///
     /// This is the ONE place the drain window applies. In the steady state a
-    /// joiner is taken between two steps and waits for neither the window
-    /// nor the batch, so the window costs a request nothing once anything is
-    /// running — and a request that arrives alone pays it exactly once,
-    /// here.
+    /// joiner is taken between two steps and waits for neither the window nor
+    /// the batch. A request arriving alone pays the window once, here.
     fn cold_start(&mut self, inner: &'a EngineInner<R>, jobs: &Receiver<Job>, first: Job) {
         let free = self.slots.free_count();
         for job in collect_batch(jobs, first, inner.options.batch_window, free) {
@@ -179,9 +173,9 @@ where
 
     /// Prefill `job` on its own and seat it in slot `slot`.
     ///
-    /// The prefill runs here, on the owner thread, between two steps: it is
-    /// a different sequence length from a decode step, and a lane is
-    /// installed from a batch of one whose keys start at cache position 0.
+    /// The prefill runs here, on the owner thread, between two steps. It is a
+    /// different sequence length from a decode step, and a lane is installed
+    /// from a batch of one whose keys start at cache position 0.
     ///
     /// Anything that refuses the request — an unknown voice, a request too
     /// long for a slot, a prefill error — is reported on the job's own reply
@@ -198,11 +192,11 @@ where
             Err(err) => return job.reply.fail(err),
         };
         let client = inner.client.as_ref();
-        // The handoff cache holds this row's prefix and nothing else: its
+        // The handoff cache holds this row's prefix and nothing else. Its
         // keys are copied into the slot's lane from position 0, so sizing it
-        // to the slot's whole capacity would reserve the batch's budget a
-        // second time on every admission. A length that does not match the
-        // sequence the layout builds is refused by the prefill itself.
+        // to the slot's whole capacity reserves the batch's budget a second
+        // time on every admission. The prefill itself refuses a length that
+        // does not match the sequence the layout builds.
         let prefilled = match inner.model.prefill_batch(
             client,
             &[PrefillRow {
@@ -236,14 +230,13 @@ where
     /// Step the seated slots once, then reply for and release the slots that
     /// finished.
     ///
-    /// The step covers the prefix of slots that hold a request, not the
-    /// whole allocation, so a lone request in a wide batch costs what one
-    /// row costs. The retire walk below still covers every slot: the slot
+    /// The step covers the prefix of slots holding a request, not the whole
+    /// allocation. The retire walk below covers every slot, because the slot
     /// table and the per-row records are sized by the allocation.
     ///
-    /// A released slot's row is DROPPED here, which drops its reply sender:
-    /// that is how a streaming caller's drain loop ends, whether the row ran
-    /// to its stop token or was retired mid-stream.
+    /// A released slot's row is DROPPED here, which drops its reply sender.
+    /// That ends a streaming caller's drain loop, whether the row ran to its
+    /// stop token or was retired mid-stream.
     fn step(&mut self, inner: &'a EngineInner<R>) -> Result<()> {
         let client = inner.client.as_ref();
         let chunk = inner.options.stream_chunk_patches.max(1);
@@ -290,10 +283,10 @@ where
 
     /// Rebuild the per-row caps from the state's own slot record.
     ///
-    /// [`GenerateState::slot_options`] is what `admit` and `release` write,
-    /// so the loop's caps cannot disagree with the slots they belong to. A
-    /// free slot needs an entry all the same — the options carry one per
-    /// slot — and counts no patch, so its cap is the smallest legal one.
+    /// `admit` and `release` write [`GenerateState::slot_options`], so the
+    /// loop's caps cannot disagree with the slots they belong to. The options
+    /// carry one entry per slot, and a free slot counts no patch, so its cap
+    /// is the smallest legal one.
     fn refresh_options(&mut self) {
         let seed = self.seed;
         self.options.rows = self
@@ -307,8 +300,8 @@ where
 
 /// Fail every queued and every later request until the queue closes.
 ///
-/// A caller blocks on its reply channel, so a thread that has stopped
-/// generating must keep answering rather than stop reading the queue.
+/// A caller blocks on its reply channel, so a stopped thread must keep
+/// answering rather than stop reading the queue.
 fn refuse_queue(jobs: &Receiver<Job>, err: &Error) {
     let reason = format!("VoxCPM2 continuous batch is not running: {err}");
     while let Ok(job) = jobs.recv() {
@@ -353,13 +346,12 @@ mod tests {
         )
     }
 
-    /// The default slot size holds an ordinary clone request, spelled out:
-    /// a reference recording of a few hundred patches, a sentence of around
-    /// a hundred tokens, and the patches that sentence generates.
+    /// The default slot size holds an ordinary clone request: a reference
+    /// recording of a few hundred patches, a sentence of around a hundred
+    /// tokens, and the patches that sentence generates.
     ///
-    /// This is the derivation behind the default, run rather than asserted
-    /// in prose — a default that no longer holds an ordinary request would
-    /// refuse one at the engine's door.
+    /// A default that stops holding an ordinary request refuses one at the
+    /// engine's door.
     #[test]
     fn the_default_slot_holds_an_ordinary_request() {
         use crate::voxcpm::options::VoxCpm2SynthOptions;
@@ -375,7 +367,7 @@ mod tests {
     }
 
     /// A request whose prefill plus patches fills the slot exactly is one
-    /// position too long: the lane table advances once past the last patch.
+    /// position too long. The lane table advances once past the last patch.
     #[test]
     fn a_request_that_cannot_fit_a_slot_is_refused_with_its_own_numbers() {
         let (job, rx) = job(100, 28);

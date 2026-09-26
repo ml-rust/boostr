@@ -19,7 +19,7 @@ pub struct KvCache<R: Runtime> {
     pub(super) seq_len: usize,
     /// One past each lane's last key. A lane-at-a-time cache holds one
     /// sequence per row, each from position 0 with its own end, so the rows
-    /// disagree and `seq_len` — their maximum — describes none of them.
+    /// disagree and `seq_len`, their maximum, describes none of them.
     pub(super) lane_lens: Vec<usize>,
     pub(super) capacity: usize,
     pub(super) max_seq_len: usize,
@@ -30,9 +30,8 @@ pub struct KvCache<R: Runtime> {
     pub(super) batch_size: usize,
     /// Lanes STEPPED: the prefix `0..active_batch` a decode call reads and
     /// writes. Defaults to `batch_size` and is lowered by
-    /// [`KvCache::set_active_batch`] when the rows above it hold nothing, so
-    /// a step pays for the rows it has rather than the rows it could hold.
-    /// Never an index bound for seating a lane — that is `batch_size`.
+    /// [`KvCache::set_active_batch`] when the rows above it hold nothing.
+    /// Never an index bound for seating a lane; that is `batch_size`.
     active_batch: usize,
     /// `k_cache` narrowed to `0..active_batch`, `None` while the two widths
     /// agree. A dim-0 prefix is a contiguous view over the same storage, so
@@ -90,10 +89,10 @@ where
     /// [`v_cache_raw`](Self::v_cache_raw), [`get_kv`](Self::get_kv),
     /// [`lane_lens`](Self::lane_lens) — then covers `0..rows`, and
     /// [`update_lanes`](Self::update_lanes) wants one row and one position
-    /// per stepped lane rather than per allocated lane. Seating a lane is
-    /// unaffected: [`update_lane`](Self::update_lane) still addresses the
-    /// full allocated width, so a caller can install a sequence above the
-    /// stepped prefix and widen it afterwards.
+    /// per stepped lane rather than per allocated lane.
+    /// [`update_lane`](Self::update_lane) still addresses the full allocated
+    /// width, so a caller installs a sequence above the stepped prefix and
+    /// widens afterwards.
     ///
     /// # Errors
     ///
@@ -121,9 +120,9 @@ where
 
     /// Rebuild the narrowed K/V views.
     ///
-    /// Called whenever the active width moves AND whenever `k_cache` or
-    /// `v_cache` is replaced by a new tensor, since a view of the old one
-    /// would then describe storage nothing writes any more.
+    /// Call this whenever the active width moves, and whenever `k_cache` or
+    /// `v_cache` is replaced. A view of the replaced tensor describes storage
+    /// nothing writes.
     pub(super) fn refresh_active_views(&mut self) -> Result<()> {
         if self.active_batch == self.batch_size {
             self.active_k = None;
@@ -206,7 +205,7 @@ where
 
         self.k_cache = self.k_cache.slice_assign(k, 2, self.seq_len)?;
         self.v_cache = self.v_cache.slice_assign(v, 2, self.seq_len)?;
-        // `slice_assign` is functional: both buffers are new tensors now, so
+        // `slice_assign` is functional, so both buffers are new tensors and
         // any view of the old ones describes storage nothing writes.
         self.refresh_active_views()?;
 
@@ -271,14 +270,13 @@ where
     ///
     /// Unlike `get_kv()`, this keeps the whole capacity on the key axis
     /// without narrowing or reallocation, so it is safe as a CUDA graph
-    /// argument. Both growth paths — growing the key axis to hold more
-    /// tokens, and [`grow_batch`](Self::grow_batch) growing the lane axis —
-    /// replace this buffer, so a caller that has captured a graph against
-    /// it must not grow the cache afterwards.
+    /// argument. Both growth paths — the key axis, and
+    /// [`grow_batch`](Self::grow_batch) on the lane axis — replace this
+    /// buffer. A caller holding a graph captured against it must not grow the
+    /// cache.
     ///
-    /// The lane axis is the STEPPED prefix: a dim-0 prefix of a dense
-    /// tensor is itself dense and starts at the same address, so a kernel
-    /// reading it reads the same bytes for the lanes it covers.
+    /// The lane axis is the STEPPED prefix. A dim-0 prefix of a dense tensor
+    /// is dense and starts at the same address.
     pub fn k_cache_raw(&self) -> &Tensor<R> {
         self.active_k.as_ref().unwrap_or(&self.k_cache)
     }
@@ -296,8 +294,8 @@ where
 
     /// One past each lane's last key, lane by lane.
     ///
-    /// [`seq_len`](Self::seq_len) is the maximum of these and moves only up,
-    /// so it is the cursor a FUSED write appends at and says nothing about a
+    /// [`seq_len`](Self::seq_len) is the maximum of these and moves only up.
+    /// It is the cursor a FUSED write appends at and says nothing about a
     /// cache filled one lane at a time. A caller checking where a lane's next
     /// token belongs reads this instead.
     ///
@@ -339,8 +337,8 @@ where
     }
 
     /// Lanes ALLOCATED. [`active_batch`](Self::active_batch) is the width a
-    /// decode call steps, which is this or less, and
-    /// [`grow_batch`](Self::grow_batch) is the one thing that raises it.
+    /// decode call steps, which is this or less.
+    /// [`grow_batch`](Self::grow_batch) is the only thing that raises it.
     pub fn batch_size(&self) -> usize {
         self.batch_size
     }
@@ -393,7 +391,7 @@ mod tests {
         let mut cache = KvCache::<CpuRuntime>::new(1, 2, 4, 2048, 4, DType::F32, &device).unwrap();
         assert_eq!(cache.capacity(), 4);
 
-        // Fill beyond capacity - should trigger growth
+        // Fill beyond capacity, which must trigger growth.
         let k = Tensor::<CpuRuntime>::zeros(&[1, 2, 5, 4], DType::F32, &device).unwrap();
         let v = Tensor::<CpuRuntime>::zeros(&[1, 2, 5, 4], DType::F32, &device).unwrap();
         cache.update(&k, &v).unwrap();
@@ -435,9 +433,8 @@ mod tests {
         assert!(cache.get_kv().is_err());
     }
 
-    /// Narrowing the stepped width narrows every per-step read and leaves
-    /// the allocation alone, and the views survive a growth that replaces
-    /// both buffers.
+    /// Narrowing the stepped width narrows every per-step read, leaves the
+    /// allocation alone, and survives a growth that replaces both buffers.
     #[test]
     fn active_batch_narrows_the_stepped_reads() {
         let device = numr::runtime::cpu::CpuDevice::new();

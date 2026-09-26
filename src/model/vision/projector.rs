@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::model::config::VisionConfig;
 use crate::nn::{Activation, Linear, VarBuilder};
 use numr::autograd::Var;
-use numr::ops::{ActivationOps, TensorOps, UnaryOps};
+use numr::ops::{ActivationOps, BinaryOps, ScalarOps, TensorOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
 use numr::tensor::Tensor;
 
@@ -77,7 +77,12 @@ impl<R: Runtime> MultimodalProjector<R> {
     /// output: [B, num_patches, llm_hidden]
     pub fn forward_inference<C>(&self, client: &C, input: &Tensor<R>) -> Result<Tensor<R>>
     where
-        C: RuntimeClient<R> + TensorOps<R> + ActivationOps<R> + UnaryOps<R>,
+        C: RuntimeClient<R>
+            + TensorOps<R>
+            + ActivationOps<R>
+            + UnaryOps<R>
+            + BinaryOps<R>
+            + ScalarOps<R>,
         R::Client: TensorOps<R>,
     {
         let input_var = Var::new(input.clone(), false);

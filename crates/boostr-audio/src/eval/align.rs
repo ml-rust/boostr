@@ -1,33 +1,6 @@
-//! Error-rate metrics for ASR output and for the intelligibility leg of TTS eval.
-//!
-//! Two callers need this and neither should reimplement it:
-//!
-//! - **Corpus QC.** A transcript is training ground truth. Measuring an ASR's
-//!   word error rate against a read script is how we learn whether an
-//!   ASR-transcribed corpus is usable at all.
-//! - **TTS eval.** Intelligibility of generated speech is ASR WER over that
-//!   speech against the text it was asked to say.
-//!
-//! **CPU-only, no tensors.** Levenshtein over token sequences: two rows of
-//! `O(hypothesis)` state, one pass per utterance.
-//!
-//! # Normalization is part of the metric, not a detail
-//!
-//! WER is meaningless without saying how text was normalized, because
-//! normalization choices move the number by several points. [`normalize`]
-//! documents every rule it applies. Two of them matter enough to state here:
-//!
-//! - **Hyphens become spaces**, so `ter-delete` scores as two tokens
-//!   `["ter", "delete"]`. Malay affixes on English roots are usually written
-//!   with a hyphen and transcribed without one; this rule makes
-//!   `ter-delete`/`ter delete` a match and `ter-delete`/`terdelete` a
-//!   two-error miss. There is no neutral choice here — it is recorded so the
-//!   number can be interpreted.
-//! - **Numbers are NOT converted between digits and words.** `250` and
-//!   `two hundred and fifty` score as four errors, not zero. Converting them
-//!   needs a per-language number-word engine, and getting it wrong silently
-//!   flatters the ASR. Score number-bearing prompts as their own subset
-//!   instead of normalizing the difference away.
+//! Levenshtein alignment and the error-rate counts it produces.
+
+use crate::eval::normalize::normalize;
 
 /// Counts behind one error rate, kept separately so they can be summed.
 ///
@@ -93,38 +66,6 @@ impl std::iter::Sum for ErrorRate {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(Self::default(), |a, b| a + b)
     }
-}
-
-/// Normalize `text` into comparison tokens.
-///
-/// Rules, applied in order:
-///
-/// 1. Lowercase (`char::to_lowercase`, so it is Unicode-aware, not ASCII-only).
-/// 2. Every character that is neither alphanumeric nor `'` becomes a space.
-///    This strips `.,?!:;"` and turns `-` and `/` into token boundaries.
-/// 3. Leading and trailing `'` are trimmed from each token, so `'word'`
-///    normalizes to `word` while `don't` keeps its apostrophe.
-/// 4. Split on whitespace; empty tokens are dropped.
-///
-/// Digits are left as digits — see the module docs on why numbers are not
-/// converted.
-pub fn normalize(text: &str) -> Vec<String> {
-    let spaced: String = text
-        .chars()
-        .flat_map(|c| {
-            if c.is_alphanumeric() || c == '\'' {
-                c.to_lowercase().collect::<Vec<char>>()
-            } else {
-                vec![' ']
-            }
-        })
-        .collect();
-
-    spaced
-        .split_whitespace()
-        .map(|t| t.trim_matches('\'').to_string())
-        .filter(|t| !t.is_empty())
-        .collect()
 }
 
 /// Edit counts aligning `hypothesis` to `reference`, both already tokenized.
@@ -248,10 +189,10 @@ where
 
 /// Corpus-level total per group, over `(group_key, reference, hypothesis)`.
 ///
-/// A number-bearing subset needs its own figure rather than being pooled into
-/// the rest of the corpus — see the module docs on why digits and number words
-/// are never reconciled. This is how a caller gets that subset scored without
-/// grouping the pairs by hand first.
+/// A number-bearing subset needs its own figure whenever the metric is scored
+/// over [`normalize`], which leaves digits and number words unreconciled. This
+/// is how a caller gets that subset scored without grouping the pairs by hand
+/// first.
 ///
 /// Each group sums its counts and divides once, the same corpus definition
 /// [`total`] uses; averaging per-utterance rates within a group is still not
@@ -286,4 +227,45 @@ where
 /// from that map, instead of scoring every item a second time.
 pub fn grand_total<K>(groups: &std::collections::BTreeMap<K, ErrorRate>) -> ErrorRate {
     groups.values().copied().sum::<ErrorRate>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identical_token_streams_are_all_hits() {
+        let rate = word_error_rate("one two three", "one two three");
+        assert_eq!(rate.hits, 3);
+        assert_eq!(rate.errors(), 0);
+        assert_eq!(rate.rate(), 0.0);
+    }
+
+    #[test]
+    fn counts_split_into_substitution_deletion_insertion() {
+        let rate = align(&["a", "b", "c"], &["a", "x", "c", "d"]);
+        assert_eq!(rate.substitutions, 1);
+        assert_eq!(rate.insertions, 1);
+        assert_eq!(rate.deletions, 0);
+        assert_eq!(rate.hits, 2);
+    }
+
+    #[test]
+    fn an_empty_reference_with_output_has_no_denominator() {
+        assert_eq!(word_error_rate("", "").rate(), 0.0);
+        assert!(word_error_rate("", "hello").rate().is_infinite());
+    }
+
+    #[test]
+    fn character_rate_ignores_spacing_in_the_raw_text() {
+        assert_eq!(character_error_rate("a  b", "a b").errors(), 0);
+    }
+
+    #[test]
+    fn grand_total_matches_the_ungrouped_total() {
+        let items = [("x", "one two", "one two"), ("y", "three", "four")];
+        let groups = by_group(items, word_error_rate);
+        let flat = total([("one two", "one two"), ("three", "four")], word_error_rate);
+        assert_eq!(grand_total(&groups), flat);
+    }
 }

@@ -1,10 +1,11 @@
 //! Intelligibility of a render: Whisper transcript scored against the prompt.
 //!
 //! [`IntelligibilityScorer`] loads one [`WhisperBundle`] and scores any number
-//! of clips against the text each was asked to say, with
-//! [`word_error_rate`] and [`character_error_rate`] over
-//! [`crate::eval::normalize`]d text. The bundle is cast to F32 on load so an
-//! fp16 checkpoint (`whisper-large-v3`) runs against the F32 mel.
+//! of clips against the text each was asked to say. Both sides go through
+//! [`crate::eval::canonicalize`], which scores the speech rather than the
+//! ASR's spelling of digits, currency and hyphenated affixes. The bundle is
+//! cast to F32 on load so an fp16 checkpoint (`whisper-large-v3`) runs
+//! against the F32 mel.
 //!
 //! What it tells you: dropped, invented or slurred words. What it cannot
 //! tell you: naturalness. Whisper reads clean TTS word-perfect long before
@@ -23,7 +24,7 @@
 use std::path::Path;
 
 use crate::error::{Error, Result};
-use crate::eval::{ErrorRate, character_error_rate, word_error_rate};
+use crate::eval::{ErrorRate, canonical_character_error_rate, canonical_word_error_rate};
 #[cfg(feature = "vad")]
 use crate::vad::{SpeechSegment, VadSegmentOptions, speech_timestamps};
 use crate::whisper::{TranscribeOptions, WhisperBundle};
@@ -161,8 +162,8 @@ impl<R: Runtime<DType = DType>> IntelligibilityScorer<R> {
         } else {
             self.transcribe_long(client, samples_16k, &opts)?
         };
-        let wer = word_error_rate(prompt, &transcript);
-        let cer = character_error_rate(prompt, &transcript);
+        let wer = canonical_word_error_rate(prompt, &transcript);
+        let cer = canonical_character_error_rate(prompt, &transcript);
         Ok(Intelligibility {
             transcript,
             wer,

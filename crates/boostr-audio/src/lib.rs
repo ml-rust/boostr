@@ -51,8 +51,8 @@ pub use corpus::{
 #[cfg(feature = "decode")]
 pub use decode::{decode_audio, decode_audio_file_mono_at, decode_audio_mono_at, extension_hint};
 pub use eval::{
-    ErrorRate, align, by_group, character_error_rate, grand_total, normalize, total,
-    word_error_rate,
+    ErrorRate, align, by_group, canonical_character_error_rate, canonical_word_error_rate,
+    canonicalize, character_error_rate, grand_total, normalize, total, word_error_rate,
 };
 pub use g2p::{G2pError, Lang, Phonemizer};
 pub use pitch::{PitchOptions, PitchTrack, estimate_pitch};

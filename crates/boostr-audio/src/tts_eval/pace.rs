@@ -1,12 +1,18 @@
 //! Speaking pace and silence budget of one render, from VAD segments.
 //!
 //! `words` counts the PROMPT (what the model was asked to say), normalised
-//! with [`crate::eval::normalize`], never the transcript. So the ratio
+//! with [`crate::eval::normalize()`], never the transcript. So the ratio
 //! `words_per_speech_s` reads as a render-length check: a render that
 //! stopped early packs the prompt's words into too little speech and shows
 //! HIGH, a render that stalled or babbled past the prompt shows LOW. It is
 //! not a speaking-rate measurement of the audio on its own; pair it with
 //! `intelligibility` to know which of the two happened.
+//!
+//! [`crate::eval::normalize()`] is the right tokenizer here and
+//! [`crate::eval::canonicalize`] is not. A speaker takes three words to say
+//! `dua puluh tiga`, which canonicalization collapses to the single token
+//! `23`. That undercount would drag `words_per_speech_s` down on every
+//! number-bearing prompt.
 //!
 //! Leading and trailing silence are the gaps before the first and after the
 //! last VAD segment. A render with no speech at all reports the whole clip

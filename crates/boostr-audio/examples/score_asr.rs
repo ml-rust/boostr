@@ -44,7 +44,11 @@
 //! rest of the corpus, such as prompts that must not have their numbers
 //! normalized away — see `boostr_audio::eval`'s module docs.
 //!
-//! `--cer` scores with `character_error_rate` instead of `word_error_rate`.
+//! `--cer` scores characters instead of words.
+//!
+//! Scoring canonicalizes both sides by default, so a number written as words
+//! matches the same number in digits and a Malay affix matches whether it is
+//! hyphenated, joined or spaced. `--raw` scores the tokens as written.
 //!
 //! # What "missing" means and why it exits non-zero
 //!
@@ -56,10 +60,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use boostr_audio::{ErrorRate, by_group, character_error_rate, grand_total, word_error_rate};
+use boostr_audio::{
+    ErrorRate, by_group, canonical_character_error_rate, canonical_word_error_rate,
+    character_error_rate, grand_total, word_error_rate,
+};
 
 const USAGE: &str = "usage: score_asr --references FILE --hypotheses FILE \
-[--text-column NAME] [--group-column NAME] [--cer]";
+[--text-column NAME] [--group-column NAME] [--cer] [--raw]";
 
 /// How many missing ids to print by name before collapsing the rest into a count.
 const MAX_LISTED_MISSING: usize = 5;
@@ -70,6 +77,7 @@ struct Args {
     text_column: String,
     group_column: Option<String>,
     cer: bool,
+    raw: bool,
 }
 
 fn take_value(argv: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -86,6 +94,7 @@ fn parse_args() -> Result<Args, String> {
     let mut text_column = "text".to_string();
     let mut group_column = None;
     let mut cer = false;
+    let mut raw = false;
 
     let mut i = 0usize;
     while i < argv.len() {
@@ -96,6 +105,7 @@ fn parse_args() -> Result<Args, String> {
             "--text-column" => text_column = take_value(&argv, &mut i, flag)?,
             "--group-column" => group_column = Some(take_value(&argv, &mut i, flag)?),
             "--cer" => cer = true,
+            "--raw" => raw = true,
             "-h" | "--help" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown flag {other}\n{USAGE}")),
         }
@@ -108,6 +118,7 @@ fn parse_args() -> Result<Args, String> {
         text_column,
         group_column,
         cer,
+        raw,
     })
 }
 
@@ -291,10 +302,11 @@ fn main() {
         print_capped("no reference for", &extra_hyp);
     }
 
-    let metric = if args.cer {
-        character_error_rate
-    } else {
-        word_error_rate
+    let metric = match (args.cer, args.raw) {
+        (true, false) => canonical_character_error_rate,
+        (false, false) => canonical_word_error_rate,
+        (true, true) => character_error_rate,
+        (false, true) => word_error_rate,
     };
     let items = matched.iter().map(|(group, reference, hypothesis)| {
         (group.as_str(), reference.as_str(), hypothesis.as_str())

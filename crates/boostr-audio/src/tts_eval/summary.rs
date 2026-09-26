@@ -19,7 +19,9 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 #[cfg(feature = "whisper")]
-use crate::eval::{ErrorRate, by_group, character_error_rate, grand_total, word_error_rate};
+use crate::eval::{
+    ErrorRate, by_group, canonical_character_error_rate, canonical_word_error_rate, grand_total,
+};
 #[cfg(feature = "whisper")]
 use crate::tts_eval::intelligibility::Intelligibility;
 #[cfg(feature = "vad")]
@@ -285,11 +287,11 @@ impl Summary {
             let items: Vec<(String, &str, &str)> = scored.collect();
             let wer = by_group(
                 items.iter().map(|(k, r, h)| (k.clone(), *r, *h)),
-                word_error_rate,
+                canonical_word_error_rate,
             );
             let cer = by_group(
                 items.iter().map(|(k, r, h)| (k.clone(), *r, *h)),
-                character_error_rate,
+                canonical_character_error_rate,
             );
             (wer, cer)
         };
@@ -443,14 +445,14 @@ mod tests {
         a.axis = Some("x".into());
         a.intelligibility = Some(Intelligibility {
             transcript: "one two".into(),
-            wer: word_error_rate("one two", "one two"),
-            cer: character_error_rate("one two", "one two"),
+            wer: canonical_word_error_rate("one two", "one two"),
+            cer: canonical_character_error_rate("one two", "one two"),
         });
         let mut b = RowScore::new("b", "one two", "b.wav");
         b.intelligibility = Some(Intelligibility {
             transcript: "one".into(),
-            wer: word_error_rate("one two", "one"),
-            cer: character_error_rate("one two", "one"),
+            wer: canonical_word_error_rate("one two", "one"),
+            cer: canonical_character_error_rate("one two", "one"),
         });
         let s = Summary::from_rows(&[a, b]);
         assert_eq!(s.wer_by_axis["x"].rate(), 0.0);

@@ -82,9 +82,10 @@ spacy-tokenizer = ["dep:regexr", "dep:unicode-general-category"]
 # `spacy-tokenizer`, whose tokens it tags.
 spacy-tagger = ["boostr/spacy-tagger", "spacy-tokenizer"]
 # Narration scripts: phrases, VoxCPM2 chunks, subtitle and timed script
-# files, written-script alignment, and number words. Its sentence pattern
-# uses lookahead, and number words are read after NFKD. splintr already
-# links both crates, so nothing new enters the graph.
+# files, written-script alignment, number words, and the check of heard
+# words against a script. Its sentence pattern uses lookahead, and number
+# words are read after NFKD. splintr already links both crates, so nothing
+# new enters the graph.
 narration = ["dep:regexr", "dep:unicode-normalization"]
 # `TtsEngine`, `TtsBundle`, `Voice`: the engine-agnostic synthesis surface.
 tts = []

@@ -1,0 +1,1660 @@
+[
+ {
+  "name": "exact match",
+  "heard": [
+   {
+    "text": "The",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "river",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "runs",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "north",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "to",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "the",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "sea.",
+    "start": 2.4,
+    "end": 2.75
+   }
+  ],
+  "text": "The river runs north to the sea."
+ },
+ {
+  "name": "one substitution",
+  "heard": [
+   {
+    "text": "The",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "river",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "walks",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "north",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "to",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "the",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "sea.",
+    "start": 2.4,
+    "end": 2.75
+   }
+  ],
+  "text": "The river runs north to the sea."
+ },
+ {
+  "name": "long near-miss matches",
+  "heard": [
+   {
+    "text": "iscribe",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "the",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "whole",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "garden.",
+    "start": 1.2,
+    "end": 1.55
+   }
+  ],
+  "text": "Describe the whole garden."
+ },
+ {
+  "name": "short one-edit word does not match",
+  "heard": [
+   {
+    "text": "Tahi",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "rezeki",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "datang",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "juga.",
+    "start": 1.2,
+    "end": 1.55
+   }
+  ],
+  "text": "Tapi rezeki datang juga."
+ },
+ {
+  "name": "five letters allow one edit",
+  "heard": [
+   {
+    "text": "The",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "river",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "runs",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "forth",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "to",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "the",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "sea.",
+    "start": 2.4,
+    "end": 2.75
+   }
+  ],
+  "text": "The river runs north to the sea."
+ },
+ {
+  "name": "extra trailing clause",
+  "heard": [
+   {
+    "text": "It",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "opens",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "at",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "nine.",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "thank",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "you",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "for",
+    "start": 2.4,
+    "end": 2.75
+   },
+   {
+    "text": "watching",
+    "start": 2.8,
+    "end": 3.15
+   }
+  ],
+  "text": "It opens at nine."
+ },
+ {
+  "name": "extra trailing word, short",
+  "heard": [
+   {
+    "text": "It",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "opens",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "at",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "nine.",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "so",
+    "start": 1.6,
+    "end": 1.95
+   }
+  ],
+  "text": "It opens at nine."
+ },
+ {
+  "name": "extra trailing word, long",
+  "heard": [
+   {
+    "text": "It",
+    "start": 0,
+    "end": 0.39
+   },
+   {
+    "text": "opens",
+    "start": 0.4,
+    "end": 0.79
+   },
+   {
+    "text": "at",
+    "start": 0.8,
+    "end": 1.19
+   },
+   {
+    "text": "nine.",
+    "start": 1.2,
+    "end": 1.59
+   },
+   {
+    "text": "so",
+    "start": 1.6,
+    "end": 2.2
+   }
+  ],
+  "text": "It opens at nine."
+ },
+ {
+  "name": "mid-sentence surplus",
+  "heard": [
+   {
+    "text": "Kuala",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "Lumpur",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "saya",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "nampak",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "bila",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "jadi",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "ibu",
+    "start": 2.4,
+    "end": 2.75
+   },
+   {
+    "text": "kota.",
+    "start": 2.8,
+    "end": 3.15
+   }
+  ],
+  "text": "Kuala Lumpur akan jadi ibu kota."
+ },
+ {
+  "name": "mid-sentence surplus of one",
+  "heard": [
+   {
+    "text": "Kuala",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "Lumpur",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "saya",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "nampak",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "jadi",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "ibu",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "kota.",
+    "start": 2.4,
+    "end": 2.75
+   }
+  ],
+  "text": "Kuala Lumpur akan jadi ibu kota."
+ },
+ {
+  "name": "mid-sentence insertion",
+  "heard": [
+   {
+    "text": "Kuala",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "Lumpur",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "saya",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "nampak",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "jadi",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "ibu",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "kota.",
+    "start": 2.4,
+    "end": 2.75
+   }
+  ],
+  "text": "Kuala Lumpur jadi ibu kota."
+ },
+ {
+  "name": "one dropped word of ten",
+  "heard": [
+   {
+    "text": "We",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "walked",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "along",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "the",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "quiet",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "river",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "until",
+    "start": 2.4,
+    "end": 2.75
+   },
+   {
+    "text": "evening",
+    "start": 2.8,
+    "end": 3.15
+   },
+   {
+    "text": "came.",
+    "start": 3.2,
+    "end": 3.55
+   }
+  ],
+  "text": "We walked along the quiet old river until evening came."
+ },
+ {
+  "name": "two dropped words of ten",
+  "heard": [
+   {
+    "text": "We",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "walked",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "along",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "the",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "river",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "until",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "evening",
+    "start": 2.4,
+    "end": 2.75
+   },
+   {
+    "text": "came.",
+    "start": 2.8,
+    "end": 3.15
+   }
+  ],
+  "text": "We walked along the quiet old river until evening came."
+ },
+ {
+  "name": "dropped word of three",
+  "heard": [
+   {
+    "text": "kuala",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "berlumpur.",
+    "start": 0.4,
+    "end": 0.75
+   }
+  ],
+  "text": "kuala yang berlumpur."
+ },
+ {
+  "name": "wrong number",
+  "heard": [
+   {
+    "text": "The",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "company",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "started",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "in",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "1985.",
+    "start": 1.6,
+    "end": 1.95
+   }
+  ],
+  "text": "The company started in 1982."
+ },
+ {
+  "name": "written number heard as words",
+  "heard": [
+   {
+    "text": "In",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "nineteen",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "eighty-five",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "the",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "plant",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "opened.",
+    "start": 2,
+    "end": 2.35
+   }
+  ],
+  "text": "In 1985 the plant opened."
+ },
+ {
+  "name": "spoken number heard as digits",
+  "heard": [
+   {
+    "text": "In",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "1985",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "the",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "plant",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "opened.",
+    "start": 1.6,
+    "end": 1.95
+   }
+  ],
+  "text": "In nineteen eighty-five the plant opened."
+ },
+ {
+  "name": "number heard, none written",
+  "heard": [
+   {
+    "text": "It",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "costs",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "40",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "now.",
+    "start": 1.2,
+    "end": 1.55
+   }
+  ],
+  "text": "It costs little now."
+ },
+ {
+  "name": "Malay short forms",
+  "heard": [
+   {
+    "text": "Saya",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "tidak",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "tahu",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "yang",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "mana",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "satu",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "dengan",
+    "start": 2.4,
+    "end": 2.75
+   },
+   {
+    "text": "dia.",
+    "start": 2.8,
+    "end": 3.15
+   }
+  ],
+  "text": "Saya tak tahu yg mana satu dgn dia."
+ },
+ {
+  "name": "Malay short forms reversed",
+  "heard": [
+   {
+    "text": "Pokok",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "ni",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "cuma",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "tumbuh",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "di",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "situ.",
+    "start": 2,
+    "end": 2.35
+   }
+  ],
+  "text": "Pokok ini cuma tumbuh di situ."
+ },
+ {
+  "name": "units written onto numbers",
+  "heard": [
+   {
+    "text": "Tambah",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "5L",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "air",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "dan",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "20%",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "gula.",
+    "start": 2,
+    "end": 2.35
+   }
+  ],
+  "text": "Tambah 5 liter air dan 20 peratus gula."
+ },
+ {
+  "name": "unit with end punctuation",
+  "heard": [
+   {
+    "text": "Jalan",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "sejauh",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "12km.",
+    "start": 0.8,
+    "end": 1.15
+   }
+  ],
+  "text": "Jalan sejauh 12 kilometer."
+ },
+ {
+  "name": "data units",
+  "heard": [
+   {
+    "text": "It",
+    "start": 0,
+    "end": 0.25
+   },
+   {
+    "text": "needs",
+    "start": 0.3,
+    "end": 0.55
+   },
+   {
+    "text": "8GB",
+    "start": 0.6,
+    "end": 0.85
+   },
+   {
+    "text": "of",
+    "start": 0.9,
+    "end": 1.15
+   },
+   {
+    "text": "memory.",
+    "start": 1.2,
+    "end": 1.45
+   }
+  ],
+  "text": "It needs eight gigabytes of memory."
+ },
+ {
+  "name": "spaced decimal with unit",
+  "heard": [
+   {
+    "text": "sampai",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "3",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": ".5L",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "air.",
+    "start": 1.2,
+    "end": 1.55
+   }
+  ],
+  "text": "sampai tiga setengah liter air."
+ },
+ {
+  "name": "recognizer fragments",
+  "heard": [
+   {
+    "text": "The",
+    "start": 0,
+    "end": 0.25
+   },
+   {
+    "text": "airline",
+    "start": 0.3,
+    "end": 0.55
+   },
+   {
+    "text": "flies",
+    "start": 0.6,
+    "end": 0.85
+   },
+   {
+    "text": "non",
+    "start": 0.9,
+    "end": 1.15
+   },
+   {
+    "text": "-stop",
+    "start": 1.2,
+    "end": 1.45
+   },
+   {
+    "text": "to",
+    "start": 1.5,
+    "end": 1.75
+   },
+   {
+    "text": "over",
+    "start": 1.8,
+    "end": 2.05
+   },
+   {
+    "text": "1",
+    "start": 2.1,
+    "end": 2.35
+   },
+   {
+    "text": ",100",
+    "start": 2.4,
+    "end": 2.65
+   },
+   {
+    "text": "cities.",
+    "start": 2.7,
+    "end": 2.95
+   }
+  ],
+  "text": "The airline flies non-stop to over 1,100 cities."
+ },
+ {
+  "name": "fragment with padding",
+  "heard": [
+   {
+    "text": "Wi ",
+    "start": 0,
+    "end": 0.2
+   },
+   {
+    "text": " -Fi",
+    "start": 0.2,
+    "end": 0.5
+   },
+   {
+    "text": "works",
+    "start": 0.5,
+    "end": 0.9
+   }
+  ],
+  "text": "Wi-Fi works"
+ },
+ {
+  "name": "accented script, plain heard",
+  "heard": [
+   {
+    "text": "The",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "cafe",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "served",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "creme",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "brulee",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "today.",
+    "start": 2,
+    "end": 2.35
+   }
+  ],
+  "text": "The café served crème brûlée today."
+ },
+ {
+  "name": "accented heard, plain script",
+  "heard": [
+   {
+    "text": "The",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "café",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "served",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "crème",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "brûlée",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "today.",
+    "start": 2,
+    "end": 2.35
+   }
+  ],
+  "text": "The cafe served creme brulee today."
+ },
+ {
+  "name": "compound split on both sides",
+  "heard": [
+   {
+    "text": "Send",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "the",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "follow-up",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "e-mail",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "today.",
+    "start": 1.6,
+    "end": 1.95
+   }
+  ],
+  "text": "Send the follow-up e-mail today."
+ },
+ {
+  "name": "compound heard as two words",
+  "heard": [
+   {
+    "text": "The",
+    "start": 0,
+    "end": 0.25
+   },
+   {
+    "text": "cafe",
+    "start": 0.3,
+    "end": 0.55
+   },
+   {
+    "text": "has",
+    "start": 0.6,
+    "end": 0.85
+   },
+   {
+    "text": "free",
+    "start": 0.9,
+    "end": 1.15
+   },
+   {
+    "text": "Wi",
+    "start": 1.2,
+    "end": 1.45
+   },
+   {
+    "text": "-Fi",
+    "start": 1.5,
+    "end": 1.75
+   },
+   {
+    "text": "for",
+    "start": 1.8,
+    "end": 2.05
+   },
+   {
+    "text": "every",
+    "start": 2.1,
+    "end": 2.35
+   },
+   {
+    "text": "guest.",
+    "start": 2.4,
+    "end": 2.65
+   }
+  ],
+  "text": "The cafe has free Wi-Fi for every guest."
+ },
+ {
+  "name": "compound heard as separate words",
+  "heard": [
+   {
+    "text": "The",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "support",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "team",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "answers",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "every",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "question",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "quickly.",
+    "start": 2.4,
+    "end": 2.75
+   }
+  ],
+  "text": "The support-team answers every question quickly."
+ },
+ {
+  "name": "short compound heard apart",
+  "heard": [
+   {
+    "text": "Send",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "an",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "e",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "mail",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "now.",
+    "start": 1.6,
+    "end": 1.95
+   }
+  ],
+  "text": "Send an e-mail now."
+ },
+ {
+  "name": "short compound heard as two words",
+  "heard": [
+   {
+    "text": "Free",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "Wi",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "Fi",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "here.",
+    "start": 1.2,
+    "end": 1.55
+   }
+  ],
+  "text": "Free Wi-Fi here."
+ },
+ {
+  "name": "unsure word",
+  "heard": [
+   {
+    "text": "The",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "ancient",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "mandate",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "was",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "fragile.",
+    "start": 1.6,
+    "end": 1.95
+   }
+  ],
+  "text": "The ancient manuscript was fragile."
+ },
+ {
+  "name": "most words unsure",
+  "heard": [
+   {
+    "text": "Saya",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "jadi",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "bijeh",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "timah.",
+    "start": 1.2,
+    "end": 1.55
+   }
+  ],
+  "text": "nak cari bijih timah."
+ },
+ {
+  "name": "heard as something else",
+  "heard": [
+   {
+    "text": "40",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "buta",
+    "start": 0.4,
+    "end": 0.75
+   }
+  ],
+  "text": "Eh, korang tahu tak?"
+ },
+ {
+  "name": "one misheard word in three",
+  "heard": [
+   {
+    "text": "Kuala",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "yang",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "belum",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "po.",
+    "start": 1.2,
+    "end": 1.55
+   }
+  ],
+  "text": "kuala yang berlumpur."
+ },
+ {
+  "name": "long number does not carry a garbled phrase",
+  "heard": [
+   {
+    "text": "saya",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "baru",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "lewat",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "tahun",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "1857.",
+    "start": 1.6,
+    "end": 1.95
+   }
+  ],
+  "text": "Semuanya bermula tahun lapan belas lima puluh tujuh."
+ },
+ {
+  "name": "long number with its phrase",
+  "heard": [
+   {
+    "text": "Semuanya",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "bermula",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "tahun",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "1857.",
+    "start": 1.2,
+    "end": 1.55
+   }
+  ],
+  "text": "Semuanya bermula tahun lapan belas lima puluh tujuh."
+ },
+ {
+  "name": "babble after the sentence",
+  "heard": [
+   {
+    "text": "Pada",
+    "start": 0,
+    "end": 0.3
+   },
+   {
+    "text": "tahun",
+    "start": 0.3,
+    "end": 0.6
+   },
+   {
+    "text": "1857,",
+    "start": 0.6,
+    "end": 1.5
+   },
+   {
+    "text": "Raja",
+    "start": 1.6,
+    "end": 1.9
+   },
+   {
+    "text": "Abdullah.",
+    "start": 1.9,
+    "end": 2.4
+   },
+   {
+    "text": "marbulan",
+    "start": 2.6,
+    "end": 3.1
+   },
+   {
+    "text": "nambar",
+    "start": 3.1,
+    "end": 3.6
+   }
+  ],
+  "text": "Pada tahun lapan belas lima puluh tujuh, Raja Abdullah."
+ },
+ {
+  "name": "take cut short",
+  "heard": [
+   {
+    "text": "Pada",
+    "start": 0,
+    "end": 0.3
+   },
+   {
+    "text": "tahun",
+    "start": 0.3,
+    "end": 0.6
+   }
+  ],
+  "text": "Pada tahun lapan belas lima puluh tujuh, Raja Abdullah."
+ },
+ {
+  "name": "wrong year",
+  "heard": [
+   {
+    "text": "Masuk",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "tahun",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "1860,",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "Kuala",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "Lumpur",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "jadi",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "ibu",
+    "start": 2.4,
+    "end": 2.75
+   },
+   {
+    "text": "kota.",
+    "start": 2.8,
+    "end": 3.15
+   }
+  ],
+  "text": "Masuk tahun lapan belas sembilan puluh enam, Kuala Lumpur jadi ibu kota."
+ },
+ {
+  "name": "right year",
+  "heard": [
+   {
+    "text": "Masuk",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "tahun",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "1896,",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "Kuala",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "Lumpur",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "jadi",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "ibu",
+    "start": 2.4,
+    "end": 2.75
+   },
+   {
+    "text": "kota.",
+    "start": 2.8,
+    "end": 3.15
+   }
+  ],
+  "text": "Masuk tahun lapan belas sembilan puluh enam, Kuala Lumpur jadi ibu kota."
+ },
+ {
+  "name": "words slipped in beside a number",
+  "heard": [
+   {
+    "text": "Tahun",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "1880,",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "saya",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "nampak",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "ibu",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "negeri",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "Selangor",
+    "start": 2.4,
+    "end": 2.75
+   },
+   {
+    "text": "dipindah.",
+    "start": 2.8,
+    "end": 3.15
+   }
+  ],
+  "text": "Tahun lapan belas lapan puluh, ibu negeri Selangor dipindah."
+ },
+ {
+  "name": "short forms and loanwords",
+  "heard": [
+   {
+    "text": "Pokok",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "ini",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "cuma",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "tumbuh",
+    "start": 1.2,
+    "end": 1.55
+   },
+   {
+    "text": "di",
+    "start": 1.6,
+    "end": 1.95
+   },
+   {
+    "text": "Sabah,",
+    "start": 2,
+    "end": 2.35
+   },
+   {
+    "text": "yang",
+    "start": 2.4,
+    "end": 2.75
+   },
+   {
+    "text": "lagi",
+    "start": 2.8,
+    "end": 3.15
+   },
+   {
+    "text": "pelik,",
+    "start": 3.2,
+    "end": 3.55
+   },
+   {
+    "text": "scientist",
+    "start": 3.6,
+    "end": 3.95
+   },
+   {
+    "text": "ukur",
+    "start": 4,
+    "end": 4.35
+   },
+   {
+    "text": "itu.",
+    "start": 4.4,
+    "end": 4.75
+   }
+  ],
+  "text": "Pokok ni cuma tumbuh di Sabah, yang lagi pelik, saintis ukur tu."
+ },
+ {
+  "name": "nothing heard",
+  "heard": [],
+  "text": "Two words."
+ },
+ {
+  "name": "empty sentence",
+  "heard": [
+   {
+    "text": "hello",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "there",
+    "start": 0.4,
+    "end": 0.75
+   }
+  ],
+  "text": "... —"
+ },
+ {
+  "name": "punctuation-only heard word",
+  "heard": [
+   {
+    "text": "Hello",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "—",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "world.",
+    "start": 0.8,
+    "end": 1.15
+   }
+  ],
+  "text": "Hello world."
+ },
+ {
+  "name": "decimal number",
+  "heard": [
+   {
+    "text": "Harga",
+    "start": 0,
+    "end": 0.35
+   },
+   {
+    "text": "naik",
+    "start": 0.4,
+    "end": 0.75
+   },
+   {
+    "text": "3.5",
+    "start": 0.8,
+    "end": 1.15
+   },
+   {
+    "text": "peratus.",
+    "start": 1.2,
+    "end": 1.55
+   }
+  ],
+  "text": "Harga naik tiga perpuluhan lima peratus."
+ }
+]

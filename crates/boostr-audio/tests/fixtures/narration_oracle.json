@@ -5,6 +5,7 @@
   "sentence": 0.3,
   "mark": 0.6
  },
+ "strayPause": 0.45,
  "cases": [
   {
    "fn": "phrases",
@@ -9217,6 +9218,10575 @@
    "fn": "isNumberWord",
    "input": "Satu",
    "output": true
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: spoken number shares the digits span",
+    "heard": [
+     {
+      "text": "Pada",
+      "start": 6.2,
+      "end": 6.5
+     },
+     {
+      "text": "tahun",
+      "start": 6.5,
+      "end": 7
+     },
+     {
+      "text": "1857,",
+      "start": 7.08,
+      "end": 7.97
+     },
+     {
+      "text": "Raja",
+      "start": 8.2,
+      "end": 8.5
+     }
+    ],
+    "text": "Pada tahun lapan belas lima puluh tujuh, Raja"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: spoken number shares the digits span",
+    "heard": [
+     {
+      "text": "Pada",
+      "start": 6.2,
+      "end": 6.5
+     },
+     {
+      "text": "tahun",
+      "start": 6.5,
+      "end": 7
+     },
+     {
+      "text": "1857,",
+      "start": 7.08,
+      "end": 7.97
+     },
+     {
+      "text": "Raja",
+      "start": 8.2,
+      "end": 8.5
+     }
+    ],
+    "text": "Pada tahun lapan belas lima puluh tujuh, Raja"
+   },
+   "output": [
+    {
+     "text": "Pada",
+     "start": "6.2",
+     "end": "6.5"
+    },
+    {
+     "text": "tahun",
+     "start": "6.5",
+     "end": "7"
+    },
+    {
+     "text": "lapan",
+     "start": "7.08",
+     "end": "7.265"
+    },
+    {
+     "text": "belas",
+     "start": "7.265",
+     "end": "7.451"
+    },
+    {
+     "text": "lima",
+     "start": "7.451",
+     "end": "7.599"
+    },
+    {
+     "text": "puluh",
+     "start": "7.599",
+     "end": "7.785"
+    },
+    {
+     "text": "tujuh,",
+     "start": "7.785",
+     "end": "7.97"
+    },
+    {
+     "text": "Raja",
+     "start": "8.2",
+     "end": "8.5"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: spoken number shares the digits span",
+    "heard": [
+     {
+      "text": "Pada",
+      "start": 6.2,
+      "end": 6.5
+     },
+     {
+      "text": "tahun",
+      "start": 6.5,
+      "end": 7
+     },
+     {
+      "text": "1857,",
+      "start": 7.08,
+      "end": 7.97
+     },
+     {
+      "text": "Raja",
+      "start": 8.2,
+      "end": 8.5
+     }
+    ],
+    "text": "Pada tahun lapan belas lima puluh tujuh, Raja"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: gap at the start with heard words",
+    "heard": [
+     {
+      "text": "um",
+      "start": 0.2,
+      "end": 0.45
+     },
+     {
+      "text": "uh",
+      "start": 0.5,
+      "end": 0.6
+     },
+     {
+      "text": "river",
+      "start": 0.7,
+      "end": 1.1
+     },
+     {
+      "text": "runs",
+      "start": 1.1,
+      "end": 1.5
+     }
+    ],
+    "text": "Well then river runs"
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "Well",
+     "then"
+    ],
+    "why": "only 50% of its words recognized",
+    "badness": "1"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: gap at the start with heard words",
+    "heard": [
+     {
+      "text": "um",
+      "start": 0.2,
+      "end": 0.45
+     },
+     {
+      "text": "uh",
+      "start": 0.5,
+      "end": 0.6
+     },
+     {
+      "text": "river",
+      "start": 0.7,
+      "end": 1.1
+     },
+     {
+      "text": "runs",
+      "start": 1.1,
+      "end": 1.5
+     }
+    ],
+    "text": "Well then river runs"
+   },
+   "output": [
+    {
+     "text": "Well",
+     "start": "0.2",
+     "end": "0.4"
+    },
+    {
+     "text": "then",
+     "start": "0.4",
+     "end": "0.6"
+    },
+    {
+     "text": "river",
+     "start": "0.7",
+     "end": "1.1"
+    },
+    {
+     "text": "runs",
+     "start": "1.1",
+     "end": "1.5"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: gap at the start with heard words",
+    "heard": [
+     {
+      "text": "um",
+      "start": 0.2,
+      "end": 0.45
+     },
+     {
+      "text": "uh",
+      "start": 0.5,
+      "end": 0.6
+     },
+     {
+      "text": "river",
+      "start": 0.7,
+      "end": 1.1
+     },
+     {
+      "text": "runs",
+      "start": 1.1,
+      "end": 1.5
+     }
+    ],
+    "text": "Well then river runs"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: gap at the start without heard words",
+    "heard": [
+     {
+      "text": "river",
+      "start": 0.7,
+      "end": 1.1
+     },
+     {
+      "text": "runs",
+      "start": 1.1,
+      "end": 1.5
+     }
+    ],
+    "text": "Well then river runs"
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [
+     "Well",
+     "then"
+    ],
+    "unsure": [
+     "Well",
+     "then"
+    ],
+    "why": "missing \"Well then\", only 50% of its words recognized",
+    "badness": "1.6"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: gap at the start without heard words",
+    "heard": [
+     {
+      "text": "river",
+      "start": 0.7,
+      "end": 1.1
+     },
+     {
+      "text": "runs",
+      "start": 1.1,
+      "end": 1.5
+     }
+    ],
+    "text": "Well then river runs"
+   },
+   "output": [
+    {
+     "text": "Well",
+     "start": "0.7",
+     "end": "0.7"
+    },
+    {
+     "text": "then",
+     "start": "0.7",
+     "end": "0.7"
+    },
+    {
+     "text": "river",
+     "start": "0.7",
+     "end": "1.1"
+    },
+    {
+     "text": "runs",
+     "start": "1.1",
+     "end": "1.5"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: gap at the start without heard words",
+    "heard": [
+     {
+      "text": "river",
+      "start": 0.7,
+      "end": 1.1
+     },
+     {
+      "text": "runs",
+      "start": 1.1,
+      "end": 1.5
+     }
+    ],
+    "text": "Well then river runs"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: gap in the middle",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0.5,
+      "end": 1.0625
+     },
+     {
+      "text": "zzzz",
+      "start": 1.0625,
+      "end": 1.3125
+     },
+     {
+      "text": "gamma",
+      "start": 1.3125,
+      "end": 1.8
+     }
+    ],
+    "text": "alpha beta gamma"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "beta"
+    ],
+    "why": "",
+    "badness": "0.6666666666666667"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: gap in the middle",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0.5,
+      "end": 1.0625
+     },
+     {
+      "text": "zzzz",
+      "start": 1.0625,
+      "end": 1.3125
+     },
+     {
+      "text": "gamma",
+      "start": 1.3125,
+      "end": 1.8
+     }
+    ],
+    "text": "alpha beta gamma"
+   },
+   "output": [
+    {
+     "text": "alpha",
+     "start": "0.5",
+     "end": "1.0625"
+    },
+    {
+     "text": "beta",
+     "start": "1.063",
+     "end": "1.313"
+    },
+    {
+     "text": "gamma",
+     "start": "1.3125",
+     "end": "1.8"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: gap in the middle",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0.5,
+      "end": 1.0625
+     },
+     {
+      "text": "zzzz",
+      "start": 1.0625,
+      "end": 1.3125
+     },
+     {
+      "text": "gamma",
+      "start": 1.3125,
+      "end": 1.8
+     }
+    ],
+    "text": "alpha beta gamma"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: gap in the middle without heard words",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0.5,
+      "end": 1
+     },
+     {
+      "text": "gamma",
+      "start": 1.25,
+      "end": 1.8
+     }
+    ],
+    "text": "alpha beta delta gamma"
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [
+     "beta",
+     "delta"
+    ],
+    "unsure": [
+     "beta",
+     "delta"
+    ],
+    "why": "missing \"beta delta\", only 50% of its words recognized",
+    "badness": "1.6"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: gap in the middle without heard words",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0.5,
+      "end": 1
+     },
+     {
+      "text": "gamma",
+      "start": 1.25,
+      "end": 1.8
+     }
+    ],
+    "text": "alpha beta delta gamma"
+   },
+   "output": [
+    {
+     "text": "alpha",
+     "start": "0.5",
+     "end": "1"
+    },
+    {
+     "text": "beta",
+     "start": "1",
+     "end": "1.111"
+    },
+    {
+     "text": "delta",
+     "start": "1.111",
+     "end": "1.25"
+    },
+    {
+     "text": "gamma",
+     "start": "1.25",
+     "end": "1.8"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: gap in the middle without heard words",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0.5,
+      "end": 1
+     },
+     {
+      "text": "gamma",
+      "start": 1.25,
+      "end": 1.8
+     }
+    ],
+    "text": "alpha beta delta gamma"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: gap at the end with heard words",
+    "heard": [
+     {
+      "text": "river",
+      "start": 0.1,
+      "end": 0.5
+     },
+     {
+      "text": "runs",
+      "start": 0.5,
+      "end": 0.9
+     },
+     {
+      "text": "qqq",
+      "start": 1,
+      "end": 1.3
+     },
+     {
+      "text": "xx",
+      "start": 1.3,
+      "end": 1.9
+     }
+    ],
+    "text": "river runs to sea"
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "to",
+     "sea"
+    ],
+    "why": "only 50% of its words recognized",
+    "badness": "1"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: gap at the end with heard words",
+    "heard": [
+     {
+      "text": "river",
+      "start": 0.1,
+      "end": 0.5
+     },
+     {
+      "text": "runs",
+      "start": 0.5,
+      "end": 0.9
+     },
+     {
+      "text": "qqq",
+      "start": 1,
+      "end": 1.3
+     },
+     {
+      "text": "xx",
+      "start": 1.3,
+      "end": 1.9
+     }
+    ],
+    "text": "river runs to sea"
+   },
+   "output": [
+    {
+     "text": "river",
+     "start": "0.1",
+     "end": "0.5"
+    },
+    {
+     "text": "runs",
+     "start": "0.5",
+     "end": "0.9"
+    },
+    {
+     "text": "to",
+     "start": "1",
+     "end": "1.36"
+    },
+    {
+     "text": "sea",
+     "start": "1.36",
+     "end": "1.9"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: gap at the end with heard words",
+    "heard": [
+     {
+      "text": "river",
+      "start": 0.1,
+      "end": 0.5
+     },
+     {
+      "text": "runs",
+      "start": 0.5,
+      "end": 0.9
+     },
+     {
+      "text": "qqq",
+      "start": 1,
+      "end": 1.3
+     },
+     {
+      "text": "xx",
+      "start": 1.3,
+      "end": 1.9
+     }
+    ],
+    "text": "river runs to sea"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: gap at the end without heard words",
+    "heard": [
+     {
+      "text": "river",
+      "start": 0.1,
+      "end": 0.5
+     },
+     {
+      "text": "runs",
+      "start": 0.5,
+      "end": 0.9
+     }
+    ],
+    "text": "river runs to the sea"
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [
+     "to",
+     "the",
+     "sea"
+    ],
+    "unsure": [
+     "to",
+     "the",
+     "sea"
+    ],
+    "why": "missing \"to the sea\", only 40% of its words recognized",
+    "badness": "2.0999999999999996"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: gap at the end without heard words",
+    "heard": [
+     {
+      "text": "river",
+      "start": 0.1,
+      "end": 0.5
+     },
+     {
+      "text": "runs",
+      "start": 0.5,
+      "end": 0.9
+     }
+    ],
+    "text": "river runs to the sea"
+   },
+   "output": [
+    {
+     "text": "river",
+     "start": "0.1",
+     "end": "0.5"
+    },
+    {
+     "text": "runs",
+     "start": "0.5",
+     "end": "0.9"
+    },
+    {
+     "text": "to",
+     "start": "0.9",
+     "end": "0.9"
+    },
+    {
+     "text": "the",
+     "start": "0.9",
+     "end": "0.9"
+    },
+    {
+     "text": "sea",
+     "start": "0.9",
+     "end": "0.9"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: gap at the end without heard words",
+    "heard": [
+     {
+      "text": "river",
+      "start": 0.1,
+      "end": 0.5
+     },
+     {
+      "text": "runs",
+      "start": 0.5,
+      "end": 0.9
+     }
+    ],
+    "text": "river runs to the sea"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: gap heard word overlapping a sure word",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0.5,
+      "end": 1.2
+     },
+     {
+      "text": "zzzz",
+      "start": 1,
+      "end": 1.1
+     },
+     {
+      "text": "gamma",
+      "start": 1.15,
+      "end": 1.8
+     }
+    ],
+    "text": "alpha beta gamma"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "beta"
+    ],
+    "why": "",
+    "badness": "0.6666666666666667"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: gap heard word overlapping a sure word",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0.5,
+      "end": 1.2
+     },
+     {
+      "text": "zzzz",
+      "start": 1,
+      "end": 1.1
+     },
+     {
+      "text": "gamma",
+      "start": 1.15,
+      "end": 1.8
+     }
+    ],
+    "text": "alpha beta gamma"
+   },
+   "output": [
+    {
+     "text": "alpha",
+     "start": "0.5",
+     "end": "1.2"
+    },
+    {
+     "text": "beta",
+     "start": "1.2",
+     "end": "1.2"
+    },
+    {
+     "text": "gamma",
+     "start": "1.15",
+     "end": "1.8"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: gap heard word overlapping a sure word",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0.5,
+      "end": 1.2
+     },
+     {
+      "text": "zzzz",
+      "start": 1,
+      "end": 1.1
+     },
+     {
+      "text": "gamma",
+      "start": 1.15,
+      "end": 1.8
+     }
+    ],
+    "text": "alpha beta gamma"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: nothing sure",
+    "heard": [
+     {
+      "text": "aaa",
+      "start": 0.1,
+      "end": 0.4
+     },
+     {
+      "text": "bbb",
+      "start": 0.4,
+      "end": 0.9
+     }
+    ],
+    "text": "river runs north"
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "river",
+     "runs",
+     "north"
+    ],
+    "why": "only 0% of its words recognized",
+    "badness": "2"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: nothing sure",
+    "heard": [
+     {
+      "text": "aaa",
+      "start": 0.1,
+      "end": 0.4
+     },
+     {
+      "text": "bbb",
+      "start": 0.4,
+      "end": 0.9
+     }
+    ],
+    "text": "river runs north"
+   },
+   "output": [
+    {
+     "text": "river",
+     "start": "0.1",
+     "end": "0.386"
+    },
+    {
+     "text": "runs",
+     "start": "0.386",
+     "end": "0.614"
+    },
+    {
+     "text": "north",
+     "start": "0.614",
+     "end": "0.9"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: nothing sure",
+    "heard": [
+     {
+      "text": "aaa",
+      "start": 0.1,
+      "end": 0.4
+     },
+     {
+      "text": "bbb",
+      "start": 0.4,
+      "end": 0.9
+     }
+    ],
+    "text": "river runs north"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: tie at every spread time",
+    "heard": [
+     {
+      "text": "one",
+      "start": 0,
+      "end": 0.0625
+     },
+     {
+      "text": "zz",
+      "start": 0.0625,
+      "end": 0.1875
+     },
+     {
+      "text": "three",
+      "start": 0.1875,
+      "end": 0.5
+     }
+    ],
+    "text": "one twoo three"
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "twoo"
+    ],
+    "why": "only 0% of its words recognized",
+    "badness": "2"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: tie at every spread time",
+    "heard": [
+     {
+      "text": "one",
+      "start": 0,
+      "end": 0.0625
+     },
+     {
+      "text": "zz",
+      "start": 0.0625,
+      "end": 0.1875
+     },
+     {
+      "text": "three",
+      "start": 0.1875,
+      "end": 0.5
+     }
+    ],
+    "text": "one twoo three"
+   },
+   "output": [
+    {
+     "text": "one",
+     "start": "0",
+     "end": "0.0625"
+    },
+    {
+     "text": "twoo",
+     "start": "0.063",
+     "end": "0.188"
+    },
+    {
+     "text": "three",
+     "start": "0.1875",
+     "end": "0.5"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: tie at every spread time",
+    "heard": [
+     {
+      "text": "one",
+      "start": 0,
+      "end": 0.0625
+     },
+     {
+      "text": "zz",
+      "start": 0.0625,
+      "end": 0.1875
+     },
+     {
+      "text": "three",
+      "start": 0.1875,
+      "end": 0.5
+     }
+    ],
+    "text": "one twoo three"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: ties in thirds",
+    "heard": [
+     {
+      "text": "start",
+      "start": 0,
+      "end": 1.0005
+     },
+     {
+      "text": "zzzzzzz",
+      "start": 1.0005,
+      "end": 1.0035
+     },
+     {
+      "text": "end",
+      "start": 1.0035,
+      "end": 2
+     }
+    ],
+    "text": "start ab cd ef end"
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "ab",
+     "cd",
+     "ef"
+    ],
+    "why": "only 40% of its words recognized",
+    "badness": "1.2"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: ties in thirds",
+    "heard": [
+     {
+      "text": "start",
+      "start": 0,
+      "end": 1.0005
+     },
+     {
+      "text": "zzzzzzz",
+      "start": 1.0005,
+      "end": 1.0035
+     },
+     {
+      "text": "end",
+      "start": 1.0035,
+      "end": 2
+     }
+    ],
+    "text": "start ab cd ef end"
+   },
+   "output": [
+    {
+     "text": "start",
+     "start": "0",
+     "end": "1.0005"
+    },
+    {
+     "text": "ab",
+     "start": "1",
+     "end": "1.002"
+    },
+    {
+     "text": "cd",
+     "start": "1.002",
+     "end": "1.003"
+    },
+    {
+     "text": "ef",
+     "start": "1.003",
+     "end": "1.004"
+    },
+    {
+     "text": "end",
+     "start": "1.0035",
+     "end": "2"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: ties in thirds",
+    "heard": [
+     {
+      "text": "start",
+      "start": 0,
+      "end": 1.0005
+     },
+     {
+      "text": "zzzzzzz",
+      "start": 1.0005,
+      "end": 1.0035
+     },
+     {
+      "text": "end",
+      "start": 1.0035,
+      "end": 2
+     }
+    ],
+    "text": "start ab cd ef end"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: units split before aligning",
+    "heard": [
+     {
+      "text": "Tambah",
+      "start": 0,
+      "end": 0.4
+     },
+     {
+      "text": "5L",
+      "start": 0.4,
+      "end": 0.9
+     },
+     {
+      "text": "air.",
+      "start": 0.9,
+      "end": 1.2
+     }
+    ],
+    "text": "Tambah lima liter air."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: units split before aligning",
+    "heard": [
+     {
+      "text": "Tambah",
+      "start": 0,
+      "end": 0.4
+     },
+     {
+      "text": "5L",
+      "start": 0.4,
+      "end": 0.9
+     },
+     {
+      "text": "air.",
+      "start": 0.9,
+      "end": 1.2
+     }
+    ],
+    "text": "Tambah lima liter air."
+   },
+   "output": [
+    {
+     "text": "Tambah",
+     "start": "0",
+     "end": "0.4"
+    },
+    {
+     "text": "lima",
+     "start": "0.4",
+     "end": "0.4"
+    },
+    {
+     "text": "liter",
+     "start": "0.4",
+     "end": "0.9"
+    },
+    {
+     "text": "air.",
+     "start": "0.9",
+     "end": "1.2"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: units split before aligning",
+    "heard": [
+     {
+      "text": "Tambah",
+      "start": 0,
+      "end": 0.4
+     },
+     {
+      "text": "5L",
+      "start": 0.4,
+      "end": 0.9
+     },
+     {
+      "text": "air.",
+      "start": 0.9,
+      "end": 1.2
+     }
+    ],
+    "text": "Tambah lima liter air."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: fragments rejoined before aligning",
+    "heard": [
+     {
+      "text": "non",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "-stop",
+      "start": 0.2,
+      "end": 0.5
+     },
+     {
+      "text": "flights",
+      "start": 0.5,
+      "end": 1
+     }
+    ],
+    "text": "non-stop flights"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: fragments rejoined before aligning",
+    "heard": [
+     {
+      "text": "non",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "-stop",
+      "start": 0.2,
+      "end": 0.5
+     },
+     {
+      "text": "flights",
+      "start": 0.5,
+      "end": 1
+     }
+    ],
+    "text": "non-stop flights"
+   },
+   "output": [
+    {
+     "text": "non-stop",
+     "start": "0",
+     "end": "0.5"
+    },
+    {
+     "text": "flights",
+     "start": "0.5",
+     "end": "1"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: fragments rejoined before aligning",
+    "heard": [
+     {
+      "text": "non",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "-stop",
+      "start": 0.2,
+      "end": 0.5
+     },
+     {
+      "text": "flights",
+      "start": 0.5,
+      "end": 1
+     }
+    ],
+    "text": "non-stop flights"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: no heard words",
+    "heard": [],
+    "text": "river runs"
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [
+     "river",
+     "runs"
+    ],
+    "why": "no speech recognized"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: no heard words",
+    "heard": [],
+    "text": "river runs"
+   },
+   "output": []
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: no heard words",
+    "heard": [],
+    "text": "river runs"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: no script words",
+    "heard": [
+     {
+      "text": "5L",
+      "start": 0,
+      "end": 0.5
+     },
+     {
+      "text": "non",
+      "start": 0.5,
+      "end": 0.7
+     },
+     {
+      "text": "-stop",
+      "start": 0.7,
+      "end": 0.9
+     }
+    ],
+    "text": "— ..."
+   },
+   "output": {
+    "ok": false,
+    "extra": [
+     {
+      "text": "5 L non-stop",
+      "seconds": "0.9"
+     }
+    ],
+    "missing": [],
+    "unsure": [],
+    "why": "numbers heard as 5, the script says none, extra speech \"5 L non-stop\"",
+    "badness": "3.1"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: no script words",
+    "heard": [
+     {
+      "text": "5L",
+      "start": 0,
+      "end": 0.5
+     },
+     {
+      "text": "non",
+      "start": 0.5,
+      "end": 0.7
+     },
+     {
+      "text": "-stop",
+      "start": 0.7,
+      "end": 0.9
+     }
+    ],
+    "text": "— ..."
+   },
+   "output": [
+    {
+     "text": "5",
+     "start": "0",
+     "end": "0.5"
+    },
+    {
+     "text": "L",
+     "start": "0",
+     "end": "0.5"
+    },
+    {
+     "text": "non-stop",
+     "start": "0.5",
+     "end": "0.9"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: no script words",
+    "heard": [
+     {
+      "text": "5L",
+      "start": 0,
+      "end": 0.5
+     },
+     {
+      "text": "non",
+      "start": 0.5,
+      "end": 0.7
+     },
+     {
+      "text": "-stop",
+      "start": 0.7,
+      "end": 0.9
+     }
+    ],
+    "text": "— ..."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/align.json: negative-length gap",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0.5,
+      "end": 1.5
+     },
+     {
+      "text": "zz",
+      "start": 1.2,
+      "end": 1.3
+     },
+     {
+      "text": "gamma",
+      "start": 1.4,
+      "end": 1.8
+     }
+    ],
+    "text": "alpha beta gamma"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "beta"
+    ],
+    "why": "",
+    "badness": "0.6666666666666667"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/align.json: negative-length gap",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0.5,
+      "end": 1.5
+     },
+     {
+      "text": "zz",
+      "start": 1.2,
+      "end": 1.3
+     },
+     {
+      "text": "gamma",
+      "start": 1.4,
+      "end": 1.8
+     }
+    ],
+    "text": "alpha beta gamma"
+   },
+   "output": [
+    {
+     "text": "alpha",
+     "start": "0.5",
+     "end": "1.5"
+    },
+    {
+     "text": "beta",
+     "start": "1.5",
+     "end": "1.5"
+    },
+    {
+     "text": "gamma",
+     "start": "1.4",
+     "end": "1.8"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/align.json: negative-length gap",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0.5,
+      "end": 1.5
+     },
+     {
+      "text": "zz",
+      "start": 1.2,
+      "end": 1.3
+     },
+     {
+      "text": "gamma",
+      "start": 1.4,
+      "end": 1.8
+     }
+    ],
+    "text": "alpha beta gamma"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: exact match",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "river",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "runs",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "north",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "to",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "the",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "sea.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "The river runs north to the sea."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: exact match",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "river",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "runs",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "north",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "to",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "the",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "sea.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "The river runs north to the sea."
+   },
+   "output": [
+    {
+     "text": "The",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "river",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "runs",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "north",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "to",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "the",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "sea.",
+     "start": "2.4",
+     "end": "2.75"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: exact match",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "river",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "runs",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "north",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "to",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "the",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "sea.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "The river runs north to the sea."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: one substitution",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "river",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "walks",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "north",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "to",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "the",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "sea.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "The river runs north to the sea."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "runs"
+    ],
+    "why": "",
+    "badness": "0.2857142857142858"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: one substitution",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "river",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "walks",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "north",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "to",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "the",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "sea.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "The river runs north to the sea."
+   },
+   "output": [
+    {
+     "text": "The",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "river",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "runs",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "north",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "to",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "the",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "sea.",
+     "start": "2.4",
+     "end": "2.75"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: one substitution",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "river",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "walks",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "north",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "to",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "the",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "sea.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "The river runs north to the sea."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: long near-miss matches",
+    "heard": [
+     {
+      "text": "iscribe",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "the",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "whole",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "garden.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Describe the whole garden."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: long near-miss matches",
+    "heard": [
+     {
+      "text": "iscribe",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "the",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "whole",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "garden.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Describe the whole garden."
+   },
+   "output": [
+    {
+     "text": "Describe",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "the",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "whole",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "garden.",
+     "start": "1.2",
+     "end": "1.55"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: long near-miss matches",
+    "heard": [
+     {
+      "text": "iscribe",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "the",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "whole",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "garden.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Describe the whole garden."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: short one-edit word does not match",
+    "heard": [
+     {
+      "text": "Tahi",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "rezeki",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "datang",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "juga.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Tapi rezeki datang juga."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "Tapi"
+    ],
+    "why": "",
+    "badness": "0.5"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: short one-edit word does not match",
+    "heard": [
+     {
+      "text": "Tahi",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "rezeki",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "datang",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "juga.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Tapi rezeki datang juga."
+   },
+   "output": [
+    {
+     "text": "Tapi",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "rezeki",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "datang",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "juga.",
+     "start": "1.2",
+     "end": "1.55"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: short one-edit word does not match",
+    "heard": [
+     {
+      "text": "Tahi",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "rezeki",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "datang",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "juga.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Tapi rezeki datang juga."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: five letters allow one edit",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "river",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "runs",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "forth",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "to",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "the",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "sea.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "The river runs north to the sea."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: five letters allow one edit",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "river",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "runs",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "forth",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "to",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "the",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "sea.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "The river runs north to the sea."
+   },
+   "output": [
+    {
+     "text": "The",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "river",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "runs",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "north",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "to",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "the",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "sea.",
+     "start": "2.4",
+     "end": "2.75"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: five letters allow one edit",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "river",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "runs",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "forth",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "to",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "the",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "sea.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "The river runs north to the sea."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: extra trailing clause",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "opens",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "at",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nine.",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "thank",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "you",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "for",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "watching",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "It opens at nine."
+   },
+   "output": {
+    "ok": false,
+    "extra": [
+     {
+      "text": "thank you for watching",
+      "seconds": "1.5499999999999998"
+     }
+    ],
+    "missing": [],
+    "unsure": [],
+    "why": "extra speech \"thank you for watching\"",
+    "badness": "2.75"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: extra trailing clause",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "opens",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "at",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nine.",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "thank",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "you",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "for",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "watching",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "It opens at nine."
+   },
+   "output": [
+    {
+     "text": "It",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "opens",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "at",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "nine.",
+     "start": "1.2",
+     "end": "1.55"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: extra trailing clause",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "opens",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "at",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nine.",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "thank",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "you",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "for",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "watching",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "It opens at nine."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: extra trailing word, short",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "opens",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "at",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nine.",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "so",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "It opens at nine."
+   },
+   "output": {
+    "ok": true,
+    "extra": [
+     {
+      "text": "so",
+      "seconds": "0.34999999999999987"
+     }
+    ],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0.6499999999999999"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: extra trailing word, short",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "opens",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "at",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nine.",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "so",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "It opens at nine."
+   },
+   "output": [
+    {
+     "text": "It",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "opens",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "at",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "nine.",
+     "start": "1.2",
+     "end": "1.55"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: extra trailing word, short",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "opens",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "at",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nine.",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "so",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "It opens at nine."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: extra trailing word, long",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.39
+     },
+     {
+      "text": "opens",
+      "start": 0.4,
+      "end": 0.79
+     },
+     {
+      "text": "at",
+      "start": 0.8,
+      "end": 1.19
+     },
+     {
+      "text": "nine.",
+      "start": 1.2,
+      "end": 1.59
+     },
+     {
+      "text": "so",
+      "start": 1.6,
+      "end": 2.2
+     }
+    ],
+    "text": "It opens at nine."
+   },
+   "output": {
+    "ok": false,
+    "extra": [
+     {
+      "text": "so",
+      "seconds": "0.6000000000000001"
+     }
+    ],
+    "missing": [],
+    "unsure": [],
+    "why": "extra speech \"so\"",
+    "badness": "0.9000000000000001"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: extra trailing word, long",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.39
+     },
+     {
+      "text": "opens",
+      "start": 0.4,
+      "end": 0.79
+     },
+     {
+      "text": "at",
+      "start": 0.8,
+      "end": 1.19
+     },
+     {
+      "text": "nine.",
+      "start": 1.2,
+      "end": 1.59
+     },
+     {
+      "text": "so",
+      "start": 1.6,
+      "end": 2.2
+     }
+    ],
+    "text": "It opens at nine."
+   },
+   "output": [
+    {
+     "text": "It",
+     "start": "0",
+     "end": "0.39"
+    },
+    {
+     "text": "opens",
+     "start": "0.4",
+     "end": "0.79"
+    },
+    {
+     "text": "at",
+     "start": "0.8",
+     "end": "1.19"
+    },
+    {
+     "text": "nine.",
+     "start": "1.2",
+     "end": "1.59"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: extra trailing word, long",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.39
+     },
+     {
+      "text": "opens",
+      "start": 0.4,
+      "end": 0.79
+     },
+     {
+      "text": "at",
+      "start": 0.8,
+      "end": 1.19
+     },
+     {
+      "text": "nine.",
+      "start": 1.2,
+      "end": 1.59
+     },
+     {
+      "text": "so",
+      "start": 1.6,
+      "end": 2.2
+     }
+    ],
+    "text": "It opens at nine."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: mid-sentence surplus",
+    "heard": [
+     {
+      "text": "Kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "Lumpur",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "saya",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nampak",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "bila",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "jadi",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "ibu",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "kota.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Kuala Lumpur akan jadi ibu kota."
+   },
+   "output": {
+    "ok": false,
+    "extra": [
+     {
+      "text": "saya nampak bila",
+      "seconds": "0"
+     }
+    ],
+    "missing": [],
+    "unsure": [
+     "akan"
+    ],
+    "why": "extra speech \"saya nampak bila\"",
+    "badness": "1.2333333333333332"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: mid-sentence surplus",
+    "heard": [
+     {
+      "text": "Kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "Lumpur",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "saya",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nampak",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "bila",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "jadi",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "ibu",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "kota.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Kuala Lumpur akan jadi ibu kota."
+   },
+   "output": [
+    {
+     "text": "Kuala",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "Lumpur",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "akan",
+     "start": "0.8",
+     "end": "1.95"
+    },
+    {
+     "text": "jadi",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "ibu",
+     "start": "2.4",
+     "end": "2.75"
+    },
+    {
+     "text": "kota.",
+     "start": "2.8",
+     "end": "3.15"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: mid-sentence surplus",
+    "heard": [
+     {
+      "text": "Kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "Lumpur",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "saya",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nampak",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "bila",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "jadi",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "ibu",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "kota.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Kuala Lumpur akan jadi ibu kota."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: mid-sentence surplus of one",
+    "heard": [
+     {
+      "text": "Kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "Lumpur",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "saya",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nampak",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "jadi",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "ibu",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "kota.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "Kuala Lumpur akan jadi ibu kota."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "akan"
+    ],
+    "why": "",
+    "badness": "0.33333333333333326"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: mid-sentence surplus of one",
+    "heard": [
+     {
+      "text": "Kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "Lumpur",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "saya",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nampak",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "jadi",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "ibu",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "kota.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "Kuala Lumpur akan jadi ibu kota."
+   },
+   "output": [
+    {
+     "text": "Kuala",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "Lumpur",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "akan",
+     "start": "0.8",
+     "end": "1.55"
+    },
+    {
+     "text": "jadi",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "ibu",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "kota.",
+     "start": "2.4",
+     "end": "2.75"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: mid-sentence surplus of one",
+    "heard": [
+     {
+      "text": "Kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "Lumpur",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "saya",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nampak",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "jadi",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "ibu",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "kota.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "Kuala Lumpur akan jadi ibu kota."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: mid-sentence insertion",
+    "heard": [
+     {
+      "text": "Kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "Lumpur",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "saya",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nampak",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "jadi",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "ibu",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "kota.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "Kuala Lumpur jadi ibu kota."
+   },
+   "output": {
+    "ok": false,
+    "extra": [
+     {
+      "text": "saya nampak",
+      "seconds": "0.75"
+     }
+    ],
+    "missing": [],
+    "unsure": [],
+    "why": "extra speech \"saya nampak\"",
+    "badness": "1.35"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: mid-sentence insertion",
+    "heard": [
+     {
+      "text": "Kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "Lumpur",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "saya",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nampak",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "jadi",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "ibu",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "kota.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "Kuala Lumpur jadi ibu kota."
+   },
+   "output": [
+    {
+     "text": "Kuala",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "Lumpur",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "jadi",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "ibu",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "kota.",
+     "start": "2.4",
+     "end": "2.75"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: mid-sentence insertion",
+    "heard": [
+     {
+      "text": "Kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "Lumpur",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "saya",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nampak",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "jadi",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "ibu",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "kota.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "Kuala Lumpur jadi ibu kota."
+   },
+   "output": [
+    {
+     "after": "Lumpur",
+     "before": "jadi",
+     "gap": "0.85"
+    }
+   ]
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: one dropped word of ten",
+    "heard": [
+     {
+      "text": "We",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "walked",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "along",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "the",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "quiet",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "river",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "until",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "evening",
+      "start": 2.8,
+      "end": 3.15
+     },
+     {
+      "text": "came.",
+      "start": 3.2,
+      "end": 3.55
+     }
+    ],
+    "text": "We walked along the quiet old river until evening came."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [
+     "old"
+    ],
+    "unsure": [
+     "old"
+    ],
+    "why": "",
+    "badness": "0.49999999999999994"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: one dropped word of ten",
+    "heard": [
+     {
+      "text": "We",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "walked",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "along",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "the",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "quiet",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "river",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "until",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "evening",
+      "start": 2.8,
+      "end": 3.15
+     },
+     {
+      "text": "came.",
+      "start": 3.2,
+      "end": 3.55
+     }
+    ],
+    "text": "We walked along the quiet old river until evening came."
+   },
+   "output": [
+    {
+     "text": "We",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "walked",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "along",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "the",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "quiet",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "old",
+     "start": "1.95",
+     "end": "2"
+    },
+    {
+     "text": "river",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "until",
+     "start": "2.4",
+     "end": "2.75"
+    },
+    {
+     "text": "evening",
+     "start": "2.8",
+     "end": "3.15"
+    },
+    {
+     "text": "came.",
+     "start": "3.2",
+     "end": "3.55"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: one dropped word of ten",
+    "heard": [
+     {
+      "text": "We",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "walked",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "along",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "the",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "quiet",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "river",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "until",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "evening",
+      "start": 2.8,
+      "end": 3.15
+     },
+     {
+      "text": "came.",
+      "start": 3.2,
+      "end": 3.55
+     }
+    ],
+    "text": "We walked along the quiet old river until evening came."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: two dropped words of ten",
+    "heard": [
+     {
+      "text": "We",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "walked",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "along",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "the",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "river",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "until",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "evening",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "came.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "We walked along the quiet old river until evening came."
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [
+     "quiet",
+     "old"
+    ],
+    "unsure": [
+     "quiet",
+     "old"
+    ],
+    "why": "missing \"quiet old\"",
+    "badness": "0.9999999999999999"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: two dropped words of ten",
+    "heard": [
+     {
+      "text": "We",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "walked",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "along",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "the",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "river",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "until",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "evening",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "came.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "We walked along the quiet old river until evening came."
+   },
+   "output": [
+    {
+     "text": "We",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "walked",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "along",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "the",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "quiet",
+     "start": "1.55",
+     "end": "1.581"
+    },
+    {
+     "text": "old",
+     "start": "1.581",
+     "end": "1.6"
+    },
+    {
+     "text": "river",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "until",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "evening",
+     "start": "2.4",
+     "end": "2.75"
+    },
+    {
+     "text": "came.",
+     "start": "2.8",
+     "end": "3.15"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: two dropped words of ten",
+    "heard": [
+     {
+      "text": "We",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "walked",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "along",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "the",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "river",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "until",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "evening",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "came.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "We walked along the quiet old river until evening came."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: dropped word of three",
+    "heard": [
+     {
+      "text": "kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "berlumpur.",
+      "start": 0.4,
+      "end": 0.75
+     }
+    ],
+    "text": "kuala yang berlumpur."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [
+     "yang"
+    ],
+    "unsure": [
+     "yang"
+    ],
+    "why": "",
+    "badness": "0.9666666666666668"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: dropped word of three",
+    "heard": [
+     {
+      "text": "kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "berlumpur.",
+      "start": 0.4,
+      "end": 0.75
+     }
+    ],
+    "text": "kuala yang berlumpur."
+   },
+   "output": [
+    {
+     "text": "kuala",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "yang",
+     "start": "0.35",
+     "end": "0.4"
+    },
+    {
+     "text": "berlumpur.",
+     "start": "0.4",
+     "end": "0.75"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: dropped word of three",
+    "heard": [
+     {
+      "text": "kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "berlumpur.",
+      "start": 0.4,
+      "end": 0.75
+     }
+    ],
+    "text": "kuala yang berlumpur."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: wrong number",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "company",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "started",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "in",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "1985.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "The company started in 1982."
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "numbers heard as 1985, the script says 1982",
+    "badness": "1"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: wrong number",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "company",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "started",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "in",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "1985.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "The company started in 1982."
+   },
+   "output": [
+    {
+     "text": "The",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "company",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "started",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "in",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "1982.",
+     "start": "1.6",
+     "end": "1.95"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: wrong number",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "company",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "started",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "in",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "1985.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "The company started in 1982."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: written number heard as words",
+    "heard": [
+     {
+      "text": "In",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "nineteen",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "eighty-five",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "the",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "plant",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "opened.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "In 1985 the plant opened."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: written number heard as words",
+    "heard": [
+     {
+      "text": "In",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "nineteen",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "eighty-five",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "the",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "plant",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "opened.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "In 1985 the plant opened."
+   },
+   "output": [
+    {
+     "text": "In",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "1985",
+     "start": "0.4",
+     "end": "1.15"
+    },
+    {
+     "text": "the",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "plant",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "opened.",
+     "start": "2",
+     "end": "2.35"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: written number heard as words",
+    "heard": [
+     {
+      "text": "In",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "nineteen",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "eighty-five",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "the",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "plant",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "opened.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "In 1985 the plant opened."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: spoken number heard as digits",
+    "heard": [
+     {
+      "text": "In",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "1985",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "the",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "plant",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "opened.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "In nineteen eighty-five the plant opened."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: spoken number heard as digits",
+    "heard": [
+     {
+      "text": "In",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "1985",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "the",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "plant",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "opened.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "In nineteen eighty-five the plant opened."
+   },
+   "output": [
+    {
+     "text": "In",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "nineteen",
+     "start": "0.4",
+     "end": "0.556"
+    },
+    {
+     "text": "eighty-five",
+     "start": "0.556",
+     "end": "0.75"
+    },
+    {
+     "text": "the",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "plant",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "opened.",
+     "start": "1.6",
+     "end": "1.95"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: spoken number heard as digits",
+    "heard": [
+     {
+      "text": "In",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "1985",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "the",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "plant",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "opened.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "In nineteen eighty-five the plant opened."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: number heard, none written",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "costs",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "40",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "now.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "It costs little now."
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "little"
+    ],
+    "why": "numbers heard as 40, the script says none",
+    "badness": "1.5"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: number heard, none written",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "costs",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "40",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "now.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "It costs little now."
+   },
+   "output": [
+    {
+     "text": "It",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "costs",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "little",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "now.",
+     "start": "1.2",
+     "end": "1.55"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: number heard, none written",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "costs",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "40",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "now.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "It costs little now."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: Malay short forms",
+    "heard": [
+     {
+      "text": "Saya",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "tidak",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "tahu",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "yang",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "mana",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "satu",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "dengan",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "dia.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Saya tak tahu yg mana satu dgn dia."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: Malay short forms",
+    "heard": [
+     {
+      "text": "Saya",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "tidak",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "tahu",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "yang",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "mana",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "satu",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "dengan",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "dia.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Saya tak tahu yg mana satu dgn dia."
+   },
+   "output": [
+    {
+     "text": "Saya",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "tak",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "tahu",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "yg",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "mana",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "satu",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "dgn",
+     "start": "2.4",
+     "end": "2.75"
+    },
+    {
+     "text": "dia.",
+     "start": "2.8",
+     "end": "3.15"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: Malay short forms",
+    "heard": [
+     {
+      "text": "Saya",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "tidak",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "tahu",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "yang",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "mana",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "satu",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "dengan",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "dia.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Saya tak tahu yg mana satu dgn dia."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: Malay short forms reversed",
+    "heard": [
+     {
+      "text": "Pokok",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "ni",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "cuma",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "tumbuh",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "di",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "situ.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "Pokok ini cuma tumbuh di situ."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: Malay short forms reversed",
+    "heard": [
+     {
+      "text": "Pokok",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "ni",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "cuma",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "tumbuh",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "di",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "situ.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "Pokok ini cuma tumbuh di situ."
+   },
+   "output": [
+    {
+     "text": "Pokok",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "ini",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "cuma",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "tumbuh",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "di",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "situ.",
+     "start": "2",
+     "end": "2.35"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: Malay short forms reversed",
+    "heard": [
+     {
+      "text": "Pokok",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "ni",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "cuma",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "tumbuh",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "di",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "situ.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "Pokok ini cuma tumbuh di situ."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: units written onto numbers",
+    "heard": [
+     {
+      "text": "Tambah",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "5L",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "air",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "dan",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "20%",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "gula.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "Tambah 5 liter air dan 20 peratus gula."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: units written onto numbers",
+    "heard": [
+     {
+      "text": "Tambah",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "5L",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "air",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "dan",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "20%",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "gula.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "Tambah 5 liter air dan 20 peratus gula."
+   },
+   "output": [
+    {
+     "text": "Tambah",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "5",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "liter",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "air",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "dan",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "20",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "peratus",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "gula.",
+     "start": "2",
+     "end": "2.35"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: units written onto numbers",
+    "heard": [
+     {
+      "text": "Tambah",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "5L",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "air",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "dan",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "20%",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "gula.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "Tambah 5 liter air dan 20 peratus gula."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: unit with end punctuation",
+    "heard": [
+     {
+      "text": "Jalan",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "sejauh",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "12km.",
+      "start": 0.8,
+      "end": 1.15
+     }
+    ],
+    "text": "Jalan sejauh 12 kilometer."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: unit with end punctuation",
+    "heard": [
+     {
+      "text": "Jalan",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "sejauh",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "12km.",
+      "start": 0.8,
+      "end": 1.15
+     }
+    ],
+    "text": "Jalan sejauh 12 kilometer."
+   },
+   "output": [
+    {
+     "text": "Jalan",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "sejauh",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "12",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "kilometer.",
+     "start": "0.8",
+     "end": "1.15"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: unit with end punctuation",
+    "heard": [
+     {
+      "text": "Jalan",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "sejauh",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "12km.",
+      "start": 0.8,
+      "end": 1.15
+     }
+    ],
+    "text": "Jalan sejauh 12 kilometer."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: data units",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.25
+     },
+     {
+      "text": "needs",
+      "start": 0.3,
+      "end": 0.55
+     },
+     {
+      "text": "8GB",
+      "start": 0.6,
+      "end": 0.85
+     },
+     {
+      "text": "of",
+      "start": 0.9,
+      "end": 1.15
+     },
+     {
+      "text": "memory.",
+      "start": 1.2,
+      "end": 1.45
+     }
+    ],
+    "text": "It needs eight gigabytes of memory."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: data units",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.25
+     },
+     {
+      "text": "needs",
+      "start": 0.3,
+      "end": 0.55
+     },
+     {
+      "text": "8GB",
+      "start": 0.6,
+      "end": 0.85
+     },
+     {
+      "text": "of",
+      "start": 0.9,
+      "end": 1.15
+     },
+     {
+      "text": "memory.",
+      "start": 1.2,
+      "end": 1.45
+     }
+    ],
+    "text": "It needs eight gigabytes of memory."
+   },
+   "output": [
+    {
+     "text": "It",
+     "start": "0",
+     "end": "0.25"
+    },
+    {
+     "text": "needs",
+     "start": "0.3",
+     "end": "0.55"
+    },
+    {
+     "text": "eight",
+     "start": "0.6",
+     "end": "0.6"
+    },
+    {
+     "text": "gigabytes",
+     "start": "0.6",
+     "end": "0.85"
+    },
+    {
+     "text": "of",
+     "start": "0.9",
+     "end": "1.15"
+    },
+    {
+     "text": "memory.",
+     "start": "1.2",
+     "end": "1.45"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: data units",
+    "heard": [
+     {
+      "text": "It",
+      "start": 0,
+      "end": 0.25
+     },
+     {
+      "text": "needs",
+      "start": 0.3,
+      "end": 0.55
+     },
+     {
+      "text": "8GB",
+      "start": 0.6,
+      "end": 0.85
+     },
+     {
+      "text": "of",
+      "start": 0.9,
+      "end": 1.15
+     },
+     {
+      "text": "memory.",
+      "start": 1.2,
+      "end": 1.45
+     }
+    ],
+    "text": "It needs eight gigabytes of memory."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: spaced decimal with unit",
+    "heard": [
+     {
+      "text": "sampai",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "3",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": ".5L",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "air.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "sampai tiga setengah liter air."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: spaced decimal with unit",
+    "heard": [
+     {
+      "text": "sampai",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "3",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": ".5L",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "air.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "sampai tiga setengah liter air."
+   },
+   "output": [
+    {
+     "text": "sampai",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "tiga",
+     "start": "0.4",
+     "end": "0.533"
+    },
+    {
+     "text": "setengah",
+     "start": "0.533",
+     "end": "0.8"
+    },
+    {
+     "text": "liter",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "air.",
+     "start": "1.2",
+     "end": "1.55"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: spaced decimal with unit",
+    "heard": [
+     {
+      "text": "sampai",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "3",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": ".5L",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "air.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "sampai tiga setengah liter air."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: recognizer fragments",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.25
+     },
+     {
+      "text": "airline",
+      "start": 0.3,
+      "end": 0.55
+     },
+     {
+      "text": "flies",
+      "start": 0.6,
+      "end": 0.85
+     },
+     {
+      "text": "non",
+      "start": 0.9,
+      "end": 1.15
+     },
+     {
+      "text": "-stop",
+      "start": 1.2,
+      "end": 1.45
+     },
+     {
+      "text": "to",
+      "start": 1.5,
+      "end": 1.75
+     },
+     {
+      "text": "over",
+      "start": 1.8,
+      "end": 2.05
+     },
+     {
+      "text": "1",
+      "start": 2.1,
+      "end": 2.35
+     },
+     {
+      "text": ",100",
+      "start": 2.4,
+      "end": 2.65
+     },
+     {
+      "text": "cities.",
+      "start": 2.7,
+      "end": 2.95
+     }
+    ],
+    "text": "The airline flies non-stop to over 1,100 cities."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: recognizer fragments",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.25
+     },
+     {
+      "text": "airline",
+      "start": 0.3,
+      "end": 0.55
+     },
+     {
+      "text": "flies",
+      "start": 0.6,
+      "end": 0.85
+     },
+     {
+      "text": "non",
+      "start": 0.9,
+      "end": 1.15
+     },
+     {
+      "text": "-stop",
+      "start": 1.2,
+      "end": 1.45
+     },
+     {
+      "text": "to",
+      "start": 1.5,
+      "end": 1.75
+     },
+     {
+      "text": "over",
+      "start": 1.8,
+      "end": 2.05
+     },
+     {
+      "text": "1",
+      "start": 2.1,
+      "end": 2.35
+     },
+     {
+      "text": ",100",
+      "start": 2.4,
+      "end": 2.65
+     },
+     {
+      "text": "cities.",
+      "start": 2.7,
+      "end": 2.95
+     }
+    ],
+    "text": "The airline flies non-stop to over 1,100 cities."
+   },
+   "output": [
+    {
+     "text": "The",
+     "start": "0",
+     "end": "0.25"
+    },
+    {
+     "text": "airline",
+     "start": "0.3",
+     "end": "0.55"
+    },
+    {
+     "text": "flies",
+     "start": "0.6",
+     "end": "0.85"
+    },
+    {
+     "text": "non-stop",
+     "start": "0.9",
+     "end": "1.45"
+    },
+    {
+     "text": "to",
+     "start": "1.5",
+     "end": "1.75"
+    },
+    {
+     "text": "over",
+     "start": "1.8",
+     "end": "2.05"
+    },
+    {
+     "text": "1,100",
+     "start": "2.1",
+     "end": "2.65"
+    },
+    {
+     "text": "cities.",
+     "start": "2.7",
+     "end": "2.95"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: recognizer fragments",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.25
+     },
+     {
+      "text": "airline",
+      "start": 0.3,
+      "end": 0.55
+     },
+     {
+      "text": "flies",
+      "start": 0.6,
+      "end": 0.85
+     },
+     {
+      "text": "non",
+      "start": 0.9,
+      "end": 1.15
+     },
+     {
+      "text": "-stop",
+      "start": 1.2,
+      "end": 1.45
+     },
+     {
+      "text": "to",
+      "start": 1.5,
+      "end": 1.75
+     },
+     {
+      "text": "over",
+      "start": 1.8,
+      "end": 2.05
+     },
+     {
+      "text": "1",
+      "start": 2.1,
+      "end": 2.35
+     },
+     {
+      "text": ",100",
+      "start": 2.4,
+      "end": 2.65
+     },
+     {
+      "text": "cities.",
+      "start": 2.7,
+      "end": 2.95
+     }
+    ],
+    "text": "The airline flies non-stop to over 1,100 cities."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: fragment with padding",
+    "heard": [
+     {
+      "text": "Wi ",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": " -Fi",
+      "start": 0.2,
+      "end": 0.5
+     },
+     {
+      "text": "works",
+      "start": 0.5,
+      "end": 0.9
+     }
+    ],
+    "text": "Wi-Fi works"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: fragment with padding",
+    "heard": [
+     {
+      "text": "Wi ",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": " -Fi",
+      "start": 0.2,
+      "end": 0.5
+     },
+     {
+      "text": "works",
+      "start": 0.5,
+      "end": 0.9
+     }
+    ],
+    "text": "Wi-Fi works"
+   },
+   "output": [
+    {
+     "text": "Wi-Fi",
+     "start": "0",
+     "end": "0.5"
+    },
+    {
+     "text": "works",
+     "start": "0.5",
+     "end": "0.9"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: fragment with padding",
+    "heard": [
+     {
+      "text": "Wi ",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": " -Fi",
+      "start": 0.2,
+      "end": 0.5
+     },
+     {
+      "text": "works",
+      "start": 0.5,
+      "end": 0.9
+     }
+    ],
+    "text": "Wi-Fi works"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: accented script, plain heard",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "cafe",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "served",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "creme",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "brulee",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "today.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "The café served crème brûlée today."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: accented script, plain heard",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "cafe",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "served",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "creme",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "brulee",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "today.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "The café served crème brûlée today."
+   },
+   "output": [
+    {
+     "text": "The",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "café",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "served",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "crème",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "brûlée",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "today.",
+     "start": "2",
+     "end": "2.35"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: accented script, plain heard",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "cafe",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "served",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "creme",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "brulee",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "today.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "The café served crème brûlée today."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: accented heard, plain script",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "café",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "served",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "crème",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "brûlée",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "today.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "The cafe served creme brulee today."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: accented heard, plain script",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "café",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "served",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "crème",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "brûlée",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "today.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "The cafe served creme brulee today."
+   },
+   "output": [
+    {
+     "text": "The",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "cafe",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "served",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "creme",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "brulee",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "today.",
+     "start": "2",
+     "end": "2.35"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: accented heard, plain script",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "café",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "served",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "crème",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "brûlée",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "today.",
+      "start": 2,
+      "end": 2.35
+     }
+    ],
+    "text": "The cafe served creme brulee today."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: compound split on both sides",
+    "heard": [
+     {
+      "text": "Send",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "the",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "follow-up",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "e-mail",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "today.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "Send the follow-up e-mail today."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: compound split on both sides",
+    "heard": [
+     {
+      "text": "Send",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "the",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "follow-up",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "e-mail",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "today.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "Send the follow-up e-mail today."
+   },
+   "output": [
+    {
+     "text": "Send",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "the",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "follow-up",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "e-mail",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "today.",
+     "start": "1.6",
+     "end": "1.95"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: compound split on both sides",
+    "heard": [
+     {
+      "text": "Send",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "the",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "follow-up",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "e-mail",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "today.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "Send the follow-up e-mail today."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: compound heard as two words",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.25
+     },
+     {
+      "text": "cafe",
+      "start": 0.3,
+      "end": 0.55
+     },
+     {
+      "text": "has",
+      "start": 0.6,
+      "end": 0.85
+     },
+     {
+      "text": "free",
+      "start": 0.9,
+      "end": 1.15
+     },
+     {
+      "text": "Wi",
+      "start": 1.2,
+      "end": 1.45
+     },
+     {
+      "text": "-Fi",
+      "start": 1.5,
+      "end": 1.75
+     },
+     {
+      "text": "for",
+      "start": 1.8,
+      "end": 2.05
+     },
+     {
+      "text": "every",
+      "start": 2.1,
+      "end": 2.35
+     },
+     {
+      "text": "guest.",
+      "start": 2.4,
+      "end": 2.65
+     }
+    ],
+    "text": "The cafe has free Wi-Fi for every guest."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: compound heard as two words",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.25
+     },
+     {
+      "text": "cafe",
+      "start": 0.3,
+      "end": 0.55
+     },
+     {
+      "text": "has",
+      "start": 0.6,
+      "end": 0.85
+     },
+     {
+      "text": "free",
+      "start": 0.9,
+      "end": 1.15
+     },
+     {
+      "text": "Wi",
+      "start": 1.2,
+      "end": 1.45
+     },
+     {
+      "text": "-Fi",
+      "start": 1.5,
+      "end": 1.75
+     },
+     {
+      "text": "for",
+      "start": 1.8,
+      "end": 2.05
+     },
+     {
+      "text": "every",
+      "start": 2.1,
+      "end": 2.35
+     },
+     {
+      "text": "guest.",
+      "start": 2.4,
+      "end": 2.65
+     }
+    ],
+    "text": "The cafe has free Wi-Fi for every guest."
+   },
+   "output": [
+    {
+     "text": "The",
+     "start": "0",
+     "end": "0.25"
+    },
+    {
+     "text": "cafe",
+     "start": "0.3",
+     "end": "0.55"
+    },
+    {
+     "text": "has",
+     "start": "0.6",
+     "end": "0.85"
+    },
+    {
+     "text": "free",
+     "start": "0.9",
+     "end": "1.15"
+    },
+    {
+     "text": "Wi-Fi",
+     "start": "1.2",
+     "end": "1.75"
+    },
+    {
+     "text": "for",
+     "start": "1.8",
+     "end": "2.05"
+    },
+    {
+     "text": "every",
+     "start": "2.1",
+     "end": "2.35"
+    },
+    {
+     "text": "guest.",
+     "start": "2.4",
+     "end": "2.65"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: compound heard as two words",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.25
+     },
+     {
+      "text": "cafe",
+      "start": 0.3,
+      "end": 0.55
+     },
+     {
+      "text": "has",
+      "start": 0.6,
+      "end": 0.85
+     },
+     {
+      "text": "free",
+      "start": 0.9,
+      "end": 1.15
+     },
+     {
+      "text": "Wi",
+      "start": 1.2,
+      "end": 1.45
+     },
+     {
+      "text": "-Fi",
+      "start": 1.5,
+      "end": 1.75
+     },
+     {
+      "text": "for",
+      "start": 1.8,
+      "end": 2.05
+     },
+     {
+      "text": "every",
+      "start": 2.1,
+      "end": 2.35
+     },
+     {
+      "text": "guest.",
+      "start": 2.4,
+      "end": 2.65
+     }
+    ],
+    "text": "The cafe has free Wi-Fi for every guest."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: compound heard as separate words",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "support",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "team",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "answers",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "every",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "question",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "quickly.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "The support-team answers every question quickly."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0.33333333333333326"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: compound heard as separate words",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "support",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "team",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "answers",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "every",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "question",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "quickly.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "The support-team answers every question quickly."
+   },
+   "output": [
+    {
+     "text": "The",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "support-team",
+     "start": "0.4",
+     "end": "1.15"
+    },
+    {
+     "text": "answers",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "every",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "question",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "quickly.",
+     "start": "2.4",
+     "end": "2.75"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: compound heard as separate words",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "support",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "team",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "answers",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "every",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "question",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "quickly.",
+      "start": 2.4,
+      "end": 2.75
+     }
+    ],
+    "text": "The support-team answers every question quickly."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: short compound heard apart",
+    "heard": [
+     {
+      "text": "Send",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "an",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "e",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "mail",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "now.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "Send an e-mail now."
+   },
+   "output": {
+    "ok": true,
+    "extra": [
+     {
+      "text": "e",
+      "seconds": "0.34999999999999987"
+     }
+    ],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0.6499999999999999"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: short compound heard apart",
+    "heard": [
+     {
+      "text": "Send",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "an",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "e",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "mail",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "now.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "Send an e-mail now."
+   },
+   "output": [
+    {
+     "text": "Send",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "an",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "e-mail",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "now.",
+     "start": "1.6",
+     "end": "1.95"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: short compound heard apart",
+    "heard": [
+     {
+      "text": "Send",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "an",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "e",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "mail",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "now.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "Send an e-mail now."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: short compound heard as two words",
+    "heard": [
+     {
+      "text": "Free",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "Wi",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "Fi",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "here.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Free Wi-Fi here."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "Wi-Fi"
+    ],
+    "why": "",
+    "badness": "0.6666666666666667"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: short compound heard as two words",
+    "heard": [
+     {
+      "text": "Free",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "Wi",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "Fi",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "here.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Free Wi-Fi here."
+   },
+   "output": [
+    {
+     "text": "Free",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "Wi-Fi",
+     "start": "0.4",
+     "end": "1.15"
+    },
+    {
+     "text": "here.",
+     "start": "1.2",
+     "end": "1.55"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: short compound heard as two words",
+    "heard": [
+     {
+      "text": "Free",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "Wi",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "Fi",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "here.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Free Wi-Fi here."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: unsure word",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "ancient",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "mandate",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "was",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "fragile.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "The ancient manuscript was fragile."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "manuscript"
+    ],
+    "why": "",
+    "badness": "0.3999999999999999"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: unsure word",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "ancient",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "mandate",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "was",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "fragile.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "The ancient manuscript was fragile."
+   },
+   "output": [
+    {
+     "text": "The",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "ancient",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "manuscript",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "was",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "fragile.",
+     "start": "1.6",
+     "end": "1.95"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: unsure word",
+    "heard": [
+     {
+      "text": "The",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "ancient",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "mandate",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "was",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "fragile.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "The ancient manuscript was fragile."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: most words unsure",
+    "heard": [
+     {
+      "text": "Saya",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "jadi",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "bijeh",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "timah.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "nak cari bijih timah."
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "nak",
+     "cari"
+    ],
+    "why": "only 50% of its words recognized",
+    "badness": "1"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: most words unsure",
+    "heard": [
+     {
+      "text": "Saya",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "jadi",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "bijeh",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "timah.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "nak cari bijih timah."
+   },
+   "output": [
+    {
+     "text": "nak",
+     "start": "0",
+     "end": "0.321"
+    },
+    {
+     "text": "cari",
+     "start": "0.321",
+     "end": "0.75"
+    },
+    {
+     "text": "bijih",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "timah.",
+     "start": "1.2",
+     "end": "1.55"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: most words unsure",
+    "heard": [
+     {
+      "text": "Saya",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "jadi",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "bijeh",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "timah.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "nak cari bijih timah."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: heard as something else",
+    "heard": [
+     {
+      "text": "40",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "buta",
+      "start": 0.4,
+      "end": 0.75
+     }
+    ],
+    "text": "Eh, korang tahu tak?"
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "Eh,",
+     "korang",
+     "tahu",
+     "tak?"
+    ],
+    "why": "numbers heard as 40, the script says none, only 0% of its words recognized",
+    "badness": "3"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: heard as something else",
+    "heard": [
+     {
+      "text": "40",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "buta",
+      "start": 0.4,
+      "end": 0.75
+     }
+    ],
+    "text": "Eh, korang tahu tak?"
+   },
+   "output": [
+    {
+     "text": "Eh,",
+     "start": "0",
+     "end": "0.1"
+    },
+    {
+     "text": "korang",
+     "start": "0.1",
+     "end": "0.4"
+    },
+    {
+     "text": "tahu",
+     "start": "0.4",
+     "end": "0.6"
+    },
+    {
+     "text": "tak?",
+     "start": "0.6",
+     "end": "0.75"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: heard as something else",
+    "heard": [
+     {
+      "text": "40",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "buta",
+      "start": 0.4,
+      "end": 0.75
+     }
+    ],
+    "text": "Eh, korang tahu tak?"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: one misheard word in three",
+    "heard": [
+     {
+      "text": "Kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "yang",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "belum",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "po.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "kuala yang berlumpur."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "berlumpur."
+    ],
+    "why": "",
+    "badness": "0.6666666666666667"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: one misheard word in three",
+    "heard": [
+     {
+      "text": "Kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "yang",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "belum",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "po.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "kuala yang berlumpur."
+   },
+   "output": [
+    {
+     "text": "kuala",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "yang",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "berlumpur.",
+     "start": "0.8",
+     "end": "1.55"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: one misheard word in three",
+    "heard": [
+     {
+      "text": "Kuala",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "yang",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "belum",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "po.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "kuala yang berlumpur."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: long number does not carry a garbled phrase",
+    "heard": [
+     {
+      "text": "saya",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "baru",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "lewat",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "tahun",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "1857.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "Semuanya bermula tahun lapan belas lima puluh tujuh."
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "Semuanya",
+     "bermula"
+    ],
+    "why": "only 33% of its words recognized",
+    "badness": "1.3333333333333335"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: long number does not carry a garbled phrase",
+    "heard": [
+     {
+      "text": "saya",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "baru",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "lewat",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "tahun",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "1857.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "Semuanya bermula tahun lapan belas lima puluh tujuh."
+   },
+   "output": [
+    {
+     "text": "Semuanya",
+     "start": "0",
+     "end": "0.613"
+    },
+    {
+     "text": "bermula",
+     "start": "0.613",
+     "end": "1.15"
+    },
+    {
+     "text": "tahun",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "lapan",
+     "start": "1.6",
+     "end": "1.673"
+    },
+    {
+     "text": "belas",
+     "start": "1.673",
+     "end": "1.746"
+    },
+    {
+     "text": "lima",
+     "start": "1.746",
+     "end": "1.804"
+    },
+    {
+     "text": "puluh",
+     "start": "1.804",
+     "end": "1.877"
+    },
+    {
+     "text": "tujuh.",
+     "start": "1.877",
+     "end": "1.95"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: long number does not carry a garbled phrase",
+    "heard": [
+     {
+      "text": "saya",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "baru",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "lewat",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "tahun",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "1857.",
+      "start": 1.6,
+      "end": 1.95
+     }
+    ],
+    "text": "Semuanya bermula tahun lapan belas lima puluh tujuh."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: long number with its phrase",
+    "heard": [
+     {
+      "text": "Semuanya",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "bermula",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "tahun",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "1857.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Semuanya bermula tahun lapan belas lima puluh tujuh."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: long number with its phrase",
+    "heard": [
+     {
+      "text": "Semuanya",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "bermula",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "tahun",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "1857.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Semuanya bermula tahun lapan belas lima puluh tujuh."
+   },
+   "output": [
+    {
+     "text": "Semuanya",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "bermula",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "tahun",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "lapan",
+     "start": "1.2",
+     "end": "1.273"
+    },
+    {
+     "text": "belas",
+     "start": "1.273",
+     "end": "1.346"
+    },
+    {
+     "text": "lima",
+     "start": "1.346",
+     "end": "1.404"
+    },
+    {
+     "text": "puluh",
+     "start": "1.404",
+     "end": "1.477"
+    },
+    {
+     "text": "tujuh.",
+     "start": "1.477",
+     "end": "1.55"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: long number with its phrase",
+    "heard": [
+     {
+      "text": "Semuanya",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "bermula",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "tahun",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "1857.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Semuanya bermula tahun lapan belas lima puluh tujuh."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: babble after the sentence",
+    "heard": [
+     {
+      "text": "Pada",
+      "start": 0,
+      "end": 0.3
+     },
+     {
+      "text": "tahun",
+      "start": 0.3,
+      "end": 0.6
+     },
+     {
+      "text": "1857,",
+      "start": 0.6,
+      "end": 1.5
+     },
+     {
+      "text": "Raja",
+      "start": 1.6,
+      "end": 1.9
+     },
+     {
+      "text": "Abdullah.",
+      "start": 1.9,
+      "end": 2.4
+     },
+     {
+      "text": "marbulan",
+      "start": 2.6,
+      "end": 3.1
+     },
+     {
+      "text": "nambar",
+      "start": 3.1,
+      "end": 3.6
+     }
+    ],
+    "text": "Pada tahun lapan belas lima puluh tujuh, Raja Abdullah."
+   },
+   "output": {
+    "ok": false,
+    "extra": [
+     {
+      "text": "marbulan nambar",
+      "seconds": "1"
+     }
+    ],
+    "missing": [],
+    "unsure": [],
+    "why": "extra speech \"marbulan nambar\"",
+    "badness": "1.6"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: babble after the sentence",
+    "heard": [
+     {
+      "text": "Pada",
+      "start": 0,
+      "end": 0.3
+     },
+     {
+      "text": "tahun",
+      "start": 0.3,
+      "end": 0.6
+     },
+     {
+      "text": "1857,",
+      "start": 0.6,
+      "end": 1.5
+     },
+     {
+      "text": "Raja",
+      "start": 1.6,
+      "end": 1.9
+     },
+     {
+      "text": "Abdullah.",
+      "start": 1.9,
+      "end": 2.4
+     },
+     {
+      "text": "marbulan",
+      "start": 2.6,
+      "end": 3.1
+     },
+     {
+      "text": "nambar",
+      "start": 3.1,
+      "end": 3.6
+     }
+    ],
+    "text": "Pada tahun lapan belas lima puluh tujuh, Raja Abdullah."
+   },
+   "output": [
+    {
+     "text": "Pada",
+     "start": "0",
+     "end": "0.3"
+    },
+    {
+     "text": "tahun",
+     "start": "0.3",
+     "end": "0.6"
+    },
+    {
+     "text": "lapan",
+     "start": "0.6",
+     "end": "0.787"
+    },
+    {
+     "text": "belas",
+     "start": "0.787",
+     "end": "0.975"
+    },
+    {
+     "text": "lima",
+     "start": "0.975",
+     "end": "1.125"
+    },
+    {
+     "text": "puluh",
+     "start": "1.125",
+     "end": "1.313"
+    },
+    {
+     "text": "tujuh,",
+     "start": "1.313",
+     "end": "1.5"
+    },
+    {
+     "text": "Raja",
+     "start": "1.6",
+     "end": "1.9"
+    },
+    {
+     "text": "Abdullah.",
+     "start": "1.9",
+     "end": "2.4"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: babble after the sentence",
+    "heard": [
+     {
+      "text": "Pada",
+      "start": 0,
+      "end": 0.3
+     },
+     {
+      "text": "tahun",
+      "start": 0.3,
+      "end": 0.6
+     },
+     {
+      "text": "1857,",
+      "start": 0.6,
+      "end": 1.5
+     },
+     {
+      "text": "Raja",
+      "start": 1.6,
+      "end": 1.9
+     },
+     {
+      "text": "Abdullah.",
+      "start": 1.9,
+      "end": 2.4
+     },
+     {
+      "text": "marbulan",
+      "start": 2.6,
+      "end": 3.1
+     },
+     {
+      "text": "nambar",
+      "start": 3.1,
+      "end": 3.6
+     }
+    ],
+    "text": "Pada tahun lapan belas lima puluh tujuh, Raja Abdullah."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: take cut short",
+    "heard": [
+     {
+      "text": "Pada",
+      "start": 0,
+      "end": 0.3
+     },
+     {
+      "text": "tahun",
+      "start": 0.3,
+      "end": 0.6
+     }
+    ],
+    "text": "Pada tahun lapan belas lima puluh tujuh, Raja Abdullah."
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [
+     "lapan",
+     "belas",
+     "lima",
+     "puluh",
+     "tujuh,",
+     "Raja",
+     "Abdullah."
+    ],
+    "unsure": [
+     "Raja",
+     "Abdullah."
+    ],
+    "why": "numbers heard as none, the script says 1857, missing \"lapan belas lima puluh tujuh, Raja Abdullah.\", only 50% of its words recognized",
+    "badness": "4.1"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: take cut short",
+    "heard": [
+     {
+      "text": "Pada",
+      "start": 0,
+      "end": 0.3
+     },
+     {
+      "text": "tahun",
+      "start": 0.3,
+      "end": 0.6
+     }
+    ],
+    "text": "Pada tahun lapan belas lima puluh tujuh, Raja Abdullah."
+   },
+   "output": [
+    {
+     "text": "Pada",
+     "start": "0",
+     "end": "0.3"
+    },
+    {
+     "text": "tahun",
+     "start": "0.3",
+     "end": "0.6"
+    },
+    {
+     "text": "lapan",
+     "start": "0.6",
+     "end": "0.6"
+    },
+    {
+     "text": "belas",
+     "start": "0.6",
+     "end": "0.6"
+    },
+    {
+     "text": "lima",
+     "start": "0.6",
+     "end": "0.6"
+    },
+    {
+     "text": "puluh",
+     "start": "0.6",
+     "end": "0.6"
+    },
+    {
+     "text": "tujuh,",
+     "start": "0.6",
+     "end": "0.6"
+    },
+    {
+     "text": "Raja",
+     "start": "0.6",
+     "end": "0.6"
+    },
+    {
+     "text": "Abdullah.",
+     "start": "0.6",
+     "end": "0.6"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: take cut short",
+    "heard": [
+     {
+      "text": "Pada",
+      "start": 0,
+      "end": 0.3
+     },
+     {
+      "text": "tahun",
+      "start": 0.3,
+      "end": 0.6
+     }
+    ],
+    "text": "Pada tahun lapan belas lima puluh tujuh, Raja Abdullah."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: wrong year",
+    "heard": [
+     {
+      "text": "Masuk",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "tahun",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "1860,",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "Kuala",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "Lumpur",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "jadi",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "ibu",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "kota.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Masuk tahun lapan belas sembilan puluh enam, Kuala Lumpur jadi ibu kota."
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "numbers heard as 1860, the script says 1896",
+    "badness": "1"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: wrong year",
+    "heard": [
+     {
+      "text": "Masuk",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "tahun",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "1860,",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "Kuala",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "Lumpur",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "jadi",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "ibu",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "kota.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Masuk tahun lapan belas sembilan puluh enam, Kuala Lumpur jadi ibu kota."
+   },
+   "output": [
+    {
+     "text": "Masuk",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "tahun",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "lapan",
+     "start": "0.8",
+     "end": "0.865"
+    },
+    {
+     "text": "belas",
+     "start": "0.865",
+     "end": "0.93"
+    },
+    {
+     "text": "sembilan",
+     "start": "0.93",
+     "end": "1.033"
+    },
+    {
+     "text": "puluh",
+     "start": "1.033",
+     "end": "1.098"
+    },
+    {
+     "text": "enam,",
+     "start": "1.098",
+     "end": "1.15"
+    },
+    {
+     "text": "Kuala",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "Lumpur",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "jadi",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "ibu",
+     "start": "2.4",
+     "end": "2.75"
+    },
+    {
+     "text": "kota.",
+     "start": "2.8",
+     "end": "3.15"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: wrong year",
+    "heard": [
+     {
+      "text": "Masuk",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "tahun",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "1860,",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "Kuala",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "Lumpur",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "jadi",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "ibu",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "kota.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Masuk tahun lapan belas sembilan puluh enam, Kuala Lumpur jadi ibu kota."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: right year",
+    "heard": [
+     {
+      "text": "Masuk",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "tahun",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "1896,",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "Kuala",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "Lumpur",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "jadi",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "ibu",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "kota.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Masuk tahun lapan belas sembilan puluh enam, Kuala Lumpur jadi ibu kota."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: right year",
+    "heard": [
+     {
+      "text": "Masuk",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "tahun",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "1896,",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "Kuala",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "Lumpur",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "jadi",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "ibu",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "kota.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Masuk tahun lapan belas sembilan puluh enam, Kuala Lumpur jadi ibu kota."
+   },
+   "output": [
+    {
+     "text": "Masuk",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "tahun",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "lapan",
+     "start": "0.8",
+     "end": "0.865"
+    },
+    {
+     "text": "belas",
+     "start": "0.865",
+     "end": "0.93"
+    },
+    {
+     "text": "sembilan",
+     "start": "0.93",
+     "end": "1.033"
+    },
+    {
+     "text": "puluh",
+     "start": "1.033",
+     "end": "1.098"
+    },
+    {
+     "text": "enam,",
+     "start": "1.098",
+     "end": "1.15"
+    },
+    {
+     "text": "Kuala",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "Lumpur",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "jadi",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "ibu",
+     "start": "2.4",
+     "end": "2.75"
+    },
+    {
+     "text": "kota.",
+     "start": "2.8",
+     "end": "3.15"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: right year",
+    "heard": [
+     {
+      "text": "Masuk",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "tahun",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "1896,",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "Kuala",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "Lumpur",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "jadi",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "ibu",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "kota.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Masuk tahun lapan belas sembilan puluh enam, Kuala Lumpur jadi ibu kota."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: words slipped in beside a number",
+    "heard": [
+     {
+      "text": "Tahun",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "1880,",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "saya",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nampak",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "ibu",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "negeri",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "Selangor",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "dipindah.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Tahun lapan belas lapan puluh, ibu negeri Selangor dipindah."
+   },
+   "output": {
+    "ok": false,
+    "extra": [
+     {
+      "text": "saya nampak",
+      "seconds": "0"
+     }
+    ],
+    "missing": [],
+    "unsure": [],
+    "why": "extra speech \"saya nampak\"",
+    "badness": "0.6"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: words slipped in beside a number",
+    "heard": [
+     {
+      "text": "Tahun",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "1880,",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "saya",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nampak",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "ibu",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "negeri",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "Selangor",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "dipindah.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Tahun lapan belas lapan puluh, ibu negeri Selangor dipindah."
+   },
+   "output": [
+    {
+     "text": "Tahun",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "lapan",
+     "start": "0.4",
+     "end": "0.688"
+    },
+    {
+     "text": "belas",
+     "start": "0.688",
+     "end": "0.975"
+    },
+    {
+     "text": "lapan",
+     "start": "0.975",
+     "end": "1.262"
+    },
+    {
+     "text": "puluh,",
+     "start": "1.262",
+     "end": "1.55"
+    },
+    {
+     "text": "ibu",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "negeri",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "Selangor",
+     "start": "2.4",
+     "end": "2.75"
+    },
+    {
+     "text": "dipindah.",
+     "start": "2.8",
+     "end": "3.15"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: words slipped in beside a number",
+    "heard": [
+     {
+      "text": "Tahun",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "1880,",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "saya",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "nampak",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "ibu",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "negeri",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "Selangor",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "dipindah.",
+      "start": 2.8,
+      "end": 3.15
+     }
+    ],
+    "text": "Tahun lapan belas lapan puluh, ibu negeri Selangor dipindah."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: short forms and loanwords",
+    "heard": [
+     {
+      "text": "Pokok",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "ini",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "cuma",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "tumbuh",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "di",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "Sabah,",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "yang",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "lagi",
+      "start": 2.8,
+      "end": 3.15
+     },
+     {
+      "text": "pelik,",
+      "start": 3.2,
+      "end": 3.55
+     },
+     {
+      "text": "scientist",
+      "start": 3.6,
+      "end": 3.95
+     },
+     {
+      "text": "ukur",
+      "start": 4,
+      "end": 4.35
+     },
+     {
+      "text": "itu.",
+      "start": 4.4,
+      "end": 4.75
+     }
+    ],
+    "text": "Pokok ni cuma tumbuh di Sabah, yang lagi pelik, saintis ukur tu."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: short forms and loanwords",
+    "heard": [
+     {
+      "text": "Pokok",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "ini",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "cuma",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "tumbuh",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "di",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "Sabah,",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "yang",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "lagi",
+      "start": 2.8,
+      "end": 3.15
+     },
+     {
+      "text": "pelik,",
+      "start": 3.2,
+      "end": 3.55
+     },
+     {
+      "text": "scientist",
+      "start": 3.6,
+      "end": 3.95
+     },
+     {
+      "text": "ukur",
+      "start": 4,
+      "end": 4.35
+     },
+     {
+      "text": "itu.",
+      "start": 4.4,
+      "end": 4.75
+     }
+    ],
+    "text": "Pokok ni cuma tumbuh di Sabah, yang lagi pelik, saintis ukur tu."
+   },
+   "output": [
+    {
+     "text": "Pokok",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "ni",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "cuma",
+     "start": "0.8",
+     "end": "1.15"
+    },
+    {
+     "text": "tumbuh",
+     "start": "1.2",
+     "end": "1.55"
+    },
+    {
+     "text": "di",
+     "start": "1.6",
+     "end": "1.95"
+    },
+    {
+     "text": "Sabah,",
+     "start": "2",
+     "end": "2.35"
+    },
+    {
+     "text": "yang",
+     "start": "2.4",
+     "end": "2.75"
+    },
+    {
+     "text": "lagi",
+     "start": "2.8",
+     "end": "3.15"
+    },
+    {
+     "text": "pelik,",
+     "start": "3.2",
+     "end": "3.55"
+    },
+    {
+     "text": "saintis",
+     "start": "3.6",
+     "end": "3.95"
+    },
+    {
+     "text": "ukur",
+     "start": "4",
+     "end": "4.35"
+    },
+    {
+     "text": "tu.",
+     "start": "4.4",
+     "end": "4.75"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: short forms and loanwords",
+    "heard": [
+     {
+      "text": "Pokok",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "ini",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "cuma",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "tumbuh",
+      "start": 1.2,
+      "end": 1.55
+     },
+     {
+      "text": "di",
+      "start": 1.6,
+      "end": 1.95
+     },
+     {
+      "text": "Sabah,",
+      "start": 2,
+      "end": 2.35
+     },
+     {
+      "text": "yang",
+      "start": 2.4,
+      "end": 2.75
+     },
+     {
+      "text": "lagi",
+      "start": 2.8,
+      "end": 3.15
+     },
+     {
+      "text": "pelik,",
+      "start": 3.2,
+      "end": 3.55
+     },
+     {
+      "text": "scientist",
+      "start": 3.6,
+      "end": 3.95
+     },
+     {
+      "text": "ukur",
+      "start": 4,
+      "end": 4.35
+     },
+     {
+      "text": "itu.",
+      "start": 4.4,
+      "end": 4.75
+     }
+    ],
+    "text": "Pokok ni cuma tumbuh di Sabah, yang lagi pelik, saintis ukur tu."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: nothing heard",
+    "heard": [],
+    "text": "Two words."
+   },
+   "output": {
+    "ok": false,
+    "extra": [],
+    "missing": [
+     "Two",
+     "words."
+    ],
+    "why": "no speech recognized"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: nothing heard",
+    "heard": [],
+    "text": "Two words."
+   },
+   "output": []
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: nothing heard",
+    "heard": [],
+    "text": "Two words."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: empty sentence",
+    "heard": [
+     {
+      "text": "hello",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "there",
+      "start": 0.4,
+      "end": 0.75
+     }
+    ],
+    "text": "... —"
+   },
+   "output": {
+    "ok": false,
+    "extra": [
+     {
+      "text": "hello there",
+      "seconds": "0.75"
+     }
+    ],
+    "missing": [],
+    "unsure": [],
+    "why": "extra speech \"hello there\"",
+    "badness": "1.35"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: empty sentence",
+    "heard": [
+     {
+      "text": "hello",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "there",
+      "start": 0.4,
+      "end": 0.75
+     }
+    ],
+    "text": "... —"
+   },
+   "output": [
+    {
+     "text": "hello",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "there",
+     "start": "0.4",
+     "end": "0.75"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: empty sentence",
+    "heard": [
+     {
+      "text": "hello",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "there",
+      "start": 0.4,
+      "end": 0.75
+     }
+    ],
+    "text": "... —"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: punctuation-only heard word",
+    "heard": [
+     {
+      "text": "Hello",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "—",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "world.",
+      "start": 0.8,
+      "end": 1.15
+     }
+    ],
+    "text": "Hello world."
+   },
+   "output": {
+    "ok": true,
+    "extra": [
+     {
+      "text": "—",
+      "seconds": "0.35"
+     }
+    ],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0.35"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: punctuation-only heard word",
+    "heard": [
+     {
+      "text": "Hello",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "—",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "world.",
+      "start": 0.8,
+      "end": 1.15
+     }
+    ],
+    "text": "Hello world."
+   },
+   "output": [
+    {
+     "text": "Hello",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "world.",
+     "start": "0.8",
+     "end": "1.15"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: punctuation-only heard word",
+    "heard": [
+     {
+      "text": "Hello",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "—",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "world.",
+      "start": 0.8,
+      "end": 1.15
+     }
+    ],
+    "text": "Hello world."
+   },
+   "output": [
+    {
+     "after": "Hello",
+     "before": "world.",
+     "gap": "0.45"
+    }
+   ]
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/check.json: decimal number",
+    "heard": [
+     {
+      "text": "Harga",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "naik",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "3.5",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "peratus.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Harga naik tiga perpuluhan lima peratus."
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/check.json: decimal number",
+    "heard": [
+     {
+      "text": "Harga",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "naik",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "3.5",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "peratus.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Harga naik tiga perpuluhan lima peratus."
+   },
+   "output": [
+    {
+     "text": "Harga",
+     "start": "0",
+     "end": "0.35"
+    },
+    {
+     "text": "naik",
+     "start": "0.4",
+     "end": "0.75"
+    },
+    {
+     "text": "tiga",
+     "start": "0.8",
+     "end": "0.878"
+    },
+    {
+     "text": "perpuluhan",
+     "start": "0.878",
+     "end": "1.072"
+    },
+    {
+     "text": "lima",
+     "start": "1.072",
+     "end": "1.15"
+    },
+    {
+     "text": "peratus.",
+     "start": "1.2",
+     "end": "1.55"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/check.json: decimal number",
+    "heard": [
+     {
+      "text": "Harga",
+      "start": 0,
+      "end": 0.35
+     },
+     {
+      "text": "naik",
+      "start": 0.4,
+      "end": 0.75
+     },
+     {
+      "text": "3.5",
+      "start": 0.8,
+      "end": 1.15
+     },
+     {
+      "text": "peratus.",
+      "start": 1.2,
+      "end": 1.55
+     }
+    ],
+    "text": "Harga naik tiga perpuluhan lima peratus."
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/pauses.json: pause just over the limit",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "support",
+      "start": 0.2,
+      "end": 0.6
+     },
+     {
+      "text": "team",
+      "start": 0.6,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.46,
+      "end": 1.8
+     },
+     {
+      "text": "each",
+      "start": 1.8,
+      "end": 2
+     },
+     {
+      "text": "customer",
+      "start": 2,
+      "end": 2.6
+     }
+    ],
+    "text": "the support team calls each customer"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/pauses.json: pause just over the limit",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "support",
+      "start": 0.2,
+      "end": 0.6
+     },
+     {
+      "text": "team",
+      "start": 0.6,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.46,
+      "end": 1.8
+     },
+     {
+      "text": "each",
+      "start": 1.8,
+      "end": 2
+     },
+     {
+      "text": "customer",
+      "start": 2,
+      "end": 2.6
+     }
+    ],
+    "text": "the support team calls each customer"
+   },
+   "output": [
+    {
+     "text": "the",
+     "start": "0",
+     "end": "0.2"
+    },
+    {
+     "text": "support",
+     "start": "0.2",
+     "end": "0.6"
+    },
+    {
+     "text": "team",
+     "start": "0.6",
+     "end": "1"
+    },
+    {
+     "text": "calls",
+     "start": "1.46",
+     "end": "1.8"
+    },
+    {
+     "text": "each",
+     "start": "1.8",
+     "end": "2"
+    },
+    {
+     "text": "customer",
+     "start": "2",
+     "end": "2.6"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/pauses.json: pause just over the limit",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "support",
+      "start": 0.2,
+      "end": 0.6
+     },
+     {
+      "text": "team",
+      "start": 0.6,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.46,
+      "end": 1.8
+     },
+     {
+      "text": "each",
+      "start": 1.8,
+      "end": 2
+     },
+     {
+      "text": "customer",
+      "start": 2,
+      "end": 2.6
+     }
+    ],
+    "text": "the support team calls each customer"
+   },
+   "output": [
+    {
+     "after": "team",
+     "before": "calls",
+     "gap": "0.46"
+    }
+   ]
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/pauses.json: pause just under the limit",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "support",
+      "start": 0.2,
+      "end": 0.6
+     },
+     {
+      "text": "team",
+      "start": 0.6,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.44,
+      "end": 1.8
+     },
+     {
+      "text": "each",
+      "start": 1.8,
+      "end": 2
+     },
+     {
+      "text": "customer",
+      "start": 2,
+      "end": 2.6
+     }
+    ],
+    "text": "the support team calls each customer"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/pauses.json: pause just under the limit",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "support",
+      "start": 0.2,
+      "end": 0.6
+     },
+     {
+      "text": "team",
+      "start": 0.6,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.44,
+      "end": 1.8
+     },
+     {
+      "text": "each",
+      "start": 1.8,
+      "end": 2
+     },
+     {
+      "text": "customer",
+      "start": 2,
+      "end": 2.6
+     }
+    ],
+    "text": "the support team calls each customer"
+   },
+   "output": [
+    {
+     "text": "the",
+     "start": "0",
+     "end": "0.2"
+    },
+    {
+     "text": "support",
+     "start": "0.2",
+     "end": "0.6"
+    },
+    {
+     "text": "team",
+     "start": "0.6",
+     "end": "1"
+    },
+    {
+     "text": "calls",
+     "start": "1.44",
+     "end": "1.8"
+    },
+    {
+     "text": "each",
+     "start": "1.8",
+     "end": "2"
+    },
+    {
+     "text": "customer",
+     "start": "2",
+     "end": "2.6"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/pauses.json: pause just under the limit",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "support",
+      "start": 0.2,
+      "end": 0.6
+     },
+     {
+      "text": "team",
+      "start": 0.6,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.44,
+      "end": 1.8
+     },
+     {
+      "text": "each",
+      "start": 1.8,
+      "end": 2
+     },
+     {
+      "text": "customer",
+      "start": 2,
+      "end": 2.6
+     }
+    ],
+    "text": "the support team calls each customer"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/pauses.json: pause at the limit",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.45,
+      "end": 1.8
+     }
+    ],
+    "text": "the team calls"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/pauses.json: pause at the limit",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.45,
+      "end": 1.8
+     }
+    ],
+    "text": "the team calls"
+   },
+   "output": [
+    {
+     "text": "the",
+     "start": "0",
+     "end": "0.2"
+    },
+    {
+     "text": "team",
+     "start": "0.2",
+     "end": "1"
+    },
+    {
+     "text": "calls",
+     "start": "1.45",
+     "end": "1.8"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/pauses.json: pause at the limit",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.45,
+      "end": 1.8
+     }
+    ],
+    "text": "the team calls"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/pauses.json: pause after a comma",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     }
+    ],
+    "text": "the team, calls"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/pauses.json: pause after a comma",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     }
+    ],
+    "text": "the team, calls"
+   },
+   "output": [
+    {
+     "text": "the",
+     "start": "0",
+     "end": "0.2"
+    },
+    {
+     "text": "team,",
+     "start": "0.2",
+     "end": "1"
+    },
+    {
+     "text": "calls",
+     "start": "1.7",
+     "end": "2"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/pauses.json: pause after a comma",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     }
+    ],
+    "text": "the team, calls"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/pauses.json: pause after a quoted stop",
+    "heard": [
+     {
+      "text": "he",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "said",
+      "start": 0.2,
+      "end": 0.5
+     },
+     {
+      "text": "no",
+      "start": 1.2,
+      "end": 1.5
+     }
+    ],
+    "text": "he said.\" no"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/pauses.json: pause after a quoted stop",
+    "heard": [
+     {
+      "text": "he",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "said",
+      "start": 0.2,
+      "end": 0.5
+     },
+     {
+      "text": "no",
+      "start": 1.2,
+      "end": 1.5
+     }
+    ],
+    "text": "he said.\" no"
+   },
+   "output": [
+    {
+     "text": "he",
+     "start": "0",
+     "end": "0.2"
+    },
+    {
+     "text": "said.\"",
+     "start": "0.2",
+     "end": "0.5"
+    },
+    {
+     "text": "no",
+     "start": "1.2",
+     "end": "1.5"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/pauses.json: pause after a quoted stop",
+    "heard": [
+     {
+      "text": "he",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "said",
+      "start": 0.2,
+      "end": 0.5
+     },
+     {
+      "text": "no",
+      "start": 1.2,
+      "end": 1.5
+     }
+    ],
+    "text": "he said.\" no"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/pauses.json: pause after a lone dash",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     },
+     {
+      "text": "them",
+      "start": 2.6,
+      "end": 3
+     }
+    ],
+    "text": "the team — calls them"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/pauses.json: pause after a lone dash",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     },
+     {
+      "text": "them",
+      "start": 2.6,
+      "end": 3
+     }
+    ],
+    "text": "the team — calls them"
+   },
+   "output": [
+    {
+     "text": "the",
+     "start": "0",
+     "end": "0.2"
+    },
+    {
+     "text": "team",
+     "start": "0.2",
+     "end": "1"
+    },
+    {
+     "text": "calls",
+     "start": "1.7",
+     "end": "2"
+    },
+    {
+     "text": "them",
+     "start": "2.6",
+     "end": "3"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/pauses.json: pause after a lone dash",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     },
+     {
+      "text": "them",
+      "start": 2.6,
+      "end": 3
+     }
+    ],
+    "text": "the team — calls them"
+   },
+   "output": [
+    {
+     "after": "calls",
+     "before": "them",
+     "gap": "0.6"
+    }
+   ]
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/pauses.json: pause after a lone ellipsis",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     }
+    ],
+    "text": "the team … calls"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/pauses.json: pause after a lone ellipsis",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     }
+    ],
+    "text": "the team … calls"
+   },
+   "output": [
+    {
+     "text": "the",
+     "start": "0",
+     "end": "0.2"
+    },
+    {
+     "text": "team",
+     "start": "0.2",
+     "end": "1"
+    },
+    {
+     "text": "calls",
+     "start": "1.7",
+     "end": "2"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/pauses.json: pause after a lone ellipsis",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     }
+    ],
+    "text": "the team … calls"
+   },
+   "output": []
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/pauses.json: pause after a lone dot run",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     }
+    ],
+    "text": "the team ... calls"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/pauses.json: pause after a lone dot run",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     }
+    ],
+    "text": "the team ... calls"
+   },
+   "output": [
+    {
+     "text": "the",
+     "start": "0",
+     "end": "0.2"
+    },
+    {
+     "text": "team",
+     "start": "0.2",
+     "end": "1"
+    },
+    {
+     "text": "calls",
+     "start": "1.7",
+     "end": "2"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/pauses.json: pause after a lone dot run",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     }
+    ],
+    "text": "the team ... calls"
+   },
+   "output": [
+    {
+     "after": "team",
+     "before": "calls",
+     "gap": "0.7"
+    }
+   ]
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/pauses.json: lone dash at the start",
+    "heard": [
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     }
+    ],
+    "text": "— team calls"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/pauses.json: lone dash at the start",
+    "heard": [
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     }
+    ],
+    "text": "— team calls"
+   },
+   "output": [
+    {
+     "text": "team",
+     "start": "0.2",
+     "end": "1"
+    },
+    {
+     "text": "calls",
+     "start": "1.7",
+     "end": "2"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/pauses.json: lone dash at the start",
+    "heard": [
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.7,
+      "end": 2
+     }
+    ],
+    "text": "— team calls"
+   },
+   "output": [
+    {
+     "after": "team",
+     "before": "calls",
+     "gap": "0.7"
+    }
+   ]
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/pauses.json: gap that rounds on a tie",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.625,
+      "end": 2
+     }
+    ],
+    "text": "the team calls"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/pauses.json: gap that rounds on a tie",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.625,
+      "end": 2
+     }
+    ],
+    "text": "the team calls"
+   },
+   "output": [
+    {
+     "text": "the",
+     "start": "0",
+     "end": "0.2"
+    },
+    {
+     "text": "team",
+     "start": "0.2",
+     "end": "1"
+    },
+    {
+     "text": "calls",
+     "start": "1.625",
+     "end": "2"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/pauses.json: gap that rounds on a tie",
+    "heard": [
+     {
+      "text": "the",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "team",
+      "start": 0.2,
+      "end": 1
+     },
+     {
+      "text": "calls",
+      "start": 1.625,
+      "end": 2
+     }
+    ],
+    "text": "the team calls"
+   },
+   "output": [
+    {
+     "after": "team",
+     "before": "calls",
+     "gap": "0.63"
+    }
+   ]
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/pauses.json: gaps on spread words",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0,
+      "end": 0.5
+     },
+     {
+      "text": "zzzz",
+      "start": 1.2,
+      "end": 1.6
+     },
+     {
+      "text": "gamma",
+      "start": 2.4,
+      "end": 2.8
+     }
+    ],
+    "text": "alpha beta gamma"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [
+     "beta"
+    ],
+    "why": "",
+    "badness": "0.6666666666666667"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/pauses.json: gaps on spread words",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0,
+      "end": 0.5
+     },
+     {
+      "text": "zzzz",
+      "start": 1.2,
+      "end": 1.6
+     },
+     {
+      "text": "gamma",
+      "start": 2.4,
+      "end": 2.8
+     }
+    ],
+    "text": "alpha beta gamma"
+   },
+   "output": [
+    {
+     "text": "alpha",
+     "start": "0",
+     "end": "0.5"
+    },
+    {
+     "text": "beta",
+     "start": "1.2",
+     "end": "1.6"
+    },
+    {
+     "text": "gamma",
+     "start": "2.4",
+     "end": "2.8"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/pauses.json: gaps on spread words",
+    "heard": [
+     {
+      "text": "alpha",
+      "start": 0,
+      "end": 0.5
+     },
+     {
+      "text": "zzzz",
+      "start": 1.2,
+      "end": 1.6
+     },
+     {
+      "text": "gamma",
+      "start": 2.4,
+      "end": 2.8
+     }
+    ],
+    "text": "alpha beta gamma"
+   },
+   "output": [
+    {
+     "after": "alpha",
+     "before": "beta",
+     "gap": "0.7"
+    },
+    {
+     "after": "beta",
+     "before": "gamma",
+     "gap": "0.8"
+    }
+   ]
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/pauses.json: percent token",
+    "heard": [
+     {
+      "text": "naik",
+      "start": 0,
+      "end": 0.4
+     },
+     {
+      "text": "20%",
+      "start": 1,
+      "end": 1.5
+     },
+     {
+      "text": "lagi",
+      "start": 2.1,
+      "end": 2.5
+     }
+    ],
+    "text": "naik 20 % lagi"
+   },
+   "output": {
+    "ok": true,
+    "extra": [],
+    "missing": [],
+    "unsure": [],
+    "why": "",
+    "badness": "0"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/pauses.json: percent token",
+    "heard": [
+     {
+      "text": "naik",
+      "start": 0,
+      "end": 0.4
+     },
+     {
+      "text": "20%",
+      "start": 1,
+      "end": 1.5
+     },
+     {
+      "text": "lagi",
+      "start": 2.1,
+      "end": 2.5
+     }
+    ],
+    "text": "naik 20 % lagi"
+   },
+   "output": [
+    {
+     "text": "naik",
+     "start": "0",
+     "end": "0.4"
+    },
+    {
+     "text": "20",
+     "start": "1",
+     "end": "1.5"
+    },
+    {
+     "text": "%",
+     "start": "1",
+     "end": "1.5"
+    },
+    {
+     "text": "lagi",
+     "start": "2.1",
+     "end": "2.5"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/pauses.json: percent token",
+    "heard": [
+     {
+      "text": "naik",
+      "start": 0,
+      "end": 0.4
+     },
+     {
+      "text": "20%",
+      "start": 1,
+      "end": 1.5
+     },
+     {
+      "text": "lagi",
+      "start": 2.1,
+      "end": 2.5
+     }
+    ],
+    "text": "naik 20 % lagi"
+   },
+   "output": [
+    {
+     "after": "naik",
+     "before": "20",
+     "gap": "0.6"
+    },
+    {
+     "after": "%",
+     "before": "lagi",
+     "gap": "0.6"
+    }
+   ]
+  },
+  {
+   "fn": "checkSpeech",
+   "input": {
+    "name": "speech/pauses.json: no script words",
+    "heard": [
+     {
+      "text": "uh",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "um",
+      "start": 0.9,
+      "end": 1.2
+     }
+    ],
+    "text": "..."
+   },
+   "output": {
+    "ok": false,
+    "extra": [
+     {
+      "text": "uh um",
+      "seconds": "1.2"
+     }
+    ],
+    "missing": [],
+    "unsure": [],
+    "why": "extra speech \"uh um\"",
+    "badness": "1.7999999999999998"
+   }
+  },
+  {
+   "fn": "alignScript",
+   "input": {
+    "name": "speech/pauses.json: no script words",
+    "heard": [
+     {
+      "text": "uh",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "um",
+      "start": 0.9,
+      "end": 1.2
+     }
+    ],
+    "text": "..."
+   },
+   "output": [
+    {
+     "text": "uh",
+     "start": "0",
+     "end": "0.2"
+    },
+    {
+     "text": "um",
+     "start": "0.9",
+     "end": "1.2"
+    }
+   ]
+  },
+  {
+   "fn": "strayPauses",
+   "input": {
+    "name": "speech/pauses.json: no script words",
+    "heard": [
+     {
+      "text": "uh",
+      "start": 0,
+      "end": 0.2
+     },
+     {
+      "text": "um",
+      "start": 0.9,
+      "end": 1.2
+     }
+    ],
+    "text": "..."
+   },
+   "output": [
+    {
+     "after": "uh",
+     "before": "um",
+     "gap": "0.7"
+    }
+   ]
   }
  ]
 }

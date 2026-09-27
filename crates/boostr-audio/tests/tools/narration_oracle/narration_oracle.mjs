@@ -1,7 +1,7 @@
 // Reference outputs for `boostr_audio::narration`: runs the JavaScript narration-script modules over the corpus
 // next to this file and prints one JSON document to stdout.
 //
-// Usage: NARRATION_JS_DIR=<directory holding speak.mjs, subtitles.mjs, numbers.mjs> \
+// Usage: NARRATION_JS_DIR=<directory holding speak.mjs, subtitles.mjs, numbers.mjs, voice.mjs> \
 //          node narration_oracle.mjs > ../../fixtures/narration_oracle.json
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -9,13 +9,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const jsDir = process.env.NARRATION_JS_DIR;
 if (!jsDir) {
-  console.error('narration_oracle: NARRATION_JS_DIR is not set. Set it to the directory that holds speak.mjs, subtitles.mjs and numbers.mjs.');
+  console.error('narration_oracle: NARRATION_JS_DIR is not set. Set it to the directory that holds speak.mjs, subtitles.mjs, numbers.mjs and voice.mjs.');
   process.exit(2);
 }
 const load = (name) => import(pathToFileURL(join(jsDir, name)).href);
 const speak = await load('speak.mjs');
 const subtitles = await load('subtitles.mjs');
 const numbers = await load('numbers.mjs');
+const voice = await load('voice.mjs');
 
 const corpus = join(dirname(fileURLToPath(import.meta.url)), 'corpus');
 const read = (rel) => readFileSync(join(corpus, rel), 'utf8');
@@ -87,4 +88,21 @@ for (const s of numberLines) {
 }
 for (const w of lines('number_words.txt')) add('isNumberWord', w, () => numbers.isNumberWord(w));
 
-process.stdout.write(`${JSON.stringify({ pauses: speak.PAUSES, cases }, null, 1)}\n`);
+// The speech check runs every case of every file under speech/: heard words and the script they should say. Numbers
+// in these outputs are written as JavaScript's String(x), which reads back as the exact double.
+const exact = (v) => {
+  if (typeof v === 'number') return String(v);
+  if (Array.isArray(v)) return v.map(exact);
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, exact(x)]));
+  return v;
+};
+for (const f of list('speech')) {
+  for (const { name, heard, text } of JSON.parse(read(f))) {
+    const input = { name: `${f}: ${name}`, heard, text };
+    add('checkSpeech', input, () => exact(voice.checkSpeech(heard, text)));
+    add('alignScript', input, () => exact(voice.alignScript(heard, text)));
+    add('strayPauses', input, () => exact(speak.strayPauses(heard, text, voice.alignScript)));
+  }
+}
+
+process.stdout.write(`${JSON.stringify({ pauses: speak.PAUSES, strayPause: speak.STRAY_PAUSE, cases }, null, 1)}\n`);

@@ -224,6 +224,19 @@ pub(crate) struct Patterns {
     pub(crate) written_number: Regex,
     /// `(\d)\s+([.,])\s*(\d)`: a decimal a recognizer spaced out.
     pub(crate) spaced_decimal: Regex,
+    /// `[^\p{L}\p{N}\s%]`: what a heard or script word drops.
+    pub(crate) not_word: Regex,
+    /// `(\d)(\p{L}|%)`: a unit written onto its number.
+    pub(crate) digit_unit: Regex,
+    /// `^\s*(-\p{L}|,\d)`: a recognizer fragment of the word before.
+    pub(crate) fragment: Regex,
+    /// `^(.*\d)\s*(\p{L}+|%)([.,!?]*)$`: a number, its unit, then end
+    /// punctuation.
+    pub(crate) number_unit: Regex,
+    /// `[\p{L}\p{N}%]`: a script token that holds a word.
+    pub(crate) word_char: Regex,
+    /// `[,.;:!?…—–-]["'”’)\]]*$`: a word ending in a break.
+    pub(crate) break_end: Regex,
 }
 
 static PATTERNS: OnceLock<std::result::Result<Patterns, String>> = OnceLock::new();
@@ -325,6 +338,16 @@ impl Patterns {
                 "spaced_decimal",
                 &format!(r"([0-9])[{WS}]+([.,])[{WS}]*([0-9])"),
             )?,
+            not_word: compile("not_word", &format!(r"[^\p{{L}}\p{{N}}{WS}%]"))?,
+            digit_unit: compile("digit_unit", r"([0-9])(\p{L}|%)")?,
+            fragment: compile("fragment", &format!(r"\A[{WS}]*(?:-\p{{L}}|,[0-9])"))?,
+            // JavaScript's `.` stops at the four line terminators.
+            number_unit: compile(
+                "number_unit",
+                &format!(r"\A([^\n\r\x{{2028}}\x{{2029}}]*[0-9])[{WS}]*(\p{{L}}+|%)([.,!?]*)\z"),
+            )?,
+            word_char: compile("word_char", r"[\p{L}\p{N}%]")?,
+            break_end: compile("break_end", r#"[,.;:!?…—–\-]["'”’)\]]*\z"#)?,
         })
     }
 }

@@ -1,0 +1,317 @@
+[
+ {
+  "name": "spoken number shares the digits span",
+  "heard": [
+   {
+    "text": "Pada",
+    "start": 6.2,
+    "end": 6.5
+   },
+   {
+    "text": "tahun",
+    "start": 6.5,
+    "end": 7
+   },
+   {
+    "text": "1857,",
+    "start": 7.08,
+    "end": 7.97
+   },
+   {
+    "text": "Raja",
+    "start": 8.2,
+    "end": 8.5
+   }
+  ],
+  "text": "Pada tahun lapan belas lima puluh tujuh, Raja"
+ },
+ {
+  "name": "gap at the start with heard words",
+  "heard": [
+   {
+    "text": "um",
+    "start": 0.2,
+    "end": 0.45
+   },
+   {
+    "text": "uh",
+    "start": 0.5,
+    "end": 0.6
+   },
+   {
+    "text": "river",
+    "start": 0.7,
+    "end": 1.1
+   },
+   {
+    "text": "runs",
+    "start": 1.1,
+    "end": 1.5
+   }
+  ],
+  "text": "Well then river runs"
+ },
+ {
+  "name": "gap at the start without heard words",
+  "heard": [
+   {
+    "text": "river",
+    "start": 0.7,
+    "end": 1.1
+   },
+   {
+    "text": "runs",
+    "start": 1.1,
+    "end": 1.5
+   }
+  ],
+  "text": "Well then river runs"
+ },
+ {
+  "name": "gap in the middle",
+  "heard": [
+   {
+    "text": "alpha",
+    "start": 0.5,
+    "end": 1.0625
+   },
+   {
+    "text": "zzzz",
+    "start": 1.0625,
+    "end": 1.3125
+   },
+   {
+    "text": "gamma",
+    "start": 1.3125,
+    "end": 1.8
+   }
+  ],
+  "text": "alpha beta gamma"
+ },
+ {
+  "name": "gap in the middle without heard words",
+  "heard": [
+   {
+    "text": "alpha",
+    "start": 0.5,
+    "end": 1
+   },
+   {
+    "text": "gamma",
+    "start": 1.25,
+    "end": 1.8
+   }
+  ],
+  "text": "alpha beta delta gamma"
+ },
+ {
+  "name": "gap at the end with heard words",
+  "heard": [
+   {
+    "text": "river",
+    "start": 0.1,
+    "end": 0.5
+   },
+   {
+    "text": "runs",
+    "start": 0.5,
+    "end": 0.9
+   },
+   {
+    "text": "qqq",
+    "start": 1,
+    "end": 1.3
+   },
+   {
+    "text": "xx",
+    "start": 1.3,
+    "end": 1.9
+   }
+  ],
+  "text": "river runs to sea"
+ },
+ {
+  "name": "gap at the end without heard words",
+  "heard": [
+   {
+    "text": "river",
+    "start": 0.1,
+    "end": 0.5
+   },
+   {
+    "text": "runs",
+    "start": 0.5,
+    "end": 0.9
+   }
+  ],
+  "text": "river runs to the sea"
+ },
+ {
+  "name": "gap heard word overlapping a sure word",
+  "heard": [
+   {
+    "text": "alpha",
+    "start": 0.5,
+    "end": 1.2
+   },
+   {
+    "text": "zzzz",
+    "start": 1,
+    "end": 1.1
+   },
+   {
+    "text": "gamma",
+    "start": 1.15,
+    "end": 1.8
+   }
+  ],
+  "text": "alpha beta gamma"
+ },
+ {
+  "name": "nothing sure",
+  "heard": [
+   {
+    "text": "aaa",
+    "start": 0.1,
+    "end": 0.4
+   },
+   {
+    "text": "bbb",
+    "start": 0.4,
+    "end": 0.9
+   }
+  ],
+  "text": "river runs north"
+ },
+ {
+  "name": "tie at every spread time",
+  "heard": [
+   {
+    "text": "one",
+    "start": 0,
+    "end": 0.0625
+   },
+   {
+    "text": "zz",
+    "start": 0.0625,
+    "end": 0.1875
+   },
+   {
+    "text": "three",
+    "start": 0.1875,
+    "end": 0.5
+   }
+  ],
+  "text": "one twoo three"
+ },
+ {
+  "name": "ties in thirds",
+  "heard": [
+   {
+    "text": "start",
+    "start": 0,
+    "end": 1.0005
+   },
+   {
+    "text": "zzzzzzz",
+    "start": 1.0005,
+    "end": 1.0035
+   },
+   {
+    "text": "end",
+    "start": 1.0035,
+    "end": 2
+   }
+  ],
+  "text": "start ab cd ef end"
+ },
+ {
+  "name": "units split before aligning",
+  "heard": [
+   {
+    "text": "Tambah",
+    "start": 0,
+    "end": 0.4
+   },
+   {
+    "text": "5L",
+    "start": 0.4,
+    "end": 0.9
+   },
+   {
+    "text": "air.",
+    "start": 0.9,
+    "end": 1.2
+   }
+  ],
+  "text": "Tambah lima liter air."
+ },
+ {
+  "name": "fragments rejoined before aligning",
+  "heard": [
+   {
+    "text": "non",
+    "start": 0,
+    "end": 0.2
+   },
+   {
+    "text": "-stop",
+    "start": 0.2,
+    "end": 0.5
+   },
+   {
+    "text": "flights",
+    "start": 0.5,
+    "end": 1
+   }
+  ],
+  "text": "non-stop flights"
+ },
+ {
+  "name": "no heard words",
+  "heard": [],
+  "text": "river runs"
+ },
+ {
+  "name": "no script words",
+  "heard": [
+   {
+    "text": "5L",
+    "start": 0,
+    "end": 0.5
+   },
+   {
+    "text": "non",
+    "start": 0.5,
+    "end": 0.7
+   },
+   {
+    "text": "-stop",
+    "start": 0.7,
+    "end": 0.9
+   }
+  ],
+  "text": "— ..."
+ },
+ {
+  "name": "negative-length gap",
+  "heard": [
+   {
+    "text": "alpha",
+    "start": 0.5,
+    "end": 1.5
+   },
+   {
+    "text": "zz",
+    "start": 1.2,
+    "end": 1.3
+   },
+   {
+    "text": "gamma",
+    "start": 1.4,
+    "end": 1.8
+   }
+  ],
+  "text": "alpha beta gamma"
+ }
+]

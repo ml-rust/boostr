@@ -1,10 +1,10 @@
 //! Live synthesis: phoneme IDs → waveform via the full Kokoro pipeline.
 //!
-//! Skips G2P (which needs `espeak-ng` on the system) and hand-encodes a
-//! short IPA phoneme sequence directly into token IDs via the inlined
-//! `vocab` in `config.json`. Purpose is to exercise every neural stage
-//! (ALBERT → text encoder → prosody predictor → decoder → iSTFT) on a real
-//! checkpoint and surface any runtime shape/dtype mismatches.
+//! Skips G2P and hand-encodes a short IPA phoneme sequence directly into
+//! token IDs via the inlined `vocab` in `config.json`. Purpose is to
+//! exercise every neural stage (ALBERT → text encoder → prosody predictor
+//! → decoder → iSTFT) on a real checkpoint and surface any runtime
+//! shape/dtype mismatches, without needing `KokoroEngine`'s G2P front end.
 //!
 //! Usage:
 //!   cargo run --example synth_kokoro --release -- /path/to/Kokoro-82M /path/to/voice.pt

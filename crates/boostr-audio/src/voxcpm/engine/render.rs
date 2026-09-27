@@ -25,7 +25,7 @@ use boostr::model::audio::voxcpm::model::config::AUDIO_START_ID;
 use boostr::model::audio::voxcpm::vae::decoder::SAMPLE_RATE;
 
 use crate::error::{Error, Result};
-use crate::g2p::Lang;
+use crate::lang::Lang;
 use crate::tts::{TtsEngine, Voice};
 use crate::voxcpm::engine::batch::{Job, Reply};
 use crate::voxcpm::engine::types::{

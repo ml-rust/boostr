@@ -7,10 +7,10 @@
 //! Always compiled: RIFF/WAVE in and out ([`wav`]), the polyphase
 //! [`resample`]r, the reference-take [`enhance`] chain, [`pitch`], [`quality`],
 //! two-signal [`spectral`] distance, ASR [`eval`] metrics, the signal and
-//! summary halves of the [`tts_eval`] quality gate, and the backend-free half
-//! of [`g2p`]. Feature gates add the compressed-audio [`decode`]rs, the
-//! espeak-ng and misaki G2P backends, the spaCy `en_core_web_sm` tokenizer
-//! and tagger, the [`tts`] surface, the [`kokoro`] and [`voxcpm`]
+//! summary halves of the [`tts_eval`] quality gate, and the [`Lang`] tag a
+//! voice carries. Feature gates add the compressed-audio [`decode`]rs, the
+//! misaki G2P backend ([`g2p`]), the spaCy `en_core_web_sm` tokenizer and
+//! tagger, the [`tts`] surface, the [`kokoro`] and [`voxcpm`]
 //! engines, the [`whisper`] bundle, the [`vad`] segmenter, [`corpus`]
 //! preparation, and the pace, intelligibility and timbre legs of
 //! [`tts_eval`].
@@ -19,6 +19,7 @@ pub mod enhance;
 pub mod error;
 pub mod eval;
 pub mod g2p;
+pub mod lang;
 pub mod pitch;
 pub mod quality;
 pub mod resample;
@@ -55,7 +56,7 @@ pub use eval::{
     ErrorRate, align, by_group, canonical_character_error_rate, canonical_word_error_rate,
     canonicalize, character_error_rate, grand_total, normalize, total, word_error_rate,
 };
-pub use g2p::{G2pError, Lang, Phonemizer};
+pub use lang::Lang;
 pub use pitch::{PitchOptions, PitchTrack, estimate_pitch};
 pub use quality::{TakeQuality, measure_quality};
 pub use resample::{

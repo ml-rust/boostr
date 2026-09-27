@@ -1,12 +1,11 @@
 //! Grapheme-to-phoneme (G2P) conversion.
 //!
-//! [`espeak`] wraps espeak-ng behind the `g2p` feature. [`misaki`] ports the
-//! misaki English lexicon G2P behind the `misaki` feature. [`spacy_tokenizer`]
-//! ports the spaCy `en_core_web_sm` tokenizer behind the `spacy-tokenizer`
-//! feature. [`spacy_tagger`] runs its `tok2vec` + `tagger` behind the
-//! `spacy-tagger` feature. `misaki` implies both.
+//! [`misaki`] ports the misaki English lexicon G2P behind the `misaki`
+//! feature. [`spacy_tokenizer`] ports the spaCy `en_core_web_sm` tokenizer
+//! behind the `spacy-tokenizer` feature. [`spacy_tagger`] runs its
+//! `tok2vec` + `tagger` behind the `spacy-tagger` feature. `misaki` implies
+//! both.
 
-pub mod espeak;
 #[cfg(feature = "misaki")]
 pub mod misaki;
 #[cfg(feature = "spacy-tokenizer")]
@@ -15,5 +14,3 @@ pub(crate) mod pystr;
 pub mod spacy_tagger;
 #[cfg(feature = "spacy-tokenizer")]
 pub mod spacy_tokenizer;
-
-pub use espeak::{G2pError, Lang, Phonemizer, tokenize_ipa};

@@ -1,19 +1,21 @@
-//! Text-to-speech bundle: G2P + neural acoustic model + vocoder + voice
-//! catalog.
+//! Text-to-speech bundle: neural acoustic model + vocoder + voice catalog.
 //!
 //! A bundle can run in two modes. Without an attached [`TtsEngine`] it
-//! validates the surrounding pipeline — tokenizer validation, voice lookup,
-//! G2P, and WAV encoding — and returns [`TtsError::NotImplemented`] from the
-//! synthesis step, which lets callers assert their plumbing is correct without
-//! loading model weights. With an engine attached via [`TtsBundle::with_engine`],
-//! `synthesize` runs the full `text → waveform` neural path. The engine is a
-//! trait object, so one bundle type serves Kokoro and VoxCPM2 alike.
+//! validates the surrounding pipeline — voice lookup and WAV encoding — and
+//! returns [`TtsError::NotImplemented`] from the synthesis step, which lets
+//! callers assert their plumbing is correct without loading model weights.
+//! With an engine attached via [`TtsBundle::with_engine`], `synthesize` runs
+//! the full `text → waveform` neural path, G2P included — each engine owns
+//! its own G2P front end (Kokoro's is `KokoroG2p`, gated on the `kokoro`
+//! feature), since different engines need different phoneme sets or none at
+//! all. The engine is a trait object, so one bundle type serves Kokoro and
+//! VoxCPM2 alike.
 
 use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::g2p::{G2pError, Lang, Phonemizer};
+use crate::lang::Lang;
 use crate::tts::engine::TtsEngine;
 
 /// Errors raised by the TTS pipeline.
@@ -21,8 +23,6 @@ use crate::tts::engine::TtsEngine;
 pub enum TtsError {
     #[error("voice '{0}' not registered on this bundle")]
     UnknownVoice(String),
-    #[error("G2P error: {0}")]
-    G2p(#[from] G2pError),
     #[error("neural synthesis requires an engine; this bundle was created without one")]
     NotImplemented,
     #[error("load error: {0}")]
@@ -91,8 +91,8 @@ pub struct TtsBundle {
 
 impl TtsBundle {
     /// Create an engine-less bundle with a fixed voice catalog. Useful for
-    /// validating the surrounding pipeline (voice lookup, G2P) without loading
-    /// model weights; `synthesize` returns [`TtsError::NotImplemented`].
+    /// validating voice lookup without loading model weights; `synthesize`
+    /// returns [`TtsError::NotImplemented`].
     pub fn scaffolding(voices: Vec<Voice>, sample_rate: u32) -> Self {
         Self {
             voices,
@@ -124,25 +124,12 @@ impl TtsBundle {
         self.voices.iter().find(|v| v.id == id)
     }
 
-    /// Run G2P for a text string using the language of `voice`.
-    ///
-    /// This is useful in two places:
-    /// 1. As the first step of the neural synthesis path.
-    /// 2. To validate the input pipeline end-to-end when no engine is attached.
-    pub fn phonemize(&self, text: &str, voice_id: &str) -> Result<Vec<String>, TtsError> {
-        let voice = self
-            .voice(voice_id)
-            .ok_or_else(|| TtsError::UnknownVoice(voice_id.to_string()))?;
-        let phonemizer = Phonemizer::new(voice.lang)?;
-        Ok(phonemizer.text_to_phonemes(text)?)
-    }
-
     /// Synthesize a waveform.
     ///
     /// If an engine is attached, runs the full neural pipeline end-to-end.
-    /// Otherwise returns [`TtsError::NotImplemented`] after validating voice
-    /// and G2P wiring — same behavior as before the engine landed, so the
-    /// server surfaces configuration issues fast.
+    /// Otherwise returns [`TtsError::NotImplemented`] after validating the
+    /// voice — same behavior as before the engine landed, so the server
+    /// surfaces configuration issues fast.
     pub fn synthesize(
         &self,
         text: &str,
@@ -178,11 +165,14 @@ impl TtsBundle {
         }
     }
 
-    /// Scaffolding path: validate voice + run G2P eagerly, then fail with
-    /// `NotImplemented`. Exercises the plumbing end-to-end so misconfigured
-    /// endpoints surface before synthesis is even attempted.
+    /// Scaffolding path: validate the voice, then fail with
+    /// `NotImplemented`. Exercises the voice-lookup plumbing so a request
+    /// for an unregistered voice surfaces before synthesis is even
+    /// attempted.
     fn scaffolding_failure(&self, text: &str, voice_id: &str) -> Result<Vec<f32>, TtsError> {
-        let _phonemes = self.phonemize(text, voice_id)?;
+        let _ = text;
+        self.voice(voice_id)
+            .ok_or_else(|| TtsError::UnknownVoice(voice_id.to_string()))?;
         Err(TtsError::NotImplemented)
     }
 }
@@ -235,12 +225,7 @@ mod tests {
         let err = bundle
             .synthesize("hello", "af_alloy", &SynthesizeOptions::default())
             .unwrap_err();
-        // Without the g2p feature we'd hit FeatureDisabled first; otherwise
-        // the G2P step runs and we get NotImplemented from the synth step.
-        #[cfg(feature = "g2p")]
         assert!(matches!(err, TtsError::NotImplemented));
-        #[cfg(not(feature = "g2p"))]
-        assert!(matches!(err, TtsError::G2p(G2pError::FeatureDisabled)));
     }
 
     #[test]
@@ -273,9 +258,6 @@ mod tests {
         let err = bundle
             .synthesize("hello", "zero-shot", &SynthesizeOptions::default())
             .unwrap_err();
-        #[cfg(feature = "g2p")]
         assert!(matches!(err, TtsError::NotImplemented));
-        #[cfg(not(feature = "g2p"))]
-        assert!(matches!(err, TtsError::G2p(G2pError::FeatureDisabled)));
     }
 }

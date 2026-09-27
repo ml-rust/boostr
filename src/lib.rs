@@ -30,6 +30,8 @@ pub mod distributed;
 pub mod error;
 pub mod format;
 pub mod inference;
+#[cfg(feature = "cuda")]
+mod kernel_loader;
 pub mod model;
 pub mod nn;
 pub mod ops;

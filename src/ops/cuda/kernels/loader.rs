@@ -1,54 +1,23 @@
 //! CUDA kernel loading and caching for boostr attention operations.
+//!
+//! Delegates fatbin lookup and the per-device module cache to
+//! `crate::kernel_loader`, shared with `quant/cuda/kernels/loader.rs`, and
+//! wraps its plain-`String` errors into `Error::KernelError`.
 
 use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule};
-use cudarc::nvrtc::Ptx;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use crate::error::{Error, Result};
+use crate::kernel_loader;
 
-/// Directory containing the compiled fatbins (set by build.rs)
-const KERNEL_DIR: &str = env!("CUDA_KERNEL_DIR");
-
-/// Load a compiled fatbin. `Ptx` is cudarc's name for any module image
-/// `cuModuleLoadData` accepts: PTX, cubin or fatbin.
-fn load_ptx(name: &str) -> Ptx {
-    let path = format!("{}/{}.fatbin", KERNEL_DIR, name);
-    Ptx::from_file(path)
-}
-
-/// Cache for loaded CUDA modules, keyed by (device_index, module_name)
-#[allow(clippy::type_complexity)]
-static MODULE_CACHE: OnceLock<Mutex<HashMap<(usize, &'static str), Arc<CudaModule>>>> =
-    OnceLock::new();
-
-/// Get or load a CUDA module from its fatbin.
+/// Get or load a CUDA module from its embedded fatbin.
 pub fn get_or_load_module(
     context: &Arc<CudaContext>,
     device_index: usize,
     module_name: &'static str,
 ) -> Result<Arc<CudaModule>> {
-    let cache = MODULE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = cache.lock().map_err(|e| Error::KernelError {
-        reason: format!("kernel cache mutex poisoned: {e}"),
-    })?;
-
-    let key = (device_index, module_name);
-    if let Some(module) = guard.get(&key) {
-        return Ok(module.clone());
-    }
-
-    let ptx = load_ptx(module_name);
-    let module = context.load_module(ptx).map_err(|e| Error::KernelError {
-        reason: format!(
-            "Failed to load CUDA module '{}': {:?}. \
-             Ensure CUDA kernels were compiled correctly by build.rs.",
-            module_name, e
-        ),
-    })?;
-
-    guard.insert(key, module.clone());
-    Ok(module)
+    kernel_loader::get_or_load_module(context, device_index, module_name)
+        .map_err(|reason| Error::KernelError { reason })
 }
 
 /// Pre-load a list of CUDA modules to avoid JIT compilation latency on first use.
@@ -65,13 +34,88 @@ pub fn preload_modules(
 
 /// Get a kernel function from a loaded module.
 pub fn get_kernel_function(module: &Arc<CudaModule>, kernel_name: &str) -> Result<CudaFunction> {
-    module
-        .load_function(kernel_name)
-        .map_err(|e| Error::KernelError {
-            reason: format!(
-                "Failed to get kernel '{}': {:?}. \
-                 Check that the kernel name matches the CUDA source.",
-                kernel_name, e
-            ),
-        })
+    kernel_loader::get_kernel_function(module, kernel_name)
+        .map_err(|reason| Error::KernelError { reason })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::constants::*;
+    use crate::kernel_loader::embedded_fatbin;
+
+    /// Every module name constant `constants.rs` defines for the attention/
+    /// training/architecture/inference/position/cache kernel families —
+    /// the central list a launcher can request.
+    fn all_module_names() -> Vec<&'static str> {
+        vec![
+            DECODE_ATTENTION_MODULE,
+            KV_INSERT_MODULE,
+            PAGED_DECODE_ATTENTION_MODULE,
+            FLASH_V2_MODULE,
+            FLASH_V2_BWD_MODULE,
+            FLASH_V2_FP8_MODULE,
+            FLASH_V2_BWD_FP8_MODULE,
+            PAGED_ATTENTION_MODULE,
+            PAGED_ATTENTION_FP8_MODULE,
+            PAGED_ATTENTION_BWD_MODULE,
+            KV_CACHE_UPDATE_MODULE,
+            VARLEN_ATTENTION_MODULE,
+            VARLEN_ATTENTION_FWD_FP16_MODULE,
+            VARLEN_ATTENTION_BWD_MODULE,
+            VARLEN_ATTENTION_BWD_FP16_MODULE,
+            MQA_GQA_MODULE,
+            MQA_GQA_BWD_MODULE,
+            ALIBI_MODULE,
+            ALIBI_BWD_MODULE,
+            KV_CACHE_INT4_MODULE,
+            KV_CACHE_FP8_MODULE,
+            KV_CACHE_FP8_BWD_MODULE,
+            KV_CACHE_QUANT_MODULE,
+            RESHAPE_AND_CACHE_MODULE,
+            FUSED_ADAMW_MODULE,
+            FUSED_SGD_MODULE,
+            FUSED_ADAGRAD_MODULE,
+            FUSED_LAMB_MODULE,
+            FUSED_MULTI_TENSOR_MODULE,
+            ROPE_MODULE,
+            ROPE_INTERLEAVED_MODULE,
+            ROPE_YARN_MODULE,
+            MROPE_INTERLEAVED_MODULE,
+            SDPA_MODULE,
+            FUSED_QKV_MODULE,
+            MOE_ROUTING_MODULE,
+            MOE_GROUPED_GEMM_MODULE,
+            SSD_STATE_PASSING_MODULE,
+            GDN_STEP_MODULE,
+            FUSED_GRAD_UNSCALE_CLIP_MODULE,
+            SPECULATIVE_VERIFY_MODULE,
+            SAMPLING_PENALTIES_MODULE,
+            SAMPLING_MODULE,
+            LOGITS_TO_TOKEN_MODULE,
+            CALIBRATION_MODULE,
+            GRAMMAR_DFA_MODULE,
+            PREFIX_CACHE_LOOKUP_MODULE,
+            // `flash_v3`/`flash_v3_bwd` are optional (sm_90-only): build.rs
+            // still writes a placeholder fatbin for them when compilation is
+            // skipped, so the name is always in the embedded table.
+            FLASH_V3_MODULE,
+            FLASH_V3_BWD_MODULE,
+        ]
+    }
+
+    #[test]
+    fn embedded_table_covers_every_named_module() {
+        for name in all_module_names() {
+            assert!(
+                embedded_fatbin(name).is_ok(),
+                "module '{name}' is named in ops/cuda/kernels/constants.rs but \
+                 missing from the embedded KERNELS table generated by build.rs"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_module_name_errors() {
+        assert!(embedded_fatbin("this_module_does_not_exist").is_err());
+    }
 }

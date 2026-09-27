@@ -1,54 +1,23 @@
 //! CUDA kernel loading and caching for boostr quantized operations.
+//!
+//! Delegates fatbin lookup and the per-device module cache to
+//! `crate::kernel_loader`, shared with `ops/cuda/kernels/loader.rs`, and
+//! wraps its plain-`String` errors into `Error::QuantError`.
 
 use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule};
-use cudarc::nvrtc::Ptx;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use crate::error::{Error, Result};
+use crate::kernel_loader;
 
-/// Directory containing the compiled fatbins (set by build.rs)
-const KERNEL_DIR: &str = env!("CUDA_KERNEL_DIR");
-
-/// Load a compiled fatbin. `Ptx` is cudarc's name for any module image
-/// `cuModuleLoadData` accepts: PTX, cubin or fatbin.
-fn load_ptx(name: &str) -> Ptx {
-    let path = format!("{}/{}.fatbin", KERNEL_DIR, name);
-    Ptx::from_file(path)
-}
-
-/// Cache for loaded CUDA modules, keyed by (device_index, module_name)
-#[allow(clippy::type_complexity)]
-static MODULE_CACHE: OnceLock<Mutex<HashMap<(usize, &'static str), Arc<CudaModule>>>> =
-    OnceLock::new();
-
-/// Get or load a CUDA module from its fatbin.
+/// Get or load a CUDA module from its embedded fatbin.
 pub fn get_or_load_module(
     context: &Arc<CudaContext>,
     device_index: usize,
     module_name: &'static str,
 ) -> Result<Arc<CudaModule>> {
-    let cache = MODULE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = cache.lock().map_err(|e| Error::QuantError {
-        reason: format!("kernel cache mutex poisoned: {e}"),
-    })?;
-
-    let key = (device_index, module_name);
-    if let Some(module) = guard.get(&key) {
-        return Ok(module.clone());
-    }
-
-    let ptx = load_ptx(module_name);
-    let module = context.load_module(ptx).map_err(|e| Error::QuantError {
-        reason: format!(
-            "Failed to load CUDA module '{}': {:?}. \
-                 Ensure CUDA kernels were compiled correctly by build.rs.",
-            module_name, e
-        ),
-    })?;
-
-    guard.insert(key, module.clone());
-    Ok(module)
+    kernel_loader::get_or_load_module(context, device_index, module_name)
+        .map_err(|reason| Error::QuantError { reason })
 }
 
 /// Pre-load a list of CUDA modules to avoid JIT compilation latency on first use.
@@ -65,13 +34,98 @@ pub fn preload_modules(
 
 /// Get a kernel function from a loaded module.
 pub fn get_kernel_function(module: &Arc<CudaModule>, kernel_name: &str) -> Result<CudaFunction> {
-    module
-        .load_function(kernel_name)
-        .map_err(|e| Error::QuantError {
-            reason: format!(
-                "Failed to get kernel '{}': {:?}. \
-                 Check that the kernel name matches the CUDA source.",
-                kernel_name, e
-            ),
-        })
+    kernel_loader::get_kernel_function(module, kernel_name)
+        .map_err(|reason| Error::QuantError { reason })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::constants::*;
+    use crate::kernel_loader::embedded_fatbin;
+
+    /// Every module name constant `constants.rs` defines for the quant
+    /// kernel family (dequant, quant matmul, per-format GEMV/GEMM) — the
+    /// central list a launcher can request.
+    fn all_module_names() -> Vec<&'static str> {
+        vec![
+            DEQUANT_MODULE,
+            DEQUANT_GENERIC_MODULE,
+            QUANT_MATMUL_GENERIC_MODULE,
+            QUANT_MATMUL_MODULE,
+            QUANT_GEMV_MODULE,
+            INT4_GEMM_MODULE,
+            INT4_GEMM_GPTQ_MODULE,
+            NF4_QUANT_MODULE,
+            MARLIN_GEMM_MODULE,
+            FUSED_INT4_SWIGLU_MODULE,
+            FUSED_INT4_QKV_MODULE,
+            QUANT_ACT_MODULE,
+            FWHT_QUANT_ACT_MODULE,
+            MMA_INT8_PROBE_MODULE,
+            QUANT_MMQ_MMA_MODULE,
+            QUANT_MMQ_GEMV1_MODULE,
+            GEMV_Q5_K_MODULE,
+            GEMV_Q3_K_MODULE,
+            GEMV_Q2_K_MODULE,
+            GEMV_Q5_0_MODULE,
+            GEMV_IQ4_NL_MODULE,
+            GEMV_IQ4_XS_MODULE,
+            GEMV_IQ3_S_MODULE,
+            GEMV_IQ2_XS_MODULE,
+            GEMM_Q5_K_MODULE,
+            GEMM_Q3_K_MODULE,
+            GEMM_Q2_K_MODULE,
+            GEMM_Q5_0_MODULE,
+            GEMM_IQ4_NL_MODULE,
+            GEMM_IQ4_XS_MODULE,
+            GEMM_IQ3_S_MODULE,
+            GEMM_IQ2_XS_MODULE,
+            GEMV_Q4_1_MODULE,
+            GEMV_Q5_1_MODULE,
+            GEMV_Q8_1_MODULE,
+            GEMV_Q8_K_MODULE,
+            GEMV_IQ1_S_MODULE,
+            GEMV_IQ1_M_MODULE,
+            GEMV_IQ2_XXS_MODULE,
+            GEMV_IQ2_S_MODULE,
+            GEMV_IQ3_XXS_MODULE,
+            GEMV_TQ1_0_MODULE,
+            GEMV_TQ2_0_MODULE,
+            GEMV_PQ2_0_MODULE,
+            GEMV_Q2_0_MODULE,
+            GEMV_Q1_0_MODULE,
+            GEMV_PTQ1_0_MODULE,
+            GEMM_Q4_1_MODULE,
+            GEMM_Q5_1_MODULE,
+            GEMM_Q8_1_MODULE,
+            GEMM_Q8_K_MODULE,
+            GEMM_IQ1_S_MODULE,
+            GEMM_IQ1_M_MODULE,
+            GEMM_IQ2_XXS_MODULE,
+            GEMM_IQ2_S_MODULE,
+            GEMM_IQ3_XXS_MODULE,
+            GEMM_TQ1_0_MODULE,
+            GEMM_TQ2_0_MODULE,
+            GEMM_PQ2_0_MODULE,
+            GEMM_Q2_0_MODULE,
+            GEMM_Q1_0_MODULE,
+            GEMM_PTQ1_0_MODULE,
+        ]
+    }
+
+    #[test]
+    fn embedded_table_covers_every_named_module() {
+        for name in all_module_names() {
+            assert!(
+                embedded_fatbin(name).is_ok(),
+                "module '{name}' is named in quant/cuda/kernels/constants.rs but \
+                 missing from the embedded KERNELS table generated by build.rs"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_module_name_errors() {
+        assert!(embedded_fatbin("this_module_does_not_exist").is_err());
+    }
 }

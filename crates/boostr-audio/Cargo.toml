@@ -62,12 +62,14 @@ decode = ["dep:symphonia"]
 # misaki English G2P from raw text or pre-tagged tokens, with the US and GB
 # lexicons embedded. No system dependencies. Implies `spacy-tagger` (and so
 # `spacy-tokenizer`), the tokenizer and tagger misaki's pipeline reads its
-# tokens from.
+# tokens from. Implies `f16`: the out-of-vocabulary model in `g2p::neural`
+# stores its weights as bf16.
 misaki = [
   "dep:flate2",
   "dep:unicode-normalization",
   "dep:unicode-general-category",
   "spacy-tagger",
+  "f16",
 ]
 # `NeuralG2pFallback::from_embedded` (`src/g2p/neural/embedded.rs`): the
 # g2p_lm checkpoint embedded via `include_bytes!`, packed by

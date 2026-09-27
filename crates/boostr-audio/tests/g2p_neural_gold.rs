@@ -25,7 +25,7 @@ use common::{model_fixture, skip_notice};
 /// Minimum exact-match accuracy over the 50 held-out words below. Greedy
 /// decoding is deterministic, so a checkpoint scores the same on every run.
 /// A new checkpoint must reach this before it replaces the published one.
-const GOLD_WORD_ACCURACY_THRESHOLD: f64 = 0.0;
+const GOLD_WORD_ACCURACY_THRESHOLD: f64 = 0.66;
 
 /// Stages `config.json` + checkpoint (symlinked) + `vocab.json` (copied)
 /// into one temporary directory, the layout `NeuralG2pFallback::from_dir`

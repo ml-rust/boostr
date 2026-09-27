@@ -12,10 +12,11 @@
 //! is `torch.nn.utils.parametrizations.weight_norm`-reparameterized in the
 //! checkpoint; loading fuses `weight_g`/`weight_v` (or the modern
 //! `parametrizations.weight.original0`/`original1` pair) into a plain
-//! `weight` once, per [`crate::nn::fuse_weight_norm`].
+//! `weight` once, per [`crate::model::audio::vits::weight_norm_conv`].
 
 use crate::error::{Error, Result};
-use crate::nn::{Conv1d, VarBuilder, fuse_weight_norm};
+use crate::model::audio::vits::weight_norm_conv::load_weight_normed_conv1d;
+use crate::nn::{Conv1d, VarBuilder};
 use numr::dtype::DType;
 use numr::ops::{BinaryOps, ConvOps, PaddingMode, ReduceOps, TensorOps, UnaryOps};
 use numr::runtime::{Runtime, RuntimeClient};
@@ -28,44 +29,6 @@ pub struct VitsWaveNet<R: Runtime> {
     /// present iff the checkpoint's `speaker_embedding_size > 0`.
     cond_layer: Option<Conv1d<R>>,
     hidden_size: usize,
-}
-
-/// Reads a weight-norm-reparameterized Conv1d at `{vb}.{prefix}`. Tries the
-/// modern `parametrizations.weight.{original0,original1}` pair (`original0`
-/// is `g`, `original1` is `v`) first, then the legacy `weight_g`/`weight_v`
-/// pair, then falls back to a plain `weight` — detected per tensor, so a
-/// source that folds weight-norm ahead of time (as compressr does when
-/// embedding a checkpoint) still loads correctly.
-#[allow(clippy::too_many_arguments)]
-fn load_weight_normed_conv1d<R, C>(
-    client: &C,
-    vb: &mut VarBuilder<'_, R>,
-    prefix: &str,
-    stride: usize,
-    padding: PaddingMode,
-    dilation: usize,
-    groups: usize,
-) -> Result<Conv1d<R>>
-where
-    R: Runtime<DType = DType>,
-    C: RuntimeClient<R> + ReduceOps<R> + UnaryOps<R> + BinaryOps<R> + TensorOps<R>,
-{
-    let mut conv_vb = vb.pp(prefix);
-    let weight = if conv_vb.contains("parametrizations.weight.original0") {
-        let g = conv_vb.take_tensor("parametrizations.weight.original0")?;
-        let v = conv_vb.take_tensor("parametrizations.weight.original1")?;
-        fuse_weight_norm(client, &v, &g, 0)?
-    } else if conv_vb.contains("weight_g") {
-        let g = conv_vb.take_tensor("weight_g")?;
-        let v = conv_vb.take_tensor("weight_v")?;
-        fuse_weight_norm(client, &v, &g, 0)?
-    } else {
-        conv_vb.take_tensor("weight")?
-    };
-    let bias = conv_vb.take_tensor_optional("bias")?;
-    Ok(Conv1d::new(
-        weight, bias, stride, padding, dilation, groups, false,
-    ))
 }
 
 impl<R: Runtime<DType = DType>> VitsWaveNet<R> {
@@ -226,49 +189,127 @@ mod tests {
     use crate::test_utils::cpu_setup;
     use numr::runtime::cpu::CpuRuntime;
 
+    /// Two layers, no conditioning: shape is preserved and padded positions
+    /// stay zeroed (the mask is applied on every masked step and the final
+    /// output).
     #[test]
-    fn load_weight_normed_conv1d_falls_back_to_plain_weight() {
+    fn forward_preserves_shape_and_masks_padding() {
         let (client, device) = cpu_setup();
+        let hidden_size = 2;
+        let kernel_size = 3;
+        let num_layers = 2;
         let mut map = VarMap::<CpuRuntime>::new();
-        map.insert(
-            "conv.weight".into(),
-            Tensor::<CpuRuntime>::from_slice(&[1.0f32; 6], &[2, 1, 3], &device).unwrap(),
-        );
-        map.insert(
-            "conv.bias".into(),
-            Tensor::<CpuRuntime>::from_slice(&[0.5f32, -0.5], &[2], &device).unwrap(),
-        );
+        for i in 0..num_layers {
+            map.insert(
+                format!("in_layers.{i}.weight"),
+                Tensor::<CpuRuntime>::from_slice(
+                    &vec![0.1f32; 2 * hidden_size * hidden_size * kernel_size],
+                    &[2 * hidden_size, hidden_size, kernel_size],
+                    &device,
+                )
+                .unwrap(),
+            );
+            map.insert(
+                format!("in_layers.{i}.bias"),
+                Tensor::<CpuRuntime>::from_slice(
+                    &vec![0.0f32; 2 * hidden_size],
+                    &[2 * hidden_size],
+                    &device,
+                )
+                .unwrap(),
+            );
+            let res_skip_out = if i < num_layers - 1 {
+                2 * hidden_size
+            } else {
+                hidden_size
+            };
+            map.insert(
+                format!("res_skip_layers.{i}.weight"),
+                Tensor::<CpuRuntime>::from_slice(
+                    &vec![0.1f32; res_skip_out * hidden_size],
+                    &[res_skip_out, hidden_size, 1],
+                    &device,
+                )
+                .unwrap(),
+            );
+            map.insert(
+                format!("res_skip_layers.{i}.bias"),
+                Tensor::<CpuRuntime>::from_slice(
+                    &vec![0.0f32; res_skip_out],
+                    &[res_skip_out],
+                    &device,
+                )
+                .unwrap(),
+            );
+        }
         let mut vb = VarBuilder::new(&mut map, &device);
-        let conv = load_weight_normed_conv1d(&client, &mut vb, "conv", 1, PaddingMode::Valid, 1, 1)
-            .unwrap();
-        let w: Vec<f32> = conv.weight().tensor().to_vec();
-        assert_eq!(w, vec![1.0f32; 6]);
+        let wavenet = VitsWaveNet::from_varbuilder(
+            &client,
+            &mut vb,
+            hidden_size,
+            kernel_size,
+            1,
+            num_layers,
+            0,
+        )
+        .unwrap();
+
+        let batch = 1;
+        let length = 3;
+        let inputs = Tensor::<CpuRuntime>::from_slice(
+            &[0.1f32, 0.2, 0.3, -0.1, -0.2, -0.3],
+            &[batch, hidden_size, length],
+            &device,
+        )
+        .unwrap();
+        // last position is padding.
+        let mask =
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32, 1.0, 0.0], &[batch, 1, length], &device)
+                .unwrap();
+
+        let out = wavenet.forward(&client, &inputs, &mask, None).unwrap();
+        assert_eq!(out.shape(), &[batch, hidden_size, length]);
+        let values: Vec<f32> = out.contiguous().unwrap().to_vec();
+        for c in 0..hidden_size {
+            assert_eq!(
+                values[c * length + length - 1],
+                0.0,
+                "padded position must be zeroed: {values:?}"
+            );
+        }
     }
 
     #[test]
-    fn load_weight_normed_conv1d_fuses_legacy_weight_g_v() {
+    fn forward_rejects_conditioning_without_cond_layer() {
         let (client, device) = cpu_setup();
+        let hidden_size = 1;
         let mut map = VarMap::<CpuRuntime>::new();
-        // v: unit-norm direction per output channel, g: requested magnitude.
         map.insert(
-            "conv.weight_v".into(),
-            Tensor::<CpuRuntime>::from_slice(
-                &[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0],
-                &[2, 1, 3],
-                &device,
-            )
-            .unwrap(),
+            "in_layers.0.weight".into(),
+            Tensor::<CpuRuntime>::from_slice(&[0.1f32, 0.1], &[2, 1, 1], &device).unwrap(),
         );
         map.insert(
-            "conv.weight_g".into(),
-            Tensor::<CpuRuntime>::from_slice(&[3.0f32, 4.0], &[2, 1, 1], &device).unwrap(),
+            "in_layers.0.bias".into(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32, 0.0], &[2], &device).unwrap(),
+        );
+        map.insert(
+            "res_skip_layers.0.weight".into(),
+            Tensor::<CpuRuntime>::from_slice(&[0.1f32], &[1, 1, 1], &device).unwrap(),
+        );
+        map.insert(
+            "res_skip_layers.0.bias".into(),
+            Tensor::<CpuRuntime>::from_slice(&[0.0f32], &[1], &device).unwrap(),
         );
         let mut vb = VarBuilder::new(&mut map, &device);
-        let conv = load_weight_normed_conv1d(&client, &mut vb, "conv", 1, PaddingMode::Valid, 1, 1)
-            .unwrap();
-        let w: Vec<f32> = conv.weight().tensor().to_vec();
-        assert!((w[0] - 3.0).abs() < 1e-5);
-        assert!((w[4] - 4.0).abs() < 1e-5);
-        assert!(conv.bias().is_none());
+        let wavenet =
+            VitsWaveNet::from_varbuilder(&client, &mut vb, hidden_size, 1, 1, 1, 0).unwrap();
+
+        let inputs =
+            Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1, hidden_size, 1], &device).unwrap();
+        let mask = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1, 1, 1], &device).unwrap();
+        let bogus_cond = Tensor::<CpuRuntime>::from_slice(&[1.0f32], &[1, 1, 1], &device).unwrap();
+
+        let err = wavenet.forward(&client, &inputs, &mask, Some(&bogus_cond));
+        assert!(err.is_err());
     }
 }

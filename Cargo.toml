@@ -198,6 +198,10 @@ name = "vits_duration_parity"
 required-features = ["vits"]
 
 [[test]]
+name = "vits_flow_decoder_parity"
+required-features = ["vits"]
+
+[[test]]
 name = "vits_text_encoder_parity"
 required-features = ["vits"]
 

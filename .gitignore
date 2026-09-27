@@ -102,3 +102,8 @@ dmypy.json
 .agents/prep/
 # pi agent scratch
 .pi-subagents/
+
+# spaCy tagger weights read at run time by boostr-audio's EnglishTagger::from_dir
+# (assets/spacy_en/convert_tagger.py); a stray pack into assets must not commit.
+crates/boostr-audio/assets/spacy_en/tagger.safetensors
+crates/boostr-audio/assets/spacy_en/tagger.json

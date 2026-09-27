@@ -1,6 +1,8 @@
 //! `EnglishTagger`: spaCy `en_core_web_sm` 3.8.0 fine tags (`Token.tag_`)
 //! for tokens from [`SpacyTokenizer`](crate::g2p::spacy_tokenizer::SpacyTokenizer).
 
+use std::path::Path;
+
 use boostr::model::text::spacy_tagger::SpacyTagger;
 use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
@@ -13,8 +15,9 @@ use crate::g2p::spacy_tokenizer::SpacyToken;
 /// The `tok2vec` + `tagger` components of `en_core_web_sm` 3.8.0, as
 /// `spacy.load("en_core_web_sm", enable=["tok2vec", "tagger"])` runs them.
 ///
-/// Weights are embedded and run on numr's CPU backend. Each call tags one
-/// document, as `nlp(text)` does.
+/// Weights load from a directory (`tagger.safetensors` + `tagger.json`,
+/// written by `assets/spacy_en/convert_tagger.py`) and run on numr's CPU
+/// backend. Each call tags one document, as `nlp(text)` does.
 pub struct EnglishTagger {
     model: SpacyTagger<CpuRuntime>,
     client: CpuClient,
@@ -35,9 +38,13 @@ impl std::fmt::Debug for EnglishTagger {
 }
 
 impl EnglishTagger {
-    /// Inflates the embedded weights and builds the network.
-    pub fn new() -> Result<Self> {
-        let meta = TaggerMeta::en_core_web_sm()?;
+    /// Reads `tagger.safetensors` + `tagger.json` from `dir` and builds the
+    /// network. `dir` is normally `<kokoro dir>/g2p/tagger` or
+    /// `$BOOSTR_MODELS_DIR/spacy-en-tagger`; see
+    /// `assets/spacy_en/convert_tagger.py` for how to produce it.
+    pub fn from_dir(dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        let meta = TaggerMeta::from_dir(dir)?;
         let attrs = meta
             .attrs
             .iter()
@@ -45,11 +52,12 @@ impl EnglishTagger {
             .collect::<Result<Vec<_>>>()?;
         let device = CpuDevice::new();
         let client = CpuRuntime::default_client(&device);
-        let model = SpacyTagger::from_safetensors_bytes(&client, meta.config, weights_image()?)?;
+        let model = SpacyTagger::from_safetensors_bytes(&client, meta.config, weights_image(dir)?)?;
         if model.n_labels() != meta.labels.len() {
             return Err(Error::ModelError {
                 reason: format!(
-                    "embedded spaCy tagger has {} output classes and {} labels",
+                    "spaCy tagger at {} has {} output classes and {} labels",
+                    dir.display(),
                     model.n_labels(),
                     meta.labels.len()
                 ),
@@ -109,13 +117,30 @@ impl EnglishTagger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::g2p::spacy_tagger::test_support::tagger_dir;
     use crate::g2p::spacy_tokenizer::SpacyTokenizer;
+
+    macro_rules! require_tagger_dir {
+        () => {
+            match tagger_dir() {
+                Some(dir) => dir,
+                None => {
+                    eprintln!(
+                        "skipping: spaCy tagger dir unavailable; set SPACY_EN_TAGGER_DIR or \
+                         BOOSTR_MODELS_DIR"
+                    );
+                    return;
+                }
+            }
+        };
+    }
 
     #[test]
     fn tags_a_sentence() {
+        let dir = require_tagger_dir!();
         let tokenizer =
             SpacyTokenizer::en_core_web_sm().unwrap_or_else(|e| panic!("tokenizer: {e}"));
-        let tagger = EnglishTagger::new().unwrap_or_else(|e| panic!("tagger: {e}"));
+        let tagger = EnglishTagger::from_dir(&dir).unwrap_or_else(|e| panic!("tagger: {e}"));
         let tokens = tokenizer.tokenize("The quick brown fox jumps over the lazy dog.");
         let tags = tagger.tag(&tokens).unwrap_or_else(|e| panic!("tag: {e}"));
         // spaCy 3.8.14, en_core_web_sm 3.8.0, tok2vec + tagger.
@@ -137,7 +162,8 @@ mod tests {
 
     #[test]
     fn empty_document() {
-        let tagger = EnglishTagger::new().unwrap_or_else(|e| panic!("tagger: {e}"));
+        let dir = require_tagger_dir!();
+        let tagger = EnglishTagger::from_dir(&dir).unwrap_or_else(|e| panic!("tagger: {e}"));
         assert!(
             tagger
                 .tag(&[])

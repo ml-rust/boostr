@@ -1,16 +1,13 @@
 //! [`NeuralG2pFallback`]: misaki's out-of-vocabulary hook backed by g2p_lm,
 //! a char-level prefix-LM oxidizr trains. See `model.rs` for the sequence
-//! format and inference path, `assets/g2p_lm/build_dataset.py` for the
-//! vocab and training data, and `assets/g2p_lm/pack_model.py` for the
-//! embedded bundle the `g2p-neural` feature compiles in.
+//! format and inference path, and `assets/g2p_lm/build_dataset.py` for the
+//! vocab and training data. `NeuralG2pFallback::from_dir` loads the model
+//! from a checkpoint directory at run time; no weights are compiled in.
 
 mod checkpoint;
 mod config;
 mod normalize;
 mod vocab;
-
-#[cfg(feature = "g2p-neural")]
-mod embedded;
 
 mod model;
 

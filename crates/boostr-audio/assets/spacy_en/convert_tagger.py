@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Build the embedded tagger weights for `boostr_audio::g2p::spacy_tagger`.
+"""Build the tagger weights for `boostr_audio::g2p::spacy_tagger`, read at
+run time by `EnglishTagger::from_dir`.
 
 Loads the `tok2vec` and `tagger` components of an installed spaCy pipeline
 `en_core_web_sm` 3.8.0 (spaCy 3.8.x, MIT, https://github.com/explosion/spaCy)
 from its directory, reads the thinc parameters the pipeline deserializes from
-`tok2vec/model` and `tagger/model`, and writes two files:
+`tok2vec/model` and `tagger/model`, and writes two files, into an output
+directory (normally `$BOOSTR_MODELS_DIR/spacy-en-tagger`; not committed to
+git):
 
-  tagger.safetensors.zlib   zlib stream (level 9) of a safetensors file
-  tagger.json               network geometry, hash seeds, labels, symbols
+  tagger.safetensors   plain (uncompressed) safetensors file
+  tagger.json          network geometry, hash seeds, labels, symbols
 
 Tensors (all F32, row-major, thinc's own layouts):
     embed.{i}.E            [rows_i, width]  HashEmbed table of attribute i
@@ -44,11 +47,11 @@ The script asserts the model tree it walks: the layer names, the attribute
 columns, the HashEmbed column order, dropout-only extra layers and the
 tagger's unnormalized softmax. Any other architecture stops it.
 
-The output is deterministic for a fixed spaCy, pipeline and zlib build.
+The output is deterministic for a fixed spaCy and pipeline build.
 
 Usage:
     python3 crates/boostr-audio/assets/spacy_en/convert_tagger.py \\
-        <en_core_web_sm model dir> crates/boostr-audio/assets/spacy_en
+        <en_core_web_sm model dir> $BOOSTR_MODELS_DIR/spacy-en-tagger
 The model dir is the one holding `config.cfg`, `tok2vec/` and `tagger/`
 (`python -c "import en_core_web_sm; print(en_core_web_sm.load().path)"`).
 Environment:
@@ -59,7 +62,6 @@ import json
 import os
 import struct
 import sys
-import zlib
 
 import numpy as np
 import spacy
@@ -200,15 +202,15 @@ def main():
         fail("usage: convert_tagger.py <model dir> <output dir>")
     tensors, meta = convert(model_dir)
     raw = safetensors_bytes(tensors, meta["source"])
-    packed = zlib.compress(raw, 9)
-    with open(os.path.join(out_dir, "tagger.safetensors.zlib"), "wb") as f:
-        f.write(packed)
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "tagger.safetensors"), "wb") as f:
+        f.write(raw)
     with open(os.path.join(out_dir, "tagger.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=1)
         f.write("\n")
     n_params = sum(a.size for a in tensors.values())
     print(f"wrote {out_dir}: {len(tensors)} tensors, {n_params} parameters, "
-          f"{len(raw)} bytes raw, {len(packed)} bytes zlib")
+          f"{len(raw)} bytes")
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@
 //! handful of out-of-vocabulary words per document, not in a hot loop.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use boostr::format::SafeTensors;
 use boostr::model::{LoadedModel, UniversalConfig};
@@ -24,11 +25,18 @@ use crate::g2p::misaki::{MToken, OovFallback};
 /// span comes close. A safety bound against a model that never emits `eos`.
 const MAX_NEW_TOKENS: usize = 64;
 
-/// misaki [`OovFallback`] backed by the g2p_lm char-level model.
-pub struct NeuralG2pFallback {
+/// The loaded checkpoint, shared between a US and a GB [`NeuralG2pFallback`]
+/// so the weights and vocab load from disk only once (see
+/// [`NeuralG2pFallback::with_british`]).
+struct Shared {
     client: CpuClient,
     model: LoadedModel<CpuRuntime>,
     vocab: G2pVocab,
+}
+
+/// misaki [`OovFallback`] backed by the g2p_lm char-level model.
+pub struct NeuralG2pFallback {
+    shared: Arc<Shared>,
     british: bool,
 }
 
@@ -41,7 +49,8 @@ impl NeuralG2pFallback {
     ///
     /// `british`: `true` sends every word through the `gb` dialect token,
     /// `false` through `us` — matching [`crate::g2p::misaki::MisakiG2p`]'s
-    /// own per-instance dialect.
+    /// own per-instance dialect. Use [`Self::with_british`] to answer the
+    /// other dialect without reloading the checkpoint.
     pub fn from_dir(dir: impl AsRef<Path>, british: bool) -> Result<Self> {
         let dir = dir.as_ref();
         let config_text =
@@ -56,20 +65,9 @@ impl NeuralG2pFallback {
         let checkpoint_bytes = std::fs::read(&checkpoint_path).map_err(|e| Error::ModelError {
             reason: format!("reading {}: {e}", checkpoint_path.display()),
         })?;
-        Self::from_parts(&config_text, &vocab_text, checkpoint_bytes, british)
-    }
 
-    /// Builds the model from an already-decompressed config/vocab/weights
-    /// triple. Shared by [`Self::from_dir`] and the embedded loader behind
-    /// the `g2p-neural` feature.
-    pub(crate) fn from_parts(
-        config_text: &str,
-        vocab_text: &str,
-        checkpoint_bytes: Vec<u8>,
-        british: bool,
-    ) -> Result<Self> {
-        let universal: UniversalConfig = parse_checkpoint_config(config_text)?;
-        let vocab = G2pVocab::from_json(vocab_text)?;
+        let universal: UniversalConfig = parse_checkpoint_config(&config_text)?;
+        let vocab = G2pVocab::from_json(&vocab_text)?;
         if universal.vocab_size as u32 != vocab.vocab_size {
             return Err(Error::ModelError {
                 reason: format!(
@@ -86,11 +84,23 @@ impl NeuralG2pFallback {
         let model = LoadedModel::<CpuRuntime>::load(&universal, &mut vb)?;
 
         Ok(Self {
-            client,
-            model,
-            vocab,
+            shared: Arc::new(Shared {
+                client,
+                model,
+                vocab,
+            }),
             british,
         })
+    }
+
+    /// A cheap clone (the loaded checkpoint is shared, not reloaded)
+    /// answering the other dialect. Used to load one checkpoint and wire
+    /// both a US and a GB [`OovFallback`] from it.
+    pub fn with_british(&self, british: bool) -> Self {
+        Self {
+            shared: self.shared.clone(),
+            british,
+        }
     }
 
     /// Predicts phonemes for an already-normalized `word` under `dialect`
@@ -100,35 +110,40 @@ impl NeuralG2pFallback {
     /// outside the trained phoneme range (a decoding error). Exposed for
     /// evaluation tooling, which needs both dialects from one loaded model.
     pub fn predict(&self, dialect: &str, word: &str) -> Result<Option<String>> {
-        let graphemes = match self.vocab.encode_word(word) {
+        let vocab = &self.shared.vocab;
+        let graphemes = match vocab.encode_word(word) {
             Some(g) if !g.is_empty() => g,
             _ => return Ok(None),
         };
 
         let mut prompt = Vec::with_capacity(graphemes.len() + 3);
-        prompt.push(self.vocab.bos()?);
-        prompt.push(self.vocab.dialect(dialect)?);
+        prompt.push(vocab.bos()?);
+        prompt.push(vocab.dialect(dialect)?);
         prompt.extend(graphemes);
-        prompt.push(self.vocab.sep()?);
+        prompt.push(vocab.sep()?);
 
         let opts = boostr::inference::GenerateOptions {
             max_new_tokens: MAX_NEW_TOKENS,
-            stop_tokens: vec![self.vocab.eos],
+            stop_tokens: vec![vocab.eos],
         };
-        let generated =
-            boostr::inference::generate_greedy(&self.client, &self.model, &prompt, &opts)?;
+        let generated = boostr::inference::generate_greedy(
+            &self.shared.client,
+            &self.shared.model,
+            &prompt,
+            &opts,
+        )?;
 
         let mut phonemes = String::new();
         for id in generated {
-            if id == self.vocab.eos {
+            if id == vocab.eos {
                 break;
             }
-            if id < self.vocab.target_base {
+            if id < vocab.target_base {
                 // Below the first phoneme id: a special or grapheme id
                 // leaked into generation, a malformed output.
                 return Ok(None);
             }
-            match self.vocab.phoneme_symbol(id) {
+            match vocab.phoneme_symbol(id) {
                 Some(sym) => phonemes.push(sym),
                 None => return Ok(None),
             }

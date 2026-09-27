@@ -18,12 +18,15 @@
 //! fixture. `raw_text_through_full_pipeline_matches_misaki` passes the raw
 //! sentence to [`MisakiG2p::phonemize_text`]: tokenizer, tagger and G2P.
 
-use boostr_audio::g2p::misaki::{G2pOutput, KOKORO_UNK, MToken, MisakiG2p};
+use std::sync::Arc;
+
+use boostr_audio::g2p::misaki::{G2pOutput, KOKORO_UNK, MToken, MisakiG2p, TextFrontEnd};
+use boostr_audio::g2p::spacy_tagger::EnglishTagger;
 use boostr_audio::g2p::spacy_tokenizer::SpacyTokenizer;
 use serde::Deserialize;
 
 mod common;
-use common::load_json;
+use common::{load_json, model_fixture, skip_notice};
 
 /// `[text, whitespace, phonemes, rating]` of one final token.
 type TokenRow = (String, String, Option<String>, Option<u8>);
@@ -127,11 +130,19 @@ fn check_dialect(name: &str, british: bool, cases: &[(&Case, Vec<MToken>)]) -> V
 
 /// Runs one dialect over every raw sentence through
 /// [`MisakiG2p::phonemize_text`]; returns the mismatch reports.
-fn check_dialect_text(name: &str, british: bool, cases: &[Case]) -> Vec<String> {
-    let g2p = MisakiG2p::new(british).unwrap_or_else(|e| panic!("MisakiG2p::new({british}): {e}"));
+fn check_dialect_text(
+    name: &str,
+    british: bool,
+    cases: &[Case],
+    front: &Arc<TextFrontEnd>,
+) -> Vec<String> {
+    let g2p = MisakiG2p::new(british)
+        .unwrap_or_else(|e| panic!("MisakiG2p::new({british}): {e}"))
+        .with_text_front(front.clone());
     let kokoro = MisakiG2p::new(british)
         .unwrap_or_else(|e| panic!("MisakiG2p::new({british}): {e}"))
-        .with_unk(KOKORO_UNK);
+        .with_unk(KOKORO_UNK)
+        .with_text_front(front.clone());
 
     let mut failures = Vec::new();
     let mut exact = 0usize;
@@ -253,6 +264,10 @@ fn raw_text_through_spacy_tokenizer_matches_misaki() {
 
 #[test]
 fn raw_text_through_full_pipeline_matches_misaki() {
+    let Some(tagger_dir) = model_fixture("SPACY_EN_TAGGER_DIR", "spacy-en-tagger") else {
+        skip_notice("spaCy tagger", "SPACY_EN_TAGGER_DIR");
+        return;
+    };
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/misaki_g2p_oracle.json"
@@ -260,8 +275,11 @@ fn raw_text_through_full_pipeline_matches_misaki() {
     let fixture: Fixture = load_json(std::path::Path::new(path));
     assert!(!fixture.cases.is_empty(), "fixture must not be empty");
 
-    let mut failures = check_dialect_text("us", false, &fixture.cases);
-    failures.extend(check_dialect_text("gb", true, &fixture.cases));
+    let tagger = EnglishTagger::from_dir(&tagger_dir).unwrap_or_else(|e| panic!("tagger: {e}"));
+    let front = Arc::new(TextFrontEnd::new(tagger).unwrap_or_else(|e| panic!("{e}")));
+
+    let mut failures = check_dialect_text("us", false, &fixture.cases, &front);
+    failures.extend(check_dialect_text("gb", true, &fixture.cases, &front));
     for f in &failures {
         println!("{f}");
     }

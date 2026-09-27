@@ -9,7 +9,7 @@
 
 mod chars;
 mod data;
-mod front;
+pub mod front;
 pub mod g2p;
 mod lexicon;
 mod num2words;
@@ -23,5 +23,6 @@ mod stress;
 mod subtokenize;
 pub mod token;
 
+pub use front::TextFrontEnd;
 pub use g2p::{DEFAULT_UNK, G2pOutput, KOKORO_UNK, MisakiG2p, OovFallback};
 pub use token::MToken;

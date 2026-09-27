@@ -1,17 +1,9 @@
-//! Gates the g2p_lm checkpoint against 50 held-out gold words.
+//! Gates the out-of-vocabulary G2P model against 50 held-out gold words.
 //!
-//! Skips when the checkpoint or the `dev.jsonl`/`vocab.json` fixtures are
-//! unavailable (`$G2P_LM_CHECKPOINT_DIR`/`$G2P_LM_VOCAB`/`$G2P_LM_DEV_JSONL`,
-//! else `$BOOSTR_MODELS_DIR/g2p_lm/{checkpoints/g2p-char,data/vocab.json,
-//! data/dev.jsonl}`) — no model is checked into this repo yet, only the
-//! fixture data `build_dataset.py` writes.
-//!
-//! `NeuralG2pFallback::from_dir` reads `config.json`, one `*.safetensors`
-//! file and `vocab.json` from the SAME directory; oxidizr's checkpoint
-//! directory and `assets/g2p_lm/build_dataset.py`'s `vocab.json` are two
-//! different directories, so this test stages a temporary directory with
-//! `config.json` and the checkpoint symlinked in and `vocab.json` copied
-//! in, rather than requiring the fixture layout to change.
+//! The model directory (`config.json`, one `*.safetensors`, `vocab.json`)
+//! comes from `$G2P_LM_MODEL_DIR`, else `$BOOSTR_MODELS_DIR/g2p-lm`. The gold
+//! words come from `build_dataset.py`'s `dev.jsonl`: `$G2P_LM_DEV_JSONL`, else
+//! `$BOOSTR_MODELS_DIR/g2p_lm/data/dev.jsonl`. Skips when either is absent.
 #![cfg(feature = "misaki")]
 
 use std::fs;
@@ -26,30 +18,6 @@ use common::{model_fixture, skip_notice};
 /// decoding is deterministic, so a checkpoint scores the same on every run.
 /// A new checkpoint must reach this before it replaces the published one.
 const GOLD_WORD_ACCURACY_THRESHOLD: f64 = 0.66;
-
-/// Stages `config.json` + checkpoint (symlinked) + `vocab.json` (copied)
-/// into one temporary directory, the layout `NeuralG2pFallback::from_dir`
-/// expects.
-fn stage_model_dir(
-    checkpoint_dir: &Path,
-    vocab_path: &Path,
-    staging: &Path,
-) -> std::io::Result<()> {
-    fs::create_dir_all(staging)?;
-    for entry in fs::read_dir(checkpoint_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let is_relevant = name == std::ffi::OsStr::new("config.json")
-            || entry.path().extension().is_some_and(|e| e == "safetensors");
-        if is_relevant {
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(entry.path(), staging.join(&name))?;
-            #[cfg(not(unix))]
-            fs::copy(entry.path(), staging.join(&name)).map(|_| ())?;
-        }
-    }
-    fs::copy(vocab_path, staging.join("vocab.json")).map(|_| ())
-}
 
 /// Reads the first 50 `{"dialect","word","phonemes"}` lines of `dev.jsonl`.
 fn gold_words(dev_jsonl: &Path) -> Vec<(String, String, String)> {
@@ -68,14 +36,8 @@ fn gold_words(dev_jsonl: &Path) -> Vec<(String, String, String)> {
 
 #[test]
 fn reproduces_fifty_held_out_gold_words() {
-    let Some(checkpoint_dir) =
-        model_fixture("G2P_LM_CHECKPOINT_DIR", "g2p_lm/checkpoints/g2p-char")
-    else {
-        skip_notice("g2p_lm checkpoint", "G2P_LM_CHECKPOINT_DIR");
-        return;
-    };
-    let Some(vocab_path) = model_fixture("G2P_LM_VOCAB", "g2p_lm/data/vocab.json") else {
-        skip_notice("g2p_lm vocab.json", "G2P_LM_VOCAB");
+    let Some(model_dir) = model_fixture("G2P_LM_MODEL_DIR", "g2p-lm") else {
+        skip_notice("g2p-lm model directory", "G2P_LM_MODEL_DIR");
         return;
     };
     let Some(dev_jsonl) = model_fixture("G2P_LM_DEV_JSONL", "g2p_lm/data/dev.jsonl") else {
@@ -83,12 +45,8 @@ fn reproduces_fifty_held_out_gold_words() {
         return;
     };
 
-    let staging = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
-    stage_model_dir(&checkpoint_dir, &vocab_path, staging.path())
-        .unwrap_or_else(|e| panic!("staging model dir: {e}"));
-
-    let model = NeuralG2pFallback::from_dir(staging.path(), false)
-        .unwrap_or_else(|e| panic!("NeuralG2pFallback::from_dir: {e}"));
+    let model = NeuralG2pFallback::from_dir(&model_dir, false)
+        .unwrap_or_else(|e| panic!("NeuralG2pFallback::from_dir({}): {e}", model_dir.display()));
 
     let words = gold_words(&dev_jsonl);
     assert_eq!(

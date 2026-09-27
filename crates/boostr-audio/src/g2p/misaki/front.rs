@@ -1,8 +1,6 @@
 //! misaki's text front end: `G2P.preprocess`, then `G2P.tokenize` with the
 //! spaCy `en_core_web_sm` tokenizer and tagger.
 
-use std::sync::OnceLock;
-
 use super::preprocess::{apply_features, preprocess};
 use super::token::MToken;
 use crate::error::Result;
@@ -10,34 +8,23 @@ use crate::g2p::spacy_tagger::EnglishTagger;
 use crate::g2p::spacy_tokenizer::SpacyTokenizer;
 
 /// Raw text to the tagged tokens misaki's G2P loop consumes. Dialect-
-/// independent, so US and GB `MisakiG2p` share one instance through
-/// [`TextFrontEnd::shared`] instead of each building their own 5.8 MB
-/// tokenizer and tagger.
+/// independent: callers build one instance and share it (`Arc`, via
+/// [`crate::g2p::misaki::MisakiG2p::with_text_front`]) between the US and GB
+/// `MisakiG2p` instead of each loading their own tagger.
 #[derive(Debug)]
-pub(crate) struct TextFrontEnd {
+pub struct TextFrontEnd {
     tokenizer: SpacyTokenizer,
     tagger: EnglishTagger,
 }
 
-static SHARED: OnceLock<TextFrontEnd> = OnceLock::new();
-
 impl TextFrontEnd {
-    /// Builds the embedded tokenizer and tagger.
-    fn new() -> Result<Self> {
+    /// Builds the embedded tokenizer and pairs it with an already-loaded
+    /// `tagger` (see [`EnglishTagger::from_dir`]).
+    pub fn new(tagger: EnglishTagger) -> Result<Self> {
         Ok(Self {
             tokenizer: SpacyTokenizer::en_core_web_sm()?,
-            tagger: EnglishTagger::new()?,
+            tagger,
         })
-    }
-
-    /// The process-wide instance, built on first use and reused by every
-    /// dialect and engine.
-    pub(crate) fn shared() -> Result<&'static Self> {
-        if let Some(front) = SHARED.get() {
-            return Ok(front);
-        }
-        let built = Self::new()?;
-        Ok(SHARED.get_or_init(|| built))
     }
 
     /// misaki `G2P.preprocess(text)` then `G2P.tokenize`: one [`MToken`] per

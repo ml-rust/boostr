@@ -2,10 +2,12 @@
 //! ready for [`crate::kokoro::engine::KokoroEngine::synthesize`] to map each
 //! chunk's phonemes to input ids and hand them to the model.
 
+use std::sync::Arc;
+
 use super::chunk::{en_tokenize, split_segments};
 use super::dialect::Dialect;
 use crate::error::{Error, Result};
-use crate::g2p::misaki::{KOKORO_UNK, MisakiG2p, OovFallback};
+use crate::g2p::misaki::{KOKORO_UNK, MisakiG2p, OovFallback, TextFrontEnd};
 
 pub use super::chunk::TextChunk;
 
@@ -22,11 +24,18 @@ pub struct KokoroG2p {
 }
 
 impl KokoroG2p {
-    /// Builds both dialects' G2P, unk = the empty string, no fallback.
-    pub fn new() -> Result<Self> {
+    /// Builds both dialects' G2P, unk = the empty string, no fallback,
+    /// sharing one text front end (spaCy tokenizer + tagger) between them —
+    /// see [`crate::kokoro::g2p::KokoroG2pModels::load`] for the loader that
+    /// builds `front` from a Kokoro model directory.
+    pub fn new(front: Arc<TextFrontEnd>) -> Result<Self> {
         Ok(Self {
-            us: MisakiG2p::new(false)?.with_unk(KOKORO_UNK),
-            gb: MisakiG2p::new(true)?.with_unk(KOKORO_UNK),
+            us: MisakiG2p::new(false)?
+                .with_unk(KOKORO_UNK)
+                .with_text_front(front.clone()),
+            gb: MisakiG2p::new(true)?
+                .with_unk(KOKORO_UNK)
+                .with_text_front(front),
         })
     }
 
@@ -80,10 +89,36 @@ impl KokoroG2p {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::g2p::spacy_tagger::EnglishTagger;
+    use crate::g2p::spacy_tagger::test_support::tagger_dir;
+
+    /// Builds a `KokoroG2p` from the packed tagger directory, or `None` to
+    /// skip when unavailable, since no tagger is checked into this repo.
+    fn kokoro_g2p() -> Option<KokoroG2p> {
+        let dir = tagger_dir()?;
+        let tagger = EnglishTagger::from_dir(&dir).unwrap_or_else(|e| panic!("tagger: {e}"));
+        let front = Arc::new(TextFrontEnd::new(tagger).unwrap_or_else(|e| panic!("{e}")));
+        Some(KokoroG2p::new(front).unwrap_or_else(|e| panic!("KokoroG2p::new: {e}")))
+    }
+
+    macro_rules! require_g2p {
+        () => {
+            match kokoro_g2p() {
+                Some(g2p) => g2p,
+                None => {
+                    eprintln!(
+                        "skipping: spaCy tagger dir unavailable; set SPACY_EN_TAGGER_DIR or \
+                         BOOSTR_MODELS_DIR"
+                    );
+                    return;
+                }
+            }
+        };
+    }
 
     #[test]
     fn chunks_splits_on_blank_lines_and_phonemizes() {
-        let g2p = KokoroG2p::new().unwrap_or_else(|e| panic!("KokoroG2p::new: {e}"));
+        let g2p = require_g2p!();
         let chunks = g2p
             .chunks("Hello world.\n\nGoodbye.", Dialect::Us)
             .unwrap_or_else(|e| panic!("chunks: {e}"));
@@ -97,7 +132,7 @@ mod tests {
         // "schedule" resolves differently between US and GB lexicons; the
         // point here is only that the GB path runs the GB lexicon, not the
         // exact phoneme string.
-        let g2p = KokoroG2p::new().unwrap_or_else(|e| panic!("KokoroG2p::new: {e}"));
+        let g2p = require_g2p!();
         let us = g2p
             .chunks("schedule", Dialect::Us)
             .unwrap_or_else(|e| panic!("chunks: {e}"));
@@ -110,7 +145,7 @@ mod tests {
 
     #[test]
     fn chunks_errs_on_all_blank_text() {
-        let g2p = KokoroG2p::new().unwrap_or_else(|e| panic!("KokoroG2p::new: {e}"));
+        let g2p = require_g2p!();
         assert!(g2p.chunks("   \n \n  ", Dialect::Us).is_err());
     }
 }

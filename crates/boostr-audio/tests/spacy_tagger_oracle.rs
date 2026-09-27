@@ -10,13 +10,18 @@
 //! asserts every token's text and `tag_`. `tok2vec_matches_spacy` asserts
 //! the `tok2vec` output of the sentences that carry it within 1e-5. All
 //! mismatches print before a test fails.
+//!
+//! Skips when the packed tagger directory is unavailable
+//! (`SPACY_EN_TAGGER_DIR`, else `$BOOSTR_MODELS_DIR/spacy-en-tagger`) — no
+//! tagger is checked into this repo, only what
+//! `assets/spacy_en/convert_tagger.py` writes.
 
 use boostr_audio::g2p::spacy_tagger::EnglishTagger;
 use boostr_audio::g2p::spacy_tokenizer::SpacyTokenizer;
 use serde::Deserialize;
 
 mod common;
-use common::load_json;
+use common::{load_json, model_fixture, skip_notice};
 
 /// Largest absolute `tok2vec` difference accepted.
 const TOK2VEC_TOLERANCE: f32 = 1e-5;
@@ -47,14 +52,15 @@ fn fixture() -> Fixture {
     fixture
 }
 
-fn pipeline(fixture: &Fixture) -> (SpacyTokenizer, EnglishTagger) {
+fn pipeline(fixture: &Fixture, tagger_dir: &std::path::Path) -> (SpacyTokenizer, EnglishTagger) {
     let tokenizer =
         SpacyTokenizer::en_core_web_sm().unwrap_or_else(|e| panic!("SpacyTokenizer: {e}"));
-    let tagger = EnglishTagger::new().unwrap_or_else(|e| panic!("EnglishTagger: {e}"));
+    let tagger =
+        EnglishTagger::from_dir(tagger_dir).unwrap_or_else(|e| panic!("EnglishTagger: {e}"));
     assert_eq!(
         tagger.source(),
         fixture.source,
-        "the fixture and the embedded weights come from different spaCy builds"
+        "the fixture and the packed weights come from different spaCy builds"
     );
     assert_eq!(tagger.width(), fixture.width);
     (tokenizer, tagger)
@@ -62,8 +68,12 @@ fn pipeline(fixture: &Fixture) -> (SpacyTokenizer, EnglishTagger) {
 
 #[test]
 fn tags_match_spacy() {
+    let Some(tagger_dir) = model_fixture("SPACY_EN_TAGGER_DIR", "spacy-en-tagger") else {
+        skip_notice("spaCy tagger", "SPACY_EN_TAGGER_DIR");
+        return;
+    };
     let fixture = fixture();
-    let (tokenizer, tagger) = pipeline(&fixture);
+    let (tokenizer, tagger) = pipeline(&fixture, &tagger_dir);
 
     let mut failures = Vec::new();
     let mut exact = std::collections::BTreeMap::<&str, (usize, usize, usize, usize)>::new();
@@ -106,8 +116,12 @@ fn tags_match_spacy() {
 
 #[test]
 fn tok2vec_matches_spacy() {
+    let Some(tagger_dir) = model_fixture("SPACY_EN_TAGGER_DIR", "spacy-en-tagger") else {
+        skip_notice("spaCy tagger", "SPACY_EN_TAGGER_DIR");
+        return;
+    };
     let fixture = fixture();
-    let (tokenizer, tagger) = pipeline(&fixture);
+    let (tokenizer, tagger) = pipeline(&fixture, &tagger_dir);
 
     let mut checked = 0usize;
     let mut failures = Vec::new();

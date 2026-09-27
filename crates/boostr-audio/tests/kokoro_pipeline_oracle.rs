@@ -13,15 +13,24 @@
 //! This crate's G2P has no OOV fallback attached (a separate unit wires the
 //! neural fallback in), matching how the fixture was generated
 //! (`fallback=None`).
+//!
+//! Skips when the packed spaCy tagger directory is unavailable
+//! (`SPACY_EN_TAGGER_DIR`, else `$BOOSTR_MODELS_DIR/spacy-en-tagger`) — no
+//! tagger is checked into this repo, only what
+//! `assets/spacy_en/convert_tagger.py` writes.
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use boostr::model::audio::PhonemeVocab;
 use boostr::model::audio::kokoro::KokoroPhonemeVocab;
+use boostr_audio::g2p::misaki::TextFrontEnd;
+use boostr_audio::g2p::spacy_tagger::EnglishTagger;
 use boostr_audio::kokoro::{Dialect, KokoroG2p};
 use serde::Deserialize;
-use std::collections::HashMap;
 
 mod common;
-use common::load_json;
+use common::{load_json, model_fixture, skip_notice};
 
 #[derive(Debug, Deserialize)]
 struct Fixture {
@@ -103,11 +112,17 @@ fn check_dialect(
 
 #[test]
 fn matches_reference_kokoro_pipeline_chunking_and_ids() {
+    let Some(tagger_dir) = model_fixture("SPACY_EN_TAGGER_DIR", "spacy-en-tagger") else {
+        skip_notice("spaCy tagger", "SPACY_EN_TAGGER_DIR");
+        return;
+    };
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/kokoro_pipeline_oracle.json");
     let fixture: Fixture = load_json(&fixture_path);
     let vocab = KokoroPhonemeVocab::new(fixture.vocab.clone());
-    let g2p = KokoroG2p::new().unwrap_or_else(|e| panic!("KokoroG2p::new: {e}"));
+    let tagger = EnglishTagger::from_dir(&tagger_dir).unwrap_or_else(|e| panic!("tagger: {e}"));
+    let front = Arc::new(TextFrontEnd::new(tagger).unwrap_or_else(|e| panic!("{e}")));
+    let g2p = KokoroG2p::new(front).unwrap_or_else(|e| panic!("KokoroG2p::new: {e}"));
 
     let mut failures = Vec::new();
     for case in &fixture.cases {

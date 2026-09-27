@@ -2,8 +2,11 @@
 //!
 //! [`MisakiG2p::phonemize`] takes the tokens misaki builds from spaCy (text,
 //! Penn Treebank fine tag, trailing whitespace).
-//! [`MisakiG2p::phonemize_text`] builds them from raw text with the embedded
-//! spaCy tokenizer and tagger, as `G2P.__call__` does.
+//! [`MisakiG2p::phonemize_text`] builds them from raw text with a text front
+//! end ([`super::front::TextFrontEnd`], attached via
+//! [`MisakiG2p::with_text_front`]), as `G2P.__call__` does.
+
+use std::sync::Arc;
 
 use super::chars::SUBTOKEN_JUNKS;
 use super::front::TextFrontEnd;
@@ -11,7 +14,7 @@ use super::lexicon::Lexicon;
 use super::resolve::{resolve_tokens, token_context};
 use super::retokenize::{Word, fold_left, retokenize};
 use super::token::{MToken, TokenContext, merge_tokens};
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// misaki's default placeholder for an unresolved word.
 pub const DEFAULT_UNK: &str = "❓";
@@ -47,6 +50,7 @@ pub struct MisakiG2p {
     lexicon: Lexicon,
     unk: String,
     fallback: Option<Box<dyn OovFallback + Send + Sync>>,
+    front: Option<Arc<TextFrontEnd>>,
 }
 
 impl std::fmt::Debug for MisakiG2p {
@@ -55,18 +59,22 @@ impl std::fmt::Debug for MisakiG2p {
             .field("british", &self.lexicon.british)
             .field("unk", &self.unk)
             .field("fallback", &self.fallback.is_some())
+            .field("text_front", &self.front.is_some())
             .finish()
     }
 }
 
 impl MisakiG2p {
     /// US (`british = false`) or GB English, `unk` = [`DEFAULT_UNK`], no
-    /// fallback. Decodes the embedded lexicon.
+    /// fallback, no text front end. Decodes the embedded lexicon.
+    /// [`Self::phonemize`] works with no further setup; [`Self::phonemize_text`]
+    /// additionally needs [`Self::with_text_front`].
     pub fn new(british: bool) -> Result<Self> {
         Ok(Self {
             lexicon: Lexicon::new(british)?,
             unk: DEFAULT_UNK.to_string(),
             fallback: None,
+            front: None,
         })
     }
 
@@ -79,6 +87,14 @@ impl MisakiG2p {
     /// Installs the hook for words the lexicon leaves unresolved.
     pub fn with_fallback(mut self, fallback: Box<dyn OovFallback + Send + Sync>) -> Self {
         self.fallback = Some(fallback);
+        self
+    }
+
+    /// Attaches the text front end [`Self::phonemize_text`] needs (spaCy
+    /// tokenizer + tagger). Callers share one `Arc` between a US and a GB
+    /// instance instead of each loading their own tagger.
+    pub fn with_text_front(mut self, front: Arc<TextFrontEnd>) -> Self {
+        self.front = Some(front);
         self
     }
 
@@ -95,10 +111,16 @@ impl MisakiG2p {
     /// misaki `G2P.__call__(text)`: markdown-link preprocessing, the spaCy
     /// `en_core_web_sm` tokenizer and tagger, then [`Self::phonemize`].
     ///
-    /// The first call across every `MisakiG2p` instance builds the embedded
-    /// tokenizer and tagger; later calls reuse the shared instance.
+    /// Errs when no text front end is attached (see
+    /// [`Self::with_text_front`]).
     pub fn phonemize_text(&self, text: &str) -> Result<G2pOutput> {
-        let tokens = TextFrontEnd::shared()?.tokens(text)?;
+        let front = self.front.as_ref().ok_or_else(|| Error::InvalidArgument {
+            arg: "text",
+            reason: "MisakiG2p::phonemize_text needs a text front end; call \
+                     with_text_front first"
+                .into(),
+        })?;
+        let tokens = front.tokens(text)?;
         Ok(self.phonemize(tokens))
     }
 
@@ -216,12 +238,35 @@ impl MisakiG2p {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::g2p::spacy_tagger::EnglishTagger;
+    use crate::g2p::spacy_tagger::test_support::tagger_dir;
+
+    /// A `MisakiG2p` with the packed tagger attached, or `None` to skip a
+    /// test that needs `phonemize_text` when no tagger is available — no
+    /// tagger is checked into this repo.
+    fn with_front(british: bool) -> Option<MisakiG2p> {
+        let dir = tagger_dir()?;
+        let tagger = EnglishTagger::from_dir(&dir).unwrap_or_else(|e| panic!("tagger: {e}"));
+        let front =
+            std::sync::Arc::new(TextFrontEnd::new(tagger).unwrap_or_else(|e| panic!("{e}")));
+        Some(
+            MisakiG2p::new(british)
+                .unwrap_or_else(|e| panic!("MisakiG2p: {e}"))
+                .with_text_front(front),
+        )
+    }
 
     #[test]
     fn phonemize_text_applies_link_features() {
         // misaki 0.9.4 `en.G2P(trf=False, british=False)(text)[0]` with
         // spaCy 3.8.14 and en_core_web_sm 3.8.0.
-        let g2p = MisakiG2p::new(false).unwrap_or_else(|e| panic!("MisakiG2p: {e}"));
+        let Some(g2p) = with_front(false) else {
+            eprintln!(
+                "skipping: spaCy tagger dir unavailable; set SPACY_EN_TAGGER_DIR or \
+                 BOOSTR_MODELS_DIR"
+            );
+            return;
+        };
         let cases = [
             ("  [Kokoro](/kˈOkəɹO/) is great.", "kˈOkəɹO ɪz ɡɹˈAt."),
             (
@@ -247,7 +292,13 @@ mod tests {
 
     #[test]
     fn phonemize_text_of_empty_text() {
-        let g2p = MisakiG2p::new(true).unwrap_or_else(|e| panic!("MisakiG2p: {e}"));
+        let Some(g2p) = with_front(true) else {
+            eprintln!(
+                "skipping: spaCy tagger dir unavailable; set SPACY_EN_TAGGER_DIR or \
+                 BOOSTR_MODELS_DIR"
+            );
+            return;
+        };
         for text in ["", "   "] {
             let got = g2p
                 .phonemize_text(text)

@@ -71,21 +71,16 @@ misaki = [
   "spacy-tagger",
   "f16",
 ]
-# `NeuralG2pFallback::from_embedded` (`src/g2p/neural/embedded.rs`): the
-# g2p_lm checkpoint embedded via `include_bytes!`, packed by
-# `assets/g2p_lm/pack_model.py`. `NeuralG2pFallback` itself and
-# `from_dir` (weights read from disk) need only `misaki`; this adds just
-# the embedded bundle. `build.rs` refuses to compile it until that bundle
-# exists.
-g2p-neural = ["misaki"]
 # The spaCy `en_core_web_sm` 3.8.0 tokenizer with its patterns, special cases
 # and norm tables embedded. Separate from `misaki` so a consumer that needs
 # spaCy tokens and lexical attributes does not embed the misaki lexicons.
 spacy-tokenizer = ["dep:regexr", "dep:unicode-general-category"]
 # The spaCy `en_core_web_sm` 3.8.0 `tok2vec` + `tagger` (Penn Treebank tags),
-# the network from boostr, the attribute IDs and the zlib-compressed weights
-# (5.8 MB) here. Implies `spacy-tokenizer`, whose tokens it tags.
-spacy-tagger = ["boostr/spacy-tagger", "spacy-tokenizer", "dep:flate2"]
+# the network from boostr, the attribute IDs here. Weights load at run time
+# from a directory (`EnglishTagger::from_dir`, written by
+# `assets/spacy_en/convert_tagger.py`); none are compiled in. Implies
+# `spacy-tokenizer`, whose tokens it tags.
+spacy-tagger = ["boostr/spacy-tagger", "spacy-tokenizer"]
 # Narration scripts: phrases, VoxCPM2 chunks, subtitle and timed script
 # files, written-script alignment, and number words. Its sentence pattern
 # uses lookahead, and number words are read after NFKD. splintr already

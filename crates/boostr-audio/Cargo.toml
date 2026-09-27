@@ -69,6 +69,13 @@ misaki = [
   "dep:unicode-general-category",
   "spacy-tagger",
 ]
+# `NeuralG2pFallback::from_embedded` (`src/g2p/neural/embedded.rs`): the
+# g2p_lm checkpoint embedded via `include_bytes!`, packed by
+# `assets/g2p_lm/pack_model.py`. `NeuralG2pFallback` itself and
+# `from_dir` (weights read from disk) need only `misaki`; this adds just
+# the embedded bundle. `build.rs` refuses to compile it until that bundle
+# exists.
+g2p-neural = ["misaki"]
 # The spaCy `en_core_web_sm` 3.8.0 tokenizer with its patterns, special cases
 # and norm tables embedded. Separate from `misaki` so a consumer that needs
 # spaCy tokens and lexical attributes does not embed the misaki lexicons.
@@ -146,6 +153,10 @@ required-features = ["spacy-tagger"]
 [[test]]
 name = "vits_tokenizer_oracle"
 required-features = ["vits"]
+
+[[test]]
+name = "g2p_neural_gold"
+required-features = ["misaki"]
 
 [[example]]
 name = "audio_stats"
@@ -249,3 +260,7 @@ required-features = ["voxcpm"]
 name = "voxcpm_quality_gate"
 path = "examples/voxcpm/quality_gate.rs"
 required-features = ["voxcpm", "whisper", "vad"]
+
+[[example]]
+name = "g2p_per_eval"
+required-features = ["misaki"]

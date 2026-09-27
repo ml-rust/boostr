@@ -10,9 +10,13 @@ vocab, then writes:
                  this file, so it never changes shape without updating
                  both.
     train.bin    oxidizr's flat little-endian u32 format (see
-                 oxidizr/docs/data/format.md): concatenated sequences of
-                 `<bos> <dialect> graphemes... <sep> phonemes... <eos>`,
-                 shuffled with a fixed seed.
+                 oxidizr/docs/data/format.md), cut into rows of exactly
+                 `--row-tokens` tokens. Each row holds whole
+                 `<bos> <dialect> graphemes... <sep> phonemes... <eos>`
+                 sequences, shuffled with a fixed seed and packed greedily,
+                 then padded with the pad id (0) to the row's end. No
+                 sequence straddles a row boundary, and the file is a whole
+                 number of rows.
     dev.jsonl    held-out gold pairs, one `{"dialect", "word", "phonemes"}`
                  object per line.
     test.jsonl   held-out gold pairs, same shape as dev.jsonl.
@@ -35,14 +39,28 @@ future additions land on the same side of the split. A silver entry
 whose word falls in a dialect's held-out set is dropped entirely (not
 placed in train, not placed in dev/test, which only ever come from gold).
 
+Row contract: oxidizr's loader reads rows of `max_seq_len + 1` tokens at
+fixed offsets (row r is tokens [r * (max_seq_len + 1), (r + 1) *
+(max_seq_len + 1))), so `--row-tokens` must equal the training config's
+`model.max_seq_len + 1`. Any other value misaligns every row after the
+first. Pad (0) is never scored under the config's prefix_lm mask
+(`target_base: 61`, `always_score: [3]`): 0 is below target_base and not
+in always_score. Pads only follow a row's last `<eos>`, so under causal
+attention no scored position attends to one.
+
 Determinism: dict iteration order in this script always follows the
 order the JSON parser returns (which follows the file's own key order,
-stable across runs of the same input), and the only shuffle applied
-before writing train.bin uses a fixed seed. Running this script twice
+stable across runs of the same input), the only shuffle applied before
+packing train.bin uses a fixed seed, and packing is a deterministic
+greedy pass over the shuffled order. Running this script twice
 against the same inputs produces byte-identical output files.
 
 Usage:
-    python3 crates/boostr-audio/assets/g2p_lm/build_dataset.py <output_dir>
+    python3 crates/boostr-audio/assets/g2p_lm/build_dataset.py <output_dir> [--row-tokens N]
+
+    --row-tokens N   tokens per train.bin row (default 129 = max_seq_len
+                     128 + 1). Must equal the training config's
+                     `model.max_seq_len + 1`.
 
 Environment:
     MISAKI_DATA_DIR  directory holding the four lexicon JSON files
@@ -51,6 +69,7 @@ Environment:
     KOKORO_CONFIG    path to Kokoro-82M's `config.json`, whose `vocab`
                      field maps phoneme symbols to integer ids (required)
 """
+import argparse
 import hashlib
 import importlib.resources
 import json
@@ -63,6 +82,7 @@ FORMAT_VERSION = 1
 SHUFFLE_SEED = 0
 DEV_THRESHOLD = 5
 TEST_THRESHOLD = 10
+DEFAULT_ROW_TOKENS = 129
 DIALECTS = ("us", "gb")
 CATEGORIES = ("gold", "silver")
 
@@ -205,18 +225,64 @@ def encode_sequence(vocab, dialect, word, phonemes):
     return seq
 
 
-def write_bin(path, sequences):
-    """Concatenate token sequences into oxidizr's flat little-endian u32 format."""
+def pack_rows(examples, row_tokens, pad_id):
+    """Pack `(word, sequence)` examples greedily into rows of `row_tokens` ids.
+
+    Sequences keep their order. A sequence that does not fit in the current
+    row's free space starts the next row, and the current row is filled to
+    `row_tokens` with `pad_id`. Returns the rows and the pad count.
+    """
+    rows = []
+    current = []
+    pads = 0
+
+    def close_row():
+        nonlocal pads
+        pads += row_tokens - len(current)
+        rows.append(current + [pad_id] * (row_tokens - len(current)))
+
+    for word, seq in examples:
+        if len(seq) > row_tokens:
+            raise ValueError(
+                f"sequence for word {word!r} is {len(seq)} tokens, longer than "
+                f"--row-tokens {row_tokens}. Raise --row-tokens and the training "
+                f"config's model.max_seq_len (row_tokens - 1) together."
+            )
+        if len(current) + len(seq) > row_tokens:
+            close_row()
+            current = []
+        current.extend(seq)
+    if current:
+        close_row()
+    return rows, pads
+
+
+def write_bin(path, rows):
+    """Write rows into oxidizr's flat little-endian u32 format."""
     with open(path, "wb") as f:
-        for seq in sequences:
-            f.write(struct.pack(f"<{len(seq)}I", *seq))
+        for row in rows:
+            f.write(struct.pack(f"<{len(row)}I", *row))
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Build the g2p_lm training set.")
+    parser.add_argument("output_dir", help="directory for vocab.json, train.bin, dev.jsonl, test.jsonl")
+    parser.add_argument(
+        "--row-tokens",
+        type=int,
+        default=DEFAULT_ROW_TOKENS,
+        help="tokens per train.bin row; must equal the training config's max_seq_len + 1 "
+        f"(default {DEFAULT_ROW_TOKENS})",
+    )
+    args = parser.parse_args()
+    if args.row_tokens < 2:
+        parser.error(f"--row-tokens {args.row_tokens} is below 2: a row needs one input and one target")
+    return args
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("usage: build_dataset.py <output_dir>", file=sys.stderr)
-        return 1
-    out_dir = sys.argv[1]
+    args = parse_args()
+    out_dir = args.output_dir
     os.makedirs(out_dir, exist_ok=True)
 
     misaki_data_dir = os.environ.get("MISAKI_DATA_DIR")
@@ -247,8 +313,14 @@ def main():
         dev_pairs.extend((dialect, w, p) for w, p in dev)
         test_pairs.extend((dialect, w, p) for w, p in test)
 
-    sequences = [encode_sequence(vocab, dialect, word, ps) for dialect, word, ps in train_pairs]
-    random.Random(SHUFFLE_SEED).shuffle(sequences)
+    examples = [(word, encode_sequence(vocab, dialect, word, ps)) for dialect, word, ps in train_pairs]
+    random.Random(SHUFFLE_SEED).shuffle(examples)
+    sequences = [seq for _, seq in examples]
+    try:
+        rows, pads = pack_rows(examples, args.row_tokens, vocab["specials"]["pad"])
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
 
     max_len = max((len(s) for s in sequences), default=0)
     max_len = max(max_len, max((len(word) + len(ps) + 3 for _, word, ps in dev_pairs), default=0))
@@ -259,7 +331,7 @@ def main():
         json.dump(vocab, f, ensure_ascii=False, indent=2, sort_keys=False)
 
     train_path = os.path.join(out_dir, "train.bin")
-    write_bin(train_path, sequences)
+    write_bin(train_path, rows)
 
     dev_path = os.path.join(out_dir, "dev.jsonl")
     with open(dev_path, "w", encoding="utf-8") as f:
@@ -280,8 +352,12 @@ def main():
         print(f"{dialect}: train {n_train}, dev {n_dev}, test {n_test}")
     print(f"total: train {len(train_pairs)}, dev {len(dev_pairs)}, test {len(test_pairs)}")
     print(f"max sequence length: {max_len} tokens")
-    print(f"train.bin: {train_path} ({sum(len(s) for s in sequences)} tokens, "
+    row_total = len(rows) * args.row_tokens
+    pad_fraction = pads / row_total if row_total else 0.0
+    print(f"train.bin: {train_path} ({len(rows)} rows of {args.row_tokens} tokens, "
+          f"{row_total} tokens, {sum(len(s) for s in sequences)} sequence tokens, "
           f"{os.path.getsize(train_path)} bytes)")
+    print(f"padding: {pads} pad tokens, {pad_fraction:.2%} of train.bin")
     print(f"dev.jsonl: {dev_path} ({os.path.getsize(dev_path)} bytes)")
     print(f"test.jsonl: {test_path} ({os.path.getsize(test_path)} bytes)")
     return 0

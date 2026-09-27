@@ -5,8 +5,6 @@
 //! [`MisakiG2p::phonemize_text`] builds them from raw text with the embedded
 //! spaCy tokenizer and tagger, as `G2P.__call__` does.
 
-use std::sync::OnceLock;
-
 use super::chars::SUBTOKEN_JUNKS;
 use super::front::TextFrontEnd;
 use super::lexicon::Lexicon;
@@ -49,8 +47,6 @@ pub struct MisakiG2p {
     lexicon: Lexicon,
     unk: String,
     fallback: Option<Box<dyn OovFallback + Send + Sync>>,
-    /// Tokenizer and tagger for [`Self::phonemize_text`], built on first use.
-    front: OnceLock<TextFrontEnd>,
 }
 
 impl std::fmt::Debug for MisakiG2p {
@@ -71,7 +67,6 @@ impl MisakiG2p {
             lexicon: Lexicon::new(british)?,
             unk: DEFAULT_UNK.to_string(),
             fallback: None,
-            front: OnceLock::new(),
         })
     }
 
@@ -100,19 +95,11 @@ impl MisakiG2p {
     /// misaki `G2P.__call__(text)`: markdown-link preprocessing, the spaCy
     /// `en_core_web_sm` tokenizer and tagger, then [`Self::phonemize`].
     ///
-    /// The first call builds the embedded tokenizer and tagger; later calls
-    /// reuse them.
+    /// The first call across every `MisakiG2p` instance builds the embedded
+    /// tokenizer and tagger; later calls reuse the shared instance.
     pub fn phonemize_text(&self, text: &str) -> Result<G2pOutput> {
-        let tokens = self.front_end()?.tokens(text)?;
+        let tokens = TextFrontEnd::shared()?.tokens(text)?;
         Ok(self.phonemize(tokens))
-    }
-
-    fn front_end(&self) -> Result<&TextFrontEnd> {
-        if let Some(front) = self.front.get() {
-            return Ok(front);
-        }
-        let built = TextFrontEnd::new()?;
-        Ok(self.front.get_or_init(|| built))
     }
 
     /// Converts tagged tokens to phonemes, exactly as misaki's `G2P.__call__`

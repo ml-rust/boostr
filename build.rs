@@ -412,6 +412,12 @@ fn compile_cuda_kernels() {
             "sm_75",
             true
         ),
+        k!(
+            "src/ops/cuda/kernels/inference",
+            "grammar_dfa.cu",
+            "sm_75",
+            true
+        ),
         // Calibration kernels (quantization)
         k!(
             "src/ops/cuda/kernels/quantization",

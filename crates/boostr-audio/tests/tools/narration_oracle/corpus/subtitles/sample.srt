@@ -1,0 +1,17 @@
+1
+00:00:01,000 --> 00:00:03,500
+<i>Every product</i> starts
+with a question.
+
+2
+00:00:04,000 --> 00:00:06,250
+{\an8}What does the user need?
+
+3
+00:00:07,000 --> 00:00:08,000
+
+
+4
+00:00:08,500 --> 00:00:10,000
+- Speaker one.
+- Speaker two.

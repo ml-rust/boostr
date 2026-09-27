@@ -12,8 +12,8 @@
 //! misaki G2P backend ([`g2p`]), the spaCy `en_core_web_sm` tokenizer and
 //! tagger, the [`tts`] surface, the [`kokoro`] and [`voxcpm`]
 //! engines, the [`whisper`] bundle, the [`vad`] segmenter, [`corpus`]
-//! preparation, and the pace, intelligibility and timbre legs of
-//! [`tts_eval`].
+//! preparation, [`narration`] script parsing, and the pace, intelligibility
+//! and timbre legs of [`tts_eval`].
 
 pub mod enhance;
 pub mod error;
@@ -33,6 +33,8 @@ pub mod corpus;
 pub mod decode;
 #[cfg(feature = "kokoro")]
 pub mod kokoro;
+#[cfg(feature = "narration")]
+pub mod narration;
 #[cfg(feature = "tts")]
 pub mod tts;
 #[cfg(feature = "vad")]

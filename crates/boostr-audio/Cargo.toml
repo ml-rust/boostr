@@ -86,6 +86,11 @@ spacy-tokenizer = ["dep:regexr", "dep:unicode-general-category"]
 # the network from boostr, the attribute IDs and the zlib-compressed weights
 # (5.8 MB) here. Implies `spacy-tokenizer`, whose tokens it tags.
 spacy-tagger = ["boostr/spacy-tagger", "spacy-tokenizer", "dep:flate2"]
+# Narration scripts: phrases, VoxCPM2 chunks, subtitle and timed script
+# files, written-script alignment, and number words. Its sentence pattern
+# uses lookahead, and number words are read after NFKD. splintr already
+# links both crates, so nothing new enters the graph.
+narration = ["dep:regexr", "dep:unicode-normalization"]
 # `TtsEngine`, `TtsBundle`, `Voice`: the engine-agnostic synthesis surface.
 tts = []
 # Kokoro synthesis pipeline: model from boostr, voice packs and the engine
@@ -163,6 +168,10 @@ required-features = ["vits"]
 [[test]]
 name = "g2p_neural_gold"
 required-features = ["misaki"]
+
+[[test]]
+name = "narration_oracle"
+required-features = ["narration"]
 
 [[example]]
 name = "audio_stats"

@@ -1,0 +1,12 @@
+Hold on. [pause] Now listen.
+Count to three [pause 1.2] and breathe [PAUSE 0.25] out.
+Zero pause [pause 0] still waits.
+A dotted value [pause 1.2.3] falls back.
+[pause]
+[pause 2]
+Two marks in a row [pause 0.3][pause 0.9] then words.
+Trailing mark at the end of a line [pause 1.5]
+
+[pause 3]
+
+After a beat of marks.

@@ -1,0 +1,8 @@
+Every product starts with a question. What does the user need?
+
+Then it gathers facts, and chooses a direction.
+It builds the scenes one by one.
+Each scene holds 13.5 seconds of motion, rendered with Node.js and ffmpeg.
+
+"Is it done?" she asked. "Not yet." The render runs... and runs.
+Wait for it…  The end!

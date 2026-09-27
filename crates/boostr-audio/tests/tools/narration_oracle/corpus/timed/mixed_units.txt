@@ -1,0 +1,7 @@
+Intro line before any time.
+5s. First timed line.
+7,5 seconds: Decimal with a comma.
+12 secs — Em dash separator.
+[1:00 - 1:30] Bracketed range.
+2000: A year that is not a time.
+3: Just a colon.

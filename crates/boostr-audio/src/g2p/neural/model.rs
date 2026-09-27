@@ -13,7 +13,7 @@ use boostr::{VarBuilder, VarMap};
 use numr::runtime::cpu::{CpuClient, CpuDevice, CpuRuntime};
 
 use super::checkpoint;
-use super::config::OxidizrCheckpointConfig;
+use super::config::parse_checkpoint_config;
 use super::normalize::fold_to_model_chars;
 use super::vocab::G2pVocab;
 use crate::error::{Error, Result};
@@ -68,8 +68,7 @@ impl NeuralG2pFallback {
         checkpoint_bytes: Vec<u8>,
         british: bool,
     ) -> Result<Self> {
-        let universal: UniversalConfig =
-            OxidizrCheckpointConfig::from_json(config_text)?.to_universal()?;
+        let universal: UniversalConfig = parse_checkpoint_config(config_text)?;
         let vocab = G2pVocab::from_json(vocab_text)?;
         if universal.vocab_size as u32 != vocab.vocab_size {
             return Err(Error::ModelError {

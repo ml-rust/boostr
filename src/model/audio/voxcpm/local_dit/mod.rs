@@ -24,6 +24,8 @@ pub use sampler::{CfmOptions, cfm_time_span};
 pub(crate) mod tests {
     pub(crate) use super::fixture::{
         FEAT_DIM, HEAD_DIM, HIDDEN_DIM, MU_TOKENS, NUM_HEADS, NUM_KV_HEADS, PATCH_SIZE, layer,
-        linear, model, model_on, norm, t, t_on,
+        linear, model, norm, t,
     };
+    #[cfg(feature = "cuda")]
+    pub(crate) use super::fixture::{model_on, t_on};
 }

@@ -8,8 +8,8 @@
 
 use unicode_normalization::UnicodeNormalization;
 
-use super::pattern::{Patterns, group, number, replace_all, replace_all_with, split};
 use crate::error::Result;
+use crate::narration::pattern::{Patterns, group, number, replace_all, replace_all_with, split};
 
 fn unit(w: &str) -> Option<f64> {
     Some(match w {

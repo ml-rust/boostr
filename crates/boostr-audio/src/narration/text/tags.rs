@@ -6,8 +6,10 @@
 //! `{written|spoken}` pairs. Captions show the written form of a pair, the
 //! voice says the spoken form, and nothing else is spoken.
 
-use super::pattern::{Patterns, collapse, group, replace_all, replace_all_with, trim, utf16_len};
 use crate::error::Result;
+use crate::narration::pattern::{
+    Patterns, collapse, group, replace_all, replace_all_with, trim, utf16_len,
+};
 
 /// The shortest and longest delivery note, in UTF-16 code units.
 const NOTE_UNITS: std::ops::RangeInclusive<usize> = 2..=120;

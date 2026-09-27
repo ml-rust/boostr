@@ -1,21 +1,33 @@
-//! JavaScript number semantics the speech check reproduces: `toFixed` read
-//! back as a number, and `Number.prototype.toString`.
+//! JavaScript number semantics the narration checks reproduce: `toFixed` as
+//! text and read back as a number, `Math.round`, and
+//! `Number.prototype.toString`.
 
 /// `+x.toFixed(digits)`: `x` rounded to `digits` decimals, read back as a
 /// number.
 ///
-/// `toFixed` works on the exact value of the double and rounds an exact tie
-/// away from zero: `0.125` gives `0.13`. Rust's `{:.N}` rounds an exact tie
-/// to even, so the rounding happens here on the exact decimal expansion.
 /// NaN, infinities and magnitudes of 1e21 or more come back unchanged, as
 /// their `toFixed` text reads back as the same value.
 pub(crate) fn js_to_fixed(x: f64, digits: usize) -> f64 {
     if !x.is_finite() || x.abs() >= 1e21 {
         return x;
     }
+    js_to_fixed_text(x, digits).parse().unwrap_or(f64::NAN)
+}
+
+/// `x.toFixed(digits)`: the text of `x` rounded to `digits` decimals.
+///
+/// `toFixed` works on the exact value of the double and rounds an exact tie
+/// away from zero: `0.125` gives `0.13`. Rust's `{:.N}` rounds an exact tie
+/// to even, so the rounding happens here on the exact decimal expansion.
+/// NaN, infinities and magnitudes of 1e21 or more are written as
+/// `String(x)`.
+pub(crate) fn js_to_fixed_text(x: f64, digits: usize) -> String {
+    if !x.is_finite() || x.abs() >= 1e21 {
+        return js_string(x);
+    }
     if x == 0.0 {
         // `(-0).toFixed(n)` has no sign.
-        return 0.0;
+        return format!("{:.*}", digits, 0.0);
     }
     // A double is m * 2^e: its exact expansion has at most -e decimals.
     let bits = x.abs().to_bits();
@@ -51,7 +63,15 @@ pub(crate) fn js_to_fixed(x: f64, digits: usize) -> f64 {
         rounded.push('.');
         rounded.extend(kept[split..].iter().map(|&b| char::from(b)));
     }
-    rounded.parse().unwrap_or(f64::NAN)
+    rounded
+}
+
+/// `Math.round(x)`: the nearest integer, an exact half rounded up (toward
+/// positive infinity). Rust's `round` takes a negative half away from zero.
+pub(crate) fn js_round(x: f64) -> f64 {
+    let floor = x.floor();
+    // `x - floor` is exact for every double.
+    if x - floor >= 0.5 { floor + 1.0 } else { floor }
 }
 
 /// `String(x)`: the shortest digits that read back as `x`, in JavaScript's
@@ -142,6 +162,29 @@ mod tests {
         assert!(js_to_fixed(f64::NAN, 3).is_nan());
         assert_eq!(js_to_fixed(f64::INFINITY, 3), f64::INFINITY);
         assert_eq!(js_to_fixed(5e-324, 3), 0.0);
+    }
+
+    #[test]
+    fn to_fixed_text_keeps_trailing_zeros() {
+        assert_eq!(js_to_fixed_text(0.04, 2), "0.04");
+        assert_eq!(js_to_fixed_text(1.0, 2), "1.00");
+        assert_eq!(js_to_fixed_text(0.125, 2), "0.13");
+        assert_eq!(js_to_fixed_text(0.0, 2), "0.00");
+        assert_eq!(js_to_fixed_text(-0.0, 1), "0.0");
+        assert_eq!(js_to_fixed_text(-0.0001, 3), "-0.000");
+        assert_eq!(js_to_fixed_text(2.5, 0), "3");
+        assert_eq!(js_to_fixed_text(f64::NAN, 2), "NaN");
+        assert_eq!(js_to_fixed_text(1e21, 2), "1e+21");
+    }
+
+    #[test]
+    fn round_takes_halves_up() {
+        assert_eq!(js_round(2.5), 3.0);
+        assert_eq!(js_round(-2.5), -2.0);
+        assert_eq!(js_round(-2.6), -3.0);
+        assert_eq!(js_round(0.49999999999999994), 0.0);
+        assert_eq!(js_round(480.00000000000006), 480.0);
+        assert_eq!(js_round(-0.4), 0.0);
     }
 
     #[test]

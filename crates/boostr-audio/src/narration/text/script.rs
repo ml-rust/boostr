@@ -8,8 +8,8 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use super::pattern::{Patterns, collapse, group, number, replace_all_with, split, trim};
 use crate::error::{Error, Result};
+use crate::narration::pattern::{Patterns, collapse, group, number, replace_all_with, split, trim};
 
 /// A subtitle cue.
 #[derive(Debug, Clone, PartialEq, Serialize)]

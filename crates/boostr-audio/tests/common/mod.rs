@@ -7,6 +7,8 @@
 // code there. The helpers ARE used — just not all of them by every crate.
 #![allow(dead_code)]
 
+pub mod signals;
+
 use std::path::{Path, PathBuf};
 
 use numr::runtime::cpu::{CpuClient, CpuDevice};

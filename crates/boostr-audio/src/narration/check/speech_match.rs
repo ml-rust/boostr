@@ -5,7 +5,9 @@
 use unicode_normalization::UnicodeNormalization;
 
 use super::heard::HeardWord;
-use super::pattern::{Patterns, group, is_space, replace_all, replace_all_with, split, trim};
+use crate::narration::pattern::{
+    Patterns, group, is_space, replace_all, replace_all_with, split, trim,
+};
 
 /// Cost of pairing two words that are not alike. It is a little less than
 /// a skipped word on each side: a lone misheard word still pairs up, but

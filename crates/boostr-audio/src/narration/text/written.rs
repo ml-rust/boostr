@@ -6,10 +6,10 @@
 //! case, punctuation and spacing ignored, so `motion-video` matches
 //! `motion video`.
 
-use super::pattern::{Patterns, replace_all_with, split, utf16_len};
 use super::phrase::Phrase;
 use super::tags::spoken;
 use crate::error::{Error, Result};
+use crate::narration::pattern::{Patterns, replace_all_with, split, utf16_len};
 
 /// A written word and where its letters start in the letter stream, in
 /// UTF-16 code units.

@@ -21,17 +21,6 @@ pub const QUANT_MMQ_MMA_MODULE: &str = "quant_mmq_mma";
 /// (`quant_mmq_<fmt>_q8_1_gemv1`) and their split-range fixup.
 pub const QUANT_MMQ_GEMV1_MODULE: &str = "quant_mmq_gemv1";
 
-/// TCF native quantized kernels: dequantization, GEMV, and GEMM in one module.
-/// One translation unit because all three share the device decoder in
-/// `tcf.cuh`, and a second copy of that decoder is what the format forbids.
-pub const TCF_MODULE: &str = "tcf";
-
-/// TCF `Q4AS32DT64`'s token-batched dp4a GEMV. It reads a Q8_1 activation
-/// and shares the GEMV family's `gemv/common.cuh` reduction, so it belongs
-/// with the per-format GEMV modules below; `TCF_MODULE` stays the three
-/// f32-activation kernels.
-pub const GEMV_TCF_Q4AS32DT64_MODULE: &str = "gemv_tcf_q4as32dt64";
-
 // Per-format GEMV kernels
 pub const GEMV_Q5_K_MODULE: &str = "gemv_q5_k";
 pub const GEMV_Q3_K_MODULE: &str = "gemv_q3_k";

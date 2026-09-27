@@ -155,6 +155,10 @@ name = "vits_tokenizer_oracle"
 required-features = ["vits"]
 
 [[test]]
+name = "vits_engine_integration"
+required-features = ["vits"]
+
+[[test]]
 name = "g2p_neural_gold"
 required-features = ["misaki"]
 

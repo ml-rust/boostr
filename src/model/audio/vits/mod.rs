@@ -12,6 +12,7 @@ pub mod hifigan;
 mod hifigan_blocks;
 mod layer_norm_channels;
 pub mod length_regulator;
+pub mod model;
 pub mod spline;
 pub mod text_encoder;
 pub mod wavenet;
@@ -30,6 +31,7 @@ pub use feed_forward::VitsFeedForward;
 pub use flows::{VitsConvFlow, VitsElementwiseAffine};
 pub use hifigan::VitsHifiGan;
 pub use length_regulator::{LengthRegulated, LengthRegulatorClient, regulate_length};
+pub use model::{VitsModel, VitsModelClient, VitsSynthOptions, VitsSynthesis};
 pub use spline::{
     MIN_BIN_HEIGHT, MIN_BIN_WIDTH, MIN_DERIVATIVE, RqSplineClient,
     unconstrained_rational_quadratic_spline,

@@ -56,7 +56,7 @@ pub use eval::{
     ErrorRate, align, by_group, canonical_character_error_rate, canonical_word_error_rate,
     canonicalize, character_error_rate, grand_total, normalize, total, word_error_rate,
 };
-pub use lang::Lang;
+pub use lang::{Lang, LangTag};
 pub use pitch::{PitchOptions, PitchTrack, estimate_pitch};
 pub use quality::{TakeQuality, measure_quality};
 pub use resample::{

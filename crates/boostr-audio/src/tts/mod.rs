@@ -9,4 +9,4 @@ pub mod vits;
 pub use bundle::{SynthesizeOptions, TtsBundle, TtsError, Voice, default_kokoro_voices};
 pub use engine::TtsEngine;
 #[cfg(feature = "vits")]
-pub use vits::VitsTokenizer;
+pub use vits::{VitsEngine, VitsTokenizer, is_vits_config, load_vits_from_dir};

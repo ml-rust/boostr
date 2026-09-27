@@ -205,6 +205,10 @@ required-features = ["vits"]
 name = "vits_text_encoder_parity"
 required-features = ["vits"]
 
+[[test]]
+name = "vits_synthesis_parity"
+required-features = ["vits"]
+
 [[example]]
 name = "gguf_diff"
 required-features = ["voxcpm"]

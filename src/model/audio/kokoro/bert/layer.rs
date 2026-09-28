@@ -79,8 +79,9 @@ impl<R: Runtime> AlbertLayer<R> {
             .map_err(Error::Numr)?
             .contiguous()?;
 
-        // Attention scores: q @ k.T / sqrt(d_head). k.T swaps the last two dims.
-        let k_t = k.transpose(2, 3).map_err(Error::Numr)?.contiguous()?;
+        // Attention scores: q @ k.T / sqrt(d_head). k.T stays a view so the
+        // matmul reads k transposed without a copy.
+        let k_t = k.transpose(2, 3).map_err(Error::Numr)?;
         let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
         let scale = 1.0 / (d_head as f64).sqrt();
         let scaled = client.mul_scalar(&scores, scale).map_err(Error::Numr)?;

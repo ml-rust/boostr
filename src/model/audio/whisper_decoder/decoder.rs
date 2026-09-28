@@ -201,11 +201,8 @@ impl<R: Runtime<DType = DType>> WhisperDecoder<R> {
         let normed = self.layer_norm.forward(client, &Var::new(hidden, false))?;
         let hidden = normed.tensor().clone();
 
-        let w_t = self
-            .tied_out_weight
-            .transpose(0, 1)
-            .map_err(Error::Numr)?
-            .contiguous()?;
+        // w_t stays a view so the matmul reads the weight transposed without a copy.
+        let w_t = self.tied_out_weight.transpose(0, 1).map_err(Error::Numr)?;
         let logits = client.matmul(&hidden, &w_t).map_err(Error::Numr)?;
         Ok(logits)
     }
@@ -271,12 +268,9 @@ impl<R: Runtime<DType = DType>> WhisperDecoder<R> {
         let normed = self.layer_norm.forward(client, &Var::new(hidden, false))?;
         let hidden = normed.tensor().clone();
 
-        // Logits = hidden @ embed_tokens.weight.T: [B, T, hidden] @ [hidden, vocab]
-        let w_t = self
-            .tied_out_weight
-            .transpose(0, 1)
-            .map_err(Error::Numr)?
-            .contiguous()?;
+        // Logits = hidden @ embed_tokens.weight.T: [B, T, hidden] @ [hidden, vocab].
+        // w_t stays a view so the matmul reads the weight transposed without a copy.
+        let w_t = self.tied_out_weight.transpose(0, 1).map_err(Error::Numr)?;
         let logits = client.matmul(&hidden, &w_t).map_err(Error::Numr)?;
         Ok(logits)
     }

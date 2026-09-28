@@ -37,7 +37,8 @@ where
     let num_heads = q_shape[1];
     let tgt_len = q_shape[2];
 
-    let k_t = k.transpose(-2, -1)?.contiguous()?;
+    // k_t stays a view so the matmul reads k transposed without a copy.
+    let k_t = k.transpose(-2, -1)?;
     let scale = (head_dim as f32).sqrt();
     let scores = client.matmul(q, &k_t).map_err(Error::Numr)?;
     let mut scores = client

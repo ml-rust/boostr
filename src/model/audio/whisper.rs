@@ -155,8 +155,9 @@ impl<R: Runtime> WhisperEncoderLayer<R> {
             .map_err(Error::Numr)?
             .contiguous()?;
 
-        // Attention: softmax(Q @ K^T / sqrt(d)) @ V
-        let k_t = k.transpose(2, 3).map_err(Error::Numr)?.contiguous()?;
+        // Attention: softmax(Q @ K^T / sqrt(d)) @ V. K^T stays a view so the
+        // matmul reads K transposed without a copy.
+        let k_t = k.transpose(2, 3).map_err(Error::Numr)?;
         let scale = (self.head_dim as f32).sqrt();
         let scores = client.matmul(&q, &k_t).map_err(Error::Numr)?;
         let scores = client
